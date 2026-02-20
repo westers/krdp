@@ -183,6 +183,12 @@ Useful runtime log command:
 journalctl --user -f -o cat -u app-org.kde.krdpserver -u plasma-xdg-desktop-portal-kde
 ```
 
+### Codec Experiment Flags
+
+`KRDP_EXPERIMENTAL_AVC444=1` and `KRDP_EXPERIMENTAL_AVC444V2=1` are accepted
+for future testing, but are currently ignored because KRDP's local encoding
+path is AVC420-only.
+
 ## SDDM Autologin
 
 Since SDDM currently has no RDP support, you either need to already be logged in,
