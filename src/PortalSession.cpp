@@ -8,8 +8,11 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QQueue>
+#include <QRect>
 
 #include <linux/input.h>
+#include <chrono>
+#include <utility>
 
 #include <KConfigGroup>
 #include <KSharedConfig>
@@ -31,6 +34,70 @@ static const QString dbusPath = QStringLiteral("/org/freedesktop/portal/desktop"
 static const QString dbusRequestInterface = QStringLiteral("org.freedesktop.portal.Request");
 static const QString dbusResponse = QStringLiteral("Response");
 static const QString dbusSessionInterface = QStringLiteral("org.freedesktop.portal.Session");
+
+namespace
+{
+struct EncodedPacketMetadata {
+    QSize size;
+    QRegion damage;
+    std::chrono::system_clock::time_point presentationTimeStamp;
+    bool hasSize = false;
+    bool hasDamage = false;
+    bool hasPresentationTimeStamp = false;
+};
+
+constexpr int MaxPendingFrameMetadata = 256;
+
+QRegion fullFrameDamage(const QSize &size)
+{
+    if (size.isEmpty()) {
+        return {};
+    }
+    return QRegion(QRect(QPoint(0, 0), size));
+}
+
+QRegion clippedDamage(const QRegion &damage, const QSize &size)
+{
+    if (size.isEmpty()) {
+        return {};
+    }
+    auto clipped = damage.intersected(QRect(QPoint(0, 0), size));
+    return clipped.isEmpty() ? fullFrameDamage(size) : clipped;
+}
+
+template<typename Stream>
+void enableDamageMetadataIfSupported(Stream *stream)
+{
+    if constexpr (requires(Stream *s) {
+                      s->setDamageEnabled(true);
+                  }) {
+        stream->setDamageEnabled(true);
+    } else {
+        qCWarning(KRDP) << "KPipeWire does not expose encoded damage metadata, using full-frame updates";
+    }
+}
+
+template<typename Stream>
+void setFullColorRangeIfSupported(Stream *stream)
+{
+    if constexpr (requires(Stream *s) {
+                      s->setColorRange(typename Stream::ColorRange{});
+                      Stream::ColorRange::Full;
+                  }) {
+        stream->setColorRange(Stream::ColorRange::Full);
+    }
+}
+
+template<typename Stream, typename Receiver, typename Callback>
+void connectFrameMetadataIfSupported(Stream *stream, Receiver *receiver, Callback &&callback)
+{
+    if constexpr (requires {
+                      &Stream::frameMetadata;
+                  }) {
+        QObject::connect(stream, &Stream::frameMetadata, receiver, std::forward<Callback>(callback));
+    }
+}
+}
 
 const QDBusArgument &operator>>(const QDBusArgument &arg, PortalSessionStream &stream)
 {
@@ -82,6 +149,7 @@ public:
     bool ignoreNextSystemClipboardChange = false;
 
     QDBusObjectPath sessionPath;
+    QQueue<EncodedPacketMetadata> pendingFrameMetadata;
 };
 
 QString createHandleToken()
@@ -329,15 +397,34 @@ void KRdp::PortalSession::onSessionStarted(uint code, const QVariantMap &result)
             setLogicalSize(qdbus_cast<QSize>(stream.map.value(u"size"_s)));
             auto fd = reply.value();
             auto encodedStream = this->stream();
+            d->pendingFrameMetadata.clear();
             encodedStream->setNodeId(stream.nodeId);
             encodedStream->setFd(fd.takeFileDescriptor());
             encodedStream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed);
-            // Ensure we encode in full color range so FFmpeg decodes correctly.
-            encodedStream->setColorRange(PipeWireBaseEncodedStream::ColorRange::Full);
+            // Ensure we encode in full color range when the KPipeWire API supports it.
+            setFullColorRangeIfSupported(encodedStream);
             encodedStream->setEncoder(PipeWireEncodedStream::H264Baseline);
+            enableDamageMetadataIfSupported(encodedStream);
             connect(encodedStream, &PipeWireEncodedStream::newPacket, this, &PortalSession::onPacketReceived);
             connect(encodedStream, &PipeWireEncodedStream::sizeChanged, this, &PortalSession::setSize);
             connect(encodedStream, &PipeWireEncodedStream::cursorChanged, this, &PortalSession::cursorUpdate);
+            connectFrameMetadataIfSupported(encodedStream, this, [this](const auto &meta) {
+                EncodedPacketMetadata frameMetadata;
+                frameMetadata.size = meta.size;
+                frameMetadata.hasSize = !meta.size.isEmpty();
+                if (meta.hasDamage) {
+                    frameMetadata.damage = meta.damage;
+                    frameMetadata.hasDamage = true;
+                }
+                if (meta.hasPts) {
+                    frameMetadata.presentationTimeStamp = std::chrono::system_clock::time_point{std::chrono::nanoseconds(meta.ptsNs)};
+                    frameMetadata.hasPresentationTimeStamp = true;
+                }
+                d->pendingFrameMetadata.enqueue(frameMetadata);
+                while (d->pendingFrameMetadata.size() > MaxPendingFrameMetadata) {
+                    d->pendingFrameMetadata.dequeue();
+                }
+            });
             QDBusConnection::sessionBus().connect(u"org.freedesktop.portal.Desktop"_s,
                                                   d->sessionPath.path(),
                                                   u"org.freedesktop.portal.Session"_s,
@@ -367,6 +454,23 @@ void PortalSession::onPacketReceived(const PipeWireEncodedStream::Packet &data)
     frameData.size = size();
     frameData.data = data.data();
     frameData.isKeyFrame = data.isKeyFrame();
+    frameData.damage = fullFrameDamage(frameData.size);
+
+    if (!d->pendingFrameMetadata.isEmpty()) {
+        auto frameMetadata = d->pendingFrameMetadata.dequeue();
+        if (frameMetadata.hasSize && !frameMetadata.size.isEmpty()) {
+            frameData.size = frameMetadata.size;
+        }
+        if (frameMetadata.hasPresentationTimeStamp) {
+            frameData.presentationTimeStamp = frameMetadata.presentationTimeStamp;
+        }
+        if (frameMetadata.hasDamage) {
+            frameData.damage = clippedDamage(frameMetadata.damage, frameData.size);
+        }
+    }
+    if (frameData.isKeyFrame || frameData.damage.isEmpty()) {
+        frameData.damage = fullFrameDamage(frameData.size);
+    }
 
     Q_EMIT frameReceived(frameData);
 }

@@ -11,9 +11,12 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <limits>
+#include <vector>
 
 #include <QDateTime>
 #include <QQueue>
+#include <QRect>
 
 #include <freerdp/freerdp.h>
 #include <freerdp/peer.h>
@@ -31,6 +34,69 @@ namespace clk = std::chrono;
 
 // Maximum number of frames to contain in the queue.
 constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seconds(1);
+constexpr int MaxDamageRectCount = 128;
+constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
+
+RECTANGLE_16 toRdpRect(const QRect &rect)
+{
+    auto left = std::clamp(rect.x(), 0, int(MaxRdpCoordinate));
+    auto top = std::clamp(rect.y(), 0, int(MaxRdpCoordinate));
+    auto right = std::clamp(rect.x() + rect.width(), 0, int(MaxRdpCoordinate));
+    auto bottom = std::clamp(rect.y() + rect.height(), 0, int(MaxRdpCoordinate));
+
+    if (right <= left) {
+        right = std::min(left + 1, int(MaxRdpCoordinate));
+    }
+    if (bottom <= top) {
+        bottom = std::min(top + 1, int(MaxRdpCoordinate));
+    }
+
+    RECTANGLE_16 region;
+    region.left = static_cast<UINT16>(left);
+    region.top = static_cast<UINT16>(top);
+    region.right = static_cast<UINT16>(right);
+    region.bottom = static_cast<UINT16>(bottom);
+    return region;
+}
+
+std::vector<RECTANGLE_16> toDamageRects(const VideoFrame &frame)
+{
+    std::vector<RECTANGLE_16> rects;
+
+    if (frame.size.isEmpty()) {
+        return rects;
+    }
+
+    const QRect frameBounds(QPoint(0, 0), frame.size);
+    const auto fullRect = toRdpRect(frameBounds);
+
+    if (frame.isKeyFrame || frame.damage.isEmpty()) {
+        rects.push_back(fullRect);
+        return rects;
+    }
+
+    const auto clippedDamage = frame.damage.intersected(frameBounds);
+    const auto damageRects = clippedDamage.rects();
+    if (damageRects.isEmpty() || damageRects.size() > MaxDamageRectCount) {
+        rects.push_back(fullRect);
+        return rects;
+    }
+
+    rects.reserve(damageRects.size());
+    for (const auto &damageRect : damageRects) {
+        const auto boundedRect = damageRect.intersected(frameBounds);
+        if (boundedRect.isEmpty()) {
+            continue;
+        }
+        rects.push_back(toRdpRect(boundedRect));
+    }
+
+    if (rects.empty()) {
+        rects.push_back(fullRect);
+    }
+
+    return rects;
+}
 
 struct RdpCapsInformation {
     uint32_t version;
@@ -420,11 +486,6 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     surfaceCommand.surfaceId = d->surface.id;
     surfaceCommand.codecId = RDPGFX_CODECID_AVC420;
     surfaceCommand.format = PIXEL_FORMAT_BGRX32;
-
-    surfaceCommand.left = 0;
-    surfaceCommand.top = 0;
-    surfaceCommand.right = frame.size.width();
-    surfaceCommand.bottom = frame.size.height();
     surfaceCommand.length = 0;
     surfaceCommand.data = nullptr;
 
@@ -434,18 +495,34 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     avcStream.data = (BYTE *)frame.data.data();
     avcStream.length = frame.data.length();
 
-    avcStream.meta.numRegionRects = 1;
-    auto rects = std::make_unique<RECTANGLE_16[]>(1);
-    rects[0].left = 0;
-    rects[0].top = 0;
-    rects[0].right = frame.size.width();
-    rects[0].bottom = frame.size.height();
+    auto damageRects = toDamageRects(frame);
+    if (damageRects.empty()) {
+        return;
+    }
+    avcStream.meta.numRegionRects = static_cast<decltype(avcStream.meta.numRegionRects)>(damageRects.size());
+    auto rects = std::make_unique<RECTANGLE_16[]>(damageRects.size());
+    std::copy(damageRects.begin(), damageRects.end(), rects.get());
     avcStream.meta.regionRects = rects.get();
-    auto qualities = std::make_unique<RDPGFX_H264_QUANT_QUALITY[]>(1);
+
+    auto damageBounds = damageRects.front();
+    for (const auto &rect : damageRects) {
+        damageBounds.left = std::min(damageBounds.left, rect.left);
+        damageBounds.top = std::min(damageBounds.top, rect.top);
+        damageBounds.right = std::max(damageBounds.right, rect.right);
+        damageBounds.bottom = std::max(damageBounds.bottom, rect.bottom);
+    }
+    surfaceCommand.left = damageBounds.left;
+    surfaceCommand.top = damageBounds.top;
+    surfaceCommand.right = damageBounds.right;
+    surfaceCommand.bottom = damageBounds.bottom;
+
+    auto qualities = std::make_unique<RDPGFX_H264_QUANT_QUALITY[]>(damageRects.size());
     avcStream.meta.quantQualityVals = qualities.get();
-    qualities[0].qp = 22;
-    qualities[0].p = 0;
-    qualities[0].qualityVal = 100;
+    for (size_t i = 0; i < damageRects.size(); ++i) {
+        qualities[i].qp = 22;
+        qualities[i].p = 0;
+        qualities[i].qualityVal = 100;
+    }
 
     d->gfxContext->StartFrame(d->gfxContext.get(), &startFramePdu);
     d->gfxContext->SurfaceCommand(d->gfxContext.get(), &surfaceCommand);

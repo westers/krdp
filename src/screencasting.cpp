@@ -114,7 +114,8 @@ ScreencastingStream *Screencasting::createOutputStream(QScreen *screen, Screenca
     auto stream = new ScreencastingStream(this);
     stream->setObjectName(screen->name());
     stream->d->init(d->stream_output(output, mode));
-    stream->d->m_size = screen->virtualSize();
+    // For per-output streams, use this output's logical size.
+    stream->d->m_size = screen->size();
     return stream;
 }
 
@@ -148,6 +149,7 @@ ScreencastingStream *Screencasting::createVirtualMonitorStream(const QString &na
 {
     auto stream = new ScreencastingStream(this);
     stream->d->init(d->stream_virtual_output(name, resolution.width(), resolution.height(), wl_fixed_from_double(dpr), mode));
+    stream->d->m_size = resolution;
     return stream;
 }
 
