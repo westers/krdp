@@ -190,7 +190,11 @@ journalctl --user -f -o cat -u app-org.kde.krdpserver -u plasma-xdg-desktop-port
 `KRDP_EXPERIMENTAL_AVC444=1` and `KRDP_EXPERIMENTAL_AVC444V2=1` enable
 AVC444 capability negotiation experiments.
 
-When local encoding is AVC420-only, KRDP will automatically fall back to
+`KRDP_EXPERIMENTAL_TRUE_AVC444=1` enables experimental AVC444 wire transport
+(`RDPGFX_AVC444_BITMAP_STREAM`, single-stream mode) when AVC444/AVC444v2 is
+negotiated.
+
+Without `KRDP_EXPERIMENTAL_TRUE_AVC444=1`, KRDP automatically falls back to
 AVC420 transport while preserving AVC444 intent for quality tuning.
 
 ### VAAPI Driver Auto-Selection
@@ -246,7 +250,7 @@ Useful debug markers:
 
 ```bash
 journalctl --user -f -o cat -u app-org.kde.krdpserver | \
-  rg -i 'Dropped stale queued frames|No matching damage metadata|Sent progressive refinement frame'
+  rg -i 'Dropped stale queued frames|No matching damage metadata|Sent progressive refinement frame|Using AVC444 wire transport mode'
 ```
 
 ## SDDM Autologin

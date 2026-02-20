@@ -444,6 +444,7 @@ public:
     int stableFramesSinceMotion = 0;
     clk::system_clock::time_point lastRefinementFrameTime;
     bool avc444Intent = false;
+    bool loggedAvc444WireTransport = false;
     int congestionQpBias = 0;
     clk::milliseconds previousRtt = clk::milliseconds(0);
     QVector<VideoMonitor> monitorLayout;
@@ -899,11 +900,27 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     surfaceCommand.length = 0;
     surfaceCommand.data = nullptr;
 
-    RDPGFX_AVC420_BITMAP_STREAM avcStream;
-    surfaceCommand.extra = &avcStream;
+    RDPGFX_AVC420_BITMAP_STREAM avc420Stream = {};
+    RDPGFX_AVC444_BITMAP_STREAM avc444Stream = {};
+    RDPGFX_AVC420_BITMAP_STREAM *streamPayload = nullptr;
+    const bool useAvc444WireTransport = d->selectedCodec == StreamCodec::Avc444 || d->selectedCodec == StreamCodec::Avc444v2;
+    if (useAvc444WireTransport) {
+        avc444Stream.cbAvc420EncodedBitstream1 = 0;
+        // LC != 0 selects single-stream transport in MS-RDPEGFX.
+        avc444Stream.LC = (d->selectedCodec == StreamCodec::Avc444v2) ? BYTE{2} : BYTE{1};
+        streamPayload = &avc444Stream.bitstream[0];
+        surfaceCommand.extra = &avc444Stream;
+        if (!d->loggedAvc444WireTransport) {
+            qCDebug(KRDP) << "Using AVC444 wire transport mode:" << codecToString(d->selectedCodec);
+            d->loggedAvc444WireTransport = true;
+        }
+    } else {
+        streamPayload = &avc420Stream;
+        surfaceCommand.extra = &avc420Stream;
+    }
 
-    avcStream.data = (BYTE *)frame.data.data();
-    avcStream.length = frame.data.length();
+    streamPayload->data = (BYTE *)frame.data.data();
+    streamPayload->length = frame.data.length();
 
     auto damageRects = toDamageRects(frame);
     const auto trackedDamageRects = damageRects;
@@ -951,10 +968,10 @@ void VideoStream::sendFrame(const VideoFrame &frame)
         d->framesSinceFullDamage++;
     }
 
-    avcStream.meta.numRegionRects = static_cast<decltype(avcStream.meta.numRegionRects)>(damageRects.size());
+    streamPayload->meta.numRegionRects = static_cast<decltype(streamPayload->meta.numRegionRects)>(damageRects.size());
     auto rects = std::make_unique<RECTANGLE_16[]>(damageRects.size());
     std::copy(damageRects.begin(), damageRects.end(), rects.get());
-    avcStream.meta.regionRects = rects.get();
+    streamPayload->meta.regionRects = rects.get();
 
     auto damageBounds = damageRects.front();
     for (const auto &rect : damageRects) {
@@ -969,7 +986,7 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     surfaceCommand.bottom = damageBounds.bottom;
 
     auto qualities = std::make_unique<RDPGFX_H264_QUANT_QUALITY[]>(damageRects.size());
-    avcStream.meta.quantQualityVals = qualities.get();
+    streamPayload->meta.quantQualityVals = qualities.get();
     d->resetActivityGrid(frame.size);
     d->decayActivity();
     std::vector<int> rectActivityScores;
