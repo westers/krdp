@@ -212,6 +212,7 @@ Recent KRDP builds include several latency and artifact-reduction behaviors:
 - Packet/damage metadata pairing with a short wait budget before full-frame fallback.
 - Tile activity classification (static regions biased for crisp quality, transient regions biased for compression).
 - Progressive refinement: after motion settles, one high-quality full-frame refresh is sent.
+- AVC444-intent fallback bias: if a client asks for AVC444 but local transport is AVC420-only, KRDP slightly raises quality for text/static UI regions.
 
 Useful debug markers:
 
