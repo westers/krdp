@@ -36,6 +36,7 @@ namespace clk = std::chrono;
 constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seconds(1);
 constexpr int MaxCoalescedDamageRects = 64;
 constexpr int MaxDamageRectCount = 128;
+constexpr int MaxQueuedFrames = 8;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MinimumFrameRate = 5;
 constexpr int MaxFramesBetweenFullDamage = 8;
@@ -312,6 +313,8 @@ public:
     std::condition_variable frameQueueCondition;
 
     QQueue<VideoFrame> frameQueue;
+    int droppedQueuedFrames = 0;
+    clk::system_clock::time_point lastDropLogTime;
     QSet<uint32_t> pendingFrames;
 
     int maximumFrameRate = 120;
@@ -379,7 +382,20 @@ bool VideoStream::initialize()
                 if (d->frameQueue.isEmpty()) {
                     continue;
                 }
-                nextFrame = d->frameQueue.takeFirst();
+                nextFrame = d->frameQueue.takeLast();
+                const auto staleFrames = d->frameQueue.size();
+                if (staleFrames > 0) {
+                    d->frameQueue.clear();
+                    d->droppedQueuedFrames += staleFrames;
+                }
+
+                auto now = clk::system_clock::now();
+                if (d->droppedQueuedFrames > 0
+                    && (d->lastDropLogTime.time_since_epoch().count() == 0 || (now - d->lastDropLogTime) >= clk::seconds(2))) {
+                    qCDebug(KRDP) << "Dropped stale queued frames:" << d->droppedQueuedFrames;
+                    d->droppedQueuedFrames = 0;
+                    d->lastDropLogTime = now;
+                }
             }
             sendFrame(nextFrame);
         }
@@ -415,6 +431,10 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
 
     {
         std::lock_guard lock(d->frameQueueMutex);
+        while (d->frameQueue.size() >= MaxQueuedFrames) {
+            d->frameQueue.removeFirst();
+            d->droppedQueuedFrames++;
+        }
         d->frameQueue.append(frame);
     }
     d->frameQueueCondition.notify_one();
