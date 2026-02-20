@@ -61,6 +61,41 @@ RECTANGLE_16 toRdpRect(const QRect &rect)
     return region;
 }
 
+struct RectEncodingQuality {
+    uint8_t qp = 22;
+    uint8_t quality = 100;
+};
+
+RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect, const QSize &frameSize, bool isKeyFrame)
+{
+    if (isKeyFrame || frameSize.isEmpty()) {
+        return {};
+    }
+
+    const auto frameArea = std::max(1, frameSize.width() * frameSize.height());
+    const auto rectArea = std::max<int>(1, (rect.right - rect.left) * (rect.bottom - rect.top));
+    const auto coverage = double(rectArea) / double(frameArea);
+
+    // Bias for crisp quality on small UI updates and better compression on large
+    // motion updates.
+    if (coverage <= 0.03) {
+        return {
+            .qp = 18,
+            .quality = 100,
+        };
+    }
+    if (coverage <= 0.20) {
+        return {
+            .qp = 22,
+            .quality = 90,
+        };
+    }
+    return {
+        .qp = 28,
+        .quality = 75,
+    };
+}
+
 std::vector<RECTANGLE_16> toDamageRects(const VideoFrame &frame)
 {
     std::vector<RECTANGLE_16> rects;
@@ -569,9 +604,10 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     auto qualities = std::make_unique<RDPGFX_H264_QUANT_QUALITY[]>(damageRects.size());
     avcStream.meta.quantQualityVals = qualities.get();
     for (size_t i = 0; i < damageRects.size(); ++i) {
-        qualities[i].qp = 22;
+        const auto quality = qualityForDamageRect(damageRects[i], frame.size, frame.isKeyFrame);
+        qualities[i].qp = quality.qp;
         qualities[i].p = 0;
-        qualities[i].qualityVal = 100;
+        qualities[i].qualityVal = quality.quality;
     }
 
     d->gfxContext->StartFrame(d->gfxContext.get(), &startFramePdu);
