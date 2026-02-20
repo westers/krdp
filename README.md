@@ -189,6 +189,23 @@ journalctl --user -f -o cat -u app-org.kde.krdpserver -u plasma-xdg-desktop-port
 for future testing, but are currently ignored because KRDP's local encoding
 path is AVC420-only.
 
+### Performance Tuning Notes
+
+Recent KRDP builds include several latency and artifact-reduction behaviors:
+
+- Damage-aware region updates with rectangle coalescing.
+- Freshest-frame delivery under load (stale queued frames are dropped).
+- Packet/damage metadata pairing with a short wait budget before full-frame fallback.
+- Tile activity classification (static regions biased for crisp quality, transient regions biased for compression).
+- Progressive refinement: after motion settles, one high-quality full-frame refresh is sent.
+
+Useful debug markers:
+
+```bash
+journalctl --user -f -o cat -u app-org.kde.krdpserver | \
+  rg -i 'Dropped stale queued frames|No matching damage metadata|Sent progressive refinement frame'
+```
+
 ## SDDM Autologin
 
 Since SDDM currently has no RDP support, you either need to already be logged in,
