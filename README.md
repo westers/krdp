@@ -205,6 +205,11 @@ The persisted KCM/config key is `General/VaapiDriverMode` with these values:
 - `radeonsi`: force AMD VAAPI driver.
 - `iHD`: force Intel VAAPI driver (runtime fallback to `i965` remains available).
 
+Note for NVIDIA-only systems: current KRDP hardware encode integration is
+VAAPI-based. NVIDIA acceleration typically uses NVENC instead, so KRDP falls
+back to software (`libx264`) unless a non-NVIDIA VAAPI encode path is present.
+This is an API-path limitation, not raw GPU compute performance.
+
 Manual environment override examples:
 
 ```bash
