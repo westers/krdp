@@ -33,12 +33,12 @@ namespace KRdp
 namespace clk = std::chrono;
 
 constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seconds(1);
-// Keep queueing latency low by bounding how many encoded frames can wait.
-constexpr int MaxQueuedFrames = 4;
 constexpr int MaxCoalescedDamageRects = 64;
 constexpr int MaxDamageRectCount = 128;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MinimumFrameRate = 5;
+constexpr int MaxFramesBetweenFullDamage = 30;
+constexpr double FullDamageCoverageThreshold = 0.35;
 
 RECTANGLE_16 toRdpRect(const QRect &rect)
 {
@@ -87,13 +87,13 @@ RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect, const QSize &
     }
     if (coverage <= 0.20) {
         return {
-            .qp = 22,
-            .quality = 90,
+            .qp = 21,
+            .quality = 92,
         };
     }
     return {
-        .qp = 28,
-        .quality = 75,
+        .qp = 24,
+        .quality = 85,
     };
 }
 
@@ -272,6 +272,7 @@ public:
 
     std::atomic_int encodedFrames = 0;
     std::atomic_int frameDelay = 0;
+    int framesSinceFullDamage = 0;
 };
 
 VideoStream::VideoStream(RdpConnection *session)
@@ -366,9 +367,6 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
     {
         std::lock_guard lock(d->frameQueueMutex);
         d->frameQueue.append(frame);
-        while (d->frameQueue.size() > MaxQueuedFrames) {
-            d->frameQueue.takeFirst();
-        }
     }
     d->frameQueueCondition.notify_one();
 }
@@ -585,6 +583,29 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     if (damageRects.empty()) {
         return;
     }
+
+    const auto fullRect = toRdpRect(QRect(QPoint(0, 0), frame.size));
+    const auto frameArea = std::max(1, frame.size.width() * frame.size.height());
+    int damageArea = 0;
+    for (const auto &rect : damageRects) {
+        damageArea += std::max<int>(1, (rect.right - rect.left) * (rect.bottom - rect.top));
+    }
+    const auto damageCoverage = double(damageArea) / double(frameArea);
+    const auto delayedFrames = std::max(d->frameDelay.load(), 0);
+
+    bool useFullDamage = frame.isKeyFrame
+        || (damageCoverage >= FullDamageCoverageThreshold)
+        || (delayedFrames >= 2)
+        || (d->framesSinceFullDamage >= MaxFramesBetweenFullDamage);
+
+    if (useFullDamage) {
+        damageRects.clear();
+        damageRects.push_back(fullRect);
+        d->framesSinceFullDamage = 0;
+    } else {
+        d->framesSinceFullDamage++;
+    }
+
     avcStream.meta.numRegionRects = static_cast<decltype(avcStream.meta.numRegionRects)>(damageRects.size());
     auto rects = std::make_unique<RECTANGLE_16[]>(damageRects.size());
     std::copy(damageRects.begin(), damageRects.end(), rects.get());
