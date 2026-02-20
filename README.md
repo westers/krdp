@@ -191,6 +191,17 @@ AVC444 capability negotiation experiments.
 When local encoding is AVC420-only, KRDP will automatically fall back to
 AVC420 transport while preserving AVC444 intent for quality tuning.
 
+### VAAPI Driver Auto-Selection
+
+On mixed-GPU systems, KRDP now attempts to avoid decode-only VAAPI backends by
+auto-selecting a non-NVIDIA `LIBVA_DRIVER_NAME` when possible.
+
+To disable this behavior:
+
+```bash
+systemctl --user set-environment KRDP_AUTO_VAAPI_DRIVER=0
+```
+
 ### KPipeWire Patch (Damage Metadata)
 
 The local KRDP improvements can use extra encoded-frame metadata from a patched

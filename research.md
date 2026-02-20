@@ -14,7 +14,7 @@ Reduce encoded bandwidth by leveraging compositor damage metadata and protocol-s
 - `OPT-008` AVC444 negotiation scaffold with AVC420 fallback and intent bias: `DONE` (transport remains AVC420 by design; true AVC444 is tracked separately in `OPT-010`).
 - `OPT-009` True multi-monitor protocol layout (server advertises multiple monitors/surfaces): `TODO`.
 - `OPT-010` True AVC444 transport path end-to-end: `TODO`.
-- `OPT-011` Automatic GPU encode-device selection (avoid decode-only VAAPI backends): `TODO`.
+- `OPT-011` Automatic GPU encode-device selection (avoid decode-only VAAPI backends): `PARTIAL` (mixed-GPU auto-selection now prefers non-NVIDIA VAAPI driver when available; further per-device validation remains).
 - `OPT-012` Explicit tile/content cache reuse strategy: `TODO`.
 
 ## Tracking Rule
