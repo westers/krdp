@@ -43,6 +43,7 @@ constexpr uint8_t ActivityDecayPerFrame = 1;
 constexpr uint8_t ActivityBoostPerDamage = 6;
 constexpr int ActivityStaticThreshold = 2;
 constexpr int ActivityTransientThreshold = 8;
+constexpr int StableFramesBeforeRefinement = 3;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MinimumFrameRate = 5;
 constexpr int MaxFramesBetweenFullDamage = 8;
@@ -75,10 +76,17 @@ struct RectEncodingQuality {
     uint8_t quality = 100;
 };
 
-RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect, const QSize &frameSize, bool isKeyFrame, int activityScore)
+RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect, const QSize &frameSize, bool isKeyFrame, bool isRefinementFrame, int activityScore)
 {
     if (isKeyFrame || frameSize.isEmpty()) {
         return {};
+    }
+
+    if (isRefinementFrame) {
+        return {
+            .qp = 16,
+            .quality = 100,
+        };
     }
 
     const auto frameArea = std::max(1, frameSize.width() * frameSize.height());
@@ -347,6 +355,8 @@ public:
     std::atomic_int encodedFrames = 0;
     std::atomic_int frameDelay = 0;
     int framesSinceFullDamage = 0;
+    bool refinementPending = false;
+    int stableFramesSinceMotion = 0;
 
     void resetActivityGrid(const QSize &size)
     {
@@ -789,12 +799,27 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     }
     const auto damageCoverage = double(damageArea) / double(frameArea);
     const auto delayedFrames = std::max(d->frameDelay.load(), 0);
+    const bool highMotionUpdate = (damageCoverage >= FullDamageCoverageThreshold) || (damageRects.size() > 8);
+
+    if (highMotionUpdate || delayedFrames >= 1) {
+        d->refinementPending = true;
+        d->stableFramesSinceMotion = 0;
+    } else if (d->refinementPending && damageCoverage <= 0.03 && delayedFrames == 0) {
+        d->stableFramesSinceMotion++;
+    } else {
+        d->stableFramesSinceMotion = 0;
+    }
+
+    const bool shouldSendRefinement = d->refinementPending && (d->stableFramesSinceMotion >= StableFramesBeforeRefinement) && (delayedFrames == 0)
+        && !frame.isKeyFrame;
 
     bool useFullDamage = frame.isKeyFrame
+        || shouldSendRefinement
         || (damageCoverage >= FullDamageCoverageThreshold)
         || (delayedFrames >= 1)
         || (damageRects.size() > 8)
         || (d->framesSinceFullDamage >= MaxFramesBetweenFullDamage);
+    const bool isRefinementFrame = shouldSendRefinement;
 
     if (useFullDamage) {
         damageRects.clear();
@@ -831,12 +856,18 @@ void VideoStream::sendFrame(const VideoFrame &frame)
         rectActivityScores.push_back(d->activityForRect(rect));
     }
     for (size_t i = 0; i < damageRects.size(); ++i) {
-        const auto quality = qualityForDamageRect(damageRects[i], frame.size, frame.isKeyFrame, rectActivityScores[i]);
+        const auto quality = qualityForDamageRect(damageRects[i], frame.size, frame.isKeyFrame, isRefinementFrame, rectActivityScores[i]);
         qualities[i].qp = quality.qp;
         qualities[i].p = 0;
         qualities[i].qualityVal = quality.quality;
     }
     d->markDamageActivity(trackedDamageRects);
+
+    if (isRefinementFrame) {
+        d->refinementPending = false;
+        d->stableFramesSinceMotion = 0;
+        qCDebug(KRDP) << "Sent progressive refinement frame";
+    }
 
     d->gfxContext->StartFrame(d->gfxContext.get(), &startFramePdu);
     d->gfxContext->SurfaceCommand(d->gfxContext.get(), &surfaceCommand);
