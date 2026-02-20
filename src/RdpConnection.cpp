@@ -364,9 +364,11 @@ void RdpConnection::initialize()
     // related codecs to implement. Moreover, it makes the encoding side also
     // simpler so it is currently the only supported codec. This uses the RdpGfx
     // pipeline, so make sure to request that.
+    const bool enableExperimentalAvc444 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444") > 0;
+    const bool enableExperimentalAvc444v2 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444V2") > 0;
     freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, true);
-    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, false);
-    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, false);
+    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, enableExperimentalAvc444 || enableExperimentalAvc444v2);
+    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, enableExperimentalAvc444v2);
     freerdp_settings_set_bool(settings, FreeRDP_GfxH264, true);
 
 
