@@ -10,6 +10,7 @@
 #include "VideoStream.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <condition_variable>
 #include <limits>
 #include <vector>
@@ -37,6 +38,11 @@ constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seco
 constexpr int MaxCoalescedDamageRects = 64;
 constexpr int MaxDamageRectCount = 128;
 constexpr int MaxQueuedFrames = 8;
+constexpr int ActivityTileSize = 64;
+constexpr uint8_t ActivityDecayPerFrame = 1;
+constexpr uint8_t ActivityBoostPerDamage = 6;
+constexpr int ActivityStaticThreshold = 2;
+constexpr int ActivityTransientThreshold = 8;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MinimumFrameRate = 5;
 constexpr int MaxFramesBetweenFullDamage = 8;
@@ -69,7 +75,7 @@ struct RectEncodingQuality {
     uint8_t quality = 100;
 };
 
-RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect, const QSize &frameSize, bool isKeyFrame)
+RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect, const QSize &frameSize, bool isKeyFrame, int activityScore)
 {
     if (isKeyFrame || frameSize.isEmpty()) {
         return {};
@@ -81,21 +87,33 @@ RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect, const QSize &
 
     // Bias for crisp quality on small UI updates and better compression on large
     // motion updates.
+    int qp = 22;
+    int quality = 90;
     if (coverage <= 0.03) {
-        return {
-            .qp = 18,
-            .quality = 100,
-        };
+        qp = 18;
+        quality = 100;
+    } else if (coverage <= 0.20) {
+        qp = 21;
+        quality = 92;
     }
-    if (coverage <= 0.20) {
-        return {
-            .qp = 21,
-            .quality = 92,
-        };
+
+    // Keep static/text-like areas crisp while compressing repeated motion
+    // regions more aggressively.
+    if (activityScore <= ActivityStaticThreshold && coverage <= 0.20) {
+        qp -= 3;
+        quality += 8;
+    } else if (activityScore >= ActivityTransientThreshold) {
+        qp += 3;
+        quality -= 8;
+        if (activityScore >= (ActivityTransientThreshold * 2)) {
+            qp += 2;
+            quality -= 6;
+        }
     }
+
     return {
-        .qp = 22,
-        .quality = 90,
+        .qp = static_cast<uint8_t>(std::clamp(qp, 10, 40)),
+        .quality = static_cast<uint8_t>(std::clamp(quality, 70, 100)),
     };
 }
 
@@ -316,6 +334,10 @@ public:
     int droppedQueuedFrames = 0;
     clk::system_clock::time_point lastDropLogTime;
     QSet<uint32_t> pendingFrames;
+    QSize activityFrameSize;
+    int activityTileColumns = 0;
+    int activityTileRows = 0;
+    QVector<uint8_t> activityTiles;
 
     int maximumFrameRate = 120;
     int requestedFrameRate = 60;
@@ -325,6 +347,74 @@ public:
     std::atomic_int encodedFrames = 0;
     std::atomic_int frameDelay = 0;
     int framesSinceFullDamage = 0;
+
+    void resetActivityGrid(const QSize &size)
+    {
+        if (size == activityFrameSize && !activityTiles.isEmpty()) {
+            return;
+        }
+
+        activityFrameSize = size;
+        activityTileColumns = std::max(1, (size.width() + ActivityTileSize - 1) / ActivityTileSize);
+        activityTileRows = std::max(1, (size.height() + ActivityTileSize - 1) / ActivityTileSize);
+        activityTiles.fill(0, activityTileColumns * activityTileRows);
+    }
+
+    void decayActivity()
+    {
+        for (auto &activity : activityTiles) {
+            if (activity > ActivityDecayPerFrame) {
+                activity -= ActivityDecayPerFrame;
+            } else {
+                activity = 0;
+            }
+        }
+    }
+
+    template<typename TileFunc>
+    void forEachTileInRect(const RECTANGLE_16 &rect, TileFunc &&tileFunc) const
+    {
+        if (activityTiles.isEmpty()) {
+            return;
+        }
+
+        const auto left = std::clamp<int>(rect.left / ActivityTileSize, 0, activityTileColumns - 1);
+        const auto top = std::clamp<int>(rect.top / ActivityTileSize, 0, activityTileRows - 1);
+        const auto right = std::clamp<int>(std::max<int>(int(rect.right) - 1, int(rect.left)) / ActivityTileSize, 0, activityTileColumns - 1);
+        const auto bottom = std::clamp<int>(std::max<int>(int(rect.bottom) - 1, int(rect.top)) / ActivityTileSize, 0, activityTileRows - 1);
+
+        for (auto y = top; y <= bottom; ++y) {
+            for (auto x = left; x <= right; ++x) {
+                tileFunc(y * activityTileColumns + x);
+            }
+        }
+    }
+
+    int activityForRect(const RECTANGLE_16 &rect) const
+    {
+        if (activityTiles.isEmpty()) {
+            return 0;
+        }
+
+        int sum = 0;
+        int count = 0;
+        forEachTileInRect(rect, [this, &sum, &count](int index) {
+            sum += activityTiles[index];
+            count++;
+        });
+
+        return count > 0 ? (sum / count) : 0;
+    }
+
+    void markDamageActivity(const std::vector<RECTANGLE_16> &rects)
+    {
+        for (const auto &rect : rects) {
+            forEachTileInRect(rect, [this](int index) {
+                const auto boosted = int(activityTiles[index]) + int(ActivityBoostPerDamage);
+                activityTiles[index] = static_cast<uint8_t>(std::min(boosted, 255));
+            });
+        }
+    }
 };
 
 VideoStream::VideoStream(RdpConnection *session)
@@ -686,6 +776,7 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     avcStream.length = frame.data.length();
 
     auto damageRects = toDamageRects(frame);
+    const auto trackedDamageRects = damageRects;
     if (damageRects.empty()) {
         return;
     }
@@ -732,12 +823,20 @@ void VideoStream::sendFrame(const VideoFrame &frame)
 
     auto qualities = std::make_unique<RDPGFX_H264_QUANT_QUALITY[]>(damageRects.size());
     avcStream.meta.quantQualityVals = qualities.get();
+    d->resetActivityGrid(frame.size);
+    d->decayActivity();
+    std::vector<int> rectActivityScores;
+    rectActivityScores.reserve(damageRects.size());
+    for (const auto &rect : damageRects) {
+        rectActivityScores.push_back(d->activityForRect(rect));
+    }
     for (size_t i = 0; i < damageRects.size(); ++i) {
-        const auto quality = qualityForDamageRect(damageRects[i], frame.size, frame.isKeyFrame);
+        const auto quality = qualityForDamageRect(damageRects[i], frame.size, frame.isKeyFrame, rectActivityScores[i]);
         qualities[i].qp = quality.qp;
         qualities[i].p = 0;
         qualities[i].qualityVal = quality.quality;
     }
+    d->markDamageActivity(trackedDamageRects);
 
     d->gfxContext->StartFrame(d->gfxContext.get(), &startFramePdu);
     d->gfxContext->SurfaceCommand(d->gfxContext.get(), &surfaceCommand);
