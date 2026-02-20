@@ -239,3 +239,19 @@ sudo kwriteconfig6 --file /etc/sddm.conf.d/kde_settings.conf --group Autologin -
 # Restart sddm to force an autologin (don't run this if you are already logged in :D)
 ## systemctl restart sddm.service
 ```
+
+## Smoke Test Script
+
+Use the bundled smoke test helper to rebuild KRDP, restart services, and watch
+the key log markers used during tuning:
+
+```bash
+./smoke-test.sh
+```
+
+Useful flags:
+
+```bash
+./smoke-test.sh --no-build --watch-seconds 180
+./smoke-test.sh --no-watch
+```
