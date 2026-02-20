@@ -37,8 +37,8 @@ constexpr int MaxCoalescedDamageRects = 64;
 constexpr int MaxDamageRectCount = 128;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MinimumFrameRate = 5;
-constexpr int MaxFramesBetweenFullDamage = 30;
-constexpr double FullDamageCoverageThreshold = 0.35;
+constexpr int MaxFramesBetweenFullDamage = 8;
+constexpr double FullDamageCoverageThreshold = 0.15;
 
 RECTANGLE_16 toRdpRect(const QRect &rect)
 {
@@ -92,8 +92,8 @@ RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect, const QSize &
         };
     }
     return {
-        .qp = 24,
-        .quality = 85,
+        .qp = 22,
+        .quality = 90,
     };
 }
 
@@ -595,7 +595,8 @@ void VideoStream::sendFrame(const VideoFrame &frame)
 
     bool useFullDamage = frame.isKeyFrame
         || (damageCoverage >= FullDamageCoverageThreshold)
-        || (delayedFrames >= 2)
+        || (delayedFrames >= 1)
+        || (damageRects.size() > 8)
         || (d->framesSinceFullDamage >= MaxFramesBetweenFullDamage);
 
     if (useFullDamage) {
