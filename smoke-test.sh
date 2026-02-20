@@ -63,7 +63,7 @@ else
     filter_cmd=(grep -Ei)
 fi
 
-log_pattern='KRDP startup summary|Using PipeWire H264 encoder profile|Started Plasma session|Closing session|Listening for connections|Cannot create children|sequence gap|desynchronized|No matching damage metadata|queue overflow|Failed receiving filtered frame|Filter queue is full|ERRINFO|Broken pipe|fake input|kpipewire_vaapi_logging|libx264|KRDP_FORCE_VAAPI_DRIVER|KRDP_AUTO_VAAPI_DRIVER'
+log_pattern='KRDP startup summary|Using PipeWire H264 encoder profile|Started Plasma session|Closing session|Listening for connections|Cannot create children|sequence gap|desynchronized|No matching damage metadata|queue overflow|Failed receiving filtered frame|Filter queue is full|ERRINFO|Broken pipe|fake input|kpipewire_vaapi_logging|libx264|KRDP_FORCE_VAAPI_DRIVER|KRDP_AUTO_VAAPI_DRIVER|PipeWire encoder initialization failed|software fallback'
 log_file="$(mktemp)"
 trap 'rm -f "${log_file}"' EXIT
 
