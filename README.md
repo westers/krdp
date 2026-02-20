@@ -189,6 +189,20 @@ journalctl --user -f -o cat -u app-org.kde.krdpserver -u plasma-xdg-desktop-port
 for future testing, but are currently ignored because KRDP's local encoding
 path is AVC420-only.
 
+### KPipeWire Patch (Damage Metadata)
+
+The local KRDP improvements can use extra encoded-frame metadata from a patched
+KPipeWire build. The patch is tracked in this repository:
+
+- `patches/kpipewire/0001-damage-metadata-encoded-stream.patch`
+
+Apply it in a KPipeWire checkout with:
+
+```bash
+cd /path/to/kpipewire
+git apply /path/to/krdp/patches/kpipewire/0001-damage-metadata-encoded-stream.patch
+```
+
 ### Performance Tuning Notes
 
 Recent KRDP builds include several latency and artifact-reduction behaviors:

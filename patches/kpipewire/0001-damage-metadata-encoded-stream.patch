@@ -1,0 +1,182 @@
+diff --git a/src/pipewirebaseencodedstream.cpp b/src/pipewirebaseencodedstream.cpp
+index 192f241..8895368 100644
+--- a/src/pipewirebaseencodedstream.cpp
++++ b/src/pipewirebaseencodedstream.cpp
+@@ -28,6 +28,7 @@ struct PipeWireEncodedStreamPrivate {
+     Fraction m_maxFramerate;
+     int m_maxPendingFrames = 50;
+     bool m_active = false;
++    bool m_damageEnabled = false;
+     PipeWireBaseEncodedStream::Encoder m_encoder = PipeWireBaseEncodedStream::NoEncoder;
+     std::optional<quint8> m_quality;
+     PipeWireBaseEncodedStream::EncodingPreference m_encodingPreference;
+@@ -172,6 +173,7 @@ void PipeWireBaseEncodedStream::start()
+     d->m_produce->setMaxPendingFrames(d->m_maxPendingFrames);
+     d->m_produce->setEncodingPreference(d->m_encodingPreference);
+     d->m_produce->setColorRange(d->m_colorRange);
++    d->m_produce->setDamageEnabled(d->m_damageEnabled);
+     d->m_produce->moveToThread(d->m_produceThread.get());
+     d->m_produceThread->start();
+     QMetaObject::invokeMethod(d->m_produce.get(), &PipeWireProduce::initialize, Qt::QueuedConnection);
+@@ -297,6 +299,23 @@ void PipeWireBaseEncodedStream::setColorRange(ColorRange colorRange)
+     }
+ }
+ 
++bool PipeWireBaseEncodedStream::damageEnabled() const
++{
++    return d->m_damageEnabled;
++}
++
++void PipeWireBaseEncodedStream::setDamageEnabled(bool enabled)
++{
++    if (d->m_damageEnabled == enabled) {
++        return;
++    }
++    if (d->m_state != Idle || d->m_produceThread) {
++        qCWarning(PIPEWIRERECORD_LOGGING) << "Changing damage enabled while recording is not supported";
++        return;
++    }
++    d->m_damageEnabled = enabled;
++}
++
+ PipeWireBaseEncodedStream::EncodingPreference PipeWireBaseEncodedStream::encodingPreference()
+ {
+     return d->m_encodingPreference;
+diff --git a/src/pipewirebaseencodedstream.h b/src/pipewirebaseencodedstream.h
+index 685c6a6..c08fe1a 100644
+--- a/src/pipewirebaseencodedstream.h
++++ b/src/pipewirebaseencodedstream.h
+@@ -155,6 +155,14 @@ public:
+     Q_ENUM(ColorRange)
+     void setColorRange(ColorRange colorRange);
+ 
++    /**
++     * Enable PipeWire damage metadata on the underlying source stream.
++     *
++     * Must be set before start(); changing while recording is not supported.
++     */
++    bool damageEnabled() const;
++    void setDamageEnabled(bool enabled);
++
+ Q_SIGNALS:
+     void activeChanged(bool active);
+     void nodeIdChanged(uint nodeId);
+diff --git a/src/pipewireencodedstream.cpp b/src/pipewireencodedstream.cpp
+index 72d9ee7..7d61fe8 100644
+--- a/src/pipewireencodedstream.cpp
++++ b/src/pipewireencodedstream.cpp
+@@ -67,6 +67,22 @@ void PipeWireEncodeProduce::processFrame(const PipeWireFrame &frame)
+         Q_EMIT m_encodedStream->sizeChanged(m_size);
+     }
+ 
++    PipeWireEncodedFrameMeta meta;
++    meta.size = m_stream->size();
++    if (frame.damage) {
++        meta.damage = *frame.damage;
++        meta.hasDamage = true;
++    }
++    if (frame.sequential) {
++        meta.sequence = *frame.sequential;
++        meta.hasSequence = true;
++    }
++    if (frame.presentationTimestamp) {
++        meta.ptsNs = frame.presentationTimestamp->count();
++        meta.hasPts = true;
++    }
++    Q_EMIT m_encodedStream->frameMetadata(meta);
++
+     PipeWireProduce::processFrame(frame);
+     if (frame.cursor && m_cursor != *frame.cursor) {
+         m_cursor = *frame.cursor;
+@@ -77,6 +93,7 @@ void PipeWireEncodeProduce::processFrame(const PipeWireFrame &frame)
+ PipeWireEncodedStream::PipeWireEncodedStream(QObject *parent)
+     : PipeWireBaseEncodedStream(parent)
+ {
++    qRegisterMetaType<PipeWireEncodedFrameMeta>();
+ }
+ 
+ PipeWireEncodedStream::~PipeWireEncodedStream() = default;
+diff --git a/src/pipewireencodedstream.h b/src/pipewireencodedstream.h
+index 6cac471..def853c 100644
+--- a/src/pipewireencodedstream.h
++++ b/src/pipewireencodedstream.h
+@@ -7,6 +7,8 @@
+ #pragma once
+ 
+ #include <QObject>
++#include <QRegion>
++#include <QSize>
+ 
+ #include "pipewirebaseencodedstream.h"
+ #include <kpipewire_export.h>
+@@ -14,6 +16,17 @@
+ struct PipeWireCursor;
+ class PipeWirePacketPrivate;
+ 
++struct KPIPEWIRE_EXPORT PipeWireEncodedFrameMeta {
++    QRegion damage;
++    QSize size;
++    quint64 sequence = 0;
++    qint64 ptsNs = 0;
++    bool hasDamage = false;
++    bool hasSequence = false;
++    bool hasPts = false;
++};
++Q_DECLARE_METATYPE(PipeWireEncodedFrameMeta)
++
+ class KPIPEWIRE_EXPORT PipeWireEncodedStream : public PipeWireBaseEncodedStream
+ {
+     Q_OBJECT
+@@ -38,6 +51,7 @@ Q_SIGNALS:
+     void sizeChanged(const QSize &size);
+     void cursorChanged(const PipeWireCursor &cursor);
+     void newPacket(const Packet &packet);
++    void frameMetadata(const PipeWireEncodedFrameMeta &meta);
+ 
+ protected:
+     std::unique_ptr<PipeWireProduce> makeProduce() override;
+diff --git a/src/pipewireproduce.cpp b/src/pipewireproduce.cpp
+index 838c4af..55849bb 100644
+--- a/src/pipewireproduce.cpp
++++ b/src/pipewireproduce.cpp
+@@ -55,6 +55,7 @@ void PipeWireProduce::initialize()
+ {
+     m_stream.reset(new PipeWireSourceStream(nullptr));
+     m_stream->setMaxFramerate(m_frameRate);
++    m_stream->setDamageEnabled(m_damageEnabled);
+ 
+     // The check in supportsHardwareEncoding() is insufficient to fully
+     // determine if we actually support hardware encoding the current stream,
+@@ -293,6 +294,11 @@ void PipeWireProduce::setColorRange(PipeWireBaseEncodedStream::ColorRange colorR
+     }
+ }
+ 
++void PipeWireProduce::setDamageEnabled(bool enabled)
++{
++    m_damageEnabled = enabled;
++}
++
+ void PipeWireProduce::processFrame(const PipeWireFrame &frame)
+ {
+     auto f = frame;
+diff --git a/src/pipewireproduce_p.h b/src/pipewireproduce_p.h
+index fc7b724..6ddff1c 100644
+--- a/src/pipewireproduce_p.h
++++ b/src/pipewireproduce_p.h
+@@ -100,6 +100,8 @@ public:
+ 
+     void setColorRange(PipeWireBaseEncodedStream::ColorRange colorRange);
+ 
++    void setDamageEnabled(bool enabled);
++
+     void handleEncodedFramesChanged();
+ 
+     const uint m_nodeId;
+@@ -117,6 +119,7 @@ public:
+ 
+     PipeWireBaseEncodedStream::EncodingPreference m_encodingPreference;
+     PipeWireBaseEncodedStream::ColorRange m_colorRange = PipeWireBaseEncodedStream::ColorRange::Limited;
++    bool m_damageEnabled = false;
+ 
+     struct {
+         QImage texture;
