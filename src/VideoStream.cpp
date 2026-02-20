@@ -24,6 +24,7 @@
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
+#include "VideoCodecSupport.h"
 
 #include "krdp_logging.h"
 
@@ -182,8 +183,6 @@ enum class StreamCodec {
     Avc444,
     Avc444v2,
 };
-
-constexpr bool LocalAvc444EncodingAvailable = false;
 
 uint16_t toCodecId(StreamCodec codec)
 {
