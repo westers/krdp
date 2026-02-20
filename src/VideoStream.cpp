@@ -44,6 +44,7 @@ constexpr uint8_t ActivityBoostPerDamage = 6;
 constexpr int ActivityStaticThreshold = 2;
 constexpr int ActivityTransientThreshold = 8;
 constexpr int StableFramesBeforeRefinement = 3;
+constexpr int MaxCongestionQpBias = 8;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MinimumFrameRate = 5;
 constexpr int MaxFramesBetweenFullDamage = 8;
@@ -76,7 +77,12 @@ struct RectEncodingQuality {
     uint8_t quality = 100;
 };
 
-RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect, const QSize &frameSize, bool isKeyFrame, bool isRefinementFrame, int activityScore)
+RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect,
+                                         const QSize &frameSize,
+                                         bool isKeyFrame,
+                                         bool isRefinementFrame,
+                                         int activityScore,
+                                         int congestionQpBias)
 {
     if (isKeyFrame || frameSize.isEmpty()) {
         return {};
@@ -118,6 +124,12 @@ RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect, const QSize &
             quality -= 6;
         }
     }
+
+    // Under congestion, bias larger/motion updates toward lower bitrate while
+    // keeping tiny UI regions readable.
+    const auto effectiveCongestionBias = (coverage <= 0.03) ? (congestionQpBias / 2) : congestionQpBias;
+    qp += effectiveCongestionBias;
+    quality -= effectiveCongestionBias * 2;
 
     return {
         .qp = static_cast<uint8_t>(std::clamp(qp, 10, 40)),
@@ -354,9 +366,12 @@ public:
 
     std::atomic_int encodedFrames = 0;
     std::atomic_int frameDelay = 0;
+    std::atomic_int decoderQueueDepth = 0;
     int framesSinceFullDamage = 0;
     bool refinementPending = false;
     int stableFramesSinceMotion = 0;
+    int congestionQpBias = 0;
+    clk::milliseconds previousRtt = clk::milliseconds(0);
 
     void resetActivityGrid(const QSize &size)
     {
@@ -696,6 +711,9 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
 
     if (frameAcknowledge->queueDepth & SUSPEND_FRAME_ACKNOWLEDGEMENT) {
         qDebug() << "suspend frame ack";
+        d->decoderQueueDepth = 16;
+    } else if (frameAcknowledge->queueDepth != QUEUE_DEPTH_UNAVAILABLE) {
+        d->decoderQueueDepth = static_cast<int>(frameAcknowledge->queueDepth);
     }
 
     d->frameDelay = d->encodedFrames - frameAcknowledge->totalFramesDecoded;
@@ -856,7 +874,8 @@ void VideoStream::sendFrame(const VideoFrame &frame)
         rectActivityScores.push_back(d->activityForRect(rect));
     }
     for (size_t i = 0; i < damageRects.size(); ++i) {
-        const auto quality = qualityForDamageRect(damageRects[i], frame.size, frame.isKeyFrame, isRefinementFrame, rectActivityScores[i]);
+        const auto quality =
+            qualityForDamageRect(damageRects[i], frame.size, frame.isKeyFrame, isRefinementFrame, rectActivityScores[i], d->congestionQpBias);
         qualities[i].qp = quality.qp;
         qualities[i].p = 0;
         qualities[i].qualityVal = quality.quality;
@@ -882,12 +901,21 @@ void VideoStream::updateRequestedFrameRate()
     auto rtt = std::max(clk::duration_cast<clk::milliseconds>(d->session->networkDetection()->averageRTT()), clk::milliseconds(1));
     auto now = clk::system_clock::now();
     const auto delayedFrames = std::max(d->frameDelay.load(), 0);
+    const auto decoderQueueDepth = std::max(d->decoderQueueDepth.load(), 0);
+
+    int rttRiseMs = 0;
+    if (d->previousRtt.count() > 0) {
+        rttRiseMs = std::max(0, int((rtt - d->previousRtt).count()));
+    }
+    d->previousRtt = rtt;
 
     FrameRateEstimate estimate;
     estimate.timeStamp = now;
     const auto baseline = double(clk::milliseconds(1000).count()) / double(rtt.count());
     const auto delayPenalty = 1.0 + (double(delayedFrames) * 0.75);
-    estimate.estimate = std::clamp(int(baseline / delayPenalty), MinimumFrameRate, d->maximumFrameRate);
+    const auto queuePenalty = 1.0 + (double(std::min(decoderQueueDepth, 12)) * 0.25);
+    const auto rttTrendPenalty = 1.0 + (double(std::clamp(rttRiseMs, 0, 20)) / 20.0);
+    estimate.estimate = std::clamp(int(baseline / (delayPenalty * queuePenalty * rttTrendPenalty)), MinimumFrameRate, d->maximumFrameRate);
     d->frameRateEstimates.append(estimate);
 
     if (now - d->lastFrameRateEstimation < FrameRateEstimateAveragePeriod) {
@@ -913,18 +941,24 @@ void VideoStream::updateRequestedFrameRate()
     auto targetFrameRate = std::clamp(int(average * targetFrameRateSaturation), MinimumFrameRate, d->maximumFrameRate);
 
     // Hard clamps when decoder backlog is growing.
-    if (delayedFrames >= 8) {
+    if (delayedFrames >= 8 || decoderQueueDepth >= 10) {
         targetFrameRate = std::min(targetFrameRate, 10);
-    } else if (delayedFrames >= 4) {
+    } else if (delayedFrames >= 4 || decoderQueueDepth >= 6) {
         targetFrameRate = std::min(targetFrameRate, 20);
-    } else if (delayedFrames >= 2) {
+    } else if (delayedFrames >= 2 || decoderQueueDepth >= 3) {
         targetFrameRate = std::min(targetFrameRate, 30);
+    }
+
+    if (rttRiseMs >= 12) {
+        targetFrameRate = std::min(targetFrameRate, 24);
+    } else if (rttRiseMs >= 6) {
+        targetFrameRate = std::min(targetFrameRate, 36);
     }
 
     int nextFrameRate = d->requestedFrameRate;
     if (targetFrameRate < d->requestedFrameRate) {
         // React quickly on congestion to avoid lag buildup.
-        if (delayedFrames >= 2) {
+        if (delayedFrames >= 2 || decoderQueueDepth >= 3 || rttRiseMs >= 8) {
             nextFrameRate = targetFrameRate;
         } else {
             nextFrameRate = std::max(targetFrameRate, d->requestedFrameRate - 5);
@@ -939,6 +973,21 @@ void VideoStream::updateRequestedFrameRate()
     if (nextFrameRate != d->requestedFrameRate) {
         d->requestedFrameRate = nextFrameRate;
         Q_EMIT requestedFrameRateChanged();
+    }
+
+    int targetQpBias = 0;
+    if (delayedFrames >= 6 || decoderQueueDepth >= 8 || rttRiseMs >= 12) {
+        targetQpBias = 8;
+    } else if (delayedFrames >= 3 || decoderQueueDepth >= 5 || rttRiseMs >= 8) {
+        targetQpBias = 5;
+    } else if (delayedFrames >= 1 || decoderQueueDepth >= 2 || rttRiseMs >= 4) {
+        targetQpBias = 2;
+    }
+    targetQpBias = std::clamp(targetQpBias, 0, MaxCongestionQpBias);
+    if (targetQpBias > d->congestionQpBias) {
+        d->congestionQpBias = targetQpBias;
+    } else if (targetQpBias < d->congestionQpBias) {
+        d->congestionQpBias = std::max(targetQpBias, d->congestionQpBias - 1);
     }
 }
 }
