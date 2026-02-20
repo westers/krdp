@@ -173,7 +173,43 @@ struct RdpCapsInformation {
     RDPGFX_CAPSET capSet;
     bool avcSupported : 1 = false;
     bool yuv420Supported : 1 = false;
+    bool avc444Supported : 1 = false;
+    bool avc444v2Supported : 1 = false;
 };
+
+enum class StreamCodec {
+    Avc420,
+    Avc444,
+    Avc444v2,
+};
+
+constexpr bool LocalAvc444EncodingAvailable = false;
+
+uint16_t toCodecId(StreamCodec codec)
+{
+    switch (codec) {
+    case StreamCodec::Avc444:
+        return RDPGFX_CODECID_AVC444;
+    case StreamCodec::Avc444v2:
+        return RDPGFX_CODECID_AVC444v2;
+    case StreamCodec::Avc420:
+    default:
+        return RDPGFX_CODECID_AVC420;
+    }
+}
+
+const char *codecToString(StreamCodec codec)
+{
+    switch (codec) {
+    case StreamCodec::Avc444:
+        return "AVC444";
+    case StreamCodec::Avc444v2:
+        return "AVC444v2";
+    case StreamCodec::Avc420:
+    default:
+        return "AVC420";
+    }
+}
 
 const char *capVersionToString(uint32_t version)
 {
@@ -257,6 +293,7 @@ public:
     bool pendingReset = true;
     bool enabled = false;
     bool capsConfirmed = false;
+    StreamCodec selectedCodec = StreamCodec::Avc420;
 
     std::jthread frameSubmissionThread;
     std::mutex frameQueueMutex;
@@ -436,6 +473,9 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         case RDPGFX_CAPVERSION_10:
             if (!(set.flags & RDPGFX_CAPS_FLAG_AVC_DISABLED)) {
                 caps.avcSupported = true;
+                caps.avc444Supported = true;
+                // Per MS-RDPEGFX, AVC444v2 is implied from 10.1+.
+                caps.avc444v2Supported = set.version >= RDPGFX_CAPVERSION_101;
             }
             break;
         case RDPGFX_CAPVERSION_81:
@@ -448,7 +488,8 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
             break;
         }
 
-        qCDebug(KRDP) << " " << capVersionToString(caps.version) << "AVC:" << caps.avcSupported << "YUV420:" << caps.yuv420Supported;
+        qCDebug(KRDP) << " " << capVersionToString(caps.version) << "AVC:" << caps.avcSupported << "YUV420:" << caps.yuv420Supported << "AVC444:"
+                      << caps.avc444Supported << "AVC444v2:" << caps.avc444v2Supported;
 
         capsInformation.push_back(caps);
     }
@@ -468,6 +509,24 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
     });
 
     qCDebug(KRDP) << "Selected caps:" << capVersionToString(maxVersion->version);
+
+    const auto settings = d->session->rdpPeerContext()->settings;
+    const bool wantsAvc444 = freerdp_settings_get_bool(settings, FreeRDP_GfxAVC444);
+    const bool wantsAvc444v2 = freerdp_settings_get_bool(settings, FreeRDP_GfxAVC444v2);
+
+    auto preferredCodec = StreamCodec::Avc420;
+    if (wantsAvc444v2 && maxVersion->avc444v2Supported) {
+        preferredCodec = StreamCodec::Avc444v2;
+    } else if (wantsAvc444 && maxVersion->avc444Supported) {
+        preferredCodec = StreamCodec::Avc444;
+    }
+
+    if ((preferredCodec != StreamCodec::Avc420) && !LocalAvc444EncodingAvailable) {
+        qCDebug(KRDP) << "Client supports" << codecToString(preferredCodec) << "but local encoder path is AVC420-only, falling back";
+        preferredCodec = StreamCodec::Avc420;
+    }
+    d->selectedCodec = preferredCodec;
+    qCDebug(KRDP) << "Selected stream codec:" << codecToString(d->selectedCodec);
 
     RDPGFX_CAPS_CONFIRM_PDU capsConfirmPdu;
     capsConfirmPdu.capsSet = &(maxVersion->capSet);
@@ -568,7 +627,7 @@ void VideoStream::sendFrame(const VideoFrame &frame)
 
     RDPGFX_SURFACE_COMMAND surfaceCommand;
     surfaceCommand.surfaceId = d->surface.id;
-    surfaceCommand.codecId = RDPGFX_CODECID_AVC420;
+    surfaceCommand.codecId = toCodecId(d->selectedCodec);
     surfaceCommand.format = PIXEL_FORMAT_BGRX32;
     surfaceCommand.length = 0;
     surfaceCommand.data = nullptr;
