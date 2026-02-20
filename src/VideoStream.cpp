@@ -759,7 +759,7 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
 
     auto selectedCaps = capsInformation.end();
     for (const auto candidate : codecFallbackOrder) {
-        if ((candidate != StreamCodec::Avc420) && !LocalAvc444EncodingAvailable) {
+        if ((candidate != StreamCodec::Avc420) && !LocalAvc444EncodingAvailable()) {
             continue;
         }
         selectedCaps = findBestCapsForCodec(candidate);

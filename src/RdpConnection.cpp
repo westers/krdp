@@ -494,7 +494,7 @@ void RdpConnection::initialize()
     // pipeline, so make sure to request that.
     const bool requestExperimentalAvc444 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444") > 0;
     const bool requestExperimentalAvc444v2 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444V2") > 0;
-    if ((requestExperimentalAvc444 || requestExperimentalAvc444v2) && !LocalAvc444EncodingAvailable) {
+    if ((requestExperimentalAvc444 || requestExperimentalAvc444v2) && !LocalAvc444EncodingAvailable()) {
         qCWarning(KRDP) << "KRDP_EXPERIMENTAL_AVC444/KRDP_EXPERIMENTAL_AVC444V2 enabled with AVC420-only local encoder path;"
                         << "negotiation will prefer AVC444 caps, then fall back to AVC420 transport";
     }
