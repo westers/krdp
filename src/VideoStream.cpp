@@ -38,6 +38,7 @@ constexpr int MaxQueuedFrames = 4;
 constexpr int MaxCoalescedDamageRects = 64;
 constexpr int MaxDamageRectCount = 128;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
+constexpr int MinimumFrameRate = 5;
 
 RECTANGLE_16 toRdpRect(const QRect &rect)
 {
@@ -622,10 +623,13 @@ void VideoStream::updateRequestedFrameRate()
 {
     auto rtt = std::max(clk::duration_cast<clk::milliseconds>(d->session->networkDetection()->averageRTT()), clk::milliseconds(1));
     auto now = clk::system_clock::now();
+    const auto delayedFrames = std::max(d->frameDelay.load(), 0);
 
     FrameRateEstimate estimate;
     estimate.timeStamp = now;
-    estimate.estimate = std::min(int(clk::milliseconds(1000) / (rtt * std::max(d->frameDelay.load(), 1))), d->maximumFrameRate);
+    const auto baseline = double(clk::milliseconds(1000).count()) / double(rtt.count());
+    const auto delayPenalty = 1.0 + (double(delayedFrames) * 0.75);
+    estimate.estimate = std::clamp(int(baseline / delayPenalty), MinimumFrameRate, d->maximumFrameRate);
     d->frameRateEstimates.append(estimate);
 
     if (now - d->lastFrameRateEstimation < FrameRateEstimateAveragePeriod) {
@@ -637,7 +641,7 @@ void VideoStream::updateRequestedFrameRate()
     d->frameRateEstimates.erase(std::remove_if(d->frameRateEstimates.begin(),
                                                d->frameRateEstimates.end(),
                                                [now](const auto &estimate) {
-                                                   return (estimate.timeStamp - now) > FrameRateEstimateAveragePeriod;
+                                                   return (now - estimate.timeStamp) > FrameRateEstimateAveragePeriod;
                                                }),
                                 d->frameRateEstimates.cend());
 
@@ -646,13 +650,36 @@ void VideoStream::updateRequestedFrameRate()
     });
     auto average = sum / d->frameRateEstimates.size();
 
-    // we want some headroom so we can always clear our current load
-    // and handle any other latency
-    constexpr qreal targetFrameRateSaturation = 0.5;
-    auto frameRate = std::max(1.0, average * targetFrameRateSaturation);
+    // Keep headroom so we can drain delay quickly when congestion appears.
+    constexpr qreal targetFrameRateSaturation = 0.8;
+    auto targetFrameRate = std::clamp(int(average * targetFrameRateSaturation), MinimumFrameRate, d->maximumFrameRate);
 
-    if (frameRate != d->requestedFrameRate) {
-        d->requestedFrameRate = frameRate;
+    // Hard clamps when decoder backlog is growing.
+    if (delayedFrames >= 8) {
+        targetFrameRate = std::min(targetFrameRate, 10);
+    } else if (delayedFrames >= 4) {
+        targetFrameRate = std::min(targetFrameRate, 20);
+    } else if (delayedFrames >= 2) {
+        targetFrameRate = std::min(targetFrameRate, 30);
+    }
+
+    int nextFrameRate = d->requestedFrameRate;
+    if (targetFrameRate < d->requestedFrameRate) {
+        // React quickly on congestion to avoid lag buildup.
+        if (delayedFrames >= 2) {
+            nextFrameRate = targetFrameRate;
+        } else {
+            nextFrameRate = std::max(targetFrameRate, d->requestedFrameRate - 5);
+        }
+    } else if (targetFrameRate > d->requestedFrameRate) {
+        // Recover conservatively to prevent oscillation.
+        nextFrameRate = std::min(targetFrameRate, d->requestedFrameRate + 2);
+    }
+
+    nextFrameRate = std::clamp(nextFrameRate, MinimumFrameRate, d->maximumFrameRate);
+
+    if (nextFrameRate != d->requestedFrameRate) {
+        d->requestedFrameRate = nextFrameRate;
         Q_EMIT requestedFrameRateChanged();
     }
 }
