@@ -32,8 +32,9 @@ namespace KRdp
 
 namespace clk = std::chrono;
 
-// Maximum number of frames to contain in the queue.
 constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seconds(1);
+// Keep queueing latency low by bounding how many encoded frames can wait.
+constexpr int MaxQueuedFrames = 4;
 constexpr int MaxDamageRectCount = 128;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 
@@ -190,6 +191,7 @@ public:
 
     std::jthread frameSubmissionThread;
     std::mutex frameQueueMutex;
+    std::condition_variable frameQueueCondition;
 
     QQueue<VideoFrame> frameQueue;
     QSet<uint32_t> pendingFrames;
@@ -248,13 +250,17 @@ bool VideoStream::initialize()
             VideoFrame nextFrame;
             {
                 std::unique_lock lock(d->frameQueueMutex);
-                if (!d->frameQueue.isEmpty()) {
-                    nextFrame = d->frameQueue.takeFirst();
+                auto frameInterval = std::chrono::milliseconds(1000 / std::max(d->requestedFrameRate, 1));
+                d->frameQueueCondition.wait_for(lock, frameInterval, [this, token]() {
+                    return token.stop_requested() || !d->frameQueue.isEmpty();
+                });
+                if (token.stop_requested()) {
+                    break;
                 }
-            }
-            if (nextFrame.size.isEmpty()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000) / d->requestedFrameRate);
-                continue;
+                if (d->frameQueue.isEmpty()) {
+                    continue;
+                }
+                nextFrame = d->frameQueue.takeFirst();
             }
             sendFrame(nextFrame);
         }
@@ -275,6 +281,7 @@ void VideoStream::close()
 
     if (d->frameSubmissionThread.joinable()) {
         d->frameSubmissionThread.request_stop();
+        d->frameQueueCondition.notify_all();
         d->frameSubmissionThread.join();
     }
 
@@ -287,8 +294,14 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
         return;
     }
 
-    std::lock_guard lock(d->frameQueueMutex);
-    d->frameQueue.append(frame);
+    {
+        std::lock_guard lock(d->frameQueueMutex);
+        d->frameQueue.append(frame);
+        while (d->frameQueue.size() > MaxQueuedFrames) {
+            d->frameQueue.takeFirst();
+        }
+    }
+    d->frameQueueCondition.notify_one();
 }
 
 void VideoStream::reset()
@@ -308,6 +321,10 @@ void VideoStream::setEnabled(bool enabled)
     }
 
     d->enabled = enabled;
+    if (!enabled) {
+        std::lock_guard lock(d->frameQueueMutex);
+        d->frameQueue.clear();
+    }
     Q_EMIT enabledChanged();
 }
 
