@@ -129,6 +129,60 @@ systemctl --user enable --now app-org.kde.krdpserver.service
 systemctl --user restart app-org.kde.krdpserver.service
 ```
 
+## Running A Local Build Under systemd
+
+When testing changes from your local checkout, use a user service drop-in and a
+matching desktop entry override so Wayland privilege checks (`fake_input` and
+`zkde_screencast_unstable_v1`) apply to your local binary.
+
+```bash
+# Build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j"$(nproc)"
+
+# Desktop entry override (required when ExecStart points to the build tree)
+mkdir -p "$HOME/.local/share/applications"
+cp /usr/share/applications/org.kde.krdpserver.desktop "$HOME/.local/share/applications/org.kde.krdpserver.desktop"
+sed -i "s#^Exec=.*#Exec=$PWD/build/bin/krdpserver#" "$HOME/.local/share/applications/org.kde.krdpserver.desktop"
+kbuildsycoca6 --noincremental
+
+# systemd user drop-in
+mkdir -p "$HOME/.config/systemd/user/app-org.kde.krdpserver.service.d"
+cat > "$HOME/.config/systemd/user/app-org.kde.krdpserver.service.d/zz-krdp-plasma.conf" <<EOF
+[Service]
+UnsetEnvironment=LIBVA_DRIVER_NAME
+Environment=XDG_DATA_DIRS=%h/.local/share:/usr/local/share:/usr/share
+ExecStart=
+ExecStart=$PWD/build/bin/krdpserver --plasma --monitor 0
+EOF
+
+# Reload and restart
+systemctl --user daemon-reload
+systemctl --user restart plasma-xdg-desktop-portal-kde app-org.kde.krdpserver
+
+# Verify active command
+systemctl --user show app-org.kde.krdpserver.service -p ExecStart
+```
+
+To switch back to the packaged binary:
+
+```bash
+cat > "$HOME/.config/systemd/user/app-org.kde.krdpserver.service.d/zz-krdp-plasma.conf" <<EOF
+[Service]
+UnsetEnvironment=LIBVA_DRIVER_NAME
+ExecStart=
+ExecStart=/usr/bin/krdpserver --plasma --monitor 0
+EOF
+systemctl --user daemon-reload
+systemctl --user restart plasma-xdg-desktop-portal-kde app-org.kde.krdpserver
+```
+
+Useful runtime log command:
+
+```bash
+journalctl --user -f -o cat -u app-org.kde.krdpserver -u plasma-xdg-desktop-portal-kde
+```
+
 ## SDDM Autologin
 
 Since SDDM currently has no RDP support, you either need to already be logged in,
