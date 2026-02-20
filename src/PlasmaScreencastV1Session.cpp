@@ -156,6 +156,22 @@ void setFullColorRangeIfSupported(Stream *stream)
     }
 }
 
+template<typename Stream>
+void setPreferredH264Encoder(Stream *stream)
+{
+    auto encoder = PipeWireEncodedStream::H264Baseline;
+    if constexpr (requires(Stream *s) {
+                      s->suggestedEncoders();
+                  }) {
+        const auto suggested = stream->suggestedEncoders();
+        if (suggested.contains(PipeWireEncodedStream::H264Main)) {
+            encoder = PipeWireEncodedStream::H264Main;
+        }
+    }
+    stream->setEncoder(encoder);
+    qCDebug(KRDP) << "Using PipeWire H264 encoder profile:" << (encoder == PipeWireEncodedStream::H264Main ? "Main" : "Baseline");
+}
+
 template<typename Stream, typename Receiver, typename Callback>
 bool connectFrameMetadataIfSupported(Stream *stream, Receiver *receiver, Callback &&callback)
 {
@@ -322,7 +338,7 @@ void PlasmaScreencastV1Session::start()
         encodedStream->setNodeId(nodeId);
         encodedStream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed);
         setFullColorRangeIfSupported(encodedStream);
-        encodedStream->setEncoder(PipeWireEncodedStream::H264Baseline);
+        setPreferredH264Encoder(encodedStream);
         enableDamageMetadataIfSupported(encodedStream);
         connect(encodedStream, &PipeWireEncodedStream::newPacket, this, &PlasmaScreencastV1Session::onPacketReceived);
         connect(encodedStream, &PipeWireEncodedStream::sizeChanged, this, &PlasmaScreencastV1Session::setSize);
