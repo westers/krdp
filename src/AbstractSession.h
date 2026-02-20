@@ -8,6 +8,7 @@
 
 #include <PipeWireEncodedStream>
 #include <PipeWireSourceStream>
+#include <QString>
 
 class QMimeData;
 
@@ -96,6 +97,10 @@ protected:
     PipeWireEncodedStream *stream();
 
 private:
+    void handleStreamError(const QString &errorMessage);
+    void handleStreamStateChanged();
+    void handleStreamActiveChanged(bool active);
+
     class Private;
     const std::unique_ptr<Private> d;
 };
