@@ -35,6 +35,7 @@ namespace clk = std::chrono;
 constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seconds(1);
 // Keep queueing latency low by bounding how many encoded frames can wait.
 constexpr int MaxQueuedFrames = 4;
+constexpr int MaxCoalescedDamageRects = 64;
 constexpr int MaxDamageRectCount = 128;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 
@@ -77,8 +78,40 @@ std::vector<RECTANGLE_16> toDamageRects(const VideoFrame &frame)
     }
 
     const auto clippedDamage = frame.damage.intersected(frameBounds);
-    const auto damageRects = clippedDamage.rects();
+    QVector<QRect> damageRects;
+    const auto sourceRects = clippedDamage.rects();
+    damageRects.reserve(sourceRects.size());
+    for (const auto &rect : sourceRects) {
+        damageRects.append(rect);
+    }
     if (damageRects.isEmpty() || damageRects.size() > MaxDamageRectCount) {
+        rects.push_back(fullRect);
+        return rects;
+    }
+
+    // Merge nearby/overlapping rectangles to reduce metadata overhead while
+    // preserving partial update behavior.
+    bool merged = true;
+    while (merged && damageRects.size() > MaxCoalescedDamageRects) {
+        merged = false;
+        for (int i = 0; i < damageRects.size() - 1; ++i) {
+            for (int j = i + 1; j < damageRects.size(); ++j) {
+                const auto &a = damageRects.at(i);
+                const auto &b = damageRects.at(j);
+                const auto joined = a.united(b);
+                if (joined.width() * joined.height() <= (a.width() * a.height() + b.width() * b.height()) * 3 / 2) {
+                    damageRects[i] = joined;
+                    damageRects.removeAt(j);
+                    merged = true;
+                    break;
+                }
+            }
+            if (merged) {
+                break;
+            }
+        }
+    }
+    if (damageRects.size() > MaxDamageRectCount) {
         rects.push_back(fullRect);
         return rects;
     }
