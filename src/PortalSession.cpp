@@ -180,6 +180,7 @@ public:
     bool metadataSignalAvailable = false;
     bool metadataSeen = false;
     std::chrono::steady_clock::time_point lastMetadataMissLog;
+    QVector<VideoMonitor> monitorLayout;
 };
 
 QString createHandleToken()
@@ -425,6 +426,12 @@ void KRdp::PortalSession::onSessionStarted(uint code, const QVariantMap &result)
             auto stream = streams.at(activeStream() >= 0 ? activeStream() : 0);
 
             setLogicalSize(qdbus_cast<QSize>(stream.map.value(u"size"_s)));
+            d->monitorLayout = {
+                VideoMonitor{
+                    .geometry = QRect(QPoint(0, 0), logicalSize()),
+                    .primary = true,
+                },
+            };
             auto fd = reply.value();
             auto encodedStream = this->stream();
             d->pendingFrameMetadata.clear();
@@ -489,7 +496,15 @@ void PortalSession::processPendingPackets()
         frameData.size = size();
         frameData.data = packet.data();
         frameData.isKeyFrame = packet.isKeyFrame();
+        frameData.monitors = d->monitorLayout;
         frameData.damage = fullFrameDamage(frameData.size);
+
+        if (frameData.monitors.isEmpty() && !frameData.size.isEmpty()) {
+            frameData.monitors.push_back(VideoMonitor{
+                .geometry = QRect(QPoint(0, 0), frameData.size),
+                .primary = true,
+            });
+        }
 
         const bool metadataApplied = metadata != nullptr;
         if (metadata) {

@@ -12,7 +12,7 @@ Reduce encoded bandwidth by leveraging compositor damage metadata and protocol-s
 - `OPT-006` Congestion adaptation (frame rate + QP bias): `DONE`.
 - `OPT-007` H264 Main preference and fallback profile handling: `DONE`.
 - `OPT-008` AVC444 negotiation scaffold with AVC420 fallback and intent bias: `DONE` (transport remains AVC420 by design; true AVC444 is tracked separately in `OPT-010`).
-- `OPT-009` True multi-monitor protocol layout (server advertises multiple monitors/surfaces): `TODO`.
+- `OPT-009` True multi-monitor protocol layout (server advertises multiple monitors/surfaces): `PARTIAL` (KRDP now advertises per-monitor layout rectangles to clients for workspace/output sessions, but transport is still a single encoded surface).
 - `OPT-010` True AVC444 transport path end-to-end: `TODO`.
 - `OPT-011` Automatic GPU encode-device selection (avoid decode-only VAAPI backends): `PARTIAL` (mixed-GPU auto-selection now prefers non-NVIDIA VAAPI driver when available, and stream startup now retries once with software `libx264` on encoder init failure; further per-device validation remains).
 - `OPT-012` Explicit tile/content cache reuse strategy: `TODO`.
@@ -28,6 +28,7 @@ Reduce encoded bandwidth by leveraging compositor damage metadata and protocol-s
 - 2026-02-20: `OPT-013` marked `DONE` after wiring `General/VaapiDriverMode` through KCM and server startup environment handling.
 - 2026-02-20: `OPT-014` marked `DONE` after adding a startup summary log line and smoke-test encoder path assertions.
 - 2026-02-20: `OPT-011` reliability pass added one-shot software fallback (`libx264`) when PipeWire encoder initialization fails.
+- 2026-02-20: `OPT-009` moved to `PARTIAL` by advertising monitor layout metadata in RDPGFX reset; full multi-surface transport is still pending.
 
 ## Current KRdp Capture Path (Source Evidence)
 KRdp already uses PipeWire and encoded streams.
