@@ -123,6 +123,8 @@ openssl req -nodes -new -x509 -keyout "$certificateKeyPath" -out "$certificatePa
 kwriteconfig6 --file krdpserverrc --group General --key Certificate "$certificatePath"
 kwriteconfig6 --file krdpserverrc --group General --key CertificateKey "$certificateKeyPath"
 kwriteconfig6 --file krdpserverrc --group General --key SystemUserEnabled true
+# Optional: VAAPI driver mode (auto|off|radeonsi|iHD)
+kwriteconfig6 --file krdpserverrc --group General --key VaapiDriverMode auto
 
 # Enable/restart the systemd service
 systemctl --user enable --now app-org.kde.krdpserver.service
@@ -196,10 +198,18 @@ AVC420 transport while preserving AVC444 intent for quality tuning.
 On mixed-GPU systems, KRDP now attempts to avoid decode-only VAAPI backends by
 auto-selecting a non-NVIDIA `LIBVA_DRIVER_NAME` when possible.
 
-To disable this behavior:
+The persisted KCM/config key is `General/VaapiDriverMode` with these values:
+
+- `auto` (default): automatic mixed-GPU selection.
+- `off`: disable KRDP VAAPI driver auto-selection.
+- `radeonsi`: force AMD VAAPI driver.
+- `iHD`: force Intel VAAPI driver (runtime fallback to `i965` remains available).
+
+Manual environment override examples:
 
 ```bash
 systemctl --user set-environment KRDP_AUTO_VAAPI_DRIVER=0
+systemctl --user set-environment KRDP_FORCE_VAAPI_DRIVER=radeonsi
 ```
 
 ### KPipeWire Patch (Damage Metadata)
@@ -268,4 +278,6 @@ Useful flags:
 ```bash
 ./smoke-test.sh --no-build --watch-seconds 180
 ./smoke-test.sh --no-watch
+./smoke-test.sh --no-build --assert-encoder vaapi
+./smoke-test.sh --no-build --assert-encoder software
 ```

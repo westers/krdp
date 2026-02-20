@@ -141,16 +141,16 @@ void maybeSelectVaapiDriverForMixedGpu()
     if (qEnvironmentVariableIsSet("LIBVA_DRIVER_NAME")) {
         return;
     }
-    if (qEnvironmentVariableIntValue("KRDP_AUTO_VAAPI_DRIVER") == 0 && qEnvironmentVariableIsSet("KRDP_AUTO_VAAPI_DRIVER")) {
-        qCDebug(KRDP) << "Skipping automatic VAAPI driver selection due to KRDP_AUTO_VAAPI_DRIVER=0";
-        return;
-    }
     if (qEnvironmentVariableIsSet("KRDP_FORCE_VAAPI_DRIVER")) {
         const auto forcedDriver = qgetenv("KRDP_FORCE_VAAPI_DRIVER");
         if (!forcedDriver.isEmpty()) {
             qputenv("LIBVA_DRIVER_NAME", forcedDriver);
             qCInfo(KRDP) << "Using forced VAAPI driver from KRDP_FORCE_VAAPI_DRIVER:" << forcedDriver;
         }
+        return;
+    }
+    if (qEnvironmentVariableIntValue("KRDP_AUTO_VAAPI_DRIVER") == 0 && qEnvironmentVariableIsSet("KRDP_AUTO_VAAPI_DRIVER")) {
+        qCDebug(KRDP) << "Skipping automatic VAAPI driver selection due to KRDP_AUTO_VAAPI_DRIVER=0";
         return;
     }
 
