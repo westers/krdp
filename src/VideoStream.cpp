@@ -82,6 +82,7 @@ RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect,
                                          const QSize &frameSize,
                                          bool isKeyFrame,
                                          bool isRefinementFrame,
+                                         bool avc444Intent,
                                          int activityScore,
                                          int congestionQpBias)
 {
@@ -131,6 +132,13 @@ RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect,
     const auto effectiveCongestionBias = (coverage <= 0.03) ? (congestionQpBias / 2) : congestionQpBias;
     qp += effectiveCongestionBias;
     quality -= effectiveCongestionBias * 2;
+
+    // If the client asked for AVC444 but we had to transport AVC420, bias
+    // quality slightly higher to preserve text/UI crispness.
+    if (avc444Intent && coverage <= 0.20 && activityScore <= ActivityTransientThreshold) {
+        qp -= 1;
+        quality += 2;
+    }
 
     return {
         .qp = static_cast<uint8_t>(std::clamp(qp, 10, 40)),
@@ -372,6 +380,7 @@ public:
     bool refinementPending = false;
     int stableFramesSinceMotion = 0;
     clk::system_clock::time_point lastRefinementFrameTime;
+    bool avc444Intent = false;
     int congestionQpBias = 0;
     clk::milliseconds previousRtt = clk::milliseconds(0);
 
@@ -656,7 +665,10 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
 
     if ((preferredCodec != StreamCodec::Avc420) && !LocalAvc444EncodingAvailable) {
         qCDebug(KRDP) << "Client supports" << codecToString(preferredCodec) << "but local encoder path is AVC420-only, falling back";
+        d->avc444Intent = true;
         preferredCodec = StreamCodec::Avc420;
+    } else {
+        d->avc444Intent = (preferredCodec == StreamCodec::Avc444 || preferredCodec == StreamCodec::Avc444v2);
     }
 
     auto findBestCapsForCodec = [&](StreamCodec codec) {
@@ -691,6 +703,9 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
 
     d->selectedCodec = preferredCodec;
     qCDebug(KRDP) << "Selected caps:" << capVersionToString(selectedCaps->version) << "codec:" << codecToString(d->selectedCodec);
+    if (d->avc444Intent && d->selectedCodec == StreamCodec::Avc420) {
+        qCDebug(KRDP) << "Applying AVC444-intent quality bias while transporting AVC420";
+    }
 
     RDPGFX_CAPS_CONFIRM_PDU capsConfirmPdu;
     capsConfirmPdu.capsSet = &(selectedCaps->capSet);
@@ -879,7 +894,7 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     }
     for (size_t i = 0; i < damageRects.size(); ++i) {
         const auto quality =
-            qualityForDamageRect(damageRects[i], frame.size, frame.isKeyFrame, isRefinementFrame, rectActivityScores[i], d->congestionQpBias);
+            qualityForDamageRect(damageRects[i], frame.size, frame.isKeyFrame, isRefinementFrame, d->avc444Intent, rectActivityScores[i], d->congestionQpBias);
         qualities[i].qp = quality.qp;
         qualities[i].p = 0;
         qualities[i].qualityVal = quality.quality;
