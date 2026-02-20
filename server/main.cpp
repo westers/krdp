@@ -27,6 +27,8 @@ int main(int argc, char **argv)
     QApplication application{argc, argv};
     application.setApplicationName(u"krdp-server"_s);
     application.setApplicationDisplayName(u"KRDP Server"_s);
+    // Ensure Wayland privilege checks resolve to the installed desktop file.
+    application.setDesktopFileName(u"org.kde.krdpserver"_s);
 
     KAboutData about(u"krdp-server"_s, u"KRDP Server"_s, QStringLiteral(KRdp_VERSION_STRING));
     KAboutData::setApplicationData(about);

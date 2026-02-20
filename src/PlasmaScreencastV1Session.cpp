@@ -7,12 +7,18 @@
 #include <QGuiApplication>
 #include <QMouseEvent>
 #include <QQueue>
+#include <QRect>
+#include <QRegion>
+#include <QScreen>
 #include <QWaylandClientExtensionTemplate>
 #include <qpa/qplatformnativeinterface.h>
 
 #include <linux/input-event-codes.h>
 #include <sys/mman.h>
+#include <wayland-util.h>
 #include <xkbcommon/xkbcommon.h>
+#include <chrono>
+#include <utility>
 
 #include "qwayland-fake-input.h"
 #include "qwayland-wayland.h"
@@ -31,6 +37,13 @@ public:
         : QWaylandClientExtensionTemplate<FakeInput>(4)
     {
         initialize();
+        if (isActive()) {
+            auto appId = qGuiApp->desktopFileName();
+            if (appId.isEmpty()) {
+                appId = QStringLiteral("org.kde.krdpserver");
+            }
+            authenticate(appId, QStringLiteral("KRDP remote control"));
+        }
         Q_ASSERT(isActive());
     }
 };
@@ -58,6 +71,92 @@ struct XKBContextDeleter {
 using ScopedXKBState = std::unique_ptr<struct xkb_state, XKBStateDeleter>;
 using ScopedXKBKeymap = std::unique_ptr<struct xkb_keymap, XKBKeymapDeleter>;
 using ScopedXKBContext = std::unique_ptr<struct xkb_context, XKBContextDeleter>;
+
+struct EncodedPacketMetadata {
+    QSize size;
+    QRegion damage;
+    std::chrono::system_clock::time_point presentationTimeStamp;
+    bool hasSize = false;
+    bool hasDamage = false;
+    bool hasPresentationTimeStamp = false;
+};
+
+constexpr int MaxPendingFrameMetadata = 256;
+
+QRegion fullFrameDamage(const QSize &size)
+{
+    if (size.isEmpty()) {
+        return {};
+    }
+    return QRegion(QRect(QPoint(0, 0), size));
+}
+
+QRegion clippedDamage(const QRegion &damage, const QSize &size)
+{
+    if (size.isEmpty()) {
+        return {};
+    }
+    auto clipped = damage.intersected(QRect(QPoint(0, 0), size));
+    return clipped.isEmpty() ? fullFrameDamage(size) : clipped;
+}
+
+QRect logicalRectForStream(int streamIndex)
+{
+    const auto screens = qGuiApp->screens();
+    if (screens.isEmpty()) {
+        return {};
+    }
+
+    QRect logicalRect;
+    if (streamIndex < 0 || streamIndex >= screens.size()) {
+        QRegion logicalRegion;
+        for (auto *screen : screens) {
+            logicalRegion += screen->geometry();
+        }
+        logicalRect = logicalRegion.boundingRect();
+    } else {
+        logicalRect = screens.at(streamIndex)->geometry();
+    }
+
+    if (auto *primary = qGuiApp->primaryScreen()) {
+        logicalRect.translate(-primary->geometry().topLeft());
+    }
+
+    return logicalRect;
+}
+
+template<typename Stream>
+void enableDamageMetadataIfSupported(Stream *stream)
+{
+    if constexpr (requires(Stream *s) {
+                      s->setDamageEnabled(true);
+                  }) {
+        stream->setDamageEnabled(true);
+    } else {
+        qCWarning(KRDP) << "KPipeWire does not expose encoded damage metadata, using full-frame updates";
+    }
+}
+
+template<typename Stream>
+void setFullColorRangeIfSupported(Stream *stream)
+{
+    if constexpr (requires(Stream *s) {
+                      s->setColorRange(typename Stream::ColorRange{});
+                      Stream::ColorRange::Full;
+                  }) {
+        stream->setColorRange(Stream::ColorRange::Full);
+    }
+}
+
+template<typename Stream, typename Receiver, typename Callback>
+void connectFrameMetadataIfSupported(Stream *stream, Receiver *receiver, Callback &&callback)
+{
+    if constexpr (requires {
+                      &Stream::frameMetadata;
+                  }) {
+        QObject::connect(stream, &Stream::frameMetadata, receiver, std::forward<Callback>(callback));
+    }
+}
 }
 class Xkb : public QtWayland::wl_keyboard
 {
@@ -156,6 +255,8 @@ public:
     Screencasting m_screencasting;
     ScreencastingStream *request = nullptr;
     FakeInput *remoteInterface = nullptr;
+    QRect logicalRect;
+    QQueue<EncodedPacketMetadata> pendingFrameMetadata;
 };
 
 PlasmaScreencastV1Session::PlasmaScreencastV1Session()
@@ -174,22 +275,58 @@ void PlasmaScreencastV1Session::start()
 {
     if (auto vm = virtualMonitor()) {
         d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata);
-    } else if (!activeStream()) {
-        d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
+        d->logicalRect = QRect(QPoint(0, 0), vm->size);
+    } else {
+        const auto screens = qGuiApp->screens();
+        const auto streamIndex = activeStream();
+        if (streamIndex >= 0 && streamIndex < screens.size()) {
+            d->request = d->m_screencasting.createOutputStream(screens.at(streamIndex), Screencasting::Metadata);
+            d->logicalRect = logicalRectForStream(streamIndex);
+        } else {
+            d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
+            d->logicalRect = logicalRectForStream(-1);
+        }
+    }
+
+    if (!d->request) {
+        Q_EMIT error();
+        return;
     }
     connect(d->request, &ScreencastingStream::failed, this, &PlasmaScreencastV1Session::error);
     connect(d->request, &ScreencastingStream::created, this, [this](uint nodeId) {
         qCDebug(KRDP) << "Started Plasma session";
-
-        setLogicalSize(d->request->size());
+        if (!d->logicalRect.isEmpty()) {
+            setLogicalSize(d->logicalRect.size());
+        } else {
+            setLogicalSize(d->request->size());
+        }
         auto encodedStream = stream();
+        d->pendingFrameMetadata.clear();
         encodedStream->setNodeId(nodeId);
         encodedStream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed);
-        encodedStream->setColorRange(PipeWireBaseEncodedStream::ColorRange::Full);
+        setFullColorRangeIfSupported(encodedStream);
         encodedStream->setEncoder(PipeWireEncodedStream::H264Baseline);
+        enableDamageMetadataIfSupported(encodedStream);
         connect(encodedStream, &PipeWireEncodedStream::newPacket, this, &PlasmaScreencastV1Session::onPacketReceived);
         connect(encodedStream, &PipeWireEncodedStream::sizeChanged, this, &PlasmaScreencastV1Session::setSize);
         connect(encodedStream, &PipeWireEncodedStream::cursorChanged, this, &PlasmaScreencastV1Session::cursorUpdate);
+        connectFrameMetadataIfSupported(encodedStream, this, [this](const auto &meta) {
+            EncodedPacketMetadata frameMetadata;
+            frameMetadata.size = meta.size;
+            frameMetadata.hasSize = !meta.size.isEmpty();
+            if (meta.hasDamage) {
+                frameMetadata.damage = meta.damage;
+                frameMetadata.hasDamage = true;
+            }
+            if (meta.hasPts) {
+                frameMetadata.presentationTimeStamp = std::chrono::system_clock::time_point{std::chrono::nanoseconds(meta.ptsNs)};
+                frameMetadata.hasPresentationTimeStamp = true;
+            }
+            d->pendingFrameMetadata.enqueue(frameMetadata);
+            while (d->pendingFrameMetadata.size() > MaxPendingFrameMetadata) {
+                d->pendingFrameMetadata.dequeue();
+            }
+        });
         setStarted(true);
     });
 }
@@ -223,18 +360,22 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
     case QEvent::MouseMove: {
         auto me = std::static_pointer_cast<QMouseEvent>(event);
         auto position = me->position();
-        auto logicalPosition = QPointF{(position.x() / size().width()) * logicalSize().width(), (position.y() / size().height()) * logicalSize().height()};
-        d->remoteInterface->pointer_motion_absolute(logicalPosition.x(), logicalPosition.y());
+        if (size().isEmpty() || logicalSize().isEmpty()) {
+            return;
+        }
+        auto logicalPosition = QPointF{(position.x() / size().width()) * logicalSize().width() + d->logicalRect.x(),
+                                       (position.y() / size().height()) * logicalSize().height() + d->logicalRect.y()};
+        d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(logicalPosition.x()), wl_fixed_from_double(logicalPosition.y()));
         break;
     }
     case QEvent::Wheel: {
         auto we = std::static_pointer_cast<QWheelEvent>(event);
         auto delta = we->angleDelta();
         if (delta.y() != 0) {
-            d->remoteInterface->axis(WL_POINTER_AXIS_VERTICAL_SCROLL, delta.y() / 120);
+            d->remoteInterface->axis(WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(delta.y() / 120.0));
         }
         if (delta.x() != 0) {
-            d->remoteInterface->axis(WL_POINTER_AXIS_HORIZONTAL_SCROLL, delta.x() / 120);
+            d->remoteInterface->axis(WL_POINTER_AXIS_HORIZONTAL_SCROLL, wl_fixed_from_double(delta.x() / 120.0));
         }
         break;
     }
@@ -289,6 +430,23 @@ void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Pa
     frameData.size = size();
     frameData.data = data.data();
     frameData.isKeyFrame = data.isKeyFrame();
+    frameData.damage = fullFrameDamage(frameData.size);
+
+    if (!d->pendingFrameMetadata.isEmpty()) {
+        auto frameMetadata = d->pendingFrameMetadata.dequeue();
+        if (frameMetadata.hasSize && !frameMetadata.size.isEmpty()) {
+            frameData.size = frameMetadata.size;
+        }
+        if (frameMetadata.hasPresentationTimeStamp) {
+            frameData.presentationTimeStamp = frameMetadata.presentationTimeStamp;
+        }
+        if (frameMetadata.hasDamage) {
+            frameData.damage = clippedDamage(frameMetadata.damage, frameData.size);
+        }
+    }
+    if (frameData.isKeyFrame || frameData.damage.isEmpty()) {
+        frameData.damage = fullFrameDamage(frameData.size);
+    }
 
     Q_EMIT frameReceived(frameData);
 }
