@@ -18,6 +18,7 @@
 #include <wayland-util.h>
 #include <xkbcommon/xkbcommon.h>
 #include <chrono>
+#include <algorithm>
 #include <optional>
 #include <utility>
 
@@ -125,11 +126,6 @@ QRect logicalRectForStream(int streamIndex)
     } else {
         logicalRect = screens.at(streamIndex)->geometry();
     }
-
-    if (auto *primary = qGuiApp->primaryScreen()) {
-        logicalRect.translate(-primary->geometry().topLeft());
-    }
-
     return logicalRect;
 }
 
@@ -306,15 +302,18 @@ void PlasmaScreencastV1Session::start()
     if (auto vm = virtualMonitor()) {
         d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata);
         d->logicalRect = QRect(QPoint(0, 0), vm->size);
+        qCDebug(KRDP) << "Using virtual monitor stream" << vm->name << "logical rect" << d->logicalRect;
     } else {
         const auto screens = qGuiApp->screens();
         const auto streamIndex = activeStream();
         if (streamIndex >= 0 && streamIndex < screens.size()) {
             d->request = d->m_screencasting.createOutputStream(screens.at(streamIndex), Screencasting::Metadata);
             d->logicalRect = logicalRectForStream(streamIndex);
+            qCDebug(KRDP) << "Using output stream index" << streamIndex << "screen" << screens.at(streamIndex)->name() << "logical rect" << d->logicalRect;
         } else {
             d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
             d->logicalRect = logicalRectForStream(-1);
+            qCDebug(KRDP) << "Using workspace stream logical rect" << d->logicalRect;
         }
     }
 
@@ -330,6 +329,7 @@ void PlasmaScreencastV1Session::start()
         } else {
             setLogicalSize(d->request->size());
         }
+        qCDebug(KRDP) << "Plasma stream sizes: request" << d->request->size() << "logical" << logicalSize();
         auto encodedStream = stream();
         d->pendingFrameMetadata.clear();
         d->pendingPackets.clear();
@@ -398,8 +398,13 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
         if (size().isEmpty() || logicalSize().isEmpty()) {
             return;
         }
-        auto logicalPosition = QPointF{(position.x() / size().width()) * logicalSize().width() + d->logicalRect.x(),
-                                       (position.y() / size().height()) * logicalSize().height() + d->logicalRect.y()};
+        const auto inputWidth = std::max(1, size().width() - 1);
+        const auto inputHeight = std::max(1, size().height() - 1);
+        const auto logicalWidth = std::max(1, logicalSize().width() - 1);
+        const auto logicalHeight = std::max(1, logicalSize().height() - 1);
+        const auto normalizedX = std::clamp(position.x() / double(inputWidth), 0.0, 1.0);
+        const auto normalizedY = std::clamp(position.y() / double(inputHeight), 0.0, 1.0);
+        auto logicalPosition = QPointF{normalizedX * logicalWidth + d->logicalRect.x(), normalizedY * logicalHeight + d->logicalRect.y()};
         d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(logicalPosition.x()), wl_fixed_from_double(logicalPosition.y()));
         break;
     }

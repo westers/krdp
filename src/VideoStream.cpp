@@ -663,13 +663,9 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         preferredCodec = StreamCodec::Avc444;
     }
 
-    if ((preferredCodec != StreamCodec::Avc420) && !LocalAvc444EncodingAvailable) {
-        qCDebug(KRDP) << "Client supports" << codecToString(preferredCodec) << "but local encoder path is AVC420-only, falling back";
-        d->avc444Intent = true;
-        preferredCodec = StreamCodec::Avc420;
-    } else {
-        d->avc444Intent = (preferredCodec == StreamCodec::Avc444 || preferredCodec == StreamCodec::Avc444v2);
-    }
+    const auto requestedCodec = preferredCodec;
+    const bool requestedAvc444Codec = requestedCodec == StreamCodec::Avc444 || requestedCodec == StreamCodec::Avc444v2;
+    d->avc444Intent = requestedAvc444Codec;
 
     auto findBestCapsForCodec = [&](StreamCodec codec) {
         const auto itr = std::max_element(capsInformation.begin(),
@@ -688,11 +684,25 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         return itr;
     };
 
-    auto selectedCaps = findBestCapsForCodec(preferredCodec);
-    if (selectedCaps == capsInformation.end() && preferredCodec != StreamCodec::Avc420) {
-        qCDebug(KRDP) << "Client did not advertise usable" << codecToString(preferredCodec) << "caps, falling back to AVC420";
-        preferredCodec = StreamCodec::Avc420;
-        selectedCaps = findBestCapsForCodec(preferredCodec);
+    std::vector<StreamCodec> codecFallbackOrder;
+    codecFallbackOrder.push_back(requestedCodec);
+    if (requestedCodec == StreamCodec::Avc444v2) {
+        codecFallbackOrder.push_back(StreamCodec::Avc444);
+    }
+    if (requestedCodec != StreamCodec::Avc420) {
+        codecFallbackOrder.push_back(StreamCodec::Avc420);
+    }
+
+    auto selectedCaps = capsInformation.end();
+    for (const auto candidate : codecFallbackOrder) {
+        if ((candidate != StreamCodec::Avc420) && !LocalAvc444EncodingAvailable) {
+            continue;
+        }
+        selectedCaps = findBestCapsForCodec(candidate);
+        if (selectedCaps != capsInformation.end()) {
+            preferredCodec = candidate;
+            break;
+        }
     }
 
     if (selectedCaps == capsInformation.end()) {
@@ -702,6 +712,9 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
     }
 
     d->selectedCodec = preferredCodec;
+    if (requestedCodec != d->selectedCodec) {
+        qCDebug(KRDP) << "Negotiated codec fallback from" << codecToString(requestedCodec) << "to" << codecToString(d->selectedCodec);
+    }
     qCDebug(KRDP) << "Selected caps:" << capVersionToString(selectedCaps->version) << "codec:" << codecToString(d->selectedCodec);
     if (d->avc444Intent && d->selectedCodec == StreamCodec::Avc420) {
         qCDebug(KRDP) << "Applying AVC444-intent quality bias while transporting AVC420";

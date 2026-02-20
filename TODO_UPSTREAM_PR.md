@@ -5,15 +5,21 @@ Last updated: 2026-02-20
 ## Current State
 
 - KRDP working branch: `master`
-- KRDP local HEAD: `f08e930a4fa6ded1eaa338a93f3b3eee597412e7`
+- KRDP local HEAD: `91d1ae1e8438c785dd9f357dd5ca477ccac3a6d9`
 - KRDP GitHub mirror: `git@github.com:westers/krdp.git` (pushed)
 - KRDP upstream remote: `https://invent.kde.org/plasma/krdp.git`
 - KRDP divergence vs upstream right now: `origin/master...master = 1 behind, 22 ahead`
 - Existing MR draft text: `UPSTREAM_MR_DRAFT.md`
 
-- KPipeWire patch repo local HEAD: `e3b65244367e63cb65a72cc5d855fd6fbfb3cbc1`
+- KPipeWire patch repo local HEAD: `fc8d138d22990d4dbaca24d2514e75bffd9f43cd`
 - KPipeWire patch repo GitHub: `git@github.com:westers/kpipewire-vaapi-fix.git` (pushed)
 - Existing MR draft text (patch summary): `/home/westers/dev/rdp/kpipewire-vaapi-fix/UPSTREAM_MR_DRAFT.md`
+
+## Project Memory: Optimization Tracking IDs
+
+- All optimization work items must have a stable ID in the format `OPT-###`.
+- Track each item in `research.md` with one status: `TODO`, `WIP`, `BLOCKED`, `PARTIAL`, `DONE`.
+- Update status in `research.md` whenever implementation or validation meaningfully changes.
 
 ## Blocker Encountered
 
@@ -58,4 +64,3 @@ Use it as source material for a real upstream branch:
   - `cd /home/westers/dev/krdp && ./smoke-test.sh --no-build --watch-seconds 120`
 - KPipeWire patch install + log watch:
   - `cd /home/westers/dev/rdp/kpipewire-vaapi-fix && ./smoke-test.sh --no-build --force-libx264 --watch-seconds 120`
-
