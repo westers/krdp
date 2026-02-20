@@ -11,9 +11,10 @@
 
 #include <filesystem>
 #include <optional>
+#include <vector>
 
-#include <fcntl.h>
-
+#include <QDir>
+#include <QFile>
 #include <QHostAddress>
 #include <QStandardPaths>
 #include <QTcpSocket>
@@ -42,6 +43,131 @@ namespace fs = std::filesystem;
 
 namespace KRdp
 {
+
+namespace
+{
+struct RenderNodeInfo {
+    QByteArray renderNode;
+    QByteArray vendorId;
+};
+
+QByteArray readTrimmedFile(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return {};
+    }
+    return file.readAll().trimmed();
+}
+
+QByteArray preferredIntelDriver()
+{
+    constexpr auto iHdDriverPath = "/usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so";
+    constexpr auto i965DriverPath = "/usr/lib/x86_64-linux-gnu/dri/i965_drv_video.so";
+    if (QFile::exists(QLatin1StringView(iHdDriverPath))) {
+        return "iHD";
+    }
+    if (QFile::exists(QLatin1StringView(i965DriverPath))) {
+        return "i965";
+    }
+    return "iHD";
+}
+
+std::vector<RenderNodeInfo> renderNodes()
+{
+    std::vector<RenderNodeInfo> nodes;
+    const QDir driDir(QStringLiteral("/dev/dri"));
+    const auto entries = driDir.entryList({QStringLiteral("renderD*")}, QDir::System | QDir::Readable, QDir::Name);
+    nodes.reserve(entries.size());
+
+    for (const auto &entry : entries) {
+        const auto vendorPath = QStringLiteral("/sys/class/drm/%1/device/vendor").arg(entry);
+        const auto vendorId = readTrimmedFile(vendorPath);
+        if (vendorId.isEmpty()) {
+            continue;
+        }
+
+        nodes.push_back(RenderNodeInfo{
+            .renderNode = QFile::encodeName(driDir.absoluteFilePath(entry)),
+            .vendorId = vendorId,
+        });
+    }
+
+    return nodes;
+}
+
+QByteArray preferredMixedGpuDriver(const std::vector<RenderNodeInfo> &nodes)
+{
+    bool hasNvidia = false;
+    bool hasAmd = false;
+    bool hasIntel = false;
+
+    for (const auto &node : nodes) {
+        hasNvidia = hasNvidia || (node.vendorId == "0x10de");
+        hasAmd = hasAmd || (node.vendorId == "0x1002" || node.vendorId == "0x1022");
+        hasIntel = hasIntel || (node.vendorId == "0x8086");
+    }
+
+    if (!hasNvidia) {
+        return {};
+    }
+    if (hasAmd) {
+        return "radeonsi";
+    }
+    if (hasIntel) {
+        return preferredIntelDriver();
+    }
+    return {};
+}
+
+QString vendorSummary(const std::vector<RenderNodeInfo> &nodes)
+{
+    QStringList values;
+    values.reserve(nodes.size());
+    for (const auto &node : nodes) {
+        values.push_back(QStringLiteral("%1=%2").arg(QString::fromLatin1(node.renderNode), QString::fromLatin1(node.vendorId)));
+    }
+    return values.join(QStringLiteral(", "));
+}
+
+void maybeSelectVaapiDriverForMixedGpu()
+{
+    static bool hasAttemptedSelection = false;
+    if (hasAttemptedSelection) {
+        return;
+    }
+    hasAttemptedSelection = true;
+
+    if (qEnvironmentVariableIsSet("LIBVA_DRIVER_NAME")) {
+        return;
+    }
+    if (qEnvironmentVariableIntValue("KRDP_AUTO_VAAPI_DRIVER") == 0 && qEnvironmentVariableIsSet("KRDP_AUTO_VAAPI_DRIVER")) {
+        qCDebug(KRDP) << "Skipping automatic VAAPI driver selection due to KRDP_AUTO_VAAPI_DRIVER=0";
+        return;
+    }
+    if (qEnvironmentVariableIsSet("KRDP_FORCE_VAAPI_DRIVER")) {
+        const auto forcedDriver = qgetenv("KRDP_FORCE_VAAPI_DRIVER");
+        if (!forcedDriver.isEmpty()) {
+            qputenv("LIBVA_DRIVER_NAME", forcedDriver);
+            qCInfo(KRDP) << "Using forced VAAPI driver from KRDP_FORCE_VAAPI_DRIVER:" << forcedDriver;
+        }
+        return;
+    }
+
+    const auto nodes = renderNodes();
+    if (nodes.empty()) {
+        return;
+    }
+
+    const auto driver = preferredMixedGpuDriver(nodes);
+    if (driver.isEmpty()) {
+        return;
+    }
+
+    qputenv("LIBVA_DRIVER_NAME", driver);
+    qCInfo(KRDP) << "Auto-selected VAAPI driver" << driver << "based on render-node vendors:" << vendorSummary(nodes);
+}
+}
 
 #include <security/pam_appl.h>
 
@@ -310,6 +436,7 @@ NetworkDetection *RdpConnection::networkDetection() const
 void RdpConnection::initialize()
 {
     setState(State::Starting);
+    maybeSelectVaapiDriverForMixedGpu();
 
     d->peer = freerdp_peer_new(d->socketHandle);
     if (!d->peer) {
