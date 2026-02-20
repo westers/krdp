@@ -211,6 +211,19 @@ const char *codecToString(StreamCodec codec)
     }
 }
 
+bool capSupportsCodec(const RdpCapsInformation &caps, StreamCodec codec)
+{
+    switch (codec) {
+    case StreamCodec::Avc444v2:
+        return caps.avcSupported && caps.avc444v2Supported;
+    case StreamCodec::Avc444:
+        return caps.avcSupported && caps.avc444Supported;
+    case StreamCodec::Avc420:
+    default:
+        return caps.avcSupported && caps.yuv420Supported;
+    }
+}
+
 const char *capVersionToString(uint32_t version)
 {
     switch (version) {
@@ -494,30 +507,14 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         capsInformation.push_back(caps);
     }
 
-    auto supported = std::any_of(capsInformation.begin(), capsInformation.end(), [](const RdpCapsInformation &caps) {
-        return caps.avcSupported && caps.yuv420Supported;
-    });
-
-    if (!supported) {
-        qCWarning(KRDP) << "Client does not support H.264 in YUV420 mode!";
-        d->session->close(RdpConnection::CloseReason::VideoInitFailed);
-        return CHANNEL_RC_INITIALIZATION_ERROR;
-    }
-
-    auto maxVersion = std::max_element(capsInformation.begin(), capsInformation.end(), [](const auto &first, const auto &second) {
-        return first.version < second.version;
-    });
-
-    qCDebug(KRDP) << "Selected caps:" << capVersionToString(maxVersion->version);
-
     const auto settings = d->session->rdpPeerContext()->settings;
     const bool wantsAvc444 = freerdp_settings_get_bool(settings, FreeRDP_GfxAVC444);
     const bool wantsAvc444v2 = freerdp_settings_get_bool(settings, FreeRDP_GfxAVC444v2);
 
     auto preferredCodec = StreamCodec::Avc420;
-    if (wantsAvc444v2 && maxVersion->avc444v2Supported) {
+    if (wantsAvc444v2) {
         preferredCodec = StreamCodec::Avc444v2;
-    } else if (wantsAvc444 && maxVersion->avc444Supported) {
+    } else if (wantsAvc444) {
         preferredCodec = StreamCodec::Avc444;
     }
 
@@ -525,11 +522,42 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         qCDebug(KRDP) << "Client supports" << codecToString(preferredCodec) << "but local encoder path is AVC420-only, falling back";
         preferredCodec = StreamCodec::Avc420;
     }
+
+    auto findBestCapsForCodec = [&](StreamCodec codec) {
+        const auto itr = std::max_element(capsInformation.begin(),
+                                          capsInformation.end(),
+                                          [codec](const auto &first, const auto &second) {
+                                              const auto firstSupported = capSupportsCodec(first, codec);
+                                              const auto secondSupported = capSupportsCodec(second, codec);
+                                              if (firstSupported != secondSupported) {
+                                                  return !firstSupported;
+                                              }
+                                              return first.version < second.version;
+                                          });
+        if (itr == capsInformation.end() || !capSupportsCodec(*itr, codec)) {
+            return capsInformation.end();
+        }
+        return itr;
+    };
+
+    auto selectedCaps = findBestCapsForCodec(preferredCodec);
+    if (selectedCaps == capsInformation.end() && preferredCodec != StreamCodec::Avc420) {
+        qCDebug(KRDP) << "Client did not advertise usable" << codecToString(preferredCodec) << "caps, falling back to AVC420";
+        preferredCodec = StreamCodec::Avc420;
+        selectedCaps = findBestCapsForCodec(preferredCodec);
+    }
+
+    if (selectedCaps == capsInformation.end()) {
+        qCWarning(KRDP) << "Client does not support H.264 in YUV420 mode!";
+        d->session->close(RdpConnection::CloseReason::VideoInitFailed);
+        return CHANNEL_RC_INITIALIZATION_ERROR;
+    }
+
     d->selectedCodec = preferredCodec;
-    qCDebug(KRDP) << "Selected stream codec:" << codecToString(d->selectedCodec);
+    qCDebug(KRDP) << "Selected caps:" << capVersionToString(selectedCaps->version) << "codec:" << codecToString(d->selectedCodec);
 
     RDPGFX_CAPS_CONFIRM_PDU capsConfirmPdu;
-    capsConfirmPdu.capsSet = &(maxVersion->capSet);
+    capsConfirmPdu.capsSet = &(selectedCaps->capSet);
     d->gfxContext->CapsConfirm(d->gfxContext.get(), &capsConfirmPdu);
 
     d->capsConfirmed = true;
