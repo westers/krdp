@@ -185,9 +185,11 @@ journalctl --user -f -o cat -u app-org.kde.krdpserver -u plasma-xdg-desktop-port
 
 ### Codec Experiment Flags
 
-`KRDP_EXPERIMENTAL_AVC444=1` and `KRDP_EXPERIMENTAL_AVC444V2=1` are accepted
-for future testing, but are currently ignored because KRDP's local encoding
-path is AVC420-only.
+`KRDP_EXPERIMENTAL_AVC444=1` and `KRDP_EXPERIMENTAL_AVC444V2=1` enable
+AVC444 capability negotiation experiments.
+
+When local encoding is AVC420-only, KRDP will automatically fall back to
+AVC420 transport while preserving AVC444 intent for quality tuning.
 
 ### KPipeWire Patch (Damage Metadata)
 

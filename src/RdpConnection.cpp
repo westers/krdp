@@ -367,12 +367,12 @@ void RdpConnection::initialize()
     // pipeline, so make sure to request that.
     const bool requestExperimentalAvc444 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444") > 0;
     const bool requestExperimentalAvc444v2 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444V2") > 0;
-    const bool canEnableExperimentalAvc444 = LocalAvc444EncodingAvailable;
-    if (!canEnableExperimentalAvc444 && (requestExperimentalAvc444 || requestExperimentalAvc444v2)) {
-        qCWarning(KRDP) << "Ignoring KRDP_EXPERIMENTAL_AVC444/KRDP_EXPERIMENTAL_AVC444V2 because local encoder path is AVC420-only";
+    if ((requestExperimentalAvc444 || requestExperimentalAvc444v2) && !LocalAvc444EncodingAvailable) {
+        qCWarning(KRDP) << "KRDP_EXPERIMENTAL_AVC444/KRDP_EXPERIMENTAL_AVC444V2 enabled with AVC420-only local encoder path;"
+                        << "negotiation will prefer AVC444 caps, then fall back to AVC420 transport";
     }
-    const bool enableExperimentalAvc444 = canEnableExperimentalAvc444 && requestExperimentalAvc444;
-    const bool enableExperimentalAvc444v2 = canEnableExperimentalAvc444 && requestExperimentalAvc444v2;
+    const bool enableExperimentalAvc444 = requestExperimentalAvc444 || requestExperimentalAvc444v2;
+    const bool enableExperimentalAvc444v2 = requestExperimentalAvc444v2;
     freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, true);
     freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, enableExperimentalAvc444 || enableExperimentalAvc444v2);
     freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, enableExperimentalAvc444v2);
