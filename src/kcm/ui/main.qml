@@ -280,6 +280,43 @@ KCM.ScrollViewKCM {
             }
         }
 
+        QQC2.ComboBox {
+            id: vaapiModeCombo
+            Kirigami.FormData.label: i18nc("@label:listbox", "VAAPI driver:")
+            textRole: "text"
+            valueRole: "value"
+            model: [
+                {text: i18nc("@item:inlistbox", "Automatic (recommended)"), value: "auto"},
+                {text: i18nc("@item:inlistbox", "Disabled"), value: "off"},
+                {text: i18nc("@item:inlistbox", "AMD (radeonsi)"), value: "radeonsi"},
+                {text: i18nc("@item:inlistbox", "Intel (iHD / i965)"), value: "iHD"}
+            ]
+            enabled: userListView.count > 0
+            onActivated: {
+                const value = currentValue;
+                if (typeof value === "string" && settings.vaapiDriverMode !== value) {
+                    settings.vaapiDriverMode = value;
+                }
+            }
+            Component.onCompleted: {
+                const idx = indexOfValue(settings.vaapiDriverMode);
+                currentIndex = idx >= 0 ? idx : 0;
+            }
+            Connections {
+                target: settings
+                function onVaapiDriverModeChanged(): void {
+                    const idx = vaapiModeCombo.indexOfValue(settings.vaapiDriverMode);
+                    if (idx >= 0 && vaapiModeCombo.currentIndex !== idx) {
+                        vaapiModeCombo.currentIndex = idx;
+                    }
+                }
+            }
+            KCM.SettingStateBinding {
+                configObject: settings
+                settingName: "vaapiDriverMode"
+            }
+        }
+
         Item {
             Kirigami.FormData.isSection: true
             Kirigami.FormData.label: i18nc("title:group Group of RDP server settings", "Security Certificates")

@@ -16,11 +16,17 @@ Reduce encoded bandwidth by leveraging compositor damage metadata and protocol-s
 - `OPT-010` True AVC444 transport path end-to-end: `TODO`.
 - `OPT-011` Automatic GPU encode-device selection (avoid decode-only VAAPI backends): `PARTIAL` (mixed-GPU auto-selection now prefers non-NVIDIA VAAPI driver when available; further per-device validation remains).
 - `OPT-012` Explicit tile/content cache reuse strategy: `TODO`.
+- `OPT-013` Persisted VAAPI mode controls in KCM/server config (`auto|off|radeonsi|iHD`): `DONE` (startup now maps config to `KRDP_AUTO_VAAPI_DRIVER` / `KRDP_FORCE_VAAPI_DRIVER`).
+- `OPT-014` Startup observability and smoke-test encoder assertions: `DONE` (startup summary log line + `smoke-test.sh --assert-encoder` checks).
 
 ## Tracking Rule
 - Every optimization item must have a stable ID in the form `OPT-###`.
 - Every ID must carry a status: `TODO`, `WIP`, `BLOCKED`, `PARTIAL`, or `DONE`.
 - When status changes, update this file with the date and short reason.
+
+## Status Updates
+- 2026-02-20: `OPT-013` marked `DONE` after wiring `General/VaapiDriverMode` through KCM and server startup environment handling.
+- 2026-02-20: `OPT-014` marked `DONE` after adding a startup summary log line and smoke-test encoder path assertions.
 
 ## Current KRdp Capture Path (Source Evidence)
 KRdp already uses PipeWire and encoded streams.

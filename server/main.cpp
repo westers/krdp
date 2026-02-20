@@ -7,6 +7,7 @@
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QDebug>
 #include <QRegularExpression>
 
 #include <KAboutData>
@@ -21,6 +22,56 @@
 #include "krdpserversettings.h"
 
 using namespace Qt::StringLiterals;
+
+namespace
+{
+QString normalizedVaapiDriverMode(QString mode)
+{
+    mode = mode.trimmed();
+    if (mode.isEmpty() || mode.compare(u"auto"_s, Qt::CaseInsensitive) == 0) {
+        return u"auto"_s;
+    }
+    if (mode.compare(u"off"_s, Qt::CaseInsensitive) == 0 || mode.compare(u"disabled"_s, Qt::CaseInsensitive) == 0) {
+        return u"off"_s;
+    }
+    if (mode.compare(u"radeonsi"_s, Qt::CaseInsensitive) == 0) {
+        return u"radeonsi"_s;
+    }
+    if (mode.compare(u"ihd"_s, Qt::CaseInsensitive) == 0) {
+        return u"iHD"_s;
+    }
+    if (mode.compare(u"i965"_s, Qt::CaseInsensitive) == 0) {
+        return u"i965"_s;
+    }
+
+    qWarning() << "Unknown VaapiDriverMode value" << mode << "falling back to auto";
+    return u"auto"_s;
+}
+
+void applyVaapiDriverMode(const QString &mode)
+{
+    const auto normalizedMode = normalizedVaapiDriverMode(mode);
+    if (normalizedMode == u"auto"_s) {
+        qunsetenv("KRDP_FORCE_VAAPI_DRIVER");
+        qunsetenv("KRDP_AUTO_VAAPI_DRIVER");
+        return;
+    }
+    if (normalizedMode == u"off"_s) {
+        qunsetenv("KRDP_FORCE_VAAPI_DRIVER");
+        qputenv("KRDP_AUTO_VAAPI_DRIVER", "0");
+        return;
+    }
+
+    qunsetenv("KRDP_AUTO_VAAPI_DRIVER");
+    qputenv("KRDP_FORCE_VAAPI_DRIVER", normalizedMode.toLatin1());
+}
+
+QString envValueOrUnset(const char *name)
+{
+    const auto value = qgetenv(name);
+    return value.isEmpty() ? u"unset"_s : QString::fromLatin1(value);
+}
+}
 
 int main(int argc, char **argv)
 {
@@ -68,6 +119,8 @@ int main(int argc, char **argv)
     });
 
     auto config = ServerConfig::self();
+    const auto vaapiDriverMode = normalizedVaapiDriverMode(config->vaapiDriverMode());
+    applyVaapiDriverMode(vaapiDriverMode);
 
     auto parserValueWithDefault = [&parser](QAnyStringView option, auto defaultValue) {
         auto optionString = option.toString();
@@ -128,6 +181,7 @@ int main(int argc, char **argv)
     }
 
     SessionController controller(&server, parser.isSet(u"plasma"_s) ? SessionController::SessionType::Plasma : SessionController::SessionType::Portal);
+    QString streamTarget = u"workspace-default"_s;
     if (parser.isSet(u"virtual-monitor"_s)) {
         const QString vmData = parser.value(u"virtual-monitor"_s);
         const QRegularExpression rx(uR"((\d+)x(\d+)@([\d.]+))"_s);
@@ -137,10 +191,33 @@ int main(int argc, char **argv)
             return 1;
         }
         controller.setVirtualMonitor({vmData, {match.capturedView(1).toInt(), match.capturedView(2).toInt()}, match.capturedView(3).toDouble()});
+        streamTarget = u"virtual:%1"_s.arg(vmData);
     } else {
         controller.setMonitorIndex(parser.isSet(u"monitor"_s) ? std::optional(parser.value(u"monitor"_s).toInt()) : std::nullopt);
+        if (parser.isSet(u"monitor"_s)) {
+            streamTarget = u"monitor:%1"_s.arg(parser.value(u"monitor"_s));
+        }
     }
-    controller.setQuality(parserValueWithDefault(u"quality", config->quality()));
+    const auto quality = parserValueWithDefault(u"quality", config->quality());
+    controller.setQuality(quality);
+
+    const bool experimentalAvc444 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444") > 0;
+    const bool experimentalAvc444v2 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444V2") > 0;
+#ifdef WITH_PLASMA_SESSION
+    const auto sessionType = parser.isSet(u"plasma"_s) ? u"plasma"_s : u"portal"_s;
+#else
+    const auto sessionType = u"portal"_s;
+#endif
+    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 expAvc444=%8 expAvc444v2=%9")
+                             .arg(sessionType,
+                                  streamTarget,
+                                  QString::number(port),
+                                  QString::number(quality),
+                                  vaapiDriverMode,
+                                  envValueOrUnset("KRDP_FORCE_VAAPI_DRIVER"),
+                                  envValueOrUnset("KRDP_AUTO_VAAPI_DRIVER"),
+                                  experimentalAvc444 ? u"1"_s : u"0"_s,
+                                  experimentalAvc444v2 ? u"1"_s : u"0"_s);
 
     if (!server.start()) {
         return -1;
