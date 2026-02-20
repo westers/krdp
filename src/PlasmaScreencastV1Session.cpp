@@ -18,6 +18,7 @@
 #include <wayland-util.h>
 #include <xkbcommon/xkbcommon.h>
 #include <chrono>
+#include <optional>
 #include <utility>
 
 #include "qwayland-fake-input.h"
@@ -81,7 +82,14 @@ struct EncodedPacketMetadata {
     bool hasPresentationTimeStamp = false;
 };
 
-constexpr int MaxPendingFrameMetadata = 256;
+struct PendingEncodedPacket {
+    PipeWireEncodedStream::Packet packet;
+    std::chrono::steady_clock::time_point queuedAt;
+};
+
+constexpr int MaxPendingFrameMetadata = 128;
+constexpr int MaxPendingPacketsWithoutMetadata = 8;
+constexpr auto MetadataPairWaitBudget = std::chrono::milliseconds(12);
 
 QRegion fullFrameDamage(const QSize &size)
 {
@@ -149,13 +157,15 @@ void setFullColorRangeIfSupported(Stream *stream)
 }
 
 template<typename Stream, typename Receiver, typename Callback>
-void connectFrameMetadataIfSupported(Stream *stream, Receiver *receiver, Callback &&callback)
+bool connectFrameMetadataIfSupported(Stream *stream, Receiver *receiver, Callback &&callback)
 {
     if constexpr (requires {
                       &Stream::frameMetadata;
                   }) {
-        QObject::connect(stream, &Stream::frameMetadata, receiver, std::forward<Callback>(callback));
+        const auto connection = QObject::connect(stream, &Stream::frameMetadata, receiver, std::forward<Callback>(callback));
+        return static_cast<bool>(connection);
     }
+    return false;
 }
 }
 class Xkb : public QtWayland::wl_keyboard
@@ -257,6 +267,10 @@ public:
     FakeInput *remoteInterface = nullptr;
     QRect logicalRect;
     QQueue<EncodedPacketMetadata> pendingFrameMetadata;
+    QQueue<PendingEncodedPacket> pendingPackets;
+    bool metadataSignalAvailable = false;
+    bool metadataSeen = false;
+    std::chrono::steady_clock::time_point lastMetadataMissLog;
 };
 
 PlasmaScreencastV1Session::PlasmaScreencastV1Session()
@@ -302,6 +316,9 @@ void PlasmaScreencastV1Session::start()
         }
         auto encodedStream = stream();
         d->pendingFrameMetadata.clear();
+        d->pendingPackets.clear();
+        d->metadataSeen = false;
+        d->lastMetadataMissLog = {};
         encodedStream->setNodeId(nodeId);
         encodedStream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed);
         setFullColorRangeIfSupported(encodedStream);
@@ -310,7 +327,7 @@ void PlasmaScreencastV1Session::start()
         connect(encodedStream, &PipeWireEncodedStream::newPacket, this, &PlasmaScreencastV1Session::onPacketReceived);
         connect(encodedStream, &PipeWireEncodedStream::sizeChanged, this, &PlasmaScreencastV1Session::setSize);
         connect(encodedStream, &PipeWireEncodedStream::cursorChanged, this, &PlasmaScreencastV1Session::cursorUpdate);
-        connectFrameMetadataIfSupported(encodedStream, this, [this](const auto &meta) {
+        d->metadataSignalAvailable = connectFrameMetadataIfSupported(encodedStream, this, [this](const auto &meta) {
             EncodedPacketMetadata frameMetadata;
             frameMetadata.size = meta.size;
             frameMetadata.hasSize = !meta.size.isEmpty();
@@ -326,6 +343,8 @@ void PlasmaScreencastV1Session::start()
             while (d->pendingFrameMetadata.size() > MaxPendingFrameMetadata) {
                 d->pendingFrameMetadata.dequeue();
             }
+            d->metadataSeen = true;
+            processPendingPackets();
         });
         setStarted(true);
     });
@@ -423,32 +442,76 @@ void PlasmaScreencastV1Session::setClipboardData(std::unique_ptr<QMimeData> data
     Q_UNUSED(data);
 }
 
+void PlasmaScreencastV1Session::processPendingPackets()
+{
+    auto emitFrame = [this](const PipeWireEncodedStream::Packet &packet, const EncodedPacketMetadata *metadata) {
+        VideoFrame frameData;
+        frameData.size = size();
+        frameData.data = packet.data();
+        frameData.isKeyFrame = packet.isKeyFrame();
+        frameData.damage = fullFrameDamage(frameData.size);
+
+        const bool metadataApplied = metadata != nullptr;
+        if (metadata) {
+            if (metadata->hasSize && !metadata->size.isEmpty()) {
+                frameData.size = metadata->size;
+            }
+            if (metadata->hasPresentationTimeStamp) {
+                frameData.presentationTimeStamp = metadata->presentationTimeStamp;
+            }
+            if (metadata->hasDamage) {
+                frameData.damage = clippedDamage(metadata->damage, frameData.size);
+            }
+        }
+
+        if (!metadataApplied || frameData.isKeyFrame || frameData.damage.isEmpty()) {
+            frameData.damage = fullFrameDamage(frameData.size);
+        }
+
+        Q_EMIT frameReceived(frameData);
+    };
+
+    while (!d->pendingPackets.isEmpty()) {
+        if (!d->pendingFrameMetadata.isEmpty()) {
+            auto packet = d->pendingPackets.dequeue().packet;
+            auto metadata = d->pendingFrameMetadata.dequeue();
+            emitFrame(packet, &metadata);
+            continue;
+        }
+
+        auto pendingPacket = d->pendingPackets.head();
+        const bool shouldSendWithoutMetadata = !d->metadataSignalAvailable || !d->metadataSeen || pendingPacket.packet.isKeyFrame();
+        if (shouldSendWithoutMetadata) {
+            d->pendingPackets.dequeue();
+            emitFrame(pendingPacket.packet, nullptr);
+            continue;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const bool waitedTooLong = (now - pendingPacket.queuedAt) >= MetadataPairWaitBudget;
+        const bool queueTooDeep = d->pendingPackets.size() > MaxPendingPacketsWithoutMetadata;
+        if (waitedTooLong || queueTooDeep) {
+            if (d->lastMetadataMissLog.time_since_epoch().count() == 0 || (now - d->lastMetadataMissLog) >= std::chrono::seconds(2)) {
+                qCDebug(KRDP) << "No matching damage metadata for encoded packet, using full-frame update";
+                d->lastMetadataMissLog = now;
+            }
+            d->pendingPackets.dequeue();
+            emitFrame(pendingPacket.packet, nullptr);
+            continue;
+        }
+
+        // Leave packet queued briefly so late metadata can still be paired.
+        break;
+    }
+}
+
 void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Packet &data)
 {
-    VideoFrame frameData;
-
-    frameData.size = size();
-    frameData.data = data.data();
-    frameData.isKeyFrame = data.isKeyFrame();
-    frameData.damage = fullFrameDamage(frameData.size);
-
-    if (!d->pendingFrameMetadata.isEmpty()) {
-        auto frameMetadata = d->pendingFrameMetadata.dequeue();
-        if (frameMetadata.hasSize && !frameMetadata.size.isEmpty()) {
-            frameData.size = frameMetadata.size;
-        }
-        if (frameMetadata.hasPresentationTimeStamp) {
-            frameData.presentationTimeStamp = frameMetadata.presentationTimeStamp;
-        }
-        if (frameMetadata.hasDamage) {
-            frameData.damage = clippedDamage(frameMetadata.damage, frameData.size);
-        }
-    }
-    if (frameData.isKeyFrame || frameData.damage.isEmpty()) {
-        frameData.damage = fullFrameDamage(frameData.size);
-    }
-
-    Q_EMIT frameReceived(frameData);
+    d->pendingPackets.enqueue(PendingEncodedPacket{
+        .packet = data,
+        .queuedAt = std::chrono::steady_clock::now(),
+    });
+    processPendingPackets();
 }
 
 }

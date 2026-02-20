@@ -39,6 +39,7 @@ public:
     void setClipboardData(std::unique_ptr<QMimeData> data) override;
 
 private:
+    void processPendingPackets();
     void onPacketReceived(const PipeWireEncodedStream::Packet &data);
 
     class Private;
