@@ -18,6 +18,7 @@
 #include <QDateTime>
 #include <QQueue>
 #include <QRect>
+#include <QStringList>
 
 #include <freerdp/freerdp.h>
 #include <freerdp/peer.h>
@@ -50,6 +51,7 @@ constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MinimumFrameRate = 5;
 constexpr int MaxFramesBetweenFullDamage = 8;
 constexpr double FullDamageCoverageThreshold = 0.15;
+constexpr int MaxMonitorLayoutCount = 16;
 
 RECTANGLE_16 toRdpRect(const QRect &rect)
 {
@@ -71,6 +73,67 @@ RECTANGLE_16 toRdpRect(const QRect &rect)
     region.right = static_cast<UINT16>(right);
     region.bottom = static_cast<UINT16>(bottom);
     return region;
+}
+
+QVector<VideoMonitor> monitorLayoutForReset(const VideoFrame &frame)
+{
+    QVector<VideoMonitor> monitors;
+    if (frame.size.isEmpty()) {
+        return monitors;
+    }
+
+    const QRect frameBounds(QPoint(0, 0), frame.size);
+    monitors.reserve(std::min<qsizetype>(frame.monitors.size(), MaxMonitorLayoutCount));
+    for (const auto &candidate : frame.monitors) {
+        if (monitors.size() >= MaxMonitorLayoutCount) {
+            break;
+        }
+
+        auto clippedGeometry = candidate.geometry.intersected(frameBounds);
+        if (clippedGeometry.isEmpty()) {
+            continue;
+        }
+        monitors.push_back(VideoMonitor{
+            .geometry = clippedGeometry,
+            .primary = candidate.primary,
+        });
+    }
+
+    if (monitors.isEmpty()) {
+        monitors.push_back(VideoMonitor{
+            .geometry = frameBounds,
+            .primary = true,
+        });
+    }
+
+    bool foundPrimary = false;
+    for (auto &monitor : monitors) {
+        if (monitor.primary && !foundPrimary) {
+            foundPrimary = true;
+        } else {
+            monitor.primary = false;
+        }
+    }
+    if (!foundPrimary) {
+        monitors.first().primary = true;
+    }
+
+    return monitors;
+}
+
+QString monitorLayoutSummary(const QVector<VideoMonitor> &monitors)
+{
+    QStringList parts;
+    parts.reserve(monitors.size());
+    for (const auto &monitor : monitors) {
+        parts.push_back(QStringLiteral("%1,%2 %3x%4%5")
+                            .arg(monitor.geometry.x())
+                            .arg(monitor.geometry.y())
+                            .arg(monitor.geometry.width())
+                            .arg(monitor.geometry.height())
+                            .arg(monitor.primary ? QStringLiteral(" primary") : QString()));
+    }
+    return parts.join(QStringLiteral("; "));
 }
 
 struct RectEncodingQuality {
@@ -383,6 +446,7 @@ public:
     bool avc444Intent = false;
     int congestionQpBias = 0;
     clk::milliseconds previousRtt = clk::milliseconds(0);
+    QVector<VideoMonitor> monitorLayout;
 
     void resetActivityGrid(const QSize &size)
     {
@@ -752,20 +816,25 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
     return CHANNEL_RC_OK;
 }
 
-void VideoStream::performReset(QSize size)
+void VideoStream::performReset(const QSize &size, const QVector<VideoMonitor> &monitors)
 {
     RDPGFX_RESET_GRAPHICS_PDU resetGraphicsPdu;
     resetGraphicsPdu.width = size.width();
     resetGraphicsPdu.height = size.height();
-    resetGraphicsPdu.monitorCount = 1;
+    resetGraphicsPdu.monitorCount = monitors.size();
 
-    auto monitors = new MONITOR_DEF[1];
-    monitors[0].left = 0;
-    monitors[0].right = size.width();
-    monitors[0].top = 0;
-    monitors[0].bottom = size.height();
-    monitors[0].flags = MONITOR_PRIMARY;
-    resetGraphicsPdu.monitorDefArray = monitors;
+    auto monitorDefs = std::make_unique<MONITOR_DEF[]>(monitors.size());
+    for (int i = 0; i < monitors.size(); ++i) {
+        const auto &monitor = monitors.at(i);
+        monitorDefs[i].left = monitor.geometry.x();
+        monitorDefs[i].top = monitor.geometry.y();
+        monitorDefs[i].right = monitor.geometry.x() + monitor.geometry.width();
+        monitorDefs[i].bottom = monitor.geometry.y() + monitor.geometry.height();
+        monitorDefs[i].flags = monitor.primary ? MONITOR_PRIMARY : 0;
+    }
+    resetGraphicsPdu.monitorDefArray = monitorDefs.get();
+
+    qCDebug(KRDP) << "Reset graphics monitor layout:" << monitorLayoutSummary(monitors);
     d->gfxContext->ResetGraphics(d->gfxContext.get(), &resetGraphicsPdu);
 
     RDPGFX_CREATE_SURFACE_PDU createSurfacePdu;
@@ -798,9 +867,12 @@ void VideoStream::sendFrame(const VideoFrame &frame)
         return;
     }
 
-    if (d->pendingReset) {
+    const auto monitorLayout = monitorLayoutForReset(frame);
+    const bool monitorLayoutChanged = (d->monitorLayout != monitorLayout);
+    if (d->pendingReset || monitorLayoutChanged || d->surface.size != frame.size) {
         d->pendingReset = false;
-        performReset(frame.size);
+        d->monitorLayout = monitorLayout;
+        performReset(frame.size, monitorLayout);
     }
 
     d->session->networkDetection()->startBandwidthMeasure();

@@ -8,8 +8,10 @@
 
 #include <QObject>
 #include <QPoint>
+#include <QRect>
 #include <QRegion>
 #include <QSize>
+#include <QVector>
 
 #include "krdp_export.h"
 
@@ -17,6 +19,16 @@ namespace KRdp
 {
 
 class RdpConnection;
+
+struct VideoMonitor {
+    QRect geometry;
+    bool primary = false;
+
+    bool operator==(const VideoMonitor &other) const
+    {
+        return geometry == other.geometry && primary == other.primary;
+    }
+};
 
 /**
  * A frame of compressed video data.
@@ -39,6 +51,10 @@ struct VideoFrame {
      * Whether the packet contains all the information
      */
     bool isKeyFrame;
+    /**
+     * Logical monitor layout mapped into this frame's coordinate space.
+     */
+    QVector<VideoMonitor> monitors;
     /**
      * When was this frame presented.
      */

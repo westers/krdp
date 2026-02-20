@@ -129,6 +129,41 @@ QRect logicalRectForStream(int streamIndex)
     return logicalRect;
 }
 
+QVector<VideoMonitor> monitorLayoutForStream(int streamIndex, const QRect &logicalRect)
+{
+    QVector<VideoMonitor> monitors;
+    const auto screens = qGuiApp->screens();
+    if (screens.isEmpty()) {
+        return monitors;
+    }
+
+    auto primaryScreen = qGuiApp->primaryScreen();
+    if (streamIndex >= 0 && streamIndex < screens.size()) {
+        const auto geometry = screens.at(streamIndex)->geometry().translated(-logicalRect.topLeft());
+        monitors.push_back(VideoMonitor{
+            .geometry = geometry,
+            .primary = (screens.at(streamIndex) == primaryScreen),
+        });
+    } else {
+        monitors.reserve(screens.size());
+        for (auto *screen : screens) {
+            monitors.push_back(VideoMonitor{
+                .geometry = screen->geometry().translated(-logicalRect.topLeft()),
+                .primary = (screen == primaryScreen),
+            });
+        }
+    }
+
+    if (!std::any_of(monitors.cbegin(), monitors.cend(), [](const auto &monitor) {
+            return monitor.primary;
+        })
+        && !monitors.isEmpty()) {
+        monitors.first().primary = true;
+    }
+
+    return monitors;
+}
+
 template<typename Stream>
 void enableDamageMetadataIfSupported(Stream *stream)
 {
@@ -278,6 +313,7 @@ public:
     ScreencastingStream *request = nullptr;
     FakeInput *remoteInterface = nullptr;
     QRect logicalRect;
+    QVector<VideoMonitor> monitorLayout;
     QQueue<EncodedPacketMetadata> pendingFrameMetadata;
     QQueue<PendingEncodedPacket> pendingPackets;
     bool metadataSignalAvailable = false;
@@ -302,6 +338,12 @@ void PlasmaScreencastV1Session::start()
     if (auto vm = virtualMonitor()) {
         d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata);
         d->logicalRect = QRect(QPoint(0, 0), vm->size);
+        d->monitorLayout = {
+            VideoMonitor{
+                .geometry = d->logicalRect,
+                .primary = true,
+            },
+        };
         qCDebug(KRDP) << "Using virtual monitor stream" << vm->name << "logical rect" << d->logicalRect;
     } else {
         const auto screens = qGuiApp->screens();
@@ -309,10 +351,12 @@ void PlasmaScreencastV1Session::start()
         if (streamIndex >= 0 && streamIndex < screens.size()) {
             d->request = d->m_screencasting.createOutputStream(screens.at(streamIndex), Screencasting::Metadata);
             d->logicalRect = logicalRectForStream(streamIndex);
+            d->monitorLayout = monitorLayoutForStream(streamIndex, d->logicalRect);
             qCDebug(KRDP) << "Using output stream index" << streamIndex << "screen" << screens.at(streamIndex)->name() << "logical rect" << d->logicalRect;
         } else {
             d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
             d->logicalRect = logicalRectForStream(-1);
+            d->monitorLayout = monitorLayoutForStream(-1, d->logicalRect);
             qCDebug(KRDP) << "Using workspace stream logical rect" << d->logicalRect;
         }
     }
@@ -470,7 +514,15 @@ void PlasmaScreencastV1Session::processPendingPackets()
         frameData.size = size();
         frameData.data = packet.data();
         frameData.isKeyFrame = packet.isKeyFrame();
+        frameData.monitors = d->monitorLayout;
         frameData.damage = fullFrameDamage(frameData.size);
+
+        if (frameData.monitors.isEmpty() && !frameData.size.isEmpty()) {
+            frameData.monitors.push_back(VideoMonitor{
+                .geometry = QRect(QPoint(0, 0), frameData.size),
+                .primary = true,
+            });
+        }
 
         const bool metadataApplied = metadata != nullptr;
         if (metadata) {
