@@ -44,6 +44,7 @@ constexpr uint8_t ActivityBoostPerDamage = 6;
 constexpr int ActivityStaticThreshold = 2;
 constexpr int ActivityTransientThreshold = 8;
 constexpr int StableFramesBeforeRefinement = 3;
+constexpr auto RefinementCooldown = clk::milliseconds(600);
 constexpr int MaxCongestionQpBias = 8;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MinimumFrameRate = 5;
@@ -370,6 +371,7 @@ public:
     int framesSinceFullDamage = 0;
     bool refinementPending = false;
     int stableFramesSinceMotion = 0;
+    clk::system_clock::time_point lastRefinementFrameTime;
     int congestionQpBias = 0;
     clk::milliseconds previousRtt = clk::milliseconds(0);
 
@@ -828,8 +830,10 @@ void VideoStream::sendFrame(const VideoFrame &frame)
         d->stableFramesSinceMotion = 0;
     }
 
+    const auto cooldownElapsed =
+        (d->lastRefinementFrameTime.time_since_epoch().count() == 0) || ((clk::system_clock::now() - d->lastRefinementFrameTime) >= RefinementCooldown);
     const bool shouldSendRefinement = d->refinementPending && (d->stableFramesSinceMotion >= StableFramesBeforeRefinement) && (delayedFrames == 0)
-        && !frame.isKeyFrame;
+        && !frame.isKeyFrame && cooldownElapsed;
 
     bool useFullDamage = frame.isKeyFrame
         || shouldSendRefinement
@@ -885,6 +889,7 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     if (isRefinementFrame) {
         d->refinementPending = false;
         d->stableFramesSinceMotion = 0;
+        d->lastRefinementFrameTime = clk::system_clock::now();
         qCDebug(KRDP) << "Sent progressive refinement frame";
     }
 
