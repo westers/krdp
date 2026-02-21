@@ -103,7 +103,7 @@ private:
     void schedulePacketStallWatchdog();
     void scheduleHardwareEncoderRetry(bool forceReschedule = false);
     void restoreForcedEncoderOverride();
-    bool requestSoftwareFallback(const QString &reason, const QString &context, int hardwareRetryDelayMs = -1);
+    bool requestSoftwareFallback(const QString &reason, const QString &context, int hardwareRetryDelayMs = -1, bool allowHardwareRetry = true);
     void handleStreamError(const QString &errorMessage);
     void handleStreamStateChanged();
     void handleStreamActiveChanged(bool active);

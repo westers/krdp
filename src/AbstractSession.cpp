@@ -38,6 +38,7 @@ public:
     bool hardwareRetryPending = false;
     bool hardwareRetryInProgress = false;
     bool hardwareRetryScheduled = false;
+    bool autoHardwareRetryAllowed = true;
     int hardwareRetryDelayMs = HardwareRetryDelayMs;
     int hardwareRetryAttempts = 0;
     quint64 hardwareRetryScheduleGeneration = 0;
@@ -80,7 +81,10 @@ void AbstractSession::preferSoftwareEncoderForDisplayChange(const QString &reaso
     }
 
     constexpr int DisplayChangeHardwareRetryDelayMs = 20000;
-    requestSoftwareFallback(reason, QStringLiteral("Display reconfiguration in progress; temporarily forcing software encoder:"), DisplayChangeHardwareRetryDelayMs);
+    requestSoftwareFallback(reason,
+                           QStringLiteral("Display reconfiguration in progress; temporarily forcing software encoder:"),
+                           DisplayChangeHardwareRetryDelayMs,
+                           false);
 }
 
 int AbstractSession::activeStream() const
@@ -144,6 +148,7 @@ void AbstractSession::setStreamingEnabled(bool enable)
             d->hardwareRetryPending = false;
             d->hardwareRetryInProgress = false;
             d->hardwareRetryScheduled = false;
+            d->autoHardwareRetryAllowed = true;
             d->hardwareRetryDelayMs = Private::HardwareRetryDelayMs;
             d->hardwareRetryAttempts = 0;
             ++d->hardwareRetryScheduleGeneration;
@@ -198,8 +203,9 @@ PipeWireEncodedStream *AbstractSession::stream()
     return d->encodedStream.get();
 }
 
-bool AbstractSession::requestSoftwareFallback(const QString &reason, const QString &context, int hardwareRetryDelayMs)
+bool AbstractSession::requestSoftwareFallback(const QString &reason, const QString &context, int hardwareRetryDelayMs, bool allowHardwareRetry)
 {
+    d->autoHardwareRetryAllowed = allowHardwareRetry;
     if (hardwareRetryDelayMs > 0) {
         d->hardwareRetryDelayMs = hardwareRetryDelayMs;
     } else if (d->hardwareRetryDelayMs <= 0) {
@@ -210,7 +216,9 @@ bool AbstractSession::requestSoftwareFallback(const QString &reason, const QStri
     const bool alreadyForcedSoftware = (forcedEncoder == "libx264");
     if (d->softwareFallbackActive) {
         qCWarning(KRDP) << context << reason << "(software fallback already active)";
-        scheduleHardwareEncoderRetry(true);
+        if (d->autoHardwareRetryAllowed) {
+            scheduleHardwareEncoderRetry(true);
+        }
         return true;
     }
 
@@ -325,13 +333,16 @@ void AbstractSession::handleStreamActiveChanged(bool active)
         d->softwareFallbackActive = true;
         qCInfo(KRDP) << "Software encoder fallback active for this session";
         restoreForcedEncoderOverride();
-        scheduleHardwareEncoderRetry();
+        if (d->autoHardwareRetryAllowed) {
+            scheduleHardwareEncoderRetry();
+        }
         return;
     }
 
     if (d->hardwareRetryInProgress) {
         d->hardwareRetryInProgress = false;
         d->softwareFallbackActive = false;
+        d->autoHardwareRetryAllowed = true;
         d->hardwareRetryDelayMs = Private::HardwareRetryDelayMs;
         d->hardwareRetryAttempts = 0;
         qCInfo(KRDP) << "Hardware encoder recovered; leaving software fallback";
@@ -339,7 +350,9 @@ void AbstractSession::handleStreamActiveChanged(bool active)
     }
 
     if (d->softwareFallbackActive) {
-        scheduleHardwareEncoderRetry();
+        if (d->autoHardwareRetryAllowed) {
+            scheduleHardwareEncoderRetry();
+        }
     }
 }
 
@@ -383,7 +396,7 @@ void AbstractSession::schedulePacketStallWatchdog()
 
 void AbstractSession::scheduleHardwareEncoderRetry(bool forceReschedule)
 {
-    if (!d->softwareFallbackActive || d->hardwareRetryInProgress || !d->enabled || !d->encodedStream) {
+    if (!d->autoHardwareRetryAllowed || !d->softwareFallbackActive || d->hardwareRetryInProgress || !d->enabled || !d->encodedStream) {
         return;
     }
 
