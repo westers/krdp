@@ -100,6 +100,7 @@ protected:
 
 private:
     void schedulePacketStallWatchdog();
+    void scheduleHardwareEncoderRetry();
     void restoreForcedEncoderOverride();
     bool requestSoftwareFallback(const QString &reason, const QString &context);
     void handleStreamError(const QString &errorMessage);
