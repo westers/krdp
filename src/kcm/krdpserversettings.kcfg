@@ -28,6 +28,14 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>The quality of the video stream</label>
       <default>75</default>
     </entry>
+    <entry name="MonitorMode" type="String">
+      <label>Display target mode (workspace, primary, specific)</label>
+      <default>workspace</default>
+    </entry>
+    <entry name="MonitorIndex" type="Int">
+      <label>Display target monitor ID when monitor mode is specific</label>
+      <default>0</default>
+    </entry>
     <entry name="VaapiDriverMode" type="String">
       <label>VAAPI driver selection mode (auto, off, radeonsi, iHD)</label>
       <default>auto</default>

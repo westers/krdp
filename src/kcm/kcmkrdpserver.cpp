@@ -9,6 +9,7 @@
 #include <PipeWireRecord>
 
 #include <KPluginFactory>
+#include <KLocalizedString>
 #include <QClipboard>
 #include <QDBusArgument>
 #include <QDBusConnection>
@@ -20,6 +21,7 @@
 #include <QHostInfo>
 #include <QNetworkInterface>
 #include <QProcess>
+#include <QScreen>
 #include <qt6keychain/keychain.h>
 
 #include "org.freedesktop.impl.portal.PermissionStore.h"
@@ -224,6 +226,22 @@ QStringList KRDPServerConfig::listenAddressList()
         }
     }
     return addressList;
+}
+
+QStringList KRDPServerConfig::availableMonitorIds() const
+{
+    QStringList monitors;
+    const auto screens = qGuiApp->screens();
+    monitors.reserve(screens.size());
+
+    auto *primary = qGuiApp->primaryScreen();
+    for (int i = 0; i < screens.size(); ++i) {
+        const auto *screen = screens.at(i);
+        const auto geometry = screen->geometry();
+        const auto primarySuffix = (screen == primary) ? i18nc("@label", " (Primary)") : QString();
+        monitors.push_back(i18nc("@item:inlistbox", "%1: %2 [%3x%4]%5", i, screen->name(), geometry.width(), geometry.height(), primarySuffix));
+    }
+    return monitors;
 }
 
 QString KRDPServerConfig::hostName() const

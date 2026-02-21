@@ -246,6 +246,71 @@ KCM.ScrollViewKCM {
             }
         }
 
+        QQC2.ComboBox {
+            id: monitorModeCombo
+            Kirigami.FormData.label: i18nc("@label:listbox", "Display target:")
+            textRole: "text"
+            valueRole: "value"
+            model: [
+                {text: i18nc("@item:inlistbox", "All monitors (workspace)"), value: "workspace"},
+                {text: i18nc("@item:inlistbox", "Primary monitor"), value: "primary"},
+                {text: i18nc("@item:inlistbox", "Specific monitor ID"), value: "specific"}
+            ]
+            enabled: userListView.count > 0
+            onActivated: {
+                const value = currentValue;
+                if (typeof value === "string" && settings.monitorMode !== value) {
+                    settings.monitorMode = value;
+                }
+            }
+            Component.onCompleted: {
+                const idx = indexOfValue(settings.monitorMode);
+                currentIndex = idx >= 0 ? idx : 0;
+            }
+            Connections {
+                target: settings
+                function onMonitorModeChanged(): void {
+                    const idx = monitorModeCombo.indexOfValue(settings.monitorMode);
+                    if (idx >= 0 && monitorModeCombo.currentIndex !== idx) {
+                        monitorModeCombo.currentIndex = idx;
+                    }
+                }
+            }
+            KCM.SettingStateBinding {
+                configObject: settings
+                settingName: "monitorMode"
+            }
+        }
+
+        QQC2.SpinBox {
+            id: monitorIdField
+            Kirigami.FormData.label: i18nc("@label:spinbox", "Monitor ID:")
+            enabled: userListView.count > 0 && settings.monitorMode === "specific"
+            from: 0
+            to: Math.max(0, kcm.availableMonitorIds().length - 1)
+            value: settings.monitorIndex
+            onValueModified: {
+                settings.monitorIndex = value;
+            }
+            KCM.SettingStateBinding {
+                configObject: settings
+                settingName: "monitorIndex"
+            }
+        }
+
+        ColumnLayout {
+            Kirigami.FormData.label: i18nc("@label", "Monitor ID map:")
+            Layout.fillWidth: true
+            Repeater {
+                model: kcm.availableMonitorIds()
+                QQC2.Label {
+                    text: modelData
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                }
+            }
+        }
+
         ColumnLayout {
             enabled: userListView.count > 0
             Layout.preferredWidth: certKeyLayout.width

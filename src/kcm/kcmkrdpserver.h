@@ -55,6 +55,7 @@ public:
 
     Q_INVOKABLE bool isH264Supported();
     Q_INVOKABLE QStringList listenAddressList();
+    Q_INVOKABLE QStringList availableMonitorIds() const;
     Q_INVOKABLE void toggleAutoconnect(const bool enabled);
     Q_INVOKABLE void toggleServer(const bool enabled);
     Q_INVOKABLE void restartServer();

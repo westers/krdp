@@ -9,6 +9,7 @@
 #include <QCommandLineParser>
 #include <QDebug>
 #include <QRegularExpression>
+#include <QScreen>
 
 #include <KAboutData>
 #include <KCrash>
@@ -46,6 +47,51 @@ QString normalizedVaapiDriverMode(QString mode)
 
     qWarning() << "Unknown VaapiDriverMode value" << mode << "falling back to auto";
     return u"auto"_s;
+}
+
+QString normalizedMonitorMode(QString mode)
+{
+    mode = mode.trimmed();
+    if (mode.isEmpty() || mode.compare(u"workspace"_s, Qt::CaseInsensitive) == 0) {
+        return u"workspace"_s;
+    }
+    if (mode.compare(u"primary"_s, Qt::CaseInsensitive) == 0) {
+        return u"primary"_s;
+    }
+    if (mode.compare(u"specific"_s, Qt::CaseInsensitive) == 0) {
+        return u"specific"_s;
+    }
+    qWarning() << "Unknown MonitorMode value" << mode << "falling back to workspace";
+    return u"workspace"_s;
+}
+
+std::optional<int> configuredMonitorIndex(const ServerConfig *config)
+{
+    const auto mode = normalizedMonitorMode(config->monitorMode());
+    if (mode == u"workspace"_s) {
+        return std::nullopt;
+    }
+
+    const auto screens = QGuiApplication::screens();
+    if (screens.isEmpty()) {
+        return std::nullopt;
+    }
+
+    if (mode == u"primary"_s) {
+        const auto primary = QGuiApplication::primaryScreen();
+        const auto primaryIndex = screens.indexOf(primary);
+        if (primaryIndex < 0) {
+            return std::nullopt;
+        }
+        return primaryIndex;
+    }
+
+    const auto index = config->monitorIndex();
+    if (index < 0) {
+        qWarning() << "Configured monitor index is negative, falling back to workspace mode";
+        return std::nullopt;
+    }
+    return index;
 }
 
 void applyVaapiDriverMode(const QString &mode)
@@ -193,9 +239,16 @@ int main(int argc, char **argv)
         controller.setVirtualMonitor({vmData, {match.capturedView(1).toInt(), match.capturedView(2).toInt()}, match.capturedView(3).toDouble()});
         streamTarget = u"virtual:%1"_s.arg(vmData);
     } else {
-        controller.setMonitorIndex(parser.isSet(u"monitor"_s) ? std::optional(parser.value(u"monitor"_s).toInt()) : std::nullopt);
+        std::optional<int> monitorIndex;
         if (parser.isSet(u"monitor"_s)) {
-            streamTarget = u"monitor:%1"_s.arg(parser.value(u"monitor"_s));
+            monitorIndex = parser.value(u"monitor"_s).toInt();
+        } else {
+            monitorIndex = configuredMonitorIndex(config);
+        }
+
+        controller.setMonitorIndex(monitorIndex);
+        if (monitorIndex.has_value()) {
+            streamTarget = u"monitor:%1"_s.arg(*monitorIndex);
         }
     }
     const auto quality = parserValueWithDefault(u"quality", config->quality());

@@ -64,6 +64,14 @@ The following command line options are available for the example server:
     <dd>Set the video quality, from 0 (lowest) to 100 (highest).</dd>
 </dl>
 
+When `--monitor` is not supplied, KRDP uses persisted config keys:
+
+- `General/MonitorMode=workspace|primary|specific`
+- `General/MonitorIndex=<id>` (used when mode is `specific`)
+
+The KDE Remote Desktop settings page exposes this as **Display target** and
+**Monitor ID**, and shows the current monitor ID map (`0: <screen name>`, etc.).
+
 # Known Working and Not-Working Clients
 
 The following clients are known to work with the server:
@@ -123,6 +131,9 @@ openssl req -nodes -new -x509 -keyout "$certificateKeyPath" -out "$certificatePa
 kwriteconfig6 --file krdpserverrc --group General --key Certificate "$certificatePath"
 kwriteconfig6 --file krdpserverrc --group General --key CertificateKey "$certificateKeyPath"
 kwriteconfig6 --file krdpserverrc --group General --key SystemUserEnabled true
+# Optional: display target (workspace|primary|specific) and monitor ID
+kwriteconfig6 --file krdpserverrc --group General --key MonitorMode workspace
+kwriteconfig6 --file krdpserverrc --group General --key MonitorIndex 0
 # Optional: VAAPI driver mode (auto|off|radeonsi|iHD)
 kwriteconfig6 --file krdpserverrc --group General --key VaapiDriverMode auto
 
