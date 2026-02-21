@@ -28,7 +28,7 @@ Reduce encoded bandwidth by leveraging compositor damage metadata and protocol-s
 - 2026-02-20: `OPT-013` marked `DONE` after wiring `General/VaapiDriverMode` through KCM and server startup environment handling.
 - 2026-02-20: `OPT-014` marked `DONE` after adding a startup summary log line and smoke-test encoder path assertions.
 - 2026-02-20: `OPT-011` reliability pass added one-shot software fallback (`libx264`) when PipeWire encoder initialization fails.
-- 2026-02-20: `OPT-011` reliability pass extended fallback to runtime startup stalls: if no encoded packets are received shortly after stream activation, KRDP forces `libx264` and retries once.
+- 2026-02-20: `OPT-011` reliability pass extended fallback to runtime startup stalls: if no encoded packets are received shortly after stream activation, KRDP forces `libx264` and retries once (with temporary override restoration so configured VAAPI mode remains in effect afterward).
 - 2026-02-20: `OPT-009` moved to `PARTIAL` by advertising monitor layout metadata in RDPGFX reset; full multi-surface transport is still pending.
 - 2026-02-20: `OPT-010` moved to `PARTIAL` after adding experimental AVC444/AVC444v2 wire transport framing (`RDPGFX_AVC444_BITMAP_STREAM`, LC single-stream mode) under `KRDP_EXPERIMENTAL_TRUE_AVC444`.
 

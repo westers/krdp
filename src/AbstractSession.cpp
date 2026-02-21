@@ -34,6 +34,9 @@ public:
     bool softwareFallbackRetryInProgress = false;
     bool receivedPacketSinceActivation = false;
     quint64 streamActivationGeneration = 0;
+    bool temporarySoftwareEncoderOverride = false;
+    bool hadPreviousForcedEncoder = false;
+    QByteArray previousForcedEncoder;
 };
 
 AbstractSession::AbstractSession()
@@ -47,6 +50,7 @@ AbstractSession::~AbstractSession()
     if (d->encodedStream) {
         d->encodedStream->stop();
     }
+    restoreForcedEncoderOverride();
 }
 
 QSize AbstractSession::logicalSize() const
@@ -106,6 +110,7 @@ void AbstractSession::setStreamingEnabled(bool enable)
             d->encodedStream->start();
         } else {
             d->encodedStream->stop();
+            restoreForcedEncoderOverride();
         }
     }
 }
@@ -166,6 +171,11 @@ bool AbstractSession::requestSoftwareFallback(const QString &reason, const QStri
 
     d->softwareFallbackAttempted = true;
     d->softwareFallbackRetryPending = true;
+    if (!d->temporarySoftwareEncoderOverride) {
+        d->hadPreviousForcedEncoder = qEnvironmentVariableIsSet("KPIPEWIRE_FORCE_ENCODER");
+        d->previousForcedEncoder = qgetenv("KPIPEWIRE_FORCE_ENCODER");
+        d->temporarySoftwareEncoderOverride = true;
+    }
     qputenv("KPIPEWIRE_FORCE_ENCODER", "libx264");
     qCWarning(KRDP) << context << reason;
 
@@ -177,10 +187,28 @@ bool AbstractSession::requestSoftwareFallback(const QString &reason, const QStri
     return true;
 }
 
+void AbstractSession::restoreForcedEncoderOverride()
+{
+    if (!d->temporarySoftwareEncoderOverride) {
+        return;
+    }
+
+    if (d->hadPreviousForcedEncoder) {
+        qputenv("KPIPEWIRE_FORCE_ENCODER", d->previousForcedEncoder);
+    } else {
+        qunsetenv("KPIPEWIRE_FORCE_ENCODER");
+    }
+
+    d->temporarySoftwareEncoderOverride = false;
+    d->hadPreviousForcedEncoder = false;
+    d->previousForcedEncoder.clear();
+}
+
 void AbstractSession::handleStreamError(const QString &errorMessage)
 {
     if (!requestSoftwareFallback(errorMessage, QStringLiteral("PipeWire encoder initialization failed; forcing software fallback to libx264:"))) {
         qCWarning(KRDP) << "PipeWire encoder failed and no additional fallback is available:" << errorMessage;
+        restoreForcedEncoderOverride();
         Q_EMIT error();
     }
 }
@@ -226,6 +254,7 @@ void AbstractSession::handleStreamActiveChanged(bool active)
         if (!requestSoftwareFallback(QStringLiteral("No encoded packets received from PipeWire within %1 ms").arg(Private::FirstPacketTimeoutMs),
                                      QStringLiteral("PipeWire stream stalled before first packet; forcing software fallback to libx264:"))) {
             qCWarning(KRDP) << "PipeWire stream stalled and no additional fallback is available";
+            restoreForcedEncoderOverride();
             Q_EMIT error();
         }
     });
@@ -236,6 +265,7 @@ void AbstractSession::handleStreamActiveChanged(bool active)
 
     d->softwareFallbackRetryInProgress = false;
     qCInfo(KRDP) << "Software encoder fallback active for this session";
+    restoreForcedEncoderOverride();
 }
 
 void AbstractSession::handleEncodedPacket()

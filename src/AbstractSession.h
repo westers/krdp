@@ -97,6 +97,7 @@ protected:
     PipeWireEncodedStream *stream();
 
 private:
+    void restoreForcedEncoderOverride();
     bool requestSoftwareFallback(const QString &reason, const QString &context);
     void handleStreamError(const QString &errorMessage);
     void handleStreamStateChanged();

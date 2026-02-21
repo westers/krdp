@@ -227,7 +227,9 @@ This is an API-path limitation, not raw GPU compute performance.
 
 KRDP also retries once with forced `libx264` if PipeWire encode startup fails
 or if the stream becomes active but does not deliver encoded packets shortly
-after activation.
+after activation. This override is temporary for that retry path and then
+restored, so panel-selected VAAPI mode continues to apply for subsequent
+sessions.
 
 Manual environment override examples:
 
