@@ -8,6 +8,7 @@
 #include "krdpserversettings.h"
 #include <PipeWireRecord>
 
+#include <KConfigGroup>
 #include <KPluginFactory>
 #include <KLocalizedString>
 #include <QClipboard>
@@ -22,7 +23,6 @@
 #include <QNetworkInterface>
 #include <QProcess>
 #include <QScreen>
-#include <QSet>
 #include <qt6keychain/keychain.h>
 
 #include "org.freedesktop.impl.portal.PermissionStore.h"
@@ -41,16 +41,30 @@ static const QString dbusSystemdPropertiesInterface = u"org.freedesktop.DBus.Pro
 
 namespace
 {
-bool settingChangeRequiresRestart(const QString &settingKey)
+bool settingChangeRequiresRestart(const KRDPServerSettings *settings)
 {
-    static const QSet<QString> runtimeApplyKeys{
-        u"Quality"_s,
-        u"MonitorMode"_s,
-        u"MonitorIndex"_s,
-        u"VaapiDriverMode"_s,
-        u"Autostart"_s,
-    };
-    return !runtimeApplyKeys.contains(settingKey);
+    const KConfigGroup group(KSharedConfig::openConfig(QStringLiteral("krdpserverrc")), QStringLiteral("General"));
+
+    if (group.readEntry(QStringLiteral("ListenPort"), settings->listenPort()) != settings->listenPort()) {
+        return true;
+    }
+    if (group.readEntry(QStringLiteral("AutogenerateCertificates"), settings->autogenerateCertificates()) != settings->autogenerateCertificates()) {
+        return true;
+    }
+    if (group.readEntry(QStringLiteral("Certificate"), settings->certificate()) != settings->certificate()) {
+        return true;
+    }
+    if (group.readEntry(QStringLiteral("CertificateKey"), settings->certificateKey()) != settings->certificateKey()) {
+        return true;
+    }
+    if (group.readEntry(QStringLiteral("Users"), settings->users()) != settings->users()) {
+        return true;
+    }
+    if (group.readEntry(QStringLiteral("SystemUserEnabled"), settings->systemUserEnabled()) != settings->systemUserEnabled()) {
+        return true;
+    }
+
+    return false;
 }
 }
 
@@ -182,17 +196,7 @@ bool KRDPServerConfig::userExists(const QString &username)
 
 void KRDPServerConfig::save()
 {
-    bool restartRequired = false;
-    const auto items = m_serverSettings->items();
-    for (const auto *item : items) {
-        if (!item || !item->isSaveNeeded()) {
-            continue;
-        }
-        if (settingChangeRequiresRestart(item->key())) {
-            restartRequired = true;
-            break;
-        }
-    }
+    const bool restartRequired = settingChangeRequiresRestart(m_serverSettings);
 
     KQuickManagedConfigModule::save();
     if (m_restartRequiredFromLastSave != restartRequired) {
