@@ -72,6 +72,15 @@ bool AbstractSession::streamingRequested() const
     return d->enabled;
 }
 
+void AbstractSession::preferSoftwareEncoderForDisplayChange(const QString &reason)
+{
+    if (!d->enabled || !d->started) {
+        return;
+    }
+
+    requestSoftwareFallback(reason, QStringLiteral("Display reconfiguration in progress; temporarily forcing software encoder:"));
+}
+
 int AbstractSession::activeStream() const
 {
     return d->activeStream.value_or(-1);

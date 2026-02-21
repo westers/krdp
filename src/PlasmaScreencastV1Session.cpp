@@ -359,6 +359,10 @@ void PlasmaScreencastV1Session::refreshDisplayConfiguration()
         return;
     }
 
+    // During mode switches, proactively move to software encode so the remote
+    // confirmation dialog stays interactive while hardware pipelines settle.
+    preferSoftwareEncoderForDisplayChange(QStringLiteral("Display geometry/topology changed"));
+
     if (!setupScreencastRequest()) {
         qCWarning(KRDP) << "Unable to refresh display configuration after topology change";
         Q_EMIT error();

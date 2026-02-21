@@ -90,6 +90,7 @@ protected:
     QSize size() const;
     QSize logicalSize() const;
     bool streamingRequested() const;
+    void preferSoftwareEncoderForDisplayChange(const QString &reason);
     std::optional<VirtualMonitor> virtualMonitor() const;
     int activeStream() const;
 
