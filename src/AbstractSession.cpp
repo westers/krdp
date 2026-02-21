@@ -19,7 +19,6 @@ public:
     static constexpr int FirstPacketTimeoutMs = 1500;
     static constexpr int PacketStallTimeoutMs = 3000;
     static constexpr int HardwareRetryDelayMs = 8000;
-    static constexpr int DisplayChangeRecoveryDelayMs = 45000;
     static constexpr int MaxHardwareRetryAttempts = 3;
 
     std::unique_ptr<PipeWireEncodedStream> encodedStream;
@@ -39,11 +38,11 @@ public:
     bool hardwareRetryPending = false;
     bool hardwareRetryInProgress = false;
     bool hardwareRetryScheduled = false;
+    bool suppressHardwareRetryForSession = false;
     bool autoHardwareRetryAllowed = true;
     int hardwareRetryDelayMs = HardwareRetryDelayMs;
     int hardwareRetryAttempts = 0;
     quint64 hardwareRetryScheduleGeneration = 0;
-    quint64 displayRecoveryScheduleGeneration = 0;
     bool receivedPacketSinceActivation = false;
     quint64 streamActivationGeneration = 0;
     quint64 packetSequence = 0;
@@ -82,11 +81,12 @@ void AbstractSession::preferSoftwareEncoderForDisplayChange(const QString &reaso
         return;
     }
 
+    d->suppressHardwareRetryForSession = true;
     requestSoftwareFallback(reason,
                            QStringLiteral("Display reconfiguration in progress; temporarily forcing software encoder:"),
-                           Private::DisplayChangeRecoveryDelayMs,
+                           Private::HardwareRetryDelayMs,
                            false);
-    scheduleDisplayChangeHardwareRecovery();
+    qCInfo(KRDP) << "Automatic hardware retry disabled for this session after display-mode transition";
 }
 
 int AbstractSession::activeStream() const
@@ -150,11 +150,11 @@ void AbstractSession::setStreamingEnabled(bool enable)
             d->hardwareRetryPending = false;
             d->hardwareRetryInProgress = false;
             d->hardwareRetryScheduled = false;
+            d->suppressHardwareRetryForSession = false;
             d->autoHardwareRetryAllowed = true;
             d->hardwareRetryDelayMs = Private::HardwareRetryDelayMs;
             d->hardwareRetryAttempts = 0;
             ++d->hardwareRetryScheduleGeneration;
-            ++d->displayRecoveryScheduleGeneration;
             d->encodedStream->stop();
             restoreForcedEncoderOverride();
         }
@@ -208,7 +208,7 @@ PipeWireEncodedStream *AbstractSession::stream()
 
 bool AbstractSession::requestSoftwareFallback(const QString &reason, const QString &context, int hardwareRetryDelayMs, bool allowHardwareRetry)
 {
-    d->autoHardwareRetryAllowed = d->autoHardwareRetryAllowed && allowHardwareRetry;
+    d->autoHardwareRetryAllowed = d->autoHardwareRetryAllowed && allowHardwareRetry && !d->suppressHardwareRetryForSession;
     if (hardwareRetryDelayMs > 0) {
         d->hardwareRetryDelayMs = hardwareRetryDelayMs;
     } else if (d->hardwareRetryDelayMs <= 0) {
@@ -345,10 +345,10 @@ void AbstractSession::handleStreamActiveChanged(bool active)
     if (d->hardwareRetryInProgress) {
         d->hardwareRetryInProgress = false;
         d->softwareFallbackActive = false;
+        d->suppressHardwareRetryForSession = false;
         d->autoHardwareRetryAllowed = true;
         d->hardwareRetryDelayMs = Private::HardwareRetryDelayMs;
         d->hardwareRetryAttempts = 0;
-        ++d->displayRecoveryScheduleGeneration;
         qCInfo(KRDP) << "Hardware encoder recovered; leaving software fallback";
         return;
     }
@@ -445,32 +445,6 @@ void AbstractSession::scheduleHardwareEncoderRetry(bool forceReschedule)
         } else {
             d->encodedStream->stop();
         }
-    });
-}
-
-void AbstractSession::scheduleDisplayChangeHardwareRecovery()
-{
-    if (!d->enabled || !d->encodedStream) {
-        return;
-    }
-
-    const auto generation = ++d->displayRecoveryScheduleGeneration;
-    QTimer::singleShot(Private::DisplayChangeRecoveryDelayMs, this, [this, generation]() {
-        if (!d->enabled || !d->encodedStream) {
-            return;
-        }
-        if (generation != d->displayRecoveryScheduleGeneration) {
-            return;
-        }
-        if (!d->softwareFallbackActive) {
-            return;
-        }
-
-        d->autoHardwareRetryAllowed = true;
-        d->hardwareRetryAttempts = 0;
-        d->hardwareRetryDelayMs = Private::HardwareRetryDelayMs;
-        qCInfo(KRDP) << "Display mode stabilized; re-enabling hardware encoder recovery";
-        scheduleHardwareEncoderRetry(true);
     });
 }
 
