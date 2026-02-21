@@ -31,6 +31,31 @@ Reduce encoded bandwidth by leveraging compositor damage metadata and protocol-s
 - 2026-02-20: `OPT-011` reliability pass extended fallback to runtime startup stalls: if no encoded packets are received shortly after stream activation, KRDP forces `libx264` and retries once (with temporary override restoration so configured VAAPI mode remains in effect afterward).
 - 2026-02-20: `OPT-009` moved to `PARTIAL` by advertising monitor layout metadata in RDPGFX reset; full multi-surface transport is still pending.
 - 2026-02-20: `OPT-010` moved to `PARTIAL` after adding experimental AVC444/AVC444v2 wire transport framing (`RDPGFX_AVC444_BITMAP_STREAM`, LC single-stream mode) under `KRDP_EXPERIMENTAL_TRUE_AVC444`.
+- 2026-02-20: Added explicit runtime settings inventory (below) so we have one project-memory reference for KCM/config/env controls and their scope.
+
+## Runtime Settings Inventory (Project Memory)
+This section is the canonical quick reference for runtime knobs already implemented.
+
+### KCM / `krdpserverrc` (`[General]`)
+- `Quality` (`50..100` in KCM): live-applied at runtime to active sessions; does not require service restart.
+- `MonitorMode` (`workspace|primary|specific`): live-applied stream target selection.
+- `MonitorIndex` (used when `MonitorMode=specific`): live-applied monitor selection.
+- `VaapiDriverMode` (`auto|off|radeonsi|iHD`):
+  - `auto`: enables KRDP VAAPI driver auto-selection.
+  - `off`: disables KRDP VAAPI auto-selection (`KRDP_AUTO_VAAPI_DRIVER=0`).
+  - `radeonsi` / `iHD`: forces the requested VAAPI driver via `KRDP_FORCE_VAAPI_DRIVER`.
+  - Important: this is VAAPI driver selection, not a full "force software encoder" session policy.
+
+### Runtime Environment Variables
+- `KRDP_FORCE_VAAPI_DRIVER=<driver>`: force VAAPI driver selection in KRDP startup/device probing.
+- `KRDP_AUTO_VAAPI_DRIVER=0`: disable KRDP automatic VAAPI driver selection.
+- `KPIPEWIRE_FORCE_ENCODER=libx264`: force KPipeWire software H.264 encoder.
+- `KRDP_EXPERIMENTAL_AVC444=1` / `KRDP_EXPERIMENTAL_AVC444V2=1`: enable AVC444 negotiation paths (with AVC420 local transport fallback behavior where applicable).
+
+### Current Display-Change Recovery Behavior
+- Display geometry/topology changes are detected at runtime and trigger stream rebind.
+- If this path stalls encode, KRDP forces software fallback.
+- Current stability policy: once display-change fallback is entered, automatic hardware retry is suppressed for the rest of that session (hardware is retried on a fresh reconnect).
 
 ## Current KRdp Capture Path (Source Evidence)
 KRdp already uses PipeWire and encoded streams.
