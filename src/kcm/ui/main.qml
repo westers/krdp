@@ -40,7 +40,7 @@ KCM.ScrollViewKCM {
     Connections {
         target: kcm
         function onKrdpServerSettingsChanged(): void {
-            restartServerWarning.visible = toggleServerSwitch.checked;
+            restartServerWarning.visible = toggleServerSwitch.checked && kcm.restartRequiredFromLastSave;
             kcm.toggleAutoconnect(settings.autostart);
         }
         function onGenerateCertificateSucceeded(): void {
@@ -324,8 +324,11 @@ KCM.ScrollViewKCM {
                 to: 100
                 stepSize: 5
                 value: settings.quality
-                onMoved: {
-                    settings.quality = value;
+                onValueChanged: {
+                    const roundedValue = Math.round(value / stepSize) * stepSize;
+                    if (settings.quality !== roundedValue) {
+                        settings.quality = roundedValue;
+                    }
                 }
                 KCM.SettingStateBinding {
                     configObject: settings

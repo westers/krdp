@@ -36,6 +36,7 @@ public:
 
     Q_PROPERTY(SystemdService::Status serverStatus READ serverStatus NOTIFY serverStatusChanged);
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY errorMessageChanged);
+    Q_PROPERTY(bool restartRequiredFromLastSave READ restartRequiredFromLastSave NOTIFY restartRequiredFromLastSaveChanged);
 
     Q_PROPERTY(QString hostName READ hostName CONSTANT)
     Q_PROPERTY(bool managementAvailable READ managementAvailable CONSTANT)
@@ -72,6 +73,7 @@ public:
     Q_INVOKABLE [[nodiscard]] bool isServerRunning() const;
 
     QString errorMessage() const;
+    bool restartRequiredFromLastSave() const;
 
     QString hostName() const;
     bool managementAvailable() const;
@@ -93,6 +95,7 @@ Q_SIGNALS:
     void serverStatusChanged();
     void errorMessageChanged();
     void isServerRunningChanged();
+    void restartRequiredFromLastSaveChanged();
 
 private:
     void setServerStatus(SystemdService::Status status);
@@ -109,6 +112,7 @@ private:
     bool m_isH264Supported { false };
     SystemdService::Status m_currentServerStatus;
     QString m_lastErrorMessage;
+    bool m_restartRequiredFromLastSave { false };
 
     template<typename Output, typename Input>
     Output narrow(Input i)

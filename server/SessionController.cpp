@@ -6,6 +6,7 @@
 #include <QAction>
 #include <QCoreApplication>
 #include <QDBusInterface>
+#include <QDebug>
 #include <QMenu>
 
 #include <KLocalizedString>
@@ -137,6 +138,8 @@ void SessionController::setQuality(const std::optional<int> &quality)
         }
         wrapper->session->setVideoQuality(m_quality.value());
     }
+
+    qInfo() << "Applied runtime quality update:" << m_quality.value() << "active sessions:" << m_wrappers.size();
 }
 
 void SessionController::refreshDisplayConfiguration()

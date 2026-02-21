@@ -22,6 +22,7 @@
 #include <QNetworkInterface>
 #include <QProcess>
 #include <QScreen>
+#include <QSet>
 #include <qt6keychain/keychain.h>
 
 #include "org.freedesktop.impl.portal.PermissionStore.h"
@@ -37,6 +38,21 @@ static const QString dbusKrdpServerServicePath = u"/org/freedesktop/systemd1/uni
 static const QString dbusSystemdUnitInterface = u"org.freedesktop.systemd1.Unit"_s;
 static const QString dbusSystemdManagerInterface = u"org.freedesktop.systemd1.Manager"_s;
 static const QString dbusSystemdPropertiesInterface = u"org.freedesktop.DBus.Properties"_s;
+
+namespace
+{
+bool settingChangeRequiresRestart(const QString &settingKey)
+{
+    static const QSet<QString> runtimeApplyKeys{
+        u"Quality"_s,
+        u"MonitorMode"_s,
+        u"MonitorIndex"_s,
+        u"VaapiDriverMode"_s,
+        u"Autostart"_s,
+    };
+    return !runtimeApplyKeys.contains(settingKey);
+}
+}
 
 KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
     : KQuickManagedConfigModule(parent, data)
@@ -166,7 +182,23 @@ bool KRDPServerConfig::userExists(const QString &username)
 
 void KRDPServerConfig::save()
 {
+    bool restartRequired = false;
+    const auto items = m_serverSettings->items();
+    for (const auto *item : items) {
+        if (!item || !item->isSaveNeeded()) {
+            continue;
+        }
+        if (settingChangeRequiresRestart(item->key())) {
+            restartRequired = true;
+            break;
+        }
+    }
+
     KQuickManagedConfigModule::save();
+    if (m_restartRequiredFromLastSave != restartRequired) {
+        m_restartRequiredFromLastSave = restartRequired;
+        Q_EMIT restartRequiredFromLastSaveChanged();
+    }
     Q_EMIT krdpServerSettingsChanged();
 }
 
@@ -410,6 +442,11 @@ bool KRDPServerConfig::isServerRunning() const
 QString KRDPServerConfig::errorMessage() const
 {
     return m_lastErrorMessage;
+}
+
+bool KRDPServerConfig::restartRequiredFromLastSave() const
+{
+    return m_restartRequiredFromLastSave;
 }
 
 void KRDPServerConfig::setErrorMessage(const QString &errorMessage)

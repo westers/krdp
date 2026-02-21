@@ -41,7 +41,7 @@ FormCard.FormCardPage {
             if (root.avoidRestartWarning) {
                 root.avoidRestartWarning = false;
             } else {
-                restartServerWarning.visible = enableServer.checked;
+                restartServerWarning.visible = enableServer.checked && kcm.restartRequiredFromLastSave;
             }
             kcm.toggleAutoconnect(settings.autostart);
         }
