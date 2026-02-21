@@ -13,6 +13,7 @@
 #include <QRegularExpression>
 #include <QScreen>
 #include <QStandardPaths>
+#include <QTimer>
 
 #include <KAboutData>
 #include <KCrash>
@@ -304,14 +305,47 @@ int main(int argc, char **argv)
         applyRuntimeConfig();
     });
 
-    QObject::connect(&application, &QGuiApplication::screenAdded, &application, [applyRuntimeConfig](QScreen *) {
+    QTimer displayRefreshDebounceTimer(&application);
+    displayRefreshDebounceTimer.setSingleShot(true);
+    displayRefreshDebounceTimer.setInterval(100);
+    QObject::connect(&displayRefreshDebounceTimer, &QTimer::timeout, &application, [applyRuntimeConfig]() {
         applyRuntimeConfig();
     });
-    QObject::connect(&application, &QGuiApplication::screenRemoved, &application, [applyRuntimeConfig](QScreen *) {
-        applyRuntimeConfig();
+
+    auto scheduleDisplayRefresh = [&displayRefreshDebounceTimer]() {
+        displayRefreshDebounceTimer.start();
+    };
+
+    auto connectScreenSignals = [&application, scheduleDisplayRefresh](QScreen *screen) {
+        if (!screen || screen->property("_krdpDisplaySignalsConnected").toBool()) {
+            return;
+        }
+        screen->setProperty("_krdpDisplaySignalsConnected", true);
+
+        QObject::connect(screen, &QScreen::geometryChanged, &application, [scheduleDisplayRefresh](const QRect &) {
+            scheduleDisplayRefresh();
+        });
+        QObject::connect(screen, &QScreen::virtualGeometryChanged, &application, [scheduleDisplayRefresh](const QRect &) {
+            scheduleDisplayRefresh();
+        });
+        QObject::connect(screen, &QScreen::availableGeometryChanged, &application, [scheduleDisplayRefresh](const QRect &) {
+            scheduleDisplayRefresh();
+        });
+    };
+
+    for (auto *screen : QGuiApplication::screens()) {
+        connectScreenSignals(screen);
+    }
+
+    QObject::connect(&application, &QGuiApplication::screenAdded, &application, [connectScreenSignals, scheduleDisplayRefresh](QScreen *screen) {
+        connectScreenSignals(screen);
+        scheduleDisplayRefresh();
     });
-    QObject::connect(&application, &QGuiApplication::primaryScreenChanged, &application, [applyRuntimeConfig](QScreen *) {
-        applyRuntimeConfig();
+    QObject::connect(&application, &QGuiApplication::screenRemoved, &application, [scheduleDisplayRefresh](QScreen *) {
+        scheduleDisplayRefresh();
+    });
+    QObject::connect(&application, &QGuiApplication::primaryScreenChanged, &application, [scheduleDisplayRefresh](QScreen *) {
+        scheduleDisplayRefresh();
     });
 
     const bool experimentalAvc444 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444") > 0;
