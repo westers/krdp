@@ -41,6 +41,7 @@ public:
     void setActiveStream(int stream);
     void setVirtualMonitor(const VirtualMonitor &vm);
     void setVideoQuality(quint8 quality);
+    virtual void refreshDisplayConfiguration();
 
     void requestStreamingEnable(QObject *requester);
     void requestStreamingDisable(QObject *requester);

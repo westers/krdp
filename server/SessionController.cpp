@@ -116,6 +116,7 @@ SessionController::~SessionController() noexcept
 void SessionController::setMonitorIndex(const std::optional<int> &index)
 {
     m_monitorIndex = index;
+    refreshDisplayConfiguration();
 }
 
 void SessionController::setVirtualMonitor(const KRdp::VirtualMonitor &virtualMonitor)
@@ -126,6 +127,32 @@ void SessionController::setVirtualMonitor(const KRdp::VirtualMonitor &virtualMon
 void SessionController::setQuality(const std::optional<int> &quality)
 {
     m_quality = quality;
+    if (!m_quality.has_value()) {
+        return;
+    }
+
+    for (const auto &wrapper : m_wrappers) {
+        if (!wrapper || !wrapper->session) {
+            continue;
+        }
+        wrapper->session->setVideoQuality(m_quality.value());
+    }
+}
+
+void SessionController::refreshDisplayConfiguration()
+{
+    if (m_virtualMonitor.has_value()) {
+        return;
+    }
+
+    for (const auto &wrapper : m_wrappers) {
+        if (!wrapper || !wrapper->session) {
+            continue;
+        }
+
+        wrapper->session->setActiveStream(m_monitorIndex.value_or(-1));
+        wrapper->session->refreshDisplayConfiguration();
+    }
 }
 
 void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)

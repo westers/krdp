@@ -34,11 +34,14 @@ public:
     ~PlasmaScreencastV1Session() override;
 
     void start() override;
+    void refreshDisplayConfiguration() override;
 
     void sendEvent(const std::shared_ptr<QEvent> &event) override;
     void setClipboardData(std::unique_ptr<QMimeData> data) override;
 
 private:
+    bool setupScreencastRequest();
+    void onScreencastCreated(uint nodeId);
     void processPendingPackets();
     void onPacketReceived(const PipeWireEncodedStream::Packet &data);
 

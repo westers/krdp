@@ -88,6 +88,10 @@ void AbstractSession::setVideoQuality(quint8 quality)
     }
 }
 
+void AbstractSession::refreshDisplayConfiguration()
+{
+}
+
 bool AbstractSession::streamingEnabled() const
 {
     if (d->encodedStream) {

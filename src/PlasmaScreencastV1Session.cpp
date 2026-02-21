@@ -6,6 +6,7 @@
 
 #include <QGuiApplication>
 #include <QMouseEvent>
+#include <QPointer>
 #include <QQueue>
 #include <QRect>
 #include <QRegion>
@@ -307,17 +308,29 @@ private:
 class KRDP_NO_EXPORT PlasmaScreencastV1Session::Private
 {
 public:
+    enum class StreamTarget {
+        None,
+        Output,
+        Workspace,
+        Virtual,
+    };
+
     Server *server = nullptr;
 
     Screencasting m_screencasting;
     ScreencastingStream *request = nullptr;
     FakeInput *remoteInterface = nullptr;
+    StreamTarget streamTarget = StreamTarget::None;
+    QPointer<QScreen> outputScreen = nullptr;
     QRect logicalRect;
     QVector<VideoMonitor> monitorLayout;
     QQueue<EncodedPacketMetadata> pendingFrameMetadata;
     QQueue<PendingEncodedPacket> pendingPackets;
     bool metadataSignalAvailable = false;
     bool metadataSeen = false;
+    bool streamConfigured = false;
+    bool streamSignalsConnected = false;
+    bool startedSignalEmitted = false;
     std::chrono::steady_clock::time_point lastMetadataMissLog;
 };
 
@@ -335,55 +348,154 @@ PlasmaScreencastV1Session::~PlasmaScreencastV1Session()
 
 void PlasmaScreencastV1Session::start()
 {
-    if (auto vm = virtualMonitor()) {
-        d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata);
-        d->logicalRect = QRect(QPoint(0, 0), vm->size);
-        d->monitorLayout = {
-            VideoMonitor{
-                .geometry = d->logicalRect,
-                .primary = true,
-            },
-        };
-        qCDebug(KRDP) << "Using virtual monitor stream" << vm->name << "logical rect" << d->logicalRect;
+    if (!setupScreencastRequest()) {
+        Q_EMIT error();
+    }
+}
+
+void PlasmaScreencastV1Session::refreshDisplayConfiguration()
+{
+    if (virtualMonitor()) {
+        return;
+    }
+
+    if (!setupScreencastRequest()) {
+        qCWarning(KRDP) << "Unable to refresh display configuration after topology change";
+        Q_EMIT error();
+    }
+}
+
+bool PlasmaScreencastV1Session::setupScreencastRequest()
+{
+    Private::StreamTarget target = Private::StreamTarget::Workspace;
+    QPointer<QScreen> outputScreen = nullptr;
+    if (virtualMonitor()) {
+        target = Private::StreamTarget::Virtual;
     } else {
         const auto screens = qGuiApp->screens();
         const auto streamIndex = activeStream();
         if (streamIndex >= 0 && streamIndex < screens.size()) {
-            d->request = d->m_screencasting.createOutputStream(screens.at(streamIndex), Screencasting::Metadata);
-            d->logicalRect = logicalRectForStream(streamIndex);
-            d->monitorLayout = monitorLayoutForStream(streamIndex, d->logicalRect);
-            qCDebug(KRDP) << "Using output stream index" << streamIndex << "screen" << screens.at(streamIndex)->name() << "logical rect" << d->logicalRect;
-        } else {
-            d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
-            d->logicalRect = logicalRectForStream(-1);
-            d->monitorLayout = monitorLayoutForStream(-1, d->logicalRect);
-            qCDebug(KRDP) << "Using workspace stream logical rect" << d->logicalRect;
+            target = Private::StreamTarget::Output;
+            outputScreen = screens.at(streamIndex);
         }
     }
 
-    if (!d->request) {
-        Q_EMIT error();
-        return;
+    QRect targetLogicalRect;
+    QVector<VideoMonitor> targetMonitorLayout;
+    if (target == Private::StreamTarget::Virtual) {
+        auto vm = virtualMonitor();
+        targetLogicalRect = QRect(QPoint(0, 0), vm->size);
+        targetMonitorLayout = {
+            VideoMonitor{
+                .geometry = targetLogicalRect,
+                .primary = true,
+            },
+        };
+    } else if (target == Private::StreamTarget::Output) {
+        targetLogicalRect = logicalRectForStream(activeStream());
+        targetMonitorLayout = monitorLayoutForStream(activeStream(), targetLogicalRect);
+    } else {
+        targetLogicalRect = logicalRectForStream(-1);
+        targetMonitorLayout = monitorLayoutForStream(-1, targetLogicalRect);
     }
-    connect(d->request, &ScreencastingStream::failed, this, &PlasmaScreencastV1Session::error);
-    connect(d->request, &ScreencastingStream::created, this, [this](uint nodeId) {
-        qCDebug(KRDP) << "Started Plasma session";
-        if (!d->logicalRect.isEmpty()) {
-            setLogicalSize(d->logicalRect.size());
+
+    const bool targetChanged = (d->streamTarget != target);
+    const bool outputChanged = (target == Private::StreamTarget::Output) && (d->outputScreen != outputScreen);
+    const bool logicalRectChanged = (d->logicalRect != targetLogicalRect);
+    const bool requiresRecreate = !d->request || targetChanged || outputChanged || logicalRectChanged;
+    d->logicalRect = targetLogicalRect;
+    d->monitorLayout = targetMonitorLayout;
+    if (!d->logicalRect.isEmpty()) {
+        setLogicalSize(d->logicalRect.size());
+    }
+    d->streamTarget = target;
+    d->outputScreen = outputScreen;
+
+    if (!requiresRecreate) {
+        return true;
+    }
+
+    if (d->request) {
+        disconnect(d->request, nullptr, this, nullptr);
+        d->request->deleteLater();
+        d->request = nullptr;
+    }
+
+    if (target == Private::StreamTarget::Virtual) {
+        auto vm = virtualMonitor();
+        d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata);
+        qCDebug(KRDP) << "Using virtual monitor stream" << vm->name << "logical rect" << d->logicalRect;
+    } else if (target == Private::StreamTarget::Output) {
+        d->request = d->m_screencasting.createOutputStream(outputScreen, Screencasting::Metadata);
+        if (!d->request) {
+            qCWarning(KRDP) << "Failed to create output stream for screen"
+                            << (outputScreen ? outputScreen->name() : QStringLiteral("<unknown>"))
+                            << ", falling back to workspace stream";
+            target = Private::StreamTarget::Workspace;
+            d->streamTarget = target;
+            d->outputScreen = nullptr;
+            d->logicalRect = logicalRectForStream(-1);
+            d->monitorLayout = monitorLayoutForStream(-1, d->logicalRect);
+            if (!d->logicalRect.isEmpty()) {
+                setLogicalSize(d->logicalRect.size());
+            }
         } else {
-            setLogicalSize(d->request->size());
+            qCDebug(KRDP) << "Using output stream index" << activeStream() << "screen" << outputScreen->name() << "logical rect" << d->logicalRect;
         }
-        qCDebug(KRDP) << "Plasma stream sizes: request" << d->request->size() << "logical" << logicalSize();
-        auto encodedStream = stream();
-        d->pendingFrameMetadata.clear();
-        d->pendingPackets.clear();
-        d->metadataSeen = false;
-        d->lastMetadataMissLog = {};
-        encodedStream->setNodeId(nodeId);
-        encodedStream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed);
-        setFullColorRangeIfSupported(encodedStream);
-        setPreferredH264Encoder(encodedStream);
-        enableDamageMetadataIfSupported(encodedStream);
+    }
+
+    if (!d->request && target == Private::StreamTarget::Workspace) {
+        d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
+        qCDebug(KRDP) << "Using workspace stream logical rect" << d->logicalRect;
+    }
+
+    if (!d->request) {
+        return false;
+    }
+
+    connect(d->request, &ScreencastingStream::failed, this, &PlasmaScreencastV1Session::error);
+    connect(d->request, &ScreencastingStream::closed, this, [this]() {
+        qCWarning(KRDP) << "Screencast stream closed, attempting to recover display stream";
+        d->request = nullptr;
+        if (!setupScreencastRequest()) {
+            Q_EMIT error();
+        }
+    });
+    connect(d->request, &ScreencastingStream::created, this, &PlasmaScreencastV1Session::onScreencastCreated);
+
+    return true;
+}
+
+void PlasmaScreencastV1Session::onScreencastCreated(uint nodeId)
+{
+    if (!d->logicalRect.isEmpty()) {
+        setLogicalSize(d->logicalRect.size());
+    } else if (d->request) {
+        setLogicalSize(d->request->size());
+    }
+    if (d->request && !d->request->size().isEmpty()) {
+        setSize(d->request->size());
+    }
+    qCDebug(KRDP) << "Plasma stream sizes: request" << (d->request ? d->request->size() : QSize()) << "logical" << logicalSize();
+
+    auto encodedStream = stream();
+    const bool restartActiveStream = d->streamConfigured && encodedStream->isActive();
+    if (restartActiveStream) {
+        encodedStream->stop();
+    }
+
+    d->pendingFrameMetadata.clear();
+    d->pendingPackets.clear();
+    d->metadataSeen = false;
+    d->lastMetadataMissLog = {};
+
+    encodedStream->setNodeId(nodeId);
+    encodedStream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed);
+    setFullColorRangeIfSupported(encodedStream);
+    setPreferredH264Encoder(encodedStream);
+    enableDamageMetadataIfSupported(encodedStream);
+
+    if (!d->streamSignalsConnected) {
         connect(encodedStream, &PipeWireEncodedStream::newPacket, this, &PlasmaScreencastV1Session::onPacketReceived);
         connect(encodedStream, &PipeWireEncodedStream::sizeChanged, this, &PlasmaScreencastV1Session::setSize);
         connect(encodedStream, &PipeWireEncodedStream::cursorChanged, this, &PlasmaScreencastV1Session::cursorUpdate);
@@ -406,8 +518,21 @@ void PlasmaScreencastV1Session::start()
             d->metadataSeen = true;
             processPendingPackets();
         });
+        d->streamSignalsConnected = true;
+    }
+
+    d->streamConfigured = true;
+    if (restartActiveStream) {
+        encodedStream->start();
+    }
+
+    if (!d->startedSignalEmitted) {
+        qCDebug(KRDP) << "Started Plasma session";
+        d->startedSignalEmitted = true;
         setStarted(true);
-    });
+    } else {
+        qCDebug(KRDP) << "Reconfigured Plasma screencast stream after display topology change";
+    }
 }
 
 void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)

@@ -8,12 +8,16 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDebug>
+#include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QRegularExpression>
 #include <QScreen>
+#include <QStandardPaths>
 
 #include <KAboutData>
 #include <KCrash>
 #include <KSharedConfig>
+#include <KConfigWatcher>
 
 #include <qt6keychain/keychain.h>
 
@@ -228,6 +232,8 @@ int main(int argc, char **argv)
 
     SessionController controller(&server, parser.isSet(u"plasma"_s) ? SessionController::SessionType::Plasma : SessionController::SessionType::Portal);
     QString streamTarget = u"workspace-default"_s;
+    const bool monitorPinnedByCli = parser.isSet(u"monitor"_s) || parser.isSet(u"virtual-monitor"_s);
+    const bool qualityPinnedByCli = parser.isSet(u"quality"_s);
     if (parser.isSet(u"virtual-monitor"_s)) {
         const QString vmData = parser.value(u"virtual-monitor"_s);
         const QRegularExpression rx(uR"((\d+)x(\d+)@([\d.]+))"_s);
@@ -253,6 +259,60 @@ int main(int argc, char **argv)
     }
     const auto quality = parserValueWithDefault(u"quality", config->quality());
     controller.setQuality(quality);
+
+    auto runtimeConfig = KSharedConfig::openConfig(QStringLiteral("krdpserverrc"));
+    auto applyRuntimeConfig = [config, &controller, monitorPinnedByCli, qualityPinnedByCli]() {
+        config->read();
+
+        if (!qualityPinnedByCli) {
+            const auto updatedQuality = config->quality();
+            controller.setQuality(updatedQuality);
+            qInfo() << "Applied runtime quality update from config:" << updatedQuality;
+        }
+
+        if (!monitorPinnedByCli) {
+            const auto updatedMonitorIndex = configuredMonitorIndex(config);
+            controller.setMonitorIndex(updatedMonitorIndex);
+            qInfo() << "Applied runtime monitor target update from config:"
+                    << (updatedMonitorIndex.has_value() ? QStringLiteral("monitor:%1").arg(updatedMonitorIndex.value()) : QStringLiteral("workspace"));
+        }
+
+        applyVaapiDriverMode(config->vaapiDriverMode());
+
+        if (monitorPinnedByCli) {
+            controller.refreshDisplayConfiguration();
+        }
+    };
+
+    auto configWatcher = KConfigWatcher::create(runtimeConfig);
+    QObject::connect(configWatcher.get(), &KConfigWatcher::configChanged, &application, [applyRuntimeConfig](const KConfigGroup &group, const QByteArrayList &) {
+        if (group.name() != QLatin1StringView("General")) {
+            return;
+        }
+        applyRuntimeConfig();
+    });
+
+    auto configFileWatcher = std::make_unique<QFileSystemWatcher>(&application);
+    const QString runtimeConfigPath = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + QStringLiteral("/krdpserverrc");
+    if (!runtimeConfigPath.isEmpty()) {
+        configFileWatcher->addPath(runtimeConfigPath);
+    }
+    QObject::connect(configFileWatcher.get(), &QFileSystemWatcher::fileChanged, &application, [applyRuntimeConfig, configFileWatcher = configFileWatcher.get()](const QString &path) {
+        if (QFileInfo::exists(path) && !configFileWatcher->files().contains(path)) {
+            configFileWatcher->addPath(path);
+        }
+        applyRuntimeConfig();
+    });
+
+    QObject::connect(&application, &QGuiApplication::screenAdded, &application, [applyRuntimeConfig](QScreen *) {
+        applyRuntimeConfig();
+    });
+    QObject::connect(&application, &QGuiApplication::screenRemoved, &application, [applyRuntimeConfig](QScreen *) {
+        applyRuntimeConfig();
+    });
+    QObject::connect(&application, &QGuiApplication::primaryScreenChanged, &application, [applyRuntimeConfig](QScreen *) {
+        applyRuntimeConfig();
+    });
 
     const bool experimentalAvc444 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444") > 0;
     const bool experimentalAvc444v2 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444V2") > 0;
