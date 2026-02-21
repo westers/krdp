@@ -101,9 +101,9 @@ protected:
 
 private:
     void schedulePacketStallWatchdog();
-    void scheduleHardwareEncoderRetry();
+    void scheduleHardwareEncoderRetry(bool forceReschedule = false);
     void restoreForcedEncoderOverride();
-    bool requestSoftwareFallback(const QString &reason, const QString &context);
+    bool requestSoftwareFallback(const QString &reason, const QString &context, int hardwareRetryDelayMs = -1);
     void handleStreamError(const QString &errorMessage);
     void handleStreamStateChanged();
     void handleStreamActiveChanged(bool active);

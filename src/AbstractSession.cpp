@@ -38,6 +38,7 @@ public:
     bool hardwareRetryPending = false;
     bool hardwareRetryInProgress = false;
     bool hardwareRetryScheduled = false;
+    int hardwareRetryDelayMs = HardwareRetryDelayMs;
     int hardwareRetryAttempts = 0;
     quint64 hardwareRetryScheduleGeneration = 0;
     bool receivedPacketSinceActivation = false;
@@ -78,7 +79,8 @@ void AbstractSession::preferSoftwareEncoderForDisplayChange(const QString &reaso
         return;
     }
 
-    requestSoftwareFallback(reason, QStringLiteral("Display reconfiguration in progress; temporarily forcing software encoder:"));
+    constexpr int DisplayChangeHardwareRetryDelayMs = 20000;
+    requestSoftwareFallback(reason, QStringLiteral("Display reconfiguration in progress; temporarily forcing software encoder:"), DisplayChangeHardwareRetryDelayMs);
 }
 
 int AbstractSession::activeStream() const
@@ -142,6 +144,7 @@ void AbstractSession::setStreamingEnabled(bool enable)
             d->hardwareRetryPending = false;
             d->hardwareRetryInProgress = false;
             d->hardwareRetryScheduled = false;
+            d->hardwareRetryDelayMs = Private::HardwareRetryDelayMs;
             d->hardwareRetryAttempts = 0;
             ++d->hardwareRetryScheduleGeneration;
             d->encodedStream->stop();
@@ -195,13 +198,19 @@ PipeWireEncodedStream *AbstractSession::stream()
     return d->encodedStream.get();
 }
 
-bool AbstractSession::requestSoftwareFallback(const QString &reason, const QString &context)
+bool AbstractSession::requestSoftwareFallback(const QString &reason, const QString &context, int hardwareRetryDelayMs)
 {
+    if (hardwareRetryDelayMs > 0) {
+        d->hardwareRetryDelayMs = hardwareRetryDelayMs;
+    } else if (d->hardwareRetryDelayMs <= 0) {
+        d->hardwareRetryDelayMs = Private::HardwareRetryDelayMs;
+    }
+
     const auto forcedEncoder = qgetenv("KPIPEWIRE_FORCE_ENCODER").trimmed().toLower();
     const bool alreadyForcedSoftware = (forcedEncoder == "libx264");
     if (d->softwareFallbackActive) {
         qCWarning(KRDP) << context << reason << "(software fallback already active)";
-        scheduleHardwareEncoderRetry();
+        scheduleHardwareEncoderRetry(true);
         return true;
     }
 
@@ -323,6 +332,7 @@ void AbstractSession::handleStreamActiveChanged(bool active)
     if (d->hardwareRetryInProgress) {
         d->hardwareRetryInProgress = false;
         d->softwareFallbackActive = false;
+        d->hardwareRetryDelayMs = Private::HardwareRetryDelayMs;
         d->hardwareRetryAttempts = 0;
         qCInfo(KRDP) << "Hardware encoder recovered; leaving software fallback";
         return;
@@ -371,11 +381,21 @@ void AbstractSession::schedulePacketStallWatchdog()
     });
 }
 
-void AbstractSession::scheduleHardwareEncoderRetry()
+void AbstractSession::scheduleHardwareEncoderRetry(bool forceReschedule)
 {
-    if (!d->softwareFallbackActive || d->hardwareRetryScheduled || d->hardwareRetryInProgress || !d->enabled || !d->encodedStream) {
+    if (!d->softwareFallbackActive || d->hardwareRetryInProgress || !d->enabled || !d->encodedStream) {
         return;
     }
+
+    if (forceReschedule && d->hardwareRetryScheduled) {
+        d->hardwareRetryScheduled = false;
+        ++d->hardwareRetryScheduleGeneration;
+    }
+
+    if (d->hardwareRetryScheduled) {
+        return;
+    }
+
     if (d->hardwareRetryAttempts >= Private::MaxHardwareRetryAttempts) {
         return;
     }
@@ -383,10 +403,10 @@ void AbstractSession::scheduleHardwareEncoderRetry()
     d->hardwareRetryScheduled = true;
     const auto retryAttempt = d->hardwareRetryAttempts + 1;
     const auto generation = ++d->hardwareRetryScheduleGeneration;
-    qCInfo(KRDP) << "Scheduling hardware encoder retry in" << Private::HardwareRetryDelayMs << "ms (attempt" << retryAttempt << "of"
+    qCInfo(KRDP) << "Scheduling hardware encoder retry in" << d->hardwareRetryDelayMs << "ms (attempt" << retryAttempt << "of"
                  << Private::MaxHardwareRetryAttempts << ')';
 
-    QTimer::singleShot(Private::HardwareRetryDelayMs, this, [this, generation]() {
+    QTimer::singleShot(d->hardwareRetryDelayMs, this, [this, generation]() {
         if (!d->encodedStream || !d->enabled) {
             return;
         }
