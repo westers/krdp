@@ -492,9 +492,11 @@ void PlasmaScreencastV1Session::onScreencastCreated(uint nodeId)
 
     encodedStream->setNodeId(nodeId);
     encodedStream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed);
-    setFullColorRangeIfSupported(encodedStream);
-    setPreferredH264Encoder(encodedStream);
-    enableDamageMetadataIfSupported(encodedStream);
+    if (!d->streamConfigured) {
+        setFullColorRangeIfSupported(encodedStream);
+        setPreferredH264Encoder(encodedStream);
+        enableDamageMetadataIfSupported(encodedStream);
+    }
 
     if (!d->streamSignalsConnected) {
         connect(encodedStream, &PipeWireEncodedStream::newPacket, this, &PlasmaScreencastV1Session::onPacketReceived);

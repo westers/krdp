@@ -17,6 +17,7 @@ class KRDP_NO_EXPORT AbstractSession::Private
 {
 public:
     static constexpr int FirstPacketTimeoutMs = 1500;
+    static constexpr int PacketStallTimeoutMs = 3000;
 
     std::unique_ptr<PipeWireEncodedStream> encodedStream;
 
@@ -34,6 +35,7 @@ public:
     bool softwareFallbackRetryInProgress = false;
     bool receivedPacketSinceActivation = false;
     quint64 streamActivationGeneration = 0;
+    quint64 packetSequence = 0;
     bool temporarySoftwareEncoderOverride = false;
     bool hadPreviousForcedEncoder = false;
     QByteArray previousForcedEncoder;
@@ -249,6 +251,7 @@ void AbstractSession::handleStreamActiveChanged(bool active)
 
     d->receivedPacketSinceActivation = false;
     const auto generation = ++d->streamActivationGeneration;
+    schedulePacketStallWatchdog();
     QTimer::singleShot(Private::FirstPacketTimeoutMs, this, [this, generation]() {
         if (!d->encodedStream || !d->enabled) {
             return;
@@ -280,6 +283,39 @@ void AbstractSession::handleStreamActiveChanged(bool active)
 void AbstractSession::handleEncodedPacket()
 {
     d->receivedPacketSinceActivation = true;
+    ++d->packetSequence;
+    schedulePacketStallWatchdog();
+}
+
+void AbstractSession::schedulePacketStallWatchdog()
+{
+    if (!d->encodedStream || !d->enabled || !d->encodedStream->isActive()) {
+        return;
+    }
+
+    const auto activationGeneration = d->streamActivationGeneration;
+    const auto packetSequence = d->packetSequence;
+    QTimer::singleShot(Private::PacketStallTimeoutMs, this, [this, activationGeneration, packetSequence]() {
+        if (!d->encodedStream || !d->enabled) {
+            return;
+        }
+        if (activationGeneration != d->streamActivationGeneration) {
+            return;
+        }
+        if (!d->encodedStream->isActive()) {
+            return;
+        }
+        if (packetSequence != d->packetSequence) {
+            return;
+        }
+
+        if (!requestSoftwareFallback(QStringLiteral("No encoded packets received for %1 ms").arg(Private::PacketStallTimeoutMs),
+                                     QStringLiteral("PipeWire stream stalled during active session; forcing software fallback to libx264:"))) {
+            qCWarning(KRDP) << "PipeWire stream stalled during active session and no additional fallback is available";
+            restoreForcedEncoderOverride();
+            Q_EMIT error();
+        }
+    });
 }
 
 void AbstractSession::setStarted(bool s)
