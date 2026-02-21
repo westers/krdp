@@ -89,6 +89,7 @@ Q_SIGNALS:
 protected:
     QSize size() const;
     QSize logicalSize() const;
+    bool streamingRequested() const;
     std::optional<VirtualMonitor> virtualMonitor() const;
     int activeStream() const;
 

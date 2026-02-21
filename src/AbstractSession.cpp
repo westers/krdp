@@ -58,6 +58,11 @@ QSize AbstractSession::logicalSize() const
     return d->logicalSize;
 }
 
+bool AbstractSession::streamingRequested() const
+{
+    return d->enabled;
+}
+
 int AbstractSession::activeStream() const
 {
     return d->activeStream.value_or(-1);

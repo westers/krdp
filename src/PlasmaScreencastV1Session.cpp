@@ -479,8 +479,9 @@ void PlasmaScreencastV1Session::onScreencastCreated(uint nodeId)
     qCDebug(KRDP) << "Plasma stream sizes: request" << (d->request ? d->request->size() : QSize()) << "logical" << logicalSize();
 
     auto encodedStream = stream();
-    const bool restartActiveStream = d->streamConfigured && encodedStream->isActive();
-    if (restartActiveStream) {
+    const bool streamWasActive = encodedStream->isActive();
+    const bool shouldResumeStreaming = d->streamConfigured && (streamWasActive || streamingRequested());
+    if (streamWasActive) {
         encodedStream->stop();
     }
 
@@ -522,7 +523,8 @@ void PlasmaScreencastV1Session::onScreencastCreated(uint nodeId)
     }
 
     d->streamConfigured = true;
-    if (restartActiveStream) {
+    if (shouldResumeStreaming) {
+        qCDebug(KRDP) << "Restarting encoded stream after display reconfiguration";
         encodedStream->start();
     }
 
