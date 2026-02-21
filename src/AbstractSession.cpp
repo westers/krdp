@@ -6,6 +6,7 @@
 #include <PipeWireEncodedStream>
 #include <PipeWireSourceStream>
 #include <QSet>
+#include <QTimer>
 
 #include "krdp_logging.h"
 
@@ -15,6 +16,8 @@ namespace KRdp
 class KRDP_NO_EXPORT AbstractSession::Private
 {
 public:
+    static constexpr int FirstPacketTimeoutMs = 1500;
+
     std::unique_ptr<PipeWireEncodedStream> encodedStream;
 
     std::optional<int> activeStream;
@@ -29,6 +32,8 @@ public:
     bool softwareFallbackAttempted = false;
     bool softwareFallbackRetryPending = false;
     bool softwareFallbackRetryInProgress = false;
+    bool receivedPacketSinceActivation = false;
+    quint64 streamActivationGeneration = 0;
 };
 
 AbstractSession::AbstractSession()
@@ -137,6 +142,9 @@ PipeWireEncodedStream *AbstractSession::stream()
         connect(d->encodedStream.get(), &PipeWireBaseEncodedStream::errorFound, this, &AbstractSession::handleStreamError);
         connect(d->encodedStream.get(), &PipeWireBaseEncodedStream::stateChanged, this, &AbstractSession::handleStreamStateChanged);
         connect(d->encodedStream.get(), &PipeWireBaseEncodedStream::activeChanged, this, &AbstractSession::handleStreamActiveChanged);
+        connect(d->encodedStream.get(), &PipeWireEncodedStream::newPacket, this, [this](const PipeWireEncodedStream::Packet &) {
+            handleEncodedPacket();
+        });
         if (d->frameRate) {
             d->encodedStream->setMaxFramerate({d->frameRate.value(), 1});
         }
@@ -147,27 +155,34 @@ PipeWireEncodedStream *AbstractSession::stream()
     return d->encodedStream.get();
 }
 
-void AbstractSession::handleStreamError(const QString &errorMessage)
+bool AbstractSession::requestSoftwareFallback(const QString &reason, const QString &context)
 {
     const auto forcedEncoder = qgetenv("KPIPEWIRE_FORCE_ENCODER").trimmed().toLower();
     const bool alreadyForcedSoftware = (forcedEncoder == "libx264");
     if (d->softwareFallbackAttempted || alreadyForcedSoftware) {
-        qCWarning(KRDP) << "PipeWire encoder failed and no additional fallback is available:" << errorMessage;
-        Q_EMIT error();
-        return;
+        qCWarning(KRDP) << context << reason;
+        return false;
     }
 
     d->softwareFallbackAttempted = true;
     d->softwareFallbackRetryPending = true;
     qputenv("KPIPEWIRE_FORCE_ENCODER", "libx264");
-    qCWarning(KRDP) << "PipeWire encoder initialization failed; forcing software fallback to libx264:" << errorMessage;
+    qCWarning(KRDP) << context << reason;
 
-    if (d->encodedStream->state() == PipeWireBaseEncodedStream::Idle) {
+    if (d->encodedStream && d->encodedStream->state() == PipeWireBaseEncodedStream::Idle) {
         handleStreamStateChanged();
-        return;
+    } else if (d->encodedStream) {
+        d->encodedStream->stop();
     }
+    return true;
+}
 
-    d->encodedStream->stop();
+void AbstractSession::handleStreamError(const QString &errorMessage)
+{
+    if (!requestSoftwareFallback(errorMessage, QStringLiteral("PipeWire encoder initialization failed; forcing software fallback to libx264:"))) {
+        qCWarning(KRDP) << "PipeWire encoder failed and no additional fallback is available:" << errorMessage;
+        Q_EMIT error();
+    }
 }
 
 void AbstractSession::handleStreamStateChanged()
@@ -190,12 +205,42 @@ void AbstractSession::handleStreamStateChanged()
 
 void AbstractSession::handleStreamActiveChanged(bool active)
 {
-    if (!active || !d->softwareFallbackRetryInProgress) {
+    if (!active) {
+        d->receivedPacketSinceActivation = false;
+        return;
+    }
+
+    d->receivedPacketSinceActivation = false;
+    const auto generation = ++d->streamActivationGeneration;
+    QTimer::singleShot(Private::FirstPacketTimeoutMs, this, [this, generation]() {
+        if (!d->encodedStream || !d->enabled) {
+            return;
+        }
+        if (generation != d->streamActivationGeneration) {
+            return;
+        }
+        if (!d->encodedStream->isActive() || d->receivedPacketSinceActivation) {
+            return;
+        }
+
+        if (!requestSoftwareFallback(QStringLiteral("No encoded packets received from PipeWire within %1 ms").arg(Private::FirstPacketTimeoutMs),
+                                     QStringLiteral("PipeWire stream stalled before first packet; forcing software fallback to libx264:"))) {
+            qCWarning(KRDP) << "PipeWire stream stalled and no additional fallback is available";
+            Q_EMIT error();
+        }
+    });
+
+    if (!d->softwareFallbackRetryInProgress) {
         return;
     }
 
     d->softwareFallbackRetryInProgress = false;
     qCInfo(KRDP) << "Software encoder fallback active for this session";
+}
+
+void AbstractSession::handleEncodedPacket()
+{
+    d->receivedPacketSinceActivation = true;
 }
 
 void AbstractSession::setStarted(bool s)

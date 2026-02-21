@@ -97,9 +97,11 @@ protected:
     PipeWireEncodedStream *stream();
 
 private:
+    bool requestSoftwareFallback(const QString &reason, const QString &context);
     void handleStreamError(const QString &errorMessage);
     void handleStreamStateChanged();
     void handleStreamActiveChanged(bool active);
+    void handleEncodedPacket();
 
     class Private;
     const std::unique_ptr<Private> d;

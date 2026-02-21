@@ -225,6 +225,10 @@ VAAPI-based. NVIDIA acceleration typically uses NVENC instead, so KRDP falls
 back to software (`libx264`) unless a non-NVIDIA VAAPI encode path is present.
 This is an API-path limitation, not raw GPU compute performance.
 
+KRDP also retries once with forced `libx264` if PipeWire encode startup fails
+or if the stream becomes active but does not deliver encoded packets shortly
+after activation.
+
 Manual environment override examples:
 
 ```bash
