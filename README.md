@@ -241,11 +241,16 @@ VAAPI-based. NVIDIA acceleration typically uses NVENC instead, so KRDP falls
 back to software (`libx264`) unless a non-NVIDIA VAAPI encode path is present.
 This is an API-path limitation, not raw GPU compute performance.
 
-KRDP also retries once with forced `libx264` if PipeWire encode startup fails
-or if the stream becomes active but does not deliver encoded packets shortly
-after activation. This override is temporary for that retry path and then
-restored, so panel-selected VAAPI mode continues to apply for subsequent
-sessions.
+KRDP can optionally retry once with forced `libx264` if the PipeWire stream
+becomes active but does not deliver encoded packets within the timeout window.
+This stall watchdog is **disabled by default** and must be opted into:
+
+```bash
+systemctl --user set-environment KRDP_ENABLE_STALL_WATCHDOG=1
+```
+
+When enabled, the override is temporary for that retry path and then restored,
+so panel-selected VAAPI mode continues to apply for subsequent sessions.
 
 Manual environment override examples:
 

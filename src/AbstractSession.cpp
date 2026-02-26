@@ -12,6 +12,14 @@
 
 namespace KRdp
 {
+namespace
+{
+bool stallWatchdogFallbackEnabled()
+{
+    static const bool enabled = qEnvironmentVariableIntValue("KRDP_ENABLE_STALL_WATCHDOG") == 1;
+    return enabled;
+}
+}
 
 class KRDP_NO_EXPORT AbstractSession::Private
 {
@@ -311,25 +319,27 @@ void AbstractSession::handleStreamActiveChanged(bool active)
 
     d->receivedPacketSinceActivation = false;
     const auto generation = ++d->streamActivationGeneration;
-    schedulePacketStallWatchdog();
-    QTimer::singleShot(Private::FirstPacketTimeoutMs, this, [this, generation]() {
-        if (!d->encodedStream || !d->enabled) {
-            return;
-        }
-        if (generation != d->streamActivationGeneration) {
-            return;
-        }
-        if (!d->encodedStream->isActive() || d->receivedPacketSinceActivation) {
-            return;
-        }
+    if (stallWatchdogFallbackEnabled()) {
+        schedulePacketStallWatchdog();
+        QTimer::singleShot(Private::FirstPacketTimeoutMs, this, [this, generation]() {
+            if (!d->encodedStream || !d->enabled) {
+                return;
+            }
+            if (generation != d->streamActivationGeneration) {
+                return;
+            }
+            if (!d->encodedStream->isActive() || d->receivedPacketSinceActivation) {
+                return;
+            }
 
-        if (!requestSoftwareFallback(QStringLiteral("No encoded packets received from PipeWire within %1 ms").arg(Private::FirstPacketTimeoutMs),
-                                     QStringLiteral("PipeWire stream stalled before first packet; forcing software fallback to libx264:"))) {
-            qCWarning(KRDP) << "PipeWire stream stalled and no additional fallback is available";
-            restoreForcedEncoderOverride();
-            Q_EMIT error();
-        }
-    });
+            if (!requestSoftwareFallback(QStringLiteral("No encoded packets received from PipeWire within %1 ms").arg(Private::FirstPacketTimeoutMs),
+                                         QStringLiteral("PipeWire stream stalled before first packet; forcing software fallback to libx264:"))) {
+                qCWarning(KRDP) << "PipeWire stream stalled and no additional fallback is available";
+                restoreForcedEncoderOverride();
+                Q_EMIT error();
+            }
+        });
+    }
 
     if (d->softwareFallbackRetryInProgress) {
         d->softwareFallbackRetryInProgress = false;
@@ -364,11 +374,16 @@ void AbstractSession::handleEncodedPacket()
 {
     d->receivedPacketSinceActivation = true;
     ++d->packetSequence;
-    schedulePacketStallWatchdog();
+    if (stallWatchdogFallbackEnabled()) {
+        schedulePacketStallWatchdog();
+    }
 }
 
 void AbstractSession::schedulePacketStallWatchdog()
 {
+    if (!stallWatchdogFallbackEnabled()) {
+        return;
+    }
     if (!d->encodedStream || !d->enabled || !d->encodedStream->isActive()) {
         return;
     }
