@@ -19,10 +19,26 @@ Features:
 - Certificates can be auto-generated (this is done by default), or the user can supply their own certificates.
 - Video quality can be changed between responsiveness and quality.
     - Do note that in software encoding mode, the quality slider might not necessarily do anything. This seems to be an encoder issue.
+- Display target can be set to stream the full workspace, primary monitor only, or a specific monitor by ID.
+    - A read-only monitor ID map shows which ID corresponds to which screen.
+- VAAPI hardware encoder driver can be configured (automatic, disabled, AMD radeonsi, or Intel iHD).
 - The KCM will do some basic sanity-checking and warn the user about the following issues:
     - Password manager inaccessible (for KRDP user passwords)
     - No supported H264 encoder
     - Failures with generating certificates
+
+Not all setting changes require a server restart. Settings that take effect
+immediately without disconnecting active sessions:
+- Video quality
+- Display target, monitor ID
+- VAAPI driver mode
+- Autostart on login
+
+Settings that require a server restart (the KCM will show a warning banner):
+- Listening port
+- User credentials (add/modify/remove)
+- System user authentication toggle
+- Certificate configuration (auto-generate toggle, certificate paths)
 
 # Running the example server
 
