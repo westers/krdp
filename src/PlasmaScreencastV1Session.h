@@ -45,6 +45,8 @@ private:
     bool setupScreencastRequest(bool allowWorkspaceFallback = true);
     void onScreencastCreated(uint nodeId);
     void processPendingPackets();
+    void restartEncodedStream(uint nodeId);
+    void attachEncodedStream(uint nodeId, bool streamWasActive);
     void onPacketReceived(const PipeWireEncodedStream::Packet &data);
 
     class Private;

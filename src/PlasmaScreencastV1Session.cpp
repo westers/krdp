@@ -100,6 +100,11 @@ constexpr int WorkspaceFallbackAttempts = 4;
 constexpr int MaxPendingFrameMetadata = 128;
 constexpr int MaxPendingPacketsWithoutMetadata = 8;
 constexpr auto MetadataPairWaitBudget = std::chrono::milliseconds(12);
+// KPipeWire tears its produce thread down asynchronously after stop(): start()
+// is a no-op until that thread is gone, and the node ID is cleared once it is.
+// Poll for that before attaching a replacement node.
+constexpr int StreamRestartPollMs = 10;
+constexpr auto StreamRestartTimeout = std::chrono::milliseconds(5000);
 
 QRegion fullFrameDamage(const QSize &size)
 {
@@ -343,6 +348,9 @@ public:
     std::chrono::steady_clock::time_point lastMetadataMissLog;
     QTimer recoveryTimer;
     int recoveryAttempt = 0;
+    QTimer streamRestartTimer;
+    uint pendingNodeId = 0;
+    std::chrono::steady_clock::time_point streamRestartWaitStarted;
 };
 
 PlasmaScreencastV1Session::PlasmaScreencastV1Session()
@@ -364,6 +372,19 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
     connect(qGuiApp, &QGuiApplication::screenAdded, this, settleRecovery);
     connect(qGuiApp, &QGuiApplication::screenRemoved, this, settleRecovery);
 
+    d->streamRestartTimer.setInterval(StreamRestartPollMs);
+    connect(&d->streamRestartTimer, &QTimer::timeout, this, [this]() {
+        auto encodedStream = stream();
+        const bool tornDown = encodedStream->nodeId() == 0;
+        if (!tornDown && (std::chrono::steady_clock::now() - d->streamRestartWaitStarted) < StreamRestartTimeout) {
+            return;
+        }
+        d->streamRestartTimer.stop();
+        if (!tornDown) {
+            qCWarning(KRDP) << "Encoded stream did not shut down within" << StreamRestartTimeout.count() << "ms, attaching new node anyway";
+        }
+        attachEncodedStream(d->pendingNodeId, true);
+    });
 }
 
 PlasmaScreencastV1Session::~PlasmaScreencastV1Session()
@@ -388,6 +409,9 @@ void PlasmaScreencastV1Session::refreshDisplayConfiguration()
     // confirmation dialog stays interactive while hardware pipelines settle.
     preferSoftwareEncoderForDisplayChange(QStringLiteral("Display geometry/topology changed"));
 
+    // Re-create the screencast for the new topology. The stream restart goes
+    // through the deferred attach in onScreencastCreated() (it waits for
+    // KPipeWire's produce thread to tear down before calling start() again).
     if (!setupScreencastRequest()) {
         qCWarning(KRDP) << "Unable to refresh display configuration after topology change (session kept alive)";
     }
@@ -561,11 +585,35 @@ void PlasmaScreencastV1Session::onScreencastCreated(uint nodeId)
     qCDebug(KRDP) << "Plasma stream sizes: request" << (d->request ? d->request->size() : QSize()) << "logical" << logicalSize();
 
     auto encodedStream = stream();
-    const bool streamWasActive = encodedStream->isActive();
-    const bool shouldResumeStreaming = d->streamConfigured && (streamWasActive || streamingRequested());
-    if (streamWasActive) {
+
+    // A previous node is still being torn down (see StreamRestartPollMs): attach
+    // once it is gone, otherwise start() silently does nothing and the node ID is
+    // wiped when the old thread exits.
+    if (encodedStream->isActive() || d->streamRestartTimer.isActive()) {
+        restartEncodedStream(nodeId);
+        return;
+    }
+
+    attachEncodedStream(nodeId, false);
+}
+
+void PlasmaScreencastV1Session::restartEncodedStream(uint nodeId)
+{
+    auto encodedStream = stream();
+    if (encodedStream->isActive()) {
         encodedStream->stop();
     }
+    d->pendingNodeId = nodeId;
+    if (!d->streamRestartTimer.isActive()) {
+        d->streamRestartWaitStarted = std::chrono::steady_clock::now();
+        d->streamRestartTimer.start();
+    }
+}
+
+void PlasmaScreencastV1Session::attachEncodedStream(uint nodeId, bool streamWasActive)
+{
+    auto encodedStream = stream();
+    const bool shouldResumeStreaming = d->streamConfigured && (streamWasActive || streamingRequested());
 
     d->pendingFrameMetadata.clear();
     d->pendingPackets.clear();
@@ -608,7 +656,7 @@ void PlasmaScreencastV1Session::onScreencastCreated(uint nodeId)
 
     d->streamConfigured = true;
     if (shouldResumeStreaming) {
-        qCDebug(KRDP) << "Restarting encoded stream after display reconfiguration";
+        qCDebug(KRDP) << "Restarting encoded stream on node" << nodeId;
         encodedStream->start();
     }
 
@@ -617,7 +665,7 @@ void PlasmaScreencastV1Session::onScreencastCreated(uint nodeId)
         d->startedSignalEmitted = true;
         setStarted(true);
     } else {
-        qCDebug(KRDP) << "Reconfigured Plasma screencast stream after display topology change";
+        qCDebug(KRDP) << "Re-attached Plasma screencast stream on node" << nodeId;
     }
 }
 
