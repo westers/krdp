@@ -10,9 +10,12 @@
 #include "VideoStream.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <condition_variable>
 #include <limits>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include <QDateTime>
@@ -414,7 +417,8 @@ public:
 
     bool pendingReset = true;
     bool enabled = false;
-    bool capsConfirmed = false;
+    // Written on the FreeRDP peer thread (onCapsAdvertise), read by the submission thread.
+    std::atomic<bool> capsConfirmed = false;
     StreamCodec selectedCodec = StreamCodec::Avc420;
 
     std::jthread frameSubmissionThread;
@@ -422,14 +426,17 @@ public:
     std::condition_variable frameQueueCondition;
 
     QQueue<VideoFrame> frameQueue;
+    // pendingFrames is inserted on the submission thread (sendFrame) and erased on
+    // the FreeRDP peer thread (onFrameAcknowledge).
     QSet<uint32_t> pendingFrames;
+    std::mutex pendingFramesMutex;
     QSize activityFrameSize;
     int activityTileColumns = 0;
     int activityTileRows = 0;
     QVector<uint8_t> activityTiles;
 
     int maximumFrameRate = 120;
-    int requestedFrameRate = 60;
+    std::atomic_int requestedFrameRate = 60;
     QQueue<FrameRateEstimate> frameRateEstimates;
     clk::system_clock::time_point lastFrameRateEstimation;
 
@@ -524,6 +531,7 @@ VideoStream::VideoStream(RdpConnection *session)
 
 VideoStream::~VideoStream()
 {
+    close();
 }
 
 bool VideoStream::initialize()
@@ -557,10 +565,19 @@ bool VideoStream::initialize()
 
     d->frameSubmissionThread = std::jthread([this](std::stop_token token) {
         while (!token.stop_requested()) {
+            // Don't dequeue frames until the GFX channel is ready. This keeps the
+            // initial keyframe in the queue until CapsAdvertise has completed and
+            // we can actually send it; otherwise the client shows a black screen
+            // until the next keyframe.
+            if (!d->gfxContext || !d->capsConfirmed) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                continue;
+            }
+
             VideoFrame nextFrame;
             {
                 std::unique_lock lock(d->frameQueueMutex);
-                auto frameInterval = std::chrono::milliseconds(1000 / std::max(d->requestedFrameRate, 1));
+                auto frameInterval = std::chrono::milliseconds(1000 / std::max(d->requestedFrameRate.load(), 1));
                 d->frameQueueCondition.wait_for(lock, frameInterval, [this, token]() {
                     return token.stop_requested() || !d->frameQueue.isEmpty();
                 });
@@ -576,7 +593,14 @@ bool VideoStream::initialize()
                 // queueFrame() clearing it whenever a new keyframe arrives.
                 nextFrame = d->frameQueue.takeFirst();
             }
-            sendFrame(nextFrame);
+            if (!sendFrame(nextFrame)) {
+                // Caps were reset between dequeue and send (e.g. a client
+                // re-advertisement); hold the frame rather than lose it. If it
+                // is the initial IDR, losing it means a blank client until the
+                // next keyframe.
+                std::lock_guard lock(d->frameQueueMutex);
+                d->frameQueue.prepend(nextFrame);
+            }
         }
     });
 
@@ -591,13 +615,25 @@ void VideoStream::close()
         return;
     }
 
-    d->gfxContext->Close(d->gfxContext.get());
-
+    // Stop the frame submission thread first to prevent use-after-free on
+    // gfxContext during close.
     if (d->frameSubmissionThread.joinable()) {
         d->frameSubmissionThread.request_stop();
         d->frameQueueCondition.notify_all();
         d->frameSubmissionThread.join();
     }
+
+    {
+        std::lock_guard lock(d->pendingFramesMutex);
+        d->pendingFrames.clear();
+    }
+    {
+        std::lock_guard lock(d->frameQueueMutex);
+        d->frameQueue.clear();
+    }
+
+    d->gfxContext->Close(d->gfxContext.get());
+    d->gfxContext.reset();
 
     Q_EMIT closed();
 }
@@ -659,6 +695,20 @@ bool VideoStream::onChannelIdAssigned(uint32_t channelId)
 
 uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdvertise)
 {
+    // Windows clients (mstsc) send CapsAdvertise twice: once during
+    // initial setup and again after confirming. If we already confirmed
+    // caps, this is a GFX channel reset — clear surface state so
+    // surfaces get re-created on the next frame.
+    if (d->capsConfirmed) {
+        qCDebug(KRDP) << "GFX channel reset (re-advertisement), resetting surface state";
+        d->capsConfirmed = false;
+        d->pendingReset = true;
+        d->surface = Surface{};
+        d->monitorLayout.clear();
+        std::lock_guard lock(d->pendingFramesMutex);
+        d->pendingFrames.clear();
+    }
+
     auto capsSets = capsAdvertise->capsSets;
     auto count = capsAdvertise->capsSetCount;
 
@@ -788,6 +838,8 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
 {
     auto id = frameAcknowledge->frameId;
 
+    std::lock_guard lock(d->pendingFramesMutex);
+
     auto itr = d->pendingFrames.constFind(id);
     if (itr == d->pendingFrames.cend()) {
         qCWarning(KRDP) << "Got frame acknowledge for an unknown frame";
@@ -848,14 +900,16 @@ void VideoStream::performReset(const QSize &size, const QVector<VideoMonitor> &m
     d->gfxContext->MapSurfaceToOutput(d->gfxContext.get(), &mapSurfaceToOutputPdu);
 }
 
-void VideoStream::sendFrame(const VideoFrame &frame)
+bool VideoStream::sendFrame(const VideoFrame &frame)
 {
     if (!d->gfxContext || !d->capsConfirmed) {
-        return;
+        // Not a drop: the caller keeps the frame queued until the channel is ready.
+        return false;
     }
 
     if (frame.data.size() == 0) {
-        return;
+        qCDebug(KRDP) << "Skipping empty encoded frame";
+        return true;
     }
 
     const auto monitorLayout = monitorLayoutForReset(frame);
@@ -872,7 +926,10 @@ void VideoStream::sendFrame(const VideoFrame &frame)
 
     d->encodedFrames++;
 
-    d->pendingFrames.insert(frameId);
+    {
+        std::lock_guard lock(d->pendingFramesMutex);
+        d->pendingFrames.insert(frameId);
+    }
 
     RDPGFX_START_FRAME_PDU startFramePdu;
     RDPGFX_END_FRAME_PDU endFramePdu;
@@ -915,7 +972,7 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     auto damageRects = toDamageRects(frame);
     const auto trackedDamageRects = damageRects;
     if (damageRects.empty()) {
-        return;
+        return true;
     }
 
     const auto fullRect = toRdpRect(QRect(QPoint(0, 0), frame.size));
@@ -1006,6 +1063,7 @@ void VideoStream::sendFrame(const VideoFrame &frame)
     d->gfxContext->EndFrame(d->gfxContext.get(), &endFramePdu);
 
     d->session->networkDetection()->stopBandwidthMeasure();
+    return true;
 }
 
 void VideoStream::updateRequestedFrameRate()

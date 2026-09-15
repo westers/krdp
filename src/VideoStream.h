@@ -129,9 +129,14 @@ private:
     uint32_t onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frameAcknowledge);
 
     void performReset(const QSize &size, const QVector<VideoMonitor> &monitors);
-    void sendFrame(const VideoFrame &frame);
 
     void updateRequestedFrameRate();
+    /**
+     * Returns false only when the frame could not be sent because the GFX
+     * channel is not ready (context gone or caps reset mid-flight); the caller
+     * then keeps the frame at the head of the queue instead of dropping it.
+     */
+    bool sendFrame(const VideoFrame &frame);
 
     class Private;
     const std::unique_ptr<Private> d;
