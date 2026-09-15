@@ -40,7 +40,9 @@ public:
     void setClipboardData(std::unique_ptr<QMimeData> data) override;
 
 private:
-    bool setupScreencastRequest();
+    void scheduleStreamRecovery(int attempt, int delayMs);
+    void attemptStreamRecovery(int attempt);
+    bool setupScreencastRequest(bool allowWorkspaceFallback = true);
     void onScreencastCreated(uint nodeId);
     void processPendingPackets();
     void onPacketReceived(const PipeWireEncodedStream::Packet &data);

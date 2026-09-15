@@ -11,6 +11,7 @@
 #include <QRect>
 #include <QRegion>
 #include <QScreen>
+#include <QTimer>
 #include <QWaylandClientExtensionTemplate>
 #include <qpa/qplatformnativeinterface.h>
 
@@ -88,6 +89,13 @@ struct PendingEncodedPacket {
     PipeWireEncodedStream::Packet packet;
     std::chrono::steady_clock::time_point queuedAt;
 };
+// Closed-stream recovery. A DPMS wake makes KWin tear down and re-add every
+// output, so wait for the output set to settle, keep retrying for a while, and
+// only settle for a workspace stream in the last few attempts.
+constexpr int MaxRecoveryAttempts = 24;
+constexpr int RecoveryIntervalMs = 500;
+constexpr int RecoverySettleMs = 750;
+constexpr int WorkspaceFallbackAttempts = 4;
 
 constexpr int MaxPendingFrameMetadata = 128;
 constexpr int MaxPendingPacketsWithoutMetadata = 8;
@@ -322,6 +330,7 @@ public:
     FakeInput *remoteInterface = nullptr;
     StreamTarget streamTarget = StreamTarget::None;
     QPointer<QScreen> outputScreen = nullptr;
+    QString targetScreenName;
     QRect logicalRect;
     QVector<VideoMonitor> monitorLayout;
     QQueue<EncodedPacketMetadata> pendingFrameMetadata;
@@ -332,6 +341,8 @@ public:
     bool streamSignalsConnected = false;
     bool startedSignalEmitted = false;
     std::chrono::steady_clock::time_point lastMetadataMissLog;
+    QTimer recoveryTimer;
+    int recoveryAttempt = 0;
 };
 
 PlasmaScreencastV1Session::PlasmaScreencastV1Session()
@@ -339,6 +350,20 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
     , d(std::make_unique<Private>())
 {
     d->remoteInterface = new FakeInput();
+
+    d->recoveryTimer.setSingleShot(true);
+    connect(&d->recoveryTimer, &QTimer::timeout, this, [this]() {
+        attemptStreamRecovery(d->recoveryAttempt);
+    });
+    // While recovering, every output change pushes the next attempt out until the set is stable.
+    auto settleRecovery = [this](QScreen *) {
+        if (d->recoveryTimer.isActive()) {
+            d->recoveryTimer.start(RecoverySettleMs);
+        }
+    };
+    connect(qGuiApp, &QGuiApplication::screenAdded, this, settleRecovery);
+    connect(qGuiApp, &QGuiApplication::screenRemoved, this, settleRecovery);
+
 }
 
 PlasmaScreencastV1Session::~PlasmaScreencastV1Session()
@@ -364,12 +389,43 @@ void PlasmaScreencastV1Session::refreshDisplayConfiguration()
     preferSoftwareEncoderForDisplayChange(QStringLiteral("Display geometry/topology changed"));
 
     if (!setupScreencastRequest()) {
-        qCWarning(KRDP) << "Unable to refresh display configuration after topology change";
-        Q_EMIT error();
+        qCWarning(KRDP) << "Unable to refresh display configuration after topology change (session kept alive)";
     }
 }
 
-bool PlasmaScreencastV1Session::setupScreencastRequest()
+void PlasmaScreencastV1Session::scheduleStreamRecovery(int attempt, int delayMs)
+{
+    d->recoveryAttempt = attempt;
+    d->recoveryTimer.start(delayMs);
+}
+
+void PlasmaScreencastV1Session::attemptStreamRecovery(int attempt)
+{
+    const auto screens = qGuiApp->screens();
+    const bool screensAvailable = !screens.isEmpty() && screens.first()->geometry().isValid();
+    // Hold out for the configured output; only the final attempts may settle for the workspace.
+    const bool allowWorkspaceFallback = attempt >= MaxRecoveryAttempts - WorkspaceFallbackAttempts;
+
+    bool recovered = false;
+    if (screensAvailable) {
+        qCInfo(KRDP) << "Attempting to recover display stream (attempt" << (attempt + 1) << "of" << MaxRecoveryAttempts << ", workspace fallback:" << allowWorkspaceFallback << ")";
+        recovered = setupScreencastRequest(allowWorkspaceFallback);
+    } else {
+        qCInfo(KRDP) << "No screens available yet (attempt" << (attempt + 1) << "of" << MaxRecoveryAttempts << ")";
+    }
+    if (recovered) {
+        return;
+    }
+
+    if (attempt + 1 < MaxRecoveryAttempts) {
+        qCInfo(KRDP) << "Retrying display stream recovery in" << RecoveryIntervalMs << "ms";
+        scheduleStreamRecovery(attempt + 1, RecoveryIntervalMs);
+        return;
+    }
+    qCWarning(KRDP) << "Display stream recovery failed after" << MaxRecoveryAttempts << "attempts (session kept alive)";
+}
+
+bool PlasmaScreencastV1Session::setupScreencastRequest(bool allowWorkspaceFallback)
 {
     Private::StreamTarget target = Private::StreamTarget::Workspace;
     QPointer<QScreen> outputScreen = nullptr;
@@ -378,9 +434,26 @@ bool PlasmaScreencastV1Session::setupScreencastRequest()
     } else {
         const auto screens = qGuiApp->screens();
         const auto streamIndex = activeStream();
-        if (streamIndex >= 0 && streamIndex < screens.size()) {
+        // On recovery, resolve by saved screen name to survive screen list reordering.
+        if (!d->targetScreenName.isEmpty()) {
+            for (auto *screen : screens) {
+                if (screen->name() == d->targetScreenName) {
+                    target = Private::StreamTarget::Output;
+                    outputScreen = screen;
+                    break;
+                }
+            }
+            if (!outputScreen) {
+                if (!allowWorkspaceFallback) {
+                    qCInfo(KRDP) << "Target screen" << d->targetScreenName << "not available yet, waiting for it to return";
+                    return false;
+                }
+                qCWarning(KRDP) << "Target screen" << d->targetScreenName << "no longer available, falling back to workspace";
+            }
+        } else if (streamIndex >= 0 && streamIndex < screens.size()) {
             target = Private::StreamTarget::Output;
             outputScreen = screens.at(streamIndex);
+            d->targetScreenName = outputScreen->name();
         }
     }
 
@@ -431,6 +504,11 @@ bool PlasmaScreencastV1Session::setupScreencastRequest()
         qCDebug(KRDP) << "Using virtual monitor stream" << vm->name << "logical rect" << d->logicalRect;
     } else if (target == Private::StreamTarget::Output) {
         d->request = d->m_screencasting.createOutputStream(outputScreen, Screencasting::Metadata);
+        if (!d->request && !allowWorkspaceFallback) {
+            // No wl_output behind the screen yet (placeholder or mid-teardown); let recovery retry.
+            qCInfo(KRDP) << "Output stream for screen" << (outputScreen ? outputScreen->name() : QStringLiteral("<unknown>")) << "not creatable yet, waiting";
+            return false;
+        }
         if (!d->request) {
             qCWarning(KRDP) << "Failed to create output stream for screen"
                             << (outputScreen ? outputScreen->name() : QStringLiteral("<unknown>"))
@@ -456,14 +534,14 @@ bool PlasmaScreencastV1Session::setupScreencastRequest()
     if (!d->request) {
         return false;
     }
+    // A stream now exists again (whichever path created it), so any pending retry is moot.
+    d->recoveryTimer.stop();
 
     connect(d->request, &ScreencastingStream::failed, this, &PlasmaScreencastV1Session::error);
     connect(d->request, &ScreencastingStream::closed, this, [this]() {
-        qCWarning(KRDP) << "Screencast stream closed, attempting to recover display stream";
+        qCWarning(KRDP) << "Screencast stream closed, deferring recovery to let compositor settle";
         d->request = nullptr;
-        if (!setupScreencastRequest()) {
-            Q_EMIT error();
-        }
+        scheduleStreamRecovery(0, RecoverySettleMs);
     });
     connect(d->request, &ScreencastingStream::created, this, &PlasmaScreencastV1Session::onScreencastCreated);
 
