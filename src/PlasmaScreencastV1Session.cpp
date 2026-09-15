@@ -76,19 +76,6 @@ using ScopedXKBState = std::unique_ptr<struct xkb_state, XKBStateDeleter>;
 using ScopedXKBKeymap = std::unique_ptr<struct xkb_keymap, XKBKeymapDeleter>;
 using ScopedXKBContext = std::unique_ptr<struct xkb_context, XKBContextDeleter>;
 
-struct EncodedPacketMetadata {
-    QSize size;
-    QRegion damage;
-    std::chrono::system_clock::time_point presentationTimeStamp;
-    bool hasSize = false;
-    bool hasDamage = false;
-    bool hasPresentationTimeStamp = false;
-};
-
-struct PendingEncodedPacket {
-    PipeWireEncodedStream::Packet packet;
-    std::chrono::steady_clock::time_point queuedAt;
-};
 // Closed-stream recovery. A DPMS wake makes KWin tear down and re-add every
 // output, so wait for the output set to settle, keep retrying for a while, and
 // only settle for a workspace stream in the last few attempts.
@@ -97,9 +84,6 @@ constexpr int RecoveryIntervalMs = 500;
 constexpr int RecoverySettleMs = 750;
 constexpr int WorkspaceFallbackAttempts = 4;
 
-constexpr int MaxPendingFrameMetadata = 128;
-constexpr int MaxPendingPacketsWithoutMetadata = 8;
-constexpr auto MetadataPairWaitBudget = std::chrono::milliseconds(12);
 // KPipeWire tears its produce thread down asynchronously after stop(): start()
 // is a no-op until that thread is gone, and the node ID is cleared once it is.
 // Poll for that before attaching a replacement node.
@@ -112,15 +96,6 @@ QRegion fullFrameDamage(const QSize &size)
         return {};
     }
     return QRegion(QRect(QPoint(0, 0), size));
-}
-
-QRegion clippedDamage(const QRegion &damage, const QSize &size)
-{
-    if (size.isEmpty()) {
-        return {};
-    }
-    auto clipped = damage.intersected(QRect(QPoint(0, 0), size));
-    return clipped.isEmpty() ? fullFrameDamage(size) : clipped;
 }
 
 QRect logicalRectForStream(int streamIndex)
@@ -179,18 +154,6 @@ QVector<VideoMonitor> monitorLayoutForStream(int streamIndex, const QRect &logic
 }
 
 template<typename Stream>
-void enableDamageMetadataIfSupported(Stream *stream)
-{
-    if constexpr (requires(Stream *s) {
-                      s->setDamageEnabled(true);
-                  }) {
-        stream->setDamageEnabled(true);
-    } else {
-        qCWarning(KRDP) << "KPipeWire does not expose encoded damage metadata, using full-frame updates";
-    }
-}
-
-template<typename Stream>
 void setFullColorRangeIfSupported(Stream *stream)
 {
     if constexpr (requires(Stream *s) {
@@ -215,18 +178,6 @@ void setPreferredH264Encoder(Stream *stream)
     }
     stream->setEncoder(encoder);
     qCDebug(KRDP) << "Using PipeWire H264 encoder profile:" << (encoder == PipeWireEncodedStream::H264Main ? "Main" : "Baseline");
-}
-
-template<typename Stream, typename Receiver, typename Callback>
-bool connectFrameMetadataIfSupported(Stream *stream, Receiver *receiver, Callback &&callback)
-{
-    if constexpr (requires {
-                      &Stream::frameMetadata;
-                  }) {
-        const auto connection = QObject::connect(stream, &Stream::frameMetadata, receiver, std::forward<Callback>(callback));
-        return static_cast<bool>(connection);
-    }
-    return false;
 }
 }
 class Xkb : public QtWayland::wl_keyboard
@@ -338,14 +289,9 @@ public:
     QString targetScreenName;
     QRect logicalRect;
     QVector<VideoMonitor> monitorLayout;
-    QQueue<EncodedPacketMetadata> pendingFrameMetadata;
-    QQueue<PendingEncodedPacket> pendingPackets;
-    bool metadataSignalAvailable = false;
-    bool metadataSeen = false;
     bool streamConfigured = false;
     bool streamSignalsConnected = false;
     bool startedSignalEmitted = false;
-    std::chrono::steady_clock::time_point lastMetadataMissLog;
     QTimer recoveryTimer;
     int recoveryAttempt = 0;
     QTimer streamRestartTimer;
@@ -630,42 +576,17 @@ void PlasmaScreencastV1Session::attachEncodedStream(uint nodeId, bool streamWasA
     auto encodedStream = stream();
     const bool shouldResumeStreaming = d->streamConfigured && (streamWasActive || streamingRequested());
 
-    d->pendingFrameMetadata.clear();
-    d->pendingPackets.clear();
-    d->metadataSeen = false;
-    d->lastMetadataMissLog = {};
-
     encodedStream->setNodeId(nodeId);
     encodedStream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed);
     if (!d->streamConfigured) {
         setFullColorRangeIfSupported(encodedStream);
         setPreferredH264Encoder(encodedStream);
-        enableDamageMetadataIfSupported(encodedStream);
     }
 
     if (!d->streamSignalsConnected) {
         connect(encodedStream, &PipeWireEncodedStream::newPacket, this, &PlasmaScreencastV1Session::onPacketReceived);
         connect(encodedStream, &PipeWireEncodedStream::sizeChanged, this, &PlasmaScreencastV1Session::setSize);
         connect(encodedStream, &PipeWireEncodedStream::cursorChanged, this, &PlasmaScreencastV1Session::cursorUpdate);
-        d->metadataSignalAvailable = connectFrameMetadataIfSupported(encodedStream, this, [this](const auto &meta) {
-            EncodedPacketMetadata frameMetadata;
-            frameMetadata.size = meta.size;
-            frameMetadata.hasSize = !meta.size.isEmpty();
-            if (meta.hasDamage) {
-                frameMetadata.damage = meta.damage;
-                frameMetadata.hasDamage = true;
-            }
-            if (meta.hasPts) {
-                frameMetadata.presentationTimeStamp = std::chrono::system_clock::time_point{std::chrono::nanoseconds(meta.ptsNs)};
-                frameMetadata.hasPresentationTimeStamp = true;
-            }
-            d->pendingFrameMetadata.enqueue(frameMetadata);
-            while (d->pendingFrameMetadata.size() > MaxPendingFrameMetadata) {
-                d->pendingFrameMetadata.dequeue();
-            }
-            d->metadataSeen = true;
-            processPendingPackets();
-        });
         d->streamSignalsConnected = true;
     }
 
@@ -781,84 +702,25 @@ void PlasmaScreencastV1Session::setClipboardData(std::unique_ptr<QMimeData> data
     Q_UNUSED(data);
 }
 
-void PlasmaScreencastV1Session::processPendingPackets()
-{
-    auto emitFrame = [this](const PipeWireEncodedStream::Packet &packet, const EncodedPacketMetadata *metadata) {
-        VideoFrame frameData;
-        frameData.size = size();
-        frameData.data = packet.data();
-        frameData.isKeyFrame = packet.isKeyFrame();
-        frameData.monitors = d->monitorLayout;
-        frameData.damage = fullFrameDamage(frameData.size);
-
-        if (frameData.monitors.isEmpty() && !frameData.size.isEmpty()) {
-            frameData.monitors.push_back(VideoMonitor{
-                .geometry = QRect(QPoint(0, 0), frameData.size),
-                .primary = true,
-            });
-        }
-
-        const bool metadataApplied = metadata != nullptr;
-        if (metadata) {
-            if (metadata->hasSize && !metadata->size.isEmpty()) {
-                frameData.size = metadata->size;
-            }
-            if (metadata->hasPresentationTimeStamp) {
-                frameData.presentationTimeStamp = metadata->presentationTimeStamp;
-            }
-            if (metadata->hasDamage) {
-                frameData.damage = clippedDamage(metadata->damage, frameData.size);
-            }
-        }
-
-        if (!metadataApplied || frameData.isKeyFrame || frameData.damage.isEmpty()) {
-            frameData.damage = fullFrameDamage(frameData.size);
-        }
-
-        Q_EMIT frameReceived(frameData);
-    };
-
-    while (!d->pendingPackets.isEmpty()) {
-        if (!d->pendingFrameMetadata.isEmpty()) {
-            auto packet = d->pendingPackets.dequeue().packet;
-            auto metadata = d->pendingFrameMetadata.dequeue();
-            emitFrame(packet, &metadata);
-            continue;
-        }
-
-        auto pendingPacket = d->pendingPackets.head();
-        const bool shouldSendWithoutMetadata = !d->metadataSignalAvailable || !d->metadataSeen || pendingPacket.packet.isKeyFrame();
-        if (shouldSendWithoutMetadata) {
-            d->pendingPackets.dequeue();
-            emitFrame(pendingPacket.packet, nullptr);
-            continue;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        const bool waitedTooLong = (now - pendingPacket.queuedAt) >= MetadataPairWaitBudget;
-        const bool queueTooDeep = d->pendingPackets.size() > MaxPendingPacketsWithoutMetadata;
-        if (waitedTooLong || queueTooDeep) {
-            if (d->lastMetadataMissLog.time_since_epoch().count() == 0 || (now - d->lastMetadataMissLog) >= std::chrono::seconds(2)) {
-                qCDebug(KRDP) << "No matching damage metadata for encoded packet, using full-frame update";
-                d->lastMetadataMissLog = now;
-            }
-            d->pendingPackets.dequeue();
-            emitFrame(pendingPacket.packet, nullptr);
-            continue;
-        }
-
-        // Leave packet queued briefly so late metadata can still be paired.
-        break;
-    }
-}
-
 void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Packet &data)
 {
-    d->pendingPackets.enqueue(PendingEncodedPacket{
-        .packet = data,
-        .queuedAt = std::chrono::steady_clock::now(),
-    });
-    processPendingPackets();
+    // KPipeWire's encoded stream carries no per-frame damage, so every packet is
+    // a full-frame update. Keep the multi-monitor layout for the RDPGFX reset.
+    VideoFrame frameData;
+    frameData.size = size();
+    frameData.data = data.data();
+    frameData.isKeyFrame = data.isKeyFrame();
+    frameData.monitors = d->monitorLayout;
+    frameData.damage = fullFrameDamage(frameData.size);
+
+    if (frameData.monitors.isEmpty() && !frameData.size.isEmpty()) {
+        frameData.monitors.push_back(VideoMonitor{
+            .geometry = QRect(QPoint(0, 0), frameData.size),
+            .primary = true,
+        });
+    }
+
+    Q_EMIT frameReceived(frameData);
 }
 
 }
