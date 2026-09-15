@@ -501,14 +501,12 @@ int main(int argc, char **argv)
         scheduleDisplayRefresh();
     });
 
-    const bool experimentalAvc444 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444") > 0;
-    const bool experimentalAvc444v2 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444V2") > 0;
 #ifdef WITH_PLASMA_SESSION
     const auto sessionType = parser.isSet(u"plasma"_s) ? u"plasma"_s : u"portal"_s;
 #else
     const auto sessionType = u"portal"_s;
 #endif
-    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 expAvc444=%8 expAvc444v2=%9 wakeDisplay=%10")
+    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8")
                              .arg(sessionType,
                                   streamTarget,
                                   QString::number(port),
@@ -516,8 +514,6 @@ int main(int argc, char **argv)
                                   vaapiDriverMode,
                                   envValueOrUnset("KRDP_FORCE_VAAPI_DRIVER"),
                                   envValueOrUnset("KRDP_AUTO_VAAPI_DRIVER"),
-                                  experimentalAvc444 ? u"1"_s : u"0"_s,
-                                  experimentalAvc444v2 ? u"1"_s : u"0"_s,
                                   config->wakeDisplayOnConnect() ? u"1"_s : u"0"_s);
 
     if (!server.start()) {

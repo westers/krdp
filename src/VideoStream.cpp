@@ -29,7 +29,6 @@
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
-#include "VideoCodecSupport.h"
 
 #include "krdp_logging.h"
 
@@ -39,20 +38,8 @@ namespace KRdp
 namespace clk = std::chrono;
 
 constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seconds(1);
-constexpr int MaxCoalescedDamageRects = 64;
-constexpr int MaxDamageRectCount = 128;
-constexpr int ActivityTileSize = 64;
-constexpr uint8_t ActivityDecayPerFrame = 1;
-constexpr uint8_t ActivityBoostPerDamage = 6;
-constexpr int ActivityStaticThreshold = 2;
-constexpr int ActivityTransientThreshold = 8;
-constexpr int StableFramesBeforeRefinement = 3;
-constexpr auto RefinementCooldown = clk::milliseconds(600);
-constexpr int MaxCongestionQpBias = 8;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MinimumFrameRate = 5;
-constexpr int MaxFramesBetweenFullDamage = 8;
-constexpr double FullDamageCoverageThreshold = 0.15;
 constexpr int MaxMonitorLayoutCount = 16;
 constexpr auto KeyFrameRequestMinInterval = clk::seconds(2);
 
@@ -139,203 +126,12 @@ QString monitorLayoutSummary(const QVector<VideoMonitor> &monitors)
     return parts.join(QStringLiteral("; "));
 }
 
-struct RectEncodingQuality {
-    uint8_t qp = 22;
-    uint8_t quality = 100;
-};
-
-RectEncodingQuality qualityForDamageRect(const RECTANGLE_16 &rect,
-                                         const QSize &frameSize,
-                                         bool isKeyFrame,
-                                         bool isRefinementFrame,
-                                         bool avc444Intent,
-                                         int activityScore,
-                                         int congestionQpBias)
-{
-    if (isKeyFrame || frameSize.isEmpty()) {
-        return {};
-    }
-
-    if (isRefinementFrame) {
-        return {
-            .qp = 16,
-            .quality = 100,
-        };
-    }
-
-    const auto frameArea = std::max(1, frameSize.width() * frameSize.height());
-    const auto rectArea = std::max<int>(1, (rect.right - rect.left) * (rect.bottom - rect.top));
-    const auto coverage = double(rectArea) / double(frameArea);
-
-    // Bias for crisp quality on small UI updates and better compression on large
-    // motion updates.
-    int qp = 22;
-    int quality = 90;
-    if (coverage <= 0.03) {
-        qp = 18;
-        quality = 100;
-    } else if (coverage <= 0.20) {
-        qp = 21;
-        quality = 92;
-    }
-
-    // Keep static/text-like areas crisp while compressing repeated motion
-    // regions more aggressively.
-    if (activityScore <= ActivityStaticThreshold && coverage <= 0.20) {
-        qp -= 3;
-        quality += 8;
-    } else if (activityScore >= ActivityTransientThreshold) {
-        qp += 3;
-        quality -= 8;
-        if (activityScore >= (ActivityTransientThreshold * 2)) {
-            qp += 2;
-            quality -= 6;
-        }
-    }
-
-    // Under congestion, bias larger/motion updates toward lower bitrate while
-    // keeping tiny UI regions readable.
-    const auto effectiveCongestionBias = (coverage <= 0.03) ? (congestionQpBias / 2) : congestionQpBias;
-    qp += effectiveCongestionBias;
-    quality -= effectiveCongestionBias * 2;
-
-    // If the client asked for AVC444 but we had to transport AVC420, bias
-    // quality slightly higher to preserve text/UI crispness.
-    if (avc444Intent && coverage <= 0.20 && activityScore <= ActivityTransientThreshold) {
-        qp -= 1;
-        quality += 2;
-    }
-
-    return {
-        .qp = static_cast<uint8_t>(std::clamp(qp, 10, 40)),
-        .quality = static_cast<uint8_t>(std::clamp(quality, 70, 100)),
-    };
-}
-
-std::vector<RECTANGLE_16> toDamageRects(const VideoFrame &frame)
-{
-    std::vector<RECTANGLE_16> rects;
-
-    if (frame.size.isEmpty()) {
-        return rects;
-    }
-
-    const QRect frameBounds(QPoint(0, 0), frame.size);
-    const auto fullRect = toRdpRect(frameBounds);
-
-    if (frame.isKeyFrame || frame.damage.isEmpty()) {
-        rects.push_back(fullRect);
-        return rects;
-    }
-
-    const auto clippedDamage = frame.damage.intersected(frameBounds);
-    QVector<QRect> damageRects;
-    const auto sourceRects = clippedDamage.rects();
-    damageRects.reserve(sourceRects.size());
-    for (const auto &rect : sourceRects) {
-        damageRects.append(rect);
-    }
-    if (damageRects.isEmpty() || damageRects.size() > MaxDamageRectCount) {
-        rects.push_back(fullRect);
-        return rects;
-    }
-
-    // Merge nearby/overlapping rectangles to reduce metadata overhead while
-    // preserving partial update behavior.
-    bool merged = true;
-    while (merged && damageRects.size() > MaxCoalescedDamageRects) {
-        merged = false;
-        for (int i = 0; i < damageRects.size() - 1; ++i) {
-            for (int j = i + 1; j < damageRects.size(); ++j) {
-                const auto &a = damageRects.at(i);
-                const auto &b = damageRects.at(j);
-                const auto joined = a.united(b);
-                if (joined.width() * joined.height() <= (a.width() * a.height() + b.width() * b.height()) * 3 / 2) {
-                    damageRects[i] = joined;
-                    damageRects.removeAt(j);
-                    merged = true;
-                    break;
-                }
-            }
-            if (merged) {
-                break;
-            }
-        }
-    }
-    if (damageRects.size() > MaxDamageRectCount) {
-        rects.push_back(fullRect);
-        return rects;
-    }
-
-    rects.reserve(damageRects.size());
-    for (const auto &damageRect : damageRects) {
-        const auto boundedRect = damageRect.intersected(frameBounds);
-        if (boundedRect.isEmpty()) {
-            continue;
-        }
-        rects.push_back(toRdpRect(boundedRect));
-    }
-
-    if (rects.empty()) {
-        rects.push_back(fullRect);
-    }
-
-    return rects;
-}
-
 struct RdpCapsInformation {
     uint32_t version;
     RDPGFX_CAPSET capSet;
     bool avcSupported : 1 = false;
     bool yuv420Supported : 1 = false;
-    bool avc444Supported : 1 = false;
-    bool avc444v2Supported : 1 = false;
 };
-
-enum class StreamCodec {
-    Avc420,
-    Avc444,
-    Avc444v2,
-};
-
-uint16_t toCodecId(StreamCodec codec)
-{
-    switch (codec) {
-    case StreamCodec::Avc444:
-        return RDPGFX_CODECID_AVC444;
-    case StreamCodec::Avc444v2:
-        return RDPGFX_CODECID_AVC444v2;
-    case StreamCodec::Avc420:
-    default:
-        return RDPGFX_CODECID_AVC420;
-    }
-}
-
-const char *codecToString(StreamCodec codec)
-{
-    switch (codec) {
-    case StreamCodec::Avc444:
-        return "AVC444";
-    case StreamCodec::Avc444v2:
-        return "AVC444v2";
-    case StreamCodec::Avc420:
-    default:
-        return "AVC420";
-    }
-}
-
-bool capSupportsCodec(const RdpCapsInformation &caps, StreamCodec codec)
-{
-    switch (codec) {
-    case StreamCodec::Avc444v2:
-        return caps.avcSupported && caps.avc444v2Supported;
-    case StreamCodec::Avc444:
-        return caps.avcSupported && caps.avc444Supported;
-    case StreamCodec::Avc420:
-    default:
-        return caps.avcSupported && caps.yuv420Supported;
-    }
-}
 
 const char *capVersionToString(uint32_t version)
 {
@@ -420,7 +216,6 @@ public:
     bool enabled = false;
     // Written on the FreeRDP peer thread (onCapsAdvertise), read by the submission thread.
     std::atomic<bool> capsConfirmed = false;
-    StreamCodec selectedCodec = StreamCodec::Avc420;
 
     std::jthread frameSubmissionThread;
     std::mutex frameQueueMutex;
@@ -431,10 +226,6 @@ public:
     // the FreeRDP peer thread (onFrameAcknowledge).
     QSet<uint32_t> pendingFrames;
     std::mutex pendingFramesMutex;
-    QSize activityFrameSize;
-    int activityTileColumns = 0;
-    int activityTileRows = 0;
-    QVector<uint8_t> activityTiles;
 
     int maximumFrameRate = 120;
     std::atomic_int requestedFrameRate = 60;
@@ -444,83 +235,8 @@ public:
     std::atomic_int encodedFrames = 0;
     std::atomic_int frameDelay = 0;
     std::atomic_int decoderQueueDepth = 0;
-    int framesSinceFullDamage = 0;
-    bool refinementPending = false;
-    int stableFramesSinceMotion = 0;
-    clk::system_clock::time_point lastRefinementFrameTime;
-    bool avc444Intent = false;
-    bool loggedAvc444WireTransport = false;
-    int congestionQpBias = 0;
     clk::milliseconds previousRtt = clk::milliseconds(0);
     QVector<VideoMonitor> monitorLayout;
-
-    void resetActivityGrid(const QSize &size)
-    {
-        if (size == activityFrameSize && !activityTiles.isEmpty()) {
-            return;
-        }
-
-        activityFrameSize = size;
-        activityTileColumns = std::max(1, (size.width() + ActivityTileSize - 1) / ActivityTileSize);
-        activityTileRows = std::max(1, (size.height() + ActivityTileSize - 1) / ActivityTileSize);
-        activityTiles.fill(0, activityTileColumns * activityTileRows);
-    }
-
-    void decayActivity()
-    {
-        for (auto &activity : activityTiles) {
-            if (activity > ActivityDecayPerFrame) {
-                activity -= ActivityDecayPerFrame;
-            } else {
-                activity = 0;
-            }
-        }
-    }
-
-    template<typename TileFunc>
-    void forEachTileInRect(const RECTANGLE_16 &rect, TileFunc &&tileFunc) const
-    {
-        if (activityTiles.isEmpty()) {
-            return;
-        }
-
-        const auto left = std::clamp<int>(rect.left / ActivityTileSize, 0, activityTileColumns - 1);
-        const auto top = std::clamp<int>(rect.top / ActivityTileSize, 0, activityTileRows - 1);
-        const auto right = std::clamp<int>(std::max<int>(int(rect.right) - 1, int(rect.left)) / ActivityTileSize, 0, activityTileColumns - 1);
-        const auto bottom = std::clamp<int>(std::max<int>(int(rect.bottom) - 1, int(rect.top)) / ActivityTileSize, 0, activityTileRows - 1);
-
-        for (auto y = top; y <= bottom; ++y) {
-            for (auto x = left; x <= right; ++x) {
-                tileFunc(y * activityTileColumns + x);
-            }
-        }
-    }
-
-    int activityForRect(const RECTANGLE_16 &rect) const
-    {
-        if (activityTiles.isEmpty()) {
-            return 0;
-        }
-
-        int sum = 0;
-        int count = 0;
-        forEachTileInRect(rect, [this, &sum, &count](int index) {
-            sum += activityTiles[index];
-            count++;
-        });
-
-        return count > 0 ? (sum / count) : 0;
-    }
-
-    void markDamageActivity(const std::vector<RECTANGLE_16> &rects)
-    {
-        for (const auto &rect : rects) {
-            forEachTileInRect(rect, [this](int index) {
-                const auto boosted = int(activityTiles[index]) + int(ActivityBoostPerDamage);
-                activityTiles[index] = static_cast<uint8_t>(std::min(boosted, 255));
-            });
-        }
-    }
     // Submission-thread only: rate-limits keyFrameRequested so a reset storm
     // (e.g. repeated caps re-advertisement) does not restart the encoder more
     // than once per KeyFrameRequestMinInterval.
@@ -742,9 +458,6 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         case RDPGFX_CAPVERSION_10:
             if (!(set.flags & RDPGFX_CAPS_FLAG_AVC_DISABLED)) {
                 caps.avcSupported = true;
-                caps.avc444Supported = true;
-                // Per MS-RDPEGFX, AVC444v2 is implied from 10.1+.
-                caps.avc444v2Supported = set.version >= RDPGFX_CAPVERSION_101;
             }
             break;
         case RDPGFX_CAPVERSION_81:
@@ -757,79 +470,25 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
             break;
         }
 
-        qCDebug(KRDP) << " " << capVersionToString(caps.version) << "AVC:" << caps.avcSupported << "YUV420:" << caps.yuv420Supported << "AVC444:"
-                      << caps.avc444Supported << "AVC444v2:" << caps.avc444v2Supported;
+        qCDebug(KRDP) << " " << capVersionToString(caps.version) << "AVC:" << caps.avcSupported << "YUV420:" << caps.yuv420Supported;
 
         capsInformation.push_back(caps);
     }
 
-    const auto settings = d->session->rdpPeerContext()->settings;
-    const bool wantsAvc444 = freerdp_settings_get_bool(settings, FreeRDP_GfxAVC444);
-    const bool wantsAvc444v2 = freerdp_settings_get_bool(settings, FreeRDP_GfxAVC444v2);
-
-    auto preferredCodec = StreamCodec::Avc420;
-    if (wantsAvc444v2) {
-        preferredCodec = StreamCodec::Avc444v2;
-    } else if (wantsAvc444) {
-        preferredCodec = StreamCodec::Avc444;
-    }
-
-    const auto requestedCodec = preferredCodec;
-    const bool requestedAvc444Codec = requestedCodec == StreamCodec::Avc444 || requestedCodec == StreamCodec::Avc444v2;
-    d->avc444Intent = requestedAvc444Codec;
-
-    auto findBestCapsForCodec = [&](StreamCodec codec) {
-        const auto itr = std::max_element(capsInformation.begin(),
-                                          capsInformation.end(),
-                                          [codec](const auto &first, const auto &second) {
-                                              const auto firstSupported = capSupportsCodec(first, codec);
-                                              const auto secondSupported = capSupportsCodec(second, codec);
-                                              if (firstSupported != secondSupported) {
-                                                  return !firstSupported;
-                                              }
-                                              return first.version < second.version;
-                                          });
-        if (itr == capsInformation.end() || !capSupportsCodec(*itr, codec)) {
-            return capsInformation.end();
-        }
-        return itr;
-    };
-
-    std::vector<StreamCodec> codecFallbackOrder;
-    codecFallbackOrder.push_back(requestedCodec);
-    if (requestedCodec == StreamCodec::Avc444v2) {
-        codecFallbackOrder.push_back(StreamCodec::Avc444);
-    }
-    if (requestedCodec != StreamCodec::Avc420) {
-        codecFallbackOrder.push_back(StreamCodec::Avc420);
-    }
-
-    auto selectedCaps = capsInformation.end();
-    for (const auto candidate : codecFallbackOrder) {
-        if ((candidate != StreamCodec::Avc420) && !LocalAvc444EncodingAvailable()) {
-            continue;
-        }
-        selectedCaps = findBestCapsForCodec(candidate);
-        if (selectedCaps != capsInformation.end()) {
-            preferredCodec = candidate;
-            break;
-        }
-    }
-
-    if (selectedCaps == capsInformation.end()) {
+    const bool supportsH264 = std::any_of(capsInformation.begin(), capsInformation.end(), [](const RdpCapsInformation &caps) {
+        return caps.avcSupported && caps.yuv420Supported;
+    });
+    if (!supportsH264) {
         qCWarning(KRDP) << "Client does not support H.264 in YUV420 mode!";
         d->session->close(RdpConnection::CloseReason::VideoInitFailed);
         return CHANNEL_RC_INITIALIZATION_ERROR;
     }
 
-    d->selectedCodec = preferredCodec;
-    if (requestedCodec != d->selectedCodec) {
-        qCDebug(KRDP) << "Negotiated codec fallback from" << codecToString(requestedCodec) << "to" << codecToString(d->selectedCodec);
-    }
-    qCDebug(KRDP) << "Selected caps:" << capVersionToString(selectedCaps->version) << "codec:" << codecToString(d->selectedCodec);
-    if (d->avc444Intent && d->selectedCodec == StreamCodec::Avc420) {
-        qCDebug(KRDP) << "Applying AVC444-intent quality bias while transporting AVC420";
-    }
+    auto selectedCaps = std::max_element(capsInformation.begin(), capsInformation.end(), [](const auto &first, const auto &second) {
+        return first.version < second.version;
+    });
+
+    qCDebug(KRDP) << "Selected caps:" << capVersionToString(selectedCaps->version);
 
     RDPGFX_CAPS_CONFIRM_PDU capsConfirmPdu;
     capsConfirmPdu.capsSet = &(selectedCaps->capSet);
@@ -960,126 +619,33 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     startFramePdu.frameId = frameId;
     endFramePdu.frameId = frameId;
 
-    RDPGFX_SURFACE_COMMAND surfaceCommand;
+    // The encoder produces a full-frame H.264 picture (KPipeWire does not crop
+    // to damage), so send a single region rect covering the whole surface, as
+    // upstream and gnome-remote-desktop do for AVC420.
+    RDPGFX_SURFACE_COMMAND surfaceCommand = {};
     surfaceCommand.surfaceId = d->surface.id;
-    surfaceCommand.codecId = toCodecId(d->selectedCodec);
+    surfaceCommand.codecId = RDPGFX_CODECID_AVC420;
     surfaceCommand.format = PIXEL_FORMAT_BGRX32;
+    surfaceCommand.left = 0;
+    surfaceCommand.top = 0;
+    surfaceCommand.right = frame.size.width();
+    surfaceCommand.bottom = frame.size.height();
     surfaceCommand.length = 0;
     surfaceCommand.data = nullptr;
 
-    RDPGFX_AVC420_BITMAP_STREAM avc420Stream = {};
-    RDPGFX_AVC444_BITMAP_STREAM avc444Stream = {};
-    RDPGFX_AVC420_BITMAP_STREAM *streamPayload = nullptr;
-    const bool useAvc444WireTransport = d->selectedCodec == StreamCodec::Avc444 || d->selectedCodec == StreamCodec::Avc444v2;
-    if (useAvc444WireTransport) {
-        avc444Stream.cbAvc420EncodedBitstream1 = 0;
-        // LC != 0 selects single-stream transport in MS-RDPEGFX.
-        avc444Stream.LC = (d->selectedCodec == StreamCodec::Avc444v2) ? BYTE{2} : BYTE{1};
-        streamPayload = &avc444Stream.bitstream[0];
-        surfaceCommand.extra = &avc444Stream;
-        if (!d->loggedAvc444WireTransport) {
-            qCDebug(KRDP) << "Using AVC444 wire transport mode:" << codecToString(d->selectedCodec);
-            d->loggedAvc444WireTransport = true;
-        }
-    } else {
-        streamPayload = &avc420Stream;
-        surfaceCommand.extra = &avc420Stream;
-    }
+    RDPGFX_AVC420_BITMAP_STREAM avcStream = {};
+    surfaceCommand.extra = &avcStream;
+    avcStream.data = (BYTE *)frame.data.data();
+    avcStream.length = frame.data.length();
 
-    streamPayload->data = (BYTE *)frame.data.data();
-    streamPayload->length = frame.data.length();
-
-    auto damageRects = toDamageRects(frame);
-    const auto trackedDamageRects = damageRects;
-    if (damageRects.empty()) {
-        return true;
-    }
-
-    const auto fullRect = toRdpRect(QRect(QPoint(0, 0), frame.size));
-    const auto frameArea = std::max(1, frame.size.width() * frame.size.height());
-    int damageArea = 0;
-    for (const auto &rect : damageRects) {
-        damageArea += std::max<int>(1, (rect.right - rect.left) * (rect.bottom - rect.top));
-    }
-    const auto damageCoverage = double(damageArea) / double(frameArea);
-    const auto delayedFrames = std::max(d->frameDelay.load(), 0);
-    const bool highMotionUpdate = (damageCoverage >= FullDamageCoverageThreshold) || (damageRects.size() > 8);
-
-    if (highMotionUpdate || delayedFrames >= 1) {
-        d->refinementPending = true;
-        d->stableFramesSinceMotion = 0;
-    } else if (d->refinementPending && damageCoverage <= 0.03 && delayedFrames == 0) {
-        d->stableFramesSinceMotion++;
-    } else {
-        d->stableFramesSinceMotion = 0;
-    }
-
-    const auto cooldownElapsed =
-        (d->lastRefinementFrameTime.time_since_epoch().count() == 0) || ((clk::system_clock::now() - d->lastRefinementFrameTime) >= RefinementCooldown);
-    const bool shouldSendRefinement = d->refinementPending && (d->stableFramesSinceMotion >= StableFramesBeforeRefinement) && (delayedFrames == 0)
-        && !frame.isKeyFrame && cooldownElapsed;
-
-    bool useFullDamage = frame.isKeyFrame
-        || shouldSendRefinement
-        || (damageCoverage >= FullDamageCoverageThreshold)
-        || (delayedFrames >= 1)
-        || (damageRects.size() > 8)
-        || (d->framesSinceFullDamage >= MaxFramesBetweenFullDamage);
-    const bool isRefinementFrame = shouldSendRefinement;
-
-    if (useFullDamage) {
-        damageRects.clear();
-        damageRects.push_back(fullRect);
-        d->framesSinceFullDamage = 0;
-    } else {
-        d->framesSinceFullDamage++;
-    }
-
-    streamPayload->meta.numRegionRects = static_cast<decltype(streamPayload->meta.numRegionRects)>(damageRects.size());
-    auto rects = std::make_unique<RECTANGLE_16[]>(damageRects.size());
-    std::copy(damageRects.begin(), damageRects.end(), rects.get());
-    streamPayload->meta.regionRects = rects.get();
-
-    auto damageBounds = damageRects.front();
-    for (const auto &rect : damageRects) {
-        damageBounds.left = std::min(damageBounds.left, rect.left);
-        damageBounds.top = std::min(damageBounds.top, rect.top);
-        damageBounds.right = std::max(damageBounds.right, rect.right);
-        damageBounds.bottom = std::max(damageBounds.bottom, rect.bottom);
-    }
-    surfaceCommand.left = damageBounds.left;
-    surfaceCommand.top = damageBounds.top;
-    surfaceCommand.right = damageBounds.right;
-    surfaceCommand.bottom = damageBounds.bottom;
-
-    auto qualities = std::make_unique<RDPGFX_H264_QUANT_QUALITY[]>(damageRects.size());
-    streamPayload->meta.quantQualityVals = qualities.get();
-    d->resetActivityGrid(frame.size);
-    d->decayActivity();
-    std::vector<int> rectActivityScores;
-    rectActivityScores.reserve(damageRects.size());
-    for (const auto &rect : damageRects) {
-        rectActivityScores.push_back(d->activityForRect(rect));
-    }
-    for (size_t i = 0; i < damageRects.size(); ++i) {
-        const auto quality =
-            qualityForDamageRect(damageRects[i], frame.size, frame.isKeyFrame, isRefinementFrame, d->avc444Intent, rectActivityScores[i], d->congestionQpBias);
-        qualities[i].qp = quality.qp;
-        qualities[i].p = 0;
-        qualities[i].qualityVal = quality.quality;
-    }
-    d->markDamageActivity(trackedDamageRects);
-
-    if (isRefinementFrame) {
-        d->refinementPending = false;
-        d->stableFramesSinceMotion = 0;
-        d->lastRefinementFrameTime = clk::system_clock::now();
-        qCDebug(KRDP) << "Sent progressive refinement frame";
-    }
+    avcStream.meta.numRegionRects = 1;
+    RECTANGLE_16 rect = {0, 0, static_cast<UINT16>(frame.size.width()), static_cast<UINT16>(frame.size.height())};
+    avcStream.meta.regionRects = &rect;
+    RDPGFX_H264_QUANT_QUALITY quality = {22, 0, 100};
+    avcStream.meta.quantQualityVals = &quality;
 
     d->gfxContext->StartFrame(d->gfxContext.get(), &startFramePdu);
     d->gfxContext->SurfaceCommand(d->gfxContext.get(), &surfaceCommand);
-
     d->gfxContext->EndFrame(d->gfxContext.get(), &endFramePdu);
 
     d->session->networkDetection()->stopBandwidthMeasure();
@@ -1163,21 +729,6 @@ void VideoStream::updateRequestedFrameRate()
     if (nextFrameRate != d->requestedFrameRate) {
         d->requestedFrameRate = nextFrameRate;
         Q_EMIT requestedFrameRateChanged();
-    }
-
-    int targetQpBias = 0;
-    if (delayedFrames >= 6 || decoderQueueDepth >= 8 || rttRiseMs >= 12) {
-        targetQpBias = 8;
-    } else if (delayedFrames >= 3 || decoderQueueDepth >= 5 || rttRiseMs >= 8) {
-        targetQpBias = 5;
-    } else if (delayedFrames >= 1 || decoderQueueDepth >= 2 || rttRiseMs >= 4) {
-        targetQpBias = 2;
-    }
-    targetQpBias = std::clamp(targetQpBias, 0, MaxCongestionQpBias);
-    if (targetQpBias > d->congestionQpBias) {
-        d->congestionQpBias = targetQpBias;
-    } else if (targetQpBias < d->congestionQpBias) {
-        d->congestionQpBias = std::max(targetQpBias, d->congestionQpBias - 1);
     }
 }
 }

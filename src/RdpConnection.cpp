@@ -33,7 +33,6 @@
 #include "PeerContext_p.h"
 #include "Server.h"
 #include "VideoStream.h"
-#include "VideoCodecSupport.h"
 
 #include <KUser>
 
@@ -498,17 +497,9 @@ void RdpConnection::initialize()
     // related codecs to implement. Moreover, it makes the encoding side also
     // simpler so it is currently the only supported codec. This uses the RdpGfx
     // pipeline, so make sure to request that.
-    const bool requestExperimentalAvc444 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444") > 0;
-    const bool requestExperimentalAvc444v2 = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_AVC444V2") > 0;
-    if ((requestExperimentalAvc444 || requestExperimentalAvc444v2) && !LocalAvc444EncodingAvailable()) {
-        qCWarning(KRDP) << "KRDP_EXPERIMENTAL_AVC444/KRDP_EXPERIMENTAL_AVC444V2 enabled with AVC420-only local encoder path;"
-                        << "negotiation will prefer AVC444 caps, then fall back to AVC420 transport";
-    }
-    const bool enableExperimentalAvc444 = requestExperimentalAvc444 || requestExperimentalAvc444v2;
-    const bool enableExperimentalAvc444v2 = requestExperimentalAvc444v2;
     freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, true);
-    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, enableExperimentalAvc444 || enableExperimentalAvc444v2);
-    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, enableExperimentalAvc444v2);
+    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, false);
+    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, false);
     freerdp_settings_set_bool(settings, FreeRDP_GfxH264, true);
 
 
