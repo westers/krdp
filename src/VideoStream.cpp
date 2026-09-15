@@ -38,7 +38,6 @@ namespace clk = std::chrono;
 constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seconds(1);
 constexpr int MaxCoalescedDamageRects = 64;
 constexpr int MaxDamageRectCount = 128;
-constexpr int MaxQueuedFrames = 8;
 constexpr int ActivityTileSize = 64;
 constexpr uint8_t ActivityDecayPerFrame = 1;
 constexpr uint8_t ActivityBoostPerDamage = 6;
@@ -423,8 +422,6 @@ public:
     std::condition_variable frameQueueCondition;
 
     QQueue<VideoFrame> frameQueue;
-    int droppedQueuedFrames = 0;
-    clk::system_clock::time_point lastDropLogTime;
     QSet<uint32_t> pendingFrames;
     QSize activityFrameSize;
     int activityTileColumns = 0;
@@ -573,20 +570,11 @@ bool VideoStream::initialize()
                 if (d->frameQueue.isEmpty()) {
                     continue;
                 }
-                nextFrame = d->frameQueue.takeLast();
-                const auto staleFrames = d->frameQueue.size();
-                if (staleFrames > 0) {
-                    d->frameQueue.clear();
-                    d->droppedQueuedFrames += staleFrames;
-                }
-
-                auto now = clk::system_clock::now();
-                if (d->droppedQueuedFrames > 0
-                    && (d->lastDropLogTime.time_since_epoch().count() == 0 || (now - d->lastDropLogTime) >= clk::seconds(2))) {
-                    qCDebug(KRDP) << "Dropped stale queued frames:" << d->droppedQueuedFrames;
-                    d->droppedQueuedFrames = 0;
-                    d->lastDropLogTime = now;
-                }
+                // Always send in order: every encoded P-frame references the one
+                // before it, so skipping a queued frame would corrupt the client's
+                // decode until the next keyframe. The queue is bounded by
+                // queueFrame() clearing it whenever a new keyframe arrives.
+                nextFrame = d->frameQueue.takeFirst();
             }
             sendFrame(nextFrame);
         }
@@ -622,9 +610,11 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
 
     {
         std::lock_guard lock(d->frameQueueMutex);
-        while (d->frameQueue.size() >= MaxQueuedFrames) {
-            d->frameQueue.removeFirst();
-            d->droppedQueuedFrames++;
+        // A keyframe supersedes everything still waiting to be sent, so the
+        // pending-send queue can never grow beyond one keyframe interval.
+        // Never drop anything else: encoded P-frames must be sent in order.
+        if (frame.isKeyFrame) {
+            d->frameQueue.clear();
         }
         d->frameQueue.append(frame);
     }
