@@ -30,9 +30,10 @@ class SessionWrapper : public QObject
 {
     Q_OBJECT
 public:
-    SessionWrapper(KRdp::RdpConnection *conn, std::unique_ptr<KRdp::AbstractSession> &&sess, KStatusNotifierItem *sni)
+    SessionWrapper(KRdp::RdpConnection *conn, std::unique_ptr<KRdp::AbstractSession> &&sess, KStatusNotifierItem *sni, DisplayWakeGuard *displayWakeGuard)
         : session(std::move(sess))
         , connection(conn)
+        , m_displayWakeGuard(displayWakeGuard)
     {
         m_sni = sni;
 
@@ -51,6 +52,11 @@ public:
         connect(connection, &QObject::destroyed, this, &SessionWrapper::onConnectionDestroyed);
     }
 
+    ~SessionWrapper() override
+    {
+        holdDisplayWake(false);
+    }
+
     void onCursorUpdate(const PipeWireCursor &cursor)
     {
         if (!connection) {
@@ -67,8 +73,24 @@ public:
     {
         if (connection->videoStream()->enabled()) {
             session->requestStreamingEnable(connection->videoStream());
+            holdDisplayWake(true);
         } else {
             session->requestStreamingDisable(connection->videoStream());
+            holdDisplayWake(false);
+        }
+    }
+
+    // Keeps acquire/release balanced no matter how the wrapper ends.
+    void holdDisplayWake(bool hold)
+    {
+        if (hold == m_holdsDisplayWake) {
+            return;
+        }
+        m_holdsDisplayWake = hold;
+        if (hold) {
+            m_displayWakeGuard->acquire();
+        } else {
+            m_displayWakeGuard->release();
         }
     }
 
@@ -88,6 +110,8 @@ public:
     std::unique_ptr<KRdp::AbstractSession> session;
     QPointer<KRdp::RdpConnection> connection;
     KStatusNotifierItem *m_sni;
+    DisplayWakeGuard *m_displayWakeGuard;
+    bool m_holdsDisplayWake = false;
 };
 
 SessionController::SessionController(KRdp::Server *server, SessionType sessionType)
@@ -108,6 +132,13 @@ SessionController::SessionController(KRdp::Server *server, SessionType sessionTy
     connect(quitAction, &QAction::triggered, this, &SessionController::stopFromSNI);
     menu->addAction(quitAction);
     m_sni->setContextMenu(menu);
+
+    // The wake makes KWin re-add every output, which closes the screencast; the
+    // session's own closed-stream recovery re-creates it, so nothing to do here
+    // beyond logging. Hook point if a forced refresh ever turns out to be needed.
+    connect(&m_displayWakeGuard, &DisplayWakeGuard::displayWakeRequested, this, [](bool succeeded) {
+        qDebug() << "Display wake request answered, succeeded:" << succeeded;
+    });
 }
 
 SessionController::~SessionController() noexcept
@@ -142,6 +173,11 @@ void SessionController::setQuality(const std::optional<int> &quality)
     qInfo() << "Applied runtime quality update:" << m_quality.value() << "active sessions:" << m_wrappers.size();
 }
 
+void SessionController::setWakeDisplayOnConnect(bool enabled)
+{
+    m_displayWakeGuard.setEnabled(enabled);
+}
+
 void SessionController::refreshDisplayConfiguration()
 {
     if (m_virtualMonitor.has_value()) {
@@ -160,7 +196,7 @@ void SessionController::refreshDisplayConfiguration()
 
 void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
 {
-    auto wrapper = std::make_unique<SessionWrapper>(newConnection, makeSession(), m_sni);
+    auto wrapper = std::make_unique<SessionWrapper>(newConnection, makeSession(), m_sni, &m_displayWakeGuard);
     if (m_virtualMonitor) {
         wrapper->session->setVirtualMonitor(*m_virtualMonitor);
     } else {

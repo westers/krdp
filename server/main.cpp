@@ -260,6 +260,7 @@ int main(int argc, char **argv)
     }
     const auto quality = parserValueWithDefault(u"quality", config->quality());
     controller.setQuality(quality);
+    controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
 
     auto runtimeConfig = KSharedConfig::openConfig(QStringLiteral("krdpserverrc"));
     auto applyRuntimeConfig = [config, &controller, monitorPinnedByCli, qualityPinnedByCli]() {
@@ -278,6 +279,7 @@ int main(int argc, char **argv)
                     << (updatedMonitorIndex.has_value() ? QStringLiteral("monitor:%1").arg(updatedMonitorIndex.value()) : QStringLiteral("workspace"));
         }
 
+        controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
         applyVaapiDriverMode(config->vaapiDriverMode());
 
         if (monitorPinnedByCli) {
@@ -355,7 +357,7 @@ int main(int argc, char **argv)
 #else
     const auto sessionType = u"portal"_s;
 #endif
-    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 expAvc444=%8 expAvc444v2=%9")
+    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 expAvc444=%8 expAvc444v2=%9 wakeDisplay=%10")
                              .arg(sessionType,
                                   streamTarget,
                                   QString::number(port),
@@ -364,7 +366,8 @@ int main(int argc, char **argv)
                                   envValueOrUnset("KRDP_FORCE_VAAPI_DRIVER"),
                                   envValueOrUnset("KRDP_AUTO_VAAPI_DRIVER"),
                                   experimentalAvc444 ? u"1"_s : u"0"_s,
-                                  experimentalAvc444v2 ? u"1"_s : u"0"_s);
+                                  experimentalAvc444v2 ? u"1"_s : u"0"_s,
+                                  config->wakeDisplayOnConnect() ? u"1"_s : u"0"_s);
 
     if (!server.start()) {
         return -1;

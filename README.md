@@ -152,6 +152,8 @@ kwriteconfig6 --file krdpserverrc --group General --key MonitorMode workspace
 kwriteconfig6 --file krdpserverrc --group General --key MonitorIndex 0
 # Optional: VAAPI driver mode (auto|off|radeonsi|iHD)
 kwriteconfig6 --file krdpserverrc --group General --key VaapiDriverMode auto
+# Optional: wake the display on connect and keep it awake while streaming (true|false)
+kwriteconfig6 --file krdpserverrc --group General --key WakeDisplayOnConnect true
 
 # Enable/restart the systemd service
 systemctl --user enable --now app-org.kde.krdpserver.service
@@ -258,6 +260,25 @@ Manual environment override examples:
 systemctl --user set-environment KRDP_AUTO_VAAPI_DRIVER=0
 systemctl --user set-environment KRDP_FORCE_VAAPI_DRIVER=radeonsi
 ```
+
+### Display Wake On Connect
+
+KWin does not render outputs that are DPMS-off, so connecting to a locked
+session whose monitors have gone to sleep yields a screencast with no frames
+and a blank remote surface. When the first client starts streaming, KRDP now
+asks PowerDevil to wake the display (`org.kde.Solid.PowerManagement.wakeup`,
+falling back to `org.freedesktop.ScreenSaver.SimulateUserActivity`) and takes
+an `org.freedesktop.ScreenSaver` inhibition so the display stays on for as long
+as any session is streaming. The inhibition is released when the last session
+ends or the server shuts down.
+
+The persisted config key is `General/WakeDisplayOnConnect`:
+
+- `true` (default): wake and inhibit as described above.
+- `false`: leave display power management alone.
+
+The key is applied live like the other `General` settings; the startup summary
+line reports it as `wakeDisplay=1|0`.
 
 ### KPipeWire Patch (Damage Metadata)
 

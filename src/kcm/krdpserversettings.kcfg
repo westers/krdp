@@ -40,6 +40,10 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>VAAPI driver selection mode (auto, off, radeonsi, iHD)</label>
       <default>auto</default>
     </entry>
+    <entry name="WakeDisplayOnConnect" type="Bool">
+      <label>Wake the display when a client starts streaming and keep it awake for the session</label>
+      <default>true</default>
+    </entry>
     <entry name="Users" type="StringList">
       <label>Users allowed to login, passwords are stored in KWallet</label>
     </entry>

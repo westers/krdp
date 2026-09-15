@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "DisplayWakeGuard.h"
 #include "RdpConnection.h"
 #include <AbstractSession.h>
 #include <KStatusNotifierItem>
@@ -34,6 +35,7 @@ public:
     void setVirtualMonitor(const KRdp::VirtualMonitor &vm);
     void setMonitorIndex(const std::optional<int> &index);
     void setQuality(const std::optional<int> &quality);
+    void setWakeDisplayOnConnect(bool enabled);
     void refreshDisplayConfiguration();
     void setSNIStatus(const KRdp::RdpConnection::State state);
     void stopFromSNI();
@@ -49,6 +51,9 @@ private:
     std::optional<KRdp::VirtualMonitor> m_virtualMonitor;
 
     std::unique_ptr<KRdp::AbstractSession> m_initializationSession;
+
+    // Declared before m_wrappers so it outlives the wrappers that release into it.
+    DisplayWakeGuard m_displayWakeGuard;
 
     std::vector<std::unique_ptr<SessionWrapper>> m_wrappers;
 
