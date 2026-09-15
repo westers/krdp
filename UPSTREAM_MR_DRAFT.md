@@ -1,3 +1,5 @@
+> **OUTDATED (2026-09-15):** The contents below predate the fork performance clean-up (see `~/dev/rdp/FORK_PERFORMANCE_REVIEW.md`). The damage-aware streaming, congestion adaptation, AVC444 wire path, tile cache and metadata pairing described here were removed; only H264 Main, VA-API driver selection, multi-monitor ResetGraphics, monitor targeting and input/pointer fixes remain as fork value.
+
 ## Title
 KRDP: damage-aware streaming refinements, congestion adaptation, and H264 Main preference
 

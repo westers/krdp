@@ -3,21 +3,21 @@
 ## Goal
 Reduce encoded bandwidth by leveraging compositor damage metadata and protocol-side region optimization, inspired by ICA/Thinwire and RDPGFX region/caching behavior.
 
-## Status Snapshot (2026-02-20)
-- `OPT-001` Damage metadata plumbed through encoded stream and consumed in KRDP: `DONE`.
-- `OPT-002` Damage-first send path with rectangle coalescing: `DONE`.
-- `OPT-003` Packet/metadata pairing with fallback and resync behavior: `DONE`.
-- `OPT-004` Tile activity classification with per-region quality bias: `DONE`.
-- `OPT-005` Progressive refinement after motion settles (with cooldown): `DONE`.
-- `OPT-006` Congestion adaptation (frame rate + QP bias): `DONE`.
-- `OPT-007` H264 Main preference and fallback profile handling: `DONE`.
-- `OPT-008` AVC444 negotiation scaffold with AVC420 fallback and intent bias: `DONE` (transport remains AVC420 by design; true AVC444 is tracked separately in `OPT-010`).
-- `OPT-009` True multi-monitor protocol layout (server advertises multiple monitors/surfaces): `PARTIAL` (KRDP now advertises per-monitor layout rectangles to clients for workspace/output sessions, but transport is still a single encoded surface).
-- `OPT-010` True AVC444 transport path end-to-end: `PARTIAL` (experimental AVC444/AVC444v2 wire payload path is implemented behind `KRDP_EXPERIMENTAL_TRUE_AVC444=1`; encoder still uses the existing single-stream H.264 path).
-- `OPT-011` Automatic GPU encode-device selection (avoid decode-only VAAPI backends): `PARTIAL` (mixed-GPU auto-selection now prefers non-NVIDIA VAAPI driver when available, and stream startup now retries once with software `libx264` on encoder init failure; further per-device validation remains).
-- `OPT-012` Explicit tile/content cache reuse strategy: `TODO`.
-- `OPT-013` Persisted VAAPI mode controls in KCM/server config (`auto|off|radeonsi|iHD`): `DONE` (startup now maps config to `KRDP_AUTO_VAAPI_DRIVER` / `KRDP_FORCE_VAAPI_DRIVER`).
-- `OPT-014` Startup observability and smoke-test encoder assertions: `DONE` (startup summary log line + `smoke-test.sh --assert-encoder` checks).
+## Status Snapshot (2026-02-20; clean-up 2026-09-15)
+- `OPT-001` Damage metadata plumbed through encoded stream and consumed in KRDP: `REMOVED` (2026-09-15 — no consumer; KPipeWire does not pair damage 1:1 with encoded packets).
+- `OPT-002` Damage-first send path with rectangle coalescing: `REMOVED` (2026-09-15 — encoder produces full-frame pictures, so full-surface AVC420 region restored per upstream).
+- `OPT-003` Packet/metadata pairing with fallback and resync behavior: `REMOVED` (2026-09-15 — FIFO pairing mis-paired metadata to packets; deleted from both sessions).
+- `OPT-004` Tile activity classification with per-region quality bias: `REMOVED` (2026-09-15 — fed only the informational RDPGFX metablock; never reached the encoder).
+- `OPT-005` Progressive refinement after motion settles (with cooldown): `REMOVED` (2026-09-15 — no extra data encoded; a relabelled normal frame).
+- `OPT-006` Congestion adaptation (frame rate + QP bias): `SUPERSEDED-BY-UPSTREAM` (2026-09-15 — RTT source-rate heuristic removed per upstream `978f1cb`; QP bias only touched the informational metablock; requested rate now fixed at the client value).
+- `OPT-007` H264 Main preference and fallback profile handling: `DONE` (kept — pure fork value over upstream).
+- `OPT-008` AVC444 negotiation scaffold with AVC420 fallback and intent bias: `REMOVED` (2026-09-15 — AVC420-only negotiation restored to match upstream `origin/master`).
+- `OPT-009` True multi-monitor protocol layout (server advertises multiple monitors/surfaces): `PARTIAL` (kept — per-monitor `ResetGraphics` layout retained; transport is still a single encoded surface).
+- `OPT-010` True AVC444 transport path end-to-end: `REMOVED` (2026-09-15 — the `LC=1`/`LC=2` wire path was AVC420-in-an-envelope / chroma-only-broken; deleted with `VideoCodecSupport.h`).
+- `OPT-011` Automatic GPU encode-device selection (avoid decode-only VAAPI backends): `PARTIAL` (kept — auto-selection moved to startup and re-runs on config change; the libx264 software-fallback/stall-watchdog was `REMOVED` on 2026-09-15 because `start()` from the Idle handler is a no-op against KPipeWire 6.6 and it leaked `KPIPEWIRE_FORCE_ENCODER` process-wide).
+- `OPT-012` Explicit tile/content cache reuse strategy: `REMOVED` (2026-09-15 — inert with full-frame encode, `cacheSlot` was 0-based (invalid), disabled by default; no path to a benefit without a damage-cropping encoder).
+- `OPT-013` Persisted VAAPI mode controls in KCM/server config (`auto|off|radeonsi|iHD`): `DONE` (kept).
+- `OPT-014` Startup observability and smoke-test encoder assertions: `DONE` (kept; startup summary line updated to drop the AVC444 fields).
 
 ## Tracking Rule
 - Every optimization item must have a stable ID in the form `OPT-###`.
@@ -25,9 +25,13 @@ Reduce encoded bandwidth by leveraging compositor damage metadata and protocol-s
 - When status changes, update this file with the date and short reason.
 
 ## Status Updates
+- 2026-09-15: `OPT-035` (force IDR on surface (re)create) implemented. KPipeWire 6.6.4 exposes no keyframe-request API (`grep -i keyframe /usr/include/KPipeWire/*.h` finds only `Packet::isKeyFrame`), so `VideoStream::sendFrame()` emits a new `keyFrameRequested()` signal when `performReset()` runs and the frame being sent is not a keyframe (rate-limited to once per 2 s). `PlasmaScreencastV1Session::requestKeyFrame()` restarts the encoded stream on the same PipeWire node through the existing deferred re-attach (a restarted stream always opens with an IDR); the `PortalSession`/base implementation logs a no-op. Also closed two silent first-IDR losses: the submission thread no longer discards a frame when caps are not yet confirmed — `sendFrame()` now returns false and the frame is re-queued (head) instead of dropped — and the start-up burst can no longer drop the IDR (Phase 1 clear-only-on-keyframe). Harness: first delivered frame is `keyframe true`; once damage exists the first keyframe lands ~100 ms after it.
+- 2026-09-15: Fork performance clean-up (see `~/dev/rdp/FORK_PERFORMANCE_REVIEW.md`). Removed the no-op quality/activity/refinement/congestion-QP logic, the AVC444/AVC444v2 wire path (`VideoCodecSupport.h`), the RDPGFX tile cache, the damage coalescer and the packet/metadata FIFO pairing in both sessions. Restored upstream's full-surface AVC420 send (single region rect, `qp=22`, full `destRect`) and AVC420-only caps negotiation. Ported upstream `d399708` (clear pending-send queue only on a new keyframe; never drop encoded P-frames), `cc67efe` (pendingFrames mutex, atomic `requestedFrameRate`, close-before-context ordering, dequeue-after-caps guard) and `d736d8a` (GFX CapsAdvertise re-advertisement reset). Removed the software-fallback / hardware-retry / stall-watchdog state machine and the display-change→libx264 policy from `AbstractSession`; stream restarts now go only through the deferred `attachEncodedStream()` + nodeId poll. `d3b0651` pre-encode backpressure was **not** ported: KPipeWire 6.6.4 has no `setEncoderPaused`.
+- 2026-09-15: `OPT-006` — removed the RTT-based source-rate heuristic (upstream `978f1cb`). The upstream ack-window + goodput adaptive-quality replacement was not ported: the installed KPipeWire 6.6.4 and the fork's `NetworkDetection` lack the required APIs (`NetworkDetection::bandwidth()`, encoder pause). Requested frame rate is pinned to the client-configured value.
 - 2026-02-20: `OPT-013` marked `DONE` after wiring `General/VaapiDriverMode` through KCM and server startup environment handling.
 - 2026-02-20: `OPT-014` marked `DONE` after adding a startup summary log line and smoke-test encoder path assertions.
 - 2026-02-20: `OPT-011` reliability pass added one-shot software fallback (`libx264`) when PipeWire encoder initialization fails.
+- 2026-02-26: `OPT-012` marked `PARTIAL`: RDPGFX tile content cache infrastructure implemented (SurfaceToCache/CacheToSurface replay, LRU eviction, batched fill, caps awareness, quality/reset invalidation). Disabled by default — FreeRDP xfreerdp crashes on SurfaceToCache PDUs (error 1359). Enable with `KRDP_ENABLE_TILE_CACHE=1` for clients that support RDPGFX bitmap caching.
 - 2026-02-20: `OPT-011` reliability pass extended fallback to runtime startup stalls: if no encoded packets are received shortly after stream activation, KRDP forces `libx264` and retries once (with temporary override restoration so configured VAAPI mode remains in effect afterward). This stall watchdog is now disabled by default and requires `KRDP_ENABLE_STALL_WATCHDOG=1` to activate.
 - 2026-02-20: `OPT-009` moved to `PARTIAL` by advertising monitor layout metadata in RDPGFX reset; full multi-surface transport is still pending.
 - 2026-02-20: `OPT-010` moved to `PARTIAL` after adding experimental AVC444/AVC444v2 wire transport framing (`RDPGFX_AVC444_BITMAP_STREAM`, LC single-stream mode) under `KRDP_EXPERIMENTAL_TRUE_AVC444`.
@@ -49,13 +53,13 @@ This section is the canonical quick reference for runtime knobs already implemen
 ### Runtime Environment Variables
 - `KRDP_FORCE_VAAPI_DRIVER=<driver>`: force VAAPI driver selection in KRDP startup/device probing.
 - `KRDP_AUTO_VAAPI_DRIVER=0`: disable KRDP automatic VAAPI driver selection.
-- `KPIPEWIRE_FORCE_ENCODER=libx264`: force KPipeWire software H.264 encoder.
-- `KRDP_EXPERIMENTAL_AVC444=1` / `KRDP_EXPERIMENTAL_AVC444V2=1`: enable AVC444 negotiation paths (with AVC420 local transport fallback behavior where applicable).
+- `KPIPEWIRE_FORCE_ENCODER=libx264`: honoured by KPipeWire itself if the user sets it; as of the 2026-09-15 clean-up KRDP no longer reads or writes this variable.
+- (removed 2026-09-15) `KRDP_EXPERIMENTAL_AVC444*` / `KRDP_EXPERIMENTAL_TRUE_AVC444` / `KRDP_ENABLE_TILE_CACHE` / `KRDP_ENABLE_STALL_WATCHDOG`: the features behind these flags were deleted.
 
-### Current Display-Change Recovery Behavior
-- Display geometry/topology changes are detected at runtime and trigger stream rebind.
-- If this path stalls encode, KRDP forces software fallback.
-- Current stability policy: once display-change fallback is entered, automatic hardware retry is suppressed for the rest of that session (hardware is retried on a fresh reconnect).
+### Current Display-Change Recovery Behavior (2026-09-15)
+- Display geometry/topology changes trigger a screencast re-create that goes through the deferred `attachEncodedStream()` path (it waits for KPipeWire's produce thread to tear down — `nodeId()==0` — before calling `start()` again).
+- Config reloads (e.g. a quality-slider write) are decoupled from display-refresh: a quality change never touches the stream.
+- The software-fallback / hardware-retry / stall-watchdog policy was removed: it could not restart a KPipeWire 6.6 stream and leaked `KPIPEWIRE_FORCE_ENCODER` process-wide. KPipeWire's own internal VAAPI→libx264 fallback still applies at encoder init.
 
 ## Current KRdp Capture Path (Source Evidence)
 KRdp already uses PipeWire and encoded streams.

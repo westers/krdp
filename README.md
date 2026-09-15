@@ -214,18 +214,6 @@ Useful runtime log command:
 journalctl --user -f -o cat -u app-org.kde.krdpserver -u plasma-xdg-desktop-portal-kde
 ```
 
-### Codec Experiment Flags
-
-`KRDP_EXPERIMENTAL_AVC444=1` and `KRDP_EXPERIMENTAL_AVC444V2=1` enable
-AVC444 capability negotiation experiments.
-
-`KRDP_EXPERIMENTAL_TRUE_AVC444=1` enables experimental AVC444 wire transport
-(`RDPGFX_AVC444_BITMAP_STREAM`, single-stream mode) when AVC444/AVC444v2 is
-negotiated.
-
-Without `KRDP_EXPERIMENTAL_TRUE_AVC444=1`, KRDP automatically falls back to
-AVC420 transport while preserving AVC444 intent for quality tuning.
-
 ### VAAPI Driver Auto-Selection
 
 On mixed-GPU systems, KRDP now attempts to avoid decode-only VAAPI backends by
@@ -240,19 +228,9 @@ The persisted KCM/config key is `General/VaapiDriverMode` with these values:
 
 Note for NVIDIA-only systems: current KRDP hardware encode integration is
 VAAPI-based. NVIDIA acceleration typically uses NVENC instead, so KRDP falls
-back to software (`libx264`) unless a non-NVIDIA VAAPI encode path is present.
-This is an API-path limitation, not raw GPU compute performance.
-
-KRDP can optionally retry once with forced `libx264` if the PipeWire stream
-becomes active but does not deliver encoded packets within the timeout window.
-This stall watchdog is **disabled by default** and must be opted into:
-
-```bash
-systemctl --user set-environment KRDP_ENABLE_STALL_WATCHDOG=1
-```
-
-When enabled, the override is temporary for that retry path and then restored,
-so panel-selected VAAPI mode continues to apply for subsequent sessions.
+back to software (`libx264`) via KPipeWire's own internal encoder fallback
+unless a non-NVIDIA VAAPI encode path is present. This is an API-path
+limitation, not raw GPU compute performance.
 
 Manual environment override examples:
 
@@ -282,34 +260,36 @@ line reports it as `wakeDisplay=1|0`.
 
 ### KPipeWire Patch (Damage Metadata)
 
-The local KRDP improvements can use extra encoded-frame metadata from a patched
-KPipeWire build. The patch is tracked in this repository:
+`patches/kpipewire/0001-damage-metadata-encoded-stream.patch` remains in the
+tree for reference but is **no longer consumed** by KRDP: the damage-metadata
+pairing it fed was removed (KPipeWire does not pair damage 1:1 with encoded
+packets, so it mis-paired rects; see the 2026-09-15 clean-up). The encoded
+path now sends a full-surface update per frame, matching upstream. The patch
+would need to attach sequence/PTS-matched damage to `Packet` before it is worth
+re-wiring.
 
-- `patches/kpipewire/0001-damage-metadata-encoded-stream.patch`
+### Performance Notes
 
-Apply it in a KPipeWire checkout with:
+The encoded-frame path mirrors upstream KRDP: one full-surface AVC420 region
+per frame, and the pending-send queue is cleared only when a new keyframe
+arrives (encoded P-frames are never dropped — dropping one corrupts the
+client's decode until the next keyframe). Fork-specific value kept over
+upstream:
 
-```bash
-cd /path/to/kpipewire
-git apply /path/to/krdp/patches/kpipewire/0001-damage-metadata-encoded-stream.patch
-```
+- H.264 **Main** profile when the encoder offers it (CABAC, better quality/bit).
+- Automatic VAAPI driver selection on mixed-GPU systems (see above).
+- Multi-monitor `ResetGraphics` layout for workspace/output streams.
+- Correct pointer mapping and input marshalling for non-origin outputs.
 
-### Performance Tuning Notes
-
-Recent KRDP builds include several latency and artifact-reduction behaviors:
-
-- Damage-aware region updates with rectangle coalescing.
-- Freshest-frame delivery under load (stale queued frames are dropped).
-- Packet/damage metadata pairing with a short wait budget before full-frame fallback.
-- Tile activity classification (static regions biased for crisp quality, transient regions biased for compression).
-- Progressive refinement: after motion settles, one high-quality full-frame refresh is sent.
-- AVC444-intent fallback bias: if a client asks for AVC444 but local transport is AVC420-only, KRDP slightly raises quality for text/static UI regions.
+The single most effective bandwidth lever is the `Quality` setting: it maps to
+the encoder's CQP, where `Quality=100` is near-lossless (QP 1). ~80 is a good
+default.
 
 Useful debug markers:
 
 ```bash
 journalctl --user -f -o cat -u app-org.kde.krdpserver | \
-  rg -i 'Dropped stale queued frames|No matching damage metadata|Sent progressive refinement frame|Using AVC444 wire transport mode'
+  rg -i 'Reset graphics monitor layout|GFX channel reset|Selected caps|VAAPI driver'
 ```
 
 ## SDDM Autologin
