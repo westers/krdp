@@ -6,29 +6,15 @@
 #include <PipeWireEncodedStream>
 #include <PipeWireSourceStream>
 #include <QSet>
-#include <QTimer>
 
 #include "krdp_logging.h"
 
 namespace KRdp
 {
-namespace
-{
-bool stallWatchdogFallbackEnabled()
-{
-    static const bool enabled = qEnvironmentVariableIntValue("KRDP_ENABLE_STALL_WATCHDOG") == 1;
-    return enabled;
-}
-}
 
 class KRDP_NO_EXPORT AbstractSession::Private
 {
 public:
-    static constexpr int FirstPacketTimeoutMs = 1500;
-    static constexpr int PacketStallTimeoutMs = 3000;
-    static constexpr int HardwareRetryDelayMs = 8000;
-    static constexpr int MaxHardwareRetryAttempts = 3;
-
     std::unique_ptr<PipeWireEncodedStream> encodedStream;
 
     std::optional<int> activeStream;
@@ -40,23 +26,6 @@ public:
     std::optional<quint32> frameRate = 60;
     std::optional<quint8> quality;
     QSet<QObject *> enableRequests;
-    bool softwareFallbackRetryPending = false;
-    bool softwareFallbackRetryInProgress = false;
-    bool softwareFallbackActive = false;
-    bool hardwareRetryPending = false;
-    bool hardwareRetryInProgress = false;
-    bool hardwareRetryScheduled = false;
-    bool suppressHardwareRetryForSession = false;
-    bool autoHardwareRetryAllowed = true;
-    int hardwareRetryDelayMs = HardwareRetryDelayMs;
-    int hardwareRetryAttempts = 0;
-    quint64 hardwareRetryScheduleGeneration = 0;
-    bool receivedPacketSinceActivation = false;
-    quint64 streamActivationGeneration = 0;
-    quint64 packetSequence = 0;
-    bool temporarySoftwareEncoderOverride = false;
-    bool hadPreviousForcedEncoder = false;
-    QByteArray previousForcedEncoder;
 };
 
 AbstractSession::AbstractSession()
@@ -70,7 +39,6 @@ AbstractSession::~AbstractSession()
     if (d->encodedStream) {
         d->encodedStream->stop();
     }
-    restoreForcedEncoderOverride();
 }
 
 QSize AbstractSession::logicalSize() const
@@ -81,20 +49,6 @@ QSize AbstractSession::logicalSize() const
 bool AbstractSession::streamingRequested() const
 {
     return d->enabled;
-}
-
-void AbstractSession::preferSoftwareEncoderForDisplayChange(const QString &reason)
-{
-    if (!d->enabled || !d->started) {
-        return;
-    }
-
-    d->suppressHardwareRetryForSession = true;
-    requestSoftwareFallback(reason,
-                           QStringLiteral("Display reconfiguration in progress; temporarily forcing software encoder:"),
-                           Private::HardwareRetryDelayMs,
-                           false);
-    qCInfo(KRDP) << "Automatic hardware retry disabled for this session after display-mode transition";
 }
 
 int AbstractSession::activeStream() const
@@ -157,19 +111,7 @@ void AbstractSession::setStreamingEnabled(bool enable)
         if (enable && d->started) {
             d->encodedStream->start();
         } else {
-            d->softwareFallbackRetryPending = false;
-            d->softwareFallbackRetryInProgress = false;
-            d->softwareFallbackActive = false;
-            d->hardwareRetryPending = false;
-            d->hardwareRetryInProgress = false;
-            d->hardwareRetryScheduled = false;
-            d->suppressHardwareRetryForSession = false;
-            d->autoHardwareRetryAllowed = true;
-            d->hardwareRetryDelayMs = Private::HardwareRetryDelayMs;
-            d->hardwareRetryAttempts = 0;
-            ++d->hardwareRetryScheduleGeneration;
             d->encodedStream->stop();
-            restoreForcedEncoderOverride();
         }
     }
 }
@@ -203,12 +145,6 @@ PipeWireEncodedStream *AbstractSession::stream()
 {
     if (!d->encodedStream) {
         d->encodedStream = std::make_unique<PipeWireEncodedStream>();
-        connect(d->encodedStream.get(), &PipeWireBaseEncodedStream::errorFound, this, &AbstractSession::handleStreamError);
-        connect(d->encodedStream.get(), &PipeWireBaseEncodedStream::stateChanged, this, &AbstractSession::handleStreamStateChanged);
-        connect(d->encodedStream.get(), &PipeWireBaseEncodedStream::activeChanged, this, &AbstractSession::handleStreamActiveChanged);
-        connect(d->encodedStream.get(), &PipeWireEncodedStream::newPacket, this, [this](const PipeWireEncodedStream::Packet &) {
-            handleEncodedPacket();
-        });
         if (d->frameRate) {
             d->encodedStream->setMaxFramerate({d->frameRate.value(), 1});
         }
@@ -217,255 +153,6 @@ PipeWireEncodedStream *AbstractSession::stream()
         }
     }
     return d->encodedStream.get();
-}
-
-bool AbstractSession::requestSoftwareFallback(const QString &reason, const QString &context, int hardwareRetryDelayMs, bool allowHardwareRetry)
-{
-    d->autoHardwareRetryAllowed = d->autoHardwareRetryAllowed && allowHardwareRetry && !d->suppressHardwareRetryForSession;
-    if (hardwareRetryDelayMs > 0) {
-        d->hardwareRetryDelayMs = hardwareRetryDelayMs;
-    } else if (d->hardwareRetryDelayMs <= 0) {
-        d->hardwareRetryDelayMs = Private::HardwareRetryDelayMs;
-    }
-
-    const auto forcedEncoder = qgetenv("KPIPEWIRE_FORCE_ENCODER").trimmed().toLower();
-    const bool alreadyForcedSoftware = (forcedEncoder == "libx264");
-    if (d->softwareFallbackActive) {
-        qCWarning(KRDP) << context << reason << "(software fallback already active)";
-        if (d->autoHardwareRetryAllowed) {
-            scheduleHardwareEncoderRetry(true);
-        }
-        return true;
-    }
-
-    if (alreadyForcedSoftware && !d->temporarySoftwareEncoderOverride) {
-        qCWarning(KRDP) << context << reason << "(software encoder forced externally)";
-        return true;
-    }
-
-    d->hardwareRetryPending = false;
-    d->hardwareRetryInProgress = false;
-    d->hardwareRetryScheduled = false;
-    ++d->hardwareRetryScheduleGeneration;
-    d->softwareFallbackRetryPending = true;
-    if (!d->temporarySoftwareEncoderOverride) {
-        d->hadPreviousForcedEncoder = qEnvironmentVariableIsSet("KPIPEWIRE_FORCE_ENCODER");
-        d->previousForcedEncoder = qgetenv("KPIPEWIRE_FORCE_ENCODER");
-        d->temporarySoftwareEncoderOverride = true;
-    }
-    qputenv("KPIPEWIRE_FORCE_ENCODER", "libx264");
-    qCWarning(KRDP) << context << reason;
-
-    if (d->encodedStream && d->encodedStream->state() == PipeWireBaseEncodedStream::Idle) {
-        handleStreamStateChanged();
-    } else if (d->encodedStream) {
-        d->encodedStream->stop();
-    }
-    return true;
-}
-
-void AbstractSession::restoreForcedEncoderOverride()
-{
-    if (!d->temporarySoftwareEncoderOverride) {
-        return;
-    }
-
-    if (d->hadPreviousForcedEncoder) {
-        qputenv("KPIPEWIRE_FORCE_ENCODER", d->previousForcedEncoder);
-    } else {
-        qunsetenv("KPIPEWIRE_FORCE_ENCODER");
-    }
-
-    d->temporarySoftwareEncoderOverride = false;
-    d->hadPreviousForcedEncoder = false;
-    d->previousForcedEncoder.clear();
-}
-
-void AbstractSession::handleStreamError(const QString &errorMessage)
-{
-    if (!requestSoftwareFallback(errorMessage, QStringLiteral("PipeWire encoder initialization failed; forcing software fallback to libx264:"))) {
-        qCWarning(KRDP) << "PipeWire encoder failed and no additional fallback is available:" << errorMessage;
-        restoreForcedEncoderOverride();
-        Q_EMIT error();
-    }
-}
-
-void AbstractSession::handleStreamStateChanged()
-{
-    if (!d->encodedStream) {
-        return;
-    }
-    if (d->encodedStream->state() != PipeWireBaseEncodedStream::Idle || !d->enabled) {
-        return;
-    }
-
-    if (d->softwareFallbackRetryPending) {
-        d->softwareFallbackRetryPending = false;
-        d->softwareFallbackRetryInProgress = true;
-        qCInfo(KRDP) << "Retrying PipeWire stream with forced software encoder libx264";
-        d->encodedStream->start();
-        return;
-    }
-
-    if (d->hardwareRetryPending) {
-        d->hardwareRetryPending = false;
-        d->hardwareRetryInProgress = true;
-        qCInfo(KRDP) << "Retrying PipeWire stream with hardware encoder";
-        d->encodedStream->start();
-    }
-}
-
-void AbstractSession::handleStreamActiveChanged(bool active)
-{
-    if (!active) {
-        d->receivedPacketSinceActivation = false;
-        return;
-    }
-
-    d->receivedPacketSinceActivation = false;
-    const auto generation = ++d->streamActivationGeneration;
-    if (stallWatchdogFallbackEnabled()) {
-        schedulePacketStallWatchdog();
-        QTimer::singleShot(Private::FirstPacketTimeoutMs, this, [this, generation]() {
-            if (!d->encodedStream || !d->enabled) {
-                return;
-            }
-            if (generation != d->streamActivationGeneration) {
-                return;
-            }
-            if (!d->encodedStream->isActive() || d->receivedPacketSinceActivation) {
-                return;
-            }
-
-            if (!requestSoftwareFallback(QStringLiteral("No encoded packets received from PipeWire within %1 ms").arg(Private::FirstPacketTimeoutMs),
-                                         QStringLiteral("PipeWire stream stalled before first packet; forcing software fallback to libx264:"))) {
-                qCWarning(KRDP) << "PipeWire stream stalled and no additional fallback is available";
-                restoreForcedEncoderOverride();
-                Q_EMIT error();
-            }
-        });
-    }
-
-    if (d->softwareFallbackRetryInProgress) {
-        d->softwareFallbackRetryInProgress = false;
-        d->softwareFallbackActive = true;
-        qCInfo(KRDP) << "Software encoder fallback active for this session";
-        restoreForcedEncoderOverride();
-        if (d->autoHardwareRetryAllowed) {
-            scheduleHardwareEncoderRetry();
-        }
-        return;
-    }
-
-    if (d->hardwareRetryInProgress) {
-        d->hardwareRetryInProgress = false;
-        d->softwareFallbackActive = false;
-        d->suppressHardwareRetryForSession = false;
-        d->autoHardwareRetryAllowed = true;
-        d->hardwareRetryDelayMs = Private::HardwareRetryDelayMs;
-        d->hardwareRetryAttempts = 0;
-        qCInfo(KRDP) << "Hardware encoder recovered; leaving software fallback";
-        return;
-    }
-
-    if (d->softwareFallbackActive) {
-        if (d->autoHardwareRetryAllowed) {
-            scheduleHardwareEncoderRetry();
-        }
-    }
-}
-
-void AbstractSession::handleEncodedPacket()
-{
-    d->receivedPacketSinceActivation = true;
-    ++d->packetSequence;
-    if (stallWatchdogFallbackEnabled()) {
-        schedulePacketStallWatchdog();
-    }
-}
-
-void AbstractSession::schedulePacketStallWatchdog()
-{
-    if (!stallWatchdogFallbackEnabled()) {
-        return;
-    }
-    if (!d->encodedStream || !d->enabled || !d->encodedStream->isActive()) {
-        return;
-    }
-
-    const auto activationGeneration = d->streamActivationGeneration;
-    const auto packetSequence = d->packetSequence;
-    QTimer::singleShot(Private::PacketStallTimeoutMs, this, [this, activationGeneration, packetSequence]() {
-        if (!d->encodedStream || !d->enabled) {
-            return;
-        }
-        if (activationGeneration != d->streamActivationGeneration) {
-            return;
-        }
-        if (!d->encodedStream->isActive()) {
-            return;
-        }
-        if (packetSequence != d->packetSequence) {
-            return;
-        }
-
-        if (!requestSoftwareFallback(QStringLiteral("No encoded packets received for %1 ms").arg(Private::PacketStallTimeoutMs),
-                                     QStringLiteral("PipeWire stream stalled during active session; forcing software fallback to libx264:"))) {
-            qCWarning(KRDP) << "PipeWire stream stalled during active session and no additional fallback is available";
-            restoreForcedEncoderOverride();
-            Q_EMIT error();
-        }
-    });
-}
-
-void AbstractSession::scheduleHardwareEncoderRetry(bool forceReschedule)
-{
-    if (!d->autoHardwareRetryAllowed || !d->softwareFallbackActive || d->hardwareRetryInProgress || !d->enabled || !d->encodedStream) {
-        return;
-    }
-
-    if (forceReschedule && d->hardwareRetryScheduled) {
-        d->hardwareRetryScheduled = false;
-        ++d->hardwareRetryScheduleGeneration;
-    }
-
-    if (d->hardwareRetryScheduled) {
-        return;
-    }
-
-    if (d->hardwareRetryAttempts >= Private::MaxHardwareRetryAttempts) {
-        return;
-    }
-
-    d->hardwareRetryScheduled = true;
-    const auto retryAttempt = d->hardwareRetryAttempts + 1;
-    const auto generation = ++d->hardwareRetryScheduleGeneration;
-    qCInfo(KRDP) << "Scheduling hardware encoder retry in" << d->hardwareRetryDelayMs << "ms (attempt" << retryAttempt << "of"
-                 << Private::MaxHardwareRetryAttempts << ')';
-
-    QTimer::singleShot(d->hardwareRetryDelayMs, this, [this, generation]() {
-        if (!d->encodedStream || !d->enabled) {
-            return;
-        }
-        if (generation != d->hardwareRetryScheduleGeneration) {
-            return;
-        }
-        if (!d->softwareFallbackActive || d->hardwareRetryInProgress || d->hardwareRetryAttempts >= Private::MaxHardwareRetryAttempts) {
-            return;
-        }
-
-        d->hardwareRetryScheduled = false;
-        ++d->hardwareRetryAttempts;
-        d->hardwareRetryPending = true;
-        qCInfo(KRDP) << "Attempting hardware encoder recovery (attempt" << d->hardwareRetryAttempts << "of" << Private::MaxHardwareRetryAttempts << ')';
-        restoreForcedEncoderOverride();
-
-        if (d->encodedStream->state() == PipeWireBaseEncodedStream::Idle) {
-            handleStreamStateChanged();
-        } else {
-            d->encodedStream->stop();
-        }
-    });
 }
 
 void AbstractSession::setStarted(bool s)

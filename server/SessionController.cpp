@@ -154,7 +154,13 @@ SessionController::~SessionController() noexcept
 
 void SessionController::setMonitorIndex(const std::optional<int> &index)
 {
+    if (m_monitorIndex == index) {
+        return;
+    }
+
     m_monitorIndex = index;
+    qInfo() << "Monitor target changed to"
+            << (index.has_value() ? QStringLiteral("monitor:%1").arg(index.value()) : QStringLiteral("workspace"));
     refreshDisplayConfiguration();
 }
 
@@ -165,6 +171,10 @@ void SessionController::setVirtualMonitor(const KRdp::VirtualMonitor &virtualMon
 
 void SessionController::setQuality(const std::optional<int> &quality)
 {
+    if (m_quality == quality) {
+        return;
+    }
+
     m_quality = quality;
     if (!m_quality.has_value()) {
         return;
@@ -209,7 +219,9 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     } else {
         wrapper->session->setActiveStream(m_monitorIndex.value_or(-1));
     }
-    wrapper->session->setVideoQuality(m_quality.value());
+    if (m_quality.has_value()) {
+        wrapper->session->setVideoQuality(m_quality.value());
+    }
 
     connect(wrapper.get(), &SessionWrapper::connectionDestroyed, this, [this](SessionWrapper *wrapper) {
         m_wrappers.erase(std::remove_if(m_wrappers.begin(),

@@ -41,6 +41,13 @@ public:
     void setActiveStream(int stream);
     void setVirtualMonitor(const VirtualMonitor &vm);
     void setVideoQuality(quint8 quality);
+
+    /**
+     * Re-create the capture stream after the display topology changed.
+     *
+     * The default implementation does nothing; sessions that can retarget an
+     * output override it.
+     */
     virtual void refreshDisplayConfiguration();
 
     /**
@@ -100,7 +107,6 @@ protected:
     QSize size() const;
     QSize logicalSize() const;
     bool streamingRequested() const;
-    void preferSoftwareEncoderForDisplayChange(const QString &reason);
     std::optional<VirtualMonitor> virtualMonitor() const;
     int activeStream() const;
 
@@ -110,15 +116,6 @@ protected:
     PipeWireEncodedStream *stream();
 
 private:
-    void schedulePacketStallWatchdog();
-    void scheduleHardwareEncoderRetry(bool forceReschedule = false);
-    void restoreForcedEncoderOverride();
-    bool requestSoftwareFallback(const QString &reason, const QString &context, int hardwareRetryDelayMs = -1, bool allowHardwareRetry = true);
-    void handleStreamError(const QString &errorMessage);
-    void handleStreamStateChanged();
-    void handleStreamActiveChanged(bool active);
-    void handleEncodedPacket();
-
     class Private;
     const std::unique_ptr<Private> d;
 };

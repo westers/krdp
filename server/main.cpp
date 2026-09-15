@@ -395,36 +395,50 @@ int main(int argc, char **argv)
     controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
 
     auto runtimeConfig = KSharedConfig::openConfig(QStringLiteral("krdpserverrc"));
+    // Applies persisted-config changes (quality, monitor target, wake, VAAPI).
+    // It must NOT force a display refresh: a quality-slider write should never
+    // touch the stream. setMonitorIndex() self-guards and only re-creates the
+    // stream when the resolved target actually changed.
     auto applyRuntimeConfig = [config, &controller, monitorPinnedByCli, qualityPinnedByCli]() {
         config->read();
 
         if (!qualityPinnedByCli) {
-            const auto updatedQuality = config->quality();
-            controller.setQuality(updatedQuality);
-            qInfo() << "Applied runtime quality update from config:" << updatedQuality;
+            controller.setQuality(config->quality());
         }
 
         if (!monitorPinnedByCli) {
-            const auto updatedMonitorIndex = configuredMonitorIndex(config);
-            controller.setMonitorIndex(updatedMonitorIndex);
-            qInfo() << "Applied runtime monitor target update from config:"
-                    << (updatedMonitorIndex.has_value() ? QStringLiteral("monitor:%1").arg(updatedMonitorIndex.value()) : QStringLiteral("workspace"));
+            controller.setMonitorIndex(configuredMonitorIndex(config));
         }
 
         controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
         applyVaapiDriverMode(config->vaapiDriverMode());
-
-        if (monitorPinnedByCli) {
-            controller.refreshDisplayConfiguration();
-        }
     };
 
+    // Re-creates the capture stream for a new display topology (resolution or
+    // output-set change). Kept separate from applyRuntimeConfig so config
+    // reloads and screen events do not share a code path.
+    auto refreshDisplayTopology = [config, &controller, monitorPinnedByCli]() {
+        if (!monitorPinnedByCli) {
+            // In primary/specific mode the resolved index can shift when outputs
+            // re-enumerate; re-resolve before refreshing.
+            controller.setMonitorIndex(configuredMonitorIndex(config));
+        }
+        controller.refreshDisplayConfiguration();
+    };
+
+    QTimer configDebounceTimer(&application);
+    configDebounceTimer.setSingleShot(true);
+    configDebounceTimer.setInterval(100);
+    QObject::connect(&configDebounceTimer, &QTimer::timeout, &application, [applyRuntimeConfig]() {
+        applyRuntimeConfig();
+    });
+
     auto configWatcher = KConfigWatcher::create(runtimeConfig);
-    QObject::connect(configWatcher.get(), &KConfigWatcher::configChanged, &application, [applyRuntimeConfig](const KConfigGroup &group, const QByteArrayList &) {
+    QObject::connect(configWatcher.get(), &KConfigWatcher::configChanged, &application, [&configDebounceTimer](const KConfigGroup &group, const QByteArrayList &) {
         if (group.name() != QLatin1StringView("General")) {
             return;
         }
-        applyRuntimeConfig();
+        configDebounceTimer.start();
     });
 
     auto configFileWatcher = std::make_unique<QFileSystemWatcher>(&application);
@@ -432,18 +446,18 @@ int main(int argc, char **argv)
     if (!runtimeConfigPath.isEmpty()) {
         configFileWatcher->addPath(runtimeConfigPath);
     }
-    QObject::connect(configFileWatcher.get(), &QFileSystemWatcher::fileChanged, &application, [applyRuntimeConfig, configFileWatcher = configFileWatcher.get()](const QString &path) {
+    QObject::connect(configFileWatcher.get(), &QFileSystemWatcher::fileChanged, &application, [&configDebounceTimer, configFileWatcher = configFileWatcher.get()](const QString &path) {
         if (QFileInfo::exists(path) && !configFileWatcher->files().contains(path)) {
             configFileWatcher->addPath(path);
         }
-        applyRuntimeConfig();
+        configDebounceTimer.start();
     });
 
     QTimer displayRefreshDebounceTimer(&application);
     displayRefreshDebounceTimer.setSingleShot(true);
     displayRefreshDebounceTimer.setInterval(100);
-    QObject::connect(&displayRefreshDebounceTimer, &QTimer::timeout, &application, [applyRuntimeConfig]() {
-        applyRuntimeConfig();
+    QObject::connect(&displayRefreshDebounceTimer, &QTimer::timeout, &application, [refreshDisplayTopology]() {
+        refreshDisplayTopology();
     });
 
     auto scheduleDisplayRefresh = [&displayRefreshDebounceTimer]() {

@@ -405,10 +405,6 @@ void PlasmaScreencastV1Session::refreshDisplayConfiguration()
         return;
     }
 
-    // During mode switches, proactively move to software encode so the remote
-    // confirmation dialog stays interactive while hardware pipelines settle.
-    preferSoftwareEncoderForDisplayChange(QStringLiteral("Display geometry/topology changed"));
-
     // Re-create the screencast for the new topology. The stream restart goes
     // through the deferred attach in onScreencastCreated() (it waits for
     // KPipeWire's produce thread to tear down before calling start() again).
