@@ -130,21 +130,25 @@ QString vendorSummary(const std::vector<RenderNodeInfo> &nodes)
     return values.join(QStringLiteral(", "));
 }
 
-void maybeSelectVaapiDriverForMixedGpu()
-{
-    static bool hasAttemptedSelection = false;
-    if (hasAttemptedSelection) {
-        return;
-    }
-    hasAttemptedSelection = true;
+// Tracks whether the value currently in LIBVA_DRIVER_NAME was set by us, so a
+// later config change can replace our own choice while an externally-provided
+// value is always left untouched.
+bool g_autoAppliedVaapiDriver = false;
+}
+}
 
-    if (qEnvironmentVariableIsSet("LIBVA_DRIVER_NAME")) {
+void KRdp::selectVaapiDriver()
+{
+    if (qEnvironmentVariableIsSet("LIBVA_DRIVER_NAME") && !g_autoAppliedVaapiDriver) {
+        // Respect an externally-provided driver.
         return;
     }
+
     if (qEnvironmentVariableIsSet("KRDP_FORCE_VAAPI_DRIVER")) {
         const auto forcedDriver = qgetenv("KRDP_FORCE_VAAPI_DRIVER");
         if (!forcedDriver.isEmpty()) {
             qputenv("LIBVA_DRIVER_NAME", forcedDriver);
+            g_autoAppliedVaapiDriver = true;
             qCInfo(KRDP) << "Using forced VAAPI driver from KRDP_FORCE_VAAPI_DRIVER:" << forcedDriver;
         }
         return;
@@ -165,9 +169,12 @@ void maybeSelectVaapiDriverForMixedGpu()
     }
 
     qputenv("LIBVA_DRIVER_NAME", driver);
+    g_autoAppliedVaapiDriver = true;
     qCInfo(KRDP) << "Auto-selected VAAPI driver" << driver << "based on render-node vendors:" << vendorSummary(nodes);
 }
-}
+
+namespace KRdp
+{
 
 #include <security/pam_appl.h>
 
@@ -436,7 +443,6 @@ NetworkDetection *RdpConnection::networkDetection() const
 void RdpConnection::initialize()
 {
     setState(State::Starting);
-    maybeSelectVaapiDriverForMixedGpu();
 
     d->peer = freerdp_peer_new(d->socketHandle);
     if (!d->peer) {

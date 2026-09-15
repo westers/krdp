@@ -24,6 +24,16 @@ class NetworkDetection;
 class Clipboard;
 
 /**
+ * Select a VAAPI driver (LIBVA_DRIVER_NAME) for the current configuration.
+ *
+ * Honours KRDP_FORCE_VAAPI_DRIVER / KRDP_AUTO_VAAPI_DRIVER (set from the
+ * VaapiDriverMode config key) and, in auto mode, avoids decode-only NVIDIA
+ * VAAPI backends on mixed-GPU systems. Safe to call at startup and again on
+ * config change; an externally-provided LIBVA_DRIVER_NAME is always respected.
+ */
+KRDP_EXPORT void selectVaapiDriver();
+
+/**
  * An RDP session.
  *
  * This represents an RDP session, that is, a connection between an RDP client

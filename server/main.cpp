@@ -26,6 +26,7 @@
 
 #include <qt6keychain/keychain.h>
 
+#include "RdpConnection.h"
 #include "Server.h"
 #include "SessionController.h"
 #include "krdp_version.h"
@@ -294,6 +295,9 @@ int main(int argc, char **argv)
     auto config = ServerConfig::self();
     const auto vaapiDriverMode = normalizedVaapiDriverMode(config->vaapiDriverMode());
     applyVaapiDriverMode(vaapiDriverMode);
+    // Resolve LIBVA_DRIVER_NAME once at startup (was previously done lazily on
+    // the first connection behind a once-per-process guard).
+    KRdp::selectVaapiDriver();
 
     auto parserValueWithDefault = [&parser](QAnyStringView option, auto defaultValue) {
         auto optionString = option.toString();
@@ -412,6 +416,7 @@ int main(int argc, char **argv)
 
         controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
         applyVaapiDriverMode(config->vaapiDriverMode());
+        KRdp::selectVaapiDriver();
     };
 
     // Re-creates the capture stream for a new display topology (resolution or
