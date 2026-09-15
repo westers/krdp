@@ -137,8 +137,6 @@ private:
     uint32_t onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frameAcknowledge);
 
     void performReset(const QSize &size, const QVector<VideoMonitor> &monitors);
-
-    void updateRequestedFrameRate();
     /**
      * Returns false only when the frame could not be sent because the GFX
      * channel is not ready (context gone or caps reset mid-flight); the caller

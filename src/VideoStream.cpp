@@ -37,9 +37,7 @@ namespace KRdp
 
 namespace clk = std::chrono;
 
-constexpr clk::system_clock::duration FrameRateEstimateAveragePeriod = clk::seconds(1);
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
-constexpr int MinimumFrameRate = 5;
 constexpr int MaxMonitorLayoutCount = 16;
 constexpr auto KeyFrameRequestMinInterval = clk::seconds(2);
 
@@ -192,11 +190,6 @@ struct Surface {
     QSize size;
 };
 
-struct FrameRateEstimate {
-    clk::system_clock::time_point timeStamp;
-    int estimate = 0;
-};
-
 class KRDP_NO_EXPORT VideoStream::Private
 {
 public:
@@ -227,15 +220,11 @@ public:
     QSet<uint32_t> pendingFrames;
     std::mutex pendingFramesMutex;
 
-    int maximumFrameRate = 120;
+    // Fixed at the client-configured rate; read by the submission thread for its
+    // idle sleep interval. The RTT-derived source-rate heuristic was removed
+    // (upstream 978f1cb): it starved high-latency links without measuring real
+    // send-side pressure.
     std::atomic_int requestedFrameRate = 60;
-    QQueue<FrameRateEstimate> frameRateEstimates;
-    clk::system_clock::time_point lastFrameRateEstimation;
-
-    std::atomic_int encodedFrames = 0;
-    std::atomic_int frameDelay = 0;
-    std::atomic_int decoderQueueDepth = 0;
-    clk::milliseconds previousRtt = clk::milliseconds(0);
     QVector<VideoMonitor> monitorLayout;
     // Submission-thread only: rate-limits keyFrameRequested so a reset storm
     // (e.g. repeated caps re-advertisement) does not restart the encoder more
@@ -282,8 +271,6 @@ bool VideoStream::initialize()
         qCWarning(KRDP) << "Could not open GFX context";
         return false;
     }
-
-    connect(d->session->networkDetection(), &NetworkDetection::rttChanged, this, &VideoStream::updateRequestedFrameRate);
 
     d->frameSubmissionThread = std::jthread([this](std::stop_token token) {
         while (!token.stop_requested()) {
@@ -408,6 +395,7 @@ uint32_t VideoStream::requestedFrameRate() const
     return d->requestedFrameRate;
 }
 
+
 bool VideoStream::onChannelIdAssigned(uint32_t channelId)
 {
     d->channelId = channelId;
@@ -511,14 +499,6 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
         return CHANNEL_RC_OK;
     }
 
-    if (frameAcknowledge->queueDepth & SUSPEND_FRAME_ACKNOWLEDGEMENT) {
-        qDebug() << "suspend frame ack";
-        d->decoderQueueDepth = 16;
-    } else if (frameAcknowledge->queueDepth != QUEUE_DEPTH_UNAVAILABLE) {
-        d->decoderQueueDepth = static_cast<int>(frameAcknowledge->queueDepth);
-    }
-
-    d->frameDelay = d->encodedFrames - frameAcknowledge->totalFramesDecoded;
     d->pendingFrames.erase(itr);
 
     return CHANNEL_RC_OK;
@@ -603,8 +583,6 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
 
     auto frameId = d->frameId++;
 
-    d->encodedFrames++;
-
     {
         std::lock_guard lock(d->pendingFramesMutex);
         d->pendingFrames.insert(frameId);
@@ -650,86 +628,6 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
 
     d->session->networkDetection()->stopBandwidthMeasure();
     return true;
-}
-
-void VideoStream::updateRequestedFrameRate()
-{
-    auto rtt = std::max(clk::duration_cast<clk::milliseconds>(d->session->networkDetection()->averageRTT()), clk::milliseconds(1));
-    auto now = clk::system_clock::now();
-    const auto delayedFrames = std::max(d->frameDelay.load(), 0);
-    const auto decoderQueueDepth = std::max(d->decoderQueueDepth.load(), 0);
-
-    int rttRiseMs = 0;
-    if (d->previousRtt.count() > 0) {
-        rttRiseMs = std::max(0, int((rtt - d->previousRtt).count()));
-    }
-    d->previousRtt = rtt;
-
-    FrameRateEstimate estimate;
-    estimate.timeStamp = now;
-    const auto baseline = double(clk::milliseconds(1000).count()) / double(rtt.count());
-    const auto delayPenalty = 1.0 + (double(delayedFrames) * 0.75);
-    const auto queuePenalty = 1.0 + (double(std::min(decoderQueueDepth, 12)) * 0.25);
-    const auto rttTrendPenalty = 1.0 + (double(std::clamp(rttRiseMs, 0, 20)) / 20.0);
-    estimate.estimate = std::clamp(int(baseline / (delayPenalty * queuePenalty * rttTrendPenalty)), MinimumFrameRate, d->maximumFrameRate);
-    d->frameRateEstimates.append(estimate);
-
-    if (now - d->lastFrameRateEstimation < FrameRateEstimateAveragePeriod) {
-        return;
-    }
-
-    d->lastFrameRateEstimation = now;
-
-    d->frameRateEstimates.erase(std::remove_if(d->frameRateEstimates.begin(),
-                                               d->frameRateEstimates.end(),
-                                               [now](const auto &estimate) {
-                                                   return (now - estimate.timeStamp) > FrameRateEstimateAveragePeriod;
-                                               }),
-                                d->frameRateEstimates.cend());
-
-    auto sum = std::accumulate(d->frameRateEstimates.cbegin(), d->frameRateEstimates.cend(), 0, [](int acc, const auto &estimate) {
-        return acc + estimate.estimate;
-    });
-    auto average = sum / d->frameRateEstimates.size();
-
-    // Keep headroom so we can drain delay quickly when congestion appears.
-    constexpr qreal targetFrameRateSaturation = 0.8;
-    auto targetFrameRate = std::clamp(int(average * targetFrameRateSaturation), MinimumFrameRate, d->maximumFrameRate);
-
-    // Hard clamps when decoder backlog is growing.
-    if (delayedFrames >= 8 || decoderQueueDepth >= 10) {
-        targetFrameRate = std::min(targetFrameRate, 10);
-    } else if (delayedFrames >= 4 || decoderQueueDepth >= 6) {
-        targetFrameRate = std::min(targetFrameRate, 20);
-    } else if (delayedFrames >= 2 || decoderQueueDepth >= 3) {
-        targetFrameRate = std::min(targetFrameRate, 30);
-    }
-
-    if (rttRiseMs >= 12) {
-        targetFrameRate = std::min(targetFrameRate, 24);
-    } else if (rttRiseMs >= 6) {
-        targetFrameRate = std::min(targetFrameRate, 36);
-    }
-
-    int nextFrameRate = d->requestedFrameRate;
-    if (targetFrameRate < d->requestedFrameRate) {
-        // React quickly on congestion to avoid lag buildup.
-        if (delayedFrames >= 2 || decoderQueueDepth >= 3 || rttRiseMs >= 8) {
-            nextFrameRate = targetFrameRate;
-        } else {
-            nextFrameRate = std::max(targetFrameRate, d->requestedFrameRate - 5);
-        }
-    } else if (targetFrameRate > d->requestedFrameRate) {
-        // Recover conservatively to prevent oscillation.
-        nextFrameRate = std::min(targetFrameRate, d->requestedFrameRate + 2);
-    }
-
-    nextFrameRate = std::clamp(nextFrameRate, MinimumFrameRate, d->maximumFrameRate);
-
-    if (nextFrameRate != d->requestedFrameRate) {
-        d->requestedFrameRate = nextFrameRate;
-        Q_EMIT requestedFrameRateChanged();
-    }
 }
 }
 
