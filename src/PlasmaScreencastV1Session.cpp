@@ -610,6 +610,25 @@ void PlasmaScreencastV1Session::restartEncodedStream(uint nodeId)
     }
 }
 
+void PlasmaScreencastV1Session::requestKeyFrame()
+{
+    // KPipeWire 6.6 cannot be asked for an IDR mid-stream, but a restarted
+    // encoded stream always opens with one. Re-attach the same PipeWire node
+    // through the deferred restart (KWin keeps the screencast source alive;
+    // only the KPipeWire consumer/encoder is recreated).
+    auto encodedStream = stream();
+    const uint nodeId = encodedStream->nodeId();
+    if (!d->streamConfigured || nodeId == 0 || !streamingRequested()) {
+        return;
+    }
+    if (d->streamRestartTimer.isActive()) {
+        // A restart is already in flight; it will deliver a keyframe.
+        return;
+    }
+    qCDebug(KRDP) << "Restarting encoded stream on node" << nodeId << "to obtain a keyframe for the new surface";
+    restartEncodedStream(nodeId);
+}
+
 void PlasmaScreencastV1Session::attachEncodedStream(uint nodeId, bool streamWasActive)
 {
     auto encodedStream = stream();

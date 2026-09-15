@@ -119,6 +119,14 @@ public:
     uint32_t requestedFrameRate() const;
     Q_SIGNAL void requestedFrameRateChanged();
 
+    /**
+     * Emitted (from the frame submission thread) when the RDPGFX surface was
+     * just (re)created but the frame being sent is not a keyframe, so the
+     * client has no reference picture until the next IDR. The session should
+     * obtain a fresh keyframe from the encoder.
+     */
+    Q_SIGNAL void keyFrameRequested();
+
 private:
     friend BOOL gfxChannelIdAssigned(RdpgfxServerContext *, uint32_t);
     friend uint32_t gfxCapsAdvertise(RdpgfxServerContext *, const RDPGFX_CAPS_ADVERTISE_PDU *);

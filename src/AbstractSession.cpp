@@ -131,6 +131,11 @@ void AbstractSession::refreshDisplayConfiguration()
 {
 }
 
+void AbstractSession::requestKeyFrame()
+{
+    qCDebug(KRDP) << "Keyframe requested but this session type cannot obtain one; waiting for the next organic keyframe";
+}
+
 bool AbstractSession::streamingEnabled() const
 {
     if (d->encodedStream) {

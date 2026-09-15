@@ -44,6 +44,8 @@ public:
 
         connect(connection->videoStream(), &KRdp::VideoStream::enabledChanged, this, &SessionWrapper::onVideoStreamEnabledChanged, Qt::QueuedConnection);
         connect(connection->videoStream(), &KRdp::VideoStream::requestedFrameRateChanged, this, &SessionWrapper::onRequestedFrameRateChanged, Qt::QueuedConnection);
+        // Emitted from the frame submission thread; the session must act on the main thread.
+        connect(connection->videoStream(), &KRdp::VideoStream::keyFrameRequested, this, &SessionWrapper::onKeyFrameRequested, Qt::QueuedConnection);
         connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, session.get(), &KRdp::AbstractSession::sendEvent);
         connect(connection->clipboard(), &KRdp::Clipboard::clientDataChanged, session.get(), [clipboard = connection->clipboard(), this]() {
             session->setClipboardData(clipboard->getClipboard());
@@ -97,6 +99,11 @@ public:
     void onRequestedFrameRateChanged()
     {
         session->setVideoFrameRate(connection->videoStream()->requestedFrameRate());
+    }
+
+    void onKeyFrameRequested()
+    {
+        session->requestKeyFrame();
     }
 
     void onConnectionDestroyed()

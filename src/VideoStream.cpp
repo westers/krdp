@@ -54,6 +54,7 @@ constexpr int MinimumFrameRate = 5;
 constexpr int MaxFramesBetweenFullDamage = 8;
 constexpr double FullDamageCoverageThreshold = 0.15;
 constexpr int MaxMonitorLayoutCount = 16;
+constexpr auto KeyFrameRequestMinInterval = clk::seconds(2);
 
 RECTANGLE_16 toRdpRect(const QRect &rect)
 {
@@ -520,7 +521,12 @@ public:
             });
         }
     }
+    // Submission-thread only: rate-limits keyFrameRequested so a reset storm
+    // (e.g. repeated caps re-advertisement) does not restart the encoder more
+    // than once per KeyFrameRequestMinInterval.
+    clk::steady_clock::time_point lastKeyFrameRequest;
 };
+
 
 VideoStream::VideoStream(RdpConnection *session)
     : QObject(nullptr)
@@ -918,6 +924,20 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         d->pendingReset = false;
         d->monitorLayout = monitorLayout;
         performReset(frame.size, monitorLayout);
+
+        // A freshly created surface has no reference picture. If the frame we
+        // are about to send is not a keyframe (e.g. after a caps
+        // re-advertisement the queue holds P-frames), ask the session for one
+        // now instead of waiting for the next organic IDR, which on a static
+        // desktop can be seconds away (gop 100, frames only on damage).
+        if (!frame.isKeyFrame) {
+            const auto now = clk::steady_clock::now();
+            if (d->lastKeyFrameRequest == clk::steady_clock::time_point{} || (now - d->lastKeyFrameRequest) >= KeyFrameRequestMinInterval) {
+                d->lastKeyFrameRequest = now;
+                qCDebug(KRDP) << "Surface (re)created on a non-keyframe, requesting a keyframe from the encoder";
+                Q_EMIT keyFrameRequested();
+            }
+        }
     }
 
     d->session->networkDetection()->startBandwidthMeasure();
