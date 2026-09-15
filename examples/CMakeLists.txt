@@ -2,3 +2,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 add_subdirectory(streamer)
+
+if(BUILD_PLASMA_SESSION)
+    add_subdirectory(plasmastreamer)
+endif()
