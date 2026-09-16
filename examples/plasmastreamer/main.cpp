@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <csignal>
+#include <memory>
+#include <vector>
 
 #include <QCommandLineParser>
 #include <QDebug>
@@ -23,6 +25,162 @@
 
 using namespace Qt::StringLiterals;
 
+namespace
+{
+
+// One capture/encode pipeline per physical screen: its own
+// PlasmaScreencastV1Session (and therefore its own PipeWireEncodedStream /
+// VA-API encoder), writing to its own output file.
+struct SessionRun {
+    std::unique_ptr<KRdp::PlasmaScreencastV1Session> session;
+    QFile file;
+    int frames = 0;
+    int keyframes = 0;
+    qint64 bytes = 0;
+};
+
+// Feasibility gate for per-monitor surfaces (OPT-018): run every screen
+// through its own session/encoder concurrently instead of the single shared
+// session the rest of this harness drives, so we can check whether the
+// Radeon 780M can actually sustain two h264_vaapi encoders at once.
+int runMulti(QGuiApplication &application, const QCommandLineParser &parser)
+{
+    signal(SIGINT, [](int) {
+        QCoreApplication::exit(0);
+    });
+
+    signal(SIGUSR1, [](int) {
+        QCoreApplication::exit(0);
+    });
+
+    const QString outputPath = parser.value(u"output"_s);
+    const auto screens = qGuiApp->screens();
+
+    std::vector<std::unique_ptr<SessionRun>> runs;
+    runs.reserve(screens.size());
+    for (int i = 0; i < screens.size(); ++i) {
+        auto run = std::make_unique<SessionRun>();
+        run->file.setFileName(outputPath + u"." + QString::number(i) + u".raw");
+        if (!run->file.open(QFile::WriteOnly)) {
+            qDebug() << "Failed opening" << run->file.fileName();
+            return -1;
+        }
+        runs.push_back(std::move(run));
+    }
+
+    // Wall-clock offsets are measured from the moment every session has
+    // started (see the started() handler below), same as the single-session
+    // path measures from its one started().
+    QElapsedTimer sinceStarted;
+    int startedCount = 0;
+
+    QTimer timer;
+    timer.setSingleShot(true);
+    const bool hasQuitAfter = parser.isSet(u"quit-after"_s);
+    const int quitAfter = hasQuitAfter ? parser.value(u"quit-after"_s).toInt() : 0;
+    timer.setInterval(quitAfter * 1000);
+
+    QObject::connect(&timer, &QTimer::timeout, &application, [&]() {
+        qWarning() << "Run time elapsed at +" << sinceStarted.elapsed() << "ms, disabling streaming to flush encoders";
+        for (auto &run : runs) {
+            run->session->requestStreamingDisable(&application);
+        }
+        QTimer::singleShot(3000, &application, &QCoreApplication::quit);
+    });
+
+    for (int i = 0; i < screens.size(); ++i) {
+        auto *run = runs[i].get();
+        run->session = std::make_unique<KRdp::PlasmaScreencastV1Session>();
+        run->session->setActiveStream(i);
+        if (parser.isSet(u"quality"_s)) {
+            run->session->setVideoQuality(parser.value(u"quality"_s).toUShort());
+        }
+
+        auto *session = run->session.get();
+        QObject::connect(session, &KRdp::AbstractSession::frameReceived, session, [run, i, &sinceStarted](const KRdp::VideoFrame &frame) {
+            run->file.write(frame.data);
+            qWarning() << "Session" << i << "frame" << run->frames << "at +" << sinceStarted.elapsed() << "ms size" << frame.size << "bytes" << frame.data.size()
+                       << "keyframe" << frame.isKeyFrame;
+            if (frame.isKeyFrame) {
+                run->keyframes++;
+            }
+            run->frames++;
+            run->bytes += frame.data.size();
+        });
+
+        QObject::connect(session, &KRdp::AbstractSession::started, &application, [i, &screens, &startedCount, &sinceStarted, &timer, hasQuitAfter]() {
+            qWarning() << "Session" << i << "started";
+            startedCount++;
+            if (startedCount == screens.size()) {
+                sinceStarted.start();
+                if (hasQuitAfter) {
+                    timer.start();
+                }
+            }
+        });
+
+        QObject::connect(session, &KRdp::AbstractSession::error, &application, [i]() {
+            qWarning() << "Session" << i << "error";
+            QCoreApplication::exit(2);
+        });
+    }
+
+    // Each session's sendEvent() normalizes the position against that
+    // session's *own* captured size before offsetting by its *own* logical
+    // rect (see PlasmaScreencastV1Session::sendEvent()), and owns its own
+    // FakeInput object. So injecting through session 0 can only ever land
+    // inside session 0's own screen, however large a position is passed in
+    // (it clamps). To make a *different* screen busy, inject through that
+    // session instead; --wake-pos is local to that session's own capture.
+    if (parser.isSet(u"wake-after"_s) && !runs.empty()) {
+        const auto wakeOffsets = parser.value(u"wake-after"_s).split(u',', Qt::SkipEmptyParts);
+        const auto posParts = parser.value(u"wake-pos"_s).split(u',');
+        const QPointF wakePos(posParts.value(0).toDouble(), posParts.value(1).toDouble());
+        const int wakeSessionIndex = std::clamp(parser.value(u"wake-session"_s).toInt(), 0, int(runs.size()) - 1);
+        auto *wakeSession = runs[wakeSessionIndex]->session.get();
+        QObject::connect(wakeSession, &KRdp::AbstractSession::started, &application, [wakeSession, &sinceStarted, wakeOffsets, wakePos, wakeSessionIndex]() {
+            for (const auto &offset : wakeOffsets) {
+                QTimer::singleShot(offset.toInt() * 1000, wakeSession, [wakeSession, &sinceStarted, wakePos, wakeSessionIndex]() {
+                    qWarning() << "Injecting mouse move via fake input at" << wakePos << "into session" << wakeSessionIndex << "to wake the display at +" << sinceStarted.elapsed() << "ms";
+                    for (const auto &pos : {wakePos, wakePos + QPointF(40, 20), wakePos}) {
+                        wakeSession->sendEvent(std::make_shared<QMouseEvent>(QEvent::MouseMove, pos, pos, pos, Qt::NoButton, Qt::NoButton, Qt::NoModifier));
+                    }
+                });
+            }
+        });
+    }
+
+    // Hard fallback so the process cannot hang forever if started() never
+    // fires for one of the sessions.
+    QTimer::singleShot((quitAfter + 15) * 1000, &application, &QCoreApplication::quit);
+
+    for (auto &run : runs) {
+        run->session->requestStreamingEnable(&application);
+    }
+
+    auto result = application.exec();
+
+    for (auto &run : runs) {
+        run->file.close();
+    }
+
+    const double elapsedSeconds = sinceStarted.isValid() ? sinceStarted.elapsed() / 1000.0 : 0.0;
+    for (int i = 0; i < int(runs.size()); ++i) {
+        auto &run = runs[i];
+        const double avgFps = elapsedSeconds > 0.0 ? run->frames / elapsedSeconds : 0.0;
+        qWarning().noquote() << QString(u"Session %1: frames %2 keyframes %3 bytes %4 avg_fps %5")
+                                     .arg(i)
+                                     .arg(run->frames)
+                                     .arg(run->keyframes)
+                                     .arg(run->bytes)
+                                     .arg(avgFps, 0, 'f', 2);
+    }
+
+    return result;
+}
+
+}
+
 int main(int argc, char **argv)
 {
     QGuiApplication application{argc, argv};
@@ -35,11 +193,21 @@ int main(int argc, char **argv)
         {u"quality"_s, u"Encoding quality of the stream, from 0 (lowest) to 100 (highest)"_s, u"quality"_s},
         {u"output"_s, u"Path of the file to write the raw h264 stream to"_s, u"file"_s, u"stream.raw"_s},
         {u"wake-after"_s, u"Inject a small mouse move via the session's fake input at these offsets (seconds, comma separated) after the stream started (mimics an RDP user wiggling the mouse)"_s, u"seconds"_s},
+        {u"wake-pos"_s, u"Position \"x,y\" for the --wake-after mouse move, in the target session's own screen pixels; only used with --multi (default 100,100)"_s, u"x,y"_s, u"100,100"_s},
+        {u"wake-session"_s,
+         u"Index into the --multi session list to inject --wake-after moves through; each session's fake input is scoped to its own screen (sendEvent() clamps the position into that session's own captured size before offsetting by its logical rect), so this picks which screen gets the activity (default 0)"_s,
+         u"index"_s,
+         u"0"_s},
         {u"refresh-after"_s, u"Call refreshDisplayConfiguration() on the session this many seconds after the stream started"_s, u"seconds"_s},
         {u"keyframe-at"_s, u"Call requestKeyFrame() on the session at these offsets (seconds, comma separated) after the stream started"_s, u"seconds"_s},
         {u"quality-at"_s, u"Set the session video quality at these offsets: seconds:quality, comma separated (e.g. 4:40,8:90)"_s, u"list"_s},
+        {u"multi"_s, u"Capture every screen with its own session and encoder; writes <output>.<index>.raw"_s},
     });
     parser.process(application);
+
+    if (parser.isSet(u"multi"_s)) {
+        return runMulti(application, parser);
+    }
 
     // Match the order krdpserver's SessionController uses: configure the
     // stream target and quality first, then enable streaming (which for the
