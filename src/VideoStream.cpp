@@ -242,6 +242,11 @@ public:
     std::atomic<bool> adaptiveQuality = true;
     // Peer-thread only (only updateAdaptiveQuality touches it).
     clk::system_clock::time_point lastQualityUpdate;
+    // Mirrors d->surface.size as a single atomic value (width * height) so
+    // updateAdaptiveQuality() (peer thread) never sees a torn width/height
+    // while performReset() (submission thread) or onCapsAdvertise() (peer
+    // thread) writes d->surface.
+    std::atomic<qint64> surfacePixels = 0;
 };
 
 
@@ -448,25 +453,39 @@ void VideoStream::updateAdaptiveQuality()
         return;
     }
 
+    const double pixels = double(d->surfacePixels.load());
+    if (pixels == 0.0) {
+        return;
+    }
+
     auto *network = d->session->networkDetection();
     const quint8 current = d->quality.load();
     const auto result = AdaptiveQuality::step({
         .current = current,
         .cap = d->qualityCap.load(),
         .goodputKbit = network->bandwidth(),
-        .pixels = double(d->surface.size.width()) * double(d->surface.size.height()),
+        .pixels = pixels,
         .averageRtt = clk::duration_cast<clk::milliseconds>(network->averageRTT()),
         .minimumRtt = clk::duration_cast<clk::milliseconds>(network->minimumRTT()),
     });
-    if (result.next == current) {
+
+    // The cap or the adaptive-quality flag may have changed on the main
+    // thread while step() ran above; re-check both immediately before
+    // committing so a stale result never overshoots a just-lowered cap or
+    // gets applied after adaptive quality was turned off.
+    if (!d->adaptiveQuality.load()) {
+        return;
+    }
+    const quint8 bounded = quint8(std::min<int>(result.next, d->qualityCap.load()));
+    if (bounded == current) {
         return;
     }
 
     d->lastQualityUpdate = now;
-    d->quality = quint8(result.next);
-    qCDebug(KRDP) << "Adaptive quality ->" << result.next << "(target" << result.target << "cap" << d->qualityCap.load() << "goodput" << network->bandwidth() << "kbit/s"
+    d->quality = bounded;
+    qCDebug(KRDP) << "Adaptive quality ->" << bounded << "(target" << result.target << "cap" << d->qualityCap.load() << "goodput" << network->bandwidth() << "kbit/s"
                   << (result.congested ? ", congested" : "") << ")";
-    Q_EMIT requestedQualityChanged(quint8(result.next));
+    Q_EMIT requestedQualityChanged(bounded);
 }
 
 bool VideoStream::onChannelIdAssigned(uint32_t channelId)
@@ -487,6 +506,7 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         d->capsConfirmed = false;
         d->pendingReset = true;
         d->surface = Surface{};
+        d->surfacePixels = 0;
         d->monitorLayout.clear();
         std::lock_guard lock(d->pendingFramesMutex);
         d->pendingFrames.clear();
@@ -610,6 +630,7 @@ void VideoStream::performReset(const QSize &size, const QVector<VideoMonitor> &m
         .id = surfaceId,
         .size = size,
     };
+    d->surfacePixels = qint64(size.width()) * size.height();
 
     RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU mapSurfaceToOutputPdu;
     mapSurfaceToOutputPdu.outputOriginX = 0;
