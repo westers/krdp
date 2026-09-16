@@ -26,7 +26,7 @@
 
 **Files:**
 - Modify: `~/dev/kpipewire/src/encoder_p.h` (`Encoder`: add `virtual bool reopenForQuality()` returning `false`; add `std::atomic_bool m_qualityChangePending = false;`; `H264VAAPIEncoder`: declare `bool openCodec();` and `bool reopenForQuality() override;` in `h264vaapiencoder_p.h`)
-- Modify: `~/dev/kpipewire/src/encoder.cpp` (`Encoder::setQuality`: set the pending flag; `Encoder::encodeFrame`: consume it before the send loop)
+- Modify: `~/dev/kpipewire/src/encoder.cpp` (`Encoder::setQuality`: set the pending flag; `Encoder::encodeFrame`: consume it inside the send loop, before `avcodec_send_frame`)
 - Modify: `~/dev/kpipewire/src/h264vaapiencoder.cpp` (extract `openCodec()` from `initialize()`; implement `reopenForQuality()`)
 - Modify: `~/dev/kpipewire/src/h264vaapiencoder_p.h`
 - Modify: `~/dev/krdp/examples/plasmastreamer/main.cpp` (`--quality-at <s:q[,s:q…]>` option calling `session.setVideoQuality(q)`)
@@ -164,7 +164,7 @@ void Encoder::setQuality(std::optional<quint8> quality)
     }
 }
 ```
-`encoder.cpp` `Encoder::encodeFrame`, inside the loop right before the existing `if (m_keyFrameRequested.exchange(false))` block:
+`encoder.cpp` `Encoder::encodeFrame`, inside the loop right before the existing `const bool forceKeyFrame = m_keyFrameRequested.exchange(false);` line (encoder.cpp:100):
 ```cpp
             if (m_qualityChangePending.exchange(false)) {
                 std::lock_guard guard(m_avCodecMutex);
@@ -175,7 +175,7 @@ void Encoder::setQuality(std::optional<quint8> quality)
                 }
             }
 ```
-(`reopenForQuality()` returns `false` for software encoders without touching anything — but the flag is only set when `m_avCodecContext` exists; to avoid the software path hitting the `break`, make the base implementation return `true` and do nothing: `virtual bool reopenForQuality() { return true; }`. Use that form.)
+(`reopenForQuality()` returns `false` for software encoders without touching anything — but the flag is only set when `m_avCodecContext` exists; to avoid the software path hitting the `break`, make the base implementation return `true` and do nothing: `virtual bool reopenForQuality() { return true; }`. Use that form.) `reopenForQuality()` must also clear `m_keyFrameRequested` (a reopened codec starts with an IDR; avoid a second one).
 
 - [ ] **Step 4: Build, run, verify**
 

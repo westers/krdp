@@ -221,7 +221,8 @@ branch `westers/opt-015`; patches exported to `~/dev/rdp/kpipewire-vaapi-fix/pat
 `scripts/build-kpipewire.sh` builds/installs it and relinks KRDP; `scripts/check-kpipewire-link.sh`
 verifies `build/bin/krdpserver` resolves `libKPipeWire*` there. Re-run the build script after any
 KPipeWire edit or after an apt upgrade of Qt/KF6/FFmpeg/PipeWire. To go back to the system
-library, reconfigure with `-UKPipeWire_DIR -DCMAKE_PREFIX_PATH=`.
+library, reconfigure with `-UKPipeWire_DIR -DCMAKE_PREFIX_PATH=`. `scripts/check-stock-build.sh`
+confirms the tree still builds `krdpplasmastreamer` against the system KPipeWire on its own.
 
 ### VAAPI Driver Auto-Selection
 
