@@ -25,6 +25,12 @@ Reduce encoded bandwidth by leveraging compositor damage metadata and protocol-s
 - When status changes, update this file with the date and short reason.
 
 ## Status Updates
+- OPT-016 DONE (code) 2026-09-16 — live validation pending Steve's session: adaptive quality steering end to end. `NetworkDetection` measures goodput in kbit/s from FreeRDP bandwidth results; `VideoStream::updateAdaptiveQuality()` steps quality from goodput + RTT via `KRdp::AdaptiveQuality::step()` (unit-tested, 8 cases, `build/bin/AdaptiveQualityTest`), at most once per `QualityUpdateInterval` (1.5 s). The `Quality` setting is now a **cap**, not a fixed value; a new `AdaptiveQuality` kcfg key (`Bool`, default `true`) enables/disables the loop (`VideoStream::setAdaptiveQuality()`). With the private KPipeWire, each quality step reopens the `h264_vaapi` codec at the new QP (forcing an IDR — see `h264vaapiencoder.cpp`'s `Reopened h264_vaapi` log); the RDPGFX metablock now reports the actual QP in use instead of the static configured value. Harness sanity (`krdpplasmastreamer --quality-at 4:40,8:100`) confirmed two `Reopened h264_vaapi` events with matching `fixed QP` lines (18/18 → 29/29 → 12/12) and `Key frames: 3`. Deployed to the live service 2026-09-16 15:28 (startup summary now reports `adaptive=1`). Consuming RDPGFX QoE acks (`gfxQoEFrameAcknowledge`) remains a stub — goodput+RTT is the first loop; QoE acks are a possible future refinement, not required by this pass.
+  - **Live validation (Steve, from Windows)**: after a few minutes of normal use, run:
+    ```bash
+    journalctl --user -u app-org.kde.krdpserver --no-pager --since -10min | grep -E 'Bandwidth measurement|Adaptive quality|Reopened h264_vaapi'
+    ```
+    Expect periodic `Bandwidth measurement: … -> N kbit/s` samples, `Adaptive quality -> N (target … cap 80 goodput … kbit/s …)` lines with quality moving within `[10, 80]`, and exactly one `Reopened h264_vaapi at quality N (QP M)` per quality move (not one per bandwidth sample). If the loop instead oscillates — alternating up/down roughly every 1.5 s — that's a known open tuning risk: fix in a future session by raising `QualityUpdateInterval` (currently a 1.5 s `constexpr` in `VideoStream.cpp`) to 3 s and widening the congestion gate to 2x. Record whatever is actually observed here (steady convergence vs. oscillation) once tested.
 - 2026-09-16 OPT-015 DONE: private KPipeWire (~/dev/kpipewire westers/opt-015) — h264_vaapi async_depth=1, rc_mode=CQP, quality→QP 40..12, gop 600, IDR QP = P QP (FFmpeg's default; no override), libx264-only options dropped, frame-repeat off for h264_vaapi.
 - 2026-09-16 OPT-023 PARTIAL: frame-repeat disabled for h264_vaapi; QoE-driven pacing remains (OPT-016).
 - 2026-09-16 OPT-035 DONE via PipeWireBaseEncodedStream::requestKeyFrame(); the encoder-restart path remains only as the stock-KPipeWire fallback (compile-time detection).
@@ -44,7 +50,8 @@ Reduce encoded bandwidth by leveraging compositor damage metadata and protocol-s
 This section is the canonical quick reference for runtime knobs already implemented.
 
 ### KCM / `krdpserverrc` (`[General]`)
-- `Quality` (`50..100` in KCM): live-applied at runtime to active sessions; does not require service restart.
+- `Quality` (`50..100` in KCM): with `AdaptiveQuality` enabled, this is now a **cap** on the adaptive loop rather than a fixed value; live-applied at runtime to active sessions; does not require service restart.
+- `AdaptiveQuality` (`Bool`, default `true`, kcfg key `General/AdaptiveQuality`): steers quality down/up from measured goodput and RTT (see `OPT-016` above); `false` pins quality to the `Quality` cap as before.
 - `MonitorMode` (`workspace|primary|specific`): live-applied stream target selection.
 - `MonitorIndex` (used when `MonitorMode=specific`): live-applied monitor selection.
 - `VaapiDriverMode` (`auto|off|radeonsi|iHD`):

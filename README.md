@@ -224,6 +224,13 @@ KPipeWire edit or after an apt upgrade of Qt/KF6/FFmpeg/PipeWire. To go back to 
 library, reconfigure with `-UKPipeWire_DIR -DCMAKE_PREFIX_PATH=`. `scripts/check-stock-build.sh`
 confirms the tree still builds `krdpplasmastreamer` against the system KPipeWire on its own.
 
+The `krdpplasmastreamer` harness has two offset-list flags for exercising the private
+KPipeWire's encoder-reopen behavior without a real client: `--keyframe-at <s[,s…]>` calls
+`requestKeyFrame()` at the given offsets, and `--quality-at <s:q[,s:q…]>` (e.g. `4:40,8:100`)
+changes the session quality at the given offsets — each quality change reopens `h264_vaapi`
+at the new QP (an IDR), so watch for one `Reopened h264_vaapi` log line and matching `fixed QP`
+line per entry.
+
 ### VAAPI Driver Auto-Selection
 
 On mixed-GPU systems, KRDP now attempts to avoid decode-only VAAPI backends by
@@ -295,6 +302,15 @@ The single most effective bandwidth lever is the `Quality` setting: it maps to
 the encoder's CQP. With the private KPipeWire, `Quality` maps to `h264_vaapi`
 CQP QP = 40 − 0.28·Quality (`100`→QP 12, `80`→QP 18, `50`→QP 26); with stock
 KPipeWire the old map applies (`Quality=100`→QP 1). ~80 is a good default.
+
+`AdaptiveQuality` (kcfg `General/AdaptiveQuality`, `Bool`, default `true`) turns
+`Quality` into a cap instead of a fixed value: while streaming, quality steps
+in +5/−10 increments (at most once every 1.5 s) from measured goodput and RTT
+(`KRdp::AdaptiveQuality::step()`, unit-tested in `AdaptiveQualityTest`). With
+the private KPipeWire, each quality change reopens the `h264_vaapi` codec at
+the new QP, forcing an IDR so the client resyncs immediately; the RDPGFX
+metablock reports the actual QP in use. Set `AdaptiveQuality=false` to pin
+quality to the `Quality` cap.
 
 Useful debug markers:
 
