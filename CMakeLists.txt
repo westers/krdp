@@ -87,6 +87,7 @@ if(BUILD_EXAMPLES)
 endif()
 
 if(BUILD_TESTING)
+    find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED Test)
     add_subdirectory(autotests)
 endif()
 
