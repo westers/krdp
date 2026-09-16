@@ -11,6 +11,8 @@
 
 #include <ranges>
 
+#include <atomic>
+
 #include <QQueue>
 #include <QTimer>
 
@@ -27,6 +29,7 @@ namespace clk = std::chrono;
 constexpr auto rttUpdateInterval = clk::milliseconds(70);
 constexpr auto rttAverageInterval = clk::milliseconds(500);
 constexpr auto networkResultInterval = clk::seconds(1);
+constexpr double bandwidthSmoothingWeight = 0.5;
 
 BOOL rttMeasureResponse(rdpAutoDetect *rdpAutodetect, RDP_TRANSPORT_TYPE, uint16_t sequence)
 {
@@ -37,10 +40,10 @@ BOOL rttMeasureResponse(rdpAutoDetect *rdpAutodetect, RDP_TRANSPORT_TYPE, uint16
     return FALSE;
 }
 
-BOOL bwMeasureResults(rdpAutoDetect *rdpAutodetect, RDP_TRANSPORT_TYPE, uint16_t, uint16_t, uint32_t, uint32_t)
+BOOL bwMeasureResults(rdpAutoDetect *rdpAutodetect, RDP_TRANSPORT_TYPE, uint16_t, uint16_t, uint32_t timeDelta, uint32_t byteCount)
 {
     auto context = reinterpret_cast<PeerContext *>(rdpAutodetect->context);
-    if (context->networkDetection->onBandwidthMeasureResults()) {
+    if (context->networkDetection->onBandwidthMeasureResults(timeDelta, byteCount)) {
         return TRUE;
     }
     return FALSE;
@@ -64,6 +67,10 @@ public:
     uint32_t sequenceNumber = 0;
 
     uint32_t lastBandwithMeasurement;
+
+    double smoothedBandwidthBps = 0.0;
+    bool hasSmoothedBandwidth = false;
+    std::atomic<uint32_t> averageBandwidthBps{0};
 
     bool rttEnabled = false;
     clk::system_clock::time_point lastRttUpdate;
@@ -93,6 +100,11 @@ std::chrono::system_clock::duration NetworkDetection::minimumRTT() const
 std::chrono::system_clock::duration NetworkDetection::averageRTT() const
 {
     return d->averageRtt;
+}
+
+quint32 NetworkDetection::bandwidth() const
+{
+    return d->averageBandwidthBps.load() * 8 / 1000;
 }
 
 void NetworkDetection::initialize()
@@ -161,13 +173,27 @@ bool NetworkDetection::onRttMeasureResponse(uint16_t sequence)
     return true;
 }
 
-bool NetworkDetection::onBandwidthMeasureResults()
+bool NetworkDetection::onBandwidthMeasureResults(uint32_t timeDelta, uint32_t byteCount)
 {
     if (d->state != State::PendingResults) {
         return true;
     }
 
     d->state = State::None;
+
+    if (timeDelta != 0 && byteCount != 0) {
+        const auto bytesPerSecond = static_cast<uint32_t>((static_cast<uint64_t>(byteCount) * 1000ULL) / static_cast<uint64_t>(timeDelta));
+        if (!d->hasSmoothedBandwidth) {
+            d->hasSmoothedBandwidth = true;
+            d->smoothedBandwidthBps = bytesPerSecond;
+        } else {
+            d->smoothedBandwidthBps = (1.0 - bandwidthSmoothingWeight) * d->smoothedBandwidthBps + bandwidthSmoothingWeight * bytesPerSecond;
+        }
+        d->averageBandwidthBps.store(static_cast<uint32_t>(d->smoothedBandwidthBps));
+        Q_EMIT bandwidthChanged();
+
+        qCDebug(KRDP) << "Bandwidth measurement:" << byteCount << "bytes in" << timeDelta << "ms ->" << bandwidth() << "kbit/s";
+    }
 
     if (d->rdpAutodetect->netCharBandwidth <= 0) {
         return true;
