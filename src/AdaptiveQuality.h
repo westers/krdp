@@ -19,7 +19,11 @@ constexpr auto CongestionRttMargin = std::chrono::milliseconds(5);
 // The client is "backlogged" when it never got within this many
 // unacknowledged frames of caught up during the whole decision interval
 // (VideoStream tracks the minimum after each ack and at decision time).
-constexpr int BacklogFrames = 2;
+// Backlog depth is roughly frame rate x ack latency and is independent of QP,
+// so 2 would read a healthy 60 fps stream with a ~35 ms ack lag as backlogged
+// every interval; 4 needs a sustained >= 67 ms lag at 60 fps, while a
+// saturated socket holds 10+ frames and is still caught.
+constexpr int BacklogFrames = 4;
 
 // After a step down, hold before climbing again so a limited link settles
 // instead of sawtoothing every interval.
