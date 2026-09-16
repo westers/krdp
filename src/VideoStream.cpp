@@ -43,6 +43,10 @@ constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MaxMonitorLayoutCount = 16;
 constexpr auto KeyFrameRequestMinInterval = clk::seconds(2);
 constexpr auto QualityUpdateInterval = clk::milliseconds(1500);
+// Wait for a few accepted bandwidth samples before adapting off them, so a
+// fresh connection stays at the cap instead of reacting to whatever
+// NetworkDetection has measured (or not yet measured) in its first window.
+constexpr int MinimumValidSamplesBeforeAdapting = 3;
 
 RECTANGLE_16 toRdpRect(const QRect &rect)
 {
@@ -459,6 +463,13 @@ void VideoStream::updateAdaptiveQuality()
     }
 
     auto *network = d->session->networkDetection();
+    if (network->validBandwidthSamples() < MinimumValidSamplesBeforeAdapting) {
+        // Keep the quality at the cap until the goodput estimate is backed by
+        // a few real samples; a fresh connection would otherwise adapt off
+        // whatever garbage (or zero) NetworkDetection has measured so far.
+        return;
+    }
+
     const quint8 current = d->quality.load();
     const auto result = AdaptiveQuality::step({
         .current = current,
@@ -673,8 +684,6 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         }
     }
 
-    d->session->networkDetection()->startBandwidthMeasure();
-
     auto frameId = d->frameId++;
 
     {
@@ -724,7 +733,6 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     d->gfxContext->SurfaceCommand(d->gfxContext.get(), &surfaceCommand);
     d->gfxContext->EndFrame(d->gfxContext.get(), &endFramePdu);
 
-    d->session->networkDetection()->stopBandwidthMeasure();
     return true;
 }
 }

@@ -47,6 +47,14 @@ public:
     quint32 bandwidth() const;
     Q_SIGNAL void bandwidthChanged();
 
+    /**
+     * Number of bandwidth measurements that passed the minimum-duration/size
+     * sanity check (see onBandwidthMeasureResults()) since the connection
+     * started. Callers that steer quality from bandwidth() should wait for
+     * a few of these before trusting the estimate.
+     */
+    int validBandwidthSamples() const;
+
     void initialize();
 
     void startBandwidthMeasure();
