@@ -15,8 +15,9 @@ cmake -S "$src" -B "$src/build" \
 cmake --build "$src/build" -j"$jobs"
 cmake --install "$src/build"
 
-config_dir="$(dirname "$(find "$prefix" -name KPipeWireConfig.cmake | head -1)")"
-[ -n "$config_dir" ] || { echo "KPipeWireConfig.cmake not found under $prefix"; exit 1; }
+config_file="$(find "$prefix" -name KPipeWireConfig.cmake | head -1)"
+[ -n "$config_file" ] || { echo "KPipeWireConfig.cmake not found under $prefix"; exit 1; }
+config_dir="$(dirname "$config_file")"
 
 cmake -S "$krdp" -B "$krdp/build" \
     -DCMAKE_PREFIX_PATH="$prefix" \
