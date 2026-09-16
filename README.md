@@ -214,6 +214,15 @@ Useful runtime log command:
 journalctl --user -f -o cat -u app-org.kde.krdpserver -u plasma-xdg-desktop-portal-kde
 ```
 
+### Private KPipeWire
+
+KRDP links against a patched KPipeWire built into `.deps/kpipewire` (source: `~/dev/kpipewire`,
+branch `westers/opt-015`; patches exported to `~/dev/rdp/kpipewire-vaapi-fix/patches-6.6.4/`).
+`scripts/build-kpipewire.sh` builds/installs it and relinks KRDP; `scripts/check-kpipewire-link.sh`
+verifies `build/bin/krdpserver` resolves `libKPipeWire*` there. Re-run the build script after any
+KPipeWire edit or after an apt upgrade of Qt/KF6/FFmpeg/PipeWire. To go back to the system
+library, reconfigure with `-UKPipeWire_DIR -DCMAKE_PREFIX_PATH=`.
+
 ### VAAPI Driver Auto-Selection
 
 On mixed-GPU systems, KRDP now attempts to avoid decode-only VAAPI backends by

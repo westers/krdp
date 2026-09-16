@@ -10,3 +10,5 @@ build*/
 CMakeLists.txt.user
 compile_commands.json
 monitor-logs/
+.deps/
+.superpowers/
