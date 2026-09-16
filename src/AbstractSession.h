@@ -54,9 +54,10 @@ public:
      * Ask the encoder for a fresh keyframe (the RDPGFX surface was just
      * re-created and has no reference picture).
      *
-     * KPipeWire 6.6 has no keyframe-request API, so the default implementation
-     * only logs; sessions that can safely restart their encoded stream (which
-     * always opens with an IDR) override it.
+     * Sessions ask the encoder for a keyframe through
+     * `PipeWireBaseEncodedStream::requestKeyFrame()` when the linked KPipeWire
+     * has it, and otherwise restart their encoded stream (which always opens
+     * with an IDR). The default implementation only logs.
      */
     virtual void requestKeyFrame();
 

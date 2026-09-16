@@ -179,6 +179,17 @@ void setPreferredH264Encoder(Stream *stream)
     stream->setEncoder(encoder);
     qCDebug(KRDP) << "Using PipeWire H264 encoder profile:" << (encoder == PipeWireEncodedStream::H264Main ? "Main" : "Baseline");
 }
+
+template<typename Stream>
+bool requestKeyFrameIfSupported(Stream *stream)
+{
+    if constexpr (requires(Stream *s) { s->requestKeyFrame(); }) {
+        stream->requestKeyFrame();
+        return true;
+    } else {
+        return false;
+    }
+}
 }
 class Xkb : public QtWayland::wl_keyboard
 {
@@ -554,15 +565,19 @@ void PlasmaScreencastV1Session::restartEncodedStream(uint nodeId)
 
 void PlasmaScreencastV1Session::requestKeyFrame()
 {
-    // KPipeWire 6.6 cannot be asked for an IDR mid-stream, but a restarted
-    // encoded stream always opens with one. Re-attach the same PipeWire node
-    // through the deferred restart (KWin keeps the screencast source alive;
-    // only the KPipeWire consumer/encoder is recreated).
     auto encodedStream = stream();
     const uint nodeId = encodedStream->nodeId();
     if (!d->streamConfigured || nodeId == 0 || !streamingRequested()) {
         return;
     }
+    if (requestKeyFrameIfSupported(encodedStream)) {
+        qCDebug(KRDP) << "Requested a keyframe from the encoder for the new surface";
+        return;
+    }
+    // Stock KPipeWire 6.6 cannot be asked for an IDR mid-stream, but a restarted
+    // encoded stream always opens with one. Re-attach the same PipeWire node
+    // through the deferred restart (KWin keeps the screencast source alive;
+    // only the KPipeWire consumer/encoder is recreated).
     if (d->streamRestartTimer.isActive()) {
         // A restart is already in flight; it will deliver a keyframe.
         return;

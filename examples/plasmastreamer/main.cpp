@@ -33,8 +33,9 @@ int main(int argc, char **argv)
         {u"monitor"_s, u"Index of the monitor to display."_s, u"monitor"_s, u"-1"_s},
         {u"quality"_s, u"Encoding quality of the stream, from 0 (lowest) to 100 (highest)"_s, u"quality"_s},
         {u"output"_s, u"Path of the file to write the raw h264 stream to"_s, u"file"_s, u"stream.raw"_s},
-        {u"wake-after"_s, u"Inject a small mouse move via the session's fake input this many seconds after the stream started (mimics an RDP user wiggling the mouse)"_s, u"seconds"_s},
+        {u"wake-after"_s, u"Inject a small mouse move via the session's fake input at these offsets (seconds, comma separated) after the stream started (mimics an RDP user wiggling the mouse)"_s, u"seconds"_s},
         {u"refresh-after"_s, u"Call refreshDisplayConfiguration() on the session this many seconds after the stream started"_s, u"seconds"_s},
+        {u"keyframe-at"_s, u"Call requestKeyFrame() on the session at these offsets (seconds, comma separated) after the stream started"_s, u"seconds"_s},
     });
     parser.process(application);
 
@@ -116,14 +117,16 @@ int main(int argc, char **argv)
     // Optionally mimic the RDP user moving the mouse after connecting, which is
     // what wakes DPMS-off outputs in the real scenario. Mouse motion only.
     if (parser.isSet(u"wake-after"_s)) {
-        const int wakeAfter = parser.value(u"wake-after"_s).toInt();
-        QObject::connect(&session, &KRdp::AbstractSession::started, &application, [&session, &sinceStarted, wakeAfter]() {
-            QTimer::singleShot(wakeAfter * 1000, &session, [&session, &sinceStarted]() {
-                qWarning() << "Injecting mouse move via fake input to wake the display at +" << sinceStarted.elapsed() << "ms";
-                for (const auto &pos : {QPointF(100, 100), QPointF(140, 120), QPointF(100, 100)}) {
-                    session.sendEvent(std::make_shared<QMouseEvent>(QEvent::MouseMove, pos, pos, pos, Qt::NoButton, Qt::NoButton, Qt::NoModifier));
-                }
-            });
+        const auto wakeOffsets = parser.value(u"wake-after"_s).split(u',', Qt::SkipEmptyParts);
+        QObject::connect(&session, &KRdp::AbstractSession::started, &application, [&session, &sinceStarted, wakeOffsets]() {
+            for (const auto &offset : wakeOffsets) {
+                QTimer::singleShot(offset.toInt() * 1000, &session, [&session, &sinceStarted]() {
+                    qWarning() << "Injecting mouse move via fake input to wake the display at +" << sinceStarted.elapsed() << "ms";
+                    for (const auto &pos : {QPointF(100, 100), QPointF(140, 120), QPointF(100, 100)}) {
+                        session.sendEvent(std::make_shared<QMouseEvent>(QEvent::MouseMove, pos, pos, pos, Qt::NoButton, Qt::NoButton, Qt::NoModifier));
+                    }
+                });
+            }
         });
     }
 
@@ -135,6 +138,20 @@ int main(int argc, char **argv)
                 qWarning() << "Calling refreshDisplayConfiguration() at +" << sinceStarted.elapsed() << "ms";
                 session.refreshDisplayConfiguration();
             });
+        });
+    }
+
+    // Optionally call requestKeyFrame() directly, exercising the API path when
+    // the linked KPipeWire supports it (or the restart fallback otherwise).
+    if (parser.isSet(u"keyframe-at"_s)) {
+        const auto offsets = parser.value(u"keyframe-at"_s).split(u',', Qt::SkipEmptyParts);
+        QObject::connect(&session, &KRdp::AbstractSession::started, &application, [&session, &sinceStarted, offsets]() {
+            for (const auto &offset : offsets) {
+                QTimer::singleShot(offset.toInt() * 1000, &session, [&session, &sinceStarted]() {
+                    qInfo() << "Requesting keyframe at +" << sinceStarted.elapsed() << "ms";
+                    session.requestKeyFrame();
+                });
+            }
         });
     }
 
