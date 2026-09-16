@@ -28,6 +28,10 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>The quality of the video stream</label>
       <default>75</default>
     </entry>
+    <entry name="AdaptiveQuality" type="Bool">
+      <label>Steer the video quality from measured goodput and RTT, up to Quality as a cap</label>
+      <default>true</default>
+    </entry>
     <entry name="MonitorMode" type="String">
       <label>Display target mode (workspace, primary, specific)</label>
       <default>workspace</default>

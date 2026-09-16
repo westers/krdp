@@ -396,6 +396,7 @@ int main(int argc, char **argv)
     }
     const auto quality = parserValueWithDefault(u"quality", config->quality());
     controller.setQuality(quality);
+    controller.setAdaptiveQuality(config->adaptiveQuality());
     controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
 
     auto runtimeConfig = KSharedConfig::openConfig(QStringLiteral("krdpserverrc"));
@@ -414,6 +415,7 @@ int main(int argc, char **argv)
             controller.setMonitorIndex(configuredMonitorIndex(config));
         }
 
+        controller.setAdaptiveQuality(config->adaptiveQuality());
         controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
         applyVaapiDriverMode(config->vaapiDriverMode());
         KRdp::selectVaapiDriver();
@@ -506,7 +508,7 @@ int main(int argc, char **argv)
 #else
     const auto sessionType = u"portal"_s;
 #endif
-    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8")
+    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9")
                              .arg(sessionType,
                                   streamTarget,
                                   QString::number(port),
@@ -514,7 +516,8 @@ int main(int argc, char **argv)
                                   vaapiDriverMode,
                                   envValueOrUnset("KRDP_FORCE_VAAPI_DRIVER"),
                                   envValueOrUnset("KRDP_AUTO_VAAPI_DRIVER"),
-                                  config->wakeDisplayOnConnect() ? u"1"_s : u"0"_s);
+                                  config->wakeDisplayOnConnect() ? u"1"_s : u"0"_s,
+                                  config->adaptiveQuality() ? u"1"_s : u"0"_s);
 
     if (!server.start()) {
         return -1;

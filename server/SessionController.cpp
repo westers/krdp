@@ -46,6 +46,9 @@ public:
         connect(connection->videoStream(), &KRdp::VideoStream::requestedFrameRateChanged, this, &SessionWrapper::onRequestedFrameRateChanged, Qt::QueuedConnection);
         // Emitted from the frame submission thread; the session must act on the main thread.
         connect(connection->videoStream(), &KRdp::VideoStream::keyFrameRequested, this, &SessionWrapper::onKeyFrameRequested, Qt::QueuedConnection);
+        // Emitted from the FreeRDP peer thread (adaptive quality) or the main thread
+        // (cap/adaptive toggles); always queue across to the session either way.
+        connect(connection->videoStream(), &KRdp::VideoStream::requestedQualityChanged, this, &SessionWrapper::onRequestedQualityChanged, Qt::QueuedConnection);
         connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, session.get(), &KRdp::AbstractSession::sendEvent);
         connect(connection->clipboard(), &KRdp::Clipboard::clientDataChanged, session.get(), [clipboard = connection->clipboard(), this]() {
             session->setClipboardData(clipboard->getClipboard());
@@ -104,6 +107,11 @@ public:
     void onKeyFrameRequested()
     {
         session->requestKeyFrame();
+    }
+
+    void onRequestedQualityChanged(quint8 quality)
+    {
+        session->setVideoQuality(quality);
     }
 
     void onConnectionDestroyed()
@@ -185,9 +193,29 @@ void SessionController::setQuality(const std::optional<int> &quality)
             continue;
         }
         wrapper->session->setVideoQuality(m_quality.value());
+        if (wrapper->connection) {
+            wrapper->connection->videoStream()->setQualityCap(quint8(m_quality.value()));
+        }
     }
 
     qInfo() << "Applied runtime quality update:" << m_quality.value() << "active sessions:" << m_wrappers.size();
+}
+
+void SessionController::setAdaptiveQuality(bool enabled)
+{
+    if (m_adaptiveQuality == enabled) {
+        return;
+    }
+
+    m_adaptiveQuality = enabled;
+    for (const auto &wrapper : m_wrappers) {
+        if (!wrapper || !wrapper->connection) {
+            continue;
+        }
+        wrapper->connection->videoStream()->setAdaptiveQuality(m_adaptiveQuality);
+    }
+
+    qInfo() << "Applied runtime adaptive quality update:" << m_adaptiveQuality << "active sessions:" << m_wrappers.size();
 }
 
 void SessionController::setWakeDisplayOnConnect(bool enabled)
@@ -221,7 +249,9 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     }
     if (m_quality.has_value()) {
         wrapper->session->setVideoQuality(m_quality.value());
+        newConnection->videoStream()->setQualityCap(quint8(m_quality.value()));
     }
+    newConnection->videoStream()->setAdaptiveQuality(m_adaptiveQuality);
 
     connect(wrapper.get(), &SessionWrapper::connectionDestroyed, this, [this](SessionWrapper *wrapper) {
         m_wrappers.erase(std::remove_if(m_wrappers.begin(),

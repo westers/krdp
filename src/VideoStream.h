@@ -127,6 +127,26 @@ public:
      */
     Q_SIGNAL void keyFrameRequested();
 
+    /**
+     * Set the upper bound for the video quality.
+     *
+     * With adaptive quality enabled this is a cap on the value the stream
+     * steers towards; with it disabled this is the quality used outright.
+     */
+    void setQualityCap(quint8 cap);
+    /**
+     * Enable or disable steering quality from measured goodput and RTT.
+     *
+     * When disabled the stream uses the configured quality cap outright.
+     */
+    void setAdaptiveQuality(bool enabled);
+    /**
+     * Emitted when the stream wants the session to use a new video quality,
+     * either because adaptive quality moved it or because the cap/adaptive
+     * setting changed. May be emitted from a thread other than the session's.
+     */
+    Q_SIGNAL void requestedQualityChanged(quint8 quality);
+
 private:
     friend BOOL gfxChannelIdAssigned(RdpgfxServerContext *, uint32_t);
     friend uint32_t gfxCapsAdvertise(RdpgfxServerContext *, const RDPGFX_CAPS_ADVERTISE_PDU *);
@@ -135,6 +155,9 @@ private:
     bool onChannelIdAssigned(uint32_t channelId);
     uint32_t onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdvertise);
     uint32_t onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frameAcknowledge);
+
+    // Connected to NetworkDetection::bandwidthChanged (FreeRDP peer thread).
+    Q_SLOT void updateAdaptiveQuality();
 
     void performReset(const QSize &size, const QVector<VideoMonitor> &monitors);
     /**

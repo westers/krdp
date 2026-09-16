@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <condition_variable>
 #include <limits>
@@ -26,6 +27,7 @@
 #include <freerdp/freerdp.h>
 #include <freerdp/peer.h>
 
+#include "AdaptiveQuality.h"
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
@@ -40,6 +42,7 @@ namespace clk = std::chrono;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MaxMonitorLayoutCount = 16;
 constexpr auto KeyFrameRequestMinInterval = clk::seconds(2);
+constexpr auto QualityUpdateInterval = clk::milliseconds(1500);
 
 RECTANGLE_16 toRdpRect(const QRect &rect)
 {
@@ -230,6 +233,15 @@ public:
     // (e.g. repeated caps re-advertisement) does not restart the encoder more
     // than once per KeyFrameRequestMinInterval.
     clk::steady_clock::time_point lastKeyFrameRequest;
+
+    // Touched from both the main thread (setQualityCap/setAdaptiveQuality, at
+    // session setup) and the FreeRDP peer thread (updateAdaptiveQuality, off
+    // NetworkDetection::bandwidthChanged), hence atomic.
+    std::atomic<quint8> quality = 100; // current adaptive value
+    std::atomic<quint8> qualityCap = 100; // configured Quality
+    std::atomic<bool> adaptiveQuality = true;
+    // Peer-thread only (only updateAdaptiveQuality touches it).
+    clk::system_clock::time_point lastQualityUpdate;
 };
 
 
@@ -263,6 +275,12 @@ bool VideoStream::initialize()
     d->gfxContext->CapsAdvertise = gfxCapsAdvertise;
     d->gfxContext->FrameAcknowledge = gfxFrameAcknowledge;
     d->gfxContext->QoeFrameAcknowledge = gfxQoEFrameAcknowledge;
+
+    // bandwidthChanged is emitted from the FreeRDP peer thread, which is also
+    // where VideoStream runs, so a direct connection is fine; the resulting
+    // requestedQualityChanged signal is queued across to the session by
+    // SessionController.
+    connect(d->session->networkDetection(), &NetworkDetection::bandwidthChanged, this, &VideoStream::updateAdaptiveQuality);
 
     d->gfxContext->custom = this;
     d->gfxContext->rdpcontext = d->session->rdpPeerContext();
@@ -395,6 +413,61 @@ uint32_t VideoStream::requestedFrameRate() const
     return d->requestedFrameRate;
 }
 
+void VideoStream::setQualityCap(quint8 cap)
+{
+    d->qualityCap = cap;
+    const quint8 current = d->quality.load();
+    const quint8 next = d->adaptiveQuality.load() ? std::min(current, cap) : cap;
+    if (next != current) {
+        d->quality = next;
+        Q_EMIT requestedQualityChanged(next);
+    }
+}
+
+void VideoStream::setAdaptiveQuality(bool enabled)
+{
+    if (d->adaptiveQuality.exchange(enabled) == enabled) {
+        return;
+    }
+    if (!enabled) {
+        const quint8 cap = d->qualityCap.load();
+        const quint8 previous = d->quality.exchange(cap);
+        if (previous != cap) {
+            Q_EMIT requestedQualityChanged(cap);
+        }
+    }
+}
+
+void VideoStream::updateAdaptiveQuality()
+{
+    if (!d->adaptiveQuality.load()) {
+        return;
+    }
+    const auto now = clk::system_clock::now();
+    if (now - d->lastQualityUpdate < QualityUpdateInterval) {
+        return;
+    }
+
+    auto *network = d->session->networkDetection();
+    const quint8 current = d->quality.load();
+    const auto result = AdaptiveQuality::step({
+        .current = current,
+        .cap = d->qualityCap.load(),
+        .goodputKbit = network->bandwidth(),
+        .pixels = double(d->surface.size.width()) * double(d->surface.size.height()),
+        .averageRtt = clk::duration_cast<clk::milliseconds>(network->averageRTT()),
+        .minimumRtt = clk::duration_cast<clk::milliseconds>(network->minimumRTT()),
+    });
+    if (result.next == current) {
+        return;
+    }
+
+    d->lastQualityUpdate = now;
+    d->quality = quint8(result.next);
+    qCDebug(KRDP) << "Adaptive quality ->" << result.next << "(target" << result.target << "cap" << d->qualityCap.load() << "goodput" << network->bandwidth() << "kbit/s"
+                  << (result.congested ? ", congested" : "") << ")";
+    Q_EMIT requestedQualityChanged(quint8(result.next));
+}
 
 bool VideoStream::onChannelIdAssigned(uint32_t channelId)
 {
@@ -619,7 +692,11 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     avcStream.meta.numRegionRects = 1;
     RECTANGLE_16 rect = {0, 0, static_cast<UINT16>(frame.size.width()), static_cast<UINT16>(frame.size.height())};
     avcStream.meta.regionRects = &rect;
-    RDPGFX_H264_QUANT_QUALITY quality = {22, 0, 100};
+    // Informational for the client (MS-RDPEGFX 2.2.4.4.1), but keep it honest:
+    // the same map the private KPipeWire uses (quality 100 -> QP 12, 0 -> QP 40).
+    const quint8 currentQuality = d->quality.load();
+    const quint8 qp = quint8(std::lround(40.0 - 0.28 * currentQuality));
+    RDPGFX_H264_QUANT_QUALITY quality = {qp, 0, currentQuality};
     avcStream.meta.quantQualityVals = &quality;
 
     d->gfxContext->StartFrame(d->gfxContext.get(), &startFramePdu);

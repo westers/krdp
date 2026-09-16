@@ -35,6 +35,7 @@ public:
     void setVirtualMonitor(const KRdp::VirtualMonitor &vm);
     void setMonitorIndex(const std::optional<int> &index);
     void setQuality(const std::optional<int> &quality);
+    void setAdaptiveQuality(bool enabled);
     void setWakeDisplayOnConnect(bool enabled);
     void refreshDisplayConfiguration();
     void setSNIStatus(const KRdp::RdpConnection::State state);
@@ -48,6 +49,7 @@ private:
     SessionType m_sessionType;
     std::optional<int> m_monitorIndex;
     std::optional<int> m_quality;
+    bool m_adaptiveQuality = true;
     std::optional<KRdp::VirtualMonitor> m_virtualMonitor;
 
     std::unique_ptr<KRdp::AbstractSession> m_initializationSession;
