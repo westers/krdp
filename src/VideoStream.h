@@ -148,8 +148,13 @@ private:
      * Send ResetGraphics for \a monitors (already in RDP desktop space, with
      * the desktop itself \a desktopSize) and re-create one surface per entry
      * of \a surfaces.
+     *
+     * Call with the private layout mutex held; it publishes the new surface
+     * vector. Returns false when the client refused to create a surface, in
+     * which case no surfaces are left behind and a reset is re-armed for the
+     * next frame.
      */
-    void performReset(const QSize &desktopSize, const QVector<VideoMonitor> &monitors, const QVector<SurfaceLayout::Entry> &surfaces);
+    bool performReset(const QSize &desktopSize, const QVector<VideoMonitor> &monitors, const QVector<SurfaceLayout::Entry> &surfaces);
     /**
      * Returns false only when the frame could not be sent because the GFX
      * channel is not ready (context gone or caps reset mid-flight); the caller

@@ -309,10 +309,14 @@ public:
     // (e.g. repeated caps re-advertisement) does not restart the encoder more
     // than once per KeyFrameRequestMinInterval. One timestamp per surface.
     QVector<clk::steady_clock::time_point> lastKeyFrameRequest;
-    // Stream-lifetime latches so a frame for a surface that does not exist,
-    // or a session reporting a broken layout, is reported once and not once
-    // per frame.
+    // Latches so a frame for a surface that does not exist, a frame whose size
+    // does not match its surface, a failed CreateSurface or a session reporting
+    // a broken layout is reported once and not once per frame. The first three
+    // are cleared by a successful reset, so a later, different misconfiguration
+    // is still reported.
     bool loggedUnknownSurface = false;
+    bool loggedSizeMismatch = false;
+    bool loggedCreateSurfaceFailure = false;
     bool warnedInvalidLayout = false;
 
     // setQualityCap()/setAdaptiveQuality() and updateAdaptiveQuality() (the
@@ -771,7 +775,7 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
     return CHANNEL_RC_OK;
 }
 
-void VideoStream::performReset(const QSize &desktopSize, const QVector<VideoMonitor> &monitors, const QVector<SurfaceLayout::Entry> &surfaces)
+bool VideoStream::performReset(const QSize &desktopSize, const QVector<VideoMonitor> &monitors, const QVector<SurfaceLayout::Entry> &surfaces)
 {
     RDPGFX_RESET_GRAPHICS_PDU resetGraphicsPdu;
     resetGraphicsPdu.width = desktopSize.width();
@@ -803,7 +807,19 @@ void VideoStream::performReset(const QSize &desktopSize, const QVector<VideoMoni
         uint16_t surfaceId = d->nextSurfaceId++;
         createSurfacePdu.surfaceId = surfaceId;
         createSurfacePdu.pixelFormat = GFX_PIXEL_FORMAT_XRGB_8888;
-        d->gfxContext->CreateSurface(d->gfxContext.get(), &createSurfacePdu);
+        if (d->gfxContext->CreateSurface(d->gfxContext.get(), &createSurfacePdu) != CHANNEL_RC_OK) {
+            // Sending frames to surfaces the client never created is worse
+            // than sending nothing: roll the whole reset back and let the next
+            // frame retry it.
+            if (!d->loggedCreateSurfaceFailure) {
+                d->loggedCreateSurfaceFailure = true;
+                qCWarning(KRDP) << "CreateSurface failed for a" << entry.size << "surface at" << entry.origin << "- aborting this reset";
+            }
+            d->surfaces.clear();
+            d->surfacePixels = 0;
+            d->pendingReset = true;
+            return false;
+        }
 
         d->surfaces.push_back(Surface{
             .id = surfaceId,
@@ -824,6 +840,9 @@ void VideoStream::performReset(const QSize &desktopSize, const QVector<VideoMoni
     // so a reset storm still cannot ask the encoder for more than one keyframe
     // per KeyFrameRequestMinInterval per surface.
     d->lastKeyFrameRequest.resize(surfaces.size());
+    d->loggedCreateSurfaceFailure = false;
+
+    return true;
 }
 
 bool VideoStream::sendFrame(const VideoFrame &frame)
@@ -862,8 +881,26 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         if (d->pendingReset || d->monitorLayout != plan.monitors || !target || frameSizeChanged) {
             d->pendingReset = false;
             d->monitorLayout = plan.monitors;
-            performReset(plan.desktopSize, plan.monitors, plan.surfaces);
+            // performReset() sends ResetGraphics, CreateSurface and
+            // MapSurfaceToOutput with layoutMutex held, deliberately. The ack
+            // path (onFrameAcknowledge) never takes this lock, so the only
+            // thread a reset can hold up is the peer thread inside
+            // onCapsAdvertise, which is about to tear these surfaces down
+            // anyway. Dropping the lock around the sends would instead let a
+            // second reset interleave with this one on the wire.
+            if (!performReset(plan.desktopSize, plan.monitors, plan.surfaces)) {
+                // The surfaces were rolled back and pendingReset re-armed.
+                // Drop this frame so the next one retries; holding it would
+                // busy-spin the submission thread, which re-dequeues a
+                // prepended frame with no wait.
+                return true;
+            }
             target = d->surfaceFor(frame.monitorIndex);
+            // A successful reset is a clean slate: let a later, different
+            // misconfiguration be reported rather than staying silent for the
+            // rest of the stream.
+            d->loggedUnknownSurface = false;
+            d->loggedSizeMismatch = false;
 
             // A freshly created surface has no reference picture. If the frame we
             // are about to send is not a keyframe (e.g. after a caps
@@ -886,6 +923,21 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
             // so a future edit cannot turn this into a null dereference.
             return true;
         }
+
+        // With a configured layout the surface is the size that layout asked
+        // for, and a frame of any other size cannot be sent: the surface
+        // command and the AVC420 region rect describe the surface, and
+        // FreeRDP's client-side avc420 decode rejects a region rect larger
+        // than the decoded picture without telling the server anything.
+        if (!d->configuredLayout.isEmpty() && target->size != frame.size) {
+            if (!d->loggedSizeMismatch) {
+                d->loggedSizeMismatch = true;
+                qCWarning(KRDP) << "Dropping frames for monitor" << frame.monitorIndex << ": the frame is" << frame.size << "but its surface is" << target->size
+                                << "- the configured monitor layout must be in pixels, not logical coordinates";
+            }
+            return true;
+        }
+
         surface = *target;
     }
 
