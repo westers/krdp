@@ -39,15 +39,6 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
-// The 780M's VA-API H.264 encoder tops out at a 4096x4096 surface, so a
-// monitor larger than that in either direction cannot become a surface (and a
-// stream) of its own.
-constexpr int MaxEncodeDimension = 4096;
-// RDPGFX_RESET_GRAPHICS carries at most 16 monitors and
-// VideoStream::setMonitorLayout() rejects a longer layout outright.
-constexpr int MaxMonitorCount = 16;
-// Below this, per-monitor streaming buys nothing over the single-surface path.
-constexpr int MinMultiMonitorCount = 2;
 // How long the output list has to hold still before a hot-plug rebuild; see
 // SessionController::rebuildMultiSessions(). Comfortably longer than the
 // 750 ms settle PlasmaScreencastV1Session's own stream recovery uses, so the
@@ -612,118 +603,105 @@ void SessionController::applyMultiLayout(bool topologyChange)
 
 SessionController::LayoutUpdate SessionController::refreshMultiLayout()
 {
-    QVector<QScreen *> usableScreens;
-    auto layout = computeMultiLayout(usableScreens);
-
     // Getting into multi mode is only worth it with two monitors. Once it is
     // running, a topology change that leaves a single usable monitor keeps a
     // single surface rather than silently moving a live client onto the
     // other code path; only losing every monitor - which the output churn on
     // a DPMS wake does transiently - leaves the previous layout alone.
-    const qsizetype minimum = m_multiMonitor ? 1 : MinMultiMonitorCount;
-    if (layout.size() < minimum) {
+    const int minimum = m_multiMonitor ? 1 : KRdp::MultiLayout::MinMonitorCount;
+    const auto result = computeMultiLayout(minimum);
+
+    if (!result.dropped.isEmpty() && result.dropped != m_droppedScreens) {
+        qWarning().noquote() << QStringLiteral("MonitorMode=multi cannot use %1 (empty geometry, past the %2 px encode limit, or past %3 monitors)")
+                                    .arg(result.dropped.join(QStringLiteral(", ")))
+                                    .arg(KRdp::MultiLayout::MaxEncodeDimension)
+                                    .arg(KRdp::MultiLayout::MaxMonitorCount);
+    }
+    m_droppedScreens = result.dropped;
+
+    if (result.layout.isEmpty()) {
         return LayoutUpdate::Unusable;
     }
 
-    const auto screens = QGuiApplication::screens();
-    QVector<int> streamIndices;
-    QStringList names;
-    streamIndices.reserve(usableScreens.size());
-    names.reserve(usableScreens.size());
-    for (auto *screen : std::as_const(usableScreens)) {
-        streamIndices.push_back(int(screens.indexOf(screen)));
-        names.push_back(screen->name());
-    }
-
-    // The layout is in pixels while fake input takes logical coordinates, so
-    // the input path needs the ratio between them. Every screen on this box is
-    // at scale 1; a mixed-scale workspace has no single ratio, so the primary's
-    // is used and the rest are approximated.
-    qreal scale = 1.0;
-    for (qsizetype i = 0; i < layout.size(); ++i) {
-        if (layout.at(i).primary) {
-            scale = usableScreens.at(i)->devicePixelRatio();
-            break;
-        }
-    }
-    const bool mixedScales = std::any_of(usableScreens.cbegin(), usableScreens.cend(), [scale](const QScreen *screen) {
-        return !qFuzzyCompare(screen->devicePixelRatio(), scale);
-    });
-    if (mixedScales && !m_warnedMixedScales) {
+    if (result.mixedScales && !m_warnedMixedScales) {
         m_warnedMixedScales = true;
-        qWarning() << "MonitorMode=multi with monitors at different scales; pointer positions use the primary's scale" << scale;
+        qWarning() << "MonitorMode=multi with monitors at different scales: each monitor's logical origin is multiplied by its own device pixel"
+                   << "ratio, so the pixel rects may gap or overlap, and pointer positions use the primary's scale of" << result.layout.scale
+                   << "- multi is only exact on a uniform scale";
     }
 
-    if (m_multiMonitor && m_layout.monitors == layout && m_streamIndices == streamIndices && qFuzzyCompare(m_layout.scale, scale)) {
+    if (m_multiMonitor && m_layout.monitors == result.layout.monitors && m_streamIndices == result.streamIndices
+        && qFuzzyCompare(m_layout.scale, result.layout.scale)) {
         return LayoutUpdate::Unchanged;
     }
 
-    m_layout.monitors = layout;
-    m_layout.names = names;
-    m_layout.scale = scale;
-    m_streamIndices = streamIndices;
+    m_layout = result.layout;
+    m_streamIndices = result.streamIndices;
     return LayoutUpdate::Changed;
 }
 
-QVector<KRdp::VideoMonitor> SessionController::computeMultiLayout(QVector<QScreen *> &orderedScreens)
+SessionController::MultiLayoutResult SessionController::computeMultiLayout(int minimumCount)
 {
-    orderedScreens.clear();
+    MultiLayoutResult result;
 
-    QVector<KRdp::VideoMonitor> layout;
     const auto screens = QGuiApplication::screens();
     if (screens.isEmpty()) {
-        return layout;
+        return result;
     }
 
-    const auto primaryIndex = primaryScreenIndex();
-    const QScreen *primary = primaryIndex.has_value() && *primaryIndex >= 0 && *primaryIndex < screens.size() ? screens.at(*primaryIndex) : nullptr;
+    const auto primary = primaryScreenIndex();
 
-    for (auto *screen : screens) {
-        if (layout.size() >= MaxMonitorCount) {
-            qWarning() << "More than" << MaxMonitorCount << "monitors; leaving" << screen->name() << "out of MonitorMode=multi";
+    // screenIndices.at(i) is the QGuiApplication::screens() index that infos[i]
+    // was read from. Carrying it through is what keeps a surface's
+    // setActiveStream() target correct without a second indexOf() lookup, which
+    // could return -1 if the screen list moved in between - and -1 means
+    // "capture the whole workspace", whose frames no per-monitor surface can
+    // take. A null entry is skipped here so it can never contribute an index.
+    QVector<int> screenIndices;
+    QVector<KRdp::MultiLayout::ScreenInfo> infos;
+    infos.reserve(screens.size());
+    screenIndices.reserve(screens.size());
+    for (qsizetype i = 0; i < screens.size(); ++i) {
+        const auto *screen = screens.at(i);
+        if (!screen) {
             continue;
         }
-
-        const auto logicalGeometry = screen->geometry();
-        if (logicalGeometry.isEmpty()) {
-            // KWin removes and re-adds every output on a DPMS wake, so a screen
-            // can briefly have no geometry. An empty rect would make
-            // VideoStream::setMonitorLayout() reject the whole layout, so skip
-            // the screen; the next topology change brings it back.
-            qDebug() << "Skipping screen" << screen->name() << "with an empty geometry";
-            continue;
-        }
-
-        const qreal scale = screen->devicePixelRatio();
-        const QRect pixelGeometry(QPoint(qRound(logicalGeometry.x() * scale), qRound(logicalGeometry.y() * scale)),
-                                  QSize(qRound(logicalGeometry.width() * scale), qRound(logicalGeometry.height() * scale)));
-
-        if (pixelGeometry.width() > MaxEncodeDimension || pixelGeometry.height() > MaxEncodeDimension) {
-            qWarning() << "Screen" << screen->name() << pixelGeometry.size() << "is past the" << MaxEncodeDimension
-                       << "px VA-API encode limit; leaving it out of MonitorMode=multi";
-            continue;
-        }
-
-        orderedScreens.push_back(screen);
-        layout.push_back(KRdp::VideoMonitor{
-            .geometry = pixelGeometry,
-            .primary = (screen == primary),
+        screenIndices.push_back(int(i));
+        infos.push_back(KRdp::MultiLayout::ScreenInfo{
+            .name = screen->name(),
+            .logicalGeometry = screen->geometry(),
+            .devicePixelRatio = screen->devicePixelRatio(),
+            .primary = primary.has_value() && *primary == int(i),
         });
     }
 
-    // setMonitorLayout() wants exactly one primary, and the configured one can
-    // have been left out above.
-    const auto primaryCount = std::count_if(layout.cbegin(), layout.cend(), [](const KRdp::VideoMonitor &monitor) {
-        return monitor.primary;
-    });
-    if (primaryCount != 1 && !layout.isEmpty()) {
-        for (auto &monitor : layout) {
-            monitor.primary = false;
-        }
-        layout.first().primary = true;
+    QList<qsizetype> kept;
+    result.layout.monitors = KRdp::MultiLayout::selectMultiLayout(infos, &result.dropped, &kept, minimumCount);
+    if (result.layout.monitors.isEmpty()) {
+        return result;
     }
 
-    return layout;
+    result.streamIndices.reserve(kept.size());
+    result.layout.names.reserve(kept.size());
+    for (const auto index : std::as_const(kept)) {
+        result.streamIndices.push_back(screenIndices.at(index));
+        result.layout.names.push_back(infos.at(index).name);
+    }
+
+    // The layout is in pixels while fake input takes logical coordinates, so
+    // the input path needs the ratio between them; the primary's is the one
+    // used. Every screen on this box is at scale 1.
+    for (qsizetype i = 0; i < result.layout.monitors.size(); ++i) {
+        if (result.layout.monitors.at(i).primary) {
+            result.layout.scale = infos.at(kept.at(i)).devicePixelRatio;
+            break;
+        }
+    }
+    result.mixedScales = std::any_of(kept.cbegin(), kept.cend(), [&infos, scale = result.layout.scale](qsizetype index) {
+        return !qFuzzyCompare(infos.at(index).devicePixelRatio, scale);
+    });
+
+    return result;
 }
 
 std::optional<int> SessionController::primaryScreenIndex()

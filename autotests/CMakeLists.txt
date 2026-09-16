@@ -7,3 +7,8 @@ add_executable(SurfaceLayoutTest SurfaceLayoutTest.cpp)
 target_include_directories(SurfaceLayoutTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(SurfaceLayoutTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME SurfaceLayoutTest COMMAND SurfaceLayoutTest)
+
+add_executable(MultiLayoutTest MultiLayoutTest.cpp)
+target_include_directories(MultiLayoutTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(MultiLayoutTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME MultiLayoutTest COMMAND MultiLayoutTest)

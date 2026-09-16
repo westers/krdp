@@ -5,6 +5,7 @@
 
 #include "DisplayWakeGuard.h"
 #include "RdpConnection.h"
+#include "MultiLayout.h"
 #include <AbstractSession.h>
 #include <KStatusNotifierItem>
 #include <SurfaceLayout.h>
@@ -117,21 +118,33 @@ public:
      * preferring KWin's own output config over Qt's idea of the primary screen.
      */
     static std::optional<int> primaryScreenIndex();
+    /** Everything computeMultiLayout() read off the live screens. */
+    struct MultiLayoutResult {
+        /** The surfaces to stream; empty when multi mode is not usable. */
+        MonitorLayout layout;
+        /** QGuiApplication::screens() index behind each entry of \c layout. */
+        QVector<int> streamIndices;
+        /** Names of the screens that were left out, for logging. */
+        QStringList dropped;
+        /** Whether the kept screens disagree about their device pixel ratio. */
+        bool mixedScales = false;
+    };
+
     /**
-     * The monitor layout for `MonitorMode=multi`, in KWin-global PIXEL
-     * coordinates, with \a orderedScreens filled with the QScreen behind each
-     * entry (same order, so entry i is orderedScreens[i]).
+     * Read the live screens and select the `MonitorMode=multi` layout from
+     * them, returning an empty layout when fewer than \a minimumCount monitors
+     * are usable.
      *
-     * Monitors with an empty geometry, monitors past the RDPGFX layout limit
-     * and monitors larger than the VA-API encode limit in either dimension are
-     * left out, so the result can be shorter than QGuiApplication::screens().
-     * Exactly one entry is flagged primary whenever the result is non-empty.
+     * All this does is turn QGuiApplication::screens() into
+     * KRdp::MultiLayout::ScreenInfo and call
+     * KRdp::MultiLayout::selectMultiLayout(); the decision itself is that pure
+     * function, which autotests/MultiLayoutTest.cpp covers without a display.
      *
      * The geometries are NOT translated: KRdp::VideoStream::setMonitorLayout()
      * owns the translation into RDP desktop space, and
      * KRdp::SurfaceLayout::originOf() inverts it for the input path.
      */
-    static QVector<KRdp::VideoMonitor> computeMultiLayout(QVector<QScreen *> &orderedScreens);
+    static MultiLayoutResult computeMultiLayout(int minimumCount = KRdp::MultiLayout::MinMonitorCount);
 
 private:
     /** What refreshMultiLayout() found. */
@@ -175,6 +188,9 @@ private:
     // A mixed-scale workspace has no single pixels-per-logical-unit ratio;
     // warned about once rather than once per layout recomputation.
     bool m_warnedMixedScales = false;
+    // The screens last left out of the layout, so the reason is logged when it
+    // changes rather than on every recomputation.
+    QStringList m_droppedScreens;
     // Lets the output list settle before a hot-plug rebuild; see
     // rebuildMultiSessions().
     QTimer m_multiRebuildTimer;
