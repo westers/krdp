@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <QObject>
+#include <QStringList>
 #include <QTimer>
 #include <QVector>
 
@@ -33,6 +34,26 @@ public:
     enum class SessionType {
         Portal,
         Plasma,
+    };
+
+    /**
+     * The monitor layout a connection's sessions are built for.
+     *
+     * Everything in it is empty/default in every mode but `multi`, which is
+     * how the wrapper tells the two apart.
+     */
+    struct MonitorLayout {
+        /** One entry per RDPGFX surface, in KWin-global PIXEL coordinates. */
+        QVector<KRdp::VideoMonitor> monitors;
+        /** Connector name of the screen behind each entry, for logging. */
+        QStringList names;
+        /** Pixels per logical unit, for turning RDP positions back into input. */
+        qreal scale = 1.0;
+
+        bool isEmpty() const
+        {
+            return monitors.isEmpty();
+        }
     };
 
     SessionController(KRdp::Server *server, SessionType sessionType);
@@ -146,15 +167,11 @@ private:
     // MonitorMode=multi was asked for, and (m_multiMonitor) is actually in use.
     bool m_multiMonitorRequested = false;
     bool m_multiMonitor = false;
-    // One entry per surface, in KWin-global pixel coordinates; empty unless
-    // multi-monitor streaming is in effect.
-    QVector<KRdp::VideoMonitor> m_monitorLayout;
+    // The surfaces multi mode streams; empty unless it is in effect.
+    MonitorLayout m_layout;
     // QGuiApplication::screens() index each surface captures, same order as
-    // m_monitorLayout. Not necessarily 0..N-1: unusable screens are skipped.
+    // m_layout.monitors. Not necessarily 0..N-1: unusable screens are skipped.
     QVector<int> m_streamIndices;
-    // Pixels per logical unit for the layout above, used to turn RDP pointer
-    // positions back into the logical coordinates fake input expects.
-    qreal m_layoutScale = 1.0;
     // A mixed-scale workspace has no single pixels-per-logical-unit ratio;
     // warned about once rather than once per layout recomputation.
     bool m_warnedMixedScales = false;

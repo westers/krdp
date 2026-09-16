@@ -101,58 +101,78 @@ public:
      * Install \a newSessions (already configured by the controller), replacing
      * whatever was there.
      *
-     * \a layout is empty in every mode but `multi`: one session, surface index
-     * 0, no explicit surface layout and no coordinate translation, exactly as
-     * it was before per-monitor surfaces. In `multi` it holds one entry per
-     * surface in KWin-global pixel coordinates, in the same order as
-     * \a newSessions, and \a layoutScale says how many of those pixels make a
-     * logical unit.
+     * \a newLayout is empty in every mode but `multi`: one session, surface
+     * index 0, no explicit surface layout and no coordinate translation,
+     * exactly as it was before per-monitor surfaces. In `multi` it holds one
+     * entry per surface in KWin-global pixel coordinates, in the same order as
+     * \a newSessions.
+     *
+     * Safe to call with sessions that are already installed: every connection
+     * made here is tracked and undone first, so dropSession() can re-install
+     * the survivors without duplicating their signals.
      */
-    void setSessions(std::vector<std::unique_ptr<KRdp::AbstractSession>> &&newSessions, const QVector<KRdp::VideoMonitor> &layout, qreal layoutScale)
+    void setSessions(std::vector<std::unique_ptr<KRdp::AbstractSession>> &&newSessions, const SessionController::MonitorLayout &newLayout)
     {
         if (newSessions.empty() || !connection) {
             return;
         }
 
-        const bool hadLayout = !monitorLayout.isEmpty();
-        // Destroying the previous sessions drops every connection made below
-        // that has one of them as sender or as context object. The input
-        // handler is wired to the wrapper itself in multi mode, so that one
-        // has to go by hand.
-        disconnect(connection->inputHandler(), nullptr, this, nullptr);
+        const bool hadLayout = !layout.isEmpty();
+        // Undo exactly what a previous call wired. Destroying the previous
+        // sessions would drop most of it anyway, but a session that survives
+        // into the new set (dropSession()) would otherwise be connected twice
+        // and queue every frame twice.
+        for (const auto &handle : std::as_const(m_sessionConnections)) {
+            QObject::disconnect(handle);
+        }
+        m_sessionConnections.clear();
+
         sessions = std::move(newSessions);
-        monitorLayout = layout;
-        m_layoutScale = layoutScale > 0.0 ? layoutScale : 1.0;
+        layout = newLayout;
+        if (!(layout.scale > 0.0)) {
+            layout.scale = 1.0;
+        }
 
         auto *videoStream = connection->videoStream();
         // The stream needs the layout before the first frame arrives: a frame
         // whose size does not match its surface is dropped. Skipped entirely
         // while no layout is or was configured, so the other modes never touch
         // this code path.
-        if (!monitorLayout.isEmpty() || hadLayout) {
-            videoStream->setMonitorLayout(monitorLayout);
+        if (!layout.isEmpty() || hadLayout) {
+            videoStream->setMonitorLayout(layout.monitors);
         }
 
+        const bool multi = !layout.isEmpty();
         for (const auto &entry : sessions) {
             auto *session = entry.get();
-            connect(session, &KRdp::AbstractSession::frameReceived, videoStream, &KRdp::VideoStream::queueFrame);
-            connect(session, &KRdp::AbstractSession::cursorUpdate, this, &SessionWrapper::onCursorUpdate);
-            connect(session, &KRdp::AbstractSession::error, this, &SessionWrapper::sessionError);
-            connect(session, &KRdp::AbstractSession::clipboardDataChanged, connection->clipboard(), &KRdp::Clipboard::setServerData);
+            m_sessionConnections.append(connect(session, &KRdp::AbstractSession::frameReceived, videoStream, &KRdp::VideoStream::queueFrame));
+            m_sessionConnections.append(connect(session, &KRdp::AbstractSession::cursorUpdate, this, &SessionWrapper::onCursorUpdate));
+            if (multi) {
+                // One monitor going away must not take the whole connection
+                // with it; see dropSession().
+                m_sessionConnections.append(connect(session, &KRdp::AbstractSession::error, this, [this, session]() {
+                    onMonitorSessionError(session);
+                }));
+            } else {
+                m_sessionConnections.append(connect(session, &KRdp::AbstractSession::error, this, &SessionWrapper::sessionError));
+            }
+            m_sessionConnections.append(
+                connect(session, &KRdp::AbstractSession::clipboardDataChanged, connection->clipboard(), &KRdp::Clipboard::setServerData));
         }
 
         // Input and clipboard are workspace-wide, so they go through the first
         // session whatever the mode. It is the only session in every mode but
         // multi, where fake input addresses the whole workspace anyway.
         auto *inputSession = sessions.front().get();
-        if (monitorLayout.isEmpty()) {
-            connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, inputSession, &KRdp::AbstractSession::sendEvent);
+        if (!multi) {
+            m_sessionConnections.append(
+                connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, inputSession, &KRdp::AbstractSession::sendEvent));
         } else {
-            connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, this, &SessionWrapper::onInputEvent);
+            m_sessionConnections.append(connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, this, &SessionWrapper::onInputEvent));
         }
-        connect(connection->clipboard(), &KRdp::Clipboard::clientDataChanged, inputSession, [clipboard = connection->clipboard(), inputSession]() {
+        m_sessionConnections.append(connect(connection->clipboard(), &KRdp::Clipboard::clientDataChanged, inputSession, [clipboard = connection->clipboard(), inputSession]() {
             inputSession->setClipboardData(clipboard->getClipboard());
-        }, Qt::QueuedConnection);
+        }, Qt::QueuedConnection));
 
         // A rebuild hands brand-new sessions to a stream that is already
         // running, so they need the state the signals above would otherwise
@@ -168,6 +188,98 @@ public:
             }
             holdDisplayWake(true);
         }
+    }
+
+    /**
+     * A monitor session reported an unrecoverable error.
+     *
+     * Deferred to the event loop because the error can arrive synchronously
+     * from inside setSessions() - PlasmaScreencastV1Session::start() emits
+     * error() when its output is already gone - and re-entering setSessions()
+     * while it is still wiring would pull the vector out from under itself.
+     * The session is held by a QPointer because a rebuild may destroy it
+     * before the deferred call runs.
+     */
+    void onMonitorSessionError(KRdp::AbstractSession *failed)
+    {
+        QPointer<KRdp::AbstractSession> guard(failed);
+        QMetaObject::invokeMethod(this, [this, guard]() {
+            if (guard) {
+                dropSession(guard.data());
+            }
+        }, Qt::QueuedConnection);
+    }
+
+    /**
+     * Take \a failed out of the session set and re-install the survivors, so
+     * the client keeps the monitors that still work.
+     *
+     * Only reached in multi mode. The connection is closed only when nothing
+     * is left, which is what every other mode does for its single session.
+     */
+    void dropSession(KRdp::AbstractSession *failed)
+    {
+        const auto position = std::find_if(sessions.begin(), sessions.end(), [failed](const std::unique_ptr<KRdp::AbstractSession> &entry) {
+            return entry.get() == failed;
+        });
+        if (position == sessions.end()) {
+            // Already replaced by a rebuild; whatever went wrong is moot.
+            return;
+        }
+        const auto failedIndex = std::distance(sessions.begin(), position);
+
+        if (layout.isEmpty()) {
+            // A rebuild moved this connection off multi mode in between, so
+            // the single-session rule applies again.
+            Q_EMIT sessionError();
+            return;
+        }
+
+        const QString failedName = layout.names.value(failedIndex, QStringLiteral("unknown"));
+
+        std::vector<std::unique_ptr<KRdp::AbstractSession>> survivors;
+        SessionController::MonitorLayout survivingLayout;
+        survivingLayout.scale = layout.scale;
+        for (size_t i = 0; i < sessions.size(); ++i) {
+            if (qsizetype(i) == failedIndex) {
+                continue;
+            }
+            survivors.push_back(std::move(sessions[i]));
+            survivingLayout.monitors.push_back(layout.monitors.at(qsizetype(i)));
+            survivingLayout.names.push_back(layout.names.value(qsizetype(i)));
+        }
+
+        // VideoStream::setMonitorLayout() rejects a layout without exactly one
+        // primary, and the monitor that just failed may have been it. Rejecting
+        // would leave the stream on the old N-surface layout while the
+        // re-indexed survivors send to it, so promote the first survivor.
+        const bool hasPrimary = std::any_of(survivingLayout.monitors.cbegin(), survivingLayout.monitors.cend(), [](const KRdp::VideoMonitor &monitor) {
+            return monitor.primary;
+        });
+        if (!hasPrimary && !survivingLayout.monitors.isEmpty()) {
+            survivingLayout.monitors.first().primary = true;
+        }
+
+        if (survivors.empty()) {
+            qWarning().noquote() << QStringLiteral("Monitor session %1 (%2) failed: the capture session reported an error; no monitors left, closing the connection")
+                                        .arg(failedIndex)
+                                        .arg(failedName);
+            Q_EMIT sessionError();
+            return;
+        }
+
+        qWarning().noquote() << QStringLiteral("Monitor session %1 (%2) failed: the capture session reported an error; continuing with %3 monitors")
+                                    .arg(failedIndex)
+                                    .arg(failedName)
+                                    .arg(survivors.size());
+
+        // Surface indices must stay 0..N-1 and match the new layout, so every
+        // session after the failed one moves down one place.
+        for (size_t i = 0; i < survivors.size(); ++i) {
+            survivors[i]->setMonitorIndex(int(i));
+        }
+
+        setSessions(std::move(survivors), survivingLayout);
     }
 
     void onCursorUpdate(const PipeWireCursor &cursor)
@@ -261,7 +373,7 @@ public:
             // which is what org_kde_kwin_fake_input's pointer_motion_absolute
             // takes. originOf() is the exact inverse of the translation
             // VideoStream::setMonitorLayout() applied to this same layout.
-            const QPointF position = (mouseEvent->position() + QPointF(KRdp::SurfaceLayout::originOf(monitorLayout))) / m_layoutScale;
+            const QPointF position = (mouseEvent->position() + QPointF(KRdp::SurfaceLayout::originOf(layout.monitors))) / layout.scale;
             auto translated = std::make_shared<QMouseEvent>(QEvent::MouseMove,
                                                             position,
                                                             position,
@@ -288,13 +400,14 @@ public:
     // monitor and the index into this vector is the RDPGFX surface index.
     std::vector<std::unique_ptr<KRdp::AbstractSession>> sessions;
     // Empty unless multi-monitor streaming is in effect; see setSessions().
-    QVector<KRdp::VideoMonitor> monitorLayout;
+    SessionController::MonitorLayout layout;
     QPointer<KRdp::RdpConnection> connection;
     KStatusNotifierItem *m_sni;
     DisplayWakeGuard *m_displayWakeGuard;
     bool m_holdsDisplayWake = false;
-    qreal m_layoutScale = 1.0;
     std::optional<quint8> m_requestedQuality;
+    // Everything setSessions() wired, so it can unwire exactly that much.
+    QList<QMetaObject::Connection> m_sessionConnections;
 };
 
 SessionController::SessionController(KRdp::Server *server, SessionType sessionType)
@@ -359,9 +472,8 @@ void SessionController::setMultiMonitorEnabled(bool enabled)
             return;
         }
         m_multiMonitor = false;
-        m_monitorLayout.clear();
+        m_layout = {};
         m_streamIndices.clear();
-        m_layoutScale = 1.0;
         qInfo() << "MonitorMode=multi turned off, rebuilding single-session streams";
         rebuildSessions();
         return;
@@ -382,7 +494,7 @@ bool SessionController::multiMonitorEnabled() const
 
 int SessionController::multiMonitorCount() const
 {
-    return m_multiMonitor ? int(m_monitorLayout.size()) : 0;
+    return m_multiMonitor ? int(m_layout.monitors.size()) : 0;
 }
 
 void SessionController::setVirtualMonitor(const KRdp::VirtualMonitor &virtualMonitor)
@@ -494,8 +606,8 @@ void SessionController::applyMultiLayout(bool topologyChange)
     rebuildSessions();
     qInfo().noquote() << (topologyChange ? QStringLiteral("Rebuilt %1 monitor sessions after topology change: %2")
                                          : QStringLiteral("MonitorMode=multi active with %1 monitors: %2"))
-                             .arg(m_monitorLayout.size())
-                             .arg(layoutSummary(m_monitorLayout));
+                             .arg(m_layout.monitors.size())
+                             .arg(layoutSummary(m_layout.monitors));
 }
 
 SessionController::LayoutUpdate SessionController::refreshMultiLayout()
@@ -515,9 +627,12 @@ SessionController::LayoutUpdate SessionController::refreshMultiLayout()
 
     const auto screens = QGuiApplication::screens();
     QVector<int> streamIndices;
+    QStringList names;
     streamIndices.reserve(usableScreens.size());
+    names.reserve(usableScreens.size());
     for (auto *screen : std::as_const(usableScreens)) {
         streamIndices.push_back(int(screens.indexOf(screen)));
+        names.push_back(screen->name());
     }
 
     // The layout is in pixels while fake input takes logical coordinates, so
@@ -539,13 +654,14 @@ SessionController::LayoutUpdate SessionController::refreshMultiLayout()
         qWarning() << "MonitorMode=multi with monitors at different scales; pointer positions use the primary's scale" << scale;
     }
 
-    if (m_multiMonitor && m_monitorLayout == layout && m_streamIndices == streamIndices && qFuzzyCompare(m_layoutScale, scale)) {
+    if (m_multiMonitor && m_layout.monitors == layout && m_streamIndices == streamIndices && qFuzzyCompare(m_layout.scale, scale)) {
         return LayoutUpdate::Unchanged;
     }
 
-    m_monitorLayout = layout;
+    m_layout.monitors = layout;
+    m_layout.names = names;
+    m_layout.scale = scale;
     m_streamIndices = streamIndices;
-    m_layoutScale = scale;
     return LayoutUpdate::Changed;
 }
 
@@ -746,10 +862,10 @@ QString SessionController::kwinPrimaryOutputName()
 void SessionController::buildSessions(SessionWrapper *wrapper)
 {
     std::vector<std::unique_ptr<KRdp::AbstractSession>> sessions;
-    QVector<KRdp::VideoMonitor> layout;
+    MonitorLayout layout;
 
-    if (m_multiMonitor && !m_monitorLayout.isEmpty()) {
-        layout = m_monitorLayout;
+    if (m_multiMonitor && !m_layout.isEmpty()) {
+        layout = m_layout;
         sessions.reserve(m_streamIndices.size());
         for (qsizetype i = 0; i < m_streamIndices.size(); ++i) {
             auto session = makeSession();
@@ -778,7 +894,7 @@ void SessionController::buildSessions(SessionWrapper *wrapper)
         }
     }
 
-    wrapper->setSessions(std::move(sessions), layout, m_layoutScale);
+    wrapper->setSessions(std::move(sessions), layout);
 }
 
 void SessionController::rebuildSessions()
