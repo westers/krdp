@@ -291,8 +291,9 @@ upstream:
 - Correct pointer mapping and input marshalling for non-origin outputs.
 
 The single most effective bandwidth lever is the `Quality` setting: it maps to
-the encoder's CQP, where `Quality=100` is near-lossless (QP 1). ~80 is a good
-default.
+the encoder's CQP. With the private KPipeWire, `Quality` maps to `h264_vaapi`
+CQP QP = 40 − 0.28·Quality (`100`→QP 12, `80`→QP 18, `50`→QP 26); with stock
+KPipeWire the old map applies (`Quality=100`→QP 1). ~80 is a good default.
 
 Useful debug markers:
 
