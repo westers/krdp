@@ -8,6 +8,7 @@
 using namespace KRdp;
 using KRdp::SurfaceLayout::Entry;
 using KRdp::SurfaceLayout::fromMonitors;
+using KRdp::SurfaceLayout::originOf;
 
 class SurfaceLayoutTest : public QObject
 {
@@ -47,11 +48,11 @@ private Q_SLOTS:
         QVERIFY(!entries.at(1).primary);
     }
 
-    // RDP desktop space puts the primary's top-left at (0, 0), so a primary
-    // that KWin placed to the right of another output pushes that output to a
-    // negative x. mstsc accepts negative coordinates as long as the primary
-    // contains (0, 0).
-    void primaryNotAtOriginTranslates()
+    // The anchor is the union's top-left, not the primary's, because
+    // MapSurfaceToOutput's origins are unsigned on the wire. A primary placed
+    // to the right of another output therefore keeps its own offset instead of
+    // pushing that output negative.
+    void primaryAwayFromOriginKeepsItsOffset()
     {
         const QVector<VideoMonitor> monitors{
             {.geometry = QRect(0, 0, 1920, 1080), .primary = false},
@@ -62,11 +63,62 @@ private Q_SLOTS:
 
         QCOMPARE(entries.size(), 2);
         QCOMPARE(entries.at(0).size, QSize(1920, 1080));
-        QCOMPARE(entries.at(0).origin, QPoint(-1920, 0));
+        QCOMPARE(entries.at(0).origin, QPoint(0, 0));
         QVERIFY(!entries.at(0).primary);
         QCOMPARE(entries.at(1).size, QSize(2560, 1440));
-        QCOMPARE(entries.at(1).origin, QPoint(0, 0));
+        QCOMPARE(entries.at(1).origin, QPoint(1920, 0));
         QVERIFY(entries.at(1).primary);
+
+        for (const auto &entry : entries) {
+            QVERIFY(entry.origin.x() >= 0);
+            QVERIFY(entry.origin.y() >= 0);
+        }
+    }
+
+    // The same, vertically: KWin puts an output above the primary at a
+    // negative y, and the whole desktop shifts down instead.
+    void monitorAbovePrimaryShiftsTheDesktopDown()
+    {
+        const QVector<VideoMonitor> monitors{
+            {.geometry = QRect(0, -1080, 1920, 1080), .primary = false},
+            {.geometry = QRect(0, 0, 2560, 1440), .primary = true},
+        };
+
+        const auto entries = fromMonitors(monitors);
+
+        QCOMPARE(entries.size(), 2);
+        QCOMPARE(entries.at(0).size, QSize(1920, 1080));
+        QCOMPARE(entries.at(0).origin, QPoint(0, 0));
+        QVERIFY(!entries.at(0).primary);
+        QCOMPARE(entries.at(1).size, QSize(2560, 1440));
+        QCOMPARE(entries.at(1).origin, QPoint(0, 1080));
+        QVERIFY(entries.at(1).primary);
+    }
+
+    // originOf() is the offset fromMonitors() removed, so adding it back to an
+    // entry's origin returns the monitor's own top-left. The input path in
+    // MonitorMode=multi needs exactly that to map a client pointer position
+    // back into KWin coordinates.
+    void unionOriginInvertsTheTranslation()
+    {
+        const QVector<VideoMonitor> monitors{
+            {.geometry = QRect(0, -1080, 1920, 1080), .primary = false},
+            {.geometry = QRect(2560, 0, 2560, 1440), .primary = true},
+        };
+
+        const auto anchor = originOf(monitors);
+        QCOMPARE(anchor, QPoint(0, -1080));
+
+        const auto entries = fromMonitors(monitors);
+        QCOMPARE(entries.size(), monitors.size());
+        for (qsizetype i = 0; i < entries.size(); ++i) {
+            QCOMPARE(entries.at(i).origin + anchor, monitors.at(i).geometry.topLeft());
+        }
+    }
+
+    void unionOriginOfEmptyLayoutIsZero()
+    {
+        QCOMPARE(originOf({}), QPoint(0, 0));
     }
 
     void emptyLayoutHasNoSurfaces()
@@ -75,9 +127,9 @@ private Q_SLOTS:
     }
 
     // VideoStream rejects a layout without exactly one primary, but the helper
-    // stays total: it anchors on the first monitor and marks that one primary,
-    // so the result always has exactly one primary and it contains (0, 0).
-    void layoutWithoutPrimaryAnchorsOnFirst()
+    // stays total: it marks the first monitor primary, so the result always
+    // has exactly one.
+    void layoutWithoutPrimaryMarksTheFirstOne()
     {
         const QVector<VideoMonitor> monitors{
             {.geometry = QRect(100, 200, 640, 480), .primary = false},

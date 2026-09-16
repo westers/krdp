@@ -86,8 +86,9 @@ public:
      *
      * \a layout is in any coordinate space whose monitors are laid out
      * relative to each other; SurfaceLayout::fromMonitors() translates it into
-     * RDP desktop space (primary at (0, 0)). Entry \a i is the surface that
-     * frames with `VideoFrame::monitorIndex == i` are sent to.
+     * RDP desktop space, anchored at the monitors' bounding union so that no
+     * origin is negative. Entry \a i is the surface that frames with
+     * `VideoFrame::monitorIndex == i` are sent to.
      *
      * A layout with an empty geometry, with more than 16 monitors, or without
      * exactly one primary is rejected and the previous layout kept: a session

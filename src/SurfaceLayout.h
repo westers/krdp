@@ -30,9 +30,18 @@ struct VideoMonitor {
 /**
  * Translation from a monitor layout to the RDPGFX surfaces that carry it.
  *
- * The RDP desktop is the union of the monitors with the primary's top-left at
- * (0, 0), so `rdp = input - primary.topLeft()`. This is the one and only place
- * that conversion is done; everything else consumes the entries below.
+ * The RDP desktop is the bounding union of the monitors, anchored at that
+ * union's top-left, so `rdp = input - union.topLeft()` and no coordinate is
+ * ever negative. The primary is identified by the MONITOR_PRIMARY flag alone,
+ * not by sitting at the origin: `MapSurfaceToOutput`'s outputOriginX/Y are
+ * UINT32 on the wire (MS-RDPEGFX 2.2.2.10), so a negative origin would wrap.
+ * Anchoring on the primary instead is an mstsc convention; FreeRDP's own
+ * shadow server sends union-anchored X11 coordinates in ResetGraphics, and the
+ * client this fork targets is a FreeRDP 3 client.
+ *
+ * This is the one and only place that conversion is done; everything else
+ * consumes the entries below unchanged, and originOf() inverts it for the
+ * input path.
  *
  * Pure: no Qt GUI, no globals, no I/O, so it links (and tests) without a
  * display.
@@ -58,14 +67,31 @@ struct Entry {
 };
 
 /**
+ * The top-left of \a monitors' bounding union, in the coordinate space
+ * \a monitors is given in.
+ *
+ * This is the offset fromMonitors() subtracts, so it is also what the input
+ * path adds back: a pointer position in RDP desktop space becomes a position
+ * in the caller's space by adding this. An empty layout has its origin at
+ * (0, 0).
+ */
+inline QPoint originOf(const QVector<VideoMonitor> &monitors)
+{
+    QRect bounds;
+    for (const auto &monitor : monitors) {
+        bounds = bounds.united(monitor.geometry);
+    }
+    return bounds.topLeft();
+}
+
+/**
  * Turn \a monitors into one surface entry each, translated into RDP desktop
  * space.
  *
- * The result always has exactly one primary and that primary always sits at
- * (0, 0): a layout with several primaries keeps only the first, and one with
- * none is anchored on (and takes its primary from) its first monitor. Monitors
- * left of or above the primary therefore get negative origins, which mstsc
- * accepts as long as the primary contains (0, 0).
+ * Every origin is non-negative and the topmost-leftmost monitor sits at
+ * (0, 0). The result always has exactly one primary, wherever it lands: a
+ * layout with several primaries keeps only the first, and one with none takes
+ * its primary from its first monitor.
  *
  * An empty layout yields no entries, meaning "no explicit layout configured".
  */
@@ -84,7 +110,7 @@ inline QVector<Entry> fromMonitors(const QVector<VideoMonitor> &monitors)
         }
     }
 
-    const QPoint anchor = monitors.at(primaryIndex).geometry.topLeft();
+    const QPoint anchor = originOf(monitors);
 
     entries.reserve(monitors.size());
     for (qsizetype i = 0; i < monitors.size(); ++i) {

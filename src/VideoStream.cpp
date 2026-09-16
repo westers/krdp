@@ -168,7 +168,10 @@ ResetPlan planReset(const VideoFrame &frame, const QVector<VideoMonitor> &config
         return plan;
     }
 
-    // One surface per monitor, each mapped at its own RDP-space origin.
+    // One surface per monitor, each mapped at its own RDP-space origin. The
+    // entries are consumed exactly as the helper produced them: it is the only
+    // place the layout is translated, and it already anchored the union at
+    // (0, 0), so the bounds below are the desktop extent.
     plan.surfaces = SurfaceLayout::fromMonitors(configuredLayout);
     plan.monitors.reserve(plan.surfaces.size());
     QRect bounds;
