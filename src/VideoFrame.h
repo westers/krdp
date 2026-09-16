@@ -4,34 +4,25 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 
-#include <QObject>
-#include <QPoint>
-#include <QRect>
+#include <QByteArray>
 #include <QRegion>
 #include <QSize>
 #include <QVector>
 
-#include "krdp_export.h"
+#include "SurfaceLayout.h"
 
 namespace KRdp
 {
 
-class RdpConnection;
-
-struct VideoMonitor {
-    QRect geometry;
-    bool primary = false;
-
-    bool operator==(const VideoMonitor &other) const
-    {
-        return geometry == other.geometry && primary == other.primary;
-    }
-};
-
 /**
  * A frame of compressed video data.
+ *
+ * This is the single definition; VideoStream.h includes it. It used to be
+ * duplicated there, which quietly gave PortalSession.cpp (the only direct
+ * includer of this header) a VideoFrame without monitorIndex.
  */
 struct VideoFrame {
     /**
@@ -55,6 +46,10 @@ struct VideoFrame {
      * Logical monitor layout mapped into this frame's coordinate space.
      */
     QVector<VideoMonitor> monitors;
+    /**
+     * Index of the surface this frame belongs to (0 unless MonitorMode=multi).
+     */
+    int monitorIndex = 0;
     /**
      * When was this frame presented.
      */

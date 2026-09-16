@@ -105,8 +105,11 @@ public:
         session->setVideoFrameRate(connection->videoStream()->requestedFrameRate());
     }
 
-    void onKeyFrameRequested()
+    void onKeyFrameRequested(int monitorIndex)
     {
+        // One session per connection today, so every surface index belongs to
+        // this session; the multi-monitor mode routes by index.
+        Q_UNUSED(monitorIndex)
         session->requestKeyFrame();
     }
 

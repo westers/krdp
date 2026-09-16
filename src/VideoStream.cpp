@@ -141,6 +141,50 @@ QString monitorLayoutSummary(const QVector<VideoMonitor> &monitors)
     return parts.join(QStringLiteral("; "));
 }
 
+// Everything a reset needs: what ResetGraphics advertises and which surfaces
+// carry it. Kept in one place so the single-surface and per-monitor paths
+// cannot drift apart.
+struct ResetPlan {
+    QSize desktopSize;
+    QVector<VideoMonitor> monitors;
+    QVector<SurfaceLayout::Entry> surfaces;
+};
+
+ResetPlan planReset(const VideoFrame &frame, const QVector<VideoMonitor> &configuredLayout)
+{
+    ResetPlan plan;
+
+    if (configuredLayout.isEmpty()) {
+        // No explicit layout: one surface covering the whole frame, with the
+        // frame's own monitor list advertised inside it. This is what every
+        // mode but MonitorMode=multi does, and it is unchanged.
+        plan.desktopSize = frame.size;
+        plan.monitors = monitorLayoutForReset(frame);
+        plan.surfaces = {SurfaceLayout::Entry{
+            .size = frame.size,
+            .origin = QPoint(0, 0),
+            .primary = true,
+        }};
+        return plan;
+    }
+
+    // One surface per monitor, each mapped at its own RDP-space origin.
+    plan.surfaces = SurfaceLayout::fromMonitors(configuredLayout);
+    plan.monitors.reserve(plan.surfaces.size());
+    QRect bounds;
+    for (const auto &entry : plan.surfaces) {
+        const QRect geometry(entry.origin, entry.size);
+        plan.monitors.push_back(VideoMonitor{
+            .geometry = geometry,
+            .primary = entry.primary,
+        });
+        bounds = bounds.united(geometry);
+    }
+    plan.desktopSize = bounds.size();
+
+    return plan;
+}
+
 struct RdpCapsInformation {
     uint32_t version;
     RDPGFX_CAPSET capSet;
@@ -203,8 +247,10 @@ uint32_t gfxQoEFrameAcknowledge(RdpgfxServerContext *, const RDPGFX_QOE_FRAME_AC
 }
 
 struct Surface {
-    uint16_t id;
+    uint16_t id = 0;
     QSize size;
+    // Top-left in RDP desktop space, as passed to MapSurfaceToOutput.
+    QPoint origin;
 };
 
 class KRDP_NO_EXPORT VideoStream::Private
@@ -220,7 +266,15 @@ public:
     uint32_t channelId = 0;
 
     uint16_t nextSurfaceId = 1;
-    Surface surface;
+    // surfaces/monitorLayout/configuredLayout are touched by three threads -
+    // the frame submission thread (performReset, sendFrame), the FreeRDP peer
+    // thread (onCapsAdvertise) and the main thread (setMonitorLayout) - so
+    // they need a lock. The single POD Surface they replace did not: clearing
+    // a QVector frees storage another thread may still be reading.
+    std::mutex layoutMutex;
+    // One surface per monitor; index == VideoFrame::monitorIndex. Exactly one
+    // entry unless a layout was configured.
+    QVector<Surface> surfaces;
 
     bool pendingReset = true;
     bool enabled = false;
@@ -242,11 +296,21 @@ public:
     // (upstream 978f1cb): it starved high-latency links without measuring real
     // send-side pressure.
     std::atomic_int requestedFrameRate = 60;
+    // The monitor list as last advertised in ResetGraphics, in RDP desktop
+    // space; a difference against the freshly planned one triggers a reset.
     QVector<VideoMonitor> monitorLayout;
+    // The layout set by setMonitorLayout(); empty means "derive it from the
+    // frames", i.e. the single-surface behaviour.
+    QVector<VideoMonitor> configuredLayout;
     // Submission-thread only: rate-limits keyFrameRequested so a reset storm
     // (e.g. repeated caps re-advertisement) does not restart the encoder more
-    // than once per KeyFrameRequestMinInterval.
-    clk::steady_clock::time_point lastKeyFrameRequest;
+    // than once per KeyFrameRequestMinInterval. One timestamp per surface.
+    QVector<clk::steady_clock::time_point> lastKeyFrameRequest;
+    // Stream-lifetime latches so a frame for a surface that does not exist,
+    // or a session reporting a broken layout, is reported once and not once
+    // per frame.
+    bool loggedUnknownSurface = false;
+    bool warnedInvalidLayout = false;
 
     // setQualityCap()/setAdaptiveQuality() and updateAdaptiveQuality() (the
     // adaptiveTimer slot) all run on the main thread - VideoStream is
@@ -256,10 +320,11 @@ public:
     std::atomic<quint8> quality = 100; // current adaptive value
     std::atomic<quint8> qualityCap = 100; // configured Quality
     std::atomic<bool> adaptiveQuality = true;
-    // Mirrors d->surface.size as a single atomic value (width * height) so
+    // The total pixel count over every surface, as a single atomic value, so
     // updateAdaptiveQuality() (main thread) never sees a torn width/height
     // while performReset() (submission thread) or onCapsAdvertise() (peer
-    // thread) writes d->surface.
+    // thread) rebuilds the surfaces. Summed because one quality steers every
+    // session feeding this connection.
     std::atomic<qint64> surfacePixels = 0;
     // Backlog evidence for the adaptive-quality decision: the smallest number
     // of frames still unacknowledged right after any ack since the last
@@ -274,6 +339,16 @@ public:
     QTimer adaptiveTimer;
     clk::steady_clock::time_point streamingSince;
     clk::steady_clock::time_point lastStepDown; // default = epoch = "never"
+
+    // Call with layoutMutex held. Null when no surface carries that index,
+    // which is every index but 0 while no layout is configured.
+    Surface *surfaceFor(int index)
+    {
+        if (index < 0 || index >= surfaces.size()) {
+            return nullptr;
+        }
+        return &surfaces[index];
+    }
 };
 
 
@@ -467,6 +542,41 @@ void VideoStream::setQualityCap(quint8 cap)
     Q_EMIT requestedQualityChanged(next);
 }
 
+void VideoStream::setMonitorLayout(const QVector<VideoMonitor> &layout)
+{
+    if (!layout.isEmpty()) {
+        const auto primaryCount = std::count_if(layout.cbegin(), layout.cend(), [](const VideoMonitor &monitor) {
+            return monitor.primary;
+        });
+        const bool hasEmptyGeometry = std::any_of(layout.cbegin(), layout.cend(), [](const VideoMonitor &monitor) {
+            return monitor.geometry.isEmpty();
+        });
+
+        if (hasEmptyGeometry || primaryCount != 1 || layout.size() > MaxMonitorLayoutCount) {
+            // A session reports a null output geometry while KWin removes and
+            // re-adds its outputs on a DPMS wake; tearing every surface down
+            // over that is worse than streaming the previous layout until the
+            // session settles. Warn once per run of bad layouts, not per call.
+            if (!d->warnedInvalidLayout) {
+                d->warnedInvalidLayout = true;
+                qCWarning(KRDP) << "Ignoring invalid monitor layout:" << monitorLayoutSummary(layout) << "- keeping the previous one";
+            }
+            return;
+        }
+        d->warnedInvalidLayout = false;
+    }
+
+    std::lock_guard lock(d->layoutMutex);
+    if (d->configuredLayout == layout) {
+        return;
+    }
+
+    d->configuredLayout = layout;
+    qCDebug(KRDP) << "Monitor layout configured:" << (layout.isEmpty() ? QStringLiteral("(derived from frames)") : monitorLayoutSummary(layout));
+    // The surfaces are rebuilt from the new layout on the next frame.
+    d->pendingReset = true;
+}
+
 void VideoStream::setAdaptiveQuality(bool enabled)
 {
     if (d->adaptiveQuality.exchange(enabled) == enabled) {
@@ -556,9 +666,14 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         qCDebug(KRDP) << "GFX channel reset (re-advertisement), resetting surface state";
         d->capsConfirmed = false;
         d->pendingReset = true;
-        d->surface = Surface{};
+        {
+            // Not configuredLayout: that is configuration, not surface state,
+            // and the next reset rebuilds the surfaces from it.
+            std::lock_guard lock(d->layoutMutex);
+            d->surfaces.clear();
+            d->monitorLayout.clear();
+        }
         d->surfacePixels = 0;
-        d->monitorLayout.clear();
         std::lock_guard lock(d->pendingFramesMutex);
         d->pendingFrames.clear();
         bumpAtomicMin(d->minPendingAfterAckSinceDecision, 0);
@@ -653,11 +768,11 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
     return CHANNEL_RC_OK;
 }
 
-void VideoStream::performReset(const QSize &size, const QVector<VideoMonitor> &monitors)
+void VideoStream::performReset(const QSize &desktopSize, const QVector<VideoMonitor> &monitors, const QVector<SurfaceLayout::Entry> &surfaces)
 {
     RDPGFX_RESET_GRAPHICS_PDU resetGraphicsPdu;
-    resetGraphicsPdu.width = size.width();
-    resetGraphicsPdu.height = size.height();
+    resetGraphicsPdu.width = desktopSize.width();
+    resetGraphicsPdu.height = desktopSize.height();
     resetGraphicsPdu.monitorCount = monitors.size();
 
     auto monitorDefs = std::make_unique<MONITOR_DEF[]>(monitors.size());
@@ -674,25 +789,38 @@ void VideoStream::performReset(const QSize &size, const QVector<VideoMonitor> &m
     qCDebug(KRDP) << "Reset graphics monitor layout:" << monitorLayoutSummary(monitors);
     d->gfxContext->ResetGraphics(d->gfxContext.get(), &resetGraphicsPdu);
 
-    RDPGFX_CREATE_SURFACE_PDU createSurfacePdu;
-    createSurfacePdu.width = size.width();
-    createSurfacePdu.height = size.height();
-    uint16_t surfaceId = d->nextSurfaceId++;
-    createSurfacePdu.surfaceId = surfaceId;
-    createSurfacePdu.pixelFormat = GFX_PIXEL_FORMAT_XRGB_8888;
-    d->gfxContext->CreateSurface(d->gfxContext.get(), &createSurfacePdu);
+    d->surfaces.clear();
+    d->surfaces.reserve(surfaces.size());
+    qint64 totalPixels = 0;
 
-    d->surface = Surface{
-        .id = surfaceId,
-        .size = size,
-    };
-    d->surfacePixels = qint64(size.width()) * size.height();
+    for (const auto &entry : surfaces) {
+        RDPGFX_CREATE_SURFACE_PDU createSurfacePdu;
+        createSurfacePdu.width = entry.size.width();
+        createSurfacePdu.height = entry.size.height();
+        uint16_t surfaceId = d->nextSurfaceId++;
+        createSurfacePdu.surfaceId = surfaceId;
+        createSurfacePdu.pixelFormat = GFX_PIXEL_FORMAT_XRGB_8888;
+        d->gfxContext->CreateSurface(d->gfxContext.get(), &createSurfacePdu);
 
-    RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU mapSurfaceToOutputPdu;
-    mapSurfaceToOutputPdu.outputOriginX = 0;
-    mapSurfaceToOutputPdu.outputOriginY = 0;
-    mapSurfaceToOutputPdu.surfaceId = surfaceId;
-    d->gfxContext->MapSurfaceToOutput(d->gfxContext.get(), &mapSurfaceToOutputPdu);
+        d->surfaces.push_back(Surface{
+            .id = surfaceId,
+            .size = entry.size,
+            .origin = entry.origin,
+        });
+        totalPixels += qint64(entry.size.width()) * entry.size.height();
+
+        RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU mapSurfaceToOutputPdu;
+        mapSurfaceToOutputPdu.outputOriginX = entry.origin.x();
+        mapSurfaceToOutputPdu.outputOriginY = entry.origin.y();
+        mapSurfaceToOutputPdu.surfaceId = surfaceId;
+        d->gfxContext->MapSurfaceToOutput(d->gfxContext.get(), &mapSurfaceToOutputPdu);
+    }
+
+    d->surfacePixels = totalPixels;
+    // resize() keeps the timestamps of the surfaces that survive this reset,
+    // so a reset storm still cannot ask the encoder for more than one keyframe
+    // per KeyFrameRequestMinInterval per surface.
+    d->lastKeyFrameRequest.resize(surfaces.size());
 }
 
 bool VideoStream::sendFrame(const VideoFrame &frame)
@@ -707,26 +835,63 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         return true;
     }
 
-    const auto monitorLayout = monitorLayoutForReset(frame);
-    const bool monitorLayoutChanged = (d->monitorLayout != monitorLayout);
-    if (d->pendingReset || monitorLayoutChanged || d->surface.size != frame.size) {
-        d->pendingReset = false;
-        d->monitorLayout = monitorLayout;
-        performReset(frame.size, monitorLayout);
+    Surface surface;
+    bool requestKeyFrame = false;
+    {
+        std::lock_guard lock(d->layoutMutex);
 
-        // A freshly created surface has no reference picture. If the frame we
-        // are about to send is not a keyframe (e.g. after a caps
-        // re-advertisement the queue holds P-frames), ask the session for one
-        // now instead of waiting for the next organic IDR, which on a static
-        // desktop can be seconds away (gop 100, frames only on damage).
-        if (!frame.isKeyFrame) {
-            const auto now = clk::steady_clock::now();
-            if (d->lastKeyFrameRequest == clk::steady_clock::time_point{} || (now - d->lastKeyFrameRequest) >= KeyFrameRequestMinInterval) {
-                d->lastKeyFrameRequest = now;
-                qCDebug(KRDP) << "Surface (re)created on a non-keyframe, requesting a keyframe from the encoder";
-                Q_EMIT keyFrameRequested();
+        const auto plan = planReset(frame, d->configuredLayout);
+        if (frame.monitorIndex < 0 || frame.monitorIndex >= plan.surfaces.size()) {
+            // Nothing sensible to send this to, and resetting would not create
+            // it either. Drop it; the session that produced it is misconfigured.
+            if (!d->loggedUnknownSurface) {
+                d->loggedUnknownSurface = true;
+                qCWarning(KRDP) << "Dropping frames for monitor index" << frame.monitorIndex << "- the layout has" << plan.surfaces.size() << "surface(s)";
+            }
+            return true;
+        }
+
+        const Surface *target = d->surfaceFor(frame.monitorIndex);
+        // With a configured layout the surface sizes come from that layout, so
+        // only a new layout resizes them. Without one the single surface still
+        // follows the frame, exactly as it did before per-monitor surfaces.
+        const bool frameSizeChanged = target && d->configuredLayout.isEmpty() && target->size != frame.size;
+        if (d->pendingReset || d->monitorLayout != plan.monitors || !target || frameSizeChanged) {
+            d->pendingReset = false;
+            d->monitorLayout = plan.monitors;
+            performReset(plan.desktopSize, plan.monitors, plan.surfaces);
+            target = d->surfaceFor(frame.monitorIndex);
+
+            // A freshly created surface has no reference picture. If the frame we
+            // are about to send is not a keyframe (e.g. after a caps
+            // re-advertisement the queue holds P-frames), ask the session for one
+            // now instead of waiting for the next organic IDR, which on a static
+            // desktop can be seconds away (gop 100, frames only on damage).
+            if (!frame.isKeyFrame) {
+                const auto now = clk::steady_clock::now();
+                auto &lastRequest = d->lastKeyFrameRequest[frame.monitorIndex];
+                if (lastRequest == clk::steady_clock::time_point{} || (now - lastRequest) >= KeyFrameRequestMinInterval) {
+                    lastRequest = now;
+                    requestKeyFrame = true;
+                }
             }
         }
+
+        if (!target) {
+            // Unreachable: the index is inside the plan, so either a surface
+            // was already there or performReset just made one. Belt and braces
+            // so a future edit cannot turn this into a null dereference.
+            return true;
+        }
+        surface = *target;
+    }
+
+    if (requestKeyFrame) {
+        // Emitted outside the lock: the slot runs on the session's thread, but
+        // signalling under a lock another thread takes is a trap not worth
+        // leaving lying around.
+        qCDebug(KRDP) << "Surface (re)created on a non-keyframe, requesting a keyframe from the encoder for monitor" << frame.monitorIndex;
+        Q_EMIT keyFrameRequested(frame.monitorIndex);
     }
 
     auto frameId = d->frameId++;
@@ -749,13 +914,14 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     // to damage), so send a single region rect covering the whole surface, as
     // upstream and gnome-remote-desktop do for AVC420.
     RDPGFX_SURFACE_COMMAND surfaceCommand = {};
-    surfaceCommand.surfaceId = d->surface.id;
+    surfaceCommand.surfaceId = surface.id;
     surfaceCommand.codecId = RDPGFX_CODECID_AVC420;
     surfaceCommand.format = PIXEL_FORMAT_BGRX32;
+    // Each surface is a whole monitor, so the command covers all of it.
     surfaceCommand.left = 0;
     surfaceCommand.top = 0;
-    surfaceCommand.right = frame.size.width();
-    surfaceCommand.bottom = frame.size.height();
+    surfaceCommand.right = surface.size.width();
+    surfaceCommand.bottom = surface.size.height();
     surfaceCommand.length = 0;
     surfaceCommand.data = nullptr;
 
@@ -765,7 +931,7 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     avcStream.length = frame.data.length();
 
     avcStream.meta.numRegionRects = 1;
-    RECTANGLE_16 rect = {0, 0, static_cast<UINT16>(frame.size.width()), static_cast<UINT16>(frame.size.height())};
+    RECTANGLE_16 rect = {0, 0, static_cast<UINT16>(surface.size.width()), static_cast<UINT16>(surface.size.height())};
     avcStream.meta.regionRects = &rect;
     // Informational for the client (MS-RDPEGFX 2.2.4.4.1), but keep it honest:
     // the same map the private KPipeWire uses (quality 100 -> QP 12, 0 -> QP 40).

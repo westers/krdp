@@ -17,57 +17,14 @@
 
 #include <freerdp/server/rdpgfx.h>
 
+#include "SurfaceLayout.h"
+#include "VideoFrame.h"
 #include "krdp_export.h"
 
 namespace KRdp
 {
 
 class RdpConnection;
-
-struct VideoMonitor {
-    QRect geometry;
-    bool primary = false;
-
-    bool operator==(const VideoMonitor &other) const
-    {
-        return geometry == other.geometry && primary == other.primary;
-    }
-};
-
-/**
- * A frame of compressed video data.
- */
-struct VideoFrame {
-    /**
-     * The size of the frame, in pixels.
-     */
-    QSize size;
-    /**
-     * h264 compressed data in YUV420 color space.
-     */
-    QByteArray data;
-    /**
-     * Area of the frame that was actually damaged.
-     * TODO: Actually use this information.
-     */
-    QRegion damage;
-    /**
-     * Whether the packet contains all the information
-     */
-    bool isKeyFrame;
-    /**
-     * Logical monitor layout mapped into this frame's coordinate space.
-     */
-    QVector<VideoMonitor> monitors;
-    /**
-     * Index of the surface this frame belongs to (0 unless MonitorMode=multi).
-     */
-    int monitorIndex = 0;
-    /**
-     * When was this frame presented.
-     */
-    std::chrono::system_clock::time_point presentationTimeStamp;
-};
 
 /**
  * A class that encapsulates an RdpGfx video stream.
@@ -124,12 +81,33 @@ public:
     Q_SIGNAL void requestedFrameRateChanged();
 
     /**
-     * Emitted (from the frame submission thread) when the RDPGFX surface was
-     * just (re)created but the frame being sent is not a keyframe, so the
-     * client has no reference picture until the next IDR. The session should
-     * obtain a fresh keyframe from the encoder.
+     * Give the stream an explicit monitor layout, one RDPGFX surface per
+     * monitor.
+     *
+     * \a layout is in any coordinate space whose monitors are laid out
+     * relative to each other; SurfaceLayout::fromMonitors() translates it into
+     * RDP desktop space (primary at (0, 0)). Entry \a i is the surface that
+     * frames with `VideoFrame::monitorIndex == i` are sent to.
+     *
+     * A layout with an empty geometry, with more than 16 monitors, or without
+     * exactly one primary is rejected and the previous layout kept: a session
+     * can briefly report a null output geometry while KWin re-adds its outputs
+     * after a DPMS wake, and tearing the surfaces down over that is worse than
+     * streaming a stale layout for a frame or two.
+     *
+     * An empty layout (the default) means "derive it from the frames", which
+     * is the single-surface behaviour every mode but `MonitorMode=multi` uses.
      */
-    Q_SIGNAL void keyFrameRequested();
+    void setMonitorLayout(const QVector<VideoMonitor> &layout);
+
+    /**
+     * Emitted (from the frame submission thread) when the RDPGFX surface for
+     * \a monitorIndex was just (re)created but the frame being sent is not a
+     * keyframe, so the client has no reference picture until the next IDR. The
+     * session feeding that surface should obtain a fresh keyframe from the
+     * encoder.
+     */
+    Q_SIGNAL void keyFrameRequested(int monitorIndex);
 
     /**
      * Set the upper bound for the video quality.
@@ -165,7 +143,12 @@ private:
     // in close()); this slot therefore runs on VideoStream's own (main) thread.
     Q_SLOT void updateAdaptiveQuality();
 
-    void performReset(const QSize &size, const QVector<VideoMonitor> &monitors);
+    /**
+     * Send ResetGraphics for \a monitors (already in RDP desktop space, with
+     * the desktop itself \a desktopSize) and re-create one surface per entry
+     * of \a surfaces.
+     */
+    void performReset(const QSize &desktopSize, const QVector<VideoMonitor> &monitors, const QVector<SurfaceLayout::Entry> &surfaces);
     /**
      * Returns false only when the frame could not be sent because the GFX
      * channel is not ready (context gone or caps reset mid-flight); the caller
