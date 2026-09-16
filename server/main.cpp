@@ -405,7 +405,14 @@ int main(int argc, char **argv)
     // touch the stream. setMonitorIndex() self-guards and only re-creates the
     // stream when the resolved target actually changed.
     auto applyRuntimeConfig = [config, &controller, monitorPinnedByCli, qualityPinnedByCli]() {
-        config->read();
+        // KConfigSkeleton::read() only re-applies the in-memory KConfig cache
+        // to the skeleton's items; it does NOT reload the file from disk (see
+        // KCoreConfigSkeleton::read() vs ::load() docs). That happened to work
+        // when KConfigWatcher had just reparsed the same KSharedConfig object
+        // for us, but left the QFileSystemWatcher-triggered path below (a
+        // plain file edit, or a write without --notify) reading stale values
+        // forever. load() always reads from disk, so it covers both triggers.
+        config->load();
 
         if (!qualityPinnedByCli) {
             controller.setQuality(config->quality());
@@ -419,6 +426,12 @@ int main(int argc, char **argv)
         controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
         applyVaapiDriverMode(config->vaapiDriverMode());
         KRdp::selectVaapiDriver();
+
+        // The KRDP logging category (used inside libKRdp) is not exported for
+        // consumers, so this uses the same plain, always-on qInfo() the rest
+        // of this file's "Applied runtime ..." lines use.
+        qInfo() << "Runtime config applied: quality" << config->quality() << "adaptive" << config->adaptiveQuality() << "monitorMode" << config->monitorMode()
+                << "monitorIndex" << config->monitorIndex() << "wakeDisplay" << config->wakeDisplayOnConnect() << "vaapiMode" << config->vaapiDriverMode();
     };
 
     // Re-creates the capture stream for a new display topology (resolution or

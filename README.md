@@ -312,6 +312,21 @@ the new QP, forcing an IDR so the client resyncs immediately; the RDPGFX
 metablock reports the actual QP in use. Set `AdaptiveQuality=false` to pin
 quality to the `Quality` cap.
 
+Goodput (`NetworkDetection::bandwidth()`) is measured in a scheduled window —
+500 ms every 2 s — independent of frame sends; bracketing the measurement
+around a single frame (the original approach) produced nonsense samples like
+"10 bytes in 1 ms" or "416 bytes in 1 ms", which read as either near-zero or
+many-hundred-Mbit/s goodput and drove the adaptive loop to oscillate wildly.
+A sample shorter than 100 ms or smaller than 4 KB is discarded before it
+reaches the smoothing filter (`NetworkDetection::onBandwidthMeasureResults()`),
+and the adaptive loop itself waits for at least three accepted samples
+(`NetworkDetection::validBandwidthSamples()`) before it starts steering
+quality — a fresh connection stays at the `Quality` cap until the estimate is
+real. `AdaptiveQuality`/`Quality` changes made while a session is connected
+(e.g. `kwriteconfig6 --notify --file krdpserverrc --group General --key
+AdaptiveQuality false`) take effect within a couple of seconds; a
+`Runtime config applied: ...` line in the journal confirms the reload ran.
+
 Useful debug markers:
 
 ```bash
