@@ -627,6 +627,54 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
         return;
     }
 
+    if (event->type() == QEvent::MouseMove) {
+        // The position is relative to this session's own captured output, in
+        // capture pixels; normalise it and map it onto the output's place in
+        // the KWin-global logical coordinate space fake input expects.
+        auto me = std::static_pointer_cast<QMouseEvent>(event);
+        auto position = me->position();
+        if (size().isEmpty() || logicalSize().isEmpty()) {
+            return;
+        }
+        const auto inputWidth = std::max(1, size().width() - 1);
+        const auto inputHeight = std::max(1, size().height() - 1);
+        const auto logicalWidth = std::max(1, logicalSize().width() - 1);
+        const auto logicalHeight = std::max(1, logicalSize().height() - 1);
+        const auto normalizedX = std::clamp(position.x() / double(inputWidth), 0.0, 1.0);
+        const auto normalizedY = std::clamp(position.y() / double(inputHeight), 0.0, 1.0);
+        auto logicalPosition = QPointF{normalizedX * logicalWidth + d->logicalRect.x(), normalizedY * logicalHeight + d->logicalRect.y()};
+        d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(logicalPosition.x()), wl_fixed_from_double(logicalPosition.y()));
+        return;
+    }
+
+    injectNonMotionEvent(event);
+}
+
+void PlasmaScreencastV1Session::sendGlobalEvent(const std::shared_ptr<QEvent> &event)
+{
+    auto encodedStream = stream();
+    if (!encodedStream || !encodedStream->isActive()) {
+        return;
+    }
+
+    if (event->type() == QEvent::MouseMove) {
+        // The position is already in KWin-global logical coordinates, so it
+        // must NOT be normalised against this session's own output: fake
+        // input's pointer_motion_absolute addresses the whole workspace, and
+        // clamping here would pin the pointer to the captured output.
+        auto me = std::static_pointer_cast<QMouseEvent>(event);
+        const auto position = me->position();
+        d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(position.x()), wl_fixed_from_double(position.y()));
+        return;
+    }
+
+    injectNonMotionEvent(event);
+}
+
+// Buttons, wheel and keys carry no position, so they are identical for the
+// output-local and the workspace-global entry points.
+void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEvent> &event)
+{
     switch (event->type()) {
     case QEvent::MouseButtonPress:
     case QEvent::MouseButtonRelease: {
@@ -644,22 +692,6 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
         }
         uint state = me->type() == QEvent::MouseButtonPress ? 1 : 0;
         d->remoteInterface->button(button, state);
-        break;
-    }
-    case QEvent::MouseMove: {
-        auto me = std::static_pointer_cast<QMouseEvent>(event);
-        auto position = me->position();
-        if (size().isEmpty() || logicalSize().isEmpty()) {
-            return;
-        }
-        const auto inputWidth = std::max(1, size().width() - 1);
-        const auto inputHeight = std::max(1, size().height() - 1);
-        const auto logicalWidth = std::max(1, logicalSize().width() - 1);
-        const auto logicalHeight = std::max(1, logicalSize().height() - 1);
-        const auto normalizedX = std::clamp(position.x() / double(inputWidth), 0.0, 1.0);
-        const auto normalizedY = std::clamp(position.y() / double(inputHeight), 0.0, 1.0);
-        auto logicalPosition = QPointF{normalizedX * logicalWidth + d->logicalRect.x(), normalizedY * logicalHeight + d->logicalRect.y()};
-        d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(logicalPosition.x()), wl_fixed_from_double(logicalPosition.y()));
         break;
     }
     case QEvent::Wheel: {
@@ -712,6 +744,11 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
     }
 }
 
+QRect PlasmaScreencastV1Session::outputGeometry() const
+{
+    return d->logicalRect;
+}
+
 void PlasmaScreencastV1Session::setClipboardData(std::unique_ptr<QMimeData> data)
 {
     Q_UNUSED(data);
@@ -726,6 +763,7 @@ void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Pa
     frameData.data = data.data();
     frameData.isKeyFrame = data.isKeyFrame();
     frameData.monitors = d->monitorLayout;
+    frameData.monitorIndex = monitorIndex();
     frameData.damage = fullFrameDamage(frameData.size);
 
     if (frameData.monitors.isEmpty() && !frameData.size.isEmpty()) {

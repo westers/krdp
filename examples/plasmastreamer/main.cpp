@@ -92,6 +92,7 @@ int runMulti(QGuiApplication &application, const QCommandLineParser &parser)
         auto *run = runs[i].get();
         run->session = std::make_unique<KRdp::PlasmaScreencastV1Session>();
         run->session->setActiveStream(i);
+        run->session->setMonitorIndex(i);
         if (parser.isSet(u"quality"_s)) {
             run->session->setVideoQuality(parser.value(u"quality"_s).toUShort());
         }
@@ -100,12 +101,21 @@ int runMulti(QGuiApplication &application, const QCommandLineParser &parser)
         QObject::connect(session, &KRdp::AbstractSession::frameReceived, session, [run, i, &sinceStarted](const KRdp::VideoFrame &frame) {
             run->file.write(frame.data);
             qWarning() << "Session" << i << "frame" << run->frames << "at +" << sinceStarted.elapsed() << "ms size" << frame.size << "bytes" << frame.data.size()
-                       << "keyframe" << frame.isKeyFrame;
+                       << "keyframe" << frame.isKeyFrame << "monitorIndex" << frame.monitorIndex;
             if (frame.isKeyFrame) {
                 run->keyframes++;
             }
             run->frames++;
             run->bytes += frame.data.size();
+        });
+
+        // The screencast runs in Screencasting::Metadata cursor mode, so the
+        // pointer is NOT painted into the video: moving it over an idle screen
+        // produces no damage and no frames. cursorUpdate() carries the pointer
+        // position in *this* session's own stream coordinates, which is the
+        // direct readout of where KWin actually placed the pointer.
+        QObject::connect(session, &KRdp::AbstractSession::cursorUpdate, session, [i, &sinceStarted](const PipeWireCursor &cursor) {
+            qWarning() << "Session" << i << "cursor at" << cursor.position << "at +" << sinceStarted.elapsed() << "ms";
         });
 
         QObject::connect(session, &KRdp::AbstractSession::started, &application, [i, &screens, &startedCount, &sinceStarted, &timer, hasQuitAfter]() {
@@ -132,22 +142,41 @@ int runMulti(QGuiApplication &application, const QCommandLineParser &parser)
     // inside session 0's own screen, however large a position is passed in
     // (it clamps). To make a *different* screen busy, inject through that
     // session instead; --wake-pos is local to that session's own capture.
+    //
+    // --wake-global takes the other route deliberately: sendGlobalEvent()
+    // skips the normalization and hands the position to fake input as-is, so
+    // --wake-pos is read as a KWin-global workspace coordinate. That is the
+    // check for whether org_kde_kwin_fake_input's pointer_motion_absolute
+    // really addresses the whole workspace: inject through session 0 at a
+    // point inside another screen and see whether that screen's session
+    // starts producing frames.
     if (parser.isSet(u"wake-after"_s) && !runs.empty()) {
         const auto wakeOffsets = parser.value(u"wake-after"_s).split(u',', Qt::SkipEmptyParts);
         const auto posParts = parser.value(u"wake-pos"_s).split(u',');
         const QPointF wakePos(posParts.value(0).toDouble(), posParts.value(1).toDouble());
         const int wakeSessionIndex = std::clamp(parser.value(u"wake-session"_s).toInt(), 0, int(runs.size()) - 1);
+        const bool wakeGlobal = parser.isSet(u"wake-global"_s);
         auto *wakeSession = runs[wakeSessionIndex]->session.get();
-        QObject::connect(wakeSession, &KRdp::AbstractSession::started, &application, [wakeSession, &sinceStarted, wakeOffsets, wakePos, wakeSessionIndex]() {
-            for (const auto &offset : wakeOffsets) {
-                QTimer::singleShot(offset.toInt() * 1000, wakeSession, [wakeSession, &sinceStarted, wakePos, wakeSessionIndex]() {
-                    qWarning() << "Injecting mouse move via fake input at" << wakePos << "into session" << wakeSessionIndex << "to wake the display at +" << sinceStarted.elapsed() << "ms";
-                    for (const auto &pos : {wakePos, wakePos + QPointF(40, 20), wakePos}) {
-                        wakeSession->sendEvent(std::make_shared<QMouseEvent>(QEvent::MouseMove, pos, pos, pos, Qt::NoButton, Qt::NoButton, Qt::NoModifier));
-                    }
-                });
-            }
-        });
+        QObject::connect(wakeSession,
+                         &KRdp::AbstractSession::started,
+                         &application,
+                         [wakeSession, &sinceStarted, wakeOffsets, wakePos, wakeSessionIndex, wakeGlobal]() {
+                             for (const auto &offset : wakeOffsets) {
+                                 QTimer::singleShot(offset.toInt() * 1000, wakeSession, [wakeSession, &sinceStarted, wakePos, wakeSessionIndex, wakeGlobal]() {
+                                     qWarning() << "Injecting mouse move via fake input at" << wakePos << (wakeGlobal ? "(KWin-global)" : "(session-local)")
+                                                << "into session" << wakeSessionIndex << "to wake the display at +" << sinceStarted.elapsed() << "ms";
+                                     for (const auto &pos : {wakePos, wakePos + QPointF(40, 20), wakePos}) {
+                                         auto event =
+                                             std::make_shared<QMouseEvent>(QEvent::MouseMove, pos, pos, pos, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+                                         if (wakeGlobal) {
+                                             wakeSession->sendGlobalEvent(event);
+                                         } else {
+                                             wakeSession->sendEvent(event);
+                                         }
+                                     }
+                                 });
+                             }
+                         });
     }
 
     // Hard fallback so the process cannot hang forever if started() never
@@ -202,6 +231,8 @@ int main(int argc, char **argv)
         {u"keyframe-at"_s, u"Call requestKeyFrame() on the session at these offsets (seconds, comma separated) after the stream started"_s, u"seconds"_s},
         {u"quality-at"_s, u"Set the session video quality at these offsets: seconds:quality, comma separated (e.g. 4:40,8:90)"_s, u"list"_s},
         {u"multi"_s, u"Capture every screen with its own session and encoder; writes <output>.<index>.raw"_s},
+        {u"wake-global"_s,
+         u"With --wake-after and --multi: inject through AbstractSession::sendGlobalEvent() instead of sendEvent(), treating --wake-pos as a KWin-global workspace coordinate rather than a position on the target session's own screen"_s},
     });
     parser.process(application);
 
@@ -243,7 +274,8 @@ int main(int argc, char **argv)
 
     QObject::connect(&session, &KRdp::AbstractSession::frameReceived, &session, [&](const KRdp::VideoFrame &frame) {
         file.write(frame.data);
-        qWarning() << "Frame" << frameCount << "at +" << sinceStarted.elapsed() << "ms size" << frame.size << "bytes" << frame.data.size() << "keyframe" << frame.isKeyFrame;
+        qWarning() << "Frame" << frameCount << "at +" << sinceStarted.elapsed() << "ms size" << frame.size << "bytes" << frame.data.size() << "keyframe"
+                   << frame.isKeyFrame << "monitorIndex" << frame.monitorIndex;
         if (frameCount == 0) {
             firstFrameSize = frame.size;
         }

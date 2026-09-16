@@ -12,6 +12,7 @@
 #include <QDBusPendingCallWatcher>
 #include <QPoint>
 #include <QPointer>
+#include <QRect>
 
 #include "AbstractSession.h"
 #include "krdp_export.h"
@@ -38,9 +39,13 @@ public:
     void requestKeyFrame() override;
 
     void sendEvent(const std::shared_ptr<QEvent> &event) override;
+    void sendGlobalEvent(const std::shared_ptr<QEvent> &event) override;
     void setClipboardData(std::unique_ptr<QMimeData> data) override;
 
+    QRect outputGeometry() const override;
+
 private:
+    void injectNonMotionEvent(const std::shared_ptr<QEvent> &event);
     void scheduleStreamRecovery(int attempt, int delayMs);
     void attemptStreamRecovery(int attempt);
     bool setupScreencastRequest(bool allowWorkspaceFallback = true);

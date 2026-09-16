@@ -26,6 +26,7 @@ public:
     std::optional<quint32> frameRate = 60;
     std::optional<quint8> quality;
     QSet<QObject *> enableRequests;
+    int monitorIndex = 0;
 };
 
 AbstractSession::AbstractSession()
@@ -83,6 +84,26 @@ void AbstractSession::setVideoQuality(quint8 quality)
 
 void AbstractSession::refreshDisplayConfiguration()
 {
+}
+
+void AbstractSession::sendGlobalEvent(const std::shared_ptr<QEvent> &event)
+{
+    sendEvent(event);
+}
+
+void AbstractSession::setMonitorIndex(int index)
+{
+    d->monitorIndex = index;
+}
+
+int AbstractSession::monitorIndex() const
+{
+    return d->monitorIndex;
+}
+
+QRect AbstractSession::outputGeometry() const
+{
+    return QRect(QPoint(0, 0), logicalSize());
 }
 
 void AbstractSession::requestKeyFrame()

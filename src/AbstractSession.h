@@ -8,6 +8,7 @@
 
 #include <PipeWireEncodedStream>
 #include <PipeWireSourceStream>
+#include <QRect>
 #include <QString>
 
 class QMimeData;
@@ -77,6 +78,37 @@ public:
      * \param event The new event to send.
      */
     virtual void sendEvent(const std::shared_ptr<QEvent> &event) = 0;
+
+    /**
+     * Send an event whose pointer position is already in KWin-global
+     * coordinates, i.e. relative to the origin of the whole compositor
+     * workspace rather than to this session's own captured output.
+     *
+     * Used by the multi-monitor path, where the client sends one pointer
+     * position for the whole workspace while each session only captures a
+     * single output. The default implementation just forwards to sendEvent().
+     *
+     * \param event The new event to send.
+     */
+    virtual void sendGlobalEvent(const std::shared_ptr<QEvent> &event);
+
+    /**
+     * The index of the RDPGFX surface this session feeds.
+     *
+     * Stamped into every emitted VideoFrame so the video stream knows which
+     * surface a frame belongs to. Always 0 unless MonitorMode is `multi`.
+     */
+    void setMonitorIndex(int index);
+    int monitorIndex() const;
+
+    /**
+     * The geometry of the captured output in KWin-global (logical) coordinates.
+     *
+     * The default implementation reports the session's own logical size at the
+     * origin; sessions that capture a single output of a larger workspace
+     * override it with that output's position.
+     */
+    virtual QRect outputGeometry() const;
 
 Q_SIGNALS:
     void started();

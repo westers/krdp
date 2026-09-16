@@ -60,6 +60,10 @@ struct VideoFrame {
      */
     QVector<VideoMonitor> monitors;
     /**
+     * Index of the surface this frame belongs to (0 unless MonitorMode=multi).
+     */
+    int monitorIndex = 0;
+    /**
      * When was this frame presented.
      */
     std::chrono::system_clock::time_point presentationTimeStamp;
