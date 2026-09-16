@@ -46,8 +46,9 @@ public:
         connect(connection->videoStream(), &KRdp::VideoStream::requestedFrameRateChanged, this, &SessionWrapper::onRequestedFrameRateChanged, Qt::QueuedConnection);
         // Emitted from the frame submission thread; the session must act on the main thread.
         connect(connection->videoStream(), &KRdp::VideoStream::keyFrameRequested, this, &SessionWrapper::onKeyFrameRequested, Qt::QueuedConnection);
-        // Emitted from the FreeRDP peer thread (adaptive quality) or the main thread
-        // (cap/adaptive toggles); always queue across to the session either way.
+        // VideoStream (and so this signal, whether from adaptive-quality steering
+        // or a cap/adaptive toggle) runs on the main thread like SessionWrapper;
+        // queued here defensively, matching the other VideoStream connections above.
         connect(connection->videoStream(), &KRdp::VideoStream::requestedQualityChanged, this, &SessionWrapper::onRequestedQualityChanged, Qt::QueuedConnection);
         connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, session.get(), &KRdp::AbstractSession::sendEvent);
         connect(connection->clipboard(), &KRdp::Clipboard::clientDataChanged, session.get(), [clipboard = connection->clipboard(), this]() {
@@ -192,7 +193,16 @@ void SessionController::setQuality(const std::optional<int> &quality)
         if (!wrapper || !wrapper->session) {
             continue;
         }
-        wrapper->session->setVideoQuality(m_quality.value());
+        // With adaptive quality on, let VideoStream own the session's actual
+        // quality: setQualityCap() below computes and emits it (queued to the
+        // session). Calling session->setVideoQuality() directly here as well
+        // would desync the encoder from VideoStream's own d->quality
+        // bookkeeping the next time the adaptive loop runs (it would believe
+        // quality is still whatever it last computed, while the encoder is
+        // actually running at this cap).
+        if (!m_adaptiveQuality) {
+            wrapper->session->setVideoQuality(m_quality.value());
+        }
         if (wrapper->connection) {
             wrapper->connection->videoStream()->setQualityCap(quint8(m_quality.value()));
         }
@@ -248,7 +258,12 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
         wrapper->session->setActiveStream(m_monitorIndex.value_or(-1));
     }
     if (m_quality.has_value()) {
-        wrapper->session->setVideoQuality(m_quality.value());
+        // See setQuality() for why the direct session call is skipped while
+        // adaptive quality is on: setQualityCap() (below) is the only path
+        // that should ever set the session's quality in that mode.
+        if (!m_adaptiveQuality) {
+            wrapper->session->setVideoQuality(m_quality.value());
+        }
         newConnection->videoStream()->setQualityCap(quint8(m_quality.value()));
     }
     newConnection->videoStream()->setAdaptiveQuality(m_adaptiveQuality);

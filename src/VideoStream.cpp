@@ -48,6 +48,16 @@ constexpr auto QualityUpdateInterval = clk::milliseconds(1500);
 // NetworkDetection has measured (or not yet measured) in its first window.
 constexpr int MinimumValidSamplesBeforeAdapting = 3;
 
+// Atomically raises `value` to `candidate` if it's higher, otherwise leaves it
+// alone. Used to track the largest number of frames simultaneously in flight
+// since the adaptive-quality gate last looked - see maxPendingFramesSinceSample.
+void bumpAtomicMax(std::atomic<int> &value, int candidate)
+{
+    int current = value.load(std::memory_order_relaxed);
+    while (candidate > current && !value.compare_exchange_weak(current, candidate, std::memory_order_relaxed)) {
+    }
+}
+
 RECTANGLE_16 toRdpRect(const QRect &rect)
 {
     auto left = std::clamp(rect.x(), 0, int(MaxRdpCoordinate));
@@ -238,19 +248,28 @@ public:
     // than once per KeyFrameRequestMinInterval.
     clk::steady_clock::time_point lastKeyFrameRequest;
 
-    // Touched from both the main thread (setQualityCap/setAdaptiveQuality, at
-    // session setup) and the FreeRDP peer thread (updateAdaptiveQuality, off
-    // NetworkDetection::bandwidthChanged), hence atomic.
+    // setQualityCap()/setAdaptiveQuality() and updateAdaptiveQuality() (a slot
+    // invoked, via a queued connection, off NetworkDetection::bandwidthChanged)
+    // all run on the main thread - VideoStream is constructed in RdpConnection's
+    // constructor and never moved to another thread. These stay atomic as
+    // belt-and-braces in case that ever changes, not because it's true today.
     std::atomic<quint8> quality = 100; // current adaptive value
     std::atomic<quint8> qualityCap = 100; // configured Quality
     std::atomic<bool> adaptiveQuality = true;
-    // Peer-thread only (only updateAdaptiveQuality touches it).
+    // Main-thread only (only updateAdaptiveQuality touches it; see above).
     clk::system_clock::time_point lastQualityUpdate;
     // Mirrors d->surface.size as a single atomic value (width * height) so
-    // updateAdaptiveQuality() (peer thread) never sees a torn width/height
+    // updateAdaptiveQuality() (main thread) never sees a torn width/height
     // while performReset() (submission thread) or onCapsAdvertise() (peer
     // thread) writes d->surface.
     std::atomic<qint64> surfacePixels = 0;
+    // Utilization evidence for the adaptive-quality gate below: the largest
+    // number of frames simultaneously outstanding (sent but not yet
+    // acknowledged) since the last accepted bandwidth sample. Updated from
+    // both sendFrame() (submission thread) and onFrameAcknowledge() (peer
+    // thread) under pendingFramesMutex; read-and-reset by updateAdaptiveQuality()
+    // (main thread), hence atomic.
+    std::atomic<int> maxPendingFramesSinceSample = 0;
 };
 
 
@@ -285,10 +304,12 @@ bool VideoStream::initialize()
     d->gfxContext->FrameAcknowledge = gfxFrameAcknowledge;
     d->gfxContext->QoeFrameAcknowledge = gfxQoEFrameAcknowledge;
 
-    // bandwidthChanged is emitted from the FreeRDP peer thread, which is also
-    // where VideoStream runs, so a direct connection is fine; the resulting
-    // requestedQualityChanged signal is queued across to the session by
-    // SessionController.
+    // bandwidthChanged is emitted from NetworkDetection's onBandwidthMeasureResults(),
+    // which runs on the FreeRDP peer thread, but VideoStream (the receiver, "this")
+    // lives on the main thread - so Qt::AutoConnection resolves this to a queued
+    // connection and updateAdaptiveQuality() actually runs on the main thread.
+    // The resulting requestedQualityChanged signal is queued again across to the
+    // session by SessionController, matching its other VideoStream connections.
     connect(d->session->networkDetection(), &NetworkDetection::bandwidthChanged, this, &VideoStream::updateAdaptiveQuality);
 
     d->gfxContext->custom = this;
@@ -427,10 +448,16 @@ void VideoStream::setQualityCap(quint8 cap)
     d->qualityCap = cap;
     const quint8 current = d->quality.load();
     const quint8 next = d->adaptiveQuality.load() ? std::min(current, cap) : cap;
-    if (next != current) {
-        d->quality = next;
-        Q_EMIT requestedQualityChanged(next);
-    }
+    d->quality = next;
+    // Always emit, even when next == current: this is the only path that
+    // tells a brand-new session its quality (SessionController no longer
+    // calls session->setVideoQuality() directly while adaptive quality is on,
+    // to avoid desyncing the encoder from d->quality - see SessionController::
+    // setQuality()/onNewConnection()), and a fresh session needs that push
+    // even when the computed value happens to match VideoStream's default.
+    // The session/KPipeWire chain already no-ops on an unchanged value, so
+    // this costs nothing when it really is a no-op.
+    Q_EMIT requestedQualityChanged(next);
 }
 
 void VideoStream::setAdaptiveQuality(bool enabled)
@@ -470,14 +497,24 @@ void VideoStream::updateAdaptiveQuality()
         return;
     }
 
+    // A scheduled bandwidth window measures bytes actually sent, not link
+    // capacity: on an idle desktop that's a tiny sample that would otherwise
+    // read as "the link can barely carry anything". Only trust the
+    // goodput-derived target when frames were actually observed queuing up
+    // (>= 2 outstanding at once) since the last sample - real evidence the
+    // client/link was the bottleneck, not just idle.
+    const int maxPending = d->maxPendingFramesSinceSample.exchange(0);
+    const bool linkLimited = maxPending >= 2;
+
     const quint8 current = d->quality.load();
     const auto result = AdaptiveQuality::step({
         .current = current,
         .cap = d->qualityCap.load(),
         .goodputKbit = network->bandwidth(),
         .pixels = pixels,
-        .averageRtt = clk::duration_cast<clk::milliseconds>(network->averageRTT()),
-        .minimumRtt = clk::duration_cast<clk::milliseconds>(network->minimumRTT()),
+        .averageRtt = clk::duration_cast<clk::microseconds>(network->averageRTT()),
+        .minimumRtt = clk::duration_cast<clk::microseconds>(network->minimumRTT()),
+        .linkLimited = linkLimited,
     });
 
     // The cap or the adaptive-quality flag may have changed on the main
@@ -495,7 +532,7 @@ void VideoStream::updateAdaptiveQuality()
     d->lastQualityUpdate = now;
     d->quality = bounded;
     qCDebug(KRDP) << "Adaptive quality ->" << bounded << "(target" << result.target << "cap" << d->qualityCap.load() << "goodput" << network->bandwidth() << "kbit/s"
-                  << (result.congested ? ", congested" : "") << ")";
+                  << (linkLimited ? "link-limited" : "idle") << (result.congested ? ", congested" : "") << ")";
     Q_EMIT requestedQualityChanged(bounded);
 }
 
@@ -597,6 +634,10 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
 
     std::lock_guard lock(d->pendingFramesMutex);
 
+    // Snapshot the backlog depth the client had to work through before this
+    // ack arrived - see maxPendingFramesSinceSample.
+    bumpAtomicMax(d->maxPendingFramesSinceSample, d->pendingFrames.size());
+
     auto itr = d->pendingFrames.constFind(id);
     if (itr == d->pendingFrames.cend()) {
         qCWarning(KRDP) << "Got frame acknowledge for an unknown frame";
@@ -689,6 +730,9 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     {
         std::lock_guard lock(d->pendingFramesMutex);
         d->pendingFrames.insert(frameId);
+        // See maxPendingFramesSinceSample: a backlog forming here means the
+        // client/link could not keep up with the previous frames.
+        bumpAtomicMax(d->maxPendingFramesSinceSample, d->pendingFrames.size());
     }
 
     RDPGFX_START_FRAME_PDU startFramePdu;
@@ -724,9 +768,15 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     avcStream.meta.regionRects = &rect;
     // Informational for the client (MS-RDPEGFX 2.2.4.4.1), but keep it honest:
     // the same map the private KPipeWire uses (quality 100 -> QP 12, 0 -> QP 40).
+    // RDPGFX_H264_QUANT_QUALITY's member order is {qpVal, qualityVal, qp, r, p}
+    // (freerdp/channels/rdpgfx.h) - name the members explicitly rather than
+    // relying on positional aggregate init, which previously put the QP in the
+    // unused qpVal slot (qp itself landed on quality, and qualityVal stayed 0).
     const quint8 currentQuality = d->quality.load();
     const quint8 qp = quint8(std::lround(40.0 - 0.28 * currentQuality));
-    RDPGFX_H264_QUANT_QUALITY quality = {qp, 0, currentQuality};
+    RDPGFX_H264_QUANT_QUALITY quality{};
+    quality.qp = qp;
+    quality.qualityVal = currentQuality;
     avcStream.meta.quantQualityVals = &quality;
 
     d->gfxContext->StartFrame(d->gfxContext.get(), &startFramePdu);

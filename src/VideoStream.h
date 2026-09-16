@@ -156,7 +156,9 @@ private:
     uint32_t onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdvertise);
     uint32_t onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frameAcknowledge);
 
-    // Connected to NetworkDetection::bandwidthChanged (FreeRDP peer thread).
+    // Connected to NetworkDetection::bandwidthChanged; that signal is emitted
+    // from the FreeRDP peer thread, but this slot runs on VideoStream's own
+    // (main) thread via the resulting queued connection.
     Q_SLOT void updateAdaptiveQuality();
 
     void performReset(const QSize &size, const QVector<VideoMonitor> &monitors);

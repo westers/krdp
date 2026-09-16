@@ -121,7 +121,9 @@ std::chrono::system_clock::duration NetworkDetection::averageRTT() const
 
 quint32 NetworkDetection::bandwidth() const
 {
-    return d->averageBandwidthBps.load() * 8 / 1000;
+    // Compute in 64 bits before narrowing back to kbit/s: averageBandwidthBps
+    // is bytes/s, and multiplying by 8 in 32 bits overflows above ~4.3 Gbit/s.
+    return static_cast<quint32>(static_cast<quint64>(d->averageBandwidthBps.load()) * 8 / 1000);
 }
 
 int NetworkDetection::validBandwidthSamples() const

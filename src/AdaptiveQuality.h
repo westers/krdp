@@ -42,8 +42,19 @@ struct Input {
     int cap;
     quint32 goodputKbit;
     double pixels;
-    std::chrono::milliseconds averageRtt;
-    std::chrono::milliseconds minimumRtt;
+    // Microseconds, not milliseconds: a millisecond-truncated RTT makes 1-4 ms
+    // Wi-Fi jitter (e.g. min 1 ms, average 2 ms) look like a 2x spike and trips
+    // the congestion gate on noise. See congested's definition in step().
+    std::chrono::microseconds averageRtt;
+    std::chrono::microseconds minimumRtt;
+    // True when frames were actually observed queuing up (client/link could
+    // not keep up) during the goodput sample. A scheduled bandwidth window
+    // measures bytes actually SENT, not link capacity, so on an idle desktop
+    // (nothing to send) it reads as "the link can barely carry anything" even
+    // though nothing tried to find out. Defaults to true so callers that don't
+    // track this (e.g. existing tests) get the original, more conservative
+    // behavior of trusting the goodput-derived target outright.
+    bool linkLimited = true;
 };
 
 struct Result {
@@ -52,9 +63,21 @@ struct Result {
     bool congested;
 };
 
+// A rising RTT counts as congestion only once it is both a real gap above the
+// minimum (not sub-millisecond jitter) and proportionally large.
+constexpr auto CongestionRttMargin = std::chrono::milliseconds(5);
+
 // One control step: move `current` towards the quality the measured goodput can
 // carry at this resolution, slowly upwards and quickly downwards; a rising RTT
-// (average > 1.5x minimum) counts as congestion and forces a step down.
+// (at least CongestionRttMargin above the minimum, and at least 1.5x it) counts
+// as congestion and forces a step down.
+//
+// The goodput-derived target is only trusted when `linkLimited` says the
+// sample actually saw the link under pressure; otherwise (an idle desktop, or
+// a fast link that was never asked to prove it) the target aims for the cap
+// instead — still climbing slowly (+5) rather than jumping there — since a
+// low-utilization sample is not evidence the link *can't* carry more. RTT
+// congestion can still force a step down either way.
 inline Result step(const Input &in)
 {
     if (in.goodputKbit == 0 || in.pixels <= 0.0) {
@@ -63,8 +86,11 @@ inline Result step(const Input &in)
     const int hi = std::max(in.cap, MinQuality);
     int target = std::clamp(int(std::lround(in.goodputKbit / fullQualityKbit(in.pixels) * 100.0)), MinQuality, hi);
 
-    const bool congested = in.minimumRtt.count() > 0 && in.averageRtt.count() > in.minimumRtt.count() * 3 / 2;
-    if (congested) {
+    const bool congested = in.minimumRtt.count() > 0 && (in.averageRtt - in.minimumRtt) >= CongestionRttMargin && in.averageRtt * 2 > in.minimumRtt * 3;
+
+    if (!in.linkLimited) {
+        target = congested ? std::clamp(in.current - StepDown, MinQuality, hi) : hi;
+    } else if (congested) {
         target = std::clamp(in.current - StepDown, MinQuality, target);
     }
 

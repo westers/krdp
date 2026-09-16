@@ -40,10 +40,39 @@ private Q_SLOTS:
         QVERIFY(r.congested);
         QCOMPARE(r.next, 50);
     }
+    void smallJitterIsNotCongestion()
+    {
+        // 1 ms of RTT jitter (e.g. average 2 ms vs. minimum 1 ms) would look
+        // like a 2x spike if RTTs were truncated to milliseconds; it should
+        // not trip the congestion gate.
+        const auto r = step({.current = 50, .cap = 100, .goodputKbit = 9000, .pixels = 2560.0 * 1440.0, .averageRtt = 2ms, .minimumRtt = 1ms});
+        QVERIFY(!r.congested);
+        QCOMPARE(r.next, 55);
+    }
     void zeroGoodputLeavesQualityAlone()
     {
         const auto r = step({.current = 60, .cap = 100, .goodputKbit = 0, .pixels = 2560.0 * 1440.0, .averageRtt = 10ms, .minimumRtt = 10ms});
         QCOMPARE(r.next, 60);
+    }
+    void idleLinkClimbsTowardsCapDespiteLowGoodput()
+    {
+        // A scheduled bandwidth window measures bytes actually sent, not link
+        // capacity: on an idle desktop the sample is tiny and would otherwise
+        // read as "the link can barely carry anything". Without evidence the
+        // link was the bottleneck (linkLimited=false), aim for the cap.
+        const auto r = step({.current = 30, .cap = 80, .goodputKbit = 80, .pixels = 2560.0 * 1440.0, .averageRtt = 10ms, .minimumRtt = 10ms, .linkLimited = false});
+        QCOMPARE(r.target, 80);
+        QCOMPARE(r.next, 35);
+        QVERIFY(!r.congested);
+    }
+    void limitedLinkStepsDownOnLowGoodput()
+    {
+        // Same low-goodput sample, but this time frames were actually queuing
+        // up (the link really is the bottleneck): trust the goodput-derived
+        // target and step down.
+        const auto r = step({.current = 30, .cap = 80, .goodputKbit = 80, .pixels = 2560.0 * 1440.0, .averageRtt = 10ms, .minimumRtt = 10ms, .linkLimited = true});
+        QCOMPARE(r.target, MinQuality);
+        QCOMPARE(r.next, 20);
     }
 };
 
