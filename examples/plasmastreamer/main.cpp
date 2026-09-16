@@ -6,6 +6,7 @@
 // (PlasmaScreencastV1Session -> KPipeWire -> encoder) and dump raw H.264 to a
 // file, without any RDP client involved.
 
+#include <algorithm>
 #include <csignal>
 
 #include <QCommandLineParser>
@@ -36,6 +37,7 @@ int main(int argc, char **argv)
         {u"wake-after"_s, u"Inject a small mouse move via the session's fake input at these offsets (seconds, comma separated) after the stream started (mimics an RDP user wiggling the mouse)"_s, u"seconds"_s},
         {u"refresh-after"_s, u"Call refreshDisplayConfiguration() on the session this many seconds after the stream started"_s, u"seconds"_s},
         {u"keyframe-at"_s, u"Call requestKeyFrame() on the session at these offsets (seconds, comma separated) after the stream started"_s, u"seconds"_s},
+        {u"quality-at"_s, u"Set the session video quality at these offsets: seconds:quality, comma separated (e.g. 4:40,8:90)"_s, u"list"_s},
     });
     parser.process(application);
 
@@ -150,6 +152,28 @@ int main(int argc, char **argv)
                 QTimer::singleShot(offset.toInt() * 1000, &session, [&session, &sinceStarted]() {
                     qInfo() << "Requesting keyframe at +" << sinceStarted.elapsed() << "ms";
                     session.requestKeyFrame();
+                });
+            }
+        });
+    }
+
+    // Optionally change the session's video quality partway through the run,
+    // exercising the h264_vaapi reopen path (or the software encoder's live
+    // global_quality update).
+    if (parser.isSet(u"quality-at"_s)) {
+        const auto entries = parser.value(u"quality-at"_s).split(u',', Qt::SkipEmptyParts);
+        QObject::connect(&session, &KRdp::AbstractSession::started, &application, [&session, &sinceStarted, entries]() {
+            for (const auto &entry : entries) {
+                const auto parts = entry.split(u':');
+                if (parts.size() != 2) {
+                    qWarning() << "Ignoring malformed --quality-at entry" << entry;
+                    continue;
+                }
+                const int offset = parts[0].toInt();
+                const int quality = std::clamp(parts[1].toInt(), 0, 100);
+                QTimer::singleShot(offset * 1000, &session, [&session, &sinceStarted, quality]() {
+                    qWarning() << "Setting video quality to" << quality << "at +" << sinceStarted.elapsed() << "ms";
+                    session.setVideoQuality(quint8(quality));
                 });
             }
         });
