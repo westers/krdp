@@ -664,6 +664,10 @@ void PlasmaScreencastV1Session::sendGlobalEvent(const std::shared_ptr<QEvent> &e
         // clamping here would pin the pointer to the captured output.
         auto me = std::static_pointer_cast<QMouseEvent>(event);
         const auto position = me->position();
+        // Debug-gated. In multi mode this is the only place the workspace-global
+        // pointer position can be checked against the monitor the click was
+        // meant for, so it is what tells a seam bug from a capture bug.
+        qCDebug(KRDP) << "Global pointer motion to" << position << "(workspace logical)";
         d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(position.x()), wl_fixed_from_double(position.y()));
         return;
     }

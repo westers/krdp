@@ -793,7 +793,7 @@ bool VideoStream::performReset(const QSize &desktopSize, const QVector<VideoMoni
     }
     resetGraphicsPdu.monitorDefArray = monitorDefs.get();
 
-    qCDebug(KRDP) << "Reset graphics monitor layout:" << monitorLayoutSummary(monitors);
+    qCDebug(KRDP) << "Reset graphics desktop" << desktopSize << "with" << monitors.size() << "monitor(s):" << monitorLayoutSummary(monitors);
     d->gfxContext->ResetGraphics(d->gfxContext.get(), &resetGraphicsPdu);
 
     d->surfaces.clear();
@@ -950,6 +950,12 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     }
 
     auto frameId = d->frameId++;
+
+    // Debug-gated (off unless org.kde.krdp.debug is on), but the only place
+    // that shows which monitor a frame actually reached the wire on - the one
+    // thing a multi-monitor stream has to be checked against.
+    qCDebug(KRDP) << "Sending frame" << frameId << "monitorIndex" << frame.monitorIndex << "surface" << surface.id << "at" << surface.origin << surface.size
+                  << (frame.isKeyFrame ? "keyframe" : "delta") << frame.data.size() << "bytes";
 
     {
         std::lock_guard lock(d->pendingFramesMutex);

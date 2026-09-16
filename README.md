@@ -86,11 +86,20 @@ When `--monitor` is not supplied, KRDP uses persisted config keys:
 - `General/MonitorIndex=<id>` (used when mode is `specific`)
 
 `multi` gives every monitor its own capture stream, encoder and RDPGFX surface,
-so a client connecting with a multiple-monitor flag (`mstsc /multimon`) sees
-them as separate remote monitors and a client without it sees their union as
-one desktop. Monitors larger than 4096 px in either direction are left out
-because the hardware H.264 encoder cannot take them; when fewer than two
-monitors remain, the server falls back to `specific` on the primary.
+so a client that negotiates multi-monitor (e.g. `sdl-freerdp3 /multimon`) sees
+them as separate remote monitors, and a client that does not sees their union as
+one desktop. The 4096-px hardware H.264 limit applies to each monitor on its
+own, not to the union, so `multi` is how to stream a workspace whose combined
+width exceeds 4096 px. A monitor larger than 4096 px in either direction is left
+out because the encoder cannot take it; when fewer than two monitors remain, the
+server falls back to `specific` on the primary. The server always streams its
+own monitors: a client's declared layout and `/size:` are ignored.
+
+`MonitorMode` is applied live, so switching needs no restart:
+
+```bash
+kwriteconfig6 --file krdpserverrc --group General --key MonitorMode multi --notify
+```
 
 The KDE Remote Desktop settings page exposes this as **Display target** and
 **Monitor ID**, and shows the current monitor ID map (`0: <screen name>`, etc.).
@@ -155,6 +164,7 @@ kwriteconfig6 --file krdpserverrc --group General --key Certificate "$certificat
 kwriteconfig6 --file krdpserverrc --group General --key CertificateKey "$certificateKeyPath"
 kwriteconfig6 --file krdpserverrc --group General --key SystemUserEnabled true
 # Optional: display target (workspace|primary|specific|multi) and monitor ID
+# (applied live; add --notify to change it without restarting the service)
 kwriteconfig6 --file krdpserverrc --group General --key MonitorMode workspace
 kwriteconfig6 --file krdpserverrc --group General --key MonitorIndex 0
 # Optional: VAAPI driver mode (auto|off|radeonsi|iHD)
