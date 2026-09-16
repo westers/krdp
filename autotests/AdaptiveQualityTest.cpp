@@ -7,72 +7,88 @@ using namespace std::chrono_literals;
 class AdaptiveQualityTest : public QObject
 {
     Q_OBJECT
-private Q_SLOTS:
-    void fullQualityAnchorsScaleLinearly()
+private:
+    static Input clear(int current, int cap = 80)
     {
-        QCOMPARE(fullQualityKbit(2560.0 * 1440.0), 4500.0);
-        QCOMPARE(fullQualityKbit(1920.0 * 1080.0), 3110.0);
-        // Halfway between anchors: nearest anchor, scaled by pixel ratio.
-        QVERIFY(fullQualityKbit(2560.0 * 1080.0) > 3110.0);
-        QVERIFY(fullQualityKbit(2560.0 * 1080.0) < 4500.0);
+        return {.current = current, .cap = cap, .averageRtt = 10ms, .minimumRtt = 10ms, .backlogged = false, .climbAllowed = true};
     }
-    void stepsUpSlowlyTowardsTarget()
+
+private Q_SLOTS:
+    void clearIntervalClimbsByStepUp()
     {
-        const auto r = step({.current = 50, .cap = 100, .goodputKbit = 9000, .pixels = 2560.0 * 1440.0, .averageRtt = 10ms, .minimumRtt = 10ms});
-        QCOMPARE(r.target, 100);
-        QCOMPARE(r.next, 55);
+        const auto r = step(clear(60));
+        QCOMPARE(r.next, 65);
         QVERIFY(!r.congested);
     }
-    void stepsDownFasterTowardsTarget()
+
+    void neverExceedsCap()
     {
-        const auto r = step({.current = 80, .cap = 100, .goodputKbit = 900, .pixels = 2560.0 * 1440.0, .averageRtt = 10ms, .minimumRtt = 10ms});
-        QCOMPARE(r.target, 20); // 900/4500*100
-        QCOMPARE(r.next, 70);
+        QCOMPARE(step(clear(78)).next, 80);
+        QCOMPARE(step(clear(80)).next, 80);
     }
-    void neverExceedsCapOrDropsBelowMinimum()
+
+    void capBelowCurrentClampsDown()
     {
-        QCOMPARE(step({.current = 80, .cap = 80, .goodputKbit = 90000, .pixels = 2560.0 * 1440.0, .averageRtt = 10ms, .minimumRtt = 10ms}).next, 80);
-        QCOMPARE(step({.current = 12, .cap = 100, .goodputKbit = 1, .pixels = 2560.0 * 1440.0, .averageRtt = 10ms, .minimumRtt = 10ms}).next, MinQuality);
+        QCOMPARE(step(clear(80, 50)).next, 50);
     }
-    void congestionForcesAStepDownAndBlocksStepUp()
+
+    void climbHoldKeepsQuality()
     {
-        const auto r = step({.current = 60, .cap = 100, .goodputKbit = 9000, .pixels = 2560.0 * 1440.0, .averageRtt = 60ms, .minimumRtt = 20ms});
+        auto in = clear(60);
+        in.climbAllowed = false;
+        QCOMPARE(step(in).next, 60);
+    }
+
+    void backlogStepsDownEvenDuringHold()
+    {
+        auto in = clear(80);
+        in.backlogged = true;
+        QCOMPARE(step(in).next, 70);
+        in.climbAllowed = false;
+        QCOMPARE(step(in).next, 70);
+        QVERIFY(!step(in).congested);
+    }
+
+    void rttCongestionStepsDown()
+    {
+        auto in = clear(60);
+        in.averageRtt = 20ms;
+        in.minimumRtt = 10ms;
+        const auto r = step(in);
         QVERIFY(r.congested);
         QCOMPARE(r.next, 50);
     }
+
     void smallJitterIsNotCongestion()
     {
-        // 1 ms of RTT jitter (e.g. average 2 ms vs. minimum 1 ms) would look
-        // like a 2x spike if RTTs were truncated to milliseconds; it should
-        // not trip the congestion gate.
-        const auto r = step({.current = 50, .cap = 100, .goodputKbit = 9000, .pixels = 2560.0 * 1440.0, .averageRtt = 2ms, .minimumRtt = 1ms});
-        QVERIFY(!r.congested);
-        QCOMPARE(r.next, 55);
+        auto in = clear(60);
+        in.averageRtt = 3000us; // 2 ms above the minimum: below the 5 ms margin
+        in.minimumRtt = 1000us;
+        QVERIFY(!step(in).congested);
+        QCOMPARE(step(in).next, 65);
+
+        in.averageRtt = 106ms; // 6 ms above the minimum but only 1.06x it
+        in.minimumRtt = 100ms;
+        QVERIFY(!step(in).congested);
+        QCOMPARE(step(in).next, 65);
     }
-    void zeroGoodputLeavesQualityAlone()
+
+    void noRttBaselineIsNotCongestion()
     {
-        const auto r = step({.current = 60, .cap = 100, .goodputKbit = 0, .pixels = 2560.0 * 1440.0, .averageRtt = 10ms, .minimumRtt = 10ms});
-        QCOMPARE(r.next, 60);
+        auto in = clear(60);
+        in.averageRtt = 50ms;
+        in.minimumRtt = 0us;
+        QVERIFY(!step(in).congested);
+        QCOMPARE(step(in).next, 65);
     }
-    void idleLinkClimbsTowardsCapDespiteLowGoodput()
+
+    void neverDropsBelowMinimum()
     {
-        // A scheduled bandwidth window measures bytes actually sent, not link
-        // capacity: on an idle desktop the sample is tiny and would otherwise
-        // read as "the link can barely carry anything". Without evidence the
-        // link was the bottleneck (linkLimited=false), aim for the cap.
-        const auto r = step({.current = 30, .cap = 80, .goodputKbit = 80, .pixels = 2560.0 * 1440.0, .averageRtt = 10ms, .minimumRtt = 10ms, .linkLimited = false});
-        QCOMPARE(r.target, 80);
-        QCOMPARE(r.next, 35);
-        QVERIFY(!r.congested);
-    }
-    void limitedLinkStepsDownOnLowGoodput()
-    {
-        // Same low-goodput sample, but this time frames were actually queuing
-        // up (the link really is the bottleneck): trust the goodput-derived
-        // target and step down.
-        const auto r = step({.current = 30, .cap = 80, .goodputKbit = 80, .pixels = 2560.0 * 1440.0, .averageRtt = 10ms, .minimumRtt = 10ms, .linkLimited = true});
-        QCOMPARE(r.target, MinQuality);
-        QCOMPARE(r.next, 20);
+        auto in = clear(12);
+        in.backlogged = true;
+        QCOMPARE(step(in).next, MinQuality);
+        in.current = MinQuality;
+        QCOMPARE(step(in).next, MinQuality);
     }
 };
 

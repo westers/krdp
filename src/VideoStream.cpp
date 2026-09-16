@@ -23,6 +23,7 @@
 #include <QQueue>
 #include <QRect>
 #include <QStringList>
+#include <QTimer>
 
 #include <freerdp/freerdp.h>
 #include <freerdp/peer.h>
@@ -43,18 +44,17 @@ constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MaxMonitorLayoutCount = 16;
 constexpr auto KeyFrameRequestMinInterval = clk::seconds(2);
 constexpr auto QualityUpdateInterval = clk::milliseconds(1500);
-// Wait for a few accepted bandwidth samples before adapting off them, so a
-// fresh connection stays at the cap instead of reacting to whatever
-// NetworkDetection has measured (or not yet measured) in its first window.
-constexpr int MinimumValidSamplesBeforeAdapting = 3;
+// Don't take adaptive-quality decisions until NetworkDetection has had a few
+// RTT probes (every 70 ms) to establish a minimum-RTT baseline.
+constexpr auto WarmupAfterStreamStart = clk::seconds(3);
 
-// Atomically raises `value` to `candidate` if it's higher, otherwise leaves it
-// alone. Used to track the largest number of frames simultaneously in flight
-// since the adaptive-quality gate last looked - see maxPendingFramesSinceSample.
-void bumpAtomicMax(std::atomic<int> &value, int candidate)
+// Atomically lowers `value` to `candidate` if it's lower, otherwise leaves it
+// alone. Used to track how close the client got to caught up since the
+// adaptive-quality decision last looked - see minPendingAfterAckSinceDecision.
+void bumpAtomicMin(std::atomic<int> &value, int candidate)
 {
     int current = value.load(std::memory_order_relaxed);
-    while (candidate > current && !value.compare_exchange_weak(current, candidate, std::memory_order_relaxed)) {
+    while (candidate < current && !value.compare_exchange_weak(current, candidate, std::memory_order_relaxed)) {
     }
 }
 
@@ -248,28 +248,32 @@ public:
     // than once per KeyFrameRequestMinInterval.
     clk::steady_clock::time_point lastKeyFrameRequest;
 
-    // setQualityCap()/setAdaptiveQuality() and updateAdaptiveQuality() (a slot
-    // invoked, via a queued connection, off NetworkDetection::bandwidthChanged)
-    // all run on the main thread - VideoStream is constructed in RdpConnection's
-    // constructor and never moved to another thread. These stay atomic as
-    // belt-and-braces in case that ever changes, not because it's true today.
+    // setQualityCap()/setAdaptiveQuality() and updateAdaptiveQuality() (the
+    // adaptiveTimer slot) all run on the main thread - VideoStream is
+    // constructed in RdpConnection's constructor and never moved to another
+    // thread. These stay atomic as belt-and-braces in case that ever changes,
+    // not because it's true today.
     std::atomic<quint8> quality = 100; // current adaptive value
     std::atomic<quint8> qualityCap = 100; // configured Quality
     std::atomic<bool> adaptiveQuality = true;
-    // Main-thread only (only updateAdaptiveQuality touches it; see above).
-    clk::system_clock::time_point lastQualityUpdate;
     // Mirrors d->surface.size as a single atomic value (width * height) so
     // updateAdaptiveQuality() (main thread) never sees a torn width/height
     // while performReset() (submission thread) or onCapsAdvertise() (peer
     // thread) writes d->surface.
     std::atomic<qint64> surfacePixels = 0;
-    // Utilization evidence for the adaptive-quality gate below: the largest
-    // number of frames simultaneously outstanding (sent but not yet
-    // acknowledged) since the last accepted bandwidth sample. Updated from
-    // both sendFrame() (submission thread) and onFrameAcknowledge() (peer
-    // thread) under pendingFramesMutex; read-and-reset by updateAdaptiveQuality()
-    // (main thread), hence atomic.
-    std::atomic<int> maxPendingFramesSinceSample = 0;
+    // Backlog evidence for the adaptive-quality decision: the smallest number
+    // of frames still unacknowledged right after any ack since the last
+    // decision (INT_MAX = no ack since). Lowered on the connection thread in
+    // onFrameAcknowledge() under pendingFramesMutex (and to 0 wherever
+    // pendingFrames is cleared - a reset counts as caught up); read-and-reset
+    // by updateAdaptiveQuality() on the main thread.
+    std::atomic<int> minPendingAfterAckSinceDecision = std::numeric_limits<int>::max();
+    // Main-thread timer that drives updateAdaptiveQuality() every
+    // QualityUpdateInterval while streaming; started/stopped via queued
+    // invokeMethod so initialize()/close() may run on any thread.
+    QTimer adaptiveTimer;
+    clk::steady_clock::time_point streamingSince;
+    clk::steady_clock::time_point lastStepDown; // default = epoch = "never"
 };
 
 
@@ -278,6 +282,10 @@ VideoStream::VideoStream(RdpConnection *session)
     , d(std::make_unique<Private>())
 {
     d->session = session;
+
+    d->adaptiveTimer.setInterval(QualityUpdateInterval);
+    d->adaptiveTimer.setTimerType(Qt::CoarseTimer);
+    connect(&d->adaptiveTimer, &QTimer::timeout, this, &VideoStream::updateAdaptiveQuality);
 }
 
 VideoStream::~VideoStream()
@@ -303,14 +311,6 @@ bool VideoStream::initialize()
     d->gfxContext->CapsAdvertise = gfxCapsAdvertise;
     d->gfxContext->FrameAcknowledge = gfxFrameAcknowledge;
     d->gfxContext->QoeFrameAcknowledge = gfxQoEFrameAcknowledge;
-
-    // bandwidthChanged is emitted from NetworkDetection's onBandwidthMeasureResults(),
-    // which runs on the FreeRDP peer thread, but VideoStream (the receiver, "this")
-    // lives on the main thread - so Qt::AutoConnection resolves this to a queued
-    // connection and updateAdaptiveQuality() actually runs on the main thread.
-    // The resulting requestedQualityChanged signal is queued again across to the
-    // session by SessionController, matching its other VideoStream connections.
-    connect(d->session->networkDetection(), &NetworkDetection::bandwidthChanged, this, &VideoStream::updateAdaptiveQuality);
 
     d->gfxContext->custom = this;
     d->gfxContext->rdpcontext = d->session->rdpPeerContext();
@@ -363,11 +363,17 @@ bool VideoStream::initialize()
 
     qCDebug(KRDP) << "Video stream initialized";
 
+    d->streamingSince = clk::steady_clock::now();
+    d->minPendingAfterAckSinceDecision = std::numeric_limits<int>::max();
+    QMetaObject::invokeMethod(&d->adaptiveTimer, qOverload<>(&QTimer::start), Qt::QueuedConnection);
+
     return true;
 }
 
 void VideoStream::close()
 {
+    QMetaObject::invokeMethod(&d->adaptiveTimer, &QTimer::stop, Qt::QueuedConnection);
+
     if (!d->gfxContext) {
         return;
     }
@@ -383,6 +389,7 @@ void VideoStream::close()
     {
         std::lock_guard lock(d->pendingFramesMutex);
         d->pendingFrames.clear();
+        bumpAtomicMin(d->minPendingAfterAckSinceDecision, 0);
     }
     {
         std::lock_guard lock(d->frameQueueMutex);
@@ -479,60 +486,56 @@ void VideoStream::updateAdaptiveQuality()
     if (!d->adaptiveQuality.load()) {
         return;
     }
-    const auto now = clk::system_clock::now();
-    if (now - d->lastQualityUpdate < QualityUpdateInterval) {
+    const auto now = clk::steady_clock::now();
+    if (now - d->streamingSince < WarmupAfterStreamStart) {
         return;
+    }
+    if (d->surfacePixels.load() == 0) {
+        return; // no surface yet, nothing is being sent
     }
 
-    const double pixels = double(d->surfacePixels.load());
-    if (pixels == 0.0) {
-        return;
+    int pendingNow = 0;
+    {
+        std::lock_guard lock(d->pendingFramesMutex);
+        pendingNow = int(d->pendingFrames.size());
     }
+    const int minAfterAck = d->minPendingAfterAckSinceDecision.exchange(std::numeric_limits<int>::max());
+    // Backlogged = the client never got within BacklogFrames of caught up:
+    // neither after any ack this interval nor right now. Idle (pendingNow 0)
+    // is never a backlog; a stall with no acks at all is (min(INT_MAX, now)).
+    const bool backlogged = std::min(minAfterAck, pendingNow) >= AdaptiveQuality::BacklogFrames;
 
     auto *network = d->session->networkDetection();
-    if (network->validBandwidthSamples() < MinimumValidSamplesBeforeAdapting) {
-        // Keep the quality at the cap until the goodput estimate is backed by
-        // a few real samples; a fresh connection would otherwise adapt off
-        // whatever garbage (or zero) NetworkDetection has measured so far.
-        return;
-    }
-
-    // A scheduled bandwidth window measures bytes actually sent, not link
-    // capacity: on an idle desktop that's a tiny sample that would otherwise
-    // read as "the link can barely carry anything". Only trust the
-    // goodput-derived target when frames were actually observed queuing up
-    // (>= 2 outstanding at once) since the last sample - real evidence the
-    // client/link was the bottleneck, not just idle.
-    const int maxPending = d->maxPendingFramesSinceSample.exchange(0);
-    const bool linkLimited = maxPending >= 2;
-
+    const auto averageRtt = clk::duration_cast<clk::microseconds>(network->averageRTT());
+    const auto minimumRtt = clk::duration_cast<clk::microseconds>(network->minimumRTT());
     const quint8 current = d->quality.load();
     const auto result = AdaptiveQuality::step({
         .current = current,
         .cap = d->qualityCap.load(),
-        .goodputKbit = network->bandwidth(),
-        .pixels = pixels,
-        .averageRtt = clk::duration_cast<clk::microseconds>(network->averageRTT()),
-        .minimumRtt = clk::duration_cast<clk::microseconds>(network->minimumRTT()),
-        .linkLimited = linkLimited,
+        .averageRtt = averageRtt,
+        .minimumRtt = minimumRtt,
+        .backlogged = backlogged,
+        .climbAllowed = (now - d->lastStepDown) >= AdaptiveQuality::ClimbHoldAfterStepDown,
     });
 
-    // The cap or the adaptive-quality flag may have changed on the main
-    // thread while step() ran above; re-check both immediately before
-    // committing so a stale result never overshoots a just-lowered cap or
-    // gets applied after adaptive quality was turned off.
+    // The cap or the adaptive-quality flag may have changed while step() ran;
+    // re-check both before committing so a stale result never overshoots a
+    // just-lowered cap or gets applied after adaptive quality was turned off.
     if (!d->adaptiveQuality.load()) {
         return;
     }
     const quint8 bounded = quint8(std::min<int>(result.next, d->qualityCap.load()));
+    if (bounded < current) {
+        d->lastStepDown = now;
+    }
     if (bounded == current) {
         return;
     }
 
-    d->lastQualityUpdate = now;
     d->quality = bounded;
-    qCDebug(KRDP) << "Adaptive quality ->" << bounded << "(target" << result.target << "cap" << d->qualityCap.load() << "goodput" << network->bandwidth() << "kbit/s"
-                  << (linkLimited ? "link-limited" : "idle") << (result.congested ? ", congested" : "") << ")";
+    qCDebug(KRDP) << "Adaptive quality ->" << bounded << "(" << (result.congested ? "congested" : (backlogged ? "backlogged" : "clear")) << "rtt avg" << averageRtt.count() << "min" << minimumRtt.count()
+                  << "us, pending min-after-ack" << (minAfterAck == std::numeric_limits<int>::max() ? -1 : minAfterAck) << "now" << pendingNow << ", goodput" << network->bandwidth() << "kbit/s, cap"
+                  << d->qualityCap.load() << ")";
     Q_EMIT requestedQualityChanged(bounded);
 }
 
@@ -558,6 +561,7 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         d->monitorLayout.clear();
         std::lock_guard lock(d->pendingFramesMutex);
         d->pendingFrames.clear();
+        bumpAtomicMin(d->minPendingAfterAckSinceDecision, 0);
     }
 
     auto capsSets = capsAdvertise->capsSets;
@@ -634,10 +638,6 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
 
     std::lock_guard lock(d->pendingFramesMutex);
 
-    // Snapshot the backlog depth the client had to work through before this
-    // ack arrived - see maxPendingFramesSinceSample.
-    bumpAtomicMax(d->maxPendingFramesSinceSample, d->pendingFrames.size());
-
     auto itr = d->pendingFrames.constFind(id);
     if (itr == d->pendingFrames.cend()) {
         qCWarning(KRDP) << "Got frame acknowledge for an unknown frame";
@@ -645,6 +645,10 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
     }
 
     d->pendingFrames.erase(itr);
+
+    // How far behind the client still is now that this ack landed - see
+    // minPendingAfterAckSinceDecision.
+    bumpAtomicMin(d->minPendingAfterAckSinceDecision, int(d->pendingFrames.size()));
 
     return CHANNEL_RC_OK;
 }
@@ -730,9 +734,6 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     {
         std::lock_guard lock(d->pendingFramesMutex);
         d->pendingFrames.insert(frameId);
-        // See maxPendingFramesSinceSample: a backlog forming here means the
-        // client/link could not keep up with the previous frames.
-        bumpAtomicMax(d->maxPendingFramesSinceSample, d->pendingFrames.size());
     }
 
     RDPGFX_START_FRAME_PDU startFramePdu;
