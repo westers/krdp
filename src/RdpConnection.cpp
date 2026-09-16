@@ -558,8 +558,11 @@ void RdpConnection::run(std::stop_token stopToken)
             qCDebug(KRDP) << "Unable to get transport event handles";
             break;
         }
-        // Wait for something to happen on the connection.
-        WaitForMultipleObjects(1 + handleCount, events.data(), FALSE, INFINITE);
+        // Bounded, not INFINITE: NetworkDetection::update() (RTT probe every
+        // 70 ms, bandwidth window stop after 500 ms) must run on an idle link
+        // too. Waiting only for socket activity stretched idle bandwidth
+        // windows to 1.0-1.6 s in the 2026-09-16 journal.
+        WaitForMultipleObjects(1 + handleCount, events.data(), FALSE, 100);
 
         // Read data from the socket and have FreeRDP process it.
         if (d->peer->CheckFileDescriptor(d->peer) != TRUE) {
