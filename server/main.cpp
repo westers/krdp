@@ -269,12 +269,18 @@ int main(int argc, char **argv)
             monitorIndex = configuredMonitorIndex(config);
         }
 
-        controller.setMultiMonitorEnabled(multiRequested);
+        // The index goes first so that a multi -> workspace/specific switch
+        // rebuilds the single session on the target it is about to use,
+        // instead of building it on the old one and re-creating the capture
+        // stream a moment later.
         controller.setMonitorIndex(monitorIndex);
+        controller.setMultiMonitorEnabled(multiRequested);
         if (controller.multiMonitorEnabled()) {
             streamTarget = u"multi:%1"_s.arg(controller.multiMonitorCount());
         } else if (multiRequested) {
-            streamTarget = u"specific:%1 (multi fallback)"_s.arg(monitorIndex.value_or(0));
+            // With no resolvable primary there is no index to fall back to, so
+            // the stream is the whole workspace.
+            streamTarget = monitorIndex.has_value() ? u"specific:%1 (multi fallback)"_s.arg(*monitorIndex) : u"workspace (multi fallback)"_s;
         } else if (monitorIndex.has_value()) {
             streamTarget = u"monitor:%1"_s.arg(*monitorIndex);
         }
@@ -305,9 +311,11 @@ int main(int argc, char **argv)
 
         if (!monitorPinnedByCli) {
             // Both self-guard on an unchanged value, so a quality-slider write
-            // does not rebuild anything.
-            controller.setMultiMonitorEnabled(normalizedMonitorMode(config->monitorMode()) == u"multi"_s);
+            // does not rebuild anything. Same order as at startup: the index
+            // has to be current before multi mode is switched off, or the
+            // single session it rebuilds targets the previous monitor.
             controller.setMonitorIndex(configuredMonitorIndex(config));
+            controller.setMultiMonitorEnabled(normalizedMonitorMode(config->monitorMode()) == u"multi"_s);
         }
 
         controller.setAdaptiveQuality(config->adaptiveQuality());
