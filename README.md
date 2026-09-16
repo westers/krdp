@@ -82,8 +82,15 @@ The following command line options are available for the example server:
 
 When `--monitor` is not supplied, KRDP uses persisted config keys:
 
-- `General/MonitorMode=workspace|primary|specific`
+- `General/MonitorMode=workspace|primary|specific|multi`
 - `General/MonitorIndex=<id>` (used when mode is `specific`)
+
+`multi` gives every monitor its own capture stream, encoder and RDPGFX surface,
+so a client connecting with a multiple-monitor flag (`mstsc /multimon`) sees
+them as separate remote monitors and a client without it sees their union as
+one desktop. Monitors larger than 4096 px in either direction are left out
+because the hardware H.264 encoder cannot take them; when fewer than two
+monitors remain, the server falls back to `specific` on the primary.
 
 The KDE Remote Desktop settings page exposes this as **Display target** and
 **Monitor ID**, and shows the current monitor ID map (`0: <screen name>`, etc.).
@@ -147,7 +154,7 @@ openssl req -nodes -new -x509 -keyout "$certificateKeyPath" -out "$certificatePa
 kwriteconfig6 --file krdpserverrc --group General --key Certificate "$certificatePath"
 kwriteconfig6 --file krdpserverrc --group General --key CertificateKey "$certificateKeyPath"
 kwriteconfig6 --file krdpserverrc --group General --key SystemUserEnabled true
-# Optional: display target (workspace|primary|specific) and monitor ID
+# Optional: display target (workspace|primary|specific|multi) and monitor ID
 kwriteconfig6 --file krdpserverrc --group General --key MonitorMode workspace
 kwriteconfig6 --file krdpserverrc --group General --key MonitorIndex 0
 # Optional: VAAPI driver mode (auto|off|radeonsi|iHD)

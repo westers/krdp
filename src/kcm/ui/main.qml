@@ -254,7 +254,8 @@ KCM.ScrollViewKCM {
             model: [
                 {text: i18nc("@item:inlistbox", "All monitors (workspace)"), value: "workspace"},
                 {text: i18nc("@item:inlistbox", "Primary monitor"), value: "primary"},
-                {text: i18nc("@item:inlistbox", "Specific monitor ID"), value: "specific"}
+                {text: i18nc("@item:inlistbox", "Specific monitor ID"), value: "specific"},
+                {text: i18nc("@item:inlistbox", "Each monitor separately"), value: "multi"}
             ]
             enabled: userListView.count > 0
             onActivated: {

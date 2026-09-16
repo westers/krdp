@@ -8,12 +8,8 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDebug>
-#include <QFile>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QRegularExpression>
 #include <QScreen>
 #include <QStandardPaths>
@@ -71,115 +67,11 @@ QString normalizedMonitorMode(QString mode)
     if (mode.compare(u"specific"_s, Qt::CaseInsensitive) == 0) {
         return u"specific"_s;
     }
+    if (mode.compare(u"multi"_s, Qt::CaseInsensitive) == 0) {
+        return u"multi"_s;
+    }
     qWarning() << "Unknown MonitorMode value" << mode << "falling back to workspace";
     return u"workspace"_s;
-}
-
-/**
- * Read KWin's output config to find the connector name of the primary output.
- *
- * KDE Plasma stores monitor priorities in ~/.config/kwinoutputconfig.json.
- * The output with priority 0 in the active setup is the user's primary.
- * Qt's QGuiApplication::primaryScreen() doesn't reflect this in headless
- * service contexts, so we read the config file directly.
- *
- * Returns the connector name (e.g. "DP-1") or an empty string on failure.
- */
-QString kwinPrimaryOutputName()
-{
-    const QString configPath = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + QStringLiteral("/kwinoutputconfig.json");
-    QFile file(configPath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        qInfo() << "Could not open KWin output config at" << configPath;
-        return {};
-    }
-
-    QJsonParseError parseError;
-    const auto doc = QJsonDocument::fromJson(file.readAll(), &parseError);
-    if (parseError.error != QJsonParseError::NoError) {
-        qWarning() << "Failed to parse KWin output config:" << parseError.errorString();
-        return {};
-    }
-
-    if (!doc.isArray()) {
-        qWarning() << "KWin output config is not a JSON array";
-        return {};
-    }
-
-    const auto root = doc.array();
-
-    // Find the "outputs" and "setups" sections.
-    QJsonArray outputsArray;
-    QJsonArray setupsArray;
-    for (const auto &entry : root) {
-        const auto obj = entry.toObject();
-        const auto name = obj.value(u"name"_s).toString();
-        if (name == u"outputs"_s) {
-            outputsArray = obj.value(u"data"_s).toArray();
-        } else if (name == u"setups"_s) {
-            setupsArray = obj.value(u"data"_s).toArray();
-        }
-    }
-
-    if (outputsArray.isEmpty() || setupsArray.isEmpty()) {
-        qInfo() << "KWin output config missing outputs or setups section";
-        return {};
-    }
-
-    // Build connector name list from the global outputs array.
-    QStringList connectorNames;
-    connectorNames.reserve(outputsArray.size());
-    for (const auto &output : outputsArray) {
-        connectorNames.append(output.toObject().value(u"connectorName"_s).toString());
-    }
-
-    // Get the set of currently connected Qt screen names.
-    const auto screens = QGuiApplication::screens();
-    QSet<QString> currentScreenNames;
-    currentScreenNames.reserve(screens.size());
-    for (const auto *screen : screens) {
-        currentScreenNames.insert(screen->name());
-    }
-
-    // Find the setup whose enabled outputs match the current Qt screens.
-    for (const auto &setupEntry : setupsArray) {
-        const auto setupOutputs = setupEntry.toObject().value(u"outputs"_s).toArray();
-
-        // Collect connector names for enabled outputs in this setup.
-        QSet<QString> enabledNames;
-        for (const auto &setupOutput : setupOutputs) {
-            const auto outputObj = setupOutput.toObject();
-            if (!outputObj.value(u"enabled"_s).toBool(true)) {
-                continue;
-            }
-            const int outputIndex = outputObj.value(u"outputIndex"_s).toInt(-1);
-            if (outputIndex >= 0 && outputIndex < connectorNames.size()) {
-                enabledNames.insert(connectorNames.at(outputIndex));
-            }
-        }
-
-        if (enabledNames != currentScreenNames) {
-            continue;
-        }
-
-        // This setup matches. Find the output with priority 0.
-        for (const auto &setupOutput : setupOutputs) {
-            const auto outputObj = setupOutput.toObject();
-            if (outputObj.value(u"priority"_s).toInt(-1) == 0) {
-                const int outputIndex = outputObj.value(u"outputIndex"_s).toInt(-1);
-                if (outputIndex >= 0 && outputIndex < connectorNames.size()) {
-                    return connectorNames.at(outputIndex);
-                }
-            }
-        }
-
-        // Matched setup but no priority-0 entry found.
-        qInfo() << "KWin setup matched but no priority-0 output found";
-        return {};
-    }
-
-    qInfo() << "No KWin setup matches current screens:" << currentScreenNames;
-    return {};
 }
 
 std::optional<int> configuredMonitorIndex(const ServerConfig *config)
@@ -194,24 +86,10 @@ std::optional<int> configuredMonitorIndex(const ServerConfig *config)
         return std::nullopt;
     }
 
-    if (mode == u"primary"_s) {
-        // Try KWin's output config first (authoritative for KDE Plasma).
-        const auto primaryName = kwinPrimaryOutputName();
-        if (!primaryName.isEmpty()) {
-            for (int i = 0; i < screens.size(); ++i) {
-                if (screens.at(i)->name() == primaryName) {
-                    return i;
-                }
-            }
-            qWarning() << "KWin primary output" << primaryName << "not found in Qt screen list";
-        }
-        // Fallback to Qt's primaryScreen().
-        const auto primary = QGuiApplication::primaryScreen();
-        const auto primaryIndex = screens.indexOf(primary);
-        if (primaryIndex < 0) {
-            return std::nullopt;
-        }
-        return primaryIndex;
+    if (mode == u"primary"_s || mode == u"multi"_s) {
+        // `multi` streams every monitor on its own surface; this is only the
+        // target it falls back to when that turns out not to be usable.
+        return SessionController::primaryScreenIndex();
     }
 
     const auto index = config->monitorIndex();
@@ -365,7 +243,7 @@ int main(int argc, char **argv)
         qInfo() << "Qt screen" << i << s->name() << s->geometry()
                 << (s == primaryScreen ? "(Qt primary)" : "");
     }
-    qInfo() << "KWin primary output:" << kwinPrimaryOutputName();
+    qInfo() << "KWin primary output:" << SessionController::kwinPrimaryOutputName();
 
     SessionController controller(&server, parser.isSet(u"plasma"_s) ? SessionController::SessionType::Plasma : SessionController::SessionType::Portal);
     QString streamTarget = u"workspace-default"_s;
@@ -383,14 +261,21 @@ int main(int argc, char **argv)
         streamTarget = u"virtual:%1"_s.arg(vmData);
     } else {
         std::optional<int> monitorIndex;
+        // --monitor pins a single output, so it wins over MonitorMode=multi.
+        const bool multiRequested = !parser.isSet(u"monitor"_s) && normalizedMonitorMode(config->monitorMode()) == u"multi"_s;
         if (parser.isSet(u"monitor"_s)) {
             monitorIndex = parser.value(u"monitor"_s).toInt();
         } else {
             monitorIndex = configuredMonitorIndex(config);
         }
 
+        controller.setMultiMonitorEnabled(multiRequested);
         controller.setMonitorIndex(monitorIndex);
-        if (monitorIndex.has_value()) {
+        if (controller.multiMonitorEnabled()) {
+            streamTarget = u"multi:%1"_s.arg(controller.multiMonitorCount());
+        } else if (multiRequested) {
+            streamTarget = u"specific:%1 (multi fallback)"_s.arg(monitorIndex.value_or(0));
+        } else if (monitorIndex.has_value()) {
             streamTarget = u"monitor:%1"_s.arg(*monitorIndex);
         }
     }
@@ -419,6 +304,9 @@ int main(int argc, char **argv)
         }
 
         if (!monitorPinnedByCli) {
+            // Both self-guard on an unchanged value, so a quality-slider write
+            // does not rebuild anything.
+            controller.setMultiMonitorEnabled(normalizedMonitorMode(config->monitorMode()) == u"multi"_s);
             controller.setMonitorIndex(configuredMonitorIndex(config));
         }
 

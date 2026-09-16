@@ -33,7 +33,7 @@ SPDX-License-Identifier: BSD-2-Clause
       <default>true</default>
     </entry>
     <entry name="MonitorMode" type="String">
-      <label>Display target mode (workspace, primary, specific)</label>
+      <label>Display target mode (workspace, primary, specific, multi)</label>
       <default>workspace</default>
     </entry>
     <entry name="MonitorIndex" type="Int">

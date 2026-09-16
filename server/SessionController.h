@@ -7,9 +7,15 @@
 #include "RdpConnection.h"
 #include <AbstractSession.h>
 #include <KStatusNotifierItem>
+#include <SurfaceLayout.h>
+#include <optional>
 #include <vector>
 
 #include <QObject>
+#include <QTimer>
+#include <QVector>
+
+class QScreen;
 
 namespace KRdp
 {
@@ -33,17 +39,102 @@ public:
     ~SessionController() override;
 
     void setVirtualMonitor(const KRdp::VirtualMonitor &vm);
+    /**
+     * Which monitor to capture in `primary`/`specific` mode, as an index into
+     * QGuiApplication::screens(); `std::nullopt` streams the whole workspace.
+     *
+     * Not to be confused with KRdp::AbstractSession::setMonitorIndex(), which
+     * is the RDPGFX surface index stamped on the frames a session emits. In
+     * `MonitorMode=multi` this value is only the fallback target used when
+     * multi-monitor streaming turns out not to be usable.
+     */
     void setMonitorIndex(const std::optional<int> &index);
+    /**
+     * Turn `MonitorMode=multi` on or off.
+     *
+     * When enabled, every connection gets one session (and so one capture
+     * stream, one encoder and one RDPGFX surface) per usable monitor instead
+     * of the single session every other mode uses. The request is refused —
+     * and multiMonitorEnabled() stays false — when fewer than two usable
+     * monitors are found, in which case the caller's monitor index applies as
+     * usual.
+     */
+    void setMultiMonitorEnabled(bool enabled);
+    /** Whether per-monitor streaming is actually in effect. */
+    bool multiMonitorEnabled() const;
+    /** The number of monitors (and so surfaces) multi mode uses; 0 when off. */
+    int multiMonitorCount() const;
     void setQuality(const std::optional<int> &quality);
     void setAdaptiveQuality(bool enabled);
     void setWakeDisplayOnConnect(bool enabled);
     void refreshDisplayConfiguration();
+    /**
+     * Recompute the monitor layout and, if it changed, rebuild every live
+     * connection's per-monitor sessions from scratch.
+     *
+     * Hot-plug v1: no per-monitor diffing, the whole session set is replaced.
+     * Does nothing unless `MonitorMode=multi` was asked for.
+     *
+     * The work is deferred by MultiRebuildSettleMs. On a DPMS wake KWin
+     * removes and re-adds every output, so the screen list passes through
+     * states (one screen, a placeholder, none) that are not the topology the
+     * user actually has; rebuilding on those would tear every capture stream
+     * down twice while each session's own recovery is already handling the
+     * churn. Hot-plug is rare enough that waiting out the churn costs nothing.
+     */
+    void rebuildMultiSessions();
     void setSNIStatus(const KRdp::RdpConnection::State state);
     void stopFromSNI();
 
+    /**
+     * Read KWin's output config to find the connector name of the primary
+     * output, or an empty string when it cannot be determined.
+     */
+    static QString kwinPrimaryOutputName();
+    /**
+     * The index into QGuiApplication::screens() of the user's primary monitor,
+     * preferring KWin's own output config over Qt's idea of the primary screen.
+     */
+    static std::optional<int> primaryScreenIndex();
+    /**
+     * The monitor layout for `MonitorMode=multi`, in KWin-global PIXEL
+     * coordinates, with \a orderedScreens filled with the QScreen behind each
+     * entry (same order, so entry i is orderedScreens[i]).
+     *
+     * Monitors with an empty geometry, monitors past the RDPGFX layout limit
+     * and monitors larger than the VA-API encode limit in either dimension are
+     * left out, so the result can be shorter than QGuiApplication::screens().
+     * Exactly one entry is flagged primary whenever the result is non-empty.
+     *
+     * The geometries are NOT translated: KRdp::VideoStream::setMonitorLayout()
+     * owns the translation into RDP desktop space, and
+     * KRdp::SurfaceLayout::originOf() inverts it for the input path.
+     */
+    static QVector<KRdp::VideoMonitor> computeMultiLayout(QVector<QScreen *> &orderedScreens);
+
 private:
+    /** What refreshMultiLayout() found. */
+    enum class LayoutUpdate {
+        /** Too few usable monitors; the previous state is untouched. */
+        Unusable,
+        /** Usable, and identical to the layout already in use. */
+        Unchanged,
+        /** Usable and different; the wrappers need rebuilding. */
+        Changed,
+    };
+
     void onNewConnection(KRdp::RdpConnection *newConnection);
     std::unique_ptr<KRdp::AbstractSession> makeSession();
+    /** Create, configure and install this wrapper's session set. */
+    void buildSessions(SessionWrapper *wrapper);
+    /** buildSessions() for every live wrapper. */
+    void rebuildSessions();
+    /**
+     * Recompute the layout and, when it changed, rebuild every wrapper.
+     * \a topologyChange only picks which of the two log lines is used.
+     */
+    void applyMultiLayout(bool topologyChange);
+    LayoutUpdate refreshMultiLayout();
 
     KRdp::Server *m_server = nullptr;
     SessionType m_sessionType;
@@ -51,6 +142,25 @@ private:
     std::optional<int> m_quality;
     bool m_adaptiveQuality = true;
     std::optional<KRdp::VirtualMonitor> m_virtualMonitor;
+
+    // MonitorMode=multi was asked for, and (m_multiMonitor) is actually in use.
+    bool m_multiMonitorRequested = false;
+    bool m_multiMonitor = false;
+    // One entry per surface, in KWin-global pixel coordinates; empty unless
+    // multi-monitor streaming is in effect.
+    QVector<KRdp::VideoMonitor> m_monitorLayout;
+    // QGuiApplication::screens() index each surface captures, same order as
+    // m_monitorLayout. Not necessarily 0..N-1: unusable screens are skipped.
+    QVector<int> m_streamIndices;
+    // Pixels per logical unit for the layout above, used to turn RDP pointer
+    // positions back into the logical coordinates fake input expects.
+    qreal m_layoutScale = 1.0;
+    // A mixed-scale workspace has no single pixels-per-logical-unit ratio;
+    // warned about once rather than once per layout recomputation.
+    bool m_warnedMixedScales = false;
+    // Lets the output list settle before a hot-plug rebuild; see
+    // rebuildMultiSessions().
+    QTimer m_multiRebuildTimer;
 
     std::unique_ptr<KRdp::AbstractSession> m_initializationSession;
 

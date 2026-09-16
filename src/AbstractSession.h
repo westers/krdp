@@ -97,6 +97,9 @@ public:
      *
      * Stamped into every emitted VideoFrame so the video stream knows which
      * surface a frame belongs to. Always 0 unless MonitorMode is `multi`.
+     *
+     * Not to be confused with SessionController::setMonitorIndex(), which
+     * picks which monitor to capture in `specific` mode.
      */
     void setMonitorIndex(int index);
     int monitorIndex() const;
@@ -107,6 +110,11 @@ public:
      * The default implementation reports the session's own logical size at the
      * origin; sessions that capture a single output of a larger workspace
      * override it with that output's position.
+     *
+     * Meaningful only after started(); it may be empty while KWin re-adds its
+     * outputs after a DPMS wake, so callers must check isEmpty(). Note also
+     * that this is logical, not pixels: a surface's size is the capture size,
+     * which is this scaled by the output's device pixel ratio.
      */
     virtual QRect outputGeometry() const;
 
