@@ -5,6 +5,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QTimer>
 #include <QVector>
 
 #include "OutputSnapshot.h"
@@ -55,5 +56,8 @@ private:
 
     QVector<KRdp::OutputSnapshot::Output> m_physical;
     bool m_held = false;
-    bool m_retryScheduled = false;
+    // The single retry a failed restore() schedules; stopped by a verified
+    // restore so it cannot fire (and re-emit restored()) afterwards.
+    QTimer m_retryTimer;
+    bool m_retrying = false;
 };
