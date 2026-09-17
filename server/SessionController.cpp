@@ -633,7 +633,12 @@ void SessionController::setQuality(const std::optional<int> &quality)
         }
     }
 
-    qInfo() << "Applied runtime quality update:" << m_quality.value() << "active sessions:" << m_wrappers.size();
+    // The port disambiguates the log: KConfig's --notify broadcasts by file
+    // NAME, so a write to one instance's krdpserverrc reaches every other
+    // krdpserver running, each of which then reloads its own config and logs
+    // a line like this one. "active sessions: 0" from an idle instance is
+    // otherwise indistinguishable from the streaming instance reporting none.
+    qInfo() << "Applied runtime quality update:" << m_quality.value() << "active sessions:" << m_wrappers.size() << "port:" << m_server->port();
 }
 
 void SessionController::setAdaptiveQuality(bool enabled)
@@ -650,7 +655,7 @@ void SessionController::setAdaptiveQuality(bool enabled)
         wrapper->connection->videoStream()->setAdaptiveQuality(m_adaptiveQuality);
     }
 
-    qInfo() << "Applied runtime adaptive quality update:" << m_adaptiveQuality << "active sessions:" << m_wrappers.size();
+    qInfo() << "Applied runtime adaptive quality update:" << m_adaptiveQuality << "active sessions:" << m_wrappers.size() << "port:" << m_server->port();
 }
 
 void SessionController::setWakeDisplayOnConnect(bool enabled)

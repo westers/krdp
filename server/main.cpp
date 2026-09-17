@@ -291,11 +291,16 @@ int main(int argc, char **argv)
     controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
 
     auto runtimeConfig = KSharedConfig::openConfig(QStringLiteral("krdpserverrc"));
+    // Also logged on every reload: KConfig's --notify broadcasts by file NAME,
+    // so a second instance started with its own XDG_CONFIG_HOME makes every
+    // other krdpserver reload too. Saying which file this process actually
+    // read is what tells a reload of one's own config from that cross-talk.
+    const QString runtimeConfigPath = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + QStringLiteral("/krdpserverrc");
     // Applies persisted-config changes (quality, monitor target, wake, VAAPI).
     // It must NOT force a display refresh: a quality-slider write should never
     // touch the stream. setMonitorIndex() self-guards and only re-creates the
     // stream when the resolved target actually changed.
-    auto applyRuntimeConfig = [config, &controller, monitorPinnedByCli, qualityPinnedByCli]() {
+    auto applyRuntimeConfig = [config, &controller, monitorPinnedByCli, qualityPinnedByCli, listenPort = server.port(), runtimeConfigPath]() {
         // KConfigSkeleton::read() only re-applies the in-memory KConfig cache
         // to the skeleton's items; it does NOT reload the file from disk (see
         // KCoreConfigSkeleton::read() vs ::load() docs). That happened to work
@@ -327,7 +332,8 @@ int main(int argc, char **argv)
         // consumers, so this uses the same plain, always-on qInfo() the rest
         // of this file's "Applied runtime ..." lines use.
         qInfo() << "Runtime config applied: quality" << config->quality() << "adaptive" << config->adaptiveQuality() << "monitorMode" << config->monitorMode()
-                << "monitorIndex" << config->monitorIndex() << "wakeDisplay" << config->wakeDisplayOnConnect() << "vaapiMode" << config->vaapiDriverMode();
+                << "monitorIndex" << config->monitorIndex() << "wakeDisplay" << config->wakeDisplayOnConnect() << "vaapiMode" << config->vaapiDriverMode()
+                << "port" << listenPort << "from" << runtimeConfigPath;
     };
 
     // Re-creates the capture stream for a new display topology (resolution or
@@ -358,7 +364,6 @@ int main(int argc, char **argv)
     });
 
     auto configFileWatcher = std::make_unique<QFileSystemWatcher>(&application);
-    const QString runtimeConfigPath = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + QStringLiteral("/krdpserverrc");
     if (!runtimeConfigPath.isEmpty()) {
         configFileWatcher->addPath(runtimeConfigPath);
     }
