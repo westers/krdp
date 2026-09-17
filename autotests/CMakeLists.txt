@@ -12,3 +12,8 @@ add_executable(MultiLayoutTest MultiLayoutTest.cpp)
 target_include_directories(MultiLayoutTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(MultiLayoutTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME MultiLayoutTest COMMAND MultiLayoutTest)
+
+add_executable(FrameQueuePolicyTest FrameQueuePolicyTest.cpp)
+target_include_directories(FrameQueuePolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(FrameQueuePolicyTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME FrameQueuePolicyTest COMMAND FrameQueuePolicyTest)

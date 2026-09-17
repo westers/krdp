@@ -29,6 +29,7 @@
 #include <freerdp/peer.h>
 
 #include "AdaptiveQuality.h"
+#include "FrameQueuePolicy.h"
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
@@ -492,11 +493,14 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
 
     {
         std::lock_guard lock(d->frameQueueMutex);
-        // A keyframe supersedes everything still waiting to be sent, so the
-        // pending-send queue can never grow beyond one keyframe interval.
-        // Never drop anything else: encoded P-frames must be sent in order.
+        // A keyframe supersedes everything of its OWN monitor still waiting to
+        // be sent, so that monitor's queue can never grow beyond one keyframe
+        // interval. Never drop anything else: encoded P-frames must be sent in
+        // order, and another monitor's queued frames come from another encoder
+        // whose reference chain this keyframe says nothing about. With a single
+        // surface every frame carries index 0, so this still clears the queue.
         if (frame.isKeyFrame) {
-            d->frameQueue.clear();
+            FrameQueuePolicy::dropSupersededFrames(d->frameQueue, frame.monitorIndex);
         }
         d->frameQueue.append(frame);
     }
