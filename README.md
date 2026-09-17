@@ -86,9 +86,10 @@ When `--monitor` is not supplied, KRDP uses persisted config keys:
 - `General/MonitorIndex=<id>` (used when mode is `specific`)
 
 `multi` gives every monitor its own capture stream, encoder and RDPGFX surface,
-so a client that negotiates multi-monitor (e.g. `sdl-freerdp /multimon`) sees
-them as separate remote monitors, and a client that does not sees their union as
-one desktop. The 4096-px hardware H.264 limit applies to each monitor on its
+so a client that negotiates multi-monitor (e.g. `sdl-freerdp /multimon`) should
+see them as separate remote monitors (not yet verified on the wire; the union
+desktop is verified), and a client that does not sees their union as one
+desktop. The 4096-px hardware H.264 limit applies to each monitor on its
 own, not to the union, so `multi` is how to stream a workspace whose combined
 width exceeds 4096 px. A monitor larger than 4096 px in either direction is left
 out because the encoder cannot take it; when fewer than two monitors remain, the
