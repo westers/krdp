@@ -85,14 +85,17 @@ When `--monitor` is not supplied, KRDP uses persisted config keys:
 - `General/MonitorMode=workspace|primary|specific|multi`
 - `General/MonitorIndex=<id>` (used when mode is `specific`)
 
-`multi` gives every monitor its own capture stream, encoder and RDPGFX surface,
-so a client that negotiates multi-monitor (e.g. `sdl-freerdp /multimon`) should
-see them as separate remote monitors (not yet verified on the wire; the union
-desktop is verified), and a client that does not sees their union as one
-desktop. The 4096-px hardware H.264 limit applies to each monitor on its
-own, not to the union, so `multi` is how to stream a workspace whose combined
-width exceeds 4096 px. A monitor larger than 4096 px in either direction is left
-out because the encoder cannot take it; when fewer than two monitors remain, the
+`multi` gives every monitor its own capture stream, encoder and RDPGFX surface.
+A client that does not negotiate multi-monitor sees the union as one wide
+desktop; this "giant screen" presentation is validated end to end with
+Remmina (FreeRDP), including the pointer crossing the seam between monitors.
+A client that does negotiate multi-monitor (e.g. `sdl-freerdp3 /multimon`)
+should see the monitors as separate remote displays instead — that path needs
+a multi-monitor-capable client and is not yet verified on the wire. The
+4096-px hardware H.264 limit applies to each monitor on its own, not to the
+union, so `multi` is how to stream a workspace whose combined width exceeds
+4096 px. A monitor larger than 4096 px in either direction is left out
+because the encoder cannot take it; when fewer than two monitors remain, the
 server falls back to `specific` on the primary. The server always streams its
 own monitors: a client's declared layout and `/size:` are ignored.
 
@@ -101,6 +104,12 @@ own monitors: a client's declared layout and `/size:` are ignored.
 ```bash
 kwriteconfig6 --file krdpserverrc --group General --key MonitorMode multi --notify
 ```
+
+To test `multi` without touching the live service, run a second instance on
+its own port and config directory, e.g. `XDG_CONFIG_HOME=<tmp> krdpserver
+--plasma --port 3391 -u krdptest -p krdptest --certificate <cert>
+--certificate-key <key>` with `MonitorMode=multi` in that instance's
+`krdpserverrc`.
 
 The KDE Remote Desktop settings page exposes this as **Display target** and
 **Monitor ID**, and shows the current monitor ID map (`0: <screen name>`, etc.).
