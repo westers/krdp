@@ -5,6 +5,7 @@
 #include "PlasmaScreencastV1Session.h"
 
 #include <QGuiApplication>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPointer>
 #include <QQueue>
@@ -23,6 +24,8 @@
 #include <algorithm>
 #include <optional>
 #include <utility>
+
+#include <KSystemClipboard>
 
 #include "qwayland-fake-input.h"
 #include "qwayland-wayland.h"
@@ -319,6 +322,38 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
     , d(std::make_unique<Private>())
 {
     d->remoteInterface = new FakeInput();
+
+    connect(KSystemClipboard::instance(), &KSystemClipboard::changed, this, [this](auto mode) {
+        // The clipboard is workspace-wide, but MonitorMode=multi runs one
+        // session per RDPGFX surface and SessionWrapper connects every
+        // session's clipboardDataChanged to the connection's cliprdr. Only
+        // the surface-0 session announces, so one copy is one format list.
+        if (monitorIndex() != 0) {
+            return;
+        }
+
+        if (mode != QClipboard::Clipboard) {
+            return;
+        }
+
+        auto data = KSystemClipboard::instance()->mimeData(mode);
+        if (!data) {
+            return;
+        }
+
+        // KSystemClipboard takes ownership of any QMimeData passed to it but
+        // does not relinquish ownership over anything it returns. So manually
+        // copy over the contents to a new instance of QMimeData so we can keep
+        // the semantics the same.
+        auto newData = new QMimeData();
+        const auto formats = data->formats();
+        for (auto format : formats) {
+            newData->setData(format, data->data(format));
+        }
+
+        qCDebug(KRDP) << "Announcing system clipboard change to the client, formats:" << formats;
+        Q_EMIT clipboardDataChanged(newData);
+    });
 
     d->recoveryTimer.setSingleShot(true);
     connect(&d->recoveryTimer, &QTimer::timeout, this, [this]() {
@@ -770,7 +805,12 @@ QRect PlasmaScreencastV1Session::outputGeometry() const
 
 void PlasmaScreencastV1Session::setClipboardData(std::unique_ptr<QMimeData> data)
 {
-    Q_UNUSED(data);
+    // KSystemClipboard takes ownership
+    if (data) {
+        KSystemClipboard::instance()->setMimeData(data.release(), QClipboard::Clipboard);
+    } else {
+        KSystemClipboard::instance()->clear(QClipboard::Clipboard);
+    }
 }
 
 void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Packet &data)
