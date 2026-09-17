@@ -10,6 +10,7 @@
 #include "RdpConnection.h"
 
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -344,6 +345,9 @@ public:
     freerdp_peer *peer = nullptr;
 
     std::jthread thread;
+
+    std::mutex clientDisplayMutex;
+    ClientDisplay::Info clientDisplay;
 };
 
 RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
@@ -432,6 +436,12 @@ Cursor *RdpConnection::cursor() const
 Clipboard *RdpConnection::clipboard() const
 {
     return d->clipboard.get();
+}
+
+ClientDisplay::Info RdpConnection::clientDisplayInfo() const
+{
+    std::lock_guard lock(d->clientDisplayMutex);
+    return d->clientDisplay;
 }
 
 NetworkDetection *RdpConnection::networkDetection() const
@@ -630,6 +640,27 @@ bool RdpConnection::onCapabilities()
         qCWarning(KRDP) << "Client doesn't support pointer caching, aborting";
         return false;
     }
+
+    ClientDisplay::Info info;
+    info.desktopSize = QSize(int(freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth)), int(freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight)));
+    const auto monitorCount = freerdp_settings_get_uint32(settings, FreeRDP_MonitorCount);
+    for (UINT32 i = 0; i < monitorCount; ++i) {
+        const auto *monitor = static_cast<const rdpMonitor *>(freerdp_settings_get_pointer_array(settings, FreeRDP_MonitorDefArray, i));
+        if (!monitor) {
+            break;
+        }
+        info.monitors.push_back(VideoMonitor{
+            .geometry = QRect(monitor->x, monitor->y, monitor->width, monitor->height),
+            .primary = monitor->is_primary != 0,
+        });
+    }
+    {
+        std::lock_guard lock(d->clientDisplayMutex);
+        d->clientDisplay = info;
+    }
+    qCInfo(KRDP) << "Client display: desktop" << info.desktopSize << "monitors" << info.monitors.size()
+                 << "monitorLayoutPdu" << freerdp_settings_get_bool(settings, FreeRDP_SupportMonitorLayoutPdu);
+    Q_EMIT clientDisplayInfoReceived();
 
     return true;
 }

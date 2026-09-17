@@ -11,6 +11,7 @@
 
 #include <freerdp/freerdp.h>
 
+#include "ClientDisplayInfo.h"
 #include "krdp_export.h"
 
 namespace KRdp
@@ -106,6 +107,11 @@ public:
     Cursor *cursor() const;
 
     Clipboard *clipboard() const;
+
+    /** The display the client asked for in its connect data. Valid once clientDisplayInfoReceived() fired; a copy, safe from any thread. */
+    ClientDisplay::Info clientDisplayInfo() const;
+    /** Emitted on the session thread, once per connection, at the end of the capabilities exchange. Connect with Qt::QueuedConnection. */
+    Q_SIGNAL void clientDisplayInfoReceived();
 
     NetworkDetection *networkDetection() const;
 
