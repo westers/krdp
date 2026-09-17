@@ -190,7 +190,7 @@ inline bool matches(const QVector<Output> &snapshot, const QVector<Output> &curr
     return true;
 }
 
-inline QByteArray toJson(const QVector<Output> &outputs)
+inline QJsonArray toJsonArray(const QVector<Output> &outputs)
 {
     QJsonArray array;
     for (const auto &output : outputs) {
@@ -204,17 +204,13 @@ inline QByteArray toJson(const QVector<Output> &outputs)
             {QLatin1String("height"), output.size.height()},
         });
     }
-    return QJsonDocument(array).toJson(QJsonDocument::Compact);
+    return array;
 }
 
-inline QVector<Output> fromJson(const QByteArray &json)
+inline QVector<Output> fromJsonArray(const QJsonArray &array)
 {
-    const auto doc = QJsonDocument::fromJson(json);
-    if (!doc.isArray()) {
-        return {};
-    }
     QVector<Output> outputs;
-    for (const auto &entry : doc.array()) {
+    for (const auto &entry : array) {
         const auto object = entry.toObject();
         outputs.push_back(Output{
             .name = object.value(QLatin1String("name")).toString(),
@@ -225,6 +221,57 @@ inline QVector<Output> fromJson(const QByteArray &json)
         });
     }
     return outputs;
+}
+
+inline QByteArray toJson(const QVector<Output> &outputs)
+{
+    return QJsonDocument(toJsonArray(outputs)).toJson(QJsonDocument::Compact);
+}
+
+inline QVector<Output> fromJson(const QByteArray &json)
+{
+    const auto doc = QJsonDocument::fromJson(json);
+    if (!doc.isArray()) {
+        return {};
+    }
+    return fromJsonArray(doc.array());
+}
+
+/**
+ * The crash-recovery state file: the physical outputs plus the PID of the
+ * krdpserver that replaced them, so another server start can tell a live
+ * session's file from a dead one's.
+ */
+inline QByteArray toStateJson(const QVector<Output> &outputs, qint64 ownerPid)
+{
+    return QJsonDocument(QJsonObject{
+                             {QLatin1String("pid"), ownerPid},
+                             {QLatin1String("outputs"), toJsonArray(outputs)},
+                         })
+        .toJson(QJsonDocument::Compact);
+}
+
+/**
+ * Inverse of toStateJson(); also accepts the bare array toJson() writes
+ * (owner 0). Empty on malformed input.
+ */
+inline QVector<Output> fromStateJson(const QByteArray &json, qint64 *ownerPid = nullptr)
+{
+    if (ownerPid) {
+        *ownerPid = 0;
+    }
+    const auto doc = QJsonDocument::fromJson(json);
+    if (doc.isArray()) {
+        return fromJsonArray(doc.array());
+    }
+    if (!doc.isObject()) {
+        return {};
+    }
+    const auto object = doc.object();
+    if (ownerPid) {
+        *ownerPid = object.value(QLatin1String("pid")).toInteger(0);
+    }
+    return fromJsonArray(object.value(QLatin1String("outputs")).toArray());
 }
 
 inline QDebug operator<<(QDebug dbg, const Output &output)

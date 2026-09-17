@@ -44,7 +44,18 @@ public:
     bool applyReplace(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
     bool positionOutputs(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
     bool reconcileExtend();
+    /**
+     * Put the physical outputs back as snapshotted, verified by read-back.
+     * A verified restore drops the snapshot and the state file.
+     */
     bool restore();
+    /**
+     * End of a virtual session: restore() if the physical outputs were (or
+     * may have been) touched by applyReplace(), otherwise just drop the
+     * snapshot and its state file without running kscreen-doctor, so an
+     * extend session leaves whatever the user changed meanwhile alone.
+     */
+    bool release();
 
 Q_SIGNALS:
     void restored(bool verified);
@@ -53,6 +64,8 @@ private:
     static bool run(const QStringList &args, QByteArray *output = nullptr);
     static QVector<KRdp::OutputSnapshot::Output> current(QString *error = nullptr);
     static bool restoreSnapshot(const QVector<KRdp::OutputSnapshot::Output> &physical);
+    /** Whether \a pid is a live process other than this one (a running krdpserver, if /proc can tell). */
+    static bool ownerAlive(qint64 pid);
 
     QVector<KRdp::OutputSnapshot::Output> m_physical;
     bool m_held = false;

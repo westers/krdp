@@ -12,6 +12,10 @@
 #include <QStandardPaths>
 #include <QTimer>
 
+#include <cerrno>
+#include <csignal>
+#include <unistd.h>
+
 using namespace KRdp::OutputSnapshot;
 using namespace Qt::StringLiterals;
 
@@ -98,6 +102,10 @@ QVector<Output> PhysicalOutputGuard::current(QString *error)
 
 bool PhysicalOutputGuard::snapshot()
 {
+    // Never keep a previous session's list around: a failed read here must
+    // leave hasSnapshot() false, or a replace would run on stale outputs
+    // with no state file behind it.
+    m_physical.clear();
     QString error;
     const auto outputs = current(&error);
     if (outputs.isEmpty()) {
@@ -114,7 +122,7 @@ bool PhysicalOutputGuard::snapshot()
     // leave the monitors off for good, so the caller falls back to extend.
     QDir().mkpath(QStandardPaths::writableLocation(QStandardPaths::StateLocation));
     QFile file(stateFilePath());
-    const QByteArray json = toJson(m_physical);
+    const QByteArray json = toStateJson(m_physical, qint64(getpid()));
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(json) != json.size() || !file.flush()) {
         qWarning() << "Cannot write" << file.fileName() << ":" << file.errorString() << "- refusing to snapshot without crash recovery";
         m_physical.clear();
@@ -158,16 +166,23 @@ bool PhysicalOutputGuard::applyReplace(const QVector<Placement> &virtualOutputs,
 
     // kscreen-doctor exits 0 whether or not it applied anything, so the
     // read-back is what tells a refused change from an applied one.
-    QVector<Output> after;
-    if (run(replaceArgs(m_physical, virtualOutputs, primaryVirtualName))) {
-        after = current();
-    }
-    if (after.isEmpty() || anyPhysicalEnabled(after)) {
+    const bool combinedRan = run(replaceArgs(m_physical, virtualOutputs, primaryVirtualName));
+    QVector<Output> after = combinedRan ? current() : QVector<Output>();
+    if (!combinedRan || after.isEmpty() || anyPhysicalEnabled(after)) {
         // kscreen may refuse the combined change (priorities colliding with
         // outputs that are being disabled in the same config); apply it as
-        // two steps instead, virtual outputs first so an enabled output always exists.
-        qInfo() << "Combined replace refused; applying in two steps";
-        if (!run(positionArgs(virtualOutputs, primaryVirtualName, 1)) || !run(replaceArgs(m_physical, {}, QString()))) {
+        // two steps instead. The virtual outputs already exist and are
+        // enabled, so disabling the physical ones first never leaves KWin
+        // without an enabled output, and the virtual outputs are placed and
+        // prioritised only once nothing is left for them to overlap.
+        if (!combinedRan) {
+            qInfo() << "Combined replace did not run; applying in two steps";
+        } else if (after.isEmpty()) {
+            qInfo() << "Combined replace applied but the read-back failed; applying in two steps";
+        } else {
+            qInfo() << "Combined replace refused; applying in two steps";
+        }
+        if (!run(replaceArgs(m_physical, {}, QString())) || !run(positionArgs(virtualOutputs, primaryVirtualName, 1))) {
             return false;
         }
         after = current();
@@ -191,9 +206,19 @@ bool PhysicalOutputGuard::positionOutputs(const QVector<Placement> &virtualOutpu
         return true;
     }
     // Virtual outputs sit behind the physical ones in priority (extend keeps
-    // Steve's primary as the primary).
-    const int firstPriority = int(m_physical.size()) + 1;
-    if (!run(positionArgs(virtualOutputs, primaryVirtualName, firstPriority))) {
+    // Steve's primary as the primary). Counted from the live layout rather
+    // than the snapshot: this also runs after a verified restore has dropped
+    // the snapshot, and a virtual output must never end up at priority 1 by
+    // accident.
+    const auto before = current();
+    const int physicalCount = int(std::count_if(before.cbegin(), before.cend(), [](const Output &o) {
+        return !isVirtual(o.name);
+    }));
+    if (physicalCount == 0) {
+        qWarning() << "Cannot place the virtual outputs: no physical output in the read-back";
+        return false;
+    }
+    if (!run(positionArgs(virtualOutputs, primaryVirtualName, physicalCount + 1))) {
         return false;
     }
     // Read back like every other mutation: kscreen-doctor's exit code does
@@ -253,6 +278,9 @@ bool PhysicalOutputGuard::restore()
         // A retry still pending from an earlier failure has nothing left to
         // do and must not fire restored() a second time.
         m_retryTimer.stop();
+        // The snapshot is spent: the next session takes its own, and nothing
+        // may restore this one again over a layout the user changed since.
+        m_physical.clear();
         QFile::remove(stateFilePath());
         qInfo() << "Physical outputs restored";
         Q_EMIT restored(true);
@@ -272,6 +300,37 @@ bool PhysicalOutputGuard::restore()
     return false;
 }
 
+bool PhysicalOutputGuard::release()
+{
+    if (m_held) {
+        return restore();
+    }
+    if (hasSnapshot()) {
+        m_physical.clear();
+        QFile::remove(stateFilePath());
+        qInfo() << "Physical outputs were never replaced; snapshot dropped, layout left as it is";
+    }
+    return true;
+}
+
+bool PhysicalOutputGuard::ownerAlive(qint64 pid)
+{
+    if (pid <= 0 || pid == qint64(getpid())) {
+        return false;
+    }
+    if (::kill(pid_t(pid), 0) != 0 && errno != EPERM) {
+        return false;
+    }
+    // The PID may have been reused since the crash; when /proc can name the
+    // process, only a krdpserver counts.
+    QFile comm(u"/proc/%1/comm"_s.arg(pid));
+    if (comm.open(QIODevice::ReadOnly)) {
+        const QByteArray name = comm.readAll().trimmed();
+        return name.isEmpty() || name.startsWith("krdp");
+    }
+    return true;
+}
+
 bool PhysicalOutputGuard::restoreFromStateFile()
 {
     QFile file(stateFilePath());
@@ -282,7 +341,8 @@ bool PhysicalOutputGuard::restoreFromStateFile()
         qWarning() << "Cannot read" << file.fileName() << ":" << file.errorString();
         return false;
     }
-    const auto physical = fromJson(file.readAll());
+    qint64 ownerPid = 0;
+    const auto physical = fromStateJson(file.readAll(), &ownerPid);
     if (physical.isEmpty()) {
         // The file only exists because a session had replaced the outputs and
         // did not get to restore them, so its being unreadable is not a
@@ -297,7 +357,16 @@ bool PhysicalOutputGuard::restoreFromStateFile()
                               << "output.DP-1.priority.1 output.HDMI-A-1.priority.2 (Steve's layout)";
         return false;
     }
-    qWarning() << "A previous krdpserver left the physical outputs replaced (state file present); restoring" << physical.size() << "outputs";
+    if (ownerAlive(ownerPid)) {
+        // A live session holds the outputs replaced on purpose; restoring
+        // under it would re-enable the physical outputs over the virtual one
+        // and delete its crash recovery. Its own teardown restores.
+        qInfo() << "State file" << file.fileName() << "belongs to running krdpserver PID" << ownerPid << "(a virtual-monitor session is live); not restoring."
+                << "Stop that server first if the outputs really are stuck.";
+        return false;
+    }
+    qWarning() << "A previous krdpserver" << (ownerPid > 0 ? u"(PID %1, gone)"_s.arg(ownerPid) : u"(unknown PID)"_s)
+               << "left the physical outputs replaced (state file present); restoring" << physical.size() << "outputs";
     if (!restoreSnapshot(physical)) {
         qCritical().noquote() << "Restore from" << file.fileName() << "failed. Run: kscreen-doctor" << restoreArgs(physical).join(u' ');
         return false;

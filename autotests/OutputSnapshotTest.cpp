@@ -134,6 +134,20 @@ private Q_SLOTS:
         QCOMPARE(fromJson(toJson(physical)), physical);
         QVERIFY(fromJson("garbage").isEmpty());
     }
+
+    void stateJsonCarriesOwnerPid()
+    {
+        const auto physical = physicalOnly(parse(kscreenJson));
+        qint64 pid = -1;
+        QCOMPARE(fromStateJson(toStateJson(physical, 4242), &pid), physical);
+        QCOMPARE(pid, qint64(4242));
+        // A file written before the owner PID existed is still readable.
+        pid = -1;
+        QCOMPARE(fromStateJson(toJson(physical), &pid), physical);
+        QCOMPARE(pid, qint64(0));
+        QVERIFY(fromStateJson("garbage", &pid).isEmpty());
+        QVERIFY(fromStateJson("{\"pid\": 1}", &pid).isEmpty());
+    }
 };
 
 QTEST_GUILESS_MAIN(OutputSnapshotTest)
