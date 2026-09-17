@@ -88,16 +88,22 @@ When `--monitor` is not supplied, KRDP uses persisted config keys:
 `multi` gives every monitor its own capture stream, encoder and RDPGFX surface.
 A client that does not negotiate multi-monitor sees the union as one wide
 desktop; this "giant screen" presentation is validated end to end with
-Remmina (FreeRDP), including the pointer crossing the seam between monitors.
-A client that does negotiate multi-monitor (e.g. `sdl-freerdp3 /multimon`)
-should see the monitors as separate remote displays instead — that path needs
-a multi-monitor-capable client and is not yet verified on the wire. The
-4096-px hardware H.264 limit applies to each monitor on its own, not to the
-union, so `multi` is how to stream a workspace whose combined width exceeds
-4096 px. A monitor larger than 4096 px in either direction is left out
-because the encoder cannot take it; when fewer than two monitors remain, the
-server falls back to `specific` on the primary. The server always streams its
-own monitors: a client's declared layout and `/size:` are ignored.
+Remmina (FreeRDP), including the pointer crossing the seam between monitors,
+and is the supported way to use `multi` with a third-party client today.
+A client that does negotiate multi-monitor (`/multimon`, e.g. with
+`sdl-freerdp3`) is **not** correctly served by `multi`: third-party
+`/multimon` clients expect the server to adopt the client's own declared
+monitor layout, and this server instead always advertises its own monitor
+layout, so the picture is split incorrectly across the client's screens and
+input lands in the wrong place. True per-monitor presentation on separate
+client screens is what the fork's own client is for; see `OPT-040` in
+research.md for the third-party client-layout-mapping work this would need.
+The 4096-px hardware H.264 limit applies to each monitor on its own, not to
+the union, so `multi` is how to stream a workspace whose combined width
+exceeds 4096 px. A monitor larger than 4096 px in either direction is left
+out because the encoder cannot take it; when fewer than two monitors remain,
+the server falls back to `specific` on the primary. The server always streams
+its own monitors: a client's declared layout and `/size:` are ignored.
 
 `MonitorMode` is applied live, so switching needs no restart:
 
