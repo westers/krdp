@@ -27,3 +27,8 @@ add_executable(OutputSnapshotTest OutputSnapshotTest.cpp)
 target_include_directories(OutputSnapshotTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(OutputSnapshotTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME OutputSnapshotTest COMMAND OutputSnapshotTest)
+
+add_executable(TakeoverDetectorTest TakeoverDetectorTest.cpp)
+target_include_directories(TakeoverDetectorTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(TakeoverDetectorTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME TakeoverDetectorTest COMMAND TakeoverDetectorTest)

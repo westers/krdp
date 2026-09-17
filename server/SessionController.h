@@ -20,6 +20,7 @@
 #include <QTimer>
 #include <QVector>
 
+class QAction;
 class QScreen;
 
 namespace KRdp
@@ -134,8 +135,13 @@ public:
     /**
      * Give the physical outputs back to the console right now: restore the
      * snapshot and turn every virtual session that replaced them into an
-     * extend session for the rest of its life. The hook for a console
-     * takeover (Task 6c); nothing triggers it yet.
+     * extend session for the rest of its life (its virtual output is parked
+     * beside the physical desktop and keeps streaming).
+     *
+     * The console takeover (Task 6c), triggered by local pointer motion seen
+     * in the screencast's cursor metadata (SessionWrapper's
+     * KRdp::Takeover::Detector), by the tray's "Restore my monitors" action
+     * and by its global shortcut (Meta+Ctrl+Alt+R). Idempotent.
      */
     void releasePhysicalOutputs();
     void setQuality(const std::optional<int> &quality);
@@ -211,6 +217,10 @@ private:
 
     void onNewConnection(KRdp::RdpConnection *newConnection);
     std::unique_ptr<KRdp::AbstractSession> makeSession();
+    /** Whether any virtual wrapper currently holds the physical layout replaced. */
+    bool physicalLayoutOwned() const;
+    /** Enable "Restore my monitors" exactly while there is something to give back. */
+    void updateRestoreAction();
     /** Create, configure and install this wrapper's session set. */
     void buildSessions(SessionWrapper *wrapper);
     /**
@@ -275,4 +285,7 @@ private:
     std::vector<std::unique_ptr<SessionWrapper>> m_wrappers;
 
     KStatusNotifierItem *m_sni;
+    // "Restore my monitors" (tray entry and global shortcut); owned by the
+    // SNI's menu.
+    QAction *m_restoreAction = nullptr;
 };

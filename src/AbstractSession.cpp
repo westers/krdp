@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "AbstractSession.h"
+
+#include <algorithm>
+
 #include <PipeWireEncodedStream>
 #include <PipeWireSourceStream>
 #include <QSet>
@@ -104,6 +107,25 @@ int AbstractSession::monitorIndex() const
 QRect AbstractSession::outputGeometry() const
 {
     return QRect(QPoint(0, 0), logicalSize());
+}
+
+QPointF AbstractSession::mapToGlobal(const QPointF &local) const
+{
+    const QPoint origin = outputGeometry().topLeft();
+    const QSize pixels = pixelSize();
+    const QSize logical = logicalSize();
+    if (pixels.isEmpty() || logical.isEmpty()) {
+        return local + origin;
+    }
+    // The last pixel of the capture is the last logical unit of the output,
+    // which is why both spans are one less than the size.
+    const auto inputWidth = std::max(1, pixels.width() - 1);
+    const auto inputHeight = std::max(1, pixels.height() - 1);
+    const auto logicalWidth = std::max(1, logical.width() - 1);
+    const auto logicalHeight = std::max(1, logical.height() - 1);
+    const auto normalizedX = std::clamp(local.x() / double(inputWidth), 0.0, 1.0);
+    const auto normalizedY = std::clamp(local.y() / double(inputHeight), 0.0, 1.0);
+    return QPointF{normalizedX * logicalWidth + origin.x(), normalizedY * logicalHeight + origin.y()};
 }
 
 void AbstractSession::requestKeyFrame()

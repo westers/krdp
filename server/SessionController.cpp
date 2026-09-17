@@ -9,6 +9,7 @@
 #include <QCoreApplication>
 #include <QDBusInterface>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QGuiApplication>
 #include <QJsonArray>
@@ -21,6 +22,7 @@
 #include <QSet>
 #include <QStandardPaths>
 
+#include <KGlobalAccel>
 #include <KLocalizedString>
 
 #include <Clipboard.h>
@@ -34,6 +36,7 @@
 #include <PlasmaScreencastV1Session.h>
 #endif
 
+#include "TakeoverDetector.h"
 #include "VideoStream.h"
 
 using namespace Qt::StringLiterals;
@@ -71,6 +74,7 @@ public:
         , m_displayWakeGuard(displayWakeGuard)
     {
         m_sni = sni;
+        m_clock.start();
 
         connect(connection->videoStream(), &KRdp::VideoStream::enabledChanged, this, &SessionWrapper::onVideoStreamEnabledChanged, Qt::QueuedConnection);
         connect(connection->videoStream(), &KRdp::VideoStream::requestedFrameRateChanged, this, &SessionWrapper::onRequestedFrameRateChanged, Qt::QueuedConnection);
@@ -147,23 +151,34 @@ public:
             return;
         }
         policyApplied = true;
-        if (virtualPolicy == SessionController::VirtualPolicy::Replace) {
+        const bool attemptedReplace = virtualPolicy == SessionController::VirtualPolicy::Replace;
+        if (attemptedReplace) {
             if (outputGuard->applyReplace(virtualPlacements, virtualPrimaryName)) {
                 ownsPhysicalLayout = true;
-                return;
+                Q_EMIT physicalLayoutOwnershipChanged();
+            } else {
+                qWarning() << "replace policy could not be applied; continuing as extend";
+                virtualPolicy = SessionController::VirtualPolicy::Extend;
             }
-            qWarning() << "replace policy could not be applied; continuing as extend";
-            virtualPolicy = SessionController::VirtualPolicy::Extend;
         }
-        if (!outputGuard->hasSnapshot()) {
-            return;
+        if (!ownsPhysicalLayout && outputGuard->hasSnapshot()) {
+            // KWin may have replayed a remembered arrangement for this output
+            // set (physical outputs off, or the virtual output overlapping
+            // one); put the physical outputs back and give the virtual output
+            // its place beside them.
+            outputGuard->reconcileExtend();
+            parkVirtualOutputs();
         }
-        // KWin may have replayed a remembered arrangement for this output set
-        // (physical outputs off, or the virtual output overlapping one); put
-        // the physical outputs back and give the virtual output its place
-        // beside them.
-        outputGuard->reconcileExtend();
-        parkVirtualOutputs();
+        if (attemptedReplace) {
+            // Console takeover (Task 6c). Armed once every kscreen-doctor call
+            // above has returned, not before: disabling an output makes KWin
+            // warp the pointer onto the one that is left, and that sample is
+            // already queued behind this slot - it must fall inside the arm
+            // delay. Armed for the attempt, not only its success: a replace
+            // that failed halfway may have switched a monitor off too, and
+            // local motion is then the way to get it back before teardown.
+            takeover.armed(m_clock.elapsed());
+        }
     }
 
     /**
@@ -174,12 +189,45 @@ public:
      */
     void adoptExtendPolicy()
     {
-        if (ownsPhysicalLayout) {
+        const bool owned = ownsPhysicalLayout;
+        if (owned) {
+            // extendPlacements was derived from the snapshot's enabled union
+            // at build time; a verified restore has just put exactly that
+            // union back, so it is the right edge of the physical desktop
+            // as it is now. (An unverified restore leaves the outputs off
+            // and this park fails with a warning; the guard's retry restores
+            // and the layout is parked again at teardown.)
             parkVirtualOutputs();
         }
         ownsPhysicalLayout = false;
         virtualPolicy = SessionController::VirtualPolicy::Extend;
         policyApplied = true;
+        if (owned) {
+            Q_EMIT physicalLayoutOwnershipChanged();
+        }
+    }
+
+    /**
+     * Console takeover bookkeeping: every pointer motion the single virtual
+     * session is about to inject, in the KWin-global logical coordinates it
+     * will be injected at, so a cursor sample that lands elsewhere can be
+     * told apart from our own. See KRdp::Takeover::Detector.
+     */
+    void noteInjectedMotion(KRdp::AbstractSession *session, const std::shared_ptr<QEvent> &event)
+    {
+        if (event->type() != QEvent::MouseMove || takeover.fired()) {
+            return;
+        }
+        // Only what the session will really inject: it drops motion while its
+        // stream is down or its virtual output is unplaced (see
+        // PlasmaScreencastV1Session::sendEvent()), and a move that never
+        // reached the compositor must not become the position the next
+        // cursor sample is compared against.
+        if (!session->streamActive() || !session->outputGeometryResolved()) {
+            return;
+        }
+        const auto mouseEvent = std::static_pointer_cast<QMouseEvent>(event);
+        takeover.injected(session->mapToGlobal(mouseEvent->position()).toPoint(), m_clock.elapsed());
     }
 
     /**
@@ -256,7 +304,15 @@ public:
         // multi, where fake input addresses the whole workspace anyway and
         // onInputEvent() picks one with a live stream per event.
         auto *clipboardSession = sessions.front().get();
-        if (!multi) {
+        if (!multi && outputGuard) {
+            // Virtual mode: the same hand-off as below, with the pointer
+            // motion about to be injected noted for the console takeover.
+            m_sessionConnections.append(
+                connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, this, [this, clipboardSession](const std::shared_ptr<QEvent> &event) {
+                    noteInjectedMotion(clipboardSession, event);
+                    clipboardSession->sendEvent(event);
+                }));
+        } else if (!multi) {
             m_sessionConnections.append(
                 connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, clipboardSession, &KRdp::AbstractSession::sendEvent));
         } else {
@@ -446,6 +502,19 @@ public:
         update.hotspot = cursor.hotspot;
         update.image = cursor.texture;
         connection->cursor()->update(update);
+
+        // The position is where the pointer really is on the captured (here:
+        // the virtual) output, in capture pixels; mapped into KWin-global
+        // logical space like an injected move it is comparable with the last
+        // one the server injected, and a sample far from that with no recent
+        // injection can only be the mouse on the console (Task 6c).
+        if (outputGuard && !takeover.fired() && sessions.size() == 1) {
+            const QPoint global = sessions.front()->mapToGlobal(cursor.position).toPoint();
+            if (takeover.observed(global, m_clock.elapsed())) {
+                qInfo() << "Console activity detected; restoring the physical outputs (session continues in extend mode)";
+                Q_EMIT consoleActivityDetected();
+            }
+        }
     }
 
     void onVideoStreamEnabledChanged()
@@ -573,6 +642,10 @@ public:
 
     Q_SIGNAL void sessionError();
     Q_SIGNAL void connectionDestroyed(SessionWrapper *wrapper);
+    /** Local pointer motion seen while this wrapper's replace policy holds the physical outputs (Task 6c). */
+    Q_SIGNAL void consoleActivityDetected();
+    /** ownsPhysicalLayout flipped; the controller's "Restore my monitors" action follows it. */
+    Q_SIGNAL void physicalLayoutOwnershipChanged();
 
     // One entry in every mode but MonitorMode=multi, where there is one per
     // monitor and the index into this vector is the RDPGFX surface index.
@@ -589,6 +662,9 @@ public:
     QString virtualPrimaryName;
     bool policyApplied = false;
     bool ownsPhysicalLayout = false; // this wrapper took the snapshot and must restore it
+    // Console takeover (Task 6c); timestamps are m_clock.elapsed().
+    KRdp::Takeover::Detector takeover;
+    QElapsedTimer m_clock;
     QPointer<KRdp::RdpConnection> connection;
     KStatusNotifierItem *m_sni;
     DisplayWakeGuard *m_displayWakeGuard;
@@ -611,6 +687,28 @@ SessionController::SessionController(KRdp::Server *server, SessionType sessionTy
     m_sni->setTitle(i18n("RDP Server"));
     m_sni->setIconByName(u"preferences-system-network-remote"_s);
     m_sni->setStatus(KStatusNotifierItem::Passive);
+    // Console takeover (Task 6c): give the physical monitors back by hand,
+    // from the tray or - since the tray is on a monitor that is off - with a
+    // global shortcut. One action serves both; it is enabled only while a
+    // virtual session holds the physical layout (updateRestoreAction()),
+    // and KGlobalAccel does not fire a disabled action.
+    m_restoreAction = new QAction(i18n("Restore my monitors"), menu);
+    m_restoreAction->setObjectName(u"restore-physical-outputs"_s);
+    m_restoreAction->setIcon(QIcon::fromTheme(u"video-display"_s));
+    m_restoreAction->setEnabled(false);
+    m_restoreAction->setProperty("componentName", u"krdpserver"_s);
+    m_restoreAction->setProperty("componentDisplayName", i18n("RDP Server"));
+    connect(m_restoreAction, &QAction::triggered, this, &SessionController::releasePhysicalOutputs);
+    menu->addAction(m_restoreAction);
+    const QKeySequence restoreShortcut(Qt::META | Qt::CTRL | Qt::ALT | Qt::Key_R);
+    KGlobalAccel::self()->setDefaultShortcut(m_restoreAction, {restoreShortcut});
+    KGlobalAccel::self()->setShortcut(m_restoreAction, {restoreShortcut});
+    // Queued: restored() is also emitted from inside a wrapper's destructor,
+    // i.e. while m_wrappers is being edited, which updateRestoreAction()
+    // must not walk. The refresh lands one event-loop turn later, and is
+    // dropped if it was the controller's own teardown.
+    connect(&m_outputGuard, &PhysicalOutputGuard::restored, this, &SessionController::updateRestoreAction, Qt::QueuedConnection);
+
     auto quitAction = new QAction(i18n("Quit"), menu);
     quitAction->setIcon(QIcon::fromTheme(QStringLiteral("application-exit")));
     connect(quitAction, &QAction::triggered, this, &SessionController::stopFromSNI);
@@ -782,23 +880,50 @@ std::optional<QSize> SessionController::parseSize(const QString &text)
     return KRdp::ClientDisplay::usable(size) ? std::optional(size) : std::nullopt;
 }
 
-void SessionController::releasePhysicalOutputs()
+bool SessionController::physicalLayoutOwned() const
 {
-    if (!m_outputGuard.hasSnapshot()) {
-        qInfo() << "Physical outputs released: nothing to restore, no virtual session holds a snapshot";
+    return std::any_of(m_wrappers.cbegin(), m_wrappers.cend(), [](const std::unique_ptr<SessionWrapper> &wrapper) {
+        return wrapper && wrapper->ownsPhysicalLayout;
+    });
+}
+
+void SessionController::updateRestoreAction()
+{
+    if (!m_restoreAction) {
         return;
     }
-    qInfo() << "Physical outputs released to the console; virtual sessions continue as extend";
-    // Restores only if a replace touched them; an extend session's snapshot
-    // is just dropped.
+    // held() is the superset: a replace that failed halfway (or an extend
+    // whose drift could not be re-applied) leaves no owner but monitors that
+    // may be off, and the console needs the action then most of all.
+    m_restoreAction->setEnabled(physicalLayoutOwned() || m_outputGuard.held());
+}
+
+void SessionController::releasePhysicalOutputs()
+{
+    // Idempotent: the second trigger (the shortcut after local motion already
+    // fired, say) finds nothing to give back.
+    if (!physicalLayoutOwned() && !m_outputGuard.held()) {
+        qDebug() << "Physical outputs are already the console's; nothing to release";
+        updateRestoreAction();
+        return;
+    }
+    // Restores, since the guard is held; the state file goes with a verified
+    // restore, and an unverified one schedules the guard's own retry. Either
+    // way the wrappers move on to extend: nothing else will restore the
+    // outputs before teardown, and a session that keeps streaming is the
+    // point (Steve's decision, Task 6c).
     m_outputGuard.release();
     // After the restore, not before: the wrapper parks its virtual output
     // beside the physical ones, which only sticks once they are enabled.
+    int continued = 0;
     for (const auto &wrapper : m_wrappers) {
         if (wrapper && wrapper->outputGuard) {
             wrapper->adoptExtendPolicy();
+            ++continued;
         }
     }
+    qInfo() << "Physical outputs released to the console;" << continued << "virtual session(s) continue as extend";
+    updateRestoreAction();
 }
 
 void SessionController::setVirtualMonitor(const KRdp::VirtualMonitor &virtualMonitor)
@@ -1359,7 +1484,12 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
                                             return entry.get() == wrapper;
                                         }),
                          m_wrappers.end());
+        updateRestoreAction();
     });
+    connect(wrapper.get(), &SessionWrapper::physicalLayoutOwnershipChanged, this, &SessionController::updateRestoreAction);
+    // Queued: the detector fires from a cursor-update slot, and the release
+    // runs kscreen-doctor synchronously and reshuffles the screens under it.
+    connect(wrapper.get(), &SessionWrapper::consoleActivityDetected, this, &SessionController::releasePhysicalOutputs, Qt::QueuedConnection);
 
     connect(wrapper.get(), &SessionWrapper::sessionError, this, [newConnection] {
         newConnection->close(KRdp::RdpConnection::CloseReason::None);

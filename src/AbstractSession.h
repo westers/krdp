@@ -8,6 +8,7 @@
 
 #include <PipeWireEncodedStream>
 #include <PipeWireSourceStream>
+#include <QPointF>
 #include <QRect>
 #include <QString>
 
@@ -140,6 +141,23 @@ public:
     {
         return true;
     }
+
+    /**
+     * Map a position in this session's captured output, in capture PIXELS
+     * (an RDP pointer position, or the screencast's cursor metadata), to
+     * KWin-global logical coordinates: the space fake input's absolute
+     * pointer motion takes and outputGeometry() lives in.
+     *
+     * This is exactly the arithmetic sendEvent() injects pointer motion
+     * with - normalised over (pixelSize()-1), spanned over (logical size-1)
+     * and offset by outputGeometry().topLeft() - so a caller that needs to
+     * know where an injected move landed, or where a cursor sample sits, in
+     * that space gets the same answer the compositor did.
+     *
+     * Meaningful only once pixelSize() and the logical size are known
+     * (started()); before that the input is returned offset by the origin.
+     */
+    QPointF mapToGlobal(const QPointF &local) const;
 
     /**
      * The size of the captured stream in PIXELS, as the compositor reports it.

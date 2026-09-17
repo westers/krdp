@@ -708,20 +708,14 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
 
     if (event->type() == QEvent::MouseMove) {
         // The position is relative to this session's own captured output, in
-        // capture pixels; normalise it and map it onto the output's place in
-        // the KWin-global logical coordinate space fake input expects.
+        // capture pixels; mapToGlobal() normalises it and maps it onto the
+        // output's place (d->logicalRect, via outputGeometry()) in the
+        // KWin-global logical coordinate space fake input expects.
         auto me = std::static_pointer_cast<QMouseEvent>(event);
-        auto position = me->position();
         if (size().isEmpty() || logicalSize().isEmpty()) {
             return;
         }
-        const auto inputWidth = std::max(1, size().width() - 1);
-        const auto inputHeight = std::max(1, size().height() - 1);
-        const auto logicalWidth = std::max(1, logicalSize().width() - 1);
-        const auto logicalHeight = std::max(1, logicalSize().height() - 1);
-        const auto normalizedX = std::clamp(position.x() / double(inputWidth), 0.0, 1.0);
-        const auto normalizedY = std::clamp(position.y() / double(inputHeight), 0.0, 1.0);
-        auto logicalPosition = QPointF{normalizedX * logicalWidth + d->logicalRect.x(), normalizedY * logicalHeight + d->logicalRect.y()};
+        const QPointF logicalPosition = mapToGlobal(me->position());
         d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(logicalPosition.x()), wl_fixed_from_double(logicalPosition.y()));
         return;
     }
