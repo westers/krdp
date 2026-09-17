@@ -128,6 +128,20 @@ public:
     virtual QRect outputGeometry() const;
 
     /**
+     * Whether outputGeometry() is the captured output's real place in the
+     * workspace yet.
+     *
+     * False only for a virtual-monitor session whose QScreen has not been
+     * found yet: KWin places the requested output itself, so until the
+     * matching screen shows up the geometry is a provisional (0,0) rect and
+     * pointer input mapped through it would land on a physical monitor.
+     */
+    virtual bool outputGeometryResolved() const
+    {
+        return true;
+    }
+
+    /**
      * The size of the captured stream in PIXELS, as the compositor reports it.
      *
      * This, not the logical geometry scaled by a device pixel ratio, is the
@@ -165,6 +179,20 @@ Q_SIGNALS:
      * Emitted whenever the system's clipboard data changes.
      */
     void clipboardDataChanged(const QMimeData *data);
+
+    /**
+     * The KWin-global logical rect of this session's captured output changed.
+     *
+     * For a virtual output this is first known some time after start(), once
+     * KWin has created and placed the output; see outputGeometryResolved().
+     */
+    void outputGeometryChanged(const QRect &geometry);
+
+    /**
+     * The virtual output requested from KWin never showed up as a QScreen
+     * (5 s). Pointer input stays gated; the stream itself may still run.
+     */
+    void virtualOutputUnresolved();
 
 protected:
     QSize size() const;

@@ -93,6 +93,13 @@ constexpr int WorkspaceFallbackAttempts = 4;
 constexpr int StreamRestartPollMs = 10;
 constexpr auto StreamRestartTimeout = std::chrono::milliseconds(5000);
 
+// How long a requested virtual output may take to show up as a QScreen. The
+// spike saw it within one screencast round trip; 5 s is generous.
+constexpr int VirtualScreenTimeoutMs = 5000;
+// KWin names the output it creates for a virtual monitor stream after the
+// requested name, with this prefix (verified: "Virtual-1280x720@1").
+const QLatin1String VirtualOutputPrefix("Virtual-");
+
 QRegion fullFrameDamage(const QSize &size)
 {
     if (size.isEmpty()) {
@@ -309,6 +316,17 @@ public:
     QTimer recoveryTimer;
     int recoveryAttempt = 0;
     QTimer streamRestartTimer;
+    // Virtual-monitor target only: the QScreen KWin created for our request.
+    // Input is mapped through logicalRect, which for a virtual output is only
+    // known once that screen exists (KWin places it, we do not).
+    QString virtualScreenName;
+    QPointer<QScreen> virtualScreen;
+    bool virtualGeometryResolved = false;
+    QMetaObject::Connection virtualScreenAddedConnection;
+    QMetaObject::Connection virtualScreenRemovedConnection;
+    QMetaObject::Connection virtualScreenGeometryConnection;
+    QTimer virtualScreenTimer;
+    bool loggedGatedInput = false;
     uint pendingNodeId = 0;
     std::chrono::steady_clock::time_point streamRestartWaitStarted;
     // Latch so a session whose stream is down logs one line for the whole
@@ -380,6 +398,12 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
             qCWarning(KRDP) << "Encoded stream did not shut down within" << StreamRestartTimeout.count() << "ms, attaching new node anyway";
         }
         attachEncodedStream(d->pendingNodeId, true);
+    });
+
+    d->virtualScreenTimer.setSingleShot(true);
+    connect(&d->virtualScreenTimer, &QTimer::timeout, this, [this]() {
+        qCWarning(KRDP) << "Virtual output" << d->virtualScreenName << "did not appear within" << VirtualScreenTimeoutMs << "ms; input stays gated";
+        Q_EMIT virtualOutputUnresolved();
     });
 }
 
@@ -494,10 +518,15 @@ bool PlasmaScreencastV1Session::setupScreencastRequest(bool allowWorkspaceFallba
 
     const bool targetChanged = (d->streamTarget != target);
     const bool outputChanged = (target == Private::StreamTarget::Output) && (d->outputScreen != outputScreen);
-    const bool logicalRectChanged = (d->logicalRect != targetLogicalRect);
+    // A virtual output's logicalRect is KWin's placement of it, not the
+    // provisional (0,0) rect computed here, so it must not trip a recreate.
+    const bool logicalRectChanged = (target != Private::StreamTarget::Virtual) && (d->logicalRect != targetLogicalRect);
     const bool requiresRecreate = !d->request || targetChanged || outputChanged || logicalRectChanged;
-    d->logicalRect = targetLogicalRect;
-    d->monitorLayout = targetMonitorLayout;
+    if (!(target == Private::StreamTarget::Virtual && d->virtualGeometryResolved)) {
+        // A resolved virtual session keeps the real rect across a no-op refresh.
+        d->logicalRect = targetLogicalRect;
+        d->monitorLayout = targetMonitorLayout;
+    }
     if (!d->logicalRect.isEmpty()) {
         setLogicalSize(d->logicalRect.size());
     }
@@ -518,6 +547,7 @@ bool PlasmaScreencastV1Session::setupScreencastRequest(bool allowWorkspaceFallba
         auto vm = virtualMonitor();
         d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata);
         qCDebug(KRDP) << "Using virtual monitor stream" << vm->name << "logical rect" << d->logicalRect;
+        watchForVirtualScreen();
     } else if (target == Private::StreamTarget::Output) {
         d->request = d->m_screencasting.createOutputStream(outputScreen, Screencasting::Metadata);
         if (!d->request && !allowWorkspaceFallback) {
@@ -666,6 +696,16 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
         return;
     }
 
+    if (virtualMonitor() && !d->virtualGeometryResolved && event->type() == QEvent::MouseMove) {
+        // Until KWin tells us where the virtual output sits, a pointer position
+        // would be mapped onto (0,0) - Steve's real primary monitor. Drop it.
+        if (!d->loggedGatedInput) {
+            d->loggedGatedInput = true;
+            qCInfo(KRDP) << "Dropping pointer motion until the virtual output geometry is known";
+        }
+        return;
+    }
+
     if (event->type() == QEvent::MouseMove) {
         // The position is relative to this session's own captured output, in
         // capture pixels; normalise it and map it onto the output's place in
@@ -801,6 +841,88 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
 QRect PlasmaScreencastV1Session::outputGeometry() const
 {
     return d->logicalRect;
+}
+
+bool PlasmaScreencastV1Session::outputGeometryResolved() const
+{
+    return !virtualMonitor() || d->virtualGeometryResolved;
+}
+
+void PlasmaScreencastV1Session::watchForVirtualScreen()
+{
+    const auto vm = virtualMonitor();
+    if (!vm) {
+        return;
+    }
+    d->virtualScreenName = VirtualOutputPrefix + vm->name;
+    d->virtualGeometryResolved = false;
+    d->virtualScreen = nullptr;
+    disconnect(d->virtualScreenAddedConnection);
+    disconnect(d->virtualScreenRemovedConnection);
+    disconnect(d->virtualScreenGeometryConnection);
+
+    d->virtualScreenRemovedConnection = connect(qGuiApp, &QGuiApplication::screenRemoved, this, [this](QScreen *screen) {
+        if (screen != d->virtualScreen) {
+            return;
+        }
+        // KWin dropped our output (stream closed, or a stale same-name output
+        // going away before the new one arrives). Wait for it to come back.
+        qCInfo(KRDP) << "Virtual output" << d->virtualScreenName << "removed; waiting for it to reappear";
+        d->virtualScreen = nullptr;
+        d->virtualGeometryResolved = false;
+        d->virtualScreenTimer.start(VirtualScreenTimeoutMs);
+    });
+    d->virtualScreenAddedConnection = connect(qGuiApp, &QGuiApplication::screenAdded, this, [this](QScreen *screen) {
+        adoptVirtualScreen(screen);
+    });
+
+    for (auto *screen : qGuiApp->screens()) {
+        if (adoptVirtualScreen(screen)) {
+            return;
+        }
+    }
+    d->virtualScreenTimer.start(VirtualScreenTimeoutMs);
+}
+
+bool PlasmaScreencastV1Session::adoptVirtualScreen(QScreen *screen)
+{
+    if (!screen || screen->name() != d->virtualScreenName || d->virtualScreen == screen) {
+        return false;
+    }
+    d->virtualScreenTimer.stop();
+    d->virtualScreen = screen;
+    d->virtualGeometryResolved = true;
+    d->loggedGatedInput = false;
+    disconnect(d->virtualScreenGeometryConnection);
+    d->virtualScreenGeometryConnection = connect(screen, &QScreen::geometryChanged, this, [this, screen](const QRect &geometry) {
+        if (screen == d->virtualScreen) {
+            updateVirtualGeometry(geometry);
+        }
+    });
+    updateVirtualGeometry(screen->geometry());
+    return true;
+}
+
+void PlasmaScreencastV1Session::updateVirtualGeometry(const QRect &geometry)
+{
+    if (geometry.isEmpty() || d->logicalRect == geometry) {
+        return;
+    }
+    // logicalRect is KWin-global (input mapping); the monitor layout handed
+    // to the RDP side stays local to this output, as for a physical one.
+    // The logical size follows KWin's placement too: at a scale other than 1
+    // it is the requested pixel size divided by the scale, and sendEvent()
+    // spans pointer positions over it.
+    d->logicalRect = geometry;
+    setLogicalSize(geometry.size());
+    d->monitorLayout = {
+        VideoMonitor{
+            .geometry = QRect(QPoint(0, 0), geometry.size()),
+            .primary = true,
+        },
+    };
+    qCInfo(KRDP) << "Virtual output" << d->virtualScreenName << "resolved at" << geometry;
+    Q_EMIT outputGeometryChanged(geometry);
 }
 
 void PlasmaScreencastV1Session::setClipboardData(std::unique_ptr<QMimeData> data)

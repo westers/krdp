@@ -17,6 +17,8 @@
 #include "AbstractSession.h"
 #include "krdp_export.h"
 
+class QScreen;
+
 namespace KRdp
 {
 
@@ -43,6 +45,7 @@ public:
     void setClipboardData(std::unique_ptr<QMimeData> data) override;
 
     QRect outputGeometry() const override;
+    bool outputGeometryResolved() const override;
 
 private:
     void injectNonMotionEvent(const std::shared_ptr<QEvent> &event);
@@ -53,6 +56,9 @@ private:
     void restartEncodedStream(uint nodeId);
     void attachEncodedStream(uint nodeId, bool streamWasActive);
     void onPacketReceived(const PipeWireEncodedStream::Packet &data);
+    void watchForVirtualScreen();
+    bool adoptVirtualScreen(QScreen *screen);
+    void updateVirtualGeometry(const QRect &geometry);
 
     class Private;
     const std::unique_ptr<Private> d;
