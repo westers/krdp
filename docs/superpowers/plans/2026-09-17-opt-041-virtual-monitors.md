@@ -1642,6 +1642,43 @@ git commit -m "server: MonitorMode=virtual - one client-sized virtual output wit
 
 ---
 
+### Task 6c: Console takeover — give the monitors back when a person uses hal9000 (plan amendment, Steve 2026-09-17)
+
+**Decision (Steve):** when someone uses the console while a `replace` session holds the outputs, the physical monitors come back immediately and the remote session CONTINUES in `extend` mode (the virtual output stays, parked to the right of the physical desktop). Triggers: (1) local pointer motion detected from the screencast cursor metadata, (2) a "Restore my monitors" action on the krdpserver tray icon, (3) a global keyboard shortcut (KGlobalAccel, default `Meta+Ctrl+Alt+R`; KF6::GlobalAccel headers are installed).
+
+**Files:**
+- Create: `server/TakeoverDetector.h` (pure), `autotests/TakeoverDetectorTest.cpp`
+- Modify: `server/SessionController.{h,cpp}` (`SessionWrapper::onCursorUpdate`, input path, `releasePhysicalOutputs()`, SNI menu, KGlobalAccel action), `server/PhysicalOutputGuard.{h,cpp}` (preamble fixes), `server/CMakeLists.txt` (`KF6::GlobalAccel`), `autotests/CMakeLists.txt`
+
+**Preamble commit first (Task 6 re-review follow-ups), `server/PhysicalOutputGuard.cpp`:** `reconcileExtend()` sets `m_held = true` when its re-apply does not verify; `snapshot()` refuses (returns false, logs) while `m_held` or when `enabledUnion()` of the physical outputs is invalid; the state file is written by `applyReplace()` (just before the first mutation), not by `snapshot()`, so an extend crash never restores anything; `restoreFromStateFile()`'s live-owner skip also prints the manual recovery command; `SessionController::rebuildSessions()` skips a virtual-mode wrapper that has no sessions yet (its deferred build is pending). Build + ctest green, commit `server: guard/controller follow-ups from the Task 6 re-review`.
+
+**Interfaces:**
+- Consumes: `PipeWireCursor{position, hotspot, texture}` from `AbstractSession::cursorUpdate` (position in the captured output's pixels), `AbstractSession::outputGeometry()` (KWin-global logical rect, Task 3), the wrapper's input path (`InputHandler::inputEvent` → `AbstractSession::sendEvent`), `SessionController::releasePhysicalOutputs()` (Task 6), `PhysicalOutputGuard::positionOutputs()`.
+- Produces:
+  ```cpp
+  namespace KRdp::Takeover {
+  constexpr int DistanceThresholdPx = 24;      // cursor moved further than any injected move could explain
+  constexpr int QuietWindowMs = 300;           // no injected pointer motion this recently
+  constexpr int ArmDelayMs = 2000;             // ignore the first samples after the policy applied
+  struct Detector {
+      void armed(qint64 nowMs);                                  // call when the replace policy applied
+      void injected(const QPoint &globalLogical, qint64 nowMs); // every pointer motion the server injects
+      bool observed(const QPoint &globalLogical, qint64 nowMs); // every cursor metadata sample; true = local motion
+  };
+  }
+  ```
+  `observed()` returns true once (then latches `fired`) when: armed for ≥ ArmDelayMs, at least one `injected()` has happened, `nowMs - lastInjectedMs > QuietWindowMs`, and `manhattanLength(observed - lastInjected) > DistanceThresholdPx`.
+
+- [ ] **Step 1: Failing test** — `autotests/TakeoverDetectorTest.cpp` (QTEST_GUILESS_MAIN): `notBeforeArmDelay` (armed at 0, injected (100,100)@100, observed (900,900)@500 → false); `injectedMotionIsNotLocal` (armed 0, injected (100,100)@3000, observed (110,105)@3050 → false: within threshold); `quietWindowSuppresses` (injected (100,100)@3000, observed (800,800)@3100 → false: too soon after an injection); `localMotionFires` (injected (100,100)@3000, observed (800,800)@3400 → true); `firesOnce` (after true, another far sample → false); `needsOneInjection` (armed 0, observed (800,800)@5000 with no injected → false).
+- [ ] **Step 2: run, expect failure. Step 3: implement `server/TakeoverDetector.h` to those rules. Step 4: run, expect pass.**
+- [ ] **Step 5: Wire it in `SessionWrapper`:** a `KRdp::Takeover::Detector takeover;` member; `armed()` when `maybeApplyVirtualPolicy()` applied `replace`; in the single-session input path (the `sendEvent` connection for virtual wrappers) route through a lambda that records `injected(globalLogical)` — compute the same mapping `PlasmaScreencastV1Session::sendEvent()` uses: normalised position × (logicalSize−1) + `outputGeometry().topLeft()` (expose a small `AbstractSession::mapToGlobal(const QPointF &local) const` helper for that); in `onCursorUpdate()` compute `outputGeometry().topLeft() + cursor.position / devicePixelRatio` and call `observed()`; on true → `qInfo() << "Console activity detected; restoring the physical outputs (session continues in extend mode)"` then `QMetaObject::invokeMethod(controller, &SessionController::releasePhysicalOutputs, Qt::QueuedConnection)`.
+- [ ] **Step 6: `releasePhysicalOutputs()` completes the takeover:** for every virtual wrapper that `ownsPhysicalLayout`: `guard.release()` (restores), then park/position the virtual output(s) at the extend anchor (right edge of the restored physical union, `positionOutputs()` with the wrapper's placements re-anchored) so nothing overlaps DP-1, set `virtualPolicy = Extend`, `ownsPhysicalLayout = false`; the sessions' `geometryChanged` tracking (Task 3) keeps input correct. Log one line. Idempotent (second call is a no-op).
+- [ ] **Step 7: Tray action + global shortcut:** in `SessionController`'s SNI menu add `i18n("Restore my monitors")` → `releasePhysicalOutputs()` (enabled only while a wrapper owns the layout; update on apply/release); register a `KGlobalAccel` action `restore-physical-outputs` (component `krdpserver`, default `Meta+Ctrl+Alt+R`) → same slot. `target_link_libraries(krdpserver PRIVATE KF6::GlobalAccel)` and `find_package` component in the top-level CMakeLists.
+- [ ] **Step 8: Build, ctest, commit** `server: console takeover - local pointer motion, tray action or shortcut restore the monitors and keep the session (OPT-041 Task 6c)`.
+- [ ] **Step 9 (deferred, Steve's go required — it toggles the monitors):** test instance :3392 `MonitorMode=virtual`, headless client from buzz for 90 s; at ~20 s move the real mouse on hal9000: expect `Console activity detected`, `Physical outputs restored`, virtual output re-parked at 5120,0, the client keeps streaming (frames continue), `kscreen-doctor -o` shows physicals enabled + virtual at 5120,0; on disconnect the layout equals the baseline. Repeat with the tray action and with the shortcut instead of the mouse. Steve does the mouse part himself if no agent can (fake input is not available to scripts).
+
+---
+
 ### Task 7: Phase B — one virtual output per client monitor
 
 **Files:**
