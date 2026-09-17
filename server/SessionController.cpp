@@ -86,19 +86,14 @@ public:
 
     ~SessionWrapper() override
     {
-        // Restore BEFORE the sessions (and with them the virtual outputs) go
+        // Release BEFORE the sessions (and with them the virtual outputs) go
         // away, so KWin never has zero enabled outputs and windows migrate
-        // back onto the physical monitors. Done for every virtual session
-        // that took a snapshot, not only a replace one: it verifies the
-        // physical layout is what it was, and it is what removes the
-        // snapshot's state file (a leftover would make the next start
-        // believe a crash left the outputs replaced). For a layout that was
-        // never touched it is a verified no-op.
-        if (outputGuard && outputGuard->hasSnapshot()) {
-            if (!ownsPhysicalLayout) {
-                qDebug() << "Virtual session ended without owning the physical layout; verifying it against the snapshot";
-            }
-            outputGuard->restore();
+        // back onto the physical monitors. The guard restores only if
+        // applyReplace() touched (or may have touched) the physical outputs;
+        // an extend session just drops its snapshot and state file, leaving
+        // whatever the user changed on the console meanwhile alone.
+        if (outputGuard) {
+            outputGuard->release();
             if (ownsPhysicalLayout) {
                 parkVirtualOutputs();
             }
@@ -120,7 +115,8 @@ public:
      */
     void parkVirtualOutputs()
     {
-        if (!outputGuard || !outputGuard->hasSnapshot() || extendPlacements.isEmpty()) {
+        // Not gated on hasSnapshot(): a verified restore has just dropped it.
+        if (!outputGuard || extendPlacements.isEmpty()) {
             return;
         }
         if (!outputGuard->positionOutputs(extendPlacements, virtualPrimaryName)) {
@@ -744,6 +740,26 @@ void SessionController::setVirtualFallbackSize(const QSize &size)
     m_virtualFallbackSize = size;
 }
 
+SessionController::VirtualPolicy SessionController::virtualPolicy() const
+{
+    return m_virtualPolicy;
+}
+
+SessionController::VirtualLayout SessionController::virtualLayout() const
+{
+    return m_virtualLayout;
+}
+
+QString SessionController::policyName(VirtualPolicy policy)
+{
+    return policy == VirtualPolicy::Extend ? u"extend"_s : u"replace"_s;
+}
+
+QString SessionController::layoutName(VirtualLayout layout)
+{
+    return layout == VirtualLayout::Single ? u"single"_s : u"client"_s;
+}
+
 SessionController::VirtualPolicy SessionController::parseVirtualPolicy(const QString &text)
 {
     return text.trimmed().compare(u"extend"_s, Qt::CaseInsensitive) == 0 ? VirtualPolicy::Extend : VirtualPolicy::Replace;
@@ -768,11 +784,13 @@ std::optional<QSize> SessionController::parseSize(const QString &text)
 void SessionController::releasePhysicalOutputs()
 {
     if (!m_outputGuard.hasSnapshot()) {
-        qInfo() << "Physical outputs released: nothing to restore, no virtual session took a snapshot";
+        qInfo() << "Physical outputs released: nothing to restore, no virtual session holds a snapshot";
         return;
     }
     qInfo() << "Physical outputs released to the console; virtual sessions continue as extend";
-    m_outputGuard.restore();
+    // Restores only if a replace touched them; an extend session's snapshot
+    // is just dropped.
+    m_outputGuard.release();
     // After the restore, not before: the wrapper parks its virtual output
     // beside the physical ones, which only sticks once they are enabled.
     for (const auto &wrapper : m_wrappers) {
@@ -851,11 +869,13 @@ void SessionController::setWakeDisplayOnConnect(bool enabled)
 
 void SessionController::refreshDisplayConfiguration()
 {
-    // In virtual mode the physical outputs come and go by design and the
-    // virtual sessions track their own screen.
-    if (m_virtualMode || m_virtualMonitor.has_value()) {
+    if (m_virtualMonitor.has_value()) {
         return;
     }
+    // MonitorMode=virtual is not a reason to return here: virtual wrappers
+    // are skipped one by one below (the physical outputs come and go by
+    // design and they track their own screen), while a physical-mode wrapper
+    // that predates a runtime switch to virtual still needs its refresh.
 
     if (m_multiMonitorRequested) {
         // Also the path back into multi mode after it was refused for want of
@@ -1193,12 +1213,16 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
         return;
     }
     const auto info = KRdp::ClientDisplay::sanitize(wrapper->connection->clientDisplayInfo(), m_virtualFallbackSize);
+    // The snapshot taken now is the only one this session may replace on;
+    // never a leftover from an earlier session (the guard clears it, and
+    // canReplace is keyed on this call's result, not on hasSnapshot()).
+    bool snapshotTaken = false;
     if (!m_outputGuard.available()) {
         qWarning() << "kscreen-doctor not found; MonitorMode=virtual runs as extend without layout control";
-    } else if (!m_outputGuard.snapshot()) {
+    } else if (!(snapshotTaken = m_outputGuard.snapshot())) {
         qWarning() << "Could not snapshot the physical outputs; MonitorMode=virtual runs as extend";
     }
-    const bool canReplace = m_virtualPolicy == VirtualPolicy::Replace && m_outputGuard.hasSnapshot();
+    const bool canReplace = m_virtualPolicy == VirtualPolicy::Replace && snapshotTaken;
 
     wrapper->outputGuard = &m_outputGuard;
     wrapper->virtualPolicy = canReplace ? VirtualPolicy::Replace : VirtualPolicy::Extend;
@@ -1218,7 +1242,7 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
     // The extend place is also where a replace session parks the output
     // once it has given the physical outputs back; see parkVirtualOutputs().
     QPoint extendAnchor;
-    if (m_outputGuard.hasSnapshot()) {
+    if (snapshotTaken) {
         const QRect physical = KRdp::OutputSnapshot::enabledUnion(m_outputGuard.physicalOutputs());
         if (physical.isValid()) {
             extendAnchor = QPoint(physical.left() + physical.width(), physical.top());
@@ -1246,6 +1270,12 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
         wrapper->maybeApplyVirtualPolicy();
     });
     connect(session.get(), &KRdp::AbstractSession::virtualOutputUnresolved, wrapper, [wrapper]() {
+        // Also fires when an output KWin removed mid-session stays away for
+        // 5 s; by then the policy has long been applied and stays so.
+        if (wrapper->policyApplied) {
+            qWarning() << "Virtual output lost mid-session and not back within 5 s: pointer input stays gated until it reappears";
+            return;
+        }
         // The output may still turn up later; once this has fired the policy
         // is never applied, so a late outputGeometryChanged() changes nothing.
         qWarning() << "Virtual output unresolved: pointer input stays gated and the" << (wrapper->virtualPolicy == VirtualPolicy::Replace ? "replace" : "extend")
@@ -1280,9 +1310,11 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
         // One virtual desktop, one snapshot of the physical outputs: a second
         // client would need a second output and would fight over the layout.
         // Any live connection counts, including one still in its capability
-        // exchange whose sessions are not built yet.
+        // exchange whose sessions are not built yet - but not one that has
+        // already closed and is only waiting to be destroyed, or a client
+        // reconnecting right after a drop would be refused.
         const bool busy = std::any_of(m_wrappers.cbegin(), m_wrappers.cend(), [](const std::unique_ptr<SessionWrapper> &w) {
-            return w && w->connection;
+            return w && w->connection && w->connection->state() != KRdp::RdpConnection::State::Closed;
         });
         if (busy) {
             qWarning() << "MonitorMode=virtual serves one connection at a time; refusing a second client";

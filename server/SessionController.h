@@ -117,7 +117,12 @@ public:
     void setVirtualMode(bool enabled);
     bool virtualMode() const;
     void setVirtualPolicy(VirtualPolicy policy);
+    VirtualPolicy virtualPolicy() const;
     void setVirtualLayout(VirtualLayout layout);
+    VirtualLayout virtualLayout() const;
+    /** The config spelling of a parsed value, for logs. */
+    static QString policyName(VirtualPolicy policy);
+    static QString layoutName(VirtualLayout layout);
     /** Output size used when the client advertises no usable desktop size. */
     void setVirtualFallbackSize(const QSize &size);
     /** "extend" -> Extend, anything else -> Replace. */

@@ -299,7 +299,7 @@ int main(int argc, char **argv)
         controller.setMonitorIndex(monitorIndex);
         controller.setMultiMonitorEnabled(multiRequested);
         if (controller.virtualMode()) {
-            streamTarget = u"virtual:%1 (%2)"_s.arg(config->virtualMonitorLayout(), config->virtualMonitorPolicy());
+            streamTarget = u"virtual:%1 (%2)"_s.arg(SessionController::layoutName(controller.virtualLayout()), SessionController::policyName(controller.virtualPolicy()));
         } else if (controller.multiMonitorEnabled()) {
             streamTarget = u"multi:%1"_s.arg(controller.multiMonitorCount());
         } else if (multiRequested) {
