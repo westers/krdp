@@ -3,9 +3,11 @@
 
 #pragma once
 
+#include "ClientDisplayInfo.h"
 #include "DisplayWakeGuard.h"
-#include "RdpConnection.h"
 #include "MultiLayout.h"
+#include "PhysicalOutputGuard.h"
+#include "RdpConnection.h"
 #include <AbstractSession.h>
 #include <KStatusNotifierItem>
 #include <SurfaceLayout.h>
@@ -13,6 +15,7 @@
 #include <vector>
 
 #include <QObject>
+#include <QSize>
 #include <QStringList>
 #include <QTimer>
 #include <QVector>
@@ -57,6 +60,24 @@ public:
         }
     };
 
+    /**
+     * What `MonitorMode=virtual` does with the physical outputs while a client
+     * is connected (OPT-041).
+     */
+    enum class VirtualPolicy {
+        /** Switch them off for the session and put them back on disconnect. */
+        Replace,
+        /** Leave them alone; the virtual output sits next to them. */
+        Extend,
+    };
+    /** How many virtual outputs `MonitorMode=virtual` creates for a client. */
+    enum class VirtualLayout {
+        /** One per client monitor (Phase B); one at the desktop size until then. */
+        Client,
+        /** Always one output, at the client's desktop size. */
+        Single,
+    };
+
     SessionController(KRdp::Server *server, SessionType sessionType);
     ~SessionController() override;
 
@@ -86,6 +107,32 @@ public:
     bool multiMonitorEnabled() const;
     /** The number of monitors (and so surfaces) multi mode uses; 0 when off. */
     int multiMonitorCount() const;
+    /**
+     * Turn `MonitorMode=virtual` on or off: every new connection gets one
+     * virtual output sized to the client's desktop instead of a capture of a
+     * physical one. Takes effect for the next connection; sessions that are
+     * already running keep whatever mode they were built in. Refused on a
+     * portal session, which cannot create outputs.
+     */
+    void setVirtualMode(bool enabled);
+    bool virtualMode() const;
+    void setVirtualPolicy(VirtualPolicy policy);
+    void setVirtualLayout(VirtualLayout layout);
+    /** Output size used when the client advertises no usable desktop size. */
+    void setVirtualFallbackSize(const QSize &size);
+    /** "extend" -> Extend, anything else -> Replace. */
+    static VirtualPolicy parseVirtualPolicy(const QString &text);
+    /** "single" -> Single, anything else -> Client. */
+    static VirtualLayout parseVirtualLayout(const QString &text);
+    /** "1920x1080" -> QSize(1920, 1080); nullopt when malformed or outside ClientDisplay::usable(). */
+    static std::optional<QSize> parseSize(const QString &text);
+    /**
+     * Give the physical outputs back to the console right now: restore the
+     * snapshot and turn every virtual session that replaced them into an
+     * extend session for the rest of its life. The hook for a console
+     * takeover (Task 6c); nothing triggers it yet.
+     */
+    void releasePhysicalOutputs();
     void setQuality(const std::optional<int> &quality);
     void setAdaptiveQuality(bool enabled);
     void setWakeDisplayOnConnect(bool enabled);
@@ -161,6 +208,12 @@ private:
     std::unique_ptr<KRdp::AbstractSession> makeSession();
     /** Create, configure and install this wrapper's session set. */
     void buildSessions(SessionWrapper *wrapper);
+    /**
+     * `MonitorMode=virtual`: build the wrapper's session set from the display
+     * the client advertised. Runs once the connection's capabilities exchange
+     * has delivered that information, not on connect.
+     */
+    void buildVirtualSessions(SessionWrapper *wrapper);
     /** buildSessions() for every live wrapper. */
     void rebuildSessions();
     /**
@@ -198,10 +251,21 @@ private:
     // rebuildMultiSessions().
     QTimer m_multiRebuildTimer;
 
+    // MonitorMode=virtual (OPT-041); see setVirtualMode().
+    bool m_virtualMode = false;
+    VirtualPolicy m_virtualPolicy = VirtualPolicy::Replace;
+    VirtualLayout m_virtualLayout = VirtualLayout::Client;
+    QSize m_virtualFallbackSize{1920, 1080};
+    // Virtual mode was asked for on a portal session; warned about once.
+    bool m_warnedPortalVirtual = false;
+
     std::unique_ptr<KRdp::AbstractSession> m_initializationSession;
 
     // Declared before m_wrappers so it outlives the wrappers that release into it.
     DisplayWakeGuard m_displayWakeGuard;
+    // Same rule: the wrappers restore the physical outputs through it, so it
+    // has to be alive when they are torn down (see ~SessionController()).
+    PhysicalOutputGuard m_outputGuard;
 
     std::vector<std::unique_ptr<SessionWrapper>> m_wrappers;
 

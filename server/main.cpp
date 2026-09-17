@@ -71,6 +71,9 @@ QString normalizedMonitorMode(QString mode)
     if (mode.compare(u"multi"_s, Qt::CaseInsensitive) == 0) {
         return u"multi"_s;
     }
+    if (mode.compare(u"virtual"_s, Qt::CaseInsensitive) == 0) {
+        return u"virtual"_s;
+    }
     qWarning() << "Unknown MonitorMode value" << mode << "falling back to workspace";
     return u"workspace"_s;
 }
@@ -78,7 +81,9 @@ QString normalizedMonitorMode(QString mode)
 std::optional<int> configuredMonitorIndex(const ServerConfig *config)
 {
     const auto mode = normalizedMonitorMode(config->monitorMode());
-    if (mode == u"workspace"_s) {
+    // `virtual` captures no physical monitor at all, and the workspace is what
+    // it falls back to when it cannot be used (portal session).
+    if (mode == u"workspace"_s || mode == u"virtual"_s) {
         return std::nullopt;
     }
 
@@ -270,13 +275,22 @@ int main(int argc, char **argv)
         streamTarget = u"virtual:%1"_s.arg(vmData);
     } else {
         std::optional<int> monitorIndex;
-        // --monitor pins a single output, so it wins over MonitorMode=multi.
-        const bool multiRequested = !parser.isSet(u"monitor"_s) && normalizedMonitorMode(config->monitorMode()) == u"multi"_s;
+        // --monitor pins a single output, so it wins over MonitorMode=multi/virtual.
+        const bool virtualRequested = !parser.isSet(u"monitor"_s) && normalizedMonitorMode(config->monitorMode()) == u"virtual"_s;
+        const bool multiRequested = !parser.isSet(u"monitor"_s) && !virtualRequested && normalizedMonitorMode(config->monitorMode()) == u"multi"_s;
         if (parser.isSet(u"monitor"_s)) {
             monitorIndex = parser.value(u"monitor"_s).toInt();
         } else {
             monitorIndex = configuredMonitorIndex(config);
         }
+
+        if (virtualRequested && !parser.isSet(u"plasma"_s)) {
+            qWarning() << "MonitorMode=virtual needs --plasma (the portal session cannot create outputs); using workspace";
+        }
+        controller.setVirtualPolicy(SessionController::parseVirtualPolicy(config->virtualMonitorPolicy()));
+        controller.setVirtualLayout(SessionController::parseVirtualLayout(config->virtualMonitorLayout()));
+        controller.setVirtualFallbackSize(SessionController::parseSize(config->virtualMonitorFallbackSize()).value_or(QSize(1920, 1080)));
+        controller.setVirtualMode(virtualRequested && parser.isSet(u"plasma"_s));
 
         // The index goes first so that a multi -> workspace/specific switch
         // rebuilds the single session on the target it is about to use,
@@ -284,7 +298,9 @@ int main(int argc, char **argv)
         // stream a moment later.
         controller.setMonitorIndex(monitorIndex);
         controller.setMultiMonitorEnabled(multiRequested);
-        if (controller.multiMonitorEnabled()) {
+        if (controller.virtualMode()) {
+            streamTarget = u"virtual:%1 (%2)"_s.arg(config->virtualMonitorLayout(), config->virtualMonitorPolicy());
+        } else if (controller.multiMonitorEnabled()) {
             streamTarget = u"multi:%1"_s.arg(controller.multiMonitorCount());
         } else if (multiRequested) {
             // With no resolvable primary there is no index to fall back to, so
@@ -309,7 +325,8 @@ int main(int argc, char **argv)
     // It must NOT force a display refresh: a quality-slider write should never
     // touch the stream. setMonitorIndex() self-guards and only re-creates the
     // stream when the resolved target actually changed.
-    auto applyRuntimeConfig = [config, &controller, monitorPinnedByCli, qualityPinnedByCli, listenPort = server.port(), runtimeConfigPath]() {
+    const bool plasmaSession = parser.isSet(u"plasma"_s);
+    auto applyRuntimeConfig = [config, &controller, monitorPinnedByCli, qualityPinnedByCli, plasmaSession, listenPort = server.port(), runtimeConfigPath]() {
         // KConfigSkeleton::read() only re-applies the in-memory KConfig cache
         // to the skeleton's items; it does NOT reload the file from disk (see
         // KCoreConfigSkeleton::read() vs ::load() docs). That happened to work
@@ -329,7 +346,12 @@ int main(int argc, char **argv)
             // has to be current before multi mode is switched off, or the
             // single session it rebuilds targets the previous monitor.
             controller.setMonitorIndex(configuredMonitorIndex(config));
-            controller.setMultiMonitorEnabled(normalizedMonitorMode(config->monitorMode()) == u"multi"_s);
+            const bool virtualRequested = normalizedMonitorMode(config->monitorMode()) == u"virtual"_s && plasmaSession;
+            controller.setVirtualPolicy(SessionController::parseVirtualPolicy(config->virtualMonitorPolicy()));
+            controller.setVirtualLayout(SessionController::parseVirtualLayout(config->virtualMonitorLayout()));
+            controller.setVirtualFallbackSize(SessionController::parseSize(config->virtualMonitorFallbackSize()).value_or(QSize(1920, 1080)));
+            controller.setVirtualMode(virtualRequested);
+            controller.setMultiMonitorEnabled(!virtualRequested && normalizedMonitorMode(config->monitorMode()) == u"multi"_s);
         }
 
         controller.setAdaptiveQuality(config->adaptiveQuality());
@@ -341,8 +363,8 @@ int main(int argc, char **argv)
         // consumers, so this uses the same plain, always-on qInfo() the rest
         // of this file's "Applied runtime ..." lines use.
         qInfo() << "Runtime config applied: quality" << config->quality() << "adaptive" << config->adaptiveQuality() << "monitorMode" << config->monitorMode()
-                << "monitorIndex" << config->monitorIndex() << "wakeDisplay" << config->wakeDisplayOnConnect() << "vaapiMode" << config->vaapiDriverMode()
-                << "port" << listenPort << "from" << runtimeConfigPath;
+                << "monitorIndex" << config->monitorIndex() << "virtualPolicy" << config->virtualMonitorPolicy() << "virtualLayout" << config->virtualMonitorLayout()
+                << "wakeDisplay" << config->wakeDisplayOnConnect() << "vaapiMode" << config->vaapiDriverMode() << "port" << listenPort << "from" << runtimeConfigPath;
     };
 
     // Re-creates the capture stream for a new display topology (resolution or

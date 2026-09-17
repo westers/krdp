@@ -33,12 +33,24 @@ SPDX-License-Identifier: BSD-2-Clause
       <default>true</default>
     </entry>
     <entry name="MonitorMode" type="String">
-      <label>Display target mode (workspace, primary, specific, multi)</label>
+      <label>Display target mode (workspace, primary, specific, multi, virtual)</label>
       <default>workspace</default>
     </entry>
     <entry name="MonitorIndex" type="Int">
       <label>Display target monitor ID when monitor mode is specific</label>
       <default>0</default>
+    </entry>
+    <entry name="VirtualMonitorPolicy" type="String">
+      <label>With MonitorMode=virtual: replace (switch the physical outputs off while a client is connected) or extend (keep them)</label>
+      <default>replace</default>
+    </entry>
+    <entry name="VirtualMonitorLayout" type="String">
+      <label>With MonitorMode=virtual: client (one virtual output per client monitor) or single (one output at the client's desktop size)</label>
+      <default>client</default>
+    </entry>
+    <entry name="VirtualMonitorFallbackSize" type="String">
+      <label>With MonitorMode=virtual: output size used when the client advertises no usable size (WIDTHxHEIGHT)</label>
+      <default>1920x1080</default>
     </entry>
     <entry name="VaapiDriverMode" type="String">
       <label>VAAPI driver selection mode (auto, off, radeonsi, iHD)</label>
