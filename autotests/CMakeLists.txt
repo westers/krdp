@@ -22,3 +22,8 @@ add_executable(ClientDisplayInfoTest ClientDisplayInfoTest.cpp)
 target_include_directories(ClientDisplayInfoTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ClientDisplayInfoTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ClientDisplayInfoTest COMMAND ClientDisplayInfoTest)
+
+add_executable(OutputSnapshotTest OutputSnapshotTest.cpp)
+target_include_directories(OutputSnapshotTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(OutputSnapshotTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME OutputSnapshotTest COMMAND OutputSnapshotTest)
