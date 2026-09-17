@@ -899,13 +899,17 @@ bool PlasmaScreencastV1Session::adoptVirtualScreen(QScreen *screen)
             updateVirtualGeometry(geometry);
         }
     });
-    updateVirtualGeometry(screen->geometry());
+    updateVirtualGeometry(screen->geometry(), true);
     return true;
 }
 
-void PlasmaScreencastV1Session::updateVirtualGeometry(const QRect &geometry)
+void PlasmaScreencastV1Session::updateVirtualGeometry(const QRect &geometry, bool adopted)
 {
-    if (geometry.isEmpty() || d->logicalRect == geometry) {
+    // An adopted screen is always announced, even at the provisional rect:
+    // KWin replays a remembered arrangement for a known output set, so the
+    // output can well appear exactly where setupScreencastRequest() guessed,
+    // and the controller waits for this to learn that it is resolved.
+    if (geometry.isEmpty() || (!adopted && d->logicalRect == geometry)) {
         return;
     }
     // logicalRect is KWin-global (input mapping); the monitor layout handed

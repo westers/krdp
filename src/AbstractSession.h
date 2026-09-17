@@ -194,6 +194,13 @@ Q_SIGNALS:
      */
     void virtualOutputUnresolved();
 
+    /**
+     * streamActive() changed. True arrives later than started(): the encoded
+     * stream reports itself active only once its produce thread runs, which is
+     * when frames can actually flow.
+     */
+    void streamActiveChanged(bool active);
+
 protected:
     QSize size() const;
     QSize logicalSize() const;

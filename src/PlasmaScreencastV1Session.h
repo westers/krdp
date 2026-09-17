@@ -58,7 +58,7 @@ private:
     void onPacketReceived(const PipeWireEncodedStream::Packet &data);
     void watchForVirtualScreen();
     bool adoptVirtualScreen(QScreen *screen);
-    void updateVirtualGeometry(const QRect &geometry);
+    void updateVirtualGeometry(const QRect &geometry, bool adopted = false);
 
     class Private;
     const std::unique_ptr<Private> d;

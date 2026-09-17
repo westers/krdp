@@ -179,6 +179,7 @@ PipeWireEncodedStream *AbstractSession::stream()
 {
     if (!d->encodedStream) {
         d->encodedStream = std::make_unique<PipeWireEncodedStream>();
+        connect(d->encodedStream.get(), &PipeWireEncodedStream::activeChanged, this, &AbstractSession::streamActiveChanged);
         if (d->frameRate) {
             d->encodedStream->setMaxFramerate({d->frameRate.value(), 1});
         }
@@ -220,5 +221,3 @@ void AbstractSession::requestStreamingDisable(QObject *requester)
 }
 
 }
-
-#include "AbstractSession.moc"
