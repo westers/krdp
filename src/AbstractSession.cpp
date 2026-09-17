@@ -111,12 +111,19 @@ void AbstractSession::requestKeyFrame()
     qCDebug(KRDP) << "Keyframe requested but this session type cannot obtain one; waiting for the next organic keyframe";
 }
 
-bool AbstractSession::streamingEnabled() const
+bool AbstractSession::streamActive() const
 {
     if (d->encodedStream) {
         return d->encodedStream->isActive();
     }
     return false;
+}
+
+// The pre-existing spelling of the same question, kept so nothing outside has
+// to change; there is one implementation, above.
+bool AbstractSession::streamingEnabled() const
+{
+    return streamActive();
 }
 
 void AbstractSession::setStreamingEnabled(bool enable)
@@ -157,9 +164,15 @@ void AbstractSession::setLogicalSize(QSize size)
     d->logicalSize = size;
 }
 
-QSize AbstractSession::size() const
+QSize AbstractSession::pixelSize() const
 {
     return d->size;
+}
+
+// The protected spelling subclasses already use; one implementation, above.
+QSize AbstractSession::size() const
+{
+    return pixelSize();
 }
 
 PipeWireEncodedStream *AbstractSession::stream()

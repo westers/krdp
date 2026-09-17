@@ -188,6 +188,9 @@ private:
     // A mixed-scale workspace has no single pixels-per-logical-unit ratio;
     // warned about once rather than once per layout recomputation.
     bool m_warnedMixedScales = false;
+    // Multi mode was asked for on a portal session, which cannot open one
+    // capture stream per output; warned about once, not on every config reload.
+    bool m_warnedPortalMulti = false;
     // The screens last left out of the layout, so the reason is logged when it
     // changes rather than on every recomputation.
     QStringList m_droppedScreens;

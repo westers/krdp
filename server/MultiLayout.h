@@ -140,5 +140,58 @@ inline QVector<VideoMonitor> selectMultiLayout(const QVector<ScreenInfo> &screen
     return layout;
 }
 
+/**
+ * What is left after one monitor of a layout is dropped.
+ */
+struct DropOutcome {
+    /**
+     * The old index of each survivor, in order. Its NEW surface index is its
+     * position in this list, so entry i is "the session that was at
+     * survivors[i] now feeds surface i".
+     */
+    QList<qsizetype> survivors;
+    /**
+     * The NEW index of the primary, or -1 when nothing survives.
+     */
+    qsizetype primary = -1;
+};
+
+/**
+ * Re-index \a count monitors after the one at \a droppedIndex goes away.
+ *
+ * Surface indices have to stay 0..N-1 and line up with the layout handed to
+ * VideoStream::setMonitorLayout(), so every monitor after the dropped one moves
+ * down a place. \a primaryIndex is the old index of the primary, or -1 when
+ * there is none; when it is the monitor being dropped (or there was none), the
+ * first survivor is promoted, because setMonitorLayout() rejects a layout
+ * without exactly one primary and rejecting would leave the stream on the old
+ * N-surface layout while the re-indexed survivors sent to it.
+ *
+ * Pure, so autotests/MultiLayoutTest.cpp can state the rule without a session.
+ */
+inline DropOutcome dropMonitor(qsizetype count, qsizetype droppedIndex, qsizetype primaryIndex)
+{
+    DropOutcome outcome;
+    if (count <= 0) {
+        return outcome;
+    }
+
+    outcome.survivors.reserve(count - 1);
+    for (qsizetype i = 0; i < count; ++i) {
+        if (i == droppedIndex) {
+            continue;
+        }
+        if (i == primaryIndex) {
+            outcome.primary = outcome.survivors.size();
+        }
+        outcome.survivors.append(i);
+    }
+
+    if (outcome.primary < 0 && !outcome.survivors.isEmpty()) {
+        outcome.primary = 0;
+    }
+    return outcome;
+}
+
 }
 }

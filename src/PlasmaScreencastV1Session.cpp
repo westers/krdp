@@ -308,6 +308,10 @@ public:
     QTimer streamRestartTimer;
     uint pendingNodeId = 0;
     std::chrono::steady_clock::time_point streamRestartWaitStarted;
+    // Latch so a session whose stream is down logs one line for the whole
+    // inactive period instead of one per dropped event; cleared as soon as the
+    // stream carries an event again.
+    bool loggedInactiveGlobalEvents = false;
 };
 
 PlasmaScreencastV1Session::PlasmaScreencastV1Session()
@@ -654,8 +658,19 @@ void PlasmaScreencastV1Session::sendGlobalEvent(const std::shared_ptr<QEvent> &e
 {
     auto encodedStream = stream();
     if (!encodedStream || !encodedStream->isActive()) {
+        // Fake input would work here - it addresses the whole workspace, not
+        // this session's output - but an inactive stream means this session is
+        // being recovered, and injecting through it is not what the caller
+        // asked for. The caller picks a session with a live stream
+        // (SessionWrapper::inputSession()); this is what a period with none
+        // looks like, and it is silent input, so say so once.
+        if (!d->loggedInactiveGlobalEvents) {
+            d->loggedInactiveGlobalEvents = true;
+            qCDebug(KRDP) << "Dropping input: this session's encoded stream is not active";
+        }
         return;
     }
+    d->loggedInactiveGlobalEvents = false;
 
     if (event->type() == QEvent::MouseMove) {
         // The position is already in KWin-global logical coordinates, so it

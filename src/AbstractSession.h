@@ -37,6 +37,15 @@ public:
     virtual void start() = 0;
 
     bool streamingEnabled() const;
+    /**
+     * Whether this session's encoded stream is actually running.
+     *
+     * False while there is no stream at all, and while a screencast that was
+     * closed (a DPMS wake re-adds every wl_output) is being recovered. A
+     * session in that state silently drops every event handed to it, so the
+     * multi-monitor input path picks a session for which this is true.
+     */
+    bool streamActive() const;
     void setStreamingEnabled(bool enable);
     void setVideoFrameRate(quint32 framerate);
     void setActiveStream(int stream);
@@ -117,6 +126,19 @@ public:
      * which is this scaled by the output's device pixel ratio.
      */
     virtual QRect outputGeometry() const;
+
+    /**
+     * The size of the captured stream in PIXELS, as the compositor reports it.
+     *
+     * This, not the logical geometry scaled by a device pixel ratio, is the
+     * size every frame of this session actually has, and so the size its
+     * RDPGFX surface must be created at: a fractional scale makes the derived
+     * value disagree with this one by a pixel, and every frame is then dropped
+     * for not matching its surface.
+     *
+     * Valid from started() onwards.
+     */
+    QSize pixelSize() const;
 
 Q_SIGNALS:
     void started();
