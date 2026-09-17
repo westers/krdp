@@ -5,7 +5,7 @@ add_definitions(-DTRANSLATION_DOMAIN=\"krdpserver\")
 
 add_executable(krdpserver)
 
-target_sources(krdpserver PRIVATE main.cpp SessionController.cpp DisplayWakeGuard.cpp)
+target_sources(krdpserver PRIVATE main.cpp SessionController.cpp DisplayWakeGuard.cpp PhysicalOutputGuard.cpp)
 
 kconfig_target_kcfg_file(krdpserver FILE krdpserversettings.kcfg CLASS_NAME ServerConfig SINGLETON)
 

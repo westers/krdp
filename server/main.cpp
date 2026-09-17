@@ -22,6 +22,7 @@
 
 #include <qt6keychain/keychain.h>
 
+#include "PhysicalOutputGuard.h"
 #include "RdpConnection.h"
 #include "Server.h"
 #include "SessionController.h"
@@ -153,6 +154,7 @@ int main(int argc, char **argv)
          u"Creates a new virtual output to connect to (WIDTHxHEIGHT@SCALE, e.g. 1920x1080@1). Incompatible with --monitor."_s,
          u"data"_s,
          u"1920x1080@1"_s},
+        {u"restore-outputs"_s, u"Re-enable the physical outputs a crashed virtual-monitor session left disabled, then exit."_s},
         {u"quality"_s, u"Encoding quality of the stream, from 0 (lowest) to 100 (highest)"_s, u"quality"_s},
 #ifdef WITH_PLASMA_SESSION
         {u"plasma"_s, u"Use Plasma protocols instead of XDP"_s},
@@ -161,6 +163,10 @@ int main(int argc, char **argv)
     about.setupCommandLine(&parser);
     parser.process(application);
     about.processCommandLine(&parser);
+
+    if (parser.isSet(u"restore-outputs"_s)) {
+        return PhysicalOutputGuard::restoreFromStateFile() ? 0 : 1;
+    }
 
     signal(SIGINT, [](int) {
         QCoreApplication::exit(0);
@@ -246,6 +252,9 @@ int main(int argc, char **argv)
     qInfo() << "KWin primary output:" << SessionController::kwinPrimaryOutputName();
 
     SessionController controller(&server, parser.isSet(u"plasma"_s) ? SessionController::SessionType::Plasma : SessionController::SessionType::Portal);
+    // A crash with MonitorMode=virtual/replace leaves the state file behind;
+    // a clean session deletes it. Nothing to do in the common case.
+    PhysicalOutputGuard::restoreFromStateFile();
     QString streamTarget = u"workspace-default"_s;
     const bool monitorPinnedByCli = parser.isSet(u"monitor"_s) || parser.isSet(u"virtual-monitor"_s);
     const bool qualityPinnedByCli = parser.isSet(u"quality"_s);

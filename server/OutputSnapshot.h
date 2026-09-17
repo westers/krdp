@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include <QByteArray>
+#include <QDebug>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -122,18 +123,18 @@ inline QStringList positionArgs(const QVector<Placement> &virtualOutputs, const 
 {
     QStringList args;
     int priority = firstPriority;
-    auto emit = [&](const Placement &placement) {
+    auto appendPlacement = [&](const Placement &placement) {
         args << QStringLiteral("output.%1.priority.%2").arg(placement.name).arg(priority++);
         args << QStringLiteral("output.%1.position.%2,%3").arg(placement.name).arg(placement.position.x()).arg(placement.position.y());
     };
     for (const auto &placement : virtualOutputs) {
         if (placement.name == primaryVirtualName) {
-            emit(placement);
+            appendPlacement(placement);
         }
     }
     for (const auto &placement : virtualOutputs) {
         if (placement.name != primaryVirtualName) {
-            emit(placement);
+            appendPlacement(placement);
         }
     }
     return args;
@@ -224,6 +225,14 @@ inline QVector<Output> fromJson(const QByteArray &json)
         });
     }
     return outputs;
+}
+
+inline QDebug operator<<(QDebug dbg, const Output &output)
+{
+    QDebugStateSaver saver(dbg);
+    dbg.nospace() << "Output(" << output.name << (output.enabled ? " enabled" : " disabled") << " at " << output.position.x() << ',' << output.position.y()
+                  << " priority " << output.priority << ')';
+    return dbg;
 }
 }
 }
