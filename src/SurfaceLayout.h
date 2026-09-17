@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <algorithm>
+
 #include <QPoint>
 #include <QRect>
 #include <QSize>
@@ -65,6 +67,42 @@ struct Entry {
         return size == other.size && origin == other.origin && primary == other.primary;
     }
 };
+
+/**
+ * The four edges of one TS_MONITOR_DEF, as RDPGFX_RESET_GRAPHICS wants them.
+ */
+struct MonitorEdges {
+    int left = 0;
+    int top = 0;
+    int right = 0;
+    int bottom = 0;
+};
+
+/**
+ * Turn \a geometry into the edges of a TS_MONITOR_DEF.
+ *
+ * MS-RDPBCGR 2.2.1.3.6.1 defines right and bottom as INCLUSIVE: a 1024x768
+ * primary at the origin is left 0, top 0, right 1023, bottom 767, and a
+ * 2560x1440 monitor at (2560, 0) ends at right 5119. Sending the exclusive
+ * edges instead overstates every monitor by one pixel in each direction, which
+ * is what this fork did until now - on the single-surface path too, not only
+ * in MonitorMode=multi.
+ *
+ * The one place the conversion happens, so the two paths cannot disagree.
+ * std::max keeps a degenerate rect from reporting an edge before its own
+ * origin; the layout paths reject empty geometries, so that is belt and braces.
+ */
+inline MonitorEdges edgesOf(const QRect &geometry)
+{
+    const int left = geometry.x();
+    const int top = geometry.y();
+    return MonitorEdges{
+        .left = left,
+        .top = top,
+        .right = std::max(left, left + geometry.width() - 1),
+        .bottom = std::max(top, top + geometry.height() - 1),
+    };
+}
 
 /**
  * The top-left of \a monitors' bounding union, in the coordinate space

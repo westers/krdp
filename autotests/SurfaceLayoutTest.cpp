@@ -6,6 +6,7 @@
 #include "SurfaceLayout.h"
 
 using namespace KRdp;
+using KRdp::SurfaceLayout::edgesOf;
 using KRdp::SurfaceLayout::Entry;
 using KRdp::SurfaceLayout::fromMonitors;
 using KRdp::SurfaceLayout::originOf;
@@ -143,6 +144,44 @@ private Q_SLOTS:
         QVERIFY(entries.at(0).primary);
         QCOMPARE(entries.at(1).origin, QPoint(640, 0));
         QVERIFY(!entries.at(1).primary);
+    }
+
+    // TS_MONITOR_DEF's right/bottom are inclusive (MS-RDPBCGR 2.2.1.3.6.1), so
+    // a 2560x1440 monitor at the origin ends at 2559/1439, not 2560/1440.
+    void monitorEdgesAreInclusive()
+    {
+        const auto primary = edgesOf(QRect(0, 0, 2560, 1440));
+        QCOMPARE(primary.left, 0);
+        QCOMPARE(primary.top, 0);
+        QCOMPARE(primary.right, 2559);
+        QCOMPARE(primary.bottom, 1439);
+    }
+
+    // The second monitor of this box, at (2560, 0): its right edge is the last
+    // pixel column it owns, which is where the desktop's 5120 px width ends.
+    void offsetMonitorEdgesAreInclusive()
+    {
+        const auto secondary = edgesOf(QRect(2560, 0, 2560, 1440));
+        QCOMPARE(secondary.left, 2560);
+        QCOMPARE(secondary.top, 0);
+        QCOMPARE(secondary.right, 5119);
+        QCOMPARE(secondary.bottom, 1439);
+
+        const auto below = edgesOf(QRect(0, 1440, 1920, 1080));
+        QCOMPARE(below.top, 1440);
+        QCOMPARE(below.bottom, 2519);
+        QCOMPARE(below.right, 1919);
+    }
+
+    // A degenerate rect must not report an edge before its own origin; the
+    // layout paths reject empty geometries, so this only pins the helper down.
+    void degenerateGeometryDoesNotInvertItsEdges()
+    {
+        const auto empty = edgesOf(QRect(100, 200, 0, 0));
+        QCOMPARE(empty.left, 100);
+        QCOMPARE(empty.top, 200);
+        QCOMPARE(empty.right, 100);
+        QCOMPARE(empty.bottom, 200);
     }
 
     // Only the first monitor flagged primary stays primary, matching the

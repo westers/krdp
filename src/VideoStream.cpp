@@ -586,6 +586,18 @@ void VideoStream::setMonitorLayout(const QVector<VideoMonitor> &layout)
     qCDebug(KRDP) << "Monitor layout configured:" << (layout.isEmpty() ? QStringLiteral("(derived from frames)") : monitorLayoutSummary(layout));
     // The surfaces are rebuilt from the new layout on the next frame.
     d->pendingReset = true;
+
+    // Every queued frame is stamped with an index into the layout that is being
+    // replaced. Sending one after the surfaces are rebuilt would paint a
+    // monitor's picture onto whatever surface now holds that index, or have it
+    // silently dropped by the size guard. The sessions re-open each surface
+    // with a keyframe, so nothing of value is lost by starting from empty.
+    //
+    // Lock order is layoutMutex -> frameQueueMutex, and only ever that way: the
+    // submission thread releases frameQueueMutex before sendFrame() takes
+    // layoutMutex, and queueFrame() takes frameQueueMutex alone.
+    std::lock_guard queueLock(d->frameQueueMutex);
+    d->frameQueue.clear();
 }
 
 void VideoStream::setAdaptiveQuality(bool enabled)
@@ -676,11 +688,15 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
     if (d->capsConfirmed) {
         qCDebug(KRDP) << "GFX channel reset (re-advertisement), resetting surface state";
         d->capsConfirmed = false;
-        d->pendingReset = true;
         {
+            // pendingReset belongs with the surfaces it re-arms: this runs on
+            // the peer thread while the submission thread may be inside
+            // sendFrame(), which reads the flag and the surfaces together
+            // under this same lock.
             // Not configuredLayout: that is configuration, not surface state,
             // and the next reset rebuilds the surfaces from it.
             std::lock_guard lock(d->layoutMutex);
+            d->pendingReset = true;
             d->surfaces.clear();
             d->monitorLayout.clear();
         }
@@ -789,10 +805,12 @@ bool VideoStream::performReset(const QSize &desktopSize, const QVector<VideoMoni
     auto monitorDefs = std::make_unique<MONITOR_DEF[]>(monitors.size());
     for (int i = 0; i < monitors.size(); ++i) {
         const auto &monitor = monitors.at(i);
-        monitorDefs[i].left = monitor.geometry.x();
-        monitorDefs[i].top = monitor.geometry.y();
-        monitorDefs[i].right = monitor.geometry.x() + monitor.geometry.width();
-        monitorDefs[i].bottom = monitor.geometry.y() + monitor.geometry.height();
+        // Inclusive edges: see SurfaceLayout::edgesOf().
+        const auto edges = SurfaceLayout::edgesOf(monitor.geometry);
+        monitorDefs[i].left = edges.left;
+        monitorDefs[i].top = edges.top;
+        monitorDefs[i].right = edges.right;
+        monitorDefs[i].bottom = edges.bottom;
         monitorDefs[i].flags = monitor.primary ? MONITOR_PRIMARY : 0;
     }
     resetGraphicsPdu.monitorDefArray = monitorDefs.get();
