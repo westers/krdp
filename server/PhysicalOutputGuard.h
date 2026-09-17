@@ -17,10 +17,11 @@
  *
  * Every mutation is one kscreen-doctor invocation followed by a read-back and
  * comparison against the snapshot, so a failure is a logged fact, not a
- * silent wrong layout. The snapshot is also written to a state file
+ * silent wrong layout. applyReplace() writes the snapshot to a state file
  * (`QStandardPaths::StateLocation`, i.e. `$XDG_STATE_HOME/<app name>/physical-outputs.json`)
- * before anything is disabled; restoreFromStateFile() replays it after a
- * crash (at server start and via `krdpserver --restore-outputs`).
+ * just before its first mutation, so it exists exactly while the physical
+ * outputs are held; restoreFromStateFile() replays it after a crash (at
+ * server start and via `krdpserver --restore-outputs`).
  *
  * All calls are synchronous on the main thread (a kscreen-doctor run takes
  * well under a second); the only asynchronous part is the single retry a
@@ -37,8 +38,21 @@ public:
     static bool restoreFromStateFile();
 
     bool available() const;
+    /**
+     * Read the physical outputs as they are now, as the layout to restore.
+     * Refused (false, logged) while a previous replace is not verifiably
+     * restored yet, and when no physical output is enabled; neither is a
+     * layout the user wants back. Writes no state file: applyReplace() does.
+     */
     bool snapshot();
     bool hasSnapshot() const;
+    /**
+     * Whether the physical outputs were, or may have been, changed by
+     * applyReplace() (or by a failed reconcileExtend() re-apply) and not
+     * verifiably restored since: the state in which release() restores and
+     * a console takeover has something to give back.
+     */
+    bool held() const;
     QVector<KRdp::OutputSnapshot::Output> physicalOutputs() const;
 
     bool applyReplace(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
@@ -64,6 +78,8 @@ private:
     static bool run(const QStringList &args, QByteArray *output = nullptr);
     static QVector<KRdp::OutputSnapshot::Output> current(QString *error = nullptr);
     static bool restoreSnapshot(const QVector<KRdp::OutputSnapshot::Output> &physical);
+    /** Write the snapshot (and this PID) for restoreFromStateFile(); false, logged, on failure. */
+    bool writeStateFile() const;
     /** Whether \a pid is a live process other than this one (a running krdpserver, if /proc can tell). */
     static bool ownerAlive(qint64 pid);
 

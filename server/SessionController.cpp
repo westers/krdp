@@ -90,8 +90,9 @@ public:
         // away, so KWin never has zero enabled outputs and windows migrate
         // back onto the physical monitors. The guard restores only if
         // applyReplace() touched (or may have touched) the physical outputs;
-        // an extend session just drops its snapshot and state file, leaving
-        // whatever the user changed on the console meanwhile alone.
+        // an extend session just drops its snapshot (it never wrote a state
+        // file), leaving whatever the user changed on the console meanwhile
+        // alone.
         if (outputGuard) {
             outputGuard->release();
             if (ownsPhysicalLayout) {
@@ -1297,7 +1298,11 @@ void SessionController::rebuildSessions()
     for (const auto &wrapper : m_wrappers) {
         // Mode changes apply to the next connection for a virtual wrapper;
         // rebuilding it here would drop the virtual output under the client.
-        if (!wrapper || !wrapper->connection || wrapper->outputGuard) {
+        // A wrapper with no sessions at all is a virtual one whose deferred
+        // build (buildVirtualSessions(), once the client's display info is
+        // in) has not run yet: building a physical session for it here would
+        // make that build a no-op and hand the client a physical capture.
+        if (!wrapper || !wrapper->connection || wrapper->outputGuard || wrapper->sessions.empty()) {
             continue;
         }
         buildSessions(wrapper.get());

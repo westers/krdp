@@ -106,6 +106,14 @@ bool PhysicalOutputGuard::snapshot()
     // leave hasSnapshot() false, or a replace would run on stale outputs
     // with no state file behind it.
     m_physical.clear();
+    if (m_held) {
+        // The physical outputs are still (or may still be) replaced by an
+        // earlier session whose restore did not verify; what -j reports now
+        // is that state, not the user's layout, and snapshotting it would
+        // make "restore" mean "put the monitors back off".
+        qWarning() << "Cannot snapshot the physical outputs: the previous replace is not verifiably restored yet";
+        return false;
+    }
     QString error;
     const auto outputs = current(&error);
     if (outputs.isEmpty()) {
@@ -117,24 +125,42 @@ bool PhysicalOutputGuard::snapshot()
         qWarning() << "No physical outputs to snapshot";
         return false;
     }
+    const QRect enabled = enabledUnion(m_physical);
+    if (!enabled.isValid()) {
+        // Every physical output is off (a DPMS-off console does not do this;
+        // a leftover replace from another instance does). Restoring this
+        // would be a no-op and the extend anchor derived from it is garbage.
+        qWarning() << "Cannot snapshot the physical outputs: none of them is enabled";
+        m_physical.clear();
+        return false;
+    }
+    // The state file is written by applyReplace(), just before the first
+    // mutation, so a crash during an extend session (which never touches the
+    // physical outputs) has nothing to restore at the next start.
+    qInfo() << "Physical outputs snapshot:" << m_physical.size() << "outputs, enabled union" << enabled;
+    return true;
+}
 
-    // No state file, no snapshot: a replace without crash recovery could
-    // leave the monitors off for good, so the caller falls back to extend.
+bool PhysicalOutputGuard::writeStateFile() const
+{
     QDir().mkpath(QStandardPaths::writableLocation(QStandardPaths::StateLocation));
     QFile file(stateFilePath());
     const QByteArray json = toStateJson(m_physical, qint64(getpid()));
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(json) != json.size() || !file.flush()) {
-        qWarning() << "Cannot write" << file.fileName() << ":" << file.errorString() << "- refusing to snapshot without crash recovery";
-        m_physical.clear();
+        qWarning() << "Cannot write" << file.fileName() << ":" << file.errorString();
         return false;
     }
-    qInfo() << "Physical outputs snapshot:" << m_physical.size() << "outputs, enabled union" << enabledUnion(m_physical);
     return true;
 }
 
 bool PhysicalOutputGuard::hasSnapshot() const
 {
     return !m_physical.isEmpty();
+}
+
+bool PhysicalOutputGuard::held() const
+{
+    return m_held;
 }
 
 QVector<Output> PhysicalOutputGuard::physicalOutputs() const
@@ -159,6 +185,13 @@ bool PhysicalOutputGuard::applyReplace(const QVector<Placement> &virtualOutputs,
             return !isVirtual(o.name) && o.enabled;
         });
     };
+
+    // No state file, no replace: without crash recovery a crash here could
+    // leave the monitors off for good, so the caller stays on extend.
+    if (!writeStateFile()) {
+        qWarning() << "Refusing to replace the physical outputs without crash recovery";
+        return false;
+    }
 
     // From here on the physical outputs may have been touched, so the
     // destructor restores even if this call ends up reporting failure.
@@ -253,7 +286,18 @@ bool PhysicalOutputGuard::reconcileExtend()
     // KWin replayed a remembered arrangement for this output set (it does that
     // when the same set of outputs reappears); put the physical ones back.
     qInfo() << "Physical outputs drifted after the virtual output appeared; re-applying the snapshot";
-    return run(restoreArgs(m_physical)) && matches(m_physical, current());
+    if (run(restoreArgs(m_physical)) && matches(m_physical, current())) {
+        return true;
+    }
+    // The physical outputs were touched and are not verifiably as the user
+    // had them: from here on release() restores instead of just dropping the
+    // snapshot, and a crash gets the same recovery as a replace.
+    m_held = true;
+    if (!writeStateFile()) {
+        qWarning() << "No crash recovery for the drifted physical outputs; manual recovery: kscreen-doctor" << restoreArgs(m_physical).join(u' ');
+    }
+    qWarning() << "Physical outputs could not be re-applied after the drift; they will be restored when the session ends";
+    return false;
 }
 
 bool PhysicalOutputGuard::restoreSnapshot(const QVector<Output> &physical)
@@ -306,8 +350,9 @@ bool PhysicalOutputGuard::release()
         return restore();
     }
     if (hasSnapshot()) {
+        // No state file to remove: only applyReplace() (or a failed
+        // reconcileExtend(), which holds) writes one.
         m_physical.clear();
-        QFile::remove(stateFilePath());
         qInfo() << "Physical outputs were never replaced; snapshot dropped, layout left as it is";
     }
     return true;
@@ -361,8 +406,8 @@ bool PhysicalOutputGuard::restoreFromStateFile()
         // A live session holds the outputs replaced on purpose; restoring
         // under it would re-enable the physical outputs over the virtual one
         // and delete its crash recovery. Its own teardown restores.
-        qInfo() << "State file" << file.fileName() << "belongs to running krdpserver PID" << ownerPid << "(a virtual-monitor session is live); not restoring."
-                << "Stop that server first if the outputs really are stuck.";
+        qInfo().noquote() << "State file" << file.fileName() << "belongs to running krdpserver PID" << ownerPid << "(a virtual-monitor session is live); not restoring."
+                          << "Stop that server first if the outputs really are stuck, or run: kscreen-doctor" << restoreArgs(physical).join(u' ');
         return false;
     }
     qWarning() << "A previous krdpserver" << (ownerPid > 0 ? u"(PID %1, gone)"_s.arg(ownerPid) : u"(unknown PID)"_s)
