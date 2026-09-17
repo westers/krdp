@@ -663,6 +663,367 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
+### Task 7: Congestion-driven adaptive quality (replaces goodput steering)
+
+**Why this task exists (read first):** Live validation on 2026-09-16 16:30–16:38 (journal of PID 2604187, `AdaptiveQuality=true`, LAN client, mostly idle desktop) showed the Task 6 loop still mis-steering: every step logged `link-limited` because the gate (`maxPendingFramesSinceSample >= 2`) trips on any two frames in flight (a 60 Hz mouse move with ~20 ms ack latency), and idle 4–14 KB windows dragged the 0.5-EMA goodput to 0.4–2 Mbit/s, so `target` came out 21–29 and quality sawtoothed 55↔80 while nothing was wrong with the link. Under a real limit the mapping errs the other way: CQP output at Quality 80 reached 15 Mbit/s during scrolling against the anchor table's 4.5 Mbit/s "full quality" figure, so a bitrate→quality table cannot steer a CQP encoder. Two more defects: decisions were only taken on `bandwidthChanged`, which never fires on an idle desktop (samples < 4 KB are rejected), so a drop was never climbed back; and `RdpConnection`'s loop waits `INFINITE`, so `NetworkDetection::update()` only ran on socket activity and idle bandwidth windows stretched to 1.0–1.6 s. Mitigation currently in place: `AdaptiveQuality=false` in `~/.config/krdpserverrc` (live-reloaded 16:38:44).
+
+**Ruling (controller):** drop the goodput control law entirely; keep the bandwidth measurement as a logged diagnostic. Quality moves on *pressure* only — RTT inflation or a persistent unacknowledged-frame backlog — and climbs back slowly when the interval was clear. Decisions run on a main-thread timer, not on bandwidth samples.
+
+**Files:**
+- Modify: `src/AdaptiveQuality.h` (full rewrite, content below)
+- Modify: `autotests/AdaptiveQualityTest.cpp` (full rewrite, cases below)
+- Modify: `src/VideoStream.cpp` — `Private` members (~lines 250–275), the `connect(... bandwidthChanged ...)` at ~313, `initialize()`/`close()`, `updateAdaptiveQuality()` (~477–537), `onFrameAcknowledge()` (~631), `sendFrame()` (~731), both `pendingFrames.clear()` sites (~384, ~559), helper `bumpAtomicMax` (~54)
+- Modify: `src/RdpConnection.cpp:562` (bounded wait)
+- Modify: `research.md` (OPT-016 status), `/home/westers/dev/rdp/CLAUDE.md` (the `AdaptiveQuality` sentence in "What actually runs"; that directory is not a git repo — just edit it)
+- Do NOT touch: `src/NetworkDetection.{h,cpp}` (measurement, EMA, `validBandwidthSamples()` stay as they are), KPipeWire, `server/`.
+
+**Interfaces:**
+- Consumes: `NetworkDetection::averageRTT()`, `minimumRTT()` (`std::chrono::system_clock::duration`), `bandwidth()` (kbit/s, log only); `VideoStream::Private::{quality, qualityCap, adaptiveQuality, surfacePixels, pendingFrames, pendingFramesMutex}` from Task 4/6.
+- Produces: `KRdp::AdaptiveQuality::Input{current, cap, averageRtt, minimumRtt, backlogged, climbAllowed}`, `Result{next, congested}`, `step()`; constants `MinQuality=10, StepUp=5, StepDown=10, CongestionRttMargin=5ms, BacklogFrames=2, ClimbHoldAfterStepDown=5s`. `VideoStream.h` is unchanged (`Q_SLOT void updateAdaptiveQuality()` stays; it is now the timer slot).
+
+- [ ] **Step 1: Rewrite `src/AdaptiveQuality.h`** with exactly this content:
+
+```cpp
+// SPDX-FileCopyrightText: 2026 Steve Westers
+// SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+#pragma once
+
+#include <algorithm>
+#include <chrono>
+
+namespace KRdp::AdaptiveQuality
+{
+
+constexpr int MinQuality = 10;
+constexpr int StepUp = 5;
+constexpr int StepDown = 10;
+
+// A rising RTT counts as congestion only once it is both a real gap above the
+// minimum (not sub-millisecond jitter) and proportionally large (>= 1.5x).
+constexpr auto CongestionRttMargin = std::chrono::milliseconds(5);
+
+// The client is "backlogged" when it never got within this many
+// unacknowledged frames of caught up during the whole decision interval
+// (VideoStream tracks the minimum after each ack and at decision time).
+constexpr int BacklogFrames = 2;
+
+// After a step down, hold before climbing again so a limited link settles
+// instead of sawtoothing every interval.
+constexpr auto ClimbHoldAfterStepDown = std::chrono::seconds(5);
+
+struct Input {
+    int current;
+    int cap;
+    // Microseconds, not milliseconds: a millisecond-truncated RTT makes 1-4 ms
+    // Wi-Fi jitter (min 1 ms, average 2 ms) look like a 2x spike.
+    std::chrono::microseconds averageRtt;
+    std::chrono::microseconds minimumRtt;
+    // True when the client stayed >= BacklogFrames frames behind for the
+    // whole interval - the client or the link could not keep up.
+    bool backlogged;
+    // False while ClimbHoldAfterStepDown has not elapsed since the last step down.
+    bool climbAllowed;
+};
+
+struct Result {
+    int next;
+    bool congested;
+};
+
+// One control step. Pressure (RTT congestion or a persistent frame backlog)
+// steps quality down by StepDown; a clear interval steps it up by StepUp
+// towards the cap, but only once climbAllowed. The result never exceeds the
+// cap and never drops below MinQuality.
+//
+// There is deliberately no goodput term: a passively measured goodput is a
+// lower bound on capacity, not an estimate of it (an idle desktop sends
+// almost nothing), and a CQP encoder's bitrate varies ~100x with content, so
+// a bitrate->quality table mis-steers in both directions. See Task 7 of the
+// OPT-016 plan for the 2026-09-16 journal evidence.
+inline Result step(const Input &in)
+{
+    const int hi = std::max(in.cap, MinQuality);
+    const bool congested = in.minimumRtt.count() > 0 && (in.averageRtt - in.minimumRtt) >= CongestionRttMargin && in.averageRtt * 2 > in.minimumRtt * 3;
+
+    int next = in.current;
+    if (congested || in.backlogged) {
+        next = in.current - StepDown;
+    } else if (in.climbAllowed) {
+        next = in.current + StepUp;
+    }
+    next = std::clamp(next, MinQuality, hi);
+    return {next, congested};
+}
+
+}
+```
+
+- [ ] **Step 2: Rewrite `autotests/AdaptiveQualityTest.cpp`** (keep the existing file header, `#include <QTest>`, `using namespace KRdp::AdaptiveQuality; using namespace std::chrono_literals;`, the `QTEST_GUILESS_MAIN` and `#include "AdaptiveQualityTest.moc"` lines exactly as they are today). Replace all test slots with these; each `QCOMPARE`/`QVERIFY` is a requirement:
+
+```cpp
+private:
+    static Input clear(int current, int cap = 80)
+    {
+        return {.current = current, .cap = cap, .averageRtt = 10ms, .minimumRtt = 10ms, .backlogged = false, .climbAllowed = true};
+    }
+
+private Q_SLOTS:
+    void clearIntervalClimbsByStepUp()
+    {
+        const auto r = step(clear(60));
+        QCOMPARE(r.next, 65);
+        QVERIFY(!r.congested);
+    }
+
+    void neverExceedsCap()
+    {
+        QCOMPARE(step(clear(78)).next, 80);
+        QCOMPARE(step(clear(80)).next, 80);
+    }
+
+    void capBelowCurrentClampsDown()
+    {
+        QCOMPARE(step(clear(80, 50)).next, 50);
+    }
+
+    void climbHoldKeepsQuality()
+    {
+        auto in = clear(60);
+        in.climbAllowed = false;
+        QCOMPARE(step(in).next, 60);
+    }
+
+    void backlogStepsDownEvenDuringHold()
+    {
+        auto in = clear(80);
+        in.backlogged = true;
+        QCOMPARE(step(in).next, 70);
+        in.climbAllowed = false;
+        QCOMPARE(step(in).next, 70);
+        QVERIFY(!step(in).congested);
+    }
+
+    void rttCongestionStepsDown()
+    {
+        auto in = clear(60);
+        in.averageRtt = 20ms;
+        in.minimumRtt = 10ms;
+        const auto r = step(in);
+        QVERIFY(r.congested);
+        QCOMPARE(r.next, 50);
+    }
+
+    void smallJitterIsNotCongestion()
+    {
+        auto in = clear(60);
+        in.averageRtt = 3000us; // 2 ms above the minimum: below the 5 ms margin
+        in.minimumRtt = 1000us;
+        QVERIFY(!step(in).congested);
+        QCOMPARE(step(in).next, 65);
+
+        in.averageRtt = 106ms; // 6 ms above the minimum but only 1.06x it
+        in.minimumRtt = 100ms;
+        QVERIFY(!step(in).congested);
+        QCOMPARE(step(in).next, 65);
+    }
+
+    void noRttBaselineIsNotCongestion()
+    {
+        auto in = clear(60);
+        in.averageRtt = 50ms;
+        in.minimumRtt = 0us;
+        QVERIFY(!step(in).congested);
+        QCOMPARE(step(in).next, 65);
+    }
+
+    void neverDropsBelowMinimum()
+    {
+        auto in = clear(12);
+        in.backlogged = true;
+        QCOMPARE(step(in).next, MinQuality);
+        in.current = MinQuality;
+        QCOMPARE(step(in).next, MinQuality);
+    }
+```
+
+- [ ] **Step 3: Build and run the test; expect all 9 slots to pass**
+
+Run: `cmake --build ~/dev/krdp/build -j16 2>&1 | tail -5 && ctest --test-dir ~/dev/krdp/build -R AdaptiveQuality --output-on-failure`
+(`VideoStream.cpp` will fail to compile at this point because `Input` changed — that is expected; if the build stops before the test binary links, do Step 4 first and then run this step. Report which order you used.)
+
+- [ ] **Step 4: `src/VideoStream.cpp` — backlog tracking and timer-driven decisions**
+
+4a. Replace the helper `bumpAtomicMax` (~line 50–59) and its comment with:
+
+```cpp
+// Atomically lowers `value` to `candidate` if it's lower, otherwise leaves it
+// alone. Used to track how close the client got to caught up since the
+// adaptive-quality decision last looked - see minPendingAfterAckSinceDecision.
+void bumpAtomicMin(std::atomic<int> &value, int candidate)
+{
+    int current = value.load(std::memory_order_relaxed);
+    while (candidate < current && !value.compare_exchange_weak(current, candidate, std::memory_order_relaxed)) {
+    }
+}
+```
+
+Delete the constant `MinimumValidSamplesBeforeAdapting` and its comment. Keep `QualityUpdateInterval = 1500 ms` and add next to it:
+
+```cpp
+// Don't take adaptive-quality decisions until NetworkDetection has had a few
+// RTT probes (every 70 ms) to establish a minimum-RTT baseline.
+constexpr auto WarmupAfterStreamStart = clk::seconds(3);
+```
+
+4b. In `VideoStream::Private`, delete `std::atomic<int> maxPendingFramesSinceSample` and its comment block, and delete `lastQualityUpdate`. Add:
+
+```cpp
+    // Backlog evidence for the adaptive-quality decision: the smallest number
+    // of frames still unacknowledged right after any ack since the last
+    // decision (INT_MAX = no ack since). Lowered on the connection thread in
+    // onFrameAcknowledge() under pendingFramesMutex (and to 0 wherever
+    // pendingFrames is cleared - a reset counts as caught up); read-and-reset
+    // by updateAdaptiveQuality() on the main thread.
+    std::atomic<int> minPendingAfterAckSinceDecision = std::numeric_limits<int>::max();
+    // Main-thread timer that drives updateAdaptiveQuality() every
+    // QualityUpdateInterval while streaming; started/stopped via queued
+    // invokeMethod so initialize()/close() may run on any thread.
+    QTimer adaptiveTimer;
+    clk::steady_clock::time_point streamingSince;
+    clk::steady_clock::time_point lastStepDown; // default = epoch = "never"
+```
+
+Add `#include <QTimer>` and `#include <limits>` if missing.
+
+4c. Replace the `connect(d->session->networkDetection(), &NetworkDetection::bandwidthChanged, this, &VideoStream::updateAdaptiveQuality);` at ~line 313 (and its comment about bandwidthChanged being emitted from the connection thread) with, in the constructor:
+
+```cpp
+    d->adaptiveTimer.setInterval(QualityUpdateInterval);
+    d->adaptiveTimer.setTimerType(Qt::CoarseTimer);
+    connect(&d->adaptiveTimer, &QTimer::timeout, this, &VideoStream::updateAdaptiveQuality);
+```
+
+At the end of a successful `initialize()` (just before its `return true`) add:
+
+```cpp
+    d->streamingSince = clk::steady_clock::now();
+    d->minPendingAfterAckSinceDecision = std::numeric_limits<int>::max();
+    QMetaObject::invokeMethod(&d->adaptiveTimer, qOverload<>(&QTimer::start), Qt::QueuedConnection);
+```
+
+At the top of `close()` add `QMetaObject::invokeMethod(&d->adaptiveTimer, &QTimer::stop, Qt::QueuedConnection);`. (If `initialize()` is only ever called from the main thread you may still keep the queued form — it is correct on both threads; say in the report which thread each runs on and how you determined it.)
+
+4d. In `onFrameAcknowledge()`: delete the `bumpAtomicMax(...)` call and its comment before `constFind`; after `d->pendingFrames.erase(itr);` add:
+
+```cpp
+    // How far behind the client still is now that this ack landed - see
+    // minPendingAfterAckSinceDecision.
+    bumpAtomicMin(d->minPendingAfterAckSinceDecision, int(d->pendingFrames.size()));
+```
+
+In `sendFrame()`: delete the `bumpAtomicMax(...)` call and its comment after `pendingFrames.insert(frameId)` (an insert cannot lower the minimum). At both `d->pendingFrames.clear();` sites (in `close()` and in `performReset()`), add `bumpAtomicMin(d->minPendingAfterAckSinceDecision, 0);` immediately after the clear, inside the same lock scope.
+
+4e. Replace the body of `updateAdaptiveQuality()` with:
+
+```cpp
+void VideoStream::updateAdaptiveQuality()
+{
+    if (!d->adaptiveQuality.load()) {
+        return;
+    }
+    const auto now = clk::steady_clock::now();
+    if (now - d->streamingSince < WarmupAfterStreamStart) {
+        return;
+    }
+    if (d->surfacePixels.load() == 0) {
+        return; // no surface yet, nothing is being sent
+    }
+
+    int pendingNow = 0;
+    {
+        std::lock_guard lock(d->pendingFramesMutex);
+        pendingNow = int(d->pendingFrames.size());
+    }
+    const int minAfterAck = d->minPendingAfterAckSinceDecision.exchange(std::numeric_limits<int>::max());
+    // Backlogged = the client never got within BacklogFrames of caught up:
+    // neither after any ack this interval nor right now. Idle (pendingNow 0)
+    // is never a backlog; a stall with no acks at all is (min(INT_MAX, now)).
+    const bool backlogged = std::min(minAfterAck, pendingNow) >= AdaptiveQuality::BacklogFrames;
+
+    auto *network = d->session->networkDetection();
+    const auto averageRtt = clk::duration_cast<clk::microseconds>(network->averageRTT());
+    const auto minimumRtt = clk::duration_cast<clk::microseconds>(network->minimumRTT());
+    const quint8 current = d->quality.load();
+    const auto result = AdaptiveQuality::step({
+        .current = current,
+        .cap = d->qualityCap.load(),
+        .averageRtt = averageRtt,
+        .minimumRtt = minimumRtt,
+        .backlogged = backlogged,
+        .climbAllowed = (now - d->lastStepDown) >= AdaptiveQuality::ClimbHoldAfterStepDown,
+    });
+
+    // The cap or the adaptive-quality flag may have changed while step() ran;
+    // re-check both before committing so a stale result never overshoots a
+    // just-lowered cap or gets applied after adaptive quality was turned off.
+    if (!d->adaptiveQuality.load()) {
+        return;
+    }
+    const quint8 bounded = quint8(std::min<int>(result.next, d->qualityCap.load()));
+    if (bounded < current) {
+        d->lastStepDown = now;
+    }
+    if (bounded == current) {
+        return;
+    }
+
+    d->quality = bounded;
+    qCDebug(KRDP) << "Adaptive quality ->" << bounded << "(" << (result.congested ? "congested" : (backlogged ? "backlogged" : "clear")) << "rtt avg" << averageRtt.count() << "min" << minimumRtt.count()
+                  << "us, pending min-after-ack" << (minAfterAck == std::numeric_limits<int>::max() ? -1 : minAfterAck) << "now" << pendingNow << ", goodput" << network->bandwidth() << "kbit/s, cap"
+                  << d->qualityCap.load() << ")";
+    Q_EMIT requestedQualityChanged(bounded);
+}
+```
+
+Delete the now-unused `#include`s or variables only if the compiler warns. `setQualityCap()` and `setAdaptiveQuality()` are unchanged.
+
+- [ ] **Step 5: `src/RdpConnection.cpp:562` — bounded wait**
+
+Change `WaitForMultipleObjects(1 + handleCount, events.data(), FALSE, INFINITE);` to a 100 ms timeout with this comment above it:
+
+```cpp
+        // Bounded, not INFINITE: NetworkDetection::update() (RTT probe every
+        // 70 ms, bandwidth window stop after 500 ms) must run on an idle link
+        // too. Waiting only for socket activity stretched idle bandwidth
+        // windows to 1.0-1.6 s in the 2026-09-16 journal.
+        WaitForMultipleObjects(1 + handleCount, events.data(), FALSE, 100);
+```
+
+Confirm nothing after the wait assumes an event fired (each handle is re-checked with `WaitForSingleObject(h, 0)`); say so in the report with the line numbers you checked.
+
+- [ ] **Step 6: Build, tests, stock-build check**
+
+Run: `cmake --build ~/dev/krdp/build -j16 2>&1 | grep -E 'error|warning: unused|Linking' ; ctest --test-dir ~/dev/krdp/build --output-on-failure 2>&1 | tail -15`
+Expected: no errors, no new warnings, all tests pass (AdaptiveQualityTest 9/9 plus the existing suite).
+Then `~/dev/krdp/scripts/check-stock-build.sh` — expected: still compiles (this task does not touch the KPipeWire API surface, so it should be a no-op check; report its last line).
+
+- [ ] **Step 7: Deployment gate — do NOT restart the service in this task**
+
+Run `ss -tnp | grep ':3389' | grep ESTAB`. A client is expected to be connected (Steve is working); if the output is non-empty, do not restart anything and report `BUILT, NOT DEPLOYED (client connected)`. Only if it is empty: `systemctl --user restart app-org.kde.krdpserver.service`, wait 3 s, and report the startup summary line from `journalctl --user -u app-org.kde.krdpserver --no-pager -n 30 | grep -E 'Runtime config applied|adaptive='`. Do not change `AdaptiveQuality` in `~/.config/krdpserverrc` (it stays `false` until the controller re-enables it after deploy).
+
+- [ ] **Step 8: Docs**
+
+`research.md`, OPT-016 entry: append a dated (2026-09-16) note: live validation found the goodput-steered loop sawtoothing 55↔80 on an idle LAN desktop (link-limited gate tripped by 2 frames in flight; idle 4–14 KB windows dragged the EMA goodput to ~1 Mbit/s → target 21–29); redesigned as congestion-driven (RTT inflation or a ≥2-frame backlog held for a whole 1.5 s interval steps −10; clear intervals step +5 after a 5 s hold; decisions on a 1.5 s timer; goodput now log-only); the journal check command is unchanged; the log line now reads `Adaptive quality -> N ( congested|backlogged|clear rtt avg … min … us, pending min-after-ack … now …, goodput … kbit/s, cap … )`.
+
+`/home/westers/dev/rdp/CLAUDE.md`: replace the clause "the session steers quality down/up from measured goodput and RTT, reopening `h264_vaapi` at the new QP each time (OPT-016)" with "the session steps quality down by 10 on RTT inflation (≥ 5 ms and ≥ 1.5× the minimum) or when the client stays ≥ 2 frames behind for a whole 1.5 s interval, and back up by 5 per interval after a 5 s hold, reopening `h264_vaapi` at the new QP each time (OPT-016; goodput is logged, not used)".
+
+- [ ] **Step 9: Commit in three commits** (each ending with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; no amend/rebase/stash/push):
+
+1. `git add src/AdaptiveQuality.h autotests/AdaptiveQualityTest.cpp src/VideoStream.cpp` → `video: congestion-driven adaptive quality, drop goodput steering` (body: the journal evidence in two lines and the new rule in two lines).
+2. `git add src/RdpConnection.cpp` → `connection: bounded wait so NetworkDetection::update runs on an idle link`.
+3. `git add research.md` → `docs: OPT-016 redesign after live validation` (CLAUDE.md lives outside the repo; mention in the report that it was edited).
+
+
 ## Self-review
 
 - Spec coverage: OPT-016 "route quality into the encoder" → Task 1 (encoder actually changes) + Task 4 (steering); "consume QoE acks" — deferred: the fork's `gfxQoEFrameAcknowledge` stub stays; goodput+RTT is the first loop (research §5.6 accepts either); metablock honesty (review §2.3) → Task 4 step 2; §13's "test that `setQuality()` takes effect" → Task 1 step 1/4.
