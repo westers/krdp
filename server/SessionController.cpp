@@ -1561,10 +1561,14 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
         if (wrapper->forceSingleVirtual) {
             qInfo() << "MonitorMode=virtual: falling back to one output of" << info.desktopSize << "for the client's" << info.monitors.size() << "monitors";
         }
+        // sanitize() keeps desktopSize usable (an unusable monitor union
+        // drops the list and the fallback replaces an unusable size);
+        // singleSize() is the belt for the one output an encoder must open.
+        const QSize size = KRdp::ClientDisplay::singleSize(info, m_virtualFallbackSize);
         std::vector<std::unique_ptr<KRdp::AbstractSession>> sessions;
         auto session = makeSession();
-        const auto name = KRdp::ClientDisplay::virtualMonitorName(0, info.desktopSize);
-        session->setVirtualMonitor(KRdp::VirtualMonitor{name, info.desktopSize, 1.0});
+        const auto name = KRdp::ClientDisplay::virtualMonitorName(0, size);
+        session->setVirtualMonitor(KRdp::VirtualMonitor{name, size, 1.0});
         // The RDPGFX surface this session feeds; see AbstractSession::setMonitorIndex().
         session->setMonitorIndex(0);
         wrapper->virtualPrimaryName = KRdp::OutputSnapshot::VirtualPrefix + name;
@@ -1580,7 +1584,7 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
         }
         sessions.push_back(std::move(session));
 
-        qInfo().noquote() << "MonitorMode=virtual: one output" << info.desktopSize << "policy" << policyLabel << "placed at" << anchor;
+        qInfo().noquote() << "MonitorMode=virtual: one output" << size << "policy" << policyLabel << "placed at" << anchor;
         wrapper->setSessions(std::move(sessions), MonitorLayout{});
         return;
     }

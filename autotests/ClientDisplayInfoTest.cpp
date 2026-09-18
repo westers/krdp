@@ -83,6 +83,64 @@ private Q_SLOTS:
         QVERIFY(sanitize(info, QSize(1920, 1080)).monitors.isEmpty());
     }
 
+    void unionWiderThanOneEncoderDropsTheList()
+    {
+        // Two usable monitors whose union no single virtual output could
+        // carry (5120 px is past the VA-API surface limit): the list goes,
+        // and the advertised 5120x1440 desktop is unusable too -> fallback.
+        const auto out = sanitize(Info{QSize(5120, 1440), {{QRect(0, 0, 2560, 1440), true}, {QRect(2560, 0, 2560, 1440), false}}}, QSize(1920, 1080));
+        QVERIFY(out.monitors.isEmpty());
+        QCOMPARE(out.desktopSize, QSize(1920, 1080));
+        // Stacked vertically past the limit as well (two 2160-high panels).
+        const auto tall = sanitize(Info{QSize(3840, 4320), {{QRect(0, 0, 3840, 2160), true}, {QRect(0, 2160, 3840, 2160), false}}}, QSize(1920, 1080));
+        QVERIFY(tall.monitors.isEmpty());
+        QCOMPARE(tall.desktopSize, QSize(1920, 1080));
+        // Within the limit in both directions is kept (2 x 1440 high = 2880).
+        const auto stacked = sanitize(Info{QSize(2560, 2880), {{QRect(0, 0, 2560, 1440), true}, {QRect(0, 1440, 2560, 1440), false}}}, QSize(1920, 1080));
+        QCOMPARE(stacked.monitors.size(), 2);
+        QCOMPARE(stacked.desktopSize, QSize(2560, 2880));
+    }
+
+    void unionWithinTheLimitIsKept()
+    {
+        const auto out = sanitize(Info{QSize(3840, 1080), {{QRect(0, 0, 1920, 1080), true}, {QRect(1920, 0, 1920, 1080), false}}}, QSize(1920, 1080));
+        QCOMPARE(out.monitors.size(), 2);
+        QCOMPARE(out.desktopSize, QSize(3840, 1080));
+    }
+
+    void absurdPositionsDropTheList()
+    {
+        // TS_MONITOR_DEF coordinates are INT32; nothing past +-32767 is a
+        // monitor position, and a union computed from it could overflow.
+        const auto far = sanitize(Info{QSize(3840, 1080), {{QRect(0, 0, 1920, 1080), true}, {QRect(40000, 0, 1920, 1080), false}}}, QSize(1920, 1080));
+        QVERIFY(far.monitors.isEmpty());
+        const auto negative = sanitize(Info{QSize(3840, 1080), {{QRect(-32768, 0, 1920, 1080), true}, {QRect(0, 0, 1920, 1080), false}}}, QSize(1920, 1080));
+        QVERIFY(negative.monitors.isEmpty());
+        // The edge itself is fine.
+        const auto edge = sanitize(Info{QSize(3840, 1080), {{QRect(-32767, 0, 1920, 1080), true}, {QRect(-32767 + 1920, 0, 1920, 1080), false}}}, QSize(1920, 1080));
+        QCOMPARE(edge.monitors.size(), 2);
+        QCOMPARE(edge.monitors[0].geometry, QRect(0, 0, 1920, 1080));
+    }
+
+    void overlappingMonitorsDropTheList()
+    {
+        const auto out = sanitize(Info{QSize(3840, 1080), {{QRect(0, 0, 1920, 1080), true}, {QRect(1900, 0, 1920, 1080), false}}}, QSize(1920, 1080));
+        QVERIFY(out.monitors.isEmpty());
+        // Touching edges are not overlapping.
+        const auto touching = sanitize(Info{QSize(3840, 1080), {{QRect(0, 0, 1920, 1080), true}, {QRect(1920, 0, 1920, 1080), false}}}, QSize(1920, 1080));
+        QCOMPARE(touching.monitors.size(), 2);
+    }
+
+    void singleSizeIsAlwaysUsable()
+    {
+        // What a single virtual output (VirtualMonitorLayout=single, or the
+        // one-output fallback) is asked for: the sanitised desktop size when
+        // it is usable, the fallback otherwise.
+        QCOMPARE(singleSize(Info{QSize(3840, 1080), {}}, QSize(1920, 1080)), QSize(3840, 1080));
+        QCOMPARE(singleSize(Info{QSize(5120, 1440), {}}, QSize(1920, 1080)), QSize(1920, 1080));
+        QCOMPARE(singleSize(Info{QSize(), {}}, QSize(1920, 1080)), QSize(1920, 1080));
+    }
+
     void placementTranslatesByAnchor()
     {
         const QVector<VideoMonitor> monitors{{QRect(0, 100, 1920, 1080), false}, {QRect(1920, 0, 1920, 1280), true}};
