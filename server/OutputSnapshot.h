@@ -200,6 +200,25 @@ inline bool allPresent(const QVector<Output> &snapshot, const QVector<Output> &c
     });
 }
 
+/**
+ * Every physical output of \a snapshot is present in \a current AND disabled:
+ * what a replace has to read back before it may call itself applied. An
+ * output the compositor is re-adding is absent, not disabled, and a read-back
+ * with no physical output at all is that churn, not a replace.
+ */
+inline bool allPresentAndDisabled(const QVector<Output> &snapshot, const QVector<Output> &current)
+{
+    return std::all_of(snapshot.cbegin(), snapshot.cend(), [&current](const Output &wanted) {
+        if (isVirtual(wanted.name)) {
+            return true;
+        }
+        const auto it = std::find_if(current.cbegin(), current.cend(), [&wanted](const Output &candidate) {
+            return candidate.name == wanted.name;
+        });
+        return it != current.cend() && !it->enabled;
+    });
+}
+
 inline QJsonArray toJsonArray(const QVector<Output> &outputs)
 {
     QJsonArray array;

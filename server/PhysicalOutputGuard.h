@@ -55,6 +55,15 @@ public:
     bool held() const;
     QVector<KRdp::OutputSnapshot::Output> physicalOutputs() const;
 
+    /**
+     * Disable the physical outputs in favour of \a virtualOutputs. Waits
+     * first for every snapshotted physical output to be present and to stay
+     * present (creating the virtual output can make KWin remove and re-add
+     * them), and counts as applied only when every one of them reads back
+     * present AND disabled. False without a mutation (not held) when the
+     * outputs never settled; false while held when the disable was issued
+     * but could not be verified, in which case release() restores.
+     */
     bool applyReplace(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
     /**
      * Where the virtual outputs belong while the physical ones are enabled
@@ -100,8 +109,19 @@ private:
     static bool run(const QStringList &args, QByteArray *output = nullptr);
     static QVector<KRdp::OutputSnapshot::Output> current(QString *error = nullptr);
     static bool restoreSnapshot(const QVector<KRdp::OutputSnapshot::Output> &physical);
-    /** Poll until  physical is present and matching for a stability window; false on timeout. */
-    static bool waitForPhysical(const QVector<KRdp::OutputSnapshot::Output> &physical);
+    /** What waitForPhysical() waits for. */
+    enum class SettleGoal {
+        /** Every physical output of the snapshot is present, whatever its state (before a replace). */
+        Present,
+        /** Every physical output of the snapshot is present and as snapshotted (after a restore). */
+        Matching,
+    };
+    /** Poll until \a physical meets \a goal and has for a stability window; false on timeout. */
+    static bool waitForPhysical(const QVector<KRdp::OutputSnapshot::Output> &physical, SettleGoal goal);
+    /** The disable-then-place form of the replace, for when kscreen refuses the combined change. */
+    bool applyReplaceInTwoSteps(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
+    /** Poll until every snapshotted physical output reads back present and disabled; re-issues the two-step form once. */
+    bool settleReplace(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
     static bool positionOutputs(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
     /** Write the snapshot (and this PID) for restoreFromStateFile(); false, logged, on failure. */
     bool writeStateFile() const;

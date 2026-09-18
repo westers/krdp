@@ -146,6 +146,32 @@ private Q_SLOTS:
         QVERIFY(allPresent({}, {}));
     }
 
+    void allPresentAndDisabledTellsAbsentFromDisabled()
+    {
+        // The replace's success check: an output KWin is re-adding is absent,
+        // not disabled, and a read-back with no physical output at all is the
+        // churn, not a replace (hw standby batch v6c, finding F).
+        const auto all = parse(kscreenJson);
+        const auto physical = physicalOnly(all);
+        QVERIFY(!allPresentAndDisabled(physical, all)); // both still enabled
+        auto replaced = all;
+        replaced[0].enabled = false;
+        replaced[1].enabled = false;
+        QVERIFY(allPresentAndDisabled(physical, replaced)); // the virtual output's state is not looked at
+        QVector<Output> onlyVirtual{all[2]};
+        QVERIFY(!allPresentAndDisabled(physical, onlyVirtual)); // nothing present is not "all disabled"
+        QVERIFY(!allPresentAndDisabled(physical, {}));
+        QVector<Output> oneBack{replaced[0], all[2]};
+        QVERIFY(!allPresentAndDisabled(physical, oneBack)); // HDMI-A-1 absent
+        QVector<Output> oneEnabled{replaced[0], all[1], all[2]};
+        QVERIFY(!allPresentAndDisabled(physical, oneEnabled)); // HDMI-A-1 back, but enabled
+        // An output the snapshot itself had disabled only has to be present and stay disabled.
+        auto snapshotWithOff = physical;
+        snapshotWithOff[1].enabled = false;
+        QVERIFY(allPresentAndDisabled(snapshotWithOff, replaced));
+        QVERIFY(allPresentAndDisabled({}, {}));
+    }
+
     void jsonRoundTrip()
     {
         const auto physical = physicalOnly(parse(kscreenJson));

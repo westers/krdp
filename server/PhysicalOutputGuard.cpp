@@ -25,14 +25,22 @@ namespace
 {
 constexpr int KscreenTimeoutMs = 5000;
 constexpr int RestoreRetryMs = 2000;
-// The settle wait after a restore's enable command; see waitForPhysical().
-// Panels that were in standby make KWin remove and re-add the physical
-// outputs ~1-3.5 s after they are enabled (hw batch v6, runs 1/4/5); the
-// budget covers that with margin, and the stability window catches a
-// read-back that happened to land before the removal (run 4).
+// The settle wait before a replace and after a restore's enable command;
+// see waitForPhysical(). Panels that have been in standby make KWin remove
+// and re-add the physical outputs when the virtual output is created and
+// when they are enabled: DP-1 gone at +0.25 s, HDMI-A-1 at +1.1 s, both back
+// by +3.5 s, nothing moves afterwards (hw standby batch v6c, run 4 table).
+// The budget bounds the time to the first good read-back with ~2.5 s of
+// margin; the stability window catches a read-back that lands before the
+// removal starts (a match at +0.1 s is not the end of it).
 constexpr int SettlePollMs = 500;
 constexpr int SettleTimeoutMs = 6000;
-constexpr int SettleStableMs = 1500;
+constexpr int SettleStableMs = 1000;
+// After the disable: how long an output that vanished under it (a churn
+// that started late) is given to come back before the replace is failed.
+// The re-add lands at +3.15 s / +3.45 s after the removal (same table), so
+// 3 s would miss it by the poll grid when the churn starts at the disable.
+constexpr int ReplaceSettleMs = 4000;
 const QString KscreenDoctor = u"kscreen-doctor"_s;
 // Steve's layout, for the messages that have no snapshot to derive it from.
 const QString FallbackRecovery =
@@ -196,11 +204,20 @@ bool PhysicalOutputGuard::applyReplace(const QVector<Placement> &virtualOutputs,
         qWarning() << "applyReplace with no virtual output; refusing to disable the physical outputs";
         return false;
     }
-    const auto anyPhysicalEnabled = [](const QVector<Output> &outputs) {
-        return std::any_of(outputs.cbegin(), outputs.cend(), [](const Output &o) {
-            return !isVirtual(o.name) && o.enabled;
-        });
-    };
+
+    // Settle before touching anything. When the panels have been in standby,
+    // creating the virtual output (and the display wake at connect, when it
+    // is on) makes KWin remove and re-add the physical outputs over ~3.5 s;
+    // a disable issued in that gap is refused ("Output ... not found") and
+    // a read-back cannot tell an absent output from a disabled one, so the
+    // replace was reported applied while the panels came back lit (hw
+    // standby batch v6c, finding F). Nothing has been mutated on a timeout,
+    // so nothing is held: the caller continues as extend.
+    if (!waitForPhysical(m_physical, SettleGoal::Present)) {
+        qWarning() << "Physical outputs not all present within" << SettleTimeoutMs
+                   << "ms of the virtual output appearing (the compositor is still re-adding them); not replacing them";
+        return false;
+    }
 
     // No state file, no replace: without crash recovery a crash here could
     // leave the monitors off for good, so the caller stays on extend.
@@ -215,38 +232,67 @@ bool PhysicalOutputGuard::applyReplace(const QVector<Placement> &virtualOutputs,
 
     // kscreen-doctor exits 0 whether or not it applied anything, so the
     // read-back is what tells a refused change from an applied one.
-    const bool combinedRan = run(replaceArgs(m_physical, virtualOutputs, primaryVirtualName));
-    QVector<Output> after = combinedRan ? current() : QVector<Output>();
-    if (!combinedRan || after.isEmpty() || anyPhysicalEnabled(after)) {
-        // kscreen may refuse the combined change (priorities colliding with
-        // outputs that are being disabled in the same config); apply it as
-        // two steps instead. The virtual outputs already exist and are
-        // enabled, so disabling the physical ones first never leaves KWin
-        // without an enabled output, and the virtual outputs are placed and
-        // prioritised only once nothing is left for them to overlap.
-        if (!combinedRan) {
-            qInfo() << "Combined replace did not run; applying in two steps";
-        } else if (after.isEmpty()) {
-            qInfo() << "Combined replace applied but the read-back failed; applying in two steps";
-        } else {
-            qInfo() << "Combined replace refused; applying in two steps";
-        }
-        if (!run(replaceArgs(m_physical, {}, QString())) || !run(positionArgs(virtualOutputs, primaryVirtualName, 1))) {
+    if (!run(replaceArgs(m_physical, virtualOutputs, primaryVirtualName))) {
+        qInfo() << "Combined replace did not run; applying in two steps";
+        if (!applyReplaceInTwoSteps(virtualOutputs, primaryVirtualName)) {
             return false;
         }
-        after = current();
     }
-
-    if (after.isEmpty()) {
-        qWarning() << "replace policy applied but the read-back failed; the physical outputs may be in any state";
-        return false;
-    }
-    if (anyPhysicalEnabled(after)) {
-        qWarning() << "replace policy applied but a physical output is still enabled:" << after;
+    if (!settleReplace(virtualOutputs, primaryVirtualName)) {
         return false;
     }
     qInfo() << "Physical outputs replaced by" << virtualOutputs.size() << "virtual output(s)";
     return true;
+}
+
+bool PhysicalOutputGuard::applyReplaceInTwoSteps(const QVector<Placement> &virtualOutputs, const QString &primaryVirtualName)
+{
+    // kscreen may refuse the combined change (priorities colliding with
+    // outputs that are being disabled in the same config). The virtual
+    // outputs already exist and are enabled, so disabling the physical ones
+    // first never leaves KWin without an enabled output, and the virtual
+    // outputs are placed and prioritised only once nothing is left for them
+    // to overlap.
+    return run(replaceArgs(m_physical, {}, QString())) && run(positionArgs(virtualOutputs, primaryVirtualName, 1));
+}
+
+bool PhysicalOutputGuard::settleReplace(const QVector<Placement> &virtualOutputs, const QString &primaryVirtualName)
+{
+    // Applied means: every physical output of the snapshot is present in
+    // the read-back AND disabled. One that is absent may be a churn that
+    // started after the pre-settle; give it ReplaceSettleMs to come back,
+    // then require it disabled. One that is present but enabled - the
+    // combined change was refused, or the re-add brought it back enabled
+    // (KWin replays the stored arrangement, and the virtual output's place
+    // with it) - gets the two-step form re-issued, once.
+    QElapsedTimer timer;
+    timer.start();
+    bool reissued = false;
+    for (;;) {
+        const auto now = current();
+        if (!now.isEmpty() && allPresentAndDisabled(m_physical, now)) {
+            return true;
+        }
+        if (!now.isEmpty() && allPresent(m_physical, now)) {
+            if (reissued) {
+                qWarning() << "replace policy applied but a physical output is still enabled:" << now;
+                return false;
+            }
+            reissued = true;
+            qInfo() << "Physical outputs present but not all disabled after the replace; applying in two steps";
+            if (!applyReplaceInTwoSteps(virtualOutputs, primaryVirtualName)) {
+                return false;
+            }
+            // The two-step form's own read-back decides; no pause needed.
+            continue;
+        }
+        if (timer.elapsed() >= ReplaceSettleMs) {
+            qWarning() << "replace policy applied but a physical output has not come back within" << ReplaceSettleMs
+                       << "ms to be verified disabled (compositor churn); the physical outputs may be in any state:" << now;
+            return false;
+        }
+        QThread::msleep(SettlePollMs);
+    }
 }
 
 void PhysicalOutputGuard::setParkPlacements(const QVector<Placement> &virtualOutputs, const QString &primaryVirtualName)
@@ -338,11 +384,12 @@ bool PhysicalOutputGuard::reconcileExtend()
     return false;
 }
 
-bool PhysicalOutputGuard::waitForPhysical(const QVector<Output> &physical)
+bool PhysicalOutputGuard::waitForPhysical(const QVector<Output> &physical, SettleGoal goal)
 {
-    // Blocking on purpose: the callers (teardown, takeover, the retry, the
-    // start-up restore) must not run the event loop here, or cursor samples,
-    // input and a connection's destruction would re-enter them mid-restore.
+    // Blocking on purpose: the callers (the replace, teardown, takeover, the
+    // retry, the start-up restore) must not run the event loop here, or
+    // cursor samples, input and a connection's destruction would re-enter
+    // them mid-change.
     QElapsedTimer timer;
     timer.start();
     qint64 stableSince = -1;
@@ -350,7 +397,8 @@ bool PhysicalOutputGuard::waitForPhysical(const QVector<Output> &physical)
     bool churned = false;
     for (;;) {
         const auto now = current();
-        if (!now.isEmpty() && matches(physical, now)) {
+        const bool good = !now.isEmpty() && (goal == SettleGoal::Present ? allPresent(physical, now) : matches(physical, now));
+        if (good) {
             if (stableSince < 0) {
                 stableSince = timer.elapsed();
             }
@@ -371,7 +419,9 @@ bool PhysicalOutputGuard::waitForPhysical(const QVector<Output> &physical)
             // missing, so the command applies now; once, so a layout KWin
             // keeps overriding ends in a timeout rather than a fight, and
             // not on the first read-back, which the enable itself answers.
-            if (!reapplied && timer.elapsed() >= SettlePollMs && !now.isEmpty() && allPresent(physical, now)) {
+            // Only when restoring: before a replace, present is all that
+            // is asked for.
+            if (goal == SettleGoal::Matching && !reapplied && timer.elapsed() >= SettlePollMs && !now.isEmpty() && allPresent(physical, now)) {
                 reapplied = true;
                 qInfo() << "Physical outputs are back but not as snapshotted; re-applying the restore";
                 if (!run(restoreArgs(physical))) {
@@ -396,7 +446,7 @@ bool PhysicalOutputGuard::restoreSnapshot(const QVector<Output> &physical)
     // later, replaying whatever arrangement it has stored for the set that
     // reappears. Verifying on the first read-back races that (hw batch v6,
     // findings A/B); wait until the snapshot is back and stays back.
-    return waitForPhysical(physical);
+    return waitForPhysical(physical, SettleGoal::Matching);
 }
 
 bool PhysicalOutputGuard::restore()

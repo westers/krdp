@@ -59,7 +59,7 @@ struct Detector {
     }
 
     /**
-     * Ignore samples until  untilMs: a restore or park is in progress and
+     * Ignore samples until \a untilMs: a restore or park is in progress and
      * the compositor is removing and re-adding outputs, which warps the
      * pointer and produces samples nobody asked for. Not a latch; the
      * detector resumes at the deadline.
