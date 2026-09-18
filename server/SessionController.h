@@ -73,7 +73,11 @@ public:
     };
     /** How many virtual outputs `MonitorMode=virtual` creates for a client. */
     enum class VirtualLayout {
-        /** One per client monitor (Phase B); one at the desktop size until then. */
+        /**
+         * One per client monitor, mirroring the client's own layout (Phase B);
+         * one at the desktop size when the client advertises fewer than two
+         * usable monitors, or when one of the requested outputs never appears.
+         */
         Client,
         /** Always one output, at the client's desktop size. */
         Single,
@@ -229,6 +233,19 @@ private:
      * has delivered that information, not on connect.
      */
     void buildVirtualSessions(SessionWrapper *wrapper);
+    /**
+     * Wire one virtual session's lifecycle signals to the wrapper's policy
+     * application (started / stream active / geometry resolved) and to the
+     * unresolved-output fallback. Shared by the single- and multi-output
+     * builds; the connections die with the session object on purpose.
+     */
+    void connectVirtualSession(KRdp::AbstractSession *session, SessionWrapper *wrapper);
+    /**
+     * A multi-output virtual build had an output that never appeared: drop
+     * the whole set and build the wrapper again as one output at the
+     * client's desktop size (the Phase A path). Once per wrapper.
+     */
+    void rebuildAsSingleVirtual(SessionWrapper *wrapper);
     /** buildSessions() for every live wrapper. */
     void rebuildSessions();
     /**

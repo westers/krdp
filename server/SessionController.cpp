@@ -54,6 +54,14 @@ constexpr int MultiRebuildSettleMs = 2000;
 // samples arrive queued behind the call that caused them (hw batch v6,
 // finding C).
 constexpr int TakeoverSuspendMs = 3000;
+// How long a multi-output virtual session waits after the policy has been
+// applied, or after the last virtual output moved, before it reads the
+// outputs' real places back and publishes them to the client; see
+// SessionWrapper::adoptActualVirtualLayout(). The QScreen geometry updates
+// a kscreen-doctor call causes arrive one output at a time, queued behind
+// the (blocking) call itself; one timer restarted on each of them turns a
+// burst into one layout reset instead of one per output.
+constexpr int VirtualLayoutAdoptMs = 1000;
 
 QString layoutSummary(const QVector<KRdp::VideoMonitor> &monitors)
 {
@@ -92,6 +100,10 @@ public:
         connect(connection->videoStream(), &KRdp::VideoStream::requestedQualityChanged, this, &SessionWrapper::onRequestedQualityChanged, Qt::QueuedConnection);
 
         connect(connection, &QObject::destroyed, this, &SessionWrapper::onConnectionDestroyed);
+
+        m_adoptTimer.setSingleShot(true);
+        m_adoptTimer.setInterval(VirtualLayoutAdoptMs);
+        connect(&m_adoptTimer, &QTimer::timeout, this, &SessionWrapper::adoptActualVirtualLayout);
     }
 
     ~SessionWrapper() override
@@ -193,6 +205,73 @@ public:
         // and the controller's "Restore my monitors" action follows held()
         // as much as ownership.
         Q_EMIT physicalLayoutOwnershipChanged();
+        // Multi-output: whatever the guard calls above made of the requested
+        // positions (or did not, without a snapshot), the RDP layout has to
+        // describe where the outputs really are before pointer input may
+        // be mapped through it.
+        scheduleVirtualLayoutAdoption();
+    }
+
+    /**
+     * Multi-output virtual session: read the outputs' real places back once
+     * they have stopped moving. Restarted by every virtual output geometry
+     * change after the policy has been applied (a console takeover parks
+     * the outputs beside the physical desktop, a standby panel's re-add
+     * replays a stored arrangement), so the client follows every move.
+     */
+    void scheduleVirtualLayoutAdoption()
+    {
+        if (layout.isEmpty() || !outputGuard) {
+            return;
+        }
+        m_adoptTimer.start();
+    }
+
+    /**
+     * KWin may refuse or adjust the requested positions of the virtual
+     * outputs, and moves them again later (takeover park, output churn).
+     * Whatever it did is what the RDP layout must describe, or pointer
+     * input lands off by the difference: read every session's resolved
+     * geometry back and, where it differs from the layout the stream was
+     * reset with, re-publish. VideoStream::setMonitorLayout() resets the
+     * surfaces with the new TS_MONITOR_DEF set, and onInputEvent() reads
+     * layout.monitors on every event, so input follows.
+     *
+     * Only the positions are adopted: the sizes are what the sessions
+     * requested (at scale 1, so logical equals capture pixels), and
+     * correctSurfaceSize() already owns the one correction a size can need.
+     */
+    void adoptActualVirtualLayout()
+    {
+        if (layout.isEmpty() || !connection || !outputGuard) {
+            return;
+        }
+        QVector<KRdp::VideoMonitor> actual = layout.monitors;
+        bool allResolved = true;
+        for (size_t i = 0; i < sessions.size() && qsizetype(i) < actual.size(); ++i) {
+            const auto &session = sessions[i];
+            const QRect geometry = session->outputGeometry();
+            if (!session->outputGeometryResolved() || !geometry.isValid()) {
+                allResolved = false;
+                continue;
+            }
+            actual[qsizetype(i)].geometry.moveTopLeft(geometry.topLeft());
+        }
+        // From here on the layout describes the outputs as KWin has them,
+        // whether or not that is what was asked for, and pointer input may
+        // be mapped through it. An output that is away right now (KWin
+        // re-adding it) keeps its last place and the next geometry change
+        // re-schedules this.
+        if (allResolved) {
+            virtualLayoutAdopted = true;
+            m_loggedGatedVirtualInput = false;
+        }
+        if (actual == layout.monitors) {
+            return;
+        }
+        qWarning().noquote() << QStringLiteral("KWin placed the virtual outputs differently than the layout describes; adopting: %1").arg(layoutSummary(actual));
+        layout.monitors = actual;
+        connection->videoStream()->setMonitorLayout(actual);
     }
 
     /**
@@ -289,7 +368,11 @@ public:
         for (const auto &entry : sessions) {
             auto *session = entry.get();
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::frameReceived, videoStream, &KRdp::VideoStream::queueFrame));
-            m_sessionConnections.append(connect(session, &KRdp::AbstractSession::cursorUpdate, this, &SessionWrapper::onCursorUpdate));
+            // The session is passed along: a cursor sample's position is
+            // local to the output that session captures (see onCursorUpdate()).
+            m_sessionConnections.append(connect(session, &KRdp::AbstractSession::cursorUpdate, this, [this, session](const PipeWireCursor &cursor) {
+                onCursorUpdate(session, cursor);
+            }));
             if (multi) {
                 // One monitor going away must not take the whole connection
                 // with it; see dropSession().
@@ -443,6 +526,32 @@ public:
             survivors[i]->setMonitorIndex(int(i));
         }
 
+        if (outputGuard) {
+            // A multi-output virtual session: the failed session's virtual
+            // output goes away with it, so the placements handed to the
+            // guard (replace and park alike) must not name it any more, or
+            // the next kscreen-doctor call fails on an output that is not
+            // there. The primary follows the outcome's promotion.
+            QVector<KRdp::OutputSnapshot::Placement> placements;
+            QVector<KRdp::OutputSnapshot::Placement> parkPlacements;
+            for (const auto old : std::as_const(outcome.survivors)) {
+                if (old < virtualPlacements.size()) {
+                    placements.push_back(virtualPlacements.at(old));
+                }
+                if (old < virtualParkPlacements.size()) {
+                    parkPlacements.push_back(virtualParkPlacements.at(old));
+                }
+            }
+            virtualPlacements = placements;
+            virtualParkPlacements = parkPlacements;
+            if (outcome.primary >= 0 && outcome.primary < survivingLayout.names.size()) {
+                virtualPrimaryName = survivingLayout.names.at(outcome.primary);
+            }
+            if (outputGuard->hasParkPlacements()) {
+                outputGuard->setParkPlacements(virtualParkPlacements, virtualPrimaryName);
+            }
+        }
+
         setSessions(std::move(survivors), survivingLayout);
     }
 
@@ -499,7 +608,13 @@ public:
         connection->videoStream()->setMonitorLayout(layout.monitors);
     }
 
-    void onCursorUpdate(const PipeWireCursor &cursor)
+    /**
+     * A cursor sample from \a session, whose captured output the pointer is
+     * on (KWin's screencast reports the cursor only to the stream of the
+     * output it is over, so with several virtual outputs the samples come
+     * from whichever session has it).
+     */
+    void onCursorUpdate(KRdp::AbstractSession *session, const PipeWireCursor &cursor)
     {
         if (!connection) {
             return;
@@ -517,9 +632,12 @@ public:
         // the virtual) output, in capture pixels; mapped into KWin-global
         // logical space like an injected move it is comparable with the last
         // one the server injected, and a sample far from that with no recent
-        // injection can only be the mouse on the console (Task 6c).
-        if (outputGuard && !takeover.fired() && sessions.size() == 1) {
-            const QPoint global = sessions.front()->mapToGlobal(cursor.position).toPoint();
+        // injection can only be the mouse on the console (Task 6c). Mapped
+        // through the emitting session's own place, which for a multi-output
+        // session is that output's, not the layout's origin. Meaningless
+        // while KWin has not placed (or has removed) that output.
+        if (outputGuard && !takeover.fired() && session->outputGeometryResolved()) {
+            const QPoint global = session->mapToGlobal(cursor.position).toPoint();
             if (takeover.observed(global, m_clock.elapsed())) {
                 qInfo() << "Console activity detected; restoring the physical outputs (session continues in extend mode)";
                 Q_EMIT consoleActivityDetected();
@@ -625,6 +743,20 @@ public:
         // buttons, wheel and keys are injected without one (see
         // PlasmaScreencastV1Session::injectNonMotionEvent()).
         if (event->type() == QEvent::MouseMove) {
+            if (outputGuard && !virtualLayoutAdopted) {
+                // Multi-output virtual session: until adoptActualVirtualLayout()
+                // has read KWin's placement back, the layout is only where the
+                // outputs are meant to go - for a replace, over the physical
+                // origin, where the physical primary still is until the
+                // policy applies. A move mapped through it would land there.
+                // Same gate as PlasmaScreencastV1Session::sendEvent() keeps
+                // for one unplaced virtual output.
+                if (!m_loggedGatedVirtualInput) {
+                    m_loggedGatedVirtualInput = true;
+                    qInfo() << "Dropping pointer motion until the virtual outputs' placement has been read back";
+                }
+                return;
+            }
             const auto mouseEvent = std::static_pointer_cast<QMouseEvent>(event);
             // RDP desktop space -> KWin-global pixels -> KWin-global logical,
             // which is what org_kde_kwin_fake_input's pointer_motion_absolute
@@ -638,6 +770,14 @@ public:
                                                             mouseEvent->button(),
                                                             mouseEvent->buttons(),
                                                             mouseEvent->modifiers());
+            // Console takeover bookkeeping (Task 6c), the multi-output
+            // counterpart of noteInjectedMotion(): only a move that will
+            // really be injected (sendGlobalEvent() drops everything while
+            // the target's stream is down) may become the reference the
+            // next cursor sample is compared against.
+            if (outputGuard && !takeover.fired() && target->streamActive()) {
+                takeover.injected(position.toPoint(), m_clock.elapsed());
+            }
             target->sendGlobalEvent(translated);
             return;
         }
@@ -668,11 +808,20 @@ public:
     PhysicalOutputGuard *outputGuard = nullptr;
     SessionController::VirtualPolicy virtualPolicy = SessionController::VirtualPolicy::Replace;
     QVector<KRdp::OutputSnapshot::Placement> virtualPlacements; // intended KWin positions, one per session
-    // The same beside the physical desktop is the guard's park placement;
-    // see PhysicalOutputGuard::setParkPlacements().
+    // The same beside the physical desktop: what the guard was handed as its
+    // park placements (PhysicalOutputGuard::setParkPlacements()), kept so a
+    // dropped session can be taken out of them. Empty without a snapshot.
+    QVector<KRdp::OutputSnapshot::Placement> virtualParkPlacements;
     QString virtualPrimaryName;
     bool policyApplied = false;
     bool ownsPhysicalLayout = false; // this wrapper took the snapshot and must restore it
+    // Multi-output (Phase B) only: a virtual output never appeared and the
+    // wrapper was rebuilt as one output at the desktop size; never twice.
+    bool forceSingleVirtual = false;
+    // Multi-output only: adoptActualVirtualLayout() has read the outputs'
+    // places back at least once, so layout.monitors is where they are and
+    // pointer input may be mapped through it (see onInputEvent()).
+    bool virtualLayoutAdopted = false;
     // Console takeover (Task 6c); timestamps are m_clock.elapsed().
     KRdp::Takeover::Detector takeover;
     QElapsedTimer m_clock;
@@ -683,6 +832,9 @@ public:
     std::optional<quint8> m_requestedQuality;
     // Everything setSessions() wired, so it can unwire exactly that much.
     QList<QMetaObject::Connection> m_sessionConnections;
+    // See scheduleVirtualLayoutAdoption().
+    QTimer m_adoptTimer;
+    bool m_loggedGatedVirtualInput = false;
 };
 
 SessionController::SessionController(KRdp::Server *server, SessionType sessionType)
@@ -1370,22 +1522,21 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
     wrapper->virtualPolicy = canReplace ? VirtualPolicy::Replace : VirtualPolicy::Extend;
     wrapper->policyApplied = false;
     wrapper->ownsPhysicalLayout = false;
+    wrapper->virtualLayoutAdopted = false;
     wrapper->virtualPlacements.clear();
+    wrapper->virtualParkPlacements.clear();
+    wrapper->virtualPrimaryName.clear();
     m_outputGuard.clearParkPlacements();
 
-    if (m_virtualLayout == VirtualLayout::Client && !info.monitors.isEmpty()) {
-        qInfo() << "Client advertises" << info.monitors.size() << "monitors; multi-output virtual layout lands in Task 7, using one output of" << info.desktopSize;
-    }
-
-    // Where the virtual output goes: over the physical desktop's origin when
-    // it replaces the physical outputs, immediately to their right when it
-    // extends them (also what KWin does by itself for a never-seen output,
-    // but KWin replays whatever arrangement it last saw for this output set).
-    // The extend place is also where a replace session's output is parked
-    // once the physical outputs are back (PhysicalOutputGuard::restore(),
-    // SessionWrapper::parkVirtualOutputs()). Known only with a snapshot:
-    // without one there is no physical union to sit beside, and no restore
-    // that could park anything.
+    // Where the virtual outputs go: over the physical desktop's origin when
+    // they replace the physical outputs, immediately to their right when
+    // they extend them (also what KWin does by itself for a never-seen
+    // output, but KWin replays whatever arrangement it last saw for this
+    // output set). The extend place is also where a replace session's
+    // outputs are parked once the physical outputs are back
+    // (PhysicalOutputGuard::restore(), SessionWrapper::parkVirtualOutputs()).
+    // Known only with a snapshot: without one there is no physical union to
+    // sit beside, and no restore that could park anything.
     std::optional<QPoint> extendAnchor;
     if (snapshotTaken) {
         const QRect physical = KRdp::OutputSnapshot::enabledUnion(m_outputGuard.physicalOutputs());
@@ -1394,54 +1545,167 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
         }
     }
     const QPoint anchor = canReplace ? QPoint(0, 0) : extendAnchor.value_or(QPoint(0, 0));
+    const QString policyLabel = canReplace ? u"replace"_s : u"extend"_s;
 
-    std::vector<std::unique_ptr<KRdp::AbstractSession>> sessions;
-    auto session = makeSession();
-    const auto name = KRdp::ClientDisplay::virtualMonitorName(0, info.desktopSize);
-    session->setVirtualMonitor(KRdp::VirtualMonitor{name, info.desktopSize, 1.0});
-    // The RDPGFX surface this session feeds; see AbstractSession::setMonitorIndex().
-    session->setMonitorIndex(0);
-    wrapper->virtualPrimaryName = KRdp::OutputSnapshot::VirtualPrefix + name;
-    wrapper->virtualPlacements.push_back({wrapper->virtualPrimaryName, anchor});
-    if (extendAnchor) {
-        m_outputGuard.setParkPlacements({{wrapper->virtualPrimaryName, *extendAnchor}}, wrapper->virtualPrimaryName);
+    // One virtual output per client monitor (Phase B) only when the client
+    // advertised a usable monitor list (sanitize() keeps it only with two or
+    // more usable entries and exactly one primary) and a previous attempt
+    // did not have an output that never appeared.
+    const bool multiOutput = m_virtualLayout == VirtualLayout::Client && info.monitors.size() >= 2 && !wrapper->forceSingleVirtual;
+    if (!multiOutput) {
+        if (wrapper->forceSingleVirtual) {
+            qInfo() << "MonitorMode=virtual: falling back to one output of" << info.desktopSize << "for the client's" << info.monitors.size() << "monitors";
+        }
+        std::vector<std::unique_ptr<KRdp::AbstractSession>> sessions;
+        auto session = makeSession();
+        const auto name = KRdp::ClientDisplay::virtualMonitorName(0, info.desktopSize);
+        session->setVirtualMonitor(KRdp::VirtualMonitor{name, info.desktopSize, 1.0});
+        // The RDPGFX surface this session feeds; see AbstractSession::setMonitorIndex().
+        session->setMonitorIndex(0);
+        wrapper->virtualPrimaryName = KRdp::OutputSnapshot::VirtualPrefix + name;
+        wrapper->virtualPlacements.push_back({wrapper->virtualPrimaryName, anchor});
+        if (extendAnchor) {
+            wrapper->virtualParkPlacements = {{wrapper->virtualPrimaryName, *extendAnchor}};
+            m_outputGuard.setParkPlacements(wrapper->virtualParkPlacements, wrapper->virtualPrimaryName);
+        }
+        connectVirtualSession(session.get(), wrapper);
+        // See setQuality() for why the direct call is skipped with adaptive quality on.
+        if (m_quality.has_value() && !m_adaptiveQuality) {
+            session->setVideoQuality(m_quality.value());
+        }
+        sessions.push_back(std::move(session));
+
+        qInfo().noquote() << "MonitorMode=virtual: one output" << info.desktopSize << "policy" << policyLabel << "placed at" << anchor;
+        wrapper->setSessions(std::move(sessions), MonitorLayout{});
+        return;
     }
 
+    // The client's own layout, anchored where the outputs go. The RDP layout
+    // is the same rects (KWin-global pixels; every virtual output is at
+    // scale 1, so logical equals pixels and the input path's scale is 1):
+    // the client gets its own monitor arrangement back in ResetGraphics
+    // (OPT-040) and each surface carries one of its monitors. Placements
+    // and park placements are the same rects' top-lefts at the two anchors.
+    const auto rects = KRdp::ClientDisplay::placement(info.monitors, anchor);
+    const auto parkRects = extendAnchor ? KRdp::ClientDisplay::placement(info.monitors, *extendAnchor) : QVector<QRect>();
+
+    std::vector<std::unique_ptr<KRdp::AbstractSession>> sessions;
+    sessions.reserve(size_t(info.monitors.size()));
+    MonitorLayout layout;
+    layout.scale = 1.0;
+    for (qsizetype i = 0; i < info.monitors.size(); ++i) {
+        const auto &monitor = info.monitors.at(i);
+        auto session = makeSession();
+        const auto name = KRdp::ClientDisplay::virtualMonitorName(int(i), monitor.geometry.size());
+        const QString kwinName = KRdp::OutputSnapshot::VirtualPrefix + name;
+        session->setVirtualMonitor(KRdp::VirtualMonitor{name, monitor.geometry.size(), 1.0});
+        // The RDPGFX surface this session feeds; see AbstractSession::setMonitorIndex().
+        session->setMonitorIndex(int(i));
+        wrapper->virtualPlacements.push_back({kwinName, rects.at(i).topLeft()});
+        if (!parkRects.isEmpty()) {
+            wrapper->virtualParkPlacements.push_back({kwinName, parkRects.at(i).topLeft()});
+        }
+        if (monitor.primary) {
+            wrapper->virtualPrimaryName = kwinName;
+        }
+        layout.monitors.push_back(KRdp::VideoMonitor{.geometry = rects.at(i), .primary = monitor.primary});
+        layout.names.push_back(kwinName);
+
+        connectVirtualSession(session.get(), wrapper);
+        // See setQuality() for why the direct call is skipped with adaptive quality on.
+        if (m_quality.has_value() && !m_adaptiveQuality) {
+            session->setVideoQuality(m_quality.value());
+        }
+        sessions.push_back(std::move(session));
+    }
+    if (extendAnchor) {
+        m_outputGuard.setParkPlacements(wrapper->virtualParkPlacements, wrapper->virtualPrimaryName);
+    }
+
+    qInfo().noquote() << QStringLiteral("MonitorMode=virtual: %1 outputs mirroring the client layout, policy %2, anchor %3,%4: %5")
+                             .arg(sessions.size())
+                             .arg(policyLabel)
+                             .arg(anchor.x())
+                             .arg(anchor.y())
+                             .arg(layoutSummary(layout.monitors));
+    wrapper->setSessions(std::move(sessions), layout);
+}
+
+void SessionController::connectVirtualSession(KRdp::AbstractSession *session, SessionWrapper *wrapper)
+{
     // Not part of m_sessionConnections on purpose: they die with the session
     // object, and a rebuild never replaces a virtual session.
-    connect(session.get(), &KRdp::AbstractSession::started, wrapper, &SessionWrapper::maybeApplyVirtualPolicy);
-    connect(session.get(), &KRdp::AbstractSession::streamActiveChanged, wrapper, [wrapper](bool) {
+    connect(session, &KRdp::AbstractSession::started, wrapper, &SessionWrapper::maybeApplyVirtualPolicy);
+    connect(session, &KRdp::AbstractSession::streamActiveChanged, wrapper, [wrapper](bool) {
         wrapper->maybeApplyVirtualPolicy();
     });
-    connect(session.get(), &KRdp::AbstractSession::outputGeometryChanged, wrapper, [wrapper](const QRect &) {
+    connect(session, &KRdp::AbstractSession::outputGeometryChanged, wrapper, [wrapper](const QRect &) {
         // A pointer move recorded for the takeover detector between a
         // kscreen-doctor call and this geometry update was mapped through
         // the output's old origin, so it is not where the pointer is; the
         // next move becomes the reference (Task 6c review, Minor 3).
         wrapper->takeover.forgetInjected();
+        if (wrapper->policyApplied) {
+            // Multi-output: the outputs moved after the policy (a park, a
+            // replayed arrangement); the client's layout has to follow.
+            wrapper->scheduleVirtualLayoutAdoption();
+            return;
+        }
         wrapper->maybeApplyVirtualPolicy();
     });
-    connect(session.get(), &KRdp::AbstractSession::virtualOutputUnresolved, wrapper, [wrapper]() {
+    connect(session, &KRdp::AbstractSession::virtualOutputUnresolved, wrapper, [this, wrapper]() {
         // Also fires when an output KWin removed mid-session stays away for
         // 5 s; by then the policy has long been applied and stays so.
         if (wrapper->policyApplied) {
-            qWarning() << "Virtual output lost mid-session and not back within 5 s: pointer input stays gated until it reappears";
+            // Not for a sibling of an output that already failed to appear
+            // (the multi-output set is still installed while the queued
+            // single-output rebuild is pending): that rebuild replaces both.
+            const bool rebuildPending = wrapper->forceSingleVirtual && !wrapper->layout.isEmpty();
+            if (!rebuildPending) {
+                qWarning() << "Virtual output lost mid-session and not back within 5 s: pointer input stays gated until it reappears";
+            }
             return;
         }
         // The output may still turn up later; once this has fired the policy
         // is never applied, so a late outputGeometryChanged() changes nothing.
+        wrapper->policyApplied = true;
+        if (!wrapper->layout.isEmpty()) {
+            // One of several: the client is better served by one output at
+            // its desktop size than by a layout with a hole in it. Queued,
+            // since the rebuild destroys the session this signal came from,
+            // and held by QPointer, since the connection may close first.
+            // forceSingleVirtual is set here already so a sibling's timeout
+            // in the meantime is recognised above.
+            qWarning() << "A virtual output never appeared; falling back to a single virtual output";
+            wrapper->forceSingleVirtual = true;
+            QPointer<SessionWrapper> guard(wrapper);
+            QMetaObject::invokeMethod(this, [this, guard]() {
+                if (guard) {
+                    rebuildAsSingleVirtual(guard.data());
+                }
+            }, Qt::QueuedConnection);
+            return;
+        }
         qWarning() << "Virtual output unresolved: pointer input stays gated and the" << (wrapper->virtualPolicy == VirtualPolicy::Replace ? "replace" : "extend")
                    << "policy is not applied";
-        wrapper->policyApplied = true;
     });
-    // See setQuality() for why the direct call is skipped with adaptive quality on.
-    if (m_quality.has_value() && !m_adaptiveQuality) {
-        session->setVideoQuality(m_quality.value());
-    }
-    sessions.push_back(std::move(session));
+}
 
-    qInfo() << "MonitorMode=virtual: one output" << info.desktopSize << "policy" << (canReplace ? "replace" : "extend") << "placed at" << anchor;
-    wrapper->setSessions(std::move(sessions), MonitorLayout{});
+void SessionController::rebuildAsSingleVirtual(SessionWrapper *wrapper)
+{
+    if (!wrapper || !wrapper->connection || !wrapper->forceSingleVirtual || wrapper->layout.isEmpty()) {
+        // Nothing to do, or done already (the layout is empty once the
+        // single-output build has replaced the set).
+        return;
+    }
+    // setSessions() replaces the vector wholesale, but buildVirtualSessions()
+    // refuses to build over live sessions: drop them first. Their virtual
+    // outputs go away with them; the physical layout was never touched,
+    // because the policy is only applied once every output has resolved,
+    // and the guard's snapshot is retaken by the build (an untouched
+    // snapshot is just dropped by snapshot() itself).
+    wrapper->sessions.clear();
+    buildVirtualSessions(wrapper);
 }
 
 void SessionController::rebuildSessions()
