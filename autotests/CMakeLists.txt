@@ -19,7 +19,7 @@ target_link_libraries(FrameQueuePolicyTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME FrameQueuePolicyTest COMMAND FrameQueuePolicyTest)
 
 add_executable(ClientDisplayInfoTest ClientDisplayInfoTest.cpp)
-target_include_directories(ClientDisplayInfoTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(ClientDisplayInfoTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ClientDisplayInfoTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ClientDisplayInfoTest COMMAND ClientDisplayInfoTest)
 

@@ -4,6 +4,7 @@
 #include <QTest>
 
 #include "ClientDisplayInfo.h"
+#include "OutputSnapshot.h"
 
 using namespace KRdp;
 using namespace KRdp::ClientDisplay;
@@ -177,6 +178,49 @@ private Q_SLOTS:
         QCOMPARE(rects[0], QRect(5120, 100, 1920, 1080));
         QCOMPARE(rects[1], QRect(7040, 0, 1920, 1280));
         QCOMPARE(placement(monitors, QPoint(0, 0))[0], QRect(0, 100, 1920, 1080));
+    }
+
+    // fromOutputs() feeds `VirtualMonitorLayout=physical` (OPT-041 S5): mirror
+    // the physical output layout instead of the client's own.
+    void fromOutputsOrdersByPriorityAndTranslatesToOrigin()
+    {
+        const QVector<KRdp::OutputSnapshot::Output> outputs{
+            {.name = QStringLiteral("DP-1"), .enabled = true, .position = QPoint(0, 0), .priority = 1, .size = QSize(2560, 1440)},
+            {.name = QStringLiteral("HDMI-A-1"), .enabled = true, .position = QPoint(2560, 0), .priority = 2, .size = QSize(2560, 1440)},
+            {.name = QStringLiteral("Virtual-x"), .enabled = false, .position = QPoint(5120, 0), .priority = 3, .size = QSize(1920, 1080)},
+        };
+        const auto info = fromOutputs(outputs);
+        QCOMPARE(info.monitors.size(), 2);
+        QCOMPARE(info.monitors[0].geometry, QRect(0, 0, 2560, 1440));
+        QVERIFY(info.monitors[0].primary);
+        QCOMPARE(info.monitors[1].geometry, QRect(2560, 0, 2560, 1440));
+        QVERIFY(!info.monitors[1].primary);
+        QCOMPARE(info.desktopSize, QSize(5120, 1440));
+    }
+
+    void fromOutputsWithNoneEnabledIsEmptyAndInvalid()
+    {
+        const QVector<KRdp::OutputSnapshot::Output> outputs{
+            {.name = QStringLiteral("DP-1"), .enabled = false, .position = QPoint(0, 0), .priority = 1, .size = QSize(2560, 1440)},
+            {.name = QStringLiteral("HDMI-A-1"), .enabled = false, .position = QPoint(2560, 0), .priority = 2, .size = QSize(2560, 1440)},
+        };
+        const auto info = fromOutputs(outputs);
+        QVERIFY(info.monitors.isEmpty());
+        QVERIFY(!info.desktopSize.isValid());
+    }
+
+    void fromOutputsTranslatesNegativePositionsToOrigin()
+    {
+        // Physical layout with the primary panel left of (0,0), as kscreen-doctor reports it.
+        const QVector<KRdp::OutputSnapshot::Output> outputs{
+            {.name = QStringLiteral("eDP-1"), .enabled = true, .position = QPoint(-2560, 0), .priority = 1, .size = QSize(2560, 1440)},
+            {.name = QStringLiteral("DP-1"), .enabled = true, .position = QPoint(0, 0), .priority = 2, .size = QSize(2560, 1440)},
+        };
+        const auto info = fromOutputs(outputs);
+        QCOMPARE(info.monitors.size(), 2);
+        QCOMPARE(info.monitors[0].geometry.topLeft(), QPoint(0, 0));
+        QVERIFY(info.monitors[0].primary);
+        QCOMPARE(info.monitors[1].geometry.topLeft(), QPoint(2560, 0));
     }
 };
 

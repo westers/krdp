@@ -45,7 +45,7 @@ SPDX-License-Identifier: BSD-2-Clause
       <default>replace</default>
     </entry>
     <entry name="VirtualMonitorLayout" type="String">
-      <label>With MonitorMode=virtual: client (one virtual output per client monitor) or single (one output at the client's desktop size)</label>
+      <label>With MonitorMode=virtual: client (one virtual output per client monitor), single (one output at the client's desktop size), or physical (one output per enabled physical monitor, mirroring its layout)</label>
       <default>client</default>
     </entry>
     <entry name="VirtualMonitorFallbackSize" type="String">

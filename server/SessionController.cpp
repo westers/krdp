@@ -1026,7 +1026,15 @@ QString SessionController::policyName(VirtualPolicy policy)
 
 QString SessionController::layoutName(VirtualLayout layout)
 {
-    return layout == VirtualLayout::Single ? u"single"_s : u"client"_s;
+    switch (layout) {
+    case VirtualLayout::Single:
+        return u"single"_s;
+    case VirtualLayout::Physical:
+        return u"physical"_s;
+    case VirtualLayout::Client:
+        break;
+    }
+    return u"client"_s;
 }
 
 SessionController::VirtualPolicy SessionController::parseVirtualPolicy(const QString &text)
@@ -1036,7 +1044,14 @@ SessionController::VirtualPolicy SessionController::parseVirtualPolicy(const QSt
 
 SessionController::VirtualLayout SessionController::parseVirtualLayout(const QString &text)
 {
-    return text.trimmed().compare(u"single"_s, Qt::CaseInsensitive) == 0 ? VirtualLayout::Single : VirtualLayout::Client;
+    const auto trimmed = text.trimmed();
+    if (trimmed.compare(u"single"_s, Qt::CaseInsensitive) == 0) {
+        return VirtualLayout::Single;
+    }
+    if (trimmed.compare(u"physical"_s, Qt::CaseInsensitive) == 0) {
+        return VirtualLayout::Physical;
+    }
+    return VirtualLayout::Client;
 }
 
 std::optional<QSize> SessionController::parseSize(const QString &text)
@@ -1525,7 +1540,7 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
     if (!wrapper || !wrapper->connection || !wrapper->sessions.empty()) {
         return;
     }
-    const auto info = KRdp::ClientDisplay::sanitize(wrapper->connection->clientDisplayInfo(), m_virtualFallbackSize);
+    auto info = KRdp::ClientDisplay::sanitize(wrapper->connection->clientDisplayInfo(), m_virtualFallbackSize);
     // The snapshot taken now is the only one this session may replace on;
     // never a leftover from an earlier session (the guard clears it, and
     // canReplace is keyed on this call's result, not on hasSnapshot()).
@@ -1534,6 +1549,20 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
         qWarning() << "kscreen-doctor not found; MonitorMode=virtual runs as extend without layout control";
     } else if (!(snapshotTaken = m_outputGuard.snapshot())) {
         qWarning() << "Could not snapshot the physical outputs; MonitorMode=virtual runs as extend";
+    }
+    if (m_virtualLayout == VirtualLayout::Physical) {
+        // Mirror the physical layout instead of the client's own (OPT-041
+        // S5); needs the snapshot just taken above, not a stale one, for the
+        // same reason canReplace is keyed on snapshotTaken rather than
+        // hasSnapshot().
+        if (!snapshotTaken) {
+            qWarning() << "VirtualMonitorLayout=physical needs the physical-output snapshot; using the client's layout";
+        } else {
+            const auto clientMonitorCount = info.monitors.size();
+            info = KRdp::ClientDisplay::fromOutputs(m_outputGuard.physicalOutputs());
+            qInfo() << "MonitorMode=virtual: mirroring the physical layout" << info.desktopSize << "monitors" << info.monitors.size() << "(client advertised"
+                    << clientMonitorCount << ")";
+        }
     }
     const bool canReplace = m_virtualPolicy == VirtualPolicy::Replace && snapshotTaken;
 
@@ -1572,11 +1601,14 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
     const QPoint anchor = canReplace ? QPoint(0, 0) : extendAnchor.value_or(QPoint(0, 0));
     const QString policyLabel = canReplace ? u"replace"_s : u"extend"_s;
 
-    // One virtual output per client monitor (Phase B) only when the client
-    // advertised a usable monitor list (sanitize() keeps it only with two or
-    // more usable entries and exactly one primary) and a previous attempt
-    // did not have an output that never appeared.
-    const bool multiOutput = m_virtualLayout == VirtualLayout::Client && info.monitors.size() >= 2 && !wrapper->forceSingleVirtual;
+    // One virtual output per monitor (Phase B), the client's own (Client) or
+    // the physical layout's (Physical, OPT-041 S5) - only when that layout
+    // has a usable two-or-more-monitor list (sanitize() keeps the client's
+    // own list only with two or more usable entries and exactly one primary;
+    // fromOutputs() is empty only when nothing was enabled to mirror) and a
+    // previous attempt did not have an output that never appeared. Single
+    // never opens more than one output.
+    const bool multiOutput = m_virtualLayout != VirtualLayout::Single && info.monitors.size() >= 2 && !wrapper->forceSingleVirtual;
     if (!multiOutput) {
         if (wrapper->forceSingleVirtual) {
             qInfo() << "MonitorMode=virtual: falling back to one output of" << info.desktopSize << "for the client's" << info.monitors.size() << "monitors";

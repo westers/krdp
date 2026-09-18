@@ -85,7 +85,7 @@ When `--monitor` is not supplied, KRDP uses persisted config keys:
 - `General/MonitorMode=workspace|primary|specific|multi|virtual`
 - `General/MonitorIndex=<id>` (used when mode is `specific`)
 - `General/VirtualMonitorPolicy=replace|extend` (used when mode is `virtual`, default `replace`)
-- `General/VirtualMonitorLayout=client|single` (used when mode is `virtual`, default `client`)
+- `General/VirtualMonitorLayout=client|single|physical` (used when mode is `virtual`, default `client`)
 - `General/VirtualMonitorFallbackSize=WIDTHxHEIGHT` (used when mode is `virtual`, default `1920x1080`)
 
 `multi` gives every monitor its own capture stream, encoder and RDPGFX surface.
@@ -127,6 +127,15 @@ one-output fallback still need the union itself to fit in 4096 px, since
 that is the one VA-API surface they open; a wider or taller union falls back
 to `VirtualMonitorFallbackSize`. `VirtualMonitorFallbackSize` (default
 `1920x1080`) is used when the client advertises no usable size.
+`VirtualMonitorLayout=physical` ignores the client's own monitor list
+entirely and instead gives it one virtual output per *enabled physical*
+output, in the physical layout's own positions and priority order (OPT-041
+S5) - useful once the own client defaults to sending no monitor list at all
+("use the host's own monitors"), and for any other client that should see
+Steve's desktop arrangement rather than its own. It needs the same
+`kscreen-doctor -j` snapshot `VirtualMonitorPolicy=replace` already takes;
+without it (no `kscreen-doctor`, or the snapshot failed) it logs a warning
+and falls back to `client`'s rules for that connection.
 `VirtualMonitorPolicy=replace` (the default) switches every physical output
 off for the duration of the connection so the virtual output(s) get the full
 VA-API budget; `VirtualMonitorPolicy=extend` leaves the physical outputs on

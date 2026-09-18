@@ -13,6 +13,7 @@
 #include <QString>
 #include <QVector>
 
+#include "OutputSnapshot.h"
 #include "SurfaceLayout.h"
 
 namespace KRdp
@@ -152,6 +153,48 @@ inline Info sanitize(Info info, const QSize &fallback)
 inline QSize singleSize(const Info &info, const QSize &fallback)
 {
     return usable(info.desktopSize) ? info.desktopSize : fallback;
+}
+
+/**
+ * The virtual layout that mirrors the physical outputs instead of the
+ * client's own (`VirtualMonitorLayout=physical`, OPT-041 S5): the enabled
+ * outputs of \a outputs (a PhysicalOutputGuard snapshot), ordered by
+ * priority ascending (KWin's primary-first convention - the lowest-priority
+ * one becomes primary here too), translated so the union's top-left is
+ * (0,0). No sanitize() pass is needed: a real output arrangement is already
+ * disjoint with exactly one lowest-priority entry, and hal9000's own
+ * 5120x1440 two-monitor union is well inside both the per-output
+ * (MaxDimension) and desktop (MaxDesktopDimension) limits. Empty monitors
+ * and an invalid desktopSize when nothing is enabled; the caller falls back
+ * to the client's own layout in that case.
+ */
+inline Info fromOutputs(const QVector<OutputSnapshot::Output> &outputs)
+{
+    QVector<OutputSnapshot::Output> enabled;
+    for (const auto &output : outputs) {
+        if (output.enabled) {
+            enabled.push_back(output);
+        }
+    }
+    if (enabled.isEmpty()) {
+        return {};
+    }
+    std::sort(enabled.begin(), enabled.end(), [](const OutputSnapshot::Output &a, const OutputSnapshot::Output &b) {
+        return a.priority < b.priority;
+    });
+
+    QRect unionRect;
+    for (const auto &output : std::as_const(enabled)) {
+        unionRect |= QRect(output.position, output.size);
+    }
+
+    Info info;
+    info.desktopSize = unionRect.size();
+    info.monitors.reserve(enabled.size());
+    for (qsizetype i = 0; i < enabled.size(); ++i) {
+        info.monitors.push_back(VideoMonitor{QRect(enabled.at(i).position, enabled.at(i).size).translated(-unionRect.topLeft()), i == 0});
+    }
+    return info;
 }
 
 /** KWin-global logical rects for sanitised \a monitors placed with their union's top-left at \a anchor. */

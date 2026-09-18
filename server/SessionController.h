@@ -81,6 +81,16 @@ public:
         Client,
         /** Always one output, at the client's desktop size. */
         Single,
+        /**
+         * One per enabled physical output, in the physical layout's own
+         * positions and priority order, ignoring the client's own monitor
+         * list (OPT-041 S5): what a third-party `/multimon` client needs to
+         * see Steve's own desktop arrangement instead of guessing from its
+         * own screens. Falls back to Client's rules (and so Client's own
+         * fallback to Single) when there is no physical-output snapshot to
+         * mirror - a portal session, or a failed `kscreen-doctor -j`.
+         */
+        Physical,
     };
 
     SessionController(KRdp::Server *server, SessionType sessionType);
@@ -132,7 +142,7 @@ public:
     void setVirtualFallbackSize(const QSize &size);
     /** "extend" -> Extend, anything else -> Replace. */
     static VirtualPolicy parseVirtualPolicy(const QString &text);
-    /** "single" -> Single, anything else -> Client. */
+    /** "single" -> Single, "physical" -> Physical, anything else -> Client (case-insensitive). */
     static VirtualLayout parseVirtualLayout(const QString &text);
     /** "1920x1080" -> QSize(1920, 1080); nullopt when malformed or outside ClientDisplay::usable(). */
     static std::optional<QSize> parseSize(const QString &text);

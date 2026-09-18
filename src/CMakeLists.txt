@@ -59,6 +59,10 @@ qt6_add_dbus_interface(_dbus_sources xdp_dbus_screencast_interface.xml xdp_dbus_
 target_sources(KRdp PRIVATE ${_dbus_sources})
 
 target_include_directories(KRdp PUBLIC ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR} ${FreeRDP_Server_INCLUDE_DIR})
+# ClientDisplayInfo.h's fromOutputs() (OPT-041 S5) takes server/OutputSnapshot.h's
+# pure Output struct; that header has no dependency of its own back onto this
+# library, so this stays a private compile-time include, not a link dependency.
+target_include_directories(KRdp PRIVATE ${CMAKE_SOURCE_DIR}/server)
 
 target_link_libraries(KRdp PUBLIC
     Qt::Core
