@@ -128,6 +128,24 @@ private Q_SLOTS:
         QVERIFY(matches(physical, resized));
     }
 
+    void allPresentIsAboutNamesOnly()
+    {
+        // The settle wait after a restore: "back but replayed wrongly" (re-apply)
+        // versus "still being re-added" (keep waiting) is a question of names.
+        const auto all = parse(kscreenJson);
+        const auto physical = physicalOnly(all);
+        QVERIFY(allPresent(physical, all));
+        auto shuffled = physical;
+        shuffled[0].priority = 3;
+        shuffled[1].position = QPoint(0, 0);
+        QVERIFY(allPresent(physical, shuffled)); // present, just not matching
+        QVERIFY(!matches(physical, shuffled));
+        QVector<Output> partial{physical[0]};
+        QVERIFY(!allPresent(physical, partial)); // HDMI-A-1 still being re-added
+        QVERIFY(!allPresent(physical, {}));
+        QVERIFY(allPresent({}, {}));
+    }
+
     void jsonRoundTrip()
     {
         const auto physical = physicalOnly(parse(kscreenJson));

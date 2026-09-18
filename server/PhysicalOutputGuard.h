@@ -56,11 +56,33 @@ public:
     QVector<KRdp::OutputSnapshot::Output> physicalOutputs() const;
 
     bool applyReplace(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
-    bool positionOutputs(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
+    /**
+     * Where the virtual outputs belong while the physical ones are enabled
+     * (beside them, at the extend anchor). Remembered so that restore()
+     * parks them itself once the physical outputs are verifiably back -
+     * including a retry that succeeds after the caller has moved on - and
+     * so teardown and takeover park through one path. Cleared by the
+     * session that set them before its virtual outputs go away.
+     */
+    void setParkPlacements(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
+    void clearParkPlacements();
+    bool hasParkPlacements() const;
+    /**
+     * Move the remembered virtual outputs to their extend places now,
+     * behind the physical outputs in priority, verified by read-back. Only
+     * sticks while a physical output is enabled: KWin pins a lone enabled
+     * output to (0,0).
+     */
+    bool parkVirtualOutputs();
     bool reconcileExtend();
     /**
-     * Put the physical outputs back as snapshotted, verified by read-back.
-     * A verified restore drops the snapshot and the state file.
+     * Put the physical outputs back as snapshotted and wait for them to
+     * settle (a panel that was in standby makes KWin remove and re-add the
+     * output a few seconds after it is enabled), verified by read-back once
+     * the snapshot has held still. A verified restore drops the snapshot and
+     * the state file, then parks the remembered virtual outputs. Blocks the
+     * caller for the settle wait (bounded, a few seconds); an unverified
+     * restore keeps the outputs held and schedules one retry.
      */
     bool restore();
     /**
@@ -78,6 +100,9 @@ private:
     static bool run(const QStringList &args, QByteArray *output = nullptr);
     static QVector<KRdp::OutputSnapshot::Output> current(QString *error = nullptr);
     static bool restoreSnapshot(const QVector<KRdp::OutputSnapshot::Output> &physical);
+    /** Poll until  physical is present and matching for a stability window; false on timeout. */
+    static bool waitForPhysical(const QVector<KRdp::OutputSnapshot::Output> &physical);
+    static bool positionOutputs(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
     /** Write the snapshot (and this PID) for restoreFromStateFile(); false, logged, on failure. */
     bool writeStateFile() const;
     /** Whether \a pid is a live process other than this one (a running krdpserver, if /proc can tell). */
@@ -85,6 +110,9 @@ private:
 
     QVector<KRdp::OutputSnapshot::Output> m_physical;
     bool m_held = false;
+    // See setParkPlacements().
+    QVector<KRdp::OutputSnapshot::Placement> m_parkPlacements;
+    QString m_parkPrimary;
     // The single retry a failed restore() schedules; stopped by a verified
     // restore so it cannot fire (and re-emit restored()) afterwards.
     QTimer m_retryTimer;

@@ -190,6 +190,16 @@ inline bool matches(const QVector<Output> &snapshot, const QVector<Output> &curr
     return true;
 }
 
+/** Every physical output of \a snapshot is present in \a current by name, whatever its state. */
+inline bool allPresent(const QVector<Output> &snapshot, const QVector<Output> &current)
+{
+    return std::all_of(snapshot.cbegin(), snapshot.cend(), [&current](const Output &wanted) {
+        return isVirtual(wanted.name) || std::any_of(current.cbegin(), current.cend(), [&wanted](const Output &candidate) {
+                   return candidate.name == wanted.name;
+               });
+    });
+}
+
 inline QJsonArray toJsonArray(const QVector<Output> &outputs)
 {
     QJsonArray array;

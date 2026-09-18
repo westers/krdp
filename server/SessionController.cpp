@@ -48,6 +48,12 @@ namespace
 // 750 ms settle PlasmaScreencastV1Session's own stream recovery uses, so the
 // output churn on a DPMS wake is over before the layout is read.
 constexpr int MultiRebuildSettleMs = 2000;
+// How long the console takeover detector ignores cursor samples after a
+// park or restore has moved outputs around: KWin removes and re-adds
+// outputs after enabling them and warps the pointer meanwhile, and those
+// samples arrive queued behind the call that caused them (hw batch v6,
+// finding C).
+constexpr int TakeoverSuspendMs = 3000;
 
 QString layoutSummary(const QVector<KRdp::VideoMonitor> &monitors)
 {
@@ -98,10 +104,12 @@ public:
         // file), leaving whatever the user changed on the console meanwhile
         // alone.
         if (outputGuard) {
+            // A verified restore parks the virtual output itself (after the
+            // outputs have settled); an unverified one leaves a retry
+            // behind, which must not try to park an output that is about
+            // to disappear with the sessions below.
             outputGuard->release();
-            if (ownsPhysicalLayout) {
-                parkVirtualOutputs();
-            }
+            outputGuard->clearParkPlacements();
         }
         holdDisplayWake(false);
     }
@@ -121,12 +129,14 @@ public:
     void parkVirtualOutputs()
     {
         // Not gated on hasSnapshot(): a verified restore has just dropped it.
-        if (!outputGuard || extendPlacements.isEmpty()) {
+        if (!outputGuard || !outputGuard->hasParkPlacements()) {
             return;
         }
-        if (!outputGuard->positionOutputs(extendPlacements, virtualPrimaryName)) {
+        if (!outputGuard->parkVirtualOutputs()) {
             qWarning() << "Could not park the virtual output beside the physical desktop; KWin's placement stands";
         }
+        // The samples the move produces are queued behind this call.
+        takeover.suspend(m_clock.elapsed() + TakeoverSuspendMs);
     }
 
     /**
@@ -155,7 +165,6 @@ public:
         if (attemptedReplace) {
             if (outputGuard->applyReplace(virtualPlacements, virtualPrimaryName)) {
                 ownsPhysicalLayout = true;
-                Q_EMIT physicalLayoutOwnershipChanged();
             } else {
                 qWarning() << "replace policy could not be applied; continuing as extend";
                 virtualPolicy = SessionController::VirtualPolicy::Extend;
@@ -179,29 +188,30 @@ public:
             // local motion is then the way to get it back before teardown.
             takeover.armed(m_clock.elapsed());
         }
+        // Unconditionally: the guard may be held without an owner (a replace
+        // that failed halfway, an extend whose drift could not be re-applied),
+        // and the controller's "Restore my monitors" action follows held()
+        // as much as ownership.
+        Q_EMIT physicalLayoutOwnershipChanged();
     }
 
     /**
      * Console takeover (Task 6c): the controller has just given the physical
-     * outputs back while this session runs on. Park the virtual output
-     * beside them; from here on the wrapper no longer owns the layout, and
-     * its own teardown restore becomes the verification pass.
+     * outputs back while this session runs on. From here on the wrapper no
+     * longer owns the layout and runs as extend; the guard parked the
+     * virtual output beside the physical desktop when the restore verified
+     * (or will, when its retry does), so nothing is parked here.
      */
     void adoptExtendPolicy()
     {
         const bool owned = ownsPhysicalLayout;
-        if (owned) {
-            // extendPlacements was derived from the snapshot's enabled union
-            // at build time; a verified restore has just put exactly that
-            // union back, so it is the right edge of the physical desktop
-            // as it is now. (An unverified restore leaves the outputs off
-            // and this park fails with a warning; the guard's retry restores
-            // and the layout is parked again at teardown.)
-            parkVirtualOutputs();
-        }
         ownsPhysicalLayout = false;
         virtualPolicy = SessionController::VirtualPolicy::Extend;
         policyApplied = true;
+        // Whatever the trigger was, there is nothing left to detect, and the
+        // output churn a restore causes must never read as a second console
+        // activity (hw batch v6, finding C).
+        takeover.latch();
         if (owned) {
             Q_EMIT physicalLayoutOwnershipChanged();
         }
@@ -658,7 +668,8 @@ public:
     PhysicalOutputGuard *outputGuard = nullptr;
     SessionController::VirtualPolicy virtualPolicy = SessionController::VirtualPolicy::Replace;
     QVector<KRdp::OutputSnapshot::Placement> virtualPlacements; // intended KWin positions, one per session
-    QVector<KRdp::OutputSnapshot::Placement> extendPlacements; // the same beside the physical desktop; see parkVirtualOutputs()
+    // The same beside the physical desktop is the guard's park placement;
+    // see PhysicalOutputGuard::setParkPlacements().
     QString virtualPrimaryName;
     bool policyApplied = false;
     bool ownsPhysicalLayout = false; // this wrapper took the snapshot and must restore it
@@ -907,14 +918,14 @@ void SessionController::releasePhysicalOutputs()
         updateRestoreAction();
         return;
     }
-    // Restores, since the guard is held; the state file goes with a verified
-    // restore, and an unverified one schedules the guard's own retry. Either
-    // way the wrappers move on to extend: nothing else will restore the
-    // outputs before teardown, and a session that keeps streaming is the
-    // point (Steve's decision, Task 6c).
-    m_outputGuard.release();
-    // After the restore, not before: the wrapper parks its virtual output
-    // beside the physical ones, which only sticks once they are enabled.
+    // Restores, since the guard is held, waiting for the outputs to settle
+    // and parking the virtual output beside them when they have; the state
+    // file goes with a verified restore, and an unverified one schedules
+    // the guard's own retry (which parks too when it succeeds). Either way
+    // the wrappers move on to extend: nothing else will restore the outputs
+    // before teardown, and a session that keeps streaming is the point
+    // (Steve's decision, Task 6c).
+    const bool restored = m_outputGuard.release();
     int continued = 0;
     for (const auto &wrapper : m_wrappers) {
         if (wrapper && wrapper->outputGuard) {
@@ -922,7 +933,12 @@ void SessionController::releasePhysicalOutputs()
             ++continued;
         }
     }
-    qInfo() << "Physical outputs released to the console;" << continued << "virtual session(s) continue as extend";
+    if (restored) {
+        qInfo() << "Physical outputs released to the console;" << continued << "virtual session(s) continue as extend";
+    } else {
+        qWarning() << "Physical outputs could not be verifiably restored for the console (the guard retries);" << continued
+                   << "virtual session(s) continue as extend regardless";
+    }
     updateRestoreAction();
 }
 
@@ -1355,7 +1371,7 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
     wrapper->policyApplied = false;
     wrapper->ownsPhysicalLayout = false;
     wrapper->virtualPlacements.clear();
-    wrapper->extendPlacements.clear();
+    m_outputGuard.clearParkPlacements();
 
     if (m_virtualLayout == VirtualLayout::Client && !info.monitors.isEmpty()) {
         qInfo() << "Client advertises" << info.monitors.size() << "monitors; multi-output virtual layout lands in Task 7, using one output of" << info.desktopSize;
@@ -1365,16 +1381,19 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
     // it replaces the physical outputs, immediately to their right when it
     // extends them (also what KWin does by itself for a never-seen output,
     // but KWin replays whatever arrangement it last saw for this output set).
-    // The extend place is also where a replace session parks the output
-    // once it has given the physical outputs back; see parkVirtualOutputs().
-    QPoint extendAnchor;
+    // The extend place is also where a replace session's output is parked
+    // once the physical outputs are back (PhysicalOutputGuard::restore(),
+    // SessionWrapper::parkVirtualOutputs()). Known only with a snapshot:
+    // without one there is no physical union to sit beside, and no restore
+    // that could park anything.
+    std::optional<QPoint> extendAnchor;
     if (snapshotTaken) {
         const QRect physical = KRdp::OutputSnapshot::enabledUnion(m_outputGuard.physicalOutputs());
         if (physical.isValid()) {
             extendAnchor = QPoint(physical.left() + physical.width(), physical.top());
         }
     }
-    const QPoint anchor = canReplace ? QPoint(0, 0) : extendAnchor;
+    const QPoint anchor = canReplace ? QPoint(0, 0) : extendAnchor.value_or(QPoint(0, 0));
 
     std::vector<std::unique_ptr<KRdp::AbstractSession>> sessions;
     auto session = makeSession();
@@ -1384,7 +1403,9 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
     session->setMonitorIndex(0);
     wrapper->virtualPrimaryName = KRdp::OutputSnapshot::VirtualPrefix + name;
     wrapper->virtualPlacements.push_back({wrapper->virtualPrimaryName, anchor});
-    wrapper->extendPlacements.push_back({wrapper->virtualPrimaryName, extendAnchor});
+    if (extendAnchor) {
+        m_outputGuard.setParkPlacements({{wrapper->virtualPrimaryName, *extendAnchor}}, wrapper->virtualPrimaryName);
+    }
 
     // Not part of m_sessionConnections on purpose: they die with the session
     // object, and a rebuild never replaces a virtual session.
@@ -1393,6 +1414,11 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
         wrapper->maybeApplyVirtualPolicy();
     });
     connect(session.get(), &KRdp::AbstractSession::outputGeometryChanged, wrapper, [wrapper](const QRect &) {
+        // A pointer move recorded for the takeover detector between a
+        // kscreen-doctor call and this geometry update was mapped through
+        // the output's old origin, so it is not where the pointer is; the
+        // next move becomes the reference (Task 6c review, Minor 3).
+        wrapper->takeover.forgetInjected();
         wrapper->maybeApplyVirtualPolicy();
     });
     connect(session.get(), &KRdp::AbstractSession::virtualOutputUnresolved, wrapper, [wrapper]() {

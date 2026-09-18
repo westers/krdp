@@ -8,8 +8,10 @@
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QElapsedTimer>
 #include <QProcess>
 #include <QStandardPaths>
+#include <QThread>
 #include <QTimer>
 
 #include <cerrno>
@@ -23,7 +25,18 @@ namespace
 {
 constexpr int KscreenTimeoutMs = 5000;
 constexpr int RestoreRetryMs = 2000;
+// The settle wait after a restore's enable command; see waitForPhysical().
+// Panels that were in standby make KWin remove and re-add the physical
+// outputs ~1-3.5 s after they are enabled (hw batch v6, runs 1/4/5); the
+// budget covers that with margin, and the stability window catches a
+// read-back that happened to land before the removal (run 4).
+constexpr int SettlePollMs = 500;
+constexpr int SettleTimeoutMs = 6000;
+constexpr int SettleStableMs = 1500;
 const QString KscreenDoctor = u"kscreen-doctor"_s;
+// Steve's layout, for the messages that have no snapshot to derive it from.
+const QString FallbackRecovery =
+    u"kscreen-doctor output.DP-1.enable output.HDMI-A-1.enable output.DP-1.position.0,0 output.HDMI-A-1.position.2560,0 output.DP-1.priority.1 output.HDMI-A-1.priority.2"_s;
 }
 
 PhysicalOutputGuard::PhysicalOutputGuard(QObject *parent)
@@ -102,18 +115,21 @@ QVector<Output> PhysicalOutputGuard::current(QString *error)
 
 bool PhysicalOutputGuard::snapshot()
 {
-    // Never keep a previous session's list around: a failed read here must
-    // leave hasSnapshot() false, or a replace would run on stale outputs
-    // with no state file behind it.
-    m_physical.clear();
     if (m_held) {
         // The physical outputs are still (or may still be) replaced by an
         // earlier session whose restore did not verify; what -j reports now
         // is that state, not the user's layout, and snapshotting it would
-        // make "restore" mean "put the monitors back off".
+        // make "restore" mean "put the monitors back off". Checked before
+        // anything is cleared: the snapshot being held is the only thing
+        // the pending retry, the tray action and the teardown can restore
+        // from (Task 6c review, Critical 1).
         qWarning() << "Cannot snapshot the physical outputs: the previous replace is not verifiably restored yet";
         return false;
     }
+    // Never keep a previous session's list around: a failed read here must
+    // leave hasSnapshot() false, or a replace would run on stale outputs
+    // with no state file behind it.
+    m_physical.clear();
     QString error;
     const auto outputs = current(&error);
     if (outputs.isEmpty()) {
@@ -233,6 +249,28 @@ bool PhysicalOutputGuard::applyReplace(const QVector<Placement> &virtualOutputs,
     return true;
 }
 
+void PhysicalOutputGuard::setParkPlacements(const QVector<Placement> &virtualOutputs, const QString &primaryVirtualName)
+{
+    m_parkPlacements = virtualOutputs;
+    m_parkPrimary = primaryVirtualName;
+}
+
+void PhysicalOutputGuard::clearParkPlacements()
+{
+    m_parkPlacements.clear();
+    m_parkPrimary.clear();
+}
+
+bool PhysicalOutputGuard::hasParkPlacements() const
+{
+    return !m_parkPlacements.isEmpty();
+}
+
+bool PhysicalOutputGuard::parkVirtualOutputs()
+{
+    return positionOutputs(m_parkPlacements, m_parkPrimary);
+}
+
 bool PhysicalOutputGuard::positionOutputs(const QVector<Placement> &virtualOutputs, const QString &primaryVirtualName)
 {
     if (virtualOutputs.isEmpty()) {
@@ -300,6 +338,51 @@ bool PhysicalOutputGuard::reconcileExtend()
     return false;
 }
 
+bool PhysicalOutputGuard::waitForPhysical(const QVector<Output> &physical)
+{
+    // Blocking on purpose: the callers (teardown, takeover, the retry, the
+    // start-up restore) must not run the event loop here, or cursor samples,
+    // input and a connection's destruction would re-enter them mid-restore.
+    QElapsedTimer timer;
+    timer.start();
+    qint64 stableSince = -1;
+    bool reapplied = false;
+    bool churned = false;
+    for (;;) {
+        const auto now = current();
+        if (!now.isEmpty() && matches(physical, now)) {
+            if (stableSince < 0) {
+                stableSince = timer.elapsed();
+            }
+            if (timer.elapsed() - stableSince >= SettleStableMs) {
+                if (churned) {
+                    qInfo() << "Physical outputs settled after" << timer.elapsed() << "ms";
+                }
+                return true;
+            }
+        } else {
+            churned = true;
+            stableSince = -1;
+            if (timer.elapsed() >= SettleTimeoutMs) {
+                return false;
+            }
+            // Back, but not as snapshotted: the re-add replayed a stored
+            // arrangement (the virtual output on top, say). Nothing is still
+            // missing, so the command applies now; once, so a layout KWin
+            // keeps overriding ends in a timeout rather than a fight, and
+            // not on the first read-back, which the enable itself answers.
+            if (!reapplied && timer.elapsed() >= SettlePollMs && !now.isEmpty() && allPresent(physical, now)) {
+                reapplied = true;
+                qInfo() << "Physical outputs are back but not as snapshotted; re-applying the restore";
+                if (!run(restoreArgs(physical))) {
+                    return false;
+                }
+            }
+        }
+        QThread::msleep(SettlePollMs);
+    }
+}
+
 bool PhysicalOutputGuard::restoreSnapshot(const QVector<Output> &physical)
 {
     if (physical.isEmpty()) {
@@ -308,11 +391,33 @@ bool PhysicalOutputGuard::restoreSnapshot(const QVector<Output> &physical)
     if (!run(restoreArgs(physical))) {
         return false;
     }
-    return matches(physical, current());
+    // The enable command is accepted at once, but a panel that was in
+    // standby makes KWin remove the output and re-add it a few seconds
+    // later, replaying whatever arrangement it has stored for the set that
+    // reappears. Verifying on the first read-back races that (hw batch v6,
+    // findings A/B); wait until the snapshot is back and stays back.
+    return waitForPhysical(physical);
 }
 
 bool PhysicalOutputGuard::restore()
 {
+    if (m_held && !hasSnapshot()) {
+        // Should be unreachable (snapshot() refuses while held), but the
+        // consequence of getting here would be monitors that stay off while
+        // every recovery path reports success, so never report success on
+        // the flag alone: fall back to the state file applyReplace() wrote.
+        QFile file(stateFilePath());
+        if (file.open(QIODevice::ReadOnly)) {
+            m_physical = fromStateJson(file.readAll());
+        }
+        if (!hasSnapshot()) {
+            qCritical().noquote() << "Physical outputs are held but the snapshot is gone and" << stateFilePath() << "is unreadable; run:" << FallbackRecovery
+                                  << "(Steve's layout) or krdpserver --restore-outputs";
+            Q_EMIT restored(false);
+            return false;
+        }
+        qWarning() << "Physical outputs held with no snapshot in memory; restoring from" << stateFilePath();
+    }
     if (!hasSnapshot()) {
         return true;
     }
@@ -327,16 +432,30 @@ bool PhysicalOutputGuard::restore()
         m_physical.clear();
         QFile::remove(stateFilePath());
         qInfo() << "Physical outputs restored";
+        // Now, after the outputs have settled, the virtual outputs go to
+        // their extend places: KWin's re-add replays the recorded
+        // arrangement and drops them at their replace-time place over the
+        // physical origin, so a park before the settle is undone (finding
+        // A). Here rather than in the caller so a retry that succeeds after
+        // the takeover has moved on parks as well. Best effort: the physical
+        // outputs are restored whether or not the park sticks.
+        if (hasParkPlacements() && !parkVirtualOutputs()) {
+            qWarning() << "Could not park the virtual output beside the physical desktop; KWin's placement stands";
+        }
         Q_EMIT restored(true);
         return true;
     }
 
+    // Still held: the enable ran but the outputs did not come back as
+    // snapshotted within the settle budget (or the command failed).
     const QString recovery = u"kscreen-doctor "_s + restoreArgs(m_physical).join(u' ');
     if (m_retrying) {
-        qCritical().noquote() << "Physical outputs still not restored after the retry. Run:" << recovery << "(or krdpserver --restore-outputs)";
+        qCritical().noquote() << "Physical outputs still not restored after the retry (not back within" << SettleTimeoutMs << "ms). Run:" << recovery
+                              << "(or krdpserver --restore-outputs)";
         Q_EMIT restored(false);
     } else if (!m_retryTimer.isActive()) {
-        qCritical().noquote() << "Physical outputs NOT restored; retrying in" << RestoreRetryMs << "ms. Manual recovery:" << recovery;
+        qCritical().noquote() << "Physical outputs NOT restored (not back within" << SettleTimeoutMs << "ms); retrying in" << RestoreRetryMs
+                              << "ms. Manual recovery:" << recovery;
         m_retryTimer.start();
     } else {
         qCritical().noquote() << "Physical outputs NOT restored; a retry is already pending. Manual recovery:" << recovery;
@@ -397,9 +516,7 @@ bool PhysicalOutputGuard::restoreFromStateFile()
         QFile::remove(corrupt);
         const bool kept = file.rename(corrupt);
         qCritical().noquote() << "State file" << original << "is unreadable" << (kept ? u"(kept as %1)"_s.arg(corrupt) : u"(and could not be renamed)"_s)
-                              << "- the physical outputs may still be off. Check: kscreen-doctor -o ; if so run: kscreen-doctor"
-                              << "output.DP-1.enable output.HDMI-A-1.enable output.DP-1.position.0,0 output.HDMI-A-1.position.2560,0"
-                              << "output.DP-1.priority.1 output.HDMI-A-1.priority.2 (Steve's layout)";
+                              << "- the physical outputs may still be off. Check: kscreen-doctor -o ; if so run:" << FallbackRecovery << "(Steve's layout)";
         return false;
     }
     if (ownerAlive(ownerPid)) {
