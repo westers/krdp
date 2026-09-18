@@ -32,3 +32,8 @@ add_executable(TakeoverDetectorTest TakeoverDetectorTest.cpp)
 target_include_directories(TakeoverDetectorTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(TakeoverDetectorTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME TakeoverDetectorTest COMMAND TakeoverDetectorTest)
+
+add_executable(ClipboardTextTest ClipboardTextTest.cpp)
+target_include_directories(ClipboardTextTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ClipboardTextTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME ClipboardTextTest COMMAND ClipboardTextTest)

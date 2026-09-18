@@ -333,6 +333,16 @@ public:
     // inactive period instead of one per dropped event; cleared as soon as the
     // stream carries an event again.
     bool loggedInactiveGlobalEvents = false;
+    // Guard the KSystemClipboard::changed handler against the server's own
+    // write of client-originated data. KGuiAddons emits changed(Clipboard)
+    // synchronously inside setMimeData() on this stack (verified in KGuiAddons
+    // 6.24 waylandclipboard.cpp: DataControlDevice::setSelection emits
+    // selectionChanged directly and the connection to changed() is a plain
+    // direct connection), so a flag set across the write and cleared right
+    // after drops that echo. lastClientText is the belt for any later
+    // asynchronous changed that still carries the bytes we just wrote.
+    bool writingClientClipboard = false;
+    QString lastClientText;
 };
 
 PlasmaScreencastV1Session::PlasmaScreencastV1Session()
@@ -354,8 +364,22 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
             return;
         }
 
+        // Do not announce the server's own write of the client's clipboard
+        // back to the client: that echo, doubled by two data requests per
+        // copy, was the announce storm (see side-clipboard-plasma). The flag
+        // covers the synchronous changed emitted inside setClipboardData();
+        // the content compare covers any later asynchronous one.
+        if (d->writingClientClipboard) {
+            return;
+        }
+
         auto data = KSystemClipboard::instance()->mimeData(mode);
         if (!data) {
+            return;
+        }
+
+        if (data->hasText() && data->text() == d->lastClientText) {
+            qCDebug(KRDP) << "Skipping announce of clipboard change that echoes the last client write";
             return;
         }
 
@@ -925,12 +949,18 @@ void PlasmaScreencastV1Session::updateVirtualGeometry(const QRect &geometry, boo
 
 void PlasmaScreencastV1Session::setClipboardData(std::unique_ptr<QMimeData> data)
 {
+    // Remember what the client sent so the changed handler can drop the echo
+    // this write triggers (see the KSystemClipboard::changed connection).
+    d->lastClientText = data && data->hasText() ? data->text() : QString();
+
+    d->writingClientClipboard = true;
     // KSystemClipboard takes ownership
     if (data) {
         KSystemClipboard::instance()->setMimeData(data.release(), QClipboard::Clipboard);
     } else {
         KSystemClipboard::instance()->clear(QClipboard::Clipboard);
     }
+    d->writingClientClipboard = false;
 }
 
 void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Packet &data)

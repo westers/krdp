@@ -121,7 +121,14 @@ public:
     std::unique_ptr<OrgFreedesktopPortalRemoteDesktopInterface> remoteInterface;
     std::unique_ptr<OrgFreedesktopPortalScreenCastInterface> screencastInterface;
 
-    bool ignoreNextSystemClipboardChange = false;
+    // Guard the KSystemClipboard::changed handler against the server's own
+    // write of client-originated data; the changed signal is emitted
+    // synchronously inside setMimeData() (KGuiAddons 6.24), so the flag set
+    // across the write and cleared after it drops the echo, and lastClientText
+    // is the belt for a later asynchronous changed carrying the same bytes.
+    // (Replaces the dead ignoreNextSystemClipboardChange member.)
+    bool writingClientClipboard = false;
+    QString lastClientText;
 
     QDBusObjectPath sessionPath;
     QVector<VideoMonitor> monitorLayout;
@@ -144,8 +151,18 @@ PortalSession::PortalSession()
             return;
         }
 
+        // Do not announce the server's own write of the client's clipboard
+        // back to the client (the announce storm; see side-clipboard-plasma).
+        if (d->writingClientClipboard) {
+            return;
+        }
+
         auto data = KSystemClipboard::instance()->mimeData(mode);
         if (!data) {
+            return;
+        }
+
+        if (data->hasText() && data->text() == d->lastClientText) {
             return;
         }
 
@@ -257,12 +274,18 @@ void PortalSession::sendEvent(const std::shared_ptr<QEvent> &event)
 
 void PortalSession::setClipboardData(std::unique_ptr<QMimeData> data)
 {
+    // Remember what the client sent so the changed handler can drop the echo
+    // this write triggers (see the KSystemClipboard::changed connection).
+    d->lastClientText = data && data->hasText() ? data->text() : QString();
+
+    d->writingClientClipboard = true;
     // KSystemClipboard takes ownership
     if (data) {
         KSystemClipboard::instance()->setMimeData(data.release(), QClipboard::Clipboard);
     } else {
         KSystemClipboard::instance()->clear(QClipboard::Clipboard);
     }
+    d->writingClientClipboard = false;
 }
 
 void PortalSession::onCreateSession(uint code, const QVariantMap &result)

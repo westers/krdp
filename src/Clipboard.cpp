@@ -8,6 +8,7 @@
 #include <freerdp/peer.h>
 #include <freerdp/server/cliprdr.h>
 
+#include "ClipboardText.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
 
@@ -42,6 +43,10 @@ public:
     bool enabled = false;
     const QMimeData *serverData = nullptr;
     std::unique_ptr<QMimeData> clientData;
+    // The format id of the one data request sent for the client's last format
+    // list, so the response can be decoded as what was asked for: UTF-16 for
+    // CF_UNICODETEXT, 8-bit for CF_TEXT/CF_OEMTEXT.
+    uint32_t requestedClientFormat = 0;
 
     template<typename>
     struct function_arg_trait;
@@ -95,6 +100,9 @@ Clipboard::Clipboard(RdpConnection *session)
 
 Clipboard::~Clipboard()
 {
+    // setServerData() took ownership of the last announcement; every earlier
+    // one was freed by its successor.
+    delete d->serverData;
 }
 
 bool Clipboard::initialize()
@@ -190,33 +198,55 @@ void Clipboard::sendServerData()
 
 uint32_t Clipboard::Private::onClientFormatList(const CLIPRDR_FORMAT_LIST *formatList)
 {
+    // One data request per format list, whatever text formats it announces:
+    // a client copy typically lists CF_UNICODETEXT and CF_TEXT together, and
+    // a request for each of them meant two clipboard writes and two announces
+    // on the host per copy (the x2 amplifier in the announce storm). Prefer
+    // CF_UNICODETEXT, then CF_TEXT, then CF_OEMTEXT.
+    uint32_t wanted = 0;
     for (uint32_t i = 0; i < formatList->numFormats; ++i) {
-        auto format = formatList->formats[i];
-
-        switch (format.formatId) {
-        case CF_TEXT:
+        const auto formatId = formatList->formats[i].formatId;
+        switch (formatId) {
         case CF_UNICODETEXT:
-        case CF_OEMTEXT: {
-            CLIPRDR_FORMAT_DATA_REQUEST formatDataRequest{.common = CLIPRDR_HEADER({.msgType = CB_FORMAT_DATA_REQUEST, .msgFlags = 0, .dataLen = 4}),
-                                                          .requestedFormatId = CF_UNICODETEXT};
-            clipContext->ServerFormatDataRequest(clipContext.get(), &formatDataRequest);
+            wanted = formatId;
             break;
-        }
+        case CF_TEXT:
+            if (wanted != CF_UNICODETEXT) {
+                wanted = formatId;
+            }
+            break;
+        case CF_OEMTEXT:
+            if (wanted == 0) {
+                wanted = formatId;
+            }
+            break;
         default:
             break;
         }
     }
 
-    // Acknowledge the client's format list (required by CLIPRDR protocol)
+    // Acknowledge the client's format list first (MS-RDPECLIP 3.1.5.2.3:
+    // the Format List Response precedes any Format Data Request).
     CLIPRDR_FORMAT_LIST_RESPONSE response = {};
     response.common.msgType = CB_FORMAT_LIST_RESPONSE;
     response.common.msgFlags = CB_RESPONSE_OK;
     clipContext->ServerFormatListResponse(clipContext.get(), &response);
 
+    if (wanted == 0) {
+        qCDebug(KRDP) << "Client announced" << formatList->numFormats << "clipboard formats, none of them text; not requesting data";
+        return CHANNEL_RC_OK;
+    }
+
+    qCDebug(KRDP) << "Client announced" << formatList->numFormats << "clipboard formats; requesting text as format" << wanted;
+    requestedClientFormat = wanted;
+    CLIPRDR_FORMAT_DATA_REQUEST formatDataRequest{.common = CLIPRDR_HEADER({.msgType = CB_FORMAT_DATA_REQUEST, .msgFlags = 0, .dataLen = 4}),
+                                                  .requestedFormatId = wanted};
+    clipContext->ServerFormatDataRequest(clipContext.get(), &formatDataRequest);
+
     return CHANNEL_RC_OK;
 }
 
-uint32_t Clipboard::Private::onClientFormatListResponse(const CLIPRDR_FORMAT_LIST_RESPONSE *formatListResponse)
+uint32_t Clipboard::Private::onClientFormatListResponse(const CLIPRDR_FORMAT_LIST_RESPONSE *)
 {
     return CHANNEL_RC_OK;
 }
@@ -233,8 +263,8 @@ uint32_t Clipboard::Private::onClientFormatDataRequest(const CLIPRDR_FORMAT_DATA
         return CHANNEL_RC_OK;
     }
 
-    auto text = serverData->text();
-    // CF_UNICODETEXT requires null-terminated UTF-16LE
+    // CF_UNICODETEXT is CRLF on the wire and requires null-terminated UTF-16LE.
+    const auto text = ClipboardText::toWire(serverData->text());
     QByteArray utf16Data(reinterpret_cast<const char *>(text.utf16()), (text.length() + 1) * 2);
 
     CLIPRDR_FORMAT_DATA_RESPONSE response = {};
@@ -243,6 +273,7 @@ uint32_t Clipboard::Private::onClientFormatDataRequest(const CLIPRDR_FORMAT_DATA
     response.common.dataLen = utf16Data.size();
     response.requestedFormatData = reinterpret_cast<const BYTE *>(utf16Data.constData());
 
+    qCDebug(KRDP) << "Serving host clipboard text to the client:" << text.length() << "characters";
     clipContext->ServerFormatDataResponse(clipContext.get(), &response);
 
     return CHANNEL_RC_OK;
@@ -251,19 +282,37 @@ uint32_t Clipboard::Private::onClientFormatDataRequest(const CLIPRDR_FORMAT_DATA
 uint32_t Clipboard::Private::onClientFormatDataResponse(const CLIPRDR_FORMAT_DATA_RESPONSE *formatDataResponse)
 {
     if (!(formatDataResponse->common.msgFlags & CB_RESPONSE_OK)) {
+        qCDebug(KRDP) << "Client refused the clipboard data request for format" << requestedClientFormat;
         return CHANNEL_RC_OK;
     }
 
-    const auto nCharacters = formatDataResponse->common.dataLen / 2 - 1; // Each char16_t is 2 bytes, plus null terminator
-    if (nCharacters < 0) {
-        clientData.reset();
-        Q_EMIT q->clientDataChanged();
-        return CHANNEL_RC_OK; // empty string
+    const auto *bytes = reinterpret_cast<const char *>(formatDataResponse->requestedFormatData);
+    const auto length = formatDataResponse->common.dataLen;
+    QString text;
+    if (requestedClientFormat == CF_UNICODETEXT) {
+        // UTF-16LE with a null terminator; anything shorter than the
+        // terminator is an empty string.
+        if (length >= 2) {
+            text = QString::fromUtf16(reinterpret_cast<const char16_t *>(bytes), length / 2 - 1);
+        }
+    } else {
+        // CF_TEXT / CF_OEMTEXT: 8-bit with a null terminator.
+        if (length >= 1) {
+            text = QString::fromLatin1(bytes, length - 1);
+        }
     }
 
-    clientData.reset(new QMimeData());
+    if (text.isEmpty()) {
+        qCDebug(KRDP) << "Client clipboard text is empty";
+        clientData.reset();
+        Q_EMIT q->clientDataChanged();
+        return CHANNEL_RC_OK;
+    }
 
-    clientData->setText(QString::fromUtf16(reinterpret_cast<const char16_t *>(formatDataResponse->requestedFormatData), nCharacters));
+    // Stored LF on the host, whatever the wire carried.
+    clientData.reset(new QMimeData());
+    clientData->setText(ClipboardText::toHost(text));
+    qCDebug(KRDP) << "Client clipboard text received:" << clientData->text().length() << "characters";
     Q_EMIT q->clientDataChanged();
 
     return CHANNEL_RC_OK;
