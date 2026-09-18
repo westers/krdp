@@ -1669,11 +1669,13 @@ void SessionController::connectVirtualSession(KRdp::AbstractSession *session, Se
         wrapper->maybeApplyVirtualPolicy();
     });
     connect(session, &KRdp::AbstractSession::outputGeometryChanged, wrapper, [wrapper](const QRect &) {
-        // A pointer move recorded for the takeover detector between a
-        // kscreen-doctor call and this geometry update was mapped through
-        // the output's old origin, so it is not where the pointer is; the
-        // next move becomes the reference (Task 6c review, Minor 3).
-        wrapper->takeover.forgetInjected();
+        // A pointer move or a cursor sample recorded for the takeover
+        // detector between a kscreen-doctor call and this geometry update
+        // was mapped through the output's old origin, so it is not where
+        // the pointer is, and a compositor-driven move must not read as two
+        // far samples; the detector drops both references and sits out the
+        // churn (Task 6c review Minor 3, final re-review).
+        wrapper->takeover.outputMoved(wrapper->m_clock.elapsed());
         if (wrapper->policyApplied) {
             // Multi-output: the outputs moved after the policy (a park, a
             // replayed arrangement); the client's layout has to follow.

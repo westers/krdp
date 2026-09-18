@@ -234,6 +234,29 @@ private Q_SLOTS:
         QVERIFY(detector.observed(QPoint(100, 100), 5400));
     }
 
+    void outputMoveSuspendsAndDropsBothReferences()
+    {
+        // The compositor moved the virtual output (a park, a replayed
+        // arrangement): the injected reference and the previous sample were
+        // both mapped through the old origin, and the churn that follows
+        // warps the pointer, so nothing is judged for a while and nothing
+        // from before the move is a reference afterwards.
+        Detector detector;
+        detector.armed(0);
+        detector.injected(QPoint(5220, 100), 2500);
+        QVERIFY(!detector.observed(QPoint(5220, 100), 3000));
+        detector.outputMoved(3100);
+        // Would fire by both rules (far from the injection and from the
+        // previous sample), but the move is in progress.
+        QVERIFY(!detector.observed(QPoint(100, 100), 3400));
+        QVERIFY(!detector.observed(QPoint(100, 100), 3100 + OutputMoveSuspendMs - 1));
+        QVERIFY(!detector.fired());
+        // After the window: the pre-move sample is not a reference, so the
+        // first sample only becomes one, and motion from there fires.
+        QVERIFY(!detector.observed(QPoint(100, 100), 3100 + OutputMoveSuspendMs));
+        QVERIFY(detector.observed(QPoint(800, 800), 3100 + OutputMoveSuspendMs + 400));
+    }
+
     void forgetInjectedNeedsANewReference()
     {
         // The output moved after an injection was recorded against its old

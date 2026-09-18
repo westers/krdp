@@ -642,27 +642,31 @@ bool PhysicalOutputGuard::restoreFromStateFile()
         qInfo() << "Physical outputs restored from the state file";
         return true;
     }
-    if (outcome.missing.isEmpty() || (!outcome.present.isEmpty() && !outcome.presentVerified)) {
-        // Everything is connected but did not settle, or what is connected
-        // did not settle either: worth another try at the next start.
-        qCritical().noquote() << "Restore from" << file.fileName() << "failed. Run: kscreen-doctor"
-                              << restoreArgs(outcome.present.isEmpty() ? physical : outcome.present).join(u' ');
+    if (outcome.missing.isEmpty()) {
+        // Everything is connected but did not settle: worth another try at
+        // the next start.
+        qCritical().noquote() << "Restore from" << file.fileName() << "failed. Run: kscreen-doctor" << restoreArgs(physical).join(u' ');
         return false;
     }
     // Some or all of the snapshotted outputs are not connected (unplugged,
-    // a KVM, a different monitor set): what is connected is restored (or
-    // there was nothing to restore), and the rest cannot be until it is
-    // back. Set the file aside rather than pay a blocking restore for
-    // outputs that are not there at every later start; the log says how
-    // to finish by hand.
+    // a KVM, a different monitor set): the rest cannot be restored until
+    // they are back, and what is connected may not even verify without
+    // them (a lone enabled output is renumbered and pinned to 0,0 by KWin,
+    // so it can never match its snapshot entry). Set the file aside
+    // whatever the connected subset did, rather than pay a blocking restore
+    // for outputs that are not there at every later start; the log says
+    // how to finish by hand.
     const QString original = file.fileName();
     const QString stale = original + u".stale"_s;
     QFile::remove(stale);
     const bool kept = file.rename(stale);
-    qCritical().noquote() << "State file" << original << (kept ? u"set aside as %1"_s.arg(stale) : u"could not be renamed"_s) << ":"
-                          << (outcome.present.isEmpty() ? u"none of its outputs is connected"_s
-                                                        : u"%1 restored, not connected: %2"_s.arg(names(outcome.present).join(u", "), names(outcome.missing).join(u", ")))
-                          << "- when" << names(outcome.missing).join(u", ") << "is back, run: kscreen-doctor" << restoreArgs(outcome.missing).join(u' ')
+    const QString presentNames = names(outcome.present).join(u", ");
+    const QString missingNames = names(outcome.missing).join(u", ");
+    const QString what = outcome.present.isEmpty() ? u"none of its outputs is connected"_s
+        : outcome.presentVerified                  ? u"%1 restored, not connected: %2"_s.arg(presentNames, missingNames)
+                                                   : u"%1 enabled but not verified as snapshotted, not connected: %2"_s.arg(presentNames, missingNames);
+    qCritical().noquote() << "State file" << original << (kept ? u"set aside as %1"_s.arg(stale) : u"could not be renamed"_s) << ":" << what << "- when" << missingNames
+                          << "is back, run: kscreen-doctor" << restoreArgs(physical).join(u' ')
                           << "(or rename the file back and run krdpserver --restore-outputs; last resort: rm" << original << "once the monitors are right)";
     return false;
 }

@@ -31,6 +31,8 @@ constexpr int DistanceThresholdPx = 24;
 constexpr int QuietWindowMs = 300;
 /** Ignore samples this long after arming: disabling outputs makes KWin warp the pointer. */
 constexpr int ArmDelayMs = 2000;
+/** Ignore samples this long after the captured output moved: the churn that follows warps the pointer too. */
+constexpr int OutputMoveSuspendMs = 3000;
 
 struct Detector {
     /** Call when the replace policy has been applied; nothing fires before this. */
@@ -60,6 +62,22 @@ struct Detector {
     void forgetInjected()
     {
         m_hasInjected = false;
+    }
+
+    /**
+     * The captured output has moved (a park, a replayed arrangement after a
+     * physical output came or went): the injected reference AND the previous
+     * sample were mapped through its old origin, so neither may be compared
+     * with what comes next - two samples straddling the move would be the
+     * output's displacement apart with nobody touching a mouse - and the
+     * churn that follows warps the pointer. Both references go, and samples
+     * are ignored until \a nowMs + OutputMoveSuspendMs.
+     */
+    void outputMoved(qint64 nowMs)
+    {
+        forgetInjected();
+        m_hasPreviousSample = false;
+        suspend(nowMs + OutputMoveSuspendMs);
     }
 
     /**

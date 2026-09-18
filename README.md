@@ -145,7 +145,11 @@ records the owning process ID so a second, unrelated krdpserver instance
 never restores a layout a still-running instance owns); `krdpserver
 --restore-outputs` does the same thing on demand without starting a session,
 and `kscreen-doctor output.DP-1.enable output.HDMI-A-1.enable` (adjusted to
-the real output names) is the manual fallback. Restarting the live service
+the real output names) is the manual fallback. If a snapshotted monitor is
+not connected at that start (unplugged, a KVM), what is connected is restored
+and the file is set aside as `physical-outputs.json.stale` with the command to
+run once the monitor is back; the last resort, once the monitors are right, is
+`rm ~/.local/state/krdp-server/physical-outputs.json`. Restarting the live service
 while a client is connected in `replace` always ends that client's session;
 the physical outputs come back either during the graceful shutdown or via
 the automatic startup recovery, so no manual step is normally needed.
