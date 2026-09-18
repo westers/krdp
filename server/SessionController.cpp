@@ -117,10 +117,17 @@ public:
         // alone.
         if (outputGuard) {
             // A verified restore parks the virtual output itself (after the
-            // outputs have settled); an unverified one leaves a retry
-            // behind, which must not try to park an output that is about
-            // to disappear with the sessions below.
-            outputGuard->release();
+            // outputs have settled). An unverified one (the outputs did not
+            // settle, or one is not connected) leaves a retry behind, which
+            // must not try to park an output that is about to disappear with
+            // the sessions below - but the physical outputs that ARE back
+            // are enabled now, and the arrangement KWin records last for
+            // this output set must not be "physicals on, virtual output
+            // over their origin", or the next connect replays that overlap
+            // (final review, Important 2). So park best effort first.
+            if (!outputGuard->release() && outputGuard->held()) {
+                outputGuard->parkIfPhysicalEnabled();
+            }
             outputGuard->clearParkPlacements();
         }
         holdDisplayWake(false);
@@ -1078,6 +1085,13 @@ void SessionController::releasePhysicalOutputs()
     // before teardown, and a session that keeps streaming is the point
     // (Steve's decision, Task 6c).
     const bool restored = m_outputGuard.release();
+    if (!restored && m_outputGuard.held()) {
+        // Same reasoning as the wrapper's teardown: whatever physical output
+        // is back is enabled, and the session runs on with its virtual
+        // output; do not leave it over DP-1 (the retry re-parks if it
+        // verifies later, harmlessly twice).
+        m_outputGuard.parkIfPhysicalEnabled();
+    }
     int continued = 0;
     for (const auto &wrapper : m_wrappers) {
         if (wrapper && wrapper->outputGuard) {
@@ -1540,10 +1554,16 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
     // output set). The extend place is also where a replace session's
     // outputs are parked once the physical outputs are back
     // (PhysicalOutputGuard::restore(), SessionWrapper::parkVirtualOutputs()).
-    // Known only with a snapshot: without one there is no physical union to
-    // sit beside, and no restore that could park anything.
+    // Known with a snapshot - this session's, or the one the guard still
+    // holds because a previous session's restore has not verified yet (a
+    // reconnect during the pending retry gets its snapshot() refused): the
+    // retry that restores that snapshot parks THIS session's outputs beside
+    // it, so it needs the placements too, and the extend reconcile parks
+    // when the physical outputs are back on their own. Without any snapshot
+    // there is no physical union to sit beside, and no restore that could
+    // park anything.
     std::optional<QPoint> extendAnchor;
-    if (snapshotTaken) {
+    if (snapshotTaken || m_outputGuard.held()) {
         const QRect physical = KRdp::OutputSnapshot::enabledUnion(m_outputGuard.physicalOutputs());
         if (physical.isValid()) {
             extendAnchor = QPoint(physical.left() + physical.width(), physical.top());

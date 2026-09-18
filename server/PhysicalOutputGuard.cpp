@@ -317,6 +317,28 @@ bool PhysicalOutputGuard::parkVirtualOutputs()
     return positionOutputs(m_parkPlacements, m_parkPrimary);
 }
 
+bool PhysicalOutputGuard::parkIfPhysicalEnabled()
+{
+    if (!hasParkPlacements()) {
+        return false;
+    }
+    // Only worth trying while a physical output is enabled: with none, KWin
+    // pins the lone enabled output to (0,0) and the move would not stick.
+    const auto now = current();
+    const bool anyPhysicalEnabled = std::any_of(now.cbegin(), now.cend(), [](const Output &o) {
+        return !isVirtual(o.name) && o.enabled;
+    });
+    if (!anyPhysicalEnabled) {
+        return false;
+    }
+    if (!parkVirtualOutputs()) {
+        qWarning() << "Could not park the virtual output beside the physical desktop after an unverified restore; KWin's placement stands";
+        return false;
+    }
+    qInfo() << "Virtual output parked beside the physical desktop after an unverified restore, so KWin does not record the overlap";
+    return true;
+}
+
 bool PhysicalOutputGuard::positionOutputs(const QVector<Placement> &virtualOutputs, const QString &primaryVirtualName)
 {
     if (virtualOutputs.isEmpty()) {
@@ -433,20 +455,41 @@ bool PhysicalOutputGuard::waitForPhysical(const QVector<Output> &physical, Settl
     }
 }
 
-bool PhysicalOutputGuard::restoreSnapshot(const QVector<Output> &physical)
+PhysicalOutputGuard::RestoreOutcome PhysicalOutputGuard::restoreSnapshot(const QVector<Output> &physical)
 {
+    RestoreOutcome outcome;
     if (physical.isEmpty()) {
-        return true;
+        outcome.presentVerified = true;
+        outcome.verified = true;
+        return outcome;
     }
-    if (!run(restoreArgs(physical))) {
-        return false;
+    // kscreen-doctor refuses the whole command when any named output is
+    // absent ("Output ... not found", nothing applied), so a snapshotted
+    // monitor that dropped HPD mid-session (power button, KVM, cable) would
+    // keep the present one dark too. Restore what is there; report the rest
+    // and stay held for it. A failed read-back falls back to the full
+    // command: there is nothing to intersect with.
+    const auto now = current();
+    outcome.present = now.isEmpty() ? physical : presentSubset(physical, now);
+    outcome.missing = now.isEmpty() ? QVector<Output>() : missingSubset(physical, now);
+    if (outcome.present.isEmpty()) {
+        qWarning() << "None of the snapshotted physical outputs is connected:" << names(outcome.missing) << "- nothing to restore right now";
+        return outcome;
+    }
+    if (!outcome.missing.isEmpty()) {
+        qWarning() << "Snapshotted physical output(s) not connected:" << names(outcome.missing) << "- restoring the rest:" << names(outcome.present);
+    }
+    if (!run(restoreArgs(outcome.present))) {
+        return outcome;
     }
     // The enable command is accepted at once, but a panel that was in
     // standby makes KWin remove the output and re-add it a few seconds
     // later, replaying whatever arrangement it has stored for the set that
     // reappears. Verifying on the first read-back races that (hw batch v6,
     // findings A/B); wait until the snapshot is back and stays back.
-    return waitForPhysical(physical, SettleGoal::Matching);
+    outcome.presentVerified = waitForPhysical(outcome.present, SettleGoal::Matching);
+    outcome.verified = outcome.presentVerified && outcome.missing.isEmpty();
+    return outcome;
 }
 
 bool PhysicalOutputGuard::restore()
@@ -471,8 +514,8 @@ bool PhysicalOutputGuard::restore()
     if (!hasSnapshot()) {
         return true;
     }
-    const bool verified = restoreSnapshot(m_physical);
-    if (verified) {
+    const auto outcome = restoreSnapshot(m_physical);
+    if (outcome.verified) {
         m_held = false;
         // A retry still pending from an earlier failure has nothing left to
         // do and must not fire restored() a second time.
@@ -497,18 +540,32 @@ bool PhysicalOutputGuard::restore()
     }
 
     // Still held: the enable ran but the outputs did not come back as
-    // snapshotted within the settle budget (or the command failed).
-    const QString recovery = u"kscreen-doctor "_s + restoreArgs(m_physical).join(u' ');
+    // snapshotted within the settle budget (or the command failed), or a
+    // snapshotted output is not connected. The manual command names only
+    // what is connected - kscreen-doctor would refuse the rest - and the
+    // missing outputs get their own command for when they are back.
+    const QString recovery = u"kscreen-doctor "_s + restoreArgs(outcome.present.isEmpty() ? m_physical : outcome.present).join(u' ');
+    QString why = u"not back within %1 ms"_s.arg(SettleTimeoutMs);
+    if (!outcome.missing.isEmpty()) {
+        const QString presentNames = names(outcome.present).join(u", ");
+        const QString missingNames = names(outcome.missing).join(u", ");
+        if (outcome.present.isEmpty()) {
+            why = u"none of %1 is connected"_s.arg(missingNames);
+        } else if (outcome.presentVerified) {
+            why = u"%1 restored, but %2 not connected"_s.arg(presentNames, missingNames);
+        } else {
+            why = u"%1 not back within %2 ms and %3 not connected"_s.arg(presentNames).arg(SettleTimeoutMs).arg(missingNames);
+        }
+        why += u"; once reconnected run: kscreen-doctor "_s + restoreArgs(outcome.missing).join(u' ');
+    }
     if (m_retrying) {
-        qCritical().noquote() << "Physical outputs still not restored after the retry (not back within" << SettleTimeoutMs << "ms). Run:" << recovery
-                              << "(or krdpserver --restore-outputs)";
+        qCritical().noquote() << u"Physical outputs still not restored after the retry (%1). Run:"_s.arg(why) << recovery << "(or krdpserver --restore-outputs)";
         Q_EMIT restored(false);
     } else if (!m_retryTimer.isActive()) {
-        qCritical().noquote() << "Physical outputs NOT restored (not back within" << SettleTimeoutMs << "ms); retrying in" << RestoreRetryMs
-                              << "ms. Manual recovery:" << recovery;
+        qCritical().noquote() << u"Physical outputs NOT restored (%1); retrying in"_s.arg(why) << RestoreRetryMs << "ms. Manual recovery:" << recovery;
         m_retryTimer.start();
     } else {
-        qCritical().noquote() << "Physical outputs NOT restored; a retry is already pending. Manual recovery:" << recovery;
+        qCritical().noquote() << u"Physical outputs NOT restored (%1); a retry is already pending. Manual recovery:"_s.arg(why) << recovery;
     }
     return false;
 }
@@ -579,11 +636,33 @@ bool PhysicalOutputGuard::restoreFromStateFile()
     }
     qWarning() << "A previous krdpserver" << (ownerPid > 0 ? u"(PID %1, gone)"_s.arg(ownerPid) : u"(unknown PID)"_s)
                << "left the physical outputs replaced (state file present); restoring" << physical.size() << "outputs";
-    if (!restoreSnapshot(physical)) {
-        qCritical().noquote() << "Restore from" << file.fileName() << "failed. Run: kscreen-doctor" << restoreArgs(physical).join(u' ');
+    const auto outcome = restoreSnapshot(physical);
+    if (outcome.verified) {
+        file.remove();
+        qInfo() << "Physical outputs restored from the state file";
+        return true;
+    }
+    if (outcome.missing.isEmpty() || (!outcome.present.isEmpty() && !outcome.presentVerified)) {
+        // Everything is connected but did not settle, or what is connected
+        // did not settle either: worth another try at the next start.
+        qCritical().noquote() << "Restore from" << file.fileName() << "failed. Run: kscreen-doctor"
+                              << restoreArgs(outcome.present.isEmpty() ? physical : outcome.present).join(u' ');
         return false;
     }
-    file.remove();
-    qInfo() << "Physical outputs restored from the state file";
-    return true;
+    // Some or all of the snapshotted outputs are not connected (unplugged,
+    // a KVM, a different monitor set): what is connected is restored (or
+    // there was nothing to restore), and the rest cannot be until it is
+    // back. Set the file aside rather than pay a blocking restore for
+    // outputs that are not there at every later start; the log says how
+    // to finish by hand.
+    const QString original = file.fileName();
+    const QString stale = original + u".stale"_s;
+    QFile::remove(stale);
+    const bool kept = file.rename(stale);
+    qCritical().noquote() << "State file" << original << (kept ? u"set aside as %1"_s.arg(stale) : u"could not be renamed"_s) << ":"
+                          << (outcome.present.isEmpty() ? u"none of its outputs is connected"_s
+                                                        : u"%1 restored, not connected: %2"_s.arg(names(outcome.present).join(u", "), names(outcome.missing).join(u", ")))
+                          << "- when" << names(outcome.missing).join(u", ") << "is back, run: kscreen-doctor" << restoreArgs(outcome.missing).join(u' ')
+                          << "(or rename the file back and run krdpserver --restore-outputs; last resort: rm" << original << "once the monitors are right)";
+    return false;
 }

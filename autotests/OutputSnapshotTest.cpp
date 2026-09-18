@@ -172,6 +172,30 @@ private Q_SLOTS:
         QVERIFY(allPresentAndDisabled({}, {}));
     }
 
+    void presentAndMissingSplitTheSnapshotByName()
+    {
+        // A snapshotted monitor that dropped HPD (power button, KVM, cable)
+        // is absent from the read-back; kscreen-doctor refuses a command that
+        // names it, so the restore is built from what is there and the rest
+        // is reported.
+        const auto all = parse(kscreenJson);
+        const auto physical = physicalOnly(all);
+        QCOMPARE(presentSubset(physical, all), physical);
+        QVERIFY(missingSubset(physical, all).isEmpty());
+        QVector<Output> onlyDp1{all[0], all[2]};
+        QCOMPARE(presentSubset(physical, onlyDp1), (QVector<Output>{physical[0]}));
+        QCOMPARE(missingSubset(physical, onlyDp1), (QVector<Output>{physical[1]}));
+        QVERIFY(presentSubset(physical, {}).isEmpty());
+        QCOMPARE(missingSubset(physical, {}), physical);
+        // The subsets carry the SNAPSHOT's entries (the state to restore), not the read-back's.
+        auto moved = onlyDp1;
+        moved[0].position = QPoint(100, 100);
+        QCOMPARE(presentSubset(physical, moved)[0].position, QPoint(0, 0));
+        QCOMPARE(names(missingSubset(physical, onlyDp1)), QStringList{QStringLiteral("HDMI-A-1")});
+        QCOMPARE(restoreArgs(presentSubset(physical, onlyDp1)),
+                 (QStringList{QStringLiteral("output.DP-1.enable"), QStringLiteral("output.DP-1.position.0,0"), QStringLiteral("output.DP-1.priority.1")}));
+    }
+
     void jsonRoundTrip()
     {
         const auto physical = physicalOnly(parse(kscreenJson));

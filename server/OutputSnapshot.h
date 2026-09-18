@@ -200,6 +200,45 @@ inline bool allPresent(const QVector<Output> &snapshot, const QVector<Output> &c
     });
 }
 
+/** The entries of \a snapshot (as snapshotted) whose output is present in \a current by name. */
+inline QVector<Output> presentSubset(const QVector<Output> &snapshot, const QVector<Output> &current)
+{
+    QVector<Output> present;
+    for (const auto &wanted : snapshot) {
+        if (std::any_of(current.cbegin(), current.cend(), [&wanted](const Output &candidate) {
+                return candidate.name == wanted.name;
+            })) {
+            present.push_back(wanted);
+        }
+    }
+    return present;
+}
+
+/** The entries of \a snapshot whose output is absent from \a current: unplugged, or being re-added. */
+inline QVector<Output> missingSubset(const QVector<Output> &snapshot, const QVector<Output> &current)
+{
+    QVector<Output> missing;
+    for (const auto &wanted : snapshot) {
+        if (std::none_of(current.cbegin(), current.cend(), [&wanted](const Output &candidate) {
+                return candidate.name == wanted.name;
+            })) {
+            missing.push_back(wanted);
+        }
+    }
+    return missing;
+}
+
+/** The output names, for logs. */
+inline QStringList names(const QVector<Output> &outputs)
+{
+    QStringList list;
+    list.reserve(outputs.size());
+    for (const auto &output : outputs) {
+        list.push_back(output.name);
+    }
+    return list;
+}
+
 /**
  * Every physical output of \a snapshot is present in \a current AND disabled:
  * what a replace has to read back before it may call itself applied. An

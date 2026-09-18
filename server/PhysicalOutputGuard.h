@@ -83,6 +83,16 @@ public:
      * output to (0,0).
      */
     bool parkVirtualOutputs();
+    /**
+     * After an unverified restore (the enable was accepted but the outputs
+     * did not settle, or one of them is not connected): park the remembered
+     * virtual outputs anyway when a physical output reads back enabled.
+     * KWin records the last arrangement it saw for an output set and replays
+     * it at the next connect; physical outputs on with a virtual output still
+     * at the replace-time origin is the overlap that hung plasmashell on
+     * 2026-09-17. Best effort; false when nothing was parked.
+     */
+    bool parkIfPhysicalEnabled();
     bool reconcileExtend();
     /**
      * Put the physical outputs back as snapshotted and wait for them to
@@ -108,7 +118,16 @@ Q_SIGNALS:
 private:
     static bool run(const QStringList &args, QByteArray *output = nullptr);
     static QVector<KRdp::OutputSnapshot::Output> current(QString *error = nullptr);
-    static bool restoreSnapshot(const QVector<KRdp::OutputSnapshot::Output> &physical);
+    /** What restoreSnapshot() did: the connected subset it enabled (as snapshotted) and what it could not name. */
+    struct RestoreOutcome {
+        /** Every snapshotted output was connected, enabled and settled. */
+        bool verified = false;
+        /** The connected subset settled as snapshotted (even if others are missing). */
+        bool presentVerified = false;
+        QVector<KRdp::OutputSnapshot::Output> present;
+        QVector<KRdp::OutputSnapshot::Output> missing;
+    };
+    static RestoreOutcome restoreSnapshot(const QVector<KRdp::OutputSnapshot::Output> &physical);
     /** What waitForPhysical() waits for. */
     enum class SettleGoal {
         /** Every physical output of the snapshot is present, whatever its state (before a replace). */
