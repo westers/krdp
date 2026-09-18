@@ -155,6 +155,85 @@ private Q_SLOTS:
         QVERIFY(!detector.fired());
     }
 
+    void twoFarSamplesFireWithoutAnyInjection()
+    {
+        // The console mouse moves while the remote side has not touched its
+        // pointer since the replace (keyboard work): two samples far apart
+        // with no injection anywhere near them can only be local motion.
+        Detector detector;
+        detector.armed(0);
+        QVERIFY(!detector.observed(QPoint(100, 100), 3000));
+        QVERIFY(detector.observed(QPoint(800, 800), 3400));
+        QVERIFY(detector.fired());
+    }
+
+    void oneSampleIsNotMotion()
+    {
+        Detector detector;
+        detector.armed(0);
+        QVERIFY(!detector.observed(QPoint(800, 800), 5000));
+        QVERIFY(!detector.fired());
+    }
+
+    void nearSamplesDoNotFire()
+    {
+        Detector detector;
+        detector.armed(0);
+        QVERIFY(!detector.observed(QPoint(100, 100), 3000));
+        QVERIFY(!detector.observed(QPoint(100 + DistanceThresholdPx, 100), 3400));
+        QVERIFY(!detector.observed(QPoint(100 + DistanceThresholdPx, 100 + DistanceThresholdPx), 3800));
+    }
+
+    void injectionBetweenSamplesSuppresses()
+    {
+        // The displacement is ours: we moved the pointer between the samples.
+        Detector detector;
+        detector.armed(0);
+        QVERIFY(!detector.observed(QPoint(100, 100), 3000));
+        detector.injected(QPoint(800, 800), 3100);
+        QVERIFY(!detector.observed(QPoint(800, 800), 3500));
+        QVERIFY(!detector.fired());
+    }
+
+    void staleSampleRightAfterInjectionDoesNotFire()
+    {
+        // The frame captured just after our move still shows the old place;
+        // the next one shows the new place. Both are ours.
+        Detector detector;
+        detector.armed(0);
+        detector.injected(QPoint(800, 800), 3000);
+        QVERIFY(!detector.observed(QPoint(100, 100), 3050));
+        QVERIFY(!detector.observed(QPoint(800, 800), 3400));
+        QVERIFY(!detector.fired());
+    }
+
+    void forgetInjectedKeepsTheSampleRule()
+    {
+        // The output moved (geometry update) after an injection: the injected
+        // reference is dropped, but two samples far apart still count.
+        Detector detector;
+        detector.armed(0);
+        detector.injected(QPoint(100, 100), 2500);
+        detector.forgetInjected();
+        QVERIFY(!detector.observed(QPoint(100, 100), 3000));
+        QVERIFY(detector.observed(QPoint(800, 800), 3400));
+    }
+
+    void samplesInsideArmDelayOrSuspendAreNotReferences()
+    {
+        // A warp sample during the arm delay must not become the "previous
+        // sample" a later, legitimate sample is compared against.
+        Detector detector;
+        detector.armed(0);
+        QVERIFY(!detector.observed(QPoint(100, 100), 1000));
+        QVERIFY(!detector.observed(QPoint(800, 800), 2000));
+        detector.suspend(5000);
+        QVERIFY(!detector.observed(QPoint(100, 100), 4000));
+        QVERIFY(!detector.observed(QPoint(800, 800), 5000));
+        QVERIFY(!detector.fired());
+        QVERIFY(detector.observed(QPoint(100, 100), 5400));
+    }
+
     void forgetInjectedNeedsANewReference()
     {
         // The output moved after an injection was recorded against its old
