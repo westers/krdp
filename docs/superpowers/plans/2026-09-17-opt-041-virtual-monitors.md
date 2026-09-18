@@ -1004,7 +1004,7 @@ git commit -m "server: pure kscreen output snapshot model and command builders (
   public:
       explicit PhysicalOutputGuard(QObject *parent = nullptr);
       ~PhysicalOutputGuard() override;                 // restore() if a snapshot is still held
-      static QString stateFilePath();                  // $XDG_STATE_HOME/krdpserver/physical-outputs.json
+      static QString stateFilePath();                  // $XDG_STATE_HOME/krdp-server/physical-outputs.json (app name is krdp-server, not krdpserver)
       static bool restoreFromStateFile();              // true = nothing to do or restored+verified
       bool available() const;                          // kscreen-doctor found in PATH
       bool snapshot();                                 // read + remember the physical outputs, write the state file
@@ -1321,7 +1321,7 @@ bool PhysicalOutputGuard::restoreFromStateFile()
     return true;
 }
 ```
-Notes for the implementer: `QStandardPaths::StateLocation` exists since Qt 6.7 and resolves to `~/.local/state/krdpserver` (the app name is set by `KAboutData`). `operator<<(QDebug, Output)` is needed for the two `qWarning() << after` lines — add a small `inline QDebug operator<<(QDebug dbg, const KRdp::OutputSnapshot::Output &o)` at the bottom of `OutputSnapshot.h` (name, enabled, position, priority) with `#include <QDebug>`. `qWarning() << virtualOutputs.size()` is fine as-is.
+Notes for the implementer: `QStandardPaths::StateLocation` exists since Qt 6.7 and resolves to `~/.local/state/krdp-server` (as built: the app name set in `main.cpp` is `krdp-server`, not `krdpserver` as this note originally said). `operator<<(QDebug, Output)` is needed for the two `qWarning() << after` lines — add a small `inline QDebug operator<<(QDebug dbg, const KRdp::OutputSnapshot::Output &o)` at the bottom of `OutputSnapshot.h` (name, enabled, position, priority) with `#include <QDebug>`. `qWarning() << virtualOutputs.size()` is fine as-is.
 
 - [ ] **Step 3: `--restore-outputs` and startup recovery in `server/main.cpp`**
 
@@ -1347,7 +1347,7 @@ And after the `SessionController controller(...)` construction:
 
 `cmake --build build -j16 2>&1 | grep -E "warning|error"` → nothing.
 
-Recovery test WITHOUT disabling anything (a hand-written state file that already matches reality is a no-op restore that still exercises the code): `mkdir -p ~/.local/state/krdpserver && printf '[{"name":"DP-1","enabled":true,"x":0,"y":0,"priority":1,"width":2560,"height":1440},{"name":"HDMI-A-1","enabled":true,"x":2560,"y":0,"priority":2,"width":2560,"height":1440}]' > ~/.local/state/krdpserver/physical-outputs.json && ./build/bin/krdpserver --restore-outputs; echo "exit $?"; ls ~/.local/state/krdpserver/`
+Recovery test WITHOUT disabling anything (a hand-written state file that already matches reality is a no-op restore that still exercises the code; as built the state directory is `~/.local/state/krdp-server`, not `~/.local/state/krdpserver`): `mkdir -p ~/.local/state/krdp-server && printf '[{"name":"DP-1","enabled":true,"x":0,"y":0,"priority":1,"width":2560,"height":1440},{"name":"HDMI-A-1","enabled":true,"x":2560,"y":0,"priority":2,"width":2560,"height":1440}]' > ~/.local/state/krdp-server/physical-outputs.json && ./build/bin/krdpserver --restore-outputs; echo "exit $?"; ls ~/.local/state/krdp-server/`
 Expected: log `restoring 2 outputs` then `Physical outputs restored from the state file`, exit 0, the file is gone, `kscreen-doctor -o` unchanged.
 
 Real toggle test (Global Constraints apply — no client on 3389/3391): with the same file but `"enabled":true` for HDMI-A-1 while HDMI-A-1 is actually disabled: `kscreen-doctor output.HDMI-A-1.disable; sleep 2; <write file>; ./build/bin/krdpserver --restore-outputs; sleep 2; kscreen-doctor -o | grep -A2 HDMI`
@@ -1624,7 +1624,7 @@ Note: the `started`/`outputGeometryChanged`/`virtualOutputUnresolved` connection
 
 Config: `printf '[General]\nMonitorMode=virtual\nVirtualMonitorPolicy=replace\nSystemUserEnabled=false\nQuality=80\nAdaptiveQuality=false\n' > $XDG_CONFIG_HOME/krdpserverrc`, start on :3392 WITHOUT `--virtual-monitor`. Baseline `kscreen-doctor -o > /tmp/krdp-v/baseline.txt`.
 
-(a) **replace**: from buzz, own client headless 40 s. While connected, at ~10 s: `kscreen-doctor -o` → `Virtual-krdp-m0-1920x1080` enabled at `0,0` priority 1, DP-1 and HDMI-A-1 `disabled`; server log has `Client display: desktop QSize(1920, 1080)`, `Virtual output "Virtual-krdp-m0-1920x1080" resolved at QRect(...)`, `Physical outputs replaced by 1 virtual output(s)`; `ls ~/.local/state/krdpserver/physical-outputs.json` exists. After the client exits: within 5 s `Physical outputs restored`, `kscreen-doctor -o` equals the baseline (`diff`), the state file is gone, the virtual output is gone.
+(a) **replace**: from buzz, own client headless 40 s. While connected, at ~10 s: `kscreen-doctor -o` → `Virtual-krdp-m0-1920x1080` enabled at `0,0` priority 1, DP-1 and HDMI-A-1 `disabled`; server log has `Client display: desktop QSize(1920, 1080)`, `Virtual output "Virtual-krdp-m0-1920x1080" resolved at QRect(...)`, `Physical outputs replaced by 1 virtual output(s)`; `ls ~/.local/state/krdp-server/physical-outputs.json` exists (as built: `krdp-server`, not `krdpserver`). After the client exits: within 5 s `Physical outputs restored`, `kscreen-doctor -o` equals the baseline (`diff`), the state file is gone, the virtual output is gone.
 (b) **input**: repeat with the GUI client's pointer debug action (a window opens on buzz ~40 s): KWin cursor readback equals `(1234, 567)` + the virtual output's origin as logged in `resolved at` (with replace it is `(0,0)`, so `(1234,567)` on the VIRTUAL output — confirm via the log that the output sits at 0,0 and DP-1 is disabled at that moment).
 (c) **extend**: `VirtualMonitorPolicy=extend` (plain rewrite of the file; restart the test instance — no `--notify`), own client headless 30 s: physical outputs stay enabled throughout, the virtual output appears to the right (`5120,0`), log shows no `replaced`; on exit the layout equals the baseline.
 (d) **second client refused**: while a headless run is connected, start a second (`--seconds 10`); server log `refusing a second client`, the second exits non-zero, the first keeps streaming.

@@ -65,17 +65,21 @@ Lifecycle per connection (`server/SessionController.cpp`):
    to "the screen added since the request whose size equals the request") — and sets
    `d->logicalRect = screen->geometry()`. It connects `QScreen::geometryChanged` so the rect
    follows KWin re-positioning the output when physical outputs are disabled/enabled. If no
-   matching screen appears within 2 s, the session logs an error, keeps `(0,0)` and **refuses to
-   apply `replace`** (input would otherwise drive the physical desktop).
+   matching screen appears within 5 s, the session logs an error, keeps `(0,0)` and **refuses to
+   apply `replace`** (input would otherwise drive the physical desktop). *(As built: the timeout is
+   5 s, not the 2 s this step originally specified — §9's failure table already had it right.)*
    `sendEvent()` already adds `d->logicalRect.x()/y()`; no change to the input path beyond the
    rect being right.
 4. **Streaming starts** exactly as today (surface reset, IDR on demand, adaptive quality).
-5. **Policy apply (replace only):** on the first frame sent *and* the geometry resolved, a new
+5. **Policy apply (replace only):** once the stream is active and the geometry resolved, a new
    `server/PhysicalOutputGuard` snapshots the physical layout (`kscreen-doctor -j` parsed to
    `{name, enabled, position, priority}` per non-virtual output) and disables every physical
    output that is currently enabled: `kscreen-doctor output.<name>.disable …` in one invocation.
    Verification 1 s later with `kscreen-doctor -j`; on failure it logs and leaves the rest as is
-   (the virtual stream keeps working; the session is then effectively `extend`).
+   (the virtual stream keeps working; the session is then effectively `extend`). *(As built: the
+   trigger ended up being "stream active and geometry resolved" rather than "first frame sent", and
+   what "disables and verifies" actually became is a full pre-settle/disable/verify sequence once
+   the physical-output churn findings below were closed — see the "As built" note after §6.)*
 6. **Teardown (all paths — normal disconnect, error, `SIGTERM`/`SIGINT`, `aboutToQuit`, and the
    guard's destructor):** the guard re-enables the snapshot's outputs with their positions and
    priorities in one `kscreen-doctor` call, verifies, and only then the session closes its
@@ -85,8 +89,11 @@ Lifecycle per connection (`server/SessionController.cpp`):
    output.HDMI-A-1.enable`) and retries once after 2 s.
 7. **Screen-change handling:** `refreshDisplayConfiguration()` no longer short-circuits for
    virtual sessions; instead the virtual session ignores `QScreen` added/removed events for
-   screens other than its own, and reacts to its own screen's `geometryChanged` (step 3) and
-   removal (treated as a fatal stream loss → session ends → teardown).
+   screens other than its own, and reacts to its own screen's `geometryChanged` (step 3). *(As
+   built: removal of the session's own virtual output is not the fatal stream loss this step
+   originally specified — KWin can drop and recreate a same-named output during the churn described
+   below, so the session instead waits up to the same 5 s timeout for it to reappear, same as the
+   initial resolution.)*
 
 Mechanism choice: `kscreen-doctor` as a child process (proven in the spike, no new build
 dependency; `libkf6screen-dev` is not installed on hal9000). The guard wraps it behind one small
@@ -111,15 +118,71 @@ N RDPGFX surfaces, `SurfaceLayout`, per-monitor keyframes). Differences from `mu
 - If any of the N outputs fails to appear, the session falls back to Phase A single output at
   the client desktop size (bounding box), logged.
 
-## 6. KWin remembered setups
+## 6. KWin remembered setups (as built: stable names + reconcile, not unique-per-connection names)
 
 KWin keys a remembered arrangement on the set of present outputs and replays it when that set
-reappears. With unique per-connection names no set ever repeats, so nothing stale is replayed and
-the server's explicit policy application (§4 steps 5–6) is the only thing that changes the
-physical outputs. Cost: `kwinoutputconfig.json` gains one setup entry per connection. The plan
-includes a check of how KWin bounds that list; if it grows without bound, the fallback is a
-stable name per `(policy, size)` plus idempotent policy application on every connect, which is
-also safe because the server always re-asserts the desired state after the output appears.
+reappears. This section originally proposed a name unique per connection so no set ever repeats;
+**as built, the ruling went the other way.** The virtual output name is stable per
+`(client monitor index, monitor size)` — `krdp-m<index>-<width>x<height>`, KWin exposes it as
+`Virtual-krdp-m<index>-<width>x<height>` — deliberately, so that:
+
+- `kwinoutputconfig.json` gains at most one setup entry per distinct client size seen, not one per
+  connection, bounding its growth.
+- The server can always **reconcile**: whatever arrangement KWin replays for a recognised output
+  set the moment the output reappears, `PhysicalOutputGuard`'s policy application (§4 steps 5–6, §5)
+  re-asserts the desired layout on top of it unconditionally, rather than depending on nothing ever
+  being replayed. Idempotent policy application on every connect was already the plan's fallback
+  for unbounded growth; it turned out to be needed regardless of growth, because a stale replay can
+  still momentarily place a virtual output somewhere wrong (see the incident below) before the
+  guard's own placement command runs.
+
+**As built — physical-output churn found on hardware, all closed in the shipped code (full detail
+in `research.md`'s `OPT-041` entry and the `hw-batch-v6`/`hw-standby-v6c`/`hw-standby2-v6c`
+reports):**
+
+- **Incident:** during early hardware testing, all virtual outputs shared one entry in
+  `kwinoutputconfig.json` keyed by UUID, so KWin replayed a remembered arrangement placing a virtual
+  output at `(0,0)` directly over DP-1 before a replace had applied, hanging plasmashell's main
+  thread. Fixed by having teardown always park the virtual output away from `(0,0)` (at the extend
+  anchor) before it disappears, so no overlapping arrangement is ever recorded.
+- **Finding A:** re-enabling a physical output that `replace` had switched off makes KWin remove and
+  re-add it a few seconds later, *whether or not it was ever in DPMS standby* — not only the standby
+  case this design anticipated. On re-add, a lone-enabled virtual output can land at `(0,0)` over a
+  physical output for the rest of a takeover session. Fixed by a churn-aware restore: poll until
+  every physical output is present and stable before declaring the restore verified, and park the
+  virtual output(s) only after that settle.
+- **Finding F:** with the panels in deep standby for 20+ seconds before connecting, *creating* the
+  virtual output alone triggers the same churn, which could make the disable step run against an
+  output KWin had just removed, or falsely report success while a physical output was still enabled.
+  Fixed by settling before issuing the disable, and verifying "replaced" only when every physical
+  output reads back present *and* disabled.
+- Net effect: applying and undoing `replace` are not instant — see the timing note in `research.md`
+  (`OPT-041`) — and this is now accounted for in the design rather than assumed away by unique
+  names.
+
+## 6a. Console takeover (Task 6c, plan amendment, Steve's decision 2026-09-17)
+
+Not part of this section's original scope; added because Steve asked what happens if someone uses
+the physical desktop directly while `replace` holds it. **Decision:** the physical monitors come
+back immediately and the remote session continues in `extend` mode for the rest of the connection,
+rather than disconnecting the client. Three triggers, all wired to the same
+`SessionController::releasePhysicalOutputs()`:
+
+- **Local pointer motion**, detected by `server/TakeoverDetector.h`: the screencast's cursor
+  metadata is compared against the last position the server itself injected for the client: armed
+  only once the replace policy has applied, ignoring the first 2 s after arming (disabling outputs
+  warps the pointer) and any sample within 300 ms of an injection or within 24 px of the last
+  injected position. Latches once fired, and is suspended around every guard-driven output change
+  so a restore/park's own pointer-warping side effect is never read as a second console activity.
+- **"Restore my monitors"** on the krdpserver tray icon (`KStatusNotifierItem`), enabled only while
+  a session owns the physical layout.
+- **A global keyboard shortcut**, `Meta+Ctrl+Alt+R` by default (`KGlobalAccel`, component
+  `krdpserver`, action `restore-physical-outputs`).
+
+Verified end to end on hardware via the tray action and the shortcut; the real-mouse trigger has
+unit-test coverage (`autotests/TakeoverDetectorTest.cpp`) plus the same DBus-triggered hardware
+runs, but an actual mouse move at the console is still pending (fake-input tooling cannot drive it;
+it is Steve's step to do himself).
 
 ## 7. Phase C — live resize (separate plan, after A and B)
 
@@ -146,7 +209,7 @@ later refinement if the private KPipeWire gains that API; it is not required.
 | Geometry unresolved | stream continues, `replace` refused, input warning logged once |
 | `kscreen-doctor` missing or exits non-zero | logged; policy degrades to `extend` |
 | Restore fails at teardown | critical log with recovery command, one retry; server keeps running |
-| Server killed with `SIGKILL` while physicals are disabled | documented recovery command in README/CLAUDE.md; a `--restore-outputs` CLI flag re-enables everything from the last snapshot file (`$XDG_STATE_HOME/krdpserver/physical-outputs.json`, written before disabling, deleted after a verified restore) |
+| Server killed with `SIGKILL` while physicals are disabled | documented recovery command in README/CLAUDE.md; a `--restore-outputs` CLI flag re-enables everything from the last snapshot file (`$XDG_STATE_HOME/krdp-server/physical-outputs.json` — as built: the app name is `krdp-server`, not `krdpserver` — written before disabling, deleted after a verified restore); the file also records the owning PID so a second, unrelated krdpserver instance never restores a layout a still-running instance owns |
 | Client connects while another virtual session is active | second connection is refused in `virtual` mode until Phase B multi-session policy is designed (one virtual desktop at a time) |
 
 ## 10. Testing

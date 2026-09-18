@@ -82,8 +82,11 @@ The following command line options are available for the example server:
 
 When `--monitor` is not supplied, KRDP uses persisted config keys:
 
-- `General/MonitorMode=workspace|primary|specific|multi`
+- `General/MonitorMode=workspace|primary|specific|multi|virtual`
 - `General/MonitorIndex=<id>` (used when mode is `specific`)
+- `General/VirtualMonitorPolicy=replace|extend` (used when mode is `virtual`, default `replace`)
+- `General/VirtualMonitorLayout=client|single` (used when mode is `virtual`, default `client`)
+- `General/VirtualMonitorFallbackSize=WIDTHxHEIGHT` (used when mode is `virtual`, default `1920x1080`)
 
 `multi` gives every monitor its own capture stream, encoder and RDPGFX surface.
 A client that does not negotiate multi-monitor sees the union as one wide
@@ -104,6 +107,55 @@ exceeds 4096 px. A monitor larger than 4096 px in either direction is left
 out because the encoder cannot take it; when fewer than two monitors remain,
 the server falls back to `specific` on the primary. The server always streams
 its own monitors: a client's declared layout and `/size:` are ignored.
+
+`MonitorMode=virtual` is the exception to that last rule: it builds the
+connecting client its own KWin virtual output(s) instead of streaming any of
+the server's physical monitors, so it is what third-party `/multimon`
+clients need (see `OPT-040` in research.md for why `multi` cannot do this).
+`VirtualMonitorLayout=client` (the default) creates one virtual output per
+client monitor, at that monitor's exact size, positioned to mirror the
+client's own layout; `VirtualMonitorLayout=single` instead creates one
+virtual output at the client's whole desktop size. `VirtualMonitorFallbackSize`
+(default `1920x1080`) is used when the client advertises no usable size.
+`VirtualMonitorPolicy=replace` (the default) switches every physical output
+off for the duration of the connection so the virtual output(s) get the full
+VA-API budget; `VirtualMonitorPolicy=extend` leaves the physical outputs on
+and places the virtual output(s) beside them instead. `virtual` serves one
+connection at a time; a second client is refused while one is active.
+
+With `replace`, if anyone uses the physical desktop directly (moves the real
+mouse, picks "Restore my monitors" from the krdpserver tray icon, or presses
+the global shortcut `Meta+Ctrl+Alt+R`), the physical outputs come back
+immediately and the connected client's session continues in `extend` mode for
+the rest of that connection rather than being dropped. Applying or undoing
+`replace` is not instant: switching a physical output off and back on again
+makes KWin remove and re-add it a few seconds later regardless of whether it
+was ever in DPMS standby, so `replace` typically takes on the order of a
+second and a half to apply with the panels already awake and up to about
+4.5 s when they were asleep, and restoring them at teardown or on takeover
+takes roughly 5 s; the client gets no video during either wait, and the
+physical panels may visibly light for a second or two mid-churn before the
+policy takes hold. `virtual` needs `--plasma` and a working `kscreen-doctor`
+on `PATH`.
+
+If krdpserver is killed or crashes while `replace` holds the physical
+outputs, the next `krdpserver` start restores them automatically from a
+state file (`~/.local/state/krdp-server/physical-outputs.json`, which also
+records the owning process ID so a second, unrelated krdpserver instance
+never restores a layout a still-running instance owns); `krdpserver
+--restore-outputs` does the same thing on demand without starting a session,
+and `kscreen-doctor output.DP-1.enable output.HDMI-A-1.enable` (adjusted to
+the real output names) is the manual fallback. Restarting the live service
+while a client is connected in `replace` always ends that client's session;
+the physical outputs come back either during the graceful shutdown or via
+the automatic startup recovery, so no manual step is normally needed.
+
+```bash
+kwriteconfig6 --file krdpserverrc --group General --key MonitorMode virtual --notify
+```
+
+takes effect at the next connection (not for one already in progress); roll
+back the same way with `specific` (or whichever mode was in use before).
 
 `MonitorMode` is applied live, so switching needs no restart:
 
