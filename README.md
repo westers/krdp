@@ -115,8 +115,18 @@ clients need (see `OPT-040` in research.md for why `multi` cannot do this).
 `VirtualMonitorLayout=client` (the default) creates one virtual output per
 client monitor, at that monitor's exact size, positioned to mirror the
 client's own layout; `VirtualMonitorLayout=single` instead creates one
-virtual output at the client's whole desktop size. `VirtualMonitorFallbackSize`
-(default `1920x1080`) is used when the client advertises no usable size.
+virtual output at the client's whole desktop size. Each monitor is still
+bounded by the 4096-px per-output VA-API limit on its own, but with `client`
+the *union* of the client's monitors only has to fit the RDP desktop limit
+(8192 px per side) rather than one encoder surface, since `client` opens one
+virtual output per monitor rather than one output for the union - a laptop
+panel plus an external monitor whose combined width exceeds 4096 px (Steve's
+buzz.local, for example) is a supported `client` layout as long as neither
+monitor exceeds 4096 px on its own. `VirtualMonitorLayout=single` and the
+one-output fallback still need the union itself to fit in 4096 px, since
+that is the one VA-API surface they open; a wider or taller union falls back
+to `VirtualMonitorFallbackSize`. `VirtualMonitorFallbackSize` (default
+`1920x1080`) is used when the client advertises no usable size.
 `VirtualMonitorPolicy=replace` (the default) switches every physical output
 off for the duration of the connection so the virtual output(s) get the full
 VA-API budget; `VirtualMonitorPolicy=extend` leaves the physical outputs on

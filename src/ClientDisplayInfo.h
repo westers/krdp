@@ -28,6 +28,18 @@ namespace ClientDisplay
 constexpr int MinDimension = 640;
 /** Per-output VA-API surface limit; the same value as MultiLayout::MaxEncodeDimension. */
 constexpr int MaxDimension = 4096;
+/**
+ * The RDP desktop limit (MS-RDPBCGR TS_UD_CS_CORE desktopWidth/desktopHeight),
+ * used to bound the *union* of a sanitised client monitor list. This is not
+ * the same limit as MaxDimension: `VirtualMonitorLayout=client` opens one
+ * virtual output - and one VA-API surface - per client monitor
+ * (SessionController::buildVirtualSessions()), each already checked against
+ * MaxDimension on its own above, so the union only has to fit inside what RDP
+ * itself can carry, not inside one encoder surface. The one-output paths
+ * (`VirtualMonitorLayout=single`, and the fallback taken when the monitor
+ * list is dropped) still ask singleSize() for a size bounded by MaxDimension.
+ */
+constexpr int MaxDesktopDimension = 8192;
 /** RDPGFX allows 16 monitors; so does MultiLayout::MaxMonitorCount. */
 constexpr int MaxMonitors = 16;
 /** TS_MONITOR_DEF coordinates are INT32; nothing past this is a monitor position, and a union of it could overflow. */
@@ -50,6 +62,12 @@ struct Info {
 inline bool usable(const QSize &size)
 {
     return size.width() >= MinDimension && size.width() <= MaxDimension && size.height() >= MinDimension && size.height() <= MaxDimension;
+}
+
+/** Whether \a size fits the RDP desktop limit: the bound for a client monitor union (see MaxDesktopDimension). */
+inline bool usableDesktop(const QSize &size)
+{
+    return size.width() >= MinDimension && size.width() <= MaxDesktopDimension && size.height() >= MinDimension && size.height() <= MaxDesktopDimension;
 }
 
 /**
@@ -81,11 +99,15 @@ inline bool disjoint(const QVector<VideoMonitor> &monitors)
  * Apply the size rules: an unusable desktop becomes \a fallback; a monitor list
  * is kept only when it has 2..MaxMonitors entries, every entry is usable and
  * sanely placed (|x|,|y| <= MaxCoordinate), no two overlap, exactly one is
- * primary and the union is usable too (one virtual output has to be able to
- * carry it when the layout is `single` or falls back to one output, and no
- * position handed to kscreen-doctor may be absurd), in which case it is
- * translated to a (0,0) origin and the desktop size becomes the union's size
- * (what RDPGFX will be told anyway).
+ * primary and the union fits the RDP desktop limit (MaxDesktopDimension; no
+ * position handed to kscreen-doctor may be absurd either), in which case it
+ * is translated to a (0,0) origin and the desktop size becomes the union's
+ * size (what RDPGFX will be told anyway). The union bound is the RDP desktop
+ * limit, not the per-output encoder limit (MaxDimension): the `client` layout
+ * opens one virtual output per monitor, each already checked against
+ * MaxDimension above, so a union past 4096 but within MaxDesktopDimension is
+ * still kept. The one-output paths (`single`, and the fallback when a list is
+ * dropped here) ask singleSize() instead, which stays bounded by MaxDimension.
  */
 inline Info sanitize(Info info, const QSize &fallback)
 {
@@ -112,7 +134,7 @@ inline Info sanitize(Info info, const QSize &fallback)
     for (const auto &monitor : std::as_const(info.monitors)) {
         unionRect |= monitor.geometry;
     }
-    if (!usable(unionRect.size())) {
+    if (!usableDesktop(unionRect.size())) {
         return dropList();
     }
     for (auto &monitor : info.monitors) {

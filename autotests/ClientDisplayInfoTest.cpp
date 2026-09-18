@@ -21,6 +21,15 @@ private Q_SLOTS:
         QVERIFY(!usable(QSize()));
     }
 
+    void usableDesktopBounds()
+    {
+        QVERIFY(usableDesktop(QSize(4096, 4096)));
+        QVERIFY(usableDesktop(QSize(8192, 8192)));
+        QVERIFY(!usableDesktop(QSize(639, 1080)));
+        QVERIFY(!usableDesktop(QSize(1920, 8193)));
+        QVERIFY(!usableDesktop(QSize()));
+    }
+
     void nameEncodesIndexAndSize()
     {
         QCOMPARE(virtualMonitorName(0, QSize(1920, 1080)), QStringLiteral("krdp-m0-1920x1080"));
@@ -83,22 +92,41 @@ private Q_SLOTS:
         QVERIFY(sanitize(info, QSize(1920, 1080)).monitors.isEmpty());
     }
 
-    void unionWiderThanOneEncoderDropsTheList()
+    void unionUpTo8192IsKeptForTheClientLayout()
     {
-        // Two usable monitors whose union no single virtual output could
-        // carry (5120 px is past the VA-API surface limit): the list goes,
-        // and the advertised 5120x1440 desktop is unusable too -> fallback.
-        const auto out = sanitize(Info{QSize(5120, 1440), {{QRect(0, 0, 2560, 1440), true}, {QRect(2560, 0, 2560, 1440), false}}}, QSize(1920, 1080));
+        // Steve's laptop: eDP-1 3072x1728 (a 200% panel, primary) with DP-1
+        // 1920x1080 beside it, offset in y. The union is 4992x1956 - past the
+        // 4096 per-output VA-API limit, but `VirtualMonitorLayout=client`
+        // opens one virtual output (and one VA-API surface) per monitor, each
+        // already checked against MaxDimension above, so the union only has
+        // to fit the RDP desktop limit (MaxDesktopDimension), not one surface.
+        const auto out = sanitize(Info{QSize(4992, 1956), {{QRect(0, 0, 3072, 1728), true}, {QRect(3072, 876, 1920, 1080), false}}}, QSize(1920, 1080));
+        QCOMPARE(out.monitors.size(), 2);
+        QCOMPARE(out.desktopSize, QSize(4992, 1956));
+    }
+
+    void unionOver8192IsDropped()
+    {
+        // Union height one past MaxDesktopDimension (8192): dropped, and the
+        // advertised 4096x8193 desktop is unusable too (height > 4096) -> fallback.
+        const auto out = sanitize(Info{QSize(4096, 8193), {{QRect(0, 0, 4096, 4096), true}, {QRect(0, 4097, 4096, 4096), false}}}, QSize(1920, 1080));
         QVERIFY(out.monitors.isEmpty());
         QCOMPARE(out.desktopSize, QSize(1920, 1080));
-        // Stacked vertically past the limit as well (two 2160-high panels).
-        const auto tall = sanitize(Info{QSize(3840, 4320), {{QRect(0, 0, 3840, 2160), true}, {QRect(0, 2160, 3840, 2160), false}}}, QSize(1920, 1080));
-        QVERIFY(tall.monitors.isEmpty());
-        QCOMPARE(tall.desktopSize, QSize(1920, 1080));
-        // Within the limit in both directions is kept (2 x 1440 high = 2880).
-        const auto stacked = sanitize(Info{QSize(2560, 2880), {{QRect(0, 0, 2560, 1440), true}, {QRect(0, 1440, 2560, 1440), false}}}, QSize(1920, 1080));
-        QCOMPARE(stacked.monitors.size(), 2);
-        QCOMPARE(stacked.desktopSize, QSize(2560, 2880));
+        // Exactly at the limit is kept.
+        const auto atLimit = sanitize(Info{QSize(8192, 2160), {{QRect(0, 0, 4096, 2160), true}, {QRect(4096, 0, 4096, 2160), false}}}, QSize(1920, 1080));
+        QCOMPARE(atLimit.monitors.size(), 2);
+        QCOMPARE(atLimit.desktopSize, QSize(8192, 2160));
+    }
+
+    void singleSizeFallsBackWhenTheUnionExceedsTheEncoderLimit()
+    {
+        // sanitize() keeps the client-layout list because the union fits the
+        // RDP desktop limit, but the one-output paths (VirtualMonitorLayout=
+        // single, or a later fallback to one output) cannot open a
+        // 4992-wide VA-API surface, so singleSize() still falls back.
+        const auto out = sanitize(Info{QSize(4992, 1956), {{QRect(0, 0, 3072, 1728), true}, {QRect(3072, 876, 1920, 1080), false}}}, QSize(1920, 1080));
+        QCOMPARE(out.monitors.size(), 2); // client layout: kept
+        QCOMPARE(singleSize(out, QSize(1920, 1080)), QSize(1920, 1080)); // single layout: fallback
     }
 
     void unionWithinTheLimitIsKept()
