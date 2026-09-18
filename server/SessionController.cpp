@@ -1289,7 +1289,12 @@ SessionController::MultiLayoutResult SessionController::computeMultiLayout(int m
     screenIndices.reserve(screens.size());
     for (qsizetype i = 0; i < screens.size(); ++i) {
         const auto *screen = screens.at(i);
-        if (!screen) {
+        // A `Virtual-*` output belongs to another krdpserver instance's
+        // virtual session (OPT-041); the live multi service must never rebuild
+        // its surfaces onto one. Skipping it here (index bookkeeping is
+        // unchanged: screenIndices only records the screens actually kept)
+        // keeps multi mode to the physical monitors.
+        if (!screen || KRdp::OutputSnapshot::isVirtual(screen->name())) {
             continue;
         }
         screenIndices.push_back(int(i));
