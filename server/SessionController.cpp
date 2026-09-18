@@ -1559,7 +1559,12 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
             qWarning() << "VirtualMonitorLayout=physical needs the physical-output snapshot; using the client's layout";
         } else {
             const auto clientMonitorCount = info.monitors.size();
-            info = KRdp::ClientDisplay::fromOutputs(m_outputGuard.physicalOutputs());
+            const auto mirrored = KRdp::OutputSnapshot::toClientDisplayInfo(m_outputGuard.physicalOutputs());
+            info = KRdp::ClientDisplay::sanitize(mirrored, m_virtualFallbackSize);
+            if (info != mirrored) {
+                qWarning() << "MonitorMode=virtual: the physical layout needed sanitizing - would-be" << mirrored.desktopSize << "monitors"
+                           << mirrored.monitors.size() << "-> using" << info.desktopSize << "monitors" << info.monitors.size();
+            }
             qInfo() << "MonitorMode=virtual: mirroring the physical layout" << info.desktopSize << "monitors" << info.monitors.size() << "(client advertised"
                     << clientMonitorCount << ")";
         }

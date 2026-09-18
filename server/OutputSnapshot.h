@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <utility>
 
 #include <QByteArray>
 #include <QDebug>
@@ -17,6 +18,8 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+
+#include "ClientDisplayInfo.h"
 
 namespace KRdp
 {
@@ -113,6 +116,50 @@ inline QRect enabledUnion(const QVector<Output> &outputs)
         }
     }
     return rect;
+}
+
+/**
+ * The virtual layout that mirrors \a outputs (a PhysicalOutputGuard snapshot)
+ * instead of a client's own advertised monitors (`VirtualMonitorLayout=physical`,
+ * OPT-041 S5): the enabled outputs, ordered by priority ascending (KWin's
+ * primary-first convention - the lowest-priority one becomes primary here
+ * too), translated so the union's top-left is (0,0). Empty monitors and an
+ * invalid desktopSize when nothing is enabled.
+ *
+ * This only reshapes the data; it does not enforce KRdp::ClientDisplay's size
+ * rules (a physical output wider than MaxDimension, or a union wider than
+ * MaxDesktopDimension, is not exotic hardware and gets no special treatment
+ * here) - the caller must still run the result through
+ * KRdp::ClientDisplay::sanitize() before using it, exactly as it does for a
+ * client's own advertised layout.
+ */
+inline ClientDisplay::Info toClientDisplayInfo(const QVector<Output> &outputs)
+{
+    QVector<Output> enabled;
+    for (const auto &output : outputs) {
+        if (output.enabled) {
+            enabled.push_back(output);
+        }
+    }
+    if (enabled.isEmpty()) {
+        return {};
+    }
+    std::sort(enabled.begin(), enabled.end(), [](const Output &a, const Output &b) {
+        return a.priority < b.priority;
+    });
+
+    QRect unionRect;
+    for (const auto &output : std::as_const(enabled)) {
+        unionRect |= QRect(output.position, output.size);
+    }
+
+    ClientDisplay::Info info;
+    info.desktopSize = unionRect.size();
+    info.monitors.reserve(enabled.size());
+    for (qsizetype i = 0; i < enabled.size(); ++i) {
+        info.monitors.push_back(VideoMonitor{QRect(enabled.at(i).position, enabled.at(i).size).translated(-unionRect.topLeft()), i == 0});
+    }
+    return info;
 }
 
 /**

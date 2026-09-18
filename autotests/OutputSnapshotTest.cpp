@@ -6,6 +6,7 @@
 #include "OutputSnapshot.h"
 
 using namespace KRdp::OutputSnapshot;
+using namespace KRdp::ClientDisplay;
 
 namespace
 {
@@ -215,6 +216,81 @@ private Q_SLOTS:
         QCOMPARE(pid, qint64(0));
         QVERIFY(fromStateJson("garbage", &pid).isEmpty());
         QVERIFY(fromStateJson("{\"pid\": 1}", &pid).isEmpty());
+    }
+
+    // toClientDisplayInfo() feeds `VirtualMonitorLayout=physical` (OPT-041 S5):
+    // mirror the physical output layout instead of the client's own. The
+    // caller (SessionController::buildVirtualSessions()) always runs this
+    // through KRdp::ClientDisplay::sanitize() afterward - see the two cases
+    // below that exercise that composition, not just this function alone.
+    void toClientDisplayInfoOrdersByPriorityAndTranslatesToOrigin()
+    {
+        const QVector<Output> outputs{
+            {.name = QStringLiteral("DP-1"), .enabled = true, .position = QPoint(0, 0), .priority = 1, .size = QSize(2560, 1440)},
+            {.name = QStringLiteral("HDMI-A-1"), .enabled = true, .position = QPoint(2560, 0), .priority = 2, .size = QSize(2560, 1440)},
+            {.name = QStringLiteral("Virtual-x"), .enabled = false, .position = QPoint(5120, 0), .priority = 3, .size = QSize(1920, 1080)},
+        };
+        const auto info = toClientDisplayInfo(outputs);
+        QCOMPARE(info.monitors.size(), 2);
+        QCOMPARE(info.monitors[0].geometry, QRect(0, 0, 2560, 1440));
+        QVERIFY(info.monitors[0].primary);
+        QCOMPARE(info.monitors[1].geometry, QRect(2560, 0, 2560, 1440));
+        QVERIFY(!info.monitors[1].primary);
+        QCOMPARE(info.desktopSize, QSize(5120, 1440));
+    }
+
+    void toClientDisplayInfoWithNoneEnabledIsEmptyAndInvalid()
+    {
+        const QVector<Output> outputs{
+            {.name = QStringLiteral("DP-1"), .enabled = false, .position = QPoint(0, 0), .priority = 1, .size = QSize(2560, 1440)},
+            {.name = QStringLiteral("HDMI-A-1"), .enabled = false, .position = QPoint(2560, 0), .priority = 2, .size = QSize(2560, 1440)},
+        };
+        const auto info = toClientDisplayInfo(outputs);
+        QVERIFY(info.monitors.isEmpty());
+        QVERIFY(!info.desktopSize.isValid());
+    }
+
+    void toClientDisplayInfoTranslatesNegativePositionsToOrigin()
+    {
+        // Physical layout with the primary panel left of (0,0), as kscreen-doctor reports it.
+        const QVector<Output> outputs{
+            {.name = QStringLiteral("eDP-1"), .enabled = true, .position = QPoint(-2560, 0), .priority = 1, .size = QSize(2560, 1440)},
+            {.name = QStringLiteral("DP-1"), .enabled = true, .position = QPoint(0, 0), .priority = 2, .size = QSize(2560, 1440)},
+        };
+        const auto info = toClientDisplayInfo(outputs);
+        QCOMPARE(info.monitors.size(), 2);
+        QCOMPARE(info.monitors[0].geometry.topLeft(), QPoint(0, 0));
+        QVERIFY(info.monitors[0].primary);
+        QCOMPARE(info.monitors[1].geometry.topLeft(), QPoint(2560, 0));
+    }
+
+    void sanitizedPhysicalLayoutMatchesHal9000Unchanged()
+    {
+        // hal9000's own layout (DP-1 + HDMI-A-1, 5120x1440 union) passes sanitize()
+        // untouched - the composition buildVirtualSessions() actually runs.
+        const auto physical = physicalOnly(parse(kscreenJson));
+        const auto mirrored = toClientDisplayInfo(physical);
+        QCOMPARE(sanitize(mirrored, QSize(1920, 1080)), mirrored);
+    }
+
+    void sanitizeFallsBackOnAnOversizedPhysicalOutput()
+    {
+        // A single ultrawide physical output (5120 wide, past MaxDimension = 4096):
+        // toClientDisplayInfo() has no size rules of its own and would hand this
+        // straight to the encoder unchanged, so the caller must still run it
+        // through sanitize() - which drops the (single-entry, so already
+        // unusable-as-a-list) monitor list and falls back the unusable
+        // desktopSize too, exactly as it would for a client-advertised list of
+        // the same shape (ClientDisplayInfoTest::unusableMonitorDropsTheWholeList).
+        const QVector<Output> outputs{
+            {.name = QStringLiteral("DP-1"), .enabled = true, .position = QPoint(0, 0), .priority = 1, .size = QSize(5120, 1440)},
+        };
+        const auto mirrored = toClientDisplayInfo(outputs);
+        QCOMPARE(mirrored.monitors.size(), 1);
+        QCOMPARE(mirrored.desktopSize, QSize(5120, 1440));
+        const auto sanitized = sanitize(mirrored, QSize(1920, 1080));
+        QVERIFY(sanitized.monitors.isEmpty());
+        QCOMPARE(sanitized.desktopSize, QSize(1920, 1080));
     }
 };
 
