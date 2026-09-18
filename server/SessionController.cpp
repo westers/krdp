@@ -1608,11 +1608,12 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
 
     // One virtual output per monitor (Phase B), the client's own (Client) or
     // the physical layout's (Physical, OPT-041 S5) - only when that layout
-    // has a usable two-or-more-monitor list (sanitize() keeps the client's
-    // own list only with two or more usable entries and exactly one primary;
-    // fromOutputs() is empty only when nothing was enabled to mirror) and a
-    // previous attempt did not have an output that never appeared. Single
-    // never opens more than one output.
+    // has a usable two-or-more-monitor list (sanitize() keeps either list
+    // only with two or more usable entries and exactly one primary; the
+    // physical layout is run through sanitize() the same way just above,
+    // so it is empty whenever nothing was enabled to mirror or the mirrored
+    // layout was not sanitize-usable) and a previous attempt did not have an
+    // output that never appeared. Single never opens more than one output.
     const bool multiOutput = m_virtualLayout != VirtualLayout::Single && info.monitors.size() >= 2 && !wrapper->forceSingleVirtual;
     if (!multiOutput) {
         if (wrapper->forceSingleVirtual) {
