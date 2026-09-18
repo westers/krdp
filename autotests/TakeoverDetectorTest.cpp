@@ -114,6 +114,61 @@ private Q_SLOTS:
         // Near the earlier one: the pointer has left where we last put it.
         QVERIFY(detector.observed(QPoint(100, 100), 3700));
     }
+
+    void latchStopsIt()
+    {
+        // A takeover by the tray action or the shortcut: nothing left to
+        // detect, and the output churn that follows a restore must not read
+        // as a second one.
+        Detector detector;
+        detector.armed(0);
+        detector.injected(QPoint(100, 100), 3000);
+        QVERIFY(!detector.fired());
+        detector.latch();
+        QVERIFY(detector.fired());
+        QVERIFY(!detector.observed(QPoint(800, 800), 3400));
+        // Nor does a later injection revive it.
+        detector.injected(QPoint(100, 100), 5000);
+        QVERIFY(!detector.observed(QPoint(800, 800), 5400));
+    }
+
+    void suspendIsTemporary()
+    {
+        Detector detector;
+        detector.armed(0);
+        detector.injected(QPoint(100, 100), 3000);
+        detector.suspend(6000);
+        // Would fire, but a park/restore is in progress.
+        QVERIFY(!detector.observed(QPoint(800, 800), 3400));
+        QVERIFY(!detector.observed(QPoint(800, 800), 5999));
+        // Over at exactly the deadline.
+        QVERIFY(detector.observed(QPoint(800, 800), 6000));
+    }
+
+    void suspendDoesNotLatch()
+    {
+        Detector detector;
+        detector.armed(0);
+        detector.injected(QPoint(100, 100), 3000);
+        detector.suspend(6000);
+        QVERIFY(!detector.observed(QPoint(800, 800), 3400));
+        QVERIFY(!detector.fired());
+    }
+
+    void forgetInjectedNeedsANewReference()
+    {
+        // The output moved after an injection was recorded against its old
+        // origin: that reference is wrong by the output's displacement, so
+        // it is dropped and the next injection becomes the reference.
+        Detector detector;
+        detector.armed(0);
+        detector.injected(QPoint(5220, 100), 3000);
+        detector.forgetInjected();
+        QVERIFY(!detector.observed(QPoint(100, 100), 6000));
+        detector.injected(QPoint(100, 100), 6100);
+        QVERIFY(!detector.observed(QPoint(105, 100), 6500));
+        QVERIFY(detector.observed(QPoint(800, 800), 6600));
+    }
 };
 
 QTEST_GUILESS_MAIN(TakeoverDetectorTest)

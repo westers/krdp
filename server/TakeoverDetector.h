@@ -6,6 +6,8 @@
 #include <QPoint>
 #include <QtGlobal>
 
+#include <algorithm>
+
 /**
  * Console takeover detection for `MonitorMode=virtual` with the replace
  * policy (OPT-041 Task 6c).
@@ -46,6 +48,39 @@ struct Detector {
     }
 
     /**
+     * The reference injection is no longer where the pointer is: the output
+     * it was mapped through has moved since (its origin changed after the
+     * move was recorded), so the next injection has to become the reference
+     * before a sample can be judged again.
+     */
+    void forgetInjected()
+    {
+        m_hasInjected = false;
+    }
+
+    /**
+     * Ignore samples until  untilMs: a restore or park is in progress and
+     * the compositor is removing and re-adding outputs, which warps the
+     * pointer and produces samples nobody asked for. Not a latch; the
+     * detector resumes at the deadline.
+     */
+    void suspend(qint64 untilMs)
+    {
+        m_suspendedUntilMs = std::max(m_suspendedUntilMs, untilMs);
+    }
+
+    /**
+     * The takeover has happened by another trigger (tray, shortcut) or the
+     * physical outputs have been released: there is nothing left to detect,
+     * and the output churn a restore causes must never read as a second
+     * console activity. Same end state as a fired detector.
+     */
+    void latch()
+    {
+        m_fired = true;
+    }
+
+    /**
      * Every cursor metadata sample. True exactly once, for the first sample
      * that can only be local motion; latched afterwards, since the takeover
      * it announces is done once.
@@ -55,7 +90,7 @@ struct Detector {
         if (m_fired || !m_isArmed || !m_hasInjected) {
             return false;
         }
-        if (nowMs - m_armedMs < ArmDelayMs) {
+        if (nowMs - m_armedMs < ArmDelayMs || nowMs < m_suspendedUntilMs) {
             return false;
         }
         if (nowMs - m_lastInjectedMs <= QuietWindowMs) {
@@ -79,6 +114,7 @@ private:
     bool m_fired = false;
     qint64 m_armedMs = 0;
     qint64 m_lastInjectedMs = 0;
+    qint64 m_suspendedUntilMs = 0;
     QPoint m_lastInjected;
 };
 }
