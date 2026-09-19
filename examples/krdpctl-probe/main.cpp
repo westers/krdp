@@ -16,9 +16,15 @@
  *   options: --gfx              also load the standard channel add-ins (drdynvc, rdpgfx)
  *                               and FreeRDP's software gdi, so the probe is a complete
  *                               AVC420 client; only useful on a libfreerdp built
- *                               WITH_GFX_H264 (buzz's Debian 3.22, not Ubuntu's 3.31)
+ *                               WITH_GFX_H264 (buzz's Debian 3.22, not Ubuntu's 3.31).
+ *                               With it every ResetGraphics (desktop size and monitor
+ *                               rects) and the first frame per surface are reported on
+ *                               stderr, plus a frame count at exit.
  *            --timeout SECONDS  give up after this long (default 15 for --query, none
  *                               otherwise)
+ *            --no-pong          do not answer the server's `ping` (by default every ping
+ *                               is answered with `pong`, as a layout owner must); lets
+ *                               the heartbeat release be watched
  *
  * Records go to stdout, one compact JSON object per line; everything else to
  * stderr. The password is never printed.
@@ -34,6 +40,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <map>
 
 #include <QByteArray>
 #include <QDeadlineTimer>
@@ -68,7 +75,10 @@ struct Probe {
     Mode mode = Mode::Silent;
     QJsonObject applyBody;
     bool gfx = false;
+    bool pong = true;
     int timeoutSeconds = 0;
+    // --gfx evidence: frames seen per RDPGFX surface id.
+    std::map<UINT16, unsigned> framesPerSurface;
 
     // Channel plumbing, filled by the entry point and the init event.
     CHANNEL_ENTRY_POINTS_FREERDP_EX entryPoints{};
@@ -169,8 +179,17 @@ VOID VCAPITYPE openEvent(LPVOID userParam, DWORD openHandle, UINT event, LPVOID 
         probe->deframer.feed(QByteArray(static_cast<const char *>(data), int(dataLength)));
         while (auto record = probe->deframer.next()) {
             printRecord(*record);
-            if (record->value(QLatin1String("type")).toString() == QLatin1String("layout")) {
+            const QString type = record->value(QLatin1String("type")).toString();
+            if (type == QLatin1String("layout")) {
                 probe->gotLayout = true;
+            } else if (type == QLatin1String("ping")) {
+                // The owner's heartbeat (design §3). Answered from the
+                // channel thread: VirtualChannelWriteEx only queues.
+                if (probe->pong) {
+                    sendRecord(probe, QJsonObject{{QStringLiteral("type"), QStringLiteral("pong")}});
+                } else {
+                    std::fprintf(stderr, "krdpctl-probe: ping ignored (--no-pong)\n");
+                }
             }
         }
         if (probe->deframer.overflowed()) {
@@ -237,6 +256,50 @@ BOOL VCAPITYPE krdpctlEntryEx(PCHANNEL_ENTRY_POINTS_EX entryPoints, PVOID initHa
     return TRUE;
 }
 
+// ---- --gfx evidence: what the server describes and sends ----
+
+pcRdpgfxResetGraphics g_gdiResetGraphics = nullptr;
+pcRdpgfxSurfaceCommand g_gdiSurfaceCommand = nullptr;
+// gfx->custom is gdi's own (rdpGdi *), so the probe is reached another way.
+Probe *g_gfxProbe = nullptr;
+
+UINT probeResetGraphics(RdpgfxClientContext *gfx, const RDPGFX_RESET_GRAPHICS_PDU *pdu)
+{
+    std::fprintf(stderr, "krdpctl-probe: ResetGraphics desktop %ux%u monitors %u:", pdu->width, pdu->height, pdu->monitorCount);
+    for (UINT32 i = 0; i < pdu->monitorCount; ++i) {
+        const auto &monitor = pdu->monitorDefArray[i];
+        std::fprintf(stderr, " [%d,%d %dx%d%s]", monitor.left, monitor.top, monitor.right - monitor.left + 1, monitor.bottom - monitor.top + 1, (monitor.flags & MONITOR_PRIMARY) ? " primary" : "");
+    }
+    std::fputc('\n', stderr);
+    return g_gdiResetGraphics ? g_gdiResetGraphics(gfx, pdu) : CHANNEL_RC_OK;
+}
+
+UINT probeSurfaceCommand(RdpgfxClientContext *gfx, const RDPGFX_SURFACE_COMMAND *cmd)
+{
+    if (auto *probe = g_gfxProbe) {
+        const unsigned count = ++probe->framesPerSurface[cmd->surfaceId];
+        if (count == 1) {
+            std::fprintf(stderr, "krdpctl-probe: first frame on surface %u (codec %u, %ux%u)\n", cmd->surfaceId, cmd->codecId, cmd->width, cmd->height);
+        }
+    }
+    return g_gdiSurfaceCommand ? g_gdiSurfaceCommand(gfx, cmd) : CHANNEL_RC_OK;
+}
+
+void onChannelConnected(void *context, const ChannelConnectedEventArgs *e)
+{
+    // Subscribed after the generic handler, so gdi has installed its
+    // callbacks by the time this runs; wrap them.
+    if (std::strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) != 0) {
+        return;
+    }
+    auto *gfx = static_cast<RdpgfxClientContext *>(e->pInterface);
+    g_gfxProbe = probeOf(static_cast<rdpContext *>(context));
+    g_gdiResetGraphics = gfx->ResetGraphics;
+    g_gdiSurfaceCommand = gfx->SurfaceCommand;
+    gfx->ResetGraphics = probeResetGraphics;
+    gfx->SurfaceCommand = probeSurfaceCommand;
+}
+
 // ---- freerdp instance callbacks ----
 
 BOOL preConnect(freerdp *instance)
@@ -248,6 +311,7 @@ BOOL preConnect(freerdp *instance)
         // when rdpgfx comes up.
         PubSub_SubscribeChannelConnected(instance->context->pubSub, freerdp_client_OnChannelConnectedEventHandler);
         PubSub_SubscribeChannelDisconnected(instance->context->pubSub, freerdp_client_OnChannelDisconnectedEventHandler);
+        PubSub_SubscribeChannelConnected(instance->context->pubSub, onChannelConnected);
     }
     return TRUE;
 }
@@ -375,7 +439,7 @@ bool applySettings(rdpSettings *s, const QString &host, int port, const QString 
 int usage()
 {
     std::fprintf(stderr,
-                 "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --silent) [--gfx] [--timeout SECONDS]\n");
+                 "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --silent) [--gfx] [--timeout SECONDS] [--no-pong]\n");
     return 2;
 }
 
@@ -428,6 +492,8 @@ int main(int argc, char **argv)
             modeGiven = true;
         } else if (arg == QLatin1String("--gfx")) {
             probe.gfx = true;
+        } else if (arg == QLatin1String("--no-pong")) {
+            probe.pong = false;
         } else if (arg == QLatin1String("--timeout") && i + 1 < argc) {
             probe.timeoutSeconds = QString::fromLocal8Bit(argv[++i]).toInt();
         } else {
@@ -550,6 +616,15 @@ int main(int argc, char **argv)
     }
     if (g_interrupted) {
         std::fprintf(stderr, "krdpctl-probe: interrupted\n");
+    }
+    if (probe.gfx) {
+        unsigned total = 0;
+        QString perSurface;
+        for (const auto &[surface, count] : probe.framesPerSurface) {
+            total += count;
+            perSurface += QStringLiteral(" surface %1: %2").arg(surface).arg(count);
+        }
+        std::fprintf(stderr, "krdpctl-probe: %u frame(s) received%s\n", total, qPrintable(perSurface));
     }
 
     freerdp_disconnect(instance);

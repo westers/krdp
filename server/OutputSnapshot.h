@@ -248,6 +248,88 @@ inline QStringList replaceArgs(const QVector<Output> &physical, const QVector<Pl
     return args;
 }
 
+/**
+ * One output of the arrangement the layout executor asks KWin for in a single
+ * kscreen-doctor invocation (OPT-044): a physical output enabled at its place
+ * or disabled, a virtual output at its place. Enabled entries take priorities
+ * 1..N in list order, so the caller lists the primary first.
+ */
+struct Arrangement {
+    /** KWin output name (connector, or a virtual output's name with its prefix). */
+    QString name;
+    bool enabled = true;
+    /** Where an enabled output goes; ignored for a disabled one. */
+    QPoint position;
+
+    bool operator==(const Arrangement &other) const = default;
+};
+
+/** Only the enables, positions and priorities of \a entries (the second step of the two-step form). */
+inline QStringList arrangementEnableArgs(const QList<Arrangement> &entries)
+{
+    QStringList args;
+    int priority = 1;
+    for (const auto &entry : entries) {
+        if (!entry.enabled) {
+            continue;
+        }
+        args << QStringLiteral("output.%1.enable").arg(entry.name);
+        args << QStringLiteral("output.%1.position.%2,%3").arg(entry.name).arg(entry.position.x()).arg(entry.position.y());
+        args << QStringLiteral("output.%1.priority.%2").arg(entry.name).arg(priority++);
+    }
+    return args;
+}
+
+/** Only the disables of \a entries (the first step of the two-step form). */
+inline QStringList arrangementDisableArgs(const QList<Arrangement> &entries)
+{
+    QStringList args;
+    for (const auto &entry : entries) {
+        if (!entry.enabled) {
+            args << QStringLiteral("output.%1.disable").arg(entry.name);
+        }
+    }
+    return args;
+}
+
+/**
+ * The whole arrangement in one invocation: enables, positions and priorities
+ * first, then the disables, so KWin never sees a configuration without an
+ * enabled output (same shape as replaceArgs()).
+ */
+inline QStringList arrangementArgs(const QList<Arrangement> &entries)
+{
+    return arrangementEnableArgs(entries) + arrangementDisableArgs(entries);
+}
+
+/** Every entry of \a entries is present in \a current by name, whatever its state. */
+inline bool arrangementPresent(const QList<Arrangement> &entries, const QVector<Output> &current)
+{
+    return std::all_of(entries.cbegin(), entries.cend(), [&current](const Arrangement &entry) {
+        return std::any_of(current.cbegin(), current.cend(), [&entry](const Output &candidate) {
+            return candidate.name == entry.name;
+        });
+    });
+}
+
+/**
+ * Every entry is present with the wanted enabled state, and every enabled
+ * one at its position. Priorities are not compared: KWin renumbers them as
+ * it sees fit, and nothing here depends on them.
+ */
+inline bool arrangementMatches(const QList<Arrangement> &entries, const QVector<Output> &current)
+{
+    return std::all_of(entries.cbegin(), entries.cend(), [&current](const Arrangement &entry) {
+        const auto it = std::find_if(current.cbegin(), current.cend(), [&entry](const Output &candidate) {
+            return candidate.name == entry.name;
+        });
+        if (it == current.cend() || it->enabled != entry.enabled) {
+            return false;
+        }
+        return !entry.enabled || it->position == entry.position;
+    });
+}
+
 /** Put the physical outputs back exactly as the snapshot had them. */
 inline QStringList restoreArgs(const QVector<Output> &physical)
 {

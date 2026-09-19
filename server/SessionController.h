@@ -5,7 +5,9 @@
 
 #include "ClientDisplayInfo.h"
 #include "DisplayWakeGuard.h"
+#include "HostLayoutExecutor.h"
 #include "LayoutControl.h"
+#include "LayoutOwner.h"
 #include "MultiLayout.h"
 #include "PhysicalOutputGuard.h"
 #include "RdpConnection.h"
@@ -17,6 +19,7 @@
 
 #include <QJsonObject>
 #include <QObject>
+#include <QPointer>
 #include <QSize>
 #include <QStringList>
 #include <QTimer>
@@ -56,6 +59,16 @@ public:
         QStringList names;
         /** Pixels per logical unit, for turning RDP positions back into input. */
         qreal scale = 1.0;
+        /**
+         * Per-entry pixels per logical unit, parallel to `monitors`, for a
+         * layout whose monitors are at different scales (a `KRDPCTL` layout
+         * with a 125 % virtual monitor beside 100 % real ones, OPT-044):
+         * each entry's geometry is then its KWin logical position with its
+         * pixel size, and input is mapped through the entry it lands on.
+         * Empty for the uniform-scale `multi` layout, where `scale` applies
+         * to the whole desktop.
+         */
+        QVector<qreal> scales;
 
         bool isEmpty() const
         {
@@ -220,16 +233,6 @@ public:
      */
     static MultiLayoutResult computeMultiLayout(int minimumCount = KRdp::MultiLayout::MinMonitorCount);
 
-    /**
-     * The host layout as a `KRDPCTL` client sees it right now (OPT-044): the
-     * real outputs from a fresh read of KWin's output list (falling back to
-     * QGuiApplication::screens() when kscreen-doctor cannot answer), no
-     * virtual monitors yet (the executor table arrives with Task 3), no
-     * owner, `you = "none"`. \a connection is the recipient; it decides
-     * `you` once layouts have owners.
-     */
-    KRdp::LayoutControl::Layout currentLayout(const KRdp::RdpConnection *connection) const;
-
 private:
     /** What refreshMultiLayout() found. */
     enum class LayoutUpdate {
@@ -255,6 +258,36 @@ private:
     void onControlTimeout(SessionWrapper *wrapper);
     /** buildSessions() or buildVirtualSessions(), whichever the configuration asks for. */
     void buildConfiguredSessions(SessionWrapper *wrapper);
+    /**
+     * `KRDPCTL` `apply` (OPT-044): owner check, plan, execute; the reply and
+     * the session build follow in onLayoutApplied(). \a first: this is the
+     * record the session build gate was waiting for.
+     */
+    void onControlApply(SessionWrapper *wrapper, const QJsonObject &record, bool first);
+    /** The executor finished the apply that m_applying started. */
+    void onLayoutApplied(const HostLayoutExecutor::Result &result);
+    /**
+     * Build (or rebuild) \a wrapper's session set from \a layout: one
+     * PlasmaScreencastV1Session per host monitor, capturing the KWin output
+     * that carries it (the connector, its stand-in, the virtual output),
+     * with the RDP layout the monitors' rects and the primary as the layout
+     * says. Marks the wrapper a layout client. Monitors whose output is not
+     * a QScreen yet are left out and logged.
+     */
+    void buildLayoutSessions(SessionWrapper *wrapper, const KRdp::LayoutControl::Layout &layout, bool retrying = false);
+    /** A channel client that does not own the layout: viewer sessions from the current layout plus its `layout` record. */
+    void buildAsViewer(SessionWrapper *wrapper);
+    /** Rebuild every layout client but \a except from the current layout and send each its `layout`. */
+    void describeLayoutClients(SessionWrapper *except);
+    /** The current layout from \a wrapper's point of view (owner and `you` filled in). */
+    KRdp::LayoutControl::Layout layoutFor(const SessionWrapper *wrapper) const;
+    void sendLayout(SessionWrapper *wrapper);
+    /** \a id (a layout client) is gone or forfeited the layout: release if it owned, then re-describe the rest. */
+    void onLayoutClientGone(const QString &id, const QString &reason);
+    /** The owner is released (by whoever decided it): restore the desk and re-describe the remaining layout clients. */
+    void finishLayoutRelease(const QString &id, const QString &reason);
+    void onHeartbeatTick();
+    SessionWrapper *wrapperFor(const QString &controlId) const;
     std::unique_ptr<KRdp::AbstractSession> makeSession();
     /** Whether any virtual wrapper currently holds the physical layout replaced. */
     bool physicalLayoutOwned() const;
@@ -333,6 +366,19 @@ private:
     // Same rule: the wrappers restore the physical outputs through it, so it
     // has to be alive when they are torn down (see ~SessionController()).
     PhysicalOutputGuard m_outputGuard;
+    // KRDPCTL layout control (OPT-044). The executor holds the layout's
+    // virtual outputs and restores the physical ones through m_outputGuard,
+    // so it lives between the guard and the wrappers: torn down after the
+    // wrappers (whose sessions stream its outputs), before the guard.
+    LayoutOwner m_layoutOwner;
+    HostLayoutExecutor m_layoutExecutor;
+    // The heartbeat to the owner: a `ping` every tick; a tick that finds the
+    // previous one unanswered counts a miss (LayoutOwner releases at 3).
+    QTimer m_heartbeatTimer;
+    bool m_pongPending = false;
+    // The apply in flight: whose it is.
+    QPointer<SessionWrapper> m_applying;
+    int m_connectionCounter = 0;
 
     std::vector<std::unique_ptr<SessionWrapper>> m_wrappers;
 

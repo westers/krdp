@@ -250,6 +250,111 @@ bool PhysicalOutputGuard::applyReplace(const QVector<Placement> &virtualOutputs,
     return true;
 }
 
+bool PhysicalOutputGuard::beginLayoutControl()
+{
+    if (m_held && hasSnapshot()) {
+        // Already ours (a second apply of the same layout session), or a
+        // legacy replace that holds: either way the snapshot on file is the
+        // layout to restore, and it is not retaken.
+        return true;
+    }
+    if (!available()) {
+        qWarning() << "kscreen-doctor not found; layout control cannot change the physical outputs";
+        return false;
+    }
+    // snapshot() refuses while a previous restore is unverified (m_held
+    // without a snapshot only happens after that), and when nothing is
+    // enabled to come back to.
+    if (!snapshot()) {
+        return false;
+    }
+    // No state file, no hold: same rule as applyReplace().
+    if (!writeStateFile()) {
+        qWarning() << "Refusing layout control without crash recovery";
+        m_physical.clear();
+        return false;
+    }
+    m_held = true;
+    qInfo() << "Layout control: physical outputs held (snapshot on file)";
+    return true;
+}
+
+bool PhysicalOutputGuard::applyArrangement(const QList<Arrangement> &entries)
+{
+    if (!m_held || !hasSnapshot()) {
+        qWarning() << "applyArrangement without beginLayoutControl(); refusing to touch the outputs";
+        return false;
+    }
+    if (entries.isEmpty()) {
+        return true;
+    }
+    const bool anyEnabled = std::any_of(entries.cbegin(), entries.cend(), [](const Arrangement &entry) {
+        return entry.enabled;
+    });
+    if (!anyEnabled) {
+        // Never ask KWin for a desktop with no output; the planner's
+        // sanitiser should have caught this (an empty layout has no primary).
+        qWarning() << "applyArrangement would leave no output enabled; refusing";
+        return false;
+    }
+
+    // Settle first, for the same reason applyReplace() does: creating the
+    // virtual outputs this arrangement places can make KWin remove and
+    // re-add the physical outputs (panels in standby), and a command that
+    // names an absent output is refused whole.
+    if (!waitForPhysical(m_physical, SettleGoal::Present)) {
+        qWarning() << "Physical outputs not all present within" << SettleTimeoutMs << "ms (the compositor is still re-adding them); arrangement not applied";
+        return false;
+    }
+
+    // kscreen-doctor exits 0 whether or not it applied anything; the
+    // read-back decides. A refused combined change (priorities colliding
+    // with outputs disabled in the same config) gets the two-step form.
+    if (!run(arrangementArgs(entries))) {
+        qInfo() << "Combined arrangement did not run; applying in two steps";
+        if (!run(arrangementDisableArgs(entries)) || !run(arrangementEnableArgs(entries))) {
+            return false;
+        }
+    }
+
+    // Applied means every named output reads back present and as wanted,
+    // and stays so for the stability window: enabling an output that was
+    // off makes KWin remove and re-add it a few seconds later (finding A),
+    // and the re-add can replay a stored arrangement. Present-but-wrong
+    // after the first poll gets the two-step form re-issued, once.
+    QElapsedTimer timer;
+    timer.start();
+    qint64 stableSince = -1;
+    bool reissued = false;
+    for (;;) {
+        const auto now = current();
+        const bool good = !now.isEmpty() && arrangementMatches(entries, now);
+        if (good) {
+            if (stableSince < 0) {
+                stableSince = timer.elapsed();
+            }
+            if (timer.elapsed() - stableSince >= SettleStableMs) {
+                qInfo() << "Arrangement applied:" << entries.size() << "outputs, after" << timer.elapsed() << "ms";
+                return true;
+            }
+        } else {
+            stableSince = -1;
+            if (timer.elapsed() >= SettleTimeoutMs) {
+                qWarning() << "Arrangement not verified within" << SettleTimeoutMs << "ms; the outputs may be in any state:" << now;
+                return false;
+            }
+            if (!reissued && timer.elapsed() >= SettlePollMs && !now.isEmpty() && arrangementPresent(entries, now)) {
+                reissued = true;
+                qInfo() << "Outputs present but not as arranged; re-applying in two steps";
+                if (!run(arrangementDisableArgs(entries)) || !run(arrangementEnableArgs(entries))) {
+                    return false;
+                }
+            }
+        }
+        QThread::msleep(SettlePollMs);
+    }
+}
+
 bool PhysicalOutputGuard::applyReplaceInTwoSteps(const QVector<Placement> &virtualOutputs, const QString &primaryVirtualName)
 {
     // kscreen may refuse the combined change (priorities colliding with

@@ -75,6 +75,30 @@ public:
      */
     bool applyReplace(const QVector<KRdp::OutputSnapshot::Placement> &virtualOutputs, const QString &primaryVirtualName);
     /**
+     * `KRDPCTL` layout control (OPT-044): the executor is about to change
+     * the physical outputs (or add virtual outputs beside them). Takes the
+     * snapshot and writes the state file NOW, before any virtual output is
+     * created (KWin may replay a remembered arrangement the moment one
+     * appears, and that must never become the layout to restore), and holds
+     * from here on, so release() restores whatever the executor does later
+     * and a crash restores at the next start. Idempotent while held by a
+     * previous call. False, logged, when refused: no kscreen-doctor, a
+     * previous session's unverified restore still pending, or nothing
+     * enabled to snapshot.
+     */
+    bool beginLayoutControl();
+    /**
+     * Layout control's one mutation per apply: put every named output into
+     * \a entries in a single kscreen-doctor invocation (physical outputs
+     * enabled at their place or disabled; virtual outputs, which must
+     * already exist, at theirs; priorities 1..N in list order), verified by
+     * read-back with the same churn-aware settle a replace uses. A combined
+     * change kscreen refuses is re-issued once in two steps (disables first).
+     * Needs beginLayoutControl(); false when not verified, in which case
+     * the outputs may be in any state and release() restores.
+     */
+    bool applyArrangement(const QList<KRdp::OutputSnapshot::Arrangement> &entries);
+    /**
      * Where the virtual outputs belong while the physical ones are enabled
      * (beside them, at the extend anchor). Remembered so that restore()
      * parks them itself once the physical outputs are verifiably back -

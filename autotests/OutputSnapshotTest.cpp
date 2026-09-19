@@ -383,6 +383,58 @@ private Q_SLOTS:
         QCOMPARE(fromJson(toJson(outputs)), outputs);
         QCOMPARE(fromJson(R"([{"name":"DP-1","enabled":true,"x":0,"y":0,"priority":1,"width":2560,"height":1440}])")[0].scale, 1.0);
     }
+
+    // OPT-044: the one-invocation arrangement the layout executor asks for.
+    void arrangementArgsPrioritiseEnabledInOrderAndDisableTheRest()
+    {
+        const QList<Arrangement> entries{
+            {QStringLiteral("Virtual-krdp-si-DP-1-1920x1080-s100"), true, QPoint(0, 0)},
+            {QStringLiteral("HDMI-A-1"), true, QPoint(2560, 0)},
+            {QStringLiteral("DP-1"), false, QPoint()},
+        };
+        const QStringList expected{
+            QStringLiteral("output.Virtual-krdp-si-DP-1-1920x1080-s100.enable"),
+            QStringLiteral("output.Virtual-krdp-si-DP-1-1920x1080-s100.position.0,0"),
+            QStringLiteral("output.Virtual-krdp-si-DP-1-1920x1080-s100.priority.1"),
+            QStringLiteral("output.HDMI-A-1.enable"),
+            QStringLiteral("output.HDMI-A-1.position.2560,0"),
+            QStringLiteral("output.HDMI-A-1.priority.2"),
+            QStringLiteral("output.DP-1.disable"),
+        };
+        QCOMPARE(arrangementArgs(entries), expected);
+        // The two-step form: disables alone, then everything else.
+        QCOMPARE(arrangementDisableArgs(entries), QStringList{QStringLiteral("output.DP-1.disable")});
+        QCOMPARE(arrangementEnableArgs(entries), expected.mid(0, 6));
+    }
+
+    void arrangementMatchesEnabledStateAndPositions()
+    {
+        const auto current = parse(kscreenJson); // DP-1 on 0,0; HDMI-A-1 on 2560,0; Virtual on 5120,0
+        QVERIFY(arrangementMatches(
+            {
+                {QStringLiteral("DP-1"), true, QPoint(0, 0)},
+                {QStringLiteral("HDMI-A-1"), true, QPoint(2560, 0)},
+                {QStringLiteral("Virtual-krdp-m0-1920x1080"), true, QPoint(5120, 0)},
+            },
+            current));
+        // A wanted-disabled output that is enabled does not match.
+        QVERIFY(!arrangementMatches({{QStringLiteral("DP-1"), false, QPoint()}}, current));
+        // An enabled output at the wrong place does not match.
+        QVERIFY(!arrangementMatches({{QStringLiteral("HDMI-A-1"), true, QPoint(0, 0)}}, current));
+        // An output that is not there at all (churn, or never created) does not match, and is not present.
+        QVERIFY(!arrangementMatches({{QStringLiteral("DP-2"), false, QPoint()}}, current));
+        QVERIFY(!arrangementPresent({{QStringLiteral("DP-1"), true, QPoint()}, {QStringLiteral("DP-2"), false, QPoint()}}, current));
+        QVERIFY(arrangementPresent({{QStringLiteral("DP-1"), true, QPoint()}, {QStringLiteral("HDMI-A-1"), false, QPoint()}}, current));
+        // Priority is not part of the match: KWin may renumber.
+        auto renumbered = current;
+        renumbered[0].priority = 7;
+        QVERIFY(arrangementMatches({{QStringLiteral("DP-1"), true, QPoint(0, 0)}}, renumbered));
+        // A disabled output's position is irrelevant.
+        auto dark = current;
+        dark[0].enabled = false;
+        dark[0].position = QPoint(999, 999);
+        QVERIFY(arrangementMatches({{QStringLiteral("DP-1"), false, QPoint(0, 0)}}, dark));
+    }
 };
 
 QTEST_GUILESS_MAIN(OutputSnapshotTest)

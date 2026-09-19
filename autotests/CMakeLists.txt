@@ -48,3 +48,9 @@ add_executable(LayoutControlTest LayoutControlTest.cpp ${CMAKE_SOURCE_DIR}/src/L
 target_include_directories(LayoutControlTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
 target_link_libraries(LayoutControlTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME LayoutControlTest COMMAND LayoutControlTest)
+
+# LayoutOwner is header-only (server/); ${CMAKE_BINARY_DIR}/src for krdp_export.h via LayoutControl.h.
+add_executable(LayoutOwnerTest LayoutOwnerTest.cpp)
+target_include_directories(LayoutOwnerTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(LayoutOwnerTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME LayoutOwnerTest COMMAND LayoutOwnerTest)
