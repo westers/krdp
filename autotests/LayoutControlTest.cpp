@@ -27,6 +27,8 @@ HostMonitor realMonitor(const QString &id, QSize size, QPoint position, bool pri
         .primary = primary,
         .lit = true,
         .standIn = false,
+        .standInSize = {},
+        .standInScale = {},
         .owner = QString(),
     };
 }
@@ -88,6 +90,8 @@ private Q_SLOTS:
         layout.you = QStringLiteral("owner");
         layout.monitors[0].standIn = true;
         layout.monitors[0].lit = false;
+        layout.monitors[0].standInSize = QSize(1920, 1080);
+        layout.monitors[0].standInScale = 1.0;
         layout.monitors.append(HostMonitor{
             .id = QStringLiteral("virtual-1"),
             .name = QStringLiteral("virtual-1"),
@@ -98,6 +102,8 @@ private Q_SLOTS:
             .primary = false,
             .lit = true,
             .standIn = false,
+            .standInSize = {},
+            .standInScale = {},
             .owner = QStringLiteral("conn-2"),
         });
 
@@ -114,10 +120,17 @@ private Q_SLOTS:
         QCOMPARE(dp1.value(QStringLiteral("size")).toObject(), (QJsonObject{{QStringLiteral("w"), 2560}, {QStringLiteral("h"), 1440}}));
         QCOMPARE(dp1.value(QStringLiteral("position")).toObject(), (QJsonObject{{QStringLiteral("x"), 0}, {QStringLiteral("y"), 0}}));
         QVERIFY(dp1.value(QStringLiteral("owner")).isNull());
+        // Stood in: the presented size/scale ride along on the wire.
+        QVERIFY(dp1.value(QStringLiteral("standIn")).toBool());
+        QCOMPARE(dp1.value(QStringLiteral("standInSize")).toObject(), (QJsonObject{{QStringLiteral("w"), 1920}, {QStringLiteral("h"), 1080}}));
+        QCOMPARE(dp1.value(QStringLiteral("standInScale")).toDouble(), 1.0);
 
         const auto virtual1 = monitors.at(2).toObject();
         QCOMPARE(virtual1.value(QStringLiteral("kind")).toString(), QStringLiteral("virtual"));
         QCOMPARE(virtual1.value(QStringLiteral("owner")).toString(), QStringLiteral("conn-2"));
+        // Not stood in (it isn't even real): no standInSize/standInScale on the wire.
+        QVERIFY(!virtual1.contains(QStringLiteral("standInSize")));
+        QVERIFY(!virtual1.contains(QStringLiteral("standInScale")));
 
         QCOMPARE(object.value(QStringLiteral("owner")).toString(), QStringLiteral("conn-1"));
         QCOMPARE(object.value(QStringLiteral("you")).toString(), QStringLiteral("owner"));
@@ -134,6 +147,20 @@ private Q_SLOTS:
         const auto roundTripped = layoutFromJson(object);
         QVERIFY(roundTripped.has_value());
         QCOMPARE(roundTripped->owner, QString());
+    }
+
+    void standInFieldsOmittedWhenNotStoodIn() // fix round 1, ruling 1
+    {
+        auto layout = hal9000Layout();
+        layout.monitors[0].standIn = false;
+        layout.monitors[0].standInSize = QSize(1920, 1080); // stale; must not reach the wire
+        layout.monitors[0].standInScale = 1.5;
+
+        const auto object = toJson(layout);
+        const auto dp1 = object.value(QStringLiteral("monitors")).toArray().at(0).toObject();
+        QVERIFY(!dp1.value(QStringLiteral("standIn")).toBool());
+        QVERIFY(!dp1.contains(QStringLiteral("standInSize")));
+        QVERIFY(!dp1.contains(QStringLiteral("standInScale")));
     }
 
     void applyRequestRoundTripsAllFields()
@@ -307,11 +334,15 @@ private Q_SLOTS:
         QVERIFY(dp1);
         QVERIFY(dp1->standIn);
         QVERIFY(!dp1->lit);
+        QCOMPARE(dp1->standInSize, std::optional<QSize>(QSize(1920, 1080)));
+        QCOMPARE(dp1->standInScale, std::optional<qreal>(1.0));
 
         const auto *hdmi = findMonitor(p.resulting.monitors, QStringLiteral("HDMI-A-1"));
         QVERIFY(hdmi);
         QVERIFY(hdmi->lit);
         QVERIFY(!hdmi->standIn);
+        QVERIFY(!hdmi->standInSize);
+        QVERIFY(!hdmi->standInScale);
     }
 
     void removingStandInSizeRestoresRealMonitor() // (c)
@@ -338,6 +369,36 @@ private Q_SLOTS:
         QVERIFY(!dp1->standIn);
         QVERIFY(dp1->lit);
         QCOMPARE(dp1->size, QSize(2560, 1440)); // native size, never touched
+        QVERIFY(!dp1->standInSize);
+        QVERIFY(!dp1->standInScale);
+    }
+
+    void resendingNativeSizeAlsoRemovesStandIn() // fix round 1, minor 4
+    {
+        // A client that re-sends the real monitor's native size (rather than
+        // omitting `size`) while it is stood in must still be treated as
+        // "remove the stand-in", not silently ignored.
+        ApplyRequest first;
+        first.monitors = {existingMonitorEntry(QStringLiteral("DP-1"), {}, QSize(1920, 1080), 1.0)};
+        const auto afterFirst = plan(hal9000Layout(), first, QStringLiteral("conn-1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(afterFirst));
+
+        ApplyRequest second;
+        second.monitors = {existingMonitorEntry(QStringLiteral("DP-1"), true, QSize(2560, 1440))}; // native size, explicit
+        const auto result = plan(std::get<Plan>(afterFirst).resulting, second, QStringLiteral("conn-1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(result));
+        const auto &p = std::get<Plan>(result);
+
+        QCOMPARE(p.actions.size(), 2);
+        QCOMPARE(p.actions[0].kind, ActionKind::RemoveStandIn);
+        QCOMPARE(p.actions[1].kind, ActionKind::LightReal);
+
+        const auto *dp1 = findMonitor(p.resulting.monitors, QStringLiteral("DP-1"));
+        QVERIFY(dp1);
+        QVERIFY(!dp1->standIn);
+        QVERIFY(dp1->lit);
+        QVERIFY(!dp1->standInSize);
+        QVERIFY(!dp1->standInScale);
     }
 
     void newMonitorIsPlacedAtUnionRightEdge() // (d)
@@ -413,6 +474,77 @@ private Q_SLOTS:
             return m.kind == Kind::Virtual && m.owner == QStringLiteral("conn-2");
         });
         QVERIFY(conn2VirtualStays);
+    }
+
+    void mentioningOwnVirtualWithNewSizeResizesItInPlace() // fix round 1, ruling 2
+    {
+        ApplyRequest create;
+        create.monitors = {newMonitorEntry(QSize(800, 600))};
+        const auto afterCreate = plan(hal9000Layout(), create, QStringLiteral("conn-1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(afterCreate));
+        const auto layoutWithVirtual = std::get<Plan>(afterCreate).resulting;
+        const auto *before = findMonitor(layoutWithVirtual.monitors, QStringLiteral("virtual-1"));
+        QVERIFY(before);
+        const QPoint originalPosition = before->position;
+
+        ApplyRequest resize;
+        resize.monitors = {existingMonitorEntry(QStringLiteral("virtual-1"), {}, QSize(1024, 768))};
+        const auto result = plan(layoutWithVirtual, resize, QStringLiteral("conn-1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(result));
+        const auto &p = std::get<Plan>(result);
+
+        QCOMPARE(p.actions.size(), 2);
+        QCOMPARE(p.actions[0].kind, ActionKind::RemoveVirtual);
+        QCOMPARE(p.actions[0].id, QStringLiteral("virtual-1"));
+        QCOMPARE(p.actions[0].size, QSize(800, 600));
+        QCOMPARE(p.actions[1].kind, ActionKind::CreateVirtual);
+        QCOMPARE(p.actions[1].id, QStringLiteral("virtual-1")); // same id
+        QCOMPARE(p.actions[1].position, originalPosition); // same position
+        QCOMPARE(p.actions[1].size, QSize(1024, 768));
+
+        const auto *after = findMonitor(p.resulting.monitors, QStringLiteral("virtual-1"));
+        QVERIFY(after);
+        QCOMPARE(after->size, QSize(1024, 768));
+        QCOMPARE(after->position, originalPosition);
+    }
+
+    void mentioningOwnVirtualWithSameSizeIsANoOp() // fix round 1, ruling 2
+    {
+        ApplyRequest create;
+        create.monitors = {newMonitorEntry(QSize(800, 600), 1.0)};
+        const auto afterCreate = plan(hal9000Layout(), create, QStringLiteral("conn-1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(afterCreate));
+        const auto layoutWithVirtual = std::get<Plan>(afterCreate).resulting;
+
+        ApplyRequest reapply;
+        reapply.monitors = {existingMonitorEntry(QStringLiteral("virtual-1"), {}, QSize(800, 600), 1.0)};
+        const auto result = plan(layoutWithVirtual, reapply, QStringLiteral("conn-1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(result));
+        const auto &p = std::get<Plan>(result);
+
+        QVERIFY(p.actions.isEmpty());
+        QCOMPARE(p.resulting.monitors.size(), layoutWithVirtual.monitors.size());
+        const auto *virtual1 = findMonitor(p.resulting.monitors, QStringLiteral("virtual-1"));
+        QVERIFY(virtual1);
+        QCOMPARE(virtual1->size, QSize(800, 600));
+        QCOMPARE(virtual1->scale, 1.0);
+    }
+
+    void mentioningAnotherClientsVirtualIsRefused() // fix round 1, ruling 2
+    {
+        ApplyRequest create;
+        create.monitors = {newMonitorEntry(QSize(800, 600))};
+        const auto afterCreate = plan(hal9000Layout(), create, QStringLiteral("conn-1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(afterCreate));
+        const auto layoutWithVirtual = std::get<Plan>(afterCreate).resulting;
+
+        ApplyRequest fromOther;
+        fromOther.monitors = {existingMonitorEntry(QStringLiteral("virtual-1"), {}, QSize(1024, 768))};
+        const auto result = plan(layoutWithVirtual, fromOther, QStringLiteral("conn-2"), Caps{});
+        QVERIFY(std::holds_alternative<Error>(result));
+        const auto &error = std::get<Error>(result);
+        QCOMPARE(error.code, QStringLiteral("invalid"));
+        QCOMPARE(error.message, QStringLiteral("virtual-1 belongs to another client"));
     }
 
     void newMonitorTooWideIsInvalid() // (f), part 1

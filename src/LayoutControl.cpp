@@ -90,6 +90,12 @@ QJsonObject monitorToJson(const HostMonitor &monitor)
     object.insert(QStringLiteral("primary"), monitor.primary);
     object.insert(QStringLiteral("lit"), monitor.lit);
     object.insert(QStringLiteral("standIn"), monitor.standIn);
+    if (monitor.standIn && monitor.standInSize) {
+        object.insert(QStringLiteral("standInSize"), sizeToJson(*monitor.standInSize));
+    }
+    if (monitor.standIn && monitor.standInScale) {
+        object.insert(QStringLiteral("standInScale"), *monitor.standInScale);
+    }
     object.insert(QStringLiteral("owner"), monitor.owner.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(monitor.owner));
     return object;
 }
@@ -120,6 +126,12 @@ std::optional<HostMonitor> monitorFromJson(const QJsonValue &value)
     monitor.primary = object.value(QStringLiteral("primary")).toBool(false);
     monitor.lit = object.value(QStringLiteral("lit")).toBool(true);
     monitor.standIn = object.value(QStringLiteral("standIn")).toBool(false);
+    if (object.contains(QStringLiteral("standInSize"))) {
+        monitor.standInSize = sizeFromJson(object.value(QStringLiteral("standInSize")));
+    }
+    if (object.contains(QStringLiteral("standInScale"))) {
+        monitor.standInScale = object.value(QStringLiteral("standInScale")).toDouble();
+    }
     const auto owner = object.value(QStringLiteral("owner"));
     monitor.owner = owner.isString() ? owner.toString() : QString();
     return monitor;
@@ -229,6 +241,11 @@ int lowestFreeVirtualNumber(const QList<HostMonitor> &monitors)
     return n;
 }
 
+// Deliberately not ClientDisplay::usable()/usableDesktop(): those also
+// enforce a 640px MinDimension floor for RDP clients, which nothing in the
+// LayoutControl planner rules asks for (a small stand-in or virtual monitor
+// is not itself a protocol violation), so the bound comparisons are
+// re-implemented here rather than reusing the floor along with the ceiling.
 std::optional<Error> sanitizeResult(const QList<HostMonitor> &monitors, const Caps &caps)
 {
     for (const auto &monitor : monitors) {
@@ -455,17 +472,23 @@ std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &reques
             if (entry.size->width() > caps.maxOutputPx || entry.size->height() > caps.maxOutputPx) {
                 return Error{QStringLiteral("invalid"), QStringLiteral("stand-in for %1 exceeds the %2px output limit").arg(monitor.id).arg(caps.maxOutputPx)};
             }
+            const qreal standInScale = entry.scale.value_or(1.0);
             actions.append(Action{
                 .kind = ActionKind::CreateStandIn,
                 .id = monitor.id,
                 .size = *entry.size,
                 .position = monitor.position,
-                .scale = entry.scale.value_or(1.0),
+                .scale = standInScale,
             });
             monitor.standIn = true;
             monitor.lit = false; // implied by CreateStandIn; no separate DarkenReal
+            monitor.standInSize = *entry.size;
+            monitor.standInScale = standInScale;
             createdStandIn = true;
-        } else if (monitor.standIn && !entry.size) {
+        } else if (monitor.standIn) {
+            // Either no size was given, or the native size was re-sent: both
+            // mean "go back to native" (a size that actually differs from
+            // native was handled by the CreateStandIn branch above).
             actions.append(Action{
                 .kind = ActionKind::RemoveStandIn,
                 .id = monitor.id,
@@ -474,6 +497,8 @@ std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &reques
                 .scale = 1.0,
             });
             monitor.standIn = false;
+            monitor.standInSize.reset();
+            monitor.standInScale.reset();
             targetLitOverride = entry.lit.value_or(true);
         }
 
@@ -507,10 +532,45 @@ std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &reques
         }
     }
 
-    // Virtual monitors owned by the requester that were left out are removed;
-    // everyone else's virtual monitors are never touched here.
+    // Existing virtual monitors: the requester's own are removed when left
+    // out of the apply, or replanned in place (RemoveVirtual + CreateVirtual
+    // at the same id/position) when a size/scale change is requested; a
+    // no-op mention (same size/scale, or neither given) leaves it untouched.
+    // Mentioning another connection's virtual monitor is refused outright.
     for (auto it = resultMonitors.begin(); it != resultMonitors.end();) {
-        if (it->kind == Kind::Virtual && it->owner == requester && !mentioned.contains(it->id)) {
+        if (it->kind != Kind::Virtual) {
+            ++it;
+            continue;
+        }
+
+        const auto mentionIt = mentioned.constFind(it->id);
+        if (mentionIt == mentioned.cend()) {
+            if (it->owner == requester) {
+                actions.append(Action{
+                    .kind = ActionKind::RemoveVirtual,
+                    .id = it->id,
+                    .size = it->size,
+                    .position = it->position,
+                    .scale = it->scale,
+                });
+                it = resultMonitors.erase(it);
+                continue;
+            }
+            ++it;
+            continue;
+        }
+
+        if (it->owner != requester) {
+            return Error{QStringLiteral("invalid"), QStringLiteral("%1 belongs to another client").arg(it->id)};
+        }
+
+        const ApplyMonitor &entry = *mentionIt.value();
+        const QSize newSize = entry.size.value_or(it->size);
+        const qreal newScale = entry.scale.value_or(it->scale);
+        if (newSize != it->size || newScale != it->scale) {
+            if (newSize.width() > caps.maxOutputPx || newSize.height() > caps.maxOutputPx) {
+                return Error{QStringLiteral("invalid"), QStringLiteral("%1 would exceed the %2px output limit").arg(it->id).arg(caps.maxOutputPx)};
+            }
             actions.append(Action{
                 .kind = ActionKind::RemoveVirtual,
                 .id = it->id,
@@ -518,10 +578,17 @@ std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &reques
                 .position = it->position,
                 .scale = it->scale,
             });
-            it = resultMonitors.erase(it);
-        } else {
-            ++it;
+            actions.append(Action{
+                .kind = ActionKind::CreateVirtual,
+                .id = it->id,
+                .size = newSize,
+                .position = it->position,
+                .scale = newScale,
+            });
+            it->size = newSize;
+            it->scale = newScale;
         }
+        ++it;
     }
 
     // New virtual monitors, placed left-to-right along the union as it stood
@@ -560,6 +627,8 @@ std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &reques
             .primary = false,
             .lit = true,
             .standIn = false,
+            .standInSize = {},
+            .standInScale = {},
             .owner = requester,
         });
         placementUnion |= QRect(position, *entry.size);

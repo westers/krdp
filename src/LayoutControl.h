@@ -36,9 +36,10 @@ enum class Kind {
  * One monitor of the host layout, as shown to `KRDPCTL` clients.
  *
  * A real monitor's `size` and `position` are its native, unchanging geometry
- * (MonitorMode never changes a real output's mode); `standIn`/`lit` are the
- * only fields planning ever changes on it. A virtual monitor's `size`,
- * `position` and `scale` are exactly what was requested/placed for it.
+ * (MonitorMode never changes a real output's mode); `standIn`/`lit`/
+ * `standInSize`/`standInScale` are the only fields planning ever changes on
+ * it. A virtual monitor's `size`, `position` and `scale` are exactly what was
+ * requested/placed for it (and can be changed later by a resizing `apply`).
  */
 struct HostMonitor {
     /** Real: the connector name ("DP-1"). Virtual: server-assigned ("virtual-<n>"). */
@@ -53,6 +54,13 @@ struct HostMonitor {
     bool lit = true;
     /** Real monitors only: whether it is currently replaced by a Fit stand-in. */
     bool standIn = false;
+    /**
+     * Real monitors only, and only while standIn is true: the stand-in's
+     * actual presented size/scale (its native `size`/`scale` above never
+     * change). On the wire, present only when `standIn` is true.
+     */
+    std::optional<QSize> standInSize;
+    std::optional<qreal> standInScale;
     /** Virtual monitors only: the connection id that created it; empty for none/real. */
     QString owner;
 
@@ -119,7 +127,13 @@ KRDP_EXPORT QJsonObject errorRecord(const Error &error);
 KRDP_EXPORT QJsonObject layoutRecord(const Layout &layout);
 KRDP_EXPORT QJsonObject takeoverRecord(const Layout &layout);
 
-/** \a record plus `"v": 1`, as a 4-byte big-endian length prefix followed by UTF-8 JSON. */
+/**
+ * \a record plus `"v": 1`, as a 4-byte big-endian length prefix followed by
+ * UTF-8 JSON. This `v` is the protocol's ONLY version field: the design
+ * doc's `Layout { version: 1, ... }` prose refers to this same wire-level
+ * `v` added here, not a separate field inside the `layout`/`takeover` body
+ * (toJson(const Layout &) below emits no `version` key).
+ */
 KRDP_EXPORT QByteArray frame(const QJsonObject &record);
 
 /**
@@ -174,11 +188,12 @@ struct Plan {
  * Turns \a current + \a request from \a requester into the actions needed to
  * reach the new layout, sanitising the result against \a caps.
  *
- * Ownership ("not-owner") is decided above this call, not here: plan() only
- * ever fails with Error{"invalid", ...} when the requested layout would
- * violate a sanitising rule (an output or the union too large, overlapping
- * monitors, not exactly one primary) or names a monitor id that does not
- * exist.
+ * Layout ownership ("not-owner": is \a requester even allowed to apply at
+ * all) is decided above this call, not here: plan() only ever fails with
+ * Error{"invalid", ...} when the requested layout would violate a sanitising
+ * rule (an output or the union too large, overlapping monitors, not exactly
+ * one primary), names a monitor id that does not exist, or names an existing
+ * virtual monitor owned by a different connection.
  */
 KRDP_EXPORT std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &request, const QString &requester, const Caps &caps);
 
