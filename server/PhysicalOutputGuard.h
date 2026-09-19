@@ -195,6 +195,13 @@ public:
 
 Q_SIGNALS:
     void restored(bool verified);
+    /**
+     * reconcileArrangement() is about to change the outputs (the arrangement
+     * did not hold): emitted right before applyArrangement() runs, so the
+     * pointer warp a kscreen change causes can be sat out by whoever judges
+     * cursor samples. Not emitted when the arrangement is already in place.
+     */
+    void aboutToArrange();
 
 private:
     static bool run(const QStringList &args, QByteArray *output = nullptr);

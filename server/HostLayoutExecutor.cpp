@@ -77,6 +77,9 @@ HostLayoutExecutor::HostLayoutExecutor(PhysicalOutputGuard *guard, SessionFactor
     , m_sessionFactory(std::move(sessionFactory))
     , m_wake(std::move(wake))
 {
+    if (m_guard) {
+        connect(m_guard, &PhysicalOutputGuard::aboutToArrange, this, &HostLayoutExecutor::arrangementStarting);
+    }
     m_dpmsTimer.setInterval(DpmsPollMs);
     connect(&m_dpmsTimer, &QTimer::timeout, this, &HostLayoutExecutor::onDpmsPoll);
     m_removalTimer.setInterval(RemovalPollMs);

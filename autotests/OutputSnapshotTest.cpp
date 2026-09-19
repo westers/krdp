@@ -744,7 +744,12 @@ private:
             Output{newDp1StandIn().name, true, QPoint(5120, 0), 4, QSize(1920, 1080), 1.0},
         };
     }
-    /** The read-back the re-assert must produce (kscreen poll 11:30:30 minus the parked output). */
+    /**
+     * The read-back the re-assert must produce: the arrangement apply 2 made
+     * (kscreen poll 11:30:30 shows the outputs before it, with the new
+     * stand-in still at 5120,0 prio 3) minus the parked, now removed,
+     * old stand-in - KWin's priority numbering.
+     */
     static QVector<Output> heldReadBack()
     {
         return {

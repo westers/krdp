@@ -147,6 +147,16 @@ Q_SIGNALS:
     void finished(const HostLayoutExecutor::Result &result);
     /** The host layout changed (an apply landed, or everything was released). */
     void layoutChanged();
+    /**
+     * An apply is about to change KWin's outputs (the guard's
+     * aboutToArrange(), relayed): the first arrangement, or a re-assert
+     * after a removal or for a restated layout while unverified. The
+     * kscreen change can warp the pointer; the controller flags every
+     * layout client's takeover detector to sit the apply out from here,
+     * whatever the plan's action count said (a genuine no-op never gets
+     * here and costs nothing).
+     */
+    void arrangementStarting();
 
 private:
     struct Creator {

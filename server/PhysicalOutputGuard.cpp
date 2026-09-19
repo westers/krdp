@@ -454,6 +454,9 @@ bool PhysicalOutputGuard::reconcileArrangement(const QList<Arrangement> &entries
     // there - a position KWin chose is never adopted into the layout.
     qInfo().noquote() << u"Outputs drifted from the arrangement %1:"_s.arg(when) << current();
     qInfo().noquote() << u"Re-asserting the arrangement %1"_s.arg(when);
+    // The only mutating call layout control makes; the warp it can cause
+    // reaches the cursor path queued behind this blocking call.
+    Q_EMIT aboutToArrange();
     if (!applyArrangement(entries)) {
         qWarning().noquote() << u"Arrangement could not be re-asserted %1; the outputs are as read back until the next apply or the release"_s.arg(when);
         return false;

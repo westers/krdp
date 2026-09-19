@@ -1058,6 +1058,22 @@ SessionController::SessionController(KRdp::Server *server, SessionType sessionTy
 {
     connect(m_server, &KRdp::Server::newConnectionCreated, this, &SessionController::onNewConnection);
     connect(&m_layoutExecutor, &HostLayoutExecutor::finished, this, &SessionController::onLayoutApplied);
+    // Whenever the executor is about to change the outputs - the first
+    // arrangement, a re-assert after a removal, the re-assert a restated
+    // layout gets while unverified - every layout client's detector sits it
+    // out until the build that follows (armLayoutTakeover() clears the
+    // flag), whatever onControlApply() decided from the plan's action count:
+    // a 0-action recovery apply warps the pointer like any other, and the
+    // warp samples must not read as a desk takeover of the very apply that
+    // puts the layout right. Synchronous on purpose: the guard blocks for
+    // the change, and the samples arrive queued behind it.
+    connect(&m_layoutExecutor, &HostLayoutExecutor::arrangementStarting, this, [this]() {
+        for (const auto &w : m_wrappers) {
+            if (w && w->layoutClient) {
+                w->layoutApplyInFlight = true;
+            }
+        }
+    });
     m_heartbeatTimer.setInterval(HeartbeatIntervalMs);
     connect(&m_heartbeatTimer, &QTimer::timeout, this, &SessionController::onHeartbeatTick);
     // Status notification item
@@ -2337,7 +2353,10 @@ void SessionController::onControlApply(SessionWrapper *wrapper, const QJsonObjec
     // the build that follows it (armLayoutTakeover() clears the flag and
     // drops the references a warp may have spoiled); a refusal below does
     // the same at once. A 0-action plan (a debounced re-send that changes
-    // nothing) warps nothing, so it must not cost that blind window either.
+    // nothing) warps nothing, so it must not cost that blind window either
+    // - and should the executor arrange after all (a restated layout while
+    // its last arrangement is unverified), its arrangementStarting() sets
+    // the flag right before the change.
     if (!plan.actions.isEmpty()) {
         for (const auto &w : m_wrappers) {
             if (w && w->layoutClient) {
