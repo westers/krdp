@@ -4,6 +4,7 @@
 #include "LayoutControl.h"
 
 #include <algorithm>
+#include <utility>
 
 #include <QDataStream>
 #include <QHash>
@@ -376,7 +377,7 @@ QJsonObject takeoverRecord(const Layout &layout)
 QByteArray frame(const QJsonObject &record)
 {
     QJsonObject withVersion = record;
-    withVersion.insert(QStringLiteral("v"), 1);
+    withVersion.insert(QStringLiteral("v"), ProtocolVersion);
     const QByteArray payload = QJsonDocument(withVersion).toJson(QJsonDocument::Compact);
 
     QByteArray out;
@@ -397,37 +398,47 @@ void Deframer::feed(const QByteArray &data)
 
 std::optional<QJsonObject> Deframer::next()
 {
-    if (m_overflowed || m_buffer.size() < 4) {
-        return std::nullopt;
-    }
+    for (;;) {
+        if (m_overflowed || m_buffer.size() < 4) {
+            return std::nullopt;
+        }
 
-    QDataStream stream(m_buffer);
-    stream.setByteOrder(QDataStream::BigEndian);
-    quint32 length = 0;
-    stream >> length;
+        QDataStream stream(m_buffer);
+        stream.setByteOrder(QDataStream::BigEndian);
+        quint32 length = 0;
+        stream >> length;
 
-    if (length > MaxFrameBytes) {
-        m_overflowed = true;
-        m_buffer.clear();
-        return std::nullopt;
-    }
-    if (m_buffer.size() < 4 + static_cast<qsizetype>(length)) {
-        return std::nullopt;
-    }
+        if (length > MaxFrameBytes) {
+            m_overflowed = true;
+            m_buffer.clear();
+            return std::nullopt;
+        }
+        if (m_buffer.size() < 4 + static_cast<qsizetype>(length)) {
+            return std::nullopt;
+        }
 
-    const QByteArray payload = m_buffer.mid(4, length);
-    m_buffer.remove(0, 4 + length);
+        const QByteArray payload = m_buffer.mid(4, length);
+        m_buffer.remove(0, 4 + length);
 
-    const QJsonDocument document = QJsonDocument::fromJson(payload);
-    if (!document.isObject()) {
-        return std::nullopt;
+        const QJsonDocument document = QJsonDocument::fromJson(payload);
+        if (!document.isObject()) {
+            // Framed correctly, so the stream stays in sync; the payload is
+            // just not a record. Skip it and look at the next one.
+            ++m_invalid;
+            continue;
+        }
+        return document.object();
     }
-    return document.object();
 }
 
 bool Deframer::overflowed() const
 {
     return m_overflowed;
+}
+
+int Deframer::takeInvalidCount()
+{
+    return std::exchange(m_invalid, 0);
 }
 
 std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &request, const QString &requester, const Caps &caps)

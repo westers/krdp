@@ -20,6 +20,7 @@
 #include <QVector>
 
 #include "ClientDisplayInfo.h"
+#include "LayoutControl.h"
 
 namespace KRdp
 {
@@ -39,6 +40,8 @@ struct Output {
     QPoint position;
     int priority = 0;
     QSize size;
+    /** KWin's scale factor for the output (1, 1.25, ...); 1.0 when kscreen does not say. */
+    qreal scale = 1.0;
 
     bool operator==(const Output &other) const = default;
 };
@@ -87,6 +90,7 @@ inline QVector<Output> parse(const QByteArray &kscreenJson, QString *error = nul
             .position = QPoint(pos.value(QLatin1String("x")).toInt(), pos.value(QLatin1String("y")).toInt()),
             .priority = object.value(QLatin1String("priority")).toInt(),
             .size = QSize(size.value(QLatin1String("width")).toInt(), size.value(QLatin1String("height")).toInt()),
+            .scale = object.value(QLatin1String("scale")).toDouble(1.0),
         });
     }
     if (error) {
@@ -160,6 +164,46 @@ inline ClientDisplay::Info toClientDisplayInfo(const QVector<Output> &outputs)
         info.monitors.push_back(VideoMonitor{QRect(enabled.at(i).position, enabled.at(i).size).translated(-unionRect.topLeft()), i == 0});
     }
     return info;
+}
+
+/**
+ * The host layout's real monitors as a `KRDPCTL` client sees them (OPT-044):
+ * one HostMonitor per output of \a outputs, in list order, with `id` and
+ * `name` the connector name, native pixel size and KWin position, KWin's
+ * scale, `lit` = enabled. Exactly one is primary: the enabled output with the
+ * lowest positive kscreen priority (1 is KWin's primary; a disabled output
+ * reports 0), else the first output when nothing qualifies. Virtual outputs
+ * are the caller's business: pass physicalOnly() to describe the real ones.
+ */
+inline QList<LayoutControl::HostMonitor> hostMonitorsFrom(const QVector<Output> &outputs)
+{
+    qsizetype primaryIndex = -1;
+    for (qsizetype i = 0; i < outputs.size(); ++i) {
+        const auto &output = outputs.at(i);
+        if (output.enabled && output.priority > 0 && (primaryIndex < 0 || output.priority < outputs.at(primaryIndex).priority)) {
+            primaryIndex = i;
+        }
+    }
+    if (primaryIndex < 0 && !outputs.isEmpty()) {
+        primaryIndex = 0;
+    }
+
+    QList<LayoutControl::HostMonitor> monitors;
+    monitors.reserve(outputs.size());
+    for (qsizetype i = 0; i < outputs.size(); ++i) {
+        const auto &output = outputs.at(i);
+        LayoutControl::HostMonitor monitor;
+        monitor.id = output.name;
+        monitor.name = output.name;
+        monitor.kind = LayoutControl::Kind::Real;
+        monitor.size = output.size;
+        monitor.position = output.position;
+        monitor.scale = output.scale > 0.0 ? output.scale : 1.0;
+        monitor.primary = i == primaryIndex;
+        monitor.lit = output.enabled;
+        monitors.push_back(monitor);
+    }
+    return monitors;
 }
 
 /**
@@ -317,6 +361,7 @@ inline QJsonArray toJsonArray(const QVector<Output> &outputs)
             {QLatin1String("priority"), output.priority},
             {QLatin1String("width"), output.size.width()},
             {QLatin1String("height"), output.size.height()},
+            {QLatin1String("scale"), output.scale},
         });
     }
     return array;
@@ -333,6 +378,8 @@ inline QVector<Output> fromJsonArray(const QJsonArray &array)
             .position = QPoint(object.value(QLatin1String("x")).toInt(), object.value(QLatin1String("y")).toInt()),
             .priority = object.value(QLatin1String("priority")).toInt(),
             .size = QSize(object.value(QLatin1String("width")).toInt(), object.value(QLatin1String("height")).toInt()),
+            // Absent from state files written before the field existed.
+            .scale = object.value(QLatin1String("scale")).toDouble(1.0),
         });
     }
     return outputs;

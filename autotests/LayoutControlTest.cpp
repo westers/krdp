@@ -4,6 +4,7 @@
 #include <algorithm>
 
 #include <QDataStream>
+#include <QIODevice>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTest>
@@ -274,6 +275,40 @@ private Q_SLOTS:
         QVERIFY(record.has_value());
         QCOMPARE(record->value(QStringLiteral("type")).toString(), QStringLiteral("query"));
         QVERIFY(!deframer.overflowed());
+    }
+
+    void deframerSkipsNonObjectPayloadsAndCountsThem()
+    {
+        // Correctly framed, but not records: a JSON array and plain garbage.
+        auto framePayload = [](const QByteArray &payload) -> QByteArray {
+            QByteArray out;
+            {
+                QDataStream stream(&out, QIODevice::WriteOnly);
+                stream.setByteOrder(QDataStream::BigEndian);
+                stream << static_cast<quint32>(payload.size());
+            }
+            out.append(payload);
+            return out;
+        };
+        const auto good = frame(QJsonObject{{QStringLiteral("type"), QStringLiteral("query")}});
+
+        Deframer deframer;
+        deframer.feed(framePayload("[1,2,3]") + framePayload("not json at all") + good);
+
+        // next() moves past both bad payloads to the record behind them.
+        const auto record = deframer.next();
+        QVERIFY(record.has_value());
+        QCOMPARE(record->value(QStringLiteral("type")).toString(), QStringLiteral("query"));
+        QVERIFY(!deframer.next().has_value());
+        QVERIFY(!deframer.overflowed());
+
+        QCOMPARE(deframer.takeInvalidCount(), 2);
+        QCOMPARE(deframer.takeInvalidCount(), 0); // taken means reset
+
+        // A bad payload with nothing behind it is counted too.
+        deframer.feed(framePayload("42"));
+        QVERIFY(!deframer.next().has_value());
+        QCOMPARE(deframer.takeInvalidCount(), 1);
     }
 
     void deframerOverflowsPastSixtyFourKiB()

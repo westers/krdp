@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 KDE Contributors
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
+#include <algorithm>
+
 #include <QTest>
 
 #include "OutputSnapshot.h"
@@ -291,6 +293,95 @@ private Q_SLOTS:
         const auto sanitized = sanitize(mirrored, QSize(1920, 1080));
         QVERIFY(sanitized.monitors.isEmpty());
         QCOMPARE(sanitized.desktopSize, QSize(1920, 1080));
+    }
+
+    // hostMonitorsFrom() is what a KRDPCTL `query` is answered from (OPT-044):
+    // the real outputs as HostMonitors, exactly one of them primary.
+
+    void hostMonitorsFromHal9000()
+    {
+        const auto monitors = hostMonitorsFrom(physicalOnly(parse(kscreenJson)));
+        QCOMPARE(monitors.size(), 2);
+        QCOMPARE(monitors[0].id, QStringLiteral("DP-1"));
+        QCOMPARE(monitors[0].name, QStringLiteral("DP-1"));
+        QCOMPARE(monitors[0].kind, KRdp::LayoutControl::Kind::Real);
+        QCOMPARE(monitors[0].size, QSize(2560, 1440));
+        QCOMPARE(monitors[0].position, QPoint(0, 0));
+        QCOMPARE(monitors[0].scale, 1.0);
+        QVERIFY(monitors[0].primary);
+        QVERIFY(monitors[0].lit);
+        QVERIFY(!monitors[0].standIn);
+        QVERIFY(monitors[0].owner.isEmpty());
+        QCOMPARE(monitors[1].id, QStringLiteral("HDMI-A-1"));
+        QCOMPARE(monitors[1].position, QPoint(2560, 0));
+        QVERIFY(!monitors[1].primary);
+        QVERIFY(monitors[1].lit);
+    }
+
+    void hostMonitorsFromSkipsDisabledPriorityZeroForPrimary()
+    {
+        // A disabled output reports priority 0; it is listed (dark) but never
+        // primary, even when it comes first.
+        const QVector<Output> outputs{
+            {.name = QStringLiteral("DP-1"), .enabled = false, .position = QPoint(0, 0), .priority = 0, .size = QSize(2560, 1440)},
+            {.name = QStringLiteral("HDMI-A-1"), .enabled = true, .position = QPoint(2560, 0), .priority = 1, .size = QSize(2560, 1440)},
+        };
+        const auto monitors = hostMonitorsFrom(outputs);
+        QCOMPARE(monitors.size(), 2);
+        QVERIFY(!monitors[0].primary);
+        QVERIFY(!monitors[0].lit);
+        QVERIFY(monitors[1].primary);
+        QVERIFY(monitors[1].lit);
+    }
+
+    void hostMonitorsFromPicksLowestPositivePriorityWhenOneIsMissing()
+    {
+        // No priority 1 anywhere (KWin renumbers after an output goes away):
+        // the lowest positive one among the enabled outputs is the primary.
+        const QVector<Output> outputs{
+            {.name = QStringLiteral("HDMI-A-1"), .enabled = true, .position = QPoint(2560, 0), .priority = 3, .size = QSize(2560, 1440)},
+            {.name = QStringLiteral("DP-1"), .enabled = true, .position = QPoint(0, 0), .priority = 2, .size = QSize(2560, 1440)},
+        };
+        const auto monitors = hostMonitorsFrom(outputs);
+        QVERIFY(!monitors[0].primary);
+        QVERIFY(monitors[1].primary);
+        QCOMPARE(std::count_if(monitors.cbegin(), monitors.cend(), [](const auto &m) {
+                     return m.primary;
+                 }),
+                 1);
+    }
+
+    void hostMonitorsFromSingleOutputIsPrimaryEvenWhenDark()
+    {
+        // One output, disabled (a leftover replace): still described, still the
+        // one primary the layout must have.
+        const QVector<Output> outputs{
+            {.name = QStringLiteral("DP-1"), .enabled = false, .position = QPoint(0, 0), .priority = 0, .size = QSize(2560, 1440)},
+        };
+        const auto monitors = hostMonitorsFrom(outputs);
+        QCOMPARE(monitors.size(), 1);
+        QVERIFY(monitors[0].primary);
+        QVERIFY(!monitors[0].lit);
+        QVERIFY(hostMonitorsFrom({}).isEmpty());
+    }
+
+    void parseCarriesScaleIntoHostMonitors()
+    {
+        const QByteArray scaled = R"({"outputs": [
+            {"name": "eDP-1", "enabled": true, "connected": true, "priority": 1, "pos": {"x": 0, "y": 0}, "size": {"width": 2880, "height": 1800}, "scale": 1.75},
+            {"name": "DP-3", "enabled": true, "connected": true, "priority": 2, "pos": {"x": 1646, "y": 0}, "size": {"width": 1920, "height": 1080}}
+        ]})";
+        const auto outputs = parse(scaled);
+        QCOMPARE(outputs.size(), 2);
+        QCOMPARE(outputs[0].scale, 1.75);
+        QCOMPARE(outputs[1].scale, 1.0); // absent -> 1
+        const auto monitors = hostMonitorsFrom(outputs);
+        QCOMPARE(monitors[0].scale, 1.75);
+        QCOMPARE(monitors[0].size, QSize(2880, 1800)); // native pixels, not divided by the scale
+        QCOMPARE(monitors[1].scale, 1.0);
+        // The state file keeps it too, and an old file without it reads as 1.
+        QCOMPARE(fromJson(toJson(outputs)), outputs);
+        QCOMPARE(fromJson(R"([{"name":"DP-1","enabled":true,"x":0,"y":0,"priority":1,"width":2560,"height":1440}])")[0].scale, 1.0);
     }
 };
 

@@ -117,10 +117,11 @@ public:
     NetworkDetection *networkDetection() const;
 
     /**
-     * Whether the client joined the `KRDPCTL` static virtual channel (slice
-     * 2c layout control, OPT-044). Known once the MCS channel join is done,
-     * which precedes the capabilities exchange: valid from the moment
-     * clientDisplayInfoReceived() fires. Safe from any thread.
+     * Whether the client has a usable `KRDPCTL` static virtual channel (slice
+     * 2c layout control, OPT-044): it joined it and the server-side open
+     * succeeded. Known once the MCS channel join is done, which precedes the
+     * capabilities exchange: valid from the moment clientDisplayInfoReceived()
+     * fires. Safe from any thread.
      */
     bool hasControlChannel() const;
     /**

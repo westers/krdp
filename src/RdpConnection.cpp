@@ -360,9 +360,12 @@ public:
     // mutex orders those writes against the close in onClose().
     std::mutex controlChannelMutex;
     HANDLE controlChannel = nullptr;
-    // Whether the client joined the channel; set on the session thread before
-    // clientDisplayInfoReceived() is emitted, read from wherever.
-    std::atomic<bool> controlChannelJoined = false;
+    // Session thread only: the join was seen and the open attempted, once.
+    bool controlChannelTried = false;
+    // Whether the client has a usable control channel (joined AND opened);
+    // set on the session thread before clientDisplayInfoReceived() is
+    // emitted, read from wherever.
+    std::atomic<bool> controlChannelOpen = false;
     LayoutControl::Deframer controlDeframer;
 };
 
@@ -467,7 +470,7 @@ NetworkDetection *RdpConnection::networkDetection() const
 
 bool RdpConnection::hasControlChannel() const
 {
-    return d->controlChannelJoined.load();
+    return d->controlChannelOpen.load();
 }
 
 void RdpConnection::sendControlRecord(const QJsonObject &record)
@@ -489,27 +492,30 @@ void RdpConnection::sendControlRecord(const QJsonObject &record)
 
 void RdpConnection::openControlChannel()
 {
-    if (d->controlChannelJoined.load()) {
-        // Opened (or failed to, once) already.
+    if (d->controlChannelTried) {
         return;
     }
     auto context = reinterpret_cast<PeerContext *>(d->peer->context);
     if (!WTSVirtualChannelManagerIsChannelJoined(context->virtualChannelManager, ControlChannelName)) {
         return;
     }
+    d->controlChannelTried = true;
     // Opened as soon as the join is visible, well before the client can send
     // on it (its channel plugins only start after activation): data for a
     // joined-but-unopened static channel is dropped by FreeRDP, not queued.
     HANDLE channel = WTSVirtualChannelOpen(context->virtualChannelManager, WTS_CURRENT_SESSION, ControlChannelName);
+    if (!channel) {
+        // Treated as a client without the channel: hasControlChannel() stays
+        // false, so the session build is not held for a record that cannot
+        // arrive.
+        qCWarning(KRDP) << "KRDPCTL: the client joined the channel but it could not be opened; serving it as a client without one";
+        return;
+    }
     {
         std::lock_guard lock(d->controlChannelMutex);
         d->controlChannel = channel;
     }
-    d->controlChannelJoined = true;
-    if (!channel) {
-        qCWarning(KRDP) << "KRDPCTL: the client joined the channel but it could not be opened";
-        return;
-    }
+    d->controlChannelOpen = true;
     qCInfo(KRDP) << "KRDPCTL: channel joined and opened";
 }
 
@@ -541,6 +547,13 @@ bool RdpConnection::readControlChannel()
         d->controlDeframer.feed(buffer);
         while (auto record = d->controlDeframer.next()) {
             Q_EMIT controlRecordReceived(*record);
+        }
+        // A payload that is not a JSON object is consumed, not a record: it
+        // never reaches the gate, but the client is told at once rather than
+        // left to wait out the gate's timeout in silence.
+        for (int invalid = d->controlDeframer.takeInvalidCount(); invalid > 0; --invalid) {
+            qCWarning(KRDP) << "KRDPCTL: record payload is not a JSON object; replying error invalid";
+            sendControlRecord(LayoutControl::errorRecord({QStringLiteral("invalid"), QStringLiteral("record payload is not a JSON object")}));
         }
         if (d->controlDeframer.overflowed()) {
             qCWarning(KRDP) << "KRDPCTL: record longer than 64 KiB announced; closing the connection";
@@ -772,7 +785,7 @@ bool RdpConnection::onCapabilities()
     openControlChannel();
     qCInfo(KRDP) << "Client display: desktop" << info.desktopSize << "monitors" << info.monitors.size()
                  << "monitorLayoutPdu" << freerdp_settings_get_bool(settings, FreeRDP_SupportMonitorLayoutPdu)
-                 << "KRDPCTL" << d->controlChannelJoined.load();
+                 << "KRDPCTL" << d->controlChannelOpen.load();
     Q_EMIT clientDisplayInfoReceived();
 
     return true;

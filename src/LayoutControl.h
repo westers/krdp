@@ -26,6 +26,9 @@ namespace KRdp
  */
 namespace LayoutControl
 {
+/** The wire protocol version frame() stamps on every record as `v`; the only one either side speaks. */
+constexpr int ProtocolVersion = 1;
+
 /** A host monitor is either a real output or one the client asked to be created. */
 enum class Kind {
     Real,
@@ -142,19 +145,25 @@ KRDP_EXPORT QByteArray frame(const QJsonObject &record);
  *
  * A declared length over 64 KiB is treated as a protocol violation rather
  * than an allocation to attempt: overflowed() latches true and no further
- * records are produced.
+ * records are produced. A complete payload that is not a JSON object is
+ * consumed and skipped (next() moves on to whatever follows it) and counted
+ * for takeInvalidCount(), so the consumer can answer `error invalid` instead
+ * of never hearing about it.
  */
 class KRDP_EXPORT Deframer
 {
 public:
     void feed(const QByteArray &data);
-    /** The next complete record, if the buffer holds one. */
+    /** The next complete, well-formed record, if the buffer holds one. */
     std::optional<QJsonObject> next();
     bool overflowed() const;
+    /** Payloads skipped by next() as not-a-JSON-object since the last call; resets the count. */
+    int takeInvalidCount();
 
 private:
     QByteArray m_buffer;
     bool m_overflowed = false;
+    int m_invalid = 0;
 };
 
 enum class ActionKind {

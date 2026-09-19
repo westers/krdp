@@ -24,7 +24,9 @@ target_link_libraries(ClientDisplayInfoTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ClientDisplayInfoTest COMMAND ClientDisplayInfoTest)
 
 add_executable(OutputSnapshotTest OutputSnapshotTest.cpp)
-target_include_directories(OutputSnapshotTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+# ${CMAKE_BINARY_DIR}/src for krdp_export.h: OutputSnapshot.h now includes LayoutControl.h
+# (hostMonitorsFrom); header-only use, nothing from libKRdp is linked.
+target_include_directories(OutputSnapshotTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
 target_link_libraries(OutputSnapshotTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME OutputSnapshotTest COMMAND OutputSnapshotTest)
 

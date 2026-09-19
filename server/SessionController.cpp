@@ -665,7 +665,15 @@ public:
             for (const auto &session : sessions) {
                 session->requestStreamingEnable(connection->videoStream());
             }
-            holdDisplayWake(true);
+            // Only with something to keep awake: the stream is enabled as
+            // soon as drdynvc is ready, whatever the KRDPCTL gate decided,
+            // and a soft `query` from a client with the standard add-ins
+            // must not switch the desk's monitors on (OPT-044). A build that
+            // lands later takes the wake in setSessions(); the release below
+            // stays balanced through m_holdsDisplayWake.
+            if (!sessions.empty()) {
+                holdDisplayWake(true);
+            }
         } else {
             for (const auto &session : sessions) {
                 session->requestStreamingDisable(connection->videoStream());
@@ -1922,6 +1930,19 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
         wrapper->controlTimer.stop();
     }
 
+    // Spec R1: records are versioned; this server speaks v1 only. Another
+    // version's record is not interpreted, whatever its type says.
+    const int version = record.value(QLatin1String("v")).toInt();
+    if (version != KRdp::LayoutControl::ProtocolVersion) {
+        connection->sendControlRecord(
+            KRdp::LayoutControl::errorRecord({u"unsupported"_s, u"protocol version %1 is not supported; this server speaks %2"_s.arg(version).arg(KRdp::LayoutControl::ProtocolVersion)}));
+        if (first) {
+            qInfo() << "KRDPCTL: first record has protocol version" << version << "; using the configured MonitorMode";
+            buildConfiguredSessions(wrapper);
+        }
+        return;
+    }
+
     if (type == QLatin1String("query")) {
         const auto layout = currentLayout(connection);
         connection->sendControlRecord(KRdp::LayoutControl::layoutRecord(layout));
@@ -1987,41 +2008,13 @@ void SessionController::buildConfiguredSessions(SessionWrapper *wrapper)
 
 KRdp::LayoutControl::Layout SessionController::currentLayout(const KRdp::RdpConnection *connection) const
 {
-    using KRdp::LayoutControl::HostMonitor;
-    using KRdp::LayoutControl::Kind;
-
     KRdp::LayoutControl::Layout layout;
     layout.you = u"none"_s;
 
     QString error;
     const auto outputs = KRdp::OutputSnapshot::physicalOnly(PhysicalOutputGuard::readOutputs(&error));
     if (!outputs.isEmpty()) {
-        // kscreen-doctor's priority is 1 for the primary; the lowest positive
-        // one wins when 1 is missing (a disabled output reports 0), and exactly
-        // one monitor is primary whatever it reports.
-        int primaryIndex = -1;
-        for (qsizetype i = 0; i < outputs.size(); ++i) {
-            const auto &output = outputs.at(i);
-            if (output.priority > 0 && (primaryIndex < 0 || output.priority < outputs.at(primaryIndex).priority)) {
-                primaryIndex = int(i);
-            }
-        }
-        if (primaryIndex < 0) {
-            primaryIndex = 0;
-        }
-        for (qsizetype i = 0; i < outputs.size(); ++i) {
-            const auto &output = outputs.at(i);
-            layout.monitors.push_back(HostMonitor{
-                .id = output.name,
-                .name = output.name,
-                .kind = Kind::Real,
-                .size = output.size,
-                .position = output.position,
-                .scale = 1.0, // kscreen-doctor -j has it, OutputSnapshot::Output does not (yet)
-                .primary = i == primaryIndex,
-                .lit = output.enabled,
-            });
-        }
+        layout.monitors = KRdp::OutputSnapshot::hostMonitorsFrom(outputs);
     } else {
         // No kscreen-doctor (a portal session, or it failed): Qt's screens
         // are the next best description. Pixel geometry, like the rest.
@@ -2031,10 +2024,10 @@ KRdp::LayoutControl::Layout SessionController::currentLayout(const KRdp::RdpConn
         for (qsizetype i = 0; i < screens.size(); ++i) {
             const auto *screen = screens.at(i);
             const qreal ratio = screen->devicePixelRatio();
-            layout.monitors.push_back(HostMonitor{
+            layout.monitors.push_back(KRdp::LayoutControl::HostMonitor{
                 .id = screen->name(),
                 .name = screen->name(),
-                .kind = Kind::Real,
+                .kind = KRdp::LayoutControl::Kind::Real,
                 .size = (QSizeF(screen->size()) * ratio).toSize(),
                 .position = (QPointF(screen->geometry().topLeft()) * ratio).toPoint(),
                 .scale = ratio,
