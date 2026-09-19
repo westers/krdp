@@ -117,6 +117,36 @@ private Q_SLOTS:
         QVERIFY(d.dropped.isEmpty());
         QVERIFY(!d.unchanged());
     }
+
+    // --- captureToGlobal: a cursor sample on a layout session, mapped through the wrapper's own table ---
+
+    void captureToGlobalOffsetsByTheEntryOrigin()
+    {
+        // HDMI-A-1 at (2560,0), 2560x1440 at scale 1: pixel (0,0) is the
+        // entry's origin, the last pixel is the last logical unit.
+        const QRect entry(QPoint(2560, 0), QSize(2560, 1440));
+        QCOMPARE(captureToGlobal(entry, 1.0, QPointF(0, 0)), QPointF(2560, 0));
+        QCOMPARE(captureToGlobal(entry, 1.0, QPointF(2559, 1439)), QPointF(5119, 1439));
+        QCOMPARE(captureToGlobal(entry, 1.0, QPointF(1280, 720)).toPoint(), QPoint(2560 + 1280, 720));
+    }
+
+    void captureToGlobalSpansPixelsOverTheLogicalSize()
+    {
+        // A 125 % virtual monitor: 1920x1080 pixels are 1536x864 logical
+        // units, so the last pixel lands 1535,863 from the origin.
+        const QRect entry(QPoint(5120, 0), QSize(1920, 1080));
+        QCOMPARE(captureToGlobal(entry, 1.25, QPointF(0, 0)), QPointF(5120, 0));
+        QCOMPARE(captureToGlobal(entry, 1.25, QPointF(1919, 1079)), QPointF(5120 + 1535, 863));
+    }
+
+    void captureToGlobalClampsAndTakesAnEmptyEntryAsOffsetOnly()
+    {
+        const QRect entry(QPoint(100, 50), QSize(200, 100));
+        QCOMPARE(captureToGlobal(entry, 1.0, QPointF(-10, 500)), QPointF(100, 50 + 99));
+        QCOMPARE(captureToGlobal(QRect(QPoint(7, 9), QSize()), 1.0, QPointF(3, 4)), QPointF(10, 13));
+        // A nonsense scale is taken as 1.
+        QCOMPARE(captureToGlobal(entry, 0.0, QPointF(199, 99)), QPointF(299, 149));
+    }
 };
 
 QTEST_GUILESS_MAIN(LayoutSessionDiffTest)

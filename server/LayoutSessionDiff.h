@@ -3,7 +3,12 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
+
 #include <QList>
+#include <QPointF>
+#include <QRect>
 #include <QStringList>
 
 namespace KRdp
@@ -77,6 +82,37 @@ inline Diff diff(const QStringList &current, const QStringList &wanted, const QS
         }
     }
     return out;
+}
+
+/**
+ * A position in the capture PIXELS of the session over \a entry (an RDP
+ * pointer position, or the screencast's cursor metadata) → KWin-global
+ * logical coordinates, the space fake input works in. \a entry is the
+ * wrapper's layout entry for that session: KWin logical origin, pixel size;
+ * \a scale its pixels per logical unit. The same arithmetic as
+ * KRdp::AbstractSession::mapToGlobal() - normalised over (pixels-1), spanned
+ * over (logical-1), offset by the origin - so a sample mapped here compares
+ * with a move injected through the same table. Used instead of the
+ * session's own mapToGlobal() for a layout session, whose output stream reads
+ * its place once at setup and never follows a move; the wrapper's table is
+ * refreshed by every build.
+ */
+inline QPointF captureToGlobal(const QRect &entry, qreal scale, const QPointF &local)
+{
+    const QPoint origin = entry.topLeft();
+    const QSize pixels = entry.size();
+    const qreal ratio = scale > 0.0 ? scale : 1.0;
+    const QSize logical(int(std::ceil(pixels.width() / ratio)), int(std::ceil(pixels.height() / ratio)));
+    if (pixels.isEmpty() || logical.isEmpty()) {
+        return local + origin;
+    }
+    const int inputWidth = std::max(1, pixels.width() - 1);
+    const int inputHeight = std::max(1, pixels.height() - 1);
+    const int logicalWidth = std::max(1, logical.width() - 1);
+    const int logicalHeight = std::max(1, logical.height() - 1);
+    const qreal normalizedX = std::clamp(local.x() / qreal(inputWidth), 0.0, 1.0);
+    const qreal normalizedY = std::clamp(local.y() / qreal(inputHeight), 0.0, 1.0);
+    return QPointF{normalizedX * logicalWidth + origin.x(), normalizedY * logicalHeight + origin.y()};
 }
 }
 }

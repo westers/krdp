@@ -76,8 +76,10 @@ public:
     /**
      * \a sessionFactory creates the creator sessions; pass an EMPTY factory
      * for a session type that cannot create virtual outputs (the portal),
-     * and every execute() is refused `unsupported` before anything is held
-     * or waited for.
+     * and ANY apply - one that would only light or darken real outputs
+     * included - is refused `unsupported` by execute() before anything is
+     * held or waited for: such a session cannot build per-output streams
+     * either, so no layout could be served.
      */
     HostLayoutExecutor(PhysicalOutputGuard *guard, SessionFactory sessionFactory, WakeHook wake, QObject *parent = nullptr);
     ~HostLayoutExecutor() override;

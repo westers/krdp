@@ -290,9 +290,11 @@ private:
     /**
      * Desk takeover for a layout client (OPT-044 §4): arm the wrapper's
      * console takeover detector while \a layout keeps a real monitor dark,
-     * latch it otherwise. Called by every build.
+     * latch it otherwise. Called at the end of every build; the detector is
+     * replaced only when \a sessionsChanged or the dark/lit state flipped,
+     * kept (references dropped if an apply just ended) otherwise.
      */
-    void armLayoutTakeover(SessionWrapper *wrapper, const KRdp::LayoutControl::Layout &layout);
+    void armLayoutTakeover(SessionWrapper *wrapper, const KRdp::LayoutControl::Layout &layout, bool sessionsChanged);
     /** The current layout from \a wrapper's point of view (owner and `you` filled in). */
     KRdp::LayoutControl::Layout layoutFor(const SessionWrapper *wrapper) const;
     /**

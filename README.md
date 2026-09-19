@@ -191,7 +191,7 @@ kwriteconfig6 --file krdpserverrc --group General --key MonitorMode multi --noti
 per connection what to stream: which real monitors stay lit at the desk,
 which are stood in by a virtual output at the client's size ("Fit"), which
 extra virtual monitors to create, or Private (every real monitor dark, each
-streamed from a native-size stand-in). The server builds that connection's
+streamed from its stand-in - native size unless it already had a Fit). The server builds that connection's
 sessions from the resulting host layout, one per host monitor; a later
 `apply` on the same connection is applied as a diff (only the sessions whose
 output changed are restarted, the rest keep streaming), other channel

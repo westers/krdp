@@ -92,8 +92,12 @@ struct Probe {
     Mode mode = Mode::Silent;
     /** The `apply` bodies, in order: one for --apply, several for --apply-seq. */
     QList<QJsonObject> applyBodies;
-    int nextApply = 0;
-    /** `layout`/`error` records seen (channel thread); the main loop paces the sequence on them. */
+    // The first apply is sent from the channel thread (on CHANNEL_EVENT_CONNECTED),
+    // the later ones from the main loop, which also reads these to pace them:
+    // atomics for visibility (the two never send concurrently, the main loop
+    // only sends after the first was answered).
+    std::atomic<int> nextApply = 0;
+    /** Answers (`layout`/`error`) to OUR applies seen so far (channel thread); never more than nextApply. */
     std::atomic<int> appliesAnswered = 0;
     bool gfx = false;
     bool pong = true;
@@ -109,9 +113,9 @@ struct Probe {
     bool channelOpen = false;
     KRdp::LayoutControl::Deframer deframer;
 
-    bool sentRequest = false;
-    bool gotLayout = false;
-    bool failed = false;
+    std::atomic<bool> sentRequest = false;
+    std::atomic<bool> gotLayout = false;
+    std::atomic<bool> failed = false;
 };
 
 struct ProbeContext {
@@ -183,14 +187,15 @@ bool sendRecord(Probe *probe, const QJsonObject &record)
 /** The next `apply` of the sequence (the only one, for --apply). */
 void sendNextApply(Probe *probe)
 {
-    if (probe->nextApply >= probe->applyBodies.size()) {
+    const int index = probe->nextApply.load();
+    if (index >= probe->applyBodies.size()) {
         return;
     }
-    QJsonObject body = probe->applyBodies.at(probe->nextApply);
+    QJsonObject body = probe->applyBodies.at(index);
     body.insert(QStringLiteral("type"), QStringLiteral("apply"));
-    ++probe->nextApply;
+    probe->nextApply = index + 1;
     if (probe->applyBodies.size() > 1) {
-        logf("apply %d of %lld", probe->nextApply, static_cast<long long>(probe->applyBodies.size()));
+        logf("apply %d of %lld", index + 1, static_cast<long long>(probe->applyBodies.size()));
     }
     sendRecord(probe, body);
 }
@@ -230,11 +235,16 @@ VOID VCAPITYPE openEvent(LPVOID userParam, DWORD openHandle, UINT event, LPVOID 
         while (auto record = probe->deframer.next()) {
             printRecord(*record);
             const QString type = record->value(QLatin1String("type")).toString();
-            if (type == QLatin1String("layout")) {
-                probe->gotLayout = true;
-                ++probe->appliesAnswered;
-            } else if (type == QLatin1String("error")) {
-                ++probe->appliesAnswered;
+            if (type == QLatin1String("layout") || type == QLatin1String("error")) {
+                if (type == QLatin1String("layout")) {
+                    probe->gotLayout = true;
+                }
+                // Only an answer to one of our applies paces the sequence: a
+                // `layout` pushed for another reason (an owner change, a
+                // viewer re-description) arrives with none outstanding.
+                if (probe->appliesAnswered.load() < probe->nextApply.load()) {
+                    ++probe->appliesAnswered;
+                }
             } else if (type == QLatin1String("ping")) {
                 // The owner's heartbeat (design §3). Answered from the
                 // channel thread: VirtualChannelWriteEx only queues.
@@ -640,7 +650,7 @@ int main(int argc, char **argv)
     QDeadlineTimer replyCap(QDeadlineTimer::Forever);
     HANDLE handles[MAXIMUM_WAIT_OBJECTS] = {};
     while (!g_interrupted && !done(&probe)) {
-        if (probe.mode == Mode::Apply && probe.nextApply < probe.applyBodies.size() && probe.sentRequest) {
+        if (probe.mode == Mode::Apply && probe.nextApply.load() < probe.applyBodies.size() && probe.sentRequest.load()) {
             const int answered = probe.appliesAnswered.load();
             if (answered > answersPaced) {
                 answersPaced = answered;
@@ -651,7 +661,7 @@ int main(int argc, char **argv)
             }
             if (nextApplyAt.hasExpired() || replyCap.hasExpired()) {
                 if (replyCap.hasExpired()) {
-                    logf("apply %d unanswered after %lld s; sending the next one anyway", probe.nextApply, static_cast<long long>(ApplySequenceReplyCapMs / 1000));
+                    logf("apply %d unanswered after %lld s; sending the next one anyway", probe.nextApply.load(), static_cast<long long>(ApplySequenceReplyCapMs / 1000));
                 }
                 nextApplyAt = QDeadlineTimer(QDeadlineTimer::Forever);
                 replyCap = QDeadlineTimer(QDeadlineTimer::Forever);

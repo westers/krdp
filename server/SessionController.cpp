@@ -691,14 +691,32 @@ public:
         // while KWin has not placed (or has removed) that output.
         // A KRDPCTL layout client is watched the same way while its layout
         // keeps a real monitor dark (layoutTakeoverArmed; OPT-044 §4
-        // "Takeover at the desk"): each of its sessions captures one
-        // output, real or stand-in, and maps its samples through that
-        // output's own place.
-        if ((outputGuard || layoutTakeoverArmed) && !takeover.fired() && session->outputGeometryResolved()) {
+        // "Takeover at the desk") - except while an apply is in flight,
+        // when the arrangement warps the pointer and nothing may be judged.
+        // Its samples are mapped through the wrapper's OWN layout table
+        // (the same one onInputEvent() injects through), not the session's:
+        // a layout session is an output stream, which reads its place once
+        // at setup and never follows a move, whereas the table is refreshed
+        // by every build - a kept session whose output KWin moved would
+        // otherwise put every quiet sample a move's distance from the last
+        // injection (Task 4 review, Important 1).
+        if (outputGuard && !takeover.fired() && session->outputGeometryResolved()) {
             const QPoint global = session->mapToGlobal(cursor.position).toPoint();
             if (takeover.observed(global, m_clock.elapsed())) {
-                qInfo() << (outputGuard ? "Console activity detected; restoring the physical outputs (session continues in extend mode)"
-                                        : "Console activity detected; restoring the physical outputs (the KRDPCTL layout is released, its owner kept)");
+                qInfo() << "Console activity detected; restoring the physical outputs (session continues in extend mode)";
+                Q_EMIT consoleActivityDetected();
+            }
+        } else if (layoutTakeoverArmed && !layoutApplyInFlight && !takeover.fired()) {
+            const auto position = std::find_if(sessions.cbegin(), sessions.cend(), [session](const std::unique_ptr<KRdp::AbstractSession> &entry) {
+                return entry.get() == session;
+            });
+            const qsizetype index = position == sessions.cend() ? -1 : std::distance(sessions.cbegin(), position);
+            if (index < 0 || index >= layout.monitors.size()) {
+                return;
+            }
+            const QPoint global = KRdp::LayoutSessions::captureToGlobal(layout.monitors.at(index).geometry, layout.scales.value(index, layout.scale), cursor.position).toPoint();
+            if (takeover.observed(global, m_clock.elapsed())) {
+                qInfo() << "Console activity detected; restoring the physical outputs (the KRDPCTL layout is released, its owner kept)";
                 Q_EMIT consoleActivityDetected();
             }
         }
@@ -1001,6 +1019,12 @@ public:
      * session; see SessionController::armLayoutTakeover().
      */
     bool layoutTakeoverArmed = false;
+    /**
+     * An apply is being executed (any owner's): the arrangement it makes
+     * warps the pointer and the samples arrive queued behind it, so none is
+     * judged until the build that follows clears this (armLayoutTakeover()).
+     */
+    bool layoutApplyInFlight = false;
     QElapsedTimer m_clock;
     QPointer<KRdp::RdpConnection> connection;
     KStatusNotifierItem *m_sni;
@@ -2304,12 +2328,13 @@ void SessionController::onControlApply(SessionWrapper *wrapper, const QJsonObjec
 
     // Nothing may read as console activity while the outputs move: the
     // arrangement warps the pointer, and those samples arrive queued behind
-    // it. Every layout client's detector is latched now and re-armed by its
-    // build once the apply has landed (armLayoutTakeover()); a refusal
-    // below re-arms from the layout there is.
+    // it. Every layout client's detector sits the apply out from now until
+    // the build that follows it (armLayoutTakeover() clears the flag and
+    // drops the references a warp may have spoiled); a refusal below does
+    // the same at once.
     for (const auto &w : m_wrappers) {
         if (w && w->layoutClient) {
-            w->takeover.latch();
+            w->layoutApplyInFlight = true;
         }
     }
     // Set before execute(): finished() may fire from inside it.
@@ -2318,7 +2343,7 @@ void SessionController::onControlApply(SessionWrapper *wrapper, const QJsonObjec
         m_applying = nullptr;
         for (const auto &w : m_wrappers) {
             if (w && w->layoutClient) {
-                armLayoutTakeover(w.get(), current);
+                armLayoutTakeover(w.get(), current, false);
             }
         }
         // Ownership goes back to how it was: dropped if this apply took it,
@@ -2365,31 +2390,43 @@ void SessionController::onLayoutApplied(const HostLayoutExecutor::Result &result
     updateRestoreAction();
 }
 
-void SessionController::armLayoutTakeover(SessionWrapper *wrapper, const KRdp::LayoutControl::Layout &layout)
+void SessionController::armLayoutTakeover(SessionWrapper *wrapper, const KRdp::LayoutControl::Layout &layout, bool sessionsChanged)
 {
     // Armed exactly while the layout keeps a real monitor dark at the desk
     // (a stand-in or Private): that is when a real mouse moving means
     // someone at the desk wants their screens, as it does under a replace
     // session. With every real monitor lit there is nothing to take over
-    // and a real mouse is ordinary use. A fresh detector each time: its arm
-    // delay (KRdp::Takeover::ArmDelayMs) sits out the pointer warps the
-    // arrangement just made, and a takeover that fired earlier (latched)
-    // must be able to fire again after the owner's next apply darkens the
-    // desk again.
+    // and a real mouse is ordinary use.
     const bool deskDark = m_layoutExecutor.controlling() && std::any_of(layout.monitors.cbegin(), layout.monitors.cend(), [](const KRdp::LayoutControl::HostMonitor &monitor) {
         return monitor.kind == KRdp::LayoutControl::Kind::Real && !monitor.lit;
     });
-    wrapper->takeover = KRdp::Takeover::Detector{};
-    if (deskDark) {
-        wrapper->takeover.armed(wrapper->m_clock.elapsed());
-        if (!wrapper->layoutTakeoverArmed) {
-            qInfo().noquote() << u"KRDPCTL: %1: desk takeover armed (a real monitor is dark)"_s.arg(wrapper->controlId);
+    const bool applyEnded = wrapper->layoutApplyInFlight;
+    wrapper->layoutApplyInFlight = false;
+    if (sessionsChanged || deskDark != wrapper->layoutTakeoverArmed) {
+        // A fresh detector: its arm delay (KRdp::Takeover::ArmDelayMs) sits
+        // out the pointer warps the arrangement just made, its references
+        // were mapped through a table that no longer applies, and a
+        // takeover that fired earlier (latched) must be able to fire again
+        // once the owner's next apply darkens the desk again.
+        wrapper->takeover = KRdp::Takeover::Detector{};
+        if (deskDark) {
+            wrapper->takeover.armed(wrapper->m_clock.elapsed());
+        } else {
+            wrapper->takeover.latch();
         }
-    } else {
-        wrapper->takeover.latch();
-        if (wrapper->layoutTakeoverArmed) {
+        if (deskDark && !wrapper->layoutTakeoverArmed) {
+            qInfo().noquote() << u"KRDPCTL: %1: desk takeover armed (a real monitor is dark)"_s.arg(wrapper->controlId);
+        } else if (!deskDark && wrapper->layoutTakeoverArmed) {
             qInfo().noquote() << u"KRDPCTL: %1: desk takeover disarmed (every real monitor is lit)"_s.arg(wrapper->controlId);
         }
+    } else if (applyEnded) {
+        // Nothing changed for this connection, but an apply just moved
+        // other outputs and may have warped the pointer: the detector keeps
+        // its arm (no new arm delay) and drops the references it would
+        // otherwise judge the next sample against, sitting the churn out
+        // (review Minor 3: not a fresh detector on every build - a retry
+        // that changed nothing leaves it alone entirely).
+        wrapper->takeover.outputMoved(wrapper->m_clock.elapsed());
     }
     wrapper->layoutTakeoverArmed = deskDark;
 }
@@ -2409,7 +2446,6 @@ bool SessionController::buildLayoutSessions(SessionWrapper *wrapper, const KRdp:
         wrapper->layoutRetryTimer.stop();
         return false;
     }
-    armLayoutTakeover(wrapper, layout);
 
     const auto screens = QGuiApplication::screens();
     // The output that carries each monitor, by name, resolved once from the
@@ -2473,11 +2509,13 @@ bool SessionController::buildLayoutSessions(SessionWrapper *wrapper, const KRdp:
         // capture outputs of a layout that is gone (a release just removed
         // them); dropping them keeps their recovery from falling back to a
         // workspace capture under the client.
-        if (!wrapper->sessions.empty()) {
+        const bool dropped = !wrapper->sessions.empty();
+        if (dropped) {
             qInfo().noquote() << u"KRDPCTL: %1: dropping %2 session(s) of the previous layout"_s.arg(wrapper->controlId).arg(wrapper->sessions.size());
             wrapper->sessions.clear();
             wrapper->layout = {};
         }
+        armLayoutTakeover(wrapper, layout, dropped);
         return false;
     }
 
@@ -2528,6 +2566,7 @@ bool SessionController::buildLayoutSessions(SessionWrapper *wrapper, const KRdp:
         if (!retrying) {
             qInfo().noquote() << u"KRDPCTL: %1: layout unchanged for this connection; %2 session(s) kept"_s.arg(wrapper->controlId).arg(wrapper->sessions.size());
         }
+        armLayoutTakeover(wrapper, layout, false);
         return false;
     }
 
@@ -2566,6 +2605,25 @@ bool SessionController::buildLayoutSessions(SessionWrapper *wrapper, const KRdp:
     // The dropped sessions (still in wrapper->sessions, beside the moved-out
     // slots) go when setSessions() replaces the vector.
     wrapper->setSessions(std::move(sessions), monitorLayout);
+    armLayoutTakeover(wrapper, layout, true);
+    if (geometryChanged) {
+        // The reset that follows recreates every surface, and a kept
+        // session's next frame is a P-frame with no reference picture behind
+        // it. VideoStream asks for a keyframe when that frame lands, but its
+        // per-surface request limiter (2 s) survives the reset, so a second
+        // reset within that window would leave the surface undecodable
+        // until the encoder's next organic IDR - 600 frames away (Task 4
+        // review, Important 2). Ask now, once per kept session: the private
+        // KPipeWire re-feeds the last frame as an IDR at once, so it is the
+        // first frame on the new surface; stock KPipeWire restarts the
+        // encoded stream, which opens with one. A created session opens
+        // with its own IDR and needs nothing.
+        for (qsizetype i = 0; i < diff.source.size() && size_t(i) < wrapper->sessions.size(); ++i) {
+            if (diff.source.at(i) >= 0) {
+                wrapper->sessions[size_t(i)]->requestKeyFrame();
+            }
+        }
+    }
     // A ResetGraphics follows only when the RDP layout changed: same rects
     // over new sessions (a real monitor swapped for its native-size
     // stand-in) keep their surfaces, and the owed record need not wait.
