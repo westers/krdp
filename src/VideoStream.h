@@ -111,6 +111,15 @@ public:
     Q_SIGNAL void keyFrameRequested(int monitorIndex);
 
     /**
+     * A ResetGraphics (with its surfaces) has just gone out for \a monitors,
+     * in RDP desktop space. Emitted from the frame submission thread;
+     * connect with Qt::QueuedConnection. What a `KRDPCTL` `layout` record
+     * waits for, so the client never reads a layout the wire has not
+     * described yet (OPT-044).
+     */
+    Q_SIGNAL void graphicsReset(const QVector<KRdp::VideoMonitor> &monitors);
+
+    /**
      * Set the upper bound for the video quality.
      *
      * With adaptive quality enabled this is a cap on the value the stream

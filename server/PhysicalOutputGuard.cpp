@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QElapsedTimer>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QThread>
 #include <QTimer>
@@ -252,11 +253,18 @@ bool PhysicalOutputGuard::applyReplace(const QVector<Placement> &virtualOutputs,
 
 bool PhysicalOutputGuard::beginLayoutControl()
 {
-    if (m_held && hasSnapshot()) {
-        // Already ours (a second apply of the same layout session), or a
-        // legacy replace that holds: either way the snapshot on file is the
-        // layout to restore, and it is not retaken.
+    if (m_held && m_layoutControl && hasSnapshot()) {
+        // Already ours (a later apply of the same layout session): the
+        // snapshot on file is the layout to restore, and it is not retaken.
         return true;
+    }
+    if (m_held) {
+        // A configured virtual session's replace holds the outputs (or its
+        // restore is still unverified). Its teardown restores its snapshot
+        // and drops the state file; layout control must not build on top
+        // of that, and must not adopt a snapshot it did not take.
+        qWarning() << "Layout control refused: the physical outputs are held by a configured virtual-monitor session";
+        return false;
     }
     if (!available()) {
         qWarning() << "kscreen-doctor not found; layout control cannot change the physical outputs";
@@ -275,8 +283,47 @@ bool PhysicalOutputGuard::beginLayoutControl()
         return false;
     }
     m_held = true;
+    m_layoutControl = true;
     qInfo() << "Layout control: physical outputs held (snapshot on file)";
     return true;
+}
+
+bool PhysicalOutputGuard::layoutControlHeld() const
+{
+    return m_held && m_layoutControl;
+}
+
+bool PhysicalOutputGuard::waitForPhysicalPresent() const
+{
+    if (!hasSnapshot()) {
+        return false;
+    }
+    return waitForPhysical(m_physical, SettleGoal::Present);
+}
+
+QStringList PhysicalOutputGuard::dpmsOffOutputs() const
+{
+    QByteArray output;
+    if (!run({u"--dpms"_s, u"show"_s}, &output)) {
+        return {};
+    }
+    // One line per output: "dpms mode for screen DP-1: off".
+    static const QRegularExpression line(uR"(dpms mode for screen (\S+): (\S+))"_s);
+    QStringList off;
+    for (const auto &text : QString::fromUtf8(output).split(u'\n', Qt::SkipEmptyParts)) {
+        const auto match = line.match(text);
+        if (!match.hasMatch()) {
+            continue;
+        }
+        const QString name = match.captured(1);
+        const bool enabled = std::any_of(m_physical.cbegin(), m_physical.cend(), [&name](const Output &candidate) {
+            return candidate.name == name && candidate.enabled;
+        });
+        if (enabled && match.captured(2).compare(u"on"_s, Qt::CaseInsensitive) != 0) {
+            off.push_back(name);
+        }
+    }
+    return off;
 }
 
 bool PhysicalOutputGuard::applyArrangement(const QList<Arrangement> &entries)
@@ -627,6 +674,7 @@ bool PhysicalOutputGuard::restore()
     const auto outcome = restoreSnapshot(m_physical);
     if (outcome.verified) {
         m_held = false;
+        m_layoutControl = false;
         // A retry still pending from an earlier failure has nothing left to
         // do and must not fire restored() a second time.
         m_retryTimer.stop();

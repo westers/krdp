@@ -80,6 +80,11 @@ void DisplayWakeGuard::release()
     }
 }
 
+void DisplayWakeGuard::wakeNow()
+{
+    wakeDisplay();
+}
+
 void DisplayWakeGuard::wakeDisplay()
 {
     auto watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(powerManagementCall(u"wakeup"_s)), this);

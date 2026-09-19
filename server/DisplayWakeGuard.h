@@ -42,6 +42,15 @@ public:
      * Mark one session as no longer streaming. Releases on the 1 -> 0 edge.
      */
     void release();
+    /**
+     * Wake the display now, whatever setEnabled() says and without counting
+     * as a session: `KRDPCTL` layout control asks for this before it creates
+     * a virtual output, because an output created while a panel is in DPMS
+     * standby is created into KWin's remove-and-re-add churn (OPT-044;
+     * `WakeDisplayOnConnect` only governs configured-mode clients). The
+     * inhibition is not taken here; the sessions that follow take it.
+     */
+    void wakeNow();
 
 Q_SIGNALS:
     /**

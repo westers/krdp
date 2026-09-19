@@ -917,6 +917,7 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
                 // prepended frame with no wait.
                 return true;
             }
+            Q_EMIT graphicsReset(plan.monitors);
             target = d->surfaceFor(frame.monitorIndex);
             // A successful reset is a clean slate: let a later, different
             // misconfiguration be reported rather than staying silent for the

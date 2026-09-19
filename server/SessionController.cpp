@@ -76,6 +76,11 @@ constexpr int HeartbeatIntervalMs = 5000;
 // physical output is known to take, twice over.
 constexpr int LayoutBuildRetryMs = 1000;
 constexpr int LayoutBuildRetries = 12;
+// A `layout` record owed after a session build goes out once the
+// ResetGraphics describing that build has (VideoStream::graphicsReset), so
+// the client never reads a layout the wire has not described yet; a client
+// with no video stream (the probe without --gfx) gets it after this long.
+constexpr int LayoutRecordFallbackMs = 2000;
 
 QString layoutSummary(const QVector<KRdp::VideoMonitor> &monitors)
 {
@@ -114,6 +119,11 @@ public:
         connect(connection->videoStream(), &KRdp::VideoStream::requestedQualityChanged, this, &SessionWrapper::onRequestedQualityChanged, Qt::QueuedConnection);
 
         connect(connection, &QObject::destroyed, this, &SessionWrapper::onConnectionDestroyed);
+        // From the frame submission thread; see layoutRecordPending.
+        connect(connection->videoStream(), &KRdp::VideoStream::graphicsReset, this, &SessionWrapper::onGraphicsReset, Qt::QueuedConnection);
+        layoutRecordTimer.setSingleShot(true);
+        layoutRecordTimer.setInterval(LayoutRecordFallbackMs);
+        connect(&layoutRecordTimer, &QTimer::timeout, this, &SessionWrapper::onGraphicsReset);
 
         m_adoptTimer.setSingleShot(true);
         m_adoptTimer.setInterval(VirtualLayoutAdoptMs);
@@ -446,6 +456,12 @@ public:
         // have delivered before they existed. On a first build the stream is
         // not enabled yet and none of this runs.
         if (videoStream->enabled()) {
+            // The wake goes out before the stream (and, for a virtual
+            // session, its output) is requested: an output created while a
+            // panel is in DPMS standby is created into KWin's remove-and-
+            // re-add churn (OPT-041 finding F; the wake is asynchronous, so
+            // this only orders the requests, it does not wait).
+            holdDisplayWake(true);
             for (const auto &session : sessions) {
                 session->setVideoFrameRate(videoStream->requestedFrameRate());
                 if (m_requestedQuality.has_value()) {
@@ -453,7 +469,6 @@ public:
                 }
                 session->requestStreamingEnable(videoStream);
             }
-            holdDisplayWake(true);
         }
     }
 
@@ -528,6 +543,9 @@ public:
             monitor.primary = false;
             survivingLayout.monitors.push_back(monitor);
             survivingLayout.names.push_back(layout.names.value(old));
+            if (old < layout.scales.size()) {
+                survivingLayout.scales.push_back(layout.scales.at(old));
+            }
         }
         if (outcome.primary >= 0 && outcome.primary < survivingLayout.monitors.size()) {
             survivingLayout.monitors[outcome.primary].primary = true;
@@ -674,17 +692,18 @@ public:
     void onVideoStreamEnabledChanged()
     {
         if (connection->videoStream()->enabled()) {
-            for (const auto &session : sessions) {
-                session->requestStreamingEnable(connection->videoStream());
-            }
             // Only with something to keep awake: the stream is enabled as
             // soon as drdynvc is ready, whatever the KRDPCTL gate decided,
             // and a soft `query` from a client with the standard add-ins
             // must not switch the desk's monitors on (OPT-044). A build that
             // lands later takes the wake in setSessions(); the release below
-            // stays balanced through m_holdsDisplayWake.
+            // stays balanced through m_holdsDisplayWake. Before the stream
+            // requests, for the same reason as in setSessions().
             if (!sessions.empty()) {
                 holdDisplayWake(true);
+            }
+            for (const auto &session : sessions) {
+                session->requestStreamingEnable(connection->videoStream());
             }
         } else {
             for (const auto &session : sessions) {
@@ -852,6 +871,27 @@ public:
         return origin + (pixel - origin) / scale;
     }
 
+    /**
+     * The surfaces for the current layout have gone out (or the fallback
+     * fired): the owed `layout` record may follow. See layoutRecordPending.
+     */
+    void onGraphicsReset()
+    {
+        if (!layoutRecordPending) {
+            return;
+        }
+        layoutRecordPending = false;
+        layoutRecordTimer.stop();
+        Q_EMIT layoutRecordDue(this);
+    }
+
+    /** Owe a `layout` record to this client, to be sent after the next ResetGraphics (or the fallback). */
+    void scheduleLayoutRecord()
+    {
+        layoutRecordPending = true;
+        layoutRecordTimer.start();
+    }
+
     void onConnectionDestroyed()
     {
         Q_EMIT connectionDestroyed(this);
@@ -863,6 +903,8 @@ public:
     Q_SIGNAL void consoleActivityDetected();
     /** ownsPhysicalLayout flipped; the controller's "Restore my monitors" action follows it. */
     Q_SIGNAL void physicalLayoutOwnershipChanged();
+    /** The `layout` record scheduleLayoutRecord() owed may go out now (KRDPCTL, OPT-044). */
+    Q_SIGNAL void layoutRecordDue(SessionWrapper *wrapper);
 
     // One entry in every mode but MonitorMode=multi, where there is one per
     // monitor and the index into this vector is the RDPGFX surface index.
@@ -913,6 +955,14 @@ public:
     /** See SessionController::buildLayoutSessions(): the rebuild for outputs that were not screens yet. */
     QTimer layoutRetryTimer;
     int layoutRetriesLeft = 0;
+    /**
+     * A `layout` record is owed and goes out with the next ResetGraphics
+     * (VideoStream::setMonitorLayout() only arms the reset; the wire sees it
+     * with the next frame), or after LayoutRecordFallbackMs for a client
+     * that has no video stream. Set by scheduleLayoutRecord().
+     */
+    bool layoutRecordPending = false;
+    QTimer layoutRecordTimer;
     QElapsedTimer m_clock;
     QPointer<KRdp::RdpConnection> connection;
     KStatusNotifierItem *m_sni;
@@ -929,9 +979,20 @@ public:
 SessionController::SessionController(KRdp::Server *server, SessionType sessionType)
     : m_server(server)
     , m_sessionType(sessionType)
-    , m_layoutExecutor(&m_outputGuard, [this]() {
-        return makeSession();
-    })
+    , m_layoutExecutor(
+          &m_outputGuard,
+          [this]() -> std::unique_ptr<KRdp::AbstractSession> {
+              // Only the Plasma screencast session can ask KWin for a virtual
+              // output; a portal creator would report itself resolved with
+              // no output behind it (review Minor 10).
+              if (m_sessionType != SessionType::Plasma) {
+                  return nullptr;
+              }
+              return makeSession();
+          },
+          [this]() {
+              m_displayWakeGuard.wakeNow();
+          })
 {
     connect(m_server, &KRdp::Server::newConnectionCreated, this, &SessionController::onNewConnection);
     connect(&m_layoutExecutor, &HostLayoutExecutor::finished, this, &SessionController::onLayoutApplied);
@@ -1943,6 +2004,7 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
             buildLayoutSessions(wrapper, m_layoutExecutor.current(), true);
         }
     });
+    connect(wrapper.get(), &SessionWrapper::layoutRecordDue, this, &SessionController::sendLayoutNow);
     if (m_quality.has_value()) {
         newConnection->videoStream()->setQualityCap(quint8(m_quality.value()));
     }
@@ -2093,9 +2155,20 @@ void SessionController::buildConfiguredSessions(SessionWrapper *wrapper)
         // waiting to be destroyed, or a client reconnecting right after a
         // drop would be refused. The peer is running by now (this follows
         // the capabilities exchange), so close() is immediate.
-        const bool busy = std::any_of(m_wrappers.cbegin(), m_wrappers.cend(), [wrapper](const std::unique_ptr<SessionWrapper> &w) {
-            return w && w.get() != wrapper && w->connection && !w->sessions.empty() && w->connection->state() != KRdp::RdpConnection::State::Closed;
-        });
+        // Known window (accepted): two channel-less clients whose capability
+        // exchanges overlap both pass here (neither has sessions yet); the
+        // second's snapshot() is then refused and it runs as extend - two
+        // virtual desktops, no dark desk. The accept-time check this
+        // replaced allowed one, but could not tell a `query` from a client.
+        // A KRDPCTL layout in force (or in flight, or merely owned) counts
+        // as busy too: the guard cannot serve both (Task 3 review, Important 3).
+        const bool busy = std::any_of(m_wrappers.cbegin(),
+                                      m_wrappers.cend(),
+                                      [wrapper](const std::unique_ptr<SessionWrapper> &w) {
+                                          return w && w.get() != wrapper && w->connection && !w->sessions.empty()
+                                              && w->connection->state() != KRdp::RdpConnection::State::Closed;
+                                      })
+            || m_layoutExecutor.controlling() || m_layoutExecutor.busy() || m_layoutOwner.hasOwner();
         if (busy) {
             qWarning() << "MonitorMode=virtual serves one connection at a time; refusing a second client";
             wrapper->connection->close(KRdp::RdpConnection::CloseReason::None);
@@ -2136,6 +2209,16 @@ void SessionController::onControlApply(SessionWrapper *wrapper, const QJsonObjec
         refuse(*notOwner, u"not-owner"_s);
         return;
     }
+    // A configured `virtual` client (replace or extend) and layout control
+    // share one guard; its teardown would restore its own snapshot under
+    // the layout owner (Task 3 review, Important 3).
+    const bool legacyVirtualHolds = std::any_of(m_wrappers.cbegin(), m_wrappers.cend(), [](const std::unique_ptr<SessionWrapper> &w) {
+        return w && w->outputGuard && w->connection && w->connection->state() != KRdp::RdpConnection::State::Closed;
+    });
+    if (legacyVirtualHolds) {
+        refuse({u"invalid"_s, u"a configured virtual-monitor client holds the physical outputs"_s}, u"invalid: configured virtual-monitor client active"_s);
+        return;
+    }
     if (m_layoutExecutor.busy()) {
         refuse({u"invalid"_s, u"another apply is still being applied; try again"_s}, u"invalid: apply in progress"_s);
         return;
@@ -2174,6 +2257,10 @@ void SessionController::onControlApply(SessionWrapper *wrapper, const QJsonObjec
             m_layoutOwner.release(id);
             if (tookOver) {
                 m_layoutOwner.tryAcquire(previousOwner, true);
+            }
+            if (wrapper->layoutClient) {
+                // Still streaming the layout there is: a viewer, not nobody.
+                m_layoutOwner.addViewer(id);
             }
         }
         refuse(*error, u"refused by the executor: %1"_s.arg(error->message));
@@ -2223,15 +2310,18 @@ void SessionController::buildLayoutSessions(SessionWrapper *wrapper, const KRdp:
     }
 
     const auto screens = QGuiApplication::screens();
+    // The output that carries each monitor, by name, resolved once from the
+    // executor's table (no process run): a QScreen index is only valid for
+    // as long as the list holds still, and the session remembers the name
+    // for its own recovery.
+    const QStringList outputNames = m_layoutExecutor.outputNamesFor(layout);
     std::vector<std::unique_ptr<KRdp::AbstractSession>> sessions;
     MonitorLayout monitorLayout;
     monitorLayout.scale = 1.0;
     QStringList missing;
-    for (const auto &monitor : layout.monitors) {
-        // The output that carries the monitor, by name: a QScreen index is
-        // only valid for as long as the list holds still, and the session
-        // remembers the name for its own recovery.
-        const QString outputName = m_layoutExecutor.outputNameFor(monitor.id);
+    for (qsizetype m = 0; m < layout.monitors.size(); ++m) {
+        const auto &monitor = layout.monitors.at(m);
+        const QString outputName = outputNames.value(m);
         int index = -1;
         for (qsizetype i = 0; i < screens.size(); ++i) {
             if (screens.at(i) && screens.at(i)->name() == outputName) {
@@ -2340,6 +2430,9 @@ void SessionController::describeLayoutClients(SessionWrapper *except)
             || wrapper->connection->state() == KRdp::RdpConnection::State::Closed) {
             continue;
         }
+        // Every layout client that is not the owner is a viewer (a no-op for
+        // the owner and for a registered viewer).
+        m_layoutOwner.addViewer(wrapper->controlId);
         buildLayoutSessions(wrapper.get(), layout);
         sendLayout(wrapper.get());
     }
@@ -2356,6 +2449,16 @@ KRdp::LayoutControl::Layout SessionController::layoutFor(const SessionWrapper *w
 void SessionController::sendLayout(SessionWrapper *wrapper)
 {
     if (!wrapper || !wrapper->connection) {
+        return;
+    }
+    // After the surfaces that describe the build have gone out (or the
+    // fallback): the record's content is read then, so it is always current.
+    wrapper->scheduleLayoutRecord();
+}
+
+void SessionController::sendLayoutNow(SessionWrapper *wrapper)
+{
+    if (!wrapper || !wrapper->connection || wrapper->connection->state() == KRdp::RdpConnection::State::Closed) {
         return;
     }
     wrapper->connection->sendControlRecord(KRdp::LayoutControl::layoutRecord(layoutFor(wrapper)));
@@ -2383,6 +2486,11 @@ void SessionController::finishLayoutRelease(const QString &id, const QString &re
     m_heartbeatTimer.stop();
     m_pongPending = false;
     qInfo().noquote() << u"layout released by %1 (%2): restoring the desk"_s.arg(id, reason);
+    if (auto *former = wrapperFor(id); former && former->layoutClient) {
+        // A former owner that is still connected (heartbeat loss) keeps
+        // streaming the restored layout: a viewer, not nobody.
+        m_layoutOwner.addViewer(id);
+    }
     m_layoutExecutor.releaseAll();
     // Whoever is left on the channel now looks at the restored layout, with
     // no owner.

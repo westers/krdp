@@ -19,6 +19,7 @@
 
 #include <AbstractSession.h>
 
+#include "LayoutArrangement.h"
 #include "LayoutControl.h"
 #include "OutputSnapshot.h"
 #include "PhysicalOutputGuard.h"
@@ -39,34 +40,27 @@
  * any connection - owner or viewer - streams it as an ordinary output by
  * name. The physical outputs are changed through PhysicalOutputGuard, whose
  * snapshot (taken before the first virtual output is created) is what
- * releaseAll() restores.
+ * releaseAll() restores. What to create, remove and where everything goes
+ * is LayoutArrangement::derive(), pure and tested; this class does the
+ * waiting and the talking to KWin.
  *
  * execute() is asynchronous: KWin creates a virtual output some time after
  * it is requested, and the Wayland events that make it a QScreen need the
- * event loop. The one blocking part is the guard's kscreen-doctor call and
- * its settle, as everywhere else. finished() carries the layout as KWin
- * reports it afterwards.
+ * event loop. Before the first output of an apply is requested the displays
+ * are woken (through the wake hook) and the physical outputs waited for, so
+ * no output is ever created into the remove-and-re-add churn a panel coming
+ * out of standby causes. The blocking parts are the guard's kscreen-doctor
+ * calls and their settles, as everywhere else. finished() carries the
+ * layout as KWin reports it afterwards.
  */
 class HostLayoutExecutor : public QObject
 {
     Q_OBJECT
 public:
     using SessionFactory = std::function<std::unique_ptr<KRdp::AbstractSession>()>;
-
-    /** One output the executor created and holds. */
-    struct VirtualOutput {
-        /** The HostMonitor it stands for: a real monitor's id for a stand-in, "virtual-<n>" otherwise. */
-        QString monitorId;
-        /** KWin's name for it, prefix included ("Virtual-krdp-si-DP-1-1920x1080-s100"). */
-        QString name;
-        /** The connection whose apply created it. */
-        QString owner;
-        QSize size;
-        qreal scale = 1.0;
-        /** Where the arrangement put it (KWin logical position). */
-        QPoint position;
-        bool standIn = false;
-    };
+    /** Asked to wake the displays (DPMS on) before an output is created; may be empty. */
+    using WakeHook = std::function<void()>;
+    using VirtualOutput = KRdp::LayoutArrangement::VirtualOutput;
 
     struct Result {
         QString requester;
@@ -79,7 +73,7 @@ public:
         std::optional<KRdp::LayoutControl::Error> error;
     };
 
-    HostLayoutExecutor(PhysicalOutputGuard *guard, SessionFactory sessionFactory, QObject *parent = nullptr);
+    HostLayoutExecutor(PhysicalOutputGuard *guard, SessionFactory sessionFactory, WakeHook wake, QObject *parent = nullptr);
     ~HostLayoutExecutor() override;
 
     /**
@@ -109,12 +103,12 @@ public:
     void releaseAll();
     QList<VirtualOutput> virtualOutputs() const;
     /**
-     * The KWin output a host monitor of the current layout is streamed
-     * from: the connector for a lit real monitor, its stand-in's name for a
-     * dark or stood-in one, the virtual output's name for a virtual monitor.
-     * Empty when \a monitorId is not in the layout.
+     * The KWin output each monitor of \a layout is streamed from, parallel
+     * to `layout.monitors` (see LayoutArrangement::outputNameFor()); an
+     * empty entry for a monitor whose output does not exist. No process is
+     * run: the table answers.
      */
-    QString outputNameFor(const QString &monitorId) const;
+    QStringList outputNamesFor(const KRdp::LayoutControl::Layout &layout) const;
 
 Q_SIGNALS:
     void finished(const HostLayoutExecutor::Result &result);
@@ -130,33 +124,32 @@ private:
     struct Pending {
         QString requester;
         KRdp::LayoutControl::Layout target;
-        QList<KRdp::OutputSnapshot::Arrangement> arrangement;
+        KRdp::LayoutArrangement::Derived derived;
         /** Outputs being created; moved into m_outputs once the arrangement is applied. */
         std::vector<Creator> creating;
-        /** Names of outputs to remove once the arrangement (which parks them) is applied. */
-        QStringList removing;
-        /** KWin output names the built sessions will need as QScreens. */
-        QStringList neededScreens;
         QStringList created;
         QStringList removed;
         /** False when the apply restates the layout as it is: no kscreen-doctor call, nothing created. */
         bool needsArrangement = false;
+        /** The creator sessions have been started (or there were none to start). */
+        bool creationStarted = false;
         bool arranged = false;
         /** An abort is queued; progress checks stand down. */
         bool abortScheduled = false;
+        QElapsedTimer wakeClock;
         QElapsedTimer screenClock;
         qint64 screensGoodSince = -1;
     };
 
-    static QString standInName(const QString &realId, const QSize &size, qreal scale);
-    static QString virtualName(const QString &virtualId, const QSize &size, qreal scale);
-    /** The stand-in size/scale a real monitor of \a monitor presents: its own when dark, the stand-in's when stood in. */
-    static QSize presentedSize(const KRdp::LayoutControl::HostMonitor &monitor);
-    static qreal presentedScale(const KRdp::LayoutControl::HostMonitor &monitor);
     /** Fresh read of KWin's real outputs as host monitors (the idle layout). */
     static QList<KRdp::LayoutControl::HostMonitor> readRealMonitors();
     /** Where virtual outputs go beside the physical desktop while the physical outputs are on. */
     QPoint extendAnchor() const;
+    /** Wake the displays if a physical output is off, wait for them, then startCreation(). */
+    void prepareCreation();
+    void onDpmsPoll();
+    /** Settle the physical outputs, then request every output of `creating`. */
+    void startCreation();
     /** Every created output has resolved (or one failed): run the arrangement. */
     void onCreatorProgress();
     /** Queue onCreatorProgress() / abortPending() for the event loop, never from inside a session's signal. */
@@ -172,9 +165,11 @@ private:
 
     PhysicalOutputGuard *m_guard;
     SessionFactory m_sessionFactory;
+    WakeHook m_wake;
     std::vector<Creator> m_outputs;
     /** The layout as last applied; meaningful while controlling(). */
     KRdp::LayoutControl::Layout m_layout;
     std::optional<Pending> m_pending;
+    QTimer m_dpmsTimer;
     QTimer m_screenTimer;
 };

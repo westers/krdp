@@ -5,6 +5,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 #include <QVector>
 
@@ -87,6 +88,24 @@ public:
      * enabled to snapshot.
      */
     bool beginLayoutControl();
+    /** Whether the current hold is layout control's (beginLayoutControl()), as opposed to a configured `virtual` session's replace. */
+    bool layoutControlHeld() const;
+    /**
+     * Layout control, before it asks KWin for a virtual output: wait for
+     * every snapshotted physical output to be present and to stay present
+     * for the stability window (the same settle applyReplace() runs before
+     * its disable). With the panels just woken from DPMS standby this is
+     * what waits KWin's remove-and-re-add of the physical outputs out, so
+     * the new output is not created into that churn (OPT-041 finding F; the
+     * 2026-09-19 plasmashell stall). Blocks; false on timeout.
+     */
+    bool waitForPhysicalPresent() const;
+    /**
+     * The snapshotted, enabled physical outputs whose DPMS mode
+     * `kscreen-doctor --dpms show` does not report as "on" (off, standby,
+     * suspend). Empty when all are on, or when kscreen-doctor cannot say.
+     */
+    QStringList dpmsOffOutputs() const;
     /**
      * Layout control's one mutation per apply: put every named output into
      * \a entries in a single kscreen-doctor invocation (physical outputs
@@ -182,6 +201,10 @@ private:
 
     QVector<KRdp::OutputSnapshot::Output> m_physical;
     bool m_held = false;
+    // The hold is layout control's (beginLayoutControl()); cleared with
+    // m_held. A configured virtual session's replace never sets it, which is
+    // how the two are kept from adopting each other's snapshot.
+    bool m_layoutControl = false;
     // See setParkPlacements().
     QVector<KRdp::OutputSnapshot::Placement> m_parkPlacements;
     QString m_parkPrimary;

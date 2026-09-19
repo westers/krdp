@@ -5,10 +5,53 @@
 
 #include <QTest>
 
+#include "LayoutArrangement.h"
 #include "OutputSnapshot.h"
 
 using namespace KRdp::OutputSnapshot;
 using namespace KRdp::ClientDisplay;
+using namespace KRdp::LayoutArrangement;
+using KRdp::LayoutControl::HostMonitor;
+using KRdp::LayoutControl::Kind;
+using KRdp::LayoutControl::Layout;
+
+namespace
+{
+HostMonitor realMonitor(const QString &id, const QPoint &position, bool primary, bool lit = true)
+{
+    HostMonitor monitor;
+    monitor.id = id;
+    monitor.name = id;
+    monitor.kind = Kind::Real;
+    monitor.size = QSize(2560, 1440);
+    monitor.position = position;
+    monitor.scale = 1.0;
+    monitor.primary = primary;
+    monitor.lit = lit;
+    return monitor;
+}
+
+HostMonitor virtualMonitor(const QString &id, const QPoint &position, const QSize &size, qreal scale, const QString &owner)
+{
+    HostMonitor monitor;
+    monitor.id = id;
+    monitor.name = id;
+    monitor.kind = Kind::Virtual;
+    monitor.size = size;
+    monitor.position = position;
+    monitor.scale = scale;
+    monitor.owner = owner;
+    return monitor;
+}
+
+std::optional<Arrangement> entryNamed(const QList<Arrangement> &entries, const QString &name)
+{
+    const auto it = std::find_if(entries.cbegin(), entries.cend(), [&name](const Arrangement &entry) {
+        return entry.name == name;
+    });
+    return it == entries.cend() ? std::nullopt : std::optional(*it);
+}
+}
 
 namespace
 {
@@ -434,6 +477,123 @@ private Q_SLOTS:
         dark[0].enabled = false;
         dark[0].position = QPoint(999, 999);
         QVERIFY(arrangementMatches({{QStringLiteral("DP-1"), false, QPoint(0, 0)}}, dark));
+    }
+
+    // LayoutArrangement::derive(): the executor's pure half.
+    void deriveNames()
+    {
+        QCOMPARE(standInName(QStringLiteral("DP-1"), QSize(1920, 1080), 1.0), QStringLiteral("krdp-si-DP-1-1920x1080-s100"));
+        QCOMPARE(virtualName(QStringLiteral("virtual-1"), QSize(1920, 1080), 1.25), QStringLiteral("krdp-v1-1920x1080-s125"));
+        QVERIFY(!standInName(QStringLiteral("DP-1"), QSize(1920, 1080), 1.5).contains(u'.'));
+        QCOMPARE(logicalWidth(QSize(1920, 1080), 1.25), 1536);
+        QCOMPARE(logicalWidth(QSize(2560, 1440), 1.0), 2560);
+    }
+
+    void derivePrivateFromIdle()
+    {
+        Layout resulting;
+        resulting.monitors = {realMonitor(QStringLiteral("DP-1"), QPoint(0, 0), true, false), realMonitor(QStringLiteral("HDMI-A-1"), QPoint(2560, 0), false, false)};
+        const auto derived = derive(resulting, {}, QStringLiteral("c1"));
+        // Two native-size stand-ins, primary's first, then the two disables; nothing removed.
+        QCOMPARE(derived.wanted.size(), 2);
+        QCOMPARE(derived.creating, derived.wanted);
+        QCOMPARE(derived.wanted[0].name, QStringLiteral("Virtual-krdp-si-DP-1-2560x1440-s100"));
+        QCOMPARE(derived.wanted[0].position, QPoint(0, 0));
+        QVERIFY(!derived.wanted[0].standIn);
+        QCOMPARE(derived.wanted[0].owner, QStringLiteral("c1"));
+        QCOMPARE(derived.arrangement.size(), 4);
+        QCOMPARE(derived.arrangement[0], (Arrangement{QStringLiteral("Virtual-krdp-si-DP-1-2560x1440-s100"), true, QPoint(0, 0)}));
+        QCOMPARE(derived.arrangement[1], (Arrangement{QStringLiteral("Virtual-krdp-si-HDMI-A-1-2560x1440-s100"), true, QPoint(2560, 0)}));
+        QCOMPARE(derived.arrangement[2], (Arrangement{QStringLiteral("DP-1"), false, QPoint()}));
+        QCOMPARE(derived.arrangement[3], (Arrangement{QStringLiteral("HDMI-A-1"), false, QPoint()}));
+        QVERIFY(derived.removing.isEmpty());
+        QVERIFY(derived.physicalDisabled);
+        QCOMPARE(derived.neededScreens, (QStringList{QStringLiteral("Virtual-krdp-si-DP-1-2560x1440-s100"), QStringLiteral("Virtual-krdp-si-HDMI-A-1-2560x1440-s100")}));
+        QCOMPARE(derived.parkAnchor, QPoint(5120, 0));
+    }
+
+    void deriveParksARemovedStandInBeyondAnExtraThatStays()
+    {
+        // Review Important 2, example 1: a Fit stand-in on DP-1 plus virtual-1
+        // at (5120,0); the client un-Fits DP-1. The stand-in must be parked
+        // beyond virtual-1 (7040), not at the physical union's edge (5120)
+        // where virtual-1 sits.
+        const VirtualOutput standIn{QStringLiteral("DP-1"), QStringLiteral("Virtual-krdp-si-DP-1-1920x1080-s100"), QStringLiteral("c1"), QSize(1920, 1080), 1.0, QPoint(0, 0), true};
+        const VirtualOutput extra{QStringLiteral("virtual-1"), QStringLiteral("Virtual-krdp-v1-1920x1080-s100"), QStringLiteral("c1"), QSize(1920, 1080), 1.0, QPoint(5120, 0), false};
+        Layout resulting;
+        resulting.monitors = {realMonitor(QStringLiteral("DP-1"), QPoint(0, 0), true),
+                              realMonitor(QStringLiteral("HDMI-A-1"), QPoint(2560, 0), false),
+                              virtualMonitor(QStringLiteral("virtual-1"), QPoint(5120, 0), QSize(1920, 1080), 1.0, QStringLiteral("c1"))};
+        const auto derived = derive(resulting, {standIn, extra}, QStringLiteral("c1"));
+        QCOMPARE(derived.removing, QStringList{standIn.name});
+        QVERIFY(derived.creating.isEmpty());
+        QCOMPARE(derived.parkAnchor, QPoint(7040, 0));
+        const auto parked = entryNamed(derived.arrangement, standIn.name);
+        QVERIFY(parked.has_value());
+        QVERIFY(parked->enabled);
+        QCOMPARE(parked->position, QPoint(7040, 0));
+        // virtual-1 keeps its place, DP-1 comes back on at its own.
+        QCOMPARE(entryNamed(derived.arrangement, extra.name)->position, QPoint(5120, 0));
+        QCOMPARE(entryNamed(derived.arrangement, QStringLiteral("DP-1"))->enabled, true);
+        QCOMPARE(entryNamed(derived.arrangement, QStringLiteral("DP-1"))->position, QPoint(0, 0));
+        QVERIFY(!derived.physicalDisabled);
+        // The parked entry comes last, so it takes the lowest priority.
+        QCOMPARE(derived.arrangement.last().name, standIn.name);
+        // No two enabled entries share a position.
+        for (qsizetype i = 0; i < derived.arrangement.size(); ++i) {
+            for (qsizetype j = i + 1; j < derived.arrangement.size(); ++j) {
+                if (derived.arrangement[i].enabled && derived.arrangement[j].enabled) {
+                    QVERIFY(derived.arrangement[i].position != derived.arrangement[j].position);
+                }
+            }
+        }
+    }
+
+    void deriveParksTheSecondOfTwoExtrasBeyondTheFirst()
+    {
+        // Review Important 2, example 2: virtual-1 at (5120,0) and virtual-2 at
+        // (7040,0); the client keeps virtual-1 only. virtual-2 parks at 7040
+        // (right of virtual-1), never at 5120 on top of it.
+        const VirtualOutput first{QStringLiteral("virtual-1"), QStringLiteral("Virtual-krdp-v1-1920x1080-s100"), QStringLiteral("c1"), QSize(1920, 1080), 1.0, QPoint(5120, 0), false};
+        const VirtualOutput second{QStringLiteral("virtual-2"), QStringLiteral("Virtual-krdp-v2-1920x1080-s125"), QStringLiteral("c1"), QSize(1920, 1080), 1.25, QPoint(7040, 0), false};
+        Layout resulting;
+        resulting.monitors = {realMonitor(QStringLiteral("DP-1"), QPoint(0, 0), true),
+                              realMonitor(QStringLiteral("HDMI-A-1"), QPoint(2560, 0), false),
+                              virtualMonitor(QStringLiteral("virtual-1"), QPoint(5120, 0), QSize(1920, 1080), 1.0, QStringLiteral("c1"))};
+        const auto derived = derive(resulting, {first, second}, QStringLiteral("c1"));
+        QCOMPARE(derived.removing, QStringList{second.name});
+        QCOMPARE(derived.parkAnchor, QPoint(7040, 0));
+        QCOMPARE(entryNamed(derived.arrangement, second.name)->position, QPoint(7040, 0));
+        QCOMPARE(entryNamed(derived.arrangement, first.name)->position, QPoint(5120, 0));
+        // Two removals stack left to right by their logical width (1536 at 125 %).
+        const VirtualOutput third{QStringLiteral("virtual-3"), QStringLiteral("Virtual-krdp-v3-1920x1080-s100"), QStringLiteral("c1"), QSize(1920, 1080), 1.0, QPoint(8576, 0), false};
+        const auto both = derive(resulting, {first, second, third}, QStringLiteral("c1"));
+        QCOMPARE(both.removing, (QStringList{second.name, third.name}));
+        QCOMPARE(entryNamed(both.arrangement, second.name)->position, QPoint(7040, 0));
+        QCOMPARE(entryNamed(both.arrangement, third.name)->position, QPoint(7040 + 1536, 0));
+    }
+
+    void deriveKeepsExistingOutputsAndResolvesNames()
+    {
+        const VirtualOutput extra{QStringLiteral("virtual-1"), QStringLiteral("Virtual-krdp-v1-1920x1080-s125"), QStringLiteral("c1"), QSize(1920, 1080), 1.25, QPoint(5120, 0), false};
+        Layout resulting;
+        resulting.monitors = {realMonitor(QStringLiteral("DP-1"), QPoint(0, 0), true),
+                              realMonitor(QStringLiteral("HDMI-A-1"), QPoint(2560, 0), false),
+                              virtualMonitor(QStringLiteral("virtual-1"), QPoint(5120, 0), QSize(1920, 1080), 1.25, QStringLiteral("c1"))};
+        const auto derived = derive(resulting, {extra}, QStringLiteral("c1"));
+        QVERIFY(derived.creating.isEmpty());
+        QVERIFY(derived.removing.isEmpty());
+        QCOMPARE(derived.wanted, QList<VirtualOutput>{extra});
+        QCOMPARE(derived.parkAnchor, QPoint(5120 + 1536, 0));
+        QCOMPARE(outputNameFor(resulting, {extra}, QStringLiteral("DP-1")), QStringLiteral("DP-1"));
+        QCOMPARE(outputNameFor(resulting, {extra}, QStringLiteral("virtual-1")), extra.name);
+        QVERIFY(outputNameFor(resulting, {extra}, QStringLiteral("virtual-9")).isEmpty());
+        auto dark = resulting;
+        dark.monitors[0].lit = false;
+        // A dark real monitor without its stand-in in the table resolves to nothing (not streamable yet).
+        QVERIFY(outputNameFor(dark, {extra}, QStringLiteral("DP-1")).isEmpty());
+        const VirtualOutput standIn{QStringLiteral("DP-1"), QStringLiteral("Virtual-krdp-si-DP-1-2560x1440-s100"), QStringLiteral("c1"), QSize(2560, 1440), 1.0, QPoint(0, 0), false};
+        QCOMPARE(outputNameFor(dark, {extra, standIn}, QStringLiteral("DP-1")), standIn.name);
     }
 };
 

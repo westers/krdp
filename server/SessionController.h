@@ -281,7 +281,9 @@ private:
     void describeLayoutClients(SessionWrapper *except);
     /** The current layout from \a wrapper's point of view (owner and `you` filled in). */
     KRdp::LayoutControl::Layout layoutFor(const SessionWrapper *wrapper) const;
+    /** Owe \a wrapper a `layout` record: sent by sendLayoutNow() once its ResetGraphics is out (or after the fallback). */
     void sendLayout(SessionWrapper *wrapper);
+    void sendLayoutNow(SessionWrapper *wrapper);
     /** \a id (a layout client) is gone or forfeited the layout: release if it owned, then re-describe the rest. */
     void onLayoutClientGone(const QString &id, const QString &reason);
     /** The owner is released (by whoever decided it): restore the desk and re-describe the remaining layout clients. */
