@@ -118,16 +118,28 @@ public:
      */
     QStringList dpmsOffOutputs() const;
     /**
-     * Layout control's one mutation per apply: put every named output into
-     * \a entries in a single kscreen-doctor invocation (physical outputs
-     * enabled at their place or disabled; virtual outputs, which must
-     * already exist, at theirs; priorities 1..N in list order), verified by
-     * read-back with the same churn-aware settle a replace uses. A combined
-     * change kscreen refuses is re-issued once in two steps (disables first).
-     * Needs beginLayoutControl(); false when not verified, in which case
-     * the outputs may be in any state and release() restores.
+     * Layout control's mutation: put every named output into \a entries in
+     * a single kscreen-doctor invocation (physical outputs enabled at their
+     * place or disabled; virtual outputs, which must already exist, at
+     * theirs; priorities 1..N in list order), verified by read-back with the
+     * same churn-aware settle a replace uses. A combined change kscreen
+     * refuses is re-issued once in two steps (disables first). Once per
+     * apply, and again by the executor after it removes an output, when
+     * arrangementHolds() says KWin replaced the arrangement. Needs
+     * beginLayoutControl(); false when not verified, in which case the
+     * outputs may be in any state and release() restores.
      */
     bool applyArrangement(const QList<KRdp::OutputSnapshot::Arrangement> &entries);
+    /**
+     * Whether \a entries read back as arranged and stay so for the settle's
+     * stability window: the executor's drift check after it has removed an
+     * output (KWin re-queries its remembered configuration for the new
+     * output set right then and may replay one that lights the desk).
+     * Blocks for the window when the arrangement holds; false at the first
+     * read-back that does not match (or cannot be read), so a re-assert can
+     * follow at once. Runs no mutation.
+     */
+    bool arrangementHolds(const QList<KRdp::OutputSnapshot::Arrangement> &entries) const;
     /**
      * Where the virtual outputs belong while the physical ones are enabled
      * (beside them, at the extend anchor). Remembered so that restore()

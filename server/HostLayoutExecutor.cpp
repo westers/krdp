@@ -24,6 +24,15 @@ namespace
 // thread, so every 500 ms rather than 250 (re-review Minor 5).
 constexpr int DpmsPollMs = 500;
 constexpr int DpmsWakeTimeoutMs = 6000;
+// After the removed outputs' creator sessions are destroyed: how often to
+// look for them to be gone (QScreens first, no process; then one kscreen
+// read-back, so an output that never became a QScreen is waited for too),
+// and how long at most before the arrangement is checked regardless. KWin
+// applies its re-queried configuration before it withdraws the wl_output,
+// so once the output is gone the read-back shows what the removal did to
+// the rest (hardware finding, 2026-09-19 step 4: ~40 ms after the reset).
+constexpr int RemovalPollMs = 500;
+constexpr int RemovalTimeoutMs = 5000;
 // After the arrangement: how often QGuiApplication::screens() is polled for
 // the outputs the sessions will capture, how long they must all have been
 // there (a re-enabled physical output is removed and re-added by KWin a few
@@ -70,6 +79,8 @@ HostLayoutExecutor::HostLayoutExecutor(PhysicalOutputGuard *guard, SessionFactor
 {
     m_dpmsTimer.setInterval(DpmsPollMs);
     connect(&m_dpmsTimer, &QTimer::timeout, this, &HostLayoutExecutor::onDpmsPoll);
+    m_removalTimer.setInterval(RemovalPollMs);
+    connect(&m_removalTimer, &QTimer::timeout, this, &HostLayoutExecutor::onRemovalPoll);
     m_screenTimer.setInterval(ScreenPollMs);
     connect(&m_screenTimer, &QTimer::timeout, this, &HostLayoutExecutor::pollScreens);
 }
@@ -151,34 +162,11 @@ Layout HostLayoutExecutor::current() const
         layout.monitors = readRealMonitors();
         return layout;
     }
+    // The targets, not a read-back (see the header): a re-read here is what
+    // turned KWin's replay after a removal into `LightReal DP-1 at 5120,0`
+    // on 2026-09-19 (step 4). No process is run.
     layout.monitors = m_layout.monitors;
-    refreshPositions(layout);
     return layout;
-}
-
-void HostLayoutExecutor::refreshPositions(Layout &layout) const
-{
-    const auto outputs = PhysicalOutputGuard::readOutputs();
-    if (outputs.isEmpty()) {
-        return;
-    }
-    const auto names = outputNamesFor(layout);
-    for (qsizetype i = 0; i < layout.monitors.size(); ++i) {
-        // Where the output that carries the monitor really is: the connector
-        // for a lit real monitor, its stand-in for a dark one, the virtual
-        // output for a virtual monitor. A disabled output's position from
-        // kscreen is whatever it last was, so only an enabled one counts.
-        const QString &name = names.at(i);
-        if (name.isEmpty()) {
-            continue;
-        }
-        const auto it = std::find_if(outputs.cbegin(), outputs.cend(), [&name](const Output &output) {
-            return output.name == name;
-        });
-        if (it != outputs.cend() && it->enabled) {
-            layout.monitors[i].position = it->position;
-        }
-    }
 }
 
 QPoint HostLayoutExecutor::extendAnchor() const
@@ -209,10 +197,7 @@ std::optional<Error> HostLayoutExecutor::execute(const Plan &plan, const QString
     pending.requester = requester;
     pending.target = plan.resulting;
     pending.derived = derive(plan.resulting, virtualOutputs(), requester);
-    for (const auto &output : std::as_const(pending.derived.creating)) {
-        pending.creating.push_back(Creator{output, nullptr});
-    }
-    pending.needsArrangement = !plan.actions.isEmpty() || pending.derived.physicalDisabled || !pending.creating.empty() || !pending.derived.removing.isEmpty();
+    pending.needsArrangement = !plan.actions.isEmpty() || pending.derived.physicalDisabled || !pending.derived.creating.isEmpty() || !pending.derived.removing.isEmpty();
 
     if (pending.needsArrangement) {
         // Held before the first virtual output exists: what KWin does with
@@ -226,6 +211,19 @@ std::optional<Error> HostLayoutExecutor::execute(const Plan &plan, const QString
         if (!m_guard->beginLayoutControl()) {
             return Error{u"invalid"_s, u"the server cannot take control of the physical outputs right now (see its log)"_s};
         }
+        // The applied layout's real monitors are where the snapshot has
+        // them (a lit one is arranged to exactly there; a dark one's place
+        // is what its stand-in takes). A plan made from the idle read a
+        // moment before the snapshot agrees with it unless the desk was
+        // rearranged in between; a later plan is made from m_layout, which
+        // already carries these positions.
+        if (alignRealMonitorsToSnapshot(pending.target, m_guard->physicalOutputs())) {
+            qWarning() << "Layout control: the real monitors moved between the plan and the snapshot; planning against the snapshot positions";
+            pending.derived = derive(pending.target, virtualOutputs(), requester);
+        }
+    }
+    for (const auto &output : std::as_const(pending.derived.creating)) {
+        pending.creating.push_back(Creator{output, nullptr});
     }
 
     m_pending = std::move(pending);
@@ -386,6 +384,7 @@ void HostLayoutExecutor::onCreatorProgress()
             creator.session.reset();
         }
         m_pending->creating.clear();
+        m_layout = withReadBackPositions(m_layout, virtualOutputs(), PhysicalOutputGuard::readOutputs());
         finish(Error{u"invalid"_s, u"the compositor did not take the requested arrangement; the layout is as read back"_s});
         return;
     }
@@ -395,10 +394,9 @@ void HostLayoutExecutor::onCreatorProgress()
         m_outputs.push_back(std::move(creator));
     }
     m_pending->creating.clear();
-    m_pending->removed = m_pending->derived.removing;
-    destroyOutputs(m_pending->derived.removing);
 
-    // Positions of what remains, as arranged.
+    // Positions of what stays, as arranged (the targets: what current()
+    // answers from now on, whatever KWin does with the removal below).
     for (auto &creator : m_outputs) {
         const auto entry = std::find_if(arrangement.cbegin(), arrangement.cend(), [&creator](const Arrangement &arranged) {
             return arranged.name == creator.record.name;
@@ -409,6 +407,88 @@ void HostLayoutExecutor::onCreatorProgress()
     }
     m_layout = m_pending->target;
 
+    m_pending->removed = m_pending->derived.removing;
+    if (m_pending->removed.isEmpty()) {
+        startScreenWait();
+        return;
+    }
+    // The removed outputs were parked by the arrangement; now they go. Their
+    // going changes KWin's output set, and KWin answers a changed set with a
+    // configuration of its own (a stored one for exactly that set, or the
+    // closest stored subset - the lit desk - plus the rest appended), on top
+    // of the arrangement just applied. So the arrangement is checked again
+    // once they are gone, and re-asserted when it did not hold.
+    destroyOutputs(m_pending->removed);
+    awaitRemoval();
+}
+
+void HostLayoutExecutor::awaitRemoval()
+{
+    m_pending->removalClock.start();
+    m_removalTimer.start();
+    // The first look happens now only to be cheap when nothing is left to
+    // wait for; the destroy requests reach KWin from the event loop, and the
+    // kscreen read-back below is what says they did.
+    onRemovalPoll();
+}
+
+void HostLayoutExecutor::onRemovalPoll()
+{
+    if (!m_pending || !m_pending->arranged) {
+        m_removalTimer.stop();
+        return;
+    }
+    const QStringList &removed = m_pending->removed;
+    const bool timedOut = m_pending->removalClock.elapsed() >= RemovalTimeoutMs;
+    const bool anyScreen = std::any_of(removed.cbegin(), removed.cend(), &screenPresent);
+    if (anyScreen && !timedOut) {
+        return;
+    }
+    if (!timedOut) {
+        // No QScreen left: confirm with KWin itself before judging the
+        // arrangement, since that read-back is what the judgement is made
+        // from and the destroy may not have reached the compositor yet.
+        const auto now = PhysicalOutputGuard::readOutputs();
+        const bool anyOutput = std::any_of(removed.cbegin(), removed.cend(), [&now](const QString &name) {
+            return std::any_of(now.cbegin(), now.cend(), [&name](const Output &output) {
+                return output.name == name;
+            });
+        });
+        if (anyOutput) {
+            return;
+        }
+    }
+    m_removalTimer.stop();
+    if (timedOut) {
+        qWarning() << "Removed output(s)" << removed.join(u", "_s) << "still reported" << RemovalTimeoutMs << "ms after their removal was requested; checking the arrangement anyway";
+    }
+    reassertAfterRemoval();
+}
+
+void HostLayoutExecutor::reassertAfterRemoval()
+{
+    const int count = int(m_pending->removed.size());
+    const auto entries = arrangementWithout(m_pending->derived.arrangement, m_pending->removed);
+    if (m_guard->arrangementHolds(entries)) {
+        qInfo() << "Arrangement held after removing" << count << "output(s); no re-assert needed";
+        startScreenWait();
+        return;
+    }
+    qInfo() << "Re-asserting the arrangement after removing" << count << "output(s)";
+    if (!m_guard->applyArrangement(entries)) {
+        // The layout stays what KWin made of it: the record says so, the
+        // client re-maps, and the release restores the desk.
+        qWarning() << "Arrangement could not be re-asserted after removing" << count << "output(s); the layout is as read back";
+        m_layout = withReadBackPositions(m_layout, virtualOutputs(), PhysicalOutputGuard::readOutputs());
+        finish(Error{u"invalid"_s, u"the compositor did not keep the requested arrangement"_s});
+        return;
+    }
+    qInfo() << "Arrangement re-asserted after removing" << count << "output(s)";
+    startScreenWait();
+}
+
+void HostLayoutExecutor::startScreenWait()
+{
     m_pending->screenClock.start();
     m_pending->screensGoodSince = -1;
     m_screenTimer.start();
@@ -453,6 +533,7 @@ void HostLayoutExecutor::abortPending(const Error &error)
         return;
     }
     m_dpmsTimer.stop();
+    m_removalTimer.stop();
     m_screenTimer.stop();
     for (auto &creator : m_pending->creating) {
         creator.session.reset();

@@ -49,9 +49,16 @@
  * event loop. Before the first output of an apply is requested the displays
  * are woken (through the wake hook) and the physical outputs waited for, so
  * no output is ever created into the remove-and-re-add churn a panel coming
- * out of standby causes. The blocking parts are the guard's kscreen-doctor
- * calls and their settles, as everywhere else. finished() carries the
- * layout as KWin reports it afterwards.
+ * out of standby causes. An output the apply removes goes only after the
+ * arrangement, and its going is followed up: KWin re-queries its remembered
+ * configuration for the new output set the moment an output disappears and
+ * may replay one that lights the desk, so once the removed outputs are gone
+ * the arrangement is read back and re-asserted if it did not hold. The
+ * blocking parts are the guard's kscreen-doctor calls and their settles, as
+ * everywhere else. finished() carries the applied layout: real monitors at
+ * their snapshot positions, virtual outputs at their target positions;
+ * KWin's read-back positions only when the arrangement could not be
+ * verified.
  */
 class HostLayoutExecutor : public QObject
 {
@@ -64,7 +71,7 @@ public:
 
     struct Result {
         QString requester;
-        /** The host layout as KWin reports it after the apply; owner/you unset. */
+        /** The host layout after the apply (current()); owner/you unset. */
         KRdp::LayoutControl::Layout layout;
         /** KWin output names created and removed by this apply (Task 4 diffs on these). */
         QStringList created;
@@ -86,8 +93,15 @@ public:
 
     /**
      * The host layout right now, owner/you unset: a fresh read of KWin's
-     * outputs while nothing is controlled, the applied layout (positions
-     * re-read from KWin) while something is.
+     * outputs while nothing is controlled, the applied layout while
+     * something is. The applied layout's positions are the targets - a real
+     * monitor's is the guard's snapshot position, a virtual output's where
+     * the arrangement put it - never a fresh read: KWin's read-back is what
+     * the executor checks the arrangement against and re-asserts over, and a
+     * plan made from it after a replay would light a real monitor wherever
+     * KWin had parked its stand-in. Only an apply whose arrangement could
+     * not be verified leaves the read-back positions in the layout, for the
+     * record.
      */
     KRdp::LayoutControl::Layout current() const;
     /** Whether anything is held: the guard, or a virtual output. */
@@ -154,6 +168,8 @@ private:
         /** An abort is queued; progress checks stand down. */
         bool abortScheduled = false;
         QElapsedTimer wakeClock;
+        /** Since the removed outputs' creator sessions were destroyed (the wait for them to be gone). */
+        QElapsedTimer removalClock;
         QElapsedTimer screenClock;
         qint64 screensGoodSince = -1;
     };
@@ -173,10 +189,20 @@ private:
     void scheduleProgress();
     void scheduleAbort(const KRdp::LayoutControl::Error &error);
     void abortPending(const KRdp::LayoutControl::Error &error);
+    /**
+     * After the removed outputs' creator sessions are destroyed: wait, from
+     * the event loop (the destroy requests need it to reach KWin), until
+     * none of them is a QScreen or a kscreen output any more, then
+     * reassertAfterRemoval().
+     */
+    void awaitRemoval();
+    void onRemovalPoll();
+    /** Read the arrangement back now that the removed outputs are gone; apply it again when KWin replaced it. */
+    void reassertAfterRemoval();
+    /** Start polling for the outputs the sessions will need (the last step before finish()). */
+    void startScreenWait();
     /** Poll QGuiApplication::screens() for the outputs the sessions will need. */
     void pollScreens();
-    /** Patch \a layout's positions from a fresh read of KWin's outputs. */
-    void refreshPositions(KRdp::LayoutControl::Layout &layout) const;
     void finish(std::optional<KRdp::LayoutControl::Error> error);
     void destroyOutputs(const QStringList &names);
 
@@ -184,9 +210,13 @@ private:
     SessionFactory m_sessionFactory;
     WakeHook m_wake;
     std::vector<Creator> m_outputs;
-    /** The layout as last applied; meaningful while controlling(). */
+    /**
+     * The layout as last applied, positions as targeted (see current());
+     * meaningful while controlling().
+     */
     KRdp::LayoutControl::Layout m_layout;
     std::optional<Pending> m_pending;
     QTimer m_dpmsTimer;
+    QTimer m_removalTimer;
     QTimer m_screenTimer;
 };

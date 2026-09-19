@@ -595,6 +595,165 @@ private Q_SLOTS:
         const VirtualOutput standIn{QStringLiteral("DP-1"), QStringLiteral("Virtual-krdp-si-DP-1-2560x1440-s100"), QStringLiteral("c1"), QSize(2560, 1440), 1.0, QPoint(0, 0), false};
         QCOMPARE(outputNameFor(dark, {extra, standIn}, QStringLiteral("DP-1")), standIn.name);
     }
+
+    // The re-assert after a removal (hardware finding, 2026-09-19 step 4).
+    void reassertTargetAfterARemovalDetectsKWinsReplay()
+    {
+        // Step 4, apply 2: the desk is Private (native stand-ins on both
+        // monitors) and the client Fits DP-1 to 1920x1080. The arrangement
+        // parks the old DP-1 stand-in at 5120,0 and the executor removes it;
+        // KWin then re-queried its configuration for the four remaining
+        // outputs and lit the desk: DP-1 and HDMI-A-1 back on at 0,0 and
+        // 2560,0, the HDMI stand-in at 0,0, the new stand-in at 5120,0
+        // (kscreen poll, 11:30:33).
+        const Layout fitted = fittedPrivateLayout();
+        const auto derived = derive(fitted, {oldDp1StandIn(), hdmiStandIn()}, QStringLiteral("c1"));
+        QCOMPARE(derived.removing, QStringList{oldDp1StandIn().name});
+        QCOMPARE(derived.creating.size(), 1);
+        QCOMPARE(derived.creating.first().name, newDp1StandIn().name);
+        QCOMPARE(derived.arrangement.size(), 5);
+        QCOMPARE(entryNamed(derived.arrangement, oldDp1StandIn().name)->position, QPoint(5120, 0));
+
+        // What is re-asserted once the parked output is gone: the target
+        // without it, in the same order (priorities 1..N unchanged).
+        const auto target = arrangementWithout(derived.arrangement, derived.removing);
+        QCOMPARE(target.size(), 4);
+        QVERIFY(!entryNamed(target, oldDp1StandIn().name).has_value());
+        QCOMPARE(target[0], (Arrangement{newDp1StandIn().name, true, QPoint(0, 0)}));
+        QCOMPARE(target[1], (Arrangement{hdmiStandIn().name, true, QPoint(2560, 0)}));
+        QCOMPARE(target[2], (Arrangement{QStringLiteral("DP-1"), false, QPoint()}));
+        QCOMPARE(target[3], (Arrangement{QStringLiteral("HDMI-A-1"), false, QPoint()}));
+        // arrangementWithout() is by name only; nothing to remove is a copy.
+        QCOMPARE(arrangementWithout(derived.arrangement, {}), derived.arrangement);
+        QCOMPARE(arrangementWithout(derived.arrangement, {QStringLiteral("nothing-of-the-sort")}), derived.arrangement);
+
+        // KWin's replay: detected as not matching.
+        QVERIFY(!arrangementMatches(target, replayedReadBack()));
+        // Only the physical outputs back on: not matching.
+        QVector<Output> desertedDesk = heldReadBack();
+        desertedDesk[0].enabled = true;
+        desertedDesk[1].enabled = true;
+        QVERIFY(!arrangementMatches(target, desertedDesk));
+        // Only a stand-in moved: not matching.
+        QVector<Output> standInMoved = heldReadBack();
+        standInMoved[2].position = QPoint(5120, 0);
+        QVERIFY(!arrangementMatches(target, standInMoved));
+        // The target held (priorities renumbered by KWin are fine): matching,
+        // and only against the target - the full arrangement can never match
+        // again once the parked output has gone.
+        QVERIFY(arrangementMatches(target, heldReadBack()));
+        QVERIFY(!arrangementMatches(derived.arrangement, heldReadBack()));
+        QVERIFY(!arrangementPresent(derived.arrangement, heldReadBack()));
+        QVERIFY(arrangementPresent(target, heldReadBack()));
+    }
+
+    void appliedLayoutKeepsItsPositionsAndOnlyAFailedApplyReportsTheReadBack()
+    {
+        // The executor's current() is the applied layout as targeted: after
+        // the replay above, DP-1 (dark, stood in) is still at 0,0 in it and
+        // the next plan lights it there. Only an apply whose arrangement
+        // could not be verified reports where KWin really put things.
+        const Layout applied = fittedPrivateLayout();
+        const QList<VirtualOutput> table{newDp1StandIn(), hdmiStandIn()};
+        QCOMPARE(applied.monitors[0].position, QPoint(0, 0));
+        QCOMPARE(applied.monitors[1].position, QPoint(2560, 0));
+
+        const Layout reported = withReadBackPositions(applied, table, replayedReadBack());
+        // DP-1 is carried by its (new) stand-in, which the replay put at 5120,0.
+        QCOMPARE(reported.monitors[0].position, QPoint(5120, 0));
+        // HDMI-A-1 by its stand-in, replayed to 0,0.
+        QCOMPARE(reported.monitors[1].position, QPoint(0, 0));
+        // Everything but the positions is the applied layout.
+        Layout expected = applied;
+        expected.monitors[0].position = QPoint(5120, 0);
+        expected.monitors[1].position = QPoint(0, 0);
+        QCOMPARE(reported, expected);
+        // A read-back that holds the target changes nothing.
+        QCOMPARE(withReadBackPositions(applied, table, heldReadBack()), applied);
+
+        // A lit real monitor is carried by its connector; a disabled carrier
+        // (its position from kscreen is stale) and a monitor with no carrier
+        // in the table are left alone.
+        Layout lit;
+        lit.monitors = {realMonitor(QStringLiteral("DP-1"), QPoint(0, 0), true), realMonitor(QStringLiteral("HDMI-A-1"), QPoint(2560, 0), false, false)};
+        const QVector<Output> readBack{
+            Output{QStringLiteral("DP-1"), true, QPoint(100, 0), 1, QSize(2560, 1440), 1.0},
+            Output{QStringLiteral("HDMI-A-1"), false, QPoint(9999, 0), 0, QSize(2560, 1440), 1.0},
+        };
+        const Layout litReported = withReadBackPositions(lit, {}, readBack);
+        QCOMPARE(litReported.monitors[0].position, QPoint(100, 0));
+        QCOMPARE(litReported.monitors[1].position, QPoint(2560, 0));
+    }
+
+    void alignRealMonitorsToSnapshotMovesOnlyRealMonitors()
+    {
+        // A plan made from a read that disagrees with the guard's snapshot
+        // (the desk rearranged in between) is aligned to the snapshot before
+        // it is derived; virtual monitors keep their planned places.
+        const QVector<Output> snapshot{
+            Output{QStringLiteral("DP-1"), true, QPoint(0, 0), 1, QSize(2560, 1440), 1.0},
+            Output{QStringLiteral("HDMI-A-1"), true, QPoint(2560, 0), 2, QSize(2560, 1440), 1.0},
+        };
+        Layout layout;
+        layout.monitors = {realMonitor(QStringLiteral("DP-1"), QPoint(5120, 0), true),
+                           realMonitor(QStringLiteral("HDMI-A-1"), QPoint(2560, 0), false, false),
+                           virtualMonitor(QStringLiteral("virtual-1"), QPoint(7040, 0), QSize(1920, 1080), 1.0, QStringLiteral("c1"))};
+        QVERIFY(alignRealMonitorsToSnapshot(layout, snapshot));
+        QCOMPARE(layout.monitors[0].position, QPoint(0, 0));
+        QCOMPARE(layout.monitors[1].position, QPoint(2560, 0));
+        QCOMPARE(layout.monitors[2].position, QPoint(7040, 0));
+        // Idempotent, and a monitor the snapshot does not know is left alone.
+        QVERIFY(!alignRealMonitorsToSnapshot(layout, snapshot));
+        layout.monitors.push_back(realMonitor(QStringLiteral("DP-2"), QPoint(-1920, 0), false));
+        QVERIFY(!alignRealMonitorsToSnapshot(layout, snapshot));
+        QCOMPARE(layout.monitors[3].position, QPoint(-1920, 0));
+    }
+
+private:
+    // Step 4 of the 2026-09-19 hardware run, as data.
+    static VirtualOutput oldDp1StandIn()
+    {
+        return VirtualOutput{QStringLiteral("DP-1"), QStringLiteral("Virtual-krdp-si-DP-1-2560x1440-s100"), QStringLiteral("c1"), QSize(2560, 1440), 1.0, QPoint(0, 0), false};
+    }
+    static VirtualOutput newDp1StandIn()
+    {
+        return VirtualOutput{QStringLiteral("DP-1"), QStringLiteral("Virtual-krdp-si-DP-1-1920x1080-s100"), QStringLiteral("c1"), QSize(1920, 1080), 1.0, QPoint(0, 0), true};
+    }
+    static VirtualOutput hdmiStandIn()
+    {
+        return VirtualOutput{QStringLiteral("HDMI-A-1"), QStringLiteral("Virtual-krdp-si-HDMI-A-1-2560x1440-s100"), QStringLiteral("c1"), QSize(2560, 1440), 1.0, QPoint(2560, 0), false};
+    }
+    /** The layout apply 2 results in: DP-1 stood in at 1920x1080, HDMI-A-1 dark at its native size. */
+    static Layout fittedPrivateLayout()
+    {
+        HostMonitor dp1 = realMonitor(QStringLiteral("DP-1"), QPoint(0, 0), true, false);
+        dp1.standIn = true;
+        dp1.standInSize = QSize(1920, 1080);
+        dp1.standInScale = 1.0;
+        Layout layout;
+        layout.monitors = {dp1, realMonitor(QStringLiteral("HDMI-A-1"), QPoint(2560, 0), false, false)};
+        return layout;
+    }
+    /** kscreen poll 11:30:33: what KWin made of the four outputs left after the old stand-in went. */
+    static QVector<Output> replayedReadBack()
+    {
+        return {
+            Output{QStringLiteral("DP-1"), true, QPoint(0, 0), 2, QSize(2560, 1440), 1.0},
+            Output{QStringLiteral("HDMI-A-1"), true, QPoint(2560, 0), 3, QSize(2560, 1440), 1.0},
+            Output{hdmiStandIn().name, true, QPoint(0, 0), 1, QSize(2560, 1440), 1.0},
+            Output{newDp1StandIn().name, true, QPoint(5120, 0), 4, QSize(1920, 1080), 1.0},
+        };
+    }
+    /** The read-back the re-assert must produce (kscreen poll 11:30:30 minus the parked output). */
+    static QVector<Output> heldReadBack()
+    {
+        return {
+            Output{QStringLiteral("DP-1"), false, QPoint(0, 0), 3, QSize(2560, 1440), 1.0},
+            Output{QStringLiteral("HDMI-A-1"), false, QPoint(2560, 0), 4, QSize(2560, 1440), 1.0},
+            Output{newDp1StandIn().name, true, QPoint(0, 0), 1, QSize(1920, 1080), 1.0},
+            Output{hdmiStandIn().name, true, QPoint(2560, 0), 2, QSize(2560, 1440), 1.0},
+        };
+    }
 };
 
 QTEST_GUILESS_MAIN(OutputSnapshotTest)

@@ -415,6 +415,29 @@ bool PhysicalOutputGuard::applyArrangement(const QList<Arrangement> &entries)
     }
 }
 
+bool PhysicalOutputGuard::arrangementHolds(const QList<Arrangement> &entries) const
+{
+    if (entries.isEmpty()) {
+        return true;
+    }
+    // The same window applyArrangement() verifies over: a read-back that
+    // matches right after the removal is not the end of it when KWin is
+    // still removing and re-adding a physical output the replay lit.
+    QElapsedTimer timer;
+    timer.start();
+    for (;;) {
+        const auto now = current();
+        if (now.isEmpty() || !arrangementMatches(entries, now)) {
+            qInfo() << "Arrangement not held by the compositor:" << now;
+            return false;
+        }
+        if (timer.elapsed() >= SettleStableMs) {
+            return true;
+        }
+        QThread::msleep(SettlePollMs);
+    }
+}
+
 bool PhysicalOutputGuard::applyReplaceInTwoSteps(const QVector<Placement> &virtualOutputs, const QString &primaryVirtualName)
 {
     // kscreen may refuse the combined change (priorities colliding with

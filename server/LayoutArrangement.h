@@ -203,6 +203,28 @@ inline Derived derive(const LayoutControl::Layout &resulting, const QList<Virtua
 }
 
 /**
+ * \a arrangement without the entries named in \a removed: the target the
+ * executor re-asserts once the removed outputs are gone. KWin re-queries its
+ * remembered configuration for the new output set the moment an output
+ * disappears (an exact match is replayed, otherwise the closest stored
+ * subset - the lit desk, at the least - is applied and the rest appended),
+ * so what the first call arranged does not survive the removal on its own
+ * (hardware finding, 2026-09-19 step 4). The parked entries no longer exist
+ * and must not be asked for again.
+ */
+inline QList<OutputSnapshot::Arrangement> arrangementWithout(const QList<OutputSnapshot::Arrangement> &arrangement, const QStringList &removed)
+{
+    QList<OutputSnapshot::Arrangement> kept;
+    kept.reserve(arrangement.size());
+    for (const auto &entry : arrangement) {
+        if (!removed.contains(entry.name)) {
+            kept.push_back(entry);
+        }
+    }
+    return kept;
+}
+
+/**
  * The KWin output that carries \a monitorId in \a layout: the connector for
  * a lit real monitor, its stand-in's name for a dark or stood-in one, the
  * virtual output's name for a virtual monitor. Empty when unknown, or when
@@ -223,6 +245,58 @@ inline QString outputNameFor(const LayoutControl::Layout &layout, const QList<Vi
         return candidate.monitorId == monitorId;
     });
     return output == outputs.cend() ? QString() : output->name;
+}
+
+/**
+ * Put every real monitor of \a layout at the position the guard's
+ * \a snapshot has for its connector. The applied layout's real monitors
+ * live at their snapshot positions - the planner never moves a real
+ * monitor, and a lit one is arranged back to exactly there - so a plan
+ * made from a read that predates the snapshot is aligned to it before it
+ * is derived. Virtual monitors are left alone. True when anything moved.
+ */
+inline bool alignRealMonitorsToSnapshot(LayoutControl::Layout &layout, const QVector<OutputSnapshot::Output> &snapshot)
+{
+    bool moved = false;
+    for (auto &monitor : layout.monitors) {
+        if (monitor.kind != LayoutControl::Kind::Real) {
+            continue;
+        }
+        const auto it = std::find_if(snapshot.cbegin(), snapshot.cend(), [&monitor](const OutputSnapshot::Output &output) {
+            return output.name == monitor.id;
+        });
+        if (it != snapshot.cend() && it->position != monitor.position) {
+            monitor.position = it->position;
+            moved = true;
+        }
+    }
+    return moved;
+}
+
+/**
+ * \a layout with each monitor at the position the output that carries it
+ * (outputNameFor()) really has in \a readBack, for the enabled ones (a
+ * disabled output's position from kscreen is whatever it last was). Only
+ * for the record of an apply whose arrangement could not be verified: while
+ * the arrangement holds, a real monitor's position is its snapshot
+ * position and a virtual output's its target, never KWin's read-back.
+ */
+inline LayoutControl::Layout withReadBackPositions(const LayoutControl::Layout &layout, const QList<VirtualOutput> &outputs, const QVector<OutputSnapshot::Output> &readBack)
+{
+    LayoutControl::Layout reported = layout;
+    for (auto &monitor : reported.monitors) {
+        const QString name = outputNameFor(layout, outputs, monitor.id);
+        if (name.isEmpty()) {
+            continue;
+        }
+        const auto it = std::find_if(readBack.cbegin(), readBack.cend(), [&name](const OutputSnapshot::Output &output) {
+            return output.name == name;
+        });
+        if (it != readBack.cend() && it->enabled) {
+            monitor.position = it->position;
+        }
+    }
+    return reported;
 }
 }
 }

@@ -764,6 +764,55 @@ private Q_SLOTS:
         QVERIFY(std::holds_alternative<Error>(result));
         QCOMPARE(std::get<Error>(result).code, QStringLiteral("invalid"));
     }
+
+    void unFitLightsTheRealMonitorAtItsAppliedPosition() // hardware finding 2026-09-19, step 4
+    {
+        // The executor plans every apply from its applied layout, whose real
+        // monitors sit at their snapshot positions whatever KWin's read-back
+        // says: after a Fit of DP-1 (Private desk, DP-1 stood in at
+        // 1920x1080, HDMI-A-1 dark) the un-Fit must light DP-1 at 0,0.
+        auto applied = hal9000Layout();
+        applied.monitors[0].lit = false;
+        applied.monitors[0].standIn = true;
+        applied.monitors[0].standInSize = QSize(1920, 1080);
+        applied.monitors[0].standInScale = 1.0;
+        applied.monitors[1].lit = false;
+
+        ApplyRequest unFit;
+        unFit.monitors = {existingMonitorEntry(QStringLiteral("DP-1"), true)};
+        const auto result = plan(applied, unFit, QStringLiteral("c1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(result));
+        const auto &p = std::get<Plan>(result);
+        QCOMPARE(p.actions.size(), 2);
+        QCOMPARE(p.actions[0].kind, ActionKind::RemoveStandIn);
+        QCOMPARE(p.actions[0].id, QStringLiteral("DP-1"));
+        QCOMPARE(p.actions[0].position, QPoint(0, 0));
+        QCOMPARE(p.actions[1].kind, ActionKind::LightReal);
+        QCOMPARE(p.actions[1].id, QStringLiteral("DP-1"));
+        QCOMPARE(p.actions[1].position, QPoint(0, 0));
+        const auto *dp1 = findMonitor(p.resulting.monitors, QStringLiteral("DP-1"));
+        QVERIFY(dp1);
+        QVERIFY(dp1->lit);
+        QVERIFY(!dp1->standIn);
+        QCOMPARE(dp1->position, QPoint(0, 0));
+        // HDMI-A-1 was not mentioned: still dark at its own place.
+        const auto *hdmi = findMonitor(p.resulting.monitors, QStringLiteral("HDMI-A-1"));
+        QVERIFY(hdmi);
+        QVERIFY(!hdmi->lit);
+        QCOMPARE(hdmi->position, QPoint(2560, 0));
+
+        // The planner takes a real monitor's position from the layout it is
+        // given and nothing else, which is why that layout must never be
+        // KWin's read-back: after KWin replayed its own arrangement on the
+        // old stand-in's removal, a read-back had DP-1's stand-in at
+        // 5120,0, and the plan made from it said `LightReal DP-1 at 5120,0`
+        // (step 4, apply 3).
+        auto drifted = applied;
+        drifted.monitors[0].position = QPoint(5120, 0);
+        const auto fromReadBack = plan(drifted, unFit, QStringLiteral("c1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(fromReadBack));
+        QCOMPARE(std::get<Plan>(fromReadBack).actions[1].position, QPoint(5120, 0));
+    }
 };
 
 QTEST_GUILESS_MAIN(LayoutControlTest)
