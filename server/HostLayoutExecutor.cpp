@@ -154,7 +154,7 @@ QStringList HostLayoutExecutor::outputNamesFor(const Layout &layout) const
     return names;
 }
 
-Layout HostLayoutExecutor::current() const
+Layout HostLayoutExecutor::target() const
 {
     Layout layout;
     layout.you = u"none"_s;
@@ -166,6 +166,19 @@ Layout HostLayoutExecutor::current() const
     // turned KWin's replay after a removal into `LightReal DP-1 at 5120,0`
     // on 2026-09-19 (step 4). No process is run.
     layout.monitors = m_layout.monitors;
+    return layout;
+}
+
+Layout HostLayoutExecutor::current() const
+{
+    Layout layout = target();
+    if (m_unverified && controlling() && !m_layout.monitors.isEmpty()) {
+        // The one state in which KWin's positions are the ones to tell: the
+        // arrangement is not in place and nothing is about to put it there
+        // until the next apply, so the record and the sessions' input
+        // mapping follow the outputs as they are.
+        layout.monitors = withReadBackPositions(layout, virtualOutputs(), PhysicalOutputGuard::readOutputs()).monitors;
+    }
     return layout;
 }
 
@@ -197,7 +210,10 @@ std::optional<Error> HostLayoutExecutor::execute(const Plan &plan, const QString
     pending.requester = requester;
     pending.target = plan.resulting;
     pending.derived = derive(plan.resulting, virtualOutputs(), requester);
-    pending.needsArrangement = !plan.actions.isEmpty() || pending.derived.physicalDisabled || !pending.derived.creating.isEmpty() || !pending.derived.removing.isEmpty();
+    // An apply that restates the layout as it is still runs the arrangement
+    // when the last one could not be verified: re-sending the layout is how
+    // a client asks for the targets again after a failed re-assert.
+    pending.needsArrangement = !plan.actions.isEmpty() || pending.derived.physicalDisabled || !pending.derived.creating.isEmpty() || !pending.derived.removing.isEmpty() || m_unverified;
 
     if (pending.needsArrangement) {
         // Held before the first virtual output exists: what KWin does with
@@ -368,15 +384,15 @@ void HostLayoutExecutor::onCreatorProgress()
         return;
     }
 
-    // KWin may already have everything where the arrangement wants it (a
-    // re-apply after a takeover restored nothing, say): then there is no
-    // call to make and no settle to pay.
+    // The created outputs have appeared and KWin has laid the set out its
+    // own way; the guard reads back and asserts the arrangement over that
+    // (no call to make when KWin already has everything in place - a
+    // re-apply after a takeover restored nothing, say, or a set KWin
+    // remembers from an earlier apply of this very layout).
     const auto &arrangement = m_pending->derived.arrangement;
-    const auto now = PhysicalOutputGuard::readOutputs();
-    const bool alreadyArranged = !now.isEmpty() && arrangementMatches(arrangement, now);
-    if (alreadyArranged) {
-        qInfo() << "Arrangement already in place; no output change needed";
-    } else if (!m_guard->applyArrangement(arrangement)) {
+    const int createdCount = int(m_pending->creating.size());
+    const QString when = createdCount > 0 ? u"after creating %1 output(s)"_s.arg(createdCount) : u"for the applied layout"_s;
+    if (!m_guard->reconcileArrangement(arrangement, when)) {
         // Whatever KWin did with the command stands until release(); the
         // created outputs go away again, and the layout reported is what
         // is really there.
@@ -384,10 +400,11 @@ void HostLayoutExecutor::onCreatorProgress()
             creator.session.reset();
         }
         m_pending->creating.clear();
-        m_layout = withReadBackPositions(m_layout, virtualOutputs(), PhysicalOutputGuard::readOutputs());
+        m_unverified = true;
         finish(Error{u"invalid"_s, u"the compositor did not take the requested arrangement; the layout is as read back"_s});
         return;
     }
+    m_unverified = false;
 
     for (auto &creator : m_pending->creating) {
         m_pending->created.push_back(creator.record.name);
@@ -413,11 +430,11 @@ void HostLayoutExecutor::onCreatorProgress()
         return;
     }
     // The removed outputs were parked by the arrangement; now they go. Their
-    // going changes KWin's output set, and KWin answers a changed set with a
-    // configuration of its own (a stored one for exactly that set, or the
-    // closest stored subset - the lit desk - plus the rest appended), on top
-    // of the arrangement just applied. So the arrangement is checked again
-    // once they are gone, and re-asserted when it did not hold.
+    // going changes KWin's output set again, and KWin answers a changed set
+    // with a configuration of its own (a stored one for exactly that set,
+    // or the closest stored subset - the lit desk - plus the rest appended)
+    // on top of the arrangement just applied. So once they are gone the
+    // guard reconciles the arrangement a second time, without them.
     destroyOutputs(m_pending->removed);
     awaitRemoval();
 }
@@ -467,23 +484,18 @@ void HostLayoutExecutor::onRemovalPoll()
 
 void HostLayoutExecutor::reassertAfterRemoval()
 {
-    const int count = int(m_pending->removed.size());
+    // The same target minus the parked entries, through the same guard path
+    // as after the creation; the targets are asked for again as they are,
+    // the read-back having only said whether they are still there.
     const auto entries = arrangementWithout(m_pending->derived.arrangement, m_pending->removed);
-    if (m_guard->arrangementHolds(entries)) {
-        qInfo() << "Arrangement held after removing" << count << "output(s); no re-assert needed";
-        startScreenWait();
-        return;
-    }
-    qInfo() << "Re-asserting the arrangement after removing" << count << "output(s)";
-    if (!m_guard->applyArrangement(entries)) {
-        // The layout stays what KWin made of it: the record says so, the
-        // client re-maps, and the release restores the desk.
-        qWarning() << "Arrangement could not be re-asserted after removing" << count << "output(s); the layout is as read back";
-        m_layout = withReadBackPositions(m_layout, virtualOutputs(), PhysicalOutputGuard::readOutputs());
+    if (!m_guard->reconcileArrangement(entries, u"after removing %1 output(s)"_s.arg(m_pending->removed.size()))) {
+        // The outputs stay what KWin made of them: current() reports that,
+        // the client re-maps, the next apply asks for the targets again and
+        // the release restores the desk.
+        m_unverified = true;
         finish(Error{u"invalid"_s, u"the compositor did not keep the requested arrangement"_s});
         return;
     }
-    qInfo() << "Arrangement re-asserted after removing" << count << "output(s)";
     startScreenWait();
 }
 
@@ -568,6 +580,7 @@ void HostLayoutExecutor::finish(std::optional<Error> error)
         // Nothing held and nothing created: the idle layout is the fresh
         // read, not a remembered one.
         m_layout = {};
+        m_unverified = false;
     }
     result.layout = current();
     if (result.error) {
@@ -631,6 +644,7 @@ void HostLayoutExecutor::releaseAll()
 
     m_outputs.clear();
     m_layout = {};
+    m_unverified = false;
     qInfo() << "Layout control released:" << virtualCount << "virtual output(s) removed, physical outputs" << (m_guard && m_guard->held() ? "NOT verifiably restored (the guard retries)" : "restored");
     Q_EMIT layoutChanged();
 }

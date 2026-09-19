@@ -2303,7 +2303,12 @@ void SessionController::onControlApply(SessionWrapper *wrapper, const QJsonObjec
         return;
     }
 
-    const auto current = m_layoutExecutor.current();
+    // Planned from the applied layout's targets, not from what KWin has
+    // right now: the sanitiser must judge the target's union (a read-back
+    // after a replay had a stand-in at 7680,0 and refused every apply as
+    // over 8192 px, 2026-09-19 step 5), and an apply after a failed
+    // re-assert asks for the targets again. Same as current() otherwise.
+    const auto current = m_layoutExecutor.target();
     const auto planned = KRdp::LayoutControl::plan(current, *request, id, KRdp::LayoutControl::Caps{});
     if (const auto *error = std::get_if<KRdp::LayoutControl::Error>(&planned)) {
         refuse(*error, u"invalid: %1"_s.arg(error->message));

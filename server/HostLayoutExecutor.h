@@ -99,11 +99,22 @@ public:
      * the arrangement put it - never a fresh read: KWin's read-back is what
      * the executor checks the arrangement against and re-asserts over, and a
      * plan made from it after a replay would light a real monitor wherever
-     * KWin had parked its stand-in. Only an apply whose arrangement could
-     * not be verified leaves the read-back positions in the layout, for the
-     * record.
+     * KWin had parked its stand-in. Only while the last apply's arrangement
+     * could not be verified does this report KWin's read-back positions
+     * instead (the truth for the `layout` record and for input mapping);
+     * the targets themselves are never overwritten - see target().
      */
     KRdp::LayoutControl::Layout current() const;
+    /**
+     * What the next apply is planned from: current(), except while the
+     * last apply's arrangement is unverified, when it is the applied
+     * layout's targets all the same. The planner's sanitiser judges the
+     * TARGET's union, never a read-back's (a replay that put a stand-in at
+     * 7680,0 made a 9600 px read-back union refuse every later apply on
+     * 2026-09-19, step 5), and the next apply re-asserts the targets
+     * rather than build on what KWin did.
+     */
+    KRdp::LayoutControl::Layout target() const;
     /** Whether anything is held: the guard, or a virtual output. */
     bool controlling() const;
     /** An execute() is in flight. */
@@ -197,7 +208,7 @@ private:
      */
     void awaitRemoval();
     void onRemovalPoll();
-    /** Read the arrangement back now that the removed outputs are gone; apply it again when KWin replaced it. */
+    /** The removed outputs are gone: the guard reconciles the arrangement without them (re-asserting it when KWin replaced it). */
     void reassertAfterRemoval();
     /** Start polling for the outputs the sessions will need (the last step before finish()). */
     void startScreenWait();
@@ -212,9 +223,16 @@ private:
     std::vector<Creator> m_outputs;
     /**
      * The layout as last applied, positions as targeted (see current());
-     * meaningful while controlling().
+     * meaningful while controlling(). Never patched from a read-back.
      */
     KRdp::LayoutControl::Layout m_layout;
+    /**
+     * The last apply's arrangement could not be verified (the guard's
+     * reconcile failed): current() reports KWin's read-back over m_layout
+     * until an apply verifies again or everything is released, and the
+     * next apply runs the arrangement even when it restates the layout.
+     */
+    bool m_unverified = false;
     std::optional<Pending> m_pending;
     QTimer m_dpmsTimer;
     QTimer m_removalTimer;

@@ -415,20 +415,19 @@ bool PhysicalOutputGuard::applyArrangement(const QList<Arrangement> &entries)
     }
 }
 
-bool PhysicalOutputGuard::arrangementHolds(const QList<Arrangement> &entries) const
+bool PhysicalOutputGuard::arrangementHolds(const QList<Arrangement> &entries)
 {
     if (entries.isEmpty()) {
         return true;
     }
     // The same window applyArrangement() verifies over: a read-back that
-    // matches right after the removal is not the end of it when KWin is
-    // still removing and re-adding a physical output the replay lit.
+    // matches right after an output came or went is not the end of it when
+    // KWin is still removing and re-adding a physical output it lit.
     QElapsedTimer timer;
     timer.start();
     for (;;) {
         const auto now = current();
         if (now.isEmpty() || !arrangementMatches(entries, now)) {
-            qInfo() << "Arrangement not held by the compositor:" << now;
             return false;
         }
         if (timer.elapsed() >= SettleStableMs) {
@@ -436,6 +435,31 @@ bool PhysicalOutputGuard::arrangementHolds(const QList<Arrangement> &entries) co
         }
         QThread::msleep(SettlePollMs);
     }
+}
+
+bool PhysicalOutputGuard::reconcileArrangement(const QList<Arrangement> &entries, const QString &when)
+{
+    if (!m_held || !hasSnapshot()) {
+        qWarning() << "reconcileArrangement without beginLayoutControl(); refusing to touch the outputs";
+        return false;
+    }
+    if (arrangementHolds(entries)) {
+        qInfo().noquote() << u"Arrangement in place %1; no output change needed"_s.arg(when);
+        return true;
+    }
+    // KWin replaced it with a configuration of its own for the output set
+    // as it is now (the same replay reconcileExtend() undoes for the extend
+    // policy, with the snapshot as its target); the target positions are
+    // asked for again, the read-back only having said that they are not
+    // there - a position KWin chose is never adopted into the layout.
+    qInfo().noquote() << u"Outputs drifted from the arrangement %1:"_s.arg(when) << current();
+    qInfo().noquote() << u"Re-asserting the arrangement %1"_s.arg(when);
+    if (!applyArrangement(entries)) {
+        qWarning().noquote() << u"Arrangement could not be re-asserted %1; the outputs are as read back until the next apply or the release"_s.arg(when);
+        return false;
+    }
+    qInfo().noquote() << u"Arrangement re-asserted %1"_s.arg(when);
+    return true;
 }
 
 bool PhysicalOutputGuard::applyReplaceInTwoSteps(const QVector<Placement> &virtualOutputs, const QString &primaryVirtualName)

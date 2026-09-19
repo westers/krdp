@@ -123,23 +123,29 @@ public:
      * place or disabled; virtual outputs, which must already exist, at
      * theirs; priorities 1..N in list order), verified by read-back with the
      * same churn-aware settle a replace uses. A combined change kscreen
-     * refuses is re-issued once in two steps (disables first). Once per
-     * apply, and again by the executor after it removes an output, when
-     * arrangementHolds() says KWin replaced the arrangement. Needs
+     * refuses is re-issued once in two steps (disables first). Needs
      * beginLayoutControl(); false when not verified, in which case the
-     * outputs may be in any state and release() restores.
+     * outputs may be in any state and release() restores. Callers go
+     * through reconcileArrangement().
      */
     bool applyArrangement(const QList<KRdp::OutputSnapshot::Arrangement> &entries);
     /**
-     * Whether \a entries read back as arranged and stay so for the settle's
-     * stability window: the executor's drift check after it has removed an
-     * output (KWin re-queries its remembered configuration for the new
-     * output set right then and may replay one that lights the desk).
-     * Blocks for the window when the arrangement holds; false at the first
-     * read-back that does not match (or cannot be read), so a re-assert can
-     * follow at once. Runs no mutation.
+     * Layout control's read-back → compare → re-assert, the twin of
+     * reconcileExtend() for an arrangement target: whether \a entries read
+     * back as arranged and stay so for the settle's stability window, and
+     * applyArrangement() when they do not. The one path the executor takes
+     * at both moments KWin answers a changed output set with a
+     * configuration of its own - after the created outputs have appeared,
+     * and again after the removed ones have gone (an exact stored setup for
+     * the new set is replayed, otherwise the closest stored subset is
+     * applied and the rest appended lit; kwin 6.6
+     * OutputConfigurationStore::queryConfig/generateConfig). \a when is
+     * the log's phrase for the moment ("after removing 1 output(s)").
+     * Blocks for the window when the arrangement holds, for
+     * applyArrangement()'s settle when it did not; false when it could not
+     * be verified either way.
      */
-    bool arrangementHolds(const QList<KRdp::OutputSnapshot::Arrangement> &entries) const;
+    bool reconcileArrangement(const QList<KRdp::OutputSnapshot::Arrangement> &entries, const QString &when);
     /**
      * Where the virtual outputs belong while the physical ones are enabled
      * (beside them, at the extend anchor). Remembered so that restore()
@@ -203,6 +209,13 @@ private:
         QVector<KRdp::OutputSnapshot::Output> missing;
     };
     static RestoreOutcome restoreSnapshot(const QVector<KRdp::OutputSnapshot::Output> &physical);
+    /**
+     * reconcileArrangement()'s detection half: \a entries read back as
+     * arranged and stay so for the stability window. False at the first
+     * read-back that does not match (or cannot be read), so the re-assert
+     * follows at once. No mutation.
+     */
+    static bool arrangementHolds(const QList<KRdp::OutputSnapshot::Arrangement> &entries);
     /** What waitForPhysical() waits for. */
     enum class SettleGoal {
         /** Every physical output of the snapshot is present, whatever its state (before a replace). */
