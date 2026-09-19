@@ -37,3 +37,12 @@ add_executable(ClipboardTextTest ClipboardTextTest.cpp)
 target_include_directories(ClipboardTextTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ClipboardTextTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ClipboardTextTest COMMAND ClipboardTextTest)
+
+# LayoutControl has an out-of-line .cpp (codec + planner), unlike its
+# header-only neighbours above, so it is compiled straight into the test
+# binary rather than linked through the KRdp library (which would drag in
+# FreeRDP/WinPR/PAM for a pure-logic test).
+add_executable(LayoutControlTest LayoutControlTest.cpp ${CMAKE_SOURCE_DIR}/src/LayoutControl.cpp)
+target_include_directories(LayoutControlTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(LayoutControlTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME LayoutControlTest COMMAND LayoutControlTest)
