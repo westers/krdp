@@ -202,6 +202,50 @@ inline Derived derive(const LayoutControl::Layout &resulting, const QList<Virtua
     return out;
 }
 
+/** One creator session's progress, for the serial creation (OPT-047 mitigation 1). */
+struct CreatorState {
+    /** start() has been called on it. */
+    bool started = false;
+    /** Its output has resolved (outputGeometryResolved()); can drop back to false while KWin churns. */
+    bool resolved = false;
+
+    bool operator==(const CreatorState &) const = default;
+};
+
+/**
+ * Which creator the executor may start now: the first not yet started, and
+ * only once every started one has resolved; -1 while a started one is
+ * still resolving (or resolving again, after KWin took its screen away for
+ * a moment) and when all are started. Virtual outputs are created one at a
+ * time on purpose: KWin (6.6.6) crashed in its DRM backend when three were
+ * requested in one go shortly after a release's physical-output churn
+ * (2026-09-19, `coredumpctl 4590`), and each output's appearance is an
+ * output-set change KWin answers with a re-queried configuration and a
+ * modeset of its own.
+ */
+inline int nextCreatorToStart(const QList<CreatorState> &states)
+{
+    int next = -1;
+    for (qsizetype i = 0; i < states.size(); ++i) {
+        const auto &state = states.at(i);
+        if (state.started && !state.resolved) {
+            return -1;
+        }
+        if (!state.started && next < 0) {
+            next = int(i);
+        }
+    }
+    return next;
+}
+
+/** Every creator has been started and has resolved (true for none): the arrangement can run. */
+inline bool allCreatorsResolved(const QList<CreatorState> &states)
+{
+    return std::all_of(states.cbegin(), states.cend(), [](const CreatorState &state) {
+        return state.started && state.resolved;
+    });
+}
+
 /**
  * \a arrangement without the entries named in \a removed: the target the
  * executor re-asserts once the removed outputs are gone. KWin re-queries its

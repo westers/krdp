@@ -709,6 +709,56 @@ private Q_SLOTS:
         QCOMPARE(layout.monitors[3].position, QPoint(-1920, 0));
     }
 
+    void serialCreationStartsTheNextCreatorOnlyAfterTheLastResolved()
+    {
+        // OPT-047 mitigation 1: a three-output apply (Private + one extra,
+        // the shape that crashed KWin on 2026-09-19) is created one output
+        // at a time. The executor asks nextCreatorToStart() after each
+        // resolve and arranges only on allCreatorsResolved().
+        QList<CreatorState> states{{}, {}, {}};
+        // Nothing started: the first is next, nothing is resolved.
+        QCOMPARE(nextCreatorToStart(states), 0);
+        QVERIFY(!allCreatorsResolved(states));
+        // A started, still resolving: nobody may start.
+        states[0].started = true;
+        QCOMPARE(nextCreatorToStart(states), -1);
+        QVERIFY(!allCreatorsResolved(states));
+        // A resolved: B is next.
+        states[0].resolved = true;
+        QCOMPARE(nextCreatorToStart(states), 1);
+        QVERIFY(!allCreatorsResolved(states));
+        // B started and resolving: hold - even though C is unstarted.
+        states[1].started = true;
+        QCOMPARE(nextCreatorToStart(states), -1);
+        // KWin takes A's screen away for a moment while B resolves: still
+        // hold, and B resolving alone does not release it.
+        states[0].resolved = false;
+        states[1].resolved = true;
+        QCOMPARE(nextCreatorToStart(states), -1);
+        QVERIFY(!allCreatorsResolved(states));
+        // A back: C is next.
+        states[0].resolved = true;
+        QCOMPARE(nextCreatorToStart(states), 2);
+        // C started: all started, so no next, whether or not it has resolved.
+        states[2].started = true;
+        QCOMPARE(nextCreatorToStart(states), -1);
+        QVERIFY(!allCreatorsResolved(states));
+        states[2].resolved = true;
+        QCOMPARE(nextCreatorToStart(states), -1);
+        QVERIFY(allCreatorsResolved(states));
+        // A restating apply creates nothing: it arranges at once.
+        QCOMPARE(nextCreatorToStart({}), -1);
+        QVERIFY(allCreatorsResolved({}));
+        // A single output is started first and arranged as soon as it resolves.
+        QList<CreatorState> one{{}};
+        QCOMPARE(nextCreatorToStart(one), 0);
+        one[0].started = true;
+        QCOMPARE(nextCreatorToStart(one), -1);
+        QVERIFY(!allCreatorsResolved(one));
+        one[0].resolved = true;
+        QVERIFY(allCreatorsResolved(one));
+    }
+
 private:
     // Step 4 of the 2026-09-19 hardware run, as data.
     static VirtualOutput oldDp1StandIn()

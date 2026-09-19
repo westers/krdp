@@ -24,6 +24,14 @@ namespace
 // thread, so every 500 ms rather than 250 (re-review Minor 5).
 constexpr int DpmsPollMs = 500;
 constexpr int DpmsWakeTimeoutMs = 6000;
+// Between one virtual output resolving and the next creator's start (the
+// outputs of an apply are created one at a time, OPT-047 mitigation 1). Long
+// enough for KWin to have applied and stored its configuration for the new
+// output set and finished the modeset that goes with it before the set
+// changes again; short enough to cost Private ~0.7 s over the parallel
+// creation. Event-loop timer, not a sleep: the previous output's resolve
+// arrives as a Wayland event.
+constexpr int CreationGapMs = 400;
 // After the removed outputs' creator sessions are destroyed: how often to
 // look for them to be gone (QScreens first, no process; then one kscreen
 // read-back, so an output that never became a QScreen is waited for too),
@@ -82,6 +90,9 @@ HostLayoutExecutor::HostLayoutExecutor(PhysicalOutputGuard *guard, SessionFactor
     }
     m_dpmsTimer.setInterval(DpmsPollMs);
     connect(&m_dpmsTimer, &QTimer::timeout, this, &HostLayoutExecutor::onDpmsPoll);
+    m_creationGapTimer.setSingleShot(true);
+    m_creationGapTimer.setInterval(CreationGapMs);
+    connect(&m_creationGapTimer, &QTimer::timeout, this, &HostLayoutExecutor::startNextCreator);
     m_removalTimer.setInterval(RemovalPollMs);
     connect(&m_removalTimer, &QTimer::timeout, this, &HostLayoutExecutor::onRemovalPoll);
     m_screenTimer.setInterval(ScreenPollMs);
@@ -310,43 +321,74 @@ void HostLayoutExecutor::startCreation()
         abortPending(Error{u"invalid"_s, u"the physical outputs did not settle after the display wake; nothing was created"_s});
         return;
     }
+    // The first creator now (the physical settle is its gap); each later
+    // one from the gap timer, once the previous output has resolved.
+    startNextCreator();
+}
 
-    for (auto &creator : m_pending->creating) {
-        auto session = m_sessionFactory();
-        if (!session) {
-            abortPending(Error{u"unsupported"_s, u"this server cannot create virtual outputs"_s});
-            return;
-        }
-        auto *raw = session.get();
-        QString requested = creator.record.name;
-        requested.remove(0, VirtualPrefix.size());
-        raw->setVirtualMonitor(KRdp::VirtualMonitor{requested, creator.record.size, creator.record.scale});
-        const QString name = creator.record.name;
-        // Deferred, all three: the progress step may destroy creator
-        // sessions (a failed arrangement, the removed outputs) and an abort
-        // destroys the very session that is emitting, so none of it may run
-        // inside a session's signal.
-        connect(raw, &KRdp::AbstractSession::outputGeometryChanged, this, [this](const QRect &) {
-            scheduleProgress();
-        });
-        connect(raw, &KRdp::AbstractSession::virtualOutputUnresolved, this, [this, name]() {
-            scheduleAbort(Error{u"invalid"_s, u"virtual output %1 did not appear"_s.arg(name)});
-        });
-        connect(raw, &KRdp::AbstractSession::error, this, [this, name]() {
-            if (m_pending && !m_pending->arranged) {
-                scheduleAbort(Error{u"invalid"_s, u"virtual output %1 could not be created"_s.arg(name)});
-            } else {
-                qWarning() << "Creator session of virtual output" << name << "reported an error; the output may be gone";
-            }
-        });
-        creator.session = std::move(session);
-        qInfo().noquote() << u"Creating virtual output %1 (%2x%3 @%4) for %5"_s.arg(name).arg(creator.record.size.width()).arg(creator.record.size.height()).arg(creator.record.scale).arg(m_pending->requester);
-        m_pending->anyCreatorStarted = true;
-        raw->start();
+void HostLayoutExecutor::startNextCreator()
+{
+    if (!m_pending || !m_pending->creationStarted || m_pending->arranged || m_pending->abortScheduled) {
+        return;
     }
+    const int index = nextCreatorToStart(creatorStates(m_pending->creating));
+    if (index < 0) {
+        // All started, or a started output is resolving again after KWin
+        // took its screen away for a moment: its next resolve re-arms the
+        // gap timer through the progress step.
+        return;
+    }
+    auto &creator = m_pending->creating[size_t(index)];
+    auto session = m_sessionFactory();
+    if (!session) {
+        abortPending(Error{u"unsupported"_s, u"this server cannot create virtual outputs"_s});
+        return;
+    }
+    auto *raw = session.get();
+    QString requested = creator.record.name;
+    requested.remove(0, VirtualPrefix.size());
+    raw->setVirtualMonitor(KRdp::VirtualMonitor{requested, creator.record.size, creator.record.scale});
+    const QString name = creator.record.name;
+    // Deferred, all three: the progress step may destroy creator sessions
+    // (a failed arrangement, the removed outputs) and an abort destroys the
+    // very session that is emitting, so none of it may run inside a
+    // session's signal.
+    connect(raw, &KRdp::AbstractSession::outputGeometryChanged, this, [this](const QRect &) {
+        scheduleProgress();
+    });
+    connect(raw, &KRdp::AbstractSession::virtualOutputUnresolved, this, [this, name]() {
+        scheduleAbort(Error{u"invalid"_s, u"virtual output %1 did not appear"_s.arg(name)});
+    });
+    connect(raw, &KRdp::AbstractSession::error, this, [this, name]() {
+        if (m_pending && !m_pending->arranged) {
+            scheduleAbort(Error{u"invalid"_s, u"virtual output %1 could not be created"_s.arg(name)});
+        } else {
+            qWarning() << "Creator session of virtual output" << name << "reported an error; the output may be gone";
+        }
+    });
+    creator.session = std::move(session);
+    qInfo().noquote() << u"Creating virtual output %1 (%2x%3 @%4) for %5 (%6 of %7)"_s.arg(name)
+                             .arg(creator.record.size.width())
+                             .arg(creator.record.size.height())
+                             .arg(creator.record.scale)
+                             .arg(m_pending->requester)
+                             .arg(index + 1)
+                             .arg(m_pending->creating.size());
+    m_pending->anyCreatorStarted = true;
+    raw->start();
     // start() may have resolved synchronously (KWin replaying a known
-    // output); the first progress check runs from the event loop either way.
+    // output); the progress check runs from the event loop either way.
     scheduleProgress();
+}
+
+QList<CreatorState> HostLayoutExecutor::creatorStates(const std::vector<Creator> &creating)
+{
+    QList<CreatorState> states;
+    states.reserve(qsizetype(creating.size()));
+    for (const auto &creator : creating) {
+        states.push_back(CreatorState{creator.session != nullptr, creator.session && creator.session->outputGeometryResolved()});
+    }
+    return states;
 }
 
 void HostLayoutExecutor::scheduleProgress()
@@ -370,12 +412,18 @@ void HostLayoutExecutor::onCreatorProgress()
     if (!m_pending || !m_pending->creationStarted || m_pending->arranged || m_pending->abortScheduled) {
         return;
     }
-    const bool allResolved = std::all_of(m_pending->creating.cbegin(), m_pending->creating.cend(), [](const Creator &creator) {
-        return creator.session && creator.session->outputGeometryResolved();
-    });
-    if (!allResolved) {
+    const auto states = creatorStates(m_pending->creating);
+    if (!allCreatorsResolved(states)) {
+        // One output at a time: the next creator is started a settle after
+        // the last started output has resolved (nextCreatorToStart() names
+        // it only then), never while one is still resolving. A resolve
+        // that arrives with the timer already armed changes nothing.
+        if (nextCreatorToStart(states) >= 0 && !m_creationGapTimer.isActive()) {
+            m_creationGapTimer.start();
+        }
         return;
     }
+    m_creationGapTimer.stop();
     m_pending->arranged = true;
 
     if (!m_pending->needsArrangement) {
@@ -548,8 +596,10 @@ void HostLayoutExecutor::abortPending(const Error &error)
         return;
     }
     m_dpmsTimer.stop();
+    m_creationGapTimer.stop();
     m_removalTimer.stop();
     m_screenTimer.stop();
+    // The creators started so far go (an unstarted one has no session).
     for (auto &creator : m_pending->creating) {
         creator.session.reset();
     }

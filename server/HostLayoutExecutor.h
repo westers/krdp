@@ -49,16 +49,25 @@
  * event loop. Before the first output of an apply is requested the displays
  * are woken (through the wake hook) and the physical outputs waited for, so
  * no output is ever created into the remove-and-re-add churn a panel coming
- * out of standby causes. An output the apply removes goes only after the
- * arrangement, and its going is followed up: KWin re-queries its remembered
- * configuration for the new output set the moment an output disappears and
- * may replay one that lights the desk, so once the removed outputs are gone
- * the arrangement is read back and re-asserted if it did not hold. The
- * blocking parts are the guard's kscreen-doctor calls and their settles, as
- * everywhere else. finished() carries the applied layout: real monitors at
- * their snapshot positions, virtual outputs at their target positions;
- * KWin's read-back positions only when the arrangement could not be
- * verified.
+ * out of standby causes. The outputs are then created ONE AT A TIME: the
+ * next creator is started only once the previous output has resolved and a
+ * settle of CreationGapMs has passed (OPT-047 mitigation 1 - KWin 6.6.6
+ * crashed in its DRM backend, `DrmGpu::pageFlipHandler`, when three were
+ * requested back to back ~5 s after a release's churn, 2026-09-19; every
+ * appearance is an output-set change KWin answers with a re-queried
+ * configuration and a modeset). Cost: an N-output creation takes about
+ * N x (resolve ~0.3 s + 0.4 s settle) before the arrangement instead of
+ * ~0.3 s for all of them - Private (two stand-ins) ~1.4 s, about 0.7 s more
+ * than the parallel creation; the arrangement itself is unchanged. An
+ * output the apply removes goes only after the arrangement, and its going
+ * is followed up: KWin re-queries its remembered configuration for the new
+ * output set the moment an output disappears and may replay one that
+ * lights the desk, so once the removed outputs are gone the arrangement is
+ * read back and re-asserted if it did not hold. The blocking parts are the
+ * guard's kscreen-doctor calls and their settles, as everywhere else.
+ * finished() carries the applied layout: real monitors at their snapshot
+ * positions, virtual outputs at their target positions; KWin's read-back
+ * positions only when the arrangement could not be verified.
  */
 class HostLayoutExecutor : public QObject
 {
@@ -174,7 +183,11 @@ private:
         QStringList removed;
         /** False when the apply restates the layout as it is: no kscreen-doctor call, nothing created. */
         bool needsArrangement = false;
-        /** The creator sessions have been started (or there were none to start). */
+        /**
+         * The creation sequence has begun: the first creator session has
+         * been started (or there were none to start); the rest are started
+         * one at a time from startNextCreator() as each output resolves.
+         */
         bool creationStarted = false;
         bool arranged = false;
         /**
@@ -202,9 +215,19 @@ private:
     /** Wake the displays if a physical output is off, wait for them, then startCreation(). */
     void prepareCreation();
     void onDpmsPoll();
-    /** Settle the physical outputs, then request every output of `creating`. */
+    /** Settle the physical outputs, then start the first creator; the rest follow one at a time. */
     void startCreation();
-    /** Every created output has resolved (or one failed): run the arrangement. */
+    /**
+     * Start the creator LayoutArrangement::nextCreatorToStart() names, if
+     * any: from startCreation() for the first, from the gap timer for each
+     * later one. Nothing happens while a started output is still resolving.
+     */
+    void startNextCreator();
+    /**
+     * A created output resolved (or the sequence just started): once every
+     * started output has resolved, arm the gap timer for the next creator;
+     * once every creator has been started and resolved, run the arrangement.
+     */
     void onCreatorProgress();
     /** Queue onCreatorProgress() / abortPending() for the event loop, never from inside a session's signal. */
     void scheduleProgress();
@@ -226,6 +249,8 @@ private:
     void pollScreens();
     void finish(std::optional<KRdp::LayoutControl::Error> error);
     void destroyOutputs(const QStringList &names);
+    /** The pending creators' progress, as the pure helpers judge it (started = has a session). */
+    static QList<KRdp::LayoutArrangement::CreatorState> creatorStates(const std::vector<Creator> &creating);
 
     PhysicalOutputGuard *m_guard;
     SessionFactory m_sessionFactory;
@@ -245,6 +270,8 @@ private:
     bool m_unverified = false;
     std::optional<Pending> m_pending;
     QTimer m_dpmsTimer;
+    /** Single-shot settle between one output resolving and the next creator's start. */
+    QTimer m_creationGapTimer;
     QTimer m_removalTimer;
     QTimer m_screenTimer;
 };
