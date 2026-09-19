@@ -221,6 +221,16 @@ private Q_SLOTS:
         QCOMPARE(takeoverRecord(hal9000Layout()).value(QStringLiteral("type")).toString(), QStringLiteral("takeover"));
     }
 
+    void errorRecordReleasedCodeRoundTrips()
+    {
+        // The desk-takeover-during-an-apply abandonment (server/HostLayoutExecutor.cpp) uses this
+        // code; the client relies on it (not "invalid") to skip its fallback apply.
+        const auto object = errorRecord(Error{QStringLiteral("released"), QStringLiteral("the layout was released while the apply was in progress")});
+        QCOMPARE(object.value(QStringLiteral("type")).toString(), QStringLiteral("error"));
+        QCOMPARE(object.value(QStringLiteral("code")).toString(), QStringLiteral("released"));
+        QCOMPARE(object.value(QStringLiteral("message")).toString(), QStringLiteral("the layout was released while the apply was in progress"));
+    }
+
     // --- Framing ---
 
     void frameAddsVersion()

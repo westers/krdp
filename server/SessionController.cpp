@@ -2331,10 +2331,13 @@ void SessionController::onControlApply(SessionWrapper *wrapper, const QJsonObjec
     // it. Every layout client's detector sits the apply out from now until
     // the build that follows it (armLayoutTakeover() clears the flag and
     // drops the references a warp may have spoiled); a refusal below does
-    // the same at once.
-    for (const auto &w : m_wrappers) {
-        if (w && w->layoutClient) {
-            w->layoutApplyInFlight = true;
+    // the same at once. A 0-action plan (a debounced re-send that changes
+    // nothing) warps nothing, so it must not cost that blind window either.
+    if (!plan.actions.isEmpty()) {
+        for (const auto &w : m_wrappers) {
+            if (w && w->layoutClient) {
+                w->layoutApplyInFlight = true;
+            }
         }
     }
     // Set before execute(): finished() may fire from inside it.

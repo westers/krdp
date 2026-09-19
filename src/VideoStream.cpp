@@ -587,6 +587,12 @@ void VideoStream::setMonitorLayout(const QVector<VideoMonitor> &layout)
     // The surfaces are rebuilt from the new layout on the next frame.
     d->pendingReset = true;
 
+    // A layout change is intentional, unlike the caps re-advertisement storm
+    // the per-index limiter (sendFrame()) exists to bound: reset every entry
+    // so a kept surface's fresh surface after a second layout change within
+    // 2 s of the first still gets its own IDR request.
+    std::fill(d->lastKeyFrameRequest.begin(), d->lastKeyFrameRequest.end(), clk::steady_clock::time_point{});
+
     // Every queued frame is stamped with an index into the layout that is being
     // replaced. Sending one after the surfaces are rebuilt would paint a
     // monitor's picture onto whatever surface now holds that index, or have it

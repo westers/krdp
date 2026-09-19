@@ -517,7 +517,7 @@ void HostLayoutExecutor::destroyOutputs(const QStringList &names)
 void HostLayoutExecutor::releaseAll()
 {
     if (m_pending) {
-        abortPending(Error{u"invalid"_s, u"the layout was released while the apply was in progress"_s});
+        abortPending(Error{u"released"_s, u"the layout was released while the apply was in progress"_s});
     }
     if (!controlling()) {
         return;

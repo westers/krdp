@@ -112,7 +112,11 @@ struct ApplyRequest {
     bool operator==(const ApplyRequest &) const = default;
 };
 
-/** The `error` record body. `code` is one of "not-owner" | "invalid" | "unsupported". */
+/**
+ * The `error` record body. `code` is one of "not-owner" | "invalid" | "unsupported" | "released".
+ * "released": an apply the server abandoned because the desk took its screens back while it was
+ * executing; a `takeover` record follows.
+ */
 struct Error {
     QString code;
     QString message;
