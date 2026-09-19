@@ -91,6 +91,17 @@ public:
     /** Whether the current hold is layout control's (beginLayoutControl()), as opposed to a configured `virtual` session's replace. */
     bool layoutControlHeld() const;
     /**
+     * Layout control gave up before it changed anything: the apply that
+     * took the hold with beginLayoutControl() was aborted before any
+     * kscreen-doctor mutation (the displays never settled, or the session
+     * type cannot create outputs). The physical outputs are still exactly
+     * as snapshotted, so there is nothing to restore: the snapshot, the
+     * hold and the state file are simply dropped, with no process run. The
+     * CALLER vouches that nothing was mutated; a hold that is not layout
+     * control's, or none, is left alone (false).
+     */
+    bool cancelLayoutControl();
+    /**
      * Layout control, before it asks KWin for a virtual output: wait for
      * every snapshotted physical output to be present and to stay present
      * for the stability window (the same settle applyReplace() runs before

@@ -11,6 +11,13 @@
  *                                                            first `layout`
  *   krdpctl-probe HOST PORT USER PASSWORD --apply FILE.json  send FILE's object as `apply`,
  *                                                            print records until Ctrl-C
+ *   krdpctl-probe HOST PORT USER PASSWORD --apply-seq A.json B.json …
+ *                                                            send A as `apply`, then each
+ *                                                            following file 8 s after the
+ *                                                            previous apply was answered
+ *                                                            (`layout` or `error`); a live
+ *                                                            re-apply sequence on one
+ *                                                            connection (Task 4)
  *   krdpctl-probe HOST PORT USER PASSWORD --silent           join the channel, send nothing
  *                                                            (exercises the server's 3 s gate)
  *   options: --gfx              also load the standard channel add-ins (drdynvc, rdpgfx)
@@ -26,8 +33,10 @@
  *                               is answered with `pong`, as a layout owner must); lets
  *                               the heartbeat release be watched
  *
- * Records go to stdout, one compact JSON object per line; everything else to
- * stderr. The password is never printed.
+ * Records go to stdout, one compact JSON object per line, each prefixed with
+ * the local time it was read (HH:MM:SS.zzz); everything else to stderr with
+ * the same prefix, so a record can be placed against the server's log and
+ * against the ResetGraphics line --gfx prints. The password is never printed.
  *
  * Without --gfx no dynamic channel exists, so the server never opens its
  * RDPGFX pipeline for this connection: the GCC early capability flag
@@ -37,6 +46,7 @@
  */
 
 #include <atomic>
+#include <cstdarg>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -48,7 +58,9 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QList>
 #include <QString>
+#include <QTime>
 
 #include <freerdp/channels/channels.h>
 #include <freerdp/channels/rdpgfx.h>
@@ -71,9 +83,18 @@ enum class Mode {
     Silent,
 };
 
+// Between two applies of --apply-seq, counted from the answer to the
+// previous one; and how long an unanswered apply holds the sequence up.
+constexpr qint64 ApplySequenceGapMs = 8000;
+constexpr qint64 ApplySequenceReplyCapMs = 30000;
+
 struct Probe {
     Mode mode = Mode::Silent;
-    QJsonObject applyBody;
+    /** The `apply` bodies, in order: one for --apply, several for --apply-seq. */
+    QList<QJsonObject> applyBodies;
+    int nextApply = 0;
+    /** `layout`/`error` records seen (channel thread); the main loop paces the sequence on them. */
+    std::atomic<int> appliesAnswered = 0;
     bool gfx = false;
     bool pong = true;
     int timeoutSeconds = 0;
@@ -110,9 +131,26 @@ Probe *probeOf(rdpContext *context)
     return context ? reinterpret_cast<ProbeContext *>(context)->probe : nullptr;
 }
 
+QByteArray stamp()
+{
+    return QTime::currentTime().toString(QStringLiteral("HH:mm:ss.zzz")).toLatin1();
+}
+
+/** One stderr line, time-stamped: "HH:mm:ss.zzz krdpctl-probe: ...". */
+void logf(const char *format, ...)
+{
+    std::fprintf(stderr, "%s krdpctl-probe: ", stamp().constData());
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(stderr, format, args);
+    va_end(args);
+    std::fputc('\n', stderr);
+    std::fflush(stderr);
+}
+
 void printRecord(const QJsonObject &record)
 {
-    const QByteArray line = QJsonDocument(record).toJson(QJsonDocument::Compact);
+    const QByteArray line = stamp() + ' ' + QJsonDocument(record).toJson(QJsonDocument::Compact);
     std::fwrite(line.constData(), 1, size_t(line.size()), stdout);
     std::fputc('\n', stdout);
     std::fflush(stdout);
@@ -121,7 +159,7 @@ void printRecord(const QJsonObject &record)
 bool sendRecord(Probe *probe, const QJsonObject &record)
 {
     if (!probe->channelOpen) {
-        std::fprintf(stderr, "krdpctl-probe: cannot send, channel not open\n");
+        logf("cannot send, channel not open");
         return false;
     }
     const QByteArray framed = KRdp::LayoutControl::frame(record);
@@ -134,12 +172,27 @@ bool sendRecord(Probe *probe, const QJsonObject &record)
     std::memcpy(buffer, framed.constData(), size_t(framed.size()));
     const UINT rc = probe->entryPoints.pVirtualChannelWriteEx(probe->initHandle, probe->openHandle, buffer, ULONG(framed.size()), buffer);
     if (rc != CHANNEL_RC_OK) {
-        std::fprintf(stderr, "krdpctl-probe: VirtualChannelWriteEx failed: %u\n", rc);
+        logf("VirtualChannelWriteEx failed: %u", rc);
         std::free(buffer);
         return false;
     }
-    std::fprintf(stderr, "krdpctl-probe: sent %s (%lld bytes)\n", qPrintable(record.value(QLatin1String("type")).toString()), static_cast<long long>(framed.size()));
+    logf("sent %s (%lld bytes)", qPrintable(record.value(QLatin1String("type")).toString()), static_cast<long long>(framed.size()));
     return true;
+}
+
+/** The next `apply` of the sequence (the only one, for --apply). */
+void sendNextApply(Probe *probe)
+{
+    if (probe->nextApply >= probe->applyBodies.size()) {
+        return;
+    }
+    QJsonObject body = probe->applyBodies.at(probe->nextApply);
+    body.insert(QStringLiteral("type"), QStringLiteral("apply"));
+    ++probe->nextApply;
+    if (probe->applyBodies.size() > 1) {
+        logf("apply %d of %lld", probe->nextApply, static_cast<long long>(probe->applyBodies.size()));
+    }
+    sendRecord(probe, body);
 }
 
 void sendRequest(Probe *probe)
@@ -152,14 +205,11 @@ void sendRequest(Probe *probe)
     case Mode::Query:
         sendRecord(probe, QJsonObject{{QStringLiteral("type"), QStringLiteral("query")}});
         break;
-    case Mode::Apply: {
-        QJsonObject body = probe->applyBody;
-        body.insert(QStringLiteral("type"), QStringLiteral("apply"));
-        sendRecord(probe, body);
+    case Mode::Apply:
+        sendNextApply(probe);
         break;
-    }
     case Mode::Silent:
-        std::fprintf(stderr, "krdpctl-probe: channel open, sending nothing\n");
+        logf("channel open, sending nothing");
         break;
     }
 }
@@ -182,18 +232,21 @@ VOID VCAPITYPE openEvent(LPVOID userParam, DWORD openHandle, UINT event, LPVOID 
             const QString type = record->value(QLatin1String("type")).toString();
             if (type == QLatin1String("layout")) {
                 probe->gotLayout = true;
+                ++probe->appliesAnswered;
+            } else if (type == QLatin1String("error")) {
+                ++probe->appliesAnswered;
             } else if (type == QLatin1String("ping")) {
                 // The owner's heartbeat (design §3). Answered from the
                 // channel thread: VirtualChannelWriteEx only queues.
                 if (probe->pong) {
                     sendRecord(probe, QJsonObject{{QStringLiteral("type"), QStringLiteral("pong")}});
                 } else {
-                    std::fprintf(stderr, "krdpctl-probe: ping ignored (--no-pong)\n");
+                    logf("ping ignored (--no-pong)");
                 }
             }
         }
         if (probe->deframer.overflowed()) {
-            std::fprintf(stderr, "krdpctl-probe: server announced a record over 64 KiB; giving up\n");
+            logf("server announced a record over 64 KiB; giving up");
             probe->failed = true;
         }
         break;
@@ -215,12 +268,12 @@ VOID VCAPITYPE initEvent(LPVOID userParam, LPVOID initHandle, UINT event, LPVOID
     case CHANNEL_EVENT_CONNECTED: {
         const UINT rc = probe->entryPoints.pVirtualChannelOpenEx(initHandle, &probe->openHandle, probe->channelDef.name, openEvent);
         if (rc != CHANNEL_RC_OK) {
-            std::fprintf(stderr, "krdpctl-probe: VirtualChannelOpenEx failed: %u\n", rc);
+            logf("VirtualChannelOpenEx failed: %u", rc);
             probe->failed = true;
             return;
         }
         probe->channelOpen = true;
-        std::fprintf(stderr, "krdpctl-probe: KRDPCTL connected\n");
+        logf("KRDPCTL connected");
         sendRequest(probe);
         break;
     }
@@ -250,7 +303,7 @@ BOOL VCAPITYPE krdpctlEntryEx(PCHANNEL_ENTRY_POINTS_EX entryPoints, PVOID initHa
     probe->channelDef.options = CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP;
     const UINT rc = ex->pVirtualChannelInitEx(probe, nullptr, initHandle, &probe->channelDef, 1, VIRTUAL_CHANNEL_VERSION_WIN2000, initEvent);
     if (rc != CHANNEL_RC_OK) {
-        std::fprintf(stderr, "krdpctl-probe: VirtualChannelInitEx failed: %u\n", rc);
+        logf("VirtualChannelInitEx failed: %u", rc);
         return FALSE;
     }
     return TRUE;
@@ -265,7 +318,7 @@ Probe *g_gfxProbe = nullptr;
 
 UINT probeResetGraphics(RdpgfxClientContext *gfx, const RDPGFX_RESET_GRAPHICS_PDU *pdu)
 {
-    std::fprintf(stderr, "krdpctl-probe: ResetGraphics desktop %ux%u monitors %u:", pdu->width, pdu->height, pdu->monitorCount);
+    std::fprintf(stderr, "%s krdpctl-probe: ResetGraphics desktop %ux%u monitors %u:", stamp().constData(), pdu->width, pdu->height, pdu->monitorCount);
     for (UINT32 i = 0; i < pdu->monitorCount; ++i) {
         const auto &monitor = pdu->monitorDefArray[i];
         std::fprintf(stderr, " [%d,%d %dx%d%s]", monitor.left, monitor.top, monitor.right - monitor.left + 1, monitor.bottom - monitor.top + 1, (monitor.flags & MONITOR_PRIMARY) ? " primary" : "");
@@ -279,7 +332,7 @@ UINT probeSurfaceCommand(RdpgfxClientContext *gfx, const RDPGFX_SURFACE_COMMAND 
     if (auto *probe = g_gfxProbe) {
         const unsigned count = ++probe->framesPerSurface[cmd->surfaceId];
         if (count == 1) {
-            std::fprintf(stderr, "krdpctl-probe: first frame on surface %u (codec %u, %ux%u)\n", cmd->surfaceId, cmd->codecId, cmd->width, cmd->height);
+            logf("first frame on surface %u (codec %u, %ux%u)", cmd->surfaceId, cmd->codecId, cmd->width, cmd->height);
         }
     }
     return g_gdiSurfaceCommand ? g_gdiSurfaceCommand(gfx, cmd) : CHANNEL_RC_OK;
@@ -329,11 +382,11 @@ BOOL loadChannels(freerdp *instance)
 {
     auto *probe = probeOf(instance->context);
     if (probe->gfx && !freerdp_client_load_addins(instance->context->channels, instance->context->settings)) {
-        std::fprintf(stderr, "krdpctl-probe: freerdp_client_load_addins failed\n");
+        logf("freerdp_client_load_addins failed");
         return FALSE;
     }
     if (freerdp_channels_client_load_ex(instance->context->channels, instance->context->settings, krdpctlEntryEx, probe) != 0) {
-        std::fprintf(stderr, "krdpctl-probe: could not register the KRDPCTL channel\n");
+        logf("could not register the KRDPCTL channel");
         return FALSE;
     }
     return TRUE;
@@ -354,12 +407,12 @@ BOOL postConnect(freerdp *instance)
     auto *probe = probeOf(instance->context);
     if (probe->gfx) {
         if (!gdi_init(instance, PIXEL_FORMAT_BGRA32)) {
-            std::fprintf(stderr, "krdpctl-probe: gdi_init failed\n");
+            logf("gdi_init failed");
             return FALSE;
         }
         instance->context->update->DesktopResize = desktopResize;
     }
-    std::fprintf(stderr, "krdpctl-probe: connected (security protocol %u)\n", freerdp_settings_get_uint32(instance->context->settings, FreeRDP_SelectedProtocol));
+    logf("connected (security protocol %u)", freerdp_settings_get_uint32(instance->context->settings, FreeRDP_SelectedProtocol));
     return TRUE;
 }
 
@@ -373,13 +426,13 @@ void postDisconnect(freerdp *instance)
 
 DWORD verifyCertificate(freerdp *, const char *host, UINT16 port, const char *, const char *subject, const char *issuer, const char *fingerprint, DWORD)
 {
-    std::fprintf(stderr, "krdpctl-probe: accepting certificate of %s:%u for this run\n  subject %s\n  issuer %s\n  fingerprint %s\n", host, port, subject, issuer, fingerprint);
+    logf("accepting certificate of %s:%u for this run\n  subject %s\n  issuer %s\n  fingerprint %s", host, port, subject, issuer, fingerprint);
     return 2; // accepted for this session only, nothing stored
 }
 
 DWORD verifyChangedCertificate(freerdp *, const char *host, UINT16 port, const char *, const char *subject, const char *issuer, const char *fingerprint, const char *, const char *, const char *, DWORD)
 {
-    std::fprintf(stderr, "krdpctl-probe: accepting CHANGED certificate of %s:%u for this run\n  subject %s\n  issuer %s\n  fingerprint %s\n", host, port, subject, issuer, fingerprint);
+    logf("accepting CHANGED certificate of %s:%u for this run\n  subject %s\n  issuer %s\n  fingerprint %s", host, port, subject, issuer, fingerprint);
     return 2;
 }
 
@@ -439,7 +492,7 @@ bool applySettings(rdpSettings *s, const QString &host, int port, const QString 
 int usage()
 {
     std::fprintf(stderr,
-                 "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --silent) [--gfx] [--timeout SECONDS] [--no-pong]\n");
+                 "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) [--gfx] [--timeout SECONDS] [--no-pong]\n");
     return 2;
 }
 
@@ -475,19 +528,24 @@ int main(int argc, char **argv)
         } else if (arg == QLatin1String("--silent")) {
             probe.mode = Mode::Silent;
             modeGiven = true;
-        } else if (arg == QLatin1String("--apply") && i + 1 < argc) {
-            QFile file(QString::fromLocal8Bit(argv[++i]));
-            if (!file.open(QIODevice::ReadOnly)) {
-                std::fprintf(stderr, "krdpctl-probe: cannot read %s\n", argv[i]);
-                return 2;
-            }
-            QJsonParseError error;
-            const auto doc = QJsonDocument::fromJson(file.readAll(), &error);
-            if (!doc.isObject()) {
-                std::fprintf(stderr, "krdpctl-probe: %s is not a JSON object: %s\n", argv[i], qPrintable(error.errorString()));
-                return 2;
-            }
-            probe.applyBody = doc.object();
+        } else if ((arg == QLatin1String("--apply") || arg == QLatin1String("--apply-seq")) && i + 1 < argc) {
+            // --apply takes one file; --apply-seq every following argument
+            // up to the next option.
+            const bool sequence = arg == QLatin1String("--apply-seq");
+            do {
+                QFile file(QString::fromLocal8Bit(argv[++i]));
+                if (!file.open(QIODevice::ReadOnly)) {
+                    logf("cannot read %s", argv[i]);
+                    return 2;
+                }
+                QJsonParseError error;
+                const auto doc = QJsonDocument::fromJson(file.readAll(), &error);
+                if (!doc.isObject()) {
+                    logf("%s is not a JSON object: %s", argv[i], qPrintable(error.errorString()));
+                    return 2;
+                }
+                probe.applyBodies.push_back(doc.object());
+            } while (sequence && i + 1 < argc && std::strncmp(argv[i + 1], "--", 2) != 0);
             probe.mode = Mode::Apply;
             modeGiven = true;
         } else if (arg == QLatin1String("--gfx")) {
@@ -545,7 +603,7 @@ int main(int argc, char **argv)
 
     rdpContext *context = freerdp_client_context_new(&entryPoints);
     if (!context) {
-        std::fprintf(stderr, "krdpctl-probe: freerdp_client_context_new failed\n");
+        logf("freerdp_client_context_new failed");
         return 1;
     }
     reinterpret_cast<ProbeContext *>(context)->probe = &probe;
@@ -559,53 +617,77 @@ int main(int argc, char **argv)
     instance->VerifyChangedCertificateEx = verifyChangedCertificate;
 
     if (!applySettings(context->settings, host, port, user, password, probe.gfx)) {
-        std::fprintf(stderr, "krdpctl-probe: settings rejected\n");
+        logf("settings rejected");
         freerdp_client_context_free(context);
         return 1;
     }
 
-    std::fprintf(stderr, "krdpctl-probe: connecting to %s:%d as %s%s\n", qPrintable(host), port, qPrintable(user), probe.gfx ? " (with gfx)" : "");
+    logf("connecting to %s:%d as %s%s", qPrintable(host), port, qPrintable(user), probe.gfx ? " (with gfx)" : "");
     int exitCode = 0;
     if (!freerdp_connect(instance)) {
         const UINT32 code = freerdp_get_last_error(context);
-        std::fprintf(stderr, "krdpctl-probe: connect failed: %s (0x%08x)\n", freerdp_get_last_error_string(code), code);
+        logf("connect failed: %s (0x%08x)", freerdp_get_last_error_string(code), code);
         freerdp_client_context_free(context);
         return 1;
     }
 
     const QDeadlineTimer deadline = probe.timeoutSeconds > 0 ? QDeadlineTimer(qint64(probe.timeoutSeconds) * 1000) : QDeadlineTimer(QDeadlineTimer::Forever);
+    // --apply-seq pacing: the next apply goes ApplySequenceGapMs after the
+    // previous one was answered (or ApplySequenceReplyCapMs after it was
+    // sent, if never answered). Answers are counted on the channel thread.
+    int answersPaced = 0;
+    QDeadlineTimer nextApplyAt(QDeadlineTimer::Forever);
+    QDeadlineTimer replyCap(QDeadlineTimer::Forever);
     HANDLE handles[MAXIMUM_WAIT_OBJECTS] = {};
     while (!g_interrupted && !done(&probe)) {
+        if (probe.mode == Mode::Apply && probe.nextApply < probe.applyBodies.size() && probe.sentRequest) {
+            const int answered = probe.appliesAnswered.load();
+            if (answered > answersPaced) {
+                answersPaced = answered;
+                nextApplyAt = QDeadlineTimer(ApplySequenceGapMs);
+                replyCap = QDeadlineTimer(QDeadlineTimer::Forever);
+            } else if (replyCap.isForever() && nextApplyAt.isForever()) {
+                replyCap = QDeadlineTimer(ApplySequenceReplyCapMs);
+            }
+            if (nextApplyAt.hasExpired() || replyCap.hasExpired()) {
+                if (replyCap.hasExpired()) {
+                    logf("apply %d unanswered after %lld s; sending the next one anyway", probe.nextApply, static_cast<long long>(ApplySequenceReplyCapMs / 1000));
+                }
+                nextApplyAt = QDeadlineTimer(QDeadlineTimer::Forever);
+                replyCap = QDeadlineTimer(QDeadlineTimer::Forever);
+                sendNextApply(&probe);
+            }
+        }
         if (deadline.hasExpired()) {
-            std::fprintf(stderr, "krdpctl-probe: timeout after %d s\n", probe.timeoutSeconds);
+            logf("timeout after %d s", probe.timeoutSeconds);
             exitCode = probe.mode == Mode::Query ? 3 : 0;
             break;
         }
         if (freerdp_shall_disconnect_context(context)) {
             const UINT32 info = freerdp_error_info(instance);
-            std::fprintf(stderr, "krdpctl-probe: server ended the session: %s (0x%08x)\n", freerdp_get_error_info_string(info), info);
+            logf("server ended the session: %s (0x%08x)", freerdp_get_error_info_string(info), info);
             exitCode = done(&probe) ? 0 : 4;
             break;
         }
         const DWORD count = freerdp_get_event_handles(context, handles, MAXIMUM_WAIT_OBJECTS);
         if (count == 0) {
-            std::fprintf(stderr, "krdpctl-probe: no event handles\n");
+            logf("no event handles");
             exitCode = 1;
             break;
         }
         const DWORD status = WaitForMultipleObjects(count, handles, FALSE, 100);
         if (status == WAIT_FAILED) {
-            std::fprintf(stderr, "krdpctl-probe: WaitForMultipleObjects failed\n");
+            logf("WaitForMultipleObjects failed");
             exitCode = 1;
             break;
         }
         if (!freerdp_check_event_handles(context)) {
             if (freerdp_shall_disconnect_context(context)) {
                 const UINT32 info = freerdp_error_info(instance);
-                std::fprintf(stderr, "krdpctl-probe: server ended the session: %s (0x%08x)\n", freerdp_get_error_info_string(info), info);
+                logf("server ended the session: %s (0x%08x)", freerdp_get_error_info_string(info), info);
             } else {
                 const UINT32 code = freerdp_get_last_error(context);
-                std::fprintf(stderr, "krdpctl-probe: connection lost: %s (0x%08x)\n", freerdp_get_last_error_string(code), code);
+                logf("connection lost: %s (0x%08x)", freerdp_get_last_error_string(code), code);
             }
             exitCode = done(&probe) ? 0 : 4;
             break;
@@ -615,7 +697,7 @@ int main(int argc, char **argv)
         exitCode = 1;
     }
     if (g_interrupted) {
-        std::fprintf(stderr, "krdpctl-probe: interrupted\n");
+        logf("interrupted");
     }
     if (probe.gfx) {
         unsigned total = 0;
@@ -624,7 +706,7 @@ int main(int argc, char **argv)
             total += count;
             perSurface += QStringLiteral(" surface %1: %2").arg(surface).arg(count);
         }
-        std::fprintf(stderr, "krdpctl-probe: %u frame(s) received%s\n", total, qPrintable(perSurface));
+        logf("%u frame(s) received%s", total, qPrintable(perSurface));
     }
 
     freerdp_disconnect(instance);

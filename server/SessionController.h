@@ -273,17 +273,35 @@ private:
      * with the RDP layout the monitors' rects and the primary as the layout
      * says. Marks the wrapper a layout client. Monitors whose output is not
      * a QScreen yet are left out and logged.
+     *
+     * A rebuild is a diff (KRdp::LayoutSessions::diff): a session over an
+     * output the new layout still streams from keeps running, one over an
+     * output that is gone (or that this apply removed or created, per
+     * \a changedOutputs) is dropped, and a session is created for every
+     * output that has none. Returns whether a ResetGraphics is expected to
+     * follow (the RDP layout changed), which is when the client's `layout`
+     * record must wait for it.
      */
-    void buildLayoutSessions(SessionWrapper *wrapper, const KRdp::LayoutControl::Layout &layout, bool retrying = false);
+    bool buildLayoutSessions(SessionWrapper *wrapper, const KRdp::LayoutControl::Layout &layout, bool retrying = false, const QStringList &changedOutputs = {});
     /** A channel client that does not own the layout: viewer sessions from the current layout plus its `layout` record. */
     void buildAsViewer(SessionWrapper *wrapper);
-    /** Rebuild every layout client but \a except from the current layout and send each its `layout`. */
-    void describeLayoutClients(SessionWrapper *except);
+    /** Rebuild (diff) every layout client but \a except from the current layout and send each its `layout`. */
+    void describeLayoutClients(SessionWrapper *except, const QStringList &changedOutputs = {});
+    /**
+     * Desk takeover for a layout client (OPT-044 §4): arm the wrapper's
+     * console takeover detector while \a layout keeps a real monitor dark,
+     * latch it otherwise. Called by every build.
+     */
+    void armLayoutTakeover(SessionWrapper *wrapper, const KRdp::LayoutControl::Layout &layout);
     /** The current layout from \a wrapper's point of view (owner and `you` filled in). */
     KRdp::LayoutControl::Layout layoutFor(const SessionWrapper *wrapper) const;
-    /** Owe \a wrapper a `layout` record: sent by sendLayoutNow() once its ResetGraphics is out (or after the fallback). */
-    void sendLayout(SessionWrapper *wrapper);
-    void sendLayoutNow(SessionWrapper *wrapper);
+    /**
+     * Send \a wrapper its `layout` (or, with \a takeover, `takeover`) record:
+     * owed until its ResetGraphics is out (or the fallback) when
+     * \a afterReset says one is coming, right away otherwise.
+     */
+    void sendLayout(SessionWrapper *wrapper, bool afterReset, bool takeover = false);
+    void sendLayoutNow(SessionWrapper *wrapper, bool takeover);
     /** \a id (a layout client) is gone or forfeited the layout: release if it owned, then re-describe the rest. */
     void onLayoutClientGone(const QString &id, const QString &reason);
     /** The owner is released (by whoever decided it): restore the desk and re-describe the remaining layout clients. */

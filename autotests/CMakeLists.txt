@@ -54,3 +54,9 @@ add_executable(LayoutOwnerTest LayoutOwnerTest.cpp)
 target_include_directories(LayoutOwnerTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
 target_link_libraries(LayoutOwnerTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME LayoutOwnerTest COMMAND LayoutOwnerTest)
+
+# LayoutSessionDiff is header-only (server/): the per-connection session diff a live KRDPCTL apply runs.
+add_executable(LayoutSessionDiffTest LayoutSessionDiffTest.cpp)
+target_include_directories(LayoutSessionDiffTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(LayoutSessionDiffTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME LayoutSessionDiffTest COMMAND LayoutSessionDiffTest)

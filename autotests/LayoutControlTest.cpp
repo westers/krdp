@@ -625,6 +625,126 @@ private Q_SLOTS:
         QVERIFY(!touchedHdmi);
     }
 
+    // --- Live re-apply diffs (Task 4): the planner against a layout that already has state ---
+
+    void lightingAStoodInMonitorTouchesOnlyIt()
+    {
+        // plan(current_with_standin, apply_light_DP1) → RemoveStandIn + LightReal
+        // for DP-1 and nothing at all for HDMI-A-1. The current layout is
+        // built directly (not through a prior plan): what the executor's
+        // current() reports after a Fit stand-in has been applied.
+        auto current = hal9000Layout();
+        current.monitors[0].lit = false;
+        current.monitors[0].standIn = true;
+        current.monitors[0].standInSize = QSize(1920, 1080);
+        current.monitors[0].standInScale = 1.0;
+        current.owner = QStringLiteral("conn-1");
+
+        ApplyRequest request;
+        request.monitors = {existingMonitorEntry(QStringLiteral("DP-1"), true)};
+        const auto result = plan(current, request, QStringLiteral("conn-1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(result));
+        const auto &p = std::get<Plan>(result);
+
+        QCOMPARE(p.actions.size(), 2);
+        QCOMPARE(p.actions[0].kind, ActionKind::RemoveStandIn);
+        QCOMPARE(p.actions[0].id, QStringLiteral("DP-1"));
+        QCOMPARE(p.actions[1].kind, ActionKind::LightReal);
+        QCOMPARE(p.actions[1].id, QStringLiteral("DP-1"));
+        for (const auto &action : p.actions) {
+            QVERIFY(action.id != QStringLiteral("HDMI-A-1"));
+        }
+        const auto *hdmi = findMonitor(p.resulting.monitors, QStringLiteral("HDMI-A-1"));
+        QVERIFY(hdmi);
+        QCOMPARE(*hdmi, current.monitors[1]);
+        const auto *dp1 = findMonitor(p.resulting.monitors, QStringLiteral("DP-1"));
+        QVERIFY(dp1);
+        QVERIFY(dp1->lit);
+        QVERIFY(!dp1->standIn);
+        QVERIFY(!dp1->standInSize);
+    }
+
+    void restatingTheCurrentLayoutPlansNoActions()
+    {
+        // plan(current, apply_same) → no actions: a client that re-sends its
+        // whole mapping (the panel does, debounced) must not make the server
+        // touch anything. Every kind of state is present: a Fit stand-in
+        // (re-sent at the same size, scale omitted), a dark real monitor
+        // (re-sent lit:false) and the requester's own extra virtual monitor
+        // (re-sent at its size and scale).
+        auto current = hal9000Layout();
+        current.monitors[0].lit = false;
+        current.monitors[0].standIn = true;
+        current.monitors[0].standInSize = QSize(1920, 1080);
+        current.monitors[0].standInScale = 1.25;
+        current.monitors[1].lit = false;
+        current.monitors.push_back(HostMonitor{
+            .id = QStringLiteral("virtual-1"),
+            .name = QStringLiteral("virtual-1"),
+            .kind = Kind::Virtual,
+            .size = QSize(1920, 1080),
+            .position = QPoint(5120, 0),
+            .scale = 1.25,
+            .primary = false,
+            .lit = true,
+            .standIn = false,
+            .standInSize = {},
+            .standInScale = {},
+            .owner = QStringLiteral("conn-1"),
+        });
+        current.owner = QStringLiteral("conn-1");
+
+        ApplyRequest request;
+        request.monitors = {
+            existingMonitorEntry(QStringLiteral("DP-1"), {}, QSize(1920, 1080)),
+            existingMonitorEntry(QStringLiteral("HDMI-A-1"), false),
+            existingMonitorEntry(QStringLiteral("virtual-1"), {}, QSize(1920, 1080), 1.25),
+        };
+        const auto result = plan(current, request, QStringLiteral("conn-1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(result));
+        const auto &p = std::get<Plan>(result);
+        QVERIFY2(p.actions.isEmpty(), qPrintable(QStringLiteral("%1 action(s) planned for an unchanged layout").arg(p.actions.size())));
+        QCOMPARE(p.resulting.monitors, current.monitors);
+    }
+
+    void privateReapplyPlansNoActions()
+    {
+        auto current = hal9000Layout();
+        current.monitors[0].lit = false;
+        current.monitors[1].lit = false;
+        current.owner = QStringLiteral("conn-1");
+
+        ApplyRequest request;
+        request.privateMode = true;
+        const auto result = plan(current, request, QStringLiteral("conn-1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(result));
+        QVERIFY(std::get<Plan>(result).actions.isEmpty());
+        QCOMPARE(std::get<Plan>(result).resulting.monitors, current.monitors);
+    }
+
+    void resizingAStandInReplacesIt()
+    {
+        // The same stand-in at another size is a change (another output, in
+        // fact: size is part of its name), planned as one CreateStandIn.
+        auto current = hal9000Layout();
+        current.monitors[0].lit = false;
+        current.monitors[0].standIn = true;
+        current.monitors[0].standInSize = QSize(1920, 1080);
+        current.monitors[0].standInScale = 1.0;
+
+        ApplyRequest request;
+        request.monitors = {existingMonitorEntry(QStringLiteral("DP-1"), {}, QSize(1600, 900))};
+        const auto result = plan(current, request, QStringLiteral("conn-1"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(result));
+        const auto &p = std::get<Plan>(result);
+        QCOMPARE(p.actions.size(), 1);
+        QCOMPARE(p.actions[0].kind, ActionKind::CreateStandIn);
+        QCOMPARE(p.actions[0].size, QSize(1600, 900));
+        const auto *dp1 = findMonitor(p.resulting.monitors, QStringLiteral("DP-1"));
+        QVERIFY(dp1);
+        QCOMPARE(dp1->standInSize, std::optional<QSize>(QSize(1600, 900)));
+    }
+
     void unknownIdIsInvalid() // (h)
     {
         ApplyRequest request;

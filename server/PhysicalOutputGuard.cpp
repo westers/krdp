@@ -293,6 +293,19 @@ bool PhysicalOutputGuard::layoutControlHeld() const
     return m_held && m_layoutControl;
 }
 
+bool PhysicalOutputGuard::cancelLayoutControl()
+{
+    if (!layoutControlHeld()) {
+        return false;
+    }
+    m_held = false;
+    m_layoutControl = false;
+    m_physical.clear();
+    QFile::remove(stateFilePath());
+    qInfo() << "Layout control cancelled before any output change; snapshot and state file dropped, nothing to restore";
+    return true;
+}
+
 bool PhysicalOutputGuard::waitForPhysicalPresent() const
 {
     if (!hasSnapshot()) {

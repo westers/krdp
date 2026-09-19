@@ -483,7 +483,15 @@ std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &reques
             if (entry.size->width() > caps.maxOutputPx || entry.size->height() > caps.maxOutputPx) {
                 return Error{QStringLiteral("invalid"), QStringLiteral("stand-in for %1 exceeds the %2px output limit").arg(monitor.id).arg(caps.maxOutputPx)};
             }
-            const qreal standInScale = entry.scale.value_or(1.0);
+            // A scale left out keeps the stand-in's current one (as a virtual
+            // monitor's does below); a new stand-in defaults to 1.
+            const qreal standInScale = entry.scale.value_or(monitor.standIn && monitor.standInScale ? *monitor.standInScale : 1.0);
+            if (monitor.standIn && monitor.standInSize == *entry.size && monitor.standInScale && qFuzzyCompare(*monitor.standInScale, standInScale)) {
+                // Already stood in exactly so: a client re-sending its whole
+                // mapping (the panel does) changes nothing here. `lit` is
+                // implied false by the stand-in, as for a fresh one.
+                continue;
+            }
             actions.append(Action{
                 .kind = ActionKind::CreateStandIn,
                 .id = monitor.id,

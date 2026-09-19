@@ -73,6 +73,12 @@ public:
         std::optional<KRdp::LayoutControl::Error> error;
     };
 
+    /**
+     * \a sessionFactory creates the creator sessions; pass an EMPTY factory
+     * for a session type that cannot create virtual outputs (the portal),
+     * and every execute() is refused `unsupported` before anything is held
+     * or waited for.
+     */
     HostLayoutExecutor(PhysicalOutputGuard *guard, SessionFactory sessionFactory, WakeHook wake, QObject *parent = nullptr);
     ~HostLayoutExecutor() override;
 
@@ -134,6 +140,15 @@ private:
         /** The creator sessions have been started (or there were none to start). */
         bool creationStarted = false;
         bool arranged = false;
+        /**
+         * This apply's beginLayoutControl() is what took the hold (nothing
+         * was held or created before it). An abort before the arrangement
+         * then cancels the hold outright: the physical outputs were never
+         * touched, so there is nothing to restore (re-review Minor 3).
+         */
+        bool tookHold = false;
+        /** A creator session's start() has been called: KWin may have re-laid outputs out since, so the hold stays. */
+        bool anyCreatorStarted = false;
         /** An abort is queued; progress checks stand down. */
         bool abortScheduled = false;
         QElapsedTimer wakeClock;

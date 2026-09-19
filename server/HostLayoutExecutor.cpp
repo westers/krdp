@@ -20,8 +20,9 @@ namespace
 // polled after the wake for every physical output to report "on", and how
 // long at most (a panel coming out of standby answers within a second or
 // two; past this the creation goes ahead behind the physical-output settle
-// alone, logged).
-constexpr int DpmsPollMs = 250;
+// alone, logged). Each poll is a ~100-200 ms child process on the main
+// thread, so every 500 ms rather than 250 (re-review Minor 5).
+constexpr int DpmsPollMs = 500;
 constexpr int DpmsWakeTimeoutMs = 6000;
 // After the arrangement: how often QGuiApplication::screens() is polled for
 // the outputs the sessions will capture, how long they must all have been
@@ -221,6 +222,7 @@ std::optional<Error> HostLayoutExecutor::execute(const Plan &plan, const QString
         if (!m_guard || !m_guard->available()) {
             return Error{u"unsupported"_s, u"layout control needs kscreen-doctor on the server"_s};
         }
+        pending.tookHold = !controlling();
         if (!m_guard->beginLayoutControl()) {
             return Error{u"invalid"_s, u"the server cannot take control of the physical outputs right now (see its log)"_s};
         }
@@ -322,6 +324,7 @@ void HostLayoutExecutor::startCreation()
         });
         creator.session = std::move(session);
         qInfo().noquote() << u"Creating virtual output %1 (%2x%3 @%4) for %5"_s.arg(name).arg(creator.record.size.width()).arg(creator.record.size.height()).arg(creator.record.scale).arg(m_pending->requester);
+        m_pending->anyCreatorStarted = true;
         raw->start();
     }
     // start() may have resolved synchronously (KWin replaying a known
@@ -455,6 +458,17 @@ void HostLayoutExecutor::abortPending(const Error &error)
         creator.session.reset();
     }
     m_pending->creating.clear();
+    if (m_pending->tookHold && !m_pending->anyCreatorStarted && !m_pending->arranged && m_outputs.empty() && m_guard) {
+        // Nothing has changed since this apply took the hold: no output was
+        // created (the settle-timeout and portal-factory aborts land here,
+        // before the first start()) and the arrangement never ran, so the
+        // hold is dropped rather than spent on a needless restore at the
+        // owner's disconnect (re-review Minor 3). Once a creator has been
+        // started the hold stays: KWin may have replayed a remembered
+        // arrangement the moment the known output appeared, and the
+        // snapshot is what undoes that at release.
+        m_guard->cancelLayoutControl();
+    }
     finish(error);
 }
 

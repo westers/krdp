@@ -186,6 +186,34 @@ back the same way with `specific` (or whichever mode was in use before).
 kwriteconfig6 --file krdpserverrc --group General --key MonitorMode multi --notify
 ```
 
+**The own client does not use `MonitorMode` at all.** It joins the private
+`KRDPCTL` static virtual channel (OPT-044, slice 2c) and tells the server
+per connection what to stream: which real monitors stay lit at the desk,
+which are stood in by a virtual output at the client's size ("Fit"), which
+extra virtual monitors to create, or Private (every real monitor dark, each
+streamed from a native-size stand-in). The server builds that connection's
+sessions from the resulting host layout, one per host monitor; a later
+`apply` on the same connection is applied as a diff (only the sessions whose
+output changed are restarted, the rest keep streaming), other channel
+clients connected at the same time follow the owner's layout as viewers, and
+if someone at the desk moves the real mouse (or uses "Restore my monitors" /
+`Meta+Ctrl+Alt+R`) the physical outputs come back at once, every channel
+client is told with a `takeover` record and the owner's next `apply`
+re-applies. The config keys above are the **default for clients without the
+channel** (Remmina, `sdl-freerdp3`, stock FreeRDP): they get the configured
+`MonitorMode` exactly as before, and they are never given a `KRDPCTL`
+layout. Steve's live service is meant to run `MonitorMode=multi` as that
+fallback once the own client 0.4.0 is in daily use (the giant-desktop
+presentation for third-party clients), with the own client choosing
+virtual or physical per connection over the channel; `virtual`, `replace`,
+`extend` and `VirtualMonitorLayout` stay for channel-less clients that need
+a virtual desktop. A channel client and a configured `virtual` client
+cannot hold the physical outputs at the same time: whichever is second is
+refused (the channel client with `error invalid`, the `virtual` client
+dropped after its capabilities exchange). `examples/krdpctl-probe` is a
+minimal libfreerdp client for the channel (`--query`, `--apply FILE.json`,
+`--apply-seq A.json B.json …`, `--gfx`).
+
 To test `multi` without touching the live service, run a second instance on
 its own port and config directory, e.g. `XDG_CONFIG_HOME=<tmp> krdpserver
 --plasma --port 3391 -u krdptest -p krdptest --certificate <cert>
