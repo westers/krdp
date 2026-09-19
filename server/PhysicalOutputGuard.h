@@ -39,6 +39,15 @@ public:
 
     bool available() const;
     /**
+     * Read-only look at every connected output (physical and virtual) as
+     * `kscreen-doctor -j` reports it right now. Touches neither the snapshot
+     * nor the held state: what the `KRDPCTL` `layout` record is answered from
+     * (OPT-044), where snapshot()'s side effects on the restore state would
+     * be wrong. Empty, with \a error set, when kscreen-doctor is missing,
+     * fails or answers something unparseable.
+     */
+    static QVector<KRdp::OutputSnapshot::Output> readOutputs(QString *error = nullptr);
+    /**
      * Read the physical outputs as they are now, as the layout to restore.
      * Refused (false, logged) while a previous replace is not verifiably
      * restored yet, and when no physical output is enabled; neither is a

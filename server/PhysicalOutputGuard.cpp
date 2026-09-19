@@ -121,6 +121,11 @@ QVector<Output> PhysicalOutputGuard::current(QString *error)
     return parse(json, error);
 }
 
+QVector<Output> PhysicalOutputGuard::readOutputs(QString *error)
+{
+    return current(error);
+}
+
 bool PhysicalOutputGuard::snapshot()
 {
     if (m_held) {

@@ -62,6 +62,10 @@ constexpr int TakeoverSuspendMs = 3000;
 // the (blocking) call itself; one timer restarted on each of them turns a
 // burst into one layout reset instead of one per output.
 constexpr int VirtualLayoutAdoptMs = 1000;
+// How long a client that joined the KRDPCTL channel gets to send its first
+// record before the session is built for the configured MonitorMode anyway
+// (slice 2c design, §4 "Session build gate").
+constexpr int ControlFirstRecordMs = 3000;
 
 QString layoutSummary(const QVector<KRdp::VideoMonitor> &monitors)
 {
@@ -104,6 +108,9 @@ public:
         m_adoptTimer.setSingleShot(true);
         m_adoptTimer.setInterval(VirtualLayoutAdoptMs);
         connect(&m_adoptTimer, &QTimer::timeout, this, &SessionWrapper::adoptActualVirtualLayout);
+
+        controlTimer.setSingleShot(true);
+        controlTimer.setInterval(ControlFirstRecordMs);
     }
 
     ~SessionWrapper() override
@@ -831,6 +838,21 @@ public:
     bool virtualLayoutAdopted = false;
     // Console takeover (Task 6c); timestamps are m_clock.elapsed().
     KRdp::Takeover::Detector takeover;
+    /**
+     * KRDPCTL session build gate (OPT-044); see
+     * SessionController::onClientDisplayInfo(). Undecided until the
+     * capabilities exchange is in; Waiting while a channel client's first
+     * record is awaited (controlTimer running); QueryOnly never builds;
+     * Built once the configured build ran, for whatever reason.
+     */
+    enum class ControlGate {
+        Undecided,
+        Waiting,
+        QueryOnly,
+        Built,
+    };
+    ControlGate controlGate = ControlGate::Undecided;
+    QTimer controlTimer;
     QElapsedTimer m_clock;
     QPointer<KRdp::RdpConnection> connection;
     KStatusNotifierItem *m_sni;
@@ -1782,10 +1804,12 @@ void SessionController::rebuildSessions()
     for (const auto &wrapper : m_wrappers) {
         // Mode changes apply to the next connection for a virtual wrapper;
         // rebuilding it here would drop the virtual output under the client.
-        // A wrapper with no sessions at all is a virtual one whose deferred
-        // build (buildVirtualSessions(), once the client's display info is
-        // in) has not run yet: building a physical session for it here would
-        // make that build a no-op and hand the client a physical capture.
+        // A wrapper with no sessions at all has not had its build yet (every
+        // build waits for the client's display info, a virtual one for its
+        // output, a KRDPCTL client's for its first record) or is query-only
+        // and never gets one: building here would either make the pending
+        // build a no-op and hand the client a physical capture, or build for
+        // a client that asked for nothing.
         if (!wrapper || !wrapper->connection || wrapper->outputGuard || wrapper->sessions.empty()) {
             continue;
         }
@@ -1822,15 +1846,26 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     }
 
     auto wrapper = std::make_unique<SessionWrapper>(newConnection, m_sni, &m_displayWakeGuard);
-    if (m_virtualMode) {
-        // The client's desktop size is only known after the capabilities
-        // exchange (session thread); build once it arrives.
-        connect(newConnection, &KRdp::RdpConnection::clientDisplayInfoReceived, wrapper.get(), [this, wrapper = wrapper.get()]() {
-            buildVirtualSessions(wrapper);
-        }, Qt::QueuedConnection);
-    } else {
-        buildSessions(wrapper.get());
-    }
+    // Every mode builds once the capabilities exchange is in (session
+    // thread): that is the first point at which the connection knows whether
+    // the client joined KRDPCTL, whose clients get no session until their
+    // first record (OPT-044), and virtual mode needs the client's desktop
+    // size from the same exchange anyway. Nothing is lost for the other
+    // modes: sessions only start streaming when the video stream is enabled,
+    // which is later still (drdynvc ready), and setSessions() starts them at
+    // once if that has already happened. Both signals are emitted from the
+    // session thread and queued here in order, so a record cannot overtake
+    // the display info; the record connection is made now rather than in
+    // onClientDisplayInfo() so nothing can slip through in between.
+    connect(newConnection, &KRdp::RdpConnection::clientDisplayInfoReceived, wrapper.get(), [this, wrapper = wrapper.get()]() {
+        onClientDisplayInfo(wrapper);
+    }, Qt::QueuedConnection);
+    connect(newConnection, &KRdp::RdpConnection::controlRecordReceived, wrapper.get(), [this, wrapper = wrapper.get()](const QJsonObject &record) {
+        onControlRecord(wrapper, record);
+    }, Qt::QueuedConnection);
+    connect(&wrapper->controlTimer, &QTimer::timeout, wrapper.get(), [this, wrapper = wrapper.get()]() {
+        onControlTimeout(wrapper);
+    });
     if (m_quality.has_value()) {
         newConnection->videoStream()->setQualityCap(quint8(m_quality.value()));
     }
@@ -1855,6 +1890,163 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     });
 
     m_wrappers.push_back(std::move(wrapper));
+}
+
+void SessionController::onClientDisplayInfo(SessionWrapper *wrapper)
+{
+    if (!wrapper || !wrapper->connection || wrapper->controlGate != SessionWrapper::ControlGate::Undecided) {
+        // A reactivation runs the capabilities callback again; the gate is
+        // decided once per connection.
+        return;
+    }
+    if (!wrapper->connection->hasControlChannel()) {
+        buildConfiguredSessions(wrapper);
+        return;
+    }
+    wrapper->controlGate = SessionWrapper::ControlGate::Waiting;
+    wrapper->controlTimer.start();
+    qInfo() << "KRDPCTL: client joined the channel; holding the session build for its first record";
+}
+
+void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObject &record)
+{
+    if (!wrapper || !wrapper->connection) {
+        return;
+    }
+    auto *connection = wrapper->connection.data();
+    const QString type = record.value(QLatin1String("type")).toString();
+    // A record proves the channel: a gate still undecided (cannot happen
+    // with the queued ordering, see onNewConnection()) is decided by it.
+    const bool first = wrapper->controlGate == SessionWrapper::ControlGate::Undecided || wrapper->controlGate == SessionWrapper::ControlGate::Waiting;
+    if (first) {
+        wrapper->controlTimer.stop();
+    }
+
+    if (type == QLatin1String("query")) {
+        const auto layout = currentLayout(connection);
+        connection->sendControlRecord(KRdp::LayoutControl::layoutRecord(layout));
+        if (first) {
+            // Soft query: the layout and nothing else; the connection ends
+            // when the client hangs up.
+            wrapper->controlGate = SessionWrapper::ControlGate::QueryOnly;
+            qInfo().nospace().noquote() << u"KRDPCTL: query → layout ("_s << layout.monitors.size() << u" monitors), no session built"_s;
+        } else {
+            qInfo().nospace().noquote() << u"KRDPCTL: query → layout ("_s << layout.monitors.size() << u" monitors)"_s;
+        }
+        return;
+    }
+
+    if (type == QLatin1String("apply")) {
+        // Task 3 turns this into owner check -> plan -> execute -> layout.
+        // Until then the request is refused as unsupported and, for a first
+        // record, the configured MonitorMode serves the client as before.
+        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"unsupported"_s, u"apply lands in Task 3"_s}));
+        if (first) {
+            qInfo() << "KRDPCTL: apply refused (not implemented yet); using the configured MonitorMode";
+            buildConfiguredSessions(wrapper);
+        }
+        return;
+    }
+
+    connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"unsupported"_s, u"unknown record type \"%1\""_s.arg(type)}));
+    if (first) {
+        // Whatever this client speaks, its first record was not one of ours;
+        // serve it as a client without the channel rather than leave it
+        // staring at nothing for the rest of the timeout.
+        qInfo() << "KRDPCTL: first record has unknown type" << type << "; using the configured MonitorMode";
+        buildConfiguredSessions(wrapper);
+    }
+}
+
+void SessionController::onControlTimeout(SessionWrapper *wrapper)
+{
+    if (!wrapper || !wrapper->connection || wrapper->controlGate != SessionWrapper::ControlGate::Waiting) {
+        return;
+    }
+    qInfo() << "KRDPCTL client sent nothing in 3 s; using the configured MonitorMode";
+    buildConfiguredSessions(wrapper);
+}
+
+void SessionController::buildConfiguredSessions(SessionWrapper *wrapper)
+{
+    if (!wrapper || !wrapper->connection) {
+        return;
+    }
+    wrapper->controlGate = SessionWrapper::ControlGate::Built;
+    if (wrapper->connection->state() == KRdp::RdpConnection::State::Closed) {
+        // The client left while the gate was open (a KRDPCTL client that
+        // hung up inside the 3 s, say); the wrapper is about to go away.
+        return;
+    }
+    if (m_virtualMode) {
+        buildVirtualSessions(wrapper);
+    } else {
+        buildSessions(wrapper);
+    }
+}
+
+KRdp::LayoutControl::Layout SessionController::currentLayout(const KRdp::RdpConnection *connection) const
+{
+    using KRdp::LayoutControl::HostMonitor;
+    using KRdp::LayoutControl::Kind;
+
+    KRdp::LayoutControl::Layout layout;
+    layout.you = u"none"_s;
+
+    QString error;
+    const auto outputs = KRdp::OutputSnapshot::physicalOnly(PhysicalOutputGuard::readOutputs(&error));
+    if (!outputs.isEmpty()) {
+        // kscreen-doctor's priority is 1 for the primary; the lowest positive
+        // one wins when 1 is missing (a disabled output reports 0), and exactly
+        // one monitor is primary whatever it reports.
+        int primaryIndex = -1;
+        for (qsizetype i = 0; i < outputs.size(); ++i) {
+            const auto &output = outputs.at(i);
+            if (output.priority > 0 && (primaryIndex < 0 || output.priority < outputs.at(primaryIndex).priority)) {
+                primaryIndex = int(i);
+            }
+        }
+        if (primaryIndex < 0) {
+            primaryIndex = 0;
+        }
+        for (qsizetype i = 0; i < outputs.size(); ++i) {
+            const auto &output = outputs.at(i);
+            layout.monitors.push_back(HostMonitor{
+                .id = output.name,
+                .name = output.name,
+                .kind = Kind::Real,
+                .size = output.size,
+                .position = output.position,
+                .scale = 1.0, // kscreen-doctor -j has it, OutputSnapshot::Output does not (yet)
+                .primary = i == primaryIndex,
+                .lit = output.enabled,
+            });
+        }
+    } else {
+        // No kscreen-doctor (a portal session, or it failed): Qt's screens
+        // are the next best description. Pixel geometry, like the rest.
+        qWarning().noquote() << u"KRDPCTL: could not read the outputs from kscreen-doctor (%1); describing QGuiApplication::screens() instead"_s.arg(error);
+        const auto screens = QGuiApplication::screens();
+        const auto primary = primaryScreenIndex();
+        for (qsizetype i = 0; i < screens.size(); ++i) {
+            const auto *screen = screens.at(i);
+            const qreal ratio = screen->devicePixelRatio();
+            layout.monitors.push_back(HostMonitor{
+                .id = screen->name(),
+                .name = screen->name(),
+                .kind = Kind::Real,
+                .size = (QSizeF(screen->size()) * ratio).toSize(),
+                .position = (QPointF(screen->geometry().topLeft()) * ratio).toPoint(),
+                .scale = ratio,
+                .primary = primary.has_value() ? i == qsizetype(*primary) : i == 0,
+                .lit = true,
+            });
+        }
+    }
+    // Task 3: virtual monitors from the executor table, owner, and `you`
+    // from whether \a connection is the owner.
+    Q_UNUSED(connection)
+    return layout;
 }
 
 void SessionController::stopFromSNI()

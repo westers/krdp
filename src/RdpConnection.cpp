@@ -9,6 +9,7 @@
 
 #include "RdpConnection.h"
 
+#include <atomic>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -30,6 +31,7 @@
 #include "Clipboard.h"
 #include "Cursor.h"
 #include "InputHandler.h"
+#include "LayoutControl.h"
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "Server.h"
@@ -134,6 +136,10 @@ QString vendorSummary(const std::vector<RenderNodeInfo> &nodes)
 // later config change can replace our own choice while an externally-provided
 // value is always left untouched.
 bool g_autoAppliedVaapiDriver = false;
+
+// The layout control static virtual channel (slice 2c, OPT-044). Seven
+// characters: CHANNEL_NAME_LEN is the limit for a static channel name.
+char ControlChannelName[] = "KRDPCTL";
 }
 }
 
@@ -348,6 +354,16 @@ public:
 
     std::mutex clientDisplayMutex;
     ClientDisplay::Info clientDisplay;
+
+    // KRDPCTL (OPT-044). The handle is opened and read on the session
+    // thread; sendControlRecord() writes through it from any thread, so the
+    // mutex orders those writes against the close in onClose().
+    std::mutex controlChannelMutex;
+    HANDLE controlChannel = nullptr;
+    // Whether the client joined the channel; set on the session thread before
+    // clientDisplayInfoReceived() is emitted, read from wherever.
+    std::atomic<bool> controlChannelJoined = false;
+    LayoutControl::Deframer controlDeframer;
 };
 
 RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
@@ -447,6 +463,91 @@ ClientDisplay::Info RdpConnection::clientDisplayInfo() const
 NetworkDetection *RdpConnection::networkDetection() const
 {
     return d->networkDetection.get();
+}
+
+bool RdpConnection::hasControlChannel() const
+{
+    return d->controlChannelJoined.load();
+}
+
+void RdpConnection::sendControlRecord(const QJsonObject &record)
+{
+    const QByteArray data = LayoutControl::frame(record);
+    std::lock_guard lock(d->controlChannelMutex);
+    if (!d->controlChannel) {
+        qCWarning(KRDP) << "KRDPCTL: dropping a" << record.value(QLatin1String("type")).toString() << "record, the channel is not open";
+        return;
+    }
+    // Only queues the bytes with the channel manager (and wakes the session
+    // thread through its event handle); WTSVirtualChannelManagerCheckFileDescriptor()
+    // in run() is what sends them.
+    ULONG written = 0;
+    if (!WTSVirtualChannelWrite(d->controlChannel, const_cast<char *>(data.constData()), ULONG(data.size()), &written)) {
+        qCWarning(KRDP) << "KRDPCTL: could not queue a" << record.value(QLatin1String("type")).toString() << "record";
+    }
+}
+
+void RdpConnection::openControlChannel()
+{
+    if (d->controlChannelJoined.load()) {
+        // Opened (or failed to, once) already.
+        return;
+    }
+    auto context = reinterpret_cast<PeerContext *>(d->peer->context);
+    if (!WTSVirtualChannelManagerIsChannelJoined(context->virtualChannelManager, ControlChannelName)) {
+        return;
+    }
+    // Opened as soon as the join is visible, well before the client can send
+    // on it (its channel plugins only start after activation): data for a
+    // joined-but-unopened static channel is dropped by FreeRDP, not queued.
+    HANDLE channel = WTSVirtualChannelOpen(context->virtualChannelManager, WTS_CURRENT_SESSION, ControlChannelName);
+    {
+        std::lock_guard lock(d->controlChannelMutex);
+        d->controlChannel = channel;
+    }
+    d->controlChannelJoined = true;
+    if (!channel) {
+        qCWarning(KRDP) << "KRDPCTL: the client joined the channel but it could not be opened";
+        return;
+    }
+    qCInfo(KRDP) << "KRDPCTL: channel joined and opened";
+}
+
+bool RdpConnection::readControlChannel()
+{
+    HANDLE channel = nullptr;
+    {
+        std::lock_guard lock(d->controlChannelMutex);
+        channel = d->controlChannel;
+    }
+    if (!channel) {
+        return true;
+    }
+    // The channel manager queues one message per complete channel PDU (the
+    // chunks are reassembled for us); the first call sizes it, the second
+    // takes it. The buffer is never empty even for a zero-length message,
+    // which WTSVirtualChannelRead would otherwise leave queued forever.
+    for (;;) {
+        ULONG length = 0;
+        if (!WTSVirtualChannelRead(channel, 0, nullptr, 0, &length)) {
+            break;
+        }
+        QByteArray buffer(int(qMax<ULONG>(length, 1)), Qt::Uninitialized);
+        ULONG read = 0;
+        if (!WTSVirtualChannelRead(channel, 0, buffer.data(), ULONG(buffer.size()), &read)) {
+            break;
+        }
+        buffer.resize(int(read));
+        d->controlDeframer.feed(buffer);
+        while (auto record = d->controlDeframer.next()) {
+            Q_EMIT controlRecordReceived(*record);
+        }
+        if (d->controlDeframer.overflowed()) {
+            qCWarning(KRDP) << "KRDPCTL: record longer than 64 KiB announced; closing the connection";
+            return false;
+        }
+    }
+    return true;
 }
 
 void RdpConnection::initialize()
@@ -608,6 +709,14 @@ void RdpConnection::run(std::stop_token stopToken)
             }
         }
 
+        // KRDPCTL (OPT-044): opened as soon as the join shows, not once
+        // connected (see openControlChannel()); the client's records arrive
+        // through CheckFileDescriptor() above, queued on the channel.
+        openControlChannel();
+        if (!readControlChannel()) {
+            break;
+        }
+
         d->networkDetection->update();
     }
 
@@ -658,8 +767,12 @@ bool RdpConnection::onCapabilities()
         std::lock_guard lock(d->clientDisplayMutex);
         d->clientDisplay = info;
     }
+    // The MCS channel join is complete by the time FreeRDP asks for the
+    // capabilities, so hasControlChannel() is exact for the slot below.
+    openControlChannel();
     qCInfo(KRDP) << "Client display: desktop" << info.desktopSize << "monitors" << info.monitors.size()
-                 << "monitorLayoutPdu" << freerdp_settings_get_bool(settings, FreeRDP_SupportMonitorLayoutPdu);
+                 << "monitorLayoutPdu" << freerdp_settings_get_bool(settings, FreeRDP_SupportMonitorLayoutPdu)
+                 << "KRDPCTL" << d->controlChannelJoined.load();
     Q_EMIT clientDisplayInfoReceived();
 
     return true;
@@ -707,6 +820,13 @@ bool RdpConnection::onPostConnect()
 
 bool RdpConnection::onClose()
 {
+    {
+        std::lock_guard lock(d->controlChannelMutex);
+        if (d->controlChannel) {
+            WTSVirtualChannelClose(d->controlChannel);
+            d->controlChannel = nullptr;
+        }
+    }
     d->clipboard->close();
     d->videoStream->close();
     setState(State::Closed);

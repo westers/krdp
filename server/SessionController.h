@@ -5,6 +5,7 @@
 
 #include "ClientDisplayInfo.h"
 #include "DisplayWakeGuard.h"
+#include "LayoutControl.h"
 #include "MultiLayout.h"
 #include "PhysicalOutputGuard.h"
 #include "RdpConnection.h"
@@ -14,6 +15,7 @@
 #include <optional>
 #include <vector>
 
+#include <QJsonObject>
 #include <QObject>
 #include <QSize>
 #include <QStringList>
@@ -218,6 +220,16 @@ public:
      */
     static MultiLayoutResult computeMultiLayout(int minimumCount = KRdp::MultiLayout::MinMonitorCount);
 
+    /**
+     * The host layout as a `KRDPCTL` client sees it right now (OPT-044): the
+     * real outputs from a fresh read of KWin's output list (falling back to
+     * QGuiApplication::screens() when kscreen-doctor cannot answer), no
+     * virtual monitors yet (the executor table arrives with Task 3), no
+     * owner, `you = "none"`. \a connection is the recipient; it decides
+     * `you` once layouts have owners.
+     */
+    KRdp::LayoutControl::Layout currentLayout(const KRdp::RdpConnection *connection) const;
+
 private:
     /** What refreshMultiLayout() found. */
     enum class LayoutUpdate {
@@ -230,6 +242,19 @@ private:
     };
 
     void onNewConnection(KRdp::RdpConnection *newConnection);
+    /**
+     * The connection's capabilities exchange is in: build the session set
+     * for the configured MonitorMode, unless the client joined `KRDPCTL`, in
+     * which case nothing is built until its first record (or the 3 s
+     * timeout); see onControlRecord() / onControlTimeout().
+     */
+    void onClientDisplayInfo(SessionWrapper *wrapper);
+    /** One `KRDPCTL` record from the wrapper's client (queued from the session thread). */
+    void onControlRecord(SessionWrapper *wrapper, const QJsonObject &record);
+    /** The `KRDPCTL` client sent nothing in time: configured MonitorMode. */
+    void onControlTimeout(SessionWrapper *wrapper);
+    /** buildSessions() or buildVirtualSessions(), whichever the configuration asks for. */
+    void buildConfiguredSessions(SessionWrapper *wrapper);
     std::unique_ptr<KRdp::AbstractSession> makeSession();
     /** Whether any virtual wrapper currently holds the physical layout replaced. */
     bool physicalLayoutOwned() const;

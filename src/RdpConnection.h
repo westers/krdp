@@ -7,6 +7,7 @@
 #include <memory>
 #include <thread>
 
+#include <QJsonObject>
 #include <QObject>
 
 #include <freerdp/freerdp.h>
@@ -115,6 +116,27 @@ public:
 
     NetworkDetection *networkDetection() const;
 
+    /**
+     * Whether the client joined the `KRDPCTL` static virtual channel (slice
+     * 2c layout control, OPT-044). Known once the MCS channel join is done,
+     * which precedes the capabilities exchange: valid from the moment
+     * clientDisplayInfoReceived() fires. Safe from any thread.
+     */
+    bool hasControlChannel() const;
+    /**
+     * Send one `KRDPCTL` record (framed by LayoutControl::frame()). Callable
+     * from any thread: the write only queues the data with FreeRDP's channel
+     * manager, and the session thread's loop puts it on the wire. Dropped,
+     * with a warning, when the client has no control channel or the
+     * connection is already closed.
+     */
+    void sendControlRecord(const QJsonObject &record);
+    /**
+     * One complete `KRDPCTL` record from the client. Emitted on the session
+     * thread; connect with Qt::QueuedConnection.
+     */
+    Q_SIGNAL void controlRecordReceived(const QJsonObject &record);
+
 private:
     friend BOOL peerCapabilities(freerdp_peer *);
     friend BOOL peerActivate(freerdp_peer *);
@@ -138,6 +160,10 @@ private:
     bool onPostConnect();
     bool onClose();
     bool onSuppressOutput(uint8_t allow);
+    /** Session thread: open `KRDPCTL` once the client has joined it. */
+    void openControlChannel();
+    /** Session thread: hand every queued `KRDPCTL` message to the deframer. False on a protocol violation. */
+    bool readControlChannel();
 
     class Private;
     const std::unique_ptr<Private> d;
