@@ -11,5 +11,8 @@ if(NOT AVCodec_FOUND)
     return()
 endif()
 add_executable(krdpavc444probe main.cpp)
-target_include_directories(krdpavc444probe PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+# SYSTEM: matches autotests/CMakeLists.txt's treatment of the same FreeRDP/WinPR headers, which
+# avoids -Wpedantic/-Wdeprecated-declarations warnings from wtypes.h/sspi.h that a plain PRIVATE
+# include dir surfaces but the main library targets (which use -isystem for these) do not see.
+target_include_directories(krdpavc444probe SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
 target_link_libraries(krdpavc444probe PRIVATE Qt${QT_MAJOR_VERSION}::Gui PkgConfig::AVCodec freerdp winpr)

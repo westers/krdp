@@ -675,8 +675,21 @@ void VideoStream::setChromaCapable(bool capable)
         return;
     }
     qCDebug(KRDP) << "Encoder chroma stream" << (capable ? "available" : "unavailable") << "for adaptive quality";
-    if (!capable && !d->chromaEnabled.load()) {
-        d->chromaEnabled = true; // nothing to shed any more; the next step-down lowers QP
+    if (!capable) {
+        if (!d->chromaEnabled.exchange(true)) {
+            // Nothing to shed any more (the rung is inert while chromaAvailable is false); the
+            // next step-down lowers QP instead. Emitted (not just stored) so the session's own
+            // chromaEnabled flag - which gates setAuxStreamEnabled() - resyncs to this reset
+            // instead of staying stuck off if capability later recovers (see the branch below).
+            Q_EMIT requestedChromaChanged(true);
+        }
+    } else {
+        // Capability recovered (e.g. a stream restart gave the encoder's SPS precondition another
+        // chance): re-emit the current desired state even though updateAdaptiveQuality() sees no
+        // change of its own (chromaAvailable flips independently of chromaEnabled), so a session
+        // whose flag was force-reset by the branch above while incapable resyncs to it now that
+        // applying it is meaningful again.
+        Q_EMIT requestedChromaChanged(d->chromaEnabled.load());
     }
 }
 
@@ -853,10 +866,13 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
     const VideoCodec codec = VideoCodecSupport::codecFor(selectedCaps->version, selectedCaps->capSet.flags, d->codecPreference);
     const int previous = d->negotiatedCodec.exchange(int(codec));
     qCInfo(KRDP).noquote() << QStringLiteral("GFX caps confirmed: %1 codec=%2").arg(QLatin1String(capVersionToString(selectedCaps->version)), QLatin1String(VideoCodecSupport::codecName(codec)));
-    if (d->codecPreference == CodecPreference::Avc444 && codec == VideoCodec::Avc420) {
-        qCWarning(KRDP) << "Codec=avc444 requested but this client advertises no AVC444 support (caps" << capVersionToString(selectedCaps->version) << "); using avc420";
-    }
     if (previous != int(codec)) {
+        // Gated on the codec actually (re)settling on avc420, not on every advertisement: a client
+        // that re-sends CapsAdvertise with the same unsupported result (e.g. mstsc) would otherwise
+        // log this every time instead of once per negotiation.
+        if (d->codecPreference == CodecPreference::Avc444 && codec == VideoCodec::Avc420) {
+            qCWarning(KRDP) << "Codec=avc444 requested but this client advertises no AVC444 support (caps" << capVersionToString(selectedCaps->version) << "); using avc420";
+        }
         if (!d->chromaEnabled.exchange(true)) { // a fresh negotiation starts with chroma on
             Q_EMIT requestedChromaChanged(true);
         }
@@ -1026,13 +1042,16 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
             d->loggedSizeMismatch = false;
 
             // A freshly created surface has no reference picture. If the frame we
-            // are about to send is not a keyframe (e.g. after a caps
+            // are about to send cannot serve as this surface's keyframe (e.g. after a caps
             // re-advertisement the queue holds P-frames), ask the session for one
             // now instead of waiting for the next organic IDR, which on a static
             // desktop can be seconds away (gop 100, frames only on damage).
-            // AVC444: every aux picture is intra; the main picture's flag is the keyframe, so an
-            // aux-only frame after a reset must not consume the per-surface request slot.
-            if (!frame.isKeyFrame && !auxOnly) {
+            // AVC444: every aux picture is intra, but an aux-only refresh can never be the main
+            // IDR a fresh surface needs (the keyFrameSent gate below drops it outright), so it
+            // must always join the request too - excluding it here would silently consume this
+            // reset's one request slot on a frame that was going to be dropped anyway, leaving no
+            // other path to ever ask for a keyframe on this surface.
+            if (!frame.isKeyFrame || auxOnly) {
                 const auto now = clk::steady_clock::now();
                 auto &lastRequest = d->lastKeyFrameRequest[frame.monitorIndex];
                 if (lastRequest == clk::steady_clock::time_point{} || (now - lastRequest) >= KeyFrameRequestMinInterval) {

@@ -38,6 +38,18 @@ struct Decoder {
     }
 };
 
+// Owns every AVFrame the decoder clones so an early return (a decode failure, a size mismatch, a
+// missing reference) frees them same as the success path does, instead of leaking to process exit.
+struct FramePool {
+    std::vector<AVFrame *> frames;
+    ~FramePool()
+    {
+        for (AVFrame *f : frames) {
+            av_frame_free(&f);
+        }
+    }
+};
+
 struct Yuv444 { int w, h; std::vector<uint8_t> y, u, v; explicit Yuv444(int width, int height) : w(width), h(height), y(size_t(width) * height), u(y.size()), v(y.size()) {} };
 
 // The decoder's own reconstruction for one frame: LUMA combine from the main picture, CHROMA combine from the aux.
@@ -122,28 +134,29 @@ int main(int argc, char **argv)
     Decoder dec;
     if (!prims || !dec.open()) { qWarning() << "no primitives / no h264 decoder"; return 2; }
 
-    // One decoder, pictures in wire order: main, then aux when the frame has one.
-    std::vector<AVFrame *> pictures;
+    // One decoder, pictures in wire order: main, then aux when the frame has one. Owned by a
+    // FramePool so every return below (including the early, error ones) frees what was decoded.
+    FramePool pool;
     std::vector<bool> hasAux, hasMain;
     QTextStream in(&index);
     while (!in.atEnd()) {
         const QStringList f = in.readLine().split(u' ', Qt::SkipEmptyParts);
         if (f.size() < 4) continue;
         const qint64 mainBytes = f[1].toLongLong(), auxBytes = f[2].toLongLong();
-        if (mainBytes > 0 && dec.feed(mainFile.read(mainBytes), pictures) < 0) { qWarning() << "main picture" << f[0] << "failed to decode"; return 1; }
-        if (avc444 && auxBytes > 0 && dec.feed(auxFile.read(auxBytes), pictures) < 0) { qWarning() << "aux picture" << f[0] << "failed to decode"; return 1; }
+        if (mainBytes > 0 && dec.feed(mainFile.read(mainBytes), pool.frames) < 0) { qWarning() << "main picture" << f[0] << "failed to decode"; return 1; }
+        if (avc444 && auxBytes > 0 && dec.feed(auxFile.read(auxBytes), pool.frames) < 0) { qWarning() << "aux picture" << f[0] << "failed to decode"; return 1; }
         hasAux.push_back(avc444 && auxBytes > 0);
         hasMain.push_back(mainBytes > 0);       // 0 for an aux-only refresh
     }
-    dec.feed(QByteArray(), pictures); // flush
+    dec.feed(QByteArray(), pool.frames); // flush
     size_t expected = 0; for (size_t i = 0; i < hasAux.size(); ++i) expected += (hasMain[i] ? 1 : 0) + (hasAux[i] ? 1 : 0);
-    qInfo() << "frames" << hasAux.size() << "pictures decoded" << pictures.size() << "expected" << expected;
-    if (pictures.size() != expected || pictures.empty()) return 1;
+    qInfo() << "frames" << hasAux.size() << "pictures decoded" << pool.frames.size() << "expected" << expected;
+    if (pool.frames.size() != expected || pool.frames.empty()) return 1;
 
     // Walk to the last frame's pictures.
     size_t pos = 0; const AVFrame *lastMain = nullptr, *lastAux = nullptr;
     // The client keeps the last luma and applies the newest chroma, which is what an aux-only refresh relies on.
-    for (size_t i = 0; i < hasAux.size(); ++i) { if (hasMain[i]) lastMain = pictures[pos++]; if (hasAux[i]) lastAux = pictures[pos++]; }
+    for (size_t i = 0; i < hasAux.size(); ++i) { if (hasMain[i]) lastMain = pool.frames[pos++]; if (hasAux[i]) lastAux = pool.frames[pos++]; }
     if (!lastMain) { qWarning() << "no main picture in the run"; return 1; }
     if (lastMain->width < w || lastMain->height < h) { qWarning() << "decoded" << lastMain->width << "x" << lastMain->height << "smaller than --size"; return 1; }
 
@@ -164,6 +177,5 @@ int main(int argc, char **argv)
         double p[3]; psnr(prims, decoded, reference, p);
         qInfo().noquote() << QStringLiteral("psnr Y=%1 U=%2 V=%3 lastFrameHasAux=%4").arg(p[0], 0, 'f', 2).arg(p[1], 0, 'f', 2).arg(p[2], 0, 'f', 2).arg(lastAux ? 1 : 0);
     }
-    for (AVFrame *f : pictures) av_frame_free(&f);
-    return 0;
+    return 0; // pool's destructor frees every decoded picture
 }

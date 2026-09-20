@@ -4,16 +4,14 @@
 
 #pragma once
 
+#include "VideoCodecSupport.h"
+#include "krdp_export.h"
+
 #include <PipeWireEncodedStream>
 #include <PipeWireSourceStream>
 #include <QPointF>
 #include <QRect>
 #include <QString>
-
-// Qt's QMetaType (needed for VideoCodecSupport.h's Q_DECLARE_METATYPE) comes in transitively via
-// the Qt/PipeWire includes above; VideoCodecSupport.h must come after them, not before.
-#include "VideoCodecSupport.h"
-#include "krdp_export.h"
 
 class QMimeData;
 

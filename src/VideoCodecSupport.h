@@ -1,4 +1,5 @@
 #pragma once
+#include <QMetaType>
 #include <QString>
 #include <QStringView>
 #include <cstdint>
