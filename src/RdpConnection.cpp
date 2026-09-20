@@ -631,10 +631,11 @@ void RdpConnection::initialize()
     // PSEUDO_XSERVER is apparently required for things to work properly.
     freerdp_settings_set_uint32(settings, FreeRDP_OsMinorType, OSMINORTYPE_PSEUDO_XSERVER);
 
-    // Advertise the standard audio channels. They are only opened after a
-    // client explicitly joins them, which keeps conferencing opt-in per
-    // connection rather than granting any device access by default.
-    freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, true);
+    // RDPSND is a client-selected static channel. Setting AudioPlayback here
+    // makes FreeRDP add it for every client (including clients that selected
+    // no audio), so leave it off and only initialize it when a client has
+    // explicitly joined RDPSND. AUDIN remains a client-selected DVC.
+    freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, false);
     freerdp_settings_set_bool(settings, FreeRDP_AudioCapture, true);
 
     freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
@@ -834,26 +835,35 @@ bool RdpConnection::onPostConnect()
     const QString username = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Username));
     const QString password = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Password));
 
+    bool authenticated = false;
     if (d->server->usePAMAuthentication()) {
         qCDebug(KRDP) << "Attempting authenticating user with PAM";
         if (username == KUser().loginName() && pamAuthenticate(username, password) >= 0) {
             qCDebug(KRDP) << "PAM authentication succeeded for user" << username;
-            return true;
+            authenticated = true;
         }
     }
 
-    const auto users = d->server->users();
-    for (auto user : users) {
-        if (user.password.isEmpty()) {
-            return false;
-        }
-        if (user.name == username && user.password == password) {
-            qCDebug(KRDP) << "User" << username << "authenticated successfully";
-            return true;
+    if (!authenticated) {
+        const auto users = d->server->users();
+        for (auto user : users) {
+            if (user.password.isEmpty()) {
+                return false;
+            }
+            if (user.name == username && user.password == password) {
+                qCDebug(KRDP) << "User" << username << "authenticated successfully";
+                authenticated = true;
+                break;
+            }
         }
     }
 
-    return false;
+    // Static channels must be initialized from PostConnect. Delaying RDPSND
+    // until the run loop can put its formats PDU on the wire while a client is
+    // still in licensing, which FreeRDP correctly rejects as an unexpected
+    // channel message. AUDIN is created here too, then opened from the loop
+    // only once DRDYNVC reaches READY.
+    return authenticated && initializeAudioChannels();
 }
 
 bool RdpConnection::onClose()
@@ -889,26 +899,6 @@ bool RdpConnection::initializeAudioChannels()
 {
     auto context = reinterpret_cast<PeerContext *>(d->peer->context);
     const auto vcm = context->virtualChannelManager;
-
-    if (WTSVirtualChannelManagerIsChannelJoined(vcm, RDPSND_CHANNEL_NAME) && !d->rdpsnd) {
-        d->rdpsnd = rdpsnd_server_context_new(vcm);
-        if (!d->rdpsnd) {
-            qCWarning(KRDP) << "Could not create RDPSND server context";
-            return false;
-        }
-        d->rdpsnd->rdpcontext = d->peer->context;
-        d->rdpsnd->num_server_formats = server_rdpsnd_get_formats(&d->rdpsnd->server_formats);
-        if (d->rdpsnd->num_server_formats == 0) {
-            qCWarning(KRDP) << "RDPSND has no server formats";
-            return false;
-        }
-        d->rdpsnd->src_format = &d->rdpsnd->server_formats[0];
-        if (!d->rdpsnd->Initialize || d->rdpsnd->Initialize(d->rdpsnd, TRUE) != CHANNEL_RC_OK) {
-            qCWarning(KRDP) << "Could not initialize RDPSND";
-            return false;
-        }
-        qCInfo(KRDP) << "RDPSND channel initialized";
-    }
 
     if (!d->audin) {
         d->audin = audin_server_context_new(vcm);
