@@ -30,6 +30,7 @@
 
 #include "AdaptiveQuality.h"
 #include "FrameQueuePolicy.h"
+#include "GfxSurfaceCommand.h"
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
@@ -255,6 +256,10 @@ struct Surface {
     QSize size;
     // Top-left in RDP desktop space, as passed to MapSurfaceToOutput.
     QPoint origin;
+    // AVC444: whether a keyframe has ever been sent on this surface. An aux-only refresh (LC = 2)
+    // needs the decoder the main IDR set up, so it is dropped until this is true; a re-created
+    // surface (performReset()) starts a fresh Surface and so starts over.
+    bool keyFrameSent = false;
 };
 
 class KRDP_NO_EXPORT VideoStream::Private
@@ -653,6 +658,12 @@ VideoCodec VideoStream::codecForSessions() const
     return negotiatedCodec().value_or(VideoCodecSupport::expectedCodec(d->codecPreference));
 }
 
+void VideoStream::setChromaCapable(bool capable)
+{
+    // Stub: S3's adaptive-quality chroma rung ANDs this in. Nothing to store yet.
+    Q_UNUSED(capable)
+}
+
 void VideoStream::updateAdaptiveQuality()
 {
     if (!d->adaptiveQuality.load()) {
@@ -926,8 +937,10 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         return false;
     }
 
-    if (frame.data.size() == 0) {
-        qCDebug(KRDP) << "Skipping empty encoded frame";
+    const VideoCodec codec = negotiatedCodec().value_or(VideoCodec::Avc420); // caps are confirmed here, so it is set
+    const bool auxOnly = frame.data.isEmpty() && !frame.aux.isEmpty();
+    if (frame.data.isEmpty() && (!auxOnly || !VideoCodecSupport::isAvc444(codec))) {
+        qCDebug(KRDP) << "Skipping empty encoded frame"; // nothing to send; an aux-only frame is meaningless to an AVC420 client
         return true;
     }
 
@@ -947,7 +960,7 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
             return true;
         }
 
-        const Surface *target = d->surfaceFor(frame.monitorIndex);
+        Surface *target = d->surfaceFor(frame.monitorIndex);
         // With a configured layout the surface sizes come from that layout, so
         // only a new layout resizes them. Without one the single surface still
         // follows the frame, exactly as it did before per-monitor surfaces.
@@ -982,7 +995,9 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
             // re-advertisement the queue holds P-frames), ask the session for one
             // now instead of waiting for the next organic IDR, which on a static
             // desktop can be seconds away (gop 100, frames only on damage).
-            if (!frame.isKeyFrame) {
+            // AVC444: every aux picture is intra; the main picture's flag is the keyframe, so an
+            // aux-only frame after a reset must not consume the per-surface request slot.
+            if (!frame.isKeyFrame && !auxOnly) {
                 const auto now = clk::steady_clock::now();
                 auto &lastRequest = d->lastKeyFrameRequest[frame.monitorIndex];
                 if (lastRequest == clk::steady_clock::time_point{} || (now - lastRequest) >= KeyFrameRequestMinInterval) {
@@ -1013,6 +1028,15 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
             return true;
         }
 
+        // An aux-only refresh (LC = 2) needs the decoder the main IDR set up: never the first
+        // frame on a fresh surface. It is dropped, and the next main picture is what the reset
+        // rule above already asked a keyframe for.
+        if (auxOnly && !target->keyFrameSent) {
+            return true;
+        }
+        if (frame.isKeyFrame) {
+            target->keyFrameSent = true;
+        }
         surface = *target;
     }
 
@@ -1030,7 +1054,8 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     // that shows which monitor a frame actually reached the wire on - the one
     // thing a multi-monitor stream has to be checked against.
     qCDebug(KRDP) << "Sending frame" << frameId << "monitorIndex" << frame.monitorIndex << "surface" << surface.id << "at" << surface.origin << surface.size
-                  << (frame.isKeyFrame ? "keyframe" : "delta") << frame.data.size() << "bytes";
+                  << (frame.isKeyFrame ? "keyframe" : "delta") << frame.data.size() << "bytes"
+                  << "aux" << frame.aux.size() << "bytes" << VideoCodecSupport::codecName(codec) << (auxOnly ? "chroma-only" : "");
 
     {
         std::lock_guard lock(d->pendingFramesMutex);
@@ -1046,44 +1071,11 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     startFramePdu.frameId = frameId;
     endFramePdu.frameId = frameId;
 
-    // The encoder produces a full-frame H.264 picture (KPipeWire does not crop
-    // to damage), so send a single region rect covering the whole surface, as
-    // upstream and gnome-remote-desktop do for AVC420.
-    RDPGFX_SURFACE_COMMAND surfaceCommand = {};
-    surfaceCommand.surfaceId = surface.id;
-    surfaceCommand.codecId = RDPGFX_CODECID_AVC420;
-    surfaceCommand.format = PIXEL_FORMAT_BGRX32;
-    // Each surface is a whole monitor, so the command covers all of it.
-    surfaceCommand.left = 0;
-    surfaceCommand.top = 0;
-    surfaceCommand.right = surface.size.width();
-    surfaceCommand.bottom = surface.size.height();
-    surfaceCommand.length = 0;
-    surfaceCommand.data = nullptr;
-
-    RDPGFX_AVC420_BITMAP_STREAM avcStream = {};
-    surfaceCommand.extra = &avcStream;
-    avcStream.data = (BYTE *)frame.data.data();
-    avcStream.length = frame.data.length();
-
-    avcStream.meta.numRegionRects = 1;
-    RECTANGLE_16 rect = {0, 0, static_cast<UINT16>(surface.size.width()), static_cast<UINT16>(surface.size.height())};
-    avcStream.meta.regionRects = &rect;
-    // Informational for the client (MS-RDPEGFX 2.2.4.4.1), but keep it honest:
-    // the same map the private KPipeWire uses (quality 100 -> QP 12, 0 -> QP 40).
-    // RDPGFX_H264_QUANT_QUALITY's member order is {qpVal, qualityVal, qp, r, p}
-    // (freerdp/channels/rdpgfx.h) - name the members explicitly rather than
-    // relying on positional aggregate init, which previously put the QP in the
-    // unused qpVal slot (qp itself landed on quality, and qualityVal stayed 0).
-    const quint8 currentQuality = d->quality.load();
-    const quint8 qp = quint8(std::lround(40.0 - 0.28 * currentQuality));
-    RDPGFX_H264_QUANT_QUALITY quality{};
-    quality.qp = qp;
-    quality.qualityVal = currentQuality;
-    avcStream.meta.quantQualityVals = &quality;
+    GfxSurfaceCommand::Storage command;
+    GfxSurfaceCommand::build(command, codec, surface.id, surface.size, frame.data, frame.aux, d->quality.load());
 
     d->gfxContext->StartFrame(d->gfxContext.get(), &startFramePdu);
-    d->gfxContext->SurfaceCommand(d->gfxContext.get(), &surfaceCommand);
+    d->gfxContext->SurfaceCommand(d->gfxContext.get(), &command.command);
     d->gfxContext->EndFrame(d->gfxContext.get(), &endFramePdu);
 
     return true;

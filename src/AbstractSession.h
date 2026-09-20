@@ -4,13 +4,16 @@
 
 #pragma once
 
-#include "krdp_export.h"
-
 #include <PipeWireEncodedStream>
 #include <PipeWireSourceStream>
 #include <QPointF>
 #include <QRect>
 #include <QString>
+
+// Qt's QMetaType (needed for VideoCodecSupport.h's Q_DECLARE_METATYPE) comes in transitively via
+// the Qt/PipeWire includes above; VideoCodecSupport.h must come after them, not before.
+#include "VideoCodecSupport.h"
+#include "krdp_export.h"
 
 class QMimeData;
 
@@ -52,6 +55,25 @@ public:
     void setActiveStream(int stream);
     void setVirtualMonitor(const VirtualMonitor &vm);
     void setVideoQuality(quint8 quality);
+
+    /**
+     * The codec the connection negotiated (or expects): picks the encoder's chroma mode. Before
+     * start() it is applied when the stream is created; on a running stream a change restarts the
+     * encoded stream (restartStreamForCodecChange()), which opens with an IDR.
+     */
+    void setVideoCodec(VideoCodec codec);
+    VideoCodec videoCodec() const;
+    /**
+     * AVC444: whether frames carry the chroma picture (the adaptive rung); a no-op for AVC420.
+     */
+    void setChromaEnabled(bool enabled);
+    Q_SIGNAL void chromaTimingReported(const KRdp::ChromaTimingReport &report);
+    /**
+     * Whether the running encoder really produces the chroma stream: false for a 4:2:0 codec, for a
+     * KPipeWire without AVC444, when h264_vaapi is unavailable, and after the encoder's mid-session
+     * fallback (activeChromaModeChanged). Emitted on every encoder start and on a fallback.
+     */
+    Q_SIGNAL void chromaCapabilityChanged(bool capable);
 
     /**
      * Re-create the capture stream after the display topology changed.
@@ -231,7 +253,18 @@ protected:
     void setLogicalSize(QSize size);
     PipeWireEncodedStream *stream();
 
+    /**
+     * Restart the encoded stream so a codec change (setVideoCodec()) takes effect on a stream that
+     * is already running. The default implementation only logs; PlasmaScreencastV1Session restarts
+     * through its existing deferred re-attach.
+     */
+    virtual void restartStreamForCodecChange();
+
 private:
+    // Replaces the signal-to-signal connect at stream()'s activeChanged: re-emits
+    // streamActiveChanged, logs the encoder line, and reports the chroma capability.
+    Q_SLOT void onStreamActiveChanged(bool active);
+
     class Private;
     const std::unique_ptr<Private> d;
 };

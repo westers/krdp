@@ -47,6 +47,9 @@ public:
     QRect outputGeometry() const override;
     bool outputGeometryResolved() const override;
 
+protected:
+    void restartStreamForCodecChange() override;
+
 private:
     void injectNonMotionEvent(const std::shared_ptr<QEvent> &event);
     void scheduleStreamRecovery(int attempt, int delayMs);

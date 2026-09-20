@@ -679,6 +679,21 @@ void PlasmaScreencastV1Session::requestKeyFrame()
     restartEncodedStream(nodeId);
 }
 
+void PlasmaScreencastV1Session::restartStreamForCodecChange()
+{
+    auto encodedStream = stream();
+    const uint nodeId = encodedStream->nodeId();
+    if (!d->streamConfigured || nodeId == 0 || !streamingRequested()) {
+        return;
+    }
+    if (d->streamRestartTimer.isActive()) {
+        // Already restarting; it picks the new mode up.
+        return;
+    }
+    qCDebug(KRDP) << "Restarting encoded stream on node" << nodeId << "for the codec change";
+    restartEncodedStream(nodeId); // setChromaMode() is applied at the next start(); the new stream opens with an IDR
+}
+
 void PlasmaScreencastV1Session::attachEncodedStream(uint nodeId, bool streamWasActive)
 {
     auto encodedStream = stream();
@@ -971,6 +986,13 @@ void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Pa
     frameData.size = size();
     frameData.data = data.data();
     frameData.isKeyFrame = data.isKeyFrame();
+    if constexpr (requires(const PipeWireEncodedStream::Packet &p) {
+                      p.aux();
+                      p.auxIsKey();
+                  }) {
+        frameData.aux = data.aux();
+        frameData.auxIsKeyFrame = data.auxIsKey();
+    }
     frameData.monitors = d->monitorLayout;
     frameData.monitorIndex = monitorIndex();
     frameData.damage = fullFrameDamage(frameData.size);

@@ -118,6 +118,10 @@ public:
         // or a cap/adaptive toggle) runs on the main thread like SessionWrapper;
         // queued here defensively, matching the other VideoStream connections above.
         connect(connection->videoStream(), &KRdp::VideoStream::requestedQualityChanged, this, &SessionWrapper::onRequestedQualityChanged, Qt::QueuedConnection);
+        // negotiatedCodecChanged is emitted from the peer thread (onCapsAdvertise); requestedChromaChanged
+        // (S3) runs on the main thread like the other VideoStream signals above but is queued to match.
+        connect(connection->videoStream(), &KRdp::VideoStream::negotiatedCodecChanged, this, &SessionWrapper::onNegotiatedCodecChanged, Qt::QueuedConnection);
+        connect(connection->videoStream(), &KRdp::VideoStream::requestedChromaChanged, this, &SessionWrapper::onRequestedChromaChanged, Qt::QueuedConnection);
 
         connect(connection, &QObject::destroyed, this, &SessionWrapper::onConnectionDestroyed);
         // From the frame submission thread; see layoutRecordPending.
@@ -412,7 +416,33 @@ public:
         const bool multi = !layout.isEmpty();
         for (const auto &entry : sessions) {
             auto *session = entry.get();
+            session->setVideoCodec(videoStream->codecForSessions());
+            session->setChromaEnabled(m_chromaEnabled);
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::frameReceived, videoStream, &KRdp::VideoStream::queueFrame));
+            m_sessionConnections.append(connect(session, &KRdp::AbstractSession::chromaCapabilityChanged, this, &SessionWrapper::onChromaCapabilityChanged));
+            // At most once every 30 s per wrapper: server/*.cpp has no access to the KRDP logging
+            // category (plain qInfo()/qWarning() here), and one line per second would flood the journal.
+            m_sessionConnections.append(connect(session, &KRdp::AbstractSession::chromaTimingReported, this, [this](const KRdp::ChromaTimingReport &r) {
+                if (m_lastCostLog.isValid() && m_lastCostLog.elapsed() < 30000) {
+                    return;
+                }
+                m_lastCostLog.start();
+                qInfo().noquote() << QStringLiteral("AVC444 cost: frames %1 aux sent %2 skipped-motion %3 rest-refresh %4 rewrite-failures %5 split=%6 download avg %7 max %8 us split avg %9 max %10 us upload avg %11 max %12 us main queue->packet avg %13 aux %14 us")
+                                          .arg(r.frames)
+                                          .arg(r.auxSent)
+                                          .arg(r.auxSkippedMotion)
+                                          .arg(r.auxRestRefresh)
+                                          .arg(r.rewriteFailures)
+                                          .arg(r.splitVariant)
+                                          .arg(r.downloadAvg)
+                                          .arg(r.downloadMax)
+                                          .arg(r.splitAvg)
+                                          .arg(r.splitMax)
+                                          .arg(r.uploadAvg)
+                                          .arg(r.uploadMax)
+                                          .arg(r.encodeMainAvg)
+                                          .arg(r.encodeAuxAvg);
+            }));
             // The session is passed along: a cursor sample's position is
             // local to the output that session captures (see onCursorUpdate()).
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::cursorUpdate, this, [this, session](const PipeWireCursor &cursor) {
@@ -792,6 +822,28 @@ public:
         }
     }
 
+    void onNegotiatedCodecChanged(KRdp::VideoCodec codec)
+    {
+        for (const auto &session : sessions) {
+            session->setVideoCodec(codec);
+        }
+    }
+
+    void onRequestedChromaChanged(bool enabled)
+    {
+        m_chromaEnabled = enabled;
+        for (const auto &session : sessions) {
+            session->setChromaEnabled(enabled);
+        }
+    }
+
+    void onChromaCapabilityChanged(bool capable)
+    {
+        // Every session of a connection runs the same encoder mode; the last report wins. The
+        // adaptive rung must not "shed" a chroma stream that is not there (S3 ANDs this in).
+        connection->videoStream()->setChromaCapable(capable);
+    }
+
     /**
      * The session multi-monitor input is injected through.
      *
@@ -1031,6 +1083,11 @@ public:
     DisplayWakeGuard *m_displayWakeGuard;
     bool m_holdsDisplayWake = false;
     std::optional<quint8> m_requestedQuality;
+    // Remembered so a session created by a later rebuild starts with the connection's current
+    // chroma setting instead of the AbstractSession default (true).
+    bool m_chromaEnabled = true;
+    // Throttles the "AVC444 cost" journal line to at most once per wrapper per 30 s.
+    QElapsedTimer m_lastCostLog;
     // Everything setSessions() wired, so it can unwire exactly that much.
     QList<QMetaObject::Connection> m_sessionConnections;
     // See scheduleVirtualLayoutAdoption().

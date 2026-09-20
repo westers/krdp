@@ -34,6 +34,14 @@ struct VideoFrame {
      */
     QByteArray data;
     /**
+     * AVC444: the auxiliary chroma picture of the same frame; empty for a luma-only frame and in AVC420.
+     */
+    QByteArray aux;
+    /**
+     * Informational (the aux is the next picture of the same H.264 stream; `isKeyFrame` is the one that matters).
+     */
+    bool auxIsKeyFrame = false;
+    /**
      * Area of the frame that was actually damaged.
      * TODO: Actually use this information.
      */

@@ -164,6 +164,18 @@ public:
      */
     Q_SIGNAL void negotiatedCodecChanged(KRdp::VideoCodec codec);
 
+    /**
+     * Emitted when the adaptive-quality chroma rung requests the chroma stream be shed or restored
+     * (S3). Stubbed out here (unemitted) so SessionController's connect compiles before S3 lands.
+     */
+    Q_SIGNAL void requestedChromaChanged(bool enabled);
+    /**
+     * Whether the running encoder actually produces the chroma stream, as reported by the session(s)
+     * (AbstractSession::chromaCapabilityChanged). Stub: stores nothing until S3 uses it to AND the
+     * chroma rung out of the adaptive ladder when the encoder cannot deliver it.
+     */
+    void setChromaCapable(bool capable);
+
 private:
     friend BOOL gfxChannelIdAssigned(RdpgfxServerContext *, uint32_t);
     friend uint32_t gfxCapsAdvertise(RdpgfxServerContext *, const RDPGFX_CAPS_ADVERTISE_PDU *);
