@@ -2340,21 +2340,26 @@ void SessionController::onControlCodec(SessionWrapper *wrapper, const QJsonObjec
 {
     auto *connection = wrapper->connection.data();
     const QJsonArray codecs = record.value(QLatin1String("codecs")).toArray();
-    const QString prefer = record.value(QLatin1String("prefer")).toString(QStringLiteral("auto")).toLower();
-    if (codecs.isEmpty() || (prefer != QLatin1String("auto") && prefer != QLatin1String("hevc") && prefer != QLatin1String("av1") && prefer != QLatin1String("avc"))) {
-        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec needs a non-empty codecs array and prefer auto|hevc|av1|avc"_s}));
-        return;
-    }
-    const auto offered = [&codecs](QStringView name) {
-        return std::any_of(codecs.cbegin(), codecs.cend(), [name](const QJsonValue &value) { return value.isString() && value.toString().compare(name, Qt::CaseInsensitive) == 0; });
-    };
+    // `codecs` is an ordered allow-list, not merely a capability set. An empty list is
+    // intentional: the client asked for ordinary AVC. Older clients also sent `prefer`;
+    // their HEVC,AV1 order already describes their historical auto choice.
     std::optional<KRdp::VideoCodec> selected;
-    // HEVC is automatic: buzz has HEVC hardware decode. AV1 is explicit-only until a client
-    // with AV1 hardware decode is available.
-    if ((prefer == QLatin1String("auto") || prefer == QLatin1String("hevc")) && offered(u"hevc")) {
-        selected = KRdp::VideoCodec::Hevc;
-    } else if (prefer == QLatin1String("av1") && offered(u"av1")) {
-        selected = KRdp::VideoCodec::Av1;
+    for (const QJsonValue &value : codecs) {
+        if (!value.isString()) {
+            connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array of hevc and/or av1"_s}));
+            return;
+        }
+        const QString name = value.toString().trimmed().toLower();
+        if (name == QLatin1String("hevc")) {
+            selected = KRdp::VideoCodec::Hevc;
+            break;
+        }
+        if (name == QLatin1String("av1")) {
+            selected = KRdp::VideoCodec::Av1;
+            break;
+        }
+        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array of hevc and/or av1"_s}));
+        return;
     }
     if (selected) {
         connection->videoStream()->setPrivateCodec(selected);
