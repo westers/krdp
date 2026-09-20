@@ -715,7 +715,8 @@ void VideoStream::updateAdaptiveQuality()
     // Backlogged = the client never got within BacklogFrames of caught up:
     // neither after any ack this interval nor right now. Idle (pendingNow 0)
     // is never a backlog; a stall with no acks at all is (min(INT_MAX, now)).
-    const bool backlogged = std::min(minAfterAck, pendingNow) >= AdaptiveQuality::BacklogFrames;
+    // Suppress only this startup-burst signal; RTT congestion remains active.
+    const bool backlogged = AdaptiveQuality::backlogIsPressure(now - d->streamingSince, minAfterAck, pendingNow);
 
     auto *network = d->session->networkDetection();
     const auto averageRtt = clk::duration_cast<clk::microseconds>(network->averageRTT());

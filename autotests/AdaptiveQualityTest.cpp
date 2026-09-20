@@ -49,6 +49,15 @@ private Q_SLOTS:
         QVERIFY(!step(in).congested);
     }
 
+    void startupKeyframeBurstIsNotBacklogPressure()
+    {
+        constexpr int burstDepth = BacklogFrames + 2;
+        QVERIFY(!backlogIsPressure(19s, burstDepth, burstDepth));
+        QVERIFY(!backlogIsPressure(19s, std::numeric_limits<int>::max(), burstDepth));
+        QVERIFY(backlogIsPressure(BacklogWarmupAfterStreamStart, burstDepth, burstDepth));
+        QVERIFY(backlogIsPressure(21s, std::numeric_limits<int>::max(), burstDepth));
+    }
+
     void rttCongestionStepsDown()
     {
         auto in = clear(60);

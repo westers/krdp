@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 
 namespace KRdp::AdaptiveQuality
 {
@@ -24,6 +25,21 @@ constexpr auto CongestionRttMargin = std::chrono::milliseconds(5);
 // every interval; 4 needs a sustained >= 67 ms lag at 60 fps, while a
 // saturated socket holds 10+ frames and is still caught.
 constexpr int BacklogFrames = 4;
+
+// The initial keyframes of a multi-surface AVC444 connection arrive in a
+// burst.  They can temporarily exceed BacklogFrames even on an otherwise
+// idle LAN, before the client has decoded and acknowledged either surface.
+// Keep RTT pressure live from the regular stream warm-up, but do not treat
+// that expected burst as a backlog signal.
+constexpr auto BacklogWarmupAfterStreamStart = std::chrono::seconds(20);
+
+inline bool backlogIsPressure(std::chrono::steady_clock::duration streamAge, int minimumAfterAck, int pendingNow)
+{
+    if (streamAge < BacklogWarmupAfterStreamStart) {
+        return false;
+    }
+    return std::min(minimumAfterAck, pendingNow) >= BacklogFrames;
+}
 
 // After a step down, hold before climbing again so a limited link settles
 // instead of sawtoothing every interval.
