@@ -41,17 +41,23 @@ struct Input {
     bool backlogged;
     // False while ClimbHoldAfterStepDown has not elapsed since the last step down.
     bool climbAllowed;
+    // AVC444 connections have one more rung above the QP ladder: the auxiliary chroma stream.
+    // It is the first thing shed under pressure and the last thing restored on a clear link.
+    bool chromaAvailable = false;
+    bool chromaEnabled = true;
 };
 
 struct Result {
     int next;
     bool congested;
+    bool chromaEnabled;
 };
 
-// One control step. Pressure (RTT congestion or a persistent frame backlog)
-// steps quality down by StepDown; a clear interval steps it up by StepUp
-// towards the cap, but only once climbAllowed. The result never exceeds the
-// cap and never drops below MinQuality.
+// One control step. Pressure (RTT congestion or a persistent frame backlog) first sheds the
+// chroma stream (AVC444, QP unchanged), then steps quality down by StepDown; a clear interval
+// steps quality up by StepUp towards the cap, and only once at the cap re-enables chroma - both
+// only once climbAllowed. The result never exceeds the cap and never drops below MinQuality.
+// Without chromaAvailable the rung does not exist and the numbers are exactly the AVC420 ones.
 //
 // There is deliberately no goodput term: a passively measured goodput is a
 // lower bound on capacity, not an estimate of it (an idle desktop sends
@@ -62,15 +68,25 @@ inline Result step(const Input &in)
 {
     const int hi = std::max(in.cap, MinQuality);
     const bool congested = in.minimumRtt.count() > 0 && (in.averageRtt - in.minimumRtt) >= CongestionRttMargin && in.averageRtt * 2 > in.minimumRtt * 3;
+    const bool chromaOn = !in.chromaAvailable || in.chromaEnabled;
 
     int next = in.current;
+    bool chroma = in.chromaEnabled;
     if (congested || in.backlogged) {
-        next = in.current - StepDown;
+        if (in.chromaAvailable && chromaOn) {
+            chroma = false;
+        } else {
+            next = in.current - StepDown;
+        }
     } else if (in.climbAllowed) {
-        next = in.current + StepUp;
+        if (in.current < hi) {
+            next = in.current + StepUp;
+        } else if (in.chromaAvailable && !chromaOn) {
+            chroma = true;
+        }
     }
     next = std::clamp(next, MinQuality, hi);
-    return {next, congested};
+    return {next, congested, chroma};
 }
 
 }

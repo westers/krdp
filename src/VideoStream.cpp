@@ -340,6 +340,14 @@ public:
     // FreeRDP peer thread (onCapsAdvertise), read from any thread via
     // negotiatedCodec()/codecForSessions().
     std::atomic<int> negotiatedCodec = -1;
+    // The adaptive-quality chroma rung's state (AdaptiveQuality::Input::chromaEnabled/
+    // Result::chromaEnabled), and whether the running encoder actually reports the aux stream
+    // (setChromaCapable(), from AbstractSession::chromaCapabilityChanged via SessionWrapper).
+    // Read/written on the main thread (updateAdaptiveQuality(), setAdaptiveQuality(),
+    // onCapsAdvertise()) and setChromaCapable() (whichever thread the session signal arrives on);
+    // atomic as belt-and-braces like the other quality state above.
+    std::atomic<bool> chromaEnabled = true;
+    std::atomic<bool> chromaCapable = false;
     // The total pixel count over every surface, as a single atomic value, so
     // updateAdaptiveQuality() (main thread) never sees a torn width/height
     // while performReset() (submission thread) or onCapsAdvertise() (peer
@@ -634,6 +642,9 @@ void VideoStream::setAdaptiveQuality(bool enabled)
         if (previous != cap) {
             Q_EMIT requestedQualityChanged(cap);
         }
+        if (!d->chromaEnabled.exchange(true)) {
+            Q_EMIT requestedChromaChanged(true);
+        }
     }
 }
 
@@ -660,8 +671,13 @@ VideoCodec VideoStream::codecForSessions() const
 
 void VideoStream::setChromaCapable(bool capable)
 {
-    // Stub: S3's adaptive-quality chroma rung ANDs this in. Nothing to store yet.
-    Q_UNUSED(capable)
+    if (d->chromaCapable.exchange(capable) == capable) {
+        return;
+    }
+    qCDebug(KRDP) << "Encoder chroma stream" << (capable ? "available" : "unavailable") << "for adaptive quality";
+    if (!capable && !d->chromaEnabled.load()) {
+        d->chromaEnabled = true; // nothing to shed any more; the next step-down lowers QP
+    }
 }
 
 void VideoStream::updateAdaptiveQuality()
@@ -692,6 +708,10 @@ void VideoStream::updateAdaptiveQuality()
     const auto averageRtt = clk::duration_cast<clk::microseconds>(network->averageRTT());
     const auto minimumRtt = clk::duration_cast<clk::microseconds>(network->minimumRTT());
     const quint8 current = d->quality.load();
+    // The rung exists only for a 4:4:4 connection whose encoder really produces the aux stream (a
+    // KPipeWire without AVC444, no h264_vaapi, or the rewriter's fallback all report false).
+    const bool chromaAvailable = negotiatedCodec().has_value() && VideoCodecSupport::isAvc444(*negotiatedCodec()) && d->chromaCapable.load();
+    const bool chromaNow = d->chromaEnabled.load();
     const auto result = AdaptiveQuality::step({
         .current = current,
         .cap = d->qualityCap.load(),
@@ -699,6 +719,8 @@ void VideoStream::updateAdaptiveQuality()
         .minimumRtt = minimumRtt,
         .backlogged = backlogged,
         .climbAllowed = (now - d->lastStepDown) >= AdaptiveQuality::ClimbHoldAfterStepDown,
+        .chromaAvailable = chromaAvailable,
+        .chromaEnabled = chromaNow,
     });
 
     // The cap or the adaptive-quality flag may have changed while step() ran;
@@ -708,18 +730,28 @@ void VideoStream::updateAdaptiveQuality()
         return;
     }
     const quint8 bounded = quint8(std::min<int>(result.next, d->qualityCap.load()));
-    if (bounded < current) {
-        d->lastStepDown = now;
+    const bool chromaChanged = chromaAvailable && result.chromaEnabled != chromaNow;
+    if (bounded < current || (chromaChanged && !result.chromaEnabled)) {
+        d->lastStepDown = now; // shedding chroma is a step down: the climb hold applies to it too
     }
-    if (bounded == current) {
+    if (bounded == current && !chromaChanged) {
         return;
     }
 
     d->quality = bounded;
-    qCDebug(KRDP) << "Adaptive quality ->" << bounded << "(" << (result.congested ? "congested" : (backlogged ? "backlogged" : "clear")) << "rtt avg" << averageRtt.count() << "min" << minimumRtt.count()
+    if (chromaChanged) {
+        d->chromaEnabled = result.chromaEnabled;
+    }
+    qCDebug(KRDP) << "Adaptive quality ->" << bounded << "chroma=" << (chromaAvailable ? (result.chromaEnabled ? "on" : "off") : "n/a") << "("
+                  << (result.congested ? "congested" : (backlogged ? "backlogged" : "clear")) << "rtt avg" << averageRtt.count() << "min" << minimumRtt.count()
                   << "us, pending min-after-ack" << (minAfterAck == std::numeric_limits<int>::max() ? -1 : minAfterAck) << "now" << pendingNow << ", goodput" << network->bandwidth() << "kbit/s, cap"
                   << d->qualityCap.load() << ")";
-    Q_EMIT requestedQualityChanged(bounded);
+    if (chromaChanged) {
+        Q_EMIT requestedChromaChanged(result.chromaEnabled);
+    }
+    if (bounded != current) {
+        Q_EMIT requestedQualityChanged(bounded);
+    }
 }
 
 bool VideoStream::onChannelIdAssigned(uint32_t channelId)
@@ -825,6 +857,9 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         qCWarning(KRDP) << "Codec=avc444 requested but this client advertises no AVC444 support (caps" << capVersionToString(selectedCaps->version) << "); using avc420";
     }
     if (previous != int(codec)) {
+        if (!d->chromaEnabled.exchange(true)) { // a fresh negotiation starts with chroma on
+            Q_EMIT requestedChromaChanged(true);
+        }
         Q_EMIT negotiatedCodecChanged(codec); // peer thread; the session side connects queued
     }
 

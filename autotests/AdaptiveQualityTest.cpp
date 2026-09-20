@@ -90,6 +90,80 @@ private Q_SLOTS:
         in.current = MinQuality;
         QCOMPARE(step(in).next, MinQuality);
     }
+
+    static Input chroma(int current, bool enabled, int cap = 80)
+    {
+        auto in = clear(current, cap);
+        in.chromaAvailable = true;
+        in.chromaEnabled = enabled;
+        return in;
+    }
+    void withoutChromaTheRungDoesNotExist()
+    {
+        auto in = clear(80);
+        in.backlogged = true;
+        const auto r = step(in);
+        QCOMPARE(r.next, 70);
+        QVERIFY(r.chromaEnabled); // reported as-is, never flipped
+    }
+    void firstStepDownShedsChromaAndKeepsQp()
+    {
+        auto in = chroma(80, true);
+        in.backlogged = true;
+        const auto r = step(in);
+        QCOMPARE(r.next, 80);
+        QVERIFY(!r.chromaEnabled);
+    }
+    void furtherStepDownsLowerQp()
+    {
+        auto in = chroma(80, false);
+        in.backlogged = true;
+        QCOMPARE(step(in).next, 70);
+        QVERIFY(!step(in).chromaEnabled);
+    }
+    void climbRaisesQpFirstThenChromaLast()
+    {
+        auto in = chroma(70, false);
+        auto r = step(in);
+        QCOMPARE(r.next, 75);
+        QVERIFY(!r.chromaEnabled);
+        in.current = 75;
+        r = step(in);
+        QCOMPARE(r.next, 80);
+        QVERIFY(!r.chromaEnabled);
+        in.current = 80;
+        r = step(in); // at the cap: chroma comes back
+        QCOMPARE(r.next, 80);
+        QVERIFY(r.chromaEnabled);
+        in.chromaEnabled = true;
+        r = step(in); // top state: nothing to do
+        QCOMPARE(r.next, 80);
+        QVERIFY(r.chromaEnabled);
+    }
+    void climbHoldBlocksChromaToo()
+    {
+        auto in = chroma(80, false);
+        in.climbAllowed = false;
+        const auto r = step(in);
+        QCOMPARE(r.next, 80);
+        QVERIFY(!r.chromaEnabled);
+    }
+    void shedBelowCapWhenChromaStillOn()
+    {
+        // The cap moved down while chroma was on: pressure still sheds chroma before touching QP.
+        auto in = chroma(60, true);
+        in.backlogged = true;
+        const auto r = step(in);
+        QCOMPARE(r.next, 60);
+        QVERIFY(!r.chromaEnabled);
+    }
+    void capClampStillApplies()
+    {
+        QCOMPARE(step(chroma(80, false, 50)).next, 50);
+        auto in = chroma(12, false);
+        in.backlogged = true;
+        QCOMPARE(step(in).next, MinQuality);
+    }
 };
 
 QTEST_GUILESS_MAIN(AdaptiveQualityTest)
