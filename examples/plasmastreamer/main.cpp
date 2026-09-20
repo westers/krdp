@@ -232,6 +232,9 @@ int main(int argc, char **argv)
         {u"keyframe-at"_s, u"Call requestKeyFrame() on the session at these offsets (seconds, comma separated) after the stream started"_s, u"seconds"_s},
         {u"quality-at"_s, u"Set the session video quality at these offsets: seconds:quality, comma separated (e.g. 4:40,8:90)"_s, u"list"_s},
         {u"multi"_s, u"Capture every screen with its own session and encoder; writes <output>.<index>.raw"_s},
+        {u"chroma"_s,
+         u"AVC444 chroma policy motionGapMs,restMs,maxGapMs (KRDP OPT-045b), applied via AbstractSession::setChromaPolicy() before start() - the same call path krdpserver uses for its configured default, unlike KPIPEWIRE_AVC444_* which only sets the encoder's own construction-time fallback and is overridden by this"_s,
+         u"motion,rest,max"_s},
         {u"wake-global"_s,
          u"With --wake-after and --multi: inject through AbstractSession::sendGlobalEvent() instead of sendEvent(), treating --wake-pos as a KWin-global workspace coordinate rather than a position on the target session's own screen"_s},
     });
@@ -262,6 +265,26 @@ int main(int argc, char **argv)
     }
     session.setVideoCodec(codec);
     const bool avc444 = codec != KRdp::VideoCodec::Avc420;
+
+    if (parser.isSet(u"chroma"_s)) {
+        const auto parts = parser.value(u"chroma"_s).split(u',');
+        if (parts.size() != 3) {
+            qWarning() << "--chroma needs motion,rest,max";
+            return 2;
+        }
+        bool ok1 = false, ok2 = false, ok3 = false;
+        const KRdp::ChromaPolicy policy{parts[0].toInt(&ok1), parts[1].toInt(&ok2), parts[2].toInt(&ok3)};
+        if (!ok1 || !ok2 || !ok3) {
+            qWarning() << "--chroma needs three integers";
+            return 2;
+        }
+        // Same call path SessionController uses for the configured server default (before the
+        // session's stream() is ever created), so this exercises exactly what a live
+        // PipeWireBaseEncodedStream::setChromaPolicy() startup push does - unlike
+        // KPIPEWIRE_AVC444_*, which only seeds the encoder's own construction-time fallback and
+        // is unconditionally overridden by AbstractSession::stream()'s own applyChromaPolicyIfSupported() call.
+        session.setChromaPolicy(policy);
+    }
 
     signal(SIGINT, [](int) {
         QCoreApplication::exit(0);
