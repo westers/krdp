@@ -30,6 +30,7 @@
 #include <freerdp/server/server-common.h>
 
 #include <freerdp/channels/drdynvc.h>
+#include <freerdp/codec/audio.h>
 #include <winpr/sysinfo.h>
 
 #include "Clipboard.h"
@@ -168,9 +169,21 @@ UINT audinData(audin_server_context *audin, const SNDIN_DATA *data)
 
 void rdpsndActivated(RdpsndServerContext *rdpsnd)
 {
-    if (auto *active = static_cast<std::atomic_bool *>(rdpsnd->data)) {
-        active->store(true);
+    for (size_t client = 0; client < rdpsnd->num_client_formats; ++client) {
+        for (size_t server = 0; server < rdpsnd->num_server_formats; ++server) {
+            if (!audio_format_compatible(&rdpsnd->server_formats[server], &rdpsnd->client_formats[client])) {
+                continue;
+            }
+            if (rdpsnd->SelectFormat(rdpsnd, UINT16(client)) == CHANNEL_RC_OK) {
+                if (auto *active = static_cast<std::atomic_bool *>(rdpsnd->data)) {
+                    active->store(true);
+                }
+                qCInfo(KRDP) << "RDPSND selected client format" << client;
+                return;
+            }
+        }
     }
+    qCWarning(KRDP) << "RDPSND client offered no compatible format";
 }
 }
 }
