@@ -144,6 +144,9 @@ bool g_autoAppliedVaapiDriver = false;
 // The layout control static virtual channel (slice 2c, OPT-044). Seven
 // characters: CHANNEL_NAME_LEN is the limit for a static channel name.
 char ControlChannelName[] = "KRDPCTL";
+const AUDIO_FORMAT RemoteMicrophoneFormat{
+    WAVE_FORMAT_PCM, 2, 48000, 192000, 4, 16, 0, nullptr,
+};
 
 UINT audinData(audin_server_context *audin, const SNDIN_DATA *data)
 {
@@ -930,7 +933,7 @@ bool RdpConnection::initializeAudioChannels()
         d->audin->rdpcontext = d->peer->context;
         d->audin->userdata = d->microphoneEndpoint.get();
         d->audin->Data = audinData;
-        if (!audin_server_set_formats(d->audin, -1, nullptr)) {
+        if (!audin_server_set_formats(d->audin, 1, &RemoteMicrophoneFormat)) {
             qCWarning(KRDP) << "Could not set AUDIN formats";
             return false;
         }
