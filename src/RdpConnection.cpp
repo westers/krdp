@@ -30,6 +30,7 @@
 #include <freerdp/server/server-common.h>
 
 #include <freerdp/channels/drdynvc.h>
+#include <winpr/sysinfo.h>
 
 #include "Clipboard.h"
 #include "Cursor.h"
@@ -38,6 +39,7 @@
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "PipeWireMicrophone.h"
+#include "PipeWireAudioPlayback.h"
 #include "Server.h"
 #include "VideoStream.h"
 
@@ -162,6 +164,13 @@ UINT audinData(audin_server_context *audin, const SNDIN_DATA *data)
         endpoint->write(QByteArray(reinterpret_cast<const char *>(Stream_Buffer(data->Data)), int(Stream_Length(data->Data))));
     }
     return CHANNEL_RC_OK;
+}
+
+void rdpsndActivated(RdpsndServerContext *rdpsnd)
+{
+    if (auto *active = static_cast<std::atomic_bool *>(rdpsnd->data)) {
+        active->store(true);
+    }
 }
 }
 }
@@ -374,8 +383,10 @@ public:
     RdpsndServerContext *rdpsnd = nullptr;
     audin_server_context *audin = nullptr;
     std::unique_ptr<PipeWireMicrophone> microphoneEndpoint;
+    std::unique_ptr<PipeWireAudioPlayback> audioPlaybackEndpoint;
     std::atomic<bool> remoteAudioPlayback = false;
     std::atomic<bool> microphone = false;
+    std::atomic_bool rdpsndActive = false;
 
     freerdp_peer *peer = nullptr;
 
@@ -765,6 +776,16 @@ void RdpConnection::run(std::stop_token stopToken)
             break;
         }
 
+        if (d->rdpsnd && d->rdpsndActive.load() && d->audioPlaybackEndpoint) {
+            const QByteArray pcm = d->audioPlaybackEndpoint->take();
+            if (!pcm.isEmpty() && d->rdpsnd->SendSamples) {
+                const auto frames = size_t(pcm.size() / d->rdpsnd->src_format->nBlockAlign);
+                if (frames > 0) {
+                    d->rdpsnd->SendSamples(d->rdpsnd, pcm.constData(), frames, UINT16(GetTickCount64() & 0xffff));
+                }
+            }
+        }
+
         // KRDPCTL (OPT-044): opened as soon as the join shows, not once
         // connected (see openControlChannel()); the client's records arrive
         // through CheckFileDescriptor() above, queued on the channel.
@@ -885,6 +906,15 @@ bool RdpConnection::onPostConnect()
 
 bool RdpConnection::onClose()
 {
+    if (d->rdpsnd) {
+        d->rdpsndActive.store(false);
+        if (d->rdpsnd->Close) {
+            d->rdpsnd->Close(d->rdpsnd);
+        }
+        rdpsnd_server_context_free(d->rdpsnd);
+        d->rdpsnd = nullptr;
+    }
+    d->audioPlaybackEndpoint.reset();
     if (d->audin) {
         if (d->audin->IsOpen && d->audin->IsOpen(d->audin) && d->audin->Close) {
             d->audin->Close(d->audin);
@@ -893,13 +923,6 @@ bool RdpConnection::onClose()
         d->audin = nullptr;
     }
     d->microphoneEndpoint.reset();
-    if (d->rdpsnd) {
-        if (d->rdpsnd->Close) {
-            d->rdpsnd->Close(d->rdpsnd);
-        }
-        rdpsnd_server_context_free(d->rdpsnd);
-        d->rdpsnd = nullptr;
-    }
     {
         std::lock_guard lock(d->controlChannelMutex);
         if (d->controlChannel) {
@@ -956,6 +979,8 @@ bool RdpConnection::initializeAudioChannels()
             return false;
         }
         d->rdpsnd->rdpcontext = d->peer->context;
+        d->rdpsnd->data = &d->rdpsndActive;
+        d->rdpsnd->Activated = rdpsndActivated;
         d->rdpsnd->num_server_formats = server_rdpsnd_get_formats(&d->rdpsnd->server_formats);
         if (d->rdpsnd->num_server_formats == 0) {
             qCWarning(KRDP) << "RDPSND has no server formats";
@@ -965,6 +990,14 @@ bool RdpConnection::initializeAudioChannels()
         if (!d->rdpsnd->Initialize || d->rdpsnd->Initialize(d->rdpsnd, TRUE) != CHANNEL_RC_OK) {
             qCWarning(KRDP) << "Could not initialize RDPSND";
             return false;
+        }
+        d->audioPlaybackEndpoint = std::make_unique<PipeWireAudioPlayback>();
+        // WirePlumber resolves this symbolic target to the current default
+        // desktop sink; PipeWire exposes that sink's monitor to Capture
+        // streams, keeping application audio distinct from microphone input.
+        if (!d->audioPlaybackEndpoint->start(QStringLiteral("@DEFAULT_AUDIO_SINK@"))) {
+            qCWarning(KRDP) << "Could not capture PipeWire desktop audio";
+            d->audioPlaybackEndpoint.reset();
         }
         qCInfo(KRDP) << "RDPSND channel initialized after explicit media consent";
     }

@@ -32,6 +32,8 @@ target_sources(KRdp PRIVATE
     PeerContext_p.h
     PipeWireMicrophone.cpp
     PipeWireMicrophone.h
+    PipeWireAudioPlayback.cpp
+    PipeWireAudioPlayback.h
     PortalSession.cpp
     PortalSession.h
     VideoStream.cpp
