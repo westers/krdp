@@ -2340,10 +2340,12 @@ void SessionController::onControlCodec(SessionWrapper *wrapper, const QJsonObjec
 {
     auto *connection = wrapper->connection.data();
     const QJsonArray codecs = record.value(QLatin1String("codecs")).toArray();
+    const bool adaptive = record.value(QLatin1String("adaptive")).toBool(false);
     // `codecs` is an ordered allow-list, not merely a capability set. An empty list is
     // intentional: the client asked for ordinary AVC. Older clients also sent `prefer`;
     // their HEVC,AV1 order already describes their historical auto choice.
     std::optional<KRdp::VideoCodec> selected;
+    QVector<KRdp::VideoCodec> ordered;
     for (const QJsonValue &value : codecs) {
         if (!value.isString()) {
             connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array of hevc and/or av1"_s}));
@@ -2351,19 +2353,18 @@ void SessionController::onControlCodec(SessionWrapper *wrapper, const QJsonObjec
         }
         const QString name = value.toString().trimmed().toLower();
         if (name == QLatin1String("hevc")) {
-            selected = KRdp::VideoCodec::Hevc;
-            break;
+            ordered.append(KRdp::VideoCodec::Hevc);
+            continue;
         }
         if (name == QLatin1String("av1")) {
-            selected = KRdp::VideoCodec::Av1;
-            break;
+            ordered.append(KRdp::VideoCodec::Av1);
+            continue;
         }
         connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array of hevc and/or av1"_s}));
         return;
     }
-    if (selected) {
-        connection->videoStream()->setPrivateCodec(selected);
-    }
+    if (!ordered.isEmpty()) selected = ordered.first();
+    connection->videoStream()->setPrivateCodecPolicy(ordered, adaptive);
     connection->sendControlRecord(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"selected"_s, selected ? QLatin1String(KRdp::VideoCodecSupport::codecName(*selected)) : u"avc"_s}});
     qInfo() << "KRDPCTL: private codec selected" << (selected ? KRdp::VideoCodecSupport::codecName(*selected) : "avc");
 }

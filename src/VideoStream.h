@@ -9,6 +9,7 @@
 
 #include <QImage>
 #include <QObject>
+#include <QVector>
 #include <QPoint>
 #include <QRect>
 #include <QRegion>
@@ -149,6 +150,9 @@ public:
     CodecPreference codecPreference() const;
     /// Select an own-client vendor codec after KRDPCTL capability exchange. Main thread only.
     void setPrivateCodec(std::optional<VideoCodec> codec);
+    /// Ordered own-client codecs plus whether sustained RTT pressure may move from the
+    /// first to the second and later restore it. Main thread only.
+    void setPrivateCodecPolicy(const QVector<VideoCodec> &codecs, bool adaptive);
     /**
      * The codec chosen in onCapsAdvertise() from this preference and the
      * client's caps. nullopt until the client has advertised its caps.

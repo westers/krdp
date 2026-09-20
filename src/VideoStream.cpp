@@ -339,6 +339,10 @@ public:
     // -1 = standard RDPGFX negotiation. Set by the main-thread KRDPCTL preflight before
     // sessions exist; read by the peer and submission threads beside negotiatedCodec.
     std::atomic<int> privateCodec = -1;
+    QVector<VideoCodec> privateCodecOrder;
+    bool adaptivePrivateCodec = false;
+    clk::steady_clock::time_point codecPressureSince;
+    clk::steady_clock::time_point codecClearSince;
     // -1 = not negotiated yet (no CapsAdvertise received). Written on the
     // FreeRDP peer thread (onCapsAdvertise), read from any thread via
     // negotiatedCodec()/codecForSessions().
@@ -673,6 +677,16 @@ void VideoStream::setPrivateCodec(std::optional<VideoCodec> codec)
     }
 }
 
+void VideoStream::setPrivateCodecPolicy(const QVector<VideoCodec> &codecs, bool adaptive)
+{
+    const bool currentIsAllowed = negotiatedCodec().has_value() && codecs.contains(*negotiatedCodec());
+    d->privateCodecOrder = codecs;
+    d->adaptivePrivateCodec = adaptive && codecs.size() > 1;
+    d->codecPressureSince = {};
+    d->codecClearSince = {};
+    if (!currentIsAllowed) setPrivateCodec(codecs.isEmpty() ? std::nullopt : std::optional<VideoCodec>(codecs.first()));
+}
+
 std::optional<VideoCodec> VideoStream::negotiatedCodec() const
 {
     const int v = d->negotiatedCodec.load();
@@ -751,6 +765,43 @@ void VideoStream::updateAdaptiveQuality()
         .chromaAvailable = chromaAvailable,
         .chromaEnabled = chromaNow,
     });
+
+    // Codec changes are intentionally much slower than QP/chroma steering. A short RTT
+    // spike must not pay for an encoder restart and IDR; nor should a WAN with a naturally
+    // high but stable base RTT bounce codecs. Only a material inflated RTT for 12 seconds
+    // falls back one ordered private codec, and 60 stable seconds restore the preference.
+    constexpr auto CodecPressureAfter = std::chrono::seconds(12);
+    constexpr auto CodecRestoreAfter = std::chrono::seconds(60);
+    constexpr auto CodecMinimumRtt = std::chrono::milliseconds(100);
+    constexpr auto CodecClearMargin = std::chrono::milliseconds(10);
+    const bool pressured = result.congested && averageRtt >= CodecMinimumRtt;
+    const bool clear = !result.congested && averageRtt <= minimumRtt + CodecClearMargin;
+    if (d->adaptivePrivateCodec && d->privateCodecOrder.size() > 1) {
+        const VideoCodec preferred = d->privateCodecOrder.first();
+        const VideoCodec fallback = d->privateCodecOrder.at(1);
+        const auto currentCodec = negotiatedCodec();
+        if (currentCodec == preferred && pressured) {
+            if (d->codecPressureSince == clk::steady_clock::time_point{}) d->codecPressureSince = now;
+            if (now - d->codecPressureSince >= CodecPressureAfter) {
+                qCInfo(KRDP) << "Adaptive private codec:" << VideoCodecSupport::codecName(preferred) << "->" << VideoCodecSupport::codecName(fallback) << "after sustained RTT pressure" << averageRtt.count() << "us";
+                setPrivateCodec(fallback);
+                d->codecPressureSince = {};
+                d->codecClearSince = {};
+            }
+        } else {
+            d->codecPressureSince = {};
+        }
+        if (currentCodec == fallback && clear) {
+            if (d->codecClearSince == clk::steady_clock::time_point{}) d->codecClearSince = now;
+            if (now - d->codecClearSince >= CodecRestoreAfter) {
+                qCInfo(KRDP) << "Adaptive private codec:" << VideoCodecSupport::codecName(fallback) << "->" << VideoCodecSupport::codecName(preferred) << "after stable RTT" << averageRtt.count() << "us";
+                setPrivateCodec(preferred);
+                d->codecClearSince = {};
+            }
+        } else if (currentCodec != fallback) {
+            d->codecClearSince = {};
+        }
+    }
 
     // The cap or the adaptive-quality flag may have changed while step() ran;
     // re-check both before committing so a stale result never overshoots a
