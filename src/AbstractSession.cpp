@@ -195,11 +195,12 @@ void AbstractSession::setVideoQuality(quint8 quality)
 
 void AbstractSession::setVideoCodec(VideoCodec codec)
 {
+    const bool changed = d->codec != codec;
     d->codec = codec;
     if (!d->encodedStream) {
         return;
     }
-    if (chromaModeMatches(d->encodedStream.get(), codec)) {
+    if (!changed && chromaModeMatches(d->encodedStream.get(), codec)) {
         return;
     }
     applyChromaModeIfSupported(d->encodedStream.get(), codec);

@@ -175,7 +175,7 @@ void setFullColorRangeIfSupported(Stream *stream)
 }
 
 template<typename Stream>
-void setPreferredH264Encoder(Stream *stream)
+void setPreferredEncoder(Stream *stream, VideoCodec codec)
 {
     auto encoder = PipeWireEncodedStream::H264Baseline;
     if constexpr (requires(Stream *s) {
@@ -185,9 +185,16 @@ void setPreferredH264Encoder(Stream *stream)
         if (suggested.contains(PipeWireEncodedStream::H264Main)) {
             encoder = PipeWireEncodedStream::H264Main;
         }
+        if constexpr (requires { Stream::HEVCMain; Stream::AV1Main; }) {
+            if (codec == VideoCodec::Hevc && suggested.contains(Stream::HEVCMain)) {
+                encoder = Stream::HEVCMain;
+            } else if (codec == VideoCodec::Av1 && suggested.contains(Stream::AV1Main)) {
+                encoder = Stream::AV1Main;
+            }
+        }
     }
     stream->setEncoder(encoder);
-    qCDebug(KRDP) << "Using PipeWire H264 encoder profile:" << (encoder == PipeWireEncodedStream::H264Main ? "Main" : "Baseline");
+    qCDebug(KRDP) << "Using PipeWire encoder for" << VideoCodecSupport::codecName(codec) << ':' << int(encoder);
 }
 
 template<typename Stream>
@@ -703,8 +710,10 @@ void PlasmaScreencastV1Session::attachEncodedStream(uint nodeId, bool streamWasA
     encodedStream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed);
     if (!d->streamConfigured) {
         setFullColorRangeIfSupported(encodedStream);
-        setPreferredH264Encoder(encodedStream);
     }
+    // setEncoder() must happen before start(), including a deferred restart after a negotiated
+    // private-codec change; KPipeWire keeps it as the next produce's encoder choice.
+    setPreferredEncoder(encodedStream, videoCodec());
 
     if (!d->streamSignalsConnected) {
         connect(encodedStream, &PipeWireEncodedStream::newPacket, this, &PlasmaScreencastV1Session::onPacketReceived);
