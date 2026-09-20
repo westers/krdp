@@ -283,6 +283,7 @@ private:
      */
     void onControlChroma(SessionWrapper *wrapper, const QJsonObject &record, bool first);
     void onControlCodec(SessionWrapper *wrapper, const QJsonObject &record);
+    void onControlMedia(SessionWrapper *wrapper, const QJsonObject &record);
     /** The executor finished the apply that m_applying started. */
     void onLayoutApplied(const HostLayoutExecutor::Result &result);
     /**

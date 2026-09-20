@@ -366,6 +366,8 @@ public:
 
     RdpsndServerContext *rdpsnd = nullptr;
     audin_server_context *audin = nullptr;
+    std::atomic<bool> remoteAudioPlayback = false;
+    std::atomic<bool> microphone = false;
 
     freerdp_peer *peer = nullptr;
 
@@ -507,6 +509,13 @@ void RdpConnection::sendControlRecord(const QJsonObject &record)
     if (!WTSVirtualChannelWrite(d->controlChannel, const_cast<char *>(data.constData()), ULONG(data.size()), &written)) {
         qCWarning(KRDP) << "KRDPCTL: could not queue a" << record.value(QLatin1String("type")).toString() << "record";
     }
+}
+
+void RdpConnection::setMediaPolicy(bool remoteAudioPlayback, bool microphone)
+{
+    d->remoteAudioPlayback.store(remoteAudioPlayback);
+    d->microphone.store(microphone);
+    qCInfo(KRDP) << "Conferencing media policy: playback" << remoteAudioPlayback << "microphone" << microphone;
 }
 
 void RdpConnection::openControlChannel()
@@ -900,7 +909,7 @@ bool RdpConnection::initializeAudioChannels()
     auto context = reinterpret_cast<PeerContext *>(d->peer->context);
     const auto vcm = context->virtualChannelManager;
 
-    if (!d->audin) {
+    if (!d->audin && d->microphone.load()) {
         d->audin = audin_server_context_new(vcm);
         if (!d->audin) {
             qCWarning(KRDP) << "Could not create AUDIN server context";
@@ -914,7 +923,7 @@ bool RdpConnection::initializeAudioChannels()
         }
     }
 
-    if (WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME)
+    if (d->audin && WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME)
         && WTSVirtualChannelManagerGetDrdynvcState(vcm) == DRDYNVC_STATE_READY
         && d->audin->IsOpen && !d->audin->IsOpen(d->audin)) {
         if (!d->audin->Open || !d->audin->Open(d->audin)) {
@@ -922,6 +931,26 @@ bool RdpConnection::initializeAudioChannels()
             return false;
         }
         qCInfo(KRDP) << "AUDIN channel opened";
+    }
+
+    if (d->remoteAudioPlayback.load() && WTSVirtualChannelManagerIsChannelJoined(vcm, RDPSND_CHANNEL_NAME) && !d->rdpsnd) {
+        d->rdpsnd = rdpsnd_server_context_new(vcm);
+        if (!d->rdpsnd) {
+            qCWarning(KRDP) << "Could not create RDPSND server context";
+            return false;
+        }
+        d->rdpsnd->rdpcontext = d->peer->context;
+        d->rdpsnd->num_server_formats = server_rdpsnd_get_formats(&d->rdpsnd->server_formats);
+        if (d->rdpsnd->num_server_formats == 0) {
+            qCWarning(KRDP) << "RDPSND has no server formats";
+            return false;
+        }
+        d->rdpsnd->src_format = &d->rdpsnd->server_formats[0];
+        if (!d->rdpsnd->Initialize || d->rdpsnd->Initialize(d->rdpsnd, TRUE) != CHANNEL_RC_OK) {
+            qCWarning(KRDP) << "Could not initialize RDPSND";
+            return false;
+        }
+        qCInfo(KRDP) << "RDPSND channel initialized after explicit media consent";
     }
     return true;
 }

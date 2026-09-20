@@ -133,6 +133,12 @@ public:
      */
     void sendControlRecord(const QJsonObject &record);
     /**
+     * Apply the own client's explicit conferencing consent. Safe from any
+     * thread: the session loop opens the selected RDP channels on its next
+     * iteration, after the connection is fully active.
+     */
+    void setMediaPolicy(bool remoteAudioPlayback, bool microphone);
+    /**
      * One complete `KRDPCTL` record from the client. Emitted on the session
      * thread; connect with Qt::QueuedConnection.
      */

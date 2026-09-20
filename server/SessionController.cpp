@@ -2312,6 +2312,11 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
         return;
     }
 
+    if (type == QLatin1String("media")) {
+        onControlMedia(wrapper, record);
+        return;
+    }
+
     if (type == QLatin1String("pong")) {
         m_layoutOwner.heartbeatOk(wrapper->controlId);
         if (m_layoutOwner.roleOf(wrapper->controlId) == LayoutOwner::Role::Owner) {
@@ -2367,6 +2372,19 @@ void SessionController::onControlCodec(SessionWrapper *wrapper, const QJsonObjec
     connection->videoStream()->setPrivateCodecPolicy(ordered, adaptive);
     connection->sendControlRecord(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"selected"_s, selected ? QLatin1String(KRdp::VideoCodecSupport::codecName(*selected)) : u"avc"_s}});
     qInfo() << "KRDPCTL: private codec selected" << (selected ? KRdp::VideoCodecSupport::codecName(*selected) : "avc");
+}
+
+void SessionController::onControlMedia(SessionWrapper *wrapper, const QJsonObject &record)
+{
+    auto *connection = wrapper->connection.data();
+    const QJsonValue playback = record.value(QLatin1String("playback"));
+    const QJsonValue microphone = record.value(QLatin1String("microphone"));
+    if (!playback.isBool() || !microphone.isBool()) {
+        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"media playback and microphone must be booleans"_s}));
+        return;
+    }
+    connection->setMediaPolicy(playback.toBool(), microphone.toBool());
+    connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"playback"_s, playback}, {u"microphone"_s, microphone}});
 }
 
 void SessionController::onControlTimeout(SessionWrapper *wrapper)
