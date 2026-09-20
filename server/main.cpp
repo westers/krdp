@@ -88,6 +88,20 @@ KRdp::CodecPreference codecPreferenceFrom(const QString &value)
     return KRdp::CodecPreference::Auto;
 }
 
+// OPT-045b (design §10 A10.2): the whole set is refused together on an invalid value, same rule as
+// ChromaPolicy::isValid() / KPipeWire's own setChromaPolicy() - never "fix up just the bad field",
+// which could silently turn a deliberately unusual but valid set into something else.
+KRdp::ChromaPolicy chromaPolicyFrom(const ServerConfig *config)
+{
+    const KRdp::ChromaPolicy policy{config->avc444MotionGapMs(), config->avc444RestMs(), config->avc444MaxGapMs()};
+    if (policy.isValid()) {
+        return policy;
+    }
+    qWarning() << "Invalid Avc444MotionGapMs/Avc444RestMs/Avc444MaxGapMs" << policy.motionGapMs << policy.restMs << policy.maxGapMs
+               << "(need each in [16,5000] and motionGap <= rest <= maxGap); using the defaults 100/150/1500";
+    return KRdp::ChromaPolicy{};
+}
+
 std::optional<int> configuredMonitorIndex(const ServerConfig *config)
 {
     const auto mode = normalizedMonitorMode(config->monitorMode());
@@ -324,6 +338,7 @@ int main(int argc, char **argv)
     controller.setQuality(quality);
     controller.setAdaptiveQuality(config->adaptiveQuality());
     controller.setCodecPreference(codecPreferenceFrom(config->codec()));
+    controller.setChromaPolicyDefaults(chromaPolicyFrom(config));
     controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
 
     auto runtimeConfig = KSharedConfig::openConfig(QStringLiteral("krdpserverrc"));
@@ -367,6 +382,8 @@ int main(int argc, char **argv)
 
         controller.setAdaptiveQuality(config->adaptiveQuality());
         controller.setCodecPreference(codecPreferenceFrom(config->codec()));
+        const auto chromaPolicy = chromaPolicyFrom(config);
+        controller.setChromaPolicyDefaults(chromaPolicy);
         controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
         applyVaapiDriverMode(config->vaapiDriverMode());
         KRdp::selectVaapiDriver();
@@ -377,7 +394,7 @@ int main(int argc, char **argv)
         qInfo() << "Runtime config applied: quality" << config->quality() << "adaptive" << config->adaptiveQuality() << "monitorMode" << config->monitorMode()
                 << "monitorIndex" << config->monitorIndex() << "virtualPolicy" << config->virtualMonitorPolicy() << "virtualLayout" << config->virtualMonitorLayout()
                 << "wakeDisplay" << config->wakeDisplayOnConnect() << "vaapiMode" << config->vaapiDriverMode() << "port" << listenPort << "from" << runtimeConfigPath
-                << "codec" << config->codec();
+                << "codec" << config->codec() << "chroma" << QStringLiteral("%1/%2/%3").arg(chromaPolicy.motionGapMs).arg(chromaPolicy.restMs).arg(chromaPolicy.maxGapMs);
     };
 
     // Re-creates the capture stream for a new display topology (resolution or
@@ -466,7 +483,9 @@ int main(int argc, char **argv)
 #else
     const auto sessionType = u"portal"_s;
 #endif
-    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9 codec=%10")
+    const auto startupChromaPolicy = controller.chromaPolicyDefaults();
+    const auto startupChromaText = QStringLiteral("%1/%2/%3").arg(startupChromaPolicy.motionGapMs).arg(startupChromaPolicy.restMs).arg(startupChromaPolicy.maxGapMs);
+    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9 codec=%10 chroma=%11")
                              .arg(sessionType,
                                   streamTarget,
                                   QString::number(port),
@@ -476,7 +495,8 @@ int main(int argc, char **argv)
                                   envValueOrUnset("KRDP_AUTO_VAAPI_DRIVER"),
                                   config->wakeDisplayOnConnect() ? u"1"_s : u"0"_s,
                                   config->adaptiveQuality() ? u"1"_s : u"0"_s,
-                                  QLatin1String(KRdp::VideoCodecSupport::preferenceName(controller.codecPreference())));
+                                  QLatin1String(KRdp::VideoCodecSupport::preferenceName(controller.codecPreference())),
+                                  startupChromaText);
 
     if (!server.start()) {
         return -1;

@@ -418,6 +418,7 @@ public:
             auto *session = entry.get();
             session->setVideoCodec(videoStream->codecForSessions());
             session->setChromaEnabled(m_chromaEnabled);
+            session->setChromaPolicy(m_chromaPolicy);
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::frameReceived, videoStream, &KRdp::VideoStream::queueFrame));
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::chromaCapabilityChanged, this, &SessionWrapper::onChromaCapabilityChanged));
             // At most once every 30 s per wrapper: server/*.cpp has no access to the KRDP logging
@@ -1086,6 +1087,11 @@ public:
     // Remembered so a session created by a later rebuild starts with the connection's current
     // chroma setting instead of the AbstractSession default (true).
     bool m_chromaEnabled = true;
+    // The connection's current AVC444 aux-stream timing policy (OPT-045b): the controller's
+    // configured default at connect time, or a client's KRDPCTL `chroma` override once one arrives.
+    // Remembered the same way m_chromaEnabled is, so a rebuilt session starts at the right policy
+    // instead of ChromaPolicy's struct default.
+    KRdp::ChromaPolicy m_chromaPolicy;
     // Throttles the "AVC444 cost" journal line to at most once per wrapper per 30 s.
     QElapsedTimer m_lastCostLog;
     // Everything setSessions() wired, so it can unwire exactly that much.
@@ -1518,6 +1524,23 @@ void SessionController::setCodecPreference(KRdp::CodecPreference preference)
 KRdp::CodecPreference SessionController::codecPreference() const
 {
     return m_codecPreference;
+}
+
+void SessionController::setChromaPolicyDefaults(const KRdp::ChromaPolicy &policy)
+{
+    if (m_chromaPolicyDefault == policy) {
+        return;
+    }
+    m_chromaPolicyDefault = policy;
+    // Existing connections keep the policy they started with (or a client's own override): only a
+    // fresh connection is seeded from this default, in onNewConnection().
+    qInfo() << "AVC444 chroma policy defaults: motionGap" << policy.motionGapMs << "rest" << policy.restMs << "maxGap" << policy.maxGapMs << "- applies to the next connection; active sessions:"
+            << m_wrappers.size() << "port:" << m_server->port();
+}
+
+KRdp::ChromaPolicy SessionController::chromaPolicyDefaults() const
+{
+    return m_chromaPolicyDefault;
 }
 
 void SessionController::setWakeDisplayOnConnect(bool enabled)
@@ -2171,6 +2194,10 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     });
     connect(wrapper.get(), &SessionWrapper::layoutRecordDue, this, &SessionController::sendLayoutNow);
     newConnection->videoStream()->setCodecPreference(m_codecPreference);
+    // Seeded from the controller's configured default; a client's own `chroma` (onControlChroma())
+    // overrides it for this connection only, before any session is created (setSessions() applies
+    // whatever wrapper->m_chromaPolicy holds at that point).
+    wrapper->m_chromaPolicy = m_chromaPolicyDefault;
     if (m_quality.has_value()) {
         newConnection->videoStream()->setQualityCap(quint8(m_quality.value()));
     }
@@ -2269,6 +2296,11 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
 
     if (type == QLatin1String("apply")) {
         onControlApply(wrapper, record, first);
+        return;
+    }
+
+    if (type == QLatin1String("chroma")) {
+        onControlChroma(wrapper, record, first);
         return;
     }
 
@@ -2460,6 +2492,56 @@ void SessionController::onControlApply(SessionWrapper *wrapper, const QJsonObjec
             }
         }
         refuse(*error, u"refused by the executor: %1"_s.arg(error->message));
+    }
+}
+
+void SessionController::onControlChroma(SessionWrapper *wrapper, const QJsonObject &record, bool first)
+{
+    auto *connection = wrapper->connection.data();
+    const QString id = wrapper->controlId;
+
+    const auto request = KRdp::LayoutControl::chromaFromJson(record);
+    if (!request) {
+        qInfo().noquote() << u"chroma from %1: invalid: malformed chroma (motionGapMs/restMs/maxGapMs must be numbers)"_s.arg(id);
+        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"malformed chroma: motionGapMs/restMs/maxGapMs must be numbers when present"_s}));
+    } else {
+        // Present fields override; an absent one keeps whatever this connection already has (the
+        // controller's default if nothing has overridden it yet, or an earlier `chroma` from the
+        // same client) - never AbstractSession/ChromaPolicy's own struct defaults.
+        KRdp::ChromaPolicy merged = wrapper->m_chromaPolicy;
+        if (request->motionGapMs) {
+            merged.motionGapMs = *request->motionGapMs;
+        }
+        if (request->restMs) {
+            merged.restMs = *request->restMs;
+        }
+        if (request->maxGapMs) {
+            merged.maxGapMs = *request->maxGapMs;
+        }
+        if (!merged.isValid()) {
+            qInfo().noquote() << u"chroma from %1: invalid: motionGap=%2 rest=%3 maxGap=%4 (need each in [16,5000] and motionGap <= rest <= maxGap)"_s.arg(id)
+                                      .arg(merged.motionGapMs)
+                                      .arg(merged.restMs)
+                                      .arg(merged.maxGapMs);
+            connection->sendControlRecord(
+                KRdp::LayoutControl::errorRecord({u"invalid"_s, u"chroma policy must have each of motionGapMs/restMs/maxGapMs in [16,5000] and motionGapMs <= restMs <= maxGapMs"_s}));
+        } else {
+            // Applies to this connection's own sessions only: chroma is not a layout-ownership
+            // concept (A10.4), so it is accepted whether or not this client owns the KRDPCTL layout.
+            wrapper->m_chromaPolicy = merged;
+            for (const auto &session : wrapper->sessions) {
+                session->setChromaPolicy(merged);
+            }
+            qInfo().noquote() << u"chroma policy: motionGap=%1 rest=%2 maxGap=%3 (client)"_s.arg(merged.motionGapMs).arg(merged.restMs).arg(merged.maxGapMs);
+        }
+    }
+
+    if (first) {
+        // A chroma request says nothing about the desired layout; served like `pong` - the
+        // configured MonitorMode, with whatever policy update above already landed on the wrapper
+        // before its sessions are built.
+        qInfo() << "KRDPCTL: first record is a chroma; using the configured MonitorMode";
+        buildConfiguredSessions(wrapper);
     }
 }
 

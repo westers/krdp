@@ -65,6 +65,13 @@ public:
      * AVC444: whether frames carry the chroma picture (the adaptive rung); a no-op for AVC420.
      */
     void setChromaEnabled(bool enabled);
+    /**
+     * AVC444: the aux (chroma) stream's timing policy (OPT-045b, design §10) - motion gap, at-rest
+     * refresh delay and maximum gap before a forced refresh, all in ms. Applied to the stream right
+     * away if one exists (stream() applies it at creation otherwise); a no-op against a KPipeWire
+     * without AVC444.
+     */
+    void setChromaPolicy(const ChromaPolicy &policy);
     Q_SIGNAL void chromaTimingReported(const KRdp::ChromaTimingReport &report);
     /**
      * Whether the running encoder really produces the chroma stream: false for a 4:2:0 codec, for a

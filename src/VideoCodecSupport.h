@@ -16,6 +16,30 @@ struct ChromaTimingReport {
     qint64 downloadAvg = 0, downloadMax = 0, splitAvg = 0, splitMax = 0, uploadAvg = 0, uploadMax = 0;
     qint64 encodeMainAvg = 0, encodeMainMax = 0, encodeAuxAvg = 0, encodeAuxMax = 0;   // queued -> packet latency per context
 };
+/**
+ * AVC444 aux (chroma) stream timing, per connection (OPT-045b, design §10 A10.1-A10.4). Mirrors the
+ * private KPipeWire's `PipeWireBaseEncodedStream::ChromaPolicy` field-for-field without exposing that
+ * type outside KRdp, so the fork still links against a stock KPipeWire (AbstractSession::setChromaPolicy
+ * forwards it behind an `if constexpr (requires ...)` check the same way setChromaEnabled does).
+ */
+struct ChromaPolicy {
+    int motionGapMs = 100;
+    int restMs = 150;
+    int maxGapMs = 1500;
+
+    bool operator==(const ChromaPolicy &) const = default;
+
+    /// Each field in [16, 5000] and motionGapMs <= restMs <= maxGapMs - the same rule KPipeWire's
+    /// H264VAAPIAvc444Encoder enforces on its own copy; checked here too so the server and KRDPCTL can
+    /// refuse an out-of-range request before it ever reaches KPipeWire.
+    bool isValid() const
+    {
+        constexpr int kMinMs = 16;
+        constexpr int kMaxMs = 5000;
+        const auto inRange = [](int v) { return v >= kMinMs && v <= kMaxMs; };
+        return inRange(motionGapMs) && inRange(restMs) && inRange(maxGapMs) && motionGapMs <= restMs && restMs <= maxGapMs;
+    }
+};
 namespace VideoCodecSupport
 {
 inline std::optional<CodecPreference> parseCodecPreference(QStringView value)
@@ -46,3 +70,4 @@ inline VideoCodec expectedCodec(CodecPreference preference) { return preference 
 }
 Q_DECLARE_METATYPE(KRdp::VideoCodec)
 Q_DECLARE_METATYPE(KRdp::ChromaTimingReport)
+Q_DECLARE_METATYPE(KRdp::ChromaPolicy)

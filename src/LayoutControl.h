@@ -124,10 +124,33 @@ struct Error {
     bool operator==(const Error &) const = default;
 };
 
+/**
+ * The `chroma` record body (client -> server, design §10 A10.4): sets the AVC444 aux (chroma)
+ * stream's timing policy for the sender's own connection. Every field is independently optional; a
+ * field left unset keeps whatever the connection's policy already has for it (the server default, or
+ * an earlier `chroma` from the same client). Fields present but not a JSON number make the whole
+ * message malformed (see chromaFromJson()); unrecognised extra keys are ignored.
+ */
+struct ChromaRequest {
+    std::optional<int> motionGapMs;
+    std::optional<int> restMs;
+    std::optional<int> maxGapMs;
+
+    bool operator==(const ChromaRequest &) const = default;
+};
+
 KRDP_EXPORT QJsonObject toJson(const Layout &layout);
 KRDP_EXPORT std::optional<Layout> layoutFromJson(const QJsonObject &object);
 KRDP_EXPORT QJsonObject toJson(const ApplyRequest &request);
 KRDP_EXPORT std::optional<ApplyRequest> applyFromJson(const QJsonObject &object);
+/**
+ * Parses a `chroma` record body. std::nullopt when a present motionGapMs/restMs/maxGapMs key is not a
+ * JSON number - a malformed request the caller should answer with `error invalid` and apply nothing,
+ * the same way a malformed `apply` is handled. Range/ordering validation (ChromaPolicy::isValid()) is
+ * the caller's job, once the (possibly partial) result here is merged over the connection's current
+ * policy.
+ */
+KRDP_EXPORT std::optional<ChromaRequest> chromaFromJson(const QJsonObject &object);
 
 /** Wraps \a error / \a layout as a full `{"type": ...}` record body, ready for frame(). */
 KRDP_EXPORT QJsonObject errorRecord(const Error &error);

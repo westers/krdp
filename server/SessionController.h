@@ -178,6 +178,14 @@ public:
     void setAdaptiveQuality(bool enabled);
     void setCodecPreference(KRdp::CodecPreference preference);
     KRdp::CodecPreference codecPreference() const;
+    /**
+     * AVC444 aux-stream timing default (OPT-045b, design §10 A10.2): `krdpserverrc`'s
+     * `Avc444MotionGapMs`/`Avc444RestMs`/`Avc444MaxGapMs`, already validated by the caller. Applies to
+     * the next connection only - an active connection keeps whatever policy it already has (the
+     * default it started with, or a client's own `chroma` override), exactly like setCodecPreference().
+     */
+    void setChromaPolicyDefaults(const KRdp::ChromaPolicy &policy);
+    KRdp::ChromaPolicy chromaPolicyDefaults() const;
     void setWakeDisplayOnConnect(bool enabled);
     void refreshDisplayConfiguration();
     /**
@@ -267,6 +275,13 @@ private:
      * record the session build gate was waiting for.
      */
     void onControlApply(SessionWrapper *wrapper, const QJsonObject &record, bool first);
+    /**
+     * `KRDPCTL` `chroma` (OPT-045b, design §10 A10.4): merges the request's present fields over
+     * \a wrapper's current AVC444 aux-stream policy, validates the result, and on success applies it
+     * to that connection's own sessions only - it never touches layout ownership. \a first: this is
+     * the record the session build gate was waiting for (same meaning as onControlApply()'s).
+     */
+    void onControlChroma(SessionWrapper *wrapper, const QJsonObject &record, bool first);
     /** The executor finished the apply that m_applying started. */
     void onLayoutApplied(const HostLayoutExecutor::Result &result);
     /**
@@ -354,6 +369,9 @@ private:
     std::optional<int> m_quality;
     bool m_adaptiveQuality = true;
     KRdp::CodecPreference m_codecPreference = KRdp::CodecPreference::Auto;
+    // AVC444 aux-stream timing default (OPT-045b, design §10 A10.2): applied to every new
+    // connection's sessions; a client's own KRDPCTL `chroma` can override it for that connection.
+    KRdp::ChromaPolicy m_chromaPolicyDefault;
     std::optional<KRdp::VirtualMonitor> m_virtualMonitor;
 
     // MonitorMode=multi was asked for, and (m_multiMonitor) is actually in use.

@@ -214,6 +214,81 @@ private Q_SLOTS:
         QCOMPARE(*roundTripped, request);
     }
 
+    // --- Chroma (OPT-045b, design §10 A10.4) ---
+
+    void chromaFullMessageParsesAllFields()
+    {
+        const QJsonObject object{
+            {QStringLiteral("motionGapMs"), 100},
+            {QStringLiteral("restMs"), 150},
+            {QStringLiteral("maxGapMs"), 1500},
+        };
+        const auto request = chromaFromJson(object);
+        QVERIFY(request.has_value());
+        QCOMPARE(request->motionGapMs, std::optional<int>(100));
+        QCOMPARE(request->restMs, std::optional<int>(150));
+        QCOMPARE(request->maxGapMs, std::optional<int>(1500));
+    }
+
+    void chromaPartialMessageLeavesOtherFieldsUnset()
+    {
+        const QJsonObject object{{QStringLiteral("maxGapMs"), 2000}};
+        const auto request = chromaFromJson(object);
+        QVERIFY(request.has_value());
+        QVERIFY(!request->motionGapMs.has_value());
+        QVERIFY(!request->restMs.has_value());
+        QCOMPARE(request->maxGapMs, std::optional<int>(2000));
+    }
+
+    void chromaEmptyMessageSetsNothing()
+    {
+        const auto request = chromaFromJson(QJsonObject{});
+        QVERIFY(request.has_value());
+        QVERIFY(!request->motionGapMs.has_value());
+        QVERIFY(!request->restMs.has_value());
+        QVERIFY(!request->maxGapMs.has_value());
+    }
+
+    void chromaUnknownExtraFieldIsIgnored()
+    {
+        const QJsonObject object{
+            {QStringLiteral("restMs"), 150},
+            {QStringLiteral("preferAvc420"), true}, // a different debug action's field; not ours
+        };
+        const auto request = chromaFromJson(object);
+        QVERIFY(request.has_value());
+        QCOMPARE(request->restMs, std::optional<int>(150));
+        QVERIFY(!request->motionGapMs.has_value());
+        QVERIFY(!request->maxGapMs.has_value());
+    }
+
+    void chromaNonIntegerFieldIsMalformed()
+    {
+        // A field that IS present but is not a JSON number makes the whole message malformed,
+        // exactly like a malformed "size" fails an apply's monitor entry: the caller answers
+        // `error invalid` and applies nothing, rather than silently treating it as absent.
+        const QJsonObject object{
+            {QStringLiteral("motionGapMs"), 100},
+            {QStringLiteral("restMs"), QStringLiteral("soon")},
+        };
+        QVERIFY(!chromaFromJson(object).has_value());
+    }
+
+    void chromaBooleanFieldIsMalformed()
+    {
+        // JSON true/false is not a number either, even though QJsonValue::toInt() would silently
+        // read it as 0/garbage if this were not checked with isDouble() first.
+        const QJsonObject object{{QStringLiteral("maxGapMs"), false}};
+        QVERIFY(!chromaFromJson(object).has_value());
+    }
+
+    // The merge-over-current-policy and ChromaPolicy::isValid() range/ordering check that
+    // SessionController::onControlChroma() runs after this parse are not reachable from here
+    // (they need a live SessionWrapper/connection); VideoCodecSupportTest::chromaPolicyValidity
+    // covers the pure isValid() rule the merge relies on, and research.md OPT-045b records the
+    // hardware acceptance of the merge itself (A10.6: `chroma=5000,100,100` -> `error invalid`,
+    // nothing applied).
+
     void errorLayoutAndTakeoverRecordsCarryType()
     {
         QCOMPARE(errorRecord(Error{QStringLiteral("invalid"), QStringLiteral("boom")}).value(QStringLiteral("type")).toString(), QStringLiteral("error"));

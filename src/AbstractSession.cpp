@@ -46,6 +46,14 @@ void applyAuxEnabledIfSupported(Stream *stream, bool enabled)
     }
 }
 template<typename Stream>
+void applyChromaPolicyIfSupported(Stream *stream, const ChromaPolicy &policy)
+{
+    if constexpr (requires(Stream *s) { s->setChromaPolicy(typename Stream::ChromaPolicy{}); }) {
+        using Policy = typename Stream::ChromaPolicy;
+        stream->setChromaPolicy(Policy{policy.motionGapMs, policy.restMs, policy.maxGapMs});
+    }
+}
+template<typename Stream>
 const char *activeChromaName(Stream *stream)
 {
     if constexpr (requires(Stream *s) { s->activeChromaMode(); }) {
@@ -129,6 +137,7 @@ public:
     int monitorIndex = 0;
     VideoCodec codec = VideoCodec::Avc420;
     bool chromaEnabled = true;
+    ChromaPolicy chromaPolicy;
 };
 
 AbstractSession::AbstractSession()
@@ -210,6 +219,14 @@ void AbstractSession::setChromaEnabled(bool enabled)
     d->chromaEnabled = enabled;
     if (d->encodedStream) {
         applyAuxEnabledIfSupported(d->encodedStream.get(), enabled);
+    }
+}
+
+void AbstractSession::setChromaPolicy(const ChromaPolicy &policy)
+{
+    d->chromaPolicy = policy;
+    if (d->encodedStream) {
+        applyChromaPolicyIfSupported(d->encodedStream.get(), policy);
     }
 }
 
@@ -343,6 +360,7 @@ PipeWireEncodedStream *AbstractSession::stream()
         }
         applyChromaModeIfSupported(d->encodedStream.get(), d->codec);
         applyAuxEnabledIfSupported(d->encodedStream.get(), d->chromaEnabled);
+        applyChromaPolicyIfSupported(d->encodedStream.get(), d->chromaPolicy);
         connectChromaTimingIfSupported(d->encodedStream.get(), this);
         connectActiveChromaModeIfSupported(d->encodedStream.get(), this);
     }

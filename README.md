@@ -214,6 +214,20 @@ dropped after its capabilities exchange). `examples/krdpctl-probe` is a
 minimal libfreerdp client for the channel (`--query`, `--apply FILE.json`,
 `--apply-seq A.json B.json …`, `--gfx`).
 
+A channel client can also tune its own AVC444 aux (chroma) stream timing
+with a `chroma` record, e.g. `{"v":1,"type":"chroma","motionGapMs":100,
+"restMs":150,"maxGapMs":1500}` (OPT-045b): `motionGapMs` is the quiet time
+before a frame carries the chroma picture, `restMs` the delay after a
+luma-only frame before an aux-only refresh, and `maxGapMs` the longest a
+busy monitor ever goes without a chroma refresh. Every field is optional -
+one left out keeps whatever this connection already has (the server's
+`Avc444MotionGapMs`/`Avc444RestMs`/`Avc444MaxGapMs` defaults, or an earlier
+`chroma` from the same client) - and each must be 16-5000 with
+`motionGapMs <= restMs <= maxGapMs`; an out-of-range or misordered set is
+refused whole with `error invalid` and nothing is applied. `chroma` affects
+only the sending connection's own sessions and needs no layout ownership,
+so it works for a viewer as well as the layout owner.
+
 To test `multi` without touching the live service, run a second instance on
 its own port and config directory, e.g. `XDG_CONFIG_HOME=<tmp> krdpserver
 --plasma --port 3391 -u krdptest -p krdptest --certificate <cert>
@@ -477,6 +491,17 @@ prints `avc444 timing: …` once a second; `krdpplasmastreamer --codec avc444v2`
 `<out>.main.raw`, `<out>.aux.raw`, `<out>.frames` and an `AVC444 cost` summary, and
 `krdpavc444probe` decodes such a run the way a FreeRDP client does and scores it against a
 `KPIPEWIRE_DUMP_RGBA` reference (see research.md OPT-045 for the numbers).
+
+`Avc444MotionGapMs`/`Avc444RestMs`/`Avc444MaxGapMs` (kcfg `General/…`, `Int`, defaults `100`/`150`/
+`1500`) are the server-wide AVC444 aux-stream timing policy (OPT-045b, design §10): the quiet time
+before a frame carries the chroma picture, the delay after a luma-only frame before an aux-only
+refresh, and the longest a busy monitor ever goes without a chroma refresh (a perpetually-animating
+window would otherwise never rest long enough to earn one). Read at start and on runtime reload for
+the next connection (an active connection keeps the policy it started with); each must be 16-5000
+with `motionGap <= rest <= maxGap`, else the whole set is refused with a warning and the compiled-in
+defaults are used. The startup summary shows `chroma=motion/rest/max`. The own client can override
+these per connection over `KRDPCTL` (see the `chroma` record above); channel-less clients always get
+the server default.
 
 Useful debug markers:
 

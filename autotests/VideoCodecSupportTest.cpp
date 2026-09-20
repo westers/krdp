@@ -49,6 +49,36 @@ private Q_SLOTS:
         QVERIFY(expectedCodec(CodecPreference::Avc444) == VideoCodec::Avc444v2);
         QVERIFY(expectedCodec(CodecPreference::Avc420) == VideoCodec::Avc420);
     }
+    // OPT-045b (design §10 A10.1-A10.3): the pure range/ordering rule ChromaPolicy::isValid()
+    // implements, mirrored by the private KPipeWire's H264VAAPIAvc444Encoder and relied on by
+    // SessionController::onControlChroma()'s KRDPCTL `chroma` merge/validation (not itself unit-
+    // testable here without a live connection - see LayoutControlTest for the wire parsing half).
+    void chromaPolicyDefaultsAreValid()
+    {
+        QVERIFY(ChromaPolicy{}.isValid());
+        QCOMPARE(ChromaPolicy{}.motionGapMs, 100);
+        QCOMPARE(ChromaPolicy{}.restMs, 150);
+        QCOMPARE(ChromaPolicy{}.maxGapMs, 1500);
+    }
+    void chromaPolicyValidity_data()
+    {
+        QTest::addColumn<int>("motionGapMs"); QTest::addColumn<int>("restMs"); QTest::addColumn<int>("maxGapMs"); QTest::addColumn<bool>("valid");
+        QTest::newRow("lower bound, all equal") << 16 << 16 << 16 << true;
+        QTest::newRow("upper bound, all equal") << 5000 << 5000 << 5000 << true;
+        QTest::newRow("strictly increasing") << 100 << 150 << 1500 << true;
+        QTest::newRow("motionGap below minimum") << 15 << 150 << 1500 << false;
+        QTest::newRow("maxGap above maximum") << 100 << 150 << 5001 << false;
+        QTest::newRow("restMs below minimum") << 100 << 0 << 1500 << false;
+        QTest::newRow("motionGap > restMs") << 200 << 150 << 1500 << false;
+        QTest::newRow("restMs > maxGap") << 100 << 2000 << 1500 << false;
+        QTest::newRow("motionGap > maxGap (implies restMs > maxGap too)") << 2000 << 2000 << 1500 << false;
+    }
+    void chromaPolicyValidity()
+    {
+        QFETCH(int, motionGapMs); QFETCH(int, restMs); QFETCH(int, maxGapMs); QFETCH(bool, valid);
+        const ChromaPolicy policy{motionGapMs, restMs, maxGapMs};
+        QCOMPARE(policy.isValid(), valid);
+    }
 };
 QTEST_GUILESS_MAIN(VideoCodecSupportTest)
 #include "VideoCodecSupportTest.moc"

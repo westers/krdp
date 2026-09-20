@@ -351,6 +351,27 @@ std::optional<ApplyRequest> applyFromJson(const QJsonObject &object)
     return request;
 }
 
+std::optional<ChromaRequest> chromaFromJson(const QJsonObject &object)
+{
+    ChromaRequest request;
+    const std::pair<QString, std::optional<int> *> fields[] = {
+        {QStringLiteral("motionGapMs"), &request.motionGapMs},
+        {QStringLiteral("restMs"), &request.restMs},
+        {QStringLiteral("maxGapMs"), &request.maxGapMs},
+    };
+    for (const auto &[key, target] : fields) {
+        if (!object.contains(key)) {
+            continue;
+        }
+        const auto value = object.value(key);
+        if (!value.isDouble()) {
+            return std::nullopt;
+        }
+        *target = value.toInt();
+    }
+    return request;
+}
+
 QJsonObject errorRecord(const Error &error)
 {
     return QJsonObject{

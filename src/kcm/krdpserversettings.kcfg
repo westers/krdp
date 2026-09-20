@@ -36,6 +36,18 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>Video codec: auto (AVC444v2/AVC444 when the client supports it, else AVC420), avc420 (always), avc444 (auto, warning when the client cannot)</label>
       <default>auto</default>
     </entry>
+    <entry name="Avc444MotionGapMs" type="Int">
+      <label>AVC444: minimum quiet time (ms) since the last frame before a frame carries the chroma (aux) picture</label>
+      <default>100</default>
+    </entry>
+    <entry name="Avc444RestMs" type="Int">
+      <label>AVC444: delay (ms) after a luma-only frame with no successor before an aux-only refresh packet is sent</label>
+      <default>150</default>
+    </entry>
+    <entry name="Avc444MaxGapMs" type="Int">
+      <label>AVC444: maximum time (ms) without an aux picture before the next frame carries one regardless of motion</label>
+      <default>1500</default>
+    </entry>
     <entry name="MonitorMode" type="String">
       <label>Display target mode (workspace, primary, specific, multi, virtual)</label>
       <default>workspace</default>
