@@ -64,6 +64,27 @@ private Q_SLOTS:
         QCOMPARE(s.command.codecId, uint32_t(RDPGFX_CODECID_AVC420));
         QVERIFY(s.command.extra == &s.avc420);
     }
+    void privateCodecUsesRawWirePayload()
+    {
+        const QByteArray data(123, 'h');
+        Storage s;
+        build(s, VideoCodec::Hevc, 4, QSize(1280, 720), data, QByteArray(), 80);
+        QCOMPARE(s.command.surfaceId, 4u);
+        QCOMPARE(s.command.format, uint32_t(PIXEL_FORMAT_BGRX32));
+        QCOMPARE(s.command.left, 0u);
+        QCOMPARE(s.command.top, 0u);
+        QCOMPARE(s.command.right, 1280u);
+        QCOMPARE(s.command.bottom, 720u);
+        QCOMPARE(s.command.codecId, uint32_t(VideoCodecSupport::PrivateHevcCodecId));
+        QCOMPARE(s.command.length, 123u);
+        QVERIFY(s.command.data == reinterpret_cast<const BYTE *>(data.constData()));
+        QVERIFY(s.command.extra == nullptr);
+
+        build(s, VideoCodec::Av1, 4, QSize(1280, 720), data, QByteArray(), 80);
+        QCOMPARE(s.command.codecId, uint32_t(VideoCodecSupport::PrivateAv1CodecId));
+        QCOMPARE(s.command.length, 123u);
+        QVERIFY(s.command.extra == nullptr);
+    }
     void avc444v2BothStreams()
     {
         const QByteArray data(1000, 'm'), aux(300, 'a');

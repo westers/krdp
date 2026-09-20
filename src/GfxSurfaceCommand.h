@@ -77,6 +77,16 @@ inline void build(Storage &s, VideoCodec codec, uint16_t surfaceId, const QSize 
         return;
     }
 
+    // Vendor codecs use the generic WIRE_TO_SURFACE_1 payload. FreeRDP writes cmd.data/length
+    // unchanged for an unrecognised codec ID; the own client intercepts it before the standard
+    // decoder. They never carry the AVC444 auxiliary stream.
+    if (!VideoCodecSupport::isAvc444(codec)) {
+        s.command.codecId = VideoCodecSupport::rdpgfxCodecId(codec);
+        s.command.data = const_cast<BYTE *>(reinterpret_cast<const BYTE *>(data.constData()));
+        s.command.length = data.length();
+        return;
+    }
+
     s.command.codecId = VideoCodecSupport::rdpgfxCodecId(codec);
     s.avc444 = RDPGFX_AVC444_BITMAP_STREAM{};
     // LC 0 = luma + chroma, 1 = luma only, 2 = chroma only (the encoder's at-rest refresh: no main picture).

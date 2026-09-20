@@ -52,7 +52,7 @@ inline std::optional<CodecPreference> parseCodecPreference(QStringView value)
 }
 inline const char *preferenceName(CodecPreference p) { switch (p) { case CodecPreference::Auto: return "auto"; case CodecPreference::Avc420: return "avc420"; case CodecPreference::Avc444: return "avc444"; } return "?"; }
 inline const char *codecName(VideoCodec c) { switch (c) { case VideoCodec::Avc420: return "avc420"; case VideoCodec::Avc444: return "avc444"; case VideoCodec::Avc444v2: return "avc444v2"; case VideoCodec::Hevc: return "hevc"; case VideoCodec::Av1: return "av1"; } return "?"; }
-inline bool isAvc444(VideoCodec c) { return c != VideoCodec::Avc420; }
+inline bool isAvc444(VideoCodec c) { return c == VideoCodec::Avc444 || c == VideoCodec::Avc444v2; }
 constexpr uint16_t PrivateHevcCodecId = 0x8001;
 constexpr uint16_t PrivateAv1CodecId = 0x8002;
 inline uint16_t rdpgfxCodecId(VideoCodec c) { switch (c) { case VideoCodec::Avc420: return RDPGFX_CODECID_AVC420; case VideoCodec::Avc444: return RDPGFX_CODECID_AVC444; case VideoCodec::Avc444v2: return RDPGFX_CODECID_AVC444v2; case VideoCodec::Hevc: return PrivateHevcCodecId; case VideoCodec::Av1: return PrivateAv1CodecId; } return RDPGFX_CODECID_AVC420; }
