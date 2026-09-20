@@ -37,6 +37,7 @@
 #include "LayoutControl.h"
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
+#include "PipeWireMicrophone.h"
 #include "Server.h"
 #include "VideoStream.h"
 
@@ -144,7 +145,7 @@ bool g_autoAppliedVaapiDriver = false;
 // characters: CHANNEL_NAME_LEN is the limit for a static channel name.
 char ControlChannelName[] = "KRDPCTL";
 
-UINT audinData(audin_server_context *, const SNDIN_DATA *data)
+UINT audinData(audin_server_context *audin, const SNDIN_DATA *data)
 {
     // The PCM is deliberately not discarded silently: the next OPT-050 slice
     // connects this callback to the per-session PipeWire virtual microphone.
@@ -153,7 +154,10 @@ UINT audinData(audin_server_context *, const SNDIN_DATA *data)
     if (!data || !data->Data) {
         return ERROR_INVALID_DATA;
     }
-    qCDebug(KRDP) << "AUDIN received" << Stream_Length(data->Data) << "bytes";
+    auto *endpoint = static_cast<PipeWireMicrophone *>(audin->userdata);
+    if (endpoint) {
+        endpoint->write(QByteArray(reinterpret_cast<const char *>(Stream_Buffer(data->Data)), int(Stream_Length(data->Data))));
+    }
     return CHANNEL_RC_OK;
 }
 }
@@ -366,6 +370,7 @@ public:
 
     RdpsndServerContext *rdpsnd = nullptr;
     audin_server_context *audin = nullptr;
+    std::unique_ptr<PipeWireMicrophone> microphoneEndpoint;
     std::atomic<bool> remoteAudioPlayback = false;
     std::atomic<bool> microphone = false;
 
@@ -884,6 +889,7 @@ bool RdpConnection::onClose()
         audin_server_context_free(d->audin);
         d->audin = nullptr;
     }
+    d->microphoneEndpoint.reset();
     if (d->rdpsnd) {
         if (d->rdpsnd->Close) {
             d->rdpsnd->Close(d->rdpsnd);
@@ -910,12 +916,19 @@ bool RdpConnection::initializeAudioChannels()
     const auto vcm = context->virtualChannelManager;
 
     if (!d->audin && d->microphone.load()) {
+        d->microphoneEndpoint = std::make_unique<PipeWireMicrophone>();
+        if (!d->microphoneEndpoint->start(QString::number(reinterpret_cast<quintptr>(this), 16))) {
+            qCWarning(KRDP) << "Could not create PipeWire remote microphone";
+            d->microphoneEndpoint.reset();
+            return false;
+        }
         d->audin = audin_server_context_new(vcm);
         if (!d->audin) {
             qCWarning(KRDP) << "Could not create AUDIN server context";
             return false;
         }
         d->audin->rdpcontext = d->peer->context;
+        d->audin->userdata = d->microphoneEndpoint.get();
         d->audin->Data = audinData;
         if (!audin_server_set_formats(d->audin, -1, nullptr)) {
             qCWarning(KRDP) << "Could not set AUDIN formats";

@@ -30,6 +30,8 @@ target_sources(KRdp PRIVATE
     LayoutControl.h
     PeerContext.cpp
     PeerContext_p.h
+    PipeWireMicrophone.cpp
+    PipeWireMicrophone.h
     PortalSession.cpp
     PortalSession.h
     VideoStream.cpp
@@ -81,6 +83,7 @@ target_link_libraries(KRdp PUBLIC
     K::KPipeWire
     K::KPipeWireRecord
     XKB::XKB
+    PkgConfig::PipeWire
 )
 
 set_target_properties(KRdp PROPERTIES
