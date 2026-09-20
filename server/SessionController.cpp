@@ -2263,7 +2263,10 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
     // A record proves the channel: a gate still undecided (cannot happen
     // with the queued ordering, see onNewConnection()) is decided by it.
     const bool first = wrapper->controlGate == SessionWrapper::ControlGate::Undecided || wrapper->controlGate == SessionWrapper::ControlGate::Waiting;
-    if (first) {
+    // `codec` is a preflight capability record: it precedes the initial apply but does not
+    // itself decide the layout-control gate.
+    const bool codecPreflight = type == QLatin1String("codec") && first;
+    if (first && !codecPreflight) {
         wrapper->controlTimer.stop();
     }
 
@@ -2304,6 +2307,11 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
         return;
     }
 
+    if (type == QLatin1String("codec")) {
+        onControlCodec(wrapper, record);
+        return;
+    }
+
     if (type == QLatin1String("pong")) {
         m_layoutOwner.heartbeatOk(wrapper->controlId);
         if (m_layoutOwner.roleOf(wrapper->controlId) == LayoutOwner::Role::Owner) {
@@ -2326,6 +2334,33 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
         qInfo() << "KRDPCTL: first record has unknown type" << type << "; using the configured MonitorMode";
         buildConfiguredSessions(wrapper);
     }
+}
+
+void SessionController::onControlCodec(SessionWrapper *wrapper, const QJsonObject &record)
+{
+    auto *connection = wrapper->connection.data();
+    const QJsonArray codecs = record.value(QLatin1String("codecs")).toArray();
+    const QString prefer = record.value(QLatin1String("prefer")).toString(QStringLiteral("auto")).toLower();
+    if (codecs.isEmpty() || (prefer != QLatin1String("auto") && prefer != QLatin1String("hevc") && prefer != QLatin1String("av1") && prefer != QLatin1String("avc"))) {
+        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec needs a non-empty codecs array and prefer auto|hevc|av1|avc"_s}));
+        return;
+    }
+    const auto offered = [&codecs](QStringView name) {
+        return std::any_of(codecs.cbegin(), codecs.cend(), [name](const QJsonValue &value) { return value.isString() && value.toString().compare(name, Qt::CaseInsensitive) == 0; });
+    };
+    std::optional<KRdp::VideoCodec> selected;
+    // HEVC is automatic: buzz has HEVC hardware decode. AV1 is explicit-only until a client
+    // with AV1 hardware decode is available.
+    if ((prefer == QLatin1String("auto") || prefer == QLatin1String("hevc")) && offered(u"hevc")) {
+        selected = KRdp::VideoCodec::Hevc;
+    } else if (prefer == QLatin1String("av1") && offered(u"av1")) {
+        selected = KRdp::VideoCodec::Av1;
+    }
+    if (selected) {
+        connection->videoStream()->setPrivateCodec(selected);
+    }
+    connection->sendControlRecord(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"selected"_s, selected ? QLatin1String(KRdp::VideoCodecSupport::codecName(*selected)) : u"avc"_s}});
+    qInfo() << "KRDPCTL: private codec selected" << (selected ? KRdp::VideoCodecSupport::codecName(*selected) : "avc");
 }
 
 void SessionController::onControlTimeout(SessionWrapper *wrapper)

@@ -336,6 +336,9 @@ public:
     // setCodecPreference()/codecPreference() are main-thread only (set before
     // caps are advertised); onCapsAdvertise() (peer thread) only reads it.
     CodecPreference codecPreference = CodecPreference::Auto;
+    // -1 = standard RDPGFX negotiation. Set by the main-thread KRDPCTL preflight before
+    // sessions exist; read by the peer and submission threads beside negotiatedCodec.
+    std::atomic<int> privateCodec = -1;
     // -1 = not negotiated yet (no CapsAdvertise received). Written on the
     // FreeRDP peer thread (onCapsAdvertise), read from any thread via
     // negotiatedCodec()/codecForSessions().
@@ -658,6 +661,18 @@ CodecPreference VideoStream::codecPreference() const
     return d->codecPreference;
 }
 
+void VideoStream::setPrivateCodec(std::optional<VideoCodec> codec)
+{
+    const int value = codec ? int(*codec) : -1;
+    d->privateCodec.store(value);
+    if (codec) {
+        const int previous = d->negotiatedCodec.exchange(value);
+        if (previous != value) {
+            Q_EMIT negotiatedCodecChanged(*codec);
+        }
+    }
+}
+
 std::optional<VideoCodec> VideoStream::negotiatedCodec() const
 {
     const int v = d->negotiatedCodec.load();
@@ -864,7 +879,8 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
     // Not reset to -1 on a re-advertisement (see the capsConfirmed branch above):
     // the previous codec stays the best guess until the caps parsed just above
     // settle on a new one a few lines later.
-    const VideoCodec codec = VideoCodecSupport::codecFor(selectedCaps->version, selectedCaps->capSet.flags, d->codecPreference);
+    const int privateCodec = d->privateCodec.load();
+    const VideoCodec codec = privateCodec >= 0 ? VideoCodec(privateCodec) : VideoCodecSupport::codecFor(selectedCaps->version, selectedCaps->capSet.flags, d->codecPreference);
     const int previous = d->negotiatedCodec.exchange(int(codec));
     qCInfo(KRDP).noquote() << QStringLiteral("GFX caps confirmed: %1 codec=%2").arg(QLatin1String(capVersionToString(selectedCaps->version)), QLatin1String(VideoCodecSupport::codecName(codec)));
     if (previous != int(codec)) {

@@ -282,6 +282,7 @@ private:
      * the record the session build gate was waiting for (same meaning as onControlApply()'s).
      */
     void onControlChroma(SessionWrapper *wrapper, const QJsonObject &record, bool first);
+    void onControlCodec(SessionWrapper *wrapper, const QJsonObject &record);
     /** The executor finished the apply that m_applying started. */
     void onLayoutApplied(const HostLayoutExecutor::Result &result);
     /**

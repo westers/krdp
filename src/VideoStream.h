@@ -147,6 +147,8 @@ public:
      */
     void setCodecPreference(CodecPreference preference);
     CodecPreference codecPreference() const;
+    /// Select an own-client vendor codec after KRDPCTL capability exchange. Main thread only.
+    void setPrivateCodec(std::optional<VideoCodec> codec);
     /**
      * The codec chosen in onCapsAdvertise() from this preference and the
      * client's caps. nullopt until the client has advertised its caps.
