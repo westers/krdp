@@ -3,6 +3,7 @@
 
 add_subdirectory(streamer)
 add_subdirectory(krdpctl-probe)
+add_subdirectory(avc444probe)
 
 if(BUILD_PLASMA_SESSION)
     add_subdirectory(plasmastreamer)

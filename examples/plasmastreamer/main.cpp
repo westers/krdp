@@ -220,6 +220,7 @@ int main(int argc, char **argv)
         {u"quit-after"_s, u"Quit after running for this amount of seconds"_s, u"seconds"_s},
         {u"monitor"_s, u"Index of the monitor to display."_s, u"monitor"_s, u"-1"_s},
         {u"quality"_s, u"Encoding quality of the stream, from 0 (lowest) to 100 (highest)"_s, u"quality"_s},
+        {u"codec"_s, u"Codec the session encodes for: avc420 (default, one stream), avc444 or avc444v2 (main + aux chroma stream; writes <output>.main.raw and <output>.aux.raw)"_s, u"codec"_s, u"avc420"_s},
         {u"output"_s, u"Path of the file to write the raw h264 stream to"_s, u"file"_s, u"stream.raw"_s},
         {u"wake-after"_s, u"Inject a small mouse move via the session's fake input at these offsets (seconds, comma separated) after the stream started (mimics an RDP user wiggling the mouse)"_s, u"seconds"_s},
         {u"wake-pos"_s, u"Position \"x,y\" for the --wake-after mouse move, in the target session's own screen pixels; only used with --multi (default 100,100)"_s, u"x,y"_s, u"100,100"_s},
@@ -249,6 +250,19 @@ int main(int argc, char **argv)
         session.setVideoQuality(parser.value(u"quality"_s).toUShort());
     }
 
+    KRdp::VideoCodec codec = KRdp::VideoCodec::Avc420;
+    const QString codecArg = parser.value(u"codec"_s).toLower();
+    if (codecArg == u"avc444v2"_s) {
+        codec = KRdp::VideoCodec::Avc444v2;
+    } else if (codecArg == u"avc444"_s) {
+        codec = KRdp::VideoCodec::Avc444;
+    } else if (codecArg != u"avc420"_s) {
+        qWarning() << "--codec must be avc420, avc444 or avc444v2";
+        return 2;
+    }
+    session.setVideoCodec(codec);
+    const bool avc444 = codec != KRdp::VideoCodec::Avc420;
+
     signal(SIGINT, [](int) {
         QCoreApplication::exit(0);
     });
@@ -257,10 +271,23 @@ int main(int argc, char **argv)
         QCoreApplication::exit(0);
     });
 
+    // AVC420 keeps writing exactly <output>, as before; AVC444/v2 splits main and aux pictures
+    // into <output>.main.raw / <output>.aux.raw. The .frames index (per-picture byte counts) is
+    // written in both modes -- the probe needs it for AVC420 too.
     const QString outputPath = parser.value(u"output"_s);
-    QFile file{outputPath};
+    QFile file{avc444 ? outputPath + u".main.raw"_s : outputPath};
+    QFile auxFile{outputPath + u".aux.raw"_s};
+    QFile indexFile{outputPath + u".frames"_s};
     if (!file.open(QFile::WriteOnly)) {
-        qDebug() << "Failed opening" << outputPath;
+        qDebug() << "Failed opening" << file.fileName();
+        return -1;
+    }
+    if (avc444 && !auxFile.open(QFile::WriteOnly)) {
+        qDebug() << "Failed opening" << auxFile.fileName();
+        return -1;
+    }
+    if (!indexFile.open(QFile::WriteOnly)) {
+        qDebug() << "Failed opening" << indexFile.fileName();
         return -1;
     }
 
@@ -269,13 +296,31 @@ int main(int argc, char **argv)
     qint64 frameCount = 0;
     qint64 byteCount = 0;
     qint64 keyFrameCount = 0;
+    qint64 keyFrameBytes = 0;
+    qint64 mainWithAuxCount = 0;
+    qint64 mainWithAuxBytes = 0;
+    qint64 lumaOnlyCount = 0;
+    qint64 lumaOnlyBytes = 0;
+    qint64 auxCount = 0;
+    qint64 auxBytes = 0;
+    qint64 auxOnlyCount = 0;
     QList<qint64> firstFrameSizes;
     QSize firstFrameSize;
 
     QObject::connect(&session, &KRdp::AbstractSession::frameReceived, &session, [&](const KRdp::VideoFrame &frame) {
         file.write(frame.data);
+        if (avc444) {
+            auxFile.write(frame.aux);
+        }
+        indexFile.write(QStringLiteral("%1 %2 %3 %4 %5\n")
+                             .arg(frameCount)
+                             .arg(frame.data.size())
+                             .arg(frame.aux.size())
+                             .arg(frame.isKeyFrame ? 1 : 0)
+                             .arg(sinceStarted.elapsed())
+                             .toUtf8());
         qWarning() << "Frame" << frameCount << "at +" << sinceStarted.elapsed() << "ms size" << frame.size << "bytes" << frame.data.size() << "keyframe"
-                   << frame.isKeyFrame << "monitorIndex" << frame.monitorIndex;
+                   << frame.isKeyFrame << "monitorIndex" << frame.monitorIndex << "aux" << frame.aux.size();
         if (frameCount == 0) {
             firstFrameSize = frame.size;
         }
@@ -284,9 +329,51 @@ int main(int argc, char **argv)
         }
         if (frame.isKeyFrame) {
             keyFrameCount++;
+            keyFrameBytes += frame.data.size();
+        } else if (!frame.data.isEmpty() && !frame.aux.isEmpty()) {
+            mainWithAuxCount++;
+            mainWithAuxBytes += frame.data.size();
+        } else if (!frame.data.isEmpty()) {
+            lumaOnlyCount++;
+            lumaOnlyBytes += frame.data.size();
+        } else if (!frame.aux.isEmpty()) {
+            // Aux-only refresh: the encoder shipped a chroma update with no new luma (LC=2).
+            auxOnlyCount++;
+        }
+        if (!frame.aux.isEmpty()) {
+            auxCount++;
+            auxBytes += frame.aux.size();
         }
         frameCount++;
         byteCount += frame.data.size();
+    });
+
+    // AVC444 per-frame CPU cost and the encoder's aux-refresh policy counters, reported once a
+    // second by the private KPipeWire (no-op signal on stock KPipeWire / AVC420 sessions).
+    qint64 dlSum = 0, dlMax = 0, spSum = 0, spMax = 0, upSum = 0, upMax = 0, emSum = 0, emMax = 0, eaSum = 0, eaMax = 0;
+    qint64 timedFrames = 0;
+    int timingReports = 0;
+    QString splitVariant;
+    qint64 auxSentTotal = 0, auxSkippedTotal = 0, auxRestTotal = 0, rewriteFailTotal = 0;
+
+    QObject::connect(&session, &KRdp::AbstractSession::chromaTimingReported, &session, [&](const KRdp::ChromaTimingReport &r) {
+        dlSum += r.downloadAvg * r.frames;
+        dlMax = std::max(dlMax, r.downloadMax);
+        spSum += r.splitAvg * r.frames;
+        spMax = std::max(spMax, r.splitMax);
+        upSum += r.uploadAvg * r.frames;
+        upMax = std::max(upMax, r.uploadMax);
+        emSum += r.encodeMainAvg * r.frames;
+        emMax = std::max(emMax, r.encodeMainMax);
+        eaSum += r.encodeAuxAvg * r.frames;
+        eaMax = std::max(eaMax, r.encodeAuxMax);
+        timedFrames += r.frames;
+        splitVariant = r.splitVariant;
+        auxSentTotal += r.auxSent;
+        auxSkippedTotal += r.auxSkippedMotion;
+        auxRestTotal += r.auxRestRefresh;
+        rewriteFailTotal += r.rewriteFailures;
+        timingReports++;
     });
 
     QObject::connect(&session, &KRdp::AbstractSession::started, &application, [&sinceStarted]() {
@@ -394,6 +481,49 @@ int main(int argc, char **argv)
     qWarning() << "First frame size (pixels):" << firstFrameSize;
     qWarning() << "First 5 frame data sizes (bytes):" << firstFrameSizes;
     qWarning() << "Output written to:" << outputPath;
+
+    const double seconds = sinceStarted.isValid() ? sinceStarted.elapsed() / 1000.0 : 0.0;
+    qWarning().noquote() << QStringLiteral(
+                                 "Pictures: frames %1 (%2 PDU/s) key %3 avg %4 B | main P with aux %5 avg %6 B | luma-only %7 avg %8 B | aux %9 avg %10 B "
+                                 "(aux-only refreshes %11)")
+                                 .arg(frameCount)
+                                 .arg(seconds > 0 ? frameCount / seconds : 0.0, 0, 'f', 1)
+                                 .arg(keyFrameCount)
+                                 .arg(keyFrameCount ? keyFrameBytes / keyFrameCount : 0)
+                                 .arg(mainWithAuxCount)
+                                 .arg(mainWithAuxCount ? mainWithAuxBytes / mainWithAuxCount : 0)
+                                 .arg(lumaOnlyCount)
+                                 .arg(lumaOnlyCount ? lumaOnlyBytes / lumaOnlyCount : 0)
+                                 .arg(auxCount)
+                                 .arg(auxCount ? auxBytes / auxCount : 0)
+                                 .arg(auxOnlyCount);
+    if (timingReports > 0 && timedFrames > 0) {
+        const qint64 dlAvg = dlSum / timedFrames;
+        const qint64 spAvg = spSum / timedFrames;
+        const qint64 upAvg = upSum / timedFrames;
+        const qint64 emAvg = emSum / timedFrames;
+        const qint64 eaAvg = eaSum / timedFrames;
+        qWarning().noquote() << QStringLiteral("AVC444 cost (per frame, us, avg over %1 frames / max): download %2/%3 split %4/%5 (%6) upload %7/%8 main "
+                                                "queue->packet %9/%10 aux %11/%12 download+split avg %13 | policy: aux sent %14 skipped-motion %15 "
+                                                "rest-refresh %16 rewrite-failures %17")
+                                     .arg(timedFrames)
+                                     .arg(dlAvg)
+                                     .arg(dlMax)
+                                     .arg(spAvg)
+                                     .arg(spMax)
+                                     .arg(splitVariant)
+                                     .arg(upAvg)
+                                     .arg(upMax)
+                                     .arg(emAvg)
+                                     .arg(emMax)
+                                     .arg(eaAvg)
+                                     .arg(eaMax)
+                                     .arg(dlAvg + spAvg)
+                                     .arg(auxSentTotal)
+                                     .arg(auxSkippedTotal)
+                                     .arg(auxRestTotal)
+                                     .arg(rewriteFailTotal);
+    }
 
     return result;
 }

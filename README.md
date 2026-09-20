@@ -463,6 +463,21 @@ real. `AdaptiveQuality`/`Quality` changes made while a session is connected
 AdaptiveQuality false`) take effect within a couple of seconds; a
 `Runtime config applied: ...` line in the journal confirms the reload ran.
 
+`Codec` (kcfg `General/Codec`, `String`, default `auto`) picks the RDPGFX video codec per
+connection: `auto` negotiates AVC444v2 (caps ≥ 10.2), AVC444 (caps 10.0/10.1) or AVC420 from what
+the client advertises; `avc420` pins AVC420 (today's path, byte for byte); `avc444` is `auto` with
+a warning for every client that cannot do it. AVC444 carries full 4:4:4 chroma as two H.264 4:2:0
+pictures per frame (main + auxiliary chroma, one stream, MS-RDPEGFX 3.3.8.3), encoded by the
+private KPipeWire on the 780M after a CPU split (AVX-512 on hal9000; `KPIPEWIRE_AVC444_SPLIT=
+scalar|freerdp|avx2|avx512` forces a variant). Under congestion the chroma stream is the first
+thing shed and the last restored (`Adaptive quality -> … chroma=on|off` in the journal); QP steps
+follow. The startup summary shows `codec=<config>`, the per-connection line `GFX caps confirmed: …
+codec=avc444v2|avc444|avc420` what was negotiated. Cost lines: `kpipewire_record_logging.debug=true`
+prints `avc444 timing: …` once a second; `krdpplasmastreamer --codec avc444v2` writes
+`<out>.main.raw`, `<out>.aux.raw`, `<out>.frames` and an `AVC444 cost` summary, and
+`krdpavc444probe` decodes such a run the way a FreeRDP client does and scores it against a
+`KPIPEWIRE_DUMP_RGBA` reference (see research.md OPT-045 for the numbers).
+
 Useful debug markers:
 
 ```bash
