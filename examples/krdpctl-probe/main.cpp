@@ -32,11 +32,24 @@
  *            --no-pong          do not answer the server's `ping` (by default every ping
  *                               is answered with `pong`, as a layout owner must); lets
  *                               the heartbeat release be watched
+ *            --raw FILE.json    send FILE's object verbatim after the handshake and after
+ *                               any --apply/--apply-seq: `type` is taken from the file as-is
+ *                               (unlike --apply/--query, which set it) and `v` is added only
+ *                               if the file omits it, so a deliberately wrong `v` can be
+ *                               tested too. Repeatable, sent in order >= 300 ms apart. Every
+ *                               reply received before --timeout is printed to stdout as
+ *                               `reply: <json>`; the probe exits 0 whether or not that reply
+ *                               is an `error` (it is printed either way). For exercising
+ *                               records --apply/--query cannot send, e.g. a raw `chroma`
+ *                               request.
  *
  * Records go to stdout, one compact JSON object per line, each prefixed with
  * the local time it was read (HH:MM:SS.zzz); everything else to stderr with
  * the same prefix, so a record can be placed against the server's log and
  * against the ResetGraphics line --gfx prints. The password is never printed.
+ * Once any --raw was given, replies are printed as `reply: <json>` (no time
+ * prefix) instead, so a test script can grep for them independent of the
+ * clock.
  *
  * Without --gfx no dynamic channel exists, so the server never opens its
  * RDPGFX pipeline for this connection: the GCC early capability flag
@@ -53,6 +66,7 @@
 #include <map>
 
 #include <QByteArray>
+#include <QDataStream>
 #include <QDeadlineTimer>
 #include <QDir>
 #include <QFile>
@@ -87,6 +101,9 @@ enum class Mode {
 // previous one; and how long an unanswered apply holds the sequence up.
 constexpr qint64 ApplySequenceGapMs = 8000;
 constexpr qint64 ApplySequenceReplyCapMs = 30000;
+// Between two --raw sends: fixed, unlike --apply-seq's pacing, since a raw
+// record (e.g. `chroma`) need not get any reply at all to count as accepted.
+constexpr qint64 RawSequenceGapMs = 300;
 
 struct Probe {
     Mode mode = Mode::Silent;
@@ -99,6 +116,10 @@ struct Probe {
     std::atomic<int> nextApply = 0;
     /** Answers (`layout`/`error`) to OUR applies seen so far (channel thread); never more than nextApply. */
     std::atomic<int> appliesAnswered = 0;
+    /** The --raw bodies, in order, sent verbatim (see the file comment); empty when --raw was not given. */
+    QList<QJsonObject> rawBodies;
+    /** Sent from the main loop only, after sentRequest; atomic for the same reason as nextApply. */
+    std::atomic<int> nextRaw = 0;
     bool gfx = false;
     bool pong = true;
     int timeoutSeconds = 0;
@@ -160,13 +181,44 @@ void printRecord(const QJsonObject &record)
     std::fflush(stdout);
 }
 
-bool sendRecord(Probe *probe, const QJsonObject &record)
+/** Same job as printRecord(), for replies once --raw is in play: a stable, greppable line. */
+void printReply(const QJsonObject &record)
+{
+    const QByteArray line = QByteArrayLiteral("reply: ") + QJsonDocument(record).toJson(QJsonDocument::Compact);
+    std::fwrite(line.constData(), 1, size_t(line.size()), stdout);
+    std::fputc('\n', stdout);
+    std::fflush(stdout);
+}
+
+/**
+ * Frames \a record exactly as given, adding "v" only when the object does not already
+ * have one. Unlike KRdp::LayoutControl::frame() (which always stamps the canonical
+ * ProtocolVersion), this is what --raw uses so a file can send a deliberately wrong
+ * "v" to test that path.
+ */
+QByteArray frameVerbatim(const QJsonObject &record)
+{
+    QJsonObject toSend = record;
+    if (!toSend.contains(QLatin1String("v"))) {
+        toSend.insert(QStringLiteral("v"), KRdp::LayoutControl::ProtocolVersion);
+    }
+    const QByteArray payload = QJsonDocument(toSend).toJson(QJsonDocument::Compact);
+    QByteArray out;
+    QDataStream stream(&out, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << static_cast<quint32>(payload.size());
+    out.append(payload);
+    return out;
+}
+
+/** \a verbatim selects frameVerbatim() (for --raw) over KRdp::LayoutControl::frame(). */
+bool sendRecord(Probe *probe, const QJsonObject &record, bool verbatim = false)
 {
     if (!probe->channelOpen) {
         logf("cannot send, channel not open");
         return false;
     }
-    const QByteArray framed = KRdp::LayoutControl::frame(record);
+    const QByteArray framed = verbatim ? frameVerbatim(record) : KRdp::LayoutControl::frame(record);
     // libfreerdp keeps the pointer until CHANNEL_EVENT_WRITE_COMPLETE, which
     // hands it back as the user data to free.
     auto *buffer = static_cast<char *>(std::malloc(size_t(framed.size())));
@@ -198,6 +250,21 @@ void sendNextApply(Probe *probe)
         logf("apply %d of %lld", index + 1, static_cast<long long>(probe->applyBodies.size()));
     }
     sendRecord(probe, body);
+}
+
+/** The next --raw record of the sequence, framed verbatim (see frameVerbatim()). */
+void sendNextRaw(Probe *probe)
+{
+    const int index = probe->nextRaw.load();
+    if (index >= probe->rawBodies.size()) {
+        return;
+    }
+    const QJsonObject body = probe->rawBodies.at(index);
+    probe->nextRaw = index + 1;
+    if (probe->rawBodies.size() > 1) {
+        logf("raw %d of %lld", index + 1, static_cast<long long>(probe->rawBodies.size()));
+    }
+    sendRecord(probe, body, /*verbatim=*/true);
 }
 
 void sendRequest(Probe *probe)
@@ -233,7 +300,11 @@ VOID VCAPITYPE openEvent(LPVOID userParam, DWORD openHandle, UINT event, LPVOID 
         // does not care where a record is cut, so feed them as they come.
         probe->deframer.feed(QByteArray(static_cast<const char *>(data), int(dataLength)));
         while (auto record = probe->deframer.next()) {
-            printRecord(*record);
+            if (probe->rawBodies.isEmpty()) {
+                printRecord(*record);
+            } else {
+                printReply(*record);
+            }
             const QString type = record->value(QLatin1String("type")).toString();
             if (type == QLatin1String("layout") || type == QLatin1String("error")) {
                 if (type == QLatin1String("layout")) {
@@ -502,8 +573,27 @@ bool applySettings(rdpSettings *s, const QString &host, int port, const QString 
 int usage()
 {
     std::fprintf(stderr,
-                 "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) [--gfx] [--timeout SECONDS] [--no-pong]\n");
+                 "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
+                 "[--gfx] [--timeout SECONDS] [--no-pong] [--raw FILE.json]...\n");
     return 2;
+}
+
+/** Reads \a path as a JSON object; logs and returns false if it cannot be opened or is not one. */
+bool readJsonFile(const char *path, QJsonObject &out)
+{
+    QFile file(QString::fromLocal8Bit(path));
+    if (!file.open(QIODevice::ReadOnly)) {
+        logf("cannot read %s", path);
+        return false;
+    }
+    QJsonParseError error;
+    const auto doc = QJsonDocument::fromJson(file.readAll(), &error);
+    if (!doc.isObject()) {
+        logf("%s is not a JSON object: %s", path, qPrintable(error.errorString()));
+        return false;
+    }
+    out = doc.object();
+    return true;
 }
 
 bool done(const Probe *probe)
@@ -543,21 +633,21 @@ int main(int argc, char **argv)
             // up to the next option.
             const bool sequence = arg == QLatin1String("--apply-seq");
             do {
-                QFile file(QString::fromLocal8Bit(argv[++i]));
-                if (!file.open(QIODevice::ReadOnly)) {
-                    logf("cannot read %s", argv[i]);
+                QJsonObject body;
+                if (!readJsonFile(argv[++i], body)) {
                     return 2;
                 }
-                QJsonParseError error;
-                const auto doc = QJsonDocument::fromJson(file.readAll(), &error);
-                if (!doc.isObject()) {
-                    logf("%s is not a JSON object: %s", argv[i], qPrintable(error.errorString()));
-                    return 2;
-                }
-                probe.applyBodies.push_back(doc.object());
+                probe.applyBodies.push_back(body);
             } while (sequence && i + 1 < argc && std::strncmp(argv[i + 1], "--", 2) != 0);
             probe.mode = Mode::Apply;
             modeGiven = true;
+        } else if (arg == QLatin1String("--raw") && i + 1 < argc) {
+            // Repeatable; does not select a mode (usually paired with --silent).
+            QJsonObject body;
+            if (!readJsonFile(argv[++i], body)) {
+                return 2;
+            }
+            probe.rawBodies.push_back(body);
         } else if (arg == QLatin1String("--gfx")) {
             probe.gfx = true;
         } else if (arg == QLatin1String("--no-pong")) {
@@ -648,6 +738,10 @@ int main(int argc, char **argv)
     int answersPaced = 0;
     QDeadlineTimer nextApplyAt(QDeadlineTimer::Forever);
     QDeadlineTimer replyCap(QDeadlineTimer::Forever);
+    // --raw pacing: fixed RawSequenceGapMs apart, not reply-paced (a raw
+    // record, e.g. `chroma`, may draw no reply at all when accepted).
+    bool rawStarted = false;
+    QDeadlineTimer nextRawAt(QDeadlineTimer::Forever);
     HANDLE handles[MAXIMUM_WAIT_OBJECTS] = {};
     while (!g_interrupted && !done(&probe)) {
         if (probe.mode == Mode::Apply && probe.nextApply.load() < probe.applyBodies.size() && probe.sentRequest.load()) {
@@ -667,6 +761,13 @@ int main(int argc, char **argv)
                 replyCap = QDeadlineTimer(QDeadlineTimer::Forever);
                 sendNextApply(&probe);
             }
+        }
+        // Raw sends start once the handshake's own request has gone out (so
+        // they follow any --apply, per the file comment), then space out.
+        if (probe.nextRaw.load() < probe.rawBodies.size() && probe.sentRequest.load() && (!rawStarted || nextRawAt.hasExpired())) {
+            rawStarted = true;
+            sendNextRaw(&probe);
+            nextRawAt = probe.nextRaw.load() < probe.rawBodies.size() ? QDeadlineTimer(RawSequenceGapMs) : QDeadlineTimer(QDeadlineTimer::Forever);
         }
         if (deadline.hasExpired()) {
             logf("timeout after %d s", probe.timeoutSeconds);
