@@ -25,6 +25,9 @@
 #include <freerdp/channels/wtsvc.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/server/cliprdr.h>
+#include <freerdp/server/audin.h>
+#include <freerdp/server/rdpsnd.h>
+#include <freerdp/server/server-common.h>
 
 #include <freerdp/channels/drdynvc.h>
 
@@ -140,6 +143,19 @@ bool g_autoAppliedVaapiDriver = false;
 // The layout control static virtual channel (slice 2c, OPT-044). Seven
 // characters: CHANNEL_NAME_LEN is the limit for a static channel name.
 char ControlChannelName[] = "KRDPCTL";
+
+UINT audinData(audin_server_context *, const SNDIN_DATA *data)
+{
+    // The PCM is deliberately not discarded silently: the next OPT-050 slice
+    // connects this callback to the per-session PipeWire virtual microphone.
+    // Keeping channel negotiation here first gives the client and server a
+    // standards-compliant lifecycle to exercise independently of media I/O.
+    if (!data || !data->Data) {
+        return ERROR_INVALID_DATA;
+    }
+    qCDebug(KRDP) << "AUDIN received" << Stream_Length(data->Data) << "bytes";
+    return CHANNEL_RC_OK;
+}
 }
 }
 
@@ -347,6 +363,9 @@ public:
     std::unique_ptr<Cursor> cursor;
     std::unique_ptr<NetworkDetection> networkDetection;
     std::unique_ptr<Clipboard> clipboard;
+
+    RdpsndServerContext *rdpsnd = nullptr;
+    audin_server_context *audin = nullptr;
 
     freerdp_peer *peer = nullptr;
 
@@ -612,8 +631,11 @@ void RdpConnection::initialize()
     // PSEUDO_XSERVER is apparently required for things to work properly.
     freerdp_settings_set_uint32(settings, FreeRDP_OsMinorType, OSMINORTYPE_PSEUDO_XSERVER);
 
-    // TODO: Implement audio support
-    freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, false);
+    // Advertise the standard audio channels. They are only opened after a
+    // client explicitly joins them, which keeps conferencing opt-in per
+    // connection rather than granting any device access by default.
+    freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, true);
+    freerdp_settings_set_bool(settings, FreeRDP_AudioCapture, true);
 
     freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
 
@@ -719,6 +741,10 @@ void RdpConnection::run(std::stop_token stopToken)
             if (!d->clipboard->initialize()) {
                 break;
             }
+        }
+
+        if (!initializeAudioChannels()) {
+            break;
         }
 
         // KRDPCTL (OPT-044): opened as soon as the join shows, not once
@@ -832,6 +858,20 @@ bool RdpConnection::onPostConnect()
 
 bool RdpConnection::onClose()
 {
+    if (d->audin) {
+        if (d->audin->IsOpen && d->audin->IsOpen(d->audin) && d->audin->Close) {
+            d->audin->Close(d->audin);
+        }
+        audin_server_context_free(d->audin);
+        d->audin = nullptr;
+    }
+    if (d->rdpsnd) {
+        if (d->rdpsnd->Close) {
+            d->rdpsnd->Close(d->rdpsnd);
+        }
+        rdpsnd_server_context_free(d->rdpsnd);
+        d->rdpsnd = nullptr;
+    }
     {
         std::lock_guard lock(d->controlChannelMutex);
         if (d->controlChannel) {
@@ -842,6 +882,57 @@ bool RdpConnection::onClose()
     d->clipboard->close();
     d->videoStream->close();
     setState(State::Closed);
+    return true;
+}
+
+bool RdpConnection::initializeAudioChannels()
+{
+    auto context = reinterpret_cast<PeerContext *>(d->peer->context);
+    const auto vcm = context->virtualChannelManager;
+
+    if (WTSVirtualChannelManagerIsChannelJoined(vcm, RDPSND_CHANNEL_NAME) && !d->rdpsnd) {
+        d->rdpsnd = rdpsnd_server_context_new(vcm);
+        if (!d->rdpsnd) {
+            qCWarning(KRDP) << "Could not create RDPSND server context";
+            return false;
+        }
+        d->rdpsnd->rdpcontext = d->peer->context;
+        d->rdpsnd->num_server_formats = server_rdpsnd_get_formats(&d->rdpsnd->server_formats);
+        if (d->rdpsnd->num_server_formats == 0) {
+            qCWarning(KRDP) << "RDPSND has no server formats";
+            return false;
+        }
+        d->rdpsnd->src_format = &d->rdpsnd->server_formats[0];
+        if (!d->rdpsnd->Initialize || d->rdpsnd->Initialize(d->rdpsnd, TRUE) != CHANNEL_RC_OK) {
+            qCWarning(KRDP) << "Could not initialize RDPSND";
+            return false;
+        }
+        qCInfo(KRDP) << "RDPSND channel initialized";
+    }
+
+    if (!d->audin) {
+        d->audin = audin_server_context_new(vcm);
+        if (!d->audin) {
+            qCWarning(KRDP) << "Could not create AUDIN server context";
+            return false;
+        }
+        d->audin->rdpcontext = d->peer->context;
+        d->audin->Data = audinData;
+        if (!audin_server_set_formats(d->audin, -1, nullptr)) {
+            qCWarning(KRDP) << "Could not set AUDIN formats";
+            return false;
+        }
+    }
+
+    if (WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME)
+        && WTSVirtualChannelManagerGetDrdynvcState(vcm) == DRDYNVC_STATE_READY
+        && d->audin->IsOpen && !d->audin->IsOpen(d->audin)) {
+        if (!d->audin->Open || !d->audin->Open(d->audin)) {
+            qCWarning(KRDP) << "Could not open AUDIN";
+            return false;
+        }
+        qCInfo(KRDP) << "AUDIN channel opened";
+    }
     return true;
 }
 

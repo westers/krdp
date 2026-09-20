@@ -161,6 +161,8 @@ private:
     bool onPostConnect();
     bool onClose();
     bool onSuppressOutput(uint8_t allow);
+    /** Session thread: create/open the standard audio channels once joined. */
+    bool initializeAudioChannels();
     /** Session thread: open `KRDPCTL` once the client has joined it. */
     void openControlChannel();
     /** Session thread: hand every queued `KRDPCTL` message to the deframer. False on a protocol violation. */
