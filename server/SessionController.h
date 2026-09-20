@@ -11,6 +11,7 @@
 #include "MultiLayout.h"
 #include "PhysicalOutputGuard.h"
 #include "RdpConnection.h"
+#include "VideoCodecSupport.h"
 #include <AbstractSession.h>
 #include <KStatusNotifierItem>
 #include <SurfaceLayout.h>
@@ -175,6 +176,8 @@ public:
     void releasePhysicalOutputs();
     void setQuality(const std::optional<int> &quality);
     void setAdaptiveQuality(bool enabled);
+    void setCodecPreference(KRdp::CodecPreference preference);
+    KRdp::CodecPreference codecPreference() const;
     void setWakeDisplayOnConnect(bool enabled);
     void refreshDisplayConfiguration();
     /**
@@ -350,6 +353,7 @@ private:
     std::optional<int> m_monitorIndex;
     std::optional<int> m_quality;
     bool m_adaptiveQuality = true;
+    KRdp::CodecPreference m_codecPreference = KRdp::CodecPreference::Auto;
     std::optional<KRdp::VirtualMonitor> m_virtualMonitor;
 
     // MonitorMode=multi was asked for, and (m_multiMonitor) is actually in use.

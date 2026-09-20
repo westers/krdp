@@ -617,13 +617,12 @@ void RdpConnection::initialize()
 
     freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
 
-    // Plain YUV420 AVC is currently the most straightforward of the the AVC
-    // related codecs to implement. Moreover, it makes the encoding side also
-    // simpler so it is currently the only supported codec. This uses the RdpGfx
-    // pipeline, so make sure to request that.
+    // The RDPGFX pipeline with H.264. AVC444/AVC444v2 are advertised unless the configuration
+    // pins the codec to AVC420; the codec is chosen per client in VideoStream::onCapsAdvertise().
+    const bool avc444 = d->videoStream->codecPreference() != CodecPreference::Avc420;
     freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, true);
-    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, false);
-    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, false);
+    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, avc444);
+    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, avc444);
     freerdp_settings_set_bool(settings, FreeRDP_GfxH264, true);
 
 

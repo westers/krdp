@@ -328,6 +328,13 @@ public:
     std::atomic<quint8> quality = 100; // current adaptive value
     std::atomic<quint8> qualityCap = 100; // configured Quality
     std::atomic<bool> adaptiveQuality = true;
+    // setCodecPreference()/codecPreference() are main-thread only (set before
+    // caps are advertised); onCapsAdvertise() (peer thread) only reads it.
+    CodecPreference codecPreference = CodecPreference::Auto;
+    // -1 = not negotiated yet (no CapsAdvertise received). Written on the
+    // FreeRDP peer thread (onCapsAdvertise), read from any thread via
+    // negotiatedCodec()/codecForSessions().
+    std::atomic<int> negotiatedCodec = -1;
     // The total pixel count over every surface, as a single atomic value, so
     // updateAdaptiveQuality() (main thread) never sees a torn width/height
     // while performReset() (submission thread) or onCapsAdvertise() (peer
@@ -365,6 +372,11 @@ VideoStream::VideoStream(RdpConnection *session)
     , d(std::make_unique<Private>())
 {
     d->session = session;
+
+    // Needed for the queued negotiatedCodecChanged connection (emitted from the
+    // FreeRDP peer thread) and, once S2+ send them, chromaTimingReported.
+    qRegisterMetaType<KRdp::VideoCodec>();
+    qRegisterMetaType<KRdp::ChromaTimingReport>();
 
     d->adaptiveTimer.setInterval(QualityUpdateInterval);
     d->adaptiveTimer.setTimerType(Qt::CoarseTimer);
@@ -620,6 +632,27 @@ void VideoStream::setAdaptiveQuality(bool enabled)
     }
 }
 
+void VideoStream::setCodecPreference(CodecPreference preference)
+{
+    d->codecPreference = preference;
+}
+
+CodecPreference VideoStream::codecPreference() const
+{
+    return d->codecPreference;
+}
+
+std::optional<VideoCodec> VideoStream::negotiatedCodec() const
+{
+    const int v = d->negotiatedCodec.load();
+    return v < 0 ? std::nullopt : std::optional<VideoCodec>(VideoCodec(v));
+}
+
+VideoCodec VideoStream::codecForSessions() const
+{
+    return negotiatedCodec().value_or(VideoCodecSupport::expectedCodec(d->codecPreference));
+}
+
 void VideoStream::updateAdaptiveQuality()
 {
     if (!d->adaptiveQuality.load()) {
@@ -770,6 +803,19 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
     });
 
     qCDebug(KRDP) << "Selected caps:" << capVersionToString(selectedCaps->version);
+
+    // Not reset to -1 on a re-advertisement (see the capsConfirmed branch above):
+    // the previous codec stays the best guess until the caps parsed just above
+    // settle on a new one a few lines later.
+    const VideoCodec codec = VideoCodecSupport::codecFor(selectedCaps->version, selectedCaps->capSet.flags, d->codecPreference);
+    const int previous = d->negotiatedCodec.exchange(int(codec));
+    qCInfo(KRDP).noquote() << QStringLiteral("GFX caps confirmed: %1 codec=%2").arg(QLatin1String(capVersionToString(selectedCaps->version)), QLatin1String(VideoCodecSupport::codecName(codec)));
+    if (d->codecPreference == CodecPreference::Avc444 && codec == VideoCodec::Avc420) {
+        qCWarning(KRDP) << "Codec=avc444 requested but this client advertises no AVC444 support (caps" << capVersionToString(selectedCaps->version) << "); using avc420";
+    }
+    if (previous != int(codec)) {
+        Q_EMIT negotiatedCodecChanged(codec); // peer thread; the session side connects queued
+    }
 
     RDPGFX_CAPS_CONFIRM_PDU capsConfirmPdu;
     capsConfirmPdu.capsSet = &(selectedCaps->capSet);

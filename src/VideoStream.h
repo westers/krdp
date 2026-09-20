@@ -18,6 +18,7 @@
 #include <freerdp/server/rdpgfx.h>
 
 #include "SurfaceLayout.h"
+#include "VideoCodecSupport.h"
 #include "VideoFrame.h"
 #include "krdp_export.h"
 
@@ -138,6 +139,30 @@ public:
      * setting changed. May be emitted from a thread other than the session's.
      */
     Q_SIGNAL void requestedQualityChanged(quint8 quality);
+
+    /**
+     * Set which codec family the client should be offered. Call before caps
+     * are advertised (main thread only); a change does not affect a
+     * connection that has already negotiated.
+     */
+    void setCodecPreference(CodecPreference preference);
+    CodecPreference codecPreference() const;
+    /**
+     * The codec chosen in onCapsAdvertise() from this preference and the
+     * client's caps. nullopt until the client has advertised its caps.
+     * May be read from any thread.
+     */
+    std::optional<VideoCodec> negotiatedCodec() const;
+    /**
+     * negotiatedCodec(), or the codec sessions are built for before caps are
+     * known (VideoCodecSupport::expectedCodec(codecPreference())).
+     */
+    VideoCodec codecForSessions() const;
+    /**
+     * Emitted when the negotiated codec changes, from the FreeRDP peer
+     * thread (onCapsAdvertise); connect with Qt::QueuedConnection.
+     */
+    Q_SIGNAL void negotiatedCodecChanged(KRdp::VideoCodec codec);
 
 private:
     friend BOOL gfxChannelIdAssigned(RdpgfxServerContext *, uint32_t);

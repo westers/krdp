@@ -60,3 +60,13 @@ add_executable(LayoutSessionDiffTest LayoutSessionDiffTest.cpp)
 target_include_directories(LayoutSessionDiffTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(LayoutSessionDiffTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME LayoutSessionDiffTest COMMAND LayoutSessionDiffTest)
+
+# VideoCodecSupport.h uses the RDPGFX enums: FreeRDP headers only, nothing linked.
+# FreeRDP/WinPR dirs are SYSTEM (matching src/CMakeLists.txt's -isystem for the
+# same headers): plain PRIVATE include dirs surfaced -Wpedantic/-Wdeprecated-declarations
+# warnings from wtypes.h/sspi.h that the main library targets do not see.
+add_executable(VideoCodecSupportTest VideoCodecSupportTest.cpp)
+target_include_directories(VideoCodecSupportTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(VideoCodecSupportTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(VideoCodecSupportTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME VideoCodecSupportTest COMMAND VideoCodecSupportTest)

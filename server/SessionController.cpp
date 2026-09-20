@@ -1447,6 +1447,22 @@ void SessionController::setAdaptiveQuality(bool enabled)
     qInfo() << "Applied runtime adaptive quality update:" << m_adaptiveQuality << "active sessions:" << m_wrappers.size() << "port:" << m_server->port();
 }
 
+void SessionController::setCodecPreference(KRdp::CodecPreference preference)
+{
+    if (m_codecPreference == preference) {
+        return;
+    }
+    m_codecPreference = preference;
+    // Existing connections negotiated already; a re-negotiation would need a GFX reset and a
+    // restart of every session for a setting that is not expected to move while streaming.
+    qInfo() << "Codec preference" << KRdp::VideoCodecSupport::preferenceName(preference) << "- applies to the next connection; active sessions:" << m_wrappers.size() << "port:" << m_server->port();
+}
+
+KRdp::CodecPreference SessionController::codecPreference() const
+{
+    return m_codecPreference;
+}
+
 void SessionController::setWakeDisplayOnConnect(bool enabled)
 {
     m_displayWakeGuard.setEnabled(enabled);
@@ -2097,6 +2113,7 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
         }
     });
     connect(wrapper.get(), &SessionWrapper::layoutRecordDue, this, &SessionController::sendLayoutNow);
+    newConnection->videoStream()->setCodecPreference(m_codecPreference);
     if (m_quality.has_value()) {
         newConnection->videoStream()->setQualityCap(quint8(m_quality.value()));
     }

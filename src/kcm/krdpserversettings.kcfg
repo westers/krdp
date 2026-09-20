@@ -32,6 +32,10 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>Steer the video quality from measured goodput and RTT, up to Quality as a cap</label>
       <default>true</default>
     </entry>
+    <entry name="Codec" type="String">
+      <label>Video codec: auto (AVC444v2/AVC444 when the client supports it, else AVC420), avc420 (always), avc444 (auto, warning when the client cannot)</label>
+      <default>auto</default>
+    </entry>
     <entry name="MonitorMode" type="String">
       <label>Display target mode (workspace, primary, specific, multi, virtual)</label>
       <default>workspace</default>
