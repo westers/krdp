@@ -17,9 +17,15 @@ bool PipeWireMicrophone::start(const QString &id)
     pw_init(nullptr, nullptr);
     m_loop = pw_thread_loop_new("krdp-remote-mic", nullptr);
     if (!m_loop) return false;
-    pw_stream_events events{};
-    events.version = PW_VERSION_STREAM_EVENTS;
-    events.process = PipeWireMicrophone::process;
+    // PipeWire retains this pointer for the life of the stream; a stack-local
+    // events table becomes invalid as soon as start() returns and crashes the
+    // first graph-process callback.
+    static const pw_stream_events events = [] {
+        pw_stream_events result{};
+        result.version = PW_VERSION_STREAM_EVENTS;
+        result.process = PipeWireMicrophone::process;
+        return result;
+    }();
     const QByteArray nodeName = QByteArrayLiteral("krdp.remote-microphone.") + id.toUtf8();
     m_stream = pw_stream_new_simple(pw_thread_loop_get_loop(m_loop), "KRDP Remote Microphone",
         pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_CLASS, "Audio/Source", PW_KEY_NODE_NAME, nodeName.constData(), PW_KEY_NODE_DESCRIPTION, "KRDP Remote Microphone", nullptr), &events, this);
