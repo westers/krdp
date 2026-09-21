@@ -23,14 +23,29 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
 wrapper_pid=
+graph_pid=
 cleanup() {
     if [[ -n "$wrapper_pid" ]]; then
         # KWinWrapper's destructor terminates/waits for its own KWin child.
         kill "$wrapper_pid" 2>/dev/null || true
         wait "$wrapper_pid" 2>/dev/null || true
     fi
+    if [[ -n "$graph_pid" ]]; then
+        kill "$graph_pid" 2>/dev/null || true
+        wait "$graph_pid" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
+env PIPEWIRE_RUNTIME_DIR="$XDG_RUNTIME_DIR" PIPEWIRE_CONFIG_DIR="$repo_path/server" \
+    PIPEWIRE_CONFIG_NAME=virtual-session-pipewire.conf pipewire \
+    >"$XDG_RUNTIME_DIR/pipewire.log" 2>&1 &
+graph_pid=$!
+for attempt in {1..50}; do
+    kill -0 "$graph_pid"
+    [[ -S "$XDG_RUNTIME_DIR/pipewire-0" ]] && break
+    sleep 0.1
+done
+[[ -S "$XDG_RUNTIME_DIR/pipewire-0" ]]
 kwin_wayland_wrapper --virtual --width 1280 --height 720 --output-count 1 \
     --no-global-shortcuts --no-kactivities >"$XDG_RUNTIME_DIR/kwin.log" 2>&1 &
 wrapper_pid=$!
@@ -50,6 +65,8 @@ env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
     timeout 10 kscreen-doctor -j >"$XDG_RUNTIME_DIR/outputs.json"
 jq -e '.outputs | length == 1' "$XDG_RUNTIME_DIR/outputs.json"
 jq -e '.outputs[0] | .enabled == true and .size.width == 1280 and .size.height == 720' "$XDG_RUNTIME_DIR/outputs.json"
+timeout 5 pw-dump >"$XDG_RUNTIME_DIR/graph.json"
+jq -e '[.[] | select(.type == "PipeWire:Interface:Device")] | length == 0' "$XDG_RUNTIME_DIR/graph.json"
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
     --method org.freedesktop.DBus.ListNames
 echo 'Private Wayland compositor ready at 1280x720; stopping probe only'
