@@ -28,6 +28,7 @@
 #include <freerdp/server/audin.h>
 #include <freerdp/server/rdpsnd.h>
 #include <freerdp/server/server-common.h>
+#include <freerdp/server/rdpecam-enumerator.h>
 
 #include <freerdp/channels/drdynvc.h>
 #include <freerdp/codec/audio.h>
@@ -184,6 +185,19 @@ void rdpsndActivated(RdpsndServerContext *rdpsnd)
         }
     }
     qCWarning(KRDP) << "RDPSND client offered no compatible format";
+}
+
+UINT cameraSelectVersion(CamDevEnumServerContext *context, const CAM_SELECT_VERSION_REQUEST *request)
+{
+    CAM_SELECT_VERSION_RESPONSE response{};
+    response.Header = request->Header;
+    return context->SelectVersionResponse(context, &response);
+}
+
+UINT cameraAdded(CamDevEnumServerContext *, const CAM_DEVICE_ADDED_NOTIFICATION *device)
+{
+    qCInfo(KRDP) << "RDPECAM client camera available:" << QString::fromUtf16(reinterpret_cast<const char16_t *>(device->DeviceName)) << device->VirtualChannelName;
+    return CHANNEL_RC_OK;
 }
 }
 }
@@ -399,7 +413,9 @@ public:
     std::unique_ptr<PipeWireAudioPlayback> audioPlaybackEndpoint;
     std::atomic<bool> remoteAudioPlayback = false;
     std::atomic<bool> microphone = false;
+    std::atomic<bool> camera = false;
     std::atomic_bool rdpsndActive = false;
+    CamDevEnumServerContext *cameraEnumerator = nullptr;
 
     freerdp_peer *peer = nullptr;
 
@@ -543,11 +559,12 @@ void RdpConnection::sendControlRecord(const QJsonObject &record)
     }
 }
 
-void RdpConnection::setMediaPolicy(bool remoteAudioPlayback, bool microphone)
+void RdpConnection::setMediaPolicy(bool remoteAudioPlayback, bool microphone, bool camera)
 {
     d->remoteAudioPlayback.store(remoteAudioPlayback);
     d->microphone.store(microphone);
-    qCInfo(KRDP) << "Conferencing media policy: playback" << remoteAudioPlayback << "microphone" << microphone;
+    d->camera.store(camera);
+    qCInfo(KRDP) << "Conferencing media policy: playback" << remoteAudioPlayback << "microphone" << microphone << "camera" << camera;
 }
 
 void RdpConnection::openControlChannel()
@@ -928,6 +945,11 @@ bool RdpConnection::onClose()
         d->rdpsnd = nullptr;
     }
     d->audioPlaybackEndpoint.reset();
+    if (d->cameraEnumerator) {
+        d->cameraEnumerator->Close(d->cameraEnumerator);
+        cam_dev_enum_server_context_free(d->cameraEnumerator);
+        d->cameraEnumerator = nullptr;
+    }
     if (d->audin) {
         if (d->audin->IsOpen && d->audin->IsOpen(d->audin) && d->audin->Close) {
             d->audin->Close(d->audin);
@@ -1013,6 +1035,22 @@ bool RdpConnection::initializeAudioChannels()
             d->audioPlaybackEndpoint.reset();
         }
         qCInfo(KRDP) << "RDPSND channel initialized after explicit media consent";
+    }
+    if (d->camera.load() && !d->cameraEnumerator && WTSVirtualChannelManagerGetDrdynvcState(vcm) == DRDYNVC_STATE_READY) {
+        d->cameraEnumerator = cam_dev_enum_server_context_new(vcm);
+        if (d->cameraEnumerator) {
+            d->cameraEnumerator->rdpcontext = d->peer->context;
+            d->cameraEnumerator->SelectVersionRequest = cameraSelectVersion;
+            d->cameraEnumerator->DeviceAddedNotification = cameraAdded;
+        }
+        if (!d->cameraEnumerator || d->cameraEnumerator->Initialize(d->cameraEnumerator, FALSE) != CHANNEL_RC_OK
+            || d->cameraEnumerator->Open(d->cameraEnumerator) != CHANNEL_RC_OK) {
+            qCWarning(KRDP) << "Could not initialize RDPECAM enumerator";
+            if (d->cameraEnumerator) cam_dev_enum_server_context_free(d->cameraEnumerator);
+            d->cameraEnumerator = nullptr;
+            return false;
+        }
+        qCInfo(KRDP) << "RDPECAM enumerator opened after explicit media consent";
     }
     return true;
 }

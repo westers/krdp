@@ -2379,12 +2379,13 @@ void SessionController::onControlMedia(SessionWrapper *wrapper, const QJsonObjec
     auto *connection = wrapper->connection.data();
     const QJsonValue playback = record.value(QLatin1String("playback"));
     const QJsonValue microphone = record.value(QLatin1String("microphone"));
-    if (!playback.isBool() || !microphone.isBool()) {
-        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"media playback and microphone must be booleans"_s}));
+    const QJsonValue camera = record.value(QLatin1String("camera"));
+    if (!playback.isBool() || !microphone.isBool() || !camera.isBool()) {
+        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"media playback, microphone, and camera must be booleans"_s}));
         return;
     }
-    connection->setMediaPolicy(playback.toBool(), microphone.toBool());
-    connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"playback"_s, playback}, {u"microphone"_s, microphone}});
+    connection->setMediaPolicy(playback.toBool(), microphone.toBool(), camera.toBool());
+    connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"playback"_s, playback}, {u"microphone"_s, microphone}, {u"camera"_s, camera}});
 }
 
 void SessionController::onControlTimeout(SessionWrapper *wrapper)
