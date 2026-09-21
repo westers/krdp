@@ -84,11 +84,17 @@ public:
     /** Old worker has closed its socket and cannot submit frames or input. */
     Actions workerStopped()
     {
-        if (!m_draining) {
-            return {};
+        if (m_draining) {
+            m_draining = false;
+            return startWanted();
         }
-        m_draining = false;
-        return startWanted();
+        // SDDM normally kills the greeter as it hands the seat to Plasma.
+        // That can race the next logind poll: remember that the old endpoint
+        // is gone so selecting the new user starts it immediately instead of
+        // waiting for a second, impossible stopped notification.
+        m_running = {};
+        m_starting = {};
+        return {};
     }
 
     /** The named worker completed its authenticated IPC handshake and capture setup. */

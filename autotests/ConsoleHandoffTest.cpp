@@ -27,6 +27,7 @@ class ConsoleHandoffTest : public QObject
 private Q_SLOTS:
     void waitsForWorkerBeforeGrantingInput();
     void revokesGreeterBeforeStartingUser();
+    void startsUserWhenGreeterStoppedBeforeSeatPoll();
     void ignoresAStaleWorkerReady();
 };
 
@@ -68,6 +69,23 @@ void ConsoleHandoffTest::revokesGreeterBeforeStartingUser()
     QVERIFY(ready.grantInput);
     QVERIFY(ready.resetGraphics);
     QVERIFY(ready.requestKeyFrame);
+}
+
+void ConsoleHandoffTest::startsUserWhenGreeterStoppedBeforeSeatPoll()
+{
+    ConsoleHandoff::State state;
+    const ConsoleHandoff::Target oldTarget = ConsoleHandoff::targetFor({greeter()});
+    const ConsoleHandoff::Target newTarget = ConsoleHandoff::targetFor({user()});
+    state.select(oldTarget);
+    state.workerReady(oldTarget);
+
+    // This is the real SDDM teardown ordering: the greeter socket closes
+    // before logind has reported the new active user session.
+    QVERIFY(state.workerStopped().empty());
+    QVERIFY(!state.inputEnabled());
+    const auto start = state.select(newTarget);
+    QVERIFY(start.startWorker);
+    QCOMPARE(start.target, newTarget);
 }
 
 void ConsoleHandoffTest::ignoresAStaleWorkerReady()
