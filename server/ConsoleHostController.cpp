@@ -211,5 +211,12 @@ void ConsoleHostController::addClient(RdpConnection *connection)
 void ConsoleHostController::removeClient(RdpConnection *connection)
 {
     std::erase_if(m_clients, [connection](const auto &client) { return client->connection == connection; });
+    if (m_clients.empty() && m_mediaConfigured) {
+        m_media = {};
+        m_mediaConfigured = false;
+        // Stopping the worker's capture restores the default sink and the
+        // playback-stream routes changed by silenceHost.
+        m_endpoint.setMedia(m_media);
+    }
 }
 }
