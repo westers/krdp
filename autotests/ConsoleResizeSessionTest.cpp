@@ -16,6 +16,39 @@ class ConsoleResizeSessionTest : public QObject
     const ConsoleWorkerWire::Resize request{11, 1, QStringLiteral("DP-3"), QSize(1280, 720), 1};
     const ConsoleWorkerWire::Outputs resized{{{QStringLiteral("DP-3"), QRect(0, 0, 1280, 720), 1, true}}};
 private Q_SLOTS:
+    void controlLossDuringDiscoveryNeverChangesTheMode()
+    {
+        int commands = 0;
+        ConsoleResizeExecutor::Reply pending;
+        ConsoleResizeSession session(nullptr, [&](auto, auto reply) { ++commands; pending = reply; });
+        int replies = 0;
+        connect(&session, &ConsoleResizeSession::result, this, [&](auto result) { QVERIFY(!result.error.isEmpty()); ++replies; });
+        session.setControl({1, true});
+        session.request(request);
+        session.setControl({2, false});
+        std::exchange(pending, {})(true, snapshot());
+        QCOMPARE(commands, 1); // Discovery only; no apply or restoration command.
+        QCOMPARE(replies, 1);
+        QVERIFY(!session.changing());
+        QVERIFY(!session.inputAllowed());
+    }
+
+    void stopDuringDiscoveryDoesNotStartAnApply()
+    {
+        int commands = 0;
+        ConsoleResizeExecutor::Reply pending;
+        ConsoleResizeSession session(nullptr, [&](auto, auto reply) { ++commands; pending = reply; });
+        int stopped = 0;
+        connect(&session, &ConsoleResizeSession::stopped, this, [&](const QString &error) { QVERIFY(error.isEmpty()); ++stopped; });
+        session.setControl({1, true});
+        session.request(request);
+        session.stop();
+        QCOMPARE(stopped, 0);
+        std::exchange(pending, {})(true, snapshot());
+        QCOMPARE(commands, 1);
+        QCOMPARE(stopped, 1);
+    }
+
     void waitsForMatchingKeyframe()
     {
         int calls = 0;

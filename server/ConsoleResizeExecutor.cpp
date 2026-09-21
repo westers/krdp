@@ -64,7 +64,12 @@ bool ConsoleResizeExecutor::resize(const QString &output, QSize pixels, double s
         return false;
     }
     m_busy = true;
+    m_cancelBeforeApply = false;
     run({QStringLiteral("-j")}, [this, output, pixels, scale](bool ok, const QByteArray &snapshot) {
+        if (m_cancelBeforeApply) {
+            finish({}, QStringLiteral("console resize cancelled before applying"));
+            return;
+        }
         const auto plan = ConsoleResize::plan(snapshot, output, pixels, scale);
         if (!ok || !plan.valid()) {
             finish(plan, ok ? plan.error : QStringLiteral("could not read physical output modes"));

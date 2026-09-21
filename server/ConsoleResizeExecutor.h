@@ -17,6 +17,9 @@ public:
     explicit ConsoleResizeExecutor(QObject *parent = nullptr, Runner runner = {});
     bool resize(const QString &output, QSize pixels, double scale);
     bool restore(const ConsoleResize::Plan &plan);
+    // Cancel discovery before a mode command is launched. An already launched
+    // command must settle and be read back so the lifecycle can restore safely.
+    void cancelBeforeApply() { m_cancelBeforeApply = true; }
     bool busy() const { return m_busy; }
 
 Q_SIGNALS:
@@ -30,5 +33,6 @@ private:
     void finish(const ConsoleResize::Plan &plan, const QString &error);
     Runner m_runner;
     bool m_busy = false;
+    bool m_cancelBeforeApply = false;
 };
 }

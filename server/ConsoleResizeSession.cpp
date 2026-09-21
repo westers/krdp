@@ -39,6 +39,7 @@ void ConsoleResizeSession::setControl(ConsoleWorkerWire::ControlState control)
     const bool oldOwner = m_control.active;
     m_control = control;
     if (oldOwner || !control.active) {
+        m_executor.cancelBeforeApply();
         m_draining = true;
         if (m_waitingCapture) {
             finishRequest(QStringLiteral("console control changed during resize"));
@@ -145,6 +146,7 @@ void ConsoleResizeSession::stop()
         return;
     }
     m_stopping = true;
+    m_executor.cancelBeforeApply();
     m_draining = true;
     if (m_waitingCapture) {
         finishRequest(QStringLiteral("console worker is stopping"));
