@@ -28,6 +28,7 @@ private Q_SLOTS:
     void waitsForWorkerBeforeGrantingInput();
     void revokesGreeterBeforeStartingUser();
     void startsUserWhenGreeterStoppedBeforeSeatPoll();
+    void retriesUnchangedTargetAfterWorkerStops();
     void ignoresAStaleWorkerReady();
 };
 
@@ -69,6 +70,19 @@ void ConsoleHandoffTest::revokesGreeterBeforeStartingUser()
     QVERIFY(ready.grantInput);
     QVERIFY(ready.resetGraphics);
     QVERIFY(ready.requestKeyFrame);
+}
+
+void ConsoleHandoffTest::retriesUnchangedTargetAfterWorkerStops()
+{
+    ConsoleHandoff::State state;
+    const ConsoleHandoff::Target target = ConsoleHandoff::targetFor({greeter()});
+    state.select(target);
+    state.workerReady(target);
+
+    QVERIFY(state.workerStopped().empty());
+    const auto retry = state.select(target);
+    QVERIFY(retry.startWorker);
+    QCOMPARE(retry.target, target);
 }
 
 void ConsoleHandoffTest::startsUserWhenGreeterStoppedBeforeSeatPoll()

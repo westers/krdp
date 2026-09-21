@@ -42,8 +42,11 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             client->session->submitFrame(frame);
         }
     });
-    connect(&m_endpoint, &ConsoleWorkerEndpoint::protocolError, this, [](const QString &message) {
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::protocolError, this, [this](const QString &message) {
         qWarning().noquote() << "Console worker protocol error:" << message;
+        setWorkerActive(false);
+        m_endpoint.close();
+        apply(m_handoff.workerStopped());
     });
 }
 
@@ -116,6 +119,9 @@ void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
     if (!m_launchWorker || !m_launchWorker(target, m_endpoint.socketName(), token, &error)) {
         qWarning().noquote() << "Cannot launch console worker for session" << target.sessionId << ':' << error;
         m_endpoint.close();
+        // close() is local and therefore has no disconnected signal. Tell the
+        // handoff state to retry on its next logind poll.
+        apply(m_handoff.workerStopped());
     }
 }
 

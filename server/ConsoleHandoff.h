@@ -94,6 +94,10 @@ public:
         // waiting for a second, impossible stopped notification.
         m_running = {};
         m_starting = {};
+        // Clear the selection as well: the next seat poll must retry a worker
+        // that crashed/failed its launch even when logind still reports the
+        // same target (and it naturally selects the new user after SDDM).
+        m_wanted = {};
         return {};
     }
 
