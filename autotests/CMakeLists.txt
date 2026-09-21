@@ -53,6 +53,11 @@ target_include_directories(ConsoleResizeTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ConsoleResizeTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ConsoleResizeTest COMMAND ConsoleResizeTest)
 
+add_executable(ConsoleResizeExecutorTest ConsoleResizeExecutorTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleResizeExecutor.cpp)
+target_include_directories(ConsoleResizeExecutorTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleResizeExecutorTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME ConsoleResizeExecutorTest COMMAND ConsoleResizeExecutorTest)
+
 add_executable(ConsoleInputStateTest ConsoleInputStateTest.cpp)
 target_include_directories(ConsoleInputStateTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ConsoleInputStateTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)

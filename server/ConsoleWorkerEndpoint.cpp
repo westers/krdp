@@ -113,6 +113,14 @@ void ConsoleWorkerEndpoint::setControlState(const ConsoleWorkerWire::ControlStat
     }
 }
 
+bool ConsoleWorkerEndpoint::resize(const ConsoleWorkerWire::Resize &request)
+{
+    if (!m_ready || !m_worker) {
+        return false;
+    }
+    return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
+}
+
 void ConsoleWorkerEndpoint::acceptConnection()
 {
     QLocalSocket *candidate = m_server->nextPendingConnection();
@@ -163,6 +171,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT outputsReceived(*outputs);
         } else if (const auto state = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::LocalTakeover); state && state->active) {
             Q_EMIT localTakeover(state->generation);
+        } else if (const auto result = ConsoleWorkerWire::resizeResult(*record)) {
+            Q_EMIT resizeFinished(*result);
         } else {
             fail(QStringLiteral("unexpected worker record"));
             return;

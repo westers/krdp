@@ -9,7 +9,7 @@ add_executable(krdp-console-probe consoleprobe.cpp ConsoleSeat.cpp)
 add_executable(krdp-greeter-probe greeterprobe.cpp)
 add_executable(krdp-audio-route-probe audioprobe.cpp ../src/PipeWireAudioPlayback.cpp)
 if (BUILD_PLASMA_SESSION)
-    add_executable(krdp-console-worker consoleworker.cpp ../src/PipeWireAudioPlayback.cpp)
+    add_executable(krdp-console-worker consoleworker.cpp ConsoleResizeExecutor.cpp ../src/PipeWireAudioPlayback.cpp)
 endif()
 
 target_sources(krdpserver PRIVATE main.cpp SessionController.cpp DisplayWakeGuard.cpp PhysicalOutputGuard.cpp HostLayoutExecutor.cpp ConsoleSeat.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp ConsoleHostController.cpp ConsoleWorkerLauncher.cpp)

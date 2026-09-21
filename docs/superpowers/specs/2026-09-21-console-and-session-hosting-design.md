@@ -112,6 +112,18 @@ an actual non-no-op mode change on Sol and clean restoration. Hal is not a resiz
 test target. The planner is implemented first; worker execution/transport/client
 Fit and runtime acceptance are still incomplete.
 
+Implementation follow-up: ConsoleResizeExecutor now provides asynchronous
+kscreen-doctor read/plan/apply/readback, a five-second per-command timeout,
+bounded helper output, no-op avoidance, conditional restore, and field-wise
+rollback of partial applies. Tests inject command replies; no physical modeset
+has been exercised yet. Worker IPC Resize/ResizeResult records carry bounded
+output/size/scale plus request ID and control generation. The authenticated
+endpoint forwards them only after Ready. Neither primitive is connected to
+Worker/ConsoleHostController resize lifecycle yet: integrate ownership changes,
+handoff/disconnect restoration, capture/keyframe settling, and capability/client
+handling before enabling it. Process exit or mode readback alone is not proof
+that the RDP stream has adopted the new geometry.
+
 ## Virtual sessions (after console mode)
 
 The virtual-session host uses the same stable transport and adapter API, but

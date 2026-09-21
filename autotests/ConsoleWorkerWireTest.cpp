@@ -20,8 +20,35 @@ private Q_SLOTS:
     void roundTripsOutputs();
     void rejectsInvalidOutputs();
     void roundTripsControlGeneration();
+    void roundTripsResizeAndRejectsMalformedRequests();
     void rejectsOversizedRecord();
 };
+
+void ConsoleWorkerWireTest::roundTripsResizeAndRejectsMalformedRequests()
+{
+    const Resize request{17, 4, QStringLiteral("DP-3"), QSize(1280, 720), 1.25};
+    Deframer reader;
+    reader.feed(frame(request) + frame(ResizeResult{17, 4, QStringLiteral("unsupported mode")}));
+    const auto record = reader.next();
+    QVERIFY(record);
+    QCOMPARE(resize(*record), std::optional<Resize>(request));
+    const auto result = reader.next();
+    QVERIFY(result);
+    QCOMPARE(resizeResult(*result), std::optional<ResizeResult>({17, 4, QStringLiteral("unsupported mode")}));
+    auto truncated = *record;
+    truncated.payload.chop(1);
+    QVERIFY(!resize(truncated));
+    QVERIFY(!resize(*result));
+    for (const auto &invalid : {Resize{0, 4, QStringLiteral("DP-3"), QSize(1280, 720), 1},
+                               Resize{17, 0, QStringLiteral("DP-3"), QSize(1280, 720), 1},
+                               Resize{17, 4, QStringLiteral("DP-3"), QSize(8192, 4320), 1},
+                               Resize{17, 4, QStringLiteral("DP-3"), QSize(1280, 720), qQNaN()}}) {
+        reader.feed(frame(invalid));
+        const auto bad = reader.next();
+        QVERIFY(bad);
+        QVERIFY(!resize(*bad));
+    }
+}
 
 void ConsoleWorkerWireTest::deframesSplitAndCoalescedRecords()
 {

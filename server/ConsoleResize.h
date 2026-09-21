@@ -62,6 +62,37 @@ inline bool matches(const QByteArray &snapshot, const Plan &plan, bool original 
     return found == 1 && match;
 }
 
+inline QStringList rollbackArgs(const QByteArray &snapshot, const Plan &plan)
+{
+    if (!plan.valid()) {
+        return {};
+    }
+    const auto document = QJsonDocument::fromJson(snapshot);
+    QJsonObject current;
+    for (const auto entry : document.object().value(QStringLiteral("outputs")).toArray()) {
+        const auto output = entry.toObject();
+        if (output.value(QStringLiteral("name")).toString() == plan.output) {
+            if (!current.isEmpty()) {
+                return {}; // Ambiguous snapshots must never produce commands.
+            }
+            current = output;
+        }
+    }
+    if (!current.value(QStringLiteral("connected")).toBool() || !current.value(QStringLiteral("enabled")).toBool()) {
+        return {};
+    }
+    QStringList arguments;
+    const QString prefix = QStringLiteral("output.%1.").arg(plan.output);
+    if (plan.mode != plan.previousMode && current.value(QStringLiteral("currentModeId")).toString() == plan.mode) {
+        arguments << prefix + QStringLiteral("mode.") + plan.previousMode;
+    }
+    const double scale = current.value(QStringLiteral("scale")).toDouble(0);
+    if (std::abs(plan.scale - plan.previousScale) > 0.000001 && std::isfinite(scale) && std::abs(scale - plan.scale) < 0.000001) {
+        arguments << prefix + QStringLiteral("scale.") + QString::number(plan.previousScale, 'g', 12);
+    }
+    return arguments;
+}
+
 inline Plan plan(const QByteArray &snapshot, const QString &name, QSize pixels, double scale)
 {
     Plan result;

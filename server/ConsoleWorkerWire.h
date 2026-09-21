@@ -39,6 +39,8 @@ enum class Kind : quint8 {
     Outputs,
     ControlState,
     LocalTakeover,
+    Resize,
+    ResizeResult,
 };
 
 struct Record {
@@ -48,6 +50,72 @@ struct Record {
 };
 
 inline QByteArray frame(Kind kind, const QByteArray &payload = {});
+
+struct Resize {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString output;
+    QSize pixels;
+    double scale = 1;
+    bool operator==(const Resize &) const = default;
+};
+
+struct ResizeResult {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString error; // Empty only after verified mode/scale readback.
+    bool operator==(const ResizeResult &) const = default;
+};
+
+inline QByteArray frame(const Resize &request)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << request.requestId << request.generation << request.output << request.pixels << request.scale;
+    return frame(Kind::Resize, payload);
+}
+
+inline std::optional<Resize> resize(const Record &record)
+{
+    if (record.kind != Kind::Resize || record.payload.size() > 512) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    Resize request;
+    stream >> request.requestId >> request.generation >> request.output >> request.pixels >> request.scale;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !request.requestId || !request.generation
+        || request.output.isEmpty() || request.output.size() > 128 || request.pixels.width() < 320 || request.pixels.height() < 200
+        || request.pixels.width() > 4096 || request.pixels.height() > 4096 || !std::isfinite(request.scale) || request.scale < 1 || request.scale > 4) {
+        return std::nullopt;
+    }
+    return request;
+}
+
+inline QByteArray frame(const ResizeResult &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.requestId << result.generation << result.error;
+    return frame(Kind::ResizeResult, payload);
+}
+
+inline std::optional<ResizeResult> resizeResult(const Record &record)
+{
+    if (record.kind != Kind::ResizeResult || record.payload.size() > 4096) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    ResizeResult result;
+    stream >> result.requestId >> result.generation >> result.error;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation || result.error.size() > 1024) {
+        return std::nullopt;
+    }
+    return result;
+}
 
 struct ControlState {
     quint64 generation = 0;
@@ -352,7 +420,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::LocalTakeover)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::ResizeResult)) {
             ++m_invalid;
             return std::nullopt;
         }

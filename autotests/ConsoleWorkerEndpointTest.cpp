@@ -29,6 +29,8 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     const ConsoleHandoff::Target target{ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000};
     const QByteArray token(24, 't');
     QVERIFY(endpoint.listen(directory.filePath(QStringLiteral("worker.sock")), target, token));
+    const ConsoleWorkerWire::Resize resize{11, 42, QStringLiteral("DP-1"), QSize(1280, 720), 1};
+    QVERIFY(!endpoint.resize(resize)); // Never send a display mutation before Ready.
 
     int ready = 0;
     int frames = 0;
@@ -70,6 +72,17 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QVERIFY(control);
     QCOMPARE(control->generation, quint64(42));
     QVERIFY(control->active);
+
+    QVERIFY(endpoint.resize(resize));
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    brokerMessages.feed(worker.readAll());
+    const auto resizeRecord = brokerMessages.next();
+    QVERIFY(resizeRecord);
+    QCOMPARE(ConsoleWorkerWire::resize(*resizeRecord), std::optional<ConsoleWorkerWire::Resize>(resize));
+    QSignalSpy resizeReplies(&endpoint, &ConsoleWorkerEndpoint::resizeFinished);
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{11, 42, {}}));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(resizeReplies.count(), 1);
 
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Outputs{{{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}}}));
     QVERIFY(worker.waitForBytesWritten(1000));
