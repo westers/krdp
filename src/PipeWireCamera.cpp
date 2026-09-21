@@ -4,6 +4,7 @@
 #include "PipeWireCamera.h"
 
 #include <QImage>
+#include <QDir>
 #include <QFile>
 #include <QMutexLocker>
 #include <QDebug>
@@ -12,10 +13,40 @@
 #include <pipewire/pipewire.h>
 #include <spa/param/video/raw-utils.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace KRdp
 {
+namespace
+{
+bool hasExternalV4l2Consumer(const QString &device)
+{
+    struct stat wanted {};
+    if (device.isEmpty() || stat(QFile::encodeName(device).constData(), &wanted) != 0) {
+        return false;
+    }
+    const QDir proc(QStringLiteral("/proc"));
+    const auto processes = proc.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const QString &process : processes) {
+        bool isPid = false;
+        const qlonglong pid = process.toLongLong(&isPid);
+        if (!isPid || pid == getpid()) {
+            continue;
+        }
+        const QDir fds(proc.filePath(process + QStringLiteral("/fd")));
+        for (const QFileInfo &entry : fds.entryInfoList(QDir::Files | QDir::System | QDir::NoDotAndDotDot)) {
+            struct stat candidate {};
+            if (stat(QFile::encodeName(entry.absoluteFilePath()).constData(), &candidate) == 0
+                && S_ISCHR(candidate.st_mode) && candidate.st_rdev == wanted.st_rdev) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+}
+
 PipeWireCamera::~PipeWireCamera() { stop(); }
 
 bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, uint32_t fps, const QString &loopbackDevice)
@@ -75,6 +106,14 @@ bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, u
                 close(m_loopbackFd);
                 m_loopbackFd = -1;
             } else {
+                // v4l2loopback with exclusive_caps only advertises CAPTURE
+                // after it has received a frame. A black frame makes the
+                // camera discoverable without opening the redirected camera.
+                const QByteArray black(int(m_width * m_height * 2), char(16));
+                if (write(m_loopbackFd, black.constData(), size_t(black.size())) < 0) {
+                    qWarning() << "KRDP remote camera could not prime V4L2 loopback" << loopbackDevice;
+                }
+                m_loopbackDevice = loopbackDevice;
                 qInfo() << "KRDP remote camera publishing V4L2 loopback" << loopbackDevice << m_width << 'x' << m_height;
             }
         }
@@ -95,6 +134,7 @@ void PipeWireCamera::stop()
         m_loop = nullptr;
         loopbackFd = m_loopbackFd;
         m_loopbackFd = -1;
+        m_loopbackDevice.clear();
         m_pending.clear();
     }
     if (loop) pw_thread_loop_stop(loop);
@@ -144,9 +184,18 @@ void PipeWireCamera::writeMjpeg(const QByteArray &jpeg)
     }
 }
 
+bool PipeWireCamera::captureRequested() const
+{
+    return m_captureRequested.load(std::memory_order_acquire) || hasExternalV4l2Consumer(m_loopbackDevice);
+}
+
 void PipeWireCamera::process(void *data) { static_cast<PipeWireCamera *>(data)->process(); }
 void PipeWireCamera::process()
 {
+    // This callback is emitted only once PipeWire schedules our output node.
+    // It is deliberately just an atomic edge: RDPECAM and FreeRDP channel I/O
+    // remain owned by RdpConnection's session thread.
+    m_captureRequested.store(true, std::memory_order_release);
     QMutexLocker lock(&m_mutex);
     if (!m_stream) return;
     pw_buffer *buffer = pw_stream_dequeue_buffer(m_stream);

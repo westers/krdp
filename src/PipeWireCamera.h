@@ -7,6 +7,8 @@
 #include <QMutex>
 #include <QString>
 
+#include <atomic>
+
 struct pw_stream;
 struct pw_thread_loop;
 
@@ -21,6 +23,10 @@ public:
     // RDPECAM's V4L backend sends MJPEG samples. Decode them outside PipeWire's
     // RT callback and retain only the newest frame to keep conferencing latency bounded.
     void writeMjpeg(const QByteArray &jpeg);
+    // A PipeWire process callback means a local application has linked this
+    // virtual source. The RDP session thread consumes this flag before asking
+    // the client to open its physical camera.
+    bool captureRequested() const;
 private:
     static void process(void *data);
     void process();
@@ -29,6 +35,8 @@ private:
     uint32_t m_width = 0;
     uint32_t m_height = 0;
     int m_loopbackFd = -1;
+    QString m_loopbackDevice;
+    std::atomic_bool m_captureRequested = false;
     pw_thread_loop *m_loop = nullptr;
     pw_stream *m_stream = nullptr;
 };

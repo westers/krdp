@@ -203,6 +203,7 @@ struct RemoteCamera {
     bool receivedSample = false;
     CAM_MEDIA_TYPE_DESCRIPTION format{};
     QString loopbackDevice;
+    bool streamStarted = false;
     std::unique_ptr<PipeWireCamera> endpoint;
     ~RemoteCamera()
     {
@@ -272,12 +273,28 @@ UINT cameraMediaTypes(CameraDeviceServerContext *context, const CAM_MEDIA_TYPE_L
         camera->endpoint.reset();
         return ERROR_INTERNAL_ERROR;
     }
+    qCInfo(KRDP) << "RDPECAM virtual camera available; waiting for a local consumer" << camera->format.Width << 'x' << camera->format.Height
+                 << "format" << camera->format.Format;
+    return CHANNEL_RC_OK;
+}
+
+bool startCameraIfRequested(RemoteCamera *camera)
+{
+    if (!camera || !camera->endpoint || camera->streamStarted || !camera->endpoint->captureRequested()) {
+        return true;
+    }
     CAM_START_STREAMS_REQUEST request{};
     request.N_Infos = 1;
     request.StartStreamsInfo[0].StreamIndex = 0;
     request.StartStreamsInfo[0].MediaTypeDescription = camera->format;
-    qCInfo(KRDP) << "RDPECAM starting stream" << camera->format.Width << 'x' << camera->format.Height << "format" << camera->format.Format;
-    return context->StartStreamsRequest(context, &request);
+    const UINT status = camera->context->StartStreamsRequest(camera->context, &request);
+    if (status != CHANNEL_RC_OK) {
+        qCWarning(KRDP) << "RDPECAM could not start camera on local demand" << status;
+        return false;
+    }
+    camera->streamStarted = true;
+    qCInfo(KRDP) << "RDPECAM starting camera for a local PipeWire/V4L2 consumer";
+    return true;
 }
 
 UINT cameraSample(CameraDeviceServerContext *context, const CAM_SAMPLE_RESPONSE *response)
@@ -935,6 +952,12 @@ void RdpConnection::run(std::stop_token stopToken)
 
         if (!initializeAudioChannels()) {
             break;
+        }
+
+        for (const auto &camera : d->remoteCameras.cameras) {
+            if (!startCameraIfRequested(camera.get())) {
+                break;
+            }
         }
 
         if (d->rdpsnd && d->rdpsndActive.load() && d->audioPlaybackEndpoint) {
