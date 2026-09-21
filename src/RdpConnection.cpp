@@ -191,6 +191,7 @@ UINT cameraSelectVersion(CamDevEnumServerContext *context, const CAM_SELECT_VERS
 {
     CAM_SELECT_VERSION_RESPONSE response{};
     response.Header = request->Header;
+    response.Header.MessageId = CAM_MSG_ID_SelectVersionResponse;
     return context->SelectVersionResponse(context, &response);
 }
 
