@@ -80,6 +80,18 @@ void ConsoleHostController::refreshSeat()
     apply(m_handoff.reconcile(sessions));
 }
 
+void ConsoleHostController::workerExited(const QString &socketName)
+{
+    // The socket path identifies this launch, including retries for the same
+    // logind session. A late exit from an old worker must not stop its successor.
+    if (socketName != m_endpoint.socketName()) {
+        return;
+    }
+    setWorkerActive(false);
+    m_endpoint.close();
+    apply(m_handoff.workerStopped());
+}
+
 void ConsoleHostController::apply(const ConsoleHandoff::Actions &actions)
 {
     if (actions.empty()) {

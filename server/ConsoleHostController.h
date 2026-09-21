@@ -38,6 +38,7 @@ public:
     ~ConsoleHostController() override;
     void start();
     void refreshSeat();
+    void workerExited(const QString &socketName);
 
 private:
     struct Client {

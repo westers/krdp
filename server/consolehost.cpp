@@ -56,6 +56,8 @@ int main(int argc, char **argv)
                                          return launcher.launch(target, socketName, token, error);
                                      },
                                      parser.value(runtimeOption));
+    QObject::connect(&launcher, &KRdp::ConsoleWorkerLauncher::workerExited,
+                     &host, &KRdp::ConsoleHostController::workerExited, Qt::QueuedConnection);
     if (!server.start()) {
         return 1;
     }

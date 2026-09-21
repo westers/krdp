@@ -144,8 +144,7 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     process->setArguments({QStringLiteral("--socket"), socketName, QStringLiteral("--logind-session"), target.sessionId, QStringLiteral("--uid"), QString::number(target.uid), QStringLiteral("--token-fd"), QStringLiteral("3")});
     const gid_t gid = account->pw_gid;
     const QByteArray user = QByteArray(account->pw_name);
-    process->setChildProcessModifier([raw, target, gid, user, tokenRead = tokenPipe[0], tokenWrite = tokenPipe[1]]() {
-        close(tokenWrite);
+    process->setChildProcessModifier([raw, target, gid, user, tokenRead = tokenPipe[0]]() {
         if (dup2(tokenRead, 3) < 0 || (tokenRead != 3 && close(tokenRead) != 0) || initgroups(user.constData(), gid) != 0 || setgid(gid) != 0 || setuid(target.uid) != 0) {
             raw->failChildProcessModifier("cannot drop privileges into logind session");
         }
@@ -153,8 +152,9 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     connect(raw, &QProcess::errorOccurred, this, [raw](QProcess::ProcessError) {
         qWarning().noquote() << "Console worker launch error:" << raw->errorString();
     });
-    connect(raw, &QProcess::finished, this, [raw](int exitCode, QProcess::ExitStatus status) {
+    connect(raw, &QProcess::finished, this, [this, raw, socketName](int exitCode, QProcess::ExitStatus status) {
         qWarning().noquote() << "Console worker exited:" << exitCode << status << raw->errorString();
+        Q_EMIT workerExited(socketName);
     });
     const ssize_t written = write(tokenPipe[1], token.constData(), size_t(token.size()));
     close(tokenPipe[1]);

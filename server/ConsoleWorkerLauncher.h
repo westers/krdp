@@ -23,6 +23,9 @@ public:
     ~ConsoleWorkerLauncher() override;
     bool launch(const ConsoleHandoff::Target &target, const QString &socketName, const QByteArray &token, QString *error = nullptr);
 
+Q_SIGNALS:
+    void workerExited(const QString &socketName);
+
 private:
     QString m_workerProgram;
     std::vector<std::unique_ptr<QProcess>> m_processes;
