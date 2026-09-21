@@ -166,9 +166,15 @@ void ConsoleHostController::addClient(RdpConnection *connection)
             return;
         }
         const QJsonValue playback = record.value(QLatin1String("playback"));
+        const QJsonValue microphone = record.value(QLatin1String("microphone"));
+        const QJsonValue camera = record.value(QLatin1String("camera"));
         const QJsonValue silenceHost = record.value(QLatin1String("silenceHost"));
-        if (!playback.isBool() || (!silenceHost.isUndefined() && !silenceHost.isBool())) {
-            connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, false}});
+        if (!playback.isBool() || !microphone.isBool() || !camera.isBool() || (!silenceHost.isUndefined() && !silenceHost.isBool())) {
+            connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"code"_s, u"invalid"_s}, {u"message"_s, u"media fields must be booleans"_s}});
+            return;
+        }
+        if (microphone.toBool() || camera.toBool()) {
+            connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"code"_s, u"unsupported"_s}, {u"message"_s, u"physical console microphone and camera are not available yet"_s}});
             return;
         }
         m_media = {playback.toBool(), silenceHost.toBool(false) && playback.toBool()};
@@ -176,7 +182,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
         connection->setExternalAudioPlayback(m_media.playback);
         connection->setMediaPolicy(m_media.playback, false, false, false);
         m_endpoint.setMedia(m_media);
-        connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, true}, {u"playback"_s, m_media.playback}, {u"silenceHost"_s, m_media.silenceHost}});
+        connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, true}, {u"playback"_s, m_media.playback}, {u"microphone"_s, false}, {u"camera"_s, false}, {u"silenceHost"_s, m_media.silenceHost}});
     }, Qt::QueuedConnection));
     client->connections.append(connect(connection, &RdpConnection::stateChanged, this, [this, connection](RdpConnection::State state) {
         if (state == RdpConnection::State::Closed) {
