@@ -89,6 +89,7 @@ bool PipeWireAudioPlayback::start(const QString &targetSink)
                                      PW_KEY_NODE_DESCRIPTION, "KRDP Remote Audio (client-only)", PW_KEY_NODE_VIRTUAL, "true",
                                      PW_KEY_NODE_ALWAYS_PROCESS, "true", nullptr)
                  : pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE, "Communication",
+                                     "stream.capture.sink", "true",
                                      PW_KEY_TARGET_OBJECT, target.constData(), nullptr),
         &events, this);
     uint8_t storage[1024];
