@@ -8,12 +8,89 @@
 #include <QProcessEnvironment>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QtEndian>
+#include <cmath>
 #include <unistd.h>
 
 class PipeWireMicrophoneTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void sourcePcmDelivery()
+    {
+        QTemporaryDir runtime(QStringLiteral("/run/user/%1/krdp-mic-pcm-XXXXXX").arg(getuid()));
+        QVERIFY(runtime.isValid());
+        qputenv("PIPEWIRE_RUNTIME_DIR", runtime.path().toUtf8());
+        qputenv("PIPEWIRE_REMOTE", "pipewire-0");
+        auto env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("XDG_RUNTIME_DIR"), runtime.path());
+        env.insert(QStringLiteral("XDG_CONFIG_HOME"), runtime.path() + QStringLiteral("/config"));
+        env.insert(QStringLiteral("XDG_STATE_HOME"), runtime.path() + QStringLiteral("/state"));
+        env.insert(QStringLiteral("XDG_CACHE_HOME"), runtime.path() + QStringLiteral("/cache"));
+        env.insert(QStringLiteral("PULSE_RUNTIME_PATH"), runtime.path() + QStringLiteral("/pulse"));
+        env.insert(QStringLiteral("PIPEWIRE_CONFIG_DIR"), QStringLiteral(KRDP_AUDIO_CONFIG_DIR));
+        env.insert(QStringLiteral("PIPEWIRE_CONFIG_NAME"), QStringLiteral("virtual-session-pipewire.conf"));
+        QProcess daemon;
+        daemon.setProcessEnvironment(env);
+        daemon.start(QStringLiteral(KRDP_PIPEWIRE_EXECUTABLE), QStringList{});
+        QVERIFY(daemon.waitForStarted());
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(runtime.path() + QStringLiteral("/pipewire-0")), 3000);
+        // CTest wraps this case in a private D-Bus session; policy only means
+        // no ALSA/Bluetooth devices. Nothing attaches to the desktop graph.
+        env.remove(QStringLiteral("PIPEWIRE_CONFIG_DIR"));
+        env.remove(QStringLiteral("PIPEWIRE_CONFIG_NAME"));
+        QProcess policy;
+        env.insert(QStringLiteral("WIREPLUMBER_CONFIG_DIR"), QStringLiteral("/usr/share/wireplumber"));
+        policy.setProcessEnvironment(env);
+        policy.start(QStringLiteral("wireplumber"), {QStringLiteral("--profile"), QStringLiteral("policy")});
+        QVERIFY(policy.waitForStarted());
+        KRdp::PipeWireMicrophone mic;
+        QVERIFY(mic.start(QStringLiteral("pcm-test")));
+        QTRY_COMPARE_WITH_TIMEOUT(mic.state(), KRdp::PipeWireMicrophone::State::Ready, 3000);
+        QProcess recorder;
+        recorder.setProcessEnvironment(env);
+        recorder.start(QStringLiteral("pw-cat"), {QStringLiteral("--record"), QStringLiteral("--raw"),
+            QStringLiteral("--rate"), QStringLiteral("48000"), QStringLiteral("--channels"), QStringLiteral("2"),
+            QStringLiteral("--format"), QStringLiteral("s16"), QStringLiteral("--target"),
+            QStringLiteral("krdp.remote-microphone.pcm-test"), QStringLiteral("-")});
+        QVERIFY(recorder.waitForStarted());
+        QTest::qWait(500);
+        constexpr double tau = 6.283185307179586;
+        int sample = 0;
+        for (int packet = 0; packet < 100; ++packet) {
+            QByteArray pcm(3840, '\0');
+            for (int frame = 0; frame < 960; ++frame, ++sample) {
+                const qint16 value = qint16(4000 * std::sin(tau * 997 * sample / 48000));
+                qToLittleEndian(value, pcm.data() + frame * 4);
+                qToLittleEndian(value, pcm.data() + frame * 4 + 2);
+            }
+            mic.write(pcm);
+            QTest::qWait(20);
+        }
+        QTest::qWait(200);
+        QVERIFY2(recorder.state() == QProcess::Running, recorder.readAllStandardError().constData());
+        recorder.terminate();
+        QVERIFY(recorder.waitForFinished(3000));
+        const QByteArray received = recorder.readAllStandardOutput();
+        QVERIFY2(received.size() > 48000, recorder.readAllStandardError().constData());
+        double energy = 0, real = 0, imaginary = 0;
+        const int frames = received.size() / 4;
+        for (int frame = 0; frame < frames; ++frame) {
+            const double value = qFromLittleEndian<qint16>(received.constData() + frame * 4);
+            energy += value * value;
+            real += value * std::cos(tau * 997 * frame / 48000);
+            imaginary += value * std::sin(tau * 997 * frame / 48000);
+        }
+        const double toneFraction = energy ? 2 * (real * real + imaginary * imaginary) / (frames * energy) : 0;
+        qInfo() << "Microphone PCM frames" << frames << "RMS" << std::sqrt(energy / frames) << "997Hz energy fraction" << toneFraction;
+        QVERIFY(energy / frames > 10000);
+        QVERIFY(toneFraction > 0.25);
+        mic.stop();
+        policy.terminate();
+        QVERIFY(policy.waitForFinished(3000));
+        daemon.terminate();
+        QVERIFY(daemon.waitForFinished(3000));
+    }
     void sourceReadinessAndTeardown()
     {
         // Never connect to the desktop's graph, even when startup fails.

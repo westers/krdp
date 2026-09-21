@@ -25,7 +25,7 @@ if(PIPEWIRE_EXECUTABLE)
     target_compile_definitions(PipeWireMicrophoneTest PRIVATE
         KRDP_AUDIO_CONFIG_DIR="${CMAKE_SOURCE_DIR}/server"
         KRDP_PIPEWIRE_EXECUTABLE="${PIPEWIRE_EXECUTABLE}")
-    add_test(NAME PipeWireMicrophoneTest COMMAND PipeWireMicrophoneTest)
+    add_test(NAME PipeWireMicrophoneTest COMMAND PipeWireMicrophoneTest sourceReadinessAndTeardown)
     set_tests_properties(PipeWireMicrophoneTest PROPERTIES TIMEOUT 20)
 endif()
 find_program(PW_DUMP_EXECUTABLE pw-dump)
@@ -38,6 +38,12 @@ if(PIPEWIRE_EXECUTABLE AND PW_DUMP_EXECUTABLE AND JQ_EXECUTABLE AND TIMEOUT_EXEC
     find_program(WIREPLUMBER_EXECUTABLE wireplumber)
     find_program(PW_CAT_EXECUTABLE pw-cat)
     find_program(FFMPEG_EXECUTABLE ffmpeg)
+    if(WIREPLUMBER_EXECUTABLE AND PW_CAT_EXECUTABLE AND DBUS_RUN_SESSION_EXECUTABLE)
+        add_test(NAME PipeWireMicrophonePcmTest COMMAND ${DBUS_RUN_SESSION_EXECUTABLE}
+            --config-file=${CMAKE_SOURCE_DIR}/server/virtual-session-bus.conf
+            -- $<TARGET_FILE:PipeWireMicrophoneTest> sourcePcmDelivery)
+        set_tests_properties(PipeWireMicrophonePcmTest PROPERTIES TIMEOUT 20)
+    endif()
     if(WIREPLUMBER_EXECUTABLE AND PW_CAT_EXECUTABLE AND FFMPEG_EXECUTABLE AND DBUS_RUN_SESSION_EXECUTABLE)
         add_test(NAME VirtualSessionAudioPcmTest COMMAND ${DBUS_RUN_SESSION_EXECUTABLE}
             --config-file=${CMAKE_SOURCE_DIR}/server/virtual-session-bus.conf

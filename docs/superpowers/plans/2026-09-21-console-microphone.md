@@ -98,3 +98,12 @@ New ConsoleHostControllerTest exercises actual connection consent/priority state
 for stale acknowledgements, mic-only readiness, source failure and revocation
 without initializing RDP sockets. This supersedes the earlier broker-rejection
 notes; live Buzz-to-Sol sample delivery and AUDIN re-open remain unverified.
+
+PipeWireMicrophonePcmTest now verifies actual sample delivery, not just source
+registration: a hardware-free private graph plus isolated D-Bus/WirePlumber
+policy, synthetic997Hz stereoS16 input into PipeWireMicrophone and independent
+pw-cat recording of that exact node. One measured run:131072 frames at48kHz,
+RMS2389.38/32768 and997Hz coherent energy fraction0.659658; test requires
+non-silent RMS plus fraction>0.25. Three repeated runs passed. This proves the
+worker's source implementation can publish usable audio; it is NOT evidence
+for client AUDIN, broker transport, hardware mic capture or conferencing.
