@@ -3,6 +3,7 @@
 
 #include <csignal>
 #include <filesystem>
+#include <unistd.h>
 
 #include <QCommandLineOption>
 #include <QCommandLineParser>
@@ -29,6 +30,11 @@ int main(int argc, char **argv)
     const QCommandLineOption runtimeOption(QStringLiteral("runtime-directory"), QStringLiteral("Host-owned worker socket directory."), QStringLiteral("path"), QStringLiteral("/run/krdp-console"));
     parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption});
     parser.process(application);
+
+    if (geteuid() != 0) {
+        qCritical("krdp-console-host must run as root to enter selected logind sessions");
+        return 1;
+    }
 
     bool portOk = false;
     const quint16 port = parser.value(portOption).toUShort(&portOk);

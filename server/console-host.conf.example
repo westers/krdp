@@ -1,0 +1,7 @@
+# Required TLS material for krdp-console-host.service.
+KRDP_CONSOLE_CERTIFICATE=/etc/krdp/console.crt
+KRDP_CONSOLE_CERTIFICATE_KEY=/etc/krdp/console.key
+
+# Bind as needed; port 3389 must not also be owned by the user-session server.
+KRDP_CONSOLE_ADDRESS=0.0.0.0
+KRDP_CONSOLE_PORT=3389

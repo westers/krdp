@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Steve Westers
+# SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+
+[Unit]
+Description=KRDP persistent physical-console host
+After=network-online.target systemd-logind.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=root
+Environment=KRDP_CONSOLE_WORKER=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-worker
+EnvironmentFile=-/etc/krdp/console-host.conf
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-host --worker ${KRDP_CONSOLE_WORKER} --certificate ${KRDP_CONSOLE_CERTIFICATE} --certificate-key ${KRDP_CONSOLE_CERTIFICATE_KEY} --address ${KRDP_CONSOLE_ADDRESS} --port ${KRDP_CONSOLE_PORT} --runtime-directory /run/krdp-console
+RuntimeDirectory=krdp-console
+RuntimeDirectoryMode=0711
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
