@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <grp.h>
+#include <fcntl.h>
 #include <pwd.h>
 #include <unistd.h>
 
@@ -85,15 +86,33 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
         }
         return false;
     }
+    int tokenPipe[2] = {-1, -1};
+    if (pipe(tokenPipe) != 0) {
+        if (error) {
+            *error = QStringLiteral("cannot create worker token pipe");
+        }
+        return false;
+    }
+    auto closePipe = [&tokenPipe]() {
+        if (tokenPipe[0] >= 0) {
+            close(tokenPipe[0]);
+            tokenPipe[0] = -1;
+        }
+        if (tokenPipe[1] >= 0) {
+            close(tokenPipe[1]);
+            tokenPipe[1] = -1;
+        }
+    };
     auto process = std::make_unique<QProcess>();
     QProcess *raw = process.get();
     process->setProcessEnvironment(environment);
     process->setProgram(m_workerProgram);
-    process->setArguments({QStringLiteral("--socket"), socketName, QStringLiteral("--session"), target.sessionId, QStringLiteral("--uid"), QString::number(target.uid), QStringLiteral("--token-hex"), QString::fromLatin1(token.toHex())});
+    process->setArguments({QStringLiteral("--socket"), socketName, QStringLiteral("--session"), target.sessionId, QStringLiteral("--uid"), QString::number(target.uid), QStringLiteral("--token-fd"), QStringLiteral("3")});
     const gid_t gid = account->pw_gid;
     const QByteArray user = QByteArray(account->pw_name);
-    process->setChildProcessModifier([raw, target, gid, user]() {
-        if (initgroups(user.constData(), gid) != 0 || setgid(gid) != 0 || setuid(target.uid) != 0) {
+    process->setChildProcessModifier([raw, target, gid, user, tokenRead = tokenPipe[0], tokenWrite = tokenPipe[1]]() {
+        close(tokenWrite);
+        if (dup2(tokenRead, 3) < 0 || (tokenRead != 3 && close(tokenRead) != 0) || initgroups(user.constData(), gid) != 0 || setgid(gid) != 0 || setuid(target.uid) != 0) {
             raw->failChildProcessModifier("cannot drop privileges into logind session");
         }
     });
@@ -105,6 +124,19 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
         if (error) {
             *error = process->errorString();
         }
+        closePipe();
+        return false;
+    }
+    close(tokenPipe[0]);
+    tokenPipe[0] = -1;
+    const ssize_t written = write(tokenPipe[1], token.constData(), size_t(token.size()));
+    close(tokenPipe[1]);
+    tokenPipe[1] = -1;
+    if (written != token.size()) {
+        if (error) {
+            *error = QStringLiteral("cannot deliver worker token");
+        }
+        process->kill();
         return false;
     }
     m_processes.push_back(std::move(process));

@@ -5,6 +5,7 @@
 
 #include <QCommandLineOption>
 #include <QCommandLineParser>
+#include <QFile>
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QLocalSocket>
@@ -147,13 +148,25 @@ int main(int argc, char **argv)
     const QCommandLineOption sessionOption(QStringLiteral("session"), QStringLiteral("logind session id."), QStringLiteral("id"));
     const QCommandLineOption uidOption(QStringLiteral("uid"), QStringLiteral("logind uid."), QStringLiteral("uid"));
     const QCommandLineOption tokenOption(QStringLiteral("token-hex"), QStringLiteral("Per-launch broker token."), QStringLiteral("token"));
-    parser.addOptions({socketOption, sessionOption, uidOption, tokenOption});
+    const QCommandLineOption tokenFdOption(QStringLiteral("token-fd"), QStringLiteral("Read the per-launch broker token once from this inherited fd."), QStringLiteral("fd"));
+    parser.addOptions({socketOption, sessionOption, uidOption, tokenOption, tokenFdOption});
     parser.process(application);
 
     bool uidOk = false;
     const quint32 uid = parser.value(uidOption).toUInt(&uidOk);
-    const QByteArray token = QByteArray::fromHex(parser.value(tokenOption).toLatin1());
-    if (!uidOk || uid == 0 || parser.value(socketOption).isEmpty() || parser.value(sessionOption).isEmpty() || token.size() < 16) {
+    QByteArray token;
+    if (parser.isSet(tokenFdOption)) {
+        bool fdOk = false;
+        const int fd = parser.value(tokenFdOption).toInt(&fdOk);
+        QFile tokenFile;
+        if (!fdOk || fd < 0 || !tokenFile.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) {
+            parser.showHelp(1);
+        }
+        token = tokenFile.readAll();
+    } else {
+        token = QByteArray::fromHex(parser.value(tokenOption).toLatin1());
+    }
+    if (parser.isSet(tokenOption) == parser.isSet(tokenFdOption) || !uidOk || uid == 0 || parser.value(socketOption).isEmpty() || parser.value(sessionOption).isEmpty() || token.size() < 16) {
         parser.showHelp(1);
     }
 
