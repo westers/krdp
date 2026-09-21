@@ -25,6 +25,16 @@ if(PIPEWIRE_EXECUTABLE AND PW_DUMP_EXECUTABLE AND JQ_EXECUTABLE AND TIMEOUT_EXEC
     add_test(NAME VirtualSessionAudioGraphTest COMMAND ${BASH_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSessionAudioGraphTest.sh ${CMAKE_SOURCE_DIR}/server)
     set_tests_properties(VirtualSessionAudioGraphTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)
+    find_program(WIREPLUMBER_EXECUTABLE wireplumber)
+    find_program(PW_CAT_EXECUTABLE pw-cat)
+    find_program(FFMPEG_EXECUTABLE ffmpeg)
+    if(WIREPLUMBER_EXECUTABLE AND PW_CAT_EXECUTABLE AND FFMPEG_EXECUTABLE AND DBUS_RUN_SESSION_EXECUTABLE)
+        add_test(NAME VirtualSessionAudioPcmTest COMMAND ${DBUS_RUN_SESSION_EXECUTABLE}
+            --config-file=${CMAKE_SOURCE_DIR}/server/virtual-session-bus.conf
+            -- ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSessionAudioGraphTest.sh
+            ${CMAKE_SOURCE_DIR}/server --pcm)
+        set_tests_properties(VirtualSessionAudioPcmTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 20)
+    endif()
 endif()
 
 add_executable(SurfaceLayoutTest SurfaceLayoutTest.cpp)
