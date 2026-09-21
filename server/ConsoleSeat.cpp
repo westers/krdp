@@ -61,6 +61,7 @@ QList<Session> readLogindSessions(QString *error)
         session.sessionClass = property(path, QStringLiteral("Class")).toString();
         session.state = property(path, QStringLiteral("State")).toString();
         session.active = property(path, QStringLiteral("Active")).toBool();
+        session.leader = property(path, QStringLiteral("Leader")).toUInt();
         sessions.append(std::move(session));
     }
     entries.endArray();

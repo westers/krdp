@@ -25,6 +25,7 @@ struct Session {
     QString state;
     bool active = false;
     quint32 uid = 0;
+    quint32 leader = 0;
 };
 
 enum class Adapter {

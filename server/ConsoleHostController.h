@@ -35,6 +35,7 @@ public:
     using WorkerLauncher = std::function<bool(const ConsoleHandoff::Target &, const QString &socketName, const QByteArray &token, QString *error)>;
 
     explicit ConsoleHostController(Server *server, WorkerLauncher launchWorker, QString runtimeDirectory, QObject *parent = nullptr);
+    ~ConsoleHostController() override;
     void start();
     void refreshSeat();
 

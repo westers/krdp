@@ -4,6 +4,7 @@
 add_definitions(-DTRANSLATION_DOMAIN=\"krdpserver\")
 
 add_executable(krdpserver)
+add_executable(krdp-console-host consolehost.cpp ConsoleSeat.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp ConsoleHostController.cpp ConsoleWorkerLauncher.cpp)
 add_executable(krdp-console-probe consoleprobe.cpp ConsoleSeat.cpp)
 add_executable(krdp-greeter-probe greeterprobe.cpp)
 add_executable(krdp-audio-route-probe audioprobe.cpp ../src/PipeWireAudioPlayback.cpp)
@@ -11,7 +12,7 @@ if (BUILD_PLASMA_SESSION)
     add_executable(krdp-console-worker consoleworker.cpp)
 endif()
 
-target_sources(krdpserver PRIVATE main.cpp SessionController.cpp DisplayWakeGuard.cpp PhysicalOutputGuard.cpp HostLayoutExecutor.cpp ConsoleSeat.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp ConsoleHostController.cpp)
+target_sources(krdpserver PRIVATE main.cpp SessionController.cpp DisplayWakeGuard.cpp PhysicalOutputGuard.cpp HostLayoutExecutor.cpp ConsoleSeat.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp ConsoleHostController.cpp ConsoleWorkerLauncher.cpp)
 
 kconfig_target_kcfg_file(krdpserver FILE krdpserversettings.kcfg CLASS_NAME ServerConfig SINGLETON)
 
@@ -19,6 +20,7 @@ target_include_directories(krdpserver PRIVATE ${CMAKE_BINARY_DIR})
 target_include_directories(krdp-audio-route-probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 target_link_libraries(krdpserver PRIVATE Qt6::Gui Qt6::Network Qt6::DBus KF6::CoreAddons KF6::ConfigGui KF6::DBusAddons KF6::Crash KRdp qt6keychain KF6::StatusNotifierItem KF6::I18n KF6::GlobalAccel)
+target_link_libraries(krdp-console-host PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
 target_link_libraries(krdp-console-probe PRIVATE Qt6::Core Qt6::DBus)
 target_link_libraries(krdp-greeter-probe PRIVATE Qt6::Core Qt6::Gui)
 target_link_libraries(krdp-audio-route-probe PRIVATE Qt6::Core PkgConfig::PipeWire)
@@ -37,6 +39,7 @@ endif()
 configure_file(app-org.kde.krdpserver.service.in ${CMAKE_CURRENT_BINARY_DIR}/app-org.kde.krdpserver.service @ONLY)
 
 install(TARGETS krdpserver DESTINATION ${KDE_INSTALL_BINDIR})
+install(TARGETS krdp-console-host DESTINATION ${KDE_INSTALL_BINDIR})
 install(TARGETS krdp-console-probe DESTINATION ${KDE_INSTALL_BINDIR})
 install(TARGETS krdp-greeter-probe DESTINATION ${KDE_INSTALL_BINDIR})
 install(TARGETS krdp-audio-route-probe DESTINATION ${KDE_INSTALL_BINDIR})

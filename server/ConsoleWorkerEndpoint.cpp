@@ -32,6 +32,10 @@ bool ConsoleWorkerEndpoint::listen(const QString &socketName, const ConsoleHando
         }
         return false;
     }
+    // The selected greeter/user worker has a different uid from the system
+    // host. Authentication is token based, so socket filesystem access only
+    // needs to permit that worker to connect.
+    m_server->setSocketOptions(QLocalServer::WorldAccessOption);
     QLocalServer::removeServer(socketName);
     if (!m_server->listen(socketName)) {
         if (error) {

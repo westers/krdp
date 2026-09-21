@@ -47,6 +47,8 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     });
 }
 
+ConsoleHostController::~ConsoleHostController() = default;
+
 void ConsoleHostController::start()
 {
     refreshSeat();
