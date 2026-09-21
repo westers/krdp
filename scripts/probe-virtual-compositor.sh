@@ -30,6 +30,8 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         XDG_CACHE_HOME="$probe_runtime/cache" XDG_STATE_HOME="$probe_runtime/state" \
         XDG_DATA_HOME="$probe_runtime/data" XDG_DATA_DIRS=/usr/local/share:/usr/share \
         XDG_SESSION_TYPE=wayland LIBGL_ALWAYS_SOFTWARE=1 \
+        __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
+        __GLX_VENDOR_LIBRARY_NAME=mesa \
         timeout 45 bwrap --unshare-pid --unshare-ipc --die-with-parent --new-session \
         --ro-bind / / "${apparmor_query[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run \
         --perms 01777 --dir /tmp/.X11-unix \
