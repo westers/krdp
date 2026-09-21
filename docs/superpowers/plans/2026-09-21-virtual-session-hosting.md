@@ -86,3 +86,21 @@ an empty replacement. Four unit scenarios cover repeated reconnect, ownership,
 stopping/late callbacks and crash invalidation; full server suite is 26/26.
 It is not yet a persistent registry, process supervisor, authentication layer,
 or runtime desktop implementation, and is not wired into the console host.
+
+2026-09-21 full Plasma probe: private PID/mount namespace (bubblewrap), host
+runtime sockets and devices hidden, isolated configuration and restricted
+autostart. AppArmor's world-writable permission-query file must remain writable
+inside the read-only root for D-Bus mediation; do not disable AppArmor.
+KWin and private PipeWire worked, but classic Plasma did not reach readiness.
+`ksmserver/main.cpp` explicitly forces the xcb Qt platform even in a Wayland
+desktop, so omitting Xwayland causes its startup to abort. This is distinct
+from using an X11 RDP client or changing the compositor to X11.
+Source: https://github.com/KDE/plasma-workspace/blob/Plasma/6.6/ksmserver/main.cpp
+
+Before proceeding, resolve whether the user's Wayland-only requirement permits
+Plasma's internal Xwayland compatibility dependency. Do not silently enable it
+or call a standalone plasmashell a complete managed Plasma session. Also disable
+irrelevant kded hardware modules in the isolated profile: BlueDevil repeatedly
+reactivated obexd without the system bus, producing an activation loop during
+the bounded probe. Entire PID namespace exited; Sol greeter/KWin/host unchanged.
+Probe logs now go to the evidence directory rather than flooding SSH output.

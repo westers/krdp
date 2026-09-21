@@ -34,7 +34,8 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         --ro-bind / / "${apparmor_query[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run \
         --bind "$probe_runtime" "$probe_runtime" \
         dbus-run-session --config-file="$repo_path/server/virtual-session-bus.conf" \
-        -- bash "$script_path" --inside-private-bus "$probe_mode"
+        -- bash "$script_path" --inside-private-bus "$probe_mode" \
+        >"$probe_runtime/probe.log" 2>&1
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
 wrapper_pid=
