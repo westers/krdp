@@ -138,7 +138,7 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     };
     auto process = std::make_unique<QProcess>();
     QProcess *raw = process.get();
-    process->setProcessChannelMode(QProcess::ForwardedErrorChannel);
+    process->setProcessChannelMode(QProcess::ForwardedChannels);
     process->setProcessEnvironment(environment);
     process->setProgram(m_workerProgram);
     process->setArguments({QStringLiteral("--socket"), socketName, QStringLiteral("--session"), target.sessionId, QStringLiteral("--uid"), QString::number(target.uid), QStringLiteral("--token-fd"), QStringLiteral("3")});
