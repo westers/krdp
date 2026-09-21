@@ -13,6 +13,7 @@
 
 #include "ConsoleHandoff.h"
 #include "ConsoleControl.h"
+#include "ConsoleInputState.h"
 #include "ConsoleWorkerEndpoint.h"
 
 namespace KRdp
@@ -60,6 +61,7 @@ private:
     void updateMedia();
     void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
     void sendLayouts();
+    void releaseInput();
 
     Server *m_server = nullptr;
     WorkerLauncher m_launchWorker;
@@ -74,5 +76,6 @@ private:
     bool m_mediaConfigured = false;
     ConsoleWorkerWire::Media m_media;
     ConsoleWorkerWire::Outputs m_outputs;
+    ConsoleInputState m_inputState;
 };
 }

@@ -17,6 +17,7 @@
 #include <PlasmaScreencastV1Session.h>
 
 #include "ConsoleWorkerWire.h"
+#include "ConsoleInputState.h"
 #include "PipeWireAudioPlayback.h"
 
 using namespace KRdp;
@@ -61,7 +62,10 @@ public:
             startCapture();
         });
         connect(&m_socket, &QLocalSocket::readyRead, this, &Worker::readBroker);
-        connect(&m_socket, &QLocalSocket::disconnected, qApp, []() { QCoreApplication::exit(1); });
+        connect(&m_socket, &QLocalSocket::disconnected, this, [this]() {
+            releaseInput();
+            QCoreApplication::exit(1);
+        });
         connect(&m_socket, &QLocalSocket::errorOccurred, this, [this](QLocalSocket::LocalSocketError) {
             if (m_socket.state() == QLocalSocket::UnconnectedState) {
                 QCoreApplication::exit(1);
@@ -125,6 +129,19 @@ public:
     }
 
 private:
+    void releaseInput()
+    {
+        const auto releases = m_inputState.releaseAll();
+        if (!releases.isEmpty()) {
+            qInfo() << "Worker releasing" << releases.size() << "held console input(s)";
+        }
+        for (const auto &input : releases) {
+            if (const auto event = eventFor(input)) {
+                m_session.sendEvent(event);
+            }
+        }
+    }
+
     void startCapture()
     {
         m_session.setActiveStream(-1); // Physical console: capture the session's complete workspace.
@@ -137,6 +154,7 @@ private:
         m_deframer.feed(m_socket.readAll());
         while (const auto record = m_deframer.next()) {
             if (record->kind == ConsoleWorkerWire::Kind::Stop && record->payload.isEmpty()) {
+                releaseInput();
                 m_audioTimer.stop();
                 m_audio.reset();
                 m_session.setStreamingEnabled(false);
@@ -166,6 +184,7 @@ private:
             if (const auto input = ConsoleWorkerWire::input(*record)) {
                 if (const auto event = eventFor(*input)) {
                     m_session.sendEvent(event);
+                    m_inputState.record(*input);
                     continue;
                 }
             }
@@ -190,6 +209,7 @@ private:
     QTimer m_audioTimer;
     bool m_captureReady = false;
     ConsoleWorkerWire::Outputs m_outputs;
+    ConsoleInputState m_inputState;
 };
 }
 

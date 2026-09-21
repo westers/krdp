@@ -157,6 +157,9 @@ void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
 
 void ConsoleHostController::setWorkerActive(bool active)
 {
+    if (!active) {
+        releaseInput();
+    }
     m_inputEnabled = active;
     for (const auto &client : m_clients) {
         client->session->setWorkerActive(active);
@@ -175,6 +178,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     client->session = std::make_unique<ConsoleWorkerSession>([this, id](const ConsoleWorkerWire::Input &input) {
         if (m_inputEnabled && m_control.ownsControl(id)) {
             m_endpoint.sendInput(input);
+            m_inputState.record(input);
         }
     });
     client->session->setWorkerActive(m_inputEnabled);
@@ -271,6 +275,9 @@ void ConsoleHostController::removeClient(RdpConnection *connection)
 {
     for (const auto &client : m_clients) {
         if (client->connection == connection) {
+            if (m_control.ownsControl(client->id)) {
+                releaseInput();
+            }
             m_control.remove(client->id);
         }
     }
@@ -302,6 +309,17 @@ void ConsoleHostController::sendLayouts()
             layout.you = m_control.ownsControl(client->id) ? u"owner"_s : u"viewer"_s;
             client->connection->sendControlRecord(LayoutControl::layoutRecord(layout));
         }
+    }
+}
+
+void ConsoleHostController::releaseInput()
+{
+    const auto releases = m_inputState.releaseAll();
+    if (!releases.isEmpty()) {
+        qInfo() << "Releasing" << releases.size() << "held console input(s)";
+    }
+    for (const auto &input : releases) {
+        m_endpoint.sendInput(input);
     }
 }
 
