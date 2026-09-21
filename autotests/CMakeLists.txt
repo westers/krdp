@@ -17,6 +17,16 @@ if(DBUS_RUN_SESSION_EXECUTABLE AND GDBUS_EXECUTABLE AND BASH_EXECUTABLE)
         -- ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSessionBusTest.sh)
 endif()
 
+find_program(PIPEWIRE_EXECUTABLE pipewire)
+find_program(PW_DUMP_EXECUTABLE pw-dump)
+find_program(JQ_EXECUTABLE jq)
+find_program(TIMEOUT_EXECUTABLE timeout)
+if(PIPEWIRE_EXECUTABLE AND PW_DUMP_EXECUTABLE AND JQ_EXECUTABLE AND TIMEOUT_EXECUTABLE AND BASH_EXECUTABLE)
+    add_test(NAME VirtualSessionAudioGraphTest COMMAND ${BASH_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSessionAudioGraphTest.sh ${CMAKE_SOURCE_DIR}/server)
+    set_tests_properties(VirtualSessionAudioGraphTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)
+endif()
+
 add_executable(SurfaceLayoutTest SurfaceLayoutTest.cpp)
 target_include_directories(SurfaceLayoutTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(SurfaceLayoutTest PRIVATE Qt6::Test Qt6::Core)
