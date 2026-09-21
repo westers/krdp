@@ -69,3 +69,20 @@ Before running a desktop, review/prove the following launch contract:
 
 Completion requires those runtime proofs. Unit tests or a headless compositor
 with no Plasma desktop do not establish virtual-session support.
+
+## Implementation evidence
+
+2026-09-21: Source review of startplasma-wayland.cpp and startPlasmaSession()
+finds environment synchronization, ResetFailed/Reload and logout cleanup even
+around the classic-boot path. A private bus with a verified activation policy
+is required; merely setting systemdBoot=false is not the isolation boundary.
+No experimental compositor is launched until that boundary is verified.
+
+VirtualSessionState.h now supplies the pure lifecycle primitive: authenticated
+UID-scoped creation/attach/explicit stop, single controller, disconnect retains
+the current generation, stop waits for exit, and late events cannot touch a
+replacement. Unexpected exit invalidates retention instead of silently making
+an empty replacement. Four unit scenarios cover repeated reconnect, ownership,
+stopping/late callbacks and crash invalidation; full server suite is 26/26.
+It is not yet a persistent registry, process supervisor, authentication layer,
+or runtime desktop implementation, and is not wired into the console host.

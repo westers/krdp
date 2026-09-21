@@ -3,6 +3,11 @@ target_include_directories(AdaptiveQualityTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(AdaptiveQualityTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME AdaptiveQualityTest COMMAND AdaptiveQualityTest)
 
+add_executable(VirtualSessionStateTest VirtualSessionStateTest.cpp)
+target_include_directories(VirtualSessionStateTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(VirtualSessionStateTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME VirtualSessionStateTest COMMAND VirtualSessionStateTest)
+
 add_executable(SurfaceLayoutTest SurfaceLayoutTest.cpp)
 target_include_directories(SurfaceLayoutTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(SurfaceLayoutTest PRIVATE Qt6::Test Qt6::Core)
