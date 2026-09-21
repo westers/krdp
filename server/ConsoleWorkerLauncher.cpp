@@ -156,6 +156,16 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     connect(raw, &QProcess::finished, this, [raw](int exitCode, QProcess::ExitStatus status) {
         qWarning().noquote() << "Console worker exited:" << exitCode << status << raw->errorString();
     });
+    const ssize_t written = write(tokenPipe[1], token.constData(), size_t(token.size()));
+    close(tokenPipe[1]);
+    tokenPipe[1] = -1;
+    if (written != token.size()) {
+        if (error) {
+            *error = QStringLiteral("cannot deliver worker token");
+        }
+        closePipe();
+        return false;
+    }
     process->start();
     if (!process->waitForStarted(3000)) {
         if (error) {
@@ -166,16 +176,6 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     }
     close(tokenPipe[0]);
     tokenPipe[0] = -1;
-    const ssize_t written = write(tokenPipe[1], token.constData(), size_t(token.size()));
-    close(tokenPipe[1]);
-    tokenPipe[1] = -1;
-    if (written != token.size()) {
-        if (error) {
-            *error = QStringLiteral("cannot deliver worker token");
-        }
-        process->kill();
-        return false;
-    }
     m_processes.push_back(std::move(process));
     return true;
 }
