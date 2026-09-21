@@ -9,7 +9,8 @@ Wants=network-online.target
 [Service]
 Type=exec
 User=root
-Environment=LD_LIBRARY_PATH=/opt/krdp-console/lib
+# CMake follows Debian's multiarch library layout below this private prefix.
+Environment=LD_LIBRARY_PATH=/opt/krdp-console/lib/x86_64-linux-gnu
 ExecStart=/opt/krdp-console/bin/krdp-console-host --worker /opt/krdp-console/bin/krdp-console-worker --certificate /opt/krdp-console/cert/krdp.crt --certificate-key /opt/krdp-console/cert/krdp.key --address 0.0.0.0 --port 3391 --runtime-directory /run/krdp-console-test
 RuntimeDirectory=krdp-console-test
 RuntimeDirectoryMode=0711
