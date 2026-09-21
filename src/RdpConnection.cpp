@@ -297,6 +297,23 @@ bool startCameraIfRequested(RemoteCamera *camera)
     return true;
 }
 
+bool stopCameraIfNoLongerRequested(RemoteCamera *camera)
+{
+    if (!camera || !camera->endpoint || !camera->streamStarted || camera->endpoint->captureRequested()) {
+        return true;
+    }
+    CAM_STOP_STREAMS_REQUEST request{};
+    const UINT status = camera->context->StopStreamsRequest(camera->context, &request);
+    if (status != CHANNEL_RC_OK) {
+        qCWarning(KRDP) << "RDPECAM could not stop camera after local consumer released it" << status;
+        return false;
+    }
+    camera->streamStarted = false;
+    camera->receivedSample = false;
+    qCInfo(KRDP) << "RDPECAM stopped camera after local PipeWire/V4L2 consumer released it";
+    return true;
+}
+
 UINT cameraSample(CameraDeviceServerContext *context, const CAM_SAMPLE_RESPONSE *response)
 {
     auto *camera = static_cast<RemoteCamera *>(context->userdata);
@@ -956,6 +973,9 @@ void RdpConnection::run(std::stop_token stopToken)
 
         for (const auto &camera : d->remoteCameras.cameras) {
             if (!startCameraIfRequested(camera.get())) {
+                break;
+            }
+            if (!stopCameraIfNoLongerRequested(camera.get())) {
                 break;
             }
         }

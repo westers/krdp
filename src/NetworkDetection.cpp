@@ -286,12 +286,12 @@ void NetworkDetection::updateAverageRtt()
 
     d->lastNetworkResult = now;
 
-    rdpNetworkCharacteristicsResult result;
-    result.type = RDP_NETCHAR_RESULT_TYPE_BASE_RTT_BW_AVG_RTT;
-    result.baseRTT = clk::duration_cast<clk::milliseconds>(d->minimumRtt).count();
-    result.averageRTT = clk::duration_cast<clk::milliseconds>(d->averageRtt).count();
-    result.bandwidth = d->lastBandwithMeasurement;
-    d->rdpAutodetect->NetworkCharacteristicsResult(d->rdpAutodetect, RDP_TRANSPORT_TCP, d->nextSequenceNumber(), &result);
+    // The server has already obtained the RTT and goodput it needs locally.
+    // Do not send a NetworkCharacteristicsResult back to the client: FreeRDP
+    // 3.22's autodetect implementation accepts the measurement exchange but
+    // tears down an otherwise healthy media session when this optional PDU is
+    // emitted.  Keep probing/measurement enabled for server adaptation; only
+    // the unused client-side advisory is omitted for wire compatibility.
 }
 
 uint32_t NetworkDetection::Private::nextSequenceNumber()
