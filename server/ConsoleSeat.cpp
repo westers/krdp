@@ -52,10 +52,9 @@ QList<Session> readLogindSessions(QString *error)
         entries.beginStructure();
         entries >> id >> uid >> user >> seat >> path;
         entries.endStructure();
-        Q_UNUSED(uid)
-
         Session session;
         session.id = id;
+        session.uid = uid;
         session.user = user;
         session.seat = seat;
         session.type = property(path, QStringLiteral("Type")).toString();

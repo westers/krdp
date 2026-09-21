@@ -6,6 +6,8 @@
 #include <QList>
 #include <QString>
 
+#include <optional>
+
 namespace KRdp::ConsoleSeat
 {
 /** The subset of logind session data a console host needs to choose an adapter.
@@ -22,6 +24,7 @@ struct Session {
     QString sessionClass;
     QString state;
     bool active = false;
+    quint32 uid = 0;
 };
 
 enum class Adapter {
@@ -72,6 +75,17 @@ inline QString activeSessionId(const QList<Session> &sessions, Adapter adapter, 
         }
     }
     return {};
+}
+
+/// Numeric uid of the selected live session; used to launch its capture worker.
+inline std::optional<quint32> activeSessionUid(const QList<Session> &sessions, Adapter adapter, const QString &seat = QStringLiteral("seat0"))
+{
+    for (const auto &session : sessions) {
+        if (((adapter == Adapter::PhysicalUser && isPhysicalUser(session, seat)) || (adapter == Adapter::Greeter && isGreeter(session, seat))) && session.uid != 0) {
+            return session.uid;
+        }
+    }
+    return std::nullopt;
 }
 
 /** Read logind sessions from the system bus. Returns an empty list with an
