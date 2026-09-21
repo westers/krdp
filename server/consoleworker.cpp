@@ -26,6 +26,7 @@
 #include "ConsoleResizeSession.h"
 #include "TakeoverDetector.h"
 #include "PipeWireAudioPlayback.h"
+#include "ConsoleMicrophoneSession.h"
 
 using namespace KRdp;
 
@@ -56,13 +57,18 @@ std::shared_ptr<QEvent> eventFor(const ConsoleWorkerWire::Input &input)
 class Worker : public QObject
 {
 public:
-    Worker(const QString &socketName, const QString &sessionId, quint32 uid, const QByteArray &token, QObject *parent = nullptr)
+    Worker(const QString &socketName, const QString &sessionId, quint32 uid, const QByteArray &token, bool desktop, QObject *parent = nullptr)
         : QObject(parent)
         , m_socketName(socketName)
         , m_sessionId(sessionId)
         , m_uid(uid)
         , m_token(token)
+        , m_microphone(desktop)
     {
+        connect(&m_microphone, &ConsoleMicrophoneSession::result, this, [this](const auto &result) {
+            if (!m_stopping && m_socket.state() == QLocalSocket::ConnectedState)
+                m_socket.write(ConsoleWorkerWire::frame(result));
+        });
         m_clock.start();
         connect(&m_resize, &ConsoleResizeSession::mutationStarting, this, [this]() {
             releaseInput();
@@ -189,6 +195,7 @@ private:
         releaseInput();
         m_audioTimer.stop();
         m_audio.reset();
+        m_microphone.stop();
         m_resize.stop(); // Keep the event loop alive until restoration finishes.
     }
 
@@ -223,6 +230,7 @@ private:
         releaseInput();
         m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalTakeover));
         m_control.active = false; // Gate immediately, before the host's acknowledgement.
+        m_microphone.setControl(m_control);
         m_session.setVideoQuality(80);
         m_resize.setControl(m_control);
         m_reclaimAction.setEnabled(false);
@@ -241,6 +249,7 @@ private:
                     releaseInput();
                     m_session.setVideoQuality(80);
                     m_control = *control;
+                    m_microphone.setControl(*control);
                     m_resize.setControl(*control);
                     m_reclaimAction.setEnabled(control->active);
                     m_takeover = {};
@@ -258,6 +267,14 @@ private:
                 if (ConsoleWorkerWire::mayApplyQuality(*quality, m_control)) {
                     m_session.setVideoQuality(quality->quality);
                 }
+                continue;
+            }
+            if (const auto policy = ConsoleWorkerWire::microphonePolicy(*record)) {
+                m_microphone.request(*policy);
+                continue;
+            }
+            if (const auto audio = ConsoleWorkerWire::microphoneAudio(*record)) {
+                m_microphone.audio(*audio);
                 continue;
             }
             if (const auto request = ConsoleWorkerWire::resize(*record)) {
@@ -315,6 +332,7 @@ private:
     ConsoleWorkerWire::Deframer m_deframer;
     PlasmaScreencastV1Session m_session;
     std::unique_ptr<PipeWireAudioPlayback> m_audio;
+    ConsoleMicrophoneSession m_microphone;
     QTimer m_connectTimeout;
     QTimer m_audioTimer;
     bool m_captureReady = false;
@@ -342,7 +360,8 @@ int main(int argc, char **argv)
     const QCommandLineOption uidOption(QStringLiteral("uid"), QStringLiteral("logind uid."), QStringLiteral("uid"));
     const QCommandLineOption tokenOption(QStringLiteral("token-hex"), QStringLiteral("Per-launch broker token."), QStringLiteral("token"));
     const QCommandLineOption tokenFdOption(QStringLiteral("token-fd"), QStringLiteral("Read the per-launch broker token once from this inherited fd."), QStringLiteral("fd"));
-    parser.addOptions({socketOption, sessionOption, uidOption, tokenOption, tokenFdOption});
+    const QCommandLineOption desktopOption(QStringLiteral("desktop-media"), QStringLiteral("Broker verified a logged-in physical user session."));
+    parser.addOptions({socketOption, sessionOption, uidOption, tokenOption, tokenFdOption, desktopOption});
     parser.process(application);
 
     bool uidOk = false;
@@ -363,7 +382,7 @@ int main(int argc, char **argv)
         parser.showHelp(1);
     }
 
-    Worker worker(parser.value(socketOption), parser.value(sessionOption), uid, token);
+    Worker worker(parser.value(socketOption), parser.value(sessionOption), uid, token, parser.isSet(desktopOption));
     worker.connectToBroker();
     return application.exec();
 }

@@ -157,6 +157,11 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     process->setProcessEnvironment(environment);
     process->setProgram(m_workerProgram);
     process->setArguments({QStringLiteral("--socket"), socketName, QStringLiteral("--logind-session"), target.sessionId, QStringLiteral("--uid"), QString::number(target.uid), QStringLiteral("--token-fd"), QStringLiteral("3")});
+    if (target.adapter == ConsoleSeat::Adapter::PhysicalUser && ConsoleSeat::isPhysicalUser(*found)) {
+        auto arguments = process->arguments();
+        arguments.append(QStringLiteral("--desktop-media"));
+        process->setArguments(arguments);
+    }
     const gid_t gid = account->pw_gid;
     const QByteArray user = QByteArray(account->pw_name);
     process->setChildProcessModifier([raw, target, gid, user, tokenRead = tokenPipe[0]]() {

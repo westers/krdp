@@ -75,3 +75,14 @@ Ready means PipeWire reached PAUSED or STREAMING, not merely that connect was
 submitted. A private, hardware-free graph test proves readiness without a
 consumer, stop/reopen, daemon-loss failure and missing-graph refusal. The worker
 must poll this state with a bounded startup deadline before acknowledging enable.
+
+Console worker now owns ConsoleMicrophoneSession: controller-generation and
+strictly increasing request-ID admission, 3s startup deadline, actual readiness
+acknowledgement, runtime failure notification, and immediate source destruction
+on control change/local takeover/Stop/socket loss. Old activation PCM is refused.
+Launcher grants --desktop-media only when both target adapter and freshly read
+logind data identify an active physical user; default/manual workers and greeters
+refuse microphone activation. Private-graph tests exercise off/on, revoke,
+ownership change, stale PCM/policy, greeter/viewer refusal and daemon loss.
+Broker wiring and real Buzz-to-Sol sample delivery are still pending: console
+microphone requests remain explicitly unsupported until that is complete.

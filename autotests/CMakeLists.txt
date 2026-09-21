@@ -19,9 +19,9 @@ endif()
 
 find_program(PIPEWIRE_EXECUTABLE pipewire)
 if(PIPEWIRE_EXECUTABLE)
-    add_executable(PipeWireMicrophoneTest PipeWireMicrophoneTest.cpp ${CMAKE_SOURCE_DIR}/src/PipeWireMicrophone.cpp)
-    target_include_directories(PipeWireMicrophoneTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
-    target_link_libraries(PipeWireMicrophoneTest PRIVATE Qt6::Test Qt6::Core PkgConfig::PipeWire)
+    add_executable(PipeWireMicrophoneTest PipeWireMicrophoneTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleMicrophoneSession.h ${CMAKE_SOURCE_DIR}/src/PipeWireMicrophone.cpp)
+    target_include_directories(PipeWireMicrophoneTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+    target_link_libraries(PipeWireMicrophoneTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui PkgConfig::PipeWire)
     target_compile_definitions(PipeWireMicrophoneTest PRIVATE
         KRDP_AUDIO_CONFIG_DIR="${CMAKE_SOURCE_DIR}/server"
         KRDP_PIPEWIRE_EXECUTABLE="${PIPEWIRE_EXECUTABLE}")
