@@ -20,6 +20,11 @@ test -f "$task_prefix/cert/krdp.crt"
 test -f "$task_prefix/cert/krdp.key"
 test -n "$task_kpipewire_libdir"
 
+# Stop before replacing mapped libraries; in-place replacement can crash a
+# running host during teardown.
+if systemctl is-active --quiet krdp-console-host-test.service; then
+    systemctl stop krdp-console-host-test.service
+fi
 cmake --install "$task_build" --prefix "$task_prefix"
 # KRDP is linked against the staged KPipeWire build rather than the distro ABI.
 install -d "$task_prefix/lib/$task_kpipewire_libdir"

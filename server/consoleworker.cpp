@@ -176,7 +176,8 @@ int main(int argc, char **argv)
     QCommandLineParser parser;
     parser.addHelpOption();
     const QCommandLineOption socketOption(QStringLiteral("socket"), QStringLiteral("Broker socket path."), QStringLiteral("path"));
-    const QCommandLineOption sessionOption(QStringLiteral("session"), QStringLiteral("logind session id."), QStringLiteral("id"));
+    // QGuiApplication consumes --session for its own session restoration.
+    const QCommandLineOption sessionOption(QStringLiteral("logind-session"), QStringLiteral("logind session id."), QStringLiteral("id"));
     const QCommandLineOption uidOption(QStringLiteral("uid"), QStringLiteral("logind uid."), QStringLiteral("uid"));
     const QCommandLineOption tokenOption(QStringLiteral("token-hex"), QStringLiteral("Per-launch broker token."), QStringLiteral("token"));
     const QCommandLineOption tokenFdOption(QStringLiteral("token-fd"), QStringLiteral("Read the per-launch broker token once from this inherited fd."), QStringLiteral("fd"));

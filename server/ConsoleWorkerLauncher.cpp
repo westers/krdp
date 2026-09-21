@@ -141,7 +141,7 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     process->setProcessChannelMode(QProcess::ForwardedChannels);
     process->setProcessEnvironment(environment);
     process->setProgram(m_workerProgram);
-    process->setArguments({QStringLiteral("--socket"), socketName, QStringLiteral("--session"), target.sessionId, QStringLiteral("--uid"), QString::number(target.uid), QStringLiteral("--token-fd"), QStringLiteral("3")});
+    process->setArguments({QStringLiteral("--socket"), socketName, QStringLiteral("--logind-session"), target.sessionId, QStringLiteral("--uid"), QString::number(target.uid), QStringLiteral("--token-fd"), QStringLiteral("3")});
     const gid_t gid = account->pw_gid;
     const QByteArray user = QByteArray(account->pw_name);
     process->setChildProcessModifier([raw, target, gid, user, tokenRead = tokenPipe[0], tokenWrite = tokenPipe[1]]() {
