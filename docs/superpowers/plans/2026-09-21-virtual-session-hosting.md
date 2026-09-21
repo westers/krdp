@@ -119,3 +119,21 @@ wrapper with --xwayland and passes its own child's display/authority path to
 startplasma (the prestarted wrapper's earlier launch-environment notification
 cannot update a plasma_session that did not exist yet). No authority cookie is
 read or logged. Runtime acceptance still required.
+
+2026-09-21 capture diagnosis: Sol probe lBNNLl reports KWin6.6.6,
+VirtualBackend, active QPainter compositor. Upstream Plasma/6.6
+`src/backends/virtual/virtual_backend.cpp` enables OpenGL only when a DRM
+device opens; `src/plugins/screenshot/screenshot.cpp` requires EglBackend,
+and `src/plugins/screencast/screencastmanager.cpp` explicitly rejects
+non-OpenGL composition. Thus another screenshot timeout or switching to the
+RDP worker cannot repair this backend limitation. Probe now records support
+information and fails early for QPainter in Plasma capture mode.
+
+Sol's renderD128 ACL grants root/render/sddm, not westers; its node is also
+intentionally hidden by the probe. Next establish scoped rendering access
+without exposing the physical modesetting card or changing seat0. Any
+privileged ACL/device setup must follow Steve's existing tmux/password flow;
+do not silently add permanent video/render group membership. CPU-only support
+also remains a separate requirement: stock headless QPainter cannot provide
+the required screencast path. No GPU access or production configuration has
+been changed by this diagnosis.

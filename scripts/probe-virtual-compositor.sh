@@ -88,6 +88,12 @@ done
 gdbus call --session --dest org.kde.KWin --object-path /KWin \
     --method org.kde.KWin.supportInformation >"$XDG_RUNTIME_DIR/kwin-support.txt"
 if [[ "${2:-}" == --plasma ]]; then
+    # KWin 6.6's screenshot AND screencast plugins require OpenGL. Shell
+    # readiness with QPainter cannot establish an RDP-capable desktop.
+    if grep -q 'Compositing Type: QPainter' "$XDG_RUNTIME_DIR/kwin-support.txt"; then
+        echo 'Capture unavailable: virtual KWin selected QPainter; an isolated OpenGL rendering backend is required.' >&2
+        exit 1
+    fi
     # The wrapper was started before plasma_session could receive its environment
     # update. Obtain only the display and authority PATH from this private child;
     # never read or print the authority cookie or inspect another session.
