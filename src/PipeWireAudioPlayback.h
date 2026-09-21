@@ -6,6 +6,7 @@
 #include <QByteArray>
 #include <QMutex>
 #include <QString>
+#include <QVector>
 
 struct pw_stream;
 struct pw_thread_loop;
@@ -33,14 +34,24 @@ public:
     QByteArray take();
 
 private:
+    struct MovedStream {
+        quint32 id = 0;
+        QString previousTarget;
+        QString previousType;
+        bool hadPreviousTarget = false;
+    };
+
     static void process(void *data);
     void process();
+    void moveExistingPlaybackStreams();
+    void restoreMovedPlaybackStreams();
 
     QMutex m_mutex;
     QByteArray m_pending;
     QString m_isolatedSinkName;
     QString m_previousDefaultSink;
     QString m_previousConfiguredSink;
+    QVector<MovedStream> m_movedStreams;
     pw_thread_loop *m_loop = nullptr;
     pw_stream *m_stream = nullptr;
 };

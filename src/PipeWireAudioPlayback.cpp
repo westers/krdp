@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "PipeWireAudioPlayback.h"
+#include "PipeWireAudioRouting.h"
 
 #include <QMutexLocker>
 #include <QProcess>
@@ -20,32 +21,40 @@ constexpr uint32_t Channels = 2;
 constexpr uint32_t FrameBytes = 4;
 constexpr uint32_t MaxQueued = Rate * FrameBytes / 2;
 
-QString metadataValue(const QString &key)
+struct MetadataValue {
+    QString value;
+    QString type;
+    bool present = false;
+};
+
+MetadataValue metadataValue(quint32 subject, const QString &key)
 {
     QProcess metadata;
-    metadata.start(QStringLiteral("pw-metadata"), {QStringLiteral("-n"), QStringLiteral("default"), QStringLiteral("0"), key});
+    metadata.start(QStringLiteral("pw-metadata"), {QStringLiteral("-n"), QStringLiteral("default"), QString::number(subject), key});
     if (!metadata.waitForFinished(1000) || metadata.exitStatus() != QProcess::NormalExit || metadata.exitCode() != 0) {
         return {};
     }
-    const QRegularExpression match(QStringLiteral("key:'%1' value:'([^']*)'").arg(QRegularExpression::escape(key)));
+    const QRegularExpression match(QStringLiteral("key:'%1' value:'([^']*)' type:'([^']*)'").arg(QRegularExpression::escape(key)));
     const auto found = match.match(QString::fromUtf8(metadata.readAllStandardOutput()));
-    return found.hasMatch() ? found.captured(1) : QString{};
+    return found.hasMatch() ? MetadataValue{found.captured(1), found.captured(2), true} : MetadataValue{};
 }
 
-bool setMetadataValue(const QString &key, const QString &value)
+bool setMetadataValue(quint32 subject, const QString &key, const QString &value, const QString &type)
 {
     QProcess metadata;
     metadata.start(QStringLiteral("pw-metadata"),
-                   {QStringLiteral("-n"), QStringLiteral("default"), QStringLiteral("0"), key, value, QStringLiteral("Spa:String:JSON")});
+                   {QStringLiteral("-n"), QStringLiteral("default"), QString::number(subject), key, value, type});
     return metadata.waitForFinished(1000) && metadata.exitStatus() == QProcess::NormalExit && metadata.exitCode() == 0;
 }
 
-void clearMetadataValue(const QString &key)
+void clearMetadataValue(quint32 subject, const QString &key)
 {
     QProcess metadata;
-    metadata.start(QStringLiteral("pw-metadata"), {QStringLiteral("-n"), QStringLiteral("default"), QStringLiteral("-d"), QStringLiteral("0"), key});
+    metadata.start(QStringLiteral("pw-metadata"), {QStringLiteral("-n"), QStringLiteral("default"), QStringLiteral("-d"), QString::number(subject), key});
     metadata.waitForFinished(1000);
 }
+
+constexpr quint32 DefaultMetadataSubject = 0;
 }
 
 PipeWireAudioPlayback::~PipeWireAudioPlayback()
@@ -110,16 +119,20 @@ bool PipeWireAudioPlayback::startIsolated(const QString &id)
         return false;
     }
     m_isolatedSinkName = QStringLiteral("krdp.remote-audio.%1").arg(id);
-    m_previousDefaultSink = metadataValue(QStringLiteral("default.audio.sink"));
-    m_previousConfiguredSink = metadataValue(QStringLiteral("default.configured.audio.sink"));
+    m_previousDefaultSink = metadataValue(DefaultMetadataSubject, QStringLiteral("default.audio.sink")).value;
+    m_previousConfiguredSink = metadataValue(DefaultMetadataSubject, QStringLiteral("default.configured.audio.sink")).value;
     if (!start({})) {
         m_isolatedSinkName.clear();
         return false;
     }
 
     const QString selected = QStringLiteral("{\"name\":\"%1\"}").arg(m_isolatedSinkName);
-    if (setMetadataValue(QStringLiteral("default.audio.sink"), selected)
-        && setMetadataValue(QStringLiteral("default.configured.audio.sink"), selected)) {
+    if (setMetadataValue(DefaultMetadataSubject, QStringLiteral("default.audio.sink"), selected, QStringLiteral("Spa:String:JSON"))
+        && setMetadataValue(DefaultMetadataSubject, QStringLiteral("default.configured.audio.sink"), selected, QStringLiteral("Spa:String:JSON"))) {
+        // The default only affects streams created from here on. WirePlumber
+        // also honours target.object metadata for already running streams,
+        // which is the part that makes an in-progress conference go private.
+        moveExistingPlaybackStreams();
         return true;
     }
     stop();
@@ -142,20 +155,21 @@ void PipeWireAudioPlayback::stop()
         const QString selected = QStringLiteral("{\"name\":\"%1\"}").arg(m_isolatedSinkName);
         // Never overwrite a choice the local user made while this RDP session
         // was active.  We only undo the values that still name our sink.
-        if (metadataValue(QStringLiteral("default.audio.sink")) == selected) {
+        if (metadataValue(DefaultMetadataSubject, QStringLiteral("default.audio.sink")).value == selected) {
             if (m_previousDefaultSink.isEmpty()) {
-                clearMetadataValue(QStringLiteral("default.audio.sink"));
+                clearMetadataValue(DefaultMetadataSubject, QStringLiteral("default.audio.sink"));
             } else {
-                setMetadataValue(QStringLiteral("default.audio.sink"), m_previousDefaultSink);
+                setMetadataValue(DefaultMetadataSubject, QStringLiteral("default.audio.sink"), m_previousDefaultSink, QStringLiteral("Spa:String:JSON"));
             }
         }
-        if (metadataValue(QStringLiteral("default.configured.audio.sink")) == selected) {
+        if (metadataValue(DefaultMetadataSubject, QStringLiteral("default.configured.audio.sink")).value == selected) {
             if (m_previousConfiguredSink.isEmpty()) {
-                clearMetadataValue(QStringLiteral("default.configured.audio.sink"));
+                clearMetadataValue(DefaultMetadataSubject, QStringLiteral("default.configured.audio.sink"));
             } else {
-                setMetadataValue(QStringLiteral("default.configured.audio.sink"), m_previousConfiguredSink);
+                setMetadataValue(DefaultMetadataSubject, QStringLiteral("default.configured.audio.sink"), m_previousConfiguredSink, QStringLiteral("Spa:String:JSON"));
             }
         }
+        restoreMovedPlaybackStreams();
         m_isolatedSinkName.clear();
         m_previousDefaultSink.clear();
         m_previousConfiguredSink.clear();
@@ -170,6 +184,45 @@ void PipeWireAudioPlayback::stop()
     if (loop) {
         pw_thread_loop_destroy(loop);
     }
+}
+
+void PipeWireAudioPlayback::moveExistingPlaybackStreams()
+{
+    QProcess dump;
+    dump.start(QStringLiteral("pw-dump"));
+    if (!dump.waitForFinished(2000) || dump.exitStatus() != QProcess::NormalExit || dump.exitCode() != 0) {
+        qWarning() << "Could not inspect PipeWire playback streams for isolated audio";
+        return;
+    }
+    const auto streams = PipeWireAudioRouting::movablePlaybackStreams(dump.readAllStandardOutput());
+    for (const PipeWireAudioRouting::PlaybackStream &stream : streams) {
+        const quint32 streamId = stream.id;
+        const MetadataValue previous = metadataValue(streamId, QStringLiteral("target.object"));
+        // A node-name target is supported by WirePlumber's defined-target
+        // policy and avoids confusing a PipeWire global id with object.serial.
+        if (setMetadataValue(streamId, QStringLiteral("target.object"), m_isolatedSinkName, QStringLiteral("Spa:String"))) {
+            m_movedStreams.append({streamId, previous.value, previous.type, previous.present});
+        }
+    }
+    if (!m_movedStreams.isEmpty()) {
+        qInfo() << "Moved" << m_movedStreams.size() << "existing PipeWire playback stream(s) to the remote-only sink";
+    }
+}
+
+void PipeWireAudioPlayback::restoreMovedPlaybackStreams()
+{
+    for (const MovedStream &stream : std::as_const(m_movedStreams)) {
+        const MetadataValue current = metadataValue(stream.id, QStringLiteral("target.object"));
+        if (!current.present || current.value != m_isolatedSinkName) {
+            continue; // The local user or application chose a new target.
+        }
+        if (stream.hadPreviousTarget) {
+            setMetadataValue(stream.id, QStringLiteral("target.object"), stream.previousTarget, stream.previousType);
+        } else {
+            clearMetadataValue(stream.id, QStringLiteral("target.object"));
+        }
+    }
+    m_movedStreams.clear();
 }
 
 QByteArray PipeWireAudioPlayback::take()

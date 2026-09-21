@@ -50,6 +50,11 @@ target_include_directories(ConsoleHandoffTest PRIVATE ${CMAKE_SOURCE_DIR}/server
 target_link_libraries(ConsoleHandoffTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ConsoleHandoffTest COMMAND ConsoleHandoffTest)
 
+add_executable(PipeWireAudioRoutingTest PipeWireAudioRoutingTest.cpp)
+target_include_directories(PipeWireAudioRoutingTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(PipeWireAudioRoutingTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME PipeWireAudioRoutingTest COMMAND PipeWireAudioRoutingTest)
+
 add_executable(ClipboardTextTest ClipboardTextTest.cpp)
 target_include_directories(ClipboardTextTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ClipboardTextTest PRIVATE Qt6::Test Qt6::Core)
