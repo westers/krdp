@@ -14,6 +14,7 @@ public:
     struct Media {
         bool playback = false;
         bool silenceHost = false;
+        bool microphone = false;
         bool operator==(const Media &) const = default;
     };
 
@@ -50,13 +51,14 @@ public:
         // Returning to view-only mode must not retain a latent host-mute
         // request. A later explicit acquisition re-sends the client's policy.
         m_clients[id].silenceHost = false;
+        m_clients[id].microphone = false;
         return true;
     }
 
     bool setMedia(Id id, Media media)
     {
         auto client = m_clients.find(id);
-        if (client == m_clients.end() || (media.playback && media.silenceHost && !ownsControl(id))) {
+        if (client == m_clients.end() || ((media.microphone || (media.playback && media.silenceHost)) && !ownsControl(id))) {
             return false;
         }
         media.silenceHost = media.playback && media.silenceHost;
@@ -79,6 +81,7 @@ public:
         for (auto client = m_clients.cbegin(); client != m_clients.cend(); ++client) {
             result.playback |= client->playback;
             result.silenceHost |= ownsControl(client.key()) && client->silenceHost;
+            result.microphone |= ownsControl(client.key()) && client->microphone;
         }
         return result;
     }

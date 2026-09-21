@@ -7,6 +7,28 @@ class ConsoleControlTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void microphoneRequiresControllerAndFreshConsentAfterRelease()
+    {
+        KRdp::ConsoleControl control;
+        QVERIFY(!control.setMedia(1, {false, false, true}));
+        control.admit(1);
+        control.admit(2);
+        QVERIFY(!control.setMedia(2, {false, false, true}));
+        QVERIFY(control.setMedia(1, {false, false, true}));
+        QVERIFY(control.media().microphone);
+        QVERIFY(!control.media().playback);
+        QVERIFY(!control.media().silenceHost);
+        QVERIFY(control.release(1));
+        QVERIFY(!control.media().microphone);
+        QVERIFY(control.acquire(1));
+        QVERIFY(!control.media().microphone);
+        QVERIFY(control.setMedia(1, {true, true, true}));
+        control.remove(1);
+        QVERIFY(!control.media().microphone);
+        QVERIFY(control.acquire(2));
+        QVERIFY(!control.media().microphone);
+    }
+
     void transferRequiresExplicitRelease()
     {
         KRdp::ConsoleControl control;
