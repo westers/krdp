@@ -8,8 +8,32 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 1 && "$1" == --plasma ) ]]
+    [[ $# == 0 || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia ) ) ]]
     probe_mode="${1:-}"
+    render_bindings=()
+    render_environment=(LIBGL_ALWAYS_SOFTWARE=1
+        __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+        __GLX_VENDOR_LIBRARY_NAME=mesa)
+    if [[ "$probe_mode" == --plasma-nvidia ]]; then
+        # Explicit opt-in for Sol's verified RTX2070 only. This test never
+        # grants device permissions and never exposes a DRM modesetting node.
+        render_node=$(realpath /dev/dri/by-path/pci-0000:09:00.0-render)
+        [[ "$render_node" =~ ^/dev/dri/renderD[0-9]+$ ]]
+        [[ "$(cat /sys/class/drm/"${render_node##*/}"/device/vendor)" == 0x10de ]]
+        [[ "$(cat /sys/class/drm/"${render_node##*/}"/device/device)" == 0x1f02 ]]
+        grep -Eq '^Device Minor:[[:space:]]+0$' /proc/driver/nvidia/gpus/0000:09:00.0/information
+        for device in "$render_node" /dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm; do
+            if [[ ! -c "$device" || ! -r "$device" || ! -w "$device" ]]; then
+                echo "GPU probe requires existing read/write permission: $device (no permissions changed)" >&2
+                exit 1
+            fi
+            render_bindings+=(--dev-bind "$device" "$device")
+        done
+        render_environment=(
+            __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+            __GLX_VENDOR_LIBRARY_NAME=nvidia)
+        probe_mode=--plasma
+    fi
     probe_runtime=$(mktemp -d "/run/user/$(id -u)/krdp-headless.XXXXXX")
     mkdir "$probe_runtime/config" "$probe_runtime/cache" "$probe_runtime/state" "$probe_runtime/data"
     cp -r "$repo_path/scripts/virtual-probe-config/." "$probe_runtime/config/"
@@ -29,11 +53,10 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         XDG_CONFIG_DIRS="$probe_runtime/config-defaults" XDG_CURRENT_DESKTOP=KDE XDG_MENU_PREFIX=plasma- \
         XDG_CACHE_HOME="$probe_runtime/cache" XDG_STATE_HOME="$probe_runtime/state" \
         XDG_DATA_HOME="$probe_runtime/data" XDG_DATA_DIRS=/usr/local/share:/usr/share \
-        XDG_SESSION_TYPE=wayland LIBGL_ALWAYS_SOFTWARE=1 \
-        __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
-        __GLX_VENDOR_LIBRARY_NAME=mesa \
+        XDG_SESSION_TYPE=wayland "${render_environment[@]}" \
         timeout 80 bwrap --unshare-pid --unshare-ipc --die-with-parent --new-session \
         --ro-bind / / "${apparmor_query[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run \
+        "${render_bindings[@]}" \
         --perms 01777 --dir /tmp/.X11-unix \
         --bind "$probe_runtime" "$probe_runtime" \
         dbus-run-session --config-file="$repo_path/server/virtual-session-bus.conf" \
