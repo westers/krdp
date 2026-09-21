@@ -59,6 +59,7 @@ private:
     ConsoleWorkerWire::Deframer m_deframer;
     ConsoleHandoff::Target m_target;
     QByteArray m_token;
+    bool m_authenticated = false;
     bool m_ready = false;
 };
 }

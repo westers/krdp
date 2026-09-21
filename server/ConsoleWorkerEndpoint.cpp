@@ -59,6 +59,7 @@ void ConsoleWorkerEndpoint::close()
     m_deframer = {};
     m_target = {};
     m_token.clear();
+    m_authenticated = false;
     m_ready = false;
 }
 
@@ -109,10 +110,18 @@ void ConsoleWorkerEndpoint::readWorker()
     }
     m_deframer.feed(m_worker->readAll());
     while (const auto record = m_deframer.next()) {
-        if (!m_ready) {
+        if (!m_authenticated) {
             const auto greeting = ConsoleWorkerWire::hello(*record);
             if (!greeting || greeting->sessionId != m_target.sessionId || greeting->uid != m_target.uid || greeting->token != m_token) {
                 fail(QStringLiteral("worker authentication failed"));
+                return;
+            }
+            m_authenticated = true;
+            continue;
+        }
+        if (!m_ready) {
+            if (record->kind != ConsoleWorkerWire::Kind::Ready || !record->payload.isEmpty()) {
+                fail(QStringLiteral("worker did not confirm active capture"));
                 return;
             }
             m_ready = true;
@@ -137,6 +146,7 @@ void ConsoleWorkerEndpoint::workerDisconnected()
 {
     const bool wasReady = m_ready;
     m_worker = nullptr;
+    m_authenticated = false;
     m_ready = false;
     m_deframer = {};
     if (wasReady) {
@@ -146,7 +156,10 @@ void ConsoleWorkerEndpoint::workerDisconnected()
 
 void ConsoleWorkerEndpoint::send(ConsoleWorkerWire::Kind kind)
 {
-    if (m_ready && m_worker) {
+    // A replacement may be selected before its encoder has become active.
+    // Authentication is enough to deliver Stop; readiness is only the point
+    // at which frames and input may cross the endpoint.
+    if (m_authenticated && m_worker) {
         m_worker->write(ConsoleWorkerWire::frame(kind));
     }
 }

@@ -41,6 +41,11 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QVERIFY(worker.waitForConnected(1000));
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), 1000, token}));
     QVERIFY(worker.waitForBytesWritten(1000));
+    QTest::qWait(20);
+    QCOMPARE(ready, 0);
+    QVERIFY(!endpoint.ready());
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+    QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(ready, 1);
 
     VideoFrame sent;
