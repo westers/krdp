@@ -46,6 +46,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     connect(m_server, &Server::newConnectionCreated, this, &ConsoleHostController::addClient);
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerReady, this, [this](const auto &target) {
         apply(m_handoff.workerReady(target));
+        qInfo() << "Console worker ready:" << target.sessionId << "forwarding" << m_inputEnabled;
         m_endpoint.setControlState({m_controlGeneration, m_control.owner() != 0});
         if (m_mediaConfigured) {
             m_endpoint.setMedia(m_media);
@@ -69,6 +70,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [this](const ConsoleWorkerWire::Outputs &outputs) {
+        qInfo() << "Console capture outputs:" << outputs.monitors.size() << "forwarding" << m_inputEnabled << "clients" << m_clients.size();
         m_outputs = outputs;
         sendLayouts();
     });
@@ -181,6 +183,7 @@ void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
 
 void ConsoleHostController::setWorkerActive(bool active)
 {
+    qInfo() << "Console capture forwarding:" << active;
     if (!active) {
         finishResize(u"console capture worker changed during resize"_s);
         releaseInput();
