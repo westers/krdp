@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Isolated Plasma desktop probe
+Exec=/usr/bin/plasmashell --no-respawn
+OnlyShowIn=KDE;
+X-KDE-autostart-phase=0
+X-DBUS-StartupType=Unique

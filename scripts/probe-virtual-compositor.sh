@@ -8,18 +8,27 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
+    [[ $# == 0 || ( $# == 1 && "$1" == --plasma ) ]]
+    probe_mode="${1:-}"
     probe_runtime=$(mktemp -d "/run/user/$(id -u)/krdp-headless.XXXXXX")
     mkdir "$probe_runtime/config" "$probe_runtime/cache" "$probe_runtime/state" "$probe_runtime/data"
+    cp -r "$repo_path/scripts/virtual-probe-config/." "$probe_runtime/config/"
+    mkdir "$probe_runtime/config-defaults"
+    ln -s /etc/xdg/menus "$probe_runtime/config-defaults/menus"
     echo "Headless probe evidence: $probe_runtime"
     # Retain the real HOME identity, but no existing display, session bus, Qt
     # reconnect, session id, manager notification, or inherited plugin settings.
     exec env -i PATH=/usr/bin:/bin HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" \
         LANG=C.UTF-8 XDG_RUNTIME_DIR="$probe_runtime" XDG_CONFIG_HOME="$probe_runtime/config" \
+        XDG_CONFIG_DIRS="$probe_runtime/config-defaults" XDG_CURRENT_DESKTOP=KDE XDG_MENU_PREFIX=plasma- \
         XDG_CACHE_HOME="$probe_runtime/cache" XDG_STATE_HOME="$probe_runtime/state" \
         XDG_DATA_HOME="$probe_runtime/data" XDG_DATA_DIRS=/usr/local/share:/usr/share \
         XDG_SESSION_TYPE=wayland LIBGL_ALWAYS_SOFTWARE=1 \
+        timeout 45 bwrap --unshare-pid --unshare-ipc --die-with-parent --new-session \
+        --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run \
+        --bind "$probe_runtime" "$probe_runtime" \
         dbus-run-session --config-file="$repo_path/server/virtual-session-bus.conf" \
-        -- bash "$script_path" --inside-private-bus
+        -- bash "$script_path" --inside-private-bus "$probe_mode"
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
 wrapper_pid=
@@ -61,6 +70,27 @@ for attempt in {1..100}; do
 done
 [[ "$ready" == true ]]
 [[ -S "$XDG_RUNTIME_DIR/wayland-0" ]]
+if [[ "${2:-}" == --plasma ]]; then
+    env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland startplasma-wayland \
+        >"$XDG_RUNTIME_DIR/plasma.log" 2>&1 &
+    plasma_pid=$!
+    ready=false
+    for attempt in {1..200}; do
+        kill -0 "$plasma_pid"
+        if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+            --method org.freedesktop.DBus.NameHasOwner org.kde.plasmashell | grep -q true; then
+            ready=true
+            break
+        fi
+        sleep 0.1
+    done
+    [[ "$ready" == true ]]
+    gdbus call --session --dest org.kde.plasmashell --object-path /PlasmaShell \
+        --method org.kde.PlasmaShell.evaluateScript 'print(desktops().length)' \
+        >"$XDG_RUNTIME_DIR/desktop-count.txt"
+    grep -Eq '[1-9]' "$XDG_RUNTIME_DIR/desktop-count.txt"
+    echo 'Plasma shell owns its private bus name and reports a desktop'
+fi
 env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
     timeout 10 kscreen-doctor -j >"$XDG_RUNTIME_DIR/outputs.json"
 jq -e '.outputs | length == 1' "$XDG_RUNTIME_DIR/outputs.json"

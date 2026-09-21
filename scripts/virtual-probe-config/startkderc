@@ -1,0 +1,4 @@
+[General]
+systemdBoot=false
+[WaitForDrKonqi]
+Enabled=false
