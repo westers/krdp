@@ -2302,6 +2302,11 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
         return;
     }
 
+    if (type == QLatin1String("attach")) {
+        onControlAttach(wrapper, record, first);
+        return;
+    }
+
     if (type == QLatin1String("chroma")) {
         onControlChroma(wrapper, record, first);
         return;
@@ -2556,6 +2561,38 @@ void SessionController::onControlApply(SessionWrapper *wrapper, const QJsonObjec
         }
         refuse(*error, u"refused by the executor: %1"_s.arg(error->message));
     }
+}
+
+void SessionController::onControlAttach(SessionWrapper *wrapper, const QJsonObject &record, bool first)
+{
+    Q_UNUSED(first)
+    auto *connection = wrapper->connection.data();
+    const QString target = record.value(QLatin1String("target")).toString();
+    if (target != QLatin1String("physical")) {
+        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"attach target must be physical"_s}));
+        return;
+    }
+    // Codec/media preflight records deliberately do not pick a session mode.
+    // `attach` may therefore follow them even though they have closed the
+    // first-record gate.  Once anything is streaming, changing the source
+    // would be indistinguishable from a layout apply and is refused.
+    if (!wrapper->sessions.empty() || wrapper->layoutClient) {
+        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"attach is only valid before a session is built"_s}));
+        return;
+    }
+    if (m_layoutExecutor.controlling() || m_layoutOwner.hasOwner()) {
+        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"a layout-controlled session currently owns the console"_s}));
+        return;
+    }
+
+    wrapper->controlTimer.stop();
+    wrapper->controlGate = SessionWrapper::ControlGate::Built;
+    // Do not use buildConfiguredSessions(): MonitorMode=virtual intentionally
+    // creates an off-screen output.  Direct attach means the existing seat's
+    // physical outputs, with no call to the layout executor.
+    buildSessions(wrapper);
+    connection->sendControlRecord(KRdp::LayoutControl::layoutRecord(layoutFor(wrapper)));
+    qInfo().noquote() << u"KRDPCTL: %1 attached to the physical console (%2 session(s))"_s.arg(wrapper->controlId).arg(wrapper->sessions.size());
 }
 
 void SessionController::onControlChroma(SessionWrapper *wrapper, const QJsonObject &record, bool first)

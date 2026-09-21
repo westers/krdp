@@ -276,6 +276,13 @@ private:
      */
     void onControlApply(SessionWrapper *wrapper, const QJsonObject &record, bool first);
     /**
+     * `KRDPCTL` `attach` starts a read-only capture of the physical console.
+     * Unlike `apply`, it never creates virtual outputs or changes the host
+     * layout.  It is deliberately an explicit client request rather than a
+     * consequence of media/codec preflight records.
+     */
+    void onControlAttach(SessionWrapper *wrapper, const QJsonObject &record, bool first);
+    /**
      * `KRDPCTL` `chroma` (OPT-045b, design §10 A10.4): merges the request's present fields over
      * \a wrapper's current AVC444 aux-stream policy, validates the result, and on success applies it
      * to that connection's own sessions only - it never touches layout ownership. \a first: this is
