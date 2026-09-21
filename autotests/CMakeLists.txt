@@ -133,6 +133,11 @@ target_include_directories(ConsoleWorkerSessionTest PRIVATE ${CMAKE_SOURCE_DIR}/
 target_link_libraries(ConsoleWorkerSessionTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
 add_test(NAME ConsoleWorkerSessionTest COMMAND ConsoleWorkerSessionTest)
 
+add_executable(RdpAudioPriorityTest RdpAudioPriorityTest.cpp)
+target_include_directories(RdpAudioPriorityTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(RdpAudioPriorityTest PRIVATE Qt6::Test Qt6::Core KRdp)
+add_test(NAME RdpAudioPriorityTest COMMAND RdpAudioPriorityTest)
+
 add_executable(PipeWireAudioRoutingTest PipeWireAudioRoutingTest.cpp)
 target_include_directories(PipeWireAudioRoutingTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(PipeWireAudioRoutingTest PRIVATE Qt6::Test Qt6::Core)

@@ -140,6 +140,7 @@ public:
     void setMediaPolicy(bool remoteAudioPlayback, bool microphone, bool camera, bool silenceHostAudio = false);
     void setAudioPriority(bool enabled);
     void setAudioPriorityDefault(bool enabled);
+    void clearAudioPriorityOverride();
     bool audioPriorityActive() const;
     /** Select PCM supplied by a session worker instead of this process's PipeWire graph. */
     void setExternalAudioPlayback(bool enabled);

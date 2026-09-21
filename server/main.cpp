@@ -338,6 +338,7 @@ int main(int argc, char **argv)
     const auto quality = parserValueWithDefault(u"quality", config->quality());
     controller.setQuality(quality);
     controller.setAdaptiveQuality(config->adaptiveQuality());
+    controller.setAudioPriorityDefault(config->preferAudioQuality());
     controller.setCodecPreference(codecPreferenceFrom(config->codec()));
     controller.setChromaPolicyDefaults(chromaPolicyFrom(config));
     controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
@@ -382,6 +383,7 @@ int main(int argc, char **argv)
         }
 
         controller.setAdaptiveQuality(config->adaptiveQuality());
+        controller.setAudioPriorityDefault(config->preferAudioQuality());
         controller.setCodecPreference(codecPreferenceFrom(config->codec()));
         const auto chromaPolicy = chromaPolicyFrom(config);
         controller.setChromaPolicyDefaults(chromaPolicy);

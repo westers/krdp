@@ -40,6 +40,7 @@ public:
     explicit ConsoleHostController(Server *server, WorkerLauncher launchWorker, QString runtimeDirectory, QObject *parent = nullptr);
     ~ConsoleHostController() override;
     void start();
+    void setAudioPriorityDefault(bool enabled);
     void refreshSeat();
     void workerExited(const QString &socketName);
 
@@ -74,6 +75,7 @@ private:
     QTimer m_seatPoll;
     std::vector<std::unique_ptr<Client>> m_clients;
     bool m_inputEnabled = false;
+    bool m_audioPriorityDefault = false;
     ConsoleControl m_control;
     ConsoleControl::Id m_nextClientId = 0;
     bool m_mediaConfigured = false;

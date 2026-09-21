@@ -752,6 +752,11 @@ void RdpConnection::setAudioPriorityDefault(bool enabled)
     d->audioPriorityDefault.store(enabled);
 }
 
+void RdpConnection::clearAudioPriorityOverride()
+{
+    d->audioPriorityOverride.store(-1);
+}
+
 bool RdpConnection::audioPriorityActive() const
 {
     const int override = d->audioPriorityOverride.load();

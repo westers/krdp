@@ -470,8 +470,18 @@ void ConsoleHostController::syncControlState()
             // no previous ownership period may carry a latent shared policy.
             client->connection->setAudioPriority(false);
             client->connection->videoStream()->setQualityCap(80);
+            client->connection->clearAudioPriorityOverride();
+            client->connection->setAudioPriorityDefault(m_audioPriorityDefault && m_control.ownsControl(client->id));
             client->videoQuality = 80;
         }
+    }
+}
+
+void ConsoleHostController::setAudioPriorityDefault(bool enabled)
+{
+    m_audioPriorityDefault = enabled;
+    for (const auto &client : m_clients) {
+        client->connection->setAudioPriorityDefault(enabled && m_control.ownsControl(client->id));
     }
 }
 

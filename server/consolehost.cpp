@@ -28,7 +28,8 @@ int main(int argc, char **argv)
     const QCommandLineOption addressOption(QStringLiteral("address"), QStringLiteral("Listen address."), QStringLiteral("address"), QStringLiteral("0.0.0.0"));
     const QCommandLineOption portOption(QStringLiteral("port"), QStringLiteral("Listen port."), QStringLiteral("port"), QStringLiteral("3389"));
     const QCommandLineOption runtimeOption(QStringLiteral("runtime-directory"), QStringLiteral("Host-owned worker socket directory."), QStringLiteral("path"), QStringLiteral("/run/krdp-console"));
-    parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption});
+    const QCommandLineOption audioPriorityOption(QStringLiteral("prefer-audio-quality"), QStringLiteral("Default to audio-first congestion steering for the controlling client (live client overrides allowed)."));
+    parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption});
     parser.process(application);
 
     if (geteuid() != 0) {
@@ -58,6 +59,7 @@ int main(int argc, char **argv)
                                      parser.value(runtimeOption));
     QObject::connect(&launcher, &KRdp::ConsoleWorkerLauncher::workerExited,
                      &host, &KRdp::ConsoleHostController::workerExited, Qt::QueuedConnection);
+    host.setAudioPriorityDefault(parser.isSet(audioPriorityOption));
     if (!server.start()) {
         return 1;
     }

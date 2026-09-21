@@ -176,6 +176,7 @@ public:
     void releasePhysicalOutputs();
     void setQuality(const std::optional<int> &quality);
     void setAdaptiveQuality(bool enabled);
+    void setAudioPriorityDefault(bool enabled);
     void setCodecPreference(KRdp::CodecPreference preference);
     KRdp::CodecPreference codecPreference() const;
     /**
@@ -377,6 +378,7 @@ private:
     std::optional<int> m_monitorIndex;
     std::optional<int> m_quality;
     bool m_adaptiveQuality = true;
+    bool m_audioPriorityDefault = false;
     KRdp::CodecPreference m_codecPreference = KRdp::CodecPreference::Auto;
     // AVC444 aux-stream timing default (OPT-045b, design §10 A10.2): applied to every new
     // connection's sessions; a client's own KRDPCTL `chroma` can override it for that connection.

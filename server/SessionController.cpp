@@ -1511,6 +1511,16 @@ void SessionController::setAdaptiveQuality(bool enabled)
     qInfo() << "Applied runtime adaptive quality update:" << m_adaptiveQuality << "active sessions:" << m_wrappers.size() << "port:" << m_server->port();
 }
 
+void SessionController::setAudioPriorityDefault(bool enabled)
+{
+    m_audioPriorityDefault = enabled;
+    for (const auto &wrapper : m_wrappers) {
+        if (wrapper && wrapper->connection) {
+            wrapper->connection->setAudioPriorityDefault(enabled);
+        }
+    }
+}
+
 void SessionController::setCodecPreference(KRdp::CodecPreference preference)
 {
     if (m_codecPreference == preference) {
@@ -2203,6 +2213,7 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
         newConnection->videoStream()->setQualityCap(quint8(m_quality.value()));
     }
     newConnection->videoStream()->setAdaptiveQuality(m_adaptiveQuality);
+    newConnection->setAudioPriorityDefault(m_audioPriorityDefault);
 
     connect(wrapper.get(), &SessionWrapper::connectionDestroyed, this, [this](SessionWrapper *wrapper) {
         const QString id = wrapper->controlId;

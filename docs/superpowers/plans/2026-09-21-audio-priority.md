@@ -76,8 +76,16 @@ priority/quality state when ownership changes. Console baseline stays80 when
 priority is off. Resetting an explicitly fixed-quality stream restores its cap;
 normal adaptive streams instead continue their gradual recovery.
 
-Still pending: configuration-file plumbing for the default, capability discovery,
-client persistence/live correlated dispatch and truthful UI, runtime congestion
+Default plumbing now uses `[General] PreferAudioQuality=false` in the desktop
+server's krdpserverrc (startup and config reload); the standalone console host,
+which has no user-config loader, accepts `--prefer-audio-quality` in its service
+command. Neither requires changing the installed config for tests. Client
+overrides survive default changes, and a console ownership change clears the
+old override before applying the default to only the new controller.
+
+Capability discovery and client persistence/live correlated dispatch/status UI
+are implemented. Isolated Buzz native GUI/persistence acceptance passed; see
+the client settings-ui-regression document. Still pending: runtime congestion
 and audio-delivery proof (including microphone), and packaging. The server reply
 acknowledges policy acceptance, not a measured latency/quality improvement or
 completion of an asynchronous encoder restart. No live deployment performed.
