@@ -223,6 +223,7 @@ private:
         releaseInput();
         m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalTakeover));
         m_control.active = false; // Gate immediately, before the host's acknowledgement.
+        m_session.setVideoQuality(80);
         m_resize.setControl(m_control);
         m_reclaimAction.setEnabled(false);
         m_takeover.latch();
@@ -238,6 +239,7 @@ private:
             if (const auto control = ConsoleWorkerWire::controlState(*record)) {
                 if (*control != m_control) {
                     releaseInput();
+                    m_session.setVideoQuality(80);
                     m_control = *control;
                     m_resize.setControl(*control);
                     m_reclaimAction.setEnabled(control->active);
@@ -251,6 +253,12 @@ private:
             if (record->kind == ConsoleWorkerWire::Kind::Stop && record->payload.isEmpty()) {
                 shutdown(0);
                 return;
+            }
+            if (const auto quality = ConsoleWorkerWire::videoQuality(*record)) {
+                if (ConsoleWorkerWire::mayApplyQuality(*quality, m_control)) {
+                    m_session.setVideoQuality(quality->quality);
+                }
+                continue;
             }
             if (const auto request = ConsoleWorkerWire::resize(*record)) {
                 releaseInput();

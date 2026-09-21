@@ -41,6 +41,7 @@ enum class Kind : quint8 {
     LocalTakeover,
     Resize,
     ResizeResult,
+    VideoQuality,
 };
 
 struct Record {
@@ -122,6 +123,42 @@ struct ControlState {
     bool active = false;
     bool operator==(const ControlState &) const = default;
 };
+
+struct VideoQuality {
+    quint64 generation = 0;
+    quint8 quality = 80;
+    bool operator==(const VideoQuality &) const = default;
+};
+
+inline QByteArray frame(const VideoQuality &quality)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << quality.generation << quality.quality;
+    return frame(Kind::VideoQuality, payload);
+}
+
+inline std::optional<VideoQuality> videoQuality(const Record &record)
+{
+    if (record.kind != Kind::VideoQuality || record.payload.size() != 9) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    VideoQuality quality;
+    stream >> quality.generation >> quality.quality;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !quality.generation || quality.quality < 10 || quality.quality > 100) {
+        return std::nullopt;
+    }
+    return quality;
+}
+
+inline bool mayApplyQuality(const VideoQuality &quality, const ControlState &control)
+{
+    return control.active && control.generation != 0 && quality.generation == control.generation
+        && quality.quality >= 10 && quality.quality <= 100;
+}
 
 inline QByteArray frame(const ControlState &state, Kind kind = Kind::ControlState)
 {
@@ -420,7 +457,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::ResizeResult)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::VideoQuality)) {
             ++m_invalid;
             return std::nullopt;
         }

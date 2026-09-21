@@ -121,6 +121,14 @@ bool ConsoleWorkerEndpoint::resize(const ConsoleWorkerWire::Resize &request)
     return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
 }
 
+bool ConsoleWorkerEndpoint::setVideoQuality(const ConsoleWorkerWire::VideoQuality &quality)
+{
+    if (!m_ready || !m_worker || !quality.generation || quality.quality < 10 || quality.quality > 100) {
+        return false;
+    }
+    return m_worker->write(ConsoleWorkerWire::frame(quality)) >= 0;
+}
+
 void ConsoleWorkerEndpoint::acceptConnection()
 {
     QLocalSocket *candidate = m_server->nextPendingConnection();

@@ -42,6 +42,7 @@ public:
     void sendInput(const ConsoleWorkerWire::Input &input);
     void setMedia(const ConsoleWorkerWire::Media &media);
     void setControlState(const ConsoleWorkerWire::ControlState &state);
+    bool setVideoQuality(const ConsoleWorkerWire::VideoQuality &quality);
     bool resize(const ConsoleWorkerWire::Resize &request);
 
 Q_SIGNALS:

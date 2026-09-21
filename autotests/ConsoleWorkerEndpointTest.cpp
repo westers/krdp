@@ -58,6 +58,7 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QTest::qWait(20);
     QCOMPARE(ready, 0);
     QVERIFY(!endpoint.ready());
+    QVERIFY(!endpoint.setVideoQuality({42, 60}));
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(ready, 1);
@@ -72,6 +73,15 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QVERIFY(control);
     QCOMPARE(control->generation, quint64(42));
     QVERIFY(control->active);
+
+    QVERIFY(!endpoint.setVideoQuality({0, 60}));
+    QVERIFY(!endpoint.setVideoQuality({42, 101}));
+    QVERIFY(endpoint.setVideoQuality({42, 60}));
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    brokerMessages.feed(worker.readAll());
+    const auto qualityRecord = brokerMessages.next();
+    QVERIFY(qualityRecord);
+    QCOMPARE(ConsoleWorkerWire::videoQuality(*qualityRecord), std::optional<ConsoleWorkerWire::VideoQuality>({42, 60}));
 
     QVERIFY(endpoint.resize(resize));
     QTRY_VERIFY(worker.bytesAvailable() > 0);

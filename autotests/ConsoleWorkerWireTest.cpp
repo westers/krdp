@@ -22,7 +22,35 @@ private Q_SLOTS:
     void roundTripsControlGeneration();
     void roundTripsResizeAndRejectsMalformedRequests();
     void rejectsOversizedRecord();
+    void videoQualityIsBoundedAndGenerationScoped();
 };
+
+void ConsoleWorkerWireTest::videoQualityIsBoundedAndGenerationScoped()
+{
+    Deframer reader;
+    const VideoQuality request{42, 60};
+    reader.feed(frame(request));
+    const auto record = reader.next();
+    QVERIFY(record);
+    QCOMPARE(videoQuality(*record), std::optional<VideoQuality>(request));
+    QVERIFY(mayApplyQuality(request, {42, true}));
+    QVERIFY(!mayApplyQuality(request, {41, true}));
+    QVERIFY(!mayApplyQuality(request, {42, false}));
+    QVERIFY(!mayApplyQuality({0, 60}, {0, true}));
+    auto invalid = *record;
+    invalid.payload.chop(1);
+    QVERIFY(!videoQuality(invalid));
+    invalid = *record;
+    invalid.payload.append('x');
+    QVERIFY(!videoQuality(invalid));
+    for (const auto bad : {VideoQuality{0, 60}, VideoQuality{42, 9}, VideoQuality{42, 101}}) {
+        reader.feed(frame(bad));
+        const auto malformed = reader.next();
+        QVERIFY(malformed);
+        QVERIFY(!videoQuality(*malformed));
+        QVERIFY(!mayApplyQuality(bad, {42, true}));
+    }
+}
 
 void ConsoleWorkerWireTest::roundTripsResizeAndRejectsMalformedRequests()
 {
