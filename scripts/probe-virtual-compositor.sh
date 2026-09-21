@@ -16,6 +16,12 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     mkdir "$probe_runtime/config-defaults"
     ln -s /etc/xdg/menus "$probe_runtime/config-defaults/menus"
     echo "Headless probe evidence: $probe_runtime"
+    apparmor_query=()
+    if [[ -e /sys/kernel/security/apparmor/.access ]]; then
+        # This world-writable kernel interface accepts permission QUERIES,
+        # not profile updates. Preserve D-Bus mediation in a read-only root.
+        apparmor_query=(--bind /sys/kernel/security/apparmor/.access /sys/kernel/security/apparmor/.access)
+    fi
     # Retain the real HOME identity, but no existing display, session bus, Qt
     # reconnect, session id, manager notification, or inherited plugin settings.
     exec env -i PATH=/usr/bin:/bin HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" \
@@ -25,7 +31,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         XDG_DATA_HOME="$probe_runtime/data" XDG_DATA_DIRS=/usr/local/share:/usr/share \
         XDG_SESSION_TYPE=wayland LIBGL_ALWAYS_SOFTWARE=1 \
         timeout 45 bwrap --unshare-pid --unshare-ipc --die-with-parent --new-session \
-        --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run \
+        --ro-bind / / "${apparmor_query[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run \
         --bind "$probe_runtime" "$probe_runtime" \
         dbus-run-session --config-file="$repo_path/server/virtual-session-bus.conf" \
         -- bash "$script_path" --inside-private-bus "$probe_mode"
