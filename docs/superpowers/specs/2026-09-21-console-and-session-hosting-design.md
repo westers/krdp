@@ -64,6 +64,15 @@ additional authenticated connections are viewers unless the current controller
 releases control. Local mouse/keyboard activity remains authoritative and can
 take over, matching the existing virtual-output safety rule.
 
+Implementation progress (2026-09-21): the worker compares capture cursor metadata
+against injected remote MouseMove events using the existing TakeoverDetector.
+Its report carries the current controller generation; the broker ignores stale
+reports after ownership changes. The worker immediately gates input and releases
+held keys/buttons; the broker demotes the controller to viewer and restores host
+audio routing. This is inferred pointer activity, not raw-device identification:
+application pointer warps can also trigger it. A local keyboard takeover path and
+real physical-device acceptance remain required.
+
 ## Virtual sessions (after console mode)
 
 The virtual-session host uses the same stable transport and adapter API, but
