@@ -32,7 +32,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         XDG_SESSION_TYPE=wayland LIBGL_ALWAYS_SOFTWARE=1 \
         __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
         __GLX_VENDOR_LIBRARY_NAME=mesa \
-        timeout 45 bwrap --unshare-pid --unshare-ipc --die-with-parent --new-session \
+        timeout 80 bwrap --unshare-pid --unshare-ipc --die-with-parent --new-session \
         --ro-bind / / "${apparmor_query[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run \
         --perms 01777 --dir /tmp/.X11-unix \
         --bind "$probe_runtime" "$probe_runtime" \
@@ -121,8 +121,10 @@ if [[ "${2:-}" == --plasma ]]; then
         >"$XDG_RUNTIME_DIR/desktop-count.txt"
     grep -Eq '[1-9]' "$XDG_RUNTIME_DIR/desktop-count.txt"
     echo 'Plasma shell owns its private bus name and reports a desktop'
+    dbus-monitor --session "destination='org.kde.KWin.ScreenShot2'" \
+        >"$XDG_RUNTIME_DIR/screenshot-bus.log" 2>&1 &
     env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
-        timeout 12 spectacle --background --nonotify --fullscreen \
+        timeout 35 spectacle --background --nonotify --fullscreen \
         --output "$XDG_RUNTIME_DIR/desktop.png" >"$XDG_RUNTIME_DIR/screenshot.log" 2>&1
     [[ -s "$XDG_RUNTIME_DIR/desktop.png" ]]
 fi
