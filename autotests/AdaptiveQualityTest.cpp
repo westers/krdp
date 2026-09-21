@@ -14,6 +14,18 @@ private:
     }
 
 private Q_SLOTS:
+    void audioPriorityIncludesMicrophoneOnly()
+    {
+        QVERIFY(audioPriorityEnabled(true, false, true));
+        QVERIFY(audioPriorityEnabled(true, true, false));
+        QVERIFY(audioPriorityEnabled(true, true, true));
+        QVERIFY(!audioPriorityEnabled(true, false, false));
+        QVERIFY(!audioPriorityEnabled(false, false, true));
+        QVERIFY(!audioPriorityEnabled(false, true, false));
+        QVERIFY(!audioPriorityEnabled(false, true, true));
+        QVERIFY(!audioPriorityEnabled(false, false, false));
+    }
+
     void audioPriorityPreservesClearLinkCap()
     {
         auto in = clear(80);

@@ -13,7 +13,8 @@ audio codec/bitrate adaptation, which was discussed but is not implemented.
 - Explicit capability and acknowledgement. Unsupported/older servers must be
   shown as unsupported, not as having applied the policy. Invalid records must
   not partially change media routing or permissions.
-- Effective only when audio playback is enabled. Under existing measured RTT
+- Effective when playback OR microphone redirection is enabled (Steve explicitly
+  includes mic-only sessions). Under existing measured RTT
   or sustained video-backlog pressure, preserve the negotiated audio format
   and reduce video more aggressively. Do not permanently lower video quality
   on a clear link or interpret high stable WAN RTT as congestion.
@@ -25,6 +26,11 @@ audio codec/bitrate adaptation, which was discussed but is not implemented.
 - This is congestion prioritization, not a hard audio latency guarantee:
   audio/video share the RDP transport and already-queued TCP bytes cannot be
   preempted. Keep queues bounded and test actual audio arrivals, not only QP.
+- Protect both playback and microphone without changing their negotiated formats.
+  Downstream video reduction alone is not proof of microphone-uplink protection:
+  test asymmetric uplink pressure and camera coexistence separately. Do not
+  advertise mic support in physical-console mode until its AUDIN/worker path is
+  actually implemented (it currently explicitly rejects microphone requests).
 
 ## Integration and acceptance
 
@@ -44,6 +50,9 @@ audio codec/bitrate adaptation, which was discussed but is not implemented.
    against isolated Sol. Use a known audio source and controlled pressure to
    compare delivery gaps and video decisions. Confirm no reconnect, first audio
    remains intact, disabled behavior restores, and unsupported-server feedback.
+   Cover playback-only, mic-only and duplex sessions; confirm voice onset and
+   quiet speech are preserved. An absent audio direction must not prevent the
+   other direction receiving priority. No-audio sessions keep normal steering.
 6. Matching packages/docs after runtime acceptance. Do not deploy a cosmetic
    toggle before both encoder paths actually honor it.
 

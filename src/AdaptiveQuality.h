@@ -13,6 +13,11 @@ constexpr int MinQuality = 10;
 constexpr int StepUp = 5;
 constexpr int StepDown = 10;
 
+inline bool audioPriorityEnabled(bool requested, bool playback, bool microphone)
+{
+    return requested && (playback || microphone);
+}
+
 // A rising RTT counts as congestion only once it is both a real gap above the
 // minimum (not sub-millisecond jitter) and proportionally large (>= 1.5x).
 constexpr auto CongestionRttMargin = std::chrono::milliseconds(5);
