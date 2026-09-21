@@ -209,6 +209,9 @@ private:
     {
         m_session.setActiveStream(-1); // Physical console: capture the session's complete workspace.
         m_session.setVideoCodec(VideoCodec::Avc420);
+        // Match the desktop server's quality baseline. Leaving this unset
+        // selects libx264's CRF35 fallback, visibly damaging desktop text.
+        m_session.setVideoQuality(80);
         m_session.setStreamingEnabled(true);
     }
 

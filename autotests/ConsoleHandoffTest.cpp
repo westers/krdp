@@ -30,7 +30,24 @@ private Q_SLOTS:
     void startsUserWhenGreeterStoppedBeforeSeatPoll();
     void retriesUnchangedTargetAfterWorkerStops();
     void ignoresAStaleWorkerReady();
+    void logoutWaitsForOldWorkerAcrossSeatGap();
 };
+
+void ConsoleHandoffTest::logoutWaitsForOldWorkerAcrossSeatGap()
+{
+    ConsoleHandoff::State state;
+    const auto oldTarget = ConsoleHandoff::targetFor({user()});
+    const auto newTarget = ConsoleHandoff::targetFor({greeter()});
+    state.select(oldTarget);
+    state.workerReady(oldTarget);
+    QVERIFY(state.select({}).stopWorker);
+    QVERIFY(state.select(newTarget).empty());
+    QVERIFY(!state.inputEnabled());
+    const auto start = state.workerStopped();
+    QVERIFY(start.startWorker);
+    QCOMPARE(start.target, newTarget);
+    QVERIFY(state.workerReady(newTarget).grantInput);
+}
 
 void ConsoleHandoffTest::waitsForWorkerBeforeGrantingInput()
 {

@@ -119,6 +119,11 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     // These descriptor numbers belong to the process whose environment we
     // inspected. The worker must open a fresh connection by display name.
     environment.remove(QStringLiteral("WAYLAND_SOCKET"));
+    // A worker belongs to one compositor for its entire lifetime. Plasma's
+    // reconnect mode can block Qt during logout, preventing Stop/socket-close
+    // from reaching our event loop and leaving the broker draining forever.
+    // Qt tests presence, so setting this to "0" would still enable it.
+    environment.remove(QStringLiteral("QT_WAYLAND_RECONNECT"));
     if (!libraryPath.isEmpty()) {
         environment.insert(QStringLiteral("LD_LIBRARY_PATH"), libraryPath);
     }

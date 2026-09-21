@@ -69,6 +69,9 @@ public:
             return {};
         }
         m_wanted = wanted;
+        if (m_draining) {
+            return {}; // Remember the latest seat, but never overlap workers.
+        }
         if (m_running.valid() || m_starting.valid()) {
             m_running = {};
             m_starting = {};
