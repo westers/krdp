@@ -35,6 +35,14 @@ target_include_directories(TakeoverDetectorTest PRIVATE ${CMAKE_SOURCE_DIR}/serv
 target_link_libraries(TakeoverDetectorTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME TakeoverDetectorTest COMMAND TakeoverDetectorTest)
 
+# The physical-console host reads logind asynchronously, but its adapter
+# selection is deliberately pure: test the greeter -> seat0-user handoff
+# without requiring a display manager in the test environment.
+add_executable(ConsoleSeatTest ConsoleSeatTest.cpp)
+target_include_directories(ConsoleSeatTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleSeatTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME ConsoleSeatTest COMMAND ConsoleSeatTest)
+
 add_executable(ClipboardTextTest ClipboardTextTest.cpp)
 target_include_directories(ClipboardTextTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ClipboardTextTest PRIVATE Qt6::Test Qt6::Core)
