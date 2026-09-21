@@ -85,6 +85,8 @@ for attempt in {1..100}; do
 done
 [[ "$ready" == true ]]
 [[ -S "$XDG_RUNTIME_DIR/wayland-0" ]]
+gdbus call --session --dest org.kde.KWin --object-path /KWin \
+    --method org.kde.KWin.supportInformation >"$XDG_RUNTIME_DIR/kwin-support.txt"
 if [[ "${2:-}" == --plasma ]]; then
     # The wrapper was started before plasma_session could receive its environment
     # update. Obtain only the display and authority PATH from this private child;
