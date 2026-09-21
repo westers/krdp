@@ -36,6 +36,10 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>Video codec: auto (AVC444v2/AVC444 when the client supports it, else AVC420), avc420 (always), avc444 (auto, warning when the client cannot)</label>
       <default>auto</default>
     </entry>
+    <entry name="PreferAudioQuality" type="Bool">
+      <label>Prefer playback and microphone quality and latency over video quality under congestion; clients may override this live</label>
+      <default>false</default>
+    </entry>
     <entry name="Avc444MotionGapMs" type="Int">
       <label>AVC444: minimum quiet time (ms) since the last frame before a frame carries the chroma (aux) picture</label>
       <default>100</default>
