@@ -9,6 +9,7 @@
 #include <pwd.h>
 #include <unistd.h>
 
+#include <QDir>
 #include <QFile>
 #include <QDebug>
 #include <QProcess>
@@ -19,15 +20,10 @@ namespace KRdp
 {
 namespace
 {
-QProcessEnvironment environmentFor(const ConsoleSeat::Session &session, QString *error)
+QProcessEnvironment readProcessEnvironment(pid_t pid)
 {
-    if (session.leader == 0) {
-        *error = QStringLiteral("logind session has no leader process");
-        return {};
-    }
-    QFile file(QStringLiteral("/proc/%1/environ").arg(session.leader));
+    QFile file(QStringLiteral("/proc/%1/environ").arg(pid));
     if (!file.open(QIODevice::ReadOnly)) {
-        *error = QStringLiteral("cannot read session-leader environment");
         return {};
     }
     QProcessEnvironment environment;
@@ -37,14 +33,47 @@ QProcessEnvironment environmentFor(const ConsoleSeat::Session &session, QString 
             environment.insert(QString::fromLocal8Bit(entry.first(equals)), QString::fromLocal8Bit(entry.mid(equals + 1)));
         }
     }
+    return environment;
+}
+
+bool isUsableWaylandEnvironment(const QProcessEnvironment &environment, const ConsoleSeat::Session &session)
+{
     const QString runtime = environment.value(QStringLiteral("XDG_RUNTIME_DIR"));
     const QString expectedRuntime = QStringLiteral("/run/user/%1").arg(session.uid);
-    if (runtime != expectedRuntime || environment.value(QStringLiteral("WAYLAND_DISPLAY")).isEmpty()
-        || environment.value(QStringLiteral("DBUS_SESSION_BUS_ADDRESS")).isEmpty()) {
-        *error = QStringLiteral("session leader lacks a usable Wayland environment");
-        return {};
+    return runtime == expectedRuntime && !environment.value(QStringLiteral("WAYLAND_DISPLAY")).isEmpty()
+        && !environment.value(QStringLiteral("DBUS_SESSION_BUS_ADDRESS")).isEmpty();
+}
+
+bool belongsToSession(pid_t pid, const ConsoleSeat::Session &session)
+{
+    const QString scope = QStringLiteral("session-%1.scope").arg(session.id);
+    QFile cgroup(QStringLiteral("/proc/%1/cgroup").arg(pid));
+    return cgroup.open(QIODevice::ReadOnly) && cgroup.readAll().contains(scope.toUtf8());
+}
+
+QProcessEnvironment environmentFor(const ConsoleSeat::Session &session, QString *error)
+{
+    if (session.leader != 0) {
+        const auto environment = readProcessEnvironment(session.leader);
+        if (isUsableWaylandEnvironment(environment, session)) {
+            return environment;
+        }
     }
-    return environment;
+
+    const auto processes = QDir(QStringLiteral("/proc")).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const auto &process : processes) {
+        bool ok = false;
+        const auto pid = process.toLongLong(&ok);
+        if (!ok || pid <= 0 || !belongsToSession(pid, session)) {
+            continue;
+        }
+        const auto environment = readProcessEnvironment(pid);
+        if (isUsableWaylandEnvironment(environment, session)) {
+            return environment;
+        }
+    }
+    *error = QStringLiteral("no process in the logind session has a usable Wayland environment");
+    return {};
 }
 }
 
