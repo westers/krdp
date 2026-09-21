@@ -4,6 +4,7 @@
 #pragma once
 
 #include <optional>
+#include <cmath>
 #include <utility>
 
 #include <QByteArray>
@@ -16,6 +17,7 @@
 #include <QSize>
 #include <QString>
 #include <QVector>
+#include <QSet>
 
 #include "VideoFrame.h"
 
@@ -34,6 +36,7 @@ enum class Kind : quint8 {
     Media,
     Audio,
     Error,
+    Outputs,
 };
 
 struct Record {
@@ -43,6 +46,60 @@ struct Record {
 };
 
 inline QByteArray frame(Kind kind, const QByteArray &payload = {});
+
+struct Output {
+    QString name;
+    QRect geometry; // Logical coordinates, normalized to the captured workspace.
+    double scale = 1;
+    bool primary = false;
+    bool operator==(const Output &) const = default;
+};
+
+struct Outputs {
+    QVector<Output> monitors;
+    bool operator==(const Outputs &) const = default;
+};
+
+inline QByteArray frame(const Outputs &outputs)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << quint32(outputs.monitors.size());
+    for (const auto &output : outputs.monitors) {
+        stream << output.name << output.geometry << output.scale << output.primary;
+    }
+    return frame(Kind::Outputs, payload);
+}
+
+inline std::optional<Outputs> outputs(const Record &record)
+{
+    if (record.kind != Kind::Outputs || record.payload.size() > 32768) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    quint32 count = 0;
+    stream >> count;
+    if (!count || count > 32) {
+        return std::nullopt;
+    }
+    Outputs result;
+    QSet<QString> names;
+    for (quint32 i = 0; i < count; ++i) {
+        Output output;
+        stream >> output.name >> output.geometry >> output.scale >> output.primary;
+        if (stream.status() != QDataStream::Ok || output.name.isEmpty() || output.name.size() > 256 || names.contains(output.name)
+            || output.geometry.x() < 0 || output.geometry.y() < 0 || output.geometry.x() > 32768 || output.geometry.y() > 32768
+            || output.geometry.width() <= 0 || output.geometry.height() <= 0 || output.geometry.width() > 32768 || output.geometry.height() > 32768
+            || !std::isfinite(output.scale) || output.scale < 0.25 || output.scale > 8) {
+            return std::nullopt;
+        }
+        names.insert(output.name);
+        result.monitors.append(output);
+    }
+    return stream.atEnd() ? std::optional<Outputs>(result) : std::nullopt;
+}
 
 /** Authenticates one worker to the broker endpoint created for its logind session. */
 struct Hello {
@@ -266,7 +323,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::Error)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::Outputs)) {
             ++m_invalid;
             return std::nullopt;
         }

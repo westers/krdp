@@ -30,6 +30,11 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
 
     int ready = 0;
     int frames = 0;
+    int layouts = 0;
+    connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&layouts](const auto &outputs) {
+        QCOMPARE(outputs.monitors.first().name, QStringLiteral("DP-1"));
+        ++layouts;
+    });
     VideoFrame received;
     connect(&endpoint, &ConsoleWorkerEndpoint::workerReady, this, [&ready](const auto &) { ++ready; });
     connect(&endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [&frames, &received](const VideoFrame &frame) {
@@ -48,6 +53,10 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(ready, 1);
+
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Outputs{{{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}}}));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(layouts, 1);
 
     VideoFrame sent;
     sent.size = QSize(1280, 720);

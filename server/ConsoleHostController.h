@@ -49,6 +49,7 @@ private:
         std::unique_ptr<ConsoleWorkerSession> session;
         QList<QMetaObject::Connection> connections;
         QJsonObject pendingMedia;
+        bool wantsLayout = false;
     };
 
     void apply(const ConsoleHandoff::Actions &actions);
@@ -58,6 +59,7 @@ private:
     void addClient(RdpConnection *connection);
     void updateMedia();
     void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
+    void sendLayouts();
 
     Server *m_server = nullptr;
     WorkerLauncher m_launchWorker;
@@ -71,5 +73,6 @@ private:
     ConsoleControl::Id m_nextClientId = 0;
     bool m_mediaConfigured = false;
     ConsoleWorkerWire::Media m_media;
+    ConsoleWorkerWire::Outputs m_outputs;
 };
 }

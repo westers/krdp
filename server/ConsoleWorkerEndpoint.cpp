@@ -152,6 +152,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT inputReceived(*input);
         } else if (const auto audio = ConsoleWorkerWire::audio(*record)) {
             Q_EMIT audioReceived(*audio);
+        } else if (const auto outputs = ConsoleWorkerWire::outputs(*record)) {
+            Q_EMIT outputsReceived(*outputs);
         } else {
             fail(QStringLiteral("unexpected worker record"));
             return;

@@ -17,6 +17,8 @@ private Q_SLOTS:
     void roundTripsEncodedFrame();
     void roundTripsNormalizedInput();
     void roundTripsMediaAndPcm();
+    void roundTripsOutputs();
+    void rejectsInvalidOutputs();
     void rejectsOversizedRecord();
 };
 
@@ -91,6 +93,40 @@ void ConsoleWorkerWireTest::rejectsOversizedRecord()
     deframer.feed(oversized);
     QVERIFY(!deframer.next());
     QVERIFY(deframer.overflowed());
+}
+
+void ConsoleWorkerWireTest::roundTripsOutputs()
+{
+    const Outputs sent{{{QStringLiteral("DP-1"), QRect(0, 0, 1920, 1080), 1, true},
+                        {QStringLiteral("HDMI-A-1"), QRect(1920, 0, 1280, 720), 1.5, false}}};
+    Deframer deframer;
+    deframer.feed(frame(sent));
+    const auto record = deframer.next();
+    QVERIFY(record);
+    QCOMPARE(outputs(*record), std::optional<Outputs>(sent));
+    Record truncated = *record;
+    truncated.payload.chop(1);
+    QVERIFY(!outputs(truncated));
+}
+
+void ConsoleWorkerWireTest::rejectsInvalidOutputs()
+{
+    const auto rejected = [](const Outputs &value) {
+        Deframer deframer;
+        deframer.feed(frame(value));
+        const auto record = deframer.next();
+        return record && !outputs(*record);
+    };
+    QVERIFY(rejected({}));
+    Outputs value{{{QStringLiteral("DP-1"), QRect(0, 0, 1920, 1080), 1, true}}};
+    value.monitors.append(value.monitors.first());
+    QVERIFY(rejected(value));
+    value.monitors.removeLast();
+    value.monitors[0].scale = std::numeric_limits<double>::quiet_NaN();
+    QVERIFY(rejected(value));
+    value.monitors[0].scale = 1;
+    value.monitors[0].geometry.setWidth(0);
+    QVERIFY(rejected(value));
 }
 
 QTEST_GUILESS_MAIN(ConsoleWorkerWireTest)

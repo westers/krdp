@@ -14,6 +14,7 @@
 #include <VideoStream.h>
 #include <VideoCodecSupport.h>
 #include <InputHandler.h>
+#include <LayoutControl.h>
 
 #include "ConsoleSeat.h"
 #include "ConsoleWorkerSession.h"
@@ -53,6 +54,10 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         for (const auto &client : m_clients) {
             client->connection->submitExternalAudio(audio.pcm);
         }
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [this](const ConsoleWorkerWire::Outputs &outputs) {
+        m_outputs = outputs;
+        sendLayouts();
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::protocolError, this, [this](const QString &message) {
         qWarning().noquote() << "Console worker protocol error:" << message;
@@ -122,6 +127,7 @@ void ConsoleHostController::apply(const ConsoleHandoff::Actions &actions)
 
 void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
 {
+    m_outputs = {}; // Never describe the prior greeter/user's outputs during handoff.
     if (!QDir().mkpath(m_runtimeDirectory)) {
         qWarning().noquote() << "Cannot create console runtime directory" << m_runtimeDirectory;
         return;
@@ -187,6 +193,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
             // Running is pre-authentication. Media preflight can also arrive
             // before Streaming; defer it without granting any authority.
             m_control.admit(id);
+            sendLayouts();
             for (const auto &client : m_clients) {
                 if (client->id == id && !client->pendingMedia.isEmpty()) {
                     const auto pending = std::exchange(client->pendingMedia, {});
@@ -204,7 +211,26 @@ void ConsoleHostController::addClient(RdpConnection *connection)
 
 void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record)
 {
-    if (record.value(QLatin1String("type")).toString() != QLatin1String("media")) {
+    const QString type = record.value(u"type"_s).toString();
+    if (type == u"query"_s || type == u"attach"_s || type == u"apply"_s) {
+        if (record.value(u"v"_s).toInt() != 1 || (type == u"attach"_s && record.value(u"target"_s).toString() != u"physical"_s)) {
+            connection->sendControlRecord(LayoutControl::errorRecord({u"invalid"_s, u"console attach requires v1 and target physical"_s}));
+            return;
+        }
+        for (const auto &client : m_clients) {
+            if (client->id == id) {
+                client->wantsLayout = true;
+            }
+        }
+        if (type == u"apply"_s) {
+            // This host does not implement monitor changes yet. Explicitly
+            // refuse them, then describe the existing physical desktop.
+            connection->sendControlRecord(LayoutControl::errorRecord({u"unsupported"_s, u"physical console monitor changes are not available yet; use attach"_s}));
+        }
+        sendLayouts();
+        return;
+    }
+    if (type != u"media"_s) {
         return;
     }
     if (!m_control.admitted(id)) {
@@ -250,6 +276,33 @@ void ConsoleHostController::removeClient(RdpConnection *connection)
     }
     std::erase_if(m_clients, [connection](const auto &client) { return client->connection == connection; });
     updateMedia();
+    sendLayouts();
+}
+
+void ConsoleHostController::sendLayouts()
+{
+    if (m_outputs.monitors.isEmpty() || !m_endpoint.ready()) {
+        return;
+    }
+    LayoutControl::Layout layout;
+    for (const auto &output : m_outputs.monitors) {
+        LayoutControl::HostMonitor monitor;
+        monitor.id = monitor.name = output.name;
+        monitor.kind = LayoutControl::Kind::Real;
+        monitor.size = output.geometry.size() * output.scale;
+        monitor.position = output.geometry.topLeft();
+        monitor.scale = output.scale;
+        monitor.primary = output.primary;
+        layout.monitors.append(monitor);
+    }
+    layout.owner = m_control.owner() ? QString::number(m_control.owner()) : QString();
+    layout.caps.cursorMetadata = false;
+    for (const auto &client : m_clients) {
+        if (client->wantsLayout && m_control.admitted(client->id)) {
+            layout.you = m_control.ownsControl(client->id) ? u"owner"_s : u"viewer"_s;
+            client->connection->sendControlRecord(LayoutControl::layoutRecord(layout));
+        }
+    }
 }
 
 void ConsoleHostController::updateMedia()

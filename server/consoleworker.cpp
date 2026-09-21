@@ -10,6 +10,7 @@
 #include <QKeyEvent>
 #include <QLocalSocket>
 #include <QMouseEvent>
+#include <QScreen>
 #include <QTimer>
 #include <QWheelEvent>
 
@@ -74,6 +75,28 @@ public:
         });
         connect(&m_session, &AbstractSession::frameReceived, this, [this](const VideoFrame &frame) {
             if (m_captureReady) {
+                // Use the same ordering and coordinates as the captured frame,
+                // not a root-side guess about the user's monitor setup.
+                const auto screens = qGuiApp->screens();
+                ConsoleWorkerWire::Outputs outputs;
+                QRect workspace;
+                for (const auto *screen : screens) {
+                    workspace = workspace.united(screen->geometry());
+                }
+                if (screens.size() == frame.monitors.size()) {
+                    for (qsizetype i = 0; i < screens.size(); ++i) {
+                        if (screens[i]->geometry().translated(-workspace.topLeft()) != frame.monitors[i].geometry) {
+                            outputs.monitors.clear();
+                            break; // Wait until capture and screen discovery agree after hotplug.
+                        }
+                        outputs.monitors.append({screens[i]->name(), frame.monitors[i].geometry,
+                                                 screens[i]->devicePixelRatio(), frame.monitors[i].primary});
+                    }
+                }
+                if (!outputs.monitors.isEmpty() && outputs != m_outputs) {
+                    m_outputs = outputs;
+                    m_socket.write(ConsoleWorkerWire::frame(outputs));
+                }
                 m_socket.write(ConsoleWorkerWire::frame(frame));
             }
         });
@@ -166,6 +189,7 @@ private:
     QTimer m_connectTimeout;
     QTimer m_audioTimer;
     bool m_captureReady = false;
+    ConsoleWorkerWire::Outputs m_outputs;
 };
 }
 

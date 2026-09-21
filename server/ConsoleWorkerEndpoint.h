@@ -48,6 +48,7 @@ Q_SIGNALS:
     void frameReceived(const KRdp::VideoFrame &frame);
     void inputReceived(const KRdp::ConsoleWorkerWire::Input &input);
     void audioReceived(const KRdp::ConsoleWorkerWire::Audio &audio);
+    void outputsReceived(const KRdp::ConsoleWorkerWire::Outputs &outputs);
     void protocolError(const QString &message);
 
 private:
