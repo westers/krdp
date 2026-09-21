@@ -158,6 +158,10 @@ void ConsoleHostController::addClient(RdpConnection *connection)
         }
     });
     client->session->setWorkerActive(m_inputEnabled);
+    client->connections.append(connect(connection->videoStream(), &VideoStream::keyFrameRequested,
+                                       &m_endpoint, [this](int) { m_endpoint.requestKeyFrame(); }, Qt::QueuedConnection));
+    client->connections.append(connect(connection->videoStream(), &VideoStream::enabledChanged,
+                                       &m_endpoint, [this]() { m_endpoint.requestKeyFrame(); }, Qt::QueuedConnection));
     client->connections.append(connect(client->session.get(), &AbstractSession::frameReceived, connection->videoStream(), &VideoStream::queueFrame));
     client->connections.append(connect(client->session.get(), &ConsoleWorkerSession::keyFrameRequested, &m_endpoint, &ConsoleWorkerEndpoint::requestKeyFrame));
     client->connections.append(connect(connection->inputHandler(), &InputHandler::inputEvent, client->session.get(), &AbstractSession::sendEvent));
