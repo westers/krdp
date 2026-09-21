@@ -134,6 +134,7 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     };
     auto process = std::make_unique<QProcess>();
     QProcess *raw = process.get();
+    process->setProcessChannelMode(QProcess::ForwardedErrorChannel);
     process->setProcessEnvironment(environment);
     process->setProgram(m_workerProgram);
     process->setArguments({QStringLiteral("--socket"), socketName, QStringLiteral("--session"), target.sessionId, QStringLiteral("--uid"), QString::number(target.uid), QStringLiteral("--token-fd"), QStringLiteral("3")});
@@ -147,6 +148,9 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     });
     connect(raw, &QProcess::errorOccurred, this, [raw](QProcess::ProcessError) {
         qWarning().noquote() << "Console worker launch error:" << raw->errorString();
+    });
+    connect(raw, &QProcess::finished, this, [raw](int exitCode, QProcess::ExitStatus status) {
+        qWarning().noquote() << "Console worker exited:" << exitCode << status << raw->errorString();
     });
     process->start();
     if (!process->waitForStarted(3000)) {
