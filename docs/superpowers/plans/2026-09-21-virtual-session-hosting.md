@@ -104,3 +104,10 @@ irrelevant kded hardware modules in the isolated profile: BlueDevil repeatedly
 reactivated obexd without the system bus, producing an activation loop during
 the bounded probe. Entire PID namespace exited; Sol greeter/KWin/host unchanged.
 Probe logs now go to the evidence directory rather than flooding SSH output.
+
+The disposable profile now sets kded5rc Module-bluedevil/autoload=false,
+plus Bolt, browser host-wrapper integration and Welcome Center startup off.
+Kded6 source still reads kded5rc for this setting; load-on-demand comes from
+plugin metadata, so these are autostart controls, not a security boundary.
+Source: https://github.com/KDE/kded/blob/master/src/kded.cpp
+Configuration parsing checked; runtime acceptance awaits the Xwayland decision.

@@ -1,0 +1,14 @@
+# kded6 still reads kded5rc (Kded::isModuleAutoloaded).
+# Disposable headless probe only; never copy into the physical user's config.
+# These suppress startup, not explicit on-demand module requests.
+[Module-bluedevil]
+autoload=false
+
+[Module-kded_bolt]
+autoload=false
+
+[Module-browserintegrationflatpakintegrator]
+autoload=false
+
+[Module-kded_plasma_welcome]
+autoload=false
