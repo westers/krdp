@@ -48,6 +48,7 @@ int main(int argc, char **argv)
     server.setTlsCertificate(std::filesystem::path(parser.value(certificateOption).toStdString()));
     server.setTlsCertificateKey(std::filesystem::path(parser.value(keyOption).toStdString()));
     server.setUsePAMAuthentication(true);
+    server.setAllowAnyPAMUser(true);
 
     KRdp::ConsoleWorkerLauncher launcher(parser.value(workerOption));
     KRdp::ConsoleHostController host(&server,

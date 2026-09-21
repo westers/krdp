@@ -1096,7 +1096,7 @@ bool RdpConnection::onPostConnect()
     bool authenticated = false;
     if (d->server->usePAMAuthentication()) {
         qCDebug(KRDP) << "Attempting authenticating user with PAM";
-        if (username == KUser().loginName() && pamAuthenticate(username, password) >= 0) {
+        if ((d->server->allowAnyPAMUser() || username == KUser().loginName()) && pamAuthenticate(username, password) >= 0) {
             qCDebug(KRDP) << "PAM authentication succeeded for user" << username;
             authenticated = true;
         }

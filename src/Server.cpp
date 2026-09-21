@@ -29,6 +29,7 @@ public:
 
     QList<User> users;
     bool usePamAuthentication = false;
+    bool allowAnyPamUser = false;
 
     std::filesystem::path tlsCertificate;
     std::filesystem::path tlsCertificateKey;
@@ -132,6 +133,16 @@ bool Server::usePAMAuthentication() const
 void Server::setUsePAMAuthentication(bool usePAM)
 {
     d->usePamAuthentication = usePAM;
+}
+
+bool Server::allowAnyPAMUser() const
+{
+    return d->allowAnyPamUser;
+}
+
+void Server::setAllowAnyPAMUser(bool allow)
+{
+    d->allowAnyPamUser = allow;
 }
 
 std::filesystem::path Server::tlsCertificate() const

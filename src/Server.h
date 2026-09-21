@@ -89,6 +89,8 @@ public:
      */
     bool usePAMAuthentication() const;
     void setUsePAMAuthentication(bool usePAM);
+    bool allowAnyPAMUser() const;
+    void setAllowAnyPAMUser(bool allow);
 
     /**
      * The path of a certificate file to use for encrypting communications.
