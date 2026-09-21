@@ -14,6 +14,49 @@ private:
     }
 
 private Q_SLOTS:
+    void audioPriorityPreservesClearLinkCap()
+    {
+        auto in = clear(80);
+        in.preferAudioQuality = true;
+        QCOMPARE(step(in).next, 80);
+        QVERIFY(!step(in).congested);
+        in.current = 60;
+        QCOMPARE(step(in).next, 62);
+        in.climbAllowed = false;
+        QCOMPARE(step(in).next, 60);
+    }
+
+    void audioPriorityPressureAndLiveDisable()
+    {
+        auto in = clear(80);
+        in.preferAudioQuality = true;
+        in.averageRtt = 20ms;
+        QCOMPARE(step(in).next, 60);
+        QVERIFY(step(in).congested);
+        in.preferAudioQuality = false;
+        QCOMPARE(step(in).next, 70);
+        in.preferAudioQuality = true;
+        in.averageRtt = in.minimumRtt;
+        in.backlogged = true;
+        QCOMPARE(step(in).next, 60);
+        in.current = 15;
+        QCOMPARE(step(in).next, MinQuality);
+    }
+
+    void audioPriorityShedsChromaAndQualityTogether()
+    {
+        auto in = clear(80);
+        in.preferAudioQuality = true;
+        in.chromaAvailable = true;
+        in.backlogged = true;
+        const auto result = step(in);
+        QVERIFY(!result.chromaEnabled);
+        QCOMPARE(result.next, 60);
+        in.preferAudioQuality = false;
+        QCOMPARE(step(in).next, 80);
+        QVERIFY(!step(in).chromaEnabled);
+    }
+
     void clearIntervalClimbsByStepUp()
     {
         const auto r = step(clear(60));

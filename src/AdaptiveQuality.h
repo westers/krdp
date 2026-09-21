@@ -61,6 +61,9 @@ struct Input {
     // It is the first thing shed under pressure and the last thing restored on a clear link.
     bool chromaAvailable = false;
     bool chromaEnabled = true;
+    // Audio-first steering trades video quality for transport headroom under
+    // pressure. It never changes the negotiated audio format or the clear-link cap.
+    bool preferAudioQuality = false;
 };
 
 struct Result {
@@ -91,12 +94,15 @@ inline Result step(const Input &in)
     if (congested || in.backlogged) {
         if (in.chromaAvailable && chromaOn) {
             chroma = false;
+            if (in.preferAudioQuality) {
+                next = in.current - 2 * StepDown;
+            }
         } else {
-            next = in.current - StepDown;
+            next = in.current - (in.preferAudioQuality ? 2 * StepDown : StepDown);
         }
     } else if (in.climbAllowed) {
         if (in.current < hi) {
-            next = in.current + StepUp;
+            next = in.current + (in.preferAudioQuality ? 2 : StepUp);
         } else if (in.chromaAvailable && !chromaOn) {
             chroma = true;
         }
