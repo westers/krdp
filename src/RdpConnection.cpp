@@ -181,7 +181,16 @@ void rdpsndActivated(RdpsndServerContext *rdpsnd)
                 if (auto *active = static_cast<std::atomic_bool *>(rdpsnd->data)) {
                     active->store(true);
                 }
-                qCInfo(KRDP) << "RDPSND selected client format" << client;
+                const auto &format = rdpsnd->client_formats[client];
+                // The index alone cannot distinguish PCM from a compressed
+                // format. These are negotiated descriptors, not measured
+                // wire throughput (especially for variable-rate codecs).
+                qCInfo(KRDP) << "RDPSND selected client format" << client
+                            << "tag" << format.wFormatTag
+                            << "rate" << format.nSamplesPerSec
+                            << "channels" << format.nChannels
+                            << "bits" << format.wBitsPerSample
+                            << "declaredBytesPerSecond" << format.nAvgBytesPerSec;
                 return;
             }
         }
