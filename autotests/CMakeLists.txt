@@ -43,6 +43,11 @@ target_include_directories(ConsoleSeatTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ConsoleSeatTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ConsoleSeatTest COMMAND ConsoleSeatTest)
 
+add_executable(ConsoleControlTest ConsoleControlTest.cpp)
+target_include_directories(ConsoleControlTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleControlTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME ConsoleControlTest COMMAND ConsoleControlTest)
+
 # The future persistent console broker uses this state machine to revoke the
 # outgoing adapter before an SDDM/Plasma worker can be replaced.
 add_executable(ConsoleHandoffTest ConsoleHandoffTest.cpp)

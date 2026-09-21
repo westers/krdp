@@ -163,9 +163,10 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     // broker can renegotiate and restart that worker atomically.
     connection->videoStream()->setCodecPreference(CodecPreference::Avc420);
     auto client = std::make_unique<Client>();
+    const auto id = client->id = ++m_nextClientId;
     client->connection = connection;
-    client->session = std::make_unique<ConsoleWorkerSession>([this](const ConsoleWorkerWire::Input &input) {
-        if (m_inputEnabled) {
+    client->session = std::make_unique<ConsoleWorkerSession>([this, id](const ConsoleWorkerWire::Input &input) {
+        if (m_inputEnabled && m_control.ownsControl(id)) {
             m_endpoint.sendInput(input);
         }
     });
@@ -177,7 +178,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     client->connections.append(connect(client->session.get(), &AbstractSession::frameReceived, connection->videoStream(), &VideoStream::queueFrame));
     client->connections.append(connect(client->session.get(), &ConsoleWorkerSession::keyFrameRequested, &m_endpoint, &ConsoleWorkerEndpoint::requestKeyFrame));
     client->connections.append(connect(connection->inputHandler(), &InputHandler::inputEvent, client->session.get(), &AbstractSession::sendEvent));
-    client->connections.append(connect(connection, &RdpConnection::controlRecordReceived, this, [this, connection](const QJsonObject &record) {
+    client->connections.append(connect(connection, &RdpConnection::controlRecordReceived, this, [this, connection, id](const QJsonObject &record) {
         if (record.value(QLatin1String("type")).toString() != QLatin1String("media")) {
             return;
         }
@@ -193,14 +194,22 @@ void ConsoleHostController::addClient(RdpConnection *connection)
             connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"code"_s, u"unsupported"_s}, {u"message"_s, u"physical console microphone and camera are not available yet"_s}});
             return;
         }
-        m_media = {playback.toBool(), silenceHost.toBool(false) && playback.toBool()};
-        m_mediaConfigured = true;
-        connection->setExternalAudioPlayback(m_media.playback);
-        connection->setMediaPolicy(m_media.playback, false, false, false);
-        m_endpoint.setMedia(m_media);
-        connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, true}, {u"playback"_s, m_media.playback}, {u"microphone"_s, false}, {u"camera"_s, false}, {u"silenceHost"_s, m_media.silenceHost}});
+        const ConsoleControl::Media requested{playback.toBool(), silenceHost.toBool(false) && playback.toBool()};
+        if (!m_control.setMedia(id, requested)) {
+            connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"code"_s, u"not-owner"_s}, {u"message"_s, u"only the authenticated console controller may silence the host"_s}});
+            return;
+        }
+        connection->setExternalAudioPlayback(requested.playback);
+        connection->setMediaPolicy(requested.playback, false, false, false);
+        updateMedia();
+        connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, true}, {u"playback"_s, requested.playback}, {u"microphone"_s, false}, {u"camera"_s, false}, {u"silenceHost"_s, requested.silenceHost}});
     }, Qt::QueuedConnection));
-    client->connections.append(connect(connection, &RdpConnection::stateChanged, this, [this, connection](RdpConnection::State state) {
+    client->connections.append(connect(connection, &RdpConnection::stateChanged, this, [this, connection, id](RdpConnection::State state) {
+        if (state == RdpConnection::State::Streaming) {
+            // Running is pre-authentication. Streaming follows successful
+            // activation and precedes control-channel records on this peer.
+            m_control.admit(id);
+        }
         if (state == RdpConnection::State::Closed) {
             removeClient(connection);
         }
@@ -210,12 +219,24 @@ void ConsoleHostController::addClient(RdpConnection *connection)
 
 void ConsoleHostController::removeClient(RdpConnection *connection)
 {
+    for (const auto &client : m_clients) {
+        if (client->connection == connection) {
+            m_control.remove(client->id);
+        }
+    }
     std::erase_if(m_clients, [connection](const auto &client) { return client->connection == connection; });
-    if (m_clients.empty() && m_mediaConfigured) {
-        m_media = {};
-        m_mediaConfigured = false;
-        // Stopping the worker's capture restores the default sink and the
-        // playback-stream routes changed by silenceHost.
+    updateMedia();
+}
+
+void ConsoleHostController::updateMedia()
+{
+    const auto policy = m_control.media();
+    const ConsoleWorkerWire::Media media{policy.playback, policy.silenceHost};
+    if (!m_mediaConfigured || media != m_media) {
+        m_media = media;
+        m_mediaConfigured = true;
+        // A viewer cannot disable another client's playback or private route.
+        // Removing the controller restores host routing even if viewers stay.
         m_endpoint.setMedia(m_media);
     }
 }

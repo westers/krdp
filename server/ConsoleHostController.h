@@ -11,6 +11,7 @@
 #include <QTimer>
 
 #include "ConsoleHandoff.h"
+#include "ConsoleControl.h"
 #include "ConsoleWorkerEndpoint.h"
 
 namespace KRdp
@@ -42,6 +43,7 @@ public:
 
 private:
     struct Client {
+        ConsoleControl::Id id = 0;
         RdpConnection *connection = nullptr;
         std::unique_ptr<ConsoleWorkerSession> session;
         QList<QMetaObject::Connection> connections;
@@ -52,6 +54,7 @@ private:
     void setWorkerActive(bool active);
     void removeClient(RdpConnection *connection);
     void addClient(RdpConnection *connection);
+    void updateMedia();
 
     Server *m_server = nullptr;
     WorkerLauncher m_launchWorker;
@@ -61,6 +64,8 @@ private:
     QTimer m_seatPoll;
     std::vector<std::unique_ptr<Client>> m_clients;
     bool m_inputEnabled = false;
+    ConsoleControl m_control;
+    ConsoleControl::Id m_nextClientId = 0;
     bool m_mediaConfigured = false;
     ConsoleWorkerWire::Media m_media;
 };
