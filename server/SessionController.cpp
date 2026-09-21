@@ -2380,12 +2380,15 @@ void SessionController::onControlMedia(SessionWrapper *wrapper, const QJsonObjec
     const QJsonValue playback = record.value(QLatin1String("playback"));
     const QJsonValue microphone = record.value(QLatin1String("microphone"));
     const QJsonValue camera = record.value(QLatin1String("camera"));
-    if (!playback.isBool() || !microphone.isBool() || !camera.isBool()) {
-        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"media playback, microphone, and camera must be booleans"_s}));
+    const QJsonValue silenceHost = record.value(QLatin1String("silenceHost"));
+    if (!playback.isBool() || !microphone.isBool() || !camera.isBool() || (!silenceHost.isUndefined() && !silenceHost.isBool())) {
+        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"media playback, microphone, camera, and silenceHost must be booleans"_s}));
         return;
     }
-    connection->setMediaPolicy(playback.toBool(), microphone.toBool(), camera.toBool());
-    connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"playback"_s, playback}, {u"microphone"_s, microphone}, {u"camera"_s, camera}});
+    // A silent host only makes sense when audio is actually redirected.
+    const bool isolated = playback.toBool() && silenceHost.toBool(false);
+    connection->setMediaPolicy(playback.toBool(), microphone.toBool(), camera.toBool(), isolated);
+    connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"playback"_s, playback}, {u"microphone"_s, microphone}, {u"camera"_s, camera}, {u"silenceHost"_s, isolated}});
 }
 
 void SessionController::onControlTimeout(SessionWrapper *wrapper)
