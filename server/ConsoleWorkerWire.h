@@ -9,6 +9,7 @@
 #include <QByteArray>
 #include <QDataStream>
 #include <QEvent>
+#include <QIODevice>
 #include <QPoint>
 #include <QPointF>
 #include <QRect>
@@ -39,6 +40,39 @@ struct Record {
     bool operator==(const Record &) const = default;
 };
 
+inline QByteArray frame(Kind kind, const QByteArray &payload = {});
+
+/** Authenticates one worker to the broker endpoint created for its logind session. */
+struct Hello {
+    QString sessionId;
+    quint32 uid = 0;
+    QByteArray token;
+    bool operator==(const Hello &) const = default;
+};
+
+inline QByteArray frame(const Hello &hello)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << hello.sessionId << hello.uid << hello.token;
+    return frame(Kind::Hello, payload);
+}
+
+inline std::optional<Hello> hello(const Record &record)
+{
+    if (record.kind != Kind::Hello) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    Hello result;
+    stream >> result.sessionId >> result.uid >> result.token;
+    return stream.status() == QDataStream::Ok && stream.atEnd() && !result.sessionId.isEmpty() && result.uid != 0 && !result.token.isEmpty()
+        ? std::optional<Hello>(result)
+        : std::nullopt;
+}
+
 /** Input independent of Qt object lifetimes, valid across the broker socket. */
 struct Input {
     enum class Type : quint8 {
@@ -60,7 +94,7 @@ struct Input {
 };
 
 /** Serialises one record as a big-endian bounded length prefix + body. */
-inline QByteArray frame(Kind kind, const QByteArray &payload = {})
+inline QByteArray frame(Kind kind, const QByteArray &payload)
 {
     QByteArray body;
     QDataStream stream(&body, QIODevice::WriteOnly);
