@@ -42,3 +42,15 @@ Initial implementation: ConsoleControl policy now carries a controller-only
 microphone bit, cleared on release; unit tests include mic-only, refusal and
 fresh consent after reacquisition. Broker still rejects microphones until the
 actual transport/source/revocation path is integrated and verified.
+
+Regular-session revocation implementation now uses MicrophoneConsent, a
+mutex-serialized enabled/generation gate around callback delivery. Each AUDIN
+context records its consent generation; repeated identical consent is a no-op,
+but off→on invalidates old callbacks even if the session loop never observed
+the disabled interval. The session loop closes/joins a revoked/stale context
+before freeing it or destroying its PipeWire endpoint, then may construct a
+new generation. It checks current consent again before opening a channel.
+Disconnect also revokes delivery first. Unit tests verify stale-context refusal
+and idempotent consent; actual AUDIN off/on transport/device acceptance remains.
+PCM callbacks reject non-stereo-frame-aligned or >1-second data buffers; the
+future worker-wire packet limit remains20ms as specified above.

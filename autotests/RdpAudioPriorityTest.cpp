@@ -2,6 +2,7 @@
 #include <QTest>
 #include "RdpConnection.h"
 #include "Server.h"
+#include "MicrophoneConsent.h"
 
 using namespace KRdp;
 
@@ -9,6 +10,29 @@ class RdpAudioPriorityTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void microphoneConsentRejectsLateContexts()
+    {
+        MicrophoneConsent consent;
+        int samples = 0;
+        const auto sink = [&] { ++samples; };
+        QVERIFY(!consent.deliver(0, sink));
+        consent.setEnabled(true);
+        const auto first = consent.snapshot();
+        QVERIFY(first.enabled);
+        QVERIFY(first.generation != 0);
+        QVERIFY(consent.deliver(first.generation, sink));
+        consent.setEnabled(true);
+        QCOMPARE(consent.snapshot().generation, first.generation);
+        consent.setEnabled(false);
+        QVERIFY(!consent.deliver(first.generation, sink));
+        consent.setEnabled(true);
+        const auto second = consent.snapshot();
+        QVERIFY(second.generation != first.generation);
+        QVERIFY(!consent.deliver(first.generation, sink));
+        QVERIFY(consent.deliver(second.generation, sink));
+        QCOMPARE(samples, 2);
+    }
+
     void defaultsOverridesAndConsent()
     {
         // Destroy before dispatching events: initialize() is queued, so these

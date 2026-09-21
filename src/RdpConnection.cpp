@@ -9,6 +9,7 @@
 
 #include "RdpConnection.h"
 #include "AdaptiveQuality.h"
+#include "MicrophoneConsent.h"
 
 #include <atomic>
 #include <filesystem>
@@ -155,18 +156,24 @@ const AUDIO_FORMAT RemoteMicrophoneFormat{
     WAVE_FORMAT_PCM, 2, 48000, 192000, 4, 16, 0, nullptr,
 };
 
+struct AudinDelivery {
+    KRdp::MicrophoneConsent *consent = nullptr;
+    PipeWireMicrophone *endpoint = nullptr;
+    uint64_t generation = 0;
+};
+
 UINT audinData(audin_server_context *audin, const SNDIN_DATA *data)
 {
-    // The PCM is deliberately not discarded silently: the next OPT-050 slice
-    // connects this callback to the per-session PipeWire virtual microphone.
-    // Keeping channel negotiation here first gives the client and server a
-    // standards-compliant lifecycle to exercise independently of media I/O.
     if (!data || !data->Data) {
         return ERROR_INVALID_DATA;
     }
-    auto *endpoint = static_cast<PipeWireMicrophone *>(audin->userdata);
-    if (endpoint) {
-        endpoint->write(QByteArray(reinterpret_cast<const char *>(Stream_Buffer(data->Data)), int(Stream_Length(data->Data))));
+    auto *delivery = static_cast<AudinDelivery *>(audin->userdata);
+    const size_t bytes = Stream_Length(data->Data);
+    if (bytes > 192000 || bytes % 4 != 0) return ERROR_INVALID_DATA;
+    if (delivery && delivery->consent && delivery->endpoint) {
+        delivery->consent->deliver(delivery->generation, [&] {
+            delivery->endpoint->write(QByteArray(reinterpret_cast<const char *>(Stream_Buffer(data->Data)), int(bytes)));
+        });
     }
     return CHANNEL_RC_OK;
 }
@@ -567,6 +574,8 @@ public:
     RdpsndServerContext *rdpsnd = nullptr;
     audin_server_context *audin = nullptr;
     std::unique_ptr<PipeWireMicrophone> microphoneEndpoint;
+    MicrophoneConsent microphoneConsent;
+    AudinDelivery microphoneDelivery;
     std::unique_ptr<PipeWireAudioPlayback> audioPlaybackEndpoint;
     QMutex externalAudioMutex;
     QByteArray externalAudio;
@@ -725,6 +734,7 @@ void RdpConnection::sendControlRecord(const QJsonObject &record)
 
 void RdpConnection::setMediaPolicy(bool remoteAudioPlayback, bool microphone, bool camera, bool silenceHostAudio)
 {
+    d->microphoneConsent.setEnabled(microphone);
     d->remoteAudioPlayback.store(remoteAudioPlayback);
     d->microphone.store(microphone);
     d->camera.store(camera);
@@ -1175,6 +1185,7 @@ bool RdpConnection::onClose()
         d->cameraEnumerator = nullptr;
     }
     d->remoteCameras.cameras.clear();
+    d->microphoneConsent.setEnabled(false);
     if (d->audin) {
         if (d->audin->IsOpen && d->audin->IsOpen(d->audin) && d->audin->Close) {
             d->audin->Close(d->audin);
@@ -1201,7 +1212,21 @@ bool RdpConnection::initializeAudioChannels()
     auto context = reinterpret_cast<PeerContext *>(d->peer->context);
     const auto vcm = context->virtualChannelManager;
 
-    if (!d->audin && d->microphone.load()) {
+    const auto microphone = d->microphoneConsent.snapshot();
+    if (d->audin && (!microphone.enabled || d->microphoneDelivery.generation != microphone.generation)) {
+        // Close joins FreeRDP's audio reader. Never destroy its userdata or
+        // PipeWire endpoint while a callback may still be using either.
+        if (d->audin->Close && !d->audin->Close(d->audin)) {
+            qCWarning(KRDP) << "Could not close revoked AUDIN channel";
+            return false;
+        }
+        audin_server_context_free(d->audin);
+        d->audin = nullptr;
+        d->microphoneDelivery = {};
+        d->microphoneEndpoint.reset();
+        qCInfo(KRDP) << "AUDIN consent generation retired";
+    }
+    if (!d->audin && microphone.enabled) {
         d->microphoneEndpoint = std::make_unique<PipeWireMicrophone>();
         if (!d->microphoneEndpoint->start(QString::number(reinterpret_cast<quintptr>(this), 16))) {
             qCWarning(KRDP) << "Could not create PipeWire remote microphone";
@@ -1214,7 +1239,8 @@ bool RdpConnection::initializeAudioChannels()
             return false;
         }
         d->audin->rdpcontext = d->peer->context;
-        d->audin->userdata = d->microphoneEndpoint.get();
+        d->microphoneDelivery = {&d->microphoneConsent, d->microphoneEndpoint.get(), microphone.generation};
+        d->audin->userdata = &d->microphoneDelivery;
         d->audin->Data = audinData;
         if (!audin_server_set_formats(d->audin, 1, &RemoteMicrophoneFormat)) {
             qCWarning(KRDP) << "Could not set AUDIN formats";
@@ -1222,7 +1248,9 @@ bool RdpConnection::initializeAudioChannels()
         }
     }
 
-    if (d->audin && WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME)
+    const auto currentMicrophone = d->microphoneConsent.snapshot();
+    if (d->audin && currentMicrophone.enabled && currentMicrophone.generation == d->microphoneDelivery.generation
+        && WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME)
         && WTSVirtualChannelManagerGetDrdynvcState(vcm) == DRDYNVC_STATE_READY
         && d->audin->IsOpen && !d->audin->IsOpen(d->audin)) {
         if (!d->audin->Open || !d->audin->Open(d->audin)) {
