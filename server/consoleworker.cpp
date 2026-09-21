@@ -6,6 +6,7 @@
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QFile>
+#include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QLocalSocket>
@@ -18,6 +19,7 @@
 
 #include "ConsoleWorkerWire.h"
 #include "ConsoleInputState.h"
+#include "TakeoverDetector.h"
 #include "PipeWireAudioPlayback.h"
 
 using namespace KRdp;
@@ -56,6 +58,18 @@ public:
         , m_uid(uid)
         , m_token(token)
     {
+        m_clock.start();
+        connect(&m_session, &AbstractSession::cursorUpdate, this, [this](const PipeWireCursor &cursor) {
+            if (m_control.active && m_session.outputGeometryResolved()
+                && m_takeover.observed(m_session.mapToGlobal(cursor.position).toPoint(), m_clock.elapsed())) {
+                releaseInput();
+                m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalTakeover));
+                m_control.active = false; // Gate immediately, before the host's acknowledgement.
+            }
+        });
+        connect(&m_session, &AbstractSession::outputGeometryChanged, this, [this](const QRect &) {
+            m_takeover.outputMoved(m_clock.elapsed());
+        });
         connect(&m_socket, &QLocalSocket::connected, this, [this]() {
             m_connectTimeout.stop();
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{m_sessionId, m_uid, m_token}));
@@ -153,6 +167,17 @@ private:
     {
         m_deframer.feed(m_socket.readAll());
         while (const auto record = m_deframer.next()) {
+            if (const auto control = ConsoleWorkerWire::controlState(*record)) {
+                if (*control != m_control) {
+                    releaseInput();
+                    m_control = *control;
+                    m_takeover = {};
+                    if (control->active) {
+                        m_takeover.armed(m_clock.elapsed());
+                    }
+                }
+                continue;
+            }
             if (record->kind == ConsoleWorkerWire::Kind::Stop && record->payload.isEmpty()) {
                 releaseInput();
                 m_audioTimer.stop();
@@ -182,7 +207,13 @@ private:
                 continue;
             }
             if (const auto input = ConsoleWorkerWire::input(*record)) {
+                if (!m_control.active) {
+                    continue;
+                }
                 if (const auto event = eventFor(*input)) {
+                    if (input->type == ConsoleWorkerWire::Input::Type::Mouse && input->eventType == QEvent::MouseMove) {
+                        m_takeover.injected(m_session.mapToGlobal(input->position).toPoint(), m_clock.elapsed());
+                    }
                     m_session.sendEvent(event);
                     m_inputState.record(*input);
                     continue;
@@ -210,6 +241,9 @@ private:
     bool m_captureReady = false;
     ConsoleWorkerWire::Outputs m_outputs;
     ConsoleInputState m_inputState;
+    QElapsedTimer m_clock;
+    Takeover::Detector m_takeover;
+    ConsoleWorkerWire::ControlState m_control;
 };
 }
 

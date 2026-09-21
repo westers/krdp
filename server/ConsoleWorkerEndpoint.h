@@ -41,6 +41,7 @@ public:
     void requestKeyFrame();
     void sendInput(const ConsoleWorkerWire::Input &input);
     void setMedia(const ConsoleWorkerWire::Media &media);
+    void setControlState(const ConsoleWorkerWire::ControlState &state);
 
 Q_SIGNALS:
     void workerReady(const KRdp::ConsoleHandoff::Target &target);
@@ -49,6 +50,7 @@ Q_SIGNALS:
     void inputReceived(const KRdp::ConsoleWorkerWire::Input &input);
     void audioReceived(const KRdp::ConsoleWorkerWire::Audio &audio);
     void outputsReceived(const KRdp::ConsoleWorkerWire::Outputs &outputs);
+    void localTakeover(quint64 generation);
     void protocolError(const QString &message);
 
 private:

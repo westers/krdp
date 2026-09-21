@@ -106,6 +106,13 @@ void ConsoleWorkerEndpoint::setMedia(const ConsoleWorkerWire::Media &media)
     }
 }
 
+void ConsoleWorkerEndpoint::setControlState(const ConsoleWorkerWire::ControlState &state)
+{
+    if (m_ready && m_worker) {
+        m_worker->write(ConsoleWorkerWire::frame(state));
+    }
+}
+
 void ConsoleWorkerEndpoint::acceptConnection()
 {
     QLocalSocket *candidate = m_server->nextPendingConnection();
@@ -154,6 +161,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT audioReceived(*audio);
         } else if (const auto outputs = ConsoleWorkerWire::outputs(*record)) {
             Q_EMIT outputsReceived(*outputs);
+        } else if (const auto state = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::LocalTakeover); state && state->active) {
+            Q_EMIT localTakeover(state->generation);
         } else {
             fail(QStringLiteral("unexpected worker record"));
             return;

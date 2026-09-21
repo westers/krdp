@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include <QLocalSocket>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -16,6 +17,7 @@ class ConsoleWorkerEndpointTest : public QObject
 private Q_SLOTS:
     void authenticatesThenForwardsFrames();
     void rejectsFramesBeforeCaptureReady();
+    void rejectsTakeoverBeforeCaptureReady();
     void rejectsWrongWorkerToken();
 };
 
@@ -31,6 +33,10 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     int ready = 0;
     int frames = 0;
     int layouts = 0;
+    quint64 takeoverGeneration = 0;
+    connect(&endpoint, &ConsoleWorkerEndpoint::localTakeover, this, [&takeoverGeneration](quint64 generation) {
+        takeoverGeneration = generation;
+    });
     connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&layouts](const auto &outputs) {
         QCOMPARE(outputs.monitors.first().name, QStringLiteral("DP-1"));
         ++layouts;
@@ -54,9 +60,23 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(ready, 1);
 
+    endpoint.setControlState({42, true});
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    ConsoleWorkerWire::Deframer brokerMessages;
+    brokerMessages.feed(worker.readAll());
+    const auto controlRecord = brokerMessages.next();
+    QVERIFY(controlRecord);
+    const auto control = ConsoleWorkerWire::controlState(*controlRecord);
+    QVERIFY(control);
+    QCOMPARE(control->generation, quint64(42));
+    QVERIFY(control->active);
+
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Outputs{{{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}}}));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(layouts, 1);
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ControlState{42, true}, ConsoleWorkerWire::Kind::LocalTakeover));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(takeoverGeneration, quint64(42));
 
     VideoFrame sent;
     sent.size = QSize(1280, 720);
@@ -90,6 +110,27 @@ void ConsoleWorkerEndpointTest::rejectsFramesBeforeCaptureReady()
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), 1000, token}) + ConsoleWorkerWire::frame(premature));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(errors, 1);
+    QVERIFY(!endpoint.ready());
+}
+
+void ConsoleWorkerEndpointTest::rejectsTakeoverBeforeCaptureReady()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    ConsoleWorkerEndpoint endpoint;
+    const ConsoleHandoff::Target target{ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000};
+    const QByteArray token(24, 't');
+    QVERIFY(endpoint.listen(directory.filePath(QStringLiteral("worker.sock")), target, token));
+    QSignalSpy errors(&endpoint, &ConsoleWorkerEndpoint::protocolError);
+    QSignalSpy takeovers(&endpoint, &ConsoleWorkerEndpoint::localTakeover);
+    QLocalSocket worker;
+    worker.connectToServer(endpoint.socketName());
+    QVERIFY(worker.waitForConnected(1000));
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), 1000, token})
+                 + ConsoleWorkerWire::frame(ConsoleWorkerWire::ControlState{42, true}, ConsoleWorkerWire::Kind::LocalTakeover));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(errors.count(), 1);
+    QCOMPARE(takeovers.count(), 0);
     QVERIFY(!endpoint.ready());
 }
 

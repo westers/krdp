@@ -35,6 +35,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     connect(m_server, &Server::newConnectionCreated, this, &ConsoleHostController::addClient);
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerReady, this, [this](const auto &target) {
         apply(m_handoff.workerReady(target));
+        m_endpoint.setControlState({m_controlGeneration, m_control.owner() != 0});
         if (m_mediaConfigured) {
             m_endpoint.setMedia(m_media);
         }
@@ -57,6 +58,17 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [this](const ConsoleWorkerWire::Outputs &outputs) {
         m_outputs = outputs;
+        sendLayouts();
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::localTakeover, this, [this](quint64 generation) {
+        if (!m_control.owner() || generation != m_controlGeneration) {
+            return; // A late cursor report must not revoke a newer controller.
+        }
+        qInfo() << "Local console pointer activity: releasing remote control";
+        releaseInput();
+        m_control.release(m_control.owner());
+        syncControlState();
+        updateMedia();
         sendLayouts();
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::protocolError, this, [this](const QString &message) {
@@ -197,6 +209,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
             // Running is pre-authentication. Media preflight can also arrive
             // before Streaming; defer it without granting any authority.
             m_control.admit(id);
+            syncControlState();
             sendLayouts();
             for (const auto &client : m_clients) {
                 if (client->id == id && !client->pendingMedia.isEmpty()) {
@@ -241,6 +254,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             refuse(u"not-owner"_s, u"another client owns control; it must release control first"_s);
             return;
         }
+        syncControlState();
         updateMedia();
         sendLayouts();
         connection->sendControlRecord(QJsonObject{{u"type"_s, u"console-control"_s}, {u"v"_s, 1}, {u"ok"_s, true}, {u"action"_s, action}});
@@ -312,6 +326,7 @@ void ConsoleHostController::removeClient(RdpConnection *connection)
         }
     }
     std::erase_if(m_clients, [connection](const auto &client) { return client->connection == connection; });
+    syncControlState();
     updateMedia();
     sendLayouts();
 }
@@ -350,6 +365,15 @@ void ConsoleHostController::releaseInput()
     }
     for (const auto &input : releases) {
         m_endpoint.sendInput(input);
+    }
+}
+
+void ConsoleHostController::syncControlState()
+{
+    if (m_workerOwner != m_control.owner()) {
+        m_workerOwner = m_control.owner();
+        ++m_controlGeneration;
+        m_endpoint.setControlState({m_controlGeneration, m_workerOwner != 0});
     }
 }
 

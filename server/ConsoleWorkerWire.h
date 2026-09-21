@@ -37,6 +37,8 @@ enum class Kind : quint8 {
     Audio,
     Error,
     Outputs,
+    ControlState,
+    LocalTakeover,
 };
 
 struct Record {
@@ -46,6 +48,33 @@ struct Record {
 };
 
 inline QByteArray frame(Kind kind, const QByteArray &payload = {});
+
+struct ControlState {
+    quint64 generation = 0;
+    bool active = false;
+    bool operator==(const ControlState &) const = default;
+};
+
+inline QByteArray frame(const ControlState &state, Kind kind = Kind::ControlState)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << state.generation << state.active;
+    return frame(kind, payload);
+}
+
+inline std::optional<ControlState> controlState(const Record &record, Kind kind = Kind::ControlState)
+{
+    if (record.kind != kind) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    ControlState state;
+    stream >> state.generation >> state.active;
+    return stream.status() == QDataStream::Ok && stream.atEnd() ? std::optional<ControlState>(state) : std::nullopt;
+}
 
 struct Output {
     QString name;
@@ -323,7 +352,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::Outputs)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::LocalTakeover)) {
             ++m_invalid;
             return std::nullopt;
         }

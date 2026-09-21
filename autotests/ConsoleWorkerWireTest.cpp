@@ -19,6 +19,7 @@ private Q_SLOTS:
     void roundTripsMediaAndPcm();
     void roundTripsOutputs();
     void rejectsInvalidOutputs();
+    void roundTripsControlGeneration();
     void rejectsOversizedRecord();
 };
 
@@ -127,6 +128,23 @@ void ConsoleWorkerWireTest::rejectsInvalidOutputs()
     value.monitors[0].scale = 1;
     value.monitors[0].geometry.setWidth(0);
     QVERIFY(rejected(value));
+}
+
+void ConsoleWorkerWireTest::roundTripsControlGeneration()
+{
+    const ControlState sent{42, true};
+    Deframer deframer;
+    deframer.feed(frame(sent) + frame(sent, Kind::LocalTakeover));
+    const auto control = deframer.next();
+    QVERIFY(control);
+    QCOMPARE(controlState(*control), std::optional<ControlState>(sent));
+    QVERIFY(!controlState(*control, Kind::LocalTakeover));
+    const auto takeover = deframer.next();
+    QVERIFY(takeover);
+    QCOMPARE(controlState(*takeover, Kind::LocalTakeover), std::optional<ControlState>(sent));
+    Record truncated = *takeover;
+    truncated.payload.chop(1);
+    QVERIFY(!controlState(truncated, Kind::LocalTakeover));
 }
 
 QTEST_GUILESS_MAIN(ConsoleWorkerWireTest)

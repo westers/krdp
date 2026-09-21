@@ -62,6 +62,7 @@ private:
     void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
     void sendLayouts();
     void releaseInput();
+    void syncControlState();
 
     Server *m_server = nullptr;
     WorkerLauncher m_launchWorker;
@@ -77,5 +78,7 @@ private:
     ConsoleWorkerWire::Media m_media;
     ConsoleWorkerWire::Outputs m_outputs;
     ConsoleInputState m_inputState;
+    ConsoleControl::Id m_workerOwner = 0;
+    quint64 m_controlGeneration = 0;
 };
 }
