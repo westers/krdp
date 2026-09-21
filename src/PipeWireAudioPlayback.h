@@ -7,8 +7,6 @@
 #include <QMutex>
 #include <QString>
 
-#include "krdp_export.h"
-
 struct pw_stream;
 struct pw_thread_loop;
 
@@ -19,7 +17,7 @@ namespace KRdp
  * PipeWire invokes process() on an RT thread. The RDP session thread takes
  * complete PCM blocks with take(); it is the only thread that writes RDPSND.
  */
-class KRDP_EXPORT PipeWireAudioPlayback
+class PipeWireAudioPlayback
 {
 public:
     ~PipeWireAudioPlayback();
