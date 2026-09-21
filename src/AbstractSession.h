@@ -254,6 +254,12 @@ protected:
     int activeStream() const;
 
     void setStarted(bool started);
+    /**
+     * Marks a session whose encoder lives in another process as active.  This
+     * keeps broker-owned sessions on the same input gate as local PipeWire
+     * sessions without constructing a PipeWire stream in the broker.
+     */
+    void setExternalStreamActive(bool active);
     void setSize(QSize size);
     void setLogicalSize(QSize size);
     PipeWireEncodedStream *stream();

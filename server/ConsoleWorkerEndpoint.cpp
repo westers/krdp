@@ -88,6 +88,13 @@ void ConsoleWorkerEndpoint::requestKeyFrame()
     send(ConsoleWorkerWire::Kind::RequestKeyFrame);
 }
 
+void ConsoleWorkerEndpoint::sendInput(const ConsoleWorkerWire::Input &input)
+{
+    if (m_ready && m_worker) {
+        m_worker->write(ConsoleWorkerWire::frame(input));
+    }
+}
+
 void ConsoleWorkerEndpoint::acceptConnection()
 {
     QLocalSocket *candidate = m_server->nextPendingConnection();

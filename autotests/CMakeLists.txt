@@ -60,6 +60,11 @@ target_include_directories(ConsoleWorkerEndpointTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(ConsoleWorkerEndpointTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
 add_test(NAME ConsoleWorkerEndpointTest COMMAND ConsoleWorkerEndpointTest)
 
+add_executable(ConsoleWorkerSessionTest ConsoleWorkerSessionTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp)
+target_include_directories(ConsoleWorkerSessionTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleWorkerSessionTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
+add_test(NAME ConsoleWorkerSessionTest COMMAND ConsoleWorkerSessionTest)
+
 add_executable(PipeWireAudioRoutingTest PipeWireAudioRoutingTest.cpp)
 target_include_directories(PipeWireAudioRoutingTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(PipeWireAudioRoutingTest PRIVATE Qt6::Test Qt6::Core)

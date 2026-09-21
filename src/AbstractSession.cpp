@@ -129,6 +129,7 @@ public:
     std::optional<VirtualMonitor> virtualMonitor;
     bool started = false;
     bool enabled = false;
+    bool externalStreamActive = false;
     QSize size;
     QSize logicalSize;
     std::optional<quint32> frameRate = 60;
@@ -286,6 +287,9 @@ void AbstractSession::requestKeyFrame()
 
 bool AbstractSession::streamActive() const
 {
+    if (d->externalStreamActive) {
+        return true;
+    }
     if (d->encodedStream) {
         return d->encodedStream->isActive();
     }
@@ -381,11 +385,20 @@ void AbstractSession::setStarted(bool s)
 {
     d->started = s;
     if (s) {
-        if (d->enabled) {
+        if (d->enabled && d->encodedStream) {
             d->encodedStream->start();
         }
         Q_EMIT started();
     }
+}
+
+void AbstractSession::setExternalStreamActive(bool active)
+{
+    if (d->externalStreamActive == active) {
+        return;
+    }
+    d->externalStreamActive = active;
+    Q_EMIT streamActiveChanged(active);
 }
 
 void AbstractSession::requestStreamingEnable(QObject *requester)

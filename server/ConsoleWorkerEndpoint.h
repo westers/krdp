@@ -39,6 +39,7 @@ public:
 
     void stopWorker();
     void requestKeyFrame();
+    void sendInput(const ConsoleWorkerWire::Input &input);
 
 Q_SIGNALS:
     void workerReady(const KRdp::ConsoleHandoff::Target &target);
