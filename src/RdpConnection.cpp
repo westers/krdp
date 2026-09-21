@@ -8,6 +8,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "RdpConnection.h"
+#include "AdaptiveQuality.h"
 
 #include <atomic>
 #include <filesystem>
@@ -574,6 +575,8 @@ public:
     std::atomic<bool> microphone = false;
     std::atomic<bool> camera = false;
     std::atomic<bool> silenceHostAudio = false;
+    std::atomic<int> audioPriorityOverride = -1;
+    std::atomic<bool> audioPriorityDefault = false;
     std::atomic_bool rdpsndActive = false;
     CamDevEnumServerContext *cameraEnumerator = nullptr;
     RemoteCameraCollection remoteCameras;
@@ -737,6 +740,23 @@ void RdpConnection::setExternalAudioPlayback(bool enabled)
         QMutexLocker lock(&d->externalAudioMutex);
         d->externalAudio.clear();
     }
+}
+
+void RdpConnection::setAudioPriority(bool enabled)
+{
+    d->audioPriorityOverride.store(enabled ? 1 : 0);
+}
+
+void RdpConnection::setAudioPriorityDefault(bool enabled)
+{
+    d->audioPriorityDefault.store(enabled);
+}
+
+bool RdpConnection::audioPriorityActive() const
+{
+    const int override = d->audioPriorityOverride.load();
+    return AdaptiveQuality::audioPriorityEnabled(override < 0 ? d->audioPriorityDefault.load() : override != 0,
+                                                d->remoteAudioPlayback.load(), d->microphone.load());
 }
 
 void RdpConnection::submitExternalAudio(const QByteArray &pcm)

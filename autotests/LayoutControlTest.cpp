@@ -10,6 +10,7 @@
 #include <QTest>
 
 #include "LayoutControl.h"
+#include "AudioPriority.h"
 
 using namespace KRdp;
 using namespace KRdp::LayoutControl;
@@ -82,6 +83,34 @@ class LayoutControlTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void audioPriorityRequestValidation()
+    {
+        QJsonObject record{{QStringLiteral("type"), QStringLiteral("audio-priority")},
+                           {QStringLiteral("v"), 1}, {QStringLiteral("id"), QStringLiteral("p1")},
+                           {QStringLiteral("enabled"), true}};
+        const auto parsed = AudioPriority::parse(record);
+        QVERIFY(parsed);
+        QVERIFY(parsed->enabled);
+        QCOMPARE(parsed->id, QStringLiteral("p1"));
+        const auto reply = AudioPriority::reply(record, true);
+        QCOMPARE(reply.value(QStringLiteral("id")), record.value(QStringLiteral("id")));
+        QVERIFY(reply.value(QStringLiteral("ok")).toBool());
+        QVERIFY(reply.value(QStringLiteral("effective")).toBool());
+        for (const auto &key : {QStringLiteral("type"), QStringLiteral("v"), QStringLiteral("id"), QStringLiteral("enabled")}) {
+            auto invalid = record;
+            invalid.remove(key);
+            QVERIFY(!AudioPriority::parse(invalid));
+        }
+        for (const QJsonValue &bad : {QJsonValue(1), QJsonValue(QStringLiteral("true")), QJsonValue()}) {
+            auto invalid = record;
+            invalid.insert(QStringLiteral("enabled"), bad);
+            QVERIFY(!AudioPriority::parse(invalid));
+        }
+        record.insert(QStringLiteral("id"), QString(65, QLatin1Char('x')));
+        QVERIFY(!AudioPriority::parse(record));
+        QCOMPARE(AudioPriority::reply(record, false, QStringLiteral("invalid")).value(QStringLiteral("id")).toString().size(), 64);
+    }
+
     // --- Codec ---
 
     void layoutRoundTripsAllFields()

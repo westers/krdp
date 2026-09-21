@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "SessionController.h"
+#include "AudioPriority.h"
 
 #include <algorithm>
 #include <limits>
@@ -2260,6 +2261,16 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
     }
     auto *connection = wrapper->connection.data();
     const QString type = record.value(QLatin1String("type")).toString();
+    if (type == QLatin1String("audio-priority")) {
+        const auto request = KRdp::AudioPriority::parse(record);
+        if (!request) {
+            connection->sendControlRecord(KRdp::AudioPriority::reply(record, false, u"invalid audio-priority request"_s));
+            return;
+        }
+        connection->setAudioPriority(request->enabled);
+        connection->sendControlRecord(KRdp::AudioPriority::reply(record, connection->audioPriorityActive()));
+        return; // This policy never consumes the initial layout-selection gate.
+    }
     // A record proves the channel: a gate still undecided (cannot happen
     // with the queued ordering, see onNewConnection()) is decided by it.
     const bool first = wrapper->controlGate == SessionWrapper::ControlGate::Undecided || wrapper->controlGate == SessionWrapper::ControlGate::Waiting;

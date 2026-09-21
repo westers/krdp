@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "ConsoleHostController.h"
+#include "AudioPriority.h"
 
 #include <algorithm>
 #include <utility>
@@ -48,6 +49,11 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         apply(m_handoff.workerReady(target));
         qInfo() << "Console worker ready:" << target.sessionId << "forwarding" << m_inputEnabled;
         m_endpoint.setControlState({m_controlGeneration, m_control.owner() != 0});
+        for (const auto &client : m_clients) {
+            if (m_control.ownsControl(client->id)) {
+                m_endpoint.setVideoQuality({m_controlGeneration, client->videoQuality});
+            }
+        }
         if (m_mediaConfigured) {
             m_endpoint.setMedia(m_media);
         }
@@ -200,6 +206,10 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     // not let a capable own client negotiate AVC444/private codecs until the
     // broker can renegotiate and restart that worker atomically.
     connection->videoStream()->setCodecPreference(CodecPreference::Avc420);
+    connection->videoStream()->setQualityCap(80);
+    // Preserve the console's fixed baseline unless audio priority explicitly
+    // enables congestion steering for its controlling connection.
+    connection->videoStream()->setAdaptiveQuality(false);
     auto client = std::make_unique<Client>();
     const auto id = client->id = ++m_nextClientId;
     client->connection = connection;
@@ -210,6 +220,18 @@ void ConsoleHostController::addClient(RdpConnection *connection)
         }
     });
     client->session->setWorkerActive(m_inputEnabled);
+    client->connections.append(connect(connection->videoStream(), &VideoStream::requestedQualityChanged,
+                                       this, [this, id](quint8 quality) {
+        for (const auto &entry : m_clients) {
+            if (entry->id == id) {
+                entry->videoQuality = quality;
+                if (m_control.ownsControl(id)) {
+                    m_endpoint.setVideoQuality({m_controlGeneration, quality});
+                }
+                break;
+            }
+        }
+    }));
     client->connections.append(connect(connection->videoStream(), &VideoStream::keyFrameRequested,
                                        &m_endpoint, [this](int) { m_endpoint.requestKeyFrame(); }, Qt::QueuedConnection));
     client->connections.append(connect(connection->videoStream(), &VideoStream::enabledChanged,
@@ -245,6 +267,18 @@ void ConsoleHostController::addClient(RdpConnection *connection)
 void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record)
 {
     const QString type = record.value(u"type"_s).toString();
+    if (type == u"audio-priority"_s) {
+        const auto request = AudioPriority::parse(record);
+        if (!request) {
+            connection->sendControlRecord(AudioPriority::reply(record, false, u"invalid audio-priority request"_s));
+        } else if (!m_control.admitted(id) || !m_control.ownsControl(id)) {
+            connection->sendControlRecord(AudioPriority::reply(record, false, u"only the authenticated console controller may change audio priority"_s));
+        } else {
+            connection->setAudioPriority(request->enabled);
+            connection->sendControlRecord(AudioPriority::reply(record, connection->audioPriorityActive()));
+        }
+        return;
+    }
     if (type == u"console-resize"_s) {
         const QString requestId = record.value(u"id"_s).toString();
         const auto refuse = [connection, &requestId](const QString &error) {
@@ -431,6 +465,13 @@ void ConsoleHostController::syncControlState()
         m_workerOwner = m_control.owner();
         ++m_controlGeneration;
         m_endpoint.setControlState({m_controlGeneration, m_workerOwner != 0});
+        for (const auto &client : m_clients) {
+            // A new controller must explicitly reapply its live preference;
+            // no previous ownership period may carry a latent shared policy.
+            client->connection->setAudioPriority(false);
+            client->connection->videoStream()->setQualityCap(80);
+            client->videoQuality = 80;
+        }
     }
 }
 

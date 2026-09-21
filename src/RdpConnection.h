@@ -138,6 +138,9 @@ public:
      * iteration, after the connection is fully active.
      */
     void setMediaPolicy(bool remoteAudioPlayback, bool microphone, bool camera, bool silenceHostAudio = false);
+    void setAudioPriority(bool enabled);
+    void setAudioPriorityDefault(bool enabled);
+    bool audioPriorityActive() const;
     /** Select PCM supplied by a session worker instead of this process's PipeWire graph. */
     void setExternalAudioPlayback(bool enabled);
     /** Thread-safe 44.1 kHz stereo S16 PCM from a trusted capture worker. */

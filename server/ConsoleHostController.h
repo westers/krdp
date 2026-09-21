@@ -51,6 +51,7 @@ private:
         QList<QMetaObject::Connection> connections;
         QJsonObject pendingMedia;
         bool wantsLayout = false;
+        quint8 videoQuality = 80;
     };
 
     void apply(const ConsoleHandoff::Actions &actions);

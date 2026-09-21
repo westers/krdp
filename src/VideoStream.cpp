@@ -572,7 +572,7 @@ void VideoStream::setQualityCap(quint8 cap)
 {
     d->qualityCap = cap;
     const quint8 current = d->quality.load();
-    const quint8 next = d->adaptiveQuality.load() ? std::min(current, cap) : cap;
+    const quint8 next = (d->adaptiveQuality.load() || d->session->audioPriorityActive()) ? std::min(current, cap) : cap;
     d->quality = next;
     // Always emit, even when next == current: this is the only path that
     // tells a brand-new session its quality (SessionController no longer
@@ -643,7 +643,7 @@ void VideoStream::setAdaptiveQuality(bool enabled)
     if (d->adaptiveQuality.exchange(enabled) == enabled) {
         return;
     }
-    if (!enabled) {
+    if (!enabled && !d->session->audioPriorityActive()) {
         const quint8 cap = d->qualityCap.load();
         const quint8 previous = d->quality.exchange(cap);
         if (previous != cap) {
@@ -724,7 +724,18 @@ void VideoStream::setChromaCapable(bool capable)
 
 void VideoStream::updateAdaptiveQuality()
 {
-    if (!d->adaptiveQuality.load()) {
+    const bool audioPriority = d->session->audioPriorityActive();
+    if (!d->adaptiveQuality.load() && !audioPriority) {
+        // A live priority override can temporarily enable steering even when
+        // ordinary video adaptation is disabled. Restore its fixed cap after
+        // that override (or the final audio direction) is switched off.
+        const quint8 cap = d->qualityCap.load();
+        if (d->quality.exchange(cap) != cap) {
+            Q_EMIT requestedQualityChanged(cap);
+        }
+        if (!d->chromaEnabled.exchange(true)) {
+            Q_EMIT requestedChromaChanged(true);
+        }
         return;
     }
     const auto now = clk::steady_clock::now();
@@ -764,6 +775,7 @@ void VideoStream::updateAdaptiveQuality()
         .climbAllowed = (now - d->lastStepDown) >= AdaptiveQuality::ClimbHoldAfterStepDown,
         .chromaAvailable = chromaAvailable,
         .chromaEnabled = chromaNow,
+        .preferAudioQuality = audioPriority,
     });
 
     // Codec changes are intentionally much slower than QP/chroma steering. A short RTT
@@ -806,7 +818,7 @@ void VideoStream::updateAdaptiveQuality()
     // The cap or the adaptive-quality flag may have changed while step() ran;
     // re-check both before committing so a stale result never overshoots a
     // just-lowered cap or gets applied after adaptive quality was turned off.
-    if (!d->adaptiveQuality.load()) {
+    if (!d->adaptiveQuality.load() && !d->session->audioPriorityActive()) {
         return;
     }
     const quint8 bounded = quint8(std::min<int>(result.next, d->qualityCap.load()));

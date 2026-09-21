@@ -58,3 +58,26 @@ audio codec/bitrate adaptation, which was discussed but is not implemented.
 
 Audio compression, silence suppression, and adaptive audio bitrate remain
 separate follow-ups; this switch must not imply they have been implemented.
+
+## Implementation state
+
+The server now parses `{"type":"audio-priority","v":1,"id":"...",
+"enabled":true}` and replies with matching type/version/id plus `ok`,
+`effective` and `message`. ID must be a nonempty string of at most64 characters;
+enabled must be a JSON boolean. This record leaves the initial layout gate
+alone. It does not reopen audio or alter its consent/routing.
+
+RdpConnection holds default/override state and derives effective priority from
+playback OR microphone consent. VideoStream reads that state on each decision,
+including temporarily steering when ordinary adaptation is off. Console broker
+accepts changes only from the admitted controller, forwards its quality signals
+to the generation-scoped worker, replays quality on worker readiness, and clears
+priority/quality state when ownership changes. Console baseline stays80 when
+priority is off. Resetting an explicitly fixed-quality stream restores its cap;
+normal adaptive streams instead continue their gradual recovery.
+
+Still pending: configuration-file plumbing for the default, capability discovery,
+client persistence/live correlated dispatch and truthful UI, runtime congestion
+and audio-delivery proof (including microphone), and packaging. The server reply
+acknowledges policy acceptance, not a measured latency/quality improvement or
+completion of an asynchronous encoder restart. No live deployment performed.
