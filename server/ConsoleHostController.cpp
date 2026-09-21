@@ -223,16 +223,16 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
     const QJsonValue camera = record.value(QLatin1String("camera"));
     const QJsonValue silenceHost = record.value(QLatin1String("silenceHost"));
     if (!playback.isBool() || !microphone.isBool() || !camera.isBool() || (!silenceHost.isUndefined() && !silenceHost.isBool())) {
-        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"code"_s, u"invalid"_s}, {u"message"_s, u"media fields must be booleans"_s}});
+        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"invalid"_s}, {u"message"_s, u"media fields must be booleans"_s}});
         return;
     }
     if (microphone.toBool() || camera.toBool()) {
-        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"code"_s, u"unsupported"_s}, {u"message"_s, u"physical console microphone and camera are not available yet"_s}});
+        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"unsupported"_s}, {u"message"_s, u"physical console microphone and camera are not available yet"_s}});
         return;
     }
     const ConsoleControl::Media requested{playback.toBool(), silenceHost.toBool(false) && playback.toBool()};
     if (!m_control.setMedia(id, requested)) {
-        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"code"_s, u"not-owner"_s}, {u"message"_s, u"only the authenticated console controller may silence the host"_s}});
+        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"not-owner"_s}, {u"message"_s, u"only the authenticated console controller may silence the host"_s}});
         return;
     }
     connection->setExternalAudioPlayback(requested.playback);
