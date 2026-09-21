@@ -108,6 +108,10 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
         }
         return false;
     }
+    const QString libraryPath = qEnvironmentVariable("LD_LIBRARY_PATH");
+    if (!libraryPath.isEmpty()) {
+        environment.insert(QStringLiteral("LD_LIBRARY_PATH"), libraryPath);
+    }
     const passwd *account = getpwuid(target.uid);
     if (!account) {
         if (error) {
