@@ -70,8 +70,19 @@ Its report carries the current controller generation; the broker ignores stale
 reports after ownership changes. The worker immediately gates input and releases
 held keys/buttons; the broker demotes the controller to viewer and restores host
 audio routing. This is inferred pointer activity, not raw-device identification:
-application pointer warps can also trigger it. A local keyboard takeover path and
-real physical-device acceptance remain required.
+application pointer warps can also trigger it. In Plasma, `Meta+Ctrl+Alt+T`
+(KRDP Physical Console → Reclaim physical console) uses KGlobalAccel to request
+the same takeover. It is active only while there is a remote controller and
+preserves the viewer connection. It deliberately does not auto-start the desktop
+shortcut daemon in SDDM, so greeter keyboard takeover remains open where that
+service is unavailable. Real physical-device acceptance remains required.
+
+Sol acceptance at a9d7f21: invoked the registered `reclaim-console` action through
+KGlobalAccel's component interface while the actual Buzz GUI was connected with
+host silence enabled. Broker logged local takeover, GUI became viewer with no
+owner while TCP stayed established, and default audio returned from the private
+KRDP sink to SteelSeries analog-chat. This proves the action/worker/broker/media
+path, not a physical keypress or greeter shortcut availability.
 
 ## Virtual sessions (after console mode)
 
