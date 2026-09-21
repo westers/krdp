@@ -41,6 +41,9 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         >"$probe_runtime/probe.log" 2>&1
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
+# Populate this private profile's desktop-service identities before KWin checks
+# application permissions (including Spectacle's restricted screenshot API).
+kbuildsycoca6 --noincremental >"$XDG_RUNTIME_DIR/service-cache.log" 2>&1
 wrapper_pid=
 graph_pid=
 cleanup() {
