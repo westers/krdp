@@ -18,6 +18,16 @@ if(DBUS_RUN_SESSION_EXECUTABLE AND GDBUS_EXECUTABLE AND BASH_EXECUTABLE)
 endif()
 
 find_program(PIPEWIRE_EXECUTABLE pipewire)
+if(PIPEWIRE_EXECUTABLE)
+    add_executable(PipeWireMicrophoneTest PipeWireMicrophoneTest.cpp ${CMAKE_SOURCE_DIR}/src/PipeWireMicrophone.cpp)
+    target_include_directories(PipeWireMicrophoneTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(PipeWireMicrophoneTest PRIVATE Qt6::Test Qt6::Core PkgConfig::PipeWire)
+    target_compile_definitions(PipeWireMicrophoneTest PRIVATE
+        KRDP_AUDIO_CONFIG_DIR="${CMAKE_SOURCE_DIR}/server"
+        KRDP_PIPEWIRE_EXECUTABLE="${PIPEWIRE_EXECUTABLE}")
+    add_test(NAME PipeWireMicrophoneTest COMMAND PipeWireMicrophoneTest)
+    set_tests_properties(PipeWireMicrophoneTest PROPERTIES TIMEOUT 20)
+endif()
 find_program(PW_DUMP_EXECUTABLE pw-dump)
 find_program(JQ_EXECUTABLE jq)
 find_program(TIMEOUT_EXECUTABLE timeout)

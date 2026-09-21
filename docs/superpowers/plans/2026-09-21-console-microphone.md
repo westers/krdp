@@ -63,3 +63,15 @@ to200ms, timestamps each chunk, expires samples older than250ms, drains at most
 generations. A stale reset cannot erase a newer generation. No console broker
 selects this route yet: worker IPC/source startup acknowledgement and lifecycle
 integration must be completed before lifting its microphone rejection.
+
+Worker IPC now defines separate microphone policy, result and PCM records,
+correlated by controller generation and per-activation request ID. Parsers reject
+zero IDs, malformed/trailing data, unaligned PCM and packets over20ms; endpoint
+delivery requires worker Ready and bounds queued socket writes. Worker/broker
+consumers are still pending; this is not live microphone forwarding.
+
+PipeWireMicrophone now exposes asynchronous Starting/Ready/Failed/Stopped state.
+Ready means PipeWire reached PAUSED or STREAMING, not merely that connect was
+submitted. A private, hardware-free graph test proves readiness without a
+consumer, stop/reopen, daemon-loss failure and missing-graph refusal. The worker
+must poll this state with a bounded startup deadline before acknowledging enable.

@@ -14,9 +14,10 @@ bool PipeWireMicrophone::start(const QString &id)
 {
     QMutexLocker lock(&m_mutex);
     if (m_stream) return true;
+    m_state = State::Starting;
     pw_init(nullptr, nullptr);
     m_loop = pw_thread_loop_new("krdp-remote-mic", nullptr);
-    if (!m_loop) return false;
+    if (!m_loop) { m_state = State::Failed; return false; }
     // PipeWire retains this pointer for the life of the stream; a stack-local
     // events table becomes invalid as soon as start() returns and crashes the
     // first graph-process callback.
@@ -24,6 +25,18 @@ bool PipeWireMicrophone::start(const QString &id)
         pw_stream_events result{};
         result.version = PW_VERSION_STREAM_EVENTS;
         result.process = PipeWireMicrophone::process;
+        result.state_changed = [](void *data, pw_stream_state, pw_stream_state state, const char *) {
+            auto *self = static_cast<PipeWireMicrophone *>(data);
+            // PAUSED is a registered source with no consumer yet. Do not wait
+            // for STREAMING: applications choose when to open the microphone.
+            if (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING) {
+                self->m_state = State::Ready;
+            } else if (state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED) {
+                self->m_state = State::Failed;
+            } else {
+                self->m_state = State::Starting;
+            }
+        };
         return result;
     }();
     const QByteArray nodeName = QByteArrayLiteral("krdp.remote-microphone.") + id.toUtf8();
@@ -38,6 +51,7 @@ bool PipeWireMicrophone::start(const QString &id)
         m_stream = nullptr;
         pw_thread_loop_destroy(m_loop);
         m_loop = nullptr;
+        m_state = State::Failed;
         return false;
     }
     return true;
@@ -59,6 +73,7 @@ void PipeWireMicrophone::stop()
     if (loop) pw_thread_loop_stop(loop);
     if (stream) { pw_stream_disconnect(stream); pw_stream_destroy(stream); }
     if (loop) pw_thread_loop_destroy(loop);
+    m_state = State::Stopped;
 }
 void PipeWireMicrophone::write(const QByteArray &pcm)
 {

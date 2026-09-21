@@ -42,6 +42,9 @@ enum class Kind : quint8 {
     Resize,
     ResizeResult,
     VideoQuality,
+    MicrophonePolicy,
+    MicrophoneResult,
+    MicrophoneAudio,
 };
 
 struct Record {
@@ -457,7 +460,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::VideoQuality)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::MicrophoneAudio)) {
             ++m_invalid;
             return std::nullopt;
         }

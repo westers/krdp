@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #pragma once
+#include "ConsoleMicrophoneWire.h"
 
 #include <memory>
 
@@ -43,6 +44,8 @@ public:
     void setMedia(const ConsoleWorkerWire::Media &media);
     void setControlState(const ConsoleWorkerWire::ControlState &state);
     bool setVideoQuality(const ConsoleWorkerWire::VideoQuality &quality);
+    bool setMicrophone(const ConsoleWorkerWire::MicrophonePolicy &policy);
+    bool sendMicrophoneAudio(const ConsoleWorkerWire::MicrophoneAudio &audio);
     bool resize(const ConsoleWorkerWire::Resize &request);
 
 Q_SIGNALS:
@@ -54,6 +57,7 @@ Q_SIGNALS:
     void outputsReceived(const KRdp::ConsoleWorkerWire::Outputs &outputs);
     void localTakeover(quint64 generation);
     void resizeFinished(const KRdp::ConsoleWorkerWire::ResizeResult &result);
+    void microphoneFinished(const KRdp::ConsoleWorkerWire::MicrophoneResult &result);
     void protocolError(const QString &message);
 
 private:

@@ -129,6 +129,21 @@ bool ConsoleWorkerEndpoint::setVideoQuality(const ConsoleWorkerWire::VideoQualit
     return m_worker->write(ConsoleWorkerWire::frame(quality)) >= 0;
 }
 
+bool ConsoleWorkerEndpoint::setMicrophone(const ConsoleWorkerWire::MicrophonePolicy &policy)
+{
+    if (!m_ready || !m_worker || !policy.generation || !policy.requestId) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(policy)) >= 0;
+}
+
+bool ConsoleWorkerEndpoint::sendMicrophoneAudio(const ConsoleWorkerWire::MicrophoneAudio &audio)
+{
+    // Never let microphone PCM add an unbounded backlog to the worker socket.
+    // The broker must discard a failed packet, not retry stale speech later.
+    if (!m_ready || !m_worker || m_worker->bytesToWrite() > 7680 || !audio.generation || !audio.requestId
+        || audio.pcm.isEmpty() || audio.pcm.size() > 3840 || audio.pcm.size() % 4) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(audio)) >= 0;
+}
+
 void ConsoleWorkerEndpoint::acceptConnection()
 {
     QLocalSocket *candidate = m_server->nextPendingConnection();
@@ -181,6 +196,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT localTakeover(state->generation);
         } else if (const auto result = ConsoleWorkerWire::resizeResult(*record)) {
             Q_EMIT resizeFinished(*result);
+        } else if (const auto result = ConsoleWorkerWire::microphoneResult(*record)) {
+            Q_EMIT microphoneFinished(*result);
         } else {
             fail(QStringLiteral("unexpected worker record"));
             return;

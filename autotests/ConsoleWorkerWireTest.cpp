@@ -4,6 +4,7 @@
 #include <QTest>
 
 #include "ConsoleWorkerWire.h"
+#include "ConsoleMicrophoneWire.h"
 
 using namespace KRdp;
 using namespace KRdp::ConsoleWorkerWire;
@@ -23,7 +24,42 @@ private Q_SLOTS:
     void roundTripsResizeAndRejectsMalformedRequests();
     void rejectsOversizedRecord();
     void videoQualityIsBoundedAndGenerationScoped();
+    void microphoneRecordsAreBoundedAndCorrelated();
 };
+
+void ConsoleWorkerWireTest::microphoneRecordsAreBoundedAndCorrelated()
+{
+    Deframer reader;
+    const MicrophonePolicy policy{5, 17, true};
+    const MicrophoneAudio audio{5, 17, QByteArray(3840, 'x')};
+    const MicrophoneResult result{5, 17, QStringLiteral("source unavailable")};
+    reader.feed(frame(policy) + frame(audio) + frame(result));
+    auto record = reader.next();
+    QVERIFY(record);
+    QCOMPARE(microphonePolicy(*record), std::optional<MicrophonePolicy>(policy));
+    auto invalid = *record;
+    invalid.payload[16] = 2;
+    QVERIFY(!microphonePolicy(invalid));
+    invalid.payload.chop(1);
+    QVERIFY(!microphonePolicy(invalid));
+    record = reader.next();
+    QVERIFY(record);
+    QCOMPARE(microphoneAudio(*record), std::optional<MicrophoneAudio>(audio));
+    invalid = *record;
+    invalid.payload.append('x');
+    QVERIFY(!microphoneAudio(invalid));
+    record = reader.next();
+    QVERIFY(record);
+    QCOMPARE(microphoneResult(*record), std::optional<MicrophoneResult>(result));
+    for (const auto &bad : {MicrophoneAudio{0, 17, "1234"}, MicrophoneAudio{5, 0, "1234"},
+                            MicrophoneAudio{5, 17, {}}, MicrophoneAudio{5, 17, "123"},
+                            MicrophoneAudio{5, 17, QByteArray(3844, 'x')}}) {
+        reader.feed(frame(bad));
+        record = reader.next();
+        QVERIFY(record);
+        QVERIFY(!microphoneAudio(*record));
+    }
+}
 
 void ConsoleWorkerWireTest::videoQualityIsBoundedAndGenerationScoped()
 {

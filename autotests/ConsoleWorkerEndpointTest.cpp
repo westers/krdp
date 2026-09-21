@@ -59,6 +59,8 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QCOMPARE(ready, 0);
     QVERIFY(!endpoint.ready());
     QVERIFY(!endpoint.setVideoQuality({42, 60}));
+    QVERIFY(!endpoint.setMicrophone({42, 7, true}));
+    QVERIFY(!endpoint.sendMicrophoneAudio({42, 7, QByteArray(4, 'a')}));
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(ready, 1);
@@ -82,6 +84,24 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     const auto qualityRecord = brokerMessages.next();
     QVERIFY(qualityRecord);
     QCOMPARE(ConsoleWorkerWire::videoQuality(*qualityRecord), std::optional<ConsoleWorkerWire::VideoQuality>({42, 60}));
+
+    QVERIFY(endpoint.setMicrophone({42, 7, true}));
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    brokerMessages.feed(worker.readAll());
+    const auto micPolicy = brokerMessages.next();
+    QVERIFY(micPolicy);
+    QCOMPARE(ConsoleWorkerWire::microphonePolicy(*micPolicy), std::optional<ConsoleWorkerWire::MicrophonePolicy>({42, 7, true}));
+    QVERIFY(!endpoint.sendMicrophoneAudio({42, 7, QByteArray(3, 'a')}));
+    QVERIFY(endpoint.sendMicrophoneAudio({42, 7, QByteArray(4, 'a')}));
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    brokerMessages.feed(worker.readAll());
+    const auto micAudio = brokerMessages.next();
+    QVERIFY(micAudio);
+    QCOMPARE(ConsoleWorkerWire::microphoneAudio(*micAudio), std::optional<ConsoleWorkerWire::MicrophoneAudio>({42, 7, QByteArray(4, 'a')}));
+    QSignalSpy micReplies(&endpoint, &ConsoleWorkerEndpoint::microphoneFinished);
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::MicrophoneResult{42, 7, {}}));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(micReplies.count(), 1);
 
     QVERIFY(endpoint.resize(resize));
     QTRY_VERIFY(worker.bytesAvailable() > 0);
