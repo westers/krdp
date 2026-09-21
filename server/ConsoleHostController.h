@@ -63,6 +63,7 @@ private:
     void sendLayouts();
     void releaseInput();
     void syncControlState();
+    void finishResize(const QString &error);
 
     Server *m_server = nullptr;
     WorkerLauncher m_launchWorker;
@@ -80,5 +81,14 @@ private:
     ConsoleInputState m_inputState;
     ConsoleControl::Id m_workerOwner = 0;
     quint64 m_controlGeneration = 0;
+    struct PendingResize {
+        ConsoleControl::Id client = 0;
+        QString clientRequest;
+        quint64 requestId = 0;
+        quint64 generation = 0;
+    };
+    std::optional<PendingResize> m_pendingResize;
+    quint64 m_nextResizeId = 0;
+    QTimer m_resizeDeadline;
 };
 }

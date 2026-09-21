@@ -91,7 +91,7 @@ bool ConsoleResizeExecutor::restore(const ConsoleResize::Plan &plan)
             finish(plan, QStringLiteral("could not read physical outputs before restoration"));
         } else if (!ConsoleResize::matches(snapshot, plan)) {
             // Local changes supersede our temporary mode. Do not undo them.
-            finish(plan, {});
+            finish(ConsoleResize::withObservedGeometry(plan, snapshot), {});
         } else {
             apply(plan, true);
         }
@@ -105,7 +105,7 @@ void ConsoleResizeExecutor::apply(ConsoleResize::Plan plan, bool restoring)
     run(restoring ? plan.restore : plan.apply, [this, plan, restoring](bool commandOk, const QByteArray &) {
         run({QStringLiteral("-j")}, [this, plan, restoring, commandOk](bool readOk, const QByteArray &snapshot) {
             if (readOk && ConsoleResize::matches(snapshot, plan, restoring)) {
-                finish(plan, {}); // Readback is authoritative even if the helper exit was nonzero.
+                finish(ConsoleResize::withObservedGeometry(plan, snapshot), {}); // Readback is authoritative even if the helper exit was nonzero.
                 return;
             }
             const QString error = !readOk ? QStringLiteral("could not verify physical output mode")

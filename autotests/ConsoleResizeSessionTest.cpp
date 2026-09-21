@@ -55,8 +55,15 @@ private Q_SLOTS:
         QCOMPARE(args.first(), QStringLiteral("output.DP-3.mode.1"));
         std::exchange(pending, {})(true, {});
         std::exchange(pending, {})(true, snapshot());
-        QVERIFY(!session.changing());
+        QVERIFY(session.changing());
         QVERIFY(!session.inputAllowed());
+        session.setControl({3, true}); // New owner cannot use old coordinates during recovery.
+        QVERIFY(!session.inputAllowed());
+        session.captured(resized, true);
+        QVERIFY(!session.inputAllowed());
+        session.captured({{{QStringLiteral("DP-3"), QRect(0, 0, 1920, 1080), 1, true}}}, true);
+        QVERIFY(!session.changing());
+        QVERIFY(session.inputAllowed());
     }
 
     void stopWaitsForOutstandingApplyAndRestore()

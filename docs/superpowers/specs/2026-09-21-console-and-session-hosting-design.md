@@ -140,6 +140,19 @@ failure/crash recovery. Greeter teardown can remove its compositor before any
 asynchronous restoration finishes, so that path remains an explicit acceptance
 case, not a guarantee inferred from the lifecycle tests.
 
+Broker/recovery follow-up: `console-resize {v:1,id,output,width,height,scale}`
+now validates bounded tokens, integral pixel dimensions, scale, active controller,
+worker readiness and membership in the current capture layout. Only one request
+is outstanding; a broker-owned serial and control generation correlate the worker
+reply, while the client receives its own ID in `console-resize {v:1,id,ok,message}`.
+Control changes, worker replacement and a 45-second timeout terminate the pending
+reply. This path is separate from layout-apply errors. No client capability is
+advertised yet. Restoration now captures its actual readback mode geometry and
+holds input until a matching keyframe arrives, even for a new owner; a stale
+frame cannot unlock input. A late correct frame can recover a capture timeout.
+Unit coverage exercises new-owner arrival during restoration. Client integration
+and non-no-op physical modeset acceptance are still outstanding.
+
 ## Virtual sessions (after console mode)
 
 The virtual-session host uses the same stable transport and adapter API, but

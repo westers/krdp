@@ -18,6 +18,7 @@
 
 #include "ConsoleSeat.h"
 #include "ConsoleWorkerSession.h"
+#include "ConsoleResize.h"
 
 using namespace Qt::StringLiterals;
 
@@ -30,6 +31,16 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     , m_runtimeDirectory(std::move(runtimeDirectory))
 {
     Q_ASSERT(m_server);
+    m_resizeDeadline.setSingleShot(true);
+    m_resizeDeadline.setInterval(45000);
+    connect(&m_resizeDeadline, &QTimer::timeout, this, [this]() {
+        finishResize(u"physical resize timed out"_s);
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::resizeFinished, this, [this](const auto &result) {
+        if (m_pendingResize && result.requestId == m_pendingResize->requestId && result.generation == m_pendingResize->generation) {
+            finishResize(result.error);
+        }
+    });
     m_seatPoll.setInterval(500);
     connect(&m_seatPoll, &QTimer::timeout, this, &ConsoleHostController::refreshSeat);
     connect(m_server, &Server::newConnectionCreated, this, &ConsoleHostController::addClient);
@@ -41,6 +52,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerStopped, this, [this]() {
+        finishResize(u"console capture worker stopped during resize"_s);
         apply(m_handoff.workerStopped());
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [this](const VideoFrame &frame) {
@@ -170,6 +182,7 @@ void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
 void ConsoleHostController::setWorkerActive(bool active)
 {
     if (!active) {
+        finishResize(u"console capture worker changed during resize"_s);
         releaseInput();
     }
     m_inputEnabled = active;
@@ -229,6 +242,44 @@ void ConsoleHostController::addClient(RdpConnection *connection)
 void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record)
 {
     const QString type = record.value(u"type"_s).toString();
+    if (type == u"console-resize"_s) {
+        const QString requestId = record.value(u"id"_s).toString();
+        const auto refuse = [connection, &requestId](const QString &error) {
+            connection->sendControlRecord(QJsonObject{{u"type"_s, u"console-resize"_s}, {u"v"_s, 1}, {u"id"_s, requestId.left(64)},
+                                                       {u"ok"_s, false}, {u"message"_s, error}});
+        };
+        const double width = record.value(u"width"_s).toDouble(0);
+        const double height = record.value(u"height"_s).toDouble(0);
+        const double scale = record.value(u"scale"_s).toDouble(0);
+        const QString output = record.value(u"output"_s).toString();
+        if (record.value(u"v"_s).toInt() != 1 || !ConsoleResize::safeToken(requestId) || requestId.size() > 64
+            || !ConsoleResize::safeToken(output) || output.startsWith(u"Virtual-"_s)
+            || !std::isfinite(width) || !std::isfinite(height) || width < 320 || width > 4096 || height < 200 || height > 4096
+            || width != std::floor(width) || height != std::floor(height) || !std::isfinite(scale) || scale < 1 || scale > 4) {
+            refuse(u"invalid physical resize request"_s);
+            return;
+        }
+        if (!m_control.ownsControl(id) || !m_inputEnabled || !m_endpoint.ready()) {
+            refuse(u"physical resize requires the active console controller"_s);
+            return;
+        }
+        if (m_pendingResize) {
+            refuse(u"another physical resize is still pending"_s);
+            return;
+        }
+        if (std::none_of(m_outputs.monitors.cbegin(), m_outputs.monitors.cend(), [&output](const auto &monitor) { return monitor.name == output; })) {
+            refuse(u"physical output is not in the active capture layout"_s);
+            return;
+        }
+        releaseInput();
+        const auto serial = ++m_nextResizeId;
+        m_pendingResize = PendingResize{id, requestId, serial, m_controlGeneration};
+        m_resizeDeadline.start();
+        if (!m_endpoint.resize({serial, m_controlGeneration, output, QSize(int(width), int(height)), scale})) {
+            finishResize(u"console capture worker is unavailable"_s);
+        }
+        return;
+    }
     if (type == u"console-control"_s) {
         const QString action = record.value(u"action"_s).toString();
         const auto refuse = [connection](const QString &code, const QString &message) {
@@ -371,9 +422,26 @@ void ConsoleHostController::releaseInput()
 void ConsoleHostController::syncControlState()
 {
     if (m_workerOwner != m_control.owner()) {
+        finishResize(u"console control changed during resize"_s);
         m_workerOwner = m_control.owner();
         ++m_controlGeneration;
         m_endpoint.setControlState({m_controlGeneration, m_workerOwner != 0});
+    }
+}
+
+void ConsoleHostController::finishResize(const QString &error)
+{
+    m_resizeDeadline.stop();
+    const auto pending = std::exchange(m_pendingResize, std::nullopt);
+    if (!pending) {
+        return;
+    }
+    for (const auto &client : m_clients) {
+        if (client->id == pending->client) {
+            client->connection->sendControlRecord(QJsonObject{{u"type"_s, u"console-resize"_s}, {u"v"_s, 1},
+                                                               {u"id"_s, pending->clientRequest}, {u"ok"_s, error.isEmpty()}, {u"message"_s, error}});
+            break;
+        }
     }
 }
 

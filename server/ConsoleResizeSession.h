@@ -31,6 +31,7 @@ private:
     ConsoleWorkerWire::ControlState m_control;
     std::optional<ConsoleWorkerWire::Resize> m_pending;
     QMap<QString, ConsoleResize::Plan> m_held;
+    QMap<QString, ConsoleResize::Plan> m_recovery;
     QTimer m_captureDeadline;
     bool m_waitingCapture = false;
     bool m_draining = false;

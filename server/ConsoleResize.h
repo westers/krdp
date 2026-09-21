@@ -22,6 +22,8 @@ struct Plan {
     double previousScale = 1;
     QStringList apply;
     QStringList restore;
+    QSize observedPixels;
+    double observedScale = 0;
     bool valid() const { return error.isEmpty() && !apply.isEmpty(); }
 };
 
@@ -91,6 +93,33 @@ inline QStringList rollbackArgs(const QByteArray &snapshot, const Plan &plan)
         arguments << prefix + QStringLiteral("scale.") + QString::number(plan.previousScale, 'g', 12);
     }
     return arguments;
+}
+
+inline Plan withObservedGeometry(Plan plan, const QByteArray &snapshot)
+{
+    const auto document = QJsonDocument::fromJson(snapshot);
+    for (const auto entry : document.object().value(QStringLiteral("outputs")).toArray()) {
+        const auto output = entry.toObject();
+        if (output.value(QStringLiteral("name")).toString() != plan.output
+            || !output.value(QStringLiteral("connected")).toBool() || !output.value(QStringLiteral("enabled")).toBool()) {
+            continue;
+        }
+        const QString modeId = output.value(QStringLiteral("currentModeId")).toString();
+        for (const auto modeEntry : output.value(QStringLiteral("modes")).toArray()) {
+            const auto mode = modeEntry.toObject();
+            if (mode.value(QStringLiteral("id")).toString() == modeId) {
+                const auto size = mode.value(QStringLiteral("size")).toObject();
+                plan.observedPixels = QSize(size.value(QStringLiteral("width")).toInt(), size.value(QStringLiteral("height")).toInt());
+                const int rotation = output.value(QStringLiteral("rotation")).toInt(1);
+                if (rotation == 2 || rotation == 8) {
+                    plan.observedPixels.transpose();
+                }
+                plan.observedScale = output.value(QStringLiteral("scale")).toDouble();
+                return plan;
+            }
+        }
+    }
+    return plan;
 }
 
 inline Plan plan(const QByteArray &snapshot, const QString &name, QSize pixels, double scale)

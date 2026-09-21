@@ -11,6 +11,10 @@ ConsoleResizeSession::ConsoleResizeSession(QObject *parent, ConsoleResizeExecuto
     connect(&m_executor, &ConsoleResizeExecutor::changing, this, &ConsoleResizeSession::mutationStarting);
     connect(&m_executor, &ConsoleResizeExecutor::finished, this, &ConsoleResizeSession::completed);
     connect(&m_captureDeadline, &QTimer::timeout, this, [this]() {
+        if (!m_pending && !m_recovery.isEmpty()) {
+            m_restoreError = QStringLiteral("capture did not reach restored geometry");
+            return; // Keep input disabled rather than use stale coordinates.
+        }
         m_draining = true;
         finishRequest(QStringLiteral("capture did not reach the requested display geometry"));
         drain();
@@ -24,7 +28,7 @@ bool ConsoleResizeSession::inputAllowed() const
 
 bool ConsoleResizeSession::changing() const
 {
-    return m_executor.busy() || m_pending.has_value() || m_restoring || m_draining;
+    return m_executor.busy() || m_pending.has_value() || m_restoring || m_draining || !m_recovery.isEmpty();
 }
 
 void ConsoleResizeSession::setControl(ConsoleWorkerWire::ControlState control)
@@ -61,6 +65,8 @@ void ConsoleResizeSession::completed(const ConsoleResize::Plan &plan, const QStr
         m_restoring = false;
         if (!error.isEmpty()) {
             m_restoreError = error;
+        } else if (plan.observedPixels.isValid() && plan.observedScale > 0) {
+            m_recovery.insert(plan.output, plan);
         }
         drain();
         return;
@@ -96,6 +102,21 @@ void ConsoleResizeSession::completed(const ConsoleResize::Plan &plan, const QStr
 
 void ConsoleResizeSession::captured(const ConsoleWorkerWire::Outputs &outputs, bool keyframe)
 {
+    if (keyframe && !m_executor.busy() && !m_restoring && !m_draining && !m_recovery.isEmpty()) {
+        for (const auto &output : outputs.monitors) {
+            const auto expected = m_recovery.constFind(output.name);
+            if (expected != m_recovery.cend() && std::abs(output.scale - expected->observedScale) < 0.000001
+                && QSize(qRound(output.geometry.width() * output.scale), qRound(output.geometry.height() * output.scale)) == expected->observedPixels) {
+                m_recovery.remove(output.name);
+            }
+        }
+        if (m_recovery.isEmpty()) {
+            m_captureDeadline.stop();
+            if (m_restoreError == QStringLiteral("capture did not reach restored geometry")) {
+                m_restoreError.clear(); // A late, correct keyframe can recover safely.
+            }
+        }
+    }
     if (!m_pending || !m_waitingCapture || !keyframe) {
         return;
     }
@@ -145,8 +166,14 @@ void ConsoleResizeSession::drain()
         return;
     }
     m_draining = false;
-    Q_EMIT keyframeNeeded();
     if (m_stopping) {
+        m_recovery.clear();
+        m_captureDeadline.stop();
         Q_EMIT stopped(m_restoreError);
+        return;
     }
+    if (!m_recovery.isEmpty()) {
+        m_captureDeadline.start();
+    }
+    Q_EMIT keyframeNeeded();
 }
