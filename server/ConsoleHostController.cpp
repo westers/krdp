@@ -403,7 +403,9 @@ void ConsoleHostController::sendLayouts()
     for (const auto &client : m_clients) {
         if (client->wantsLayout && m_control.admitted(client->id)) {
             layout.you = m_control.ownsControl(client->id) ? u"owner"_s : u"viewer"_s;
-            client->connection->sendControlRecord(LayoutControl::layoutRecord(layout));
+            auto record = LayoutControl::layoutRecord(layout);
+            record.insert(u"consoleResize"_s, true);
+            client->connection->sendControlRecord(record);
         }
     }
 }

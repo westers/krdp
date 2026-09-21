@@ -6,8 +6,10 @@
 #include <QJsonObject>
 #include <QSize>
 #include <QStringList>
+#include <QRectF>
 #include <cmath>
 #include <limits>
+#include <algorithm>
 
 namespace KRdp::ConsoleResize
 {
@@ -171,8 +173,13 @@ inline Plan plan(const QByteArray &snapshot, const QString &name, QSize pixels, 
         const auto size = mode.value(QStringLiteral("size")).toObject();
         const QString id = mode.value(QStringLiteral("id")).toString();
         const double refresh = mode.value(QStringLiteral("refreshRate")).toDouble();
+        QSize oriented(size.value(QStringLiteral("width")).toInt(), size.value(QStringLiteral("height")).toInt());
+        const int rotation = output.value(QStringLiteral("rotation")).toInt(1);
+        if (rotation == 2 || rotation == 8) {
+            oriented.transpose();
+        }
         if (!safeToken(id) || !std::isfinite(refresh) || refresh <= 0
-            || QSize(size.value(QStringLiteral("width")).toInt(), size.value(QStringLiteral("height")).toInt()) != pixels) {
+            || oriented != pixels) {
             continue;
         }
         // A no-op preserves the exact mode; otherwise keep refresh as close as possible.
@@ -184,6 +191,40 @@ inline Plan plan(const QByteArray &snapshot, const QString &name, QSize pixels, 
     }
     if (result.mode.isEmpty()) {
         return fail(QStringLiteral("requested resolution is not an advertised physical mode"));
+    }
+    // The physical worker currently encodes one workspace. Preserve every
+    // output's position, but reject overlap or a workspace beyond its limits.
+    QList<QRectF> rectangles;
+    QRectF workspace;
+    double maximumScale = scale;
+    for (const auto entry : document.object().value(QStringLiteral("outputs")).toArray()) {
+        const auto candidate = entry.toObject();
+        if (!candidate.value(QStringLiteral("connected")).toBool() || !candidate.value(QStringLiteral("enabled")).toBool()) {
+            continue;
+        }
+        const bool target = candidate.value(QStringLiteral("name")).toString() == name;
+        Plan named;
+        named.output = candidate.value(QStringLiteral("name")).toString();
+        const auto observed = withObservedGeometry(named, snapshot);
+        const QSize native = target ? pixels : observed.observedPixels;
+        const double ratio = target ? scale : observed.observedScale;
+        if (!native.isValid() || !std::isfinite(ratio) || ratio <= 0 || ratio > 4) {
+            return fail(QStringLiteral("cannot validate active output geometry"));
+        }
+        const auto position = candidate.value(QStringLiteral("pos")).toObject();
+        const QRectF rectangle(position.value(QStringLiteral("x")).toDouble(), position.value(QStringLiteral("y")).toDouble(),
+                               native.width() / ratio, native.height() / ratio);
+        for (const auto &other : rectangles) {
+            if (rectangle.intersects(other)) {
+                return fail(QStringLiteral("physical resize would overlap active outputs"));
+            }
+        }
+        rectangles.append(rectangle);
+        workspace = workspace.united(rectangle);
+        maximumScale = std::max(maximumScale, ratio);
+    }
+    if (workspace.width() * maximumScale > 4096 || workspace.height() * maximumScale > 4096) {
+        return fail(QStringLiteral("resized physical workspace exceeds capture limits"));
     }
     const QString prefix = QStringLiteral("output.%1.").arg(name);
     result.apply = {prefix + QStringLiteral("mode.") + result.mode, prefix + QStringLiteral("scale.") + QString::number(scale, 'g', 12)};

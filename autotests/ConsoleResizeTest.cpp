@@ -58,6 +58,27 @@ private Q_SLOTS:
         missing.replace("\"currentModeId\":\"2\"", "\"currentModeId\":\"missing\"");
         QVERIFY(!KRdp::ConsoleResize::plan(missing, QStringLiteral("DP-3"), {1280, 720}, 1).valid());
     }
+    void rejectsOverlapAndOversizedWorkspace()
+    {
+        auto document = QJsonDocument::fromJson(snapshot);
+        auto root = document.object();
+        auto outputs = root.value(QStringLiteral("outputs")).toArray();
+        auto other = outputs.first().toObject();
+        other.insert(QStringLiteral("name"), QStringLiteral("DP-4"));
+        other.insert(QStringLiteral("scale"), 1);
+        other.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1000}, {QStringLiteral("y"), 0}});
+        outputs.append(other);
+        root.insert(QStringLiteral("outputs"), outputs);
+        QVERIFY(!KRdp::ConsoleResize::plan(QJsonDocument(root).toJson(), QStringLiteral("DP-3"), {1280, 720}, 1).valid());
+        other.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 4000}, {QStringLiteral("y"), 0}});
+        outputs[1] = other;
+        root.insert(QStringLiteral("outputs"), outputs);
+        QVERIFY(!KRdp::ConsoleResize::plan(QJsonDocument(root).toJson(), QStringLiteral("DP-3"), {1280, 720}, 1).valid());
+        other.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1280}, {QStringLiteral("y"), 0}});
+        outputs[1] = other;
+        root.insert(QStringLiteral("outputs"), outputs);
+        QVERIFY(KRdp::ConsoleResize::plan(QJsonDocument(root).toJson(), QStringLiteral("DP-3"), {1280, 720}, 1).valid());
+    }
 };
 QTEST_GUILESS_MAIN(ConsoleResizeTest)
 #include "ConsoleResizeTest.moc"
