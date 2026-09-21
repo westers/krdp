@@ -15,6 +15,7 @@ class ConsoleWorkerEndpointTest : public QObject
 
 private Q_SLOTS:
     void authenticatesThenForwardsFrames();
+    void rejectsFramesBeforeCaptureReady();
     void rejectsWrongWorkerToken();
 };
 
@@ -58,6 +59,29 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QCOMPARE(received.size, sent.size);
     QCOMPARE(received.data, sent.data);
     QVERIFY(received.isKeyFrame);
+}
+
+void ConsoleWorkerEndpointTest::rejectsFramesBeforeCaptureReady()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    ConsoleWorkerEndpoint endpoint;
+    const ConsoleHandoff::Target target{ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000};
+    const QByteArray token(24, 't');
+    QVERIFY(endpoint.listen(directory.filePath(QStringLiteral("worker.sock")), target, token));
+    int errors = 0;
+    connect(&endpoint, &ConsoleWorkerEndpoint::protocolError, this, [&errors](const QString &) { ++errors; });
+
+    QLocalSocket worker;
+    worker.connectToServer(endpoint.socketName());
+    QVERIFY(worker.waitForConnected(1000));
+    VideoFrame premature;
+    premature.size = QSize(1, 1);
+    premature.data = "not-ready";
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), 1000, token}) + ConsoleWorkerWire::frame(premature));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(errors, 1);
+    QVERIFY(!endpoint.ready());
 }
 
 void ConsoleWorkerEndpointTest::rejectsWrongWorkerToken()
