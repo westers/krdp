@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <QObject>
+#include <QJsonObject>
 #include <QTimer>
 
 #include "ConsoleHandoff.h"
@@ -47,6 +48,7 @@ private:
         RdpConnection *connection = nullptr;
         std::unique_ptr<ConsoleWorkerSession> session;
         QList<QMetaObject::Connection> connections;
+        QJsonObject pendingMedia;
     };
 
     void apply(const ConsoleHandoff::Actions &actions);
@@ -55,6 +57,7 @@ private:
     void removeClient(RdpConnection *connection);
     void addClient(RdpConnection *connection);
     void updateMedia();
+    void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
 
     Server *m_server = nullptr;
     WorkerLauncher m_launchWorker;

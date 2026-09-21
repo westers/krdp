@@ -29,6 +29,7 @@ public:
     }
 
     bool ownsControl(Id id) const { return id && id == m_owner; }
+    bool admitted(Id id) const { return m_clients.contains(id); }
 
     bool setMedia(Id id, Media media)
     {

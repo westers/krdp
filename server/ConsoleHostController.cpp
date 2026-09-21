@@ -4,6 +4,7 @@
 #include "ConsoleHostController.h"
 
 #include <algorithm>
+#include <utility>
 
 #include <QDir>
 #include <QRandomGenerator>
@@ -179,42 +180,65 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     client->connections.append(connect(client->session.get(), &ConsoleWorkerSession::keyFrameRequested, &m_endpoint, &ConsoleWorkerEndpoint::requestKeyFrame));
     client->connections.append(connect(connection->inputHandler(), &InputHandler::inputEvent, client->session.get(), &AbstractSession::sendEvent));
     client->connections.append(connect(connection, &RdpConnection::controlRecordReceived, this, [this, connection, id](const QJsonObject &record) {
-        if (record.value(QLatin1String("type")).toString() != QLatin1String("media")) {
-            return;
-        }
-        const QJsonValue playback = record.value(QLatin1String("playback"));
-        const QJsonValue microphone = record.value(QLatin1String("microphone"));
-        const QJsonValue camera = record.value(QLatin1String("camera"));
-        const QJsonValue silenceHost = record.value(QLatin1String("silenceHost"));
-        if (!playback.isBool() || !microphone.isBool() || !camera.isBool() || (!silenceHost.isUndefined() && !silenceHost.isBool())) {
-            connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"code"_s, u"invalid"_s}, {u"message"_s, u"media fields must be booleans"_s}});
-            return;
-        }
-        if (microphone.toBool() || camera.toBool()) {
-            connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"code"_s, u"unsupported"_s}, {u"message"_s, u"physical console microphone and camera are not available yet"_s}});
-            return;
-        }
-        const ConsoleControl::Media requested{playback.toBool(), silenceHost.toBool(false) && playback.toBool()};
-        if (!m_control.setMedia(id, requested)) {
-            connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"code"_s, u"not-owner"_s}, {u"message"_s, u"only the authenticated console controller may silence the host"_s}});
-            return;
-        }
-        connection->setExternalAudioPlayback(requested.playback);
-        connection->setMediaPolicy(requested.playback, false, false, false);
-        updateMedia();
-        connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, true}, {u"playback"_s, requested.playback}, {u"microphone"_s, false}, {u"camera"_s, false}, {u"silenceHost"_s, requested.silenceHost}});
+        onControlRecord(connection, id, record);
     }, Qt::QueuedConnection));
     client->connections.append(connect(connection, &RdpConnection::stateChanged, this, [this, connection, id](RdpConnection::State state) {
         if (state == RdpConnection::State::Streaming) {
-            // Running is pre-authentication. Streaming follows successful
-            // activation and precedes control-channel records on this peer.
+            // Running is pre-authentication. Media preflight can also arrive
+            // before Streaming; defer it without granting any authority.
             m_control.admit(id);
+            for (const auto &client : m_clients) {
+                if (client->id == id && !client->pendingMedia.isEmpty()) {
+                    const auto pending = std::exchange(client->pendingMedia, {});
+                    onControlRecord(connection, id, pending);
+                    break;
+                }
+            }
         }
         if (state == RdpConnection::State::Closed) {
             removeClient(connection);
         }
     }));
     m_clients.push_back(std::move(client));
+}
+
+void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record)
+{
+    if (record.value(QLatin1String("type")).toString() != QLatin1String("media")) {
+        return;
+    }
+    if (!m_control.admitted(id)) {
+        for (const auto &client : m_clients) {
+            if (client->id == id) {
+                // Bounded: keep only the latest preflight. Failed
+                // authentication discards it with the client.
+                client->pendingMedia = record;
+                break;
+            }
+        }
+        return;
+    }
+    const QJsonValue playback = record.value(QLatin1String("playback"));
+    const QJsonValue microphone = record.value(QLatin1String("microphone"));
+    const QJsonValue camera = record.value(QLatin1String("camera"));
+    const QJsonValue silenceHost = record.value(QLatin1String("silenceHost"));
+    if (!playback.isBool() || !microphone.isBool() || !camera.isBool() || (!silenceHost.isUndefined() && !silenceHost.isBool())) {
+        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"code"_s, u"invalid"_s}, {u"message"_s, u"media fields must be booleans"_s}});
+        return;
+    }
+    if (microphone.toBool() || camera.toBool()) {
+        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"code"_s, u"unsupported"_s}, {u"message"_s, u"physical console microphone and camera are not available yet"_s}});
+        return;
+    }
+    const ConsoleControl::Media requested{playback.toBool(), silenceHost.toBool(false) && playback.toBool()};
+    if (!m_control.setMedia(id, requested)) {
+        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"code"_s, u"not-owner"_s}, {u"message"_s, u"only the authenticated console controller may silence the host"_s}});
+        return;
+    }
+    connection->setExternalAudioPlayback(requested.playback);
+    connection->setMediaPolicy(requested.playback, false, false, false);
+    updateMedia();
+    connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, true}, {u"playback"_s, requested.playback}, {u"microphone"_s, false}, {u"camera"_s, false}, {u"silenceHost"_s, requested.silenceHost}});
 }
 
 void ConsoleHostController::removeClient(RdpConnection *connection)
