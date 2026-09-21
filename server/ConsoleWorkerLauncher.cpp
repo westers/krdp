@@ -11,6 +11,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QDebug>
 #include <QProcess>
 
@@ -64,10 +65,16 @@ QProcessEnvironment environmentFor(const ConsoleSeat::Session &session, QString 
     for (const auto &process : processes) {
         bool ok = false;
         const auto pid = process.toLongLong(&ok);
-        if (!ok || pid <= 0 || !belongsToSession(pid, session)) {
+        if (!ok || pid <= 0 || QFileInfo(QStringLiteral("/proc/%1").arg(pid)).ownerId() != session.uid) {
             continue;
         }
         const auto environment = readProcessEnvironment(pid);
+        // Plasma starts applications as user-manager services outside the
+        // logind scope, but retains the originating session ID in their env.
+        if (!belongsToSession(pid, session)
+            && environment.value(QStringLiteral("XDG_SESSION_ID")) != session.id) {
+            continue;
+        }
         if (isUsableWaylandEnvironment(environment, session)) {
             return environment;
         }
