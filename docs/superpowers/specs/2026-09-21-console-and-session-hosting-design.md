@@ -84,6 +84,34 @@ owner while TCP stayed established, and default audio returned from the private
 KRDP sink to SteelSeries analog-chat. This proves the action/worker/broker/media
 path, not a physical keypress or greeter shortcut availability.
 
+## Physical-console Fit amendment (Steve's requested host resolution change)
+
+Physical Fit changes the actual physical output mode and desktop scale. It must
+not reuse the normal layout executor's dark-monitor/virtual-stand-in behavior.
+Only the authenticated current controller may request it. The broker validates
+the request and forwards it with its control generation to the selected worker;
+the worker runs kscreen-doctor in that compositor's environment, never as root.
+The client needs an advertised capability before enabling physical Fit, and a
+correlated result must not complete an unrelated layout/media operation.
+
+The worker first reads available modes and records the original mode/scale.
+ConsoleResize.h selects an exact advertised native-pixel mode, preserving the
+current mode when possible and otherwise the closest refresh rate. Unsupported
+sizes must be reported explicitly, not silently replaced by client scaling.
+Sol also advertises kscreen-doctor custom-mode support; safe custom-size handling
+remains follow-up, not something the first planner claims to implement.
+
+Application must be asynchronous and verified against a fresh output readback;
+exit status alone is insufficient. Resize suspends pointer-takeover inference
+during compositor churn, gates stale input coordinates, and requires a fresh
+capture layout/keyframe before success. Preserve other outputs and validate the
+resulting capture dimensions. Roll back failed applies; restore temporary mode
+and scale on release/disconnect/handoff only while they still match KRDP's last
+applied values, preserving independent local display changes. Tests must prove
+an actual non-no-op mode change on Sol and clean restoration. Hal is not a resize
+test target. The planner is implemented first; worker execution/transport/client
+Fit and runtime acceptance are still incomplete.
+
 ## Virtual sessions (after console mode)
 
 The virtual-session host uses the same stable transport and adapter API, but
