@@ -385,6 +385,7 @@ QJsonObject layoutRecord(const Layout &layout)
 {
     QJsonObject object = toJson(layout);
     object.insert(QStringLiteral("type"), QStringLiteral("layout"));
+    object.insert(QStringLiteral("audioPriority"), true);
     return object;
 }
 
@@ -392,6 +393,7 @@ QJsonObject takeoverRecord(const Layout &layout)
 {
     QJsonObject object = toJson(layout);
     object.insert(QStringLiteral("type"), QStringLiteral("takeover"));
+    object.insert(QStringLiteral("audioPriority"), true);
     return object;
 }
 
