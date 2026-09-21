@@ -16,6 +16,7 @@ private Q_SLOTS:
     void deframesSplitAndCoalescedRecords();
     void roundTripsEncodedFrame();
     void roundTripsNormalizedInput();
+    void roundTripsMediaAndPcm();
     void rejectsOversizedRecord();
 };
 
@@ -64,6 +65,20 @@ void ConsoleWorkerWireTest::roundTripsNormalizedInput()
     const auto record = deframer.next();
     QVERIFY(record);
     QCOMPARE(input(*record), std::optional<Input>(sent));
+}
+
+void ConsoleWorkerWireTest::roundTripsMediaAndPcm()
+{
+    Deframer deframer;
+    const Media policy{true, true};
+    const Audio samples{QByteArray(3528, '\x01')}; // 20 ms of 44.1 kHz stereo S16
+    deframer.feed(frame(policy) + frame(samples));
+    const auto mediaRecord = deframer.next();
+    QVERIFY(mediaRecord);
+    QCOMPARE(media(*mediaRecord), std::optional<Media>(policy));
+    const auto audioRecord = deframer.next();
+    QVERIFY(audioRecord);
+    QCOMPARE(audio(*audioRecord), std::optional<Audio>(samples));
 }
 
 void ConsoleWorkerWireTest::rejectsOversizedRecord()

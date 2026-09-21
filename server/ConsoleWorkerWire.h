@@ -31,6 +31,8 @@ enum class Kind : quint8 {
     Input,
     Stop,
     RequestKeyFrame,
+    Media,
+    Audio,
     Error,
 };
 
@@ -49,6 +51,53 @@ struct Hello {
     QByteArray token;
     bool operator==(const Hello &) const = default;
 };
+
+/** Explicit per-connection playback policy sent by the console host. */
+struct Media {
+    bool playback = false;
+    bool silenceHost = false;
+    bool operator==(const Media &) const = default;
+};
+
+inline QByteArray frame(const Media &media)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << media.playback << media.silenceHost;
+    return frame(Kind::Media, payload);
+}
+
+inline std::optional<Media> media(const Record &record)
+{
+    if (record.kind != Kind::Media) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    Media result;
+    stream >> result.playback >> result.silenceHost;
+    return stream.status() == QDataStream::Ok && stream.atEnd() ? std::optional<Media>(result) : std::nullopt;
+}
+
+/** 44.1 kHz stereo S16 PCM, bounded to one or a few 20-ms RDPSND packets. */
+struct Audio {
+    QByteArray pcm;
+    bool operator==(const Audio &) const = default;
+};
+
+inline QByteArray frame(const Audio &audio)
+{
+    return frame(Kind::Audio, audio.pcm);
+}
+
+inline std::optional<Audio> audio(const Record &record)
+{
+    if (record.kind != Kind::Audio || record.payload.isEmpty() || record.payload.size() > 32768 || record.payload.size() % 4 != 0) {
+        return std::nullopt;
+    }
+    return Audio{record.payload};
+}
 
 inline QByteArray frame(const Hello &hello)
 {

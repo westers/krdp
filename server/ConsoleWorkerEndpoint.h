@@ -40,12 +40,14 @@ public:
     void stopWorker();
     void requestKeyFrame();
     void sendInput(const ConsoleWorkerWire::Input &input);
+    void setMedia(const ConsoleWorkerWire::Media &media);
 
 Q_SIGNALS:
     void workerReady(const KRdp::ConsoleHandoff::Target &target);
     void workerStopped();
     void frameReceived(const KRdp::VideoFrame &frame);
     void inputReceived(const KRdp::ConsoleWorkerWire::Input &input);
+    void audioReceived(const KRdp::ConsoleWorkerWire::Audio &audio);
     void protocolError(const QString &message);
 
 private:

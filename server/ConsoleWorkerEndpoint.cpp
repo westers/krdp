@@ -99,6 +99,13 @@ void ConsoleWorkerEndpoint::sendInput(const ConsoleWorkerWire::Input &input)
     }
 }
 
+void ConsoleWorkerEndpoint::setMedia(const ConsoleWorkerWire::Media &media)
+{
+    if (m_ready && m_worker) {
+        m_worker->write(ConsoleWorkerWire::frame(media));
+    }
+}
+
 void ConsoleWorkerEndpoint::acceptConnection()
 {
     QLocalSocket *candidate = m_server->nextPendingConnection();
@@ -143,6 +150,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT frameReceived(*frame);
         } else if (const auto input = ConsoleWorkerWire::input(*record)) {
             Q_EMIT inputReceived(*input);
+        } else if (const auto audio = ConsoleWorkerWire::audio(*record)) {
+            Q_EMIT audioReceived(*audio);
         } else {
             fail(QStringLiteral("unexpected worker record"));
             return;
