@@ -138,6 +138,10 @@ public:
      * iteration, after the connection is fully active.
      */
     void setMediaPolicy(bool remoteAudioPlayback, bool microphone, bool camera, bool silenceHostAudio = false);
+    /** Select PCM supplied by a session worker instead of this process's PipeWire graph. */
+    void setExternalAudioPlayback(bool enabled);
+    /** Thread-safe 44.1 kHz stereo S16 PCM from a trusted capture worker. */
+    void submitExternalAudio(const QByteArray &pcm);
     /**
      * One complete `KRDPCTL` record from the client. Emitted on the session
      * thread; connect with Qt::QueuedConnection.

@@ -558,7 +558,10 @@ public:
     audin_server_context *audin = nullptr;
     std::unique_ptr<PipeWireMicrophone> microphoneEndpoint;
     std::unique_ptr<PipeWireAudioPlayback> audioPlaybackEndpoint;
+    QMutex externalAudioMutex;
+    QByteArray externalAudio;
     std::atomic<bool> remoteAudioPlayback = false;
+    std::atomic<bool> externalAudioPlayback = false;
     std::atomic<bool> microphone = false;
     std::atomic<bool> camera = false;
     std::atomic<bool> silenceHostAudio = false;
@@ -716,6 +719,28 @@ void RdpConnection::setMediaPolicy(bool remoteAudioPlayback, bool microphone, bo
     d->silenceHostAudio.store(silenceHostAudio);
     qCInfo(KRDP) << "Conferencing media policy: playback" << remoteAudioPlayback << "microphone" << microphone << "camera" << camera
                  << "silence host" << silenceHostAudio;
+}
+
+void RdpConnection::setExternalAudioPlayback(bool enabled)
+{
+    d->externalAudioPlayback.store(enabled);
+    if (!enabled) {
+        QMutexLocker lock(&d->externalAudioMutex);
+        d->externalAudio.clear();
+    }
+}
+
+void RdpConnection::submitExternalAudio(const QByteArray &pcm)
+{
+    if (!d->externalAudioPlayback.load() || pcm.isEmpty() || pcm.size() % 4 != 0) {
+        return;
+    }
+    QMutexLocker lock(&d->externalAudioMutex);
+    d->externalAudio.append(pcm);
+    constexpr int MaxQueued = 44100 * 4 / 2;
+    if (d->externalAudio.size() > MaxQueued) {
+        d->externalAudio.remove(0, d->externalAudio.size() - MaxQueued);
+    }
 }
 
 void RdpConnection::openControlChannel()
@@ -963,8 +988,16 @@ void RdpConnection::run(std::stop_token stopToken)
             }
         }
 
-        if (d->rdpsnd && d->rdpsndActive.load() && d->audioPlaybackEndpoint) {
-            const QByteArray pcm = d->audioPlaybackEndpoint->take();
+        if (d->rdpsnd && d->rdpsndActive.load()) {
+            QByteArray pcm;
+            if (d->externalAudioPlayback.load()) {
+                QMutexLocker lock(&d->externalAudioMutex);
+                const int bytes = qMin(d->externalAudio.size(), 44100 * 4 / 50);
+                pcm = d->externalAudio.left(bytes);
+                d->externalAudio.remove(0, bytes);
+            } else if (d->audioPlaybackEndpoint) {
+                pcm = d->audioPlaybackEndpoint->take();
+            }
             if (!pcm.isEmpty() && d->rdpsnd->SendSamples) {
                 const auto frames = size_t(pcm.size() / d->rdpsnd->src_format->nBlockAlign);
                 if (frames > 0) {
@@ -1184,18 +1217,22 @@ bool RdpConnection::initializeAudioChannels()
             qCWarning(KRDP) << "Could not initialize RDPSND";
             return false;
         }
-        d->audioPlaybackEndpoint = std::make_unique<PipeWireAudioPlayback>();
-        const bool isolated = d->silenceHostAudio.load();
+        if (d->externalAudioPlayback.load()) {
+            qCInfo(KRDP) << "RDPSND using PCM supplied by the console capture worker";
+        } else {
+            d->audioPlaybackEndpoint = std::make_unique<PipeWireAudioPlayback>();
+            const bool isolated = d->silenceHostAudio.load();
         // An isolated sink is the only safe way to silence the host: muting
         // the physical sink can mute its monitor too.  The sink becomes the
         // default only for this RDP session and stop() restores it.
-        const bool started = isolated ? d->audioPlaybackEndpoint->startIsolated(QString::number(reinterpret_cast<quintptr>(this), 16))
-                                      : d->audioPlaybackEndpoint->start(QStringLiteral("@DEFAULT_AUDIO_SINK@"));
-        if (!started) {
-            qCWarning(KRDP) << "Could not capture PipeWire desktop audio";
-            d->audioPlaybackEndpoint.reset();
-        } else if (isolated) {
-            qCInfo(KRDP) << "RDPSND capturing the session-private PipeWire sink; new audio will not reach the host speakers";
+            const bool started = isolated ? d->audioPlaybackEndpoint->startIsolated(QString::number(reinterpret_cast<quintptr>(this), 16))
+                                          : d->audioPlaybackEndpoint->start(QStringLiteral("@DEFAULT_AUDIO_SINK@"));
+            if (!started) {
+                qCWarning(KRDP) << "Could not capture PipeWire desktop audio";
+                d->audioPlaybackEndpoint.reset();
+            } else if (isolated) {
+                qCInfo(KRDP) << "RDPSND capturing the session-private PipeWire sink; new audio will not reach the host speakers";
+            }
         }
         qCInfo(KRDP) << "RDPSND channel initialized after explicit media consent";
     }

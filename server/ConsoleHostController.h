@@ -60,5 +60,7 @@ private:
     QTimer m_seatPoll;
     std::vector<std::unique_ptr<Client>> m_clients;
     bool m_inputEnabled = false;
+    bool m_mediaConfigured = false;
+    ConsoleWorkerWire::Media m_media;
 };
 }

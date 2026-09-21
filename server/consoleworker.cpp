@@ -16,6 +16,7 @@
 #include <PlasmaScreencastV1Session.h>
 
 #include "ConsoleWorkerWire.h"
+#include "PipeWireAudioPlayback.h"
 
 using namespace KRdp;
 
@@ -82,6 +83,16 @@ public:
         });
         m_connectTimeout.setSingleShot(true);
         connect(&m_connectTimeout, &QTimer::timeout, qApp, []() { QCoreApplication::exit(1); });
+        m_audioTimer.setInterval(20);
+        connect(&m_audioTimer, &QTimer::timeout, this, [this]() {
+            if (!m_audio || !m_captureReady) {
+                return;
+            }
+            const QByteArray pcm = m_audio->take();
+            if (!pcm.isEmpty()) {
+                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Audio{pcm}));
+            }
+        });
     }
 
     void connectToBroker()
@@ -103,12 +114,30 @@ private:
         m_deframer.feed(m_socket.readAll());
         while (const auto record = m_deframer.next()) {
             if (record->kind == ConsoleWorkerWire::Kind::Stop && record->payload.isEmpty()) {
+                m_audioTimer.stop();
+                m_audio.reset();
                 m_session.setStreamingEnabled(false);
                 QCoreApplication::quit();
                 return;
             }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {
                 m_session.requestKeyFrame();
+                continue;
+            }
+            if (const auto media = ConsoleWorkerWire::media(*record)) {
+                m_audioTimer.stop();
+                m_audio.reset();
+                if (media->playback) {
+                    m_audio = std::make_unique<PipeWireAudioPlayback>();
+                    const bool started = media->silenceHost ? m_audio->startIsolated(QStringLiteral("console-%1").arg(m_sessionId))
+                                                            : m_audio->start(QStringLiteral("@DEFAULT_AUDIO_SINK@"));
+                    if (!started) {
+                        qWarning("Cannot capture console-session PipeWire audio");
+                        m_audio.reset();
+                    } else {
+                        m_audioTimer.start();
+                    }
+                }
                 continue;
             }
             if (const auto input = ConsoleWorkerWire::input(*record)) {
@@ -133,7 +162,9 @@ private:
     QLocalSocket m_socket;
     ConsoleWorkerWire::Deframer m_deframer;
     PlasmaScreencastV1Session m_session;
+    std::unique_ptr<PipeWireAudioPlayback> m_audio;
     QTimer m_connectTimeout;
+    QTimer m_audioTimer;
     bool m_captureReady = false;
 };
 }
