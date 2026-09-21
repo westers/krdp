@@ -116,6 +116,9 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
         return false;
     }
     const QString libraryPath = qEnvironmentVariable("LD_LIBRARY_PATH");
+    // These descriptor numbers belong to the process whose environment we
+    // inspected. The worker must open a fresh connection by display name.
+    environment.remove(QStringLiteral("WAYLAND_SOCKET"));
     if (!libraryPath.isEmpty()) {
         environment.insert(QStringLiteral("LD_LIBRARY_PATH"), libraryPath);
     }
