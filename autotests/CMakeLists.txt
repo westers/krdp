@@ -34,6 +34,15 @@ if(PIPEWIRE_EXECUTABLE AND PW_DUMP_EXECUTABLE AND JQ_EXECUTABLE AND TIMEOUT_EXEC
             -- ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSessionAudioGraphTest.sh
             ${CMAKE_SOURCE_DIR}/server --pcm)
         set_tests_properties(VirtualSessionAudioPcmTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 20)
+        find_program(PAPLAY_EXECUTABLE paplay)
+        find_program(PACTL_EXECUTABLE pactl)
+        if(PAPLAY_EXECUTABLE AND PACTL_EXECUTABLE)
+            add_test(NAME VirtualSessionAudioPulseTest COMMAND ${DBUS_RUN_SESSION_EXECUTABLE}
+                --config-file=${CMAKE_SOURCE_DIR}/server/virtual-session-bus.conf
+                -- ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSessionAudioGraphTest.sh
+                ${CMAKE_SOURCE_DIR}/server --pulse)
+            set_tests_properties(VirtualSessionAudioPulseTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 25)
+        endif()
     endif()
 endif()
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Isolated graph admission only; this does not claim app routing/PCM delivery.
+# Private graph admission, with optional native/Pulse PCM-routing acceptance.
 set -euo pipefail
 config_dir=$(cd "$1" && pwd)
 runtime_parent="/run/user/$(id -u)"
@@ -28,6 +28,7 @@ cleanup() {
 }
 trap cleanup EXIT
 env XDG_RUNTIME_DIR="$test_runtime" PIPEWIRE_RUNTIME_DIR="$test_runtime" \
+    PULSE_RUNTIME_PATH="$test_runtime/pulse" \
     PIPEWIRE_CONFIG_DIR="$config_dir" PIPEWIRE_CONFIG_NAME=virtual-session-pipewire.conf \
     pipewire >"$test_runtime/daemon.log" 2>&1 &
 graph_pid=$!
@@ -37,16 +38,26 @@ for attempt in {1..50}; do
     sleep 0.1
 done
 [[ -S "$test_runtime/pipewire-0" ]]
-if [[ "${2:-}" == --pcm ]]; then
+if [[ "${2:-}" == --pcm || "${2:-}" == --pulse ]]; then
     # Caller supplies a disposable private D-Bus session, never the desktop bus.
     [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]
     mkdir "$test_runtime/config" "$test_runtime/state" "$test_runtime/cache"
     private_env=(env XDG_RUNTIME_DIR="$test_runtime" PIPEWIRE_RUNTIME_DIR="$test_runtime"
         PIPEWIRE_REMOTE=pipewire-0 XDG_CONFIG_HOME="$test_runtime/config"
+        PULSE_SERVER="unix:$test_runtime/pulse/native" PULSE_RUNTIME_PATH="$test_runtime/pulse"
         XDG_STATE_HOME="$test_runtime/state" XDG_CACHE_HOME="$test_runtime/cache")
     "${private_env[@]}" WIREPLUMBER_CONFIG_DIR=/usr/share/wireplumber wireplumber --profile policy \
         >"$test_runtime/policy.log" 2>&1 &
     policy_pid=$!
+    if [[ "$2" == --pulse ]]; then
+        for attempt in {1..50}; do
+            kill -0 "$policy_pid"
+            default_sink=$("${private_env[@]}" pactl get-default-sink 2>/dev/null || true)
+            [[ "$default_sink" == krdp.virtual-session.audio ]] && break
+            sleep 0.1
+        done
+        [[ "$default_sink" == krdp.virtual-session.audio ]]
+    fi
     # Record the sink monitor, never a microphone or the host graph.
     "${private_env[@]}" timeout 8 pw-cat --record --raw --rate 48000 --channels 2 \
         --format s16 --target krdp.virtual-session.audio \
@@ -55,8 +66,13 @@ if [[ "${2:-}" == --pcm ]]; then
     record_pid=$!
     ffmpeg -nostdin -hide_banner -loglevel error -f lavfi \
         -i sine=frequency=997:sample_rate=48000:duration=2 -ac 2 "$test_runtime/tone.wav"
-    "${private_env[@]}" timeout 6 pw-cat --playback --target krdp.virtual-session.audio \
-        "$test_runtime/tone.wav"
+    if [[ "$2" == --pulse ]]; then
+        # Deliberately omit --device: ordinary apps must use the private default.
+        "${private_env[@]}" timeout 6 paplay "$test_runtime/tone.wav"
+    else
+        "${private_env[@]}" timeout 6 pw-cat --playback --target krdp.virtual-session.audio \
+            "$test_runtime/tone.wav"
+    fi
     # timeout terminates capture after 8s; its 124 status is expected.
     wait "$record_pid" || [[ $? == 124 ]]
     record_pid=
