@@ -32,6 +32,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         XDG_SESSION_TYPE=wayland LIBGL_ALWAYS_SOFTWARE=1 \
         timeout 45 bwrap --unshare-pid --unshare-ipc --die-with-parent --new-session \
         --ro-bind / / "${apparmor_query[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run \
+        --perms 01777 --dir /tmp/.X11-unix \
         --bind "$probe_runtime" "$probe_runtime" \
         dbus-run-session --config-file="$repo_path/server/virtual-session-bus.conf" \
         -- bash "$script_path" --inside-private-bus "$probe_mode" \
