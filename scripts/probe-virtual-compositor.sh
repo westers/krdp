@@ -118,6 +118,10 @@ if [[ "${2:-}" == --plasma ]]; then
         >"$XDG_RUNTIME_DIR/desktop-count.txt"
     grep -Eq '[1-9]' "$XDG_RUNTIME_DIR/desktop-count.txt"
     echo 'Plasma shell owns its private bus name and reports a desktop'
+    env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
+        timeout 12 spectacle --background --nonotify --fullscreen \
+        --output "$XDG_RUNTIME_DIR/desktop.png" >"$XDG_RUNTIME_DIR/screenshot.log" 2>&1
+    [[ -s "$XDG_RUNTIME_DIR/desktop.png" ]]
 fi
 env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
     timeout 10 kscreen-doctor -j >"$XDG_RUNTIME_DIR/outputs.json"
