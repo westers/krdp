@@ -10,6 +10,7 @@
 #include "RdpConnection.h"
 #include "AdaptiveQuality.h"
 #include "MicrophoneConsent.h"
+#include "MicrophonePcmQueue.h"
 
 #include <atomic>
 #include <filesystem>
@@ -160,6 +161,7 @@ struct AudinDelivery {
     KRdp::MicrophoneConsent *consent = nullptr;
     PipeWireMicrophone *endpoint = nullptr;
     uint64_t generation = 0;
+    KRdp::MicrophonePcmQueue *external = nullptr;
 };
 
 UINT audinData(audin_server_context *audin, const SNDIN_DATA *data)
@@ -170,9 +172,11 @@ UINT audinData(audin_server_context *audin, const SNDIN_DATA *data)
     auto *delivery = static_cast<AudinDelivery *>(audin->userdata);
     const size_t bytes = Stream_Length(data->Data);
     if (bytes > 192000 || bytes % 4 != 0) return ERROR_INVALID_DATA;
-    if (delivery && delivery->consent && delivery->endpoint) {
+    if (delivery && delivery->consent && (delivery->endpoint || delivery->external)) {
         delivery->consent->deliver(delivery->generation, [&] {
-            delivery->endpoint->write(QByteArray(reinterpret_cast<const char *>(Stream_Buffer(data->Data)), int(bytes)));
+            const QByteArray pcm(reinterpret_cast<const char *>(Stream_Buffer(data->Data)), int(bytes));
+            if (delivery->external) delivery->external->write(delivery->generation, pcm);
+            else delivery->endpoint->write(pcm);
         });
     }
     return CHANNEL_RC_OK;
@@ -576,6 +580,8 @@ public:
     std::unique_ptr<PipeWireMicrophone> microphoneEndpoint;
     MicrophoneConsent microphoneConsent;
     AudinDelivery microphoneDelivery;
+    bool externalMicrophone = false; // Chosen once, before queued initialize().
+    MicrophonePcmQueue microphonePcm;
     std::unique_ptr<PipeWireAudioPlayback> audioPlaybackEndpoint;
     QMutex externalAudioMutex;
     QByteArray externalAudio;
@@ -735,6 +741,7 @@ void RdpConnection::sendControlRecord(const QJsonObject &record)
 void RdpConnection::setMediaPolicy(bool remoteAudioPlayback, bool microphone, bool camera, bool silenceHostAudio)
 {
     d->microphoneConsent.setEnabled(microphone);
+    d->microphonePcm.reset(d->microphoneConsent.snapshot().generation);
     d->remoteAudioPlayback.store(remoteAudioPlayback);
     d->microphone.store(microphone);
     d->camera.store(camera);
@@ -772,6 +779,24 @@ bool RdpConnection::audioPriorityActive() const
     const int override = d->audioPriorityOverride.load();
     return AdaptiveQuality::audioPriorityEnabled(override < 0 ? d->audioPriorityDefault.load() : override != 0,
                                                 d->remoteAudioPlayback.load(), d->microphone.load());
+}
+
+bool RdpConnection::enableExternalMicrophone()
+{
+    if (d->state != State::Initial) return false;
+    d->externalMicrophone = true;
+    return true;
+}
+
+QByteArray RdpConnection::takeExternalMicrophone()
+{
+    if (!d->externalMicrophone) return {};
+    QByteArray pcm;
+    const auto consent = d->microphoneConsent.snapshot();
+    d->microphoneConsent.deliver(consent.generation, [&] {
+        pcm = d->microphonePcm.take(consent.generation);
+    });
+    return pcm;
 }
 
 void RdpConnection::submitExternalAudio(const QByteArray &pcm)
@@ -1186,6 +1211,7 @@ bool RdpConnection::onClose()
     }
     d->remoteCameras.cameras.clear();
     d->microphoneConsent.setEnabled(false);
+    d->microphonePcm.reset(d->microphoneConsent.snapshot().generation);
     if (d->audin) {
         if (d->audin->IsOpen && d->audin->IsOpen(d->audin) && d->audin->Close) {
             d->audin->Close(d->audin);
@@ -1227,11 +1253,13 @@ bool RdpConnection::initializeAudioChannels()
         qCInfo(KRDP) << "AUDIN consent generation retired";
     }
     if (!d->audin && microphone.enabled) {
-        d->microphoneEndpoint = std::make_unique<PipeWireMicrophone>();
-        if (!d->microphoneEndpoint->start(QString::number(reinterpret_cast<quintptr>(this), 16))) {
-            qCWarning(KRDP) << "Could not create PipeWire remote microphone";
-            d->microphoneEndpoint.reset();
-            return false;
+        if (!d->externalMicrophone) {
+            d->microphoneEndpoint = std::make_unique<PipeWireMicrophone>();
+            if (!d->microphoneEndpoint->start(QString::number(reinterpret_cast<quintptr>(this), 16))) {
+                qCWarning(KRDP) << "Could not create PipeWire remote microphone";
+                d->microphoneEndpoint.reset();
+                return false;
+            }
         }
         d->audin = audin_server_context_new(vcm);
         if (!d->audin) {
@@ -1239,7 +1267,8 @@ bool RdpConnection::initializeAudioChannels()
             return false;
         }
         d->audin->rdpcontext = d->peer->context;
-        d->microphoneDelivery = {&d->microphoneConsent, d->microphoneEndpoint.get(), microphone.generation};
+        d->microphoneDelivery = {&d->microphoneConsent, d->microphoneEndpoint.get(), microphone.generation,
+                                 d->externalMicrophone ? &d->microphonePcm : nullptr};
         d->audin->userdata = &d->microphoneDelivery;
         d->audin->Data = audinData;
         if (!audin_server_set_formats(d->audin, 1, &RemoteMicrophoneFormat)) {

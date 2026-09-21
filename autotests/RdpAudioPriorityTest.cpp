@@ -3,6 +3,7 @@
 #include "RdpConnection.h"
 #include "Server.h"
 #include "MicrophoneConsent.h"
+#include "MicrophonePcmQueue.h"
 
 using namespace KRdp;
 
@@ -10,6 +11,49 @@ class RdpAudioPriorityTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void microphoneQueueIsBoundedFreshAndGenerationScoped()
+    {
+        using Queue = MicrophonePcmQueue;
+        const auto now = Queue::Clock::time_point{};
+        const QByteArray packet(Queue::PacketBytes, 'a');
+        Queue queue;
+        QVERIFY(!queue.write(0, packet, now));
+        queue.reset(1);
+        QVERIFY(!queue.write(1, QByteArray(3, 'x'), now));
+        QVERIFY(!queue.write(1, QByteArray(192004, 'x'), now));
+        QVERIFY(queue.write(1, QByteArray(Queue::Capacity, 'a'), now));
+        QVERIFY(queue.write(1, QByteArray(Queue::PacketBytes, 'b'), now));
+        for (int i = 0; i < 9; ++i) QCOMPARE(queue.take(1, now), packet);
+        QCOMPARE(queue.take(1, now), QByteArray(Queue::PacketBytes, 'b'));
+        QVERIFY(queue.take(1, now).isEmpty());
+        QVERIFY(queue.write(1, packet, now));
+        const auto later = now + std::chrono::milliseconds(251);
+        QVERIFY(queue.write(1, QByteArray(4, 'n'), later));
+        QCOMPARE(queue.take(1, later), QByteArray(4, 'n')); // no stale prefix
+        QVERIFY(queue.write(1, packet, later));
+        queue.reset(2);
+        QVERIFY(queue.take(2, later).isEmpty());
+        QVERIFY(!queue.write(1, packet, later));
+        QVERIFY(queue.write(2, packet, later));
+        queue.reset(1); // stale cleanup cannot erase successor samples
+        QCOMPARE(queue.take(2, later), packet);
+    }
+
+    void externalMicrophoneRouteDoesNotImplyConsent()
+    {
+        Server server;
+        RdpConnection connection(&server, -1);
+        QVERIFY(connection.enableExternalMicrophone());
+        QVERIFY(connection.takeExternalMicrophone().isEmpty());
+        connection.setAudioPriority(true);
+        QVERIFY(!connection.audioPriorityActive());
+        connection.setMediaPolicy(false, true, false);
+        QVERIFY(connection.audioPriorityActive());
+        QVERIFY(connection.takeExternalMicrophone().isEmpty());
+        connection.setMediaPolicy(false, false, false);
+        QVERIFY(connection.takeExternalMicrophone().isEmpty());
+    }
+
     void microphoneConsentRejectsLateContexts()
     {
         MicrophoneConsent consent;

@@ -141,6 +141,10 @@ public:
     void setAudioPriority(bool enabled);
     void setAudioPriorityDefault(bool enabled);
     void clearAudioPriorityOverride();
+    /** Select a worker-bound microphone destination before initialization. Never opens host PipeWire. */
+    bool enableExternalMicrophone();
+    /** Drain at most 20ms of fresh, currently consented 48kHz stereo S16 PCM. */
+    QByteArray takeExternalMicrophone();
     bool audioPriorityActive() const;
     /** Select PCM supplied by a session worker instead of this process's PipeWire graph. */
     void setExternalAudioPlayback(bool enabled);

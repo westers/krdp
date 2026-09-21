@@ -54,3 +54,12 @@ Disconnect also revokes delivery first. Unit tests verify stale-context refusal
 and idempotent consent; actual AUDIN off/on transport/device acceptance remains.
 PCM callbacks reject non-stereo-frame-aligned or >1-second data buffers; the
 future worker-wire packet limit remains20ms as specified above.
+
+External AUDIN destination is now available on RdpConnection, selected only in
+Initial state before initialization. It skips local PipeWireMicrophone entirely
+and sends consent-gated callbacks into MicrophonePcmQueue. The queue is bounded
+to200ms, timestamps each chunk, expires samples older than250ms, drains at most
+20ms per call, validates stereo-frame alignment and discards previous consent
+generations. A stale reset cannot erase a newer generation. No console broker
+selects this route yet: worker IPC/source startup acknowledgement and lifecycle
+integration must be completed before lifting its microphone rejection.
