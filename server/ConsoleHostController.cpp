@@ -64,7 +64,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         if (!m_control.owner() || generation != m_controlGeneration) {
             return; // A late cursor report must not revoke a newer controller.
         }
-        qInfo() << "Local console pointer activity: releasing remote control";
+        qInfo() << "Local console takeover: releasing remote control";
         releaseInput();
         m_control.release(m_control.owner());
         syncControlState();

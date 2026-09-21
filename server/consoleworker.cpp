@@ -3,6 +3,9 @@
 
 #include <memory>
 
+#include <QAction>
+#include <QDBusConnection>
+#include <QDBusConnectionInterface>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QFile>
@@ -16,6 +19,7 @@
 #include <QWheelEvent>
 
 #include <PlasmaScreencastV1Session.h>
+#include <KGlobalAccel>
 
 #include "ConsoleWorkerWire.h"
 #include "ConsoleInputState.h"
@@ -59,12 +63,24 @@ public:
         , m_token(token)
     {
         m_clock.start();
+        // Use Plasma's shortcut service, never a raw keyboard grab. SDDM need
+        // not provide it; do not auto-start desktop services in the greeter.
+        if (QDBusConnection::sessionBus().interface()
+            && QDBusConnection::sessionBus().interface()->isServiceRegistered(QStringLiteral("org.kde.kglobalaccel"))) {
+            m_reclaimAction.setText(QStringLiteral("Reclaim physical console"));
+            m_reclaimAction.setObjectName(QStringLiteral("reclaim-console"));
+            m_reclaimAction.setProperty("componentName", QStringLiteral("krdp-console-worker"));
+            m_reclaimAction.setProperty("componentDisplayName", QStringLiteral("KRDP Physical Console"));
+            m_reclaimAction.setEnabled(false);
+            connect(&m_reclaimAction, &QAction::triggered, this, &Worker::reclaimConsole);
+            const QKeySequence shortcut(Qt::META | Qt::CTRL | Qt::ALT | Qt::Key_T);
+            KGlobalAccel::self()->setDefaultShortcut(&m_reclaimAction, {shortcut});
+            KGlobalAccel::self()->setShortcut(&m_reclaimAction, {shortcut});
+        }
         connect(&m_session, &AbstractSession::cursorUpdate, this, [this](const PipeWireCursor &cursor) {
             if (m_control.active && m_session.outputGeometryResolved()
                 && m_takeover.observed(m_session.mapToGlobal(cursor.position).toPoint(), m_clock.elapsed())) {
-                releaseInput();
-                m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalTakeover));
-                m_control.active = false; // Gate immediately, before the host's acknowledgement.
+                reclaimConsole();
             }
         });
         connect(&m_session, &AbstractSession::outputGeometryChanged, this, [this](const QRect &) {
@@ -163,6 +179,18 @@ private:
         m_session.setStreamingEnabled(true);
     }
 
+    void reclaimConsole()
+    {
+        if (!m_control.active) {
+            return;
+        }
+        releaseInput();
+        m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalTakeover));
+        m_control.active = false; // Gate immediately, before the host's acknowledgement.
+        m_reclaimAction.setEnabled(false);
+        m_takeover.latch();
+    }
+
     void readBroker()
     {
         m_deframer.feed(m_socket.readAll());
@@ -171,6 +199,7 @@ private:
                 if (*control != m_control) {
                     releaseInput();
                     m_control = *control;
+                    m_reclaimAction.setEnabled(control->active);
                     m_takeover = {};
                     if (control->active) {
                         m_takeover.armed(m_clock.elapsed());
@@ -243,6 +272,7 @@ private:
     ConsoleInputState m_inputState;
     QElapsedTimer m_clock;
     Takeover::Detector m_takeover;
+    QAction m_reclaimAction;
     ConsoleWorkerWire::ControlState m_control;
 };
 }

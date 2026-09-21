@@ -25,7 +25,7 @@ target_link_libraries(krdp-console-probe PRIVATE Qt6::Core Qt6::DBus)
 target_link_libraries(krdp-greeter-probe PRIVATE Qt6::Core Qt6::Gui)
 target_link_libraries(krdp-audio-route-probe PRIVATE Qt6::Core PkgConfig::PipeWire)
 if (BUILD_PLASMA_SESSION)
-    target_link_libraries(krdp-console-worker PRIVATE Qt6::Gui Qt6::Network KRdp PkgConfig::PipeWire)
+    target_link_libraries(krdp-console-worker PRIVATE Qt6::Gui Qt6::Network Qt6::DBus KF6::GlobalAccel KRdp PkgConfig::PipeWire)
 endif()
 
 if (BUILD_PLASMA_SESSION)
