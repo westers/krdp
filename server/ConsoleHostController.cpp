@@ -11,6 +11,7 @@
 #include <RdpConnection.h>
 #include <Server.h>
 #include <VideoStream.h>
+#include <VideoCodecSupport.h>
 #include <InputHandler.h>
 
 #include "ConsoleSeat.h"
@@ -135,6 +136,10 @@ void ConsoleHostController::setWorkerActive(bool active)
 
 void ConsoleHostController::addClient(RdpConnection *connection)
 {
+    // The initial cross-session worker owns a single AVC 4:2:0 encoder. Do
+    // not let a capable own client negotiate AVC444/private codecs until the
+    // broker can renegotiate and restart that worker atomically.
+    connection->videoStream()->setCodecPreference(CodecPreference::Avc420);
     auto client = std::make_unique<Client>();
     client->connection = connection;
     client->session = std::make_unique<ConsoleWorkerSession>([this](const ConsoleWorkerWire::Input &input) {
