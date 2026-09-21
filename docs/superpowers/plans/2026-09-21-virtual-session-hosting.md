@@ -111,3 +111,11 @@ Kded6 source still reads kded5rc for this setting; load-on-demand comes from
 plugin metadata, so these are autostart controls, not a security boundary.
 Source: https://github.com/KDE/kded/blob/master/src/kded.cpp
 Configuration parsing checked; runtime acceptance awaits the Xwayland decision.
+
+Steve approved normal internal Xwayland compatibility on 2026-09-21. Keep the
+compositor and RDP client Wayland; the isolated compatibility server is for
+Plasma's session-manager dependency. The --plasma probe now starts the private
+wrapper with --xwayland and passes its own child's display/authority path to
+startplasma (the prestarted wrapper's earlier launch-environment notification
+cannot update a plasma_session that did not exist yet). No authority cookie is
+read or logged. Runtime acceptance still required.

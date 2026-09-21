@@ -62,7 +62,9 @@ for attempt in {1..50}; do
     sleep 0.1
 done
 [[ -S "$XDG_RUNTIME_DIR/pipewire-0" ]]
-kwin_wayland_wrapper --virtual --width 1280 --height 720 --output-count 1 \
+compat_args=()
+[[ "${2:-}" != --plasma ]] || compat_args=(--xwayland)
+kwin_wayland_wrapper "${compat_args[@]}" --virtual --width 1280 --height 720 --output-count 1 \
     --no-global-shortcuts --no-kactivities >"$XDG_RUNTIME_DIR/kwin.log" 2>&1 &
 wrapper_pid=$!
 ready=false
@@ -78,7 +80,23 @@ done
 [[ "$ready" == true ]]
 [[ -S "$XDG_RUNTIME_DIR/wayland-0" ]]
 if [[ "${2:-}" == --plasma ]]; then
-    env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland startplasma-wayland \
+    # The wrapper was started before plasma_session could receive its environment
+    # update. Obtain only the display and authority PATH from this private child;
+    # never read or print the authority cookie or inspect another session.
+    kwin_pid=$(pgrep -P "$wrapper_pid" -x kwin_wayland)
+    readarray -d '' -t kwin_args <"/proc/$kwin_pid/cmdline"
+    compat_display=
+    compat_authority=
+    for ((i=0; i+1<${#kwin_args[@]}; ++i)); do
+        case "${kwin_args[i]}" in
+            --xwayland-display) compat_display="${kwin_args[i+1]}" ;;
+            --xwayland-xauthority) compat_authority="${kwin_args[i+1]}" ;;
+        esac
+    done
+    [[ "$compat_display" =~ ^:[0-9]+$ ]]
+    [[ "$compat_authority" == "$XDG_RUNTIME_DIR/"* && -f "$compat_authority" ]]
+    env DISPLAY="$compat_display" XAUTHORITY="$compat_authority" \
+        WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland startplasma-wayland \
         >"$XDG_RUNTIME_DIR/plasma.log" 2>&1 &
     plasma_pid=$!
     ready=false
