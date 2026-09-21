@@ -78,7 +78,11 @@ public:
         if (!isInitialized()) {
             qWarning() << "Remember requesting the interface on your desktop file: X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1";
         }
-        Q_ASSERT(isInitialized());
+        // The compositor may legitimately withhold this privileged global
+        // (for example at a login greeter or after a policy change).  The
+        // public create*Stream() methods already report that state by
+        // returning nullptr, so aborting the whole RDP server here turns a
+        // recoverable access denial into a physical-console disruption.
     }
 
     ~ScreencastingPrivate()
