@@ -76,6 +76,10 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>Wake the display when a client starts streaming and keep it awake for the session</label>
       <default>true</default>
     </entry>
+    <entry name="CameraLoopbackDevice" type="String">
+      <label>Optional V4L2 loopback device to publish redirected cameras for applications that cannot use PipeWire directly</label>
+      <default></default>
+    </entry>
     <entry name="Users" type="StringList">
       <label>Users allowed to login, passwords are stored in KWallet</label>
     </entry>

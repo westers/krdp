@@ -32,6 +32,7 @@ public:
 
     std::filesystem::path tlsCertificate;
     std::filesystem::path tlsCertificateKey;
+    QString cameraLoopbackDevice;
 };
 
 Server::Server(QObject *parent)
@@ -159,6 +160,16 @@ void Server::setTlsCertificateKey(const std::filesystem::path &newTlsCertificate
     }
 
     d->tlsCertificateKey = newTlsCertificateKey;
+}
+
+QString Server::cameraLoopbackDevice() const
+{
+    return d->cameraLoopbackDevice;
+}
+
+void Server::setCameraLoopbackDevice(const QString &device)
+{
+    d->cameraLoopbackDevice = device.trimmed();
 }
 
 void Server::incomingConnection(qintptr handle)

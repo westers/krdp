@@ -236,6 +236,7 @@ int main(int argc, char **argv)
 
     server.setTlsCertificate(certificate);
     server.setTlsCertificateKey(certificateKey);
+    server.setCameraLoopbackDevice(config->cameraLoopbackDevice());
 
     // Use parsed username/pw if set
     if (parser.isSet(u"username"_s)) {
@@ -352,7 +353,7 @@ int main(int argc, char **argv)
     // touch the stream. setMonitorIndex() self-guards and only re-creates the
     // stream when the resolved target actually changed.
     const bool plasmaSession = parser.isSet(u"plasma"_s);
-    auto applyRuntimeConfig = [config, &controller, monitorPinnedByCli, qualityPinnedByCli, plasmaSession, listenPort = server.port(), runtimeConfigPath]() {
+    auto applyRuntimeConfig = [config, &server, &controller, monitorPinnedByCli, qualityPinnedByCli, plasmaSession, listenPort = server.port(), runtimeConfigPath]() {
         // KConfigSkeleton::read() only re-applies the in-memory KConfig cache
         // to the skeleton's items; it does NOT reload the file from disk (see
         // KCoreConfigSkeleton::read() vs ::load() docs). That happened to work
@@ -385,6 +386,7 @@ int main(int argc, char **argv)
         const auto chromaPolicy = chromaPolicyFrom(config);
         controller.setChromaPolicyDefaults(chromaPolicy);
         controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
+        server.setCameraLoopbackDevice(config->cameraLoopbackDevice());
         applyVaapiDriverMode(config->vaapiDriverMode());
         KRdp::selectVaapiDriver();
 
@@ -394,7 +396,8 @@ int main(int argc, char **argv)
         qInfo() << "Runtime config applied: quality" << config->quality() << "adaptive" << config->adaptiveQuality() << "monitorMode" << config->monitorMode()
                 << "monitorIndex" << config->monitorIndex() << "virtualPolicy" << config->virtualMonitorPolicy() << "virtualLayout" << config->virtualMonitorLayout()
                 << "wakeDisplay" << config->wakeDisplayOnConnect() << "vaapiMode" << config->vaapiDriverMode() << "port" << listenPort << "from" << runtimeConfigPath
-                << "codec" << config->codec() << "chroma" << QStringLiteral("%1/%2/%3").arg(chromaPolicy.motionGapMs).arg(chromaPolicy.restMs).arg(chromaPolicy.maxGapMs);
+                << "codec" << config->codec() << "chroma" << QStringLiteral("%1/%2/%3").arg(chromaPolicy.motionGapMs).arg(chromaPolicy.restMs).arg(chromaPolicy.maxGapMs)
+                << "cameraLoopback" << config->cameraLoopbackDevice();
     };
 
     // Re-creates the capture stream for a new display topology (resolution or
@@ -485,7 +488,7 @@ int main(int argc, char **argv)
 #endif
     const auto startupChromaPolicy = controller.chromaPolicyDefaults();
     const auto startupChromaText = QStringLiteral("%1/%2/%3").arg(startupChromaPolicy.motionGapMs).arg(startupChromaPolicy.restMs).arg(startupChromaPolicy.maxGapMs);
-    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9 codec=%10 chroma=%11")
+    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9 codec=%10 chroma=%11 cameraLoopback=%12")
                              .arg(sessionType,
                                   streamTarget,
                                   QString::number(port),
@@ -496,7 +499,8 @@ int main(int argc, char **argv)
                                   config->wakeDisplayOnConnect() ? u"1"_s : u"0"_s,
                                   config->adaptiveQuality() ? u"1"_s : u"0"_s,
                                   QLatin1String(KRdp::VideoCodecSupport::preferenceName(controller.codecPreference())),
-                                  startupChromaText);
+                                  startupChromaText,
+                                  config->cameraLoopbackDevice());
 
     if (!server.start()) {
         return -1;

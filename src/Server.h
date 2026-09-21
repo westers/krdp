@@ -108,6 +108,11 @@ public:
     std::filesystem::path tlsCertificateKey() const;
     void setTlsCertificateKey(const std::filesystem::path &newTlsCertificateKey);
 
+    /** Optional V4L2 loopback device for remote cameras (for applications which
+     * cannot consume PipeWire camera sources directly). */
+    QString cameraLoopbackDevice() const;
+    void setCameraLoopbackDevice(const QString &device);
+
     /**
      * Emitted whenever a new connection is started.
      *

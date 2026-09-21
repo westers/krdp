@@ -29,6 +29,7 @@
 #include <freerdp/server/rdpsnd.h>
 #include <freerdp/server/server-common.h>
 #include <freerdp/server/rdpecam-enumerator.h>
+#include <freerdp/server/rdpecam.h>
 
 #include <freerdp/channels/drdynvc.h>
 #include <freerdp/codec/audio.h>
@@ -41,6 +42,7 @@
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "PipeWireMicrophone.h"
+#include "PipeWireCamera.h"
 #include "PipeWireAudioPlayback.h"
 #include "Server.h"
 #include "VideoStream.h"
@@ -195,9 +197,136 @@ UINT cameraSelectVersion(CamDevEnumServerContext *context, const CAM_SELECT_VERS
     return context->SelectVersionResponse(context, &response);
 }
 
-UINT cameraAdded(CamDevEnumServerContext *, const CAM_DEVICE_ADDED_NOTIFICATION *device)
+struct RemoteCamera {
+    CameraDeviceServerContext *context = nullptr;
+    bool activated = false;
+    bool receivedSample = false;
+    CAM_MEDIA_TYPE_DESCRIPTION format{};
+    QString loopbackDevice;
+    std::unique_ptr<PipeWireCamera> endpoint;
+    ~RemoteCamera()
+    {
+        if (context) {
+            context->Close(context);
+            camera_device_server_context_free(context);
+        }
+    }
+};
+
+UINT cameraSuccess(CameraDeviceServerContext *context, const CAM_SUCCESS_RESPONSE *)
+{
+    auto *camera = static_cast<RemoteCamera *>(context->userdata);
+    qCInfo(KRDP) << "RDPECAM success response" << (camera && camera->activated ? "stream started" : "device activated");
+    if (!camera->activated) {
+        camera->activated = true;
+        CAM_STREAM_LIST_REQUEST request{};
+        return context->StreamListRequest(context, &request);
+    }
+    // RDPECAM is pull based: a started stream does not produce a frame until
+    // the server asks for one, and each subsequent frame needs another pull.
+    CAM_SAMPLE_REQUEST request{};
+    request.StreamIndex = 0;
+    const UINT status = context->SampleRequest(context, &request);
+    qCInfo(KRDP) << "RDPECAM initial sample request status" << status;
+    return status;
+}
+
+BOOL cameraChannelAssigned(CameraDeviceServerContext *context, UINT32 channelId)
+{
+    qCInfo(KRDP) << "RDPECAM device channel ready" << channelId;
+    CAM_ACTIVATE_DEVICE_REQUEST activate{};
+    return context->ActivateDeviceRequest(context, &activate) == CHANNEL_RC_OK;
+}
+
+UINT cameraStreamList(CameraDeviceServerContext *context, const CAM_STREAM_LIST_RESPONSE *response)
+{
+    if (response->N_Descriptions == 0) {
+        return ERROR_NOT_FOUND;
+    }
+    CAM_MEDIA_TYPE_LIST_REQUEST request{};
+    request.StreamIndex = 0;
+    return context->MediaTypeListRequest(context, &request);
+}
+
+UINT cameraMediaTypes(CameraDeviceServerContext *context, const CAM_MEDIA_TYPE_LIST_RESPONSE *response)
+{
+    auto *camera = static_cast<RemoteCamera *>(context->userdata);
+    if (response->N_Descriptions == 0) {
+        return ERROR_NOT_FOUND;
+    }
+    // The bundled V4L backend currently advertises H.264 for this webcam yet
+    // emits MJPEG frames (see its cam_v4l_stream_start log). Keep the advertised
+    // type for the protocol, then identify/decode the actual JPEG samples.
+    const CAM_MEDIA_TYPE_DESCRIPTION *selected = &response->MediaTypeDescriptions[0];
+    for (size_t i = 0; i < response->N_Descriptions; ++i) {
+        if (response->MediaTypeDescriptions[i].Format == CAM_MEDIA_FORMAT_MJPG) {
+            selected = &response->MediaTypeDescriptions[i];
+            break;
+        }
+    }
+    camera->format = *selected;
+    camera->endpoint = std::make_unique<PipeWireCamera>();
+    const uint32_t fps = camera->format.FrameRateDenominator ? camera->format.FrameRateNumerator / camera->format.FrameRateDenominator : 30;
+    if (!camera->endpoint->start(QString::number(reinterpret_cast<quintptr>(camera)), camera->format.Width, camera->format.Height, fps, camera->loopbackDevice)) {
+        qCWarning(KRDP) << "Failed to create PipeWire remote camera source";
+        camera->endpoint.reset();
+        return ERROR_INTERNAL_ERROR;
+    }
+    CAM_START_STREAMS_REQUEST request{};
+    request.N_Infos = 1;
+    request.StartStreamsInfo[0].StreamIndex = 0;
+    request.StartStreamsInfo[0].MediaTypeDescription = camera->format;
+    qCInfo(KRDP) << "RDPECAM starting stream" << camera->format.Width << 'x' << camera->format.Height << "format" << camera->format.Format;
+    return context->StartStreamsRequest(context, &request);
+}
+
+UINT cameraSample(CameraDeviceServerContext *context, const CAM_SAMPLE_RESPONSE *response)
+{
+    auto *camera = static_cast<RemoteCamera *>(context->userdata);
+    if (!camera || !camera->endpoint || response->StreamIndex != 0 || !response->Sample || !response->SampleSize) return ERROR_INVALID_DATA;
+    if (!camera->receivedSample) {
+        camera->receivedSample = true;
+        qCInfo(KRDP) << "RDPECAM receiving camera samples (first frame bytes)" << response->SampleSize;
+    }
+    camera->endpoint->writeMjpeg(QByteArray(reinterpret_cast<const char *>(response->Sample), response->SampleSize));
+    CAM_SAMPLE_REQUEST request{};
+    request.StreamIndex = 0;
+    const UINT status = context->SampleRequest(context, &request);
+    if (status != CHANNEL_RC_OK) qCWarning(KRDP) << "RDPECAM follow-up sample request failed" << status;
+    return status;
+}
+
+struct RemoteCameraCollection {
+    std::vector<std::unique_ptr<RemoteCamera>> cameras;
+    QString loopbackDevice;
+};
+
+UINT cameraAdded(CamDevEnumServerContext *enumerator, const CAM_DEVICE_ADDED_NOTIFICATION *device)
 {
     qCInfo(KRDP) << "RDPECAM client camera available:" << QString::fromUtf16(reinterpret_cast<const char16_t *>(device->DeviceName)) << device->VirtualChannelName;
+    auto *collection = static_cast<RemoteCameraCollection *>(enumerator->userdata);
+    if (!collection || !device->VirtualChannelName) {
+        return ERROR_INVALID_DATA;
+    }
+    auto camera = std::make_unique<RemoteCamera>();
+    camera->loopbackDevice = collection->loopbackDevice;
+    camera->context = camera_device_server_context_new(enumerator->vcm);
+    if (!camera->context) {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    camera->context->virtualChannelName = _strdup(device->VirtualChannelName);
+    camera->context->protocolVersion = device->Header.Version;
+    camera->context->userdata = camera.get();
+    camera->context->ChannelIdAssigned = cameraChannelAssigned;
+    camera->context->SuccessResponse = cameraSuccess;
+    camera->context->StreamListResponse = cameraStreamList;
+    camera->context->MediaTypeListResponse = cameraMediaTypes;
+    camera->context->SampleResponse = cameraSample;
+    if (!camera->context->virtualChannelName || camera->context->Initialize(camera->context, FALSE) != CHANNEL_RC_OK
+        || camera->context->Open(camera->context) != CHANNEL_RC_OK) {
+        return ERROR_INTERNAL_ERROR;
+    }
+    collection->cameras.push_back(std::move(camera));
     return CHANNEL_RC_OK;
 }
 }
@@ -417,6 +546,7 @@ public:
     std::atomic<bool> camera = false;
     std::atomic_bool rdpsndActive = false;
     CamDevEnumServerContext *cameraEnumerator = nullptr;
+    RemoteCameraCollection remoteCameras;
 
     freerdp_peer *peer = nullptr;
 
@@ -951,6 +1081,7 @@ bool RdpConnection::onClose()
         cam_dev_enum_server_context_free(d->cameraEnumerator);
         d->cameraEnumerator = nullptr;
     }
+    d->remoteCameras.cameras.clear();
     if (d->audin) {
         if (d->audin->IsOpen && d->audin->IsOpen(d->audin) && d->audin->Close) {
             d->audin->Close(d->audin);
@@ -1041,6 +1172,8 @@ bool RdpConnection::initializeAudioChannels()
         d->cameraEnumerator = cam_dev_enum_server_context_new(vcm);
         if (d->cameraEnumerator) {
             d->cameraEnumerator->rdpcontext = d->peer->context;
+            d->remoteCameras.loopbackDevice = d->server->cameraLoopbackDevice();
+            d->cameraEnumerator->userdata = &d->remoteCameras;
             d->cameraEnumerator->SelectVersionRequest = cameraSelectVersion;
             d->cameraEnumerator->DeviceAddedNotification = cameraAdded;
         }
