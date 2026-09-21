@@ -989,6 +989,22 @@ void PlasmaScreencastV1Session::setClipboardData(std::unique_ptr<QMimeData> data
 
 void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Packet &data)
 {
+    // KWin can resize an existing single-output workspace stream in place.
+    // PipeWire updates size(), but no new screencast request is created, so
+    // the request-time logical geometry otherwise stays stale indefinitely.
+    // Publish new coordinates only once the captured pixel size agrees with
+    // the current output; leave ambiguous multi-output transitions gated.
+    const auto screens = qGuiApp->screens();
+    if (d->streamTarget == Private::StreamTarget::Workspace && screens.size() == 1) {
+        const auto *screen = screens.first();
+        const QRect geometry = screen->geometry();
+        if (geometry.size() * screen->devicePixelRatio() == size() && d->logicalRect != geometry) {
+            d->logicalRect = geometry;
+            d->monitorLayout = monitorLayoutForStream(-1, geometry);
+            setLogicalSize(geometry.size());
+            Q_EMIT outputGeometryChanged(geometry);
+        }
+    }
     // KPipeWire's encoded stream carries no per-frame damage, so every packet is
     // a full-frame update. Keep the multi-monitor layout for the RDPGFX reset.
     VideoFrame frameData;
