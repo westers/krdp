@@ -7,6 +7,29 @@ class ConsoleControlTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void transferRequiresExplicitRelease()
+    {
+        KRdp::ConsoleControl control;
+        QVERIFY(!control.acquire(1));
+        control.admit(1);
+        control.admit(2);
+        QVERIFY(control.setMedia(1, {true, true}));
+        QVERIFY(!control.acquire(2));
+        QVERIFY(!control.release(2));
+        QVERIFY(control.ownsControl(1));
+        QVERIFY(control.media().silenceHost);
+        QVERIFY(control.release(1));
+        QVERIFY(control.media().playback);
+        QVERIFY(!control.media().silenceHost);
+        QVERIFY(!control.ownsControl(2));
+        QVERIFY(control.acquire(2));
+        QVERIFY(!control.acquire(1));
+        QVERIFY(control.ownsControl(2));
+        QVERIFY(control.release(2));
+        QVERIFY(control.acquire(1));
+        QVERIFY(!control.media().silenceHost); // Requires a fresh policy request.
+    }
+
     void onlyFirstAdmittedClientControls()
     {
         KRdp::ConsoleControl control;

@@ -32,6 +32,27 @@ public:
     Id owner() const { return m_owner; }
     bool admitted(Id id) const { return m_clients.contains(id); }
 
+    bool acquire(Id id)
+    {
+        if (!admitted(id) || (m_owner && m_owner != id)) {
+            return false;
+        }
+        m_owner = id;
+        return true;
+    }
+
+    bool release(Id id)
+    {
+        if (!ownsControl(id)) {
+            return false;
+        }
+        m_owner = 0;
+        // Returning to view-only mode must not retain a latent host-mute
+        // request. A later explicit acquisition re-sends the client's policy.
+        m_clients[id].silenceHost = false;
+        return true;
+    }
+
     bool setMedia(Id id, Media media)
     {
         auto client = m_clients.find(id);

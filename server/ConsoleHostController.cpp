@@ -216,6 +216,36 @@ void ConsoleHostController::addClient(RdpConnection *connection)
 void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record)
 {
     const QString type = record.value(u"type"_s).toString();
+    if (type == u"console-control"_s) {
+        const QString action = record.value(u"action"_s).toString();
+        const auto refuse = [connection](const QString &code, const QString &message) {
+            connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"console-control"_s},
+                                                      {u"code"_s, code}, {u"message"_s, message}});
+        };
+        if (record.value(u"v"_s).toInt() != 1 || (action != u"acquire"_s && action != u"release"_s)) {
+            refuse(u"invalid"_s, u"console-control requires v1 and action acquire or release"_s);
+            return;
+        }
+        if (!m_control.admitted(id)) {
+            refuse(u"not-owner"_s, u"console control requires an authenticated streaming connection"_s);
+            return;
+        }
+        if (action == u"release"_s) {
+            if (!m_control.ownsControl(id)) {
+                refuse(u"not-owner"_s, u"only the current controller may release control"_s);
+                return;
+            }
+            releaseInput();
+            m_control.release(id);
+        } else if (!m_control.acquire(id)) {
+            refuse(u"not-owner"_s, u"another client owns control; it must release control first"_s);
+            return;
+        }
+        updateMedia();
+        sendLayouts();
+        connection->sendControlRecord(QJsonObject{{u"type"_s, u"console-control"_s}, {u"v"_s, 1}, {u"ok"_s, true}, {u"action"_s, action}});
+        return;
+    }
     if (type == u"query"_s || type == u"attach"_s || type == u"apply"_s) {
         if (record.value(u"v"_s).toInt() != 1 || (type == u"attach"_s && record.value(u"target"_s).toString() != u"physical"_s)) {
             connection->sendControlRecord(LayoutControl::errorRecord({u"invalid"_s, u"console attach requires v1 and target physical"_s}));
