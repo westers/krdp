@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Steve Westers
+# SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+
+[Unit]
+Description=KRDP persistent physical-console host (isolated test)
+After=network-online.target systemd-logind.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=root
+Environment=LD_LIBRARY_PATH=/opt/krdp-console/lib
+ExecStart=/opt/krdp-console/bin/krdp-console-host --worker /opt/krdp-console/bin/krdp-console-worker --certificate /opt/krdp-console/cert/krdp.crt --certificate-key /opt/krdp-console/cert/krdp.key --address 0.0.0.0 --port 3391 --runtime-directory /run/krdp-console-test
+RuntimeDirectory=krdp-console-test
+RuntimeDirectoryMode=0711
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
