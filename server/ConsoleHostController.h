@@ -45,6 +45,7 @@ public:
     void workerExited(const QString &socketName);
 
 private:
+    friend class ConsoleHostControllerTest;
     struct Client {
         ConsoleControl::Id id = 0;
         RdpConnection *connection = nullptr;
@@ -53,6 +54,8 @@ private:
         QJsonObject pendingMedia;
         bool wantsLayout = false;
         quint8 videoQuality = 80;
+        ConsoleControl::Media media;
+        bool externalMicrophone = false;
     };
 
     void apply(const ConsoleHandoff::Actions &actions);
@@ -66,6 +69,9 @@ private:
     void releaseInput();
     void syncControlState();
     void finishResize(const QString &error);
+    void stopMicrophone(const QString &error);
+    void microphoneResult(const ConsoleWorkerWire::MicrophoneResult &result);
+    void sendMedia(Client &client, bool microphone, const QString &error = {});
 
     Server *m_server = nullptr;
     WorkerLauncher m_launchWorker;
@@ -93,5 +99,11 @@ private:
     std::optional<PendingResize> m_pendingResize;
     quint64 m_nextResizeId = 0;
     QTimer m_resizeDeadline;
+    ConsoleControl::Id m_microphoneClient = 0;
+    ConsoleWorkerWire::MicrophonePolicy m_microphonePolicy;
+    quint64 m_nextMicrophoneId = 0;
+    bool m_microphoneReady = false;
+    QTimer m_microphoneDeadline;
+    QTimer m_microphonePump;
 };
 }

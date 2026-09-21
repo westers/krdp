@@ -143,6 +143,15 @@ target_include_directories(ConsoleWorkerSessionTest PRIVATE ${CMAKE_SOURCE_DIR}/
 target_link_libraries(ConsoleWorkerSessionTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
 add_test(NAME ConsoleWorkerSessionTest COMMAND ConsoleWorkerSessionTest)
 
+add_executable(ConsoleHostControllerTest ConsoleHostControllerTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleHostController.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleSeat.cpp)
+target_include_directories(ConsoleHostControllerTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleHostControllerTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
+add_test(NAME ConsoleHostControllerTest COMMAND ConsoleHostControllerTest)
+
 add_executable(RdpAudioPriorityTest RdpAudioPriorityTest.cpp)
 target_include_directories(RdpAudioPriorityTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(RdpAudioPriorityTest PRIVATE Qt6::Test Qt6::Core KRdp)

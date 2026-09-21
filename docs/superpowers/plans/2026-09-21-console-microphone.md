@@ -86,3 +86,15 @@ refuse microphone activation. Private-graph tests exercise off/on, revoke,
 ownership change, stale PCM/policy, greeter/viewer refusal and daemon loss.
 Broker wiring and real Buzz-to-Sol sample delivery are still pending: console
 microphone requests remain explicitly unsupported until that is complete.
+
+Broker integration now selects the external AUDIN route before initialization,
+accepts controller mic policy only with a ready PhysicalUser worker, and enables
+AUDIN only after the matching generation/activation startup result. A4s broker
+deadline complements the worker's3s source deadline. A20ms timer drains bounded
+PCM and discards sends under socket pressure rather than retrying old speech.
+Control loss, worker failure/replacement and handoff revoke consent and clear
+queued PCM; a successor desktop needs fresh consent. Camera remains refused.
+New ConsoleHostControllerTest exercises actual connection consent/priority state
+for stale acknowledgements, mic-only readiness, source failure and revocation
+without initializing RDP sockets. This supersedes the earlier broker-rejection
+notes; live Buzz-to-Sol sample delivery and AUDIN re-open remain unverified.
