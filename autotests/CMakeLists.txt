@@ -8,6 +8,15 @@ target_include_directories(VirtualSessionStateTest PRIVATE ${CMAKE_SOURCE_DIR}/s
 target_link_libraries(VirtualSessionStateTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionStateTest COMMAND VirtualSessionStateTest)
 
+find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session)
+find_program(GDBUS_EXECUTABLE gdbus)
+find_program(BASH_EXECUTABLE bash)
+if(DBUS_RUN_SESSION_EXECUTABLE AND GDBUS_EXECUTABLE AND BASH_EXECUTABLE)
+    add_test(NAME VirtualSessionBusTest COMMAND ${DBUS_RUN_SESSION_EXECUTABLE}
+        --config-file=${CMAKE_SOURCE_DIR}/server/virtual-session-bus.conf
+        -- ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSessionBusTest.sh)
+endif()
+
 add_executable(SurfaceLayoutTest SurfaceLayoutTest.cpp)
 target_include_directories(SurfaceLayoutTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(SurfaceLayoutTest PRIVATE Qt6::Test Qt6::Core)
