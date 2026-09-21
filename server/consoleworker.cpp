@@ -23,6 +23,7 @@
 
 #include "ConsoleWorkerWire.h"
 #include "ConsoleInputState.h"
+#include "ConsoleResizeSession.h"
 #include "TakeoverDetector.h"
 #include "PipeWireAudioPlayback.h"
 
@@ -63,6 +64,23 @@ public:
         , m_token(token)
     {
         m_clock.start();
+        connect(&m_resize, &ConsoleResizeSession::mutationStarting, this, [this]() {
+            releaseInput();
+            m_takeover.outputMoved(m_clock.elapsed());
+        });
+        connect(&m_resize, &ConsoleResizeSession::keyframeNeeded, &m_session, &AbstractSession::requestKeyFrame);
+        connect(&m_resize, &ConsoleResizeSession::result, this, [this](const auto &result) {
+            if (m_socket.state() == QLocalSocket::ConnectedState) {
+                m_socket.write(ConsoleWorkerWire::frame(result));
+            }
+        });
+        connect(&m_resize, &ConsoleResizeSession::stopped, this, [this](const QString &error) {
+            if (!error.isEmpty()) {
+                qWarning().noquote() << "Console output restoration:" << error;
+            }
+            m_session.setStreamingEnabled(false);
+            QCoreApplication::exit(error.isEmpty() ? m_exitCode : 1);
+        });
         // Use Plasma's shortcut service, never a raw keyboard grab. SDDM need
         // not provide it; do not auto-start desktop services in the greeter.
         if (QDBusConnection::sessionBus().interface()
@@ -78,7 +96,7 @@ public:
             KGlobalAccel::self()->setShortcut(&m_reclaimAction, {shortcut});
         }
         connect(&m_session, &AbstractSession::cursorUpdate, this, [this](const PipeWireCursor &cursor) {
-            if (m_control.active && m_session.outputGeometryResolved()
+            if (m_control.active && !m_resize.changing() && m_session.outputGeometryResolved()
                 && m_takeover.observed(m_session.mapToGlobal(cursor.position).toPoint(), m_clock.elapsed())) {
                 reclaimConsole();
             }
@@ -93,12 +111,11 @@ public:
         });
         connect(&m_socket, &QLocalSocket::readyRead, this, &Worker::readBroker);
         connect(&m_socket, &QLocalSocket::disconnected, this, [this]() {
-            releaseInput();
-            QCoreApplication::exit(1);
+            shutdown(1);
         });
         connect(&m_socket, &QLocalSocket::errorOccurred, this, [this](QLocalSocket::LocalSocketError) {
             if (m_socket.state() == QLocalSocket::UnconnectedState) {
-                QCoreApplication::exit(1);
+                shutdown(1);
             }
         });
         connect(&m_session, &AbstractSession::streamActiveChanged, this, [this](bool active) {
@@ -132,6 +149,9 @@ public:
                     m_socket.write(ConsoleWorkerWire::frame(outputs));
                 }
                 m_socket.write(ConsoleWorkerWire::frame(frame));
+                // Only this frame's validated output geometry may complete Fit,
+                // never metadata cached before a resize or a compositor handoff.
+                m_resize.captured(outputs, frame.isKeyFrame);
             }
         });
         connect(&m_session, &AbstractSession::error, this, [this]() {
@@ -159,6 +179,19 @@ public:
     }
 
 private:
+    void shutdown(int code)
+    {
+        if (m_stopping) {
+            return;
+        }
+        m_stopping = true;
+        m_exitCode = code;
+        releaseInput();
+        m_audioTimer.stop();
+        m_audio.reset();
+        m_resize.stop(); // Keep the event loop alive until restoration finishes.
+    }
+
     void releaseInput()
     {
         const auto releases = m_inputState.releaseAll();
@@ -187,18 +220,23 @@ private:
         releaseInput();
         m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalTakeover));
         m_control.active = false; // Gate immediately, before the host's acknowledgement.
+        m_resize.setControl(m_control);
         m_reclaimAction.setEnabled(false);
         m_takeover.latch();
     }
 
     void readBroker()
     {
+        if (m_stopping) {
+            return;
+        }
         m_deframer.feed(m_socket.readAll());
         while (const auto record = m_deframer.next()) {
             if (const auto control = ConsoleWorkerWire::controlState(*record)) {
                 if (*control != m_control) {
                     releaseInput();
                     m_control = *control;
+                    m_resize.setControl(*control);
                     m_reclaimAction.setEnabled(control->active);
                     m_takeover = {};
                     if (control->active) {
@@ -208,12 +246,13 @@ private:
                 continue;
             }
             if (record->kind == ConsoleWorkerWire::Kind::Stop && record->payload.isEmpty()) {
-                releaseInput();
-                m_audioTimer.stop();
-                m_audio.reset();
-                m_session.setStreamingEnabled(false);
-                QCoreApplication::quit();
+                shutdown(0);
                 return;
+            }
+            if (const auto request = ConsoleWorkerWire::resize(*record)) {
+                releaseInput();
+                m_resize.request(*request);
+                continue;
             }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {
                 m_session.requestKeyFrame();
@@ -236,7 +275,7 @@ private:
                 continue;
             }
             if (const auto input = ConsoleWorkerWire::input(*record)) {
-                if (!m_control.active) {
+                if (!m_control.active || !m_resize.inputAllowed()) {
                     continue;
                 }
                 if (const auto event = eventFor(*input)) {
@@ -274,6 +313,9 @@ private:
     Takeover::Detector m_takeover;
     QAction m_reclaimAction;
     ConsoleWorkerWire::ControlState m_control;
+    ConsoleResizeSession m_resize;
+    bool m_stopping = false;
+    int m_exitCode = 0;
 };
 }
 

@@ -86,7 +86,8 @@ bool ConsoleResizeExecutor::restore(const ConsoleResize::Plan &plan)
     }
     m_busy = true;
     run({QStringLiteral("-j")}, [this, plan](bool ok, const QByteArray &snapshot) {
-        if (!ok) {
+        const auto document = QJsonDocument::fromJson(snapshot);
+        if (!ok || !document.isObject() || !document.object().value(QStringLiteral("outputs")).isArray()) {
             finish(plan, QStringLiteral("could not read physical outputs before restoration"));
         } else if (!ConsoleResize::matches(snapshot, plan)) {
             // Local changes supersede our temporary mode. Do not undo them.

@@ -124,6 +124,22 @@ handoff/disconnect restoration, capture/keyframe settling, and capability/client
 handling before enabling it. Process exit or mode readback alone is not proof
 that the RDP stream has adopted the new geometry.
 
+Worker integration follow-up: ConsoleResizeSession is now wired to worker IPC,
+control changes, frame metadata and Stop/socket-loss shutdown. Requests require
+the current active generation and an idle resize lifecycle. Success waits for a
+keyframe whose freshly validated output metadata matches requested native pixels
+and scale. Revocation cancels pending success and drains held temporary modes;
+Stop keeps the event loop alive until pending apply/restoration completes.
+Repeated resizes retain the first original mode unless a local display change
+superseded it. Unit tests cover revocation during apply and capture wait, stale
+generation, late frames, and shutdown ordering. Not yet live accepted or
+reachable through broker/client resize requests. Before enabling: verify capture
+restart on actual modeset, restoration geometry/input settling (including a new
+owner arriving during restoration), multi-output capture bounds/overlap, and
+failure/crash recovery. Greeter teardown can remove its compositor before any
+asynchronous restoration finishes, so that path remains an explicit acceptance
+case, not a guarantee inferred from the lifecycle tests.
+
 ## Virtual sessions (after console mode)
 
 The virtual-session host uses the same stable transport and adapter API, but
