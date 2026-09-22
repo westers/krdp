@@ -8,10 +8,15 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia ) ) ]]
     probe_mode="${1:-}"
     rdp_mode=
     probe_timeout=80
+    if [[ "$probe_mode" == --plasma-worker-nvidia ]]; then
+        rdp_mode=--worker
+        probe_mode=--plasma-nvidia
+        probe_timeout=120
+    fi
     if [[ "$probe_mode" == --plasma-rdp-nvidia || "$probe_mode" == --plasma-retention-nvidia || "$probe_mode" == --plasma-audio-nvidia ]]; then
         # Disposable acceptance listener, never the installed console service.
         if ss -H -ltn 'sport = :3394' | grep -q .; then
@@ -57,7 +62,10 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     probe_runtime=$(mktemp -d "/run/user/$(id -u)/krdp-headless.XXXXXX")
     mkdir "$probe_runtime/config" "$probe_runtime/cache" "$probe_runtime/state" "$probe_runtime/data"
     cp -r "$repo_path/scripts/virtual-probe-config/." "$probe_runtime/config/"
-    if [[ -n "$rdp_mode" ]]; then
+    if [[ "$rdp_mode" == --worker ]]; then
+        mkdir -p "$probe_runtime/data/applications"
+        cp "$repo_path/build/server/org.kde.krdpvirtualprobe.desktop" "$probe_runtime/data/applications/org.kde.krdpconsoleworker.desktop"
+    elif [[ -n "$rdp_mode" ]]; then
         mkdir -p "$probe_runtime/data/applications"
         cp "$repo_path/scripts/virtual-probe-rdp.desktop" "$probe_runtime/data/applications/org.kde.krdpserver.desktop"
         (umask 077; openssl rand -hex 24 >"$probe_runtime/rdp-password")
@@ -226,6 +234,16 @@ jq -e '[.[] | select(.type == "PipeWire:Interface:Device")] | length == 0' "$XDG
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
     --method org.freedesktop.DBus.ListNames
 echo 'Private Wayland compositor ready at 1280x720'
+if [[ "${3:-}" == --worker ]]; then
+    "$repo_path/build/bin/krdp-virtual-worker-probe" >"$XDG_RUNTIME_DIR/worker-probe.log" 2>&1
+    # Stopping capture must leave the separate desktop alive and unchanged.
+    kill -0 "$wrapper_pid"
+    kill -0 "$plasma_pid"
+    env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
+        kscreen-doctor -j >"$XDG_RUNTIME_DIR/outputs-after-worker.json"
+    jq -e '.outputs | length == 1' "$XDG_RUNTIME_DIR/outputs-after-worker.json"
+    jq -e '.outputs[0] | .enabled == true and .size.width == 1280 and .size.height == 720' "$XDG_RUNTIME_DIR/outputs-after-worker.json"
+fi
 if [[ "${3:-}" == --rdp || "${3:-}" == --retention || "${3:-}" == --audio ]]; then
     acceptance_seconds=90
     if [[ "${3:-}" == --audio ]]; then

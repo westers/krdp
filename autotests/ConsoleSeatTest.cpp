@@ -32,6 +32,8 @@ void ConsoleSeatTest::prefersPhysicalUserDuringHandoff()
     };
     QCOMPARE(adapterFor(sessions), Adapter::PhysicalUser);
     QCOMPARE(activeSessionId(sessions, Adapter::PhysicalUser), QStringLiteral("3"));
+    QVERIFY(activeSessionId(sessions, Adapter::VirtualUser).isEmpty());
+    QVERIFY(!activeSessionUid(sessions, Adapter::VirtualUser));
 }
 
 void ConsoleSeatTest::ignoresInactiveAndRemoteSessions()

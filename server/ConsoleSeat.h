@@ -32,6 +32,7 @@ enum class Adapter {
     None,
     Greeter,
     PhysicalUser,
+    VirtualUser, // Explicit registry target only; never selected from logind.
 };
 
 /** A session usable as the physical console for @p seat (normally `seat0`). */

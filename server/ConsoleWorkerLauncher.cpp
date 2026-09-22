@@ -97,6 +97,10 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     if (error) {
         error->clear();
     }
+    if (target.adapter != ConsoleSeat::Adapter::Greeter && target.adapter != ConsoleSeat::Adapter::PhysicalUser) {
+        if (error) *error = QStringLiteral("physical launcher cannot launch a virtual registry target");
+        return false;
+    }
     const auto sessions = ConsoleSeat::readLogindSessions(error);
     const auto found = std::find_if(sessions.cbegin(), sessions.cend(), [&target](const auto &session) {
         return session.id == target.sessionId && session.uid == target.uid;
