@@ -567,3 +567,14 @@ credential on stdin. This adopts the already-running desktop into the real PAM
 listener instead of launching a timed desktop; only the diagnostic listener
 has its180s bound. New create requests are refused by its empty launch factory.
 Durable registry/service startup and production installation are still pending.
+
+Production recovery ordering: the trusted launcher must allocate and durably
+record UID/session/launch/guardian-incarnation/token before spawning a service.
+Guardian now accepts an optional canonical non-null --instance UUID from that
+launcher (never RDP JSON), with the same parameter propagated by startPrepared.
+Without it, diagnostic callers retain fresh random identity generation. Invalid
+explicit CLI values are refused before storage/socket/child creation. A supplied
+value is not permission to reuse a runtime or bypass the exclusive profile lock.
+Use a fresh incarnation for every actual launch; uncertain recovery must not
+silently spawn a replacement. This removes the identity-discovery crash window
+but does not itself implement the durable journal or independent service launch.

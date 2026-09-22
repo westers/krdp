@@ -24,6 +24,22 @@ class VirtualSessionGuardianTest : public QObject
         return QJsonDocument::fromJson(socket.readLine()).object();
     }
 private Q_SLOTS:
+    void invalidLauncherIncarnationDoesNotSpawn()
+    {
+        QTemporaryDir runtime;
+        const auto session = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const auto address = runtime.filePath(u"guardian.sock"_s);
+        const QStringList invalid{u"not-a-uuid"_s, u"00000000-0000-0000-0000-000000000000"_s,
+            u"{12345678-1234-1234-1234-123456789abc}"_s, u"12345678-1234-1234-1234-123456789ABC"_s};
+        for (const auto &instance : invalid) {
+            VirtualSessionGuardian guardian;
+            QVERIFY(!guardian.start(getuid(), session, token, address,
+                {u"/usr/bin/sleep"_s, {u"60"_s}, {}, {}}, nullptr, instance));
+            QCOMPARE(guardian.phase(), u"absent"_s);
+            QCOMPARE(guardian.processId(), qint64(0));
+            QVERIFY(!QFile::exists(address));
+        }
+    }
     void brokerDisconnectAndReconnectRetainsChild()
     {
         QTemporaryDir runtime;
@@ -59,6 +75,29 @@ private Q_SLOTS:
         QVERIFY(exchange(nextBroker, stop).value(u"ok"_s).toBool());
         QTRY_COMPARE(guardian.phase(), u"exited"_s);
         QCOMPARE(guardian.processId(), qint64(0));
+    }
+    void executableRejectsInvalidExplicitInstance()
+    {
+        QTemporaryDir runtime;
+        QTemporaryFile credential(runtime.filePath(u"token.XXXXXX"_s));
+        QVERIFY(credential.open());
+        QCOMPARE(credential.write(token), qint64(32));
+        QVERIFY(credential.flush());
+        credential.close();
+        const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const auto address = runtime.filePath(u"guardian.sock"_s);
+        for (const auto &instance : QStringList{QString(), u"not-a-uuid"_s,
+                u"00000000-0000-0000-0000-000000000000"_s}) {
+            QProcess process;
+            process.setStandardInputFile(credential.fileName());
+            process.start(QCoreApplication::applicationDirPath() + u"/krdp-virtual-guardian"_s,
+                {u"--session"_s, id, u"--instance"_s, instance, u"--socket"_s, address,
+                    u"--token-fd"_s, u"0"_s, u"--"_s, u"/usr/bin/sleep"_s, u"60"_s});
+            QVERIFY(process.waitForFinished(3000));
+            QCOMPARE(process.exitStatus(), QProcess::NormalExit);
+            QCOMPARE(process.exitCode(), 1);
+            QVERIFY(!QFile::exists(address));
+        }
     }
     void badTokenAndStaleInstanceCannotStopChild()
     {
@@ -102,11 +141,13 @@ private Q_SLOTS:
         QVERIFY(credential.flush());
         credential.close();
         const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const auto plannedInstance = QUuid::createUuid().toString(QUuid::WithoutBraces);
         const auto address = runtime.filePath(u"guardian.sock"_s);
         QProcess guardian;
         guardian.setStandardInputFile(credential.fileName());
         guardian.start(QCoreApplication::applicationDirPath() + u"/krdp-virtual-guardian"_s,
-            {u"--session"_s, id, u"--socket"_s, address, u"--token-fd"_s, u"0"_s, u"--"_s, u"/usr/bin/sleep"_s, u"60"_s});
+            {u"--session"_s, id, u"--instance"_s, plannedInstance, u"--socket"_s, address,
+                u"--token-fd"_s, u"0"_s, u"--"_s, u"/usr/bin/sleep"_s, u"60"_s});
         QVERIFY(guardian.waitForStarted());
         QTRY_VERIFY(QFile::exists(address));
         QString instance;
@@ -117,6 +158,7 @@ private Q_SLOTS:
             const auto reply = exchange(first, message(id));
             QVERIFY(reply.value(u"ok"_s).toBool());
             instance = reply.value(u"instance"_s).toString();
+            QCOMPARE(instance, plannedInstance);
             first.abort();
         }
         QCOMPARE(guardian.state(), QProcess::Running);

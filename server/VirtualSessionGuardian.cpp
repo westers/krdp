@@ -44,7 +44,7 @@ VirtualSessionGuardian::~VirtualSessionGuardian()
 }
 
 bool VirtualSessionGuardian::start(quint32 uid, const QString &session, const QByteArray &token,
-    const QString &socket, const VirtualSessionSupervisor::Launch &launch, QString *error)
+    const QString &socket, const VirtualSessionSupervisor::Launch &launch, QString *error, const QString &incarnation)
 {
     const auto refuse = [error](const QString &why) {
         if (error) *error = why;
@@ -53,6 +53,8 @@ bool VirtualSessionGuardian::start(quint32 uid, const QString &session, const QB
     const QFileInfo socketInfo(socket), directory(socketInfo.absolutePath());
     struct stat permissions{};
     if (m_started || !uid || uid != getuid() || uid != geteuid() || token.size() != 32
+        || (!incarnation.isEmpty() && (QUuid(incarnation).isNull()
+            || QUuid(incarnation).toString(QUuid::WithoutBraces) != incarnation))
         || QUuid(session).isNull() || QUuid(session).toString(QUuid::WithoutBraces) != session
         || !QDir::isAbsolutePath(socket) || QDir::cleanPath(socket) != socket
         || socketInfo.exists() || socketInfo.isSymLink() || !directory.isDir()
@@ -68,7 +70,9 @@ bool VirtualSessionGuardian::start(quint32 uid, const QString &session, const QB
     m_uid = uid;
     m_session = session;
     m_token = token;
-    m_incarnation = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    // A trusted launcher can durably record a fresh incarnation BEFORE spawn.
+    // Never obtain it from a remote control request or discover it by PID.
+    m_incarnation = incarnation.isEmpty() ? QUuid::createUuid().toString(QUuid::WithoutBraces) : incarnation;
     m_process.setProgram(launch.program);
     m_process.setArguments(launch.arguments);
     m_process.setProcessEnvironment(launch.environment);
@@ -89,7 +93,8 @@ bool VirtualSessionGuardian::start(quint32 uid, const QString &session, const QB
 }
 
 bool VirtualSessionGuardian::startPrepared(quint32 uid, const QString &session, const QByteArray &token,
-    std::unique_ptr<VirtualSessionStorage> storage, const VirtualSessionSupervisor::Launch &launch, QString *error)
+    std::unique_ptr<VirtualSessionStorage> storage, const VirtualSessionSupervisor::Launch &launch, QString *error,
+    const QString &incarnation)
 {
     if (m_started || !storage || storage->ownerUid() != uid || storage->sessionId() != session) {
         if (error) *error = QStringLiteral("Guardian requires fresh prepared storage");
@@ -99,7 +104,7 @@ bool VirtualSessionGuardian::startPrepared(quint32 uid, const QString &session, 
     // This object lives in the independent guardian, not the RDP broker. Neither
     // client socket loss nor the child's exec closes the parent's profile lock.
     m_storage = std::move(storage);
-    if (start(uid, session, token, socket, launch, error)) return true;
+    if (start(uid, session, token, socket, launch, error, incarnation)) return true;
     m_storage.reset();
     return false;
 }

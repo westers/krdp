@@ -21,9 +21,11 @@ public:
     explicit VirtualSessionGuardian(QObject *parent = nullptr);
     ~VirtualSessionGuardian() override;
     bool start(quint32 uid, const QString &session, const QByteArray &token,
-        const QString &socket, const VirtualSessionSupervisor::Launch &launch, QString *error = nullptr);
+        const QString &socket, const VirtualSessionSupervisor::Launch &launch, QString *error = nullptr,
+        const QString &incarnation = {});
     bool startPrepared(quint32 uid, const QString &session, const QByteArray &token,
-        std::unique_ptr<VirtualSessionStorage> storage, const VirtualSessionSupervisor::Launch &launch, QString *error = nullptr);
+        std::unique_ptr<VirtualSessionStorage> storage, const VirtualSessionSupervisor::Launch &launch, QString *error = nullptr,
+        const QString &incarnation = {});
     QString phase() const { return m_phase; }
     QString incarnation() const { return m_incarnation; }
     qint64 processId() const { return m_process.processId(); }

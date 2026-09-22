@@ -96,8 +96,10 @@ private Q_SLOTS:
         const auto profile = storage->profileDirectory();
         {
             VirtualSessionGuardian guardian;
+            const auto incarnation = id();
             QVERIFY2(guardian.startPrepared(getuid(), session, token, std::move(storage),
-                {u"/usr/bin/sleep"_s, {u"60"_s}, {}, {}}, &error), qPrintable(error));
+                {u"/usr/bin/sleep"_s, {u"60"_s}, {}, {}}, &error, incarnation), qPrintable(error));
+            QCOMPARE(guardian.incarnation(), incarnation);
             QTRY_COMPARE(guardian.phase(), u"running"_s);
             QVERIFY(!storage);
             QVERIFY(!VirtualSessionStorage::prepareAt(getuid(), home.path(), runtime.path(), session, id(), token, &error));

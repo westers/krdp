@@ -16,6 +16,7 @@ int main(int argc, char **argv)
     QCommandLineParser parser;
     parser.addHelpOption();
     parser.addOption({QStringLiteral("session"), QStringLiteral("Server-generated desktop UUID"), QStringLiteral("uuid")});
+    parser.addOption({QStringLiteral("instance"), QStringLiteral("Fresh canonical guardian UUID recorded by the trusted launcher before spawn"), QStringLiteral("uuid")});
     parser.addOption({QStringLiteral("socket"), QStringLiteral("Fresh socket in an owned private runtime"), QStringLiteral("path")});
     parser.addOption({QStringLiteral("launch-id"), QStringLiteral("Prepare and own persistent profile/runtime storage for this launch UUID; excludes --socket"), QStringLiteral("uuid")});
     parser.addOption({QStringLiteral("token-fd"), QStringLiteral("Descriptor with exactly 32 credential bytes available"), QStringLiteral("fd")});
@@ -24,7 +25,10 @@ int main(int argc, char **argv)
     bool validFd = false;
     const int descriptor = parser.value(QStringLiteral("token-fd")).toInt(&validFd);
     const auto arguments = parser.positionalArguments();
+    const auto incarnation = parser.value(QStringLiteral("instance"));
     if (!getuid() || getuid() != geteuid() || !validFd || descriptor < 0 || arguments.isEmpty()
+        || (parser.isSet(QStringLiteral("instance")) && (QUuid(incarnation).isNull()
+            || QUuid(incarnation).toString(QUuid::WithoutBraces) != incarnation))
         || parser.isSet(QStringLiteral("launch-id")) == parser.isSet(QStringLiteral("socket"))) return 1;
     const int flags = fcntl(descriptor, F_GETFL);
     if (flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)) return 1;
@@ -61,10 +65,10 @@ int main(int argc, char **argv)
         environment.insert(QStringLiteral("KRDP_VIRTUAL_RUNTIME"), storage->runtimeDirectory());
         environment.insert(QStringLiteral("KRDP_VIRTUAL_PROFILE"), storage->profileDirectory());
         started = guardian.startPrepared(getuid(), parser.value(QStringLiteral("session")), token, std::move(storage),
-            {arguments.first(), arguments.mid(1), environment, {}}, &error);
+            {arguments.first(), arguments.mid(1), environment, {}}, &error, incarnation);
     } else {
         started = guardian.start(getuid(), parser.value(QStringLiteral("session")), token,
-            parser.value(QStringLiteral("socket")), {arguments.first(), arguments.mid(1), environment, {}}, &error);
+            parser.value(QStringLiteral("socket")), {arguments.first(), arguments.mid(1), environment, {}}, &error, incarnation);
     }
     if (!started) {
         qCritical().noquote() << error;
