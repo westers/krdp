@@ -84,6 +84,107 @@ class VirtualSessionMaintenanceGuardTest : public QObject {
         return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     }
 private Q_SLOTS:
+    void v2ClaimAndStaleCompletion() {
+        using R = VirtualSessionMaintenanceRecord;
+        QTemporaryDir guard, pkg; QVERIFY(put(guard.filePath(QStringLiteral("lock")), {})); QVERIFY(packages(pkg.path()));
+        auto ordered = [&] { return G::orderedAt(guard.path(), pkg.path(), getuid(), boot, true, true, nullptr); };
+        auto l = ordered(); QVERIFY(l);
+        const auto id = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        R initial; initial.phase = R::Phase::InitialBlocked;
+        initial.installation = id(); initial.transaction = id(); initial.generation = id();
+        initial.boot = boot; initial.profile = digest; initial.attestation = id();
+        QCOMPARE(l->initializeRecord(initial, nullptr), P::Durable);
+        QVERIFY(!l->admitRecord(digest, nullptr));
+        QCOMPARE(l->initializeRecord(initial, nullptr), P::FailedBeforeRename);
+        R claim; QCOMPARE(l->claimRecord(initial, id(), &claim, nullptr), P::Durable);
+        QCOMPARE(claim.phase, R::Phase::Validating); QVERIFY(!l->admitRecord(digest, nullptr));
+        l.reset(); l = ordered(); QVERIFY(l);
+        QCOMPARE(l->claimRecord(initial, id(), nullptr, nullptr), P::FailedBeforeRename);
+        for (auto member : {&R::installation, &R::transaction, &R::generation, &R::boot, &R::invocation, &R::attestation}) {
+            auto stale = claim; stale.*member = id();
+            QCOMPARE(l->completeRecord(stale, nullptr), P::FailedBeforeRename);
+        }
+        auto wrongProfile = claim; wrongProfile.profile = QString(64, QLatin1Char('b'));
+        QCOMPARE(l->completeRecord(wrongProfile, nullptr), P::FailedBeforeRename);
+        QCOMPARE(l->completeRecord(claim, nullptr), P::Durable); QVERIFY(l->admitRecord(digest, nullptr));
+        QVERIFY(!l->admitRecord(wrongProfile.profile, nullptr));
+        QCOMPARE(l->completeRecord(claim, nullptr), P::FailedBeforeRename);
+        l.reset(); auto invalidator = lease(guard.path()); QVERIFY(invalidator);
+        QCOMPARE(invalidator->invalidate(), P::Durable);
+        const auto first = invalidator->record(); QVERIFY(first); QCOMPARE(first->phase, R::Phase::ExternalUnknown);
+        QCOMPARE(invalidator->invalidate(), P::Durable); QVERIFY(invalidator->record()->generation != first->generation);
+        invalidator.reset(); l = ordered(); QVERIFY(l);
+        QVERIFY(!l->admitRecord(digest, nullptr));
+        QCOMPARE(l->completeRecord(claim, nullptr), P::FailedBeforeRename);
+        QCOMPARE(l->initializeRecord(initial, nullptr), P::FailedBeforeRename);
+    }
+    void v2ClaimAndCleanPublicationFaults_data() {
+        QTest::addColumn<bool>("complete"); QTest::addColumn<int>("sync");
+        for (bool complete : {false, true}) for (int sync : {1, 2})
+            QTest::newRow(qPrintable(QStringLiteral("%1-%2").arg(complete ? "clean" : "claim").arg(sync))) << complete << sync;
+    }
+    void v2ClaimAndCleanPublicationFaults() {
+        QFETCH(bool, complete); QFETCH(int, sync); using R = VirtualSessionMaintenanceRecord;
+        QTemporaryDir guard, pkg; QVERIFY(put(guard.filePath(QStringLiteral("lock")), {})); QVERIFY(packages(pkg.path()));
+        auto l = G::orderedAt(guard.path(), pkg.path(), getuid(), boot, true, true, nullptr); QVERIFY(l);
+        const auto id = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        R initial; initial.phase = R::Phase::InitialBlocked;
+        initial.installation = id(); initial.transaction = id(); initial.generation = id();
+        initial.boot = boot; initial.profile = digest; initial.attestation = id();
+        QCOMPARE(l->initializeRecord(initial, nullptr), P::Durable);
+        R claim;
+        if (complete) QCOMPARE(l->claimRecord(initial, id(), &claim, nullptr), P::Durable);
+        failSync = sync;
+        const auto result = complete ? l->completeRecord(claim, nullptr) : l->claimRecord(initial, id(), &claim, nullptr);
+        QCOMPARE(result, sync == 1 ? P::FailedBeforeRename : P::UncertainAfterRename);
+        const auto current = l->record(); QVERIFY(current);
+        if (sync == 1) QCOMPARE(current->phase, complete ? R::Phase::Validating : R::Phase::InitialBlocked);
+        else QCOMPARE(current->phase, complete ? R::Phase::Clean : R::Phase::Validating);
+        if (!complete) QVERIFY(claim.installation.isEmpty());
+        if (complete && sync == 2) {
+            for (int readSync : {1, 2}) {
+                failSync = readSync;
+                QVERIFY(!l->admitRecord(digest, nullptr));
+            }
+        }
+        QCOMPARE(l->admitRecord(digest, nullptr), complete && sync == 2);
+    }
+    void v2TransitionsRequireOrderedExclusiveLease() {
+        using R = VirtualSessionMaintenanceRecord;
+        QTemporaryDir guard, pkg; QVERIFY(put(guard.filePath(QStringLiteral("lock")), {})); QVERIFY(packages(pkg.path()));
+        const auto id = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        R initial; initial.phase = R::Phase::InitialBlocked;
+        initial.installation = id(); initial.transaction = id(); initial.generation = id();
+        initial.boot = boot; initial.profile = digest; initial.attestation = id();
+        auto gate = lease(guard.path()); QVERIFY(gate);
+        QCOMPARE(gate->initializeRecord(initial, nullptr), P::FailedBeforeRename);
+        gate.reset();
+        auto shared = G::orderedAt(guard.path(), pkg.path(), getuid(), boot, false, true, nullptr); QVERIFY(shared);
+        QCOMPARE(shared->initializeRecord(initial, nullptr), P::FailedBeforeRename); shared.reset();
+        auto exclusive = G::orderedAt(guard.path(), pkg.path(), getuid(), boot, true, true, nullptr); QVERIFY(exclusive);
+        QCOMPARE(exclusive->initializeRecord(initial, nullptr), P::Durable); exclusive.reset();
+        gate = lease(guard.path()); QVERIFY(gate);
+        QCOMPARE(gate->claimRecord(initial, id(), nullptr, nullptr), P::FailedBeforeRename); gate.reset();
+        shared = G::orderedAt(guard.path(), pkg.path(), getuid(), boot, false, true, nullptr); QVERIFY(shared);
+        QCOMPARE(shared->claimRecord(initial, id(), nullptr, nullptr), P::FailedBeforeRename); shared.reset();
+        exclusive = G::orderedAt(guard.path(), pkg.path(), getuid(), boot, true, true, nullptr); QVERIFY(exclusive);
+        R claim; QCOMPARE(exclusive->claimRecord(initial, id(), &claim, nullptr), P::Durable); exclusive.reset();
+        gate = lease(guard.path()); QVERIFY(gate);
+        QCOMPARE(gate->completeRecord(claim, nullptr), P::FailedBeforeRename); gate.reset();
+        shared = G::orderedAt(guard.path(), pkg.path(), getuid(), boot, false, true, nullptr); QVERIFY(shared);
+        QCOMPARE(shared->completeRecord(claim, nullptr), P::FailedBeforeRename);
+        QCOMPARE(shared->record()->phase, R::Phase::Validating);
+    }
+    void v2MissingOrMalformedCannotBootstrapByInvalidation() {
+        QTemporaryDir guard; QVERIFY(put(guard.filePath(QStringLiteral("lock")), {}));
+        auto l = lease(guard.path()); QVERIFY(l);
+        QCOMPARE(l->invalidate(), P::Durable);
+        const auto r = l->record(); QVERIFY(r); QVERIFY(r->installation.isEmpty());
+        QCOMPARE(r->phase, VirtualSessionMaintenanceRecord::Phase::ExternalUnknown);
+        QVERIFY(!r->claim(boot, boot));
+        QVERIFY(put(guard.filePath(QStringLiteral("state")), "broken"));
+        QCOMPARE(l->invalidate(), P::FailedBeforeRename); QVERIFY(!l->record());
+    }
     void init() { failSync = ofdError = ofdFailureCountdown = 0; shortWrite = failRename = false; atGate = {}; }
     void compoundLifetimeAndUnrelatedClose() {
         QTemporaryDir guard, pkg; QVERIFY(initialize(guard.path())); QVERIFY(packages(pkg.path()));

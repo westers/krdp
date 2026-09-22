@@ -170,8 +170,9 @@ The connected coordinator schema must distinguish `initial-bootstrap`,
 transaction ID, invalidation generation, boot ID, approved profile and owned
 coordinator InvocationID. Bootstrap additionally binds an explicit boundary
 attestation ID to that boot. Clean state includes a fresh validated epoch.
-These are integration requirements; the current isolated core format does not
-yet implement this schema or authorize clean publication from a CLI.
+The V2 private storage slice implements the bootstrap and external-unknown
+record distinctions. A coordinated-writer recipe and CLI authorization are not
+implemented; the older V1 public admission path remains unwired in production.
 
 `initialize-blocked(profile)` is explicit first provisioning only and refuses
 existing state. `bootstrap-validate(bootstrap-id)` is permitted only for an unused
@@ -187,7 +188,51 @@ records and boot changes remain blocked. `status` is diagnostic only. Recovery
 of unresolved work requires concrete writer resolution, never deleting state,
 another attestation standing in for evidence, or a generic force-clean flag.
 
-### Delivery sequence
+### Connected bootstrap implementation contract
+
+The V2 storage implementation now distinguishes InitialBlocked, Validating,
+Clean and ExternalUnknown. Its fixed, canonical record binds installation,
+transaction, generation, boot, profile, invocation and attestation; Clean adds
+an epoch. The private claim consumes InitialBlocked durably before validation.
+Every invalidation changes generation. These storage operations alone authorize
+neither first provisioning nor reopening admission.
+
+One fixed `bootstrap-validate` operation is the first supported coordinator:
+
+1. Retain package frontend SH, backend SH, then gate EX.
+2. Read the trusted first-provisioning receipt and InitialBlocked record; match
+   installation, transaction, generation, boot, profile and attestation. Refuse
+   missing, inconsistent, previously consumed or unknown-origin state.
+3. Load the fixed approved runtime profile, match its digest, and pin this
+   process as the MainPID of `krdp-maintenance-validate.service` using the
+   approved coordinator executable. The unit is a non-restarting oneshot;
+   caller arguments do not supply an executable, role, profile or invocation.
+4. Durably claim the initial record. Do not proceed on uncertain publication.
+5. Check the fixed supported-writer/activation inventory and validate this
+   process's `coordinator` role against the approved files and mappings.
+6. Recheck writer/activation conditions and live coordinator identity, then
+   privately complete the exact claimed record under the same retained leases.
+
+Writer checks are over a finite audited inventory, not arbitrary manifest
+commands or a generic success callback. Approved hook/wrapper routing must be
+installed. Each relevant service must have an empty relevant subtree and no
+pending activation job, with its timer/socket/path/D-Bus activation sources
+routed or excluded during validation. Inactivity alone is insufficient. Refuse
+active relevant writers or uncertainty; do not stop unrelated services or
+desktops. Initial attestation covers historical survivors but cannot override a
+contradictory runtime observation. Unknown/interrupted state has no bootstrap
+retry or force-clean path.
+
+The current RuntimeProfile validator supplies canonical input/hash/topology and
+own-process mapping checks. It is not an approved Sol footprint generator, a
+writer-quiescence checker, or proof about another process. Its filesystem
+deadline is cooperative, not cancellation of a blocked filesystem syscall.
+CoordinatorIdentity supplies observed service/boot/bus/invocation identity, not
+continuous ownership history. Full self-process deployment acceptance remains
+separate from selected-map fixtures. These constraints must remain visible when
+connecting the components; do not turn missing integration into implicit success.
+
+### Acceptance order
 
 1. Reviewed storage/lease core with temporary-directory subprocess tests; no
    production caller or auto-clean path until the full integration is validated.

@@ -117,6 +117,100 @@ std::optional<VirtualSessionMaintenanceGuard::State> VirtualSessionMaintenanceGu
     if (fd < 0) return {};
     ::close(fd); return s;
 }
+int VirtualSessionMaintenanceGuard::Lease::recordFile(VirtualSessionMaintenanceRecord &value, QString *error) const {
+    if (!associated(error)) return -1;
+    int fd = openat(m_directory, "state", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    struct stat st{};
+    char buffer[512], tail;
+    bool valid = regular(fd, m_owner) && !fstat(fd, &st) && st.st_size > 0 && st.st_size <= 512;
+    const ssize_t size = valid ? ::read(fd, buffer, st.st_size) : -1;
+    valid = valid && size == st.st_size && ::read(fd, &tail, 1) == 0;
+    const auto decoded = valid ? VirtualSessionMaintenanceRecord::decode(QByteArray(buffer, size)) : std::nullopt;
+    if (!decoded || !associated(error)) {
+        if (fd >= 0) ::close(fd);
+        fail(error, "Missing, unsafe or malformed V2 maintenance record"); return -1;
+    }
+    value = *decoded;
+    return fd;
+}
+std::optional<VirtualSessionMaintenanceRecord> VirtualSessionMaintenanceGuard::Lease::record(QString *error) const {
+    VirtualSessionMaintenanceRecord value;
+    int fd = recordFile(value, error);
+    if (fd < 0) return {};
+    ::close(fd); return value;
+}
+VirtualSessionMaintenanceGuard::Publication VirtualSessionMaintenanceGuard::Lease::initializeRecord(
+    const VirtualSessionMaintenanceRecord &initial, QString *error) {
+    struct stat st{};
+    if (!m_exclusive || !m_packages || !associated(error) || !initial.valid()
+        || initial.phase != VirtualSessionMaintenanceRecord::Phase::InitialBlocked || initial.boot != m_boot
+        || !fstatat(m_directory, "state", &st, AT_SYMLINK_NOFOLLOW) || errno != ENOENT) {
+        fail(error, "Initial provisioning requires absent state and an ordered exclusive lease");
+        return Publication::FailedBeforeRename;
+    }
+    // Only the coordinator's trusted first-install receipt workflow may call
+    // this method. Missing state alone never authorizes first provisioning.
+    return publishRecord(initial, error);
+}
+VirtualSessionMaintenanceGuard::Publication VirtualSessionMaintenanceGuard::Lease::claimRecord(
+    const VirtualSessionMaintenanceRecord &expected, const QString &invocation,
+    VirtualSessionMaintenanceRecord *claimed, QString *error) {
+    const auto current = record(error);
+    const auto next = expected.claim(m_boot, invocation);
+    if (!m_exclusive || !m_packages || !current || *current != expected || !next) {
+        fail(error, "Bootstrap already consumed, stale, or missing ordered exclusion");
+        return Publication::FailedBeforeRename;
+    }
+    const auto result = publishRecord(*next, error);
+    if (result == Publication::Durable && claimed) *claimed = *next;
+    return result;
+}
+VirtualSessionMaintenanceGuard::Publication VirtualSessionMaintenanceGuard::Lease::completeRecord(
+    const VirtualSessionMaintenanceRecord &claimed, QString *error) {
+    const auto current = record(error);
+    if (!m_exclusive || !m_packages || !current || *current != claimed || claimed.boot != m_boot
+        || claimed.phase != VirtualSessionMaintenanceRecord::Phase::Validating) {
+        fail(error, "Validation identity changed or ordered exclusion lost");
+        return Publication::FailedBeforeRename;
+    }
+    // Private to the coordinator: call only after actual profile/process/writer
+    // checks while retaining this lease. A caller-provided digest is not proof.
+    auto next = claimed;
+    next.phase = VirtualSessionMaintenanceRecord::Phase::Clean;
+    next.epoch = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    return publishRecord(next, error);
+}
+VirtualSessionMaintenanceGuard::Publication VirtualSessionMaintenanceGuard::Lease::invalidate(QString *error) {
+    if (!m_exclusive || !associated(error)) return Publication::FailedBeforeRename;
+    VirtualSessionMaintenanceRecord next;
+    struct stat st{};
+    if (!fstatat(m_directory, "state", &st, AT_SYMLINK_NOFOLLOW)) {
+        const auto current = record(error);
+        if (!current) return Publication::FailedBeforeRename;
+        const auto invalidated = current->invalidate(m_boot);
+        if (!invalidated) return Publication::FailedBeforeRename;
+        next = *invalidated;
+    } else {
+        if (errno != ENOENT) return Publication::FailedBeforeRename;
+        next.boot = m_boot;
+        next.generation = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
+    return publishRecord(next, error);
+}
+bool VirtualSessionMaintenanceGuard::Lease::admitRecord(const QString &approved, QString *error) {
+    if (!m_packages) return fail(error, "Admission requires retained package exclusion");
+    VirtualSessionMaintenanceRecord value;
+    const int fd = recordFile(value, error);
+    if (fd < 0) return false;
+    bool ok = value.phase == VirtualSessionMaintenanceRecord::Phase::Clean && value.boot == m_boot
+        && value.profile == approved && VirtualSessionMaintenanceRecord::digest(approved);
+    if (ok) ok = !fsync(fd) && !fsync(m_directory) && associated(error);
+    const int named = openat(m_directory, "state", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    ok = ok && regular(named, m_owner) && same(fd, named);
+    if (named >= 0) ::close(named);
+    ::close(fd);
+    return ok || fail(error, "V2 maintenance admission blocked or durability uncertain");
+}
 bool VirtualSessionMaintenanceGuard::Lease::admit(const QString &approved, QString *error) {
     State s; int fd = stateFile(s, error);
     if (fd < 0) return false;
@@ -134,15 +228,26 @@ VirtualSessionMaintenanceGuard::Publication VirtualSessionMaintenanceGuard::Leas
         || (s.clean ? !profile(s.profile) : !s.profile.isEmpty())) {
         fail(error, "Invalid maintenance publication lease or state"); return Publication::FailedBeforeRename;
     }
+    return publishBytes(bytes(s), false, error);
+}
+VirtualSessionMaintenanceGuard::Publication VirtualSessionMaintenanceGuard::Lease::publishRecord(
+    const VirtualSessionMaintenanceRecord &value, QString *error) {
+    if (!value.valid() || value.boot != m_boot) {
+        fail(error, "Invalid V2 maintenance record"); return Publication::FailedBeforeRename;
+    }
+    return publishBytes(value.encode(), true, error);
+}
+VirtualSessionMaintenanceGuard::Publication VirtualSessionMaintenanceGuard::Lease::publishBytes(
+    const QByteArray &data, bool version2, QString *error) {
+    if (!m_exclusive || !associated(error)) return Publication::FailedBeforeRename;
     // Refuse unsafe existing objects, but allow explicit blocked initialization
     // of absent state. Never bootstrap clean state.
     struct stat st{};
     if (!fstatat(m_directory, "state", &st, AT_SYMLINK_NOFOLLOW)) {
-        if (!read(error)) return Publication::FailedBeforeRename;
+        if (version2 ? !record(error) : !read(error)) return Publication::FailedBeforeRename;
     } else if (errno != ENOENT) return Publication::FailedBeforeRename;
     const QByteArray name = ".state-" + QUuid::createUuid().toString(QUuid::WithoutBraces).toLatin1();
     int fd = openat(m_directory, name.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-    const auto data = bytes(s);
     bool ok = regular(fd, m_owner) && ::write(fd, data.constData(), data.size()) == data.size() && !fsync(fd) && associated(error);
     if (fd >= 0) ::close(fd);
     // Leave partial temporary evidence untouched on uncertainty; never admitted.
@@ -185,12 +290,18 @@ std::optional<VirtualSessionMaintenanceGuard::Lease> VirtualSessionMaintenanceGu
 }
 std::optional<VirtualSessionMaintenanceGuard::Lease> VirtualSessionMaintenanceGuard::admissionAt(
     const QString &path, const QString &packagePath, uid_t owner, const QString &bootId, const QString &approved, bool fixture, QString *error) {
+    auto lease = orderedAt(path, packagePath, owner, bootId, false, fixture, error);
+    if (!lease || !lease->admit(approved, error)) return {};
+    return lease;
+}
+std::optional<VirtualSessionMaintenanceGuard::Lease> VirtualSessionMaintenanceGuard::orderedAt(
+    const QString &path, const QString &packagePath, uid_t owner, const QString &bootId, bool exclusive, bool fixture, QString *error) {
     auto packages = PackageLease::acquireAt(packagePath, owner, fixture, error);
     if (!packages) return {};
-    auto lease = acquire(path, owner, bootId, false, fixture, error);
+    auto lease = acquire(path, owner, bootId, exclusive, fixture, error);
     if (!lease) return {};
     lease->m_packages = std::move(packages);
-    if (!lease->admit(approved, error)) return {};
+    if (!lease->associated(error)) return {};
     return lease;
 }
 std::optional<VirtualSessionMaintenanceGuard::Lease> VirtualSessionMaintenanceGuard::maintenance(QString *error) {
