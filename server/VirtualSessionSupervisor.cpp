@@ -170,7 +170,10 @@ std::optional<VirtualSessionSupervisor::Handle> VirtualSessionSupervisor::recrea
 
 void VirtualSessionSupervisor::launch(quint32 uid, const Handle &handle)
 {
-    const auto spec = m_factory ? m_factory(uid, handle) : std::nullopt;
+    const QPointer<VirtualSessionSupervisor> alive(this);
+    const auto factory = m_factory;
+    const auto spec = factory ? factory(uid, handle) : std::nullopt;
+    if (!alive) return;
     if (!spec || !QDir::isAbsolutePath(spec->program) || spec->environment.inheritsFromParent()) {
         m_registry.exited(handle);
         return;

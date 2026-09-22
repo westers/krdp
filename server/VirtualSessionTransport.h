@@ -28,12 +28,18 @@ public:
 
 private:
     friend class VirtualSessionTransportTest;
+    // Private identity seam for socket-free tests; production callers use only
+    // RdpConnection's authenticated PAM identity, never record-supplied identity.
+    QJsonObject request(const QJsonObject &record, std::optional<quint32> uid);
+    void deliverControlRecord(const QJsonObject &record, std::optional<quint32> uid);
     bool bind();
+    bool activateBinding(const VirtualSessionRegistry::Handle &handle, QPointer<ConsoleWorkerEndpoint> endpoint);
+    bool attachmentMatches(const VirtualSessionRegistry::Handle &handle) const;
     bool authorized() const;
     void closed();
     quint64 m_client;
     QPointer<RdpConnection> m_connection;
-    VirtualSessionControl &m_control;
+    QPointer<VirtualSessionControl> m_control;
     Resolve m_resolve;
     quint64 &m_sequence;
     QPointer<ConsoleWorkerEndpoint> m_endpoint;
@@ -41,5 +47,6 @@ private:
     ConsoleWorkerSession m_session;
     QList<QMetaObject::Connection> m_workerConnections;
     bool m_playback = false;
+    bool m_closing = false;
 };
 }

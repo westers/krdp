@@ -12,6 +12,57 @@ class VirtualSessionHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void controlDispatchDefersRetirementEvenInNestedEventLoop()
+    {
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server;
+        auto host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
+        QVERIFY(host->recover(*journal));
+        QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        QVERIFY(host->createIndependent(1000));
+        const auto records = journal->records(); QVERIFY(records); QCOMPARE(records->size(), 1);
+        const auto record = records->first();
+        QVERIFY(journal->claimRecord(record, nullptr));
+        QVERIFY(journal->writeOrderedExit(record, nullptr)); QVERIFY(journal->writeReconciled(record, nullptr));
+        int retired = 0;
+        host->m_supervisor.setUnavailableCallback([&](const auto &handle) {
+            if (handle.id == record.session) { ++retired; host.reset(); }
+        });
+        bool nestedRan = false;
+        host->m_startService = [&](const auto &, const auto &) {
+            QTimer::singleShot(0, host.get(), [&] {
+                nestedRan = true;
+                host->reconcileCleanExits();
+            });
+            QCoreApplication::processEvents();
+            return false;
+        };
+        const QJsonObject request{{QStringLiteral("type"), QStringLiteral("virtual-session")},
+            {QStringLiteral("v"), 1}, {QStringLiteral("id"), QStringLiteral("create")},
+            {QStringLiteral("action"), QStringLiteral("create")}};
+        const auto response = host->m_control.request(1000, 1, request);
+        QVERIFY(response.value(QStringLiteral("ok")).toBool()); QVERIFY(nestedRan);
+        QCOMPARE(retired, 0); QVERIFY(host); QVERIFY(!host->m_control.dispatchActive());
+        host->reconcileCleanExits(); // Once dispatch unwinds, the same callback is allowed.
+        QCOMPARE(retired, 1); QVERIFY(!host);
+        QCOMPARE(journal->records()->size(), 2);
+    }
+    void controlCreateMayLoseHostInServiceCallback()
+    {
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server;
+        auto host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
+        QVERIFY(host->recover(*journal));
+        QVERIFY(host->enableIndependentCreates(*journal, [&](const auto &, const auto &) { host.reset(); return false; }));
+        const QJsonObject request{{QStringLiteral("type"), QStringLiteral("virtual-session")},
+            {QStringLiteral("v"), 1}, {QStringLiteral("id"), QStringLiteral("create")},
+            {QStringLiteral("action"), QStringLiteral("create")}};
+        const auto response = host->m_control.request(1000, 1, request);
+        QVERIFY(!response.value(QStringLiteral("ok")).toBool()); QVERIFY(!host);
+        QCOMPARE(journal->records()->size(), 1); // Published intent retained despite lost reply.
+    }
     void retirementGuardsRecursionAndSupervisorDestruction()
     {
         const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };

@@ -2,6 +2,7 @@
 #include "VirtualSessionControl.h"
 #include <QJsonArray>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <algorithm>
 
 namespace KRdp
@@ -51,94 +52,135 @@ QJsonObject VirtualSessionControl::request(std::optional<quint32> uid, quint64 c
 {
     if (!uid || !*uid || !client) return reply(record, false, QStringLiteral("PAM-authenticated nonroot identity required"));
     if (!validRequest(record)) return reply(record, false, QStringLiteral("invalid virtual-session request"));
+    if (!m_supervisor) return reply(record, false, QStringLiteral("session supervisor unavailable"));
+    // Commands are synchronous. A nested event loop or callback may reenter;
+    // reject before allocating a transport or executing any mutation.
+    if (dispatchActive()) return reply(record, false, QStringLiteral("virtual-session command in progress; retry"));
     auto it = m_transports.find(client);
     if (it == m_transports.end()) {
-        it = m_transports.insert(client, Transport{*uid, {}, {}});
+        it = m_transports.insert(client, std::make_shared<Transport>(Transport{*uid, {}, {}}));
     }
-    auto &transport = it.value();
-    if (transport.uid != *uid) return reply(record, false, QStringLiteral("transport identity changed"));
-    for (const auto &old : transport.replies) {
+    const auto transport = it.value();
+    if (transport->uid != *uid) return reply(record, false, QStringLiteral("transport identity changed"));
+    for (const auto &old : transport->replies) {
         if (old.request.value(QStringLiteral("id")) == record.value(QStringLiteral("id"))) {
+            if (old.pending) return reply(record, false, QStringLiteral("virtual-session command in progress; retry"));
             return old.request == record ? old.response : reply(record, false, QStringLiteral("request id reused with different content"));
         }
     }
     // Do not evict accepted mutation IDs: a delayed retry could create another
     // desktop after eviction. A bounded connection must reconnect when full.
-    if (transport.replies.size() >= 256) return reply(record, false, QStringLiteral("request limit reached; reconnect"));
+    if (transport->replies.size() >= 256) return reply(record, false, QStringLiteral("request limit reached; reconnect"));
+    const QPointer<VirtualSessionControl> alive(this);
+    ++m_dispatchDepth;
+    const auto leave = qScopeGuard([alive] { if (alive) --alive->m_dispatchDepth; });
+    // Reserve before callbacks; the exact object survives removal/rehashing.
+    transport->replies.push_back({record, {}, true});
     auto response = dispatch(*uid, client, transport, record);
-    transport.replies.push_back({record, response});
+    if (!alive || !m_supervisor || m_transports.value(client) != transport)
+        return reply(record, false, QStringLiteral("transport closed during command; outcome uncertain"));
+    transport->replies.back().response = response;
+    transport->replies.back().pending = false;
     return response;
 }
 
-QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, Transport &transport, const QJsonObject &record)
+QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const std::shared_ptr<Transport> &transport, const QJsonObject &record)
 {
+    const QPointer<VirtualSessionControl> alive(this);
+    const auto supervisor = m_supervisor;
+    const auto valid = [alive, supervisor, client, transport] {
+        return alive && supervisor && alive->m_transports.value(client) == transport;
+    };
+    const auto uncertain = [&record] { return reply(record, false, QStringLiteral("transport closed during command; outcome uncertain")); };
     const auto action = record.value(QStringLiteral("action")).toString();
     auto response = reply(record, true);
     if (action == QStringLiteral("list")) {
         QJsonArray sessions;
-        for (const auto &entry : m_supervisor.list(uid)) {
+        for (const auto &entry : supervisor->list(uid)) {
             sessions.append(QJsonObject{{QStringLiteral("session"), entry.id}, {QStringLiteral("state"), phaseName(entry.phase)}});
         }
         response.insert(QStringLiteral("sessions"), sessions);
         return response;
     }
     if (action == QStringLiteral("create")) {
-        const auto handle = m_create ? m_create(uid) : m_supervisor.create(uid);
+        const auto create = m_create; // Callback storage can be destroyed by itself.
+        const auto handle = create ? create(uid) : supervisor->create(uid);
+        if (!valid()) return uncertain();
         if (!handle) return reply(record, false, QStringLiteral("session creation refused"));
         response.insert(QStringLiteral("session"), handle->id);
         // Accepted is not ready: failed launch/first-frame readiness is exposed
         // by subsequent list requests. No transport is automatically attached.
-        for (const auto &entry : m_supervisor.list(uid)) {
+        for (const auto &entry : supervisor->list(uid)) {
             if (entry.id == handle->id) response.insert(QStringLiteral("state"), phaseName(entry.phase));
         }
         return response;
     }
     if (action == QStringLiteral("attach")) {
-        if (transport.attached) return reply(record, false, QStringLiteral("detach current session first"));
-        const auto handle = m_supervisor.attach(uid, record.value(QStringLiteral("session")).toString(), client);
+        if (transport->attached) return reply(record, false, QStringLiteral("detach current session first"));
+        const auto handle = supervisor->attach(uid, record.value(QStringLiteral("session")).toString(), client);
         if (!handle) return reply(record, false, QStringLiteral("session unavailable"));
-        transport.attached = handle;
+        transport->attached = handle;
         response.insert(QStringLiteral("session"), handle->id);
         response.insert(QStringLiteral("state"), QStringLiteral("attached"));
         return response;
     }
     if (action == QStringLiteral("detach")) {
         release(client, transport);
+        if (!valid()) return uncertain();
         return response;
     }
     const QString id = record.value(QStringLiteral("session")).toString();
     // Check ownership before releasing another transport or disclosing state.
-    const auto owned = m_supervisor.list(uid);
+    const auto owned = supervisor->list(uid);
     const auto found = std::find_if(owned.cbegin(), owned.cend(), [&](const auto &entry) { return entry.id == id; });
     if (found == owned.cend()) return reply(record, false, QStringLiteral("session unavailable"));
-    for (auto i = m_transports.begin(); i != m_transports.end(); ++i) {
-        if (i->uid == uid && i->attached && i->attached->id == id) release(i.key(), i.value());
+    QList<QPair<quint64, std::shared_ptr<Transport>>> affected;
+    for (auto i = m_transports.cbegin(); i != m_transports.cend(); ++i) {
+        if ((*i)->uid == uid && (*i)->attached && (*i)->attached->id == id) affected.append({i.key(), i.value()});
     }
-    if (!m_supervisor.stop(uid, id)) return reply(record, false, QStringLiteral("session stop refused"));
+    for (const auto &[target, value] : affected) {
+        if (m_transports.value(target) == value) release(target, value);
+        if (!valid()) return uncertain();
+    }
+    const bool stopped = supervisor->stop(uid, id);
+    if (!valid()) return uncertain();
+    if (!stopped) return reply(record, false, QStringLiteral("session stop refused"));
     response.insert(QStringLiteral("state"), QStringLiteral("stopping"));
     return response;
 }
 
-void VirtualSessionControl::release(quint64 client, Transport &transport)
+void VirtualSessionControl::release(quint64 client, const std::shared_ptr<Transport> &transport, std::function<void()> revoke)
 {
-    if (!transport.attached) return;
-    const auto handle = *transport.attached;
-    if (m_release) m_release(client, handle);
-    m_supervisor.disconnect(handle, client);
-    transport.attached.reset();
+    const auto handle = transport ? transport->attached : std::nullopt;
+    if (!handle && !revoke) return;
+    // Reentrant disconnect must not revoke twice, or erase a successor record.
+    if (transport) transport->attached.reset();
+    const auto callback = m_release;
+    const auto supervisor = m_supervisor;
+    const QPointer<VirtualSessionControl> alive(this);
+    ++m_dispatchDepth;
+    const auto leave = qScopeGuard([alive] { if (alive) --alive->m_dispatchDepth; });
+    if (revoke) revoke();
+    if (alive && callback && handle) callback(client, *handle);
+    // Revocation precedes registry release. This remains safe if Control died
+    // but the independently-owned supervisor is still alive.
+    if (supervisor && handle) supervisor->disconnect(*handle, client);
 }
 
 void VirtualSessionControl::disconnected(quint64 client)
 {
-    auto it = m_transports.find(client);
-    if (it == m_transports.end()) return;
-    release(client, it.value());
-    m_transports.erase(it);
+    disconnected(client, {});
+}
+
+void VirtualSessionControl::disconnected(quint64 client, std::function<void()> revoke)
+{
+    const auto transport = m_transports.take(client);
+    release(client, transport, std::move(revoke));
 }
 
 std::optional<VirtualSessionControl::Handle> VirtualSessionControl::attachment(quint64 client) const
 {
     const auto it = m_transports.constFind(client);
-    return it == m_transports.cend() ? std::nullopt : it->attached;
+    return it == m_transports.cend() ? std::nullopt : (*it)->attached;
 }
 }

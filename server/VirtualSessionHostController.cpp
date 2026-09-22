@@ -24,6 +24,7 @@ VirtualSessionHostController::VirtualSessionHostController(Server *server, Prepa
     Q_ASSERT(server);
     connect(&m_reconcileTimer, &QTimer::timeout, this, &VirtualSessionHostController::reconcileCleanExits);
     m_supervisor.setUnavailableCallback([this](const auto &handle) {
+        const QPointer<VirtualSessionHostController> alive(this);
         // Closing one desktop must not revoke any other user's transport.
         QList<quint64> affected;
         for (const auto &[id, client] : m_clients) {
@@ -34,6 +35,7 @@ VirtualSessionHostController::VirtualSessionHostController(Server *server, Prepa
         for (const auto id : affected) {
             const auto found = m_clients.find(id);
             if (found != m_clients.end()) found->second->unavailable();
+            if (!alive) return;
         }
         if (auto *endpoint = resolve(handle)) endpoint->close();
     });
@@ -58,8 +60,11 @@ std::optional<VirtualSessionSupervisor::Launch> VirtualSessionHostController::pr
     quint32 uid, const VirtualSessionRegistry::Handle &handle)
 {
     if (!m_prepare || !uid) return {};
+    const QPointer<VirtualSessionHostController> alive(this);
+    const auto callback = m_prepare;
     const auto token = QUuid::createUuid().toRfc4122() + QUuid::createUuid().toRfc4122();
-    const auto prepared = m_prepare(uid, handle, token);
+    const auto prepared = callback(uid, handle, token);
+    if (!alive) return {};
     if (!prepared) return {};
     if (!prepareEndpoint(uid, handle, prepared->socketName, token)) return {};
     return prepared->process;
@@ -140,7 +145,10 @@ std::optional<VirtualSessionRegistry::Handle> VirtualSessionHostController::crea
     VirtualSessionJournal::Record record{uid, uuid(), uuid(), uuid(), QString::fromLatin1(bootFile.read(128)).trimmed(),
         QUuid::createUuid().toRfc4122() + QUuid::createUuid().toRfc4122()};
     if (!m_supervisor.canAdopt(uid, record.session)) return {};
-    if (!m_commitIntent(record)) {
+    const auto commit = m_commitIntent;
+    const bool committed = commit(record);
+    if (!alive) return {};
+    if (!committed) {
         // A failed fsync may leave a published record outside live accounting.
         // Freeze creation until recovery/reconciliation reads authoritative state.
         m_creationBlocked = true;
@@ -151,7 +159,10 @@ std::optional<VirtualSessionRegistry::Handle> VirtualSessionHostController::crea
     if (!handle) return {};
     m_newIntents.emplace(record.session, record);
     const QString unit = QStringLiteral("krdp-virtual-session@%1.service").arg(record.session);
-    if (!m_startService(unit, *handle)) m_supervisor.captureUnavailable(*handle);
+    const auto start = m_startService;
+    const bool started = start(unit, *handle);
+    if (!alive) return {};
+    if (!started) m_supervisor.captureUnavailable(*handle);
     return handle;
 }
 
@@ -175,7 +186,9 @@ bool VirtualSessionHostController::startIndependentService(const QString &unit, 
 
 void VirtualSessionHostController::reconcileCleanExits()
 {
-    if (!m_journal) return;
+    // A nested event loop can deliver this timer during control dispatch.
+    // Retry on the next tick rather than revoking a transport below its reply.
+    if (!m_journal || m_control.dispatchActive()) return;
     const auto records = m_journal->records();
     if (!records) { m_creationBlocked = true; return; }
     for (const auto &record : *records) {

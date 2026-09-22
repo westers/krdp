@@ -22,6 +22,136 @@ class VirtualSessionControlTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void revokeGuardAlsoCoversMissingRecordAndControlDestruction()
+    {
+        VirtualSessionSupervisor supervisor(sleeper);
+        auto control = std::make_unique<VirtualSessionControl>(supervisor, VirtualSessionControl::Release{});
+        bool called = false, guarded = false, refused = false;
+        control->disconnected(42, [&] {
+            called = true; guarded = control->dispatchActive();
+            refused = !control->request(1000, 42, command(QStringLiteral("reenter"), QStringLiteral("create")))
+                .value(QStringLiteral("ok")).toBool();
+            control.reset();
+        });
+        QVERIFY(called); QVERIFY(guarded); QVERIFY(refused); QVERIFY(!control);
+        QVERIFY(supervisor.list(1000).isEmpty());
+    }
+    void reentrantRequestsCannotRepeatOrReplacePendingMutation()
+    {
+        VirtualSessionSupervisor supervisor(sleeper);
+        VirtualSessionControl control(supervisor, {});
+        const auto create = command(QStringLiteral("c"), QStringLiteral("create"));
+        int called = 0;
+        bool guarded = false;
+        QList<QJsonObject> nested;
+        control.setCreateHandler([&](quint32 uid) {
+            ++called;
+            guarded = control.dispatchActive();
+            // Bound the fixture even against the old recursively executing code.
+            if (called == 1) {
+                nested.append(control.request(uid, 1, create));
+                nested.append(control.request(uid, 1, command(QStringLiteral("different"), QStringLiteral("create"))));
+                nested.append(control.request(1001, 2, command(QStringLiteral("other"), QStringLiteral("create"))));
+            }
+            return supervisor.create(uid);
+        });
+        const auto response = control.request(1000, 1, create);
+        QVERIFY(response.value(QStringLiteral("ok")).toBool());
+        QVERIFY(guarded); QVERIFY(!control.dispatchActive()); QCOMPARE(called, 1);
+        QCOMPARE(nested.size(), 3);
+        for (const auto &value : nested) QVERIFY(!value.value(QStringLiteral("ok")).toBool());
+        QCOMPARE(control.request(1000, 1, create), response); QCOMPARE(called, 1);
+        QCOMPARE(supervisor.list(1000).size(), 1); QVERIFY(supervisor.list(1001).isEmpty());
+    }
+    void disconnectDuringCreateDoesNotCacheIntoReplacement()
+    {
+        VirtualSessionSupervisor supervisor(sleeper);
+        VirtualSessionControl control(supervisor, {});
+        bool nestedRefused = false;
+        control.setCreateHandler([&](quint32 uid) {
+            control.disconnected(1);
+            nestedRefused = !control.request(1001, 1, command(QStringLiteral("fresh"), QStringLiteral("list")))
+                .value(QStringLiteral("ok")).toBool();
+            return supervisor.create(uid);
+        });
+        const auto result = control.request(1000, 1, command(QStringLiteral("c"), QStringLiteral("create")));
+        QVERIFY(!result.value(QStringLiteral("ok")).toBool()); QVERIFY(nestedRefused);
+        QCOMPARE(supervisor.list(1000).size(), 1); // Accepted mutation is not rolled back or repeated.
+        const auto replacement = control.request(1001, 1, command(QStringLiteral("c"), QStringLiteral("list")));
+        QVERIFY(replacement.value(QStringLiteral("ok")).toBool());
+        QVERIFY(replacement.value(QStringLiteral("sessions")).toArray().isEmpty());
+    }
+    void createCallbacksMayDestroyControlOrSupervisor_data()
+    {
+        QTest::addColumn<QString>("target");
+        for (const auto *target : {"control", "supervisor", "factory-supervisor"})
+            QTest::newRow(target) << QString::fromLatin1(target);
+    }
+    void createCallbacksMayDestroyControlOrSupervisor()
+    {
+        QFETCH(QString, target);
+        std::unique_ptr<VirtualSessionSupervisor> supervisor;
+        supervisor = std::make_unique<VirtualSessionSupervisor>([&](quint32 uid, const auto &handle) {
+            if (target == QStringLiteral("factory-supervisor")) supervisor.reset();
+            return sleeper(uid, handle);
+        });
+        auto control = std::make_unique<VirtualSessionControl>(*supervisor, VirtualSessionControl::Release{});
+        if (target != QStringLiteral("factory-supervisor")) {
+            control->setCreateHandler([&](quint32) -> std::optional<VirtualSessionControl::Handle> {
+                if (target == QStringLiteral("control")) control.reset();
+                else supervisor.reset();
+                return {};
+            });
+        }
+        const auto response = control->request(1000, 1, command(QStringLiteral("c"), QStringLiteral("create")));
+        QVERIFY(!response.value(QStringLiteral("ok")).toBool());
+        if (control) QVERIFY(!control->dispatchActive());
+    }
+    void releaseMayReenterDisconnectOrDestroyControl_data()
+    {
+        QTest::addColumn<QString>("action"); QTest::addColumn<bool>("destroy");
+        for (const auto *action : {"detach", "stop", "disconnect"}) {
+            QTest::newRow(qPrintable(QString::fromLatin1(action) + QStringLiteral("-reenter"))) << QString::fromLatin1(action) << false;
+            QTest::newRow(qPrintable(QString::fromLatin1(action) + QStringLiteral("-destroy"))) << QString::fromLatin1(action) << true;
+        }
+    }
+    void releaseMayReenterDisconnectOrDestroyControl()
+    {
+        QFETCH(QString, action); QFETCH(bool, destroy);
+        std::optional<VirtualSessionControl::Handle> handle;
+        VirtualSessionSupervisor supervisor([&](quint32 uid, const auto &created) {
+            handle = created; return sleeper(uid, created);
+        });
+        int releases = 0; bool nestedRefused = false;
+        std::unique_ptr<VirtualSessionControl> control;
+        control = std::make_unique<VirtualSessionControl>(supervisor, [&](quint64 client, const auto &) {
+            ++releases;
+            if (destroy) { control.reset(); return; }
+            control->disconnected(client);
+            control->disconnected(client);
+            nestedRefused = !control->request(1001, client, command(QStringLiteral("replacement"), QStringLiteral("create")))
+                .value(QStringLiteral("ok")).toBool();
+        });
+        const auto made = control->request(1000, 1, command(QStringLiteral("c"), QStringLiteral("create")));
+        const QString id = made.value(QStringLiteral("session")).toString();
+        QVERIFY(handle); bool ready = false;
+        QTRY_VERIFY(ready || (ready = supervisor.captureReady(*handle)));
+        QVERIFY(control->request(1000, 1, command(QStringLiteral("a"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
+        const auto other = control->request(1001, 2, command(QStringLiteral("other"), QStringLiteral("create")));
+        QVERIFY(other.value(QStringLiteral("ok")).toBool());
+        if (action == QStringLiteral("disconnect")) control->disconnected(1);
+        else control->request(1000, action == QStringLiteral("stop") ? 3 : 1,
+            command(QStringLiteral("release"), action, action == QStringLiteral("stop") ? id : QString{}));
+        QCOMPARE(releases, 1);
+        if (control) {
+            QVERIFY(nestedRefused); QVERIFY(!control->attachment(1)); QVERIFY(!control->dispatchActive());
+            QVERIFY(control->request(1001, 1, command(QStringLiteral("replacement"), QStringLiteral("list"))).value(QStringLiteral("ok")).toBool());
+        }
+        QCOMPARE(supervisor.list(1001).size(), 1);
+        QCOMPARE(supervisor.list(1001).first().id, other.value(QStringLiteral("session")).toString());
+        QCOMPARE(supervisor.list(1001).first().phase, Phase::Starting);
+        QVERIFY(supervisor.list(1000).first().phase != Phase::Attached);
+    }
     void rejectClaimedIdentityAndMalformedRequests()
     {
         VirtualSessionSupervisor supervisor(sleeper);
