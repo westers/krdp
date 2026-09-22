@@ -27,6 +27,7 @@ public:
     void unavailable();
 
 private:
+    friend class VirtualSessionTransportTest;
     bool bind();
     bool authorized() const;
     void closed();

@@ -131,13 +131,19 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record)
         const auto microphone = record.value(u"microphone"_s);
         const auto camera = record.value(u"camera"_s);
         const auto silence = record.value(u"silenceHost"_s);
-        const bool accepted = authorized() && record.value(u"v"_s).isDouble() && record.value(u"v"_s).toDouble() == 1
+        const bool ownsDesktop = authorized();
+        const bool accepted = ownsDesktop && record.value(u"v"_s).isDouble() && record.value(u"v"_s).toDouble() == 1
             && playback.isBool() && microphone.isBool() && camera.isBool()
             && (silence.isUndefined() || silence.isBool()) && !microphone.toBool() && !camera.toBool();
-        if (accepted) {
-            m_playback = playback.toBool();
+        // A refused update must not report playback off while continuing the
+        // previous stream. Revoke this connection even after ownership loss,
+        // but never change a worker now belonging to another attachment.
+        m_playback = accepted && playback.toBool();
+        if (m_connection) {
             m_connection->setExternalAudioPlayback(true);
             m_connection->setMediaPolicy(m_playback, false, false);
+        }
+        if (ownsDesktop) {
             m_endpoint->setMedia({m_playback, m_playback && silence.toBool()});
         }
         QJsonObject response{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, accepted},

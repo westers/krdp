@@ -30,6 +30,7 @@
 #include <freerdp/server/cliprdr.h>
 #include <freerdp/server/audin.h>
 #include <freerdp/server/rdpsnd.h>
+#include "ExternalAudioQueue.h"
 #include <freerdp/server/server-common.h>
 #include <freerdp/server/rdpecam-enumerator.h>
 #include <freerdp/server/rdpecam.h>
@@ -599,8 +600,7 @@ public:
     bool externalMicrophone = false; // Chosen once, before queued initialize().
     MicrophonePcmQueue microphonePcm;
     std::unique_ptr<PipeWireAudioPlayback> audioPlaybackEndpoint;
-    QMutex externalAudioMutex;
-    QByteArray externalAudio;
+    ExternalAudioQueue externalAudio;
     std::atomic<bool> remoteAudioPlayback = false;
     std::atomic<bool> externalAudioPlayback = false;
     std::atomic<bool> microphone = false;
@@ -765,6 +765,7 @@ void RdpConnection::setMediaPolicy(bool remoteAudioPlayback, bool microphone, bo
     d->microphoneConsent.setEnabled(microphone);
     d->microphonePcm.reset(d->microphoneConsent.snapshot().generation);
     d->remoteAudioPlayback.store(remoteAudioPlayback);
+    d->externalAudio.setEnabled(remoteAudioPlayback && d->externalAudioPlayback.load());
     d->microphone.store(microphone);
     d->camera.store(camera);
     d->silenceHostAudio.store(silenceHostAudio);
@@ -775,10 +776,7 @@ void RdpConnection::setMediaPolicy(bool remoteAudioPlayback, bool microphone, bo
 void RdpConnection::setExternalAudioPlayback(bool enabled)
 {
     d->externalAudioPlayback.store(enabled);
-    if (!enabled) {
-        QMutexLocker lock(&d->externalAudioMutex);
-        d->externalAudio.clear();
-    }
+    d->externalAudio.setEnabled(enabled && d->remoteAudioPlayback.load());
 }
 
 void RdpConnection::setAudioPriority(bool enabled)
@@ -826,12 +824,7 @@ void RdpConnection::submitExternalAudio(const QByteArray &pcm)
     if (!d->externalAudioPlayback.load() || pcm.isEmpty() || pcm.size() % 4 != 0) {
         return;
     }
-    QMutexLocker lock(&d->externalAudioMutex);
-    d->externalAudio.append(pcm);
-    constexpr int MaxQueued = 44100 * 4 / 2;
-    if (d->externalAudio.size() > MaxQueued) {
-        d->externalAudio.remove(0, d->externalAudio.size() - MaxQueued);
-    }
+    d->externalAudio.submit(pcm);
 }
 
 void RdpConnection::openControlChannel()
@@ -1080,20 +1073,17 @@ void RdpConnection::run(std::stop_token stopToken)
         }
 
         if (d->rdpsnd && d->rdpsndActive.load()) {
-            QByteArray pcm;
-            if (d->externalAudioPlayback.load()) {
-                QMutexLocker lock(&d->externalAudioMutex);
-                const int bytes = qMin(d->externalAudio.size(), 44100 * 4 / 50);
-                pcm = d->externalAudio.left(bytes);
-                d->externalAudio.remove(0, bytes);
-            } else if (d->audioPlaybackEndpoint) {
-                pcm = d->audioPlaybackEndpoint->take();
-            }
-            if (!pcm.isEmpty() && d->rdpsnd->SendSamples) {
+            const auto send = [&](const QByteArray &pcm) {
+                if (pcm.isEmpty() || !d->rdpsnd->SendSamples) return;
                 const auto frames = size_t(pcm.size() / d->rdpsnd->src_format->nBlockAlign);
                 if (frames > 0) {
                     d->rdpsnd->SendSamples(d->rdpsnd, pcm.constData(), frames, UINT16(GetTickCount64() & 0xffff));
                 }
+            };
+            if (d->externalAudioPlayback.load()) {
+                d->externalAudio.deliver(send);
+            } else if (d->remoteAudioPlayback.load() && d->audioPlaybackEndpoint) {
+                send(d->audioPlaybackEndpoint->take());
             }
         }
 
