@@ -154,6 +154,40 @@ must say this explicitly.
 
 ## Implementation sequence / gates
 
+### Initial provisioning versus interrupted maintenance
+
+Initial provenance is an explicit trusted installer/operator boundary, not a
+runtime inference from absent files. The operator must establish that no
+uncoordinated maintenance or surviving writers from earlier work remain.
+The finite profile must classify startup services/hooks/activation paths, and
+supported future writers must be routed through the guard. This assumption is
+about the present boundary; it supplies no historical registration/cleanup proof.
+The validator still checks actual approved inputs under package SH/frontend,
+SH/backend, then gate EX. Attestation alone cannot publish clean state.
+
+The connected coordinator schema must distinguish `initial-bootstrap`,
+`coordinated`, and `external-unknown` origins, binding installation ID,
+transaction ID, invalidation generation, boot ID, approved profile and owned
+coordinator InvocationID. Bootstrap additionally binds an explicit boundary
+attestation ID to that boot. Clean state includes a fresh validated epoch.
+These are integration requirements; the current isolated core format does not
+yet implement this schema or authorize clean publication from a CLI.
+
+`initialize-blocked(profile)` is explicit first provisioning only and refuses
+existing state. `bootstrap-validate(bootstrap-id)` consumes an unused initial
+record only after all boundary/profile/activation checks and generation matching.
+The coordinator must durably claim/consume the attempt before proceeding with
+validation; failure to publish that claim forbids proceeding. Once claimed,
+its death leaves an interrupted attempt,
+not a reusable first-install permission. `validate-current(transaction-id)` may
+reopen only known-origin work with fully accounted writer lifetimes; unknown
+invalidations cannot fall back to bootstrap. Missing/inconsistent installation
+records and boot changes remain blocked. `status` is diagnostic only. Recovery
+of unresolved work requires concrete writer resolution, never deleting state,
+another attestation standing in for evidence, or a generic force-clean flag.
+
+### Delivery sequence
+
 1. Reviewed storage/lease core with temporary-directory subprocess tests; no
    production caller or auto-clean path until the full integration is validated.
 2. Concrete baseline validator, package/guard lock order, supported hook/writer
