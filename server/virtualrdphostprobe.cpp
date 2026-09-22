@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+#include "VirtualSessionHostController.h"
+#include <QCoreApplication>
+#include <QTemporaryDir>
+#include <QFile>
+#include <QDir>
+#include <QDebug>
+#include <filesystem>
+#include <unistd.h>
+
+using namespace KRdp;
+int main(int argc, char **argv)
+{
+    QCoreApplication app(argc, argv);
+    char name[256] = {};
+    if (gethostname(name, sizeof(name) - 1) || QByteArray(name).split('.').first() != "sol"
+        || !getuid() || getuid() != geteuid() || app.arguments().size() != 2) return 1;
+    const auto script = app.arguments().at(1);
+    if (!QDir::isAbsolutePath(script)) return 1;
+    QTemporaryDir runtime(QStringLiteral("/run/user/%1/krdp-virtual-host.XXXXXX").arg(getuid()));
+    if (!runtime.isValid()) return 1;
+    runtime.setAutoRemove(false);
+    qInfo().noquote() << "PAM host probe evidence:" << runtime.path();
+    const auto cert = runtime.filePath(QStringLiteral("probe.crt"));
+    const auto key = runtime.filePath(QStringLiteral("probe.key"));
+    QProcess tls;
+    tls.setStandardOutputFile(QProcess::nullDevice());
+    tls.setStandardErrorFile(runtime.filePath(QStringLiteral("tls.log")));
+    tls.start(QStringLiteral("/usr/bin/openssl"), {QStringLiteral("req"), QStringLiteral("-x509"),
+        QStringLiteral("-newkey"), QStringLiteral("rsa:2048"), QStringLiteral("-nodes"), QStringLiteral("-days"), QStringLiteral("1"),
+        QStringLiteral("-subj"), QStringLiteral("/CN=sol.local"), QStringLiteral("-keyout"), key, QStringLiteral("-out"), cert});
+    if (!tls.waitForFinished(10000) || tls.exitCode()) return 1;
+    Server server;
+    server.setAddress(QHostAddress(QStringLiteral("192.168.48.57")));
+    server.setPort(3395);
+    server.setTlsCertificate(std::filesystem::path(cert.toStdString()));
+    server.setTlsCertificateKey(std::filesystem::path(key.toStdString()));
+    server.setUsePAMAuthentication(true);
+    server.setAllowAnyPAMUser(false); // probe may launch only its actual OS user
+    VirtualSessionHostController host(&server, [&](quint32 uid, const auto &handle, const QByteArray &token)
+        -> std::optional<VirtualSessionHostController::PreparedLaunch> {
+        if (uid != getuid()) return {};
+        QTemporaryDir desktop(QStringLiteral("/run/user/%1/krdp-headless.XXXXXX").arg(uid));
+        if (!desktop.isValid()) return {};
+        desktop.setAutoRemove(false);
+        QFile secret(desktop.filePath(QStringLiteral("worker-token")));
+        if (!secret.open(QIODevice::WriteOnly | QIODevice::NewOnly)
+            || !secret.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)
+            || secret.write(token) != token.size()) return {};
+        secret.close();
+        QProcessEnvironment env;
+        env.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin:/bin"));
+        env.insert(QStringLiteral("HOME"), QDir::homePath());
+        qInfo().noquote() << "PAM-owned desktop" << handle.id << "uid" << uid << "runtime" << desktop.path();
+        return VirtualSessionHostController::PreparedLaunch{desktop.filePath(QStringLiteral("worker.sock")),
+            {QStringLiteral("/usr/bin/bash"), {script, QStringLiteral("--supervised-worker-nvidia"), desktop.path(), handle.id}, env, {}}};
+    });
+    if (!server.start()) return 1;
+    qInfo() << "Isolated PAM virtual host listening on Sol3395 for180 seconds";
+    QTimer::singleShot(180000, &app, &QCoreApplication::quit);
+    return app.exec();
+}

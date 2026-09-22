@@ -14,6 +14,9 @@ if (BUILD_PLASMA_SESSION)
     target_link_libraries(krdp-virtual-worker-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network KRdp)
     add_executable(krdp-virtual-session-probe virtualsessionprobe.cpp VirtualSessionSupervisor.cpp VirtualSessionControl.cpp ConsoleWorkerEndpoint.cpp)
     target_link_libraries(krdp-virtual-session-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network KRdp)
+    add_executable(krdp-virtual-rdp-host-probe virtualrdphostprobe.cpp VirtualSessionHostController.cpp
+        VirtualSessionTransport.cpp VirtualSessionControl.cpp VirtualSessionSupervisor.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp)
+    target_link_libraries(krdp-virtual-rdp-host-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network KRdp)
     configure_file(org.kde.krdpvirtualprobe.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpvirtualprobe.desktop @ONLY)
 endif()
 
