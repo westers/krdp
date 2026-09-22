@@ -22,6 +22,8 @@ private Q_SLOTS:
         const auto bytes = unit.readAll();
         QVERIFY(bytes.contains("\nSlice=system.slice\n"));
         QVERIFY(bytes.contains("\nDelegate=no\n"));
+        QVERIFY(bytes.contains("\nKillMode=mixed\n"));
+        QVERIFY(bytes.contains("--pam-keeper "));
     }
     void pamKeeperRequiresCleanPrivilegedOwner() {
         QProcess keeper;
@@ -104,6 +106,10 @@ private Q_SLOTS:
     void executableRefusesUnprivilegedInvocation() {
         if (!getuid()) QSKIP("Nonroot refusal fixture");
         QProcess entry;
+        QProcessEnvironment environment;
+        environment.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin:/bin"));
+        environment.insert(QStringLiteral("LANG"), QStringLiteral("C.UTF-8"));
+        entry.setProcessEnvironment(environment);
         entry.start(QString::fromLocal8Bit(KRDP_SESSION_ENTRY), {QStringLiteral("--session"), id()});
         QVERIFY(entry.waitForFinished(3000));
         QCOMPARE(entry.exitStatus(), QProcess::NormalExit); QCOMPARE(entry.exitCode(), 1);

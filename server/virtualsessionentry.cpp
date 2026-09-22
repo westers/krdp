@@ -2,19 +2,26 @@
 // Independent root service entry, never setuid or invoked with RDP-supplied argv.
 #include "VirtualSessionServicePlan.h"
 #include "VirtualSessionServiceScope.h"
+#include "VirtualSessionServiceOwner.h"
+#include "VirtualSessionLogin.h"
 #include <QCoreApplication>
 #include <QCommandLineParser>
 #include <QFile>
 #include <QFileInfo>
 #include <QDirIterator>
 #include <QDebug>
+#include <QSocketNotifier>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusPendingCall>
+#include <csignal>
 #include <pwd.h>
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/signalfd.h>
 #include <unistd.h>
-#include <vector>
 
 namespace {
 bool trusted(const QString &path, bool directory = false)
@@ -36,10 +43,19 @@ int refused(const char *stage) { qCritical() << "Virtual session entry refused:"
 }
 int main(int argc, char **argv)
 {
+    for (char **entry = environ; entry && *entry; ++entry) {
+        const QByteArray value(*entry);
+        if (value != "PATH=/usr/bin:/bin" && value != "LANG=C.UTF-8") return refused("unclean environment");
+    }
+    sigset_t terminationMask;
+    sigemptyset(&terminationMask); sigaddset(&terminationMask, SIGTERM); sigaddset(&terminationMask, SIGINT);
+    if (sigprocmask(SIG_BLOCK, &terminationMask, nullptr)
+        || syscall(SYS_close_range, 3U, ~0U, 0U)) return refused("clean execution context");
+    umask(0077);
     QCoreApplication app(argc, argv);
     QCommandLineParser parser;
     parser.addHelpOption();
-    for (const auto &name : {"session", "device-entry", "guardian", "launcher", "worker", "support", "render-pci"})
+    for (const auto &name : {"session", "device-entry", "guardian", "pam-keeper", "launcher", "worker", "support", "render-pci"})
         parser.addOption({QString::fromLatin1(name), QStringLiteral("Trusted service launch parameter"), QStringLiteral("value")});
     parser.process(app);
     if (getuid() || geteuid()) return refused("explicit root service required");
@@ -63,13 +79,14 @@ int main(int argc, char **argv)
         return refused("OS account");
     const auto device = parser.value(QStringLiteral("device-entry"));
     const auto guardian = parser.value(QStringLiteral("guardian"));
+    const auto keeper = parser.value(QStringLiteral("pam-keeper"));
     const KRdp::VirtualSessionLaunchPlan::Configuration config{parser.value(QStringLiteral("launcher")),
         parser.value(QStringLiteral("worker")), parser.value(QStringLiteral("support")),
         parser.value(QStringLiteral("render-pci")).split(QLatin1Char(','), Qt::KeepEmptyParts), {1280, 720}};
     const auto plan = KRdp::VirtualSessionServicePlan::build(*record, boot,
         {record->uid, QString::fromLocal8Bit(account.pw_name), QString::fromLocal8Bit(account.pw_dir)}, config, device, guardian);
     if (!plan) return refused("boot or trusted launch policy");
-    if (!executable(device) || !executable(guardian) || !executable(config.launcher) || !executable(config.worker)
+    if (!executable(device) || !executable(guardian) || !executable(keeper) || !executable(config.launcher) || !executable(config.worker)
         || !trusted(config.supportDirectory, true)
         || !trusted(config.supportDirectory + QStringLiteral("/virtual-session-bus.conf"))
         || !trusted(config.supportDirectory + QStringLiteral("/virtual-session-pipewire.conf"))
@@ -87,28 +104,45 @@ int main(int argc, char **argv)
     if (!lstat(QFile::encodeName(plan->runtime).constData(), &runtime) || errno != ENOENT)
         return refused("runtime already exists or cannot be inspected");
     if (!KRdp::VirtualSessionJournal::claimLaunch(*record)) return refused("one-use launch claim");
-    // No credential file or argv. The child consumes exactly32bytes from stdin.
-    int pipeFds[2];
-    if (pipe2(pipeFds, O_CLOEXEC)) return refused("credential pipe");
-    ssize_t written;
-    do { written = write(pipeFds[1], plan->credential.constData(), plan->credential.size()); } while (written < 0 && errno == EINTR);
-    close(pipeFds[1]);
-    if (written != 32 || dup2(pipeFds[0], STDIN_FILENO) < 0) { close(pipeFds[0]); return refused("credential delivery"); }
-    if (pipeFds[0] != STDIN_FILENO) close(pipeFds[0]);
-    if (fcntl(STDIN_FILENO, F_SETFD, 0)) return refused("credential descriptor");
-    std::vector<QByteArray> encoded{QFile::encodeName(plan->program)};
-    for (const auto &argument : plan->arguments) encoded.push_back(argument.toUtf8());
-    std::vector<char *> arguments;
-    for (auto &argument : encoded) arguments.push_back(argument.data());
-    arguments.push_back(nullptr);
-    char path[] = "PATH=/usr/bin:/bin", lang[] = "LANG=C.UTF-8";
-    char *environment[] = {path, lang, nullptr};
-    umask(0077);
-    // This entry still execs the guardian chain; only admission uses the scope
-    // handle until the persistent parent is integrated. Close it before the
-    // bulk inherited-FD close so failed exec cannot double-close a reused FD.
-    scope.reset();
-    if (chdir("/") || syscall(SYS_close_range, 3U, ~0U, 0U)) return refused("clean execution context");
-    execve(arguments[0], arguments.data(), environment);
-    return refused("device entry exec");
+    const int signalFd = signalfd(-1, &terminationMask, SFD_CLOEXEC | SFD_NONBLOCK);
+    if (signalFd < 0) return refused("signal descriptor");
+    QFile signalFile;
+    if (!signalFile.open(signalFd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) {
+        close(signalFd); return refused("signal ownership");
+    }
+    KRdp::VirtualSessionServiceOwner::Checks checks;
+    checks.keeper = [uid = record->uid](pid_t pid, const QString &id) {
+        const auto login = KRdp::VirtualSessionLogin::read(pid);
+        if (!login || !login->matches(uid, pid, id, QStringLiteral("/run/user/%1").arg(uid))) return false;
+        QFile cgroup(QStringLiteral("/proc/%1/cgroup").arg(pid));
+        if (!cgroup.open(QIODevice::ReadOnly)) return false;
+        const auto bytes = cgroup.read(65537);
+        return cgroup.error() == QFileDevice::NoError && bytes.size() <= 65536
+            && bytes.startsWith("0::/") && bytes.count('\n') == 1
+            && bytes.endsWith((QLatin1Char('/') + login->scope + QLatin1Char('\n')).toUtf8());
+    };
+    checks.descendantsGone = [&scope] { return scope->descendantsGone(); };
+    checks.signalDescendants = [&scope](int signal) { return scope->signalDescendants(signal); };
+    checks.emergency = [&app, session = record->session] {
+        qCritical("Virtual desktop extinction uncertain; requesting failed service teardown, PAM cleanup unproven");
+        auto stop = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.systemd1"),
+            QStringLiteral("/org/freedesktop/systemd1"), QStringLiteral("org.freedesktop.systemd1.Manager"), QStringLiteral("StopUnit"));
+        stop.setArguments({QStringLiteral("krdp-virtual-session@%1.service").arg(session), QStringLiteral("replace")});
+        QDBusConnection::systemBus().asyncCall(stop, 3000);
+        // Also bound bus failure: exiting the dedicated unit's main process
+        // invokes its KillMode=mixed fallback. Bypass QProcess destructors,
+        // which otherwise wait indefinitely. Keeper observes owner death.
+        QTimer::singleShot(5000, &app, [] { _exit(1); });
+    };
+    KRdp::VirtualSessionServiceOwner owner(std::move(checks), [&app](int result) { app.exit(result); });
+    QSocketNotifier notifier(signalFd, QSocketNotifier::Read);
+    QObject::connect(&notifier, &QSocketNotifier::activated, &app, [&] {
+        signalfd_siginfo signal{};
+        while (read(signalFd, &signal, sizeof(signal)) == sizeof(signal)) owner.stop();
+    });
+    // Schedule startup after exec() begins, including failure completion.
+    QTimer::singleShot(0, &app, [&] {
+        if (!owner.start(*record, keeper, *plan, {})) app.exit(1);
+    });
+    return app.exec();
 }

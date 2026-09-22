@@ -883,3 +883,53 @@ Tests cover pure PID parsing and temporary-directory missing/nested/symlink/empt
 cases, nonroot/random-unit refusal and draft slice directives, not root runtime.
 References: https://docs.kernel.org/admin-guide/cgroup-v2.html and
 https://github.com/systemd/systemd/blob/main/man/systemd.service.xml
+
+### Persistent service owner integration (not installed; root acceptance pending)
+
+The entry now remains the dedicated unit's root parent instead of execing the
+desktop chain. Its environment is PATH/LANG-only before Qt, inherited descriptors
+above stderr are closed at entry, and TERM/INT are blocked before any threads.
+It validates the installed keeper path, launches that separate executable with
+private owner pipes, and admits exactly one bounded Ready record matching the
+journal session/launch/UID and the actual child PID. It independently checks the
+keeper's logind metadata and session-scope membership, then requires its own
+service group to contain only itself before launching the sibling desktop.
+Validation time counts toward the opening deadline; cancellation during opening
+does not race keeper migration with service-group cleanup.
+
+Both children use clean environments, working directory `/`, and Qt's
+CloseFileDescriptors; their child modifiers unblock TERM/INT. The desktop token
+is prefilled into an anonymous CLOEXEC pipe before fork and duplicated to stdin
+in the modifier, not queued after exec (the guardian reads immediately in
+nonblocking mode). Neither sibling receives the other's control/credential FDs.
+The parent keeps no PAM handle. It polls authoritative keeper/login membership
+while running; keeper loss or failed login checks stop the desktop.
+
+Normal shutdown sends TERM to the guardian, allows8s for its5s escalation and
+terminal-status window, then requests verified service-member SIGKILL if needed.
+Guardian exit alone never authorizes PAM close: the dedicated scope must report
+no live non-parent members. Only then does the parent send `stop\n` to the keeper
+and wait for normal completion. Keeper close is bounded12s, followed by kill;
+if it still cannot exit5s later, emergency teardown is requested. Unknown desktop
+extinction requests emergency at20s. Emergency is latched once: ask systemd to
+stop this exact UUID unit, then failed `_exit(1)` after5s if still alive, avoiding
+QProcess destructor waits. This makes internal failures initiate a stop job too,
+not just administrator-initiated stops. Draft KillMode=mixed/TimeoutStopSec=60
+lets the parent handle normal ordering and systemd handle emergency leftovers.
+
+Emergency termination is NOT proof of PAM close or cleanup of the migrated
+logind scope. External crash/session reconciliation remains UNIMPLEMENTED and
+mandatory before installation. Live root admission/migration, actual namespace
+extinction, runtime inode continuity and systemd emergency behavior still need
+privileged acceptance. The production checks may block the event loop for up to
+9s per logind snapshot; asynchronous monitoring remains a responsiveness follow-up.
+
+Disposable nonroot sibling-process tests cover ordering, prefilled credentials,
+inheritable-FD exclusion, inherited blocked-signal reset, fragmented/wrong/large
+Ready, authoritative gate failure, cancellation during opening, keeper loss,
+login removal, hung open/close, failed executables, descendant-state uncertainty,
+one-shot emergency request, slow-validation timeout, real pidfd KILL of a
+TERM-ignoring fixture, and active-owner destruction callback safety. Scope/logind
+checks are injected in these tests; they do not claim actual root cleanup.
+Qt child modifier runs before UnixProcessParameters/descriptor closure:
+https://doc.qt.io/qt-6/qprocess.html#setChildProcessModifier
