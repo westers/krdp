@@ -757,3 +757,39 @@ pam_systemd implementation:
 https://www.man7.org/linux/man-pages/man3/pam_open_session.3.html
 https://www.man7.org/linux/man-pages/man3/pam_close_session.3.html
 https://github.com/systemd/systemd/blob/v259/src/login/pam_systemd.c
+
+### Runtime-owner direction and authoritative login gate
+
+Architecture review supports a separate PAM keeper child plus a sibling desktop
+guardian under the independent service parent. The service parent never opens
+PAM; only the keeper may migrate into the new logind scope. Guardian/namespace
+remain in the desktop service cgroup. This is a runtime lifetime registration,
+not a claim that desktop PIDs belong to the keeper's logind session: PAM limits,
+audit identity, credentials and keyrings in the keeper do not propagate to its
+sibling. Preserve the local-account/private-bus restriction and do not export a
+misleading XDG_SESSION_ID to desktop applications. No implementation of this
+supervisor/keeper has landed yet.
+
+Before enabling that design, require: audited supported PAM stack preserving
+parent-death protection through startup; exec-before-PAM (no shared handles);
+launch-generation-bound bounded Ready/control pipes with no sibling FD leaks;
+unchanged parent cgroup and verified keeper membership; keeper failure/session
+removal stops desktop; desktop descendant/namespace extinction precedes normal
+PAM close; bounded open/close/stop with independent kill fallback. Guardian's
+current default SIGTERM does not execute its C++ destructor; integrate graceful
+stop, and do not infer descendant extinction from guardian exit. Existing
+KillMode=control-group is fallback, not ordered teardown. Test parent/keeper/
+guardian crashes, hung PAM, service stop and broker restart separately.
+
+VirtualSessionLogin supplies the next read-only gate, not yet integrated:
+GetSessionByPID followed by strictly typed Session/User GetAll snapshots on the
+system bus (three calls bounded to3s each). Match journal UID, actual keeper PID,
+PAM ID and exact runtime, fixed service, background/wayland, active-or-online,
+empty seat/TTY/display, zero VT and session scope. Missing properties and wrong
+types cannot become empty-seat/zero-VT defaults. This is a point-in-time identity
+check, not a runtime-directory ownership check or continuing liveness monitor.
+Private D-Bus fixture tests exercise actual wire decoding without contacting
+host logind; pure checks mutate every identity/console field. Read-only host
+busctl inspection confirms User(uo), Seat(so), Leader/VTNr(u), Scope/Service(s)
+and User UID(u)/RuntimePath(s) signatures against the installed service.
+Reference: https://github.com/systemd/systemd/blob/v259/man/org.freedesktop.login1.xml

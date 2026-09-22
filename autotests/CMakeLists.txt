@@ -23,6 +23,12 @@ target_include_directories(VirtualSessionLaunchPlanTest PRIVATE ${CMAKE_SOURCE_D
 target_link_libraries(VirtualSessionLaunchPlanTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionLaunchPlanTest COMMAND VirtualSessionLaunchPlanTest)
 
+add_executable(VirtualSessionLoginTest VirtualSessionLoginTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionLogin.cpp)
+target_include_directories(VirtualSessionLoginTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(VirtualSessionLoginTest PRIVATE Qt6::Core Qt6::Test Qt6::DBus)
+add_test(NAME VirtualSessionLoginTest COMMAND VirtualSessionLoginTest)
+set_tests_properties(VirtualSessionLoginTest PROPERTIES TIMEOUT 30)
+
 add_executable(VirtualSessionPamTest VirtualSessionPamTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionPam.cpp)
 target_include_directories(VirtualSessionPamTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${PAM_INCLUDE_DIR})
 target_link_libraries(VirtualSessionPamTest PRIVATE Qt6::Core Qt6::Test)
