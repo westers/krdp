@@ -137,3 +137,22 @@ do not silently add permanent video/render group membership. CPU-only support
 also remains a separate requirement: stock headless QPainter cannot provide
 the required screencast path. No GPU access or production configuration has
 been changed by this diagnosis.
+
+2026-09-21 19:34 GPU rendering gate PASS: after Steve logged into physical
+Sol817, logind granted westers renderD128 access automatically. No sudo,
+group membership or ACL mutation was required. Ran existing Sol-only
+--plasma-nvidia probe; private1280x720 compositor reports OpenGL/NVIDIA
+GeForceRTX2070, private Plasma reports one desktop, Spectacle wrote a valid
+1280x720 wallpaper screenshot (inspected), graph has no hardware devices,
+probe exited0 and cleaned its namespace. Physical KWin168073 and console
+host167444 remained unchanged and session817 stayed active. Evidence runtime
+/run/user/1000/krdp-headless.V4BrDB, persistent copies under
+~/dev/rdp/evidence/virtual-plasma-nvidia*.
+
+This proves a separately rendered/capturable Plasma desktop, not an RDP
+session or retained applications. Screenshot captured early wallpaper without
+panel readiness proof. Next gate is actual worker capture/first keyframe and
+native Buzz RDP view on this private compositor, then disconnect/reattach to
+an unsaved application. CPU-only capture remains unresolved. Current render
+permission depends on the physical login; production session ownership must
+establish its own rendering admission rather than rely on that incidental ACL.
