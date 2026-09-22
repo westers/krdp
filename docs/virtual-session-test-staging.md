@@ -31,6 +31,12 @@ an administrator installs or runs them:
   KRdp/KPipeWire libraries; successful copying alone is not link acceptance.
 - Verify canonical paths and root ownership/non-writability of code, libraries,
   support files and every ancestor after the administrator copies the stage.
+  For the fixed `/opt/krdp-virtual-service-test` acceptance prefix, run
+  `bash scripts/check-virtual-session-install.sh` as the ordinary account.
+  It checks ownership, all twelve required ELF runtime paths and clean-environment
+  library/symbol resolution without starting services. Run only while the
+  administrator is not changing the installation; it is not a race-proof sandbox
+  or an artifact-authenticity check. It intentionally refuses root invocation.
 - Review unit paths, renderer allow-list, PAM policy including common-account,
   TLS ownership and journal permissions. Install drafts only as a separate
   explicit administrative step, never through the ordinary install component.
