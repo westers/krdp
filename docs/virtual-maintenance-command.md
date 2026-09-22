@@ -47,3 +47,24 @@ verification that the existing waiter's actual PATH and loader environment selec
 the wrapper safely. Those installation conditions are not implemented here.
 There is no instruction to manually replace a system executable or restart the
 running waiter at this checkpoint.
+
+## Operator launch-path diagnostic
+
+`scripts/inspect-maintenance-launcher.sh` takes no arguments and requires root
+only to read the shutdown waiter's process environment. It reads service/PID,
+mount/UID metadata, the initial environment's PATH, and the resulting candidate's
+path/hash/mode. Loader/plugin/APT environment variables are reported by name
+only; arbitrary environment values are never printed. It does not execute the
+discovered candidate or change services/configuration.
+
+Run only a reviewed, hash-verified root-private copy. The staged Sol command
+creates that temporary copy, verifies its hardcoded SHA256, runs Bash with a
+sanitized environment, and removes only that private copy and empty directory.
+Agents stage the command without Enter; the operator executes it in the existing
+host tmux session.
+
+Output is diagnostic: `/proc/PID/environ` may not reflect later Python environment
+changes; inspector credentials can differ; PID/metadata bracketing is not a
+pidfd pin or ABA proof. Candidate discovery is not proof of successful future
+exec. `future_executable_selection=not-proven` and `admission=not-evaluated`
+remain explicit. Further routing/profile checks are required.
