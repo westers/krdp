@@ -13,6 +13,35 @@ class VirtualSessionJournalTest : public QObject {
     static QString id() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     static VirtualSessionJournal::Record record() { return {1000, id(), id(), id(), id(), QByteArray(32, 's')}; }
 private Q_SLOTS:
+    void consumedIntentCannotReplayAfterRuntimeDisappears() {
+        QTemporaryDir dir, runtime;
+        auto writer = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr);
+        QVERIFY(writer);
+        const auto r = record(); QVERIFY(writer->insert(r));
+        auto entry = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr, false);
+        QVERIFY(entry);
+        auto different = r; different.incarnation = id();
+        QVERIFY(!entry->claimRecord(different, nullptr));
+        QVERIFY(entry->claimRecord(r, nullptr));
+        QVERIFY(!entry->claimRecord(r, nullptr));
+        QVERIFY(QDir(runtime.path()).removeRecursively());
+        entry.reset();
+        entry = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr, false);
+        QVERIFY(entry); QVERIFY(!entry->claimRecord(r, nullptr));
+        const auto records = writer->records();
+        QVERIFY(records); QCOMPARE(records->size(), 1); QVERIFY(records->first() == r);
+        if (getuid()) QVERIFY(!VirtualSessionJournal::claimLaunch(r));
+    }
+    void interruptedClaimIsNotRelaunchAuthority() {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr);
+        QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r));
+        QFile marker(dir.filePath(QStringLiteral(".claimed-") + r.session));
+        QVERIFY(marker.open(QIODevice::WriteOnly | QIODevice::NewOnly)); marker.close();
+        QVERIFY(!journal->claimRecord(r, nullptr));
+        QVERIFY(journal->records());
+    }
     void independentReaderDoesNotTakeOrReleaseBrokerLease() {
         QTemporaryDir dir;
         QString error;

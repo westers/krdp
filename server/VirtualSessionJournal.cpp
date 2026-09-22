@@ -44,6 +44,28 @@ std::optional<VirtualSessionJournal::Record> VirtualSessionJournal::readLaunchIn
     auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
     return journal ? journal->readRecord(session, error) : std::nullopt;
 }
+bool VirtualSessionJournal::claimLaunch(const Record &expected, QString *error) {
+    if (getuid() || geteuid()) return fail(error, QStringLiteral("Launch claim requires the root service"));
+    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    return journal && journal->claimRecord(expected, error);
+}
+bool VirtualSessionJournal::claimRecord(const Record &expected, QString *error) {
+    const auto current = readRecord(expected.session, error);
+    if (!current || *current != expected) return fail(error, QStringLiteral("Launch intent changed or is unavailable"));
+    const QByteArray name = QByteArray(".claimed-") + expected.session.toLatin1();
+    const int fd = openat(m_directory, name.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return fail(error, QStringLiteral("Launch already consumed or claim unavailable"));
+    // Even an empty/partial marker blocks replay. Never unlink it on failure.
+    const QByteArray marker = expected.launch.toLatin1() + '\n' + expected.incarnation.toLatin1();
+    ssize_t count;
+    do { count = write(fd, marker.constData(), marker.size()); } while (count < 0 && errno == EINTR);
+    const bool prepared = count == marker.size() && !fchmod(fd, 0600) && safeFile(fd, m_owner) && !fsync(fd);
+    close(fd);
+    const bool durable = !fsync(m_directory);
+    if (!prepared || !durable) return fail(error, QStringLiteral("Launch claim uncertain; explicit reconciliation required"));
+    if (error) error->clear();
+    return true;
+}
 std::unique_ptr<VirtualSessionJournal> VirtualSessionJournal::openAt(const QString &path, quint32 owner, QString *error, bool writable) {
     // Production ancestors are checked too; tests use an owned private temp root.
     if (!QDir::isAbsolutePath(path) || QDir::cleanPath(path) != path || path.contains(QChar::Null)) return {};
@@ -144,6 +166,10 @@ std::optional<QVector<VirtualSessionJournal::Record>> VirtualSessionJournal::rec
         if (!entry) { if (errno) ok = false; break; }
         const QByteArray name(entry->d_name);
         if (name == "." || name == ".." || name.startsWith(".pending-")) continue;
+        // Consumption markers are not recovery identities. Their presence,
+        // including interrupted creation, forbids a second launch but must not
+        // hide unrelated surviving desktops from recovery.
+        if (name.startsWith(".claimed-") && uuid(QString::fromLatin1(name.mid(9)))) continue;
         if (!name.endsWith(".json") || !uuid(QString::fromLatin1(name.chopped(5))) || result.size() >= 256) { ok = false; break; }
         const auto record = readRecord(QString::fromLatin1(name.chopped(5)), error);
         if (!record) { ok = false; break; }

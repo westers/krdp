@@ -643,3 +643,29 @@ a conflicting fresh UUID. Empty optional identity retains diagnostic fresh-launc
 behavior; explicit invalid identity is rejected. Executor/runtime preparation
 must still reject reuse. Service executable, unit and broker launch wiring remain
 to implement; these interfaces alone do not start or install a service.
+
+Independent entry implemented as krdp-virtual-session-entry plus a draft
+krdp-virtual-session@.service (neither installed yet). Root-only entry reads one
+immutable intent, compares current kernel boot, resolves the account via passwd,
+builds device-helper→guardian→namespace arguments with recorded session/launch/
+incarnation, validates root-owned nonshared canonical helper/script/support paths
+and bounded support tree, and refuses an existing runtime. Credential is written
+to a CLOEXEC pipe and duped to stdin only; execve supplies only PATH/LANG and
+closes inherited descriptors. No passwords/credential bytes enter argv/logs.
+Draft unit is independent of the broker (no PartOf/BindsTo/Requires), KillMode
+control-group, Restart=no; helper does private GPU admission then UID/capability
+drop. Trusted service policy accepts a comma-separated PCI allow-list; empty is
+refused. This draft config is not a delivered user setting: installed KCM/config
+scope, packaging and privileged launch acceptance remain required. User runtime
+provisioning/PAM-session lifetime is also not implemented; missing runtime fails
+in storage preparation rather than borrowing another desktop. Broker does not
+yet write intent/start the unit or supervise new creates through this path.
+Review follow-up: runtime absence is not permission to reuse a launch identity.
+Entry now claims the exact unchanged intent via a root-owned .claimed-SESSION
+marker before pipe/exec. Exclusive nofollow creation plus file/directory fsync
+makes consumption one-use; even an interrupted empty marker prevents retry.
+The marker is never removed automatically, including exec failure. Recovery
+ignores canonical consumption markers because they are not desktop identities;
+an uncertain claim cannot hide other surviving desktops. Explicit privileged
+reconciliation is required for consumed/ambiguous intents. Regression tests
+cover a second reader/claim after fixture runtime removal and incomplete claims.
