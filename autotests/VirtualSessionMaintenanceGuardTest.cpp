@@ -10,8 +10,24 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/file.h>
+#include <cstdarg>
+#include <functional>
 
 namespace { int failSync = 0; bool shortWrite = false, failRename = false; }
+namespace { int ofdError = 0, ofdFailureCountdown = 0; std::function<void()> atGate; }
+extern "C" int __real_fcntl(int, int, ...);
+extern "C" int __wrap_fcntl(int fd, int command, ...) {
+    if (command == F_GETFD) return __real_fcntl(fd, command);
+    va_list args; va_start(args, command); auto *lock = va_arg(args, struct flock *); va_end(args);
+    if (command == F_OFD_SETLK && ofdError && --ofdFailureCountdown == 0) { errno = ofdError; return -1; }
+    return __real_fcntl(fd, command, lock);
+}
+extern "C" int __real_flock(int, int);
+extern "C" int __wrap_flock(int fd, int operation) {
+    if (atGate) { auto callback = std::move(atGate); atGate = {}; callback(); }
+    return __real_flock(fd, operation);
+}
 extern "C" int __real_fsync(int);
 extern "C" int __wrap_fsync(int fd) {
     if (failSync && --failSync == 0) { errno = EIO; return -1; }
@@ -47,8 +63,146 @@ class VirtualSessionMaintenanceGuardTest : public QObject {
         auto l = lease(path); QString txn;
         return l && l->block(&txn) == P::Durable && l->publishClean(txn, digest) == P::Durable;
     }
+    bool packages(const QString &path) {
+        return put(path + QStringLiteral("/lock-frontend"), {}) && put(path + QStringLiteral("/lock"), {})
+            && !chmod(QFile::encodeName(path + QStringLiteral("/lock-frontend")).constData(), 0640)
+            && !chmod(QFile::encodeName(path + QStringLiteral("/lock")).constData(), 0640);
+    }
+    auto compound(const QString &guard, const QString &package) {
+        return G::admissionAt(guard, package, getuid(), boot, digest, true, nullptr);
+    }
+    static bool writer(const QString &path) {
+        // Always a separate process: POSIX close-any-fd semantics must not
+        // contaminate the process whose OFD lease is being tested.
+        const pid_t child = fork();
+        if (!child) {
+            int fd = ::open(QFile::encodeName(path).constData(), O_RDWR | O_CLOEXEC);
+            struct flock lock{}; lock.l_type = F_WRLCK; lock.l_whence = SEEK_SET;
+            _exit(fd >= 0 && __real_fcntl(fd, F_SETLK, &lock) == 0 ? 0 : 1);
+        }
+        int status = 0;
+        return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
 private Q_SLOTS:
-    void init() { failSync = 0; shortWrite = failRename = false; }
+    void init() { failSync = ofdError = ofdFailureCountdown = 0; shortWrite = failRename = false; atGate = {}; }
+    void compoundLifetimeAndUnrelatedClose() {
+        QTemporaryDir guard, pkg; QVERIFY(initialize(guard.path())); QVERIFY(packages(pkg.path()));
+        auto a = compound(guard.path(), pkg.path()), b = compound(guard.path(), pkg.path()); QVERIFY(a && b);
+        for (const auto *name : {"lock-frontend", "lock"}) {
+            const auto path = pkg.filePath(QString::fromLatin1(name));
+            QVERIFY(!writer(path));
+            const int alias = ::open(QFile::encodeName(path).constData(), O_RDONLY); QVERIFY(alias >= 0); ::close(alias);
+            QVERIFY(!writer(path));
+        }
+        G::Lease moved(std::move(*a)); a.reset(); b.reset();
+        QVERIFY(!writer(pkg.filePath(QStringLiteral("lock"))));
+        QTemporaryDir otherGuard, otherPkg; QVERIFY(initialize(otherGuard.path())); QVERIFY(packages(otherPkg.path()));
+        auto other = compound(otherGuard.path(), otherPkg.path()); QVERIFY(other);
+        moved = std::move(*other); other.reset();
+        QVERIFY(writer(pkg.filePath(QStringLiteral("lock-frontend")))); QVERIFY(writer(pkg.filePath(QStringLiteral("lock"))));
+        QVERIFY(!writer(otherPkg.filePath(QStringLiteral("lock")))); moved.close();
+        QVERIFY(writer(otherPkg.filePath(QStringLiteral("lock-frontend")))); QVERIFY(writer(otherPkg.filePath(QStringLiteral("lock"))));
+    }
+    void packageBusyAndGateOnlyInvalidation_data() {
+        QTest::addColumn<QString>("name"); QTest::newRow("frontend") << QStringLiteral("lock-frontend"); QTest::newRow("backend") << QStringLiteral("lock");
+    }
+    void packageBusyAndGateOnlyInvalidation() {
+        QFETCH(QString, name); QTemporaryDir guard, pkg; QVERIFY(initialize(guard.path())); QVERIFY(packages(pkg.path()));
+        int ready[2], done[2]; QVERIFY(!pipe(ready)); QVERIFY(!pipe(done));
+        pid_t child = fork(); QVERIFY(child >= 0);
+        if (!child) {
+            ::close(ready[0]); ::close(done[1]);
+            int fd = ::open(QFile::encodeName(pkg.filePath(name)).constData(), O_RDWR);
+            struct flock lock{}; lock.l_type = F_WRLCK; lock.l_whence = SEEK_SET;
+            char result = fd >= 0 && __real_fcntl(fd, F_SETLK, &lock) == 0 ? 'y' : 'n';
+            __real_write(ready[1], &result, 1); char c; _exit(::read(done[0], &c, 1) == 1 ? 0 : 1);
+        }
+        ::close(ready[1]); ::close(done[0]); char result;
+        QCOMPARE(::read(ready[0], &result, 1), ssize_t(1)); QCOMPARE(result, 'y');
+        const bool refused = !compound(guard.path(), pkg.path());
+        const bool unwound = name != QStringLiteral("lock") || writer(pkg.filePath(QStringLiteral("lock-frontend")));
+        auto gate = lease(guard.path()); QString txn;
+        const bool invalidated = gate && gate->block(&txn) == P::Durable;
+        QCOMPARE(__real_write(done[1], "x", 1), ssize_t(1)); ::close(done[1]); ::close(ready[0]);
+        int status; QCOMPARE(waitpid(child, &status, 0), child);
+        QVERIFY(refused); QVERIFY(unwound); QVERIFY(invalidated); gate.reset();
+        QVERIFY(writer(pkg.filePath(QStringLiteral("lock-frontend")))); QVERIFY(writer(pkg.filePath(QStringLiteral("lock"))));
+    }
+    void compoundFailureUnwinds_data() {
+        QTest::addColumn<QString>("kind");
+        for (auto kind : {"gate", "state", "sync", "unsupported", "error", "unsupported-backend", "error-backend", "replacement"}) QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void compoundFailureUnwinds() {
+        QFETCH(QString, kind); QTemporaryDir guard, pkg; QVERIFY(initialize(guard.path())); QVERIFY(packages(pkg.path()));
+        std::optional<G::Lease> held;
+        if (kind == QStringLiteral("gate")) { held = lease(guard.path()); QVERIFY(held); }
+        if (kind == QStringLiteral("state")) QVERIFY(put(guard.filePath(QStringLiteral("state")), "bad"));
+        if (kind == QStringLiteral("sync")) failSync = 1;
+        if (kind.startsWith(QStringLiteral("unsupported"))) ofdError = EINVAL;
+        if (kind.startsWith(QStringLiteral("error"))) ofdError = EIO;
+        if (ofdError) ofdFailureCountdown = kind.endsWith(QStringLiteral("-backend")) ? 2 : 1;
+        bool replaced = false;
+        if (kind == QStringLiteral("replacement")) atGate = [&] {
+            const auto name = pkg.filePath(QStringLiteral("lock"));
+            replaced = QFile::rename(name, name + QStringLiteral("-old")) && put(name, {});
+        };
+        QVERIFY(!compound(guard.path(), pkg.path()));
+        if (ofdError) QCOMPARE(ofdFailureCountdown, 0);
+        if (kind == QStringLiteral("replacement")) QVERIFY(replaced);
+        ofdError = 0;
+        QVERIFY(writer(pkg.filePath(QStringLiteral("lock-frontend")))); QVERIFY(writer(pkg.filePath(QStringLiteral("lock"))));
+        if (replaced) QVERIFY(writer(pkg.filePath(QStringLiteral("lock-old"))));
+    }
+    void packageUnsafe_data() {
+        QTest::addColumn<QString>("kind");
+        for (auto kind : {"missing", "symlink", "hardlink", "mode", "group-write", "fifo", "directory", "ancestry", "alias"}) QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void packageUnsafe() {
+        QFETCH(QString, kind); QTemporaryDir guard, pkg; QVERIFY(initialize(guard.path())); QVERIFY(packages(pkg.path()));
+        const QString path = pkg.filePath(QStringLiteral("lock")), old = path + QStringLiteral("-old");
+        if (kind == QStringLiteral("mode")) QVERIFY(!chmod(QFile::encodeName(path).constData(), 0602));
+        else if (kind == QStringLiteral("group-write")) QVERIFY(!chmod(QFile::encodeName(path).constData(), 0660));
+        else if (kind == QStringLiteral("ancestry")) QVERIFY(!chmod(QFile::encodeName(pkg.path()).constData(), 0777));
+        else if (kind == QStringLiteral("hardlink")) QVERIFY(!link(QFile::encodeName(path).constData(), QFile::encodeName(old).constData()));
+        else {
+            QVERIFY(QFile::rename(path, old));
+            if (kind == QStringLiteral("symlink")) QVERIFY(QFile::link(old, path));
+            if (kind == QStringLiteral("fifo")) QVERIFY(!mkfifo(QFile::encodeName(path).constData(), 0600));
+            if (kind == QStringLiteral("directory")) QVERIFY(QDir().mkdir(path));
+            if (kind == QStringLiteral("alias")) QVERIFY(!link(QFile::encodeName(pkg.filePath(QStringLiteral("lock-frontend"))).constData(), QFile::encodeName(path).constData()));
+        }
+        QVERIFY(!compound(guard.path(), pkg.path()));
+        QVERIFY(writer(pkg.filePath(QStringLiteral("lock-frontend"))));
+    }
+    void compoundForkExec() {
+        QTemporaryDir guard, pkg; QVERIFY(initialize(guard.path())); QVERIFY(packages(pkg.path()));
+        auto parent = compound(guard.path(), pkg.path()); QVERIFY(parent);
+        const pid_t closer = fork(); QVERIFY(closer >= 0);
+        if (!closer) { parent.reset(); _exit(0); }
+        int closeStatus; QCOMPARE(waitpid(closer, &closeStatus, 0), closer);
+        QVERIFY(WIFEXITED(closeStatus)); QCOMPARE(WEXITSTATUS(closeStatus), 0);
+        // Child destruction must close only, never explicitly unlock the
+        // parent's shared open file descriptions (OFD locks or guard flock).
+        QVERIFY(!writer(pkg.filePath(QStringLiteral("lock-frontend"))));
+        QVERIFY(!writer(pkg.filePath(QStringLiteral("lock")))); QVERIFY(!lease(guard.path()));
+        QByteArray command("true");
+        for (int fd : {parent->m_lock, parent->m_directory, parent->m_packages->m_frontend, parent->m_packages->m_backend, parent->m_packages->m_directory}) {
+            QCOMPARE(fcntl(fd, F_GETFD) & FD_CLOEXEC, FD_CLOEXEC);
+            command += " && test ! -e /proc/self/fd/" + QByteArray::number(fd);
+        }
+        int proceed[2]; QVERIFY(!pipe(proceed)); pid_t child = fork(); QVERIFY(child >= 0);
+        if (!child) {
+            ::close(proceed[1]);
+            if (parent->read() || parent->m_packages->associated()) _exit(2);
+            char c; if (::read(proceed[0], &c, 1) != 1) _exit(3); ::close(proceed[0]);
+            execl("/bin/sh", "sh", "-c", command.constData(), static_cast<char *>(nullptr)); _exit(4);
+        }
+        ::close(proceed[0]); parent.reset();
+        bool pinned = !writer(pkg.filePath(QStringLiteral("lock-frontend"))) && !writer(pkg.filePath(QStringLiteral("lock"))) && !lease(guard.path());
+        QCOMPARE(__real_write(proceed[1], "x", 1), ssize_t(1)); ::close(proceed[1]); int status;
+        QCOMPARE(waitpid(child, &status, 0), child); QVERIFY(WIFEXITED(status)); QCOMPARE(WEXITSTATUS(status), 0); QVERIFY(pinned);
+        QVERIFY(writer(pkg.filePath(QStringLiteral("lock-frontend")))); QVERIFY(writer(pkg.filePath(QStringLiteral("lock")))); QVERIFY(lease(guard.path()));
+    }
     void missingAndTransactions() {
         QTemporaryDir dir;
         QVERIFY(!lease(dir.path()));

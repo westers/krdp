@@ -3,6 +3,7 @@
 #include <QString>
 #include <optional>
 #include <sys/types.h>
+#include "PackageLease.h"
 
 namespace KRdp {
 class VirtualSessionMaintenanceGuardTest;
@@ -44,15 +45,22 @@ public:
         uid_t m_owner = 0;
         bool m_exclusive = false, m_fixture = false;
         QString m_path, m_boot;
+        std::optional<PackageLease> m_packages;
     };
-    // Fixed installer-owned root paths; nonblocking, missing state denies.
+    // Fixed root paths: package frontend/backend OFD read locks, then shared
+    // guard flock, all nonblocking and retained through the lease lifetime.
+    // Missing/unsafe package files or state deny; nothing is created/repaired.
     // CLOEXEC is not a fork barrier: children must promptly close inherited
     // descriptors. Inherited lease API use is refused, without LOCK_UN.
     static std::optional<Lease> admission(const QString &approvedProfile, QString *error = nullptr);
+    // Gate-only invalidation, deliberately no package locks (installer hooks
+    // may already hold them). This is not a validation/rearm entry point.
     static std::optional<Lease> maintenance(QString *error = nullptr);
 private:
     friend class VirtualSessionMaintenanceGuardTest;
     static std::optional<Lease> acquire(const QString &path, uid_t owner, const QString &boot,
                                        bool exclusive, bool fixture, QString *error);
+    static std::optional<Lease> admissionAt(const QString &path, const QString &packages, uid_t owner,
+        const QString &boot, const QString &profile, bool fixture, QString *error);
 };
 }

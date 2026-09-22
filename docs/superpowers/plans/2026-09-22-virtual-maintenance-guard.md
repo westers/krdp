@@ -32,8 +32,33 @@ interruption until writer quiescence and actual approved baseline are establishe
 Separate synchronous package actions from detached services. Only a finite
 classified writer profile is admitted. No inotify/quiet-time substitution.
 
+Implement compound startup admission first: move-only OFD shared package lease
+retained by the guard admission lease; frontend/backend/gate order and complete
+reverse unwind, stable trusted paths, unsupported OFD refusal. Gate-only
+invalidation stays independent. Ordinary-user fixtures must prove actual POSIX
+writer contention, lifetime/move/fork/exec behavior, alias-close safety,
+replacement detection, and every partial-acquisition failure. This is not yet a
+validator, transaction coordinator, installed hook, or production startup caller.
+
 Accept: explicit deadlock, stale rearm, owner death, surviving worker and profile
 change tests. Review installed Sol hook inventory before integration approval.
+
+Next connected delivery (not another isolated helper): exact installer-owned
+`sol-login-v1` footprint manifest, non-restarting coordinator with authenticated
+invocation/transaction/generation, `validate-current`, broker compound preflight
+and mandatory pre-NSS keeper lease. Initially validate the approved installed
+baseline; do not accept arbitrary shell/apt operations or version floors. A
+relevant package update requires an approved replacement profile. Unknown
+surviving writers remain blocking, never cleared by coordinator exit or reboot
+identity alone. Finite audit inputs: apt-news, esm-cache, PackageKit cache
+notification, AppStream, command-not-found, debconf, ubuntu-virt and update-notifier
+actual code/output/activation paths. Classify detached irrelevant work from
+source, or require exact invocation completion/subtree extinction and excluded
+reactivation for relevant work. Do not stop unrelated services/desktops to make
+this pass. Connect and test approved baseline -> clean -> block -> create refusal
+with retained desktop -> revalidation -> new create, plus crash/survivor/profile
+mismatch/stale-generation refusal. This does not itself complete registration
+certificates or keeper-crash cleanup acceptance.
 
 ## 3. Create-only production enforcement
 

@@ -66,6 +66,7 @@ void VirtualSessionMaintenanceGuard::Lease::close() {
     // the parent's shared open-file-description lock.
     if (m_lock >= 0) ::close(std::exchange(m_lock, -1));
     if (m_directory >= 0) ::close(std::exchange(m_directory, -1));
+    m_packages.reset(); // Gate first, then backend, then frontend.
 }
 VirtualSessionMaintenanceGuard::Lease::~Lease() { close(); }
 VirtualSessionMaintenanceGuard::Lease::Lease(Lease &&other) noexcept { *this = std::move(other); }
@@ -75,9 +76,11 @@ VirtualSessionMaintenanceGuard::Lease &VirtualSessionMaintenanceGuard::Lease::op
     m_directory = std::exchange(other.m_directory, -1); m_lock = std::exchange(other.m_lock, -1);
     m_process = other.m_process; m_owner = other.m_owner; m_exclusive = other.m_exclusive;
     m_fixture = other.m_fixture; m_path = std::move(other.m_path); m_boot = std::move(other.m_boot);
+    m_packages = std::move(other.m_packages); other.m_packages.reset();
     return *this;
 }
 bool VirtualSessionMaintenanceGuard::Lease::associated(QString *error) const {
+    if (m_packages && !m_packages->associated(error)) return false;
     if (m_process != getpid() || m_directory < 0 || !regular(m_lock, m_owner)) return fail(error, "Invalid or inherited maintenance lease");
     const int dir = directory(m_path, m_owner, m_fixture);
     const int lock = dir < 0 ? -1 : openat(dir, "lock", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
@@ -178,8 +181,16 @@ std::optional<VirtualSessionMaintenanceGuard::Lease> VirtualSessionMaintenanceGu
 }
 std::optional<VirtualSessionMaintenanceGuard::Lease> VirtualSessionMaintenanceGuard::admission(const QString &approved, QString *error) {
     if (getuid() || geteuid()) { fail(error, "Root admission caller required"); return {}; }
-    auto lease = acquire(QStringLiteral("/var/lib/krdp/maintenance"), 0, boot(), false, false, error);
-    if (!lease || !lease->admit(approved, error)) return {};
+    return admissionAt(QStringLiteral("/var/lib/krdp/maintenance"), QStringLiteral("/var/lib/dpkg"), 0, boot(), approved, false, error);
+}
+std::optional<VirtualSessionMaintenanceGuard::Lease> VirtualSessionMaintenanceGuard::admissionAt(
+    const QString &path, const QString &packagePath, uid_t owner, const QString &bootId, const QString &approved, bool fixture, QString *error) {
+    auto packages = PackageLease::acquireAt(packagePath, owner, fixture, error);
+    if (!packages) return {};
+    auto lease = acquire(path, owner, bootId, false, fixture, error);
+    if (!lease) return {};
+    lease->m_packages = std::move(packages);
+    if (!lease->admit(approved, error)) return {};
     return lease;
 }
 std::optional<VirtualSessionMaintenanceGuard::Lease> VirtualSessionMaintenanceGuard::maintenance(QString *error) {

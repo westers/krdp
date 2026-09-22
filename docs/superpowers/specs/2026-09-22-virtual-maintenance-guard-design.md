@@ -109,6 +109,34 @@ idempotently. Root UID or a caller-supplied transaction UUID is not membership.
 The core represents freshness in its blocked record; future integration must not
 reset that freshness on status reads or reconstruct it from an environment flag.
 
+### Package exclusion for compound admission
+
+Admission owns read-only descriptors for the existing root-owned regular
+`/var/lib/dpkg/lock-frontend` and `/var/lib/dpkg/lock`, opened without creation,
+symlink following or truncation. Reject writable-by-nonroot files, unsafe
+ancestry, hard links, aliases and missing files; do not repair package state.
+Acquire whole-file Linux `F_OFD_SETLK` shared locks in frontend/backend order,
+then the shared maintenance gate, all nonblocking. Unsupported OFD locking and
+every acquisition error deny admission and unwind all partial holdings.
+
+OFD locks conflict with apt/dpkg's traditional POSIX write locks without being
+released by an unrelated descriptor close in the same process; these semantics
+are documented in the [Linux locking manual](https://man7.org/linux/man-pages/man2/fcntl_locking.2.html).
+The request is a zero-initialized `struct flock` with `F_RDLCK`, `SEEK_SET`, and
+zero start, length and PID. No fallback to `flock`, which is a different lock
+domain. Revalidate named directory/file inode associations after acquisition and
+before admission succeeds. Keep package descriptors until admission lease close;
+release gate, backend, then frontend. Move assignment follows the same order.
+Close without explicit unlock so a fork child cannot release its parent's lock;
+inherited API use is refused and descriptors are CLOEXEC, but unclosed inherited
+descriptors can delay an update until exec/exit. Do not describe this as a fork
+barrier or writer-quiescence proof.
+
+The compound core initially has no production callers. Gate-only maintenance
+invalidation remains independent of package locks, since an apt hook may already
+run under package exclusion. A future validator must take package locks before
+its exclusive gate and still prove transaction ownership and writer quiescence.
+
 A dedicated coordinator unit records boot/InvocationID and accounts for its writer
 subtree separately from itself. Activated services and other permitted detached
 work require explicit classification/lifetime tracking. Coordinator death leaves
