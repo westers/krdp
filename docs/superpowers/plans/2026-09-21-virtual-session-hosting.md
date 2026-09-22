@@ -388,3 +388,18 @@ The executable/executor is not implemented or installed by this contract slice.
 The current supervisor still owns/kills its children on destruction. Production
 restart retention needs a separately supervised namespace plus validated runtime
 handshake and durable registry; removing die-with-parent alone is not recovery.
+
+VirtualSessionStorage now implements actual profile/runtime preparation after
+real/effective UID drop: descriptor-relative mkdir/open, no symlink components,
+owned non-shared home directories, private runtime/profile trees, exclusive
+0600 regular single-link profile.lock plus nonblocking flock, and new0700 runtime
+with O_EXCL0600 token. Existing runtimes are never overwritten or auto-adopted.
+Tests use disposable directories and prove retained file contents, concurrent
+profile refusal, symlink/shared-permission/identity/path/token-size refusal and
+hardlink-lock refusal. Destruction releases locks but deletes nothing.
+
+The eventual independent namespace supervisor must own this storage object
+for the desktop's entire lifetime, not one RDP transport or restartable broker.
+It must keep the lock across desktop startup (CLOEXEC FDs cannot simply be
+lost in an exec). Storage preparation is not yet wired to the probe or an
+installed launcher. No test has launched a production namespace with it yet.
