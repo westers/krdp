@@ -53,6 +53,9 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         mkdir -p "$probe_runtime/data/applications"
         cp "$repo_path/scripts/virtual-probe-rdp.desktop" "$probe_runtime/data/applications/org.kde.krdpserver.desktop"
         (umask 077; openssl rand -hex 24 >"$probe_runtime/rdp-password")
+        (umask 077; openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj /CN=krdp-private-probe -keyout "$probe_runtime/rdp.key" \
+            -out "$probe_runtime/rdp.crt" >"$probe_runtime/tls.log" 2>&1)
     fi
     mkdir "$probe_runtime/config-defaults"
     ln -s /etc/xdg/menus "$probe_runtime/config-defaults/menus"
@@ -195,6 +198,7 @@ if [[ "${3:-}" == --rdp ]]; then
         LD_LIBRARY_PATH=/opt/krdp-console/lib/x86_64-linux-gnu \
         /opt/krdp-console/bin/krdpserver --plasma --monitor 0 --quality 80 \
         --address 192.168.48.57 --port 3394 -u krdptest \
+        --certificate "$XDG_RUNTIME_DIR/rdp.crt" --certificate-key "$XDG_RUNTIME_DIR/rdp.key" \
         -p "$(<"$XDG_RUNTIME_DIR/rdp-password")" \
         >"$XDG_RUNTIME_DIR/rdp.log" 2>&1 &
     rdp_pid=$!
