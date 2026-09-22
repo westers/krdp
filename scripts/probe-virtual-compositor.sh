@@ -89,6 +89,7 @@ fi
 kbuildsycoca6 --noincremental >"$XDG_RUNTIME_DIR/service-cache.log" 2>&1
 wrapper_pid=
 graph_pid=
+policy_pid=
 rdp_pid=
 cleanup() {
     if [[ -n "$rdp_pid" ]]; then
@@ -99,6 +100,10 @@ cleanup() {
         # KWinWrapper's destructor terminates/waits for its own KWin child.
         kill "$wrapper_pid" 2>/dev/null || true
         wait "$wrapper_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$policy_pid" ]]; then
+        kill "$policy_pid" 2>/dev/null || true
+        wait "$policy_pid" 2>/dev/null || true
     fi
     if [[ -n "$graph_pid" ]]; then
         kill "$graph_pid" 2>/dev/null || true
@@ -116,6 +121,23 @@ for attempt in {1..50}; do
     sleep 0.1
 done
 [[ -S "$XDG_RUNTIME_DIR/pipewire-0" ]]
+# AUTOCONNECT capture streams need a session-policy manager to create links.
+# The policy-only profile excludes hardware discovery; all sockets and state
+# remain inside this probe's private runtime and D-Bus namespace.
+env PIPEWIRE_RUNTIME_DIR="$XDG_RUNTIME_DIR" PIPEWIRE_REMOTE=pipewire-0 \
+    WIREPLUMBER_CONFIG_DIR=/usr/share/wireplumber wireplumber --profile policy \
+    >"$XDG_RUNTIME_DIR/policy.log" 2>&1 &
+policy_pid=$!
+ready=false
+for attempt in {1..50}; do
+    kill -0 "$policy_pid"
+    if pw-dump | jq -e 'any(.[]; .type == "PipeWire:Interface:Client" and .info.props."application.name" == "WirePlumber")' >/dev/null; then
+        ready=true
+        break
+    fi
+    sleep 0.1
+done
+[[ "$ready" == true ]]
 compat_args=()
 [[ "${2:-}" != --plasma ]] || compat_args=(--xwayland)
 kwin_wayland_wrapper "${compat_args[@]}" --virtual --width 1280 --height 720 --output-count 1 \
@@ -192,7 +214,7 @@ timeout 5 pw-dump >"$XDG_RUNTIME_DIR/graph.json"
 jq -e '[.[] | select(.type == "PipeWire:Interface:Device")] | length == 0' "$XDG_RUNTIME_DIR/graph.json"
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
     --method org.freedesktop.DBus.ListNames
-echo 'Private Wayland compositor ready at 1280x720; stopping probe only'
+echo 'Private Wayland compositor ready at 1280x720'
 if [[ "${3:-}" == --rdp ]]; then
     env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
         LD_LIBRARY_PATH=/opt/krdp-console/lib/x86_64-linux-gnu \
@@ -211,6 +233,10 @@ if [[ "${3:-}" == --rdp ]]; then
     echo 'Private desktop RDP listener ready on Sol3394 for90 seconds'
     for attempt in {1..90}; do
         kill -0 "$rdp_pid"
+        kill -0 "$policy_pid"
+        if (( attempt % 10 == 0 )); then
+            timeout 5 pw-dump >"$XDG_RUNTIME_DIR/rdp-graph-$attempt.json"
+        fi
         sleep 1
     done
 fi
