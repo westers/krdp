@@ -192,6 +192,7 @@ gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/
 echo 'Private Wayland compositor ready at 1280x720; stopping probe only'
 if [[ "${3:-}" == --rdp ]]; then
     env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
+        LD_LIBRARY_PATH=/opt/krdp-console/lib/x86_64-linux-gnu \
         /opt/krdp-console/bin/krdpserver --plasma --monitor 0 --quality 80 \
         --address 192.168.48.57 --port 3394 -u krdptest \
         -p "$(<"$XDG_RUNTIME_DIR/rdp-password")" \
