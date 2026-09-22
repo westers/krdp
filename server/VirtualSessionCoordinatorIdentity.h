@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #pragma once
 #include <QString>
+#include <QDBusMessage>
+#include <array>
 #include <memory>
 #include <optional>
 #include <sys/types.h>
@@ -32,6 +34,27 @@ public:
     QString bootId() const;
 private:
     friend class ::VirtualSessionCoordinatorIdentityTest;
+    friend class VirtualSessionMaintenanceWriterPolicy;
+    enum class PolicyUnit : size_t {
+        Coordinator, ShutdownWaiter, AptDaily, AptDailyUpgrade,
+        UpdateNotifierDownload, UpdateNotifierMotd, UaTimer, PackageKit,
+        PackageKitOfflineUpdate, UaRebootCommands, AptNews, EsmCache, Count
+    };
+    struct UnitInputs {
+        QDBusMessage unit, service;
+        // Hidden from GetAll; fetched explicitly, never defaulted when absent.
+        bool permissionsStartOnly = false;
+    };
+    struct PolicyInputs {
+        QDBusMessage manager;
+        std::array<UnitInputs, size_t(PolicyUnit::Count)> units;
+    };
+    static QString policyUnitName(PolicyUnit);
+    static QString policyUnitPath(PolicyUnit);
+    // Synchronous whole-inventory observation under one deadline; no escaping
+    // batch, arbitrary destinations, activation or partial-success result.
+    // Raw dictionaries retain duplicate keys for WriterPolicy's strict parser.
+    std::optional<PolicyInputs> readPolicyInputs(int timeoutMs = 3000) const;
     struct Data;
     static bool validBusId(const QString &);
     static bool validUniqueOwner(const QString &);

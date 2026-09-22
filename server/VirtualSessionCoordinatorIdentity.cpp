@@ -2,6 +2,8 @@
 #include "VirtualSessionCoordinatorIdentity.h"
 #include "VirtualSessionProcessIdentity.h"
 #include <QDBusConnection>
+#include <QDBusArgument>
+#include <QDBusVariant>
 #include <QDBusMessage>
 #include <QDBusObjectPath>
 #include <QDBusReply>
@@ -155,6 +157,77 @@ bool VirtualSessionCoordinatorIdentity::validUniqueOwner(const QString &value) {
         }
     }
     return dot && component;
+}
+QString VirtualSessionCoordinatorIdentity::policyUnitName(PolicyUnit unit) {
+    switch (unit) {
+    case PolicyUnit::Coordinator: return unitName;
+    case PolicyUnit::ShutdownWaiter: return QStringLiteral("unattended-upgrades.service");
+    case PolicyUnit::AptDaily: return QStringLiteral("apt-daily.service");
+    case PolicyUnit::AptDailyUpgrade: return QStringLiteral("apt-daily-upgrade.service");
+    case PolicyUnit::UpdateNotifierDownload: return QStringLiteral("update-notifier-download.service");
+    case PolicyUnit::UpdateNotifierMotd: return QStringLiteral("update-notifier-motd.service");
+    case PolicyUnit::UaTimer: return QStringLiteral("ua-timer.service");
+    case PolicyUnit::PackageKit: return QStringLiteral("packagekit.service");
+    case PolicyUnit::PackageKitOfflineUpdate: return QStringLiteral("packagekit-offline-update.service");
+    case PolicyUnit::UaRebootCommands: return QStringLiteral("ua-reboot-cmds.service");
+    case PolicyUnit::AptNews: return QStringLiteral("apt-news.service");
+    case PolicyUnit::EsmCache: return QStringLiteral("esm-cache.service");
+    case PolicyUnit::Count: break;
+    }
+    return {};
+}
+QString VirtualSessionCoordinatorIdentity::policyUnitPath(PolicyUnit unit) {
+    const auto name = policyUnitName(unit).toLatin1();
+    if (name.isEmpty()) return {};
+    QString encoded;
+    for (qsizetype i = 0; i < name.size(); ++i) {
+        const auto c = static_cast<unsigned char>(name[i]);
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (i && c >= '0' && c <= '9')) encoded += QLatin1Char(c);
+        else encoded += QStringLiteral("_%1").arg(c, 2, 16, QLatin1Char('0'));
+    }
+    return QStringLiteral("/org/freedesktop/systemd1/unit/") + encoded;
+}
+std::optional<VirtualSessionCoordinatorIdentity::PolicyInputs> VirtualSessionCoordinatorIdentity::readPolicyInputs(int timeoutMs) const {
+    if (!d || timeoutMs <= 0 || timeoutMs > 3000) return {};
+    QDeadlineTimer deadline(timeoutMs, Qt::PreciseTimer);
+    if (d->snapshot(deadline) != d->invocation) return {};
+    const auto properties = [&](const QString &path, const QString &interface) -> std::optional<QDBusMessage> {
+        if (!d->endpoint(deadline)) return {};
+        const auto reply = d->call(deadline, d->owner, path, QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("GetAll"), {interface});
+        if (reply.signature() != QStringLiteral("a{sv}") || reply.arguments().size() != 1
+            || reply.arguments()[0].metaType() != QMetaType::fromType<QDBusArgument>()
+            || qvariant_cast<QDBusArgument>(reply.arguments()[0]).currentSignature() != QStringLiteral("a{sv}")
+            || !d->endpoint(deadline)) return {};
+        return reply;
+    };
+    PolicyInputs result;
+    const auto manager = properties(QStringLiteral("/org/freedesktop/systemd1"), managerName + QStringLiteral(".Manager"));
+    if (!manager) return {};
+    result.manager = *manager;
+    for (size_t i = 0; i < result.units.size(); ++i) {
+        const auto unit = static_cast<PolicyUnit>(i);
+        const auto expected = policyUnitPath(unit);
+        if (!d->endpoint(deadline)) return {};
+        const auto reply = d->call(deadline, d->owner, QStringLiteral("/org/freedesktop/systemd1"), managerName + QStringLiteral(".Manager"),
+                                   QStringLiteral("GetUnit"), {policyUnitName(unit)});
+        const QDBusReply<QDBusObjectPath> path(reply);
+        if (reply.signature() != QStringLiteral("o") || reply.arguments().size() != 1 || !path.isValid()
+            || path.value().path() != expected || !d->endpoint(deadline)) return {};
+        const auto unitReply = properties(expected, managerName + QStringLiteral(".Unit"));
+        if (!unitReply) return {};
+        const auto serviceReply = properties(expected, managerName + QStringLiteral(".Service"));
+        if (!serviceReply) return {};
+        if (!d->endpoint(deadline)) return {};
+        const auto hidden = d->call(deadline, d->owner, expected, QStringLiteral("org.freedesktop.DBus.Properties"),
+                                    QStringLiteral("Get"), {QString(managerName + QStringLiteral(".Service")), QStringLiteral("PermissionsStartOnly")});
+        if (hidden.signature() != QStringLiteral("v") || hidden.arguments().size() != 1
+            || hidden.arguments()[0].metaType() != QMetaType::fromType<QDBusVariant>()) return {};
+        const auto value = qvariant_cast<QDBusVariant>(hidden.arguments()[0]).variant();
+        if (value.metaType() != QMetaType::fromType<bool>() || !d->endpoint(deadline)) return {};
+        result.units[i] = {*unitReply, *serviceReply, value.toBool()};
+    }
+    if (d->snapshot(deadline) != d->invocation || !d->bus.isConnected() || deadline.hasExpired()) return {};
+    return result;
 }
 bool VirtualSessionCoordinatorIdentity::revalidate(int timeoutMs) const {
     if (!d || timeoutMs <= 0 || timeoutMs > 3000) return false;
