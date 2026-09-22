@@ -93,3 +93,29 @@ if (BUILD_PLASMA_SESSION)
 endif()
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/app-org.kde.krdpserver.service DESTINATION ${KDE_INSTALL_SYSTEMDUSERUNITDIR})
 install(FILES 00-krdp.preset DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/user-preset)
+
+# Explicit staging only. Default installs must not enable the unfinished root
+# virtual service. Policy/unit drafts go under share, never active configuration.
+# Configure the intended prefix before staging: the draft units embed it.
+if (BUILD_PLASMA_SESSION)
+    install(TARGETS krdp-virtual-host krdp-virtual-session-entry
+        krdp-virtual-pam-keeper krdp-virtual-session-cleanup
+        krdp-virtual-device-entry krdp-virtual-guardian krdp-virtual-guardianctl
+        krdp-console-worker
+        RUNTIME DESTINATION ${KDE_INSTALL_BINDIR}
+        COMPONENT KRdpVirtualSessionTest EXCLUDE_FROM_ALL)
+    install(TARGETS KRdp LIBRARY DESTINATION ${KDE_INSTALL_LIBDIR}
+        COMPONENT KRdpVirtualSessionTest EXCLUDE_FROM_ALL)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-host.service
+        ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-session@.service
+        krdp-virtual-session.pam
+        DESTINATION ${KDE_INSTALL_DATADIR}/krdp/virtual-session/drafts
+        COMPONENT KRdpVirtualSessionTest EXCLUDE_FROM_ALL)
+    install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/launch-virtual-session.sh
+        ${CMAKE_SOURCE_DIR}/scripts/virtual-session-desktop.sh
+        DESTINATION ${KDE_INSTALL_DATADIR}/krdp/virtual-session
+        COMPONENT KRdpVirtualSessionTest EXCLUDE_FROM_ALL)
+    install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support/
+        DESTINATION ${KDE_INSTALL_DATADIR}/krdp/virtual-session/support
+        COMPONENT KRdpVirtualSessionTest EXCLUDE_FROM_ALL)
+endif()
