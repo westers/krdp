@@ -37,6 +37,13 @@ change tests. Review installed Sol hook inventory before integration approval.
 
 ## 3. Create-only production enforcement
 
+Preparatory slice (before step 2 is complete): add an injected broker admission
+callback and a typed creation result with a stable maintenance refusal. Test the
+control boundary and lifetime/reentrancy behavior without accessing the guard or
+enabling enforcement. The existing startup path remains unchanged until the
+validator, bootstrap and mandatory keeper lease are ready together. A missing
+callback in this temporary unwired stage is not the future production policy.
+
 Broker createIndependent preflight before reconciliation/intent/quota writes;
 typed control refusal for maintenance. Independent keeper gate before account
 lookup/NSS/policy reads, retained to registration certificate cutoff. Check

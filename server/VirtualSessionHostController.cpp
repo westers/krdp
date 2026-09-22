@@ -116,11 +116,12 @@ bool VirtualSessionHostController::recover(VirtualSessionJournal &journal, QStri
     return true;
 }
 
-bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJournal &journal, StartService start)
+bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJournal &journal, StartService start, AdmitCreate admission)
 {
     if (!m_recoveryAttempted || m_recoveredJournal != &journal || m_nextClient || m_journal
         || (!start && (getuid() || geteuid()))) return false;
     m_journal = &journal;
+    m_admitCreate = std::move(admission);
     m_reconcileTimer.start(1000);
     m_commitIntent = [&journal](const auto &record) { return journal.insert(record); };
     m_startService = start ? std::move(start) : [this](const auto &unit, const auto &handle) { return startIndependentService(unit, handle); };
@@ -138,10 +139,15 @@ bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJourna
     return true;
 }
 
-std::optional<VirtualSessionRegistry::Handle> VirtualSessionHostController::createIndependent(quint32 uid)
+VirtualSessionControl::CreateResult VirtualSessionHostController::createIndependent(quint32 uid)
 {
     if (!m_journal || !uid || m_creationBlocked) return {};
     const QPointer<VirtualSessionHostController> alive(this);
+    const auto admission = m_admitCreate;
+    const auto admitted = admission ? admission(uid) : CreateAdmission::Permitted;
+    if (!alive) return {};
+    if (admitted != CreateAdmission::Permitted)
+        return VirtualSessionControl::CreateResult(VirtualSessionControl::CreateResult::Refusal::Maintenance);
     reconcileCleanExits();
     if (!alive) return {};
     if (m_creationBlocked) return {};

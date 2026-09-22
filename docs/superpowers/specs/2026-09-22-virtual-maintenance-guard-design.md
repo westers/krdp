@@ -28,6 +28,14 @@ Descriptors are CLOEXEC and must not escape to the desktop. The keeper is the
 mandatory enforcement point. Broker create preflight supplies a friendly error
 before consuming a session slot but cannot replace the keeper's held lease.
 
+The preparatory broker seam distinguishes maintenance refusal from ordinary
+creation refusal. It does not change the accepted outcome once an intent has
+been durably published: an uncertain service submission remains an accepted
+session whose failed state can be listed. Refused request IDs retain their cached
+reply; after maintenance, a new create requires a new request ID. This prevents
+a delayed duplicate from unexpectedly creating a desktop. The seam is initially
+unwired and adds no maintenance capability advertisement or host policy change.
+
 Maintenance acquires exclusive flock, waiting only for bounded in-flight startup
 leases (never retained desktop lifetime). BEFORE any relevant writer runs it
 durably publishes blocked state. Short write, rename/fsync failure or uncertain

@@ -28,7 +28,11 @@ public:
     bool recover(VirtualSessionJournal &journal, QString *error = nullptr);
     using StartService = std::function<bool(const QString &, const VirtualSessionRegistry::Handle &)>;
     // Journal must outlive host. Enable only after recovery and before clients.
-    bool enableIndependentCreates(VirtualSessionJournal &journal, StartService start = {});
+    enum class CreateAdmission { Permitted, Maintenance };
+    using AdmitCreate = std::function<CreateAdmission(quint32)>;
+    // Create-only preflight, not the keeper's mandatory held maintenance lease.
+    // Empty remains permitted for this unwired stage; no production enforcement.
+    bool enableIndependentCreates(VirtualSessionJournal &journal, StartService start = {}, AdmitCreate admission = {});
 
 private:
     friend class VirtualSessionHostControllerTest;
@@ -38,7 +42,7 @@ private:
     std::optional<VirtualSessionJournal::Record> dismissalRecord(quint32 uid, const QString &id) const;
     bool dismissalEligible(quint32 uid, const QString &id) const;
     VirtualSessionControl::DismissResult dismissFailure(quint32 uid, const QString &id);
-    std::optional<VirtualSessionRegistry::Handle> createIndependent(quint32 uid);
+    VirtualSessionControl::CreateResult createIndependent(quint32 uid);
     bool startIndependentService(const QString &unit, const VirtualSessionRegistry::Handle &handle);
     struct Worker {
         VirtualSessionRegistry::Handle handle;
@@ -63,6 +67,7 @@ private:
     QString m_recoveryBoot;
     QTimer m_reconcileTimer;
     StartService m_startService;
+    AdmitCreate m_admitCreate;
     std::function<bool(const VirtualSessionJournal::Record &)> m_commitIntent;
     bool m_creationBlocked = false;
     std::map<QString, VirtualSessionJournal::Record> m_newIntents;

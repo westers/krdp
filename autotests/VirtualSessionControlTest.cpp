@@ -258,23 +258,36 @@ private Q_SLOTS:
         const auto created = control.request(1000, 1, command(QStringLiteral("c"), QStringLiteral("create")));
         const auto id = created.value(QStringLiteral("session")).toString();
         QVERIFY(handle);
+        int refusedCreates = 0;
+        control.setCreateHandler([&](quint32) {
+            ++refusedCreates;
+            return VirtualSessionControl::CreateResult(VirtualSessionControl::CreateResult::Refusal::Maintenance);
+        });
+        QVERIFY(!control.request(1000, 1, command(QStringLiteral("maintenance"), QStringLiteral("create"))).value(QStringLiteral("ok")).toBool());
+        const auto listed = control.request(1000, 1, command(QStringLiteral("maintenance-list"), QStringLiteral("list")));
+        QVERIFY(listed.value(QStringLiteral("ok")).toBool());
+        QCOMPARE(listed.value(QStringLiteral("sessions")).toArray().size(), 1);
         QVERIFY(!control.request(1000, 1, command(QStringLiteral("early"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
         bool ready = false;
         QTRY_VERIFY(ready || (ready = supervisor.captureReady(*handle)));
         QVERIFY(control.request(1000, 1, command(QStringLiteral("a"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
         QVERIFY(control.attachment(1));
         QVERIFY(!control.request(1000, 2, command(QStringLiteral("a"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
+        QVERIFY(control.request(1000, 1, command(QStringLiteral("maintenance-detach"), QStringLiteral("detach"))).value(QStringLiteral("ok")).toBool());
+        QVERIFY(!control.attachment(1));
+        QVERIFY(control.request(1000, 1, command(QStringLiteral("maintenance-reattach"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
         control.disconnected(1);
-        QCOMPARE(released, QList<quint64>{1});
+        QCOMPARE(released, (QList<quint64>{1, 1}));
         QVERIFY(!control.attachment(1));
         QCOMPARE(supervisor.list(1000).first().phase, Phase::Retained);
         QVERIFY(control.request(1000, 2, command(QStringLiteral("a2"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
         QCOMPARE(control.attachment(2)->generation, handle->generation);
         // Another transport of the authenticated owner may explicitly stop it.
         QVERIFY(control.request(1000, 3, command(QStringLiteral("s"), QStringLiteral("stop"), id)).value(QStringLiteral("ok")).toBool());
-        QCOMPARE(released, (QList<quint64>{1, 2}));
+        QCOMPARE(released, (QList<quint64>{1, 1, 2}));
         QVERIFY(!control.attachment(2));
         QTRY_COMPARE(supervisor.list(1000).first().phase, Phase::Absent);
+        QCOMPARE(refusedCreates, 1); // List/attach/reconnect/stop never call admission.
     }
     void boundedReplayHistoryNeverReexecutesOldMutation()
     {

@@ -27,7 +27,18 @@ public:
     // registry release. The callback runs even when no control record exists.
     void disconnected(quint64 client, std::function<void()> revoke);
     std::optional<Handle> attachment(quint64 client) const;
-    void setCreateHandler(std::function<std::optional<Handle>(quint32)> create) { m_create = std::move(create); }
+    struct CreateResult {
+        enum class Refusal { Ordinary, Maintenance };
+        std::optional<Handle> handle;
+        Refusal refusal = Refusal::Ordinary; // Relevant only without a handle.
+        CreateResult() = default;
+        CreateResult(std::optional<Handle> accepted) : handle(std::move(accepted)) {}
+        explicit CreateResult(Refusal reason) : refusal(reason) {}
+        explicit operator bool() const { return handle.has_value(); }
+        const Handle *operator->() const { return &handle.value(); }
+        const Handle &operator*() const { return handle.value(); }
+    };
+    void setCreateHandler(std::function<CreateResult(quint32)> create) { m_create = std::move(create); }
     enum class DismissResult { Accepted, Unavailable, Uncertain };
     void setDismissHandlers(std::function<bool(quint32, const QString &)> eligible,
                             std::function<DismissResult(quint32, const QString &)> dismiss)
@@ -47,7 +58,7 @@ private:
     void release(quint64 client, const std::shared_ptr<Transport> &transport, std::function<void()> revoke = {});
     QPointer<VirtualSessionSupervisor> m_supervisor;
     Release m_release;
-    std::function<std::optional<Handle>(quint32)> m_create;
+    std::function<CreateResult(quint32)> m_create;
     std::function<bool(quint32, const QString &)> m_dismissible;
     std::function<DismissResult(quint32, const QString &)> m_dismiss;
     QHash<quint64, std::shared_ptr<Transport>> m_transports;

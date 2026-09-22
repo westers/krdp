@@ -26,6 +26,120 @@ class VirtualSessionHostControllerTest : public QObject
         return r;
     }
 private Q_SLOTS:
+    void maintenanceAdmissionHasNoCreateSideEffects()
+    {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal));
+        bool permitted = false; int admissions = 0, commits = 0, starts = 0;
+        QVERIFY(host.enableIndependentCreates(*journal, [&](const auto &, const auto &) { ++starts; return false; },
+            [&](quint32 uid) { ++admissions; return uid == 1000 && permitted
+                ? VirtualSessionHostController::CreateAdmission::Permitted : VirtualSessionHostController::CreateAdmission::Maintenance; }));
+        const auto commit = host.m_commitIntent;
+        host.m_commitIntent = [&](const auto &record) { ++commits; return commit(record); };
+        const auto files = QDir(dir.path()).entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot);
+        const auto request = command(QStringLiteral("create"));
+        const auto refused = host.m_control.request(1000, 1, request);
+        QVERIFY(!refused.value(QStringLiteral("ok")).toBool());
+        QCOMPARE(refused.value(QStringLiteral("message")).toString(), QStringLiteral("session creation unavailable during maintenance"));
+        QCOMPARE(host.m_control.request(1000, 1, request), refused); QCOMPARE(admissions, 1);
+        QVERIFY(!host.m_control.request(1000, 1, command(QStringLiteral("create"))).value(QStringLiteral("ok")).toBool());
+        QCOMPARE(admissions, 2); QCOMPARE(starts, 0); QCOMPARE(commits, 0);
+        QVERIFY(journal->records()->isEmpty()); QVERIFY(host.m_supervisor.list(1000).isEmpty());
+        QVERIFY(host.m_newIntents.empty()); QVERIFY(host.m_workers.empty()); QVERIFY(!host.m_creationBlocked);
+        QCOMPARE(QDir(dir.path()).entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot), files);
+        permitted = true;
+        QCOMPARE(host.m_control.request(1000, 1, request), refused); QCOMPARE(admissions, 2);
+        for (int i = 0; i < 4; ++i) {
+            const auto accepted = host.m_control.request(1000, 1, command(QStringLiteral("create")));
+            QVERIFY(accepted.value(QStringLiteral("ok")).toBool());
+            // Failed submission AFTER durable intent remains accepted, not retryable.
+            QCOMPARE(accepted.value(QStringLiteral("state")).toString(), QStringLiteral("failed"));
+        }
+        QCOMPARE(starts, 4); QCOMPARE(commits, 4); QCOMPARE(journal->records()->size(), 4);
+        const auto full = host.m_control.request(1000, 1, command(QStringLiteral("create")));
+        QCOMPARE(full.value(QStringLiteral("message")).toString(), QStringLiteral("session creation refused"));
+        QCOMPARE(starts, 4); QCOMPARE(commits, 4);
+    }
+    void maintenanceAdmissionPrecedesReconciliation()
+    {
+        QTemporaryDir dir; auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; VirtualSessionHostController host(&server, {}); QVERIFY(host.recover(*journal));
+        bool permitted = true;
+        QVERIFY(host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }, [&] (quint32) {
+            return permitted ? VirtualSessionHostController::CreateAdmission::Permitted : VirtualSessionHostController::CreateAdmission::Maintenance;
+        }));
+        QVERIFY(host.createIndependent(1000));
+        const auto record = journal->records()->first();
+        QVERIFY(journal->claimRecord(record, nullptr)); QVERIFY(journal->writeReconciled(record, nullptr));
+        QVERIFY(journal->writeOrderedExit(record, nullptr));
+        permitted = false;
+        QCOMPARE(host.createIndependent(1000).refusal, VirtualSessionControl::CreateResult::Refusal::Maintenance);
+        QCOMPARE(host.m_supervisor.list(1000).size(), 1); QCOMPARE(host.m_newIntents.size(), size_t(1));
+        QCOMPARE(journal->records()->size(), 1);
+        // Proves the row was eligible to retire, but denied create did not do it.
+        host.reconcileCleanExits(); QVERIFY(host.m_supervisor.list(1000).isEmpty());
+    }
+    void maintenanceAdmissionDoesNotGateExistingSessionCommands()
+    {
+        QTemporaryDir dir; auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; VirtualSessionHostController host(&server, {}); QVERIFY(host.recover(*journal));
+        int admissions = 0, starts = 0;
+        QVERIFY(host.enableIndependentCreates(*journal, [&](const auto &, const auto &) { ++starts; return false; }, [&](quint32) {
+            ++admissions; return VirtualSessionHostController::CreateAdmission::Maintenance;
+        }));
+        // Existing-session control fixture only: a local sleeper plus synthetic
+        // capture readiness, not a real guardian/PAM/media acceptance claim.
+        host.m_supervisor.m_factory = [](quint32, const auto &) -> std::optional<VirtualSessionSupervisor::Launch> {
+            return VirtualSessionSupervisor::Launch{QStringLiteral("/usr/bin/sleep"), {QStringLiteral("60")}, {}, {}};
+        };
+        const auto handle = host.m_supervisor.create(1000); QVERIFY(handle);
+        bool ready = false; QTRY_VERIFY(ready || (ready = host.m_supervisor.captureReady(*handle)));
+        QVERIFY(!host.m_control.request(1000, 1, command(QStringLiteral("create"))).value(QStringLiteral("ok")).toBool());
+        const auto list = host.m_control.request(1000, 1, command(QStringLiteral("list")));
+        QVERIFY(list.value(QStringLiteral("ok")).toBool()); QCOMPARE(list.value(QStringLiteral("sessions")).toArray().size(), 1);
+        QVERIFY(host.m_control.request(1000, 1, command(QStringLiteral("attach"), handle->id)).value(QStringLiteral("ok")).toBool());
+        QVERIFY(host.m_control.request(1000, 1, command(QStringLiteral("detach"))).value(QStringLiteral("ok")).toBool());
+        host.m_control.disconnected(1);
+        QVERIFY(host.m_control.request(1000, 2, command(QStringLiteral("attach"), handle->id)).value(QStringLiteral("ok")).toBool());
+        QVERIFY(host.m_control.request(1000, 2, command(QStringLiteral("stop"), handle->id)).value(QStringLiteral("ok")).toBool());
+        QTRY_COMPARE(host.m_supervisor.list(1000).first().phase, VirtualSessionState::Phase::Absent);
+        QCOMPARE(admissions, 1); QCOMPARE(starts, 0); QVERIFY(journal->records()->isEmpty());
+    }
+    void maintenanceAdmissionCallbackLifetimeAndReentrancy_data()
+    {
+        QTest::addColumn<bool>("destroy"); QTest::newRow("destroy") << true; QTest::newRow("reenter") << false;
+    }
+    void maintenanceAdmissionCallbackLifetimeAndReentrancy()
+    {
+        QFETCH(bool, destroy);
+        QTemporaryDir dir; auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; auto host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
+        QVERIFY(host->recover(*journal)); int admissions = 0, starts = 0; bool guarded = false; QList<QJsonObject> nested;
+        QVERIFY(host->enableIndependentCreates(*journal, [&](const auto &, const auto &) { ++starts; return false; }, [&](quint32 uid) {
+            ++admissions; guarded = host->m_control.dispatchActive();
+            if (destroy) host.reset();
+            else {
+                nested.append(host->m_control.request(uid, 1, command(QStringLiteral("create"))));
+                nested.append(host->m_control.request(1001, 2, command(QStringLiteral("create"))));
+                host->m_admitCreate = {}; // Copied callback survives its own removal.
+            }
+            // A permissive result must still not continue after destruction.
+            return destroy ? VirtualSessionHostController::CreateAdmission::Permitted : VirtualSessionHostController::CreateAdmission::Maintenance;
+        }));
+        const auto response = host->m_control.request(1000, 1, command(QStringLiteral("create")));
+        QVERIFY(!response.value(QStringLiteral("ok")).toBool()); QVERIFY(guarded); QCOMPARE(admissions, 1); QCOMPARE(starts, 0);
+        QVERIFY(journal->records()->isEmpty());
+        if (destroy) { QVERIFY(!host); QVERIFY(response.value(QStringLiteral("message")).toString().contains(QStringLiteral("uncertain"))); }
+        else {
+            QCOMPARE(nested.size(), 2);
+            for (const auto &reply : nested) QCOMPARE(reply.value(QStringLiteral("message")).toString(), QStringLiteral("virtual-session command in progress; retry"));
+            QVERIFY(!host->m_control.dispatchActive()); QVERIFY(host->m_supervisor.list(1000).isEmpty());
+            QVERIFY(host->m_control.request(1000, 1, command(QStringLiteral("create"))).value(QStringLiteral("ok")).toBool());
+            QCOMPARE(starts, 1);
+        }
+    }
     void oldBootAndMalformedEvidenceStayConservative_data()
     {
         QTest::addColumn<QString>("kind");

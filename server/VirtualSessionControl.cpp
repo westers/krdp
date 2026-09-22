@@ -111,9 +111,10 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
     }
     if (action == QStringLiteral("create")) {
         const auto create = m_create; // Callback storage can be destroyed by itself.
-        const auto handle = create ? create(uid) : supervisor->create(uid);
+        const CreateResult handle = create ? create(uid) : CreateResult(supervisor->create(uid));
         if (!valid()) return uncertain();
-        if (!handle) return reply(record, false, QStringLiteral("session creation refused"));
+        if (!handle) return reply(record, false, handle.refusal == CreateResult::Refusal::Maintenance
+            ? QStringLiteral("session creation unavailable during maintenance") : QStringLiteral("session creation refused"));
         response.insert(QStringLiteral("session"), handle->id);
         // Accepted is not ready: failed launch/first-frame readiness is exposed
         // by subsequent list requests. No transport is automatically attached.
