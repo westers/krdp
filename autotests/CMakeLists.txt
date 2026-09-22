@@ -47,6 +47,12 @@ target_link_libraries(VirtualSessionProvisioningReceiptTest PRIVATE Qt6::Core Qt
 target_link_options(VirtualSessionProvisioningReceiptTest PRIVATE "-Wl,--wrap=fsync")
 add_test(NAME VirtualSessionProvisioningReceiptTest COMMAND VirtualSessionProvisioningReceiptTest)
 set_tests_properties(VirtualSessionProvisioningReceiptTest PROPERTIES TIMEOUT 20)
+add_executable(VirtualSessionMaintenanceWriterPolicyTest VirtualSessionMaintenanceWriterPolicyTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionMaintenanceWriterPolicy.cpp)
+target_include_directories(VirtualSessionMaintenanceWriterPolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(VirtualSessionMaintenanceWriterPolicyTest PRIVATE Qt6::Core Qt6::Test Qt6::DBus)
+add_test(NAME VirtualSessionMaintenanceWriterPolicyTest COMMAND VirtualSessionMaintenanceWriterPolicyTest)
+set_tests_properties(VirtualSessionMaintenanceWriterPolicyTest PROPERTIES TIMEOUT 30)
 add_executable(VirtualSessionMaintenanceRecordTest VirtualSessionMaintenanceRecordTest.cpp)
 target_include_directories(VirtualSessionMaintenanceRecordTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(VirtualSessionMaintenanceRecordTest PRIVATE Qt6::Core Qt6::Test)

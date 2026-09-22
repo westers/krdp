@@ -1,0 +1,15 @@
+# Integration draft only; not installed until routing/bootstrap acceptance.
+[Unit]
+Description=Validate the initial KRDP virtual-session maintenance boundary
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @KDE_INSTALL_FULL_BINDIR@/krdp-virtual-maintenance-validate
+Restart=no
+TimeoutStartSec=30
+KillMode=control-group
+Delegate=no
+NoNewPrivileges=yes
+UMask=0077
