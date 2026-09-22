@@ -493,3 +493,23 @@ and installed root-controlled executable/libraries, before its dynamic loader
 runs; cleaning only the guardian environment is insufficient. FD0 must be the
 token pipe and FD1/2 safe log destinations. No privileged acceptance is claimed
 by the nonroot refusal test. Review found no blocking mount/drop ordering defect.
+
+2026-09-21 logged-out device-entry runtime PASS: user executed the prepared
+Sol tmux command. Private nodes mode0600 westers:westers; identity1000:1000,
+all five capability sets zero, NoNewPrivs1, render open succeeds, no card0/card1.
+Host nodes remain renderD128 root:render0660 with sddm-only user ACL and NVIDIA
+nodes root:root0666. Physical SDDM954/KWin200016 and consolehost167444:3391
+remain unchanged. Guardian201320 owns sessionc3fc28e6-a437-41d3-9747-4841cc7e05b0,
+launchb236be9a-dd0d-4047-a814-6c8285a78f5b; private KWin201386 reports OpenGL
+RTX2070, one1280x720 output and no PipeWire hardware Devices. Full Plasma panel
+and icons visibly confirmed in decoded capture rdp/evidence/virtual-device-b236be9a.png.
+
+Probe7b1c367 adds --managed-session: only creates broker endpoint in an owned
+private runtime with no existing socket, reads existing0600 single-link token
+without following symlinks, and lets guardian's loop launch the worker. Two
+separate invocations each received authenticated116763-byte1280x720 keyframes,
+verified physical-resize refusal, stopped only the worker, and exited0. Same
+guardian PID/starttime and private desktop survived both endpoint lifetimes.
+This is capture/worker-reconnect acceptance, NOT full RDP/client reattachment,
+broker restart recovery, fresh audio-tone acceptance or final namespace cleanup.
+Guardian remains running in the user's tmux for the next integration test.
