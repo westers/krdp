@@ -5,6 +5,7 @@ add_definitions(-DTRANSLATION_DOMAIN=\"krdpserver\")
 
 add_executable(krdpserver)
 add_library(KRdpGuardianClient STATIC VirtualSessionGuardianClient.cpp)
+target_sources(KRdpGuardianClient PRIVATE VirtualSessionJournal.cpp)
 target_link_libraries(KRdpGuardianClient PUBLIC Qt6::Core Qt6::Network)
 add_executable(krdp-virtual-device-entry virtualdeviceentry.cpp)
 target_link_libraries(krdp-virtual-device-entry PRIVATE Qt6::Core)

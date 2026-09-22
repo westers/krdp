@@ -578,3 +578,24 @@ value is not permission to reuse a runtime or bypass the exclusive profile lock.
 Use a fresh incarnation for every actual launch; uncertain recovery must not
 silently spawn a replacement. This removes the identity-discovery crash window
 but does not itself implement the durable journal or independent service launch.
+
+Launch journal contract: a root-service-only store at installer-provisioned
+/var/lib/krdp/virtual-sessions (0700) contains immutable0600 single-link records
+of UID/session/launch/incarnation/boot UUIDs and32-byte credentials. No command,
+environment, PID or client-selected path is serialized. Every ancestor is opened
+without following symlinks and must be root-owned/non-shared; the directory FD
+anchors subsequent operations. Temporary exclusive files are fsynced before
+atomic no-replace publication, then the directory is fsynced. Failure forbids
+spawn even if publication may have occurred. Existing intents are never replaced.
+A nonblocking exclusive directory flock lasts for the journal object's lifetime;
+another broker must wait for the old one to exit. A256-record bound is enforced
+before publication and reading; unknown/corrupt state also prevents new launches.
+Unpublished .pending files are ignored, not deleted; interrupted publication
+leaving an extra hardlink fails closed and requires explicit reconciliation.
+Reads reject nonregular/shared/hardlinked/oversized/malformed records and never
+return a partial recovery set. A record proves intent only. Startup must compare
+boot identity, preserve uncertain entries, authenticate exact guardian and await
+fresh capture before attachment. No automatic resurrection after reboot, no PID
+signalling and no root traversal of user-supplied runtime paths is permitted.
+Journal is implemented/tested as a library; production startup/write-before-spawn
+and explicit terminal reconciliation remain to be wired to the service launcher.
