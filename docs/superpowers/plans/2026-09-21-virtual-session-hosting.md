@@ -206,3 +206,22 @@ callbacks, manager identity, capacity and stop/exit ordering. This registry is
 in-memory and NOT yet wired to a supervisor, transport or persistent store.
 Recovery must verify a surviving runtime identity/readiness before adoption;
 do not deserialize an Attached/Retained flag and assume applications survived.
+
+Process supervision foundation: VirtualSessionSupervisor now owns actual
+QProcess leaders independently of attached clients and uses the live registry.
+A trusted launch factory receives authenticated UID/internal handle; it must
+supply absolute executable, explicit environment, identity setup and a
+namespace leader guaranteeing descendant cleanup. Readiness is an explicit
+authenticated capture event, never stdout text or successful spawn. Startup
+deadline kills failed leaders, owner stop drains until exit, then escalates
+TERM to KILL on the exact QProcess context. Disconnect has no process action.
+Real disposable-process tests cover retention, cross-owner stop refusal,
+failed spawn, rejected factory/environment, startup timeout, stale readiness,
+unexpected exit and forced stop without affecting another runtime.
+
+This class is not yet installed/runtime-wired. Its current destructor explicitly
+tears down owned leaders; production service restart recovery remains required
+and must not be advertised from this foundation. Next extract a reviewed
+installed private Plasma launch contract from the bounded probe, connect worker
+readiness/IPC and authenticated transports, and implement verified runtime
+adoption rather than PID/record-only restart recovery.
