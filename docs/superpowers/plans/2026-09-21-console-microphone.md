@@ -107,3 +107,22 @@ RMS2389.38/32768 and997Hz coherent energy fraction0.659658; test requires
 non-silent RMS plus fraction>0.25. Three repeated runs passed. This proves the
 worker's source implementation can publish usable audio; it is NOT evidence
 for client AUDIN, broker transport, hardware mic capture or conferencing.
+
+## Live console acceptance (2026-09-21)
+
+Sol installed product55f2dcd; isolated native-Wayland Buzz client3131719.
+Known5s997Hz stereo48k tone into a temporary Pulse null-sink monitor, selected
+explicitly as the client's AUDIN input, arrived at Sol's console-worker source.
+Independent parec recording measured mean-28.6dB/max-21.1dB; narrow997Hz
+bandpass retained these levels. No physical microphone was sampled.
+
+Mic-only (playbackfalse) requests activated audio priority. Releasing control
+removed the source and retired AUDIN consent. Reacquiring control in the same
+RDP connection sent fresh consent, reopened AUDIN and delivered a NEW tone:
+6.144s recording,mean-25.6dB/max-21.1dB. A second-client viewer was refused mic
+injection without disrupting the owner. Final disconnect removed the source;
+synthetic fixture removed, physical/default routing and production client
+configuration unchanged. Evidence in rdp/evidence/console-audio-client.yI3kMD:
+mic-received.raw,mic-reopen.raw,mic-live.log,mic-only.log,mic-viewer.log,
+mic-reopen.log. Real microphone/acoustic latency, asymmetric uplink congestion,
+external conference and camera in console mode remain unverified/unimplemented.
