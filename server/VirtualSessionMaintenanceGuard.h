@@ -80,6 +80,7 @@ public:
 private:
     friend class VirtualSessionMaintenanceGuardTest;
     friend class VirtualSessionMaintenanceCoordinator;
+    friend class VirtualUnattendedUpgradeGuardTest;
     static std::optional<Diagnostic> statusAt(const QString &path, uid_t owner,
         const QString &boot, bool fixture, QString *error);
     static std::optional<Lease> acquire(const QString &path, uid_t owner, const QString &boot,

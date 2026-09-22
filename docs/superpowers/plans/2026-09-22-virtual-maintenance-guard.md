@@ -114,8 +114,9 @@ The live Sol shutdown waiter is an active conditional upgrade launcher. Its
 byte-matched 2.12ubuntu9 script can spawn `unattended-upgrade` through its existing
 PATH/environment. The local upgrader loads plugins before package locks and may
 perform direct dpkg repair, so APT pre-invoke alone is not its first boundary.
-The approved next route is a fixed executable wrapper which invalidates before
-execing the real upgrader and never rearms. Installation must validate the
+The fixed executable wrapper is now built and fixture-tested: it invalidates
+before execing the real upgrader and never rearms. It is not installed.
+Installation must validate the
 running waiter's actual resolution/environment and package-safe diversion
 lifecycle; an environment drop-in cannot change an existing Python process.
 No service stop/restart or timer disabling is authorized as a testing shortcut.

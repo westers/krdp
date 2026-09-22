@@ -27,3 +27,23 @@ that clears the maintenance state on successful process exit.
 Tests use temporary ordinary-user fixtures. Do not run privileged commands from
 an agent: isolated deployment remains a user-run operation in the existing host
 tmux session, after the integration gates are complete.
+
+## Fixed unattended-upgrade boundary (build only)
+
+`krdp-unattended-upgrade-guard` is also built without installation. Its only
+backend is `/usr/libexec/krdp/unattended-upgrade.real`; no argument, environment
+variable or PATH lookup can select a different backend. It requires real,
+effective and saved UID 0, durably invalidates the maintenance state, releases
+the gate, and calls `execv`. Backend argument boundaries and the environment are
+preserved; argv[0] is the fixed backend path. It invokes no shell and never
+rearms, including after a successful backend exit. Failed invalidation prevents
+exec; failed exec leaves the external-unknown state intact.
+
+This closes the **future-launch** boundary before upgrader plugin imports and
+direct dpkg repair. It does not account for already-running descendants or
+effects before the wrapper's own main function. Installing it requires reviewed
+package-safe diversion/update/removal handling, exact backend identity, and
+verification that the existing waiter's actual PATH and loader environment select
+the wrapper safely. Those installation conditions are not implemented here.
+There is no instruction to manually replace a system executable or restart the
+running waiter at this checkpoint.

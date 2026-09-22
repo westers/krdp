@@ -53,6 +53,16 @@ target_include_directories(VirtualSessionMaintenanceWriterPolicyTest PRIVATE ${C
 target_link_libraries(VirtualSessionMaintenanceWriterPolicyTest PRIVATE Qt6::Core Qt6::Test Qt6::DBus)
 add_test(NAME VirtualSessionMaintenanceWriterPolicyTest COMMAND VirtualSessionMaintenanceWriterPolicyTest)
 set_tests_properties(VirtualSessionMaintenanceWriterPolicyTest PROPERTIES TIMEOUT 30)
+add_executable(VirtualUnattendedUpgradeGuardTest VirtualUnattendedUpgradeGuardTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualUnattendedUpgradeGuard.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionMaintenanceGuard.cpp
+    ${CMAKE_SOURCE_DIR}/server/PackageLease.cpp)
+target_include_directories(VirtualUnattendedUpgradeGuardTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(VirtualUnattendedUpgradeGuardTest PRIVATE Qt6::Core Qt6::Test)
+target_link_options(VirtualUnattendedUpgradeGuardTest PRIVATE "-Wl,--wrap=fsync" "-Wl,--wrap=execv")
+add_dependencies(VirtualUnattendedUpgradeGuardTest krdp-unattended-upgrade-guard)
+add_test(NAME VirtualUnattendedUpgradeGuardTest COMMAND VirtualUnattendedUpgradeGuardTest)
+set_tests_properties(VirtualUnattendedUpgradeGuardTest PROPERTIES TIMEOUT 20)
 add_executable(VirtualSessionMaintenanceRecordTest VirtualSessionMaintenanceRecordTest.cpp)
 target_include_directories(VirtualSessionMaintenanceRecordTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(VirtualSessionMaintenanceRecordTest PRIVATE Qt6::Core Qt6::Test)
