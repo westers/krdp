@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionHostController.h"
 #include <QDebug>
+#include <QFileInfo>
 #include <limits>
 
 namespace KRdp
@@ -14,11 +15,26 @@ VirtualSessionHostController::VirtualSessionHostController(Server *server, Prepa
       })
 {
     Q_ASSERT(server);
+    m_supervisor.setUnavailableCallback([this](const auto &handle) {
+        // Closing one desktop must not revoke any other user's transport.
+        QList<quint64> affected;
+        for (const auto &[id, client] : m_clients) {
+            const auto attached = m_control.attachment(id);
+            if (attached && attached->id == handle.id && attached->manager == handle.manager
+                && attached->generation == handle.generation) affected.append(id);
+        }
+        for (const auto id : affected) {
+            const auto found = m_clients.find(id);
+            if (found != m_clients.end()) found->second->unavailable();
+        }
+        if (auto *endpoint = resolve(handle)) endpoint->close();
+    });
     connect(server, &Server::newConnectionCreated, this, &VirtualSessionHostController::addClient);
 }
 
 VirtualSessionHostController::~VirtualSessionHostController()
 {
+    m_supervisor.setUnavailableCallback({});
     // Release all transports while control and endpoints still exist. The
     // supervisor subsequently tears down leaders on explicit host shutdown.
     while (!m_clients.empty()) removeClient(m_clients.begin()->first);
@@ -35,19 +51,45 @@ std::optional<VirtualSessionSupervisor::Launch> VirtualSessionHostController::pr
     const auto token = QUuid::createUuid().toRfc4122() + QUuid::createUuid().toRfc4122();
     const auto prepared = m_prepare(uid, handle, token);
     if (!prepared) return {};
+    if (!prepareEndpoint(uid, handle, prepared->socketName, token)) return {};
+    return prepared->process;
+}
+
+bool VirtualSessionHostController::adopt(const VirtualSessionGuardianClient::Identity &identity, const QString &workerSocket)
+{
+    const QFileInfo worker(workerSocket), guardian(identity.socket);
+    if (m_workers.contains(identity.session) || worker.fileName() != QStringLiteral("worker.sock")
+        || worker.absolutePath() != guardian.absolutePath()) return false;
+    auto lease = VirtualSessionBrokerLease::acquire(identity.uid, workerSocket);
+    if (!lease) return false;
+    const auto handle = m_supervisor.adopt(identity);
+    if (!handle) return false;
+    for (const auto &summary : m_supervisor.list(identity.uid)) {
+        if (summary.id == handle->id && summary.phase == VirtualSessionState::Phase::Failed) return false;
+    }
+    if (prepareEndpoint(identity.uid, *handle, workerSocket, identity.token, std::move(lease))) return true;
+    m_supervisor.captureUnavailable(*handle);
+    return false;
+}
+
+bool VirtualSessionHostController::prepareEndpoint(quint32 uid, const VirtualSessionRegistry::Handle &handle,
+    const QString &socket, const QByteArray &token, std::unique_ptr<VirtualSessionBrokerLease> lease)
+{
     auto worker = std::make_unique<Worker>();
     worker->handle = handle;
+    worker->lease = std::move(lease);
     worker->endpoint = std::make_unique<ConsoleWorkerEndpoint>();
     QString error;
-    if (!worker->endpoint->listen(prepared->socketName,
+    if (!worker->endpoint->listen(socket,
             {ConsoleSeat::Adapter::VirtualUser, handle.id, uid}, token, &error)) {
         qWarning().noquote() << "Virtual worker endpoint:" << error;
-        return {};
+        return false;
     }
     auto *endpoint = worker->endpoint.get();
     auto *entry = worker.get();
     connect(endpoint, &ConsoleWorkerEndpoint::workerReady, this, [endpoint](const auto &) { endpoint->requestKeyFrame(); });
     connect(endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [entry](const auto &outputs) { entry->outputs = outputs; });
+    connect(endpoint, &ConsoleWorkerEndpoint::workerStopped, this, [this, handle] { m_supervisor.captureUnavailable(handle); });
     connect(endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [this, entry](const VideoFrame &frame) {
         if (!frame.isKeyFrame || frame.data.isEmpty() || frame.size.isEmpty() || entry->outputs.monitors.isEmpty()
             || frame.monitors.size() != entry->outputs.monitors.size()) return;
@@ -57,7 +99,7 @@ std::optional<VirtualSessionSupervisor::Launch> VirtualSessionHostController::pr
         m_supervisor.captureReady(entry->handle);
     });
     m_workers.insert_or_assign(handle.id, std::move(worker));
-    return prepared->process;
+    return true;
 }
 
 ConsoleWorkerEndpoint *VirtualSessionHostController::resolve(const VirtualSessionRegistry::Handle &handle)

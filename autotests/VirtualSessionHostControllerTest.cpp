@@ -9,6 +9,46 @@ class VirtualSessionHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void brokerLeaseReclaimsOnlyRefusedSocket()
+    {
+        if (!getuid()) QSKIP("Nonroot lease fixture");
+        QTemporaryDir directory;
+        const auto path = directory.filePath(QStringLiteral("worker.sock"));
+        const auto encoded = QFile::encodeName(path);
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        QVERIFY(encoded.size() < qsizetype(sizeof(address.sun_path)));
+        std::memcpy(address.sun_path, encoded.constData(), size_t(encoded.size()) + 1);
+        const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        QVERIFY(fd >= 0);
+        QCOMPARE(bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)), 0);
+        QCOMPARE(listen(fd, 4), 0);
+        QVERIFY(!VirtualSessionBrokerLease::acquire(getuid(), path));
+        QVERIFY(QFileInfo::exists(path)); // active listener must never be removed
+        close(fd); // dead broker leaves the bound socket inode behind
+        auto lease = VirtualSessionBrokerLease::acquire(getuid(), path);
+        QVERIFY(lease);
+        QVERIFY(!QFileInfo::exists(path));
+        QVERIFY(!VirtualSessionBrokerLease::acquire(getuid(), path));
+        lease.reset();
+        QVERIFY(VirtualSessionBrokerLease::acquire(getuid(), path));
+    }
+    void brokerLeaseRejectsUnsafeArtifacts()
+    {
+        if (!getuid()) QSKIP("Nonroot lease fixture");
+        QTemporaryDir directory;
+        const auto path = directory.filePath(QStringLiteral("worker.sock"));
+        QFile ordinary(path);
+        QVERIFY(ordinary.open(QIODevice::WriteOnly));
+        ordinary.close();
+        QVERIFY(!VirtualSessionBrokerLease::acquire(getuid(), path));
+        QVERIFY(ordinary.exists());
+        QVERIFY(ordinary.remove());
+        QVERIFY(QFile::link(directory.filePath(QStringLiteral("missing")), path));
+        QVERIFY(!VirtualSessionBrokerLease::acquire(getuid(), path));
+        QVERIFY(QFileInfo(path).isSymLink());
+        QVERIFY(!VirtualSessionBrokerLease::acquire(getuid() + 1, path));
+    }
     void hostMayBeDestroyedBeforeAnOpenConnection()
     {
         Server server;

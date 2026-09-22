@@ -2,6 +2,7 @@
 #pragma once
 
 #include "VirtualSessionRegistry.h"
+#include "VirtualSessionGuardianClient.h"
 #include <QObject>
 #include <QProcess>
 #include <QTimer>
@@ -14,9 +15,10 @@ namespace KRdp
  * The trusted launch factory must construct an isolated, identity-dropped
  * namespace leader whose exit tears down all descendants. No program, argv,
  * environment or readiness Handle comes from client-supplied JSON.
- * Not yet a persistent service/recovery implementation: destruction explicitly
- * tears down these owned processes. Transport disconnect never destroys this
- * object. Restart adoption requires a separate validated runtime handshake.
+ * Destruction tears down legacy owned processes, but only disconnects adopted
+ * guardians. Adoption requires a trusted identity plus authenticated guardian
+ * liveness AND fresh capture before attach. Durable identity storage and an
+ * independent service launcher remain caller responsibilities.
  */
 class VirtualSessionSupervisor : public QObject
 {
@@ -34,6 +36,10 @@ public:
                                       int stopTimeoutMs = 5000, QObject *parent = nullptr);
     ~VirtualSessionSupervisor() override;
     std::optional<Handle> create(quint32 authenticatedUid);
+    // Trusted durable launch identity, not RDP JSON. Starts unavailable until
+    // guardian handshake AND authenticated fresh capture have both succeeded.
+    std::optional<Handle> adopt(const VirtualSessionGuardianClient::Identity &identity);
+    void setUnavailableCallback(std::function<void(const Handle &)> callback) { m_unavailable = std::move(callback); }
     std::optional<Handle> recreate(quint32 authenticatedUid, const QString &id);
     QList<VirtualSessionRegistry::Summary> list(quint32 uid) const { return m_registry.list(uid); }
     std::optional<Handle> attach(quint32 uid, const QString &id, quint64 client);
@@ -41,6 +47,7 @@ public:
     bool stop(quint32 uid, const QString &id);
     bool forget(quint32 uid, const QString &id);
     bool captureReady(const Handle &handle);
+    void captureUnavailable(const Handle &handle);
 
 private:
     struct Runtime {
@@ -49,14 +56,26 @@ private:
         QTimer deadline;
         bool stopping = false;
         bool failed = false;
+        std::unique_ptr<VirtualSessionGuardianClient> guardian;
+        VirtualSessionGuardianClient::Identity identity;
+        QTimer poll;
+        bool observedRunning = false;
+        bool captureObserved = false;
+        bool terminalConfirmed = false;
+        bool stopSent = false;
     };
     void launch(quint32 uid, const Handle &handle);
     Runtime *runtime(const Handle &handle);
     void terminate(Runtime &runtime);
+    void queryGuardian(Runtime &runtime);
+    void guardianUnavailable(Runtime &runtime);
+    void guardianReply(Runtime &runtime, const QString &phase, bool running);
+    void notifyUnavailable(const Handle &handle);
     LaunchFactory m_factory;
     int m_readyTimeoutMs;
     int m_stopTimeoutMs;
     VirtualSessionRegistry m_registry;
     std::map<QString, std::unique_ptr<Runtime>> m_runtimes;
+    std::function<void(const Handle &)> m_unavailable;
 };
 }

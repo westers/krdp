@@ -24,6 +24,7 @@ public:
     ~VirtualSessionTransport() override;
     QJsonObject request(const QJsonObject &record);
     void revoke();
+    void unavailable();
 
 private:
     bool bind();

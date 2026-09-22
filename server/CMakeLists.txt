@@ -4,6 +4,8 @@
 add_definitions(-DTRANSLATION_DOMAIN=\"krdpserver\")
 
 add_executable(krdpserver)
+add_library(KRdpGuardianClient STATIC VirtualSessionGuardianClient.cpp)
+target_link_libraries(KRdpGuardianClient PUBLIC Qt6::Core Qt6::Network)
 add_executable(krdp-virtual-device-entry virtualdeviceentry.cpp)
 target_link_libraries(krdp-virtual-device-entry PRIVATE Qt6::Core)
 add_executable(krdp-virtual-guardian virtualguardian.cpp VirtualSessionGuardian.cpp VirtualSessionStorage.cpp)
@@ -23,10 +25,10 @@ if (BUILD_PLASMA_SESSION)
     add_executable(krdp-virtual-worker-probe virtualworkerprobe.cpp ConsoleWorkerEndpoint.cpp)
     target_link_libraries(krdp-virtual-worker-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network KRdp)
     add_executable(krdp-virtual-session-probe virtualsessionprobe.cpp VirtualSessionSupervisor.cpp VirtualSessionControl.cpp ConsoleWorkerEndpoint.cpp)
-    target_link_libraries(krdp-virtual-session-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network KRdp)
+    target_link_libraries(krdp-virtual-session-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network KRdp KRdpGuardianClient)
     add_executable(krdp-virtual-rdp-host-probe virtualrdphostprobe.cpp VirtualSessionHostController.cpp
         VirtualSessionTransport.cpp VirtualSessionControl.cpp VirtualSessionSupervisor.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp)
-    target_link_libraries(krdp-virtual-rdp-host-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network KRdp)
+    target_link_libraries(krdp-virtual-rdp-host-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network KRdp KRdpGuardianClient)
     configure_file(org.kde.krdpvirtualprobe.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpvirtualprobe.desktop @ONLY)
 endif()
 

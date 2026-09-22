@@ -109,6 +109,12 @@ void VirtualSessionTransport::closed()
     m_control.disconnected(m_client);
 }
 
+void VirtualSessionTransport::unavailable()
+{
+    closed();
+    if (m_connection) m_connection->close();
+}
+
 QJsonObject VirtualSessionTransport::request(const QJsonObject &record)
 {
     if (record.value(u"type"_s) == u"virtual-session"_s) {

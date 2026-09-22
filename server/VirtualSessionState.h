@@ -89,6 +89,24 @@ public:
         return true;
     }
 
+    // Loss of authenticated supervision is not proof of process exit, even
+    // while stopping. Never report Absent merely because a socket failed.
+    bool unavailable(quint64 generation)
+    {
+        if (!current(generation) || m_phase == Phase::Absent || m_phase == Phase::Failed) return false;
+        m_client = 0;
+        m_phase = Phase::Failed;
+        return true;
+    }
+
+    bool stopUnavailable(quint32 uid, quint64 generation)
+    {
+        if (!owns(uid) || !current(generation) || m_phase != Phase::Failed) return false;
+        m_phase = Phase::Stopping;
+        m_client = 0;
+        return true;
+    }
+
 private:
     bool owns(quint32 uid) const { return m_ownerUid != 0 && uid == m_ownerUid; }
     bool current(quint64 generation) const { return generation != 0 && generation == m_generation; }

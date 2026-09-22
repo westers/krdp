@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #pragma once
 #include "VirtualSessionTransport.h"
+#include "VirtualSessionBrokerLease.h"
 #include <Server.h>
 
 namespace KRdp
@@ -20,15 +21,19 @@ public:
     using Prepare = std::function<std::optional<PreparedLaunch>(quint32, const VirtualSessionRegistry::Handle &, const QByteArray &)>;
     VirtualSessionHostController(Server *server, Prepare prepare, QObject *parent = nullptr);
     ~VirtualSessionHostController() override;
+    bool adopt(const VirtualSessionGuardianClient::Identity &identity, const QString &workerSocket);
 
 private:
     friend class VirtualSessionHostControllerTest;
     struct Worker {
         VirtualSessionRegistry::Handle handle;
+        std::unique_ptr<VirtualSessionBrokerLease> lease; // destroyed after endpoint
         std::unique_ptr<ConsoleWorkerEndpoint> endpoint;
         ConsoleWorkerWire::Outputs outputs;
     };
     std::optional<VirtualSessionSupervisor::Launch> prepare(quint32 uid, const VirtualSessionRegistry::Handle &handle);
+    bool prepareEndpoint(quint32 uid, const VirtualSessionRegistry::Handle &handle, const QString &socket, const QByteArray &token,
+        std::unique_ptr<VirtualSessionBrokerLease> lease = {});
     ConsoleWorkerEndpoint *resolve(const VirtualSessionRegistry::Handle &handle);
     void addClient(RdpConnection *connection);
     void removeClient(quint64 id);

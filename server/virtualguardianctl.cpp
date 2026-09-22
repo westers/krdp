@@ -34,16 +34,19 @@ int main(int argc, char **argv)
     }
     close(fd);
     KRdp::VirtualSessionGuardianClient client;
+    int result = -1;
     QObject::connect(&client, &KRdp::VirtualSessionGuardianClient::failed, &app, [&](const QString &error) {
         qCritical().noquote() << error;
+        result = 1;
         app.exit(1);
     });
     QObject::connect(&client, &KRdp::VirtualSessionGuardianClient::received, &app, [&](const QString &phase, bool running) {
         qInfo().noquote() << QJsonDocument(QJsonObject{{QStringLiteral("phase"), phase}, {QStringLiteral("processRunning"), running}}).toJson(QJsonDocument::Compact);
+        result = 0;
         app.quit();
     });
     if (!client.request({uid, parser.value(QStringLiteral("session")), parser.value(QStringLiteral("instance")),
             parser.value(QStringLiteral("socket")), token}, parser.isSet(QStringLiteral("stop"))
             ? KRdp::VirtualSessionGuardianClient::Operation::Stop : KRdp::VirtualSessionGuardianClient::Operation::Status)) return 1;
-    return app.exec();
+    return result >= 0 ? result : app.exec();
 }

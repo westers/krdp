@@ -43,7 +43,8 @@ target_link_libraries(VirtualSessionGuardianClientTest PRIVATE Qt6::Test Qt6::Co
 add_test(NAME VirtualSessionGuardianClientTest COMMAND VirtualSessionGuardianClientTest)
 
 add_executable(VirtualSessionSupervisorTest VirtualSessionSupervisorTest.cpp
-    ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp)
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardian.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionStorage.cpp)
 target_include_directories(VirtualSessionSupervisorTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(VirtualSessionSupervisorTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionSupervisorTest COMMAND VirtualSessionSupervisorTest)
@@ -68,6 +69,9 @@ add_executable(VirtualSessionHostControllerTest VirtualSessionHostControllerTest
     ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp)
 target_include_directories(VirtualSessionHostControllerTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(VirtualSessionHostControllerTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
+foreach(test VirtualSessionSupervisorTest VirtualSessionControlTest VirtualSessionTransportTest VirtualSessionHostControllerTest)
+    target_link_libraries(${test} PRIVATE KRdpGuardianClient)
+endforeach()
 add_test(NAME VirtualSessionHostControllerTest COMMAND VirtualSessionHostControllerTest)
 
 add_executable(CaptureWorkerModeTest CaptureWorkerModeTest.cpp)

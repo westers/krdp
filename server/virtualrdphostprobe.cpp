@@ -6,17 +6,21 @@
 #include <QDir>
 #include <QDebug>
 #include <filesystem>
+#include <fcntl.h>
+#include <cerrno>
 #include <unistd.h>
 
 using namespace KRdp;
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
+    const auto arguments = app.arguments();
+    const bool adopting = arguments.size() == 5 && arguments[1] == QStringLiteral("--adopt");
     char name[256] = {};
     if (gethostname(name, sizeof(name) - 1) || QByteArray(name).split('.').first() != "sol"
-        || !getuid() || getuid() != geteuid() || app.arguments().size() != 2) return 1;
-    const auto script = app.arguments().at(1);
-    if (!QDir::isAbsolutePath(script)) return 1;
+        || !getuid() || getuid() != geteuid() || (arguments.size() != 2 && !adopting)) return 1;
+    const auto script = adopting ? QString() : arguments.at(1);
+    if (!adopting && !QDir::isAbsolutePath(script)) return 1;
     QTemporaryDir runtime(QStringLiteral("/run/user/%1/krdp-virtual-host.XXXXXX").arg(getuid()));
     if (!runtime.isValid()) return 1;
     runtime.setAutoRemove(false);
@@ -39,7 +43,7 @@ int main(int argc, char **argv)
     server.setAllowAnyPAMUser(false); // probe may launch only its actual OS user
     VirtualSessionHostController host(&server, [&](quint32 uid, const auto &handle, const QByteArray &token)
         -> std::optional<VirtualSessionHostController::PreparedLaunch> {
-        if (uid != getuid()) return {};
+        if (adopting || uid != getuid()) return {};
         QTemporaryDir desktop(QStringLiteral("/run/user/%1/krdp-headless.XXXXXX").arg(uid));
         if (!desktop.isValid()) return {};
         desktop.setAutoRemove(false);
@@ -55,6 +59,26 @@ int main(int argc, char **argv)
         return VirtualSessionHostController::PreparedLaunch{desktop.filePath(QStringLiteral("worker.sock")),
             {QStringLiteral("/usr/bin/bash"), {script, QStringLiteral("--supervised-worker-nvidia"), desktop.path(), handle.id}, env, {}}};
     });
+    if (adopting) {
+        // Trusted local recovery inputs, not a protocol-supplied process/path.
+        // Credentials arrive on stdin; do not read or print account passwords.
+        QByteArray token(32, '\0');
+        const int flags = fcntl(0, F_GETFL);
+        if (flags < 0 || fcntl(0, F_SETFL, flags | O_NONBLOCK)) return 1;
+        qsizetype offset = 0;
+        while (offset < token.size()) {
+            const auto count = ::read(0, token.data() + offset, token.size() - offset);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) return 1;
+            offset += count;
+        }
+        close(0);
+        const auto desktop = arguments[4];
+        if (!desktop.startsWith(QStringLiteral("/run/user/%1/krdp-virtual/").arg(getuid()))) return 1;
+        if (!host.adopt({quint32(getuid()), arguments[2], arguments[3], desktop + QStringLiteral("/guardian.sock"), token},
+                desktop + QStringLiteral("/worker.sock"))) return 1;
+        qInfo().noquote() << "Adopting retained desktop" << arguments[2] << "without owning its process lifetime";
+    }
     if (!server.start()) return 1;
     qInfo() << "Isolated PAM virtual host listening on Sol3395 for180 seconds";
     QTimer::singleShot(180000, &app, &QCoreApplication::quit);

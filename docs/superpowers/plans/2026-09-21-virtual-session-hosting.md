@@ -534,3 +534,36 @@ socket failure must revoke transport readiness without killing the desktop or
 silently creating a replacement; registry stop must use guardian Stop rather
 than QProcess teardown. Existing HostController/Supervisor still use owned child
 launches; this client alone does not change their lifetime behavior.
+
+Adoption integration: registry can reserve a trusted stable desktop ID in a
+fresh manager generation; supervisor adopts an exact guardian identity, polls
+authenticated state, and requires both live guardian and fresh worker capture
+before attach. Either readiness arrival order works. Destruction of this broker
+only detaches adopted guardians; legacy owned-process launch remains supported.
+HostController binds the authenticated worker endpoint and closes only affected
+transports on supervision loss. Failed capture does not kill apps or authorize
+replacement/forget; an explicit owner Stop can retry the same guardian identity.
+Loss of contact during Stop reports Failed, never unproven Absent.
+
+Per-runtime broker.lock is an exclusive0600 single-link flock retained through
+endpoint teardown. After a broker crash, reclamation accepts only a socket in
+the selected UID's private0700 canonical runtime, owned by that UID (or root
+for a root successor), whose nonblocking connect returns ECONNREFUSED and whose
+inode is unchanged. Live/uncertain sockets, symlinks and ordinary files are
+refused. Cooperating brokers serialize under the lock; same UID is trusted.
+
+Combined review found and corrected stop-after-capture-failure, root socket
+ownership, crash-left socket recovery and callback lifetime issues. An added
+stale-guardian-socket test actually reproduced a Qt Network synchronous-error
+UAF. Guardian signals are now queued to the supervisor and resolve the full
+handle at delivery; callbacks/handle arguments are copied before external
+notification. Tests cover broker lifetime changes, both readiness gate orders,
+owner denial, timeouts, explicit stop after failure, lost stop contact, callback
+destruction including synchronous connection refusal, and live/stale/unsafe
+worker socket lease cases. No live RDP recovery acceptance is inferred from them.
+
+Sol-only virtualrdphostprobe gains --adopt SESSION INSTANCE RUNTIME with32-byte
+credential on stdin. This adopts the already-running desktop into the real PAM
+listener instead of launching a timed desktop; only the diagnostic listener
+has its180s bound. New create requests are refused by its empty launch factory.
+Durable registry/service startup and production installation are still pending.

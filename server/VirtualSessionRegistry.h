@@ -37,6 +37,18 @@ public:
 
     std::optional<Handle> create(quint32 authenticatedUid)
     {
+        QString id;
+        do {
+            id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        } while (m_sessions.contains(id));
+        return reserveRetained(authenticatedUid, id);
+    }
+
+    // Trusted recovery identity only, never a client-supplied creation ID.
+    // Reserving does NOT prove the desktop exists or make it attachable.
+    std::optional<Handle> reserveRetained(quint32 authenticatedUid, const QString &id)
+    {
+        if (QUuid(id).isNull() || QUuid(id).toString(QUuid::WithoutBraces) != id || m_sessions.contains(id)) return {};
         if (!authenticatedUid || m_sessions.size() >= m_totalLimit) {
             return {};
         }
@@ -49,10 +61,6 @@ public:
         if (owned >= m_perUserLimit) {
             return {};
         }
-        QString id;
-        do {
-            id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        } while (m_sessions.contains(id));
         auto [it, inserted] = m_sessions.try_emplace(id, authenticatedUid);
         Q_ASSERT(inserted);
         const auto generation = it->second.state.create(authenticatedUid);
@@ -118,6 +126,19 @@ public:
     {
         auto *entry = current(handle);
         return entry && entry->state.exited(handle.generation);
+    }
+
+    bool unavailable(const Handle &handle)
+    {
+        auto *entry = current(handle);
+        return entry && entry->state.unavailable(handle.generation);
+    }
+
+    std::optional<Handle> stopUnavailable(quint32 uid, const QString &id)
+    {
+        auto *entry = owned(uid, id);
+        if (!entry || !entry->state.stopUnavailable(uid, entry->state.generation())) return {};
+        return Handle{id, m_manager, entry->state.generation()};
     }
 
     // A crash is visible as Failed. Never silently replace lost applications.
