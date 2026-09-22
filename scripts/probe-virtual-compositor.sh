@@ -8,11 +8,11 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia ) ) ]]
     probe_mode="${1:-}"
     rdp_mode=
     probe_timeout=80
-    if [[ "$probe_mode" == --plasma-rdp-nvidia || "$probe_mode" == --plasma-retention-nvidia ]]; then
+    if [[ "$probe_mode" == --plasma-rdp-nvidia || "$probe_mode" == --plasma-retention-nvidia || "$probe_mode" == --plasma-audio-nvidia ]]; then
         # Disposable acceptance listener, never the installed console service.
         if ss -H -ltn 'sport = :3394' | grep -q .; then
             echo 'Test port3394 already occupied; refusing probe.' >&2
@@ -22,6 +22,10 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         probe_timeout=150
         if [[ "$probe_mode" == --plasma-retention-nvidia ]]; then
             rdp_mode=--retention
+            probe_timeout=240
+        fi
+        if [[ "$probe_mode" == --plasma-audio-nvidia ]]; then
+            rdp_mode=--audio
             probe_timeout=240
         fi
         probe_mode=--plasma-nvidia
@@ -74,6 +78,8 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     # reconnect, session id, manager notification, or inherited plugin settings.
     exec env -i PATH=/usr/bin:/bin HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" \
         LANG=C.UTF-8 XDG_RUNTIME_DIR="$probe_runtime" XDG_CONFIG_HOME="$probe_runtime/config" \
+        PIPEWIRE_RUNTIME_DIR="$probe_runtime" PIPEWIRE_REMOTE=pipewire-0 \
+        PULSE_RUNTIME_PATH="$probe_runtime/pulse" PULSE_SERVER="unix:$probe_runtime/pulse/native" \
         XDG_CONFIG_DIRS="$probe_runtime/config-defaults" XDG_CURRENT_DESKTOP=KDE XDG_MENU_PREFIX=plasma- \
         XDG_CACHE_HOME="$probe_runtime/cache" XDG_STATE_HOME="$probe_runtime/state" \
         XDG_DATA_HOME="$probe_runtime/data" XDG_DATA_DIRS=/usr/local/share:/usr/share \
@@ -220,8 +226,14 @@ jq -e '[.[] | select(.type == "PipeWire:Interface:Device")] | length == 0' "$XDG
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
     --method org.freedesktop.DBus.ListNames
 echo 'Private Wayland compositor ready at 1280x720'
-if [[ "${3:-}" == --rdp || "${3:-}" == --retention ]]; then
+if [[ "${3:-}" == --rdp || "${3:-}" == --retention || "${3:-}" == --audio ]]; then
     acceptance_seconds=90
+    if [[ "${3:-}" == --audio ]]; then
+        acceptance_seconds=180
+        ffmpeg -nostdin -hide_banner -loglevel error -f lavfi \
+            -i sine=frequency=997:sample_rate=48000:duration=10 -ac 2 "$XDG_RUNTIME_DIR/tone.wav"
+        audio_sent=false
+    fi
     if [[ "${3:-}" == --retention ]]; then
         # stdin creates an unnamed, unsaved document in the private desktop.
         # This fixture must outlive individual RDP transports, not the bounded
@@ -255,6 +267,14 @@ EOF
     for ((attempt=1; attempt<=acceptance_seconds; ++attempt)); do
         kill -0 "$rdp_pid"
         kill -0 "$policy_pid"
+        if [[ "${audio_sent:-true}" == false ]] && grep -q 'RDPSND channel initialized after explicit media consent' "$XDG_RUNTIME_DIR/rdp.log"; then
+            # Ordinary Pulse playback must route to the private graph default,
+            # including a client-requested silent-host sink. No physical target.
+            sleep 3
+            pactl get-default-sink >"$XDG_RUNTIME_DIR/tone-default-sink.txt"
+            timeout 15 paplay "$XDG_RUNTIME_DIR/tone.wav" >"$XDG_RUNTIME_DIR/tone-playback.log" 2>&1
+            audio_sent=true
+        fi
         if (( attempt % 10 == 0 )); then
             timeout 5 pw-dump >"$XDG_RUNTIME_DIR/rdp-graph-$attempt.json"
             if [[ -n "${retention_pid:-}" ]]; then
