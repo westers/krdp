@@ -3,6 +3,14 @@ target_include_directories(AdaptiveQualityTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(AdaptiveQualityTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME AdaptiveQualityTest COMMAND AdaptiveQualityTest)
 
+add_executable(PeerContextLifecycleTest PeerContextLifecycleTest.cpp
+    ${CMAKE_SOURCE_DIR}/src/PeerContext.cpp ${CMAKE_BINARY_DIR}/src/krdp_logging.cpp)
+target_include_directories(PeerContextLifecycleTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
+target_include_directories(PeerContextLifecycleTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(PeerContextLifecycleTest PRIVATE Qt6::Test freerdp winpr)
+target_link_options(PeerContextLifecycleTest PRIVATE -Wl,--wrap=WTSOpenServerA -Wl,--wrap=WTSCloseServer -Wl,--wrap=freerdp_peer_context_free)
+add_test(NAME PeerContextLifecycleTest COMMAND PeerContextLifecycleTest)
+
 add_executable(VirtualSessionStateTest VirtualSessionStateTest.cpp)
 target_include_directories(VirtualSessionStateTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(VirtualSessionStateTest PRIVATE Qt6::Test Qt6::Core)
@@ -72,6 +80,7 @@ target_link_libraries(VirtualSessionServicePlanTest PRIVATE Qt6::Test OpenSSL::C
 target_compile_definitions(VirtualSessionServicePlanTest PRIVATE KRDP_SESSION_ENTRY="$<TARGET_FILE:krdp-virtual-session-entry>")
 target_compile_definitions(VirtualSessionServicePlanTest PRIVATE KRDP_SESSION_UNIT="${CMAKE_BINARY_DIR}/server/krdp-virtual-session@.service")
 target_compile_definitions(VirtualSessionServicePlanTest PRIVATE KRDP_VIRTUAL_HOST="$<TARGET_FILE:krdp-virtual-host>")
+target_compile_definitions(VirtualSessionServicePlanTest PRIVATE KRDP_HOST_UNIT="${CMAKE_BINARY_DIR}/server/krdp-virtual-host.service")
 add_dependencies(VirtualSessionServicePlanTest krdp-virtual-session-entry krdp-virtual-host)
 add_dependencies(VirtualSessionServicePlanTest krdp-virtual-pam-keeper)
 add_dependencies(VirtualSessionServicePlanTest krdp-virtual-session-cleanup)

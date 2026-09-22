@@ -17,6 +17,13 @@ class VirtualSessionServicePlanTest : public QObject {
         {QStringLiteral("0000:09:00.0")}, {1280, 720}};
     const QString device = QStringLiteral("/usr/bin/krdp-virtual-device-entry"), guardian = QStringLiteral("/usr/bin/krdp-virtual-guardian");
 private Q_SLOTS:
+    void brokerHasPrivateHomeForFreeRdp() {
+        QFile unit(QString::fromLocal8Bit(KRDP_HOST_UNIT)); QVERIFY(unit.open(QIODevice::ReadOnly));
+        const auto bytes = unit.readAll();
+        QVERIFY(bytes.contains("HOME=/var/lib/krdp/virtual-host "));
+        QVERIFY(bytes.contains("StateDirectory=krdp/virtual-sessions krdp/virtual-host\n"));
+        QVERIFY(bytes.contains("StateDirectoryMode=0700\n"));
+    }
     void serviceHasExplicitNondelegatedSlice() {
         QFile unit(QString::fromLocal8Bit(KRDP_SESSION_UNIT)); QVERIFY(unit.open(QIODevice::ReadOnly));
         const auto bytes = unit.readAll();

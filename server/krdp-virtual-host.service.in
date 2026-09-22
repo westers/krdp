@@ -10,8 +10,8 @@ User=root
 Environment=KRDP_VIRTUAL_ADDRESS=0.0.0.0
 Environment=KRDP_VIRTUAL_PORT=3395
 EnvironmentFile=-/etc/krdp/virtual-host.conf
-ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-host --certificate ${KRDP_VIRTUAL_CERTIFICATE} --certificate-key ${KRDP_VIRTUAL_CERTIFICATE_KEY} --address ${KRDP_VIRTUAL_ADDRESS} --port ${KRDP_VIRTUAL_PORT}
-StateDirectory=krdp/virtual-sessions
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/krdp/virtual-host @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-host --certificate ${KRDP_VIRTUAL_CERTIFICATE} --certificate-key ${KRDP_VIRTUAL_CERTIFICATE_KEY} --address ${KRDP_VIRTUAL_ADDRESS} --port ${KRDP_VIRTUAL_PORT}
+StateDirectory=krdp/virtual-sessions krdp/virtual-host
 StateDirectoryMode=0700
 UMask=0077
 KillMode=control-group

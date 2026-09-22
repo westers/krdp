@@ -27,7 +27,9 @@ BOOL newPeerContext(freerdp_peer *peer, rdpContext *context)
     peerContext->virtualChannelManager = WTSOpenServerA((LPSTR)peer->context);
     if (!peerContext->virtualChannelManager || peerContext->virtualChannelManager == INVALID_HANDLE_VALUE) {
         qCWarning(KRDP) << "Failed creating virtual channel manager";
-        freerdp_peer_context_free(peer);
+        // FreeRDP owns failure unwind and invokes ContextFree itself. Calling
+        // context_free here would recurse/double-free the partially built peer.
+        peerContext->virtualChannelManager = nullptr;
         return FALSE;
     }
 
@@ -42,6 +44,8 @@ void freePeerContext(freerdp_peer * /*peer*/, rdpContext *context)
         return;
     }
 
-    WTSCloseServer(peerContext->virtualChannelManager);
+    if (peerContext->virtualChannelManager && peerContext->virtualChannelManager != INVALID_HANDLE_VALUE) {
+        WTSCloseServer(peerContext->virtualChannelManager);
+    }
     peerContext->virtualChannelManager = nullptr;
 }
