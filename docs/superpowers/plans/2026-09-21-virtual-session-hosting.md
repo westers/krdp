@@ -343,3 +343,21 @@ resolution and owned process stop. This composition is currently test-linked;
 next instantiate it in an isolated PAM listener with the private launcher, exercise
 actual Buzz control/video/audio/reconnect, and only then integrate installed
 hosting, client UI and recovery. No new production listener is running yet.
+
+2026-09-21: Isolated same-user PAM host on Sol3395 now exercised through native
+Buzz GUI. Actual list/create/attach/detach and fresh-client retained-session
+reattach/display pass; explicit stop reaches absent and removes private KWin.
+Client739626a fixes a15-second layout fallback delay on explicit unsupported
+layout control (the original short reconnect probe ended before that timer).
+Screenshots and logs: rdp/evidence/virtual-pam-fixed-reconnect.{png,log}.
+
+New-host audio acceptance: after attachment, debug media-resend applies saved
+playback/silenceHost consent. Private997Hz10-second tone arrives at Buzz
+(7012352 sampled values,997Hz bandpass peak-21.1dB); simultaneous Solphysical
+sink monitor is exactlyzero,3522560frames/channel. Seat0 default unchanged;
+detach removes transient remote sink and restores private desktop sink.
+RDPSND remains uncompressed44100Hz/stereo/S16. All temporary desktops stopped;
+Solphysical817/KWin168073/consolehost167444 and Buzzproductionconfig unchanged.
+This is bounded probe acceptance, not installed delivery. Next production
+launcher and typed client create/resume UI, automatic correlated postattach
+consent, app/logout retention acceptance, recovery and matching packages.
