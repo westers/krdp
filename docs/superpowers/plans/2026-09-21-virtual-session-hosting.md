@@ -436,3 +436,29 @@ second profile launch is refused while the real child runs, verify release after
 guardian shutdown, and reject a different profile's session ID before spawn.
 Actual Plasma launch, allowed-device resolution, independent service placement,
 capture-worker reconnection and durable recovery remain unimplemented here.
+
+2026-09-21 production executor follow-up: scripts/launch-virtual-session.sh and
+virtual-session-desktop.sh now implement the private namespace/Plasma launch,
+ordered PCI/sysfs render-device selection, private audio graph, retained profile
+defaults, and capture-worker restart while keeping the desktop alive. This is
+source implementation, not installed production acceptance or broker recovery.
+Guardian captures helper diagnostics in its private runtime/launcher.log.
+
+Sol runtime attempt with d6a8169 verifies profile creation at
+HOME/.krdp-virtual/sessions (0700), avoiding the existing group-writable .local
+and share ancestors without changing their permissions. Session
+da3464e6-41ed-4333-b1a2-c63685ba1d43, launch
+204c49fa-a95a-41e0-8e2e-9034c493075e exited1 with
+"No permitted render GPU is accessible; no fallback to physical DRM."
+Sol was at SDDM954; westers lacked renderD128 access. No desktop launched,
+profile lock was released, only greeter KWin200016 remained, and existing
+console host167444 still listened on3391. Three focused launch/storage/guardian
+tests pass. Profile/runtime evidence retained; the runtime UUID must not be
+reused for another launch.
+
+Production admission must grant scoped access to only administrator-allowed
+render devices independently of seat0's logind ACL. Asking the user to log into
+seat0 again would unblock a probe but would not satisfy logged-out virtual
+hosting. Do not silently grant permanent render/video membership or broaden
+device permissions. Privileged deployment remains user-run through host tmux;
+independent guardian placement and durable broker/worker adoption remain open.
