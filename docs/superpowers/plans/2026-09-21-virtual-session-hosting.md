@@ -156,3 +156,13 @@ native Buzz RDP view on this private compositor, then disconnect/reattach to
 an unsaved application. CPU-only capture remains unresolved. Current render
 permission depends on the physical login; production session ownership must
 establish its own rendering admission rather than rely on that incidental ACL.
+
+2026-09-21 RDP first-frame gate PASS: Mpv5Yt probe with policy-only private
+WirePlumber renders the full Plasma desktop (panel and icons) in the native
+Buzz GUI. KPipeWire AUTOCONNECT had no policy manager to link streams in the
+earlier probe; adding it fixed frame delivery despite the remaining EGL
+DMA-BUF warning. AVC420/libx264 emitted a116772-byte1280x720 keyframe and the
+client decoded it. Screenshot: rdp/evidence/virtual-rdp-policy.png. Both client
+and bounded probe exited0; only physical KWin168073 remained,3394 closed.
+This is still a disposable listener using test credentials, not the registry,
+PAM admission, persistent supervisor or client create/resume implementation.
