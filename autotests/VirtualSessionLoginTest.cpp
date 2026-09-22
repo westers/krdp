@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionLogin.h"
+#include "VirtualSessionLoginTag.h"
 #include <QTest>
 #include <QDBusConnection>
 #include <QDBusVirtualObject>
@@ -28,7 +29,7 @@ public:
     QVariantMap session{
         {u"Id"_s, u"c42"_s}, {u"Service"_s, u"krdp-virtual-session"_s}, {u"Type"_s, u"wayland"_s},
         {u"Class"_s, u"background"_s}, {u"State"_s, u"online"_s}, {u"TTY"_s, QString()},
-        {u"Display"_s, QString()}, {u"Scope"_s, u"session-c42.scope"_s}, {u"Leader"_s, quint32(2345)},
+        {u"Display"_s, QString()}, {u"Desktop"_s, u"krdp-fixture"_s}, {u"Scope"_s, u"session-c42.scope"_s}, {u"Leader"_s, quint32(2345)},
         {u"VTNr"_s, quint32(0)}, {u"User"_s, ownerTuple()}, {u"Seat"_s, seatTuple()}};
     QVariantMap user{{u"UID"_s, quint32(1000)}, {u"RuntimePath"_s, u"/run/user/1000"_s}};
     bool fail = false;
@@ -60,7 +61,7 @@ class VirtualSessionLoginTest : public QObject {
 private Q_SLOTS:
     void exactIdentityAndNoConsole() {
         VirtualSessionLogin login{u"c42"_s, u"krdp-virtual-session"_s, u"wayland"_s, u"background"_s,
-            u"online"_s, {}, {}, {}, u"/run/user/1000"_s, u"session-c42.scope"_s, 1000, 2345, 0};
+            u"online"_s, {}, {}, {}, u"/run/user/1000"_s, u"session-c42.scope"_s, 1000, 2345, 0, {}};
         const auto matches = [](const auto &value) { return value.matches(1000, 2345, u"c42"_s, u"/run/user/1000"_s); };
         QVERIFY(matches(login));
         const QList<std::function<void(VirtualSessionLogin &)>> mutations{
@@ -75,6 +76,14 @@ private Q_SLOTS:
         QVERIFY(!login.matches(0, 2345, login.id, login.runtime));
         QVERIFY(!login.matches(1000, 1, login.id, login.runtime));
         login.state = u"active"_s; QVERIFY(matches(login));
+        const auto launch = u"12345678-1234-1234-1234-123456789abc"_s;
+        QVERIFY(!login.matchesLaunch(1000, 2345, login.id, login.runtime, launch));
+        login.desktop = KRdp::virtualLoginTag(launch);
+        QVERIFY(login.matchesLaunch(1000, 2345, login.id, login.runtime, launch));
+        QVERIFY(!login.matchesLaunch(1000, 2345, login.id, login.runtime, u"12345678-1234-1234-1234-123456789abd"_s));
+        QVERIFY(!login.matchesLaunch(1000, 2345, login.id, login.runtime, QString()));
+        login.desktop = u"KDE"_s;
+        QVERIFY(!login.matchesLaunch(1000, 2345, login.id, login.runtime, launch));
     }
     void readsStrictlyTypedDbusSnapshot() {
         const auto daemon = QStandardPaths::findExecutable(u"dbus-daemon"_s);
@@ -102,6 +111,7 @@ private Q_SLOTS:
         });
         QVERIFY(registered);
         auto snapshot = VirtualSessionLogin::read(2345); QVERIFY(snapshot);
+        QCOMPARE(snapshot->desktop, u"krdp-fixture"_s);
         QVERIFY(snapshot->matches(1000, 2345, u"c42"_s, u"/run/user/1000"_s));
         const auto original = fixture->session;
         const auto originalUser = fixture->user;

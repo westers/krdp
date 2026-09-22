@@ -9,7 +9,9 @@ namespace KRdp {
 struct VirtualSessionLogin {
     QString id, service, type, sessionClass, state, seat, tty, display, runtime, scope;
     quint32 uid = 0, leader = 0, virtualTerminal = 0;
+    QString desktop;
     bool matches(uid_t owner, pid_t expectedLeader, const QString &pamId, const QString &pamRuntime) const;
+    bool matchesLaunch(uid_t owner, pid_t expectedLeader, const QString &pamId, const QString &pamRuntime, const QString &launch) const;
     // Read-only system-bus lookup. Bounded calls, no session creation/activation.
     static std::optional<VirtualSessionLogin> read(pid_t leader);
 };

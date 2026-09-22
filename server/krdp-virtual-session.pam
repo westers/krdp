@@ -5,4 +5,6 @@ auth requisite pam_deny.so
 @include common-account
 # Unlike common-session's optional pam_systemd, failure here must block launch.
 session required pam_unix.so
-session required pam_systemd.so class=background type=wayland desktop=KDE
+# Desktop is a generation-bound keeper marker supplied via PAM environment.
+# It must not be copied into the sibling Plasma application's environment.
+session required pam_systemd.so class=background type=wayland

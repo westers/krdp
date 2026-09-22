@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionPam.h"
+#include "VirtualSessionLoginTag.h"
 #include <QRegularExpression>
 #include <cstdlib>
 
@@ -19,9 +20,10 @@ int VirtualSessionPam::conversation(int count, const pam_message **messages, pam
     return *responses ? PAM_SUCCESS : PAM_BUF_ERR;
 }
 
-std::unique_ptr<VirtualSessionPam> VirtualSessionPam::open(uid_t uid, const QByteArray &account, std::function<void()> beforeClose)
+std::unique_ptr<VirtualSessionPam> VirtualSessionPam::open(uid_t uid, const QByteArray &account, const QString &launch, std::function<void()> beforeClose)
 {
-    if (!uid || uid == uid_t(-1) || account.isEmpty() || account.contains('\0') || account.size() > 256) return {};
+    const auto desktop = virtualLoginTag(launch);
+    if (!uid || uid == uid_t(-1) || account.isEmpty() || account.contains('\0') || account.size() > 256 || desktop.isEmpty()) return {};
     auto session = std::unique_ptr<VirtualSessionPam>(new VirtualSessionPam);
     auto &s = *session;
     s.m_beforeClose = std::move(beforeClose);
@@ -45,8 +47,9 @@ std::unique_ptr<VirtualSessionPam> VirtualSessionPam::open(uid_t uid, const QByt
     };
     if (!sameAccount()) return {};
     // Deliberately no seat/VT/display or inherited user-manager environment.
-    for (const char *value : {"XDG_SESSION_CLASS=background", "XDG_SESSION_TYPE=wayland", "XDG_SESSION_DESKTOP=KDE"}) {
-        s.m_status = pam_putenv(s.m_handle, value);
+    const QByteArray desktopEnvironment = QByteArray("XDG_SESSION_DESKTOP=") + desktop.toLatin1();
+    for (const auto &value : {QByteArray("XDG_SESSION_CLASS=background"), QByteArray("XDG_SESSION_TYPE=wayland"), desktopEnvironment}) {
+        s.m_status = pam_putenv(s.m_handle, value.constData());
         if (s.m_status != PAM_SUCCESS) return {};
     }
     // A later session module can fail after an earlier one already registered

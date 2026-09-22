@@ -34,6 +34,17 @@ public:
     // Persist one-use launch consumption before any exec. Failure/uncertainty
     // leaves the marker; only explicit privileged reconciliation may remove it.
     static bool claimLaunch(const Record &expected, QString *error = nullptr);
+    struct Keeper {
+        pid_t pid = 0;
+        quint64 startTicks = 0;
+        quint64 pidInode = 0;
+        bool operator==(const Keeper &) const = default;
+    };
+    // Keeper records its own birth identity durably BEFORE any PAM call.
+    // Immutable, separate from broker recovery identity; never deleted here.
+    static bool recordKeeper(const Record &expected, QString *error = nullptr);
+    // Missing is distinct from malformed/uncertain. Neither supplies a PID.
+    static std::optional<Keeper> readKeeper(const Record &expected, bool *missing, QString *error = nullptr);
     bool insert(const Record &record, QString *error = nullptr);
     std::optional<QVector<Record>> records(QString *error = nullptr) const;
 private:
@@ -43,6 +54,9 @@ private:
     static std::unique_ptr<VirtualSessionJournal> openAt(const QString &path, quint32 owner, QString *error, bool writable = true);
     std::optional<Record> readRecord(const QString &session, QString *error) const;
     bool claimRecord(const Record &expected, QString *error);
+    bool hasClaim(const Record &expected) const;
+    bool writeKeeper(const Record &expected, const Keeper &keeper, QString *error);
+    std::optional<Keeper> readKeeperRecord(const Record &expected, bool *missing, QString *error) const;
     int m_directory;
     quint32 m_owner;
     bool m_writable;

@@ -15,6 +15,9 @@ int lastEndStatus;
 bool remapAtOpen;
 bool remapAtAccount, nullMetadata;
 int userCalls;
+auto fixtureOpen(uid_t uid, const QByteArray &account, std::function<void()> beforeClose = {}) {
+    return KRdp::VirtualSessionPam::open(uid, account, u"12345678-1234-1234-1234-123456789abc"_s, beforeClose);
+}
 int invoke(const char *name) {
     calls.append(QString::fromLatin1(name));
     return failAt == QLatin1String(name) ? PAM_SYSTEM_ERR : PAM_SUCCESS;
@@ -60,12 +63,12 @@ private Q_SLOTS:
         remapAtAccount = nullMetadata = false; userCalls = 0;
     }
     void closesOnceAndInOrder() {
-        auto session = KRdp::VirtualSessionPam::open(1000, "fixture");
+        auto session = fixtureOpen(1000, "fixture");
         QVERIFY(session);
         QCOMPARE(session->sessionId(), QStringLiteral("c42"));
         QCOMPARE(session->runtimeDirectory(), QStringLiteral("/run/user/1000"));
         QCOMPARE(calls, QStringList({u"start"_s, u"account"_s, u"user"_s, u"XDG_SESSION_CLASS=background"_s,
-            u"XDG_SESSION_TYPE=wayland"_s, u"XDG_SESSION_DESKTOP=KDE"_s, u"open"_s, u"user"_s}));
+            u"XDG_SESSION_TYPE=wayland"_s, u"XDG_SESSION_DESKTOP=krdp-12345678-1234-1234-1234-123456789abc"_s, u"open"_s, u"user"_s}));
         QVERIFY(session->close()); QVERIFY(session->close()); session.reset();
         QCOMPARE(calls.count(u"close"_s), 1); QCOMPARE(calls.count(u"end"_s), 1);
         QCOMPARE(calls.last(), QStringLiteral("end")); QCOMPARE(lastEndStatus, PAM_SUCCESS);
@@ -73,12 +76,12 @@ private Q_SLOTS:
     void failureCleanup_data() {
         QTest::addColumn<QString>("stage");
         for (const auto *stage : {"start", "account", "user", "XDG_SESSION_CLASS=background",
-                "XDG_SESSION_TYPE=wayland", "XDG_SESSION_DESKTOP=KDE", "open"})
+                "XDG_SESSION_TYPE=wayland", "XDG_SESSION_DESKTOP=krdp-12345678-1234-1234-1234-123456789abc", "open"})
             QTest::newRow(stage) << QString::fromLatin1(stage);
     }
     void failureCleanup() {
         QFETCH(QString, stage); failAt = stage;
-        QVERIFY(!KRdp::VirtualSessionPam::open(1000, "fixture"));
+        QVERIFY(!fixtureOpen(1000, "fixture"));
         QCOMPARE(calls.count(u"end"_s), stage == u"start"_s ? 0 : 1);
         QCOMPARE(calls.count(u"close"_s), stage == u"open"_s ? 1 : 0);
         if (stage == u"start"_s) {
@@ -97,56 +100,56 @@ private Q_SLOTS:
     }
     void invalidMetadataClosesOpenedSession() {
         QFETCH(QByteArray, id); QFETCH(QByteArray, path); sessionId = id; runtime = path;
-        QVERIFY(!KRdp::VirtualSessionPam::open(1000, "fixture"));
+        QVERIFY(!fixtureOpen(1000, "fixture"));
         QCOMPARE(calls.sliced(calls.size() - 2), QStringList({u"close"_s, u"end"_s}));
         QCOMPARE(lastEndStatus, PAM_SESSION_ERR);
     }
     void changedAccountClosesOpenedSession() {
         remapAtOpen = true;
-        QVERIFY(!KRdp::VirtualSessionPam::open(1000, "fixture"));
+        QVERIFY(!fixtureOpen(1000, "fixture"));
         QCOMPARE(calls.count(u"close"_s), 1); QCOMPARE(lastEndStatus, PAM_USER_UNKNOWN);
     }
     void changedAccountBeforeOpen() {
         remapAtAccount = true;
-        QVERIFY(!KRdp::VirtualSessionPam::open(1000, "fixture"));
+        QVERIFY(!fixtureOpen(1000, "fixture"));
         QCOMPARE(calls.count(u"open"_s), 0); QCOMPARE(calls.count(u"end"_s), 1);
         QCOMPARE(lastEndStatus, PAM_USER_UNKNOWN);
     }
     void secondUserReadFailureAndNullMetadata() {
         failAt = u"second user"_s;
-        QVERIFY(!KRdp::VirtualSessionPam::open(1000, "fixture"));
+        QVERIFY(!fixtureOpen(1000, "fixture"));
         QCOMPARE(calls.count(u"close"_s), 1); QCOMPARE(lastEndStatus, PAM_SYSTEM_ERR);
         init(); nullMetadata = true;
-        QVERIFY(!KRdp::VirtualSessionPam::open(1000, "fixture"));
+        QVERIFY(!fixtureOpen(1000, "fixture"));
         QCOMPARE(calls.count(u"close"_s), 1); QCOMPARE(lastEndStatus, PAM_SESSION_ERR);
     }
     void endFailureIsReportedWithoutRetry() {
-        auto session = KRdp::VirtualSessionPam::open(1000, "fixture"); QVERIFY(session);
+        auto session = fixtureOpen(1000, "fixture"); QVERIFY(session);
         failAt = u"end"_s; QVERIFY(!session->close()); session.reset();
         QCOMPARE(calls.count(u"end"_s), 1);
     }
     void destructorClosesAndEndRunsAfterCloseFailure() {
-        auto session = KRdp::VirtualSessionPam::open(1000, "fixture"); QVERIFY(session);
+        auto session = fixtureOpen(1000, "fixture"); QVERIFY(session);
         failAt = u"close"_s; QVERIFY(!session->close()); session.reset();
         QCOMPARE(calls.count(u"close"_s), 1); QCOMPARE(calls.count(u"end"_s), 1);
         QCOMPARE(lastEndStatus, PAM_SYSTEM_ERR);
     }
     void destructorCloses() {
-        { auto session = KRdp::VirtualSessionPam::open(1000, "fixture"); QVERIFY(session); }
+        { auto session = fixtureOpen(1000, "fixture"); QVERIFY(session); }
         QCOMPARE(calls.count(u"close"_s), 1); QCOMPARE(calls.count(u"end"_s), 1);
     }
     void cleanupDeadlineArmedBeforePartialFailureCleanup() {
         failAt = u"open"_s;
-        QVERIFY(!KRdp::VirtualSessionPam::open(1000, "fixture", [] { calls.append(u"deadline"_s); }));
+        QVERIFY(!fixtureOpen(1000, "fixture", [] { calls.append(u"deadline"_s); }));
         QCOMPARE(calls.sliced(calls.size() - 3), QStringList({u"deadline"_s, u"close"_s, u"end"_s}));
         init();
-        auto session = KRdp::VirtualSessionPam::open(1000, "fixture", [] { calls.append(u"deadline"_s); });
+        auto session = fixtureOpen(1000, "fixture", [] { calls.append(u"deadline"_s); });
         QVERIFY(session); QVERIFY(session->close()); session.reset();
         QCOMPARE(calls.count(u"deadline"_s), 1);
         QCOMPARE(calls.sliced(calls.size() - 3), QStringList({u"deadline"_s, u"close"_s, u"end"_s}));
     }
     void neverPromptsOrLogsModuleText() {
-        auto session = KRdp::VirtualSessionPam::open(1000, "fixture"); QVERIFY(session);
+        auto session = fixtureOpen(1000, "fixture"); QVERIFY(session);
         pam_message info{PAM_TEXT_INFO, "information"}, prompt{PAM_PROMPT_ECHO_OFF, "password"};
         const pam_message *messages[] = {&info, &prompt};
         pam_response *responses = nullptr;
@@ -165,10 +168,13 @@ private Q_SLOTS:
         QVERIFY(!responses);
     }
     void refusesInvalidIdentityBeforePam() {
-        QVERIFY(!KRdp::VirtualSessionPam::open(0, "root"));
-        QVERIFY(!KRdp::VirtualSessionPam::open(uid_t(-1), "fixture"));
-        QVERIFY(!KRdp::VirtualSessionPam::open(1000, QByteArray("user\0suffix", 11)));
-        QVERIFY(!KRdp::VirtualSessionPam::open(1000, {})); QVERIFY(calls.isEmpty());
+        for (const auto &launch : {QString(), u"../bad"_s, u"00000000-0000-0000-0000-000000000000"_s,
+                u"12345678-1234-1234-1234-123456789ABC"_s})
+            QVERIFY(!KRdp::VirtualSessionPam::open(1000, "fixture", launch));
+        QVERIFY(!fixtureOpen(0, "root"));
+        QVERIFY(!fixtureOpen(uid_t(-1), "fixture"));
+        QVERIFY(!fixtureOpen(1000, QByteArray("user\0suffix", 11)));
+        QVERIFY(!fixtureOpen(1000, {})); QVERIFY(calls.isEmpty());
     }
 };
 QTEST_GUILESS_MAIN(VirtualSessionPamTest)

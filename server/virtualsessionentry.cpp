@@ -111,9 +111,9 @@ int main(int argc, char **argv)
         close(signalFd); return refused("signal ownership");
     }
     KRdp::VirtualSessionServiceOwner::Checks checks;
-    checks.keeper = [uid = record->uid](pid_t pid, const QString &id) {
+    checks.keeper = [uid = record->uid, launch = record->launch](pid_t pid, const QString &id) {
         const auto login = KRdp::VirtualSessionLogin::read(pid);
-        if (!login || !login->matches(uid, pid, id, QStringLiteral("/run/user/%1").arg(uid))) return false;
+        if (!login || !login->matchesLaunch(uid, pid, id, QStringLiteral("/run/user/%1").arg(uid), launch)) return false;
         QFile cgroup(QStringLiteral("/proc/%1/cgroup").arg(pid));
         if (!cgroup.open(QIODevice::ReadOnly)) return false;
         const auto bytes = cgroup.read(65537);

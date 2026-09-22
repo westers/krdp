@@ -97,12 +97,15 @@ int main(int argc, char **argv)
         && buffer.size() < 1048576) buffer.resize(buffer.size() * 2);
     if (result || !resolved || account.pw_uid != record->uid || !account.pw_name || !trustedPolicy())
         return refused("OS account or installed PAM policy");
-    auto pam = KRdp::VirtualSessionPam::open(record->uid, QByteArray(account.pw_name), [&watch] { watch.closing(); });
+    // Crash recovery must be able to pin this exact keeper even if PAM never
+    // returns or Ready never reaches the parent. Failure forbids opening PAM.
+    if (!KRdp::VirtualSessionJournal::recordKeeper(*record)) return refused("durable keeper identity");
+    auto pam = KRdp::VirtualSessionPam::open(record->uid, QByteArray(account.pw_name), record->launch, [&watch] { watch.closing(); });
     if (!pam) return refused("PAM session");
     // Every failure after open still closes PAM before watch/descriptors die.
     const auto login = KRdp::VirtualSessionLogin::read(getpid());
     QFile cgroup(QStringLiteral("/proc/self/cgroup"));
-    if (getuid() || geteuid() || !login || !login->matches(record->uid, getpid(), pam->sessionId(), pam->runtimeDirectory())
+    if (getuid() || geteuid() || !login || !login->matchesLaunch(record->uid, getpid(), pam->sessionId(), pam->runtimeDirectory(), record->launch)
         || !privateRuntime(record->uid) || !cgroup.open(QIODevice::ReadOnly)) return refused("login ownership/runtime");
     const auto membership = cgroup.read(65537);
     if (membership.size() > 65536 || !membership.startsWith("0::/")

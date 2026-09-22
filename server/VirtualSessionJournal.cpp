@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionJournal.h"
+#include "VirtualSessionProcessIdentity.h"
 #include <QFile>
 #include <QDir>
 #include <QJsonDocument>
@@ -7,11 +8,13 @@
 #include <QUuid>
 #include <cmath>
 #include <limits>
+#include <climits>
 #include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 namespace KRdp {
@@ -48,6 +51,92 @@ bool VirtualSessionJournal::claimLaunch(const Record &expected, QString *error) 
     if (getuid() || geteuid()) return fail(error, QStringLiteral("Launch claim requires the root service"));
     auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
     return journal && journal->claimRecord(expected, error);
+}
+bool VirtualSessionJournal::recordKeeper(const Record &expected, QString *error) {
+    if (getuid() || geteuid()) return fail(error, QStringLiteral("Keeper record requires root"));
+    const auto birth = virtualProcessStartTime(getpid());
+    const int fd = int(syscall(SYS_pidfd_open, getpid(), 0));
+    const auto identity = virtualPidfdIdentity(fd);
+    if (fd >= 0) close(fd);
+    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    return birth && identity && journal && journal->writeKeeper(expected, {getpid(), *birth, *identity}, error);
+}
+std::optional<VirtualSessionJournal::Keeper> VirtualSessionJournal::readKeeper(const Record &expected, bool *missing, QString *error) {
+    if (missing) *missing = false;
+    if (getuid() || geteuid()) { fail(error, QStringLiteral("Keeper record requires root")); return {}; }
+    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    return journal ? journal->readKeeperRecord(expected, missing, error) : std::nullopt;
+}
+bool VirtualSessionJournal::writeKeeper(const Record &expected, const Keeper &keeper, QString *error) {
+    const auto current = readRecord(expected.session, error);
+    if (!current || *current != expected || !hasClaim(expected) || keeper.pid <= 1 || !keeper.startTicks || keeper.pidInode < 2)
+        return fail(error, QStringLiteral("Invalid keeper launch identity"));
+    const QByteArray name = QByteArray(".keeper-") + expected.session.toLatin1();
+    const QJsonObject object{{QStringLiteral("v"), 1}, {QStringLiteral("session"), expected.session},
+        {QStringLiteral("launch"), expected.launch}, {QStringLiteral("boot"), expected.boot},
+        {QStringLiteral("uid"), qint64(expected.uid)}, {QStringLiteral("pid"), qint64(keeper.pid)},
+        {QStringLiteral("start"), QString::number(keeper.startTicks)}, {QStringLiteral("pidInode"), QString::number(keeper.pidInode)}};
+    const auto data = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    const int fd = openat(m_directory, name.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return fail(error, QStringLiteral("Keeper identity already recorded or unavailable"));
+    ssize_t count;
+    do { count = write(fd, data.constData(), data.size()); } while (count < 0 && errno == EINTR);
+    const bool prepared = count == data.size() && !fchmod(fd, 0600) && safeFile(fd, m_owner) && !fsync(fd);
+    close(fd);
+    const bool durable = !fsync(m_directory);
+    if (!prepared || !durable) return fail(error, QStringLiteral("Keeper identity uncertain; PAM must not open"));
+    if (error) error->clear();
+    return true;
+}
+std::optional<VirtualSessionJournal::Keeper> VirtualSessionJournal::readKeeperRecord(const Record &expected, bool *missing, QString *error) const {
+    if (missing) *missing = false;
+    const auto refuse = [error]() -> std::optional<Keeper> {
+        fail(error, QStringLiteral("Unsafe or mismatched keeper identity")); return {};
+    };
+    const auto current = readRecord(expected.session, error);
+    if (!current || *current != expected || !hasClaim(expected)) return refuse();
+    const QByteArray name = QByteArray(".keeper-") + expected.session.toLatin1();
+    const int fd = openat(m_directory, name.constData(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno != ENOENT) return refuse();
+        if (missing) *missing = true;
+        if (error) error->clear();
+        return {};
+    }
+    QFile file;
+    if (!file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) { close(fd); return refuse(); }
+    if (!safeFile(fd, m_owner)) return refuse();
+    const auto bytes = file.read(4097);
+    QJsonParseError parse;
+    const auto document = QJsonDocument::fromJson(bytes, &parse);
+    const auto object = document.object();
+    const auto pid = object.value(QStringLiteral("pid")).toDouble(-1);
+    const auto start = object.value(QStringLiteral("start")).toString();
+    bool ok = false; const auto ticks = start.toULongLong(&ok);
+    const auto inode = object.value(QStringLiteral("pidInode")).toString();
+    bool inodeOk = false; const auto identity = inode.toULongLong(&inodeOk);
+    if (file.error() != QFileDevice::NoError || bytes.size() > 4096 || parse.error != QJsonParseError::NoError
+        || !document.isObject() || object.size() != 8 || object.value(QStringLiteral("v")) != QJsonValue(1)
+        || object.value(QStringLiteral("session")) != QJsonValue(expected.session)
+        || object.value(QStringLiteral("launch")) != QJsonValue(expected.launch)
+        || object.value(QStringLiteral("boot")) != QJsonValue(expected.boot)
+        || object.value(QStringLiteral("uid")) != QJsonValue(qint64(expected.uid))
+        || pid <= 1 || pid > INT_MAX || std::floor(pid) != pid
+        || !ok || !ticks || QString::number(ticks) != start
+        || !inodeOk || identity < 2 || QString::number(identity) != inode) return refuse();
+    if (error) error->clear();
+    return Keeper{pid_t(pid), ticks, identity};
+}
+bool VirtualSessionJournal::hasClaim(const Record &expected) const {
+    if (!expected.valid()) return false;
+    const QByteArray name = QByteArray(".claimed-") + expected.session.toLatin1();
+    const int fd = openat(m_directory, name.constData(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return false;
+    QFile file;
+    if (!file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) { close(fd); return false; }
+    if (!safeFile(fd, m_owner)) return false;
+    const auto bytes = file.read(4097);
+    return file.error() == QFileDevice::NoError && bytes == expected.launch.toLatin1() + '\n' + expected.incarnation.toLatin1();
 }
 bool VirtualSessionJournal::claimRecord(const Record &expected, QString *error) {
     const auto current = readRecord(expected.session, error);
@@ -170,6 +259,7 @@ std::optional<QVector<VirtualSessionJournal::Record>> VirtualSessionJournal::rec
         // including interrupted creation, forbids a second launch but must not
         // hide unrelated surviving desktops from recovery.
         if (name.startsWith(".claimed-") && uuid(QString::fromLatin1(name.mid(9)))) continue;
+        if (name.startsWith(".keeper-") && uuid(QString::fromLatin1(name.mid(8)))) continue;
         if (!name.endsWith(".json") || !uuid(QString::fromLatin1(name.chopped(5))) || result.size() >= 256) { ok = false; break; }
         const auto record = readRecord(QString::fromLatin1(name.chopped(5)), error);
         if (!record) { ok = false; break; }

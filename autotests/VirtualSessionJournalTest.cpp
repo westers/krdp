@@ -1,11 +1,25 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionJournal.h"
+#include "VirtualSessionProcessIdentity.h"
 #include <QTest>
 #include <QTemporaryDir>
 #include <QFile>
 #include <QUuid>
 #include <sys/stat.h>
+#include <sys/prctl.h>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QScopeGuard>
+#include <limits>
+#include <sys/syscall.h>
 #include <unistd.h>
+
+namespace { int failSync = 0; }
+extern "C" int __real_fsync(int fd);
+extern "C" int __wrap_fsync(int fd) {
+    if (failSync > 0 && --failSync == 0) { errno = EIO; return -1; }
+    return __real_fsync(fd);
+}
 
 namespace KRdp {
 class VirtualSessionJournalTest : public QObject {
@@ -13,6 +27,110 @@ class VirtualSessionJournalTest : public QObject {
     static QString id() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     static VirtualSessionJournal::Record record() { return {1000, id(), id(), id(), id(), QByteArray(32, 's')}; }
 private Q_SLOTS:
+    void failedKeeperDurabilityForbidsPamAndReplay_data() {
+        QTest::addColumn<int>("which");
+        QTest::newRow("file fsync") << 1;
+        QTest::newRow("directory fsync") << 2;
+    }
+    void failedKeeperDurabilityForbidsPamAndReplay() {
+        QFETCH(int, which);
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        failSync = which;
+        const auto reset = qScopeGuard([] { failSync = 0; });
+        QString error;
+        QVERIFY(!journal->writeKeeper(r, {12345, 42, 4242}, &error));
+        QVERIFY(error.contains(QStringLiteral("PAM must not open")));
+        failSync = 0;
+        QVERIFY(!journal->writeKeeper(r, {12345, 42, 4242}, nullptr));
+        QVERIFY(QFile::exists(dir.filePath(QStringLiteral(".keeper-") + r.session)));
+        bool missing = true;
+        journal->readKeeperRecord(r, &missing, nullptr);
+        QVERIFY(!missing); QVERIFY(journal->records());
+    }
+    void keeperBirthIsDurableImmutableAndSeparate() {
+        QTemporaryDir dir;
+        auto writer = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr);
+        QVERIFY(writer);
+        const auto r = record(); QVERIFY(writer->insert(r));
+        const VirtualSessionJournal::Keeper birth{12345, std::numeric_limits<quint64>::max(), std::numeric_limits<quint64>::max()};
+        QVERIFY(!writer->writeKeeper(r, birth, nullptr)); // Must have consumed launch.
+        QVERIFY(writer->claimRecord(r, nullptr));
+        bool missing = false;
+        QVERIFY(!writer->readKeeperRecord(r, &missing, nullptr)); QVERIFY(missing);
+        QVERIFY(!writer->writeKeeper(r, {1, 42}, nullptr));
+        QVERIFY(!writer->writeKeeper(r, {12345, 0}, nullptr));
+        QVERIFY(writer->writeKeeper(r, birth, nullptr));
+        QVERIFY(!writer->writeKeeper(r, birth, nullptr));
+        auto reader = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr, false); QVERIFY(reader);
+        const auto loaded = reader->readKeeperRecord(r, &missing, nullptr);
+        QVERIFY(loaded); QVERIFY(!missing); QVERIFY(*loaded == birth);
+        const auto recovered = writer->records(); QVERIFY(recovered); QCOMPARE(recovered->size(), 1);
+        auto stale = r; stale.launch = id();
+        QVERIFY(!reader->readKeeperRecord(stale, &missing, nullptr)); QVERIFY(!missing);
+        QVERIFY(!reader->writeKeeper(stale, birth, nullptr));
+        QVERIFY(QFile::remove(dir.filePath(QStringLiteral(".claimed-") + r.session)));
+        QVERIFY(!reader->readKeeperRecord(r, &missing, nullptr)); QVERIFY(!missing);
+        if (getuid()) {
+            QVERIFY(!VirtualSessionJournal::recordKeeper(r));
+            QVERIFY(!VirtualSessionJournal::readKeeper(r, &missing)); QVERIFY(!missing);
+        }
+    }
+    void unsafeKeeperRecordIsNeverAnAbsentKeeper_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"empty", "malformed", "symlink", "hardlink", "fifo", "permissions", "launch", "boot", "uid", "pid", "start", "numeric start", "pidInode"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void unsafeKeeperRecordIsNeverAnAbsentKeeper() {
+        QFETCH(QString, kind);
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(journal->writeKeeper(r, {12345, 42, 4242}, nullptr));
+        const auto path = dir.filePath(QStringLiteral(".keeper-") + r.session);
+        if (kind == QStringLiteral("symlink") || kind == QStringLiteral("fifo")) {
+            QVERIFY(QFile::remove(path));
+            if (kind == QStringLiteral("symlink")) QVERIFY(QFile::link(QStringLiteral("/etc/passwd"), path));
+            else QVERIFY(!mkfifo(QFile::encodeName(path).constData(), 0600));
+        } else if (kind == QStringLiteral("hardlink")) {
+            QVERIFY(!link(QFile::encodeName(path).constData(), QFile::encodeName(dir.filePath(QStringLiteral(".pending-alias"))).constData()));
+        } else if (kind == QStringLiteral("permissions")) {
+            QVERIFY(!chmod(QFile::encodeName(path).constData(), 0644));
+        } else {
+            QFile file(path); QVERIFY(file.open(QIODevice::ReadOnly));
+            auto object = QJsonDocument::fromJson(file.readAll()).object(); file.close();
+            if (kind == QStringLiteral("launch") || kind == QStringLiteral("boot")) object[kind] = id();
+            else if (kind == QStringLiteral("uid")) object[kind] = 1001;
+            else if (kind == QStringLiteral("pid")) object[kind] = QStringLiteral("12345");
+            else if (kind == QStringLiteral("start")) object[kind] = QStringLiteral("042");
+            else if (kind == QStringLiteral("numeric start")) object[QStringLiteral("start")] = 42;
+            else if (kind == QStringLiteral("pidInode")) object[kind] = QStringLiteral("1");
+            QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            if (kind != QStringLiteral("empty")) {
+                const auto bytes = kind == QStringLiteral("malformed") ? QByteArray("{") : QJsonDocument(object).toJson(QJsonDocument::Compact);
+                QCOMPARE(file.write(bytes), qint64(bytes.size()));
+            }
+            file.close();
+        }
+        bool missing = true;
+        QVERIFY(!journal->readKeeperRecord(r, &missing, nullptr)); QVERIFY(!missing);
+        QVERIFY(!journal->writeKeeper(r, {12345, 42, 4242}, nullptr));
+        QVERIFY(journal->records()); // Still recover unrelated desktops.
+    }
+    void processBirthHandlesCommDelimiters() {
+        const auto before = virtualProcessStartTime(getpid()); QVERIFY(before); QVERIFY(*before > 0);
+        char name[16]{}; QVERIFY(!prctl(PR_GET_NAME, name));
+        const auto restore = qScopeGuard([&] { prctl(PR_SET_NAME, name); });
+        QVERIFY(!prctl(PR_SET_NAME, "a) b (\nc) d"));
+        QCOMPARE(virtualProcessStartTime(getpid()), before);
+        QVERIFY(!virtualProcessStartTime(0)); QVERIFY(!virtualProcessStartTime(1));
+        const int fd = int(syscall(SYS_pidfd_open, getpid(), 0)); QVERIFY(fd >= 0);
+        const auto identity = virtualPidfdIdentity(fd); close(fd); QVERIFY(identity);
+        const int again = int(syscall(SYS_pidfd_open, getpid(), 0)); QVERIFY(again >= 0);
+        QCOMPARE(virtualPidfdIdentity(again), identity); close(again);
+        QVERIFY(!virtualPidfdIdentity(-1));
+    }
     void consumedIntentCannotReplayAfterRuntimeDisappears() {
         QTemporaryDir dir, runtime;
         auto writer = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr);

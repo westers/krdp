@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionLogin.h"
+#include "VirtualSessionLoginTag.h"
 #include <QDBusArgument>
 #include <QDBusConnection>
 #include <QDBusMessage>
@@ -9,6 +10,11 @@
 #include <QVariantMap>
 
 namespace KRdp {
+bool VirtualSessionLogin::matchesLaunch(uid_t owner, pid_t expectedLeader, const QString &pamId, const QString &pamRuntime, const QString &launch) const
+{
+    const auto tag = virtualLoginTag(launch);
+    return !tag.isEmpty() && desktop == tag && matches(owner, expectedLeader, pamId, pamRuntime);
+}
 bool VirtualSessionLogin::matches(uid_t owner, pid_t expectedLeader, const QString &pamId, const QString &pamRuntime) const
 {
     return owner && owner != uid_t(-1) && expectedLeader > 1
@@ -42,7 +48,7 @@ std::optional<VirtualSessionLogin> VirtualSessionLogin::read(pid_t leader)
     if (!session.isValid()) return {};
     const auto fields = session.value();
     // Missing/incorrectly typed fields must not turn into empty seat/zero VT.
-    for (const auto *field : {"Id", "Service", "Type", "Class", "State", "TTY", "Display", "Scope"})
+    for (const auto *field : {"Id", "Service", "Type", "Class", "State", "TTY", "Display", "Scope", "Desktop"})
         if (fields.value(QString::fromLatin1(field)).metaType().id() != QMetaType::QString) return {};
     for (const auto *field : {"Leader", "VTNr"})
         if (fields.value(QString::fromLatin1(field)).metaType().id() != QMetaType::UInt) return {};
@@ -71,6 +77,7 @@ std::optional<VirtualSessionLogin> VirtualSessionLogin::read(pid_t leader)
     result.tty = fields.value(QStringLiteral("TTY")).toString();
     result.display = fields.value(QStringLiteral("Display")).toString();
     result.scope = fields.value(QStringLiteral("Scope")).toString();
+    result.desktop = fields.value(QStringLiteral("Desktop")).toString();
     result.leader = fields.value(QStringLiteral("Leader")).toUInt();
     result.virtualTerminal = fields.value(QStringLiteral("VTNr")).toUInt();
     result.runtime = userFields.value(QStringLiteral("RuntimePath")).toString();

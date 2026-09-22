@@ -20,7 +20,7 @@ class VirtualSessionPam {
 public:
     // beforeClose arms the caller's cleanup deadline, including partial-open
     // failure paths internal to open(). It must not throw or call PAM.
-    static std::unique_ptr<VirtualSessionPam> open(uid_t uid, const QByteArray &account,
+    static std::unique_ptr<VirtualSessionPam> open(uid_t uid, const QByteArray &account, const QString &launch,
         std::function<void()> beforeClose = {});
     ~VirtualSessionPam();
     VirtualSessionPam(const VirtualSessionPam &) = delete;

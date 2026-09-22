@@ -933,3 +933,68 @@ TERM-ignoring fixture, and active-owner destruction callback safety. Scope/login
 checks are injected in these tests; they do not claim actual root cleanup.
 Qt child modifier runs before UnixProcessParameters/descriptor closure:
 https://doc.qt.io/qt-6/qprocess.html#setChildProcessModifier
+
+### Durable keeper identity before PAM and recovery design constraints
+
+Before opening PAM the keeper now publishes an immutable root-owned0600
+`.keeper-<desktopUUID>` companion in the existing0700 launch journal. It binds
+session/launch/boot/UID, keeper PID, canonical decimal start ticks and the64-bit
+pidfs inode identity. The existing committed intent and consumed launch marker
+must both match. Exclusive creation plus file/directory fsync must all succeed
+before PAM may run; partial/uncertain files are preserved and block replay.
+Missing and malformed records are distinct. Companion files do not prevent the
+broker from recovering unrelated desktops. No companion contains credentials.
+
+The pidfs identity requires modern64-bit Linux pidfs, refusing anonymous-inode
+pidfds and32-bit identity truncation. Kernel inode identity, not just potentially
+same-tick PID/start-time reuse, determines whether a reopened pidfd belongs to
+the original process. VirtualSessionKeeperProcess pins BEFORE reading procfs,
+checks observed exit around start-time lookup, refuses conflicting metadata,
+and treats a different kernel identity as original-gone without signaling or
+waiting for the replacement. Its kill method targets only the retained pidfd;
+submission is not exit proof. Caller MUST establish matching current boot and
+desktop extinction before use. This helper currently has no production caller.
+
+PAM receives `XDG_SESSION_DESKTOP=krdp-<launchUUID>` before registration. Strict
+Desktop property parsing and `matchesLaunch()` are used by both keeper and
+parent, alongside the existing UID/leader/service/no-console checks. The marker
+is keeper metadata only; it is not exported to private desktop applications.
+The draft PAM stack no longer supplies a generic desktop fallback. Fixtures
+exercise marker rejection, exact environment writes, journal safety/replay,
+file/directory fsync failure, unusual proc comm delimiters, reopening pidfds,
+generation mismatch and real exit/signaling of a disposable child. Changed
+inode fixtures simulate reuse; they do not force actual kernel PID reuse.
+
+The following recovery constraints were reviewed but the logind reconciler and
+ExecStopPost integration are NOT IMPLEMENTED yet:
+
+- Validate the exact dedicated unit and absence of desktop descendants. A
+  verified original keeper may temporarily still be in that service before PAM
+  migration; no arbitrary extra processes/nested cgroups may be accepted.
+- Missing birth record means no PAM only after establishing that no live keeper
+  can still publish it. Wait/kill the exact original keeper via pidfd, observing
+  exit before logind reconciliation. Errors remain uncertain.
+- Enumerate marker-bearing sessions first; duplicate markers or contradictory
+  UID/leader/service/type/class/seat/TTY/display metadata are failure, not silent
+  filtering. Recovery must accept opening/closing identities without depending
+  on an already-removed user runtime; Ready's liveness predicate is unsuitable.
+- Pin logind's unique bus owner across listing, revalidation, termination and
+  disappearance checks. A path alone is not generation-bound. Support only
+  source-verified non-reused counter session IDs within that owner lifetime, or
+  provide an equivalent conditional operation; reject other identity schemes.
+- Keeper exit does not cancel an already submitted registration request. An
+  empty list/quiet interval/Ping is not a completion barrier across PAM's
+  Varlink and D-Bus transports. Without a source-backed registration-completion
+  guarantee, bounded zero-match recovery must report unresolved failure, keep
+  journals and never authorize relaunch/deletion. Successful Terminate submission
+  also needs authoritative disappearance before claiming reconciliation.
+
+No reconciliation can claim that skipped PAM close callbacks ran. Fixed-stack
+resource audit, crashes at registration boundaries, bus-owner changes, ambiguous
+markers and the actual systemd post-stop path remain enablement gates. Upstream
+v259 uses `.control` for delegated control processes; Delegate=no keeps this
+draft's ExecStopPost in its exact service cgroup, subject to installed validation.
+Primary implementation references:
+https://raw.githubusercontent.com/torvalds/linux/v6.17/fs/pidfs.c
+https://raw.githubusercontent.com/systemd/systemd/v259/src/login/pam_systemd.c
+https://raw.githubusercontent.com/systemd/systemd/v259/src/core/execute.c
