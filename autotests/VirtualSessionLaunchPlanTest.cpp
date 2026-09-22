@@ -17,7 +17,7 @@ private Q_SLOTS:
         const auto plan = VirtualSessionLaunchPlan::build(1000, account, id, config);
         QVERIFY(plan);
         QVERIFY(plan->runtimeDirectory.startsWith(u"/run/user/1000/krdp-virtual/"_s));
-        QCOMPARE(plan->profileDirectory, u"/home/user/.local/share/krdp-virtual/sessions/"_s + id);
+        QCOMPARE(plan->profileDirectory, u"/home/user/.krdp-virtual/sessions/"_s + id);
         QVERIFY(!plan->environment.inheritsFromParent());
         QCOMPARE(plan->environment.keys().size(), 5);
         QVERIFY(!plan->environment.contains(u"DISPLAY"_s));

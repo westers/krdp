@@ -80,9 +80,9 @@ std::unique_ptr<VirtualSessionStorage> VirtualSessionStorage::prepareAt(quint32 
     if (!directory(homeFd.value, uid, false) || !directory(runtimeFd.value, uid, true)) {
         return refuse(QStringLiteral("Home/runtime roots must be owned directories without symlink components; runtime must be private"));
     }
-    Fd local(child(homeFd.value, ".local", uid, false));
-    Fd share(child(local.value, "share", uid, false));
-    Fd profiles(child(share.value, "krdp-virtual", uid, true));
+    // Do not depend on mutable/shared permissions in an existing .local tree
+    // and never chmod that user-owned tree to accommodate the service.
+    Fd profiles(child(homeFd.value, ".krdp-virtual", uid, true));
     Fd sessions(child(profiles.value, "sessions", uid, true));
     Fd profile(child(sessions.value, session.toLatin1().constData(), uid, true));
     if (profile.value < 0) return refuse(QStringLiteral("Cannot create or validate private persistent profile"));
@@ -113,7 +113,7 @@ std::unique_ptr<VirtualSessionStorage> VirtualSessionStorage::prepareAt(quint32 
     }
     if (fsync(secret.value)) return refuse(QStringLiteral("Cannot flush worker credential"));
     result->m_runtimePath = runtimeBase + QStringLiteral("/krdp-virtual/") + launch;
-    result->m_profilePath = home + QStringLiteral("/.local/share/krdp-virtual/sessions/") + session;
+    result->m_profilePath = home + QStringLiteral("/.krdp-virtual/sessions/") + session;
     result->m_sessionId = session;
     result->m_ownerUid = uid;
     if (error) error->clear();

@@ -86,7 +86,7 @@ struct VirtualSessionLaunchPlan {
         // generation's socket/token path; only the profile is session-stable.
         plan.runtimeDirectory = QStringLiteral("/run/user/%1/krdp-virtual/%2")
             .arg(account.uid).arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
-        plan.profileDirectory = account.home + QStringLiteral("/.local/share/krdp-virtual/sessions/") + session;
+        plan.profileDirectory = account.home + QStringLiteral("/.krdp-virtual/sessions/") + session;
         plan.socketPath = plan.runtimeDirectory + QStringLiteral("/worker.sock");
         plan.tokenPath = plan.runtimeDirectory + QStringLiteral("/worker-token");
         plan.program = config.launcher;

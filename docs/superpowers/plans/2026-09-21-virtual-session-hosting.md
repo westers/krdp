@@ -366,7 +366,7 @@ consent, app/logout retention acceptance, recovery and matching packages.
 
 VirtualSessionLaunchPlan constructs a launch only from a PAM UID, an OS-resolved
 matching account, a server-generated session UUID and administrator configuration.
-Profiles persist at HOME/.local/share/krdp-virtual/sessions/<session UUID>.
+Profiles persist at HOME/.krdp-virtual/sessions/<session UUID>.
 Each launch uses a fresh runtime UUID below /run/user/<uid>/krdp-virtual, so
 recreation cannot overwrite a previous generation's token/socket. The executor
 must create both parents privately, reject symlinks/incorrect ownership, and

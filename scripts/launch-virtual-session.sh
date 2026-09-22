@@ -20,7 +20,7 @@ done
 [[ $width =~ ^[0-9]{3,4}$ && $height =~ ^[0-9]{3,4}$ ]]
 (( 10#$width >= 320 && 10#$width <= 4096 && 10#$height >= 200 && 10#$height <= 4096 && 10#$width % 2 == 0 && 10#$height % 2 == 0 ))
 [[ $runtime == /run/user/"$session_uid"/krdp-virtual/* && $runtime == "${KRDP_VIRTUAL_RUNTIME:-}" ]]
-[[ $profile == "$HOME/.local/share/krdp-virtual/sessions/$session" && $profile == "${KRDP_VIRTUAL_PROFILE:-}" ]]
+[[ $profile == "$HOME/.krdp-virtual/sessions/$session" && $profile == "${KRDP_VIRTUAL_PROFILE:-}" ]]
 for directory in "$runtime" "$profile" "$profile/config" "$profile/data" "$profile/cache" "$profile/state"; do
     [[ -d $directory && -O $directory && $(realpath -e "$directory") == "$directory" && $(stat -c %a "$directory") == 700 ]]
 done

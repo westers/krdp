@@ -54,7 +54,7 @@ private Q_SLOTS:
     void refusesSymlinksAndSharedPermissions()
     {
         QTemporaryDir home, runtime, outside;
-        QVERIFY(QFile::link(outside.path(), home.path() + u"/.local"_s));
+        QVERIFY(QFile::link(outside.path(), home.path() + u"/.krdp-virtual"_s));
         QString error;
         QVERIFY(!VirtualSessionStorage::prepareAt(getuid(), home.path(), runtime.path(), id(), id(), QByteArray(32, 'x'), &error));
         QVERIFY(QDir(outside.path()).entryList(QDir::NoDotAndDotDot | QDir::AllEntries).isEmpty());
