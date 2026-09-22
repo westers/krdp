@@ -35,6 +35,13 @@ target_link_libraries(VirtualSessionGuardianTest PRIVATE Qt6::Test Qt6::Core Qt6
 add_test(NAME VirtualSessionGuardianTest COMMAND VirtualSessionGuardianTest)
 add_dependencies(VirtualSessionGuardianTest krdp-virtual-guardian)
 
+add_executable(VirtualSessionGuardianClientTest VirtualSessionGuardianClientTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardianClient.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardian.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionStorage.cpp)
+target_include_directories(VirtualSessionGuardianClientTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(VirtualSessionGuardianClientTest PRIVATE Qt6::Test Qt6::Core Qt6::Network)
+add_test(NAME VirtualSessionGuardianClientTest COMMAND VirtualSessionGuardianClientTest)
+
 add_executable(VirtualSessionSupervisorTest VirtualSessionSupervisorTest.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp)
 target_include_directories(VirtualSessionSupervisorTest PRIVATE ${CMAKE_SOURCE_DIR}/server)

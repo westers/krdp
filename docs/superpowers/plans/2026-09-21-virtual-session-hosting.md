@@ -513,3 +513,24 @@ guardian PID/starttime and private desktop survived both endpoint lifetimes.
 This is capture/worker-reconnect acceptance, NOT full RDP/client reattachment,
 broker restart recovery, fresh audio-tone acceptance or final namespace cleanup.
 Guardian remains running in the user's tmux for the next integration test.
+
+Broker adoption prerequisite implemented: VirtualSessionGuardianClient performs
+one bounded async exchange per Unix connection, validating private directory and
+socket ownership, SO_PEERCRED UID,32-byte credential, request correlation,
+session UUID, and expected guardian incarnation. Responses have strict shape,
+bounded size and deadline; malformed/inconsistent liveness is not accepted.
+Destructor/disconnect never sends Stop or signals a process. Explicit Stop
+requires the exact expected incarnation; status is not capture readiness.
+krdp-virtual-guardianctl exposes this same path with descriptor-only token input
+and read-only status by default. It is a build target, not installed machinery.
+
+Tests use an actual guardian/sleep child and show two fresh clients see the same
+live child, then explicit Stop terminates it. Wrong token, stale status/stop
+incarnation, wrong owner, silent peer, oversized/extra-field replies, correlation
+mismatch and contradictory liveness are refused. The next integration must
+adopt a trusted persisted desktop ID into a fresh manager generation only after
+this handshake, then authenticate worker outputs/keyframe before attach. Control
+socket failure must revoke transport readiness without killing the desktop or
+silently creating a replacement; registry stop must use guardian Stop rather
+than QProcess teardown. Existing HostController/Supervisor still use owned child
+launches; this client alone does not change their lifetime behavior.
