@@ -280,3 +280,31 @@ Virtual-host admission must use this value, never a KRDPCTL UID/username.
 Current unit coverage checks no inferred identity on a new connection/media
 policy changes; real PAM success/failure/canonicalization acceptance remains
 pending and no live service has been deployed with this change.
+
+Lifecycle command dispatch (eb0226f): VirtualSessionControl implements strict
+`virtual-session {v:1,id,action[,session]}` requests for list/create/attach/
+detach/stop. Broker supplies authenticated nonroot UID plus unique transport ID;
+JSON identity fields, unknown fields/actions, malformed UUIDs/versions and
+changed transport identity are refused. List is owner-scoped, create acceptance
+reports actual starting/failed state without claiming readiness, attach requires
+capture readiness. Detach/socket disconnect invokes input/media-release hook
+before retaining the namespace; an owner stop also releases any attached owner
+transport. Correlated replies are retained for256 requests per connection;
+identical retries return the original reply, altered reuse is refused. History
+is never evicted into accidental repeated create; at limit reconnect is required.
+This bounded policy needs suitable UI request cadence, not unlimited polling.
+
+Five request-dispatch tests use real disposable supervised children: malformed/
+claimed identity refusal, owner visibility, duplicate mutation safety, readiness,
+detach/resume, owner stop/release ordering, capacity and failed launch reporting.
+Full local38/38 suite passes. Dispatcher is wired into the Sol-only manager probe,
+not yet a production RDP listener; real transport/client feature advertisement
+and lifecycle wiring must precede delivery. Release hooks are synchronous and
+must not reenter/remove dispatcher transports during dispatch.
+
+Sol command-driven acceptance TFLiPw exits0: real namespace/worker capture,
+create/attach/detach/reattach/stop all through VirtualSessionControl using the
+probe's own verified UID and synthetic client IDs. Worker control generation is
+revoked and audio disabled by the release hook. Same registry generation1 after
+reattach; only physical KWin168073 remains after scoped stop;817active and
+host167444 unchanged. This does not exercise PAM or actual RDP control messages.
