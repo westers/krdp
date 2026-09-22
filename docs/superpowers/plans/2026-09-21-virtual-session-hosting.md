@@ -804,3 +804,18 @@ not call local stop. Executable-level fixtures cover TERM and INT with a gracefu
 child and forced escalation with a TERM-ignoring child, including socket cleanup
 and observed child exit. This establishes direct-child shutdown only: actual
 Plasma/bubblewrap namespace extinction and ordered PAM close still need proof.
+
+2026-09-21 retained/adopted audio acceptance PASS: existing managed desktop
+c3fc28e6-a437-41d3-9747-4841cc7e05b0 adopted on isolated3395; native Buzz GUI
+attached and acknowledged playback1/silenceHost1. Played8s997Hz through its
+private Pulse socket. Concurrent44100Hz stereoS16 monitor captures: Buzz1081344
+samples, mean-26.7dBFS/peak-20.1dBFS (997Hz30Hzbandpass peak-21.1dBFS); Sol
+physical chat/game each1081344samples and SPDIF1048576samples, all exactlyzero.
+Disconnect restored private default to krdp.virtual-session.audio and removed
+temporary remote sink. Physical defaults/processes, retained guardian/KWin and
+production Buzz PID/configSHA unchanged. TestGUI exited0, no3395peers; exact
+probe stopped,3395closed; guardian authenticated running afterwards. No unlocking,
+physical-output changes or privileged operation. Evidence and limitations:
+`~/dev/rdp/evidence/adopt-audio.qs1FEn/RESULT.md` plus logs/raw captures. This proves
+audio payload and host digital silence after explicit adoption, not yet the new
+journal/systemd/PAM-lifetime launch path or acoustic/conferencing performance.
