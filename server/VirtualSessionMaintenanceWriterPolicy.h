@@ -4,6 +4,9 @@
 #include <QMap>
 #include <QStringList>
 #include <QVariant>
+#include <QJsonObject>
+#include <span>
+#include "VirtualSessionCoordinatorIdentity.h"
 #include <optional>
 
 namespace KRdp {
@@ -39,5 +42,22 @@ private:
     static std::optional<QList<Command>> commands(const QVariant &value);
     static std::optional<Service> service(const QDBusMessage &reply);
     static std::optional<Unit> unit(const QDBusMessage &reply);
+    // Comparison-only internals. No runtime approvals or fixture-selected live calls.
+    using Inputs = VirtualSessionCoordinatorIdentity::PolicyInputs;
+    using Inventory = VirtualSessionCoordinatorIdentity::PolicyUnit;
+    enum class Rule { Exact, Set, Empty, False, Zero, Blank, Loaded, Id, Fragment,
+        RootUser, WorkingRoot, No, Init, Max64, EmptyHostname, DisabledQuota,
+        Label, Mode, Input, Output, Error, EmptyFilter };
+    struct Descriptor { const char *group, *name, *signature; Rule rule; };
+    struct Policy { QJsonObject document; };
+    static std::span<const Descriptor> descriptors();
+    static QString inventoryName(size_t index);
+    static QByteArray canonical(const QJsonValue &value);
+    static std::optional<Policy> parseApproved(const QByteArray &, QString *error = nullptr);
+    static std::optional<QJsonValue> normalize(const Descriptor &, const QJsonValue &,
+        const QString &unitName, bool wire);
+    static std::optional<QJsonValue> decode(const Descriptor &, const QVariant &);
+    static bool compareEffective(const Policy &, const Inputs &, QString *error = nullptr);
+    static bool finishComparison(const Policy &, const Inputs &, QString *error);
 };
 }

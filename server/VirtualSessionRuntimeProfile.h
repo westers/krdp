@@ -6,6 +6,7 @@
 #include <optional>
 
 namespace KRdp {
+class VirtualSessionMaintenanceWriterPolicyTest;
 /** Exact approved runtime inputs, not an approval generator or rearm authority.
  * Caller must retain package+gate exclusion and establish writer quiescence.
  * Neither validation nor a digest proves uninterrupted history or PAM completion.
@@ -51,6 +52,7 @@ public:
     // after PAM loading; coordinator self-check cannot certify a keeper process.
     bool validateCurrentProcess(const QString &role, QString *error = nullptr) const;
 private:
+    friend class VirtualSessionMaintenanceWriterPolicyTest;
     friend class RuntimeProfileTest;
     struct Data;
     explicit VirtualSessionRuntimeProfile(std::unique_ptr<Data> data);

@@ -48,7 +48,9 @@ target_link_options(VirtualSessionProvisioningReceiptTest PRIVATE "-Wl,--wrap=fs
 add_test(NAME VirtualSessionProvisioningReceiptTest COMMAND VirtualSessionProvisioningReceiptTest)
 set_tests_properties(VirtualSessionProvisioningReceiptTest PROPERTIES TIMEOUT 20)
 add_executable(VirtualSessionMaintenanceWriterPolicyTest VirtualSessionMaintenanceWriterPolicyTest.cpp
-    ${CMAKE_SOURCE_DIR}/server/VirtualSessionMaintenanceWriterPolicy.cpp)
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionMaintenanceWriterPolicy.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionCoordinatorIdentity.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionRuntimeProfile.cpp)
 target_include_directories(VirtualSessionMaintenanceWriterPolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(VirtualSessionMaintenanceWriterPolicyTest PRIVATE Qt6::Core Qt6::Test Qt6::DBus)
 add_test(NAME VirtualSessionMaintenanceWriterPolicyTest COMMAND VirtualSessionMaintenanceWriterPolicyTest)

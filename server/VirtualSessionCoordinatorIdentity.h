@@ -10,6 +10,7 @@
 class QDBusConnection;
 class VirtualSessionCoordinatorIdentityTest;
 namespace KRdp {
+class VirtualSessionMaintenanceWriterPolicyTest;
 /** Identity of this root process running krdp-maintenance-validate.service.
  * The caller supplies an executable from its approved profile, not CLI authority,
  * and separately validates its bytes/loading closure. No activation or mutation.
@@ -34,6 +35,7 @@ public:
     QString bootId() const;
 private:
     friend class ::VirtualSessionCoordinatorIdentityTest;
+    friend class VirtualSessionMaintenanceWriterPolicyTest;
     friend class VirtualSessionMaintenanceWriterPolicy;
     enum class PolicyUnit : size_t {
         Coordinator, ShutdownWaiter, AptDaily, AptDailyUpgrade,

@@ -110,6 +110,26 @@ unconditionally until the finite effective execution/activation checks exist.
 Private-bus tests currently cover typed systemd command/metadata decoding, not
 writer quiescence, loaded-context approval, or bootstrap acceptance.
 
+The fixed RuntimeProfile policy-byte reader and CoordinatorIdentity whole-inventory
+reader are implemented. The latter retains raw dictionaries, uses GetUnit without
+loading units, shares one deadline, and explicitly reads hidden
+PermissionsStartOnly. The comparison-only implementation uses a compiled 321-entry
+typed property table and canonical approved bytes, with private parser/comparator
+tests and an independent source-checked descriptor oracle. It still returns
+refusal from public validate after a complete match: selected
+effective properties matching approved bytes is not path binding, guarded future
+activation, quiescence, or shutdown-waiter provenance. No generic JSON commands,
+queries, type declarations or approval-generation operation are permitted.
+
+Comparison rules: required selected fields must exist at exact wire types;
+duplicate dictionary keys refuse; unrelated exported properties may remain.
+Only explicitly designated sets and command flags are normalized; other arrays
+retain order. Condition/Assert runtime result must be -1/0/1 before discarding it;
+command volatile timestamps/PID/results are decoded exactly but not configuration.
+Public refusal after a matching fixture is exercised through the actual public
+method, a private manager bus, and a temporary profile declaring the policy bytes.
+An exact match produces the distinct runtimeChecksIncomplete refusal, not Clean.
+
 The live Sol shutdown waiter is an active conditional upgrade launcher. Its
 byte-matched 2.12ubuntu9 script can spawn `unattended-upgrade` through its existing
 PATH/environment. The local upgrader loads plugins before package locks and may
