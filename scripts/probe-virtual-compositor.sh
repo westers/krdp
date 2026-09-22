@@ -8,10 +8,25 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 3 && "$1" == --supervised-worker-nvidia ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia ) ) ]]
     probe_mode="${1:-}"
     rdp_mode=
     probe_timeout=80
+    managed_runtime=
+    managed_id=
+    if [[ "$probe_mode" == --supervised-worker-nvidia ]]; then
+        managed_runtime="$2"
+        managed_id="$3"
+        [[ "$managed_runtime" == /run/user/"$(id -u)"/krdp-headless.* ]]
+        [[ -d "$managed_runtime" && ! -L "$managed_runtime" && -O "$managed_runtime" ]]
+        [[ "$(realpath "$managed_runtime")" == "$managed_runtime" && "$(stat -c %a "$managed_runtime")" == 700 ]]
+        [[ "$managed_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+        [[ -S "$managed_runtime/worker.sock" && -f "$managed_runtime/worker-token" && ! -L "$managed_runtime/worker-token" ]]
+        [[ "$(stat -c %s "$managed_runtime/worker-token")" == 32 ]]
+        rdp_mode=--supervised
+        probe_mode=--plasma-nvidia
+        probe_timeout=120
+    fi
     if [[ "$probe_mode" == --plasma-worker-nvidia ]]; then
         rdp_mode=--worker
         probe_mode=--plasma-nvidia
@@ -59,10 +74,13 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
             __GLX_VENDOR_LIBRARY_NAME=nvidia)
         probe_mode=--plasma
     fi
-    probe_runtime=$(mktemp -d "/run/user/$(id -u)/krdp-headless.XXXXXX")
+    probe_runtime="$managed_runtime"
+    if [[ -z "$probe_runtime" ]]; then
+        probe_runtime=$(mktemp -d "/run/user/$(id -u)/krdp-headless.XXXXXX")
+    fi
     mkdir "$probe_runtime/config" "$probe_runtime/cache" "$probe_runtime/state" "$probe_runtime/data"
     cp -r "$repo_path/scripts/virtual-probe-config/." "$probe_runtime/config/"
-    if [[ "$rdp_mode" == --worker ]]; then
+    if [[ "$rdp_mode" == --worker || "$rdp_mode" == --supervised ]]; then
         mkdir -p "$probe_runtime/data/applications"
         cp "$repo_path/build/server/org.kde.krdpvirtualprobe.desktop" "$probe_runtime/data/applications/org.kde.krdpconsoleworker.desktop"
     elif [[ -n "$rdp_mode" ]]; then
@@ -98,7 +116,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         --perms 01777 --dir /tmp/.X11-unix \
         --bind "$probe_runtime" "$probe_runtime" \
         dbus-run-session --config-file="$repo_path/server/virtual-session-bus.conf" \
-        -- bash "$script_path" --inside-private-bus "$probe_mode" "$rdp_mode" \
+        -- bash "$script_path" --inside-private-bus "$probe_mode" "$rdp_mode" "$managed_id" \
         >"$probe_runtime/probe.log" 2>&1
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
@@ -234,6 +252,16 @@ jq -e '[.[] | select(.type == "PipeWire:Interface:Device")] | length == 0' "$XDG
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
     --method org.freedesktop.DBus.ListNames
 echo 'Private Wayland compositor ready at 1280x720'
+if [[ "${3:-}" == --supervised ]]; then
+    env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
+        "$repo_path/build/bin/krdp-console-worker" --virtual-session "$4" --uid "$(id -u)" \
+        --socket "$XDG_RUNTIME_DIR/worker.sock" --token-fd 0 --desktop-media \
+        <"$XDG_RUNTIME_DIR/worker-token" >"$XDG_RUNTIME_DIR/managed-worker.log" 2>&1 &
+    # The supervisor owns the namespace, not the capture worker or RDP client.
+    # A transport/worker disconnect must not terminate the Plasma desktop.
+    while kill -0 "$plasma_pid" && kill -0 "$wrapper_pid"; do sleep 1; done
+    exit 1
+fi
 if [[ "${3:-}" == --worker ]]; then
     "$repo_path/build/bin/krdp-virtual-worker-probe" >"$XDG_RUNTIME_DIR/worker-probe.log" 2>&1
     # Stopping capture must leave the separate desktop alive and unchanged.
