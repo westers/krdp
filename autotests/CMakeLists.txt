@@ -23,11 +23,13 @@ target_include_directories(VirtualSessionLaunchPlanTest PRIVATE ${CMAKE_SOURCE_D
 target_link_libraries(VirtualSessionLaunchPlanTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionLaunchPlanTest COMMAND VirtualSessionLaunchPlanTest)
 
-add_executable(VirtualSessionServicePlanTest VirtualSessionServicePlanTest.cpp)
+find_package(OpenSSL REQUIRED)
+add_executable(VirtualSessionServicePlanTest VirtualSessionServicePlanTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualHostTls.cpp)
 target_include_directories(VirtualSessionServicePlanTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
-target_link_libraries(VirtualSessionServicePlanTest PRIVATE Qt6::Test KRdpGuardianClient)
+target_link_libraries(VirtualSessionServicePlanTest PRIVATE Qt6::Test OpenSSL::Crypto KRdpGuardianClient)
 target_compile_definitions(VirtualSessionServicePlanTest PRIVATE KRDP_SESSION_ENTRY="$<TARGET_FILE:krdp-virtual-session-entry>")
-add_dependencies(VirtualSessionServicePlanTest krdp-virtual-session-entry)
+target_compile_definitions(VirtualSessionServicePlanTest PRIVATE KRDP_VIRTUAL_HOST="$<TARGET_FILE:krdp-virtual-host>")
+add_dependencies(VirtualSessionServicePlanTest krdp-virtual-session-entry krdp-virtual-host)
 add_test(NAME VirtualSessionServicePlanTest COMMAND VirtualSessionServicePlanTest)
 
 add_executable(VirtualDeviceEntryTest VirtualDeviceEntryTest.cpp)

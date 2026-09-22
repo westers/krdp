@@ -695,3 +695,24 @@ real guardian/sleep child plus synthetic worker frame for create→attach and
 host-destruction retention. The installed systemd Manager StartUnit signature
 was confirmed by read-only bus introspection; actual service dispatch is not
 runtime-accepted yet.
+
+Production broker executable now exists as krdp-virtual-host with a draft,
+noninstalled krdp-virtual-host.service. Root-only, explicit readable absolute TLS
+files, validated numeric address/nonzero port (default3395, separate fromconsole),
+PAM account authentication, journal lease/recovery then independentcreates BEFORE
+listener startup. SIGINT/SIGTERM are blocked before worker threads and consumed
+via signalfd on Qt's event loop so normal shutdown detaches transports/guardians
+and releases the journal last. There is no physicalseat/layout adapter or bounded
+desktop-lifetime timer. Draftservice supplies private StateDirectory and broker
+restart policy but does not own independent session units. Neither executable nor
+unit is installed yet: live root startup, PAM/runtime lifetime, settings/KCM and
+matching packages remain acceptance gates. Nonroot invocation is tested to fail
+before journal/listener access; unit syntax validation is not live acceptance.
+
+Startup also parses bounded PEM certificate/key contents and checks their public
+keys match before recovery/listening. Encrypted keys are rejected without an
+interactive password prompt. Tests cover a valid generated pair and mismatched,
+reversed, encrypted, empty, malformed, missing, directory and oversized inputs.
+This validates initial configuration, not later replacement of the TLS files or
+certificate trust/expiry policy; installed credential ownership remains an
+installation responsibility.

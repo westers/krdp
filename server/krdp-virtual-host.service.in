@@ -1,0 +1,22 @@
+# Draft broker service; not installed pending privileged/runtime/UI acceptance.
+[Unit]
+Description=KRDP persistent virtual-desktop broker
+After=network-online.target systemd-logind.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=root
+Environment=KRDP_VIRTUAL_ADDRESS=0.0.0.0
+Environment=KRDP_VIRTUAL_PORT=3395
+EnvironmentFile=-/etc/krdp/virtual-host.conf
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-host --certificate ${KRDP_VIRTUAL_CERTIFICATE} --certificate-key ${KRDP_VIRTUAL_CERTIFICATE_KEY} --address ${KRDP_VIRTUAL_ADDRESS} --port ${KRDP_VIRTUAL_PORT}
+StateDirectory=krdp/virtual-sessions
+StateDirectoryMode=0700
+UMask=0077
+KillMode=control-group
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
