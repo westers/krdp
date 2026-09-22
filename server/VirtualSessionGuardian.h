@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #pragma once
 #include "VirtualSessionSupervisor.h"
+#include "VirtualSessionStorage.h"
 #include <QJsonObject>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -21,6 +22,8 @@ public:
     ~VirtualSessionGuardian() override;
     bool start(quint32 uid, const QString &session, const QByteArray &token,
         const QString &socket, const VirtualSessionSupervisor::Launch &launch, QString *error = nullptr);
+    bool startPrepared(quint32 uid, const QString &session, const QByteArray &token,
+        std::unique_ptr<VirtualSessionStorage> storage, const VirtualSessionSupervisor::Launch &launch, QString *error = nullptr);
     QString phase() const { return m_phase; }
     QString incarnation() const { return m_incarnation; }
     qint64 processId() const { return m_process.processId(); }
@@ -28,6 +31,8 @@ private:
     void accept();
     QJsonObject request(const QJsonObject &record);
     void stop();
+    // Declared first, destroyed last: profile ownership outlives child teardown.
+    std::unique_ptr<VirtualSessionStorage> m_storage;
     QLocalServer m_server;
     QProcess m_process;
     QSet<QLocalSocket *> m_clients;

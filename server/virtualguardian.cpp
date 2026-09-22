@@ -5,6 +5,7 @@
 #include <QDebug>
 #include <cerrno>
 #include <fcntl.h>
+#include <pwd.h>
 #include <unistd.h>
 
 // Trusted service entrypoint, not an RDP command runner. The eventual launcher
@@ -16,13 +17,15 @@ int main(int argc, char **argv)
     parser.addHelpOption();
     parser.addOption({QStringLiteral("session"), QStringLiteral("Server-generated desktop UUID"), QStringLiteral("uuid")});
     parser.addOption({QStringLiteral("socket"), QStringLiteral("Fresh socket in an owned private runtime"), QStringLiteral("path")});
+    parser.addOption({QStringLiteral("launch-id"), QStringLiteral("Prepare and own persistent profile/runtime storage for this launch UUID; excludes --socket"), QStringLiteral("uuid")});
     parser.addOption({QStringLiteral("token-fd"), QStringLiteral("Descriptor with exactly 32 credential bytes available"), QStringLiteral("fd")});
     parser.addPositionalArgument(QStringLiteral("helper"), QStringLiteral("Trusted namespace leader and arguments (after --)"), QStringLiteral("helper [arguments...]") );
     parser.process(app);
     bool validFd = false;
     const int descriptor = parser.value(QStringLiteral("token-fd")).toInt(&validFd);
     const auto arguments = parser.positionalArguments();
-    if (!getuid() || getuid() != geteuid() || !validFd || descriptor < 0 || arguments.isEmpty()) return 1;
+    if (!getuid() || getuid() != geteuid() || !validFd || descriptor < 0 || arguments.isEmpty()
+        || parser.isSet(QStringLiteral("launch-id")) == parser.isSet(QStringLiteral("socket"))) return 1;
     const int flags = fcntl(descriptor, F_GETFL);
     if (flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)) return 1;
     QByteArray token(32, '\0');
@@ -39,8 +42,31 @@ int main(int argc, char **argv)
     environment.insert(QStringLiteral("LANG"), QStringLiteral("C.UTF-8"));
     KRdp::VirtualSessionGuardian guardian;
     QString error;
-    if (!guardian.start(getuid(), parser.value(QStringLiteral("session")), token,
-            parser.value(QStringLiteral("socket")), {arguments.first(), arguments.mid(1), environment, {}}, &error)) {
+    bool started = false;
+    if (parser.isSet(QStringLiteral("launch-id"))) {
+        struct passwd account{};
+        struct passwd *resolved = nullptr;
+        QByteArray buffer(16384, '\0');
+        int status = 0;
+        while ((status = getpwuid_r(getuid(), &account, buffer.data(), buffer.size(), &resolved)) == ERANGE && buffer.size() < 1048576) {
+            buffer.resize(buffer.size() * 2);
+        }
+        if (status || !resolved || account.pw_uid != getuid() || !account.pw_dir || !account.pw_name) return 1;
+        auto storage = KRdp::VirtualSessionStorage::prepare(getuid(), QString::fromLocal8Bit(account.pw_dir),
+            parser.value(QStringLiteral("session")), parser.value(QStringLiteral("launch-id")), token, &error);
+        if (!storage) { qCritical().noquote() << error; return 1; }
+        environment.insert(QStringLiteral("HOME"), QString::fromLocal8Bit(account.pw_dir));
+        environment.insert(QStringLiteral("USER"), QString::fromLocal8Bit(account.pw_name));
+        environment.insert(QStringLiteral("LOGNAME"), QString::fromLocal8Bit(account.pw_name));
+        environment.insert(QStringLiteral("KRDP_VIRTUAL_RUNTIME"), storage->runtimeDirectory());
+        environment.insert(QStringLiteral("KRDP_VIRTUAL_PROFILE"), storage->profileDirectory());
+        started = guardian.startPrepared(getuid(), parser.value(QStringLiteral("session")), token, std::move(storage),
+            {arguments.first(), arguments.mid(1), environment, {}}, &error);
+    } else {
+        started = guardian.start(getuid(), parser.value(QStringLiteral("session")), token,
+            parser.value(QStringLiteral("socket")), {arguments.first(), arguments.mid(1), environment, {}}, &error);
+    }
+    if (!started) {
         qCritical().noquote() << error;
         return 1;
     }

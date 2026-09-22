@@ -114,6 +114,8 @@ std::unique_ptr<VirtualSessionStorage> VirtualSessionStorage::prepareAt(quint32 
     if (fsync(secret.value)) return refuse(QStringLiteral("Cannot flush worker credential"));
     result->m_runtimePath = runtimeBase + QStringLiteral("/krdp-virtual/") + launch;
     result->m_profilePath = home + QStringLiteral("/.local/share/krdp-virtual/sessions/") + session;
+    result->m_sessionId = session;
+    result->m_ownerUid = uid;
     if (error) error->clear();
     return result;
 }

@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "VirtualSessionStorage.h"
+#include "VirtualSessionGuardian.h"
 using namespace Qt::StringLiterals;
 namespace KRdp
 {
@@ -83,6 +84,42 @@ private Q_SLOTS:
         QVERIFY(!::link(QFile::encodeName(lockPath).constData(), QFile::encodeName(home.path() + u"/lock-alias"_s).constData()));
         QVERIFY(!VirtualSessionStorage::prepareAt(getuid(), home.path(), runtime.path(), session, id(), QByteArray(32, 'x'), &error));
         QVERIFY(error.contains(u"unsafe"_s));
+    }
+    void guardianOwnsProfileAcrossChildExec()
+    {
+        QTemporaryDir home, runtime;
+        QString error;
+        const auto session = id();
+        const QByteArray token(32, 'x');
+        auto storage = VirtualSessionStorage::prepareAt(getuid(), home.path(), runtime.path(), session, id(), token, &error);
+        QVERIFY(storage);
+        const auto profile = storage->profileDirectory();
+        {
+            VirtualSessionGuardian guardian;
+            QVERIFY2(guardian.startPrepared(getuid(), session, token, std::move(storage),
+                {u"/usr/bin/sleep"_s, {u"60"_s}, {}, {}}, &error), qPrintable(error));
+            QTRY_COMPARE(guardian.phase(), u"running"_s);
+            QVERIFY(!storage);
+            QVERIFY(!VirtualSessionStorage::prepareAt(getuid(), home.path(), runtime.path(), session, id(), token, &error));
+            QVERIFY(error.contains(u"already in use"_s));
+        }
+        auto next = VirtualSessionStorage::prepareAt(getuid(), home.path(), runtime.path(), session, id(), token, &error);
+        QVERIFY2(next, qPrintable(error));
+        QCOMPARE(next->profileDirectory(), profile);
+    }
+    void guardianRejectsWrongProfileIdentity()
+    {
+        QTemporaryDir home, runtime;
+        QString error;
+        const auto session = id();
+        const QByteArray token(32, 'x');
+        auto storage = VirtualSessionStorage::prepareAt(getuid(), home.path(), runtime.path(), session, id(), token, &error);
+        QVERIFY(storage);
+        VirtualSessionGuardian guardian;
+        QVERIFY(!guardian.startPrepared(getuid(), id(), token, std::move(storage),
+            {u"/usr/bin/sleep"_s, {u"60"_s}, {}, {}}, &error));
+        QCOMPARE(guardian.phase(), u"absent"_s);
+        QCOMPARE(guardian.processId(), qint64(0));
     }
 };
 }

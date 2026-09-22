@@ -21,6 +21,8 @@ public:
         const QString &sessionId, const QString &launchId, const QByteArray &token, QString *error = nullptr);
     QString runtimeDirectory() const { return m_runtimePath; }
     QString profileDirectory() const { return m_profilePath; }
+    QString sessionId() const { return m_sessionId; }
+    quint32 ownerUid() const { return m_ownerUid; }
 
 private:
     friend class VirtualSessionStorageTest;
@@ -31,5 +33,7 @@ private:
     int m_lock = -1;
     QString m_runtimePath;
     QString m_profilePath;
+    QString m_sessionId;
+    quint32 m_ownerUid = 0;
 };
 }

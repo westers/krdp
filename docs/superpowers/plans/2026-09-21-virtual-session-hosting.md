@@ -423,3 +423,16 @@ not installed yet and is NOT full restart recovery: still wire storage-lock
 ownership, actual namespace/device executor, independent service placement,
 durable registry/worker reconnection and capture-generation validation. Ordinary
 guardian shutdown still owns descendant teardown; only broker loss preserves it.
+
+Guardian storage ownership is now connected: startPrepared takes exclusive
+ownership of VirtualSessionStorage and checks the storage UID/session identity.
+The lock outlives child exec and teardown, and is never held by a client socket.
+The executable's --launch-id mode resolves the real account with getpwuid_r,
+prepares runtime/profile storage and starts guardian.sock there. It excludes
+the lower-level --socket mode. HOME/USER/LOGNAME are OS-derived; private paths
+are explicit KRDP_VIRTUAL_RUNTIME/KRDP_VIRTUAL_PROFILE environment entries for
+the trusted namespace helper. Tests use disposable directory anchors, verify a
+second profile launch is refused while the real child runs, verify release after
+guardian shutdown, and reject a different profile's session ID before spawn.
+Actual Plasma launch, allowed-device resolution, independent service placement,
+capture-worker reconnection and durable recovery remain unimplemented here.

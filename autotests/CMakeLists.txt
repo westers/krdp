@@ -18,12 +18,12 @@ target_include_directories(VirtualSessionLaunchPlanTest PRIVATE ${CMAKE_SOURCE_D
 target_link_libraries(VirtualSessionLaunchPlanTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionLaunchPlanTest COMMAND VirtualSessionLaunchPlanTest)
 
-add_executable(VirtualSessionStorageTest VirtualSessionStorageTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionStorage.cpp)
+add_executable(VirtualSessionStorageTest VirtualSessionStorageTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionStorage.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardian.cpp)
 target_include_directories(VirtualSessionStorageTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
-target_link_libraries(VirtualSessionStorageTest PRIVATE Qt6::Test Qt6::Core)
+target_link_libraries(VirtualSessionStorageTest PRIVATE Qt6::Test Qt6::Core Qt6::Network)
 add_test(NAME VirtualSessionStorageTest COMMAND VirtualSessionStorageTest)
 
-add_executable(VirtualSessionGuardianTest VirtualSessionGuardianTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardian.cpp)
+add_executable(VirtualSessionGuardianTest VirtualSessionGuardianTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardian.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionStorage.cpp)
 target_include_directories(VirtualSessionGuardianTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(VirtualSessionGuardianTest PRIVATE Qt6::Test Qt6::Core Qt6::Network)
 add_test(NAME VirtualSessionGuardianTest COMMAND VirtualSessionGuardianTest)

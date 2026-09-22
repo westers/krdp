@@ -83,6 +83,22 @@ bool VirtualSessionGuardian::start(quint32 uid, const QString &session, const QB
     return true;
 }
 
+bool VirtualSessionGuardian::startPrepared(quint32 uid, const QString &session, const QByteArray &token,
+    std::unique_ptr<VirtualSessionStorage> storage, const VirtualSessionSupervisor::Launch &launch, QString *error)
+{
+    if (m_started || !storage || storage->ownerUid() != uid || storage->sessionId() != session) {
+        if (error) *error = QStringLiteral("Guardian requires fresh prepared storage");
+        return false;
+    }
+    const auto socket = storage->runtimeDirectory() + QStringLiteral("/guardian.sock");
+    // This object lives in the independent guardian, not the RDP broker. Neither
+    // client socket loss nor the child's exec closes the parent's profile lock.
+    m_storage = std::move(storage);
+    if (start(uid, session, token, socket, launch, error)) return true;
+    m_storage.reset();
+    return false;
+}
+
 void VirtualSessionGuardian::accept()
 {
     while (auto *socket = m_server.nextPendingConnection()) {
