@@ -181,6 +181,29 @@ QString VirtualSessionRuntimeProfile::approvedExecutable(const QString &fixedRol
     const auto role=d->processes.constFind(fixedRole);
     return role==d->processes.cend() ? QString() : role->executable;
 }
+std::optional<QByteArray> VirtualSessionRuntimeProfile::approvedWriterPolicy(QString *error) const {
+    const auto bad = [&]() -> std::optional<QByteArray> {
+        refuse(error, QStringLiteral("Approved writer policy missing, changed or unsafe"));
+        return {};
+    };
+    if (error) error->clear();
+    if (!d->associated()) return bad();
+    const QString name = QStringLiteral("/etc/krdp/virtual-writer-policy.json");
+    const auto expected = std::find_if(d->files.begin(), d->files.end(), [&](const auto &f) { return f.path == name; });
+    if (expected == d->files.end() || expected->size <= 0 || expected->size > ManifestLimit) return bad();
+    auto file = d->open(name, false);
+    struct stat before{}, after{}, named{};
+    if (file.fd < 0 || fstat(file.fd, &before) || !S_ISREG(before.st_mode) || before.st_nlink != 1
+        || before.st_uid != expected->uid || before.st_gid != expected->gid
+        || (before.st_mode & 07777) != expected->mode || before.st_size != expected->size) return bad();
+    QByteArray bytes;
+    if (!readBounded(file.fd, ManifestLimit, bytes)
+        || QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex() != expected->hash
+        || fstat(file.fd, &after) || !unchanged(before, after)) return bad();
+    auto current = d->open(name, false);
+    if (current.fd < 0 || fstat(current.fd, &named) || !unchanged(before, named) || !d->associated()) return bad();
+    return bytes;
+}
 
 std::unique_ptr<VirtualSessionRuntimeProfile> VirtualSessionRuntimeProfile::loadApproved(QString *error) {
     if (getuid() || geteuid()) { refuse(error, QStringLiteral("Root runtime-profile caller required")); return {}; }

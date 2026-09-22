@@ -70,6 +70,7 @@ add_test(NAME VirtualSessionMaintenanceRecordTest COMMAND VirtualSessionMaintena
 add_executable(RuntimeProfileTest RuntimeProfileTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionRuntimeProfile.cpp)
 target_include_directories(RuntimeProfileTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(RuntimeProfileTest PRIVATE Qt6::Core Qt6::Test)
+target_link_options(RuntimeProfileTest PRIVATE "-Wl,--wrap=read")
 add_test(NAME RuntimeProfileTest COMMAND RuntimeProfileTest)
 set_tests_properties(RuntimeProfileTest PROPERTIES TIMEOUT 30)
 add_executable(VirtualSessionCoordinatorIdentityTest VirtualSessionCoordinatorIdentityTest.cpp

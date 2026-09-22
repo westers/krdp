@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QString>
 #include <memory>
+#include <optional>
 
 namespace KRdp {
 /** Exact approved runtime inputs, not an approval generator or rearm authority.
@@ -39,6 +40,10 @@ public:
     // Fixed caller-selected role only, never a CLI/client-selected identity.
     // Empty means unknown role; this lookup alone does not validate the file.
     QString approvedExecutable(const QString &fixedRole) const;
+    // Fixed writer-policy input only, declared and hashed by this profile.
+    // Reads at most 1 MiB under caller-held exclusion. Not policy approval or
+    // validation of the rest of the runtime profile; no arbitrary path API.
+    std::optional<QByteArray> approvedWriterPolicy(QString *error = nullptr) const;
     bool validateFilesystem(QString *error = nullptr) const;
     // Validates filesystem plus every current file-backed mapping and executable
     // against pinned approved objects. Unknown/deleted mappings refuse. Checks

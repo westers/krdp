@@ -18,7 +18,23 @@
 #include <sys/mman.h>
 #include <sys/sysmacros.h>
 #include <fcntl.h>
+#include <functional>
 #include <unistd.h>
+
+namespace {
+std::function<void()> policyReadHook;
+dev_t policyDevice = 0;
+ino_t policyInode = 0;
+}
+extern "C" ssize_t __real_read(int, void *, size_t);
+extern "C" ssize_t __wrap_read(int fd, void *buffer, size_t size) {
+    const auto result = __real_read(fd, buffer, size);
+    struct stat st{};
+    if (result > 0 && policyReadHook && !fstat(fd, &st) && st.st_dev == policyDevice && st.st_ino == policyInode) {
+        auto hook = std::move(policyReadHook); policyReadHook = {}; hook();
+    }
+    return result;
+}
 
 namespace KRdp {
 class RuntimeProfileTest : public QObject {
@@ -55,6 +71,66 @@ class RuntimeProfileTest : public QObject {
             + QByteArray::number(major(st.st_dev),16)+':'+QByteArray::number(minor(st.st_dev),16)+' '+QByteArray::number(st.st_ino)+' '+path.toLatin1()+'\n';
     }
 private Q_SLOTS:
+    void fixedWriterPolicy_data() {
+        QTest::addColumn<QString>("kind");
+        for (const char *kind : {"valid", "undeclared", "missing", "changed", "mode", "symlink", "hardlink", "empty", "oversize", "manifest-changed", "replace-during-read", "mode-during-read", "manifest-during-read"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void fixedWriterPolicy() {
+        QFETCH(QString, kind);
+        QTemporaryDir dir; auto m = manifest(dir.path());
+        const QString logical = QStringLiteral("/etc/krdp/virtual-writer-policy.json");
+        QVERIFY(QDir().mkpath(dir.path() + QStringLiteral("/etc/krdp")));
+        QVERIFY(!chmod(QFile::encodeName(dir.path() + QStringLiteral("/etc")).constData(), 0700));
+        QVERIFY(!chmod(QFile::encodeName(dir.path() + QStringLiteral("/etc/krdp")).constData(), 0700));
+        const QString pathname = dir.path() + logical;
+        // Opaque bytes here: the policy parser, not this reader, validates JSON
+        // schema and policy semantics. A valid read is not admission authority.
+        QByteArray data("{\"v\":1}\n");
+        if (kind == QStringLiteral("empty")) data.clear();
+        if (kind == QStringLiteral("oversize")) data = QByteArray(1024 * 1024 + 1, 'x');
+        QVERIFY(put(pathname, data));
+        if (kind != QStringLiteral("undeclared")) {
+            auto files = m[QStringLiteral("files")].toArray();
+            files.prepend(file(logical, data)); m[QStringLiteral("files")] = files;
+        }
+        QVERIFY(put(dir.filePath(QStringLiteral("profile.json")), encode(m)));
+        auto profile = load(dir.path()); QVERIFY(profile);
+        if (kind == QStringLiteral("missing")) QVERIFY(QFile::remove(pathname));
+        if (kind == QStringLiteral("changed")) QVERIFY(put(pathname, QByteArray(data.size(), '?')));
+        if (kind == QStringLiteral("mode")) QVERIFY(!chmod(QFile::encodeName(pathname).constData(), 0640));
+        if (kind == QStringLiteral("symlink")) {
+            const QString backup = dir.filePath(QStringLiteral("policy-backup"));
+            QVERIFY(QFile::rename(pathname, backup)); QVERIFY(QFile::link(backup, pathname));
+        }
+        if (kind == QStringLiteral("hardlink")) QVERIFY(!link(QFile::encodeName(pathname).constData(), QFile::encodeName(dir.filePath(QStringLiteral("policy-alias"))).constData()));
+        if (kind == QStringLiteral("manifest-changed")) QVERIFY(put(dir.filePath(QStringLiteral("profile.json")), encode(m) + ' '));
+        bool mutated = false;
+        const auto cleanup = qScopeGuard([] { policyReadHook = {}; });
+        if (kind.endsWith(QStringLiteral("-during-read"))) {
+            struct stat st{}; QVERIFY(!stat(QFile::encodeName(pathname).constData(), &st));
+            policyDevice = st.st_dev; policyInode = st.st_ino;
+            policyReadHook = [&] {
+                if (kind == QStringLiteral("replace-during-read"))
+                    mutated = QFile::rename(pathname, dir.filePath(QStringLiteral("old-policy"))) && put(pathname, data);
+                else if (kind == QStringLiteral("mode-during-read"))
+                    mutated = !chmod(QFile::encodeName(pathname).constData(), 0640);
+                else {
+                    const QString manifestPath = dir.filePath(QStringLiteral("profile.json"));
+                    mutated = QFile::rename(manifestPath, dir.filePath(QStringLiteral("old-profile"))) && put(manifestPath, encode(m));
+                }
+            };
+        }
+        QString error = QStringLiteral("old diagnostic");
+        const auto result = profile->approvedWriterPolicy(&error);
+        if (kind == QStringLiteral("valid")) {
+            QVERIFY(result); QCOMPARE(*result, data); QVERIFY(error.isEmpty());
+            QFile f(pathname); QVERIFY(f.open(QIODevice::ReadOnly)); QCOMPARE(f.readAll(), data);
+        } else {
+            QVERIFY(!result); QVERIFY(!error.isEmpty());
+        }
+        if (kind.endsWith(QStringLiteral("-during-read"))) QVERIFY(mutated);
+    }
     void validationDoesNotCreateExecutableAnonymousMappings() {
         const auto anonymousExecutable=[] {
             QFile maps("/proc/self/maps"); QSet<QByteArray> result;
