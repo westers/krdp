@@ -25,6 +25,14 @@ target_include_directories(VirtualSessionControlTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(VirtualSessionControlTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionControlTest COMMAND VirtualSessionControlTest)
 
+add_executable(VirtualSessionTransportTest VirtualSessionTransportTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp)
+target_include_directories(VirtualSessionTransportTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(VirtualSessionTransportTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
+add_test(NAME VirtualSessionTransportTest COMMAND VirtualSessionTransportTest)
+
 add_executable(CaptureWorkerModeTest CaptureWorkerModeTest.cpp)
 target_include_directories(CaptureWorkerModeTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(CaptureWorkerModeTest PRIVATE Qt6::Test Qt6::Core)

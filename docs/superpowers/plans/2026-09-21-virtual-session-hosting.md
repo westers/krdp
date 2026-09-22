@@ -308,3 +308,21 @@ probe's own verified UID and synthetic client IDs. Worker control generation is
 revoked and audio disabled by the release hook. Same registry generation1 after
 reattach; only physical KWin168073 remains after scoped stop;817active and
 host167444 unchanged. This does not exercise PAM or actual RDP control messages.
+
+RDP adapter foundation: VirtualSessionTransport connects actual RdpConnection
+control/input/video signals to VirtualSessionControl and authenticated virtual
+worker resolution. Every route checks PAM UID, endpoint UID and exact registry
+handle. Attachment grants a new manager-wide control generation and requests a
+keyframe; revoke disables/clears the video queue, revokes held worker input,
+stops media, removes worker signal routes, and socket close retains the desktop.
+Playback uses external worker PCM only, never broker PipeWire. Microphone/camera
+and other unsupported controls are explicitly refused in this new adapter until
+integrated; earlier console microphone acceptance is not virtual-adapter support.
+
+Host wiring must register the dispatcher release hook to revoke the named
+transport before stop/detach and provide generation-safe worker resolution.
+The adapter is currently compiled/tested only, not instantiated by an installed
+listener. Test verifies a real unauthenticated RdpConnection cannot create a
+desktop or enable media;39/39 complete suite passes. Positive PAM attachment,
+actual wire video/audio/control, disconnect/reconnect and failure paths through
+this adapter still need end-to-end acceptance before feature advertisement.
