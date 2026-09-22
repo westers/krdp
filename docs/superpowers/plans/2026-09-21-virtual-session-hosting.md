@@ -251,3 +251,20 @@ select it and physical launcher rejects it before reading any desktop env.
 Local37/37 tests pass; affected physical tests rerun after build4/4pass.
 This validates the actual worker/IPC capture boundary, not supervisor integration,
 authenticated RDP create-resume UI or production persistence/restart recovery.
+
+2026-09-21 real namespace supervisor integration PASS (99956ce, SolOPYgRT):
+krdp-virtual-session-probe supplies a trusted launch factory for the bounded
+private Plasma script, binds the authenticated ConsoleWorkerEndpoint outside
+the namespace through its owned0700 runtime, and lets VirtualSessionSupervisor
+own the namespace leader. Actual worker Ready + matching1280x720 metadata and
+keyframe call captureReady, then registry client1 attaches/detaches. One second
+later registry client2 reattaches the SAME generation1, and explicit owner stop
+waits for namespace leader exit/Absent. Probe exits0; only physical KWin168073
+remains; physical817active/host167444 unchanged. Worker log copied to
+rdp/evidence/virtual-supervised-worker.log. Local focused lifecycle tests4/4pass.
+
+These registry clients are simulated identifiers, NOT two RDP transports. The
+earlier native-GUI reconnect proof remains separate. The manager now supervises
+a real authenticated-capture namespace, but still through the Sol-only bounded
+probe (read-only HOME, incidental render ACL); no installed persistent launcher,
+PAM admission/create-resume protocol, UI or restart adoption is delivered yet.
