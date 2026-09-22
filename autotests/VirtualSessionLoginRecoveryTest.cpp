@@ -26,8 +26,8 @@ namespace {
 const QString root = u"/org/freedesktop/login1"_s;
 const QString prefix = root + u"/session/"_s;
 const QString service = u"org.freedesktop.login1"_s;
-QVariant userTuple(quint32 uid) {
-    QDBusArgument a; a.beginStructure(); a << uid << QDBusObjectPath(root + u"/user/_1000"_s); a.endStructure();
+QVariant userTuple(quint32 uid, const QString &path = root + u"/user/_1000"_s) {
+    QDBusArgument a; a.beginStructure(); a << uid << QDBusObjectPath(path); a.endStructure();
     return QVariant::fromValue(a);
 }
 QVariant seatTuple(const QString &seat = {}) {
@@ -167,6 +167,19 @@ private Q_SLOTS:
             s.rows.append({u"c43"_s, 1000, {}, {}, QDBusObjectPath(prefix + u"c43"_s)});
             s.fields[prefix + u"c43"_s] = props(u"c43"_s, virtualLoginTag(f.record.launch));
         });
+        QCOMPARE(VirtualSessionLoginRecovery::reconcile(*f.client, f.record, f.keeper, 300), Result::Refused);
+        QVERIFY(f.terminations().isEmpty());
+    }
+    void rejectsContradictoryUserObject_data() {
+        QTest::addColumn<QString>("path");
+        QTest::newRow("different uid") << root + u"/user/_1001"_s;
+        QTest::newRow("noncanonical uid") << root + u"/user/_01000"_s;
+        QTest::newRow("suffix") << root + u"/user/_1000extra"_s;
+        QTest::newRow("child") << root + u"/user/_1000/child"_s;
+    }
+    void rejectsContradictoryUserObject() {
+        QFETCH(QString, path); Fixture f; QVERIFY(f.start());
+        f.edit([&](auto &s) { s.fields[prefix + u"c42"_s][u"User"_s] = userTuple(1000, path); });
         QCOMPARE(VirtualSessionLoginRecovery::reconcile(*f.client, f.record, f.keeper, 300), Result::Refused);
         QVERIFY(f.terminations().isEmpty());
     }

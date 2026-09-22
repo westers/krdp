@@ -48,7 +48,7 @@ bool identity(const QVariantMap &fields, const Session &listed, const VirtualSes
     // No runtime/user lookup: those resources may already be disappearing.
     return counterId(listed.id) && listed.path == SessionPrefix + listed.id
         && get("Id") == listed.id && uid == record.uid && listed.uid == record.uid
-        && userPath.path().startsWith(QStringLiteral("/org/freedesktop/login1/user/"))
+        && userPath.path() == QStringLiteral("/org/freedesktop/login1/user/_%1").arg(record.uid)
         && listed.seat.isEmpty() && seatName.isEmpty() && seatPath.path() == QStringLiteral("/")
         && get("Desktop") == virtualLoginTag(record.launch) && get("Service") == QStringLiteral("krdp-virtual-session")
         && get("Type") == QStringLiteral("wayland") && get("Class") == QStringLiteral("background")
