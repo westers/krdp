@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 // Independent root service entry, never setuid or invoked with RDP-supplied argv.
 #include "VirtualSessionServicePlan.h"
+#include "VirtualSessionServiceScope.h"
 #include <QCoreApplication>
 #include <QCommandLineParser>
 #include <QFile>
@@ -45,6 +46,10 @@ int main(int argc, char **argv)
     if (!parser.positionalArguments().isEmpty()) return refused("unexpected arguments");
     const auto record = KRdp::VirtualSessionJournal::readLaunchIntent(parser.value(QStringLiteral("session")));
     if (!record) return refused("committed launch intent");
+    // This launcher must already belong to its dedicated system unit, never
+    // an administrator's shell, the broker unit, or a physical login scope.
+    auto scope = KRdp::VirtualSessionServiceScope::open(record->session);
+    if (!scope) return refused("dedicated nondelegated service scope");
     QFile bootFile(QStringLiteral("/proc/sys/kernel/random/boot_id"));
     if (!bootFile.open(QIODevice::ReadOnly)) return refused("boot identity");
     const auto boot = QString::fromLatin1(bootFile.read(128)).trimmed();
@@ -99,6 +104,10 @@ int main(int argc, char **argv)
     char path[] = "PATH=/usr/bin:/bin", lang[] = "LANG=C.UTF-8";
     char *environment[] = {path, lang, nullptr};
     umask(0077);
+    // This entry still execs the guardian chain; only admission uses the scope
+    // handle until the persistent parent is integrated. Close it before the
+    // bulk inherited-FD close so failed exec cannot double-close a reused FD.
+    scope.reset();
     if (chdir("/") || syscall(SYS_close_range, 3U, ~0U, 0U)) return refused("clean execution context");
     execve(arguments[0], arguments.data(), environment);
     return refused("device entry exec");

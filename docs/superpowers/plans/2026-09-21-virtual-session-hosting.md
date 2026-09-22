@@ -852,3 +852,34 @@ administrator installation responsibility, not verified by an ownership check.
 The keeper's trusted logind snapshot does not prove subsequent runtime inode
 continuity. No passwords or inherited host bus variables reach desktop children.
 Reference: https://man7.org/linux/man-pages/man2/pidfd_open.2.html
+
+### Dedicated service containment gate
+
+VirtualSessionServiceScope now pins only the calling root launcher's exact
+`/system.slice/krdp-virtual-session@UUID.service` cgroup on the cgroup-v2 kernel
+filesystem. Entry validates this before consuming its launch claim. The draft
+template explicitly sets Slice=system.slice and Delegate=no (instanced services
+otherwise default to a per-template slice). No arbitrary root shell, broker unit,
+physical login scope or client-supplied cgroup path can pass admission.
+
+Snapshots require the parent still in that group, root-owned/non-group/world-
+writable migration/control files, no nested cgroups, bounded complete PID lines,
+and inclusion of the parent PID. Duplicates are allowed/deduplicated per kernel
+semantics. Absent/malformed/truncated/oversized data is uncertainty, not proof of
+extinction. No live non-parent members observed is distinct from reaped zombies:
+the kernel omits zombies from cgroup.procs. Signal helper preflights pidfds and
+membership and only permits TERM/KILL to non-parent members; submission is not
+exit proof. Root signaling is NOT exercised by current tests.
+
+Before the parent may use this cleanup helper, serialize its own PAM migration
+and resolve keeper lifecycle separately: never include a migrating keeper as an
+ordinary desktop cleanup target. Require no external privileged migration during
+teardown. Pidfds prevent PID-reuse targeting, NOT atomic cgroup membership; mode
+checks establish only a nondelegation snapshot. Normal caller must repeat the
+extinction check after signaling and keep PAM while state is uncertain. Full
+parent/keeper integration and privileged cgroup signaling remain unimplemented
+or unaccepted; this adds entry admission plus the next teardown building block.
+Tests cover pure PID parsing and temporary-directory missing/nested/symlink/empty
+cases, nonroot/random-unit refusal and draft slice directives, not root runtime.
+References: https://docs.kernel.org/admin-guide/cgroup-v2.html and
+https://github.com/systemd/systemd/blob/main/man/systemd.service.xml

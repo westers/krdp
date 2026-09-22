@@ -17,6 +17,12 @@ class VirtualSessionServicePlanTest : public QObject {
         {QStringLiteral("0000:09:00.0")}, {1280, 720}};
     const QString device = QStringLiteral("/usr/bin/krdp-virtual-device-entry"), guardian = QStringLiteral("/usr/bin/krdp-virtual-guardian");
 private Q_SLOTS:
+    void serviceHasExplicitNondelegatedSlice() {
+        QFile unit(QString::fromLocal8Bit(KRDP_SESSION_UNIT)); QVERIFY(unit.open(QIODevice::ReadOnly));
+        const auto bytes = unit.readAll();
+        QVERIFY(bytes.contains("\nSlice=system.slice\n"));
+        QVERIFY(bytes.contains("\nDelegate=no\n"));
+    }
     void pamKeeperRequiresCleanPrivilegedOwner() {
         QProcess keeper;
         QProcessEnvironment environment;
