@@ -131,7 +131,8 @@ policy_pid=$!
 ready=false
 for attempt in {1..50}; do
     kill -0 "$policy_pid"
-    if pw-dump | jq -e 'any(.[]; .type == "PipeWire:Interface:Client" and .info.props."application.name" == "WirePlumber")' >/dev/null; then
+    timeout 5 pw-dump >"$XDG_RUNTIME_DIR/policy-graph.json"
+    if jq -e 'any(.[]; .type == "PipeWire:Interface:Client" and .info.props."application.process.binary" == "wireplumber")' "$XDG_RUNTIME_DIR/policy-graph.json" >/dev/null; then
         ready=true
         break
     fi
