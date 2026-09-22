@@ -32,7 +32,9 @@ public:
 
 private:
     friend class VirtualSessionHostControllerTest;
-    bool recoverRecords(const QVector<VirtualSessionJournal::Record> &records, const QString &boot, QString *error);
+    bool recoverRecords(const QVector<VirtualSessionJournal::Record> &records, const QString &boot, QString *error,
+                        const QSet<QString> &completed = {});
+    void reconcileCleanExits();
     std::optional<VirtualSessionRegistry::Handle> createIndependent(quint32 uid);
     bool startIndependentService(const QString &unit, const VirtualSessionRegistry::Handle &handle);
     struct Worker {
@@ -55,6 +57,8 @@ private:
     bool m_recoveryAttempted = false;
     VirtualSessionJournal *m_journal = nullptr;
     VirtualSessionJournal *m_recoveredJournal = nullptr;
+    QString m_recoveryBoot;
+    QTimer m_reconcileTimer;
     StartService m_startService;
     std::function<bool(const VirtualSessionJournal::Record &)> m_commitIntent;
     bool m_creationBlocked = false;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionSupervisor.h"
 #include <QDir>
+#include <QPointer>
 #include <algorithm>
 
 namespace KRdp
@@ -61,15 +62,16 @@ std::optional<VirtualSessionSupervisor::Handle> VirtualSessionSupervisor::adopt(
     return handle;
 }
 
-bool VirtualSessionSupervisor::rememberUnavailable(quint32 uid, const QString &session)
+bool VirtualSessionSupervisor::rememberUnavailable(const VirtualSessionGuardianClient::Identity &identity)
 {
-    const auto handle = m_registry.reserveRetained(uid, session);
+    const auto handle = m_registry.reserveRetained(identity.uid, identity.session);
     if (!handle) return false;
     auto value = std::make_unique<Runtime>();
     value->handle = *handle;
+    value->identity = identity;
     value->failed = true;
     value->unresolvedIntent = true;
-    m_runtimes.emplace(session, std::move(value));
+    m_runtimes.emplace(identity.session, std::move(value));
     return m_registry.unavailable(*handle);
 }
 
@@ -305,12 +307,38 @@ bool VirtualSessionSupervisor::stop(quint32 uid, const QString &id)
 bool VirtualSessionSupervisor::forget(quint32 uid, const QString &id)
 {
     const auto existing = m_runtimes.find(id);
+    if (existing != m_runtimes.end() && existing->second->retiring) return false;
     if (existing != m_runtimes.end() && existing->second->unresolvedIntent) return false;
     if (existing != m_runtimes.end() && existing->second->guardian && !existing->second->terminalConfirmed) return false;
     if (!m_registry.forget(uid, id)) {
         return false;
     }
     m_runtimes.erase(id);
+    return true;
+}
+
+bool VirtualSessionSupervisor::forgetReconciled(const VirtualSessionGuardianClient::Identity &identity)
+{
+    const auto found = m_runtimes.find(identity.session);
+    if (found == m_runtimes.end()) return false;
+    auto &r = *found->second;
+    // Never use this journal-only authority to destroy a legacy QProcess launch.
+    if (r.retiring || r.process.state() != QProcess::NotRunning || (!r.guardian && !r.unresolvedIntent)) return false;
+    bool owned = false;
+    for (const auto &entry : m_registry.list(identity.uid)) if (entry.id == identity.session) owned = true;
+    if (!owned) return false;
+    if (r.identity.uid != identity.uid || r.identity.session != identity.session
+        || r.identity.incarnation != identity.incarnation || r.identity.socket != identity.socket || r.identity.token != identity.token) return false;
+    const auto handle = r.handle;
+    r.deadline.stop(); r.poll.stop();
+    r.failed = true; r.terminalConfirmed = true; r.retiring = true;
+    m_registry.unavailable(handle);
+    const QPointer<VirtualSessionSupervisor> alive(this);
+    notifyUnavailable(handle);
+    if (!alive) return false;
+    // Notification may release a transport. Do not reuse runtime references.
+    if (!m_registry.forget(identity.uid, identity.session)) return false;
+    m_runtimes.erase(identity.session);
     return true;
 }
 }

@@ -134,7 +134,13 @@ int main(int argc, char **argv)
         // which otherwise wait indefinitely. Keeper observes owner death.
         QTimer::singleShot(5000, &app, [] { _exit(1); });
     };
-    KRdp::VirtualSessionServiceOwner owner(std::move(checks), [&app](int result) { app.exit(result); });
+    KRdp::VirtualSessionServiceOwner owner(std::move(checks), [&app, record = *record](int result) {
+        // Only the root owner's normal completion supplies this outcome; the
+        // independent ExecStopPost reconciliation proof is still required.
+        if (result == 0 && !KRdp::VirtualSessionJournal::recordOrderedExit(record))
+            result = refused("durable ordered-exit evidence");
+        app.exit(result);
+    });
     QSocketNotifier notifier(signalFd, QSocketNotifier::Read);
     QObject::connect(&notifier, &QSocketNotifier::activated, &app, [&] {
         signalfd_siginfo signal{};

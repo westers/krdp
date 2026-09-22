@@ -28,6 +28,155 @@ class VirtualSessionJournalTest : public QObject {
     static QString id() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     static VirtualSessionJournal::Record record() { return {1000, id(), id(), id(), id(), QByteArray(32, 's')}; }
 private Q_SLOTS:
+    void orderedAndReconciledAreIndependent() {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto ordered = record(), reconciled = record();
+        for (const auto &r : {ordered, reconciled}) {
+            QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        }
+        QVERIFY(journal->writeOrderedExit(ordered, nullptr));
+        QVERIFY(journal->writeReconciled(reconciled, nullptr));
+        QCOMPARE(journal->orderedExit(ordered), std::optional<bool>(true));
+        QCOMPARE(journal->reconciled(ordered), std::optional<bool>(false));
+        QCOMPARE(journal->orderedExit(reconciled), std::optional<bool>(false));
+        QCOMPARE(journal->reconciled(reconciled), std::optional<bool>(true));
+        // Even copying intact evidence cannot change its meaning/domain.
+        QVERIFY(QFile::copy(dir.filePath(QStringLiteral(".reconciled-") + reconciled.session),
+            dir.filePath(QStringLiteral(".ordered-") + reconciled.session)));
+        QVERIFY(!journal->orderedExit(reconciled));
+        QVERIFY(QFile::copy(dir.filePath(QStringLiteral(".ordered-") + ordered.session),
+            dir.filePath(QStringLiteral(".reconciled-") + ordered.session)));
+        QVERIFY(!journal->reconciled(ordered));
+        const auto records = journal->records(); QVERIFY(records); QCOMPARE(records->size(), 2);
+    }
+    void orderedExitIsSeparateDurableAndNeverReplayAuthority() {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record();
+        QVERIFY(journal->insert(r));
+        QCOMPARE(journal->orderedExit(r), std::optional<bool>());
+        QVERIFY(!journal->writeOrderedExit(r, nullptr)); // No consumed launch.
+        QVERIFY(journal->claimRecord(r, nullptr));
+        const VirtualSessionJournal::Keeper birth{12345, 42, 4242};
+        QVERIFY(journal->writeKeeper(r, birth, nullptr));
+        QVERIFY(journal->writeKeeperClosed(r, birth, nullptr));
+        QCOMPARE(journal->orderedExit(r), std::optional<bool>(false)); // PAM close alone.
+        QVERIFY(journal->writeOrderedExit(r, nullptr));
+        QVERIFY(!journal->writeOrderedExit(r, nullptr));
+        QVERIFY(!journal->claimRecord(r, nullptr));
+        QVERIFY(!journal->insert(r));
+        journal.reset();
+        journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        QString error = QStringLiteral("stale error");
+        QCOMPARE(journal->orderedExit(r, &error), std::optional<bool>(true)); QVERIFY(error.isEmpty());
+        const auto all = journal->records(); QVERIFY(all); QCOMPARE(all->size(), 1); QVERIFY(all->first() == r);
+        if (getuid()) QVERIFY(!VirtualSessionJournal::recordOrderedExit(r));
+    }
+    void absentOrderedExitRequiresValidClaim_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"missing", "malformed", "wrong-launch", "wrong-incarnation"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void absentOrderedExitRequiresValidClaim() {
+        QFETCH(QString, kind); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r));
+        if (kind != QStringLiteral("missing")) {
+            QVERIFY(journal->claimRecord(r, nullptr));
+            QFile claim(dir.filePath(QStringLiteral(".claimed-") + r.session));
+            QVERIFY(claim.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            const QByteArray bytes = kind == QStringLiteral("malformed") ? QByteArray("partial")
+                : (kind == QStringLiteral("wrong-launch") ? id() : r.launch).toLatin1() + '\n'
+                    + (kind == QStringLiteral("wrong-incarnation") ? id() : r.incarnation).toLatin1();
+            QCOMPARE(claim.write(bytes), qint64(bytes.size()));
+        }
+        QVERIFY(!QFile::exists(dir.filePath(QStringLiteral(".ordered-") + r.session)));
+        QString error;
+        QCOMPARE(journal->orderedExit(r, &error), std::optional<bool>());
+        QVERIFY(!error.isEmpty());
+        QVERIFY(!journal->writeOrderedExit(r, nullptr));
+        QVERIFY(journal->records());
+    }
+    void orderedExitBindsEveryIdentityField_data() {
+        QTest::addColumn<QString>("field");
+        for (const auto *field : {"uid", "session", "launch", "incarnation", "boot", "token"})
+            QTest::newRow(field) << QString::fromLatin1(field);
+    }
+    void orderedExitBindsEveryIdentityField() {
+        QFETCH(QString, field); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); auto other = r;
+        if (field == QStringLiteral("uid")) ++other.uid;
+        else if (field == QStringLiteral("session")) other.session = id();
+        else if (field == QStringLiteral("launch")) other.launch = id();
+        else if (field == QStringLiteral("incarnation")) other.incarnation = id();
+        else if (field == QStringLiteral("boot")) other.boot = id();
+        else other.token.fill('t');
+        QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(!journal->writeOrderedExit(other, nullptr));
+        QVERIFY(!journal->orderedExit(other));
+        QVERIFY(journal->writeOrderedExit(r, nullptr));
+        // Move valid evidence to a different, independently valid launch intent.
+        // This exercises the marker binding, beyond the expected-vs-intent check.
+        QTemporaryDir second;
+        auto next = VirtualSessionJournal::openAt(second.path(), getuid(), nullptr); QVERIFY(next);
+        QVERIFY(next->insert(other)); QVERIFY(next->claimRecord(other, nullptr));
+        QVERIFY(QFile::copy(dir.filePath(QStringLiteral(".ordered-") + r.session),
+            second.filePath(QStringLiteral(".ordered-") + other.session)));
+        QString error;
+        QVERIFY(!next->orderedExit(other, &error)); QVERIFY(!error.isEmpty());
+        QVERIFY(!error.contains(QString::fromLatin1(r.token.toHex())));
+    }
+    void unsafeOrderedExitRefused_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"empty", "truncated", "extra", "permissions", "symlink", "hardlink", "fifo", "intent-owner"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void unsafeOrderedExitRefused() {
+        QFETCH(QString, kind); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(journal->writeOrderedExit(r, nullptr));
+        const auto path = dir.filePath(QStringLiteral(".ordered-") + r.session);
+        if (kind == QStringLiteral("symlink") || kind == QStringLiteral("fifo")) {
+            QVERIFY(QFile::remove(path));
+            if (kind == QStringLiteral("symlink")) QVERIFY(QFile::link(QStringLiteral("/etc/passwd"), path));
+            else QVERIFY(!mkfifo(QFile::encodeName(path).constData(), 0600));
+        } else if (kind == QStringLiteral("hardlink")) {
+            QVERIFY(!link(QFile::encodeName(path).constData(), QFile::encodeName(dir.filePath(QStringLiteral(".pending-alias"))).constData()));
+        } else if (kind == QStringLiteral("permissions")) {
+            QVERIFY(!chmod(QFile::encodeName(path).constData(), 0644));
+        } else if (kind == QStringLiteral("intent-owner")) {
+            // Changing the trust owner rejects the launch intent first; this
+            // unprivileged fixture does not isolate marker-owner validation.
+            ++journal->m_owner;
+        } else {
+            QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite));
+            if (kind == QStringLiteral("extra")) { QVERIFY(file.seek(file.size())); QCOMPARE(file.write("x"), qint64(1)); }
+            else QVERIFY(file.resize(kind == QStringLiteral("empty") ? 0 : file.size() - 1));
+        }
+        QString error;
+        QVERIFY(!journal->orderedExit(r, &error)); QVERIFY(!error.isEmpty());
+        QVERIFY(!journal->writeOrderedExit(r, nullptr));
+        if (kind == QStringLiteral("intent-owner")) --journal->m_owner;
+        QVERIFY(journal->records());
+    }
+    void orderedExitDurabilityFailurePreservesEvidence_data() {
+        QTest::addColumn<int>("which");
+        QTest::newRow("file") << 1; QTest::newRow("directory") << 2;
+    }
+    void orderedExitDurabilityFailurePreservesEvidence() {
+        QFETCH(int, which); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        failSync = which; const auto reset = qScopeGuard([] { failSync = 0; });
+        QString error;
+        QVERIFY(!journal->writeOrderedExit(r, &error)); QVERIFY(!error.isEmpty());
+        failSync = 0;
+        QVERIFY(QFile::exists(dir.filePath(QStringLiteral(".ordered-") + r.session)));
+        QVERIFY(!journal->writeOrderedExit(r, nullptr)); QVERIFY(!journal->claimRecord(r, nullptr));
+    }
     void noKeeperReconciliationRequiresPostExtinctionRead() {
         QTemporaryDir dir;
         auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);

@@ -55,6 +55,12 @@ public:
     static bool recordReconciled(const Record &expected, QString *error = nullptr);
     // nullopt = unsafe/malformed/mismatched; false = missing evidence.
     std::optional<bool> reconciled(const Record &expected, QString *error = nullptr) const;
+    // Root ServiceOwner finished normally (result == 0). Independent of cleanup
+    // proof; not inferred from guardian exit, and never permission to replay.
+    static bool recordOrderedExit(const Record &expected, QString *error = nullptr);
+    // Claim required even when marker is missing. nullopt = uncertain; false =
+    // missing. Neither establishes an ordered outcome.
+    std::optional<bool> orderedExit(const Record &expected, QString *error = nullptr) const;
     bool insert(const Record &record, QString *error = nullptr);
     std::optional<QVector<Record>> records(QString *error = nullptr) const;
 private:
@@ -66,6 +72,10 @@ private:
     bool claimRecord(const Record &expected, QString *error);
     bool hasClaim(const Record &expected) const;
     bool writeReconciled(const Record &expected, QString *error);
+    bool writeOrderedExit(const Record &expected, QString *error);
+    enum class Outcome { Reconciled, Ordered };
+    bool writeOutcome(const Record &expected, Outcome outcome, QString *error);
+    std::optional<bool> readOutcome(const Record &expected, Outcome outcome, QString *error) const;
     bool writeKeeper(const Record &expected, const Keeper &keeper, QString *error);
     std::optional<Keeper> readKeeperRecord(const Record &expected, bool *missing, QString *error) const;
     bool writeKeeperClosed(const Record &expected, const Keeper &keeper, QString *error);

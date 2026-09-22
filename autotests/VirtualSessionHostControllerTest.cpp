@@ -12,6 +12,124 @@ class VirtualSessionHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void retirementGuardsRecursionAndSupervisorDestruction()
+    {
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        VirtualSessionGuardianClient::Identity identity{1000, uuid(), uuid(), QStringLiteral("/test/socket"), QByteArray(32, 't')};
+        auto supervisor = std::make_unique<VirtualSessionSupervisor>(VirtualSessionSupervisor::LaunchFactory{});
+        QVERIFY(supervisor->rememberUnavailable(identity));
+        auto wrong = identity; wrong.incarnation = uuid();
+        QVERIFY(!supervisor->forgetReconciled(wrong));
+        wrong = identity; wrong.token.fill('x'); QVERIFY(!supervisor->forgetReconciled(wrong));
+        wrong = identity; wrong.socket += QStringLiteral("-wrong"); QVERIFY(!supervisor->forgetReconciled(wrong));
+        wrong = identity; ++wrong.uid; QVERIFY(!supervisor->forgetReconciled(wrong));
+        int callbacks = 0;
+        supervisor->setUnavailableCallback([&](const auto &) {
+            ++callbacks;
+            QVERIFY(!supervisor->forgetReconciled(identity));
+            QVERIFY(!supervisor->forget(identity.uid, identity.session));
+        });
+        QVERIFY(supervisor->forgetReconciled(identity)); QCOMPARE(callbacks, 1);
+        QVERIFY(supervisor->list(1000).isEmpty());
+        QVERIFY(supervisor->rememberUnavailable(identity));
+        supervisor->setUnavailableCallback([&](const auto &) { supervisor.reset(); });
+        QVERIFY(!supervisor->forgetReconciled(identity)); QVERIFY(!supervisor);
+    }
+    void retirementCallbackMayDestroyHostDuringCreate()
+    {
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server;
+        auto host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
+        QVERIFY(host->recover(*journal));
+        QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        QVERIFY(host->createIndependent(1000));
+        const auto records = journal->records(); QVERIFY(records); QCOMPARE(records->size(), 1);
+        const auto r = records->first();
+        QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(journal->writeOrderedExit(r, nullptr)); QVERIFY(journal->writeReconciled(r, nullptr));
+        host->m_supervisor.setUnavailableCallback([&](const auto &) { host.reset(); });
+        QVERIFY(!host->createIndependent(1000)); QVERIFY(!host);
+        QCOMPARE(journal->records()->size(), 1);
+    }
+    void completedHistoryDoesNotConsumeLiveAdmissionAfterRestart_data()
+    {
+        QTest::addColumn<int>("history");
+        QTest::newRow("beyond-live-limit") << 8;
+        QTest::newRow("journal-capacity") << 256;
+    }
+    void completedHistoryDoesNotConsumeLiveAdmissionAfterRestart()
+    {
+        QFETCH(int, history);
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr); QVERIFY(journal);
+        QFile file(QStringLiteral("/proc/sys/kernel/random/boot_id")); QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto boot = QString::fromLatin1(file.readAll()).trimmed();
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        for (int i = 0; i < history; ++i) {
+            const VirtualSessionJournal::Record r{1000, uuid(), uuid(), uuid(), boot, QByteArray(32, 'x')};
+            QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+            QVERIFY(journal->writeOrderedExit(r, nullptr)); QVERIFY(journal->writeReconciled(r, nullptr));
+        }
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal)); QVERIFY(host.m_supervisor.list(1000).isEmpty());
+        int started = 0;
+        QVERIFY(host.enableIndependentCreates(*journal, [&](const auto &, const auto &) { ++started; return false; }));
+        const auto created = host.createIndependent(1000);
+        QCOMPARE(bool(created), history < 256);
+        QCOMPARE(started, history < 256 ? 1 : 0);
+        QCOMPARE(journal->records()->size(), history + started); // Never publish an unreadable 257th intent.
+    }
+    void eachTerminalProofAloneAndOldBootRemainUnavailable_data()
+    {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"ordered-only", "reconciled-only", "corrupt-ordered", "old-boot"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void eachTerminalProofAloneAndOldBootRemainUnavailable()
+    {
+        QFETCH(QString, kind);
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr); QVERIFY(journal);
+        QFile file(QStringLiteral("/proc/sys/kernel/random/boot_id")); QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto boot = QString::fromLatin1(file.readAll()).trimmed();
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        const VirtualSessionJournal::Record r{1000, uuid(), uuid(), uuid(), kind == QStringLiteral("old-boot") ? uuid() : boot, QByteArray(32, 'x')};
+        QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        if (kind != QStringLiteral("reconciled-only")) QVERIFY(journal->writeOrderedExit(r, nullptr));
+        if (kind != QStringLiteral("ordered-only")) QVERIFY(journal->writeReconciled(r, nullptr));
+        if (kind == QStringLiteral("corrupt-ordered")) {
+            QFile marker(directory.filePath(QStringLiteral(".ordered-") + r.session));
+            QVERIFY(marker.open(QIODevice::WriteOnly | QIODevice::Truncate)); marker.close();
+        }
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal));
+        QCOMPARE(host.m_supervisor.list(1000).size(), 1);
+        QCOMPARE(host.m_supervisor.list(1000).first().phase, VirtualSessionState::Phase::Failed);
+        QVERIFY(journal->records()->first() == r);
+    }
+    void sameBrokerReclaimsOnlyProvenCleanHistory()
+    {
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal));
+        QVERIFY(host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        for (int i = 0; i < 8; ++i) {
+            const auto handle = host.createIndependent(1000); QVERIFY(handle);
+            VirtualSessionJournal::Record r;
+            const auto records = journal->records(); QVERIFY(records);
+            for (const auto &candidate : *records) if (candidate.session == handle->id) r = candidate;
+            QVERIFY(r.valid()); QVERIFY(journal->claimRecord(r, nullptr));
+            QVERIFY(journal->writeOrderedExit(r, nullptr));
+            host.reconcileCleanExits(); QCOMPARE(host.m_supervisor.list(1000).size(), 1);
+            QVERIFY(journal->writeReconciled(r, nullptr));
+            if (i == 7) QTRY_VERIFY_WITH_TIMEOUT(host.m_supervisor.list(1000).isEmpty(), 2000);
+            else { host.reconcileCleanExits(); QVERIFY(host.m_supervisor.list(1000).isEmpty()); }
+            QVERIFY(!journal->claimRecord(r, nullptr));
+        }
+        QCOMPARE(journal->records()->size(), 8);
+    }
     void uncertainPublicationBlocksFurtherCreationUntilRecovery()
     {
         QTemporaryDir directory;

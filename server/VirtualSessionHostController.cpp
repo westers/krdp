@@ -2,6 +2,7 @@
 #include "VirtualSessionHostController.h"
 #include <QDebug>
 #include <QFileInfo>
+#include <QPointer>
 #include <limits>
 #include <QDBusConnection>
 #include <QDBusMessage>
@@ -21,6 +22,7 @@ VirtualSessionHostController::VirtualSessionHostController(Server *server, Prepa
       })
 {
     Q_ASSERT(server);
+    connect(&m_reconcileTimer, &QTimer::timeout, this, &VirtualSessionHostController::reconcileCleanExits);
     m_supervisor.setUnavailableCallback([this](const auto &handle) {
         // Closing one desktop must not revoke any other user's transport.
         QList<quint64> affected;
@@ -40,6 +42,7 @@ VirtualSessionHostController::VirtualSessionHostController(Server *server, Prepa
 
 VirtualSessionHostController::~VirtualSessionHostController()
 {
+    m_reconcileTimer.stop();
     m_supervisor.setUnavailableCallback({});
     m_supervisor.setGuardianAvailableCallback({});
     // Release all transports while control and endpoints still exist. The
@@ -88,7 +91,14 @@ bool VirtualSessionHostController::recover(VirtualSessionJournal &journal, QStri
         if (error) *error = QStringLiteral("Cannot establish current boot identity");
         return false;
     }
-    if (!recoverRecords(*records, QString::fromLatin1(file.read(128)).trimmed(), error)) return false;
+    const auto boot = QString::fromLatin1(file.read(128)).trimmed();
+    QSet<QString> completed;
+    for (const auto &record : *records) {
+        if (record.boot == boot && journal.reconciled(record) == std::optional<bool>(true)
+            && journal.orderedExit(record) == std::optional<bool>(true)) completed.insert(record.session);
+    }
+    if (!recoverRecords(*records, boot, error, completed)) return false;
+    m_recoveryBoot = boot;
     m_recoveredJournal = &journal;
     return true;
 }
@@ -98,6 +108,7 @@ bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJourna
     if (!m_recoveryAttempted || m_recoveredJournal != &journal || m_nextClient || m_journal
         || (!start && (getuid() || geteuid()))) return false;
     m_journal = &journal;
+    m_reconcileTimer.start(1000);
     m_commitIntent = [&journal](const auto &record) { return journal.insert(record); };
     m_startService = start ? std::move(start) : [this](const auto &unit, const auto &handle) { return startIndependentService(unit, handle); };
     m_control.setCreateHandler([this](quint32 uid) { return createIndependent(uid); });
@@ -115,6 +126,14 @@ bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJourna
 std::optional<VirtualSessionRegistry::Handle> VirtualSessionHostController::createIndependent(quint32 uid)
 {
     if (!m_journal || !uid || m_creationBlocked) return {};
+    const QPointer<VirtualSessionHostController> alive(this);
+    reconcileCleanExits();
+    if (!alive) return {};
+    if (m_creationBlocked) return {};
+    const auto existing = m_journal->records();
+    // Journal history has a separate bounded capacity; never publish an intent
+    // that the next broker would refuse to enumerate.
+    if (!existing || existing->size() >= 256) return {};
     QFile bootFile(QStringLiteral("/proc/sys/kernel/random/boot_id"));
     if (!bootFile.open(QIODevice::ReadOnly)) return {};
     const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
@@ -154,8 +173,27 @@ bool VirtualSessionHostController::startIndependentService(const QString &unit, 
     return true;
 }
 
+void VirtualSessionHostController::reconcileCleanExits()
+{
+    if (!m_journal) return;
+    const auto records = m_journal->records();
+    if (!records) { m_creationBlocked = true; return; }
+    for (const auto &record : *records) {
+        if (record.boot != m_recoveryBoot || m_journal->reconciled(record) != std::optional<bool>(true)
+            || m_journal->orderedExit(record) != std::optional<bool>(true)) continue;
+        const QPointer<VirtualSessionHostController> alive(this);
+        const bool retired = m_supervisor.forgetReconciled(record.identity());
+        if (!alive) return;
+        if (!retired) continue;
+        // The supervisor first revokes/disconnects affected transports. Remove
+        // endpoints only afterward; journal intents/claims stay immutable.
+        m_workers.erase(record.session);
+        m_newIntents.erase(record.session);
+    }
+}
+
 bool VirtualSessionHostController::recoverRecords(const QVector<VirtualSessionJournal::Record> &records,
-    const QString &boot, QString *error)
+    const QString &boot, QString *error, const QSet<QString> &completed)
 {
     const auto refuse = [error]() {
         if (error) *error = QStringLiteral("Recovery requires a fresh host and valid launch intents within admission limits");
@@ -166,17 +204,21 @@ bool VirtualSessionHostController::recoverRecords(const QVector<VirtualSessionJo
     QList<QPair<quint32, QString>> identities;
     QSet<QString> runtimes;
     QSet<QString> incarnations;
+    QSet<QString> sessions;
     for (const auto &record : records) {
         const QString runtime = QString::number(record.uid) + QLatin1Char('/') + record.launch;
-        if (!record.valid() || runtimes.contains(runtime) || incarnations.contains(record.incarnation)) return refuse();
+        if (!record.valid() || sessions.contains(record.session) || runtimes.contains(runtime) || incarnations.contains(record.incarnation)) return refuse();
+        sessions.insert(record.session);
         runtimes.insert(runtime);
         incarnations.insert(record.incarnation);
-        identities.append({record.uid, record.session});
+        if (!completed.contains(record.session)) identities.append({record.uid, record.session});
     }
+    if (!(completed - sessions).isEmpty()) return refuse();
     // Validate the whole set before socket activity or metadata mutation.
     if (!m_supervisor.canRecover(identities)) return refuse();
     m_recoveryAttempted = true;
     for (const auto &record : records) {
+        if (completed.contains(record.session)) continue;
         if (record.boot == boot && adopt(record.identity(), record.workerSocket())) continue;
         bool reserved = false;
         for (const auto &summary : m_supervisor.list(record.uid)) {
@@ -184,7 +226,7 @@ bool VirtualSessionHostController::recoverRecords(const QVector<VirtualSessionJo
         }
         // Failed adoption may already have reserved a runtime. Missing runtime
         // or occupied lease must still leave a visible intent, never a new spawn.
-        if (!reserved && !m_supervisor.rememberUnavailable(record.uid, record.session)) return refuse();
+        if (!reserved && !m_supervisor.rememberUnavailable(record.identity())) return refuse();
     }
     if (error) error->clear();
     return true;

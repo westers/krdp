@@ -43,7 +43,7 @@ public:
     void setGuardianAvailableCallback(std::function<void(const Handle &)> callback) { m_guardianAvailable = std::move(callback); }
     bool canRecover(const QList<QPair<quint32, QString>> &identities) const { return m_registry.empty() && m_registry.canReserve(identities); }
     // Trusted intent without a safe endpoint: visible Failed, no socket or spawn.
-    bool rememberUnavailable(quint32 uid, const QString &session);
+    bool rememberUnavailable(const VirtualSessionGuardianClient::Identity &identity);
     void setUnavailableCallback(std::function<void(const Handle &)> callback) { m_unavailable = std::move(callback); }
     std::optional<Handle> recreate(quint32 authenticatedUid, const QString &id);
     QList<VirtualSessionRegistry::Summary> list(quint32 uid) const { return m_registry.list(uid); }
@@ -56,6 +56,9 @@ public:
 
 private:
     friend class VirtualSessionHostControllerTest;
+    friend class VirtualSessionHostController;
+    // Host-only: both immutable ordered-exit and final cleanup proofs required.
+    bool forgetReconciled(const VirtualSessionGuardianClient::Identity &identity);
     struct Runtime {
         Handle handle;
         QProcess process;
@@ -71,6 +74,7 @@ private:
         bool stopSent = false;
         bool unresolvedIntent = false;
         bool awaitingService = false;
+        bool retiring = false;
     };
     void launch(quint32 uid, const Handle &handle);
     Runtime *runtime(const Handle &handle);
