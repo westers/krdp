@@ -57,7 +57,8 @@ public:
 private:
     friend class VirtualSessionHostControllerTest;
     friend class VirtualSessionHostController;
-    // Host-only: both immutable ordered-exit and final cleanup proofs required.
+    // Host-only: final cleanup plus orderly-exit or durable owner-dismissal
+    // proof required. Failed registry state alone never authorizes retirement.
     bool forgetReconciled(const VirtualSessionGuardianClient::Identity &identity);
     struct Runtime {
         Handle handle;

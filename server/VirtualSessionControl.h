@@ -28,6 +28,10 @@ public:
     void disconnected(quint64 client, std::function<void()> revoke);
     std::optional<Handle> attachment(quint64 client) const;
     void setCreateHandler(std::function<std::optional<Handle>(quint32)> create) { m_create = std::move(create); }
+    enum class DismissResult { Accepted, Unavailable, Uncertain };
+    void setDismissHandlers(std::function<bool(quint32, const QString &)> eligible,
+                            std::function<DismissResult(quint32, const QString &)> dismiss)
+    { m_dismissible = std::move(eligible); m_dismiss = std::move(dismiss); }
     // Includes release callbacks; nested event loops must not retire registry
     // entries while a command or synchronous revocation is on the stack.
     bool dispatchActive() const { return m_dispatchDepth != 0; }
@@ -44,6 +48,8 @@ private:
     QPointer<VirtualSessionSupervisor> m_supervisor;
     Release m_release;
     std::function<std::optional<Handle>(quint32)> m_create;
+    std::function<bool(quint32, const QString &)> m_dismissible;
+    std::function<DismissResult(quint32, const QString &)> m_dismiss;
     QHash<quint64, std::shared_ptr<Transport>> m_transports;
     unsigned m_dispatchDepth = 0;
 };

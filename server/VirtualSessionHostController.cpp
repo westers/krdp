@@ -13,6 +13,15 @@
 
 namespace KRdp
 {
+namespace {
+bool terminalProof(VirtualSessionJournal &journal, const VirtualSessionJournal::Record &record, const QString &boot)
+{
+    // A readback of complete dismissal bytes does not prove a previous fsync
+    // succeeded. Establish durability on every dismissal-based retirement path.
+    return record.boot == boot && journal.reconciled(record) == std::optional<bool>(true)
+        && (journal.orderedExit(record) == std::optional<bool>(true) || journal.durableDismissed(record));
+}
+}
 VirtualSessionHostController::VirtualSessionHostController(Server *server, Prepare prepare, QObject *parent)
     : QObject(parent), m_prepare(std::move(prepare)),
       m_supervisor([this](quint32 uid, const auto &handle) { return this->prepare(uid, handle); }),
@@ -99,8 +108,7 @@ bool VirtualSessionHostController::recover(VirtualSessionJournal &journal, QStri
     const auto boot = QString::fromLatin1(file.read(128)).trimmed();
     QSet<QString> completed;
     for (const auto &record : *records) {
-        if (record.boot == boot && journal.reconciled(record) == std::optional<bool>(true)
-            && journal.orderedExit(record) == std::optional<bool>(true)) completed.insert(record.session);
+        if (terminalProof(journal, record, boot)) completed.insert(record.session);
     }
     if (!recoverRecords(*records, boot, error, completed)) return false;
     m_recoveryBoot = boot;
@@ -117,6 +125,8 @@ bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJourna
     m_commitIntent = [&journal](const auto &record) { return journal.insert(record); };
     m_startService = start ? std::move(start) : [this](const auto &unit, const auto &handle) { return startIndependentService(unit, handle); };
     m_control.setCreateHandler([this](quint32 uid) { return createIndependent(uid); });
+    m_control.setDismissHandlers([this](quint32 uid, const QString &id) { return dismissalEligible(uid, id); },
+        [this](quint32 uid, const QString &id) { return dismissFailure(uid, id); });
     m_supervisor.setGuardianAvailableCallback([this](const auto &handle) {
         const auto found = m_newIntents.find(handle.id);
         if (found == m_newIntents.end()) return;
@@ -192,8 +202,7 @@ void VirtualSessionHostController::reconcileCleanExits()
     const auto records = m_journal->records();
     if (!records) { m_creationBlocked = true; return; }
     for (const auto &record : *records) {
-        if (record.boot != m_recoveryBoot || m_journal->reconciled(record) != std::optional<bool>(true)
-            || m_journal->orderedExit(record) != std::optional<bool>(true)) continue;
+        if (!terminalProof(*m_journal, record, m_recoveryBoot)) continue;
         const QPointer<VirtualSessionHostController> alive(this);
         const bool retired = m_supervisor.forgetReconciled(record.identity());
         if (!alive) return;
@@ -203,6 +212,50 @@ void VirtualSessionHostController::reconcileCleanExits()
         m_workers.erase(record.session);
         m_newIntents.erase(record.session);
     }
+}
+
+std::optional<VirtualSessionJournal::Record> VirtualSessionHostController::dismissalRecord(quint32 uid, const QString &id) const
+{
+    if (!uid || !m_journal) return {};
+    const auto records = m_journal->records();
+    if (!records) return {};
+    for (const auto &record : *records) {
+        if (record.session == id && record.uid == uid && record.boot == m_recoveryBoot
+            && m_journal->reconciled(record) == std::optional<bool>(true)) return record;
+    }
+    return {};
+}
+
+bool VirtualSessionHostController::dismissalEligible(quint32 uid, const QString &id) const
+{
+    bool failed = false;
+    for (const auto &entry : m_supervisor.list(uid))
+        if (entry.id == id) failed = entry.phase == VirtualSessionState::Phase::Failed;
+    if (!failed) return false;
+    const auto record = dismissalRecord(uid, id);
+    // Missing dismissal is eligible; malformed/uncertain evidence is not.
+    return record && m_journal->dismissed(*record).has_value();
+}
+
+VirtualSessionControl::DismissResult VirtualSessionHostController::dismissFailure(quint32 uid, const QString &id)
+{
+    using Result = VirtualSessionControl::DismissResult;
+    const auto record = dismissalRecord(uid, id); // Authenticate owner before disclosing any outcome.
+    if (!record) return Result::Unavailable;
+    const auto dismissed = m_journal->dismissed(*record);
+    bool present = false;
+    for (const auto &entry : m_supervisor.list(uid)) {
+        if (entry.id != id) continue;
+        present = true;
+        if (entry.phase != VirtualSessionState::Phase::Failed) return Result::Unavailable;
+    }
+    // No live row authorizes only a retry of an existing exact acknowledgement.
+    if (!present && dismissed != std::optional<bool>(true)) return Result::Unavailable;
+    if (!dismissed || !m_journal->recordDismissed(*record)) return Result::Uncertain;
+    // Do not revoke transports on the command's reply stack. The recurring
+    // timer is also a fallback if a nested event loop delivers this too soon.
+    QTimer::singleShot(0, this, &VirtualSessionHostController::reconcileCleanExits);
+    return Result::Accepted;
 }
 
 bool VirtualSessionHostController::recoverRecords(const QVector<VirtualSessionJournal::Record> &records,

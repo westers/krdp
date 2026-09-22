@@ -36,7 +36,7 @@ bool validRequest(const QJsonObject &request)
         || !request.value(QStringLiteral("v")).isDouble() || request.value(QStringLiteral("v")).toDouble() != 1
         || !token.match(request.value(QStringLiteral("id")).toString()).hasMatch()) return false;
     const auto action = request.value(QStringLiteral("action")).toString();
-    const bool sessionRequired = action == QStringLiteral("attach") || action == QStringLiteral("stop");
+    const bool sessionRequired = action == QStringLiteral("attach") || action == QStringLiteral("stop") || action == QStringLiteral("dismiss");
     if (!sessionRequired && action != QStringLiteral("list") && action != QStringLiteral("create") && action != QStringLiteral("detach")) return false;
     if (request.size() != (sessionRequired ? 5 : 4)) return false;
     if (sessionRequired) {
@@ -97,7 +97,14 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
     if (action == QStringLiteral("list")) {
         QJsonArray sessions;
         for (const auto &entry : supervisor->list(uid)) {
-            sessions.append(QJsonObject{{QStringLiteral("session"), entry.id}, {QStringLiteral("state"), phaseName(entry.phase)}});
+            QJsonObject row{{QStringLiteral("session"), entry.id}, {QStringLiteral("state"), phaseName(entry.phase)}};
+            if (m_dismissible && m_dismiss) {
+                const auto eligible = m_dismissible;
+                const bool permitted = entry.phase == VirtualSessionState::Phase::Failed && eligible(uid, entry.id);
+                if (!valid()) return uncertain();
+                row.insert(QStringLiteral("dismissible"), permitted);
+            }
+            sessions.append(row);
         }
         response.insert(QStringLiteral("sessions"), sessions);
         return response;
@@ -130,6 +137,19 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
         return response;
     }
     const QString id = record.value(QStringLiteral("session")).toString();
+    if (action == QStringLiteral("dismiss")) {
+        // Host resolves immutable owner identity first, including historical
+        // retries whose live row is already retired. Never route through Stop.
+        const auto dismiss = m_dismiss;
+        const auto result = dismiss ? dismiss(uid, id) : DismissResult::Unavailable;
+        if (!valid()) return uncertain();
+        if (result == DismissResult::Unavailable) return reply(record, false, QStringLiteral("session unavailable"));
+        if (result == DismissResult::Uncertain)
+            return reply(record, false, QStringLiteral("dismissal outcome uncertain; refresh before retrying with a new request id"));
+        response.insert(QStringLiteral("session"), id);
+        response.insert(QStringLiteral("state"), QStringLiteral("dismissed"));
+        return response;
+    }
     // Check ownership before releasing another transport or disclosing state.
     const auto owned = supervisor->list(uid);
     const auto found = std::find_if(owned.cbegin(), owned.cend(), [&](const auto &entry) { return entry.id == id; });

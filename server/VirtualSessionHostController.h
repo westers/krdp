@@ -35,6 +35,9 @@ private:
     bool recoverRecords(const QVector<VirtualSessionJournal::Record> &records, const QString &boot, QString *error,
                         const QSet<QString> &completed = {});
     void reconcileCleanExits();
+    std::optional<VirtualSessionJournal::Record> dismissalRecord(quint32 uid, const QString &id) const;
+    bool dismissalEligible(quint32 uid, const QString &id) const;
+    VirtualSessionControl::DismissResult dismissFailure(quint32 uid, const QString &id);
     std::optional<VirtualSessionRegistry::Handle> createIndependent(quint32 uid);
     bool startIndependentService(const QString &unit, const VirtualSessionRegistry::Handle &handle);
     struct Worker {

@@ -5,13 +5,190 @@
 #include <QSignalSpy>
 #include "VirtualSessionGuardian.h"
 #include "VirtualSessionHostController.h"
+#include <QJsonArray>
+
+namespace { int dismissalFailSync = 0; }
+extern "C" int __real_fsync(int fd);
+extern "C" int __wrap_fsync(int fd) {
+    if (dismissalFailSync > 0 && --dismissalFailSync == 0) { errno = EIO; return -1; }
+    return __real_fsync(fd);
+}
 
 namespace KRdp
 {
 class VirtualSessionHostControllerTest : public QObject
 {
     Q_OBJECT
+    static QJsonObject command(const QString &action, const QString &session = {}) {
+        QJsonObject r{{QStringLiteral("type"), QStringLiteral("virtual-session")}, {QStringLiteral("v"), 1},
+            {QStringLiteral("id"), QUuid::createUuid().toString(QUuid::WithoutBraces)}, {QStringLiteral("action"), action}};
+        if (!session.isEmpty()) r.insert(QStringLiteral("session"), session);
+        return r;
+    }
 private Q_SLOTS:
+    void oldBootAndMalformedEvidenceStayConservative_data()
+    {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"old-boot", "missing-proof", "malformed-proof", "malformed-dismissal", "ordered-with-malformed-dismissal"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void oldBootAndMalformedEvidenceStayConservative()
+    {
+        QFETCH(QString, kind); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        QFile bootFile(QStringLiteral("/proc/sys/kernel/random/boot_id")); QVERIFY(bootFile.open(QIODevice::ReadOnly));
+        const auto boot = QString::fromLatin1(bootFile.readAll()).trimmed();
+        const VirtualSessionJournal::Record r{1000, uuid(), uuid(), uuid(), kind == QStringLiteral("old-boot") ? uuid() : boot, QByteArray(32, 't')};
+        QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        if (kind != QStringLiteral("missing-proof")) QVERIFY(journal->writeReconciled(r, nullptr));
+        if (kind == QStringLiteral("old-boot")) QVERIFY(journal->recordDismissed(r));
+        if (kind == QStringLiteral("malformed-proof")) {
+            QFile marker(dir.filePath(QStringLiteral(".reconciled-") + r.session));
+            QVERIFY(marker.open(QIODevice::WriteOnly | QIODevice::Truncate)); marker.close();
+        }
+        if (kind.contains(QStringLiteral("malformed-dismissal"))) {
+            QFile marker(dir.filePath(QStringLiteral(".dismissed-") + r.session));
+            QVERIFY(marker.open(QIODevice::WriteOnly)); marker.close();
+        }
+        if (kind == QStringLiteral("ordered-with-malformed-dismissal")) QVERIFY(journal->writeOrderedExit(r, nullptr));
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal)); QVERIFY(host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        QVERIFY(!host.dismissalEligible(1000, r.session));
+        const auto response = host.m_control.request(1000, 1, command(QStringLiteral("dismiss"), r.session));
+        QVERIFY(!response.value(QStringLiteral("ok")).toBool());
+        host.reconcileCleanExits();
+        QCOMPARE(host.m_supervisor.list(1000).size(), kind == QStringLiteral("ordered-with-malformed-dismissal") ? 0 : 1);
+        QCOMPARE(journal->records()->size(), 1); QVERIFY(!journal->claimRecord(r, nullptr));
+    }
+    void ownerDismissalReclaimsQuotaAndSurvivesRecovery()
+    {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server;
+        auto host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
+        QVERIFY(host->recover(*journal));
+        QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        for (int i = 0; i < 4; ++i) QVERIFY(host->createIndependent(1000));
+        QVERIFY(!host->createIndependent(1000));
+        const auto r = journal->records()->first();
+        QVERIFY(journal->claimRecord(r, nullptr)); QVERIFY(journal->writeReconciled(r, nullptr));
+        const auto list = host->m_control.request(1000, 1, command(QStringLiteral("list")));
+        int eligible = 0;
+        for (const auto &value : list.value(QStringLiteral("sessions")).toArray()) {
+            const auto row = value.toObject(); QVERIFY(row.value(QStringLiteral("dismissible")).isBool());
+            if (row.value(QStringLiteral("dismissible")).toBool()) { ++eligible; QCOMPARE(row.value(QStringLiteral("session")).toString(), r.session); }
+        }
+        QCOMPARE(eligible, 1);
+        const auto wrong = host->m_control.request(1001, 2, command(QStringLiteral("dismiss"), r.session));
+        const auto missing = host->m_control.request(1001, 2, command(QStringLiteral("dismiss"), QUuid::createUuid().toString(QUuid::WithoutBraces)));
+        QVERIFY(!wrong.value(QStringLiteral("ok")).toBool()); QCOMPARE(wrong.value(QStringLiteral("message")), missing.value(QStringLiteral("message")));
+        const auto request = command(QStringLiteral("dismiss"), r.session);
+        const auto reply = host->m_control.request(1000, 1, request);
+        QVERIFY(reply.value(QStringLiteral("ok")).toBool()); QCOMPARE(reply.value(QStringLiteral("session")).toString(), r.session);
+        QCOMPARE(reply.value(QStringLiteral("state")).toString(), QStringLiteral("dismissed"));
+        QCOMPARE(host->m_supervisor.list(1000).size(), 4); // No inline retirement on reply stack.
+        QCOMPARE(host->m_control.request(1000, 1, request), reply);
+        QCOMPARE(journal->orderedExit(r), std::optional<bool>(false));
+        QTRY_COMPARE(host->m_supervisor.list(1000).size(), 3);
+        QVERIFY(host->createIndependent(1000)); QCOMPARE(journal->records()->size(), 5);
+        QVERIFY(!journal->claimRecord(r, nullptr));
+        host.reset();
+        host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
+        QVERIFY(host->recover(*journal)); QCOMPARE(host->m_supervisor.list(1000).size(), 4);
+        QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        for (const auto &entry : host->m_supervisor.list(1000)) QVERIFY(entry.id != r.session);
+        const auto retry = host->m_control.request(1000, 3, command(QStringLiteral("dismiss"), r.session));
+        QVERIFY(retry.value(QStringLiteral("ok")).toBool()); QCOMPARE(journal->records()->size(), 5);
+        QVERIFY(!host->m_control.request(1001, 4, command(QStringLiteral("dismiss"), r.session)).value(QStringLiteral("ok")).toBool());
+    }
+    void dismissalRequiresFailedLiveState_data()
+    {
+        QTest::addColumn<QString>("phase");
+        for (const auto *phase : {"starting", "retained", "attached", "stopping", "absent", "failed"})
+            QTest::newRow(phase) << QString::fromLatin1(phase);
+    }
+    void dismissalRequiresFailedLiveState()
+    {
+        QFETCH(QString, phase); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal)); QVERIFY(host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return true; }));
+        const auto handle = host.createIndependent(1000); QVERIFY(handle);
+        // Construct lifecycle states without falsely claiming real capture readiness.
+        auto &registry = host.m_supervisor.m_registry;
+        if (phase == QStringLiteral("retained") || phase == QStringLiteral("attached")) QVERIFY(registry.ready(*handle));
+        if (phase == QStringLiteral("attached")) QVERIFY(registry.attach(1000, handle->id, 99));
+        if (phase == QStringLiteral("stopping") || phase == QStringLiteral("absent")) QVERIFY(registry.stop(1000, handle->id));
+        if (phase == QStringLiteral("absent")) QVERIFY(registry.exited(*handle));
+        if (phase == QStringLiteral("failed")) QVERIFY(registry.unavailable(*handle));
+        const auto r = journal->records()->first();
+        QVERIFY(journal->claimRecord(r, nullptr)); QVERIFY(journal->writeReconciled(r, nullptr));
+        QCOMPARE(host.dismissalEligible(1000, r.session), phase == QStringLiteral("failed"));
+        const auto reply = host.m_control.request(1000, 1, command(QStringLiteral("dismiss"), r.session));
+        QCOMPARE(reply.value(QStringLiteral("ok")).toBool(), phase == QStringLiteral("failed"));
+        QCOMPARE(journal->dismissed(r), std::optional<bool>(phase == QStringLiteral("failed")));
+    }
+    void staleCleanupAndAbsentUndismissedHistoryCannotAuthorize()
+    {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal)); QVERIFY(host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        QVERIFY(host.createIndependent(1000));
+        const auto r = journal->records()->first(); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(journal->writeReconciled(r, nullptr)); QVERIFY(host.dismissalEligible(1000, r.session));
+        const QString path = dir.filePath(QStringLiteral(".reconciled-") + r.session);
+        QFile proof(path); QVERIFY(proof.open(QIODevice::ReadOnly)); const auto bytes = proof.readAll(); proof.close();
+        QVERIFY(proof.open(QIODevice::WriteOnly | QIODevice::Truncate)); proof.close();
+        QVERIFY(!host.m_control.request(1000, 1, command(QStringLiteral("dismiss"), r.session)).value(QStringLiteral("ok")).toBool());
+        QVERIFY(!QFile::exists(dir.filePath(QStringLiteral(".dismissed-") + r.session)));
+        QVERIFY(proof.open(QIODevice::WriteOnly)); QCOMPARE(proof.write(bytes), qint64(bytes.size())); proof.close();
+        QVERIFY(journal->writeOrderedExit(r, nullptr)); host.reconcileCleanExits(); QVERIFY(host.m_supervisor.list(1000).isEmpty());
+        QVERIFY(!host.dismissalEligible(1000, r.session));
+        QVERIFY(!host.m_control.request(1000, 1, command(QStringLiteral("dismiss"), r.session)).value(QStringLiteral("ok")).toBool());
+        QVERIFY(!QFile::exists(dir.filePath(QStringLiteral(".dismissed-") + r.session)));
+    }
+    void uncertainDismissalCannotRetireWithoutDurability_data()
+    {
+        QTest::addColumn<int>("sync"); QTest::addColumn<QString>("path");
+        for (int sync : {1, 2}) for (const auto *path : {"timer", "create", "recovery"})
+            QTest::newRow(qPrintable(QString::number(sync) + QLatin1Char('-') + QString::fromLatin1(path))) << sync << QString::fromLatin1(path);
+    }
+    void uncertainDismissalCannotRetireWithoutDurability()
+    {
+        QFETCH(int, sync); QFETCH(QString, path); QTemporaryDir dir;
+        const auto reset = qScopeGuard([] { dismissalFailSync = 0; });
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server;
+        auto host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
+        QVERIFY(host->recover(*journal)); QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        for (int i = 0; i < 4; ++i) QVERIFY(host->createIndependent(1000));
+        const auto r = journal->records()->first(); QVERIFY(journal->claimRecord(r, nullptr)); QVERIFY(journal->writeReconciled(r, nullptr));
+        const auto request = command(QStringLiteral("dismiss"), r.session);
+        dismissalFailSync = sync;
+        const auto uncertain = host->m_control.request(1000, 1, request);
+        QVERIFY(!uncertain.value(QStringLiteral("ok")).toBool());
+        QVERIFY(uncertain.value(QStringLiteral("message")).toString().contains(QStringLiteral("uncertain")));
+        QCOMPARE(journal->dismissed(r), std::optional<bool>(true));
+        QCOMPARE(host->m_control.request(1000, 1, request), uncertain); // Failure retry never executes again.
+        dismissalFailSync = sync;
+        if (path == QStringLiteral("timer")) {
+            QVERIFY(QMetaObject::invokeMethod(&host->m_reconcileTimer, "timeout", Qt::DirectConnection));
+        } else if (path == QStringLiteral("create")) {
+            QVERIFY(!host->createIndependent(1000));
+        } else {
+            host.reset(); host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
+            QVERIFY(host->recover(*journal));
+            QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        }
+        QCOMPARE(dismissalFailSync, 0); QCOMPARE(host->m_supervisor.list(1000).size(), 4);
+        QCOMPARE(journal->records()->size(), 4);
+        dismissalFailSync = 0;
+        QVERIFY(host->m_control.request(1000, 1, command(QStringLiteral("dismiss"), r.session)).value(QStringLiteral("ok")).toBool());
+        QTRY_COMPARE(host->m_supervisor.list(1000).size(), 3);
+        QVERIFY(!journal->claimRecord(r, nullptr));
+    }
     void controlDispatchDefersRetirementEvenInNestedEventLoop()
     {
         QTemporaryDir directory;

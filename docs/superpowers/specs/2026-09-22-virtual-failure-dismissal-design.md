@@ -1,6 +1,6 @@
 # Explicit dismissal of reconciled virtual-session failures
 
-Status: reviewed with required corrections below; implementation not yet delivered.
+Status: implemented and reviewed; isolated native acceptance and deployment pending.
 
 ## Problem and scope
 

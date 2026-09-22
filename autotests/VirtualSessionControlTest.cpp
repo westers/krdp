@@ -22,6 +22,59 @@ class VirtualSessionControlTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void dismissSchemaCapabilityAndReplay()
+    {
+        VirtualSessionSupervisor supervisor([](quint32, const auto &) -> std::optional<VirtualSessionSupervisor::Launch> { return {}; });
+        VirtualSessionControl control(supervisor, {});
+        const auto created = control.request(1000, 1, command(QStringLiteral("create"), QStringLiteral("create")));
+        const auto id = created.value(QStringLiteral("session")).toString();
+        const auto before = control.request(1000, 1, command(QStringLiteral("list-old"), QStringLiteral("list")));
+        QVERIFY(!before.value(QStringLiteral("sessions")).toArray().first().toObject().contains(QStringLiteral("dismissible")));
+        QVERIFY(!control.request(1000, 1, command(QStringLiteral("unsupported"), QStringLiteral("dismiss"), id)).value(QStringLiteral("ok")).toBool());
+        int mutations = 0;
+        bool uncertain = true;
+        control.setDismissHandlers([&](quint32 uid, const QString &session) { return uid == 1000 && session == id; },
+            [&](quint32 uid, const QString &session) {
+                ++mutations;
+                if (uid != 1000 || session != id) return VirtualSessionControl::DismissResult::Unavailable;
+                return uncertain ? VirtualSessionControl::DismissResult::Uncertain : VirtualSessionControl::DismissResult::Accepted;
+            });
+        const auto listed = control.request(1000, 1, command(QStringLiteral("list-new"), QStringLiteral("list")));
+        const auto capability = listed.value(QStringLiteral("sessions")).toArray().first().toObject().value(QStringLiteral("dismissible"));
+        QVERIFY(capability.isBool()); QVERIFY(capability.toBool());
+        for (auto malformed : {command(QStringLiteral("bad"), QStringLiteral("dismiss")),
+                               command(QStringLiteral("bad"), QStringLiteral("dismiss"), QStringLiteral("../path"))})
+            QVERIFY(!control.request(1000, 1, malformed).value(QStringLiteral("ok")).toBool());
+        auto extra = command(QStringLiteral("bad"), QStringLiteral("dismiss"), id); extra.insert(QStringLiteral("uid"), 1000);
+        QVERIFY(!control.request(1000, 1, extra).value(QStringLiteral("ok")).toBool()); QCOMPARE(mutations, 0);
+        const auto request = command(QStringLiteral("dismiss-once"), QStringLiteral("dismiss"), id);
+        const auto failed = control.request(1000, 1, request); QVERIFY(!failed.value(QStringLiteral("ok")).toBool());
+        uncertain = false;
+        QCOMPARE(control.request(1000, 1, request), failed); QCOMPARE(mutations, 1);
+        const auto accepted = control.request(1000, 1, command(QStringLiteral("fresh-retry"), QStringLiteral("dismiss"), id));
+        QVERIFY(accepted.value(QStringLiteral("ok")).toBool()); QCOMPARE(mutations, 2);
+        QCOMPARE(accepted.value(QStringLiteral("session")).toString(), id);
+        QCOMPARE(accepted.value(QStringLiteral("state")).toString(), QStringLiteral("dismissed"));
+        // The host acknowledgement callback, not a hidden Stop, owns retirement.
+        QCOMPARE(supervisor.list(1000).first().phase, Phase::Failed);
+    }
+    void dismissalHandlersMayDestroyControl_data()
+    {
+        QTest::addColumn<bool>("listing"); QTest::newRow("list") << true; QTest::newRow("dismiss") << false;
+    }
+    void dismissalHandlersMayDestroyControl()
+    {
+        QFETCH(bool, listing);
+        VirtualSessionSupervisor supervisor([](quint32, const auto &) -> std::optional<VirtualSessionSupervisor::Launch> { return {}; });
+        auto control = std::make_unique<VirtualSessionControl>(supervisor, VirtualSessionControl::Release{});
+        const auto created = control->request(1000, 1, command(QStringLiteral("create"), QStringLiteral("create")));
+        const auto id = created.value(QStringLiteral("session")).toString();
+        control->setDismissHandlers([&](quint32, const QString &) { control.reset(); return true; },
+            [&](quint32, const QString &) { control.reset(); return VirtualSessionControl::DismissResult::Accepted; });
+        const auto response = control->request(1000, 1, command(QStringLiteral("callback"),
+            listing ? QStringLiteral("list") : QStringLiteral("dismiss"), listing ? QString{} : id));
+        QVERIFY(!response.value(QStringLiteral("ok")).toBool()); QVERIFY(!control);
+    }
     void revokeGuardAlsoCoversMissingRecordAndControlDestruction()
     {
         VirtualSessionSupervisor supervisor(sleeper);
