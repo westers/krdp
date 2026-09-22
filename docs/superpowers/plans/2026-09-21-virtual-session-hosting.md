@@ -235,3 +235,19 @@ requires its own layout implementation. Both modes require actual real/effective
 UID matching the broker-supplied nonroot UID. Existing physical launch arguments
 remain unchanged. Pure mode parsing/action policy is tested; real virtual-worker
 socket/capture acceptance and installed launcher integration remain pending.
+
+2026-09-21 actual virtual-worker acceptance PASS (2b74ffa, Solp1IfWf):
+new bounded --plasma-worker-nvidia mode uses freshly built real capture worker,
+private desktop-service identity and ConsoleWorkerEndpoint. Broker generates
+fresh UUID/token, delivers token via private-file stdin fd0 (not argv), accepts
+authenticated Ready then matching output metadata and103952-byte1280x720
+AVC420 keyframe. Worker explicitly refuses correlated physical Resize request;
+broker Stop ends worker0, while private KWin/Plasma remain alive and output
+readback stays1280x720. Bounded namespace then exits0. Decoded keyframe inspected
+(wallpaper, early shell frame) at rdp/evidence/virtual-worker-keyframe.png;
+raw bitstream/log alongside. Physical KWin168073/host167444/session817active
+unchanged after cleanup. VirtualUser target is explicit; logind selectors never
+select it and physical launcher rejects it before reading any desktop env.
+Local37/37 tests pass; affected physical tests rerun after build4/4pass.
+This validates the actual worker/IPC capture boundary, not supervisor integration,
+authenticated RDP create-resume UI or production persistence/restart recovery.
