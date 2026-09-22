@@ -174,12 +174,13 @@ These are integration requirements; the current isolated core format does not
 yet implement this schema or authorize clean publication from a CLI.
 
 `initialize-blocked(profile)` is explicit first provisioning only and refuses
-existing state. `bootstrap-validate(bootstrap-id)` consumes an unused initial
-record only after all boundary/profile/activation checks and generation matching.
+existing state. `bootstrap-validate(bootstrap-id)` is permitted only for an unused
+initial record; success requires all boundary/profile/activation checks and
+generation matching.
 The coordinator must durably claim/consume the attempt before proceeding with
 validation; failure to publish that claim forbids proceeding. Once claimed,
-its death leaves an interrupted attempt,
-not a reusable first-install permission. `validate-current(transaction-id)` may
+its death leaves an interrupted attempt, not a reusable first-install permission.
+`validate-current(transaction-id)` may
 reopen only known-origin work with fully accounted writer lifetimes; unknown
 invalidations cannot fall back to bootstrap. Missing/inconsistent installation
 records and boot changes remain blocked. `status` is diagnostic only. Recovery
