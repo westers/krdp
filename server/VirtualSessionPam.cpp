@@ -19,11 +19,12 @@ int VirtualSessionPam::conversation(int count, const pam_message **messages, pam
     return *responses ? PAM_SUCCESS : PAM_BUF_ERR;
 }
 
-std::unique_ptr<VirtualSessionPam> VirtualSessionPam::open(uid_t uid, const QByteArray &account)
+std::unique_ptr<VirtualSessionPam> VirtualSessionPam::open(uid_t uid, const QByteArray &account, std::function<void()> beforeClose)
 {
     if (!uid || uid == uid_t(-1) || account.isEmpty() || account.contains('\0') || account.size() > 256) return {};
     auto session = std::unique_ptr<VirtualSessionPam>(new VirtualSessionPam);
     auto &s = *session;
+    s.m_beforeClose = std::move(beforeClose);
     pam_handle_t *handle = nullptr;
     s.m_status = pam_start("krdp-virtual-session", account.constData(), &s.m_conversation, &handle);
     // The output is undefined on failure; only a successful start transfers
@@ -71,6 +72,7 @@ std::unique_ptr<VirtualSessionPam> VirtualSessionPam::open(uid_t uid, const QByt
 bool VirtualSessionPam::close()
 {
     if (!m_handle) return true;
+    if (m_beforeClose) m_beforeClose();
     int closeStatus = PAM_SUCCESS;
     if (m_openAttempted) closeStatus = pam_close_session(m_handle, PAM_SILENT);
     const int endStatus = pam_end(m_handle, closeStatus == PAM_SUCCESS ? m_status : closeStatus);

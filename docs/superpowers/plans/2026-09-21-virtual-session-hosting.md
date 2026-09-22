@@ -819,3 +819,36 @@ physical-output changes or privileged operation. Evidence and limitations:
 `~/dev/rdp/evidence/adopt-audio.qs1FEn/RESULT.md` plus logs/raw captures. This proves
 audio payload and host digital silence after explicit adoption, not yet the new
 journal/systemd/PAM-lifetime launch path or acoustic/conferencing performance.
+
+### PAM keeper executable (not installed or integrated yet)
+
+krdp-virtual-pam-keeper implements the independent session-owner half: explicit
+root invocation, strict PATH/LANG-only environment before Qt, private stdin/stdout
+pipes, actual-parent PID checked around pidfd_open, journal session/launch/current
+boot, canonical OS account lookup, existing root-owned PAM policy (no `other`
+fallback), PAM open, authoritative logind UID/leader/service/seat/type/runtime
+checks, descriptor-relative nofollow root `/run/user` chain plus UID0700 leaf,
+and cgroup-v2 membership in the expected session scope. Emits one bounded Ready
+JSON carrying launch/session/login/UID/leader, never credentials; accepts only
+`stop\n` or owner-channel loss and closes PAM before exit. The sibling desktop
+must be launched/contained by the service parent, not by this keeper.
+
+A separate pidfd-watching thread self-terminates the keeper if its parent dies
+or startup exceeds30s; successful Ready removes that startup deadline. All PAM
+cleanup paths, including partial-open failure, arm a fresh10s close deadline via
+VirtualSessionPam's beforeClose callback. This avoids relying solely on
+PDEATHSIG, which credential-changing PAM modules can clear. Unit fixtures use
+real pidfds and disposable processes to test parent death, hung startup/close
+and retained lifetime. Executable negative tests cover contaminated environment
+and nonroot invocation without opening PAM. Positive privileged behavior remains
+UNTESTED; no service entry invokes it and no install rule enables it.
+
+Emergency SIGKILL intentionally bypasses PAM callbacks; it is not cleanup proof.
+Required before enabling: service-parent process/namespace extinction tracking,
+audited PAM module/helper behavior, external logind/scope crash reconciliation,
+session removal monitoring, generation-bound Ready handling and ordered normal
+desktop shutdown before keeper stop. Root-owned policy contents/includes are an
+administrator installation responsibility, not verified by an ownership check.
+The keeper's trusted logind snapshot does not prove subsequent runtime inode
+continuity. No passwords or inherited host bus variables reach desktop children.
+Reference: https://man7.org/linux/man-pages/man2/pidfd_open.2.html

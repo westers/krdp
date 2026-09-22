@@ -17,6 +17,23 @@ class VirtualSessionServicePlanTest : public QObject {
         {QStringLiteral("0000:09:00.0")}, {1280, 720}};
     const QString device = QStringLiteral("/usr/bin/krdp-virtual-device-entry"), guardian = QStringLiteral("/usr/bin/krdp-virtual-guardian");
 private Q_SLOTS:
+    void pamKeeperRequiresCleanPrivilegedOwner() {
+        QProcess keeper;
+        QProcessEnvironment environment;
+        environment.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin:/bin"));
+        environment.insert(QStringLiteral("LANG"), QStringLiteral("C.UTF-8"));
+        environment.insert(QStringLiteral("DBUS_SYSTEM_BUS_ADDRESS"), QStringLiteral("unix:path=/not-a-real-bus"));
+        keeper.setProcessEnvironment(environment);
+        keeper.start(QString::fromLocal8Bit(KRDP_PAM_KEEPER), {});
+        QVERIFY(keeper.waitForFinished(3000)); QCOMPARE(keeper.exitCode(), 1);
+        QVERIFY(keeper.readAllStandardError().contains("unclean environment"));
+        if (!getuid()) return;
+        environment.remove(QStringLiteral("DBUS_SYSTEM_BUS_ADDRESS"));
+        keeper.setProcessEnvironment(environment);
+        keeper.start(QString::fromLocal8Bit(KRDP_PAM_KEEPER), {});
+        QVERIFY(keeper.waitForFinished(3000)); QCOMPARE(keeper.exitCode(), 1);
+        QVERIFY(keeper.readAllStandardError().contains("explicit root service required"));
+    }
     void tlsRequiresMatchingPemAndNeverPrompts() {
         const auto openssl = QStandardPaths::findExecutable(QStringLiteral("openssl"));
         if (openssl.isEmpty()) QSKIP("OpenSSL fixture generator unavailable");

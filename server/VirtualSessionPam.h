@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QString>
 #include <memory>
+#include <functional>
 #include <security/pam_appl.h>
 #include <sys/types.h>
 
@@ -17,7 +18,10 @@ namespace KRdp {
  */
 class VirtualSessionPam {
 public:
-    static std::unique_ptr<VirtualSessionPam> open(uid_t uid, const QByteArray &account);
+    // beforeClose arms the caller's cleanup deadline, including partial-open
+    // failure paths internal to open(). It must not throw or call PAM.
+    static std::unique_ptr<VirtualSessionPam> open(uid_t uid, const QByteArray &account,
+        std::function<void()> beforeClose = {});
     ~VirtualSessionPam();
     VirtualSessionPam(const VirtualSessionPam &) = delete;
     VirtualSessionPam &operator=(const VirtualSessionPam &) = delete;
@@ -34,5 +38,6 @@ private:
     int m_status = PAM_SUCCESS;
     QString m_sessionId;
     QString m_runtime;
+    std::function<void()> m_beforeClose;
 };
 }

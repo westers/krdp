@@ -135,6 +135,16 @@ private Q_SLOTS:
         { auto session = KRdp::VirtualSessionPam::open(1000, "fixture"); QVERIFY(session); }
         QCOMPARE(calls.count(u"close"_s), 1); QCOMPARE(calls.count(u"end"_s), 1);
     }
+    void cleanupDeadlineArmedBeforePartialFailureCleanup() {
+        failAt = u"open"_s;
+        QVERIFY(!KRdp::VirtualSessionPam::open(1000, "fixture", [] { calls.append(u"deadline"_s); }));
+        QCOMPARE(calls.sliced(calls.size() - 3), QStringList({u"deadline"_s, u"close"_s, u"end"_s}));
+        init();
+        auto session = KRdp::VirtualSessionPam::open(1000, "fixture", [] { calls.append(u"deadline"_s); });
+        QVERIFY(session); QVERIFY(session->close()); session.reset();
+        QCOMPARE(calls.count(u"deadline"_s), 1);
+        QCOMPARE(calls.sliced(calls.size() - 3), QStringList({u"deadline"_s, u"close"_s, u"end"_s}));
+    }
     void neverPromptsOrLogsModuleText() {
         auto session = KRdp::VirtualSessionPam::open(1000, "fixture"); QVERIFY(session);
         pam_message info{PAM_TEXT_INFO, "information"}, prompt{PAM_PROMPT_ECHO_OFF, "password"};
