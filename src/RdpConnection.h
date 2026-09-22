@@ -5,6 +5,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <thread>
 
 #include <QJsonObject>
@@ -85,6 +86,13 @@ public:
      */
     State state() const;
     Q_SIGNAL void stateChanged(State newState);
+
+    /** OS identity established by successful PAM authentication/account checks.
+     * Thread-safe; empty before completed authentication, for configured test
+     * accounts, and after close. Never derived from a control-channel record.
+     * UID0 is still subject to the virtual-session manager's root refusal.
+     */
+    std::optional<quint32> authenticatedPamUid() const;
 
     /**
      * Close the connection

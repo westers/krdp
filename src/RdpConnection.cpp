@@ -51,6 +51,7 @@
 #include "VideoStream.h"
 
 #include <KUser>
+#include <QScopeGuard>
 
 #include "krdp_logging.h"
 
@@ -477,7 +478,7 @@ out_fail:
     return pam_status;
 }
 
-static int pamAuthenticate(const QString &user, const QString &password)
+static std::optional<quint32> pamAuthenticate(const QString &user, const QString &password)
 {
     int pam_status = 0;
     RdpConnectionPamHandle info = {0};
@@ -491,24 +492,37 @@ static int pamAuthenticate(const QString &user, const QString &password)
 
     if (pam_status != PAM_SUCCESS) {
         qWarning() << "pam_start failure:" << pam_strerror(info.handle, pam_status);
-        return -1;
+        if (info.handle) pam_end(info.handle, pam_status);
+        return {};
     }
+
+    const auto finish = qScopeGuard([&] { pam_end(info.handle, pam_status); });
 
     pam_status = pam_authenticate(info.handle, 0);
 
     if (pam_status != PAM_SUCCESS) {
         qWarning() << "pam_authenticate failure:" << pam_strerror(info.handle, pam_status);
-        return -1;
+        return {};
     }
 
     pam_status = pam_acct_mgmt(info.handle, 0);
 
     if (pam_status != PAM_SUCCESS) {
         qWarning() << "pam_acct_mgmt failure:" << pam_strerror(info.handle, pam_status);
-        return -1;
+        return {};
     }
-
-    return 1;
+    // PAM modules may canonicalize/map the login. Resolve the final identity,
+    // not the client-supplied username or a later KRDPCTL claim.
+    const void *canonicalUser = nullptr;
+    pam_status = pam_get_item(info.handle, PAM_USER, &canonicalUser);
+    if (pam_status != PAM_SUCCESS || !canonicalUser || !*static_cast<const char *>(canonicalUser)) {
+        return {};
+    }
+    const KUser account(QString::fromLocal8Bit(static_cast<const char *>(canonicalUser)));
+    if (!account.isValid() || !account.userId().isValid()) {
+        return {};
+    }
+    return quint32(account.userId().nativeId());
 }
 
 /**
@@ -566,6 +580,8 @@ public:
     Server *server = nullptr;
 
     State state = State::Initial;
+    // Zero means no OS identity; uid+1 also represents uid0 without ambiguity.
+    std::atomic<quint64> authenticatedPamUid = 0;
 
     qintptr socketHandle;
 
@@ -658,6 +674,12 @@ RdpConnection::~RdpConnection()
 RdpConnection::State RdpConnection::state() const
 {
     return d->state;
+}
+
+std::optional<quint32> RdpConnection::authenticatedPamUid() const
+{
+    const auto encoded = d->authenticatedPamUid.load();
+    return encoded ? std::optional<quint32>(quint32(encoded - 1)) : std::nullopt;
 }
 
 void RdpConnection::setState(KRdp::RdpConnection::State newState)
@@ -1151,6 +1173,7 @@ bool RdpConnection::onActivate()
 
 bool RdpConnection::onPostConnect()
 {
+    d->authenticatedPamUid.store(0);
     qCInfo(KRDP) << "New client connected:" << d->peer->hostname << freerdp_peer_os_major_type_string(d->peer) << freerdp_peer_os_minor_type_string(d->peer);
 
     rdpSettings *settings = d->peer->context->settings;
@@ -1163,11 +1186,17 @@ bool RdpConnection::onPostConnect()
     const QString password = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Password));
 
     bool authenticated = false;
+    std::optional<quint32> pamUid;
     if (d->server->usePAMAuthentication()) {
         qCDebug(KRDP) << "Attempting authenticating user with PAM";
-        if ((d->server->allowAnyPAMUser() || username == KUser().loginName()) && pamAuthenticate(username, password) >= 0) {
-            qCDebug(KRDP) << "PAM authentication succeeded for user" << username;
-            authenticated = true;
+        if (d->server->allowAnyPAMUser() || username == KUser().loginName()) {
+            pamUid = pamAuthenticate(username, password);
+            if (pamUid && (d->server->allowAnyPAMUser() || *pamUid == KUser().userId().nativeId())) {
+                qCDebug(KRDP) << "PAM authentication succeeded for user" << username;
+                authenticated = true;
+            } else {
+                pamUid.reset();
+            }
         }
     }
 
@@ -1190,11 +1219,18 @@ bool RdpConnection::onPostConnect()
     // still in licensing, which FreeRDP correctly rejects as an unexpected
     // channel message. AUDIN is created here too, then opened from the loop
     // only once DRDYNVC reaches READY.
-    return authenticated && initializeAudioChannels();
+    if (!authenticated || !initializeAudioChannels()) {
+        return false;
+    }
+    if (pamUid) {
+        d->authenticatedPamUid.store(quint64(*pamUid) + 1);
+    }
+    return true;
 }
 
 bool RdpConnection::onClose()
 {
+    d->authenticatedPamUid.store(0);
     if (d->rdpsnd) {
         d->rdpsndActive.store(false);
         if (d->rdpsnd->Close) {

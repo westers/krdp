@@ -268,3 +268,15 @@ earlier native-GUI reconnect proof remains separate. The manager now supervises
 a real authenticated-capture namespace, but still through the Sol-only bounded
 probe (read-only HOME, incidental render ACL); no installed persistent launcher,
 PAM admission/create-resume protocol, UI or restart adoption is delivered yet.
+
+Authenticated-identity prerequisite: RdpConnection now exposes thread-safe,
+read-only authenticatedPamUid(). It is published only after successful PAM
+authentication/account checks, resolution of PAM's final PAM_USER to an OS
+account and successful PostConnect media initialization. Static configured
+credentials never acquire a UID. Identity clears on close/reauthentication;
+single-user daemons also check the resolved UID against their own account.
+Every successfully started PAM transaction now calls pam_end on all returns.
+Virtual-host admission must use this value, never a KRDPCTL UID/username.
+Current unit coverage checks no inferred identity on a new connection/media
+policy changes; real PAM success/failure/canonicalization acceptance remains
+pending and no live service has been deployed with this change.

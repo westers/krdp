@@ -11,6 +11,15 @@ class RdpAudioPriorityTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void connectionDoesNotInferAnOperatingSystemIdentity()
+    {
+        Server server;
+        RdpConnection connection(&server, -1);
+        QVERIFY(!connection.authenticatedPamUid());
+        connection.setMediaPolicy(true, false, false);
+        connection.setAudioPriority(true);
+        QVERIFY(!connection.authenticatedPamUid());
+    }
     void microphoneQueueIsBoundedFreshAndGenerationScoped()
     {
         using Queue = MicrophonePcmQueue;
