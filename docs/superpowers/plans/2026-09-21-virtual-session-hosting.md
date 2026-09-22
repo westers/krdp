@@ -166,3 +166,15 @@ client decoded it. Screenshot: rdp/evidence/virtual-rdp-policy.png. Both client
 and bounded probe exited0; only physical KWin168073 remained,3394 closed.
 This is still a disposable listener using test credentials, not the registry,
 PAM admission, persistent supervisor or client create/resume implementation.
+
+2026-09-21 bounded reconnect gate PASS: --plasma-retention-nvidia starts Kate
+with stdin in an anonymous session, displaying an unnamed modified document
+containing unique runtime identity krdp-headless.xoK8SN. Two separate native
+Buzz GUI processes connected, took screenshots and exited0. Between clients,
+ss showed no3394 peers while Kate PID334/starttime62237832 stayed alive.
+Second connection decoded a fresh keyframe and displayed the same unsaved
+text, verified visually (rdp/evidence/retention-before.png and
+retention-after.png). Physical Sol817 stayed active, console host167444
+unchanged. This proves application retention across transport disconnect in
+the bounded isolated runtime, not persistence across supervisor restart,
+production create/resume admission, or explicit logout cleanup.
