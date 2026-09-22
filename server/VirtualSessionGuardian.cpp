@@ -75,8 +75,13 @@ bool VirtualSessionGuardian::start(quint32 uid, const QString &session, const QB
     if (launch.childSetup) m_process.setChildProcessModifier(launch.childSetup);
     m_process.setStandardInputFile(QProcess::nullDevice());
     // The namespace launcher owns its private diagnostic files.
-    m_process.setStandardOutputFile(QProcess::nullDevice());
-    m_process.setStandardErrorFile(QProcess::nullDevice());
+    if (m_storage) {
+        m_process.setProcessChannelMode(QProcess::MergedChannels);
+        m_process.setStandardOutputFile(m_storage->runtimeDirectory() + QStringLiteral("/launcher.log"));
+    } else {
+        m_process.setStandardOutputFile(QProcess::nullDevice());
+        m_process.setStandardErrorFile(QProcess::nullDevice());
+    }
     m_phase = QStringLiteral("starting");
     m_process.start();
     if (error) error->clear();
