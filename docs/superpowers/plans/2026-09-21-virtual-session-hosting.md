@@ -462,3 +462,34 @@ seat0 again would unblock a probe but would not satisfy logged-out virtual
 hosting. Do not silently grant permanent render/video membership or broaden
 device permissions. Privileged deployment remains user-run through host tmux;
 independent guardian placement and durable broker/worker adoption remain open.
+
+Scoped-device helper design: a root-service-only executable (never setuid and
+never invoked directly by RDP JSON) validates an ordered PCI allow-list, resolves
+sysfs driver identity and character-device numbers, and validates an installed
+root-owned guardian path. It creates a new mount namespace, makes propagation
+recursively private BEFORE mounting anything, overlays /dev with private tmpfs,
+and recreates only basic character devices plus the selected render/driver nodes.
+GPU nodes are mode0600 owned by the authenticated OS UID only within that mount.
+No host ACL/chown, group database edit, modesetting card, evdev, or other GPU.
+NVIDIA requires selected /dev/nvidiaN plus shared control/UVM interfaces; this
+is not a hostile-same-UID or GPU-driver security boundary.
+
+It drops supplementary groups, all bounding/ambient capabilities, real/effective/
+saved gid and uid, enables no-new-privileges, closes extra FDs, and execs the
+guardian with a clean environment. Token input is FD0; no credential argv.
+Errors after unshare terminate the process and its private mount state, not
+repair host mounts. Readiness still requires authenticated capture frames.
+The helper does not establish a PAM session, user runtime directory, durable
+registry or independent system service; those are required integration steps.
+Acceptance must include logged-out Sol, unchanged host device metadata/ACL,
+private node identity/permissions, empty effective capabilities, selected-GPU
+capture, and full cleanup. Unprivileged tests cannot prove these mount gates.
+
+Combined review hardening: render st_rdev must match both sysfs dev contents
+and reverse /sys/dev/char identity; NVIDIA node major/minor must match kernel
+/proc/devices registration and the selected GPU's information file (ctl255,
+uvm0). The root caller must launch the helper itself with a clean environment
+and installed root-controlled executable/libraries, before its dynamic loader
+runs; cleaning only the guardian environment is insufficient. FD0 must be the
+token pipe and FD1/2 safe log destinations. No privileged acceptance is claimed
+by the nonroot refusal test. Review found no blocking mount/drop ordering defect.

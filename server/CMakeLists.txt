@@ -4,6 +4,8 @@
 add_definitions(-DTRANSLATION_DOMAIN=\"krdpserver\")
 
 add_executable(krdpserver)
+add_executable(krdp-virtual-device-entry virtualdeviceentry.cpp)
+target_link_libraries(krdp-virtual-device-entry PRIVATE Qt6::Core)
 add_executable(krdp-virtual-guardian virtualguardian.cpp VirtualSessionGuardian.cpp VirtualSessionStorage.cpp)
 target_link_libraries(krdp-virtual-guardian PRIVATE Qt6::Core Qt6::Network)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support)

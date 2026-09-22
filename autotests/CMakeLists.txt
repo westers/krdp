@@ -18,6 +18,12 @@ target_include_directories(VirtualSessionLaunchPlanTest PRIVATE ${CMAKE_SOURCE_D
 target_link_libraries(VirtualSessionLaunchPlanTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionLaunchPlanTest COMMAND VirtualSessionLaunchPlanTest)
 
+add_executable(VirtualDeviceEntryTest VirtualDeviceEntryTest.cpp)
+target_link_libraries(VirtualDeviceEntryTest PRIVATE Qt6::Test Qt6::Core)
+target_compile_definitions(VirtualDeviceEntryTest PRIVATE KRDP_DEVICE_ENTRY="$<TARGET_FILE:krdp-virtual-device-entry>")
+add_dependencies(VirtualDeviceEntryTest krdp-virtual-device-entry)
+add_test(NAME VirtualDeviceEntryTest COMMAND VirtualDeviceEntryTest)
+
 add_executable(VirtualSessionStorageTest VirtualSessionStorageTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionStorage.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardian.cpp)
 target_include_directories(VirtualSessionStorageTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(VirtualSessionStorageTest PRIVATE Qt6::Test Qt6::Core Qt6::Network)
