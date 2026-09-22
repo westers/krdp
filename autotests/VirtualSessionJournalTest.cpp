@@ -28,6 +28,184 @@ class VirtualSessionJournalTest : public QObject {
     static QString id() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     static VirtualSessionJournal::Record record() { return {1000, id(), id(), id(), id(), QByteArray(32, 's')}; }
 private Q_SLOTS:
+    void dismissalRefusesInvalidReconciliation_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"missing", "malformed", "mismatched"}) QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void dismissalRefusesInvalidReconciliation() {
+        QFETCH(QString, kind); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        if (kind != QStringLiteral("missing")) {
+            QVERIFY(journal->writeReconciled(r, nullptr));
+            QFile proof(dir.filePath(QStringLiteral(".reconciled-") + r.session));
+            QVERIFY(proof.open(QIODevice::ReadWrite));
+            auto bytes = proof.readAll();
+            if (kind == QStringLiteral("malformed")) bytes.truncate(3);
+            else bytes.replace(r.token.toHex(), QByteArray(64, '0'));
+            QVERIFY(proof.resize(0)); QVERIFY(proof.seek(0)); QCOMPARE(proof.write(bytes), qint64(bytes.size()));
+        }
+        QVERIFY(!journal->recordDismissed(r)); QVERIFY(!journal->durableDismissed(r));
+        QVERIFY(!QFile::exists(dir.filePath(QStringLiteral(".dismissed-") + r.session)));
+        QVERIFY(!journal->claimRecord(r, nullptr)); QVERIFY(journal->records());
+    }
+    void dismissalRequiresBrokerAndReconciliationPreservesHistory() {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QCOMPARE(journal->dismissed(r), std::optional<bool>(false));
+        QVERIFY(!journal->recordDismissed(r)); QVERIFY(!journal->durableDismissed(r));
+        QVERIFY(journal->writeOrderedExit(r, nullptr)); // Ordered is not cleanup proof.
+        QVERIFY(!journal->recordDismissed(r));
+        QVERIFY(journal->writeReconciled(r, nullptr));
+        auto reader = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr, false); QVERIFY(reader);
+        QVERIFY(!reader->recordDismissed(r));
+        QVERIFY(journal->recordDismissed(r));
+        QVERIFY(!reader->recordDismissed(r)); // Even a retry needs the lease.
+        QVERIFY(journal->recordDismissed(r));
+        QVERIFY(journal->durableDismissed(r));
+        QCOMPARE(reader->dismissed(r), std::optional<bool>(true));
+        QVERIFY(!journal->claimRecord(r, nullptr)); QVERIFY(!journal->insert(r));
+        const auto all = journal->records(); QVERIFY(all); QCOMPARE(all->size(), 1); QVERIFY(all->first() == r);
+    }
+    void dismissalDurabilityMustBeEstablishedOnEveryRetry_data() {
+        QTest::addColumn<int>("which");
+        QTest::newRow("file") << 1; QTest::newRow("directory") << 2;
+    }
+    void dismissalDurabilityMustBeEstablishedOnEveryRetry() {
+        QFETCH(int, which); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(journal->writeReconciled(r, nullptr));
+        const auto reset = qScopeGuard([] { failSync = 0; });
+        failSync = which;
+        QVERIFY(!journal->recordDismissed(r));
+        failSync = 0;
+        const auto path = dir.filePath(QStringLiteral(".dismissed-") + r.session);
+        struct stat before{}; QVERIFY(!stat(QFile::encodeName(path).constData(), &before));
+        QCOMPARE(journal->dismissed(r), std::optional<bool>(true)); // Bytes are not durability.
+        failSync = which; QVERIFY(!journal->durableDismissed(r));
+        failSync = which; QVERIFY(!journal->recordDismissed(r));
+        failSync = 0; QVERIFY(journal->durableDismissed(r)); QVERIFY(journal->recordDismissed(r));
+        failSync = which; QVERIFY(!journal->durableDismissed(r)); // No cached durability.
+        failSync = 0;
+        journal.reset(); journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        QVERIFY(journal->durableDismissed(r));
+        struct stat after{}; QVERIFY(!stat(QFile::encodeName(path).constData(), &after));
+        QCOMPARE(before.st_ino, after.st_ino); // Retry never replaces the marker.
+        QCOMPARE(journal->orderedExit(r), std::optional<bool>(false));
+        QVERIFY(!journal->claimRecord(r, nullptr)); QVERIFY(journal->records());
+    }
+    void dismissalRejectsOtherOutcomeDomains_data() {
+        QTest::addColumn<QString>("kind");
+        QTest::newRow("ordered") << QStringLiteral("ordered");
+        QTest::newRow("reconciled") << QStringLiteral("reconciled");
+    }
+    void dismissalRejectsOtherOutcomeDomains() {
+        QFETCH(QString, kind); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(journal->writeReconciled(r, nullptr)); QVERIFY(journal->writeOrderedExit(r, nullptr));
+        const auto path = dir.filePath(QStringLiteral(".dismissed-") + r.session);
+        QVERIFY(QFile::copy(dir.filePath(QLatin1Char('.') + kind + QLatin1Char('-') + r.session), path));
+        QVERIFY(!journal->dismissed(r)); QVERIFY(!journal->durableDismissed(r)); QVERIFY(!journal->recordDismissed(r));
+        QVERIFY(QFile::exists(path)); QVERIFY(journal->records());
+    }
+    void absentDismissedRequiresValidClaim_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"missing", "malformed", "wrong-launch", "wrong-incarnation"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void absentDismissedRequiresValidClaim() {
+        QFETCH(QString, kind); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r));
+        if (kind != QStringLiteral("missing")) {
+            QVERIFY(journal->claimRecord(r, nullptr));
+            QFile claim(dir.filePath(QStringLiteral(".claimed-") + r.session));
+            QVERIFY(claim.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            const QByteArray bytes = kind == QStringLiteral("malformed") ? QByteArray("partial")
+                : (kind == QStringLiteral("wrong-launch") ? id() : r.launch).toLatin1() + '\n'
+                    + (kind == QStringLiteral("wrong-incarnation") ? id() : r.incarnation).toLatin1();
+            QCOMPARE(claim.write(bytes), qint64(bytes.size()));
+        }
+        QVERIFY(!QFile::exists(dir.filePath(QStringLiteral(".dismissed-") + r.session)));
+        QString error;
+        QCOMPARE(journal->dismissed(r, &error), std::optional<bool>());
+        QVERIFY(!error.isEmpty());
+        QVERIFY(!journal->recordDismissed(r, nullptr));
+        QVERIFY(!journal->durableDismissed(r));
+        QVERIFY(journal->records());
+    }
+    void dismissedBindsEveryIdentityField_data() {
+        QTest::addColumn<QString>("field");
+        for (const auto *field : {"uid", "session", "launch", "incarnation", "boot", "token"})
+            QTest::newRow(field) << QString::fromLatin1(field);
+    }
+    void dismissedBindsEveryIdentityField() {
+        QFETCH(QString, field); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); auto other = r;
+        if (field == QStringLiteral("uid")) ++other.uid;
+        else if (field == QStringLiteral("session")) other.session = id();
+        else if (field == QStringLiteral("launch")) other.launch = id();
+        else if (field == QStringLiteral("incarnation")) other.incarnation = id();
+        else if (field == QStringLiteral("boot")) other.boot = id();
+        else other.token.fill('t');
+        QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(!journal->recordDismissed(other, nullptr));
+        QVERIFY(!journal->dismissed(other));
+        QVERIFY(journal->writeReconciled(r, nullptr));
+        QVERIFY(journal->recordDismissed(r, nullptr));
+        // Move valid evidence to a different, independently valid launch intent.
+        // This exercises the marker binding, beyond the expected-vs-intent check.
+        QTemporaryDir second;
+        auto next = VirtualSessionJournal::openAt(second.path(), getuid(), nullptr); QVERIFY(next);
+        QVERIFY(next->insert(other)); QVERIFY(next->claimRecord(other, nullptr));
+        QVERIFY(next->writeReconciled(other, nullptr));
+        QVERIFY(QFile::copy(dir.filePath(QStringLiteral(".dismissed-") + r.session),
+            second.filePath(QStringLiteral(".dismissed-") + other.session)));
+        QString error;
+        QVERIFY(!next->dismissed(other, &error)); QVERIFY(!error.isEmpty());
+        QVERIFY(!next->recordDismissed(other)); QVERIFY(!next->durableDismissed(other));
+        QVERIFY(!error.contains(QString::fromLatin1(r.token.toHex())));
+    }
+    void unsafeDismissedRefused_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"empty", "truncated", "extra", "permissions", "symlink", "hardlink", "fifo", "intent-owner"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void unsafeDismissedRefused() {
+        QFETCH(QString, kind); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(journal->writeReconciled(r, nullptr));
+        QVERIFY(journal->recordDismissed(r, nullptr));
+        const auto path = dir.filePath(QStringLiteral(".dismissed-") + r.session);
+        if (kind == QStringLiteral("symlink") || kind == QStringLiteral("fifo")) {
+            QVERIFY(QFile::remove(path));
+            if (kind == QStringLiteral("symlink")) QVERIFY(QFile::link(QStringLiteral("/etc/passwd"), path));
+            else QVERIFY(!mkfifo(QFile::encodeName(path).constData(), 0600));
+        } else if (kind == QStringLiteral("hardlink")) {
+            QVERIFY(!link(QFile::encodeName(path).constData(), QFile::encodeName(dir.filePath(QStringLiteral(".pending-alias"))).constData()));
+        } else if (kind == QStringLiteral("permissions")) {
+            QVERIFY(!chmod(QFile::encodeName(path).constData(), 0644));
+        } else if (kind == QStringLiteral("intent-owner")) {
+            // Changing the trust owner rejects the launch intent first; this
+            // unprivileged fixture does not isolate marker-owner validation.
+            ++journal->m_owner;
+        } else {
+            QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite));
+            if (kind == QStringLiteral("extra")) { QVERIFY(file.seek(file.size())); QCOMPARE(file.write("x"), qint64(1)); }
+            else QVERIFY(file.resize(kind == QStringLiteral("empty") ? 0 : file.size() - 1));
+        }
+        QString error;
+        QVERIFY(!journal->dismissed(r, &error)); QVERIFY(!error.isEmpty());
+        QVERIFY(!journal->recordDismissed(r, nullptr));
+        QVERIFY(!journal->durableDismissed(r));
+        if (kind == QStringLiteral("intent-owner")) --journal->m_owner;
+        QVERIFY(journal->records());
+    }
     void orderedAndReconciledAreIndependent() {
         QTemporaryDir dir;
         auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);

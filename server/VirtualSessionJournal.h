@@ -61,6 +61,15 @@ public:
     // Claim required even when marker is missing. nullopt = uncertain; false =
     // missing. Neither establishes an ordered outcome.
     std::optional<bool> orderedExit(const Record &expected, QString *error = nullptr) const;
+    // Root broker lease + exact reconciliation required. Host must authorize
+    // owner/current boot/Failed state (and distinguish first action from retry).
+    // Durable acknowledgement only: never ordered exit, deletion or replay.
+    bool recordDismissed(const Record &expected, QString *error = nullptr);
+    // Byte validation only: nullopt = uncertain, false = missing. Not durability.
+    std::optional<bool> dismissed(const Record &expected, QString *error = nullptr) const;
+    // Revalidate reconciliation and exact dismissal, then fsync its file and
+    // directory on EVERY call, including retries/recovery. False forbids retirement.
+    bool durableDismissed(const Record &expected, QString *error = nullptr) const;
     bool insert(const Record &record, QString *error = nullptr);
     std::optional<QVector<Record>> records(QString *error = nullptr) const;
 private:
@@ -73,9 +82,9 @@ private:
     bool hasClaim(const Record &expected) const;
     bool writeReconciled(const Record &expected, QString *error);
     bool writeOrderedExit(const Record &expected, QString *error);
-    enum class Outcome { Reconciled, Ordered };
+    enum class Outcome { Reconciled, Ordered, Dismissed };
     bool writeOutcome(const Record &expected, Outcome outcome, QString *error);
-    std::optional<bool> readOutcome(const Record &expected, Outcome outcome, QString *error) const;
+    std::optional<bool> readOutcome(const Record &expected, Outcome outcome, QString *error, bool durable = false) const;
     bool writeKeeper(const Record &expected, const Keeper &keeper, QString *error);
     std::optional<Keeper> readKeeperRecord(const Record &expected, bool *missing, QString *error) const;
     bool writeKeeperClosed(const Record &expected, const Keeper &keeper, QString *error);

@@ -84,11 +84,30 @@ bool VirtualSessionJournal::recordOrderedExit(const Record &expected, QString *e
 bool VirtualSessionJournal::writeOrderedExit(const Record &expected, QString *error) {
     return writeOutcome(expected, Outcome::Ordered, error);
 }
+bool VirtualSessionJournal::recordDismissed(const Record &expected, QString *error) {
+    if (!m_writable) return fail(error, QStringLiteral("Dismissal requires the broker journal lease"));
+    if (reconciled(expected, error) != std::optional<bool>(true))
+        return fail(error, QStringLiteral("Dismissal requires exact reconciliation proof"));
+    const auto existing = dismissed(expected, error);
+    if (!existing) return false;
+    if (*existing) return durableDismissed(expected, error);
+    return writeOutcome(expected, Outcome::Dismissed, error);
+}
+std::optional<bool> VirtualSessionJournal::dismissed(const Record &expected, QString *error) const {
+    return readOutcome(expected, Outcome::Dismissed, error);
+}
+bool VirtualSessionJournal::durableDismissed(const Record &expected, QString *error) const {
+    if (reconciled(expected, error) != std::optional<bool>(true))
+        return fail(error, QStringLiteral("Dismissal requires exact reconciliation proof"));
+    if (readOutcome(expected, Outcome::Dismissed, error, true) != std::optional<bool>(true))
+        return fail(error, QStringLiteral("Durable dismissal evidence unavailable or uncertain"));
+    return true;
+}
 bool VirtualSessionJournal::writeOutcome(const Record &expected, Outcome outcome, QString *error) {
     const auto current = readRecord(expected.session, error);
     if (!current || *current != expected || !hasClaim(expected))
         return fail(error, QStringLiteral("Outcome launch identity uncertain"));
-    const QByteArray kind = outcome == Outcome::Reconciled ? "reconciled" : "ordered";
+    const QByteArray kind = outcome == Outcome::Reconciled ? "reconciled" : outcome == Outcome::Ordered ? "ordered" : "dismissed";
     const QByteArray name = '.' + kind + '-' + expected.session.toLatin1();
     const auto bytes = outcomeBytes(expected, kind);
     const int fd = openat(m_directory, name.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -109,13 +128,13 @@ std::optional<bool> VirtualSessionJournal::reconciled(const Record &expected, QS
 std::optional<bool> VirtualSessionJournal::orderedExit(const Record &expected, QString *error) const {
     return readOutcome(expected, Outcome::Ordered, error);
 }
-std::optional<bool> VirtualSessionJournal::readOutcome(const Record &expected, Outcome outcome, QString *error) const {
+std::optional<bool> VirtualSessionJournal::readOutcome(const Record &expected, Outcome outcome, QString *error, bool durable) const {
     const auto refuse = [error]() -> std::optional<bool> {
         fail(error, QStringLiteral("Unsafe, malformed or mismatched outcome evidence")); return {};
     };
     const auto current = readRecord(expected.session, error);
     if (!current || *current != expected || !hasClaim(expected)) return refuse();
-    const QByteArray kind = outcome == Outcome::Reconciled ? "reconciled" : "ordered";
+    const QByteArray kind = outcome == Outcome::Reconciled ? "reconciled" : outcome == Outcome::Ordered ? "ordered" : "dismissed";
     const QByteArray name = '.' + kind + '-' + expected.session.toLatin1();
     const int fd = openat(m_directory, name.constData(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
@@ -127,6 +146,13 @@ std::optional<bool> VirtualSessionJournal::readOutcome(const Record &expected, O
     if (!safeFile(fd, m_owner)) return refuse();
     const auto bytes = file.read(4097);
     if (file.error() != QFileDevice::NoError || bytes != outcomeBytes(expected, kind)) return refuse();
+    if (durable) {
+        // Sync the same descriptor whose ownership and exact bytes we checked.
+        // A previous failed publication may have left complete cached bytes.
+        const bool fileDurable = !fsync(fd);
+        const bool directoryDurable = !fsync(m_directory);
+        if (!fileDurable || !directoryDurable) return refuse();
+    }
     if (error) error->clear();
     return true;
 }
@@ -383,6 +409,7 @@ std::optional<QVector<VirtualSessionJournal::Record>> VirtualSessionJournal::rec
         if (name.startsWith(".closed-") && uuid(QString::fromLatin1(name.mid(8)))) continue;
         if (name.startsWith(".reconciled-") && uuid(QString::fromLatin1(name.mid(12)))) continue;
         if (name.startsWith(".ordered-") && uuid(QString::fromLatin1(name.mid(9)))) continue;
+        if (name.startsWith(".dismissed-") && uuid(QString::fromLatin1(name.mid(11)))) continue;
         if (!name.endsWith(".json") || !uuid(QString::fromLatin1(name.chopped(5))) || result.size() >= 256) { ok = false; break; }
         const auto record = readRecord(QString::fromLatin1(name.chopped(5)), error);
         if (!record) { ok = false; break; }
