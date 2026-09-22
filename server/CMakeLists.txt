@@ -4,6 +4,8 @@
 add_definitions(-DTRANSLATION_DOMAIN=\"krdpserver\")
 
 add_executable(krdpserver)
+add_executable(krdp-virtual-guardian virtualguardian.cpp VirtualSessionGuardian.cpp)
+target_link_libraries(krdp-virtual-guardian PRIVATE Qt6::Core Qt6::Network)
 add_executable(krdp-console-host consolehost.cpp ConsoleSeat.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp ConsoleHostController.cpp ConsoleWorkerLauncher.cpp)
 add_executable(krdp-console-probe consoleprobe.cpp ConsoleSeat.cpp)
 add_executable(krdp-greeter-probe greeterprobe.cpp)

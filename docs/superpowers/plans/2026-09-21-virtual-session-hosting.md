@@ -403,3 +403,23 @@ for the desktop's entire lifetime, not one RDP transport or restartable broker.
 It must keep the lock across desktop startup (CLOEXEC FDs cannot simply be
 lost in an exec). Storage preparation is not yet wired to the probe or an
 installed launcher. No test has launched a production namespace with it yet.
+
+VirtualSessionGuardian and the standalone krdp-virtual-guardian executable now
+own one trusted child independently of broker socket clients. The private Unix
+control socket accepts only root or the same OS UID, then requires a32-byte
+credential for status/stop. Requests are bounded/versioned/correlated; stop
+also requires the guardian's fresh incarnation UUID. Old-runtime requests cannot
+stop a replacement. No child command/environment comes from control JSON.
+Socket disconnect only drops that connection; explicit stop terminates then
+kills after5s. Status distinguishes starting/running/exited/failed and does NOT
+assert capture readiness. No desktop lifetime timer exists.
+
+Tests exercise the real executable with a disposable sleep child, destroy the
+first broker socket, reconnect through a second socket to the same incarnation,
+then explicitly stop and observe exit0. Negative tests cover bad token, stale
+incarnation, existing socket and inherited environment. CLI token travels by
+descriptor, never argv; nonroot real/effective UID must match. This binary is
+not installed yet and is NOT full restart recovery: still wire storage-lock
+ownership, actual namespace/device executor, independent service placement,
+durable registry/worker reconnection and capture-generation validation. Ordinary
+guardian shutdown still owns descendant teardown; only broker loss preserves it.
