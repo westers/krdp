@@ -613,3 +613,20 @@ True means imported, not attachable; the caller must keep the journal lease aliv
 and fail startup on false. No service entrypoint invokes this yet. Independent
 launch/write-before-spawn, explicit terminal reconciliation and installation
 remain required; conservative unresolved records may need operator reconciliation.
+
+Journal-driven recovery integration regression now runs a real guardian and
+bounded sleep child through two fresh host controllers and reopened journal
+leases. It uses the kernel boot UUID and exclusively creates a fresh canonical
+runtime, then performs token-authenticated worker Hello/Ready/Outputs/frame IPC.
+Attach is refused before fresh capture on each host; after fixture capture it
+succeeds under a new manager identity, and the old handle is rejected. Guardian
+child PID stays unchanged across both host destructors and journal reopens;
+saved incarnation remains unchanged. This is real lifecycle/socket sequencing
+with synthetic encoded bytes, NOT actual Plasma decoding/audio acceptance.
+The fixture owns and removes only its fresh runtime and bounded child; it never
+uses a live desktop. It skips without a nonroot user runtime (local run did not
+skip). Production service entrypoint and launcher remain unfinished.
+Review corrected async assertions to wait for observed guardian liveness and
+worker Ready/Outputs, then frame signal counts; delta and wrong-layout keyframes
+are refused. Stale-handle rejection runs while Starting (where a current handle
+could otherwise mark capture ready), not after attachment. Five repeats pass.

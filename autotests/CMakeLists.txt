@@ -69,6 +69,7 @@ target_link_libraries(VirtualSessionTransportTest PRIVATE Qt6::Test Qt6::Core Qt
 add_test(NAME VirtualSessionTransportTest COMMAND VirtualSessionTransportTest)
 
 add_executable(VirtualSessionHostControllerTest VirtualSessionHostControllerTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardian.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionStorage.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionHostController.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp
     ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp)

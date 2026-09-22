@@ -53,6 +53,7 @@ public:
     void captureUnavailable(const Handle &handle);
 
 private:
+    friend class VirtualSessionHostControllerTest;
     struct Runtime {
         Handle handle;
         QProcess process;
