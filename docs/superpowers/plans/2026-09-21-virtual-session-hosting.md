@@ -178,3 +178,17 @@ retention-after.png). Physical Sol817 stayed active, console host167444
 unchanged. This proves application retention across transport disconnect in
 the bounded isolated runtime, not persistence across supervisor restart,
 production create/resume admission, or explicit logout cleanup.
+
+2026-09-21 virtual playback/host-silence gate PASS in bounded runtime8eyAFp:
+synthetic10s997Hz stereo tone played by paplay using private Pulse default
+after explicit media consent. Client acknowledged playback1/silenceHost1;
+private default was krdp.remote-audio.62dedf894750. RDPSND negotiated PCM
+44100Hz16bit stereo. Buzz physical sink monitor captured the tone (997Hz
+bandpass max-21.1dB); concurrent Sol physical sink monitor remained silent.
+Sol physical default SteelSeries analog-chat,817active and host167444 stayed
+unchanged. First attempt disabled KRDPCTL via video-only test hook, so it
+sent no consent/tone and was NOT accepted; retry enabled the channel in the
+isolated compositor and GUI exited0. Client/server logs copied to
+rdp/evidence/virtual-audio-{client,server}.log. This is actual private app →
+RDPSND → Buzz speaker-sink proof, not production supervisor integration,
+microphone/camera acceptance or acoustic latency measurement.
