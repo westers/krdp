@@ -26,6 +26,13 @@ target_include_directories(VirtualSessionJournalTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(VirtualSessionJournalTest PRIVATE Qt6::Test KRdpGuardianClient)
 target_link_options(VirtualSessionJournalTest PRIVATE "-Wl,--wrap=fsync")
 add_test(NAME VirtualSessionJournalTest COMMAND VirtualSessionJournalTest)
+add_executable(VirtualSessionMaintenanceGuardTest VirtualSessionMaintenanceGuardTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionMaintenanceGuard.cpp)
+target_include_directories(VirtualSessionMaintenanceGuardTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(VirtualSessionMaintenanceGuardTest PRIVATE Qt6::Test Qt6::Core)
+target_link_options(VirtualSessionMaintenanceGuardTest PRIVATE "-Wl,--wrap=fsync" "-Wl,--wrap=write" "-Wl,--wrap=renameat")
+add_test(NAME VirtualSessionMaintenanceGuardTest COMMAND VirtualSessionMaintenanceGuardTest)
+set_tests_properties(VirtualSessionMaintenanceGuardTest PROPERTIES TIMEOUT 20)
 add_executable(VirtualSessionKeeperProcessTest VirtualSessionKeeperProcessTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionKeeperProcess.cpp)
 target_include_directories(VirtualSessionKeeperProcessTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(VirtualSessionKeeperProcessTest PRIVATE Qt6::Test KRdpGuardianClient)
