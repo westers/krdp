@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionMaintenanceGuard.h"
 #include <QFile>
-#include <QRegularExpression>
 #include <QUuid>
 #include <fcntl.h>
 #include <sys/file.h>
@@ -13,11 +12,10 @@ namespace KRdp {
 namespace {
 bool fail(QString *error, const char *message) { if (error) *error = QString::fromLatin1(message); return false; }
 bool uuid(const QString &s) {
-    return QRegularExpression(QStringLiteral("\\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\z")).match(s).hasMatch()
-        && !QUuid(s).isNull();
+    return VirtualSessionMaintenanceRecord::uuid(s);
 }
 bool profile(const QString &s) {
-    return QRegularExpression(QStringLiteral("\\A[0-9a-f]{64}\\z")).match(s).hasMatch();
+    return VirtualSessionMaintenanceRecord::digest(s);
 }
 QString boot() {
     QFile file(QStringLiteral("/proc/sys/kernel/random/boot_id"));
@@ -307,5 +305,20 @@ std::optional<VirtualSessionMaintenanceGuard::Lease> VirtualSessionMaintenanceGu
 std::optional<VirtualSessionMaintenanceGuard::Lease> VirtualSessionMaintenanceGuard::maintenance(QString *error) {
     if (getuid() || geteuid()) { fail(error, "Root maintenance caller required"); return {}; }
     return acquire(QStringLiteral("/var/lib/krdp/maintenance"), 0, boot(), true, false, error);
+}
+std::optional<VirtualSessionMaintenanceGuard::Diagnostic> VirtualSessionMaintenanceGuard::status(QString *error) {
+    uid_t real, effective, saved;
+    if (getresuid(&real, &effective, &saved) || real || effective || saved) {
+        fail(error, "Root diagnostic caller required"); return {};
+    }
+    return statusAt(QStringLiteral("/var/lib/krdp/maintenance"), 0, boot(), false, error);
+}
+std::optional<VirtualSessionMaintenanceGuard::Diagnostic> VirtualSessionMaintenanceGuard::statusAt(
+    const QString &path, uid_t owner, const QString &currentBoot, bool fixture, QString *error) {
+    auto lease = acquire(path, owner, currentBoot, false, fixture, error);
+    if (!lease) return {};
+    const auto record = lease->record(error);
+    if (!record) return {};
+    return Diagnostic{*record, record->boot == currentBoot};
 }
 }

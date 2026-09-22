@@ -4,6 +4,7 @@
 #include <QTemporaryDir>
 #include <QFile>
 #include <QDir>
+#include <QSet>
 #include <QUuid>
 #include <fcntl.h>
 #include <sys/wait.h>
@@ -84,6 +85,54 @@ class VirtualSessionMaintenanceGuardTest : public QObject {
         return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     }
 private Q_SLOTS:
+    void guardDoesNotGenerateExecutableAnonymousMappings() {
+        const auto mappings = [] {
+            QFile file(QStringLiteral("/proc/self/maps")); QSet<QByteArray> result;
+            if (!file.open(QIODevice::ReadOnly)) return result;
+            for (const auto &line : file.readAll().split('\n')) {
+                const auto fields = line.simplified().split(' ');
+                if (fields.size() >= 5 && fields[1].size() == 4 && fields[1][2] == 'x' && fields[4] == "0") result.insert(line);
+            }
+            return result;
+        };
+        const auto before = mappings(); QVERIFY(!before.isEmpty());
+        QTemporaryDir guard, pkg; QVERIFY(initialize(guard.path())); QVERIFY(packages(pkg.path()));
+        auto admitted = compound(guard.path(), pkg.path()); QVERIFY(admitted);
+        QVERIFY(!lease(guard.path())); admitted.reset();
+        auto invalidator = lease(guard.path()); QVERIFY(invalidator);
+        QString transaction; QCOMPARE(invalidator->block(&transaction), P::Durable);
+        QCOMPARE(invalidator->publishClean(transaction, digest), P::Durable);
+        QTemporaryDir v2; QVERIFY(put(v2.filePath(QStringLiteral("lock")), {}));
+        auto newer = lease(v2.path()); QVERIFY(newer);
+        QCOMPARE(newer->invalidate(), P::Durable); QVERIFY(newer->record()); newer.reset();
+        QVERIFY(G::statusAt(v2.path(), getuid(), boot, true, nullptr));
+        QVERIFY(put(v2.filePath(QStringLiteral("state")), "malformed"));
+        QVERIFY(!G::statusAt(v2.path(), getuid(), boot, true, nullptr));
+        QCOMPARE(mappings(), before);
+    }
+    void v2StatusIsDiagnosticOnly() {
+        using R = VirtualSessionMaintenanceRecord;
+        QTemporaryDir guard; QVERIFY(put(guard.filePath(QStringLiteral("lock")), {}));
+        const auto inspect = [&](const QString &currentBoot) { return G::statusAt(guard.path(), getuid(), currentBoot, true, nullptr); };
+        QVERIFY(!inspect(boot)); // No implicit initial state.
+        auto exclusive = lease(guard.path()); QVERIFY(exclusive);
+        QCOMPARE(exclusive->invalidate(), P::Durable);
+        QVERIFY(!inspect(boot)); // Nonblocking conflict with maintenance.
+        exclusive.reset();
+        QFile file(guard.filePath(QStringLiteral("state"))); QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto before = file.readAll(); file.close();
+        auto shared = lease(guard.path(), false); QVERIFY(shared);
+        // Status must not touch package locks or fsync a purported admission.
+        ofdError = EIO; ofdFailureCountdown = 1; failSync = 1;
+        const auto observed = inspect(boot); QVERIFY(observed);
+        QCOMPARE(ofdFailureCountdown, 1); QCOMPARE(failSync, 1);
+        ofdError = 0; ofdFailureCountdown = 0; failSync = 0;
+        QCOMPARE(observed->record.phase, R::Phase::ExternalUnknown); QVERIFY(observed->currentBoot);
+        const auto old = inspect(QUuid::createUuid().toString(QUuid::WithoutBraces)); QVERIFY(old); QVERIFY(!old->currentBoot);
+        QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), before); file.close();
+        shared.reset();
+        QVERIFY(put(guard.filePath(QStringLiteral("state")), "bad")); QVERIFY(!inspect(boot));
+    }
     void v2ClaimAndStaleCompletion() {
         using R = VirtualSessionMaintenanceRecord;
         QTemporaryDir guard, pkg; QVERIFY(put(guard.filePath(QStringLiteral("lock")), {})); QVERIFY(packages(pkg.path()));

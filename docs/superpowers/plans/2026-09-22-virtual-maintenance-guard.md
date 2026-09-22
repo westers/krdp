@@ -80,6 +80,14 @@ zero side effects on refusal and existing-session controls while creates blocked
 
 ## 4. Hooks, staging and operator workflow
 
+Preparatory command is built (not installed): `krdp-virtual-maintenance
+status|invalidate`, root-only, fixed paths, no rearm command. Status is gate-only
+SH and expressly does not evaluate admission; invalidation succeeds only after
+durable V2 ExternalUnknown publication. The provisioning receipt reader matches
+the six immutable initial fields, verifies exact trusted storage and renews
+file/directory durability; it neither creates state nor proves installer history.
+These pieces remain prerequisites, not completed coordinator deployment.
+
 Root-only helper, conservative apt/dpkg pre-hooks, explicit maintenance status and
 revalidation commands, installer-owned root0700 state. Generic post-hooks do not
 rearm. Document interruption behavior, supported maintenance boundary and manual

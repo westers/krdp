@@ -19,6 +19,13 @@ public:
         bool operator==(const State &) const = default;
     };
     enum class Publication { Durable, FailedBeforeRename, UncertainAfterRename };
+    struct Diagnostic {
+        VirtualSessionMaintenanceRecord record;
+        bool currentBoot = false;
+    };
+    // Gate-only shared diagnostic read. Never evaluates admission, acquires
+    // package exclusion, publishes state, or resolves durability uncertainty.
+    static std::optional<Diagnostic> status(QString *error = nullptr);
     class Lease {
     public:
         ~Lease();
@@ -73,6 +80,8 @@ public:
 private:
     friend class VirtualSessionMaintenanceGuardTest;
     friend class VirtualSessionMaintenanceCoordinator;
+    static std::optional<Diagnostic> statusAt(const QString &path, uid_t owner,
+        const QString &boot, bool fixture, QString *error);
     static std::optional<Lease> acquire(const QString &path, uid_t owner, const QString &boot,
                                        bool exclusive, bool fixture, QString *error);
     static std::optional<Lease> admissionAt(const QString &path, const QString &packages, uid_t owner,

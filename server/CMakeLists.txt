@@ -4,6 +4,10 @@
 add_definitions(-DTRANSLATION_DOMAIN=\"krdpserver\")
 
 add_executable(krdpserver)
+# Built for integration tests only; installation waits for complete bootstrap,
+# writer routing, and mandatory keeper admission.
+add_executable(krdp-virtual-maintenance virtualmaintenance.cpp VirtualSessionMaintenanceGuard.cpp PackageLease.cpp)
+target_link_libraries(krdp-virtual-maintenance PRIVATE Qt6::Core)
 add_library(KRdpGuardianClient STATIC VirtualSessionGuardianClient.cpp)
 target_sources(KRdpGuardianClient PRIVATE VirtualSessionJournal.cpp)
 target_link_libraries(KRdpGuardianClient PUBLIC Qt6::Core Qt6::Network)
