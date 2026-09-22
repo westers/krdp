@@ -3,6 +3,10 @@
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QJsonDocument>
+#include <QScopeGuard>
+#include <QElapsedTimer>
+#include <csignal>
+#include <cerrno>
 #include <unistd.h>
 #include "VirtualSessionGuardian.h"
 using namespace KRdp;
@@ -24,6 +28,60 @@ class VirtualSessionGuardianTest : public QObject
         return QJsonDocument::fromJson(socket.readLine()).object();
     }
 private Q_SLOTS:
+    void executableTerminationStopsChild_data()
+    {
+        QTest::addColumn<int>("signal"); QTest::addColumn<bool>("ignore");
+        QTest::newRow("TERM graceful") << int(SIGTERM) << false;
+        QTest::newRow("INT graceful") << int(SIGINT) << false;
+        QTest::newRow("TERM escalation") << int(SIGTERM) << true;
+    }
+    void executableTerminationStopsChild()
+    {
+        if (!getuid()) QSKIP("Guardian requires a nonroot desktop UID");
+        QFETCH(int, signal); QFETCH(bool, ignore);
+        QTemporaryDir runtime; QVERIFY(runtime.isValid());
+        QTemporaryFile credential(runtime.filePath(u"credential.XXXXXX"_s));
+        QVERIFY(credential.open()); QCOMPARE(credential.write(token), qint64(32));
+        QVERIFY(credential.flush()); credential.close();
+        const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const auto address = runtime.filePath(u"guardian.sock"_s);
+        const auto ready = runtime.filePath(u"ready"_s), exited = runtime.filePath(u"exited"_s);
+        QProcess process;
+        process.setStandardInputFile(credential.fileName());
+        process.start(QCoreApplication::applicationDirPath() + u"/krdp-virtual-guardian"_s,
+            {u"--session"_s, id, u"--socket"_s, address, u"--token-fd"_s, u"0"_s, u"--"_s,
+                QCoreApplication::applicationDirPath() + u"/GuardianSignalChild"_s, ready, exited,
+                ignore ? u"ignore"_s : u"graceful"_s});
+        QVERIFY(process.waitForStarted(3000));
+        const auto cleanup = qScopeGuard([&] {
+            if (process.state() != QProcess::NotRunning) {
+                process.terminate();
+                if (!process.waitForFinished(9000)) { process.kill(); process.waitForFinished(3000); }
+            }
+        });
+        QJsonObject state;
+        QTRY_VERIFY_WITH_TIMEOUT(([&] {
+            QFile readiness(ready);
+            if (!readiness.open(QIODevice::ReadOnly)) return false;
+            state = QJsonDocument::fromJson(readiness.readAll()).object();
+            return state.contains(u"blocked"_s) && state.contains(u"pid"_s);
+        })(), 3000);
+        QVERIFY(state.contains(u"blocked"_s)); QVERIFY(!state.value(u"blocked"_s).toBool());
+        const auto childPid = pid_t(state.value(u"pid"_s).toInteger()); QVERIFY(childPid > 1);
+        // QProcess still owns this unreaped guardian, so its PID cannot be reused.
+        QCOMPARE(process.state(), QProcess::Running);
+        const auto guardianPid = pid_t(process.processId()); QVERIFY(guardianPid > 1);
+        QElapsedTimer elapsed; elapsed.start();
+        QCOMPARE(::kill(guardianPid, signal), 0);
+        QVERIFY(process.waitForFinished(9000));
+        QCOMPARE(process.exitStatus(), QProcess::NormalExit); QCOMPARE(process.exitCode(), 0);
+        QCOMPARE(QFile::exists(exited), !ignore);
+        if (ignore) QVERIFY(elapsed.elapsed() >= 4500);
+        else QVERIFY(elapsed.elapsed() < 4500);
+        // Observation only: never signal a child by this possibly stale PID.
+        QCOMPARE(::kill(childPid, 0), -1); QCOMPARE(errno, ESRCH);
+        QVERIFY(!QFile::exists(address));
+    }
     void invalidLauncherIncarnationDoesNotSpawn()
     {
         QTemporaryDir runtime;

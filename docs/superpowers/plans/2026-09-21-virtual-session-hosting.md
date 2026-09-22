@@ -793,3 +793,14 @@ host logind; pure checks mutate every identity/console field. Read-only host
 busctl inspection confirms User(uo), Seat(so), Leader/VTNr(u), Scope/Service(s)
 and User UID(u)/RuntimePath(s) signatures against the installed service.
 Reference: https://github.com/systemd/systemd/blob/v259/man/org.freedesktop.login1.xml
+
+Guardian service termination now consumes SIGTERM/SIGINT with signalfd on its
+event loop and requests the same idempotent TERM→5s→KILL child stop used by an
+authenticated explicit stop. It does not exit until QProcess observes child
+termination, then retains the existing brief terminal-status window and runs
+normal cleanup. The child explicitly unblocks those signals before exec; it must
+not inherit the guardian's signal mask. Broker socket loss is unchanged and does
+not call local stop. Executable-level fixtures cover TERM and INT with a graceful
+child and forced escalation with a TERM-ignoring child, including socket cleanup
+and observed child exit. This establishes direct-child shutdown only: actual
+Plasma/bubblewrap namespace extinction and ordered PAM close still need proof.

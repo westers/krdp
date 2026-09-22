@@ -29,6 +29,9 @@ public:
     QString phase() const { return m_phase; }
     QString incarnation() const { return m_incarnation; }
     qint64 processId() const { return m_process.processId(); }
+    // Trusted local service termination; uses the same bounded stop path as
+    // an authenticated broker request. Socket loss must never call this.
+    void requestStop() { stop(); }
 private:
     void accept();
     QJsonObject request(const QJsonObject &record);

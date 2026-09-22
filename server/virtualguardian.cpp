@@ -3,16 +3,31 @@
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QDebug>
+#include <QFile>
+#include <QSocketNotifier>
 #include <cerrno>
+#include <csignal>
 #include <fcntl.h>
 #include <pwd.h>
+#include <sys/signalfd.h>
 #include <unistd.h>
 
 // Trusted service entrypoint, not an RDP command runner. The eventual launcher
 // supplies argv after identity drop. No client-provided executable/environment.
 int main(int argc, char **argv)
 {
+    // No Qt calls from POSIX signal handlers. Block before Qt can start threads
+    // and consume termination on the guardian's event loop.
+    sigset_t terminationMask;
+    sigemptyset(&terminationMask);
+    sigaddset(&terminationMask, SIGTERM);
+    sigaddset(&terminationMask, SIGINT);
+    if (sigprocmask(SIG_BLOCK, &terminationMask, nullptr)) return 1;
     QCoreApplication app(argc, argv);
+    const int signalFd = signalfd(-1, &terminationMask, SFD_CLOEXEC | SFD_NONBLOCK);
+    if (signalFd < 0) return 1;
+    QFile signalFile;
+    if (!signalFile.open(signalFd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) { close(signalFd); return 1; }
     QCommandLineParser parser;
     parser.addHelpOption();
     parser.addOption({QStringLiteral("session"), QStringLiteral("Server-generated desktop UUID"), QStringLiteral("uuid")});
@@ -45,6 +60,16 @@ int main(int argc, char **argv)
     environment.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin:/bin"));
     environment.insert(QStringLiteral("LANG"), QStringLiteral("C.UTF-8"));
     KRdp::VirtualSessionGuardian guardian;
+    QSocketNotifier notifier(signalFd, QSocketNotifier::Read);
+    QObject::connect(&notifier, &QSocketNotifier::activated, &app, [&] {
+        signalfd_siginfo signal{};
+        while (read(signalFd, &signal, sizeof(signal)) == sizeof(signal)) guardian.requestStop();
+    });
+    // The namespace leader must not inherit the guardian's blocked termination
+    // mask, otherwise graceful terminate() always waits for the forced-kill rung.
+    const auto childSetup = [terminationMask] {
+        if (sigprocmask(SIG_UNBLOCK, &terminationMask, nullptr)) _exit(127);
+    };
     QString error;
     bool started = false;
     if (parser.isSet(QStringLiteral("launch-id"))) {
@@ -65,10 +90,10 @@ int main(int argc, char **argv)
         environment.insert(QStringLiteral("KRDP_VIRTUAL_RUNTIME"), storage->runtimeDirectory());
         environment.insert(QStringLiteral("KRDP_VIRTUAL_PROFILE"), storage->profileDirectory());
         started = guardian.startPrepared(getuid(), parser.value(QStringLiteral("session")), token, std::move(storage),
-            {arguments.first(), arguments.mid(1), environment, {}}, &error, incarnation);
+            {arguments.first(), arguments.mid(1), environment, childSetup}, &error, incarnation);
     } else {
         started = guardian.start(getuid(), parser.value(QStringLiteral("session")), token,
-            parser.value(QStringLiteral("socket")), {arguments.first(), arguments.mid(1), environment, {}}, &error, incarnation);
+            parser.value(QStringLiteral("socket")), {arguments.first(), arguments.mid(1), environment, childSetup}, &error, incarnation);
     }
     if (!started) {
         qCritical().noquote() << error;
