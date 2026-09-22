@@ -12,6 +12,20 @@ class VirtualSessionLaunchPlanTest : public QObject
     const VirtualSessionLaunchPlan::Configuration config{u"/usr/libexec/krdp/launch-virtual-session"_s,
         u"/usr/bin/krdp-console-worker"_s, u"/usr/share/krdp"_s, {u"0000:09:00.0"_s, u"0000:c5:00.0"_s}, {1280, 720}};
 private Q_SLOTS:
+    void recordedLaunchIdentityIsNotRegenerated()
+    {
+        const auto launch = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const auto first = VirtualSessionLaunchPlan::build(1000, account, id, config, nullptr, launch);
+        const auto second = VirtualSessionLaunchPlan::build(1000, account, id, config, nullptr, launch);
+        QVERIFY(first); QVERIFY(second);
+        QCOMPARE(first->runtimeDirectory, QStringLiteral("/run/user/1000/krdp-virtual/") + launch);
+        QCOMPARE(first->runtimeDirectory, second->runtimeDirectory);
+        QCOMPARE(first->arguments, second->arguments);
+        QVERIFY(first->arguments.contains(first->runtimeDirectory));
+        for (const auto &bad : {QStringLiteral("../old"), QStringLiteral("00000000-0000-0000-0000-000000000000"),
+                QStringLiteral("{12345678-1234-1234-1234-123456789abc}")})
+            QVERIFY(!VirtualSessionLaunchPlan::build(1000, account, id, config, nullptr, bad));
+    }
     void persistentProfileSeparateFromRuntime()
     {
         const auto plan = VirtualSessionLaunchPlan::build(1000, account, id, config);

@@ -39,7 +39,12 @@ std::unique_ptr<VirtualSessionJournal> VirtualSessionJournal::open(QString *erro
     if (getuid() || geteuid()) { fail(error, QStringLiteral("Journal requires the root service")); return {}; }
     return openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error);
 }
-std::unique_ptr<VirtualSessionJournal> VirtualSessionJournal::openAt(const QString &path, quint32 owner, QString *error) {
+std::optional<VirtualSessionJournal::Record> VirtualSessionJournal::readLaunchIntent(const QString &session, QString *error) {
+    if (getuid() || geteuid()) { fail(error, QStringLiteral("Launch intent requires the root service")); return {}; }
+    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    return journal ? journal->readRecord(session, error) : std::nullopt;
+}
+std::unique_ptr<VirtualSessionJournal> VirtualSessionJournal::openAt(const QString &path, quint32 owner, QString *error, bool writable) {
     // Production ancestors are checked too; tests use an owned private temp root.
     if (!QDir::isAbsolutePath(path) || QDir::cleanPath(path) != path || path.contains(QChar::Null)) return {};
     int fd = ::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -56,13 +61,14 @@ std::unique_ptr<VirtualSessionJournal> VirtualSessionJournal::openAt(const QStri
         if (fd >= 0) close(fd);
         fail(error, QStringLiteral("Unsafe or unavailable journal directory")); return {};
     }
-    if (flock(fd, LOCK_EX | LOCK_NB)) {
+    if (writable && flock(fd, LOCK_EX | LOCK_NB)) {
         close(fd); fail(error, QStringLiteral("Launch journal already in use")); return {};
     }
     if (error) error->clear();
-    return std::unique_ptr<VirtualSessionJournal>(new VirtualSessionJournal(fd, owner));
+    return std::unique_ptr<VirtualSessionJournal>(new VirtualSessionJournal(fd, owner, writable));
 }
 bool VirtualSessionJournal::insert(const Record &r, QString *error) {
+    if (!m_writable) return fail(error, QStringLiteral("Read-only launch intent lookup"));
     if (!r.valid()) return fail(error, QStringLiteral("Invalid launch record"));
     const auto existing = records(error);
     if (!existing) return false;
@@ -95,6 +101,32 @@ bool VirtualSessionJournal::insert(const Record &r, QString *error) {
     if (error) error->clear();
     return true;
 }
+std::optional<VirtualSessionJournal::Record> VirtualSessionJournal::readRecord(const QString &session, QString *error) const {
+    const auto refuse = [error]() -> std::optional<Record> {
+        fail(error, QStringLiteral("Unsafe, malformed or unreadable launch intent")); return {};
+    };
+    if (!uuid(session)) return refuse();
+    const QByteArray name = session.toLatin1() + ".json";
+    const int fd = openat(m_directory, name.constData(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return refuse();
+    QFile file;
+    if (!file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) { close(fd); return refuse(); }
+    if (!safeFile(fd, m_owner)) return refuse();
+    const auto data = file.read(4097);
+    QJsonParseError parse{};
+    const auto doc = QJsonDocument::fromJson(data, &parse);
+    const auto o = doc.object();
+    const double uid = o.value(QStringLiteral("uid")).toDouble(-1);
+    if (file.error() != QFileDevice::NoError || data.size() > 4096 || parse.error != QJsonParseError::NoError
+        || !doc.isObject() || o.size() != 7 || o.value(QStringLiteral("v")) != QJsonValue(1)
+        || uid < 1 || uid >= std::numeric_limits<quint32>::max() || std::floor(uid) != uid) return refuse();
+    const auto encoded = o.value(QStringLiteral("token")).toString().toLatin1();
+    Record record{quint32(uid), o.value(QStringLiteral("session")).toString(), o.value(QStringLiteral("launch")).toString(),
+        o.value(QStringLiteral("instance")).toString(), o.value(QStringLiteral("boot")).toString(), QByteArray::fromHex(encoded)};
+    if (!record.valid() || record.token.toHex() != encoded || record.session != session) return refuse();
+    if (error) error->clear();
+    return record;
+}
 std::optional<QVector<VirtualSessionJournal::Record>> VirtualSessionJournal::records(QString *error) const {
     const auto refuse = [error]() -> std::optional<QVector<Record>> {
         fail(error, QStringLiteral("Unsafe, malformed or unreadable launch journal")); return {};
@@ -113,24 +145,9 @@ std::optional<QVector<VirtualSessionJournal::Record>> VirtualSessionJournal::rec
         const QByteArray name(entry->d_name);
         if (name == "." || name == ".." || name.startsWith(".pending-")) continue;
         if (!name.endsWith(".json") || !uuid(QString::fromLatin1(name.chopped(5))) || result.size() >= 256) { ok = false; break; }
-        const int fd = openat(m_directory, name.constData(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-        if (fd < 0) { ok = false; break; }
-        QFile file;
-        if (!file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) { close(fd); ok = false; break; }
-        if (!safeFile(fd, m_owner)) { ok = false; break; }
-        const auto data = file.read(4097);
-        QJsonParseError parse{};
-        const auto doc = QJsonDocument::fromJson(data, &parse);
-        const auto o = doc.object();
-        const double uid = o.value(QStringLiteral("uid")).toDouble(-1);
-        if (file.error() != QFileDevice::NoError || data.size() > 4096 || parse.error != QJsonParseError::NoError
-            || !doc.isObject() || o.size() != 7 || o.value(QStringLiteral("v")) != QJsonValue(1)
-            || uid < 1 || uid >= std::numeric_limits<quint32>::max() || std::floor(uid) != uid) { ok = false; break; }
-        const auto encoded = o.value(QStringLiteral("token")).toString().toLatin1();
-        Record record{quint32(uid), o.value(QStringLiteral("session")).toString(), o.value(QStringLiteral("launch")).toString(),
-            o.value(QStringLiteral("instance")).toString(), o.value(QStringLiteral("boot")).toString(), QByteArray::fromHex(encoded)};
-        if (!record.valid() || record.token.toHex() != encoded || record.session.toLatin1() + ".json" != name) { ok = false; break; }
-        result.append(record);
+        const auto record = readRecord(QString::fromLatin1(name.chopped(5)), error);
+        if (!record) { ok = false; break; }
+        result.append(*record);
     }
     closedir(directory);
     if (!ok) return refuse();

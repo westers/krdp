@@ -13,6 +13,30 @@ class VirtualSessionJournalTest : public QObject {
     static QString id() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     static VirtualSessionJournal::Record record() { return {1000, id(), id(), id(), id(), QByteArray(32, 's')}; }
 private Q_SLOTS:
+    void independentReaderDoesNotTakeOrReleaseBrokerLease() {
+        QTemporaryDir dir;
+        QString error;
+        auto writer = VirtualSessionJournal::openAt(dir.path(), getuid(), &error);
+        QVERIFY(writer);
+        const auto r = record();
+        QVERIFY(writer->insert(r));
+        {
+            auto reader = VirtualSessionJournal::openAt(dir.path(), getuid(), &error, false);
+            QVERIFY2(reader, qPrintable(error));
+            QVERIFY(!reader->insert(record(), &error));
+            QVERIFY(!VirtualSessionJournal::openAt(dir.path(), getuid(), &error));
+            const auto intent = reader->readRecord(r.session, &error);
+            QVERIFY2(intent, qPrintable(error));
+            QCOMPARE(intent->token, r.token); QCOMPARE(intent->launch, r.launch);
+            QVERIFY(!reader->readRecord(QStringLiteral("../outside"), &error));
+            QVERIFY(!reader->readRecord(id(), &error));
+            if (getuid()) QVERIFY(!VirtualSessionJournal::readLaunchIntent(r.session, &error));
+        }
+        QVERIFY(!VirtualSessionJournal::openAt(dir.path(), getuid(), &error));
+        QVERIFY(writer->insert(record()));
+        writer.reset();
+        QVERIFY(VirtualSessionJournal::openAt(dir.path(), getuid(), &error));
+    }
     void restartReadsExactIntentAndCannotReplace() {
         QTemporaryDir dir;
         QString error;
@@ -81,6 +105,9 @@ private Q_SLOTS:
         }
         QString error;
         QVERIFY(!journal->records(&error));
+        auto reader = VirtualSessionJournal::openAt(dir.path(), getuid(), &error, false);
+        QVERIFY(reader);
+        QVERIFY(!reader->readRecord(r.session, &error));
         QVERIFY(!error.contains(QString::fromLatin1(r.token.toHex())));
     }
     void invalidIntentAndInterruptedTemporary() {

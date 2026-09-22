@@ -45,7 +45,8 @@ struct VirtualSessionLaunchPlan {
             && !path.contains(QLatin1Char('\n'));
     }
     static std::optional<VirtualSessionLaunchPlan> build(quint32 authenticatedUid,
-            const Account &account, const QString &session, const Configuration &config, QString *error = nullptr)
+            const Account &account, const QString &session, const Configuration &config, QString *error = nullptr,
+            const QString &recordedLaunch = {})
     {
         const auto refuse = [error](const QString &why) -> std::optional<VirtualSessionLaunchPlan> {
             if (error) *error = why;
@@ -58,6 +59,10 @@ struct VirtualSessionLaunchPlan {
         const QUuid id(session);
         if (id.isNull() || id.toString(QUuid::WithoutBraces) != session) {
             return refuse(QStringLiteral("A canonical server-generated session UUID is required"));
+        }
+        if (!recordedLaunch.isEmpty() && (QUuid(recordedLaunch).isNull()
+            || QUuid(recordedLaunch).toString(QUuid::WithoutBraces) != recordedLaunch)) {
+            return refuse(QStringLiteral("Recorded launch identity must be a canonical non-null UUID"));
         }
         if (!absoluteCleanPath(config.launcher) || !absoluteCleanPath(config.worker)
             || !absoluteCleanPath(config.supportDirectory)) {
@@ -82,10 +87,11 @@ struct VirtualSessionLaunchPlan {
             unique.append(device);
         }
         VirtualSessionLaunchPlan plan;
-        // Fresh launch identity prevents a replacement from reusing an old
-        // generation's socket/token path; only the profile is session-stable.
+        // Production receives the fresh identity already persisted by the broker;
+        // diagnostics allocate it here. This does not authorize runtime reuse:
+        // the executor still refuses any preexisting generation's socket/token.
         plan.runtimeDirectory = QStringLiteral("/run/user/%1/krdp-virtual/%2")
-            .arg(account.uid).arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+            .arg(account.uid).arg(recordedLaunch.isEmpty() ? QUuid::createUuid().toString(QUuid::WithoutBraces) : recordedLaunch);
         plan.profileDirectory = account.home + QStringLiteral("/.krdp-virtual/sessions/") + session;
         plan.socketPath = plan.runtimeDirectory + QStringLiteral("/worker.sock");
         plan.tokenPath = plan.runtimeDirectory + QStringLiteral("/worker-token");

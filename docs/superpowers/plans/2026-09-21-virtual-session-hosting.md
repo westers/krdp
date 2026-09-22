@@ -630,3 +630,16 @@ Review corrected async assertions to wait for observed guardian liveness and
 worker Ready/Outputs, then frame signal counts; delta and wrong-layout keyframes
 are refused. Stale-handle rejection runs while Starting (where a current handle
 could otherwise mark capture ready), not after attachment. Five repeats pass.
+
+Independent service launch prerequisites: root-only readLaunchIntent(session)
+loads exactly one canonical immutable record without taking the broker's writer
+lease. Shared parsing retains nofollow/owner0600/singlelink/bounded/schema checks;
+the internal read-only object cannot insert or release another object's lease.
+The service must validate current boot and existing-runtime refusal before spawn;
+reading an intent is not relaunch authority. Credentials remain memory/FD data,
+never log output or argv. VirtualSessionLaunchPlan can now consume the previously
+recorded launch UUID, preserving its runtime/socket paths instead of generating
+a conflicting fresh UUID. Empty optional identity retains diagnostic fresh-launch
+behavior; explicit invalid identity is rejected. Executor/runtime preparation
+must still reject reuse. Service executable, unit and broker launch wiring remain
+to implement; these interfaces alone do not start or install a service.
