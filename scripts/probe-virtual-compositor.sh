@@ -8,11 +8,11 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia ) ) ]]
     probe_mode="${1:-}"
     rdp_mode=
     probe_timeout=80
-    if [[ "$probe_mode" == --plasma-rdp-nvidia ]]; then
+    if [[ "$probe_mode" == --plasma-rdp-nvidia || "$probe_mode" == --plasma-retention-nvidia ]]; then
         # Disposable acceptance listener, never the installed console service.
         if ss -H -ltn 'sport = :3394' | grep -q .; then
             echo 'Test port3394 already occupied; refusing probe.' >&2
@@ -20,6 +20,10 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         fi
         rdp_mode=--rdp
         probe_timeout=150
+        if [[ "$probe_mode" == --plasma-retention-nvidia ]]; then
+            rdp_mode=--retention
+            probe_timeout=240
+        fi
         probe_mode=--plasma-nvidia
     fi
     render_bindings=()
@@ -216,7 +220,23 @@ jq -e '[.[] | select(.type == "PipeWire:Interface:Device")] | length == 0' "$XDG
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
     --method org.freedesktop.DBus.ListNames
 echo 'Private Wayland compositor ready at 1280x720'
-if [[ "${3:-}" == --rdp ]]; then
+if [[ "${3:-}" == --rdp || "${3:-}" == --retention ]]; then
+    acceptance_seconds=90
+    if [[ "${3:-}" == --retention ]]; then
+        # stdin creates an unnamed, unsaved document in the private desktop.
+        # This fixture must outlive individual RDP transports, not the bounded
+        # probe itself. Never launch against the physical session's bus.
+        env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
+            kate --startanon --stdin >"$XDG_RUNTIME_DIR/retention-app.log" 2>&1 <<EOF &
+KRDP unsaved reconnect acceptance
+Private desktop identity: ${XDG_RUNTIME_DIR##*/}
+This document has never been saved.
+EOF
+        retention_pid=$!
+        acceptance_seconds=180
+        printf '%s\n' "$retention_pid" >"$XDG_RUNTIME_DIR/retention-app.pid"
+        cat "/proc/$retention_pid/stat" >"$XDG_RUNTIME_DIR/retention-app-start.stat"
+    fi
     env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
         LD_LIBRARY_PATH=/opt/krdp-console/lib/x86_64-linux-gnu \
         /opt/krdp-console/bin/krdpserver --plasma --monitor 0 --quality 80 \
@@ -231,12 +251,16 @@ if [[ "${3:-}" == --rdp ]]; then
         sleep 0.1
     done
     ss -H -ltn 'sport = :3394' | grep -q .
-    echo 'Private desktop RDP listener ready on Sol3394 for90 seconds'
-    for attempt in {1..90}; do
+    echo "Private desktop RDP listener ready on Sol3394 for $acceptance_seconds seconds"
+    for ((attempt=1; attempt<=acceptance_seconds; ++attempt)); do
         kill -0 "$rdp_pid"
         kill -0 "$policy_pid"
         if (( attempt % 10 == 0 )); then
             timeout 5 pw-dump >"$XDG_RUNTIME_DIR/rdp-graph-$attempt.json"
+            if [[ -n "${retention_pid:-}" ]]; then
+                kill -0 "$retention_pid"
+                cat "/proc/$retention_pid/stat" >"$XDG_RUNTIME_DIR/retention-app-$attempt.stat"
+            fi
         fi
         sleep 1
     done
