@@ -26,10 +26,15 @@ public:
     // Call once before server.start(). False is fatal to startup; true means
     // intents imported, NOT desktop readiness. Keep the journal lease alive.
     bool recover(VirtualSessionJournal &journal, QString *error = nullptr);
+    using StartService = std::function<bool(const QString &, const VirtualSessionRegistry::Handle &)>;
+    // Journal must outlive host. Enable only after recovery and before clients.
+    bool enableIndependentCreates(VirtualSessionJournal &journal, StartService start = {});
 
 private:
     friend class VirtualSessionHostControllerTest;
     bool recoverRecords(const QVector<VirtualSessionJournal::Record> &records, const QString &boot, QString *error);
+    std::optional<VirtualSessionRegistry::Handle> createIndependent(quint32 uid);
+    bool startIndependentService(const QString &unit, const VirtualSessionRegistry::Handle &handle);
     struct Worker {
         VirtualSessionRegistry::Handle handle;
         std::unique_ptr<VirtualSessionBrokerLease> lease; // destroyed after endpoint
@@ -48,6 +53,12 @@ private:
     quint64 m_sequence = 0;
     quint64 m_nextClient = 0;
     bool m_recoveryAttempted = false;
+    VirtualSessionJournal *m_journal = nullptr;
+    VirtualSessionJournal *m_recoveredJournal = nullptr;
+    StartService m_startService;
+    std::function<bool(const VirtualSessionJournal::Record &)> m_commitIntent;
+    bool m_creationBlocked = false;
+    std::map<QString, VirtualSessionJournal::Record> m_newIntents;
     VirtualSessionSupervisor m_supervisor;
     VirtualSessionControl m_control;
     std::map<quint64, std::unique_ptr<VirtualSessionTransport>> m_clients;

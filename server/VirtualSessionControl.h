@@ -22,6 +22,7 @@ public:
     QJsonObject request(std::optional<quint32> authenticatedUid, quint64 client, const QJsonObject &record);
     void disconnected(quint64 client);
     std::optional<Handle> attachment(quint64 client) const;
+    void setCreateHandler(std::function<std::optional<Handle>(quint32)> create) { m_create = std::move(create); }
 
 private:
     struct Reply { QJsonObject request; QJsonObject response; };
@@ -34,6 +35,7 @@ private:
     void release(quint64 client, Transport &transport);
     VirtualSessionSupervisor &m_supervisor;
     Release m_release;
+    std::function<std::optional<Handle>(quint32)> m_create;
     QHash<quint64, Transport> m_transports;
 };
 }

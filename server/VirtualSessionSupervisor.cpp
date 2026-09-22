@@ -28,13 +28,14 @@ VirtualSessionSupervisor::~VirtualSessionSupervisor()
     }
 }
 
-std::optional<VirtualSessionSupervisor::Handle> VirtualSessionSupervisor::adopt(const VirtualSessionGuardianClient::Identity &identity)
+std::optional<VirtualSessionSupervisor::Handle> VirtualSessionSupervisor::adopt(const VirtualSessionGuardianClient::Identity &identity, bool awaitingService)
 {
     const auto handle = m_registry.reserveRetained(identity.uid, identity.session);
     if (!handle) return {};
     auto value = std::make_unique<Runtime>();
     value->handle = *handle;
     value->identity = identity;
+    value->awaitingService = awaitingService;
     value->guardian = std::make_unique<VirtualSessionGuardianClient>();
     auto *r = value.get();
     m_runtimes.emplace(handle->id, std::move(value));
@@ -47,7 +48,10 @@ std::optional<VirtualSessionSupervisor::Handle> VirtualSessionSupervisor::adopt(
     // Resolve the full handle at delivery so queued replies cannot use an erased
     // runtime or affect a successor after forget/recovery.
     connect(r->guardian.get(), &VirtualSessionGuardianClient::failed, this, [this, handle = *handle](const auto &) {
-        if (auto *current = runtime(handle)) guardianUnavailable(*current);
+        if (auto *current = runtime(handle)) {
+            if (current->awaitingService && !current->failed && !current->stopping) current->poll.start(250);
+            else guardianUnavailable(*current);
+        }
     }, Qt::QueuedConnection);
     connect(r->guardian.get(), &VirtualSessionGuardianClient::received, this, [this, handle = *handle](const auto &phase, bool running) {
         if (auto *current = runtime(handle)) guardianReply(*current, phase, running);
@@ -97,6 +101,7 @@ void VirtualSessionSupervisor::queryGuardian(Runtime &r)
     // connectToServer may synchronously fail and invoke a callback that destroys
     // this runtime/supervisor. No runtime access after an accepted request.
     if (!r.guardian->request(r.identity, stop ? VirtualSessionGuardianClient::Operation::Stop : VirtualSessionGuardianClient::Operation::Status)) {
+        if (r.awaitingService && !r.stopping) { r.poll.start(250); return; }
         guardianUnavailable(r);
         return;
     }
@@ -122,6 +127,8 @@ void VirtualSessionSupervisor::guardianReply(Runtime &r, const QString &phase, b
         r.deadline.start(m_stopTimeoutMs + 1000);
     }
     r.observedRunning = running && phase == QStringLiteral("running");
+    const bool newlyAvailable = r.awaitingService && r.observedRunning && !r.stopping;
+    if (newlyAvailable) r.awaitingService = false;
     if (!r.stopping && r.observedRunning && r.captureObserved) {
         m_registry.ready(r.handle);
         r.deadline.stop();
@@ -130,6 +137,11 @@ void VirtualSessionSupervisor::guardianReply(Runtime &r, const QString &phase, b
     else r.poll.start(r.stopping ? 100 : 1000);
     // External callbacks may destroy this supervisor. Do not touch r afterward.
     if (notifyStopping) notifyUnavailable(r.handle);
+    else if (newlyAvailable) {
+        const auto callback = m_guardianAvailable;
+        const auto handle = r.handle;
+        if (callback) callback(handle); // no runtime access after external callback
+    }
 }
 
 std::optional<VirtualSessionSupervisor::Handle> VirtualSessionSupervisor::create(quint32 uid)

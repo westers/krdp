@@ -83,7 +83,7 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, Transpo
         return response;
     }
     if (action == QStringLiteral("create")) {
-        const auto handle = m_supervisor.create(uid);
+        const auto handle = m_create ? m_create(uid) : m_supervisor.create(uid);
         if (!handle) return reply(record, false, QStringLiteral("session creation refused"));
         response.insert(QStringLiteral("session"), handle->id);
         // Accepted is not ready: failed launch/first-frame readiness is exposed

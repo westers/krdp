@@ -669,3 +669,29 @@ ignores canonical consumption markers because they are not desktop identities;
 an uncertain claim cannot hide other surviving desktops. Explicit privileged
 reconciliation is required for consumed/ambiguous intents. Regression tests
 cover a second reader/claim after fixture runtime removal and incomplete claims.
+
+Independent create wiring: after journal recovery, host can enable the service
+create handler before admitting clients. It preflights registry capacity, writes
+fresh intent durably, reserves guardian supervision, then sends exactly one async
+systemd StartUnit(unit,"fail") request (unit name derived from server UUID only).
+No credential crosses D-Bus. Job acceptance is not readiness; request failure or
+timeout retains intent/Failed without restart or kill. Before first authenticated
+Running reply only, the supervisor polls the exact expected guardian identity on
+a bounded startup deadline. It never retries launch. The host creates/leases the
+worker endpoint only after this handshake; fresh matching capture still gates
+attach. Request-ID dedup stays in the existing control dispatcher. Host shutdown
+detaches rather than owns these services. Production listener/service caller,
+PAM/runtime ownership and privileged live acceptance are not delivered yet.
+Any journal insert failure freezes further creates in that host: publication
+may have succeeded before directory fsync failed, so continued admission could
+exceed limits and make later recovery fail. Existing desktops are unaffected;
+restart/reconciliation must reread authoritative records. Fault-injection coverage
+simulates a published record followed by a failed commit result, verifies no
+service request or further creates, and recovers the intent as visible Failed.
+Create enablement is bound to the exact journal object used for successful
+recovery; swapping to another store cannot bypass recovered admission accounting.
+Tests inject the service request (never start real system units), including a
+real guardian/sleep child plus synthetic worker frame for create→attach and
+host-destruction retention. The installed systemd Manager StartUnit signature
+was confirmed by read-only bus introspection; actual service dispatch is not
+runtime-accepted yet.

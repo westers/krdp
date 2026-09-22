@@ -12,6 +12,147 @@ class VirtualSessionHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void uncertainPublicationBlocksFurtherCreationUntilRecovery()
+    {
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr);
+        QVERIFY(journal);
+        int starts = 0;
+        {
+            Server server;
+            VirtualSessionHostController host(&server, {});
+            QVERIFY(host.recover(*journal));
+            QVERIFY(host.enableIndependentCreates(*journal, [&](const auto &, const auto &) { ++starts; return true; }));
+            bool published = false;
+            host.m_commitIntent = [&](const auto &record) {
+                published = journal->insert(record);
+                return false; // simulate an uncertain fsync result after publication
+            };
+            QVERIFY(!host.createIndependent(1000)); QVERIFY(published);
+            QVERIFY(host.m_creationBlocked);
+            QVERIFY(!host.createIndependent(1000));
+            QVERIFY(!host.createIndependent(1001));
+            const auto records = journal->records(); QVERIFY(records); QCOMPARE(records->size(), 1);
+            QCOMPARE(starts, 0);
+        }
+        Server server;
+        VirtualSessionHostController next(&server, {});
+        QVERIFY(next.recover(*journal));
+        QCOMPARE(next.m_supervisor.list(1000).size(), 1);
+        QCOMPARE(next.m_supervisor.list(1000).first().phase, VirtualSessionState::Phase::Failed);
+    }
+    void independentCreateWaitsForGuardianThenCapture()
+    {
+        if (!getuid()) QSKIP("Nonroot guardian fixture");
+        const QString userRuntime = QStringLiteral("/run/user/%1").arg(getuid());
+        if (!QFileInfo(userRuntime).isDir()) QSKIP("No canonical user runtime");
+        const QString base = userRuntime + QStringLiteral("/krdp-virtual");
+        const bool createdBase = QDir().mkdir(base);
+        auto cleanBase = qScopeGuard([&] { if (createdBase) QDir().rmdir(base); });
+        if (createdBase) QVERIFY(!chmod(QFile::encodeName(base).constData(), 0700));
+        QVERIFY(!QFileInfo(base).isSymLink()); QCOMPARE(QFileInfo(base).ownerId(), quint32(getuid()));
+        QString runtime;
+        auto cleanRuntime = qScopeGuard([&] { if (!runtime.isEmpty()) QDir(runtime).removeRecursively(); });
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr);
+        QVERIFY(journal);
+        VirtualSessionGuardian guardian;
+        qint64 child = 0;
+        {
+            Server server;
+            VirtualSessionHostController host(&server, {});
+            QVERIFY(host.recover(*journal));
+            QVERIFY(host.enableIndependentCreates(*journal, [&](const auto &, const auto &) {
+                const auto records = journal->records();
+                if (!records || records->size() != 1) return false;
+                const auto &r = records->first();
+                const QString path = QFileInfo(r.workerSocket()).absolutePath();
+                if (!QDir().mkdir(path)) return false;
+                runtime = path;
+                if (chmod(QFile::encodeName(path).constData(), 0700)) return false;
+                return guardian.start(getuid(), r.session, r.token, r.identity().socket,
+                    {QStringLiteral("/usr/bin/sleep"), {QStringLiteral("60")}, {}, {}}, nullptr, r.incarnation);
+            }));
+            const auto handle = host.createIndependent(getuid());
+            QVERIFY(handle);
+            QVERIFY(host.m_workers.empty());
+            QTRY_VERIFY(host.m_workers.contains(handle->id));
+            QCOMPARE(host.m_supervisor.list(getuid()).first().phase, VirtualSessionState::Phase::Starting);
+            QVERIFY(!host.m_supervisor.attach(getuid(), handle->id, 1));
+            const auto r = journal->records()->first();
+            QLocalSocket worker; worker.connectToServer(r.workerSocket());
+            QVERIFY(worker.waitForConnected(1000));
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{r.session, quint32(getuid()), r.token}));
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Outputs{{{QStringLiteral("Virtual-1"), QRect(0, 0, 1280, 720), 1, true}}}));
+            VideoFrame frame; frame.size = QSize(1280, 720); frame.data = "fixture"; frame.isKeyFrame = true;
+            frame.monitors = {{QRect(0, 0, 1280, 720), true}};
+            worker.write(ConsoleWorkerWire::frame(frame)); QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(host.m_supervisor.list(getuid()).first().phase, VirtualSessionState::Phase::Retained);
+            QVERIFY(host.m_supervisor.attach(getuid(), handle->id, 1));
+            child = guardian.processId(); QVERIFY(child > 0);
+        }
+        QCOMPARE(guardian.phase(), QStringLiteral("running")); QCOMPARE(guardian.processId(), child);
+    }
+    void independentCreatePersistsBeforeOneStartAndDeduplicates()
+    {
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr);
+        QVERIFY(journal);
+        Server server;
+        VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal));
+        int starts = 0;
+        bool persistedBeforeStart = false;
+        QVERIFY(host.enableIndependentCreates(*journal, [&](const QString &unit, const auto &handle) {
+            ++starts;
+            const auto records = journal->records();
+            persistedBeforeStart = records && records->size() == 1 && records->first().session == handle.id
+                && unit == QStringLiteral("krdp-virtual-session@%1.service").arg(handle.id);
+            return true; // accepted request, no guardian or capture yet
+        }));
+        const QJsonObject request{{QStringLiteral("type"), QStringLiteral("virtual-session")}, {QStringLiteral("v"), 1},
+            {QStringLiteral("id"), QStringLiteral("create-once")}, {QStringLiteral("action"), QStringLiteral("create")}};
+        const auto reply = host.m_control.request(1000, 1, request);
+        QVERIFY(reply.value(QStringLiteral("ok")).toBool());
+        QVERIFY(persistedBeforeStart); QCOMPARE(starts, 1);
+        QCOMPARE(reply.value(QStringLiteral("state")).toString(), QStringLiteral("starting"));
+        QCOMPARE(host.m_control.request(1000, 1, request), reply);
+        QCOMPARE(starts, 1);
+        const auto session = reply.value(QStringLiteral("session")).toString();
+        QVERIFY(!host.m_supervisor.attach(1000, session, 1));
+        QVERIFY(host.m_workers.empty());
+        QVERIFY(!host.m_supervisor.forget(1000, session));
+        QVERIFY(!host.m_supervisor.recreate(1000, session));
+        host.m_control.disconnected(1);
+        QCOMPARE(journal->records()->size(), 1);
+        QCOMPARE(host.m_supervisor.list(1000).first().phase, VirtualSessionState::Phase::Starting);
+    }
+    void failedServiceSubmissionPreservesIntent()
+    {
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr);
+        QVERIFY(journal);
+        Server server;
+        VirtualSessionHostController host(&server, {});
+        QVERIFY(!host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        QVERIFY(host.recover(*journal));
+        QTemporaryDir otherDirectory;
+        auto otherJournal = VirtualSessionJournal::openAt(otherDirectory.path(), getuid(), nullptr);
+        QVERIFY(otherJournal);
+        QVERIFY(!host.enableIndependentCreates(*otherJournal, [](const auto &, const auto &) { return false; }));
+        int starts = 0;
+        QVERIFY(host.enableIndependentCreates(*journal, [&](const auto &, const auto &) { ++starts; return false; }));
+        const auto handle = host.createIndependent(1000);
+        QVERIFY(handle); QCOMPARE(starts, 1);
+        QCOMPARE(host.m_supervisor.list(1000).first().phase, VirtualSessionState::Phase::Failed);
+        const auto records = journal->records();
+        QVERIFY(records); QCOMPARE(records->size(), 1);
+        QCOMPARE(records->first().session, handle->id);
+        QVERIFY(!host.m_supervisor.recreate(1000, handle->id));
+        QVERIFY(!host.m_supervisor.forget(1000, handle->id));
+        QVERIFY(host.m_workers.empty());
+    }
     void journalRecoveryReattachesOnlyAfterNewAuthenticatedCapture()
     {
         if (!getuid()) QSKIP("Guardian requires a nonroot desktop UID");

@@ -3,6 +3,12 @@
 #include <QDebug>
 #include <QFileInfo>
 #include <limits>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
+#include <QDBusObjectPath>
+#include <unistd.h>
 
 namespace KRdp
 {
@@ -35,6 +41,7 @@ VirtualSessionHostController::VirtualSessionHostController(Server *server, Prepa
 VirtualSessionHostController::~VirtualSessionHostController()
 {
     m_supervisor.setUnavailableCallback({});
+    m_supervisor.setGuardianAvailableCallback({});
     // Release all transports while control and endpoints still exist. The
     // supervisor subsequently tears down leaders on explicit host shutdown.
     while (!m_clients.empty()) removeClient(m_clients.begin()->first);
@@ -81,7 +88,70 @@ bool VirtualSessionHostController::recover(VirtualSessionJournal &journal, QStri
         if (error) *error = QStringLiteral("Cannot establish current boot identity");
         return false;
     }
-    return recoverRecords(*records, QString::fromLatin1(file.read(128)).trimmed(), error);
+    if (!recoverRecords(*records, QString::fromLatin1(file.read(128)).trimmed(), error)) return false;
+    m_recoveredJournal = &journal;
+    return true;
+}
+
+bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJournal &journal, StartService start)
+{
+    if (!m_recoveryAttempted || m_recoveredJournal != &journal || m_nextClient || m_journal
+        || (!start && (getuid() || geteuid()))) return false;
+    m_journal = &journal;
+    m_commitIntent = [&journal](const auto &record) { return journal.insert(record); };
+    m_startService = start ? std::move(start) : [this](const auto &unit, const auto &handle) { return startIndependentService(unit, handle); };
+    m_control.setCreateHandler([this](quint32 uid) { return createIndependent(uid); });
+    m_supervisor.setGuardianAvailableCallback([this](const auto &handle) {
+        const auto found = m_newIntents.find(handle.id);
+        if (found == m_newIntents.end()) return;
+        const auto &record = found->second;
+        auto lease = VirtualSessionBrokerLease::acquire(record.uid, record.workerSocket());
+        if (!lease || !prepareEndpoint(record.uid, handle, record.workerSocket(), record.token, std::move(lease)))
+            m_supervisor.captureUnavailable(handle);
+    });
+    return true;
+}
+
+std::optional<VirtualSessionRegistry::Handle> VirtualSessionHostController::createIndependent(quint32 uid)
+{
+    if (!m_journal || !uid || m_creationBlocked) return {};
+    QFile bootFile(QStringLiteral("/proc/sys/kernel/random/boot_id"));
+    if (!bootFile.open(QIODevice::ReadOnly)) return {};
+    const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+    VirtualSessionJournal::Record record{uid, uuid(), uuid(), uuid(), QString::fromLatin1(bootFile.read(128)).trimmed(),
+        QUuid::createUuid().toRfc4122() + QUuid::createUuid().toRfc4122()};
+    if (!m_supervisor.canAdopt(uid, record.session)) return {};
+    if (!m_commitIntent(record)) {
+        // A failed fsync may leave a published record outside live accounting.
+        // Freeze creation until recovery/reconciliation reads authoritative state.
+        m_creationBlocked = true;
+        return {};
+    }
+    // From here every failure leaves a durable intent, never a second start.
+    const auto handle = m_supervisor.adopt(record.identity(), true);
+    if (!handle) return {};
+    m_newIntents.emplace(record.session, record);
+    const QString unit = QStringLiteral("krdp-virtual-session@%1.service").arg(record.session);
+    if (!m_startService(unit, *handle)) m_supervisor.captureUnavailable(*handle);
+    return handle;
+}
+
+bool VirtualSessionHostController::startIndependentService(const QString &unit, const VirtualSessionRegistry::Handle &handle)
+{
+    auto bus = QDBusConnection::systemBus();
+    if (!bus.isConnected()) return false;
+    auto message = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.systemd1"),
+        QStringLiteral("/org/freedesktop/systemd1"), QStringLiteral("org.freedesktop.systemd1.Manager"), QStringLiteral("StartUnit"));
+    message.setArguments({unit, QStringLiteral("fail")});
+    auto *watcher = new QDBusPendingCallWatcher(bus.asyncCall(message, 10000), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, handle](QDBusPendingCallWatcher *finished) {
+        const QDBusPendingReply<QDBusObjectPath> reply = *finished;
+        finished->deleteLater();
+        // An accepted job is NOT a running desktop. Even error/timeout is not
+        // permission to restart or terminate a service that may have started.
+        if (reply.isError()) m_supervisor.captureUnavailable(handle);
+    });
+    return true;
 }
 
 bool VirtualSessionHostController::recoverRecords(const QVector<VirtualSessionJournal::Record> &records,

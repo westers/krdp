@@ -81,7 +81,7 @@ add_executable(VirtualSessionHostControllerTest VirtualSessionHostControllerTest
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp
     ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp)
 target_include_directories(VirtualSessionHostControllerTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(VirtualSessionHostControllerTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
+target_link_libraries(VirtualSessionHostControllerTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
 foreach(test VirtualSessionSupervisorTest VirtualSessionControlTest VirtualSessionTransportTest VirtualSessionHostControllerTest)
     target_link_libraries(${test} PRIVATE KRdpGuardianClient)
 endforeach()

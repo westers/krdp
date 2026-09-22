@@ -22,6 +22,52 @@ class VirtualSessionSupervisorTest : public QObject
         return Supervisor::Launch{QStringLiteral("/usr/bin/sleep"), {QStringLiteral("60")}, {}, {}};
     }
 private Q_SLOTS:
+    void independentServiceMayAppearAfterReservation()
+    {
+        if (!getuid()) QSKIP("Nonroot guardian");
+        QTemporaryDir directory;
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        const auto id = uuid(), incarnation = uuid();
+        const auto socket = directory.filePath(QStringLiteral("guardian.sock"));
+        const QByteArray token(32, 'p');
+        Supervisor broker({}, 1500);
+        int available = 0;
+        broker.setGuardianAvailableCallback([&](const auto &) { ++available; });
+        const auto handle = broker.adopt({quint32(getuid()), id, incarnation, socket, token}, true);
+        QVERIFY(handle);
+        QCOMPARE(broker.list(getuid()).first().phase, Phase::Starting);
+        QVERIFY(!broker.attach(getuid(), id, 1));
+        KRdp::VirtualSessionGuardian guardian;
+        QVERIFY(guardian.start(getuid(), id, token, socket, *sleeper(getuid(), {}), nullptr, incarnation));
+        QTRY_COMPARE(available, 1);
+        QCOMPARE(broker.list(getuid()).first().phase, Phase::Starting);
+        QVERIFY(broker.captureReady(*handle));
+        QVERIFY(broker.attach(getuid(), id, 1));
+        QCOMPARE(available, 1);
+    }
+    void independentStartupTimeoutCannotAcceptLateGuardian()
+    {
+        if (!getuid()) QSKIP("Nonroot guardian");
+        QTemporaryDir directory;
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        const auto id = uuid(), incarnation = uuid();
+        const auto socket = directory.filePath(QStringLiteral("guardian.sock"));
+        const QByteArray token(32, 'p');
+        Supervisor broker({}, 20);
+        int available = 0;
+        broker.setGuardianAvailableCallback([&](const auto &) { ++available; });
+        const auto handle = broker.adopt({quint32(getuid()), id, incarnation, socket, token}, true);
+        QVERIFY(handle);
+        QTRY_COMPARE(broker.list(getuid()).first().phase, Phase::Failed);
+        KRdp::VirtualSessionGuardian guardian;
+        QVERIFY(guardian.start(getuid(), id, token, socket, *sleeper(getuid(), {}), nullptr, incarnation));
+        QTRY_COMPARE(guardian.phase(), QStringLiteral("running"));
+        QVERIFY(!broker.captureReady(*handle));
+        QVERIFY(!broker.attach(getuid(), id, 1));
+        QVERIFY(!broker.recreate(getuid(), id));
+        QVERIFY(!broker.forget(getuid(), id));
+        QCOMPARE(available, 0);
+    }
     void adoptAcrossBrokerLifetimes()
     {
         if (!getuid()) QSKIP("Nonroot guardian");
