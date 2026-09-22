@@ -8,8 +8,20 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia ) ) ]]
     probe_mode="${1:-}"
+    rdp_mode=
+    probe_timeout=80
+    if [[ "$probe_mode" == --plasma-rdp-nvidia ]]; then
+        # Disposable acceptance listener, never the installed console service.
+        if ss -H -ltn 'sport = :3394' | grep -q .; then
+            echo 'Test port3394 already occupied; refusing probe.' >&2
+            exit 1
+        fi
+        rdp_mode=--rdp
+        probe_timeout=150
+        probe_mode=--plasma-nvidia
+    fi
     render_bindings=()
     render_environment=(LIBGL_ALWAYS_SOFTWARE=1
         __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
@@ -37,6 +49,11 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     probe_runtime=$(mktemp -d "/run/user/$(id -u)/krdp-headless.XXXXXX")
     mkdir "$probe_runtime/config" "$probe_runtime/cache" "$probe_runtime/state" "$probe_runtime/data"
     cp -r "$repo_path/scripts/virtual-probe-config/." "$probe_runtime/config/"
+    if [[ -n "$rdp_mode" ]]; then
+        mkdir -p "$probe_runtime/data/applications"
+        cp "$repo_path/scripts/virtual-probe-rdp.desktop" "$probe_runtime/data/applications/org.kde.krdpserver.desktop"
+        (umask 077; openssl rand -hex 24 >"$probe_runtime/rdp-password")
+    fi
     mkdir "$probe_runtime/config-defaults"
     ln -s /etc/xdg/menus "$probe_runtime/config-defaults/menus"
     echo "Headless probe evidence: $probe_runtime"
@@ -54,13 +71,13 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         XDG_CACHE_HOME="$probe_runtime/cache" XDG_STATE_HOME="$probe_runtime/state" \
         XDG_DATA_HOME="$probe_runtime/data" XDG_DATA_DIRS=/usr/local/share:/usr/share \
         XDG_SESSION_TYPE=wayland "${render_environment[@]}" \
-        timeout 80 bwrap --unshare-pid --unshare-ipc --die-with-parent --new-session \
+        timeout "$probe_timeout" bwrap --unshare-pid --unshare-ipc --die-with-parent --new-session \
         --ro-bind / / "${apparmor_query[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run \
         "${render_bindings[@]}" \
         --perms 01777 --dir /tmp/.X11-unix \
         --bind "$probe_runtime" "$probe_runtime" \
         dbus-run-session --config-file="$repo_path/server/virtual-session-bus.conf" \
-        -- bash "$script_path" --inside-private-bus "$probe_mode" \
+        -- bash "$script_path" --inside-private-bus "$probe_mode" "$rdp_mode" \
         >"$probe_runtime/probe.log" 2>&1
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
@@ -69,7 +86,12 @@ fi
 kbuildsycoca6 --noincremental >"$XDG_RUNTIME_DIR/service-cache.log" 2>&1
 wrapper_pid=
 graph_pid=
+rdp_pid=
 cleanup() {
+    if [[ -n "$rdp_pid" ]]; then
+        kill "$rdp_pid" 2>/dev/null || true
+        wait "$rdp_pid" 2>/dev/null || true
+    fi
     if [[ -n "$wrapper_pid" ]]; then
         # KWinWrapper's destructor terminates/waits for its own KWin child.
         kill "$wrapper_pid" 2>/dev/null || true
@@ -168,3 +190,22 @@ jq -e '[.[] | select(.type == "PipeWire:Interface:Device")] | length == 0' "$XDG
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
     --method org.freedesktop.DBus.ListNames
 echo 'Private Wayland compositor ready at 1280x720; stopping probe only'
+if [[ "${3:-}" == --rdp ]]; then
+    env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
+        /opt/krdp-console/bin/krdpserver --plasma --monitor 0 --quality 80 \
+        --address 192.168.48.57 --port 3394 -u krdptest \
+        -p "$(<"$XDG_RUNTIME_DIR/rdp-password")" \
+        >"$XDG_RUNTIME_DIR/rdp.log" 2>&1 &
+    rdp_pid=$!
+    for attempt in {1..100}; do
+        kill -0 "$rdp_pid"
+        if ss -H -ltn 'sport = :3394' | grep -q .; then break; fi
+        sleep 0.1
+    done
+    ss -H -ltn 'sport = :3394' | grep -q .
+    echo 'Private desktop RDP listener ready on Sol3394 for90 seconds'
+    for attempt in {1..90}; do
+        kill -0 "$rdp_pid"
+        sleep 1
+    done
+fi

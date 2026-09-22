@@ -1,0 +1,7 @@
+[General]
+SystemUserEnabled=false
+MonitorMode=specific
+MonitorIndex=0
+Codec=avc420
+WakeDisplayOnConnect=false
+AdaptiveQuality=false
