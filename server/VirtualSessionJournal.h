@@ -31,6 +31,7 @@ public:
     std::optional<QVector<Record>> records(QString *error = nullptr) const;
 private:
     friend class VirtualSessionJournalTest;
+    friend class VirtualSessionHostControllerTest;
     VirtualSessionJournal(int directory, quint32 owner) : m_directory(directory), m_owner(owner) {}
     static std::unique_ptr<VirtualSessionJournal> openAt(const QString &path, quint32 owner, QString *error);
     int m_directory;

@@ -3,6 +3,7 @@
 
 #include "VirtualSessionState.h"
 #include <QList>
+#include <QSet>
 #include <QString>
 #include <QUuid>
 #include <map>
@@ -34,6 +35,21 @@ public:
         : m_perUserLimit(perUserLimit), m_totalLimit(totalLimit) {}
     VirtualSessionRegistry(const VirtualSessionRegistry &) = delete;
     VirtualSessionRegistry &operator=(const VirtualSessionRegistry &) = delete;
+
+    bool empty() const { return m_sessions.empty(); }
+    bool canReserve(const QList<QPair<quint32, QString>> &identities) const
+    {
+        if (m_sessions.size() + size_t(identities.size()) > m_totalLimit) return false;
+        std::map<quint32, size_t> counts;
+        QSet<QString> ids;
+        for (const auto &[id, entry] : m_sessions) { ids.insert(id); ++counts[entry.uid]; }
+        for (const auto &[uid, id] : identities) {
+            if (!uid || QUuid(id).isNull() || QUuid(id).toString(QUuid::WithoutBraces) != id
+                || ids.contains(id) || ++counts[uid] > m_perUserLimit) return false;
+            ids.insert(id);
+        }
+        return true;
+    }
 
     std::optional<Handle> create(quint32 authenticatedUid)
     {

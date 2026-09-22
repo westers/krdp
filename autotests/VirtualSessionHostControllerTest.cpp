@@ -9,6 +9,88 @@ class VirtualSessionHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void recoveryReadsJournalAndBootWithoutChangingIntent()
+    {
+        QTemporaryDir directory;
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        QFile bootFile(QStringLiteral("/proc/sys/kernel/random/boot_id"));
+        QVERIFY(bootFile.open(QIODevice::ReadOnly));
+        const auto boot = QString::fromLatin1(bootFile.readAll()).trimmed();
+        const VirtualSessionJournal::Record record{1000, uuid(), uuid(), uuid(), uuid(), QByteArray(32, 'x')};
+        QVERIFY(record.boot != boot);
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr);
+        QVERIFY(journal); QVERIFY(journal->insert(record));
+        Server server;
+        VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal));
+        QCOMPARE(host.m_supervisor.list(1000).size(), 1);
+        QCOMPARE(host.m_supervisor.list(1000).first().phase, VirtualSessionState::Phase::Failed);
+        QVERIFY(host.m_workers.empty());
+        const auto saved = journal->records();
+        QVERIFY(saved); QCOMPARE(saved->size(), 1);
+        QCOMPARE(saved->first().incarnation, record.incarnation);
+        QCOMPARE(saved->first().token, record.token);
+        QVERIFY(!host.recover(*journal));
+    }
+    void recoveryRefusesAfterClientAdmission()
+    {
+        Server server;
+        VirtualSessionHostController host(&server, {});
+        auto connection = std::make_unique<RdpConnection>(&server, -1);
+        Q_EMIT server.newConnectionCreated(connection.get());
+        connection.reset();
+        QVERIFY(!host.recoverRecords({}, QUuid::createUuid().toString(QUuid::WithoutBraces), nullptr));
+    }
+    void unavailableRecoveryNeverCreatesOrForgetsApps()
+    {
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        const auto boot = uuid();
+        Server server;
+        int launched = 0;
+        VirtualSessionHostController host(&server, [&](quint32, const auto &, const auto &) -> std::optional<VirtualSessionHostController::PreparedLaunch> {
+            ++launched; return {};
+        });
+        const VirtualSessionJournal::Record oldBoot{quint32(getuid()), uuid(), uuid(), uuid(), uuid(), QByteArray(32, 'x')};
+        const VirtualSessionJournal::Record missing{quint32(getuid()), uuid(), uuid(), uuid(), boot, QByteArray(32, 'y')};
+        QVERIFY(!QFileInfo::exists(QFileInfo(missing.workerSocket()).absolutePath()));
+        QString error;
+        QVERIFY2(host.recoverRecords({oldBoot, missing}, boot, &error), qPrintable(error));
+        QCOMPARE(launched, 0);
+        QCOMPARE(host.m_supervisor.list(getuid()).size(), 2);
+        QVERIFY(host.m_supervisor.list(getuid() + 1).isEmpty());
+        for (const auto &summary : host.m_supervisor.list(getuid())) {
+            QCOMPARE(summary.phase, VirtualSessionState::Phase::Failed);
+            QVERIFY(!host.m_supervisor.attach(getuid(), summary.id, 1));
+            QVERIFY(!host.m_supervisor.stop(getuid(), summary.id));
+            QVERIFY(!host.m_supervisor.recreate(getuid(), summary.id));
+            QVERIFY(!host.m_supervisor.forget(getuid(), summary.id));
+        }
+        QVERIFY(!host.recoverRecords({}, boot, &error));
+        QVERIFY(!QFileInfo::exists(QFileInfo(missing.workerSocket()).absolutePath()));
+        QCOMPARE(launched, 0);
+    }
+    void recoveryPreflightIsAllOrNothing()
+    {
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        const auto boot = uuid();
+        const VirtualSessionJournal::Record good{1000, uuid(), uuid(), uuid(), boot, QByteArray(32, 'x')};
+        for (const auto &kind : {QStringLiteral("invalid"), QStringLiteral("duplicate"), QStringLiteral("alias"), QStringLiteral("capacity")}) {
+            Server server;
+            VirtualSessionHostController host(&server, {});
+            QVector<VirtualSessionJournal::Record> records{good};
+            auto second = good;
+            if (kind == QStringLiteral("invalid")) second.token.clear();
+            if (kind == QStringLiteral("alias")) { second.session = uuid(); second.incarnation = uuid(); }
+            records.append(second);
+            if (kind == QStringLiteral("capacity")) {
+                records.clear();
+                for (int i = 0; i < 5; ++i) records.append({1000, uuid(), uuid(), uuid(), boot, QByteArray(32, 'x')});
+            }
+            QVERIFY(!host.recoverRecords(records, boot, nullptr));
+            QVERIFY(host.m_supervisor.list(1000).isEmpty());
+            QVERIFY(host.m_workers.empty());
+        }
+    }
     void brokerLeaseReclaimsOnlyRefusedSocket()
     {
         if (!getuid()) QSKIP("Nonroot lease fixture");

@@ -39,6 +39,9 @@ public:
     // Trusted durable launch identity, not RDP JSON. Starts unavailable until
     // guardian handshake AND authenticated fresh capture have both succeeded.
     std::optional<Handle> adopt(const VirtualSessionGuardianClient::Identity &identity);
+    bool canRecover(const QList<QPair<quint32, QString>> &identities) const { return m_registry.empty() && m_registry.canReserve(identities); }
+    // Trusted intent without a safe endpoint: visible Failed, no socket or spawn.
+    bool rememberUnavailable(quint32 uid, const QString &session);
     void setUnavailableCallback(std::function<void(const Handle &)> callback) { m_unavailable = std::move(callback); }
     std::optional<Handle> recreate(quint32 authenticatedUid, const QString &id);
     QList<VirtualSessionRegistry::Summary> list(quint32 uid) const { return m_registry.list(uid); }
@@ -63,6 +66,7 @@ private:
         bool captureObserved = false;
         bool terminalConfirmed = false;
         bool stopSent = false;
+        bool unresolvedIntent = false;
     };
     void launch(quint32 uid, const Handle &handle);
     Runtime *runtime(const Handle &handle);

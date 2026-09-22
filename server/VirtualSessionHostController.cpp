@@ -72,6 +72,54 @@ bool VirtualSessionHostController::adopt(const VirtualSessionGuardianClient::Ide
     return false;
 }
 
+bool VirtualSessionHostController::recover(VirtualSessionJournal &journal, QString *error)
+{
+    const auto records = journal.records(error);
+    if (!records) return false;
+    QFile file(QStringLiteral("/proc/sys/kernel/random/boot_id"));
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (error) *error = QStringLiteral("Cannot establish current boot identity");
+        return false;
+    }
+    return recoverRecords(*records, QString::fromLatin1(file.read(128)).trimmed(), error);
+}
+
+bool VirtualSessionHostController::recoverRecords(const QVector<VirtualSessionJournal::Record> &records,
+    const QString &boot, QString *error)
+{
+    const auto refuse = [error]() {
+        if (error) *error = QStringLiteral("Recovery requires a fresh host and valid launch intents within admission limits");
+        return false;
+    };
+    if (m_recoveryAttempted || m_nextClient || !m_workers.empty()
+        || QUuid(boot).isNull() || QUuid(boot).toString(QUuid::WithoutBraces) != boot) return refuse();
+    QList<QPair<quint32, QString>> identities;
+    QSet<QString> runtimes;
+    QSet<QString> incarnations;
+    for (const auto &record : records) {
+        const QString runtime = QString::number(record.uid) + QLatin1Char('/') + record.launch;
+        if (!record.valid() || runtimes.contains(runtime) || incarnations.contains(record.incarnation)) return refuse();
+        runtimes.insert(runtime);
+        incarnations.insert(record.incarnation);
+        identities.append({record.uid, record.session});
+    }
+    // Validate the whole set before socket activity or metadata mutation.
+    if (!m_supervisor.canRecover(identities)) return refuse();
+    m_recoveryAttempted = true;
+    for (const auto &record : records) {
+        if (record.boot == boot && adopt(record.identity(), record.workerSocket())) continue;
+        bool reserved = false;
+        for (const auto &summary : m_supervisor.list(record.uid)) {
+            if (summary.id == record.session) { reserved = true; break; }
+        }
+        // Failed adoption may already have reserved a runtime. Missing runtime
+        // or occupied lease must still leave a visible intent, never a new spawn.
+        if (!reserved && !m_supervisor.rememberUnavailable(record.uid, record.session)) return refuse();
+    }
+    if (error) error->clear();
+    return true;
+}
+
 bool VirtualSessionHostController::prepareEndpoint(quint32 uid, const VirtualSessionRegistry::Handle &handle,
     const QString &socket, const QByteArray &token, std::unique_ptr<VirtualSessionBrokerLease> lease)
 {

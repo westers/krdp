@@ -599,3 +599,17 @@ fresh capture before attachment. No automatic resurrection after reboot, no PID
 signalling and no root traversal of user-supplied runtime paths is permitted.
 Journal is implemented/tested as a library; production startup/write-before-spawn
 and explicit terminal reconciliation remain to be wired to the service launcher.
+
+Host recovery integration: VirtualSessionHostController::recover reads the
+protected journal and kernel boot UUID before listener startup. Whole-set
+validation checks identities, duplicate runtime/incarnation aliases and existing
+registry admission limits before any endpoint work. Matching-boot records use
+the existing authenticated guardian/capture adoption; other-boot or missing/
+occupied endpoints become owner-visible Failed intents without socket probes
+for old boots, process launch, Stop, recreation or forgetting. Failed adoption
+that already reserved its guardian runtime keeps that runtime's stricter gates.
+Recovery can run only on a fresh controller and only once after successful import.
+True means imported, not attachable; the caller must keep the journal lease alive
+and fail startup on false. No service entrypoint invokes this yet. Independent
+launch/write-before-spawn, explicit terminal reconciliation and installation
+remain required; conservative unresolved records may need operator reconciliation.

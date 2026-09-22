@@ -2,6 +2,7 @@
 #pragma once
 #include "VirtualSessionTransport.h"
 #include "VirtualSessionBrokerLease.h"
+#include "VirtualSessionJournal.h"
 #include <Server.h>
 
 namespace KRdp
@@ -22,9 +23,13 @@ public:
     VirtualSessionHostController(Server *server, Prepare prepare, QObject *parent = nullptr);
     ~VirtualSessionHostController() override;
     bool adopt(const VirtualSessionGuardianClient::Identity &identity, const QString &workerSocket);
+    // Call once before server.start(). False is fatal to startup; true means
+    // intents imported, NOT desktop readiness. Keep the journal lease alive.
+    bool recover(VirtualSessionJournal &journal, QString *error = nullptr);
 
 private:
     friend class VirtualSessionHostControllerTest;
+    bool recoverRecords(const QVector<VirtualSessionJournal::Record> &records, const QString &boot, QString *error);
     struct Worker {
         VirtualSessionRegistry::Handle handle;
         std::unique_ptr<VirtualSessionBrokerLease> lease; // destroyed after endpoint
@@ -42,6 +47,7 @@ private:
     std::map<QString, std::unique_ptr<Worker>> m_workers;
     quint64 m_sequence = 0;
     quint64 m_nextClient = 0;
+    bool m_recoveryAttempted = false;
     VirtualSessionSupervisor m_supervisor;
     VirtualSessionControl m_control;
     std::map<quint64, std::unique_ptr<VirtualSessionTransport>> m_clients;

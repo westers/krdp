@@ -57,6 +57,18 @@ std::optional<VirtualSessionSupervisor::Handle> VirtualSessionSupervisor::adopt(
     return handle;
 }
 
+bool VirtualSessionSupervisor::rememberUnavailable(quint32 uid, const QString &session)
+{
+    const auto handle = m_registry.reserveRetained(uid, session);
+    if (!handle) return false;
+    auto value = std::make_unique<Runtime>();
+    value->handle = *handle;
+    value->failed = true;
+    value->unresolvedIntent = true;
+    m_runtimes.emplace(session, std::move(value));
+    return m_registry.unavailable(*handle);
+}
+
 void VirtualSessionSupervisor::guardianUnavailable(Runtime &r)
 {
     if (r.failed || r.terminalConfirmed) return;
@@ -134,7 +146,7 @@ std::optional<VirtualSessionSupervisor::Handle> VirtualSessionSupervisor::recrea
     const auto existing = m_runtimes.find(id);
     // A lost guardian may still own live apps. Never replace it via the old
     // process factory, even if the registry is reporting Failed.
-    if (existing != m_runtimes.end() && existing->second->guardian) return {};
+    if (existing != m_runtimes.end() && (existing->second->guardian || existing->second->unresolvedIntent)) return {};
     auto handle = m_registry.recreate(uid, id);
     if (handle) {
         launch(uid, *handle);
@@ -257,8 +269,9 @@ void VirtualSessionSupervisor::terminate(Runtime &r)
 
 bool VirtualSessionSupervisor::stop(quint32 uid, const QString &id)
 {
-    auto handle = m_registry.stop(uid, id);
     const auto existing = m_runtimes.find(id);
+    if (existing != m_runtimes.end() && existing->second->unresolvedIntent) return false;
+    auto handle = m_registry.stop(uid, id);
     if (!handle && existing != m_runtimes.end() && existing->second->guardian
         && !existing->second->terminalConfirmed) {
         handle = m_registry.stopUnavailable(uid, id);
@@ -280,6 +293,7 @@ bool VirtualSessionSupervisor::stop(quint32 uid, const QString &id)
 bool VirtualSessionSupervisor::forget(quint32 uid, const QString &id)
 {
     const auto existing = m_runtimes.find(id);
+    if (existing != m_runtimes.end() && existing->second->unresolvedIntent) return false;
     if (existing != m_runtimes.end() && existing->second->guardian && !existing->second->terminalConfirmed) return false;
     if (!m_registry.forget(uid, id)) {
         return false;
