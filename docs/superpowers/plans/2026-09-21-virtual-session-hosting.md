@@ -192,3 +192,17 @@ isolated compositor and GUI exited0. Client/server logs copied to
 rdp/evidence/virtual-audio-{client,server}.log. This is actual private app →
 RDPSND → Buzz speaker-sink proof, not production supervisor integration,
 microphone/camera acceptance or acoustic latency measurement.
+
+Live-registry implementation: VirtualSessionRegistry indexes separate opaque
+desktop IDs, scopes listing/create/resume/stop/recreate/forget to authenticated
+nonroot UIDs and delegates phases to VirtualSessionState. Supervisor events
+carry a manager-instance UUID plus session ID and generation; old callbacks
+cannot act on replacement sessions. A transport may attach only one desktop;
+disconnect retains it, stopping waits for actual exit, and failed desktops
+require explicit recreation. Per-user/global limits include retained, stopping
+and failed entries until confirmed-terminal metadata is explicitly forgotten.
+Tests cover cross-user refusal, retained reconnect, crash replacement/stale
+callbacks, manager identity, capacity and stop/exit ordering. This registry is
+in-memory and NOT yet wired to a supervisor, transport or persistent store.
+Recovery must verify a surviving runtime identity/readiness before adoption;
+do not deserialize an Attached/Retained flag and assume applications survived.
