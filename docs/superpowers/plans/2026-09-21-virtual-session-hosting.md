@@ -716,3 +716,44 @@ reversed, encrypted, empty, malformed, missing, directory and oversized inputs.
 This validates initial configuration, not later replacement of the TLS files or
 certificate trust/expiry policy; installed credential ownership remains an
 installation responsibility.
+
+## Login-session lifetime implementation contract
+
+The independent service entry currently execs the privilege-dropping helper;
+it cannot yet own a PAM session through desktop exit. Add a privileged lifetime
+owner, separate from the RDP broker, retaining its PAM handle until the guardian
+and namespace descendants terminate. Do not open PAM in the broker, borrow a
+physical session, enable linger, or exec/drop privilege in the handle owner.
+Opening PAM may migrate the calling process into a logind session scope: service
+cgroup kill policy alone is NOT an adequate cleanup proof. Before integration,
+design/review parent-child ownership, bounded signal forwarding, scope cleanup,
+crash behavior and PID-reuse-safe termination. Keep the guardian independent of
+broker death; distinguish desktop-owner death from broker death.
+
+VirtualSessionPam now supplies the initial nonintegrated lifecycle component:
+fixed service name; account check for journal-bound OS account; no prompts or
+password persistence; reject identity remapping; background/wayland metadata;
+reject absent or wrong-UID runtime metadata; close attempted session stacks even
+when a later open module fails, then pam_end exactly once. Its draft Ubuntu PAM
+policy requires pam_systemd (common-session makes that module optional) and denies
+authentication, which remains the broker's separate boundary. Local-account
+session management only: Kerberos/homed credential establishment is not claimed.
+Tests replace PAM symbols and cannot mutate real login state. The component is
+not linked into the service entry or installed yet.
+
+Mandatory caller gates before enabling: validate trusted installed PAM policy
+(missing service must not fall back to `other`), root clean startup context,
+resolve journal UID to canonical OS account; verify returned logind session's
+owner, leader, no physical seat and matching runtime using authoritative logind
+properties; validate runtime directory ownership without symlinks. PAM success
+and environment strings alone do not prove a new session. Never export PAM's
+DBUS_SESSION_BUS_ADDRESS or physical display environment into the private graph.
+Privileged acceptance must create a desktop with no seat0 login dependency,
+retain it across broker restart and physical logout, then prove explicit logout
+ends only its own login session and descendants. Do not log Steve out to test.
+
+References: Linux-PAM pam_open_session/pam_close_session manuals and systemd259
+pam_systemd implementation:
+https://www.man7.org/linux/man-pages/man3/pam_open_session.3.html
+https://www.man7.org/linux/man-pages/man3/pam_close_session.3.html
+https://github.com/systemd/systemd/blob/v259/src/login/pam_systemd.c

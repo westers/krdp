@@ -1,0 +1,8 @@
+# Draft only: install as /etc/pam.d/krdp-virtual-session after root acceptance.
+# Authentication already happened at the RDP broker; this stack must never
+# become an alternative password-authentication policy.
+auth requisite pam_deny.so
+@include common-account
+# Unlike common-session's optional pam_systemd, failure here must block launch.
+session required pam_unix.so
+session required pam_systemd.so class=background type=wayland desktop=KDE

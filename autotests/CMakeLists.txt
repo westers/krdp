@@ -23,6 +23,11 @@ target_include_directories(VirtualSessionLaunchPlanTest PRIVATE ${CMAKE_SOURCE_D
 target_link_libraries(VirtualSessionLaunchPlanTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionLaunchPlanTest COMMAND VirtualSessionLaunchPlanTest)
 
+add_executable(VirtualSessionPamTest VirtualSessionPamTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionPam.cpp)
+target_include_directories(VirtualSessionPamTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${PAM_INCLUDE_DIR})
+target_link_libraries(VirtualSessionPamTest PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME VirtualSessionPamTest COMMAND VirtualSessionPamTest)
+
 find_package(OpenSSL REQUIRED)
 add_executable(VirtualSessionServicePlanTest VirtualSessionServicePlanTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualHostTls.cpp)
 target_include_directories(VirtualSessionServicePlanTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
