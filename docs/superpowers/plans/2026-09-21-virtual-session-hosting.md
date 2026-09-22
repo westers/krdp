@@ -361,3 +361,30 @@ Solphysical817/KWin168073/consolehost167444 and Buzzproductionconfig unchanged.
 This is bounded probe acceptance, not installed delivery. Next production
 launcher and typed client create/resume UI, automatic correlated postattach
 consent, app/logout retention acceptance, recovery and matching packages.
+
+## Production launcher contract (implementation in progress)
+
+VirtualSessionLaunchPlan constructs a launch only from a PAM UID, an OS-resolved
+matching account, a server-generated session UUID and administrator configuration.
+Profiles persist at HOME/.local/share/krdp-virtual/sessions/<session UUID>.
+Each launch uses a fresh runtime UUID below /run/user/<uid>/krdp-virtual, so
+recreation cannot overwrite a previous generation's token/socket. The executor
+must create both parents privately, reject symlinks/incorrect ownership, and
+atomically refuse a preexisting runtime. No reuse/adoption from path or PID alone.
+
+The launcher receives explicit worker/support paths, even bounded capture size
+and an ordered PCI render-device allow-list. This is compositor access, not an
+NVENC/offloaded-encoding admission policy. A transient renderD index is refused.
+No allow-list is an explicit unsupported CPU-only configuration for now, not
+permission to expose every GPU. Hardware resolution must match sysfs PCI identity,
+render node and driver; only selected render/driver devices may enter the namespace,
+never a modesetting card or evdev. Recheck access after dropping to the PAM UID.
+
+The environment is constructed from scratch (PATH, HOME, USER, LOGNAME, LANG).
+Namespace setup must then provide private XDG/bus/audio paths and persistent
+profile mounts; do not import the physical user-manager environment. No desktop
+lifetime timeout is included. Retain bounded startup/stop deadlines instead.
+The executable/executor is not implemented or installed by this contract slice.
+The current supervisor still owns/kills its children on destruction. Production
+restart retention needs a separately supervised namespace plus validated runtime
+handshake and durable registry; removing die-with-parent alone is not recovery.

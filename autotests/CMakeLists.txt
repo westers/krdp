@@ -13,6 +13,11 @@ target_include_directories(VirtualSessionRegistryTest PRIVATE ${CMAKE_SOURCE_DIR
 target_link_libraries(VirtualSessionRegistryTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionRegistryTest COMMAND VirtualSessionRegistryTest)
 
+add_executable(VirtualSessionLaunchPlanTest VirtualSessionLaunchPlanTest.cpp)
+target_include_directories(VirtualSessionLaunchPlanTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(VirtualSessionLaunchPlanTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME VirtualSessionLaunchPlanTest COMMAND VirtualSessionLaunchPlanTest)
+
 add_executable(VirtualSessionSupervisorTest VirtualSessionSupervisorTest.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp)
 target_include_directories(VirtualSessionSupervisorTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
