@@ -140,3 +140,56 @@ Installation must validate the
 running waiter's actual resolution/environment and package-safe diversion
 lifecycle; an environment drop-in cannot change an existing Python process.
 No service stop/restart or timer disabling is authorized as a testing shortcut.
+
+## Authorized Sol first-install restart (2026-09-22)
+
+Steve approved a one-time restart of only `unattended-upgrades.service` during
+guard installation. No RDP, KDE, SDDM or unrelated service restart is included.
+The previous launcher diagnostic is complete; do not ask him to run it again.
+The installation remains user-run in the existing `krdp-sol` tmux session,
+with the exact reviewed command staged without Enter. Approval does not make
+the existing validation-only coordinator an installer.
+
+Required implementation order:
+
+1. Implement an explicit, durably blocked, known-origin first-install transaction
+   and authenticate its finite installation actions. Bind boot, installation,
+   transaction, generation and installer invocation. Unrelated invalidation must
+   invalidate completion. Never restore ExternalUnknown to InitialBlocked or
+   accept an environment-variable bypass.
+2. Prepare and verify package-safe executable diversion, the fixed backend and
+   approved startup inputs before stopping the waiter. Respect package-before-
+   gate ordering and release the gate before any package action whose hook
+   reacquires it. Do not deploy a partial gate or break unattended updates while
+   the full supported routing/bootstrap/keeper integration is unfinished.
+3. Check shutdown preparation, active upgrades and relevant jobs immediately
+   before the stop. Stop only the waiter, then check completed stop job, old
+   PID/birth disappearance and relevant subtree extinction. A concurrent
+   shutdown, unexpected child or timeout aborts progress; no automatic kill
+   escalation. A naked `systemctl restart` cannot perform these intermediate
+   checks. The script's SIGTERM path can stop an already-running upgrade.
+4. Start with approved fixed executable resolution and Python startup/import
+   inputs; record the fresh invocation, PID/birth, interpreter and profile
+   association. Recheck expected waiter state and absence of upgrade children.
+   Initial `/proc/environ` alone is not fresh-launch provenance.
+5. Validate the complete writer/activation/profile boundary and publish Clean
+   only for the exact authenticated transaction/generation. Interrupted or
+   unexplained activity stays blocked; report whether the updater helper was
+   left stopped or running. Do not silently restore an unguarded route.
+
+Tests must cover an upgrade/shutdown racing the stop, surviving descendants,
+failed start, interrupted diversion, nested hook lock order, unrelated
+invalidation and stale completion. Disposable fixtures first; no fault injection
+against Sol's existing desktops. The present WriterPolicy still refuses after
+comparison; no executable installation command is ready at this checkpoint.
+
+Next implementation target is one fixed installation transaction and checked
+sequence, not a generic installer framework: `VirtualSessionMaintenanceInstallation`
+with durable phases, Guard storage integration and failure-boundary fixtures.
+Its installation-complete evidence must be distinct from admission/Clean. Review
+the exact phase schema and crash/recovery behavior before adding a live executor.
+Preparation before stop and publication while stopped must be distinguished:
+the exact diversion cutover must exclude concurrent launch; a stopped waiter
+alone does not exclude other package/activation paths. Likewise, preflight
+snapshots alone do not exclude an upgrade racing SIGTERM. The sequencing contract
+must provide exclusion or refuse, not promise safety from repeated observations.
