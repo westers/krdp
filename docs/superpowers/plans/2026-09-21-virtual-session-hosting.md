@@ -326,3 +326,20 @@ listener. Test verifies a real unauthenticated RdpConnection cannot create a
 desktop or enable media;39/39 complete suite passes. Positive PAM attachment,
 actual wire video/audio/control, disconnect/reconnect and failure paths through
 this adapter still need end-to-end acceptance before feature advertisement.
+
+Host composition: VirtualSessionHostController owns registry/supervisor/control,
+per-connection RDP adapters and generation-scoped authenticated worker endpoints.
+A trusted preparation callback receives OS UID/internal handle/fresh token and
+returns runtime/socket/process setup; endpoint listens before spawn. Ready alone
+does not admit attach: matching output metadata plus a keyframe gates readiness.
+Server::newConnectionCreated installs adapters before queued RDP initialization;
+the dispatcher's release hook resolves/revokes the named adapter. Client teardown
+extracts its entry before destruction to avoid callback reentry; host teardown
+drains adapters and closes endpoints before destroying the supervisor.
+
+Tests cover both host/connection destruction orders, ordinary connection creation
+without desktop spawn, token delivery/VirtualUser target, stale manager/generation
+resolution and owned process stop. This composition is currently test-linked;
+next instantiate it in an isolated PAM listener with the private launcher, exercise
+actual Buzz control/video/audio/reconnect, and only then integrate installed
+hosting, client UI and recovery. No new production listener is running yet.
