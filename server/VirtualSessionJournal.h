@@ -45,6 +45,10 @@ public:
     static bool recordKeeper(const Record &expected, QString *error = nullptr);
     // Missing is distinct from malformed/uncertain. Neither supplies a PID.
     static std::optional<Keeper> readKeeper(const Record &expected, bool *missing, QString *error = nullptr);
+    // Only called by that same keeper after successful PAM close + pam_end.
+    static bool recordKeeperClosed(const Record &expected, QString *error = nullptr);
+    // nullopt = unsafe/uncertain; false = no successful-close record.
+    static std::optional<bool> keeperClosed(const Record &expected, const Keeper &keeper, QString *error = nullptr);
     bool insert(const Record &record, QString *error = nullptr);
     std::optional<QVector<Record>> records(QString *error = nullptr) const;
 private:
@@ -57,6 +61,8 @@ private:
     bool hasClaim(const Record &expected) const;
     bool writeKeeper(const Record &expected, const Keeper &keeper, QString *error);
     std::optional<Keeper> readKeeperRecord(const Record &expected, bool *missing, QString *error) const;
+    bool writeKeeperClosed(const Record &expected, const Keeper &keeper, QString *error);
+    std::optional<bool> readKeeperClosed(const Record &expected, const Keeper &keeper, QString *error) const;
     int m_directory;
     quint32 m_owner;
     bool m_writable;

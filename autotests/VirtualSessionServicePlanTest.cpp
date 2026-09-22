@@ -24,6 +24,8 @@ private Q_SLOTS:
         QVERIFY(bytes.contains("\nDelegate=no\n"));
         QVERIFY(bytes.contains("\nKillMode=mixed\n"));
         QVERIFY(bytes.contains("--pam-keeper "));
+        QVERIFY(bytes.contains("\nExecStopPost=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 "));
+        QVERIFY(bytes.contains("/bin/krdp-virtual-session-cleanup --session %i\n"));
     }
     void pamKeeperRequiresCleanPrivilegedOwner() {
         QProcess keeper;
@@ -114,6 +116,22 @@ private Q_SLOTS:
         QVERIFY(entry.waitForFinished(3000));
         QCOMPARE(entry.exitStatus(), QProcess::NormalExit); QCOMPARE(entry.exitCode(), 1);
         QVERIFY(entry.readAllStandardError().contains("explicit root service required"));
+    }
+    void cleanupRefusesUnsafeInvocation() {
+        QProcess cleanup;
+        QProcessEnvironment env;
+        env.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin:/bin"));
+        env.insert(QStringLiteral("LANG"), QStringLiteral("C.UTF-8"));
+        env.insert(QStringLiteral("DBUS_SYSTEM_BUS_ADDRESS"), QStringLiteral("unix:path=/not-a-bus"));
+        cleanup.setProcessEnvironment(env);
+        cleanup.start(QString::fromLocal8Bit(KRDP_SESSION_CLEANUP), {});
+        QVERIFY(cleanup.waitForFinished(3000)); QCOMPARE(cleanup.exitCode(), 1);
+        QVERIFY(cleanup.readAllStandardError().contains("unclean environment"));
+        if (!getuid()) return;
+        env.remove(QStringLiteral("DBUS_SYSTEM_BUS_ADDRESS")); cleanup.setProcessEnvironment(env);
+        cleanup.start(QString::fromLocal8Bit(KRDP_SESSION_CLEANUP), {});
+        QVERIFY(cleanup.waitForFinished(3000)); QCOMPARE(cleanup.exitCode(), 1);
+        QVERIFY(cleanup.readAllStandardError().contains("explicit root service required"));
     }
     void brokerRefusesUnprivilegedInvocation() {
         if (!getuid()) QSKIP("Nonroot refusal fixture");

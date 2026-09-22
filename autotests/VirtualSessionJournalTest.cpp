@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionJournal.h"
 #include "VirtualSessionProcessIdentity.h"
+#include "VirtualSessionCleanupBirth.h"
 #include <QTest>
 #include <QTemporaryDir>
 #include <QFile>
@@ -27,6 +28,95 @@ class VirtualSessionJournalTest : public QObject {
     static QString id() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     static VirtualSessionJournal::Record record() { return {1000, id(), id(), id(), id(), QByteArray(32, 's')}; }
 private Q_SLOTS:
+    void cleanupRereadsBirthAfterServiceExtinction() {
+        std::optional<VirtualSessionJournal::Keeper> published;
+        int reads = 0;
+        const auto read = [&] { ++reads; return VirtualSessionCleanupBirth{published, !published}; };
+        const VirtualSessionJournal::Keeper birth{12345, 42, 4242};
+        const auto result = VirtualSessionCleanupBirth::inspect(read, [&]() -> std::optional<bool> {
+            // Deterministic missing→publication/migration→empty race.
+            published = birth; return true;
+        });
+        QCOMPARE(reads, 2); QVERIFY(result.keeper); QVERIFY(!result.absent); QVERIFY(*result.keeper == birth);
+        published.reset(); reads = 0;
+        const auto missing = VirtualSessionCleanupBirth::inspect(read, [] { return std::optional<bool>(true); });
+        QCOMPARE(reads, 2); QVERIFY(!missing.keeper); QVERIFY(missing.absent);
+        for (const auto empty : {std::optional<bool>(), std::optional<bool>(false)}) {
+            reads = 0;
+            const auto uncertain = VirtualSessionCleanupBirth::inspect(read, [=] { return empty; });
+            QCOMPARE(reads, 1); QVERIFY(!uncertain.keeper); QVERIFY(!uncertain.absent);
+        }
+        reads = 0;
+        const auto partial = VirtualSessionCleanupBirth::inspect([&] {
+            return ++reads == 1 ? VirtualSessionCleanupBirth{{}, true} : VirtualSessionCleanupBirth{};
+        }, [] { return std::optional<bool>(true); });
+        QVERIFY(!partial.keeper); QVERIFY(!partial.absent); QCOMPARE(reads, 2);
+    }
+    void successfulCloseEvidenceIsBoundToOriginalKeeper() {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); const VirtualSessionJournal::Keeper birth{12345, 42, 4242};
+        QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(!journal->writeKeeperClosed(r, birth, nullptr));
+        QVERIFY(!journal->readKeeperClosed(r, birth, nullptr));
+        QVERIFY(journal->writeKeeper(r, birth, nullptr));
+        QCOMPARE(journal->readKeeperClosed(r, birth, nullptr), std::optional<bool>(false));
+        auto other = birth; ++other.pidInode;
+        QVERIFY(!journal->writeKeeperClosed(r, other, nullptr));
+        QVERIFY(journal->writeKeeperClosed(r, birth, nullptr));
+        QVERIFY(!journal->writeKeeperClosed(r, birth, nullptr));
+        QCOMPARE(journal->readKeeperClosed(r, birth, nullptr), std::optional<bool>(true));
+        QVERIFY(!journal->readKeeperClosed(r, other, nullptr));
+        const auto all = journal->records(); QVERIFY(all); QCOMPARE(all->size(), 1);
+        if (getuid()) {
+            QVERIFY(!VirtualSessionJournal::recordKeeperClosed(r));
+            QVERIFY(!VirtualSessionJournal::keeperClosed(r, birth));
+        }
+    }
+    void unsafeCloseEvidenceRefused_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"empty", "identity", "permissions", "symlink", "hardlink", "fifo"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void unsafeCloseEvidenceRefused() {
+        QFETCH(QString, kind); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); const VirtualSessionJournal::Keeper birth{12345, 42, 4242};
+        QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(journal->writeKeeper(r, birth, nullptr)); QVERIFY(journal->writeKeeperClosed(r, birth, nullptr));
+        const auto path = dir.filePath(QStringLiteral(".closed-") + r.session);
+        if (kind == QStringLiteral("symlink") || kind == QStringLiteral("fifo")) {
+            QVERIFY(QFile::remove(path));
+            if (kind == QStringLiteral("symlink")) QVERIFY(QFile::link(QStringLiteral("/etc/passwd"), path));
+            else QVERIFY(!mkfifo(QFile::encodeName(path).constData(), 0600));
+        } else if (kind == QStringLiteral("hardlink")) {
+            QVERIFY(!link(QFile::encodeName(path).constData(), QFile::encodeName(dir.filePath(QStringLiteral(".pending-alias"))).constData()));
+        } else if (kind == QStringLiteral("permissions")) {
+            QVERIFY(!chmod(QFile::encodeName(path).constData(), 0644));
+        } else {
+            QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            if (kind == QStringLiteral("identity")) QVERIFY(file.write("wrong generation") > 0);
+            file.close();
+        }
+        QVERIFY(!journal->readKeeperClosed(r, birth, nullptr));
+        QVERIFY(!journal->writeKeeperClosed(r, birth, nullptr));
+        QVERIFY(journal->records());
+    }
+    void closeEvidenceDurabilityFailureIsReported_data() {
+        QTest::addColumn<int>("which");
+        QTest::newRow("file") << 1; QTest::newRow("directory") << 2;
+    }
+    void closeEvidenceDurabilityFailureIsReported() {
+        QFETCH(int, which); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); const VirtualSessionJournal::Keeper birth{12345, 42, 4242};
+        QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr)); QVERIFY(journal->writeKeeper(r, birth, nullptr));
+        failSync = which; const auto reset = qScopeGuard([] { failSync = 0; });
+        QVERIFY(!journal->writeKeeperClosed(r, birth, nullptr));
+        failSync = 0;
+        QVERIFY(!journal->writeKeeperClosed(r, birth, nullptr));
+        QVERIFY(QFile::exists(dir.filePath(QStringLiteral(".closed-") + r.session)));
+    }
     void failedKeeperDurabilityForbidsPamAndReplay_data() {
         QTest::addColumn<int>("which");
         QTest::newRow("file fsync") << 1;

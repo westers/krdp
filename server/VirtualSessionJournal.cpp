@@ -67,6 +67,57 @@ std::optional<VirtualSessionJournal::Keeper> VirtualSessionJournal::readKeeper(c
     auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
     return journal ? journal->readKeeperRecord(expected, missing, error) : std::nullopt;
 }
+bool VirtualSessionJournal::recordKeeperClosed(const Record &expected, QString *error) {
+    if (getuid() || geteuid()) return fail(error, QStringLiteral("Keeper close requires root"));
+    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    if (!journal) return false;
+    const auto keeper = journal->readKeeperRecord(expected, nullptr, error);
+    const auto ticks = virtualProcessStartTime(getpid());
+    const int fd = int(syscall(SYS_pidfd_open, getpid(), 0));
+    const auto inode = virtualPidfdIdentity(fd); if (fd >= 0) close(fd);
+    if (!keeper || keeper->pid != getpid() || !ticks || keeper->startTicks != *ticks || !inode || keeper->pidInode != *inode)
+        return fail(error, QStringLiteral("Keeper close identity mismatch"));
+    return journal->writeKeeperClosed(expected, *keeper, error);
+}
+std::optional<bool> VirtualSessionJournal::keeperClosed(const Record &expected, const Keeper &keeper, QString *error) {
+    if (getuid() || geteuid()) { fail(error, QStringLiteral("Keeper close requires root")); return {}; }
+    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    return journal ? journal->readKeeperClosed(expected, keeper, error) : std::nullopt;
+}
+bool VirtualSessionJournal::writeKeeperClosed(const Record &expected, const Keeper &keeper, QString *error) {
+    const auto current = readKeeperRecord(expected, nullptr, error);
+    if (!current || *current != keeper) return fail(error, QStringLiteral("Keeper close identity mismatch"));
+    const QByteArray name = QByteArray(".closed-") + expected.session.toLatin1();
+    const QByteArray bytes = expected.launch.toLatin1() + '\n' + expected.boot.toLatin1() + '\n' + QByteArray::number(keeper.pidInode);
+    const int fd = openat(m_directory, name.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return fail(error, QStringLiteral("Keeper close already recorded or unavailable"));
+    ssize_t count;
+    do { count = write(fd, bytes.constData(), bytes.size()); } while (count < 0 && errno == EINTR);
+    const bool prepared = count == bytes.size() && !fchmod(fd, 0600) && safeFile(fd, m_owner) && !fsync(fd);
+    close(fd);
+    const bool durable = !fsync(m_directory);
+    if (!prepared || !durable) return fail(error, QStringLiteral("Keeper close record uncertain"));
+    if (error) error->clear();
+    return true;
+}
+std::optional<bool> VirtualSessionJournal::readKeeperClosed(const Record &expected, const Keeper &keeper, QString *error) const {
+    const auto current = readKeeperRecord(expected, nullptr, error);
+    if (!current || *current != keeper) { fail(error, QStringLiteral("Keeper close identity mismatch")); return {}; }
+    const QByteArray name = QByteArray(".closed-") + expected.session.toLatin1();
+    const int fd = openat(m_directory, name.constData(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) { if (error) error->clear(); return false; }
+        fail(error, QStringLiteral("Unsafe keeper close record")); return {};
+    }
+    QFile file;
+    if (!file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) { close(fd); return {}; }
+    if (!safeFile(fd, m_owner)) return {};
+    const auto bytes = file.read(4097);
+    const QByteArray expectedBytes = expected.launch.toLatin1() + '\n' + expected.boot.toLatin1() + '\n' + QByteArray::number(keeper.pidInode);
+    if (file.error() != QFileDevice::NoError || bytes != expectedBytes) { fail(error, QStringLiteral("Unsafe keeper close record")); return {}; }
+    if (error) error->clear();
+    return true;
+}
 bool VirtualSessionJournal::writeKeeper(const Record &expected, const Keeper &keeper, QString *error) {
     const auto current = readRecord(expected.session, error);
     if (!current || *current != expected || !hasClaim(expected) || keeper.pid <= 1 || !keeper.startTicks || keeper.pidInode < 2)
@@ -260,6 +311,7 @@ std::optional<QVector<VirtualSessionJournal::Record>> VirtualSessionJournal::rec
         // hide unrelated surviving desktops from recovery.
         if (name.startsWith(".claimed-") && uuid(QString::fromLatin1(name.mid(9)))) continue;
         if (name.startsWith(".keeper-") && uuid(QString::fromLatin1(name.mid(8)))) continue;
+        if (name.startsWith(".closed-") && uuid(QString::fromLatin1(name.mid(8)))) continue;
         if (!name.endsWith(".json") || !uuid(QString::fromLatin1(name.chopped(5))) || result.size() >= 256) { ok = false; break; }
         const auto record = readRecord(QString::fromLatin1(name.chopped(5)), error);
         if (!record) { ok = false; break; }

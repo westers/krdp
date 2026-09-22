@@ -19,6 +19,9 @@ public:
     VirtualSessionServiceScope &operator=(const VirtualSessionServiceScope &) = delete;
     // nullopt means uncertain: do not close PAM or claim descendants are gone.
     std::optional<bool> descendantsGone() const;
+    // Recovery only: caller must pin/verify this original keeper separately.
+    // Allows a pre-migration keeper, not arbitrary surviving desktop processes.
+    std::optional<bool> onlyKeeperRemains(pid_t verifiedKeeper) const;
     // Signals verified service members except the parent. SIGTERM/SIGKILL only.
     // Requires no external privileged migration during teardown; pidfds protect
     // PID reuse, not cgroup migration. Not an adversarial same-UID sandbox.

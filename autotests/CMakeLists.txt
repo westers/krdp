@@ -23,6 +23,11 @@ target_include_directories(VirtualSessionKeeperProcessTest PRIVATE ${CMAKE_SOURC
 target_link_libraries(VirtualSessionKeeperProcessTest PRIVATE Qt6::Test KRdpGuardianClient)
 add_test(NAME VirtualSessionKeeperProcessTest COMMAND VirtualSessionKeeperProcessTest)
 set_tests_properties(VirtualSessionKeeperProcessTest PROPERTIES TIMEOUT 10)
+add_executable(VirtualSessionLoginRecoveryTest VirtualSessionLoginRecoveryTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionLoginRecovery.cpp)
+target_include_directories(VirtualSessionLoginRecoveryTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(VirtualSessionLoginRecoveryTest PRIVATE Qt6::Test Qt6::DBus KRdpGuardianClient)
+add_test(NAME VirtualSessionLoginRecoveryTest COMMAND VirtualSessionLoginRecoveryTest)
+set_tests_properties(VirtualSessionLoginRecoveryTest PROPERTIES TIMEOUT 30)
 
 add_executable(VirtualSessionLaunchPlanTest VirtualSessionLaunchPlanTest.cpp)
 target_include_directories(VirtualSessionLaunchPlanTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
@@ -69,6 +74,8 @@ target_compile_definitions(VirtualSessionServicePlanTest PRIVATE KRDP_SESSION_UN
 target_compile_definitions(VirtualSessionServicePlanTest PRIVATE KRDP_VIRTUAL_HOST="$<TARGET_FILE:krdp-virtual-host>")
 add_dependencies(VirtualSessionServicePlanTest krdp-virtual-session-entry krdp-virtual-host)
 add_dependencies(VirtualSessionServicePlanTest krdp-virtual-pam-keeper)
+add_dependencies(VirtualSessionServicePlanTest krdp-virtual-session-cleanup)
+target_compile_definitions(VirtualSessionServicePlanTest PRIVATE KRDP_SESSION_CLEANUP="$<TARGET_FILE:krdp-virtual-session-cleanup>")
 target_compile_definitions(VirtualSessionServicePlanTest PRIVATE KRDP_PAM_KEEPER="$<TARGET_FILE:krdp-virtual-pam-keeper>")
 add_test(NAME VirtualSessionServicePlanTest COMMAND VirtualSessionServicePlanTest)
 

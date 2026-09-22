@@ -15,6 +15,9 @@ target_link_libraries(KRdpVirtualPam PUBLIC Qt6::Core PRIVATE Qt6::DBus ${PAM_LI
 add_executable(krdp-virtual-pam-keeper virtualpamkeeper.cpp)
 target_link_libraries(krdp-virtual-pam-keeper PRIVATE KRdpVirtualPam KRdpGuardianClient)
 target_link_libraries(krdp-virtual-session-entry PRIVATE KRdpGuardianClient Qt6::DBus)
+add_executable(krdp-virtual-session-cleanup virtualsessioncleanup.cpp VirtualSessionKeeperProcess.cpp
+    VirtualSessionServiceScope.cpp VirtualSessionLoginRecovery.cpp)
+target_link_libraries(krdp-virtual-session-cleanup PRIVATE KRdpGuardianClient Qt6::DBus)
 configure_file(krdp-virtual-session@.service.in ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-session@.service @ONLY)
 find_package(OpenSSL REQUIRED)
 add_executable(krdp-virtual-host virtualhost.cpp VirtualHostTls.cpp VirtualSessionHostController.cpp VirtualSessionTransport.cpp

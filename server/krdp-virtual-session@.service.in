@@ -13,6 +13,7 @@ Environment=KRDP_VIRTUAL_RENDER_PCI=
 EnvironmentFile=-/etc/krdp/virtual-session.conf
 ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-session-entry --session %i --device-entry @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-device-entry --guardian @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-guardian --pam-keeper @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-pam-keeper --launcher @CMAKE_INSTALL_PREFIX@/share/krdp/virtual-session/launch-virtual-session.sh --worker @CMAKE_INSTALL_PREFIX@/bin/krdp-console-worker --support @CMAKE_INSTALL_PREFIX@/share/krdp/virtual-session/support --render-pci ${KRDP_VIRTUAL_RENDER_PCI}
 UMask=0077
+ExecStopPost=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-session-cleanup --session %i
 StandardInput=null
 StandardOutput=journal
 StandardError=journal

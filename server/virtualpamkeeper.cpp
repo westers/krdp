@@ -130,5 +130,6 @@ int main(int argc, char **argv)
         stop = command == "stop\n";
     }
     const bool closed = pam->close();
+    if (closed && !KRdp::VirtualSessionJournal::recordKeeperClosed(*record)) return refused("durable PAM close record");
     return stop && closed ? 0 : 1;
 }

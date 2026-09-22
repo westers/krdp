@@ -126,6 +126,14 @@ std::optional<bool> VirtualSessionServiceScope::descendantsGone() const
     const auto processes = members();
     return processes ? std::optional<bool>(processes->isEmpty()) : std::nullopt;
 }
+std::optional<bool> VirtualSessionServiceScope::onlyKeeperRemains(pid_t verifiedKeeper) const
+{
+    if (verifiedKeeper <= 1 || verifiedKeeper == m_parent) return {};
+    const auto processes = members();
+    if (!processes) return {};
+    for (const auto pid : *processes) if (pid != verifiedKeeper) return false;
+    return true;
+}
 bool VirtualSessionServiceScope::signalDescendants(int signal) const
 {
     if (signal != SIGTERM && signal != SIGKILL) return false;

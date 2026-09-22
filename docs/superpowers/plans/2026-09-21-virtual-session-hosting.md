@@ -998,3 +998,40 @@ Primary implementation references:
 https://raw.githubusercontent.com/torvalds/linux/v6.17/fs/pidfs.c
 https://raw.githubusercontent.com/systemd/systemd/v259/src/login/pam_systemd.c
 https://raw.githubusercontent.com/systemd/systemd/v259/src/core/execute.c
+
+### Bounded post-stop reconciliation implemented (not installed)
+
+The draft unit now invokes `krdp-virtual-session-cleanup` through ExecStopPost.
+This supersedes the preceding unimplemented status: KeeperProcess now has a
+production-code caller, but privileged runtime acceptance remains outstanding.
+Cleanup validates immutable intent/current boot and the exact service cgroup,
+proves desktop extinction, pins the original keeper, waits briefly for natural
+exit and if necessary kills only its retained pidfd, then observes extinction
+again before touching logind. A missing birth record is reread AFTER verified
+service extinction, covering publication/migration between the initial read and
+the cgroup check. Unknown evidence never means absence.
+
+The keeper writes a root-owned exclusive `.closed-<desktopUUID>` companion only
+after successful PAM close and end. It binds launch, boot and pidfs identity to
+the immutable birth record, with file/directory fsync and no overwrite. This
+permits already-closed recovery; without that evidence, an initially empty
+logind list remains unresolved, not proof that registration cannot arrive later.
+
+LoginRecovery uses one bounded deadline and pins logind's unique bus owner.
+It strictly enumerates and checks launch markers, refuses ambiguous or
+contradictory identities, revalidates before terminating the exact session, and
+requires authoritative disappearance afterward. Only canonical counter IDs
+(`cNN`) are supported, under the supported logind owner's non-reuse contract
+(no 64-bit counter wrap); audit-derived IDs are refused. Owner replacement,
+method errors, changed identities and incomplete replies remain failures.
+All launch/birth/closed records are preserved; success does not authorize replay
+or claim that emergency-skipped PAM callbacks executed.
+
+Private-bus tests cover opening/active/closing sessions, physical-login
+preservation, duplicate markers, malformed and contradictory properties,
+revalidation races, delayed registration, owner replacement, timeouts and
+termination acknowledgements without disappearance. Journal tests cover closed
+evidence safety, fsync failures and the missing-birth migration race. These are
+not evidence of actual root/system-bus cleanup. Installed PAM policy/resource
+audit, supported logind/kernel validation, actual ExecStopPost cgroup placement
+and Sol crash-boundary acceptance remain required before enablement.
