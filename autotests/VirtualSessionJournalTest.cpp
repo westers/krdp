@@ -28,6 +28,155 @@ class VirtualSessionJournalTest : public QObject {
     static QString id() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     static VirtualSessionJournal::Record record() { return {1000, id(), id(), id(), id(), QByteArray(32, 's')}; }
 private Q_SLOTS:
+    void noKeeperReconciliationRequiresPostExtinctionRead() {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        int reads = 0;
+        const auto read = [&] {
+            ++reads; bool missing = false;
+            const auto keeper = journal->readKeeperRecord(r, &missing, nullptr);
+            return VirtualSessionCleanupBirth{keeper, missing};
+        };
+        for (const auto empty : {std::optional<bool>(), std::optional<bool>(false)}) {
+            const auto evidence = VirtualSessionCleanupBirth::inspect(read, [=] { return empty; });
+            QVERIFY(!evidence.absent); QVERIFY(!evidence.keeper);
+            QCOMPARE(journal->reconciled(r), std::optional<bool>(false));
+        }
+        reads = 0;
+        const auto evidence = VirtualSessionCleanupBirth::inspect(read, [] { return std::optional<bool>(true); });
+        QCOMPARE(reads, 2); QVERIFY(evidence.absent); QVERIFY(!evidence.keeper);
+        QVERIFY(journal->writeReconciled(r, nullptr));
+        QCOMPARE(journal->reconciled(r), std::optional<bool>(true));
+        QVERIFY(!journal->claimRecord(r, nullptr));
+    }
+    void reconciliationIsSeparateDurableAndNeverReplayAuthority() {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record();
+        QVERIFY(journal->insert(r));
+        QCOMPARE(journal->reconciled(r), std::optional<bool>());
+        QVERIFY(!journal->writeReconciled(r, nullptr)); // No consumed launch.
+        QVERIFY(journal->claimRecord(r, nullptr));
+        const VirtualSessionJournal::Keeper birth{12345, 42, 4242};
+        QVERIFY(journal->writeKeeper(r, birth, nullptr));
+        QVERIFY(journal->writeKeeperClosed(r, birth, nullptr));
+        QCOMPARE(journal->reconciled(r), std::optional<bool>(false)); // PAM close alone.
+        QVERIFY(journal->writeReconciled(r, nullptr));
+        QVERIFY(!journal->writeReconciled(r, nullptr));
+        QVERIFY(!journal->claimRecord(r, nullptr));
+        QVERIFY(!journal->insert(r));
+        journal.reset();
+        journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        QString error = QStringLiteral("stale error");
+        QCOMPARE(journal->reconciled(r, &error), std::optional<bool>(true)); QVERIFY(error.isEmpty());
+        const auto all = journal->records(); QVERIFY(all); QCOMPARE(all->size(), 1); QVERIFY(all->first() == r);
+        if (getuid()) QVERIFY(!VirtualSessionJournal::recordReconciled(r));
+    }
+    void absentReconciliationRequiresValidClaim_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"missing", "malformed", "wrong-launch", "wrong-incarnation"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void absentReconciliationRequiresValidClaim() {
+        QFETCH(QString, kind); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r));
+        if (kind != QStringLiteral("missing")) {
+            QVERIFY(journal->claimRecord(r, nullptr));
+            QFile claim(dir.filePath(QStringLiteral(".claimed-") + r.session));
+            QVERIFY(claim.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            const QByteArray bytes = kind == QStringLiteral("malformed") ? QByteArray("partial")
+                : (kind == QStringLiteral("wrong-launch") ? id() : r.launch).toLatin1() + '\n'
+                    + (kind == QStringLiteral("wrong-incarnation") ? id() : r.incarnation).toLatin1();
+            QCOMPARE(claim.write(bytes), qint64(bytes.size()));
+        }
+        QVERIFY(!QFile::exists(dir.filePath(QStringLiteral(".reconciled-") + r.session)));
+        QString error;
+        QCOMPARE(journal->reconciled(r, &error), std::optional<bool>());
+        QVERIFY(!error.isEmpty());
+        QVERIFY(!journal->writeReconciled(r, nullptr));
+        QVERIFY(journal->records());
+    }
+    void reconciliationBindsEveryIdentityField_data() {
+        QTest::addColumn<QString>("field");
+        for (const auto *field : {"uid", "session", "launch", "incarnation", "boot", "token"})
+            QTest::newRow(field) << QString::fromLatin1(field);
+    }
+    void reconciliationBindsEveryIdentityField() {
+        QFETCH(QString, field); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); auto other = r;
+        if (field == QStringLiteral("uid")) ++other.uid;
+        else if (field == QStringLiteral("session")) other.session = id();
+        else if (field == QStringLiteral("launch")) other.launch = id();
+        else if (field == QStringLiteral("incarnation")) other.incarnation = id();
+        else if (field == QStringLiteral("boot")) other.boot = id();
+        else other.token.fill('t');
+        QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(!journal->writeReconciled(other, nullptr));
+        QVERIFY(!journal->reconciled(other));
+        QVERIFY(journal->writeReconciled(r, nullptr));
+        // Move valid evidence to a different, independently valid launch intent.
+        // This exercises the marker binding, beyond the expected-vs-intent check.
+        QTemporaryDir second;
+        auto next = VirtualSessionJournal::openAt(second.path(), getuid(), nullptr); QVERIFY(next);
+        QVERIFY(next->insert(other)); QVERIFY(next->claimRecord(other, nullptr));
+        QVERIFY(QFile::copy(dir.filePath(QStringLiteral(".reconciled-") + r.session),
+            second.filePath(QStringLiteral(".reconciled-") + other.session)));
+        QString error;
+        QVERIFY(!next->reconciled(other, &error)); QVERIFY(!error.isEmpty());
+        QVERIFY(!error.contains(QString::fromLatin1(r.token.toHex())));
+    }
+    void unsafeReconciliationRefused_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"empty", "truncated", "extra", "permissions", "symlink", "hardlink", "fifo", "intent-owner"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void unsafeReconciliationRefused() {
+        QFETCH(QString, kind); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        QVERIFY(journal->writeReconciled(r, nullptr));
+        const auto path = dir.filePath(QStringLiteral(".reconciled-") + r.session);
+        if (kind == QStringLiteral("symlink") || kind == QStringLiteral("fifo")) {
+            QVERIFY(QFile::remove(path));
+            if (kind == QStringLiteral("symlink")) QVERIFY(QFile::link(QStringLiteral("/etc/passwd"), path));
+            else QVERIFY(!mkfifo(QFile::encodeName(path).constData(), 0600));
+        } else if (kind == QStringLiteral("hardlink")) {
+            QVERIFY(!link(QFile::encodeName(path).constData(), QFile::encodeName(dir.filePath(QStringLiteral(".pending-alias"))).constData()));
+        } else if (kind == QStringLiteral("permissions")) {
+            QVERIFY(!chmod(QFile::encodeName(path).constData(), 0644));
+        } else if (kind == QStringLiteral("intent-owner")) {
+            // Changing the trust owner rejects the launch intent first; this
+            // unprivileged fixture does not isolate marker-owner validation.
+            ++journal->m_owner;
+        } else {
+            QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite));
+            if (kind == QStringLiteral("extra")) { QVERIFY(file.seek(file.size())); QCOMPARE(file.write("x"), qint64(1)); }
+            else QVERIFY(file.resize(kind == QStringLiteral("empty") ? 0 : file.size() - 1));
+        }
+        QString error;
+        QVERIFY(!journal->reconciled(r, &error)); QVERIFY(!error.isEmpty());
+        QVERIFY(!journal->writeReconciled(r, nullptr));
+        if (kind == QStringLiteral("intent-owner")) --journal->m_owner;
+        QVERIFY(journal->records());
+    }
+    void reconciliationDurabilityFailurePreservesEvidence_data() {
+        QTest::addColumn<int>("which");
+        QTest::newRow("file") << 1; QTest::newRow("directory") << 2;
+    }
+    void reconciliationDurabilityFailurePreservesEvidence() {
+        QFETCH(int, which); QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto r = record(); QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+        failSync = which; const auto reset = qScopeGuard([] { failSync = 0; });
+        QString error;
+        QVERIFY(!journal->writeReconciled(r, &error)); QVERIFY(!error.isEmpty());
+        failSync = 0;
+        QVERIFY(QFile::exists(dir.filePath(QStringLiteral(".reconciled-") + r.session)));
+        QVERIFY(!journal->writeReconciled(r, nullptr)); QVERIFY(!journal->claimRecord(r, nullptr));
+    }
     void cleanupRereadsBirthAfterServiceExtinction() {
         std::optional<VirtualSessionJournal::Keeper> published;
         int reads = 0;

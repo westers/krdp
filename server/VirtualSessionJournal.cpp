@@ -26,6 +26,13 @@ bool safeFile(int fd, quint32 owner) {
     return !fstat(fd, &s) && S_ISREG(s.st_mode) && s.st_uid == owner
         && (s.st_mode & 07777) == 0600 && s.st_nlink == 1 && s.st_size > 0 && s.st_size <= 4096;
 }
+QByteArray reconciliationBytes(const VirtualSessionJournal::Record &r) {
+    // Canonical identity: validated UUIDs, decimal UID and hex token cannot
+    // contain delimiters. Version/domain separates this from PAM-close proof.
+    return QByteArray("krdp-reconciled-v1\n") + QByteArray::number(r.uid) + '\n'
+        + r.session.toLatin1() + '\n' + r.launch.toLatin1() + '\n'
+        + r.incarnation.toLatin1() + '\n' + r.boot.toLatin1() + '\n' + r.token.toHex() + '\n';
+}
 }
 bool VirtualSessionJournal::Record::valid() const {
     return uid && uid != std::numeric_limits<quint32>::max() && uuid(session) && uuid(launch)
@@ -60,6 +67,49 @@ bool VirtualSessionJournal::recordKeeper(const Record &expected, QString *error)
     if (fd >= 0) close(fd);
     auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
     return birth && identity && journal && journal->writeKeeper(expected, {getpid(), *birth, *identity}, error);
+}
+bool VirtualSessionJournal::recordReconciled(const Record &expected, QString *error) {
+    if (getuid() || geteuid()) return fail(error, QStringLiteral("Reconciliation evidence requires root"));
+    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    return journal && journal->writeReconciled(expected, error);
+}
+bool VirtualSessionJournal::writeReconciled(const Record &expected, QString *error) {
+    const auto current = readRecord(expected.session, error);
+    if (!current || *current != expected || !hasClaim(expected))
+        return fail(error, QStringLiteral("Reconciliation launch identity uncertain"));
+    const QByteArray name = QByteArray(".reconciled-") + expected.session.toLatin1();
+    const auto bytes = reconciliationBytes(expected);
+    const int fd = openat(m_directory, name.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return fail(error, QStringLiteral("Reconciliation already recorded or unavailable"));
+    ssize_t count;
+    do { count = write(fd, bytes.constData(), bytes.size()); } while (count < 0 && errno == EINTR);
+    const bool prepared = count == bytes.size() && !fchmod(fd, 0600) && safeFile(fd, m_owner) && !fsync(fd);
+    close(fd);
+    const bool durable = !fsync(m_directory);
+    // Never remove even a partial marker: uncertainty is not missing evidence.
+    if (!prepared || !durable) return fail(error, QStringLiteral("Reconciliation evidence uncertain"));
+    if (error) error->clear();
+    return true;
+}
+std::optional<bool> VirtualSessionJournal::reconciled(const Record &expected, QString *error) const {
+    const auto refuse = [error]() -> std::optional<bool> {
+        fail(error, QStringLiteral("Unsafe, malformed or mismatched reconciliation evidence")); return {};
+    };
+    const auto current = readRecord(expected.session, error);
+    if (!current || *current != expected || !hasClaim(expected)) return refuse();
+    const QByteArray name = QByteArray(".reconciled-") + expected.session.toLatin1();
+    const int fd = openat(m_directory, name.constData(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) { if (error) error->clear(); return false; }
+        return refuse();
+    }
+    QFile file;
+    if (!file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) { close(fd); return refuse(); }
+    if (!safeFile(fd, m_owner)) return refuse();
+    const auto bytes = file.read(4097);
+    if (file.error() != QFileDevice::NoError || bytes != reconciliationBytes(expected)) return refuse();
+    if (error) error->clear();
+    return true;
 }
 std::optional<VirtualSessionJournal::Keeper> VirtualSessionJournal::readKeeper(const Record &expected, bool *missing, QString *error) {
     if (missing) *missing = false;
@@ -312,6 +362,7 @@ std::optional<QVector<VirtualSessionJournal::Record>> VirtualSessionJournal::rec
         if (name.startsWith(".claimed-") && uuid(QString::fromLatin1(name.mid(9)))) continue;
         if (name.startsWith(".keeper-") && uuid(QString::fromLatin1(name.mid(8)))) continue;
         if (name.startsWith(".closed-") && uuid(QString::fromLatin1(name.mid(8)))) continue;
+        if (name.startsWith(".reconciled-") && uuid(QString::fromLatin1(name.mid(12)))) continue;
         if (!name.endsWith(".json") || !uuid(QString::fromLatin1(name.chopped(5))) || result.size() >= 256) { ok = false; break; }
         const auto record = readRecord(QString::fromLatin1(name.chopped(5)), error);
         if (!record) { ok = false; break; }

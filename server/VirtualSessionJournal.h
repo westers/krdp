@@ -49,6 +49,12 @@ public:
     static bool recordKeeperClosed(const Record &expected, QString *error = nullptr);
     // nullopt = unsafe/uncertain; false = no successful-close record.
     static std::optional<bool> keeperClosed(const Record &expected, const Keeper &keeper, QString *error = nullptr);
+    // Trusted cleanup ONLY, after final process/keeper/logind proof (or proven
+    // no-keeper boundary). Evidence of reconciliation, not graceful app exit
+    // or permission to replay a launch. Existing/uncertain markers stay intact.
+    static bool recordReconciled(const Record &expected, QString *error = nullptr);
+    // nullopt = unsafe/malformed/mismatched; false = missing evidence.
+    std::optional<bool> reconciled(const Record &expected, QString *error = nullptr) const;
     bool insert(const Record &record, QString *error = nullptr);
     std::optional<QVector<Record>> records(QString *error = nullptr) const;
 private:
@@ -59,6 +65,7 @@ private:
     std::optional<Record> readRecord(const QString &session, QString *error) const;
     bool claimRecord(const Record &expected, QString *error);
     bool hasClaim(const Record &expected) const;
+    bool writeReconciled(const Record &expected, QString *error);
     bool writeKeeper(const Record &expected, const Keeper &keeper, QString *error);
     std::optional<Keeper> readKeeperRecord(const Record &expected, bool *missing, QString *error) const;
     bool writeKeeperClosed(const Record &expected, const Keeper &keeper, QString *error);

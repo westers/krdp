@@ -56,7 +56,10 @@ int main(int argc, char **argv)
     if (!birth) {
         // Registration cannot begin without this durable record. This inference
         // also requires no surviving pre-PAM keeper able to publish it later.
-        return evidence.absent ? 0 : refused("keeper identity or surviving service processes");
+        if (!evidence.absent) return refused("keeper identity or surviving service processes");
+        // inspect() read missing twice around empty-scope proof; the consumed
+        // launch cannot replay, and no keeper remains able to register with PAM.
+        return KRdp::VirtualSessionJournal::recordReconciled(*record) ? 0 : refused("durable reconciliation evidence");
     }
     auto keeper = KRdp::VirtualSessionKeeperProcess::pin(*birth);
     if (!keeper) return refused("original keeper identity");
@@ -74,6 +77,7 @@ int main(int argc, char **argv)
     const auto result = KRdp::VirtualSessionLoginRecovery::reconcile(QDBusConnection::systemBus(), *record, *birth, 15000, *closed);
     if (result != KRdp::VirtualSessionLoginRecovery::Result::Removed && result != KRdp::VirtualSessionLoginRecovery::Result::AlreadyClosed)
         return refused("logind identity, disappearance, or registration still uncertain");
+    if (!KRdp::VirtualSessionJournal::recordReconciled(*record)) return refused("durable reconciliation evidence");
     qInfo("Virtual session process/logind reconciliation completed; launch records preserved");
     return 0;
 }
