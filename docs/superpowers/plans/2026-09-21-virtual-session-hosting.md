@@ -225,3 +225,13 @@ and must not be advertised from this foundation. Next extract a reviewed
 installed private Plasma launch contract from the bounded probe, connect worker
 readiness/IPC and authenticated transports, and implement verified runtime
 adoption rather than PID/record-only restart recovery.
+
+Capture-worker mode separation: consoleworker now accepts exactly one of
+--logind-session or --virtual-session (canonical non-null registry UUID).
+The latter disables physical reclaim shortcut/cursor takeover and explicitly
+rejects physical-output resize rather than silently modesetting its compositor.
+Capture/input and consent-gated desktop media remain reusable; virtual resize
+requires its own layout implementation. Both modes require actual real/effective
+UID matching the broker-supplied nonroot UID. Existing physical launch arguments
+remain unchanged. Pure mode parsing/action policy is tested; real virtual-worker
+socket/capture acceptance and installed launcher integration remain pending.

@@ -19,6 +19,11 @@ target_include_directories(VirtualSessionSupervisorTest PRIVATE ${CMAKE_SOURCE_D
 target_link_libraries(VirtualSessionSupervisorTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionSupervisorTest COMMAND VirtualSessionSupervisorTest)
 
+add_executable(CaptureWorkerModeTest CaptureWorkerModeTest.cpp)
+target_include_directories(CaptureWorkerModeTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(CaptureWorkerModeTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME CaptureWorkerModeTest COMMAND CaptureWorkerModeTest)
+
 find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session)
 find_program(GDBUS_EXECUTABLE gdbus)
 find_program(BASH_EXECUTABLE bash)

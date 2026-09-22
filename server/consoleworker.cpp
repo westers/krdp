@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include <memory>
+#include <unistd.h>
 
 #include <QAction>
 #include <QDBusConnection>
@@ -27,6 +28,7 @@
 #include "TakeoverDetector.h"
 #include "PipeWireAudioPlayback.h"
 #include "ConsoleMicrophoneSession.h"
+#include "CaptureWorkerMode.h"
 
 using namespace KRdp;
 
@@ -57,12 +59,13 @@ std::shared_ptr<QEvent> eventFor(const ConsoleWorkerWire::Input &input)
 class Worker : public QObject
 {
 public:
-    Worker(const QString &socketName, const QString &sessionId, quint32 uid, const QByteArray &token, bool desktop, QObject *parent = nullptr)
+    Worker(const QString &socketName, const CaptureWorkerMode &mode, quint32 uid, const QByteArray &token, bool desktop, QObject *parent = nullptr)
         : QObject(parent)
         , m_socketName(socketName)
-        , m_sessionId(sessionId)
+        , m_sessionId(mode.sessionId)
         , m_uid(uid)
         , m_token(token)
+        , m_mode(mode)
         , m_microphone(desktop)
     {
         connect(&m_microphone, &ConsoleMicrophoneSession::result, this, [this](const auto &result) {
@@ -89,7 +92,7 @@ public:
         });
         // Use Plasma's shortcut service, never a raw keyboard grab. SDDM need
         // not provide it; do not auto-start desktop services in the greeter.
-        if (QDBusConnection::sessionBus().interface()
+        if (m_mode.physicalActions() && QDBusConnection::sessionBus().interface()
             && QDBusConnection::sessionBus().interface()->isServiceRegistered(QStringLiteral("org.kde.kglobalaccel"))) {
             m_reclaimAction.setText(QStringLiteral("Reclaim physical console"));
             m_reclaimAction.setObjectName(QStringLiteral("reclaim-console"));
@@ -102,7 +105,7 @@ public:
             KGlobalAccel::self()->setShortcut(&m_reclaimAction, {shortcut});
         }
         connect(&m_session, &AbstractSession::cursorUpdate, this, [this](const PipeWireCursor &cursor) {
-            if (m_control.active && !m_resize.changing() && m_session.outputGeometryResolved()
+            if (m_mode.physicalActions() && m_control.active && !m_resize.changing() && m_session.outputGeometryResolved()
                 && m_takeover.observed(m_session.mapToGlobal(cursor.position).toPoint(), m_clock.elapsed())) {
                 reclaimConsole();
             }
@@ -214,7 +217,7 @@ private:
 
     void startCapture()
     {
-        m_session.setActiveStream(-1); // Physical console: capture the session's complete workspace.
+        m_session.setActiveStream(-1); // Capture this compositor's complete workspace.
         m_session.setVideoCodec(VideoCodec::Avc420);
         // Match the desktop server's quality baseline. Leaving this unset
         // selects libx264's CRF35 fallback, visibly damaging desktop text.
@@ -224,7 +227,7 @@ private:
 
     void reclaimConsole()
     {
-        if (!m_control.active) {
+        if (!m_mode.physicalActions() || !m_control.active) {
             return;
         }
         releaseInput();
@@ -251,7 +254,7 @@ private:
                     m_control = *control;
                     m_microphone.setControl(*control);
                     m_resize.setControl(*control);
-                    m_reclaimAction.setEnabled(control->active);
+                    m_reclaimAction.setEnabled(m_mode.physicalActions() && control->active);
                     m_takeover = {};
                     if (control->active) {
                         m_takeover.armed(m_clock.elapsed());
@@ -278,6 +281,12 @@ private:
                 continue;
             }
             if (const auto request = ConsoleWorkerWire::resize(*record)) {
+                if (!m_mode.physicalActions()) {
+                    m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{
+                        request->requestId, request->generation,
+                        QStringLiteral("Physical-output resize is unavailable in a virtual session")}));
+                    continue;
+                }
                 releaseInput();
                 m_resize.request(*request);
                 continue;
@@ -328,6 +337,7 @@ private:
     QString m_sessionId;
     quint32 m_uid = 0;
     QByteArray m_token;
+    CaptureWorkerMode m_mode;
     QLocalSocket m_socket;
     ConsoleWorkerWire::Deframer m_deframer;
     PlasmaScreencastV1Session m_session;
@@ -357,15 +367,17 @@ int main(int argc, char **argv)
     const QCommandLineOption socketOption(QStringLiteral("socket"), QStringLiteral("Broker socket path."), QStringLiteral("path"));
     // QGuiApplication consumes --session for its own session restoration.
     const QCommandLineOption sessionOption(QStringLiteral("logind-session"), QStringLiteral("logind session id."), QStringLiteral("id"));
-    const QCommandLineOption uidOption(QStringLiteral("uid"), QStringLiteral("logind uid."), QStringLiteral("uid"));
+    const QCommandLineOption virtualOption(QStringLiteral("virtual-session"), QStringLiteral("Authenticated virtual registry session UUID; exclusive with --logind-session."), QStringLiteral("id"));
+    const QCommandLineOption uidOption(QStringLiteral("uid"), QStringLiteral("Authenticated desktop owner's uid."), QStringLiteral("uid"));
     const QCommandLineOption tokenOption(QStringLiteral("token-hex"), QStringLiteral("Per-launch broker token."), QStringLiteral("token"));
     const QCommandLineOption tokenFdOption(QStringLiteral("token-fd"), QStringLiteral("Read the per-launch broker token once from this inherited fd."), QStringLiteral("fd"));
-    const QCommandLineOption desktopOption(QStringLiteral("desktop-media"), QStringLiteral("Broker verified a logged-in physical user session."));
-    parser.addOptions({socketOption, sessionOption, uidOption, tokenOption, tokenFdOption, desktopOption});
+    const QCommandLineOption desktopOption(QStringLiteral("desktop-media"), QStringLiteral("Broker verified an authenticated user desktop (never a greeter)."));
+    parser.addOptions({socketOption, sessionOption, virtualOption, uidOption, tokenOption, tokenFdOption, desktopOption});
     parser.process(application);
 
     bool uidOk = false;
     const quint32 uid = parser.value(uidOption).toUInt(&uidOk);
+    const auto mode = CaptureWorkerMode::parse(parser.value(sessionOption), parser.value(virtualOption));
     QByteArray token;
     if (parser.isSet(tokenFdOption)) {
         bool fdOk = false;
@@ -378,11 +390,12 @@ int main(int argc, char **argv)
     } else {
         token = QByteArray::fromHex(parser.value(tokenOption).toLatin1());
     }
-    if (parser.isSet(tokenOption) == parser.isSet(tokenFdOption) || !uidOk || uid == 0 || parser.value(socketOption).isEmpty() || parser.value(sessionOption).isEmpty() || token.size() < 16) {
+    if (parser.isSet(tokenOption) == parser.isSet(tokenFdOption) || parser.isSet(sessionOption) == parser.isSet(virtualOption)
+        || !mode || !uidOk || uid == 0 || uid != getuid() || uid != geteuid() || parser.value(socketOption).isEmpty() || token.size() < 16) {
         parser.showHelp(1);
     }
 
-    Worker worker(parser.value(socketOption), parser.value(sessionOption), uid, token, parser.isSet(desktopOption));
+    Worker worker(parser.value(socketOption), *mode, uid, token, parser.isSet(desktopOption));
     worker.connectToBroker();
     return application.exec();
 }
