@@ -42,6 +42,13 @@ click-only probe placed the pointer at the expected mixed-scale logical
 coordinate. Client-driven drag, application click effect, mixed-scale GUI,
 installed broker, deployment and write transactions remain unaccepted. Other
 backends have no new query handler yet.
+Source-only `RetainedKScreenReadback` parses a separate, fresh
+`kscreen-doctor -j` record from a verified private compositor, checks output
+identity/mode/scale/position/primary/count, and builds shell-free logical
+position arguments. It accepts the saved isolated Sol 125%/100% two-output
+KScreen fixture. It is not yet called by the worker/broker; the published
+query remains capture/QScreen-backed, not independently verified KScreen
+readback. No topology-write capability follows from this parser.
 The client sends the query only after an acknowledged retained attachment,
 validates its correlation and bounded geometry/capabilities, and treats an old
 broker's generic unsupported error as query fallback without failing the
