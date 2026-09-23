@@ -1,7 +1,9 @@
 # Remote monitor transaction protocol (implementation contract)
 
-Status: proposed implementation contract, 2026-09-23; no wire support or
-runtime acceptance yet. This fills in phase 1 of the
+Status: proposed implementation contract, 2026-09-23; retained single-output
+read-only `topology-query`/`topology` is wired in server `aba1754`, but client
+consumption, Console query, every topology write and runtime acceptance are
+still absent. This fills in phase 1 of the
 [remote monitor layout plan](../plans/2026-09-22-remote-monitor-layout.md).
 The existing `KRDPCTL` v1 `apply` remains for older clients. A new editor must
 not use that coupled request as if it provided revisions or independent views.
@@ -15,6 +17,17 @@ answer unknown-record `unsupported`; the client keeps video and local views
 working and disables topology writes. Do not send a new version as the first
 record: an old server would fall back to configured MonitorMode instead of
 attaching to the intended existing compositor.
+
+Current server slice: the retained virtual broker accepts an exact v1
+`topology-query` with a 1–64 character correlation ID **after attachment**,
+requests a worker keyframe and answers only when that frame matches the
+worker-reported single output and its generation-scoped catalog. Five seconds
+without such a frame returns a correlated `topology-error`/`timeout`; detach
+cancels the query. It advertises enumeration only, with all topology-write and
+multi-output-capture capabilities false. The output geometry is worker/QScreen
+metadata confirmed by a matching captured keyframe, not an independent fresh
+KScreen query or encoded-payload-dimension proof; do not treat it as a commit
+readback. Other backends have no new query handler yet.
 
 The authoritative `topology` record carries:
 
