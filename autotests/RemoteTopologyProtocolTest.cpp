@@ -92,6 +92,38 @@ private Q_SLOTS:
         record.insert(QStringLiteral("operations"), QJsonArray{add});
         QVERIFY(previewRequest(record));
     }
+
+    void strictCommitAndCorrelatedPreviewReply()
+    {
+        QJsonObject commit{{QStringLiteral("type"), QStringLiteral("topology-commit")}, {QStringLiteral("v"), 1},
+            {QStringLiteral("id"), QStringLiteral("p_1")}, {QStringLiteral("token"), QStringLiteral("token-1")},
+            {QStringLiteral("generation"), QStringLiteral("generation-1")}, {QStringLiteral("expectedRevision"), 3}};
+        const auto parsed = commitRequest(commit);
+        QVERIFY(parsed);
+        QCOMPARE(parsed->expectedRevision, quint64(3));
+        commit.insert(QStringLiteral("owner"), QStringLiteral("forged"));
+        QVERIFY(!commitRequest(commit));
+        commit.remove(QStringLiteral("owner"));
+        commit.insert(QStringLiteral("expectedRevision"), 3.5);
+        QVERIFY(!commitRequest(commit));
+        commit.insert(QStringLiteral("expectedRevision"), 3);
+        commit.insert(QStringLiteral("token"), QStringLiteral("../bad"));
+        QVERIFY(!commitRequest(commit));
+
+        KRdp::RemoteTopologyCatalog catalog;
+        const auto snapshot = catalog.observe({{.backendKey = QStringLiteral("Virtual-0"), .name = QStringLiteral("Virtual-0"),
+            .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(0, 0, 1280, 720), .scale = 1,
+            .enabled = true, .primary = true, .physical = false, .owner = QStringLiteral("lease-1")}});
+        QVERIFY(snapshot);
+        KRdp::RemoteTopologyDraft::Preview proposal{snapshot->outputs, snapshot->outputs, {}};
+        proposal.after.first().output.logicalGeometry.moveTo(-1280, 100);
+        const auto reply = previewReply(QStringLiteral("p_1"), QStringLiteral("token-1"), proposal, *snapshot);
+        QCOMPARE(reply.value(QStringLiteral("id")).toString(), QStringLiteral("p_1"));
+        QCOMPARE(reply.value(QStringLiteral("before")).toArray().first().toObject().value(QStringLiteral("logical")).toObject()
+            .value(QStringLiteral("x")).toInt(), 0);
+        QCOMPARE(reply.value(QStringLiteral("after")).toArray().first().toObject().value(QStringLiteral("logical")).toObject()
+            .value(QStringLiteral("x")).toInt(), -1280);
+    }
 };
 
 QTEST_GUILESS_MAIN(RemoteTopologyProtocolTest)

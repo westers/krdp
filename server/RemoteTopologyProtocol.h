@@ -119,13 +119,31 @@ inline QJsonObject error(const QString &id, const QString &code)
         {QStringLiteral("id"), id}, {QStringLiteral("code"), code}};
 }
 
-// The retained worker has no topology writes yet. Report only what its
-// captured outputs prove; never borrow legacy single-output virtual-resize as
-// an advertised general resize capability.
-inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot)
+struct CommitRequest {
+    QString id;
+    QString token;
+    QString generation;
+    quint64 expectedRevision = 0;
+};
+
+inline std::optional<CommitRequest> commitRequest(const QJsonObject &record)
+{
+    const auto revision = record.value(QStringLiteral("expectedRevision"));
+    constexpr double maxExact = 9007199254740991.0;
+    if (record.size() != 6 || record.value(QStringLiteral("type")) != QStringLiteral("topology-commit")
+        || record.value(QStringLiteral("v")) != 1 || !identifier(record.value(QStringLiteral("id")))
+        || !identifier(record.value(QStringLiteral("token")), 64)
+        || !identifier(record.value(QStringLiteral("generation")), 128)
+        || !revision.isDouble() || !std::isfinite(revision.toDouble()) || revision.toDouble() < 1
+        || revision.toDouble() > maxExact || std::floor(revision.toDouble()) != revision.toDouble()) return {};
+    return CommitRequest{record.value(QStringLiteral("id")).toString(), record.value(QStringLiteral("token")).toString(),
+        record.value(QStringLiteral("generation")).toString(), quint64(revision.toDouble())};
+}
+
+inline QJsonArray outputArray(const QVector<RemoteTopologyCatalog::Entry> &entries)
 {
     QJsonArray outputs;
-    for (const auto &entry : snapshot.outputs) {
+    for (const auto &entry : entries) {
         const auto &output = entry.output;
         outputs.append(QJsonObject{
             {QStringLiteral("id"), entry.id}, {QStringLiteral("name"), output.name},
@@ -141,9 +159,28 @@ inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatal
             {QStringLiteral("scale"), output.scale},
         });
     }
+    return outputs;
+}
+
+inline QJsonObject previewReply(const QString &id, const QString &token, const RemoteTopologyDraft::Preview &draft,
+    const RemoteTopologyCatalog::Snapshot &snapshot)
+{
+    return {{QStringLiteral("type"), QStringLiteral("topology-preview")}, {QStringLiteral("v"), 1},
+        {QStringLiteral("id"), id}, {QStringLiteral("token"), token},
+        {QStringLiteral("generation"), snapshot.generation}, {QStringLiteral("expectedRevision"), double(snapshot.revision)},
+        {QStringLiteral("before"), outputArray(draft.before)}, {QStringLiteral("after"), outputArray(draft.after)},
+        {QStringLiteral("warnings"), QJsonArray{}}};
+}
+
+// The retained worker has a position primitive, but the broker's preview/
+// commit path is still source-only and not end-to-end accepted. Keep writes
+// undiscoverable until client and disposable-RDP acceptance is complete;
+// never borrow legacy single-output resize as a general topology capability.
+inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot)
+{
     return {{QStringLiteral("type"), QStringLiteral("topology")}, {QStringLiteral("v"), 1},
         {QStringLiteral("id"), id}, {QStringLiteral("generation"), snapshot.generation},
-        {QStringLiteral("revision"), double(snapshot.revision)}, {QStringLiteral("outputs"), outputs},
+        {QStringLiteral("revision"), double(snapshot.revision)}, {QStringLiteral("outputs"), outputArray(snapshot.outputs)},
         {QStringLiteral("capabilities"), QJsonObject{
             {QStringLiteral("enumerate"), true}, {QStringLiteral("add"), false},
             {QStringLiteral("remove"), false}, {QStringLiteral("position"), false},

@@ -7,6 +7,7 @@
 #include <RdpConnection.h>
 #include <QPointer>
 #include <QTimer>
+#include <QElapsedTimer>
 
 namespace KRdp
 {
@@ -46,6 +47,10 @@ private:
     QJsonObject requestResize(const QJsonObject &, std::optional<quint32> uid);
     QJsonObject resizeResult(const ConsoleWorkerWire::ResizeResult &, std::optional<quint32> uid);
     QJsonObject topologyFrame(const VideoFrame &, std::optional<quint32> uid);
+    QJsonObject topologyPreview(const QJsonObject &, std::optional<quint32> uid);
+    QJsonObject topologyCommit(const QJsonObject &, std::optional<quint32> uid);
+    QJsonObject positionResult(const ConsoleWorkerWire::PositionResult &, std::optional<quint32> uid);
+    void clearPosition();
     void clearTopology();
     void clearResize();
     void stopMicrophone();
@@ -80,6 +85,30 @@ private:
     QTimer m_microphonePump;
     QTimer m_resizeDeadline;
     QTimer m_topologyDeadline;
+    QTimer m_positionDeadline;
+    struct PendingPreview {
+        QString id;
+        QString token;
+        QString generation;
+        quint64 revision = 0;
+        QString outputId;
+        QString backendKey;
+        QPoint position;
+        QVector<RemoteTopologyCatalog::Entry> before;
+        QVector<RemoteTopologyCatalog::Entry> after;
+        QElapsedTimer age;
+    };
+    std::optional<PendingPreview> m_preview;
+    QString m_positionId;
+    quint64 m_nextPositionId = 0;
+    quint64 m_positionWorkerId = 0;
+    quint64 m_positionBinding = 0;
+    QString m_positionGeneration;
+    quint64 m_positionRevision = 0;
+    QString m_positionOutputId;
+    QPoint m_positionTarget;
+    QVector<RemoteTopologyCatalog::Entry> m_positionExpectedAfter;
+    bool m_positionExpectedChange = false;
     QString m_topologyId;
     quint64 m_topologyBinding = 0;
     QString m_resizeId;

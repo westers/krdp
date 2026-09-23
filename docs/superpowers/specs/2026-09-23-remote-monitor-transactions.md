@@ -3,8 +3,11 @@
 Status: proposed implementation contract, 2026-09-23; retained read-only
 `topology-query`/`topology` is wired in server `aba1754`/`c4ef5f1` and parsed
 into separate client state in client `358235b`; client `2b09d00` shows a
-separate read-only retained inventory. Console query, every topology write,
-a functional arrangement editor and full runtime acceptance are still absent.
+separate read-only retained inventory. Source now has one-position retained
+preview/commit and a captured worker position primitive, but they are not
+advertised, GUI-wired or accepted through an RDP client. Console query, the
+other topology writes, a functional arrangement editor and full runtime
+acceptance are still absent.
 This fills in phase 1 of the
 [remote monitor layout plan](../plans/2026-09-22-remote-monitor-layout.md).
 The existing `KRDPCTL` v1 `apply` remains for older clients. A new editor must
@@ -117,13 +120,24 @@ The v1 preview request's exact envelope is `type="topology-preview"`, `v=1`,
 `{x,y}`, `pixels` `{width,height}`, and `scale`; `move` requires `position`;
 `resize` requires `pixels` and `scale`; `remove` and `primary` have no extra
 fields. Coordinates are integral KWin logical positions. Unknown fields and
-client-supplied `owner` fail parsing. Server source now parses this strict
-shape (`RemoteTopologyProtocol.h`), but the retained transport returns
-correlated `unsupported` even for a valid authenticated preview until
-readback/capture-backed writes exist; this is **not** a preview capability.
+client-supplied `owner` fail parsing. Server source parses this strict shape
+(`RemoteTopologyProtocol.h`). In source `8f51fb0` plus the subsequent broker
+slice, a retained multi-output owner can preview and commit **one move of an
+owned virtual output**; the preview token is short-lived and one-use, and
+commit success requires fresh private KScreen checks, republished inventory
+and both decoded keyframes agreeing with the entire previewed after-state.
+Other operations return `unsupported`. The query still advertises all write
+capabilities false until a disposable RDP client and UI exercise this path;
+this is not a shipped remote arrangement capability.
 
 `topology-commit` includes the preview token, the same `id` and expected
 generation/revision. Only one commit per compositor may execute at a time.
+The v1 commit envelope has exactly `type="topology-commit"`, `v=1`, `id`,
+`token`, `generation`, and `expectedRevision`; a successful source response is
+`topology-result` with the same `id`, `ok=true`, and a nested authoritative
+`topology` record. No-op moves retain the revision; observed changes must bump
+it exactly once. An altered complete after-state returns `partial`, not a
+target-only success.
 The server rechecks owner, generation, revision, capabilities and all state
 against fresh readback before any mutation; no queued stale draft is rebased
 silently. It releases held input and gates stale video/input during the
