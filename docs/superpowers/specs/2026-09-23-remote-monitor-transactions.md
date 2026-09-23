@@ -2,8 +2,9 @@
 
 Status: proposed implementation contract, 2026-09-23; retained read-only
 `topology-query`/`topology` is wired in server `aba1754`/`c4ef5f1` and parsed
-into separate client state in client `358235b`, but Console query, every
-topology write, a visible editor and runtime acceptance are still absent.
+into separate client state in client `358235b`; client `2b09d00` shows a
+separate read-only retained inventory. Console query, every topology write,
+a functional arrangement editor and full runtime acceptance are still absent.
 This fills in phase 1 of the
 [remote monitor layout plan](../plans/2026-09-22-remote-monitor-layout.md).
 The existing `KRDPCTL` v1 `apply` remains for older clients. A new editor must
@@ -35,14 +36,18 @@ readback or a transaction commit proof. This multi-output path has source tests
 and isolated Sol/Buzz two-surface GUI acceptance; the source client also received
 a read-only two-output topology reply (`ready/2/rev1`) in an isolated run. A
 same-compositor Sol worker probe moved a KDE window to the second virtual output
-and captured it there. Client-driven drag/input, mixed-scale GUI, installed
-broker, deployment and write transactions remain unaccepted. Other backends have no new
-query handler yet.
+and captured it there. Source `ea89fc7`/`b1f8698` also maps click/wheel
+packets in retained multi-output mode; a bounded Sol private-compositor
+click-only probe placed the pointer at the expected mixed-scale logical
+coordinate. Client-driven drag, application click effect, mixed-scale GUI,
+installed broker, deployment and write transactions remain unaccepted. Other
+backends have no new query handler yet.
 The client sends the query only after an acknowledged retained attachment,
 validates its correlation and bounded geometry/capabilities, and treats an old
 broker's generic unsupported error as query fallback without failing the
-legacy layout flow. It exposes read-only `remoteTopology` state but no monitor
-editor uses it yet; topology writes remain disabled.
+legacy layout flow. It exposes read-only `remoteTopology` state in a separate
+KDE monitor inventory in the Monitors dialog, with remote editing visibly
+unavailable; topology writes remain disabled.
 
 The authoritative `topology` record carries:
 
