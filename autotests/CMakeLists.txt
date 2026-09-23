@@ -304,6 +304,11 @@ target_include_directories(RemoteTopologyProtocolTest PRIVATE ${CMAKE_SOURCE_DIR
 target_link_libraries(RemoteTopologyProtocolTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME RemoteTopologyProtocolTest COMMAND RemoteTopologyProtocolTest)
 
+add_executable(RetainedMultiCaptureTest RetainedMultiCaptureTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp)
+target_include_directories(RetainedMultiCaptureTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(RetainedMultiCaptureTest PRIVATE Qt6::Test Qt6::Gui PkgConfig::AVCodec)
+add_test(NAME RetainedMultiCaptureTest COMMAND RetainedMultiCaptureTest)
+
 add_executable(TakeoverDetectorTest TakeoverDetectorTest.cpp)
 target_include_directories(TakeoverDetectorTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(TakeoverDetectorTest PRIVATE Qt6::Test Qt6::Core)

@@ -8,6 +8,7 @@
 #include <QEvent>
 #include <limits>
 #include "VirtualSessionTransport.h"
+#include "RemoteMonitorGeometry.h"
 #include "VirtualResizeProtocol.h"
 #include "ExternalAudioQueue.h"
 using namespace KRdp;
@@ -107,6 +108,41 @@ private Q_SLOTS:
             t.revoke();
             QVERIFY(t.m_topologyId.isEmpty());
             QVERIFY(t.topologyFrame(frame, 1000).isEmpty());
+        });
+    }
+    void topologyQueryRequiresMatchingIndependentSurfaces() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            RemoteTopologyCatalog catalog;
+            const auto snapshot = catalog.observe({
+                {.backendKey = u"Virtual-left"_s, .name = u"Virtual-left"_s,
+                    .nativePixels = QSize(1920, 1080), .logicalGeometry = QRect(0, 0, 1280, 720),
+                    .scale = 1.5, .enabled = true, .primary = false, .physical = false, .owner = t.m_handle->id},
+                {.backendKey = u"Virtual-right"_s, .name = u"Virtual-right"_s,
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(1280, 100, 1280, 720),
+                    .scale = 1.0, .enabled = true, .primary = true, .physical = false, .owner = t.m_handle->id},
+            });
+            QVERIFY(snapshot);
+            t.setTopologyResolver([snapshot](const auto &) { return snapshot; });
+            const QJsonObject query{{u"type"_s, u"topology-query"_s}, {u"v"_s, 1}, {u"id"_s, u"two"_s}};
+            QVERIFY(t.request(query, 1000).isEmpty());
+            VideoFrame frame;
+            frame.size = QSize(1920, 1080); frame.data = "fixture"; frame.isKeyFrame = true;
+            frame.monitors = RemoteMonitorGeometry::projectToWire({
+                {QPoint(0, 0), QSize(1920, 1080), 1.5, false},
+                {QPoint(1280, 100), QSize(1280, 720), 1.0, true},
+            });
+            frame.monitorIndex = 0;
+            auto invalid = frame;
+            invalid.monitors[1].geometry.moveLeft(1280); // Logical pixels cannot be reused as wire pixels.
+            QVERIFY(t.topologyFrame(invalid, 1000).isEmpty());
+            const auto reply = t.topologyFrame(frame, 1000);
+            QCOMPARE(reply.value(u"type"_s).toString(), u"topology"_s);
+            QCOMPARE(reply.value(u"outputs"_s).toArray().size(), 2);
+            const auto capabilities = reply.value(u"capabilities"_s).toObject();
+            QVERIFY(capabilities.value(u"multiOutputCapture"_s).toBool());
+            QCOMPARE(capabilities.value(u"maxOutputs"_s).toInt(), 16);
+            QVERIFY(!capabilities.value(u"position"_s).toBool());
         });
     }
     void virtualResizeStrictSchema() {

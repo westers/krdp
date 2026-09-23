@@ -30,9 +30,9 @@ inline QJsonObject error(const QString &id, const QString &code)
         {QStringLiteral("id"), id}, {QStringLiteral("code"), code}};
 }
 
-// The retained single-output worker has no topology writes yet. Report only
-// what its captured output proves; never borrow legacy virtual-resize as an
-// advertised general resize capability.
+// The retained worker has no topology writes yet. Report only what its
+// captured outputs prove; never borrow legacy single-output virtual-resize as
+// an advertised general resize capability.
 inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot)
 {
     QJsonArray outputs;
@@ -59,8 +59,8 @@ inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatal
             {QStringLiteral("enumerate"), true}, {QStringLiteral("add"), false},
             {QStringLiteral("remove"), false}, {QStringLiteral("position"), false},
             {QStringLiteral("resize"), false}, {QStringLiteral("scale"), false},
-            {QStringLiteral("primary"), false}, {QStringLiteral("multiOutputCapture"), false},
-            {QStringLiteral("maxOutputs"), 1}, {QStringLiteral("lifetime"), QStringLiteral("retained")},
+            {QStringLiteral("primary"), false}, {QStringLiteral("multiOutputCapture"), snapshot.outputs.size() > 1},
+            {QStringLiteral("maxOutputs"), 16}, {QStringLiteral("lifetime"), QStringLiteral("retained")},
         }}};
 }
 }

@@ -726,6 +726,31 @@ private Q_SLOTS:
             QVERIFY(reattached);
             QCOMPARE(host.topologyFor(*reattached), retainedTopology);
             QVERIFY(host.m_supervisor.disconnect(*reattached, 2));
+            if (!attempt) {
+                const ConsoleWorkerWire::Outputs multiple{{
+                    {QStringLiteral("Virtual-1"), QRect(0, 0, 1024, 576), 1.25, true},
+                    {QStringLiteral("Virtual-2"), QRect(1024, 0, 1280, 720), 1.0, false}}};
+                worker.write(ConsoleWorkerWire::frame(multiple));
+                QVERIFY(worker.waitForBytesWritten(1000));
+                QTRY_COMPARE(workerState.outputs.monitors.size(), 2);
+                QVERIFY(!host.topologyFor(*handle)); // A new inventory alone is not a captured layout.
+                frame.monitors = {{QRect(0, 0, 1280, 720), true}, {QRect(1280, 0, 1280, 720), false}};
+                frame.monitorIndex = 0;
+                worker.write(ConsoleWorkerWire::frame(frame));
+                QVERIFY(worker.waitForBytesWritten(1000));
+                QTRY_VERIFY(workerState.verifiedKeyframes.contains(0));
+                QVERIFY(!host.topologyFor(*handle)); // Both independently encoded surfaces need keyframes.
+                frame.monitorIndex = 1;
+                worker.write(ConsoleWorkerWire::frame(frame));
+                QVERIFY(worker.waitForBytesWritten(1000));
+                QTRY_VERIFY(host.topologyFor(*handle).has_value());
+                const auto multi = *host.topologyFor(*handle);
+                QCOMPARE(multi.outputs.size(), 2);
+                QCOMPARE(multi.outputs[0].id, stableId);
+                QVERIFY(multi.outputs[1].id != stableId);
+                QCOMPARE(multi.outputs[1].output.logicalGeometry, QRect(1024, 0, 1280, 720));
+                QCOMPARE(multi.revision, quint64(3));
+            }
             QCOMPARE(guardian.processId(), child);
         }
         QCOMPARE(guardian.phase(), QStringLiteral("running"));

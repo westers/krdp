@@ -2,6 +2,7 @@
 #include "VirtualSessionTransport.h"
 #include "AudioPriority.h"
 #include "VirtualResizeProtocol.h"
+#include "RemoteMonitorGeometry.h"
 #include <InputHandler.h>
 #include <VideoStream.h>
 #include <QScopeGuard>
@@ -12,6 +13,23 @@ using namespace Qt::StringLiterals;
 
 namespace KRdp
 {
+namespace
+{
+bool frameMatchesTopology(const VideoFrame &frame, const RemoteTopologyCatalog::Snapshot &snapshot)
+{
+    if (snapshot.outputs.isEmpty() || snapshot.outputs.size() != frame.monitors.size()
+        || frame.monitorIndex < 0 || frame.monitorIndex >= frame.monitors.size()
+        || frame.size != frame.monitors[frame.monitorIndex].geometry.size()) return false;
+    QVector<RemoteMonitorGeometry::Output> projection;
+    for (const auto &entry : snapshot.outputs) {
+        const auto &output = entry.output;
+        if (!output.enabled || output.physical || output.nativePixels.isEmpty()) return false;
+        projection.append({output.logicalGeometry.topLeft(), output.nativePixels, output.scale, output.primary});
+    }
+    return RemoteMonitorGeometry::projectToWire(projection) == frame.monitors;
+}
+}
+
 VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *connection,
         VirtualSessionControl &control, Resolve resolve, quint64 &sequence, QObject *parent)
     : QObject(parent), m_client(client), m_connection(connection), m_control(&control), m_resolve(std::move(resolve)),
@@ -144,6 +162,16 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [this](const VideoFrame &frame) {
         if (!authorized()) return;
         const QPointer<VirtualSessionTransport> alive(this);
+        if (frame.monitors.size() > 1 || !m_wireLayout.isEmpty()) {
+            if (!m_topologyResolve || !m_handle) return;
+            const auto topology = m_topologyResolve(*m_handle);
+            if (!alive || !topology || !authorized() || !frameMatchesTopology(frame, *topology)) return;
+            if (m_wireLayout != frame.monitors) {
+                if (!frame.isKeyFrame) return;
+                m_connection->videoStream()->setMonitorLayout(frame.monitors.size() > 1 ? frame.monitors : QVector<VideoMonitor>{});
+                m_wireLayout = frame.monitors.size() > 1 ? frame.monitors : QVector<VideoMonitor>{};
+            }
+        }
         m_session.submitFrame(frame);
         if (!alive || !m_connection) return;
         const auto reply = topologyFrame(frame, m_connection->authenticatedPamUid());
@@ -180,6 +208,8 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     if (!bindingCurrent()) return false;
     // reset() only sets pendingReset; setEnabled() emits enabledChanged.
     m_connection->videoStream()->reset();
+    m_wireLayout.clear();
+    m_connection->videoStream()->setMonitorLayout({});
     m_connection->videoStream()->setEnabled(true);
     if (!bindingCurrent()) return false;
     endpoint->requestKeyFrame();
@@ -214,6 +244,7 @@ void VirtualSessionTransport::revoke()
     m_workerConnections.clear();
     m_endpoint = nullptr;
     m_handle.reset();
+    m_wireLayout.clear();
     m_playback = false;
     m_silenceHost = false;
     m_controlGeneration = 0;
@@ -238,6 +269,7 @@ void VirtualSessionTransport::revoke()
         }
         if (!alive) return;
         if (!m_connection) { m_revoking = false; return; }
+        m_connection->videoStream()->setMonitorLayout({});
         m_connection->setMediaPolicy(false, false, false);
         if (!alive) return;
         if (m_connection) m_connection->videoStream()->setEnabled(false); // discard old desktop frames
@@ -395,14 +427,12 @@ QJsonObject VirtualSessionTransport::topologyFrame(const VideoFrame &frame, std:
 {
     if (m_topologyId.isEmpty() || !m_topologyBinding || m_topologyBinding != m_controlGeneration
         || !authorized(uid) || !m_handle || !m_topologyResolve
-        || !frame.isKeyFrame || frame.data.isEmpty() || frame.size.isEmpty()
-        || frame.monitors.size() != 1 || frame.monitors.first().geometry != QRect(QPoint(0, 0), frame.size)) return {};
+        || !frame.isKeyFrame || frame.data.isEmpty() || frame.size.isEmpty()) return {};
     const QPointer<VirtualSessionTransport> alive(this);
     const auto snapshot = m_topologyResolve(*m_handle);
-    if (!alive || !snapshot || snapshot->outputs.size() != 1 || !authorized(uid)) return {};
-    const auto &output = snapshot->outputs.first().output;
-    if (snapshot->generation.isEmpty() || !snapshot->revision || output.nativePixels != frame.size
-        || !output.enabled || !output.primary || output.physical || output.owner != m_handle->id) return {};
+    if (!alive || !snapshot || !authorized(uid) || !frameMatchesTopology(frame, *snapshot)) return {};
+    if (snapshot->generation.isEmpty() || !snapshot->revision) return {};
+    for (const auto &entry : snapshot->outputs) if (entry.output.owner != m_handle->id) return {};
     const QString id = m_topologyId;
     clearTopology();
     return RemoteTopologyProtocol::retainedReadOnly(id, *snapshot);
@@ -493,7 +523,9 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
             if (!alive || !m_control || !m_connection) return {};
             if (bound && handle && attachmentMatches(*handle) && authorized()) {
                 response.insert(u"audioPriority"_s, true);
-                response.insert(u"virtualResize"_s, true);
+                const auto topology = m_topologyResolve ? m_topologyResolve(*handle) : std::nullopt;
+                if (!alive || !m_connection || !attachmentMatches(*handle)) return {};
+                response.insert(u"virtualResize"_s, !m_topologyResolve || (topology && topology->outputs.size() == 1));
                 return response;
             }
             // A callback may have attached a different desktop. Do not detach

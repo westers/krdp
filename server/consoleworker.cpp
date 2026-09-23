@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include <memory>
+#include <vector>
 #include <unistd.h>
 
 #include <QAction>
@@ -31,6 +32,7 @@
 #include "PipeWireAudioPlayback.h"
 #include "ConsoleMicrophoneSession.h"
 #include "CaptureWorkerMode.h"
+#include "RetainedMultiCapture.h"
 
 using namespace KRdp;
 
@@ -96,12 +98,14 @@ public:
         connect(&m_session, &PlasmaScreencastV1Session::captureRestartFailed, &m_virtualResize, &VirtualResizeSession::captureRestartFailed);
         connect(&m_virtualResize, &VirtualResizeSession::result, this, [this](const auto &result) {
             if (m_socket.state() == QLocalSocket::ConnectedState) m_socket.write(ConsoleWorkerWire::frame(result));
+            if (m_mode.virtualSession) m_multiSettle.start();
         });
         const auto resizedStopped = [this](const QString &error) {
             if (!error.isEmpty()) {
                 qWarning().noquote() << "Worker output recovery:" << error;
             }
             m_session.setStreamingEnabled(false);
+            for (const auto &session : m_multiSessions) session->setStreamingEnabled(false);
             QCoreApplication::exit(error.isEmpty() ? m_exitCode : 1);
         };
         connect(&m_resize, &ConsoleResizeSession::stopped, this, resizedStopped);
@@ -151,7 +155,7 @@ public:
             }
         });
         connect(&m_session, &AbstractSession::frameReceived, this, [this](const VideoFrame &frame) {
-            if (m_captureReady) {
+            if (m_captureReady && !m_multiMode) {
                 // Use the same ordering and coordinates as the captured frame,
                 // not a root-side guess about the user's monitor setup.
                 const auto screens = qGuiApp->screens();
@@ -221,9 +225,24 @@ public:
             }
         });
         connect(&m_session, &AbstractSession::error, this, [this]() {
+            if (m_multiMode) return; // The per-output producers now own capture.
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, QByteArrayLiteral("screencast failed")));
             m_socket.disconnectFromServer();
         });
+        m_multiSettle.setSingleShot(true);
+        m_multiSettle.setInterval(400);
+        connect(&m_multiSettle, &QTimer::timeout, this, &Worker::syncCaptureMode);
+        if (m_mode.virtualSession) {
+            connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, [this] { m_multiSettle.start(); });
+            connect(qGuiApp, &QGuiApplication::screenAdded, this, [this](QScreen *screen) {
+                watchScreen(screen);
+                m_multiSettle.start();
+            });
+            connect(qGuiApp, &QGuiApplication::screenRemoved, this, [this](QScreen *screen) {
+                m_watchedScreens.remove(screen);
+                m_multiSettle.start();
+            });
+        }
         m_connectTimeout.setSingleShot(true);
         connect(&m_connectTimeout, &QTimer::timeout, qApp, []() { QCoreApplication::exit(1); });
         m_audioTimer.setInterval(20);
@@ -262,6 +281,14 @@ private:
         else m_resize.stop();
     }
 
+    PlasmaScreencastV1Session *multiInputSession() const
+    {
+        for (const auto &session : m_multiSessions) {
+            if (session->streamActive()) return session.get();
+        }
+        return nullptr;
+    }
+
     void releaseInput()
     {
         const auto releases = m_inputState.releaseAll();
@@ -270,7 +297,9 @@ private:
         }
         for (const auto &input : releases) {
             if (const auto event = eventFor(input)) {
-                m_session.sendEvent(event);
+                if (m_multiMode) {
+                    if (auto *session = multiInputSession()) session->sendGlobalEvent(event);
+                } else m_session.sendEvent(event);
             }
         }
     }
@@ -282,7 +311,117 @@ private:
         // Match the desktop server's quality baseline. Leaving this unset
         // selects libx264's CRF35 fallback, visibly damaging desktop text.
         m_session.setVideoQuality(80);
-        m_session.setStreamingEnabled(true);
+        if (m_mode.virtualSession) {
+            for (auto *screen : qGuiApp->screens()) watchScreen(screen);
+            if (qGuiApp->screens().size() > 1) {
+                syncCaptureMode(); // Never start an oversized workspace encoder for a multi-output desktop.
+            } else {
+                m_session.setStreamingEnabled(true);
+                m_multiSettle.start();
+            }
+        } else {
+            m_session.setStreamingEnabled(true);
+        }
+    }
+
+    void watchScreen(QScreen *screen)
+    {
+        if (!screen || m_watchedScreens.contains(screen)) return;
+        m_watchedScreens.insert(screen);
+        connect(screen, &QScreen::geometryChanged, this, [this] { m_multiSettle.start(); });
+    }
+
+    void syncCaptureMode()
+    {
+        if (!m_mode.virtualSession || m_stopping) return;
+        const auto screens = qGuiApp->screens();
+        for (auto *screen : screens) watchScreen(screen);
+        if (screens.size() < 2) {
+            if (m_multiMode) {
+                releaseInput();
+                ++m_multiEpoch;
+                m_multiReady = false;
+                m_multiMode = false;
+                m_multiSessions.clear();
+                m_multiCapture.invalidate();
+                m_wireAtlas.clear();
+                m_logicalOutputs.clear();
+                m_outputs = {};
+                m_session.setStreamingEnabled(true);
+            }
+            return;
+        }
+        if (m_virtualResize.changing()) {
+            m_multiSettle.start(500);
+            return; // Do not replace the verified single-output Fit producer mid-transaction.
+        }
+        QVector<RetainedMultiCapture::Screen> inventory;
+        inventory.reserve(screens.size());
+        const auto *primary = qGuiApp->primaryScreen() ? qGuiApp->primaryScreen() : screens.first();
+        for (const auto *screen : screens) inventory.append({screen->name(), screen->geometry(), screen == primary});
+        if (m_multiMode && m_multiCapture.screens() == inventory) return;
+        releaseInput();
+        ++m_multiEpoch;
+        m_multiReady = false;
+        m_multiMode = true;
+        m_multiSessions.clear();
+        m_wireAtlas.clear();
+        m_logicalOutputs.clear();
+        QRect workspace;
+        for (const auto *screen : screens) workspace |= screen->geometry();
+        m_workspaceOrigin = workspace.topLeft();
+        if (!m_multiCapture.configure(inventory)) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, QByteArrayLiteral("unsupported retained monitor arrangement")));
+            m_socket.disconnectFromServer();
+            return;
+        }
+        const auto epoch = m_multiEpoch;
+        for (qsizetype i = 0; i < screens.size(); ++i) {
+            auto session = std::make_unique<PlasmaScreencastV1Session>();
+            session->setParent(this);
+            session->setActiveStream(int(i));
+            session->setMonitorIndex(int(i));
+            session->setVideoCodec(VideoCodec::Avc420);
+            session->setVideoQuality(m_multiQuality);
+            connect(session.get(), &AbstractSession::frameReceived, this, [this, i, epoch](const VideoFrame &frame) {
+                if (m_multiMode && epoch == m_multiEpoch) onMultiFrame(i, frame);
+            });
+            connect(session.get(), &AbstractSession::error, this, [this, epoch] {
+                if (epoch != m_multiEpoch || m_stopping) return;
+                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, QByteArrayLiteral("retained output capture failed")));
+                m_socket.disconnectFromServer();
+            });
+            m_multiSessions.push_back(std::move(session));
+        }
+        for (const auto &session : m_multiSessions) session->setStreamingEnabled(true);
+    }
+
+    void onMultiFrame(qsizetype index, const VideoFrame &frame)
+    {
+        const auto result = m_multiCapture.submit(index, frame);
+        if (result.reset) {
+            releaseInput();
+            m_multiReady = false;
+            for (const auto &session : m_multiSessions) session->requestKeyFrame();
+        }
+        if (result.becameReady) {
+            m_outputs = result.outputs;
+            m_wireAtlas = result.atlas;
+            m_logicalOutputs.clear();
+            for (qsizetype i = 0; i < result.outputs.monitors.size(); ++i) {
+                const auto &output = result.outputs.monitors[i];
+                m_logicalOutputs.append({output.geometry.topLeft(), result.frames[i].size, output.scale, output.primary});
+            }
+            m_multiReady = true;
+            if (!m_captureReady) {
+                m_captureReady = true;
+                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+            }
+            m_socket.write(ConsoleWorkerWire::frame(result.outputs));
+            m_session.setStreamingEnabled(false); // No oversized workspace encoder in multi mode.
+        }
+        if (!m_multiReady) return;
+        for (const auto &packet : result.frames) m_socket.write(ConsoleWorkerWire::frame(packet));
     }
 
     void reclaimConsole()
@@ -311,6 +450,8 @@ private:
                 if (*control != m_control) {
                     releaseInput();
                     m_session.setVideoQuality(80);
+                    m_multiQuality = 80;
+                    for (const auto &session : m_multiSessions) session->setVideoQuality(80);
                     m_control = *control;
                     m_microphone.setControl(*control);
                     if (m_mode.virtualSession) m_virtualResize.setControl(*control);
@@ -330,6 +471,8 @@ private:
             if (const auto quality = ConsoleWorkerWire::videoQuality(*record)) {
                 if (ConsoleWorkerWire::mayApplyQuality(*quality, m_control)) {
                     m_session.setVideoQuality(quality->quality);
+                    m_multiQuality = quality->quality;
+                    for (const auto &session : m_multiSessions) session->setVideoQuality(quality->quality);
                 }
                 continue;
             }
@@ -343,12 +486,18 @@ private:
             }
             if (const auto request = ConsoleWorkerWire::resize(*record)) {
                 releaseInput();
-                if (m_mode.virtualSession) m_virtualResize.request(*request);
+                if (m_mode.virtualSession && m_multiMode) {
+                    m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{
+                        request->requestId, request->generation,
+                        QStringLiteral("single-output Fit is unavailable with multiple remote monitors") }));
+                } else if (m_mode.virtualSession) m_virtualResize.request(*request);
                 else m_resize.request(*request);
                 continue;
             }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {
-                m_session.requestKeyFrame();
+                if (m_multiMode) {
+                    for (const auto &session : m_multiSessions) session->requestKeyFrame();
+                } else m_session.requestKeyFrame();
                 continue;
             }
             if (const auto media = ConsoleWorkerWire::media(*record)) {
@@ -368,14 +517,27 @@ private:
                 continue;
             }
             if (const auto input = ConsoleWorkerWire::input(*record)) {
-                if (!m_control.active || !(m_mode.virtualSession ? m_virtualResize.inputAllowed() : m_resize.inputAllowed())) {
+                if (!m_control.active || !(m_mode.virtualSession ? m_virtualResize.inputAllowed() : m_resize.inputAllowed())
+                    || (m_multiMode && !m_multiReady)) {
                     continue;
                 }
                 if (const auto event = eventFor(*input)) {
-                    if (input->type == ConsoleWorkerWire::Input::Type::Mouse && input->eventType == QEvent::MouseMove) {
-                        m_takeover.injected(m_session.mapToGlobal(input->position).toPoint(), m_clock.elapsed());
+                    if (m_multiMode) {
+                        auto *session = multiInputSession();
+                        if (!session) continue;
+                        if (input->type == ConsoleWorkerWire::Input::Type::Mouse && input->eventType == QEvent::MouseMove) {
+                            const QPointF logical = RemoteMonitorGeometry::wireToLogical(input->position, m_wireAtlas, m_logicalOutputs)
+                                + QPointF(m_workspaceOrigin);
+                            const auto motion = std::make_shared<QMouseEvent>(QEvent::MouseMove, logical, QPointF{},
+                                input->button, input->buttons, Qt::NoModifier);
+                            session->sendGlobalEvent(motion);
+                        } else session->sendGlobalEvent(event);
+                    } else {
+                        if (input->type == ConsoleWorkerWire::Input::Type::Mouse && input->eventType == QEvent::MouseMove) {
+                            m_takeover.injected(m_session.mapToGlobal(input->position).toPoint(), m_clock.elapsed());
+                        }
+                        m_session.sendEvent(event);
                     }
-                    m_session.sendEvent(event);
                     m_inputState.record(*input);
                     continue;
                 }
@@ -397,6 +559,17 @@ private:
     QLocalSocket m_socket;
     ConsoleWorkerWire::Deframer m_deframer;
     PlasmaScreencastV1Session m_session;
+    RetainedMultiCapture m_multiCapture;
+    std::vector<std::unique_ptr<PlasmaScreencastV1Session>> m_multiSessions;
+    QVector<VideoMonitor> m_wireAtlas;
+    QVector<RemoteMonitorGeometry::Output> m_logicalOutputs;
+    QPoint m_workspaceOrigin;
+    QSet<QScreen *> m_watchedScreens;
+    QTimer m_multiSettle;
+    quint64 m_multiEpoch = 0;
+    quint8 m_multiQuality = 80;
+    bool m_multiMode = false;
+    bool m_multiReady = false;
     std::unique_ptr<PipeWireAudioPlayback> m_audio;
     ConsoleMicrophoneSession m_microphone;
     QTimer m_connectTimeout;

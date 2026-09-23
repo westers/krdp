@@ -65,6 +65,7 @@ private:
     QPointer<ConsoleWorkerEndpoint> m_endpoint;
     std::optional<VirtualSessionRegistry::Handle> m_handle;
     ConsoleWorkerSession m_session;
+    QVector<VideoMonitor> m_wireLayout;
     QList<QMetaObject::Connection> m_workerConnections;
     bool m_playback = false;
     bool m_silenceHost = false;

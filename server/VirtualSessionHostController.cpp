@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionHostController.h"
 #include "WorkspaceFrameGeometry.h"
+#include "RemoteMonitorGeometry.h"
+#include <algorithm>
 #include <QDebug>
 #include <QFileInfo>
 #include <QPointer>
@@ -321,11 +323,69 @@ bool VirtualSessionHostController::prepareEndpoint(quint32 uid, const VirtualSes
     auto *endpoint = worker->endpoint.get();
     auto *entry = worker.get();
     connect(endpoint, &ConsoleWorkerEndpoint::workerReady, this, [endpoint](const auto &) { endpoint->requestKeyFrame(); });
-    connect(endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [entry](const auto &outputs) { entry->outputs = outputs; });
+    connect(endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [entry](const auto &outputs) {
+        if (entry->outputs != outputs) {
+            entry->verifiedKeyframes.clear();
+            entry->wireLayout.clear();
+            entry->multiPublished = false;
+        }
+        entry->outputs = outputs;
+    });
     connect(endpoint, &ConsoleWorkerEndpoint::workerStopped, this, [this, handle] { m_supervisor.captureUnavailable(handle); });
     connect(endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [this, entry](const VideoFrame &frame) {
         if (!frame.isKeyFrame || frame.data.isEmpty() || frame.size.isEmpty() || entry->outputs.monitors.isEmpty()
             || frame.monitors.size() != entry->outputs.monitors.size()) return;
+        if (entry->outputs.monitors.size() > 1) {
+            const qsizetype count = entry->outputs.monitors.size();
+            if (count > 16 || frame.monitorIndex < 0 || frame.monitorIndex >= count
+                || frame.monitors[frame.monitorIndex].geometry.size() != frame.size) return;
+            QSet<QString> names;
+            QVector<RemoteMonitorGeometry::Output> projection;
+            QVector<RemoteTopologyCatalog::Output> observed;
+            int primaries = 0;
+            for (qsizetype i = 0; i < count; ++i) {
+                const auto &output = entry->outputs.monitors[i];
+                const auto &wire = frame.monitors[i];
+                if (output.name.isEmpty() || names.contains(output.name) || output.geometry.isEmpty()
+                    || output.geometry.left() < 0 || output.geometry.top() < 0
+                    || wire.geometry.size().isEmpty() || wire.geometry.width() > 4096 || wire.geometry.height() > 4096
+                    || !WorkspaceFrameGeometry::matches(wire.geometry.size(), output.geometry.size(), output.scale)
+                    || wire.primary != output.primary) return;
+                names.insert(output.name);
+                if (output.primary) ++primaries;
+                projection.append({output.geometry.topLeft(), wire.geometry.size(), output.scale, output.primary});
+                observed.append({.backendKey = output.name, .name = output.name,
+                    .nativePixels = wire.geometry.size(), .logicalGeometry = output.geometry,
+                    .scale = output.scale, .enabled = true, .primary = output.primary,
+                    .physical = false, .owner = entry->handle.id});
+            }
+            if (primaries != 1 || RemoteMonitorGeometry::projectToWire(projection) != frame.monitors) return;
+            QRect atlasBounds;
+            for (qsizetype i = 0; i < count; ++i) {
+                const auto &wire = frame.monitors[i].geometry;
+                if (wire.left() < 0 || wire.top() < 0) return;
+                atlasBounds |= wire;
+                for (qsizetype j = i + 1; j < count; ++j) {
+                    if (wire.intersects(frame.monitors[j].geometry)
+                        || observed[i].logicalGeometry.intersects(observed[j].logicalGeometry)) return;
+                }
+            }
+            if (atlasBounds.width() > 8192 || atlasBounds.height() > 8192) return;
+            if (entry->wireLayout != frame.monitors) {
+                entry->wireLayout = frame.monitors;
+                entry->verifiedKeyframes.clear();
+                entry->multiPublished = false;
+            }
+            entry->verifiedKeyframes.insert(frame.monitorIndex);
+            if (!entry->multiPublished && entry->verifiedKeyframes.size() == count && entry->topology.observe(observed)) {
+                entry->multiPublished = true;
+                m_supervisor.captureReady(entry->handle);
+                // The first captured keyframes were needed to prove readiness;
+                // ask for a fresh set after the RDP surface layout is enabled.
+                entry->endpoint->requestKeyFrame();
+            }
+            return;
+        }
         // The encoded RDP monitor is in pixels; Outputs deliberately remains
         // in KWin logical coordinates for virtual input and resize readback.
         const auto &monitor = entry->outputs.monitors.first();
@@ -343,9 +403,11 @@ bool VirtualSessionHostController::prepareEndpoint(quint32 uid, const VirtualSes
             .physical = false,
             .owner = entry->handle.id,
         };
-        // A capture frame proves the one-output layout currently served by
-        // this backend. Retained multi-output remains unsupported here.
+        // The historical single-output capture path remains distinct from
+        // the independently encoded multi-output path above.
         if (!entry->topology.observe({observed})) return;
+        entry->wireLayout = frame.monitors;
+        entry->multiPublished = false;
         m_supervisor.captureReady(entry->handle);
     });
     m_workers.insert_or_assign(handle.id, std::move(worker));
@@ -369,12 +431,25 @@ std::optional<RemoteTopologyCatalog::Snapshot> VirtualSessionHostController::top
     const auto &worker = *found->second;
     if (worker.handle.manager != handle.manager || worker.handle.generation != handle.generation
         || !worker.endpoint->ready() || !worker.topology.observed()
-        || worker.outputs.monitors.size() != 1 || worker.topology.snapshot().outputs.size() != 1) return {};
-    const auto &reported = worker.outputs.monitors.first();
-    const auto &observed = worker.topology.snapshot().outputs.first().output;
-    if (observed.name != reported.name || observed.logicalGeometry != reported.geometry
-        || observed.scale != reported.scale || observed.owner != handle.id) return {};
-    return worker.topology.snapshot();
+        || worker.outputs.monitors.isEmpty() || worker.outputs.monitors.size() != worker.topology.snapshot().outputs.size()
+        || worker.wireLayout.size() != worker.outputs.monitors.size()
+        || (worker.outputs.monitors.size() > 1 && !worker.multiPublished)) return {};
+    auto snapshot = worker.topology.snapshot();
+    QVector<RemoteTopologyCatalog::Entry> ordered;
+    for (qsizetype i = 0; i < worker.outputs.monitors.size(); ++i) {
+        const auto &reported = worker.outputs.monitors[i];
+        const auto foundOutput = std::find_if(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [&reported](const auto &entry) {
+            return entry.output.name == reported.name;
+        });
+        if (foundOutput == snapshot.outputs.cend()) return {};
+        const auto &observed = foundOutput->output;
+        if (observed.logicalGeometry != reported.geometry || observed.scale != reported.scale
+            || observed.primary != reported.primary || observed.nativePixels != worker.wireLayout[i].geometry.size()
+            || observed.owner != handle.id) return {};
+        ordered.append(*foundOutput);
+    }
+    snapshot.outputs = std::move(ordered); // Same order as RDP surface indexes.
+    return snapshot;
 }
 
 void VirtualSessionHostController::addClient(RdpConnection *connection)
