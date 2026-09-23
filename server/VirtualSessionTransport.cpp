@@ -695,7 +695,7 @@ QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, 
     if (m_preview && m_preview->id == parsed->id && m_preview->generation == snapshot->generation
         && m_preview->revision == snapshot->revision && m_preview->before == snapshot->outputs
         && m_preview->operations == parsed->draft.operations
-        && m_preview->age.isValid() && m_preview->age.elapsed() < 15000)
+        && m_preview->age.isValid() && m_preview->age.elapsed() < RemoteTopologyProtocol::PreviewLifetimeMs)
         return RemoteTopologyProtocol::previewReply(parsed->id, m_preview->token,
             {m_preview->before, m_preview->after, {}}, *snapshot);
     PendingPreview next;
@@ -849,7 +849,7 @@ QJsonObject VirtualSessionTransport::topologyCommit(const QJsonObject &record, s
     if (!m_positionId.isEmpty() || !m_addId.isEmpty() || !m_removeId.isEmpty()
         || !m_topologyResizeId.isEmpty() || !m_resizeId.isEmpty())
         return RemoteTopologyProtocol::error(parsed->id, u"busy"_s);
-    if (!m_preview || !m_preview->age.isValid() || m_preview->age.elapsed() >= 15000
+    if (!m_preview || !m_preview->age.isValid() || m_preview->age.elapsed() >= RemoteTopologyProtocol::PreviewLifetimeMs
         || parsed->id != m_preview->id || parsed->token != m_preview->token)
         return RemoteTopologyProtocol::error(parsed->id, u"invalid"_s);
     const auto proposal = *m_preview;

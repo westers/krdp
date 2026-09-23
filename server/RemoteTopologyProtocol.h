@@ -16,6 +16,9 @@
 
 namespace KRdp::RemoteTopologyProtocol
 {
+// Read-only preview reservation. The client subtracts a transit margin.
+inline constexpr qint64 PreviewLifetimeMs = 60000;
+
 inline bool identifier(const QJsonValue &value, int maximum = 64)
 {
     if (!value.isString()) return false;
@@ -235,7 +238,8 @@ inline QJsonObject previewReply(const QString &id, const QString &token, const R
         {QStringLiteral("id"), id}, {QStringLiteral("token"), token},
         {QStringLiteral("generation"), snapshot.generation}, {QStringLiteral("expectedRevision"), double(snapshot.revision)},
         {QStringLiteral("before"), outputArray(draft.before)}, {QStringLiteral("after"), outputArray(draft.after)},
-        {QStringLiteral("warnings"), QJsonArray{}}};
+        {QStringLiteral("warnings"), QJsonArray{}},
+        {QStringLiteral("previewLifetimeMs"), double(PreviewLifetimeMs)}};
 }
 
 // Retained position/Add/owned Remove use revisioned preview/commit and fresh

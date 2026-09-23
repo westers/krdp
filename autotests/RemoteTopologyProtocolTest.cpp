@@ -224,6 +224,7 @@ private Q_SLOTS:
         proposal.after.first().output.logicalGeometry.moveTo(-1280, 100);
         const auto reply = previewReply(QStringLiteral("p_1"), QStringLiteral("token-1"), proposal, *snapshot);
         QCOMPARE(reply.value(QStringLiteral("id")).toString(), QStringLiteral("p_1"));
+        QCOMPARE(reply.value(QStringLiteral("previewLifetimeMs")).toInt(), 60000);
         QCOMPARE(reply.value(QStringLiteral("before")).toArray().first().toObject().value(QStringLiteral("logical")).toObject()
             .value(QStringLiteral("x")).toInt(), 0);
         QCOMPARE(reply.value(QStringLiteral("after")).toArray().first().toObject().value(QStringLiteral("logical")).toObject()
