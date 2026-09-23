@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualResizeTestFixture.h"
+#include "../src/WorkspaceFrameGeometry.h"
 #include <QTest>
 #include <limits>
 
@@ -40,6 +41,14 @@ private Q_SLOTS:
         // At the smallest supported logical dimensions, one output pixel of
         // compositor rounding must not invalidate a verified exact scale.
         QVERIFY(V::frameScaleMatches(322.0 / 81, 4, {81, 50}));
+        // The first packet after a 1920 -> 1600@125% resize must adopt the
+        // new 1280x720 logical geometry even though Qt reports DPR 2. An old
+        // 1920-pixel packet or an unrelated logical rectangle cannot do so.
+        QVERIFY(WorkspaceFrameGeometry::matches({1600, 900}, {1280, 720}, 1.25));
+        QVERIFY(!WorkspaceFrameGeometry::matches({1920, 1080}, {1280, 720}, 1.25));
+        QVERIFY(!WorkspaceFrameGeometry::matches({1600, 900}, {1920, 1080}, 1.25));
+        QVERIFY(WorkspaceFrameGeometry::matches({322, 4096}, {81, 1024}, 4));
+        QVERIFY(!WorkspaceFrameGeometry::matches({322, 4096}, {81, 980}, 4));
     }
     void refusesBadSnapshots_data()
     {

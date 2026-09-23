@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionHostController.h"
+#include "WorkspaceFrameGeometry.h"
 #include <QDebug>
 #include <QFileInfo>
 #include <QPointer>
@@ -325,9 +326,12 @@ bool VirtualSessionHostController::prepareEndpoint(quint32 uid, const VirtualSes
     connect(endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [this, entry](const VideoFrame &frame) {
         if (!frame.isKeyFrame || frame.data.isEmpty() || frame.size.isEmpty() || entry->outputs.monitors.isEmpty()
             || frame.monitors.size() != entry->outputs.monitors.size()) return;
-        for (qsizetype i = 0; i < frame.monitors.size(); ++i) {
-            if (frame.monitors[i].geometry != entry->outputs.monitors[i].geometry) return;
-        }
+        // The encoded RDP monitor is in pixels; Outputs deliberately remains
+        // in KWin logical coordinates for virtual input and resize readback.
+        const auto &monitor = entry->outputs.monitors.first();
+        if (frame.monitors.size() != 1 || frame.monitors.first().geometry != QRect(QPoint(0, 0), frame.size)
+            || monitor.geometry.topLeft() != QPoint(0, 0)
+            || !WorkspaceFrameGeometry::matches(frame.size, monitor.geometry.size(), monitor.scale)) return;
         m_supervisor.captureReady(entry->handle);
     });
     m_workers.insert_or_assign(handle.id, std::move(worker));

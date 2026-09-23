@@ -41,6 +41,9 @@ public:
     // Reopen the encoder even if the screencast's logical rectangle is
     // unchanged. Resize callers must gate output until a fresh keyframe.
     bool restartCaptureForResize(quint64 epoch);
+    // For a verified private single-output resize, use KScreen's exact scale
+    // while adopting the new workspace geometry. Qt's DPR may be rounded.
+    void setWorkspaceFrameScaleHint(std::optional<double> scale);
     // Old producer teardown confirmed; replacement startup follows this signal.
     Q_SIGNAL void captureRestartReady(quint64 epoch);
     Q_SIGNAL void captureRestartFailed(quint64 epoch);

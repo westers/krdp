@@ -32,6 +32,7 @@
 #include "screencasting_p.h"
 
 #include "VideoStream.h"
+#include "WorkspaceFrameGeometry.h"
 #include "krdp_logging.h"
 
 namespace KRdp
@@ -317,6 +318,7 @@ public:
     QString targetScreenName;
     QRect logicalRect;
     QVector<VideoMonitor> monitorLayout;
+    std::optional<double> workspaceFrameScaleHint;
     bool streamConfigured = false;
     bool streamSignalsConnected = false;
     bool startedSignalEmitted = false;
@@ -495,6 +497,11 @@ bool PlasmaScreencastV1Session::restartCaptureForResize(quint64 epoch)
     if (!encodedStream->isActive()) encodedStream->stop();
     restartEncodedStream(nodeId);
     return true;
+}
+
+void PlasmaScreencastV1Session::setWorkspaceFrameScaleHint(std::optional<double> scale)
+{
+    d->workspaceFrameScaleHint = scale && std::isfinite(*scale) && *scale >= 1 && *scale <= 4 ? scale : std::nullopt;
 }
 
 void PlasmaScreencastV1Session::scheduleStreamRecovery(int attempt, int delayMs)
@@ -1031,7 +1038,10 @@ void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Pa
     if (d->streamTarget == Private::StreamTarget::Workspace && screens.size() == 1) {
         const auto *screen = screens.first();
         const QRect geometry = screen->geometry();
-        if (geometry.size() * screen->devicePixelRatio() == size() && d->logicalRect != geometry) {
+        const bool matchingPixels = d->workspaceFrameScaleHint
+            ? WorkspaceFrameGeometry::matches(size(), geometry.size(), *d->workspaceFrameScaleHint)
+            : geometry.size() * screen->devicePixelRatio() == size();
+        if (matchingPixels && d->logicalRect != geometry) {
             d->logicalRect = geometry;
             d->monitorLayout = monitorLayoutForStream(-1, geometry);
             setLogicalSize(geometry.size());

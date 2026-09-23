@@ -89,6 +89,7 @@ public:
         connect(&m_virtualResize, &VirtualResizeSession::keyframeNeeded, &m_session, &AbstractSession::requestKeyFrame);
         connect(&m_virtualResize, &VirtualResizeSession::captureRefreshNeeded, this, [this](quint64 epoch) {
             m_virtualCaptureEpoch = epoch;
+            m_session.setWorkspaceFrameScaleHint(m_virtualResize.outputScale());
             if (!m_session.restartCaptureForResize(epoch)) m_virtualResize.captureRestartFailed(epoch);
         });
         connect(&m_session, &PlasmaScreencastV1Session::captureRestartReady, &m_virtualResize, &VirtualResizeSession::captureRestartReady);
@@ -188,15 +189,32 @@ public:
                         ? h264KeyframeSize(frame.data).value_or(QSize{}) : QSize{};
                     if (m_virtualResize.changing() && frame.isKeyFrame)
                         qInfo() << "Virtual Fit keyframe epoch" << m_virtualCaptureEpoch
-                                << "payload" << payloadPixels << "metadata" << frame.size;
+                                << "payload" << payloadPixels << "metadata" << frame.size
+                                << "screen" << (screens.isEmpty() ? QRect{} : screens.first()->geometry())
+                                << "frame monitor" << (frame.monitors.isEmpty() ? QRect{} : frame.monitors.first().geometry)
+                                << "outputs" << outputs.monitors.size()
+                                << "scale" << (outputs.monitors.isEmpty() ? 0.0 : outputs.monitors.first().scale)
+                                << "target scale" << m_virtualResize.outputScale().value_or(0.0);
                     m_virtualResize.captured(outputs, frame.size, payloadPixels, frame.isKeyFrame, m_virtualCaptureEpoch);
+                    // A failed Fit may report its error while a rollback producer
+                    // still needs the exact fractional scale for its recovery frame.
+                    if (!m_virtualResize.changing()) m_session.setWorkspaceFrameScaleHint(std::nullopt);
                     if (!m_virtualResize.framesAllowed()) return; // Never forward stale-size encoded packets during Fit/recovery.
                 }
                 if (!outputs.monitors.isEmpty() && outputs != m_outputs) {
                     m_outputs = outputs;
                     m_socket.write(ConsoleWorkerWire::frame(outputs));
                 }
-                m_socket.write(ConsoleWorkerWire::frame(frame));
+                if (m_mode.virtualSession && outputs.monitors.size() == 1) {
+                    // Capture/input use KWin's logical output rectangle, but
+                    // RDPGFX monitor coordinates describe the encoded pixel
+                    // surface. At fractional scale those are different axes.
+                    VideoFrame rdpFrame = frame;
+                    rdpFrame.monitors = {VideoMonitor{.geometry = QRect(QPoint(0, 0), frame.size), .primary = true}};
+                    m_socket.write(ConsoleWorkerWire::frame(rdpFrame));
+                } else {
+                    m_socket.write(ConsoleWorkerWire::frame(frame));
+                }
                 // Only this frame's validated output geometry may complete Fit,
                 // never metadata cached before a resize or a compositor handoff.
                 if (!m_mode.virtualSession) m_resize.captured(outputs, frame.isKeyFrame);
