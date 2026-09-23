@@ -170,6 +170,23 @@ The worker still returned 0; only the artificial post-worker-stop observation
 failed. Source confirms ordinary detach does not stop the retained worker,
 whereas explicit Stop terminates the desktop guardian's process. Actual RDP
 client reconnect and crash recovery are not proved by this worker test.
+Source `203b271` resolves an idle read-only query race: after the host has
+published its generation/revision catalog only from independently decoded
+all-output keyframes (plus KScreen confirmation for multi-output), a later
+authorized `topology-query` can return that verified catalog immediately.
+Before publication it still waits for a matching captured keyframe with the
+original bounded timeout. Previously every query requested another IDR and
+waited for a *new* frame; a static KWin desktop need not supply a damaged
+frame merely because the encoder was asked for an IDR. The own GUI client
+0.4.5 also retries a timed-out initial query once after its first decoded
+frame and exposes manual Refresh after timeout/error. Private Buzz Intel
+:3396→own GUI diagnostic managed-Fit preview/commit then advanced rev1→rev2,
+KScreen/capture proved 1600x900 at `(0,0)` and 1280x720 at `(1600,100)`,
+and RDPGFX reset to 2880x900 with two decoded surfaces. The test-only worker
+lifetime was extended from 120 to 300 seconds to survive the bounded GUI
+campaign; no production service changed. This is not a Monitors-dialog click,
+Match, failure recovery, or Console physical-write acceptance. Evidence:
+`~/dev/rdp/evidence/2026-09-23-buzz-intel-mixed-create.md`.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. The later private Fit
