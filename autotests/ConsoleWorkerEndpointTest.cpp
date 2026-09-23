@@ -33,10 +33,12 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QVERIFY(!endpoint.resize(resize)); // Never send a display mutation before Ready.
     const ConsoleWorkerWire::Position position{12, 42, QStringLiteral("Virtual-1"), QPoint(1280, 100)};
     QVERIFY(!endpoint.position(position));
+    QVERIFY(!endpoint.requestTopology());
 
     int ready = 0;
     int frames = 0;
     int layouts = 0;
+    int topologies = 0;
     quint64 takeoverGeneration = 0;
     connect(&endpoint, &ConsoleWorkerEndpoint::localTakeover, this, [&takeoverGeneration](quint64 generation) {
         takeoverGeneration = generation;
@@ -44,6 +46,10 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&layouts](const auto &outputs) {
         QCOMPARE(outputs.monitors.first().name, QStringLiteral("DP-1"));
         ++layouts;
+    });
+    connect(&endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [&topologies](const auto &topology) {
+        QCOMPARE(topology.outputs.first().name, QStringLiteral("DP-1"));
+        ++topologies;
     });
     VideoFrame received;
     connect(&endpoint, &ConsoleWorkerEndpoint::workerReady, this, [&ready](const auto &) { ++ready; });
@@ -77,6 +83,14 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QVERIFY(control);
     QCOMPARE(control->generation, quint64(42));
     QVERIFY(control->active);
+
+    QVERIFY(endpoint.requestTopology());
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    brokerMessages.feed(worker.readAll());
+    const auto topologyQuery = brokerMessages.next();
+    QVERIFY(topologyQuery);
+    QCOMPARE(topologyQuery->kind, ConsoleWorkerWire::Kind::TopologyQuery);
+    QVERIFY(topologyQuery->payload.isEmpty());
 
     QSignalSpy positioned(&endpoint, &ConsoleWorkerEndpoint::positionFinished);
     QVERIFY(endpoint.position(position));
@@ -130,6 +144,10 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Outputs{{{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}}}));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(layouts, 1);
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Topology{{
+        {QStringLiteral("DP-1"), QSize(1280, 720), QRect(0, 0, 1280, 720), 1.0, true}}}));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(topologies, 1);
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ControlState{42, true}, ConsoleWorkerWire::Kind::LocalTakeover));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(takeoverGeneration, quint64(42));

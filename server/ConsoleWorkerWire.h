@@ -23,7 +23,7 @@
 
 namespace KRdp::ConsoleWorkerWire
 {
-constexpr quint16 ProtocolVersion = 2;
+constexpr quint16 ProtocolVersion = 3; // Topology record; broker and worker must upgrade together.
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 
 enum class Kind : quint8 {
@@ -51,6 +51,8 @@ enum class Kind : quint8 {
     AddVirtualResult,
     RemoveVirtual,
     RemoveVirtualResult,
+    Topology,
+    TopologyQuery,
 };
 
 struct Record {
@@ -390,6 +392,63 @@ struct Outputs {
     bool operator==(const Outputs &) const = default;
 };
 
+// Independently KScreen-confirmed inventory accompanying a decoded console
+// keyframe. Empty means the worker could not validate the current capture;
+// the broker must retire its cached topology instead of serving stale data.
+struct TopologyOutput {
+    QString name;
+    QSize pixels;
+    QRect logical;
+    double scale = 1;
+    bool primary = false;
+    bool operator==(const TopologyOutput &) const = default;
+};
+
+struct Topology {
+    QVector<TopologyOutput> outputs;
+    bool operator==(const Topology &) const = default;
+};
+
+inline QByteArray frame(const Topology &topology)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << quint32(topology.outputs.size());
+    for (const auto &output : topology.outputs)
+        stream << output.name << output.pixels << output.logical << output.scale << output.primary;
+    return frame(Kind::Topology, payload);
+}
+
+inline std::optional<Topology> topology(const Record &record)
+{
+    if (record.kind != Kind::Topology || record.payload.size() > 32768) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    quint32 count = 0;
+    stream >> count;
+    if (count > 16) return {};
+    Topology result;
+    QSet<QString> names;
+    int primaries = 0;
+    for (quint32 i = 0; i < count; ++i) {
+        TopologyOutput output;
+        stream >> output.name >> output.pixels >> output.logical >> output.scale >> output.primary;
+        if (stream.status() != QDataStream::Ok || output.name.isEmpty() || output.name.size() > 128
+            || names.contains(output.name) || output.pixels.width() < 1 || output.pixels.width() > 16384
+            || output.pixels.height() < 1 || output.pixels.height() > 16384
+            || output.logical.isEmpty() || output.logical.width() > 32768 || output.logical.height() > 32768
+            || output.logical.x() < -32768 || output.logical.x() > 32768
+            || output.logical.y() < -32768 || output.logical.y() > 32768
+            || !std::isfinite(output.scale) || output.scale < 1 || output.scale > 4) return {};
+        names.insert(output.name);
+        primaries += output.primary;
+        result.outputs.append(output);
+    }
+    return stream.status() == QDataStream::Ok && stream.atEnd() && (count == 0 || primaries == 1)
+        ? std::optional<Topology>(result) : std::nullopt;
+}
+
 inline QByteArray frame(const Outputs &outputs)
 {
     QByteArray payload;
@@ -657,7 +716,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::RemoveVirtualResult)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::TopologyQuery)) {
             ++m_invalid;
             return std::nullopt;
         }

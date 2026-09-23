@@ -140,7 +140,7 @@ inline std::optional<CommitRequest> commitRequest(const QJsonObject &record)
         record.value(QStringLiteral("generation")).toString(), quint64(revision.toDouble())};
 }
 
-inline QJsonArray outputArray(const QVector<RemoteTopologyCatalog::Entry> &entries)
+inline QJsonArray outputArray(const QVector<RemoteTopologyCatalog::Entry> &entries, const QString &lifetime = QStringLiteral("retained"))
 {
     QJsonArray outputs;
     for (const auto &entry : entries) {
@@ -148,7 +148,7 @@ inline QJsonArray outputArray(const QVector<RemoteTopologyCatalog::Entry> &entri
         outputs.append(QJsonObject{
             {QStringLiteral("id"), entry.id}, {QStringLiteral("name"), output.name},
             {QStringLiteral("kind"), output.physical ? QStringLiteral("physical") : QStringLiteral("virtual")},
-            {QStringLiteral("owner"), output.owner}, {QStringLiteral("lifetime"), QStringLiteral("retained")},
+            {QStringLiteral("owner"), output.owner}, {QStringLiteral("lifetime"), lifetime},
             {QStringLiteral("enabled"), output.enabled}, {QStringLiteral("primary"), output.primary},
             {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), output.nativePixels.width()},
                 {QStringLiteral("height"), output.nativePixels.height()}}},
@@ -192,6 +192,21 @@ inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatal
             {QStringLiteral("primary"), false}, {QStringLiteral("multiOutputCapture"), snapshot.outputs.size() > 1},
             {QStringLiteral("maxOutputs"), 16}, {QStringLiteral("positionMin"), 0},
             {QStringLiteral("positionMax"), 32768}, {QStringLiteral("lifetime"), QStringLiteral("retained")},
+        }}};
+}
+
+inline QJsonObject consoleReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot)
+{
+    return {{QStringLiteral("type"), QStringLiteral("topology")}, {QStringLiteral("v"), 1},
+        {QStringLiteral("id"), id}, {QStringLiteral("generation"), snapshot.generation},
+        {QStringLiteral("revision"), double(snapshot.revision)},
+        {QStringLiteral("outputs"), outputArray(snapshot.outputs, QStringLiteral("lease"))},
+        {QStringLiteral("capabilities"), QJsonObject{
+            {QStringLiteral("enumerate"), true}, {QStringLiteral("add"), false},
+            {QStringLiteral("remove"), false}, {QStringLiteral("position"), false},
+            {QStringLiteral("resize"), false}, {QStringLiteral("scale"), false},
+            {QStringLiteral("primary"), false}, {QStringLiteral("multiOutputCapture"), false},
+            {QStringLiteral("maxOutputs"), 16}, {QStringLiteral("lifetime"), QStringLiteral("lease")},
         }}};
 }
 }

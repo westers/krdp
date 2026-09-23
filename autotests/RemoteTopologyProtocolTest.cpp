@@ -51,6 +51,26 @@ private Q_SLOTS:
         QVERIFY(!caps.value(QStringLiteral("multiOutputCapture")).toBool());
     }
 
+    void physicalConsoleReplyNeverAdvertisesWrites()
+    {
+        KRdp::RemoteTopologyCatalog catalog;
+        const auto observed = catalog.observe({{
+            .backendKey = QStringLiteral("DP-1"), .name = QStringLiteral("DP-1"),
+            .nativePixels = QSize(2560, 1440), .logicalGeometry = QRect(0, 0, 2560, 1440),
+            .scale = 1.0, .enabled = true, .primary = true, .physical = true, .owner = {},
+        }});
+        QVERIFY(observed);
+        const auto record = consoleReadOnly(QStringLiteral("q-console"), *observed);
+        const auto output = record.value(QStringLiteral("outputs")).toArray().first().toObject();
+        QCOMPARE(output.value(QStringLiteral("kind")).toString(), QStringLiteral("physical"));
+        QCOMPARE(output.value(QStringLiteral("lifetime")).toString(), QStringLiteral("lease"));
+        const auto caps = record.value(QStringLiteral("capabilities")).toObject();
+        QCOMPARE(caps.value(QStringLiteral("lifetime")).toString(), QStringLiteral("lease"));
+        QVERIFY(caps.value(QStringLiteral("enumerate")).toBool());
+        for (const auto *name : {"add", "remove", "position", "resize", "scale", "primary", "multiOutputCapture"})
+            QVERIFY(!caps.value(QLatin1String(name)).toBool());
+    }
+
     void strictPreviewWithoutClientOwner()
     {
         QJsonObject add{{QStringLiteral("op"), QStringLiteral("add")},

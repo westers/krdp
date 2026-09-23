@@ -20,6 +20,7 @@
 #include "ConsoleSeat.h"
 #include "ConsoleWorkerSession.h"
 #include "ConsoleResize.h"
+#include "RemoteTopologyProtocol.h"
 
 using namespace Qt::StringLiterals;
 
@@ -97,8 +98,41 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [this](const ConsoleWorkerWire::Outputs &outputs) {
         qInfo() << "Console capture outputs:" << outputs.monitors.size() << "forwarding" << m_inputEnabled << "clients" << m_clients.size();
+        if (outputs != m_outputs) {
+            m_topologyAvailable = false;
+            finishTopologyQueries(u"capture-failed"_s);
+        }
         m_outputs = outputs;
         sendLayouts();
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [this](const ConsoleWorkerWire::Topology &topology) {
+        if (topology.outputs.isEmpty() || topology.outputs.size() != m_outputs.monitors.size()) {
+            m_topologyAvailable = false;
+            m_topologyCatalog.resetGeneration();
+            finishTopologyQueries(u"capture-failed"_s);
+            return;
+        }
+        QVector<RemoteTopologyCatalog::Output> inventory;
+        QRect workspace;
+        for (const auto &output : topology.outputs) workspace |= output.logical;
+        for (const auto &output : topology.outputs) {
+            const auto found = std::find_if(m_outputs.monitors.cbegin(), m_outputs.monitors.cend(), [&output](const auto &monitor) {
+                return monitor.name == output.name;
+            });
+            if (found == m_outputs.monitors.cend() || found->geometry != output.logical.translated(-workspace.topLeft())
+                || found->primary != output.primary) {
+                m_topologyAvailable = false;
+                m_topologyCatalog.resetGeneration();
+                finishTopologyQueries(u"capture-failed"_s);
+                return;
+            }
+            inventory.append({.backendKey = output.name, .name = output.name, .nativePixels = output.pixels,
+                .logicalGeometry = output.logical, .scale = output.scale, .enabled = true,
+                .primary = output.primary, .physical = true, .owner = {}});
+        }
+        m_topologyAvailable = m_topologyCatalog.observe(inventory).has_value();
+        if (!m_topologyAvailable) m_topologyCatalog.resetGeneration();
+        finishTopologyQueries(m_topologyAvailable ? QString() : u"capture-failed"_s);
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::localTakeover, this, [this](quint64 generation) {
         if (!m_control.owner() || generation != m_controlGeneration) {
@@ -182,6 +216,9 @@ void ConsoleHostController::apply(const ConsoleHandoff::Actions &actions)
 
 void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
 {
+    m_topologyAvailable = false;
+    m_topologyCatalog.resetGeneration();
+    finishTopologyQueries(u"capture-failed"_s);
     m_outputs = {}; // Never describe the prior greeter/user's outputs during handoff.
     if (!QDir().mkpath(m_runtimeDirectory)) {
         qWarning().noquote() << "Cannot create console runtime directory" << m_runtimeDirectory;
@@ -214,6 +251,9 @@ void ConsoleHostController::setWorkerActive(bool active)
 {
     qInfo() << "Console capture forwarding:" << active;
     if (!active) {
+        m_topologyAvailable = false;
+        m_topologyCatalog.resetGeneration();
+        finishTopologyQueries(u"capture-failed"_s);
         stopMicrophone(u"console session changed; microphone consent must be renewed"_s);
         finishResize(u"console capture worker changed during resize"_s);
         releaseInput();
@@ -292,6 +332,28 @@ void ConsoleHostController::addClient(RdpConnection *connection)
 void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record)
 {
     const QString type = record.value(u"type"_s).toString();
+    if (type == u"topology-query"_s) {
+        const auto requestId = RemoteTopologyProtocol::queryId(record);
+        if (!requestId) {
+            connection->sendControlRecord(RemoteTopologyProtocol::error(record.value(u"id"_s).toString().left(64), u"invalid"_s));
+        } else if (!m_control.admitted(id) || !m_endpoint.ready()) {
+            connection->sendControlRecord(RemoteTopologyProtocol::error(*requestId, u"capture-failed"_s));
+        } else {
+            m_pendingTopology.insert(id, *requestId);
+            if (!m_endpoint.requestTopology()) {
+                m_pendingTopology.remove(id);
+                connection->sendControlRecord(RemoteTopologyProtocol::error(*requestId, u"capture-failed"_s));
+                return;
+            }
+            QTimer::singleShot(6000, this, [this, id, request = *requestId] {
+                if (m_pendingTopology.value(id) != request) return;
+                m_pendingTopology.remove(id);
+                for (const auto &client : m_clients) if (client->id == id)
+                    client->connection->sendControlRecord(RemoteTopologyProtocol::error(request, u"timeout"_s));
+            });
+        }
+        return;
+    }
     if (type == u"audio-priority"_s) {
         const auto request = AudioPriority::parse(record);
         if (!request) {
@@ -453,6 +515,7 @@ void ConsoleHostController::removeClient(RdpConnection *connection)
 {
     for (const auto &client : m_clients) {
         if (client->connection == connection) {
+            m_pendingTopology.remove(client->id);
             if (m_control.ownsControl(client->id)) {
                 releaseInput();
             }
@@ -463,6 +526,18 @@ void ConsoleHostController::removeClient(RdpConnection *connection)
     syncControlState();
     updateMedia();
     sendLayouts();
+}
+
+void ConsoleHostController::finishTopologyQueries(const QString &error)
+{
+    const auto pending = std::exchange(m_pendingTopology, {});
+    for (const auto &client : m_clients) {
+        const QString request = pending.value(client->id);
+        if (request.isEmpty()) continue;
+        client->connection->sendControlRecord(error.isEmpty()
+            ? RemoteTopologyProtocol::consoleReadOnly(request, m_topologyCatalog.snapshot())
+            : RemoteTopologyProtocol::error(request, error));
+    }
 }
 
 void ConsoleHostController::sendLayouts()

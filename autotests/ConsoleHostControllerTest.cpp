@@ -11,6 +11,38 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void physicalTopologyRevisionAndWorkerInvalidation()
+    {
+        Server server;
+        ConsoleHostController host(&server, {}, {});
+        const ConsoleWorkerWire::Outputs captured{{
+            {QStringLiteral("DP-1"), QRect(0, 0, 2560, 1440), 1.0, true},
+            {QStringLiteral("HDMI-A-1"), QRect(2560, 0, 2560, 1440), 1.0, false}}};
+        Q_EMIT host.m_endpoint.outputsReceived(captured);
+        const ConsoleWorkerWire::Topology confirmed{{
+            {QStringLiteral("DP-1"), QSize(2560, 1440), QRect(0, 0, 2560, 1440), 1.0, true},
+            {QStringLiteral("HDMI-A-1"), QSize(2560, 1440), QRect(2560, 0, 2560, 1440), 1.0, false}}};
+        Q_EMIT host.m_endpoint.topologyReceived(confirmed);
+        QVERIFY(host.m_topologyAvailable);
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, quint64(1));
+        const QString generation = host.m_topologyCatalog.snapshot().generation;
+        Q_EMIT host.m_endpoint.topologyReceived(confirmed);
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, quint64(1));
+        auto changed = confirmed;
+        changed.outputs[1].pixels = QSize(1920, 1080);
+        changed.outputs[1].logical = QRect(2560, 0, 1920, 1080);
+        auto newCapture = captured;
+        newCapture.monitors[1].geometry = QRect(2560, 0, 1920, 1080);
+        Q_EMIT host.m_endpoint.outputsReceived(newCapture);
+        Q_EMIT host.m_endpoint.topologyReceived(changed);
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, quint64(2));
+        QCOMPARE(host.m_topologyCatalog.snapshot().generation, generation);
+        Q_EMIT host.m_endpoint.topologyReceived(ConsoleWorkerWire::Topology{});
+        QVERIFY(!host.m_topologyAvailable);
+        QVERIFY(host.m_topologyCatalog.snapshot().generation != generation);
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, quint64(0));
+    }
+
     void microphoneAcknowledgementAndRevocation()
     {
         // No event-loop pumping: RdpConnection's queued socket initialization

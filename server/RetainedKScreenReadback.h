@@ -41,9 +41,11 @@ inline bool outputName(const QString &name)
 }
 
 // This is a parser for a fresh `kscreen-doctor -j` from inside the verified
-// private compositor, NOT proof that an arbitrary XDG_RUNTIME_DIR is retained
-// or that every output has a working encoder. It intentionally supports only
-// enabled, unrotated, non-mirrored outputs until those cases have capture proof.
+// worker's compositor, NOT proof that an arbitrary XDG_RUNTIME_DIR is retained
+// or that every output has a working encoder. The physical Console read-only
+// path also uses the geometry/mode fields, then separately matches a captured
+// keyframe; it does not use the retained owner/kind fields returned here.
+// Only enabled, unrotated, non-mirrored outputs have capture proof so far.
 inline std::optional<Snapshot> parse(const QByteArray &json, const QString &authenticatedOwner)
 {
     if (authenticatedOwner.isEmpty() || json.isEmpty() || json.size() > 1024 * 1024) return {};

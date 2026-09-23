@@ -40,6 +40,7 @@ public:
 
     void stopWorker();
     void requestKeyFrame();
+    bool requestTopology();
     void sendInput(const ConsoleWorkerWire::Input &input);
     void setMedia(const ConsoleWorkerWire::Media &media);
     void setControlState(const ConsoleWorkerWire::ControlState &state);
@@ -58,6 +59,7 @@ Q_SIGNALS:
     void inputReceived(const KRdp::ConsoleWorkerWire::Input &input);
     void audioReceived(const KRdp::ConsoleWorkerWire::Audio &audio);
     void outputsReceived(const KRdp::ConsoleWorkerWire::Outputs &outputs);
+    void topologyReceived(const KRdp::ConsoleWorkerWire::Topology &topology);
     void localTakeover(quint64 generation);
     void resizeFinished(const KRdp::ConsoleWorkerWire::ResizeResult &result);
     void positionFinished(const KRdp::ConsoleWorkerWire::PositionResult &result);

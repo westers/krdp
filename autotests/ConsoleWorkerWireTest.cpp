@@ -28,7 +28,37 @@ private Q_SLOTS:
     void positionRecordsAreBoundedAndCorrelated();
     void addVirtualRecordsAreBoundedAndCorrelated();
     void removeVirtualRecordsRequireOwnedName();
+    void readOnlyTopologyRecordIsBounded();
 };
+
+void ConsoleWorkerWireTest::readOnlyTopologyRecordIsBounded()
+{
+    const Topology expected{{{QStringLiteral("DP-1"), QSize(2560, 1440), QRect(0, 0, 2560, 1440), 1.0, true},
+        {QStringLiteral("HDMI-A-1"), QSize(1600, 900), QRect(2560, 100, 1280, 720), 1.25, false}}};
+    Deframer reader;
+    reader.feed(frame(expected) + frame(Topology{}));
+    auto record = reader.next();
+    QVERIFY(record);
+    QCOMPARE(topology(*record), std::optional<Topology>(expected));
+    auto truncated = *record;
+    truncated.payload.chop(1);
+    QVERIFY(!topology(truncated));
+    auto duplicate = expected;
+    duplicate.outputs[1].name = duplicate.outputs[0].name;
+    reader.feed(frame(duplicate));
+    record = reader.next();
+    QVERIFY(record);
+    QVERIFY(topology(*record));
+    QCOMPARE(topology(*record)->outputs.size(), 0); // Explicit invalidation.
+    record = reader.next();
+    QVERIFY(record);
+    QVERIFY(!topology(*record));
+    reader.feed(frame(Kind::TopologyQuery));
+    record = reader.next();
+    QVERIFY(record);
+    QCOMPARE(record->kind, Kind::TopologyQuery);
+    QVERIFY(record->payload.isEmpty());
+}
 
 void ConsoleWorkerWireTest::removeVirtualRecordsRequireOwnedName()
 {

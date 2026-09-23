@@ -5,6 +5,7 @@
 #include <QFile>
 
 #include "RetainedKScreenReadback.h"
+#include "ConsoleTopologyReadback.h"
 
 using namespace KRdp::RetainedKScreenReadback;
 
@@ -49,6 +50,31 @@ class RetainedKScreenReadbackTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void physicalReadOnlyInventoryNeedsCapturedKeyframe()
+    {
+        const QJsonObject physical{{QStringLiteral("screen"), QJsonObject{{QStringLiteral("maxActiveOutputsCount"), 1}}},
+            {QStringLiteral("outputs"), QJsonArray{output(QStringLiteral("DP-1"), 1, 0, 0, 1.0, 1)}}};
+        const auto state = decoded(physical);
+        QVERIFY(state);
+        KRdp::ConsoleWorkerWire::Outputs worker{{{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1.0, true}}};
+        KRdp::VideoFrame frame;
+        frame.monitorIndex = 0;
+        frame.size = QSize(1280, 720);
+        frame.monitors = {{.geometry = QRect(0, 0, 1280, 720), .primary = true}};
+        frame.data = keyframe();
+        frame.isKeyFrame = true;
+        QVERIFY(!frame.data.isEmpty());
+        const auto confirmed = KRdp::ConsoleTopologyReadback::confirmed(*state, worker, frame);
+        QVERIFY(confirmed);
+        QCOMPARE(confirmed->outputs[0].name, QStringLiteral("DP-1"));
+        QCOMPARE(confirmed->outputs[0].pixels, QSize(1280, 720));
+        frame.data = QByteArrayLiteral("fake-keyframe");
+        QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(*state, worker, frame));
+        frame.data = keyframe();
+        worker.monitors[0].geometry.moveTo(1, 0);
+        QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(*state, worker, frame));
+    }
+
     void privateTwoOutputReadbackAndPositionCommands()
     {
         const auto state = decoded(root());

@@ -7,9 +7,22 @@ retained desktops, and accepted through disposable Sol :3396 → Buzz source GUI
 (`d958e6d` server, `cf6bae8` client). The native Monitors dialog performed
 Preview/Apply clicks and observed revision 1→2 with stable output IDs and
 KScreen/captured-keyframe proof. No installed server/client or production path
-is claimed. Console query, resize/scale/primary, Fit/Match and full
+is claimed. Console native acceptance, resize/scale/primary, Fit/Match and full
 runtime acceptance remain absent. A visual arrangement is now the client UI's
 main draft control; X/Y remains under Advanced.
+Source WIP now includes a separate read-only Console `topology-query`: the
+authenticated physical worker runs `kscreen-doctor -j` inside its session on
+an encoded keyframe, requires exact capture/monitor geometry and decoded
+payload dimensions to agree with KScreen's native mode/scale/position/primary,
+and sends a bounded inventory over worker-wire v3. The broker assigns
+generation-scoped IDs/revisions and answers an admitted Console query only
+after a fresh worker result; the client accepts `lifetime=lease` only on a
+physical Console attachment and rejects lease write capabilities. All Console
+topology writes are false. This is source/build/unit-tested only, NOT native
+Sol/Buzz GUI-accepted or deployed. KScreen arrangements with disabled, rotated
+or mirrored outputs currently fail closed rather than yielding a partial
+inventory. The older Console `layout` and `console-resize` paths remain
+separate; no physical mutation is authorized by this topology query.
 An additional disposable 125%/100% Sol/Buzz source-GUI run confirmed that the
 visual editor uses logical aspect/position and committed one virtual move from
 `(1024,100)` to `(1024,209)` with revision 1→2 and unchanged IDs. This does
@@ -70,7 +83,7 @@ coordinate. A later private Sol worker-endpoint pointer drag also moved a
 marked Konsole across the seam to Virtual-1 and decoded a fresh destination
 keyframe (`e982f21`/`0802ee6` probe). GUI/RDP-driven window drag, application click effect,
 installed broker and deployment remain unaccepted; a later mixed-scale visual position write passed isolated RDP acceptance. Other
-backends have no new query handler yet. The readback parser accepts the saved
+backends besides the source Console read-only path have no new query handler yet. The readback parser accepts the saved
 isolated Sol 125%/100% two-output KScreen fixture; a subsequent bounded Sol
 worker probe logged that the independent two-output KScreen readback matched
 both decoded captures before publishing and stopped cleanly. Its shell-free

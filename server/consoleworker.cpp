@@ -38,6 +38,7 @@
 #include "RetainedMultiCapture.h"
 #include "RetainedMultiInput.h"
 #include "RetainedKScreenReadback.h"
+#include "ConsoleTopologyReadback.h"
 
 using namespace KRdp;
 
@@ -235,6 +236,14 @@ public:
                 if (!outputs.monitors.isEmpty() && outputs != m_outputs) {
                     m_outputs = outputs;
                     m_socket.write(ConsoleWorkerWire::frame(outputs));
+                }
+                if (!m_mode.virtualSession && frame.isKeyFrame && m_topologyQueryPending) {
+                    m_topologyQueryPending = false;
+                    const auto kscreen = readKScreen();
+                    const auto topology = kscreen ? ConsoleTopologyReadback::confirmed(*kscreen, outputs, frame) : std::nullopt;
+                    // Empty explicitly retires a previous inventory after a
+                    // failed or changing compositor readback.
+                    m_socket.write(ConsoleWorkerWire::frame(topology.value_or(ConsoleWorkerWire::Topology{})));
                 }
                 if (m_mode.virtualSession && outputs.monitors.size() == 1) {
                     // Capture/input use KWin's logical output rectangle, but
@@ -885,6 +894,13 @@ private:
                 } else m_session.requestKeyFrame();
                 continue;
             }
+            if (record->kind == ConsoleWorkerWire::Kind::TopologyQuery && record->payload.isEmpty()) {
+                if (!m_mode.virtualSession && !m_multiMode) {
+                    m_topologyQueryPending = true;
+                    m_session.requestKeyFrame();
+                }
+                continue;
+            }
             if (const auto media = ConsoleWorkerWire::media(*record)) {
                 m_audioTimer.stop();
                 m_audio.reset();
@@ -978,6 +994,7 @@ private:
     QTimer m_audioTimer;
     bool m_captureReady = false;
     ConsoleWorkerWire::Outputs m_outputs;
+    bool m_topologyQueryPending = false;
     ConsoleInputState m_inputState;
     QElapsedTimer m_clock;
     Takeover::Detector m_takeover;

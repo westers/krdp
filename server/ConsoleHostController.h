@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <QObject>
+#include <QHash>
 #include <QJsonObject>
 #include <QTimer>
 
@@ -15,6 +16,7 @@
 #include "ConsoleControl.h"
 #include "ConsoleInputState.h"
 #include "ConsoleWorkerEndpoint.h"
+#include "RemoteTopologyCatalog.h"
 
 namespace KRdp
 {
@@ -66,6 +68,7 @@ private:
     void updateMedia();
     void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
     void sendLayouts();
+    void finishTopologyQueries(const QString &error = {});
     void releaseInput();
     void syncControlState();
     void finishResize(const QString &error);
@@ -87,6 +90,9 @@ private:
     bool m_mediaConfigured = false;
     ConsoleWorkerWire::Media m_media;
     ConsoleWorkerWire::Outputs m_outputs;
+    RemoteTopologyCatalog m_topologyCatalog;
+    bool m_topologyAvailable = false;
+    QHash<ConsoleControl::Id, QString> m_pendingTopology;
     ConsoleInputState m_inputState;
     ConsoleControl::Id m_workerOwner = 0;
     quint64 m_controlGeneration = 0;

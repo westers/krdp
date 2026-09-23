@@ -92,6 +92,12 @@ void ConsoleWorkerEndpoint::requestKeyFrame()
     send(ConsoleWorkerWire::Kind::RequestKeyFrame);
 }
 
+bool ConsoleWorkerEndpoint::requestTopology()
+{
+    if (!m_ready || !m_worker) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::TopologyQuery)) >= 0;
+}
+
 void ConsoleWorkerEndpoint::sendInput(const ConsoleWorkerWire::Input &input)
 {
     if (m_ready && m_worker) {
@@ -210,6 +216,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT audioReceived(*audio);
         } else if (const auto outputs = ConsoleWorkerWire::outputs(*record)) {
             Q_EMIT outputsReceived(*outputs);
+        } else if (const auto topology = ConsoleWorkerWire::topology(*record)) {
+            Q_EMIT topologyReceived(*topology);
         } else if (const auto state = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::LocalTakeover); state && state->active) {
             Q_EMIT localTakeover(state->generation);
         } else if (const auto result = ConsoleWorkerWire::resizeResult(*record)) {
