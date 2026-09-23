@@ -20,7 +20,14 @@ or package deployment. A later isolated 125%/100% Sol/Buzz GUI run accepted a
 visual drag and authenticated position commit with compositor logical
 `(1024,100)→(1024,209)` and verified capture (`d674f9a` probe,
 `d096cfc` client tooltip follow-up). This is one supported move, not a
-general mixed-scale topology implementation.
+general mixed-scale topology implementation. Subsequent server
+`ad1b58a`/`f79f2d0`/`6e06fbc`/`67487f9` and client `0f2a741`/`f43a1e1`
+added a generation/revision-bound one-output Add path. A Sol private
+three-output worker test, a diagnostic RDP round trip, and actual Buzz GUI
+Preview add/Apply clicks all passed with fresh KScreen/capture verification,
+stable new ID `o-3` and revision1→2. Only this Add is advertised on retained
+multi-output desktops with capacity. Source only; no package/service update.
+Remove, Console, Fit/Match, multi-operation drafts and release remain open.
 
 Test-only `bee24a1`/`add2794` then proved that a new 960×540 virtual KWin
 output can be created at the right seam of an already running two-output

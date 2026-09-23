@@ -1,22 +1,26 @@
 # Remote monitor transaction protocol (implementation contract)
 
 Status: partially implemented in source, 2026-09-23. Retained multi-output
-`topology-query`/`topology` and one owned-virtual-output `move` preview/commit
-are wired, advertised with `position=true` only for published multi-output
+`topology-query`/`topology` and one owned-virtual-output `move` or `add` preview/commit
+are wired; position and capacity-gated Add are advertised only for published multi-output
 retained desktops, and accepted through disposable Sol :3396 → Buzz source GUI
 (`d958e6d` server, `cf6bae8` client). The native Monitors dialog performed
 Preview/Apply clicks and observed revision 1→2 with stable output IDs and
 KScreen/captured-keyframe proof. No installed server/client or production path
-is claimed. Console query, add/remove/resize/scale/primary, Fit/Match and full
+is claimed. Console query, remove/resize/scale/primary, Fit/Match and full
 runtime acceptance remain absent. A visual arrangement is now the client UI's
 main draft control; X/Y remains under Advanced.
 An additional disposable 125%/100% Sol/Buzz source-GUI run confirmed that the
 visual editor uses logical aspect/position and committed one virtual move from
 `(1024,100)` to `(1024,209)` with revision 1→2 and unchanged IDs. This does
 not advertise any additional operation.
-A later Sol-only compositor probe created and removed a third virtual output
-while preserving the original two, but no authenticated Add/Remove wire,
-broker ownership, three-output capture gate or client action follows from it.
+A later Sol-only compositor probe first proved creator lifetime; subsequent
+`ad1b58a`/`f79f2d0` worker and `6e06fbc` broker Add code requires authenticated
+generation/revision, unchanged existing outputs, fresh KScreen readback and
+independently decoded three-output keyframes. Source GUI `f43a1e1` actual
+Preview add/Apply clicks on disposable Sol/Buzz accepted a third 1280×720
+output at `(2560,0)`, revision1→2, stable new ID `o-3` (`67487f9` capability).
+Remove remains unsupported. Source-only; see the evidence report.
 This fills in phase 1 of the
 [remote monitor layout plan](../plans/2026-09-22-remote-monitor-layout.md).
 The existing `KRDPCTL` v1 `apply` remains for older clients. A new editor must
