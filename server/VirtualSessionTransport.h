@@ -5,6 +5,7 @@
 #include "ConsoleWorkerSession.h"
 #include <RdpConnection.h>
 #include <QPointer>
+#include <QTimer>
 
 namespace KRdp
 {
@@ -36,6 +37,13 @@ private:
     bool activateBinding(const VirtualSessionRegistry::Handle &handle, QPointer<ConsoleWorkerEndpoint> endpoint);
     bool attachmentMatches(const VirtualSessionRegistry::Handle &handle) const;
     bool authorized() const;
+    bool authorized(std::optional<quint32> uid) const;
+    void stopMicrophone();
+    QJsonObject microphoneResult(const ConsoleWorkerWire::MicrophoneResult &, std::optional<quint32> uid);
+    QJsonObject microphoneTimeout();
+    void pumpMicrophone();
+    bool forwardMicrophone(const QByteArray &pcm, std::optional<quint32> uid);
+    QJsonObject mediaReply(bool ok, const QString &error = {}) const;
     void closed();
     quint64 m_client;
     QPointer<RdpConnection> m_connection;
@@ -47,6 +55,16 @@ private:
     ConsoleWorkerSession m_session;
     QList<QMetaObject::Connection> m_workerConnections;
     bool m_playback = false;
+    bool m_silenceHost = false;
+    bool m_externalMicrophone = false;
+    bool m_microphoneReady = false;
+    bool m_revoking = false;
+    bool m_mediaDispatch = false;
+    quint64 m_controlGeneration = 0;
+    quint64 m_nextMicrophoneId = 0;
+    ConsoleWorkerWire::MicrophonePolicy m_microphonePolicy;
+    QTimer m_microphoneDeadline;
+    QTimer m_microphonePump;
     bool m_closing = false;
 };
 }
