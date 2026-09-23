@@ -2,7 +2,7 @@
 # Privileged envelope for an explicitly authorized disposable Sol GPU probe.
 # Never install this as a service or run it against a physical desktop.
 set -euo pipefail
-[[ $# == 0 || ( $# == 1 && $1 == --multi-worker ) ]]
+[[ $# == 0 || ( $# == 1 && ( $1 == --multi-worker || $1 == --multi-mixed ) ) ]]
 [[ $EUID == 0 && "$(hostname -s)" == sol ]] || {
     echo 'Run explicitly as root on Sol.' >&2
     exit 1
@@ -49,6 +49,7 @@ probe_mode=--plasma-nvidia
 probe_limit=100
 if [[ $# == 1 ]]; then
     probe_mode=--plasma-multi-worker-nvidia
+    [[ $1 != --multi-mixed ]] || probe_mode=--plasma-mixed-worker-nvidia
     probe_limit=150
 fi
 timeout --kill-after=5 "$probe_limit" runuser -u westers -- \

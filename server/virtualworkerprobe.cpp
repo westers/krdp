@@ -22,7 +22,8 @@ int main(int argc, char **argv)
     QCoreApplication app(argc, argv);
     const auto arguments = app.arguments();
     const bool managed = arguments.size() == 3 && arguments[1] == QStringLiteral("--managed-session");
-    const bool multi = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi");
+    const bool mixed = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-mixed");
+    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed);
     if (arguments.size() != 1 && !managed && !multi) return 1;
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     const QFileInfo runtimeInfo(runtime);
@@ -104,8 +105,11 @@ int main(int argc, char **argv)
             || h264KeyframeSize(frame.data) != frame.size || frame.monitorIndex < 0 || frame.monitorIndex >= expected
             || outputs.monitors.size() != expected || frame.monitors.size() != expected) return;
         for (int i = 0; i < expected; ++i) {
-            if (outputs.monitors[i].geometry != QRect(i * 1280, 0, 1280, 720)
-                || frame.monitors[i].geometry != QRect(i * 1280, 0, 1280, 720)) return;
+            const QRect logical = mixed && i == 0 ? QRect(0, 0, 1024, 576)
+                : mixed && i == 1 ? QRect(1024, 100, 1280, 720) : QRect(i * 1280, 0, 1280, 720);
+            const QRect wire = mixed && i == 1 ? QRect(1280, 100, 1280, 720) : QRect(i * 1280, 0, 1280, 720);
+            if (outputs.monitors[i].geometry != logical || frame.monitors[i].geometry != wire
+                || outputs.monitors[i].scale != (mixed && i == 0 ? 1.25 : 1.0)) return;
         }
         QFile output(runtime + (multi ? QStringLiteral("/worker-keyframe-%1.h264").arg(frame.monitorIndex)
                                       : QStringLiteral("/worker-keyframe.h264")));
