@@ -1,13 +1,15 @@
 # Remote monitor transaction protocol (implementation contract)
 
-Status: proposed implementation contract, 2026-09-23; retained read-only
-`topology-query`/`topology` is wired in server `aba1754`/`c4ef5f1` and parsed
-into separate client state in client `358235b`; client `2b09d00` shows a
-separate read-only retained inventory. Source now has one-position retained
-preview/commit and a captured worker position primitive, but they are not
-advertised, GUI-wired or accepted through an RDP client. Console query, the
-other topology writes, a functional arrangement editor and full runtime
-acceptance are still absent.
+Status: partially implemented in source, 2026-09-23. Retained multi-output
+`topology-query`/`topology` and one owned-virtual-output `move` preview/commit
+are wired, advertised with `position=true` only for published multi-output
+retained desktops, and accepted through disposable Sol :3396 → Buzz source GUI
+(`d958e6d` server, `cf6bae8` client). The native Monitors dialog performed
+Preview/Apply clicks and observed revision 1→2 with stable output IDs and
+KScreen/captured-keyframe proof. No installed server/client or production path
+is claimed. Console query, add/remove/resize/scale/primary, Fit/Match and full
+runtime acceptance remain absent. A visual arrangement is now the client UI's
+main draft control; X/Y remains under Advanced.
 This fills in phase 1 of the
 [remote monitor layout plan](../plans/2026-09-22-remote-monitor-layout.md).
 The existing `KRDPCTL` v1 `apply` remains for older clients. A new editor must
@@ -23,7 +25,7 @@ working and disables topology writes. Do not send a new version as the first
 record: an old server would fall back to configured MonitorMode instead of
 attaching to the intended existing compositor.
 
-Current server slice: the retained virtual broker accepts an exact v1
+Initial read-only server slice: the retained virtual broker accepts an exact v1
 `topology-query` with a 1–64 character correlation ID **after attachment**,
 requests worker keyframes and answers only when a frame matches the
 worker-reported output inventory and its generation-scoped catalog. For a
@@ -31,15 +33,15 @@ multi-output retained desktop, the worker captures/encodes each QScreen
 separately and gates publication until every output has an H.264 keyframe
 whose decoded dimensions match the reported pixels and logical scale. Five seconds
 without such a frame returns a correlated `topology-error`/`timeout`; detach
-cancels the query. It advertises enumeration only, with all topology-write
+cancels the query. It initially advertised enumeration only, with all topology-write
 capabilities false; `multiOutputCapture` is true only for a currently published
 multi-output capture. In source `b413c9e`, before first publication the worker
 also queries `kscreen-doctor -j` inside its verified private compositor and
 requires independently reported mode, scale, logical geometry and primary to
 match every decoded captured keyframe. A mismatch fails the worker closed. The
 published geometry remains worker/QScreen metadata after this KScreen check;
-a later query does not itself request a new KScreen readback, and no transaction
-commit proof exists. This multi-output path has source tests
+a later query does not itself request a new KScreen readback. The later
+position-commit path does require fresh readback and recapture. This multi-output path has source tests
 and isolated Sol/Buzz two-surface GUI acceptance; the source client also received
 a read-only two-output topology reply (`ready/2/rev1`) in an isolated run. A
 same-compositor Sol worker probe moved a KDE window to the second virtual output
@@ -48,8 +50,8 @@ packets in retained multi-output mode; a bounded Sol private-compositor
 click-only probe placed the pointer at the expected mixed-scale logical
 coordinate. A later private Sol worker-endpoint pointer drag also moved a
 marked Konsole across the seam to Virtual-1 and decoded a fresh destination
-keyframe (`e982f21`/`0802ee6` probe). GUI/RDP-driven drag, application click effect, mixed-scale GUI,
-installed broker, deployment and write transactions remain unaccepted. Other
+keyframe (`e982f21`/`0802ee6` probe). GUI/RDP-driven window drag, application click effect, mixed-scale GUI,
+installed broker and deployment remain unaccepted; a later position write passed isolated RDP acceptance. Other
 backends have no new query handler yet. The readback parser accepts the saved
 isolated Sol 125%/100% two-output KScreen fixture; a subsequent bounded Sol
 worker probe logged that the independent two-output KScreen readback matched
@@ -59,9 +61,9 @@ follows from this publication gate.
 The client sends the query only after an acknowledged retained attachment,
 validates its correlation and bounded geometry/capabilities, and treats an old
 broker's generic unsupported error as query fallback without failing the
-legacy layout flow. It exposes read-only `remoteTopology` state in a separate
-KDE monitor inventory in the Monitors dialog, with remote editing visibly
-unavailable; topology writes remain disabled.
+legacy layout flow. It exposes `remoteTopology` state in a separate KDE monitor
+inventory in the Monitors dialog. Only the position editor is enabled when the
+backend advertises `position`; unrelated writes remain disabled.
 
 The authoritative `topology` record carries:
 
@@ -126,9 +128,9 @@ slice, a retained multi-output owner can preview and commit **one move of an
 owned virtual output**; the preview token is short-lived and one-use, and
 commit success requires fresh private KScreen checks, republished inventory
 and both decoded keyframes agreeing with the entire previewed after-state.
-Other operations return `unsupported`. The query still advertises all write
-capabilities false until a disposable RDP client and UI exercise this path;
-this is not a shipped remote arrangement capability.
+Other operations return `unsupported`. The query now advertises `position=true`
+for a published multi-output retained desktop after disposable RDP and GUI
+Preview/Apply acceptance. This is not an installed remote arrangement release.
 
 `topology-commit` includes the preview token, the same `id` and expected
 generation/revision. Only one commit per compositor may execute at a time.

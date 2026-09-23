@@ -10,6 +10,14 @@ this goal after Fit was completed. The local source-level coordinate fix is
 not native acceptance or deployment of this whole plan. See
 `~/dev/rdp/evidence/2026-09-23-monitor-layout-diagnosis.md`.
 
+2026-09-23 progress: a disposable Sol retained desktop and Buzz source GUI
+accepted one authenticated virtual-output position move through a proportionally
+scaled visual drag draft, Preview and Apply (`3b7fcee` client; server
+`8f51fb0`/`04e868c`/`d958e6d`). The detailed evidence is
+`~/dev/rdp/evidence/2026-09-23-retained-multi-output-sol.md`. This does not
+complete Console topology, add/remove, Fit/Match, multi-operation drafts,
+mixed-scale GUI acceptance or package deployment.
+
 ## Phase 0 — Diagnose the missing KDE monitor behavior
 
 - Identify the actual connection mode and compositor: physical Console, ordinary

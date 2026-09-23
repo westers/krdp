@@ -1,6 +1,11 @@
 # Remote monitor layout and client views
 
 Status: agreed product direction; implementation in progress, not delivered.
+Source client now has a proportionally scaled visual retained-monitor arrangement
+draft with drag, edge snapping and keyboard placement. Only one retained virtual
+output position move is currently accepted through the authenticated preview/
+commit backend; X/Y fields are an Advanced/test control. Add/remove, Fit/Match,
+Console topology and deployment are still outstanding.
 Recorded 2026-09-22 after Steve reported that adding a virtual monitor did not
 allow moving KDE windows onto it. The cause is NOT diagnosed. Documentation
 originally documentation-only. A source-level placement defect now has red-to-
