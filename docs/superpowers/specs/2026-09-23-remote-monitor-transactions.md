@@ -158,6 +158,11 @@ for RDP capture/input, while the broker adds the origin back when publishing
 `topology.logical`. The separate KScreen publication check also verifies this
 origin. A zero origin cannot be inferred merely because the RDP atlas starts
 at zero; doing so loses valid negative and shifted KWin arrangements.
+In the isolated Sol KWin test, a negative-position `kscreen-doctor` request
+was accepted but read back as an equivalent layout translated to origin
+`(0,0)`. This is an observed backend normalization, not evidence that literal
+negative origins are supported there. A commit must return the actual fresh
+readback and never report the requested coordinates as if they landed.
 
 No claim of support is made for retained multi-output desktops until the
 broker/worker transports multiple independent capture streams and per-output
