@@ -30,3 +30,5 @@ function inspect(window) {
 
 workspace.windowList().forEach(inspect);
 workspace.windowAdded.connect(inspect);
+workspace.cursorPosChanged.connect(() => console.info("krdp-monitor-probe: cursor="
+    + workspace.cursorPos.x + "," + workspace.cursorPos.y));

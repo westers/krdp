@@ -22,7 +22,8 @@ int main(int argc, char **argv)
     QCoreApplication app(argc, argv);
     const auto arguments = app.arguments();
     const bool managed = arguments.size() == 3 && arguments[1] == QStringLiteral("--managed-session");
-    const bool mixed = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-mixed");
+    const bool inputProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-input");
+    const bool mixed = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi-mixed") || inputProbe);
     const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed);
     if (arguments.size() != 1 && !managed && !multi) return 1;
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
@@ -78,15 +79,28 @@ int main(int argc, char **argv)
     bool captured = false;
     QSet<int> capturedOutputs;
     bool resizeRefused = false;
+    bool inputSent = false;
+    bool inputVerified = !inputProbe;
     bool stopping = false;
     int result = 1;
     ConsoleWorkerWire::Outputs outputs;
     const auto maybeStop = [&] {
-        if (captured && resizeRefused && !stopping) {
+        if (captured && resizeRefused && inputVerified && !stopping) {
             stopping = true;
             endpoint.stopWorker();
         }
     };
+    QTimer inputTimer;
+    inputTimer.setInterval(100);
+    QObject::connect(&inputTimer, &QTimer::timeout, &app, [&] {
+        QFile log(runtime + QStringLiteral("/kwin.log"));
+        if (!log.open(QIODevice::ReadOnly)) return;
+        if (!log.readAll().contains("krdp-monitor-probe: cursor=1224,300")) return;
+        inputVerified = true;
+        inputTimer.stop();
+        qInfo("Private KWin observed mixed-scale second-output pointer at logical (1224,300)");
+        maybeStop();
+    });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::workerReady, &app, [&](const auto &) {
         endpoint.setControlState({1, true});
         endpoint.resize({1, 1, QStringLiteral("Virtual-0"), QSize(1024, 768), 1});
@@ -117,6 +131,15 @@ int main(int argc, char **argv)
         capturedOutputs.insert(frame.monitorIndex);
         captured = capturedOutputs.size() == expected;
         qInfo() << "Authenticated virtual worker keyframe" << frame.monitorIndex << frame.size << frame.data.size();
+        if (captured && inputProbe && !inputSent) {
+            inputSent = true;
+            ConsoleWorkerWire::Input motion;
+            motion.type = ConsoleWorkerWire::Input::Type::Mouse;
+            motion.eventType = QEvent::MouseMove;
+            motion.position = QPointF(1480, 300); // output 1 pixel atlas -> KWin logical (1224,300)
+            endpoint.sendInput(motion);
+            inputTimer.start();
+        }
         maybeStop();
     });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::protocolError, &app, [&](const QString &message) {
@@ -124,15 +147,15 @@ int main(int argc, char **argv)
         app.quit();
     });
     if (managed) QObject::connect(&endpoint, &ConsoleWorkerEndpoint::workerStopped, &app, [&] {
-        result = captured && resizeRefused && stopping ? 0 : 1;
+        result = captured && resizeRefused && inputVerified && stopping ? 0 : 1;
         app.quit();
     });
     QObject::connect(&worker, &QProcess::errorOccurred, &app, [&](auto) { app.quit(); });
     QObject::connect(&worker, &QProcess::finished, &app, [&](int code, QProcess::ExitStatus status) {
-        result = captured && resizeRefused && stopping && code == 0 && status == QProcess::NormalExit ? 0 : 1;
+        result = captured && resizeRefused && inputVerified && stopping && code == 0 && status == QProcess::NormalExit ? 0 : 1;
         app.quit();
     });
-    QTimer::singleShot(20000, &app, &QCoreApplication::quit);
+    QTimer::singleShot(inputProbe ? 25000 : 20000, &app, &QCoreApplication::quit);
     // Managed mode owns only the broker endpoint. The existing desktop loop
     // supplies its worker; this process must never enter or stop the guardian.
     if (!managed) worker.start();
