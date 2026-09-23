@@ -109,6 +109,7 @@ private:
         qreal scale = 1.0;
         QVector<RemoteTopologyDraft::Operation> operations;
         QVector<ConsoleWorkerWire::PositionTarget> batchTargets;
+        QVector<ConsoleWorkerWire::MixedOperation> mixedOperations;
         bool managedFit = false;
         QVector<ConsoleWorkerWire::FitRelation> fitRelations;
         QVector<RemoteTopologyCatalog::Entry> before;
@@ -153,8 +154,10 @@ private:
     QVector<RemoteTopologyCatalog::Entry> m_topologyResizeExpectedAfter;
     bool m_topologyResizeExpectedChange = false;
     bool m_topologyPrimaryPending = false;
+    bool m_topologyMixedPending = false;
     bool m_experimentalMultiResize = false;
     bool m_experimentalPrimary = false;
+    bool m_experimentalMixed = false;
     QString m_topologyId;
     quint64 m_topologyBinding = 0;
     QString m_resizeId;

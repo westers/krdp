@@ -68,17 +68,25 @@ private Q_SLOTS:
             .toObject().value(QStringLiteral("primary")).toBool());
         QVERIFY(retainedReadOnly(QStringLiteral("q"), *owned, false, true).value(QStringLiteral("capabilities"))
             .toObject().value(QStringLiteral("primary")).toBool());
+        QVERIFY(!retainedReadOnly(QStringLiteral("q"), *owned, true, true).value(QStringLiteral("capabilities"))
+            .toObject().value(QStringLiteral("mixed")).toBool());
+        QVERIFY(retainedReadOnly(QStringLiteral("q"), *owned, true, true, true).value(QStringLiteral("capabilities"))
+            .toObject().value(QStringLiteral("mixed")).toBool());
         second.owner = QStringLiteral("other-desktop");
         const auto mixed = catalog.observe({first, second});
         QVERIFY(mixed);
         QVERIFY(!retainedReadOnly(QStringLiteral("q"), *mixed, false, true).value(QStringLiteral("capabilities"))
             .toObject().value(QStringLiteral("primary")).toBool());
+        QVERIFY(!retainedReadOnly(QStringLiteral("q"), *mixed, true, true, true).value(QStringLiteral("capabilities"))
+            .toObject().value(QStringLiteral("mixed")).toBool());
         second.owner = first.owner;
         second.physical = true;
         const auto physical = catalog.observe({first, second});
         QVERIFY(physical);
         QVERIFY(!retainedReadOnly(QStringLiteral("q"), *physical, false, true).value(QStringLiteral("capabilities"))
             .toObject().value(QStringLiteral("primary")).toBool());
+        QVERIFY(!retainedReadOnly(QStringLiteral("q"), *physical, true, true, true).value(QStringLiteral("capabilities"))
+            .toObject().value(QStringLiteral("mixed")).toBool());
     }
 
     void physicalConsoleReplyNeverAdvertisesWrites()

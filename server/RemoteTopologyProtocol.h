@@ -240,7 +240,7 @@ inline QJsonObject previewReply(const QString &id, const QString &token, const R
 // an explicit private-test opt-in until native acceptance; legacy single-
 // output resize is not a general topology capability.
 inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot,
-    bool experimentalResize = false, bool experimentalPrimary = false)
+    bool experimentalResize = false, bool experimentalPrimary = false, bool experimentalMixed = false)
 {
     const bool removable = snapshot.outputs.size() > 2
         && std::any_of(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [](const auto &entry) {
@@ -248,6 +248,11 @@ inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatal
         });
     const QString owner = snapshot.outputs.isEmpty() ? QString{} : snapshot.outputs.first().output.owner;
     const bool primaryEligible = experimentalPrimary && snapshot.outputs.size() > 1 && !owner.isEmpty()
+        && std::all_of(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [&owner](const auto &entry) {
+            return !entry.output.physical && entry.output.owner == owner;
+        });
+    const bool mixedEligible = experimentalMixed && (experimentalResize || experimentalPrimary)
+        && snapshot.outputs.size() > 1 && !owner.isEmpty()
         && std::all_of(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [&owner](const auto &entry) {
             return !entry.output.physical && entry.output.owner == owner;
         });
@@ -261,6 +266,7 @@ inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatal
             {QStringLiteral("resize"), experimentalResize && snapshot.outputs.size() > 1},
             {QStringLiteral("scale"), experimentalResize && snapshot.outputs.size() > 1},
             {QStringLiteral("primary"), primaryEligible},
+            {QStringLiteral("mixed"), mixedEligible},
             {QStringLiteral("multiOutputCapture"), snapshot.outputs.size() > 1},
             {QStringLiteral("maxOutputs"), 16}, {QStringLiteral("positionMin"), 0},
             {QStringLiteral("positionMax"), 32768}, {QStringLiteral("lifetime"), QStringLiteral("retained")},
