@@ -121,6 +121,16 @@ unchanged old record and the exact proposed new output. Add result validation
 accepts catalog reordering only after full stable-ID record equality, avoiding
 a false partial result on later Adds. Mixed Add+resize/move/primary, removal
 consent and native Match acceptance remain open.
+Server `e262548` introduces a pure worker-side mixed-creation preflight: one
+new creator-owned virtual output plus existing-output resize/move/primary is
+validated as a whole final topology. It requires unchanged older outputs in
+the immediate post-creation KScreen readback, then converts the remaining
+work to the existing mixed KScreen planner. This is NOT wired to worker wire,
+broker commit, creator lifetime/recovery or capture publication, and it is
+not a native accepted or advertised capability. Local and clean Sol focused
+readback tests pass. The unrelated coordinator identity deadline test failed
+in the local non-maintenance suite and again in isolation; do not report a
+green full server suite for this slice.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. The later private Fit
