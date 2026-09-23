@@ -3,12 +3,14 @@
 Status: agreed product direction; implementation in progress, not delivered.
 Source client now has a proportionally scaled visual retained-monitor arrangement
 draft with drag, edge snapping and keyboard placement. One retained virtual
-output position move or one new retained virtual output is currently accepted
+output position move, one new retained virtual output, or removal of one worker-added retained output is currently accepted
 through the authenticated preview/commit backend; X/Y fields are an Advanced/test
-control. Remove, Fit/Match, Console topology and deployment are still outstanding. A disposable 125%/100%
+control. Fit/Match, Console topology and deployment are still outstanding. A disposable 125%/100%
 Sol/Buzz GUI run also accepted one visual position move with two independently
 captured outputs; a later disposable GUI run added a third captured output by
-actual Preview add/Apply clicks. See `~/dev/rdp/evidence/2026-09-23-retained-multi-output-sol.md`.
+actual Preview add/Apply clicks. A subsequent GUI run selected that third output,
+previewed its removal, then committed while retaining the original two outputs.
+See `~/dev/rdp/evidence/2026-09-23-retained-multi-output-sol.md`.
 Recorded 2026-09-22 after Steve reported that adding a virtual monitor did not
 allow moving KDE windows onto it. The cause is NOT diagnosed. Documentation
 originally documentation-only. A source-level placement defect now has red-to-
@@ -21,7 +23,7 @@ capture, OPT-043 server settings. This extends those features; it does not
 reopen their completed slices or replace the delivered single-output virtual
 Fit work. Implementation plan: [remote-monitor-layout plan](../plans/2026-09-22-remote-monitor-layout.md).
 Transaction contract: [remote monitor transactions](2026-09-23-remote-monitor-transactions.md)
-(partially implemented for one retained position move or Add; other operations proposed).
+(partially implemented for one retained position move, Add or owned Remove; other operations proposed).
 
 ## 1. The product model
 

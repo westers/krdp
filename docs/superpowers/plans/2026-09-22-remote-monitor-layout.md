@@ -27,7 +27,12 @@ three-output worker test, a diagnostic RDP round trip, and actual Buzz GUI
 Preview add/Apply clicks all passed with fresh KScreen/capture verification,
 stable new ID `o-3` and revision1→2. Only this Add is advertised on retained
 multi-output desktops with capacity. Source only; no package/service update.
-Remove, Console, Fit/Match, multi-operation drafts and release remain open.
+Worker-only Remove `83dbcec`/`3dd59ec`, authenticated broker `2b7260e` and
+client visual Preview remove/Apply `afbb4fd` then passed a disposable Sol/Buzz
+source GUI Add→Remove cycle: a third output at rev2 disappeared at rev3 with
+the two original IDs unchanged, after fresh KScreen and post-remove keyframes.
+Original monitors cannot be removed through this path. Console, Fit/Match,
+multi-operation drafts and release remain open.
 
 Test-only `bee24a1`/`add2794` then proved that a new 960×540 virtual KWin
 output can be created at the right seam of an already running two-output

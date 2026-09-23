@@ -1,13 +1,13 @@
 # Remote monitor transaction protocol (implementation contract)
 
 Status: partially implemented in source, 2026-09-23. Retained multi-output
-`topology-query`/`topology` and one owned-virtual-output `move` or `add` preview/commit
-are wired; position and capacity-gated Add are advertised only for published multi-output
+`topology-query`/`topology` and one owned-virtual-output `move`, `add`, or `remove` preview/commit
+are wired; position, capacity-gated Add and owned-output Remove are advertised only for published multi-output
 retained desktops, and accepted through disposable Sol :3396 → Buzz source GUI
 (`d958e6d` server, `cf6bae8` client). The native Monitors dialog performed
 Preview/Apply clicks and observed revision 1→2 with stable output IDs and
 KScreen/captured-keyframe proof. No installed server/client or production path
-is claimed. Console query, remove/resize/scale/primary, Fit/Match and full
+is claimed. Console query, resize/scale/primary, Fit/Match and full
 runtime acceptance remain absent. A visual arrangement is now the client UI's
 main draft control; X/Y remains under Advanced.
 An additional disposable 125%/100% Sol/Buzz source-GUI run confirmed that the
@@ -20,7 +20,14 @@ generation/revision, unchanged existing outputs, fresh KScreen readback and
 independently decoded three-output keyframes. Source GUI `f43a1e1` actual
 Preview add/Apply clicks on disposable Sol/Buzz accepted a third 1280×720
 output at `(2560,0)`, revision1→2, stable new ID `o-3` (`67487f9` capability).
-Remove remains unsupported. Source-only; see the evidence report.
+`83dbcec`/`3dd59ec` proved worker-only owned Remove on Sol. Broker `2b7260e`
+then bound Remove to an authenticated one-use preview token, rejects original
+outputs and requires exact surviving catalog entries with one revision bump.
+Client `afbb4fd` adds selection-based Preview remove and Apply. Disposable
+Sol :3396 → Buzz source GUI clicked the added third rectangle, previewed only
+the two originals, then applied Remove with topology revision 2→3 and unchanged
+`o-1|o-2`; the worker independently KScreen-confirmed and recaptured both
+survivors before its acknowledgment. Source-only; see the evidence report.
 This fills in phase 1 of the
 [remote monitor layout plan](../plans/2026-09-22-remote-monitor-layout.md).
 The existing `KRDPCTL` v1 `apply` remains for older clients. A new editor must
