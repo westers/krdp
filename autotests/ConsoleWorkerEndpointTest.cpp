@@ -41,6 +41,10 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QVERIFY(!endpoint.managedFit(fit));
     const ConsoleWorkerWire::Primary primary{15, 42, QStringLiteral("Virtual-1")};
     QVERIFY(!endpoint.primary(primary));
+    const ConsoleWorkerWire::Mixed mixed{16, 42, {
+        {ConsoleWorkerWire::MixedOperation::Kind::Move, QStringLiteral("Virtual-1"), QPoint(1280, 100), {}, 1},
+        {ConsoleWorkerWire::MixedOperation::Kind::Primary, QStringLiteral("Virtual-1"), {}, {}, 1}}};
+    QVERIFY(!endpoint.mixed(mixed));
     QVERIFY(!endpoint.requestTopology());
 
     int ready = 0;
@@ -143,6 +147,17 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PrimaryResult{15, 42, {}}));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(primaryChanged.count(), 1);
+
+    QSignalSpy mixedChanged(&endpoint, &ConsoleWorkerEndpoint::mixedFinished);
+    QVERIFY(endpoint.mixed(mixed));
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    brokerMessages.feed(worker.readAll());
+    const auto mixedRecord = brokerMessages.next();
+    QVERIFY(mixedRecord);
+    QCOMPARE(ConsoleWorkerWire::mixed(*mixedRecord), std::optional<ConsoleWorkerWire::Mixed>(mixed));
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::MixedResult{16, 42, {}}));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(mixedChanged.count(), 1);
 
     QVERIFY(!endpoint.setVideoQuality({0, 60}));
     QVERIFY(!endpoint.setVideoQuality({42, 101}));

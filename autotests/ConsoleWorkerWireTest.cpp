@@ -29,6 +29,7 @@ private Q_SLOTS:
     void positionBatchRecordsAreBoundedAndCorrelated();
     void managedFitRecordsAreBoundedAndCorrelated();
     void primaryRecordsAreBoundedAndCorrelated();
+    void mixedRecordsAreBoundedAndCorrelated();
     void addVirtualRecordsAreBoundedAndCorrelated();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
@@ -87,6 +88,37 @@ void ConsoleWorkerWireTest::primaryRecordsAreBoundedAndCorrelated()
         const auto record = reader.next();
         QVERIFY(record);
         QVERIFY(!primary(*record));
+    }
+}
+
+void ConsoleWorkerWireTest::mixedRecordsAreBoundedAndCorrelated()
+{
+    Deframer reader;
+    const Mixed request{21, 9, {
+        {MixedOperation::Kind::Resize, QStringLiteral("Virtual-0"), {}, QSize(1600, 900), 1.25},
+        {MixedOperation::Kind::Move, QStringLiteral("Virtual-1"), QPoint(1280, 100), {}, 1},
+        {MixedOperation::Kind::Primary, QStringLiteral("Virtual-1"), {}, {}, 1}}};
+    const MixedResult answer{21, 9, QStringLiteral("readback mismatch")};
+    reader.feed(frame(request) + frame(answer));
+    const auto first = reader.next();
+    QVERIFY(first);
+    QCOMPARE(mixed(*first), std::optional<Mixed>(request));
+    auto truncated = *first;
+    truncated.payload.chop(1);
+    QVERIFY(!mixed(truncated));
+    const auto second = reader.next();
+    QVERIFY(second);
+    QCOMPARE(mixedResult(*second), std::optional<MixedResult>(answer));
+    for (const auto &bad : {Mixed{0, 9, request.operations}, Mixed{21, 0, request.operations},
+                            Mixed{21, 9, {{MixedOperation::Kind::Primary, QStringLiteral("Virtual-1"), {}, {}, 1}}},
+                            Mixed{21, 9, {{MixedOperation::Kind::Move, QStringLiteral("../bad"), QPoint(0, 0), {}, 1},
+                                request.operations[1]}},
+                            Mixed{21, 9, {{MixedOperation::Kind::Resize, QStringLiteral("Virtual-0"), {}, QSize(1601, 900), 1.25},
+                                request.operations[1]}}}) {
+        reader.feed(frame(bad));
+        const auto record = reader.next();
+        QVERIFY(record);
+        QVERIFY(!mixed(*record));
     }
 }
 

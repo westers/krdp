@@ -23,7 +23,7 @@
 
 namespace KRdp::ConsoleWorkerWire
 {
-constexpr quint16 ProtocolVersion = 6; // Primary selection; broker and worker must upgrade together.
+constexpr quint16 ProtocolVersion = 7; // Mixed retained transaction; broker and worker must upgrade together.
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 
 enum class Kind : quint8 {
@@ -59,6 +59,8 @@ enum class Kind : quint8 {
     ManagedFitResult,
     Primary,
     PrimaryResult,
+    Mixed,
+    MixedResult,
 };
 
 struct Record {
@@ -157,6 +159,30 @@ struct PrimaryResult {
     quint64 generation = 0;
     QString error;
     bool operator==(const PrimaryResult &) const = default;
+};
+
+struct MixedOperation {
+    enum class Kind : quint8 { Move = 1, Resize = 2, Primary = 3 };
+    Kind kind = Kind::Move;
+    QString output;
+    QPoint globalLogical;
+    QSize pixels;
+    double scale = 1;
+    bool operator==(const MixedOperation &) const = default;
+};
+
+struct Mixed {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QVector<MixedOperation> operations;
+    bool operator==(const Mixed &) const = default;
+};
+
+struct MixedResult {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString error;
+    bool operator==(const MixedResult &) const = default;
 };
 
 struct AddVirtual {
@@ -494,6 +520,76 @@ inline std::optional<PrimaryResult> primaryResult(const Record &record)
     QDataStream stream(record.payload);
     stream.setByteOrder(QDataStream::BigEndian);
     PrimaryResult result;
+    stream >> result.requestId >> result.generation >> result.error;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
+        || result.error.size() > 1024) return {};
+    return result;
+}
+
+inline QByteArray frame(const Mixed &request)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << request.requestId << request.generation << quint8(request.operations.size());
+    for (const auto &operation : request.operations)
+        stream << quint8(operation.kind) << operation.output << operation.globalLogical
+               << operation.pixels << operation.scale;
+    return frame(Kind::Mixed, payload);
+}
+
+inline std::optional<Mixed> mixed(const Record &record)
+{
+    if (record.kind != Kind::Mixed || record.payload.size() > 4096) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    Mixed request;
+    quint8 count = 0;
+    stream >> request.requestId >> request.generation >> count;
+    if (stream.status() != QDataStream::Ok || !request.requestId || !request.generation
+        || count < 2 || count > 16) return {};
+    for (quint8 i = 0; i < count; ++i) {
+        MixedOperation operation;
+        quint8 kind = 0;
+        stream >> kind >> operation.output >> operation.globalLogical >> operation.pixels >> operation.scale;
+        if (stream.status() != QDataStream::Ok || kind < 1 || kind > 3
+            || operation.output.isEmpty() || operation.output.size() > 128
+            || !std::isfinite(operation.scale)) return {};
+        for (const auto character : operation.output)
+            if (!character.isLetterOrNumber() && character != QLatin1Char('-') && character != QLatin1Char('_')) return {};
+        operation.kind = MixedOperation::Kind(kind);
+        if (operation.kind == MixedOperation::Kind::Move) {
+            if (operation.globalLogical.x() < 0 || operation.globalLogical.x() > 32768
+                || operation.globalLogical.y() < 0 || operation.globalLogical.y() > 32768
+                || operation.pixels != QSize() || operation.scale != 1) return {};
+        } else if (operation.kind == MixedOperation::Kind::Resize) {
+            if (operation.globalLogical != QPoint() || operation.pixels.width() < 320
+                || operation.pixels.width() > 4096 || operation.pixels.height() < 200
+                || operation.pixels.height() > 4096 || operation.pixels.width() % 2
+                || operation.pixels.height() % 2 || operation.scale < 1 || operation.scale > 4) return {};
+        } else if (operation.globalLogical != QPoint() || operation.pixels != QSize()
+            || operation.scale != 1) return {};
+        request.operations.append(operation);
+    }
+    if (!stream.atEnd()) return {};
+    return request;
+}
+
+inline QByteArray frame(const MixedResult &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.requestId << result.generation << result.error;
+    return frame(Kind::MixedResult, payload);
+}
+
+inline std::optional<MixedResult> mixedResult(const Record &record)
+{
+    if (record.kind != Kind::MixedResult || record.payload.size() > 4096) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    MixedResult result;
     stream >> result.requestId >> result.generation >> result.error;
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
         || result.error.size() > 1024) return {};
@@ -951,7 +1047,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::PrimaryResult)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::MixedResult)) {
             ++m_invalid;
             return std::nullopt;
         }

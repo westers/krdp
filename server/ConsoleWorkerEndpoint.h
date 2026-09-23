@@ -52,6 +52,7 @@ public:
     bool positionBatch(const ConsoleWorkerWire::PositionBatch &request);
     bool managedFit(const ConsoleWorkerWire::ManagedFit &request);
     bool primary(const ConsoleWorkerWire::Primary &request);
+    bool mixed(const ConsoleWorkerWire::Mixed &request);
     bool addVirtual(const ConsoleWorkerWire::AddVirtual &request);
     bool removeVirtual(const ConsoleWorkerWire::RemoveVirtual &request);
 
@@ -69,6 +70,7 @@ Q_SIGNALS:
     void positionBatchFinished(const KRdp::ConsoleWorkerWire::PositionBatchResult &result);
     void managedFitFinished(const KRdp::ConsoleWorkerWire::ManagedFitResult &result);
     void primaryFinished(const KRdp::ConsoleWorkerWire::PrimaryResult &result);
+    void mixedFinished(const KRdp::ConsoleWorkerWire::MixedResult &result);
     void addVirtualFinished(const KRdp::ConsoleWorkerWire::AddVirtualResult &result);
     void removeVirtualFinished(const KRdp::ConsoleWorkerWire::RemoveVirtualResult &result);
     void microphoneFinished(const KRdp::ConsoleWorkerWire::MicrophoneResult &result);

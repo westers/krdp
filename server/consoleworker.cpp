@@ -43,6 +43,7 @@
 #include "RetainedMultiPositionPlan.h"
 #include "RetainedMultiFitPlan.h"
 #include "RetainedMultiPrimaryPlan.h"
+#include "RetainedMultiMixedPlan.h"
 
 using namespace KRdp;
 
@@ -189,6 +190,13 @@ public:
         connect(&m_primaryDeadline, &QTimer::timeout, this, [this] {
             if (!m_primaryPending) return;
             finishPrimary(QStringLiteral("post-primary capture/readback timed out"));
+            m_socket.disconnectFromServer();
+        });
+        m_mixedDeadline.setSingleShot(true);
+        m_mixedDeadline.setInterval(15000);
+        connect(&m_mixedDeadline, &QTimer::timeout, this, [this] {
+            if (!m_mixedPending) return;
+            finishMixed(QStringLiteral("post-mixed-layout capture/readback timed out"));
             m_socket.disconnectFromServer();
         });
         m_addDeadline.setSingleShot(true);
@@ -488,6 +496,11 @@ private:
             if (!screensAgree) { m_multiSettle.start(200); return; }
         }
         if (screens.size() < 2) {
+            if (m_mixedPending) {
+                finishMixed(QStringLiteral("multi-output capture disappeared during mixed layout"));
+                m_socket.disconnectFromServer();
+                return;
+            }
             if (m_primaryPending) {
                 finishPrimary(QStringLiteral("multi-output capture disappeared during primary selection"));
                 m_socket.disconnectFromServer();
@@ -550,6 +563,17 @@ private:
                             && (screen == primary) == output.primary;
                     });
                 });
+            if (!screensAgree) { m_multiSettle.start(200); return; }
+        }
+        if (m_mixedPending && m_mixedPlan) {
+            const bool screensAgree = screens.size() == m_mixedPlan->after.size()
+                && std::all_of(m_mixedPlan->after.cbegin(), m_mixedPlan->after.cend(),
+                    [&screens, primary](const auto &output) {
+                        return std::any_of(screens.cbegin(), screens.cend(), [&output, primary](const auto *screen) {
+                            return screen->name() == output.backendKey && screen->geometry() == output.logicalGeometry
+                                && (screen == primary) == output.primary;
+                        });
+                    });
             if (!screensAgree) { m_multiSettle.start(200); return; }
         }
         if (m_multiMode && m_multiCapture.screens() == inventory && !m_multiResizeNeedsRestart) return;
@@ -646,6 +670,17 @@ private:
                 m_socket.disconnectFromServer();
                 return;
             }
+            if (m_mixedPending) {
+                const auto priorities = kscreenJson
+                    ? RetainedMultiPrimaryPlan::priorities(*kscreenJson, *kscreen) : std::nullopt;
+                if (!m_mixedPlan || !priorities
+                    || !RetainedMultiMixedPlan::matches(*m_mixedPlan, *kscreen, *priorities)
+                    || !m_control.active || m_control.generation != m_mixedPending->generation) {
+                    finishMixed(QStringLiteral("mixed layout or peers differ after captured readback"));
+                    m_socket.disconnectFromServer();
+                    return;
+                }
+            }
             if (m_positionPending && (!m_positionPlan || !RetainedMultiPositionPlan::matches(*m_positionPlan, *kscreen)
                 || !m_control.active || m_control.generation != m_positionPending->generation)) {
                 finishPosition(QStringLiteral("positioned output or peers differ after captured readback"));
@@ -682,6 +717,7 @@ private:
         if (result.becameReady && m_multiResizePending) finishMultiResize({});
         if (result.becameReady && m_multiFitPending) finishMultiFit({});
         if (result.becameReady && m_primaryPending) finishPrimary({});
+        if (result.becameReady && m_mixedPending) finishMixed({});
     }
 
     std::optional<QByteArray> readKScreenJson() const
@@ -771,7 +807,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation || m_positionPending
-            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending) {
+            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending) {
             reject(QStringLiteral("managed Fit unavailable or not authorized"));
             return;
         }
@@ -882,7 +918,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation || m_positionPending
-            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending) {
+            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending) {
             reject(QStringLiteral("primary unavailable or not authorized"));
             return;
         }
@@ -923,6 +959,177 @@ private:
         m_multiSettle.start(200);
     }
 
+    void finishMixed(const QString &error)
+    {
+        if (!m_mixedPending) return;
+        const auto request = *m_mixedPending;
+        QString finalError = error;
+        if (!error.isEmpty() && m_mixedPlan && m_control.active
+            && m_control.generation == request.generation) {
+            const auto json = readKScreenJson();
+            const auto current = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+            const auto priorities = current
+                ? RetainedMultiPrimaryPlan::priorities(*json, *current) : std::nullopt;
+            QMap<QString, VirtualResize::Snapshot> states;
+            if (current && priorities) {
+                for (auto it = m_mixedPlan->resizes.cbegin(); it != m_mixedPlan->resizes.cend(); ++it) {
+                    const auto state = VirtualResize::snapshotForOutput(*json, it.key(), nullptr);
+                    if (!state) break;
+                    states.insert(it.key(), *state);
+                }
+                const auto restore = RetainedMultiMixedPlan::recoveryArguments(*m_mixedPlan, *current,
+                    *priorities, states, m_mixedOriginalStates, m_mixedAppliedModes);
+                if (restore && (restore->isEmpty() || runKScreenCommand(*restore))) {
+                    const auto verifiedJson = readKScreenJson();
+                    const auto verified = verifiedJson
+                        ? RetainedKScreenReadback::parse(*verifiedJson, m_sessionId) : std::nullopt;
+                    const auto verifiedPriorities = verified
+                        ? RetainedMultiPrimaryPlan::priorities(*verifiedJson, *verified) : std::nullopt;
+                    bool modesRestored = verifiedJson.has_value();
+                    for (auto it = m_mixedOriginalStates.cbegin(); modesRestored && it != m_mixedOriginalStates.cend(); ++it) {
+                        const auto mode = VirtualResize::snapshotForOutput(*verifiedJson, it.key(), nullptr);
+                        modesRestored = mode && mode->current.id == it.value().current.id
+                            && VirtualResize::sameScale(mode->scale, it.value().scale);
+                    }
+                    if (verified && verifiedPriorities && modesRestored
+                        && verified->outputs == m_mixedPlan->before.outputs
+                        && *verifiedPriorities == m_mixedPlan->originalPriorities)
+                        finalError += QStringLiteral("; original mixed layout restored");
+                }
+            }
+        }
+        m_mixedPending.reset();
+        m_mixedPlan.reset();
+        m_mixedOriginalStates.clear();
+        m_mixedAppliedModes.clear();
+        m_mixedDeadline.stop();
+        m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::MixedResult{
+            request.requestId, request.generation, finalError}));
+    }
+
+    void mixed(const ConsoleWorkerWire::Mixed &request)
+    {
+        const auto reject = [this, &request](const QString &error) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::MixedResult{
+                request.requestId, request.generation, error}));
+        };
+        if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
+            || !m_control.active || m_control.generation != request.generation || m_positionPending
+            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending
+            || m_primaryPending || m_mixedPending) {
+            reject(QStringLiteral("mixed layout unavailable or not authorized"));
+            return;
+        }
+        const auto beforeJson = readKScreenJson();
+        const auto before = beforeJson ? RetainedKScreenReadback::parse(*beforeJson, m_sessionId) : std::nullopt;
+        if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)) {
+            reject(QStringLiteral("fresh compositor readback differs from capture"));
+            return;
+        }
+        const auto priorities = RetainedMultiPrimaryPlan::priorities(*beforeJson, *before);
+        if (!priorities) { reject(QStringLiteral("mixed layout priority inventory unavailable")); return; }
+        QVector<RemoteTopologyDraft::Operation> operations;
+        for (const auto &wire : request.operations) {
+            RemoteTopologyDraft::Operation operation;
+            operation.id = wire.output;
+            operation.position = wire.globalLogical;
+            operation.pixels = wire.pixels;
+            operation.scale = wire.scale;
+            switch (wire.kind) {
+            case ConsoleWorkerWire::MixedOperation::Kind::Move:
+                operation.kind = RemoteTopologyDraft::Operation::Kind::Move;
+                break;
+            case ConsoleWorkerWire::MixedOperation::Kind::Resize:
+                operation.kind = RemoteTopologyDraft::Operation::Kind::Resize;
+                break;
+            case ConsoleWorkerWire::MixedOperation::Kind::Primary:
+                operation.kind = RemoteTopologyDraft::Operation::Kind::SetPrimary;
+                break;
+            }
+            operations.append(operation);
+        }
+        const auto plan = RetainedMultiMixedPlan::make(*before, m_sessionId, *priorities, operations);
+        if (!plan) { reject(QStringLiteral("mixed layout conflicts with retained output arrangement")); return; }
+        if (!plan->changed) { reject({}); return; }
+        QMap<QString, VirtualResize::Snapshot> originalStates;
+        QMap<QString, VirtualResize::Snapshot> states;
+        QMap<QString, VirtualResize::Mode> selectedModes;
+        for (auto it = plan->resizes.cbegin(); it != plan->resizes.cend(); ++it) {
+            auto state = VirtualResize::snapshotForOutput(*beforeJson, it.key(), nullptr);
+            if (!state) { reject(QStringLiteral("mixed target mode inventory unavailable")); return; }
+            originalStates.insert(it.key(), *state);
+            auto mode = VirtualResize::matchingMode(*state, it.value().first, state->current.refresh);
+            if (!mode) {
+                if (state->modes.size() >= 64 || !runKScreenCommand(VirtualResize::add({*state,
+                    it.value().first, it.value().second}))) {
+                    reject(QStringLiteral("mixed custom mode could not be added"));
+                    return;
+                }
+                const auto addedJson = readKScreenJson();
+                const auto unchanged = addedJson ? RetainedKScreenReadback::parse(*addedJson, m_sessionId) : std::nullopt;
+                const auto unchangedPriorities = unchanged
+                    ? RetainedMultiPrimaryPlan::priorities(*addedJson, *unchanged) : std::nullopt;
+                state = addedJson ? VirtualResize::snapshotForOutput(*addedJson, it.key(), nullptr) : std::nullopt;
+                if (!unchanged || unchanged->outputs != before->outputs || unchangedPriorities != priorities
+                    || !state || !VirtualResize::sameOutput(*state, originalStates.value(it.key()))
+                    || state->current.id != originalStates.value(it.key()).current.id) {
+                    reject(QStringLiteral("mixed custom mode changed the active arrangement"));
+                    return;
+                }
+                mode = VirtualResize::matchingMode(*state, it.value().first, state->current.refresh);
+                if (!mode) { reject(QStringLiteral("mixed custom mode not advertised")); return; }
+            }
+            states.insert(it.key(), *state);
+            selectedModes.insert(it.key(), *mode);
+        }
+        const auto finalJson = readKScreenJson();
+        const auto stillBefore = finalJson ? RetainedKScreenReadback::parse(*finalJson, m_sessionId) : std::nullopt;
+        const auto stillPriorities = stillBefore
+            ? RetainedMultiPrimaryPlan::priorities(*finalJson, *stillBefore) : std::nullopt;
+        if (!stillBefore || stillBefore->outputs != before->outputs || stillPriorities != priorities) {
+            reject(QStringLiteral("mixed layout changed during mode preparation"));
+            return;
+        }
+        for (auto it = plan->resizes.cbegin(); it != plan->resizes.cend(); ++it) {
+            const auto fresh = VirtualResize::snapshotForOutput(*finalJson, it.key(), nullptr);
+            if (!fresh || !VirtualResize::sameOutput(*fresh, originalStates.value(it.key()))
+                || fresh->current.id != originalStates.value(it.key()).current.id) {
+                reject(QStringLiteral("mixed mode inventory changed during preparation"));
+                return;
+            }
+            states.insert(it.key(), *fresh);
+        }
+        const auto args = RetainedMultiMixedPlan::arguments(*plan, states, selectedModes);
+        if (!args || args->isEmpty()) { reject(QStringLiteral("mixed layout command preflight failed")); return; }
+        releaseInput();
+        m_multiReady = false;
+        ++m_multiEpoch;
+        m_multiSessions.clear();
+        m_multiCapture.invalidate();
+        m_multiPublishedFrames.clear();
+        m_mixedPending = request;
+        m_mixedPlan = *plan;
+        m_mixedOriginalStates = originalStates;
+        m_mixedAppliedModes = selectedModes;
+        m_mixedDeadline.start();
+        if (!runKScreenCommand(*args)) {
+            finishMixed(QStringLiteral("mixed layout compositor apply failed"));
+            m_socket.disconnectFromServer();
+            return;
+        }
+        const auto afterJson = readKScreenJson();
+        const auto after = afterJson ? RetainedKScreenReadback::parse(*afterJson, m_sessionId) : std::nullopt;
+        const auto afterPriorities = after
+            ? RetainedMultiPrimaryPlan::priorities(*afterJson, *after) : std::nullopt;
+        if (!after || !afterPriorities || !RetainedMultiMixedPlan::matches(*plan, *after, *afterPriorities)) {
+            finishMixed(QStringLiteral("mixed layout readback differs from preview"));
+            m_socket.disconnectFromServer();
+            return;
+        }
+        m_multiResizeNeedsRestart = true;
+        m_multiSettle.start(200);
+    }
+
     void multiResize(const ConsoleWorkerWire::Resize &request)
     {
         const auto reject = [this, &request](const QString &error) {
@@ -930,7 +1137,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation
-            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending) {
+            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending) {
             reject(QStringLiteral("multi-output resize unavailable or not authorized"));
             return;
         }
@@ -1070,7 +1277,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
             || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending || m_multiResizePending
-            || m_multiFitPending || m_primaryPending || m_multiPublishedFrames.size() < 3) {
+            || m_multiFitPending || m_primaryPending || m_mixedPending || m_multiPublishedFrames.size() < 3) {
             reject(QStringLiteral("virtual output removal unavailable or not authorized"));
             return;
         }
@@ -1107,7 +1314,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
             || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending || m_multiResizePending
-            || m_multiFitPending || m_primaryPending || m_multiPublishedFrames.size() < 2) {
+            || m_multiFitPending || m_primaryPending || m_mixedPending || m_multiPublishedFrames.size() < 2) {
             reject(QStringLiteral("virtual output creation unavailable or not authorized"));
             return;
         }
@@ -1183,7 +1390,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation
-            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending) {
+            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending) {
             reject(QStringLiteral("position unavailable or not authorized"));
             return;
         }
@@ -1318,6 +1525,10 @@ private:
                 primary(*request);
                 continue;
             }
+            if (const auto request = ConsoleWorkerWire::mixed(*record)) {
+                mixed(*request);
+                continue;
+            }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {
                 if (m_multiMode) {
                     for (const auto &session : m_multiSessions) session->requestKeyFrame();
@@ -1416,6 +1627,11 @@ private:
     QTimer m_primaryDeadline;
     std::optional<ConsoleWorkerWire::Primary> m_primaryPending;
     std::optional<RetainedMultiPrimaryPlan::Plan> m_primaryPlan;
+    QTimer m_mixedDeadline;
+    std::optional<ConsoleWorkerWire::Mixed> m_mixedPending;
+    std::optional<RetainedMultiMixedPlan::Plan> m_mixedPlan;
+    QMap<QString, VirtualResize::Snapshot> m_mixedOriginalStates;
+    QMap<QString, VirtualResize::Mode> m_mixedAppliedModes;
     bool m_multiResizeNeedsRestart = false;
     QTimer m_addDeadline;
     std::optional<ConsoleWorkerWire::AddVirtual> m_addPending;
