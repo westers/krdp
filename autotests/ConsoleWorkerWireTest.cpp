@@ -30,6 +30,7 @@ private Q_SLOTS:
     void managedFitRecordsAreBoundedAndCorrelated();
     void primaryRecordsAreBoundedAndCorrelated();
     void mixedRecordsAreBoundedAndCorrelated();
+    void mixedCreateRecordsAreBoundedAndCorrelated();
     void addVirtualRecordsAreBoundedAndCorrelated();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
@@ -120,6 +121,37 @@ void ConsoleWorkerWireTest::mixedRecordsAreBoundedAndCorrelated()
         QVERIFY(record);
         QVERIFY(!mixed(*record));
     }
+}
+
+void ConsoleWorkerWireTest::mixedCreateRecordsAreBoundedAndCorrelated()
+{
+    Deframer reader;
+    const MixedCreate request{25, 9, QStringLiteral("Virtual-krdp-added-test"), QSize(960, 540), 1,
+        QPoint(2560, 100), {{MixedOperation::Kind::Resize, QStringLiteral("Virtual-0"), {}, QSize(1600, 900), 1.25},
+            {MixedOperation::Kind::Primary, QStringLiteral("Virtual-krdp-added-test"), {}, {}, 1}}};
+    const MixedCreateResult answer{25, 9, QStringLiteral("capture mismatch")};
+    reader.feed(frame(request) + frame(answer));
+    const auto first = reader.next();
+    QVERIFY(first);
+    QCOMPARE(mixedCreate(*first), std::optional<MixedCreate>(request));
+    auto truncated = *first;
+    truncated.payload.chop(1);
+    QVERIFY(!mixedCreate(truncated));
+    const auto second = reader.next();
+    QVERIFY(second);
+    QCOMPARE(mixedCreateResult(*second), std::optional<MixedCreateResult>(answer));
+    auto bad = request;
+    bad.newOutput = QStringLiteral("../Virtual-krdp-added-test");
+    reader.feed(frame(bad));
+    QVERIFY(!mixedCreate(*reader.next()));
+    bad = request;
+    bad.changes[0].pixels = QSize(1601, 900);
+    reader.feed(frame(bad));
+    QVERIFY(!mixedCreate(*reader.next()));
+    bad = request;
+    bad.changes.clear();
+    reader.feed(frame(bad));
+    QVERIFY(!mixedCreate(*reader.next()));
 }
 
 void ConsoleWorkerWireTest::readOnlyTopologyRecordIsBounded()
