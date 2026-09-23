@@ -43,6 +43,13 @@ owner/generation/revision token, dispatches one worker batch, and requires an
 exact full after-catalog with one revision bump before success. Client source
 `6986c8a` accumulates multiple visual positions in one draft and validates the
 exact returned after-catalog; `b414a05` adds a diagnostic batch action.
+Source `bdb1803` bumps the paired internal worker wire to v5 for an unadvertised
+ManagedFit request: selected mode/scale plus explicit backend-key parent/child
+relations pass whole-layout preflight, one KScreen command, exact full-output
+readback and fresh decoded keyframes. It is not yet bound to a revisioned broker
+preview/commit, client action or native compositor acceptance. On failure the
+worker closes capture; conditional restoration of only its own changed outputs
+remains a requirement before exposing Fit or Console writes.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. Fit and mixed-operation
