@@ -50,6 +50,16 @@ readback and fresh decoded keyframes. It is not yet bound to a revisioned broker
 preview/commit, client action or native compositor acceptance. On failure the
 worker closes capture; conditional restoration of only its own changed outputs
 remains a requirement before exposing Fit or Console writes.
+Later source `a96a676`/`15e5b89` adds private-opt-in
+`topology-fit-preview`: strict selected output, pixels, scale and explicit
+stable-ID relations are checked by the pure Fit planner, resolved to backend
+keys and bound to the existing one-use owner/generation/revision token. Commit
+dispatches the v5 worker Fit and requires the entire authoritative after-catalog
+at exactly one new revision; a metadata-only result fails `partial`. Client
+`791e57c` adds a diagnostic-only Fit request with its own exact dependent
+reflow check before Apply. No visual Fit/Match control, native Sol/Buzz Fit
+acceptance or release; default runtime capability remains off. The earlier
+sentence describing an unbound worker records the `bdb1803` stage only.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. Fit and mixed-operation
