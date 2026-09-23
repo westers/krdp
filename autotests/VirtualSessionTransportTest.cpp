@@ -415,6 +415,74 @@ private Q_SLOTS:
             QCOMPARE(t.request(preview, 1000).value(u"code"_s).toString(), u"stale-revision"_s);
         });
     }
+    void managedFitPreviewBindsDependentReflowAndFullReadback() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            RemoteTopologyCatalog catalog;
+            const auto initial = catalog.observe({
+                {.backendKey = u"Virtual-0"_s, .name = u"Virtual-0"_s,
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(0, 0, 1280, 720),
+                    .scale = 1, .enabled = true, .primary = true, .physical = false, .owner = t.m_handle->id},
+                {.backendKey = u"Virtual-1"_s, .name = u"Virtual-1"_s,
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(1280, 0, 1280, 720),
+                    .scale = 1, .enabled = true, .primary = false, .physical = false, .owner = t.m_handle->id},
+            });
+            QVERIFY(initial);
+            auto current = *initial;
+            t.setTopologyResolver([&current](const auto &) { return std::optional(current); });
+            QJsonObject preview{{u"type"_s, u"topology-fit-preview"_s}, {u"v"_s, 1},
+                {u"id"_s, u"fit-1"_s}, {u"generation"_s, current.generation},
+                {u"expectedRevision"_s, double(current.revision)}, {u"output"_s, current.outputs[0].id},
+                {u"pixels"_s, QJsonObject{{u"width"_s, 1600}, {u"height"_s, 900}}},
+                {u"scale"_s, 1.0}, {u"relations"_s, QJsonArray{
+                    QJsonObject{{u"parent"_s, current.outputs[0].id}, {u"child"_s, current.outputs[1].id},
+                        {u"edge"_s, u"right"_s}, {u"offset"_s, 0}}}}};
+            t.m_experimentalMultiResize = false;
+            QCOMPARE(t.request(preview, 1000).value(u"code"_s).toString(), u"unsupported"_s);
+            t.m_experimentalMultiResize = true;
+            QCOMPARE(t.request(preview, 1001).value(u"code"_s).toString(), u"not-owner"_s);
+            auto malformed = preview;
+            malformed[u"owner"_s] = u"forged"_s;
+            QCOMPARE(t.request(malformed, 1000).value(u"code"_s).toString(), u"invalid"_s);
+            const auto answer = t.request(preview, 1000);
+            QCOMPARE(answer.value(u"type"_s).toString(), u"topology-preview"_s);
+            QCOMPARE(answer.value(u"after"_s).toArray()[1].toObject().value(u"logical"_s).toObject().value(u"x"_s).toInt(), 1600);
+            const auto token = answer.value(u"token"_s).toString();
+            QVERIFY(!token.isEmpty());
+            QJsonObject commit{{u"type"_s, u"topology-commit"_s}, {u"v"_s, 1},
+                {u"id"_s, u"fit-1"_s}, {u"token"_s, token},
+                {u"generation"_s, current.generation}, {u"expectedRevision"_s, double(current.revision)}};
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            std::optional<ConsoleWorkerWire::ManagedFit> command;
+            for (const auto &record : workerRecords(worker))
+                if (auto parsed = ConsoleWorkerWire::managedFit(record)) command = parsed;
+            QVERIFY(command);
+            QCOMPARE(command->output, u"Virtual-0"_s);
+            QCOMPARE(command->pixels, QSize(1600, 900));
+            QCOMPARE(command->relations.size(), 1);
+            QCOMPARE(command->relations[0].child, u"Virtual-1"_s);
+            QCOMPARE(t.topologyResizeResult({command->requestId, command->generation, {}}, 1000)
+                .value(u"code"_s).toString(), u"partial"_s); // No metadata-only success.
+            preview[u"id"_s] = u"fit-2"_s;
+            const auto second = t.request(preview, 1000);
+            commit[u"id"_s] = u"fit-2"_s;
+            commit[u"token"_s] = second.value(u"token"_s);
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            const auto workerId = t.m_topologyResizeWorkerId;
+            auto firstOutput = initial->outputs[0].output;
+            firstOutput.nativePixels = QSize(1600, 900);
+            firstOutput.logicalGeometry.setSize(QSize(1600, 900));
+            auto secondOutput = initial->outputs[1].output;
+            secondOutput.logicalGeometry.moveLeft(1600);
+            const auto updated = catalog.observe({firstOutput, secondOutput});
+            QVERIFY(updated);
+            current = *updated;
+            const auto success = t.topologyResizeResult({workerId, t.m_controlGeneration, {}}, 1000);
+            QCOMPARE(success.value(u"type"_s).toString(), u"topology-result"_s);
+            QVERIFY(success.value(u"ok"_s).toBool());
+            QCOMPARE(t.request(commit, 1000).value(u"code"_s).toString(), u"invalid"_s);
+        });
+    }
     void retainedAddRequiresAuthenticatedCommitAndCapturedReadback() {
         microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
             workerRecords(worker);

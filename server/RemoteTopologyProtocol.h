@@ -5,6 +5,7 @@
 
 #include "RemoteTopologyCatalog.h"
 #include "RemoteTopologyDraft.h"
+#include "RemoteTopologyFit.h"
 
 #include <cmath>
 #include <optional>
@@ -36,6 +37,68 @@ struct PreviewRequest {
     QString id;
     RemoteTopologyDraft::Request draft; // owner is always filled from authenticated server state
 };
+
+struct FitPreviewRequest {
+    QString id;
+    QString generation;
+    quint64 expectedRevision = 0;
+    QString output;
+    QSize pixels;
+    double scale = 1;
+    QVector<RemoteTopologyFit::Relation> relations;
+};
+
+inline std::optional<FitPreviewRequest> fitPreviewRequest(const QJsonObject &record)
+{
+    constexpr double maxExact = 9007199254740991.0;
+    const auto revision = record.value(QStringLiteral("expectedRevision"));
+    const auto pixels = record.value(QStringLiteral("pixels")).toObject();
+    const auto width = pixels.value(QStringLiteral("width"));
+    const auto height = pixels.value(QStringLiteral("height"));
+    const auto scale = record.value(QStringLiteral("scale"));
+    if (record.size() != 9 || record.value(QStringLiteral("type")) != QStringLiteral("topology-fit-preview")
+        || record.value(QStringLiteral("v")) != 1 || !identifier(record.value(QStringLiteral("id")))
+        || !identifier(record.value(QStringLiteral("generation")), 128)
+        || !identifier(record.value(QStringLiteral("output")), 128)
+        || !revision.isDouble() || !std::isfinite(revision.toDouble()) || revision.toDouble() < 1
+        || revision.toDouble() > maxExact || std::floor(revision.toDouble()) != revision.toDouble()
+        || pixels.size() != 2 || !width.isDouble() || !height.isDouble()
+        || !std::isfinite(width.toDouble()) || !std::isfinite(height.toDouble())
+        || width.toDouble() < 320 || width.toDouble() > 4096 || height.toDouble() < 200 || height.toDouble() > 4096
+        || std::floor(width.toDouble()) != width.toDouble() || std::floor(height.toDouble()) != height.toDouble()
+        || int(width.toDouble()) % 2 || int(height.toDouble()) % 2
+        || !scale.isDouble() || !std::isfinite(scale.toDouble()) || scale.toDouble() < 1 || scale.toDouble() > 4
+        || !record.value(QStringLiteral("relations")).isArray()) return {};
+    const auto edges = record.value(QStringLiteral("relations")).toArray();
+    if (edges.size() > 16) return {};
+    FitPreviewRequest request{record.value(QStringLiteral("id")).toString(),
+        record.value(QStringLiteral("generation")).toString(), quint64(revision.toDouble()),
+        record.value(QStringLiteral("output")).toString(), QSize(int(width.toDouble()), int(height.toDouble())),
+        scale.toDouble(), {}};
+    QSet<QString> children;
+    for (const auto &value : edges) {
+        if (!value.isObject()) return {};
+        const auto edge = value.toObject();
+        const auto offset = edge.value(QStringLiteral("offset"));
+        const auto side = edge.value(QStringLiteral("edge")).toString();
+        if (edge.size() != 4 || !identifier(edge.value(QStringLiteral("parent")), 128)
+            || !identifier(edge.value(QStringLiteral("child")), 128)
+            || !offset.isDouble() || !std::isfinite(offset.toDouble()) || offset.toDouble() < -32768
+            || offset.toDouble() > 32768 || std::floor(offset.toDouble()) != offset.toDouble()
+            || (side != QStringLiteral("left") && side != QStringLiteral("right")
+                && side != QStringLiteral("above") && side != QStringLiteral("below"))) return {};
+        const auto parent = edge.value(QStringLiteral("parent")).toString();
+        const auto child = edge.value(QStringLiteral("child")).toString();
+        if (parent == child || children.contains(child)) return {};
+        children.insert(child);
+        const auto direction = side == QStringLiteral("left") ? RemoteTopologyFit::Relation::Edge::Left
+            : side == QStringLiteral("right") ? RemoteTopologyFit::Relation::Edge::Right
+            : side == QStringLiteral("above") ? RemoteTopologyFit::Relation::Edge::Above
+            : RemoteTopologyFit::Relation::Edge::Below;
+        request.relations.append({parent, child, direction, int(offset.toDouble())});
+    }
+    return request;
+}
 
 inline std::optional<PreviewRequest> previewRequest(const QJsonObject &record)
 {

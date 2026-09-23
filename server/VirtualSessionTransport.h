@@ -48,6 +48,7 @@ private:
     QJsonObject resizeResult(const ConsoleWorkerWire::ResizeResult &, std::optional<quint32> uid);
     QJsonObject topologyFrame(const VideoFrame &, std::optional<quint32> uid);
     QJsonObject topologyPreview(const QJsonObject &, std::optional<quint32> uid);
+    QJsonObject topologyFitPreview(const QJsonObject &, std::optional<quint32> uid);
     QJsonObject topologyCommit(const QJsonObject &, std::optional<quint32> uid);
     QJsonObject positionResult(const ConsoleWorkerWire::PositionResult &, std::optional<quint32> uid, bool batch = false);
     QJsonObject addVirtualResult(const ConsoleWorkerWire::AddVirtualResult &, std::optional<quint32> uid);
@@ -108,6 +109,8 @@ private:
         qreal scale = 1.0;
         QVector<RemoteTopologyDraft::Operation> operations;
         QVector<ConsoleWorkerWire::PositionTarget> batchTargets;
+        bool managedFit = false;
+        QVector<ConsoleWorkerWire::FitRelation> fitRelations;
         QVector<RemoteTopologyCatalog::Entry> before;
         QVector<RemoteTopologyCatalog::Entry> after;
         QElapsedTimer age;
