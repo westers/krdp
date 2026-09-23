@@ -595,7 +595,10 @@ private:
         }
         const auto before = readKScreen();
         if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)
-            || before->outputs.size() >= before->maxActiveOutputs || before->outputs.size() >= 16
+            // Private KWin reports maxActiveOutputsCount as its *current*
+            // virtual-output count and increments it on creation; it is not
+            // a fixed capacity. The capture/wire cap is checked separately.
+            || before->outputs.size() >= 16
             || std::any_of(before->outputs.cbegin(), before->outputs.cend(), [&request](const auto &output) {
                 return output.backendKey == request.output;
             })) {
