@@ -49,6 +49,8 @@ enum class Kind : quint8 {
     PositionResult,
     AddVirtual,
     AddVirtualResult,
+    RemoveVirtual,
+    RemoveVirtualResult,
 };
 
 struct Record {
@@ -106,6 +108,66 @@ struct AddVirtualResult {
     QString error; // Empty only after independent KScreen and all new encoded keyframes agree.
     bool operator==(const AddVirtualResult &) const = default;
 };
+
+struct RemoveVirtual {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString output; // Must be an Add-created output owned by this live worker.
+    bool operator==(const RemoveVirtual &) const = default;
+};
+
+struct RemoveVirtualResult {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString error;
+    bool operator==(const RemoveVirtualResult &) const = default;
+};
+
+inline QByteArray frame(const RemoveVirtual &request)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << request.requestId << request.generation << request.output;
+    return frame(Kind::RemoveVirtual, payload);
+}
+
+inline std::optional<RemoveVirtual> removeVirtual(const Record &record)
+{
+    if (record.kind != Kind::RemoveVirtual || record.payload.size() > 512) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    RemoveVirtual request;
+    stream >> request.requestId >> request.generation >> request.output;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !request.requestId || !request.generation
+        || !request.output.startsWith(QStringLiteral("Virtual-krdp-added-"))
+        || request.output.size() <= QStringLiteral("Virtual-krdp-added-").size() || request.output.size() > 128) return {};
+    for (const auto character : request.output) {
+        if (!character.isLetterOrNumber() && character != QLatin1Char('-') && character != QLatin1Char('_')) return {};
+    }
+    return request;
+}
+
+inline QByteArray frame(const RemoveVirtualResult &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.requestId << result.generation << result.error;
+    return frame(Kind::RemoveVirtualResult, payload);
+}
+
+inline std::optional<RemoveVirtualResult> removeVirtualResult(const Record &record)
+{
+    if (record.kind != Kind::RemoveVirtualResult || record.payload.size() > 4096) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    RemoveVirtualResult result;
+    stream >> result.requestId >> result.generation >> result.error;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
+        || result.error.size() > 1024) return {};
+    return result;
+}
 
 inline QByteArray frame(const AddVirtual &request)
 {
@@ -595,7 +657,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::AddVirtualResult)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::RemoveVirtualResult)) {
             ++m_invalid;
             return std::nullopt;
         }

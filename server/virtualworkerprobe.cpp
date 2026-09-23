@@ -29,7 +29,10 @@ int main(int argc, char **argv)
     const bool dragProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-drag");
     const bool negativeProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-negative");
     const bool repositionProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-reposition");
-    const bool addProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-add");
+    const bool removeProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-remove");
+    const bool addProbe = removeProbe || (arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-add"));
+    const QString addedName = removeProbe ? QStringLiteral("Virtual-krdp-added-probe-extra")
+                                          : QStringLiteral("Virtual-krdp-probe-extra");
     const bool mixed = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi-mixed") || inputProbe);
     const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || negativeProbe || dragProbe || repositionProbe || addProbe);
     if (arguments.size() != 1 && !managed && !multi) return 1;
@@ -97,13 +100,19 @@ int main(int argc, char **argv)
     bool addAcknowledged = false;
     bool addInventory = false;
     QSet<int> addFrames;
+    bool removeStarted = false;
+    bool removeAcknowledged = false;
+    bool removeInventory = false;
+    QSet<int> removeFrames;
     bool stopping = false;
     int result = 1;
     ConsoleWorkerWire::Outputs outputs;
     const auto maybeStop = [&] {
         if (captured && resizeRefused && inputVerified && postMoveCaptured
             && (!repositionProbe || (repositionReadback && repositionInventory && repositionFrames.size() == 2))
-            && (!addProbe || (addAcknowledged && addInventory && addFrames.size() == 3)) && !stopping) {
+            && (!addProbe || (addAcknowledged && (removeProbe
+                ? removeAcknowledged && removeInventory && removeFrames.size() == 2
+                : addInventory && addFrames.size() == 3))) && !stopping) {
             stopping = true;
             endpoint.stopWorker();
         }
@@ -170,6 +179,14 @@ int main(int argc, char **argv)
             endpoint.requestKeyFrame();
             maybeStop();
         });
+    const auto maybeRemove = [&] {
+        if (!removeProbe || !addAcknowledged || addFrames.size() != 3 || removeStarted) return;
+        removeStarted = true;
+        capturedOutputs.clear();
+        captured = false;
+        qInfo("Requesting authenticated worker RemoveVirtual of only the Add-owned output");
+        if (!endpoint.removeVirtual({3, 1, addedName})) app.quit();
+    };
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::addVirtualFinished, &app,
         [&](const ConsoleWorkerWire::AddVirtualResult &answer) {
             if (!addProbe || answer.requestId != 2 || answer.generation != 1 || !answer.error.isEmpty()) {
@@ -184,20 +201,53 @@ int main(int argc, char **argv)
             if (!snapshot || snapshot->outputs.size() != 3
                 || snapshot->outputs[0].logicalGeometry != QRect(0, 0, 1280, 720)
                 || snapshot->outputs[1].logicalGeometry != QRect(1280, 0, 1280, 720)
-                || snapshot->outputs[2].backendKey != QStringLiteral("Virtual-krdp-probe-extra")
+                || snapshot->outputs[2].backendKey != addedName
                 || snapshot->outputs[2].logicalGeometry != QRect(2560, 0, 960, 540)
                 || snapshot->outputs[2].nativePixels != QSize(960, 540)) { app.quit(); return; }
             addAcknowledged = true;
             qInfo("Authenticated worker add acknowledged after three-output KScreen/capture readback");
+            endpoint.requestKeyFrame();
+            maybeRemove();
+            maybeStop();
+        });
+    QObject::connect(&endpoint, &ConsoleWorkerEndpoint::removeVirtualFinished, &app,
+        [&](const ConsoleWorkerWire::RemoveVirtualResult &answer) {
+            if (!removeProbe || answer.requestId != 3 || answer.generation != 1 || !answer.error.isEmpty()) {
+                qCritical().noquote() << "Worker remove failed:" << answer.error;
+                app.quit();
+                return;
+            }
+            QProcess readback;
+            readback.start(QStringLiteral("kscreen-doctor"), {QStringLiteral("-j")});
+            if (!readback.waitForFinished(3000) || readback.exitCode() != 0) { app.quit(); return; }
+            const auto snapshot = RetainedKScreenReadback::parse(readback.readAllStandardOutput(), id);
+            if (!snapshot || snapshot->outputs.size() != 2
+                || snapshot->outputs[0].logicalGeometry != QRect(0, 0, 1280, 720)
+                || snapshot->outputs[1].logicalGeometry != QRect(1280, 0, 1280, 720)
+                || snapshot->outputs[0].backendKey != QStringLiteral("Virtual-0")
+                || snapshot->outputs[1].backendKey != QStringLiteral("Virtual-1")) { app.quit(); return; }
+            removeAcknowledged = true;
+            qInfo("Authenticated worker remove acknowledged after two-output KScreen/capture readback");
             endpoint.requestKeyFrame();
             maybeStop();
         });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, &app, [&](const auto &value) {
         outputs = value;
         if (addProbe && addStarted && value.monitors.size() == 3
-            && value.monitors[2].name == QStringLiteral("Virtual-krdp-probe-extra")
+            && value.monitors[2].name == addedName
             && value.monitors[2].geometry == QRect(2560, 0, 960, 540)) {
             addInventory = true;
+            endpoint.requestKeyFrame();
+        }
+        if (removeProbe && removeStarted && !removeInventory && value.monitors.size() == 2
+            && value.monitors[0].name == QStringLiteral("Virtual-0")
+            && value.monitors[1].name == QStringLiteral("Virtual-1")) {
+            addInventory = false;
+            removeInventory = true;
+            capturedOutputs.clear();
+            captured = false;
+            removeFrames.clear();
+            qInfo("Worker published only the two original outputs after removal");
             endpoint.requestKeyFrame();
         }
         if (repositionProbe && repositionStarted && value.monitors.size() == 2
@@ -262,11 +312,16 @@ int main(int argc, char **argv)
         if (addProbe && addInventory) {
             addFrames.insert(frame.monitorIndex);
             if (addFrames.size() == 3) qInfo("Three post-add independently decoded output keyframes verified");
+            maybeRemove();
+        }
+        if (removeProbe && removeInventory) {
+            removeFrames.insert(frame.monitorIndex);
+            if (removeFrames.size() == 2) qInfo("Two post-remove independently decoded output keyframes verified");
         }
         if (captured && addProbe && !addStarted) {
             addStarted = true;
             qInfo("Requesting authenticated worker AddVirtual beside existing desktop");
-            if (!endpoint.addVirtual({2, 1, QStringLiteral("Virtual-krdp-probe-extra"), QSize(960, 540), 1.0,
+            if (!endpoint.addVirtual({2, 1, addedName, QSize(960, 540), 1.0,
                 QPoint(2560, 0)})) app.quit();
         }
         if (captured && inputProbe && !inputSent) {

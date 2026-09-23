@@ -133,6 +133,12 @@ bool ConsoleWorkerEndpoint::addVirtual(const ConsoleWorkerWire::AddVirtual &requ
     return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
 }
 
+bool ConsoleWorkerEndpoint::removeVirtual(const ConsoleWorkerWire::RemoveVirtual &request)
+{
+    if (!m_ready || !m_worker) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
+}
+
 bool ConsoleWorkerEndpoint::setVideoQuality(const ConsoleWorkerWire::VideoQuality &quality)
 {
     if (!m_ready || !m_worker || !quality.generation || quality.quality < 10 || quality.quality > 100) {
@@ -212,6 +218,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT positionFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::addVirtualResult(*record)) {
             Q_EMIT addVirtualFinished(*result);
+        } else if (const auto result = ConsoleWorkerWire::removeVirtualResult(*record)) {
+            Q_EMIT removeVirtualFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::microphoneResult(*record)) {
             Q_EMIT microphoneFinished(*result);
         } else {

@@ -166,6 +166,13 @@ public:
             finishAdd(QStringLiteral("virtual output creation/readback timed out"));
             m_socket.disconnectFromServer(); // The creator is released as the worker exits.
         });
+        m_removeDeadline.setSingleShot(true);
+        m_removeDeadline.setInterval(15000);
+        connect(&m_removeDeadline, &QTimer::timeout, this, [this] {
+            if (!m_removePending) return;
+            finishRemove(QStringLiteral("virtual output removal/readback timed out"));
+            m_socket.disconnectFromServer();
+        });
         connect(&m_session, &AbstractSession::streamActiveChanged, this, [this](bool active) {
             if (m_mode.virtualSession) m_virtualResize.captureStateChanged(m_virtualCaptureEpoch, active);
             if (active && !m_captureReady) {
@@ -349,6 +356,7 @@ private:
         if (!screen || m_watchedScreens.contains(screen)) return;
         m_watchedScreens.insert(screen);
         connect(screen, &QScreen::geometryChanged, this, [this] { m_multiSettle.start(); });
+        connect(screen, &QObject::destroyed, this, [this, screen] { m_watchedScreens.remove(screen); });
     }
 
     void syncCaptureMode()
@@ -356,6 +364,30 @@ private:
         if (!m_mode.virtualSession || m_stopping) return;
         const auto screens = qGuiApp->screens();
         for (auto *screen : screens) watchScreen(screen);
+        if (m_removePending) {
+            if (!m_control.active || m_control.generation != m_removePending->generation) {
+                finishRemove(QStringLiteral("virtual output authority changed during removal"));
+                m_socket.disconnectFromServer();
+                return;
+            }
+            const auto current = readKScreen();
+            if (!current || current->outputs.size() == m_removeBefore.outputs.size()) {
+                m_multiSettle.start(200); // KWin has not retired the output yet.
+                return;
+            }
+            if (!removeMatches(*current)) {
+                finishRemove(QStringLiteral("removing the output changed the remaining compositor layout"));
+                m_socket.disconnectFromServer();
+                return;
+            }
+            const bool screensAgree = screens.size() == current->outputs.size()
+                && std::all_of(current->outputs.cbegin(), current->outputs.cend(), [&screens](const auto &output) {
+                    return std::any_of(screens.cbegin(), screens.cend(), [&output](const auto *screen) {
+                        return screen->name() == output.backendKey && screen->geometry() == output.logicalGeometry;
+                    });
+                });
+            if (!screensAgree) { m_multiSettle.start(200); return; }
+        }
         if (m_addPending) {
             if (!m_control.active || m_control.generation != m_addPending->generation) {
                 finishAdd(QStringLiteral("virtual output authority changed during creation"));
@@ -505,6 +537,12 @@ private:
                 m_socket.disconnectFromServer();
                 return;
             }
+            if (m_removePending && (!removeMatches(*kscreen) || !m_control.active
+                || m_control.generation != m_removePending->generation)) {
+                finishRemove(QStringLiteral("remaining outputs differ from preview after captured readback"));
+                m_socket.disconnectFromServer();
+                return;
+            }
             qInfo() << "Retained KScreen readback confirmed" << kscreen->outputs.size() << "independent captured outputs";
             m_outputs = result.outputs;
             m_multiPublishedFrames = result.frames;
@@ -536,6 +574,7 @@ private:
             } else finishPosition({});
         }
         if (result.becameReady && m_addPending) finishAdd({});
+        if (result.becameReady && m_removePending) finishRemove({});
     }
 
     std::optional<RetainedKScreenReadback::Snapshot> readKScreen() const
@@ -578,8 +617,70 @@ private:
         m_addPending.reset();
         m_addDeadline.stop();
         m_addPlaced = false;
-        if (error.isEmpty()) m_ownedCreators.push_back(std::move(m_addCreator));
+        if (error.isEmpty()) m_ownedCreators.emplace_back(request.output, std::move(m_addCreator));
         m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::AddVirtualResult{request.requestId, request.generation, error}));
+    }
+
+    bool removeMatches(const RetainedKScreenReadback::Snapshot &current) const
+    {
+        if (!m_removePending || current.outputs.size() + 1 != m_removeBefore.outputs.size()) return false;
+        for (const auto &old : m_removeBefore.outputs) {
+            const auto found = std::find_if(current.outputs.cbegin(), current.outputs.cend(), [&old](const auto &output) {
+                return output.backendKey == old.backendKey;
+            });
+            if (old.backendKey == m_removePending->output) {
+                if (found != current.outputs.cend()) return false;
+            } else if (found == current.outputs.cend() || found->nativePixels != old.nativePixels
+                || found->logicalGeometry != old.logicalGeometry || found->primary != old.primary
+                || !VirtualResize::sameScale(found->scale, old.scale)) return false;
+        }
+        return true;
+    }
+
+    void finishRemove(const QString &error)
+    {
+        if (!m_removePending) return;
+        const auto request = *m_removePending;
+        m_removePending.reset();
+        m_removeDeadline.stop();
+        m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::RemoveVirtualResult{request.requestId, request.generation, error}));
+    }
+
+    void removeVirtual(const ConsoleWorkerWire::RemoveVirtual &request)
+    {
+        const auto reject = [this, &request](const QString &error) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::RemoveVirtualResult{request.requestId, request.generation, error}));
+        };
+        if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
+            || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending
+            || m_multiPublishedFrames.size() < 3) {
+            reject(QStringLiteral("virtual output removal unavailable or not authorized"));
+            return;
+        }
+        const auto creator = std::find_if(m_ownedCreators.begin(), m_ownedCreators.end(), [&request](const auto &owned) {
+            return owned.first == request.output;
+        });
+        if (creator == m_ownedCreators.end()) {
+            reject(QStringLiteral("worker does not own this virtual output"));
+            return;
+        }
+        const auto before = readKScreen();
+        if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)
+            || before->outputs.size() < 3
+            || std::none_of(before->outputs.cbegin(), before->outputs.cend(), [&request](const auto &output) {
+                return output.backendKey == request.output && !output.primary;
+            })) {
+            reject(QStringLiteral("fresh compositor readback refused removal"));
+            return;
+        }
+        releaseInput();
+        m_multiReady = false;
+        m_multiPublishedFrames.clear();
+        m_removeBefore = *before;
+        m_removePending = request;
+        m_removeDeadline.start();
+        m_ownedCreators.erase(creator); // Release only this worker-owned KWin output.
+        m_multiSettle.start(200);
     }
 
     void addVirtual(const ConsoleWorkerWire::AddVirtual &request)
@@ -588,7 +689,7 @@ private:
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::AddVirtualResult{request.requestId, request.generation, error}));
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
-            || m_control.generation != request.generation || m_positionPending || m_addPending
+            || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending
             || m_multiPublishedFrames.size() < 2) {
             reject(QStringLiteral("virtual output creation unavailable or not authorized"));
             return;
@@ -644,7 +745,8 @@ private:
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionResult{request.requestId, request.generation, error}));
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
-            || !m_control.active || m_control.generation != request.generation || m_positionPending || m_addPending) {
+            || !m_control.active || m_control.generation != request.generation
+            || m_positionPending || m_addPending || m_removePending) {
             reject(QStringLiteral("position unavailable or not authorized"));
             return;
         }
@@ -769,6 +871,10 @@ private:
                 addVirtual(*request);
                 continue;
             }
+            if (const auto request = ConsoleWorkerWire::removeVirtual(*record)) {
+                removeVirtual(*request);
+                continue;
+            }
             if (const auto request = ConsoleWorkerWire::position(*record)) {
                 position(*request);
                 continue;
@@ -856,8 +962,11 @@ private:
     std::optional<ConsoleWorkerWire::AddVirtual> m_addPending;
     RetainedKScreenReadback::Snapshot m_addBefore;
     std::unique_ptr<PlasmaScreencastV1Session> m_addCreator;
-    std::vector<std::unique_ptr<PlasmaScreencastV1Session>> m_ownedCreators;
+    std::vector<std::pair<QString, std::unique_ptr<PlasmaScreencastV1Session>>> m_ownedCreators;
     bool m_addPlaced = false;
+    QTimer m_removeDeadline;
+    std::optional<ConsoleWorkerWire::RemoveVirtual> m_removePending;
+    RetainedKScreenReadback::Snapshot m_removeBefore;
     QVector<VideoFrame> m_multiPublishedFrames;
     quint64 m_multiEpoch = 0;
     quint8 m_multiQuality = 80;

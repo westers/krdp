@@ -27,7 +27,33 @@ private Q_SLOTS:
     void microphoneRecordsAreBoundedAndCorrelated();
     void positionRecordsAreBoundedAndCorrelated();
     void addVirtualRecordsAreBoundedAndCorrelated();
+    void removeVirtualRecordsRequireOwnedName();
 };
+
+void ConsoleWorkerWireTest::removeVirtualRecordsRequireOwnedName()
+{
+    Deframer reader;
+    const RemoveVirtual request{11, 9, QStringLiteral("Virtual-krdp-added-abcdef")};
+    const RemoveVirtualResult answer{11, 9, QStringLiteral("capture failed")};
+    reader.feed(frame(request) + frame(answer));
+    const auto first = reader.next();
+    QVERIFY(first);
+    QCOMPARE(removeVirtual(*first), std::optional<RemoveVirtual>(request));
+    auto truncated = *first;
+    truncated.payload.chop(1);
+    QVERIFY(!removeVirtual(truncated));
+    const auto second = reader.next();
+    QVERIFY(second);
+    QCOMPARE(removeVirtualResult(*second), std::optional<RemoveVirtualResult>(answer));
+    for (const auto &bad : {RemoveVirtual{0, 9, request.output}, RemoveVirtual{11, 0, request.output},
+                            RemoveVirtual{11, 9, QStringLiteral("Virtual-0")},
+                            RemoveVirtual{11, 9, QStringLiteral("Virtual-krdp-added-../bad")}}) {
+        reader.feed(frame(bad));
+        const auto record = reader.next();
+        QVERIFY(record);
+        QVERIFY(!removeVirtual(*record));
+    }
+}
 
 void ConsoleWorkerWireTest::addVirtualRecordsAreBoundedAndCorrelated()
 {
