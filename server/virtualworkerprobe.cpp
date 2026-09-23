@@ -5,6 +5,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcess>
 #include <QTemporaryFile>
 #include <QTimer>
@@ -23,8 +25,9 @@ int main(int argc, char **argv)
     const auto arguments = app.arguments();
     const bool managed = arguments.size() == 3 && arguments[1] == QStringLiteral("--managed-session");
     const bool inputProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-input");
+    const bool dragProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-drag");
     const bool mixed = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi-mixed") || inputProbe);
-    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed);
+    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || dragProbe);
     if (arguments.size() != 1 && !managed && !multi) return 1;
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     const QFileInfo runtimeInfo(runtime);
@@ -80,12 +83,13 @@ int main(int argc, char **argv)
     QSet<int> capturedOutputs;
     bool resizeRefused = false;
     bool inputSent = false;
-    bool inputVerified = !inputProbe;
+    bool inputVerified = !inputProbe && !dragProbe;
+    bool postMoveCaptured = !dragProbe;
     bool stopping = false;
     int result = 1;
     ConsoleWorkerWire::Outputs outputs;
     const auto maybeStop = [&] {
-        if (captured && resizeRefused && inputVerified && !stopping) {
+        if (captured && resizeRefused && inputVerified && postMoveCaptured && !stopping) {
             stopping = true;
             endpoint.stopWorker();
         }
@@ -95,11 +99,38 @@ int main(int argc, char **argv)
     QObject::connect(&inputTimer, &QTimer::timeout, &app, [&] {
         QFile log(runtime + QStringLiteral("/kwin.log"));
         if (!log.open(QIODevice::ReadOnly)) return;
-        if (!log.readAll().contains("krdp-monitor-probe: cursor=1224,300")) return;
+        const auto contents = log.readAll();
+        if (dragProbe) {
+            if (!contents.contains("krdp-monitor-drag: outputChanged=Virtual-1")) return;
+            endpoint.requestKeyFrame();
+            qInfo("Private KWin observed worker-input drag move to Virtual-1");
+        } else if (!contents.contains("krdp-monitor-probe: cursor=1224,300")) return;
         inputVerified = true;
         inputTimer.stop();
-        qInfo("Private KWin observed mixed-scale second-output pointer at logical (1224,300)");
+        if (!dragProbe) qInfo("Private KWin observed mixed-scale second-output pointer at logical (1224,300)");
         maybeStop();
+    });
+    QPointF dragFrom;
+    QPointF dragTo;
+    QTimer dragTimer;
+    dragTimer.setInterval(50);
+    int dragStep = 0;
+    QObject::connect(&dragTimer, &QTimer::timeout, &app, [&] {
+        ++dragStep;
+        ConsoleWorkerWire::Input drag;
+        drag.type = ConsoleWorkerWire::Input::Type::Mouse;
+        drag.eventType = QEvent::MouseMove;
+        drag.position = dragFrom + (dragTo - dragFrom) * (double(dragStep) / 14.0);
+        drag.buttons = Qt::LeftButton;
+        endpoint.sendInput(drag);
+        if (dragStep == 14) {
+            dragTimer.stop();
+            drag.eventType = QEvent::MouseButtonRelease;
+            drag.button = Qt::LeftButton;
+            drag.buttons = Qt::NoButton;
+            endpoint.sendInput(drag);
+            inputTimer.start();
+        }
     });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::workerReady, &app, [&](const auto &) {
         endpoint.setControlState({1, true});
@@ -131,6 +162,10 @@ int main(int argc, char **argv)
         capturedOutputs.insert(frame.monitorIndex);
         captured = capturedOutputs.size() == expected;
         qInfo() << "Authenticated virtual worker keyframe" << frame.monitorIndex << frame.size << frame.data.size();
+        if (dragProbe && inputVerified && frame.monitorIndex == 1) {
+            postMoveCaptured = true;
+            qInfo("Captured second output again after KWin drag destination changed");
+        }
         if (captured && inputProbe && !inputSent) {
             inputSent = true;
             // Deliberately send no separate motion. The worker must position
@@ -147,6 +182,39 @@ int main(int argc, char **argv)
             endpoint.sendInput(click);
             inputTimer.start();
         }
+        if (captured && dragProbe && !inputSent) {
+            inputSent = true;
+            QFile log(runtime + QStringLiteral("/kwin.log"));
+            if (!log.open(QIODevice::ReadOnly)) { app.quit(); return; }
+            const auto contents = log.readAll();
+            const auto marker = QByteArrayLiteral("krdp-monitor-drag: before output=Virtual-0 geometry=");
+            const int line = contents.indexOf(marker);
+            const int startJson = line < 0 ? -1 : contents.indexOf('{', line);
+            const int endJson = startJson < 0 ? -1 : contents.indexOf('}', startJson);
+            if (endJson < 0) { app.quit(); return; }
+            int lineEnd = contents.indexOf('\n', endJson);
+            if (lineEnd < 0) lineEnd = contents.size();
+            if (!contents.mid(endJson, lineEnd - endJson).contains("movable=true")) { app.quit(); return; }
+            const auto geometry = QJsonDocument::fromJson(contents.mid(startJson, endJson - startJson + 1)).object();
+            const double x = geometry.value(QStringLiteral("x")).toDouble(-1);
+            const double y = geometry.value(QStringLiteral("y")).toDouble(-1);
+            const double width = geometry.value(QStringLiteral("width")).toDouble(-1);
+            if (x < 0 || y < 0 || width < 100) { app.quit(); return; }
+            dragFrom = QPointF(x + std::min(width / 2.0, 200.0), y + 12.0);
+            dragTo = QPointF(std::min(dragFrom.x() + 1400.0, 2400.0), dragFrom.y() + 40.0);
+            qInfo() << "Dragging marked Konsole titlebar from" << dragFrom << "to" << dragTo;
+            ConsoleWorkerWire::Input pointer;
+            pointer.type = ConsoleWorkerWire::Input::Type::Mouse;
+            pointer.eventType = QEvent::MouseMove;
+            pointer.position = dragFrom;
+            endpoint.sendInput(pointer);
+            pointer.eventType = QEvent::MouseButtonPress;
+            pointer.button = Qt::LeftButton;
+            pointer.buttons = Qt::LeftButton;
+            endpoint.sendInput(pointer);
+            dragStep = 0;
+            dragTimer.start();
+        }
         maybeStop();
     });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::protocolError, &app, [&](const QString &message) {
@@ -154,15 +222,15 @@ int main(int argc, char **argv)
         app.quit();
     });
     if (managed) QObject::connect(&endpoint, &ConsoleWorkerEndpoint::workerStopped, &app, [&] {
-        result = captured && resizeRefused && inputVerified && stopping ? 0 : 1;
+        result = captured && resizeRefused && inputVerified && postMoveCaptured && stopping ? 0 : 1;
         app.quit();
     });
     QObject::connect(&worker, &QProcess::errorOccurred, &app, [&](auto) { app.quit(); });
     QObject::connect(&worker, &QProcess::finished, &app, [&](int code, QProcess::ExitStatus status) {
-        result = captured && resizeRefused && inputVerified && stopping && code == 0 && status == QProcess::NormalExit ? 0 : 1;
+        result = captured && resizeRefused && inputVerified && postMoveCaptured && stopping && code == 0 && status == QProcess::NormalExit ? 0 : 1;
         app.quit();
     });
-    QTimer::singleShot(inputProbe ? 25000 : 20000, &app, &QCoreApplication::quit);
+    QTimer::singleShot(inputProbe || dragProbe ? 30000 : 20000, &app, &QCoreApplication::quit);
     // Managed mode owns only the broker endpoint. The existing desktop loop
     // supplies its worker; this process must never enter or stop the guardian.
     if (!managed) worker.start();
