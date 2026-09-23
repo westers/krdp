@@ -10,6 +10,7 @@
 #include "RetainedMultiPositionPlan.h"
 #include "RetainedMultiFitPlan.h"
 #include "RetainedMultiPrimaryPlan.h"
+#include "RetainedMultiMixedPlan.h"
 
 using namespace KRdp::RetainedKScreenReadback;
 
@@ -54,6 +55,86 @@ class RetainedKScreenReadbackTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void mixedExistingOutputsPreflightOneFinalLayout()
+    {
+        namespace Mixed = KRdp::RetainedMultiMixedPlan;
+        using Kind = KRdp::RemoteTopologyDraft::Operation::Kind;
+        const auto before = decoded(root());
+        QVERIFY(before);
+        const KRdp::RetainedMultiPrimaryPlan::Priorities priorities{
+            {QStringLiteral("Virtual-0"), 1}, {QStringLiteral("Virtual-1"), 2}};
+        QVector<Mixed::Operation> operations;
+        Mixed::Operation resize;
+        resize.kind = Kind::Resize;
+        resize.id = QStringLiteral("Virtual-0");
+        resize.pixels = QSize(1600, 900);
+        resize.scale = 1.25;
+        operations.append(resize);
+        Mixed::Operation move;
+        move.kind = Kind::Move;
+        move.id = QStringLiteral("Virtual-1");
+        move.position = QPoint(1280, 100);
+        operations.append(move);
+        Mixed::Operation primary;
+        primary.kind = Kind::SetPrimary;
+        primary.id = QStringLiteral("Virtual-1");
+        operations.append(primary);
+        const auto plan = Mixed::make(*before, QStringLiteral("lease-1"), priorities, operations);
+        QVERIFY(plan);
+        QVERIFY(plan->changed);
+        QCOMPARE(plan->after[0].nativePixels, QSize(1600, 900));
+        QCOMPARE(plan->after[1].logicalGeometry.topLeft(), QPoint(1280, 100));
+        QVERIFY(plan->after[1].primary);
+        QCOMPARE(plan->requestedPriorities.value(QStringLiteral("Virtual-1")), 1);
+        KRdp::VirtualResize::Snapshot state;
+        state.name = QStringLiteral("Virtual-0");
+        state.position = QPoint(0, 0);
+        state.scale = 1.25;
+        state.current = {QStringLiteral("old"), QSize(1280, 720), 60000};
+        state.modes = {state.current, {QStringLiteral("new"), QSize(1600, 900), 60000}};
+        const QMap<QString, KRdp::VirtualResize::Snapshot> states{{state.name, state}};
+        const QMap<QString, KRdp::VirtualResize::Mode> modes{{state.name, state.modes.last()}};
+        const auto args = Mixed::arguments(*plan, states, modes);
+        QVERIFY(args);
+        QCOMPARE(*args, (QStringList{QStringLiteral("output.Virtual-0.mode.new"),
+            QStringLiteral("output.Virtual-0.scale.1.25"),
+            QStringLiteral("output.Virtual-1.position.1280,100"),
+            QStringLiteral("output.Virtual-0.priority.2"), QStringLiteral("output.Virtual-1.priority.1")}));
+        auto landed = *before;
+        landed.outputs = plan->after;
+        QVERIFY(Mixed::matches(*plan, landed, plan->requestedPriorities));
+        auto appliedState = state;
+        appliedState.current = state.modes.last();
+        const QMap<QString, KRdp::VirtualResize::Snapshot> appliedStates{{state.name, appliedState}};
+        const auto recovery = Mixed::recoveryArguments(*plan, landed, plan->requestedPriorities,
+            appliedStates, states, modes);
+        QVERIFY(recovery);
+        QCOMPARE(*recovery, (QStringList{QStringLiteral("output.Virtual-0.mode.old"),
+            QStringLiteral("output.Virtual-0.scale.1.25"),
+            QStringLiteral("output.Virtual-1.position.1024,100"),
+            QStringLiteral("output.Virtual-0.priority.1"), QStringLiteral("output.Virtual-1.priority.2")}));
+        landed.outputs[0].logicalGeometry.moveLeft(1);
+        QVERIFY(!Mixed::matches(*plan, landed, plan->requestedPriorities));
+        QVERIFY(!Mixed::recoveryArguments(*plan, landed, plan->requestedPriorities,
+            appliedStates, states, modes));
+        auto wrongModes = modes;
+        wrongModes[state.name] = state.current;
+        QVERIFY(!Mixed::arguments(*plan, states, wrongModes));
+        auto noReflow = operations;
+        noReflow.removeAt(1);
+        QVERIFY(!Mixed::make(*before, QStringLiteral("lease-1"), priorities, noReflow));
+        auto duplicate = operations;
+        duplicate.append(move);
+        QVERIFY(!Mixed::make(*before, QStringLiteral("lease-1"), priorities, duplicate));
+        auto physical = *before;
+        physical.outputs[1].physical = true;
+        QVERIFY(!Mixed::make(physical, QStringLiteral("lease-1"), priorities, operations));
+        QVERIFY(!Mixed::make(*before, QStringLiteral("foreign"), priorities, operations));
+        auto invalidPriorities = priorities;
+        invalidPriorities[QStringLiteral("Virtual-1")] = 1;
+        QVERIFY(!Mixed::make(*before, QStringLiteral("lease-1"), invalidPriorities, operations));
+    }
+
     void multiPositionPreflightsPeersAndExactReadback()
     {
         const auto before = decoded(root());
