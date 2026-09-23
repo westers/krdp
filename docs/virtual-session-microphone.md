@@ -1,6 +1,8 @@
 # Microphone forwarding into an independent desktop
 
-Transport implemented and regression-tested; not yet deployed or live-accepted.
+Transport implemented, deployed to Sol's isolated virtual broker, and live-tested
+with the native Buzz client (2026-09-22). Physical microphone/browser-conference
+and camera acceptance are separate.
 
 Reuse the existing physical-console microphone transport: AUDIN on the RDP
 connection, bounded external PCM queue, generation-tagged worker IPC, and the
@@ -36,4 +38,14 @@ Transport's 30 QtTest cases also passed ASAN/UBSAN (Qt/KRdp shared libraries
 are not sanitizer-instrumented). Synthetic IPC tests cover the forwarding and
 teardown logic; they do not fabricate a real PAM/RDP login or prove end-to-end
 AUDIN capture. The unchanged client already resends saved opt-in media policy
-after a correlated successful virtual attach. Live Sol/Buzz verification remains.
+after a correlated successful virtual attach.
+
+Live Sol/Buzz acceptance passed using a synthetic997Hz source, not a physical
+microphone: private PipeWire capture mean -24.7dBFS, reconnect/private Pulse
+capture mean -25.0dBFS. Playback to Buzz concurrently measured -26.0dBFS;
+all three monitored Sol physical outputs contained exactly zero PCM samples.
+Detach removed the source and restored the private default; reconnect renewed
+consent with a new worker generation. The disposable desktop stopped normally;
+the older uncertain failed records were preserved. No physical service restart
+or routing change. Detailed recordings/logs/results are in the shared workspace
+`rdp/evidence/virtual-microphone-eb1da3c/RESULT.md`.
