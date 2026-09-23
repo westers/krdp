@@ -16,7 +16,11 @@ scaled visual drag draft, Preview and Apply (`3b7fcee` client; server
 `8f51fb0`/`04e868c`/`d958e6d`). The detailed evidence is
 `~/dev/rdp/evidence/2026-09-23-retained-multi-output-sol.md`. This does not
 complete Console topology, add/remove, Fit/Match, multi-operation drafts,
-mixed-scale GUI acceptance or package deployment.
+or package deployment. A later isolated 125%/100% Sol/Buzz GUI run accepted a
+visual drag and authenticated position commit with compositor logical
+`(1024,100)→(1024,209)` and verified capture (`d674f9a` probe,
+`d096cfc` client tooltip follow-up). This is one supported move, not a
+general mixed-scale topology implementation.
 
 ## Phase 0 — Diagnose the missing KDE monitor behavior
 

@@ -10,6 +10,10 @@ KScreen/captured-keyframe proof. No installed server/client or production path
 is claimed. Console query, add/remove/resize/scale/primary, Fit/Match and full
 runtime acceptance remain absent. A visual arrangement is now the client UI's
 main draft control; X/Y remains under Advanced.
+An additional disposable 125%/100% Sol/Buzz source-GUI run confirmed that the
+visual editor uses logical aspect/position and committed one virtual move from
+`(1024,100)` to `(1024,209)` with revision 1→2 and unchanged IDs. This does
+not advertise any additional operation.
 This fills in phase 1 of the
 [remote monitor layout plan](../plans/2026-09-22-remote-monitor-layout.md).
 The existing `KRDPCTL` v1 `apply` remains for older clients. A new editor must
@@ -50,8 +54,8 @@ packets in retained multi-output mode; a bounded Sol private-compositor
 click-only probe placed the pointer at the expected mixed-scale logical
 coordinate. A later private Sol worker-endpoint pointer drag also moved a
 marked Konsole across the seam to Virtual-1 and decoded a fresh destination
-keyframe (`e982f21`/`0802ee6` probe). GUI/RDP-driven window drag, application click effect, mixed-scale GUI,
-installed broker and deployment remain unaccepted; a later position write passed isolated RDP acceptance. Other
+keyframe (`e982f21`/`0802ee6` probe). GUI/RDP-driven window drag, application click effect,
+installed broker and deployment remain unaccepted; a later mixed-scale visual position write passed isolated RDP acceptance. Other
 backends have no new query handler yet. The readback parser accepts the saved
 isolated Sol 125%/100% two-output KScreen fixture; a subsequent bounded Sol
 worker probe logged that the independent two-output KScreen readback matched
