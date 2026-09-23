@@ -54,7 +54,7 @@ public:
      * how the wrapper tells the two apart.
      */
     struct MonitorLayout {
-        /** One entry per RDPGFX surface, in KWin-global PIXEL coordinates. */
+        /** One entry per RDPGFX surface, in a non-overlapping pixel atlas. */
         QVector<KRdp::VideoMonitor> monitors;
         /** Connector name of the screen behind each entry, for logging. */
         QStringList names;
@@ -64,12 +64,14 @@ public:
          * Per-entry pixels per logical unit, parallel to `monitors`, for a
          * layout whose monitors are at different scales (a `KRDPCTL` layout
          * with a 125 % virtual monitor beside 100 % real ones, OPT-044):
-         * each entry's geometry is then its KWin logical position with its
-         * pixel size, and input is mapped through the entry it lands on.
+         * each entry's wire geometry is paired with the KWin logical origin
+         * in logicalOrigins; input maps through that same entry.
          * Empty for the uniform-scale `multi` layout, where `scale` applies
          * to the whole desktop.
          */
         QVector<qreal> scales;
+        /** KWin compositor origins, parallel to the projected RDP surfaces. */
+        QVector<QPoint> logicalOrigins;
 
         bool isEmpty() const
         {

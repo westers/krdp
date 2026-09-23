@@ -104,6 +104,18 @@ private Q_SLOTS:
         QCOMPARE(enabledUnion(oneOff), QRect(0, 0, 2560, 1440));
     }
 
+    void fractionalScaleUnionAndRightmostAnchorUseLogicalCoordinates()
+    {
+        QVector<Output> outputs{
+            {QStringLiteral("DP-1"), true, QPoint(-100, 100), 1, QSize(1280, 720), 1.0},
+            {QStringLiteral("HDMI-A-1"), true, QPoint(1180, 300), 2, QSize(1600, 900), 1.25},
+        };
+        QCOMPARE(enabledUnion(outputs), QRect(-100, 100, 2560, 920));
+        QCOMPARE(rightmostEnabledAnchor(outputs), QPoint(2460, 300));
+        outputs[1].enabled = false;
+        QCOMPARE(rightmostEnabledAnchor(outputs), QPoint(1180, 100));
+    }
+
     void replaceArgsDisablePhysicalsAndPlaceVirtuals()
     {
         const auto physical = physicalOnly(parse(kscreenJson));

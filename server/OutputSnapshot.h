@@ -21,6 +21,7 @@
 
 #include "ClientDisplayInfo.h"
 #include "LayoutControl.h"
+#include "RemoteMonitorGeometry.h"
 
 namespace KRdp
 {
@@ -110,16 +111,34 @@ inline QVector<Output> physicalOnly(const QVector<Output> &outputs)
     return physical;
 }
 
-/** Bounding rect of the enabled outputs; invalid when none is enabled. */
+/** Bounding rect of enabled outputs in KWin logical coordinates. */
 inline QRect enabledUnion(const QVector<Output> &outputs)
 {
     QRect rect;
     for (const auto &output : outputs) {
         if (output.enabled) {
-            rect |= QRect(output.position, output.size);
+            rect |= RemoteMonitorGeometry::logicalRect(output.position, output.size, output.scale);
         }
     }
     return rect;
+}
+
+/** A new output touches the rightmost enabled output, aligned with its top. */
+inline QPoint rightmostEnabledAnchor(const QVector<Output> &outputs)
+{
+    const Output *rightmost = nullptr;
+    int edge = 0;
+    for (const auto &output : outputs) {
+        if (!output.enabled) {
+            continue;
+        }
+        const int candidate = RemoteMonitorGeometry::logicalRect(output.position, output.size, output.scale).right() + 1;
+        if (!rightmost || candidate > edge) {
+            rightmost = &output;
+            edge = candidate;
+        }
+    }
+    return rightmost ? QPoint(edge, rightmost->position.y()) : QPoint(0, 0);
 }
 
 /**

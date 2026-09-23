@@ -10,6 +10,7 @@
 #include <QTest>
 
 #include "LayoutControl.h"
+#include "RemoteMonitorGeometry.h"
 #include "AudioPriority.h"
 
 using namespace KRdp;
@@ -571,6 +572,86 @@ private Q_SLOTS:
         QCOMPARE(created->kind, Kind::Virtual);
         QCOMPARE(created->position, QPoint(5120, 0));
         QCOMPARE(created->owner, QStringLiteral("conn-1"));
+    }
+
+    void newMonitorSharesLogicalEdgeAtFractionalScale()
+    {
+        Layout layout;
+        auto main = realMonitor(QStringLiteral("DP-1"), QSize(1600, 900), QPoint(0, 0), true);
+        main.scale = 1.25; // 1280x720 in KWin's logical layout.
+        layout.monitors = {main};
+        ApplyRequest request;
+        request.monitors = {newMonitorEntry(QSize(1920, 1080), 1.0)};
+        const auto answer = plan(layout, request, QStringLiteral("owner"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(answer));
+        const auto &created = std::get<Plan>(answer).resulting.monitors.last();
+        QCOMPARE(created.position, QPoint(1280, 0));
+    }
+
+    void invalidNewMonitorGeometryIsRefusedBeforePlacement()
+    {
+        for (const auto &entry : {newMonitorEntry(QSize(0, 1080)), newMonitorEntry(QSize(1920, 1080), 0.0)}) {
+            ApplyRequest request;
+            request.monitors = {entry};
+            const auto answer = plan(hal9000Layout(), request, QStringLiteral("owner"), Caps{});
+            QVERIFY(std::holds_alternative<Error>(answer));
+            QCOMPARE(std::get<Error>(answer).code, QStringLiteral("invalid"));
+        }
+    }
+
+    void newMonitorAlignsToRightmostOutputsTopEdge()
+    {
+        Layout layout;
+        layout.monitors = {
+            realMonitor(QStringLiteral("DP-1"), QSize(1280, 720), QPoint(-100, 100), true),
+            realMonitor(QStringLiteral("HDMI-A-1"), QSize(1600, 900), QPoint(1180, 300), false),
+        };
+        layout.monitors[1].scale = 1.25; // x=1180..2460 in logical space.
+        ApplyRequest request;
+        request.monitors = {newMonitorEntry(QSize(800, 600))};
+        const auto answer = plan(layout, request, QStringLiteral("owner"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(answer));
+        QCOMPARE(std::get<Plan>(answer).resulting.monitors.last().position, QPoint(2460, 300));
+    }
+
+    void mixedScaleWireSurfacesRemainDisjointAndMapBackToLogical()
+    {
+        using namespace KRdp::RemoteMonitorGeometry;
+        const QVector<Output> outputs{
+            {QPoint(-100, 100), QSize(1600, 900), 1.25, true},
+            {QPoint(1180, 300), QSize(1920, 1080), 1.0, false},
+            {QPoint(3100, 300), QSize(800, 600), 1.0, false},
+        };
+        const auto wire = projectToWire(outputs);
+        QCOMPARE(wire.size(), 3);
+        QVERIFY(ClientDisplay::disjoint(wire));
+        QCOMPARE(wire.at(0).geometry.topLeft(), QPoint(0, 0));
+        QCOMPARE(wire.at(1).geometry.topLeft(), QPoint(1600, 200));
+        QCOMPARE(wire.at(2).geometry.topLeft(), QPoint(3520, 200));
+        QCOMPARE(wireToLogical(QPointF(wire.at(1).geometry.topLeft()), wire, outputs), QPointF(1180, 300));
+        QCOMPARE(wireToLogical(QPointF(wire.at(2).geometry.topLeft()) + QPointF(50, 20), wire, outputs), QPointF(3150, 320));
+    }
+
+    void wireProjectionPreservesFourWayLogicalReachability()
+    {
+        using namespace KRdp::RemoteMonitorGeometry;
+        const QVector<Output> outputs{
+            {QPoint(0, 0), QSize(1500, 900), 1.5, true},
+            {QPoint(-800, 100), QSize(800, 600), 1.0, false},
+            {QPoint(1000, 0), QSize(900, 700), 1.0, false},
+            {QPoint(200, -500), QSize(600, 500), 1.0, false},
+            {QPoint(200, 600), QSize(600, 500), 1.0, false},
+        };
+        const auto wire = projectToWire(outputs);
+        QVERIFY(ClientDisplay::disjoint(wire));
+        for (qsizetype i = 0; i < outputs.size(); ++i) {
+            QCOMPARE(wireToLogical(QPointF(wire.at(i).geometry.topLeft()), wire, outputs), QPointF(outputs.at(i).logicalPosition));
+        }
+        QCOMPARE(wire.at(0).geometry, QRect(800, 500, 1500, 900));
+        QCOMPARE(wire.at(1).geometry.right() + 1, wire.at(0).geometry.left());
+        QCOMPARE(wire.at(0).geometry.right() + 1, wire.at(2).geometry.left());
+        QCOMPARE(wire.at(3).geometry.bottom() + 1, wire.at(0).geometry.top());
+        QCOMPARE(wire.at(0).geometry.bottom() + 1, wire.at(4).geometry.top());
     }
 
     void twoNewMonitorsInOneApplyLandSideBySide()

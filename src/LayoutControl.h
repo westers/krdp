@@ -38,8 +38,8 @@ enum class Kind {
 /**
  * One monitor of the host layout, as shown to `KRDPCTL` clients.
  *
- * A real monitor's `size` and `position` are its native, unchanging geometry
- * (MonitorMode never changes a real output's mode); `standIn`/`lit`/
+ * A real monitor's `size` is native pixels and `position` is KWin logical.
+ * MonitorMode never changes a real output's mode; `standIn`/`lit`/
  * `standInSize`/`standInScale` are the only fields planning ever changes on
  * it. A virtual monitor's `size`, `position` and `scale` are exactly what was
  * requested/placed for it (and can be changed later by a resizing `apply`).

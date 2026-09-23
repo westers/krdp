@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "LayoutControl.h"
+#include "RemoteMonitorGeometry.h"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 #include <QDataStream>
@@ -211,16 +213,6 @@ std::optional<ApplyMonitor> applyMonitorFromJson(const QJsonValue &value)
     return monitor;
 }
 
-/** The bounding union, in host desktop coordinates, of \a monitors. Invalid (null) when empty. */
-QRect unionOf(const QList<HostMonitor> &monitors)
-{
-    QRect result;
-    for (const auto &monitor : monitors) {
-        result |= QRect(monitor.position, monitor.size);
-    }
-    return result;
-}
-
 /** The lowest n >= 1 not already used by a "virtual-<n>" id in \a monitors. */
 int lowestFreeVirtualNumber(const QList<HostMonitor> &monitors)
 {
@@ -250,23 +242,36 @@ int lowestFreeVirtualNumber(const QList<HostMonitor> &monitors)
 std::optional<Error> sanitizeResult(const QList<HostMonitor> &monitors, const Caps &caps)
 {
     for (const auto &monitor : monitors) {
-        if (monitor.size.width() > caps.maxOutputPx || monitor.size.height() > caps.maxOutputPx) {
+        const QSize size = monitor.kind == Kind::Real && monitor.standIn && monitor.standInSize ? *monitor.standInSize : monitor.size;
+        const qreal scale = monitor.kind == Kind::Real && monitor.standIn && monitor.standInScale ? *monitor.standInScale : monitor.scale;
+        if (monitor.size.isEmpty() || size.isEmpty() || !std::isfinite(scale) || scale <= 0.0
+            || size.width() / scale > caps.maxUnionPx || size.height() / scale > caps.maxUnionPx) {
+            return Error{QStringLiteral("invalid"), QStringLiteral("monitor %1 has invalid size or scale").arg(monitor.id)};
+        }
+        if (size.width() > caps.maxOutputPx || size.height() > caps.maxOutputPx) {
             return Error{QStringLiteral("invalid"), QStringLiteral("monitor %1 exceeds the %2px output limit").arg(monitor.id).arg(caps.maxOutputPx)};
         }
     }
 
-    const QRect union_ = unionOf(monitors);
-    if (union_.width() > caps.maxUnionPx || union_.height() > caps.maxUnionPx) {
-        return Error{QStringLiteral("invalid"), QStringLiteral("layout union exceeds the %1px limit").arg(caps.maxUnionPx)};
-    }
-
     QVector<VideoMonitor> asVideoMonitors;
+    QVector<RemoteMonitorGeometry::Output> wireOutputs;
     asVideoMonitors.reserve(monitors.size());
+    wireOutputs.reserve(monitors.size());
     for (const auto &monitor : monitors) {
-        asVideoMonitors.push_back(VideoMonitor{.geometry = QRect(monitor.position, monitor.size), .primary = monitor.primary});
+        const QSize size = monitor.kind == Kind::Real && monitor.standIn && monitor.standInSize ? *monitor.standInSize : monitor.size;
+        const qreal scale = monitor.kind == Kind::Real && monitor.standIn && monitor.standInScale ? *monitor.standInScale : monitor.scale;
+        asVideoMonitors.push_back(VideoMonitor{.geometry = RemoteMonitorGeometry::logicalRect(monitor.position, size, scale), .primary = monitor.primary});
+        wireOutputs.push_back(RemoteMonitorGeometry::Output{monitor.position, size, scale, monitor.primary});
     }
     if (!ClientDisplay::disjoint(asVideoMonitors)) {
         return Error{QStringLiteral("invalid"), QStringLiteral("monitors overlap")};
+    }
+    QRect wireUnion;
+    for (const auto &entry : RemoteMonitorGeometry::projectToWire(wireOutputs)) {
+        wireUnion |= entry.geometry;
+    }
+    if (wireUnion.width() > caps.maxUnionPx || wireUnion.height() > caps.maxUnionPx) {
+        return Error{QStringLiteral("invalid"), QStringLiteral("layout union exceeds the %1px limit").arg(caps.maxUnionPx)};
     }
 
     const auto primaryCount = std::count_if(monitors.cbegin(), monitors.cend(), [](const HostMonitor &monitor) {
@@ -468,6 +473,10 @@ std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &reques
 {
     QHash<QString, const ApplyMonitor *> mentioned;
     for (const auto &entry : request.monitors) {
+        if ((entry.scale && (!std::isfinite(*entry.scale) || *entry.scale <= 0.0))
+            || (entry.size && entry.size->isEmpty())) {
+            return Error{QStringLiteral("invalid"), QStringLiteral("monitor request has invalid size or scale")};
+        }
         if (!entry.isNew) {
             mentioned.insert(entry.id, &entry);
         }
@@ -633,9 +642,9 @@ std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &reques
         ++it;
     }
 
-    // New virtual monitors, placed left-to-right along the union as it stood
-    // before this apply, extended by each one already placed in this request.
-    QRect placementUnion = unionOf(current.monitors);
+    // Grow from the rightmost enabled monitor's LOGICAL edge and its top.
+    // A union's top can belong to another row and cannot guarantee a
+    // traversable shared edge with the output being extended.
     for (const auto &entry : request.monitors) {
         if (!entry.isNew) {
             continue;
@@ -649,7 +658,25 @@ std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &reques
 
         const int n = lowestFreeVirtualNumber(resultMonitors);
         const QString id = QStringLiteral("virtual-%1").arg(n);
-        const QPoint position(placementUnion.isValid() ? placementUnion.right() + 1 : 0, 0);
+        const HostMonitor *rightmost = nullptr;
+        int rightEdge = 0;
+        for (const auto &candidate : std::as_const(resultMonitors)) {
+            if (candidate.kind == Kind::Real && !candidate.lit && !candidate.standIn) {
+                continue;
+            }
+            const QSize size = candidate.kind == Kind::Real && candidate.standIn && candidate.standInSize ? *candidate.standInSize : candidate.size;
+            const qreal candidateScale = candidate.kind == Kind::Real && candidate.standIn && candidate.standInScale ? *candidate.standInScale : candidate.scale;
+            if (size.isEmpty() || !std::isfinite(candidateScale) || candidateScale <= 0.0
+                || size.width() / candidateScale > caps.maxUnionPx || size.height() / candidateScale > caps.maxUnionPx) {
+                return Error{QStringLiteral("invalid"), QStringLiteral("monitor %1 has invalid size or scale").arg(candidate.id)};
+            }
+            const int edge = RemoteMonitorGeometry::logicalRect(candidate.position, size, candidateScale).right() + 1;
+            if (!rightmost || edge > rightEdge) {
+                rightmost = &candidate;
+                rightEdge = edge;
+            }
+        }
+        const QPoint position(rightmost ? rightEdge : 0, rightmost ? rightmost->position.y() : 0);
         const qreal scale = entry.scale.value_or(1.0);
 
         actions.append(Action{
@@ -659,7 +686,7 @@ std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &reques
             .position = position,
             .scale = scale,
         });
-        resultMonitors.append(HostMonitor{
+        HostMonitor created{
             .id = id,
             .name = id,
             .kind = Kind::Virtual,
@@ -672,8 +699,8 @@ std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &reques
             .standInSize = {},
             .standInScale = {},
             .owner = requester,
-        });
-        placementUnion |= QRect(position, *entry.size);
+        };
+        resultMonitors.append(created);
     }
 
     if (const auto error = sanitizeResult(resultMonitors, caps)) {

@@ -39,6 +39,7 @@
 #endif
 
 #include "LayoutSessionDiff.h"
+#include "RemoteMonitorGeometry.h"
 #include "TakeoverDetector.h"
 #include "VideoStream.h"
 
@@ -587,6 +588,9 @@ public:
             if (old < layout.scales.size()) {
                 survivingLayout.scales.push_back(layout.scales.at(old));
             }
+            if (old < layout.logicalOrigins.size()) {
+                survivingLayout.logicalOrigins.push_back(layout.logicalOrigins.at(old));
+            }
         }
         if (outcome.primary >= 0 && outcome.primary < survivingLayout.monitors.size()) {
             survivingLayout.monitors[outcome.primary].primary = true;
@@ -688,6 +692,14 @@ public:
                                     .arg(geometry.height());
 
         geometry.setSize(captured);
+        if (layout.logicalOrigins.size() == layout.monitors.size() && layout.scales.size() == layout.monitors.size()) {
+            QVector<KRdp::RemoteMonitorGeometry::Output> outputs;
+            outputs.reserve(layout.monitors.size());
+            for (qsizetype i = 0; i < layout.monitors.size(); ++i) {
+                outputs.push_back({layout.logicalOrigins.at(i), layout.monitors.at(i).geometry.size(), layout.scales.at(i), layout.monitors.at(i).primary});
+            }
+            layout.monitors = KRdp::RemoteMonitorGeometry::projectToWire(outputs);
+        }
         // Re-applying the layout is what rebuilds the surfaces; the stream
         // ignores an unchanged one, so this only resets because it changed.
         connection->videoStream()->setMonitorLayout(layout.monitors);
@@ -746,7 +758,9 @@ public:
             if (index < 0 || index >= layout.monitors.size()) {
                 return;
             }
-            const QPoint global = KRdp::LayoutSessions::captureToGlobal(layout.monitors.at(index).geometry, layout.scales.value(index, layout.scale), cursor.position).toPoint();
+            const QPoint logicalOrigin = layout.logicalOrigins.size() == layout.monitors.size() ? layout.logicalOrigins.at(index) : layout.monitors.at(index).geometry.topLeft();
+            const QRect logicalEntry(logicalOrigin, layout.monitors.at(index).geometry.size());
+            const QPoint global = KRdp::LayoutSessions::captureToGlobal(logicalEntry, layout.scales.value(index, layout.scale), cursor.position).toPoint();
             if (takeover.observed(global, m_clock.elapsed())) {
                 qInfo() << "Console activity detected; restoring the physical outputs (the KRDPCTL layout is released, its owner kept)";
                 Q_EMIT consoleActivityDetected();
@@ -898,7 +912,7 @@ public:
                 return;
             }
             const auto mouseEvent = std::static_pointer_cast<QMouseEvent>(event);
-            // RDP desktop space -> KWin-global pixels -> KWin-global logical,
+            // RDP desktop space -> wire pixel atlas -> KWin-global logical,
             // which is what org_kde_kwin_fake_input's pointer_motion_absolute
             // takes. originOf() is the exact inverse of the translation
             // VideoStream::setMonitorLayout() applied to this same layout.
@@ -926,36 +940,23 @@ public:
     }
 
     /**
-     * KWin-global pixel position (a layout entry's coordinate space) to
-     * KWin-global logical. Uniform scale: divide. Per-monitor scales (a
-     * KRDPCTL layout, whose entries sit at their logical position with
-     * their pixel size): the entry the point is on - or the nearest, for a
-     * point in a gap - maps it with its own scale from its own origin.
+     * Wire-atlas pixel position to KWin-global logical. Uniform scale:
+     * divide. KRDPCTL per-monitor scale: select the containing surface (or
+     * nearest in a gap), then map its local pixels from its own logical
+     * origin. The wire origin is not a KWin position at mixed scales.
      */
     QPointF toGlobalLogical(const QPointF &pixel) const
     {
         if (layout.scales.size() != layout.monitors.size() || layout.monitors.isEmpty()) {
             return pixel / layout.scale;
         }
-        qsizetype best = 0;
-        qreal bestDistance = std::numeric_limits<qreal>::max();
+        QVector<KRdp::RemoteMonitorGeometry::Output> outputs;
+        outputs.reserve(layout.monitors.size());
         for (qsizetype i = 0; i < layout.monitors.size(); ++i) {
-            const QRectF rect(layout.monitors.at(i).geometry);
-            if (rect.contains(pixel)) {
-                best = i;
-                break;
-            }
-            const qreal dx = std::max({rect.left() - pixel.x(), 0.0, pixel.x() - rect.right()});
-            const qreal dy = std::max({rect.top() - pixel.y(), 0.0, pixel.y() - rect.bottom()});
-            const qreal distance = dx * dx + dy * dy;
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                best = i;
-            }
+            const QPoint origin = layout.logicalOrigins.size() == layout.monitors.size() ? layout.logicalOrigins.at(i) : layout.monitors.at(i).geometry.topLeft();
+            outputs.push_back({origin, layout.monitors.at(i).geometry.size(), layout.scales.at(i), layout.monitors.at(i).primary});
         }
-        const QPointF origin(layout.monitors.at(best).geometry.topLeft());
-        const qreal scale = layout.scales.at(best) > 0.0 ? layout.scales.at(best) : 1.0;
-        return origin + (pixel - origin) / scale;
+        return KRdp::RemoteMonitorGeometry::wireToLogical(pixel, layout.monitors, outputs);
     }
 
     /**
@@ -1972,7 +1973,7 @@ void SessionController::buildVirtualSessions(SessionWrapper *wrapper)
     if (snapshotTaken || m_outputGuard.held()) {
         const QRect physical = KRdp::OutputSnapshot::enabledUnion(m_outputGuard.physicalOutputs());
         if (physical.isValid()) {
-            extendAnchor = QPoint(physical.left() + physical.width(), physical.top());
+            extendAnchor = KRdp::OutputSnapshot::rightmostEnabledAnchor(m_outputGuard.physicalOutputs());
         }
     }
     const QPoint anchor = canReplace ? QPoint(0, 0) : extendAnchor.value_or(QPoint(0, 0));
@@ -2828,6 +2829,7 @@ bool SessionController::buildLayoutSessions(SessionWrapper *wrapper, const KRdp:
     // an unchanged connection can be left exactly as it runs.
     MonitorLayout monitorLayout;
     monitorLayout.scale = 1.0;
+    QVector<KRdp::RemoteMonitorGeometry::Output> remoteOutputs;
     for (qsizetype i = 0; i < resolved.size(); ++i) {
         const auto &entry = resolved.at(i);
         const auto &monitor = layout.monitors.at(entry.monitor);
@@ -2842,16 +2844,18 @@ bool SessionController::buildLayoutSessions(SessionWrapper *wrapper, const KRdp:
                 size = captured;
             }
         }
-        // The entry's rect: KWin logical position, pixel size (the capture
-        // size; correctSurfaceSize() fixes a mismatch once the stream is
-        // up), so RDP gets one surface per monitor at its pixel size.
-        monitorLayout.monitors.push_back(KRdp::VideoMonitor{.geometry = QRect(monitor.position, size), .primary = monitor.primary});
+        // Keep KWin's logical origin separate from the RDP surface atlas.
+        // Adjacent mixed-scale outputs overlap if pixel sizes are placed at
+        // logical origins; projectToWire() packs them after all are known.
+        remoteOutputs.push_back({monitor.position, size, scale, monitor.primary});
+        monitorLayout.logicalOrigins.push_back(monitor.position);
         monitorLayout.names.push_back(entry.output);
         monitorLayout.scales.push_back(scale > 0.0 ? scale : 1.0);
         if (monitor.primary) {
             monitorLayout.scale = scale > 0.0 ? scale : 1.0;
         }
     }
+    monitorLayout.monitors = KRdp::RemoteMonitorGeometry::projectToWire(remoteOutputs);
     // Exactly one primary, whatever the layout says (it always says one, but
     // the primary may be among the missing).
     const bool hasPrimary = std::any_of(monitorLayout.monitors.cbegin(), monitorLayout.monitors.cend(), [](const KRdp::VideoMonitor &monitor) {
@@ -2862,7 +2866,8 @@ bool SessionController::buildLayoutSessions(SessionWrapper *wrapper, const KRdp:
         monitorLayout.scale = monitorLayout.scales.first();
     }
 
-    const bool geometryChanged = monitorLayout.monitors != wrapper->layout.monitors || monitorLayout.scales != wrapper->layout.scales;
+    const bool geometryChanged = monitorLayout.monitors != wrapper->layout.monitors || monitorLayout.scales != wrapper->layout.scales
+        || monitorLayout.logicalOrigins != wrapper->layout.logicalOrigins;
     if (diff.unchanged() && !geometryChanged) {
         // Every output the layout wants is already streamed by a running
         // session and the RDP layout is the same: nothing to restart, no

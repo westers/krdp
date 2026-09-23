@@ -198,8 +198,8 @@ Layout HostLayoutExecutor::current() const
 
 QPoint HostLayoutExecutor::extendAnchor() const
 {
-    const QRect physical = m_guard && m_guard->hasSnapshot() ? enabledUnion(m_guard->physicalOutputs()) : enabledUnion(physicalOnly(PhysicalOutputGuard::readOutputs()));
-    return physical.isValid() ? QPoint(physical.left() + physical.width(), physical.top()) : QPoint(0, 0);
+    const auto outputs = m_guard && m_guard->hasSnapshot() ? m_guard->physicalOutputs() : physicalOnly(PhysicalOutputGuard::readOutputs());
+    return rightmostEnabledAnchor(outputs);
 }
 
 std::optional<Error> HostLayoutExecutor::execute(const Plan &plan, const QString &requester)
