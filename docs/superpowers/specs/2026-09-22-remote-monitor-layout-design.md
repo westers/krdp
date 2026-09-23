@@ -129,6 +129,18 @@ Fit does not change existing lifetime semantics: retained virtual geometry stays
 after detach; physical-console changes follow the existing temporary ownership
 and restoration contract. This plan must not silently rewrite current Fit code.
 
+Source-only planning slice (not a live Fit implementation): managed adjacency
+is represented as a directed parent→child edge with one parent per movable
+virtual output, a side (left/right/above/below), and a logical offset along
+that edge. Fit keeps the selected output's top-left fixed, then visits its
+dependents in output-ID order and moves only those managed virtual outputs.
+Unrelated/pinned outputs and intentional gaps remain where KDE put them. A
+cycle, stale relation after an external edit, ownership conflict, collision,
+or relation that cannot be kept while holding the selected origin returns an
+error for preview instead of repacking or partly applying. The resulting
+operation list still requires authenticated revisioned transaction, compositor
+readback and verified capture before any capability can be advertised.
+
 ## 4. User interface
 
 Separate sections, not one diagram combining unrelated coordinate systems:

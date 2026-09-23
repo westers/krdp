@@ -299,6 +299,11 @@ target_include_directories(RemoteTopologyDraftTest PRIVATE ${CMAKE_SOURCE_DIR}/s
 target_link_libraries(RemoteTopologyDraftTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME RemoteTopologyDraftTest COMMAND RemoteTopologyDraftTest)
 
+add_executable(RemoteTopologyFitTest RemoteTopologyFitTest.cpp)
+target_include_directories(RemoteTopologyFitTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(RemoteTopologyFitTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME RemoteTopologyFitTest COMMAND RemoteTopologyFitTest)
+
 add_executable(RemoteTopologyProtocolTest RemoteTopologyProtocolTest.cpp)
 target_include_directories(RemoteTopologyProtocolTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(RemoteTopologyProtocolTest PRIVATE Qt6::Test Qt6::Core)
