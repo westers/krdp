@@ -31,11 +31,12 @@ int main(int argc, char **argv)
     const bool repositionProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-reposition");
     const bool removeProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-remove");
     const bool resizeProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-resize");
+    const bool fitProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-fit");
     const bool addProbe = removeProbe || (arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-add"));
     const QString addedName = removeProbe ? QStringLiteral("Virtual-krdp-added-probe-extra")
                                           : QStringLiteral("Virtual-krdp-probe-extra");
     const bool mixed = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi-mixed") || inputProbe);
-    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || negativeProbe || dragProbe || repositionProbe || addProbe || resizeProbe);
+    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || negativeProbe || dragProbe || repositionProbe || addProbe || resizeProbe || fitProbe);
     if (arguments.size() != 1 && !managed && !multi) return 1;
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     const QFileInfo runtimeInfo(runtime);
@@ -109,6 +110,10 @@ int main(int argc, char **argv)
     bool resizeAcknowledged = false;
     bool resizeInventory = false;
     QSet<int> resizeFrames;
+    bool fitStarted = false;
+    bool fitAcknowledged = false;
+    bool fitInventory = false;
+    QSet<int> fitFrames;
     bool stopping = false;
     int result = 1;
     ConsoleWorkerWire::Outputs outputs;
@@ -118,7 +123,8 @@ int main(int argc, char **argv)
             && (!addProbe || (addAcknowledged && (removeProbe
                 ? removeAcknowledged && removeInventory && removeFrames.size() == 2
                 : addInventory && addFrames.size() == 3)))
-            && (!resizeProbe || (resizeAcknowledged && resizeInventory && resizeFrames.size() == 2));
+            && (!resizeProbe || (resizeAcknowledged && resizeInventory && resizeFrames.size() == 2))
+            && (!fitProbe || (fitAcknowledged && fitInventory && fitFrames.size() == 2));
     };
     const auto maybeStop = [&] {
         if (verified() && !stopping) {
@@ -242,6 +248,17 @@ int main(int argc, char **argv)
         });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, &app, [&](const auto &value) {
         outputs = value;
+        if (fitProbe && fitStarted && !fitInventory && value.monitors.size() == 2
+            && value.monitors[0].name == QStringLiteral("Virtual-0")
+            && value.monitors[1].name == QStringLiteral("Virtual-1")
+            && value.monitors[0].geometry == QRect(0, 0, 1600, 900)
+            && value.monitors[1].geometry == QRect(1600, 0, 1280, 720)) {
+            fitInventory = true;
+            capturedOutputs.clear();
+            captured = false;
+            qInfo("Worker published managed Fit two-output inventory");
+            endpoint.requestKeyFrame();
+        }
         if (resizeProbe && resizeStarted && !resizeInventory && value.monitors.size() == 2
             && value.monitors[0].name == QStringLiteral("Virtual-0")
             && value.monitors[1].name == QStringLiteral("Virtual-1")
@@ -306,20 +323,44 @@ int main(int argc, char **argv)
                 : value.error == QStringLiteral("Physical-output resize is unavailable in a virtual session"));
         maybeStop();
     });
+    QObject::connect(&endpoint, &ConsoleWorkerEndpoint::managedFitFinished, &app, [&](const auto &value) {
+        if (!fitProbe || value.requestId != 2 || value.generation != 1 || !value.error.isEmpty()) {
+            qCritical().noquote() << "Worker managed Fit failed:" << value.error;
+            app.quit();
+            return;
+        }
+        QProcess readback;
+        readback.start(QStringLiteral("kscreen-doctor"), {QStringLiteral("-j")});
+        if (!readback.waitForFinished(3000) || readback.exitCode() != 0) { app.quit(); return; }
+        const auto snapshot = RetainedKScreenReadback::parse(readback.readAllStandardOutput(), id);
+        if (!snapshot || snapshot->outputs.size() != 2
+            || snapshot->outputs[0].nativePixels != QSize(1600, 900)
+            || snapshot->outputs[0].logicalGeometry != QRect(0, 0, 1600, 900)
+            || snapshot->outputs[1].nativePixels != QSize(1280, 720)
+            || snapshot->outputs[1].logicalGeometry != QRect(1600, 0, 1280, 720)) { app.quit(); return; }
+        fitAcknowledged = true;
+        qInfo("Authenticated managed Fit acknowledged after dependent reflow, KScreen and both captures");
+        maybeStop();
+    });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::frameReceived, &app, [&](const VideoFrame &frame) {
         const int expected = addInventory ? 3 : multi ? 2 : 1;
-        const QSize expectedSize = frame.monitorIndex == 2 ? QSize(960, 540)
+        const QSize expectedSize = fitInventory && frame.monitorIndex == 0 ? QSize(1600, 900)
+            : frame.monitorIndex == 2 ? QSize(960, 540)
             : resizeInventory && frame.monitorIndex == 1 ? QSize(1600, 900) : QSize(1280, 720);
         if (!frame.isKeyFrame || frame.data.isEmpty() || frame.size != expectedSize
             || h264KeyframeSize(frame.data) != frame.size || frame.monitorIndex < 0 || frame.monitorIndex >= expected
             || outputs.monitors.size() != expected || frame.monitors.size() != expected) return;
         for (int i = 0; i < expected; ++i) {
-            const QRect logical = i == 2 ? QRect(2560, 0, 960, 540)
+            const QRect logical = fitInventory && i == 0 ? QRect(0, 0, 1600, 900)
+                : fitInventory && i == 1 ? QRect(1600, 0, 1280, 720)
+                : i == 2 ? QRect(2560, 0, 960, 540)
                 : mixed && i == 0 ? QRect(0, 0, 1024, 576)
                 : mixed && i == 1 ? QRect(1024, 100, 1280, 720)
                 : (negativeProbe || repositionInventory) && i == 1 ? QRect(1280, 100, 1280, 720)
                 : QRect(i * 1280, 0, 1280, 720);
-            const QRect wire = i == 2 ? QRect(2560, 0, 960, 540)
+            const QRect wire = fitInventory && i == 0 ? QRect(0, 0, 1600, 900)
+                : fitInventory && i == 1 ? QRect(1600, 0, 1280, 720)
+                : i == 2 ? QRect(2560, 0, 960, 540)
                 : (mixed || negativeProbe || repositionInventory) && i == 1 ? QRect(1280, 100, 1280, 720)
                 : QRect(i * 1280, 0, 1280, 720);
             if (outputs.monitors[i].geometry != logical || frame.monitors[i].geometry != wire
@@ -365,6 +406,16 @@ int main(int argc, char **argv)
         if (resizeProbe && resizeInventory) {
             resizeFrames.insert(frame.monitorIndex);
             if (resizeFrames.size() == 2) qInfo("Two post-resize independently decoded output keyframes verified");
+        }
+        if (fitProbe && fitInventory) {
+            fitFrames.insert(frame.monitorIndex);
+            if (fitFrames.size() == 2) qInfo("Two post-Fit independently decoded output keyframes verified");
+        }
+        if (captured && fitProbe && !fitStarted) {
+            fitStarted = true;
+            qInfo("Requesting authenticated managed Fit of Virtual-0 and dependent Virtual-1");
+            if (!endpoint.managedFit({2, 1, QStringLiteral("Virtual-0"), QSize(1600, 900), 1.0,
+                {{QStringLiteral("Virtual-0"), QStringLiteral("Virtual-1"), 1, 0}}})) app.quit();
         }
         if (captured && resizeProbe && !resizeStarted) {
             resizeStarted = true;
