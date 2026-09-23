@@ -294,6 +294,11 @@ target_include_directories(RemoteTopologyCatalogTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(RemoteTopologyCatalogTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME RemoteTopologyCatalogTest COMMAND RemoteTopologyCatalogTest)
 
+add_executable(RemoteTopologyDraftTest RemoteTopologyDraftTest.cpp)
+target_include_directories(RemoteTopologyDraftTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(RemoteTopologyDraftTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME RemoteTopologyDraftTest COMMAND RemoteTopologyDraftTest)
+
 add_executable(TakeoverDetectorTest TakeoverDetectorTest.cpp)
 target_include_directories(TakeoverDetectorTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(TakeoverDetectorTest PRIVATE Qt6::Test Qt6::Core)
