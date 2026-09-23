@@ -107,12 +107,15 @@ int main(int argc, char **argv)
     bool stopping = false;
     int result = 1;
     ConsoleWorkerWire::Outputs outputs;
-    const auto maybeStop = [&] {
-        if (captured && resizeRefused && inputVerified && postMoveCaptured
+    const auto verified = [&] {
+        return captured && resizeRefused && inputVerified && postMoveCaptured
             && (!repositionProbe || (repositionReadback && repositionInventory && repositionFrames.size() == 2))
             && (!addProbe || (addAcknowledged && (removeProbe
                 ? removeAcknowledged && removeInventory && removeFrames.size() == 2
-                : addInventory && addFrames.size() == 3))) && !stopping) {
+                : addInventory && addFrames.size() == 3)));
+    };
+    const auto maybeStop = [&] {
+        if (verified() && !stopping) {
             stopping = true;
             endpoint.stopWorker();
         }
@@ -380,17 +383,12 @@ int main(int argc, char **argv)
         app.quit();
     });
     if (managed) QObject::connect(&endpoint, &ConsoleWorkerEndpoint::workerStopped, &app, [&] {
-        result = captured && resizeRefused && inputVerified && postMoveCaptured &&
-            (!repositionProbe || (repositionReadback && repositionInventory && repositionFrames.size() == 2))
-            && (!addProbe || (addAcknowledged && addInventory && addFrames.size() == 3)) && stopping ? 0 : 1;
+        result = verified() && stopping ? 0 : 1;
         app.quit();
     });
     QObject::connect(&worker, &QProcess::errorOccurred, &app, [&](auto) { app.quit(); });
     QObject::connect(&worker, &QProcess::finished, &app, [&](int code, QProcess::ExitStatus status) {
-        result = captured && resizeRefused && inputVerified && postMoveCaptured &&
-            (!repositionProbe || (repositionReadback && repositionInventory && repositionFrames.size() == 2))
-            && (!addProbe || (addAcknowledged && addInventory && addFrames.size() == 3))
-            && stopping && code == 0 && status == QProcess::NormalExit ? 0 : 1;
+        result = verified() && stopping && code == 0 && status == QProcess::NormalExit ? 0 : 1;
         app.quit();
     });
     QTimer::singleShot(inputProbe || dragProbe || repositionProbe || addProbe ? 30000 : 20000, &app, &QCoreApplication::quit);
