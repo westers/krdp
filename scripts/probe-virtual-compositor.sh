@@ -8,7 +8,7 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-window-nvidia ) ) ]]
     probe_mode="${1:-}"
     rdp_mode=
     probe_timeout=80
@@ -29,10 +29,11 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         probe_mode=--plasma-nvidia
         probe_timeout=120
     fi
-    if [[ "$probe_mode" == --plasma-worker-nvidia || "$probe_mode" == --plasma-multi-worker-nvidia || "$probe_mode" == --plasma-mixed-worker-nvidia ]]; then
+    if [[ "$probe_mode" == --plasma-worker-nvidia || "$probe_mode" == --plasma-multi-worker-nvidia || "$probe_mode" == --plasma-mixed-worker-nvidia || "$probe_mode" == --plasma-multi-window-nvidia ]]; then
         rdp_mode=--worker
         [[ "$probe_mode" != --plasma-multi-worker-nvidia ]] || rdp_mode=--multi-worker
         [[ "$probe_mode" != --plasma-mixed-worker-nvidia ]] || rdp_mode=--multi-mixed
+        [[ "$probe_mode" != --plasma-multi-window-nvidia ]] || rdp_mode=--multi-window
         [[ "$rdp_mode" == --worker ]] || probe_output_count=2
         probe_mode=--plasma-nvidia
         probe_timeout=120
@@ -85,7 +86,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     fi
     mkdir "$probe_runtime/config" "$probe_runtime/cache" "$probe_runtime/state" "$probe_runtime/data"
     cp -r "$repo_path/scripts/virtual-probe-config/." "$probe_runtime/config/"
-    if [[ "$rdp_mode" == --worker || "$rdp_mode" == --multi-worker || "$rdp_mode" == --multi-mixed || "$rdp_mode" == --supervised ]]; then
+    if [[ "$rdp_mode" == --worker || "$rdp_mode" == --multi-worker || "$rdp_mode" == --multi-mixed || "$rdp_mode" == --multi-window || "$rdp_mode" == --supervised ]]; then
         mkdir -p "$probe_runtime/data/applications"
         cp "$repo_path/build/server/org.kde.krdpvirtualprobe.desktop" "$probe_runtime/data/applications/org.kde.krdpconsoleworker.desktop"
     elif [[ -n "$rdp_mode" ]]; then
@@ -126,7 +127,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
 expected_outputs=${5:-1}
-[[ $expected_outputs == 1 || ( $expected_outputs == 2 && ( ${3:-} == --multi-worker || ${3:-} == --multi-mixed || ${3:-} == --supervised ) ) ]]
+[[ $expected_outputs == 1 || ( $expected_outputs == 2 && ( ${3:-} == --multi-worker || ${3:-} == --multi-mixed || ${3:-} == --multi-window || ${3:-} == --supervised ) ) ]]
 # Populate this private profile's desktop-service identities before KWin checks
 # application permissions (including Spectacle's restricted screenshot API).
 kbuildsycoca6 --noincremental >"$XDG_RUNTIME_DIR/service-cache.log" 2>&1
@@ -287,10 +288,33 @@ if [[ "${3:-}" == --supervised ]]; then
     while kill -0 "$plasma_pid" && kill -0 "$wrapper_pid"; do sleep 1; done
     exit 1
 fi
-if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker || "${3:-}" == --multi-mixed ]]; then
+if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker || "${3:-}" == --multi-mixed || "${3:-}" == --multi-window ]]; then
+    if [[ "${3:-}" == --multi-window ]]; then
+        # This window is created in the SAME private compositor as the capture
+        # worker. KWin's own move-to-screen API proves that its second output
+        # is a real workspace destination, not just an RDP client view.
+        env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
+            konsole --nofork --title KRDP-MONITOR-PROBE -e sleep 45 \
+            >"$XDG_RUNTIME_DIR/window-app.log" 2>&1 &
+        window_pid=$!
+        qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript \
+            "$repo_path/scripts/probe-retained-window-move.js" krdp-retained-window-probe
+        qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start
+        moved=false
+        for attempt in {1..100}; do
+            kill -0 "$window_pid"
+            if grep -q 'krdp-monitor-probe: after output=Virtual-1' "$XDG_RUNTIME_DIR/kwin.log"; then
+                moved=true
+                break
+            fi
+            sleep 0.1
+        done
+        [[ "$moved" == true ]]
+    fi
     probe_args=()
     [[ "${3:-}" != --multi-worker ]] || probe_args=(--multi)
     [[ "${3:-}" != --multi-mixed ]] || probe_args=(--multi-mixed)
+    [[ "${3:-}" != --multi-window ]] || probe_args=(--multi)
     "$repo_path/build/bin/krdp-virtual-worker-probe" "${probe_args[@]}" >"$XDG_RUNTIME_DIR/worker-probe.log" 2>&1
     # Stopping capture must leave the separate desktop alive and unchanged.
     kill -0 "$wrapper_pid"
