@@ -16,10 +16,11 @@ int main(int argc, char **argv)
     QCoreApplication app(argc, argv);
     const auto arguments = app.arguments();
     const bool adopting = arguments.size() == 5 && arguments[1] == QStringLiteral("--adopt");
+    const bool multi = arguments.size() == 3 && arguments[1] == QStringLiteral("--multi");
     char name[256] = {};
     if (gethostname(name, sizeof(name) - 1) || QByteArray(name).split('.').first() != "sol"
-        || !getuid() || getuid() != geteuid() || (arguments.size() != 2 && !adopting)) return 1;
-    const auto script = adopting ? QString() : arguments.at(1);
+        || !getuid() || getuid() != geteuid() || (arguments.size() != 2 && !adopting && !multi)) return 1;
+    const auto script = adopting ? QString() : arguments.at(multi ? 2 : 1);
     if (!adopting && !QDir::isAbsolutePath(script)) return 1;
     QTemporaryDir runtime(QStringLiteral("/run/user/%1/krdp-virtual-host.XXXXXX").arg(getuid()));
     if (!runtime.isValid()) return 1;
@@ -36,7 +37,7 @@ int main(int argc, char **argv)
     if (!tls.waitForFinished(10000) || tls.exitCode()) return 1;
     Server server;
     server.setAddress(QHostAddress(QStringLiteral("192.168.48.57")));
-    server.setPort(3395);
+    server.setPort(multi ? 3396 : 3395);
     server.setTlsCertificate(std::filesystem::path(cert.toStdString()));
     server.setTlsCertificateKey(std::filesystem::path(key.toStdString()));
     server.setUsePAMAuthentication(true);
@@ -57,7 +58,8 @@ int main(int argc, char **argv)
         env.insert(QStringLiteral("HOME"), QDir::homePath());
         qInfo().noquote() << "PAM-owned desktop" << handle.id << "uid" << uid << "runtime" << desktop.path();
         return VirtualSessionHostController::PreparedLaunch{desktop.filePath(QStringLiteral("worker.sock")),
-            {QStringLiteral("/usr/bin/bash"), {script, QStringLiteral("--supervised-worker-nvidia"), desktop.path(), handle.id}, env, {}}};
+            {QStringLiteral("/usr/bin/bash"), {script, multi ? QStringLiteral("--supervised-multi-worker-nvidia")
+                : QStringLiteral("--supervised-worker-nvidia"), desktop.path(), handle.id}, env, {}}};
     });
     if (adopting) {
         // Trusted local recovery inputs, not a protocol-supplied process/path.
@@ -80,7 +82,7 @@ int main(int argc, char **argv)
         qInfo().noquote() << "Adopting retained desktop" << arguments[2] << "without owning its process lifetime";
     }
     if (!server.start()) return 1;
-    qInfo() << "Isolated PAM virtual host listening on Sol3395 for180 seconds";
+    qInfo() << "Isolated PAM virtual host listening on Sol" << (multi ? 3396 : 3395) << "for180 seconds";
     QTimer::singleShot(180000, &app, &QCoreApplication::quit);
     return app.exec();
 }

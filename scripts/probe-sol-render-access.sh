@@ -2,7 +2,7 @@
 # Privileged envelope for an explicitly authorized disposable Sol GPU probe.
 # Never install this as a service or run it against a physical desktop.
 set -euo pipefail
-[[ $# == 0 || ( $# == 1 && ( $1 == --multi-worker || $1 == --multi-mixed ) ) ]]
+[[ $# == 0 || ( $# == 1 && ( $1 == --multi-worker || $1 == --multi-mixed || $1 == --multi-rdp ) ) ]]
 [[ $EUID == 0 && "$(hostname -s)" == sol ]] || {
     echo 'Run explicitly as root on Sol.' >&2
     exit 1
@@ -52,5 +52,12 @@ if [[ $# == 1 ]]; then
     [[ $1 != --multi-mixed ]] || probe_mode=--plasma-mixed-worker-nvidia
     probe_limit=150
 fi
-timeout --kill-after=5 "$probe_limit" runuser -u westers -- \
-    bash /home/westers/dev/krdp/scripts/probe-virtual-compositor.sh "$probe_mode"
+if [[ ${1:-} == --multi-rdp ]]; then
+    [[ -z $(ss -H -ltn 'sport = :3396') ]]
+    timeout --kill-after=5 210 runuser -u westers -- \
+        /home/westers/dev/krdp/build/bin/krdp-virtual-rdp-host-probe --multi \
+        /home/westers/dev/krdp/scripts/probe-virtual-compositor.sh
+else
+    timeout --kill-after=5 "$probe_limit" runuser -u westers -- \
+        bash /home/westers/dev/krdp/scripts/probe-virtual-compositor.sh "$probe_mode"
+fi

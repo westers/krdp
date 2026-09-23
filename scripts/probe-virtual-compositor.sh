@@ -8,14 +8,15 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 3 && "$1" == --supervised-worker-nvidia ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia ) ) ]]
     probe_mode="${1:-}"
     rdp_mode=
     probe_timeout=80
     probe_output_count=1
     managed_runtime=
     managed_id=
-    if [[ "$probe_mode" == --supervised-worker-nvidia ]]; then
+    if [[ "$probe_mode" == --supervised-worker-nvidia || "$probe_mode" == --supervised-multi-worker-nvidia ]]; then
+        [[ "$probe_mode" != --supervised-multi-worker-nvidia ]] || probe_output_count=2
         managed_runtime="$2"
         managed_id="$3"
         [[ "$managed_runtime" == /run/user/"$(id -u)"/krdp-headless.* ]]
@@ -125,7 +126,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
 expected_outputs=${5:-1}
-[[ $expected_outputs == 1 || ( $expected_outputs == 2 && ( ${3:-} == --multi-worker || ${3:-} == --multi-mixed ) ) ]]
+[[ $expected_outputs == 1 || ( $expected_outputs == 2 && ( ${3:-} == --multi-worker || ${3:-} == --multi-mixed || ${3:-} == --supervised ) ) ]]
 # Populate this private profile's desktop-service identities before KWin checks
 # application permissions (including Spectacle's restricted screenshot API).
 kbuildsycoca6 --noincremental >"$XDG_RUNTIME_DIR/service-cache.log" 2>&1
