@@ -31,6 +31,8 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QVERIFY(endpoint.listen(directory.filePath(QStringLiteral("worker.sock")), target, token));
     const ConsoleWorkerWire::Resize resize{11, 42, QStringLiteral("DP-1"), QSize(1280, 720), 1};
     QVERIFY(!endpoint.resize(resize)); // Never send a display mutation before Ready.
+    const ConsoleWorkerWire::Position position{12, 42, QStringLiteral("Virtual-1"), QPoint(1280, 100)};
+    QVERIFY(!endpoint.position(position));
 
     int ready = 0;
     int frames = 0;
@@ -75,6 +77,17 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QVERIFY(control);
     QCOMPARE(control->generation, quint64(42));
     QVERIFY(control->active);
+
+    QSignalSpy positioned(&endpoint, &ConsoleWorkerEndpoint::positionFinished);
+    QVERIFY(endpoint.position(position));
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    brokerMessages.feed(worker.readAll());
+    const auto positionRecord = brokerMessages.next();
+    QVERIFY(positionRecord);
+    QCOMPARE(ConsoleWorkerWire::position(*positionRecord), std::optional<ConsoleWorkerWire::Position>(position));
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionResult{12, 42, {}}));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(positioned.count(), 1);
 
     QVERIFY(!endpoint.setVideoQuality({0, 60}));
     QVERIFY(!endpoint.setVideoQuality({42, 101}));

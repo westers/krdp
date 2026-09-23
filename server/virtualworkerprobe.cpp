@@ -92,8 +92,6 @@ int main(int argc, char **argv)
     bool repositionReadback = false;
     bool repositionInventory = false;
     QSet<int> repositionFrames;
-    QProcess reposition;
-    reposition.setProgram(QStringLiteral("kscreen-doctor"));
     bool stopping = false;
     int result = 1;
     ConsoleWorkerWire::Outputs outputs;
@@ -147,9 +145,13 @@ int main(int argc, char **argv)
         endpoint.resize({1, 1, QStringLiteral("Virtual-0"), QSize(1024, 768), 1});
         endpoint.requestKeyFrame();
     });
-    QObject::connect(&reposition, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), &app,
-        [&](int code, QProcess::ExitStatus status) {
-            if (code != 0 || status != QProcess::NormalExit) { app.quit(); return; }
+    QObject::connect(&endpoint, &ConsoleWorkerEndpoint::positionFinished, &app,
+        [&](const ConsoleWorkerWire::PositionResult &result) {
+            if (result.requestId != 2 || result.generation != 1 || !result.error.isEmpty()) {
+                qCritical().noquote() << "Worker position failed:" << result.error;
+                app.quit();
+                return;
+            }
             QProcess readback;
             readback.start(QStringLiteral("kscreen-doctor"), {QStringLiteral("-j")});
             if (!readback.waitForFinished(3000) || readback.exitCode() != 0) { app.quit(); return; }
@@ -158,7 +160,7 @@ int main(int argc, char **argv)
                 || snapshot->outputs[0].logicalGeometry != QRect(0, 0, 1280, 720)
                 || snapshot->outputs[1].logicalGeometry != QRect(1280, 100, 1280, 720)) { app.quit(); return; }
             repositionReadback = true;
-            qInfo("Private KScreen read back repositioned Virtual-1 at logical (1280,100)");
+            qInfo("Authenticated worker position acknowledged after private KScreen/capture readback");
             endpoint.requestKeyFrame();
             maybeStop();
         });
@@ -217,12 +219,8 @@ int main(int argc, char **argv)
             if (!snapshot || snapshot->outputs.size() != 2
                 || snapshot->outputs[0].logicalGeometry != QRect(0, 0, 1280, 720)
                 || snapshot->outputs[1].logicalGeometry != QRect(1280, 0, 1280, 720)) { app.quit(); return; }
-            const auto arguments = RetainedKScreenReadback::positionArguments(*snapshot,
-                {{QStringLiteral("Virtual-1"), QPoint(1280, 100)}});
-            if (!arguments) { app.quit(); return; }
-            qInfo("Applying private KScreen position to Virtual-1");
-            reposition.setArguments(*arguments);
-            reposition.start();
+            qInfo("Requesting authenticated worker position for Virtual-1");
+            if (!endpoint.position({2, 1, QStringLiteral("Virtual-1"), QPoint(1280, 100)})) app.quit();
         }
         if (captured && inputProbe && !inputSent) {
             inputSent = true;

@@ -25,7 +25,31 @@ private Q_SLOTS:
     void rejectsOversizedRecord();
     void videoQualityIsBoundedAndGenerationScoped();
     void microphoneRecordsAreBoundedAndCorrelated();
+    void positionRecordsAreBoundedAndCorrelated();
 };
+
+void ConsoleWorkerWireTest::positionRecordsAreBoundedAndCorrelated()
+{
+    Deframer reader;
+    const Position request{7, 9, QStringLiteral("Virtual-1"), QPoint(1280, 100)};
+    const PositionResult answer{7, 9, QStringLiteral("capture failed")};
+    reader.feed(frame(request) + frame(answer));
+    const auto first = reader.next();
+    QVERIFY(first);
+    QCOMPARE(position(*first), std::optional<Position>(request));
+    auto truncated = *first;
+    truncated.payload.chop(1);
+    QVERIFY(!position(truncated));
+    const auto second = reader.next();
+    QVERIFY(second);
+    QCOMPARE(positionResult(*second), std::optional<PositionResult>(answer));
+    Position invalid = request;
+    invalid.globalLogical.setX(-32769);
+    reader.feed(frame(invalid));
+    const auto bad = reader.next();
+    QVERIFY(bad);
+    QVERIFY(!position(*bad));
+}
 
 void ConsoleWorkerWireTest::microphoneRecordsAreBoundedAndCorrelated()
 {

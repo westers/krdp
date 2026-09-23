@@ -121,6 +121,12 @@ bool ConsoleWorkerEndpoint::resize(const ConsoleWorkerWire::Resize &request)
     return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
 }
 
+bool ConsoleWorkerEndpoint::position(const ConsoleWorkerWire::Position &request)
+{
+    if (!m_ready || !m_worker) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
+}
+
 bool ConsoleWorkerEndpoint::setVideoQuality(const ConsoleWorkerWire::VideoQuality &quality)
 {
     if (!m_ready || !m_worker || !quality.generation || quality.quality < 10 || quality.quality > 100) {
@@ -196,6 +202,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT localTakeover(state->generation);
         } else if (const auto result = ConsoleWorkerWire::resizeResult(*record)) {
             Q_EMIT resizeFinished(*result);
+        } else if (const auto result = ConsoleWorkerWire::positionResult(*record)) {
+            Q_EMIT positionFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::microphoneResult(*record)) {
             Q_EMIT microphoneFinished(*result);
         } else {

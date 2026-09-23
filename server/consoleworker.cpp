@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Steve Westers
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
+#include <algorithm>
 #include <memory>
+#include <optional>
 #include <vector>
 #include <unistd.h>
 
@@ -149,6 +151,13 @@ public:
             if (m_socket.state() == QLocalSocket::UnconnectedState) {
                 shutdown(1);
             }
+        });
+        m_positionDeadline.setSingleShot(true);
+        m_positionDeadline.setInterval(12000);
+        connect(&m_positionDeadline, &QTimer::timeout, this, [this] {
+            if (!m_positionPending) return;
+            finishPosition(QStringLiteral("post-position capture timed out"));
+            m_socket.disconnectFromServer(); // No stale video/input after an unverified mutation.
         });
         connect(&m_session, &AbstractSession::streamActiveChanged, this, [this](bool active) {
             if (m_mode.virtualSession) m_virtualResize.captureStateChanged(m_virtualCaptureEpoch, active);
@@ -348,6 +357,7 @@ private:
                 m_multiMode = false;
                 m_multiSessions.clear();
                 m_multiCapture.invalidate();
+                m_multiPublishedFrames.clear();
                 m_wireAtlas.clear();
                 m_logicalOutputs.clear();
                 m_outputs = {};
@@ -369,6 +379,7 @@ private:
         m_multiReady = false;
         m_multiMode = true;
         m_multiSessions.clear();
+        m_multiPublishedFrames.clear();
         m_wireAtlas.clear();
         m_logicalOutputs.clear();
         QRect workspace;
@@ -406,6 +417,7 @@ private:
         if (result.reset) {
             releaseInput();
             m_multiReady = false;
+            m_multiPublishedFrames.clear();
             for (const auto &session : m_multiSessions) session->requestKeyFrame();
         }
         if (result.becameReady) {
@@ -413,18 +425,7 @@ private:
             // compositor configuration readback. Query KScreen from THIS
             // private worker runtime before publishing the inventory. A failed
             // query/mismatch must not masquerade as topology success.
-            QProcess readback;
-            readback.setProgram(QStringLiteral("kscreen-doctor"));
-            readback.setArguments({QStringLiteral("-j")});
-            readback.start();
-            const bool started = readback.waitForStarted(1000);
-            const bool finished = started && readback.waitForFinished(3000);
-            if (!finished) {
-                readback.kill();
-                readback.waitForFinished(1000);
-            }
-            const auto kscreen = finished && readback.exitStatus() == QProcess::NormalExit && readback.exitCode() == 0
-                ? RetainedKScreenReadback::parse(readback.readAllStandardOutput(), m_sessionId) : std::nullopt;
+            const auto kscreen = readKScreen();
             if (!kscreen || !RetainedKScreenReadback::matchesPublished(*kscreen, result.outputs, result.frames)) {
                 qWarning() << "Retained KScreen readback did not match all captured outputs";
                 m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error,
@@ -434,6 +435,7 @@ private:
             }
             qInfo() << "Retained KScreen readback confirmed" << kscreen->outputs.size() << "independent captured outputs";
             m_outputs = result.outputs;
+            m_multiPublishedFrames = result.frames;
             m_wireAtlas = result.atlas;
             m_logicalOutputs.clear();
             for (qsizetype i = 0; i < result.outputs.monitors.size(); ++i) {
@@ -450,6 +452,96 @@ private:
         }
         if (!m_multiReady) return;
         for (const auto &packet : result.frames) m_socket.write(ConsoleWorkerWire::frame(packet));
+        if (result.becameReady && m_positionPending) {
+            const auto request = *m_positionPending;
+            const auto it = std::find_if(m_outputs.monitors.cbegin(), m_outputs.monitors.cend(), [&request](const auto &output) {
+                return output.name == request.output;
+            });
+            const bool landed = it != m_outputs.monitors.cend()
+                && it->geometry.topLeft() + m_outputs.compositorOrigin == request.globalLogical;
+            if (!landed || !m_control.active || m_control.generation != request.generation) {
+                finishPosition(QStringLiteral("position changed or authority lost during capture"));
+            } else finishPosition({});
+        }
+    }
+
+    std::optional<RetainedKScreenReadback::Snapshot> readKScreen() const
+    {
+        QProcess readback;
+        readback.start(QStringLiteral("kscreen-doctor"), {QStringLiteral("-j")});
+        const bool finished = readback.waitForStarted(1000) && readback.waitForFinished(3000);
+        if (!finished) {
+            readback.kill();
+            readback.waitForFinished(1000);
+        }
+        return finished && readback.exitStatus() == QProcess::NormalExit && readback.exitCode() == 0
+            ? RetainedKScreenReadback::parse(readback.readAllStandardOutput(), m_sessionId) : std::nullopt;
+    }
+
+    void finishPosition(const QString &error)
+    {
+        if (!m_positionPending) return;
+        const auto request = *m_positionPending;
+        m_positionPending.reset();
+        m_positionDeadline.stop();
+        m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionResult{request.requestId, request.generation, error}));
+    }
+
+    void position(const ConsoleWorkerWire::Position &request)
+    {
+        const auto reject = [this, &request](const QString &error) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionResult{request.requestId, request.generation, error}));
+        };
+        if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
+            || !m_control.active || m_control.generation != request.generation || m_positionPending) {
+            reject(QStringLiteral("position unavailable or not authorized"));
+            return;
+        }
+        const auto before = readKScreen();
+        if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)) {
+            reject(QStringLiteral("fresh compositor readback differs from capture"));
+            return;
+        }
+        const auto found = std::find_if(before->outputs.cbegin(), before->outputs.cend(), [&request](const auto &output) {
+            return output.backendKey == request.output;
+        });
+        if (found == before->outputs.cend()) {
+            reject(QStringLiteral("output no longer exists"));
+            return;
+        }
+        if (found->logicalGeometry.topLeft() == request.globalLogical) {
+            reject({}); // Fresh readback still agrees with captured keyframes; no mutation.
+            return;
+        }
+        const auto arguments = RetainedKScreenReadback::positionArguments(*before, {{request.output, request.globalLogical}});
+        if (!arguments) {
+            reject(QStringLiteral("invalid position"));
+            return;
+        }
+        releaseInput();
+        m_multiReady = false;
+        m_multiPublishedFrames.clear();
+        m_positionPending = request;
+        m_positionDeadline.start();
+        QProcess command;
+        command.start(QStringLiteral("kscreen-doctor"), *arguments);
+        const bool finished = command.waitForStarted(1000) && command.waitForFinished(3000);
+        if (!finished) {
+            command.kill();
+            command.waitForFinished(1000);
+        }
+        const auto after = readKScreen();
+        const bool landed = after && std::any_of(after->outputs.cbegin(), after->outputs.cend(), [&request](const auto &output) {
+            return output.backendKey == request.output && output.logicalGeometry.topLeft() == request.globalLogical;
+        });
+        if (!finished || command.exitStatus() != QProcess::NormalExit || command.exitCode() != 0
+            || !landed) {
+            finishPosition(QStringLiteral("position readback differs from request"));
+            m_socket.flush();
+            m_socket.disconnectFromServer();
+            return;
+        }
+        m_multiSettle.start(0); // KWin/QScreen reconfiguration must precede capture success.
     }
 
     void reclaimConsole()
@@ -520,6 +612,10 @@ private:
                         QStringLiteral("single-output Fit is unavailable with multiple remote monitors") }));
                 } else if (m_mode.virtualSession) m_virtualResize.request(*request);
                 else m_resize.request(*request);
+                continue;
+            }
+            if (const auto request = ConsoleWorkerWire::position(*record)) {
+                position(*request);
                 continue;
             }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {
@@ -599,6 +695,9 @@ private:
     QPoint m_workspaceOrigin;
     QSet<QScreen *> m_watchedScreens;
     QTimer m_multiSettle;
+    QTimer m_positionDeadline;
+    std::optional<ConsoleWorkerWire::Position> m_positionPending;
+    QVector<VideoFrame> m_multiPublishedFrames;
     quint64 m_multiEpoch = 0;
     quint8 m_multiQuality = 80;
     bool m_multiMode = false;

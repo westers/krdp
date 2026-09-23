@@ -45,6 +45,8 @@ enum class Kind : quint8 {
     MicrophonePolicy,
     MicrophoneResult,
     MicrophoneAudio,
+    Position,
+    PositionResult,
 };
 
 struct Record {
@@ -70,6 +72,65 @@ struct ResizeResult {
     QString error; // Empty only after verified mode/scale readback.
     bool operator==(const ResizeResult &) const = default;
 };
+
+struct Position {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString output;
+    QPoint globalLogical;
+    bool operator==(const Position &) const = default;
+};
+
+struct PositionResult {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString error; // Empty only after fresh KScreen readback and captured keyframes.
+    bool operator==(const PositionResult &) const = default;
+};
+
+inline QByteArray frame(const Position &request)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << request.requestId << request.generation << request.output << request.globalLogical;
+    return frame(Kind::Position, payload);
+}
+
+inline std::optional<Position> position(const Record &record)
+{
+    if (record.kind != Kind::Position || record.payload.size() > 512) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    Position request;
+    stream >> request.requestId >> request.generation >> request.output >> request.globalLogical;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !request.requestId || !request.generation
+        || request.output.isEmpty() || request.output.size() > 128
+        || request.globalLogical.x() < -32768 || request.globalLogical.x() > 32768
+        || request.globalLogical.y() < -32768 || request.globalLogical.y() > 32768) return {};
+    return request;
+}
+
+inline QByteArray frame(const PositionResult &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.requestId << result.generation << result.error;
+    return frame(Kind::PositionResult, payload);
+}
+
+inline std::optional<PositionResult> positionResult(const Record &record)
+{
+    if (record.kind != Kind::PositionResult || record.payload.size() > 4096) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    PositionResult result;
+    stream >> result.requestId >> result.generation >> result.error;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
+        || result.error.size() > 1024) return {};
+    return result;
+}
 
 inline QByteArray frame(const Resize &request)
 {
@@ -465,7 +526,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::MicrophoneAudio)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::PositionResult)) {
             ++m_invalid;
             return std::nullopt;
         }
