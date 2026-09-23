@@ -99,4 +99,54 @@ inline std::optional<QStringList> arguments(const Plan &plan, const VirtualResiz
     }
     return result;
 }
+
+// A failed KScreen apply is not necessarily atomic. Reconcile only a layout
+// made entirely of the before/after values of this transaction; any third
+// party change makes restoration unsafe and must be left alone.
+inline std::optional<QStringList> recoveryArguments(const Plan &plan,
+    const RetainedKScreenReadback::Snapshot &current, const VirtualResize::Snapshot &selectedState,
+    const VirtualResize::Snapshot &originalState, const VirtualResize::Mode &appliedMode)
+{
+    if (current.outputs.size() != plan.before.outputs.size() || current.outputs.size() != plan.after.size()
+        || selectedState.name != plan.selected || originalState.name != plan.selected
+        || selectedState.id != originalState.id) return {};
+    QStringList result;
+    QVector<RetainedKScreenReadback::Placement> restorePositions;
+    for (qsizetype i = 0; i < current.outputs.size(); ++i) {
+        const auto &now = current.outputs[i];
+        const auto &before = plan.before.outputs[i];
+        const auto &after = plan.after[i];
+        if (now.backendKey != before.backendKey || after.backendKey != before.backendKey
+            || now.name != before.name || now.owner != before.owner || now.enabled != before.enabled
+            || now.primary != before.primary || now.physical != before.physical
+            || (now.nativePixels != before.nativePixels && now.nativePixels != after.nativePixels)
+            || (!VirtualResize::sameScale(now.scale, before.scale)
+                && !VirtualResize::sameScale(now.scale, after.scale))) return {};
+        const auto origin = now.logicalGeometry.topLeft();
+        if (origin != before.logicalGeometry.topLeft() && origin != after.logicalGeometry.topLeft()) return {};
+        if (now.logicalGeometry.size() != RemoteMonitorGeometry::logicalRect(origin, now.nativePixels, now.scale).size()) return {};
+        if (origin != before.logicalGeometry.topLeft()) restorePositions.append({now.backendKey, before.logicalGeometry.topLeft()});
+    }
+    const auto selected = std::find_if(current.outputs.cbegin(), current.outputs.cend(), [&plan](const auto &output) {
+        return output.backendKey == plan.selected;
+    });
+    if (selected == current.outputs.cend() || selectedState.position != selected->logicalGeometry.topLeft()
+        || selectedState.current.pixels != selected->nativePixels
+        || !VirtualResize::sameScale(selectedState.scale, selected->scale)
+        || (selectedState.current.id != originalState.current.id && selectedState.current.id != appliedMode.id)
+        || std::none_of(selectedState.modes.cbegin(), selectedState.modes.cend(), [&originalState](const auto &mode) {
+            return mode.id == originalState.current.id && mode.pixels == originalState.current.pixels
+                && mode.refresh == originalState.current.refresh;
+        })) return {};
+    if (selectedState.current.id != originalState.current.id
+        || !VirtualResize::sameScale(selectedState.scale, originalState.scale)) {
+        result = VirtualResize::select(selectedState, originalState.current, originalState.scale);
+    }
+    if (!restorePositions.isEmpty()) {
+        const auto positions = RetainedKScreenReadback::positionArguments(current, restorePositions);
+        if (!positions) return {};
+        result.append(*positions);
+    }
+    return result;
+}
 }

@@ -186,6 +186,52 @@ private Q_SLOTS:
             QSize(1600, 900), 1.25, relations));
     }
 
+    void managedFitRecoveryRefusesUnrelatedChanges()
+    {
+        namespace Fit = KRdp::RemoteTopologyFit;
+        namespace WorkerFit = KRdp::RetainedMultiFitPlan;
+        const auto before = decoded(root());
+        QVERIFY(before);
+        const auto plan = WorkerFit::make(*before, QStringLiteral("lease-1"), QStringLiteral("Virtual-0"),
+            QSize(1600, 900), 1.25, {{QStringLiteral("Virtual-0"), QStringLiteral("Virtual-1"),
+                Fit::Relation::Edge::Right, 100}});
+        QVERIFY(plan);
+        KRdp::VirtualResize::Snapshot original;
+        original.name = QStringLiteral("Virtual-0");
+        original.id = 1;
+        original.position = QPoint(0, 0);
+        original.scale = 1.25;
+        original.current = {QStringLiteral("old"), QSize(1280, 720), 60000};
+        const KRdp::VirtualResize::Mode applied{QStringLiteral("new"), QSize(1600, 900), 60000};
+        original.modes = {original.current, applied};
+        auto selected = original;
+        auto partial = *before;
+        partial.outputs[0] = plan->after[0]; // Mode landed; dependent position did not.
+        selected.current = applied;
+        const auto restore = WorkerFit::recoveryArguments(*plan, partial, selected, original, applied);
+        QVERIFY(restore);
+        QCOMPARE(*restore, (QStringList{QStringLiteral("output.Virtual-0.mode.old"),
+            QStringLiteral("output.Virtual-0.scale.1.25")}));
+        partial.outputs[1] = plan->after[1];
+        const auto full = WorkerFit::recoveryArguments(*plan, partial, selected, original, applied);
+        QVERIFY(full);
+        QCOMPARE(*full, (QStringList{QStringLiteral("output.Virtual-0.mode.old"),
+            QStringLiteral("output.Virtual-0.scale.1.25"),
+            QStringLiteral("output.Virtual-1.position.1024,100")}));
+        partial.outputs[1].logicalGeometry.moveLeft(1279);
+        QVERIFY(!WorkerFit::recoveryArguments(*plan, partial, selected, original, applied));
+        partial.outputs[1] = plan->after[1];
+        partial.outputs[1].primary = true;
+        QVERIFY(!WorkerFit::recoveryArguments(*plan, partial, selected, original, applied));
+        partial = *before;
+        selected = original;
+        const auto unchanged = WorkerFit::recoveryArguments(*plan, partial, selected, original, applied);
+        QVERIFY(unchanged);
+        QVERIFY(unchanged->isEmpty());
+        selected.current = {QStringLiteral("third-party"), QSize(1280, 720), 60000};
+        QVERIFY(!WorkerFit::recoveryArguments(*plan, partial, selected, original, applied));
+    }
+
     void physicalReadOnlyInventoryNeedsCapturedKeyframe()
     {
         const QJsonObject physical{{QStringLiteral("screen"), QJsonObject{{QStringLiteral("maxActiveOutputsCount"), 1}}},

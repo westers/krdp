@@ -699,10 +699,36 @@ private:
     {
         if (!m_multiFitPending) return;
         const auto request = *m_multiFitPending;
+        QString finalError = error;
+        if (!error.isEmpty() && m_multiFitPlan && m_multiFitOriginalState && m_multiFitAppliedMode
+            && m_control.active && m_control.generation == request.generation) {
+            const auto currentJson = readKScreenJson();
+            const auto current = currentJson ? RetainedKScreenReadback::parse(*currentJson, m_sessionId) : std::nullopt;
+            const auto selected = currentJson
+                ? VirtualResize::snapshotForOutput(*currentJson, request.output, nullptr) : std::nullopt;
+            if (current && selected) {
+                const auto restore = RetainedMultiFitPlan::recoveryArguments(*m_multiFitPlan, *current,
+                    *selected, *m_multiFitOriginalState, *m_multiFitAppliedMode);
+                if (restore && (restore->isEmpty() || runKScreenCommand(*restore))) {
+                    const auto verifiedJson = readKScreenJson();
+                    const auto verified = verifiedJson
+                        ? RetainedKScreenReadback::parse(*verifiedJson, m_sessionId) : std::nullopt;
+                    const auto restoredMode = verifiedJson
+                        ? VirtualResize::snapshotForOutput(*verifiedJson, request.output, nullptr) : std::nullopt;
+                    if (verified && verified->outputs == m_multiFitPlan->before.outputs && restoredMode
+                        && restoredMode->current.id == m_multiFitOriginalState->current.id
+                        && VirtualResize::sameScale(restoredMode->scale, m_multiFitOriginalState->scale)) {
+                        finalError += QStringLiteral("; original layout restored");
+                    }
+                }
+            }
+        }
         m_multiFitPending.reset();
         m_multiFitPlan.reset();
+        m_multiFitOriginalState.reset();
+        m_multiFitAppliedMode.reset();
         m_multiFitDeadline.stop();
-        m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ManagedFitResult{request.requestId, request.generation, error}));
+        m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ManagedFitResult{request.requestId, request.generation, finalError}));
     }
 
     void managedFit(const ConsoleWorkerWire::ManagedFit &request)
@@ -767,6 +793,8 @@ private:
         m_multiPublishedFrames.clear();
         m_multiFitPending = request;
         m_multiFitPlan = *plan;
+        m_multiFitOriginalState = originalState;
+        m_multiFitAppliedMode = mode.value_or(state->current);
         m_multiFitDeadline.start();
         if (!runKScreenCommand(*args)) {
             finishMultiFit(QStringLiteral("managed Fit compositor apply failed"));
@@ -1267,6 +1295,8 @@ private:
     QTimer m_multiFitDeadline;
     std::optional<ConsoleWorkerWire::ManagedFit> m_multiFitPending;
     std::optional<RetainedMultiFitPlan::Plan> m_multiFitPlan;
+    std::optional<VirtualResize::Snapshot> m_multiFitOriginalState;
+    std::optional<VirtualResize::Mode> m_multiFitAppliedMode;
     bool m_multiResizeNeedsRestart = false;
     QTimer m_addDeadline;
     std::optional<ConsoleWorkerWire::AddVirtual> m_addPending;
