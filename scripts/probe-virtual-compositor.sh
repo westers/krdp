@@ -8,7 +8,7 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia ) ) ]]
     probe_mode="${1:-}"
     rdp_mode=
     probe_timeout=80
