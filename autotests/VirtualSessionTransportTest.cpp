@@ -143,7 +143,8 @@ private Q_SLOTS:
             const auto capabilities = reply.value(u"capabilities"_s).toObject();
             QVERIFY(capabilities.value(u"multiOutputCapture"_s).toBool());
             QCOMPARE(capabilities.value(u"maxOutputs"_s).toInt(), 16);
-            QVERIFY(!capabilities.value(u"position"_s).toBool());
+            QVERIFY(capabilities.value(u"position"_s).toBool());
+            QCOMPARE(capabilities.value(u"positionMin"_s).toInt(), 0);
         });
     }
     void topologyPreviewNeedsPublishedBackend() {

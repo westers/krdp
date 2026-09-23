@@ -172,10 +172,9 @@ inline QJsonObject previewReply(const QString &id, const QString &token, const R
         {QStringLiteral("warnings"), QJsonArray{}}};
 }
 
-// The retained worker has a position primitive, but the broker's preview/
-// commit path is still source-only and not end-to-end accepted. Keep writes
-// undiscoverable until client and disposable-RDP acceptance is complete;
-// never borrow legacy single-output resize as a general topology capability.
+// The retained multi-output position path is accepted in an isolated GUI/RDP
+// run. Advertise only that one operation; never borrow legacy single-output
+// resize as a general topology capability.
 inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot)
 {
     return {{QStringLiteral("type"), QStringLiteral("topology")}, {QStringLiteral("v"), 1},
@@ -183,10 +182,11 @@ inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatal
         {QStringLiteral("revision"), double(snapshot.revision)}, {QStringLiteral("outputs"), outputArray(snapshot.outputs)},
         {QStringLiteral("capabilities"), QJsonObject{
             {QStringLiteral("enumerate"), true}, {QStringLiteral("add"), false},
-            {QStringLiteral("remove"), false}, {QStringLiteral("position"), false},
+            {QStringLiteral("remove"), false}, {QStringLiteral("position"), snapshot.outputs.size() > 1},
             {QStringLiteral("resize"), false}, {QStringLiteral("scale"), false},
             {QStringLiteral("primary"), false}, {QStringLiteral("multiOutputCapture"), snapshot.outputs.size() > 1},
-            {QStringLiteral("maxOutputs"), 16}, {QStringLiteral("lifetime"), QStringLiteral("retained")},
+            {QStringLiteral("maxOutputs"), 16}, {QStringLiteral("positionMin"), 0},
+            {QStringLiteral("positionMax"), 32768}, {QStringLiteral("lifetime"), QStringLiteral("retained")},
         }}};
 }
 }
