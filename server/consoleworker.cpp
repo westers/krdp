@@ -42,6 +42,7 @@
 #include "RetainedMultiResizePlan.h"
 #include "RetainedMultiPositionPlan.h"
 #include "RetainedMultiFitPlan.h"
+#include "RetainedMultiPrimaryPlan.h"
 
 using namespace KRdp;
 
@@ -181,6 +182,13 @@ public:
         connect(&m_multiFitDeadline, &QTimer::timeout, this, [this] {
             if (!m_multiFitPending) return;
             finishMultiFit(QStringLiteral("post-Fit capture/readback timed out"));
+            m_socket.disconnectFromServer();
+        });
+        m_primaryDeadline.setSingleShot(true);
+        m_primaryDeadline.setInterval(15000);
+        connect(&m_primaryDeadline, &QTimer::timeout, this, [this] {
+            if (!m_primaryPending) return;
+            finishPrimary(QStringLiteral("post-primary capture/readback timed out"));
             m_socket.disconnectFromServer();
         });
         m_addDeadline.setSingleShot(true);
@@ -480,6 +488,11 @@ private:
             if (!screensAgree) { m_multiSettle.start(200); return; }
         }
         if (screens.size() < 2) {
+            if (m_primaryPending) {
+                finishPrimary(QStringLiteral("multi-output capture disappeared during primary selection"));
+                m_socket.disconnectFromServer();
+                return;
+            }
             if (m_multiFitPending) {
                 finishMultiFit(QStringLiteral("multi-output capture disappeared during Fit"));
                 m_socket.disconnectFromServer();
@@ -527,6 +540,16 @@ private:
                     return screen->name() == output.backendKey && screen->geometry() == output.logicalGeometry;
                 });
             });
+            if (!screensAgree) { m_multiSettle.start(200); return; }
+        }
+        if (m_primaryPending && m_primaryPlan) {
+            const bool screensAgree = std::all_of(m_primaryPlan->after.cbegin(), m_primaryPlan->after.cend(),
+                [&screens, primary](const auto &output) {
+                    return std::any_of(screens.cbegin(), screens.cend(), [&output, primary](const auto *screen) {
+                        return screen->name() == output.backendKey && screen->geometry() == output.logicalGeometry
+                            && (screen == primary) == output.primary;
+                    });
+                });
             if (!screensAgree) { m_multiSettle.start(200); return; }
         }
         if (m_multiMode && m_multiCapture.screens() == inventory && !m_multiResizeNeedsRestart) return;
@@ -582,7 +605,9 @@ private:
             // compositor configuration readback. Query KScreen from THIS
             // private worker runtime before publishing the inventory. A failed
             // query/mismatch must not masquerade as topology success.
-            const auto kscreen = readKScreen();
+            const auto kscreenJson = readKScreenJson();
+            const auto kscreen = kscreenJson
+                ? RetainedKScreenReadback::parse(*kscreenJson, m_sessionId) : std::nullopt;
             if (!kscreen || !RetainedKScreenReadback::matchesPublished(*kscreen, result.outputs, result.frames)) {
                 qWarning() << "Retained KScreen readback did not match all captured outputs";
                 m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error,
@@ -611,6 +636,13 @@ private:
             if (m_multiFitPending && (!m_multiFitPlan || !RetainedMultiFitPlan::matches(*m_multiFitPlan, *kscreen)
                 || !m_control.active || m_control.generation != m_multiFitPending->generation)) {
                 finishMultiFit(QStringLiteral("Fit output or dependents differ after captured readback"));
+                m_socket.disconnectFromServer();
+                return;
+            }
+            if (m_primaryPending && (!m_primaryPlan || !RetainedMultiPrimaryPlan::matches(*m_primaryPlan, *kscreen)
+                || !kscreenJson || RetainedMultiPrimaryPlan::priorities(*kscreenJson, *kscreen) != m_primaryPlan->requested
+                || !m_control.active || m_control.generation != m_primaryPending->generation)) {
+                finishPrimary(QStringLiteral("primary or peer outputs differ after captured readback"));
                 m_socket.disconnectFromServer();
                 return;
             }
@@ -649,6 +681,7 @@ private:
         if (result.becameReady && m_removePending) finishRemove({});
         if (result.becameReady && m_multiResizePending) finishMultiResize({});
         if (result.becameReady && m_multiFitPending) finishMultiFit({});
+        if (result.becameReady && m_primaryPending) finishPrimary({});
     }
 
     std::optional<QByteArray> readKScreenJson() const
@@ -738,7 +771,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation || m_positionPending
-            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending) {
+            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending) {
             reject(QStringLiteral("managed Fit unavailable or not authorized"));
             return;
         }
@@ -811,6 +844,85 @@ private:
         m_multiSettle.start(200);
     }
 
+    void finishPrimary(const QString &error)
+    {
+        if (!m_primaryPending) return;
+        const auto request = *m_primaryPending;
+        QString finalError = error;
+        if (!error.isEmpty() && m_primaryPlan && m_control.active && m_control.generation == request.generation) {
+            const auto json = readKScreenJson();
+            const auto current = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+            const auto currentPriority = current ? RetainedMultiPrimaryPlan::priorities(*json, *current) : std::nullopt;
+            if (current && currentPriority) {
+                const auto restore = RetainedMultiPrimaryPlan::recoveryArguments(*m_primaryPlan, *current, *currentPriority);
+                if (restore && (restore->isEmpty() || runKScreenCommand(*restore))) {
+                    const auto verifiedJson = readKScreenJson();
+                    const auto verified = verifiedJson
+                        ? RetainedKScreenReadback::parse(*verifiedJson, m_sessionId) : std::nullopt;
+                    const auto restoredPriority = verified
+                        ? RetainedMultiPrimaryPlan::priorities(*verifiedJson, *verified) : std::nullopt;
+                    if (verified && restoredPriority && verified->outputs == m_primaryPlan->before.outputs
+                        && *restoredPriority == m_primaryPlan->original)
+                        finalError += QStringLiteral("; original priority order restored");
+                }
+            }
+        }
+        m_primaryPending.reset();
+        m_primaryPlan.reset();
+        m_primaryDeadline.stop();
+        m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PrimaryResult{
+            request.requestId, request.generation, finalError}));
+    }
+
+    void primary(const ConsoleWorkerWire::Primary &request)
+    {
+        const auto reject = [this, &request](const QString &error) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PrimaryResult{
+                request.requestId, request.generation, error}));
+        };
+        if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
+            || !m_control.active || m_control.generation != request.generation || m_positionPending
+            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending) {
+            reject(QStringLiteral("primary unavailable or not authorized"));
+            return;
+        }
+        const auto json = readKScreenJson();
+        const auto before = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+        if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)) {
+            reject(QStringLiteral("fresh compositor readback differs from capture"));
+            return;
+        }
+        const auto priorities = RetainedMultiPrimaryPlan::priorities(*json, *before);
+        const auto plan = priorities
+            ? RetainedMultiPrimaryPlan::make(*before, m_sessionId, request.output, *priorities) : std::nullopt;
+        if (!plan) { reject(QStringLiteral("invalid owned primary selection")); return; }
+        if (!plan->changed) { reject({}); return; }
+        releaseInput();
+        m_multiReady = false;
+        ++m_multiEpoch;
+        m_multiSessions.clear();
+        m_multiCapture.invalidate();
+        m_multiPublishedFrames.clear();
+        m_primaryPending = request;
+        m_primaryPlan = *plan;
+        m_primaryDeadline.start();
+        if (!runKScreenCommand(RetainedMultiPrimaryPlan::arguments(plan->requested))) {
+            finishPrimary(QStringLiteral("primary compositor apply failed"));
+            m_socket.disconnectFromServer();
+            return;
+        }
+        const auto afterJson = readKScreenJson();
+        const auto after = afterJson ? RetainedKScreenReadback::parse(*afterJson, m_sessionId) : std::nullopt;
+        if (!after || !RetainedMultiPrimaryPlan::matches(*plan, *after)
+            || RetainedMultiPrimaryPlan::priorities(*afterJson, *after) != plan->requested) {
+            finishPrimary(QStringLiteral("primary readback differs from preview"));
+            m_socket.disconnectFromServer();
+            return;
+        }
+        m_multiResizeNeedsRestart = true;
+        m_multiSettle.start(200);
+    }
+
     void multiResize(const ConsoleWorkerWire::Resize &request)
     {
         const auto reject = [this, &request](const QString &error) {
@@ -818,7 +930,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation
-            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending) {
+            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending) {
             reject(QStringLiteral("multi-output resize unavailable or not authorized"));
             return;
         }
@@ -958,7 +1070,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
             || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending || m_multiResizePending
-            || m_multiFitPending || m_multiPublishedFrames.size() < 3) {
+            || m_multiFitPending || m_primaryPending || m_multiPublishedFrames.size() < 3) {
             reject(QStringLiteral("virtual output removal unavailable or not authorized"));
             return;
         }
@@ -995,7 +1107,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
             || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending || m_multiResizePending
-            || m_multiFitPending || m_multiPublishedFrames.size() < 2) {
+            || m_multiFitPending || m_primaryPending || m_multiPublishedFrames.size() < 2) {
             reject(QStringLiteral("virtual output creation unavailable or not authorized"));
             return;
         }
@@ -1071,7 +1183,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation
-            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending) {
+            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending) {
             reject(QStringLiteral("position unavailable or not authorized"));
             return;
         }
@@ -1202,6 +1314,10 @@ private:
                 managedFit(*request);
                 continue;
             }
+            if (const auto request = ConsoleWorkerWire::primary(*record)) {
+                primary(*request);
+                continue;
+            }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {
                 if (m_multiMode) {
                     for (const auto &session : m_multiSessions) session->requestKeyFrame();
@@ -1297,6 +1413,9 @@ private:
     std::optional<RetainedMultiFitPlan::Plan> m_multiFitPlan;
     std::optional<VirtualResize::Snapshot> m_multiFitOriginalState;
     std::optional<VirtualResize::Mode> m_multiFitAppliedMode;
+    QTimer m_primaryDeadline;
+    std::optional<ConsoleWorkerWire::Primary> m_primaryPending;
+    std::optional<RetainedMultiPrimaryPlan::Plan> m_primaryPlan;
     bool m_multiResizeNeedsRestart = false;
     QTimer m_addDeadline;
     std::optional<ConsoleWorkerWire::AddVirtual> m_addPending;

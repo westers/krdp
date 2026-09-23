@@ -43,6 +43,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     // Source-only private-compositor switch. Never enabled by a client record
     // or by the installed service's default environment.
     m_experimentalMultiResize = qEnvironmentVariable("KRDP_EXPERIMENTAL_MULTI_RESIZE") == u"1"_s;
+    m_experimentalPrimary = qEnvironmentVariable("KRDP_EXPERIMENTAL_MULTI_PRIMARY") == u"1"_s;
     connection->setAudioPriorityDefault(false);
     connection->clearAudioPriorityOverride();
     connection->videoStream()->setCodecPreference(CodecPreference::Avc420);
@@ -240,6 +241,12 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::managedFitFinished, this, [this](const auto &result) {
+        const auto response = topologyResizeResult({result.requestId, result.generation, result.error},
+            m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+    }));
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::primaryFinished, this, [this](const auto &result) {
+        if (!m_topologyPrimaryPending) return;
         const auto response = topologyResizeResult({result.requestId, result.generation, result.error},
             m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
@@ -539,6 +546,7 @@ void VirtualSessionTransport::clearTopologyResize()
     m_topologyResizeOutputId.clear();
     m_topologyResizeExpectedAfter.clear();
     m_topologyResizeExpectedChange = false;
+    m_topologyPrimaryPending = false;
 }
 
 QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, std::optional<quint32> uid)
@@ -572,7 +580,11 @@ QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, 
     const bool adding = operation.kind == RemoteTopologyDraft::Operation::Kind::AddVirtual;
     const bool removing = operation.kind == RemoteTopologyDraft::Operation::Kind::Remove;
     const bool resizing = operation.kind == RemoteTopologyDraft::Operation::Kind::Resize;
-    if (!adding && !removing && !resizing && operation.kind != RemoteTopologyDraft::Operation::Kind::Move)
+    const bool selectingPrimary = operation.kind == RemoteTopologyDraft::Operation::Kind::SetPrimary;
+    if (!adding && !removing && !resizing && !selectingPrimary
+        && operation.kind != RemoteTopologyDraft::Operation::Kind::Move)
+        return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
+    if (selectingPrimary && (movingBatch || !m_experimentalPrimary))
         return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
     if (resizing && (!m_experimentalMultiResize || !VirtualResize::validRequest(operation.pixels, operation.scale)))
         return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
@@ -583,7 +595,7 @@ QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, 
     auto draft = parsed->draft;
     draft.owner = m_handle->id; // Never trust caller-provided ownership.
     const RemoteTopologyDraft::Capabilities caps{.addVirtual = true, .removeVirtual = true, .moveVirtual = true,
-        .resizeVirtual = m_experimentalMultiResize, .maxOutputs = 16,
+        .resizeVirtual = m_experimentalMultiResize, .changePrimary = m_experimentalPrimary, .maxOutputs = 16,
         .maxOutputDimension = 4096, .maxAtlasDimension = 8192};
     const auto entry = std::find_if(snapshot->outputs.cbegin(), snapshot->outputs.cend(), [&operation](const auto &candidate) {
         return candidate.id == operation.id;
@@ -598,6 +610,9 @@ QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, 
         return RemoteTopologyProtocol::error(parsed->id, u"limit"_s);
     if (!adding && (entry == snapshot->outputs.cend() || entry->output.backendKey.isEmpty()))
         return RemoteTopologyProtocol::error(parsed->id, u"stale-output"_s);
+    if (selectingPrimary && std::any_of(snapshot->outputs.cbegin(), snapshot->outputs.cend(), [this](const auto &candidate) {
+        return candidate.output.physical || !m_handle || candidate.output.owner != m_handle->id;
+    })) return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
     if (m_preview && m_preview->id == parsed->id && m_preview->generation == snapshot->generation
         && m_preview->revision == snapshot->revision && m_preview->before == snapshot->outputs
         && m_preview->operations == parsed->draft.operations
@@ -743,6 +758,29 @@ QJsonObject VirtualSessionTransport::topologyCommit(const QJsonObject &record, s
         const QPointer<VirtualSessionTransport> alive(this);
         const bool sent = m_endpoint->managedFit({m_topologyResizeWorkerId, m_topologyResizeBinding,
             proposal.backendKey, proposal.pixels, proposal.scale, proposal.fitRelations});
+        if (!alive) return {};
+        if (!sent && m_topologyResizeId == parsed->id) {
+            clearTopologyResize();
+            return RemoteTopologyProtocol::error(parsed->id, u"capture-failed"_s);
+        }
+        return {};
+    }
+    if (proposal.kind == RemoteTopologyDraft::Operation::Kind::SetPrimary) {
+        if (!m_experimentalPrimary || !m_endpoint || m_nextResizeId == std::numeric_limits<quint64>::max()
+            || proposal.after.size() != proposal.before.size())
+            return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
+        m_topologyResizeId = parsed->id;
+        m_topologyResizeWorkerId = ++m_nextResizeId;
+        m_topologyResizeBinding = m_controlGeneration;
+        m_topologyResizeGeneration = proposal.generation;
+        m_topologyResizeRevision = proposal.revision;
+        m_topologyResizeOutputId = proposal.outputId;
+        m_topologyResizeExpectedAfter = proposal.after;
+        m_topologyResizeExpectedChange = proposal.before != proposal.after;
+        m_topologyPrimaryPending = true;
+        m_topologyResizeDeadline.start();
+        const QPointer<VirtualSessionTransport> alive(this);
+        const bool sent = m_endpoint->primary({m_topologyResizeWorkerId, m_topologyResizeBinding, proposal.backendKey});
         if (!alive) return {};
         if (!sent && m_topologyResizeId == parsed->id) {
             clearTopologyResize();
@@ -919,7 +957,7 @@ QJsonObject VirtualSessionTransport::addVirtualResult(const ConsoleWorkerWire::A
     if (added == snapshot->outputs.cend() || oldIds.contains(added->id) || added->output != expected)
         return RemoteTopologyProtocol::error(id, u"partial"_s);
     return {{u"type"_s, u"topology-result"_s}, {u"v"_s, 1}, {u"id"_s, id}, {u"ok"_s, true},
-        {u"topology"_s, RemoteTopologyProtocol::retainedReadOnly(id, *snapshot, m_experimentalMultiResize)}};
+        {u"topology"_s, RemoteTopologyProtocol::retainedReadOnly(id, *snapshot, m_experimentalMultiResize, m_experimentalPrimary)}};
 }
 
 QJsonObject VirtualSessionTransport::removeVirtualResult(const ConsoleWorkerWire::RemoveVirtualResult &result,
@@ -942,7 +980,7 @@ QJsonObject VirtualSessionTransport::removeVirtualResult(const ConsoleWorkerWire
             return entry.output.backendKey == backendKey;
         })) return RemoteTopologyProtocol::error(id, u"partial"_s);
     return {{u"type"_s, u"topology-result"_s}, {u"v"_s, 1}, {u"id"_s, id}, {u"ok"_s, true},
-        {u"topology"_s, RemoteTopologyProtocol::retainedReadOnly(id, *snapshot, m_experimentalMultiResize)}};
+        {u"topology"_s, RemoteTopologyProtocol::retainedReadOnly(id, *snapshot, m_experimentalMultiResize, m_experimentalPrimary)}};
 }
 
 QJsonObject VirtualSessionTransport::positionResult(const ConsoleWorkerWire::PositionResult &result,
@@ -975,7 +1013,7 @@ QJsonObject VirtualSessionTransport::positionResult(const ConsoleWorkerWire::Pos
     if (!batch && (found == snapshot->outputs.cend() || found->output.logicalGeometry.topLeft() != target))
         return RemoteTopologyProtocol::error(id, u"partial"_s);
     return {{u"type"_s, u"topology-result"_s}, {u"v"_s, 1}, {u"id"_s, id}, {u"ok"_s, true},
-        {u"topology"_s, RemoteTopologyProtocol::retainedReadOnly(id, *snapshot, m_experimentalMultiResize)}};
+        {u"topology"_s, RemoteTopologyProtocol::retainedReadOnly(id, *snapshot, m_experimentalMultiResize, m_experimentalPrimary)}};
 }
 
 QJsonObject VirtualSessionTransport::topologyResizeResult(const ConsoleWorkerWire::ResizeResult &result,
@@ -1004,7 +1042,7 @@ QJsonObject VirtualSessionTransport::topologyResizeResult(const ConsoleWorkerWir
     if (found == snapshot->outputs.cend() || found->output.physical)
         return RemoteTopologyProtocol::error(id, u"partial"_s);
     return {{u"type"_s, u"topology-result"_s}, {u"v"_s, 1}, {u"id"_s, id}, {u"ok"_s, true},
-        {u"topology"_s, RemoteTopologyProtocol::retainedReadOnly(id, *snapshot, m_experimentalMultiResize)}};
+        {u"topology"_s, RemoteTopologyProtocol::retainedReadOnly(id, *snapshot, m_experimentalMultiResize, m_experimentalPrimary)}};
 }
 
 QJsonObject VirtualSessionTransport::topologyFrame(const VideoFrame &frame, std::optional<quint32> uid)
@@ -1019,7 +1057,7 @@ QJsonObject VirtualSessionTransport::topologyFrame(const VideoFrame &frame, std:
     for (const auto &entry : snapshot->outputs) if (entry.output.owner != m_handle->id) return {};
     const QString id = m_topologyId;
     clearTopology();
-    return RemoteTopologyProtocol::retainedReadOnly(id, *snapshot, m_experimentalMultiResize);
+    return RemoteTopologyProtocol::retainedReadOnly(id, *snapshot, m_experimentalMultiResize, m_experimentalPrimary);
 }
 
 QJsonObject VirtualSessionTransport::requestResize(const QJsonObject &record, std::optional<quint32> uid)

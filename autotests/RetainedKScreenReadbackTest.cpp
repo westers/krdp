@@ -9,6 +9,7 @@
 #include "RetainedMultiResizePlan.h"
 #include "RetainedMultiPositionPlan.h"
 #include "RetainedMultiFitPlan.h"
+#include "RetainedMultiPrimaryPlan.h"
 
 using namespace KRdp::RetainedKScreenReadback;
 
@@ -230,6 +231,42 @@ private Q_SLOTS:
         QVERIFY(unchanged->isEmpty());
         selected.current = {QStringLiteral("third-party"), QSize(1280, 720), 60000};
         QVERIFY(!WorkerFit::recoveryArguments(*plan, partial, selected, original, applied));
+    }
+
+    void managedPrimaryPreservesPeersAndRestoresOnlyOwnPriorityChange()
+    {
+        namespace Primary = KRdp::RetainedMultiPrimaryPlan;
+        const auto json = QJsonDocument(root()).toJson();
+        const auto before = parse(json, QStringLiteral("lease-1"));
+        QVERIFY(before);
+        const auto original = Primary::priorities(json, *before);
+        QVERIFY(original);
+        const auto plan = Primary::make(*before, QStringLiteral("lease-1"), QStringLiteral("Virtual-1"), *original);
+        QVERIFY(plan);
+        QVERIFY(plan->changed);
+        QCOMPARE(plan->after[0].primary, false);
+        QCOMPARE(plan->after[1].primary, true);
+        QCOMPARE(Primary::arguments(plan->requested), (QStringList{
+            QStringLiteral("output.Virtual-0.priority.2"), QStringLiteral("output.Virtual-1.priority.1")}));
+        auto landed = *before;
+        landed.outputs = plan->after;
+        QVERIFY(Primary::matches(*plan, landed));
+        const auto restore = Primary::recoveryArguments(*plan, landed, plan->requested);
+        QVERIFY(restore);
+        QCOMPARE(*restore, (QStringList{QStringLiteral("output.Virtual-0.priority.1"),
+            QStringLiteral("output.Virtual-1.priority.2")}));
+        landed.outputs[0].logicalGeometry.moveTop(1);
+        QVERIFY(!Primary::recoveryArguments(*plan, landed, plan->requested));
+        landed.outputs[0].logicalGeometry.moveTop(0);
+        landed.outputs[1].nativePixels = QSize(1600, 900);
+        QVERIFY(!Primary::recoveryArguments(*plan, landed, plan->requested));
+        const auto noOp = Primary::make(*before, QStringLiteral("lease-1"), QStringLiteral("Virtual-0"), *original);
+        QVERIFY(noOp);
+        QVERIFY(!noOp->changed);
+        QVERIFY(!Primary::make(*before, QStringLiteral("other-owner"), QStringLiteral("Virtual-1"), *original));
+        auto physical = *before;
+        physical.outputs[1].physical = true;
+        QVERIFY(!Primary::make(physical, QStringLiteral("lease-1"), QStringLiteral("Virtual-1"), *original));
     }
 
     void physicalReadOnlyInventoryNeedsCapturedKeyframe()

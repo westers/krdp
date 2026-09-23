@@ -23,7 +23,7 @@
 
 namespace KRdp::ConsoleWorkerWire
 {
-constexpr quint16 ProtocolVersion = 5; // Managed Fit; broker and worker must upgrade together.
+constexpr quint16 ProtocolVersion = 6; // Primary selection; broker and worker must upgrade together.
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 
 enum class Kind : quint8 {
@@ -57,6 +57,8 @@ enum class Kind : quint8 {
     PositionBatchResult,
     ManagedFit,
     ManagedFitResult,
+    Primary,
+    PrimaryResult,
 };
 
 struct Record {
@@ -141,6 +143,20 @@ struct ManagedFitResult {
     quint64 generation = 0;
     QString error;
     bool operator==(const ManagedFitResult &) const = default;
+};
+
+struct Primary {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString output;
+    bool operator==(const Primary &) const = default;
+};
+
+struct PrimaryResult {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString error;
+    bool operator==(const PrimaryResult &) const = default;
 };
 
 struct AddVirtual {
@@ -434,6 +450,50 @@ inline std::optional<ManagedFitResult> managedFitResult(const Record &record)
     QDataStream stream(record.payload);
     stream.setByteOrder(QDataStream::BigEndian);
     ManagedFitResult result;
+    stream >> result.requestId >> result.generation >> result.error;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
+        || result.error.size() > 1024) return {};
+    return result;
+}
+
+inline QByteArray frame(const Primary &request)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << request.requestId << request.generation << request.output;
+    return frame(Kind::Primary, payload);
+}
+
+inline std::optional<Primary> primary(const Record &record)
+{
+    if (record.kind != Kind::Primary || record.payload.size() > 512) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    Primary request;
+    stream >> request.requestId >> request.generation >> request.output;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !request.requestId || !request.generation
+        || request.output.isEmpty() || request.output.size() > 128) return {};
+    for (const auto character : request.output)
+        if (!character.isLetterOrNumber() && character != QLatin1Char('-') && character != QLatin1Char('_')) return {};
+    return request;
+}
+
+inline QByteArray frame(const PrimaryResult &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.requestId << result.generation << result.error;
+    return frame(Kind::PrimaryResult, payload);
+}
+
+inline std::optional<PrimaryResult> primaryResult(const Record &record)
+{
+    if (record.kind != Kind::PrimaryResult || record.payload.size() > 4096) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    PrimaryResult result;
     stream >> result.requestId >> result.generation >> result.error;
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
         || result.error.size() > 1024) return {};
@@ -891,7 +951,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::ManagedFitResult)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::PrimaryResult)) {
             ++m_invalid;
             return std::nullopt;
         }

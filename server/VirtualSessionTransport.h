@@ -152,7 +152,9 @@ private:
     QString m_topologyResizeOutputId;
     QVector<RemoteTopologyCatalog::Entry> m_topologyResizeExpectedAfter;
     bool m_topologyResizeExpectedChange = false;
+    bool m_topologyPrimaryPending = false;
     bool m_experimentalMultiResize = false;
+    bool m_experimentalPrimary = false;
     QString m_topologyId;
     quint64 m_topologyBinding = 0;
     QString m_resizeId;

@@ -28,6 +28,7 @@ private Q_SLOTS:
     void positionRecordsAreBoundedAndCorrelated();
     void positionBatchRecordsAreBoundedAndCorrelated();
     void managedFitRecordsAreBoundedAndCorrelated();
+    void primaryRecordsAreBoundedAndCorrelated();
     void addVirtualRecordsAreBoundedAndCorrelated();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
@@ -62,6 +63,30 @@ void ConsoleWorkerWireTest::managedFitRecordsAreBoundedAndCorrelated()
         const auto bad = reader.next();
         QVERIFY(bad);
         QVERIFY(!managedFit(*bad));
+    }
+}
+
+void ConsoleWorkerWireTest::primaryRecordsAreBoundedAndCorrelated()
+{
+    Deframer reader;
+    const Primary request{19, 9, QStringLiteral("Virtual-1")};
+    const PrimaryResult answer{19, 9, QStringLiteral("readback failed")};
+    reader.feed(frame(request) + frame(answer));
+    const auto first = reader.next();
+    QVERIFY(first);
+    QCOMPARE(primary(*first), std::optional<Primary>(request));
+    auto truncated = *first;
+    truncated.payload.chop(1);
+    QVERIFY(!primary(truncated));
+    const auto second = reader.next();
+    QVERIFY(second);
+    QCOMPARE(primaryResult(*second), std::optional<PrimaryResult>(answer));
+    for (const auto &bad : {Primary{0, 9, request.output}, Primary{19, 0, request.output},
+                            Primary{19, 9, QStringLiteral("../Virtual-1")}}) {
+        reader.feed(frame(bad));
+        const auto record = reader.next();
+        QVERIFY(record);
+        QVERIFY(!primary(*record));
     }
 }
 

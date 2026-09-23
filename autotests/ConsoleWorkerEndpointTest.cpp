@@ -39,6 +39,8 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     const ConsoleWorkerWire::ManagedFit fit{14, 42, QStringLiteral("Virtual-0"), QSize(1600, 900), 1.25,
         {{QStringLiteral("Virtual-0"), QStringLiteral("Virtual-1"), 1, 0}}};
     QVERIFY(!endpoint.managedFit(fit));
+    const ConsoleWorkerWire::Primary primary{15, 42, QStringLiteral("Virtual-1")};
+    QVERIFY(!endpoint.primary(primary));
     QVERIFY(!endpoint.requestTopology());
 
     int ready = 0;
@@ -130,6 +132,17 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ManagedFitResult{14, 42, {}}));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(fitted.count(), 1);
+
+    QSignalSpy primaryChanged(&endpoint, &ConsoleWorkerEndpoint::primaryFinished);
+    QVERIFY(endpoint.primary(primary));
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    brokerMessages.feed(worker.readAll());
+    const auto primaryRecord = brokerMessages.next();
+    QVERIFY(primaryRecord);
+    QCOMPARE(ConsoleWorkerWire::primary(*primaryRecord), std::optional<ConsoleWorkerWire::Primary>(primary));
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PrimaryResult{15, 42, {}}));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(primaryChanged.count(), 1);
 
     QVERIFY(!endpoint.setVideoQuality({0, 60}));
     QVERIFY(!endpoint.setVideoQuality({42, 101}));

@@ -240,11 +240,16 @@ inline QJsonObject previewReply(const QString &id, const QString &token, const R
 // an explicit private-test opt-in until native acceptance; legacy single-
 // output resize is not a general topology capability.
 inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot,
-    bool experimentalResize = false)
+    bool experimentalResize = false, bool experimentalPrimary = false)
 {
     const bool removable = snapshot.outputs.size() > 2
         && std::any_of(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [](const auto &entry) {
             return !entry.output.physical && entry.output.backendKey.startsWith(QStringLiteral("Virtual-krdp-added-"));
+        });
+    const QString owner = snapshot.outputs.isEmpty() ? QString{} : snapshot.outputs.first().output.owner;
+    const bool primaryEligible = experimentalPrimary && snapshot.outputs.size() > 1 && !owner.isEmpty()
+        && std::all_of(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [&owner](const auto &entry) {
+            return !entry.output.physical && entry.output.owner == owner;
         });
     return {{QStringLiteral("type"), QStringLiteral("topology")}, {QStringLiteral("v"), 1},
         {QStringLiteral("id"), id}, {QStringLiteral("generation"), snapshot.generation},
@@ -255,7 +260,8 @@ inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatal
             {QStringLiteral("remove"), removable}, {QStringLiteral("position"), snapshot.outputs.size() > 1},
             {QStringLiteral("resize"), experimentalResize && snapshot.outputs.size() > 1},
             {QStringLiteral("scale"), experimentalResize && snapshot.outputs.size() > 1},
-            {QStringLiteral("primary"), false}, {QStringLiteral("multiOutputCapture"), snapshot.outputs.size() > 1},
+            {QStringLiteral("primary"), primaryEligible},
+            {QStringLiteral("multiOutputCapture"), snapshot.outputs.size() > 1},
             {QStringLiteral("maxOutputs"), 16}, {QStringLiteral("positionMin"), 0},
             {QStringLiteral("positionMax"), 32768}, {QStringLiteral("lifetime"), QStringLiteral("retained")},
         }}};

@@ -51,6 +51,36 @@ private Q_SLOTS:
         QVERIFY(!caps.value(QStringLiteral("multiOutputCapture")).toBool());
     }
 
+    void privatePrimaryCapabilityNeedsWhollyOwnedVirtualLayout()
+    {
+        KRdp::RemoteTopologyCatalog catalog;
+        KRdp::RemoteTopologyCatalog::Output first{.backendKey = QStringLiteral("Virtual-0"),
+            .name = QStringLiteral("Virtual-0"), .nativePixels = QSize(1280, 720),
+            .logicalGeometry = QRect(0, 0, 1280, 720), .scale = 1,
+            .enabled = true, .primary = true, .physical = false, .owner = QStringLiteral("desktop-1")};
+        KRdp::RemoteTopologyCatalog::Output second{.backendKey = QStringLiteral("Virtual-1"),
+            .name = QStringLiteral("Virtual-1"), .nativePixels = QSize(1280, 720),
+            .logicalGeometry = QRect(1280, 0, 1280, 720), .scale = 1,
+            .enabled = true, .primary = false, .physical = false, .owner = QStringLiteral("desktop-1")};
+        const auto owned = catalog.observe({first, second});
+        QVERIFY(owned);
+        QVERIFY(!retainedReadOnly(QStringLiteral("q"), *owned).value(QStringLiteral("capabilities"))
+            .toObject().value(QStringLiteral("primary")).toBool());
+        QVERIFY(retainedReadOnly(QStringLiteral("q"), *owned, false, true).value(QStringLiteral("capabilities"))
+            .toObject().value(QStringLiteral("primary")).toBool());
+        second.owner = QStringLiteral("other-desktop");
+        const auto mixed = catalog.observe({first, second});
+        QVERIFY(mixed);
+        QVERIFY(!retainedReadOnly(QStringLiteral("q"), *mixed, false, true).value(QStringLiteral("capabilities"))
+            .toObject().value(QStringLiteral("primary")).toBool());
+        second.owner = first.owner;
+        second.physical = true;
+        const auto physical = catalog.observe({first, second});
+        QVERIFY(physical);
+        QVERIFY(!retainedReadOnly(QStringLiteral("q"), *physical, false, true).value(QStringLiteral("capabilities"))
+            .toObject().value(QStringLiteral("primary")).toBool());
+    }
+
     void physicalConsoleReplyNeverAdvertisesWrites()
     {
         KRdp::RemoteTopologyCatalog catalog;

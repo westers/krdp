@@ -70,6 +70,19 @@ mode readback is required before saying restoration succeeded. The worker
 still closes capture on failure. Local 68 selected non-maintenance server
 tests and Sol's focused readback test pass. Native failed-apply/rollback,
 revision refresh and GUI behavior remain unverified, so Fit stays private.
+The next source slice adds a separate private `KRDP_EXPERIMENTAL_MULTI_PRIMARY=1`
+retained-primary path. Internal broker/worker wire v6 carries a generation-bound
+selected backend key; the worker checks fresh wholly owned virtual outputs and
+their exact old priority ordering, applies all output priorities in one
+KScreen command, and acknowledges only after exact KScreen ordering plus new
+decoded keyframes agree. A failed apply conditionally restores the original
+ordering only when no unrelated output field changed. The broker accepts one
+`primary` operation through the existing one-use preview/commit token, then
+requires the full captured after-catalog at exactly one new revision. The
+client validates that only primary flags change and shows Preview primary
+only when the private capability is advertised. Broker and worker must be
+updated together; default production capability stays off. Native compositor
+priority behavior, GUI clicks and failure recovery are not yet accepted.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. Fit and mixed-operation
