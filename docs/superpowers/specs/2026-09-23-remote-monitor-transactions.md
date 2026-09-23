@@ -163,6 +163,13 @@ post-stop preservation assertion returned 1. The Intel VA-API filter failed
 and software x264 fallback ran. No broker/RDP GUI path or installed service
 was exercised; Sol GPU and the full matrix remain pending. See
 `~/dev/rdp/evidence/2026-09-23-buzz-intel-mixed-create.md`.
+Probe follow-up `91d0e16` separated client control detach from worker Stop:
+native Buzz KScreen retained all three committed outputs while control was
+inactive, and all three decoded keyframes were received after reactivation.
+The worker still returned 0; only the artificial post-worker-stop observation
+failed. Source confirms ordinary detach does not stop the retained worker,
+whereas explicit Stop terminates the desktop guardian's process. Actual RDP
+client reconnect and crash recovery are not proved by this worker test.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. The later private Fit
