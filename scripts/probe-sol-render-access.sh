@@ -2,7 +2,7 @@
 # Privileged envelope for an explicitly authorized disposable Sol GPU probe.
 # Never install this as a service or run it against a physical desktop.
 set -euo pipefail
-[[ $# == 0 || ( $# == 1 && ( $1 == --multi-worker || $1 == --multi-mixed || $1 == --multi-create || $1 == --multi-add || $1 == --multi-remove || $1 == --multi-resize || $1 == --multi-negative || $1 == --multi-window || $1 == --multi-input || $1 == --multi-drag || $1 == --multi-reposition || $1 == --multi-rdp || $1 == --multi-mixed-rdp ) ) ]]
+[[ $# == 0 || ( $# == 1 && ( $1 == --multi-worker || $1 == --multi-mixed || $1 == --multi-create || $1 == --multi-add || $1 == --multi-remove || $1 == --multi-resize || $1 == --multi-negative || $1 == --multi-window || $1 == --multi-input || $1 == --multi-drag || $1 == --multi-reposition || $1 == --multi-rdp || $1 == --multi-mixed-rdp || $1 == --multi-resize-rdp ) ) ]]
 [[ $EUID == 0 && "$(hostname -s)" == sol ]] || {
     echo 'Run explicitly as root on Sol.' >&2
     exit 1
@@ -61,11 +61,14 @@ if [[ $# == 1 ]]; then
     [[ $1 != --multi-reposition ]] || probe_mode=--plasma-multi-reposition-nvidia
     probe_limit=150
 fi
-if [[ ${1:-} == --multi-rdp || ${1:-} == --multi-mixed-rdp ]]; then
+if [[ ${1:-} == --multi-rdp || ${1:-} == --multi-mixed-rdp || ${1:-} == --multi-resize-rdp ]]; then
     [[ -z $(ss -H -ltn 'sport = :3396') ]]
     host_mode=--multi
     [[ ${1:-} != --multi-mixed-rdp ]] || host_mode=--multi-mixed
+    host_environment=()
+    [[ ${1:-} != --multi-resize-rdp ]] || host_environment=(KRDP_EXPERIMENTAL_MULTI_RESIZE=1)
     timeout --kill-after=5 210 runuser -u westers -- \
+        env "${host_environment[@]}" \
         /home/westers/dev/krdp/build/bin/krdp-virtual-rdp-host-probe "$host_mode" \
         /home/westers/dev/krdp/scripts/probe-virtual-compositor.sh
 else
