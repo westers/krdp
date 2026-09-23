@@ -25,7 +25,7 @@ inline std::optional<ConsoleWorkerWire::Topology> confirmed(const RetainedKScree
         || frame.monitors.size() != worker.monitors.size() || frame.monitorIndex != 0) return {};
     QRect workspace;
     for (const auto &output : kscreen.outputs) workspace |= output.logicalGeometry;
-    if (workspace.isEmpty()) return {};
+    if (workspace.isEmpty() || frame.size.width() < workspace.width() || frame.size.height() < workspace.height()) return {};
     ConsoleWorkerWire::Topology result;
     for (qsizetype i = 0; i < worker.monitors.size(); ++i) {
         const auto &published = worker.monitors[i];

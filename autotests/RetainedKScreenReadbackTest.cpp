@@ -73,6 +73,12 @@ private Q_SLOTS:
         frame.data = keyframe();
         worker.monitors[0].geometry.moveTo(1, 0);
         QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(*state, worker, frame));
+        worker.monitors[0].geometry.moveTo(0, 0);
+        auto tooLarge = *state;
+        tooLarge.outputs[0].logicalGeometry = QRect(0, 0, 2560, 720);
+        worker.monitors[0].geometry = QRect(0, 0, 2560, 720);
+        frame.monitors[0].geometry = worker.monitors[0].geometry;
+        QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(tooLarge, worker, frame));
     }
 
     void privateTwoOutputReadbackAndPositionCommands()
