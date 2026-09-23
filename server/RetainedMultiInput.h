@@ -11,10 +11,17 @@
 
 namespace KRdp::RetainedMultiInput
 {
-// Every pointer-bearing event has the same inverse transform. A press at an
-// RDP surface pixel and a motion to that pixel must address the same KWin
-// global logical point; otherwise a drag moves but its button is pressed on
-// another output. Record the transformed event for held-button release too.
+// Fake-input button/axis requests have no position. Send an absolute motion
+// at the packet's mapped point just before those requests, even if this RDP
+// client did not send a separate move packet.
+inline bool positionBeforeDispatch(const ConsoleWorkerWire::Input &input)
+{
+    return input.type == ConsoleWorkerWire::Input::Type::Wheel
+        || (input.type == ConsoleWorkerWire::Input::Type::Mouse && input.eventType != QEvent::MouseMove);
+}
+
+// Every pointer-bearing packet has the same inverse transform. Record the
+// transformed event so a held-button release retains its compositor position.
 inline std::optional<ConsoleWorkerWire::Input> toCompositor(ConsoleWorkerWire::Input input,
     const QVector<VideoMonitor> &wire, const QVector<RemoteMonitorGeometry::Output> &logical,
     const QPoint &workspaceOrigin)

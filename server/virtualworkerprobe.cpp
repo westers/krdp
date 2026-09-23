@@ -133,11 +133,18 @@ int main(int argc, char **argv)
         qInfo() << "Authenticated virtual worker keyframe" << frame.monitorIndex << frame.size << frame.data.size();
         if (captured && inputProbe && !inputSent) {
             inputSent = true;
-            ConsoleWorkerWire::Input motion;
-            motion.type = ConsoleWorkerWire::Input::Type::Mouse;
-            motion.eventType = QEvent::MouseMove;
-            motion.position = QPointF(1480, 300); // output 1 pixel atlas -> KWin logical (1224,300)
-            endpoint.sendInput(motion);
+            // Deliberately send no separate motion. The worker must position
+            // fake-input at this packet's logical point before clicking.
+            ConsoleWorkerWire::Input click;
+            click.type = ConsoleWorkerWire::Input::Type::Mouse;
+            click.eventType = QEvent::MouseButtonPress;
+            click.position = QPointF(1480, 300); // output 1 pixel atlas -> KWin logical (1224,300)
+            click.button = Qt::LeftButton;
+            click.buttons = Qt::LeftButton;
+            endpoint.sendInput(click);
+            click.eventType = QEvent::MouseButtonRelease;
+            click.buttons = Qt::NoButton;
+            endpoint.sendInput(click);
             inputTimer.start();
         }
         maybeStop();

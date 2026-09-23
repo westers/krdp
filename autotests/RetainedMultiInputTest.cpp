@@ -29,6 +29,7 @@ private Q_SLOTS:
         const auto mappedPress = RetainedMultiInput::toCompositor(press, wire, logical, workspaceOrigin);
         QVERIFY(mappedPress);
         QCOMPARE(mappedPress->position, QPointF(-960, 150));
+        QVERIFY(RetainedMultiInput::positionBeforeDispatch(*mappedPress));
 
         Input motion = press;
         motion.eventType = QEvent::MouseMove;
@@ -37,6 +38,7 @@ private Q_SLOTS:
         const auto mappedMotion = RetainedMultiInput::toCompositor(motion, wire, logical, workspaceOrigin);
         QVERIFY(mappedMotion);
         QCOMPARE(mappedMotion->position, QPointF(200, 200));
+        QVERIFY(!RetainedMultiInput::positionBeforeDispatch(*mappedMotion));
 
         ConsoleInputState held;
         held.record(*mappedPress);
@@ -45,6 +47,7 @@ private Q_SLOTS:
         QCOMPARE(releases.size(), 1);
         QCOMPARE(releases.first().position, mappedMotion->position);
         QCOMPARE(releases.first().eventType, QEvent::MouseButtonRelease);
+        QVERIFY(RetainedMultiInput::positionBeforeDispatch(releases.first()));
 
         Input click = press;
         click.position = motion.position;
@@ -54,6 +57,7 @@ private Q_SLOTS:
         wheel.eventType = QEvent::Wheel;
         wheel.position = motion.position;
         QCOMPARE(RetainedMultiInput::toCompositor(wheel, wire, logical, workspaceOrigin)->position, mappedMotion->position);
+        QVERIFY(RetainedMultiInput::positionBeforeDispatch(wheel));
     }
 
     void refusesMissingOrNonFiniteLayoutButKeepsKeyboardPositionless()
@@ -70,6 +74,7 @@ private Q_SLOTS:
         key.eventType = QEvent::KeyPress;
         key.nativeScanCode = 38;
         QCOMPARE(RetainedMultiInput::toCompositor(key, {}, {}, {}).value(), key);
+        QVERIFY(!RetainedMultiInput::positionBeforeDispatch(key));
     }
 };
 

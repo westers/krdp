@@ -530,6 +530,13 @@ private:
                     if (m_multiMode) {
                         auto *session = multiInputSession();
                         if (!session) continue;
+                        if (RetainedMultiInput::positionBeforeDispatch(*mapped)) {
+                            auto motion = *mapped;
+                            motion.type = ConsoleWorkerWire::Input::Type::Mouse;
+                            motion.eventType = QEvent::MouseMove;
+                            motion.button = Qt::NoButton;
+                            session->sendGlobalEvent(eventFor(motion));
+                        }
                         session->sendGlobalEvent(event);
                     } else {
                         if (input->type == ConsoleWorkerWire::Input::Type::Mouse && input->eventType == QEvent::MouseMove) {
