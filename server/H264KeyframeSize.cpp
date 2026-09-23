@@ -59,7 +59,9 @@ std::optional<QSize> h264KeyframeSize(const QByteArray &packet)
     context->max_pixels = 4096LL * 4096;
     context->thread_count = 1;
     context->err_recognition = AV_EF_BITSTREAM | AV_EF_BUFFER | AV_EF_EXPLODE;
-    context->error_concealment = 0;
+    // Keep FFmpeg's error-resilience bookkeeping enabled. Disabling it marks
+    // valid sliced-thread x264 pictures with FF_DECODE_ERROR_DECODE_SLICES.
+    // Repaired pictures are still rejected below via decode_error_flags.
     parser->flags |= PARSER_FLAG_COMPLETE_FRAMES;
     QByteArray padded = packet;
     padded.append(QByteArray(AV_INPUT_BUFFER_PADDING_SIZE, '\0'));
@@ -75,8 +77,8 @@ std::optional<QSize> h264KeyframeSize(const QByteArray &packet)
         || parser->width % 2 || parser->height % 2 || parser->picture_structure != AV_PICTURE_STRUCTURE_FRAME) return {};
     const QSize dimensions(parser->width, parser->height);
     // The parser exposes dimensions even on some later slice errors. Decode
-    // this one candidate with error concealment disabled; do not treat a
-    // plausible SPS alone as a complete, correctly-sized keyframe.
+    // this one candidate and reject every reported decode/concealment error;
+    // do not treat a plausible SPS alone as a complete, correctly-sized frame.
     if (avcodec_open2(context, codec, nullptr) < 0 || av_new_packet(input, int(packet.size())) < 0) return {};
     std::memcpy(input->data, packet.constData(), packet.size());
     if (avcodec_send_packet(context, input) < 0) return {};

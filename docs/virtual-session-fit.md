@@ -42,6 +42,13 @@ servers leave the action disabled. Errors stay out of unrelated layout flows.
 Deploy matching broker, worker and KRdp library together; a newer broker with
 an older worker can advertise the feature but the worker will refuse it.
 
+The first native Fit test found that disabling FFmpeg error concealment also
+disabled slice-completion bookkeeping: valid multi-slice CPU keyframes were
+rejected and the resize rolled back. The verifier now keeps that bookkeeping
+enabled while still rejecting every nonzero decode/concealment error flag.
+Production-encoder fixtures and individually removed/truncated slice tests cover
+the correction. Native Fit acceptance must be repeated with the corrected worker.
+
 Automated coverage: `VirtualResizeTest`, `VirtualResizeSessionTest`,
 `VirtualSessionTransportTest`, client `VirtualSessionClientStateTest` and
 `SessionModelTest`. Native acceptance uses Buzz's Wayland GUI and a new Sol

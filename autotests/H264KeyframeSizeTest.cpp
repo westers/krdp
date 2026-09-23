@@ -18,6 +18,9 @@ private Q_SLOTS:
         QTest::newRow("720p") << QStringLiteral("1280x720") << QSize(1280, 720);
         QTest::newRow("cropped-height") << QStringLiteral("1920x1080") << QSize(1920, 1080);
         QTest::newRow("cropped-width") << QStringLiteral("1366x768") << QSize(1366, 768);
+        QTest::newRow("multislice") << QStringLiteral("1920x1080-multislice") << QSize(1920, 1080);
+        QTest::newRow("production-720p") << QStringLiteral("1280x720-production") << QSize(1280, 720);
+        QTest::newRow("production-1080p") << QStringLiteral("1920x1080-production") << QSize(1920, 1080);
     }
     void dimensions()
     {
@@ -50,6 +53,44 @@ private Q_SLOTS:
         QVERIFY(!KRdp::h264KeyframeSize(unsupported));
         const auto oversized = fixture(QStringLiteral("4098x200")); QVERIFY(!oversized.isEmpty());
         QVERIFY(!KRdp::h264KeyframeSize(oversized));
+    }
+    void rejectsIncompleteMultislice_data()
+    {
+        QTest::addColumn<QString>("name");
+        QTest::newRow("synthetic") << QStringLiteral("1920x1080-multislice");
+        QTest::newRow("production-720p") << QStringLiteral("1280x720-production");
+        QTest::newRow("production-1080p") << QStringLiteral("1920x1080-production");
+    }
+    void rejectsIncompleteMultislice()
+    {
+        QFETCH(QString, name);
+        const auto packet = fixture(name); QVERIFY(!packet.isEmpty());
+        QList<qsizetype> starts;
+        for (qsizetype i = 0; i + 3 < packet.size(); ++i) {
+            if (packet[i] == 0 && packet[i + 1] == 0 && packet[i + 2] == 1) {
+                starts.append(i > 0 && packet[i - 1] == 0 ? i - 1 : i);
+                i += 3;
+            }
+        }
+        starts.append(packet.size());
+        int slices = 0;
+        for (qsizetype i = 0; i + 1 < starts.size(); ++i) {
+            const auto begin = starts[i], end = starts[i + 1];
+            const auto header = begin + (packet[begin + 2] == 1 ? 3 : 4);
+            if ((static_cast<unsigned char>(packet[header]) & 0x1f) != 5) continue;
+            ++slices;
+            auto missing = packet;
+            missing.remove(begin, end - begin);
+            QVERIFY2(!KRdp::h264KeyframeSize(missing), qPrintable(QStringLiteral("missing slice %1").arg(slices)));
+            // Keep its header/first_mb but remove half the coded slice, including
+            // its end. Remaining later slices must not conceal an incomplete one.
+            QVERIFY(end - header > 4);
+            auto truncated = packet;
+            const auto cut = header + (end - header) / 2;
+            truncated.remove(cut, end - cut);
+            QVERIFY2(!KRdp::h264KeyframeSize(truncated), qPrintable(QStringLiteral("truncated slice %1").arg(slices)));
+        }
+        QVERIFY(slices > 1);
     }
 };
 QTEST_GUILESS_MAIN(H264KeyframeSizeTest)
