@@ -154,6 +154,15 @@ acknowledgment remains `partial`. The parser now allows a temporary `new:`
 primary target only after that Add appears in the same draft. Source tests
 pass, but native Sol compositor and Buzz GUI acceptance still have not run;
 the opt-in remains default OFF and no installed service is changed.
+Private Buzz Intel worker probe `dc079cf` subsequently reached exact
+three-output KScreen/capture acknowledgment with three decoded keyframes and
+worker result 0, using source-matched libraries in a disposable compositor.
+It is **not** full native acceptance: after worker-owned output release,
+Buzz KWin reset surviving Virtual-1's y=100 move to y=0, so the wrapper's
+post-stop preservation assertion returned 1. The Intel VA-API filter failed
+and software x264 fallback ran. No broker/RDP GUI path or installed service
+was exercised; Sol GPU and the full matrix remain pending. See
+`~/dev/rdp/evidence/2026-09-23-buzz-intel-mixed-create.md`.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. The later private Fit
