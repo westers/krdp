@@ -51,6 +51,7 @@ private Q_SLOTS:
         const auto ready = set.submit(1, right);
         QVERIFY(ready.becameReady); QVERIFY(set.ready());
         QCOMPARE(ready.outputs.monitors.size(), 2);
+        QCOMPARE(ready.outputs.compositorOrigin, QPoint(-1280, 0));
         QCOMPARE(ready.outputs.monitors[0].geometry, QRect(0, 0, 1280, 720));
         QCOMPARE(ready.outputs.monitors[1].geometry, QRect(1280, 100, 1280, 720));
         QCOMPARE(ready.outputs.monitors[0].scale, 1.5);

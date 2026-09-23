@@ -190,7 +190,7 @@ void ConsoleWorkerWireTest::rejectsOversizedRecord()
 void ConsoleWorkerWireTest::roundTripsOutputs()
 {
     const Outputs sent{{{QStringLiteral("DP-1"), QRect(0, 0, 1920, 1080), 1, true},
-                        {QStringLiteral("HDMI-A-1"), QRect(1920, 0, 1280, 720), 1.5, false}}};
+                        {QStringLiteral("HDMI-A-1"), QRect(1920, 0, 1280, 720), 1.5, false}}, QPoint(-1920, -100)};
     Deframer deframer;
     deframer.feed(frame(sent));
     const auto record = deframer.next();
@@ -199,6 +199,12 @@ void ConsoleWorkerWireTest::roundTripsOutputs()
     Record truncated = *record;
     truncated.payload.chop(1);
     QVERIFY(!outputs(truncated));
+    auto invalidOrigin = sent;
+    invalidOrigin.compositorOrigin = QPoint(-32769, 0);
+    deframer.feed(frame(invalidOrigin));
+    const auto bad = deframer.next();
+    QVERIFY(bad);
+    QVERIFY(!outputs(*bad));
 }
 
 void ConsoleWorkerWireTest::rejectsInvalidOutputs()

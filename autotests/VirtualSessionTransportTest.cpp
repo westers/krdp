@@ -116,10 +116,10 @@ private Q_SLOTS:
             RemoteTopologyCatalog catalog;
             const auto snapshot = catalog.observe({
                 {.backendKey = u"Virtual-left"_s, .name = u"Virtual-left"_s,
-                    .nativePixels = QSize(1920, 1080), .logicalGeometry = QRect(0, 0, 1280, 720),
+                    .nativePixels = QSize(1920, 1080), .logicalGeometry = QRect(-1280, -100, 1280, 720),
                     .scale = 1.5, .enabled = true, .primary = false, .physical = false, .owner = t.m_handle->id},
                 {.backendKey = u"Virtual-right"_s, .name = u"Virtual-right"_s,
-                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(1280, 100, 1280, 720),
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(0, 0, 1280, 720),
                     .scale = 1.0, .enabled = true, .primary = true, .physical = false, .owner = t.m_handle->id},
             });
             QVERIFY(snapshot);
@@ -129,8 +129,8 @@ private Q_SLOTS:
             VideoFrame frame;
             frame.size = QSize(1920, 1080); frame.data = "fixture"; frame.isKeyFrame = true;
             frame.monitors = RemoteMonitorGeometry::projectToWire({
-                {QPoint(0, 0), QSize(1920, 1080), 1.5, false},
-                {QPoint(1280, 100), QSize(1280, 720), 1.0, true},
+                {QPoint(-1280, -100), QSize(1920, 1080), 1.5, false},
+                {QPoint(0, 0), QSize(1280, 720), 1.0, true},
             });
             frame.monitorIndex = 0;
             auto invalid = frame;
@@ -139,6 +139,7 @@ private Q_SLOTS:
             const auto reply = t.topologyFrame(frame, 1000);
             QCOMPARE(reply.value(u"type"_s).toString(), u"topology"_s);
             QCOMPARE(reply.value(u"outputs"_s).toArray().size(), 2);
+            QCOMPARE(reply.value(u"outputs"_s).toArray().first().toObject().value(u"logical"_s).toObject().value(u"x"_s).toInt(), -1280);
             const auto capabilities = reply.value(u"capabilities"_s).toObject();
             QVERIFY(capabilities.value(u"multiOutputCapture"_s).toBool());
             QCOMPARE(capabilities.value(u"maxOutputs"_s).toInt(), 16);

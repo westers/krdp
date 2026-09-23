@@ -27,9 +27,10 @@ int main(int argc, char **argv)
     const bool managed = arguments.size() == 3 && arguments[1] == QStringLiteral("--managed-session");
     const bool inputProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-input");
     const bool dragProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-drag");
+    const bool negativeProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-negative");
     const bool repositionProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-reposition");
     const bool mixed = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi-mixed") || inputProbe);
-    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || dragProbe || repositionProbe);
+    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || negativeProbe || dragProbe || repositionProbe);
     if (arguments.size() != 1 && !managed && !multi) return 1;
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     const QFileInfo runtimeInfo(runtime);
@@ -185,12 +186,14 @@ int main(int argc, char **argv)
         for (int i = 0; i < expected; ++i) {
             const QRect logical = mixed && i == 0 ? QRect(0, 0, 1024, 576)
                 : mixed && i == 1 ? QRect(1024, 100, 1280, 720)
-                : repositionInventory && i == 1 ? QRect(1280, 100, 1280, 720) : QRect(i * 1280, 0, 1280, 720);
-            const QRect wire = (mixed || repositionInventory) && i == 1 ? QRect(1280, 100, 1280, 720)
+                : (negativeProbe || repositionInventory) && i == 1 ? QRect(1280, 100, 1280, 720)
+                : QRect(i * 1280, 0, 1280, 720);
+            const QRect wire = (mixed || negativeProbe || repositionInventory) && i == 1 ? QRect(1280, 100, 1280, 720)
                 : QRect(i * 1280, 0, 1280, 720);
             if (outputs.monitors[i].geometry != logical || frame.monitors[i].geometry != wire
                 || outputs.monitors[i].scale != (mixed && i == 0 ? 1.25 : 1.0)) return;
         }
+        if (outputs.compositorOrigin != (negativeProbe ? QPoint(-1280, -100) : QPoint(0, 0))) return;
         QFile output(runtime + (multi ? QStringLiteral("/worker-keyframe-%1.h264").arg(frame.monitorIndex)
                                       : QStringLiteral("/worker-keyframe.h264")));
         if (!output.open(QIODevice::WriteOnly) || output.write(frame.data) != frame.data.size()) return;

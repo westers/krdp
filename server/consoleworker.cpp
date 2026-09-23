@@ -167,6 +167,7 @@ public:
                 for (const auto *screen : screens) {
                     workspace = workspace.united(screen->geometry());
                 }
+                if (m_mode.virtualSession && !screens.isEmpty()) outputs.compositorOrigin = workspace.topLeft();
                 if (screens.size() == frame.monitors.size()) {
                     for (qsizetype i = 0; i < screens.size(); ++i) {
                         if (screens[i]->geometry().translated(-workspace.topLeft()) != frame.monitors[i].geometry) {

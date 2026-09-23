@@ -97,6 +97,31 @@ private Q_SLOTS:
         QVERIFY(!matchesPublished(*state, worker, {first, second}));
     }
 
+    void preservesNegativeCompositorOriginSeparateFromAtlas()
+    {
+        auto object = root();
+        object.insert(QStringLiteral("outputs"), QJsonArray{
+            output(QStringLiteral("Virtual-0"), 1, -1024, -100, 1.25, 1),
+            output(QStringLiteral("Virtual-1"), 2, 0, 0, 1.0, 2)});
+        const auto state = decoded(object);
+        QVERIFY(state);
+        const auto data = keyframe();
+        QVERIFY(!data.isEmpty());
+        KRdp::ConsoleWorkerWire::Outputs worker{{
+            {QStringLiteral("Virtual-0"), QRect(0, 0, 1024, 576), 1.25, true},
+            {QStringLiteral("Virtual-1"), QRect(1024, 100, 1280, 720), 1.0, false}}, QPoint(-1024, -100)};
+        KRdp::VideoFrame first;
+        first.monitorIndex = 0;
+        first.size = QSize(1280, 720);
+        first.data = data;
+        first.isKeyFrame = true;
+        auto second = first;
+        second.monitorIndex = 1;
+        QVERIFY(matchesPublished(*state, worker, {first, second}));
+        worker.compositorOrigin = QPoint(0, 0);
+        QVERIFY(!matchesPublished(*state, worker, {first, second}));
+    }
+
     void refusesAmbiguousOrUnsupportedReadback()
     {
         auto object = root();

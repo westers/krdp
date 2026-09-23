@@ -114,6 +114,7 @@ public:
         QVector<RemoteMonitorGeometry::Output> projected;
         projected.reserve(m_screens.size());
         ConsoleWorkerWire::Outputs outputs;
+        outputs.compositorOrigin = workspace.topLeft();
         for (qsizetype i = 0; i < m_screens.size(); ++i) {
             const auto logical = m_screens[i].logicalGeometry.translated(-workspace.topLeft());
             projected.append({logical.topLeft(), m_sizes[i], m_scales[i], m_screens[i].primary});

@@ -152,6 +152,13 @@ local screen viewing several remote outputs are normal. Read-back compositor
 rounding wins over client arithmetic. The old `virtual-<n>` ID is a compatibility
 alias only and must never be treated as a new stable output ID.
 
+The internal worker `Outputs` record carries an explicit compositor-global
+workspace origin (worker-wire v2). Its monitor rectangles remain normalized
+for RDP capture/input, while the broker adds the origin back when publishing
+`topology.logical`. The separate KScreen publication check also verifies this
+origin. A zero origin cannot be inferred merely because the RDP atlas starts
+at zero; doing so loses valid negative and shifted KWin arrangements.
+
 No claim of support is made for retained multi-output desktops until the
 broker/worker transports multiple independent capture streams and per-output
 input mapping in one compositor. No client UI should display an enabled

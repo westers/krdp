@@ -8,7 +8,7 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-negative-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia ) ) ]]
     probe_mode="${1:-}"
     rdp_mode=
     probe_timeout=80
@@ -29,10 +29,11 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         probe_mode=--plasma-nvidia
         probe_timeout=120
     fi
-    if [[ "$probe_mode" == --plasma-worker-nvidia || "$probe_mode" == --plasma-multi-worker-nvidia || "$probe_mode" == --plasma-mixed-worker-nvidia || "$probe_mode" == --plasma-multi-window-nvidia || "$probe_mode" == --plasma-multi-input-nvidia || "$probe_mode" == --plasma-multi-drag-nvidia || "$probe_mode" == --plasma-multi-reposition-nvidia ]]; then
+    if [[ "$probe_mode" == --plasma-worker-nvidia || "$probe_mode" == --plasma-multi-worker-nvidia || "$probe_mode" == --plasma-mixed-worker-nvidia || "$probe_mode" == --plasma-negative-worker-nvidia || "$probe_mode" == --plasma-multi-window-nvidia || "$probe_mode" == --plasma-multi-input-nvidia || "$probe_mode" == --plasma-multi-drag-nvidia || "$probe_mode" == --plasma-multi-reposition-nvidia ]]; then
         rdp_mode=--worker
         [[ "$probe_mode" != --plasma-multi-worker-nvidia ]] || rdp_mode=--multi-worker
         [[ "$probe_mode" != --plasma-mixed-worker-nvidia ]] || rdp_mode=--multi-mixed
+        [[ "$probe_mode" != --plasma-negative-worker-nvidia ]] || rdp_mode=--multi-negative
         [[ "$probe_mode" != --plasma-multi-window-nvidia ]] || rdp_mode=--multi-window
         [[ "$probe_mode" != --plasma-multi-input-nvidia ]] || rdp_mode=--multi-input
         [[ "$probe_mode" != --plasma-multi-drag-nvidia ]] || rdp_mode=--multi-drag
@@ -89,7 +90,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     fi
     mkdir "$probe_runtime/config" "$probe_runtime/cache" "$probe_runtime/state" "$probe_runtime/data"
     cp -r "$repo_path/scripts/virtual-probe-config/." "$probe_runtime/config/"
-    if [[ "$rdp_mode" == --worker || "$rdp_mode" == --multi-worker || "$rdp_mode" == --multi-mixed || "$rdp_mode" == --multi-window || "$rdp_mode" == --multi-input || "$rdp_mode" == --multi-drag || "$rdp_mode" == --multi-reposition || "$rdp_mode" == --supervised ]]; then
+    if [[ "$rdp_mode" == --worker || "$rdp_mode" == --multi-worker || "$rdp_mode" == --multi-mixed || "$rdp_mode" == --multi-negative || "$rdp_mode" == --multi-window || "$rdp_mode" == --multi-input || "$rdp_mode" == --multi-drag || "$rdp_mode" == --multi-reposition || "$rdp_mode" == --supervised ]]; then
         mkdir -p "$probe_runtime/data/applications"
         cp "$repo_path/build/server/org.kde.krdpvirtualprobe.desktop" "$probe_runtime/data/applications/org.kde.krdpconsoleworker.desktop"
     elif [[ -n "$rdp_mode" ]]; then
@@ -130,7 +131,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
 expected_outputs=${5:-1}
-[[ $expected_outputs == 1 || ( $expected_outputs == 2 && ( ${3:-} == --multi-worker || ${3:-} == --multi-mixed || ${3:-} == --multi-window || ${3:-} == --multi-input || ${3:-} == --multi-drag || ${3:-} == --multi-reposition || ${3:-} == --supervised ) ) ]]
+[[ $expected_outputs == 1 || ( $expected_outputs == 2 && ( ${3:-} == --multi-worker || ${3:-} == --multi-mixed || ${3:-} == --multi-negative || ${3:-} == --multi-window || ${3:-} == --multi-input || ${3:-} == --multi-drag || ${3:-} == --multi-reposition || ${3:-} == --supervised ) ) ]]
 # Populate this private profile's desktop-service identities before KWin checks
 # application permissions (including Spectacle's restricted screenshot API).
 kbuildsycoca6 --noincremental >"$XDG_RUNTIME_DIR/service-cache.log" 2>&1
@@ -261,7 +262,10 @@ jq -e 'all(.outputs[]; .enabled == true and .size.width == 1280 and .size.height
 if [[ $expected_outputs == 2 ]]; then
     mapfile -t output_names < <(jq -r '.outputs[].name' "$XDG_RUNTIME_DIR/outputs.json")
     [[ ${#output_names[@]} == 2 && ${output_names[0]} =~ ^Virtual-[0-9]+$ && ${output_names[1]} =~ ^Virtual-[0-9]+$ ]]
-    if [[ ${3:-} == --multi-mixed || ${3:-} == --multi-input ]]; then
+    if [[ ${3:-} == --multi-negative ]]; then
+        env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland timeout 10 kscreen-doctor \
+            "output.${output_names[0]}.position.-1280,-100" "output.${output_names[1]}.position.0,0"
+    elif [[ ${3:-} == --multi-mixed || ${3:-} == --multi-input ]]; then
         env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland timeout 10 kscreen-doctor \
             "output.${output_names[0]}.scale.1.25" "output.${output_names[0]}.position.0,0" \
             "output.${output_names[1]}.position.1024,100"
@@ -270,7 +274,9 @@ if [[ $expected_outputs == 2 ]]; then
             "output.${output_names[0]}.position.0,0" "output.${output_names[1]}.position.1280,0"
     fi
     env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland timeout 10 kscreen-doctor -j >"$XDG_RUNTIME_DIR/outputs.json"
-    if [[ ${3:-} == --multi-mixed || ${3:-} == --multi-input ]]; then
+    if [[ ${3:-} == --multi-negative ]]; then
+        jq -e '(.outputs | map(.pos.x) | sort) == [-1280,0] and (.outputs | map(.pos.y) | sort) == [-100,0]' "$XDG_RUNTIME_DIR/outputs.json"
+    elif [[ ${3:-} == --multi-mixed || ${3:-} == --multi-input ]]; then
         jq -e '(.outputs | map(.pos.x) | sort) == [0,1024] and any(.outputs[]; .scale == 1.25)' "$XDG_RUNTIME_DIR/outputs.json"
     else
         jq -e '(.outputs | map(.pos.x) | sort) == [0,1280]' "$XDG_RUNTIME_DIR/outputs.json"
@@ -291,7 +297,7 @@ if [[ "${3:-}" == --supervised ]]; then
     while kill -0 "$plasma_pid" && kill -0 "$wrapper_pid"; do sleep 1; done
     exit 1
 fi
-if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker || "${3:-}" == --multi-mixed || "${3:-}" == --multi-window || "${3:-}" == --multi-input || "${3:-}" == --multi-drag || "${3:-}" == --multi-reposition ]]; then
+if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker || "${3:-}" == --multi-mixed || "${3:-}" == --multi-negative || "${3:-}" == --multi-window || "${3:-}" == --multi-input || "${3:-}" == --multi-drag || "${3:-}" == --multi-reposition ]]; then
     if [[ "${3:-}" == --multi-window || "${3:-}" == --multi-input || "${3:-}" == --multi-drag ]]; then
         # This window is created in the SAME private compositor as the capture
         # worker. KWin's own move-to-screen API proves that its second output
@@ -324,6 +330,7 @@ if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker || "${3:-}" == --multi-
     probe_args=()
     [[ "${3:-}" != --multi-worker ]] || probe_args=(--multi)
     [[ "${3:-}" != --multi-mixed ]] || probe_args=(--multi-mixed)
+    [[ "${3:-}" != --multi-negative ]] || probe_args=(--multi-negative)
     [[ "${3:-}" != --multi-window ]] || probe_args=(--multi)
     [[ "${3:-}" != --multi-input ]] || probe_args=(--multi-input)
     [[ "${3:-}" != --multi-drag ]] || probe_args=(--multi-drag)

@@ -132,6 +132,7 @@ inline bool matchesPublished(const Snapshot &readback, const ConsoleWorkerWire::
         || worker.monitors.size() != keyframes.size()) return false;
     QRect workspace;
     for (const auto &output : readback.outputs) workspace |= output.logicalGeometry;
+    if (worker.compositorOrigin != workspace.topLeft()) return false;
     QSet<QString> matched;
     QSet<int> frameIndexes;
     for (qsizetype i = 0; i < worker.monitors.size(); ++i) {

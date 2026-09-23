@@ -750,6 +750,57 @@ private Q_SLOTS:
                 QVERIFY(multi.outputs[1].id != stableId);
                 QCOMPARE(multi.outputs[1].output.logicalGeometry, QRect(1024, 0, 1280, 720));
                 QCOMPARE(multi.revision, quint64(3));
+                const auto secondId = multi.outputs[1].id;
+                const ConsoleWorkerWire::Outputs repositioned{{
+                    {QStringLiteral("Virtual-1"), QRect(0, 0, 1024, 576), 1.25, true},
+                    {QStringLiteral("Virtual-2"), QRect(1024, 100, 1280, 720), 1.0, false}}};
+                worker.write(ConsoleWorkerWire::frame(repositioned));
+                QVERIFY(worker.waitForBytesWritten(1000));
+                QTRY_COMPARE(workerState.outputs, repositioned);
+                QVERIFY(!host.topologyFor(*handle)); // Changed geometry is hidden until both new keyframes.
+                QCOMPARE(workerState.topology.snapshot().revision, quint64(3));
+                frame.monitors = {{QRect(0, 0, 1280, 720), true}, {QRect(1280, 100, 1280, 720), false}};
+                frame.monitorIndex = 1;
+                worker.write(ConsoleWorkerWire::frame(frame));
+                QVERIFY(worker.waitForBytesWritten(1000));
+                QTRY_VERIFY(workerState.verifiedKeyframes.contains(1));
+                QVERIFY(!host.topologyFor(*handle));
+                frame.monitorIndex = 0;
+                worker.write(ConsoleWorkerWire::frame(frame));
+                QVERIFY(worker.waitForBytesWritten(1000));
+                QTRY_VERIFY(host.topologyFor(*handle).has_value());
+                const auto moved = *host.topologyFor(*handle);
+                QCOMPARE(moved.revision, quint64(4));
+                QCOMPARE(moved.generation, multi.generation);
+                QCOMPARE(moved.outputs[0].id, stableId);
+                QCOMPARE(moved.outputs[1].id, secondId);
+                QCOMPARE(moved.outputs[1].output.logicalGeometry, QRect(1024, 100, 1280, 720));
+                worker.write(ConsoleWorkerWire::frame(frame));
+                QVERIFY(worker.waitForBytesWritten(1000));
+                QTest::qWait(20);
+                QCOMPARE(workerState.topology.snapshot().revision, quint64(4));
+                auto shifted = repositioned;
+                shifted.compositorOrigin = QPoint(-1280, -100);
+                worker.write(ConsoleWorkerWire::frame(shifted));
+                QVERIFY(worker.waitForBytesWritten(1000));
+                QTRY_COMPARE(workerState.outputs, shifted);
+                QVERIFY(!host.topologyFor(*handle));
+                QCOMPARE(workerState.topology.snapshot().revision, quint64(4));
+                frame.monitorIndex = 0;
+                worker.write(ConsoleWorkerWire::frame(frame));
+                QVERIFY(worker.waitForBytesWritten(1000));
+                QTRY_VERIFY(workerState.verifiedKeyframes.contains(0));
+                QVERIFY(!host.topologyFor(*handle));
+                frame.monitorIndex = 1;
+                worker.write(ConsoleWorkerWire::frame(frame));
+                QVERIFY(worker.waitForBytesWritten(1000));
+                QTRY_VERIFY(host.topologyFor(*handle).has_value());
+                const auto negative = *host.topologyFor(*handle);
+                QCOMPARE(negative.revision, quint64(5));
+                QCOMPARE(negative.outputs[0].id, stableId);
+                QCOMPARE(negative.outputs[1].id, secondId);
+                QCOMPARE(negative.outputs[0].output.logicalGeometry, QRect(-1280, -100, 1024, 576));
+                QCOMPARE(negative.outputs[1].output.logicalGeometry, QRect(-256, 0, 1280, 720));
             }
             QCOMPARE(guardian.processId(), child);
         }

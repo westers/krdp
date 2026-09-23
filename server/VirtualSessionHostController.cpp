@@ -355,7 +355,8 @@ bool VirtualSessionHostController::prepareEndpoint(quint32 uid, const VirtualSes
                 if (output.primary) ++primaries;
                 projection.append({output.geometry.topLeft(), wire.geometry.size(), output.scale, output.primary});
                 observed.append({.backendKey = output.name, .name = output.name,
-                    .nativePixels = wire.geometry.size(), .logicalGeometry = output.geometry,
+                    .nativePixels = wire.geometry.size(),
+                    .logicalGeometry = output.geometry.translated(entry->outputs.compositorOrigin),
                     .scale = output.scale, .enabled = true, .primary = output.primary,
                     .physical = false, .owner = entry->handle.id});
             }
@@ -396,7 +397,7 @@ bool VirtualSessionHostController::prepareEndpoint(quint32 uid, const VirtualSes
             .backendKey = monitor.name,
             .name = monitor.name,
             .nativePixels = frame.size,
-            .logicalGeometry = monitor.geometry,
+            .logicalGeometry = monitor.geometry.translated(entry->outputs.compositorOrigin),
             .scale = monitor.scale,
             .enabled = true,
             .primary = monitor.primary,
@@ -443,7 +444,7 @@ std::optional<RemoteTopologyCatalog::Snapshot> VirtualSessionHostController::top
         });
         if (foundOutput == snapshot.outputs.cend()) return {};
         const auto &observed = foundOutput->output;
-        if (observed.logicalGeometry != reported.geometry || observed.scale != reported.scale
+        if (observed.logicalGeometry != reported.geometry.translated(worker.outputs.compositorOrigin) || observed.scale != reported.scale
             || observed.primary != reported.primary || observed.nativePixels != worker.wireLayout[i].geometry.size()
             || observed.owner != handle.id) return {};
         ordered.append(*foundOutput);

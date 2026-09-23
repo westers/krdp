@@ -23,7 +23,7 @@
 
 namespace KRdp::ConsoleWorkerWire
 {
-constexpr quint16 ProtocolVersion = 1;
+constexpr quint16 ProtocolVersion = 2;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 
 enum class Kind : quint8 {
@@ -194,6 +194,7 @@ struct Output {
 
 struct Outputs {
     QVector<Output> monitors;
+    QPoint compositorOrigin = QPoint(0, 0); // Global KWin top-left; monitor geometry is RDP-normalized.
     bool operator==(const Outputs &) const = default;
 };
 
@@ -206,6 +207,7 @@ inline QByteArray frame(const Outputs &outputs)
     for (const auto &output : outputs.monitors) {
         stream << output.name << output.geometry << output.scale << output.primary;
     }
+    stream << outputs.compositorOrigin;
     return frame(Kind::Outputs, payload);
 }
 
@@ -235,6 +237,9 @@ inline std::optional<Outputs> outputs(const Record &record)
         names.insert(output.name);
         result.monitors.append(output);
     }
+    stream >> result.compositorOrigin;
+    if (stream.status() != QDataStream::Ok || result.compositorOrigin.x() < -32768 || result.compositorOrigin.x() > 32768
+        || result.compositorOrigin.y() < -32768 || result.compositorOrigin.y() > 32768) return std::nullopt;
     return stream.atEnd() ? std::optional<Outputs>(result) : std::nullopt;
 }
 
