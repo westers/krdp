@@ -252,7 +252,8 @@ private Q_SLOTS:
                 .owner = t.m_handle->id,
             }});
             QVERIFY(snapshot);
-            t.setTopologyResolver([snapshot](const auto &) { return snapshot; });
+            std::optional<RemoteTopologyCatalog::Snapshot> published;
+            t.setTopologyResolver([&published](const auto &) { return published; });
             const QJsonObject query{{u"type"_s, u"topology-query"_s}, {u"v"_s, 1}, {u"id"_s, u"top-1"_s}};
             QVERIFY(t.request(query, 1000).isEmpty());
             QCOMPARE(t.m_topologyId, u"top-1"_s);
@@ -270,6 +271,7 @@ private Q_SLOTS:
             frame.monitors = {{QRect(0, 0, 640, 480), true}};
             QVERIFY(t.topologyFrame(frame, 1000).isEmpty());
             frame.monitors = {{QRect(0, 0, 1280, 720), true}};
+            published = snapshot;
             const auto answer = t.topologyFrame(frame, 1000);
             QCOMPARE(answer.value(u"type"_s).toString(), u"topology"_s);
             QCOMPARE(answer.value(u"id"_s).toString(), u"top-1"_s);
@@ -277,7 +279,10 @@ private Q_SLOTS:
             QVERIFY(!answer.value(u"capabilities"_s).toObject().value(u"add"_s).toBool());
             QVERIFY(t.m_topologyId.isEmpty());
             QVERIFY(!t.m_topologyDeadline.isActive());
-            QVERIFY(t.request(query, 1000).isEmpty());
+            const auto idleAnswer = t.request(query, 1000);
+            QCOMPARE(idleAnswer.value(u"type"_s).toString(), u"topology"_s);
+            QCOMPARE(idleAnswer.value(u"generation"_s).toString(), snapshot->generation);
+            QVERIFY(t.m_topologyId.isEmpty());
             t.revoke();
             QVERIFY(t.m_topologyId.isEmpty());
             QVERIFY(t.topologyFrame(frame, 1000).isEmpty());
@@ -296,7 +301,8 @@ private Q_SLOTS:
                     .scale = 1.0, .enabled = true, .primary = true, .physical = false, .owner = t.m_handle->id},
             });
             QVERIFY(snapshot);
-            t.setTopologyResolver([snapshot](const auto &) { return snapshot; });
+            std::optional<RemoteTopologyCatalog::Snapshot> published;
+            t.setTopologyResolver([&published](const auto &) { return published; });
             const QJsonObject query{{u"type"_s, u"topology-query"_s}, {u"v"_s, 1}, {u"id"_s, u"two"_s}};
             QVERIFY(t.request(query, 1000).isEmpty());
             VideoFrame frame;
@@ -309,9 +315,13 @@ private Q_SLOTS:
             auto invalid = frame;
             invalid.monitors[1].geometry.moveLeft(1280); // Logical pixels cannot be reused as wire pixels.
             QVERIFY(t.topologyFrame(invalid, 1000).isEmpty());
+            published = snapshot;
             const auto reply = t.topologyFrame(frame, 1000);
             QCOMPARE(reply.value(u"type"_s).toString(), u"topology"_s);
             QCOMPARE(reply.value(u"outputs"_s).toArray().size(), 2);
+            const auto idleReply = t.request(query, 1000);
+            QCOMPARE(idleReply.value(u"outputs"_s).toArray().size(), 2);
+            QVERIFY(t.m_topologyId.isEmpty());
             QCOMPARE(reply.value(u"outputs"_s).toArray().first().toObject().value(u"logical"_s).toObject().value(u"x"_s).toInt(), -1280);
             const auto capabilities = reply.value(u"capabilities"_s).toObject();
             QVERIFY(capabilities.value(u"multiOutputCapture"_s).toBool());

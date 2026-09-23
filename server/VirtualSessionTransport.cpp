@@ -1316,6 +1316,19 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         if (!authorized(uid)) return RemoteTopologyProtocol::error(*id, u"not-owner"_s);
         if (!m_topologyResolve) return RemoteTopologyProtocol::error(*id, u"unsupported"_s);
         if (!m_topologyId.isEmpty()) return m_topologyId == *id ? QJsonObject{} : RemoteTopologyProtocol::error(*id, u"busy"_s);
+        // The host publishes a snapshot only after decoded keyframes prove
+        // every captured output (and multi-output KScreen agrees). An idle compositor may
+        // not produce another frame merely because we request an IDR, so a
+        // later read-only query can use that already verified publication.
+        if (m_handle) {
+            const auto snapshot = m_topologyResolve(*m_handle);
+            if (snapshot && !snapshot->generation.isEmpty() && snapshot->revision && !snapshot->outputs.isEmpty()
+                && std::all_of(snapshot->outputs.cbegin(), snapshot->outputs.cend(), [this](const auto &entry) {
+                    return entry.output.owner == m_handle->id;
+                }))
+                return RemoteTopologyProtocol::retainedReadOnly(*id, *snapshot,
+                    m_experimentalMultiResize, m_experimentalPrimary, m_experimentalMixed);
+        }
         m_topologyId = *id;
         m_topologyBinding = m_controlGeneration;
         m_topologyDeadline.start();

@@ -37,7 +37,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         [[ "$(stat -c %s "$managed_runtime/worker-token")" == 32 ]]
         rdp_mode=--supervised
         if [[ "$probe_host" == buzz ]]; then probe_mode=--plasma-intel; else probe_mode=--plasma-nvidia; fi
-        probe_timeout=120
+        if [[ "$probe_host" == buzz ]]; then probe_timeout=300; else probe_timeout=120; fi
     fi
     if [[ "$probe_mode" == --plasma-worker-nvidia || "$probe_mode" == --plasma-multi-worker-nvidia || "$probe_mode" == --plasma-mixed-worker-nvidia || "$probe_mode" == --plasma-multi-create-nvidia || "$probe_mode" == --plasma-multi-add-nvidia || "$probe_mode" == --plasma-multi-mixed-create-nvidia || "$probe_mode" == --plasma-multi-mixed-create-intel || "$probe_mode" == --plasma-multi-remove-nvidia || "$probe_mode" == --plasma-multi-resize-nvidia || "$probe_mode" == --plasma-multi-fit-nvidia || "$probe_mode" == --plasma-multi-primary-nvidia || "$probe_mode" == --plasma-negative-worker-nvidia || "$probe_mode" == --plasma-multi-window-nvidia || "$probe_mode" == --plasma-multi-input-nvidia || "$probe_mode" == --plasma-multi-drag-nvidia || "$probe_mode" == --plasma-multi-reposition-nvidia ]]; then
         rdp_mode=--worker
