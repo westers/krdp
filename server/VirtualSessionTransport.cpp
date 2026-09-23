@@ -492,6 +492,15 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         m_endpoint->requestKeyFrame();
         return {};
     }
+    if (record.value(u"type"_s) == u"topology-preview"_s) {
+        const auto parsed = RemoteTopologyProtocol::previewRequest(record);
+        const auto id = record.value(u"id"_s).toString().left(64);
+        if (!parsed) return RemoteTopologyProtocol::error(id, u"invalid"_s);
+        if (!authorized(uid)) return RemoteTopologyProtocol::error(parsed->id, u"not-owner"_s);
+        // Preview is intentionally disabled until a backend can prove its
+        // post-write compositor readback and per-output captured payloads.
+        return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
+    }
     if (record.value(u"type"_s) == u"virtual-resize"_s) return requestResize(record, uid);
     if (record.value(u"type"_s) == u"audio-priority"_s) {
         const auto parsed = AudioPriority::parse(record);

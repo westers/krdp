@@ -145,6 +145,25 @@ private Q_SLOTS:
             QVERIFY(!capabilities.value(u"position"_s).toBool());
         });
     }
+    void topologyPreviewFailsClosedUntilBackendWriteProof() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &) {
+            const QJsonObject preview{{u"type"_s, u"topology-preview"_s}, {u"v"_s, 1},
+                {u"id"_s, u"preview-1"_s}, {u"generation"_s, u"generation-1"_s},
+                {u"expectedRevision"_s, 1}, {u"allowRemoval"_s, false},
+                {u"allowPhysicalChange"_s, false}, {u"operations"_s, QJsonArray{
+                    QJsonObject{{u"op"_s, u"move"_s}, {u"output"_s, u"o-1"_s},
+                        {u"position"_s, QJsonObject{{u"x"_s, 1280}, {u"y"_s, 0}}}}}}};
+            QCOMPARE(t.request(preview, std::nullopt).value(u"code"_s).toString(), u"not-owner"_s);
+            QCOMPARE(t.request(preview, 1001).value(u"code"_s).toString(), u"not-owner"_s);
+            const auto reply = t.request(preview, 1000);
+            QCOMPARE(reply.value(u"type"_s).toString(), u"topology-error"_s);
+            QCOMPARE(reply.value(u"id"_s).toString(), u"preview-1"_s);
+            QCOMPARE(reply.value(u"code"_s).toString(), u"unsupported"_s);
+            auto malformed = preview;
+            malformed.insert(u"owner"_s, u"another-user"_s);
+            QCOMPARE(t.request(malformed, 1000).value(u"code"_s).toString(), u"invalid"_s);
+        });
+    }
     void virtualResizeStrictSchema() {
         auto request = resizeRequest();
         QVERIFY(VirtualResizeProtocol::parse(request));

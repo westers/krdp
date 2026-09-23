@@ -310,7 +310,7 @@ target_link_libraries(RetainedKScreenReadbackTest PRIVATE Qt6::Test Qt6::Gui Pkg
 add_test(NAME RetainedKScreenReadbackTest COMMAND RetainedKScreenReadbackTest)
 
 add_executable(RemoteTopologyProtocolTest RemoteTopologyProtocolTest.cpp)
-target_include_directories(RemoteTopologyProtocolTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_include_directories(RemoteTopologyProtocolTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(RemoteTopologyProtocolTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME RemoteTopologyProtocolTest COMMAND RemoteTopologyProtocolTest)
 

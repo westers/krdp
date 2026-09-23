@@ -4,7 +4,9 @@
 #pragma once
 
 #include "RemoteTopologyCatalog.h"
+#include "RemoteTopologyDraft.h"
 
+#include <cmath>
 #include <optional>
 
 #include <QJsonArray>
@@ -12,16 +14,103 @@
 
 namespace KRdp::RemoteTopologyProtocol
 {
+inline bool identifier(const QJsonValue &value, int maximum = 64)
+{
+    if (!value.isString()) return false;
+    const auto id = value.toString();
+    if (id.isEmpty() || id.size() > maximum) return false;
+    for (const auto character : id) {
+        if (!character.isLetterOrNumber() && character != QLatin1Char('-') && character != QLatin1Char('_')) return false;
+    }
+    return true;
+}
+
 inline std::optional<QString> queryId(const QJsonObject &record)
 {
     if (record.size() != 3 || record.value(QStringLiteral("type")) != QStringLiteral("topology-query")
-        || record.value(QStringLiteral("v")) != 1 || !record.value(QStringLiteral("id")).isString()) return {};
-    const auto id = record.value(QStringLiteral("id")).toString();
-    if (id.isEmpty() || id.size() > 64) return {};
-    for (const auto character : id) {
-        if (!character.isLetterOrNumber() && character != QLatin1Char('-') && character != QLatin1Char('_')) return {};
+        || record.value(QStringLiteral("v")) != 1 || !identifier(record.value(QStringLiteral("id")))) return {};
+    return record.value(QStringLiteral("id")).toString();
+}
+
+struct PreviewRequest {
+    QString id;
+    RemoteTopologyDraft::Request draft; // owner is always filled from authenticated server state
+};
+
+inline std::optional<PreviewRequest> previewRequest(const QJsonObject &record)
+{
+    constexpr double maxExact = 9007199254740991.0;
+    if (record.size() != 8 || record.value(QStringLiteral("type")) != QStringLiteral("topology-preview")
+        || record.value(QStringLiteral("v")) != 1 || !identifier(record.value(QStringLiteral("id")))
+        || !identifier(record.value(QStringLiteral("generation")), 128)
+        || !record.value(QStringLiteral("expectedRevision")).isDouble()
+        || !std::isfinite(record.value(QStringLiteral("expectedRevision")).toDouble())
+        || record.value(QStringLiteral("expectedRevision")).toDouble() < 1
+        || record.value(QStringLiteral("expectedRevision")).toDouble() > maxExact
+        || std::floor(record.value(QStringLiteral("expectedRevision")).toDouble()) != record.value(QStringLiteral("expectedRevision")).toDouble()
+        || !record.value(QStringLiteral("allowRemoval")).isBool()
+        || !record.value(QStringLiteral("allowPhysicalChange")).isBool()
+        || !record.value(QStringLiteral("operations")).isArray()) return {};
+    const auto operations = record.value(QStringLiteral("operations")).toArray();
+    if (operations.isEmpty() || operations.size() > 16) return {};
+    PreviewRequest result;
+    result.id = record.value(QStringLiteral("id")).toString();
+    result.draft.generation = record.value(QStringLiteral("generation")).toString();
+    result.draft.expectedRevision = quint64(record.value(QStringLiteral("expectedRevision")).toDouble());
+    result.draft.allowRemoval = record.value(QStringLiteral("allowRemoval")).toBool();
+    result.draft.allowPhysicalChange = record.value(QStringLiteral("allowPhysicalChange")).toBool();
+    for (const auto &value : operations) {
+        if (!value.isObject()) return {};
+        const auto object = value.toObject();
+        const auto kind = object.value(QStringLiteral("op")).toString();
+        const auto output = object.value(QStringLiteral("output"));
+        const bool temporary = kind == QStringLiteral("add") && output.isString()
+            && output.toString().startsWith(QStringLiteral("new:"))
+            && identifier(output.toString().mid(4), 124);
+        if (!identifier(output, 128) && !temporary) return {};
+        RemoteTopologyDraft::Operation operation;
+        operation.id = output.toString();
+        if (kind == QStringLiteral("add") || kind == QStringLiteral("move") || kind == QStringLiteral("resize")) {
+            const auto position = object.value(QStringLiteral("position")).toObject();
+            if (kind != QStringLiteral("resize")) {
+                if (position.size() != 2) return {};
+                const auto x = position.value(QStringLiteral("x"));
+                const auto y = position.value(QStringLiteral("y"));
+                if (!x.isDouble() || !y.isDouble() || !std::isfinite(x.toDouble()) || !std::isfinite(y.toDouble())
+                    || x.toDouble() < -32768 || x.toDouble() > 32768 || y.toDouble() < -32768 || y.toDouble() > 32768
+                    || std::floor(x.toDouble()) != x.toDouble() || std::floor(y.toDouble()) != y.toDouble()) return {};
+                operation.position = QPoint(x.toInt(), y.toInt());
+            }
+            if (kind == QStringLiteral("move")) {
+                if (object.size() != 3) return {};
+                operation.kind = RemoteTopologyDraft::Operation::Kind::Move;
+            } else {
+                const auto pixels = object.value(QStringLiteral("pixels")).toObject();
+                const auto width = pixels.value(QStringLiteral("width"));
+                const auto height = pixels.value(QStringLiteral("height"));
+                const auto scale = object.value(QStringLiteral("scale"));
+                if (object.size() != (kind == QStringLiteral("add") ? 5 : 4)
+                    || (kind == QStringLiteral("resize") && object.contains(QStringLiteral("position")))
+                    || pixels.size() != 2 || !width.isDouble() || !height.isDouble()
+                    || !std::isfinite(width.toDouble()) || !std::isfinite(height.toDouble())
+                    || width.toDouble() < 1 || width.toDouble() > 16384
+                    || height.toDouble() < 1 || height.toDouble() > 16384
+                    || std::floor(width.toDouble()) != width.toDouble() || std::floor(height.toDouble()) != height.toDouble()
+                    || !scale.isDouble() || !std::isfinite(scale.toDouble()) || scale.toDouble() < 1 || scale.toDouble() > 4) return {};
+                operation.pixels = QSize(width.toInt(), height.toInt());
+                operation.scale = scale.toDouble();
+                operation.kind = kind == QStringLiteral("add") ? RemoteTopologyDraft::Operation::Kind::AddVirtual
+                    : RemoteTopologyDraft::Operation::Kind::Resize;
+                if (kind == QStringLiteral("add") && !operation.id.startsWith(QStringLiteral("new:"))) return {};
+            }
+        } else if (kind == QStringLiteral("remove") || kind == QStringLiteral("primary")) {
+            if (object.size() != 2) return {};
+            operation.kind = kind == QStringLiteral("remove") ? RemoteTopologyDraft::Operation::Kind::Remove
+                : RemoteTopologyDraft::Operation::Kind::SetPrimary;
+        } else return {};
+        result.draft.operations.append(operation);
     }
-    return id;
+    return result;
 }
 
 inline QJsonObject error(const QString &id, const QString &code)

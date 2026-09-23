@@ -50,6 +50,48 @@ private Q_SLOTS:
         QVERIFY(!caps.value(QStringLiteral("add")).toBool());
         QVERIFY(!caps.value(QStringLiteral("multiOutputCapture")).toBool());
     }
+
+    void strictPreviewWithoutClientOwner()
+    {
+        QJsonObject add{{QStringLiteral("op"), QStringLiteral("add")},
+            {QStringLiteral("output"), QStringLiteral("new:second")},
+            {QStringLiteral("position"), QJsonObject{{QStringLiteral("x"), -1280}, {QStringLiteral("y"), 100}}},
+            {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 1600}, {QStringLiteral("height"), 900}}},
+            {QStringLiteral("scale"), 1.25}};
+        QJsonObject record{{QStringLiteral("type"), QStringLiteral("topology-preview")}, {QStringLiteral("v"), 1},
+            {QStringLiteral("id"), QStringLiteral("p_1")}, {QStringLiteral("generation"), QStringLiteral("generation-1")},
+            {QStringLiteral("expectedRevision"), 3}, {QStringLiteral("allowRemoval"), false},
+            {QStringLiteral("allowPhysicalChange"), false}, {QStringLiteral("operations"), QJsonArray{add}}};
+        auto parsed = previewRequest(record);
+        QVERIFY(parsed);
+        QCOMPARE(parsed->id, QStringLiteral("p_1"));
+        QVERIFY(parsed->draft.owner.isEmpty());
+        QCOMPARE(parsed->draft.operations.first().kind, KRdp::RemoteTopologyDraft::Operation::Kind::AddVirtual);
+        QCOMPARE(parsed->draft.operations.first().position, QPoint(-1280, 100));
+        QCOMPARE(parsed->draft.operations.first().pixels, QSize(1600, 900));
+        QCOMPARE(parsed->draft.operations.first().scale, 1.25);
+        add.insert(QStringLiteral("owner"), QStringLiteral("forged"));
+        record.insert(QStringLiteral("operations"), QJsonArray{add});
+        QVERIFY(!previewRequest(record));
+        add.remove(QStringLiteral("owner"));
+        record.insert(QStringLiteral("operations"), QJsonArray{add});
+        record.insert(QStringLiteral("owner"), QStringLiteral("forged"));
+        QVERIFY(!previewRequest(record));
+        record.remove(QStringLiteral("owner"));
+        record.insert(QStringLiteral("expectedRevision"), 9007199254740992.0);
+        QVERIFY(!previewRequest(record));
+        record.insert(QStringLiteral("expectedRevision"), 3);
+        add.insert(QStringLiteral("position"), QJsonObject{{QStringLiteral("x"), 1.5}, {QStringLiteral("y"), 100}});
+        record.insert(QStringLiteral("operations"), QJsonArray{add});
+        QVERIFY(!previewRequest(record));
+        add.insert(QStringLiteral("position"), QJsonObject{{QStringLiteral("x"), -1280}, {QStringLiteral("y"), 100}});
+        add.insert(QStringLiteral("output"), QStringLiteral("new:../bad"));
+        record.insert(QStringLiteral("operations"), QJsonArray{add});
+        QVERIFY(!previewRequest(record));
+        add.insert(QStringLiteral("output"), QStringLiteral("new:second"));
+        record.insert(QStringLiteral("operations"), QJsonArray{add});
+        QVERIFY(previewRequest(record));
+    }
 };
 
 QTEST_GUILESS_MAIN(RemoteTopologyProtocolTest)

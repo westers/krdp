@@ -43,7 +43,9 @@ same-compositor Sol worker probe moved a KDE window to the second virtual output
 and captured it there. Source `ea89fc7`/`b1f8698` also maps click/wheel
 packets in retained multi-output mode; a bounded Sol private-compositor
 click-only probe placed the pointer at the expected mixed-scale logical
-coordinate. Client-driven drag, application click effect, mixed-scale GUI,
+coordinate. A later private Sol worker-endpoint pointer drag also moved a
+marked Konsole across the seam to Virtual-1 and decoded a fresh destination
+keyframe (`e982f21`/`0802ee6` probe). GUI/RDP-driven drag, application click effect, mixed-scale GUI,
 installed broker, deployment and write transactions remain unaccepted. Other
 backends have no new query handler yet. The readback parser accepts the saved
 isolated Sol 125%/100% two-output KScreen fixture; a subsequent bounded Sol
@@ -107,6 +109,18 @@ token, before/after records and warnings. The preview itself changes nothing.
 The UI shows all consequences, including managed-dependent Fit moves. Removal
 and physical changes require an explicit confirmation in the preview and an
 identical commitment; they cannot be smuggled in as a side effect of Match.
+
+The v1 preview request's exact envelope is `type="topology-preview"`, `v=1`,
+`id`, `generation`, `expectedRevision`, `allowRemoval`,
+`allowPhysicalChange`, and `operations` (1–16 items). Every operation has
+`op` and `output`: `add` uses a unique `new:<id>` and requires `position`
+`{x,y}`, `pixels` `{width,height}`, and `scale`; `move` requires `position`;
+`resize` requires `pixels` and `scale`; `remove` and `primary` have no extra
+fields. Coordinates are integral KWin logical positions. Unknown fields and
+client-supplied `owner` fail parsing. Server source now parses this strict
+shape (`RemoteTopologyProtocol.h`), but the retained transport returns
+correlated `unsupported` even for a valid authenticated preview until
+readback/capture-backed writes exist; this is **not** a preview capability.
 
 `topology-commit` includes the preview token, the same `id` and expected
 generation/revision. Only one commit per compositor may execute at a time.
