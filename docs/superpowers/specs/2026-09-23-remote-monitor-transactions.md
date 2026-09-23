@@ -14,6 +14,9 @@ An additional disposable 125%/100% Sol/Buzz source-GUI run confirmed that the
 visual editor uses logical aspect/position and committed one virtual move from
 `(1024,100)` to `(1024,209)` with revision 1→2 and unchanged IDs. This does
 not advertise any additional operation.
+A later Sol-only compositor probe created and removed a third virtual output
+while preserving the original two, but no authenticated Add/Remove wire,
+broker ownership, three-output capture gate or client action follows from it.
 This fills in phase 1 of the
 [remote monitor layout plan](../plans/2026-09-22-remote-monitor-layout.md).
 The existing `KRDPCTL` v1 `apply` remains for older clients. A new editor must

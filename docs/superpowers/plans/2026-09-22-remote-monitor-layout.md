@@ -22,6 +22,15 @@ visual drag and authenticated position commit with compositor logical
 `d096cfc` client tooltip follow-up). This is one supported move, not a
 general mixed-scale topology implementation.
 
+Test-only `bee24a1`/`add2794` then proved that a new 960×540 virtual KWin
+output can be created at the right seam of an already running two-output
+private compositor and removed by releasing only its creator session; both
+original outputs were unchanged on KScreen readback and ordinary capture
+still worked after removal. This is a prerequisite, **not** an Add/Remove
+transaction or capability. The initial test-process permission failure was
+fixed by a probe-only desktop-service identity; no installed permission was
+changed. Evidence is in the same report.
+
 ## Phase 0 — Diagnose the missing KDE monitor behavior
 
 - Identify the actual connection mode and compositor: physical Console, ordinary
