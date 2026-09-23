@@ -157,6 +157,12 @@ bool ConsoleWorkerEndpoint::mixed(const ConsoleWorkerWire::Mixed &request)
     return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
 }
 
+bool ConsoleWorkerEndpoint::mixedCreate(const ConsoleWorkerWire::MixedCreate &request)
+{
+    if (!m_ready || !m_worker) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
+}
+
 bool ConsoleWorkerEndpoint::addVirtual(const ConsoleWorkerWire::AddVirtual &request)
 {
     if (!m_ready || !m_worker) return false;
@@ -256,6 +262,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT primaryFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::mixedResult(*record)) {
             Q_EMIT mixedFinished(*result);
+        } else if (const auto result = ConsoleWorkerWire::mixedCreateResult(*record)) {
+            Q_EMIT mixedCreateFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::addVirtualResult(*record)) {
             Q_EMIT addVirtualFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::removeVirtualResult(*record)) {

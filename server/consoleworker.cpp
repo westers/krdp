@@ -44,6 +44,7 @@
 #include "RetainedMultiFitPlan.h"
 #include "RetainedMultiPrimaryPlan.h"
 #include "RetainedMultiMixedPlan.h"
+#include "RetainedMultiMixedCreatePlan.h"
 
 using namespace KRdp;
 
@@ -197,6 +198,13 @@ public:
         connect(&m_mixedDeadline, &QTimer::timeout, this, [this] {
             if (!m_mixedPending) return;
             finishMixed(QStringLiteral("post-mixed-layout capture/readback timed out"));
+            m_socket.disconnectFromServer();
+        });
+        m_mixedCreateDeadline.setSingleShot(true);
+        m_mixedCreateDeadline.setInterval(30000); // Creator, KScreen apply, then three or more fresh captures.
+        connect(&m_mixedCreateDeadline, &QTimer::timeout, this, [this] {
+            if (!m_mixedCreatePending) return;
+            finishMixedCreate(QStringLiteral("mixed creation/capture timed out"));
             m_socket.disconnectFromServer();
         });
         m_addDeadline.setSingleShot(true);
@@ -436,6 +444,27 @@ private:
                 });
             if (!screensAgree) { m_multiSettle.start(200); return; }
         }
+        if (m_mixedCreatePending && !m_mixedCreateApplied) {
+            if (!m_control.active || m_control.generation != m_mixedCreatePending->generation) {
+                finishMixedCreate(QStringLiteral("mixed creation authority changed"));
+                m_socket.disconnectFromServer();
+                return;
+            }
+            const auto json = readKScreenJson();
+            const auto current = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+            if (!current || current->outputs.size() == m_mixedCreatePlan->before.outputs.size()) {
+                m_multiSettle.start(200);
+                return;
+            }
+            if (!RetainedMultiMixedCreatePlan::matchesCreated(*m_mixedCreatePlan, *current)
+                || !applyMixedCreateAfterCreation(*current, *json)) {
+                finishMixedCreate(QStringLiteral("mixed created output or apply differs from preview"));
+                m_socket.disconnectFromServer();
+                return;
+            }
+            m_multiSettle.start(200);
+            return;
+        }
         if (m_addPending) {
             if (!m_control.active || m_control.generation != m_addPending->generation) {
                 finishAdd(QStringLiteral("virtual output authority changed during creation"));
@@ -496,6 +525,11 @@ private:
             if (!screensAgree) { m_multiSettle.start(200); return; }
         }
         if (screens.size() < 2) {
+            if (m_mixedCreatePending) {
+                finishMixedCreate(QStringLiteral("multi-output capture disappeared during mixed creation"));
+                m_socket.disconnectFromServer();
+                return;
+            }
             if (m_mixedPending) {
                 finishMixed(QStringLiteral("multi-output capture disappeared during mixed layout"));
                 m_socket.disconnectFromServer();
@@ -576,6 +610,17 @@ private:
                     });
             if (!screensAgree) { m_multiSettle.start(200); return; }
         }
+        if (m_mixedCreatePending && m_mixedCreateApplied) {
+            const bool screensAgree = screens.size() == m_mixedCreateApplied->after.size()
+                && std::all_of(m_mixedCreateApplied->after.cbegin(), m_mixedCreateApplied->after.cend(),
+                    [&screens, primary](const auto &output) {
+                        return std::any_of(screens.cbegin(), screens.cend(), [&output, primary](const auto *screen) {
+                            return screen->name() == output.backendKey && screen->geometry() == output.logicalGeometry
+                                && (screen == primary) == output.primary;
+                        });
+                    });
+            if (!screensAgree) { m_multiSettle.start(200); return; }
+        }
         if (m_multiMode && m_multiCapture.screens() == inventory && !m_multiResizeNeedsRestart) return;
         m_multiResizeNeedsRestart = false;
         releaseInput();
@@ -634,6 +679,8 @@ private:
                 ? RetainedKScreenReadback::parse(*kscreenJson, m_sessionId) : std::nullopt;
             if (!kscreen || !RetainedKScreenReadback::matchesPublished(*kscreen, result.outputs, result.frames)) {
                 qWarning() << "Retained KScreen readback did not match all captured outputs";
+                if (m_mixedCreatePending)
+                    finishMixedCreate(QStringLiteral("mixed-created capture differs from compositor readback"));
                 m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error,
                     QByteArrayLiteral("retained compositor readback/capture mismatch")));
                 m_socket.disconnectFromServer();
@@ -681,6 +728,17 @@ private:
                     return;
                 }
             }
+            if (m_mixedCreatePending) {
+                const auto priorities = kscreenJson
+                    ? RetainedMultiPrimaryPlan::priorities(*kscreenJson, *kscreen) : std::nullopt;
+                if (!m_mixedCreateApplied || !priorities
+                    || !RetainedMultiMixedPlan::matches(*m_mixedCreateApplied, *kscreen, *priorities)
+                    || !m_control.active || m_control.generation != m_mixedCreatePending->generation) {
+                    finishMixedCreate(QStringLiteral("mixed-created layout differs after captured readback"));
+                    m_socket.disconnectFromServer();
+                    return;
+                }
+            }
             if (m_positionPending && (!m_positionPlan || !RetainedMultiPositionPlan::matches(*m_positionPlan, *kscreen)
                 || !m_control.active || m_control.generation != m_positionPending->generation)) {
                 finishPosition(QStringLiteral("positioned output or peers differ after captured readback"));
@@ -718,6 +776,7 @@ private:
         if (result.becameReady && m_multiFitPending) finishMultiFit({});
         if (result.becameReady && m_primaryPending) finishPrimary({});
         if (result.becameReady && m_mixedPending) finishMixed({});
+        if (result.becameReady && m_mixedCreatePending) finishMixedCreate({});
     }
 
     std::optional<QByteArray> readKScreenJson() const
@@ -807,7 +866,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation || m_positionPending
-            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending) {
+            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending) {
             reject(QStringLiteral("managed Fit unavailable or not authorized"));
             return;
         }
@@ -918,7 +977,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation || m_positionPending
-            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending) {
+            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending) {
             reject(QStringLiteral("primary unavailable or not authorized"));
             return;
         }
@@ -1007,6 +1066,198 @@ private:
             request.requestId, request.generation, finalError}));
     }
 
+    void finishMixedCreate(const QString &error)
+    {
+        if (!m_mixedCreatePending) return;
+        const auto request = *m_mixedCreatePending;
+        if (!error.isEmpty() && m_mixedCreateApplied && m_control.active
+            && m_control.generation == request.generation) {
+            const auto json = readKScreenJson();
+            const auto current = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+            const auto priorities = current ? RetainedMultiPrimaryPlan::priorities(*json, *current) : std::nullopt;
+            QMap<QString, VirtualResize::Snapshot> states;
+            if (current && priorities) {
+                for (auto it = m_mixedCreateApplied->resizes.cbegin(); it != m_mixedCreateApplied->resizes.cend(); ++it) {
+                    const auto state = VirtualResize::snapshotForOutput(*json, it.key(), nullptr);
+                    if (!state) break;
+                    states.insert(it.key(), *state);
+                }
+                const auto restore = RetainedMultiMixedPlan::recoveryArguments(*m_mixedCreateApplied,
+                    *current, *priorities, states, m_mixedCreateOriginalStates, m_mixedCreateAppliedModes);
+                if (restore && (restore->isEmpty() || runKScreenCommand(*restore))) {
+                    const auto verifiedJson = readKScreenJson();
+                    const auto verified = verifiedJson
+                        ? RetainedKScreenReadback::parse(*verifiedJson, m_sessionId) : std::nullopt;
+                    const auto verifiedPriorities = verified
+                        ? RetainedMultiPrimaryPlan::priorities(*verifiedJson, *verified) : std::nullopt;
+                    bool modesRestored = verifiedJson.has_value();
+                    for (auto it = m_mixedCreateOriginalStates.cbegin(); modesRestored && it != m_mixedCreateOriginalStates.cend(); ++it) {
+                        const auto mode = VirtualResize::snapshotForOutput(*verifiedJson, it.key(), nullptr);
+                        modesRestored = mode && mode->current.id == it.value().current.id
+                            && VirtualResize::sameScale(mode->scale, it.value().scale);
+                    }
+                    if (verified && verifiedPriorities && modesRestored
+                        && verified->outputs == m_mixedCreateApplied->before.outputs
+                        && *verifiedPriorities == m_mixedCreateApplied->originalPriorities)
+                        qInfo() << "Mixed-create existing outputs restored before creator release";
+                }
+            }
+        }
+        m_mixedCreatePending.reset();
+        m_mixedCreateDeadline.stop();
+        m_mixedCreatePlan.reset();
+        m_mixedCreateApplied.reset();
+        m_mixedCreateOriginalStates.clear();
+        m_mixedCreateAppliedModes.clear();
+        if (error.isEmpty()) m_ownedCreators.emplace_back(request.newOutput, std::move(m_mixedCreateCreator));
+        // On failure the caller closes the socket; the worker then releases
+        // this creator. Never report a rollback that has not been read back.
+        m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::MixedCreateResult{
+            request.requestId, request.generation, error}));
+    }
+
+    bool applyMixedCreateAfterCreation(const RetainedKScreenReadback::Snapshot &created,
+        const QByteArray &createdJson)
+    {
+        if (!m_mixedCreatePlan || !m_mixedCreatePending) return false;
+        const auto priorities = RetainedMultiPrimaryPlan::priorities(createdJson, created);
+        const auto plan = priorities ? RetainedMultiMixedCreatePlan::afterCreation(*m_mixedCreatePlan,
+            created, *priorities) : std::nullopt;
+        if (!plan) return false;
+        QMap<QString, VirtualResize::Snapshot> originals;
+        QMap<QString, VirtualResize::Snapshot> states;
+        QMap<QString, VirtualResize::Mode> modes;
+        for (auto it = plan->resizes.cbegin(); it != plan->resizes.cend(); ++it) {
+            auto state = VirtualResize::snapshotForOutput(createdJson, it.key(), nullptr);
+            if (!state) return false;
+            originals.insert(it.key(), *state);
+            auto mode = VirtualResize::matchingMode(*state, it.value().first, state->current.refresh);
+            if (!mode) {
+                if (state->modes.size() >= 64 || !runKScreenCommand(VirtualResize::add({*state,
+                    it.value().first, it.value().second}))) return false;
+                const auto addedJson = readKScreenJson();
+                const auto unchanged = addedJson
+                    ? RetainedKScreenReadback::parse(*addedJson, m_sessionId) : std::nullopt;
+                const auto unchangedPriorities = unchanged
+                    ? RetainedMultiPrimaryPlan::priorities(*addedJson, *unchanged) : std::nullopt;
+                state = addedJson ? VirtualResize::snapshotForOutput(*addedJson, it.key(), nullptr) : std::nullopt;
+                if (!unchanged || unchanged->outputs != created.outputs || unchangedPriorities != priorities
+                    || !state || !VirtualResize::sameOutput(*state, originals.value(it.key()))
+                    || state->current.id != originals.value(it.key()).current.id) return false;
+                mode = VirtualResize::matchingMode(*state, it.value().first, state->current.refresh);
+                if (!mode) return false;
+            }
+            states.insert(it.key(), *state);
+            modes.insert(it.key(), *mode);
+        }
+        const auto freshJson = readKScreenJson();
+        const auto fresh = freshJson ? RetainedKScreenReadback::parse(*freshJson, m_sessionId) : std::nullopt;
+        const auto freshPriorities = fresh
+            ? RetainedMultiPrimaryPlan::priorities(*freshJson, *fresh) : std::nullopt;
+        if (!fresh || fresh->outputs != created.outputs || freshPriorities != priorities) return false;
+        for (auto it = plan->resizes.cbegin(); it != plan->resizes.cend(); ++it) {
+            const auto state = VirtualResize::snapshotForOutput(*freshJson, it.key(), nullptr);
+            if (!state || !VirtualResize::sameOutput(*state, originals.value(it.key()))
+                || state->current.id != originals.value(it.key()).current.id) return false;
+            states.insert(it.key(), *state);
+        }
+        const auto args = RetainedMultiMixedPlan::arguments(*plan, states, modes);
+        if (!args) return false;
+        m_mixedCreateApplied = *plan;
+        m_mixedCreateOriginalStates = originals;
+        m_mixedCreateAppliedModes = modes;
+        if (!args->isEmpty() && !runKScreenCommand(*args)) return false;
+        const auto afterJson = readKScreenJson();
+        const auto after = afterJson ? RetainedKScreenReadback::parse(*afterJson, m_sessionId) : std::nullopt;
+        const auto afterPriorities = after
+            ? RetainedMultiPrimaryPlan::priorities(*afterJson, *after) : std::nullopt;
+        if (!after || !afterPriorities || !RetainedMultiMixedPlan::matches(*plan, *after, *afterPriorities)) return false;
+        m_multiResizeNeedsRestart = true;
+        m_multiSettle.start(200);
+        return true;
+    }
+
+    void mixedCreate(const ConsoleWorkerWire::MixedCreate &request)
+    {
+        const auto reject = [this, &request](const QString &error) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::MixedCreateResult{
+                request.requestId, request.generation, error}));
+        };
+        if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
+            || !m_control.active || m_control.generation != request.generation || m_positionPending
+            || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending
+            || m_primaryPending || m_mixedPending || m_mixedCreatePending) {
+            reject(QStringLiteral("mixed creation unavailable or not authorized"));
+            return;
+        }
+        const auto beforeJson = readKScreenJson();
+        const auto before = beforeJson ? RetainedKScreenReadback::parse(*beforeJson, m_sessionId) : std::nullopt;
+        if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)) {
+            reject(QStringLiteral("fresh compositor readback differs from capture"));
+            return;
+        }
+        const auto priorities = RetainedMultiPrimaryPlan::priorities(*beforeJson, *before);
+        if (!priorities) { reject(QStringLiteral("mixed creation priority inventory unavailable")); return; }
+        const QString temporaryId = QStringLiteral("new:worker");
+        RemoteTopologyDraft::Operation add;
+        add.kind = RemoteTopologyDraft::Operation::Kind::AddVirtual;
+        add.id = temporaryId;
+        add.position = request.globalLogical;
+        add.pixels = request.pixels;
+        add.scale = request.scale;
+        QVector<RemoteTopologyDraft::Operation> operations{add};
+        for (const auto &wire : request.changes) {
+            if (wire.output == request.newOutput && wire.kind != ConsoleWorkerWire::MixedOperation::Kind::Primary) {
+                reject(QStringLiteral("new output mode and position belong in creator request"));
+                return;
+            }
+            RemoteTopologyDraft::Operation operation;
+            operation.id = wire.output == request.newOutput ? temporaryId : wire.output;
+            operation.position = wire.globalLogical;
+            operation.pixels = wire.pixels;
+            operation.scale = wire.scale;
+            switch (wire.kind) {
+            case ConsoleWorkerWire::MixedOperation::Kind::Move:
+                operation.kind = RemoteTopologyDraft::Operation::Kind::Move;
+                break;
+            case ConsoleWorkerWire::MixedOperation::Kind::Resize:
+                operation.kind = RemoteTopologyDraft::Operation::Kind::Resize;
+                break;
+            case ConsoleWorkerWire::MixedOperation::Kind::Primary:
+                operation.kind = RemoteTopologyDraft::Operation::Kind::SetPrimary;
+                break;
+            }
+            operations.append(operation);
+        }
+        const auto plan = RetainedMultiMixedCreatePlan::make(*before, m_sessionId,
+            *priorities, request.newOutput, operations);
+        if (!plan) { reject(QStringLiteral("mixed creation conflicts with retained output arrangement")); return; }
+        releaseInput();
+        m_multiReady = false;
+        ++m_multiEpoch;
+        m_multiSessions.clear();
+        m_multiCapture.invalidate();
+        m_multiPublishedFrames.clear();
+        m_mixedCreatePending = request;
+        m_mixedCreatePlan = *plan;
+        m_mixedCreateDeadline.start();
+        m_mixedCreateCreator = std::make_unique<PlasmaScreencastV1Session>();
+        m_mixedCreateCreator->setVirtualMonitor(VirtualMonitor{request.newOutput.mid(8), request.pixels, request.scale});
+        m_mixedCreateCreator->setVideoCodec(VideoCodec::Avc420);
+        connect(m_mixedCreateCreator.get(), &AbstractSession::error, this, [this] {
+            if (!m_mixedCreatePending) return;
+            finishMixedCreate(QStringLiteral("KWin rejected mixed virtual output creation"));
+            m_socket.disconnectFromServer();
+        });
+        connect(m_mixedCreateCreator.get(), &AbstractSession::virtualOutputUnresolved, this, [this] {
+            if (!m_mixedCreatePending) return;
+            finishMixedCreate(QStringLiteral("mixed new KWin output did not resolve"));
+            m_socket.disconnectFromServer();
+        });
+        m_mixedCreateCreator->setStreamingEnabled(true);
+        m_multiSettle.start(200);
+    }
+
     void mixed(const ConsoleWorkerWire::Mixed &request)
     {
         const auto reject = [this, &request](const QString &error) {
@@ -1016,7 +1267,7 @@ private:
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation || m_positionPending
             || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending
-            || m_primaryPending || m_mixedPending) {
+            || m_primaryPending || m_mixedPending || m_mixedCreatePending) {
             reject(QStringLiteral("mixed layout unavailable or not authorized"));
             return;
         }
@@ -1137,7 +1388,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation
-            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending) {
+            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending) {
             reject(QStringLiteral("multi-output resize unavailable or not authorized"));
             return;
         }
@@ -1277,7 +1528,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
             || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending || m_multiResizePending
-            || m_multiFitPending || m_primaryPending || m_mixedPending || m_multiPublishedFrames.size() < 3) {
+            || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending || m_multiPublishedFrames.size() < 3) {
             reject(QStringLiteral("virtual output removal unavailable or not authorized"));
             return;
         }
@@ -1314,7 +1565,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
             || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending || m_multiResizePending
-            || m_multiFitPending || m_primaryPending || m_mixedPending || m_multiPublishedFrames.size() < 2) {
+            || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending || m_multiPublishedFrames.size() < 2) {
             reject(QStringLiteral("virtual output creation unavailable or not authorized"));
             return;
         }
@@ -1390,7 +1641,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation
-            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending) {
+            || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending) {
             reject(QStringLiteral("position unavailable or not authorized"));
             return;
         }
@@ -1529,6 +1780,10 @@ private:
                 mixed(*request);
                 continue;
             }
+            if (const auto request = ConsoleWorkerWire::mixedCreate(*record)) {
+                mixedCreate(*request);
+                continue;
+            }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {
                 if (m_multiMode) {
                     for (const auto &session : m_multiSessions) session->requestKeyFrame();
@@ -1632,6 +1887,13 @@ private:
     std::optional<RetainedMultiMixedPlan::Plan> m_mixedPlan;
     QMap<QString, VirtualResize::Snapshot> m_mixedOriginalStates;
     QMap<QString, VirtualResize::Mode> m_mixedAppliedModes;
+    QTimer m_mixedCreateDeadline;
+    std::optional<ConsoleWorkerWire::MixedCreate> m_mixedCreatePending;
+    std::optional<RetainedMultiMixedCreatePlan::Plan> m_mixedCreatePlan;
+    std::optional<RetainedMultiMixedPlan::Plan> m_mixedCreateApplied;
+    QMap<QString, VirtualResize::Snapshot> m_mixedCreateOriginalStates;
+    QMap<QString, VirtualResize::Mode> m_mixedCreateAppliedModes;
+    std::unique_ptr<PlasmaScreencastV1Session> m_mixedCreateCreator;
     bool m_multiResizeNeedsRestart = false;
     QTimer m_addDeadline;
     std::optional<ConsoleWorkerWire::AddVirtual> m_addPending;

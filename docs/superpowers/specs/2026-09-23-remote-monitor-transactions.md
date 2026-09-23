@@ -125,12 +125,24 @@ Server `e262548` introduces a pure worker-side mixed-creation preflight: one
 new creator-owned virtual output plus existing-output resize/move/primary is
 validated as a whole final topology. It requires unchanged older outputs in
 the immediate post-creation KScreen readback, then converts the remaining
-work to the existing mixed KScreen planner. This is NOT wired to worker wire,
-broker commit, creator lifetime/recovery or capture publication, and it is
-not a native accepted or advertised capability. Local and clean Sol focused
+work to the existing mixed KScreen planner. At that commit it was not wired to
+worker wire, broker commit, creator lifetime/recovery or capture publication,
+and was not a native accepted or advertised capability. Local and clean Sol focused
 readback tests pass. The unrelated coordinator identity deadline test failed
 in the local non-maintenance suite and again in isolation; do not report a
 green full server suite for this slice.
+Server `31fa723` defines bounded paired v8 mixed-create request/result records.
+The following worker source slice routes them through a single frozen-capture
+creator phase, exact unchanged-peer KScreen readback, one mixed KScreen apply,
+and independent recapture before success. On failure it restores only
+recognized before/after partial states, then closes the worker; it never
+claims post-creator-release rollback without proof. Endpoint tests cover
+record routing and pure recovery tests cover recognized partial readback;
+neither exercises the live worker creator lifecycle. The broker still does not
+dispatch the record or advertise combined Add, and no native GPU/compositor
+test has run. The Sol
+render ACL needed for the private test is absent. This source is not an
+installed or accepted monitor-layout feature.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. The later private Fit

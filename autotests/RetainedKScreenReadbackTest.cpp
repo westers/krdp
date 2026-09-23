@@ -106,6 +106,25 @@ private Q_SLOTS:
         QCOMPARE(remaining->requestedPriorities.value(newKey), 1);
         QCOMPARE(remaining->placements.size(), 2);
         QCOMPARE(remaining->resizes.size(), 1);
+        KRdp::VirtualResize::Snapshot modeState;
+        modeState.name = QStringLiteral("Virtual-0");
+        modeState.position = QPoint(0, 0);
+        modeState.scale = 1.25;
+        modeState.current = {QStringLiteral("old"), QSize(1280, 720), 60000};
+        modeState.modes = {modeState.current, {QStringLiteral("new"), QSize(1600, 900), 60000}};
+        const QMap<QString, KRdp::VirtualResize::Snapshot> modeStates{{modeState.name, modeState}};
+        const QMap<QString, KRdp::VirtualResize::Mode> selectedModes{{modeState.name, modeState.modes.last()}};
+        auto partial = created;
+        partial.outputs[1].logicalGeometry.moveTopLeft(QPoint(1280, 100));
+        partial.outputs[2].logicalGeometry.moveTopLeft(QPoint(2560, 100));
+        const auto restore = KRdp::RetainedMultiMixedPlan::recoveryArguments(*remaining,
+            partial, createdPriorities, modeStates, modeStates, selectedModes);
+        QVERIFY(restore);
+        QVERIFY(restore->contains(QStringLiteral("output.Virtual-1.position.1024,100")));
+        QVERIFY(restore->contains(QStringLiteral("output.Virtual-krdp-added-test.position.2304,100")));
+        partial.outputs[1].logicalGeometry.moveLeft(1281);
+        QVERIFY(!KRdp::RetainedMultiMixedPlan::recoveryArguments(*remaining,
+            partial, createdPriorities, modeStates, modeStates, selectedModes));
         auto changedOld = created;
         changedOld.outputs[1].logicalGeometry.moveLeft(1025);
         QVERIFY(!Create::matchesCreated(*plan, changedOld));

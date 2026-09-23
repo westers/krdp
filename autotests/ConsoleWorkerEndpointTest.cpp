@@ -45,6 +45,10 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
         {ConsoleWorkerWire::MixedOperation::Kind::Move, QStringLiteral("Virtual-1"), QPoint(1280, 100), {}, 1},
         {ConsoleWorkerWire::MixedOperation::Kind::Primary, QStringLiteral("Virtual-1"), {}, {}, 1}}};
     QVERIFY(!endpoint.mixed(mixed));
+    const ConsoleWorkerWire::MixedCreate mixedCreate{17, 42, QStringLiteral("Virtual-krdp-added-test"),
+        QSize(960, 540), 1, QPoint(2560, 100), {
+            {ConsoleWorkerWire::MixedOperation::Kind::Primary, QStringLiteral("Virtual-krdp-added-test"), {}, {}, 1}}};
+    QVERIFY(!endpoint.mixedCreate(mixedCreate));
     QVERIFY(!endpoint.requestTopology());
 
     int ready = 0;
@@ -158,6 +162,18 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::MixedResult{16, 42, {}}));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(mixedChanged.count(), 1);
+
+    QSignalSpy mixedCreateChanged(&endpoint, &ConsoleWorkerEndpoint::mixedCreateFinished);
+    QVERIFY(endpoint.mixedCreate(mixedCreate));
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    brokerMessages.feed(worker.readAll());
+    const auto mixedCreateRecord = brokerMessages.next();
+    QVERIFY(mixedCreateRecord);
+    QCOMPARE(ConsoleWorkerWire::mixedCreate(*mixedCreateRecord),
+        std::optional<ConsoleWorkerWire::MixedCreate>(mixedCreate));
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::MixedCreateResult{17, 42, {}}));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(mixedCreateChanged.count(), 1);
 
     QVERIFY(!endpoint.setVideoQuality({0, 60}));
     QVERIFY(!endpoint.setVideoQuality({42, 101}));
