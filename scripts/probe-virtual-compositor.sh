@@ -305,7 +305,9 @@ if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker || "${3:-}" == --multi-
         moved=false
         for attempt in {1..100}; do
             kill -0 "$window_pid"
-            if grep -q 'krdp-monitor-probe: after output=Virtual-1' "$XDG_RUNTIME_DIR/kwin.log"; then
+            # KWin may finish moving asynchronously after sendClientToScreen
+            # returns, especially when the outputs have different scales.
+            if grep -Eq 'krdp-monitor-probe: (after output|outputChanged)=Virtual-1' "$XDG_RUNTIME_DIR/kwin.log"; then
                 moved=true
                 break
             fi
