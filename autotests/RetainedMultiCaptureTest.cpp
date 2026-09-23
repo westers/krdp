@@ -94,6 +94,44 @@ private Q_SLOTS:
         QCOMPARE(set.atlas()[0].geometry.size(), QSize(1280, 720));
     }
 
+    void scaleOnlyRestartRequiresFreshKeyframesFromEveryOutput()
+    {
+        RetainedMultiCapture set;
+        const QVector<RetainedMultiCapture::Screen> inventory{
+            {QStringLiteral("Virtual-0"), QRect(0, 0, 1280, 720), true},
+            {QStringLiteral("Virtual-1"), QRect(1280, 0, 1280, 720), false},
+        };
+        QVERIFY(set.configure(inventory));
+        const auto standard = fixture(QStringLiteral("1280x720"));
+        const auto scaled = fixture(QStringLiteral("1920x1080"));
+        QVERIFY(!standard.isEmpty());
+        QVERIFY(!scaled.isEmpty());
+        QVERIFY(set.submit(0, packet(QSize(1280, 720), QSize(1280, 720), standard)).frames.isEmpty());
+        QVERIFY(set.submit(1, packet(QSize(1280, 720), QSize(1280, 720), standard)).becameReady);
+        QCOMPARE(set.outputs().monitors[1].scale, 1.0);
+        QCOMPARE(set.atlas()[1].geometry, QRect(1280, 0, 1280, 720));
+
+        // KScreen has changed only the native mode and scale of Virtual-1;
+        // both QScreen logical rectangles still compare equal. The worker's
+        // forced restart must invalidate the old verified pair explicitly.
+        set.invalidate();
+        QVERIFY(!set.ready());
+        QCOMPARE(set.screens(), inventory);
+        QVERIFY(set.submit(1, packet(QSize(1920, 1080), QSize(1280, 720), scaled)).frames.isEmpty());
+        QVERIFY(!set.ready());
+        QVERIFY(set.submit(0, packet(QSize(1280, 720), QSize(1280, 720), QByteArrayLiteral("old p-frame"), false)).frames.isEmpty());
+        QVERIFY(!set.ready());
+        const auto recovered = set.submit(0, packet(QSize(1280, 720), QSize(1280, 720), standard));
+        QVERIFY(recovered.becameReady);
+        QCOMPARE(recovered.frames.size(), 2);
+        QCOMPARE(recovered.frames[0].size, QSize(1280, 720));
+        QCOMPARE(recovered.frames[1].size, QSize(1920, 1080));
+        QCOMPARE(recovered.outputs.monitors[0].geometry, QRect(0, 0, 1280, 720));
+        QCOMPARE(recovered.outputs.monitors[1].geometry, QRect(1280, 0, 1280, 720));
+        QCOMPARE(recovered.outputs.monitors[1].scale, 1.5);
+        QCOMPARE(recovered.atlas[1].geometry, QRect(1280, 0, 1920, 1080));
+    }
+
     void rejectsAmbiguousScreenInventory()
     {
         RetainedMultiCapture set;
