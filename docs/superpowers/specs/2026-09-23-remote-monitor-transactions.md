@@ -83,6 +83,12 @@ client validates that only primary flags change and shows Preview primary
 only when the private capability is advertised. Broker and worker must be
 updated together; default production capability stays off. Native compositor
 priority behavior, GUI clicks and failure recovery are not yet accepted.
+Source `c3bc870` adds a bounded test-only `--plasma-multi-primary-nvidia`
+Sol path. It tests authenticated priority switching inside one disposable
+private compositor, fresh KScreen order and two independently decoded
+post-change keyframes, allowing QScreen output-index reordering. The script
+also checks the private compositor's post-worker priority map. It is built
+on Sol but cannot run until the user-started render-access envelope is live.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. The later private Fit
