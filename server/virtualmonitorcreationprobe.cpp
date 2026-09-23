@@ -50,6 +50,7 @@ const RemoteTopologyCatalog::Output *named(const RetainedKScreenReadback::Snapsh
 int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
+    app.setDesktopFileName(QStringLiteral("org.kde.krdpvirtualmonitorprobe"));
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     const QFileInfo info(runtime);
     struct stat permissions{};

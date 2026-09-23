@@ -96,6 +96,9 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     if [[ "$rdp_mode" == --worker || "$rdp_mode" == --multi-worker || "$rdp_mode" == --multi-mixed || "$rdp_mode" == --multi-create || "$rdp_mode" == --multi-negative || "$rdp_mode" == --multi-window || "$rdp_mode" == --multi-input || "$rdp_mode" == --multi-drag || "$rdp_mode" == --multi-reposition || "$rdp_mode" == --supervised ]]; then
         mkdir -p "$probe_runtime/data/applications"
         cp "$repo_path/build/server/org.kde.krdpvirtualprobe.desktop" "$probe_runtime/data/applications/org.kde.krdpconsoleworker.desktop"
+        if [[ "$rdp_mode" == --multi-create ]]; then
+            cp "$repo_path/build/server/org.kde.krdpvirtualmonitorprobe.desktop" "$probe_runtime/data/applications/"
+        fi
     elif [[ -n "$rdp_mode" ]]; then
         mkdir -p "$probe_runtime/data/applications"
         cp "$repo_path/scripts/virtual-probe-rdp.desktop" "$probe_runtime/data/applications/org.kde.krdpserver.desktop"
