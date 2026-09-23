@@ -51,8 +51,10 @@ private:
     QJsonObject topologyCommit(const QJsonObject &, std::optional<quint32> uid);
     QJsonObject positionResult(const ConsoleWorkerWire::PositionResult &, std::optional<quint32> uid);
     QJsonObject addVirtualResult(const ConsoleWorkerWire::AddVirtualResult &, std::optional<quint32> uid);
+    QJsonObject removeVirtualResult(const ConsoleWorkerWire::RemoveVirtualResult &, std::optional<quint32> uid);
     void clearPosition();
     void clearAdd();
+    void clearRemove();
     void clearTopology();
     void clearResize();
     void stopMicrophone();
@@ -89,6 +91,7 @@ private:
     QTimer m_topologyDeadline;
     QTimer m_positionDeadline;
     QTimer m_addDeadline;
+    QTimer m_removeDeadline;
     struct PendingPreview {
         QString id;
         QString token;
@@ -124,6 +127,14 @@ private:
     QString m_addBackendKey;
     QVector<RemoteTopologyCatalog::Entry> m_addBefore;
     RemoteTopologyCatalog::Output m_addExpected;
+    QString m_removeId;
+    quint64 m_nextRemoveId = 0;
+    quint64 m_removeWorkerId = 0;
+    quint64 m_removeBinding = 0;
+    QString m_removeGeneration;
+    quint64 m_removeRevision = 0;
+    QString m_removeBackendKey;
+    QVector<RemoteTopologyCatalog::Entry> m_removeExpectedAfter;
     QString m_topologyId;
     quint64 m_topologyBinding = 0;
     QString m_resizeId;

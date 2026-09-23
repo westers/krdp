@@ -300,6 +300,71 @@ private Q_SLOTS:
             QCOMPARE(t.request(commit, 1000).value(u"code"_s).toString(), u"invalid"_s);
         });
     }
+    void retainedRemoveRequiresOwnedAddOutputAndCapturedReadback() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            RemoteTopologyCatalog catalog;
+            const auto initial = catalog.observe({
+                {.backendKey = u"Virtual-0"_s, .name = u"Virtual-0"_s,
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(0, 0, 1280, 720),
+                    .scale = 1, .enabled = true, .primary = true, .physical = false, .owner = t.m_handle->id},
+                {.backendKey = u"Virtual-1"_s, .name = u"Virtual-1"_s,
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(1280, 0, 1280, 720),
+                    .scale = 1, .enabled = true, .primary = false, .physical = false, .owner = t.m_handle->id},
+                {.backendKey = u"Virtual-krdp-added-test"_s, .name = u"Virtual-krdp-added-test"_s,
+                    .nativePixels = QSize(960, 540), .logicalGeometry = QRect(2560, 0, 960, 540),
+                    .scale = 1, .enabled = true, .primary = false, .physical = false, .owner = t.m_handle->id},
+            });
+            QVERIFY(initial);
+            auto current = *initial;
+            t.setTopologyResolver([&current](const auto &) { return std::optional(current); });
+            const auto target = current.outputs.last().id;
+            QJsonObject preview{{u"type"_s, u"topology-preview"_s}, {u"v"_s, 1},
+                {u"id"_s, u"remove-1"_s}, {u"generation"_s, current.generation},
+                {u"expectedRevision"_s, double(current.revision)}, {u"allowRemoval"_s, true},
+                {u"allowPhysicalChange"_s, false}, {u"operations"_s, QJsonArray{
+                    QJsonObject{{u"op"_s, u"remove"_s}, {u"output"_s, target}}}}};
+            QCOMPARE(t.request(preview, 1001).value(u"code"_s).toString(), u"not-owner"_s);
+            auto unsafe = preview;
+            unsafe[u"allowRemoval"_s] = false;
+            QCOMPARE(t.request(unsafe, 1000).value(u"code"_s).toString(), u"unsupported"_s);
+            unsafe = preview;
+            unsafe[u"operations"_s] = QJsonArray{QJsonObject{{u"op"_s, u"remove"_s},
+                {u"output"_s, current.outputs.first().id}}};
+            QCOMPARE(t.request(unsafe, 1000).value(u"code"_s).toString(), u"unsupported"_s);
+            const auto answer = t.request(preview, 1000);
+            QCOMPARE(answer.value(u"type"_s).toString(), u"topology-preview"_s);
+            QCOMPARE(answer.value(u"after"_s).toArray().size(), 2);
+            QJsonObject commit{{u"type"_s, u"topology-commit"_s}, {u"v"_s, 1},
+                {u"id"_s, u"remove-1"_s}, {u"token"_s, answer.value(u"token"_s)},
+                {u"generation"_s, current.generation}, {u"expectedRevision"_s, double(current.revision)}};
+            QCOMPARE(t.request(commit, 1001).value(u"code"_s).toString(), u"not-owner"_s);
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            std::optional<ConsoleWorkerWire::RemoveVirtual> command;
+            for (const auto &record : workerRecords(worker))
+                if (auto parsed = ConsoleWorkerWire::removeVirtual(record)) command = parsed;
+            QVERIFY(command);
+            QCOMPARE(command->output, u"Virtual-krdp-added-test"_s);
+            QCOMPARE(t.removeVirtualResult({command->requestId, command->generation, {}}, 1000)
+                .value(u"code"_s).toString(), u"partial"_s);
+            preview[u"id"_s] = u"remove-2"_s;
+            const auto second = t.request(preview, 1000);
+            commit[u"id"_s] = u"remove-2"_s;
+            commit[u"token"_s] = second.value(u"token"_s);
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            const auto workerId = t.m_removeWorkerId;
+            const auto updated = catalog.observe({initial->outputs[0].output, initial->outputs[1].output});
+            QVERIFY(updated);
+            current = *updated;
+            const auto result = t.removeVirtualResult({workerId, t.m_controlGeneration, {}}, 1000);
+            QCOMPARE(result.value(u"type"_s).toString(), u"topology-result"_s);
+            QVERIFY(result.value(u"ok"_s).toBool());
+            QCOMPARE(result.value(u"topology"_s).toObject().value(u"revision"_s).toInt(), 2);
+            QCOMPARE(result.value(u"topology"_s).toObject().value(u"outputs"_s).toArray().size(), 2);
+            QCOMPARE(t.request(commit, 1000).value(u"code"_s).toString(), u"invalid"_s);
+        });
+    }
     void virtualResizeStrictSchema() {
         auto request = resizeRequest();
         QVERIFY(VirtualResizeProtocol::parse(request));

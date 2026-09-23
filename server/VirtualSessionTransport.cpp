@@ -89,6 +89,14 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         clearAdd();
         if (m_connection) m_connection->sendControlRecord(RemoteTopologyProtocol::error(id, u"capture-failed"_s));
     });
+    m_removeDeadline.setSingleShot(true);
+    m_removeDeadline.setInterval(20000);
+    connect(&m_removeDeadline, &QTimer::timeout, this, [this] {
+        if (m_removeId.isEmpty()) return;
+        const QString id = m_removeId;
+        clearRemove();
+        if (m_connection) m_connection->sendControlRecord(RemoteTopologyProtocol::error(id, u"capture-failed"_s));
+    });
     connect(&m_session, &AbstractSession::frameReceived, connection->videoStream(), &VideoStream::queueFrame);
     connect(connection->inputHandler(), &InputHandler::inputEvent, &m_session, &AbstractSession::sendEvent);
     connect(&m_session, &ConsoleWorkerSession::keyFrameRequested, this, [this] {
@@ -217,6 +225,10 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         const auto response = addVirtualResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
     }));
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::removeVirtualFinished, this, [this](const auto &result) {
+        const auto response = removeVirtualResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+    }));
     m_controlGeneration = ++m_sequence;
     // Capture the binding's generation at connection time, NOT delivery time:
     // disconnect does not retract already queued signals from the RDP thread.
@@ -250,6 +262,7 @@ void VirtualSessionTransport::revoke()
     clearTopology();
     clearPosition();
     clearAdd();
+    clearRemove();
     m_preview.reset();
     // Clear preference before any teardown signal can destroy this transport.
     if (m_connection) {
@@ -478,6 +491,18 @@ void VirtualSessionTransport::clearAdd()
     m_addExpected = {};
 }
 
+void VirtualSessionTransport::clearRemove()
+{
+    m_removeDeadline.stop();
+    m_removeId.clear();
+    m_removeWorkerId = 0;
+    m_removeBinding = 0;
+    m_removeGeneration.clear();
+    m_removeRevision = 0;
+    m_removeBackendKey.clear();
+    m_removeExpectedAfter.clear();
+}
+
 QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, std::optional<quint32> uid)
 {
     const auto parsed = RemoteTopologyProtocol::previewRequest(record);
@@ -485,7 +510,8 @@ QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, 
     if (!parsed) return RemoteTopologyProtocol::error(id, u"invalid"_s);
     if (!authorized(uid) || !m_handle) return RemoteTopologyProtocol::error(parsed->id, u"not-owner"_s);
     if (!m_topologyResolve || !m_endpoint) return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
-    if (!m_positionId.isEmpty() || !m_addId.isEmpty()) return RemoteTopologyProtocol::error(parsed->id, u"busy"_s);
+    if (!m_positionId.isEmpty() || !m_addId.isEmpty() || !m_removeId.isEmpty())
+        return RemoteTopologyProtocol::error(parsed->id, u"busy"_s);
     const auto snapshot = m_topologyResolve(*m_handle);
     if (!snapshot) return RemoteTopologyProtocol::error(parsed->id, u"capture-failed"_s);
     if (parsed->draft.generation != snapshot->generation) return RemoteTopologyProtocol::error(parsed->id, u"stale-generation"_s);
@@ -494,7 +520,8 @@ QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, 
         return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
     const auto &operation = parsed->draft.operations.first();
     const bool adding = operation.kind == RemoteTopologyDraft::Operation::Kind::AddVirtual;
-    if (!adding && operation.kind != RemoteTopologyDraft::Operation::Kind::Move)
+    const bool removing = operation.kind == RemoteTopologyDraft::Operation::Kind::Remove;
+    if (!adding && !removing && operation.kind != RemoteTopologyDraft::Operation::Kind::Move)
         return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
     // This KWin backend normalizes negative workspace origins. A preview may
     // not promise a literal negative position it cannot read back afterward.
@@ -502,16 +529,19 @@ QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, 
         return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
     auto draft = parsed->draft;
     draft.owner = m_handle->id; // Never trust caller-provided ownership.
-    const RemoteTopologyDraft::Capabilities caps{.addVirtual = true, .moveVirtual = true, .maxOutputs = 16,
+    const RemoteTopologyDraft::Capabilities caps{.addVirtual = true, .removeVirtual = true, .moveVirtual = true, .maxOutputs = 16,
         .maxOutputDimension = 4096, .maxAtlasDimension = 8192};
+    const auto entry = std::find_if(snapshot->outputs.cbegin(), snapshot->outputs.cend(), [&operation](const auto &candidate) {
+        return candidate.id == operation.id;
+    });
+    if (removing && (!parsed->draft.allowRemoval || snapshot->outputs.size() <= 2
+        || entry == snapshot->outputs.cend() || !entry->output.backendKey.startsWith(u"Virtual-krdp-added-"_s)))
+        return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
     const auto proposal = RemoteTopologyDraft::preview(*snapshot, caps, draft);
     if (!proposal.valid()) return RemoteTopologyProtocol::error(parsed->id, proposal.error);
     if (adding && (operation.pixels.width() < 320 || operation.pixels.height() < 200
         || operation.scale < 1.0 || operation.scale > 4.0))
         return RemoteTopologyProtocol::error(parsed->id, u"limit"_s);
-    const auto entry = std::find_if(snapshot->outputs.cbegin(), snapshot->outputs.cend(), [&operation](const auto &candidate) {
-        return candidate.id == operation.id;
-    });
     if (!adding && (entry == snapshot->outputs.cend() || entry->output.backendKey.isEmpty()))
         return RemoteTopologyProtocol::error(parsed->id, u"stale-output"_s);
     if (m_preview && m_preview->id == parsed->id && m_preview->generation == snapshot->generation
@@ -552,8 +582,9 @@ QJsonObject VirtualSessionTransport::topologyCommit(const QJsonObject &record, s
     const auto id = record.value(u"id"_s).toString().left(64);
     if (!parsed) return RemoteTopologyProtocol::error(id, u"invalid"_s);
     if (!authorized(uid) || !m_handle) return RemoteTopologyProtocol::error(parsed->id, u"not-owner"_s);
-    if (m_positionId == parsed->id || m_addId == parsed->id) return {}; // In-flight retry cannot contradict its result.
-    if (!m_positionId.isEmpty() || !m_addId.isEmpty()) return RemoteTopologyProtocol::error(parsed->id, u"busy"_s);
+    if (m_positionId == parsed->id || m_addId == parsed->id || m_removeId == parsed->id) return {};
+    if (!m_positionId.isEmpty() || !m_addId.isEmpty() || !m_removeId.isEmpty())
+        return RemoteTopologyProtocol::error(parsed->id, u"busy"_s);
     if (!m_preview || !m_preview->age.isValid() || m_preview->age.elapsed() >= 15000
         || parsed->id != m_preview->id || parsed->token != m_preview->token)
         return RemoteTopologyProtocol::error(parsed->id, u"invalid"_s);
@@ -588,6 +619,33 @@ QJsonObject VirtualSessionTransport::topologyCommit(const QJsonObject &record, s
         if (!alive) return {};
         if (!sent && m_addId == parsed->id) {
             clearAdd();
+            return RemoteTopologyProtocol::error(parsed->id, u"capture-failed"_s);
+        }
+        return {};
+    }
+    if (proposal.kind == RemoteTopologyDraft::Operation::Kind::Remove) {
+        if (!m_endpoint || m_nextRemoveId == std::numeric_limits<quint64>::max()
+            || proposal.before.size() <= 2 || proposal.after.size() + 1 != proposal.before.size()
+            || !proposal.backendKey.startsWith(u"Virtual-krdp-added-"_s))
+            return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
+        const auto removed = std::find_if(proposal.before.cbegin(), proposal.before.cend(), [&proposal](const auto &entry) {
+            return entry.id == proposal.outputId && entry.output.backendKey == proposal.backendKey;
+        });
+        if (removed == proposal.before.cend() || removed->output.physical || removed->output.owner != m_handle->id)
+            return RemoteTopologyProtocol::error(parsed->id, u"stale-output"_s);
+        m_removeId = parsed->id;
+        m_removeWorkerId = ++m_nextRemoveId;
+        m_removeBinding = m_controlGeneration;
+        m_removeGeneration = proposal.generation;
+        m_removeRevision = proposal.revision;
+        m_removeBackendKey = proposal.backendKey;
+        m_removeExpectedAfter = proposal.after;
+        m_removeDeadline.start();
+        const QPointer<VirtualSessionTransport> alive(this);
+        const bool sent = m_endpoint->removeVirtual({m_removeWorkerId, m_removeBinding, proposal.backendKey});
+        if (!alive) return {};
+        if (!sent && m_removeId == parsed->id) {
+            clearRemove();
             return RemoteTopologyProtocol::error(parsed->id, u"capture-failed"_s);
         }
         return {};
@@ -653,6 +711,29 @@ QJsonObject VirtualSessionTransport::addVirtualResult(const ConsoleWorkerWire::A
     });
     if (added == snapshot->outputs.cend() || oldIds.contains(added->id) || added->output != expected)
         return RemoteTopologyProtocol::error(id, u"partial"_s);
+    return {{u"type"_s, u"topology-result"_s}, {u"v"_s, 1}, {u"id"_s, id}, {u"ok"_s, true},
+        {u"topology"_s, RemoteTopologyProtocol::retainedReadOnly(id, *snapshot)}};
+}
+
+QJsonObject VirtualSessionTransport::removeVirtualResult(const ConsoleWorkerWire::RemoveVirtualResult &result,
+    std::optional<quint32> uid)
+{
+    if (m_removeId.isEmpty() || result.requestId != m_removeWorkerId || result.generation != m_removeBinding) return {};
+    const QString id = m_removeId;
+    const QString generation = m_removeGeneration;
+    const quint64 revision = m_removeRevision;
+    const QString backendKey = m_removeBackendKey;
+    const auto expectedAfter = m_removeExpectedAfter;
+    const bool current = authorized(uid) && m_handle && m_controlGeneration == result.generation;
+    clearRemove();
+    if (!current) return {};
+    if (!result.error.isEmpty()) return RemoteTopologyProtocol::error(id, u"partial"_s);
+    const auto snapshot = m_topologyResolve ? m_topologyResolve(*m_handle) : std::nullopt;
+    if (!snapshot || snapshot->generation != generation) return RemoteTopologyProtocol::error(id, u"capture-failed"_s);
+    if (snapshot->revision != revision + 1 || snapshot->outputs != expectedAfter
+        || std::any_of(snapshot->outputs.cbegin(), snapshot->outputs.cend(), [&backendKey](const auto &entry) {
+            return entry.output.backendKey == backendKey;
+        })) return RemoteTopologyProtocol::error(id, u"partial"_s);
     return {{u"type"_s, u"topology-result"_s}, {u"v"_s, 1}, {u"id"_s, id}, {u"ok"_s, true},
         {u"topology"_s, RemoteTopologyProtocol::retainedReadOnly(id, *snapshot)}};
 }

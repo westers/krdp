@@ -172,18 +172,22 @@ inline QJsonObject previewReply(const QString &id, const QString &token, const R
         {QStringLiteral("warnings"), QJsonArray{}}};
 }
 
-// The retained multi-output position path is accepted in an isolated GUI/RDP
-// run. Advertise only that one operation; never borrow legacy single-output
-// resize as a general topology capability.
+// Retained position/Add/owned Remove use revisioned preview/commit and fresh
+// compositor/capture readback. Legacy single-output resize is not a general
+// topology capability.
 inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot)
 {
+    const bool removable = snapshot.outputs.size() > 2
+        && std::any_of(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [](const auto &entry) {
+            return !entry.output.physical && entry.output.backendKey.startsWith(QStringLiteral("Virtual-krdp-added-"));
+        });
     return {{QStringLiteral("type"), QStringLiteral("topology")}, {QStringLiteral("v"), 1},
         {QStringLiteral("id"), id}, {QStringLiteral("generation"), snapshot.generation},
         {QStringLiteral("revision"), double(snapshot.revision)}, {QStringLiteral("outputs"), outputArray(snapshot.outputs)},
         {QStringLiteral("capabilities"), QJsonObject{
             {QStringLiteral("enumerate"), true},
             {QStringLiteral("add"), snapshot.outputs.size() > 1 && snapshot.outputs.size() < 16},
-            {QStringLiteral("remove"), false}, {QStringLiteral("position"), snapshot.outputs.size() > 1},
+            {QStringLiteral("remove"), removable}, {QStringLiteral("position"), snapshot.outputs.size() > 1},
             {QStringLiteral("resize"), false}, {QStringLiteral("scale"), false},
             {QStringLiteral("primary"), false}, {QStringLiteral("multiOutputCapture"), snapshot.outputs.size() > 1},
             {QStringLiteral("maxOutputs"), 16}, {QStringLiteral("positionMin"), 0},
