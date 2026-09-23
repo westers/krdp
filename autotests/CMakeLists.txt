@@ -185,7 +185,7 @@ add_test(NAME VirtualSessionControlTest COMMAND VirtualSessionControlTest)
 add_executable(VirtualSessionTransportTest VirtualSessionTransportTest.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
-    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp)
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp)
 target_include_directories(VirtualSessionTransportTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(VirtualSessionTransportTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
 add_test(NAME VirtualSessionTransportTest COMMAND VirtualSessionTransportTest)
@@ -194,7 +194,8 @@ add_executable(VirtualSessionHostControllerTest VirtualSessionHostControllerTest
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardian.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionStorage.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionHostController.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp
-    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp)
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp)
 target_include_directories(VirtualSessionHostControllerTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(VirtualSessionHostControllerTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
 target_link_options(VirtualSessionHostControllerTest PRIVATE "-Wl,--wrap=fsync")

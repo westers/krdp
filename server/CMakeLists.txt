@@ -32,7 +32,7 @@ target_link_libraries(krdp-virtual-session-cleanup PRIVATE KRdpGuardianClient Qt
 configure_file(krdp-virtual-session@.service.in ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-session@.service @ONLY)
 find_package(OpenSSL REQUIRED)
 add_executable(krdp-virtual-host virtualhost.cpp VirtualHostTls.cpp VirtualSessionHostController.cpp VirtualSessionTransport.cpp
-    VirtualSessionControl.cpp VirtualSessionSupervisor.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp)
+    VirtualSessionControl.cpp VirtualSessionSupervisor.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp VirtualResize.cpp)
 target_link_libraries(krdp-virtual-host PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus OpenSSL::Crypto KRdp KRdpGuardianClient)
 configure_file(krdp-virtual-host.service.in ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-host.service @ONLY)
 add_executable(krdp-virtual-device-entry virtualdeviceentry.cpp)
@@ -61,7 +61,7 @@ if (BUILD_PLASMA_SESSION)
     add_executable(krdp-virtual-session-probe virtualsessionprobe.cpp VirtualSessionSupervisor.cpp VirtualSessionControl.cpp ConsoleWorkerEndpoint.cpp)
     target_link_libraries(krdp-virtual-session-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network KRdp KRdpGuardianClient)
     add_executable(krdp-virtual-rdp-host-probe virtualrdphostprobe.cpp VirtualSessionHostController.cpp
-        VirtualSessionTransport.cpp VirtualSessionControl.cpp VirtualSessionSupervisor.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp)
+        VirtualSessionTransport.cpp VirtualSessionControl.cpp VirtualSessionSupervisor.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp VirtualResize.cpp)
     target_link_libraries(krdp-virtual-rdp-host-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp KRdpGuardianClient)
     configure_file(org.kde.krdpvirtualprobe.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpvirtualprobe.desktop @ONLY)
 endif()

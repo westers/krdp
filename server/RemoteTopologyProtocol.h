@@ -173,9 +173,11 @@ inline QJsonObject previewReply(const QString &id, const QString &token, const R
 }
 
 // Retained position/Add/owned Remove use revisioned preview/commit and fresh
-// compositor/capture readback. Legacy single-output resize is not a general
-// topology capability.
-inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot)
+// compositor/capture readback. The per-output mode/scale path remains behind
+// an explicit private-test opt-in until native acceptance; legacy single-
+// output resize is not a general topology capability.
+inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot,
+    bool experimentalResize = false)
 {
     const bool removable = snapshot.outputs.size() > 2
         && std::any_of(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [](const auto &entry) {
@@ -188,7 +190,8 @@ inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatal
             {QStringLiteral("enumerate"), true},
             {QStringLiteral("add"), snapshot.outputs.size() > 1 && snapshot.outputs.size() < 16},
             {QStringLiteral("remove"), removable}, {QStringLiteral("position"), snapshot.outputs.size() > 1},
-            {QStringLiteral("resize"), false}, {QStringLiteral("scale"), false},
+            {QStringLiteral("resize"), experimentalResize && snapshot.outputs.size() > 1},
+            {QStringLiteral("scale"), experimentalResize && snapshot.outputs.size() > 1},
             {QStringLiteral("primary"), false}, {QStringLiteral("multiOutputCapture"), snapshot.outputs.size() > 1},
             {QStringLiteral("maxOutputs"), 16}, {QStringLiteral("positionMin"), 0},
             {QStringLiteral("positionMax"), 32768}, {QStringLiteral("lifetime"), QStringLiteral("retained")},

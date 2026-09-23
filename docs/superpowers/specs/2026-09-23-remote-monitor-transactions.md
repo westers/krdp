@@ -10,6 +10,16 @@ KScreen/captured-keyframe proof. No installed server/client or production path
 is claimed. Console native acceptance, resize/scale/primary, Fit/Match and full
 runtime acceptance remain absent. A visual arrangement is now the client UI's
 main draft control; X/Y remains under Advanced.
+Source `cb55efb` adds an unadvertised retained multi-output worker mode/scale
+primitive; `c88cc5b` tests all-output recapture when logical rectangles stay
+unchanged. An experimental broker binding (default OFF, private-process
+`KRDP_EXPERIMENTAL_MULTI_RESIZE=1` only) accepts one owned virtual `resize`
+through the existing revisioned one-use preview/commit, sends a target-specific
+worker resize, and requires exact after-catalog/revision proof. With the
+default environment, `resize`/`scale` capabilities remain false and preview
+returns `unsupported`. The Sol private GPU worker probe has not run because
+the render node requires a user-run scoped privileged envelope. This is not
+native acceptance, client UI support, installation or a public capability.
 Source WIP now includes a separate read-only Console `topology-query`: the
 authenticated physical worker runs `kscreen-doctor -j` inside its session on
 an encoded keyframe, requires exact capture/monitor geometry and decoded
