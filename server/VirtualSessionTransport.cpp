@@ -46,6 +46,14 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
             m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
     });
+    m_topologyDeadline.setSingleShot(true);
+    m_topologyDeadline.setInterval(5000);
+    connect(&m_topologyDeadline, &QTimer::timeout, this, [this] {
+        const QString id = m_topologyId;
+        clearTopology();
+        if (m_connection && !id.isEmpty())
+            m_connection->sendControlRecord(RemoteTopologyProtocol::error(id, u"timeout"_s));
+    });
     connect(&m_session, &AbstractSession::frameReceived, connection->videoStream(), &VideoStream::queueFrame);
     connect(connection->inputHandler(), &InputHandler::inputEvent, &m_session, &AbstractSession::sendEvent);
     connect(&m_session, &ConsoleWorkerSession::keyFrameRequested, this, [this] {
@@ -134,7 +142,12 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
             && m_handle->generation == handle.generation;
     };
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [this](const VideoFrame &frame) {
-        if (authorized()) m_session.submitFrame(frame);
+        if (!authorized()) return;
+        const QPointer<VirtualSessionTransport> alive(this);
+        m_session.submitFrame(frame);
+        if (!alive || !m_connection) return;
+        const auto reply = topologyFrame(frame, m_connection->authenticatedPamUid());
+        if (alive && m_connection && !reply.isEmpty()) m_connection->sendControlRecord(reply);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::audioReceived, this, [this](const auto &audio) {
         if (m_playback && authorized()) m_connection->submitExternalAudio(audio.pcm);
@@ -179,6 +192,7 @@ void VirtualSessionTransport::revoke()
     const QPointer<VirtualSessionTransport> alive(this);
     m_revoking = true;
     clearResize(); // Invalidate before any teardown callback can rebind.
+    clearTopology();
     // Clear preference before any teardown signal can destroy this transport.
     if (m_connection) {
         m_connection->setAudioPriorityDefault(false);
@@ -370,6 +384,30 @@ void VirtualSessionTransport::clearResize()
     m_resizeGeneration = 0;
 }
 
+void VirtualSessionTransport::clearTopology()
+{
+    m_topologyDeadline.stop();
+    m_topologyId.clear();
+    m_topologyBinding = 0;
+}
+
+QJsonObject VirtualSessionTransport::topologyFrame(const VideoFrame &frame, std::optional<quint32> uid)
+{
+    if (m_topologyId.isEmpty() || !m_topologyBinding || m_topologyBinding != m_controlGeneration
+        || !authorized(uid) || !m_handle || !m_topologyResolve
+        || !frame.isKeyFrame || frame.data.isEmpty() || frame.size.isEmpty()
+        || frame.monitors.size() != 1 || frame.monitors.first().geometry != QRect(QPoint(0, 0), frame.size)) return {};
+    const QPointer<VirtualSessionTransport> alive(this);
+    const auto snapshot = m_topologyResolve(*m_handle);
+    if (!alive || !snapshot || snapshot->outputs.size() != 1 || !authorized(uid)) return {};
+    const auto &output = snapshot->outputs.first().output;
+    if (snapshot->generation.isEmpty() || !snapshot->revision || output.nativePixels != frame.size
+        || !output.enabled || !output.primary || output.physical || output.owner != m_handle->id) return {};
+    const QString id = m_topologyId;
+    clearTopology();
+    return RemoteTopologyProtocol::retainedReadOnly(id, *snapshot);
+}
+
 QJsonObject VirtualSessionTransport::requestResize(const QJsonObject &record, std::optional<quint32> uid)
 {
     const auto parsed = VirtualResizeProtocol::parse(record);
@@ -412,6 +450,18 @@ QJsonObject VirtualSessionTransport::resizeResult(const ConsoleWorkerWire::Resiz
 QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::optional<quint32> uid)
 {
     if (m_revoking) return {};
+    if (record.value(u"type"_s) == u"topology-query"_s) {
+        const auto id = RemoteTopologyProtocol::queryId(record);
+        if (!id) return RemoteTopologyProtocol::error(record.value(u"id"_s).toString().left(64), u"invalid"_s);
+        if (!authorized(uid)) return RemoteTopologyProtocol::error(*id, u"not-owner"_s);
+        if (!m_topologyResolve) return RemoteTopologyProtocol::error(*id, u"unsupported"_s);
+        if (!m_topologyId.isEmpty()) return m_topologyId == *id ? QJsonObject{} : RemoteTopologyProtocol::error(*id, u"busy"_s);
+        m_topologyId = *id;
+        m_topologyBinding = m_controlGeneration;
+        m_topologyDeadline.start();
+        m_endpoint->requestKeyFrame();
+        return {};
+    }
     if (record.value(u"type"_s) == u"virtual-resize"_s) return requestResize(record, uid);
     if (record.value(u"type"_s) == u"audio-priority"_s) {
         const auto parsed = AudioPriority::parse(record);

@@ -56,6 +56,7 @@ private:
     bool prepareEndpoint(quint32 uid, const VirtualSessionRegistry::Handle &handle, const QString &socket, const QByteArray &token,
         std::unique_ptr<VirtualSessionBrokerLease> lease = {});
     ConsoleWorkerEndpoint *resolve(const VirtualSessionRegistry::Handle &handle);
+    std::optional<RemoteTopologyCatalog::Snapshot> topologyFor(const VirtualSessionRegistry::Handle &handle) const;
     void addClient(RdpConnection *connection);
     void removeClient(quint64 id);
 

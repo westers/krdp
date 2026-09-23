@@ -693,11 +693,13 @@ private Q_SLOTS:
             QTRY_COMPARE(host.m_supervisor.list(getuid()).first().phase, VirtualSessionState::Phase::Retained);
             const auto &topology = workerState.topology.snapshot();
             QVERIFY(workerState.topology.observed());
+            QVERIFY(host.topologyFor(runtimeState.handle));
             QCOMPARE(topology.revision, quint64(1));
             QCOMPARE(topology.outputs.size(), 1);
             QCOMPARE(topology.outputs.first().output.logicalGeometry, QRect(0, 0, 1280, 720));
             QCOMPARE(topology.outputs.first().output.nativePixels, QSize(1280, 720));
             if (attempt) QVERIFY(topology.generation != oldTopologyGeneration);
+            if (attempt) QVERIFY(!host.topologyFor(oldHandle));
             oldTopologyGeneration = topology.generation;
             const auto handle = host.m_supervisor.attach(getuid(), record.session, 1);
             QVERIFY(handle);
@@ -708,9 +710,13 @@ private Q_SLOTS:
             const auto stableId = topology.outputs.first().id;
             worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Outputs{{
                 {QStringLiteral("Virtual-1"), QRect(0, 0, 1024, 576), 1.25, true}}}));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(workerState.outputs.monitors.first().geometry, QRect(0, 0, 1024, 576));
+            QVERIFY(!host.topologyFor(runtimeState.handle)); // Metadata alone is not capture proof.
             worker.write(ConsoleWorkerWire::frame(frame));
             QVERIFY(worker.waitForBytesWritten(1000));
             QTRY_COMPARE(workerState.topology.snapshot().revision, quint64(2));
+            QVERIFY(host.topologyFor(runtimeState.handle));
             QCOMPARE(workerState.topology.snapshot().outputs.first().id, stableId);
             QCOMPARE(workerState.topology.snapshot().outputs.first().output.logicalGeometry, QRect(0, 0, 1024, 576));
             QVERIFY(host.m_supervisor.disconnect(*handle, 1));

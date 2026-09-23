@@ -361,6 +361,22 @@ ConsoleWorkerEndpoint *VirtualSessionHostController::resolve(const VirtualSessio
     return worker.endpoint.get();
 }
 
+std::optional<RemoteTopologyCatalog::Snapshot> VirtualSessionHostController::topologyFor(
+    const VirtualSessionRegistry::Handle &handle) const
+{
+    const auto found = m_workers.find(handle.id);
+    if (found == m_workers.end()) return {};
+    const auto &worker = *found->second;
+    if (worker.handle.manager != handle.manager || worker.handle.generation != handle.generation
+        || !worker.endpoint->ready() || !worker.topology.observed()
+        || worker.outputs.monitors.size() != 1 || worker.topology.snapshot().outputs.size() != 1) return {};
+    const auto &reported = worker.outputs.monitors.first();
+    const auto &observed = worker.topology.snapshot().outputs.first().output;
+    if (observed.name != reported.name || observed.logicalGeometry != reported.geometry
+        || observed.scale != reported.scale || observed.owner != handle.id) return {};
+    return worker.topology.snapshot();
+}
+
 void VirtualSessionHostController::addClient(RdpConnection *connection)
 {
     if (m_nextClient == std::numeric_limits<quint64>::max()) {
@@ -368,8 +384,10 @@ void VirtualSessionHostController::addClient(RdpConnection *connection)
         return;
     }
     const quint64 id = ++m_nextClient;
-    m_clients.emplace(id, std::make_unique<VirtualSessionTransport>(id, connection, m_control,
-        [this](const auto &handle) { return resolve(handle); }, m_sequence));
+    auto transport = std::make_unique<VirtualSessionTransport>(id, connection, m_control,
+        [this](const auto &handle) { return resolve(handle); }, m_sequence);
+    transport->setTopologyResolver([this](const auto &handle) { return topologyFor(handle); });
+    m_clients.emplace(id, std::move(transport));
     connect(connection, &RdpConnection::stateChanged, this, [this, id](RdpConnection::State state) {
         if (state == RdpConnection::State::Closed) removeClient(id);
     }, Qt::QueuedConnection);

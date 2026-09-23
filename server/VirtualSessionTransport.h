@@ -3,6 +3,7 @@
 #include "VirtualSessionControl.h"
 #include "ConsoleWorkerEndpoint.h"
 #include "ConsoleWorkerSession.h"
+#include "RemoteTopologyProtocol.h"
 #include <RdpConnection.h>
 #include <QPointer>
 #include <QTimer>
@@ -20,10 +21,12 @@ class VirtualSessionTransport : public QObject
 {
 public:
     using Resolve = std::function<ConsoleWorkerEndpoint *(const VirtualSessionRegistry::Handle &)>;
+    using ResolveTopology = std::function<std::optional<RemoteTopologyCatalog::Snapshot>(const VirtualSessionRegistry::Handle &)>;
     VirtualSessionTransport(quint64 client, RdpConnection *connection, VirtualSessionControl &control,
                             Resolve resolve, quint64 &controlSequence, QObject *parent = nullptr);
     ~VirtualSessionTransport() override;
     QJsonObject request(const QJsonObject &record);
+    void setTopologyResolver(ResolveTopology resolve) { m_topologyResolve = std::move(resolve); }
     void revoke();
     void unavailable();
 
@@ -42,6 +45,8 @@ private:
     void restoreFixedVideoQuality(std::optional<quint32> uid);
     QJsonObject requestResize(const QJsonObject &, std::optional<quint32> uid);
     QJsonObject resizeResult(const ConsoleWorkerWire::ResizeResult &, std::optional<quint32> uid);
+    QJsonObject topologyFrame(const VideoFrame &, std::optional<quint32> uid);
+    void clearTopology();
     void clearResize();
     void stopMicrophone();
     void stopMicrophone(std::optional<quint32> uid);
@@ -55,6 +60,7 @@ private:
     QPointer<RdpConnection> m_connection;
     QPointer<VirtualSessionControl> m_control;
     Resolve m_resolve;
+    ResolveTopology m_topologyResolve;
     quint64 &m_sequence;
     QPointer<ConsoleWorkerEndpoint> m_endpoint;
     std::optional<VirtualSessionRegistry::Handle> m_handle;
@@ -72,6 +78,9 @@ private:
     QTimer m_microphoneDeadline;
     QTimer m_microphonePump;
     QTimer m_resizeDeadline;
+    QTimer m_topologyDeadline;
+    QString m_topologyId;
+    quint64 m_topologyBinding = 0;
     QString m_resizeId;
     quint64 m_nextResizeId = 0;
     quint64 m_resizeWorkerId = 0;

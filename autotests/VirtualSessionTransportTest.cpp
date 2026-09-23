@@ -67,6 +67,48 @@ class VirtualSessionTransportTest : public QObject
         return records;
     }
 private Q_SLOTS:
+    void topologyQueryWaitsForCurrentCapturedKeyframe() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            RemoteTopologyCatalog catalog;
+            const auto snapshot = catalog.observe({{
+                .backendKey = u"Virtual-1"_s, .name = u"Virtual-1"_s,
+                .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(0, 0, 1280, 720),
+                .scale = 1.0, .enabled = true, .primary = true, .physical = false,
+                .owner = t.m_handle->id,
+            }});
+            QVERIFY(snapshot);
+            t.setTopologyResolver([snapshot](const auto &) { return snapshot; });
+            const QJsonObject query{{u"type"_s, u"topology-query"_s}, {u"v"_s, 1}, {u"id"_s, u"top-1"_s}};
+            QVERIFY(t.request(query, 1000).isEmpty());
+            QCOMPARE(t.m_topologyId, u"top-1"_s);
+            QVERIFY(t.m_topologyDeadline.isActive());
+            QVERIFY(t.request(query, 1000).isEmpty()); // Retry cannot get early success.
+            auto another = query; another[u"id"_s] = u"top-2"_s;
+            QCOMPARE(t.request(another, 1000).value(u"code"_s).toString(), u"busy"_s);
+            VideoFrame frame;
+            frame.size = QSize(1280, 720); frame.data = "fixture"; frame.isKeyFrame = true;
+            frame.monitors = {{QRect(0, 0, 1280, 720), true}};
+            frame.isKeyFrame = false;
+            QVERIFY(t.topologyFrame(frame, 1000).isEmpty());
+            frame.isKeyFrame = true;
+            QVERIFY(t.topologyFrame(frame, 1001).isEmpty());
+            frame.monitors = {{QRect(0, 0, 640, 480), true}};
+            QVERIFY(t.topologyFrame(frame, 1000).isEmpty());
+            frame.monitors = {{QRect(0, 0, 1280, 720), true}};
+            const auto answer = t.topologyFrame(frame, 1000);
+            QCOMPARE(answer.value(u"type"_s).toString(), u"topology"_s);
+            QCOMPARE(answer.value(u"id"_s).toString(), u"top-1"_s);
+            QCOMPARE(answer.value(u"generation"_s).toString(), snapshot->generation);
+            QVERIFY(!answer.value(u"capabilities"_s).toObject().value(u"add"_s).toBool());
+            QVERIFY(t.m_topologyId.isEmpty());
+            QVERIFY(!t.m_topologyDeadline.isActive());
+            QVERIFY(t.request(query, 1000).isEmpty());
+            t.revoke();
+            QVERIFY(t.m_topologyId.isEmpty());
+            QVERIFY(t.topologyFrame(frame, 1000).isEmpty());
+        });
+    }
     void virtualResizeStrictSchema() {
         auto request = resizeRequest();
         QVERIFY(VirtualResizeProtocol::parse(request));
