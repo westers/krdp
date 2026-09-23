@@ -11,6 +11,7 @@
 #include "RetainedMultiFitPlan.h"
 #include "RetainedMultiPrimaryPlan.h"
 #include "RetainedMultiMixedPlan.h"
+#include "RetainedMultiMixedCreatePlan.h"
 
 using namespace KRdp::RetainedKScreenReadback;
 
@@ -55,6 +56,80 @@ class RetainedKScreenReadbackTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void mixedCreationPreflightsFinalLayoutAcrossCreatorStage()
+    {
+        namespace Create = KRdp::RetainedMultiMixedCreatePlan;
+        using Kind = KRdp::RemoteTopologyDraft::Operation::Kind;
+        const auto before = decoded(root());
+        QVERIFY(before);
+        const KRdp::RetainedMultiPrimaryPlan::Priorities beforePriorities{
+            {QStringLiteral("Virtual-0"), 1}, {QStringLiteral("Virtual-1"), 2}};
+        KRdp::RemoteTopologyDraft::Operation add;
+        add.kind = Kind::AddVirtual;
+        add.id = QStringLiteral("new:client-screen");
+        add.position = QPoint(2560, 100);
+        add.pixels = QSize(960, 540);
+        add.scale = 1;
+        KRdp::RemoteTopologyDraft::Operation resize;
+        resize.kind = Kind::Resize;
+        resize.id = QStringLiteral("Virtual-0");
+        resize.pixels = QSize(1600, 900);
+        resize.scale = 1.25;
+        KRdp::RemoteTopologyDraft::Operation move;
+        move.kind = Kind::Move;
+        move.id = QStringLiteral("Virtual-1");
+        move.position = QPoint(1280, 100);
+        KRdp::RemoteTopologyDraft::Operation primary;
+        primary.kind = Kind::SetPrimary;
+        primary.id = add.id;
+        const QVector<Create::Operation> changes{add, resize, move, primary};
+        const QString newKey = QStringLiteral("Virtual-krdp-added-test");
+        const auto plan = Create::make(*before, QStringLiteral("lease-1"), beforePriorities, newKey, changes);
+        QVERIFY(plan);
+        QCOMPARE(plan->after.size(), 3);
+        QCOMPARE(plan->after[0].nativePixels, QSize(1600, 900));
+        QCOMPARE(plan->after[1].logicalGeometry.topLeft(), QPoint(1280, 100));
+        QCOMPARE(plan->after[2].backendKey, newKey);
+        QCOMPARE(plan->after[2].logicalGeometry.topLeft(), QPoint(2560, 100));
+        QVERIFY(plan->after[2].primary);
+        auto created = *before;
+        auto newOutput = plan->after[2];
+        newOutput.primary = false;
+        newOutput.logicalGeometry.moveTopLeft(QPoint(2304, 100));
+        created.outputs.append(newOutput);
+        QVERIFY(Create::matchesCreated(*plan, created));
+        const KRdp::RetainedMultiPrimaryPlan::Priorities createdPriorities{
+            {QStringLiteral("Virtual-0"), 1}, {QStringLiteral("Virtual-1"), 2}, {newKey, 3}};
+        const auto remaining = Create::afterCreation(*plan, created, createdPriorities);
+        QVERIFY(remaining);
+        QCOMPARE(remaining->after, plan->after);
+        QCOMPARE(remaining->requestedPriorities.value(newKey), 1);
+        QCOMPARE(remaining->placements.size(), 2);
+        QCOMPARE(remaining->resizes.size(), 1);
+        auto changedOld = created;
+        changedOld.outputs[1].logicalGeometry.moveLeft(1025);
+        QVERIFY(!Create::matchesCreated(*plan, changedOld));
+        QVERIFY(!Create::afterCreation(*plan, changedOld, createdPriorities));
+        auto wrongMode = created;
+        wrongMode.outputs[2].nativePixels.setWidth(1280);
+        QVERIFY(!Create::matchesCreated(*plan, wrongMode));
+        auto wrongOwner = created;
+        wrongOwner.outputs[2].owner = QStringLiteral("foreign");
+        QVERIFY(!Create::matchesCreated(*plan, wrongOwner));
+        auto wrongPriority = createdPriorities;
+        wrongPriority[newKey] = 1;
+        QVERIFY(!Create::afterCreation(*plan, created, wrongPriority));
+        auto duplicate = changes;
+        duplicate.append(add);
+        QVERIFY(!Create::make(*before, QStringLiteral("lease-1"), beforePriorities, newKey, duplicate));
+        auto overlap = changes;
+        overlap[0].position = QPoint(2500, 100);
+        QVERIFY(!Create::make(*before, QStringLiteral("lease-1"), beforePriorities, newKey, overlap));
+        auto foreign = *before;
+        foreign.outputs[1].owner = QStringLiteral("foreign");
+        QVERIFY(!Create::make(foreign, QStringLiteral("lease-1"), beforePriorities, newKey, changes));
+    }
+
     void mixedExistingOutputsPreflightOneFinalLayout()
     {
         namespace Mixed = KRdp::RetainedMultiMixedPlan;
