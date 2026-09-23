@@ -100,7 +100,15 @@ wires paired worker v7: authenticated same-count mixed requests execute one
 KScreen apply; fresh full-layout/priority readback and independently decoded
 keyframes gate acknowledgment, with conditional failure recovery. Local full
 build/68 selected tests and Sol paired worker/host focused tests pass. The
-broker still does not dispatch mixed requests; Match remains unavailable.
+broker source `89734c2` now binds mixed existing-output drafts to the same
+one-use owner/generation/revision preview token and exact after-catalog gate.
+The path is separately default-OFF behind
+`KRDP_EXPERIMENTAL_MULTI_MIXED=1`, and operation-specific resize/primary
+opt-ins remain required. A private `mixed` capability is true only for wholly
+owned retained virtual layouts. Local full build/68 selected non-maintenance
+and Sol paired worker/host focused broker/protocol/wire tests pass. This is
+not native acceptance, and it cannot combine Add/Remove creator lifecycles;
+the client Match action is still unavailable.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. The later private Fit
