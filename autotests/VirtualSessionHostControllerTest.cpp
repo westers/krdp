@@ -720,6 +720,12 @@ private Q_SLOTS:
             QCOMPARE(workerState.topology.snapshot().outputs.first().id, stableId);
             QCOMPARE(workerState.topology.snapshot().outputs.first().output.logicalGeometry, QRect(0, 0, 1024, 576));
             QVERIFY(host.m_supervisor.disconnect(*handle, 1));
+            const auto retainedTopology = host.topologyFor(*handle);
+            QVERIFY(retainedTopology);
+            const auto reattached = host.m_supervisor.attach(getuid(), record.session, 2);
+            QVERIFY(reattached);
+            QCOMPARE(host.topologyFor(*reattached), retainedTopology);
+            QVERIFY(host.m_supervisor.disconnect(*reattached, 2));
             QCOMPARE(guardian.processId(), child);
         }
         QCOMPARE(guardian.phase(), QStringLiteral("running"));
