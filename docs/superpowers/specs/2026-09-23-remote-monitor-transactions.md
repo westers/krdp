@@ -30,9 +30,13 @@ whose decoded dimensions match the reported pixels and logical scale. Five secon
 without such a frame returns a correlated `topology-error`/`timeout`; detach
 cancels the query. It advertises enumeration only, with all topology-write
 capabilities false; `multiOutputCapture` is true only for a currently published
-multi-output capture. The output geometry is worker/QScreen metadata confirmed
-by matching captured keyframes. This is not an independent fresh KScreen
-readback or a transaction commit proof. This multi-output path has source tests
+multi-output capture. In source `b413c9e`, before first publication the worker
+also queries `kscreen-doctor -j` inside its verified private compositor and
+requires independently reported mode, scale, logical geometry and primary to
+match every decoded captured keyframe. A mismatch fails the worker closed. The
+published geometry remains worker/QScreen metadata after this KScreen check;
+a later query does not itself request a new KScreen readback, and no transaction
+commit proof exists. This multi-output path has source tests
 and isolated Sol/Buzz two-surface GUI acceptance; the source client also received
 a read-only two-output topology reply (`ready/2/rev1`) in an isolated run. A
 same-compositor Sol worker probe moved a KDE window to the second virtual output
@@ -41,14 +45,12 @@ packets in retained multi-output mode; a bounded Sol private-compositor
 click-only probe placed the pointer at the expected mixed-scale logical
 coordinate. Client-driven drag, application click effect, mixed-scale GUI,
 installed broker, deployment and write transactions remain unaccepted. Other
-backends have no new query handler yet.
-Source-only `RetainedKScreenReadback` parses a separate, fresh
-`kscreen-doctor -j` record from a verified private compositor, checks output
-identity/mode/scale/position/primary/count, and builds shell-free logical
-position arguments. It accepts the saved isolated Sol 125%/100% two-output
-KScreen fixture. It is not yet called by the worker/broker; the published
-query remains capture/QScreen-backed, not independently verified KScreen
-readback. No topology-write capability follows from this parser.
+backends have no new query handler yet. The readback parser accepts the saved
+isolated Sol 125%/100% two-output KScreen fixture; a subsequent bounded Sol
+worker probe logged that the independent two-output KScreen readback matched
+both decoded captures before publishing and stopped cleanly. Its shell-free
+logical position arguments remain source-only. No topology-write capability
+follows from this publication gate.
 The client sends the query only after an acknowledged retained attachment,
 validates its correlation and bounded geometry/capabilities, and treats an old
 broker's generic unsupported error as query fallback without failing the
