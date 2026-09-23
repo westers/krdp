@@ -8,6 +8,7 @@
 #include <QEvent>
 #include <limits>
 #include "VirtualSessionTransport.h"
+#include "VirtualResizeProtocol.h"
 #include "ExternalAudioQueue.h"
 using namespace KRdp;
 using namespace Qt::StringLiterals;
@@ -23,6 +24,10 @@ class VirtualSessionTransportTest : public QObject
     }
     static QJsonObject priority(bool enabled = true) {
         return {{u"type"_s, u"audio-priority"_s}, {u"v"_s, 1}, {u"id"_s, u"priority-1"_s}, {u"enabled"_s, enabled}};
+    }
+    static QJsonObject resizeRequest() {
+        return {{u"type"_s, u"virtual-resize"_s}, {u"v"_s, 1}, {u"id"_s, u"fit-1"_s},
+            {u"width"_s, 1920}, {u"height"_s, 1080}, {u"scale"_s, 1.25}};
     }
     void microphoneFixture(const std::function<void(VirtualSessionTransport &, VirtualSessionControl &,
                                                     ConsoleWorkerEndpoint &, QLocalSocket &)> &test) {
@@ -62,6 +67,85 @@ class VirtualSessionTransportTest : public QObject
         return records;
     }
 private Q_SLOTS:
+    void virtualResizeStrictSchema() {
+        auto request = resizeRequest();
+        QVERIFY(VirtualResizeProtocol::parse(request));
+        for (const QString &field : {u"v"_s, u"width"_s, u"height"_s, u"scale"_s}) {
+            auto invalid = request; invalid[field] = true;
+            QVERIFY(!VirtualResizeProtocol::parse(invalid));
+        }
+        for (const auto value : {319.0, 321.0, 4098.0, 1920.5}) {
+            auto invalid = request; invalid[u"width"_s] = value;
+            QVERIFY(!VirtualResizeProtocol::parse(invalid));
+        }
+        request[u"output"_s] = u"DP-1"_s;
+        QVERIFY(!VirtualResizeProtocol::parse(request));
+        request.remove(u"output"_s); request[u"scale"_s] = 1.333;
+        QCOMPARE(VirtualResizeProtocol::parse(request)->scale, 160.0 / 120);
+        request[u"id"_s] = QString(65, u'x');
+        QVERIFY(!VirtualResizeProtocol::parse(request));
+    }
+    void virtualResizeDispatchCorrelationAndRevoke() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            QVERIFY(!t.request(resizeRequest(), std::nullopt).value(u"ok"_s).toBool());
+            QVERIFY(!t.request(resizeRequest(), 1001).value(u"ok"_s).toBool());
+            QVERIFY(t.request(resizeRequest(), 1000).isEmpty()); // Not an early success.
+            QVERIFY(t.m_resizeDeadline.isActive());
+            std::optional<ConsoleWorkerWire::Resize> sent;
+            for (const auto &record : workerRecords(worker)) if (auto resize = ConsoleWorkerWire::resize(record)) sent = resize;
+            QVERIFY(sent); QCOMPARE(sent->output, u"virtual-desktop"_s);
+            QCOMPARE(sent->pixels, QSize(1920, 1080)); QCOMPARE(sent->scale, 1.25);
+            QCOMPARE(sent->generation, t.m_controlGeneration);
+            QVERIFY(t.request(resizeRequest(), 1000).isEmpty()); // Pending duplicate is coalesced.
+            QCOMPARE(t.m_resizeWorkerId, sent->requestId);
+            auto another = resizeRequest(); another[u"id"_s] = u"another-fit"_s;
+            QVERIFY(!t.request(another, 1000).value(u"ok"_s).toBool());
+            QVERIFY(t.resizeResult({sent->requestId + 1, sent->generation, {}}, 1000).isEmpty());
+            QVERIFY(t.resizeResult({sent->requestId, sent->generation + 1, {}}, 1000).isEmpty());
+            QCOMPARE(t.m_resizeId, u"fit-1"_s);
+            const auto result = t.resizeResult({sent->requestId, sent->generation, {}}, 1000);
+            QVERIFY(result.value(u"ok"_s).toBool()); QCOMPARE(result.value(u"id"_s).toString(), u"fit-1"_s);
+            QVERIFY(t.m_resizeId.isEmpty()); QVERIFY(!t.m_resizeDeadline.isActive());
+            QVERIFY(t.request(resizeRequest(), 1000).isEmpty());
+            const auto second = t.m_resizeWorkerId; QVERIFY(second > sent->requestId);
+            QVERIFY(t.resizeResult({sent->requestId, sent->generation, u"old failure"_s}, 1000).isEmpty());
+            QCOMPARE(t.m_resizeWorkerId, second);
+            t.revoke(); QVERIFY(t.m_resizeId.isEmpty()); QVERIFY(!t.m_resizeDeadline.isActive());
+            QVERIFY(t.resizeResult({second, sent->generation, {}}, 1000).isEmpty());
+        });
+    }
+    void virtualResizeFailureLostAuthorityAndExhaustion() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            QVERIFY(t.request(resizeRequest(), 1000).isEmpty());
+            const auto refused = t.resizeResult({t.m_resizeWorkerId, t.m_resizeGeneration, u"readback mismatch"_s}, 1000);
+            QVERIFY(!refused.value(u"ok"_s).toBool());
+            QCOMPARE(refused.value(u"message"_s).toString(), u"readback mismatch"_s);
+            QVERIFY(t.request(resizeRequest(), 1000).isEmpty());
+            QVERIFY(t.resizeResult({t.m_resizeWorkerId, t.m_resizeGeneration, {}}, std::nullopt).isEmpty());
+            QVERIFY(t.m_resizeId.isEmpty());
+            t.m_nextResizeId = std::numeric_limits<quint64>::max();
+            QVERIFY(!t.request(resizeRequest(), 1000).value(u"ok"_s).toBool());
+            QVERIFY(t.m_resizeId.isEmpty());
+        });
+    }
+    void virtualResizeTimeoutRetryCannotCompleteFromOldReply() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            QVERIFY(t.request(resizeRequest(), 1000).isEmpty());
+            const auto previous = t.m_resizeWorkerId;
+            const auto generation = t.m_resizeGeneration;
+            t.m_resizeDeadline.start(1);
+            QTRY_VERIFY(t.m_resizeId.isEmpty()); // Real timer; no fabricated PAM identity in callback.
+            QVERIFY(t.request(resizeRequest(), 1000).isEmpty());
+            QVERIFY(t.m_resizeWorkerId > previous);
+            QVERIFY(t.resizeResult({previous, generation, {}}, 1000).isEmpty());
+            QCOMPARE(t.m_resizeId, u"fit-1"_s);
+            const auto busy = t.resizeResult({t.m_resizeWorkerId, generation, u"worker still settling"_s}, 1000);
+            QVERIFY(!busy.value(u"ok"_s).toBool());
+        });
+    }
     void finalAudioOffRestoresWithoutFrameOrPriorityRequest() {
         for (int mode = 0; mode < 3; ++mode) microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
             QVERIFY(t.request(priority(), 1000).value(u"ok"_s).toBool());

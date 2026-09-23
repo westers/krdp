@@ -323,6 +323,7 @@ public:
     QTimer recoveryTimer;
     int recoveryAttempt = 0;
     QTimer streamRestartTimer;
+    quint64 resizeRestartEpoch = 0;
     // Virtual-monitor target only: the QScreen KWin created for our request.
     // Input is mapped through logicalRect, which for a virtual output is only
     // known once that screen exists (KWin places it, we do not).
@@ -426,7 +427,26 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
         }
         d->streamRestartTimer.stop();
         if (!tornDown) {
+            if (d->resizeRestartEpoch) {
+                // Do not label a still-running old encoder a new capture
+                // epoch. The resize owner times out with input/frames gated.
+                qCWarning(KRDP) << "Resize encoder teardown timed out; capture remains gated";
+                const auto epoch = std::exchange(d->resizeRestartEpoch, quint64(0));
+                Q_EMIT captureRestartFailed(epoch);
+                return;
+            }
             qCWarning(KRDP) << "Encoded stream did not shut down within" << StreamRestartTimeout.count() << "ms, attaching new node anyway";
+        }
+        if (d->resizeRestartEpoch) {
+            const auto epoch = std::exchange(d->resizeRestartEpoch, quint64(0));
+            // nodeId becomes zero only in KPipeWire's producer-thread finished
+            // handler, after the old producer and its queued packets retire.
+            // A starting producer's activeChanged(true) is NOT this boundary.
+            const QPointer<PlasmaScreencastV1Session> alive(this);
+            const uint nodeId = d->pendingNodeId;
+            Q_EMIT captureRestartReady(epoch);
+            if (!alive || d->resizeRestartEpoch || d->streamRestartTimer.isActive()
+                || d->pendingNodeId != nodeId || !streamingRequested() || stream()->nodeId() != 0) return;
         }
         attachEncodedStream(d->pendingNodeId, true);
     });
@@ -462,6 +482,19 @@ void PlasmaScreencastV1Session::refreshDisplayConfiguration()
     if (!setupScreencastRequest()) {
         qCWarning(KRDP) << "Unable to refresh display configuration after topology change (session kept alive)";
     }
+}
+
+bool PlasmaScreencastV1Session::restartCaptureForResize(quint64 epoch)
+{
+    auto encodedStream = stream();
+    const uint nodeId = d->streamRestartTimer.isActive() ? d->pendingNodeId : encodedStream->nodeId();
+    if (!epoch || !d->streamConfigured || !streamingRequested() || nodeId == 0) return false;
+    d->resizeRestartEpoch = epoch;
+    // stop() also queues deactivation for a producer which is still starting.
+    // isActive() alone cannot distinguish that state from complete teardown.
+    if (!encodedStream->isActive()) encodedStream->stop();
+    restartEncodedStream(nodeId);
+    return true;
 }
 
 void PlasmaScreencastV1Session::scheduleStreamRecovery(int attempt, int delayMs)

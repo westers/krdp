@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionTransport.h"
 #include "AudioPriority.h"
+#include "VirtualResizeProtocol.h"
 #include <InputHandler.h>
 #include <VideoStream.h>
 #include <QScopeGuard>
@@ -37,6 +38,14 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     });
     m_microphonePump.setInterval(20);
     connect(&m_microphonePump, &QTimer::timeout, this, &VirtualSessionTransport::pumpMicrophone);
+    m_resizeDeadline.setSingleShot(true);
+    m_resizeDeadline.setInterval(60000);
+    connect(&m_resizeDeadline, &QTimer::timeout, this, [this] {
+        const auto response = resizeResult({m_resizeWorkerId, m_resizeGeneration,
+            u"virtual resize timed out; refresh before retrying"_s},
+            m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+    });
     connect(&m_session, &AbstractSession::frameReceived, connection->videoStream(), &VideoStream::queueFrame);
     connect(connection->inputHandler(), &InputHandler::inputEvent, &m_session, &AbstractSession::sendEvent);
     connect(&m_session, &ConsoleWorkerSession::keyFrameRequested, this, [this] {
@@ -138,6 +147,10 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         const auto reply = microphoneResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
         if (alive && m_connection && !reply.isEmpty()) m_connection->sendControlRecord(reply);
     }));
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::resizeFinished, this, [this](const auto &result) {
+        const auto response = resizeResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+    }));
     m_controlGeneration = ++m_sequence;
     // Capture the binding's generation at connection time, NOT delivery time:
     // disconnect does not retract already queued signals from the RDP thread.
@@ -165,6 +178,7 @@ void VirtualSessionTransport::revoke()
     if (m_revoking) return;
     const QPointer<VirtualSessionTransport> alive(this);
     m_revoking = true;
+    clearResize(); // Invalidate before any teardown callback can rebind.
     // Clear preference before any teardown signal can destroy this transport.
     if (m_connection) {
         m_connection->setAudioPriorityDefault(false);
@@ -348,9 +362,57 @@ void VirtualSessionTransport::deliverControlRecord(const QJsonObject &record, st
     if (alive && connection && m_connection == connection && !response.isEmpty()) connection->sendControlRecord(response);
 }
 
+void VirtualSessionTransport::clearResize()
+{
+    m_resizeDeadline.stop();
+    m_resizeId.clear();
+    m_resizeWorkerId = 0;
+    m_resizeGeneration = 0;
+}
+
+QJsonObject VirtualSessionTransport::requestResize(const QJsonObject &record, std::optional<quint32> uid)
+{
+    const auto parsed = VirtualResizeProtocol::parse(record);
+    const auto id = record.value(u"id"_s).toString().left(64);
+    if (!parsed) return VirtualResizeProtocol::reply(id, u"invalid virtual resize request"_s);
+    if (!authorized(uid)) return VirtualResizeProtocol::reply(id, u"attach to your virtual desktop before resizing"_s);
+    // An in-flight ID denotes the original operation. Retrying it must not
+    // deliver an early failure followed by a contradictory eventual success.
+    if (m_resizeId == id) return {};
+    if (!m_resizeId.isEmpty()) return VirtualResizeProtocol::reply(id, u"virtual resize already pending"_s);
+    if (m_nextResizeId == std::numeric_limits<quint64>::max())
+        return VirtualResizeProtocol::reply(id, u"virtual resize request sequence exhausted"_s);
+    m_resizeId = id;
+    m_resizeWorkerId = ++m_nextResizeId;
+    m_resizeGeneration = m_controlGeneration;
+    const auto generation = m_resizeGeneration;
+    const auto workerId = m_resizeWorkerId;
+    m_resizeDeadline.start();
+    const QPointer<VirtualSessionTransport> alive(this);
+    const bool dispatched = m_endpoint->resize({workerId, generation, u"virtual-desktop"_s, parsed->pixels, parsed->scale});
+    if (!alive) return {};
+    if (m_resizeGeneration != generation || m_resizeWorkerId != workerId || !authorized(uid)) return {};
+    if (!dispatched) {
+        clearResize();
+        return VirtualResizeProtocol::reply(id, u"cannot dispatch virtual resize"_s);
+    }
+    return {}; // Worker acknowledges only after readback and matching capture.
+}
+
+QJsonObject VirtualSessionTransport::resizeResult(const ConsoleWorkerWire::ResizeResult &result,
+                                                 std::optional<quint32> uid)
+{
+    if (m_resizeId.isEmpty() || result.requestId != m_resizeWorkerId || result.generation != m_resizeGeneration) return {};
+    const QString id = m_resizeId;
+    const bool current = m_controlGeneration == result.generation && authorized(uid);
+    clearResize();
+    return current ? VirtualResizeProtocol::reply(id, result.error) : QJsonObject{};
+}
+
 QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::optional<quint32> uid)
 {
     if (m_revoking) return {};
+    if (record.value(u"type"_s) == u"virtual-resize"_s) return requestResize(record, uid);
     if (record.value(u"type"_s) == u"audio-priority"_s) {
         const auto parsed = AudioPriority::parse(record);
         if (!parsed) return AudioPriority::reply(record, false, u"invalid audio-priority request"_s);
@@ -381,6 +443,7 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
             if (!alive || !m_control || !m_connection) return {};
             if (bound && handle && attachmentMatches(*handle) && authorized()) {
                 response.insert(u"audioPriority"_s, true);
+                response.insert(u"virtualResize"_s, true);
                 return response;
             }
             // A callback may have attached a different desktop. Do not detach

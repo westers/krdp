@@ -38,6 +38,12 @@ public:
 
     void start() override;
     void refreshDisplayConfiguration() override;
+    // Reopen the encoder even if the screencast's logical rectangle is
+    // unchanged. Resize callers must gate output until a fresh keyframe.
+    bool restartCaptureForResize(quint64 epoch);
+    // Old producer teardown confirmed; replacement startup follows this signal.
+    Q_SIGNAL void captureRestartReady(quint64 epoch);
+    Q_SIGNAL void captureRestartFailed(quint64 epoch);
     void requestKeyFrame() override;
 
     void sendEvent(const std::shared_ptr<QEvent> &event) override;

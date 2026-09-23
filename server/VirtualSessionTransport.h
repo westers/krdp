@@ -40,6 +40,9 @@ private:
     bool authorized(std::optional<quint32> uid) const;
     bool forwardVideoQuality(quint64 generation, quint8 quality, std::optional<quint32> uid);
     void restoreFixedVideoQuality(std::optional<quint32> uid);
+    QJsonObject requestResize(const QJsonObject &, std::optional<quint32> uid);
+    QJsonObject resizeResult(const ConsoleWorkerWire::ResizeResult &, std::optional<quint32> uid);
+    void clearResize();
     void stopMicrophone();
     void stopMicrophone(std::optional<quint32> uid);
     QJsonObject microphoneResult(const ConsoleWorkerWire::MicrophoneResult &, std::optional<quint32> uid);
@@ -68,6 +71,11 @@ private:
     ConsoleWorkerWire::MicrophonePolicy m_microphonePolicy;
     QTimer m_microphoneDeadline;
     QTimer m_microphonePump;
+    QTimer m_resizeDeadline;
+    QString m_resizeId;
+    quint64 m_nextResizeId = 0;
+    quint64 m_resizeWorkerId = 0;
+    quint64 m_resizeGeneration = 0;
     bool m_closing = false;
 };
 }

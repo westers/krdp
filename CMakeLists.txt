@@ -70,6 +70,7 @@ set_package_properties(PAM PROPERTIES DESCRIPTION "PAM Libraries"
                       )
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PipeWire REQUIRED IMPORTED_TARGET libpipewire-0.3)
+pkg_check_modules(AVCodec REQUIRED IMPORTED_TARGET libavcodec libavutil)
 
 set(EXCLUDE_DEPRECATED_BEFORE_AND_AT 0 CACHE STRING "Control the range of deprecated API excluded from the build [default=0].")
 

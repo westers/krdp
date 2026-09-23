@@ -25,6 +25,8 @@
 #include "ConsoleWorkerWire.h"
 #include "ConsoleInputState.h"
 #include "ConsoleResizeSession.h"
+#include "VirtualResizeSession.h"
+#include "H264KeyframeSize.h"
 #include "TakeoverDetector.h"
 #include "PipeWireAudioPlayback.h"
 #include "ConsoleMicrophoneSession.h"
@@ -83,13 +85,26 @@ public:
                 m_socket.write(ConsoleWorkerWire::frame(result));
             }
         });
-        connect(&m_resize, &ConsoleResizeSession::stopped, this, [this](const QString &error) {
+        connect(&m_virtualResize, &VirtualResizeSession::mutationStarting, this, &Worker::releaseInput);
+        connect(&m_virtualResize, &VirtualResizeSession::keyframeNeeded, &m_session, &AbstractSession::requestKeyFrame);
+        connect(&m_virtualResize, &VirtualResizeSession::captureRefreshNeeded, this, [this](quint64 epoch) {
+            m_virtualCaptureEpoch = epoch;
+            if (!m_session.restartCaptureForResize(epoch)) m_virtualResize.captureRestartFailed(epoch);
+        });
+        connect(&m_session, &PlasmaScreencastV1Session::captureRestartReady, &m_virtualResize, &VirtualResizeSession::captureRestartReady);
+        connect(&m_session, &PlasmaScreencastV1Session::captureRestartFailed, &m_virtualResize, &VirtualResizeSession::captureRestartFailed);
+        connect(&m_virtualResize, &VirtualResizeSession::result, this, [this](const auto &result) {
+            if (m_socket.state() == QLocalSocket::ConnectedState) m_socket.write(ConsoleWorkerWire::frame(result));
+        });
+        const auto resizedStopped = [this](const QString &error) {
             if (!error.isEmpty()) {
-                qWarning().noquote() << "Console output restoration:" << error;
+                qWarning().noquote() << "Worker output recovery:" << error;
             }
             m_session.setStreamingEnabled(false);
             QCoreApplication::exit(error.isEmpty() ? m_exitCode : 1);
-        });
+        };
+        connect(&m_resize, &ConsoleResizeSession::stopped, this, resizedStopped);
+        connect(&m_virtualResize, &VirtualResizeSession::stopped, this, resizedStopped);
         // Use Plasma's shortcut service, never a raw keyboard grab. SDDM need
         // not provide it; do not auto-start desktop services in the greeter.
         if (m_mode.physicalActions() && QDBusConnection::sessionBus().interface()
@@ -128,6 +143,7 @@ public:
             }
         });
         connect(&m_session, &AbstractSession::streamActiveChanged, this, [this](bool active) {
+            if (m_mode.virtualSession) m_virtualResize.captureStateChanged(m_virtualCaptureEpoch, active);
             if (active && !m_captureReady) {
                 m_captureReady = true;
                 m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
@@ -153,6 +169,15 @@ public:
                                                  screens[i]->devicePixelRatio(), frame.monitors[i].primary});
                     }
                 }
+                if (m_mode.virtualSession) {
+                    const QSize payloadPixels = m_virtualResize.changing() && frame.isKeyFrame
+                        ? h264KeyframeSize(frame.data).value_or(QSize{}) : QSize{};
+                    if (m_virtualResize.changing() && frame.isKeyFrame)
+                        qInfo() << "Virtual Fit keyframe epoch" << m_virtualCaptureEpoch
+                                << "payload" << payloadPixels << "metadata" << frame.size;
+                    m_virtualResize.captured(outputs, frame.size, payloadPixels, frame.isKeyFrame, m_virtualCaptureEpoch);
+                    if (!m_virtualResize.framesAllowed()) return; // Never forward stale-size encoded packets during Fit/recovery.
+                }
                 if (!outputs.monitors.isEmpty() && outputs != m_outputs) {
                     m_outputs = outputs;
                     m_socket.write(ConsoleWorkerWire::frame(outputs));
@@ -160,7 +185,7 @@ public:
                 m_socket.write(ConsoleWorkerWire::frame(frame));
                 // Only this frame's validated output geometry may complete Fit,
                 // never metadata cached before a resize or a compositor handoff.
-                m_resize.captured(outputs, frame.isKeyFrame);
+                if (!m_mode.virtualSession) m_resize.captured(outputs, frame.isKeyFrame);
             }
         });
         connect(&m_session, &AbstractSession::error, this, [this]() {
@@ -199,7 +224,10 @@ private:
         m_audioTimer.stop();
         m_audio.reset();
         m_microphone.stop();
-        m_resize.stop(); // Keep the event loop alive until restoration finishes.
+        // Keep the event loop alive until in-flight mutations settle. Successful
+        // virtual geometry is retained; only an unfinished Fit may roll back.
+        if (m_mode.virtualSession) m_virtualResize.stop();
+        else m_resize.stop();
     }
 
     void releaseInput()
@@ -253,7 +281,8 @@ private:
                     m_session.setVideoQuality(80);
                     m_control = *control;
                     m_microphone.setControl(*control);
-                    m_resize.setControl(*control);
+                    if (m_mode.virtualSession) m_virtualResize.setControl(*control);
+                    else m_resize.setControl(*control);
                     m_reclaimAction.setEnabled(m_mode.physicalActions() && control->active);
                     m_takeover = {};
                     if (control->active) {
@@ -281,14 +310,9 @@ private:
                 continue;
             }
             if (const auto request = ConsoleWorkerWire::resize(*record)) {
-                if (!m_mode.physicalActions()) {
-                    m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{
-                        request->requestId, request->generation,
-                        QStringLiteral("Physical-output resize is unavailable in a virtual session")}));
-                    continue;
-                }
                 releaseInput();
-                m_resize.request(*request);
+                if (m_mode.virtualSession) m_virtualResize.request(*request);
+                else m_resize.request(*request);
                 continue;
             }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {
@@ -312,7 +336,7 @@ private:
                 continue;
             }
             if (const auto input = ConsoleWorkerWire::input(*record)) {
-                if (!m_control.active || !m_resize.inputAllowed()) {
+                if (!m_control.active || !(m_mode.virtualSession ? m_virtualResize.inputAllowed() : m_resize.inputAllowed())) {
                     continue;
                 }
                 if (const auto event = eventFor(*input)) {
@@ -353,6 +377,8 @@ private:
     QAction m_reclaimAction;
     ConsoleWorkerWire::ControlState m_control;
     ConsoleResizeSession m_resize;
+    VirtualResizeSession m_virtualResize;
+    quint64 m_virtualCaptureEpoch = 0;
     bool m_stopping = false;
     int m_exitCode = 0;
 };
