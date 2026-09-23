@@ -113,6 +113,41 @@ private Q_SLOTS:
         QVERIFY(previewRequest(record));
     }
 
+    void strictManagedFitPreview()
+    {
+        QJsonObject record{{QStringLiteral("type"), QStringLiteral("topology-fit-preview")},
+            {QStringLiteral("v"), 1}, {QStringLiteral("id"), QStringLiteral("fit-1")},
+            {QStringLiteral("generation"), QStringLiteral("generation-1")},
+            {QStringLiteral("expectedRevision"), 2}, {QStringLiteral("output"), QStringLiteral("o-1")},
+            {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 1600}, {QStringLiteral("height"), 900}}},
+            {QStringLiteral("scale"), 1.25}, {QStringLiteral("relations"), QJsonArray{
+                QJsonObject{{QStringLiteral("parent"), QStringLiteral("o-1")},
+                    {QStringLiteral("child"), QStringLiteral("o-2")},
+                    {QStringLiteral("edge"), QStringLiteral("right")}, {QStringLiteral("offset"), 100}}}}};
+        const auto parsed = fitPreviewRequest(record);
+        QVERIFY(parsed);
+        QCOMPARE(parsed->pixels, QSize(1600, 900));
+        QCOMPARE(parsed->relations.size(), 1);
+        QCOMPARE(parsed->relations[0].offset, 100);
+        record.insert(QStringLiteral("owner"), QStringLiteral("forged"));
+        QVERIFY(!fitPreviewRequest(record));
+        record.remove(QStringLiteral("owner"));
+        record.insert(QStringLiteral("expectedRevision"), 2.5);
+        QVERIFY(!fitPreviewRequest(record));
+        record.insert(QStringLiteral("expectedRevision"), 2);
+        record.insert(QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 1601}, {QStringLiteral("height"), 900}});
+        QVERIFY(!fitPreviewRequest(record));
+        record.insert(QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 1600}, {QStringLiteral("height"), 900}});
+        record.insert(QStringLiteral("relations"), QJsonArray{
+            QJsonObject{{QStringLiteral("parent"), QStringLiteral("o-1")},
+                {QStringLiteral("child"), QStringLiteral("o-2")},
+                {QStringLiteral("edge"), QStringLiteral("right")}, {QStringLiteral("offset"), 100}},
+            QJsonObject{{QStringLiteral("parent"), QStringLiteral("o-3")},
+                {QStringLiteral("child"), QStringLiteral("o-2")},
+                {QStringLiteral("edge"), QStringLiteral("below")}, {QStringLiteral("offset"), 0}}});
+        QVERIFY(!fitPreviewRequest(record));
+    }
+
     void strictCommitAndCorrelatedPreviewReply()
     {
         QJsonObject commit{{QStringLiteral("type"), QStringLiteral("topology-commit")}, {QStringLiteral("v"), 1},
