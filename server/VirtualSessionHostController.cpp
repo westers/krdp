@@ -332,6 +332,20 @@ bool VirtualSessionHostController::prepareEndpoint(quint32 uid, const VirtualSes
         if (frame.monitors.size() != 1 || frame.monitors.first().geometry != QRect(QPoint(0, 0), frame.size)
             || monitor.geometry.topLeft() != QPoint(0, 0)
             || !WorkspaceFrameGeometry::matches(frame.size, monitor.geometry.size(), monitor.scale)) return;
+        const RemoteTopologyCatalog::Output observed{
+            .backendKey = monitor.name,
+            .name = monitor.name,
+            .nativePixels = frame.size,
+            .logicalGeometry = monitor.geometry,
+            .scale = monitor.scale,
+            .enabled = true,
+            .primary = monitor.primary,
+            .physical = false,
+            .owner = entry->handle.id,
+        };
+        // A capture frame proves the one-output layout currently served by
+        // this backend. Retained multi-output remains unsupported here.
+        if (!entry->topology.observe({observed})) return;
         m_supervisor.captureReady(entry->handle);
     });
     m_workers.insert_or_assign(handle.id, std::move(worker));

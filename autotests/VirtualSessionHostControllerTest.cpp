@@ -643,6 +643,7 @@ private Q_SLOTS:
         const auto child = guardian.processId();
         QVERIFY(child > 0);
         VirtualSessionRegistry::Handle oldHandle;
+        QString oldTopologyGeneration;
         for (int attempt = 0; attempt < 2; ++attempt) {
             journal.reset();
             journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr);
@@ -690,12 +691,28 @@ private Q_SLOTS:
             worker.write(ConsoleWorkerWire::frame(frame));
             QVERIFY(worker.waitForBytesWritten(1000));
             QTRY_COMPARE(host.m_supervisor.list(getuid()).first().phase, VirtualSessionState::Phase::Retained);
+            const auto &topology = workerState.topology.snapshot();
+            QVERIFY(workerState.topology.observed());
+            QCOMPARE(topology.revision, quint64(1));
+            QCOMPARE(topology.outputs.size(), 1);
+            QCOMPARE(topology.outputs.first().output.logicalGeometry, QRect(0, 0, 1280, 720));
+            QCOMPARE(topology.outputs.first().output.nativePixels, QSize(1280, 720));
+            if (attempt) QVERIFY(topology.generation != oldTopologyGeneration);
+            oldTopologyGeneration = topology.generation;
             const auto handle = host.m_supervisor.attach(getuid(), record.session, 1);
             QVERIFY(handle);
             if (attempt) {
                 QVERIFY(handle->manager != oldHandle.manager);
             }
             oldHandle = *handle;
+            const auto stableId = topology.outputs.first().id;
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Outputs{{
+                {QStringLiteral("Virtual-1"), QRect(0, 0, 1024, 576), 1.25, true}}}));
+            worker.write(ConsoleWorkerWire::frame(frame));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(workerState.topology.snapshot().revision, quint64(2));
+            QCOMPARE(workerState.topology.snapshot().outputs.first().id, stableId);
+            QCOMPARE(workerState.topology.snapshot().outputs.first().output.logicalGeometry, QRect(0, 0, 1024, 576));
             QVERIFY(host.m_supervisor.disconnect(*handle, 1));
             QCOMPARE(guardian.processId(), child);
         }

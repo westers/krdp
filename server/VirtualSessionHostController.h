@@ -3,6 +3,7 @@
 #include "VirtualSessionTransport.h"
 #include "VirtualSessionBrokerLease.h"
 #include "VirtualSessionJournal.h"
+#include "RemoteTopologyCatalog.h"
 #include <Server.h>
 
 namespace KRdp
@@ -49,6 +50,7 @@ private:
         std::unique_ptr<VirtualSessionBrokerLease> lease; // destroyed after endpoint
         std::unique_ptr<ConsoleWorkerEndpoint> endpoint;
         ConsoleWorkerWire::Outputs outputs;
+        RemoteTopologyCatalog topology;
     };
     std::optional<VirtualSessionSupervisor::Launch> prepare(quint32 uid, const VirtualSessionRegistry::Handle &handle);
     bool prepareEndpoint(quint32 uid, const VirtualSessionRegistry::Handle &handle, const QString &socket, const QByteArray &token,
