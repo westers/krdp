@@ -33,6 +33,7 @@
 #include "ConsoleMicrophoneSession.h"
 #include "CaptureWorkerMode.h"
 #include "RetainedMultiCapture.h"
+#include "RetainedMultiInput.h"
 
 using namespace KRdp;
 
@@ -521,24 +522,22 @@ private:
                     || (m_multiMode && !m_multiReady)) {
                     continue;
                 }
-                if (const auto event = eventFor(*input)) {
+                const auto mapped = m_multiMode
+                    ? RetainedMultiInput::toCompositor(*input, m_wireAtlas, m_logicalOutputs, m_workspaceOrigin)
+                    : std::optional(*input);
+                if (!mapped) continue;
+                if (const auto event = eventFor(*mapped)) {
                     if (m_multiMode) {
                         auto *session = multiInputSession();
                         if (!session) continue;
-                        if (input->type == ConsoleWorkerWire::Input::Type::Mouse && input->eventType == QEvent::MouseMove) {
-                            const QPointF logical = RemoteMonitorGeometry::wireToLogical(input->position, m_wireAtlas, m_logicalOutputs)
-                                + QPointF(m_workspaceOrigin);
-                            const auto motion = std::make_shared<QMouseEvent>(QEvent::MouseMove, logical, QPointF{},
-                                input->button, input->buttons, Qt::NoModifier);
-                            session->sendGlobalEvent(motion);
-                        } else session->sendGlobalEvent(event);
+                        session->sendGlobalEvent(event);
                     } else {
                         if (input->type == ConsoleWorkerWire::Input::Type::Mouse && input->eventType == QEvent::MouseMove) {
                             m_takeover.injected(m_session.mapToGlobal(input->position).toPoint(), m_clock.elapsed());
                         }
                         m_session.sendEvent(event);
                     }
-                    m_inputState.record(*input);
+                    m_inputState.record(*mapped);
                     continue;
                 }
             }
