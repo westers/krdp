@@ -159,6 +159,13 @@ public:
             finishPosition(QStringLiteral("post-position capture timed out"));
             m_socket.disconnectFromServer(); // No stale video/input after an unverified mutation.
         });
+        m_addDeadline.setSingleShot(true);
+        m_addDeadline.setInterval(15000);
+        connect(&m_addDeadline, &QTimer::timeout, this, [this] {
+            if (!m_addPending) return;
+            finishAdd(QStringLiteral("virtual output creation/readback timed out"));
+            m_socket.disconnectFromServer(); // The creator is released as the worker exits.
+        });
         connect(&m_session, &AbstractSession::streamActiveChanged, this, [this](bool active) {
             if (m_mode.virtualSession) m_virtualResize.captureStateChanged(m_virtualCaptureEpoch, active);
             if (active && !m_captureReady) {
@@ -349,6 +356,65 @@ private:
         if (!m_mode.virtualSession || m_stopping) return;
         const auto screens = qGuiApp->screens();
         for (auto *screen : screens) watchScreen(screen);
+        if (m_addPending) {
+            if (!m_control.active || m_control.generation != m_addPending->generation) {
+                finishAdd(QStringLiteral("virtual output authority changed during creation"));
+                m_socket.disconnectFromServer();
+                return;
+            }
+            const auto current = readKScreen();
+            if (!current || current->outputs.size() == m_addBefore.outputs.size()) {
+                m_multiSettle.start(200); // KWin has not exposed the new output yet.
+                return;
+            }
+            if (!addMatches(*current, false)) {
+                finishAdd(QStringLiteral("virtual output changed the existing compositor layout"));
+                m_socket.disconnectFromServer();
+                return;
+            }
+            if (!m_addPlaced) {
+                const auto &request = *m_addPending;
+                const auto created = std::find_if(current->outputs.cbegin(), current->outputs.cend(), [&request](const auto &output) {
+                    return output.backendKey == request.output;
+                });
+                if (created == current->outputs.cend()) {
+                    finishAdd(QStringLiteral("new virtual output was not found"));
+                    m_socket.disconnectFromServer();
+                    return;
+                }
+                if (created->logicalGeometry.topLeft() != request.globalLogical) {
+                    const auto arguments = RetainedKScreenReadback::positionArguments(*current,
+                        {{request.output, request.globalLogical}});
+                    if (!arguments) {
+                        finishAdd(QStringLiteral("invalid new-output position"));
+                        m_socket.disconnectFromServer();
+                        return;
+                    }
+                    QProcess command;
+                    command.start(QStringLiteral("kscreen-doctor"), *arguments);
+                    const bool finished = command.waitForStarted(1000) && command.waitForFinished(3000);
+                    if (!finished) { command.kill(); command.waitForFinished(1000); }
+                    const auto positioned = readKScreen();
+                    if (!finished || command.exitStatus() != QProcess::NormalExit || command.exitCode() != 0
+                        || !positioned || !addMatches(*positioned, true)) {
+                        finishAdd(QStringLiteral("new virtual output position did not land"));
+                        m_socket.disconnectFromServer();
+                        return;
+                    }
+                }
+                m_addPlaced = true;
+            }
+            if (!addMatches(*current, true)) {
+                m_multiSettle.start(200); // KScreen accepted a move; QScreen may still be catching up.
+                return;
+            }
+            const bool screensAgree = std::all_of(current->outputs.cbegin(), current->outputs.cend(), [&screens](const auto &output) {
+                return std::any_of(screens.cbegin(), screens.cend(), [&output](const auto *screen) {
+                    return screen->name() == output.backendKey && screen->geometry() == output.logicalGeometry;
+                });
+            });
+            if (!screensAgree) { m_multiSettle.start(200); return; }
+        }
         if (screens.size() < 2) {
             if (m_multiMode) {
                 releaseInput();
@@ -433,6 +499,12 @@ private:
                 m_socket.disconnectFromServer();
                 return;
             }
+            if (m_addPending && (!m_addPlaced || !addMatches(*kscreen, true)
+                || !m_control.active || m_control.generation != m_addPending->generation)) {
+                finishAdd(QStringLiteral("created output differs from preview after captured readback"));
+                m_socket.disconnectFromServer();
+                return;
+            }
             qInfo() << "Retained KScreen readback confirmed" << kscreen->outputs.size() << "independent captured outputs";
             m_outputs = result.outputs;
             m_multiPublishedFrames = result.frames;
@@ -463,6 +535,7 @@ private:
                 finishPosition(QStringLiteral("position changed or authority lost during capture"));
             } else finishPosition({});
         }
+        if (result.becameReady && m_addPending) finishAdd({});
     }
 
     std::optional<RetainedKScreenReadback::Snapshot> readKScreen() const
@@ -476,6 +549,81 @@ private:
         }
         return finished && readback.exitStatus() == QProcess::NormalExit && readback.exitCode() == 0
             ? RetainedKScreenReadback::parse(readback.readAllStandardOutput(), m_sessionId) : std::nullopt;
+    }
+
+    bool addMatches(const RetainedKScreenReadback::Snapshot &current, bool position) const
+    {
+        if (!m_addPending || current.outputs.size() != m_addBefore.outputs.size() + 1) return false;
+        for (const auto &old : m_addBefore.outputs) {
+            const auto found = std::find_if(current.outputs.cbegin(), current.outputs.cend(), [&old](const auto &output) {
+                return output.backendKey == old.backendKey;
+            });
+            if (found == current.outputs.cend() || found->nativePixels != old.nativePixels
+                || found->logicalGeometry != old.logicalGeometry || found->primary != old.primary
+                || !VirtualResize::sameScale(found->scale, old.scale)) return false;
+        }
+        const auto &request = *m_addPending;
+        const auto created = std::find_if(current.outputs.cbegin(), current.outputs.cend(), [&request](const auto &output) {
+            return output.backendKey == request.output;
+        });
+        return created != current.outputs.cend() && !created->primary && created->nativePixels == request.pixels
+            && VirtualResize::sameScale(created->scale, request.scale)
+            && (!position || created->logicalGeometry.topLeft() == request.globalLogical);
+    }
+
+    void finishAdd(const QString &error)
+    {
+        if (!m_addPending) return;
+        const auto request = *m_addPending;
+        m_addPending.reset();
+        m_addDeadline.stop();
+        m_addPlaced = false;
+        if (error.isEmpty()) m_ownedCreators.push_back(std::move(m_addCreator));
+        m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::AddVirtualResult{request.requestId, request.generation, error}));
+    }
+
+    void addVirtual(const ConsoleWorkerWire::AddVirtual &request)
+    {
+        const auto reject = [this, &request](const QString &error) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::AddVirtualResult{request.requestId, request.generation, error}));
+        };
+        if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
+            || m_control.generation != request.generation || m_positionPending || m_addPending
+            || m_multiPublishedFrames.size() < 2) {
+            reject(QStringLiteral("virtual output creation unavailable or not authorized"));
+            return;
+        }
+        const auto before = readKScreen();
+        if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)
+            || before->outputs.size() >= before->maxActiveOutputs || before->outputs.size() >= 16
+            || std::any_of(before->outputs.cbegin(), before->outputs.cend(), [&request](const auto &output) {
+                return output.backendKey == request.output;
+            })) {
+            reject(QStringLiteral("fresh compositor readback or output limit refused creation"));
+            return;
+        }
+        releaseInput();
+        m_multiReady = false;
+        m_multiPublishedFrames.clear();
+        m_addBefore = *before;
+        m_addPending = request;
+        m_addPlaced = false;
+        m_addDeadline.start();
+        m_addCreator = std::make_unique<PlasmaScreencastV1Session>();
+        m_addCreator->setVirtualMonitor(VirtualMonitor{request.output.mid(8), request.pixels, request.scale});
+        m_addCreator->setVideoCodec(VideoCodec::Avc420);
+        connect(m_addCreator.get(), &AbstractSession::error, this, [this] {
+            if (!m_addPending) return;
+            finishAdd(QStringLiteral("KWin rejected virtual output creation"));
+            m_socket.disconnectFromServer();
+        });
+        connect(m_addCreator.get(), &AbstractSession::virtualOutputUnresolved, this, [this] {
+            if (!m_addPending) return;
+            finishAdd(QStringLiteral("new KWin output did not resolve"));
+            m_socket.disconnectFromServer();
+        });
+        m_addCreator->setStreamingEnabled(true);
+        m_multiSettle.start(200);
     }
 
     void finishPosition(const QString &error)
@@ -493,7 +641,7 @@ private:
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionResult{request.requestId, request.generation, error}));
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
-            || !m_control.active || m_control.generation != request.generation || m_positionPending) {
+            || !m_control.active || m_control.generation != request.generation || m_positionPending || m_addPending) {
             reject(QStringLiteral("position unavailable or not authorized"));
             return;
         }
@@ -614,6 +762,10 @@ private:
                 else m_resize.request(*request);
                 continue;
             }
+            if (const auto request = ConsoleWorkerWire::addVirtual(*record)) {
+                addVirtual(*request);
+                continue;
+            }
             if (const auto request = ConsoleWorkerWire::position(*record)) {
                 position(*request);
                 continue;
@@ -697,6 +849,12 @@ private:
     QTimer m_multiSettle;
     QTimer m_positionDeadline;
     std::optional<ConsoleWorkerWire::Position> m_positionPending;
+    QTimer m_addDeadline;
+    std::optional<ConsoleWorkerWire::AddVirtual> m_addPending;
+    RetainedKScreenReadback::Snapshot m_addBefore;
+    std::unique_ptr<PlasmaScreencastV1Session> m_addCreator;
+    std::vector<std::unique_ptr<PlasmaScreencastV1Session>> m_ownedCreators;
+    bool m_addPlaced = false;
     QVector<VideoFrame> m_multiPublishedFrames;
     quint64 m_multiEpoch = 0;
     quint8 m_multiQuality = 80;

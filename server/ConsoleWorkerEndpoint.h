@@ -48,6 +48,7 @@ public:
     bool sendMicrophoneAudio(const ConsoleWorkerWire::MicrophoneAudio &audio);
     bool resize(const ConsoleWorkerWire::Resize &request);
     bool position(const ConsoleWorkerWire::Position &request);
+    bool addVirtual(const ConsoleWorkerWire::AddVirtual &request);
 
 Q_SIGNALS:
     void workerReady(const KRdp::ConsoleHandoff::Target &target);
@@ -59,6 +60,7 @@ Q_SIGNALS:
     void localTakeover(quint64 generation);
     void resizeFinished(const KRdp::ConsoleWorkerWire::ResizeResult &result);
     void positionFinished(const KRdp::ConsoleWorkerWire::PositionResult &result);
+    void addVirtualFinished(const KRdp::ConsoleWorkerWire::AddVirtualResult &result);
     void microphoneFinished(const KRdp::ConsoleWorkerWire::MicrophoneResult &result);
     void protocolError(const QString &message);
 

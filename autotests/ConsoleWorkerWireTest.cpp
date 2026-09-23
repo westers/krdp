@@ -26,7 +26,36 @@ private Q_SLOTS:
     void videoQualityIsBoundedAndGenerationScoped();
     void microphoneRecordsAreBoundedAndCorrelated();
     void positionRecordsAreBoundedAndCorrelated();
+    void addVirtualRecordsAreBoundedAndCorrelated();
 };
+
+void ConsoleWorkerWireTest::addVirtualRecordsAreBoundedAndCorrelated()
+{
+    Deframer reader;
+    const AddVirtual request{7, 9, QStringLiteral("Virtual-krdp-new"), QSize(960, 540), 1.25, QPoint(2560, 100)};
+    const AddVirtualResult answer{7, 9, QStringLiteral("capture failed")};
+    reader.feed(frame(request) + frame(answer));
+    const auto first = reader.next();
+    QVERIFY(first);
+    QCOMPARE(addVirtual(*first), std::optional<AddVirtual>(request));
+    auto truncated = *first;
+    truncated.payload.chop(1);
+    QVERIFY(!addVirtual(truncated));
+    const auto second = reader.next();
+    QVERIFY(second);
+    QCOMPARE(addVirtualResult(*second), std::optional<AddVirtualResult>(answer));
+    for (const auto &invalid : {AddVirtual{0, 9, request.output, request.pixels, 1, request.globalLogical},
+                                AddVirtual{7, 9, QStringLiteral("DP-1"), request.pixels, 1, request.globalLogical},
+                                AddVirtual{7, 9, QStringLiteral("Virtual-../bad"), request.pixels, 1, request.globalLogical},
+                                AddVirtual{7, 9, request.output, QSize(8192, 540), 1, request.globalLogical},
+                                AddVirtual{7, 9, request.output, request.pixels, 0.5, request.globalLogical},
+                                AddVirtual{7, 9, request.output, request.pixels, 1, QPoint(-32769, 0)}}) {
+        reader.feed(frame(invalid));
+        const auto bad = reader.next();
+        QVERIFY(bad);
+        QVERIFY(!addVirtual(*bad));
+    }
+}
 
 void ConsoleWorkerWireTest::positionRecordsAreBoundedAndCorrelated()
 {

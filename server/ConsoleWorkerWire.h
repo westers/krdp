@@ -47,6 +47,8 @@ enum class Kind : quint8 {
     MicrophoneAudio,
     Position,
     PositionResult,
+    AddVirtual,
+    AddVirtualResult,
 };
 
 struct Record {
@@ -87,6 +89,73 @@ struct PositionResult {
     QString error; // Empty only after fresh KScreen readback and captured keyframes.
     bool operator==(const PositionResult &) const = default;
 };
+
+struct AddVirtual {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString output; // Full, unique compositor name, prefixed Virtual-.
+    QSize pixels;
+    double scale = 1;
+    QPoint globalLogical;
+    bool operator==(const AddVirtual &) const = default;
+};
+
+struct AddVirtualResult {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString error; // Empty only after independent KScreen and all new encoded keyframes agree.
+    bool operator==(const AddVirtualResult &) const = default;
+};
+
+inline QByteArray frame(const AddVirtual &request)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << request.requestId << request.generation << request.output << request.pixels << request.scale << request.globalLogical;
+    return frame(Kind::AddVirtual, payload);
+}
+
+inline std::optional<AddVirtual> addVirtual(const Record &record)
+{
+    if (record.kind != Kind::AddVirtual || record.payload.size() > 512) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    AddVirtual request;
+    stream >> request.requestId >> request.generation >> request.output >> request.pixels >> request.scale >> request.globalLogical;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !request.requestId || !request.generation
+        || !request.output.startsWith(QStringLiteral("Virtual-")) || request.output.size() <= 8 || request.output.size() > 128
+        || request.pixels.width() < 320 || request.pixels.width() > 4096
+        || request.pixels.height() < 200 || request.pixels.height() > 4096
+        || !std::isfinite(request.scale) || request.scale < 1 || request.scale > 4
+        || request.globalLogical.x() < -32768 || request.globalLogical.x() > 32768
+        || request.globalLogical.y() < -32768 || request.globalLogical.y() > 32768) return {};
+    for (const auto character : request.output) {
+        if (!character.isLetterOrNumber() && character != QLatin1Char('-') && character != QLatin1Char('_')) return {};
+    }
+    return request;
+}
+
+inline QByteArray frame(const AddVirtualResult &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.requestId << result.generation << result.error;
+    return frame(Kind::AddVirtualResult, payload);
+}
+
+inline std::optional<AddVirtualResult> addVirtualResult(const Record &record)
+{
+    if (record.kind != Kind::AddVirtualResult || record.payload.size() > 4096) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    AddVirtualResult result;
+    stream >> result.requestId >> result.generation >> result.error;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
+        || result.error.size() > 1024) return {};
+    return result;
+}
 
 inline QByteArray frame(const Position &request)
 {
@@ -526,7 +595,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::PositionResult)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::AddVirtualResult)) {
             ++m_invalid;
             return std::nullopt;
         }
