@@ -5,6 +5,9 @@
 
 #include "RemoteTopologyCatalog.h"
 #include "RemoteMonitorGeometry.h"
+#include "ConsoleWorkerWire.h"
+#include "H264KeyframeSize.h"
+#include "VirtualResize.h"
 
 #include <algorithm>
 #include <cmath>
@@ -116,6 +119,39 @@ inline std::optional<Snapshot> parse(const QByteArray &json, const QString &auth
     if (primary != 1) return {};
     std::sort(result.outputs.begin(), result.outputs.end(), [](const auto &a, const auto &b) { return a.backendKey < b.backendKey; });
     return result;
+}
+
+// The separately queried KScreen inventory must agree with EVERY worker
+// output and independently decodable initial keyframe before the broker may
+// publish a new retained multi-output topology. Worker geometry is normalized
+// to the workspace; KScreen positions remain compositor-global.
+inline bool matchesPublished(const Snapshot &readback, const ConsoleWorkerWire::Outputs &worker,
+    const QVector<VideoFrame> &keyframes)
+{
+    if (readback.outputs.size() < 2 || readback.outputs.size() != worker.monitors.size()
+        || worker.monitors.size() != keyframes.size()) return false;
+    QRect workspace;
+    for (const auto &output : readback.outputs) workspace |= output.logicalGeometry;
+    QSet<QString> matched;
+    QSet<int> frameIndexes;
+    for (qsizetype i = 0; i < worker.monitors.size(); ++i) {
+        const auto &published = worker.monitors[i];
+        if (matched.contains(published.name)) return false;
+        const auto it = std::find_if(readback.outputs.cbegin(), readback.outputs.cend(), [&published](const auto &output) {
+            return output.backendKey == published.name;
+        });
+        if (it == readback.outputs.cend() || published.geometry != it->logicalGeometry.translated(-workspace.topLeft())
+            || !VirtualResize::sameScale(published.scale, it->scale) || published.primary != it->primary) return false;
+        matched.insert(published.name);
+        const auto frame = std::find_if(keyframes.cbegin(), keyframes.cend(), [i](const auto &packet) {
+            return packet.monitorIndex == i;
+        });
+        if (frame == keyframes.cend() || frameIndexes.contains(frame->monitorIndex)
+            || !frame->isKeyFrame || frame->size != it->nativePixels
+            || h264KeyframeSize(frame->data) != it->nativePixels) return false;
+        frameIndexes.insert(frame->monitorIndex);
+    }
+    return matched.size() == readback.outputs.size() && frameIndexes.size() == keyframes.size();
 }
 
 struct Placement {

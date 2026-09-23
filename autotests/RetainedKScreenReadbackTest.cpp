@@ -36,6 +36,13 @@ std::optional<Snapshot> decoded(const QJsonObject &object)
 {
     return parse(QJsonDocument(object).toJson(), QStringLiteral("lease-1"));
 }
+
+QByteArray keyframe()
+{
+    QFile file(QFINDTESTDATA("data/virtual-fit/1280x720.h264"));
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    return file.readAll();
+}
 }
 
 class RetainedKScreenReadbackTest : public QObject
@@ -60,6 +67,34 @@ private Q_SLOTS:
         QVERIFY(!positionArguments(*state, {{QStringLiteral("DP-1"), QPoint(0, 0)}}));
         QVERIFY(!positionArguments(*state, {{QStringLiteral("Virtual-1"), QPoint(0, 0)},
             {QStringLiteral("Virtual-1"), QPoint(0, 0)}}));
+    }
+
+    void independentReadbackMustAgreeWithBothDecodedCaptures()
+    {
+        const auto state = decoded(root());
+        QVERIFY(state);
+        const auto data = keyframe();
+        QVERIFY(!data.isEmpty());
+        KRdp::ConsoleWorkerWire::Outputs worker{{
+            {QStringLiteral("Virtual-0"), QRect(0, 0, 1024, 576), 1.25, true},
+            {QStringLiteral("Virtual-1"), QRect(1024, 100, 1280, 720), 1.0, false},
+        }};
+        KRdp::VideoFrame first;
+        first.monitorIndex = 0;
+        first.size = QSize(1280, 720);
+        first.data = data;
+        first.isKeyFrame = true;
+        auto second = first;
+        second.monitorIndex = 1;
+        QVERIFY(matchesPublished(*state, worker, {first, second}));
+        worker.monitors[1].geometry.moveTo(1025, 100);
+        QVERIFY(!matchesPublished(*state, worker, {first, second}));
+        worker.monitors[1].geometry.moveTo(1024, 100);
+        second.size = QSize(1600, 900);
+        QVERIFY(!matchesPublished(*state, worker, {first, second}));
+        second.size = QSize(1280, 720);
+        second.data = QByteArrayLiteral("fake-keyframe");
+        QVERIFY(!matchesPublished(*state, worker, {first, second}));
     }
 
     void refusesAmbiguousOrUnsupportedReadback()

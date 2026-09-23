@@ -16,6 +16,7 @@
 #include <QKeyEvent>
 #include <QLocalSocket>
 #include <QMouseEvent>
+#include <QProcess>
 #include <QScreen>
 #include <QTimer>
 #include <QWheelEvent>
@@ -34,6 +35,7 @@
 #include "CaptureWorkerMode.h"
 #include "RetainedMultiCapture.h"
 #include "RetainedMultiInput.h"
+#include "RetainedKScreenReadback.h"
 
 using namespace KRdp;
 
@@ -406,6 +408,30 @@ private:
             for (const auto &session : m_multiSessions) session->requestKeyFrame();
         }
         if (result.becameReady) {
+            // QScreen and encoded packets agree, but neither is an independent
+            // compositor configuration readback. Query KScreen from THIS
+            // private worker runtime before publishing the inventory. A failed
+            // query/mismatch must not masquerade as topology success.
+            QProcess readback;
+            readback.setProgram(QStringLiteral("kscreen-doctor"));
+            readback.setArguments({QStringLiteral("-j")});
+            readback.start();
+            const bool started = readback.waitForStarted(1000);
+            const bool finished = started && readback.waitForFinished(3000);
+            if (!finished) {
+                readback.kill();
+                readback.waitForFinished(1000);
+            }
+            const auto kscreen = finished && readback.exitStatus() == QProcess::NormalExit && readback.exitCode() == 0
+                ? RetainedKScreenReadback::parse(readback.readAllStandardOutput(), m_sessionId) : std::nullopt;
+            if (!kscreen || !RetainedKScreenReadback::matchesPublished(*kscreen, result.outputs, result.frames)) {
+                qWarning() << "Retained KScreen readback did not match all captured outputs";
+                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error,
+                    QByteArrayLiteral("retained compositor readback/capture mismatch")));
+                m_socket.disconnectFromServer();
+                return;
+            }
+            qInfo() << "Retained KScreen readback confirmed" << kscreen->outputs.size() << "independent captured outputs";
             m_outputs = result.outputs;
             m_wireAtlas = result.atlas;
             m_logicalOutputs.clear();
