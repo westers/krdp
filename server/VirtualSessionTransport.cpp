@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionTransport.h"
+#include "AudioPriority.h"
 #include <InputHandler.h>
 #include <VideoStream.h>
 #include <QScopeGuard>
+#include <QSignalBlocker>
 #include <limits>
 
 using namespace Qt::StringLiterals;
@@ -17,6 +19,8 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
       })
 {
     Q_ASSERT(client && connection);
+    connection->setAudioPriorityDefault(false);
+    connection->clearAudioPriorityOverride();
     connection->videoStream()->setCodecPreference(CodecPreference::Avc420);
     connection->videoStream()->setQualityCap(80);
     connection->videoStream()->setAdaptiveQuality(false);
@@ -135,7 +139,16 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         if (alive && m_connection && !reply.isEmpty()) m_connection->sendControlRecord(reply);
     }));
     m_controlGeneration = ++m_sequence;
+    // Capture the binding's generation at connection time, NOT delivery time:
+    // disconnect does not retract already queued signals from the RDP thread.
+    const auto generation = m_controlGeneration;
+    m_workerConnections.append(connect(m_connection->videoStream(), &VideoStream::requestedQualityChanged,
+        this, [this, generation](quint8 quality) {
+            forwardVideoQuality(generation, quality, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        }, Qt::QueuedConnection));
     endpoint->setControlState({m_controlGeneration, true});
+    if (!bindingCurrent()) return false;
+    endpoint->setVideoQuality({generation, 80});
     if (!bindingCurrent()) return false;
     m_session.setWorkerActive(true);
     if (!bindingCurrent()) return false;
@@ -152,11 +165,17 @@ void VirtualSessionTransport::revoke()
     if (m_revoking) return;
     const QPointer<VirtualSessionTransport> alive(this);
     m_revoking = true;
+    // Clear preference before any teardown signal can destroy this transport.
+    if (m_connection) {
+        m_connection->setAudioPriorityDefault(false);
+        m_connection->clearAudioPriorityOverride();
+    }
     // Invalidate local consent before dispatch, while the old endpoint is still
     // pinned. Nested requests/binds cannot acquire a replacement during revoke.
     stopMicrophone();
     if (!alive) return;
     const auto endpoint = m_endpoint;
+    const auto generation = m_controlGeneration;
     quint64 sequence = 0;
     if (endpoint) {
         if (m_sequence != std::numeric_limits<quint64>::max()) ++m_sequence;
@@ -171,7 +190,11 @@ void VirtualSessionTransport::revoke()
     m_silenceHost = false;
     m_controlGeneration = 0;
     if (endpoint) {
-        endpoint->setControlState({sequence, false});
+        // Reset the retained desktop encoder before withdrawing the old grant.
+        // Its generation prevents this reset affecting a replacement owner.
+        if (generation) endpoint->setVideoQuality({generation, 80});
+        if (!alive) return;
+        if (endpoint) endpoint->setControlState({sequence, false});
         if (!alive) return;
         if (endpoint) endpoint->setMedia({false, false});
         if (!alive) return;
@@ -179,11 +202,39 @@ void VirtualSessionTransport::revoke()
     m_session.setWorkerActive(false);
     if (!alive) return;
     if (m_connection) {
+        // The old worker was reset explicitly. Do not re-emit quality while
+        // tearing down (possibly from a quality callback deleting this object).
+        {
+            const QSignalBlocker quiet(m_connection->videoStream());
+            m_connection->videoStream()->setQualityCap(80);
+        }
+        if (!alive) return;
+        if (!m_connection) { m_revoking = false; return; }
         m_connection->setMediaPolicy(false, false, false);
         if (!alive) return;
         if (m_connection) m_connection->videoStream()->setEnabled(false); // discard old desktop frames
     }
     if (alive) m_revoking = false;
+}
+
+bool VirtualSessionTransport::forwardVideoQuality(quint64 generation, quint8 quality, std::optional<quint32> uid)
+{
+    if (!generation || generation != m_controlGeneration || !authorized(uid) || quality < 10 || quality > 100) return false;
+    // Off/final-audio-off also neutralizes a queued reduction from the same
+    // binding. Virtual desktops retain their fixed 80 cap outside priority.
+    const quint8 bounded = m_connection->audioPriorityActive() ? std::min<quint8>(quality, 80) : 80;
+    return m_endpoint->setVideoQuality({generation, bounded});
+}
+
+void VirtualSessionTransport::restoreFixedVideoQuality(std::optional<quint32> uid)
+{
+    if (!m_connection || m_connection->audioPriorityActive()) return;
+    const QPointer<VirtualSessionTransport> alive(this);
+    // Worker writes require current ownership. Local reset remains necessary
+    // after ownership/endpoint loss, but must never reset a replacement worker.
+    forwardVideoQuality(m_controlGeneration, 80, uid);
+    if (!alive || !m_connection || m_connection->audioPriorityActive()) return;
+    m_connection->videoStream()->setQualityCap(80); // May synchronously destroy/reenter this transport.
 }
 
 QJsonObject VirtualSessionTransport::mediaReply(bool ok, const QString &error) const
@@ -197,6 +248,13 @@ QJsonObject VirtualSessionTransport::mediaReply(bool ok, const QString &error) c
 
 void VirtualSessionTransport::stopMicrophone()
 {
+    stopMicrophone(m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+}
+
+void VirtualSessionTransport::stopMicrophone(std::optional<quint32> uid)
+{
+    const QPointer<VirtualSessionTransport> alive(this);
+    const bool wasPriority = m_connection && m_connection->audioPriorityActive();
     m_microphoneDeadline.stop();
     m_microphonePump.stop();
     const auto policy = m_microphonePolicy;
@@ -208,6 +266,7 @@ void VirtualSessionTransport::stopMicrophone()
     if (policy.enabled && m_endpoint && m_nextMicrophoneId != std::numeric_limits<quint64>::max()) {
         m_endpoint->setMicrophone({policy.generation, ++m_nextMicrophoneId, false});
     }
+    if (alive && wasPriority) restoreFixedVideoQuality(uid);
 }
 
 QJsonObject VirtualSessionTransport::microphoneResult(const ConsoleWorkerWire::MicrophoneResult &result,
@@ -218,7 +277,7 @@ QJsonObject VirtualSessionTransport::microphoneResult(const ConsoleWorkerWire::M
     const QPointer<VirtualSessionTransport> alive(this);
     if (!authorized(uid) || !result.error.isEmpty()) {
         const QString error = result.error.isEmpty() ? u"virtual microphone authority changed"_s : result.error;
-        stopMicrophone();
+        stopMicrophone(uid);
         return alive ? mediaReply(false, error) : QJsonObject{};
     }
     if (m_microphoneReady) return {};
@@ -292,6 +351,25 @@ void VirtualSessionTransport::deliverControlRecord(const QJsonObject &record, st
 QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::optional<quint32> uid)
 {
     if (m_revoking) return {};
+    if (record.value(u"type"_s) == u"audio-priority"_s) {
+        const auto parsed = AudioPriority::parse(record);
+        if (!parsed) return AudioPriority::reply(record, false, u"invalid audio-priority request"_s);
+        if (!authorized(uid)) return AudioPriority::reply(record, false, u"only the authenticated attached virtual owner may change audio priority"_s);
+        const QPointer<VirtualSessionTransport> alive(this);
+        const auto generation = m_controlGeneration;
+        m_connection->setAudioPriority(parsed->enabled);
+        const bool effective = m_connection->audioPriorityActive();
+        if (!effective) {
+            // Immediate restore; do not wait for another desktop frame.
+            forwardVideoQuality(m_controlGeneration, 80, uid);
+            if (!alive || !m_connection) return {};
+            m_connection->videoStream()->setQualityCap(80);
+            if (!alive || !m_connection) return {};
+        }
+        if (generation != m_controlGeneration || !authorized(uid))
+            return AudioPriority::reply(record, false, u"virtual desktop authority changed"_s);
+        return AudioPriority::reply(record, effective);
+    }
     if (record.value(u"type"_s) == u"virtual-session"_s) {
         const QPointer<VirtualSessionTransport> alive(this);
         if (!m_control) return {};
@@ -301,7 +379,10 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
             const auto handle = m_control->attachment(m_client);
             const bool bound = bind();
             if (!alive || !m_control || !m_connection) return {};
-            if (bound && handle && attachmentMatches(*handle) && authorized()) return response;
+            if (bound && handle && attachmentMatches(*handle) && authorized()) {
+                response.insert(u"audioPriority"_s, true);
+                return response;
+            }
             // A callback may have attached a different desktop. Do not detach
             // that replacement while refusing the stale attach acknowledgement.
             if (handle && attachmentMatches(*handle)) closed();
@@ -336,10 +417,11 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         // A refused update must not report playback off while continuing the
         // previous stream. Revoke this connection even after ownership loss,
         // but never change a worker now belonging to another attachment.
-        stopMicrophone();
+        stopMicrophone(uid);
         if (!alive || !m_connection) return {};
         // Socket failure during source-off can synchronously revoke the binding.
         if (ownsDesktop && !bindingCurrent()) return mediaReply(false, u"virtual desktop authority changed"_s);
+        const bool wasPriority = m_connection->audioPriorityActive();
         m_playback = accepted && playback.toBool();
         m_silenceHost = m_playback && silence.toBool();
         if (m_connection) {
@@ -350,6 +432,10 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         }
         if (ownsDesktop && m_endpoint) {
             m_endpoint->setMedia({m_playback, m_silenceHost});
+            if (!alive || !m_connection) return {};
+        }
+        if (wasPriority) {
+            restoreFixedVideoQuality(uid);
             if (!alive || !m_connection) return {};
         }
         if (!accepted) return mediaReply(false, u"media requires an authenticated attached owner; camera unavailable"_s);

@@ -38,7 +38,10 @@ private:
     bool attachmentMatches(const VirtualSessionRegistry::Handle &handle) const;
     bool authorized() const;
     bool authorized(std::optional<quint32> uid) const;
+    bool forwardVideoQuality(quint64 generation, quint8 quality, std::optional<quint32> uid);
+    void restoreFixedVideoQuality(std::optional<quint32> uid);
     void stopMicrophone();
+    void stopMicrophone(std::optional<quint32> uid);
     QJsonObject microphoneResult(const ConsoleWorkerWire::MicrophoneResult &, std::optional<quint32> uid);
     QJsonObject microphoneTimeout();
     void pumpMicrophone();
