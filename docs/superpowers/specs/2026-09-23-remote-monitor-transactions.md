@@ -60,6 +60,16 @@ at exactly one new revision; a metadata-only result fails `partial`. Client
 reflow check before Apply. No visual Fit/Match control, native Sol/Buzz Fit
 acceptance or release; default runtime capability remains off. The earlier
 sentence describing an unbound worker records the `bdb1803` stage only.
+Source `91ba30e` adds a bounded test-only native two-output managed-Fit probe;
+it has not run on Sol because the temporary GPU render grant is still absent.
+Source `0545b34` adds conditional worker failure recovery: fresh KScreen output
+values must each be the original or previewed result, with no unrelated
+geometry, mode, ownership or primary edits; only then does one command restore
+the selected mode/scale and dependent positions. An exact whole-layout plus
+mode readback is required before saying restoration succeeded. The worker
+still closes capture on failure. Local 68 selected non-maintenance server
+tests and Sol's focused readback test pass. Native failed-apply/rollback,
+revision refresh and GUI behavior remain unverified, so Fit stays private.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. Fit and mixed-operation
