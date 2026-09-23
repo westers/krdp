@@ -8,10 +8,11 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 3 && "$1" == --supervised-worker-nvidia ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 3 && "$1" == --supervised-worker-nvidia ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia ) ) ]]
     probe_mode="${1:-}"
     rdp_mode=
     probe_timeout=80
+    probe_output_count=1
     managed_runtime=
     managed_id=
     if [[ "$probe_mode" == --supervised-worker-nvidia ]]; then
@@ -27,8 +28,9 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         probe_mode=--plasma-nvidia
         probe_timeout=120
     fi
-    if [[ "$probe_mode" == --plasma-worker-nvidia ]]; then
-        rdp_mode=--worker
+    if [[ "$probe_mode" == --plasma-worker-nvidia || "$probe_mode" == --plasma-multi-worker-nvidia ]]; then
+        rdp_mode=$([[ "$probe_mode" == --plasma-multi-worker-nvidia ]] && printf '%s' --multi-worker || printf '%s' --worker)
+        [[ "$rdp_mode" != --multi-worker ]] || probe_output_count=2
         probe_mode=--plasma-nvidia
         probe_timeout=120
     fi
@@ -80,7 +82,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     fi
     mkdir "$probe_runtime/config" "$probe_runtime/cache" "$probe_runtime/state" "$probe_runtime/data"
     cp -r "$repo_path/scripts/virtual-probe-config/." "$probe_runtime/config/"
-    if [[ "$rdp_mode" == --worker || "$rdp_mode" == --supervised ]]; then
+    if [[ "$rdp_mode" == --worker || "$rdp_mode" == --multi-worker || "$rdp_mode" == --supervised ]]; then
         mkdir -p "$probe_runtime/data/applications"
         cp "$repo_path/build/server/org.kde.krdpvirtualprobe.desktop" "$probe_runtime/data/applications/org.kde.krdpconsoleworker.desktop"
     elif [[ -n "$rdp_mode" ]]; then
@@ -116,10 +118,12 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         --perms 01777 --dir /tmp/.X11-unix \
         --bind "$probe_runtime" "$probe_runtime" \
         dbus-run-session --config-file="$repo_path/server/virtual-session-bus.conf" \
-        -- bash "$script_path" --inside-private-bus "$probe_mode" "$rdp_mode" "$managed_id" \
+        -- bash "$script_path" --inside-private-bus "$probe_mode" "$rdp_mode" "$managed_id" "$probe_output_count" \
         >"$probe_runtime/probe.log" 2>&1
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
+expected_outputs=${5:-1}
+[[ $expected_outputs == 1 || ( $expected_outputs == 2 && ${3:-} == --multi-worker ) ]]
 # Populate this private profile's desktop-service identities before KWin checks
 # application permissions (including Spectacle's restricted screenshot API).
 kbuildsycoca6 --noincremental >"$XDG_RUNTIME_DIR/service-cache.log" 2>&1
@@ -177,7 +181,7 @@ done
 [[ "$ready" == true ]]
 compat_args=()
 [[ "${2:-}" != --plasma ]] || compat_args=(--xwayland)
-kwin_wayland_wrapper "${compat_args[@]}" --virtual --width 1280 --height 720 --output-count 1 \
+kwin_wayland_wrapper "${compat_args[@]}" --virtual --width 1280 --height 720 --output-count "$expected_outputs" \
     --no-global-shortcuts --no-kactivities >"$XDG_RUNTIME_DIR/kwin.log" 2>&1 &
 wrapper_pid=$!
 ready=false
@@ -245,8 +249,16 @@ if [[ "${2:-}" == --plasma ]]; then
 fi
 env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
     timeout 10 kscreen-doctor -j >"$XDG_RUNTIME_DIR/outputs.json"
-jq -e '.outputs | length == 1' "$XDG_RUNTIME_DIR/outputs.json"
-jq -e '.outputs[0] | .enabled == true and .size.width == 1280 and .size.height == 720' "$XDG_RUNTIME_DIR/outputs.json"
+jq -e --argjson count "$expected_outputs" '.outputs | length == $count' "$XDG_RUNTIME_DIR/outputs.json"
+jq -e 'all(.outputs[]; .enabled == true and .size.width == 1280 and .size.height == 720)' "$XDG_RUNTIME_DIR/outputs.json"
+if [[ $expected_outputs == 2 ]]; then
+    mapfile -t output_names < <(jq -r '.outputs[].name' "$XDG_RUNTIME_DIR/outputs.json")
+    [[ ${#output_names[@]} == 2 && ${output_names[0]} =~ ^Virtual-[0-9]+$ && ${output_names[1]} =~ ^Virtual-[0-9]+$ ]]
+    env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland timeout 10 kscreen-doctor \
+        "output.${output_names[0]}.position.0,0" "output.${output_names[1]}.position.1280,0"
+    env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland timeout 10 kscreen-doctor -j >"$XDG_RUNTIME_DIR/outputs.json"
+    jq -e '.outputs | map(.pos.x) | sort == [0,1280]' "$XDG_RUNTIME_DIR/outputs.json"
+fi
 timeout 5 pw-dump >"$XDG_RUNTIME_DIR/graph.json"
 jq -e '[.[] | select(.type == "PipeWire:Interface:Device")] | length == 0' "$XDG_RUNTIME_DIR/graph.json"
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
@@ -262,15 +274,17 @@ if [[ "${3:-}" == --supervised ]]; then
     while kill -0 "$plasma_pid" && kill -0 "$wrapper_pid"; do sleep 1; done
     exit 1
 fi
-if [[ "${3:-}" == --worker ]]; then
-    "$repo_path/build/bin/krdp-virtual-worker-probe" >"$XDG_RUNTIME_DIR/worker-probe.log" 2>&1
+if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker ]]; then
+    probe_args=()
+    [[ "${3:-}" != --multi-worker ]] || probe_args=(--multi)
+    "$repo_path/build/bin/krdp-virtual-worker-probe" "${probe_args[@]}" >"$XDG_RUNTIME_DIR/worker-probe.log" 2>&1
     # Stopping capture must leave the separate desktop alive and unchanged.
     kill -0 "$wrapper_pid"
     kill -0 "$plasma_pid"
     env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
         kscreen-doctor -j >"$XDG_RUNTIME_DIR/outputs-after-worker.json"
-    jq -e '.outputs | length == 1' "$XDG_RUNTIME_DIR/outputs-after-worker.json"
-    jq -e '.outputs[0] | .enabled == true and .size.width == 1280 and .size.height == 720' "$XDG_RUNTIME_DIR/outputs-after-worker.json"
+    jq -e --argjson count "$expected_outputs" '.outputs | length == $count' "$XDG_RUNTIME_DIR/outputs-after-worker.json"
+    jq -e 'all(.outputs[]; .enabled == true and .size.width == 1280 and .size.height == 720)' "$XDG_RUNTIME_DIR/outputs-after-worker.json"
 fi
 if [[ "${3:-}" == --rdp || "${3:-}" == --retention || "${3:-}" == --audio ]]; then
     acceptance_seconds=90

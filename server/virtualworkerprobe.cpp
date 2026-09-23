@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "ConsoleWorkerEndpoint.h"
+#include "H264KeyframeSize.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -7,6 +8,7 @@
 #include <QProcess>
 #include <QTemporaryFile>
 #include <QTimer>
+#include <QSet>
 #include <QUuid>
 #include <QDebug>
 #include <fcntl.h>
@@ -20,7 +22,8 @@ int main(int argc, char **argv)
     QCoreApplication app(argc, argv);
     const auto arguments = app.arguments();
     const bool managed = arguments.size() == 3 && arguments[1] == QStringLiteral("--managed-session");
-    if (arguments.size() != 1 && !managed) return 1;
+    const bool multi = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi");
+    if (arguments.size() != 1 && !managed && !multi) return 1;
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     const QFileInfo runtimeInfo(runtime);
     const QString prefix = managed ? QStringLiteral("/run/user/%1/krdp-virtual/").arg(getuid())
@@ -72,6 +75,7 @@ int main(int argc, char **argv)
                          QStringLiteral("--uid"), QString::number(getuid()), QStringLiteral("--token-fd"), QStringLiteral("0"),
                          QStringLiteral("--desktop-media")});
     bool captured = false;
+    QSet<int> capturedOutputs;
     bool resizeRefused = false;
     bool stopping = false;
     int result = 1;
@@ -90,16 +94,25 @@ int main(int argc, char **argv)
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, &app, [&](const auto &value) { outputs = value; });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::resizeFinished, &app, [&](const auto &value) {
         resizeRefused = value.requestId == 1 && value.generation == 1
-            && value.error == QStringLiteral("Physical-output resize is unavailable in a virtual session");
+            && value.error == (multi ? QStringLiteral("single-output Fit is unavailable with multiple remote monitors")
+                : QStringLiteral("Physical-output resize is unavailable in a virtual session"));
         maybeStop();
     });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::frameReceived, &app, [&](const VideoFrame &frame) {
+        const int expected = multi ? 2 : 1;
         if (!frame.isKeyFrame || frame.data.isEmpty() || frame.size != QSize(1280, 720)
-            || outputs.monitors.size() != 1 || outputs.monitors[0].geometry != QRect(0, 0, 1280, 720)) return;
-        QFile output(runtime + QStringLiteral("/worker-keyframe.h264"));
+            || h264KeyframeSize(frame.data) != frame.size || frame.monitorIndex < 0 || frame.monitorIndex >= expected
+            || outputs.monitors.size() != expected || frame.monitors.size() != expected) return;
+        for (int i = 0; i < expected; ++i) {
+            if (outputs.monitors[i].geometry != QRect(i * 1280, 0, 1280, 720)
+                || frame.monitors[i].geometry != QRect(i * 1280, 0, 1280, 720)) return;
+        }
+        QFile output(runtime + (multi ? QStringLiteral("/worker-keyframe-%1.h264").arg(frame.monitorIndex)
+                                      : QStringLiteral("/worker-keyframe.h264")));
         if (!output.open(QIODevice::WriteOnly) || output.write(frame.data) != frame.data.size()) return;
-        captured = true;
-        qInfo() << "Authenticated virtual worker keyframe" << frame.size << frame.data.size();
+        capturedOutputs.insert(frame.monitorIndex);
+        captured = capturedOutputs.size() == expected;
+        qInfo() << "Authenticated virtual worker keyframe" << frame.monitorIndex << frame.size << frame.data.size();
         maybeStop();
     });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::protocolError, &app, [&](const QString &message) {

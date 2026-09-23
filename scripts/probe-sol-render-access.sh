@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# User-started privileged envelope for the disposable Sol GPU probe only.
-# Never install this as a service or invoke it automatically from the agent.
+# Privileged envelope for an explicitly authorized disposable Sol GPU probe.
+# Never install this as a service or run it against a physical desktop.
 set -euo pipefail
-[[ $# == 0 && $EUID == 0 && "$(hostname -s)" == sol ]] || {
-    echo 'Run explicitly as root on Sol, with no arguments.' >&2
+[[ $# == 0 || ( $# == 1 && $1 == --multi-worker ) ]]
+[[ $EUID == 0 && "$(hostname -s)" == sol ]] || {
+    echo 'Run explicitly as root on Sol.' >&2
     exit 1
 }
 [[ "$(id -u westers)" == 1000 ]]
@@ -44,5 +45,11 @@ trap 'exit 143' TERM
 setfacl -n -m u:1000:rw "$node"
 # The graphical probe runs as the ordinary user, never as root. Its own
 # timeout is 80 seconds; this outer bound also covers wrapper startup/cleanup.
-timeout --kill-after=5 100 runuser -u westers -- \
-    bash /home/westers/dev/krdp/scripts/probe-virtual-compositor.sh --plasma-nvidia
+probe_mode=--plasma-nvidia
+probe_limit=100
+if [[ $# == 1 ]]; then
+    probe_mode=--plasma-multi-worker-nvidia
+    probe_limit=150
+fi
+timeout --kill-after=5 "$probe_limit" runuser -u westers -- \
+    bash /home/westers/dev/krdp/scripts/probe-virtual-compositor.sh "$probe_mode"
