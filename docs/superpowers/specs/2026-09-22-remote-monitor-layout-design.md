@@ -7,6 +7,12 @@ revisioned Preview/Apply. One or more retained virtual-output position moves,
 one new retained virtual output, or removal of one worker-added retained output
 is supported in source by the authenticated preview/commit backend; X/Y fields
 are an Advanced/test control. Batch moves have not passed native GUI acceptance.
+Client source `23b2ba8` also offers explicit left/right/above/below placement
+relative to another monitor. For an all-owned retained virtual arrangement,
+a left/above draft that would use a negative origin is shown as the equivalent
+nonnegative multi-output translation; it still requires Preview and Apply.
+Physical or unowned peers are never translated by this editor. Native acceptance
+of this normalization is still pending.
 Fit/Match, Console writes and deployment are still outstanding. A disposable 125%/100%
 Sol/Buzz GUI run also accepted one visual position move with two independently
 captured outputs; a later disposable GUI run added a third captured output by

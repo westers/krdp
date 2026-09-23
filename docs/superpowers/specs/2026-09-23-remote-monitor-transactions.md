@@ -47,8 +47,11 @@ Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. Fit and mixed-operation
 drafts remain absent; no Fit capability is advertised. Broker and worker must
-be built/deployed as a pair;
-the v4 bump intentionally rejects mixed-version worker sockets.
+be built/deployed as a pair; the v4 bump intentionally rejects mixed-version
+worker sockets. Client `23b2ba8` later adds relative edge placement and normalizes a negative
+all-owned virtual draft into visible nonnegative peer moves, with full build/29
+CTests passing. It does not claim native negative-origin KWin support or Console
+physical mutation.
 An additional disposable 125%/100% Sol/Buzz source-GUI run confirmed that the
 visual editor uses logical aspect/position and committed one virtual move from
 `(1024,100)` to `(1024,209)` with revision 1→2 and unchanged IDs. This does
