@@ -30,5 +30,42 @@ quality. A new binding starts at 80 and requires fresh preference/consent.
 
 Tests use private identity seams and authenticated fake-worker sockets for wire
 quality, policy changes, and stale-generation rejection. They do not authenticate
-PAM or prove adaptive behavior over a live congested network. No physical output,
-live microphone capture, host restart, or deployment is part of this slice.
+PAM or prove adaptive behavior over a live congested network. Live acceptance
+is recorded separately below.
+
+## Live acceptance (2026-09-22)
+
+Native Buzz client075b7d9 against Sol server4e2a83d passed playback-only and
+microphone-only priority toggles, same-desktop reconnect, synthetic microphone
+PCM capture, detach source removal and clean desktop stop. Bounded frame-ack
+delay triggered broker quality requests, but revealed that the CPU libx264
+backend ignored the generic global_quality field.
+
+Private KPipeWire183a140 (exported patch0024) fixes that backend by updating
+private CRF before the next encoded frame, preserving the existing mapping and
+default. Failed updates retain the previous working quality and permit an
+identical later request to retry. Producer quality snapshots are synchronized
+with setters and rollback. Nine headless CTests pass, including actual encoded
+packet reduction/recovery and eight encoder Qt cases; the display-dependent
+media monitor test was excluded.
+
+After installation only in Sol's isolated virtual prefix, a fresh disposable
+desktop's worker mapped the verified new library. Native GUI acceptance with
+playback consent and5000ms injected frame-ack delay confirmed worker CRF changes
+17→34→52→69→78; priority-off restored17 without disconnect. Baseline and recovery
+screenshots were visually checked. The lowest rungs may saturate to the same
+encoder limit. This is live CRF steering under synthetic frame backlog, not
+proof of acoustic latency or asymmetric network performance.
+
+An initial test deliberately restarted its detached capture worker solely to
+enable logging. The existing fail-closed path marked that desktop unavailable;
+normal authenticated Stop retired that known-owned fixture cleanly. The passing
+test seeded logging before its worker started instead. Automatic capture-worker
+recovery is not implemented by this change; maintenance work remains parked.
+
+Both new disposable desktops stopped successfully. The three historical failed
+records were preserved. Physical-console service, physical session and Hal were
+unchanged. No new audio recording or camera/browser-conference test was made by
+the CPU-fix acceptance; prior media/host-silence recordings remain separate.
+Evidence: `~/dev/rdp/evidence/virtual-x264-live/RESULT.md` and
+`~/dev/rdp/evidence/virtual-audio-priority-live/RESULT.md`.
