@@ -294,7 +294,8 @@ if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker || "${3:-}" == --multi-
         # worker. KWin's own move-to-screen API proves that its second output
         # is a real workspace destination, not just an RDP client view.
         env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
-            konsole --nofork --title KRDP-MONITOR-PROBE -e sleep 45 \
+            konsole --nofork -p LocalTabTitleFormat=KRDP-MONITOR-PROBE \
+            -p tabtitle=KRDP-MONITOR-PROBE -e sleep 45 \
             >"$XDG_RUNTIME_DIR/window-app.log" 2>&1 &
         window_pid=$!
         qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript \
