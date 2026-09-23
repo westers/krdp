@@ -19,7 +19,10 @@ int main(int argc, char **argv)
     const bool mixed = arguments.size() == 3 && arguments[1] == QStringLiteral("--multi-mixed");
     const bool multi = arguments.size() == 3 && (arguments[1] == QStringLiteral("--multi") || mixed);
     char name[256] = {};
-    if (gethostname(name, sizeof(name) - 1) || QByteArray(name).split('.').first() != "sol"
+    if (gethostname(name, sizeof(name) - 1)) return 1;
+    const auto hostName = QByteArray(name).split('.').first();
+    const bool buzzIntel = hostName == "buzz" && qgetenv("KRDP_BUZZ_INTEL_PRIVATE") == "1";
+    if ((hostName != "sol" && !buzzIntel) || (buzzIntel && (!mixed || adopting))
         || !getuid() || getuid() != geteuid() || (arguments.size() != 2 && !adopting && !multi)) return 1;
     const auto script = adopting ? QString() : arguments.at(multi ? 2 : 1);
     if (!adopting && !QDir::isAbsolutePath(script)) return 1;
@@ -34,10 +37,11 @@ int main(int argc, char **argv)
     tls.setStandardErrorFile(runtime.filePath(QStringLiteral("tls.log")));
     tls.start(QStringLiteral("/usr/bin/openssl"), {QStringLiteral("req"), QStringLiteral("-x509"),
         QStringLiteral("-newkey"), QStringLiteral("rsa:2048"), QStringLiteral("-nodes"), QStringLiteral("-days"), QStringLiteral("1"),
-        QStringLiteral("-subj"), QStringLiteral("/CN=sol.local"), QStringLiteral("-keyout"), key, QStringLiteral("-out"), cert});
+        QStringLiteral("-subj"), buzzIntel ? QStringLiteral("/CN=buzz.local") : QStringLiteral("/CN=sol.local"),
+        QStringLiteral("-keyout"), key, QStringLiteral("-out"), cert});
     if (!tls.waitForFinished(10000) || tls.exitCode()) return 1;
     Server server;
-    server.setAddress(QHostAddress(QStringLiteral("192.168.48.57")));
+    server.setAddress(QHostAddress(buzzIntel ? QStringLiteral("127.0.0.1") : QStringLiteral("192.168.48.57")));
     server.setPort(multi ? 3396 : 3395);
     server.setTlsCertificate(std::filesystem::path(cert.toStdString()));
     server.setTlsCertificateKey(std::filesystem::path(key.toStdString()));
@@ -57,9 +61,14 @@ int main(int argc, char **argv)
         QProcessEnvironment env;
         env.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin:/bin"));
         env.insert(QStringLiteral("HOME"), QDir::homePath());
+        if (buzzIntel) {
+            env.insert(QStringLiteral("KRDP_BUZZ_INTEL_PRIVATE"), QStringLiteral("1"));
+            env.insert(QStringLiteral("LD_LIBRARY_PATH"), qEnvironmentVariable("LD_LIBRARY_PATH"));
+        }
         qInfo().noquote() << "PAM-owned desktop" << handle.id << "uid" << uid << "runtime" << desktop.path();
         return VirtualSessionHostController::PreparedLaunch{desktop.filePath(QStringLiteral("worker.sock")),
-            {QStringLiteral("/usr/bin/bash"), {script, mixed ? QStringLiteral("--supervised-mixed-worker-nvidia")
+            {QStringLiteral("/usr/bin/bash"), {script, buzzIntel ? QStringLiteral("--supervised-mixed-worker-intel")
+                : mixed ? QStringLiteral("--supervised-mixed-worker-nvidia")
                 : multi ? QStringLiteral("--supervised-multi-worker-nvidia")
                 : QStringLiteral("--supervised-worker-nvidia"), desktop.path(), handle.id}, env, {}}};
     });
@@ -84,7 +93,9 @@ int main(int argc, char **argv)
         qInfo().noquote() << "Adopting retained desktop" << arguments[2] << "without owning its process lifetime";
     }
     if (!server.start()) return 1;
-    qInfo() << "Isolated PAM virtual host listening on Sol" << (multi ? 3396 : 3395) << "for180 seconds";
-    QTimer::singleShot(180000, &app, &QCoreApplication::quit);
+    const int lifetimeMs = buzzIntel ? 360000 : 180000;
+    qInfo() << "Isolated PAM virtual host listening on" << hostName << (multi ? 3396 : 3395)
+            << "for" << lifetimeMs / 1000 << "seconds";
+    QTimer::singleShot(lifetimeMs, &app, &QCoreApplication::quit);
     return app.exec();
 }

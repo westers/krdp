@@ -10,9 +10,13 @@ script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
     probe_mode="${1:-}"
-    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia || "$1" == --supervised-mixed-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-create-nvidia || "$1" == --plasma-multi-add-nvidia || "$1" == --plasma-multi-mixed-create-nvidia || "$1" == --plasma-multi-remove-nvidia || "$1" == --plasma-multi-resize-nvidia || "$1" == --plasma-multi-fit-nvidia || "$1" == --plasma-multi-primary-nvidia || "$1" == --plasma-negative-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia || "$1" == --plasma-multi-mixed-create-intel ) ) ]]
+    if [[ "$probe_host" == buzz && "$probe_mode" == --supervised-mixed-worker-intel ]]; then
+        [[ $# == 3 ]]
+    else
+        [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia || "$1" == --supervised-mixed-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-create-nvidia || "$1" == --plasma-multi-add-nvidia || "$1" == --plasma-multi-mixed-create-nvidia || "$1" == --plasma-multi-remove-nvidia || "$1" == --plasma-multi-resize-nvidia || "$1" == --plasma-multi-fit-nvidia || "$1" == --plasma-multi-primary-nvidia || "$1" == --plasma-negative-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia || "$1" == --plasma-multi-mixed-create-intel ) ) ]]
+    fi
     if [[ "$probe_host" == buzz ]]; then
-        [[ "$probe_mode" == --plasma-multi-mixed-create-intel ]]
+        [[ "$probe_mode" == --plasma-multi-mixed-create-intel || "$probe_mode" == --supervised-mixed-worker-intel ]]
     fi
     rdp_mode=
     probe_timeout=80
@@ -20,9 +24,9 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     managed_runtime=
     managed_id=
     layout_hint=
-    if [[ "$probe_mode" == --supervised-worker-nvidia || "$probe_mode" == --supervised-multi-worker-nvidia || "$probe_mode" == --supervised-mixed-worker-nvidia ]]; then
+    if [[ "$probe_mode" == --supervised-worker-nvidia || "$probe_mode" == --supervised-multi-worker-nvidia || "$probe_mode" == --supervised-mixed-worker-nvidia || "$probe_mode" == --supervised-mixed-worker-intel ]]; then
         [[ "$probe_mode" == --supervised-worker-nvidia ]] || probe_output_count=2
-        [[ "$probe_mode" != --supervised-mixed-worker-nvidia ]] || layout_hint=--multi-mixed
+        [[ "$probe_mode" != --supervised-mixed-worker-nvidia && "$probe_mode" != --supervised-mixed-worker-intel ]] || layout_hint=--multi-mixed
         managed_runtime="$2"
         managed_id="$3"
         [[ "$managed_runtime" == /run/user/"$(id -u)"/krdp-headless.* ]]
@@ -32,7 +36,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         [[ -S "$managed_runtime/worker.sock" && -f "$managed_runtime/worker-token" && ! -L "$managed_runtime/worker-token" ]]
         [[ "$(stat -c %s "$managed_runtime/worker-token")" == 32 ]]
         rdp_mode=--supervised
-        probe_mode=--plasma-nvidia
+        if [[ "$probe_host" == buzz ]]; then probe_mode=--plasma-intel; else probe_mode=--plasma-nvidia; fi
         probe_timeout=120
     fi
     if [[ "$probe_mode" == --plasma-worker-nvidia || "$probe_mode" == --plasma-multi-worker-nvidia || "$probe_mode" == --plasma-mixed-worker-nvidia || "$probe_mode" == --plasma-multi-create-nvidia || "$probe_mode" == --plasma-multi-add-nvidia || "$probe_mode" == --plasma-multi-mixed-create-nvidia || "$probe_mode" == --plasma-multi-mixed-create-intel || "$probe_mode" == --plasma-multi-remove-nvidia || "$probe_mode" == --plasma-multi-resize-nvidia || "$probe_mode" == --plasma-multi-fit-nvidia || "$probe_mode" == --plasma-multi-primary-nvidia || "$probe_mode" == --plasma-negative-worker-nvidia || "$probe_mode" == --plasma-multi-window-nvidia || "$probe_mode" == --plasma-multi-input-nvidia || "$probe_mode" == --plasma-multi-drag-nvidia || "$probe_mode" == --plasma-multi-reposition-nvidia ]]; then
