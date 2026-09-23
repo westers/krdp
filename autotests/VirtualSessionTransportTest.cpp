@@ -232,6 +232,101 @@ private Q_SLOTS:
             QCOMPARE(t.request(commit, 1000).value(u"code"_s).toString(), u"invalid"_s); // Token consumed.
         });
     }
+    void retainedPositionBatchRequiresOneUsePreviewAndExactCatalog() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            RemoteTopologyCatalog catalog;
+            const auto initial = catalog.observe({
+                {.backendKey = u"Virtual-0"_s, .name = u"Virtual-0"_s,
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(0, 0, 1280, 720),
+                    .scale = 1, .enabled = true, .primary = true, .physical = false, .owner = t.m_handle->id},
+                {.backendKey = u"Virtual-1"_s, .name = u"Virtual-1"_s,
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(1280, 0, 1280, 720),
+                    .scale = 1, .enabled = true, .primary = false, .physical = false, .owner = t.m_handle->id},
+            });
+            QVERIFY(initial);
+            auto current = *initial;
+            t.setTopologyResolver([&current](const auto &) { return std::optional(current); });
+            const QJsonArray moves{
+                QJsonObject{{u"op"_s, u"move"_s}, {u"output"_s, current.outputs[0].id},
+                    {u"position"_s, QJsonObject{{u"x"_s, 1280}, {u"y"_s, 0}}}},
+                QJsonObject{{u"op"_s, u"move"_s}, {u"output"_s, current.outputs[1].id},
+                    {u"position"_s, QJsonObject{{u"x"_s, 0}, {u"y"_s, 0}}}},
+            };
+            QJsonObject preview{{u"type"_s, u"topology-preview"_s}, {u"v"_s, 1},
+                {u"id"_s, u"batch-1"_s}, {u"generation"_s, current.generation},
+                {u"expectedRevision"_s, double(current.revision)}, {u"allowRemoval"_s, false},
+                {u"allowPhysicalChange"_s, false}, {u"operations"_s, moves}};
+            QCOMPARE(t.request(preview, 1001).value(u"code"_s).toString(), u"not-owner"_s);
+            auto duplicate = preview;
+            auto duplicated = moves;
+            duplicated[1] = duplicated[0];
+            duplicate[u"operations"_s] = duplicated;
+            QCOMPARE(t.request(duplicate, 1000).value(u"code"_s).toString(), u"unsupported"_s);
+            auto mixed = preview;
+            auto mixedOps = moves;
+            mixedOps[1] = QJsonObject{{u"op"_s, u"remove"_s}, {u"output"_s, current.outputs[1].id}};
+            mixed[u"operations"_s] = mixedOps;
+            QCOMPARE(t.request(mixed, 1000).value(u"code"_s).toString(), u"unsupported"_s);
+            const auto answer = t.request(preview, 1000);
+            QCOMPARE(answer.value(u"type"_s).toString(), u"topology-preview"_s);
+            const auto after = answer.value(u"after"_s).toArray();
+            QCOMPARE(after[0].toObject().value(u"logical"_s).toObject().value(u"x"_s).toInt(), 1280);
+            QCOMPARE(after[1].toObject().value(u"logical"_s).toObject().value(u"x"_s).toInt(), 0);
+            QString token = answer.value(u"token"_s).toString();
+            QVERIFY(!token.isEmpty());
+            QCOMPARE(t.request(preview, 1000).value(u"token"_s).toString(), token);
+            auto altered = preview;
+            auto alteredMoves = moves;
+            auto alteredSecond = alteredMoves[1].toObject();
+            alteredSecond[u"position"_s] = QJsonObject{{u"x"_s, 0}, {u"y"_s, 100}};
+            alteredMoves[1] = alteredSecond;
+            altered[u"operations"_s] = alteredMoves;
+            const auto alteredReply = t.request(altered, 1000);
+            QCOMPARE(alteredReply.value(u"type"_s).toString(), u"topology-preview"_s);
+            QVERIFY(alteredReply.value(u"token"_s).toString() != token);
+            token = t.request(preview, 1000).value(u"token"_s).toString();
+            QVERIFY(!token.isEmpty());
+            QVERIFY(token != alteredReply.value(u"token"_s).toString());
+            QJsonObject commit{{u"type"_s, u"topology-commit"_s}, {u"v"_s, 1},
+                {u"id"_s, u"batch-1"_s}, {u"token"_s, token},
+                {u"generation"_s, current.generation}, {u"expectedRevision"_s, double(current.revision)}};
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            std::optional<ConsoleWorkerWire::PositionBatch> command;
+            for (const auto &record : workerRecords(worker))
+                if (auto parsed = ConsoleWorkerWire::positionBatch(record)) command = parsed;
+            QVERIFY(command);
+            QCOMPARE(command->targets.size(), 2);
+            QCOMPARE(command->targets[0].output, u"Virtual-0"_s);
+            QCOMPARE(command->targets[0].globalLogical, QPoint(1280, 0));
+            QCOMPARE(command->targets[1].output, u"Virtual-1"_s);
+            QCOMPARE(command->targets[1].globalLogical, QPoint(0, 0));
+            QVERIFY(t.positionResult({command->requestId, command->generation, {}}, 1000).isEmpty());
+            QCOMPARE(t.positionResult({command->requestId, command->generation, {}}, 1000, true)
+                .value(u"code"_s).toString(), u"partial"_s); // Worker metadata alone is insufficient.
+            preview[u"id"_s] = u"batch-2"_s;
+            const auto second = t.request(preview, 1000);
+            QCOMPARE(second.value(u"type"_s).toString(), u"topology-preview"_s);
+            commit[u"id"_s] = u"batch-2"_s;
+            commit[u"token"_s] = second.value(u"token"_s);
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            const auto workerId = t.m_positionWorkerId;
+            auto left = initial->outputs[0].output;
+            auto right = initial->outputs[1].output;
+            left.logicalGeometry.moveLeft(1280);
+            right.logicalGeometry.moveLeft(0);
+            const auto updated = catalog.observe({left, right});
+            QVERIFY(updated);
+            current = *updated;
+            QCOMPARE(current.revision, initial->revision + 1);
+            const auto success = t.positionResult({workerId, t.m_controlGeneration, {}}, 1000, true);
+            QCOMPARE(success.value(u"type"_s).toString(), u"topology-result"_s);
+            QVERIFY(success.value(u"ok"_s).toBool());
+            QCOMPARE(success.value(u"topology"_s).toObject().value(u"revision"_s).toInt(), 2);
+            QCOMPARE(t.request(commit, 1000).value(u"code"_s).toString(), u"invalid"_s);
+        });
+    }
     void experimentalRetainedResizeRequiresOneUseCommitAndExactCatalog() {
         microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
             workerRecords(worker);

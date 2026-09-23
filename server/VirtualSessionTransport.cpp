@@ -234,6 +234,11 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         const auto response = positionResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
     }));
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::positionBatchFinished, this, [this](const auto &result) {
+        const auto response = positionResult({result.requestId, result.generation, result.error},
+            m_connection ? m_connection->authenticatedPamUid() : std::nullopt, true);
+        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+    }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::addVirtualFinished, this, [this](const auto &result) {
         const auto response = addVirtualResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
@@ -490,6 +495,7 @@ void VirtualSessionTransport::clearPosition()
     m_positionTarget = {};
     m_positionExpectedAfter.clear();
     m_positionExpectedChange = false;
+    m_positionBatch = false;
 }
 
 void VirtualSessionTransport::clearAdd()
@@ -544,9 +550,20 @@ QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, 
     if (!snapshot) return RemoteTopologyProtocol::error(parsed->id, u"capture-failed"_s);
     if (parsed->draft.generation != snapshot->generation) return RemoteTopologyProtocol::error(parsed->id, u"stale-generation"_s);
     if (parsed->draft.expectedRevision != snapshot->revision) return RemoteTopologyProtocol::error(parsed->id, u"stale-revision"_s);
-    if (snapshot->outputs.size() < 2 || parsed->draft.operations.size() != 1)
+    if (snapshot->outputs.size() < 2 || parsed->draft.operations.isEmpty()
+        || parsed->draft.operations.size() > snapshot->outputs.size())
         return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
+    const bool movingBatch = parsed->draft.operations.size() > 1;
     const auto &operation = parsed->draft.operations.first();
+    if (movingBatch) {
+        QSet<QString> ids;
+        for (const auto &move : parsed->draft.operations) {
+            if (move.kind != RemoteTopologyDraft::Operation::Kind::Move || ids.contains(move.id)
+                || move.position.x() < 0 || move.position.y() < 0)
+                return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
+            ids.insert(move.id);
+        }
+    }
     const bool adding = operation.kind == RemoteTopologyDraft::Operation::Kind::AddVirtual;
     const bool removing = operation.kind == RemoteTopologyDraft::Operation::Kind::Remove;
     const bool resizing = operation.kind == RemoteTopologyDraft::Operation::Kind::Resize;
@@ -578,6 +595,7 @@ QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, 
         return RemoteTopologyProtocol::error(parsed->id, u"stale-output"_s);
     if (m_preview && m_preview->id == parsed->id && m_preview->generation == snapshot->generation
         && m_preview->revision == snapshot->revision && m_preview->before == snapshot->outputs
+        && m_preview->operations == parsed->draft.operations
         && m_preview->outputId == operation.id && m_preview->kind == operation.kind
         && m_preview->position == operation.position && m_preview->pixels == operation.pixels
         && m_preview->scale == operation.scale && m_preview->age.isValid() && m_preview->age.elapsed() < 15000)
@@ -595,8 +613,20 @@ QJsonObject VirtualSessionTransport::topologyPreview(const QJsonObject &record, 
     next.position = operation.position;
     next.pixels = operation.pixels;
     next.scale = operation.scale;
+    next.operations = parsed->draft.operations;
     next.before = proposal.before;
     next.after = proposal.after;
+    if (movingBatch) {
+        for (const auto &move : parsed->draft.operations) {
+            const auto target = std::find_if(snapshot->outputs.cbegin(), snapshot->outputs.cend(), [&move](const auto &candidate) {
+                return candidate.id == move.id;
+            });
+            if (target == snapshot->outputs.cend() || target->output.physical
+                || target->output.owner != m_handle->id || target->output.backendKey.isEmpty())
+                return RemoteTopologyProtocol::error(parsed->id, u"stale-output"_s);
+            next.batchTargets.append({target->output.backendKey, move.position});
+        }
+    }
     if (adding) {
         auto &created = next.after.last().output;
         created.backendKey = next.backendKey;
@@ -631,6 +661,30 @@ QJsonObject VirtualSessionTransport::topologyCommit(const QJsonObject &record, s
     if (snapshot->generation != proposal.generation) return RemoteTopologyProtocol::error(parsed->id, u"stale-generation"_s);
     if (snapshot->revision != proposal.revision) return RemoteTopologyProtocol::error(parsed->id, u"stale-revision"_s);
     if (snapshot->outputs != proposal.before) return RemoteTopologyProtocol::error(parsed->id, u"stale-revision"_s);
+    if (!proposal.batchTargets.isEmpty()) {
+        if (proposal.kind != RemoteTopologyDraft::Operation::Kind::Move || !m_endpoint
+            || proposal.batchTargets.size() < 2 || proposal.batchTargets.size() > snapshot->outputs.size()
+            || proposal.after.size() != proposal.before.size()
+            || m_nextPositionId == std::numeric_limits<quint64>::max())
+            return RemoteTopologyProtocol::error(parsed->id, u"unsupported"_s);
+        m_positionId = parsed->id;
+        m_positionWorkerId = ++m_nextPositionId;
+        m_positionBinding = m_controlGeneration;
+        m_positionGeneration = proposal.generation;
+        m_positionRevision = proposal.revision;
+        m_positionExpectedAfter = proposal.after;
+        m_positionExpectedChange = proposal.before != proposal.after;
+        m_positionBatch = true;
+        m_positionDeadline.start();
+        const QPointer<VirtualSessionTransport> alive(this);
+        const bool sent = m_endpoint->positionBatch({m_positionWorkerId, m_positionBinding, proposal.batchTargets});
+        if (!alive) return {};
+        if (!sent && m_positionId == parsed->id) {
+            clearPosition();
+            return RemoteTopologyProtocol::error(parsed->id, u"capture-failed"_s);
+        }
+        return {};
+    }
     if (proposal.kind == RemoteTopologyDraft::Operation::Kind::AddVirtual) {
         if (!m_endpoint || m_nextAddId == std::numeric_limits<quint64>::max()
             || proposal.after.size() != proposal.before.size() + 1)
@@ -803,9 +857,10 @@ QJsonObject VirtualSessionTransport::removeVirtualResult(const ConsoleWorkerWire
 }
 
 QJsonObject VirtualSessionTransport::positionResult(const ConsoleWorkerWire::PositionResult &result,
-    std::optional<quint32> uid)
+    std::optional<quint32> uid, bool batch)
 {
-    if (m_positionId.isEmpty() || result.requestId != m_positionWorkerId || result.generation != m_positionBinding) return {};
+    if (m_positionId.isEmpty() || result.requestId != m_positionWorkerId || result.generation != m_positionBinding
+        || batch != m_positionBatch) return {};
     const QString id = m_positionId;
     const QString generation = m_positionGeneration;
     const quint64 revision = m_positionRevision;
@@ -828,7 +883,7 @@ QJsonObject VirtualSessionTransport::positionResult(const ConsoleWorkerWire::Pos
     const auto found = std::find_if(snapshot->outputs.cbegin(), snapshot->outputs.cend(), [&outputId](const auto &entry) {
         return entry.id == outputId;
     });
-    if (found == snapshot->outputs.cend() || found->output.logicalGeometry.topLeft() != target)
+    if (!batch && (found == snapshot->outputs.cend() || found->output.logicalGeometry.topLeft() != target))
         return RemoteTopologyProtocol::error(id, u"partial"_s);
     return {{u"type"_s, u"topology-result"_s}, {u"v"_s, 1}, {u"id"_s, id}, {u"ok"_s, true},
         {u"topology"_s, RemoteTopologyProtocol::retainedReadOnly(id, *snapshot, m_experimentalMultiResize)}};

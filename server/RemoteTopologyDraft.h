@@ -36,6 +36,7 @@ struct Operation {
     QPoint position;
     QSize pixels;
     qreal scale = 1.0;
+    bool operator==(const Operation &) const = default;
 };
 
 struct Request {

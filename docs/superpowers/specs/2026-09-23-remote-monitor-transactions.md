@@ -37,7 +37,11 @@ The later source-only worker wire v4 adds a bounded `PositionBatch` request and
 result. The private retained worker preflights the full owned arrangement,
 runs one `kscreen-doctor` invocation for all requested positions, and requires
 exact all-output KScreen readback plus fresh independently decoded frames before
-acknowledgment. The broker does not yet dispatch batches; no Fit/multi-operation
+acknowledgment. The broker now accepts one previewed batch containing only
+owned virtual `move` operations, binds it to the same one-use
+owner/generation/revision token, dispatches one worker batch, and requires an
+exact full after-catalog with one revision bump before success. Fit,
+mixed-operation drafts and native batch GUI acceptance remain absent; no Fit
 capability is advertised. Broker and worker must be built/deployed as a pair;
 the v4 bump intentionally rejects mixed-version worker sockets.
 An additional disposable 125%/100% Sol/Buzz source-GUI run confirmed that the
@@ -176,7 +180,9 @@ slice, a retained multi-output owner can preview and commit **one move of an
 owned virtual output**; the preview token is short-lived and one-use, and
 commit success requires fresh private KScreen checks, republished inventory
 and both decoded keyframes agreeing with the entire previewed after-state.
-Other operations return `unsupported`. The query now advertises `position=true`
+The later broker batch slice also accepts 2–16 owned virtual `move` operations
+as one transaction; mixed batches still return `unsupported`. The query
+advertises `position=true`
 for a published multi-output retained desktop after disposable RDP and GUI
 Preview/Apply acceptance. This is not an installed remote arrangement release.
 

@@ -49,7 +49,7 @@ private:
     QJsonObject topologyFrame(const VideoFrame &, std::optional<quint32> uid);
     QJsonObject topologyPreview(const QJsonObject &, std::optional<quint32> uid);
     QJsonObject topologyCommit(const QJsonObject &, std::optional<quint32> uid);
-    QJsonObject positionResult(const ConsoleWorkerWire::PositionResult &, std::optional<quint32> uid);
+    QJsonObject positionResult(const ConsoleWorkerWire::PositionResult &, std::optional<quint32> uid, bool batch = false);
     QJsonObject addVirtualResult(const ConsoleWorkerWire::AddVirtualResult &, std::optional<quint32> uid);
     QJsonObject removeVirtualResult(const ConsoleWorkerWire::RemoveVirtualResult &, std::optional<quint32> uid);
     QJsonObject topologyResizeResult(const ConsoleWorkerWire::ResizeResult &, std::optional<quint32> uid);
@@ -106,6 +106,8 @@ private:
         QPoint position;
         QSize pixels;
         qreal scale = 1.0;
+        QVector<RemoteTopologyDraft::Operation> operations;
+        QVector<ConsoleWorkerWire::PositionTarget> batchTargets;
         QVector<RemoteTopologyCatalog::Entry> before;
         QVector<RemoteTopologyCatalog::Entry> after;
         QElapsedTimer age;
@@ -121,6 +123,7 @@ private:
     QPoint m_positionTarget;
     QVector<RemoteTopologyCatalog::Entry> m_positionExpectedAfter;
     bool m_positionExpectedChange = false;
+    bool m_positionBatch = false;
     QString m_addId;
     quint64 m_nextAddId = 0;
     quint64 m_addWorkerId = 0;
