@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# Explicit Sol-only headless smoke; not an installed session launcher.
+# Explicit disposable headless smoke; not an installed session launcher.
 set -euo pipefail
-if [[ "$(hostname -s)" != sol ]]; then
-    echo 'This acceptance probe is restricted to Sol, not the active Hal desktop.' >&2
+probe_host=$(hostname -s)
+if [[ "$probe_host" != sol && !( "$probe_host" == buzz && "${KRDP_BUZZ_INTEL_PRIVATE:-}" == 1 ) ]]; then
+    echo 'This acceptance probe is restricted to Sol or the explicit private Buzz Intel test.' >&2
     exit 1
 fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia || "$1" == --supervised-mixed-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-create-nvidia || "$1" == --plasma-multi-add-nvidia || "$1" == --plasma-multi-mixed-create-nvidia || "$1" == --plasma-multi-remove-nvidia || "$1" == --plasma-multi-resize-nvidia || "$1" == --plasma-multi-fit-nvidia || "$1" == --plasma-multi-primary-nvidia || "$1" == --plasma-negative-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia ) ) ]]
     probe_mode="${1:-}"
+    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia || "$1" == --supervised-mixed-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-create-nvidia || "$1" == --plasma-multi-add-nvidia || "$1" == --plasma-multi-mixed-create-nvidia || "$1" == --plasma-multi-remove-nvidia || "$1" == --plasma-multi-resize-nvidia || "$1" == --plasma-multi-fit-nvidia || "$1" == --plasma-multi-primary-nvidia || "$1" == --plasma-negative-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia || "$1" == --plasma-multi-mixed-create-intel ) ) ]]
+    if [[ "$probe_host" == buzz ]]; then
+        [[ "$probe_mode" == --plasma-multi-mixed-create-intel ]]
+    fi
     rdp_mode=
     probe_timeout=80
     probe_output_count=1
@@ -31,13 +35,14 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         probe_mode=--plasma-nvidia
         probe_timeout=120
     fi
-    if [[ "$probe_mode" == --plasma-worker-nvidia || "$probe_mode" == --plasma-multi-worker-nvidia || "$probe_mode" == --plasma-mixed-worker-nvidia || "$probe_mode" == --plasma-multi-create-nvidia || "$probe_mode" == --plasma-multi-add-nvidia || "$probe_mode" == --plasma-multi-mixed-create-nvidia || "$probe_mode" == --plasma-multi-remove-nvidia || "$probe_mode" == --plasma-multi-resize-nvidia || "$probe_mode" == --plasma-multi-fit-nvidia || "$probe_mode" == --plasma-multi-primary-nvidia || "$probe_mode" == --plasma-negative-worker-nvidia || "$probe_mode" == --plasma-multi-window-nvidia || "$probe_mode" == --plasma-multi-input-nvidia || "$probe_mode" == --plasma-multi-drag-nvidia || "$probe_mode" == --plasma-multi-reposition-nvidia ]]; then
+    if [[ "$probe_mode" == --plasma-worker-nvidia || "$probe_mode" == --plasma-multi-worker-nvidia || "$probe_mode" == --plasma-mixed-worker-nvidia || "$probe_mode" == --plasma-multi-create-nvidia || "$probe_mode" == --plasma-multi-add-nvidia || "$probe_mode" == --plasma-multi-mixed-create-nvidia || "$probe_mode" == --plasma-multi-mixed-create-intel || "$probe_mode" == --plasma-multi-remove-nvidia || "$probe_mode" == --plasma-multi-resize-nvidia || "$probe_mode" == --plasma-multi-fit-nvidia || "$probe_mode" == --plasma-multi-primary-nvidia || "$probe_mode" == --plasma-negative-worker-nvidia || "$probe_mode" == --plasma-multi-window-nvidia || "$probe_mode" == --plasma-multi-input-nvidia || "$probe_mode" == --plasma-multi-drag-nvidia || "$probe_mode" == --plasma-multi-reposition-nvidia ]]; then
         rdp_mode=--worker
         [[ "$probe_mode" != --plasma-multi-worker-nvidia ]] || rdp_mode=--multi-worker
         [[ "$probe_mode" != --plasma-mixed-worker-nvidia ]] || rdp_mode=--multi-mixed
         [[ "$probe_mode" != --plasma-multi-create-nvidia ]] || rdp_mode=--multi-create
         [[ "$probe_mode" != --plasma-multi-add-nvidia ]] || rdp_mode=--multi-add
         [[ "$probe_mode" != --plasma-multi-mixed-create-nvidia ]] || rdp_mode=--multi-mixed-create
+        [[ "$probe_mode" != --plasma-multi-mixed-create-intel ]] || rdp_mode=--multi-mixed-create
         [[ "$probe_mode" != --plasma-multi-remove-nvidia ]] || rdp_mode=--multi-remove
         [[ "$probe_mode" != --plasma-multi-resize-nvidia ]] || rdp_mode=--multi-resize
         [[ "$probe_mode" != --plasma-multi-fit-nvidia ]] || rdp_mode=--multi-fit
@@ -48,7 +53,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         [[ "$probe_mode" != --plasma-multi-drag-nvidia ]] || rdp_mode=--multi-drag
         [[ "$probe_mode" != --plasma-multi-reposition-nvidia ]] || rdp_mode=--multi-reposition
         [[ "$rdp_mode" == --worker ]] || probe_output_count=2
-        probe_mode=--plasma-nvidia
+        if [[ "$probe_host" == buzz ]]; then probe_mode=--plasma-intel; else probe_mode=--plasma-nvidia; fi
         probe_timeout=120
     fi
     if [[ "$probe_mode" == --plasma-rdp-nvidia || "$probe_mode" == --plasma-retention-nvidia || "$probe_mode" == --plasma-audio-nvidia ]]; then
@@ -93,6 +98,17 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
             __GLX_VENDOR_LIBRARY_NAME=nvidia)
         probe_mode=--plasma
     fi
+    if [[ "$probe_mode" == --plasma-intel ]]; then
+        [[ "$probe_host" == buzz && "${KRDP_BUZZ_INTEL_PRIVATE:-}" == 1 ]]
+        render_node=/dev/dri/renderD128
+        [[ -c "$render_node" && -r "$render_node" && -w "$render_node" ]]
+        [[ "$(cat /sys/class/drm/renderD128/device/vendor)" == 0x8086 ]]
+        [[ "$(cat /sys/class/drm/renderD128/device/device)" == 0x9bc4 ]]
+        render_bindings+=(--dev-bind "$render_node" "$render_node")
+        render_environment=(__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+            __GLX_VENDOR_LIBRARY_NAME=mesa)
+        probe_mode=--plasma
+    fi
     probe_runtime="$managed_runtime"
     if [[ -z "$probe_runtime" ]]; then
         probe_runtime=$(mktemp -d "/run/user/$(id -u)/krdp-headless.XXXXXX")
@@ -101,7 +117,13 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     cp -r "$repo_path/scripts/virtual-probe-config/." "$probe_runtime/config/"
     if [[ "$rdp_mode" == --worker || "$rdp_mode" == --multi-worker || "$rdp_mode" == --multi-mixed || "$rdp_mode" == --multi-create || "$rdp_mode" == --multi-add || "$rdp_mode" == --multi-mixed-create || "$rdp_mode" == --multi-remove || "$rdp_mode" == --multi-resize || "$rdp_mode" == --multi-fit || "$rdp_mode" == --multi-primary || "$rdp_mode" == --multi-negative || "$rdp_mode" == --multi-window || "$rdp_mode" == --multi-input || "$rdp_mode" == --multi-drag || "$rdp_mode" == --multi-reposition || "$rdp_mode" == --supervised ]]; then
         mkdir -p "$probe_runtime/data/applications"
-        cp "$repo_path/build/server/org.kde.krdpvirtualprobe.desktop" "$probe_runtime/data/applications/org.kde.krdpconsoleworker.desktop"
+        if [[ "$probe_host" == buzz ]]; then
+            sed "s#^Exec=.*#Exec=$repo_path/build/bin/krdp-console-worker#" \
+                "$repo_path/build/server/org.kde.krdpvirtualprobe.desktop" \
+                >"$probe_runtime/data/applications/org.kde.krdpconsoleworker.desktop"
+        else
+            cp "$repo_path/build/server/org.kde.krdpvirtualprobe.desktop" "$probe_runtime/data/applications/org.kde.krdpconsoleworker.desktop"
+        fi
         if [[ "$rdp_mode" == --multi-create ]]; then
             cp "$repo_path/build/server/org.kde.krdpvirtualmonitorprobe.desktop" "$probe_runtime/data/applications/"
         fi
@@ -122,9 +144,18 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         # not profile updates. Preserve D-Bus mediation in a read-only root.
         apparmor_query=(--bind /sys/kernel/security/apparmor/.access /sys/kernel/security/apparmor/.access)
     fi
+    repo_bindings=()
+    probe_environment=()
+    if [[ "$probe_host" == buzz ]]; then
+        [[ "$repo_path" == /tmp/krdp-buzz-probe.* && -d "$repo_path" && -O "$repo_path" ]]
+        repo_bindings=(--bind "$repo_path" "$repo_path")
+        [[ -n "${LD_LIBRARY_PATH:-}" ]]
+        probe_environment=(KRDP_BUZZ_INTEL_PRIVATE=1 LD_LIBRARY_PATH="$LD_LIBRARY_PATH")
+    fi
     # Retain the real HOME identity, but no existing display, session bus, Qt
     # reconnect, session id, manager notification, or inherited plugin settings.
     exec env -i PATH=/usr/bin:/bin HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" \
+        "${probe_environment[@]}" \
         LANG=C.UTF-8 XDG_RUNTIME_DIR="$probe_runtime" XDG_CONFIG_HOME="$probe_runtime/config" \
         PIPEWIRE_RUNTIME_DIR="$probe_runtime" PIPEWIRE_REMOTE=pipewire-0 \
         PULSE_RUNTIME_PATH="$probe_runtime/pulse" PULSE_SERVER="unix:$probe_runtime/pulse/native" \
@@ -137,6 +168,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         "${render_bindings[@]}" \
         --perms 01777 --dir /tmp/.X11-unix \
         --bind "$probe_runtime" "$probe_runtime" \
+        "${repo_bindings[@]}" \
         dbus-run-session --config-file="$repo_path/server/virtual-session-bus.conf" \
         -- bash "$script_path" --inside-private-bus "$probe_mode" "$rdp_mode" "$managed_id" "$probe_output_count" "$layout_hint" \
         >"$probe_runtime/probe.log" 2>&1

@@ -450,8 +450,10 @@ int main(int argc, char **argv)
                 : QRect(i * 1280, 0, 1280, 720);
             const QRect wire = fitInventory && i == 0 ? QRect(0, 0, 1600, 900)
                 : fitInventory && i == 1 ? QRect(1600, 0, 1280, 720)
+                : mixedCreateInventory && i == 2 ? QRect(2560, 100, 960, 540)
                 : i == 2 ? QRect(2560, 0, 960, 540)
-                : (mixed || negativeProbe || repositionInventory) && i == 1 ? QRect(1280, 100, 1280, 720)
+                : (mixed || negativeProbe || repositionInventory || mixedCreateInventory) && i == 1
+                    ? QRect(1280, 100, 1280, 720)
                 : QRect(i * 1280, 0, 1280, 720);
             if (outputs.monitors[i].geometry != logical || frame.monitors[i].geometry != wire
                 || !VirtualResize::sameScale(outputs.monitors[i].scale,
@@ -606,7 +608,8 @@ int main(int argc, char **argv)
         result = verified() && stopping && code == 0 && status == QProcess::NormalExit ? 0 : 1;
         app.quit();
     });
-    QTimer::singleShot(inputProbe || dragProbe || repositionProbe || addProbe || resizeProbe || fitProbe || primaryProbe ? 30000 : 20000, &app, &QCoreApplication::quit);
+    QTimer::singleShot(inputProbe || dragProbe || repositionProbe || addProbe || mixedCreateProbe
+        || resizeProbe || fitProbe || primaryProbe ? 30000 : 20000, &app, &QCoreApplication::quit);
     // Managed mode owns only the broker endpoint. The existing desktop loop
     // supplies its worker; this process must never enter or stop the guardian.
     if (!managed) worker.start();
