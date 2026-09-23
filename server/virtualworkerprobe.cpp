@@ -30,11 +30,12 @@ int main(int argc, char **argv)
     const bool negativeProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-negative");
     const bool repositionProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-reposition");
     const bool removeProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-remove");
+    const bool resizeProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-resize");
     const bool addProbe = removeProbe || (arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-add"));
     const QString addedName = removeProbe ? QStringLiteral("Virtual-krdp-added-probe-extra")
                                           : QStringLiteral("Virtual-krdp-probe-extra");
     const bool mixed = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi-mixed") || inputProbe);
-    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || negativeProbe || dragProbe || repositionProbe || addProbe);
+    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || negativeProbe || dragProbe || repositionProbe || addProbe || resizeProbe);
     if (arguments.size() != 1 && !managed && !multi) return 1;
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     const QFileInfo runtimeInfo(runtime);
@@ -104,6 +105,10 @@ int main(int argc, char **argv)
     bool removeAcknowledged = false;
     bool removeInventory = false;
     QSet<int> removeFrames;
+    bool resizeStarted = false;
+    bool resizeAcknowledged = false;
+    bool resizeInventory = false;
+    QSet<int> resizeFrames;
     bool stopping = false;
     int result = 1;
     ConsoleWorkerWire::Outputs outputs;
@@ -112,7 +117,8 @@ int main(int argc, char **argv)
             && (!repositionProbe || (repositionReadback && repositionInventory && repositionFrames.size() == 2))
             && (!addProbe || (addAcknowledged && (removeProbe
                 ? removeAcknowledged && removeInventory && removeFrames.size() == 2
-                : addInventory && addFrames.size() == 3)));
+                : addInventory && addFrames.size() == 3)))
+            && (!resizeProbe || (resizeAcknowledged && resizeInventory && resizeFrames.size() == 2));
     };
     const auto maybeStop = [&] {
         if (verified() && !stopping) {
@@ -160,7 +166,7 @@ int main(int argc, char **argv)
     });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::workerReady, &app, [&](const auto &) {
         endpoint.setControlState({1, true});
-        endpoint.resize({1, 1, QStringLiteral("Virtual-0"), QSize(1024, 768), 1});
+        endpoint.resize({1, 1, multi ? QStringLiteral("Virtual-missing") : QStringLiteral("Virtual-0"), QSize(1024, 768), 1});
         endpoint.requestKeyFrame();
     });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::positionFinished, &app,
@@ -236,6 +242,18 @@ int main(int argc, char **argv)
         });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, &app, [&](const auto &value) {
         outputs = value;
+        if (resizeProbe && resizeStarted && !resizeInventory && value.monitors.size() == 2
+            && value.monitors[0].name == QStringLiteral("Virtual-0")
+            && value.monitors[1].name == QStringLiteral("Virtual-1")
+            && value.monitors[0].geometry == QRect(0, 0, 1280, 720)
+            && value.monitors[1].geometry == QRect(1280, 0, 1280, 720)
+            && VirtualResize::sameScale(value.monitors[1].scale, 1.25)) {
+            resizeInventory = true;
+            capturedOutputs.clear();
+            captured = false;
+            qInfo("Worker published scale-only resized two-output inventory");
+            endpoint.requestKeyFrame();
+        }
         if (addProbe && addStarted && value.monitors.size() == 3
             && value.monitors[2].name == addedName
             && value.monitors[2].geometry == QRect(2560, 0, 960, 540)) {
@@ -262,14 +280,36 @@ int main(int argc, char **argv)
         }
     });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::resizeFinished, &app, [&](const auto &value) {
+        if (resizeProbe && value.requestId == 2) {
+            if (value.generation != 1 || !value.error.isEmpty()) {
+                qCritical().noquote() << "Worker multi-resize failed:" << value.error;
+                app.quit();
+                return;
+            }
+            QProcess readback;
+            readback.start(QStringLiteral("kscreen-doctor"), {QStringLiteral("-j")});
+            if (!readback.waitForFinished(3000) || readback.exitCode() != 0) { app.quit(); return; }
+            const auto snapshot = RetainedKScreenReadback::parse(readback.readAllStandardOutput(), id);
+            if (!snapshot || snapshot->outputs.size() != 2
+                || snapshot->outputs[0].nativePixels != QSize(1280, 720)
+                || snapshot->outputs[0].logicalGeometry != QRect(0, 0, 1280, 720)
+                || snapshot->outputs[1].nativePixels != QSize(1600, 900)
+                || snapshot->outputs[1].logicalGeometry != QRect(1280, 0, 1280, 720)
+                || !VirtualResize::sameScale(snapshot->outputs[1].scale, 1.25)) { app.quit(); return; }
+            resizeAcknowledged = true;
+            qInfo("Authenticated multi-resize acknowledged after two-output KScreen/capture readback");
+            maybeStop();
+            return;
+        }
         resizeRefused = value.requestId == 1 && value.generation == 1
-            && value.error == (multi ? QStringLiteral("single-output Fit is unavailable with multiple remote monitors")
-                : QStringLiteral("Physical-output resize is unavailable in a virtual session"));
+            && (multi ? !value.error.isEmpty()
+                : value.error == QStringLiteral("Physical-output resize is unavailable in a virtual session"));
         maybeStop();
     });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::frameReceived, &app, [&](const VideoFrame &frame) {
         const int expected = addInventory ? 3 : multi ? 2 : 1;
-        const QSize expectedSize = frame.monitorIndex == 2 ? QSize(960, 540) : QSize(1280, 720);
+        const QSize expectedSize = frame.monitorIndex == 2 ? QSize(960, 540)
+            : resizeInventory && frame.monitorIndex == 1 ? QSize(1600, 900) : QSize(1280, 720);
         if (!frame.isKeyFrame || frame.data.isEmpty() || frame.size != expectedSize
             || h264KeyframeSize(frame.data) != frame.size || frame.monitorIndex < 0 || frame.monitorIndex >= expected
             || outputs.monitors.size() != expected || frame.monitors.size() != expected) return;
@@ -283,7 +323,8 @@ int main(int argc, char **argv)
                 : (mixed || negativeProbe || repositionInventory) && i == 1 ? QRect(1280, 100, 1280, 720)
                 : QRect(i * 1280, 0, 1280, 720);
             if (outputs.monitors[i].geometry != logical || frame.monitors[i].geometry != wire
-                || outputs.monitors[i].scale != (mixed && i == 0 ? 1.25 : 1.0)) return;
+                || !VirtualResize::sameScale(outputs.monitors[i].scale,
+                    mixed && i == 0 ? 1.25 : resizeInventory && i == 1 ? 1.25 : 1.0)) return;
         }
         if (outputs.compositorOrigin != QPoint(0, 0)) return; // Sol KWin normalizes the negative request.
         QFile output(runtime + (multi ? QStringLiteral("/worker-keyframe-%1.h264").arg(frame.monitorIndex)
@@ -320,6 +361,15 @@ int main(int argc, char **argv)
         if (removeProbe && removeInventory) {
             removeFrames.insert(frame.monitorIndex);
             if (removeFrames.size() == 2) qInfo("Two post-remove independently decoded output keyframes verified");
+        }
+        if (resizeProbe && resizeInventory) {
+            resizeFrames.insert(frame.monitorIndex);
+            if (resizeFrames.size() == 2) qInfo("Two post-resize independently decoded output keyframes verified");
+        }
+        if (captured && resizeProbe && !resizeStarted) {
+            resizeStarted = true;
+            qInfo("Requesting authenticated scale-only worker resize of Virtual-1");
+            if (!endpoint.resize({2, 1, QStringLiteral("Virtual-1"), QSize(1600, 900), 1.25})) app.quit();
         }
         if (captured && addProbe && !addStarted) {
             addStarted = true;
@@ -391,7 +441,7 @@ int main(int argc, char **argv)
         result = verified() && stopping && code == 0 && status == QProcess::NormalExit ? 0 : 1;
         app.quit();
     });
-    QTimer::singleShot(inputProbe || dragProbe || repositionProbe || addProbe ? 30000 : 20000, &app, &QCoreApplication::quit);
+    QTimer::singleShot(inputProbe || dragProbe || repositionProbe || addProbe || resizeProbe ? 30000 : 20000, &app, &QCoreApplication::quit);
     // Managed mode owns only the broker endpoint. The existing desktop loop
     // supplies its worker; this process must never enter or stop the guardian.
     if (!managed) worker.start();

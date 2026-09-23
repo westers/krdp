@@ -40,6 +40,10 @@ std::optional<double> frameScale(QSize pixels, QSize logical);
 bool frameScaleMatches(double observed, double requested, QSize logical);
 bool geometryMatchesScale(QSize pixels, QSize logical, double scale);
 std::optional<Snapshot> snapshot(const QByteArray &json, QString *error);
+// Mode inventory for one named output in a multi-output compositor. Callers
+// must also validate the full KScreen snapshot before applying any mutation;
+// this helper does not establish ownership or peer preservation.
+std::optional<Snapshot> snapshotForOutput(const QByteArray &json, const QString &outputName, QString *error);
 bool sameOutput(const Snapshot &a, const Snapshot &b);
 bool matches(const Snapshot &state, const Plan &plan);
 std::optional<Mode> matchingMode(const Snapshot &state, QSize pixels, int refresh);

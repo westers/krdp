@@ -11,6 +11,29 @@ class VirtualResizeTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void selectsTargetModeInventoryFromMultiOutputReadback()
+    {
+        auto first = output();
+        auto second = output();
+        second.insert(QStringLiteral("name"), QStringLiteral("Virtual-1"));
+        second.insert(QStringLiteral("id"), 2);
+        second.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1280}, {QStringLiteral("y"), 100}});
+        const auto json = QJsonDocument(QJsonObject{{QStringLiteral("outputs"), QJsonArray{first, second}}}).toJson();
+        QString error;
+        QVERIFY(!V::snapshot(json, &error)); // Legacy single-output Fit stays strict.
+        const auto selected = V::snapshotForOutput(json, QStringLiteral("Virtual-1"), &error);
+        QVERIFY2(selected.has_value(), qPrintable(error));
+        QCOMPARE(selected->name, QStringLiteral("Virtual-1"));
+        QCOMPARE(selected->id, 2);
+        QCOMPARE(selected->position, QPoint(1280, 100));
+        QCOMPARE(selected->current.pixels, QSize(1280, 720));
+        QVERIFY(!V::snapshotForOutput(json, QStringLiteral("Virtual-2"), &error));
+        QVERIFY(!V::snapshotForOutput(json, QStringLiteral("Virtual-1.scale.2"), &error));
+        QVERIFY(!V::snapshotForOutput(QByteArray(1024 * 1024 + 1, ' '), QStringLiteral("Virtual-1"), &error));
+        const auto ambiguous = QJsonDocument(QJsonObject{{QStringLiteral("outputs"), QJsonArray{first, second, second}}}).toJson();
+        QVERIFY(!V::snapshotForOutput(ambiguous, QStringLiteral("Virtual-1"), &error));
+    }
+
     void boundsAndSourceSchema()
     {
         QVERIFY(V::validRequest({320, 200}, 1)); QVERIFY(V::validRequest({4096, 4096}, 4));

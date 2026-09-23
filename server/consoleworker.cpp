@@ -39,6 +39,7 @@
 #include "RetainedMultiInput.h"
 #include "RetainedKScreenReadback.h"
 #include "ConsoleTopologyReadback.h"
+#include "RetainedMultiResizePlan.h"
 
 using namespace KRdp;
 
@@ -159,6 +160,13 @@ public:
             if (!m_positionPending) return;
             finishPosition(QStringLiteral("post-position capture timed out"));
             m_socket.disconnectFromServer(); // No stale video/input after an unverified mutation.
+        });
+        m_multiResizeDeadline.setSingleShot(true);
+        m_multiResizeDeadline.setInterval(15000);
+        connect(&m_multiResizeDeadline, &QTimer::timeout, this, [this] {
+            if (!m_multiResizePending) return;
+            finishMultiResize(QStringLiteral("post-resize capture/readback timed out"));
+            m_socket.disconnectFromServer();
         });
         m_addDeadline.setSingleShot(true);
         m_addDeadline.setInterval(15000);
@@ -457,6 +465,11 @@ private:
             if (!screensAgree) { m_multiSettle.start(200); return; }
         }
         if (screens.size() < 2) {
+            if (m_multiResizePending) {
+                finishMultiResize(QStringLiteral("multi-output capture disappeared during resize"));
+                m_socket.disconnectFromServer();
+                return;
+            }
             if (m_multiMode) {
                 releaseInput();
                 ++m_multiEpoch;
@@ -480,7 +493,16 @@ private:
         inventory.reserve(screens.size());
         const auto *primary = qGuiApp->primaryScreen() ? qGuiApp->primaryScreen() : screens.first();
         for (const auto *screen : screens) inventory.append({screen->name(), screen->geometry(), screen == primary});
-        if (m_multiMode && m_multiCapture.screens() == inventory) return;
+        if (m_multiResizePending && m_multiResizePlan) {
+            const bool screensAgree = std::all_of(m_multiResizePlan->after.cbegin(), m_multiResizePlan->after.cend(), [&screens](const auto &output) {
+                return std::any_of(screens.cbegin(), screens.cend(), [&output](const auto *screen) {
+                    return screen->name() == output.backendKey && screen->geometry() == output.logicalGeometry;
+                });
+            });
+            if (!screensAgree) { m_multiSettle.start(200); return; }
+        }
+        if (m_multiMode && m_multiCapture.screens() == inventory && !m_multiResizeNeedsRestart) return;
+        m_multiResizeNeedsRestart = false;
         releaseInput();
         ++m_multiEpoch;
         m_multiReady = false;
@@ -552,6 +574,12 @@ private:
                 m_socket.disconnectFromServer();
                 return;
             }
+            if (m_multiResizePending && (!m_multiResizePlan || !RetainedMultiResizePlan::matches(*m_multiResizePlan, *kscreen)
+                || !m_control.active || m_control.generation != m_multiResizePending->generation)) {
+                finishMultiResize(QStringLiteral("resized output or peers differ after captured readback"));
+                m_socket.disconnectFromServer();
+                return;
+            }
             qInfo() << "Retained KScreen readback confirmed" << kscreen->outputs.size() << "independent captured outputs";
             m_outputs = result.outputs;
             m_multiPublishedFrames = result.frames;
@@ -584,9 +612,10 @@ private:
         }
         if (result.becameReady && m_addPending) finishAdd({});
         if (result.becameReady && m_removePending) finishRemove({});
+        if (result.becameReady && m_multiResizePending) finishMultiResize({});
     }
 
-    std::optional<RetainedKScreenReadback::Snapshot> readKScreen() const
+    std::optional<QByteArray> readKScreenJson() const
     {
         QProcess readback;
         readback.start(QStringLiteral("kscreen-doctor"), {QStringLiteral("-j")});
@@ -595,8 +624,123 @@ private:
             readback.kill();
             readback.waitForFinished(1000);
         }
-        return finished && readback.exitStatus() == QProcess::NormalExit && readback.exitCode() == 0
-            ? RetainedKScreenReadback::parse(readback.readAllStandardOutput(), m_sessionId) : std::nullopt;
+        if (!finished || readback.exitStatus() != QProcess::NormalExit || readback.exitCode() != 0) return {};
+        const auto json = readback.readAllStandardOutput();
+        return json.size() <= 1024 * 1024 ? std::optional<QByteArray>(json) : std::nullopt;
+    }
+
+    std::optional<RetainedKScreenReadback::Snapshot> readKScreen() const
+    {
+        const auto json = readKScreenJson();
+        return json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+    }
+
+    bool runKScreenCommand(const QStringList &arguments) const
+    {
+        if (arguments.isEmpty()) return false;
+        QProcess command;
+        command.start(QStringLiteral("kscreen-doctor"), arguments);
+        const bool finished = command.waitForStarted(1000) && command.waitForFinished(3000);
+        if (!finished) {
+            command.kill();
+            command.waitForFinished(1000);
+        }
+        return finished && command.exitStatus() == QProcess::NormalExit && command.exitCode() == 0;
+    }
+
+    void finishMultiResize(const QString &error)
+    {
+        if (!m_multiResizePending) return;
+        const auto request = *m_multiResizePending;
+        m_multiResizePending.reset();
+        m_multiResizePlan.reset();
+        m_multiResizeNeedsRestart = false;
+        m_multiResizeDeadline.stop();
+        m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{request.requestId, request.generation, error}));
+    }
+
+    void multiResize(const ConsoleWorkerWire::Resize &request)
+    {
+        const auto reject = [this, &request](const QString &error) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{request.requestId, request.generation, error}));
+        };
+        if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
+            || !m_control.active || m_control.generation != request.generation
+            || m_positionPending || m_addPending || m_removePending || m_multiResizePending) {
+            reject(QStringLiteral("multi-output resize unavailable or not authorized"));
+            return;
+        }
+        const auto beforeJson = readKScreenJson();
+        const auto before = beforeJson ? RetainedKScreenReadback::parse(*beforeJson, m_sessionId) : std::nullopt;
+        if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)) {
+            reject(QStringLiteral("fresh compositor readback differs from capture"));
+            return;
+        }
+        const auto plan = RetainedMultiResizePlan::make(*before, m_sessionId, request.output, request.pixels, request.scale);
+        if (!plan) {
+            reject(QStringLiteral("resize overlaps or exceeds retained-output limits"));
+            return;
+        }
+        if (!plan->changed) {
+            reject({}); // Full fresh readback and capture already agree; no mutation.
+            return;
+        }
+        QString parseError;
+        auto state = VirtualResize::snapshotForOutput(*beforeJson, request.output, &parseError);
+        const auto target = std::find_if(before->outputs.cbegin(), before->outputs.cend(), [&request](const auto &output) {
+            return output.backendKey == request.output;
+        });
+        if (!state || target == before->outputs.cend() || state->position != target->logicalGeometry.topLeft()
+            || state->current.pixels != target->nativePixels || !VirtualResize::sameScale(state->scale, target->scale)) {
+            reject(QStringLiteral("target mode inventory differs from full compositor readback"));
+            return;
+        }
+        const auto originalState = *state;
+        auto mode = VirtualResize::matchingMode(*state, request.pixels, state->current.refresh);
+        if (!mode) {
+            if (state->modes.size() >= 64 || !runKScreenCommand(VirtualResize::add({*state, request.pixels, request.scale}))) {
+                reject(QStringLiteral("requested custom mode could not be added"));
+                return;
+            }
+            const auto addedJson = readKScreenJson();
+            const auto unchanged = addedJson ? RetainedKScreenReadback::parse(*addedJson, m_sessionId) : std::nullopt;
+            state = addedJson ? VirtualResize::snapshotForOutput(*addedJson, request.output, &parseError) : std::nullopt;
+            if (!unchanged || unchanged->outputs != before->outputs || !state
+                || !VirtualResize::sameOutput(*state, originalState)
+                || state->current.id != originalState.current.id || state->current.pixels != originalState.current.pixels
+                || state->current.refresh != originalState.current.refresh
+                || !VirtualResize::sameScale(state->scale, originalState.scale)) {
+                reject(QStringLiteral("custom mode changed the active arrangement"));
+                return;
+            }
+            mode = VirtualResize::matchingMode(*state, request.pixels, state->current.refresh);
+            if (!mode) {
+                reject(QStringLiteral("new custom mode was not advertised"));
+                return;
+            }
+        }
+        releaseInput();
+        m_multiReady = false;
+        ++m_multiEpoch;
+        m_multiSessions.clear();
+        m_multiCapture.invalidate();
+        m_multiPublishedFrames.clear();
+        m_multiResizePending = request;
+        m_multiResizePlan = *plan;
+        m_multiResizeDeadline.start();
+        if (!runKScreenCommand(VirtualResize::select(*state, *mode, request.scale))) {
+            finishMultiResize(QStringLiteral("virtual mode/scale apply failed"));
+            m_socket.disconnectFromServer();
+            return;
+        }
+        const auto after = readKScreen();
+        if (!after || !RetainedMultiResizePlan::matches(*plan, *after)) {
+            finishMultiResize(QStringLiteral("mode/scale readback differs from preview"));
+            m_socket.disconnectFromServer();
+            return;
+        }
+        m_multiResizeNeedsRestart = true;
+        m_multiSettle.start(200);
     }
 
     bool addMatches(const RetainedKScreenReadback::Snapshot &current, bool position) const
@@ -661,7 +805,7 @@ private:
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::RemoveVirtualResult{request.requestId, request.generation, error}));
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
-            || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending
+            || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending || m_multiResizePending
             || m_multiPublishedFrames.size() < 3) {
             reject(QStringLiteral("virtual output removal unavailable or not authorized"));
             return;
@@ -698,7 +842,7 @@ private:
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::AddVirtualResult{request.requestId, request.generation, error}));
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
-            || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending
+            || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending || m_multiResizePending
             || m_multiPublishedFrames.size() < 2) {
             reject(QStringLiteral("virtual output creation unavailable or not authorized"));
             return;
@@ -755,7 +899,7 @@ private:
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation
-            || m_positionPending || m_addPending || m_removePending) {
+            || m_positionPending || m_addPending || m_removePending || m_multiResizePending) {
             reject(QStringLiteral("position unavailable or not authorized"));
             return;
         }
@@ -868,11 +1012,8 @@ private:
             }
             if (const auto request = ConsoleWorkerWire::resize(*record)) {
                 releaseInput();
-                if (m_mode.virtualSession && m_multiMode) {
-                    m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{
-                        request->requestId, request->generation,
-                        QStringLiteral("single-output Fit is unavailable with multiple remote monitors") }));
-                } else if (m_mode.virtualSession) m_virtualResize.request(*request);
+                if (m_mode.virtualSession && m_multiMode) multiResize(*request);
+                else if (m_mode.virtualSession) m_virtualResize.request(*request);
                 else m_resize.request(*request);
                 continue;
             }
@@ -974,6 +1115,10 @@ private:
     QTimer m_multiSettle;
     QTimer m_positionDeadline;
     std::optional<ConsoleWorkerWire::Position> m_positionPending;
+    QTimer m_multiResizeDeadline;
+    std::optional<ConsoleWorkerWire::Resize> m_multiResizePending;
+    std::optional<RetainedMultiResizePlan::Plan> m_multiResizePlan;
+    bool m_multiResizeNeedsRestart = false;
     QTimer m_addDeadline;
     std::optional<ConsoleWorkerWire::AddVirtual> m_addPending;
     RetainedKScreenReadback::Snapshot m_addBefore;

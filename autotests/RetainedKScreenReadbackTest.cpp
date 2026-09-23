@@ -6,6 +6,7 @@
 
 #include "RetainedKScreenReadback.h"
 #include "ConsoleTopologyReadback.h"
+#include "RetainedMultiResizePlan.h"
 
 using namespace KRdp::RetainedKScreenReadback;
 
@@ -50,6 +51,34 @@ class RetainedKScreenReadbackTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void multiOutputResizePreflightAndExactAfterState()
+    {
+        const auto before = decoded(root());
+        QVERIFY(before);
+        const auto plan = KRdp::RetainedMultiResizePlan::make(*before, QStringLiteral("lease-1"),
+            QStringLiteral("Virtual-1"), QSize(1600, 900), 1.25);
+        QVERIFY(plan);
+        QVERIFY(plan->changed);
+        QCOMPARE(plan->after[0], before->outputs[0]);
+        QCOMPARE(plan->after[1].logicalGeometry, QRect(1024, 100, 1280, 720));
+        auto landed = *before;
+        landed.outputs[1].nativePixels = QSize(1600, 900);
+        landed.outputs[1].scale = 1.25;
+        QVERIFY(KRdp::RetainedMultiResizePlan::matches(*plan, landed));
+        landed.outputs[0].logicalGeometry.moveTo(0, 1);
+        QVERIFY(!KRdp::RetainedMultiResizePlan::matches(*plan, landed));
+        QVERIFY(!KRdp::RetainedMultiResizePlan::make(*before, QStringLiteral("lease-1"),
+            QStringLiteral("Virtual-0"), QSize(1600, 900), 1.25)); // Expands into Virtual-1.
+        QVERIFY(!KRdp::RetainedMultiResizePlan::make(*before, QStringLiteral("other-owner"),
+            QStringLiteral("Virtual-1"), QSize(1600, 900), 1.25));
+        QVERIFY(!KRdp::RetainedMultiResizePlan::make(*before, QStringLiteral("lease-1"),
+            QStringLiteral("Virtual-1"), QSize(1601, 900), 1.25));
+        auto physical = *before;
+        physical.outputs[1].physical = true;
+        QVERIFY(!KRdp::RetainedMultiResizePlan::make(physical, QStringLiteral("lease-1"),
+            QStringLiteral("Virtual-1"), QSize(1600, 900), 1.25));
+    }
+
     void physicalReadOnlyInventoryNeedsCapturedKeyframe()
     {
         const QJsonObject physical{{QStringLiteral("screen"), QJsonObject{{QStringLiteral("maxActiveOutputsCount"), 1}}},

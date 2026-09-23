@@ -132,6 +132,38 @@ std::optional<Snapshot> snapshot(const QByteArray &json, QString *error)
     return result;
 }
 
+std::optional<Snapshot> snapshotForOutput(const QByteArray &json, const QString &outputName, QString *error)
+{
+    const auto fail = [error](const QString &message) -> std::optional<Snapshot> {
+        if (error) *error = message;
+        return {};
+    };
+    if (!token(outputName) || json.isEmpty() || json.size() > 1024 * 1024)
+        return fail(QStringLiteral("target virtual output snapshot invalid"));
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(json, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject())
+        return fail(QStringLiteral("target virtual output JSON invalid"));
+    const auto array = document.object().value(QStringLiteral("outputs"));
+    if (!array.isArray() || array.toArray().isEmpty() || array.toArray().size() > 16)
+        return fail(QStringLiteral("target virtual output count invalid"));
+    QJsonObject selected;
+    for (const auto &value : array.toArray()) {
+        if (!value.isObject()) return fail(QStringLiteral("target virtual output record invalid"));
+        const auto object = value.toObject();
+        if (object.value(QStringLiteral("name")) != outputName) continue;
+        if (!selected.isEmpty()) return fail(QStringLiteral("target virtual output is ambiguous"));
+        selected = object;
+    }
+    if (selected.isEmpty()) return fail(QStringLiteral("target virtual output missing"));
+    // Reuse the strict single-output mode/id/scale parser unchanged. The full
+    // multi-output geometry and peers are verified by RetainedKScreenReadback
+    // in the mutation caller, before and after this extraction.
+    QJsonObject isolated = document.object();
+    isolated.insert(QStringLiteral("outputs"), QJsonArray{selected});
+    return snapshot(QJsonDocument(isolated).toJson(QJsonDocument::Compact), error);
+}
+
 bool sameOutput(const Snapshot &a, const Snapshot &b)
 {
     return a.name == b.name && a.id == b.id && a.position == b.position;
