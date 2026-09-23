@@ -8,15 +8,17 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-negative-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia || "$1" == --supervised-mixed-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-negative-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia ) ) ]]
     probe_mode="${1:-}"
     rdp_mode=
     probe_timeout=80
     probe_output_count=1
     managed_runtime=
     managed_id=
-    if [[ "$probe_mode" == --supervised-worker-nvidia || "$probe_mode" == --supervised-multi-worker-nvidia ]]; then
-        [[ "$probe_mode" != --supervised-multi-worker-nvidia ]] || probe_output_count=2
+    layout_hint=
+    if [[ "$probe_mode" == --supervised-worker-nvidia || "$probe_mode" == --supervised-multi-worker-nvidia || "$probe_mode" == --supervised-mixed-worker-nvidia ]]; then
+        [[ "$probe_mode" == --supervised-worker-nvidia ]] || probe_output_count=2
+        [[ "$probe_mode" != --supervised-mixed-worker-nvidia ]] || layout_hint=--multi-mixed
         managed_runtime="$2"
         managed_id="$3"
         [[ "$managed_runtime" == /run/user/"$(id -u)"/krdp-headless.* ]]
@@ -126,12 +128,14 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         --perms 01777 --dir /tmp/.X11-unix \
         --bind "$probe_runtime" "$probe_runtime" \
         dbus-run-session --config-file="$repo_path/server/virtual-session-bus.conf" \
-        -- bash "$script_path" --inside-private-bus "$probe_mode" "$rdp_mode" "$managed_id" "$probe_output_count" \
+        -- bash "$script_path" --inside-private-bus "$probe_mode" "$rdp_mode" "$managed_id" "$probe_output_count" "$layout_hint" \
         >"$probe_runtime/probe.log" 2>&1
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
 expected_outputs=${5:-1}
 [[ $expected_outputs == 1 || ( $expected_outputs == 2 && ( ${3:-} == --multi-worker || ${3:-} == --multi-mixed || ${3:-} == --multi-negative || ${3:-} == --multi-window || ${3:-} == --multi-input || ${3:-} == --multi-drag || ${3:-} == --multi-reposition || ${3:-} == --supervised ) ) ]]
+layout_mode=${3:-}
+if [[ $layout_mode == --supervised && ${6:-} == --multi-mixed ]]; then layout_mode=--multi-mixed; fi
 # Populate this private profile's desktop-service identities before KWin checks
 # application permissions (including Spectacle's restricted screenshot API).
 kbuildsycoca6 --noincremental >"$XDG_RUNTIME_DIR/service-cache.log" 2>&1
@@ -265,7 +269,7 @@ if [[ $expected_outputs == 2 ]]; then
     if [[ ${3:-} == --multi-negative ]]; then
         env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland timeout 10 kscreen-doctor \
             "output.${output_names[0]}.position.-1280,-100" "output.${output_names[1]}.position.0,0"
-    elif [[ ${3:-} == --multi-mixed || ${3:-} == --multi-input ]]; then
+    elif [[ $layout_mode == --multi-mixed || $layout_mode == --multi-input ]]; then
         env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland timeout 10 kscreen-doctor \
             "output.${output_names[0]}.scale.1.25" "output.${output_names[0]}.position.0,0" \
             "output.${output_names[1]}.position.1024,100"
@@ -279,7 +283,7 @@ if [[ $expected_outputs == 2 ]]; then
         # negative position. Record the actual readback, not the request.
         jq -e '(.outputs | map(.pos.x) | sort) == [0,1280] and (.outputs | map(.pos.y) | sort) == [0,100]' "$XDG_RUNTIME_DIR/outputs.json"
         echo 'Private KWin normalized requested negative origin to 0,0'
-    elif [[ ${3:-} == --multi-mixed || ${3:-} == --multi-input ]]; then
+    elif [[ $layout_mode == --multi-mixed || $layout_mode == --multi-input ]]; then
         jq -e '(.outputs | map(.pos.x) | sort) == [0,1024] and any(.outputs[]; .scale == 1.25)' "$XDG_RUNTIME_DIR/outputs.json"
     else
         jq -e '(.outputs | map(.pos.x) | sort) == [0,1280]' "$XDG_RUNTIME_DIR/outputs.json"

@@ -16,7 +16,8 @@ int main(int argc, char **argv)
     QCoreApplication app(argc, argv);
     const auto arguments = app.arguments();
     const bool adopting = arguments.size() == 5 && arguments[1] == QStringLiteral("--adopt");
-    const bool multi = arguments.size() == 3 && arguments[1] == QStringLiteral("--multi");
+    const bool mixed = arguments.size() == 3 && arguments[1] == QStringLiteral("--multi-mixed");
+    const bool multi = arguments.size() == 3 && (arguments[1] == QStringLiteral("--multi") || mixed);
     char name[256] = {};
     if (gethostname(name, sizeof(name) - 1) || QByteArray(name).split('.').first() != "sol"
         || !getuid() || getuid() != geteuid() || (arguments.size() != 2 && !adopting && !multi)) return 1;
@@ -58,7 +59,8 @@ int main(int argc, char **argv)
         env.insert(QStringLiteral("HOME"), QDir::homePath());
         qInfo().noquote() << "PAM-owned desktop" << handle.id << "uid" << uid << "runtime" << desktop.path();
         return VirtualSessionHostController::PreparedLaunch{desktop.filePath(QStringLiteral("worker.sock")),
-            {QStringLiteral("/usr/bin/bash"), {script, multi ? QStringLiteral("--supervised-multi-worker-nvidia")
+            {QStringLiteral("/usr/bin/bash"), {script, mixed ? QStringLiteral("--supervised-mixed-worker-nvidia")
+                : multi ? QStringLiteral("--supervised-multi-worker-nvidia")
                 : QStringLiteral("--supervised-worker-nvidia"), desktop.path(), handle.id}, env, {}}};
     });
     if (adopting) {
