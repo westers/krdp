@@ -27,10 +27,43 @@ private Q_SLOTS:
     void microphoneRecordsAreBoundedAndCorrelated();
     void positionRecordsAreBoundedAndCorrelated();
     void positionBatchRecordsAreBoundedAndCorrelated();
+    void managedFitRecordsAreBoundedAndCorrelated();
     void addVirtualRecordsAreBoundedAndCorrelated();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
 };
+
+void ConsoleWorkerWireTest::managedFitRecordsAreBoundedAndCorrelated()
+{
+    Deframer reader;
+    const ManagedFit request{17, 9, QStringLiteral("Virtual-0"), QSize(1600, 900), 1.25,
+        {{QStringLiteral("Virtual-0"), QStringLiteral("Virtual-1"), 1, 100},
+         {QStringLiteral("Virtual-1"), QStringLiteral("Virtual-2"), 3, 0}}};
+    const ManagedFitResult answer{17, 9, QStringLiteral("capture failed")};
+    reader.feed(frame(request) + frame(answer));
+    const auto first = reader.next();
+    QVERIFY(first);
+    QCOMPARE(managedFit(*first), std::optional<ManagedFit>(request));
+    auto truncated = *first;
+    truncated.payload.chop(1);
+    QVERIFY(!managedFit(truncated));
+    const auto second = reader.next();
+    QVERIFY(second);
+    QCOMPARE(managedFitResult(*second), std::optional<ManagedFitResult>(answer));
+    for (const auto &invalid : {ManagedFit{0, 9, request.output, request.pixels, request.scale, request.relations},
+                                ManagedFit{17, 9, request.output, QSize(1601, 900), request.scale, request.relations},
+                                ManagedFit{17, 9, request.output, request.pixels, 0.5, request.relations},
+                                ManagedFit{17, 9, request.output, request.pixels, request.scale,
+                                    {{QStringLiteral("Virtual-0"), QStringLiteral("Virtual-1"), 4, 0}}},
+                                ManagedFit{17, 9, request.output, request.pixels, request.scale,
+                                    {{QStringLiteral("Virtual-0"), QStringLiteral("Virtual-1"), 1, 0},
+                                     {QStringLiteral("Virtual-2"), QStringLiteral("Virtual-1"), 1, 0}}}}) {
+        reader.feed(frame(invalid));
+        const auto bad = reader.next();
+        QVERIFY(bad);
+        QVERIFY(!managedFit(*bad));
+    }
+}
 
 void ConsoleWorkerWireTest::readOnlyTopologyRecordIsBounded()
 {

@@ -23,7 +23,7 @@
 
 namespace KRdp::ConsoleWorkerWire
 {
-constexpr quint16 ProtocolVersion = 4; // Position batch; broker and worker must upgrade together.
+constexpr quint16 ProtocolVersion = 5; // Managed Fit; broker and worker must upgrade together.
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 
 enum class Kind : quint8 {
@@ -55,6 +55,8 @@ enum class Kind : quint8 {
     TopologyQuery,
     PositionBatch,
     PositionBatchResult,
+    ManagedFit,
+    ManagedFitResult,
 };
 
 struct Record {
@@ -114,6 +116,31 @@ struct PositionBatchResult {
     quint64 generation = 0;
     QString error;
     bool operator==(const PositionBatchResult &) const = default;
+};
+
+struct FitRelation {
+    QString parent;
+    QString child;
+    quint8 edge = 0; // 0 left, 1 right, 2 above, 3 below.
+    qint32 offset = 0;
+    bool operator==(const FitRelation &) const = default;
+};
+
+struct ManagedFit {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString output;
+    QSize pixels;
+    double scale = 1;
+    QVector<FitRelation> relations;
+    bool operator==(const ManagedFit &) const = default;
+};
+
+struct ManagedFitResult {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString error;
+    bool operator==(const ManagedFitResult &) const = default;
 };
 
 struct AddVirtual {
@@ -339,6 +366,74 @@ inline std::optional<PositionBatchResult> positionBatchResult(const Record &reco
     QDataStream stream(record.payload);
     stream.setByteOrder(QDataStream::BigEndian);
     PositionBatchResult result;
+    stream >> result.requestId >> result.generation >> result.error;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
+        || result.error.size() > 1024) return {};
+    return result;
+}
+
+inline QByteArray frame(const ManagedFit &request)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << request.requestId << request.generation << request.output << request.pixels << request.scale
+           << quint8(request.relations.size());
+    for (const auto &relation : request.relations)
+        stream << relation.parent << relation.child << relation.edge << relation.offset;
+    return frame(Kind::ManagedFit, payload);
+}
+
+inline std::optional<ManagedFit> managedFit(const Record &record)
+{
+    if (record.kind != Kind::ManagedFit || record.payload.size() > 4096) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    ManagedFit request;
+    quint8 count = 0;
+    stream >> request.requestId >> request.generation >> request.output >> request.pixels >> request.scale >> count;
+    if (stream.status() != QDataStream::Ok || !request.requestId || !request.generation || count > 16
+        || request.pixels.width() < 320 || request.pixels.height() < 200
+        || request.pixels.width() > 4096 || request.pixels.height() > 4096
+        || request.pixels.width() % 2 || request.pixels.height() % 2
+        || !std::isfinite(request.scale) || request.scale < 1.0 || request.scale > 4.0
+        || request.output.isEmpty() || request.output.size() > 128) return {};
+    const auto validName = [](const QString &name) {
+        if (name.isEmpty() || name.size() > 128) return false;
+        for (const auto character : name)
+            if (!character.isLetterOrNumber() && character != QLatin1Char('-') && character != QLatin1Char('_')) return false;
+        return true;
+    };
+    if (!validName(request.output)) return {};
+    QSet<QString> children;
+    for (quint8 i = 0; i < count; ++i) {
+        FitRelation relation;
+        stream >> relation.parent >> relation.child >> relation.edge >> relation.offset;
+        if (stream.status() != QDataStream::Ok || !validName(relation.parent) || !validName(relation.child)
+            || relation.parent == relation.child || relation.edge > 3 || children.contains(relation.child)
+            || relation.offset < -32768 || relation.offset > 32768) return {};
+        children.insert(relation.child);
+        request.relations.append(relation);
+    }
+    if (!stream.atEnd()) return {};
+    return request;
+}
+
+inline QByteArray frame(const ManagedFitResult &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.requestId << result.generation << result.error;
+    return frame(Kind::ManagedFitResult, payload);
+}
+
+inline std::optional<ManagedFitResult> managedFitResult(const Record &record)
+{
+    if (record.kind != Kind::ManagedFitResult || record.payload.size() > 4096) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    ManagedFitResult result;
     stream >> result.requestId >> result.generation >> result.error;
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
         || result.error.size() > 1024) return {};
@@ -796,7 +891,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::PositionBatchResult)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::ManagedFitResult)) {
             ++m_invalid;
             return std::nullopt;
         }

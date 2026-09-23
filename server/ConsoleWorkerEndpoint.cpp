@@ -139,6 +139,12 @@ bool ConsoleWorkerEndpoint::positionBatch(const ConsoleWorkerWire::PositionBatch
     return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
 }
 
+bool ConsoleWorkerEndpoint::managedFit(const ConsoleWorkerWire::ManagedFit &request)
+{
+    if (!m_ready || !m_worker) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
+}
+
 bool ConsoleWorkerEndpoint::addVirtual(const ConsoleWorkerWire::AddVirtual &request)
 {
     if (!m_ready || !m_worker) return false;
@@ -232,6 +238,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT positionFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::positionBatchResult(*record)) {
             Q_EMIT positionBatchFinished(*result);
+        } else if (const auto result = ConsoleWorkerWire::managedFitResult(*record)) {
+            Q_EMIT managedFitFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::addVirtualResult(*record)) {
             Q_EMIT addVirtualFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::removeVirtualResult(*record)) {
