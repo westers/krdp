@@ -2,10 +2,12 @@
 
 Status: agreed product direction; implementation in progress, not delivered.
 Source client now has a proportionally scaled visual retained-monitor arrangement
-draft with drag, edge snapping and keyboard placement. One retained virtual
-output position move, one new retained virtual output, or removal of one worker-added retained output is currently accepted
-through the authenticated preview/commit backend; X/Y fields are an Advanced/test
-control. Fit/Match, Console topology and deployment are still outstanding. A disposable 125%/100%
+draft with drag, edge snapping, keyboard placement and multiple positions in one
+revisioned Preview/Apply. One or more retained virtual-output position moves,
+one new retained virtual output, or removal of one worker-added retained output
+is supported in source by the authenticated preview/commit backend; X/Y fields
+are an Advanced/test control. Batch moves have not passed native GUI acceptance.
+Fit/Match, Console writes and deployment are still outstanding. A disposable 125%/100%
 Sol/Buzz GUI run also accepted one visual position move with two independently
 captured outputs; a later disposable GUI run added a third captured output by
 actual Preview add/Apply clicks. A subsequent GUI run selected that third output,
@@ -23,7 +25,7 @@ capture, OPT-043 server settings. This extends those features; it does not
 reopen their completed slices or replace the delivered single-output virtual
 Fit work. Implementation plan: [remote-monitor-layout plan](../plans/2026-09-22-remote-monitor-layout.md).
 Transaction contract: [remote monitor transactions](2026-09-23-remote-monitor-transactions.md)
-(partially implemented for one retained position move, Add or owned Remove; other operations proposed).
+(partially implemented for retained position moves, Add or owned Remove; other operations proposed).
 
 ## 1. The product model
 

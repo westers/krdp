@@ -40,9 +40,14 @@ exact all-output KScreen readback plus fresh independently decoded frames before
 acknowledgment. The broker now accepts one previewed batch containing only
 owned virtual `move` operations, binds it to the same one-use
 owner/generation/revision token, dispatches one worker batch, and requires an
-exact full after-catalog with one revision bump before success. Fit,
-mixed-operation drafts and native batch GUI acceptance remain absent; no Fit
-capability is advertised. Broker and worker must be built/deployed as a pair;
+exact full after-catalog with one revision bump before success. Client source
+`6986c8a` accumulates multiple visual positions in one draft and validates the
+exact returned after-catalog; `b414a05` adds a diagnostic batch action.
+Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
+tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
+CTests pass, but native batch GUI acceptance is absent. Fit and mixed-operation
+drafts remain absent; no Fit capability is advertised. Broker and worker must
+be built/deployed as a pair;
 the v4 bump intentionally rejects mixed-version worker sockets.
 An additional disposable 125%/100% Sol/Buzz source-GUI run confirmed that the
 visual editor uses logical aspect/position and committed one virtual move from

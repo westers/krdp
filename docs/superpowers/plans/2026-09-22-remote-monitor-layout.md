@@ -32,7 +32,12 @@ client visual Preview remove/Apply `afbb4fd` then passed a disposable Sol/Buzz
 source GUI Add→Remove cycle: a third output at rev2 disappeared at rev3 with
 the two original IDs unchanged, after fresh KScreen and post-remove keyframes.
 Original monitors cannot be removed through this path. Console, Fit/Match,
-multi-operation drafts and release remain open.
+mixed-operation drafts and release remain open. Subsequent server source
+`bc56de2`/`86ec0e2` supports an authenticated 2–16-position batch with
+whole-layout readback; client source `6986c8a`/`b414a05` accumulates multiple
+visual draft moves and provides a diagnostic batch action. Offscreen client
+tests pass, but no native batch GUI run or package/install has accepted this
+path. Mixed resize-plus-reflow and Add/Remove combinations remain open.
 
 Test-only `bee24a1`/`add2794` then proved that a new 960×540 virtual KWin
 output can be created at the right seam of an already running two-output
