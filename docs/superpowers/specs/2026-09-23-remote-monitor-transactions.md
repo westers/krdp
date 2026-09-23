@@ -33,6 +33,13 @@ Sol/Buzz GUI-accepted or deployed. KScreen arrangements with disabled, rotated
 or mirrored outputs currently fail closed rather than yielding a partial
 inventory. The older Console `layout` and `console-resize` paths remain
 separate; no physical mutation is authorized by this topology query.
+The later source-only worker wire v4 adds a bounded `PositionBatch` request and
+result. The private retained worker preflights the full owned arrangement,
+runs one `kscreen-doctor` invocation for all requested positions, and requires
+exact all-output KScreen readback plus fresh independently decoded frames before
+acknowledgment. The broker does not yet dispatch batches; no Fit/multi-operation
+capability is advertised. Broker and worker must be built/deployed as a pair;
+the v4 bump intentionally rejects mixed-version worker sockets.
 An additional disposable 125%/100% Sol/Buzz source-GUI run confirmed that the
 visual editor uses logical aspect/position and committed one virtual move from
 `(1024,100)` to `(1024,209)` with revision 1→2 and unchanged IDs. This does

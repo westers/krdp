@@ -23,7 +23,7 @@
 
 namespace KRdp::ConsoleWorkerWire
 {
-constexpr quint16 ProtocolVersion = 3; // Topology record; broker and worker must upgrade together.
+constexpr quint16 ProtocolVersion = 4; // Position batch; broker and worker must upgrade together.
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 
 enum class Kind : quint8 {
@@ -53,6 +53,8 @@ enum class Kind : quint8 {
     RemoveVirtualResult,
     Topology,
     TopologyQuery,
+    PositionBatch,
+    PositionBatchResult,
 };
 
 struct Record {
@@ -92,6 +94,26 @@ struct PositionResult {
     quint64 generation = 0;
     QString error; // Empty only after fresh KScreen readback and captured keyframes.
     bool operator==(const PositionResult &) const = default;
+};
+
+struct PositionTarget {
+    QString output;
+    QPoint globalLogical;
+    bool operator==(const PositionTarget &) const = default;
+};
+
+struct PositionBatch {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QVector<PositionTarget> targets;
+    bool operator==(const PositionBatch &) const = default;
+};
+
+struct PositionBatchResult {
+    quint64 requestId = 0;
+    quint64 generation = 0;
+    QString error;
+    bool operator==(const PositionBatchResult &) const = default;
 };
 
 struct AddVirtual {
@@ -259,6 +281,64 @@ inline std::optional<PositionResult> positionResult(const Record &record)
     QDataStream stream(record.payload);
     stream.setByteOrder(QDataStream::BigEndian);
     PositionResult result;
+    stream >> result.requestId >> result.generation >> result.error;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
+        || result.error.size() > 1024) return {};
+    return result;
+}
+
+inline QByteArray frame(const PositionBatch &request)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << request.requestId << request.generation << quint8(request.targets.size());
+    for (const auto &target : request.targets) stream << target.output << target.globalLogical;
+    return frame(Kind::PositionBatch, payload);
+}
+
+inline std::optional<PositionBatch> positionBatch(const Record &record)
+{
+    if (record.kind != Kind::PositionBatch || record.payload.size() > 4096) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    PositionBatch request;
+    quint8 count = 0;
+    stream >> request.requestId >> request.generation >> count;
+    if (stream.status() != QDataStream::Ok || !request.requestId || !request.generation || count < 2 || count > 16) return {};
+    QSet<QString> names;
+    for (quint8 i = 0; i < count; ++i) {
+        PositionTarget target;
+        stream >> target.output >> target.globalLogical;
+        if (stream.status() != QDataStream::Ok || target.output.isEmpty() || target.output.size() > 128
+            || names.contains(target.output)
+            || target.globalLogical.x() < -32768 || target.globalLogical.x() > 32768
+            || target.globalLogical.y() < -32768 || target.globalLogical.y() > 32768) return {};
+        for (const auto character : target.output) {
+            if (!character.isLetterOrNumber() && character != QLatin1Char('-') && character != QLatin1Char('_')) return {};
+        }
+        names.insert(target.output);
+        request.targets.append(target);
+    }
+    if (!stream.atEnd()) return {};
+    return request;
+}
+
+inline QByteArray frame(const PositionBatchResult &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.requestId << result.generation << result.error;
+    return frame(Kind::PositionBatchResult, payload);
+}
+
+inline std::optional<PositionBatchResult> positionBatchResult(const Record &record)
+{
+    if (record.kind != Kind::PositionBatchResult || record.payload.size() > 4096) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    PositionBatchResult result;
     stream >> result.requestId >> result.generation >> result.error;
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
         || result.error.size() > 1024) return {};
@@ -716,7 +796,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::TopologyQuery)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::PositionBatchResult)) {
             ++m_invalid;
             return std::nullopt;
         }

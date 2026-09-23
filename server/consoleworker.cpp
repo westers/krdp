@@ -40,6 +40,7 @@
 #include "RetainedKScreenReadback.h"
 #include "ConsoleTopologyReadback.h"
 #include "RetainedMultiResizePlan.h"
+#include "RetainedMultiPositionPlan.h"
 
 using namespace KRdp;
 
@@ -69,6 +70,12 @@ std::shared_ptr<QEvent> eventFor(const ConsoleWorkerWire::Input &input)
 
 class Worker : public QObject
 {
+    struct PendingPosition {
+        quint64 requestId = 0;
+        quint64 generation = 0;
+        bool batch = false;
+        QVector<RetainedKScreenReadback::Placement> targets;
+    };
 public:
     Worker(const QString &socketName, const CaptureWorkerMode &mode, quint32 uid, const QByteArray &token, bool desktop, QObject *parent = nullptr)
         : QObject(parent)
@@ -580,6 +587,12 @@ private:
                 m_socket.disconnectFromServer();
                 return;
             }
+            if (m_positionPending && (!m_positionPlan || !RetainedMultiPositionPlan::matches(*m_positionPlan, *kscreen)
+                || !m_control.active || m_control.generation != m_positionPending->generation)) {
+                finishPosition(QStringLiteral("positioned output or peers differ after captured readback"));
+                m_socket.disconnectFromServer();
+                return;
+            }
             qInfo() << "Retained KScreen readback confirmed" << kscreen->outputs.size() << "independent captured outputs";
             m_outputs = result.outputs;
             m_multiPublishedFrames = result.frames;
@@ -601,12 +614,7 @@ private:
         for (const auto &packet : result.frames) m_socket.write(ConsoleWorkerWire::frame(packet));
         if (result.becameReady && m_positionPending) {
             const auto request = *m_positionPending;
-            const auto it = std::find_if(m_outputs.monitors.cbegin(), m_outputs.monitors.cend(), [&request](const auto &output) {
-                return output.name == request.output;
-            });
-            const bool landed = it != m_outputs.monitors.cend()
-                && it->geometry.topLeft() + m_outputs.compositorOrigin == request.globalLogical;
-            if (!landed || !m_control.active || m_control.generation != request.generation) {
+            if (!m_control.active || m_control.generation != request.generation) {
                 finishPosition(QStringLiteral("position changed or authority lost during capture"));
             } else finishPosition({});
         }
@@ -888,14 +896,34 @@ private:
         if (!m_positionPending) return;
         const auto request = *m_positionPending;
         m_positionPending.reset();
+        m_positionPlan.reset();
         m_positionDeadline.stop();
-        m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionResult{request.requestId, request.generation, error}));
+        if (request.batch) m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionBatchResult{
+            request.requestId, request.generation, error}));
+        else m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionResult{
+            request.requestId, request.generation, error}));
     }
 
     void position(const ConsoleWorkerWire::Position &request)
     {
+        positionTargets({request.requestId, request.generation, false,
+            {{request.output, request.globalLogical}}});
+    }
+
+    void positionBatch(const ConsoleWorkerWire::PositionBatch &request)
+    {
+        QVector<RetainedKScreenReadback::Placement> targets;
+        for (const auto &target : request.targets) targets.append({target.output, target.globalLogical});
+        positionTargets({request.requestId, request.generation, true, std::move(targets)});
+    }
+
+    void positionTargets(const PendingPosition &request)
+    {
         const auto reject = [this, &request](const QString &error) {
-            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionResult{request.requestId, request.generation, error}));
+            if (request.batch) m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionBatchResult{
+                request.requestId, request.generation, error}));
+            else m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionResult{
+                request.requestId, request.generation, error}));
         };
         if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
             || !m_control.active || m_control.generation != request.generation
@@ -908,26 +936,21 @@ private:
             reject(QStringLiteral("fresh compositor readback differs from capture"));
             return;
         }
-        const auto found = std::find_if(before->outputs.cbegin(), before->outputs.cend(), [&request](const auto &output) {
-            return output.backendKey == request.output;
-        });
-        if (found == before->outputs.cend()) {
-            reject(QStringLiteral("output no longer exists"));
+        const auto plan = RetainedMultiPositionPlan::make(*before, m_sessionId, request.targets);
+        if (!plan) {
+            reject(QStringLiteral("invalid or overlapping position"));
             return;
         }
-        if (found->logicalGeometry.topLeft() == request.globalLogical) {
+        if (!plan->changed) {
             reject({}); // Fresh readback still agrees with captured keyframes; no mutation.
             return;
         }
-        const auto arguments = RetainedKScreenReadback::positionArguments(*before, {{request.output, request.globalLogical}});
-        if (!arguments) {
-            reject(QStringLiteral("invalid position"));
-            return;
-        }
+        const auto arguments = RetainedKScreenReadback::positionArguments(*before, request.targets);
         releaseInput();
         m_multiReady = false;
         m_multiPublishedFrames.clear();
         m_positionPending = request;
+        m_positionPlan = *plan;
         m_positionDeadline.start();
         QProcess command;
         command.start(QStringLiteral("kscreen-doctor"), *arguments);
@@ -937,9 +960,7 @@ private:
             command.waitForFinished(1000);
         }
         const auto after = readKScreen();
-        const bool landed = after && std::any_of(after->outputs.cbegin(), after->outputs.cend(), [&request](const auto &output) {
-            return output.backendKey == request.output && output.logicalGeometry.topLeft() == request.globalLogical;
-        });
+        const bool landed = after && RetainedMultiPositionPlan::matches(*plan, *after);
         if (!finished || command.exitStatus() != QProcess::NormalExit || command.exitCode() != 0
             || !landed) {
             finishPosition(QStringLiteral("position readback differs from request"));
@@ -1029,6 +1050,10 @@ private:
                 position(*request);
                 continue;
             }
+            if (const auto request = ConsoleWorkerWire::positionBatch(*record)) {
+                positionBatch(*request);
+                continue;
+            }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {
                 if (m_multiMode) {
                     for (const auto &session : m_multiSessions) session->requestKeyFrame();
@@ -1114,7 +1139,8 @@ private:
     QSet<QScreen *> m_watchedScreens;
     QTimer m_multiSettle;
     QTimer m_positionDeadline;
-    std::optional<ConsoleWorkerWire::Position> m_positionPending;
+    std::optional<PendingPosition> m_positionPending;
+    std::optional<RetainedMultiPositionPlan::Plan> m_positionPlan;
     QTimer m_multiResizeDeadline;
     std::optional<ConsoleWorkerWire::Resize> m_multiResizePending;
     std::optional<RetainedMultiResizePlan::Plan> m_multiResizePlan;

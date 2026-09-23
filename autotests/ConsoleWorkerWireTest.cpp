@@ -26,6 +26,7 @@ private Q_SLOTS:
     void videoQualityIsBoundedAndGenerationScoped();
     void microphoneRecordsAreBoundedAndCorrelated();
     void positionRecordsAreBoundedAndCorrelated();
+    void positionBatchRecordsAreBoundedAndCorrelated();
     void addVirtualRecordsAreBoundedAndCorrelated();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
@@ -134,6 +135,42 @@ void ConsoleWorkerWireTest::positionRecordsAreBoundedAndCorrelated()
     const auto bad = reader.next();
     QVERIFY(bad);
     QVERIFY(!position(*bad));
+}
+
+void ConsoleWorkerWireTest::positionBatchRecordsAreBoundedAndCorrelated()
+{
+    Deframer reader;
+    const PositionBatch request{7, 9, {{QStringLiteral("Virtual-0"), QPoint(1280, 0)},
+        {QStringLiteral("Virtual-1"), QPoint(0, 0)}}};
+    const PositionBatchResult answer{7, 9, QStringLiteral("capture failed")};
+    reader.feed(frame(request) + frame(answer));
+    const auto first = reader.next();
+    QVERIFY(first);
+    QCOMPARE(positionBatch(*first), std::optional<PositionBatch>(request));
+    auto truncated = *first;
+    truncated.payload.chop(1);
+    QVERIFY(!positionBatch(truncated));
+    const auto second = reader.next();
+    QVERIFY(second);
+    QCOMPARE(positionBatchResult(*second), std::optional<PositionBatchResult>(answer));
+    auto duplicate = request;
+    duplicate.targets[1].output = duplicate.targets[0].output;
+    reader.feed(frame(duplicate));
+    const auto bad = reader.next();
+    QVERIFY(bad);
+    QVERIFY(!positionBatch(*bad));
+    auto invalid = request;
+    invalid.targets[0].globalLogical.setX(-32769);
+    reader.feed(frame(invalid));
+    const auto outOfBounds = reader.next();
+    QVERIFY(outOfBounds);
+    QVERIFY(!positionBatch(*outOfBounds));
+    invalid = request;
+    invalid.targets.removeLast();
+    reader.feed(frame(invalid));
+    const auto tooFew = reader.next();
+    QVERIFY(tooFew);
+    QVERIFY(!positionBatch(*tooFew));
 }
 
 void ConsoleWorkerWireTest::microphoneRecordsAreBoundedAndCorrelated()

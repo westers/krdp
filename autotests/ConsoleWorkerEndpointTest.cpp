@@ -33,6 +33,9 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QVERIFY(!endpoint.resize(resize)); // Never send a display mutation before Ready.
     const ConsoleWorkerWire::Position position{12, 42, QStringLiteral("Virtual-1"), QPoint(1280, 100)};
     QVERIFY(!endpoint.position(position));
+    const ConsoleWorkerWire::PositionBatch batch{13, 42, {{QStringLiteral("Virtual-0"), QPoint(1280, 0)},
+        {QStringLiteral("Virtual-1"), QPoint(0, 0)}}};
+    QVERIFY(!endpoint.positionBatch(batch));
     QVERIFY(!endpoint.requestTopology());
 
     int ready = 0;
@@ -102,6 +105,17 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionResult{12, 42, {}}));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(positioned.count(), 1);
+
+    QSignalSpy batchPositioned(&endpoint, &ConsoleWorkerEndpoint::positionBatchFinished);
+    QVERIFY(endpoint.positionBatch(batch));
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    brokerMessages.feed(worker.readAll());
+    const auto batchRecord = brokerMessages.next();
+    QVERIFY(batchRecord);
+    QCOMPARE(ConsoleWorkerWire::positionBatch(*batchRecord), std::optional<ConsoleWorkerWire::PositionBatch>(batch));
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PositionBatchResult{13, 42, {}}));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(batchPositioned.count(), 1);
 
     QVERIFY(!endpoint.setVideoQuality({0, 60}));
     QVERIFY(!endpoint.setVideoQuality({42, 101}));

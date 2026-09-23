@@ -7,6 +7,7 @@
 #include "RetainedKScreenReadback.h"
 #include "ConsoleTopologyReadback.h"
 #include "RetainedMultiResizePlan.h"
+#include "RetainedMultiPositionPlan.h"
 
 using namespace KRdp::RetainedKScreenReadback;
 
@@ -51,6 +52,45 @@ class RetainedKScreenReadbackTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void multiPositionPreflightsPeersAndExactReadback()
+    {
+        const auto before = decoded(root());
+        QVERIFY(before);
+        const QVector<Placement> move{{QStringLiteral("Virtual-1"), QPoint(1024, 120)}};
+        const auto plan = KRdp::RetainedMultiPositionPlan::make(*before, QStringLiteral("lease-1"), move);
+        QVERIFY(plan);
+        QVERIFY(plan->changed);
+        QCOMPARE(plan->after[0], before->outputs[0]);
+        QCOMPARE(plan->after[1].logicalGeometry, QRect(1024, 120, 1280, 720));
+        auto landed = *before;
+        landed.outputs[1].logicalGeometry.moveTo(1024, 120);
+        QVERIFY(KRdp::RetainedMultiPositionPlan::matches(*plan, landed));
+        landed.outputs[0].logicalGeometry.moveTo(0, 1);
+        QVERIFY(!KRdp::RetainedMultiPositionPlan::matches(*plan, landed));
+        QVERIFY(!KRdp::RetainedMultiPositionPlan::make(*before, QStringLiteral("other-owner"), move));
+        QVERIFY(!KRdp::RetainedMultiPositionPlan::make(*before, QStringLiteral("lease-1"),
+            {{QStringLiteral("Virtual-1"), QPoint(1000, 120)}})); // Overlap.
+        QVERIFY(!KRdp::RetainedMultiPositionPlan::make(*before, QStringLiteral("lease-1"),
+            {{QStringLiteral("Virtual-1"), QPoint(1024, 120)},
+             {QStringLiteral("Virtual-1"), QPoint(1024, 130)}})); // Duplicate.
+        auto physical = *before;
+        physical.outputs[1].physical = true;
+        QVERIFY(!KRdp::RetainedMultiPositionPlan::make(physical, QStringLiteral("lease-1"), move));
+        // A future Fit can move both outputs in one backend command. Validate
+        // the final arrangement, not an overlapping intermediate order.
+        const auto swap = KRdp::RetainedMultiPositionPlan::make(*before, QStringLiteral("lease-1"),
+            {{QStringLiteral("Virtual-0"), QPoint(1280, 0)},
+             {QStringLiteral("Virtual-1"), QPoint(0, 0)}});
+        QVERIFY(swap);
+        QVERIFY(swap->changed);
+        QCOMPARE(swap->after[0].logicalGeometry.topLeft(), QPoint(1280, 0));
+        QCOMPARE(swap->after[1].logicalGeometry.topLeft(), QPoint(0, 0));
+        const auto noOp = KRdp::RetainedMultiPositionPlan::make(*before, QStringLiteral("lease-1"),
+            {{QStringLiteral("Virtual-1"), QPoint(1024, 100)}});
+        QVERIFY(noOp);
+        QVERIFY(!noOp->changed);
+    }
+
     void multiOutputResizePreflightAndExactAfterState()
     {
         const auto before = decoded(root());
