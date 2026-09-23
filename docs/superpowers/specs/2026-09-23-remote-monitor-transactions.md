@@ -31,8 +31,12 @@ cancels the query. It advertises enumeration only, with all topology-write
 capabilities false; `multiOutputCapture` is true only for a currently published
 multi-output capture. The output geometry is worker/QScreen metadata confirmed
 by matching captured keyframes. This is not an independent fresh KScreen
-readback or a transaction commit proof. This multi-output path has source tests,
-but not native GUI/host acceptance or deployment. Other backends have no new
+readback or a transaction commit proof. This multi-output path has source tests
+and isolated Sol/Buzz two-surface GUI acceptance; the source client also received
+a read-only two-output topology reply (`ready/2/rev1`) in an isolated run. A
+same-compositor Sol worker probe moved a KDE window to the second virtual output
+and captured it there. Client-driven drag/input, mixed-scale GUI, installed
+broker, deployment and write transactions remain unaccepted. Other backends have no new
 query handler yet.
 The client sends the query only after an acknowledged retained attachment,
 validates its correlation and bounded geometry/capabilities, and treats an old
