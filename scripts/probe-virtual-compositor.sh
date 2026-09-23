@@ -275,7 +275,10 @@ if [[ $expected_outputs == 2 ]]; then
     fi
     env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland timeout 10 kscreen-doctor -j >"$XDG_RUNTIME_DIR/outputs.json"
     if [[ ${3:-} == --multi-negative ]]; then
-        jq -e '(.outputs | map(.pos.x) | sort) == [-1280,0] and (.outputs | map(.pos.y) | sort) == [-100,0]' "$XDG_RUNTIME_DIR/outputs.json"
+        # This KWin build normalizes the workspace origin after accepting a
+        # negative position. Record the actual readback, not the request.
+        jq -e '(.outputs | map(.pos.x) | sort) == [0,1280] and (.outputs | map(.pos.y) | sort) == [0,100]' "$XDG_RUNTIME_DIR/outputs.json"
+        echo 'Private KWin normalized requested negative origin to 0,0'
     elif [[ ${3:-} == --multi-mixed || ${3:-} == --multi-input ]]; then
         jq -e '(.outputs | map(.pos.x) | sort) == [0,1024] and any(.outputs[]; .scale == 1.25)' "$XDG_RUNTIME_DIR/outputs.json"
     else

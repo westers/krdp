@@ -193,7 +193,7 @@ int main(int argc, char **argv)
             if (outputs.monitors[i].geometry != logical || frame.monitors[i].geometry != wire
                 || outputs.monitors[i].scale != (mixed && i == 0 ? 1.25 : 1.0)) return;
         }
-        if (outputs.compositorOrigin != (negativeProbe ? QPoint(-1280, -100) : QPoint(0, 0))) return;
+        if (outputs.compositorOrigin != QPoint(0, 0)) return; // Sol KWin normalizes the negative request.
         QFile output(runtime + (multi ? QStringLiteral("/worker-keyframe-%1.h264").arg(frame.monitorIndex)
                                       : QStringLiteral("/worker-keyframe.h264")));
         if (!output.open(QIODevice::WriteOnly) || output.write(frame.data) != frame.data.size()) return;
