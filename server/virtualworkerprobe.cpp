@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "ConsoleWorkerEndpoint.h"
 #include "H264KeyframeSize.h"
+#include "RetainedKScreenReadback.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -26,8 +27,9 @@ int main(int argc, char **argv)
     const bool managed = arguments.size() == 3 && arguments[1] == QStringLiteral("--managed-session");
     const bool inputProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-input");
     const bool dragProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-drag");
+    const bool repositionProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-reposition");
     const bool mixed = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi-mixed") || inputProbe);
-    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || dragProbe);
+    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || dragProbe || repositionProbe);
     if (arguments.size() != 1 && !managed && !multi) return 1;
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     const QFileInfo runtimeInfo(runtime);
@@ -85,11 +87,18 @@ int main(int argc, char **argv)
     bool inputSent = false;
     bool inputVerified = !inputProbe && !dragProbe;
     bool postMoveCaptured = !dragProbe;
+    bool repositionStarted = false;
+    bool repositionReadback = false;
+    bool repositionInventory = false;
+    QSet<int> repositionFrames;
+    QProcess reposition;
+    reposition.setProgram(QStringLiteral("kscreen-doctor"));
     bool stopping = false;
     int result = 1;
     ConsoleWorkerWire::Outputs outputs;
     const auto maybeStop = [&] {
-        if (captured && resizeRefused && inputVerified && postMoveCaptured && !stopping) {
+        if (captured && resizeRefused && inputVerified && postMoveCaptured
+            && (!repositionProbe || (repositionReadback && repositionInventory && repositionFrames.size() == 2)) && !stopping) {
             stopping = true;
             endpoint.stopWorker();
         }
@@ -137,7 +146,31 @@ int main(int argc, char **argv)
         endpoint.resize({1, 1, QStringLiteral("Virtual-0"), QSize(1024, 768), 1});
         endpoint.requestKeyFrame();
     });
-    QObject::connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, &app, [&](const auto &value) { outputs = value; });
+    QObject::connect(&reposition, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), &app,
+        [&](int code, QProcess::ExitStatus status) {
+            if (code != 0 || status != QProcess::NormalExit) { app.quit(); return; }
+            QProcess readback;
+            readback.start(QStringLiteral("kscreen-doctor"), {QStringLiteral("-j")});
+            if (!readback.waitForFinished(3000) || readback.exitCode() != 0) { app.quit(); return; }
+            const auto snapshot = RetainedKScreenReadback::parse(readback.readAllStandardOutput(), id);
+            if (!snapshot || snapshot->outputs.size() != 2
+                || snapshot->outputs[0].logicalGeometry != QRect(0, 0, 1280, 720)
+                || snapshot->outputs[1].logicalGeometry != QRect(1280, 100, 1280, 720)) { app.quit(); return; }
+            repositionReadback = true;
+            qInfo("Private KScreen read back repositioned Virtual-1 at logical (1280,100)");
+            endpoint.requestKeyFrame();
+            maybeStop();
+        });
+    QObject::connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, &app, [&](const auto &value) {
+        outputs = value;
+        if (repositionProbe && repositionStarted && value.monitors.size() == 2
+            && value.monitors[0].geometry == QRect(0, 0, 1280, 720)
+            && value.monitors[1].geometry == QRect(1280, 100, 1280, 720)) {
+            repositionInventory = true;
+            qInfo("Worker published repositioned two-output inventory");
+            endpoint.requestKeyFrame();
+        }
+    });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::resizeFinished, &app, [&](const auto &value) {
         resizeRefused = value.requestId == 1 && value.generation == 1
             && value.error == (multi ? QStringLiteral("single-output Fit is unavailable with multiple remote monitors")
@@ -151,8 +184,10 @@ int main(int argc, char **argv)
             || outputs.monitors.size() != expected || frame.monitors.size() != expected) return;
         for (int i = 0; i < expected; ++i) {
             const QRect logical = mixed && i == 0 ? QRect(0, 0, 1024, 576)
-                : mixed && i == 1 ? QRect(1024, 100, 1280, 720) : QRect(i * 1280, 0, 1280, 720);
-            const QRect wire = mixed && i == 1 ? QRect(1280, 100, 1280, 720) : QRect(i * 1280, 0, 1280, 720);
+                : mixed && i == 1 ? QRect(1024, 100, 1280, 720)
+                : repositionInventory && i == 1 ? QRect(1280, 100, 1280, 720) : QRect(i * 1280, 0, 1280, 720);
+            const QRect wire = (mixed || repositionInventory) && i == 1 ? QRect(1280, 100, 1280, 720)
+                : QRect(i * 1280, 0, 1280, 720);
             if (outputs.monitors[i].geometry != logical || frame.monitors[i].geometry != wire
                 || outputs.monitors[i].scale != (mixed && i == 0 ? 1.25 : 1.0)) return;
         }
@@ -165,6 +200,26 @@ int main(int argc, char **argv)
         if (dragProbe && inputVerified && frame.monitorIndex == 1) {
             postMoveCaptured = true;
             qInfo("Captured second output again after KWin drag destination changed");
+        }
+        if (repositionProbe && repositionInventory && repositionReadback) {
+            repositionFrames.insert(frame.monitorIndex);
+            if (repositionFrames.size() == 2) qInfo("Both post-reposition encoded output keyframes verified");
+        }
+        if (captured && repositionProbe && !repositionStarted) {
+            repositionStarted = true;
+            QProcess before;
+            before.start(QStringLiteral("kscreen-doctor"), {QStringLiteral("-j")});
+            if (!before.waitForFinished(3000) || before.exitCode() != 0) { app.quit(); return; }
+            const auto snapshot = RetainedKScreenReadback::parse(before.readAllStandardOutput(), id);
+            if (!snapshot || snapshot->outputs.size() != 2
+                || snapshot->outputs[0].logicalGeometry != QRect(0, 0, 1280, 720)
+                || snapshot->outputs[1].logicalGeometry != QRect(1280, 0, 1280, 720)) { app.quit(); return; }
+            const auto arguments = RetainedKScreenReadback::positionArguments(*snapshot,
+                {{QStringLiteral("Virtual-1"), QPoint(1280, 100)}});
+            if (!arguments) { app.quit(); return; }
+            qInfo("Applying private KScreen position to Virtual-1");
+            reposition.setArguments(*arguments);
+            reposition.start();
         }
         if (captured && inputProbe && !inputSent) {
             inputSent = true;
@@ -222,15 +277,18 @@ int main(int argc, char **argv)
         app.quit();
     });
     if (managed) QObject::connect(&endpoint, &ConsoleWorkerEndpoint::workerStopped, &app, [&] {
-        result = captured && resizeRefused && inputVerified && postMoveCaptured && stopping ? 0 : 1;
+        result = captured && resizeRefused && inputVerified && postMoveCaptured &&
+            (!repositionProbe || (repositionReadback && repositionInventory && repositionFrames.size() == 2)) && stopping ? 0 : 1;
         app.quit();
     });
     QObject::connect(&worker, &QProcess::errorOccurred, &app, [&](auto) { app.quit(); });
     QObject::connect(&worker, &QProcess::finished, &app, [&](int code, QProcess::ExitStatus status) {
-        result = captured && resizeRefused && inputVerified && postMoveCaptured && stopping && code == 0 && status == QProcess::NormalExit ? 0 : 1;
+        result = captured && resizeRefused && inputVerified && postMoveCaptured &&
+            (!repositionProbe || (repositionReadback && repositionInventory && repositionFrames.size() == 2))
+            && stopping && code == 0 && status == QProcess::NormalExit ? 0 : 1;
         app.quit();
     });
-    QTimer::singleShot(inputProbe || dragProbe ? 30000 : 20000, &app, &QCoreApplication::quit);
+    QTimer::singleShot(inputProbe || dragProbe || repositionProbe ? 30000 : 20000, &app, &QCoreApplication::quit);
     // Managed mode owns only the broker endpoint. The existing desktop loop
     // supplies its worker; this process must never enter or stop the guardian.
     if (!managed) worker.start();
