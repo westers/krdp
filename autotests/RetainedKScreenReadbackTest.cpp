@@ -8,6 +8,7 @@
 #include "ConsoleTopologyReadback.h"
 #include "RetainedMultiResizePlan.h"
 #include "RetainedMultiPositionPlan.h"
+#include "RetainedMultiFitPlan.h"
 
 using namespace KRdp::RetainedKScreenReadback;
 
@@ -117,6 +118,72 @@ private Q_SLOTS:
         physical.outputs[1].physical = true;
         QVERIFY(!KRdp::RetainedMultiResizePlan::make(physical, QStringLiteral("lease-1"),
             QStringLiteral("Virtual-1"), QSize(1600, 900), 1.25));
+    }
+
+    void managedFitPreflightsResizeAndDependentMoveTogether()
+    {
+        namespace Fit = KRdp::RemoteTopologyFit;
+        namespace WorkerFit = KRdp::RetainedMultiFitPlan;
+        const auto before = decoded(root());
+        QVERIFY(before);
+        const QVector<Fit::Relation> relations{{QStringLiteral("Virtual-0"), QStringLiteral("Virtual-1"),
+            Fit::Relation::Edge::Right, 100}};
+        const auto plan = WorkerFit::make(*before, QStringLiteral("lease-1"), QStringLiteral("Virtual-0"),
+            QSize(1600, 900), 1.25, relations);
+        QVERIFY(plan);
+        QVERIFY(plan->changed);
+        QVERIFY(plan->resizeChanged);
+        QCOMPARE(plan->placements.size(), 1);
+        QCOMPARE(plan->placements[0].outputName, QStringLiteral("Virtual-1"));
+        QCOMPARE(plan->placements[0].logicalPosition, QPoint(1280, 100));
+        QCOMPARE(plan->after[0].nativePixels, QSize(1600, 900));
+        QCOMPARE(plan->after[0].logicalGeometry, QRect(0, 0, 1280, 720));
+        QCOMPARE(plan->after[1].logicalGeometry, QRect(1280, 100, 1280, 720));
+        KRdp::VirtualResize::Snapshot target;
+        target.name = QStringLiteral("Virtual-0");
+        target.position = QPoint(0, 0);
+        target.scale = 1.25;
+        target.current = {QStringLiteral("current"), QSize(1280, 720), 60000};
+        target.modes = {target.current, {QStringLiteral("fit-mode"), QSize(1600, 900), 60000}};
+        const auto command = WorkerFit::arguments(*plan, target, target.modes.last());
+        QVERIFY(command);
+        QCOMPARE(*command, (QStringList{QStringLiteral("output.Virtual-0.mode.fit-mode"),
+            QStringLiteral("output.Virtual-0.scale.1.25"),
+            QStringLiteral("output.Virtual-1.position.1280,100")}));
+        target.position.setX(1);
+        QVERIFY(!WorkerFit::arguments(*plan, target, target.modes.last()));
+        target.position.setX(0);
+        QVERIFY(!WorkerFit::arguments(*plan, target, target.current));
+        auto landed = *before;
+        landed.outputs = plan->after;
+        QVERIFY(WorkerFit::matches(*plan, landed));
+        landed.outputs[1].logicalGeometry.moveLeft(1281);
+        QVERIFY(!WorkerFit::matches(*plan, landed));
+        const auto noOp = WorkerFit::make(*before, QStringLiteral("lease-1"), QStringLiteral("Virtual-0"),
+            QSize(1280, 720), 1.25, relations);
+        QVERIFY(noOp);
+        QVERIFY(!noOp->changed);
+        QVERIFY(!noOp->resizeChanged);
+        QVERIFY(noOp->placements.isEmpty());
+        const auto scaleOnly = WorkerFit::make(*before, QStringLiteral("lease-1"), QStringLiteral("Virtual-0"),
+            QSize(1600, 900), 1.5625, relations);
+        QVERIFY(scaleOnly);
+        QVERIFY(scaleOnly->changed);
+        QVERIFY(scaleOnly->resizeChanged);
+        QVERIFY(scaleOnly->placements.isEmpty());
+        QCOMPARE(scaleOnly->after[0].logicalGeometry, before->outputs[0].logicalGeometry);
+        QCOMPARE(scaleOnly->after[1], before->outputs[1]);
+        QVERIFY(!WorkerFit::make(*before, QStringLiteral("lease-1"), QStringLiteral("Virtual-0"),
+            QSize(1600, 900), 1.25, {})); // Unmanaged neighbor would be overlapped, never repacked.
+        QVERIFY(!WorkerFit::make(*before, QStringLiteral("other-owner"), QStringLiteral("Virtual-0"),
+            QSize(1600, 900), 1.25, relations));
+        QVERIFY(!WorkerFit::make(*before, QStringLiteral("lease-1"), QStringLiteral("Virtual-0"),
+            QSize(1600, 900), 1.25, {{QStringLiteral("Virtual-0"), QStringLiteral("Virtual-1"),
+                Fit::Relation::Edge::Right, 99}})); // Stale edge.
+        auto physical = *before;
+        physical.outputs[1].physical = true;
+        QVERIFY(!WorkerFit::make(physical, QStringLiteral("lease-1"), QStringLiteral("Virtual-0"),
+            QSize(1600, 900), 1.25, relations));
     }
 
     void physicalReadOnlyInventoryNeedsCapturedKeyframe()
