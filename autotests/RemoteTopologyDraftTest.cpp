@@ -121,6 +121,9 @@ private Q_SLOTS:
         small.maxAtlasDimension = 3000;
         request.operations[0].pixels = QSize(2000, 600);
         QCOMPARE(preview(source, small, request).error, QStringLiteral("limit"));
+        request.operations[0].pixels = QSize(800, 600);
+        request.operations[0].scale = 1e-12; // Must reject before ceil-to-int overflow.
+        QCOMPARE(preview(source, capabilities(), request).error, QStringLiteral("limit"));
     }
 };
 

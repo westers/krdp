@@ -65,6 +65,14 @@ inline Preview preview(const Snapshot &snapshot, const Capabilities &caps, const
     if (request.generation != snapshot.generation) return fail(QStringLiteral("stale-generation"));
     if (request.expectedRevision != snapshot.revision) return fail(QStringLiteral("stale-revision"));
     if (request.owner.isEmpty()) return fail(QStringLiteral("not-owner"));
+    const auto modeAllowed = [&caps](const QSize &pixels, qreal scale) {
+        return caps.maxOutputDimension > 0 && caps.maxAtlasDimension > 0
+            && !pixels.isEmpty() && pixels.width() <= caps.maxOutputDimension && pixels.height() <= caps.maxOutputDimension
+            && std::isfinite(scale) && scale > 0.0
+            && std::isfinite(double(pixels.width()) / scale) && std::isfinite(double(pixels.height()) / scale)
+            && double(pixels.width()) / scale <= caps.maxAtlasDimension
+            && double(pixels.height()) / scale <= caps.maxAtlasDimension;
+    };
     QSet<QString> ids;
     for (const auto &entry : result.after) {
         if (entry.id.isEmpty() || ids.contains(entry.id)) return fail(QStringLiteral("invalid"));
@@ -74,9 +82,9 @@ inline Preview preview(const Snapshot &snapshot, const Capabilities &caps, const
     for (const auto &operation : request.operations) {
         if (operation.kind == Operation::Kind::AddVirtual) {
             if (!caps.addVirtual) return fail(QStringLiteral("unsupported"));
-            if (!operation.id.startsWith(QStringLiteral("new:")) || operation.id.size() <= 4 || ids.contains(operation.id)
-                || operation.pixels.isEmpty() || !std::isfinite(operation.scale) || operation.scale <= 0.0)
+            if (!operation.id.startsWith(QStringLiteral("new:")) || operation.id.size() <= 4 || ids.contains(operation.id))
                 return fail(QStringLiteral("invalid"));
+            if (!modeAllowed(operation.pixels, operation.scale)) return fail(QStringLiteral("limit"));
             ids.insert(operation.id);
             added.insert(operation.id);
             result.after.append({operation.id, {
@@ -106,8 +114,7 @@ inline Preview preview(const Snapshot &snapshot, const Capabilities &caps, const
             break;
         case Operation::Kind::Resize:
             if (!it->output.physical && !caps.resizeVirtual) return fail(QStringLiteral("unsupported"));
-            if (operation.pixels.isEmpty() || !std::isfinite(operation.scale) || operation.scale <= 0.0)
-                return fail(QStringLiteral("invalid"));
+            if (!modeAllowed(operation.pixels, operation.scale)) return fail(QStringLiteral("limit"));
             it->output.nativePixels = operation.pixels;
             it->output.scale = operation.scale;
             it->output.logicalGeometry.setSize(RemoteMonitorGeometry::logicalSize(operation.pixels, operation.scale));
@@ -129,8 +136,7 @@ inline Preview preview(const Snapshot &snapshot, const Capabilities &caps, const
         if (!output.enabled) continue;
         if (output.primary) ++primaryCount;
         const QRect rect = output.logicalGeometry;
-        if (!rect.isValid() || output.nativePixels.isEmpty() || !std::isfinite(output.scale) || output.scale <= 0.0
-            || output.nativePixels.width() > caps.maxOutputDimension || output.nativePixels.height() > caps.maxOutputDimension
+        if (!rect.isValid() || !modeAllowed(output.nativePixels, output.scale)
             || rect.left() < -caps.maxAtlasDimension || rect.top() < -caps.maxAtlasDimension
             || rect.right() > caps.maxAtlasDimension || rect.bottom() > caps.maxAtlasDimension)
             return fail(QStringLiteral("limit"));
