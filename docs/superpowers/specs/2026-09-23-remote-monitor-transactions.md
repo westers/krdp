@@ -107,8 +107,13 @@ The path is separately default-OFF behind
 opt-ins remain required. A private `mixed` capability is true only for wholly
 owned retained virtual layouts. Local full build/68 selected non-maintenance
 and Sol paired worker/host focused broker/protocol/wire tests pass. This is
-not native acceptance, and it cannot combine Add/Remove creator lifecycles;
-the client Match action is still unavailable.
+not native acceptance, and it cannot combine Add/Remove creator lifecycles.
+Client `c001275` now wires explicit screen-to-existing-output Match choices
+through preview/commit and exact whole-catalog validation, with extra remote
+outputs preserved. The action is gated on the private mixed capability; new
+client screens needing a mixed Add remain unsupported. Full client build/29
+CTests pass and both Buzz client launch paths are updated, but no native Match
+GUI/compositor acceptance has been run.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. The later private Fit
