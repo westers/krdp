@@ -231,6 +231,74 @@ private Q_SLOTS:
             QCOMPARE(t.request(commit, 1000).value(u"code"_s).toString(), u"invalid"_s); // Token consumed.
         });
     }
+    void retainedAddRequiresAuthenticatedCommitAndCapturedReadback() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            RemoteTopologyCatalog catalog;
+            const auto initial = catalog.observe({
+                {.backendKey = u"Virtual-0"_s, .name = u"Virtual-0"_s,
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(0, 0, 1280, 720),
+                    .scale = 1, .enabled = true, .primary = true, .physical = false, .owner = t.m_handle->id},
+                {.backendKey = u"Virtual-1"_s, .name = u"Virtual-1"_s,
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(1280, 0, 1280, 720),
+                    .scale = 1, .enabled = true, .primary = false, .physical = false, .owner = t.m_handle->id},
+            });
+            QVERIFY(initial);
+            auto current = *initial;
+            t.setTopologyResolver([&current](const auto &) { return std::optional(current); });
+            QJsonObject preview{{u"type"_s, u"topology-preview"_s}, {u"v"_s, 1},
+                {u"id"_s, u"add-1"_s}, {u"generation"_s, current.generation},
+                {u"expectedRevision"_s, double(current.revision)}, {u"allowRemoval"_s, false},
+                {u"allowPhysicalChange"_s, false}, {u"operations"_s, QJsonArray{
+                    QJsonObject{{u"op"_s, u"add"_s}, {u"output"_s, u"new:extra"_s},
+                        {u"position"_s, QJsonObject{{u"x"_s, 2560}, {u"y"_s, 0}}},
+                        {u"pixels"_s, QJsonObject{{u"width"_s, 960}, {u"height"_s, 540}}},
+                        {u"scale"_s, 1.0}}}}};
+            QCOMPARE(t.request(preview, 1001).value(u"code"_s).toString(), u"not-owner"_s);
+            const auto answer = t.request(preview, 1000);
+            QCOMPARE(answer.value(u"type"_s).toString(), u"topology-preview"_s);
+            const auto after = answer.value(u"after"_s).toArray();
+            QCOMPARE(after.size(), 3);
+            const QString backend = after.last().toObject().value(u"name"_s).toString();
+            QVERIFY(backend.startsWith(u"Virtual-krdp-added-"_s));
+            QCOMPARE(t.request(preview, 1000).value(u"token"_s).toString(), answer.value(u"token"_s).toString());
+            QJsonObject commit{{u"type"_s, u"topology-commit"_s}, {u"v"_s, 1},
+                {u"id"_s, u"add-1"_s}, {u"token"_s, answer.value(u"token"_s)},
+                {u"generation"_s, current.generation}, {u"expectedRevision"_s, double(current.revision)}};
+            QCOMPARE(t.request(commit, 1001).value(u"code"_s).toString(), u"not-owner"_s);
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            std::optional<ConsoleWorkerWire::AddVirtual> command;
+            for (const auto &record : workerRecords(worker))
+                if (auto parsed = ConsoleWorkerWire::addVirtual(record)) command = parsed;
+            QVERIFY(command);
+            QCOMPARE(command->output, backend);
+            QCOMPARE(command->pixels, QSize(960, 540));
+            QCOMPARE(command->globalLogical, QPoint(2560, 0));
+            QCOMPARE(t.addVirtualResult({command->requestId, command->generation, {}}, 1000)
+                .value(u"code"_s).toString(), u"partial"_s); // Worker metadata alone cannot succeed.
+
+            preview.insert(u"id"_s, u"add-2"_s);
+            const auto second = t.request(preview, 1000);
+            const QString secondBackend = second.value(u"after"_s).toArray().last().toObject().value(u"name"_s).toString();
+            commit.insert(u"id"_s, u"add-2"_s);
+            commit.insert(u"token"_s, second.value(u"token"_s));
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            const auto workerId = t.m_addWorkerId;
+            const auto updated = catalog.observe({initial->outputs[0].output, initial->outputs[1].output,
+                {.backendKey = secondBackend, .name = secondBackend,
+                    .nativePixels = QSize(960, 540), .logicalGeometry = QRect(2560, 0, 960, 540),
+                    .scale = 1, .enabled = true, .primary = false, .physical = false, .owner = t.m_handle->id}});
+            QVERIFY(updated);
+            current = *updated;
+            const auto result = t.addVirtualResult({workerId, t.m_controlGeneration, {}}, 1000);
+            QCOMPARE(result.value(u"type"_s).toString(), u"topology-result"_s);
+            QVERIFY(result.value(u"ok"_s).toBool());
+            QCOMPARE(result.value(u"topology"_s).toObject().value(u"revision"_s).toInt(), 2);
+            QCOMPARE(result.value(u"topology"_s).toObject().value(u"outputs"_s).toArray().size(), 3);
+            QCOMPARE(t.request(commit, 1000).value(u"code"_s).toString(), u"invalid"_s);
+        });
+    }
     void virtualResizeStrictSchema() {
         auto request = resizeRequest();
         QVERIFY(VirtualResizeProtocol::parse(request));
