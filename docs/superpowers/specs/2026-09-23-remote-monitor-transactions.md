@@ -114,6 +114,13 @@ outputs preserved. The action is gated on the private mixed capability; new
 client screens needing a mixed Add remain unsupported. Full client build/29
 CTests pass and both Buzz client launch paths are updated, but no native Match
 GUI/compositor acceptance has been run.
+Client `d407f19` additionally permits Match to create one new non-primary
+virtual output through the existing single-Add transaction when all existing
+mapped outputs already match the client screens. Add preview validates every
+unchanged old record and the exact proposed new output. Add result validation
+accepts catalog reordering only after full stable-ID record equality, avoiding
+a false partial result on later Adds. Mixed Add+resize/move/primary, removal
+consent and native Match acceptance remain open.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. The later private Fit
