@@ -10,8 +10,10 @@ acceptance of the complete topology feature is claimed. See
 
 Related work: OPT-044 layout control, OPT-041 virtual outputs, OPT-018 per-output
 capture, OPT-043 server settings. This extends those features; it does not
-reopen their completed slices or replace the ongoing single-output virtual Fit
-work. Implementation plan: [remote-monitor-layout plan](../plans/2026-09-22-remote-monitor-layout.md).
+reopen their completed slices or replace the delivered single-output virtual
+Fit work. Implementation plan: [remote-monitor-layout plan](../plans/2026-09-22-remote-monitor-layout.md).
+Transaction contract: [remote monitor transactions](2026-09-23-remote-monitor-transactions.md)
+(proposed; not yet implemented).
 
 ## 1. The product model
 

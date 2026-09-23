@@ -29,6 +29,10 @@ missing observation; do not assume a topology redesign itself diagnoses the bug.
 
 ## Phase 1 — Define separate models and compatibility
 
+Proposed wire/transaction decisions are recorded in
+[remote monitor transactions](../specs/2026-09-23-remote-monitor-transactions.md).
+They are not implemented merely by that document.
+
 - Inventory the existing server layout authority/executor, `LayoutRecords`,
   client `Mapping`, `ScreenLayout`, `Views`, `LayoutFlow`, `AppLayout`, monitor UI
   and physical/virtual worker paths. Use current source, not historical class names.
