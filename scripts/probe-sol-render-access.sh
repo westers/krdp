@@ -2,7 +2,7 @@
 # Privileged envelope for an explicitly authorized disposable Sol GPU probe.
 # Never install this as a service or run it against a physical desktop.
 set -euo pipefail
-[[ $# == 0 || ( $# == 1 && ( $1 == --multi-worker || $1 == --multi-mixed || $1 == --multi-create || $1 == --multi-add || $1 == --multi-remove || $1 == --multi-resize || $1 == --multi-negative || $1 == --multi-window || $1 == --multi-input || $1 == --multi-drag || $1 == --multi-reposition || $1 == --multi-rdp || $1 == --multi-mixed-rdp || $1 == --multi-resize-rdp ) ) ]]
+[[ $# == 0 || ( $# == 1 && ( $1 == --multi-worker || $1 == --multi-mixed || $1 == --multi-create || $1 == --multi-add || $1 == --multi-remove || $1 == --multi-resize || $1 == --multi-negative || $1 == --multi-window || $1 == --multi-input || $1 == --multi-drag || $1 == --multi-reposition || $1 == --multi-rdp || $1 == --multi-mixed-rdp || $1 == --multi-resize-rdp || $1 == --layout-campaign ) ) ]]
 [[ $EUID == 0 && "$(hostname -s)" == sol ]] || {
     echo 'Run explicitly as root on Sol.' >&2
     exit 1
@@ -43,6 +43,16 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 setfacl -n -m u:1000:rw "$node"
+# A single user-run sudo envelope can cover several independently bounded,
+# unprivileged private-compositor/RDP probes. No probe is started by root here;
+# the agent uses the existing Sol tmux/SSH session while this scoped ACL is
+# live. The EXIT trap revokes exactly this grant after 20 minutes or Ctrl-C.
+if [[ ${1:-} == --layout-campaign ]]; then
+    [[ -z $(ss -H -ltn 'sport = :3396') ]] || { echo 'Private test port 3396 is already occupied.' >&2; exit 1; }
+    echo 'Private render access ready for at most 20 minutes; run only isolated Sol probes. Ctrl-C ends it early.'
+    timeout --kill-after=5 1200 sleep 1200
+    exit
+fi
 # The graphical probe runs as the ordinary user, never as root. Its own
 # timeout is 80 seconds; this outer bound also covers wrapper startup/cleanup.
 probe_mode=--plasma-nvidia
