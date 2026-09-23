@@ -85,8 +85,9 @@ updated together; default production capability stays off. Native compositor
 priority behavior, GUI clicks and failure recovery are not yet accepted.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
-CTests pass, but native batch GUI acceptance is absent. Fit and mixed-operation
-drafts remain absent; no Fit capability is advertised. Broker and worker must
+CTests pass, but native batch GUI acceptance is absent. The later private Fit
+preview above exists; persisted managed relations and mixed-operation drafts
+remain absent. The default server does not advertise Fit. Broker and worker must
 be built/deployed as a pair; the v4 bump intentionally rejects mixed-version
 worker sockets. Client `23b2ba8` later adds relative edge placement and normalizes a negative
 all-owned virtual draft into visible nonnegative peer moves, with full build/29
