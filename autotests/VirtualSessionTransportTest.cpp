@@ -68,6 +68,98 @@ class VirtualSessionTransportTest : public QObject
         return records;
     }
 private Q_SLOTS:
+    void mixedCreateBindsNewOutputAndWholeLayoutToOneCapturedCommit() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            RemoteTopologyCatalog catalog;
+            const auto initial = catalog.observe({
+                {.backendKey = u"Virtual-0"_s, .name = u"Virtual-0"_s,
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(0, 0, 1280, 720),
+                    .scale = 1, .enabled = true, .primary = true, .physical = false, .owner = t.m_handle->id},
+                {.backendKey = u"Virtual-1"_s, .name = u"Virtual-1"_s,
+                    .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(1280, 0, 1280, 720),
+                    .scale = 1, .enabled = true, .primary = false, .physical = false, .owner = t.m_handle->id},
+            });
+            QVERIFY(initial);
+            auto current = *initial;
+            t.setTopologyResolver([&current](const auto &) { return std::optional(current); });
+            const QString temporary = u"new:client-screen"_s;
+            const QJsonArray operations{
+                QJsonObject{{u"op"_s, u"resize"_s}, {u"output"_s, current.outputs[0].id},
+                    {u"pixels"_s, QJsonObject{{u"width"_s, 1600}, {u"height"_s, 900}}}, {u"scale"_s, 1.0}},
+                QJsonObject{{u"op"_s, u"move"_s}, {u"output"_s, current.outputs[1].id},
+                    {u"position"_s, QJsonObject{{u"x"_s, 1600}, {u"y"_s, 0}}}},
+                QJsonObject{{u"op"_s, u"add"_s}, {u"output"_s, temporary},
+                    {u"position"_s, QJsonObject{{u"x"_s, 2880}, {u"y"_s, 0}}},
+                    {u"pixels"_s, QJsonObject{{u"width"_s, 960}, {u"height"_s, 540}}}, {u"scale"_s, 1.0}},
+                QJsonObject{{u"op"_s, u"primary"_s}, {u"output"_s, temporary}},
+            };
+            QJsonObject preview{{u"type"_s, u"topology-preview"_s}, {u"v"_s, 1},
+                {u"id"_s, u"mixed-create-1"_s}, {u"generation"_s, current.generation},
+                {u"expectedRevision"_s, double(current.revision)}, {u"allowRemoval"_s, false},
+                {u"allowPhysicalChange"_s, false}, {u"operations"_s, operations}};
+            QCOMPARE(t.request(preview, 1000).value(u"code"_s).toString(), u"unsupported"_s);
+            t.m_experimentalMixed = true;
+            auto simple = preview;
+            simple[u"id"_s] = u"mixed-create-simple"_s;
+            simple[u"operations"_s] = QJsonArray{operations[1], operations[2]}; // Move, then Add.
+            QCOMPARE(t.request(simple, 1000).value(u"type"_s).toString(), u"topology-preview"_s);
+            QVERIFY(RemoteTopologyProtocol::retainedReadOnly(u"cap"_s, current, false, false, true)
+                .value(u"capabilities"_s).toObject().value(u"mixed"_s).toBool());
+            t.m_experimentalMultiResize = true;
+            t.m_experimentalPrimary = true;
+            const auto proposed = t.request(preview, 1000);
+            QCOMPARE(proposed.value(u"type"_s).toString(), u"topology-preview"_s);
+            QCOMPARE(proposed.value(u"after"_s).toArray().size(), 3);
+            QCOMPARE(proposed.value(u"after"_s).toArray().last().toObject().value(u"id"_s).toString(), temporary);
+            QCOMPARE(t.request(preview, 1000).value(u"token"_s).toString(), proposed.value(u"token"_s).toString());
+            QJsonObject commit{{u"type"_s, u"topology-commit"_s}, {u"v"_s, 1},
+                {u"id"_s, u"mixed-create-1"_s}, {u"token"_s, proposed.value(u"token"_s)},
+                {u"generation"_s, current.generation}, {u"expectedRevision"_s, double(current.revision)}};
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            std::optional<ConsoleWorkerWire::MixedCreate> command;
+            for (const auto &record : workerRecords(worker))
+                if (const auto parsed = ConsoleWorkerWire::mixedCreate(record)) command = parsed;
+            QVERIFY(command);
+            QCOMPARE(command->newOutput, t.m_topologyResizeBackendKey);
+            QCOMPARE(command->pixels, QSize(960, 540));
+            QCOMPARE(command->globalLogical, QPoint(2880, 0));
+            QCOMPARE(command->changes.size(), 3);
+            QCOMPARE(command->changes[2].output, command->newOutput);
+            QCOMPARE(command->changes[2].kind, ConsoleWorkerWire::MixedOperation::Kind::Primary);
+            QCOMPARE(t.topologyResizeResult({command->requestId, command->generation, {}}, 1000)
+                .value(u"code"_s).toString(), u"partial"_s); // Worker metadata alone is insufficient.
+            preview[u"id"_s] = u"mixed-create-2"_s;
+            const auto second = t.request(preview, 1000);
+            QCOMPARE(second.value(u"type"_s).toString(), u"topology-preview"_s);
+            commit[u"id"_s] = u"mixed-create-2"_s;
+            commit[u"token"_s] = second.value(u"token"_s);
+            QVERIFY(t.request(commit, 1000).isEmpty());
+            const auto workerId = t.m_topologyResizeWorkerId;
+            const auto newKey = t.m_topologyResizeBackendKey;
+            auto first = initial->outputs[0].output;
+            first.nativePixels = QSize(1600, 900);
+            first.logicalGeometry.setSize(QSize(1600, 900));
+            first.primary = false;
+            auto secondOutput = initial->outputs[1].output;
+            secondOutput.logicalGeometry.moveLeft(1600);
+            RemoteTopologyCatalog::Output created{
+                .backendKey = newKey, .name = newKey, .nativePixels = QSize(960, 540),
+                .logicalGeometry = QRect(2880, 0, 960, 540), .scale = 1, .enabled = true,
+                .primary = true, .physical = false, .owner = t.m_handle->id,
+            };
+            const auto updated = catalog.observe({first, secondOutput, created});
+            QVERIFY(updated);
+            current = *updated;
+            const auto success = t.topologyResizeResult({workerId, t.m_controlGeneration, {}}, 1000);
+            QCOMPARE(success.value(u"type"_s).toString(), u"topology-result"_s);
+            QVERIFY(success.value(u"ok"_s).toBool());
+            QCOMPARE(success.value(u"topology"_s).toObject().value(u"revision"_s).toInt(), 2);
+            QCOMPARE(t.request(commit, 1000).value(u"code"_s).toString(), u"invalid"_s);
+        });
+    }
+
     void mixedPreviewBindsWholeLayoutToOneWorkerCommit() {
         microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
             workerRecords(worker);

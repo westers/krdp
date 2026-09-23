@@ -149,6 +149,18 @@ private Q_SLOTS:
         add.insert(QStringLiteral("output"), QStringLiteral("new:second"));
         record.insert(QStringLiteral("operations"), QJsonArray{add});
         QVERIFY(previewRequest(record));
+        const QJsonObject primary{{QStringLiteral("op"), QStringLiteral("primary")},
+            {QStringLiteral("output"), QStringLiteral("new:second")}};
+        record.insert(QStringLiteral("operations"), QJsonArray{primary, add});
+        QVERIFY(!previewRequest(record)); // A temporary ID must first be introduced by Add.
+        record.insert(QStringLiteral("operations"), QJsonArray{add, primary});
+        parsed = previewRequest(record);
+        QVERIFY(parsed);
+        QCOMPARE(parsed->draft.operations.last().id, QStringLiteral("new:second"));
+        auto unknown = primary;
+        unknown.insert(QStringLiteral("output"), QStringLiteral("new:unknown"));
+        record.insert(QStringLiteral("operations"), QJsonArray{add, unknown});
+        QVERIFY(!previewRequest(record));
     }
 
     void strictManagedFitPreview()

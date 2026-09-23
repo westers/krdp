@@ -12,6 +12,7 @@
 
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSet>
 
 namespace KRdp::RemoteTopologyProtocol
 {
@@ -122,15 +123,16 @@ inline std::optional<PreviewRequest> previewRequest(const QJsonObject &record)
     result.draft.expectedRevision = quint64(record.value(QStringLiteral("expectedRevision")).toDouble());
     result.draft.allowRemoval = record.value(QStringLiteral("allowRemoval")).toBool();
     result.draft.allowPhysicalChange = record.value(QStringLiteral("allowPhysicalChange")).toBool();
+    QSet<QString> introduced;
     for (const auto &value : operations) {
         if (!value.isObject()) return {};
         const auto object = value.toObject();
         const auto kind = object.value(QStringLiteral("op")).toString();
         const auto output = object.value(QStringLiteral("output"));
-        const bool temporary = kind == QStringLiteral("add") && output.isString()
-            && output.toString().startsWith(QStringLiteral("new:"))
+        const bool temporary = output.isString() && output.toString().startsWith(QStringLiteral("new:"))
             && identifier(output.toString().mid(4), 124);
-        if (!identifier(output, 128) && !temporary) return {};
+        if (!identifier(output, 128) && !(temporary && (kind == QStringLiteral("add")
+            || introduced.contains(output.toString())))) return {};
         RemoteTopologyDraft::Operation operation;
         operation.id = output.toString();
         if (kind == QStringLiteral("add") || kind == QStringLiteral("move") || kind == QStringLiteral("resize")) {
@@ -172,6 +174,7 @@ inline std::optional<PreviewRequest> previewRequest(const QJsonObject &record)
                 : RemoteTopologyDraft::Operation::Kind::SetPrimary;
         } else return {};
         result.draft.operations.append(operation);
+        if (kind == QStringLiteral("add") && temporary) introduced.insert(operation.id);
     }
     return result;
 }
@@ -251,8 +254,7 @@ inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatal
         && std::all_of(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [&owner](const auto &entry) {
             return !entry.output.physical && entry.output.owner == owner;
         });
-    const bool mixedEligible = experimentalMixed && (experimentalResize || experimentalPrimary)
-        && snapshot.outputs.size() > 1 && !owner.isEmpty()
+    const bool mixedEligible = experimentalMixed && snapshot.outputs.size() > 1 && !owner.isEmpty()
         && std::all_of(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [&owner](const auto &entry) {
             return !entry.output.physical && entry.output.owner == owner;
         });

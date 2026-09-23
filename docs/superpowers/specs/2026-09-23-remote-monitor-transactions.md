@@ -143,6 +143,17 @@ dispatch the record or advertise combined Add, and no native GPU/compositor
 test has run. The Sol
 render ACL needed for the private test is absent. This source is not an
 installed or accepted monitor-layout feature.
+The paired broker source follow-up accepts exactly one Add with owned existing
+resize/move and optional primary under the private `KRDP_EXPERIMENTAL_MULTI_MIXED=1`
+opt-in. One preview token binds the full final catalog, creates a backend key,
+and dispatches exactly one v8 `MixedCreate`; no intermediate Add result or
+revision is published. A success result must match all old stable-ID output
+records, the new backend output's complete record under a fresh public ID,
+and exactly one revision advance from host-verified capture. Metadata-only
+acknowledgment remains `partial`. The parser now allows a temporary `new:`
+primary target only after that Add appears in the same draft. Source tests
+pass, but native Sol compositor and Buzz GUI acceptance still have not run;
+the opt-in remains default OFF and no installed service is changed.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. The later private Fit
