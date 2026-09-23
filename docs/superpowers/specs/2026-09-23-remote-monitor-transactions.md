@@ -1,7 +1,7 @@
 # Remote monitor transaction protocol (implementation contract)
 
-Status: proposed implementation contract, 2026-09-23; retained single-output
-read-only `topology-query`/`topology` is wired in server `aba1754` and parsed
+Status: proposed implementation contract, 2026-09-23; retained read-only
+`topology-query`/`topology` is wired in server `aba1754`/`c4ef5f1` and parsed
 into separate client state in client `358235b`, but Console query, every
 topology write, a visible editor and runtime acceptance are still absent.
 This fills in phase 1 of the
@@ -21,14 +21,19 @@ attaching to the intended existing compositor.
 
 Current server slice: the retained virtual broker accepts an exact v1
 `topology-query` with a 1–64 character correlation ID **after attachment**,
-requests a worker keyframe and answers only when that frame matches the
-worker-reported single output and its generation-scoped catalog. Five seconds
+requests worker keyframes and answers only when a frame matches the
+worker-reported output inventory and its generation-scoped catalog. For a
+multi-output retained desktop, the worker captures/encodes each QScreen
+separately and gates publication until every output has an H.264 keyframe
+whose decoded dimensions match the reported pixels and logical scale. Five seconds
 without such a frame returns a correlated `topology-error`/`timeout`; detach
-cancels the query. It advertises enumeration only, with all topology-write and
-multi-output-capture capabilities false. The output geometry is worker/QScreen
-metadata confirmed by a matching captured keyframe, not an independent fresh
-KScreen query or encoded-payload-dimension proof; do not treat it as a commit
-readback. Other backends have no new query handler yet.
+cancels the query. It advertises enumeration only, with all topology-write
+capabilities false; `multiOutputCapture` is true only for a currently published
+multi-output capture. The output geometry is worker/QScreen metadata confirmed
+by matching captured keyframes. This is not an independent fresh KScreen
+readback or a transaction commit proof. This multi-output path has source tests,
+but not native GUI/host acceptance or deployment. Other backends have no new
+query handler yet.
 The client sends the query only after an acknowledged retained attachment,
 validates its correlation and bounded geometry/capabilities, and treats an old
 broker's generic unsupported error as query fallback without failing the
