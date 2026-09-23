@@ -142,6 +142,7 @@ private Q_SLOTS:
             QCOMPARE(reply.value(u"outputs"_s).toArray().first().toObject().value(u"logical"_s).toObject().value(u"x"_s).toInt(), -1280);
             const auto capabilities = reply.value(u"capabilities"_s).toObject();
             QVERIFY(capabilities.value(u"multiOutputCapture"_s).toBool());
+            QVERIFY(capabilities.value(u"add"_s).toBool());
             QCOMPARE(capabilities.value(u"maxOutputs"_s).toInt(), 16);
             QVERIFY(capabilities.value(u"position"_s).toBool());
             QCOMPARE(capabilities.value(u"positionMin"_s).toInt(), 0);

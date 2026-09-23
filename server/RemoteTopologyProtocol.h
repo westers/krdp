@@ -181,7 +181,8 @@ inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatal
         {QStringLiteral("id"), id}, {QStringLiteral("generation"), snapshot.generation},
         {QStringLiteral("revision"), double(snapshot.revision)}, {QStringLiteral("outputs"), outputArray(snapshot.outputs)},
         {QStringLiteral("capabilities"), QJsonObject{
-            {QStringLiteral("enumerate"), true}, {QStringLiteral("add"), false},
+            {QStringLiteral("enumerate"), true},
+            {QStringLiteral("add"), snapshot.outputs.size() > 1 && snapshot.outputs.size() < 16},
             {QStringLiteral("remove"), false}, {QStringLiteral("position"), snapshot.outputs.size() > 1},
             {QStringLiteral("resize"), false}, {QStringLiteral("scale"), false},
             {QStringLiteral("primary"), false}, {QStringLiteral("multiOutputCapture"), snapshot.outputs.size() > 1},
