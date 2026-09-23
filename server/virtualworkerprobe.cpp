@@ -2,6 +2,8 @@
 #include "ConsoleWorkerEndpoint.h"
 #include "H264KeyframeSize.h"
 #include "RetainedKScreenReadback.h"
+#include "RetainedMultiPrimaryPlan.h"
+#include <algorithm>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -32,11 +34,12 @@ int main(int argc, char **argv)
     const bool removeProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-remove");
     const bool resizeProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-resize");
     const bool fitProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-fit");
+    const bool primaryProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-primary");
     const bool addProbe = removeProbe || (arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-add"));
     const QString addedName = removeProbe ? QStringLiteral("Virtual-krdp-added-probe-extra")
                                           : QStringLiteral("Virtual-krdp-probe-extra");
     const bool mixed = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi-mixed") || inputProbe);
-    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || negativeProbe || dragProbe || repositionProbe || addProbe || resizeProbe || fitProbe);
+    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || negativeProbe || dragProbe || repositionProbe || addProbe || resizeProbe || fitProbe || primaryProbe);
     if (arguments.size() != 1 && !managed && !multi) return 1;
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     const QFileInfo runtimeInfo(runtime);
@@ -114,6 +117,10 @@ int main(int argc, char **argv)
     bool fitAcknowledged = false;
     bool fitInventory = false;
     QSet<int> fitFrames;
+    bool primaryStarted = false;
+    bool primaryAcknowledged = false;
+    bool primaryInventory = false;
+    QSet<int> primaryFrames;
     bool stopping = false;
     int result = 1;
     ConsoleWorkerWire::Outputs outputs;
@@ -124,7 +131,8 @@ int main(int argc, char **argv)
                 ? removeAcknowledged && removeInventory && removeFrames.size() == 2
                 : addInventory && addFrames.size() == 3)))
             && (!resizeProbe || (resizeAcknowledged && resizeInventory && resizeFrames.size() == 2))
-            && (!fitProbe || (fitAcknowledged && fitInventory && fitFrames.size() == 2));
+            && (!fitProbe || (fitAcknowledged && fitInventory && fitFrames.size() == 2))
+            && (!primaryProbe || (primaryAcknowledged && primaryInventory && primaryFrames.size() == 2));
     };
     const auto maybeStop = [&] {
         if (verified() && !stopping) {
@@ -248,6 +256,20 @@ int main(int argc, char **argv)
         });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, &app, [&](const auto &value) {
         outputs = value;
+        const auto hasPrimaryOutput = [&value](const QString &name, const QRect &geometry, bool isPrimary) {
+            return std::any_of(value.monitors.cbegin(), value.monitors.cend(), [&](const auto &monitor) {
+                return monitor.name == name && monitor.geometry == geometry && monitor.primary == isPrimary;
+            });
+        };
+        if (primaryProbe && primaryStarted && !primaryInventory && value.monitors.size() == 2
+            && hasPrimaryOutput(QStringLiteral("Virtual-0"), QRect(0, 0, 1280, 720), false)
+            && hasPrimaryOutput(QStringLiteral("Virtual-1"), QRect(1280, 0, 1280, 720), true)) {
+            primaryInventory = true;
+            capturedOutputs.clear();
+            captured = false;
+            qInfo("Worker published primary-switched two-output inventory");
+            endpoint.requestKeyFrame();
+        }
         if (fitProbe && fitStarted && !fitInventory && value.monitors.size() == 2
             && value.monitors[0].name == QStringLiteral("Virtual-0")
             && value.monitors[1].name == QStringLiteral("Virtual-1")
@@ -342,6 +364,28 @@ int main(int argc, char **argv)
         qInfo("Authenticated managed Fit acknowledged after dependent reflow, KScreen and both captures");
         maybeStop();
     });
+    QObject::connect(&endpoint, &ConsoleWorkerEndpoint::primaryFinished, &app, [&](const auto &value) {
+        if (!primaryProbe || value.requestId != 2 || value.generation != 1 || !value.error.isEmpty()) {
+            qCritical().noquote() << "Worker primary change failed:" << value.error;
+            app.quit();
+            return;
+        }
+        QProcess readback;
+        readback.start(QStringLiteral("kscreen-doctor"), {QStringLiteral("-j")});
+        if (!readback.waitForFinished(3000) || readback.exitCode() != 0) { app.quit(); return; }
+        const auto json = readback.readAllStandardOutput();
+        const auto snapshot = RetainedKScreenReadback::parse(json, id);
+        const auto ordering = snapshot ? RetainedMultiPrimaryPlan::priorities(json, *snapshot) : std::nullopt;
+        if (!snapshot || snapshot->outputs.size() != 2 || !ordering
+            || snapshot->outputs[0].primary || !snapshot->outputs[1].primary
+            || snapshot->outputs[0].logicalGeometry != QRect(0, 0, 1280, 720)
+            || snapshot->outputs[1].logicalGeometry != QRect(1280, 0, 1280, 720)
+            || ordering->value(QStringLiteral("Virtual-0")) != 2
+            || ordering->value(QStringLiteral("Virtual-1")) != 1) { app.quit(); return; }
+        primaryAcknowledged = true;
+        qInfo("Authenticated primary change acknowledged after KScreen priority and both captures");
+        maybeStop();
+    });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::frameReceived, &app, [&](const VideoFrame &frame) {
         const int expected = addInventory ? 3 : multi ? 2 : 1;
         const QSize expectedSize = fitInventory && frame.monitorIndex == 0 ? QSize(1600, 900)
@@ -351,7 +395,11 @@ int main(int argc, char **argv)
             || h264KeyframeSize(frame.data) != frame.size || frame.monitorIndex < 0 || frame.monitorIndex >= expected
             || outputs.monitors.size() != expected || frame.monitors.size() != expected) return;
         for (int i = 0; i < expected; ++i) {
-            const QRect logical = fitInventory && i == 0 ? QRect(0, 0, 1600, 900)
+            const QRect logical = primaryProbe && outputs.monitors[i].name == QStringLiteral("Virtual-0")
+                    ? QRect(0, 0, 1280, 720)
+                : primaryProbe && outputs.monitors[i].name == QStringLiteral("Virtual-1")
+                    ? QRect(1280, 0, 1280, 720)
+                : fitInventory && i == 0 ? QRect(0, 0, 1600, 900)
                 : fitInventory && i == 1 ? QRect(1600, 0, 1280, 720)
                 : i == 2 ? QRect(2560, 0, 960, 540)
                 : mixed && i == 0 ? QRect(0, 0, 1024, 576)
@@ -366,6 +414,9 @@ int main(int argc, char **argv)
             if (outputs.monitors[i].geometry != logical || frame.monitors[i].geometry != wire
                 || !VirtualResize::sameScale(outputs.monitors[i].scale,
                     mixed && i == 0 ? 1.25 : resizeInventory && i == 1 ? 1.25 : 1.0)) return;
+            if (primaryInventory && (outputs.monitors[i].primary
+                != (outputs.monitors[i].name == QStringLiteral("Virtual-1"))
+                || frame.monitors[i].primary != outputs.monitors[i].primary)) return;
         }
         if (outputs.compositorOrigin != QPoint(0, 0)) return; // Sol KWin normalizes the negative request.
         QFile output(runtime + (multi ? QStringLiteral("/worker-keyframe-%1.h264").arg(frame.monitorIndex)
@@ -410,6 +461,15 @@ int main(int argc, char **argv)
         if (fitProbe && fitInventory) {
             fitFrames.insert(frame.monitorIndex);
             if (fitFrames.size() == 2) qInfo("Two post-Fit independently decoded output keyframes verified");
+        }
+        if (primaryProbe && primaryInventory) {
+            primaryFrames.insert(frame.monitorIndex);
+            if (primaryFrames.size() == 2) qInfo("Two post-primary independently decoded output keyframes verified");
+        }
+        if (captured && primaryProbe && !primaryStarted) {
+            primaryStarted = true;
+            qInfo("Requesting authenticated primary change to Virtual-1");
+            if (!endpoint.primary({2, 1, QStringLiteral("Virtual-1")})) app.quit();
         }
         if (captured && fitProbe && !fitStarted) {
             fitStarted = true;
@@ -492,7 +552,7 @@ int main(int argc, char **argv)
         result = verified() && stopping && code == 0 && status == QProcess::NormalExit ? 0 : 1;
         app.quit();
     });
-    QTimer::singleShot(inputProbe || dragProbe || repositionProbe || addProbe || resizeProbe ? 30000 : 20000, &app, &QCoreApplication::quit);
+    QTimer::singleShot(inputProbe || dragProbe || repositionProbe || addProbe || resizeProbe || fitProbe || primaryProbe ? 30000 : 20000, &app, &QCoreApplication::quit);
     // Managed mode owns only the broker endpoint. The existing desktop loop
     // supplies its worker; this process must never enter or stop the guardian.
     if (!managed) worker.start();

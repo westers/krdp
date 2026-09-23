@@ -8,7 +8,7 @@ fi
 script_path=$(realpath "$0")
 repo_path=$(dirname "$(dirname "$script_path")")
 if [[ "${1:-}" != --inside-private-bus ]]; then
-    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia || "$1" == --supervised-mixed-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-create-nvidia || "$1" == --plasma-multi-add-nvidia || "$1" == --plasma-multi-remove-nvidia || "$1" == --plasma-multi-resize-nvidia || "$1" == --plasma-multi-fit-nvidia || "$1" == --plasma-negative-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia ) ) ]]
+    [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia || "$1" == --supervised-mixed-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-create-nvidia || "$1" == --plasma-multi-add-nvidia || "$1" == --plasma-multi-remove-nvidia || "$1" == --plasma-multi-resize-nvidia || "$1" == --plasma-multi-fit-nvidia || "$1" == --plasma-multi-primary-nvidia || "$1" == --plasma-negative-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia ) ) ]]
     probe_mode="${1:-}"
     rdp_mode=
     probe_timeout=80
@@ -31,7 +31,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         probe_mode=--plasma-nvidia
         probe_timeout=120
     fi
-    if [[ "$probe_mode" == --plasma-worker-nvidia || "$probe_mode" == --plasma-multi-worker-nvidia || "$probe_mode" == --plasma-mixed-worker-nvidia || "$probe_mode" == --plasma-multi-create-nvidia || "$probe_mode" == --plasma-multi-add-nvidia || "$probe_mode" == --plasma-multi-remove-nvidia || "$probe_mode" == --plasma-multi-resize-nvidia || "$probe_mode" == --plasma-multi-fit-nvidia || "$probe_mode" == --plasma-negative-worker-nvidia || "$probe_mode" == --plasma-multi-window-nvidia || "$probe_mode" == --plasma-multi-input-nvidia || "$probe_mode" == --plasma-multi-drag-nvidia || "$probe_mode" == --plasma-multi-reposition-nvidia ]]; then
+    if [[ "$probe_mode" == --plasma-worker-nvidia || "$probe_mode" == --plasma-multi-worker-nvidia || "$probe_mode" == --plasma-mixed-worker-nvidia || "$probe_mode" == --plasma-multi-create-nvidia || "$probe_mode" == --plasma-multi-add-nvidia || "$probe_mode" == --plasma-multi-remove-nvidia || "$probe_mode" == --plasma-multi-resize-nvidia || "$probe_mode" == --plasma-multi-fit-nvidia || "$probe_mode" == --plasma-multi-primary-nvidia || "$probe_mode" == --plasma-negative-worker-nvidia || "$probe_mode" == --plasma-multi-window-nvidia || "$probe_mode" == --plasma-multi-input-nvidia || "$probe_mode" == --plasma-multi-drag-nvidia || "$probe_mode" == --plasma-multi-reposition-nvidia ]]; then
         rdp_mode=--worker
         [[ "$probe_mode" != --plasma-multi-worker-nvidia ]] || rdp_mode=--multi-worker
         [[ "$probe_mode" != --plasma-mixed-worker-nvidia ]] || rdp_mode=--multi-mixed
@@ -40,6 +40,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         [[ "$probe_mode" != --plasma-multi-remove-nvidia ]] || rdp_mode=--multi-remove
         [[ "$probe_mode" != --plasma-multi-resize-nvidia ]] || rdp_mode=--multi-resize
         [[ "$probe_mode" != --plasma-multi-fit-nvidia ]] || rdp_mode=--multi-fit
+        [[ "$probe_mode" != --plasma-multi-primary-nvidia ]] || rdp_mode=--multi-primary
         [[ "$probe_mode" != --plasma-negative-worker-nvidia ]] || rdp_mode=--multi-negative
         [[ "$probe_mode" != --plasma-multi-window-nvidia ]] || rdp_mode=--multi-window
         [[ "$probe_mode" != --plasma-multi-input-nvidia ]] || rdp_mode=--multi-input
@@ -97,7 +98,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     fi
     mkdir "$probe_runtime/config" "$probe_runtime/cache" "$probe_runtime/state" "$probe_runtime/data"
     cp -r "$repo_path/scripts/virtual-probe-config/." "$probe_runtime/config/"
-    if [[ "$rdp_mode" == --worker || "$rdp_mode" == --multi-worker || "$rdp_mode" == --multi-mixed || "$rdp_mode" == --multi-create || "$rdp_mode" == --multi-add || "$rdp_mode" == --multi-remove || "$rdp_mode" == --multi-resize || "$rdp_mode" == --multi-fit || "$rdp_mode" == --multi-negative || "$rdp_mode" == --multi-window || "$rdp_mode" == --multi-input || "$rdp_mode" == --multi-drag || "$rdp_mode" == --multi-reposition || "$rdp_mode" == --supervised ]]; then
+    if [[ "$rdp_mode" == --worker || "$rdp_mode" == --multi-worker || "$rdp_mode" == --multi-mixed || "$rdp_mode" == --multi-create || "$rdp_mode" == --multi-add || "$rdp_mode" == --multi-remove || "$rdp_mode" == --multi-resize || "$rdp_mode" == --multi-fit || "$rdp_mode" == --multi-primary || "$rdp_mode" == --multi-negative || "$rdp_mode" == --multi-window || "$rdp_mode" == --multi-input || "$rdp_mode" == --multi-drag || "$rdp_mode" == --multi-reposition || "$rdp_mode" == --supervised ]]; then
         mkdir -p "$probe_runtime/data/applications"
         cp "$repo_path/build/server/org.kde.krdpvirtualprobe.desktop" "$probe_runtime/data/applications/org.kde.krdpconsoleworker.desktop"
         if [[ "$rdp_mode" == --multi-create ]]; then
@@ -141,7 +142,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
 fi
 [[ "$XDG_RUNTIME_DIR" == /run/user/"$(id -u)"/krdp-headless.* ]]
 expected_outputs=${5:-1}
-[[ $expected_outputs == 1 || ( $expected_outputs == 2 && ( ${3:-} == --multi-worker || ${3:-} == --multi-mixed || ${3:-} == --multi-create || ${3:-} == --multi-add || ${3:-} == --multi-remove || ${3:-} == --multi-resize || ${3:-} == --multi-fit || ${3:-} == --multi-negative || ${3:-} == --multi-window || ${3:-} == --multi-input || ${3:-} == --multi-drag || ${3:-} == --multi-reposition || ${3:-} == --supervised ) ) ]]
+[[ $expected_outputs == 1 || ( $expected_outputs == 2 && ( ${3:-} == --multi-worker || ${3:-} == --multi-mixed || ${3:-} == --multi-create || ${3:-} == --multi-add || ${3:-} == --multi-remove || ${3:-} == --multi-resize || ${3:-} == --multi-fit || ${3:-} == --multi-primary || ${3:-} == --multi-negative || ${3:-} == --multi-window || ${3:-} == --multi-input || ${3:-} == --multi-drag || ${3:-} == --multi-reposition || ${3:-} == --supervised ) ) ]]
 layout_mode=${3:-}
 if [[ $layout_mode == --supervised && ${6:-} == --multi-mixed ]]; then layout_mode=--multi-mixed; fi
 # Populate this private profile's desktop-service identities before KWin checks
@@ -312,7 +313,7 @@ if [[ "${3:-}" == --supervised ]]; then
     while kill -0 "$plasma_pid" && kill -0 "$wrapper_pid"; do sleep 1; done
     exit 1
 fi
-if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker || "${3:-}" == --multi-mixed || "${3:-}" == --multi-create || "${3:-}" == --multi-add || "${3:-}" == --multi-remove || "${3:-}" == --multi-resize || "${3:-}" == --multi-fit || "${3:-}" == --multi-negative || "${3:-}" == --multi-window || "${3:-}" == --multi-input || "${3:-}" == --multi-drag || "${3:-}" == --multi-reposition ]]; then
+if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker || "${3:-}" == --multi-mixed || "${3:-}" == --multi-create || "${3:-}" == --multi-add || "${3:-}" == --multi-remove || "${3:-}" == --multi-resize || "${3:-}" == --multi-fit || "${3:-}" == --multi-primary || "${3:-}" == --multi-negative || "${3:-}" == --multi-window || "${3:-}" == --multi-input || "${3:-}" == --multi-drag || "${3:-}" == --multi-reposition ]]; then
     if [[ "${3:-}" == --multi-create ]]; then
         env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
             "$repo_path/build/bin/krdp-virtual-monitor-creation-probe" \
@@ -355,6 +356,7 @@ if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker || "${3:-}" == --multi-
     [[ "${3:-}" != --multi-remove ]] || probe_args=(--multi-remove)
     [[ "${3:-}" != --multi-resize ]] || probe_args=(--multi-resize)
     [[ "${3:-}" != --multi-fit ]] || probe_args=(--multi-fit)
+    [[ "${3:-}" != --multi-primary ]] || probe_args=(--multi-primary)
     [[ "${3:-}" != --multi-negative ]] || probe_args=(--multi-negative)
     [[ "${3:-}" != --multi-window ]] || probe_args=(--multi)
     [[ "${3:-}" != --multi-input ]] || probe_args=(--multi-input)
@@ -382,6 +384,8 @@ if [[ "${3:-}" == --worker || "${3:-}" == --multi-worker || "${3:-}" == --multi-
         jq -e 'any(.outputs[]; .name == "Virtual-0" and .size.width == 1280 and .size.height == 720 and .scale == 1) and any(.outputs[]; .name == "Virtual-1" and .size.width == 1600 and .size.height == 900 and .scale == 1.25)' "$XDG_RUNTIME_DIR/outputs-after-worker.json"
     elif [[ "${3:-}" == --multi-fit ]]; then
         jq -e 'any(.outputs[]; .name == "Virtual-0" and .size.width == 1600 and .size.height == 900 and .pos.x == 0) and any(.outputs[]; .name == "Virtual-1" and .size.width == 1280 and .size.height == 720 and .pos.x == 1600)' "$XDG_RUNTIME_DIR/outputs-after-worker.json"
+    elif [[ "${3:-}" == --multi-primary ]]; then
+        jq -e 'any(.outputs[]; .name == "Virtual-0" and .priority == 2 and .size.width == 1280 and .size.height == 720 and .pos.x == 0) and any(.outputs[]; .name == "Virtual-1" and .priority == 1 and .size.width == 1280 and .size.height == 720 and .pos.x == 1280)' "$XDG_RUNTIME_DIR/outputs-after-worker.json"
     else
         jq -e 'all(.outputs[]; .enabled == true and .size.width == 1280 and .size.height == 720)' "$XDG_RUNTIME_DIR/outputs-after-worker.json"
     fi
