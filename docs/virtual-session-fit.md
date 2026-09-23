@@ -39,6 +39,10 @@ rolled back merely because a client disconnects.
 The client permits one pending Fit, correlates replies, clears pending state
 before attachment/reset notifications and ignores stale replies. Unsupported
 servers leave the action disabled. Errors stay out of unrelated layout flows.
+After a verified Fit and matching graphics layout, a windowed 1:1 view grows or
+shrinks to the remote pixels, limited by its current local screen. Scaled and
+full-screen views keep their presentation. Attachment changes retire a pending
+window adjustment before it can affect another desktop.
 Deploy matching broker, worker and KRdp library together; a newer broker with
 an older worker can advertise the feature but the worker will refuse it.
 
@@ -48,6 +52,13 @@ rejected and the resize rolled back. The verifier now keeps that bookkeeping
 enabled while still rejecting every nonzero decode/concealment error flag.
 Production-encoder fixtures and individually removed/truncated slice tests cover
 the correction. Native Fit acceptance must be repeated with the corrected worker.
+The first corrected native run confirmed 1920x1080 keyframes and client decode,
+but then exposed a separate fractional-scale issue: Qt Wayland reports integer
+QScreen DPR2 for a KScreen1.25 output. The virtual worker now derives the
+pixel/logical ratio from each frame and retains KScreen's exact scale once Fit
+has verified it. Both axes are checked with compositor rounding tolerance;
+the physical-console path still uses its existing QScreen behavior. Fractional
+native acceptance must be repeated after this worker update.
 
 Automated coverage: `VirtualResizeTest`, `VirtualResizeSessionTest`,
 `VirtualSessionTransportTest`, client `VirtualSessionClientStateTest` and

@@ -190,12 +190,13 @@ void VirtualResizeSession::captured(const ConsoleWorkerWire::Outputs &outputs, Q
     // keyframe dimensions as well as the epoch and metadata. Candidate payload
     // validation does not replace end-to-end client/visual acceptance.
     // Fractional logical geometry is rounded.
-    if (output.name != target.name || !V::sameScale(output.scale, target.scale)
+    if (output.name != target.name || !V::frameScaleMatches(output.scale, target.scale, output.geometry.size())
         || frameMetadataPixels != target.current.pixels || encodedPayloadPixels != target.current.pixels
         || output.geometry.topLeft() != QPoint(0, 0)
         || std::abs(output.geometry.width() - encodedPayloadPixels.width() / target.scale) > 1.0
         || std::abs(output.geometry.height() - encodedPayloadPixels.height() / target.scale) > 1.0) return;
     m_deadline.stop();
+    m_confirmedScale = target.scale;
     m_captureTarget.reset();
     m_plan.reset();
     m_blockedError.clear();

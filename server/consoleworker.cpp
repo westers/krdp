@@ -165,8 +165,22 @@ public:
                             outputs.monitors.clear();
                             break; // Wait until capture and screen discovery agree after hotplug.
                         }
+                        double scale = screens[i]->devicePixelRatio();
+                        if (m_mode.virtualSession) {
+                            const auto inferred = VirtualResize::frameScale(frame.size, frame.monitors[i].geometry.size());
+                            if (!inferred) {
+                                outputs.monitors.clear();
+                                break; // A frame with inconsistent pixel/logical axes cannot prove Fit.
+                            }
+                            const auto verified = m_virtualResize.outputScale();
+                            // A completed Fit carries KScreen's exact scale. For an
+                            // independently changed output, use the ratio that agrees
+                            // with this frame's pixels and logical rectangle.
+                            scale = verified && VirtualResize::geometryMatchesScale(frame.size, frame.monitors[i].geometry.size(), *verified)
+                                ? *verified : *inferred;
+                        }
                         outputs.monitors.append({screens[i]->name(), frame.monitors[i].geometry,
-                                                 screens[i]->devicePixelRatio(), frame.monitors[i].primary});
+                                                 scale, frame.monitors[i].primary});
                     }
                 }
                 if (m_mode.virtualSession) {

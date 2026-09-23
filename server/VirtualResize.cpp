@@ -4,6 +4,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
+#include <algorithm>
 #include <cmath>
 
 namespace KRdp::VirtualResize
@@ -41,6 +42,38 @@ bool sameScale(double a, double b)
     // KWin uses 1/120 scale steps, transported through wl_fixed (1/256).
     // Less than half a scale step tolerates that transport, not the next step.
     return std::isfinite(a) && std::isfinite(b) && std::abs(a - b) <= 1.0 / 256.0 + 0.000001;
+}
+
+std::optional<double> frameScale(QSize pixels, QSize logical)
+{
+    if (pixels.width() <= 0 || pixels.height() <= 0 || logical.width() <= 0 || logical.height() <= 0) return {};
+    // Width and height round independently in KWin. Prefer the longer logical
+    // axis, then quantize to KWin's scale step and verify BOTH axes within one
+    // logical pixel. Extrapolating a width rounding error over a tall frame can
+    // otherwise reject a valid 322x4096@4 output by 25 physical pixels.
+    const double ratio = logical.width() >= logical.height()
+        ? double(pixels.width()) / logical.width()
+        : double(pixels.height()) / logical.height();
+    if (!std::isfinite(ratio)) return {};
+    const double scale = std::clamp(normalizedScale(ratio), 1.0, 4.0);
+    if (!geometryMatchesScale(pixels, logical, scale)) return {};
+    return scale;
+}
+
+bool geometryMatchesScale(QSize pixels, QSize logical, double scale)
+{
+    return pixels.width() > 0 && pixels.height() > 0 && logical.width() > 0 && logical.height() > 0
+        && std::isfinite(scale) && scale >= 1 && scale <= 4
+        && std::abs(double(logical.width()) - pixels.width() / scale) <= 1.0 + 0.000001
+        && std::abs(double(logical.height()) - pixels.height() / scale) <= 1.0 + 0.000001;
+}
+
+bool frameScaleMatches(double observed, double requested, QSize logical)
+{
+    if (!std::isfinite(observed) || !std::isfinite(requested) || logical.width() <= 0 || logical.height() <= 0) return false;
+    // One logical pixel of rounding at a very small virtual size can exceed
+    // wl_fixed precision, while ordinary sizes retain the stricter threshold.
+    return std::abs(observed - requested) <= std::max(1.0 / 256.0 + 0.000001, requested / logical.width());
 }
 
 std::optional<Snapshot> snapshot(const QByteArray &json, QString *error)

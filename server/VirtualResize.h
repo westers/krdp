@@ -33,6 +33,12 @@ struct Plan {
 bool validRequest(QSize pixels, double scale);
 double normalizedScale(double scale);
 bool sameScale(double a, double b);
+// Qt's Wayland QScreen DPR is integer even when KScreen reports a fractional
+// output scale. For the private single-output stream, infer the effective
+// pixel-to-logical ratio from the frame and its own output geometry.
+std::optional<double> frameScale(QSize pixels, QSize logical);
+bool frameScaleMatches(double observed, double requested, QSize logical);
+bool geometryMatchesScale(QSize pixels, QSize logical, double scale);
 std::optional<Snapshot> snapshot(const QByteArray &json, QString *error);
 bool sameOutput(const Snapshot &a, const Snapshot &b);
 bool matches(const Snapshot &state, const Plan &plan);

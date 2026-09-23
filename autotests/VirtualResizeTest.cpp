@@ -24,6 +24,22 @@ private Q_SLOTS:
         QVERIFY(V::sameScale(1.333333333, 1.33203125));
         QVERIFY(!V::sameScale(1.333333333, 1.341666666));
         QCOMPARE(V::normalizedScale(1.331), 160.0 / 120);
+        // Sol's Qt Wayland QScreen reported DPR 2 for a KScreen 1.25 output.
+        // Encoded pixels and frame logical geometry recover the useful ratio.
+        QCOMPARE(V::frameScale({1600, 900}, {1280, 720}), 1.25);
+        QVERIFY(V::frameScaleMatches(1.25, 1.25, {1280, 720}));
+        QVERIFY(!V::frameScaleMatches(2, 1.25, {1280, 720}));
+        QVERIFY(!V::frameScale({1600, 900}, {1280, 710}));
+        QVERIFY(!V::frameScale({1600, 900}, {}));
+        QCOMPARE(V::frameScale({320, 202}, {80, 51}), 4.0);
+        QCOMPARE(V::frameScale({322, 4096}, {81, 1024}), 4.0);
+        QVERIFY(!V::frameScale({322, 4096}, {81, 980}));
+        QVERIFY(V::geometryMatchesScale({322, 4096}, {81, 1024}, 4));
+        QVERIFY(!V::geometryMatchesScale({322, 4096}, {81, 1024}, 3.95));
+        QVERIFY(!V::geometryMatchesScale({1600, 900}, {1280, 720}, 2));
+        // At the smallest supported logical dimensions, one output pixel of
+        // compositor rounding must not invalidate a verified exact scale.
+        QVERIFY(V::frameScaleMatches(322.0 / 81, 4, {81, 50}));
     }
     void refusesBadSnapshots_data()
     {

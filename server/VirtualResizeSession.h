@@ -18,6 +18,9 @@ public:
     void captureRestartFailed(quint64 epoch);
     void captureStateChanged(quint64 epoch, bool active);
     quint64 captureEpoch() const { return m_captureEpoch; }
+    std::optional<double> outputScale() const {
+        return m_captureTarget ? std::optional(m_captureTarget->scale) : m_confirmedScale;
+    }
     bool framesAllowed() const { return m_forwardFrames && !m_stopping && !changing() && m_blockedError.isEmpty(); }
     void stop();
     bool inputAllowed() const;
@@ -41,6 +44,7 @@ private:
     std::optional<ConsoleWorkerWire::Resize> m_pending;
     std::optional<VirtualResize::Plan> m_plan;
     std::optional<VirtualResize::Snapshot> m_captureTarget;
+    std::optional<double> m_confirmedScale;
     QTimer m_deadline;
     QString m_cancelError;
     QString m_blockedError;

@@ -120,6 +120,7 @@ private Q_SLOTS:
         const auto failedEpoch = session.captureEpoch();
         session.captureRestartFailed(failedEpoch + 1); QVERIFY(io.calls.isEmpty());
         session.captureRestartFailed(failedEpoch); QVERIFY(!io.calls.isEmpty());
+        QVERIFY(!session.m_confirmedScale); // Failed activation cannot publish a newly verified scale.
         io.state(changed()); io.answer(true); io.state(output());
         QCOMPARE(replies.size(), 1); QVERIFY(!replies.first().error.isEmpty());
         QVERIFY(session.captureEpoch() > failedEpoch);
@@ -129,6 +130,7 @@ private Q_SLOTS:
         session.captured(original, {1280, 720}, {1280, 720}, true, session.captureEpoch()); QVERIFY(!session.framesAllowed());
         activate(session);
         session.captured(original, {1280, 720}, {1280, 720}, true, session.captureEpoch()); QVERIFY(session.framesAllowed());
+        QCOMPARE(session.outputScale(), std::optional(1.0)); // Recovery's verified original scale.
         QCOMPARE(replies.size(), 1); // Recovery never sends a success for the failed Fit.
     }
     void synchronousRestartAndRecoveryFailuresRemainBlocked()
@@ -321,6 +323,7 @@ private Q_SLOTS:
         const ConsoleWorkerWire::Outputs fractional{{{QStringLiteral("Virtual-0"), QRect(0, 0, 1440, 810), 1.33203125, true}}};
         session.captured(fractional, {1918, 1080}, {1918, 1080}, true, session.captureEpoch()); QVERIFY(!session.framesAllowed());
         session.captured(fractional, {1920, 1080}, {1920, 1080}, true, session.captureEpoch()); QVERIFY(session.framesAllowed());
+        QCOMPARE(session.outputScale(), std::optional(request.scale));
     }
     void framedRequestsAndRepliesKeepIdentity()
     {
