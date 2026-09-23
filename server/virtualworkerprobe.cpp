@@ -35,11 +35,12 @@ int main(int argc, char **argv)
     const bool resizeProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-resize");
     const bool fitProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-fit");
     const bool primaryProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-primary");
+    const bool mixedCreateProbe = arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-mixed-create");
     const bool addProbe = removeProbe || (arguments.size() == 2 && arguments[1] == QStringLiteral("--multi-add"));
-    const QString addedName = removeProbe ? QStringLiteral("Virtual-krdp-added-probe-extra")
+    const QString addedName = (removeProbe || mixedCreateProbe) ? QStringLiteral("Virtual-krdp-added-probe-extra")
                                           : QStringLiteral("Virtual-krdp-probe-extra");
     const bool mixed = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi-mixed") || inputProbe);
-    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || negativeProbe || dragProbe || repositionProbe || addProbe || resizeProbe || fitProbe || primaryProbe);
+    const bool multi = arguments.size() == 2 && (arguments[1] == QStringLiteral("--multi") || mixed || negativeProbe || dragProbe || repositionProbe || addProbe || resizeProbe || fitProbe || primaryProbe || mixedCreateProbe);
     if (arguments.size() != 1 && !managed && !multi) return 1;
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     const QFileInfo runtimeInfo(runtime);
@@ -121,6 +122,10 @@ int main(int argc, char **argv)
     bool primaryAcknowledged = false;
     bool primaryInventory = false;
     QSet<int> primaryFrames;
+    bool mixedCreateStarted = false;
+    bool mixedCreateAcknowledged = false;
+    bool mixedCreateInventory = false;
+    QSet<int> mixedCreateFrames;
     bool stopping = false;
     int result = 1;
     ConsoleWorkerWire::Outputs outputs;
@@ -132,7 +137,8 @@ int main(int argc, char **argv)
                 : addInventory && addFrames.size() == 3)))
             && (!resizeProbe || (resizeAcknowledged && resizeInventory && resizeFrames.size() == 2))
             && (!fitProbe || (fitAcknowledged && fitInventory && fitFrames.size() == 2))
-            && (!primaryProbe || (primaryAcknowledged && primaryInventory && primaryFrames.size() == 2));
+            && (!primaryProbe || (primaryAcknowledged && primaryInventory && primaryFrames.size() == 2))
+            && (!mixedCreateProbe || (mixedCreateAcknowledged && mixedCreateInventory && mixedCreateFrames.size() == 3));
     };
     const auto maybeStop = [&] {
         if (verified() && !stopping) {
@@ -299,6 +305,16 @@ int main(int argc, char **argv)
             addInventory = true;
             endpoint.requestKeyFrame();
         }
+        if (mixedCreateProbe && mixedCreateStarted && !mixedCreateInventory && value.monitors.size() == 3
+            && hasPrimaryOutput(QStringLiteral("Virtual-0"), QRect(0, 0, 1280, 720), true)
+            && hasPrimaryOutput(QStringLiteral("Virtual-1"), QRect(1280, 100, 1280, 720), false)
+            && hasPrimaryOutput(addedName, QRect(2560, 100, 960, 540), false)) {
+            mixedCreateInventory = true;
+            capturedOutputs.clear();
+            captured = false;
+            qInfo("Worker published one final three-output mixed-create inventory");
+            endpoint.requestKeyFrame();
+        }
         if (removeProbe && removeStarted && !removeInventory && value.monitors.size() == 2
             && value.monitors[0].name == QStringLiteral("Virtual-0")
             && value.monitors[1].name == QStringLiteral("Virtual-1")) {
@@ -386,8 +402,33 @@ int main(int argc, char **argv)
         qInfo("Authenticated primary change acknowledged after KScreen priority and both captures");
         maybeStop();
     });
+    QObject::connect(&endpoint, &ConsoleWorkerEndpoint::mixedCreateFinished, &app, [&](const auto &value) {
+        if (!mixedCreateProbe || value.requestId != 2 || value.generation != 1 || !value.error.isEmpty()) {
+            qCritical().noquote() << "Worker mixed creation failed:" << value.error;
+            app.quit();
+            return;
+        }
+        QProcess readback;
+        readback.start(QStringLiteral("kscreen-doctor"), {QStringLiteral("-j")});
+        if (!readback.waitForFinished(3000) || readback.exitCode() != 0) { app.quit(); return; }
+        const auto json = readback.readAllStandardOutput();
+        const auto snapshot = RetainedKScreenReadback::parse(json, id);
+        const auto priorities = snapshot ? RetainedMultiPrimaryPlan::priorities(json, *snapshot) : std::nullopt;
+        if (!snapshot || !priorities || snapshot->outputs.size() != 3
+            || snapshot->outputs[0].backendKey != QStringLiteral("Virtual-0")
+            || snapshot->outputs[0].logicalGeometry != QRect(0, 0, 1280, 720)
+            || snapshot->outputs[1].backendKey != QStringLiteral("Virtual-1")
+            || snapshot->outputs[1].logicalGeometry != QRect(1280, 100, 1280, 720)
+            || snapshot->outputs[2].backendKey != addedName
+            || snapshot->outputs[2].logicalGeometry != QRect(2560, 100, 960, 540)
+            || snapshot->outputs[2].nativePixels != QSize(960, 540)
+            || priorities->value(QStringLiteral("Virtual-0")) != 1) { app.quit(); return; }
+        mixedCreateAcknowledged = true;
+        qInfo("Authenticated mixed creation acknowledged after exact three-output KScreen readback and capture");
+        maybeStop();
+    });
     QObject::connect(&endpoint, &ConsoleWorkerEndpoint::frameReceived, &app, [&](const VideoFrame &frame) {
-        const int expected = addInventory ? 3 : multi ? 2 : 1;
+        const int expected = addInventory || mixedCreateInventory ? 3 : multi ? 2 : 1;
         const QSize expectedSize = fitInventory && frame.monitorIndex == 0 ? QSize(1600, 900)
             : frame.monitorIndex == 2 ? QSize(960, 540)
             : resizeInventory && frame.monitorIndex == 1 ? QSize(1600, 900) : QSize(1280, 720);
@@ -401,10 +442,11 @@ int main(int argc, char **argv)
                     ? QRect(1280, 0, 1280, 720)
                 : fitInventory && i == 0 ? QRect(0, 0, 1600, 900)
                 : fitInventory && i == 1 ? QRect(1600, 0, 1280, 720)
+                : i == 2 && mixedCreateInventory ? QRect(2560, 100, 960, 540)
                 : i == 2 ? QRect(2560, 0, 960, 540)
                 : mixed && i == 0 ? QRect(0, 0, 1024, 576)
                 : mixed && i == 1 ? QRect(1024, 100, 1280, 720)
-                : (negativeProbe || repositionInventory) && i == 1 ? QRect(1280, 100, 1280, 720)
+                : (negativeProbe || repositionInventory || mixedCreateInventory) && i == 1 ? QRect(1280, 100, 1280, 720)
                 : QRect(i * 1280, 0, 1280, 720);
             const QRect wire = fitInventory && i == 0 ? QRect(0, 0, 1600, 900)
                 : fitInventory && i == 1 ? QRect(1600, 0, 1280, 720)
@@ -450,6 +492,11 @@ int main(int argc, char **argv)
             if (addFrames.size() == 3) qInfo("Three post-add independently decoded output keyframes verified");
             maybeRemove();
         }
+        if (mixedCreateProbe && mixedCreateInventory) {
+            mixedCreateFrames.insert(frame.monitorIndex);
+            if (mixedCreateFrames.size() == 3)
+                qInfo("Three post-mixed-create independently decoded output keyframes verified");
+        }
         if (removeProbe && removeInventory) {
             removeFrames.insert(frame.monitorIndex);
             if (removeFrames.size() == 2) qInfo("Two post-remove independently decoded output keyframes verified");
@@ -470,6 +517,13 @@ int main(int argc, char **argv)
             primaryStarted = true;
             qInfo("Requesting authenticated primary change to Virtual-1");
             if (!endpoint.primary({2, 1, QStringLiteral("Virtual-1")})) app.quit();
+        }
+        if (captured && mixedCreateProbe && !mixedCreateStarted) {
+            mixedCreateStarted = true;
+            qInfo("Requesting one authenticated Add-plus-move mixed worker transaction");
+            if (!endpoint.mixedCreate({2, 1, addedName, QSize(960, 540), 1.0, QPoint(2560, 100),
+                {{ConsoleWorkerWire::MixedOperation::Kind::Move, QStringLiteral("Virtual-1"),
+                    QPoint(1280, 100), {}, 1}}})) app.quit();
         }
         if (captured && fitProbe && !fitStarted) {
             fitStarted = true;

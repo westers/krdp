@@ -2,7 +2,7 @@
 # Privileged envelope for an explicitly authorized disposable Sol GPU probe.
 # Never install this as a service or run it against a physical desktop.
 set -euo pipefail
-[[ $# == 0 || ( $# == 1 && ( $1 == --multi-worker || $1 == --multi-mixed || $1 == --multi-create || $1 == --multi-add || $1 == --multi-remove || $1 == --multi-resize || $1 == --multi-negative || $1 == --multi-window || $1 == --multi-input || $1 == --multi-drag || $1 == --multi-reposition || $1 == --multi-rdp || $1 == --multi-mixed-rdp || $1 == --multi-resize-rdp || $1 == --layout-campaign ) ) ]]
+[[ $# == 0 || ( $# == 1 && ( $1 == --multi-worker || $1 == --multi-mixed || $1 == --multi-create || $1 == --multi-add || $1 == --multi-mixed-create || $1 == --multi-remove || $1 == --multi-resize || $1 == --multi-negative || $1 == --multi-window || $1 == --multi-input || $1 == --multi-drag || $1 == --multi-reposition || $1 == --multi-rdp || $1 == --multi-mixed-rdp || $1 == --multi-resize-rdp || $1 == --layout-campaign ) ) ]]
 [[ $EUID == 0 && "$(hostname -s)" == sol ]] || {
     echo 'Run explicitly as root on Sol.' >&2
     exit 1
@@ -62,6 +62,7 @@ if [[ $# == 1 ]]; then
     [[ $1 != --multi-mixed ]] || probe_mode=--plasma-mixed-worker-nvidia
     [[ $1 != --multi-create ]] || probe_mode=--plasma-multi-create-nvidia
     [[ $1 != --multi-add ]] || probe_mode=--plasma-multi-add-nvidia
+    [[ $1 != --multi-mixed-create ]] || probe_mode=--plasma-multi-mixed-create-nvidia
     [[ $1 != --multi-remove ]] || probe_mode=--plasma-multi-remove-nvidia
     [[ $1 != --multi-resize ]] || probe_mode=--plasma-multi-resize-nvidia
     [[ $1 != --multi-negative ]] || probe_mode=--plasma-negative-worker-nvidia
