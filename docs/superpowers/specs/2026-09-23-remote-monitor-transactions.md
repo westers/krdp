@@ -89,6 +89,13 @@ private compositor, fresh KScreen order and two independently decoded
 post-change keyframes, allowing QScreen output-index reordering. The script
 also checks the private compositor's post-worker priority map. It is built
 on Sol but cannot run until the user-started render-access envelope is live.
+Source `b4fab8d` adds pure mixed existing-output worker preflight for 2–16
+resize/move/primary operations. It checks the final owned-virtual arrangement
+and full priority map, builds one KScreen command, and restricts failure
+recovery to recognized before/after partial states. Local full build/68
+selected non-maintenance tests and Sol focused readback tests pass. It is not
+yet wired to worker/broker, does not handle Add/Remove creator lifecycles, and
+has no native compositor or GUI acceptance. Match remains unavailable.
 Client `15407f0` requires explicit confirmation for new gaps and `b40a08a`
 tests an offscreen pointer drag and monitor aspect ratio. Full client build/29
 CTests pass, but native batch GUI acceptance is absent. The later private Fit
