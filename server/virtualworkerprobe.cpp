@@ -126,6 +126,9 @@ int main(int argc, char **argv)
     bool mixedCreateAcknowledged = false;
     bool mixedCreateInventory = false;
     QSet<int> mixedCreateFrames;
+    bool mixedCreateDetached = false;
+    bool mixedCreateReattached = false;
+    QSet<int> mixedCreateReattachFrames;
     bool stopping = false;
     int result = 1;
     ConsoleWorkerWire::Outputs outputs;
@@ -138,7 +141,8 @@ int main(int argc, char **argv)
             && (!resizeProbe || (resizeAcknowledged && resizeInventory && resizeFrames.size() == 2))
             && (!fitProbe || (fitAcknowledged && fitInventory && fitFrames.size() == 2))
             && (!primaryProbe || (primaryAcknowledged && primaryInventory && primaryFrames.size() == 2))
-            && (!mixedCreateProbe || (mixedCreateAcknowledged && mixedCreateInventory && mixedCreateFrames.size() == 3));
+            && (!mixedCreateProbe || (mixedCreateAcknowledged && mixedCreateInventory && mixedCreateFrames.size() == 3
+                && mixedCreateDetached && mixedCreateReattached && mixedCreateReattachFrames.size() == 3));
     };
     const auto maybeStop = [&] {
         if (verified() && !stopping) {
@@ -498,6 +502,34 @@ int main(int argc, char **argv)
             mixedCreateFrames.insert(frame.monitorIndex);
             if (mixedCreateFrames.size() == 3)
                 qInfo("Three post-mixed-create independently decoded output keyframes verified");
+            if (mixedCreateReattached) {
+                mixedCreateReattachFrames.insert(frame.monitorIndex);
+                if (mixedCreateReattachFrames.size() == 3)
+                    qInfo("Three independently decoded outputs survived controller reattachment");
+            }
+            if (mixedCreateAcknowledged && mixedCreateFrames.size() == 3 && !mixedCreateDetached) {
+                mixedCreateDetached = true;
+                endpoint.setControlState({2, false});
+                QTimer::singleShot(250, &app, [&] {
+                    QProcess readback;
+                    readback.start(QStringLiteral("kscreen-doctor"), {QStringLiteral("-j")});
+                    if (!readback.waitForFinished(3000) || readback.exitCode() != 0) { app.quit(); return; }
+                    const auto snapshot = RetainedKScreenReadback::parse(readback.readAllStandardOutput(), id);
+                    if (!snapshot || snapshot->outputs.size() != 3
+                        || snapshot->outputs[0].logicalGeometry != QRect(0, 0, 1280, 720)
+                        || snapshot->outputs[1].logicalGeometry != QRect(1280, 100, 1280, 720)
+                        || snapshot->outputs[2].backendKey != addedName
+                        || snapshot->outputs[2].logicalGeometry != QRect(2560, 100, 960, 540)) {
+                        qCritical("Mixed-created layout changed while client control was detached");
+                        app.quit();
+                        return;
+                    }
+                    qInfo("Mixed-created KScreen layout survived client control detach");
+                    endpoint.setControlState({3, true});
+                    mixedCreateReattached = true;
+                    endpoint.requestKeyFrame();
+                });
+            }
         }
         if (removeProbe && removeInventory) {
             removeFrames.insert(frame.monitorIndex);
