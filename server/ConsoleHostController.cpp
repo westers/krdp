@@ -100,6 +100,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         qInfo() << "Console capture outputs:" << outputs.monitors.size() << "forwarding" << m_inputEnabled << "clients" << m_clients.size();
         if (outputs != m_outputs) {
             m_topologyAvailable = false;
+            m_topologyPriorities.clear();
             finishTopologyQueries(u"capture-failed"_s);
         }
         m_outputs = outputs;
@@ -108,11 +109,13 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     connect(&m_endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [this](const ConsoleWorkerWire::Topology &topology) {
         if (topology.outputs.isEmpty() || topology.outputs.size() != m_outputs.monitors.size()) {
             m_topologyAvailable = false;
+            m_topologyPriorities.clear();
             m_topologyCatalog.resetGeneration();
             finishTopologyQueries(u"capture-failed"_s);
             return;
         }
         QVector<RemoteTopologyCatalog::Output> inventory;
+        QMap<QString, int> priorities;
         QRect workspace;
         for (const auto &output : topology.outputs) workspace |= output.logical;
         for (const auto &output : topology.outputs) {
@@ -120,18 +123,24 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
                 return monitor.name == output.name;
             });
             if (found == m_outputs.monitors.cend() || found->geometry != output.logical.translated(-workspace.topLeft())
-                || found->primary != output.primary) {
+                || found->primary != output.primary || output.priority < 1 || output.priority > 16
+                || priorities.values().contains(output.priority)) {
                 m_topologyAvailable = false;
+                m_topologyPriorities.clear();
                 m_topologyCatalog.resetGeneration();
                 finishTopologyQueries(u"capture-failed"_s);
                 return;
             }
+            priorities.insert(output.name, output.priority);
             inventory.append({.backendKey = output.name, .name = output.name, .nativePixels = output.pixels,
                 .logicalGeometry = output.logical, .scale = output.scale, .enabled = true,
                 .primary = output.primary, .physical = true, .owner = {}});
         }
         m_topologyAvailable = m_topologyCatalog.observe(inventory).has_value();
-        if (!m_topologyAvailable) m_topologyCatalog.resetGeneration();
+        if (!m_topologyAvailable) {
+            m_topologyPriorities.clear();
+            m_topologyCatalog.resetGeneration();
+        } else m_topologyPriorities = priorities;
         finishTopologyQueries(m_topologyAvailable ? QString() : u"capture-failed"_s);
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::localTakeover, this, [this](quint64 generation) {
@@ -217,6 +226,7 @@ void ConsoleHostController::apply(const ConsoleHandoff::Actions &actions)
 void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
 {
     m_topologyAvailable = false;
+    m_topologyPriorities.clear();
     m_topologyCatalog.resetGeneration();
     finishTopologyQueries(u"capture-failed"_s);
     m_outputs = {}; // Never describe the prior greeter/user's outputs during handoff.
@@ -252,6 +262,7 @@ void ConsoleHostController::setWorkerActive(bool active)
     qInfo() << "Console capture forwarding:" << active;
     if (!active) {
         m_topologyAvailable = false;
+        m_topologyPriorities.clear();
         m_topologyCatalog.resetGeneration();
         finishTopologyQueries(u"capture-failed"_s);
         stopMicrophone(u"console session changed; microphone consent must be renewed"_s);

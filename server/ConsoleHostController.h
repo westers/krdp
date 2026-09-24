@@ -10,6 +10,7 @@
 #include <QObject>
 #include <QHash>
 #include <QJsonObject>
+#include <QMap>
 #include <QTimer>
 
 #include "ConsoleHandoff.h"
@@ -92,6 +93,7 @@ private:
     ConsoleWorkerWire::Outputs m_outputs;
     RemoteTopologyCatalog m_topologyCatalog;
     bool m_topologyAvailable = false;
+    QMap<QString, int> m_topologyPriorities; // Exact same-worker KScreen order, never inferred from primary flags.
     QHash<ConsoleControl::Id, QString> m_pendingTopology;
     ConsoleInputState m_inputState;
     ConsoleControl::Id m_workerOwner = 0;

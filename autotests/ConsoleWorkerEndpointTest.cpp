@@ -233,7 +233,7 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(layouts, 1);
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Topology{{
-        {QStringLiteral("DP-1"), QSize(1280, 720), QRect(0, 0, 1280, 720), 1.0, true}}}));
+        {QStringLiteral("DP-1"), QSize(1280, 720), QRect(0, 0, 1280, 720), 1.0, true, 1}}}));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(topologies, 1);
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ControlState{42, true}, ConsoleWorkerWire::Kind::LocalTakeover));

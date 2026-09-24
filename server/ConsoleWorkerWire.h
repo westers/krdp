@@ -23,7 +23,7 @@
 
 namespace KRdp::ConsoleWorkerWire
 {
-constexpr quint16 ProtocolVersion = 9; // Physical-layout wire; broker and worker must upgrade together.
+constexpr quint16 ProtocolVersion = 10; // Physical priorities; broker and worker must upgrade together.
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 
 enum class Kind : quint8 {
@@ -979,6 +979,7 @@ struct TopologyOutput {
     QRect logical;
     double scale = 1;
     bool primary = false;
+    quint8 priority = 0;
     bool operator==(const TopologyOutput &) const = default;
 };
 
@@ -994,7 +995,7 @@ inline QByteArray frame(const Topology &topology)
     stream.setByteOrder(QDataStream::BigEndian);
     stream << quint32(topology.outputs.size());
     for (const auto &output : topology.outputs)
-        stream << output.name << output.pixels << output.logical << output.scale << output.primary;
+        stream << output.name << output.pixels << output.logical << output.scale << output.primary << output.priority;
     return frame(Kind::Topology, payload);
 }
 
@@ -1008,22 +1009,26 @@ inline std::optional<Topology> topology(const Record &record)
     if (count > 16) return {};
     Topology result;
     QSet<QString> names;
+    QSet<int> priorities;
     int primaries = 0;
     for (quint32 i = 0; i < count; ++i) {
         TopologyOutput output;
-        stream >> output.name >> output.pixels >> output.logical >> output.scale >> output.primary;
+        stream >> output.name >> output.pixels >> output.logical >> output.scale >> output.primary >> output.priority;
         if (stream.status() != QDataStream::Ok || output.name.isEmpty() || output.name.size() > 128
             || names.contains(output.name) || output.pixels.width() < 1 || output.pixels.width() > 16384
             || output.pixels.height() < 1 || output.pixels.height() > 16384
             || output.logical.isEmpty() || output.logical.width() > 32768 || output.logical.height() > 32768
             || output.logical.x() < -32768 || output.logical.x() > 32768
             || output.logical.y() < -32768 || output.logical.y() > 32768
-            || !std::isfinite(output.scale) || output.scale < 1 || output.scale > 4) return {};
+            || !std::isfinite(output.scale) || output.scale < 1 || output.scale > 4
+            || output.priority < 1 || output.priority > 16 || priorities.contains(output.priority)
+            || output.primary != (output.priority == 1)) return {};
         names.insert(output.name);
+        priorities.insert(output.priority);
         primaries += output.primary;
         result.outputs.append(output);
     }
-    return stream.status() == QDataStream::Ok && stream.atEnd() && (count == 0 || primaries == 1)
+    return stream.status() == QDataStream::Ok && stream.atEnd() && (count == 0 || (primaries == 1 && priorities.size() == count))
         ? std::optional<Topology>(result) : std::nullopt;
 }
 

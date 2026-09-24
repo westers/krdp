@@ -20,10 +20,11 @@ private Q_SLOTS:
             {QStringLiteral("HDMI-A-1"), QRect(2560, 0, 2560, 1440), 1.0, false}}};
         Q_EMIT host.m_endpoint.outputsReceived(captured);
         const ConsoleWorkerWire::Topology confirmed{{
-            {QStringLiteral("DP-1"), QSize(2560, 1440), QRect(0, 0, 2560, 1440), 1.0, true},
-            {QStringLiteral("HDMI-A-1"), QSize(2560, 1440), QRect(2560, 0, 2560, 1440), 1.0, false}}};
+            {QStringLiteral("DP-1"), QSize(2560, 1440), QRect(0, 0, 2560, 1440), 1.0, true, 1},
+            {QStringLiteral("HDMI-A-1"), QSize(2560, 1440), QRect(2560, 0, 2560, 1440), 1.0, false, 3}}};
         Q_EMIT host.m_endpoint.topologyReceived(confirmed);
         QVERIFY(host.m_topologyAvailable);
+        QCOMPARE(host.m_topologyPriorities.value(QStringLiteral("HDMI-A-1")), 3);
         QCOMPARE(host.m_topologyCatalog.snapshot().revision, quint64(1));
         const QString generation = host.m_topologyCatalog.snapshot().generation;
         Q_EMIT host.m_endpoint.topologyReceived(confirmed);
@@ -39,6 +40,7 @@ private Q_SLOTS:
         QCOMPARE(host.m_topologyCatalog.snapshot().generation, generation);
         Q_EMIT host.m_endpoint.topologyReceived(ConsoleWorkerWire::Topology{});
         QVERIFY(!host.m_topologyAvailable);
+        QVERIFY(host.m_topologyPriorities.isEmpty());
         QVERIFY(host.m_topologyCatalog.snapshot().generation != generation);
         QCOMPARE(host.m_topologyCatalog.snapshot().revision, quint64(0));
     }

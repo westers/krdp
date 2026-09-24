@@ -207,8 +207,8 @@ void ConsoleWorkerWireTest::mixedCreateRecordsAreBoundedAndCorrelated()
 
 void ConsoleWorkerWireTest::readOnlyTopologyRecordIsBounded()
 {
-    const Topology expected{{{QStringLiteral("DP-1"), QSize(2560, 1440), QRect(0, 0, 2560, 1440), 1.0, true},
-        {QStringLiteral("HDMI-A-1"), QSize(1600, 900), QRect(2560, 100, 1280, 720), 1.25, false}}};
+    const Topology expected{{{QStringLiteral("DP-1"), QSize(2560, 1440), QRect(0, 0, 2560, 1440), 1.0, true, 1},
+        {QStringLiteral("HDMI-A-1"), QSize(1600, 900), QRect(2560, 100, 1280, 720), 1.25, false, 3}}};
     Deframer reader;
     reader.feed(frame(expected) + frame(Topology{}));
     auto record = reader.next();
@@ -227,6 +227,17 @@ void ConsoleWorkerWireTest::readOnlyTopologyRecordIsBounded()
     record = reader.next();
     QVERIFY(record);
     QVERIFY(!topology(*record));
+    auto invalidPriority = expected;
+    invalidPriority.outputs[1].priority = 1;
+    reader.feed(frame(invalidPriority));
+    QVERIFY(!topology(*reader.next()));
+    invalidPriority.outputs[1].priority = 0;
+    reader.feed(frame(invalidPriority));
+    QVERIFY(!topology(*reader.next()));
+    invalidPriority.outputs[1].priority = 2;
+    invalidPriority.outputs[1].primary = true;
+    reader.feed(frame(invalidPriority));
+    QVERIFY(!topology(*reader.next()));
     reader.feed(frame(Kind::TopologyQuery));
     record = reader.next();
     QVERIFY(record);

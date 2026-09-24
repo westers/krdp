@@ -351,8 +351,7 @@ public:
                         m_lastPhysicalKeyframe = frame;
                         if (m_topologyQueryPending) {
                             m_topologyQueryPending = false;
-                            const auto kscreen = readKScreen();
-                            const auto topology = kscreen ? ConsoleTopologyReadback::confirmed(*kscreen, outputs, frame) : std::nullopt;
+                            const auto topology = physicalTopology(outputs, frame);
                             // Empty explicitly retires an earlier inventory when
                             // fresh compositor readback and capture disagree.
                             m_socket.write(ConsoleWorkerWire::frame(topology.value_or(ConsoleWorkerWire::Topology{})));
@@ -852,7 +851,7 @@ private:
             m_session.setStreamingEnabled(false); // No oversized workspace encoder in multi mode.
             if (!m_mode.virtualSession && m_topologyQueryPending) {
                 m_topologyQueryPending = false;
-                const auto topology = ConsoleTopologyReadback::confirmedMulti(*kscreen, result.outputs, result.frames);
+                const auto topology = physicalTopology(result.outputs, result.frames);
                 m_socket.write(ConsoleWorkerWire::frame(topology.value_or(ConsoleWorkerWire::Topology{})));
             }
         }
@@ -891,6 +890,24 @@ private:
     {
         const auto json = readKScreenJson();
         return json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+    }
+
+    std::optional<ConsoleWorkerWire::Topology> physicalTopology(const ConsoleWorkerWire::Outputs &outputs,
+        const VideoFrame &frame) const
+    {
+        const auto json = readKScreenJson();
+        const auto kscreen = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+        const auto captured = kscreen ? ConsoleTopologyReadback::confirmed(*kscreen, outputs, frame) : std::nullopt;
+        return captured ? ConsoleTopologyReadback::withPriorities(*captured, *json, *kscreen) : std::nullopt;
+    }
+
+    std::optional<ConsoleWorkerWire::Topology> physicalTopology(const ConsoleWorkerWire::Outputs &outputs,
+        const QVector<VideoFrame> &frames) const
+    {
+        const auto json = readKScreenJson();
+        const auto kscreen = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+        const auto captured = kscreen ? ConsoleTopologyReadback::confirmedMulti(*kscreen, outputs, frames) : std::nullopt;
+        return captured ? ConsoleTopologyReadback::withPriorities(*captured, *json, *kscreen) : std::nullopt;
     }
 
     void finishPhysical(const QString &error)
@@ -2031,14 +2048,10 @@ private:
             if (record->kind == ConsoleWorkerWire::Kind::TopologyQuery && record->payload.isEmpty()) {
                 if (!m_mode.virtualSession) {
                     if (!m_resize.changing()) {
-                        const auto kscreen = readKScreen();
-                        const auto topology = kscreen
-                            ? (m_multiMode && m_multiReady
-                                ? ConsoleTopologyReadback::confirmedMulti(*kscreen, m_outputs, m_multiPublishedFrames)
-                                : (!m_multiMode && m_lastPhysicalKeyframe
-                                    ? ConsoleTopologyReadback::confirmed(*kscreen, m_outputs, *m_lastPhysicalKeyframe)
-                                    : std::nullopt))
-                            : std::nullopt;
+                        const auto topology = m_multiMode && m_multiReady
+                            ? physicalTopology(m_outputs, m_multiPublishedFrames)
+                            : (!m_multiMode && m_lastPhysicalKeyframe
+                                ? physicalTopology(m_outputs, *m_lastPhysicalKeyframe) : std::nullopt);
                         if (topology) {
                             m_socket.write(ConsoleWorkerWire::frame(*topology));
                             continue; // Idle KWin need not produce damage.

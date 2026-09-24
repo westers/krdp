@@ -33,6 +33,16 @@ private Q_SLOTS:
         const auto confirmed = KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, captured);
         QVERIFY(confirmed);
         QCOMPARE(confirmed->outputs.size(), 2);
+        const QByteArray priorityJson = R"({"outputs":[{"name":"DP-1","priority":1},{"name":"HDMI-A-1","priority":3}]})";
+        const auto ordered = KRdp::ConsoleTopologyReadback::withPriorities(*confirmed, priorityJson, fresh);
+        QVERIFY(ordered);
+        QCOMPARE(ordered->outputs[0].priority, quint8(1));
+        QCOMPARE(ordered->outputs[1].priority, quint8(3));
+        QVERIFY(!KRdp::ConsoleTopologyReadback::withPriorities(*confirmed,
+            R"({"outputs":[{"name":"DP-1","priority":1},{"name":"HDMI-A-1","priority":1}]})", fresh));
+        auto stale = *confirmed;
+        stale.outputs[1].logical.moveLeft(650);
+        QVERIFY(!KRdp::ConsoleTopologyReadback::withPriorities(stale, priorityJson, fresh));
 
         fresh.outputs[1].logicalGeometry.moveLeft(650);
         QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, captured));
