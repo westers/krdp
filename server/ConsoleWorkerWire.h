@@ -78,7 +78,8 @@ inline QByteArray frame(Kind kind, const QByteArray &payload = {});
 
 struct PhysicalLeaseReleased {
     quint64 controlGeneration = 0;
-    bool verified = false; // Exact conditional KScreen readback; fresh capture comes from a replacement worker.
+    bool verified = false; // Exact physical and/or creator-output lease release readback;
+                           // fresh capture comes from a replacement worker.
     bool operator==(const PhysicalLeaseReleased &) const = default;
 };
 

@@ -144,10 +144,12 @@ public:
         const auto resizedStopped = [this](const QString &error) {
             if (!error.isEmpty()) {
                 qWarning().noquote() << "Worker output recovery:" << error;
+                m_exitCode = 1;
             }
             m_session.setStreamingEnabled(false);
             for (const auto &session : m_multiSessions) session->setStreamingEnabled(false);
-            QCoreApplication::exit(error.isEmpty() ? m_exitCode : 1);
+            m_outputStopDone = true;
+            if (!m_creatorReleaseActive) QCoreApplication::exit(m_exitCode);
         };
         connect(&m_resize, &ConsoleResizeSession::stopped, this, resizedStopped);
         connect(&m_virtualResize, &VirtualResizeSession::stopped, this, resizedStopped);
@@ -257,6 +259,8 @@ public:
             finishRemove(QStringLiteral("virtual output removal/readback timed out"));
             m_socket.disconnectFromServer();
         });
+        m_creatorReleasePoll.setInterval(200);
+        connect(&m_creatorReleasePoll, &QTimer::timeout, this, &Worker::pollConsoleCreatorRelease);
         connect(&m_session, &AbstractSession::streamActiveChanged, this, [this](bool active) {
             if (m_mode.virtualSession) m_virtualResize.captureStateChanged(m_virtualCaptureEpoch, active);
             if (active && !m_captureReady) {
@@ -265,6 +269,7 @@ public:
             }
         });
         connect(&m_session, &AbstractSession::frameReceived, this, [this](const VideoFrame &frame) {
+            if (m_creatorReleaseActive || m_creatorReleaseFinished) return;
             // A single-output Console keeps this workspace producer alive
             // until KWin publishes the new screen. Its old-size frames must
             // not escape while Add is changing the output set.
@@ -426,6 +431,7 @@ private:
         m_stopping = true;
         m_exitCode = code;
         if (m_physicalPending) failPhysical(QStringLiteral("physical Console worker stopped during layout change"));
+        beginConsoleCreatorRelease();
         releasePhysicalLease();
         releaseInput();
         m_audioTimer.stop();
@@ -435,6 +441,67 @@ private:
         // virtual geometry is retained; only an unfinished Fit may roll back.
         if (m_mode.virtualSession) m_virtualResize.stop();
         else m_resize.stop();
+    }
+
+    bool beginConsoleCreatorRelease()
+    {
+        if (m_mode.virtualSession || (m_ownedCreators.empty() && !m_addPending && !m_removePending)
+            || m_creatorReleaseActive) return false;
+        releaseInput();
+        m_creatorReleaseActive = true;
+        m_multiReady = false;
+        m_lastPhysicalKeyframe.reset();
+        m_multiPublishedFrames.clear();
+        QSet<QString> owned;
+        for (const auto &creator : m_ownedCreators) owned.insert(creator.first);
+        if (m_addPending) owned.insert(m_addPending->output);
+        if (m_removePending) owned.insert(m_removePending->output);
+        const auto json = readKScreenJson();
+        m_creatorReleasePlan = json ? ConsoleCreatorLease::start(*json, m_sessionId, owned) : std::nullopt;
+        m_creatorReleaseGeneration = m_control.generation;
+        if (m_addPending) finishAdd(QStringLiteral("Console creation canceled by lease release"));
+        if (m_removePending) finishRemove(QStringLiteral("Console removal canceled by lease release"));
+        m_addCreator.reset();
+        m_ownedCreators.clear(); // Only these worker-held creator objects retire their KWin outputs.
+        m_creatorReleaseAge.start();
+        m_creatorReleasePoll.start();
+        QTimer::singleShot(0, this, &Worker::pollConsoleCreatorRelease);
+        return true;
+    }
+
+    void pollConsoleCreatorRelease()
+    {
+        if (!m_creatorReleaseActive) return;
+        const auto json = m_creatorReleasePlan ? readKScreenJson() : std::nullopt;
+        if (json && ConsoleCreatorLease::matchesReleased(*m_creatorReleasePlan, *json, m_sessionId)) {
+            finishConsoleCreatorRelease(true);
+        } else if (!m_creatorReleasePlan || m_creatorReleaseAge.elapsed() >= 8000) {
+            finishConsoleCreatorRelease(false);
+        }
+    }
+
+    void finishConsoleCreatorRelease(bool verified)
+    {
+        m_creatorReleasePoll.stop();
+        m_creatorReleaseFinished = true;
+        m_creatorReleaseActive = false;
+        m_creatorReleasePlan.reset();
+        qInfo() << "Console creator lease release verified:" << verified;
+        if (m_socket.state() == QLocalSocket::ConnectedState) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLeaseReleased{
+                m_creatorReleaseGeneration, verified}));
+            m_socket.flush();
+            m_socket.waitForBytesWritten(1000);
+        }
+        m_creatorReleaseGeneration = 0;
+        if (m_stopping) {
+            if (!verified) m_exitCode = 1;
+            if (m_outputStopDone) QCoreApplication::exit(m_exitCode);
+        } else if (m_socket.state() == QLocalSocket::ConnectedState) {
+            m_socket.disconnectFromServer(); // A replacement worker must prove fresh capture.
+        } else {
+            shutdown(verified ? 0 : 1);
+        }
     }
 
     PlasmaScreencastV1Session *multiInputSession() const
@@ -486,7 +553,7 @@ private:
 
     void syncCaptureMode()
     {
-        if (m_stopping) return;
+        if (m_stopping || m_creatorReleaseActive || m_creatorReleaseFinished) return;
         const auto screens = qGuiApp->screens();
         for (auto *screen : screens) watchScreen(screen);
         if (!m_mode.virtualSession && m_multiMode && m_resize.changing() && !m_physicalResizeReadyForCapture) {
@@ -750,6 +817,7 @@ private:
 
     void onMultiFrame(qsizetype index, const VideoFrame &frame)
     {
+        if (m_creatorReleaseActive || m_creatorReleaseFinished) return;
         const auto result = m_multiCapture.submit(index, frame);
         if (result.reset) {
             releaseInput();
@@ -1013,7 +1081,9 @@ private:
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLayoutResult{
                 request.requestId, request.controlGeneration, error}));
         };
-        if (m_mode.virtualSession || !m_authenticatedDesktop || m_stopping || m_physicalPending || !m_control.active
+        if (m_mode.virtualSession || !m_authenticatedDesktop || m_stopping
+            || m_creatorReleaseActive || m_creatorReleaseFinished
+            || !m_ownedCreators.empty() || m_physicalPending || !m_control.active
             || m_control.generation != request.controlGeneration || m_resize.changing()
             || m_outputs.monitors.isEmpty()
             || (m_multiMode ? (!m_multiReady || m_multiPublishedFrames.size() != m_outputs.monitors.size())
@@ -2001,6 +2071,7 @@ private:
         releaseInput();
         m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalTakeover));
         m_control.active = false; // Gate immediately, before the host's acknowledgement.
+        if (beginConsoleCreatorRelease()) return;
         if (m_physicalLease) {
             releasePhysicalLease();
             m_socket.disconnectFromServer(); // A new worker must prove fresh capture before any new grant.
@@ -2014,7 +2085,7 @@ private:
 
     void readBroker()
     {
-        if (m_stopping) {
+        if (m_stopping || m_creatorReleaseActive || m_creatorReleaseFinished) {
             return;
         }
         m_deframer.feed(m_socket.readAll());
@@ -2023,6 +2094,11 @@ private:
                 if (*control != m_control) {
                     if (m_physicalPending) {
                         failPhysical(QStringLiteral("physical layout authority changed during capture"));
+                        return;
+                    }
+                    if (!m_mode.virtualSession && (!m_ownedCreators.empty() || m_addPending || m_removePending)
+                        && (!control->active || control->generation != m_control.generation)) {
+                        beginConsoleCreatorRelease();
                         return;
                     }
                     if (m_physicalLease && (!control->active || control->generation != m_physicalLeaseGeneration)) {
@@ -2182,7 +2258,7 @@ private:
                 continue;
             }
             if (const auto input = ConsoleWorkerWire::input(*record)) {
-                if (!m_control.active || m_physicalPending
+                if (!m_control.active || m_physicalPending || m_creatorReleaseActive || m_creatorReleaseFinished
                     || ((!m_mode.virtualSession) && (m_addPending || m_removePending))
                     || !(m_mode.virtualSession ? m_virtualResize.inputAllowed() : m_resize.inputAllowed())
                     || (m_multiMode && !m_multiReady)) {
@@ -2286,6 +2362,13 @@ private:
     RetainedKScreenReadback::Snapshot m_addBefore;
     std::unique_ptr<PlasmaScreencastV1Session> m_addCreator;
     std::vector<std::pair<QString, std::unique_ptr<PlasmaScreencastV1Session>>> m_ownedCreators;
+    QTimer m_creatorReleasePoll;
+    QElapsedTimer m_creatorReleaseAge;
+    std::optional<ConsoleCreatorLease::State> m_creatorReleasePlan;
+    quint64 m_creatorReleaseGeneration = 0;
+    bool m_creatorReleaseActive = false;
+    bool m_creatorReleaseFinished = false;
+    bool m_outputStopDone = false;
     bool m_addPlaced = false;
     QTimer m_removeDeadline;
     std::optional<ConsoleWorkerWire::RemoveVirtual> m_removePending;

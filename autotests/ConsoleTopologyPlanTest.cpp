@@ -169,6 +169,32 @@ private Q_SLOTS:
             QStringLiteral("console-session")));
     }
 
+    void consoleCreatorReleaseTracksEveryOwnedExtra()
+    {
+        auto before = physicalKScreen();
+        auto values = before.value(QStringLiteral("outputs")).toArray();
+        values.append(physicalOutput(QStringLiteral("Virtual-krdp-added-a"), 55, QPoint(2560, 0),
+            QSize(800, 600), 1, 3, {mode(QStringLiteral("55"), QSize(800, 600), 60)}));
+        values.append(physicalOutput(QStringLiteral("Virtual-krdp-added-b"), 56, QPoint(3360, 0),
+            QSize(800, 600), 1, 4, {mode(QStringLiteral("56"), QSize(800, 600), 60)}));
+        before.insert(QStringLiteral("outputs"), values);
+        before.insert(QStringLiteral("screen"), QJsonObject{{QStringLiteral("maxActiveOutputsCount"), 4}});
+        const QSet<QString> owned{QStringLiteral("Virtual-krdp-added-a"), QStringLiteral("Virtual-krdp-added-b")};
+        const auto lease = KRdp::ConsoleCreatorLease::start(QJsonDocument(before).toJson(),
+            QStringLiteral("console-session"), owned);
+        QVERIFY(lease);
+        values.removeLast();
+        auto partial = before;
+        partial.insert(QStringLiteral("outputs"), values);
+        QVERIFY(!KRdp::ConsoleCreatorLease::matchesReleased(*lease, QJsonDocument(partial).toJson(),
+            QStringLiteral("console-session")));
+        values.removeLast();
+        partial.insert(QStringLiteral("outputs"), values);
+        partial.insert(QStringLiteral("screen"), QJsonObject{{QStringLiteral("maxActiveOutputsCount"), 2}});
+        QVERIFY(KRdp::ConsoleCreatorLease::matchesReleased(*lease, QJsonDocument(partial).toJson(),
+            QStringLiteral("console-session")));
+    }
+
     void physicalLeaseReleaseRequiresExactSecondReadback()
     {
         const auto source = baseline();
