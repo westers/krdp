@@ -22,6 +22,58 @@ class VirtualSessionControlTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void selectedCreateKeepsThreeScreenMixedScaleArrangement()
+    {
+        VirtualSessionSupervisor supervisor(sleeper);
+        VirtualSessionControl control(supervisor, {});
+        VirtualSessionControl::InitialOutputs committed;
+        int launches = 0;
+        control.setSelectedCreateHandler([&](quint32 uid, const auto &outputs) {
+            ++launches;
+            committed = outputs;
+            return VirtualSessionControl::CreateResult(supervisor.create(uid));
+        });
+        control.setInitialLayoutPreviewCapabilities({.maxOutputs = 16, .maxOutputDimension = 4096,
+            .maxAtlasDimension = 8192});
+        const QJsonArray screens{
+            QJsonObject{{QStringLiteral("id"), QStringLiteral("left")},
+                {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), -800}, {QStringLiteral("y"), 0}}},
+                {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 800}, {QStringLiteral("height"), 600}}},
+                {QStringLiteral("scale"), 1.0}, {QStringLiteral("primary"), false}},
+            QJsonObject{{QStringLiteral("id"), QStringLiteral("center")},
+                {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), 0}, {QStringLiteral("y"), 0}}},
+                {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 1600}, {QStringLiteral("height"), 900}}},
+                {QStringLiteral("scale"), 1.25}, {QStringLiteral("primary"), true}},
+            QJsonObject{{QStringLiteral("id"), QStringLiteral("right")},
+                {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), 1280}, {QStringLiteral("y"), 100}}},
+                {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 960}, {QStringLiteral("height"), 540}}},
+                {QStringLiteral("scale"), 1.5}, {QStringLiteral("primary"), false}}};
+        auto preview = command(QStringLiteral("three-preview"), QStringLiteral("preview-create"));
+        preview.insert(QStringLiteral("screens"), screens);
+        const auto proposal = control.request(1000, 7, preview);
+        QVERIFY(proposal.value(QStringLiteral("ok")).toBool());
+        QCOMPARE(proposal.value(QStringLiteral("outputs")).toArray().size(), 3);
+        QVERIFY(supervisor.list(1000).isEmpty());
+
+        auto create = command(QStringLiteral("three-create"), QStringLiteral("create"));
+        create.insert(QStringLiteral("preview"), preview.value(QStringLiteral("id")));
+        create.insert(QStringLiteral("token"), proposal.value(QStringLiteral("token")));
+        create.insert(QStringLiteral("screens"), screens);
+        QVERIFY(control.request(1000, 7, create).value(QStringLiteral("ok")).toBool());
+        QCOMPARE(launches, 1);
+        QCOMPARE(committed.size(), 3);
+        QCOMPARE(committed[0].pixels, QSize(1600, 900));
+        QCOMPARE(committed[0].position, QPoint(800, 0));
+        QCOMPARE(committed[0].scale, 1.25);
+        QVERIFY(committed[0].primary);
+        QCOMPARE(committed[1].pixels, QSize(800, 600));
+        QCOMPARE(committed[1].position, QPoint(0, 0));
+        QVERIFY(!committed[1].primary);
+        QCOMPARE(committed[2].pixels, QSize(960, 540));
+        QCOMPARE(committed[2].position, QPoint(2080, 100));
+        QCOMPARE(committed[2].scale, 1.5);
+        QVERIFY(!committed[2].primary);
+    }
     void selectedCreateConsumesPreviewOnceAndRefusesChangedSelection()
     {
         VirtualSessionSupervisor supervisor(sleeper);
