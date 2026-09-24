@@ -123,6 +123,33 @@ private Q_SLOTS:
             .scale = 1.5, .enabled = true, .primary = true, .physical = true, .owner = {}}};
         QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, old));
     }
+
+    void singleConsoleOutputNeedsExactCaptureBeforeCreation()
+    {
+        QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/1280x720.h264")));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        KRdp::VideoFrame frame;
+        frame.size = QSize(1280, 720);
+        frame.data = file.readAll();
+        frame.isKeyFrame = true;
+        frame.monitorIndex = 0;
+        frame.monitors = {{QRect(0, 0, 1280, 720), true}};
+        KRdp::ConsoleWorkerWire::Outputs outputs;
+        outputs.monitors = {{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}};
+        KRdp::RetainedKScreenReadback::Snapshot fresh;
+        fresh.outputs = {{.backendKey = QStringLiteral("DP-1"), .name = QStringLiteral("DP-1"),
+            .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(0, 0, 1280, 720),
+            .scale = 1, .enabled = true, .primary = true, .physical = true, .owner = {}}};
+        QVERIFY(KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, frame));
+        fresh.outputs[0].logicalGeometry.moveLeft(100);
+        QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, frame));
+        outputs.compositorOrigin = QPoint(100, 0);
+        QVERIFY(KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, frame));
+        outputs.compositorOrigin = QPoint(0, 0);
+        fresh.outputs[0].logicalGeometry.moveLeft(0);
+        frame.isKeyFrame = false;
+        QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, frame));
+    }
 };
 
 QTEST_GUILESS_MAIN(ConsoleTopologyReadbackTest)

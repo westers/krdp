@@ -264,6 +264,10 @@ public:
             }
         });
         connect(&m_session, &AbstractSession::frameReceived, this, [this](const VideoFrame &frame) {
+            // A single-output Console keeps this workspace producer alive
+            // until KWin publishes the new screen. Its old-size frames must
+            // not escape while Add is changing the output set.
+            if (m_addPending && !m_mode.virtualSession) return;
             if (m_captureReady && !m_multiMode) {
                 // Use the same ordering and coordinates as the captured frame,
                 // not a root-side guess about the user's monitor setup.
@@ -273,7 +277,7 @@ public:
                 for (const auto *screen : screens) {
                     workspace = workspace.united(screen->geometry());
                 }
-                if (m_mode.virtualSession && !screens.isEmpty()) outputs.compositorOrigin = workspace.topLeft();
+                if (!screens.isEmpty()) outputs.compositorOrigin = workspace.topLeft();
                 if (screens.size() == frame.monitors.size()) {
                     for (qsizetype i = 0; i < screens.size(); ++i) {
                         if (screens[i]->geometry().translated(-workspace.topLeft()) != frame.monitors[i].geometry) {
@@ -1832,14 +1836,23 @@ private:
         const auto reject = [this, &request](const QString &error) {
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::AddVirtualResult{request.requestId, request.generation, error}));
         };
-        if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
+        const bool retainedReady = m_mode.virtualSession && m_multiMode && m_multiReady
+            && m_multiPublishedFrames.size() >= 2;
+        const bool consoleReady = !m_mode.virtualSession && m_authenticatedDesktop
+            && !m_resize.changing() && !m_physicalPending && !m_physicalLease
+            && (m_multiMode ? (m_multiReady && m_multiPublishedFrames.size() == m_outputs.monitors.size())
+                            : m_lastPhysicalKeyframe.has_value());
+        if ((!retainedReady && !consoleReady) || !m_control.active
             || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending || m_multiResizePending
-            || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending || m_multiPublishedFrames.size() < 2) {
+            || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending) {
             reject(QStringLiteral("virtual output creation unavailable or not authorized"));
             return;
         }
         const auto before = readKScreen();
-        if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)
+        const bool captured = before && (m_multiMode
+            ? RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)
+            : ConsoleTopologyReadback::confirmed(*before, m_outputs, *m_lastPhysicalKeyframe).has_value());
+        if (!captured
             // Private KWin reports maxActiveOutputsCount as its *current*
             // virtual-output count and increments it on creation; it is not
             // a fixed capacity. The capture/wire cap is checked separately.
@@ -1852,6 +1865,7 @@ private:
         }
         releaseInput();
         m_multiReady = false;
+        m_lastPhysicalKeyframe.reset();
         m_multiPublishedFrames.clear();
         m_addBefore = *before;
         m_addPending = request;
@@ -2143,7 +2157,7 @@ private:
                 continue;
             }
             if (const auto input = ConsoleWorkerWire::input(*record)) {
-                if (!m_control.active || m_physicalPending
+                if (!m_control.active || m_physicalPending || (m_addPending && !m_mode.virtualSession)
                     || !(m_mode.virtualSession ? m_virtualResize.inputAllowed() : m_resize.inputAllowed())
                     || (m_multiMode && !m_multiReady)) {
                     continue;
