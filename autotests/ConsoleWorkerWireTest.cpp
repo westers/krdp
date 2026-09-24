@@ -31,6 +31,7 @@ private Q_SLOTS:
     void primaryRecordsAreBoundedAndCorrelated();
     void mixedRecordsAreBoundedAndCorrelated();
     void mixedCreateRecordsAreBoundedAndCorrelated();
+    void physicalLayoutRecordsRequireConsentAndCompleteBefore();
     void addVirtualRecordsAreBoundedAndCorrelated();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
@@ -121,6 +122,56 @@ void ConsoleWorkerWireTest::mixedRecordsAreBoundedAndCorrelated()
         QVERIFY(record);
         QVERIFY(!mixed(*record));
     }
+}
+
+void ConsoleWorkerWireTest::physicalLayoutRecordsRequireConsentAndCompleteBefore()
+{
+    Deframer reader;
+    const PhysicalLayout request{31, 9, QStringLiteral("console-generation-1"), 4, true,
+        {{QStringLiteral("DP-1"), QSize(1600, 900), QRect(0, 0, 1280, 720), 1.25, true, 1},
+         {QStringLiteral("HDMI-A-1"), QSize(1280, 720), QRect(1280, 100, 1280, 720), 1, false, 2}},
+        {{MixedOperation::Kind::Move, QStringLiteral("HDMI-A-1"), QPoint(-1280, 100), {}, 1},
+         {MixedOperation::Kind::Resize, QStringLiteral("DP-1"), {}, QSize(1920, 1080), 1}}};
+    const PhysicalLayoutResult answer{31, 9, QStringLiteral("capture failed")};
+    reader.feed(frame(request) + frame(answer));
+    const auto first = reader.next();
+    QVERIFY(first);
+    QCOMPARE(physicalLayout(*first), std::optional<PhysicalLayout>(request));
+    auto truncated = *first;
+    truncated.payload.chop(1);
+    QVERIFY(!physicalLayout(truncated));
+    const auto second = reader.next();
+    QVERIFY(second);
+    QCOMPARE(physicalLayoutResult(*second), std::optional<PhysicalLayoutResult>(answer));
+
+    auto bad = request;
+    bad.allowPhysicalChange = false;
+    reader.feed(frame(bad));
+    QVERIFY(!physicalLayout(*reader.next()));
+    bad = request;
+    bad.before[1].priority = 1;
+    reader.feed(frame(bad));
+    QVERIFY(!physicalLayout(*reader.next()));
+    bad = request;
+    bad.before[1].name = QStringLiteral("Virtual-1");
+    reader.feed(frame(bad));
+    QVERIFY(!physicalLayout(*reader.next()));
+    bad = request;
+    bad.before[0].logical.setWidth(1600); // Native pixels cannot masquerade as scaled logical size.
+    reader.feed(frame(bad));
+    QVERIFY(!physicalLayout(*reader.next()));
+    bad = request;
+    bad.operations[0].output = QStringLiteral("unknown");
+    reader.feed(frame(bad));
+    QVERIFY(!physicalLayout(*reader.next()));
+    bad = request;
+    bad.operations.append(bad.operations.first());
+    reader.feed(frame(bad));
+    QVERIFY(!physicalLayout(*reader.next()));
+    bad = request;
+    bad.operations[0].globalLogical.setX(-32769);
+    reader.feed(frame(bad));
+    QVERIFY(!physicalLayout(*reader.next()));
 }
 
 void ConsoleWorkerWireTest::mixedCreateRecordsAreBoundedAndCorrelated()

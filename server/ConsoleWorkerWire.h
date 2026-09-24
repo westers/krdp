@@ -23,7 +23,7 @@
 
 namespace KRdp::ConsoleWorkerWire
 {
-constexpr quint16 ProtocolVersion = 8; // Mixed-create wire; broker and worker must upgrade together.
+constexpr quint16 ProtocolVersion = 9; // Physical-layout wire; broker and worker must upgrade together.
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 
 enum class Kind : quint8 {
@@ -63,6 +63,8 @@ enum class Kind : quint8 {
     MixedResult,
     MixedCreate,
     MixedCreateResult,
+    PhysicalLayout,
+    PhysicalLayoutResult,
 };
 
 struct Record {
@@ -205,6 +207,38 @@ struct MixedCreateResult {
     quint64 generation = 0;
     QString error;
     bool operator==(const MixedCreateResult &) const = default;
+};
+
+struct PhysicalOutput {
+    QString name;
+    QSize pixels;
+    QRect logical;
+    double scale = 1;
+    bool primary = false;
+    quint8 priority = 0;
+    bool operator==(const PhysicalOutput &) const = default;
+};
+
+// The broker supplies its entire capture-verified physical snapshot and the
+// exact draft. The selected unprivileged worker must compare ALL outputs with
+// fresh KScreen before any mutation. The consent bit is explicit, not inferred
+// from a physical-looking output name. This record alone grants no write path.
+struct PhysicalLayout {
+    quint64 requestId = 0;
+    quint64 controlGeneration = 0;
+    QString catalogGeneration;
+    quint64 expectedRevision = 0;
+    bool allowPhysicalChange = false;
+    QVector<PhysicalOutput> before;
+    QVector<MixedOperation> operations;
+    bool operator==(const PhysicalLayout &) const = default;
+};
+
+struct PhysicalLayoutResult {
+    quint64 requestId = 0;
+    quint64 controlGeneration = 0;
+    QString error;
+    bool operator==(const PhysicalLayoutResult &) const = default;
 };
 
 struct AddVirtual {
@@ -615,6 +649,117 @@ inline std::optional<MixedResult> mixedResult(const Record &record)
     stream >> result.requestId >> result.generation >> result.error;
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId || !result.generation
         || result.error.size() > 1024) return {};
+    return result;
+}
+
+inline QByteArray frame(const PhysicalLayout &request)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << request.requestId << request.controlGeneration << request.catalogGeneration
+           << request.expectedRevision << quint8(request.allowPhysicalChange ? 1 : 0) << quint8(request.before.size());
+    for (const auto &output : request.before)
+        stream << output.name << output.pixels << output.logical << output.scale << output.primary << output.priority;
+    stream << quint8(request.operations.size());
+    for (const auto &operation : request.operations)
+        stream << quint8(operation.kind) << operation.output << operation.globalLogical
+               << operation.pixels << operation.scale;
+    return frame(Kind::PhysicalLayout, payload);
+}
+
+inline std::optional<PhysicalLayout> physicalLayout(const Record &record)
+{
+    if (record.kind != Kind::PhysicalLayout || record.payload.size() > 16384) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    PhysicalLayout request;
+    quint8 consent = 0;
+    quint8 count = 0;
+    stream >> request.requestId >> request.controlGeneration >> request.catalogGeneration
+           >> request.expectedRevision >> consent >> count;
+    request.allowPhysicalChange = consent == 1;
+    const auto safeName = [](const QString &name) {
+        if (name.isEmpty() || name.size() > 128) return false;
+        for (const auto character : name)
+            if (!character.isLetterOrNumber() && character != QLatin1Char('-') && character != QLatin1Char('_')) return false;
+        return true;
+    };
+    if (stream.status() != QDataStream::Ok || !request.requestId || !request.controlGeneration
+        || !safeName(request.catalogGeneration) || !request.expectedRevision
+        || consent != 1 || count < 1 || count > 16) return {};
+    QSet<QString> names;
+    QSet<quint8> priorities;
+    for (quint8 i = 0; i < count; ++i) {
+        PhysicalOutput output;
+        stream >> output.name >> output.pixels >> output.logical >> output.scale >> output.primary >> output.priority;
+        if (stream.status() != QDataStream::Ok || !safeName(output.name)
+            || output.name.startsWith(QStringLiteral("Virtual-")) || names.contains(output.name)
+            || output.pixels.width() < 320 || output.pixels.width() > 4096
+            || output.pixels.height() < 200 || output.pixels.height() > 4096
+            || !output.logical.isValid() || output.logical.left() < -32768 || output.logical.top() < -32768
+            || output.logical.right() > 32768 || output.logical.bottom() > 32768
+            || !std::isfinite(output.scale) || output.scale < 1 || output.scale > 4
+            || output.logical.size() != QSize(int(std::ceil(output.pixels.width() / output.scale)),
+                int(std::ceil(output.pixels.height() / output.scale)))
+            || output.priority < 1 || output.priority > 16 || priorities.contains(output.priority)
+            || output.primary != (output.priority == 1)) return {};
+        names.insert(output.name);
+        priorities.insert(output.priority);
+        request.before.append(output);
+    }
+    if (!priorities.contains(1)) return {};
+    quint8 operations = 0;
+    stream >> operations;
+    if (stream.status() != QDataStream::Ok || operations < 1 || operations > 16) return {};
+    QSet<QString> seen;
+    int primaryOperations = 0;
+    for (quint8 i = 0; i < operations; ++i) {
+        MixedOperation operation;
+        quint8 kind = 0;
+        stream >> kind >> operation.output >> operation.globalLogical >> operation.pixels >> operation.scale;
+        if (stream.status() != QDataStream::Ok || kind < 1 || kind > 3 || !names.contains(operation.output)
+            || !std::isfinite(operation.scale)) return {};
+        operation.kind = MixedOperation::Kind(kind);
+        const QString key = QString::number(kind) + QLatin1Char(':') + operation.output;
+        if (seen.contains(key)) return {};
+        seen.insert(key);
+        if (operation.kind == MixedOperation::Kind::Move) {
+            if (operation.globalLogical.x() < -32768 || operation.globalLogical.x() > 32768
+                || operation.globalLogical.y() < -32768 || operation.globalLogical.y() > 32768
+                || !operation.pixels.isEmpty() || operation.scale != 1) return {};
+        } else if (operation.kind == MixedOperation::Kind::Resize) {
+            if (operation.globalLogical != QPoint() || operation.pixels.width() < 320
+                || operation.pixels.width() > 4096 || operation.pixels.height() < 200
+                || operation.pixels.height() > 4096 || operation.pixels.width() % 2
+                || operation.pixels.height() % 2 || operation.scale < 1 || operation.scale > 4) return {};
+        } else {
+            if (operation.globalLogical != QPoint() || !operation.pixels.isEmpty() || operation.scale != 1
+                || ++primaryOperations > 1) return {};
+        }
+        request.operations.append(operation);
+    }
+    return stream.atEnd() ? std::optional(request) : std::nullopt;
+}
+
+inline QByteArray frame(const PhysicalLayoutResult &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.requestId << result.controlGeneration << result.error;
+    return frame(Kind::PhysicalLayoutResult, payload);
+}
+
+inline std::optional<PhysicalLayoutResult> physicalLayoutResult(const Record &record)
+{
+    if (record.kind != Kind::PhysicalLayoutResult || record.payload.size() > 4096) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    PhysicalLayoutResult result;
+    stream >> result.requestId >> result.controlGeneration >> result.error;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.requestId
+        || !result.controlGeneration || result.error.size() > 1024) return {};
     return result;
 }
 
@@ -1149,7 +1294,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::MixedCreateResult)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::PhysicalLayoutResult)) {
             ++m_invalid;
             return std::nullopt;
         }

@@ -1812,6 +1812,15 @@ private:
                 mixedCreate(*request);
                 continue;
             }
+            if (const auto request = ConsoleWorkerWire::physicalLayout(*record)) {
+                // The separate physical transaction is not wired yet. A
+                // valid v9 request must fail closed without mutating KDE or
+                // terminating an otherwise healthy Console capture.
+                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLayoutResult{
+                    request->requestId, request->controlGeneration,
+                    QStringLiteral("physical layout transaction unavailable")}));
+                continue;
+            }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {
                 if (m_multiMode) {
                     for (const auto &session : m_multiSessions) session->requestKeyFrame();

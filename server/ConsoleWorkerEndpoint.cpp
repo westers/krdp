@@ -163,6 +163,12 @@ bool ConsoleWorkerEndpoint::mixedCreate(const ConsoleWorkerWire::MixedCreate &re
     return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
 }
 
+bool ConsoleWorkerEndpoint::physicalLayout(const ConsoleWorkerWire::PhysicalLayout &request)
+{
+    if (!m_ready || !m_worker || !request.allowPhysicalChange) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(request)) >= 0;
+}
+
 bool ConsoleWorkerEndpoint::addVirtual(const ConsoleWorkerWire::AddVirtual &request)
 {
     if (!m_ready || !m_worker) return false;
@@ -264,6 +270,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT mixedFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::mixedCreateResult(*record)) {
             Q_EMIT mixedCreateFinished(*result);
+        } else if (const auto result = ConsoleWorkerWire::physicalLayoutResult(*record)) {
+            Q_EMIT physicalLayoutFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::addVirtualResult(*record)) {
             Q_EMIT addVirtualFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::removeVirtualResult(*record)) {

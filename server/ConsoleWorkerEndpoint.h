@@ -54,6 +54,7 @@ public:
     bool primary(const ConsoleWorkerWire::Primary &request);
     bool mixed(const ConsoleWorkerWire::Mixed &request);
     bool mixedCreate(const ConsoleWorkerWire::MixedCreate &request);
+    bool physicalLayout(const ConsoleWorkerWire::PhysicalLayout &request);
     bool addVirtual(const ConsoleWorkerWire::AddVirtual &request);
     bool removeVirtual(const ConsoleWorkerWire::RemoveVirtual &request);
 
@@ -73,6 +74,7 @@ Q_SIGNALS:
     void primaryFinished(const KRdp::ConsoleWorkerWire::PrimaryResult &result);
     void mixedFinished(const KRdp::ConsoleWorkerWire::MixedResult &result);
     void mixedCreateFinished(const KRdp::ConsoleWorkerWire::MixedCreateResult &result);
+    void physicalLayoutFinished(const KRdp::ConsoleWorkerWire::PhysicalLayoutResult &result);
     void addVirtualFinished(const KRdp::ConsoleWorkerWire::AddVirtualResult &result);
     void removeVirtualFinished(const KRdp::ConsoleWorkerWire::RemoveVirtualResult &result);
     void microphoneFinished(const KRdp::ConsoleWorkerWire::MicrophoneResult &result);

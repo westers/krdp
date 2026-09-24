@@ -49,6 +49,10 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
         QSize(960, 540), 1, QPoint(2560, 100), {
             {ConsoleWorkerWire::MixedOperation::Kind::Primary, QStringLiteral("Virtual-krdp-added-test"), {}, {}, 1}}};
     QVERIFY(!endpoint.mixedCreate(mixedCreate));
+    const ConsoleWorkerWire::PhysicalLayout physical{18, 42, QStringLiteral("console-generation"), 1, true,
+        {{QStringLiteral("DP-1"), QSize(1280, 720), QRect(0, 0, 1280, 720), 1, true, 1}},
+        {{ConsoleWorkerWire::MixedOperation::Kind::Move, QStringLiteral("DP-1"), QPoint(-100, 0), {}, 1}}};
+    QVERIFY(!endpoint.physicalLayout(physical));
     QVERIFY(!endpoint.requestTopology());
 
     int ready = 0;
@@ -174,6 +178,18 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::MixedCreateResult{17, 42, {}}));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(mixedCreateChanged.count(), 1);
+
+    QSignalSpy physicalChanged(&endpoint, &ConsoleWorkerEndpoint::physicalLayoutFinished);
+    QVERIFY(endpoint.physicalLayout(physical));
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    brokerMessages.feed(worker.readAll());
+    const auto physicalRecord = brokerMessages.next();
+    QVERIFY(physicalRecord);
+    QCOMPARE(ConsoleWorkerWire::physicalLayout(*physicalRecord),
+        std::optional<ConsoleWorkerWire::PhysicalLayout>(physical));
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLayoutResult{18, 42, QStringLiteral("unsupported")}));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(physicalChanged.count(), 1);
 
     QVERIFY(!endpoint.setVideoQuality({0, 60}));
     QVERIFY(!endpoint.setVideoQuality({42, 101}));
