@@ -1,16 +1,19 @@
 # First virtual desktop layout from selected client screens
 
-Status: design contract for OPT-044. The pure planner and a broker-side
-`preview-create` source path exist, but that preview is disabled in production
-and cannot be consumed by `create`. The journal now round-trips a strict v2
+Status: design contract for OPT-044. The pure planner and broker-side
+`preview-create`/one-use selected `create` source path exist, but are disabled
+by default pending native acceptance. The journal round-trips a strict v2
 normalized output record while keeping v1 byte-compatible. The root service
 derives a bounded `--initial-layout` argument and primary size from that
 record; the namespace launcher validates and forwards it to the private worker.
 The worker source now creates the remaining outputs sequentially, applies one
 KScreen layout and checks compositor geometry before capture, then checks the
-initial encoded keyframes before Ready. This path still needs native private
-compositor acceptance and production create-token wiring; there is no client
-selection UI. Do not advertise this capability or claim a matching desktop.
+initial encoded keyframes before Ready. A selected Create carrying the exact
+preview ID, token, and selected descriptors now consumes its transport-bound
+proposal before the host callback and persists the normalized v2 record.
+`krdp-virtual-host --experimental-initial-layout` enables this source path for
+isolated testing; it is off by default. Native private-compositor acceptance
+and the client selection UI remain open. Do not claim a matching desktop yet.
 
 ## User-visible contract
 
@@ -33,7 +36,8 @@ client's screen count until an explicit Match action is previewed and applied.
 
 Extend the v1 virtual-session command family with a separately advertised
 `initialLayout` capability, an exact `preview-create` request, and a `create`
-request carrying its one-use token. The preview request contains 1–16 selected
+request carrying its one-use token, preview request ID and unchanged screens.
+The preview request contains 1–16 selected
 screen descriptors: a client-local selection ID, relative logical top-left,
 native pixel size, exact scale, and exactly one primary. Client IDs are only
 correlation keys; never use them as KWin output names or trusted paths.

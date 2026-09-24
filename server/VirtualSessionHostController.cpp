@@ -119,7 +119,8 @@ bool VirtualSessionHostController::recover(VirtualSessionJournal &journal, QStri
     return true;
 }
 
-bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJournal &journal, StartService start, AdmitCreate admission)
+bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJournal &journal, StartService start,
+    AdmitCreate admission, bool experimentalInitialLayout)
 {
     if (!m_recoveryAttempted || m_recoveredJournal != &journal || m_nextClient || m_journal
         || (!start && (getuid() || geteuid()))) return false;
@@ -129,6 +130,11 @@ bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJourna
     m_commitIntent = [&journal](const auto &record) { return journal.insert(record); };
     m_startService = start ? std::move(start) : [this](const auto &unit, const auto &handle) { return startIndependentService(unit, handle); };
     m_control.setCreateHandler([this](quint32 uid) { return createIndependent(uid); });
+    if (experimentalInitialLayout) {
+        m_control.setSelectedCreateHandler([this](quint32 uid, const auto &outputs) { return createIndependent(uid, outputs); });
+        m_control.setInitialLayoutPreviewCapabilities({.maxOutputs = 16, .maxOutputDimension = 4096,
+            .maxAtlasDimension = 8192});
+    }
     m_control.setDismissHandlers([this](quint32 uid, const QString &id) { return dismissalEligible(uid, id); },
         [this](quint32 uid, const QString &id) { return dismissFailure(uid, id); });
     m_supervisor.setGuardianAvailableCallback([this](const auto &handle) {
@@ -142,7 +148,8 @@ bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJourna
     return true;
 }
 
-VirtualSessionControl::CreateResult VirtualSessionHostController::createIndependent(quint32 uid)
+VirtualSessionControl::CreateResult VirtualSessionHostController::createIndependent(quint32 uid,
+    const VirtualSessionControl::InitialOutputs &initialOutputs)
 {
     if (!m_journal || !uid || m_creationBlocked) return {};
     const QPointer<VirtualSessionHostController> alive(this);
@@ -163,6 +170,8 @@ VirtualSessionControl::CreateResult VirtualSessionHostController::createIndepend
     const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
     VirtualSessionJournal::Record record{uid, uuid(), uuid(), uuid(), QString::fromLatin1(bootFile.read(128)).trimmed(),
         QUuid::createUuid().toRfc4122() + QUuid::createUuid().toRfc4122()};
+    record.initialOutputs = initialOutputs;
+    if (!record.valid()) return {};
     if (!m_supervisor.canAdopt(uid, record.session)) return {};
     const auto commit = m_commitIntent;
     const bool committed = commit(record);

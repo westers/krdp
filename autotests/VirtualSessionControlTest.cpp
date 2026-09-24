@@ -22,6 +22,82 @@ class VirtualSessionControlTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void selectedCreateConsumesPreviewOnceAndRefusesChangedSelection()
+    {
+        VirtualSessionSupervisor supervisor(sleeper);
+        VirtualSessionControl control(supervisor, {});
+        int selectedCalls = 0;
+        bool nestedRefused = false;
+        VirtualSessionControl::InitialOutputs committed;
+        control.setSelectedCreateHandler([&](quint32 uid, const auto &outputs) {
+            ++selectedCalls;
+            committed = outputs;
+            nestedRefused = !control.request(uid, 1, command(QStringLiteral("nested"), QStringLiteral("create")))
+                .value(QStringLiteral("ok")).toBool();
+            return VirtualSessionControl::CreateResult(supervisor.create(uid));
+        });
+        control.setInitialLayoutPreviewCapabilities({.maxOutputs = 16, .maxOutputDimension = 4096,
+            .maxAtlasDimension = 8192});
+        const auto capabilities = control.request(1000, 1, command(QStringLiteral("list-caps"), QStringLiteral("list")));
+        QCOMPARE(capabilities.value(QStringLiteral("initialLayout")).toObject().value(QStringLiteral("maxOutputs")), QJsonValue(16));
+        QJsonObject preview = command(QStringLiteral("preview-a"), QStringLiteral("preview-create"));
+        const QJsonArray screens{
+            QJsonObject{{QStringLiteral("id"), QStringLiteral("left")},
+                {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), -800}, {QStringLiteral("y"), 0}}},
+                {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 800}, {QStringLiteral("height"), 600}}},
+                {QStringLiteral("scale"), 1.0}, {QStringLiteral("primary"), false}},
+            QJsonObject{{QStringLiteral("id"), QStringLiteral("right")},
+                {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), 0}, {QStringLiteral("y"), 0}}},
+                {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 1280}, {QStringLiteral("height"), 720}}},
+                {QStringLiteral("scale"), 1.0}, {QStringLiteral("primary"), true}}};
+        preview.insert(QStringLiteral("screens"), screens);
+        const auto proposal = control.request(1000, 1, preview);
+        QVERIFY(proposal.value(QStringLiteral("ok")).toBool());
+        auto create = command(QStringLiteral("selected-a"), QStringLiteral("create"));
+        create.insert(QStringLiteral("preview"), preview.value(QStringLiteral("id")));
+        create.insert(QStringLiteral("token"), proposal.value(QStringLiteral("token")));
+        create.insert(QStringLiteral("screens"), screens);
+        QVERIFY(!control.request(1000, 2, create).value(QStringLiteral("ok")).toBool()); // Other transport.
+        const auto accepted = control.request(1000, 1, create);
+        QVERIFY(accepted.value(QStringLiteral("ok")).toBool()); QVERIFY(nestedRefused);
+        QCOMPARE(selectedCalls, 1); QCOMPARE(committed.size(), 2);
+        QCOMPARE(committed.first().pixels, QSize(1280, 720));
+        QCOMPARE(committed.first().position, QPoint(800, 0));
+        QVERIFY(committed.first().primary);
+        QCOMPARE(control.request(1000, 1, create), accepted); // Correlated retry, no second desktop.
+        create.insert(QStringLiteral("id"), QStringLiteral("selected-replay"));
+        QVERIFY(!control.request(1000, 1, create).value(QStringLiteral("ok")).toBool());
+        QCOMPARE(selectedCalls, 1);
+
+        preview.insert(QStringLiteral("id"), QStringLiteral("preview-b"));
+        const auto second = control.request(1000, 1, preview); QVERIFY(second.value(QStringLiteral("ok")).toBool());
+        create.insert(QStringLiteral("id"), QStringLiteral("selected-changed"));
+        create.insert(QStringLiteral("preview"), preview.value(QStringLiteral("id")));
+        create.insert(QStringLiteral("token"), second.value(QStringLiteral("token")));
+        auto changed = screens; changed.removeLast();
+        create.insert(QStringLiteral("screens"), changed);
+        QVERIFY(!control.request(1000, 1, create).value(QStringLiteral("ok")).toBool());
+        QCOMPARE(selectedCalls, 1);
+
+        preview.insert(QStringLiteral("id"), QStringLiteral("preview-c"));
+        const auto third = control.request(1000, 1, preview); QVERIFY(third.value(QStringLiteral("ok")).toBool());
+        control.m_transports.value(1)->initialPreview->age.invalidate();
+        create.insert(QStringLiteral("id"), QStringLiteral("selected-expired"));
+        create.insert(QStringLiteral("preview"), preview.value(QStringLiteral("id")));
+        create.insert(QStringLiteral("token"), third.value(QStringLiteral("token")));
+        create.insert(QStringLiteral("screens"), screens);
+        QVERIFY(!control.request(1000, 1, create).value(QStringLiteral("ok")).toBool());
+
+        preview.insert(QStringLiteral("id"), QStringLiteral("preview-d"));
+        const auto fourth = control.request(1000, 1, preview); QVERIFY(fourth.value(QStringLiteral("ok")).toBool());
+        control.setInitialLayoutPreviewCapabilities({.maxOutputs = 16, .maxOutputDimension = 4096,
+            .maxAtlasDimension = 8192}); // Even a same-value capability generation change invalidates token.
+        create.insert(QStringLiteral("id"), QStringLiteral("selected-stale-caps"));
+        create.insert(QStringLiteral("preview"), preview.value(QStringLiteral("id")));
+        create.insert(QStringLiteral("token"), fourth.value(QStringLiteral("token")));
+        QVERIFY(!control.request(1000, 1, create).value(QStringLiteral("ok")).toBool());
+        QCOMPARE(selectedCalls, 1);
+    }
     void selectedScreenPreviewIsReadOnlyAndCreateCannotConsumeIt()
     {
         VirtualSessionSupervisor supervisor(sleeper);

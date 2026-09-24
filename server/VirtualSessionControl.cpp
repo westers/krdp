@@ -40,6 +40,13 @@ bool validRequest(const QJsonObject &request)
     const auto action = request.value(QStringLiteral("action")).toString();
     if (action == QStringLiteral("preview-create"))
         return request.size() == 5 && request.value(QStringLiteral("screens")).isArray();
+    if (action == QStringLiteral("create") && request.size() == 7) {
+        const QString tokenId = request.value(QStringLiteral("token")).toString();
+        const QUuid uuid(tokenId);
+        return !uuid.isNull() && uuid.toString(QUuid::WithoutBraces) == tokenId
+            && token.match(request.value(QStringLiteral("preview")).toString()).hasMatch()
+            && request.value(QStringLiteral("screens")).isArray();
+    }
     const bool sessionRequired = action == QStringLiteral("attach") || action == QStringLiteral("stop") || action == QStringLiteral("dismiss");
     if (!sessionRequired && action != QStringLiteral("list") && action != QStringLiteral("create") && action != QStringLiteral("detach")) return false;
     if (request.size() != (sessionRequired ? 5 : 4)) return false;
@@ -99,8 +106,8 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
     const auto action = record.value(QStringLiteral("action")).toString();
     auto response = reply(record, true);
     if (action == QStringLiteral("preview-create")) {
-        // Read-only private source path. A normal create must not infer this
-        // proposal; durable launch and worker support are still unwired.
+        // A normal create never infers this proposal. The token is scoped to
+        // this authenticated transport and consumed before any create callback.
         transport->initialPreview.reset();
         if (m_initialCaps.maxOutputs <= 0)
             return reply(record, false, QStringLiteral("selected-screen creation unavailable"));
@@ -112,8 +119,10 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
         auto proposed = VirtualInitialLayout::plan(*screens, QStringLiteral("initial-preview"), caps);
         if (!proposed.valid()) return reply(record, false, proposed.error);
         QJsonArray outputs;
+        InitialOutputs committed;
         for (const auto &entry : proposed.outputs) {
             const auto &output = entry.output;
+            committed.append({output.logicalGeometry.topLeft(), output.nativePixels, output.scale, output.primary});
             outputs.append(QJsonObject{{QStringLiteral("id"), entry.id},
                 {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), output.logicalGeometry.x()},
                     {QStringLiteral("y"), output.logicalGeometry.y()},
@@ -124,7 +133,7 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
                 {QStringLiteral("scale"), output.scale}, {QStringLiteral("primary"), output.primary}});
         }
         Transport::InitialPreview preview{QUuid::createUuid().toString(QUuid::WithoutBraces),
-            record.value(QStringLiteral("id")).toString(), raw, outputs, {}};
+            record.value(QStringLiteral("id")).toString(), raw, outputs, committed, m_initialRevision, {}};
         preview.age.start();
         response.insert(QStringLiteral("token"), preview.token);
         response.insert(QStringLiteral("outputs"), outputs);
@@ -132,6 +141,11 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
         return response;
     }
     if (action == QStringLiteral("list")) {
+        if (m_initialCaps.maxOutputs > 0 && m_selectedCreate) {
+            response.insert(QStringLiteral("initialLayout"), QJsonObject{{QStringLiteral("maxOutputs"), m_initialCaps.maxOutputs},
+                {QStringLiteral("maxOutputDimension"), m_initialCaps.maxOutputDimension},
+                {QStringLiteral("maxAtlasDimension"), m_initialCaps.maxAtlasDimension}});
+        }
         QJsonArray sessions;
         for (const auto &entry : supervisor->list(uid)) {
             QJsonObject row{{QStringLiteral("session"), entry.id}, {QStringLiteral("state"), phaseName(entry.phase)}};
@@ -147,9 +161,23 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
         return response;
     }
     if (action == QStringLiteral("create")) {
-        transport->initialPreview.reset(); // Legacy create cannot consume a selected-screen proposal.
-        const auto create = m_create; // Callback storage can be destroyed by itself.
-        const CreateResult handle = create ? create(uid) : CreateResult(supervisor->create(uid));
+        CreateResult handle;
+        if (record.contains(QStringLiteral("token"))) {
+            const auto pending = std::move(transport->initialPreview);
+            transport->initialPreview.reset(); // One use even if callback reenters or fails.
+            if (!pending || !m_selectedCreate || m_initialCaps.maxOutputs <= 0
+                || pending->revision != m_initialRevision || !pending->age.isValid() || pending->age.elapsed() > 30000
+                || pending->token != record.value(QStringLiteral("token")).toString()
+                || pending->requestId != record.value(QStringLiteral("preview")).toString()
+                || pending->screens != record.value(QStringLiteral("screens")).toArray())
+                return reply(record, false, QStringLiteral("selected-layout preview expired or changed"));
+            const auto create = m_selectedCreate;
+            handle = create(uid, pending->committed);
+        } else {
+            transport->initialPreview.reset(); // Legacy create cannot consume a selected-screen proposal.
+            const auto create = m_create; // Callback storage can be destroyed by itself.
+            handle = create ? create(uid) : CreateResult(supervisor->create(uid));
+        }
         if (!valid()) return uncertain();
         if (!handle) return reply(record, false, handle.refusal == CreateResult::Refusal::Maintenance
             ? QStringLiteral("session creation unavailable during maintenance") : QStringLiteral("session creation refused"));

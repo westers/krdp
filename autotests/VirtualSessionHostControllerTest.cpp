@@ -26,6 +26,54 @@ class VirtualSessionHostControllerTest : public QObject
         return r;
     }
 private Q_SLOTS:
+    void selectedCreatePersistsNormalizedV2BeforeServiceStart()
+    {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal));
+        int starts = 0; bool sawDurable = false;
+        QVERIFY(host.enableIndependentCreates(*journal, [&](const auto &, const auto &) {
+            ++starts;
+            const auto records = journal->records();
+            sawDurable = records && records->size() == starts; // Durable record must exist before start.
+            return false;
+        }, {}, true));
+        auto list = host.m_control.request(1000, 1, command(QStringLiteral("list")));
+        QVERIFY(list.value(QStringLiteral("initialLayout")).isObject());
+        auto preview = command(QStringLiteral("preview-create"));
+        const QJsonArray screens{
+            QJsonObject{{QStringLiteral("id"), QStringLiteral("secondary")},
+                {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), -800}, {QStringLiteral("y"), 100}}},
+                {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 1000}, {QStringLiteral("height"), 800}}},
+                {QStringLiteral("scale"), 1.25}, {QStringLiteral("primary"), false}},
+            QJsonObject{{QStringLiteral("id"), QStringLiteral("primary")},
+                {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), 0}, {QStringLiteral("y"), 100}}},
+                {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 1280}, {QStringLiteral("height"), 720}}},
+                {QStringLiteral("scale"), 1.0}, {QStringLiteral("primary"), true}}};
+        preview.insert(QStringLiteral("screens"), screens);
+        const auto proposal = host.m_control.request(1000, 1, preview);
+        QVERIFY(proposal.value(QStringLiteral("ok")).toBool());
+        auto create = command(QStringLiteral("create"));
+        create.insert(QStringLiteral("preview"), preview.value(QStringLiteral("id")));
+        create.insert(QStringLiteral("token"), proposal.value(QStringLiteral("token")));
+        create.insert(QStringLiteral("screens"), screens);
+        const auto accepted = host.m_control.request(1000, 1, create);
+        QVERIFY(accepted.value(QStringLiteral("ok")).toBool()); QCOMPARE(starts, 1); QVERIFY(sawDurable);
+        const auto records = journal->records(); QVERIFY(records); QCOMPARE(records->size(), 1);
+        const auto &saved = records->first();
+        QCOMPARE(saved.session, accepted.value(QStringLiteral("session")).toString());
+        QCOMPARE(saved.initialOutputs.size(), 2);
+        QCOMPARE(saved.initialOutputs[0].pixels, QSize(1280, 720));
+        QCOMPARE(saved.initialOutputs[0].position, QPoint(800, 0));
+        QVERIFY(saved.initialOutputs[0].primary);
+        QCOMPARE(saved.initialOutputs[1].position, QPoint(0, 0));
+        QVERIFY(!saved.initialLayoutJson().isEmpty());
+        QCOMPARE(host.m_control.request(1000, 1, create), accepted); QCOMPARE(starts, 1);
+        create.insert(QStringLiteral("id"), QStringLiteral("replayed-token"));
+        QVERIFY(!host.m_control.request(1000, 1, create).value(QStringLiteral("ok")).toBool());
+        QCOMPARE(journal->records()->size(), 1);
+    }
     void maintenanceAdmissionHasNoCreateSideEffects()
     {
         QTemporaryDir dir;

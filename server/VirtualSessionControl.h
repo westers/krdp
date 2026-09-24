@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #pragma once
 #include "VirtualSessionSupervisor.h"
+#include "VirtualSessionJournal.h"
 #include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -8,6 +9,8 @@
 #include <QPointer>
 #include <deque>
 #include <memory>
+
+class VirtualSessionControlTest;
 
 namespace KRdp
 {
@@ -41,14 +44,19 @@ public:
         const Handle &operator*() const { return handle.value(); }
     };
     void setCreateHandler(std::function<CreateResult(quint32)> create) { m_create = std::move(create); }
-    // Preview-only until the immutable launch intent and worker can consume a
-    // selected layout. The production host does not set these capabilities.
+    using InitialOutputs = QVector<VirtualSessionJournal::Record::InitialOutput>;
+    void setSelectedCreateHandler(std::function<CreateResult(quint32, const InitialOutputs &)> create)
+    { m_selectedCreate = std::move(create); ++m_initialRevision; }
+    // Default unavailable; the production host enables only with explicit
+    // experimental opt-in until native selected-layout acceptance is complete.
     struct InitialLayoutPreviewCapabilities {
         int maxOutputs = 0;
         int maxOutputDimension = 0;
         int maxAtlasDimension = 0;
+        bool operator==(const InitialLayoutPreviewCapabilities &) const = default;
     };
-    void setInitialLayoutPreviewCapabilities(InitialLayoutPreviewCapabilities caps) { m_initialCaps = caps; }
+    void setInitialLayoutPreviewCapabilities(InitialLayoutPreviewCapabilities caps)
+    { m_initialCaps = caps; ++m_initialRevision; }
     enum class DismissResult { Accepted, Unavailable, Uncertain };
     void setDismissHandlers(std::function<bool(quint32, const QString &)> eligible,
                             std::function<DismissResult(quint32, const QString &)> dismiss)
@@ -58,6 +66,7 @@ public:
     bool dispatchActive() const { return m_dispatchDepth != 0; }
 
 private:
+    friend class ::VirtualSessionControlTest;
     struct Reply { QJsonObject request; QJsonObject response; bool pending = true; };
     struct Transport {
         struct InitialPreview {
@@ -65,6 +74,8 @@ private:
             QString requestId;
             QJsonArray screens;
             QJsonArray outputs;
+            InitialOutputs committed;
+            quint64 revision = 0;
             QElapsedTimer age;
         };
         quint32 uid;
@@ -77,7 +88,9 @@ private:
     QPointer<VirtualSessionSupervisor> m_supervisor;
     Release m_release;
     std::function<CreateResult(quint32)> m_create;
+    std::function<CreateResult(quint32, const InitialOutputs &)> m_selectedCreate;
     InitialLayoutPreviewCapabilities m_initialCaps;
+    quint64 m_initialRevision = 1;
     std::function<bool(quint32, const QString &)> m_dismissible;
     std::function<DismissResult(quint32, const QString &)> m_dismiss;
     QHash<quint64, std::shared_ptr<Transport>> m_transports;

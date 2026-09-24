@@ -28,6 +28,7 @@ int main(int argc, char **argv)
     parser.addOption({QStringLiteral("certificate-key"), QStringLiteral("Absolute TLS private-key path."), QStringLiteral("path")});
     parser.addOption({QStringLiteral("address"), QStringLiteral("Numeric listen address."), QStringLiteral("address"), QStringLiteral("0.0.0.0")});
     parser.addOption({QStringLiteral("port"), QStringLiteral("Listen port, independent of the physical-console listener."), QStringLiteral("port"), QStringLiteral("3395")});
+    parser.addOption({QStringLiteral("experimental-initial-layout"), QStringLiteral("Enable selected-screen virtual desktop creation for isolated testing.")});
     parser.process(application);
     if (getuid() || geteuid()) { qCritical("Virtual host requires an explicit root service invocation"); return 1; }
     bool validPort = false;
@@ -63,7 +64,7 @@ int main(int argc, char **argv)
     server.setTlsCertificateKey(std::filesystem::path(key.toStdString()));
     server.setUsePAMAuthentication(true); server.setAllowAnyPAMUser(true);
     KRdp::VirtualSessionHostController host(&server, {});
-    if (!host.recover(*journal, &error) || !host.enableIndependentCreates(*journal)) {
+    if (!host.recover(*journal, &error) || !host.enableIndependentCreates(*journal, {}, {}, parser.isSet(QStringLiteral("experimental-initial-layout")))) {
         qCritical().noquote() << "Virtual host recovery refused:" << error; return 1;
     }
     // Never expose a listener with partially imported or unavailable journal state.

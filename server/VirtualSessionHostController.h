@@ -34,7 +34,8 @@ public:
     using AdmitCreate = std::function<CreateAdmission(quint32)>;
     // Create-only preflight, not the keeper's mandatory held maintenance lease.
     // Empty remains permitted for this unwired stage; no production enforcement.
-    bool enableIndependentCreates(VirtualSessionJournal &journal, StartService start = {}, AdmitCreate admission = {});
+    bool enableIndependentCreates(VirtualSessionJournal &journal, StartService start = {}, AdmitCreate admission = {},
+        bool experimentalInitialLayout = false);
 
 private:
     friend class VirtualSessionHostControllerTest;
@@ -44,7 +45,8 @@ private:
     std::optional<VirtualSessionJournal::Record> dismissalRecord(quint32 uid, const QString &id) const;
     bool dismissalEligible(quint32 uid, const QString &id) const;
     VirtualSessionControl::DismissResult dismissFailure(quint32 uid, const QString &id);
-    VirtualSessionControl::CreateResult createIndependent(quint32 uid);
+    VirtualSessionControl::CreateResult createIndependent(quint32 uid,
+        const VirtualSessionControl::InitialOutputs &initialOutputs = {});
     bool startIndependentService(const QString &unit, const VirtualSessionRegistry::Handle &handle);
     struct Worker {
         VirtualSessionRegistry::Handle handle;
