@@ -44,6 +44,9 @@ public:
     // Independent root-service entry reads only its committed immutable intent,
     // without taking the broker's exclusive lease. Not permission to relaunch.
     static std::optional<Record> readLaunchIntent(const QString &session, QString *error = nullptr);
+    // Same bounded canonical output schema used by the private worker at
+    // startup; no journal access or root authority is involved.
+    static std::optional<QVector<Record::InitialOutput>> parseInitialLayoutJson(const QByteArray &json);
     // Persist one-use launch consumption before any exec. Failure/uncertainty
     // leaves the marker; only explicit privileged reconciliation may remove it.
     static bool claimLaunch(const Record &expected, QString *error = nullptr);

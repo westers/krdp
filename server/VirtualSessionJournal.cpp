@@ -114,6 +114,14 @@ std::optional<VirtualSessionJournal::Record> VirtualSessionJournal::readLaunchIn
     auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
     return journal ? journal->readRecord(session, error) : std::nullopt;
 }
+std::optional<QVector<VirtualSessionJournal::Record::InitialOutput>> VirtualSessionJournal::parseInitialLayoutJson(const QByteArray &json) {
+    if (json.isEmpty() || json.size() > 4096) return {};
+    QJsonParseError error;
+    const auto document = QJsonDocument::fromJson(json, &error);
+    if (error.error != QJsonParseError::NoError || !document.isArray()) return {};
+    const auto outputs = parseOutputs(document.array());
+    return outputs && QJsonDocument(outputArray(*outputs)).toJson(QJsonDocument::Compact) == json ? outputs : std::nullopt;
+}
 bool VirtualSessionJournal::claimLaunch(const Record &expected, QString *error) {
     if (getuid() || geteuid()) return fail(error, QStringLiteral("Launch claim requires the root service"));
     auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);

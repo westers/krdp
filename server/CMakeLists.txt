@@ -58,7 +58,7 @@ if (BUILD_PLASMA_SESSION)
     target_link_libraries(krdp-virtual-monitor-creation-probe PRIVATE Qt6::Core Qt6::Gui KRdp)
     configure_file(org.kde.krdpvirtualmonitorprobe.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpvirtualmonitorprobe.desktop @ONLY)
     target_sources(krdp-console-worker PRIVATE H264KeyframeSize.cpp)
-    target_link_libraries(krdp-console-worker PRIVATE PkgConfig::AVCodec)
+    target_link_libraries(krdp-console-worker PRIVATE PkgConfig::AVCodec KRdpGuardianClient)
     add_executable(krdp-virtual-session-probe virtualsessionprobe.cpp VirtualSessionSupervisor.cpp VirtualSessionControl.cpp ConsoleWorkerEndpoint.cpp)
     target_link_libraries(krdp-virtual-session-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network KRdp KRdpGuardianClient)
     add_executable(krdp-virtual-rdp-host-probe virtualrdphostprobe.cpp VirtualSessionHostController.cpp

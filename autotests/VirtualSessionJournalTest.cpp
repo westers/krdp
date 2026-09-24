@@ -50,6 +50,9 @@ private Q_SLOTS:
         const auto newJson = QJsonDocument::fromJson(newFile.readAll()).object();
         QCOMPARE(newJson.value(QStringLiteral("v")), QJsonValue(2));
         QCOMPARE(newJson.value(QStringLiteral("outputs")).toArray().size(), 3);
+        QCOMPARE(VirtualSessionJournal::parseInitialLayoutJson(selected.initialLayoutJson()), std::optional(selected.initialOutputs));
+        QVERIFY(!VirtualSessionJournal::parseInitialLayoutJson(QByteArrayLiteral("[]")));
+        QVERIFY(!VirtualSessionJournal::parseInitialLayoutJson(selected.initialLayoutJson() + '\n'));
         QCOMPARE(journal->readRecord(selected.session, nullptr), std::optional(selected));
         const auto all = journal->records(); QVERIFY(all); QCOMPARE(all->size(), 2);
         QVERIFY(journal->claimRecord(selected, nullptr));

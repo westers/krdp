@@ -300,6 +300,11 @@ target_include_directories(RemoteTopologyDraftTest PRIVATE ${CMAKE_SOURCE_DIR}/s
 target_link_libraries(RemoteTopologyDraftTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME RemoteTopologyDraftTest COMMAND RemoteTopologyDraftTest)
 
+add_executable(VirtualInitialBootstrapTest VirtualInitialBootstrapTest.cpp)
+target_include_directories(VirtualInitialBootstrapTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(VirtualInitialBootstrapTest PRIVATE Qt6::Test Qt6::Gui Qt6::Network)
+add_test(NAME VirtualInitialBootstrapTest COMMAND VirtualInitialBootstrapTest)
+
 add_executable(ConsoleTopologyPlanTest ConsoleTopologyPlanTest.cpp)
 target_include_directories(ConsoleTopologyPlanTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ConsoleTopologyPlanTest PRIVATE Qt6::Test Qt6::Gui)

@@ -4,11 +4,11 @@ set -euo pipefail
 umask 077
 [[ ( $# == 5 || $# == 6 ) && $(id -u) != 0 && $XDG_RUNTIME_DIR == /run/user/"$(id -u)"/krdp-virtual/* ]]
 [[ ! -S /run/dbus/system_bus_socket && ! -S /run/user/"$(id -u)"/bus ]]
-if (( $# == 6 )); then
-    echo 'Selected-layout worker bootstrap is not yet available; refusing a mismatched desktop.' >&2
-    exit 1
-fi
 session=$1 worker=$2 support=$3 width=$4 height=$5
+layout_args=()
+if (( $# == 6 )); then
+    layout_args=(--initial-layout "$6")
+fi
 wrapper_pid= graph_pid= policy_pid= plasma_pid= worker_pid=
 cleanup() {
     for child in "$worker_pid" "$plasma_pid" "$wrapper_pid" "$policy_pid" "$graph_pid"; do
@@ -87,7 +87,7 @@ while kill -0 "$plasma_pid" 2>/dev/null; do
     fi
     if [[ -z $worker_pid && -S $XDG_RUNTIME_DIR/worker.sock ]]; then
         env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland "$worker" --virtual-session "$session" --uid "$(id -u)" \
-            --socket "$XDG_RUNTIME_DIR/worker.sock" --token-fd 0 --desktop-media \
+            --socket "$XDG_RUNTIME_DIR/worker.sock" --token-fd 0 --desktop-media "${layout_args[@]}" \
             <"$XDG_RUNTIME_DIR/worker-token" >>"$XDG_RUNTIME_DIR/worker.log" 2>&1 &
         worker_pid=$!
     fi

@@ -3,13 +3,14 @@
 Status: design contract for OPT-044. The pure planner and a broker-side
 `preview-create` source path exist, but that preview is disabled in production
 and cannot be consumed by `create`. The journal now round-trips a strict v2
-normalized output record while keeping v1 byte-compatible; no production
-create, launcher, worker, or client UI path consumes it yet. The trusted root
-service plan derives a bounded `--initial-layout` argument and primary size
-from a validated v2 record. The namespace launcher validates and forwards
-that payload to the private desktop entry, which currently refuses it before
-starting KWin; v2 still fails closed rather than starting a mismatched desktop. Do not
-advertise this capability or claim a matching desktop.
+normalized output record while keeping v1 byte-compatible. The root service
+derives a bounded `--initial-layout` argument and primary size from that
+record; the namespace launcher validates and forwards it to the private worker.
+The worker source now creates the remaining outputs sequentially, applies one
+KScreen layout and checks compositor geometry before capture, then checks the
+initial encoded keyframes before Ready. This path still needs native private
+compositor acceptance and production create-token wiring; there is no client
+selection UI. Do not advertise this capability or claim a matching desktop.
 
 ## User-visible contract
 

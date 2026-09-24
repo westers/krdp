@@ -49,6 +49,8 @@
 #include "RetainedMultiPrimaryPlan.h"
 #include "RetainedMultiMixedPlan.h"
 #include "RetainedMultiMixedCreatePlan.h"
+#include "VirtualSessionJournal.h"
+#include "VirtualInitialBootstrap.h"
 
 using namespace KRdp;
 
@@ -85,7 +87,8 @@ class Worker : public QObject
         QVector<RetainedKScreenReadback::Placement> targets;
     };
 public:
-    Worker(const QString &socketName, const CaptureWorkerMode &mode, quint32 uid, const QByteArray &token, bool desktop, QObject *parent = nullptr)
+    Worker(const QString &socketName, const CaptureWorkerMode &mode, quint32 uid, const QByteArray &token, bool desktop,
+        QVector<VirtualSessionJournal::Record::InitialOutput> initialOutputs = {}, QObject *parent = nullptr)
         : QObject(parent)
         , m_socketName(socketName)
         , m_sessionId(mode.sessionId)
@@ -93,6 +96,7 @@ public:
         , m_token(token)
         , m_mode(mode)
         , m_authenticatedDesktop(desktop)
+        , m_initialOutputs(std::move(initialOutputs))
         , m_microphone(desktop)
     {
         connect(&m_microphone, &ConsoleMicrophoneSession::result, this, [this](const auto &result) {
@@ -179,7 +183,8 @@ public:
         connect(&m_socket, &QLocalSocket::connected, this, [this]() {
             m_connectTimeout.stop();
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{m_sessionId, m_uid, m_token}));
-            startCapture();
+            if (m_initialOutputs.isEmpty()) startCapture();
+            else startBootstrap();
         });
         connect(&m_socket, &QLocalSocket::readyRead, this, &Worker::readBroker);
         connect(&m_socket, &QLocalSocket::disconnected, this, [this]() {
@@ -265,7 +270,7 @@ public:
             if (m_mode.virtualSession) m_virtualResize.captureStateChanged(m_virtualCaptureEpoch, active);
             if (active && !m_captureReady) {
                 m_captureReady = true;
-                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+                if (m_initialOutputs.isEmpty()) m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
             }
         });
         connect(&m_session, &AbstractSession::frameReceived, this, [this](const VideoFrame &frame) {
@@ -309,6 +314,15 @@ public:
                     }
                 }
                 if (outputs.monitors.isEmpty()) m_lastPhysicalKeyframe.reset();
+                if (m_mode.virtualSession && !m_initialOutputs.isEmpty() && !m_initialReadySent) {
+                    const auto readback = frame.isKeyFrame ? readKScreen() : std::nullopt;
+                    if (!frame.isKeyFrame || !m_captureReady || outputs.monitors.size() != 1
+                        || frame.size != m_initialOutputs.first().pixels
+                        || h264KeyframeSize(frame.data) != std::optional(m_initialOutputs.first().pixels)
+                        || !readback || !bootstrapMatches(*readback)) return;
+                    m_initialReadySent = true;
+                    m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+                }
                 if (m_mode.virtualSession) {
                     const QSize payloadPixels = m_virtualResize.changing() && frame.isKeyFrame
                         ? h264KeyframeSize(frame.data).value_or(QSize{}) : QSize{};
@@ -393,6 +407,8 @@ public:
         m_multiSettle.setSingleShot(true);
         m_multiSettle.setInterval(400);
         connect(&m_multiSettle, &QTimer::timeout, this, &Worker::syncCaptureMode);
+        m_bootstrapPoll.setInterval(200);
+        connect(&m_bootstrapPoll, &QTimer::timeout, this, &Worker::pollBootstrap);
         connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, [this] { m_multiSettle.start(); });
         connect(qGuiApp, &QGuiApplication::screenAdded, this, [this](QScreen *screen) {
             watchScreen(screen);
@@ -527,6 +543,109 @@ private:
         }
     }
 
+    QString bootstrapName(qsizetype index) const
+    {
+        return VirtualInitialBootstrap::name(index);
+    }
+
+    void failBootstrap(const QString &why)
+    {
+        qWarning().noquote() << "Selected-layout bootstrap failed:" << why;
+        m_bootstrapPoll.stop();
+        m_bootstrapCreator.reset();
+        m_ownedCreators.clear(); // Release only outputs this worker created.
+        if (m_socket.state() == QLocalSocket::ConnectedState) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, why.toUtf8()));
+            m_socket.disconnectFromServer();
+        } else shutdown(1);
+    }
+
+    bool bootstrapMatches(const RetainedKScreenReadback::Snapshot &readback) const
+    {
+        const auto screens = qGuiApp->screens();
+        if (!VirtualInitialBootstrap::matches(m_initialOutputs, readback)
+            || screens.size() != m_initialOutputs.size()) return false;
+        for (qsizetype i = 0; i < m_initialOutputs.size(); ++i) {
+            const auto &expected = m_initialOutputs[i];
+            const auto name = bootstrapName(i);
+            const auto output = std::find_if(readback.outputs.cbegin(), readback.outputs.cend(), [&name](const auto &entry) {
+                return entry.backendKey == name;
+            });
+            const auto screen = std::find_if(screens.cbegin(), screens.cend(), [&name](const auto *entry) {
+                return entry->name() == name;
+            });
+            if (screen == screens.cend() || (*screen)->geometry() != output->logicalGeometry
+                || ((*screen) == qGuiApp->primaryScreen()) != expected.primary) return false;
+        }
+        return true;
+    }
+
+    void startBootstrap()
+    {
+        if (!m_mode.virtualSession || !m_authenticatedDesktop || m_initialOutputs.isEmpty()) {
+            failBootstrap(QStringLiteral("selected layout requires authenticated private desktop"));
+            return;
+        }
+        m_bootstrapAge.start();
+        m_bootstrapPoll.start();
+        pollBootstrap();
+    }
+
+    void pollBootstrap()
+    {
+        if (m_stopping || m_initialOutputs.isEmpty() || m_bootstrapComplete) return;
+        if (m_bootstrapAge.elapsed() > 90000) {
+            failBootstrap(QStringLiteral("selected outputs did not settle before startup deadline"));
+            return;
+        }
+        const auto readback = readKScreen();
+        if (!readback) return;
+        if (!m_bootstrapStarted) {
+            if (readback->outputs.size() != 1 || readback->outputs.first().backendKey != bootstrapName(0)
+                || readback->outputs.first().nativePixels != m_initialOutputs.first().pixels) return;
+            m_bootstrapStarted = true;
+            m_bootstrapIndex = 1;
+        }
+        if (m_bootstrapCreator) {
+            if (readback->outputs.size() != m_bootstrapIndex + 1) return;
+            const auto name = bootstrapName(m_bootstrapIndex);
+            const auto created = std::find_if(readback->outputs.cbegin(), readback->outputs.cend(), [&name](const auto &entry) {
+                return entry.backendKey == name;
+            });
+            if (created == readback->outputs.cend() || created->nativePixels != m_initialOutputs[m_bootstrapIndex].pixels) return;
+            m_ownedCreators.emplace_back(name, std::move(m_bootstrapCreator));
+            ++m_bootstrapIndex;
+        }
+        if (m_bootstrapIndex < m_initialOutputs.size()) {
+            const auto &next = m_initialOutputs[m_bootstrapIndex];
+            m_bootstrapCreator = std::make_unique<PlasmaScreencastV1Session>();
+            m_bootstrapCreator->setVirtualMonitor(VirtualMonitor{bootstrapName(m_bootstrapIndex).mid(8), next.pixels, next.scale});
+            m_bootstrapCreator->setVideoCodec(VideoCodec::Avc420);
+            connect(m_bootstrapCreator.get(), &AbstractSession::error, this, [this] {
+                failBootstrap(QStringLiteral("KWin rejected selected virtual output"));
+            });
+            connect(m_bootstrapCreator.get(), &AbstractSession::virtualOutputUnresolved, this, [this] {
+                failBootstrap(QStringLiteral("selected virtual output did not resolve"));
+            });
+            m_bootstrapCreator->setStreamingEnabled(true);
+            return;
+        }
+        if (!m_bootstrapApplied) {
+            const auto arguments = VirtualInitialBootstrap::applyArguments(m_initialOutputs, *readback);
+            if (!arguments) return;
+            if (!runKScreenCommand(*arguments)) {
+                failBootstrap(QStringLiteral("selected output layout apply failed"));
+                return;
+            }
+            m_bootstrapApplied = true;
+            return;
+        }
+        if (!bootstrapMatches(*readback)) return;
+        m_bootstrapComplete = true;
+        m_bootstrapPoll.stop();
+        startCapture();
+    }
+
     void startCapture()
     {
         m_session.setActiveStream(-1); // Capture this compositor's complete workspace.
@@ -554,6 +673,7 @@ private:
     void syncCaptureMode()
     {
         if (m_stopping || m_creatorReleaseActive || m_creatorReleaseFinished) return;
+        if (!m_initialOutputs.isEmpty() && !m_bootstrapComplete) return;
         const auto screens = qGuiApp->screens();
         for (auto *screen : screens) watchScreen(screen);
         if (!m_mode.virtualSession && m_multiMode && m_resize.changing() && !m_physicalResizeReadyForCapture) {
@@ -846,6 +966,16 @@ private:
                 m_socket.disconnectFromServer();
                 return;
             }
+            if (!m_initialOutputs.isEmpty() && !m_initialReadySent) {
+                if (!bootstrapMatches(*kscreen)) {
+                    m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error,
+                        QByteArrayLiteral("selected output capture differs from committed layout")));
+                    m_socket.disconnectFromServer();
+                    return;
+                }
+                m_initialReadySent = true;
+                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+            }
             if (!m_mode.virtualSession) {
                 m_resize.captured(result.outputs, true);
                 if (m_resize.changing()) {
@@ -935,7 +1065,7 @@ private:
             m_multiReady = true;
             if (!m_captureReady) {
                 m_captureReady = true;
-                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+                if (m_initialOutputs.isEmpty()) m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
             }
             m_socket.write(ConsoleWorkerWire::frame(result.outputs));
             m_session.setStreamingEnabled(false); // No oversized workspace encoder in multi mode.
@@ -2362,6 +2492,15 @@ private:
     RetainedKScreenReadback::Snapshot m_addBefore;
     std::unique_ptr<PlasmaScreencastV1Session> m_addCreator;
     std::vector<std::pair<QString, std::unique_ptr<PlasmaScreencastV1Session>>> m_ownedCreators;
+    QVector<VirtualSessionJournal::Record::InitialOutput> m_initialOutputs;
+    QTimer m_bootstrapPoll;
+    QElapsedTimer m_bootstrapAge;
+    std::unique_ptr<PlasmaScreencastV1Session> m_bootstrapCreator;
+    qsizetype m_bootstrapIndex = 0;
+    bool m_bootstrapStarted = false;
+    bool m_bootstrapApplied = false;
+    bool m_bootstrapComplete = false;
+    bool m_initialReadySent = false;
     QTimer m_creatorReleasePoll;
     QElapsedTimer m_creatorReleaseAge;
     std::optional<ConsoleCreatorLease::State> m_creatorReleasePlan;
@@ -2415,12 +2554,16 @@ int main(int argc, char **argv)
     const QCommandLineOption tokenOption(QStringLiteral("token-hex"), QStringLiteral("Per-launch broker token."), QStringLiteral("token"));
     const QCommandLineOption tokenFdOption(QStringLiteral("token-fd"), QStringLiteral("Read the per-launch broker token once from this inherited fd."), QStringLiteral("fd"));
     const QCommandLineOption desktopOption(QStringLiteral("desktop-media"), QStringLiteral("Broker verified an authenticated user desktop (never a greeter)."));
-    parser.addOptions({socketOption, sessionOption, virtualOption, uidOption, tokenOption, tokenFdOption, desktopOption});
+    const QCommandLineOption initialLayoutOption(QStringLiteral("initial-layout"), QStringLiteral("Committed private desktop layout."), QStringLiteral("json"));
+    parser.addOptions({socketOption, sessionOption, virtualOption, uidOption, tokenOption, tokenFdOption, desktopOption, initialLayoutOption});
     parser.process(application);
 
     bool uidOk = false;
     const quint32 uid = parser.value(uidOption).toUInt(&uidOk);
     const auto mode = CaptureWorkerMode::parse(parser.value(sessionOption), parser.value(virtualOption));
+    const auto initialOutputs = parser.isSet(initialLayoutOption)
+        ? VirtualSessionJournal::parseInitialLayoutJson(parser.value(initialLayoutOption).toUtf8())
+        : std::optional<QVector<VirtualSessionJournal::Record::InitialOutput>>(QVector<VirtualSessionJournal::Record::InitialOutput>{});
     QByteArray token;
     if (parser.isSet(tokenFdOption)) {
         bool fdOk = false;
@@ -2434,11 +2577,12 @@ int main(int argc, char **argv)
         token = QByteArray::fromHex(parser.value(tokenOption).toLatin1());
     }
     if (parser.isSet(tokenOption) == parser.isSet(tokenFdOption) || parser.isSet(sessionOption) == parser.isSet(virtualOption)
-        || !mode || !uidOk || uid == 0 || uid != getuid() || uid != geteuid() || parser.value(socketOption).isEmpty() || token.size() < 16) {
+        || !mode || !uidOk || uid == 0 || uid != getuid() || uid != geteuid() || parser.value(socketOption).isEmpty() || token.size() < 16
+        || !initialOutputs || (parser.isSet(initialLayoutOption) && (!mode->virtualSession || !parser.isSet(desktopOption)))) {
         parser.showHelp(1);
     }
 
-    Worker worker(parser.value(socketOption), *mode, uid, token, parser.isSet(desktopOption));
+    Worker worker(parser.value(socketOption), *mode, uid, token, parser.isSet(desktopOption), *initialOutputs);
     worker.connectToBroker();
     return application.exec();
 }
