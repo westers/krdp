@@ -1709,6 +1709,11 @@ private:
         while (const auto record = m_deframer.next()) {
             if (const auto control = ConsoleWorkerWire::controlState(*record)) {
                 if (*control != m_control) {
+                    const bool retainedNewGrant = m_mode.virtualSession && m_multiMode && m_multiReady
+                        && !m_control.active && control->active
+                        && !m_positionPending && !m_addPending && !m_removePending
+                        && !m_multiResizePending && !m_multiFitPending && !m_primaryPending
+                        && !m_mixedPending && !m_mixedCreatePending;
                     releaseInput();
                     m_session.setVideoQuality(80);
                     m_multiQuality = 80;
@@ -1721,6 +1726,21 @@ private:
                     m_takeover = {};
                     if (control->active) {
                         m_takeover.armed(m_clock.elapsed());
+                    }
+                    if (retainedNewGrant) {
+                        // An idle compositor may not deliver any new damage after
+                        // readiness or after a former RDP client exits. A keyframe request cannot
+                        // recover when the old encoder has no reusable last frame.
+                        // Recreate only the private capture streams; the retained
+                        // compositor, outputs and apps are left untouched. Hold
+                        // input until fresh per-output packets and KScreen agree.
+                        ++m_multiEpoch;
+                        m_multiReady = false;
+                        m_multiCapture.invalidate();
+                        m_multiPublishedFrames.clear();
+                        m_multiResizeNeedsRestart = true;
+                        m_multiSettle.start(0);
+                        qInfo() << "Refreshing retained captures for a new client";
                     }
                 }
                 continue;
