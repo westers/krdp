@@ -3,6 +3,8 @@
 #include "ConsoleWorkerSession.h"
 #include "RdpConnection.h"
 #include "Server.h"
+#include <QLocalSocket>
+#include <QTemporaryDir>
 #include <QTest>
 
 namespace KRdp
@@ -11,6 +13,132 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void physicalPreviewCommitWaitsForExactCapturedReadback()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        Server server;
+        RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, directory.path());
+        host.addClient(&connection);
+        const auto id = host.m_clients.front()->id;
+        host.m_control.admit(id);
+        host.syncControlState();
+        host.m_inputEnabled = true;
+        const ConsoleHandoff::Target target{ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000};
+        const QByteArray token(24, 't');
+        QVERIFY(host.m_endpoint.listen(directory.filePath(QStringLiteral("worker.sock")), target, token));
+        QLocalSocket worker;
+        worker.connectToServer(host.m_endpoint.socketName());
+        QVERIFY(worker.waitForConnected(1000));
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), 1000, token})
+            + ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+        QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_VERIFY(host.m_endpoint.ready());
+        const ConsoleWorkerWire::Outputs captured{{
+            {QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true},
+            {QStringLiteral("HDMI-A-1"), QRect(1280, 0, 1280, 720), 1, false}}};
+        const ConsoleWorkerWire::Topology before{{
+            {QStringLiteral("DP-1"), QSize(1280, 720), QRect(0, 0, 1280, 720), 1, true, 1},
+            {QStringLiteral("HDMI-A-1"), QSize(1280, 720), QRect(1280, 0, 1280, 720), 1, false, 3}}};
+        Q_EMIT host.m_endpoint.outputsReceived(captured);
+        Q_EMIT host.m_endpoint.topologyReceived(before);
+        QVERIFY(host.m_topologyAvailable);
+        const auto snapshot = host.m_topologyCatalog.snapshot();
+        const auto preview = [&](const QString &requestId) {
+            return QJsonObject{{QStringLiteral("type"), QStringLiteral("topology-preview")},
+                {QStringLiteral("v"), 1}, {QStringLiteral("id"), requestId},
+                {QStringLiteral("generation"), snapshot.generation},
+                {QStringLiteral("expectedRevision"), double(snapshot.revision)},
+                {QStringLiteral("allowRemoval"), false}, {QStringLiteral("allowPhysicalChange"), true},
+                {QStringLiteral("operations"), QJsonArray{QJsonObject{
+                    {QStringLiteral("op"), QStringLiteral("move")},
+                    {QStringLiteral("output"), snapshot.outputs[1].id},
+                    {QStringLiteral("position"), QJsonObject{{QStringLiteral("x"), 1280}, {QStringLiteral("y"), 100}}}}}}};
+        };
+        const auto commit = [&](const QString &requestId, const QString &previewToken) {
+            return QJsonObject{{QStringLiteral("type"), QStringLiteral("topology-commit")},
+                {QStringLiteral("v"), 1}, {QStringLiteral("id"), requestId},
+                {QStringLiteral("token"), previewToken}, {QStringLiteral("generation"), snapshot.generation},
+                {QStringLiteral("expectedRevision"), double(snapshot.revision)}};
+        };
+        host.onControlRecord(&connection, id, preview(QStringLiteral("disabled")));
+        QVERIFY(!host.m_physicalPreview); // Source route is deliberately off in installed defaults.
+        host.m_experimentalPhysicalTopology = true;
+        host.onControlRecord(&connection, id, preview(QStringLiteral("first")));
+        QVERIFY(host.m_physicalPreview);
+        QCOMPARE(host.m_physicalPreview->plan.beforePriorities.value(QStringLiteral("HDMI-A-1")), 3);
+        auto reordered = before;
+        reordered.outputs[1].priority = 2;
+        Q_EMIT host.m_endpoint.topologyReceived(reordered);
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, snapshot.revision + 1);
+        host.onControlRecord(&connection, id, commit(QStringLiteral("first"), host.m_physicalPreview->token));
+        QVERIFY(!host.m_pendingPhysical); // A KDE priority-only edit invalidates the preview.
+
+        const auto current = host.m_topologyCatalog.snapshot();
+        auto currentPreview = preview(QStringLiteral("second"));
+        currentPreview.insert(QStringLiteral("expectedRevision"), double(current.revision));
+        host.onControlRecord(&connection, id, currentPreview);
+        QVERIFY(host.m_physicalPreview);
+        auto currentCommit = commit(QStringLiteral("second"), host.m_physicalPreview->token);
+        currentCommit.insert(QStringLiteral("expectedRevision"), double(current.revision));
+        host.onControlRecord(&connection, id, currentCommit);
+        QVERIFY(host.m_pendingPhysical);
+        QVERIFY(!host.m_pendingPhysical->waitingReadback);
+        const auto serial = host.m_pendingPhysical->serial;
+        const auto generation = host.m_pendingPhysical->controlGeneration;
+        ConsoleWorkerWire::Deframer fromBroker;
+        std::optional<ConsoleWorkerWire::PhysicalLayout> dispatched;
+        QElapsedTimer readDeadline;
+        readDeadline.start();
+        while (!dispatched && readDeadline.elapsed() < 1000) {
+            QCoreApplication::processEvents();
+            if (!worker.bytesAvailable()) worker.waitForReadyRead(20);
+            fromBroker.feed(worker.readAll());
+            while (const auto record = fromBroker.next()) {
+                if (const auto physical = ConsoleWorkerWire::physicalLayout(*record)) dispatched = *physical;
+            }
+        }
+        QVERIFY(dispatched);
+        QCOMPARE(dispatched->requestId, serial);
+        QCOMPARE(dispatched->controlGeneration, generation);
+        QCOMPARE(dispatched->before[1].priority, quint8(2));
+        QCOMPARE(dispatched->operations.size(), 1);
+        QCOMPARE(dispatched->operations[0].output, QStringLiteral("HDMI-A-1"));
+        QCOMPARE(dispatched->operations[0].globalLogical, QPoint(1280, 100));
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLayoutResult{serial, generation, {}}));
+        QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_VERIFY(host.m_pendingPhysical && host.m_pendingPhysical->waitingReadback);
+        QVERIFY(host.m_pendingPhysical); // Worker success alone is not client success.
+        auto movedCapture = captured;
+        movedCapture.monitors[1].geometry.moveTop(100);
+        Q_EMIT host.m_endpoint.outputsReceived(movedCapture);
+        auto moved = reordered;
+        moved.outputs[1].logical.moveTop(100);
+        Q_EMIT host.m_endpoint.topologyReceived(moved);
+        QVERIFY(!host.m_pendingPhysical);
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, current.revision + 1);
+        QCOMPARE(host.m_topologyCatalog.snapshot().outputs[1].output.logicalGeometry.top(), 100);
+        RemoteTopologyDraft::Request nextDraft;
+        nextDraft.generation = host.m_topologyCatalog.snapshot().generation;
+        nextDraft.expectedRevision = host.m_topologyCatalog.snapshot().revision;
+        nextDraft.owner = QString::number(id);
+        nextDraft.allowPhysicalChange = true;
+        nextDraft.operations.append({RemoteTopologyDraft::Operation::Kind::Move,
+            host.m_topologyCatalog.snapshot().outputs[1].id, QPoint(1280, 200), {}, 1});
+        const auto nextPlan = ConsoleTopologyPlan::make(host.m_topologyCatalog.snapshot(), host.m_topologyPriorities,
+            nextDraft, {.changePrimary = true, .maxOutputs = 16, .maxOutputDimension = 4096, .maxAtlasDimension = 8192});
+        QVERIFY(nextPlan);
+        host.m_pendingPhysical = ConsoleHostController::PendingPhysical{id, QStringLiteral("failed"), serial + 1,
+            generation, *nextPlan, true};
+        movedCapture.monitors[1].geometry.moveTop(150);
+        Q_EMIT host.m_endpoint.outputsReceived(movedCapture);
+        moved.outputs[1].logical.moveTop(150);
+        Q_EMIT host.m_endpoint.topologyReceived(moved);
+        QVERIFY(!host.m_pendingPhysical);
+        QVERIFY(!host.m_inputEnabled); // A plausible but wrong whole-layout readback fails closed.
+    }
+
     void physicalTopologyRevisionAndWorkerInvalidation()
     {
         Server server;

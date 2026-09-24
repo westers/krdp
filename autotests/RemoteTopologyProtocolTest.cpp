@@ -107,6 +107,15 @@ private Q_SLOTS:
         QVERIFY(caps.value(QStringLiteral("enumerate")).toBool());
         for (const auto *name : {"add", "remove", "position", "resize", "scale", "primary", "multiOutputCapture"})
             QVERIFY(!caps.value(QLatin1String(name)).toBool());
+        const auto preview = previewReply(QStringLiteral("p-console"), QStringLiteral("token"),
+            {observed->outputs, observed->outputs, {}}, *observed, QStringLiteral("lease"),
+            QJsonArray{QStringLiteral("physical-output-change")});
+        QCOMPARE(preview.value(QStringLiteral("before")).toArray().first().toObject()
+            .value(QStringLiteral("lifetime")).toString(), QStringLiteral("lease"));
+        QCOMPARE(preview.value(QStringLiteral("after")).toArray().first().toObject()
+            .value(QStringLiteral("lifetime")).toString(), QStringLiteral("lease"));
+        QCOMPARE(preview.value(QStringLiteral("warnings")).toArray().first().toString(),
+            QStringLiteral("physical-output-change"));
     }
 
     void strictPreviewWithoutClientOwner()

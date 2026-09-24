@@ -33,6 +33,20 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     , m_runtimeDirectory(std::move(runtimeDirectory))
 {
     Q_ASSERT(m_server);
+    m_experimentalPhysicalTopology = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_CONSOLE_TOPOLOGY") == 1;
+    m_physicalDeadline.setSingleShot(true);
+    m_physicalDeadline.setInterval(45000);
+    connect(&m_physicalDeadline, &QTimer::timeout, this, [this] { finishPhysicalTopology(u"timeout"_s); });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::physicalLayoutFinished, this, [this](const auto &result) {
+        if (!m_pendingPhysical || result.requestId != m_pendingPhysical->serial
+            || result.controlGeneration != m_pendingPhysical->controlGeneration) return;
+        if (!result.error.isEmpty()) {
+            finishPhysicalTopology(u"partial"_s, result.error);
+            return;
+        }
+        m_pendingPhysical->waitingReadback = true;
+        if (!m_endpoint.requestTopology()) finishPhysicalTopology(u"capture-failed"_s);
+    });
     m_microphoneDeadline.setSingleShot(true);
     m_microphoneDeadline.setInterval(4000);
     connect(&m_microphoneDeadline, &QTimer::timeout, this, [this] {
@@ -79,12 +93,13 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerStopped, this, [this]() {
+        finishPhysicalTopology(u"capture-failed"_s);
         stopMicrophone(u"console microphone worker stopped"_s);
         finishResize(u"console capture worker stopped during resize"_s);
         apply(m_handoff.workerStopped());
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [this](const VideoFrame &frame) {
-        if (!m_inputEnabled) {
+        if (!m_inputEnabled || m_pendingPhysical) {
             return;
         }
         for (const auto &client : m_clients) {
@@ -101,6 +116,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         if (outputs != m_outputs) {
             m_topologyAvailable = false;
             m_topologyPriorities.clear();
+            m_physicalPreview.reset();
             finishTopologyQueries(u"capture-failed"_s);
         }
         m_outputs = outputs;
@@ -112,6 +128,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             m_topologyPriorities.clear();
             m_topologyCatalog.resetGeneration();
             finishTopologyQueries(u"capture-failed"_s);
+            if (m_pendingPhysical && m_pendingPhysical->waitingReadback) finishPhysicalTopology(u"capture-failed"_s);
             return;
         }
         QVector<RemoteTopologyCatalog::Output> inventory;
@@ -129,6 +146,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
                 m_topologyPriorities.clear();
                 m_topologyCatalog.resetGeneration();
                 finishTopologyQueries(u"capture-failed"_s);
+                if (m_pendingPhysical && m_pendingPhysical->waitingReadback) finishPhysicalTopology(u"capture-failed"_s);
                 return;
             }
             priorities.insert(output.name, output.priority);
@@ -143,6 +161,16 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             m_topologyCatalog.resetGeneration();
         } else m_topologyPriorities = priorities;
         finishTopologyQueries(m_topologyAvailable ? QString() : u"capture-failed"_s);
+        if (m_pendingPhysical && m_pendingPhysical->waitingReadback) {
+            const auto &pending = *m_pendingPhysical;
+            const auto &snapshot = m_topologyCatalog.snapshot();
+            if (!m_topologyAvailable) finishPhysicalTopology(u"capture-failed"_s);
+            else if (snapshot.generation != pending.plan.before.generation
+                || snapshot.revision != pending.plan.before.revision + (pending.plan.changed ? 1 : 0)
+                || snapshot.outputs != pending.plan.after || m_topologyPriorities != pending.plan.afterPriorities)
+                finishPhysicalTopology(u"partial"_s);
+            else finishPhysicalTopology({});
+        }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::localTakeover, this, [this](quint64 generation) {
         if (!m_control.owner() || generation != m_controlGeneration) {
@@ -226,6 +254,8 @@ void ConsoleHostController::apply(const ConsoleHandoff::Actions &actions)
 
 void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
 {
+    m_physicalPreview.reset();
+    finishPhysicalTopology(u"capture-failed"_s);
     m_topologyAvailable = false;
     m_topologyPriorities.clear();
     m_topologyCatalog.resetGeneration();
@@ -262,6 +292,8 @@ void ConsoleHostController::setWorkerActive(bool active)
 {
     qInfo() << "Console capture forwarding:" << active;
     if (!active) {
+        m_physicalPreview.reset();
+        finishPhysicalTopology(u"capture-failed"_s);
         m_topologyAvailable = false;
         m_topologyPriorities.clear();
         m_topologyCatalog.resetGeneration();
@@ -291,7 +323,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     client->connection = connection;
     client->externalMicrophone = connection->enableExternalMicrophone();
     client->session = std::make_unique<ConsoleWorkerSession>([this, id](const ConsoleWorkerWire::Input &input) {
-        if (m_inputEnabled && m_control.ownsControl(id)) {
+        if (m_inputEnabled && !m_pendingPhysical && m_control.ownsControl(id)) {
             m_endpoint.sendInput(input);
             m_inputState.record(input);
         }
@@ -344,10 +376,126 @@ void ConsoleHostController::addClient(RdpConnection *connection)
 void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record)
 {
     const QString type = record.value(u"type"_s).toString();
+    if (type == u"topology-preview"_s) {
+        const auto parsed = RemoteTopologyProtocol::previewRequest(record);
+        const QString request = record.value(u"id"_s).toString().left(64);
+        const auto refuse = [connection](const QString &requestId, const QString &code) {
+            connection->sendControlRecord(RemoteTopologyProtocol::error(requestId, code));
+        };
+        if (!parsed) { refuse(request, u"invalid"_s); return; }
+        if (!m_experimentalPhysicalTopology || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
+            refuse(parsed->id, u"unsupported"_s); return;
+        }
+        if (!m_control.ownsControl(id) || !m_inputEnabled || !m_endpoint.ready()) {
+            refuse(parsed->id, u"not-owner"_s); return;
+        }
+        if (!m_topologyAvailable || m_topologyPriorities.isEmpty()) {
+            refuse(parsed->id, u"capture-failed"_s); return;
+        }
+        if (m_pendingPhysical || m_pendingResize) { refuse(parsed->id, u"busy"_s); return; }
+        if (!parsed->draft.allowPhysicalChange || parsed->draft.allowRemoval) {
+            refuse(parsed->id, u"invalid"_s); return;
+        }
+        auto draft = parsed->draft;
+        draft.owner = QString::number(id); // Only authenticated controller supplies ownership.
+        const auto snapshot = m_topologyCatalog.snapshot();
+        if (draft.generation != snapshot.generation) { refuse(parsed->id, u"stale-generation"_s); return; }
+        if (draft.expectedRevision != snapshot.revision) { refuse(parsed->id, u"stale-revision"_s); return; }
+        const auto plan = ConsoleTopologyPlan::make(snapshot, m_topologyPriorities, draft,
+            {.changePrimary = true, .maxOutputs = 16, .maxOutputDimension = 4096, .maxAtlasDimension = 8192});
+        if (!plan) { refuse(parsed->id, u"invalid"_s); return; }
+        QString token;
+        for (int i = 0; i < 4; ++i)
+            token += QString::number(QRandomGenerator::system()->generate64(), 16).rightJustified(16, QLatin1Char('0'));
+        m_physicalPreview = PhysicalPreview{id, m_controlGeneration, parsed->id, token, *plan, draft.operations, {}};
+        m_physicalPreview->age.start();
+        connection->sendControlRecord(RemoteTopologyProtocol::previewReply(parsed->id, token,
+            {plan->before.outputs, plan->after, {}}, snapshot, u"lease"_s,
+            QJsonArray{u"physical-output-change"_s}));
+        return;
+    }
+    if (type == u"topology-commit"_s) {
+        const auto parsed = RemoteTopologyProtocol::commitRequest(record);
+        const QString request = record.value(u"id"_s).toString().left(64);
+        const auto refuse = [connection](const QString &requestId, const QString &code) {
+            connection->sendControlRecord(RemoteTopologyProtocol::error(requestId, code));
+        };
+        if (!parsed) { refuse(request, u"invalid"_s); return; }
+        if (!m_experimentalPhysicalTopology || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
+            refuse(parsed->id, u"unsupported"_s); return;
+        }
+        if (!m_control.ownsControl(id) || !m_inputEnabled || !m_endpoint.ready()) {
+            refuse(parsed->id, u"not-owner"_s); return;
+        }
+        if (m_pendingPhysical || m_pendingResize) { refuse(parsed->id, u"busy"_s); return; }
+        if (!m_physicalPreview || m_physicalPreview->owner != id || m_physicalPreview->id != parsed->id
+            || m_physicalPreview->token != parsed->token || !m_physicalPreview->age.isValid()
+            || m_physicalPreview->age.elapsed() >= RemoteTopologyProtocol::PreviewLifetimeMs) {
+            refuse(parsed->id, u"invalid"_s); return;
+        }
+        const auto preview = std::exchange(m_physicalPreview, std::nullopt); // One use before dispatch.
+        const auto &plan = preview->plan;
+        const auto &snapshot = m_topologyCatalog.snapshot();
+        if (parsed->generation != plan.before.generation || snapshot.generation != plan.before.generation) {
+            refuse(parsed->id, u"stale-generation"_s); return;
+        }
+        if (parsed->expectedRevision != plan.before.revision || snapshot.revision != plan.before.revision
+            || snapshot.outputs != plan.before.outputs || m_topologyPriorities != plan.beforePriorities
+            || preview->controlGeneration != m_controlGeneration) {
+            refuse(parsed->id, u"stale-revision"_s); return;
+        }
+        if (!m_topologyAvailable || ++m_nextPhysicalId == 0) {
+            refuse(parsed->id, u"capture-failed"_s); return;
+        }
+        ConsoleWorkerWire::PhysicalLayout command;
+        command.requestId = m_nextPhysicalId;
+        command.controlGeneration = m_controlGeneration;
+        command.catalogGeneration = plan.before.generation;
+        command.expectedRevision = plan.before.revision;
+        command.allowPhysicalChange = true;
+        for (const auto &entry : plan.before.outputs) {
+            const auto &output = entry.output;
+            command.before.append({output.backendKey, output.nativePixels, output.logicalGeometry,
+                output.scale, output.primary, quint8(plan.beforePriorities.value(output.backendKey))});
+        }
+        for (const auto &operation : preview->operations) {
+            const auto found = std::find_if(plan.before.outputs.cbegin(), plan.before.outputs.cend(), [&operation](const auto &entry) {
+                return entry.id == operation.id;
+            });
+            if (found == plan.before.outputs.cend()) { refuse(parsed->id, u"stale-output"_s); return; }
+            ConsoleWorkerWire::MixedOperation change;
+            change.output = found->output.backendKey;
+            switch (operation.kind) {
+            case RemoteTopologyDraft::Operation::Kind::Move:
+                change.kind = ConsoleWorkerWire::MixedOperation::Kind::Move;
+                change.globalLogical = operation.position;
+                break;
+            case RemoteTopologyDraft::Operation::Kind::Resize:
+                change.kind = ConsoleWorkerWire::MixedOperation::Kind::Resize;
+                change.pixels = operation.pixels;
+                change.scale = operation.scale;
+                break;
+            case RemoteTopologyDraft::Operation::Kind::SetPrimary:
+                change.kind = ConsoleWorkerWire::MixedOperation::Kind::Primary;
+                break;
+            case RemoteTopologyDraft::Operation::Kind::AddVirtual:
+            case RemoteTopologyDraft::Operation::Kind::Remove:
+                refuse(parsed->id, u"invalid"_s); return;
+            }
+            command.operations.append(change);
+        }
+        releaseInput();
+        m_pendingPhysical = PendingPhysical{id, parsed->id, command.requestId, command.controlGeneration, plan, false};
+        m_physicalDeadline.start();
+        if (!m_endpoint.physicalLayout(command)) finishPhysicalTopology(u"capture-failed"_s);
+        return;
+    }
     if (type == u"topology-query"_s) {
         const auto requestId = RemoteTopologyProtocol::queryId(record);
         if (!requestId) {
             connection->sendControlRecord(RemoteTopologyProtocol::error(record.value(u"id"_s).toString().left(64), u"invalid"_s));
+        } else if (m_pendingPhysical) {
+            connection->sendControlRecord(RemoteTopologyProtocol::error(*requestId, u"busy"_s));
         } else if (!m_control.admitted(id) || !m_endpoint.ready()) {
             connection->sendControlRecord(RemoteTopologyProtocol::error(*requestId, u"capture-failed"_s));
         } else {
@@ -399,7 +547,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             refuse(u"physical resize requires the active console controller"_s);
             return;
         }
-        if (m_pendingResize) {
+        if (m_pendingResize || m_pendingPhysical) {
             refuse(u"another physical resize is still pending"_s);
             return;
         }
@@ -408,6 +556,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             return;
         }
         releaseInput();
+        m_physicalPreview.reset();
         const auto serial = ++m_nextResizeId;
         m_pendingResize = PendingResize{id, requestId, serial, m_controlGeneration};
         m_resizeDeadline.start();
@@ -527,6 +676,8 @@ void ConsoleHostController::removeClient(RdpConnection *connection)
 {
     for (const auto &client : m_clients) {
         if (client->connection == connection) {
+            if (m_physicalPreview && m_physicalPreview->owner == client->id) m_physicalPreview.reset();
+            if (m_pendingPhysical && m_pendingPhysical->owner == client->id) finishPhysicalTopology(u"not-owner"_s);
             m_pendingTopology.remove(client->id);
             if (m_control.ownsControl(client->id)) {
                 releaseInput();
@@ -594,6 +745,8 @@ void ConsoleHostController::releaseInput()
 void ConsoleHostController::syncControlState()
 {
     if (m_workerOwner != m_control.owner()) {
+        m_physicalPreview.reset();
+        finishPhysicalTopology(u"not-owner"_s);
         stopMicrophone(u"console control changed; microphone disabled"_s);
         finishResize(u"console control changed during resize"_s);
         m_workerOwner = m_control.owner();
@@ -633,6 +786,34 @@ void ConsoleHostController::finishResize(const QString &error)
             break;
         }
     }
+}
+
+void ConsoleHostController::finishPhysicalTopology(const QString &code, const QString &detail)
+{
+    m_physicalDeadline.stop();
+    const auto pending = std::exchange(m_pendingPhysical, std::nullopt);
+    if (!pending) return;
+    if (!code.isEmpty()) {
+        // The worker may still be inside a blocked KScreen call. Keep this
+        // broker closed to stale frames/input until that worker actually dies.
+        releaseInput();
+        m_inputEnabled = false;
+        for (const auto &client : m_clients) client->session->setWorkerActive(false);
+        m_endpoint.stopWorker();
+    }
+    for (const auto &client : m_clients) {
+        if (client->id != pending->owner) continue;
+        if (!code.isEmpty()) {
+            auto reply = RemoteTopologyProtocol::error(pending->id, code);
+            if (!detail.isEmpty()) reply.insert(u"message"_s, detail.left(1024));
+            client->connection->sendControlRecord(reply);
+        }
+        else client->connection->sendControlRecord(QJsonObject{{u"type"_s, u"topology-result"_s},
+            {u"v"_s, 1}, {u"id"_s, pending->id}, {u"ok"_s, true},
+            {u"topology"_s, RemoteTopologyProtocol::consoleReadOnly(pending->id, m_topologyCatalog.snapshot())}});
+        break;
+    }
+    if (code.isEmpty()) m_endpoint.requestKeyFrame(); // The verified frame was held during the transaction.
 }
 
 void ConsoleHostController::updateMedia()

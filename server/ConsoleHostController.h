@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <QObject>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QJsonObject>
 #include <QMap>
@@ -17,6 +18,7 @@
 #include "ConsoleControl.h"
 #include "ConsoleInputState.h"
 #include "ConsoleWorkerEndpoint.h"
+#include "ConsoleTopologyPlan.h"
 #include "RemoteTopologyCatalog.h"
 
 namespace KRdp
@@ -73,6 +75,7 @@ private:
     void releaseInput();
     void syncControlState();
     void finishResize(const QString &error);
+    void finishPhysicalTopology(const QString &code, const QString &detail = {});
     void stopMicrophone(const QString &error);
     void microphoneResult(const ConsoleWorkerWire::MicrophoneResult &result);
     void sendMedia(Client &client, bool microphone, const QString &error = {});
@@ -95,6 +98,28 @@ private:
     bool m_topologyAvailable = false;
     QMap<QString, int> m_topologyPriorities; // Exact same-worker KScreen order, never inferred from primary flags.
     QHash<ConsoleControl::Id, QString> m_pendingTopology;
+    struct PhysicalPreview {
+        ConsoleControl::Id owner = 0;
+        quint64 controlGeneration = 0;
+        QString id;
+        QString token;
+        ConsoleTopologyPlan::Plan plan;
+        QVector<RemoteTopologyDraft::Operation> operations;
+        QElapsedTimer age;
+    };
+    struct PendingPhysical {
+        ConsoleControl::Id owner = 0;
+        QString id;
+        quint64 serial = 0;
+        quint64 controlGeneration = 0;
+        ConsoleTopologyPlan::Plan plan;
+        bool waitingReadback = false;
+    };
+    bool m_experimentalPhysicalTopology = false;
+    std::optional<PhysicalPreview> m_physicalPreview;
+    std::optional<PendingPhysical> m_pendingPhysical;
+    quint64 m_nextPhysicalId = 0;
+    QTimer m_physicalDeadline;
     ConsoleInputState m_inputState;
     ConsoleControl::Id m_workerOwner = 0;
     quint64 m_controlGeneration = 0;

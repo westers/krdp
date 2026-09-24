@@ -232,13 +232,14 @@ inline QJsonArray outputArray(const QVector<RemoteTopologyCatalog::Entry> &entri
 }
 
 inline QJsonObject previewReply(const QString &id, const QString &token, const RemoteTopologyDraft::Preview &draft,
-    const RemoteTopologyCatalog::Snapshot &snapshot)
+    const RemoteTopologyCatalog::Snapshot &snapshot, const QString &lifetime = QStringLiteral("retained"),
+    const QJsonArray &warnings = {})
 {
     return {{QStringLiteral("type"), QStringLiteral("topology-preview")}, {QStringLiteral("v"), 1},
         {QStringLiteral("id"), id}, {QStringLiteral("token"), token},
         {QStringLiteral("generation"), snapshot.generation}, {QStringLiteral("expectedRevision"), double(snapshot.revision)},
-        {QStringLiteral("before"), outputArray(draft.before)}, {QStringLiteral("after"), outputArray(draft.after)},
-        {QStringLiteral("warnings"), QJsonArray{}},
+        {QStringLiteral("before"), outputArray(draft.before, lifetime)}, {QStringLiteral("after"), outputArray(draft.after, lifetime)},
+        {QStringLiteral("warnings"), warnings},
         {QStringLiteral("previewLifetimeMs"), double(PreviewLifetimeMs)}};
 }
 
