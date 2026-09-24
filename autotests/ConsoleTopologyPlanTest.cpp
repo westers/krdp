@@ -4,6 +4,7 @@
 #include <QTest>
 
 #include "ConsoleTopologyPlan.h"
+#include "ConsoleTopologyLease.h"
 
 namespace Plan = KRdp::ConsoleTopologyPlan;
 using KRdp::RemoteTopologyDraft::Operation;
@@ -85,6 +86,111 @@ class ConsoleTopologyPlanTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void cumulativePhysicalLeaseRestoresOriginalAfterSuccessiveCommits()
+    {
+        const auto source = baseline();
+        auto firstDraft = request(source);
+        firstDraft.operations = {
+            {Operation::Kind::Move, idFor(source, QStringLiteral("HDMI-A-1")), QPoint(1920, 100), {}, 1},
+            {Operation::Kind::Resize, idFor(source, QStringLiteral("DP-1")), {}, QSize(1920, 1080), 1},
+            {Operation::Kind::SetPrimary, idFor(source, QStringLiteral("HDMI-A-1")), {}, {}, 1},
+        };
+        const auto first = Plan::make(source, priorities(), firstDraft, limits());
+        QVERIFY(first);
+        const auto originalJson = QJsonDocument(physicalKScreen()).toJson();
+        const auto original = Plan::inventory(*first, originalJson);
+        QVERIFY(original);
+        const auto firstMode = Plan::selectedModes(*first, *original);
+        QVERIFY(firstMode);
+        const auto lease = KRdp::ConsoleTopologyLease::start(*first, *original, *firstMode);
+        QVERIFY(lease);
+
+        auto firstApplied = physicalKScreen();
+        auto outputs = firstApplied.value(QStringLiteral("outputs")).toArray();
+        auto dp = outputs[0].toObject();
+        dp.insert(QStringLiteral("currentModeId"), QStringLiteral("41"));
+        dp.insert(QStringLiteral("size"), QJsonObject{{QStringLiteral("width"), 1920}, {QStringLiteral("height"), 1080}});
+        dp.insert(QStringLiteral("scale"), 1.0);
+        dp.insert(QStringLiteral("priority"), 2);
+        outputs[0] = dp;
+        auto hdmi = outputs[1].toObject();
+        hdmi.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1920}, {QStringLiteral("y"), 100}});
+        hdmi.insert(QStringLiteral("priority"), 1);
+        outputs[1] = hdmi;
+        firstApplied.insert(QStringLiteral("outputs"), outputs);
+        const auto firstAppliedJson = QJsonDocument(firstApplied).toJson();
+        QVERIFY(Plan::matchesApplied(*first, *original, *firstMode, firstAppliedJson));
+
+        auto secondBefore = source;
+        secondBefore.outputs = first->after;
+        secondBefore.revision++;
+        auto secondDraft = request(secondBefore);
+        secondDraft.operations = {{Operation::Kind::Move,
+            idFor(secondBefore, QStringLiteral("HDMI-A-1")), QPoint(2000, 100), {}, 1}};
+        const auto second = Plan::make(secondBefore, first->afterPriorities, secondDraft, limits());
+        QVERIFY(second);
+        const auto current = Plan::inventory(*second, firstAppliedJson);
+        QVERIFY(current);
+        const auto secondMode = Plan::selectedModes(*second, *current);
+        QVERIFY(secondMode);
+        const auto combined = KRdp::ConsoleTopologyLease::advance(*lease, *second, *current, *secondMode);
+        QVERIFY(combined);
+        QCOMPARE(combined->latestRevision, secondBefore.revision);
+        QCOMPARE(combined->cumulative.positions.value(QStringLiteral("HDMI-A-1")), QPoint(2000, 100));
+        QCOMPARE(combined->selected.value(QStringLiteral("DP-1")).id, QStringLiteral("41"));
+        auto latest = firstApplied;
+        outputs = latest.value(QStringLiteral("outputs")).toArray();
+        hdmi = outputs[1].toObject();
+        hdmi.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 2000}, {QStringLiteral("y"), 100}});
+        outputs[1] = hdmi;
+        latest.insert(QStringLiteral("outputs"), outputs);
+        const auto latestJson = QJsonDocument(latest).toJson();
+        const auto restore = Plan::recoveryArguments(combined->cumulative, combined->original,
+            combined->selected, latestJson);
+        QVERIFY(restore);
+        QVERIFY(restore->contains(QStringLiteral("output.DP-1.mode.27")));
+        QVERIFY(restore->contains(QStringLiteral("output.DP-1.scale.1.25")));
+        QVERIFY(restore->contains(QStringLiteral("output.HDMI-A-1.position.1280,100")));
+        QVERIFY(Plan::recoveryVerified(combined->cumulative, combined->original,
+            combined->selected, latestJson, originalJson));
+
+        auto independent = latest;
+        outputs = independent.value(QStringLiteral("outputs")).toArray();
+        hdmi = outputs[1].toObject();
+        hdmi.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 2100}, {QStringLiteral("y"), 100}});
+        outputs[1] = hdmi;
+        independent.insert(QStringLiteral("outputs"), outputs);
+        const auto selective = Plan::recoveryArguments(combined->cumulative, combined->original,
+            combined->selected, QJsonDocument(independent).toJson());
+        QVERIFY(selective);
+        QVERIFY(!selective->contains(QStringLiteral("output.HDMI-A-1.position.1280,100")));
+
+        auto stale = *second;
+        stale.before.outputs[1].output.logicalGeometry.moveLeft(1999);
+        QVERIFY(!KRdp::ConsoleTopologyLease::advance(*lease, stale, *current, *secondMode));
+        auto changedMode = *current;
+        changedMode.states[QStringLiteral("DP-1")].current.id = QStringLiteral("42");
+        QVERIFY(!KRdp::ConsoleTopologyLease::advance(*lease, *second, changedMode, *secondMode));
+
+        auto thirdBefore = secondBefore;
+        thirdBefore.outputs = second->after;
+        thirdBefore.revision++;
+        auto thirdDraft = request(thirdBefore);
+        thirdDraft.operations = {{Operation::Kind::Move,
+            idFor(thirdBefore, QStringLiteral("HDMI-A-1")), QPoint(2050, 100), {}, 1}};
+        const auto third = Plan::make(thirdBefore, second->afterPriorities, thirdDraft, limits());
+        QVERIFY(third);
+        const auto thirdCurrent = Plan::inventory(*third, latestJson);
+        QVERIFY(thirdCurrent);
+        const auto thirdMode = Plan::selectedModes(*third, *thirdCurrent);
+        QVERIFY(thirdMode);
+        const auto advanced = KRdp::ConsoleTopologyLease::advance(*combined, *third, *thirdCurrent, *thirdMode);
+        QVERIFY(advanced);
+        QCOMPARE(advanced->latestRevision, thirdBefore.revision);
+        QCOMPARE(advanced->cumulative.positions.value(QStringLiteral("HDMI-A-1")), QPoint(2050, 100));
+        QVERIFY(!KRdp::ConsoleTopologyLease::advance(*advanced, *third, *thirdCurrent, *thirdMode));
+    }
+
     void explicitMixedPhysicalDraftPreservesExactIdentity()
     {
         const auto source = baseline();
