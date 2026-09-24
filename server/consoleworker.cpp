@@ -812,13 +812,19 @@ private:
     {
         if (m_mode.virtualSession || m_stopping || !m_control.active
             || m_control.generation != request.controlGeneration || m_resize.changing()
-            || m_multiMode || !m_lastPhysicalKeyframe || m_outputs.monitors.isEmpty())
+            || m_outputs.monitors.isEmpty()
+            || (m_multiMode ? (!m_multiReady || m_multiPublishedFrames.size() != m_outputs.monitors.size())
+                            : !m_lastPhysicalKeyframe))
             return QStringLiteral("physical layout requires an idle authenticated Console capture");
         const auto plan = ConsoleTopologyPlan::fromWire(request);
         if (!plan) return QStringLiteral("physical layout draft is invalid");
         const auto json = readKScreenJson();
         const auto kscreen = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
-        if (!kscreen || !ConsoleTopologyReadback::confirmed(*kscreen, m_outputs, *m_lastPhysicalKeyframe))
+        const auto captured = kscreen
+            ? (m_multiMode ? ConsoleTopologyReadback::confirmedMulti(*kscreen, m_outputs, m_multiPublishedFrames)
+                           : ConsoleTopologyReadback::confirmed(*kscreen, m_outputs, *m_lastPhysicalKeyframe))
+            : std::nullopt;
+        if (!captured)
             return QStringLiteral("fresh physical KScreen readback differs from captured desktop");
         const auto arguments = ConsoleTopologyPlan::arguments(*plan, *json);
         if (!arguments) return QStringLiteral("physical layout or advertised modes changed before apply");

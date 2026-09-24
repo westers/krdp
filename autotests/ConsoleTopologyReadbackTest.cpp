@@ -43,6 +43,41 @@ private Q_SLOTS:
         captured.data.truncate(captured.data.size() / 2);
         QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, captured));
     }
+
+    void independentPhysicalKeyframesConfirmEveryOutput()
+    {
+        QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/1280x720.h264")));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        KRdp::VideoFrame first;
+        first.size = QSize(1280, 720);
+        first.data = file.readAll();
+        first.isKeyFrame = true;
+        first.monitorIndex = 0;
+        KRdp::VideoFrame second = first;
+        second.monitorIndex = 1;
+        KRdp::ConsoleWorkerWire::Outputs outputs;
+        outputs.monitors = {
+            {QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true},
+            {QStringLiteral("HDMI-A-1"), QRect(1280, 0, 1280, 720), 1, false},
+        };
+        KRdp::RetainedKScreenReadback::Snapshot fresh;
+        fresh.outputs = {
+            {.backendKey = QStringLiteral("DP-1"), .name = QStringLiteral("DP-1"), .nativePixels = QSize(1280, 720),
+                .logicalGeometry = QRect(0, 0, 1280, 720), .scale = 1, .enabled = true, .primary = true, .physical = true, .owner = {}},
+            {.backendKey = QStringLiteral("HDMI-A-1"), .name = QStringLiteral("HDMI-A-1"), .nativePixels = QSize(1280, 720),
+                .logicalGeometry = QRect(1280, 0, 1280, 720), .scale = 1, .enabled = true, .physical = true, .owner = {}},
+        };
+        const auto confirmed = KRdp::ConsoleTopologyReadback::confirmedMulti(fresh, outputs, {first, second});
+        QVERIFY(confirmed);
+        QCOMPARE(confirmed->outputs.size(), 2);
+        QVERIFY(!KRdp::ConsoleTopologyReadback::confirmedMulti(fresh, outputs, {first}));
+        second.data.truncate(second.data.size() / 2);
+        QVERIFY(!KRdp::ConsoleTopologyReadback::confirmedMulti(fresh, outputs, {first, second}));
+        second = first;
+        second.monitorIndex = 1;
+        fresh.outputs[1].logicalGeometry.moveLeft(1300);
+        QVERIFY(!KRdp::ConsoleTopologyReadback::confirmedMulti(fresh, outputs, {first, second}));
+    }
 };
 
 QTEST_GUILESS_MAIN(ConsoleTopologyReadbackTest)

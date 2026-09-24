@@ -39,4 +39,25 @@ inline std::optional<ConsoleWorkerWire::Topology> confirmed(const RetainedKScree
     }
     return result;
 }
+
+// Physical multi-output capture must prove *each* encoded surface. An
+// aggregate workspace keyframe can agree with KScreen while one physical
+// output has no independently decodable stream (or exceeds an encoder's
+// per-surface limit). The same geometry/payload gate used by the retained
+// compositor is valid here; ownership is supplied by the authenticated
+// physical worker, never inferred from output names.
+inline std::optional<ConsoleWorkerWire::Topology> confirmedMulti(const RetainedKScreenReadback::Snapshot &kscreen,
+    const ConsoleWorkerWire::Outputs &worker, const QVector<VideoFrame> &keyframes)
+{
+    if (!RetainedKScreenReadback::matchesPublished(kscreen, worker, keyframes)) return {};
+    ConsoleWorkerWire::Topology result;
+    for (const auto &published : worker.monitors) {
+        const auto it = std::find_if(kscreen.outputs.cbegin(), kscreen.outputs.cend(), [&published](const auto &output) {
+            return output.backendKey == published.name;
+        });
+        if (it == kscreen.outputs.cend()) return {};
+        result.outputs.append({it->name, it->nativePixels, it->logicalGeometry, it->scale, it->primary});
+    }
+    return result;
+}
 }
