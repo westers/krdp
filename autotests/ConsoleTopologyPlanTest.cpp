@@ -5,6 +5,7 @@
 
 #include "ConsoleTopologyPlan.h"
 #include "ConsoleTopologyLease.h"
+#include "ConsoleTopologyRelease.h"
 
 namespace Plan = KRdp::ConsoleTopologyPlan;
 using KRdp::RemoteTopologyDraft::Operation;
@@ -86,6 +87,83 @@ class ConsoleTopologyPlanTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void physicalLeaseReleaseRequiresExactSecondReadback()
+    {
+        const auto source = baseline();
+        auto draft = request(source);
+        draft.operations = {{Operation::Kind::Move,
+            idFor(source, QStringLiteral("HDMI-A-1")), QPoint(1500, 100), {}, 1}};
+        const auto plan = Plan::make(source, priorities(), draft, limits());
+        QVERIFY(plan);
+        const auto originalJson = QJsonDocument(physicalKScreen()).toJson();
+        const auto before = Plan::inventory(*plan, originalJson);
+        QVERIFY(before);
+        const auto selected = Plan::selectedModes(*plan, *before);
+        QVERIFY(selected);
+        const auto lease = KRdp::ConsoleTopologyLease::start(*plan, *before, *selected);
+        QVERIFY(lease);
+
+        auto applied = physicalKScreen();
+        auto outputs = applied.value(QStringLiteral("outputs")).toArray();
+        auto hdmi = outputs[1].toObject();
+        hdmi.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1500}, {QStringLiteral("y"), 100}});
+        outputs[1] = hdmi;
+        applied.insert(QStringLiteral("outputs"), outputs);
+        const auto appliedJson = QJsonDocument(applied).toJson();
+        QStringList invoked;
+        int reads = 0;
+        const auto accepted = KRdp::ConsoleTopologyRelease::reconcile(*lease,
+            [&]() -> std::optional<QByteArray> { return ++reads == 1 ? appliedJson : originalJson; },
+            [&](const QStringList &args) { invoked = args; return false; });
+        QVERIFY(accepted.verified); // The helper's exit status cannot override exact KDE readback.
+        QVERIFY(accepted.commandAttempted);
+        QVERIFY(!accepted.helperReportedSuccess);
+        QCOMPARE(reads, 2);
+        QCOMPARE(invoked, QStringList({QStringLiteral("output.HDMI-A-1.position.1280,100")}));
+
+        reads = 0;
+        const auto mismatch = KRdp::ConsoleTopologyRelease::reconcile(*lease,
+            [&]() -> std::optional<QByteArray> { ++reads; return appliedJson; },
+            [&](const QStringList &) { return true; });
+        QVERIFY(!mismatch.verified); // Exit 0 with unchanged KDE layout is not success.
+        QVERIFY(mismatch.commandAttempted);
+        QCOMPARE(reads, 2);
+
+        reads = 0;
+        const auto unreadable = KRdp::ConsoleTopologyRelease::reconcile(*lease,
+            [&]() -> std::optional<QByteArray> {
+                return ++reads == 1 ? std::optional(appliedJson) : std::nullopt;
+            },
+            [&](const QStringList &) { return true; });
+        QVERIFY(!unreadable.verified); // A successful helper with no final readback is still failure.
+        QVERIFY(unreadable.commandAttempted);
+        QCOMPARE(reads, 2);
+
+        auto independent = applied;
+        outputs = independent.value(QStringLiteral("outputs")).toArray();
+        hdmi = outputs[1].toObject();
+        hdmi.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1400}, {QStringLiteral("y"), 100}});
+        outputs[1] = hdmi;
+        independent.insert(QStringLiteral("outputs"), outputs);
+        const auto independentJson = QJsonDocument(independent).toJson();
+        bool called = false;
+        const auto preserved = KRdp::ConsoleTopologyRelease::reconcile(*lease,
+            [&]() -> std::optional<QByteArray> { return independentJson; },
+            [&](const QStringList &) { called = true; return true; });
+        QVERIFY(preserved.verified);
+        QVERIFY(!preserved.commandAttempted);
+        QVERIFY(!called); // A local third-value edit is not ours to undo.
+
+        auto missing = applied;
+        missing.insert(QStringLiteral("outputs"), QJsonArray{outputs[0]});
+        const auto refused = KRdp::ConsoleTopologyRelease::reconcile(*lease,
+            [&]() -> std::optional<QByteArray> { return QJsonDocument(missing).toJson(); },
+            [&](const QStringList &) { called = true; return true; });
+        QVERIFY(!refused.verified);
+        QVERIFY(!refused.commandAttempted);
+        QVERIFY(!called); // Hotplug or changed output set cannot be guessed through.
+    }
+
     void resizeThenMoveUsesOneOriginalPhysicalLease()
     {
         const auto source = baseline();

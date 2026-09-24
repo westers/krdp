@@ -41,6 +41,7 @@
 #include "ConsoleTopologyReadback.h"
 #include "ConsoleTopologyPlan.h"
 #include "ConsoleTopologyLease.h"
+#include "ConsoleTopologyRelease.h"
 #include "RetainedMultiResizePlan.h"
 #include "RetainedMultiPositionPlan.h"
 #include "RetainedMultiFitPlan.h"
@@ -939,19 +940,13 @@ private:
         m_lastPhysicalKeyframe.reset();
         QString error = reason;
         if (m_physicalPlan && m_physicalBefore && m_physicalSelected) {
-            const auto current = readKScreenJson();
-            const auto restore = current ? ConsoleTopologyPlan::recoveryArguments(*m_physicalPlan,
-                *m_physicalBefore, *m_physicalSelected, *current) : std::nullopt;
-            if (restore) {
-                if (!restore->isEmpty()) runKScreenCommand(*restore);
-                const auto verified = readKScreenJson();
-                error += verified && ConsoleTopologyPlan::recoveryVerified(*m_physicalPlan,
-                    *m_physicalBefore, *m_physicalSelected, *current, *verified)
-                    ? QStringLiteral("; owned fields reconciled")
-                    : QStringLiteral("; recovery not fully verified");
-            } else {
-                error += QStringLiteral("; recovery unavailable");
-            }
+            const ConsoleTopologyLease::State attempted{*m_physicalPlan, *m_physicalBefore,
+                *m_physicalSelected, m_physicalPlan->before.revision};
+            const auto recovery = ConsoleTopologyRelease::reconcile(attempted,
+                [this] { return readKScreenJson(); },
+                [this](const QStringList &arguments) { return runKScreenCommand(arguments); });
+            error += recovery.verified ? QStringLiteral("; owned fields reconciled")
+                : QStringLiteral("; recovery not fully verified: ") + recovery.error;
         }
         finishPhysical(error);
         m_socket.disconnectFromServer(); // Never show stale video or accept stale input after failure.
@@ -964,24 +959,20 @@ private:
         m_multiReady = false;
         m_lastPhysicalKeyframe.reset();
         m_multiPublishedFrames.clear();
-        const auto current = readKScreenJson();
-        const auto restore = current ? ConsoleTopologyPlan::recoveryArguments(m_physicalLease->cumulative,
-            m_physicalLease->original, m_physicalLease->selected, *current) : std::nullopt;
-        if (restore && !restore->isEmpty()) runKScreenCommand(*restore);
-        const auto verified = restore ? readKScreenJson() : std::nullopt;
-        const bool okay = current && verified && ConsoleTopologyPlan::recoveryVerified(
-            m_physicalLease->cumulative, m_physicalLease->original, m_physicalLease->selected,
-            *current, *verified);
-        qInfo() << "Physical Console lease released; conditional KScreen reconciliation verified:" << okay;
+        const auto result = ConsoleTopologyRelease::reconcile(*m_physicalLease,
+            [this] { return readKScreenJson(); },
+            [this](const QStringList &arguments) { return runKScreenCommand(arguments); });
+        qInfo() << "Physical Console lease released; conditional KScreen reconciliation verified:"
+                << result.verified << result.error;
         if (m_socket.state() == QLocalSocket::ConnectedState) {
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLeaseReleased{
-                m_physicalLeaseGeneration, okay}));
+                m_physicalLeaseGeneration, result.verified}));
             m_socket.flush();
             m_socket.waitForBytesWritten(1000);
         }
         m_physicalLease.reset();
         m_physicalLeaseGeneration = 0;
-        return okay;
+        return result.verified;
     }
 
     void physicalLayout(const ConsoleWorkerWire::PhysicalLayout &request)
