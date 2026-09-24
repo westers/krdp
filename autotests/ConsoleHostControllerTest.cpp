@@ -121,6 +121,42 @@ private Q_SLOTS:
         QVERIFY(!host.m_pendingPhysical);
         QCOMPARE(host.m_topologyCatalog.snapshot().revision, current.revision + 1);
         QCOMPARE(host.m_topologyCatalog.snapshot().outputs[1].output.logicalGeometry.top(), 100);
+        host.onControlRecord(&connection, id, QJsonObject{{QStringLiteral("type"), QStringLiteral("console-resize")},
+            {QStringLiteral("v"), 1}, {QStringLiteral("id"), QStringLiteral("fit-1")},
+            {QStringLiteral("output"), QStringLiteral("DP-1")},
+            {QStringLiteral("width"), 1600}, {QStringLiteral("height"), 900}, {QStringLiteral("scale"), 1.25}});
+        QVERIFY(host.m_pendingPhysical);
+        QVERIFY(host.m_pendingPhysical->resizeReply);
+        QVERIFY(!host.m_pendingResize); // Experimental legacy Fit uses the same physical lease.
+        const auto fitSerial = host.m_pendingPhysical->serial;
+        std::optional<ConsoleWorkerWire::PhysicalLayout> fitCommand;
+        readDeadline.restart();
+        while (!fitCommand && readDeadline.elapsed() < 1000) {
+            QCoreApplication::processEvents();
+            if (!worker.bytesAvailable()) worker.waitForReadyRead(20);
+            fromBroker.feed(worker.readAll());
+            while (const auto record = fromBroker.next()) {
+                if (const auto physical = ConsoleWorkerWire::physicalLayout(*record)) fitCommand = *physical;
+            }
+        }
+        QVERIFY(fitCommand);
+        QCOMPARE(fitCommand->requestId, fitSerial);
+        QCOMPARE(fitCommand->operations.size(), 1);
+        QCOMPARE(fitCommand->operations[0].kind, ConsoleWorkerWire::MixedOperation::Kind::Resize);
+        QCOMPARE(fitCommand->operations[0].output, QStringLiteral("DP-1"));
+        QCOMPARE(fitCommand->operations[0].pixels, QSize(1600, 900));
+        QCOMPARE(fitCommand->operations[0].scale, 1.25);
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLayoutResult{fitSerial, generation, {}}));
+        QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_VERIFY(host.m_pendingPhysical && host.m_pendingPhysical->waitingReadback);
+        movedCapture.monitors[0].scale = 1.25;
+        Q_EMIT host.m_endpoint.outputsReceived(movedCapture);
+        moved.outputs[0].pixels = QSize(1600, 900);
+        moved.outputs[0].scale = 1.25;
+        Q_EMIT host.m_endpoint.topologyReceived(moved);
+        QVERIFY(!host.m_pendingPhysical);
+        QVERIFY(host.m_physicalLeaseActive);
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, current.revision + 2);
         RemoteTopologyDraft::Request nextDraft;
         nextDraft.generation = host.m_topologyCatalog.snapshot().generation;
         nextDraft.expectedRevision = host.m_topologyCatalog.snapshot().revision;

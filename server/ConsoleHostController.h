@@ -114,6 +114,7 @@ private:
         quint64 controlGeneration = 0;
         ConsoleTopologyPlan::Plan plan;
         bool waitingReadback = false;
+        bool resizeReply = false; // Legacy Console resize is an adapter into the same physical lease.
     };
     bool m_experimentalPhysicalTopology = false;
     bool m_physicalLeaseActive = false; // Fail closed if a worker vanishes before verified release.

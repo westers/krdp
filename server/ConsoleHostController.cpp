@@ -24,6 +24,55 @@
 
 using namespace Qt::StringLiterals;
 
+namespace
+{
+std::optional<KRdp::ConsoleWorkerWire::PhysicalLayout> physicalCommand(
+    const KRdp::ConsoleTopologyPlan::Plan &plan,
+    const QVector<KRdp::RemoteTopologyDraft::Operation> &operations,
+    quint64 requestId, quint64 controlGeneration)
+{
+    using namespace KRdp;
+    ConsoleWorkerWire::PhysicalLayout command;
+    command.requestId = requestId;
+    command.controlGeneration = controlGeneration;
+    command.catalogGeneration = plan.before.generation;
+    command.expectedRevision = plan.before.revision;
+    command.allowPhysicalChange = true;
+    for (const auto &entry : plan.before.outputs) {
+        const auto &output = entry.output;
+        command.before.append({output.backendKey, output.nativePixels, output.logicalGeometry,
+            output.scale, output.primary, quint8(plan.beforePriorities.value(output.backendKey))});
+    }
+    for (const auto &operation : operations) {
+        const auto found = std::find_if(plan.before.outputs.cbegin(), plan.before.outputs.cend(), [&operation](const auto &entry) {
+            return entry.id == operation.id;
+        });
+        if (found == plan.before.outputs.cend()) return {};
+        ConsoleWorkerWire::MixedOperation change;
+        change.output = found->output.backendKey;
+        switch (operation.kind) {
+        case RemoteTopologyDraft::Operation::Kind::Move:
+            change.kind = ConsoleWorkerWire::MixedOperation::Kind::Move;
+            change.globalLogical = operation.position;
+            break;
+        case RemoteTopologyDraft::Operation::Kind::Resize:
+            change.kind = ConsoleWorkerWire::MixedOperation::Kind::Resize;
+            change.pixels = operation.pixels;
+            change.scale = operation.scale;
+            break;
+        case RemoteTopologyDraft::Operation::Kind::SetPrimary:
+            change.kind = ConsoleWorkerWire::MixedOperation::Kind::Primary;
+            break;
+        case RemoteTopologyDraft::Operation::Kind::AddVirtual:
+        case RemoteTopologyDraft::Operation::Kind::Remove:
+            return {};
+        }
+        command.operations.append(change);
+    }
+    return command;
+}
+}
+
 namespace KRdp
 {
 ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher launchWorker, QString runtimeDirectory, QObject *parent)
@@ -468,47 +517,12 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         if (!m_topologyAvailable || ++m_nextPhysicalId == 0) {
             refuse(parsed->id, u"capture-failed"_s); return;
         }
-        ConsoleWorkerWire::PhysicalLayout command;
-        command.requestId = m_nextPhysicalId;
-        command.controlGeneration = m_controlGeneration;
-        command.catalogGeneration = plan.before.generation;
-        command.expectedRevision = plan.before.revision;
-        command.allowPhysicalChange = true;
-        for (const auto &entry : plan.before.outputs) {
-            const auto &output = entry.output;
-            command.before.append({output.backendKey, output.nativePixels, output.logicalGeometry,
-                output.scale, output.primary, quint8(plan.beforePriorities.value(output.backendKey))});
-        }
-        for (const auto &operation : preview->operations) {
-            const auto found = std::find_if(plan.before.outputs.cbegin(), plan.before.outputs.cend(), [&operation](const auto &entry) {
-                return entry.id == operation.id;
-            });
-            if (found == plan.before.outputs.cend()) { refuse(parsed->id, u"stale-output"_s); return; }
-            ConsoleWorkerWire::MixedOperation change;
-            change.output = found->output.backendKey;
-            switch (operation.kind) {
-            case RemoteTopologyDraft::Operation::Kind::Move:
-                change.kind = ConsoleWorkerWire::MixedOperation::Kind::Move;
-                change.globalLogical = operation.position;
-                break;
-            case RemoteTopologyDraft::Operation::Kind::Resize:
-                change.kind = ConsoleWorkerWire::MixedOperation::Kind::Resize;
-                change.pixels = operation.pixels;
-                change.scale = operation.scale;
-                break;
-            case RemoteTopologyDraft::Operation::Kind::SetPrimary:
-                change.kind = ConsoleWorkerWire::MixedOperation::Kind::Primary;
-                break;
-            case RemoteTopologyDraft::Operation::Kind::AddVirtual:
-            case RemoteTopologyDraft::Operation::Kind::Remove:
-                refuse(parsed->id, u"invalid"_s); return;
-            }
-            command.operations.append(change);
-        }
+        const auto command = physicalCommand(plan, preview->operations, m_nextPhysicalId, m_controlGeneration);
+        if (!command) { refuse(parsed->id, u"stale-output"_s); return; }
         releaseInput();
-        m_pendingPhysical = PendingPhysical{id, parsed->id, command.requestId, command.controlGeneration, plan, false};
+        m_pendingPhysical = PendingPhysical{id, parsed->id, command->requestId, command->controlGeneration, plan, false};
         m_physicalDeadline.start();
-        if (!m_endpoint.physicalLayout(command)) finishPhysicalTopology(u"capture-failed"_s);
+        if (!m_endpoint.physicalLayout(*command)) finishPhysicalTopology(u"capture-failed"_s);
         return;
     }
     if (type == u"topology-query"_s) {
@@ -574,6 +588,48 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         }
         if (std::none_of(m_outputs.monitors.cbegin(), m_outputs.monitors.cend(), [&output](const auto &monitor) { return monitor.name == output; })) {
             refuse(u"physical output is not in the active capture layout"_s);
+            return;
+        }
+        if (m_experimentalPhysicalTopology && m_endpoint.target().adapter == ConsoleSeat::Adapter::PhysicalUser) {
+            // A legacy Fit must share the same original physical baseline as
+            // visual topology edits. Its separate resize helper would restore
+            // asynchronously after the topology lease had already released.
+            if (!m_topologyAvailable || m_topologyPriorities.isEmpty()) {
+                refuse(u"physical layout capture is unavailable"_s);
+                return;
+            }
+            const auto snapshot = m_topologyCatalog.snapshot();
+            const auto found = std::find_if(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [&output](const auto &entry) {
+                return entry.output.backendKey == output;
+            });
+            if (found == snapshot.outputs.cend()) {
+                refuse(u"physical output is not in the verified layout"_s);
+                return;
+            }
+            RemoteTopologyDraft::Request draft;
+            draft.generation = snapshot.generation;
+            draft.expectedRevision = snapshot.revision;
+            draft.owner = QString::number(id);
+            draft.allowPhysicalChange = true;
+            draft.operations.append({RemoteTopologyDraft::Operation::Kind::Resize, found->id,
+                {}, QSize(int(width), int(height)), scale});
+            const auto plan = ConsoleTopologyPlan::make(snapshot, m_topologyPriorities, draft,
+                {.changePrimary = true, .maxOutputs = 16, .maxOutputDimension = 4096, .maxAtlasDimension = 8192});
+            if (!plan || ++m_nextPhysicalId == 0) {
+                refuse(u"physical resize conflicts with the verified layout"_s);
+                return;
+            }
+            const auto command = physicalCommand(*plan, draft.operations, m_nextPhysicalId, m_controlGeneration);
+            if (!command) {
+                refuse(u"physical output changed before resize"_s);
+                return;
+            }
+            releaseInput();
+            m_physicalPreview.reset();
+            m_pendingPhysical = PendingPhysical{id, requestId, command->requestId,
+                command->controlGeneration, *plan, false, true};
+            m_physicalDeadline.start();
+            if (!m_endpoint.physicalLayout(*command)) finishPhysicalTopology(u"capture-failed"_s);
             return;
         }
         releaseInput();
@@ -827,7 +883,11 @@ void ConsoleHostController::finishPhysicalTopology(const QString &code, const QS
     }
     for (const auto &client : m_clients) {
         if (client->id != pending->owner) continue;
-        if (!code.isEmpty()) {
+        if (pending->resizeReply) {
+            client->connection->sendControlRecord(QJsonObject{{u"type"_s, u"console-resize"_s}, {u"v"_s, 1},
+                {u"id"_s, pending->id}, {u"ok"_s, code.isEmpty()},
+                {u"message"_s, detail.isEmpty() ? code : detail.left(1024)}});
+        } else if (!code.isEmpty()) {
             auto reply = RemoteTopologyProtocol::error(pending->id, code);
             if (!detail.isEmpty()) reply.insert(u"message"_s, detail.left(1024));
             client->connection->sendControlRecord(reply);

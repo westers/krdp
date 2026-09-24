@@ -86,6 +86,62 @@ class ConsoleTopologyPlanTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void resizeThenMoveUsesOneOriginalPhysicalLease()
+    {
+        const auto source = baseline();
+        auto resizeDraft = request(source);
+        resizeDraft.operations = {{Operation::Kind::Resize,
+            idFor(source, QStringLiteral("DP-1")), {}, QSize(1600, 900), 1.5}};
+        const auto resized = Plan::make(source, priorities(), resizeDraft, limits());
+        QVERIFY(resized);
+        const auto originalJson = QJsonDocument(physicalKScreen()).toJson();
+        const auto original = Plan::inventory(*resized, originalJson);
+        QVERIFY(original);
+        const auto resizeMode = Plan::selectedModes(*resized, *original);
+        QVERIFY(resizeMode);
+        const auto lease = KRdp::ConsoleTopologyLease::start(*resized, *original, *resizeMode);
+        QVERIFY(lease);
+
+        auto afterResize = physicalKScreen();
+        auto outputs = afterResize.value(QStringLiteral("outputs")).toArray();
+        auto dp = outputs[0].toObject();
+        dp.insert(QStringLiteral("scale"), 1.5);
+        outputs[0] = dp;
+        afterResize.insert(QStringLiteral("outputs"), outputs);
+        const auto resizedJson = QJsonDocument(afterResize).toJson();
+        QVERIFY(Plan::matchesApplied(*resized, *original, *resizeMode, resizedJson));
+
+        auto secondBefore = source;
+        secondBefore.outputs = resized->after;
+        secondBefore.revision++;
+        auto moveDraft = request(secondBefore);
+        moveDraft.operations = {{Operation::Kind::Move,
+            idFor(secondBefore, QStringLiteral("HDMI-A-1")), QPoint(1500, 100), {}, 1}};
+        const auto moved = Plan::make(secondBefore, resized->afterPriorities, moveDraft, limits());
+        QVERIFY(moved);
+        const auto current = Plan::inventory(*moved, resizedJson);
+        QVERIFY(current);
+        const auto moveMode = Plan::selectedModes(*moved, *current);
+        QVERIFY(moveMode);
+        const auto combined = KRdp::ConsoleTopologyLease::advance(*lease, *moved, *current, *moveMode);
+        QVERIFY(combined);
+
+        auto afterMove = afterResize;
+        outputs = afterMove.value(QStringLiteral("outputs")).toArray();
+        auto hdmi = outputs[1].toObject();
+        hdmi.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1500}, {QStringLiteral("y"), 100}});
+        outputs[1] = hdmi;
+        afterMove.insert(QStringLiteral("outputs"), outputs);
+        const auto movedJson = QJsonDocument(afterMove).toJson();
+        const auto restore = Plan::recoveryArguments(combined->cumulative, combined->original,
+            combined->selected, movedJson);
+        QVERIFY(restore);
+        QVERIFY(restore->contains(QStringLiteral("output.DP-1.scale.1.25")));
+        QVERIFY(restore->contains(QStringLiteral("output.HDMI-A-1.position.1280,100")));
+        QVERIFY(Plan::recoveryVerified(combined->cumulative, combined->original,
+            combined->selected, movedJson, originalJson));
+    }
+
     void cumulativePhysicalLeaseRestoresOriginalAfterSuccessiveCommits()
     {
         const auto source = baseline();
