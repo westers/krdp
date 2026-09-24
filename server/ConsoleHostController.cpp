@@ -44,8 +44,24 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             finishPhysicalTopology(u"partial"_s, result.error);
             return;
         }
+        // The worker has committed a captured physical change. Keep the
+        // broker closed on any later owner change until that worker explicitly
+        // verifies conditional release; its socket disappearing is not proof.
+        if (m_pendingPhysical->plan.changed) {
+            m_physicalLeaseActive = true;
+            m_physicalLeaseGeneration = result.controlGeneration;
+        }
         m_pendingPhysical->waitingReadback = true;
         if (!m_endpoint.requestTopology()) finishPhysicalTopology(u"capture-failed"_s);
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::physicalLeaseReleased, this, [this](const auto &result) {
+        if (!m_physicalLeaseActive || result.controlGeneration != m_physicalLeaseGeneration) return;
+        if (!result.verified) {
+            qWarning() << "Physical Console lease could not be verified on release; capture remains disabled";
+            return;
+        }
+        m_physicalLeaseActive = false;
+        m_physicalLeaseGeneration = 0;
     });
     m_microphoneDeadline.setSingleShot(true);
     m_microphoneDeadline.setInterval(4000);
@@ -93,6 +109,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerStopped, this, [this]() {
+        setWorkerActive(false);
         finishPhysicalTopology(u"capture-failed"_s);
         stopMicrophone(u"console microphone worker stopped"_s);
         finishResize(u"console capture worker stopped during resize"_s);
@@ -290,6 +307,10 @@ void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
 
 void ConsoleHostController::setWorkerActive(bool active)
 {
+    if (active && m_physicalLeaseActive) {
+        qWarning() << "Refusing Console capture while physical layout lease release is unverified";
+        active = false;
+    }
     qInfo() << "Console capture forwarding:" << active;
     if (!active) {
         m_physicalPreview.reset();
@@ -747,6 +768,7 @@ void ConsoleHostController::releaseInput()
 void ConsoleHostController::syncControlState()
 {
     if (m_workerOwner != m_control.owner()) {
+        if (m_physicalLeaseActive) setWorkerActive(false);
         m_physicalPreview.reset();
         finishPhysicalTopology(u"not-owner"_s);
         stopMicrophone(u"console control changed; microphone disabled"_s);

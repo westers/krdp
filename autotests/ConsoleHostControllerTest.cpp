@@ -109,6 +109,8 @@ private Q_SLOTS:
         worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLayoutResult{serial, generation, {}}));
         QVERIFY(worker.waitForBytesWritten(1000));
         QTRY_VERIFY(host.m_pendingPhysical && host.m_pendingPhysical->waitingReadback);
+        QVERIFY(host.m_physicalLeaseActive);
+        QCOMPARE(host.m_physicalLeaseGeneration, generation);
         QVERIFY(host.m_pendingPhysical); // Worker success alone is not client success.
         auto movedCapture = captured;
         movedCapture.monitors[1].geometry.moveTop(100);
@@ -137,6 +139,37 @@ private Q_SLOTS:
         Q_EMIT host.m_endpoint.topologyReceived(moved);
         QVERIFY(!host.m_pendingPhysical);
         QVERIFY(!host.m_inputEnabled); // A plausible but wrong whole-layout readback fails closed.
+    }
+
+    void physicalLeaseTransferWaitsForVerifiedRelease()
+    {
+        Server server;
+        RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.addClient(&connection);
+        const auto id = host.m_clients.front()->id;
+        host.m_control.admit(id);
+        host.syncControlState();
+        host.m_inputEnabled = true;
+        host.m_physicalLeaseActive = true;
+        host.m_physicalLeaseGeneration = host.m_controlGeneration;
+        const auto oldGeneration = host.m_controlGeneration;
+        host.m_control.release(id);
+        host.syncControlState();
+        QVERIFY(!host.m_inputEnabled);
+        QVERIFY(host.m_physicalLeaseActive);
+        host.setWorkerActive(true);
+        QVERIFY(!host.m_inputEnabled); // A replacement worker cannot bypass the pending release.
+        Q_EMIT host.m_endpoint.physicalLeaseReleased({oldGeneration + 1, true});
+        QVERIFY(host.m_physicalLeaseActive);
+        Q_EMIT host.m_endpoint.physicalLeaseReleased({oldGeneration, false});
+        QVERIFY(host.m_physicalLeaseActive);
+        Q_EMIT host.m_endpoint.workerStopped();
+        QVERIFY(host.m_physicalLeaseActive); // A vanished worker cannot claim release.
+        QVERIFY(!host.m_inputEnabled);
+        Q_EMIT host.m_endpoint.physicalLeaseReleased({oldGeneration, true});
+        QVERIFY(!host.m_physicalLeaseActive);
+        QVERIFY(!host.m_inputEnabled); // The next worker must still establish fresh capture.
     }
 
     void physicalTopologyRevisionAndWorkerInvalidation()

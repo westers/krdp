@@ -143,6 +143,16 @@ void ConsoleWorkerWireTest::physicalLayoutRecordsRequireConsentAndCompleteBefore
     const auto second = reader.next();
     QVERIFY(second);
     QCOMPARE(physicalLayoutResult(*second), std::optional<PhysicalLayoutResult>(answer));
+    const PhysicalLeaseReleased released{9, true};
+    reader.feed(frame(released));
+    const auto releaseRecord = reader.next();
+    QVERIFY(releaseRecord);
+    QCOMPARE(physicalLeaseReleased(*releaseRecord), std::optional<PhysicalLeaseReleased>(released));
+    auto invalidRelease = *releaseRecord;
+    invalidRelease.payload.chop(1);
+    QVERIFY(!physicalLeaseReleased(invalidRelease));
+    reader.feed(frame(PhysicalLeaseReleased{0, false}));
+    QVERIFY(!physicalLeaseReleased(*reader.next()));
 
     auto bad = request;
     bad.allowPhysicalChange = false;

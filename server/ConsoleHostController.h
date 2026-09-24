@@ -116,6 +116,8 @@ private:
         bool waitingReadback = false;
     };
     bool m_experimentalPhysicalTopology = false;
+    bool m_physicalLeaseActive = false; // Fail closed if a worker vanishes before verified release.
+    quint64 m_physicalLeaseGeneration = 0;
     std::optional<PhysicalPreview> m_physicalPreview;
     std::optional<PendingPhysical> m_pendingPhysical;
     quint64 m_nextPhysicalId = 0;

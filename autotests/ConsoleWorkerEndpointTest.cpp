@@ -190,6 +190,12 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLayoutResult{18, 42, QStringLiteral("unsupported")}));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(physicalChanged.count(), 1);
+    QSignalSpy leaseReleased(&endpoint, &ConsoleWorkerEndpoint::physicalLeaseReleased);
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLeaseReleased{42, true}));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(leaseReleased.count(), 1);
+    QCOMPARE(leaseReleased.takeFirst().at(0).value<ConsoleWorkerWire::PhysicalLeaseReleased>(),
+        (ConsoleWorkerWire::PhysicalLeaseReleased{42, true}));
 
     QVERIFY(!endpoint.setVideoQuality({0, 60}));
     QVERIFY(!endpoint.setVideoQuality({42, 101}));

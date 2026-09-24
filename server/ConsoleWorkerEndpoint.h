@@ -75,6 +75,7 @@ Q_SIGNALS:
     void mixedFinished(const KRdp::ConsoleWorkerWire::MixedResult &result);
     void mixedCreateFinished(const KRdp::ConsoleWorkerWire::MixedCreateResult &result);
     void physicalLayoutFinished(const KRdp::ConsoleWorkerWire::PhysicalLayoutResult &result);
+    void physicalLeaseReleased(const KRdp::ConsoleWorkerWire::PhysicalLeaseReleased &result);
     void addVirtualFinished(const KRdp::ConsoleWorkerWire::AddVirtualResult &result);
     void removeVirtualFinished(const KRdp::ConsoleWorkerWire::RemoveVirtualResult &result);
     void microphoneFinished(const KRdp::ConsoleWorkerWire::MicrophoneResult &result);

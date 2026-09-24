@@ -40,6 +40,7 @@
 #include "RetainedKScreenReadback.h"
 #include "ConsoleTopologyReadback.h"
 #include "ConsoleTopologyPlan.h"
+#include "ConsoleTopologyLease.h"
 #include "RetainedMultiResizePlan.h"
 #include "RetainedMultiPositionPlan.h"
 #include "RetainedMultiFitPlan.h"
@@ -406,6 +407,7 @@ private:
         m_stopping = true;
         m_exitCode = code;
         if (m_physicalPending) failPhysical(QStringLiteral("physical Console worker stopped during layout change"));
+        releasePhysicalLease();
         releaseInput();
         m_audioTimer.stop();
         m_audio.reset();
@@ -914,7 +916,12 @@ private:
     {
         if (!m_physicalPending) return;
         const auto request = *m_physicalPending;
+        if (error.isEmpty() && m_physicalCandidate) {
+            m_physicalLease = std::move(m_physicalCandidate);
+            m_physicalLeaseGeneration = request.controlGeneration;
+        }
         m_physicalPending.reset();
+        m_physicalCandidate.reset();
         m_physicalPlan.reset();
         m_physicalBefore.reset();
         m_physicalSelected.reset();
@@ -948,6 +955,33 @@ private:
         }
         finishPhysical(error);
         m_socket.disconnectFromServer(); // Never show stale video or accept stale input after failure.
+    }
+
+    bool releasePhysicalLease()
+    {
+        if (!m_physicalLease) return true;
+        releaseInput();
+        m_multiReady = false;
+        m_lastPhysicalKeyframe.reset();
+        m_multiPublishedFrames.clear();
+        const auto current = readKScreenJson();
+        const auto restore = current ? ConsoleTopologyPlan::recoveryArguments(m_physicalLease->cumulative,
+            m_physicalLease->original, m_physicalLease->selected, *current) : std::nullopt;
+        if (restore && !restore->isEmpty()) runKScreenCommand(*restore);
+        const auto verified = restore ? readKScreenJson() : std::nullopt;
+        const bool okay = current && verified && ConsoleTopologyPlan::recoveryVerified(
+            m_physicalLease->cumulative, m_physicalLease->original, m_physicalLease->selected,
+            *current, *verified);
+        qInfo() << "Physical Console lease released; conditional KScreen reconciliation verified:" << okay;
+        if (m_socket.state() == QLocalSocket::ConnectedState) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLeaseReleased{
+                m_physicalLeaseGeneration, okay}));
+            m_socket.flush();
+            m_socket.waitForBytesWritten(1000);
+        }
+        m_physicalLease.reset();
+        m_physicalLeaseGeneration = 0;
+        return okay;
     }
 
     void physicalLayout(const ConsoleWorkerWire::PhysicalLayout &request)
@@ -991,8 +1025,18 @@ private:
             reject({}); // A verified no-op must not churn the compositor.
             return;
         }
+        const auto candidate = m_physicalLease
+            ? (m_physicalLeaseGeneration == request.controlGeneration
+                ? ConsoleTopologyLease::advance(*m_physicalLease, *plan, *before, *selected)
+                : std::nullopt)
+            : ConsoleTopologyLease::start(*plan, *before, *selected);
+        if (!candidate) {
+            reject(QStringLiteral("physical layout lease baseline or control generation changed"));
+            return;
+        }
         releaseInput();
         m_physicalPending = request;
+        m_physicalCandidate = *candidate;
         m_physicalPlan = *plan;
         m_physicalBefore = *before;
         m_physicalSelected = *selected;
@@ -1914,6 +1958,10 @@ private:
         releaseInput();
         m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalTakeover));
         m_control.active = false; // Gate immediately, before the host's acknowledgement.
+        if (m_physicalLease) {
+            releasePhysicalLease();
+            m_socket.disconnectFromServer(); // A new worker must prove fresh capture before any new grant.
+        }
         m_microphone.setControl(m_control);
         m_session.setVideoQuality(80);
         m_resize.setControl(m_control);
@@ -1932,6 +1980,11 @@ private:
                 if (*control != m_control) {
                     if (m_physicalPending) {
                         failPhysical(QStringLiteral("physical layout authority changed during capture"));
+                        return;
+                    }
+                    if (m_physicalLease && (!control->active || control->generation != m_physicalLeaseGeneration)) {
+                        releasePhysicalLease();
+                        m_socket.disconnectFromServer(); // Never reuse pre-restoration capture metadata.
                         return;
                     }
                     const bool multiNewGrant = m_multiMode && m_multiReady
@@ -2152,6 +2205,9 @@ private:
     std::optional<ConsoleTopologyPlan::Plan> m_physicalPlan;
     std::optional<ConsoleTopologyPlan::Inventory> m_physicalBefore;
     std::optional<QMap<QString, ConsoleTopologyPlan::Mode>> m_physicalSelected;
+    std::optional<ConsoleTopologyLease::State> m_physicalCandidate;
+    std::optional<ConsoleTopologyLease::State> m_physicalLease;
+    quint64 m_physicalLeaseGeneration = 0;
     quint64 m_physicalCaptureEpoch = 0;
     bool m_physicalCaptureRestartReady = false;
     QTimer m_positionDeadline;

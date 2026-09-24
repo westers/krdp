@@ -272,6 +272,8 @@ void ConsoleWorkerEndpoint::readWorker()
             Q_EMIT mixedCreateFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::physicalLayoutResult(*record)) {
             Q_EMIT physicalLayoutFinished(*result);
+        } else if (const auto result = ConsoleWorkerWire::physicalLeaseReleased(*record)) {
+            Q_EMIT physicalLeaseReleased(*result);
         } else if (const auto result = ConsoleWorkerWire::addVirtualResult(*record)) {
             Q_EMIT addVirtualFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::removeVirtualResult(*record)) {

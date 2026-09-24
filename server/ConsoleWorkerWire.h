@@ -23,7 +23,7 @@
 
 namespace KRdp::ConsoleWorkerWire
 {
-constexpr quint16 ProtocolVersion = 10; // Physical priorities; broker and worker must upgrade together.
+constexpr quint16 ProtocolVersion = 11; // Physical lease release; broker and worker must upgrade together.
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 
 enum class Kind : quint8 {
@@ -65,6 +65,7 @@ enum class Kind : quint8 {
     MixedCreateResult,
     PhysicalLayout,
     PhysicalLayoutResult,
+    PhysicalLeaseReleased,
 };
 
 struct Record {
@@ -74,6 +75,32 @@ struct Record {
 };
 
 inline QByteArray frame(Kind kind, const QByteArray &payload = {});
+
+struct PhysicalLeaseReleased {
+    quint64 controlGeneration = 0;
+    bool verified = false; // Exact conditional KScreen readback; fresh capture comes from a replacement worker.
+    bool operator==(const PhysicalLeaseReleased &) const = default;
+};
+
+inline QByteArray frame(const PhysicalLeaseReleased &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.controlGeneration << result.verified;
+    return frame(Kind::PhysicalLeaseReleased, payload);
+}
+
+inline std::optional<PhysicalLeaseReleased> physicalLeaseReleased(const Record &record)
+{
+    if (record.kind != Kind::PhysicalLeaseReleased || record.payload.size() != 9) return {};
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    PhysicalLeaseReleased result;
+    stream >> result.controlGeneration >> result.verified;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.controlGeneration) return {};
+    return result;
+}
 
 struct Resize {
     quint64 requestId = 0;
@@ -1299,7 +1326,7 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::PhysicalLayoutResult)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::PhysicalLeaseReleased)) {
             ++m_invalid;
             return std::nullopt;
         }
