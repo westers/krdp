@@ -29,6 +29,13 @@ private Q_SLOTS:
         const QString generation = host.m_topologyCatalog.snapshot().generation;
         Q_EMIT host.m_endpoint.topologyReceived(confirmed);
         QCOMPARE(host.m_topologyCatalog.snapshot().revision, quint64(1));
+        auto reordered = confirmed;
+        reordered.outputs[1].priority = 2;
+        Q_EMIT host.m_endpoint.topologyReceived(reordered);
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, quint64(2));
+        QCOMPARE(host.m_topologyPriorities.value(QStringLiteral("HDMI-A-1")), 2);
+        Q_EMIT host.m_endpoint.topologyReceived(reordered);
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, quint64(2));
         auto changed = confirmed;
         changed.outputs[1].pixels = QSize(1920, 1080);
         changed.outputs[1].logical = QRect(2560, 0, 1920, 1080);
@@ -36,7 +43,7 @@ private Q_SLOTS:
         newCapture.monitors[1].geometry = QRect(2560, 0, 1920, 1080);
         Q_EMIT host.m_endpoint.outputsReceived(newCapture);
         Q_EMIT host.m_endpoint.topologyReceived(changed);
-        QCOMPARE(host.m_topologyCatalog.snapshot().revision, quint64(2));
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, quint64(3));
         QCOMPARE(host.m_topologyCatalog.snapshot().generation, generation);
         Q_EMIT host.m_endpoint.topologyReceived(ConsoleWorkerWire::Topology{});
         QVERIFY(!host.m_topologyAvailable);

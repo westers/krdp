@@ -63,7 +63,7 @@ public:
 
     // Feed *fresh* compositor readback. Invalid/ambiguous readback leaves the
     // last good snapshot untouched; callers must report failure, not success.
-    std::optional<Snapshot> observe(const QVector<Output> &readback)
+    std::optional<Snapshot> observe(const QVector<Output> &readback, bool backendStateChanged = false)
     {
         QMap<QString, Output> sorted;
         for (const auto &output : readback) {
@@ -84,7 +84,7 @@ public:
             nextCurrent.insert(it.key(), id);
             entries.append({id, it.value()});
         }
-        if (!m_observed || entries != m_snapshot.outputs) ++m_snapshot.revision;
+        if (!m_observed || entries != m_snapshot.outputs || backendStateChanged) ++m_snapshot.revision;
         m_snapshot.outputs = std::move(entries);
         m_current = std::move(nextCurrent);
         m_nextId = nextId;

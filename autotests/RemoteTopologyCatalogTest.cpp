@@ -73,6 +73,21 @@ private Q_SLOTS:
         QCOMPARE(valid->revision, quint64(2));
         QCOMPARE(valid->outputs[1].id, QStringLiteral("o-2"));
     }
+
+    void backendOnlyStateChangeAdvancesRevision()
+    {
+        RemoteTopologyCatalog catalog;
+        const auto first = catalog.observe({output(QStringLiteral("DP-1"))});
+        QVERIFY(first);
+        const auto changed = catalog.observe({output(QStringLiteral("DP-1"))}, true);
+        QVERIFY(changed);
+        QCOMPARE(changed->revision, first->revision + 1);
+        QCOMPARE(changed->generation, first->generation);
+        QCOMPARE(changed->outputs, first->outputs);
+        const auto unchanged = catalog.observe({output(QStringLiteral("DP-1"))});
+        QVERIFY(unchanged);
+        QCOMPARE(unchanged->revision, changed->revision);
+    }
 };
 
 QTEST_GUILESS_MAIN(RemoteTopologyCatalogTest)

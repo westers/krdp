@@ -136,7 +136,8 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
                 .logicalGeometry = output.logical, .scale = output.scale, .enabled = true,
                 .primary = output.primary, .physical = true, .owner = {}});
         }
-        m_topologyAvailable = m_topologyCatalog.observe(inventory).has_value();
+        m_topologyAvailable = m_topologyCatalog.observe(inventory, !m_topologyPriorities.isEmpty()
+            && priorities != m_topologyPriorities).has_value();
         if (!m_topologyAvailable) {
             m_topologyPriorities.clear();
             m_topologyCatalog.resetGeneration();
