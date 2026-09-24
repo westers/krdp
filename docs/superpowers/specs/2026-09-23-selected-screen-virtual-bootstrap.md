@@ -1,8 +1,10 @@
 # First virtual desktop layout from selected client screens
 
-Status: design contract for OPT-044; pure planner `VirtualInitialLayout` exists,
-but none of the request, journal, launcher, worker, or client UI path below is
-implemented. Do not advertise this capability or claim a matching desktop.
+Status: design contract for OPT-044. The pure planner and a broker-side
+`preview-create` source path exist, but that preview is disabled in production
+and cannot be consumed by `create`. No journal, launcher, worker, or client UI
+path below is implemented. Do not advertise this capability or claim a
+matching desktop.
 
 ## User-visible contract
 

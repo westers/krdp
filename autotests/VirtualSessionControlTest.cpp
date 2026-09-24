@@ -22,6 +22,49 @@ class VirtualSessionControlTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void selectedScreenPreviewIsReadOnlyAndCreateCannotConsumeIt()
+    {
+        VirtualSessionSupervisor supervisor(sleeper);
+        VirtualSessionControl control(supervisor, {});
+        QJsonObject preview = command(QStringLiteral("preview-1"), QStringLiteral("preview-create"));
+        preview.insert(QStringLiteral("screens"), QJsonArray{
+            QJsonObject{{QStringLiteral("id"), QStringLiteral("left")},
+                {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), -800}, {QStringLiteral("y"), 0}}},
+                {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 800}, {QStringLiteral("height"), 600}}},
+                {QStringLiteral("scale"), 1.0}, {QStringLiteral("primary"), false}},
+            QJsonObject{{QStringLiteral("id"), QStringLiteral("right")},
+                {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), 0}, {QStringLiteral("y"), 0}}},
+                {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 1280}, {QStringLiteral("height"), 720}}},
+                {QStringLiteral("scale"), 1.0}, {QStringLiteral("primary"), true}}});
+        QVERIFY(!control.request(1000, 1, preview).value(QStringLiteral("ok")).toBool()); // Production default off.
+        control.setInitialLayoutPreviewCapabilities({.maxOutputs = 16,
+            .maxOutputDimension = 4096, .maxAtlasDimension = 8192});
+        preview.insert(QStringLiteral("id"), QStringLiteral("preview-2"));
+        const auto answer = control.request(1000, 1, preview);
+        QVERIFY(answer.value(QStringLiteral("ok")).toBool());
+        QVERIFY(!answer.value(QStringLiteral("token")).toString().isEmpty());
+        const auto outputs = answer.value(QStringLiteral("outputs")).toArray();
+        QCOMPARE(outputs.size(), 2);
+        QCOMPARE(outputs.first().toObject().value(QStringLiteral("id")).toString(), QStringLiteral("new:initial-1"));
+        QCOMPARE(outputs.first().toObject().value(QStringLiteral("logical")).toObject().value(QStringLiteral("x")).toInt(), 800);
+        QVERIFY(outputs.first().toObject().value(QStringLiteral("primary")).toBool());
+        QCOMPARE(control.request(1000, 1, preview), answer); // Correlated replay does not mint another token.
+        QVERIFY(supervisor.list(1000).isEmpty());
+        auto forged = command(QStringLiteral("create-with-token"), QStringLiteral("create"));
+        forged.insert(QStringLiteral("token"), answer.value(QStringLiteral("token")));
+        QVERIFY(!control.request(1000, 1, forged).value(QStringLiteral("ok")).toBool());
+        QVERIFY(supervisor.list(1000).isEmpty());
+        auto malformed = preview;
+        malformed.insert(QStringLiteral("id"), QStringLiteral("bad-preview"));
+        auto screens = malformed.value(QStringLiteral("screens")).toArray();
+        auto first = screens.first().toObject();
+        first.insert(QStringLiteral("extra"), true);
+        screens.replace(0, first);
+        malformed.insert(QStringLiteral("screens"), screens);
+        QVERIFY(!control.request(1000, 1, malformed).value(QStringLiteral("ok")).toBool());
+        QVERIFY(supervisor.list(1000).isEmpty());
+    }
+
     void dismissSchemaCapabilityAndReplay()
     {
         VirtualSessionSupervisor supervisor([](quint32, const auto &) -> std::optional<VirtualSessionSupervisor::Launch> { return {}; });

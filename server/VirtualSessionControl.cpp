@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionControl.h"
+#include "VirtualInitialLayout.h"
 #include <QJsonArray>
 #include <QRegularExpression>
 #include <QScopeGuard>
+#include <QUuid>
 #include <algorithm>
 
 namespace KRdp
@@ -36,6 +38,8 @@ bool validRequest(const QJsonObject &request)
         || !request.value(QStringLiteral("v")).isDouble() || request.value(QStringLiteral("v")).toDouble() != 1
         || !token.match(request.value(QStringLiteral("id")).toString()).hasMatch()) return false;
     const auto action = request.value(QStringLiteral("action")).toString();
+    if (action == QStringLiteral("preview-create"))
+        return request.size() == 5 && request.value(QStringLiteral("screens")).isArray();
     const bool sessionRequired = action == QStringLiteral("attach") || action == QStringLiteral("stop") || action == QStringLiteral("dismiss");
     if (!sessionRequired && action != QStringLiteral("list") && action != QStringLiteral("create") && action != QStringLiteral("detach")) return false;
     if (request.size() != (sessionRequired ? 5 : 4)) return false;
@@ -58,7 +62,7 @@ QJsonObject VirtualSessionControl::request(std::optional<quint32> uid, quint64 c
     if (dispatchActive()) return reply(record, false, QStringLiteral("virtual-session command in progress; retry"));
     auto it = m_transports.find(client);
     if (it == m_transports.end()) {
-        it = m_transports.insert(client, std::make_shared<Transport>(Transport{*uid, {}, {}}));
+        it = m_transports.insert(client, std::make_shared<Transport>(Transport{*uid, {}, {}, {}}));
     }
     const auto transport = it.value();
     if (transport->uid != *uid) return reply(record, false, QStringLiteral("transport identity changed"));
@@ -94,6 +98,39 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
     const auto uncertain = [&record] { return reply(record, false, QStringLiteral("transport closed during command; outcome uncertain")); };
     const auto action = record.value(QStringLiteral("action")).toString();
     auto response = reply(record, true);
+    if (action == QStringLiteral("preview-create")) {
+        // Read-only private source path. A normal create must not infer this
+        // proposal; durable launch and worker support are still unwired.
+        transport->initialPreview.reset();
+        if (m_initialCaps.maxOutputs <= 0)
+            return reply(record, false, QStringLiteral("selected-screen creation unavailable"));
+        const auto raw = record.value(QStringLiteral("screens")).toArray();
+        const auto screens = VirtualInitialLayout::parseScreens(raw);
+        if (!screens) return reply(record, false, QStringLiteral("invalid selected-screen proposal"));
+        const RemoteTopologyDraft::Capabilities caps{.addVirtual = true, .maxOutputs = m_initialCaps.maxOutputs,
+            .maxOutputDimension = m_initialCaps.maxOutputDimension, .maxAtlasDimension = m_initialCaps.maxAtlasDimension};
+        auto proposed = VirtualInitialLayout::plan(*screens, QStringLiteral("initial-preview"), caps);
+        if (!proposed.valid()) return reply(record, false, proposed.error);
+        QJsonArray outputs;
+        for (const auto &entry : proposed.outputs) {
+            const auto &output = entry.output;
+            outputs.append(QJsonObject{{QStringLiteral("id"), entry.id},
+                {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), output.logicalGeometry.x()},
+                    {QStringLiteral("y"), output.logicalGeometry.y()},
+                    {QStringLiteral("width"), output.logicalGeometry.width()},
+                    {QStringLiteral("height"), output.logicalGeometry.height()}}},
+                {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), output.nativePixels.width()},
+                    {QStringLiteral("height"), output.nativePixels.height()}}},
+                {QStringLiteral("scale"), output.scale}, {QStringLiteral("primary"), output.primary}});
+        }
+        Transport::InitialPreview preview{QUuid::createUuid().toString(QUuid::WithoutBraces),
+            record.value(QStringLiteral("id")).toString(), raw, outputs, {}};
+        preview.age.start();
+        response.insert(QStringLiteral("token"), preview.token);
+        response.insert(QStringLiteral("outputs"), outputs);
+        transport->initialPreview = std::move(preview);
+        return response;
+    }
     if (action == QStringLiteral("list")) {
         QJsonArray sessions;
         for (const auto &entry : supervisor->list(uid)) {
@@ -110,6 +147,7 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
         return response;
     }
     if (action == QStringLiteral("create")) {
+        transport->initialPreview.reset(); // Legacy create cannot consume a selected-screen proposal.
         const auto create = m_create; // Callback storage can be destroyed by itself.
         const CreateResult handle = create ? create(uid) : CreateResult(supervisor->create(uid));
         if (!valid()) return uncertain();

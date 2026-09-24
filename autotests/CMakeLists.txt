@@ -178,7 +178,7 @@ add_test(NAME VirtualSessionSupervisorTest COMMAND VirtualSessionSupervisorTest)
 
 add_executable(VirtualSessionControlTest VirtualSessionControlTest.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp)
-target_include_directories(VirtualSessionControlTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_include_directories(VirtualSessionControlTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(VirtualSessionControlTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionControlTest COMMAND VirtualSessionControlTest)
 

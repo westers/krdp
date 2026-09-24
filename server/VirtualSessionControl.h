@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #pragma once
 #include "VirtualSessionSupervisor.h"
+#include <QElapsedTimer>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QHash>
 #include <QPointer>
@@ -39,6 +41,14 @@ public:
         const Handle &operator*() const { return handle.value(); }
     };
     void setCreateHandler(std::function<CreateResult(quint32)> create) { m_create = std::move(create); }
+    // Preview-only until the immutable launch intent and worker can consume a
+    // selected layout. The production host does not set these capabilities.
+    struct InitialLayoutPreviewCapabilities {
+        int maxOutputs = 0;
+        int maxOutputDimension = 0;
+        int maxAtlasDimension = 0;
+    };
+    void setInitialLayoutPreviewCapabilities(InitialLayoutPreviewCapabilities caps) { m_initialCaps = caps; }
     enum class DismissResult { Accepted, Unavailable, Uncertain };
     void setDismissHandlers(std::function<bool(quint32, const QString &)> eligible,
                             std::function<DismissResult(quint32, const QString &)> dismiss)
@@ -50,15 +60,24 @@ public:
 private:
     struct Reply { QJsonObject request; QJsonObject response; bool pending = true; };
     struct Transport {
+        struct InitialPreview {
+            QString token;
+            QString requestId;
+            QJsonArray screens;
+            QJsonArray outputs;
+            QElapsedTimer age;
+        };
         quint32 uid;
         std::optional<Handle> attached;
         std::deque<Reply> replies;
+        std::optional<InitialPreview> initialPreview;
     };
     QJsonObject dispatch(quint32 uid, quint64 client, const std::shared_ptr<Transport> &transport, const QJsonObject &request);
     void release(quint64 client, const std::shared_ptr<Transport> &transport, std::function<void()> revoke = {});
     QPointer<VirtualSessionSupervisor> m_supervisor;
     Release m_release;
     std::function<CreateResult(quint32)> m_create;
+    InitialLayoutPreviewCapabilities m_initialCaps;
     std::function<bool(quint32, const QString &)> m_dismissible;
     std::function<DismissResult(quint32, const QString &)> m_dismiss;
     QHash<quint64, std::shared_ptr<Transport>> m_transports;
