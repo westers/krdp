@@ -22,8 +22,10 @@ struct VirtualSessionServicePlan {
             || !VirtualSessionLaunchPlan::absoluteCleanPath(deviceEntry)
             || !VirtualSessionLaunchPlan::absoluteCleanPath(guardian)
             || configuration.allowedRenderPci.size() > 32) return {};
+        auto launchConfiguration = configuration;
+        if (!record.initialOutputs.isEmpty()) launchConfiguration.initialSize = record.initialOutputs.first().pixels;
         const auto desktop = VirtualSessionLaunchPlan::build(record.uid, account, record.session,
-            configuration, nullptr, record.launch);
+            launchConfiguration, nullptr, record.launch);
         if (!desktop) return {};
         VirtualSessionServicePlan plan{deviceEntry, {QStringLiteral("--uid"), QString::number(record.uid)},
             desktop->runtimeDirectory, record.token};
@@ -33,6 +35,11 @@ struct VirtualSessionServicePlan {
             QStringLiteral("--instance"), record.incarnation, QStringLiteral("--launch-id"), record.launch,
             QStringLiteral("--token-fd"), QStringLiteral("0"), QStringLiteral("--"), desktop->program});
         plan.arguments.append(desktop->arguments);
+        if (!record.initialOutputs.isEmpty()) {
+            const auto layout = record.initialLayoutJson();
+            if (layout.isEmpty() || layout.size() > 4096) return {};
+            plan.arguments.append({QStringLiteral("--initial-layout"), QString::fromUtf8(layout)});
+        }
         return plan;
     }
 };

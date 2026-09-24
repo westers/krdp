@@ -4,8 +4,11 @@ Status: design contract for OPT-044. The pure planner and a broker-side
 `preview-create` source path exist, but that preview is disabled in production
 and cannot be consumed by `create`. The journal now round-trips a strict v2
 normalized output record while keeping v1 byte-compatible; no production
-create, launcher, worker, or client UI path consumes it yet. Do not advertise
-this capability or claim a matching desktop.
+create, launcher, worker, or client UI path consumes it yet. The trusted root
+service plan derives a bounded `--initial-layout` argument and primary size
+from a validated v2 record; the current launcher rejects that new option, so
+v2 still fails closed rather than starting a mismatched desktop. Do not
+advertise this capability or claim a matching desktop.
 
 ## User-visible contract
 

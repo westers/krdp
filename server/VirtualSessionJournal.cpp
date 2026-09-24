@@ -95,6 +95,9 @@ bool VirtualSessionJournal::Record::valid() const {
         && uuid(incarnation) && uuid(boot) && token.size() == 32
         && (initialOutputs.isEmpty() || validInitialOutputs(initialOutputs));
 }
+QByteArray VirtualSessionJournal::Record::initialLayoutJson() const {
+    return initialOutputs.isEmpty() || !valid() ? QByteArray() : QJsonDocument(outputArray(initialOutputs)).toJson(QJsonDocument::Compact);
+}
 VirtualSessionGuardianClient::Identity VirtualSessionJournal::Record::identity() const {
     return {uid, session, incarnation, QStringLiteral("/run/user/%1/krdp-virtual/%2/guardian.sock").arg(uid).arg(launch), token};
 }

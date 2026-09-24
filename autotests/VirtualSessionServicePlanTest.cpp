@@ -5,6 +5,8 @@
 #include <QFile>
 #include <QTemporaryDir>
 #include <QStandardPaths>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <unistd.h>
 
 using namespace KRdp;
@@ -100,6 +102,26 @@ private Q_SLOTS:
         QVERIFY(!args.join(QLatin1Char(' ')).contains(QString::fromLatin1(r.token.toHex())));
         QCOMPARE(args.count(QStringLiteral("--allow-render-pci")), 2);
         QVERIFY(!args.contains(QStringLiteral("timeout")));
+    }
+    void selectedLayoutComesOnlyFromCommittedRecord() {
+        VirtualSessionJournal::Record r{1000, id(), id(), id(), id(), QByteArray(32, 's')};
+        r.initialOutputs = {{QPoint(0, 0), QSize(1600, 900), 1.25, true},
+            {QPoint(1280, 100), QSize(1280, 720), 1.0, false}};
+        const auto plan = VirtualSessionServicePlan::build(r, r.boot, account, config, device, guardian);
+        QVERIFY(plan);
+        const auto args = plan->arguments;
+        QCOMPARE(args.count(QStringLiteral("--initial-layout")), 1);
+        const auto layout = args.at(args.indexOf(QStringLiteral("--initial-layout")) + 1);
+        QCOMPARE(layout.toUtf8(), r.initialLayoutJson());
+        QCOMPARE(QJsonDocument::fromJson(layout.toUtf8()).array().size(), 2);
+        QCOMPARE(args.at(args.indexOf(QStringLiteral("--width")) + 1), QStringLiteral("1600"));
+        QCOMPARE(args.at(args.indexOf(QStringLiteral("--height")) + 1), QStringLiteral("900"));
+        auto tampered = r; tampered.initialOutputs[1].position.setX(1281);
+        QVERIFY(!VirtualSessionServicePlan::build(tampered, r.boot, account, config, device, guardian));
+        auto legacy = r; legacy.initialOutputs.clear();
+        const auto old = VirtualSessionServicePlan::build(legacy, r.boot, account, config, device, guardian);
+        QVERIFY(old); QVERIFY(!old->arguments.contains(QStringLiteral("--initial-layout")));
+        QCOMPARE(old->arguments.at(old->arguments.indexOf(QStringLiteral("--width")) + 1), QStringLiteral("1280"));
     }
     void refusesStaleBootWrongOwnerAndMissingGpuPolicy() {
         const VirtualSessionJournal::Record r{1000, id(), id(), id(), id(), QByteArray(32, 's')};

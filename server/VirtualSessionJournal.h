@@ -29,6 +29,8 @@ public:
         // Empty means the exact legacy v1 single-output launch intent.
         QVector<InitialOutput> initialOutputs = {};
         bool valid() const;
+        // Bounded canonical argv payload for the trusted launch chain only.
+        QByteArray initialLayoutJson() const;
         VirtualSessionGuardianClient::Identity identity() const;
         QString workerSocket() const;
         bool operator==(const Record &) const = default;
