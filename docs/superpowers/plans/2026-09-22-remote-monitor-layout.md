@@ -15,8 +15,8 @@ accepted one authenticated virtual-output position move through a proportionally
 scaled visual drag draft, Preview and Apply (`3b7fcee` client; server
 `8f51fb0`/`04e868c`/`d958e6d`). The detailed evidence is
 `~/dev/rdp/evidence/2026-09-23-retained-multi-output-sol.md`. This does not
-complete Console topology, add/remove, Fit/Match, multi-operation drafts,
-or package deployment. A later isolated 125%/100% Sol/Buzz GUI run accepted a
+complete Console topology, Add/Remove, native Fit/Match acceptance, mixed-operation
+drafts, or package deployment. A later isolated 125%/100% Sol/Buzz GUI run accepted a
 visual drag and authenticated position commit with compositor logical
 `(1024,100)→(1024,209)` and verified capture (`d674f9a` probe,
 `d096cfc` client tooltip follow-up). This is one supported move, not a
@@ -31,13 +31,21 @@ Worker-only Remove `83dbcec`/`3dd59ec`, authenticated broker `2b7260e` and
 client visual Preview remove/Apply `afbb4fd` then passed a disposable Sol/Buzz
 source GUI Add→Remove cycle: a third output at rev2 disappeared at rev3 with
 the two original IDs unchanged, after fresh KScreen and post-remove keyframes.
-Original monitors cannot be removed through this path. Console, Fit/Match,
-mixed-operation drafts and release remain open. Subsequent server source
+Original monitors cannot be removed through this path. Console, native Fit/Match
+acceptance, mixed-operation drafts and release remain open. Subsequent server source
 `bc56de2`/`86ec0e2` supports an authenticated 2–16-position batch with
 whole-layout readback; client source `6986c8a`/`b414a05` accumulates multiple
 visual draft moves and provides a diagnostic batch action. Offscreen client
 tests pass, but no native batch GUI run or package/install has accepted this
 path. Mixed resize-plus-reflow and Add/Remove combinations remain open.
+
+Later source also added revisioned retained managed-Fit reflow, primary selection
+and conditional one-shot Match (explicit screen-to-output assignment, preserving
+unmatched outputs). These paths remain private-capability gated and do not
+constitute the native Fit/Match matrix or first-creation screen matching.
+Console physical Preview/Apply and lease-temporary Add/Remove likewise have
+source tests, but the installed Sol package still predates the Console
+multi-surface broker fix, so Console GUI acceptance remains open.
 
 Test-only `bee24a1`/`add2794` then proved that a new 960×540 virtual KWin
 output can be created at the right seam of an already running two-output

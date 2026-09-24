@@ -13,7 +13,14 @@ a left/above draft that would use a negative origin is shown as the equivalent
 nonnegative multi-output translation; it still requires Preview and Apply.
 Physical or unowned peers are never translated by this editor. Native acceptance
 of this normalization is still pending.
-Fit/Match, Console writes and deployment are still outstanding. A disposable 125%/100%
+Retained multi-output Fit with managed dependent reflow, primary selection, and a
+limited explicit Match planner now exist in source behind private capability gates;
+they have unit/transaction tests but not the full native GUI acceptance matrix.
+Match can map explicitly selected client screens onto retained owned outputs and
+can conditionally include one new output; it does not remove unmatched outputs.
+Console physical Preview/Apply and temporary worker-owned Add/Remove also exist
+in source, but their mixed native GUI acceptance is still outstanding. Matching
+server/client package installation and deployment are incomplete. A disposable 125%/100%
 Sol/Buzz GUI run also accepted one visual position move with two independently
 captured outputs; a later disposable GUI run added a third captured output by
 actual Preview add/Apply clicks. A subsequent GUI run selected that third output,
