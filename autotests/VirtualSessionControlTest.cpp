@@ -150,6 +150,42 @@ private Q_SLOTS:
         QVERIFY(!control.request(1000, 1, create).value(QStringLiteral("ok")).toBool());
         QCOMPARE(selectedCalls, 1);
     }
+    void selectedCreateRefusalConsumesPreviewWithoutLaunching()
+    {
+        VirtualSessionSupervisor supervisor(sleeper);
+        VirtualSessionControl control(supervisor, {});
+        int selectedCalls = 0;
+        control.setSelectedCreateHandler([&](quint32, const auto &) {
+            ++selectedCalls;
+            return VirtualSessionControl::CreateResult(VirtualSessionControl::CreateResult::Refusal::Maintenance);
+        });
+        control.setInitialLayoutPreviewCapabilities({.maxOutputs = 16, .maxOutputDimension = 4096,
+            .maxAtlasDimension = 8192});
+        const QJsonArray screens{QJsonObject{{QStringLiteral("id"), QStringLiteral("only")},
+            {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), 0}, {QStringLiteral("y"), 0}}},
+            {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 1280}, {QStringLiteral("height"), 720}}},
+            {QStringLiteral("scale"), 1.0}, {QStringLiteral("primary"), true}}};
+        auto preview = command(QStringLiteral("refused-preview"), QStringLiteral("preview-create"));
+        preview.insert(QStringLiteral("screens"), screens);
+        const auto proposal = control.request(1000, 1, preview);
+        QVERIFY(proposal.value(QStringLiteral("ok")).toBool());
+        QVERIFY(supervisor.list(1000).isEmpty());
+
+        auto create = command(QStringLiteral("refused-create"), QStringLiteral("create"));
+        create.insert(QStringLiteral("preview"), preview.value(QStringLiteral("id")));
+        create.insert(QStringLiteral("token"), proposal.value(QStringLiteral("token")));
+        create.insert(QStringLiteral("screens"), screens);
+        const auto refused = control.request(1000, 1, create);
+        QVERIFY(!refused.value(QStringLiteral("ok")).toBool());
+        QCOMPARE(refused.value(QStringLiteral("message")).toString(), QStringLiteral("session creation unavailable during maintenance"));
+        QCOMPARE(selectedCalls, 1);
+        QVERIFY(supervisor.list(1000).isEmpty());
+        QCOMPARE(control.request(1000, 1, create), refused); // Correlated retry preserves the refusal.
+        create.insert(QStringLiteral("id"), QStringLiteral("refused-replay"));
+        QVERIFY(!control.request(1000, 1, create).value(QStringLiteral("ok")).toBool());
+        QCOMPARE(selectedCalls, 1); // A fresh ID cannot reuse the consumed token.
+        QVERIFY(supervisor.list(1000).isEmpty());
+    }
     void selectedScreenPreviewIsReadOnlyAndCreateCannotConsumeIt()
     {
         VirtualSessionSupervisor supervisor(sleeper);
