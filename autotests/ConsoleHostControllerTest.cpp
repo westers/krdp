@@ -13,6 +13,103 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void consoleOwnedAddRemoveWaitForCapturedReadback()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        Server server;
+        RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, directory.path());
+        host.addClient(&connection);
+        const auto id = host.m_clients.front()->id;
+        host.m_control.admit(id);
+        host.syncControlState();
+        host.m_inputEnabled = true;
+        host.m_experimentalPhysicalTopology = true;
+        const ConsoleHandoff::Target target{ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000};
+        const QByteArray token(24, 'v');
+        QVERIFY(host.m_endpoint.listen(directory.filePath(QStringLiteral("worker.sock")), target, token));
+        QLocalSocket worker;
+        worker.connectToServer(host.m_endpoint.socketName());
+        QVERIFY(worker.waitForConnected(1000));
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), 1000, token})
+            + ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+        QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_VERIFY(host.m_endpoint.ready());
+        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}}});
+        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("DP-1"), QSize(1280, 720),
+            QRect(0, 0, 1280, 720), 1, true, 1, true}}});
+        QVERIFY(host.m_topologyAvailable);
+        auto before = host.m_topologyCatalog.snapshot();
+        QVERIFY(!host.consoleTopology(QStringLiteral("query")).value(QStringLiteral("capabilities")).toObject()
+            .value(QStringLiteral("add")).toBool()); // Physical-only opt-in does not expose new Console virtual writes.
+        host.m_experimentalConsoleVirtual = true;
+        QVERIFY(host.consoleTopology(QStringLiteral("query")).value(QStringLiteral("capabilities")).toObject()
+            .value(QStringLiteral("add")).toBool());
+        const auto preview = [&](const QString &request, const QString &operation, const QString &output,
+                                 bool allowRemoval, quint64 revision) {
+            QJsonObject change{{QStringLiteral("op"), operation}, {QStringLiteral("output"), output}};
+            if (operation == QStringLiteral("add")) {
+                change.insert(QStringLiteral("position"), QJsonObject{{QStringLiteral("x"), 1280}, {QStringLiteral("y"), 0}});
+                change.insert(QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 960}, {QStringLiteral("height"), 540}});
+                change.insert(QStringLiteral("scale"), 1.0);
+            }
+            return QJsonObject{{QStringLiteral("type"), QStringLiteral("topology-preview")},
+                {QStringLiteral("v"), 1}, {QStringLiteral("id"), request},
+                {QStringLiteral("generation"), before.generation},
+                {QStringLiteral("expectedRevision"), double(revision)},
+                {QStringLiteral("allowRemoval"), allowRemoval}, {QStringLiteral("allowPhysicalChange"), false},
+                {QStringLiteral("operations"), QJsonArray{change}}};
+        };
+        const auto commit = [&](const QString &request, const QString &previewToken, quint64 revision) {
+            return QJsonObject{{QStringLiteral("type"), QStringLiteral("topology-commit")},
+                {QStringLiteral("v"), 1}, {QStringLiteral("id"), request},
+                {QStringLiteral("token"), previewToken}, {QStringLiteral("generation"), before.generation},
+                {QStringLiteral("expectedRevision"), double(revision)}};
+        };
+        host.onControlRecord(&connection, id, preview(QStringLiteral("add"), QStringLiteral("add"), QStringLiteral("new:extra"), false, before.revision));
+        QVERIFY(host.m_virtualPreview);
+        QVERIFY(!host.m_physicalLeaseActive); // Preview does not create anything.
+        const auto addToken = host.m_virtualPreview->token;
+        host.onControlRecord(&connection, id, commit(QStringLiteral("add"), addToken, before.revision));
+        QVERIFY(host.m_pendingVirtual);
+        QVERIFY(host.m_physicalLeaseActive);
+        const auto add = *host.m_pendingVirtual;
+        QVERIFY(add.backendKey.startsWith(QStringLiteral("Virtual-krdp-added-")));
+        Q_EMIT host.m_endpoint.addVirtualFinished({add.serial, add.controlGeneration, {}});
+        QVERIFY(host.m_pendingVirtual->waitingReadback);
+        Q_EMIT host.m_endpoint.outputsReceived({{
+            {QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true},
+            {add.backendKey, QRect(1280, 0, 960, 540), 1, false}}});
+        Q_EMIT host.m_endpoint.topologyReceived({{
+            {QStringLiteral("DP-1"), QSize(1280, 720), QRect(0, 0, 1280, 720), 1, true, 1, true},
+            {add.backendKey, QSize(960, 540), QRect(1280, 0, 960, 540), 1, false, 2, false}}});
+        QVERIFY(!host.m_pendingVirtual);
+        QVERIFY(host.m_consoleCreatorsActive);
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, before.revision + 1);
+        before = host.m_topologyCatalog.snapshot();
+        const auto addedId = std::find_if(before.outputs.cbegin(), before.outputs.cend(), [&add](const auto &entry) {
+            return entry.output.backendKey == add.backendKey;
+        })->id;
+        QVERIFY(host.consoleTopology(QStringLiteral("query")).value(QStringLiteral("capabilities")).toObject()
+            .value(QStringLiteral("remove")).toBool());
+        host.onControlRecord(&connection, id, preview(QStringLiteral("remove"), QStringLiteral("remove"), addedId, true, before.revision));
+        QVERIFY(host.m_virtualPreview);
+        host.onControlRecord(&connection, id, commit(QStringLiteral("remove"), host.m_virtualPreview->token, before.revision));
+        QVERIFY(host.m_pendingVirtual);
+        const auto remove = *host.m_pendingVirtual;
+        QCOMPARE(remove.backendKey, add.backendKey);
+        Q_EMIT host.m_endpoint.removeVirtualFinished({remove.serial, remove.controlGeneration, {}});
+        QVERIFY(host.m_pendingVirtual->waitingReadback);
+        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}}});
+        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("DP-1"), QSize(1280, 720),
+            QRect(0, 0, 1280, 720), 1, true, 1, true}}});
+        QVERIFY(!host.m_pendingVirtual);
+        QVERIFY(!host.m_consoleCreatorsActive);
+        QVERIFY(!host.m_physicalLeaseActive);
+        QCOMPARE(host.m_topologyCatalog.snapshot().revision, before.revision + 1);
+    }
+
     void creatorOwnedOutputKeepsConsoleKindAndOwner()
     {
         Server server;

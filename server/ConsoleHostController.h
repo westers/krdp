@@ -76,6 +76,8 @@ private:
     void syncControlState();
     void finishResize(const QString &error);
     void finishPhysicalTopology(const QString &code, const QString &detail = {});
+    void finishVirtualTopology(const QString &code, const QString &detail = {});
+    QJsonObject consoleTopology(const QString &id) const;
     void stopMicrophone(const QString &error);
     void microphoneResult(const ConsoleWorkerWire::MicrophoneResult &result);
     void sendMedia(Client &client, bool microphone, const QString &error = {});
@@ -116,11 +118,39 @@ private:
         bool waitingReadback = false;
         bool resizeReply = false; // Legacy Console resize is an adapter into the same physical lease.
     };
+    struct VirtualPreview {
+        ConsoleControl::Id owner = 0;
+        quint64 controlGeneration = 0;
+        QString id;
+        QString token;
+        RemoteTopologyCatalog::Snapshot before;
+        QMap<QString, int> priorities;
+        RemoteTopologyDraft::Preview draft;
+        RemoteTopologyDraft::Operation operation;
+        QString backendKey;
+        QElapsedTimer age;
+    };
+    struct PendingVirtual {
+        ConsoleControl::Id owner = 0;
+        QString id;
+        quint64 serial = 0;
+        quint64 controlGeneration = 0;
+        RemoteTopologyCatalog::Snapshot before;
+        QMap<QString, int> priorities;
+        RemoteTopologyDraft::Preview draft;
+        QString backendKey;
+        bool add = false;
+        bool waitingReadback = false;
+    };
     bool m_experimentalPhysicalTopology = false;
+    bool m_experimentalConsoleVirtual = false; // Separate from physical edits until the client accepts mixed lease inventory.
     bool m_physicalLeaseActive = false; // Fail closed if a worker vanishes before verified release.
+    bool m_consoleCreatorsActive = false;
     quint64 m_physicalLeaseGeneration = 0;
     std::optional<PhysicalPreview> m_physicalPreview;
     std::optional<PendingPhysical> m_pendingPhysical;
+    std::optional<VirtualPreview> m_virtualPreview;
+    std::optional<PendingVirtual> m_pendingVirtual;
     quint64 m_nextPhysicalId = 0;
     QTimer m_physicalDeadline;
     ConsoleInputState m_inputState;
