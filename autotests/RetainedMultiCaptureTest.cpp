@@ -5,6 +5,7 @@
 #include <QTest>
 
 #include "RetainedMultiCapture.h"
+#include "ConsoleTopologyReadback.h"
 
 using KRdp::RetainedMultiCapture;
 using KRdp::VideoFrame;
@@ -154,6 +155,35 @@ private Q_SLOTS:
         QVERIFY(set.submit(1, wrong).reset);
         QVERIFY(!set.ready());
         QVERIFY(set.submit(1, packet(QSize(1280, 720), QSize(1280, 720), fixture(QStringLiteral("1280x720")))).frames.isEmpty());
+    }
+
+    void physicalNamesAndMixedScalesReachConsoleProof()
+    {
+        RetainedMultiCapture set;
+        QVERIFY(set.configure({
+            {QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), true},
+            {QStringLiteral("HDMI-A-1"), QRect(1280, 100, 1280, 720), false},
+        }));
+        const auto standard = fixture(QStringLiteral("1280x720"));
+        const auto scaled = fixture(QStringLiteral("1920x1080"));
+        QVERIFY(!set.submit(0, packet(QSize(1920, 1080), QSize(1280, 720), scaled)).becameReady);
+        const auto ready = set.submit(1, packet(QSize(1280, 720), QSize(1280, 720), standard));
+        QVERIFY(ready.becameReady);
+        KRdp::RetainedKScreenReadback::Snapshot fresh;
+        fresh.outputs = {
+            {.backendKey = QStringLiteral("DP-1"), .name = QStringLiteral("DP-1"), .nativePixels = QSize(1920, 1080),
+                .logicalGeometry = QRect(0, 0, 1280, 720), .scale = 1.5, .enabled = true, .primary = true,
+                .physical = true, .owner = {}},
+            {.backendKey = QStringLiteral("HDMI-A-1"), .name = QStringLiteral("HDMI-A-1"), .nativePixels = QSize(1280, 720),
+                .logicalGeometry = QRect(1280, 100, 1280, 720), .scale = 1, .enabled = true, .primary = false,
+                .physical = true, .owner = {}},
+        };
+        const auto confirmed = KRdp::ConsoleTopologyReadback::confirmedMulti(fresh, ready.outputs, ready.frames);
+        QVERIFY(confirmed);
+        QCOMPARE(confirmed->outputs[0].pixels, QSize(1920, 1080));
+        QCOMPARE(confirmed->outputs[1].logical.topLeft(), QPoint(1280, 100));
+        QCOMPARE(ready.atlas[0].geometry.size(), QSize(1920, 1080));
+        QVERIFY(!ready.atlas[0].geometry.intersects(ready.atlas[1].geometry));
     }
 };
 

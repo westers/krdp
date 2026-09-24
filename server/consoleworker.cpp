@@ -100,9 +100,26 @@ public:
             releaseInput();
             m_lastPhysicalKeyframe.reset();
             m_takeover.outputMoved(m_clock.elapsed());
+            if (m_multiMode) {
+                m_multiReady = false;
+                m_multiCapture.invalidate();
+                m_multiPublishedFrames.clear();
+                m_multiResizeNeedsRestart = true;
+            }
         });
-        connect(&m_resize, &ConsoleResizeSession::keyframeNeeded, &m_session, &AbstractSession::requestKeyFrame);
+        connect(&m_resize, &ConsoleResizeSession::keyframeNeeded, this, [this] {
+            if (m_multiMode) {
+                m_physicalResizeReadyForCapture = true;
+                releaseInput();
+                m_multiReady = false;
+                m_multiCapture.invalidate();
+                m_multiPublishedFrames.clear();
+                m_multiResizeNeedsRestart = true;
+                m_multiSettle.start(0); // A mode change can leave logical geometry unchanged.
+            } else m_session.requestKeyFrame();
+        });
         connect(&m_resize, &ConsoleResizeSession::result, this, [this](const auto &result) {
+            m_physicalResizeReadyForCapture = false;
             if (m_socket.state() == QLocalSocket::ConnectedState) {
                 m_socket.write(ConsoleWorkerWire::frame(result));
             }
@@ -324,17 +341,15 @@ public:
         m_multiSettle.setSingleShot(true);
         m_multiSettle.setInterval(400);
         connect(&m_multiSettle, &QTimer::timeout, this, &Worker::syncCaptureMode);
-        if (m_mode.virtualSession) {
-            connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, [this] { m_multiSettle.start(); });
-            connect(qGuiApp, &QGuiApplication::screenAdded, this, [this](QScreen *screen) {
-                watchScreen(screen);
-                m_multiSettle.start();
-            });
-            connect(qGuiApp, &QGuiApplication::screenRemoved, this, [this](QScreen *screen) {
-                m_watchedScreens.remove(screen);
-                m_multiSettle.start();
-            });
-        }
+        connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, [this] { m_multiSettle.start(); });
+        connect(qGuiApp, &QGuiApplication::screenAdded, this, [this](QScreen *screen) {
+            watchScreen(screen);
+            m_multiSettle.start();
+        });
+        connect(qGuiApp, &QGuiApplication::screenRemoved, this, [this](QScreen *screen) {
+            m_watchedScreens.remove(screen);
+            m_multiSettle.start();
+        });
         m_connectTimeout.setSingleShot(true);
         connect(&m_connectTimeout, &QTimer::timeout, qApp, []() { QCoreApplication::exit(1); });
         m_audioTimer.setInterval(20);
@@ -403,16 +418,12 @@ private:
         // Match the desktop server's quality baseline. Leaving this unset
         // selects libx264's CRF35 fallback, visibly damaging desktop text.
         m_session.setVideoQuality(80);
-        if (m_mode.virtualSession) {
-            for (auto *screen : qGuiApp->screens()) watchScreen(screen);
-            if (qGuiApp->screens().size() > 1) {
-                syncCaptureMode(); // Never start an oversized workspace encoder for a multi-output desktop.
-            } else {
-                m_session.setStreamingEnabled(true);
-                m_multiSettle.start();
-            }
+        for (auto *screen : qGuiApp->screens()) watchScreen(screen);
+        if (qGuiApp->screens().size() > 1) {
+            syncCaptureMode(); // Each output gets its own encoder and independently checked keyframe.
         } else {
             m_session.setStreamingEnabled(true);
+            m_multiSettle.start();
         }
     }
 
@@ -426,9 +437,13 @@ private:
 
     void syncCaptureMode()
     {
-        if (!m_mode.virtualSession || m_stopping) return;
+        if (m_stopping) return;
         const auto screens = qGuiApp->screens();
         for (auto *screen : screens) watchScreen(screen);
+        if (!m_mode.virtualSession && m_multiMode && m_resize.changing() && !m_physicalResizeReadyForCapture) {
+            m_multiSettle.start(200); // Wait for the physical KScreen executor's readback before recapture.
+            return;
+        }
         if (m_removePending) {
             if (!m_control.active || m_control.generation != m_removePending->generation) {
                 finishRemove(QStringLiteral("virtual output authority changed during removal"));
@@ -570,6 +585,7 @@ private:
                 m_wireAtlas.clear();
                 m_logicalOutputs.clear();
                 m_outputs = {};
+                m_lastPhysicalKeyframe.reset();
                 m_session.setStreamingEnabled(true);
             }
             return;
@@ -636,6 +652,7 @@ private:
         ++m_multiEpoch;
         m_multiReady = false;
         m_multiMode = true;
+        m_lastPhysicalKeyframe.reset();
         m_multiSessions.clear();
         m_multiPublishedFrames.clear();
         m_wireAtlas.clear();
@@ -661,9 +678,21 @@ private:
             });
             connect(session.get(), &AbstractSession::error, this, [this, epoch] {
                 if (epoch != m_multiEpoch || m_stopping) return;
-                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, QByteArrayLiteral("retained output capture failed")));
+                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, QByteArrayLiteral("per-output capture failed")));
                 m_socket.disconnectFromServer();
             });
+            if (!m_mode.virtualSession) {
+                auto *producer = session.get();
+                connect(producer, &AbstractSession::cursorUpdate, this, [this, producer](const PipeWireCursor &cursor) {
+                    if (m_mode.physicalActions() && m_control.active && !m_resize.changing()
+                        && producer->outputGeometryResolved()
+                        && m_takeover.observed(producer->mapToGlobal(cursor.position).toPoint(), m_clock.elapsed()))
+                        reclaimConsole();
+                });
+                connect(producer, &AbstractSession::outputGeometryChanged, this, [this](const QRect &) {
+                    m_takeover.outputMoved(m_clock.elapsed());
+                });
+            }
             m_multiSessions.push_back(std::move(session));
         }
         for (const auto &session : m_multiSessions) session->setStreamingEnabled(true);
@@ -687,13 +716,21 @@ private:
             const auto kscreen = kscreenJson
                 ? RetainedKScreenReadback::parse(*kscreenJson, m_sessionId) : std::nullopt;
             if (!kscreen || !RetainedKScreenReadback::matchesPublished(*kscreen, result.outputs, result.frames)) {
-                qWarning() << "Retained KScreen readback did not match all captured outputs";
+                qWarning() << "KScreen readback did not match all captured outputs";
                 if (m_mixedCreatePending)
                     finishMixedCreate(QStringLiteral("mixed-created capture differs from compositor readback"));
                 m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error,
                     QByteArrayLiteral("retained compositor readback/capture mismatch")));
                 m_socket.disconnectFromServer();
                 return;
+            }
+            if (!m_mode.virtualSession) {
+                m_resize.captured(result.outputs, true);
+                if (m_resize.changing()) {
+                    // An intermediate frame must not be shown at stale RDP
+                    // coordinates while the legacy resize is unresolved.
+                    return;
+                }
             }
             if (m_addPending && (!m_addPlaced || !addMatches(*kscreen, true)
                 || !m_control.active || m_control.generation != m_addPending->generation)) {
@@ -770,6 +807,11 @@ private:
             }
             m_socket.write(ConsoleWorkerWire::frame(result.outputs));
             m_session.setStreamingEnabled(false); // No oversized workspace encoder in multi mode.
+            if (!m_mode.virtualSession && m_topologyQueryPending) {
+                m_topologyQueryPending = false;
+                const auto topology = ConsoleTopologyReadback::confirmedMulti(*kscreen, result.outputs, result.frames);
+                m_socket.write(ConsoleWorkerWire::frame(topology.value_or(ConsoleWorkerWire::Topology{})));
+            }
         }
         if (!m_multiReady) return;
         for (const auto &packet : result.frames) m_socket.write(ConsoleWorkerWire::frame(packet));
@@ -1741,7 +1783,7 @@ private:
         while (const auto record = m_deframer.next()) {
             if (const auto control = ConsoleWorkerWire::controlState(*record)) {
                 if (*control != m_control) {
-                    const bool retainedNewGrant = m_mode.virtualSession && m_multiMode && m_multiReady
+                    const bool multiNewGrant = m_multiMode && m_multiReady
                         && !m_control.active && control->active
                         && !m_positionPending && !m_addPending && !m_removePending
                         && !m_multiResizePending && !m_multiFitPending && !m_primaryPending
@@ -1759,7 +1801,7 @@ private:
                     if (control->active) {
                         m_takeover.armed(m_clock.elapsed());
                     }
-                    if (retainedNewGrant) {
+                    if (multiNewGrant) {
                         // An idle compositor may not deliver any new damage after
                         // readiness or after a former RDP client exits. A keyframe request cannot
                         // recover when the old encoder has no reusable last frame.
@@ -1772,7 +1814,7 @@ private:
                         m_multiPublishedFrames.clear();
                         m_multiResizeNeedsRestart = true;
                         m_multiSettle.start(0);
-                        qInfo() << "Refreshing retained captures for a new client";
+                        qInfo() << "Refreshing per-output captures for a new client";
                     }
                 }
                 continue;
@@ -1851,18 +1893,30 @@ private:
                 continue;
             }
             if (record->kind == ConsoleWorkerWire::Kind::TopologyQuery && record->payload.isEmpty()) {
-                if (!m_mode.virtualSession && !m_multiMode) {
-                    if (!m_resize.changing() && m_lastPhysicalKeyframe) {
+                if (!m_mode.virtualSession) {
+                    if (!m_resize.changing()) {
                         const auto kscreen = readKScreen();
                         const auto topology = kscreen
-                            ? ConsoleTopologyReadback::confirmed(*kscreen, m_outputs, *m_lastPhysicalKeyframe) : std::nullopt;
+                            ? (m_multiMode && m_multiReady
+                                ? ConsoleTopologyReadback::confirmedMulti(*kscreen, m_outputs, m_multiPublishedFrames)
+                                : (!m_multiMode && m_lastPhysicalKeyframe
+                                    ? ConsoleTopologyReadback::confirmed(*kscreen, m_outputs, *m_lastPhysicalKeyframe)
+                                    : std::nullopt))
+                            : std::nullopt;
                         if (topology) {
                             m_socket.write(ConsoleWorkerWire::frame(*topology));
-                            continue; // An idle compositor need not produce new damage.
+                            continue; // Idle KWin need not produce damage.
                         }
                     }
                     m_topologyQueryPending = true;
-                    m_session.requestKeyFrame();
+                    if (m_multiMode) {
+                        releaseInput();
+                        m_multiReady = false;
+                        m_multiCapture.invalidate();
+                        m_multiPublishedFrames.clear();
+                        m_multiResizeNeedsRestart = true;
+                        m_multiSettle.start(0);
+                    } else m_session.requestKeyFrame();
                 }
                 continue;
             }
@@ -1895,11 +1949,16 @@ private:
                     if (m_multiMode) {
                         auto *session = multiInputSession();
                         if (!session) continue;
+                        if (!m_mode.virtualSession && mapped->type == ConsoleWorkerWire::Input::Type::Mouse
+                            && mapped->eventType == QEvent::MouseMove)
+                            m_takeover.injected(mapped->position.toPoint(), m_clock.elapsed());
                         if (RetainedMultiInput::positionBeforeDispatch(*mapped)) {
                             auto motion = *mapped;
                             motion.type = ConsoleWorkerWire::Input::Type::Mouse;
                             motion.eventType = QEvent::MouseMove;
                             motion.button = Qt::NoButton;
+                            if (!m_mode.virtualSession)
+                                m_takeover.injected(motion.position.toPoint(), m_clock.elapsed());
                             session->sendGlobalEvent(eventFor(motion));
                         }
                         session->sendGlobalEvent(event);
@@ -1978,6 +2037,7 @@ private:
     quint8 m_multiQuality = 80;
     bool m_multiMode = false;
     bool m_multiReady = false;
+    bool m_physicalResizeReadyForCapture = false;
     std::unique_ptr<PipeWireAudioPlayback> m_audio;
     ConsoleMicrophoneSession m_microphone;
     QTimer m_connectTimeout;
