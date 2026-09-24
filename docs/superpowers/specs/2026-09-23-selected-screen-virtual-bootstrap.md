@@ -6,8 +6,9 @@ and cannot be consumed by `create`. The journal now round-trips a strict v2
 normalized output record while keeping v1 byte-compatible; no production
 create, launcher, worker, or client UI path consumes it yet. The trusted root
 service plan derives a bounded `--initial-layout` argument and primary size
-from a validated v2 record; the current launcher rejects that new option, so
-v2 still fails closed rather than starting a mismatched desktop. Do not
+from a validated v2 record. The namespace launcher validates and forwards
+that payload to the private desktop entry, which currently refuses it before
+starting KWin; v2 still fails closed rather than starting a mismatched desktop. Do not
 advertise this capability or claim a matching desktop.
 
 ## User-visible contract

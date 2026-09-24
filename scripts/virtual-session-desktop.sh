@@ -2,8 +2,12 @@
 # Inside the guardian's PID/mount/bus namespace only. Do not invoke on seat0.
 set -euo pipefail
 umask 077
-[[ $# == 5 && $(id -u) != 0 && $XDG_RUNTIME_DIR == /run/user/"$(id -u)"/krdp-virtual/* ]]
+[[ ( $# == 5 || $# == 6 ) && $(id -u) != 0 && $XDG_RUNTIME_DIR == /run/user/"$(id -u)"/krdp-virtual/* ]]
 [[ ! -S /run/dbus/system_bus_socket && ! -S /run/user/"$(id -u)"/bus ]]
+if (( $# == 6 )); then
+    echo 'Selected-layout worker bootstrap is not yet available; refusing a mismatched desktop.' >&2
+    exit 1
+fi
 session=$1 worker=$2 support=$3 width=$4 height=$5
 wrapper_pid= graph_pid= policy_pid= plasma_pid= worker_pid=
 cleanup() {

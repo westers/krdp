@@ -3,14 +3,14 @@
 # loss does not. This is not a sandbox against other applications of the UID.
 set -euo pipefail
 umask 077
-runtime= profile= session= session_uid= worker= support= width= height=
+runtime= profile= session= session_uid= worker= support= width= height= initial_layout=
 allowed_pci=()
 while (( $# )); do
     [[ $# -ge 2 ]] || exit 1
     case "$1" in
         --runtime) runtime=$2;; --profile) profile=$2;; --session) session=$2;;
         --uid) session_uid=$2;; --worker) worker=$2;; --support) support=$2;;
-        --width) width=$2;; --height) height=$2;; --allow-render-pci) allowed_pci+=("$2");;
+        --width) width=$2;; --height) height=$2;; --initial-layout) initial_layout=$2;; --allow-render-pci) allowed_pci+=("$2");;
         *) echo 'Unknown namespace-launch option' >&2; exit 1;;
     esac
     shift 2
@@ -19,6 +19,23 @@ done
 [[ $session =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
 [[ $width =~ ^[0-9]{3,4}$ && $height =~ ^[0-9]{3,4}$ ]]
 (( 10#$width >= 320 && 10#$width <= 4096 && 10#$height >= 200 && 10#$height <= 4096 && 10#$width % 2 == 0 && 10#$height % 2 == 0 ))
+layout_args=()
+if [[ -n $initial_layout ]]; then
+    [[ ${#initial_layout} -le 4096 ]]
+    jq -e --argjson w "$width" --argjson h "$height" '
+        type == "array" and length >= 1 and length <= 16
+        and .[0].primary == true and (map(select(.primary == true)) | length) == 1
+        and .[0].width == $w and .[0].height == $h
+        and all(.[]; type == "object" and (keys == ["height", "primary", "scale", "width", "x", "y"])
+            and (.x | type) == "number" and .x == (.x | floor) and .x >= 0 and .x <= 32768
+            and (.y | type) == "number" and .y == (.y | floor) and .y >= 0 and .y <= 32768
+            and (.width | type) == "number" and .width == (.width | floor) and .width >= 320 and .width <= 4096 and .width % 2 == 0
+            and (.height | type) == "number" and .height == (.height | floor) and .height >= 200 and .height <= 4096 and .height % 2 == 0
+            and (.scale | type) == "number" and .scale >= 1 and .scale <= 4
+            and (.primary | type) == "boolean")
+    ' <<<"$initial_layout" >/dev/null
+    layout_args=("$initial_layout")
+fi
 [[ $runtime == /run/user/"$session_uid"/krdp-virtual/* && $runtime == "${KRDP_VIRTUAL_RUNTIME:-}" ]]
 [[ $profile == "$HOME/.krdp-virtual/sessions/$session" && $profile == "${KRDP_VIRTUAL_PROFILE:-}" ]]
 for directory in "$runtime" "$profile" "$profile/config" "$profile/data" "$profile/cache" "$profile/state"; do
@@ -92,5 +109,5 @@ exec env -i PATH=/usr/bin:/bin HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)"
     "${render_bindings[@]}" --perms 01777 --dir /tmp/.X11-unix \
     --bind "$HOME" "$HOME" --bind "$runtime" "$runtime" \
     dbus-run-session --config-file="$support/virtual-session-bus.conf" \
-    -- /usr/bin/bash "$inner" "$session" "$worker" "$support" "$width" "$height" \
+    -- /usr/bin/bash "$inner" "$session" "$worker" "$support" "$width" "$height" "${layout_args[@]}" \
     >"$runtime/desktop.log" 2>&1
