@@ -1090,13 +1090,18 @@ QJsonObject ConsoleHostController::consoleTopology(const QString &id) const
     auto record = RemoteTopologyProtocol::consoleReadOnly(id, m_topologyCatalog.snapshot(), writable);
     auto caps = record.value(u"capabilities"_s).toObject();
     const auto &outputs = m_topologyCatalog.snapshot().outputs;
-    caps.insert(u"add"_s, writable && m_experimentalConsoleVirtual && outputs.size() < 16
+    // This describes the lease inventory even for viewers/control handoff;
+    // only the active authenticated controller gets write capabilities.
+    const bool virtualLease = m_experimentalConsoleVirtual && m_topologyAvailable;
+    caps.insert(u"consoleVirtual"_s, virtualLease);
+    caps.insert(u"add"_s, writable && virtualLease && outputs.size() < 16
         && (!m_physicalLeaseActive || m_consoleCreatorsActive));
-    caps.insert(u"remove"_s, writable && m_experimentalConsoleVirtual && outputs.size() > 1 && m_consoleCreatorsActive
+    caps.insert(u"remove"_s, writable && virtualLease && outputs.size() > 1 && m_consoleCreatorsActive
         && std::any_of(outputs.cbegin(), outputs.cend(), [](const auto &entry) {
             return !entry.output.physical && entry.output.owner == u"physical-console"_s
                 && !entry.output.primary && entry.output.backendKey.startsWith(u"Virtual-krdp-added-"_s);
         }));
+    caps.insert(u"multiOutputCapture"_s, writable && outputs.size() > 1);
     record.insert(u"capabilities"_s, caps);
     return record;
 }
