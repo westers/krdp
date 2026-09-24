@@ -4,6 +4,8 @@
 #include <memory>
 #include <optional>
 #include <QVector>
+#include <QPoint>
+#include <QSize>
 
 namespace KRdp {
 /** Root-service launch intent, persisted BEFORE spawn. Never proof of liveness.
@@ -14,9 +16,18 @@ namespace KRdp {
 class VirtualSessionJournal {
 public:
     struct Record {
+        struct InitialOutput {
+            QPoint position;
+            QSize pixels;
+            qreal scale = 1;
+            bool primary = false;
+            bool operator==(const InitialOutput &) const = default;
+        };
         quint32 uid = 0;
         QString session, launch, incarnation, boot;
         QByteArray token;
+        // Empty means the exact legacy v1 single-output launch intent.
+        QVector<InitialOutput> initialOutputs = {};
         bool valid() const;
         VirtualSessionGuardianClient::Identity identity() const;
         QString workerSocket() const;

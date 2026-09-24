@@ -10,6 +10,7 @@
 #include <sys/prctl.h>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QScopeGuard>
 #include <limits>
 #include <sys/syscall.h>
@@ -28,6 +29,67 @@ class VirtualSessionJournalTest : public QObject {
     static QString id() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     static VirtualSessionJournal::Record record() { return {1000, id(), id(), id(), id(), QByteArray(32, 's')}; }
 private Q_SLOTS:
+    void selectedLayoutV2RoundTripAndLegacyV1() {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto legacy = record(); QVERIFY(journal->insert(legacy));
+        QFile oldFile(dir.filePath(legacy.session + QStringLiteral(".json")));
+        QVERIFY(oldFile.open(QIODevice::ReadOnly));
+        const auto oldJson = QJsonDocument::fromJson(oldFile.readAll()).object();
+        QCOMPARE(oldJson.value(QStringLiteral("v")), QJsonValue(1));
+        QVERIFY(!oldJson.contains(QStringLiteral("outputs")));
+        QCOMPARE(journal->readRecord(legacy.session, nullptr), std::optional(legacy));
+
+        auto selected = record();
+        selected.initialOutputs = {{QPoint(0, 0), QSize(1600, 900), 1.25, true},
+            {QPoint(1280, 100), QSize(1280, 720), 1.0, false},
+            {QPoint(2560, 100), QSize(960, 540), 1.5, false}};
+        QVERIFY(selected.valid()); QVERIFY(journal->insert(selected));
+        QFile newFile(dir.filePath(selected.session + QStringLiteral(".json")));
+        QVERIFY(newFile.open(QIODevice::ReadOnly));
+        const auto newJson = QJsonDocument::fromJson(newFile.readAll()).object();
+        QCOMPARE(newJson.value(QStringLiteral("v")), QJsonValue(2));
+        QCOMPARE(newJson.value(QStringLiteral("outputs")).toArray().size(), 3);
+        QCOMPARE(journal->readRecord(selected.session, nullptr), std::optional(selected));
+        const auto all = journal->records(); QVERIFY(all); QCOMPARE(all->size(), 2);
+        QVERIFY(journal->claimRecord(selected, nullptr));
+        auto changed = selected; changed.initialOutputs[1].position.setY(101);
+        QVERIFY(!journal->claimRecord(changed, nullptr));
+    }
+    void selectedLayoutV2RejectsMalformed_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"extra", "missing", "fractional", "overlap", "gap", "second-primary", "non-normalized", "wrong-version"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void selectedLayoutV2RejectsMalformed() {
+        QFETCH(QString, kind);
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        auto selected = record();
+        selected.initialOutputs = {{QPoint(0, 0), QSize(1600, 900), 1.25, true},
+            {QPoint(1280, 100), QSize(1280, 720), 1.0, false}};
+        QVERIFY(journal->insert(selected));
+        const auto path = dir.filePath(selected.session + QStringLiteral(".json"));
+        QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite));
+        auto object = QJsonDocument::fromJson(file.readAll()).object();
+        auto array = object.value(QStringLiteral("outputs")).toArray();
+        auto first = array[0].toObject(); auto second = array[1].toObject();
+        if (kind == QStringLiteral("extra")) second.insert(QStringLiteral("command"), QStringLiteral("bad"));
+        else if (kind == QStringLiteral("missing")) second.remove(QStringLiteral("scale"));
+        else if (kind == QStringLiteral("fractional")) second.insert(QStringLiteral("x"), 1280.5);
+        else if (kind == QStringLiteral("overlap")) second.insert(QStringLiteral("x"), 1279);
+        else if (kind == QStringLiteral("gap")) second.insert(QStringLiteral("x"), 1281);
+        else if (kind == QStringLiteral("second-primary")) second.insert(QStringLiteral("primary"), true);
+        else if (kind == QStringLiteral("non-normalized")) { first.insert(QStringLiteral("x"), 1); second.insert(QStringLiteral("x"), 1281); }
+        else object.insert(QStringLiteral("v"), 1);
+        array.replace(0, first); array.replace(1, second);
+        object.insert(QStringLiteral("outputs"), array);
+        const auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
+        QVERIFY(file.resize(0)); QVERIFY(file.seek(0)); QCOMPARE(file.write(bytes), qint64(bytes.size())); file.close();
+        QString error;
+        QVERIFY(!journal->readRecord(selected.session, &error)); QVERIFY(!error.isEmpty());
+        QVERIFY(!journal->records());
+    }
     void dismissalRefusesInvalidReconciliation_data() {
         QTest::addColumn<QString>("kind");
         for (const auto *kind : {"missing", "malformed", "mismatched"}) QTest::newRow(kind) << QString::fromLatin1(kind);

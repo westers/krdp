@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionJournal.h"
 #include "VirtualSessionProcessIdentity.h"
+#include "VirtualInitialLayout.h"
 #include <QFile>
 #include <QDir>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QUuid>
 #include <cmath>
 #include <limits>
@@ -26,6 +28,60 @@ bool safeFile(int fd, quint32 owner) {
     return !fstat(fd, &s) && S_ISREG(s.st_mode) && s.st_uid == owner
         && (s.st_mode & 07777) == 0600 && s.st_nlink == 1 && s.st_size > 0 && s.st_size <= 4096;
 }
+bool validInitialOutputs(const QVector<VirtualSessionJournal::Record::InitialOutput> &outputs) {
+    if (outputs.isEmpty() || outputs.size() > 16 || !outputs.first().primary) return false;
+    QVector<VirtualInitialLayout::Screen> screens;
+    screens.reserve(outputs.size());
+    for (qsizetype i = 0; i < outputs.size(); ++i) {
+        const auto &output = outputs[i];
+        if (i && output.primary) return false;
+        screens.append({QStringLiteral("screen-%1").arg(i), output.position, output.pixels, output.scale, output.primary});
+    }
+    const RemoteTopologyDraft::Capabilities caps{.addVirtual = true, .maxOutputs = 16,
+        .maxOutputDimension = 4096, .maxAtlasDimension = 32768};
+    const auto proposal = VirtualInitialLayout::plan(screens, QStringLiteral("journal"), caps);
+    if (!proposal.valid() || proposal.outputs.size() != outputs.size()) return false;
+    for (qsizetype i = 0; i < outputs.size(); ++i) {
+        const auto &actual = proposal.outputs[i].output;
+        const auto &expected = outputs[i];
+        if (actual.logicalGeometry.topLeft() != expected.position || actual.nativePixels != expected.pixels
+            || actual.scale != expected.scale || actual.primary != expected.primary) return false;
+    }
+    return true;
+}
+QJsonArray outputArray(const QVector<VirtualSessionJournal::Record::InitialOutput> &outputs) {
+    QJsonArray array;
+    for (const auto &output : outputs)
+        array.append(QJsonObject{{QStringLiteral("x"), output.position.x()}, {QStringLiteral("y"), output.position.y()},
+            {QStringLiteral("width"), output.pixels.width()}, {QStringLiteral("height"), output.pixels.height()},
+            {QStringLiteral("scale"), output.scale}, {QStringLiteral("primary"), output.primary}});
+    return array;
+}
+std::optional<QVector<VirtualSessionJournal::Record::InitialOutput>> parseOutputs(const QJsonArray &array) {
+    if (array.isEmpty() || array.size() > 16) return {};
+    QVector<VirtualSessionJournal::Record::InitialOutput> outputs;
+    const auto integer = [](const QJsonValue &value, int low, int high) -> std::optional<int> {
+        if (!value.isDouble()) return {};
+        const double n = value.toDouble();
+        if (!std::isfinite(n) || std::floor(n) != n || n < low || n > high) return {};
+        return int(n);
+    };
+    for (const auto &value : array) {
+        if (!value.isObject()) return {};
+        const auto o = value.toObject();
+        const auto x = integer(o.value(QStringLiteral("x")), 0, 32768);
+        const auto y = integer(o.value(QStringLiteral("y")), 0, 32768);
+        const auto width = integer(o.value(QStringLiteral("width")), 320, 4096);
+        const auto height = integer(o.value(QStringLiteral("height")), 200, 4096);
+        const auto scale = o.value(QStringLiteral("scale"));
+        const auto primary = o.value(QStringLiteral("primary"));
+        if (o.size() != 6 || !x || !y || !width || !height || !scale.isDouble()
+            || !std::isfinite(scale.toDouble()) || !primary.isBool()) return {};
+        outputs.append({QPoint(*x, *y), QSize(*width, *height), scale.toDouble(), primary.toBool()});
+    }
+    if (!validInitialOutputs(outputs)) return {};
+    return outputs;
+}
 QByteArray outcomeBytes(const VirtualSessionJournal::Record &r, const QByteArray &kind) {
     // Canonical identity: validated UUIDs, decimal UID and hex token cannot
     // contain delimiters. Version/domain separates this from PAM-close proof.
@@ -36,7 +92,8 @@ QByteArray outcomeBytes(const VirtualSessionJournal::Record &r, const QByteArray
 }
 bool VirtualSessionJournal::Record::valid() const {
     return uid && uid != std::numeric_limits<quint32>::max() && uuid(session) && uuid(launch)
-        && uuid(incarnation) && uuid(boot) && token.size() == 32;
+        && uuid(incarnation) && uuid(boot) && token.size() == 32
+        && (initialOutputs.isEmpty() || validInitialOutputs(initialOutputs));
 }
 VirtualSessionGuardianClient::Identity VirtualSessionJournal::Record::identity() const {
     return {uid, session, incarnation, QStringLiteral("/run/user/%1/krdp-virtual/%2/guardian.sock").arg(uid).arg(launch), token};
@@ -330,11 +387,13 @@ bool VirtualSessionJournal::insert(const Record &r, QString *error) {
     const auto existing = records(error);
     if (!existing) return false;
     if (existing->size() >= 256) return fail(error, QStringLiteral("Launch journal capacity reached"));
-    const QJsonObject object{{QStringLiteral("v"), 1}, {QStringLiteral("uid"), qint64(r.uid)},
+    QJsonObject object{{QStringLiteral("v"), r.initialOutputs.isEmpty() ? 1 : 2}, {QStringLiteral("uid"), qint64(r.uid)},
         {QStringLiteral("session"), r.session}, {QStringLiteral("launch"), r.launch},
         {QStringLiteral("instance"), r.incarnation}, {QStringLiteral("boot"), r.boot},
         {QStringLiteral("token"), QString::fromLatin1(r.token.toHex())}};
+    if (!r.initialOutputs.isEmpty()) object.insert(QStringLiteral("outputs"), outputArray(r.initialOutputs));
     const auto data = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    if (data.size() > 4096) return fail(error, QStringLiteral("Launch layout exceeds journal limit"));
     const QByteArray temporary = QByteArray(".pending-") + QUuid::createUuid().toByteArray(QUuid::WithoutBraces);
     const QByteArray name = r.session.toLatin1() + ".json";
     const int fd = openat(m_directory, temporary.constData(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_CREAT | O_EXCL, 0600);
@@ -374,12 +433,19 @@ std::optional<VirtualSessionJournal::Record> VirtualSessionJournal::readRecord(c
     const auto doc = QJsonDocument::fromJson(data, &parse);
     const auto o = doc.object();
     const double uid = o.value(QStringLiteral("uid")).toDouble(-1);
+    const auto version = o.value(QStringLiteral("v"));
     if (file.error() != QFileDevice::NoError || data.size() > 4096 || parse.error != QJsonParseError::NoError
-        || !doc.isObject() || o.size() != 7 || o.value(QStringLiteral("v")) != QJsonValue(1)
+        || !doc.isObject() || !((version == QJsonValue(1) && o.size() == 7)
+            || (version == QJsonValue(2) && o.size() == 8 && o.value(QStringLiteral("outputs")).isArray()))
         || uid < 1 || uid >= std::numeric_limits<quint32>::max() || std::floor(uid) != uid) return refuse();
     const auto encoded = o.value(QStringLiteral("token")).toString().toLatin1();
     Record record{quint32(uid), o.value(QStringLiteral("session")).toString(), o.value(QStringLiteral("launch")).toString(),
         o.value(QStringLiteral("instance")).toString(), o.value(QStringLiteral("boot")).toString(), QByteArray::fromHex(encoded)};
+    if (version == QJsonValue(2)) {
+        const auto outputs = parseOutputs(o.value(QStringLiteral("outputs")).toArray());
+        if (!outputs) return refuse();
+        record.initialOutputs = *outputs;
+    }
     if (!record.valid() || record.token.toHex() != encoded || record.session != session) return refuse();
     if (error) error->clear();
     return record;

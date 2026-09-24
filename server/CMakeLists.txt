@@ -17,6 +17,7 @@ add_library(KRdpMaintenanceBootstrapDraft OBJECT VirtualSessionMaintenanceCoordi
 target_link_libraries(KRdpMaintenanceBootstrapDraft PRIVATE Qt6::Core Qt6::DBus)
 add_library(KRdpGuardianClient STATIC VirtualSessionGuardianClient.cpp)
 target_sources(KRdpGuardianClient PRIVATE VirtualSessionJournal.cpp)
+target_include_directories(KRdpGuardianClient PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(KRdpGuardianClient PUBLIC Qt6::Core Qt6::Network)
 add_executable(krdp-virtual-session-entry virtualsessionentry.cpp)
 target_sources(krdp-virtual-session-entry PRIVATE VirtualSessionServiceScope.cpp VirtualSessionServiceOwner.cpp VirtualSessionLogin.cpp)
