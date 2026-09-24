@@ -225,6 +225,8 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         qInfo() << "Console capture outputs:" << outputs.monitors.size() << "forwarding" << m_inputEnabled << "clients" << m_clients.size();
         const bool changed = outputs != m_outputs;
         const bool wasMulti = m_outputs.monitors.size() > 1;
+        const bool independentTransition = changed && (outputs.monitors.size() > 1 || wasMulti)
+            && !m_pendingPhysical && !m_pendingVirtual;
         if (changed) {
             m_topologyAvailable = false;
             m_topologyPriorities.clear();
@@ -235,11 +237,12 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         m_outputs = outputs;
         // Do not publish an in-flight layout from an Outputs record alone.
         // First require the worker's independently captured KScreen topology.
-        if (changed && (outputs.monitors.size() > 1 || wasMulti)
-            && !m_pendingPhysical && !m_pendingVirtual) m_layoutAwaitingReadback = true;
+        if (independentTransition) {
+            releaseInput(); // Held keys/buttons must not carry across coordinate systems.
+            m_layoutAwaitingReadback = true;
+        }
         if (!m_pendingPhysical && !m_pendingVirtual && !m_layoutAwaitingReadback) sendLayouts();
-        if (changed && (outputs.monitors.size() > 1 || wasMulti)
-            && !m_pendingPhysical && !m_pendingVirtual) m_endpoint.requestTopology();
+        if (independentTransition) m_endpoint.requestTopology();
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [this](const ConsoleWorkerWire::Topology &topology) {
         if (topology.outputs.isEmpty() || topology.outputs.size() != m_outputs.monitors.size()) {
@@ -507,7 +510,8 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     client->connection = connection;
     client->externalMicrophone = connection->enableExternalMicrophone();
     client->session = std::make_unique<ConsoleWorkerSession>([this, id](const ConsoleWorkerWire::Input &input) {
-        if (m_inputEnabled && !m_pendingPhysical && !m_pendingVirtual && m_control.ownsControl(id)) {
+        if (m_inputEnabled && !m_pendingPhysical && !m_pendingVirtual && !m_layoutAwaitingReadback
+            && m_control.ownsControl(id)) {
             m_endpoint.sendInput(input);
             m_inputState.record(input);
         }
@@ -994,7 +998,8 @@ void ConsoleHostController::finishTopologyQueries(const QString &error)
 
 void ConsoleHostController::sendLayouts()
 {
-    if (m_outputs.monitors.isEmpty() || !m_endpoint.ready()) {
+    if (m_outputs.monitors.isEmpty() || !m_endpoint.ready() || m_layoutAwaitingReadback
+        || m_pendingPhysical || m_pendingVirtual) {
         return;
     }
     LayoutControl::Layout layout;

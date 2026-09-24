@@ -4,6 +4,7 @@
 #include "ConsoleWorkerSession.h"
 #include "RdpConnection.h"
 #include "Server.h"
+#include <QMouseEvent>
 #include <QLocalSocket>
 #include <QTemporaryDir>
 #include <QTest>
@@ -57,6 +58,12 @@ private Q_SLOTS:
         ConsoleHostController host(&server, {}, {});
         host.addClient(&connection);
         host.m_inputEnabled = true;
+        const auto clientId = host.m_clients.front()->id;
+        host.m_control.admit(clientId);
+        QVERIFY(host.m_control.acquire(clientId));
+        host.m_clients.front()->session->setWorkerActive(true);
+        const auto press = std::make_shared<QMouseEvent>(QEvent::MouseButtonPress, QPointF(20, 20), QPointF{},
+            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
         VideoFrame single;
         single.size = QSize(1280, 720);
         single.isKeyFrame = true;
@@ -66,11 +73,15 @@ private Q_SLOTS:
             QRect(0, 0, 1280, 720), 1, true, 1, true}}});
         Q_EMIT host.m_endpoint.frameReceived(single);
         QVERIFY(host.m_clients.front()->wireLayout.isEmpty());
+        host.m_clients.front()->session->sendEvent(press);
 
         Q_EMIT host.m_endpoint.outputsReceived({{
             {QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true},
             {QStringLiteral("Virtual-extra"), QRect(1280, 0, 960, 540), 1, false}}});
         QVERIFY(host.m_layoutAwaitingReadback);
+        QVERIFY(host.m_inputState.releaseAll().isEmpty()); // Independent transition released the held button.
+        host.m_clients.front()->session->sendEvent(press);
+        QVERIFY(host.m_inputState.releaseAll().isEmpty()); // No stale-coordinate input before readback.
         Q_EMIT host.m_endpoint.frameReceived(single); // Old single-output capture must not pass the new inventory.
         QVERIFY(host.m_clients.front()->wireLayout.isEmpty());
         VideoFrame multi = single;
@@ -87,6 +98,8 @@ private Q_SLOTS:
         multi.isKeyFrame = true;
         Q_EMIT host.m_endpoint.frameReceived(multi);
         QCOMPARE(host.m_clients.front()->wireLayout, multi.monitors);
+        host.m_clients.front()->session->sendEvent(press);
+        QCOMPARE(host.m_inputState.releaseAll().size(), 1); // Input resumed only after authoritative readback.
 
         Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}}});
         QVERIFY(host.m_layoutAwaitingReadback);
