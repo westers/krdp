@@ -1,0 +1,194 @@
+// SPDX-FileCopyrightText: 2026 Steve Westers
+// SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+
+#include <QTest>
+
+#include "ConsoleTopologyPlan.h"
+
+namespace Plan = KRdp::ConsoleTopologyPlan;
+using KRdp::RemoteTopologyDraft::Operation;
+
+namespace
+{
+Plan::Snapshot baseline()
+{
+    KRdp::RemoteTopologyCatalog catalog;
+    return *catalog.observe({
+        {.backendKey = QStringLiteral("DP-1"), .name = QStringLiteral("DP-1"),
+            .nativePixels = QSize(1600, 900), .logicalGeometry = QRect(0, 0, 1280, 720),
+            .scale = 1.25, .enabled = true, .primary = true, .physical = true, .owner = {}},
+        {.backendKey = QStringLiteral("HDMI-A-1"), .name = QStringLiteral("HDMI-A-1"),
+            .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(1280, 100, 1280, 720),
+            .scale = 1.0, .enabled = true, .primary = false, .physical = true, .owner = {}},
+    });
+}
+
+QString idFor(const Plan::Snapshot &snapshot, const QString &backend)
+{
+    for (const auto &entry : snapshot.outputs) if (entry.output.backendKey == backend) return entry.id;
+    return {};
+}
+
+KRdp::RemoteTopologyDraft::Capabilities limits()
+{
+    return {.changePrimary = true, .maxOutputs = 16, .maxOutputDimension = 4096, .maxAtlasDimension = 8192};
+}
+
+KRdp::RemoteTopologyDraft::Request request(const Plan::Snapshot &source)
+{
+    return {.generation = source.generation, .expectedRevision = source.revision,
+        .owner = QStringLiteral("authenticated-console-controller"), .operations = {},
+        .allowPhysicalChange = true};
+}
+
+Plan::Priorities priorities()
+{
+    return {{QStringLiteral("DP-1"), 1}, {QStringLiteral("HDMI-A-1"), 2}};
+}
+}
+
+class ConsoleTopologyPlanTest : public QObject
+{
+    Q_OBJECT
+private Q_SLOTS:
+    void explicitMixedPhysicalDraftPreservesExactIdentity()
+    {
+        const auto source = baseline();
+        auto draft = request(source);
+        draft.operations = {
+            {Operation::Kind::Move, idFor(source, QStringLiteral("HDMI-A-1")), QPoint(1920, 100), {}, 1.0},
+            {Operation::Kind::Resize, idFor(source, QStringLiteral("DP-1")), {}, QSize(1920, 1080), 1.0},
+            {Operation::Kind::SetPrimary, idFor(source, QStringLiteral("HDMI-A-1")), {}, {}, 1.0},
+        };
+        const auto result = Plan::make(source, priorities(), draft, limits());
+        QVERIFY(result);
+        QVERIFY(result->changed);
+        QCOMPARE(result->positions.value(QStringLiteral("HDMI-A-1")), QPoint(1920, 100));
+        QCOMPARE(result->modes.value(QStringLiteral("DP-1")).first, QSize(1920, 1080));
+        QCOMPARE(result->afterPriorities.value(QStringLiteral("HDMI-A-1")), 1);
+        QCOMPARE(result->afterPriorities.value(QStringLiteral("DP-1")), 2);
+        QCOMPARE(result->after.size(), source.outputs.size());
+        for (qsizetype i = 0; i < source.outputs.size(); ++i) {
+            QCOMPARE(result->after[i].id, source.outputs[i].id);
+            QCOMPARE(result->after[i].output.backendKey, source.outputs[i].output.backendKey);
+        }
+        auto observed = source;
+        observed.outputs = result->after;
+        QVERIFY(Plan::matches(*result, observed, result->afterPriorities));
+        observed.outputs[0].output.logicalGeometry.moveLeft(1);
+        QVERIFY(!Plan::matches(*result, observed, result->afterPriorities));
+    }
+
+    void consentGenerationRevisionAndOverlapFailClosed()
+    {
+        const auto source = baseline();
+        auto draft = request(source);
+        draft.operations = {{Operation::Kind::Resize, idFor(source, QStringLiteral("DP-1")), {}, QSize(1920, 1080), 1.0}};
+        QVERIFY(!Plan::make(source, priorities(), draft, limits())); // Would overlap unchanged HDMI-A-1.
+        draft.operations = {{Operation::Kind::Move, idFor(source, QStringLiteral("HDMI-A-1")), QPoint(1920, 100), {}, 1.0}};
+        draft.allowPhysicalChange = false;
+        QVERIFY(!Plan::make(source, priorities(), draft, limits()));
+        draft.allowPhysicalChange = true;
+        draft.expectedRevision++;
+        QVERIFY(!Plan::make(source, priorities(), draft, limits()));
+        draft.expectedRevision = source.revision;
+        draft.generation = QStringLiteral("old-greeter-generation");
+        QVERIFY(!Plan::make(source, priorities(), draft, limits()));
+        draft.generation = source.generation;
+        QVERIFY(Plan::make(source, priorities(), draft, limits()));
+        draft.operations.append(draft.operations.first());
+        QVERIFY(!Plan::make(source, priorities(), draft, limits()));
+    }
+
+    void unknownEditsAndModeChangesCannotBeRestored()
+    {
+        const auto source = baseline();
+        auto draft = request(source);
+        draft.operations = {
+            {Operation::Kind::Move, idFor(source, QStringLiteral("HDMI-A-1")), QPoint(1920, 100), {}, 1.0},
+            {Operation::Kind::Resize, idFor(source, QStringLiteral("DP-1")), {}, QSize(1920, 1080), 1.0},
+        };
+        const auto result = Plan::make(source, priorities(), draft, limits());
+        QVERIFY(result);
+        auto partial = source;
+        for (qsizetype i = 0; i < partial.outputs.size(); ++i) {
+            if (partial.outputs[i].output.backendKey == QStringLiteral("HDMI-A-1"))
+                partial.outputs[i].output.logicalGeometry.moveTopLeft(QPoint(1920, 100));
+        }
+        QVERIFY(Plan::recognizedPartial(*result, partial, priorities()));
+        for (auto &entry : partial.outputs) if (entry.output.backendKey == QStringLiteral("HDMI-A-1"))
+            entry.output.logicalGeometry.moveTopLeft(QPoint(1800, 100));
+        QVERIFY(!Plan::recognizedPartial(*result, partial, priorities()));
+        partial = source;
+        for (auto &entry : partial.outputs) if (entry.output.backendKey == QStringLiteral("DP-1")) {
+            entry.output.nativePixels = QSize(1680, 1050);
+            entry.output.logicalGeometry.setSize(QSize(1344, 840));
+        }
+        QVERIFY(!Plan::recognizedPartial(*result, partial, priorities()));
+        partial = source;
+        partial.generation = QStringLiteral("new-user-compositor");
+        QVERIFY(!Plan::recognizedPartial(*result, partial, priorities()));
+    }
+
+    void noImplicitAddRemoveOrVirtualCaptureClaim()
+    {
+        const auto source = baseline();
+        auto draft = request(source);
+        draft.operations = {{Operation::Kind::AddVirtual, QStringLiteral("new:one"), QPoint(2560, 100), QSize(800, 600), 1.0}};
+        QVERIFY(!Plan::make(source, priorities(), draft, limits()));
+        draft.operations = {{Operation::Kind::Remove, idFor(source, QStringLiteral("HDMI-A-1")), {}, {}, 1.0}};
+        QVERIFY(!Plan::make(source, priorities(), draft, limits()));
+        auto virtualSource = source;
+        virtualSource.outputs[0].output.physical = false;
+        virtualSource.outputs[0].output.owner = QStringLiteral("someone-else");
+        draft.operations = {{Operation::Kind::Move, idFor(source, QStringLiteral("HDMI-A-1")), QPoint(1920, 100), {}, 1.0}};
+        QVERIFY(!Plan::make(virtualSource, priorities(), draft, limits()));
+    }
+
+    void physicalArgumentsRequireFreshAdvertisedMode()
+    {
+        const auto source = baseline();
+        auto draft = request(source);
+        draft.operations = {
+            {Operation::Kind::Move, idFor(source, QStringLiteral("HDMI-A-1")), QPoint(1920, 100), {}, 1.0},
+            {Operation::Kind::Resize, idFor(source, QStringLiteral("DP-1")), {}, QSize(1920, 1080), 1.0},
+            {Operation::Kind::SetPrimary, idFor(source, QStringLiteral("HDMI-A-1")), {}, {}, 1.0},
+        };
+        const auto plan = Plan::make(source, priorities(), draft, limits());
+        QVERIFY(plan);
+        const Plan::Mode current{QStringLiteral("27"), QSize(1600, 900), 60000};
+        const Plan::Mode target{QStringLiteral("41"), QSize(1920, 1080), 60000};
+        Plan::OutputState state{QStringLiteral("DP-1"), QPoint(0, 0), 1.25, current, {current, target}};
+        const Plan::Mode peerMode{QStringLiteral("12"), QSize(1280, 720), 60000};
+        const Plan::OutputState peer{QStringLiteral("HDMI-A-1"), QPoint(1280, 100), 1.0, peerMode, {peerMode}};
+        QMap<QString, Plan::OutputState> states{{QStringLiteral("DP-1"), state}, {QStringLiteral("HDMI-A-1"), peer}};
+        QMap<QString, Plan::Mode> selected{{QStringLiteral("DP-1"), target}};
+        const auto args = Plan::arguments(*plan, states, priorities(), selected);
+        QVERIFY(args);
+        QVERIFY(args->contains(QStringLiteral("output.DP-1.mode.41")));
+        QVERIFY(args->contains(QStringLiteral("output.DP-1.scale.1")));
+        QVERIFY(args->contains(QStringLiteral("output.HDMI-A-1.position.1920,100")));
+        QVERIFY(args->contains(QStringLiteral("output.HDMI-A-1.priority.1")));
+        QVERIFY(args->contains(QStringLiteral("output.DP-1.priority.2")));
+        QCOMPARE(args->size(), 5);
+
+        selected[QStringLiteral("DP-1")].id = QStringLiteral("unadvertised");
+        QVERIFY(!Plan::arguments(*plan, states, priorities(), selected));
+        selected[QStringLiteral("DP-1")] = target;
+        states[QStringLiteral("DP-1")].position = QPoint(1, 0);
+        QVERIFY(!Plan::arguments(*plan, states, priorities(), selected));
+        states[QStringLiteral("DP-1")] = state;
+        states[QStringLiteral("DP-1")].scale = 1.0;
+        QVERIFY(!Plan::arguments(*plan, states, priorities(), selected));
+        states[QStringLiteral("DP-1")] = state;
+        states[QStringLiteral("HDMI-A-1")].position = QPoint(1280, 101);
+        QVERIFY(!Plan::arguments(*plan, states, priorities(), selected));
+        states[QStringLiteral("HDMI-A-1")] = peer;
+        auto changedPriorities = priorities();
+        changedPriorities[QStringLiteral("HDMI-A-1")] = 3;
+        QVERIFY(!Plan::arguments(*plan, states, changedPriorities, selected));
+    }
+};
+
+QTEST_GUILESS_MAIN(ConsoleTopologyPlanTest)
+#include "ConsoleTopologyPlanTest.moc"
