@@ -107,6 +107,24 @@ private Q_SLOTS:
         QVERIFY(caps.value(QStringLiteral("enumerate")).toBool());
         for (const auto *name : {"add", "remove", "position", "resize", "scale", "primary", "multiOutputCapture"})
             QVERIFY(!caps.value(QLatin1String(name)).toBool());
+        QVERIFY(!caps.value(QStringLiteral("physicalChange")).toBool());
+        const auto privateSingle = consoleReadOnly(QStringLiteral("q-console"), *observed, true)
+            .value(QStringLiteral("capabilities")).toObject();
+        QVERIFY(privateSingle.value(QStringLiteral("physicalChange")).toBool());
+        QVERIFY(privateSingle.value(QStringLiteral("resize")).toBool());
+        QVERIFY(!privateSingle.value(QStringLiteral("position")).toBool());
+        const auto two = catalog.observe({observed->outputs.first().output, {
+            .backendKey = QStringLiteral("HDMI-A-1"), .name = QStringLiteral("HDMI-A-1"),
+            .nativePixels = QSize(1920, 1080), .logicalGeometry = QRect(2560, 0, 1920, 1080),
+            .scale = 1, .enabled = true, .primary = false, .physical = true, .owner = {},
+        }});
+        QVERIFY(two);
+        const auto privateMulti = consoleReadOnly(QStringLiteral("q-console"), *two, true)
+            .value(QStringLiteral("capabilities")).toObject();
+        QVERIFY(privateMulti.value(QStringLiteral("position")).toBool());
+        QVERIFY(privateMulti.value(QStringLiteral("primary")).toBool());
+        QVERIFY(!privateMulti.value(QStringLiteral("add")).toBool());
+        QVERIFY(!privateMulti.value(QStringLiteral("remove")).toBool());
         const auto preview = previewReply(QStringLiteral("p-console"), QStringLiteral("token"),
             {observed->outputs, observed->outputs, {}}, *observed, QStringLiteral("lease"),
             QJsonArray{QStringLiteral("physical-output-change")});

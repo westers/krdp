@@ -698,7 +698,9 @@ void ConsoleHostController::finishTopologyQueries(const QString &error)
         const QString request = pending.value(client->id);
         if (request.isEmpty()) continue;
         client->connection->sendControlRecord(error.isEmpty()
-            ? RemoteTopologyProtocol::consoleReadOnly(request, m_topologyCatalog.snapshot())
+            ? RemoteTopologyProtocol::consoleReadOnly(request, m_topologyCatalog.snapshot(),
+                m_experimentalPhysicalTopology && m_endpoint.target().adapter == ConsoleSeat::Adapter::PhysicalUser
+                    && m_inputEnabled && m_topologyAvailable)
             : RemoteTopologyProtocol::error(request, error));
     }
 }
@@ -810,7 +812,9 @@ void ConsoleHostController::finishPhysicalTopology(const QString &code, const QS
         }
         else client->connection->sendControlRecord(QJsonObject{{u"type"_s, u"topology-result"_s},
             {u"v"_s, 1}, {u"id"_s, pending->id}, {u"ok"_s, true},
-            {u"topology"_s, RemoteTopologyProtocol::consoleReadOnly(pending->id, m_topologyCatalog.snapshot())}});
+            {u"topology"_s, RemoteTopologyProtocol::consoleReadOnly(pending->id, m_topologyCatalog.snapshot(),
+                m_experimentalPhysicalTopology && m_endpoint.target().adapter == ConsoleSeat::Adapter::PhysicalUser
+                    && m_inputEnabled && m_topologyAvailable)}});
         break;
     }
     if (code.isEmpty()) m_endpoint.requestKeyFrame(); // The verified frame was held during the transaction.

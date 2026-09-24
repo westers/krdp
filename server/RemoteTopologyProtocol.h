@@ -280,17 +280,25 @@ inline QJsonObject retainedReadOnly(const QString &id, const RemoteTopologyCatal
         }}};
 }
 
-inline QJsonObject consoleReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot)
+inline QJsonObject consoleReadOnly(const QString &id, const RemoteTopologyCatalog::Snapshot &snapshot,
+    bool experimentalPhysical = false)
 {
+    const bool physical = experimentalPhysical && !snapshot.outputs.isEmpty()
+        && std::all_of(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [](const auto &entry) {
+            return entry.output.physical && entry.output.enabled && entry.output.owner.isEmpty();
+        });
     return {{QStringLiteral("type"), QStringLiteral("topology")}, {QStringLiteral("v"), 1},
         {QStringLiteral("id"), id}, {QStringLiteral("generation"), snapshot.generation},
         {QStringLiteral("revision"), double(snapshot.revision)},
         {QStringLiteral("outputs"), outputArray(snapshot.outputs, QStringLiteral("lease"))},
         {QStringLiteral("capabilities"), QJsonObject{
             {QStringLiteral("enumerate"), true}, {QStringLiteral("add"), false},
-            {QStringLiteral("remove"), false}, {QStringLiteral("position"), false},
-            {QStringLiteral("resize"), false}, {QStringLiteral("scale"), false},
-            {QStringLiteral("primary"), false}, {QStringLiteral("multiOutputCapture"), false},
+            {QStringLiteral("remove"), false}, {QStringLiteral("position"), physical && snapshot.outputs.size() > 1},
+            {QStringLiteral("resize"), physical}, {QStringLiteral("scale"), physical},
+            {QStringLiteral("primary"), physical && snapshot.outputs.size() > 1},
+            {QStringLiteral("multiOutputCapture"), physical && snapshot.outputs.size() > 1},
+            {QStringLiteral("physicalChange"), physical},
+            {QStringLiteral("positionMin"), -32768}, {QStringLiteral("positionMax"), 32768},
             {QStringLiteral("maxOutputs"), 16}, {QStringLiteral("lifetime"), QStringLiteral("lease")},
         }}};
 }
