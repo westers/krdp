@@ -263,6 +263,105 @@ private Q_SLOTS:
         QVERIFY(!Plan::arguments(*plan, QJsonDocument(sourceJson).toJson()));
     }
 
+    void recoveryRestoresOnlyOwnedFieldsFromFreshReadback()
+    {
+        const auto source = baseline();
+        auto draft = request(source);
+        draft.operations = {
+            {Operation::Kind::Move, idFor(source, QStringLiteral("HDMI-A-1")), QPoint(1920, 100), {}, 1},
+            {Operation::Kind::Resize, idFor(source, QStringLiteral("DP-1")), {}, QSize(1920, 1080), 1},
+            {Operation::Kind::SetPrimary, idFor(source, QStringLiteral("HDMI-A-1")), {}, {}, 1},
+        };
+        const auto plan = Plan::make(source, priorities(), draft, limits());
+        QVERIFY(plan);
+        const auto before = Plan::inventory(*plan, QJsonDocument(physicalKScreen()).toJson());
+        QVERIFY(before);
+        const auto selected = Plan::selectedModes(*plan, *before);
+        QVERIFY(selected);
+        auto json = physicalKScreen();
+        auto outputs = json.value(QStringLiteral("outputs")).toArray();
+        auto first = outputs[0].toObject();
+        first.insert(QStringLiteral("currentModeId"), QStringLiteral("41"));
+        first.insert(QStringLiteral("size"), QJsonObject{{QStringLiteral("width"), 1920}, {QStringLiteral("height"), 1080}});
+        first.insert(QStringLiteral("scale"), 1.0);
+        first.insert(QStringLiteral("priority"), 2);
+        outputs[0] = first;
+        auto second = outputs[1].toObject();
+        second.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1920}, {QStringLiteral("y"), 100}});
+        second.insert(QStringLiteral("priority"), 1);
+        outputs[1] = second;
+        json.insert(QStringLiteral("outputs"), outputs);
+        const auto full = Plan::recoveryArguments(*plan, *before, *selected, QJsonDocument(json).toJson());
+        QVERIFY(full);
+        QVERIFY(full->contains(QStringLiteral("output.DP-1.mode.27")));
+        QVERIFY(full->contains(QStringLiteral("output.DP-1.scale.1.25")));
+        QVERIFY(full->contains(QStringLiteral("output.HDMI-A-1.position.1280,100")));
+        QVERIFY(full->contains(QStringLiteral("output.DP-1.priority.1")));
+        QVERIFY(full->contains(QStringLiteral("output.HDMI-A-1.priority.2")));
+
+        // A previous physical mode ID can vanish after hotplug/driver churn.
+        auto noOriginalMode = first;
+        noOriginalMode.insert(QStringLiteral("modes"), QJsonArray{
+            mode(QStringLiteral("41"), QSize(1920, 1080), 59.94),
+            mode(QStringLiteral("42"), QSize(1920, 1080), 50)});
+        auto missingModeOutputs = outputs;
+        missingModeOutputs[0] = noOriginalMode;
+        auto missingModeJson = json;
+        missingModeJson.insert(QStringLiteral("outputs"), missingModeOutputs);
+        QVERIFY(!Plan::recoveryArguments(*plan, *before, *selected, QJsonDocument(missingModeJson).toJson()));
+
+        // KDE moved the peer elsewhere after our attempt: do not clobber it.
+        second.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 2000}, {QStringLiteral("y"), 100}});
+        outputs[1] = second;
+        json.insert(QStringLiteral("outputs"), outputs);
+        const auto independent = Plan::recoveryArguments(*plan, *before, *selected, QJsonDocument(json).toJson());
+        QVERIFY(independent);
+        QVERIFY(!independent->contains(QStringLiteral("output.HDMI-A-1.position.1280,100")));
+        QVERIFY(independent->contains(QStringLiteral("output.DP-1.mode.27")));
+
+        // A different refresh-rate mode with identical pixels is also an
+        // independent edit; no size-based mode rollback is allowed.
+        first.insert(QStringLiteral("currentModeId"), QStringLiteral("42"));
+        outputs[0] = first;
+        json.insert(QStringLiteral("outputs"), outputs);
+        const auto changedRefresh = Plan::recoveryArguments(*plan, *before, *selected, QJsonDocument(json).toJson());
+        QVERIFY(changedRefresh);
+        QVERIFY(!changedRefresh->contains(QStringLiteral("output.DP-1.mode.27")));
+    }
+
+    void recoveryRefusesHotplugAndProjectedOverlap()
+    {
+        const auto source = baseline();
+        auto draft = request(source);
+        draft.operations = {
+            {Operation::Kind::Move, idFor(source, QStringLiteral("HDMI-A-1")), QPoint(1920, 100), {}, 1},
+            {Operation::Kind::Resize, idFor(source, QStringLiteral("DP-1")), {}, QSize(1920, 1080), 1},
+        };
+        const auto plan = Plan::make(source, priorities(), draft, limits());
+        QVERIFY(plan);
+        const auto before = Plan::inventory(*plan, QJsonDocument(physicalKScreen()).toJson());
+        QVERIFY(before);
+        const auto selected = Plan::selectedModes(*plan, *before);
+        QVERIFY(selected);
+        auto json = physicalKScreen();
+        auto outputs = json.value(QStringLiteral("outputs")).toArray();
+        auto first = outputs[0].toObject();
+        first.insert(QStringLiteral("currentModeId"), QStringLiteral("42"));
+        first.insert(QStringLiteral("size"), QJsonObject{{QStringLiteral("width"), 1920}, {QStringLiteral("height"), 1080}});
+        first.insert(QStringLiteral("scale"), 1.0);
+        outputs[0] = first;
+        auto second = outputs[1].toObject();
+        second.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1920}, {QStringLiteral("y"), 100}});
+        outputs[1] = second;
+        json.insert(QStringLiteral("outputs"), outputs);
+        // Preserving mode 42 while reverting scale and peer position would
+        // overlap the two outputs, so the entire recovery is refused.
+        QVERIFY(!Plan::recoveryArguments(*plan, *before, *selected, QJsonDocument(json).toJson()));
+        outputs.removeLast();
+        json.insert(QStringLiteral("outputs"), outputs);
+        QVERIFY(!Plan::recoveryArguments(*plan, *before, *selected, QJsonDocument(json).toJson()));
+    }
+
     void workerWireMustMatchFullPhysicalBeforeLayout()
     {
         using KRdp::ConsoleWorkerWire::MixedOperation;

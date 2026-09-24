@@ -372,4 +372,90 @@ inline bool recognizedPartial(const Plan &plan, const Snapshot &current, const P
     }
     return true;
 }
+
+// Build a compensating command from a *new* compositor readback. This is not
+// an unconditional rollback: a field that KDE or another controller changed
+// to a third value is left alone. The projected complete layout must still
+// have distinct priorities and non-overlapping logical output rectangles.
+// The worker must verify the resulting KScreen state and fresh captures before
+// reporting recovery; an empty list means there is nothing of ours to undo.
+inline std::optional<QStringList> recoveryArguments(const Plan &plan, const Inventory &before,
+    const QMap<QString, Mode> &selected, const QByteArray &freshKScreenJson)
+{
+    if (!arguments(plan, before.states, before.priorities, selected)) return {};
+    const auto parsed = RetainedKScreenReadback::parse(freshKScreenJson, QStringLiteral("console-recovery"));
+    if (!parsed || parsed->outputs.size() != plan.before.outputs.size()) return {};
+    const auto currentPriorities = RetainedMultiPrimaryPlan::priorities(freshKScreenJson, *parsed);
+    if (!currentPriorities || currentPriorities->size() != plan.before.outputs.size()) return {};
+    Plan observedPlan = plan;
+    observedPlan.before.outputs.clear();
+    for (const auto &output : parsed->outputs) {
+        if (!before.states.contains(output.backendKey)) return {}; // hotplug or replacement
+        auto physical = output;
+        physical.physical = true;
+        physical.owner.clear();
+        const auto old = std::find_if(plan.before.outputs.cbegin(), plan.before.outputs.cend(),
+            [&physical](const auto &entry) { return entry.output.backendKey == physical.backendKey; });
+        if (old == plan.before.outputs.cend() || old->output.name != physical.name) return {};
+        observedPlan.before.outputs.append({old->id, physical});
+    }
+    observedPlan.beforePriorities = *currentPriorities;
+    const auto current = inventory(observedPlan, freshKScreenJson);
+    if (!current || current->states.size() != before.states.size()) return {};
+
+    auto projected = current->states;
+    auto projectedPriorities = current->priorities;
+    QStringList args;
+    for (auto it = before.states.cbegin(); it != before.states.cend(); ++it) {
+        const QString &name = it.key();
+        if (!current->states.contains(name)) return {};
+        const auto &old = it.value();
+        const auto &now = current->states.value(name);
+        auto &next = projected[name];
+        const QString prefix = QStringLiteral("output.%1.").arg(name);
+        if (selected.contains(name)) {
+            const auto &target = selected.value(name);
+            // Equal pixels with a different mode ID can be an independent
+            // refresh-rate edit. Never infer ownership from size alone.
+            if (now.current == target && now.current != old.current) {
+                if (std::none_of(now.modes.cbegin(), now.modes.cend(), [&old](const Mode &mode) {
+                        return mode == old.current;
+                    })) return {};
+                args.append(prefix + QStringLiteral("mode.") + old.current.id);
+                next.current = old.current;
+            }
+            const double targetScale = plan.modes.value(name).second;
+            if (sameScale(now.scale, targetScale) && !sameScale(targetScale, old.scale)) {
+                args.append(prefix + QStringLiteral("scale.") + QString::number(old.scale, 'g', 12));
+                next.scale = old.scale;
+            }
+        }
+        if (plan.positions.contains(name) && now.position == plan.positions.value(name)
+            && now.position != old.position) {
+            args.append(prefix + QStringLiteral("position.%1,%2").arg(old.position.x()).arg(old.position.y()));
+            next.position = old.position;
+        }
+        if (plan.afterPriorities.value(name) != plan.beforePriorities.value(name)
+            && current->priorities.value(name) == plan.afterPriorities.value(name))
+            projectedPriorities[name] = plan.beforePriorities.value(name);
+    }
+    if (projectedPriorities != current->priorities) {
+        QSet<int> values;
+        for (auto it = projectedPriorities.cbegin(); it != projectedPriorities.cend(); ++it) {
+            if (it.value() < 1 || it.value() > projectedPriorities.size() || values.contains(it.value())) return {};
+            values.insert(it.value());
+        }
+        if (!values.contains(1)) return {};
+        args.append(RetainedMultiPrimaryPlan::arguments(projectedPriorities));
+    }
+    QVector<QRect> rectangles;
+    for (const auto &state : std::as_const(projected)) {
+        if (!validPhysicalRequest(state.current.pixels, state.scale)) return {};
+        const QRect rect = RemoteMonitorGeometry::logicalRect(state.position, state.current.pixels, state.scale);
+        if (rect.isEmpty() || std::any_of(rectangles.cbegin(), rectangles.cend(),
+                [&rect](const QRect &peer) { return peer.intersects(rect); })) return {};
+        rectangles.append(rect);
+    }
+    return args;
+}
 }
