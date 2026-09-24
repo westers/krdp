@@ -343,6 +343,27 @@ inline std::optional<QStringList> arguments(const Plan &plan, const QByteArray &
     return selected ? arguments(plan, fresh->states, fresh->priorities, *selected) : std::nullopt;
 }
 
+// An apply is not complete merely because KScreen reports the requested pixel
+// sizes. Two advertised physical modes can share pixels but differ in refresh;
+// compare exact mode IDs for *every* output as well as the entire geometry,
+// scale and priority map. The caller separately proves encoded captures.
+inline bool matchesApplied(const Plan &plan, const Inventory &before,
+    const QMap<QString, Mode> &selected, const QByteArray &freshKScreenJson)
+{
+    if (!arguments(plan, before.states, before.priorities, selected)) return false;
+    Plan expected = plan;
+    expected.before.outputs = plan.after;
+    expected.beforePriorities = plan.afterPriorities;
+    const auto observed = inventory(expected, freshKScreenJson);
+    if (!observed || observed->states.size() != before.states.size()) return false;
+    for (auto it = before.states.cbegin(); it != before.states.cend(); ++it) {
+        if (!observed->states.contains(it.key())) return false;
+        const Mode wanted = selected.value(it.key(), it.value().current);
+        if (observed->states.value(it.key()).current != wanted) return false;
+    }
+    return true;
+}
+
 // A conditional restore must not overwrite an unrelated KDE edit. This is
 // only the field-level gate; the worker must additionally verify original
 // mode IDs still exist before producing rollback arguments and must read back
@@ -457,5 +478,58 @@ inline std::optional<QStringList> recoveryArguments(const Plan &plan, const Inve
         rectangles.append(rect);
     }
     return args;
+}
+
+// A second readback after the compensating batch must show exactly the
+// requested restorations and no collateral changes to peer fields. Merely
+// finding no further recovery arguments is insufficient: KDE could normalize
+// a requested position to a third value, which must be reported unverified.
+inline bool recoveryVerified(const Plan &plan, const Inventory &before,
+    const QMap<QString, Mode> &selected, const QByteArray &currentJson, const QByteArray &verifiedJson)
+{
+    const auto commands = recoveryArguments(plan, before, selected, currentJson);
+    const auto current = RetainedKScreenReadback::parse(currentJson, QStringLiteral("console-recovery-before"));
+    const auto verified = RetainedKScreenReadback::parse(verifiedJson, QStringLiteral("console-recovery-after"));
+    const auto oldPriorities = current ? RetainedMultiPrimaryPlan::priorities(currentJson, *current) : std::nullopt;
+    const auto newPriorities = verified ? RetainedMultiPrimaryPlan::priorities(verifiedJson, *verified) : std::nullopt;
+    if (!commands || !current || !verified || !oldPriorities || !newPriorities
+        || current->outputs.size() != plan.before.outputs.size()
+        || verified->outputs.size() != current->outputs.size()) return false;
+    const auto rawCurrent = QJsonDocument::fromJson(currentJson).object().value(QStringLiteral("outputs")).toArray();
+    const auto rawVerified = QJsonDocument::fromJson(verifiedJson).object().value(QStringLiteral("outputs")).toArray();
+    QMap<QString, QString> oldModes;
+    QMap<QString, QString> newModes;
+    for (const auto &value : rawCurrent)
+        oldModes.insert(value.toObject().value(QStringLiteral("name")).toString(),
+            value.toObject().value(QStringLiteral("currentModeId")).toString());
+    for (const auto &value : rawVerified)
+        newModes.insert(value.toObject().value(QStringLiteral("name")).toString(),
+            value.toObject().value(QStringLiteral("currentModeId")).toString());
+    if (oldModes.size() != plan.before.outputs.size() || newModes.size() != oldModes.size()) return false;
+    for (const auto &was : current->outputs) {
+        const QString &name = was.backendKey;
+        const auto now = std::find_if(verified->outputs.cbegin(), verified->outputs.cend(), [&name](const auto &output) {
+            return output.backendKey == name;
+        });
+        if (now == verified->outputs.cend() || !before.states.contains(name)
+            || !oldPriorities->contains(name) || !newPriorities->contains(name)
+            || !oldModes.contains(name) || !newModes.contains(name)) return false;
+        const auto &original = before.states.value(name);
+        const QString prefix = QStringLiteral("output.%1.").arg(name);
+        const bool restoreMode = commands->contains(prefix + QStringLiteral("mode.") + original.current.id);
+        const bool restoreScale = commands->contains(prefix + QStringLiteral("scale.")
+            + QString::number(original.scale, 'g', 12));
+        const bool restorePosition = commands->contains(prefix + QStringLiteral("position.%1,%2")
+            .arg(original.position.x()).arg(original.position.y()));
+        const bool restorePriority = commands->contains(prefix + QStringLiteral("priority.%1")
+            .arg(plan.beforePriorities.value(name)));
+        if (newModes.value(name) != (restoreMode ? original.current.id : oldModes.value(name))
+            || now->nativePixels != (restoreMode ? original.current.pixels : was.nativePixels)
+            || !sameScale(now->scale, restoreScale ? original.scale : was.scale)
+            || now->logicalGeometry.topLeft() != (restorePosition ? original.position : was.logicalGeometry.topLeft())
+            || newPriorities->value(name) != (restorePriority ? plan.beforePriorities.value(name) : oldPriorities->value(name)))
+            return false;
+    }
+    return true;
 }
 }

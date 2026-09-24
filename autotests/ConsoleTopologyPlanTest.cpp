@@ -291,6 +291,7 @@ private Q_SLOTS:
         second.insert(QStringLiteral("priority"), 1);
         outputs[1] = second;
         json.insert(QStringLiteral("outputs"), outputs);
+        QVERIFY(Plan::matchesApplied(*plan, *before, *selected, QJsonDocument(json).toJson()));
         const auto full = Plan::recoveryArguments(*plan, *before, *selected, QJsonDocument(json).toJson());
         QVERIFY(full);
         QVERIFY(full->contains(QStringLiteral("output.DP-1.mode.27")));
@@ -298,6 +299,17 @@ private Q_SLOTS:
         QVERIFY(full->contains(QStringLiteral("output.HDMI-A-1.position.1280,100")));
         QVERIFY(full->contains(QStringLiteral("output.DP-1.priority.1")));
         QVERIFY(full->contains(QStringLiteral("output.HDMI-A-1.priority.2")));
+        const auto appliedJson = QJsonDocument(json).toJson();
+        QVERIFY(Plan::recoveryVerified(*plan, *before, *selected, appliedJson,
+            QJsonDocument(physicalKScreen()).toJson()));
+        auto normalized = physicalKScreen();
+        auto normalizedOutputs = normalized.value(QStringLiteral("outputs")).toArray();
+        auto normalizedPeer = normalizedOutputs[1].toObject();
+        normalizedPeer.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1300}, {QStringLiteral("y"), 100}});
+        normalizedOutputs[1] = normalizedPeer;
+        normalized.insert(QStringLiteral("outputs"), normalizedOutputs);
+        QVERIFY(!Plan::recoveryVerified(*plan, *before, *selected, appliedJson,
+            QJsonDocument(normalized).toJson()));
 
         // A previous physical mode ID can vanish after hotplug/driver churn.
         auto noOriginalMode = first;
@@ -324,6 +336,7 @@ private Q_SLOTS:
         first.insert(QStringLiteral("currentModeId"), QStringLiteral("42"));
         outputs[0] = first;
         json.insert(QStringLiteral("outputs"), outputs);
+        QVERIFY(!Plan::matchesApplied(*plan, *before, *selected, QJsonDocument(json).toJson()));
         const auto changedRefresh = Plan::recoveryArguments(*plan, *before, *selected, QJsonDocument(json).toJson());
         QVERIFY(changedRefresh);
         QVERIFY(!changedRefresh->contains(QStringLiteral("output.DP-1.mode.27")));

@@ -89,6 +89,7 @@ public:
         , m_uid(uid)
         , m_token(token)
         , m_mode(mode)
+        , m_authenticatedDesktop(desktop)
         , m_microphone(desktop)
     {
         connect(&m_microphone, &ConsoleMicrophoneSession::result, this, [this](const auto &result) {
@@ -226,6 +227,19 @@ public:
             finishMixedCreate(QStringLiteral("mixed creation/capture timed out"));
             m_socket.disconnectFromServer();
         });
+        m_physicalDeadline.setSingleShot(true);
+        m_physicalDeadline.setInterval(15000);
+        connect(&m_physicalDeadline, &QTimer::timeout, this, [this] {
+            if (m_physicalPending) failPhysical(QStringLiteral("physical layout capture timed out"));
+        });
+        connect(&m_session, &PlasmaScreencastV1Session::captureRestartFailed, this, [this](quint64 epoch) {
+            if (m_physicalPending && epoch == m_physicalCaptureEpoch)
+                failPhysical(QStringLiteral("physical layout capture restart failed"));
+        });
+        connect(&m_session, &PlasmaScreencastV1Session::captureRestartReady, this, [this](quint64 epoch) {
+            if (m_physicalPending && epoch == m_physicalCaptureEpoch)
+                m_physicalCaptureRestartReady = true;
+        });
         m_addDeadline.setSingleShot(true);
         m_addDeadline.setInterval(15000);
         connect(&m_addDeadline, &QTimer::timeout, this, [this] {
@@ -299,6 +313,20 @@ public:
                     // still needs the exact fractional scale for its recovery frame.
                     if (!m_virtualResize.changing()) m_session.setWorkspaceFrameScaleHint(std::nullopt);
                     if (!m_virtualResize.framesAllowed()) return; // Never forward stale-size encoded packets during Fit/recovery.
+                }
+                if (!m_mode.virtualSession && m_physicalPending) {
+                    if (!m_physicalCaptureRestartReady || !frame.isKeyFrame || outputs.monitors.isEmpty()) return;
+                    const auto json = readKScreenJson();
+                    const auto kscreen = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+                    if (!json || !kscreen || !ConsoleTopologyReadback::confirmed(*kscreen, outputs, frame)
+                        || !m_physicalPlan || !m_physicalBefore || !m_physicalSelected
+                        || !ConsoleTopologyPlan::matchesApplied(*m_physicalPlan, *m_physicalBefore,
+                            *m_physicalSelected, *json)
+                        || !m_control.active || m_control.generation != m_physicalPending->controlGeneration) {
+                        failPhysical(QStringLiteral("physical layout differs after captured readback"));
+                        return;
+                    }
+                    finishPhysical({});
                 }
                 if (!outputs.monitors.isEmpty() && outputs != m_outputs) {
                     m_outputs = outputs;
@@ -378,6 +406,7 @@ private:
         }
         m_stopping = true;
         m_exitCode = code;
+        if (m_physicalPending) failPhysical(QStringLiteral("physical Console worker stopped during layout change"));
         releaseInput();
         m_audioTimer.stop();
         m_audio.reset();
@@ -717,6 +746,10 @@ private:
                 ? RetainedKScreenReadback::parse(*kscreenJson, m_sessionId) : std::nullopt;
             if (!kscreen || !RetainedKScreenReadback::matchesPublished(*kscreen, result.outputs, result.frames)) {
                 qWarning() << "KScreen readback did not match all captured outputs";
+                if (m_physicalPending) {
+                    failPhysical(QStringLiteral("physical layout differs from independent captured outputs"));
+                    return;
+                }
                 if (m_mixedCreatePending)
                     finishMixedCreate(QStringLiteral("mixed-created capture differs from compositor readback"));
                 m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error,
@@ -730,6 +763,16 @@ private:
                     // An intermediate frame must not be shown at stale RDP
                     // coordinates while the legacy resize is unresolved.
                     return;
+                }
+                if (m_physicalPending) {
+                    if (!kscreenJson || !m_physicalPlan || !m_physicalBefore || !m_physicalSelected
+                        || !ConsoleTopologyPlan::matchesApplied(*m_physicalPlan, *m_physicalBefore,
+                            *m_physicalSelected, *kscreenJson)
+                        || !m_control.active || m_control.generation != m_physicalPending->controlGeneration) {
+                        failPhysical(QStringLiteral("physical layout differs after per-output captured readback"));
+                        return;
+                    }
+                    finishPhysical({});
                 }
             }
             if (m_addPending && (!m_addPlaced || !addMatches(*kscreen, true)
@@ -850,27 +893,114 @@ private:
         return json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
     }
 
-    QString physicalLayoutPreflight(const ConsoleWorkerWire::PhysicalLayout &request) const
+    void finishPhysical(const QString &error)
     {
-        if (m_mode.virtualSession || m_stopping || !m_control.active
+        if (!m_physicalPending) return;
+        const auto request = *m_physicalPending;
+        m_physicalPending.reset();
+        m_physicalPlan.reset();
+        m_physicalBefore.reset();
+        m_physicalSelected.reset();
+        m_physicalDeadline.stop();
+        m_physicalCaptureRestartReady = false;
+        m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLayoutResult{
+            request.requestId, request.controlGeneration, error}));
+    }
+
+    void failPhysical(const QString &reason)
+    {
+        if (!m_physicalPending) return;
+        releaseInput();
+        m_multiReady = false;
+        m_lastPhysicalKeyframe.reset();
+        QString error = reason;
+        if (m_physicalPlan && m_physicalBefore && m_physicalSelected) {
+            const auto current = readKScreenJson();
+            const auto restore = current ? ConsoleTopologyPlan::recoveryArguments(*m_physicalPlan,
+                *m_physicalBefore, *m_physicalSelected, *current) : std::nullopt;
+            if (restore) {
+                if (!restore->isEmpty()) runKScreenCommand(*restore);
+                const auto verified = readKScreenJson();
+                error += verified && ConsoleTopologyPlan::recoveryVerified(*m_physicalPlan,
+                    *m_physicalBefore, *m_physicalSelected, *current, *verified)
+                    ? QStringLiteral("; owned fields reconciled")
+                    : QStringLiteral("; recovery not fully verified");
+            } else {
+                error += QStringLiteral("; recovery unavailable");
+            }
+        }
+        finishPhysical(error);
+        m_socket.disconnectFromServer(); // Never show stale video or accept stale input after failure.
+    }
+
+    void physicalLayout(const ConsoleWorkerWire::PhysicalLayout &request)
+    {
+        const auto reject = [this, &request](const QString &error) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLayoutResult{
+                request.requestId, request.controlGeneration, error}));
+        };
+        if (m_mode.virtualSession || !m_authenticatedDesktop || m_stopping || m_physicalPending || !m_control.active
             || m_control.generation != request.controlGeneration || m_resize.changing()
             || m_outputs.monitors.isEmpty()
             || (m_multiMode ? (!m_multiReady || m_multiPublishedFrames.size() != m_outputs.monitors.size())
-                            : !m_lastPhysicalKeyframe))
-            return QStringLiteral("physical layout requires an idle authenticated Console capture");
+                            : !m_lastPhysicalKeyframe)) {
+            reject(QStringLiteral("physical layout requires an idle authenticated Console capture"));
+            return;
+        }
         const auto plan = ConsoleTopologyPlan::fromWire(request);
-        if (!plan) return QStringLiteral("physical layout draft is invalid");
+        if (!plan) {
+            reject(QStringLiteral("physical layout draft is invalid"));
+            return;
+        }
         const auto json = readKScreenJson();
         const auto kscreen = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
         const auto captured = kscreen
             ? (m_multiMode ? ConsoleTopologyReadback::confirmedMulti(*kscreen, m_outputs, m_multiPublishedFrames)
                            : ConsoleTopologyReadback::confirmed(*kscreen, m_outputs, *m_lastPhysicalKeyframe))
             : std::nullopt;
-        if (!captured)
-            return QStringLiteral("fresh physical KScreen readback differs from captured desktop");
-        const auto arguments = ConsoleTopologyPlan::arguments(*plan, *json);
-        if (!arguments) return QStringLiteral("physical layout or advertised modes changed before apply");
-        return QStringLiteral("physical layout apply and capture verification unavailable");
+        if (!captured) {
+            reject(QStringLiteral("fresh physical KScreen readback differs from captured desktop"));
+            return;
+        }
+        const auto before = ConsoleTopologyPlan::inventory(*plan, *json);
+        const auto selected = before ? ConsoleTopologyPlan::selectedModes(*plan, *before) : std::nullopt;
+        const auto args = selected
+            ? ConsoleTopologyPlan::arguments(*plan, before->states, before->priorities, *selected) : std::nullopt;
+        if (!args) {
+            reject(QStringLiteral("physical layout or advertised modes changed before apply"));
+            return;
+        }
+        if (args->isEmpty()) {
+            reject({}); // A verified no-op must not churn the compositor.
+            return;
+        }
+        releaseInput();
+        m_physicalPending = request;
+        m_physicalPlan = *plan;
+        m_physicalBefore = *before;
+        m_physicalSelected = *selected;
+        m_physicalCaptureRestartReady = false;
+        m_lastPhysicalKeyframe.reset();
+        if (m_multiMode) {
+            m_multiReady = false;
+            m_multiCapture.invalidate();
+            m_multiPublishedFrames.clear();
+        }
+        // KScreen's exit code is not authoritative. It can report apply failure
+        // and still exit zero; always compare a second complete readback.
+        runKScreenCommand(*args);
+        const auto applied = readKScreenJson();
+        if (!applied || !ConsoleTopologyPlan::matchesApplied(*plan, *before, *selected, *applied)) {
+            failPhysical(QStringLiteral("physical layout did not match requested full readback"));
+            return;
+        }
+        m_physicalDeadline.start();
+        if (m_multiMode) {
+            m_multiResizeNeedsRestart = true;
+            m_multiSettle.start(0);
+        } else if (!m_session.restartCaptureForResize(++m_physicalCaptureEpoch)) {
+            failPhysical(QStringLiteral("physical layout capture cannot restart"));
+        }
     }
 
     bool runKScreenCommand(const QStringList &arguments) const
@@ -1783,6 +1913,10 @@ private:
         while (const auto record = m_deframer.next()) {
             if (const auto control = ConsoleWorkerWire::controlState(*record)) {
                 if (*control != m_control) {
+                    if (m_physicalPending) {
+                        failPhysical(QStringLiteral("physical layout authority changed during capture"));
+                        return;
+                    }
                     const bool multiNewGrant = m_multiMode && m_multiReady
                         && !m_control.active && control->active
                         && !m_positionPending && !m_addPending && !m_removePending
@@ -1840,6 +1974,12 @@ private:
                 continue;
             }
             if (const auto request = ConsoleWorkerWire::resize(*record)) {
+                if (m_physicalPending) {
+                    m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{
+                        request->requestId, request->generation,
+                        QStringLiteral("physical layout transaction is in progress")}));
+                    continue;
+                }
                 releaseInput();
                 if (m_mode.virtualSession && m_multiMode) multiResize(*request);
                 else if (m_mode.virtualSession) m_virtualResize.request(*request);
@@ -1879,11 +2019,7 @@ private:
                 continue;
             }
             if (const auto request = ConsoleWorkerWire::physicalLayout(*record)) {
-                // Preflight the *whole* current Console and current control
-                // grant, but do not mutate KDE until post-apply per-output
-                // capture and conditional recovery are wired.
-                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLayoutResult{
-                    request->requestId, request->controlGeneration, physicalLayoutPreflight(*request)}));
+                physicalLayout(*request);
                 continue;
             }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {
@@ -1937,7 +2073,8 @@ private:
                 continue;
             }
             if (const auto input = ConsoleWorkerWire::input(*record)) {
-                if (!m_control.active || !(m_mode.virtualSession ? m_virtualResize.inputAllowed() : m_resize.inputAllowed())
+                if (!m_control.active || m_physicalPending
+                    || !(m_mode.virtualSession ? m_virtualResize.inputAllowed() : m_resize.inputAllowed())
                     || (m_multiMode && !m_multiReady)) {
                     continue;
                 }
@@ -1986,6 +2123,7 @@ private:
     quint32 m_uid = 0;
     QByteArray m_token;
     CaptureWorkerMode m_mode;
+    bool m_authenticatedDesktop = false;
     QLocalSocket m_socket;
     ConsoleWorkerWire::Deframer m_deframer;
     PlasmaScreencastV1Session m_session;
@@ -1996,6 +2134,13 @@ private:
     QPoint m_workspaceOrigin;
     QSet<QScreen *> m_watchedScreens;
     QTimer m_multiSettle;
+    QTimer m_physicalDeadline;
+    std::optional<ConsoleWorkerWire::PhysicalLayout> m_physicalPending;
+    std::optional<ConsoleTopologyPlan::Plan> m_physicalPlan;
+    std::optional<ConsoleTopologyPlan::Inventory> m_physicalBefore;
+    std::optional<QMap<QString, ConsoleTopologyPlan::Mode>> m_physicalSelected;
+    quint64 m_physicalCaptureEpoch = 0;
+    bool m_physicalCaptureRestartReady = false;
     QTimer m_positionDeadline;
     std::optional<PendingPosition> m_positionPending;
     std::optional<RetainedMultiPositionPlan::Plan> m_positionPlan;

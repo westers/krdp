@@ -78,6 +78,24 @@ private Q_SLOTS:
         fresh.outputs[1].logicalGeometry.moveLeft(1300);
         QVERIFY(!KRdp::ConsoleTopologyReadback::confirmedMulti(fresh, outputs, {first, second}));
     }
+
+    void singlePhysicalModeCannotUseAnOldEncodedSize()
+    {
+        QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/1280x720.h264")));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        KRdp::VideoFrame old;
+        old.size = QSize(1280, 720);
+        old.data = file.readAll();
+        old.isKeyFrame = true;
+        old.monitors = {{QRect(0, 0, 1280, 720), true}};
+        KRdp::ConsoleWorkerWire::Outputs outputs;
+        outputs.monitors = {{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1.5, true}};
+        KRdp::RetainedKScreenReadback::Snapshot fresh;
+        fresh.outputs = {{.backendKey = QStringLiteral("DP-1"), .name = QStringLiteral("DP-1"),
+            .nativePixels = QSize(1920, 1080), .logicalGeometry = QRect(0, 0, 1280, 720),
+            .scale = 1.5, .enabled = true, .primary = true, .physical = true, .owner = {}}};
+        QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, old));
+    }
 };
 
 QTEST_GUILESS_MAIN(ConsoleTopologyReadbackTest)
