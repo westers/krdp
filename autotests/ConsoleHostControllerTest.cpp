@@ -76,6 +76,24 @@ private Q_SLOTS:
         QVERIFY(host.m_physicalLeaseActive);
         const auto add = *host.m_pendingVirtual;
         QVERIFY(add.backendKey.startsWith(QStringLiteral("Virtual-krdp-added-")));
+        ConsoleWorkerWire::Deframer fromBroker;
+        std::optional<ConsoleWorkerWire::AddVirtual> dispatchedAdd;
+        QElapsedTimer wireDeadline;
+        wireDeadline.start();
+        while (!dispatchedAdd && wireDeadline.elapsed() < 1000) {
+            QCoreApplication::processEvents();
+            if (!worker.bytesAvailable()) worker.waitForReadyRead(20);
+            fromBroker.feed(worker.readAll());
+            while (const auto record = fromBroker.next()) {
+                if (const auto command = ConsoleWorkerWire::addVirtual(*record)) dispatchedAdd = *command;
+            }
+        }
+        QVERIFY(dispatchedAdd);
+        QCOMPARE(dispatchedAdd->requestId, add.serial);
+        QCOMPARE(dispatchedAdd->generation, add.controlGeneration);
+        QCOMPARE(dispatchedAdd->output, add.backendKey);
+        QCOMPARE(dispatchedAdd->pixels, QSize(960, 540));
+        QCOMPARE(dispatchedAdd->globalLogical, QPoint(1280, 0));
         Q_EMIT host.m_endpoint.addVirtualFinished({add.serial, add.controlGeneration, {}});
         QVERIFY(host.m_pendingVirtual->waitingReadback);
         Q_EMIT host.m_endpoint.outputsReceived({{
@@ -99,6 +117,20 @@ private Q_SLOTS:
         QVERIFY(host.m_pendingVirtual);
         const auto remove = *host.m_pendingVirtual;
         QCOMPARE(remove.backendKey, add.backendKey);
+        std::optional<ConsoleWorkerWire::RemoveVirtual> dispatchedRemove;
+        wireDeadline.restart();
+        while (!dispatchedRemove && wireDeadline.elapsed() < 1000) {
+            QCoreApplication::processEvents();
+            if (!worker.bytesAvailable()) worker.waitForReadyRead(20);
+            fromBroker.feed(worker.readAll());
+            while (const auto record = fromBroker.next()) {
+                if (const auto command = ConsoleWorkerWire::removeVirtual(*record)) dispatchedRemove = *command;
+            }
+        }
+        QVERIFY(dispatchedRemove);
+        QCOMPARE(dispatchedRemove->requestId, remove.serial);
+        QCOMPARE(dispatchedRemove->generation, remove.controlGeneration);
+        QCOMPARE(dispatchedRemove->output, add.backendKey);
         Q_EMIT host.m_endpoint.removeVirtualFinished({remove.serial, remove.controlGeneration, {}});
         QVERIFY(host.m_pendingVirtual->waitingReadback);
         Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}}});
