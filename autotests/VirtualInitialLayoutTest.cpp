@@ -18,6 +18,37 @@ class VirtualInitialLayoutTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void selectedScreenWireSchemaIsStrict()
+    {
+        QJsonObject screen{{QStringLiteral("id"), QStringLiteral("DP-1")},
+            {QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), -1536}, {QStringLiteral("y"), 100}}},
+            {QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), 1920}, {QStringLiteral("height"), 1080}}},
+            {QStringLiteral("scale"), 1.25}, {QStringLiteral("primary"), true}};
+        const auto parsed = VirtualInitialLayout::parseScreens(QJsonArray{screen});
+        QVERIFY(parsed);
+        QCOMPARE(parsed->first().logicalPosition, QPoint(-1536, 100));
+        QCOMPARE(parsed->first().pixels, QSize(1920, 1080));
+        QVERIFY(parsed->first().primary);
+        QVERIFY(VirtualInitialLayout::plan(*parsed, QStringLiteral("session"), caps()).valid());
+        QVERIFY(!VirtualInitialLayout::parseScreens({}));
+        auto wrong = screen;
+        wrong.insert(QStringLiteral("extra"), true);
+        QVERIFY(!VirtualInitialLayout::parseScreens(QJsonArray{wrong}));
+        wrong = screen;
+        wrong.insert(QStringLiteral("primary"), 1);
+        QVERIFY(!VirtualInitialLayout::parseScreens(QJsonArray{wrong}));
+        wrong = screen;
+        wrong.insert(QStringLiteral("id"), QStringLiteral("bad\nkey"));
+        QVERIFY(!VirtualInitialLayout::parseScreens(QJsonArray{wrong}));
+        wrong = screen;
+        wrong.insert(QStringLiteral("logical"), QJsonObject{{QStringLiteral("x"), 1.5}, {QStringLiteral("y"), 0}});
+        QVERIFY(!VirtualInitialLayout::parseScreens(QJsonArray{wrong}));
+        wrong = screen;
+        wrong.insert(QStringLiteral("pixels"), QJsonObject{{QStringLiteral("width"), QStringLiteral("1920")},
+            {QStringLiteral("height"), 1080}});
+        QVERIFY(!VirtualInitialLayout::parseScreens(QJsonArray{wrong}));
+    }
+
     void selectedPrimaryAndMixedScaleKeepClientAdjacency()
     {
         const QVector<VirtualInitialLayout::Screen> screens{

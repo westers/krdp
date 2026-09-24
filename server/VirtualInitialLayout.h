@@ -6,7 +6,10 @@
 
 #include <cmath>
 #include <limits>
+#include <optional>
 
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QSet>
 
 namespace KRdp::VirtualInitialLayout
@@ -27,6 +30,45 @@ struct Plan {
     QString error;
     bool valid() const { return error.isEmpty(); }
 };
+
+inline std::optional<QVector<Screen>> parseScreens(const QJsonArray &records)
+{
+    if (records.isEmpty() || records.size() > 16) return {};
+    QVector<Screen> screens;
+    screens.reserve(records.size());
+    const auto integer = [](const QJsonValue &value, int minimum, int maximum) -> std::optional<int> {
+        if (!value.isDouble()) return {};
+        const double number = value.toDouble();
+        if (!std::isfinite(number) || std::floor(number) != number || number < minimum || number > maximum) return {};
+        return int(number);
+    };
+    for (const auto &value : records) {
+        if (!value.isObject()) return {};
+        const auto object = value.toObject();
+        const auto logical = object.value(QStringLiteral("logical")).toObject();
+        const auto pixels = object.value(QStringLiteral("pixels")).toObject();
+        const auto id = object.value(QStringLiteral("id")).toString();
+        const auto x = integer(logical.value(QStringLiteral("x")), -32768, 32768);
+        const auto y = integer(logical.value(QStringLiteral("y")), -32768, 32768);
+        const auto width = integer(pixels.value(QStringLiteral("width")), 320, 4096);
+        const auto height = integer(pixels.value(QStringLiteral("height")), 200, 4096);
+        const auto scale = object.value(QStringLiteral("scale"));
+        const auto primary = object.value(QStringLiteral("primary"));
+        if (object.size() != 5 || logical.size() != 2 || pixels.size() != 2
+            || id.isEmpty() || id.size() > 64 || !x || !y || !width || !height
+            || !scale.isDouble() || !std::isfinite(scale.toDouble())
+            || !primary.isBool()) return {};
+        // A client-local selection key, never a compositor name. Keep it
+        // printable and bounded so logs/replies cannot carry control text.
+        for (const QChar ch : id) {
+            const auto code = ch.unicode();
+            if (!((code >= 'A' && code <= 'Z') || (code >= 'a' && code <= 'z')
+                || (code >= '0' && code <= '9') || code == '-' || code == '_')) return {};
+        }
+        screens.append({id, QPoint(*x, *y), QSize(*width, *height), scale.toDouble(), primary.toBool()});
+    }
+    return screens;
+}
 
 inline Plan plan(const QVector<Screen> &screens, const QString &owner,
     const RemoteTopologyDraft::Capabilities &caps)

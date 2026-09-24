@@ -112,6 +112,8 @@ without treating a client screen name as a compositor output ID. The current
 `virtual-session create` wire request still carries no screen selection and the
 installed launcher still uses a fixed initial 1280×720 output; this planner
 does not yet make first creation follow the proposal.
+The request, immutable launch and native acceptance contract is in
+[selected-screen virtual bootstrap](2026-09-23-selected-screen-virtual-bootstrap.md).
 
 **Match my client screens** is an explicit one-shot remote-layout action, not
 continuous synchronization. Show the proposed add/resize/move/remove changes.

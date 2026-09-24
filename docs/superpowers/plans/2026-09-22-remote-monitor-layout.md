@@ -122,6 +122,9 @@ authentication and unchanged physical behavior; real output readback is required
 - Fit updates one remote mode/scale and proposes necessary dependent virtual
   position changes. Test both expansion and shrinking, scale-only changes and no-op.
 - First virtual-desktop creation may initialize from selected client screens.
+  Its still-unwired durable launch path is specified in
+  [selected-screen virtual bootstrap](../specs/2026-09-23-selected-screen-virtual-bootstrap.md);
+  do not advertise the planner alone as a working create feature.
   Later reconnects use retained topology, even if client screen count differs.
 - Implement explicit Match my client screens with preview. Add/move/resize are
   visible; removal needs explicit consent. Console physical changes are never implicit.
