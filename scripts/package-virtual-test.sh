@@ -54,5 +54,6 @@ for name in KRdp KPipeWire KPipeWireDmaBuf KPipeWireRecord; do
 done
 [[ "$task_contents" == *"./opt/krdp-virtual-service-test/share/krdp/virtual-session/drafts/krdp-virtual-host.service"* ]]
 [[ "$task_contents" == *"./opt/krdp-virtual-service-test/share/krdp/virtual-session/drafts/krdp-virtual-session@.service"* ]]
+[[ "$task_contents" == *"./opt/krdp-virtual-service-test/share/krdp/virtual-session/drafts/krdp-virtual-initial-layout-test.conf"* ]]
 [[ "$task_contents" != *'/etc/systemd/'* && "$task_contents" != *'/usr/share/applications/'* ]]
 echo "Paired non-activating virtual test deb: $task_package"
