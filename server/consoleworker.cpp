@@ -39,6 +39,7 @@
 #include "RetainedMultiInput.h"
 #include "RetainedKScreenReadback.h"
 #include "ConsoleTopologyReadback.h"
+#include "ConsoleCreatorLease.h"
 #include "ConsoleTopologyPlan.h"
 #include "ConsoleTopologyLease.h"
 #include "ConsoleTopologyRelease.h"
@@ -334,6 +335,19 @@ public:
                     }
                     finishPhysical({});
                 }
+                if (!m_mode.virtualSession && m_removePending && !m_multiMode) {
+                    if (!frame.isKeyFrame || outputs.monitors.size() != 1) return;
+                    const auto json = readKScreenJson();
+                    const auto kscreen = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+                    if (!json || !kscreen || !ConsoleTopologyReadback::confirmed(*kscreen, outputs, frame)
+                        || !m_removeLease || !ConsoleCreatorLease::matchesReleased(*m_removeLease, *json, m_sessionId)
+                        || !m_control.active || m_control.generation != m_removePending->generation) {
+                        finishRemove(QStringLiteral("last output removal lacks fresh single-output capture proof"));
+                        m_socket.disconnectFromServer();
+                        return;
+                    }
+                    finishRemove({});
+                }
                 if (!outputs.monitors.isEmpty() && outputs != m_outputs) {
                     m_outputs = outputs;
                     m_lastPhysicalKeyframe.reset();
@@ -485,12 +499,13 @@ private:
                 m_socket.disconnectFromServer();
                 return;
             }
-            const auto current = readKScreen();
+            const auto currentJson = readKScreenJson();
+            const auto current = currentJson ? RetainedKScreenReadback::parse(*currentJson, m_sessionId) : std::nullopt;
             if (!current || current->outputs.size() == m_removeBefore.outputs.size()) {
                 m_multiSettle.start(200); // KWin has not retired the output yet.
                 return;
             }
-            if (!removeMatches(*current)) {
+            if (!removeMatches(*current, *currentJson)) {
                 finishRemove(QStringLiteral("removing the output changed the remaining compositor layout"));
                 m_socket.disconnectFromServer();
                 return;
@@ -787,7 +802,7 @@ private:
                 m_socket.disconnectFromServer();
                 return;
             }
-            if (m_removePending && (!removeMatches(*kscreen) || !m_control.active
+            if (m_removePending && (!kscreenJson || !removeMatches(*kscreen, *kscreenJson) || !m_control.active
                 || m_control.generation != m_removePending->generation)) {
                 finishRemove(QStringLiteral("remaining outputs differ from preview after captured readback"));
                 m_socket.disconnectFromServer();
@@ -1769,9 +1784,10 @@ private:
         m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::AddVirtualResult{request.requestId, request.generation, error}));
     }
 
-    bool removeMatches(const RetainedKScreenReadback::Snapshot &current) const
+    bool removeMatches(const RetainedKScreenReadback::Snapshot &current, const QByteArray &json) const
     {
         if (!m_removePending || current.outputs.size() + 1 != m_removeBefore.outputs.size()) return false;
+        if (m_removeLease) return ConsoleCreatorLease::matchesReleased(*m_removeLease, json, m_sessionId);
         for (const auto &old : m_removeBefore.outputs) {
             const auto found = std::find_if(current.outputs.cbegin(), current.outputs.cend(), [&old](const auto &output) {
                 return output.backendKey == old.backendKey;
@@ -1790,6 +1806,7 @@ private:
         if (!m_removePending) return;
         const auto request = *m_removePending;
         m_removePending.reset();
+        m_removeLease.reset();
         m_removeDeadline.stop();
         m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::RemoveVirtualResult{request.requestId, request.generation, error}));
     }
@@ -1799,9 +1816,13 @@ private:
         const auto reject = [this, &request](const QString &error) {
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::RemoveVirtualResult{request.requestId, request.generation, error}));
         };
-        if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || !m_control.active
+        const bool retainedReady = m_mode.virtualSession && m_multiPublishedFrames.size() >= 3;
+        const bool consoleReady = !m_mode.virtualSession && m_authenticatedDesktop
+            && !m_resize.changing() && !m_physicalPending && !m_physicalLease
+            && m_multiPublishedFrames.size() >= 2;
+        if ((!retainedReady && !consoleReady) || !m_multiMode || !m_multiReady || !m_control.active
             || m_control.generation != request.generation || m_positionPending || m_addPending || m_removePending || m_multiResizePending
-            || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending || m_multiPublishedFrames.size() < 3) {
+            || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending) {
             reject(QStringLiteral("virtual output removal unavailable or not authorized"));
             return;
         }
@@ -1812,9 +1833,12 @@ private:
             reject(QStringLiteral("worker does not own this virtual output"));
             return;
         }
-        const auto before = readKScreen();
+        const auto beforeJson = readKScreenJson();
+        const auto before = beforeJson ? RetainedKScreenReadback::parse(*beforeJson, m_sessionId) : std::nullopt;
+        const auto release = consoleReady && beforeJson
+            ? ConsoleCreatorLease::start(*beforeJson, m_sessionId, {request.output}) : std::nullopt;
         if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)
-            || before->outputs.size() < 3
+            || (retainedReady && before->outputs.size() < 3) || (consoleReady && !release)
             || std::none_of(before->outputs.cbegin(), before->outputs.cend(), [&request](const auto &output) {
                 return output.backendKey == request.output && !output.primary;
             })) {
@@ -1825,6 +1849,7 @@ private:
         m_multiReady = false;
         m_multiPublishedFrames.clear();
         m_removeBefore = *before;
+        m_removeLease = release;
         m_removePending = request;
         m_removeDeadline.start();
         m_ownedCreators.erase(creator); // Release only this worker-owned KWin output.
@@ -2157,7 +2182,8 @@ private:
                 continue;
             }
             if (const auto input = ConsoleWorkerWire::input(*record)) {
-                if (!m_control.active || m_physicalPending || (m_addPending && !m_mode.virtualSession)
+                if (!m_control.active || m_physicalPending
+                    || ((!m_mode.virtualSession) && (m_addPending || m_removePending))
                     || !(m_mode.virtualSession ? m_virtualResize.inputAllowed() : m_resize.inputAllowed())
                     || (m_multiMode && !m_multiReady)) {
                     continue;
@@ -2264,6 +2290,7 @@ private:
     QTimer m_removeDeadline;
     std::optional<ConsoleWorkerWire::RemoveVirtual> m_removePending;
     RetainedKScreenReadback::Snapshot m_removeBefore;
+    std::optional<ConsoleCreatorLease::State> m_removeLease;
     QVector<VideoFrame> m_multiPublishedFrames;
     quint64 m_multiEpoch = 0;
     quint8 m_multiQuality = 80;

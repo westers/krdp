@@ -6,6 +6,7 @@
 #include "ConsoleTopologyPlan.h"
 #include "ConsoleTopologyLease.h"
 #include "ConsoleTopologyRelease.h"
+#include "ConsoleCreatorLease.h"
 
 namespace Plan = KRdp::ConsoleTopologyPlan;
 using KRdp::RemoteTopologyDraft::Operation;
@@ -87,6 +88,87 @@ class ConsoleTopologyPlanTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void consoleCreatorReleasePreservesOnlySurvivors()
+    {
+        auto before = physicalKScreen();
+        auto values = before.value(QStringLiteral("outputs")).toArray();
+        auto physical = values[1].toObject();
+        physical.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1300}, {QStringLiteral("y"), 100}});
+        values[1] = physical; // An independent edit before release is the baseline.
+        values.append(physicalOutput(QStringLiteral("Virtual-krdp-added-a"), 55, QPoint(2600, 100),
+            QSize(800, 600), 1, 3, {mode(QStringLiteral("55"), QSize(800, 600), 60)}));
+        before.insert(QStringLiteral("outputs"), values);
+        before.insert(QStringLiteral("screen"), QJsonObject{{QStringLiteral("maxActiveOutputsCount"), 3}});
+        const QSet<QString> owned{QStringLiteral("Virtual-krdp-added-a")};
+        const auto lease = KRdp::ConsoleCreatorLease::start(QJsonDocument(before).toJson(),
+            QStringLiteral("console-session"), owned);
+        QVERIFY(lease);
+
+        auto after = before;
+        values.removeLast();
+        after.insert(QStringLiteral("outputs"), values);
+        after.insert(QStringLiteral("screen"), QJsonObject{{QStringLiteral("maxActiveOutputsCount"), 2}});
+        QVERIFY(KRdp::ConsoleCreatorLease::matchesReleased(*lease, QJsonDocument(after).toJson(),
+            QStringLiteral("console-session")));
+
+        auto gap = after;
+        auto gapValues = values;
+        auto gapPeer = gapValues[1].toObject();
+        gapPeer.insert(QStringLiteral("priority"), 3);
+        gapValues[1] = gapPeer;
+        gap.insert(QStringLiteral("outputs"), gapValues);
+        QVERIFY(KRdp::ConsoleCreatorLease::matchesReleased(*lease, QJsonDocument(gap).toJson(),
+            QStringLiteral("console-session"))); // Numerical gaps are not an ownership change.
+
+        auto moved = after;
+        auto movedValues = values;
+        auto movedPhysical = movedValues[1].toObject();
+        movedPhysical.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1280}, {QStringLiteral("y"), 100}});
+        movedValues[1] = movedPhysical;
+        moved.insert(QStringLiteral("outputs"), movedValues);
+        QVERIFY(!KRdp::ConsoleCreatorLease::matchesReleased(*lease, QJsonDocument(moved).toJson(),
+            QStringLiteral("console-session")));
+
+        auto wrong = before;
+        auto wrongValues = before.value(QStringLiteral("outputs")).toArray();
+        wrongValues.removeAt(1); // Removing an unowned panel can never pass.
+        wrong.insert(QStringLiteral("outputs"), wrongValues);
+        QVERIFY(!KRdp::ConsoleCreatorLease::matchesReleased(*lease, QJsonDocument(wrong).toJson(),
+            QStringLiteral("console-session")));
+
+        QVERIFY(!KRdp::ConsoleCreatorLease::start(QJsonDocument(before).toJson(),
+            QStringLiteral("console-session"), {QStringLiteral("Virtual-missing")}));
+        auto primaryOwned = before;
+        auto primaryValues = before.value(QStringLiteral("outputs")).toArray();
+        auto oldPrimary = primaryValues[0].toObject();
+        oldPrimary.insert(QStringLiteral("priority"), 3);
+        primaryValues[0] = oldPrimary;
+        auto creator = primaryValues[2].toObject();
+        creator.insert(QStringLiteral("priority"), 1);
+        primaryValues[2] = creator;
+        primaryOwned.insert(QStringLiteral("outputs"), primaryValues);
+        QVERIFY(!KRdp::ConsoleCreatorLease::start(QJsonDocument(primaryOwned).toJson(),
+            QStringLiteral("console-session"), owned));
+    }
+
+    void consoleCreatorCanReturnToOnePhysicalOutput()
+    {
+        auto before = physicalKScreen();
+        auto values = before.value(QStringLiteral("outputs")).toArray();
+        values.removeLast();
+        values.append(physicalOutput(QStringLiteral("Virtual-krdp-added-a"), 55, QPoint(1280, 0),
+            QSize(800, 600), 1, 2, {mode(QStringLiteral("55"), QSize(800, 600), 60)}));
+        before.insert(QStringLiteral("outputs"), values);
+        const auto lease = KRdp::ConsoleCreatorLease::start(QJsonDocument(before).toJson(),
+            QStringLiteral("console-session"), {QStringLiteral("Virtual-krdp-added-a")});
+        QVERIFY(lease);
+        values.removeLast();
+        before.insert(QStringLiteral("outputs"), values);
+        before.insert(QStringLiteral("screen"), QJsonObject{{QStringLiteral("maxActiveOutputsCount"), 1}});
+        QVERIFY(KRdp::ConsoleCreatorLease::matchesReleased(*lease, QJsonDocument(before).toJson(),
+            QStringLiteral("console-session")));
+    }
+
     void physicalLeaseReleaseRequiresExactSecondReadback()
     {
         const auto source = baseline();
