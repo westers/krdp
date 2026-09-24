@@ -34,6 +34,7 @@ include(ECMQmlModule)
 
 option(BUILD_EXAMPLES "Build example applications" ON)
 option(BUILD_PLASMA_SESSION "Build support for Plasma Screencasting extensions" ON)
+option(KRDP_BUILD_CONSOLE_TEST_PACKAGE "Stage the paired isolated Console test deb" OFF)
 
 find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED Core Quick Gui Network DBus WaylandClient Qml)
 
@@ -123,3 +124,31 @@ kde_clang_format(${ALL_CLANG_FORMAT_SOURCE_FILES})
 kde_configure_git_pre_commit_hook(CHECKS CLANG_FORMAT)
 
 ki18n_install(po)
+
+if(KRDP_BUILD_CONSOLE_TEST_PACKAGE)
+    if(NOT BUILD_PLASMA_SESSION OR NOT CMAKE_INSTALL_PREFIX STREQUAL "/opt/krdp-console")
+        message(FATAL_ERROR "Console test package requires Plasma support and /opt/krdp-console prefix")
+    endif()
+    if(NOT IS_DIRECTORY "${KRDP_PRIVATE_KPIPEWIRE_LIBDIR}")
+        message(FATAL_ERROR "Set KRDP_PRIVATE_KPIPEWIRE_LIBDIR to the private KPipeWire multiarch lib directory")
+    endif()
+    string(LENGTH "${KRDP_CONSOLE_PACKAGE_REVISION}" console_revision_length)
+    if(NOT KRDP_CONSOLE_PACKAGE_REVISION MATCHES "^[0-9a-f]+$"
+        OR console_revision_length LESS 7 OR console_revision_length GREATER 40)
+        message(FATAL_ERROR "Set KRDP_CONSOLE_PACKAGE_REVISION to the tested source commit")
+    endif()
+    install(DIRECTORY "${KRDP_PRIVATE_KPIPEWIRE_LIBDIR}/"
+        DESTINATION lib/${CMAKE_LIBRARY_ARCHITECTURE}
+        COMPONENT KRdpConsoleTest
+        FILES_MATCHING PATTERN "libKPipeWire*.so*")
+    install(FILES server/org.kde.krdpconsoleworker-test.desktop
+        DESTINATION /usr/share/applications
+        RENAME org.kde.krdpconsoleworker.desktop
+        COMPONENT KRdpConsoleTest)
+    # Ship the unit as a draft. Packaging must not enable or restart a service;
+    # the existing isolated Sol unit still requires a deliberate paired rollout.
+    install(FILES server/krdp-console-host-test.service
+        DESTINATION share/krdp/console-test
+        COMPONENT KRdpConsoleTest)
+    include(cmake/ConsoleTestPackage.cmake)
+endif()
