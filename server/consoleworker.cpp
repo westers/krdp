@@ -39,6 +39,7 @@
 #include "RetainedMultiInput.h"
 #include "RetainedKScreenReadback.h"
 #include "ConsoleTopologyReadback.h"
+#include "ConsoleTopologyPlan.h"
 #include "RetainedMultiResizePlan.h"
 #include "RetainedMultiPositionPlan.h"
 #include "RetainedMultiFitPlan.h"
@@ -805,6 +806,23 @@ private:
     {
         const auto json = readKScreenJson();
         return json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+    }
+
+    QString physicalLayoutPreflight(const ConsoleWorkerWire::PhysicalLayout &request) const
+    {
+        if (m_mode.virtualSession || m_stopping || !m_control.active
+            || m_control.generation != request.controlGeneration || m_resize.changing()
+            || m_multiMode || !m_lastPhysicalKeyframe || m_outputs.monitors.isEmpty())
+            return QStringLiteral("physical layout requires an idle authenticated Console capture");
+        const auto plan = ConsoleTopologyPlan::fromWire(request);
+        if (!plan) return QStringLiteral("physical layout draft is invalid");
+        const auto json = readKScreenJson();
+        const auto kscreen = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+        if (!kscreen || !ConsoleTopologyReadback::confirmed(*kscreen, m_outputs, *m_lastPhysicalKeyframe))
+            return QStringLiteral("fresh physical KScreen readback differs from captured desktop");
+        const auto arguments = ConsoleTopologyPlan::arguments(*plan, *json);
+        if (!arguments) return QStringLiteral("physical layout or advertised modes changed before apply");
+        return QStringLiteral("physical layout apply and capture verification unavailable");
     }
 
     bool runKScreenCommand(const QStringList &arguments) const
@@ -1813,12 +1831,11 @@ private:
                 continue;
             }
             if (const auto request = ConsoleWorkerWire::physicalLayout(*record)) {
-                // The separate physical transaction is not wired yet. A
-                // valid v9 request must fail closed without mutating KDE or
-                // terminating an otherwise healthy Console capture.
+                // Preflight the *whole* current Console and current control
+                // grant, but do not mutate KDE until post-apply per-output
+                // capture and conditional recovery are wired.
                 m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLayoutResult{
-                    request->requestId, request->controlGeneration,
-                    QStringLiteral("physical layout transaction unavailable")}));
+                    request->requestId, request->controlGeneration, physicalLayoutPreflight(*request)}));
                 continue;
             }
             if (record->kind == ConsoleWorkerWire::Kind::RequestKeyFrame && record->payload.isEmpty()) {

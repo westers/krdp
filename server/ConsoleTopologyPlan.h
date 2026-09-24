@@ -6,6 +6,7 @@
 #include "RemoteTopologyDraft.h"
 #include "RetainedMultiPrimaryPlan.h"
 #include "ConsoleResize.h"
+#include "ConsoleWorkerWire.h"
 
 #include <QMap>
 #include <QSet>
@@ -141,6 +142,66 @@ inline std::optional<Plan> make(const Snapshot &before, const Priorities &priori
             || !plan.after[i].output.physical || !plan.after[i].output.owner.isEmpty()) return {};
     }
     return plan;
+}
+
+// Translate the authenticated v9 worker record to the same complete draft
+// preflight used by the broker. Names are local worker lookup keys here;
+// generation-scoped public IDs remain exclusively broker-owned.
+inline std::optional<Plan> fromWire(const ConsoleWorkerWire::PhysicalLayout &wire)
+{
+    if (!wire.requestId || !wire.controlGeneration || wire.catalogGeneration.isEmpty()
+        || !wire.expectedRevision || !wire.allowPhysicalChange || wire.before.isEmpty()
+        || wire.before.size() > 16 || wire.operations.isEmpty() || wire.operations.size() > 16) return {};
+    Snapshot snapshot;
+    snapshot.generation = wire.catalogGeneration;
+    snapshot.revision = wire.expectedRevision;
+    Priorities priorities;
+    QSet<QString> names;
+    for (const auto &physical : wire.before) {
+        if (!RetainedKScreenReadback::outputName(physical.name) || physical.name.startsWith(QStringLiteral("Virtual-"))
+            || names.contains(physical.name) || !validPhysicalRequest(physical.pixels, physical.scale)
+            || physical.logical != RemoteMonitorGeometry::logicalRect(physical.logical.topLeft(),
+                physical.pixels, physical.scale)
+            || physical.priority < 1 || physical.priority > 16
+            || physical.primary != (physical.priority == 1)) return {};
+        names.insert(physical.name);
+        priorities.insert(physical.name, physical.priority);
+        snapshot.outputs.append({physical.name, {
+            .backendKey = physical.name, .name = physical.name, .nativePixels = physical.pixels,
+            .logicalGeometry = physical.logical, .scale = physical.scale, .enabled = true,
+            .primary = physical.primary, .physical = true, .owner = {},
+        }});
+    }
+    std::sort(snapshot.outputs.begin(), snapshot.outputs.end(), [](const auto &a, const auto &b) {
+        return a.output.backendKey < b.output.backendKey;
+    });
+    RemoteTopologyDraft::Request draft;
+    draft.generation = wire.catalogGeneration;
+    draft.expectedRevision = wire.expectedRevision;
+    draft.owner = QStringLiteral("authenticated-physical-controller");
+    draft.allowPhysicalChange = true;
+    for (const auto &change : wire.operations) {
+        if (!names.contains(change.output)) return {};
+        Operation operation;
+        operation.id = change.output;
+        switch (change.kind) {
+        case ConsoleWorkerWire::MixedOperation::Kind::Move:
+            operation.kind = Operation::Kind::Move;
+            operation.position = change.globalLogical;
+            break;
+        case ConsoleWorkerWire::MixedOperation::Kind::Resize:
+            operation.kind = Operation::Kind::Resize;
+            operation.pixels = change.pixels;
+            operation.scale = change.scale;
+            break;
+        case ConsoleWorkerWire::MixedOperation::Kind::Primary:
+            operation.kind = Operation::Kind::SetPrimary;
+            break;
+        }
+        draft.operations.append(operation);
+    }
+    return make(snapshot, priorities, draft, {.changePrimary = true, .maxOutputs = 16,
+        .maxOutputDimension = 4096, .maxAtlasDimension = 8192});
 }
 
 inline bool matches(const Plan &plan, const Snapshot &readback, const Priorities &priorities)

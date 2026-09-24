@@ -262,6 +262,33 @@ private Q_SLOTS:
         sourceJson.insert(QStringLiteral("outputs"), outputs);
         QVERIFY(!Plan::arguments(*plan, QJsonDocument(sourceJson).toJson()));
     }
+
+    void workerWireMustMatchFullPhysicalBeforeLayout()
+    {
+        using KRdp::ConsoleWorkerWire::MixedOperation;
+        KRdp::ConsoleWorkerWire::PhysicalLayout wire{31, 9, QStringLiteral("console-generation-1"), 4, true,
+            {{QStringLiteral("DP-1"), QSize(1600, 900), QRect(0, 0, 1280, 720), 1.25, true, 1},
+             {QStringLiteral("HDMI-A-1"), QSize(1280, 720), QRect(1280, 100, 1280, 720), 1, false, 2}},
+            {{MixedOperation::Kind::Move, QStringLiteral("HDMI-A-1"), QPoint(1920, 100), {}, 1},
+             {MixedOperation::Kind::Resize, QStringLiteral("DP-1"), {}, QSize(1920, 1080), 1},
+             {MixedOperation::Kind::Primary, QStringLiteral("HDMI-A-1"), {}, {}, 1}}};
+        const auto plan = Plan::fromWire(wire);
+        QVERIFY(plan);
+        QCOMPARE(plan->before.generation, wire.catalogGeneration);
+        QCOMPARE(plan->before.revision, wire.expectedRevision);
+        QCOMPARE(plan->afterPriorities.value(QStringLiteral("HDMI-A-1")), 1);
+        QVERIFY(Plan::arguments(*plan, QJsonDocument(physicalKScreen()).toJson()));
+
+        wire.allowPhysicalChange = false;
+        QVERIFY(!Plan::fromWire(wire));
+        wire.allowPhysicalChange = true;
+        wire.before[1].logical.moveLeft(1281);
+        const auto stale = Plan::fromWire(wire);
+        QVERIFY(!stale || !Plan::inventory(*stale, QJsonDocument(physicalKScreen()).toJson()));
+        wire.before[1].logical.moveLeft(1280);
+        wire.operations[0].output = QStringLiteral("unlisted");
+        QVERIFY(!Plan::fromWire(wire));
+    }
 };
 
 QTEST_GUILESS_MAIN(ConsoleTopologyPlanTest)
