@@ -158,7 +158,9 @@ inline std::optional<Plan> fromWire(const ConsoleWorkerWire::PhysicalLayout &wir
     Priorities priorities;
     QSet<QString> names;
     for (const auto &physical : wire.before) {
-        if (!RetainedKScreenReadback::outputName(physical.name) || physical.name.startsWith(QStringLiteral("Virtual-"))
+        // The broker selects eligible outputs from the worker's captured
+        // ownership record. A KWin name is not proof of output kind.
+        if (!RetainedKScreenReadback::outputName(physical.name)
             || names.contains(physical.name) || !validPhysicalRequest(physical.pixels, physical.scale)
             || physical.logical != RemoteMonitorGeometry::logicalRect(physical.logical.topLeft(),
                 physical.pixels, physical.scale)

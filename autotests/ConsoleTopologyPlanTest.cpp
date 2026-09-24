@@ -641,6 +641,32 @@ private Q_SLOTS:
         wire.operations[0].output = QStringLiteral("unlisted");
         QVERIFY(!Plan::fromWire(wire));
     }
+
+    void workerWireDoesNotInferOwnershipFromVirtualPrefix()
+    {
+        using KRdp::ConsoleWorkerWire::MixedOperation;
+        KRdp::ConsoleWorkerWire::PhysicalLayout wire{32, 10, QStringLiteral("console-generation-2"), 5, true,
+            {{QStringLiteral("Virtual-user-output"), QSize(1600, 900), QRect(0, 0, 1600, 900), 1, true, 1},
+             {QStringLiteral("HDMI-A-1"), QSize(1280, 720), QRect(1600, 0, 1280, 720), 1, false, 2}},
+            {{MixedOperation::Kind::Move, QStringLiteral("HDMI-A-1"), QPoint(1600, 100), {}, 1}}};
+        const auto plan = Plan::fromWire(wire);
+        QVERIFY(plan);
+        QCOMPARE(plan->before.outputs.size(), 2);
+        QCOMPARE(plan->beforePriorities.value(QStringLiteral("Virtual-user-output")), 1);
+        auto json = physicalKScreen();
+        auto outputs = json.value(QStringLiteral("outputs")).toArray();
+        auto first = outputs[0].toObject();
+        first.insert(QStringLiteral("name"), QStringLiteral("Virtual-user-output"));
+        first.insert(QStringLiteral("scale"), 1.0);
+        outputs[0] = first;
+        auto second = outputs[1].toObject();
+        second.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1600}, {QStringLiteral("y"), 0}});
+        outputs[1] = second;
+        json.insert(QStringLiteral("outputs"), outputs);
+        QVERIFY(Plan::inventory(*plan, QJsonDocument(json).toJson()));
+        // The complete fresh compositor inventory must still agree exactly.
+        QVERIFY(!Plan::inventory(*plan, QJsonDocument(physicalKScreen()).toJson()));
+    }
 };
 
 QTEST_GUILESS_MAIN(ConsoleTopologyPlanTest)
