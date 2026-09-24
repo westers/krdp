@@ -13,7 +13,7 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
     if [[ "$probe_host" == buzz && "$probe_mode" == --supervised-mixed-worker-intel ]]; then
         [[ $# == 3 ]]
     else
-        [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia || "$1" == --supervised-mixed-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-create-nvidia || "$1" == --plasma-multi-add-nvidia || "$1" == --plasma-multi-mixed-create-nvidia || "$1" == --plasma-multi-remove-nvidia || "$1" == --plasma-multi-resize-nvidia || "$1" == --plasma-multi-fit-nvidia || "$1" == --plasma-multi-primary-nvidia || "$1" == --plasma-negative-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia || "$1" == --plasma-multi-mixed-create-intel ) ) ]]
+        [[ $# == 0 || ( $# == 3 && ( "$1" == --supervised-worker-nvidia || "$1" == --supervised-multi-worker-nvidia || "$1" == --supervised-mixed-worker-nvidia ) ) || ( $# == 1 && ( "$1" == --plasma || "$1" == --plasma-nvidia || "$1" == --plasma-rdp-nvidia || "$1" == --plasma-retention-nvidia || "$1" == --plasma-audio-nvidia || "$1" == --plasma-worker-nvidia || "$1" == --plasma-multi-worker-nvidia || "$1" == --plasma-mixed-worker-nvidia || "$1" == --plasma-multi-create-nvidia || "$1" == --plasma-multi-add-nvidia || "$1" == --plasma-multi-mixed-create-nvidia || "$1" == --plasma-multi-remove-nvidia || "$1" == --plasma-multi-resize-nvidia || "$1" == --plasma-multi-fit-nvidia || "$1" == --plasma-multi-fit-software || "$1" == --plasma-multi-primary-nvidia || "$1" == --plasma-negative-worker-nvidia || "$1" == --plasma-multi-window-nvidia || "$1" == --plasma-multi-input-nvidia || "$1" == --plasma-multi-drag-nvidia || "$1" == --plasma-multi-reposition-nvidia || "$1" == --plasma-multi-mixed-create-intel ) ) ]]
     fi
     if [[ "$probe_host" == buzz ]]; then
         [[ "$probe_mode" == --plasma-multi-mixed-create-intel || "$probe_mode" == --supervised-mixed-worker-intel ]]
@@ -59,6 +59,14 @@ if [[ "${1:-}" != --inside-private-bus ]]; then
         [[ "$rdp_mode" == --worker ]] || probe_output_count=2
         if [[ "$probe_host" == buzz ]]; then probe_mode=--plasma-intel; else probe_mode=--plasma-nvidia; fi
         probe_timeout=120
+    fi
+    if [[ "$probe_mode" == --plasma-multi-fit-software ]]; then
+        # Native Fit/readback on a disposable CPU-rendered KWin requires no
+        # render-node ACL and never touches the physical compositor.
+        rdp_mode=--multi-fit
+        probe_output_count=2
+        probe_timeout=120
+        probe_mode=--plasma
     fi
     if [[ "$probe_mode" == --plasma-rdp-nvidia || "$probe_mode" == --plasma-retention-nvidia || "$probe_mode" == --plasma-audio-nvidia ]]; then
         # Disposable acceptance listener, never the installed console service.
