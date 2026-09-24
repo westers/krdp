@@ -104,6 +104,15 @@ client. Persist client view preferences separately, per connection/client.
 Retaining across a compositor exit/recreation is a separate lifecycle promise;
 do not claim app/process persistence across logout or explicit Stop.
 
+Source-only bootstrap planning now validates an explicit selected-screen set:
+one primary, unique client-screen identities, even native modes, legal scales,
+normalized relative logical positions, connected nonoverlapping seams and
+backend count/per-output/atlas limits. It produces provisional Add operations
+without treating a client screen name as a compositor output ID. The current
+`virtual-session create` wire request still carries no screen selection and the
+installed launcher still uses a fixed initial 1280×720 output; this planner
+does not yet make first creation follow the proposal.
+
 **Match my client screens** is an explicit one-shot remote-layout action, not
 continuous synchronization. Show the proposed add/resize/move/remove changes.
 Never silently delete outputs because the new client has fewer screens. Any

@@ -315,6 +315,11 @@ target_include_directories(RemoteTopologyFitTest PRIVATE ${CMAKE_SOURCE_DIR}/ser
 target_link_libraries(RemoteTopologyFitTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME RemoteTopologyFitTest COMMAND RemoteTopologyFitTest)
 
+add_executable(VirtualInitialLayoutTest VirtualInitialLayoutTest.cpp)
+target_include_directories(VirtualInitialLayoutTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(VirtualInitialLayoutTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME VirtualInitialLayoutTest COMMAND VirtualInitialLayoutTest)
+
 add_executable(RetainedKScreenReadbackTest RetainedKScreenReadbackTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp)
 target_include_directories(RetainedKScreenReadbackTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(RetainedKScreenReadbackTest PRIVATE Qt6::Test Qt6::Gui PkgConfig::AVCodec)
