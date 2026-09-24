@@ -97,6 +97,7 @@ public:
         m_clock.start();
         connect(&m_resize, &ConsoleResizeSession::mutationStarting, this, [this]() {
             releaseInput();
+            m_lastPhysicalKeyframe.reset();
             m_takeover.outputMoved(m_clock.elapsed());
         });
         connect(&m_resize, &ConsoleResizeSession::keyframeNeeded, &m_session, &AbstractSession::requestKeyFrame);
@@ -263,6 +264,7 @@ public:
                                                  scale, frame.monitors[i].primary});
                     }
                 }
+                if (outputs.monitors.isEmpty()) m_lastPhysicalKeyframe.reset();
                 if (m_mode.virtualSession) {
                     const QSize payloadPixels = m_virtualResize.changing() && frame.isKeyFrame
                         ? h264KeyframeSize(frame.data).value_or(QSize{}) : QSize{};
@@ -282,15 +284,8 @@ public:
                 }
                 if (!outputs.monitors.isEmpty() && outputs != m_outputs) {
                     m_outputs = outputs;
+                    m_lastPhysicalKeyframe.reset();
                     m_socket.write(ConsoleWorkerWire::frame(outputs));
-                }
-                if (!m_mode.virtualSession && frame.isKeyFrame && m_topologyQueryPending) {
-                    m_topologyQueryPending = false;
-                    const auto kscreen = readKScreen();
-                    const auto topology = kscreen ? ConsoleTopologyReadback::confirmed(*kscreen, outputs, frame) : std::nullopt;
-                    // Empty explicitly retires a previous inventory after a
-                    // failed or changing compositor readback.
-                    m_socket.write(ConsoleWorkerWire::frame(topology.value_or(ConsoleWorkerWire::Topology{})));
                 }
                 if (m_mode.virtualSession && outputs.monitors.size() == 1) {
                     // Capture/input use KWin's logical output rectangle, but
@@ -304,7 +299,20 @@ public:
                 }
                 // Only this frame's validated output geometry may complete Fit,
                 // never metadata cached before a resize or a compositor handoff.
-                if (!m_mode.virtualSession) m_resize.captured(outputs, frame.isKeyFrame);
+                if (!m_mode.virtualSession) {
+                    m_resize.captured(outputs, frame.isKeyFrame);
+                    if (frame.isKeyFrame && !m_resize.changing() && !outputs.monitors.isEmpty()) {
+                        m_lastPhysicalKeyframe = frame;
+                        if (m_topologyQueryPending) {
+                            m_topologyQueryPending = false;
+                            const auto kscreen = readKScreen();
+                            const auto topology = kscreen ? ConsoleTopologyReadback::confirmed(*kscreen, outputs, frame) : std::nullopt;
+                            // Empty explicitly retires an earlier inventory when
+                            // fresh compositor readback and capture disagree.
+                            m_socket.write(ConsoleWorkerWire::frame(topology.value_or(ConsoleWorkerWire::Topology{})));
+                        }
+                    }
+                }
             }
         });
         connect(&m_session, &AbstractSession::error, this, [this]() {
@@ -1812,6 +1820,15 @@ private:
             }
             if (record->kind == ConsoleWorkerWire::Kind::TopologyQuery && record->payload.isEmpty()) {
                 if (!m_mode.virtualSession && !m_multiMode) {
+                    if (!m_resize.changing() && m_lastPhysicalKeyframe) {
+                        const auto kscreen = readKScreen();
+                        const auto topology = kscreen
+                            ? ConsoleTopologyReadback::confirmed(*kscreen, m_outputs, *m_lastPhysicalKeyframe) : std::nullopt;
+                        if (topology) {
+                            m_socket.write(ConsoleWorkerWire::frame(*topology));
+                            continue; // An idle compositor need not produce new damage.
+                        }
+                    }
                     m_topologyQueryPending = true;
                     m_session.requestKeyFrame();
                 }
@@ -1936,6 +1953,7 @@ private:
     bool m_captureReady = false;
     ConsoleWorkerWire::Outputs m_outputs;
     bool m_topologyQueryPending = false;
+    std::optional<VideoFrame> m_lastPhysicalKeyframe;
     ConsoleInputState m_inputState;
     QElapsedTimer m_clock;
     Takeover::Detector m_takeover;
