@@ -61,6 +61,7 @@ private:
         quint8 videoQuality = 80;
         ConsoleControl::Media media;
         bool externalMicrophone = false;
+        QVector<VideoMonitor> wireLayout; // RDPGFX surfaces installed for this client, not the catalog's sorted order.
     };
 
     void apply(const ConsoleHandoff::Actions &actions);
@@ -98,6 +99,7 @@ private:
     ConsoleWorkerWire::Outputs m_outputs;
     RemoteTopologyCatalog m_topologyCatalog;
     bool m_topologyAvailable = false;
+    bool m_layoutAwaitingReadback = false;
     QMap<QString, int> m_topologyPriorities; // Exact same-worker KScreen order, never inferred from primary flags.
     QHash<ConsoleControl::Id, QString> m_pendingTopology;
     struct PhysicalPreview {

@@ -23,6 +23,7 @@
 #include "ConsoleSeat.h"
 #include "ConsoleWorkerSession.h"
 #include "ConsoleResize.h"
+#include "ConsoleFrameLayout.h"
 #include "RemoteTopologyProtocol.h"
 
 using namespace Qt::StringLiterals;
@@ -199,10 +200,19 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         apply(m_handoff.workerStopped());
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [this](const VideoFrame &frame) {
-        if (!m_inputEnabled || m_pendingPhysical || m_pendingVirtual) {
+        if (!m_inputEnabled || m_pendingPhysical || m_pendingVirtual || m_layoutAwaitingReadback) {
             return;
         }
+        if (m_outputs.monitors.size() > 1) {
+            if (!m_topologyAvailable || !ConsoleFrameLayout::confirmed(frame, m_outputs, m_topologyCatalog.snapshot())) return;
+        } else if (frame.monitors.size() > 1) return;
         for (const auto &client : m_clients) {
+            const QVector<VideoMonitor> desired = frame.monitors.size() > 1 ? frame.monitors : QVector<VideoMonitor>{};
+            if (client->wireLayout != desired) {
+                if (!frame.isKeyFrame || (desired.isEmpty() && !m_topologyAvailable && !client->wireLayout.isEmpty())) continue;
+                client->connection->videoStream()->setMonitorLayout(desired);
+                client->wireLayout = desired;
+            }
             client->session->submitFrame(frame);
         }
     });
@@ -213,7 +223,9 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [this](const ConsoleWorkerWire::Outputs &outputs) {
         qInfo() << "Console capture outputs:" << outputs.monitors.size() << "forwarding" << m_inputEnabled << "clients" << m_clients.size();
-        if (outputs != m_outputs) {
+        const bool changed = outputs != m_outputs;
+        const bool wasMulti = m_outputs.monitors.size() > 1;
+        if (changed) {
             m_topologyAvailable = false;
             m_topologyPriorities.clear();
             m_physicalPreview.reset();
@@ -221,7 +233,13 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             finishTopologyQueries(u"capture-failed"_s);
         }
         m_outputs = outputs;
-        sendLayouts();
+        // Do not publish an in-flight layout from an Outputs record alone.
+        // First require the worker's independently captured KScreen topology.
+        if (changed && (outputs.monitors.size() > 1 || wasMulti)
+            && !m_pendingPhysical && !m_pendingVirtual) m_layoutAwaitingReadback = true;
+        if (!m_pendingPhysical && !m_pendingVirtual && !m_layoutAwaitingReadback) sendLayouts();
+        if (changed && (outputs.monitors.size() > 1 || wasMulti)
+            && !m_pendingPhysical && !m_pendingVirtual) m_endpoint.requestTopology();
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [this](const ConsoleWorkerWire::Topology &topology) {
         if (topology.outputs.isEmpty() || topology.outputs.size() != m_outputs.monitors.size()) {
@@ -265,6 +283,15 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             m_topologyCatalog.resetGeneration();
         } else m_topologyPriorities = priorities;
         finishTopologyQueries(m_topologyAvailable ? QString() : u"capture-failed"_s);
+        const bool republishedLayout = m_topologyAvailable && m_layoutAwaitingReadback
+            && !m_pendingPhysical && !m_pendingVirtual;
+        if (republishedLayout) {
+            m_layoutAwaitingReadback = false;
+            sendLayouts();
+        }
+        if (m_topologyAvailable && !m_pendingPhysical && !m_pendingVirtual
+            && (m_outputs.monitors.size() > 1 || republishedLayout))
+            m_endpoint.requestKeyFrame();
         if (m_pendingPhysical && m_pendingPhysical->waitingReadback) {
             const auto &pending = *m_pendingPhysical;
             const auto &snapshot = m_topologyCatalog.snapshot();
@@ -406,6 +433,7 @@ void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
     finishPhysicalTopology(u"capture-failed"_s);
     finishVirtualTopology(u"capture-failed"_s);
     m_topologyAvailable = false;
+    m_layoutAwaitingReadback = false;
     m_topologyPriorities.clear();
     m_topologyCatalog.resetGeneration();
     finishTopologyQueries(u"capture-failed"_s);
@@ -450,6 +478,7 @@ void ConsoleHostController::setWorkerActive(bool active)
         finishPhysicalTopology(u"capture-failed"_s);
         finishVirtualTopology(u"capture-failed"_s);
         m_topologyAvailable = false;
+        m_layoutAwaitingReadback = false;
         m_topologyPriorities.clear();
         m_topologyCatalog.resetGeneration();
         finishTopologyQueries(u"capture-failed"_s);
@@ -1080,7 +1109,10 @@ void ConsoleHostController::finishPhysicalTopology(const QString &code, const QS
             {u"topology"_s, consoleTopology(pending->id)}});
         break;
     }
-    if (code.isEmpty()) m_endpoint.requestKeyFrame(); // The verified frame was held during the transaction.
+    if (code.isEmpty()) {
+        sendLayouts();
+        m_endpoint.requestKeyFrame(); // The verified frame was held during the transaction.
+    }
 }
 
 QJsonObject ConsoleHostController::consoleTopology(const QString &id) const
@@ -1127,7 +1159,10 @@ void ConsoleHostController::finishVirtualTopology(const QString &code, const QSt
             {u"v"_s, 1}, {u"id"_s, pending->id}, {u"ok"_s, true}, {u"topology"_s, consoleTopology(pending->id)}});
         break;
     }
-    if (code.isEmpty()) m_endpoint.requestKeyFrame();
+    if (code.isEmpty()) {
+        sendLayouts();
+        m_endpoint.requestKeyFrame();
+    }
 }
 
 void ConsoleHostController::updateMedia()

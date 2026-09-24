@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "ConsoleHostController.h"
+#include "ConsoleFrameLayout.h"
 #include "ConsoleWorkerSession.h"
 #include "RdpConnection.h"
 #include "Server.h"
@@ -13,6 +14,91 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void multiOutputFrameRequiresCapturedPixelAtlas()
+    {
+        // The catalog sorts by backend key; capture/surface indices instead
+        // follow QScreen order. Matching array indices would paint the wrong
+        // output when a virtual name sorts ahead of a physical connector.
+        const ConsoleWorkerWire::Outputs captured{{
+            {QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true},
+            {QStringLiteral("Virtual-krdp-added-test"), QRect(1280, 0, 960, 540), 1, false}}, QPoint(200, 100)};
+        RemoteTopologyCatalog::Snapshot snapshot{QStringLiteral("generation"), 1, {
+            {QStringLiteral("o-2"), {QStringLiteral("Virtual-krdp-added-test"), QStringLiteral("Virtual-krdp-added-test"),
+                QSize(960, 540), QRect(1480, 100, 960, 540), 1, true, false, false, QStringLiteral("physical-console")}},
+            {QStringLiteral("o-1"), {QStringLiteral("DP-1"), QStringLiteral("DP-1"),
+                QSize(1280, 720), QRect(200, 100, 1280, 720), 1, true, true, true, {}}}}};
+        VideoFrame frame;
+        frame.size = QSize(960, 540);
+        frame.monitorIndex = 1;
+        frame.isKeyFrame = true;
+        frame.monitors = {{QRect(0, 0, 1280, 720), true}, {QRect(1280, 0, 960, 540), false}};
+        QVERIFY(ConsoleFrameLayout::confirmed(frame, captured, snapshot));
+        auto wrong = frame;
+        wrong.monitorIndex = 0;
+        QVERIFY(!ConsoleFrameLayout::confirmed(wrong, captured, snapshot));
+        wrong = frame;
+        wrong.monitors[1].geometry.moveLeft(1281);
+        QVERIFY(!ConsoleFrameLayout::confirmed(wrong, captured, snapshot));
+        wrong = frame;
+        wrong.monitors[1].primary = true;
+        QVERIFY(!ConsoleFrameLayout::confirmed(wrong, captured, snapshot));
+        auto stale = snapshot;
+        stale.outputs[0].output.logicalGeometry.moveLeft(1481);
+        QVERIFY(!ConsoleFrameLayout::confirmed(frame, captured, stale));
+        stale = snapshot;
+        stale.outputs[0].output.nativePixels = QSize(958, 540);
+        QVERIFY(!ConsoleFrameLayout::confirmed(frame, captured, stale));
+    }
+
+    void independentOutputChangeWaitsForReadbackAndKeyframe()
+    {
+        Server server;
+        RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.addClient(&connection);
+        host.m_inputEnabled = true;
+        VideoFrame single;
+        single.size = QSize(1280, 720);
+        single.isKeyFrame = true;
+        single.monitors = {{QRect(0, 0, 1280, 720), true}};
+        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}}});
+        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("DP-1"), QSize(1280, 720),
+            QRect(0, 0, 1280, 720), 1, true, 1, true}}});
+        Q_EMIT host.m_endpoint.frameReceived(single);
+        QVERIFY(host.m_clients.front()->wireLayout.isEmpty());
+
+        Q_EMIT host.m_endpoint.outputsReceived({{
+            {QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true},
+            {QStringLiteral("Virtual-extra"), QRect(1280, 0, 960, 540), 1, false}}});
+        QVERIFY(host.m_layoutAwaitingReadback);
+        Q_EMIT host.m_endpoint.frameReceived(single); // Old single-output capture must not pass the new inventory.
+        QVERIFY(host.m_clients.front()->wireLayout.isEmpty());
+        VideoFrame multi = single;
+        multi.monitors = {{QRect(0, 0, 1280, 720), true}, {QRect(1280, 0, 960, 540), false}};
+        Q_EMIT host.m_endpoint.frameReceived(multi);
+        QVERIFY(host.m_clients.front()->wireLayout.isEmpty());
+        Q_EMIT host.m_endpoint.topologyReceived({{
+            {QStringLiteral("DP-1"), QSize(1280, 720), QRect(0, 0, 1280, 720), 1, true, 1, true},
+            {QStringLiteral("Virtual-extra"), QSize(960, 540), QRect(1280, 0, 960, 540), 1, false, 2, false}}});
+        QVERIFY(!host.m_layoutAwaitingReadback);
+        multi.isKeyFrame = false;
+        Q_EMIT host.m_endpoint.frameReceived(multi);
+        QVERIFY(host.m_clients.front()->wireLayout.isEmpty());
+        multi.isKeyFrame = true;
+        Q_EMIT host.m_endpoint.frameReceived(multi);
+        QCOMPARE(host.m_clients.front()->wireLayout, multi.monitors);
+
+        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}}});
+        QVERIFY(host.m_layoutAwaitingReadback);
+        Q_EMIT host.m_endpoint.frameReceived(single);
+        QCOMPARE(host.m_clients.front()->wireLayout, multi.monitors);
+        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("DP-1"), QSize(1280, 720),
+            QRect(0, 0, 1280, 720), 1, true, 1, true}}});
+        QVERIFY(!host.m_layoutAwaitingReadback);
+        Q_EMIT host.m_endpoint.frameReceived(single);
+        QVERIFY(host.m_clients.front()->wireLayout.isEmpty());
+    }
+
     void consoleOwnedAddRemoveWaitForCapturedReadback()
     {
         QTemporaryDir directory;
@@ -105,6 +191,13 @@ private Q_SLOTS:
         QVERIFY(!host.m_pendingVirtual);
         QVERIFY(host.m_consoleCreatorsActive);
         QCOMPARE(host.m_topologyCatalog.snapshot().revision, before.revision + 1);
+        VideoFrame multiFrame;
+        multiFrame.size = QSize(1280, 720);
+        multiFrame.monitorIndex = 0;
+        multiFrame.isKeyFrame = true;
+        multiFrame.monitors = {{QRect(0, 0, 1280, 720), true}, {QRect(1280, 0, 960, 540), false}};
+        Q_EMIT host.m_endpoint.frameReceived(multiFrame);
+        QCOMPARE(host.m_clients.front()->wireLayout, multiFrame.monitors); // Installs two RDPGFX surfaces before indexed frames.
         before = host.m_topologyCatalog.snapshot();
         const auto addedId = std::find_if(before.outputs.cbegin(), before.outputs.cend(), [&add](const auto &entry) {
             return entry.output.backendKey == add.backendKey;
@@ -140,6 +233,13 @@ private Q_SLOTS:
         QVERIFY(!host.m_consoleCreatorsActive);
         QVERIFY(!host.m_physicalLeaseActive);
         QCOMPARE(host.m_topologyCatalog.snapshot().revision, before.revision + 1);
+        VideoFrame singleFrame;
+        singleFrame.size = QSize(1280, 720);
+        singleFrame.monitorIndex = 0;
+        singleFrame.isKeyFrame = true;
+        singleFrame.monitors = {{QRect(0, 0, 1280, 720), true}};
+        Q_EMIT host.m_endpoint.frameReceived(singleFrame);
+        QVERIFY(host.m_clients.front()->wireLayout.isEmpty()); // Return from 2→1 clears indexed surfaces.
     }
 
     void creatorOwnedOutputKeepsConsoleKindAndOwner()
