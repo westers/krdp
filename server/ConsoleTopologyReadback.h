@@ -85,4 +85,20 @@ inline std::optional<ConsoleWorkerWire::Topology> withPriorities(ConsoleWorkerWi
     }
     return topology;
 }
+
+// Creation ownership is independent of a display name or KScreen's type
+// enum. KWin can report "unknown" for a virtual output, so only creator IDs
+// retained by this authenticated worker are classified as lease-owned virtual.
+inline std::optional<ConsoleWorkerWire::Topology> withOwnedVirtuals(ConsoleWorkerWire::Topology topology,
+    const QSet<QString> &owned)
+{
+    QSet<QString> seen;
+    for (auto &output : topology.outputs) {
+        if (owned.contains(output.name)) {
+            output.physical = false;
+            seen.insert(output.name);
+        }
+    }
+    return seen == owned ? std::optional<ConsoleWorkerWire::Topology>(std::move(topology)) : std::nullopt;
+}
 }

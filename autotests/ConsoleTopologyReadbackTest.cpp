@@ -10,6 +10,23 @@ class ConsoleTopologyReadbackTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void creatorOwnershipIsExplicitAndComplete()
+    {
+        KRdp::ConsoleWorkerWire::Topology captured{{
+            {QStringLiteral("DP-1"), QSize(1280, 720), QRect(0, 0, 1280, 720), 1, true, 1},
+            {QStringLiteral("Virtual-owned"), QSize(1280, 720), QRect(1280, 0, 1280, 720), 1, false, 2}}};
+        const auto owned = KRdp::ConsoleTopologyReadback::withOwnedVirtuals(captured,
+            {QStringLiteral("Virtual-owned")});
+        QVERIFY(owned);
+        QVERIFY(owned->outputs[0].physical);
+        QVERIFY(!owned->outputs[1].physical);
+        QVERIFY(!KRdp::ConsoleTopologyReadback::withOwnedVirtuals(captured,
+            {QStringLiteral("Virtual-missing")}));
+        const auto none = KRdp::ConsoleTopologyReadback::withOwnedVirtuals(captured, {});
+        QVERIFY(none);
+        QVERIFY(none->outputs[1].physical); // Names alone never establish ownership.
+    }
+
     void idleKeyframeCanConfirmFreshUnchangedKScreen()
     {
         QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/1280x720.h264")));

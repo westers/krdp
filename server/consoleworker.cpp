@@ -895,13 +895,25 @@ private:
         return json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
     }
 
+    std::optional<ConsoleWorkerWire::Topology> markOwnedConsoleOutputs(
+        std::optional<ConsoleWorkerWire::Topology> topology) const
+    {
+        if (!topology) return {};
+        QSet<QString> owned;
+        for (const auto &creator : m_ownedCreators) owned.insert(creator.first);
+        if (m_addPending) owned.insert(m_addPending->output);
+        if (m_mixedCreatePending) owned.insert(m_mixedCreatePending->newOutput);
+        return ConsoleTopologyReadback::withOwnedVirtuals(std::move(*topology), owned);
+    }
+
     std::optional<ConsoleWorkerWire::Topology> physicalTopology(const ConsoleWorkerWire::Outputs &outputs,
         const VideoFrame &frame) const
     {
         const auto json = readKScreenJson();
         const auto kscreen = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
         const auto captured = kscreen ? ConsoleTopologyReadback::confirmed(*kscreen, outputs, frame) : std::nullopt;
-        return captured ? ConsoleTopologyReadback::withPriorities(*captured, *json, *kscreen) : std::nullopt;
+        return markOwnedConsoleOutputs(captured
+            ? ConsoleTopologyReadback::withPriorities(*captured, *json, *kscreen) : std::nullopt);
     }
 
     std::optional<ConsoleWorkerWire::Topology> physicalTopology(const ConsoleWorkerWire::Outputs &outputs,
@@ -910,7 +922,8 @@ private:
         const auto json = readKScreenJson();
         const auto kscreen = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
         const auto captured = kscreen ? ConsoleTopologyReadback::confirmedMulti(*kscreen, outputs, frames) : std::nullopt;
-        return captured ? ConsoleTopologyReadback::withPriorities(*captured, *json, *kscreen) : std::nullopt;
+        return markOwnedConsoleOutputs(captured
+            ? ConsoleTopologyReadback::withPriorities(*captured, *json, *kscreen) : std::nullopt);
     }
 
     void finishPhysical(const QString &error)

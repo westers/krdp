@@ -253,6 +253,12 @@ void ConsoleWorkerWireTest::readOnlyTopologyRecordIsBounded()
     QVERIFY(record);
     QCOMPARE(record->kind, Kind::TopologyQuery);
     QVERIFY(record->payload.isEmpty());
+    auto owned = expected;
+    owned.outputs[1].physical = false;
+    reader.feed(frame(owned));
+    record = reader.next();
+    QVERIFY(record);
+    QCOMPARE(topology(*record), std::optional<Topology>(owned));
 }
 
 void ConsoleWorkerWireTest::removeVirtualRecordsRequireOwnedName()

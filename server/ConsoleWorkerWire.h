@@ -23,7 +23,7 @@
 
 namespace KRdp::ConsoleWorkerWire
 {
-constexpr quint16 ProtocolVersion = 11; // Physical lease release; broker and worker must upgrade together.
+constexpr quint16 ProtocolVersion = 12; // Console output ownership; broker and worker must upgrade together.
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 
 enum class Kind : quint8 {
@@ -1007,6 +1007,7 @@ struct TopologyOutput {
     double scale = 1;
     bool primary = false;
     quint8 priority = 0;
+    bool physical = true; // False only for an output created and owned by this worker.
     bool operator==(const TopologyOutput &) const = default;
 };
 
@@ -1022,7 +1023,7 @@ inline QByteArray frame(const Topology &topology)
     stream.setByteOrder(QDataStream::BigEndian);
     stream << quint32(topology.outputs.size());
     for (const auto &output : topology.outputs)
-        stream << output.name << output.pixels << output.logical << output.scale << output.primary << output.priority;
+        stream << output.name << output.pixels << output.logical << output.scale << output.primary << output.priority << output.physical;
     return frame(Kind::Topology, payload);
 }
 
@@ -1040,7 +1041,7 @@ inline std::optional<Topology> topology(const Record &record)
     int primaries = 0;
     for (quint32 i = 0; i < count; ++i) {
         TopologyOutput output;
-        stream >> output.name >> output.pixels >> output.logical >> output.scale >> output.primary >> output.priority;
+        stream >> output.name >> output.pixels >> output.logical >> output.scale >> output.primary >> output.priority >> output.physical;
         if (stream.status() != QDataStream::Ok || output.name.isEmpty() || output.name.size() > 128
             || names.contains(output.name) || output.pixels.width() < 1 || output.pixels.width() > 16384
             || output.pixels.height() < 1 || output.pixels.height() > 16384

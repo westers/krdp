@@ -218,7 +218,8 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             priorities.insert(output.name, output.priority);
             inventory.append({.backendKey = output.name, .name = output.name, .nativePixels = output.pixels,
                 .logicalGeometry = output.logical, .scale = output.scale, .enabled = true,
-                .primary = output.primary, .physical = true, .owner = {}});
+                .primary = output.primary, .physical = output.physical,
+                .owner = output.physical ? QString{} : QStringLiteral("physical-console")});
         }
         m_topologyAvailable = m_topologyCatalog.observe(inventory, !m_topologyPriorities.isEmpty()
             && priorities != m_topologyPriorities).has_value();

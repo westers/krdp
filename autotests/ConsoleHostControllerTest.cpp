@@ -13,6 +13,27 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void creatorOwnedOutputKeepsConsoleKindAndOwner()
+    {
+        Server server;
+        ConsoleHostController host(&server, {}, {});
+        const ConsoleWorkerWire::Outputs captured{{
+            {QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true},
+            {QStringLiteral("Virtual-owned"), QRect(1280, 0, 1280, 720), 1, false}}};
+        Q_EMIT host.m_endpoint.outputsReceived(captured);
+        const ConsoleWorkerWire::Topology topology{{
+            {QStringLiteral("DP-1"), QSize(1280, 720), QRect(0, 0, 1280, 720), 1, true, 1, true},
+            {QStringLiteral("Virtual-owned"), QSize(1280, 720), QRect(1280, 0, 1280, 720), 1, false, 2, false}}};
+        Q_EMIT host.m_endpoint.topologyReceived(topology);
+        QVERIFY(host.m_topologyAvailable);
+        const auto &outputs = host.m_topologyCatalog.snapshot().outputs;
+        QCOMPARE(outputs.size(), 2);
+        QVERIFY(outputs[0].output.physical);
+        QVERIFY(outputs[0].output.owner.isEmpty());
+        QVERIFY(!outputs[1].output.physical);
+        QCOMPARE(outputs[1].output.owner, QStringLiteral("physical-console"));
+    }
+
     void physicalPreviewCommitWaitsForExactCapturedReadback()
     {
         QTemporaryDir directory;
