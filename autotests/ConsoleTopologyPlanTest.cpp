@@ -45,6 +45,40 @@ Plan::Priorities priorities()
 {
     return {{QStringLiteral("DP-1"), 1}, {QStringLiteral("HDMI-A-1"), 2}};
 }
+
+QJsonObject physicalOutput(const QString &name, int id, QPoint position, QSize currentPixels, double scale,
+    int priority, const QJsonArray &modes)
+{
+    return {{QStringLiteral("name"), name}, {QStringLiteral("id"), id},
+        {QStringLiteral("connected"), true}, {QStringLiteral("enabled"), true},
+        {QStringLiteral("rotation"), 1}, {QStringLiteral("replicationSource"), 0},
+        {QStringLiteral("currentModeId"), QString::number(id)}, {QStringLiteral("priority"), priority},
+        {QStringLiteral("scale"), scale},
+        {QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), position.x()}, {QStringLiteral("y"), position.y()}}},
+        {QStringLiteral("size"), QJsonObject{{QStringLiteral("width"), currentPixels.width()},
+            {QStringLiteral("height"), currentPixels.height()}}},
+        {QStringLiteral("modes"), modes}};
+}
+
+QJsonObject mode(const QString &id, QSize pixels, double hz)
+{
+    return {{QStringLiteral("id"), id},
+        {QStringLiteral("size"), QJsonObject{{QStringLiteral("width"), pixels.width()},
+            {QStringLiteral("height"), pixels.height()}}}, {QStringLiteral("refreshRate"), hz}};
+}
+
+QJsonObject physicalKScreen()
+{
+    return {{QStringLiteral("screen"), QJsonObject{{QStringLiteral("maxActiveOutputsCount"), 2}}},
+        {QStringLiteral("outputs"), QJsonArray{
+            physicalOutput(QStringLiteral("DP-1"), 27, QPoint(0, 0), QSize(1600, 900), 1.25, 1,
+                {mode(QStringLiteral("27"), QSize(1600, 900), 60),
+                    mode(QStringLiteral("41"), QSize(1920, 1080), 59.94),
+                    mode(QStringLiteral("42"), QSize(1920, 1080), 50)}),
+            physicalOutput(QStringLiteral("HDMI-A-1"), 12, QPoint(1280, 100), QSize(1280, 720), 1, 2,
+                {mode(QStringLiteral("12"), QSize(1280, 720), 60)}),
+        }}};
+}
 }
 
 class ConsoleTopologyPlanTest : public QObject
@@ -187,6 +221,46 @@ private Q_SLOTS:
         auto changedPriorities = priorities();
         changedPriorities[QStringLiteral("HDMI-A-1")] = 3;
         QVERIFY(!Plan::arguments(*plan, states, changedPriorities, selected));
+    }
+
+    void freshCompletePhysicalKScreenSelectsModeAndRejectsPeerEdits()
+    {
+        const auto source = baseline();
+        auto draft = request(source);
+        draft.operations = {
+            {Operation::Kind::Move, idFor(source, QStringLiteral("HDMI-A-1")), QPoint(1920, 100), {}, 1.0},
+            {Operation::Kind::Resize, idFor(source, QStringLiteral("DP-1")), {}, QSize(1920, 1080), 1.0},
+        };
+        const auto plan = Plan::make(source, priorities(), draft, limits());
+        QVERIFY(plan);
+        auto sourceJson = physicalKScreen();
+        const auto args = Plan::arguments(*plan, QJsonDocument(sourceJson).toJson());
+        QVERIFY(args);
+        QVERIFY(args->contains(QStringLiteral("output.DP-1.mode.41"))); // 59.94 Hz is closest to 60 Hz.
+        QVERIFY(args->contains(QStringLiteral("output.HDMI-A-1.position.1920,100")));
+
+        auto outputs = sourceJson.value(QStringLiteral("outputs")).toArray();
+        auto peer = outputs[1].toObject();
+        peer.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 1281}, {QStringLiteral("y"), 100}});
+        outputs[1] = peer;
+        sourceJson.insert(QStringLiteral("outputs"), outputs);
+        QVERIFY(!Plan::arguments(*plan, QJsonDocument(sourceJson).toJson()));
+
+        sourceJson = physicalKScreen();
+        outputs = sourceJson.value(QStringLiteral("outputs")).toArray();
+        auto target = outputs[0].toObject();
+        target.insert(QStringLiteral("modes"), QJsonArray{mode(QStringLiteral("27"), QSize(1600, 900), 60)});
+        outputs[0] = target;
+        sourceJson.insert(QStringLiteral("outputs"), outputs);
+        QVERIFY(!Plan::arguments(*plan, QJsonDocument(sourceJson).toJson()));
+
+        sourceJson = physicalKScreen();
+        outputs = sourceJson.value(QStringLiteral("outputs")).toArray();
+        peer = outputs[1].toObject();
+        peer.insert(QStringLiteral("priority"), 3);
+        outputs[1] = peer;
+        sourceJson.insert(QStringLiteral("outputs"), outputs);
+        QVERIFY(!Plan::arguments(*plan, QJsonDocument(sourceJson).toJson()));
     }
 };
 

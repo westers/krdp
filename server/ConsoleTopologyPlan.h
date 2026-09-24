@@ -31,6 +31,10 @@ struct OutputState {
     Mode current;
     QList<Mode> modes;
 };
+struct Inventory {
+    QMap<QString, OutputState> states;
+    Priorities priorities;
+};
 
 inline bool sameScale(double a, double b)
 {
@@ -145,6 +149,76 @@ inline bool matches(const Plan &plan, const Snapshot &readback, const Priorities
         && readback.outputs == plan.after && priorities == plan.afterPriorities;
 }
 
+// Parse the complete *fresh* physical worker readback, not a broker-cached
+// catalog or a single target's mode list. A changed peer invalidates the
+// entire candidate command before KScreen sees any mutation.
+inline std::optional<Inventory> inventory(const Plan &plan, const QByteArray &json)
+{
+    const auto readback = RetainedKScreenReadback::parse(json, QStringLiteral("console-mode-inventory"));
+    if (!readback || readback->outputs.size() != plan.before.outputs.size()) return {};
+    const auto freshPriorities = RetainedMultiPrimaryPlan::priorities(json, *readback);
+    if (!freshPriorities || *freshPriorities != plan.beforePriorities) return {};
+    for (qsizetype i = 0; i < readback->outputs.size(); ++i) {
+        const auto &fresh = readback->outputs[i];
+        const auto &old = plan.before.outputs[i].output;
+        if (fresh.backendKey != old.backendKey || fresh.name != old.name
+            || fresh.nativePixels != old.nativePixels || fresh.logicalGeometry != old.logicalGeometry
+            || !sameScale(fresh.scale, old.scale) || fresh.primary != old.primary) return {};
+    }
+    const auto document = QJsonDocument::fromJson(json);
+    Inventory result;
+    result.priorities = *freshPriorities;
+    for (const auto &value : document.object().value(QStringLiteral("outputs")).toArray()) {
+        const auto object = value.toObject();
+        OutputState state;
+        state.name = object.value(QStringLiteral("name")).toString();
+        const auto position = object.value(QStringLiteral("pos")).toObject();
+        state.position = QPoint(position.value(QStringLiteral("x")).toInt(), position.value(QStringLiteral("y")).toInt());
+        state.scale = object.value(QStringLiteral("scale")).toDouble();
+        const QString currentId = object.value(QStringLiteral("currentModeId")).toString();
+        QSet<QString> modeIds;
+        for (const auto &modeValue : object.value(QStringLiteral("modes")).toArray()) {
+            const auto modeObject = modeValue.toObject();
+            const auto size = modeObject.value(QStringLiteral("size")).toObject();
+            const auto refresh = modeObject.value(QStringLiteral("refreshRate"));
+            Mode mode{modeObject.value(QStringLiteral("id")).toString(),
+                QSize(size.value(QStringLiteral("width")).toInt(), size.value(QStringLiteral("height")).toInt()), 0};
+            if (!ConsoleResize::safeToken(mode.id) || modeIds.contains(mode.id)
+                || !refresh.isDouble() || !std::isfinite(refresh.toDouble())
+                || refresh.toDouble() < 0.001 || refresh.toDouble() > 1000) return {};
+            mode.refresh = qRound(refresh.toDouble() * 1000.0);
+            if (mode.refresh < 1) return {};
+            modeIds.insert(mode.id);
+            state.modes.append(mode);
+            if (mode.id == currentId) state.current = mode;
+        }
+        if (state.current.id.isEmpty() || result.states.contains(state.name)) return {};
+        result.states.insert(state.name, state);
+    }
+    return result.states.size() == plan.before.outputs.size() ? std::optional(result) : std::nullopt;
+}
+
+// Preserve the existing refresh rate when available; otherwise choose the
+// closest advertised physical mode, with a stable ID tie-break.
+inline std::optional<QMap<QString, Mode>> selectedModes(const Plan &plan, const Inventory &fresh)
+{
+    QMap<QString, Mode> selected;
+    for (auto it = plan.modes.cbegin(); it != plan.modes.cend(); ++it) {
+        if (!fresh.states.contains(it.key())) return {};
+        const auto &state = fresh.states.value(it.key());
+        std::optional<Mode> best;
+        for (const auto &candidate : state.modes) {
+            if (candidate.pixels != it.value().first) continue;
+            if (!best || std::abs(candidate.refresh - state.current.refresh) < std::abs(best->refresh - state.current.refresh)
+                || (std::abs(candidate.refresh - state.current.refresh) == std::abs(best->refresh - state.current.refresh)
+                    && candidate.id < best->id)) best = candidate;
+        }
+        if (!best) return {};
+        selected.insert(it.key(), *best);
+    }
+    return selected;
+}
+
 // Build one shell-free KScreen invocation from the *fresh* per-output mode
 // inventory. This prepares an executor; it does not execute or claim that the
 // compositor accepted any field. Readback and decoded captures remain required.
@@ -198,6 +272,14 @@ inline std::optional<QStringList> arguments(const Plan &plan,
         args.append(RetainedMultiPrimaryPlan::arguments(plan.afterPriorities));
     if (plan.changed == args.isEmpty()) return {};
     return args;
+}
+
+inline std::optional<QStringList> arguments(const Plan &plan, const QByteArray &freshKScreenJson)
+{
+    const auto fresh = inventory(plan, freshKScreenJson);
+    if (!fresh) return {};
+    const auto selected = selectedModes(plan, *fresh);
+    return selected ? arguments(plan, fresh->states, fresh->priorities, *selected) : std::nullopt;
 }
 
 // A conditional restore must not overwrite an unrelated KDE edit. This is
