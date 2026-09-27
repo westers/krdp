@@ -12,6 +12,7 @@
 #include "Server.h"
 
 #include <QDataStream>
+#include <QMouseEvent>
 #include <QLocalSocket>
 #include <QTemporaryDir>
 #include <QTest>
@@ -293,10 +294,16 @@ private Q_SLOTS:
         host.setUidResolver([&uids](RdpConnection *connection) -> std::optional<quint32> {
             return uids.contains(connection) ? std::optional<quint32>(uids.value(connection)) : std::nullopt;
         });
+        QList<QPair<RdpConnection *, quint32>> refused;
+        host.setRefuse([&refused](RdpConnection *connection, quint32 errorInfo) {
+            refused.append({connection, errorInfo});
+        });
         host.setSeatSessions({user(QStringLiteral("3"), 1000, false)});
+        // Stock RDP clients (mstsc, FreeRDP, Remmina): no KRDPCTL channel.
         RdpConnection owner(&server, -1);
         RdpConnection intruder(&server, -1);
         RdpConnection anonymous(&server, -1);
+        QVERIFY(!owner.hasControlChannel() && !intruder.hasControlChannel() && !anonymous.hasControlChannel());
         uids.insert(&owner, 1000);
         uids.insert(&intruder, 1001);
         for (auto *connection : {&owner, &intruder, &anonymous}) {
@@ -318,7 +325,22 @@ private Q_SLOTS:
         const auto ownerId = idOf(&owner);
         Q_EMIT owner.stateChanged(RdpConnection::State::Streaming);
         QVERIFY(host.m_control.admitted(ownerId));
-        QVERIFY(host.m_control.ownsControl(ownerId));
+        QVERIFY(host.m_control.ownsControl(ownerId)); // No console-control record needed.
+        // Refusals use the standard disconnect reason every client can show.
+        QTRY_COMPARE(refused.size(), 2);
+        QCOMPARE(refused[0], (QPair<RdpConnection *, quint32>{&intruder, quint32(ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES)}));
+        QCOMPARE(refused[1], (QPair<RdpConnection *, quint32>{&anonymous, quint32(ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES)}));
+        // ... and the admitted stock client drives the desktop without KRDPCTL.
+        host.m_inputEnabled = true;
+        for (const auto &client : host.m_clients) {
+            if (client->id == ownerId) client->session->setWorkerActive(true);
+        }
+        const auto press = std::make_shared<QMouseEvent>(QEvent::MouseButtonPress, QPointF(20, 20), QPointF{}, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        for (const auto &client : host.m_clients) {
+            if (client->id == ownerId) client->session->sendEvent(press);
+        }
+        QCOMPARE(host.m_inputState.releaseAll().size(), 1);
+        host.m_inputEnabled = false;
 
         // Locked desktop: another account may use the lock screen ...
         host.setSeatSessions({user(QStringLiteral("3"), 1000, true)});
@@ -331,6 +353,9 @@ private Q_SLOTS:
         // ... until it is unlocked, when only the owner stays.
         host.setSeatSessions({user(QStringLiteral("3"), 1000, false)});
         QVERIFY(!host.m_control.admitted(visitorId));
+        QTRY_COMPARE(refused.size(), 3);
+        QCOMPARE(refused.last().first, &visitor);
+        QCOMPARE(refused.last().second, quint32(ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES));
         QCOMPARE(idOf(&visitor), ConsoleControl::Id(0));
         QVERIFY(host.m_control.admitted(ownerId));
 

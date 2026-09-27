@@ -94,6 +94,10 @@ public:
      */
     std::optional<quint32> authenticatedPamUid() const;
 
+    /** FreeRDP context of this peer (null before it exists), so a host can
+     * set a standard error-info disconnect reason before close(). */
+    rdpContext *freerdpContext() const;
+
     /**
      * Close the connection
      *

@@ -51,6 +51,8 @@ public:
     };
     /** PAM uid of an authenticated connection; injectable for tests. */
     using UidResolver = std::function<std::optional<quint32>(RdpConnection *)>;
+    /** Disconnect with a standard RDP error-info code (MS-RDPBCGR 2.2.5.1.1); injectable for tests. */
+    using Refuse = std::function<void(RdpConnection *, quint32 errorInfo)>;
 
     /// Stop handshake budget, then SIGTERM, then SIGKILL (AUD-C-2).
     static constexpr int DrainDeadlineMs = 5000;
@@ -65,6 +67,7 @@ public:
     /** A launched worker process exited (reaped). The only event that ends a drain. */
     void workerExited(const QString &socketName);
     void setUidResolver(UidResolver resolver);
+    void setRefuse(Refuse refuse);
 
 private:
     friend class ConsoleHostControllerTest;
@@ -119,6 +122,7 @@ private:
     ConsoleWorkerEndpoint m_endpoint;
     QList<ConsoleSeat::Session> m_sessions;
     UidResolver m_uidOf;
+    Refuse m_refuse;
     // One launched process at a time; a replacement waits for its reaping.
     QString m_workerSocket;
     QString m_workerDirectory;

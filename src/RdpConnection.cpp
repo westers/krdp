@@ -682,6 +682,11 @@ std::optional<quint32> RdpConnection::authenticatedPamUid() const
     return encoded ? std::optional<quint32>(quint32(encoded - 1)) : std::nullopt;
 }
 
+rdpContext *RdpConnection::freerdpContext() const
+{
+    return d->peer ? d->peer->context : nullptr;
+}
+
 void RdpConnection::setState(KRdp::RdpConnection::State newState)
 {
     if (newState == d->state) {

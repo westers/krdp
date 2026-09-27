@@ -106,6 +106,14 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     m_uidOf = [](RdpConnection *connection) -> std::optional<quint32> {
         return connection ? connection->authenticatedPamUid() : std::nullopt;
     };
+    m_refuse = [](RdpConnection *connection, quint32 errorInfo) {
+        // Sent as a Set Error Info PDU when the peer closes, so mstsc, stock
+        // FreeRDP and Remmina show a reason; no KRDPCTL channel is needed.
+        if (auto *context = connection->freerdpContext(); context && context->rdp) {
+            freerdp_set_error_info(context->rdp, errorInfo);
+        }
+        connection->close();
+    };
     m_drainDeadline.setSingleShot(true);
     m_drainDeadline.setInterval(DrainDeadlineMs);
     connect(&m_drainDeadline, &QTimer::timeout, this, [this] {
@@ -415,6 +423,11 @@ void ConsoleHostController::setUidResolver(UidResolver resolver)
     m_uidOf = std::move(resolver);
 }
 
+void ConsoleHostController::setRefuse(Refuse refuse)
+{
+    m_refuse = std::move(refuse);
+}
+
 void ConsoleHostController::setSeatSessions(const QList<ConsoleSeat::Session> &sessions)
 {
     m_sessions = sessions;
@@ -544,12 +557,16 @@ void ConsoleHostController::evictClient(ConsoleControl::Id id, const QString &me
     const QPointer<RdpConnection> connection = (*found)->connection;
     qWarning().noquote() << "Refusing console client" << id << "(uid" << ((*found)->uid ? QString::number(*(*found)->uid) : u"none"_s) << "):" << message;
     if (connection) {
-        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"console"_s},
-                                                  {u"code"_s, u"not-owner"_s}, {u"message"_s, message}});
-        // Server deletes the connection when it closes; never do that from
-        // inside one of its own signal emissions or our loops.
-        QMetaObject::invokeMethod(connection, [connection] {
-            if (connection) connection->close();
+        if (connection->hasControlChannel()) {
+            // Own client only: a readable reason in its UI. Never required.
+            connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"console"_s},
+                                                      {u"code"_s, u"not-owner"_s}, {u"message"_s, message}});
+        }
+        // The standard path every RDP client understands: disconnect with
+        // ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES. Queued: Server deletes the
+        // connection when it closes; never inside its own emission or our loops.
+        QMetaObject::invokeMethod(this, [this, connection] {
+            if (connection && m_refuse) m_refuse(connection, ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES);
         }, Qt::QueuedConnection);
     }
     removeClient(connection.data(), id);
