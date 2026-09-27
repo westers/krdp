@@ -447,3 +447,11 @@ target_include_directories(RdpConnectionInitTest PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_link_libraries(RdpConnectionInitTest PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
 add_test(NAME RdpConnectionInitTest COMMAND RdpConnectionInitTest)
 set_tests_properties(RdpConnectionInitTest PROPERTIES TIMEOUT 60)
+
+# Links libKRdp: drives Clipboard's cliprdr callbacks from another thread.
+add_executable(ClipboardHandoffTest ClipboardHandoffTest.cpp)
+target_include_directories(ClipboardHandoffTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(ClipboardHandoffTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(ClipboardHandoffTest PRIVATE Qt6::Test Qt6::Core KRdp)
+add_test(NAME ClipboardHandoffTest COMMAND ClipboardHandoffTest)
+set_tests_properties(ClipboardHandoffTest PROPERTIES TIMEOUT 30)
