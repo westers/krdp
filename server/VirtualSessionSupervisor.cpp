@@ -320,6 +320,29 @@ bool VirtualSessionSupervisor::forget(quint32 uid, const QString &id)
     return true;
 }
 
+bool VirtualSessionSupervisor::unadoptedFailure(const VirtualSessionGuardianClient::Identity &identity) const
+{
+    const auto found = m_runtimes.find(identity.session);
+    if (found == m_runtimes.end()) return false;
+    const auto &r = *found->second;
+    if (!r.failed || r.captureObserved || r.retiring || r.stopping || r.process.state() != QProcess::NotRunning) return false;
+    return r.identity.uid == identity.uid && r.identity.session == identity.session && r.identity.incarnation == identity.incarnation
+        && r.identity.socket == identity.socket && r.identity.token == identity.token;
+}
+
+bool VirtualSessionSupervisor::retireUnadopted(const VirtualSessionGuardianClient::Identity &identity)
+{
+    if (!unadoptedFailure(identity)) return false;
+    const auto found = m_runtimes.find(identity.session);
+    auto &r = *found->second;
+    if (!m_registry.forget(identity.uid, identity.session)) return false;
+    r.deadline.stop();
+    r.poll.stop();
+    // Queued guardian replies resolve their runtime by handle and find none.
+    m_runtimes.erase(found);
+    return true;
+}
+
 bool VirtualSessionSupervisor::forgetReconciled(const VirtualSessionGuardianClient::Identity &identity)
 {
     const auto found = m_runtimes.find(identity.session);

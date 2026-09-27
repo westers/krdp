@@ -6,6 +6,7 @@
 #include <QSet>
 #include <QString>
 #include <QUuid>
+#include <algorithm>
 #include <map>
 #include <optional>
 
@@ -39,10 +40,13 @@ public:
     bool empty() const { return m_sessions.empty(); }
     bool canReserve(const QList<QPair<quint32, QString>> &identities) const
     {
-        if (m_sessions.size() + size_t(identities.size()) > m_totalLimit) return false;
+        if (occupied() + size_t(identities.size()) > m_totalLimit) return false;
         std::map<quint32, size_t> counts;
         QSet<QString> ids;
-        for (const auto &[id, entry] : m_sessions) { ids.insert(id); ++counts[entry.uid]; }
+        for (const auto &[id, entry] : m_sessions) {
+            ids.insert(id);
+            if (occupiesSlot(entry)) ++counts[entry.uid];
+        }
         for (const auto &[uid, id] : identities) {
             if (!uid || QUuid(id).isNull() || QUuid(id).toString(QUuid::WithoutBraces) != id
                 || ids.contains(id) || ++counts[uid] > m_perUserLimit) return false;
@@ -65,12 +69,12 @@ public:
     std::optional<Handle> reserveRetained(quint32 authenticatedUid, const QString &id)
     {
         if (QUuid(id).isNull() || QUuid(id).toString(QUuid::WithoutBraces) != id || m_sessions.contains(id)) return {};
-        if (!authenticatedUid || m_sessions.size() >= m_totalLimit) {
+        if (!authenticatedUid || occupied() >= m_totalLimit) {
             return {};
         }
         size_t owned = 0;
         for (const auto &[id, entry] : m_sessions) {
-            if (entry.uid == authenticatedUid) {
+            if (entry.uid == authenticatedUid && occupiesSlot(entry)) {
                 ++owned;
             }
         }
@@ -164,6 +168,14 @@ public:
         if (!entry) {
             return {};
         }
+        // A Failed entry holds no slot (AUD-FIX F5): restarting it takes one.
+        if (!occupiesSlot(*entry)) {
+            size_t owned = 0;
+            for (const auto &[otherId, other] : m_sessions) {
+                if (other.uid == authenticatedUid && occupiesSlot(other)) ++owned;
+            }
+            if (owned >= m_perUserLimit || occupied() >= m_totalLimit) return {};
+        }
         const auto generation = entry->state.create(authenticatedUid);
         if (!generation) {
             return {};
@@ -173,6 +185,7 @@ public:
 
     // Retained/starting/stopping entries continue counting against limits;
     // removing metadata is not a substitute for terminating a runtime.
+    // Failed entries stay listed but hold no slot (AUD-FIX F5).
     bool forget(quint32 authenticatedUid, const QString &id)
     {
         const auto *entry = owned(authenticatedUid, id);
@@ -189,6 +202,15 @@ private:
         quint32 uid;
         VirtualSessionState state;
     };
+    // AUD-FIX F5: a Failed desktop (crashed, or a record the broker could not
+    // adopt) does not hold one of its owner's slots, so stale records can
+    // never lock a user out of creating a desktop. It stays listed until it
+    // is dismissed or retired.
+    static bool occupiesSlot(const Entry &entry) { return entry.state.phase() != Phase::Failed; }
+    size_t occupied() const
+    {
+        return size_t(std::count_if(m_sessions.begin(), m_sessions.end(), [](const auto &item) { return occupiesSlot(item.second); }));
+    }
     Entry *owned(quint32 uid, const QString &id)
     {
         const auto it = m_sessions.find(id);

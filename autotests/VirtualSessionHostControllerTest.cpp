@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include <QTest>
+#include <QJsonDocument>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QScopeGuard>
 #include <QSignalSpy>
@@ -119,9 +121,10 @@ private Q_SLOTS:
             QCOMPARE(accepted.value(QStringLiteral("state")).toString(), QStringLiteral("failed"));
         }
         QCOMPARE(starts, 4); QCOMPARE(commits, 4); QCOMPARE(journal->records()->size(), 4);
-        const auto full = host.m_control.request(1000, 1, command(QStringLiteral("create")));
-        QCOMPARE(full.value(QStringLiteral("message")).toString(), QStringLiteral("session creation refused"));
-        QCOMPARE(starts, 4); QCOMPARE(commits, 4);
+        // AUD-FIX F5: failed desktops hold no slot, so a fifth create is admitted.
+        const auto fifth = host.m_control.request(1000, 1, command(QStringLiteral("create")));
+        QVERIFY(fifth.value(QStringLiteral("ok")).toBool());
+        QCOMPARE(starts, 5); QCOMPARE(commits, 5);
     }
     void maintenanceAdmissionPrecedesReconciliation()
     {
@@ -233,8 +236,54 @@ private Q_SLOTS:
         const auto response = host.m_control.request(1000, 1, command(QStringLiteral("dismiss"), r.session));
         QVERIFY(!response.value(QStringLiteral("ok")).toBool());
         host.reconcileCleanExits();
-        QCOMPARE(host.m_supervisor.list(1000).size(), kind == QStringLiteral("ordered-with-malformed-dismissal") ? 0 : 1);
-        QCOMPARE(journal->records()->size(), 1); QVERIFY(!journal->claimRecord(r, nullptr));
+        // AUD-FIX F5: nothing here can be adopted, so recovery retired the
+        // intent (moved aside, not deleted) instead of listing it forever;
+        // only the completed one stays as history.
+        const bool completed = kind == QStringLiteral("ordered-with-malformed-dismissal");
+        QVERIFY(host.m_supervisor.list(1000).isEmpty());
+        QCOMPARE(journal->records()->size(), completed ? 1 : 0);
+        QCOMPARE(QFile::exists(dir.filePath(QStringLiteral(".retired-") + r.session + QStringLiteral(".json"))), !completed);
+        QVERIFY(!journal->claimRecord(r, nullptr));
+    }
+    // AUD-FIX F5, Sol 2026-09-27: four records left by the old test broker
+    // (claimed, keeper recorded, some PAM-closed, none reconciled) listed as
+    // failed, filled the per-user limit of 4, and a create got 0x408.
+    void fourStaleRecordsAreRetiredAndCreateSucceeds()
+    {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        QFile bootFile(QStringLiteral("/proc/sys/kernel/random/boot_id")); QVERIFY(bootFile.open(QIODevice::ReadOnly));
+        const auto boot = QString::fromLatin1(bootFile.readAll()).trimmed();
+        QList<VirtualSessionJournal::Record> stale;
+        for (int i = 0; i < 4; ++i) {
+            // Three from this boot (as on Sol), one from an earlier boot.
+            VirtualSessionJournal::Record r{1000, uuid(), uuid(), uuid(), i == 3 ? uuid() : boot, QByteArray(32, char('a' + i))};
+            if (i == 0) r.initialOutputs = {{QPoint(1920, 114), QSize(1920, 1080), 1, true}, {QPoint(0, 0), QSize(1920, 1080), 1, false}};
+            QVERIFY(journal->insert(r)); QVERIFY(journal->claimRecord(r, nullptr));
+            QVERIFY(journal->writeKeeper(r, {4000 + i, 7, 9}, nullptr));
+            stale.append(r);
+        }
+        Server server; VirtualSessionHostController host(&server, {});
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("^Retired virtual desktop record .*earlier boot")));
+        for (int i = 0; i < 3; ++i)
+            QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("^Retired virtual desktop record .*could not be adopted")));
+        QVERIFY(host.recover(*journal));
+        QVERIFY(host.m_supervisor.list(1000).isEmpty());
+        QVERIFY(journal->records()->isEmpty());
+        for (const auto &r : stale) {
+            QVERIFY(QFile::exists(dir.filePath(QStringLiteral(".retired-") + r.session + QStringLiteral(".json"))));
+            QVERIFY(QFile::exists(dir.filePath(QStringLiteral(".keeper-") + r.session)));
+        }
+        int starts = 0;
+        QVERIFY(host.enableIndependentCreates(*journal, [&](const auto &, const auto &) { ++starts; return true; }));
+        const auto created = host.m_control.request(1000, 1, command(QStringLiteral("create")));
+        QVERIFY2(created.value(QStringLiteral("ok")).toBool(), QJsonDocument(created).toJson().constData());
+        QCOMPARE(starts, 1);
+        QCOMPARE(journal->records()->size(), 1);
+        // And the full limit is available again.
+        for (int i = 0; i < 3; ++i) QVERIFY(host.m_control.request(1000, 2 + i, command(QStringLiteral("create"))).value(QStringLiteral("ok")).toBool());
+        QVERIFY(!host.m_control.request(1000, 9, command(QStringLiteral("create"))).value(QStringLiteral("ok")).toBool());
     }
     void ownerDismissalReclaimsQuotaAndSurvivesRecovery()
     {
@@ -243,10 +292,19 @@ private Q_SLOTS:
         Server server;
         auto host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
         QVERIFY(host->recover(*journal));
-        QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
-        for (int i = 0; i < 4; ++i) QVERIFY(host->createIndependent(1000));
+        // Started (not failed) desktops hold slots.
+        QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return true; }));
+        QList<VirtualSessionRegistry::Handle> handles;
+        for (int i = 0; i < 4; ++i) { const auto handle = host->createIndependent(1000); QVERIFY(handle); handles.append(*handle); }
         QVERIFY(!host->createIndependent(1000));
-        const auto r = journal->records()->first();
+        // AUD-FIX F5: a failed desktop holds no slot, even before it is dismissed.
+        QVERIFY(host->m_supervisor.m_registry.unavailable(handles.first()));
+        QVERIFY(host->createIndependent(1000));
+        QVERIFY(!host->createIndependent(1000));
+        VirtualSessionJournal::Record r;
+        const auto created = journal->records(); QVERIFY(created);
+        for (const auto &candidate : *created) if (candidate.session == handles.first().id) r = candidate;
+        QVERIFY(r.valid());
         QVERIFY(journal->claimRecord(r, nullptr)); QVERIFY(journal->writeReconciled(r, nullptr));
         const auto list = host->m_control.request(1000, 1, command(QStringLiteral("list")));
         int eligible = 0;
@@ -262,19 +320,21 @@ private Q_SLOTS:
         const auto reply = host->m_control.request(1000, 1, request);
         QVERIFY(reply.value(QStringLiteral("ok")).toBool()); QCOMPARE(reply.value(QStringLiteral("session")).toString(), r.session);
         QCOMPARE(reply.value(QStringLiteral("state")).toString(), QStringLiteral("dismissed"));
-        QCOMPARE(host->m_supervisor.list(1000).size(), 4); // No inline retirement on reply stack.
+        QCOMPARE(host->m_supervisor.list(1000).size(), 5); // No inline retirement on reply stack.
         QCOMPARE(host->m_control.request(1000, 1, request), reply);
         QCOMPARE(journal->orderedExit(r), std::optional<bool>(false));
-        QTRY_COMPARE(host->m_supervisor.list(1000).size(), 3);
-        QVERIFY(host->createIndependent(1000)); QCOMPARE(journal->records()->size(), 5);
+        QTRY_COMPARE(host->m_supervisor.list(1000).size(), 4);
+        QCOMPARE(journal->records()->size(), 5);
         QVERIFY(!journal->claimRecord(r, nullptr));
         host.reset();
         host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
-        QVERIFY(host->recover(*journal)); QCOMPARE(host->m_supervisor.list(1000).size(), 4);
+        // The dismissed one is completed history; the other four have no
+        // runtime to adopt here, so recovery retires them (AUD-FIX F5).
+        QVERIFY(host->recover(*journal)); QVERIFY(host->m_supervisor.list(1000).isEmpty());
+        QCOMPARE(journal->records()->size(), 1); QCOMPARE(journal->records()->first().session, r.session);
         QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
-        for (const auto &entry : host->m_supervisor.list(1000)) QVERIFY(entry.id != r.session);
         const auto retry = host->m_control.request(1000, 3, command(QStringLiteral("dismiss"), r.session));
-        QVERIFY(retry.value(QStringLiteral("ok")).toBool()); QCOMPARE(journal->records()->size(), 5);
+        QVERIFY(retry.value(QStringLiteral("ok")).toBool()); QCOMPARE(journal->records()->size(), 1);
         QVERIFY(!host->m_control.request(1001, 4, command(QStringLiteral("dismiss"), r.session)).value(QStringLiteral("ok")).toBool());
     }
     void dismissalRequiresFailedLiveState_data()
@@ -337,9 +397,14 @@ private Q_SLOTS:
         auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
         Server server;
         auto host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
-        QVERIFY(host->recover(*journal)); QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
-        for (int i = 0; i < 4; ++i) QVERIFY(host->createIndependent(1000));
-        const auto r = journal->records()->first(); QVERIFY(journal->claimRecord(r, nullptr)); QVERIFY(journal->writeReconciled(r, nullptr));
+        QVERIFY(host->recover(*journal)); QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return true; }));
+        QList<VirtualSessionRegistry::Handle> handles;
+        for (int i = 0; i < 4; ++i) { const auto handle = host->createIndependent(1000); QVERIFY(handle); handles.append(*handle); }
+        QVERIFY(host->m_supervisor.m_registry.unavailable(handles.first()));
+        VirtualSessionJournal::Record r;
+        const auto created = journal->records(); QVERIFY(created);
+        for (const auto &candidate : *created) if (candidate.session == handles.first().id) r = candidate;
+        QVERIFY(journal->claimRecord(r, nullptr)); QVERIFY(journal->writeReconciled(r, nullptr));
         const auto request = command(QStringLiteral("dismiss"), r.session);
         dismissalFailSync = sync;
         const auto uncertain = host->m_control.request(1000, 1, request);
@@ -348,20 +413,30 @@ private Q_SLOTS:
         QCOMPARE(journal->dismissed(r), std::optional<bool>(true));
         QCOMPARE(host->m_control.request(1000, 1, request), uncertain); // Failure retry never executes again.
         dismissalFailSync = sync;
+        int expected = 4;
         if (path == QStringLiteral("timer")) {
             QVERIFY(QMetaObject::invokeMethod(&host->m_reconcileTimer, "timeout", Qt::DirectConnection));
         } else if (path == QStringLiteral("create")) {
-            QVERIFY(!host->createIndependent(1000));
+            // The failed desktop holds no slot (AUD-FIX F5), so this create
+            // is admitted; its inline reconciliation must still not retire r.
+            QVERIFY(host->createIndependent(1000)); expected = 5;
         } else {
             host.reset(); host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
             QVERIFY(host->recover(*journal));
             QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+            // Without durable proof r is not complete history; nothing here can
+            // be adopted, so recovery retires every intent (AUD-FIX F5).
+            QCOMPARE(dismissalFailSync, 0);
+            QVERIFY(host->m_supervisor.list(1000).isEmpty());
+            QVERIFY(journal->records()->isEmpty());
+            QVERIFY(!journal->claimRecord(r, nullptr));
+            return;
         }
-        QCOMPARE(dismissalFailSync, 0); QCOMPARE(host->m_supervisor.list(1000).size(), 4);
-        QCOMPARE(journal->records()->size(), 4);
+        QCOMPARE(dismissalFailSync, 0); QCOMPARE(host->m_supervisor.list(1000).size(), expected);
+        QCOMPARE(journal->records()->size(), expected);
         dismissalFailSync = 0;
         QVERIFY(host->m_control.request(1000, 1, command(QStringLiteral("dismiss"), r.session)).value(QStringLiteral("ok")).toBool());
-        QTRY_COMPARE(host->m_supervisor.list(1000).size(), 3);
+        QTRY_COMPARE(host->m_supervisor.list(1000).size(), expected - 1);
         QVERIFY(!journal->claimRecord(r, nullptr));
     }
     void controlDispatchDefersRetirementEvenInNestedEventLoop()
@@ -507,9 +582,12 @@ private Q_SLOTS:
         }
         Server server; VirtualSessionHostController host(&server, {});
         QVERIFY(host.recover(*journal));
-        QCOMPARE(host.m_supervisor.list(1000).size(), 1);
-        QCOMPARE(host.m_supervisor.list(1000).first().phase, VirtualSessionState::Phase::Failed);
-        QVERIFY(journal->records()->first() == r);
+        // AUD-FIX F5: incomplete proof and no adoptable runtime: retired, not a Failed row.
+        QVERIFY(host.m_supervisor.list(1000).isEmpty());
+        QVERIFY(journal->records()->isEmpty());
+        bool retired = false;
+        QVERIFY(journal->readRecord(r.session, nullptr, &retired) == r); QVERIFY(retired);
+        QVERIFY(!journal->claimRecord(r, nullptr));
     }
     void sameBrokerReclaimsOnlyProvenCleanHistory()
     {
@@ -559,8 +637,11 @@ private Q_SLOTS:
         Server server;
         VirtualSessionHostController next(&server, {});
         QVERIFY(next.recover(*journal));
-        QCOMPARE(next.m_supervisor.list(1000).size(), 1);
-        QCOMPARE(next.m_supervisor.list(1000).first().phase, VirtualSessionState::Phase::Failed);
+        // AUD-FIX F5: the published intent never started, so recovery retires it.
+        QVERIFY(next.m_supervisor.list(1000).isEmpty());
+        QVERIFY(journal->records()->isEmpty());
+        QVERIFY(next.enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        QVERIFY(next.createIndependent(1000));
     }
     void independentCreateWaitsForGuardianThenCapture()
     {
@@ -884,13 +965,15 @@ private Q_SLOTS:
         Server server;
         VirtualSessionHostController host(&server, {});
         QVERIFY(host.recover(*journal));
-        QCOMPARE(host.m_supervisor.list(1000).size(), 1);
-        QCOMPARE(host.m_supervisor.list(1000).first().phase, VirtualSessionState::Phase::Failed);
+        // AUD-FIX F5: an earlier boot's desktop is gone: retired, unchanged, not listed.
+        QVERIFY(host.m_supervisor.list(1000).isEmpty());
         QVERIFY(host.m_workers.empty());
-        const auto saved = journal->records();
-        QVERIFY(saved); QCOMPARE(saved->size(), 1);
-        QCOMPARE(saved->first().incarnation, record.incarnation);
-        QCOMPARE(saved->first().token, record.token);
+        QVERIFY(journal->records()->isEmpty());
+        bool retired = false;
+        const auto saved = journal->readRecord(record.session, nullptr, &retired);
+        QVERIFY(saved); QVERIFY(retired);
+        QCOMPARE(saved->incarnation, record.incarnation);
+        QCOMPARE(saved->token, record.token);
         QVERIFY(!host.recover(*journal));
     }
     void recoveryRefusesAfterClientAdmission()

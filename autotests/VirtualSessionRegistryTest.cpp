@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include <QTest>
+#include <QUuid>
 #include "VirtualSessionRegistry.h"
 
 using Registry = KRdp::VirtualSessionRegistry;
@@ -9,6 +10,39 @@ class VirtualSessionRegistryTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    // AUD-FIX F5: failed desktops stay listed but hold no slot; restarting
+    // one takes a slot again.
+    void failedEntriesHoldNoSlot()
+    {
+        Registry registry(4, 6);
+        QList<Registry::Handle> failed;
+        for (int i = 0; i < 4; ++i) {
+            const auto handle = registry.create(1000);
+            QVERIFY(handle);
+            QVERIFY(registry.unavailable(*handle));
+            failed.append(*handle);
+        }
+        QCOMPARE(registry.list(1000).size(), 4);
+        // Four failed records (Sol, 2026-09-27) no longer lock the user out.
+        const auto fresh = registry.create(1000);
+        QVERIFY(fresh);
+        QVERIFY(registry.canReserve({{1000, QUuid::createUuid().toString(QUuid::WithoutBraces)}}));
+        for (int i = 0; i < 3; ++i) QVERIFY(registry.create(1000));
+        // Four live desktops: the per-user limit holds for them.
+        QVERIFY(!registry.create(1000));
+        QVERIFY(!registry.recreate(1000, failed.first().id));
+        // The host total (6) counts live desktops only: 4 failed + 4 live so far.
+        QVERIFY(registry.create(1001));
+        QVERIFY(registry.create(1001));
+        QVERIFY(!registry.create(1001)); // 6 live
+        QCOMPARE(registry.list(1000).size(), 8);
+        QVERIFY(!registry.create(1000));
+        // Once a live one is gone a failed one can be restarted.
+        QVERIFY(registry.stop(1000, fresh->id));
+        QVERIFY(registry.exited(*fresh));
+        QVERIFY(registry.forget(1000, fresh->id));
+        QVERIFY(registry.recreate(1000, failed.first().id));
+    }
     void ownerScopedDiscoveryAndActions()
     {
         Registry registry;

@@ -9,6 +9,8 @@
 #include <functional>
 #include <memory>
 
+class VirtualSessionSupervisorTest;
+
 namespace KRdp
 {
 /** Owns namespace-leader processes independently of RDP transports.
@@ -57,9 +59,15 @@ public:
 private:
     friend class VirtualSessionHostControllerTest;
     friend class VirtualSessionHostController;
+    friend class ::VirtualSessionSupervisorTest;
     // Host-only: final cleanup plus orderly-exit or durable owner-dismissal
     // proof required. Failed registry state alone never authorizes retirement.
     bool forgetReconciled(const VirtualSessionGuardianClient::Identity &identity);
+    // AUD-FIX F5: drop a recovered runtime that failed before capture was ever
+    // observed and whose journal intent has been retired. Supervision only:
+    // nothing is stopped or killed and no profile is touched.
+    bool retireUnadopted(const VirtualSessionGuardianClient::Identity &identity);
+    bool unadoptedFailure(const VirtualSessionGuardianClient::Identity &identity) const;
     struct Runtime {
         Handle handle;
         QProcess process;

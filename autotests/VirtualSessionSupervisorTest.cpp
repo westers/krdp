@@ -124,13 +124,24 @@ private Q_SLOTS:
         Supervisor broker(sleeper);
         int revoked = 0;
         broker.setUnavailableCallback([&](const auto &) { ++revoked; });
-        const auto adopted = broker.adopt({quint32(getuid()), id, QUuid::createUuid().toString(QUuid::WithoutBraces), socket, token});
+        const KRdp::VirtualSessionGuardianClient::Identity identity{quint32(getuid()), id, QUuid::createUuid().toString(QUuid::WithoutBraces), socket, token};
+        const auto adopted = broker.adopt(identity);
         QVERIFY(adopted);
         QTRY_COMPARE(broker.list(getuid()).first().phase, Phase::Failed);
         QCOMPARE(revoked, 1);
         QVERIFY(!broker.captureReady(*adopted));
         QVERIFY(!broker.recreate(getuid(), id));
         QVERIFY(!broker.forget(getuid(), id));
+        QCOMPARE(guardian.phase(), QStringLiteral("running"));
+        // AUD-FIX F5: the broker may retire such a record (e.g. an old test
+        // broker's desktop); that drops supervision only.
+        const KRdp::VirtualSessionGuardianClient::Identity wrong{quint32(getuid()), id, QUuid::createUuid().toString(QUuid::WithoutBraces), socket, token};
+        QVERIFY(!broker.unadoptedFailure(wrong)); // identity must match exactly
+        QVERIFY(!broker.retireUnadopted(wrong));
+        QVERIFY(broker.unadoptedFailure(identity));
+        QVERIFY(broker.retireUnadopted(identity));
+        QVERIFY(broker.list(getuid()).isEmpty());
+        QVERIFY(broker.create(getuid())); // no slot was ever held
         QCOMPARE(guardian.phase(), QStringLiteral("running"));
     }
     void captureTimeoutDoesNotStopRetainedDesktop()

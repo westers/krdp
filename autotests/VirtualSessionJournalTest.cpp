@@ -29,6 +29,35 @@ class VirtualSessionJournalTest : public QObject {
     static QString id() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     static VirtualSessionJournal::Record record() { return {1000, id(), id(), id(), id(), QByteArray(32, 's')}; }
 private Q_SLOTS:
+    // AUD-FIX F5: an intent the broker cannot adopt is moved aside, never deleted.
+    void retiredIntentIsKeptButNotEnumeratedOrLaunched() {
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        const auto kept = record(); QVERIFY(journal->insert(kept));
+        const auto stale = record(); QVERIFY(journal->insert(stale));
+        QVERIFY(journal->claimRecord(stale, nullptr)); QVERIFY(journal->writeKeeper(stale, {4242, 7, 9}, nullptr));
+        auto other = stale; other.token = QByteArray(32, 'o');
+        QVERIFY(!journal->retire(other, nullptr)); // exact identity only
+        QVERIFY(journal->retire(stale, nullptr));
+        QVERIFY(!QFile::exists(dir.filePath(stale.session + QStringLiteral(".json"))));
+        QVERIFY(QFile::exists(dir.filePath(QStringLiteral(".retired-") + stale.session + QStringLiteral(".json"))));
+        // Markers stay; nothing is deleted.
+        QVERIFY(QFile::exists(dir.filePath(QStringLiteral(".claimed-") + stale.session)));
+        QVERIFY(QFile::exists(dir.filePath(QStringLiteral(".keeper-") + stale.session)));
+        const auto all = journal->records(); QVERIFY(all);
+        QCOMPARE(all->size(), 1); QCOMPARE(all->first(), kept);
+        // Teardown can still read it (cleanup of a still-running desktop)...
+        bool retired = false;
+        QCOMPARE(journal->readRecord(stale.session, nullptr, &retired), std::optional(stale)); QVERIFY(retired);
+        QVERIFY(journal->writeReconciled(stale, nullptr));
+        // ...but it can never be claimed (launched) again.
+        const auto unclaimed = record(); QVERIFY(journal->insert(unclaimed)); QVERIFY(journal->retire(unclaimed, nullptr));
+        QVERIFY(!journal->claimRecord(unclaimed, nullptr));
+        QVERIFY(journal->retire(unclaimed, nullptr)); // idempotent
+        QCOMPARE(journal->records()->size(), 1);
+        auto readOnly = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr, false); QVERIFY(readOnly);
+        QVERIFY(!readOnly->retire(kept, nullptr));
+    }
     void selectedLayoutV2RoundTripAndLegacyV1() {
         QTemporaryDir dir;
         auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);

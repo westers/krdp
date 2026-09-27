@@ -40,7 +40,8 @@ int main(int argc, char **argv)
     parser.addOption({QStringLiteral("session"), QStringLiteral("Trusted systemd desktop UUID"), QStringLiteral("uuid")});
     parser.process(app);
     if (!parser.positionalArguments().isEmpty()) return refused("arguments");
-    const auto record = KRdp::VirtualSessionJournal::readLaunchIntent(parser.value(QStringLiteral("session")));
+    const auto record = KRdp::VirtualSessionJournal::readLaunchIntent(parser.value(QStringLiteral("session")), nullptr,
+                                                                        true /* a retired desktop still gets its cleanup */);
     if (!record) return refused("committed launch intent");
     QFile boot(QStringLiteral("/proc/sys/kernel/random/boot_id"));
     if (!boot.open(QIODevice::ReadOnly) || QString::fromLatin1(boot.read(128)).trimmed() != record->boot)

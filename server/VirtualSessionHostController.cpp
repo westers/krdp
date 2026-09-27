@@ -50,6 +50,9 @@ VirtualSessionHostController::VirtualSessionHostController(Server *server, Prepa
             if (!alive) return;
         }
         if (auto *endpoint = resolve(handle)) endpoint->close();
+        // Never on the supervisor's callback stack: it may still use the runtime.
+        if (m_recoveredPending.contains(handle.id))
+            QTimer::singleShot(0, this, [this, id = handle.id] { retireFailedRecovery(id); });
     });
     // AUD-D4: a stock client took a desktop over from another connection of
     // the same user; that one is told with the standard error code and closed.
@@ -115,18 +118,30 @@ bool VirtualSessionHostController::recover(VirtualSessionJournal &journal, QStri
         return false;
     }
     const auto boot = QString::fromLatin1(file.read(128)).trimmed();
-    QSet<QString> completed;
-    for (const auto &record : *records) {
-        if (terminalProof(journal, record, boot)) completed.insert(record.session);
+    if (m_recoveryAttempted || m_nextClient || !m_workers.empty()) {
+        if (error) *error = QStringLiteral("Recovery requires a fresh host and valid launch intents within admission limits");
+        return false;
     }
-    if (!recoverRecords(*records, boot, error, completed)) return false;
+    m_recoveredJournal = &journal;
+    QSet<QString> completed;
+    QVector<VirtualSessionJournal::Record> current;
+    for (const auto &record : *records) {
+        const bool done = terminalProof(journal, record, boot);
+        // AUD-FIX F5: a desktop from an earlier boot is gone and can never be
+        // adopted. Move its intent aside instead of listing it as Failed
+        // forever (it could not even be dismissed: that needs this boot).
+        if (!done && record.valid() && record.boot != boot && retireRecord(journal, record, QStringLiteral("it belongs to an earlier boot")))
+            continue;
+        if (done) completed.insert(record.session);
+        current.append(record);
+    }
+    if (!recoverRecords(current, boot, error, completed)) return false;
     // "Most recently used" for stock clients (AUD-D4): nothing was used since
     // this broker started, so the journal's creation order stands in for it.
-    for (const auto &record : *records) {
+    for (const auto &record : current) {
         if (!completed.contains(record.session)) m_control.noteUsed(record.session);
     }
     m_recoveryBoot = boot;
-    m_recoveredJournal = &journal;
     return true;
 }
 
@@ -246,6 +261,49 @@ void VirtualSessionHostController::reconcileCleanExits()
     }
 }
 
+bool VirtualSessionHostController::retireRecord(VirtualSessionJournal &journal, const VirtualSessionJournal::Record &record, const QString &reason)
+{
+    // A reserved row must go too; one that proved capture is not "unadoptable".
+    bool reserved = false;
+    for (const auto &summary : m_supervisor.list(record.uid)) {
+        if (summary.id == record.session) reserved = true;
+    }
+    QString error;
+    if (!journal.retire(record, &error)) {
+        qWarning().noquote() << "Cannot retire virtual desktop record" << record.session << "(uid" << record.uid << "):" << error;
+        return false;
+    }
+    if (reserved && !m_supervisor.retireUnadopted(record.identity())) {
+        qWarning().noquote() << "Retired virtual desktop record" << record.session << "stays listed as failed until the broker restarts";
+    }
+    m_workers.erase(record.session);
+    m_recoveredPending.erase(record.session);
+    qWarning().noquote() << "Retired virtual desktop record" << record.session << "(uid" << record.uid << "):" << reason
+                         << QStringLiteral("- moved aside as .retired-%1.json; it no longer holds a slot. The desktop's").arg(record.session)
+                         << "profile and any process still running were left alone.";
+    return true;
+}
+
+void VirtualSessionHostController::retireFailedRecovery(const QString &session)
+{
+    const auto found = m_recoveredPending.find(session);
+    if (found == m_recoveredPending.end() || !m_recoveredJournal) return;
+    const auto record = found->second;
+    bool failed = false;
+    for (const auto &summary : m_supervisor.list(record.uid)) {
+        if (summary.id == session) failed = summary.phase == VirtualSessionState::Phase::Failed;
+    }
+    if (!failed) return;
+    // Only a runtime that never proved capture; a desktop that worked and
+    // then crashed stays listed (and dismissible) as before.
+    if (!m_supervisor.unadoptedFailure(record.identity())) {
+        m_recoveredPending.erase(found);
+        return;
+    }
+    retireRecord(*m_recoveredJournal, record, QStringLiteral("its recovered desktop failed before it was ever captured"));
+    m_recoveredPending.erase(session);
+}
+
 std::optional<VirtualSessionJournal::Record> VirtualSessionHostController::dismissalRecord(quint32 uid, const QString &id) const
 {
     if (!uid || !m_journal) return {};
@@ -317,13 +375,21 @@ bool VirtualSessionHostController::recoverRecords(const QVector<VirtualSessionJo
     m_recoveryAttempted = true;
     for (const auto &record : records) {
         if (completed.contains(record.session)) continue;
-        if (record.boot == boot && adopt(record.identity(), record.workerSocket())) continue;
+        if (record.boot == boot && adopt(record.identity(), record.workerSocket())) {
+            // Adoption is asynchronous: it can still fail before capture.
+            m_recoveredPending.insert_or_assign(record.session, record);
+            continue;
+        }
         bool reserved = false;
         for (const auto &summary : m_supervisor.list(record.uid)) {
             if (summary.id == record.session) { reserved = true; break; }
         }
-        // Failed adoption may already have reserved a runtime. Missing runtime
-        // or occupied lease must still leave a visible intent, never a new spawn.
+        // AUD-FIX F5: a record this broker cannot adopt (no runtime, occupied
+        // lease, unusable endpoint) is moved aside rather than kept as a Failed
+        // row. Never a new spawn either way.
+        if (m_recoveredJournal && retireRecord(*m_recoveredJournal, record, QStringLiteral("its desktop could not be adopted")))
+            continue;
+        // Retirement failed: keep a visible intent (Failed rows hold no slot).
         if (!reserved && !m_supervisor.rememberUnavailable(record.identity())) return refuse();
     }
     if (error) error->clear();

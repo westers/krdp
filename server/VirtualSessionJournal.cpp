@@ -12,6 +12,7 @@
 #include <limits>
 #include <climits>
 #include <cerrno>
+#include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -109,10 +110,14 @@ std::unique_ptr<VirtualSessionJournal> VirtualSessionJournal::open(QString *erro
     if (getuid() || geteuid()) { fail(error, QStringLiteral("Journal requires the root service")); return {}; }
     return openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error);
 }
-std::optional<VirtualSessionJournal::Record> VirtualSessionJournal::readLaunchIntent(const QString &session, QString *error) {
+std::optional<VirtualSessionJournal::Record> VirtualSessionJournal::readLaunchIntent(const QString &session, QString *error, bool allowRetired) {
     if (getuid() || geteuid()) { fail(error, QStringLiteral("Launch intent requires the root service")); return {}; }
     auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
-    return journal ? journal->readRecord(session, error) : std::nullopt;
+    if (!journal) return {};
+    bool retired = false;
+    auto record = journal->readRecord(session, error, &retired);
+    if (record && retired && !allowRetired) { fail(error, QStringLiteral("Launch intent was retired")); return {}; }
+    return record;
 }
 std::optional<QVector<VirtualSessionJournal::Record::InitialOutput>> VirtualSessionJournal::parseInitialLayoutJson(const QByteArray &json) {
     if (json.isEmpty() || json.size() > 4096) return {};
@@ -353,8 +358,9 @@ bool VirtualSessionJournal::hasClaim(const Record &expected) const {
     return file.error() == QFileDevice::NoError && bytes == expected.launch.toLatin1() + '\n' + expected.incarnation.toLatin1();
 }
 bool VirtualSessionJournal::claimRecord(const Record &expected, QString *error) {
-    const auto current = readRecord(expected.session, error);
-    if (!current || *current != expected) return fail(error, QStringLiteral("Launch intent changed or is unavailable"));
+    bool retired = false;
+    const auto current = readRecord(expected.session, error, &retired);
+    if (!current || *current != expected || retired) return fail(error, QStringLiteral("Launch intent changed or is unavailable"));
     const QByteArray name = QByteArray(".claimed-") + expected.session.toLatin1();
     const int fd = openat(m_directory, name.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return fail(error, QStringLiteral("Launch already consumed or claim unavailable"));
@@ -428,13 +434,34 @@ bool VirtualSessionJournal::insert(const Record &r, QString *error) {
     if (error) error->clear();
     return true;
 }
-std::optional<VirtualSessionJournal::Record> VirtualSessionJournal::readRecord(const QString &session, QString *error) const {
+bool VirtualSessionJournal::retire(const Record &expected, QString *error) {
+    if (!m_writable) return fail(error, QStringLiteral("Retirement requires the broker journal lease"));
+    bool retired = false;
+    const auto current = readRecord(expected.session, error, &retired);
+    if (!current || *current != expected) return fail(error, QStringLiteral("Retired launch identity uncertain"));
+    if (retired) { if (error) error->clear(); return true; }
+    const QByteArray name = expected.session.toLatin1() + ".json";
+    const QByteArray retiredName = ".retired-" + name;
+    // RENAME_NOREPLACE: never overwrite an earlier retired copy.
+    if (syscall(SYS_renameat2, m_directory, name.constData(), m_directory, retiredName.constData(), 1U /* RENAME_NOREPLACE */))
+        return fail(error, QStringLiteral("Cannot move the launch intent aside: %1").arg(QString::fromLocal8Bit(strerror(errno))));
+    if (fsync(m_directory)) return fail(error, QStringLiteral("Retirement not durable"));
+    if (error) error->clear();
+    return true;
+}
+std::optional<VirtualSessionJournal::Record> VirtualSessionJournal::readRecord(const QString &session, QString *error, bool *retired) const {
     const auto refuse = [error]() -> std::optional<Record> {
         fail(error, QStringLiteral("Unsafe, malformed or unreadable launch intent")); return {};
     };
+    if (retired) *retired = false;
     if (!uuid(session)) return refuse();
     const QByteArray name = session.toLatin1() + ".json";
-    const int fd = openat(m_directory, name.constData(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    int fd = openat(m_directory, name.constData(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0 && errno == ENOENT) {
+        const QByteArray retiredName = ".retired-" + name;
+        fd = openat(m_directory, retiredName.constData(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (fd >= 0 && retired) *retired = true;
+    }
     if (fd < 0) return refuse();
     QFile file;
     if (!file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) { close(fd); return refuse(); }
@@ -487,6 +514,8 @@ std::optional<QVector<VirtualSessionJournal::Record>> VirtualSessionJournal::rec
         if (name.startsWith(".reconciled-") && uuid(QString::fromLatin1(name.mid(12)))) continue;
         if (name.startsWith(".ordered-") && uuid(QString::fromLatin1(name.mid(9)))) continue;
         if (name.startsWith(".dismissed-") && uuid(QString::fromLatin1(name.mid(11)))) continue;
+        // AUD-FIX F5: retired intents are history, not recovery identities.
+        if (name.startsWith(".retired-") && name.endsWith(".json") && uuid(QString::fromLatin1(name.mid(9).chopped(5)))) continue;
         if (!name.endsWith(".json") || !uuid(QString::fromLatin1(name.chopped(5))) || result.size() >= 256) { ok = false; break; }
         const auto record = readRecord(QString::fromLatin1(name.chopped(5)), error);
         if (!record) { ok = false; break; }

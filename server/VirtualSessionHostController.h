@@ -43,6 +43,10 @@ private:
     bool recoverRecords(const QVector<VirtualSessionJournal::Record> &records, const QString &boot, QString *error,
                         const QSet<QString> &completed = {});
     void reconcileCleanExits();
+    // AUD-FIX F5: move an intent this broker cannot adopt aside in the journal
+    // (and drop its Failed row when it has one), with a log line.
+    bool retireRecord(VirtualSessionJournal &journal, const VirtualSessionJournal::Record &record, const QString &reason);
+    void retireFailedRecovery(const QString &session);
     std::optional<VirtualSessionJournal::Record> dismissalRecord(quint32 uid, const QString &id) const;
     bool dismissalEligible(quint32 uid, const QString &id) const;
     VirtualSessionControl::DismissResult dismissFailure(quint32 uid, const QString &id);
@@ -82,6 +86,9 @@ private:
     std::function<bool(const VirtualSessionJournal::Record &)> m_commitIntent;
     bool m_creationBlocked = false;
     std::map<QString, VirtualSessionJournal::Record> m_newIntents;
+    // Records recovered at startup whose desktop has not yet been captured;
+    // one that fails first is retired (AUD-FIX F5).
+    std::map<QString, VirtualSessionJournal::Record> m_recoveredPending;
     VirtualSessionSupervisor m_supervisor;
     VirtualSessionControl m_control;
     std::map<quint64, std::unique_ptr<VirtualSessionTransport>> m_clients;

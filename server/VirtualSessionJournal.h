@@ -43,7 +43,9 @@ public:
     static std::unique_ptr<VirtualSessionJournal> open(QString *error = nullptr);
     // Independent root-service entry reads only its committed immutable intent,
     // without taking the broker's exclusive lease. Not permission to relaunch.
-    static std::optional<Record> readLaunchIntent(const QString &session, QString *error = nullptr);
+    // A retired intent (see retire()) never launches; teardown helpers that
+    // must still finish a running desktop's cleanup pass allowRetired.
+    static std::optional<Record> readLaunchIntent(const QString &session, QString *error = nullptr, bool allowRetired = false);
     // Same bounded canonical output schema used by the private worker at
     // startup; no journal access or root authority is involved.
     static std::optional<QVector<Record::InitialOutput>> parseInitialLayoutJson(const QByteArray &json);
@@ -87,13 +89,19 @@ public:
     // directory on EVERY call, including retries/recovery. False forbids retirement.
     bool durableDismissed(const Record &expected, QString *error = nullptr) const;
     bool insert(const Record &record, QString *error = nullptr);
+    // AUD-FIX F5: move an intent the broker cannot adopt aside as
+    // `.retired-<session>.json` (atomic rename, never deleted, markers kept).
+    // records() skips it, so it no longer counts against any limit or blocks
+    // recovery; the desktop's profile and runtime are not touched.
+    bool retire(const Record &expected, QString *error = nullptr);
     std::optional<QVector<Record>> records(QString *error = nullptr) const;
 private:
     friend class VirtualSessionJournalTest;
     friend class VirtualSessionHostControllerTest;
     VirtualSessionJournal(int directory, quint32 owner, bool writable) : m_directory(directory), m_owner(owner), m_writable(writable) {}
     static std::unique_ptr<VirtualSessionJournal> openAt(const QString &path, quint32 owner, QString *error, bool writable = true);
-    std::optional<Record> readRecord(const QString &session, QString *error) const;
+    // Falls back to the retired copy; *retired says which one was read.
+    std::optional<Record> readRecord(const QString &session, QString *error, bool *retired = nullptr) const;
     bool claimRecord(const Record &expected, QString *error);
     bool hasClaim(const Record &expected) const;
     bool writeReconciled(const Record &expected, QString *error);
