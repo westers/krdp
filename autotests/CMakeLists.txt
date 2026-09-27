@@ -427,3 +427,11 @@ target_include_directories(GfxSurfaceCommandTest PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_include_directories(GfxSurfaceCommandTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
 target_link_libraries(GfxSurfaceCommandTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME GfxSurfaceCommandTest COMMAND GfxSurfaceCommandTest)
+
+# --- AUD-WS-S ---
+# AUD-S4: ListenAddress parsing (header-only, server/).
+add_executable(ListenAddressTest ListenAddressTest.cpp)
+target_include_directories(ListenAddressTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ListenAddressTest PRIVATE Qt6::Test Qt6::Core Qt6::Network)
+add_test(NAME ListenAddressTest COMMAND ListenAddressTest)
+# --- end AUD-WS-S ---

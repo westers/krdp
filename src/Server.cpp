@@ -68,7 +68,7 @@ bool Server::start()
     // global default instance. So create one here and use that.
     d->settings = freerdp_settings_new(FREERDP_SETTINGS_SERVER_MODE);
 
-    qCDebug(KRDP) << "Listening for connections on" << serverAddress() << serverPort();
+    qCInfo(KRDP) << "Listening for connections on" << serverAddress() << serverPort();
     return true;
 }
 
