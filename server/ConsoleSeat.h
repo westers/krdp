@@ -26,6 +26,8 @@ struct Session {
     bool active = false;
     quint32 uid = 0;
     quint32 leader = 0;
+    bool locked = false; ///< logind LockedHint: the desktop shows its lock screen.
+    bool operator==(const Session &) const = default;
 };
 
 enum class Adapter {
@@ -90,7 +92,19 @@ inline std::optional<quint32> activeSessionUid(const QList<Session> &sessions, A
     return std::nullopt;
 }
 
-/** Read logind sessions from the system bus. Returns an empty list with an
+/** The session record for @p id, if logind still lists it. */
+inline std::optional<Session> find(const QList<Session> &sessions, const QString &id)
+{
+    for (const auto &session : sessions) {
+        if (session.id == id) {
+            return session;
+        }
+    }
+    return std::nullopt;
+}
+
+/** Read logind sessions from the system bus synchronously (diagnostic probe
+ * only; the console host uses the asynchronous ConsoleSeatWatcher). Returns an empty list with an
  * explanatory message when the system service is unavailable. */
 QList<Session> readLogindSessions(QString *error = nullptr);
 }
