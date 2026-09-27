@@ -14,6 +14,7 @@ class InputHandler;
 class VideoStream;
 class NetworkDetection;
 class Clipboard;
+class PreAuthChannelGate;
 
 /**
  * Extension of the FreeRDP Peer Context used to store extra data for KRdp.
@@ -31,6 +32,8 @@ struct PeerContext {
     Clipboard *clipboard = nullptr;
 
     HANDLE virtualChannelManager = nullptr;
+    // Set by PreAuthChannelGate::install(); owned by the RdpConnection.
+    PreAuthChannelGate *channelGate = nullptr;
 };
 
 // Convenience method to get the PeerContext instance for a specific FreeRDP peer.

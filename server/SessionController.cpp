@@ -2272,6 +2272,12 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
         return;
     }
     auto *connection = wrapper->connection.data();
+    if (!connection->isAuthenticated()) {
+        // AUD-S1: RdpConnection's gate never delivers a record before
+        // PostConnect authentication; this only keeps it that way.
+        qWarning() << "KRDPCTL: dropping a record from an unauthenticated connection";
+        return;
+    }
     const QString type = record.value(QLatin1String("type")).toString();
     if (type == QLatin1String("audio-priority")) {
         const auto request = KRdp::AudioPriority::parse(record);

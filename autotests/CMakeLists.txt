@@ -429,6 +429,13 @@ target_link_libraries(GfxSurfaceCommandTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui
 add_test(NAME GfxSurfaceCommandTest COMMAND GfxSurfaceCommandTest)
 
 # --- AUD-WS-S ---
+# AUD-S1: the pre-authentication channel gate, fed through a fake freerdp_peer.
+add_executable(PreAuthChannelGateTest PreAuthChannelGateTest.cpp)
+target_include_directories(PreAuthChannelGateTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
+target_include_directories(PreAuthChannelGateTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(PreAuthChannelGateTest PRIVATE Qt6::Test Qt6::Core KRdp freerdp winpr)
+add_test(NAME PreAuthChannelGateTest COMMAND PreAuthChannelGateTest)
+
 # AUD-S4: ListenAddress parsing (header-only, server/).
 add_executable(ListenAddressTest ListenAddressTest.cpp)
 target_include_directories(ListenAddressTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
