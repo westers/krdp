@@ -14,6 +14,7 @@
 #include <freerdp/freerdp.h>
 
 #include "ClientDisplayInfo.h"
+#include "DeviceControl.h"
 #include "krdp_export.h"
 
 namespace KRdp
@@ -163,11 +164,51 @@ public:
      */
     void sendControlRecord(const QJsonObject &record);
     /**
-     * Apply the own client's explicit conferencing consent. Safe from any
-     * thread: the session loop opens the selected RDP channels on its next
-     * iteration, after the connection is fully active.
+     * A KRDPCTL `device` request (DEVICES-DESIGN.md §4). Safe from any thread:
+     * it only stores the device's consent (a fresh DeviceConsent generation
+     * for every `on` and `reselect`) and \a requestId; the session loop's
+     * reconcilers do the standard channel work on their next iteration.
+     *
+     * The answer is a deviceState() carrying \a requestId, emitted once the
+     * request is settled: `on` once the channel is ready and the PipeWire node
+     * exists, `off` once teardown finished, `error` (with a code) otherwise,
+     * or after the 5 s deadline. A `query` is answered at once with the last
+     * state (possibly `starting`). An empty \a requestId still gets its
+     * answer, uncorrelated (KRDPCTL-V2-CONTRACT.md §a).
+     * \a silenceHost only applies to a playback `on`.
      */
-    void setMediaPolicy(bool remoteAudioPlayback, bool microphone, bool camera, bool silenceHostAudio = false);
+    void requestDevice(MediaDevice device, DeviceControl::Action action, bool silenceHost, const QString &requestId);
+    /**
+     * Brokers: switch a device's consent without a request (idempotent: the
+     * generation only changes when the enabled state does). Any thread. The
+     * console and virtual brokers answer their clients themselves.
+     */
+    void setDeviceEnabled(MediaDevice device, bool enabled, bool silenceHost = false);
+    /**
+     * StandardClientMedia (DEVICES-DESIGN.md §1): if Server::standardClientMedia()
+     * is set, treat standard negotiation as consent - playback if the client
+     * joined RDPSND, the microphone and camera if it has dynamic channels (the
+     * client's accept of the AUDIN / RDPECAM channel is its consent). Only for
+     * a connection that sent no `device` record. Any thread; returns whether
+     * it was applied.
+     */
+    bool applyStandardConsent();
+    /** The last state deviceState() reported for \a device. Any thread. */
+    DeviceStatus deviceStatus(MediaDevice device) const;
+    /**
+     * Whether the peer is our own client: it joined `KRDPCTL`, got
+     * `capabilities` and sent a record back. Only such a peer gets the
+     * non-essential RDPSND SNDC_CLOSE when playback is switched off
+     * (DEVICES-DESIGN.md §7 risk 1). Any thread.
+     */
+    bool isOwnClient() const;
+    /**
+     * A device's state changed, or a request was settled (\a requestId set:
+     * the answer to that request; empty: an unsolicited push, e.g. `inUse`, a
+     * camera the client removed). Emitted on the session thread (a `query`:
+     * on the caller's); connect with Qt::QueuedConnection.
+     */
+    Q_SIGNAL void deviceState(KRdp::MediaDevice device, const KRdp::DeviceStatus &status, const QString &requestId);
     void setAudioPriority(bool enabled);
     void setAudioPriorityDefault(bool enabled);
     void clearAudioPriorityOverride();
@@ -211,8 +252,17 @@ private:
     /** Session thread, from onPostConnect(): open the pre-authentication gate. */
     void onAuthenticated();
     bool onSuppressOutput(uint8_t allow);
-    /** Session thread: create/open the standard audio channels once joined. */
-    bool initializeAudioChannels();
+    /** Session thread: bring each device's channels in line with its consent. False only on a fatal error. */
+    bool reconcileDevices();
+    bool reconcilePlayback();
+    bool reconcileMicrophone();
+    bool reconcileCamera();
+    /** Session thread: close the RDPECAM enumerator, then every camera (each joins its channel thread before its PipeWire node goes). */
+    void closeCameras();
+    /** Session thread: close AUDIN (joins its thread), then drop the PipeWire source. */
+    bool retireMicrophone();
+    /** Session thread: record \a status; with \a settledGeneration, answer the requests up to it, else push a change. */
+    void publishDevice(MediaDevice device, const DeviceStatus &status, std::optional<uint64_t> settledGeneration = std::nullopt);
     /** Session thread: open `KRDPCTL` once the client has joined it. */
     void openControlChannel();
     /** Session thread: hand every queued `KRDPCTL` message to the deframer. False on a protocol violation. */

@@ -586,4 +586,12 @@ target_compile_definitions(DeviceToggleLoopTest PRIVATE
 add_test(NAME DeviceToggleLoopTest COMMAND DeviceToggleLoopTest)
 # ~20 s idle; 55-80 s seen under a load average of 25.
 set_tests_properties(DeviceToggleLoopTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+# AUD-D2/D3: the KRDPCTL `device` record, the `devices` capabilities group,
+# DeviceConsent generations and StandardClientMedia (pure, socket-free).
+add_executable(DeviceControlTest DeviceControlTest.cpp)
+target_include_directories(DeviceControlTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+target_include_directories(DeviceControlTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(DeviceControlTest PRIVATE Qt6::Test Qt6::Core KRdp)
+add_test(NAME DeviceControlTest COMMAND DeviceControlTest)
 # --- end AUD-WS-D ---

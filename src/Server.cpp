@@ -4,6 +4,8 @@
 
 #include "Server.h"
 
+#include <atomic>
+
 #include <vector>
 
 #include <QCoreApplication>
@@ -37,6 +39,7 @@ public:
     std::filesystem::path tlsCertificate;
     std::filesystem::path tlsCertificateKey;
     QString cameraLoopbackDevice;
+    std::atomic<bool> standardClientMedia = true;
     std::chrono::milliseconds handshakeTimeout = std::chrono::seconds(15);
 };
 
@@ -239,6 +242,16 @@ QString Server::cameraLoopbackDevice() const
 void Server::setCameraLoopbackDevice(const QString &device)
 {
     d->cameraLoopbackDevice = device.trimmed();
+}
+
+bool Server::standardClientMedia() const
+{
+    return d->standardClientMedia.load();
+}
+
+void Server::setStandardClientMedia(bool enabled)
+{
+    d->standardClientMedia.store(enabled);
 }
 
 void Server::incomingConnection(qintptr handle)

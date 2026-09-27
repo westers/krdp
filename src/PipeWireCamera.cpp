@@ -67,6 +67,11 @@ bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, u
         pw_stream_events result{};
         result.version = PW_VERSION_STREAM_EVENTS;
         result.process = PipeWireCamera::process;
+        result.state_changed = [](void *data, pw_stream_state, pw_stream_state state, const char *) {
+            auto *self = static_cast<PipeWireCamera *>(data);
+            self->m_ready = state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING;
+            self->m_streaming = state == PW_STREAM_STATE_STREAMING;
+        };
         return result;
     }();
     const QByteArray nodeName = QByteArrayLiteral("krdp.remote-camera.") + id.toUtf8();
@@ -146,6 +151,11 @@ void PipeWireCamera::stop()
     if (loop) pw_thread_loop_destroy(loop);
     m_runtime.release();
     if (loopbackFd >= 0) close(loopbackFd);
+    // AUD-D2: a later start() on this object is a new consent period. A
+    // consumer of the previous node must not start the client's camera.
+    m_captureRequested.store(false, std::memory_order_release);
+    m_ready = false;
+    m_streaming = false;
 }
 
 void PipeWireCamera::writeMjpeg(const QByteArray &jpeg)
@@ -192,6 +202,19 @@ void PipeWireCamera::writeMjpeg(const QByteArray &jpeg)
 bool PipeWireCamera::captureRequested() const
 {
     return m_captureRequested.load(std::memory_order_acquire) || hasExternalV4l2Consumer(m_loopbackDevice);
+}
+
+bool PipeWireCamera::consumerActive() const
+{
+    if (m_streaming.load()) {
+        return true;
+    }
+    QString device;
+    {
+        QMutexLocker lock(&m_mutex);
+        device = m_loopbackDevice;
+    }
+    return hasExternalV4l2Consumer(device);
 }
 
 void PipeWireCamera::process(void *data) { static_cast<PipeWireCamera *>(data)->process(); }

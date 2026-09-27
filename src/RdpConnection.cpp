@@ -9,10 +9,12 @@
 
 #include "RdpConnection.h"
 #include "AdaptiveQuality.h"
-#include "MicrophoneConsent.h"
+#include "DeviceConsent.h"
 #include "MicrophonePcmQueue.h"
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -167,11 +169,34 @@ const AUDIO_FORMAT RemoteMicrophoneFormat{
     WAVE_FORMAT_PCM, 2, 48000, 192000, 4, 16, 0, nullptr,
 };
 
+// How long a device may take to become ready once its channel was opened
+// (DEVICES-DESIGN.md §3). FreeRDP's AUDIN thread would otherwise poll a
+// channel the client never accepts for as long as the connection lasts.
+constexpr auto DeviceReadyDeadline = std::chrono::seconds(5);
+// Microphone/camera: how often the session loop checks whether a host
+// application is capturing (the `inUse` push).
+constexpr auto InUsePollInterval = std::chrono::milliseconds(500);
+
 struct AudinDelivery {
-    KRdp::MicrophoneConsent *consent = nullptr;
-    PipeWireMicrophone *endpoint = nullptr;
+    KRdp::DeviceConsent *consent = nullptr;
+    // Set by the session thread once the client accepted the channel (the
+    // PipeWire source only exists from then on); read by the AUDIN thread.
+    std::atomic<PipeWireMicrophone *> endpoint = nullptr;
     uint64_t generation = 0;
     KRdp::MicrophonePcmQueue *external = nullptr;
+    // The client's Open Reply (AUDIN thread): -1 none yet, else its Result
+    // (0: the client opened its capture device; anything else: it refused).
+    std::atomic<int64_t> openResult = -1;
+
+    /** Session thread, while no AUDIN thread is running. */
+    void reset(KRdp::DeviceConsent *newConsent = nullptr, uint64_t newGeneration = 0, KRdp::MicrophonePcmQueue *newExternal = nullptr)
+    {
+        consent = newConsent;
+        endpoint = nullptr;
+        generation = newGeneration;
+        external = newExternal;
+        openResult = -1;
+    }
 };
 
 UINT audinData(audin_server_context *audin, const SNDIN_DATA *data)
@@ -182,15 +207,35 @@ UINT audinData(audin_server_context *audin, const SNDIN_DATA *data)
     auto *delivery = static_cast<AudinDelivery *>(audin->userdata);
     const size_t bytes = Stream_Length(data->Data);
     if (bytes > 192000 || bytes % 4 != 0) return ERROR_INVALID_DATA;
-    if (delivery && delivery->consent && (delivery->endpoint || delivery->external)) {
+    PipeWireMicrophone *endpoint = delivery ? delivery->endpoint.load() : nullptr;
+    if (delivery && delivery->consent && (endpoint || delivery->external)) {
         delivery->consent->deliver(delivery->generation, [&] {
             const QByteArray pcm(reinterpret_cast<const char *>(Stream_Buffer(data->Data)), int(bytes));
             if (delivery->external) delivery->external->write(delivery->generation, pcm);
-            else delivery->endpoint->write(pcm);
+            else endpoint->write(pcm);
         });
     }
     return CHANNEL_RC_OK;
 }
+
+UINT audinOpenReply(audin_server_context *audin, const SNDIN_OPEN_REPLY *reply)
+{
+    // MS-RDPEAI 2.2.2.4: Result is an HRESULT, zero when the client opened its
+    // capture device. The session loop turns it into `on` or `declined`.
+    if (auto *delivery = static_cast<AudinDelivery *>(audin->userdata); delivery && reply) {
+        delivery->openResult.store(int64_t(reply->Result));
+    }
+    qCInfo(KRDP) << "AUDIN Open Reply, result" << (reply ? reply->Result : 0);
+    return CHANNEL_RC_OK;
+}
+
+// RDPSND bookkeeping shared with FreeRDP's RDPSND thread (Activated).
+struct RdpsndState {
+    std::atomic_bool active = false;
+    // The client format Activated selected; re-selected after SNDC_CLOSE,
+    // which makes FreeRDP forget it.
+    std::atomic<int> clientFormat = -1;
+};
 
 void rdpsndActivated(RdpsndServerContext *rdpsnd)
 {
@@ -200,8 +245,9 @@ void rdpsndActivated(RdpsndServerContext *rdpsnd)
                 continue;
             }
             if (rdpsnd->SelectFormat(rdpsnd, UINT16(client)) == CHANNEL_RC_OK) {
-                if (auto *active = static_cast<std::atomic_bool *>(rdpsnd->data)) {
-                    active->store(true);
+                if (auto *state = static_cast<RdpsndState *>(rdpsnd->data)) {
+                    state->clientFormat.store(int(client));
+                    state->active.store(true);
                 }
                 const auto &format = rdpsnd->client_formats[client];
                 // The index alone cannot distinguish PCM from a compressed
@@ -220,14 +266,6 @@ void rdpsndActivated(RdpsndServerContext *rdpsnd)
     qCWarning(KRDP) << "RDPSND client offered no compatible format";
 }
 
-UINT cameraSelectVersion(CamDevEnumServerContext *context, const CAM_SELECT_VERSION_REQUEST *request)
-{
-    CAM_SELECT_VERSION_RESPONSE response{};
-    response.Header = request->Header;
-    response.Header.MessageId = CAM_MSG_ID_SelectVersionResponse;
-    return context->SelectVersionResponse(context, &response);
-}
-
 struct RemoteCamera {
     CameraDeviceServerContext *context = nullptr;
     bool activated = false;
@@ -236,6 +274,9 @@ struct RemoteCamera {
     QString loopbackDevice;
     bool streamStarted = false;
     std::unique_ptr<PipeWireCamera> endpoint;
+    // Set (device thread) once endpoint exists; the session thread only
+    // touches endpoint after seeing it.
+    std::atomic<bool> endpointStarted = false;
     ~RemoteCamera()
     {
         if (context) {
@@ -286,6 +327,9 @@ UINT cameraMediaTypes(CameraDeviceServerContext *context, const CAM_MEDIA_TYPE_L
     if (response->N_Descriptions == 0) {
         return ERROR_NOT_FOUND;
     }
+    if (camera->endpointStarted.load()) {
+        return CHANNEL_RC_OK; // one media type list per device; never replace a published endpoint
+    }
     // The bundled V4L backend currently advertises H.264 for this webcam yet
     // emits MJPEG frames (see its cam_v4l_stream_start log). Keep the advertised
     // type for the protocol, then identify/decode the actual JPEG samples.
@@ -304,6 +348,7 @@ UINT cameraMediaTypes(CameraDeviceServerContext *context, const CAM_MEDIA_TYPE_L
         camera->endpoint.reset();
         return ERROR_INTERNAL_ERROR;
     }
+    camera->endpointStarted.store(true);
     qCInfo(KRDP) << "RDPECAM virtual camera available; waiting for a local consumer" << camera->format.Width << 'x' << camera->format.Height
                  << "format" << camera->format.Format;
     return CHANNEL_RC_OK;
@@ -311,7 +356,7 @@ UINT cameraMediaTypes(CameraDeviceServerContext *context, const CAM_MEDIA_TYPE_L
 
 bool startCameraIfRequested(RemoteCamera *camera)
 {
-    if (!camera || !camera->endpoint || camera->streamStarted || !camera->endpoint->captureRequested()) {
+    if (!camera || !camera->endpointStarted.load() || camera->streamStarted || !camera->endpoint->captureRequested()) {
         return true;
     }
     CAM_START_STREAMS_REQUEST request{};
@@ -347,7 +392,21 @@ UINT cameraSample(CameraDeviceServerContext *context, const CAM_SAMPLE_RESPONSE 
 struct RemoteCameraCollection {
     RemoteCameraSet<RemoteCamera> cameras;
     QString loopbackDevice;
+    // The enumerator answered Select Version (enumerator thread): the client
+    // accepted the channel, whether or not it then offers a camera.
+    std::atomic<bool> versionSeen = false;
 };
+
+UINT cameraSelectVersion(CamDevEnumServerContext *context, const CAM_SELECT_VERSION_REQUEST *request)
+{
+    if (auto *collection = static_cast<RemoteCameraCollection *>(context->userdata)) {
+        collection->versionSeen.store(true);
+    }
+    CAM_SELECT_VERSION_RESPONSE response{};
+    response.Header = request->Header;
+    response.Header.MessageId = CAM_MSG_ID_SelectVersionResponse;
+    return context->SelectVersionResponse(context, &response);
+}
 
 UINT cameraAdded(CamDevEnumServerContext *enumerator, const CAM_DEVICE_ADDED_NOTIFICATION *device)
 {
@@ -638,25 +697,65 @@ public:
     std::unique_ptr<NetworkDetection> networkDetection;
     std::unique_ptr<Clipboard> clipboard;
 
+    /**
+     * One device's consent and state (DEVICES-DESIGN.md §4). The consent and
+     * the pending requests are written from any thread; everything below
+     * "session thread" is only touched by the session loop's reconcilers.
+     */
+    struct DeviceSlot {
+        DeviceConsent consent;
+        std::atomic<bool> silenceHost = false; // playback: for the latest `on`
+        std::mutex requestsMutex;
+        // (generation the request produced, requestId): answered once that
+        // generation is settled.
+        std::vector<std::pair<uint64_t, QString>> requests;
+        mutable std::mutex statusMutex;
+        DeviceStatus published; // the last status, for deviceStatus()/`query`
+        // Session thread.
+        uint64_t applied = 0; // the consent generation the reconciler acted on
+        uint64_t settled = 0; // the generation `status` is the outcome of
+        DeviceStatus status;
+        std::chrono::steady_clock::time_point deadline;
+        std::chrono::steady_clock::time_point nextInUsePoll;
+        bool cameraRemoved = false; // camera: turned to error because the client removed it
+    };
+    std::array<DeviceSlot, 3> devices;
+    DeviceSlot &slot(MediaDevice device)
+    {
+        return devices[size_t(device)];
+    }
+    std::atomic<bool> standardConsentPending = false;
+    // KRDPCTL `capabilities` was queued, and then a record came back from the
+    // client: our own client (isOwnClient()).
+    std::atomic<bool> capabilitiesSent = false;
+    std::atomic<bool> ownClient = false;
+
     RdpsndServerContext *rdpsnd = nullptr;
+    RdpsndState rdpsndState;
+    bool rdpsndClosed = false; // session thread: SNDC_CLOSE sent, the format must be selected again
+    bool playbackSending = false; // session thread: the current playback period is `on`
     audin_server_context *audin = nullptr;
     std::unique_ptr<PipeWireMicrophone> microphoneEndpoint;
-    MicrophoneConsent microphoneConsent;
     AudinDelivery microphoneDelivery;
     bool externalMicrophone = false; // Chosen once, before queued initialize().
     MicrophonePcmQueue microphonePcm;
     std::unique_ptr<PipeWireAudioPlayback> audioPlaybackEndpoint;
     ExternalAudioQueue externalAudio;
-    std::atomic<bool> remoteAudioPlayback = false;
     std::atomic<bool> externalAudioPlayback = false;
-    std::atomic<bool> microphone = false;
-    std::atomic<bool> camera = false;
-    std::atomic<bool> silenceHostAudio = false;
     std::atomic<int> audioPriorityOverride = -1;
     std::atomic<bool> audioPriorityDefault = false;
-    std::atomic_bool rdpsndActive = false;
     CamDevEnumServerContext *cameraEnumerator = nullptr;
     RemoteCameraCollection remoteCameras;
+
+    /** Any thread, after a consent change: keep the dependent queues in step. */
+    void consentChanged(MediaDevice device)
+    {
+        if (device == MediaDevice::Microphone) {
+            microphonePcm.reset(slot(MediaDevice::Microphone).consent.snapshot().generation);
+        } else if (device == MediaDevice::Playback) {
+            externalAudio.setEnabled(slot(MediaDevice::Playback).consent.snapshot().enabled && externalAudioPlayback.load());
+        }
+    }
 
     freerdp_peer *peer = nullptr;
 
@@ -834,26 +933,109 @@ void RdpConnection::sendControlRecord(const QJsonObject &record)
     ULONG written = 0;
     if (!WTSVirtualChannelWrite(d->controlChannel, const_cast<char *>(data.constData()), ULONG(data.size()), &written)) {
         qCWarning(KRDP) << "KRDPCTL: could not queue a" << record.value(QLatin1String("type")).toString() << "record";
+    } else if (record.value(QLatin1String("type")).toString() == QLatin1String("capabilities")) {
+        d->capabilitiesSent.store(true);
     }
 }
 
-void RdpConnection::setMediaPolicy(bool remoteAudioPlayback, bool microphone, bool camera, bool silenceHostAudio)
+void RdpConnection::requestDevice(MediaDevice device, DeviceControl::Action action, bool silenceHost, const QString &requestId)
 {
-    d->microphoneConsent.setEnabled(microphone);
-    d->microphonePcm.reset(d->microphoneConsent.snapshot().generation);
-    d->remoteAudioPlayback.store(remoteAudioPlayback);
-    d->externalAudio.setEnabled(remoteAudioPlayback && d->externalAudioPlayback.load());
-    d->microphone.store(microphone);
-    d->camera.store(camera);
-    d->silenceHostAudio.store(silenceHostAudio);
-    qCInfo(KRDP) << "Conferencing media policy: playback" << remoteAudioPlayback << "microphone" << microphone << "camera" << camera
-                 << "silence host" << silenceHostAudio;
+    auto &slot = d->slot(device);
+    if (action == DeviceControl::Action::Query) {
+        Q_EMIT deviceState(device, deviceStatus(device), requestId);
+        return;
+    }
+    uint64_t generation = 0;
+    if (action == DeviceControl::Action::Off) {
+        slot.consent.setEnabled(false);
+        generation = slot.consent.snapshot().generation;
+    } else {
+        // Before renew(): the session loop reads it once it sees the new generation.
+        slot.silenceHost.store(device == MediaDevice::Playback && action == DeviceControl::Action::On && silenceHost);
+        generation = slot.consent.renew();
+    }
+    d->consentChanged(device);
+    {
+        // Even without a requestId: the answer is then uncorrelated, but sent.
+        std::lock_guard lock(slot.requestsMutex);
+        slot.requests.emplace_back(generation, requestId);
+    }
+    qCInfo(KRDP) << "Device request:" << DeviceControl::deviceName(device) << "action" << int(action) << "silence host" << slot.silenceHost.load()
+                 << "generation" << generation;
+}
+
+void RdpConnection::setDeviceEnabled(MediaDevice device, bool enabled, bool silenceHost)
+{
+    auto &slot = d->slot(device);
+    if (device == MediaDevice::Playback) {
+        slot.silenceHost.store(enabled && silenceHost);
+    }
+    slot.consent.setEnabled(enabled);
+    d->consentChanged(device);
+}
+
+bool RdpConnection::applyStandardConsent()
+{
+    if (!d->server || !d->server->standardClientMedia()) {
+        return false;
+    }
+    // The session loop decides per device from what the client joined.
+    d->standardConsentPending.store(true);
+    return true;
+}
+
+DeviceStatus RdpConnection::deviceStatus(MediaDevice device) const
+{
+    auto &slot = d->slot(device);
+    std::lock_guard lock(slot.statusMutex);
+    return slot.published;
+}
+
+bool RdpConnection::isOwnClient() const
+{
+    return d->ownClient.load();
+}
+
+void RdpConnection::publishDevice(MediaDevice device, const DeviceStatus &status, std::optional<uint64_t> settledGeneration)
+{
+    auto &slot = d->slot(device);
+    const bool changed = status != slot.status;
+    slot.status = status;
+    {
+        std::lock_guard lock(slot.statusMutex);
+        slot.published = status;
+    }
+    if (settledGeneration) {
+        slot.settled = *settledGeneration;
+    }
+    if (changed) {
+        qCInfo(KRDP) << "Device" << DeviceControl::deviceName(device) << "is" << DeviceControl::stateName(status.state) << "in use" << status.inUse
+                     << status.code << status.message;
+    }
+    // Requests are answered once their generation is settled; a change that
+    // answers none is pushed (unsolicited, no requestId). `starting` is never
+    // pushed: the client already knows it asked.
+    std::vector<std::pair<uint64_t, QString>> answered;
+    if (status.state != DeviceStatus::State::Starting) {
+        std::lock_guard lock(slot.requestsMutex);
+        const auto settled = std::stable_partition(slot.requests.begin(), slot.requests.end(), [&slot](const auto &request) {
+            return request.first > slot.settled;
+        });
+        std::move(settled, slot.requests.end(), std::back_inserter(answered));
+        slot.requests.erase(settled, slot.requests.end());
+    }
+    for (const auto &request : answered) {
+        Q_EMIT deviceState(device, status, request.second);
+    }
+    if (changed && answered.empty() && status.state != DeviceStatus::State::Starting) {
+        Q_EMIT deviceState(device, status, QString());
+    }
 }
 
 void RdpConnection::setExternalAudioPlayback(bool enabled)
 {
     d->externalAudioPlayback.store(enabled);
-    d->externalAudio.setEnabled(enabled && d->remoteAudioPlayback.load());
+    d->consentChanged(MediaDevice::Playback);
 }
 
 void RdpConnection::setAudioPriority(bool enabled)
@@ -875,7 +1057,8 @@ bool RdpConnection::audioPriorityActive() const
 {
     const int override = d->audioPriorityOverride.load();
     return AdaptiveQuality::audioPriorityEnabled(override < 0 ? d->audioPriorityDefault.load() : override != 0,
-                                                d->remoteAudioPlayback.load(), d->microphone.load());
+                                                d->slot(MediaDevice::Playback).consent.snapshot().enabled,
+                                                d->slot(MediaDevice::Microphone).consent.snapshot().enabled);
 }
 
 bool RdpConnection::enableExternalMicrophone()
@@ -889,8 +1072,9 @@ QByteArray RdpConnection::takeExternalMicrophone()
 {
     if (!d->externalMicrophone) return {};
     QByteArray pcm;
-    const auto consent = d->microphoneConsent.snapshot();
-    d->microphoneConsent.deliver(consent.generation, [&] {
+    auto &microphone = d->slot(MediaDevice::Microphone).consent;
+    const auto consent = microphone.snapshot();
+    microphone.deliver(consent.generation, [&] {
         pcm = d->microphonePcm.take(consent.generation);
     });
     return pcm;
@@ -960,6 +1144,10 @@ bool RdpConnection::readControlChannel()
         buffer.resize(int(read));
         d->controlDeframer.feed(buffer);
         while (auto record = d->controlDeframer.next()) {
+            if (d->capabilitiesSent.load()) {
+                // It heard `capabilities` and answered: it speaks KRDPCTL v2.
+                d->ownClient.store(true);
+            }
             Q_EMIT controlRecordReceived(*record);
         }
         // A payload that is not a JSON object is consumed, not a record: it
@@ -1203,13 +1391,13 @@ void RdpConnection::run(std::stop_token stopToken)
             }
         }
 
-        if (!initializeAudioChannels()) {
+        if (!reconcileDevices()) {
             break;
         }
 
         d->remoteCameras.cameras.forEach(startCameraIfRequested);
 
-        if (d->rdpsnd && d->rdpsndActive.load()) {
+        if (d->rdpsnd && d->rdpsndState.active.load() && d->playbackSending) {
             const auto send = [&](const QByteArray &pcm) {
                 if (pcm.isEmpty() || !d->rdpsnd->SendSamples) return;
                 const auto frames = size_t(pcm.size() / d->rdpsnd->src_format->nBlockAlign);
@@ -1219,7 +1407,7 @@ void RdpConnection::run(std::stop_token stopToken)
             };
             if (d->externalAudioPlayback.load()) {
                 d->externalAudio.deliver(send);
-            } else if (d->remoteAudioPlayback.load() && d->audioPlaybackEndpoint) {
+            } else if (d->audioPlaybackEndpoint) {
                 send(d->audioPlaybackEndpoint->take());
             }
         }
@@ -1348,20 +1536,17 @@ bool RdpConnection::onPostConnect()
         authenticated = true;
     }
 
-    // Static channels must be initialized from PostConnect. Delaying RDPSND
-    // until the run loop can put its formats PDU on the wire while a client is
-    // still in licensing, which FreeRDP correctly rejects as an unexpected
-    // channel message. AUDIN is created here too, then opened from the loop
-    // only once DRDYNVC reaches READY.
+    // Devices (RDPSND, AUDIN, RDPECAM) are created by the session loop's
+    // reconcilers, and only once a consent exists: a KRDPCTL `device` record
+    // or StandardClientMedia, both after this authentication. That is past
+    // licensing, so RDPSND's formats PDU can no longer arrive while the client
+    // still rejects channel messages; AUDIN and RDPECAM wait for DRDYNVC READY.
     if (!authenticated) {
         // A standard reason every RDP client understands, instead of a bare drop that FreeRDP
         // reports as a logoff: Close() sends Deactivate All, the Set Error Info PDU and the
         // Disconnect Provider Ultimatum before PostConnect fails the state machine.
         qCInfo(KRDP) << "Authentication failed for user" << username << "- telling the client (ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES)";
         close(CloseReason::AuthenticationFailed);
-        return false;
-    }
-    if (!initializeAudioChannels()) {
         return false;
     }
     if (pamUid) {
@@ -1374,10 +1559,11 @@ bool RdpConnection::onPostConnect()
 bool RdpConnection::onClose()
 {
     d->authenticatedPamUid.store(0);
+    d->playbackSending = false;
     if (d->rdpsnd) {
-        d->rdpsndActive.store(false);
+        d->rdpsndState.active.store(false);
         if (d->rdpsnd->Close) {
-            d->rdpsnd->Close(d->rdpsnd);
+            (void)d->rdpsnd->Close(d->rdpsnd);
         }
         rdpsnd_server_context_free(d->rdpsnd);
         d->rdpsnd = nullptr;
@@ -1387,23 +1573,12 @@ bool RdpConnection::onClose()
     // endpoint outright, so this connection can be destroyed before it ends;
     // Server::~Server() drains the queue before the process exits.
     PipeWireAudioPlayback::stopAsync(std::move(d->audioPlaybackEndpoint));
-    if (d->cameraEnumerator) {
-        d->cameraEnumerator->Close(d->cameraEnumerator);
-        cam_dev_enum_server_context_free(d->cameraEnumerator);
-        d->cameraEnumerator = nullptr;
+    closeCameras();
+    for (const auto device : {MediaDevice::Playback, MediaDevice::Microphone, MediaDevice::Camera}) {
+        d->slot(device).consent.setEnabled(false);
+        d->consentChanged(device);
     }
-    // The enumerator thread is joined, so nothing adds or removes any more.
-    d->remoteCameras.cameras.takeAll();
-    d->microphoneConsent.setEnabled(false);
-    d->microphonePcm.reset(d->microphoneConsent.snapshot().generation);
-    if (d->audin) {
-        if (d->audin->IsOpen && d->audin->IsOpen(d->audin) && d->audin->Close) {
-            d->audin->Close(d->audin);
-        }
-        audin_server_context_free(d->audin);
-        d->audin = nullptr;
-    }
-    d->microphoneEndpoint.reset();
+    retireMicrophone();
     {
         std::lock_guard lock(d->controlChannelMutex);
         if (d->controlChannel) {
@@ -1417,101 +1592,328 @@ bool RdpConnection::onClose()
     return true;
 }
 
-bool RdpConnection::initializeAudioChannels()
+bool RdpConnection::reconcileDevices()
 {
-    auto context = reinterpret_cast<PeerContext *>(d->peer->context);
-    const auto vcm = context->virtualChannelManager;
-
-    const auto microphone = d->microphoneConsent.snapshot();
-    if (d->audin && (!microphone.enabled || d->microphoneDelivery.generation != microphone.generation)) {
-        // Close joins FreeRDP's audio reader. Never destroy its userdata or
-        // PipeWire endpoint while a callback may still be using either.
-        if (d->audin->Close && !d->audin->Close(d->audin)) {
-            qCWarning(KRDP) << "Could not close revoked AUDIN channel";
-            return false;
+    const auto vcm = reinterpret_cast<PeerContext *>(d->peer->context)->virtualChannelManager;
+    if (d->standardConsentPending.exchange(false)) {
+        // StandardClientMedia: the client's own negotiation is the consent.
+        // Playback only if it joined RDPSND; the microphone and camera are
+        // offered on DRDYNVC, where the client's accept of the AUDIN /
+        // RDPECAM channel is its consent (and a refusal just ends it).
+        const bool rdpsnd = WTSVirtualChannelManagerIsChannelJoined(vcm, RDPSND_CHANNEL_NAME);
+        const bool dynamic = WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME);
+        qCInfo(KRDP) << "StandardClientMedia: playback" << rdpsnd << "microphone and camera" << dynamic;
+        if (rdpsnd) {
+            setDeviceEnabled(MediaDevice::Playback, true);
         }
-        audin_server_context_free(d->audin);
-        d->audin = nullptr;
-        d->microphoneDelivery = {};
-        d->microphoneEndpoint.reset();
-        qCInfo(KRDP) << "AUDIN consent generation retired";
+        if (dynamic) {
+            setDeviceEnabled(MediaDevice::Microphone, true);
+            setDeviceEnabled(MediaDevice::Camera, true);
+        }
     }
-    if (!d->audin && microphone.enabled) {
-        if (!d->externalMicrophone) {
-            d->microphoneEndpoint = std::make_unique<PipeWireMicrophone>();
-            if (!d->microphoneEndpoint->start(QString::number(reinterpret_cast<quintptr>(this), 16))) {
-                qCWarning(KRDP) << "Could not create PipeWire remote microphone";
-                d->microphoneEndpoint.reset();
-                return false;
+    if (!reconcilePlayback() || !reconcileMicrophone() || !reconcileCamera()) {
+        return false;
+    }
+    // Requests for a generation that was already settled (an `off` of a device
+    // that is off) are answered here.
+    for (const auto device : {MediaDevice::Playback, MediaDevice::Microphone, MediaDevice::Camera}) {
+        auto &slot = d->slot(device);
+        bool pending = false;
+        {
+            std::lock_guard lock(slot.requestsMutex);
+            pending = std::any_of(slot.requests.cbegin(), slot.requests.cend(), [&slot](const auto &request) {
+                return request.first <= slot.settled;
+            });
+        }
+        if (pending) {
+            publishDevice(device, slot.status);
+        }
+    }
+    return true;
+}
+
+bool RdpConnection::reconcilePlayback()
+{
+    using State = DeviceStatus::State;
+    auto &slot = d->slot(MediaDevice::Playback);
+    const auto vcm = reinterpret_cast<PeerContext *>(d->peer->context)->virtualChannelManager;
+    const auto consent = slot.consent.snapshot();
+    const auto now = std::chrono::steady_clock::now();
+
+    if (slot.applied != consent.generation) {
+        slot.applied = consent.generation;
+        // End the previous period: stop sending first, then stop the capture
+        // off this thread (AUD-D1: pw-metadata calls must never block it).
+        d->playbackSending = false;
+        PipeWireAudioPlayback::stopAsync(std::move(d->audioPlaybackEndpoint));
+        if (!consent.enabled) {
+            // RDPSND is a static channel and stays open. The standard off is
+            // "no more Wave PDUs"; SNDC_CLOSE on top only goes to our own
+            // client (DEVICES-DESIGN.md §7 risk 1: untested against mstsc).
+            if (d->rdpsnd && d->rdpsnd->Close && d->rdpsndState.active.load() && !d->rdpsndClosed && isOwnClient()) {
+                if (d->rdpsnd->Close(d->rdpsnd) == CHANNEL_RC_OK) {
+                    d->rdpsndClosed = true;
+                    qCInfo(KRDP) << "RDPSND: sent SNDC_CLOSE to the own client";
+                }
             }
+            publishDevice(MediaDevice::Playback, {}, consent.generation);
+            return true;
         }
-        d->audin = audin_server_context_new(vcm);
-        if (!d->audin) {
-            qCWarning(KRDP) << "Could not create AUDIN server context";
-            return false;
+        const auto fail = [&](const QString &code, const QString &message) {
+            PipeWireAudioPlayback::stopAsync(std::move(d->audioPlaybackEndpoint));
+            publishDevice(MediaDevice::Playback, {State::Error, false, code, message}, consent.generation);
+        };
+        if (!WTSVirtualChannelManagerIsChannelJoined(vcm, RDPSND_CHANNEL_NAME)) {
+            fail(DeviceControl::Unavailable, QStringLiteral("the client did not join the audio playback channel (rdpsnd)"));
+            return true;
         }
-        d->audin->rdpcontext = d->peer->context;
-        d->microphoneDelivery = {&d->microphoneConsent, d->microphoneEndpoint.get(), microphone.generation,
-                                 d->externalMicrophone ? &d->microphonePcm : nullptr};
-        d->audin->userdata = &d->microphoneDelivery;
-        d->audin->Data = audinData;
-        if (!audin_server_set_formats(d->audin, 1, &RemoteMicrophoneFormat)) {
-            qCWarning(KRDP) << "Could not set AUDIN formats";
-            return false;
-        }
-    }
-
-    const auto currentMicrophone = d->microphoneConsent.snapshot();
-    if (d->audin && currentMicrophone.enabled && currentMicrophone.generation == d->microphoneDelivery.generation
-        && WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME)
-        && WTSVirtualChannelManagerGetDrdynvcState(vcm) == DRDYNVC_STATE_READY
-        && d->audin->IsOpen && !d->audin->IsOpen(d->audin)) {
-        if (!d->audin->Open || !d->audin->Open(d->audin)) {
-            qCWarning(KRDP) << "Could not open AUDIN";
-            return false;
-        }
-        qCInfo(KRDP) << "AUDIN channel opened";
-    }
-
-    if (d->remoteAudioPlayback.load() && WTSVirtualChannelManagerIsChannelJoined(vcm, RDPSND_CHANNEL_NAME) && !d->rdpsnd) {
-        d->rdpsnd = rdpsnd_server_context_new(vcm);
         if (!d->rdpsnd) {
-            qCWarning(KRDP) << "Could not create RDPSND server context";
-            return false;
-        }
-        d->rdpsnd->rdpcontext = d->peer->context;
-        d->rdpsnd->data = &d->rdpsndActive;
-        d->rdpsnd->Activated = rdpsndActivated;
-        d->rdpsnd->num_server_formats = server_rdpsnd_get_formats(&d->rdpsnd->server_formats);
-        if (d->rdpsnd->num_server_formats == 0) {
-            qCWarning(KRDP) << "RDPSND has no server formats";
-            return false;
-        }
-        d->rdpsnd->src_format = &d->rdpsnd->server_formats[0];
-        if (!d->rdpsnd->Initialize || d->rdpsnd->Initialize(d->rdpsnd, TRUE) != CHANNEL_RC_OK) {
-            qCWarning(KRDP) << "Could not initialize RDPSND";
-            return false;
+            d->rdpsnd = rdpsnd_server_context_new(vcm);
+            if (!d->rdpsnd) {
+                fail(DeviceControl::Unavailable, QStringLiteral("could not create the RDPSND server context"));
+                return true;
+            }
+            d->rdpsnd->rdpcontext = d->peer->context;
+            d->rdpsnd->data = &d->rdpsndState;
+            d->rdpsnd->Activated = rdpsndActivated;
+            d->rdpsnd->num_server_formats = server_rdpsnd_get_formats(&d->rdpsnd->server_formats);
+            if (d->rdpsnd->num_server_formats == 0 || !d->rdpsnd->Initialize) {
+                rdpsnd_server_context_free(d->rdpsnd);
+                d->rdpsnd = nullptr;
+                fail(DeviceControl::Unavailable, QStringLiteral("RDPSND has no server formats"));
+                return true;
+            }
+            d->rdpsnd->src_format = &d->rdpsnd->server_formats[0];
+            if (d->rdpsnd->Initialize(d->rdpsnd, TRUE) != CHANNEL_RC_OK) {
+                rdpsnd_server_context_free(d->rdpsnd);
+                d->rdpsnd = nullptr;
+                fail(DeviceControl::Unavailable, QStringLiteral("could not initialize RDPSND"));
+                return true;
+            }
+            qCInfo(KRDP) << "RDPSND channel initialized";
         }
         if (d->externalAudioPlayback.load()) {
             qCInfo(KRDP) << "RDPSND using PCM supplied by the console capture worker";
         } else {
             d->audioPlaybackEndpoint = std::make_unique<PipeWireAudioPlayback>();
-            const bool isolated = d->silenceHostAudio.load();
-        // An isolated sink is the only safe way to silence the host: muting
-        // the physical sink can mute its monitor too.  The sink becomes the
-        // default only for this RDP session and stop() restores it.
+            const bool isolated = slot.silenceHost.load();
+            // An isolated sink is the only safe way to silence the host: muting
+            // the physical sink can mute its monitor too. The sink becomes the
+            // default only for this period and stop() restores it.
             const bool started = isolated ? d->audioPlaybackEndpoint->startIsolated(QString::number(reinterpret_cast<quintptr>(this), 16))
                                           : d->audioPlaybackEndpoint->start(QStringLiteral("@DEFAULT_AUDIO_SINK@"));
             if (!started) {
-                qCWarning(KRDP) << "Could not capture PipeWire desktop audio";
-                d->audioPlaybackEndpoint.reset();
-            } else if (isolated) {
+                fail(DeviceControl::Unavailable, QStringLiteral("could not capture the host's audio from PipeWire"));
+                return true;
+            }
+            if (isolated) {
                 qCInfo(KRDP) << "RDPSND capturing the session-private PipeWire sink; new audio will not reach the host speakers";
             }
         }
-        qCInfo(KRDP) << "RDPSND channel initialized after explicit media consent";
+        slot.deadline = now + DeviceReadyDeadline;
+        publishDevice(MediaDevice::Playback, {State::Starting, false, {}, {}});
     }
-    if (d->camera.load() && !d->cameraEnumerator && WTSVirtualChannelManagerGetDrdynvcState(vcm) == DRDYNVC_STATE_READY) {
+
+    if (consent.enabled && slot.status.state == State::Starting) {
+        if (d->rdpsndState.active.load()) {
+            if (std::exchange(d->rdpsndClosed, false) && d->rdpsnd->SelectFormat) {
+                // SNDC_CLOSE made FreeRDP forget the format the client's
+                // Activated exchange chose; the client itself still has it.
+                (void)d->rdpsnd->SelectFormat(d->rdpsnd, UINT16(d->rdpsndState.clientFormat.load()));
+            }
+            d->playbackSending = true;
+            publishDevice(MediaDevice::Playback, {State::On, false, {}, {}}, consent.generation);
+        } else if (now >= slot.deadline) {
+            PipeWireAudioPlayback::stopAsync(std::move(d->audioPlaybackEndpoint));
+            publishDevice(MediaDevice::Playback,
+                          {State::Error, false, DeviceControl::Timeout, QStringLiteral("the client did not activate audio playback within 5 s")},
+                          consent.generation);
+        }
+    }
+    return true;
+}
+
+bool RdpConnection::retireMicrophone()
+{
+    if (d->audin) {
+        // Close joins FreeRDP's audio reader. Never destroy its userdata or
+        // PipeWire endpoint while a callback may still be using either.
+        if (d->audin->Close && !d->audin->Close(d->audin)) {
+            qCWarning(KRDP) << "Could not close the AUDIN channel";
+            return false;
+        }
+        audin_server_context_free(d->audin);
+        d->audin = nullptr;
+    }
+    d->microphoneDelivery.reset();
+    d->microphoneEndpoint.reset();
+    return true;
+}
+
+bool RdpConnection::reconcileMicrophone()
+{
+    using State = DeviceStatus::State;
+    auto &slot = d->slot(MediaDevice::Microphone);
+    const auto vcm = reinterpret_cast<PeerContext *>(d->peer->context)->virtualChannelManager;
+    const auto consent = slot.consent.snapshot();
+    const auto now = std::chrono::steady_clock::now();
+
+    if (d->audin && (!consent.enabled || d->microphoneDelivery.generation != consent.generation)) {
+        if (!retireMicrophone()) {
+            return false;
+        }
+        qCInfo(KRDP) << "AUDIN consent generation retired";
+    }
+    if (!consent.enabled) {
+        slot.applied = consent.generation;
+        if (slot.settled != consent.generation || slot.status.state != State::Off) {
+            publishDevice(MediaDevice::Microphone, {}, consent.generation);
+        }
+        return true;
+    }
+    // Closes the channel and reports \a code; the consent stays, but nothing
+    // reopens it before a new request (a new generation).
+    const auto fail = [&](const QString &code, const QString &message) {
+        if (!retireMicrophone()) {
+            return false;
+        }
+        publishDevice(MediaDevice::Microphone, {State::Error, false, code, message}, consent.generation);
+        return true;
+    };
+
+    if (slot.applied != consent.generation) {
+        slot.applied = consent.generation;
+        if (!WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME)) {
+            return fail(DeviceControl::Unavailable, QStringLiteral("the client has no dynamic virtual channels"));
+        }
+        d->audin = audin_server_context_new(vcm);
+        if (!d->audin) {
+            return fail(DeviceControl::Unavailable, QStringLiteral("could not create the AUDIN server context"));
+        }
+        d->audin->rdpcontext = d->peer->context;
+        d->microphoneDelivery.reset(&slot.consent, consent.generation, d->externalMicrophone ? &d->microphonePcm : nullptr);
+        d->audin->userdata = &d->microphoneDelivery;
+        d->audin->Data = audinData;
+        d->audin->OpenReply = audinOpenReply;
+        if (!audin_server_set_formats(d->audin, 1, &RemoteMicrophoneFormat)) {
+            return fail(DeviceControl::Unavailable, QStringLiteral("could not set the AUDIN formats"));
+        }
+        // Until DRDYNVC is READY there is no Open to time; the 5 s deadline
+        // restarts at the Open.
+        slot.deadline = now + 2 * DeviceReadyDeadline;
+        publishDevice(MediaDevice::Microphone, {State::Starting, false, {}, {}});
+    }
+    if (!d->audin) {
+        return true; // settled as an error; waiting for a new request
+    }
+    if (WTSVirtualChannelManagerGetDrdynvcState(vcm) == DRDYNVC_STATE_READY && d->audin->IsOpen && !d->audin->IsOpen(d->audin)) {
+        if (!d->audin->Open || !d->audin->Open(d->audin)) {
+            return fail(DeviceControl::Unavailable, QStringLiteral("could not open the AUDIN channel"));
+        }
+        slot.deadline = now + DeviceReadyDeadline;
+        qCInfo(KRDP) << "AUDIN channel opened";
+    }
+
+    if (slot.status.state == State::Starting) {
+        const auto result = d->microphoneDelivery.openResult.load();
+        if (result > 0) {
+            return fail(DeviceControl::Declined, QStringLiteral("the client could not open its microphone (result 0x%1)").arg(quint64(result), 8, 16, QLatin1Char('0')));
+        }
+        if (result == 0) {
+            if (!d->externalMicrophone && !d->microphoneEndpoint) {
+                // The node only appears once the client accepted: a client
+                // that refuses the channel never shows a dead microphone.
+                auto endpoint = std::make_unique<PipeWireMicrophone>();
+                if (!endpoint->start(QString::number(reinterpret_cast<quintptr>(this), 16))) {
+                    return fail(DeviceControl::Unavailable, QStringLiteral("could not create the PipeWire remote microphone"));
+                }
+                d->microphoneEndpoint = std::move(endpoint);
+                d->microphoneDelivery.endpoint.store(d->microphoneEndpoint.get());
+            }
+            const auto state = d->microphoneEndpoint ? d->microphoneEndpoint->state() : PipeWireMicrophone::State::Ready;
+            if (state == PipeWireMicrophone::State::Ready) {
+                publishDevice(MediaDevice::Microphone, {State::On, false, {}, {}}, consent.generation);
+                slot.nextInUsePoll = now;
+            } else if (state == PipeWireMicrophone::State::Failed) {
+                return fail(DeviceControl::Unavailable, QStringLiteral("the PipeWire remote microphone failed"));
+            }
+        }
+        if (slot.status.state == State::Starting && now >= slot.deadline) {
+            return fail(DeviceControl::Timeout, QStringLiteral("the client did not open the microphone within 5 s"));
+        }
+        return true;
+    }
+
+    if (slot.status.state == State::On && d->microphoneEndpoint) {
+        if (d->microphoneEndpoint->state() == PipeWireMicrophone::State::Failed) {
+            return fail(DeviceControl::Unavailable, QStringLiteral("the PipeWire remote microphone failed"));
+        }
+        if (now >= slot.nextInUsePoll) {
+            slot.nextInUsePoll = now + InUsePollInterval;
+            const bool inUse = d->microphoneEndpoint->consumerActive();
+            if (inUse != slot.status.inUse) {
+                auto status = slot.status;
+                status.inUse = inUse;
+                publishDevice(MediaDevice::Microphone, status);
+            }
+        }
+    }
+    return true;
+}
+
+void RdpConnection::closeCameras()
+{
+    if (d->cameraEnumerator) {
+        // Joins the enumerator thread first: nothing adds or removes a camera after this.
+        if (d->cameraEnumerator->Close) {
+            (void)d->cameraEnumerator->Close(d->cameraEnumerator);
+        }
+        cam_dev_enum_server_context_free(d->cameraEnumerator);
+        d->cameraEnumerator = nullptr;
+    }
+    // Destroyed outside the set's lock: each ~RemoteCamera closes its device
+    // channel and joins its thread before its PipeWire node is removed.
+    auto cameras = d->remoteCameras.cameras.takeAll();
+    cameras.clear();
+}
+
+bool RdpConnection::reconcileCamera()
+{
+    using State = DeviceStatus::State;
+    auto &slot = d->slot(MediaDevice::Camera);
+    const auto vcm = reinterpret_cast<PeerContext *>(d->peer->context)->virtualChannelManager;
+    const auto consent = slot.consent.snapshot();
+    const auto now = std::chrono::steady_clock::now();
+
+    if (d->cameraEnumerator && (!consent.enabled || slot.applied != consent.generation)) {
+        // Off, or `reselect` (a new generation): close; a reopen makes the
+        // client enumerate its cameras again.
+        closeCameras();
+    }
+    if (!consent.enabled) {
+        slot.applied = consent.generation;
+        if (slot.settled != consent.generation || slot.status.state != State::Off) {
+            publishDevice(MediaDevice::Camera, {}, consent.generation);
+        }
+        return true;
+    }
+    const auto fail = [&](const QString &code, const QString &message) {
+        closeCameras();
+        publishDevice(MediaDevice::Camera, {State::Error, false, code, message}, consent.generation);
+    };
+
+    if (slot.applied != consent.generation) {
+        if (!WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME)) {
+            slot.applied = consent.generation;
+            fail(DeviceControl::Unavailable, QStringLiteral("the client has no dynamic virtual channels"));
+            return true;
+        }
+        if (WTSVirtualChannelManagerGetDrdynvcState(vcm) != DRDYNVC_STATE_READY) {
+            return true; // not yet
+        }
+        slot.applied = consent.generation;
+        slot.cameraRemoved = false;
+        d->remoteCameras.versionSeen.store(false);
         d->cameraEnumerator = cam_dev_enum_server_context_new(vcm);
         if (d->cameraEnumerator) {
             d->cameraEnumerator->rdpcontext = d->peer->context;
@@ -1523,12 +1925,73 @@ bool RdpConnection::initializeAudioChannels()
         }
         if (!d->cameraEnumerator || d->cameraEnumerator->Initialize(d->cameraEnumerator, FALSE) != CHANNEL_RC_OK
             || d->cameraEnumerator->Open(d->cameraEnumerator) != CHANNEL_RC_OK) {
-            qCWarning(KRDP) << "Could not initialize RDPECAM enumerator";
-            if (d->cameraEnumerator) cam_dev_enum_server_context_free(d->cameraEnumerator);
-            d->cameraEnumerator = nullptr;
-            return false;
+            if (d->cameraEnumerator) {
+                cam_dev_enum_server_context_free(d->cameraEnumerator);
+                d->cameraEnumerator = nullptr;
+            }
+            fail(DeviceControl::Unavailable, QStringLiteral("could not open the camera channel (RDPECAM)"));
+            return true;
         }
-        qCInfo(KRDP) << "RDPECAM enumerator opened after explicit media consent";
+        qCInfo(KRDP) << "RDPECAM enumerator opened";
+        slot.deadline = now + DeviceReadyDeadline;
+        publishDevice(MediaDevice::Camera, {State::Starting, false, {}, {}});
+        return true;
+    }
+    if (!d->cameraEnumerator) {
+        return true;
+    }
+
+    size_t ready = 0;
+    d->remoteCameras.cameras.forEach([&ready](RemoteCamera *camera) {
+        if (camera->endpointStarted.load() && camera->endpoint->ready()) {
+            ++ready;
+        }
+        return true;
+    });
+    switch (slot.status.state) {
+    case State::Starting:
+        if (ready > 0) {
+            publishDevice(MediaDevice::Camera, {State::On, false, {}, {}}, consent.generation);
+            slot.nextInUsePoll = now;
+        } else if (now >= slot.deadline) {
+            if (d->remoteCameras.versionSeen.load()) {
+                fail(DeviceControl::Unavailable, QStringLiteral("the client offered no camera"));
+            } else {
+                fail(DeviceControl::Timeout, QStringLiteral("the client did not open the camera channel within 5 s"));
+            }
+        }
+        return true;
+    case State::On:
+        if (ready == 0) {
+            // DeviceRemovedNotification took the last camera. The enumerator
+            // stays open: a camera the client adds again turns it back on.
+            slot.cameraRemoved = true;
+            publishDevice(MediaDevice::Camera, {State::Error, false, DeviceControl::Unavailable, QStringLiteral("the client removed its camera")});
+            return true;
+        }
+        if (now >= slot.nextInUsePoll) {
+            slot.nextInUsePoll = now + 2 * InUsePollInterval; // the loopback check walks /proc
+            bool inUse = false;
+            d->remoteCameras.cameras.forEach([&inUse](RemoteCamera *camera) {
+                inUse = camera->endpointStarted.load() && camera->endpoint->consumerActive();
+                return !inUse;
+            });
+            if (inUse != slot.status.inUse) {
+                auto status = slot.status;
+                status.inUse = inUse;
+                publishDevice(MediaDevice::Camera, status);
+            }
+        }
+        return true;
+    case State::Error:
+        if (slot.cameraRemoved && ready > 0) {
+            slot.cameraRemoved = false;
+            publishDevice(MediaDevice::Camera, {State::On, false, {}, {}});
+            slot.nextInUsePoll = now;
+        }
+        return true;
+    case State::Off:
+        return true;
     }
     return true;
 }

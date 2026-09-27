@@ -91,7 +91,7 @@ private Q_SLOTS:
         // on, PostConnect decides), but nothing reaches the channel manager.
         QVERIFY(sendOnChannel(peer, record("apply")));
         QVERIFY(sendOnChannel(peer, record("query")));
-        QVERIFY(sendOnChannel(peer, record("attach") + record("media")));
+        QVERIFY(sendOnChannel(peer, record("attach") + record("device")));
         QCOMPARE(downstreamCalls, 0);
         QVERIFY(executed.isEmpty());
         QCOMPARE(gate.droppedPdus(), std::uint64_t(3));

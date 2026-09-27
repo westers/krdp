@@ -325,6 +325,7 @@ int main(int argc, char **argv)
     server.setTlsCertificate(certificate);
     server.setTlsCertificateKey(certificateKey);
     server.setCameraLoopbackDevice(config->cameraLoopbackDevice());
+    server.setStandardClientMedia(config->standardClientMedia());
 
     // Use parsed username/pw if set
     if (parser.isSet(u"username"_s)) {
@@ -486,6 +487,7 @@ int main(int argc, char **argv)
         controller.setChromaPolicyDefaults(chromaPolicy);
         controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
         server.setCameraLoopbackDevice(config->cameraLoopbackDevice());
+        server.setStandardClientMedia(config->standardClientMedia());
         applyVaapiDriverMode(config->vaapiDriverMode());
         KRdp::selectVaapiDriver();
 
@@ -496,7 +498,7 @@ int main(int argc, char **argv)
                 << "monitorIndex" << config->monitorIndex() << "virtualPolicy" << config->virtualMonitorPolicy() << "virtualLayout" << config->virtualMonitorLayout()
                 << "wakeDisplay" << config->wakeDisplayOnConnect() << "vaapiMode" << config->vaapiDriverMode() << "port" << listenPort << "from" << runtimeConfigPath
                 << "codec" << config->codec() << "chroma" << QStringLiteral("%1/%2/%3").arg(chromaPolicy.motionGapMs).arg(chromaPolicy.restMs).arg(chromaPolicy.maxGapMs)
-                << "cameraLoopback" << config->cameraLoopbackDevice();
+                << "cameraLoopback" << config->cameraLoopbackDevice() << "standardClientMedia" << config->standardClientMedia();
     };
 
     // Re-creates the capture stream for a new display topology (resolution or

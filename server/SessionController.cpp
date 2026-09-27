@@ -42,6 +42,7 @@
 #endif
 
 #include "LayoutSessionDiff.h"
+#include "PhysicalDeviceControl.h"
 #include "RemoteMonitorGeometry.h"
 #include "TakeoverDetector.h"
 #include "VideoStream.h"
@@ -1067,6 +1068,13 @@ public:
     QString controlId;
     /** Sessions were built from the host layout (buildLayoutSessions()); kept out of every configured-mode rebuild. */
     bool layoutClient = false;
+    /**
+     * StandardClientMedia (DEVICES-DESIGN.md §1) is for clients that do not speak
+     * KRDPCTL: either flag set means this one does, and it asks for each device
+     * itself with `device` records (no record: the device stays off).
+     */
+    bool deviceRecordSeen = false;
+    bool spokeKrdpctl = false;
     /** See SessionController::buildLayoutSessions(): the rebuild for outputs that were not screens yet. */
     QTimer layoutRetryTimer;
     int layoutRetriesLeft = 0;
@@ -2226,6 +2234,14 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
         }
     });
     connect(wrapper.get(), &SessionWrapper::layoutRecordDue, this, &SessionController::sendLayoutNow);
+    // `device` answers and pushes (KRDPCTL-V2-CONTRACT.md §d). A connection
+    // without the channel (StandardClientMedia) has nobody to tell.
+    connect(newConnection, &KRdp::RdpConnection::deviceState, wrapper.get(),
+            [connection = QPointer<KRdp::RdpConnection>(newConnection)](KRdp::MediaDevice device, const KRdp::DeviceStatus &status, const QString &requestId) {
+        if (connection && connection->hasControlChannel()) {
+            connection->sendControlRecord(KRdp::PhysicalDeviceControl::stateRecord(device, status, requestId));
+        }
+    }, Qt::QueuedConnection);
     newConnection->videoStream()->setCodecPreference(m_codecPreference);
     // Seeded from the controller's configured default; a client's own `chroma` (onControlChroma())
     // overrides it for this connection only, before any session is created (setSessions() applies
@@ -2304,6 +2320,7 @@ void SessionController::onClientDisplayInfo(SessionWrapper *wrapper)
     capabilities.host = u"physical"_s;
     capabilities.layoutQuery = true;
     capabilities.layoutApply = true;
+    capabilities.devices = KRdp::PhysicalDeviceControl::Capabilities;
     wrapper->connection->sendControlRecord(KRdp::LayoutControl::capabilitiesRecord(capabilities));
     wrapper->controlTimer.start();
     qInfo() << "KRDPCTL: client joined the channel; capabilities sent, holding the session build for its first record";
@@ -2348,6 +2365,12 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
         replyTo(wrapper, KRdp::AudioPriority::reply(record, connection->audioPriorityActive()));
         return; // This policy never consumes the initial layout-selection gate.
     }
+    if (type == QLatin1String("device")) {
+        // Nor does a device: a client sends its initial `device` records right
+        // after `capabilities`, before (or instead of) its layout choice.
+        onControlDevice(wrapper, record);
+        return;
+    }
     // A record proves the channel: a gate still undecided (cannot happen
     // with the queued ordering, see onNewConnection()) is decided by it.
     const bool first = wrapper->controlGate == SessionWrapper::ControlGate::Undecided || wrapper->controlGate == SessionWrapper::ControlGate::Waiting;
@@ -2369,6 +2392,11 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
             buildConfiguredSessions(wrapper);
         }
         return;
+    }
+
+    static const QSet<QString> knownTypes{u"query"_s, u"apply"_s, u"attach"_s, u"chroma"_s, u"codec"_s, u"pong"_s};
+    if (knownTypes.contains(type)) {
+        wrapper->spokeKrdpctl = true;
     }
 
     if (type == QLatin1String("query")) {
@@ -2402,11 +2430,6 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
 
     if (type == QLatin1String("codec")) {
         onControlCodec(wrapper, record);
-        return;
-    }
-
-    if (type == QLatin1String("media")) {
-        onControlMedia(wrapper, record);
         return;
     }
 
@@ -2467,21 +2490,14 @@ void SessionController::onControlCodec(SessionWrapper *wrapper, const QJsonObjec
     qInfo() << "KRDPCTL: private codec selected" << (selected ? KRdp::VideoCodecSupport::codecName(*selected) : "avc");
 }
 
-void SessionController::onControlMedia(SessionWrapper *wrapper, const QJsonObject &record)
+void SessionController::onControlDevice(SessionWrapper *wrapper, const QJsonObject &record)
 {
-    auto *connection = wrapper->connection.data();
-    const QJsonValue playback = record.value(QLatin1String("playback"));
-    const QJsonValue microphone = record.value(QLatin1String("microphone"));
-    const QJsonValue camera = record.value(QLatin1String("camera"));
-    const QJsonValue silenceHost = record.value(QLatin1String("silenceHost"));
-    if (!playback.isBool() || !microphone.isBool() || !camera.isBool() || (!silenceHost.isUndefined() && !silenceHost.isBool())) {
-        replyTo(wrapper, KRdp::LayoutControl::errorRecord({u"invalid"_s, u"media playback, microphone, camera, and silenceHost must be booleans"_s}));
-        return;
+    wrapper->deviceRecordSeen = true;
+    // Refused at once, or answered later from the session loop (deviceState,
+    // connected in onNewConnection()) with this record's requestId.
+    if (const auto refused = KRdp::PhysicalDeviceControl::request(*wrapper->connection, record, wrapper->replyRequestId)) {
+        wrapper->connection->sendControlRecord(*refused);
     }
-    // A silent host only makes sense when audio is actually redirected.
-    const bool isolated = playback.toBool() && silenceHost.toBool(false);
-    connection->setMediaPolicy(playback.toBool(), microphone.toBool(), camera.toBool(), isolated);
-    replyTo(wrapper, QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"playback"_s, playback}, {u"microphone"_s, microphone}, {u"camera"_s, camera}, {u"silenceHost"_s, isolated}});
 }
 
 void SessionController::onControlTimeout(SessionWrapper *wrapper)
@@ -2534,6 +2550,12 @@ void SessionController::buildConfiguredSessions(SessionWrapper *wrapper)
         buildVirtualSessions(wrapper);
     } else {
         buildSessions(wrapper);
+    }
+    if (KRdp::PhysicalDeviceControl::wantsStandardConsent(wrapper->deviceRecordSeen, wrapper->spokeKrdpctl) && wrapper->connection
+        && wrapper->connection->applyStandardConsent()) {
+        // A stock client (or one that joined KRDPCTL and said nothing we
+        // know): its standard channel negotiation is its consent.
+        qInfo() << "StandardClientMedia: the client's standard audio, microphone and camera negotiation is its consent";
     }
 }
 

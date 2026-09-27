@@ -293,7 +293,8 @@ private:
      */
     void onControlChroma(SessionWrapper *wrapper, const QJsonObject &record, bool first);
     void onControlCodec(SessionWrapper *wrapper, const QJsonObject &record);
-    void onControlMedia(SessionWrapper *wrapper, const QJsonObject &record);
+    /** KRDPCTL `device` (KRDPCTL-V2-CONTRACT.md §d): answered asynchronously through RdpConnection::deviceState. */
+    void onControlDevice(SessionWrapper *wrapper, const QJsonObject &record);
     /** The executor finished the apply that m_applying started. */
     void onLayoutApplied(const HostLayoutExecutor::Result &result);
     /**

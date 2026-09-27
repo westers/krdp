@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionTransport.h"
 #include "LayoutControl.h"
+#include "DeviceControl.h"
 #include "AudioPriority.h"
 #include "VirtualResizeProtocol.h"
 #include "VirtualResize.h"
@@ -18,6 +19,15 @@ namespace KRdp
 {
 namespace
 {
+/** What `device` can do on a virtual desktop (DEVICES-DESIGN.md §3): no camera yet (risk 5). */
+constexpr LayoutControl::DeviceCapabilities VirtualDeviceCapabilities{
+    .playbackToggle = true,
+    .playbackSilenceHost = true,
+    .microphoneToggle = true,
+    .cameraToggle = false,
+    .cameraReselect = false,
+};
+
 bool frameMatchesTopology(const VideoFrame &frame, const RemoteTopologyCatalog::Snapshot &snapshot)
 {
     if (snapshot.outputs.isEmpty() || snapshot.outputs.size() != frame.monitors.size()
@@ -54,7 +64,8 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     connection->videoStream()->setEnabled(false);
     connection->setExternalAudioPlayback(true); // broker must never open host PipeWire
     m_externalMicrophone = connection->enableExternalMicrophone();
-    connection->setMediaPolicy(false, false, false);
+    connection->setDeviceEnabled(MediaDevice::Playback, false);
+    connection->setDeviceEnabled(MediaDevice::Microphone, false);
     m_microphoneDeadline.setSingleShot(true);
     m_microphoneDeadline.setInterval(4000);
     connect(&m_microphoneDeadline, &QTimer::timeout, this, [this] {
@@ -125,6 +136,19 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     }, Qt::QueuedConnection);
     // Emitted once the client authenticated (AUD-S1), with KRDPCTL open if it joined it.
     connect(connection, &RdpConnection::clientDisplayInfoReceived, this, [this] { sendCapabilities(); }, Qt::QueuedConnection);
+    // The connection's own channel work fails after the broker said `on`: the
+    // client refused AUDIN, or never joined RDPSND. Pass it on.
+    connect(connection, &RdpConnection::deviceState, this, [this](MediaDevice device, const DeviceStatus &status, const QString &) {
+        if (status.state != DeviceStatus::State::Error || !m_connection) return;
+        const QPointer<VirtualSessionTransport> alive(this);
+        if (device == MediaDevice::Microphone && m_microphonePolicy.enabled) {
+            const QString requestId = std::exchange(m_microphoneRequestId, {});
+            stopMicrophone();
+            if (alive) pushRecord(LayoutControl::withRequestId(deviceReply(device, status), requestId));
+        } else if (device == MediaDevice::Playback && m_playback) {
+            pushRecord(deviceReply(device, status));
+        }
+    }, Qt::QueuedConnection);
     connect(connection, &RdpConnection::stateChanged, this, [this](RdpConnection::State state) {
         if (state == RdpConnection::State::Closed) closed();
     }, Qt::QueuedConnection);
@@ -316,6 +340,11 @@ void VirtualSessionTransport::revoke()
         m_connection->setAudioPriorityDefault(false);
         m_connection->clearAudioPriorityOverride();
     }
+    // A device that was on is pushed as `off`/`revoked` once the teardown is
+    // done; a microphone start still pending is answered with it (echo once).
+    const bool microphoneWasOn = m_microphonePolicy.enabled;
+    const QString microphoneRequestId = std::exchange(m_microphoneRequestId, {});
+    const bool playbackWasOn = m_playback;
     // Invalidate local consent before dispatch, while the old endpoint is still
     // pinned. Nested requests/binds cannot acquire a replacement during revoke.
     stopMicrophone();
@@ -358,11 +387,20 @@ void VirtualSessionTransport::revoke()
         if (!alive) return;
         if (!m_connection) { m_revoking = false; return; }
         m_connection->videoStream()->setMonitorLayout({});
-        m_connection->setMediaPolicy(false, false, false);
+        m_connection->setDeviceEnabled(MediaDevice::Playback, false);
+        m_connection->setDeviceEnabled(MediaDevice::Microphone, false);
         if (!alive) return;
         if (m_connection) m_connection->videoStream()->setEnabled(false); // discard old desktop frames
     }
-    if (alive) m_revoking = false;
+    if (!alive) return;
+    if (m_connection && m_connection->state() != RdpConnection::State::Closed) {
+        const DeviceStatus revoked{DeviceStatus::State::Off, false, DeviceControl::Revoked, u"the virtual desktop was detached from this connection"_s};
+        if (microphoneWasOn) pushRecord(LayoutControl::withRequestId(DeviceControl::stateRecord(MediaDevice::Microphone, revoked), microphoneRequestId));
+        if (!alive) return;
+        if (playbackWasOn) pushRecord(DeviceControl::stateRecord(MediaDevice::Playback, revoked));
+        if (!alive) return;
+    }
+    m_revoking = false;
 }
 
 bool VirtualSessionTransport::forwardVideoQuality(quint64 generation, quint8 quality, std::optional<quint32> uid)
@@ -385,13 +423,23 @@ void VirtualSessionTransport::restoreFixedVideoQuality(std::optional<quint32> ui
     m_connection->videoStream()->setQualityCap(80); // May synchronously destroy/reenter this transport.
 }
 
-QJsonObject VirtualSessionTransport::mediaReply(bool ok, const QString &error) const
+QJsonObject VirtualSessionTransport::deviceReply(MediaDevice device, const DeviceStatus &status) const
 {
-    QJsonObject reply{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, ok},
-        {u"playback"_s, m_playback}, {u"microphone"_s, m_microphoneReady}, {u"camera"_s, false},
-        {u"silenceHost"_s, m_silenceHost}};
-    if (!error.isEmpty()) reply.insert(u"message"_s, error);
-    return reply;
+    return DeviceControl::stateRecord(device, status);
+}
+
+DeviceStatus VirtualSessionTransport::deviceStatus(MediaDevice device) const
+{
+    using State = DeviceStatus::State;
+    switch (device) {
+    case MediaDevice::Playback:
+        return {m_playback ? State::On : State::Off, false, {}, {}};
+    case MediaDevice::Microphone:
+        return {m_microphoneReady ? State::On : m_microphonePolicy.enabled ? State::Starting : State::Off, false, {}, {}};
+    case MediaDevice::Camera:
+        break;
+    }
+    return {};
 }
 
 void VirtualSessionTransport::stopMicrophone()
@@ -408,9 +456,9 @@ void VirtualSessionTransport::stopMicrophone(std::optional<quint32> uid)
     const auto policy = m_microphonePolicy;
     m_microphonePolicy = {};
     m_microphoneReady = false;
-    // setMediaPolicy updates consent atomics and clears the generation-bound
+    // setDeviceEnabled updates consent atomics and clears the generation-bound
     // AUDIN queue; it does not emit signals. Playback remains independent.
-    if (m_connection) m_connection->setMediaPolicy(m_playback, false, false, false);
+    if (m_connection) m_connection->setDeviceEnabled(MediaDevice::Microphone, false);
     if (policy.enabled && m_endpoint && m_nextMicrophoneId != std::numeric_limits<quint64>::max()) {
         m_endpoint->setMicrophone({policy.generation, ++m_nextMicrophoneId, false});
     }
@@ -423,19 +471,22 @@ QJsonObject VirtualSessionTransport::microphoneResult(const ConsoleWorkerWire::M
     if (!m_microphonePolicy.enabled || result.generation != m_microphonePolicy.generation
         || result.requestId != m_microphonePolicy.requestId) return {};
     const QPointer<VirtualSessionTransport> alive(this);
-    // The first result answers the pending `media` request; a later failure is unsolicited.
+    // The first result answers the pending `device` request; a later failure is unsolicited.
     if (!authorized(uid) || !result.error.isEmpty()) {
-        const QString error = result.error.isEmpty() ? u"virtual microphone authority changed"_s : result.error;
+        const DeviceStatus status = result.error.isEmpty()
+            ? DeviceStatus{DeviceStatus::State::Off, false, DeviceControl::Revoked, u"virtual microphone authority changed"_s}
+            : DeviceStatus{DeviceStatus::State::Error, false, DeviceControl::Unavailable, result.error};
         const QString requestId = std::exchange(m_microphoneRequestId, {});
         stopMicrophone(uid);
-        return alive ? LayoutControl::withRequestId(mediaReply(false, error), requestId) : QJsonObject{};
+        return alive ? LayoutControl::withRequestId(deviceReply(MediaDevice::Microphone, status), requestId) : QJsonObject{};
     }
     if (m_microphoneReady) return {};
     m_microphoneDeadline.stop();
-    m_connection->setMediaPolicy(m_playback, true, false, false);
+    m_connection->setDeviceEnabled(MediaDevice::Microphone, true);
     m_microphoneReady = true;
     m_microphonePump.start();
-    return LayoutControl::withRequestId(mediaReply(true), std::exchange(m_microphoneRequestId, {}));
+    return LayoutControl::withRequestId(deviceReply(MediaDevice::Microphone, {DeviceStatus::State::On, false, {}, {}}),
+                                        std::exchange(m_microphoneRequestId, {}));
 }
 
 QJsonObject VirtualSessionTransport::microphoneTimeout()
@@ -444,7 +495,9 @@ QJsonObject VirtualSessionTransport::microphoneTimeout()
     const QPointer<VirtualSessionTransport> alive(this);
     const QString requestId = std::exchange(m_microphoneRequestId, {});
     stopMicrophone();
-    return alive ? LayoutControl::withRequestId(mediaReply(false, u"virtual microphone worker startup timed out"_s), requestId) : QJsonObject{};
+    return alive ? LayoutControl::withRequestId(deviceReply(MediaDevice::Microphone,
+                       {DeviceStatus::State::Error, false, DeviceControl::Timeout, u"virtual microphone worker startup timed out"_s}), requestId)
+                 : QJsonObject{};
 }
 
 bool VirtualSessionTransport::forwardMicrophone(const QByteArray &pcm, std::optional<quint32> uid)
@@ -457,7 +510,14 @@ bool VirtualSessionTransport::forwardMicrophone(const QByteArray &pcm, std::opti
 void VirtualSessionTransport::pumpMicrophone()
 {
     if (!m_microphoneReady) return;
-    if (!authorized()) { stopMicrophone(); return; }
+    if (!authorized()) {
+        const QPointer<VirtualSessionTransport> alive(this);
+        stopMicrophone();
+        if (alive)
+            pushRecord(deviceReply(MediaDevice::Microphone,
+                {DeviceStatus::State::Off, false, DeviceControl::Revoked, u"virtual microphone authority changed"_s}));
+        return;
+    }
     // Queue drains at most 20ms, expires old speech, and never retries backlog
     // rejected by the worker socket. No PipeWire object exists in this broker.
     const auto pcm = m_connection->takeExternalMicrophone();
@@ -520,6 +580,13 @@ void VirtualSessionTransport::sendReply(const QJsonObject &record)
         ? record : LayoutControl::withRequestId(record, id.toString()));
 }
 
+void VirtualSessionTransport::pushRecord(const QJsonObject &record)
+{
+    if (!m_connection) return;
+    if (m_recordPushed) m_recordPushed(record);
+    if (m_connection) m_connection->sendControlRecord(record);
+}
+
 void VirtualSessionTransport::sendCapabilities()
 {
     if (m_capabilitiesSent || !m_connection || !m_connection->isAuthenticated() || !m_connection->hasControlChannel()) return;
@@ -532,6 +599,7 @@ void VirtualSessionTransport::sendCapabilities()
     capabilities.topologyQuery = true;
     capabilities.topologyPreview = true;
     capabilities.topologyApply = true;
+    capabilities.devices = VirtualDeviceCapabilities;
     m_connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
 
@@ -1427,9 +1495,26 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         }
         return response;
     }
-    if (record.value(u"type"_s) == u"media"_s) {
+    if (record.value(u"type"_s) == u"device"_s) {
+        // KRDPCTL `device` (KRDPCTL-V2-CONTRACT.md §d). Request-level refusals are
+        // `error` records; a device's outcome is a `device` state record. The
+        // microphone is answered when the worker acknowledges its source.
+        const auto parsed = DeviceControl::parseRequest(record);
+        if (const auto *error = std::get_if<LayoutControl::Error>(&parsed)) return LayoutControl::errorRecord(*error);
+        const auto device = std::get<DeviceControl::Request>(parsed);
+        if (const auto refused = DeviceControl::checkSupported(device, VirtualDeviceCapabilities)) return LayoutControl::errorRecord(*refused);
+        if (device.action == DeviceControl::Action::Query) return deviceReply(device.device, deviceStatus(device.device));
         const QPointer<VirtualSessionTransport> alive(this);
         if (m_mediaDispatch) return {};
+        if (!authorized(uid)) {
+            // A refused request must not leave an earlier consent running: end
+            // this connection's devices locally (never another attachment's worker).
+            stopMicrophone(uid);
+            if (!alive || !m_connection) return {};
+            m_playback = m_silenceHost = false;
+            m_connection->setDeviceEnabled(MediaDevice::Playback, false);
+            return LayoutControl::errorRecord({u"not-owner"_s, u"devices need the authenticated owner of an attached virtual desktop"_s});
+        }
         m_mediaDispatch = true;
         const auto endDispatch = qScopeGuard([alive] { if (alive) alive->m_mediaDispatch = false; });
         const auto endpoint = m_endpoint;
@@ -1441,45 +1526,38 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
                 && m_handle->generation == handle->generation && m_controlGeneration == generation
                 && authorized(uid);
         };
-        const auto playback = record.value(u"playback"_s);
-        const auto microphone = record.value(u"microphone"_s);
-        const auto camera = record.value(u"camera"_s);
-        const auto silence = record.value(u"silenceHost"_s);
-        const bool ownsDesktop = authorized(uid);
-        const bool accepted = ownsDesktop && record.value(u"v"_s).isDouble() && record.value(u"v"_s).toDouble() == 1
-            && playback.isBool() && microphone.isBool() && camera.isBool()
-            && (silence.isUndefined() || silence.isBool()) && !camera.toBool();
-        // A refused update must not report playback off while continuing the
-        // previous stream. Revoke this connection even after ownership loss,
-        // but never change a worker now belonging to another attachment.
+        const auto revoked = [this] {
+            return deviceReply(MediaDevice::Microphone, {DeviceStatus::State::Off, false, DeviceControl::Revoked, u"virtual desktop authority changed"_s});
+        };
+        const bool on = device.action == DeviceControl::Action::On;
+        if (device.device == MediaDevice::Playback) {
+            const bool wasPriority = m_connection->audioPriorityActive();
+            m_playback = on;
+            m_silenceHost = on && device.silenceHost;
+            // Only atomics/queue state: no signals.
+            m_connection->setExternalAudioPlayback(true);
+            m_connection->setDeviceEnabled(MediaDevice::Playback, m_playback);
+            m_endpoint->setMedia({m_playback, m_silenceHost});
+            if (!alive || !m_connection) return {};
+            if (wasPriority) {
+                restoreFixedVideoQuality(uid);
+                if (!alive || !m_connection) return {};
+            }
+            if (!bindingCurrent())
+                return deviceReply(MediaDevice::Playback, {DeviceStatus::State::Off, false, DeviceControl::Revoked, u"virtual desktop authority changed"_s});
+            return deviceReply(MediaDevice::Playback, deviceStatus(MediaDevice::Playback));
+        }
+        // Microphone: any change ends the current source first (a new `on` is a
+        // new consent period with a new worker request).
         stopMicrophone(uid);
         if (!alive || !m_connection) return {};
         // Socket failure during source-off can synchronously revoke the binding.
-        if (ownsDesktop && !bindingCurrent()) return mediaReply(false, u"virtual desktop authority changed"_s);
-        const bool wasPriority = m_connection->audioPriorityActive();
-        m_playback = accepted && playback.toBool();
-        m_silenceHost = m_playback && silence.toBool();
-        if (m_connection) {
-            // setExternalAudioPlayback only updates atomics/queue state.
-            m_connection->setExternalAudioPlayback(true);
-            m_connection->setMediaPolicy(m_playback, false, false);
-            if (!alive || !m_connection) return {};
-        }
-        if (ownsDesktop && m_endpoint) {
-            m_endpoint->setMedia({m_playback, m_silenceHost});
-            if (!alive || !m_connection) return {};
-        }
-        if (wasPriority) {
-            restoreFixedVideoQuality(uid);
-            if (!alive || !m_connection) return {};
-        }
-        if (!accepted) return mediaReply(false, u"media requires an authenticated attached owner; camera unavailable"_s);
-        if (!bindingCurrent()) return mediaReply(false, u"virtual desktop authority changed"_s);
-        if (!microphone.toBool()) return mediaReply(true);
+        if (!bindingCurrent()) return revoked();
+        if (!on) return deviceReply(MediaDevice::Microphone, deviceStatus(MediaDevice::Microphone));
         // Reserve one request ID for source-off; never wrap on enable/disable.
         if (!m_externalMicrophone || !m_controlGeneration
             || m_nextMicrophoneId >= std::numeric_limits<quint64>::max() - 1)
-            return mediaReply(false, u"virtual microphone unavailable"_s);
+            return deviceReply(MediaDevice::Microphone, {DeviceStatus::State::Error, false, DeviceControl::Unavailable, u"virtual microphone unavailable"_s});
         m_microphonePolicy = {m_controlGeneration, ++m_nextMicrophoneId, true};
         m_microphoneRequestId = m_replyRequestId; // the worker's acknowledgement answers this request
         m_microphoneDeadline.start();
@@ -1487,8 +1565,10 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         if (!alive || !m_connection) return {};
         if (!bindingCurrent()) return {}; // A replaced binding cannot acknowledge this consent.
         if (!dispatched) {
+            m_microphoneRequestId.clear(); // answered synchronously below (echo once)
             stopMicrophone();
-            return alive ? mediaReply(false, u"cannot dispatch virtual microphone startup"_s) : QJsonObject{};
+            return alive ? deviceReply(MediaDevice::Microphone, {DeviceStatus::State::Error, false, DeviceControl::Unavailable, u"cannot dispatch virtual microphone startup"_s})
+                         : QJsonObject{};
         }
         return {}; // Success is acknowledged only after correlated source readiness.
     }

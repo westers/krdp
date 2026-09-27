@@ -176,6 +176,20 @@ KRDP_EXPORT QJsonObject withRequestId(QJsonObject reply, const QString &requestI
 /** The refusal of a record whose requestId is invalid (never executed, never correlated). */
 KRDP_EXPORT QJsonObject invalidRequestIdRecord();
 
+/**
+ * The optional `devices` group of `capabilities` (DEVICES-DESIGN.md §3): what
+ * a host can switch during a session through the `device` record. An endpoint
+ * that leaves it out offers no runtime device control.
+ */
+struct DeviceCapabilities {
+    bool playbackToggle = false;
+    bool playbackSilenceHost = false;
+    bool microphoneToggle = false;
+    bool cameraToggle = false;
+    bool cameraReselect = false;
+    bool operator==(const DeviceCapabilities &) const = default;
+};
+
 /** What a KRDPCTL endpoint offers, as the `capabilities` record says it. */
 struct ChannelCapabilities {
     QString host; ///< "physical" | "console" | "virtual"
@@ -187,6 +201,7 @@ struct ChannelCapabilities {
     bool topologyQuery = false;
     bool topologyPreview = false;
     bool topologyApply = false;
+    std::optional<DeviceCapabilities> devices; ///< absent: no `devices` group, no runtime device control
     bool operator==(const ChannelCapabilities &) const = default;
 };
 KRDP_EXPORT QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities);

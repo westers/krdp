@@ -184,7 +184,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     m_microphoneDeadline.setSingleShot(true);
     m_microphoneDeadline.setInterval(4000);
     connect(&m_microphoneDeadline, &QTimer::timeout, this, [this] {
-        stopMicrophone(u"microphone worker startup timed out"_s);
+        stopMicrophone(DeviceControl::Timeout, u"microphone worker startup timed out"_s);
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::microphoneFinished, this, &ConsoleHostController::microphoneResult);
     m_microphonePump.setInterval(20);
@@ -230,7 +230,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         setWorkerActive(false);
         finishPhysicalTopology(u"capture-failed"_s);
         finishVirtualTopology(u"capture-failed"_s);
-        stopMicrophone(u"console microphone worker stopped"_s);
+        stopMicrophone(DeviceControl::Unavailable, u"console microphone worker stopped"_s);
         finishResize(u"console capture worker stopped during resize"_s);
         // A closed socket is not a reaped process: the worker may still be
         // restoring outputs. The handoff advances only on workerExited().
@@ -416,7 +416,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
 
 ConsoleHostController::~ConsoleHostController()
 {
-    stopMicrophone({});
+    stopMicrophone();
 }
 
 void ConsoleHostController::start()
@@ -687,7 +687,7 @@ void ConsoleHostController::setWorkerActive(bool active)
         m_topologyPriorities.clear();
         m_topologyCatalog.resetGeneration();
         finishTopologyQueries(u"capture-failed"_s);
-        stopMicrophone(u"console session changed; microphone consent must be renewed"_s);
+        stopMicrophone(DeviceControl::Revoked, u"console session changed; microphone consent must be renewed"_s);
         finishResize(u"console capture worker changed during resize"_s);
         releaseInput();
     }
@@ -753,6 +753,20 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     client->connections.append(connect(connection, &QObject::destroyed, this, [this, id] {
         removeClient(nullptr, id);
     }));
+    // The connection's own channel work fails after the broker said `on`: the
+    // client refused AUDIN, or never joined RDPSND. Pass it on.
+    client->connections.append(connect(connection, &RdpConnection::deviceState, this,
+                                       [this, id](MediaDevice device, const DeviceStatus &status, const QString &) {
+        if (status.state != DeviceStatus::State::Error) return;
+        if (device == MediaDevice::Microphone && m_microphoneClient == id) {
+            stopMicrophone(status.code, status.message);
+            return;
+        }
+        for (const auto &client : m_clients) {
+            if (client->id == id && client->connection && device == MediaDevice::Playback && client->media.playback)
+                sendRecord(client->connection, DeviceControl::stateRecord(device, status));
+        }
+    }, Qt::QueuedConnection));
     // Post-authentication (AUD-S1): KRDPCTL clients hear `capabilities` first; others nothing.
     client->connections.append(connect(connection, &RdpConnection::clientDisplayInfoReceived, this, [this, id] {
         for (const auto &client : m_clients) {
@@ -776,9 +790,13 @@ void ConsoleHostController::addClient(RdpConnection *connection)
             // Frames were withheld until now; start this client on a key frame.
             m_endpoint.requestKeyFrame();
             for (const auto &client : m_clients) {
-                if (client->id == id && !client->pendingMedia.isEmpty()) {
-                    const auto pending = std::exchange(client->pendingMedia, {});
-                    onControlRecord(connection, id, pending);
+                if (client->id == id && !client->pendingDevices.isEmpty()) {
+                    const auto pending = std::exchange(client->pendingDevices, {});
+                    const QPointer<RdpConnection> guarded(connection);
+                    for (const auto &record : pending) {
+                        if (!guarded) break;
+                        onControlRecord(connection, id, record); // replayed whole, requestId included
+                    }
                     break;
                 }
             }
@@ -1147,60 +1165,126 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         sendLayouts();
         return;
     }
-    if (type != u"media"_s) {
-        return;
+    if (type == u"device"_s) {
+        onControlDevice(connection, id, record, incoming);
     }
-    if (!m_control.admitted(id)) {
-        for (const auto &client : m_clients) {
-            if (client->id == id) {
-                // Bounded: keep only the latest preflight. Failed
-                // authentication discards it with the client.
-                client->pendingMedia = incoming; // replayed whole, requestId included
-                break;
-            }
-        }
-        return;
+}
+
+namespace
+{
+/** What `device` can do on the physical console (DEVICES-DESIGN.md §3): no camera yet (risk 5). */
+constexpr LayoutControl::DeviceCapabilities ConsoleDeviceCapabilities{
+    .playbackToggle = true,
+    .playbackSilenceHost = true,
+    .microphoneToggle = true,
+    .cameraToggle = false,
+    .cameraReselect = false,
+};
+}
+
+DeviceStatus ConsoleHostController::deviceStatus(const Client &client, MediaDevice device) const
+{
+    using State = DeviceStatus::State;
+    switch (device) {
+    case MediaDevice::Playback:
+        return {client.media.playback ? State::On : State::Off, false, {}, {}};
+    case MediaDevice::Microphone:
+        if (m_microphoneClient != client.id) return {};
+        return {m_microphoneReady ? State::On : State::Starting, false, {}, {}};
+    case MediaDevice::Camera:
+        break;
     }
-    const QJsonValue playback = record.value(QLatin1String("playback"));
-    const QJsonValue microphone = record.value(QLatin1String("microphone"));
-    const QJsonValue camera = record.value(QLatin1String("camera"));
-    const QJsonValue silenceHost = record.value(QLatin1String("silenceHost"));
-    if (!playback.isBool() || !microphone.isBool() || !camera.isBool() || (!silenceHost.isUndefined() && !silenceHost.isBool())) {
-        replyTo(connection, QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"invalid"_s}, {u"message"_s, u"media fields must be booleans"_s}});
-        return;
-    }
-    if (camera.toBool()) {
-        replyTo(connection, QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"unsupported"_s}, {u"message"_s, u"physical console camera is not available yet"_s}});
-        return;
-    }
+    return {};
+}
+
+void ConsoleHostController::onControlDevice(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record, const QJsonObject &incoming)
+{
     const auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &client) { return client->id == id; });
     if (found == m_clients.end()) return;
     auto &client = **found;
-    client.mediaRequestId = m_replyRequestId;
-    if (microphone.toBool() && (!client.externalMicrophone || !m_inputEnabled || !m_endpoint.ready()
-        || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser)) {
-        sendMedia(client, false, u"microphone requires a ready logged-in desktop"_s);
+    if (!m_control.admitted(id)) {
+        // Before admission (Streaming): keep only the latest record per device,
+        // replayed whole (requestId included). Failed authentication discards
+        // them with the client.
+        const QJsonValue device = record.value(u"device"_s);
+        client.pendingDevices.erase(std::remove_if(client.pendingDevices.begin(), client.pendingDevices.end(), [&device](const QJsonObject &pending) {
+            return pending.value(u"device"_s) == device;
+        }), client.pendingDevices.end());
+        if (client.pendingDevices.size() < 3) client.pendingDevices.append(incoming);
         return;
     }
-    const ConsoleControl::Media requested{playback.toBool(), silenceHost.toBool(false) && playback.toBool(), microphone.toBool()};
-    if (!m_control.setMedia(id, requested)) {
-        replyTo(connection, QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"not-owner"_s}, {u"message"_s, u"only the authenticated console controller may inject microphone audio or silence the host"_s}});
+    const auto parsed = DeviceControl::parseRequest(record);
+    if (const auto *error = std::get_if<LayoutControl::Error>(&parsed)) {
+        replyTo(connection, LayoutControl::errorRecord(*error));
         return;
     }
-    if (m_microphoneClient == id) stopMicrophone({});
-    client.media = requested;
-    m_control.setMedia(id, requested);
-    connection->setExternalAudioPlayback(requested.playback);
-    connection->setMediaPolicy(requested.playback, false, false, false);
+    const auto request = std::get<DeviceControl::Request>(parsed);
+    if (const auto refused = DeviceControl::checkSupported(request, ConsoleDeviceCapabilities)) {
+        replyTo(connection, LayoutControl::errorRecord(*refused));
+        return;
+    }
+    if (request.action == DeviceControl::Action::Query) {
+        replyTo(connection, DeviceControl::stateRecord(request.device, deviceStatus(client, request.device)));
+        return;
+    }
+    const bool on = request.action == DeviceControl::Action::On;
+    using State = DeviceStatus::State;
+    if (request.device == MediaDevice::Playback) {
+        auto media = client.media;
+        media.playback = on;
+        media.silenceHost = on && request.silenceHost;
+        if (!m_control.setMedia(id, media)) {
+            replyTo(connection, LayoutControl::errorRecord({u"not-owner"_s, u"only the client controlling this console can silence its speakers"_s}));
+            return;
+        }
+        client.media = media;
+        connection->setExternalAudioPlayback(media.playback);
+        connection->setDeviceEnabled(MediaDevice::Playback, media.playback);
+        updateMedia();
+        replyTo(connection, DeviceControl::stateRecord(MediaDevice::Playback, deviceStatus(client, MediaDevice::Playback)));
+        return;
+    }
+    // Microphone.
+    if (!on) {
+        if (m_microphoneClient == id) {
+            client.microphoneRequestId.clear(); // superseded: this `off` is the answer
+            stopMicrophone();
+        }
+        replyTo(connection, DeviceControl::stateRecord(MediaDevice::Microphone, {}));
+        return;
+    }
+    if (m_microphoneClient && m_microphoneClient != id) {
+        replyTo(connection, DeviceControl::stateRecord(MediaDevice::Microphone,
+            {State::Error, false, DeviceControl::Busy, u"another client is sharing its microphone with this console"_s}));
+        return;
+    }
+    if (!m_control.ownsControl(id)) {
+        replyTo(connection, LayoutControl::errorRecord({u"not-owner"_s, u"only the client controlling this console can share a microphone"_s}));
+        return;
+    }
+    if (!client.externalMicrophone || !m_inputEnabled || !m_endpoint.ready()
+        || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
+        replyTo(connection, DeviceControl::stateRecord(MediaDevice::Microphone,
+            {State::Error, false, DeviceControl::Unavailable, u"microphone requires a ready logged-in desktop"_s}));
+        return;
+    }
+    if (m_microphoneClient == id) {
+        client.microphoneRequestId.clear(); // superseded by this `on`
+        stopMicrophone(); // a new consent period
+    }
+    auto media = client.media;
+    media.microphone = true;
+    if (!m_control.setMedia(id, media)) {
+        replyTo(connection, LayoutControl::errorRecord({u"not-owner"_s, u"only the client controlling this console can share a microphone"_s}));
+        return;
+    }
+    client.media = media;
     updateMedia();
-    if (!requested.microphone) {
-        sendMedia(client, false);
-        return;
-    }
+    client.microphoneRequestId = m_replyRequestId; // the worker's acknowledgement answers this request
     m_microphoneClient = id;
     m_microphonePolicy = {m_controlGeneration, ++m_nextMicrophoneId, true};
     if (!m_endpoint.setMicrophone(m_microphonePolicy)) {
-        stopMicrophone(u"cannot dispatch microphone startup"_s);
+        stopMicrophone(DeviceControl::Unavailable, u"cannot dispatch microphone startup"_s);
     } else {
         m_microphoneDeadline.start();
     }
@@ -1257,16 +1341,23 @@ void ConsoleHostController::finishTopologyQueries(const QString &error)
     }
 }
 
+void ConsoleHostController::sendRecord(RdpConnection *connection, const QJsonObject &record)
+{
+    if (!connection) return;
+    if (m_recordSent) m_recordSent(connection, record);
+    connection->sendControlRecord(record);
+}
+
 void ConsoleHostController::replyTo(RdpConnection *connection, const QJsonObject &record)
 {
     if (!connection) return;
     if (!m_replyRequestId.isEmpty() || record.contains(u"requestId"_s)) {
-        connection->sendControlRecord(LayoutControl::withRequestId(record, m_replyRequestId));
+        sendRecord(connection, LayoutControl::withRequestId(record, m_replyRequestId));
         return;
     }
     // An asynchronous result names its request by `id` (v2 clients send requestId == id).
     const QJsonValue id = record.value(u"id"_s);
-    connection->sendControlRecord(id.isString() ? LayoutControl::withRequestId(record, id.toString()) : record);
+    sendRecord(connection, id.isString() ? LayoutControl::withRequestId(record, id.toString()) : record);
 }
 
 void ConsoleHostController::sendCapabilities(Client &client)
@@ -1279,6 +1370,7 @@ void ConsoleHostController::sendCapabilities(Client &client)
     capabilities.topologyQuery = true;
     capabilities.topologyPreview = m_experimentalPhysicalTopology || m_experimentalConsoleVirtual;
     capabilities.topologyApply = capabilities.topologyPreview;
+    capabilities.devices = ConsoleDeviceCapabilities;
     client.connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
 
@@ -1330,7 +1422,7 @@ void ConsoleHostController::syncControlState()
         m_virtualPreview.reset();
         finishPhysicalTopology(u"not-owner"_s);
         finishVirtualTopology(u"not-owner"_s);
-        stopMicrophone(u"console control changed; microphone disabled"_s);
+        stopMicrophone(DeviceControl::Revoked, u"console control changed; microphone disabled"_s);
         finishResize(u"console control changed during resize"_s);
         m_workerOwner = m_control.owner();
         ++m_controlGeneration;
@@ -1469,14 +1561,14 @@ void ConsoleHostController::updateMedia()
     }
 }
 
-void ConsoleHostController::sendMedia(Client &client, bool microphone, const QString &error)
+void ConsoleHostController::sendMicrophoneState(Client &client, const DeviceStatus &status)
 {
-    client.connection->sendControlRecord(LayoutControl::withRequestId(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, error.isEmpty()},
-        {u"playback"_s, client.media.playback}, {u"microphone"_s, microphone}, {u"camera"_s, false},
-        {u"silenceHost"_s, client.media.silenceHost}, {u"message"_s, error}}, std::exchange(client.mediaRequestId, {})));
+    if (!client.connection) return;
+    sendRecord(client.connection, LayoutControl::withRequestId(DeviceControl::stateRecord(MediaDevice::Microphone, status),
+                                                               std::exchange(client.microphoneRequestId, {})));
 }
 
-void ConsoleHostController::stopMicrophone(const QString &error)
+void ConsoleHostController::stopMicrophone(const QString &code, const QString &message)
 {
     m_microphoneDeadline.stop();
     m_microphonePump.stop();
@@ -1488,8 +1580,11 @@ void ConsoleHostController::stopMicrophone(const QString &error)
         client->media.microphone = false;
         if (!m_control.ownsControl(id)) client->media.silenceHost = false;
         m_control.setMedia(id, client->media);
-        client->connection->setMediaPolicy(client->media.playback, false, false, false);
-        if (!error.isEmpty()) sendMedia(*client, false, error);
+        if (client->connection) client->connection->setDeviceEnabled(MediaDevice::Microphone, false);
+        if (!code.isEmpty() || !client->microphoneRequestId.isEmpty()) {
+            const auto state = code.isEmpty() || code == DeviceControl::Revoked ? DeviceStatus::State::Off : DeviceStatus::State::Error;
+            sendMicrophoneState(*client, {state, false, code, message});
+        }
         break;
     }
     m_endpoint.setMicrophone({m_microphonePolicy.generation, ++m_nextMicrophoneId, false});
@@ -1500,19 +1595,19 @@ void ConsoleHostController::microphoneResult(const ConsoleWorkerWire::Microphone
 {
     if (!m_microphoneClient || result.generation != m_microphonePolicy.generation
         || result.requestId != m_microphonePolicy.requestId) return;
-    if (!result.error.isEmpty()) { stopMicrophone(result.error); return; }
+    if (!result.error.isEmpty()) { stopMicrophone(DeviceControl::Unavailable, result.error); return; }
     if (m_microphoneReady) return;
     if (!m_inputEnabled || !m_control.ownsControl(m_microphoneClient)) {
-        stopMicrophone(u"console microphone authority changed"_s);
+        stopMicrophone(DeviceControl::Revoked, u"console microphone authority changed"_s);
         return;
     }
     for (const auto &client : m_clients) {
         if (client->id != m_microphoneClient) continue;
         m_microphoneDeadline.stop();
-        client->connection->setMediaPolicy(client->media.playback, true, false, false);
+        client->connection->setDeviceEnabled(MediaDevice::Microphone, true);
         m_microphoneReady = true;
         m_microphonePump.start();
-        sendMedia(*client, true);
+        sendMicrophoneState(*client, {DeviceStatus::State::On, false, {}, {}});
         break;
     }
 }
