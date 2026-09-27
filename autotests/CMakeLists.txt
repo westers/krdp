@@ -438,3 +438,9 @@ add_executable(ServerCertificateTest ServerCertificateTest.cpp)
 target_include_directories(ServerCertificateTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
 target_link_libraries(ServerCertificateTest PRIVATE Qt6::Test Qt6::Core KRdpServerCertificate freerdp winpr)
 add_test(NAME ServerCertificateTest COMMAND ServerCertificateTest)
+
+# K4/K5: port range and backend choice shared by krdpserver and the KCM.
+add_executable(ServerSettingsPolicyTest ServerSettingsPolicyTest.cpp)
+target_include_directories(ServerSettingsPolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ServerSettingsPolicyTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME ServerSettingsPolicyTest COMMAND ServerSettingsPolicyTest)
