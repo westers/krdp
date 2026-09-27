@@ -23,8 +23,13 @@
 
 namespace KRdp::ConsoleWorkerWire
 {
-constexpr quint16 ProtocolVersion = 12; // Console output ownership; broker and worker must upgrade together.
+// Paired broker/worker wire. Reset to 1 on 2026-09-27 (AUD-C-6); older
+// versions are not accepted. Broker and worker must always upgrade together.
+constexpr quint16 ProtocolVersion = 1;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
+constexpr int MaxFrameDimension = 16384;
+/// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
+constexpr const char *SocketEnvironment = "KRDP_CONSOLE_WORKER_SOCKET";
 
 enum class Kind : quint8 {
     Hello = 1,
@@ -1242,7 +1247,12 @@ inline std::optional<VideoFrame> videoFrame(const Record &record)
     qint32 monitorIndex = 0;
     quint32 count = 0;
     stream >> video.size >> video.data >> video.aux >> video.isKeyFrame >> video.auxIsKeyFrame >> monitorIndex >> count;
-    if (stream.status() != QDataStream::Ok || count > 16) {
+    // The worker runs as another user; its sizes and indices index broker
+    // arrays and size encoder surfaces (AUD-C-10). Reject anything outside
+    // the limits a capture can legitimately produce.
+    if (stream.status() != QDataStream::Ok || count > 16 || video.size.width() < 1 || video.size.height() < 1
+        || video.size.width() > MaxFrameDimension || video.size.height() > MaxFrameDimension || monitorIndex < 0
+        || (count == 0 ? monitorIndex != 0 : monitorIndex >= qint32(count))) {
         return std::nullopt;
     }
     video.monitorIndex = monitorIndex;
@@ -1328,7 +1338,14 @@ public:
         quint8 type = 0;
         QByteArray payload;
         stream >> version >> type >> payload;
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || version != ProtocolVersion || type < quint8(Kind::Hello) || type > quint8(Kind::PhysicalLeaseReleased)) {
+        if (stream.status() == QDataStream::Ok && version != ProtocolVersion) {
+            // A different paired build, not a corrupt stream. Callers back
+            // off instead of relaunching the same mismatched worker at once.
+            m_mismatchedVersion = version;
+            ++m_invalid;
+            return std::nullopt;
+        }
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || type < quint8(Kind::Hello) || type > quint8(Kind::PhysicalLeaseReleased)) {
             ++m_invalid;
             return std::nullopt;
         }
@@ -1337,8 +1354,13 @@ public:
 
     bool overflowed() const { return m_overflowed; }
     int takeInvalidCount() { return std::exchange(m_invalid, 0); }
+    /** Peer wire version of the last well-formed record with a different version, if any. */
+    std::optional<quint16> mismatchedVersion() const { return m_mismatchedVersion; }
+    /** Bytes buffered but not yet returned as a record. */
+    qsizetype pending() const { return m_buffer.size(); }
 
 private:
+    std::optional<quint16> m_mismatchedVersion;
     QByteArray m_buffer;
     bool m_overflowed = false;
     int m_invalid = 0;

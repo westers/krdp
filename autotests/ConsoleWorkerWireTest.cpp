@@ -480,8 +480,8 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
     sent.aux = "aux";
     sent.isKeyFrame = true;
     sent.auxIsKeyFrame = true;
-    sent.monitorIndex = 1;
-    sent.monitors = {{QRect(0, 0, 1920, 1080), true}};
+    sent.monitorIndex = 1; // Must index `monitors` (AUD-C-10 bounds check).
+    sent.monitors = {{QRect(0, 0, 1920, 1080), true}, {QRect(1920, 0, 1920, 1080), false}};
     Deframer deframer;
     deframer.feed(frame(sent));
     const auto record = deframer.next();

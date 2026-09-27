@@ -6,6 +6,8 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <unistd.h>
+
 #include "ConsoleWorkerEndpoint.h"
 
 using namespace KRdp;
@@ -307,7 +309,8 @@ void ConsoleWorkerEndpointTest::rejectsWrongWorkerToken()
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
     ConsoleWorkerEndpoint endpoint;
-    const ConsoleHandoff::Target target{ConsoleSeat::Adapter::Greeter, QStringLiteral("1"), 107};
+    // The peer uid must match (AUD-C-9) so this exercises the token check itself.
+    const ConsoleHandoff::Target target{ConsoleSeat::Adapter::Greeter, QStringLiteral("1"), quint32(getuid())};
     QVERIFY(endpoint.listen(directory.filePath(QStringLiteral("worker.sock")), target, QByteArray(24, 't')));
     int errors = 0;
     connect(&endpoint, &ConsoleWorkerEndpoint::protocolError, this, [&errors](const QString &) { ++errors; });
@@ -315,7 +318,7 @@ void ConsoleWorkerEndpointTest::rejectsWrongWorkerToken()
     QLocalSocket worker;
     worker.connectToServer(endpoint.socketName());
     QVERIFY(worker.waitForConnected(1000));
-    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("1"), 107, QByteArray(24, 'x')}));
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("1"), quint32(getuid()), QByteArray(24, 'x')}));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(errors, 1);
     QVERIFY(!endpoint.ready());

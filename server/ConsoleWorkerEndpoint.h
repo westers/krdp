@@ -8,12 +8,14 @@
 
 #include <QObject>
 #include <QPointer>
+#include <QTimer>
 
 #include "ConsoleHandoff.h"
 #include "ConsoleWorkerWire.h"
 
 class QLocalServer;
 class QLocalSocket;
+class ConsoleWorkerEndpointHardeningTest;
 
 namespace KRdp
 {
@@ -32,9 +34,17 @@ public:
     explicit ConsoleWorkerEndpoint(QObject *parent = nullptr);
     ~ConsoleWorkerEndpoint() override;
 
+    /// Pre-authentication limits (AUD-C-9).
+    static constexpr int AuthenticationTimeoutMs = 5000;
+    static constexpr qsizetype MaxPreAuthenticationBytes = 64 * 1024;
+
     bool listen(const QString &socketName, const ConsoleHandoff::Target &target, const QByteArray &token, QString *error = nullptr);
     void close();
     bool ready() const;
+    bool authenticated() const;
+    /** Stop was requested but could not be delivered yet (worker not authenticated). */
+    bool stopPending() const;
+    void setAuthenticationTimeout(int milliseconds);
     QString socketName() const;
     ConsoleHandoff::Target target() const;
 
@@ -80,13 +90,18 @@ Q_SIGNALS:
     void removeVirtualFinished(const KRdp::ConsoleWorkerWire::RemoveVirtualResult &result);
     void microphoneFinished(const KRdp::ConsoleWorkerWire::MicrophoneResult &result);
     void protocolError(const QString &message);
+    /** The worker speaks another paired wire version; always followed by protocolError. */
+    void versionMismatch(quint16 workerVersion);
 
 private:
+    friend class ::ConsoleWorkerEndpointHardeningTest;
     void acceptConnection();
     void readWorker();
+    bool processRecords();
     void workerDisconnected();
     void send(ConsoleWorkerWire::Kind kind);
     void fail(const QString &message);
+    void dropWorker();
 
     std::unique_ptr<QLocalServer> m_server;
     QPointer<QLocalSocket> m_worker;
@@ -95,5 +110,7 @@ private:
     QByteArray m_token;
     bool m_authenticated = false;
     bool m_ready = false;
+    bool m_stopRequested = false;
+    QTimer m_authenticationDeadline;
 };
 }

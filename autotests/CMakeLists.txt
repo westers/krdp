@@ -427,3 +427,10 @@ target_include_directories(GfxSurfaceCommandTest PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_include_directories(GfxSurfaceCommandTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
 target_link_libraries(GfxSurfaceCommandTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME GfxSurfaceCommandTest COMMAND GfxSurfaceCommandTest)
+
+# --- AUD-WS-C ---
+# Console broker/worker audit fixes (AUD-C-1 .. AUD-C-10).
+add_executable(ConsoleWorkerEndpointHardeningTest ConsoleWorkerEndpointHardeningTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
+target_include_directories(ConsoleWorkerEndpointHardeningTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleWorkerEndpointHardeningTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
+add_test(NAME ConsoleWorkerEndpointHardeningTest COMMAND ConsoleWorkerEndpointHardeningTest)
