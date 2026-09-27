@@ -242,7 +242,10 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             if (!m_topologyAvailable || !ConsoleFrameLayout::confirmed(frame, m_outputs, m_topologyCatalog.snapshot())) return;
         } else if (frame.monitors.size() > 1) return;
         for (const auto &client : m_clients) {
-            if (!client->connection) continue;
+            // AUD-C-1: the session thread can mark a stream enabled before the
+            // main-thread PAM uid check has admitted it. Only admitted clients
+            // may see the console, not even its monitor layout.
+            if (!client->connection || !m_control.admitted(client->id)) continue;
             const QVector<VideoMonitor> desired = frame.monitors.size() > 1 ? frame.monitors : QVector<VideoMonitor>{};
             if (client->wireLayout != desired) {
                 if (!frame.isKeyFrame || (desired.isEmpty() && !m_topologyAvailable && !client->wireLayout.isEmpty())) continue;
@@ -254,7 +257,8 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::audioReceived, this, [this](const ConsoleWorkerWire::Audio &audio) {
         for (const auto &client : m_clients) {
-            if (client->connection) client->connection->submitExternalAudio(audio.pcm);
+            // Desktop audio is console content too (AUD-C-1).
+            if (client->connection && m_control.admitted(client->id)) client->connection->submitExternalAudio(audio.pcm);
         }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [this](const ConsoleWorkerWire::Outputs &outputs) {
@@ -761,6 +765,8 @@ void ConsoleHostController::addClient(RdpConnection *connection)
             m_control.admit(id);
             syncControlState();
             sendLayouts();
+            // Frames were withheld until now; start this client on a key frame.
+            m_endpoint.requestKeyFrame();
             for (const auto &client : m_clients) {
                 if (client->id == id && !client->pendingMedia.isEmpty()) {
                     const auto pending = std::exchange(client->pendingMedia, {});
@@ -1220,7 +1226,9 @@ void ConsoleHostController::finishTopologyQueries(const QString &error)
     const auto pending = std::exchange(m_pendingTopology, {});
     for (const auto &client : m_clients) {
         const QString request = pending.value(client->id);
-        if (request.isEmpty()) continue;
+        // Queries are accepted only from admitted clients; never answer one
+        // that is no longer admitted with the console's monitor topology.
+        if (request.isEmpty() || !client->connection || !m_control.admitted(client->id)) continue;
         client->connection->sendControlRecord(error.isEmpty()
             ? consoleTopology(request)
             : RemoteTopologyProtocol::error(request, error));

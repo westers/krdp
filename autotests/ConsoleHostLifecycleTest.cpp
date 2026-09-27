@@ -423,6 +423,53 @@ private Q_SLOTS:
         QTRY_COMPARE(refused, (QList<RdpConnection *>{&visitor}));
     }
 
+    void unadmittedClientReceivesNoConsoleContent()
+    {
+        Server server;
+        ConsoleHostController host(&server, {}, {});
+        host.setUidResolver([](RdpConnection *) -> std::optional<quint32> { return 1000; });
+        host.setSeatSessions({user(QStringLiteral("3"), 1000, false)});
+        RdpConnection admitted(&server, -1);
+        RdpConnection pending(&server, -1);
+        host.addClient(&admitted);
+        host.addClient(&pending);
+        auto *admittedClient = host.m_clients.front().get();
+        auto *pendingClient = host.m_clients.back().get();
+        const auto pendingId = pendingClient->id;
+        Q_EMIT admitted.stateChanged(RdpConnection::State::Streaming);
+        QVERIFY(host.m_control.admitted(admittedClient->id));
+        // The race: the session thread has already enabled the pending
+        // client's stream, but its main-thread uid check has not run yet.
+        host.m_inputEnabled = true;
+        admittedClient->session->setWorkerActive(true);
+        pendingClient->session->setWorkerActive(true);
+        QVERIFY(pendingClient->session->streamActive());
+        QVERIFY(!host.m_control.admitted(pendingId));
+        int admittedFrames = 0;
+        int pendingFrames = 0;
+        connect(admittedClient->session.get(), &AbstractSession::frameReceived, this, [&admittedFrames](const VideoFrame &) { ++admittedFrames; });
+        connect(pendingClient->session.get(), &AbstractSession::frameReceived, this, [&pendingFrames](const VideoFrame &) { ++pendingFrames; });
+
+        VideoFrame frame;
+        frame.size = QSize(1280, 720);
+        frame.isKeyFrame = true;
+        frame.monitors = {{QRect(0, 0, 1280, 720), true}};
+        Q_EMIT host.m_endpoint.frameReceived(frame);
+        Q_EMIT host.m_endpoint.frameReceived(frame);
+        QCOMPARE(admittedFrames, 2);
+        QCOMPARE(pendingFrames, 0);
+        // Desktop audio is gated the same way (no observable effect here
+        // beyond not crashing; the frame counters above are the assertion).
+        Q_EMIT host.m_endpoint.audioReceived(ConsoleWorkerWire::Audio{QByteArray(16, '\0')});
+
+        // Once its uid check admits it, it receives frames.
+        Q_EMIT pending.stateChanged(RdpConnection::State::Streaming);
+        QVERIFY(host.m_control.admitted(pendingId));
+        Q_EMIT host.m_endpoint.frameReceived(frame);
+        QCOMPARE(pendingFrames, 1);
+        QCOMPARE(admittedFrames, 3);
+    }
+
     void disconnectWhileTopologyChangeIsPending()
     {
         Server server;
