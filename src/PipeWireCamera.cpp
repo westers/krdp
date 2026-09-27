@@ -54,11 +54,14 @@ bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, u
     QMutexLocker lock(&m_mutex);
     if (m_stream) return true;
     if (!width || !height) return false;
-    pw_init(nullptr, nullptr);
+    m_runtime.acquire();
     m_width = width;
     m_height = height;
     m_loop = pw_thread_loop_new("krdp-remote-camera", nullptr);
-    if (!m_loop) return false;
+    if (!m_loop) {
+        m_runtime.release();
+        return false;
+    }
     // Like PipeWireMicrophone, PipeWire retains the events pointer beyond this call.
     static const pw_stream_events events = [] {
         pw_stream_events result{};
@@ -83,6 +86,7 @@ bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, u
         m_stream = nullptr;
         pw_thread_loop_destroy(m_loop);
         m_loop = nullptr;
+        m_runtime.release();
         return false;
     }
     if (!loopbackDevice.isEmpty()) {
@@ -140,6 +144,7 @@ void PipeWireCamera::stop()
     if (loop) pw_thread_loop_stop(loop);
     if (stream) { pw_stream_disconnect(stream); pw_stream_destroy(stream); }
     if (loop) pw_thread_loop_destroy(loop);
+    m_runtime.release();
     if (loopbackFd >= 0) close(loopbackFd);
 }
 

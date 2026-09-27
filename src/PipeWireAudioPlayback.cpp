@@ -68,9 +68,10 @@ bool PipeWireAudioPlayback::start(const QString &targetSink)
     if (m_stream) {
         return true;
     }
-    pw_init(nullptr, nullptr);
+    m_runtime.acquire();
     m_loop = pw_thread_loop_new("krdp-remote-audio", nullptr);
     if (!m_loop) {
+        m_runtime.release();
         return false;
     }
     // PipeWire keeps the supplied event table for the stream lifetime.
@@ -109,6 +110,7 @@ bool PipeWireAudioPlayback::start(const QString &targetSink)
         m_stream = nullptr;
         pw_thread_loop_destroy(m_loop);
         m_loop = nullptr;
+        m_runtime.release();
         return false;
     }
     return true;
@@ -208,6 +210,7 @@ void PipeWireAudioPlayback::moveExistingPlaybackStreams()
     if (!m_movedStreams.isEmpty()) {
         qInfo() << "Moved" << m_movedStreams.size() << "existing PipeWire playback stream(s) to the remote-only sink";
     }
+    m_runtime.release();
 }
 
 void PipeWireAudioPlayback::restoreMovedPlaybackStreams()

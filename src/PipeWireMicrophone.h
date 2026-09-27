@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "PipeWireRuntime.h"
+
 #include <QByteArray>
 #include <QMutex>
 #include <QString>
@@ -30,5 +32,6 @@ private:
     std::atomic<State> m_state{State::Stopped};
     pw_thread_loop *m_loop = nullptr;
     pw_stream *m_stream = nullptr;
+    PipeWireRuntime::Reference m_runtime;
 };
 }

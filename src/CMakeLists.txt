@@ -38,6 +38,7 @@ target_sources(KRdp PRIVATE
     PipeWireCamera.h
     PipeWireAudioPlayback.cpp
     PipeWireAudioPlayback.h
+    PipeWireRuntime.h
     PortalSession.cpp
     PortalSession.h
     VideoStream.cpp
