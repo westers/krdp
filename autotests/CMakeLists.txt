@@ -427,3 +427,11 @@ target_include_directories(GfxSurfaceCommandTest PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_include_directories(GfxSurfaceCommandTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
 target_link_libraries(GfxSurfaceCommandTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME GfxSurfaceCommandTest COMMAND GfxSurfaceCommandTest)
+
+# --- AUD-WS-P ---
+# Physical direct session fixes (AUDIT-FIX-PLAN.md WS-P). Pure headers except
+# where noted.
+add_executable(ScreencastTargetTest ScreencastTargetTest.cpp)
+target_include_directories(ScreencastTargetTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ScreencastTargetTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
+add_test(NAME ScreencastTargetTest COMMAND ScreencastTargetTest)

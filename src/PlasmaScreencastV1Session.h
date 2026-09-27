@@ -63,7 +63,7 @@ private:
     void injectNonMotionEvent(const std::shared_ptr<QEvent> &event);
     void scheduleStreamRecovery(int attempt, int delayMs);
     void attemptStreamRecovery(int attempt);
-    bool setupScreencastRequest(bool allowWorkspaceFallback = true);
+    bool setupScreencastRequest(bool recovery = false, bool allowWorkspaceFallback = true);
     void onScreencastCreated(uint nodeId);
     void restartEncodedStream(uint nodeId);
     void attachEncodedStream(uint nodeId, bool streamWasActive);

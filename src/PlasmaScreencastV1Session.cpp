@@ -31,6 +31,7 @@
 #include "qwayland-wayland.h"
 #include "screencasting_p.h"
 
+#include "ScreencastTarget.h"
 #include "VideoStream.h"
 #include "WorkspaceFrameGeometry.h"
 #include "krdp_logging.h"
@@ -109,59 +110,20 @@ QRegion fullFrameDamage(const QSize &size)
     return QRegion(QRect(QPoint(0, 0), size));
 }
 
-QRect logicalRectForStream(int streamIndex)
+// A snapshot of Qt's screen list for ScreencastTarget::resolve(), plus the
+// QScreen pointers at the same indices.
+QList<ScreencastTarget::Screen> screenSnapshot(QList<QScreen *> *pointers = nullptr)
 {
+    QList<ScreencastTarget::Screen> result;
     const auto screens = qGuiApp->screens();
-    if (screens.isEmpty()) {
-        return {};
+    const auto *primaryScreen = qGuiApp->primaryScreen();
+    for (auto *screen : screens) {
+        result.push_back(ScreencastTarget::Screen{.name = screen->name(), .geometry = screen->geometry(), .primary = screen == primaryScreen});
     }
-
-    QRect logicalRect;
-    if (streamIndex < 0 || streamIndex >= screens.size()) {
-        QRegion logicalRegion;
-        for (auto *screen : screens) {
-            logicalRegion += screen->geometry();
-        }
-        logicalRect = logicalRegion.boundingRect();
-    } else {
-        logicalRect = screens.at(streamIndex)->geometry();
+    if (pointers) {
+        *pointers = screens;
     }
-    return logicalRect;
-}
-
-QVector<VideoMonitor> monitorLayoutForStream(int streamIndex, const QRect &logicalRect)
-{
-    QVector<VideoMonitor> monitors;
-    const auto screens = qGuiApp->screens();
-    if (screens.isEmpty()) {
-        return monitors;
-    }
-
-    auto primaryScreen = qGuiApp->primaryScreen();
-    if (streamIndex >= 0 && streamIndex < screens.size()) {
-        const auto geometry = screens.at(streamIndex)->geometry().translated(-logicalRect.topLeft());
-        monitors.push_back(VideoMonitor{
-            .geometry = geometry,
-            .primary = (screens.at(streamIndex) == primaryScreen),
-        });
-    } else {
-        monitors.reserve(screens.size());
-        for (auto *screen : screens) {
-            monitors.push_back(VideoMonitor{
-                .geometry = screen->geometry().translated(-logicalRect.topLeft()),
-                .primary = (screen == primaryScreen),
-            });
-        }
-    }
-
-    if (!std::any_of(monitors.cbegin(), monitors.cend(), [](const auto &monitor) {
-            return monitor.primary;
-        })
-        && !monitors.isEmpty()) {
-        monitors.first().primary = true;
-    }
-
-    return monitors;
+    return result;
 }
 
 template<typename Stream>
@@ -315,7 +277,10 @@ public:
     FakeInput *remoteInterface = nullptr;
     StreamTarget streamTarget = StreamTarget::None;
     QPointer<QScreen> outputScreen = nullptr;
+    // The screen an Output target captures, and the stream index it was
+    // resolved for; a recovery re-finds the screen by this name (AUD-P1).
     QString targetScreenName;
+    int targetStreamIndex = -1;
     QRect logicalRect;
     QVector<VideoMonitor> monitorLayout;
     std::optional<double> workspaceFrameScaleHint;
@@ -520,7 +485,7 @@ void PlasmaScreencastV1Session::attemptStreamRecovery(int attempt)
     bool recovered = false;
     if (screensAvailable) {
         qCInfo(KRDP) << "Attempting to recover display stream (attempt" << (attempt + 1) << "of" << MaxRecoveryAttempts << ", workspace fallback:" << allowWorkspaceFallback << ")";
-        recovered = setupScreencastRequest(allowWorkspaceFallback);
+        recovered = setupScreencastRequest(true, allowWorkspaceFallback);
     } else {
         qCInfo(KRDP) << "No screens available yet (attempt" << (attempt + 1) << "of" << MaxRecoveryAttempts << ")";
     }
@@ -536,41 +501,14 @@ void PlasmaScreencastV1Session::attemptStreamRecovery(int attempt)
     qCWarning(KRDP) << "Display stream recovery failed after" << MaxRecoveryAttempts << "attempts (session kept alive)";
 }
 
-bool PlasmaScreencastV1Session::setupScreencastRequest(bool allowWorkspaceFallback)
+bool PlasmaScreencastV1Session::setupScreencastRequest(bool recovery, bool allowWorkspaceFallback)
 {
     Private::StreamTarget target = Private::StreamTarget::Workspace;
     QPointer<QScreen> outputScreen = nullptr;
-    if (virtualMonitor()) {
-        target = Private::StreamTarget::Virtual;
-    } else {
-        const auto screens = qGuiApp->screens();
-        const auto streamIndex = activeStream();
-        // On recovery, resolve by saved screen name to survive screen list reordering.
-        if (!d->targetScreenName.isEmpty()) {
-            for (auto *screen : screens) {
-                if (screen->name() == d->targetScreenName) {
-                    target = Private::StreamTarget::Output;
-                    outputScreen = screen;
-                    break;
-                }
-            }
-            if (!outputScreen) {
-                if (!allowWorkspaceFallback) {
-                    qCInfo(KRDP) << "Target screen" << d->targetScreenName << "not available yet, waiting for it to return";
-                    return false;
-                }
-                qCWarning(KRDP) << "Target screen" << d->targetScreenName << "no longer available, falling back to workspace";
-            }
-        } else if (streamIndex >= 0 && streamIndex < screens.size()) {
-            target = Private::StreamTarget::Output;
-            outputScreen = screens.at(streamIndex);
-            d->targetScreenName = outputScreen->name();
-        }
-    }
-
     QRect targetLogicalRect;
     QVector<VideoMonitor> targetMonitorLayout;
-    if (target == Private::StreamTarget::Virtual) {
+    if (virtualMonitor()) {
+        target = Private::StreamTarget::Virtual;
         auto vm = virtualMonitor();
         targetLogicalRect = QRect(QPoint(0, 0), vm->size);
         targetMonitorLayout = {
@@ -579,12 +517,32 @@ bool PlasmaScreencastV1Session::setupScreencastRequest(bool allowWorkspaceFallba
                 .primary = true,
             },
         };
-    } else if (target == Private::StreamTarget::Output) {
-        targetLogicalRect = logicalRectForStream(activeStream());
-        targetMonitorLayout = monitorLayoutForStream(activeStream(), targetLogicalRect);
     } else {
-        targetLogicalRect = logicalRectForStream(-1);
-        targetMonitorLayout = monitorLayoutForStream(-1, targetLogicalRect);
+        // The captured screen and the rect input is mapped through come from
+        // the same resolution (AUD-P1). A recovery holds on to the remembered
+        // screen name; an explicit start/refresh follows the stream index.
+        QList<QScreen *> screens;
+        const auto snapshot = screenSnapshot(&screens);
+        const auto resolution =
+            ScreencastTarget::resolve(snapshot, activeStream(), d->targetScreenName, d->targetStreamIndex, recovery, allowWorkspaceFallback);
+        if (resolution.kind == ScreencastTarget::Kind::Wait) {
+            qCInfo(KRDP) << "Target screen" << resolution.name << "not available yet, waiting for it to return";
+            return false;
+        }
+        if (resolution.kind == ScreencastTarget::Kind::Output) {
+            target = Private::StreamTarget::Output;
+            outputScreen = screens.at(resolution.screenIndex);
+            d->targetScreenName = resolution.name;
+            d->targetStreamIndex = activeStream();
+        } else {
+            if (recovery && !d->targetScreenName.isEmpty()) {
+                qCWarning(KRDP) << "Target screen" << d->targetScreenName << "no longer available, falling back to workspace";
+            }
+            d->targetScreenName.clear();
+            d->targetStreamIndex = -1;
+        }
+        targetLogicalRect = resolution.logicalRect;
+        targetMonitorLayout = resolution.monitors;
     }
 
     const bool targetChanged = (d->streamTarget != target);
@@ -633,8 +591,11 @@ bool PlasmaScreencastV1Session::setupScreencastRequest(bool allowWorkspaceFallba
             target = Private::StreamTarget::Workspace;
             d->streamTarget = target;
             d->outputScreen = nullptr;
-            d->logicalRect = logicalRectForStream(-1);
-            d->monitorLayout = monitorLayoutForStream(-1, d->logicalRect);
+            const auto workspace = ScreencastTarget::resolve(screenSnapshot(), -1, {}, -1, false, true);
+            d->targetScreenName.clear();
+            d->targetStreamIndex = -1;
+            d->logicalRect = workspace.logicalRect;
+            d->monitorLayout = workspace.monitors;
             if (!d->logicalRect.isEmpty()) {
                 setLogicalSize(d->logicalRect.size());
             }
@@ -1043,7 +1004,7 @@ void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Pa
             : geometry.size() * screen->devicePixelRatio() == size();
         if (matchingPixels && d->logicalRect != geometry) {
             d->logicalRect = geometry;
-            d->monitorLayout = monitorLayoutForStream(-1, geometry);
+            d->monitorLayout = ScreencastTarget::resolve(screenSnapshot(), -1, {}, -1, false, true).monitors;
             setLogicalSize(geometry.size());
             Q_EMIT outputGeometryChanged(geometry);
         }
