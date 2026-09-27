@@ -109,12 +109,11 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         return connection ? connection->authenticatedPamUid() : std::nullopt;
     };
     m_refuse = [](RdpConnection *connection, quint32 errorInfo) {
-        // Sent as a Set Error Info PDU when the peer closes, so mstsc, stock
-        // FreeRDP and Remmina show a reason; no KRDPCTL channel is needed.
-        if (auto *context = connection->freerdpContext(); context && context->rdp) {
-            freerdp_set_error_info(context->rdp, errorInfo);
-        }
-        connection->close();
+        // A Set Error Info PDU, so mstsc, stock FreeRDP and Remmina show a
+        // reason; no KRDPCTL channel is needed. AUD-FIX F4: it must go out
+        // before the Deactivate All that close() sends, or the client reports
+        // 0xC LOGOFF_BY_USER instead (as the virtual broker already does).
+        connection->closeWithErrorInfo(errorInfo);
     };
     m_drainDeadline.setSingleShot(true);
     m_drainDeadline.setInterval(DrainDeadlineMs);

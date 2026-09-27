@@ -645,3 +645,18 @@ if(BUILD_PLASMA_SESSION)
     add_test(NAME PlasmaBackendProbeTest COMMAND PlasmaBackendProbeTest)
     set_tests_properties(PlasmaBackendProbeTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
+# F4: the console broker's refusal reaches a real libfreerdp client as 0x9.
+if(TARGET krdpctl-probe)
+    add_executable(ConsoleRefusalLoopbackTest ConsoleRefusalLoopbackTest.cpp
+        ${CMAKE_SOURCE_DIR}/server/ConsoleHostController.cpp
+        ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
+        ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp
+        ${CMAKE_SOURCE_DIR}/server/ConsoleSeat.cpp)
+    target_include_directories(ConsoleRefusalLoopbackTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+    target_include_directories(ConsoleRefusalLoopbackTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+    target_link_libraries(ConsoleRefusalLoopbackTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
+    target_compile_definitions(ConsoleRefusalLoopbackTest PRIVATE KRDPCTL_PROBE="$<TARGET_FILE:krdpctl-probe>")
+    add_dependencies(ConsoleRefusalLoopbackTest krdpctl-probe)
+    add_test(NAME ConsoleRefusalLoopbackTest COMMAND ConsoleRefusalLoopbackTest)
+    set_tests_properties(ConsoleRefusalLoopbackTest PROPERTIES TIMEOUT 120)
+endif()
