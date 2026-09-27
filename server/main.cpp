@@ -22,6 +22,7 @@
 
 #include <qt6keychain/keychain.h>
 
+#include "ListenAddress.h"
 #include "PhysicalOutputGuard.h"
 #include "RdpConnection.h"
 #include "Server.h"
@@ -174,7 +175,7 @@ int main(int argc, char **argv)
     parser.addOptions({
         {{u"u"_s, u"username"_s}, u"The username to use for login"_s, u"username"_s},
         {{u"p"_s, u"password"_s}, u"The password to use for login. Requires username to be passed as well."_s, u"password"_s},
-        {u"address"_s, u"The address to listen on for connections. Defaults to 0.0.0.0"_s, u"address"_s},
+        {u"address"_s, u"The address to listen on for connections. Overrides ListenAddress; defaults to all interfaces."_s, u"address"_s},
         {u"port"_s, u"The port to use for connections. Defaults to 3389."_s, u"port"_s, u"3389"_s},
         {u"certificate"_s, u"The TLS certificate file to use."_s, u"certificate"_s, u"server.crt"_s},
         {u"certificate-key"_s, u"The TLS certificate key to use."_s, u"certificate-key"_s, u"server.key"_s},
@@ -221,9 +222,11 @@ int main(int argc, char **argv)
         }
     };
 
-    QHostAddress address = QHostAddress::Any;
-    if (parser.isSet(u"address"_s)) {
-        address = QHostAddress(parser.value(u"address"_s));
+    const QString addressSetting = parser.isSet(u"address"_s) ? parser.value(u"address"_s) : config->listenAddress();
+    const auto address = KRdp::parseListenAddress(addressSetting);
+    if (!address) {
+        qCritical() << "Invalid listen address" << addressSetting << "(ListenAddress / --address): expected an IPv4 or IPv6 address, or empty for all interfaces";
+        return 1;
     }
     auto port = parserValueWithDefault(u"port", config->listenPort());
     auto certificate = std::filesystem::path(parserValueWithDefault(u"certificate", config->certificate()).toStdString());
@@ -231,7 +234,7 @@ int main(int argc, char **argv)
 
     KRdp::Server server(nullptr);
 
-    server.setAddress(address);
+    server.setAddress(*address);
     server.setPort(port);
 
     server.setTlsCertificate(certificate);

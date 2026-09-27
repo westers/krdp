@@ -24,6 +24,9 @@
 #include <QStandardPaths>
 #include <QTcpSocket>
 #include <QThread>
+#include <QTimer>
+
+#include <sys/socket.h>
 
 #include <freerdp/channels/wtsvc.h>
 #include <freerdp/freerdp.h>
@@ -48,6 +51,7 @@
 #include "PipeWireMicrophone.h"
 #include "PipeWireCamera.h"
 #include "PipeWireAudioPlayback.h"
+#include "PreAuthChannelGate.h"
 #include "Server.h"
 #include "VideoStream.h"
 
@@ -583,6 +587,12 @@ public:
     State state = State::Initial;
     // Zero means no OS identity; uid+1 also represents uid0 without ambiguity.
     std::atomic<quint64> authenticatedPamUid = 0;
+    // AUD-S1: set once, on the session thread, when PostConnect authentication
+    // succeeded. Until then channelGate drops every channel PDU, no input
+    // callback is installed, KRDPCTL is not opened and clientDisplayInfoReceived
+    // is not emitted.
+    std::atomic<bool> authenticated = false;
+    PreAuthChannelGate channelGate;
 
     qintptr socketHandle;
 
@@ -667,6 +677,13 @@ RdpConnection::~RdpConnection()
     }
 
     if (d->peer) {
+        // The transport owns the socket once the peer is initialized
+        // (freerdp_peer::sockfd is -1 from then on) and nothing else closes
+        // it: without this every closed connection kept its descriptor, and a
+        // client dropped by the handshake timeout never saw the close.
+        if (d->peer->context && d->peer->Disconnect) {
+            d->peer->Disconnect(d->peer);
+        }
         freerdp_peer_free(d->peer);
     }
 }
@@ -680,6 +697,11 @@ std::optional<quint32> RdpConnection::authenticatedPamUid() const
 {
     const auto encoded = d->authenticatedPamUid.load();
     return encoded ? std::optional<quint32>(quint32(encoded - 1)) : std::nullopt;
+}
+
+bool RdpConnection::isAuthenticated() const
+{
+    return d->authenticated.load();
 }
 
 void RdpConnection::setState(KRdp::RdpConnection::State newState)
@@ -990,7 +1012,11 @@ void RdpConnection::initialize()
 
     d->peer->context->update->SuppressOutput = suppressOutput;
 
-    d->inputHandler->initialize(d->peer->context->input);
+    // AUD-S1: every static (and so every dynamic) channel PDU goes through the
+    // gate; the channel manager installed its hook in newPeerContext().
+    d->channelGate.install(d->peer);
+    // The input callbacks are installed by onAuthenticated(): FreeRDP accepts
+    // input PDUs during connection finalization, before PostConnect.
     context->inputHandler = d->inputHandler.get();
 
     context->networkDetection = d->networkDetection.get();
@@ -1002,6 +1028,22 @@ void RdpConnection::initialize()
     }
 
     qCDebug(KRDP) << "Session setup completed, start processing...";
+
+    // AUD-S2: a client that has not authenticated within the handshake
+    // timeout is dropped. A timer rather than a check in run(): a stalled TLS
+    // handshake blocks the session thread inside freerdp_tls_accept() until
+    // the context's abort event is set or the socket fails.
+    QTimer::singleShot(d->server->handshakeTimeout(), this, [this]() {
+        if (d->authenticated.load() || d->state == State::Closed || !d->peer || !d->peer->context) {
+            return;
+        }
+        qCWarning(KRDP) << "Client did not authenticate within" << d->server->handshakeTimeout().count() << "ms; closing the connection";
+        // The abort event ends a wait inside FreeRDP; shutting the socket
+        // down ends a blocking read (the transport owns the descriptor, but
+        // it is still the one Server accepted).
+        freerdp_abort_connect_context(d->peer->context);
+        ::shutdown(int(d->socketHandle), SHUT_RDWR);
+    });
 
     // Perform actual communication on a separate thread.
     d->thread = std::jthread(std::bind(&RdpConnection::run, this, std::placeholders::_1));
@@ -1032,6 +1074,17 @@ void RdpConnection::run(std::stop_token stopToken)
         if (d->peer->CheckFileDescriptor(d->peer) != TRUE) {
             qCDebug(KRDP) << "Unable to check file descriptor";
             break;
+        }
+
+        // AUD-S1: nothing below serves a client that has not authenticated.
+        // Its channel PDUs never got past the gate, so there is nothing to
+        // read; only the channel manager's own queue is still serviced.
+        if (!d->authenticated.load()) {
+            if (WaitForSingleObject(channelEvent, 0) == WAIT_OBJECT_0 && WTSVirtualChannelManagerCheckFileDescriptor(context->virtualChannelManager) != TRUE) {
+                qCDebug(KRDP) << "Unable to check Virtual Channel Manager file descriptor, closing connection";
+                break;
+            }
+            continue;
         }
 
         // Initialize any dynamic channels once the dynamic channel channel is setup.
@@ -1087,10 +1140,9 @@ void RdpConnection::run(std::stop_token stopToken)
             }
         }
 
-        // KRDPCTL (OPT-044): opened as soon as the join shows, not once
-        // connected (see openControlChannel()); the client's records arrive
-        // through CheckFileDescriptor() above, queued on the channel.
-        openControlChannel();
+        // KRDPCTL (OPT-044): opened by onAuthenticated(); the client's
+        // records arrive through CheckFileDescriptor() above, queued on the
+        // channel.
         if (!readControlChannel()) {
             break;
         }
@@ -1145,15 +1197,32 @@ bool RdpConnection::onCapabilities()
         std::lock_guard lock(d->clientDisplayMutex);
         d->clientDisplay = info;
     }
-    // The MCS channel join is complete by the time FreeRDP asks for the
-    // capabilities, so hasControlChannel() is exact for the slot below.
-    openControlChannel();
     qCInfo(KRDP) << "Client display: desktop" << info.desktopSize << "monitors" << info.monitors.size()
                  << "monitorLayoutPdu" << freerdp_settings_get_bool(settings, FreeRDP_SupportMonitorLayoutPdu)
-                 << "KRDPCTL" << d->controlChannelOpen.load();
-    Q_EMIT clientDisplayInfoReceived();
+                 << "KRDPCTL joined" << WTSVirtualChannelManagerIsChannelJoined(reinterpret_cast<PeerContext *>(d->peer->context)->virtualChannelManager, ControlChannelName);
+    // AUD-S1: the first capabilities exchange precedes PostConnect, so the
+    // display info is announced by onAuthenticated(). A reactivation (already
+    // authenticated) announces it again, as before.
+    if (d->authenticated.load()) {
+        Q_EMIT clientDisplayInfoReceived();
+    }
 
     return true;
+}
+
+void RdpConnection::onAuthenticated()
+{
+    d->authenticated.store(true);
+    d->channelGate.authorize();
+    d->inputHandler->initialize(d->peer->context->input);
+    // The MCS channel join was complete long before PostConnect, so
+    // hasControlChannel() is exact for the clientDisplayInfoReceived() slot.
+    // No client record is lost by opening only now: FreeRDP runs PostConnect
+    // right after the client's Font List PDU, in the same receive call, and
+    // anything the client sent before that was pre-authentication data.
+    openControlChannel();
+    qCInfo(KRDP) << "Client authenticated; KRDPCTL" << d->controlChannelOpen.load();
+    Q_EMIT clientDisplayInfoReceived();
 }
 
 bool RdpConnection::onActivate()
@@ -1190,18 +1259,9 @@ bool RdpConnection::onPostConnect()
         }
     }
 
-    if (!authenticated) {
-        const auto users = d->server->users();
-        for (auto user : users) {
-            if (user.password.isEmpty()) {
-                return false;
-            }
-            if (user.name == username && user.password == password) {
-                qCDebug(KRDP) << "User" << username << "authenticated successfully";
-                authenticated = true;
-                break;
-            }
-        }
+    if (!authenticated && d->server->matchesConfiguredUser(username, password)) {
+        qCDebug(KRDP) << "User" << username << "authenticated successfully";
+        authenticated = true;
     }
 
     // Static channels must be initialized from PostConnect. Delaying RDPSND
@@ -1215,6 +1275,7 @@ bool RdpConnection::onPostConnect()
     if (pamUid) {
         d->authenticatedPamUid.store(quint64(*pamUid) + 1);
     }
+    onAuthenticated();
     return true;
 }
 

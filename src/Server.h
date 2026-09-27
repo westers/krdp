@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <filesystem>
 #include <memory>
 
@@ -83,7 +84,19 @@ public:
     QList<User> users() const;
     void setUsers(const QList<User> &users);
     void addUser(const User &user);
+    /**
+     * Whether @p name and @p password match one of users(). An entry with an
+     * empty name or password never matches and is skipped (AUD-S3): it does
+     * not keep the entries after it from logging in.
+     */
+    bool matchesConfiguredUser(const QString &name, const QString &password) const;
 
+    /**
+     * How long a connection may take from accept to successful PostConnect
+     * authentication before it is closed (AUD-S2). Default 15 s.
+     */
+    std::chrono::milliseconds handshakeTimeout() const;
+    void setHandshakeTimeout(std::chrono::milliseconds timeout);
 
     /** Whether to authenticate against PAM for the user running the daemon
      */

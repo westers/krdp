@@ -30,6 +30,8 @@ target_sources(KRdp PRIVATE
     LayoutControl.h
     PeerContext.cpp
     PeerContext_p.h
+    PreAuthChannelGate.cpp
+    PreAuthChannelGate.h
     PipeWireMicrophone.cpp
     PipeWireMicrophone.h
     PipeWireCamera.cpp

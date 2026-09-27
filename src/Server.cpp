@@ -34,6 +34,7 @@ public:
     std::filesystem::path tlsCertificate;
     std::filesystem::path tlsCertificateKey;
     QString cameraLoopbackDevice;
+    std::chrono::milliseconds handshakeTimeout = std::chrono::seconds(15);
 };
 
 Server::Server(QObject *parent)
@@ -68,7 +69,7 @@ bool Server::start()
     // global default instance. So create one here and use that.
     d->settings = freerdp_settings_new(FREERDP_SETTINGS_SERVER_MODE);
 
-    qCDebug(KRDP) << "Listening for connections on" << serverAddress() << serverPort();
+    qCInfo(KRDP) << "Listening for connections on" << serverAddress() << serverPort();
     return true;
 }
 
@@ -123,6 +124,29 @@ void KRdp::Server::setUsers(const QList<User> &users)
 void KRdp::Server::addUser(const User &user)
 {
     d->users.append(user);
+}
+
+bool KRdp::Server::matchesConfiguredUser(const QString &name, const QString &password) const
+{
+    for (const auto &user : std::as_const(d->users)) {
+        if (user.name.isEmpty() || user.password.isEmpty()) {
+            continue;
+        }
+        if (user.name == name && user.password == password) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::chrono::milliseconds Server::handshakeTimeout() const
+{
+    return d->handshakeTimeout;
+}
+
+void Server::setHandshakeTimeout(std::chrono::milliseconds timeout)
+{
+    d->handshakeTimeout = timeout;
 }
 
 bool Server::usePAMAuthentication() const

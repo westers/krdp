@@ -94,6 +94,12 @@ public:
      */
     std::optional<quint32> authenticatedPamUid() const;
 
+    /** Whether PostConnect authentication (PAM or a configured user) has
+     * succeeded on this connection. Thread-safe; never reset. Until then no
+     * channel data, input or control record from the client is delivered.
+     */
+    bool isAuthenticated() const;
+
     /**
      * Close the connection
      *
@@ -119,7 +125,14 @@ public:
 
     /** The display the client asked for in its connect data. Valid once clientDisplayInfoReceived() fired; a copy, safe from any thread. */
     ClientDisplay::Info clientDisplayInfo() const;
-    /** Emitted on the session thread, once per connection, at the end of the capabilities exchange. Connect with Qt::QueuedConnection. */
+    /**
+     * Emitted on the session thread once PostConnect authentication has
+     * succeeded (and again after a reactivation's capabilities exchange).
+     * Nothing the client sent before authentication reached any handler, and
+     * the `KRDPCTL` channel, if the client joined it, is open by now: this is
+     * the earliest point a control record (e.g. `capabilities`) can be sent.
+     * Connect with Qt::QueuedConnection.
+     */
     Q_SIGNAL void clientDisplayInfoReceived();
 
     NetworkDetection *networkDetection() const;
@@ -127,9 +140,9 @@ public:
     /**
      * Whether the client has a usable `KRDPCTL` static virtual channel (slice
      * 2c layout control, OPT-044): it joined it and the server-side open
-     * succeeded. Known once the MCS channel join is done, which precedes the
-     * capabilities exchange: valid from the moment clientDisplayInfoReceived()
-     * fires. Safe from any thread.
+     * succeeded. The channel is only opened once the client authenticated
+     * (AUD-S1): valid from the moment clientDisplayInfoReceived() fires.
+     * Safe from any thread.
      */
     bool hasControlChannel() const;
     /**
@@ -186,6 +199,8 @@ private:
     bool onActivate();
     bool onPostConnect();
     bool onClose();
+    /** Session thread, from onPostConnect(): open the pre-authentication gate. */
+    void onAuthenticated();
     bool onSuppressOutput(uint8_t allow);
     /** Session thread: create/open the standard audio channels once joined. */
     bool initializeAudioChannels();
