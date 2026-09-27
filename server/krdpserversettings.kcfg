@@ -14,6 +14,10 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>The port the server listens on</label>
       <default>3389</default>
     </entry>
+    <entry name="ListenAddress" type="String">
+      <label>The address the server listens on; empty means all interfaces</label>
+      <default></default>
+    </entry>
     <entry name="AutogenerateCertificates" type="Bool">
       <label>The server creates and renews its own self-signed certificate (ignoring Certificate and CertificateKey)</label>
       <default>true</default>

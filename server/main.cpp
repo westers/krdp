@@ -8,9 +8,11 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDebug>
+#include <QDir>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
 #include <QHostInfo>
+#include <QSaveFile>
 #include <QRegularExpression>
 #include <QScreen>
 #include <QStandardPaths>
@@ -184,6 +186,36 @@ void logCertificate(const KRdp::ServerCertificate::Paths &paths, bool managed)
                       << info.notAfter.toString(Qt::ISODate) << "SHA-256 fingerprint" << info.sha256Fingerprint;
     if (!managed && info.notAfter <= QDateTime::currentDateTimeUtc().addDays(KRdp::ServerCertificate::kRenewBeforeDays)) {
         qWarning() << "The configured TLS certificate expires within" << KRdp::ServerCertificate::kRenewBeforeDays << "days; replace it";
+    }
+}
+
+// AUD-K6: record what this process loaded so the KCM can tell whether the
+// saved configuration needs a restart, even after it was closed and reopened.
+void writeLoadedState(const QString &configFilePath, const ServerConfig *config, KRdp::ServerSettings::Backend backend)
+{
+    using namespace KRdp::ServerSettings;
+    LoadedState state;
+    state.pid = QCoreApplication::applicationPid();
+    state.loadedAt = QDateTime::currentDateTimeUtc();
+    state.backend = backend;
+    state.settings = {config->listenPort(),
+                      config->listenAddress(),
+                      config->autogenerateCertificates(),
+                      config->certificate(),
+                      config->certificateKey(),
+                      config->users(),
+                      config->systemUserEnabled()};
+    const QString path = loadedStatePath(configFilePath);
+    QDir().mkpath(runtimeDirectory());
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        qWarning() << "Cannot record the loaded configuration in" << path << file.errorString();
+        return;
+    }
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    file.write(serializeLoadedState(state));
+    if (!file.commit()) {
+        qWarning() << "Cannot record the loaded configuration in" << path << file.errorString();
     }
 }
 }
@@ -565,6 +597,7 @@ int main(int argc, char **argv)
     if (!server.start()) {
         return -1;
     }
+    writeLoadedState(runtimeConfigPath, config, backendChoice.backend);
 
     // AUD-K3: connections read the files per connection, so renewing a
     // long-running server's certificate needs no restart.
