@@ -432,3 +432,9 @@ add_test(NAME GfxSurfaceCommandTest COMMAND GfxSurfaceCommandTest)
 # K13: one krdpserverrc schema, owned by server/ and used by the KCM.
 add_test(NAME KcfgSingleSourceTest
     COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/check-single-kcfg.cmake)
+
+# K3: certificate generation and renewal decisions with an injected clock.
+add_executable(ServerCertificateTest ServerCertificateTest.cpp)
+target_include_directories(ServerCertificateTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(ServerCertificateTest PRIVATE Qt6::Test Qt6::Core KRdpServerCertificate freerdp winpr)
+add_test(NAME ServerCertificateTest COMMAND ServerCertificateTest)

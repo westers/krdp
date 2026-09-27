@@ -10,6 +10,7 @@
 #include <QDebug>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
+#include <QHostInfo>
 #include <QRegularExpression>
 #include <QScreen>
 #include <QStandardPaths>
@@ -25,6 +26,7 @@
 #include "PhysicalOutputGuard.h"
 #include "RdpConnection.h"
 #include "Server.h"
+#include "ServerCertificate.h"
 #include "SessionController.h"
 #include "VideoCodecSupport.h"
 #include "krdp_version.h"
@@ -153,6 +155,36 @@ QString envValueOrUnset(const char *name)
     const auto value = qgetenv(name);
     return value.isEmpty() ? u"unset"_s : QString::fromLatin1(value);
 }
+
+// AUD-K3: keep the managed certificate valid and say which one is in use.
+bool ensureManagedCertificate(const KRdp::ServerCertificate::Paths &paths)
+{
+    using namespace KRdp::ServerCertificate;
+    const auto result = ensure(paths, QHostInfo::localHostName(), QDateTime::currentDateTimeUtc());
+    if (!result.ok) {
+        qCritical().noquote() << "Could not create a TLS certificate at" << paths.certificate << "(" << describe(result.decision) << "):" << result.error;
+        return false;
+    }
+    if (result.generated) {
+        qInfo().noquote() << "Generated a new self-signed TLS certificate (" << describe(result.decision) << "):" << result.info.algorithm << "valid until"
+                          << result.info.notAfter.toString(Qt::ISODate) << "SHA-256 fingerprint" << result.info.sha256Fingerprint;
+    }
+    return true;
+}
+
+void logCertificate(const KRdp::ServerCertificate::Paths &paths, bool managed)
+{
+    const auto info = KRdp::ServerCertificate::inspect(paths);
+    if (!info.usable()) {
+        qWarning().noquote() << "TLS certificate" << paths.certificate << "or key" << paths.key << "is missing, unreadable or mismatched";
+        return;
+    }
+    qInfo().noquote() << "TLS certificate" << paths.certificate << (managed ? "(managed)" : "(configured)") << info.algorithm << "valid until"
+                      << info.notAfter.toString(Qt::ISODate) << "SHA-256 fingerprint" << info.sha256Fingerprint;
+    if (!managed && info.notAfter <= QDateTime::currentDateTimeUtc().addDays(KRdp::ServerCertificate::kRenewBeforeDays)) {
+        qWarning() << "The configured TLS certificate expires within" << KRdp::ServerCertificate::kRenewBeforeDays << "days; replace it";
+    }
+}
 }
 
 int main(int argc, char **argv)
@@ -226,8 +258,21 @@ int main(int argc, char **argv)
         address = QHostAddress(parser.value(u"address"_s));
     }
     auto port = parserValueWithDefault(u"port", config->listenPort());
-    auto certificate = std::filesystem::path(parserValueWithDefault(u"certificate", config->certificate()).toStdString());
-    auto certificateKey = std::filesystem::path(parserValueWithDefault(u"certificate-key", config->certificateKey()).toStdString());
+    // AUD-K3: with AutogenerateCertificates the server owns a certificate in
+    // its data directory and renews it; the command line or a configured pair
+    // (AutogenerateCertificates=false) is used as given.
+    const bool certificatePinnedByCli = parser.isSet(u"certificate"_s) || parser.isSet(u"certificate-key"_s);
+    const bool managedCertificate = !certificatePinnedByCli && config->autogenerateCertificates();
+    const KRdp::ServerCertificate::Paths certificatePaths = managedCertificate
+        ? KRdp::ServerCertificate::defaultPaths()
+        : KRdp::ServerCertificate::Paths{parserValueWithDefault(u"certificate", config->certificate()),
+                                         parserValueWithDefault(u"certificate-key", config->certificateKey())};
+    if (managedCertificate && !ensureManagedCertificate(certificatePaths)) {
+        return 1;
+    }
+    logCertificate(certificatePaths, managedCertificate);
+    auto certificate = std::filesystem::path(certificatePaths.certificate.toStdString());
+    auto certificateKey = std::filesystem::path(certificatePaths.key.toStdString());
 
     KRdp::Server server(nullptr);
 
@@ -506,6 +551,17 @@ int main(int argc, char **argv)
 
     if (!server.start()) {
         return -1;
+    }
+
+    // AUD-K3: connections read the files per connection, so renewing a
+    // long-running server's certificate needs no restart.
+    QTimer certificateRenewTimer(&application);
+    if (managedCertificate) {
+        certificateRenewTimer.setInterval(std::chrono::hours(12));
+        QObject::connect(&certificateRenewTimer, &QTimer::timeout, &application, [certificatePaths]() {
+            ensureManagedCertificate(certificatePaths);
+        });
+        certificateRenewTimer.start();
     }
 
     return application.exec();

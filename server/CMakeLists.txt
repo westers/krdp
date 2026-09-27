@@ -4,6 +4,11 @@
 add_definitions(-DTRANSLATION_DOMAIN=\"krdpserver\")
 
 add_executable(krdpserver)
+# AUD-K3: certificate generation/renewal; also linked by the KCM to show the fingerprint.
+add_library(KRdpServerCertificate STATIC ServerCertificate.cpp)
+set_target_properties(KRdpServerCertificate PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(KRdpServerCertificate PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(KRdpServerCertificate PUBLIC Qt6::Core PRIVATE OpenSSL::Crypto)
 add_library(KRdpGuardianClient STATIC VirtualSessionGuardianClient.cpp)
 target_sources(KRdpGuardianClient PRIVATE VirtualSessionJournal.cpp)
 target_include_directories(KRdpGuardianClient PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -20,7 +25,6 @@ add_executable(krdp-virtual-session-cleanup virtualsessioncleanup.cpp VirtualSes
     VirtualSessionServiceScope.cpp VirtualSessionLoginRecovery.cpp)
 target_link_libraries(krdp-virtual-session-cleanup PRIVATE KRdpGuardianClient Qt6::DBus)
 configure_file(krdp-virtual-session@.service.in ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-session@.service @ONLY)
-find_package(OpenSSL REQUIRED)
 add_executable(krdp-virtual-host virtualhost.cpp VirtualHostTls.cpp VirtualSessionHostController.cpp VirtualSessionTransport.cpp
     VirtualSessionControl.cpp VirtualSessionSupervisor.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp VirtualResize.cpp)
 target_link_libraries(krdp-virtual-host PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus OpenSSL::Crypto KRdp KRdpGuardianClient)
@@ -63,7 +67,7 @@ kconfig_target_kcfg_file(krdpserver FILE krdpserversettings.kcfg CLASS_NAME Serv
 target_include_directories(krdpserver PRIVATE ${CMAKE_BINARY_DIR})
 target_include_directories(krdp-audio-route-probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-target_link_libraries(krdpserver PRIVATE Qt6::Gui Qt6::Network Qt6::DBus KF6::CoreAddons KF6::ConfigGui KF6::DBusAddons KF6::Crash KRdp qt6keychain KF6::StatusNotifierItem KF6::I18n KF6::GlobalAccel)
+target_link_libraries(krdpserver PRIVATE KRdpServerCertificate Qt6::Gui Qt6::Network Qt6::DBus KF6::CoreAddons KF6::ConfigGui KF6::DBusAddons KF6::Crash KRdp qt6keychain KF6::StatusNotifierItem KF6::I18n KF6::GlobalAccel)
 target_link_libraries(krdp-console-host PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
 target_link_libraries(krdp-console-probe PRIVATE Qt6::Core Qt6::DBus)
 target_link_libraries(krdp-greeter-probe PRIVATE Qt6::Core Qt6::Gui)

@@ -66,6 +66,8 @@ find_package(Systemd 254 QUIET)
 set_package_properties(Systemd PROPERTIES TYPE OPTIONAL PURPOSE "If available, used by KCM to integrate with systemd to enable/disable the service and show logs")
 
 find_package(PAM REQUIRED)
+# Top level so both server/ (certificate helper) and src/kcm (which links it) see OpenSSL::Crypto.
+find_package(OpenSSL REQUIRED)
 set_package_properties(PAM PROPERTIES DESCRIPTION "PAM Libraries"
                        URL "https://www.kernel.org/pub/linux/libs/pam/"
                        TYPE REQUIRED
