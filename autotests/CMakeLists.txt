@@ -436,6 +436,18 @@ target_include_directories(PreAuthChannelGateTest SYSTEM PRIVATE ${FreeRDP_INCLU
 target_link_libraries(PreAuthChannelGateTest PRIVATE Qt6::Test Qt6::Core KRdp freerdp winpr)
 add_test(NAME PreAuthChannelGateTest COMMAND PreAuthChannelGateTest)
 
+# AUD-S1/S3: a real Server on 127.0.0.1 with krdpctl-probe as the client.
+if(TARGET krdpctl-probe)
+    add_executable(RdpPreAuthLoopbackTest RdpPreAuthLoopbackTest.cpp)
+    target_include_directories(RdpPreAuthLoopbackTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
+    target_include_directories(RdpPreAuthLoopbackTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+    target_link_libraries(RdpPreAuthLoopbackTest PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
+    target_compile_definitions(RdpPreAuthLoopbackTest PRIVATE KRDPCTL_PROBE="$<TARGET_FILE:krdpctl-probe>")
+    add_dependencies(RdpPreAuthLoopbackTest krdpctl-probe)
+    add_test(NAME RdpPreAuthLoopbackTest COMMAND RdpPreAuthLoopbackTest)
+    set_tests_properties(RdpPreAuthLoopbackTest PROPERTIES TIMEOUT 180)
+endif()
+
 # AUD-S4: ListenAddress parsing (header-only, server/).
 add_executable(ListenAddressTest ListenAddressTest.cpp)
 target_include_directories(ListenAddressTest PRIVATE ${CMAKE_SOURCE_DIR}/server)

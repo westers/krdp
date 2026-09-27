@@ -1233,18 +1233,9 @@ bool RdpConnection::onPostConnect()
         }
     }
 
-    if (!authenticated) {
-        const auto users = d->server->users();
-        for (auto user : users) {
-            if (user.password.isEmpty()) {
-                return false;
-            }
-            if (user.name == username && user.password == password) {
-                qCDebug(KRDP) << "User" << username << "authenticated successfully";
-                authenticated = true;
-                break;
-            }
-        }
+    if (!authenticated && d->server->matchesConfiguredUser(username, password)) {
+        qCDebug(KRDP) << "User" << username << "authenticated successfully";
+        authenticated = true;
     }
 
     // Static channels must be initialized from PostConnect. Delaying RDPSND

@@ -125,6 +125,19 @@ void KRdp::Server::addUser(const User &user)
     d->users.append(user);
 }
 
+bool KRdp::Server::matchesConfiguredUser(const QString &name, const QString &password) const
+{
+    for (const auto &user : std::as_const(d->users)) {
+        if (user.name.isEmpty() || user.password.isEmpty()) {
+            continue;
+        }
+        if (user.name == name && user.password == password) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool Server::usePAMAuthentication() const
 {
     return d->usePamAuthentication;
