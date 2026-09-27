@@ -9,6 +9,8 @@
 #include <QCoreApplication>
 
 #include <freerdp/channels/channels.h>
+#include <freerdp/crypto/certificate.h>
+#include <freerdp/crypto/privatekey.h>
 #include <freerdp/freerdp.h>
 #include <winpr/ssl.h>
 
@@ -49,11 +51,35 @@ Server::~Server()
     stop();
 }
 
+bool Server::tlsFilesUsable(const std::filesystem::path &certificatePath, const std::filesystem::path &keyPath)
+{
+    auto *certificate = freerdp_certificate_new_from_file(certificatePath.string().data());
+    if (!certificate) {
+        qCCritical(KRDP) << "The TLS certificate" << QString::fromStdString(certificatePath.string()) << "cannot be read or is not a valid certificate";
+        return false;
+    }
+    freerdp_certificate_free(certificate);
+
+    auto *key = freerdp_key_new_from_file(keyPath.string().data());
+    if (!key) {
+        qCCritical(KRDP) << "The TLS key" << QString::fromStdString(keyPath.string()) << "cannot be read or is not a valid private key";
+        return false;
+    }
+    freerdp_key_free(key);
+    return true;
+}
+
 bool Server::start()
 {
     if (!std::filesystem::exists(d->tlsCertificate) || !std::filesystem::exists(d->tlsCertificateKey)) {
         qCCritical(KRDP).nospace() << "A valid TLS certificate (" << QString::fromStdString(d->tlsCertificate.filename().string()) << ") and key ("
                                    << QString::fromStdString(d->tlsCertificateKey.filename().string()) << ") is required for the server to run!";
+        return false;
+    }
+    // AUD-P3: existing is not enough. Every connection loads both files again
+    // (RdpConnection::initialize()), so an unreadable or unparsable pair would
+    // otherwise only show up as each client being dropped after TCP accept.
+    if (!tlsFilesUsable(d->tlsCertificate, d->tlsCertificateKey)) {
         return false;
     }
 

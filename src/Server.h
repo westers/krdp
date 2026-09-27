@@ -50,6 +50,11 @@ public:
      */
     bool start();
     /**
+     * Whether \a certificatePath and \a keyPath can be read and parse as a
+     * certificate and a private key. start() refuses to listen otherwise.
+     */
+    static bool tlsFilesUsable(const std::filesystem::path &certificatePath, const std::filesystem::path &keyPath);
+    /**
      * Stop listening for incoming connections.
      */
     void stop();
