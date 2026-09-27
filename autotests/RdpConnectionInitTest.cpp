@@ -8,14 +8,34 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <atomic>
+
+#include <dlfcn.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include <freerdp/peer.h>
 
 #include "RdpConnection.h"
 #include "Server.h"
 
 using namespace KRdp;
+
+// Interposes libfreerdp's freerdp_peer_context_free() (the executable's
+// definition wins over the library's for libKRdp's calls) to count how often
+// RdpConnection frees a peer context before forwarding to the real one.
+static std::atomic<int> s_contextFrees = 0;
+
+extern "C" void freerdp_peer_context_free(freerdp_peer *client)
+{
+    using Fn = void (*)(freerdp_peer *);
+    static const auto real = reinterpret_cast<Fn>(::dlsym(RTLD_NEXT, "freerdp_peer_context_free"));
+    if (client && client->context) {
+        ++s_contextFrees;
+    }
+    real(client);
+}
 
 // AUD-P3: Server::start() refuses a certificate/key pair that does not parse,
 // and a connection whose initialize() fails closes its socket and reaches
@@ -123,6 +143,7 @@ private Q_SLOTS:
         server.setTlsCertificate(m_dir.filePath(QStringLiteral("missing.crt")).toStdString());
         server.setTlsCertificateKey(m_dir.filePath(QStringLiteral("missing.key")).toStdString());
 
+        s_contextFrees = 0;
         auto connection = std::make_unique<RdpConnection>(&server, fds[0]);
         QSignalSpy states(connection.get(), &RdpConnection::stateChanged);
         QTRY_COMPARE_WITH_TIMEOUT(connection->state(), RdpConnection::State::Closed, 5000);
@@ -140,6 +161,41 @@ private Q_SLOTS:
         // Closing again, with a reason, on a connection without a peer is safe.
         connection->close(RdpConnection::CloseReason::VideoInitFailed);
         connection.reset();
+        // The failure path freed the peer context, and the destructor did
+        // not free it again.
+        QCOMPARE(s_contextFrees.load(), 1);
+    }
+
+    // AUD-INT: a connection that initialized and then lost its client frees
+    // the peer context (transport, rdp, channel manager) exactly once, when
+    // it is destroyed. Before, ~RdpConnection only freed the freerdp_peer
+    // struct and leaked the context of every normally closed connection.
+    void normalDisconnectFreesThePeerContextOnce()
+    {
+        const auto [cert, key] = generatePair();
+        if (cert.isEmpty()) {
+            QSKIP("openssl is needed to generate a valid pair");
+        }
+        int fds[2];
+        QCOMPARE(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+
+        Server server;
+        server.setTlsCertificate(cert.toStdString());
+        server.setTlsCertificateKey(key.toStdString());
+
+        s_contextFrees = 0;
+        auto connection = std::make_unique<RdpConnection>(&server, fds[0]);
+        // initialize() succeeded: the session thread runs and waits for the
+        // client's first PDU.
+        QTRY_COMPARE_WITH_TIMEOUT(connection->state(), RdpConnection::State::Running, 5000);
+
+        // The client goes away; the session thread ends the connection.
+        ::close(fds[1]);
+        QTRY_COMPARE_WITH_TIMEOUT(connection->state(), RdpConnection::State::Closed, 10000);
+        QCOMPARE(s_contextFrees.load(), 0);
+
+        connection.reset();
+        QCOMPARE(s_contextFrees.load(), 1);
     }
 };
 

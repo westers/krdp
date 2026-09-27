@@ -686,10 +686,16 @@ RdpConnection::~RdpConnection()
         // (freerdp_peer::sockfd is -1 from then on) and nothing else closes
         // it: without this every closed connection kept its descriptor, and a
         // client dropped by the handshake timeout never saw the close.
-        if (d->peer->context && d->peer->Disconnect) {
-            d->peer->Disconnect(d->peer);
-        }
+        // freerdp_peer_context_free() frees the transport (which disconnects
+        // it, closing the socket once), the rdp state and, through
+        // freePeerContext(), the virtual channel manager; before AUD-INT only
+        // the peer struct was freed and every closed connection leaked its
+        // context. Safe here: the session thread has been joined and onClose()
+        // already closed every channel opened on that channel manager.
+        // freerdp_peer_free() then closes a socket the transport never took.
+        freerdp_peer_context_free(d->peer);
         freerdp_peer_free(d->peer);
+        d->peer = nullptr;
     }
 }
 

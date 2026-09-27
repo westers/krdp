@@ -471,7 +471,8 @@ add_test(NAME PressedInputTrackerTest COMMAND PressedInputTrackerTest)
 # Links libKRdp: a real Server and RdpConnection over a socketpair.
 add_executable(RdpConnectionInitTest RdpConnectionInitTest.cpp)
 target_include_directories(RdpConnectionInitTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(RdpConnectionInitTest PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
+target_include_directories(RdpConnectionInitTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(RdpConnectionInitTest PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp freerdp winpr ${CMAKE_DL_LIBS})
 add_test(NAME RdpConnectionInitTest COMMAND RdpConnectionInitTest)
 set_tests_properties(RdpConnectionInitTest PROPERTIES TIMEOUT 60)
 
