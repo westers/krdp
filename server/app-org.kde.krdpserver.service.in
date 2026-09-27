@@ -5,10 +5,16 @@ Description=KRDP Server
 After=plasma-xdg-desktop-portal-kde.service
 After=plasma-core.target
 
+# AUD-FIX F2: restart after a crash (exit 255 on Sol was not "abnormal"),
+# but give up after 5 failures in 2 minutes instead of looping.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
 [Service]
 Type=exec
 ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdpserver
-Restart=on-abnormal
+Restart=on-failure
+RestartSec=3
 
 [Install]
 WantedBy=plasma-workspace.target

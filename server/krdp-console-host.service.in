@@ -6,6 +6,10 @@ Description=KRDP persistent physical-console host
 After=network-online.target systemd-logind.service
 Wants=network-online.target
 
+# Restart on failure, but stop after 10 failures in 5 minutes (AUD-FIX F2).
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
 [Service]
 Type=exec
 User=root
@@ -15,7 +19,7 @@ ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-host --worker ${KRDP_CONSOLE_W
 RuntimeDirectory=krdp-console
 RuntimeDirectoryMode=0711
 Restart=on-failure
-RestartSec=2
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target

@@ -632,3 +632,8 @@ if(BUILD_PLASMA_SESSION)
     add_dependencies(WaylandRequestVersionTest KRdp)
     add_test(NAME WaylandRequestVersionTest COMMAND WaylandRequestVersionTest)
 endif()
+# F2: the configured systemd units restart after a crash, with a start limit.
+add_executable(SystemdUnitPolicyTest SystemdUnitPolicyTest.cpp)
+target_link_libraries(SystemdUnitPolicyTest PRIVATE Qt6::Test Qt6::Core)
+target_compile_definitions(SystemdUnitPolicyTest PRIVATE KRDP_UNIT_DIR="${CMAKE_BINARY_DIR}/server")
+add_test(NAME SystemdUnitPolicyTest COMMAND SystemdUnitPolicyTest)
