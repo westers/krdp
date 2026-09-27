@@ -7,6 +7,8 @@
 
 #include "ConsoleAdmission.h"
 #include "ConsoleHostController.h"
+#include "ConsoleSeatWatcher.h"
+#include "FakeLogindBus.h"
 #include "ConsoleWorkerSession.h"
 #include "RdpConnection.h"
 #include "Server.h"
@@ -14,6 +16,7 @@
 #include <QDataStream>
 #include <QMouseEvent>
 #include <QLocalSocket>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -371,6 +374,53 @@ private Q_SLOTS:
         host.setSeatSessions({user(QStringLiteral("5"), 1001, false)});
         QVERIFY(host.m_control.admitted(otherId));
         QVERIFY(!host.m_control.admitted(ownerId));
+    }
+
+    void unlockThroughSeatWatcherEvictsVisitorPromptly()
+    {
+        // The real signal path: logind PropertiesChanged on the session's
+        // escaped object path -> ConsoleSeatWatcher -> setSeatSessions().
+        const QString path = QStringLiteral("/org/freedesktop/login1/session/_33");
+        auto logind = std::make_shared<FakeLogindBus::State>();
+        logind->sessions = {logindSession(QStringLiteral("3"), path, 1000, QStringLiteral("user"), true)};
+        ConsoleSeatWatcher seat(std::make_unique<FakeLogindBus>(logind));
+        Server server;
+        ConsoleHostController host(&server, {}, {});
+        QObject::connect(&seat, &ConsoleSeatWatcher::sessionsChanged, &host, &ConsoleHostController::setSeatSessions);
+        QHash<RdpConnection *, quint32> uids;
+        host.setUidResolver([&uids](RdpConnection *connection) -> std::optional<quint32> {
+            return uids.contains(connection) ? std::optional<quint32>(uids.value(connection)) : std::nullopt;
+        });
+        QList<RdpConnection *> refused;
+        host.setRefuse([&refused](RdpConnection *connection, quint32) {
+            refused.append(connection);
+        });
+        QSignalSpy published(&seat, &ConsoleSeatWatcher::sessionsChanged);
+        seat.start();
+        QTRY_COMPARE(published.size(), 1);
+        QVERIFY(host.m_sessions.first().locked);
+
+        // Another account is admitted while A's desktop shows its lock screen.
+        RdpConnection owner(&server, -1);
+        RdpConnection visitor(&server, -1);
+        uids.insert(&owner, 1000);
+        uids.insert(&visitor, 1001);
+        host.addClient(&owner);
+        host.addClient(&visitor);
+        const auto ownerId = host.m_clients.front()->id;
+        const auto visitorId = host.m_clients.back()->id;
+        Q_EMIT owner.stateChanged(RdpConnection::State::Streaming);
+        Q_EMIT visitor.stateChanged(RdpConnection::State::Streaming);
+        QVERIFY(host.m_control.admitted(ownerId));
+        QVERIFY(host.m_control.admitted(visitorId));
+
+        // A unlocks: LockedHint -> false. Well inside the 60 s resync: the watcher's
+        // per-session subscription must still be live after its publishes.
+        logind->find(QStringLiteral("3"))->locked = false;
+        QVERIFY(logind->propertiesChanged(path));
+        QTRY_VERIFY_WITH_TIMEOUT(!host.m_control.admitted(visitorId), 1000);
+        QVERIFY(host.m_control.admitted(ownerId));
+        QTRY_COMPARE(refused, (QList<RdpConnection *>{&visitor}));
     }
 
     void disconnectWhileTopologyChangeIsPending()

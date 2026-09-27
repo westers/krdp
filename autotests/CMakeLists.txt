@@ -303,6 +303,11 @@ target_include_directories(ConsoleSeatTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ConsoleSeatTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ConsoleSeatTest COMMAND ConsoleSeatTest)
 
+add_executable(ConsoleSeatWatcherTest ConsoleSeatWatcherTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleSeat.cpp)
+target_include_directories(ConsoleSeatWatcherTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleSeatWatcherTest PRIVATE Qt6::Test Qt6::Core Qt6::DBus)
+add_test(NAME ConsoleSeatWatcherTest COMMAND ConsoleSeatWatcherTest)
+
 add_executable(ConsoleControlTest ConsoleControlTest.cpp)
 target_include_directories(ConsoleControlTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ConsoleControlTest PRIVATE Qt6::Test Qt6::Core)

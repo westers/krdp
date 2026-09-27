@@ -27,6 +27,10 @@ struct Session {
     quint32 uid = 0;
     quint32 leader = 0;
     bool locked = false; ///< logind LockedHint: the desktop shows its lock screen.
+    /// logind's object path for this session, exactly as ListSessions reports it.
+    /// Never rebuild it from `id`: logind escapes ids (session "3" lives at
+    /// `/org/freedesktop/login1/session/_33`).
+    QString objectPath;
     bool operator==(const Session &) const = default;
 };
 
