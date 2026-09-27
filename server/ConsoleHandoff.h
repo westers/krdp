@@ -116,6 +116,9 @@ public:
     }
 
     Target activeTarget() const { return m_running; }
+    Target wantedTarget() const { return m_wanted; }
+    /** An old worker was told to stop; nothing new starts until it has exited. */
+    bool draining() const { return m_draining; }
     Target startingTarget() const { return m_starting; }
     bool inputEnabled() const { return m_running.valid(); }
 

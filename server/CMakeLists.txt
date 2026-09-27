@@ -44,7 +44,7 @@ add_executable(krdp-console-probe consoleprobe.cpp ConsoleSeat.cpp)
 add_executable(krdp-greeter-probe greeterprobe.cpp)
 add_executable(krdp-audio-route-probe audioprobe.cpp ../src/PipeWireAudioPlayback.cpp)
 if (BUILD_PLASMA_SESSION)
-    add_executable(krdp-console-worker consoleworker.cpp ConsoleResizeExecutor.cpp ConsoleResizeSession.cpp VirtualResize.cpp VirtualResizeExecutor.cpp VirtualResizeSession.cpp ConsoleMicrophoneSession.h ../src/PipeWireMicrophone.cpp ../src/PipeWireAudioPlayback.cpp)
+    add_executable(krdp-console-worker consoleworker.cpp ConsoleResizeExecutor.cpp ConsoleResizeSession.cpp OutputRestoreJournal.cpp VirtualResize.cpp VirtualResizeExecutor.cpp VirtualResizeSession.cpp ConsoleMicrophoneSession.h ../src/PipeWireMicrophone.cpp ../src/PipeWireAudioPlayback.cpp)
     add_executable(krdp-virtual-worker-probe virtualworkerprobe.cpp ConsoleWorkerEndpoint.cpp H264KeyframeSize.cpp VirtualResize.cpp)
     target_link_libraries(krdp-virtual-worker-probe PRIVATE Qt6::Core Qt6::Gui Qt6::Network KRdp PkgConfig::AVCodec)
     add_executable(krdp-virtual-monitor-creation-probe virtualmonitorcreationprobe.cpp)
@@ -60,7 +60,7 @@ if (BUILD_PLASMA_SESSION)
     configure_file(org.kde.krdpvirtualprobe.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpvirtualprobe.desktop @ONLY)
 endif()
 
-target_sources(krdpserver PRIVATE main.cpp SessionController.cpp DisplayWakeGuard.cpp PhysicalOutputGuard.cpp HostLayoutExecutor.cpp ConsoleSeat.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp ConsoleHostController.cpp ConsoleWorkerLauncher.cpp)
+target_sources(krdpserver PRIVATE main.cpp SessionController.cpp DisplayWakeGuard.cpp PhysicalOutputGuard.cpp OutputRestoreJournal.cpp HostLayoutExecutor.cpp ConsoleSeat.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp ConsoleHostController.cpp ConsoleWorkerLauncher.cpp)
 
 kconfig_target_kcfg_file(krdpserver FILE krdpserversettings.kcfg CLASS_NAME ServerConfig SINGLETON)
 

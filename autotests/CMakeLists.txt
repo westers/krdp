@@ -318,7 +318,7 @@ target_include_directories(ConsoleResizeExecutorTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(ConsoleResizeExecutorTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ConsoleResizeExecutorTest COMMAND ConsoleResizeExecutorTest)
 
-add_executable(ConsoleResizeSessionTest ConsoleResizeSessionTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleResizeExecutor.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleResizeSession.cpp)
+add_executable(ConsoleResizeSessionTest ConsoleResizeSessionTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleResizeExecutor.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleResizeSession.cpp ${CMAKE_SOURCE_DIR}/server/OutputRestoreJournal.cpp)
 target_include_directories(ConsoleResizeSessionTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ConsoleResizeSessionTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME ConsoleResizeSessionTest COMMAND ConsoleResizeSessionTest)
@@ -505,3 +505,31 @@ add_test(NAME ServerSettingsPolicyTest COMMAND ServerSettingsPolicyTest)
 add_executable(KcmSettingsTest KcmSettingsTest.cpp)
 target_link_libraries(KcmSettingsTest PRIVATE Qt6::Test Qt6::Core kcm_krdpserver_core)
 add_test(NAME KcmSettingsTest COMMAND KcmSettingsTest)
+
+# --- AUD-WS-C ---
+# Console broker/worker audit fixes (AUD-C-1 .. AUD-C-10).
+add_executable(ConsoleWorkerEndpointHardeningTest ConsoleWorkerEndpointHardeningTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
+target_include_directories(ConsoleWorkerEndpointHardeningTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleWorkerEndpointHardeningTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
+add_test(NAME ConsoleWorkerEndpointHardeningTest COMMAND ConsoleWorkerEndpointHardeningTest)
+add_executable(OutputRestoreJournalTest OutputRestoreJournalTest.cpp ${CMAKE_SOURCE_DIR}/server/OutputRestoreJournal.cpp)
+target_include_directories(OutputRestoreJournalTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(OutputRestoreJournalTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME OutputRestoreJournalTest COMMAND OutputRestoreJournalTest)
+add_executable(ConsoleOutputJournalTest ConsoleOutputJournalTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/OutputRestoreJournal.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleResizeExecutor.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleResizeSession.cpp
+    ${CMAKE_SOURCE_DIR}/server/PhysicalOutputGuard.cpp)
+target_include_directories(ConsoleOutputJournalTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleOutputJournalTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
+add_test(NAME ConsoleOutputJournalTest COMMAND ConsoleOutputJournalTest)
+set_tests_properties(ConsoleOutputJournalTest PROPERTIES TIMEOUT 60)
+add_executable(ConsoleHostLifecycleTest ConsoleHostLifecycleTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleHostController.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleSeat.cpp)
+target_include_directories(ConsoleHostLifecycleTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleHostLifecycleTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
+add_test(NAME ConsoleHostLifecycleTest COMMAND ConsoleHostLifecycleTest)

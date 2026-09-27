@@ -715,6 +715,11 @@ bool RdpConnection::isAuthenticated() const
     return d->authenticated.load();
 }
 
+rdpContext *RdpConnection::freerdpContext() const
+{
+    return d->peer ? d->peer->context : nullptr;
+}
+
 void RdpConnection::setState(KRdp::RdpConnection::State newState)
 {
     if (d->state.exchange(newState) == newState) {

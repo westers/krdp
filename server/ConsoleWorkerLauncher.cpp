@@ -4,10 +4,13 @@
 #include "ConsoleWorkerLauncher.h"
 
 #include <algorithm>
+#include <csignal>
 #include <grp.h>
 #include <fcntl.h>
 #include <pwd.h>
 #include <unistd.h>
+
+#include <vector>
 
 #include <QDir>
 #include <QFile>
@@ -16,6 +19,7 @@
 #include <QProcess>
 
 #include "ConsoleSeat.h"
+#include "ConsoleWorkerWire.h"
 
 namespace KRdp
 {
@@ -90,34 +94,59 @@ ConsoleWorkerLauncher::ConsoleWorkerLauncher(QString workerProgram, QObject *par
 {
 }
 
-ConsoleWorkerLauncher::~ConsoleWorkerLauncher() = default;
+ConsoleWorkerLauncher::~ConsoleWorkerLauncher()
+{
+    // The broker is going away: do not leave a worker holding the seat.
+    for (auto &[socket, process] : m_processes) {
+        process->disconnect(this);
+        process->terminate();
+        if (!process->waitForFinished(2000)) {
+            process->kill();
+            process->waitForFinished(1000);
+        }
+    }
+}
+
+void ConsoleWorkerLauncher::setSessionLookup(SessionLookup lookup)
+{
+    m_sessionLookup = std::move(lookup);
+}
+
+void ConsoleWorkerLauncher::signalWorker(const QString &socketName, int signal)
+{
+    const auto found = m_processes.find(socketName);
+    if (found == m_processes.end() || found->second->state() == QProcess::NotRunning) {
+        return;
+    }
+    const qint64 pid = found->second->processId();
+    if (pid > 0) {
+        ::kill(pid_t(pid), signal);
+    }
+}
 
 bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const QString &socketName, const QByteArray &token, QString *error)
 {
     if (error) {
         error->clear();
     }
+    const auto fail = [error](const QString &message) {
+        if (error) *error = message;
+        return false;
+    };
     if (target.adapter != ConsoleSeat::Adapter::Greeter && target.adapter != ConsoleSeat::Adapter::PhysicalUser) {
-        if (error) *error = QStringLiteral("physical launcher cannot launch a virtual registry target");
-        return false;
+        return fail(QStringLiteral("physical launcher cannot launch a virtual registry target"));
     }
-    const auto sessions = ConsoleSeat::readLogindSessions(error);
-    const auto found = std::find_if(sessions.cbegin(), sessions.cend(), [&target](const auto &session) {
-        return session.id == target.sessionId && session.uid == target.uid;
-    });
-    if (found == sessions.cend()) {
-        if (error && error->isEmpty()) {
-            *error = QStringLiteral("selected logind session disappeared");
-        }
-        return false;
+    if (m_processes.count(socketName)) {
+        return fail(QStringLiteral("a worker for this launch is already running"));
+    }
+    const auto found = m_sessionLookup ? m_sessionLookup(target.sessionId) : std::nullopt;
+    if (!found || found->uid != target.uid) {
+        return fail(QStringLiteral("selected logind session disappeared"));
     }
     QString environmentError;
     auto environment = environmentFor(*found, &environmentError);
     if (environment.isEmpty()) {
-        if (error) {
-            *error = environmentError;
-        }
-        return false;
+        return fail(environmentError);
     }
     const QString libraryPath = qEnvironmentVariable("LD_LIBRARY_PATH");
     // These descriptor numbers belong to the process whose environment we
@@ -131,28 +160,40 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     if (!libraryPath.isEmpty()) {
         environment.insert(QStringLiteral("LD_LIBRARY_PATH"), libraryPath);
     }
+    // Keep the per-launch socket path out of argv (world-readable /proc).
+    environment.insert(QString::fromLatin1(ConsoleWorkerWire::SocketEnvironment), socketName);
+
+    // All name-service lookups happen here, before fork: getpwuid() and
+    // getgrouplist() may allocate, lock or talk to nscd/sssd, none of which is
+    // safe between fork and exec (AUD-C-10). The child only makes syscalls.
     const passwd *account = getpwuid(target.uid);
     if (!account) {
-        if (error) {
-            *error = QStringLiteral("selected uid has no passwd entry");
-        }
-        return false;
+        return fail(QStringLiteral("selected uid has no passwd entry"));
     }
-    int tokenPipe[2] = {-1, -1};
-    if (pipe(tokenPipe) != 0) {
-        if (error) {
-            *error = QStringLiteral("cannot create worker token pipe");
+    const gid_t gid = account->pw_gid;
+    std::vector<gid_t> groups(32);
+    int groupCount = int(groups.size());
+    if (getgrouplist(account->pw_name, gid, groups.data(), &groupCount) < 0) {
+        if (groupCount <= 0 || groupCount > 65536) {
+            return fail(QStringLiteral("cannot resolve the selected user's groups"));
         }
-        return false;
+        groups.resize(size_t(groupCount));
+        if (getgrouplist(account->pw_name, gid, groups.data(), &groupCount) < 0) {
+            return fail(QStringLiteral("cannot resolve the selected user's groups"));
+        }
+    }
+    groups.resize(size_t(groupCount));
+
+    int tokenPipe[2] = {-1, -1};
+    if (pipe2(tokenPipe, O_CLOEXEC) != 0) {
+        return fail(QStringLiteral("cannot create worker token pipe"));
     }
     auto closePipe = [&tokenPipe]() {
-        if (tokenPipe[0] >= 0) {
-            close(tokenPipe[0]);
-            tokenPipe[0] = -1;
-        }
-        if (tokenPipe[1] >= 0) {
-            close(tokenPipe[1]);
-            tokenPipe[1] = -1;
+        for (int &fd : tokenPipe) {
+            if (fd >= 0) {
+                close(fd);
+                fd = -1;
+            }
         }
     };
     auto process = std::make_unique<QProcess>();
@@ -160,47 +201,52 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     process->setProcessChannelMode(QProcess::ForwardedChannels);
     process->setProcessEnvironment(environment);
     process->setProgram(m_workerProgram);
-    process->setArguments({QStringLiteral("--socket"), socketName, QStringLiteral("--logind-session"), target.sessionId, QStringLiteral("--uid"), QString::number(target.uid), QStringLiteral("--token-fd"), QStringLiteral("3")});
+    QStringList arguments{QStringLiteral("--logind-session"), target.sessionId, QStringLiteral("--uid"), QString::number(target.uid),
+                          QStringLiteral("--token-fd"), QStringLiteral("3")};
     if (target.adapter == ConsoleSeat::Adapter::PhysicalUser && ConsoleSeat::isPhysicalUser(*found)) {
-        auto arguments = process->arguments();
         arguments.append(QStringLiteral("--desktop-media"));
-        process->setArguments(arguments);
     }
-    const gid_t gid = account->pw_gid;
-    const QByteArray user = QByteArray(account->pw_name);
-    process->setChildProcessModifier([raw, target, gid, user, tokenRead = tokenPipe[0]]() {
-        if (dup2(tokenRead, 3) < 0 || (tokenRead != 3 && close(tokenRead) != 0) || initgroups(user.constData(), gid) != 0 || setgid(gid) != 0 || setuid(target.uid) != 0) {
+    process->setArguments(arguments);
+    // Close every inherited descriptor except stdio and the token (fd 3),
+    // which the modifier below installs before Qt closes the rest.
+    QProcess::UnixProcessParameters parameters;
+    parameters.flags = QProcess::UnixProcessFlag::CloseFileDescriptors | QProcess::UnixProcessFlag::ResetSignalHandlers
+        | QProcess::UnixProcessFlag::IgnoreSigPipe;
+    parameters.lowestFileDescriptorToClose = 4;
+    process->setUnixProcessParameters(parameters);
+    process->setChildProcessModifier([raw, uid = target.uid, gid, groups, tokenRead = tokenPipe[0]]() {
+        if ((tokenRead == 3 ? fcntl(3, F_SETFD, 0) : dup2(tokenRead, 3)) < 0 || setgroups(groups.size(), groups.data()) != 0 || setgid(gid) != 0 || setuid(uid) != 0 || setuid(0) == 0) {
             raw->failChildProcessModifier("cannot drop privileges into logind session");
         }
     });
     connect(raw, &QProcess::errorOccurred, this, [raw](QProcess::ProcessError) {
         qWarning().noquote() << "Console worker launch error:" << raw->errorString();
     });
-    connect(raw, &QProcess::finished, this, [this, raw, socketName](int exitCode, QProcess::ExitStatus status) {
-        qWarning().noquote() << "Console worker exited:" << exitCode << status << raw->errorString();
+    connect(raw, &QProcess::finished, this, [this, socketName](int exitCode, QProcess::ExitStatus status) {
+        qWarning().noquote() << "Console worker exited:" << exitCode << status;
+        // Reap: forget the process before anyone may start a successor.
+        const auto found = m_processes.find(socketName);
+        if (found != m_processes.end()) {
+            found->second.release()->deleteLater();
+            m_processes.erase(found);
+        }
         Q_EMIT workerExited(socketName);
     });
     const ssize_t written = write(tokenPipe[1], token.constData(), size_t(token.size()));
     close(tokenPipe[1]);
     tokenPipe[1] = -1;
     if (written != token.size()) {
-        if (error) {
-            *error = QStringLiteral("cannot deliver worker token");
-        }
         closePipe();
-        return false;
+        return fail(QStringLiteral("cannot deliver worker token"));
     }
     process->start();
     if (!process->waitForStarted(3000)) {
-        if (error) {
-            *error = process->errorString();
-        }
+        const QString message = process->errorString();
         closePipe();
-        return false;
+        return fail(message);
     }
-    close(tokenPipe[0]);
-    tokenPipe[0] = -1;
-    m_processes.push_back(std::move(process));
+    closePipe();
+    m_processes.emplace(socketName, std::move(process));
     return true;
 }
 }

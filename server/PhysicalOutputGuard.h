@@ -18,11 +18,13 @@
  *
  * Every mutation is one kscreen-doctor invocation followed by a read-back and
  * comparison against the snapshot, so a failure is a logged fact, not a
- * silent wrong layout. applyReplace() writes the snapshot to a state file
- * (`QStandardPaths::StateLocation`, i.e. `$XDG_STATE_HOME/<app name>/physical-outputs.json`)
- * just before its first mutation, so it exists exactly while the physical
- * outputs are held; restoreFromStateFile() replays it after a crash (at
- * server start and via `krdpserver --restore-outputs`).
+ * silent wrong layout. applyReplace() writes the snapshot as an entry of the
+ * shared output-restore journal (OutputRestoreJournal,
+ * `$XDG_STATE_HOME/krdp/output-restore.json`, written atomically) just before
+ * its first mutation, so the entry exists exactly while the physical outputs
+ * are held; restoreFromStateFile() replays it after a crash (at server start
+ * and via `krdpserver --restore-outputs`), together with any console worker
+ * entries whose owner died.
  *
  * All calls are synchronous on the main thread (a kscreen-doctor run takes
  * well under a second); the only asynchronous part is the single retry a

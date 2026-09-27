@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ConsoleTopologyPlan.h"
+#include "OutputRestoreJournal.h"
 
 namespace KRdp::ConsoleTopologyLease
 {
@@ -70,5 +71,45 @@ inline std::optional<State> advance(const State &lease, const ConsoleTopologyPla
     if (merged.cumulative.changed
         && !arguments(merged.cumulative, merged.original.states, merged.original.priorities, merged.selected)) return {};
     return merged;
+}
+
+/**
+ * The output-restore journal outputs owed by `lease` (AUD-C-3): for every
+ * physical output, the fields the cumulative lease changed, with the value
+ * before the first transaction as `original` and our requested value as
+ * `applied`, so a replay after a crash undoes only what is still ours.
+ */
+inline QVector<OutputRestoreJournal::Output> journalOutputs(const State &lease)
+{
+    QVector<OutputRestoreJournal::Output> outputs;
+    for (auto it = lease.original.states.cbegin(); it != lease.original.states.cend(); ++it) {
+        const QString &name = it.key();
+        const auto &state = it.value();
+        OutputRestoreJournal::Fields original;
+        OutputRestoreJournal::Fields applied;
+        const auto target = lease.selected.value(name, state.current);
+        if (target.id != state.current.id) {
+            original.mode = state.current.id;
+            applied.mode = target.id;
+        }
+        if (lease.cumulative.modes.contains(name) && !ConsoleTopologyPlan::sameScale(lease.cumulative.modes.value(name).second, state.scale)) {
+            original.scale = state.scale;
+            applied.scale = lease.cumulative.modes.value(name).second;
+        }
+        if (lease.cumulative.positions.contains(name) && lease.cumulative.positions.value(name) != state.position) {
+            original.position = state.position;
+            applied.position = lease.cumulative.positions.value(name);
+        }
+        const int before = lease.original.priorities.value(name);
+        const int after = lease.cumulative.afterPriorities.value(name, before);
+        if (after != before) {
+            original.priority = before;
+            applied.priority = after;
+        }
+        if (!original.empty()) {
+            outputs.append({name, original, applied});
+        }
+    }
+    return outputs;
 }
 }

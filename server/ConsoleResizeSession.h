@@ -2,6 +2,7 @@
 #pragma once
 #include "ConsoleResizeExecutor.h"
 #include "ConsoleWorkerWire.h"
+#include "OutputRestoreJournal.h"
 #include <QMap>
 #include <QTimer>
 
@@ -16,6 +17,12 @@ public:
     void request(const ConsoleWorkerWire::Resize &request);
     void captured(const ConsoleWorkerWire::Outputs &outputs, bool keyframe);
     void stop();
+    /**
+     * Record every applied Fit in the shared output-restore journal before
+     * the mode changes, and drop it once restored (AUD-C-3). A crash leaves
+     * the entry for the next worker to replay. Null disables journaling.
+     */
+    void setJournal(OutputRestoreJournal *journal, const QString &session);
     bool inputAllowed() const;
     bool changing() const;
 Q_SIGNALS:
@@ -27,7 +34,14 @@ private:
     void completed(const ConsoleResize::Plan &plan, const QString &error);
     void finishRequest(const QString &error);
     void drain();
+    void journalApplying(const ConsoleResize::Plan &plan, bool restoring);
+    void writeJournal();
     ConsoleResizeExecutor m_executor;
+    OutputRestoreJournal *m_journal = nullptr;
+    QString m_journalSession;
+    // Outputs whose Fit is (or may be) applied and not yet verifiably
+    // restored: previousMode/previousScale are the originals to put back.
+    QMap<QString, ConsoleResize::Plan> m_journaled;
     ConsoleWorkerWire::ControlState m_control;
     std::optional<ConsoleWorkerWire::Resize> m_pending;
     QMap<QString, ConsoleResize::Plan> m_held;

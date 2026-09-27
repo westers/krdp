@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "PhysicalOutputGuard.h"
+#include "OutputRestoreJournal.h"
 
 #include <algorithm>
 
@@ -46,6 +47,53 @@ const QString KscreenDoctor = u"kscreen-doctor"_s;
 // Steve's layout, for the messages that have no snapshot to derive it from.
 const QString FallbackRecovery =
     u"kscreen-doctor output.DP-1.enable output.HDMI-A-1.enable output.DP-1.position.0,0 output.HDMI-A-1.position.2560,0 output.DP-1.priority.1 output.HDMI-A-1.priority.2"_s;
+const QString GuardOwner = QString::fromLatin1(KRdp::OutputRestoreJournal::OutputGuardOwner);
+
+/** The snapshot as an unconditional journal entry: put back exactly this. */
+KRdp::OutputRestoreJournal::Entry toEntry(const QVector<Output> &physical, qint64 pid)
+{
+    KRdp::OutputRestoreJournal::Entry entry{GuardOwner, pid, {}, {}};
+    for (const auto &output : physical) {
+        KRdp::OutputRestoreJournal::Fields original;
+        original.enabled = output.enabled;
+        if (output.enabled) {
+            original.position = output.position;
+            original.priority = output.priority;
+        }
+        entry.outputs.append({output.name, original, {}});
+    }
+    return entry;
+}
+
+QVector<Output> fromEntry(const KRdp::OutputRestoreJournal::Entry &entry)
+{
+    QVector<Output> physical;
+    for (const auto &output : entry.outputs) {
+        Output snapshot;
+        snapshot.name = output.name;
+        snapshot.enabled = output.original.enabled.value_or(true);
+        snapshot.position = output.original.position.value_or(QPoint());
+        snapshot.priority = output.original.priority.value_or(0);
+        physical.push_back(snapshot);
+    }
+    return physical;
+}
+
+std::optional<KRdp::OutputRestoreJournal::Entry> ownEntry()
+{
+    for (const auto &entry : KRdp::OutputRestoreJournal().entries()) {
+        if (entry.owner == GuardOwner && entry.pid == qint64(getpid())) return entry;
+    }
+    return std::nullopt;
+}
+
+void releaseOwnEntry()
+{
+    QString error;
+    if (!KRdp::OutputRestoreJournal().release(GuardOwner, qint64(getpid()), &error)) {
+        qWarning().noquote() << "Cannot update the output-restore journal:" << error;
+    }
+}
 }
 
 PhysicalOutputGuard::PhysicalOutputGuard(QObject *parent)
@@ -70,7 +118,8 @@ PhysicalOutputGuard::~PhysicalOutputGuard()
 
 QString PhysicalOutputGuard::stateFilePath()
 {
-    return QStandardPaths::writableLocation(QStandardPaths::StateLocation) + u"/physical-outputs.json"_s;
+    // The one output-restore journal shared with the console worker (AUD-C-3).
+    return KRdp::OutputRestoreJournal::defaultPath();
 }
 
 bool PhysicalOutputGuard::available() const
@@ -173,11 +222,11 @@ bool PhysicalOutputGuard::snapshot()
 
 bool PhysicalOutputGuard::writeStateFile() const
 {
-    QDir().mkpath(QStandardPaths::writableLocation(QStandardPaths::StateLocation));
-    QFile file(stateFilePath());
-    const QByteArray json = toStateJson(m_physical, qint64(getpid()));
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(json) != json.size() || !file.flush()) {
-        qWarning() << "Cannot write" << file.fileName() << ":" << file.errorString();
+    // Atomic (temporary file, fsync, rename): a crash can no longer leave a
+    // truncated file where the snapshot of switched-off monitors used to be.
+    QString error;
+    if (!KRdp::OutputRestoreJournal().hold(toEntry(m_physical, qint64(getpid())), &error)) {
+        qWarning().noquote() << "Cannot write the output-restore journal:" << error;
         return false;
     }
     return true;
@@ -301,7 +350,7 @@ bool PhysicalOutputGuard::cancelLayoutControl()
     m_held = false;
     m_layoutControl = false;
     m_physical.clear();
-    QFile::remove(stateFilePath());
+    releaseOwnEntry();
     qInfo() << "Layout control cancelled before any output change; snapshot and state file dropped, nothing to restore";
     return true;
 }
@@ -719,9 +768,8 @@ bool PhysicalOutputGuard::restore()
         // consequence of getting here would be monitors that stay off while
         // every recovery path reports success, so never report success on
         // the flag alone: fall back to the state file applyReplace() wrote.
-        QFile file(stateFilePath());
-        if (file.open(QIODevice::ReadOnly)) {
-            m_physical = fromStateJson(file.readAll());
+        if (const auto entry = ownEntry()) {
+            m_physical = fromEntry(*entry);
         }
         if (!hasSnapshot()) {
             qCritical().noquote() << "Physical outputs are held but the snapshot is gone and" << stateFilePath() << "is unreadable; run:" << FallbackRecovery
@@ -744,7 +792,7 @@ bool PhysicalOutputGuard::restore()
         // The snapshot is spent: the next session takes its own, and nothing
         // may restore this one again over a layout the user changed since.
         m_physical.clear();
-        QFile::remove(stateFilePath());
+        releaseOwnEntry();
         qInfo() << "Physical outputs restored";
         // Now, after the outputs have settled, the virtual outputs go to
         // their extend places: KWin's re-add replays the recorded
@@ -807,87 +855,77 @@ bool PhysicalOutputGuard::release()
 
 bool PhysicalOutputGuard::ownerAlive(qint64 pid)
 {
-    if (pid <= 0 || pid == qint64(getpid())) {
-        return false;
-    }
-    if (::kill(pid_t(pid), 0) != 0 && errno != EPERM) {
-        return false;
-    }
-    // The PID may have been reused since the crash; when /proc can name the
-    // process, only a krdpserver counts.
-    QFile comm(u"/proc/%1/comm"_s.arg(pid));
-    if (comm.open(QIODevice::ReadOnly)) {
-        const QByteArray name = comm.readAll().trimmed();
-        return name.isEmpty() || name.startsWith("krdp");
-    }
-    return true;
+    return KRdp::OutputRestoreJournal::ownerAlive(pid);
 }
 
 bool PhysicalOutputGuard::restoreFromStateFile()
 {
-    QFile file(stateFilePath());
-    if (!file.exists()) {
-        return true;
-    }
-    if (!file.open(QIODevice::ReadOnly)) {
-        qWarning() << "Cannot read" << file.fileName() << ":" << file.errorString();
-        return false;
-    }
-    qint64 ownerPid = 0;
-    const auto physical = fromStateJson(file.readAll(), &ownerPid);
-    if (physical.isEmpty()) {
-        // The file only exists because a session had replaced the outputs and
-        // did not get to restore them, so its being unreadable is not a
-        // reason to forget that: keep it under another name and say so.
-        const QString original = file.fileName();
-        const QString corrupt = original + u".corrupt"_s;
-        QFile::remove(corrupt);
-        const bool kept = file.rename(corrupt);
-        qCritical().noquote() << "State file" << original << "is unreadable" << (kept ? u"(kept as %1)"_s.arg(corrupt) : u"(and could not be renamed)"_s)
+    KRdp::OutputRestoreJournal journal;
+    bool ok = true;
+    QString error;
+    const auto entries = journal.entries(&error);
+    if (!error.isEmpty()) {
+        qCritical().noquote() << "Output-restore journal" << journal.path() << "is unreadable:" << error
                               << "- the physical outputs may still be off. Check: kscreen-doctor -o ; if so run:" << FallbackRecovery << "(Steve's layout)";
-        return false;
+        ok = false;
     }
-    if (ownerAlive(ownerPid)) {
-        // A live session holds the outputs replaced on purpose; restoring
-        // under it would re-enable the physical outputs over the virtual one
-        // and delete its crash recovery. Its own teardown restores.
-        qInfo().noquote() << "State file" << file.fileName() << "belongs to running krdpserver PID" << ownerPid << "(a virtual-monitor session is live); not restoring."
-                          << "Stop that server first if the outputs really are stuck, or run: kscreen-doctor" << restoreArgs(physical).join(u' ');
-        return false;
+    for (const auto &entry : entries) {
+        if (entry.owner != GuardOwner) {
+            continue;
+        }
+        const auto physical = fromEntry(entry);
+        if (ownerAlive(entry.pid)) {
+            // A live session holds the outputs replaced on purpose; restoring
+            // under it would re-enable the physical outputs over the virtual one
+            // and delete its crash recovery. Its own teardown restores.
+            qInfo().noquote() << "Output-restore journal entry belongs to running krdpserver PID" << entry.pid << "(a virtual-monitor session is live); not restoring."
+                              << "Stop that server first if the outputs really are stuck, or run: kscreen-doctor" << restoreArgs(physical).join(u' ');
+            ok = false;
+            continue;
+        }
+        qWarning() << "A previous krdpserver" << (entry.pid > 0 ? u"(PID %1, gone)"_s.arg(entry.pid) : u"(unknown PID)"_s)
+                   << "left the physical outputs replaced; restoring" << physical.size() << "outputs";
+        const auto outcome = restoreSnapshot(physical);
+        if (outcome.verified) {
+            journal.release(entry.owner, entry.pid);
+            qInfo() << "Physical outputs restored from the output-restore journal";
+            continue;
+        }
+        ok = false;
+        if (outcome.missing.isEmpty()) {
+            // Everything is connected but did not settle: worth another try at
+            // the next start.
+            qCritical().noquote() << "Restore from" << journal.path() << "failed. Run: kscreen-doctor" << restoreArgs(physical).join(u' ');
+            continue;
+        }
+        // Some or all of the snapshotted outputs are not connected (unplugged,
+        // a KVM, a different monitor set): set the entry aside rather than pay
+        // a blocking restore for outputs that are not there at every start.
+        const QString stale = journal.path() + u".stale"_s;
+        KRdp::OutputRestoreJournal staleJournal(stale);
+        staleJournal.hold(entry);
+        journal.release(entry.owner, entry.pid);
+        const QString presentNames = names(outcome.present).join(u", ");
+        const QString missingNames = names(outcome.missing).join(u", ");
+        const QString what = outcome.present.isEmpty() ? u"none of its outputs is connected"_s
+            : outcome.presentVerified                  ? u"%1 restored, not connected: %2"_s.arg(presentNames, missingNames)
+                                                       : u"%1 enabled but not verified as snapshotted, not connected: %2"_s.arg(presentNames, missingNames);
+        qCritical().noquote() << "Output-restore journal entry of PID" << entry.pid << "set aside in" << stale << ":" << what << "- when" << missingNames
+                              << "is back, run: kscreen-doctor" << restoreArgs(physical).join(u' ');
     }
-    qWarning() << "A previous krdpserver" << (ownerPid > 0 ? u"(PID %1, gone)"_s.arg(ownerPid) : u"(unknown PID)"_s)
-               << "left the physical outputs replaced (state file present); restoring" << physical.size() << "outputs";
-    const auto outcome = restoreSnapshot(physical);
-    if (outcome.verified) {
-        file.remove();
-        qInfo() << "Physical outputs restored from the state file";
-        return true;
+    // The same journal holds console Fit/lease entries; undo those of a
+    // console worker that died in this user's session as well.
+    const auto console = journal.replay(
+        [] {
+            QByteArray json;
+            return run({u"-j"_s}, &json) ? std::optional<QByteArray>(json) : std::nullopt;
+        },
+        [](const QStringList &arguments) { return run(arguments); },
+        [](qint64 pid) { return ownerAlive(pid); },
+        [](const KRdp::OutputRestoreJournal::Entry &entry) { return entry.owner != GuardOwner; });
+    if (console.kept || !console.errors.isEmpty()) {
+        qWarning().noquote() << "Console output restore: restored" << console.restored << "kept" << console.kept << console.errors.join(u"; "_s);
+        ok = false;
     }
-    if (outcome.missing.isEmpty()) {
-        // Everything is connected but did not settle: worth another try at
-        // the next start.
-        qCritical().noquote() << "Restore from" << file.fileName() << "failed. Run: kscreen-doctor" << restoreArgs(physical).join(u' ');
-        return false;
-    }
-    // Some or all of the snapshotted outputs are not connected (unplugged,
-    // a KVM, a different monitor set): the rest cannot be restored until
-    // they are back, and what is connected may not even verify without
-    // them (a lone enabled output is renumbered and pinned to 0,0 by KWin,
-    // so it can never match its snapshot entry). Set the file aside
-    // whatever the connected subset did, rather than pay a blocking restore
-    // for outputs that are not there at every later start; the log says
-    // how to finish by hand.
-    const QString original = file.fileName();
-    const QString stale = original + u".stale"_s;
-    QFile::remove(stale);
-    const bool kept = file.rename(stale);
-    const QString presentNames = names(outcome.present).join(u", ");
-    const QString missingNames = names(outcome.missing).join(u", ");
-    const QString what = outcome.present.isEmpty() ? u"none of its outputs is connected"_s
-        : outcome.presentVerified                  ? u"%1 restored, not connected: %2"_s.arg(presentNames, missingNames)
-                                                   : u"%1 enabled but not verified as snapshotted, not connected: %2"_s.arg(presentNames, missingNames);
-    qCritical().noquote() << "State file" << original << (kept ? u"set aside as %1"_s.arg(stale) : u"could not be renamed"_s) << ":" << what << "- when" << missingNames
-                          << "is back, run: kscreen-doctor" << restoreArgs(physical).join(u' ')
-                          << "(or rename the file back and run krdpserver --restore-outputs; last resort: rm" << original << "once the monitors are right)";
-    return false;
+    return ok;
 }
