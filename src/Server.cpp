@@ -14,6 +14,7 @@
 #include <freerdp/freerdp.h>
 #include <winpr/ssl.h>
 
+#include "PipeWireAudioPlayback.h"
 #include "RdpConnection.h"
 
 #include "krdp_logging.h"
@@ -50,6 +51,13 @@ Server::Server(QObject *parent)
 Server::~Server()
 {
     stop();
+    // Join every session first: each one hands its playback endpoint to the
+    // background stop queue on close (AUD-D1). Then let those jobs restore
+    // the host's default sink before the process can exit.
+    d->sessions.clear();
+    if (!PipeWireAudioPlayback::waitForPendingStops(10000)) {
+        qCWarning(KRDP) << "PipeWire audio endpoints were still stopping at shutdown";
+    }
 }
 
 bool Server::tlsFilesUsable(const std::filesystem::path &certificatePath, const std::filesystem::path &keyPath)

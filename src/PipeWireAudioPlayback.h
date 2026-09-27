@@ -10,6 +10,8 @@
 #include <QString>
 #include <QVector>
 
+#include <memory>
+
 struct pw_stream;
 struct pw_thread_loop;
 
@@ -34,6 +36,23 @@ public:
     bool startIsolated(const QString &id);
     void stop();
     QByteArray take();
+
+    /**
+     * Stop and destroy @p endpoint on a background thread.
+     *
+     * stop() of an isolated endpoint runs up to four synchronous pw-metadata
+     * calls (1 s timeout each) plus two per moved stream, which must never
+     * block the RDP session thread. The job owns the endpoint and nothing
+     * else, so the caller may be destroyed immediately. Jobs run one at a
+     * time, in submission order.
+     */
+    static void stopAsync(std::unique_ptr<PipeWireAudioPlayback> endpoint);
+    /**
+     * Wait for every stopAsync() job queued so far. Returns false on timeout.
+     * A negative @p msecs waits without a deadline. Never call it from a
+     * stopAsync() job.
+     */
+    static bool waitForPendingStops(int msecs = -1);
 
 private:
     struct MovedStream {

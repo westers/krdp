@@ -1355,7 +1355,11 @@ bool RdpConnection::onClose()
         rdpsnd_server_context_free(d->rdpsnd);
         d->rdpsnd = nullptr;
     }
-    d->audioPlaybackEndpoint.reset();
+    // AUD-D1: an isolated endpoint restores the host's default sink with
+    // blocking pw-metadata calls (up to several seconds). The job owns the
+    // endpoint outright, so this connection can be destroyed before it ends;
+    // Server::~Server() drains the queue before the process exits.
+    PipeWireAudioPlayback::stopAsync(std::move(d->audioPlaybackEndpoint));
     if (d->cameraEnumerator) {
         d->cameraEnumerator->Close(d->cameraEnumerator);
         cam_dev_enum_server_context_free(d->cameraEnumerator);
