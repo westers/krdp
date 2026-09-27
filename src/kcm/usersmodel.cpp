@@ -8,6 +8,16 @@ UsersModel::UsersModel(KRDPServerSettings *settings, QObject *parent)
     : QAbstractListModel(parent)
     , m_settings(settings)
 {
+    // Load/Defaults change the settings behind the model's back.
+    connect(m_settings, &KRDPServerSettings::UsersChanged, this, [this]() {
+        beginResetModel();
+        endResetModel();
+        Q_EMIT loginMethodsChanged();
+    });
+    connect(m_settings, &KRDPServerSettings::SystemUserEnabledChanged, this, [this]() {
+        Q_EMIT dataChanged(index(0), index(0), {SystemUserEnabledRole});
+        Q_EMIT loginMethodsChanged();
+    });
 }
 
 int UsersModel::rowCount(const QModelIndex &parent) const
@@ -54,8 +64,8 @@ bool UsersModel::setData(const QModelIndex &index, const QVariant &value, int ro
         Q_ASSERT(false);
         return false;
     }
+    // SystemUserEnabledChanged emits dataChanged (see the constructor).
     m_settings->setSystemUserEnabled(value.toBool());
-    Q_EMIT dataChanged(index, index, {role});
     return true;
 }
 
@@ -75,7 +85,16 @@ QStringList UsersModel::users() const
 
 void UsersModel::setUsers(const QStringList &users)
 {
-    beginResetModel();
+    // UsersChanged resets the model (see the constructor).
     m_settings->setUsers(users);
-    endResetModel();
+}
+
+int UsersModel::additionalUserCount() const
+{
+    return int(m_settings->users().size());
+}
+
+int UsersModel::loginMethodCount() const
+{
+    return additionalUserCount() + (m_settings->systemUserEnabled() ? 1 : 0);
 }

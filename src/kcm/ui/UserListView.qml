@@ -31,15 +31,6 @@ ListView {
         ]
     }
 
-    Kirigami.PlaceholderMessage {
-        width: parent.width - (Kirigami.Units.largeSpacing * 4)
-        anchors.centerIn: parent
-        visible: userListView.count === 0
-        icon.name: "list-add-user-symbolic"
-        text: i18nc("@info:placeholder", "Add at least one user account to enable remote login")
-        explanation: xi18nc("@info:placeholder", "Click <interface>Add New…</interface> to add one")
-    }
-
     model: kcm.users
 
     section.property: "systemUser"

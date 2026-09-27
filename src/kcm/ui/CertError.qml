@@ -5,11 +5,17 @@
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
+// Only for a certificate the user manages: the server creates and renews its
+// own (AUD-K3), and the Security Certificate section shows its state.
 Kirigami.InlineMessage {
     id: certificateError
-    type: Kirigami.MessageType.Error
+    readonly property bool manual: !kcm.settings().autogenerateCertificates
+    readonly property bool broken: kcm.certificateState === "missing" || kcm.certificateState === "unusable" || kcm.certificateState === "expired"
+    type: broken ? Kirigami.MessageType.Error : Kirigami.MessageType.Warning
     position: Kirigami.InlineMessage.Position.Header
     Layout.fillWidth: true
-    // TODO better text
-    text: i18nc("@info:status", "Generating certificates automatically has failed!")
+    visible: manual && (broken || kcm.certificateState === "expiring")
+    text: broken
+        ? i18nc("@info:status", "The server cannot accept connections: the chosen TLS certificate is missing, unreadable, expired or does not match its key. Choose another one, or let the server create one automatically.")
+        : i18nc("@info:status %1 date", "The chosen TLS certificate expires on %1. Replace it, or let the server create one automatically.", kcm.certificateExpiry)
 }

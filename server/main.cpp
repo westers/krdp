@@ -8,8 +8,11 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDebug>
+#include <QDir>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
+#include <QHostInfo>
+#include <QSaveFile>
 #include <QRegularExpression>
 #include <QScreen>
 #include <QStandardPaths>
@@ -26,6 +29,8 @@
 #include "PhysicalOutputGuard.h"
 #include "RdpConnection.h"
 #include "Server.h"
+#include "ServerCertificate.h"
+#include "ServerSettingsPolicy.h"
 #include "SessionController.h"
 #include "VideoCodecSupport.h"
 #include "krdp_version.h"
@@ -154,6 +159,66 @@ QString envValueOrUnset(const char *name)
     const auto value = qgetenv(name);
     return value.isEmpty() ? u"unset"_s : QString::fromLatin1(value);
 }
+
+// AUD-K3: keep the managed certificate valid and say which one is in use.
+bool ensureManagedCertificate(const KRdp::ServerCertificate::Paths &paths)
+{
+    using namespace KRdp::ServerCertificate;
+    const auto result = ensure(paths, QHostInfo::localHostName(), QDateTime::currentDateTimeUtc());
+    if (!result.ok) {
+        qCritical().noquote() << "Could not create a TLS certificate at" << paths.certificate << "(" << describe(result.decision) << "):" << result.error;
+        return false;
+    }
+    if (result.generated) {
+        qInfo().noquote() << "Generated a new self-signed TLS certificate (" << describe(result.decision) << "):" << result.info.algorithm << "valid until"
+                          << result.info.notAfter.toString(Qt::ISODate) << "SHA-256 fingerprint" << result.info.sha256Fingerprint;
+    }
+    return true;
+}
+
+void logCertificate(const KRdp::ServerCertificate::Paths &paths, bool managed)
+{
+    const auto info = KRdp::ServerCertificate::inspect(paths);
+    if (!info.usable()) {
+        qWarning().noquote() << "TLS certificate" << paths.certificate << "or key" << paths.key << "is missing, unreadable or mismatched";
+        return;
+    }
+    qInfo().noquote() << "TLS certificate" << paths.certificate << (managed ? "(managed)" : "(configured)") << info.algorithm << "valid until"
+                      << info.notAfter.toString(Qt::ISODate) << "SHA-256 fingerprint" << info.sha256Fingerprint;
+    if (!managed && info.notAfter <= QDateTime::currentDateTimeUtc().addDays(KRdp::ServerCertificate::kRenewBeforeDays)) {
+        qWarning() << "The configured TLS certificate expires within" << KRdp::ServerCertificate::kRenewBeforeDays << "days; replace it";
+    }
+}
+
+// AUD-K6: record what this process loaded so the KCM can tell whether the
+// saved configuration needs a restart, even after it was closed and reopened.
+void writeLoadedState(const QString &configFilePath, const ServerConfig *config, KRdp::ServerSettings::Backend backend)
+{
+    using namespace KRdp::ServerSettings;
+    LoadedState state;
+    state.pid = QCoreApplication::applicationPid();
+    state.loadedAt = QDateTime::currentDateTimeUtc();
+    state.backend = backend;
+    state.settings = {config->listenPort(),
+                      config->listenAddress(),
+                      config->autogenerateCertificates(),
+                      config->certificate(),
+                      config->certificateKey(),
+                      config->users(),
+                      config->systemUserEnabled()};
+    const QString path = loadedStatePath(configFilePath);
+    QDir().mkpath(runtimeDirectory());
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        qWarning() << "Cannot record the loaded configuration in" << path << file.errorString();
+        return;
+    }
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    file.write(serializeLoadedState(state));
+    if (!file.commit()) {
+        qWarning() << "Cannot record the loaded configuration in" << path << file.errorString();
+    }
+}
 }
 
 int main(int argc, char **argv)
@@ -229,8 +294,28 @@ int main(int argc, char **argv)
         return 1;
     }
     auto port = parserValueWithDefault(u"port", config->listenPort());
-    auto certificate = std::filesystem::path(parserValueWithDefault(u"certificate", config->certificate()).toStdString());
-    auto certificateKey = std::filesystem::path(parserValueWithDefault(u"certificate-key", config->certificateKey()).toStdString());
+    if (!KRdp::ServerSettings::isValidListenPort(port)) {
+        // AUD-K4: never wrap a bad value into some other port.
+        qCritical() << "Listening port" << (parser.isSet(u"port"_s) ? parser.value(u"port"_s) : QString::number(config->listenPort()))
+                    << "is out of range; it must be between" << KRdp::ServerSettings::kMinPort << "and" << KRdp::ServerSettings::kMaxPort;
+        return 1;
+    }
+
+    // AUD-K3: with AutogenerateCertificates the server owns a certificate in
+    // its data directory and renews it; the command line or a configured pair
+    // (AutogenerateCertificates=false) is used as given.
+    const bool certificatePinnedByCli = parser.isSet(u"certificate"_s) || parser.isSet(u"certificate-key"_s);
+    const bool managedCertificate = !certificatePinnedByCli && config->autogenerateCertificates();
+    const KRdp::ServerCertificate::Paths certificatePaths = managedCertificate
+        ? KRdp::ServerCertificate::defaultPaths()
+        : KRdp::ServerCertificate::Paths{parserValueWithDefault(u"certificate", config->certificate()),
+                                         parserValueWithDefault(u"certificate-key", config->certificateKey())};
+    if (managedCertificate && !ensureManagedCertificate(certificatePaths)) {
+        return 1;
+    }
+    logCertificate(certificatePaths, managedCertificate);
+    auto certificate = std::filesystem::path(certificatePaths.certificate.toStdString());
+    auto certificateKey = std::filesystem::path(certificatePaths.key.toStdString());
 
     KRdp::Server server(nullptr);
 
@@ -255,7 +340,7 @@ int main(int argc, char **argv)
         const auto users = config->users();
         for (const auto &userName : users) {
             const auto readJob = new QKeychain::ReadPasswordJob(QLatin1StringView("KRDP"));
-            readJob->setKey(QLatin1StringView(userName.toLatin1()));
+            readJob->setKey(userName);
             QObject::connect(readJob, &QKeychain::ReadPasswordJob::finished, &server, [userName, readJob, &server]() {
                 KRdp::User user;
                 if (readJob->error() != QKeychain::Error::NoError) {
@@ -284,7 +369,17 @@ int main(int argc, char **argv)
     }
     qInfo() << "KWin primary output:" << SessionController::kwinPrimaryOutputName();
 
-    SessionController controller(&server, parser.isSet(u"plasma"_s) ? SessionController::SessionType::Plasma : SessionController::SessionType::Portal);
+#ifdef WITH_PLASMA_SESSION
+    const auto backendChoice = KRdp::ServerSettings::chooseBackend(parser.isSet(u"plasma"_s), config->monitorMode(), true);
+#else
+    const auto backendChoice = KRdp::ServerSettings::chooseBackend(false, config->monitorMode(), false);
+#endif
+    // AUD-K5: the stock unit passes no flag; pick Plasma when the mode needs it.
+    const bool plasmaSession = backendChoice.backend == KRdp::ServerSettings::Backend::Plasma;
+    if (!backendChoice.automaticReason.isEmpty()) {
+        qInfo().noquote() << "Using the Plasma capture backend:" << backendChoice.automaticReason;
+    }
+    SessionController controller(&server, plasmaSession ? SessionController::SessionType::Plasma : SessionController::SessionType::Portal);
     // A crash with MonitorMode=virtual/replace leaves the state file behind;
     // a clean session deletes it. Nothing to do in the common case.
     PhysicalOutputGuard::restoreFromStateFile();
@@ -312,13 +407,13 @@ int main(int argc, char **argv)
             monitorIndex = configuredMonitorIndex(config);
         }
 
-        if (virtualRequested && !parser.isSet(u"plasma"_s)) {
-            qWarning() << "MonitorMode=virtual needs --plasma (the portal session cannot create outputs); using workspace";
+        if (virtualRequested && !plasmaSession) {
+            qWarning() << "MonitorMode=virtual needs the Plasma backend (the portal session cannot create outputs); using workspace";
         }
         controller.setVirtualPolicy(SessionController::parseVirtualPolicy(config->virtualMonitorPolicy()));
         controller.setVirtualLayout(SessionController::parseVirtualLayout(config->virtualMonitorLayout()));
         controller.setVirtualFallbackSize(SessionController::parseSize(config->virtualMonitorFallbackSize()).value_or(QSize(1920, 1080)));
-        controller.setVirtualMode(virtualRequested && parser.isSet(u"plasma"_s));
+        controller.setVirtualMode(virtualRequested && plasmaSession);
 
         // The index goes first so that a multi -> workspace/specific switch
         // rebuilds the single session on the target it is about to use,
@@ -356,7 +451,6 @@ int main(int argc, char **argv)
     // It must NOT force a display refresh: a quality-slider write should never
     // touch the stream. setMonitorIndex() self-guards and only re-creates the
     // stream when the resolved target actually changed.
-    const bool plasmaSession = parser.isSet(u"plasma"_s);
     auto applyRuntimeConfig = [config, &server, &controller, monitorPinnedByCli, qualityPinnedByCli, plasmaSession, listenPort = server.port(), runtimeConfigPath]() {
         // KConfigSkeleton::read() only re-applies the in-memory KConfig cache
         // to the skeleton's items; it does NOT reload the file from disk (see
@@ -486,11 +580,7 @@ int main(int argc, char **argv)
         scheduleDisplayRefresh();
     });
 
-#ifdef WITH_PLASMA_SESSION
-    const auto sessionType = parser.isSet(u"plasma"_s) ? u"plasma"_s : u"portal"_s;
-#else
-    const auto sessionType = u"portal"_s;
-#endif
+    const auto sessionType = KRdp::ServerSettings::backendName(backendChoice.backend);
     const auto startupChromaPolicy = controller.chromaPolicyDefaults();
     const auto startupChromaText = QStringLiteral("%1/%2/%3").arg(startupChromaPolicy.motionGapMs).arg(startupChromaPolicy.restMs).arg(startupChromaPolicy.maxGapMs);
     qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9 codec=%10 chroma=%11 cameraLoopback=%12")
@@ -509,6 +599,18 @@ int main(int argc, char **argv)
 
     if (!server.start()) {
         return -1;
+    }
+    writeLoadedState(runtimeConfigPath, config, backendChoice.backend);
+
+    // AUD-K3: connections read the files per connection, so renewing a
+    // long-running server's certificate needs no restart.
+    QTimer certificateRenewTimer(&application);
+    if (managedCertificate) {
+        certificateRenewTimer.setInterval(std::chrono::hours(12));
+        QObject::connect(&certificateRenewTimer, &QTimer::timeout, &application, [certificatePaths]() {
+            ensureManagedCertificate(certificatePaths);
+        });
+        certificateRenewTimer.start();
     }
 
     return application.exec();

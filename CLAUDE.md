@@ -111,7 +111,8 @@ scripts/package-virtual-test.sh   # build-virtual-package/, prefix /opt/krdp-vir
 - `InputHandler`, `Cursor`, `Clipboard`, and PipeWire audio playback, microphone and camera round out
   the session. `LayoutControl` is the private `KRDPCTL` static virtual channel that the own client
   (`~/dev/krdp-client`) uses (OPT-044).
-- `src/kcm/`: System Settings KCM and `krdpserversettings.kcfg` (the `krdpserverrc` schema).
+- `src/kcm/`: System Settings KCM. The `krdpserverrc` schema is `server/krdpserversettings.kcfg`
+  (the only copy; the KCM generates its settings class from it).
 
 **`server/` → `krdpserver` plus a family of helper daemons.**
 - `krdpserver` (`main.cpp`, `SessionController`) is the user-service daemon. It maps `MonitorMode`

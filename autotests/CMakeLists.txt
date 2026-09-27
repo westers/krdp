@@ -483,3 +483,25 @@ target_include_directories(ClipboardHandoffTest SYSTEM PRIVATE ${FreeRDP_INCLUDE
 target_link_libraries(ClipboardHandoffTest PRIVATE Qt6::Test Qt6::Core KRdp)
 add_test(NAME ClipboardHandoffTest COMMAND ClipboardHandoffTest)
 set_tests_properties(ClipboardHandoffTest PROPERTIES TIMEOUT 30)
+
+# --- AUD-WS-K ---
+# K13: one krdpserverrc schema, owned by server/ and used by the KCM.
+add_test(NAME KcfgSingleSourceTest
+    COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/check-single-kcfg.cmake)
+
+# K3: certificate generation and renewal decisions with an injected clock.
+add_executable(ServerCertificateTest ServerCertificateTest.cpp)
+target_include_directories(ServerCertificateTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(ServerCertificateTest PRIVATE Qt6::Test Qt6::Core KRdpServerCertificate freerdp winpr)
+add_test(NAME ServerCertificateTest COMMAND ServerCertificateTest)
+
+# K4/K5: port range and backend choice shared by krdpserver and the KCM.
+add_executable(ServerSettingsPolicyTest ServerSettingsPolicyTest.cpp)
+target_include_directories(ServerSettingsPolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ServerSettingsPolicyTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME ServerSettingsPolicyTest COMMAND ServerSettingsPolicyTest)
+
+# K1/K2/K5/K6/K9/K10: the KCM's logic (kcm_krdpserver_core), with a fake keychain.
+add_executable(KcmSettingsTest KcmSettingsTest.cpp)
+target_link_libraries(KcmSettingsTest PRIVATE Qt6::Test Qt6::Core kcm_krdpserver_core)
+add_test(NAME KcmSettingsTest COMMAND KcmSettingsTest)
