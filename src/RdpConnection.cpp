@@ -37,6 +37,7 @@
 #include <freerdp/freerdp.h>
 #include <freerdp/server/cliprdr.h>
 #include <freerdp/server/audin.h>
+#include <freerdp/server/disp.h>
 #include <freerdp/server/rdpsnd.h>
 #include "ExternalAudioQueue.h"
 #include <freerdp/server/server-common.h>
@@ -779,6 +780,15 @@ public:
     // emitted, read from wherever.
     std::atomic<bool> controlChannelOpen = false;
     LayoutControl::Deframer controlDeframer;
+
+    // MS-RDPEDISP (setDisplayControlEnabled()). The context is created, used
+    // and freed on the session thread; its own reader thread only calls
+    // DispMonitorLayout, which emits displayLayoutRequested().
+    std::atomic<bool> displayControlEnabled = false;
+    bool displayControlTried = false;
+    DispServerContext *displayControl = nullptr;
+    std::atomic<UINT32> displayControlChannelId = 0;
+    std::atomic<bool> displayControlCapsPending = false;
 };
 
 RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
@@ -860,6 +870,22 @@ void RdpConnection::setState(KRdp::RdpConnection::State newState)
     }
 
     Q_EMIT stateChanged(newState);
+}
+
+void RdpConnection::closeWithErrorInfo(quint32 errorInfo)
+{
+    if (d->peer && d->peer->context && d->peer->context->rdp) {
+        freerdp_set_error_info(d->peer->context->rdp, errorInfo);
+        // As for AuthenticationFailed: a client that already processed the
+        // Deactivate All that Close() sends first ignores a later Set Error Info.
+        freerdp_send_error_info(d->peer->context->rdp);
+    }
+    close(CloseReason::None);
+}
+
+void RdpConnection::setDisplayControlEnabled(bool enabled)
+{
+    d->displayControlEnabled.store(enabled);
 }
 
 void RdpConnection::close(RdpConnection::CloseReason reason)
@@ -1097,6 +1123,79 @@ void RdpConnection::submitExternalAudio(const QByteArray &pcm)
         return;
     }
     d->externalAudio.submit(pcm);
+}
+
+void RdpConnection::openDisplayControl()
+{
+    if (d->displayControlTried || !d->displayControlEnabled.load()) {
+        return;
+    }
+    d->displayControlTried = true;
+    const auto vcm = reinterpret_cast<PeerContext *>(d->peer->context)->virtualChannelManager;
+    auto *context = disp_server_context_new(vcm);
+    if (!context) {
+        qCWarning(KRDP) << "Display Control: cannot create the server context";
+        return;
+    }
+    context->custom = this;
+    context->rdpcontext = d->peer->context;
+    // RDPGFX's limits: 16 monitors; FreeRDP checks each one against 8192.
+    context->MaxNumMonitors = ClientDisplay::MaxMonitors;
+    context->MaxMonitorAreaFactorA = ClientDisplay::MaxDesktopDimension;
+    context->MaxMonitorAreaFactorB = ClientDisplay::MaxDesktopDimension;
+    context->ChannelIdAssigned = [](DispServerContext *context, UINT32 channelId) -> BOOL {
+        static_cast<RdpConnection *>(context->custom)->d->displayControlChannelId.store(channelId);
+        return TRUE;
+    };
+    context->DispMonitorLayout = [](DispServerContext *context, const DISPLAY_CONTROL_MONITOR_LAYOUT_PDU *pdu) -> UINT {
+        // The channel's reader thread. FreeRDP has already checked the count
+        // against MaxNumMonitors and each size against the protocol's limits.
+        QList<VideoMonitor> monitors;
+        for (UINT32 i = 0; pdu && i < pdu->NumMonitors; ++i) {
+            const auto &monitor = pdu->Monitors[i];
+            monitors.append(VideoMonitor{
+                .geometry = QRect(monitor.Left, monitor.Top, int(monitor.Width), int(monitor.Height)),
+                .primary = (monitor.Flags & DISPLAY_CONTROL_MONITOR_PRIMARY) != 0,
+            });
+        }
+        auto *connection = static_cast<RdpConnection *>(context->custom);
+        qCInfo(KRDP) << "Display Control: client asks for" << monitors.size() << "monitor(s)"
+                     << (monitors.isEmpty() ? QSize() : monitors.first().geometry.size());
+        Q_EMIT connection->displayLayoutRequested(monitors);
+        return CHANNEL_RC_OK;
+    };
+    // The caps PDU may only go out once the client accepted the channel: the
+    // channel manager reports every DVC's creation status on the session thread.
+    const psDVCCreationStatusCallback created = [](void *userdata, UINT32 channelId, INT32 creationStatus) -> BOOL {
+        auto *p = static_cast<Private *>(userdata);
+        if (p && channelId != 0 && channelId == p->displayControlChannelId.load() && creationStatus >= 0) {
+            p->displayControlCapsPending.store(true);
+        }
+        return TRUE;
+    };
+    WTSVirtualChannelManagerSetDVCCreationCallback(vcm, created, d.get());
+    if (context->Open(context) != CHANNEL_RC_OK) {
+        qCWarning(KRDP) << "Display Control: cannot open the channel";
+        WTSVirtualChannelManagerSetDVCCreationCallback(vcm, nullptr, nullptr);
+        disp_server_context_free(context);
+        return;
+    }
+    d->displayControl = context;
+}
+
+void RdpConnection::closeDisplayControl()
+{
+    if (!d->displayControl) {
+        return;
+    }
+    if (d->peer && d->peer->context) {
+        const auto vcm = reinterpret_cast<PeerContext *>(d->peer->context)->virtualChannelManager;
+        WTSVirtualChannelManagerSetDVCCreationCallback(vcm, nullptr, nullptr);
+    }
+    // Joins the channel's reader thread before freeing.
+    disp_server_context_free(d->displayControl);
+    d->displayControl = nullptr;
+    d->displayControlCapsPending.store(false);
 }
 
 void RdpConnection::openControlChannel()
@@ -1379,6 +1478,7 @@ void RdpConnection::run(std::stop_token stopToken)
             auto state = WTSVirtualChannelManagerGetDrdynvcState(context->virtualChannelManager);
             // Dynamic channels can only be set up properly once the dynamic channel channel is properly setup.
             if (state == DRDYNVC_STATE_READY) {
+                openDisplayControl();
                 if (d->videoStream->initialize()) {
                     d->videoStream->setEnabled(true);
                     setState(State::Streaming);
@@ -1394,6 +1494,13 @@ void RdpConnection::run(std::stop_token stopToken)
         if (WaitForSingleObject(channelEvent, 0) == WAIT_OBJECT_0 && WTSVirtualChannelManagerCheckFileDescriptor(context->virtualChannelManager) != TRUE) {
             qCDebug(KRDP) << "Unable to check Virtual Channel Manager file descriptor, closing connection";
             break;
+        }
+
+        if (d->displayControl && d->displayControlCapsPending.exchange(false)) {
+            // No reply is expected: the client starts sending layouts when it wants a change.
+            if (d->displayControl->DisplayControlCaps(d->displayControl) != CHANNEL_RC_OK) {
+                qCWarning(KRDP) << "Display Control: cannot send the capabilities";
+            }
         }
 
         if (d->peer->connected && WTSVirtualChannelManagerIsChannelJoined(context->virtualChannelManager, CLIPRDR_SVC_CHANNEL_NAME)) {
@@ -1596,6 +1703,7 @@ bool RdpConnection::onClose()
         d->consentChanged(device);
     }
     retireMicrophone();
+    closeDisplayControl();
     {
         std::lock_guard lock(d->controlChannelMutex);
         if (d->controlChannel) {

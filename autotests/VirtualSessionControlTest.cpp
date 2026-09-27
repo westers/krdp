@@ -496,6 +496,44 @@ private Q_SLOTS:
         QTRY_COMPARE(supervisor.list(1000).first().phase, Phase::Absent);
         QCOMPARE(refusedCreates, 1); // List/attach/reconnect/stop never call admission.
     }
+    // AUD-D4: "most recently used" is the last attach or detach, not creation or id order.
+    void stockClientPicksMostRecentlyUsedAndOnlyItsOwnersDesktops()
+    {
+        QList<VirtualSessionRegistry::Handle> handles;
+        VirtualSessionSupervisor supervisor([&](quint32 uid, const auto &created) {
+            handles.append(created);
+            return sleeper(uid, created);
+        });
+        VirtualSessionControl control(supervisor, {});
+        const auto first = control.request(1000, 1, command(QStringLiteral("c1"), QStringLiteral("create"))).value(QStringLiteral("session")).toString();
+        const auto second = control.request(1000, 1, command(QStringLiteral("c2"), QStringLiteral("create"))).value(QStringLiteral("session")).toString();
+        const auto foreign = control.request(2000, 9, command(QStringLiteral("c3"), QStringLiteral("create"))).value(QStringLiteral("session")).toString();
+        QCOMPARE(handles.size(), 3);
+        for (const auto &handle : handles) {
+            bool ready = false;
+            QTRY_VERIFY(ready || (ready = supervisor.captureReady(handle)));
+        }
+        // Use `second`, then `first`: `first` is the most recent.
+        QVERIFY(control.request(1000, 5, command(QStringLiteral("a2"), QStringLiteral("attach"), second)).value(QStringLiteral("ok")).toBool());
+        QVERIFY(control.request(1000, 5, command(QStringLiteral("d2"), QStringLiteral("detach"))).value(QStringLiteral("ok")).toBool());
+        QVERIFY(control.request(1000, 6, command(QStringLiteral("a1"), QStringLiteral("attach"), first)).value(QStringLiteral("ok")).toBool());
+        control.disconnected(6);
+        const auto result = control.attachStockClient(1000, 7, {});
+        QCOMPARE(result.kind, VirtualSessionControl::StockResult::Kind::Attached);
+        QCOMPARE(result.session, first);
+        QCOMPARE(control.attachment(7)->id, first);
+        // Another user's desktop is never a candidate; an unauthenticated one gets nothing.
+        QCOMPARE(control.attachStockClient(2000, 8, {}).session, foreign);
+        QCOMPARE(control.attachStockClient(std::nullopt, 10, {}).kind, VirtualSessionControl::StockResult::Kind::Refused);
+        // The per-user limit is a Limit refusal (the host reports it; ERRINFO_CB_DESTINATION_POOL_NOT_FREE).
+        control.setCreateHandler([](quint32) { return VirtualSessionControl::CreateResult(VirtualSessionControl::CreateResult::Refusal::Limit); });
+        const auto limited = control.attachStockClient(3000, 11, {});
+        QCOMPARE(limited.kind, VirtualSessionControl::StockResult::Kind::Refused);
+        QCOMPARE(limited.reason, VirtualSessionControl::StockResult::Reason::Limit);
+        // Our own client's create with the same refusal keeps its message.
+        QCOMPARE(control.request(3000, 12, command(QStringLiteral("c4"), QStringLiteral("create"))).value(QStringLiteral("message")).toString(),
+                 QStringLiteral("session creation refused"));
+    }
     void boundedReplayHistoryNeverReexecutesOldMutation()
     {
         VirtualSessionSupervisor supervisor(sleeper);

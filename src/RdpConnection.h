@@ -119,6 +119,29 @@ public:
     void close(CloseReason reason = CloseReason::None);
 
     /**
+     * Close the connection with a standard MS-RDPBCGR Set Error Info code
+     * (an `ERRINFO_*` value), sent at once and again by the close sequence,
+     * so that any stock client (mstsc, FreeRDP, Remmina) shows the reason.
+     * Callable from the main thread, like close().
+     */
+    void closeWithErrorInfo(quint32 errorInfo);
+
+    /**
+     * Offer the standard Display Control channel (MS-RDPEDISP) once DRDYNVC is
+     * ready, so a client can ask for a new desktop size by resizing its window.
+     * Off by default; call before the client authenticates. The requests
+     * arrive as displayLayoutRequested().
+     */
+    void setDisplayControlEnabled(bool enabled);
+    /**
+     * A DISPLAYCONTROL_MONITOR_LAYOUT_PDU from the client: the monitors it
+     * would like, in its own coordinates (already range-checked by FreeRDP).
+     * Emitted on the Display Control channel's thread; connect with
+     * Qt::QueuedConnection.
+     */
+    Q_SIGNAL void displayLayoutRequested(const QList<KRdp::VideoMonitor> &monitors);
+
+    /**
      * The InputHandler instance associated with this session.
      */
     InputHandler *inputHandler() const;
@@ -279,6 +302,10 @@ private:
     void openControlChannel();
     /** Session thread: hand every queued `KRDPCTL` message to the deframer. False on a protocol violation. */
     bool readControlChannel();
+
+    /** Session thread: open MS-RDPEDISP once DRDYNVC is ready (setDisplayControlEnabled()). */
+    void openDisplayControl();
+    void closeDisplayControl();
 
     class Private;
     const std::unique_ptr<Private> d;

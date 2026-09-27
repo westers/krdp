@@ -413,6 +413,23 @@ KCM.ScrollViewKCM {
             }
         }
 
+        SettingComboBox {
+            id: stockClientPolicy
+            Kirigami.FormData.label: i18nc("@label:listbox", "Standard clients on virtual desktops:")
+            configObject: root.settings
+            settingName: "virtualStockClientPolicy"
+            model: [
+                {text: i18nc("@item:inlistbox", "Resume my latest desktop, or start a new one"), value: "attach-or-create"},
+                {text: i18nc("@item:inlistbox", "Turn them away"), value: "refuse"}
+            ]
+        }
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 22
+            wrapMode: Text.WordWrap
+            font: Kirigami.Theme.smallFont
+            text: i18nc("@info", "For the virtual desktop service. Clients such as the Windows Remote Desktop app, FreeRDP and Remmina can't pick a virtual desktop themselves. A new desktop matches the size of their screen. The KRDP client always lets you choose.")
+        }
+
         QQC2.CheckBox {
             text: i18nc("@option:check", "Wake the display when a client connects")
             checked: root.settings.wakeDisplayOnConnect

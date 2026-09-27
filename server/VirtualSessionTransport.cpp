@@ -66,6 +66,21 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     m_externalMicrophone = connection->enableExternalMicrophone();
     connection->setDeviceEnabled(MediaDevice::Playback, false);
     connection->setDeviceEnabled(MediaDevice::Microphone, false);
+    // A standard client resizes the desktop through MS-RDPEDISP (its window
+    // size); ours uses `virtual-resize` and never joins that channel.
+    connection->setDisplayControlEnabled(true);
+    connect(connection, &RdpConnection::displayLayoutRequested, this, [this](const QList<VideoMonitor> &monitors) {
+        if (m_connection) displayLayout(monitors, m_connection->authenticatedPamUid());
+    }, Qt::QueuedConnection);
+    // AUD-D4: the same 3 s first-record gate krdpserver has. A client that
+    // sends no `virtual-session` record by then gets the broker's choice.
+    m_stockGate.setSingleShot(true);
+    m_stockGate.setInterval(3000);
+    connect(&m_stockGate, &QTimer::timeout, this, [this] {
+        if (!m_virtualSessionSeen) stockClientBind(m_stockUid);
+    });
+    m_stockWait.setInterval(250);
+    connect(&m_stockWait, &QTimer::timeout, this, &VirtualSessionTransport::stockWaitTick);
     m_microphoneDeadline.setSingleShot(true);
     m_microphoneDeadline.setInterval(4000);
     connect(&m_microphoneDeadline, &QTimer::timeout, this, [this] {
@@ -135,7 +150,12 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         if (m_connection) deliverControlRecord(record, m_connection->authenticatedPamUid());
     }, Qt::QueuedConnection);
     // Emitted once the client authenticated (AUD-S1), with KRDPCTL open if it joined it.
-    connect(connection, &RdpConnection::clientDisplayInfoReceived, this, [this] { sendCapabilities(); }, Qt::QueuedConnection);
+    connect(connection, &RdpConnection::clientDisplayInfoReceived, this, [this] {
+        const QPointer<VirtualSessionTransport> alive(this);
+        sendCapabilities();
+        if (alive && m_connection && m_connection->isAuthenticated())
+            startStockGate(m_connection->hasControlChannel(), m_connection->authenticatedPamUid());
+    }, Qt::QueuedConnection);
     // The connection's own channel work fails after the broker said `on`: the
     // client refused AUDIN, or never joined RDPSND. Pass it on.
     connect(connection, &RdpConnection::deviceState, this, [this](MediaDevice device, const DeviceStatus &status, const QString &) {
@@ -184,6 +204,11 @@ bool VirtualSessionTransport::attachmentMatches(const VirtualSessionRegistry::Ha
 
 bool VirtualSessionTransport::bind()
 {
+    return bind(m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+}
+
+bool VirtualSessionTransport::bind(std::optional<quint32> uid)
+{
     const QPointer<VirtualSessionTransport> alive(this);
     if (m_revoking || !m_control) return false;
     const auto handle = m_control->attachment(m_client);
@@ -192,19 +217,24 @@ bool VirtualSessionTransport::bind()
         return alive && m_connection && attachmentMatches(*handle);
     };
     if (m_handle && m_handle->id == handle->id && m_handle->manager == handle->manager
-        && m_handle->generation == handle->generation) return authorized();
+        && m_handle->generation == handle->generation) return authorized(uid);
     // Resolution is host code and may destroy this (including its callback).
     const auto resolve = m_resolve;
     const QPointer<ConsoleWorkerEndpoint> endpoint = resolve ? resolve(*handle) : nullptr;
     if (!stillAttached()) return false;
-    const auto uid = m_connection ? m_connection->authenticatedPamUid() : std::nullopt;
     if (!endpoint || !endpoint->ready() || !uid || !*uid || endpoint->target().uid != *uid
         || endpoint->target().adapter != ConsoleSeat::Adapter::VirtualUser || endpoint->target().sessionId != handle->id
         || m_sequence == std::numeric_limits<quint64>::max()) return false;
-    return activateBinding(*handle, endpoint);
+    return activateBinding(*handle, endpoint, uid);
 }
 
 bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Handle &expected, QPointer<ConsoleWorkerEndpoint> endpoint)
+{
+    return activateBinding(expected, endpoint, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+}
+
+bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Handle &expected, QPointer<ConsoleWorkerEndpoint> endpoint,
+    std::optional<quint32> uid)
 {
     // bind() has validated endpoint and PAM identity. Keep the continuation
     // separate so callback invalidation can be tested without fabricating PAM.
@@ -240,6 +270,10 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         }
         m_session.submitFrame(frame);
         if (!alive || !m_connection) return;
+        if (m_displaySize && frame.isKeyFrame) {
+            applyDisplayLayout(m_connection->authenticatedPamUid());
+            if (!alive || !m_connection) return;
+        }
         const auto reply = topologyFrame(frame, m_connection->authenticatedPamUid());
         if (alive && m_connection && !reply.isEmpty()) sendReply(reply);
     }));
@@ -320,9 +354,9 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     m_connection->videoStream()->setEnabled(true);
     if (!bindingCurrent()) return false;
     endpoint->requestKeyFrame();
-    if (!bindingCurrent() || !authorized()) return false;
-    applyStandardMedia(m_connection->authenticatedPamUid());
-    return bindingCurrent() && authorized();
+    if (!bindingCurrent() || !authorized(uid)) return false;
+    applyStandardMedia(uid);
+    return bindingCurrent() && authorized(uid);
 }
 
 void VirtualSessionTransport::applyStandardMedia(std::optional<quint32> uid)
@@ -596,6 +630,168 @@ void VirtualSessionTransport::deliverControlRecord(const QJsonObject &incoming, 
         connection->sendControlRecord(LayoutControl::withRequestId(response, requestId.value));
 }
 
+void VirtualSessionTransport::startStockGate(bool controlChannel, std::optional<quint32> uid)
+{
+    if (m_stockStarted) return;
+    m_stockStarted = true;
+    m_stockUid = uid;
+    if (m_virtualSessionSeen) return;
+    if (controlChannel) {
+        m_stockGate.start();
+        return;
+    }
+    stockClientBind(uid);
+}
+
+void VirtualSessionTransport::stockClientBind(std::optional<quint32> uid)
+{
+    if (m_virtualSessionSeen || m_revoking || !m_control || !m_connection || !uid || !*uid) return;
+    const QPointer<VirtualSessionTransport> alive(this);
+    const auto policyOf = m_stockPolicy;
+    const auto policy = policyOf ? policyOf(*uid) : VirtualStockClient::Policy::AttachOrCreate;
+    if (!alive || !m_control || !m_connection) return;
+    if (policy == VirtualStockClient::Policy::Refuse) {
+        qInfo() << "Virtual stock client" << m_client << "(uid" << *uid << "): refused by VirtualStockClientPolicy";
+        refuseStockClient(VirtualStockClient::Refusal::Policy);
+        return;
+    }
+    const auto info = m_clientDisplayInfo ? m_clientDisplayInfo() : m_connection->clientDisplayInfo();
+    const auto caps = m_control->initialLayoutCapabilities();
+    VirtualStockClient::Limits limits{.maxOutputs = caps.maxOutputs};
+    if (caps.maxOutputDimension > 0) limits.maxOutputDimension = caps.maxOutputDimension;
+    if (caps.maxAtlasDimension > 0) limits.maxAtlasDimension = caps.maxAtlasDimension;
+    const auto outputs = VirtualStockClient::initialOutputs(info, limits);
+    const auto result = m_control->attachStockClient(uid, m_client, outputs);
+    if (!alive) return;
+    qInfo() << "Virtual stock client" << m_client << "(uid" << *uid << "): desktop" << result.session
+            << (result.kind == VirtualSessionControl::StockResult::Kind::Attached ? "attached"
+                : result.kind == VirtualSessionControl::StockResult::Kind::Starting ? "starting" : "refused")
+            << "first layout" << outputs.size() << "output(s)" << (outputs.isEmpty() ? QSize() : outputs.first().pixels);
+    stockResult(result, uid);
+}
+
+void VirtualSessionTransport::stockResult(const VirtualSessionControl::StockResult &result, std::optional<quint32> uid)
+{
+    using Kind = VirtualSessionControl::StockResult::Kind;
+    using Reason = VirtualSessionControl::StockResult::Reason;
+    switch (result.kind) {
+    case Kind::Attached:
+        m_stockWait.stop();
+        stockAttached(uid);
+        return;
+    case Kind::Starting:
+        m_stockSession = result.session;
+        if (!m_stockWait.isActive()) {
+            m_stockWaitAge.start();
+            m_stockWait.start();
+        }
+        return;
+    case Kind::Refused:
+        m_stockWait.stop();
+        refuseStockClient(result.reason == Reason::Limit ? VirtualStockClient::Refusal::NoFreeSlot
+                          : result.reason == Reason::Maintenance ? VirtualStockClient::Refusal::Policy
+                                                                 : VirtualStockClient::Refusal::StartFailed);
+        return;
+    }
+}
+
+void VirtualSessionTransport::stockWaitTick()
+{
+    if (m_virtualSessionSeen || !m_control || !m_connection || m_stockSession.isEmpty()) {
+        m_stockWait.stop();
+        return;
+    }
+    if (m_stockWaitAge.isValid() && m_stockWaitAge.elapsed() > m_stockWaitLimitMs) {
+        m_stockWait.stop();
+        qWarning() << "Virtual stock client" << m_client << ": desktop" << m_stockSession << "did not become ready in time";
+        refuseStockClient(VirtualStockClient::Refusal::StartTimeout);
+        return;
+    }
+    const QPointer<VirtualSessionTransport> alive(this);
+    const auto result = m_control->attachStarted(m_stockUid, m_client, m_stockSession);
+    if (alive) stockResult(result, m_stockUid);
+}
+
+void VirtualSessionTransport::stockAttached(std::optional<quint32> uid)
+{
+    const QPointer<VirtualSessionTransport> alive(this);
+    const bool bound = bind(uid);
+    if (!alive || !m_connection) return;
+    if (!bound) {
+        qWarning() << "Virtual stock client" << m_client << ": authenticated virtual capture unavailable";
+        closed();
+        if (alive) refuseStockClient(VirtualStockClient::Refusal::StartFailed);
+        return;
+    }
+    applyDisplayLayout(uid);
+}
+
+void VirtualSessionTransport::refuseStockClient(VirtualStockClient::Refusal refusal)
+{
+    m_stockGate.stop();
+    m_stockWait.stop();
+    const quint32 code = VirtualStockClient::errorInfo(refusal);
+    qWarning().noquote() << "Virtual client" << m_client << "closed with ERRINFO" << QStringLiteral("0x%1").arg(code, 8, 16, QLatin1Char('0'));
+    const QPointer<VirtualSessionTransport> alive(this);
+    if (m_refused) m_refused(code);
+    if (alive && m_connection) m_connection->closeWithErrorInfo(code);
+}
+
+void VirtualSessionTransport::displaced()
+{
+    // Queued: the takeover that caused this is still on the stack.
+    QTimer::singleShot(0, this, [this] { refuseStockClient(VirtualStockClient::Refusal::Displaced); });
+}
+
+void VirtualSessionTransport::displayLayout(const QList<VideoMonitor> &monitors, std::optional<quint32> uid)
+{
+    const auto size = VirtualStockClient::displayControlSize(monitors);
+    if (!size) {
+        qInfo() << "Display Control: ignoring a layout of" << monitors.size() << "monitors (one-output desktops only)";
+        return;
+    }
+    m_displaySize = size; // The latest window size wins; applied once the desktop is bound and idle.
+    applyDisplayLayout(uid);
+}
+
+void VirtualSessionTransport::applyDisplayLayout(std::optional<quint32> uid)
+{
+    if (!m_displaySize || !authorized(uid) || !m_endpoint || !m_handle) return;
+    if (!m_resizeId.isEmpty() || !m_topologyResizeId.isEmpty()) return; // retried when that one finishes
+    double scale = 1.0;
+    if (m_topologyResolve) {
+        const QPointer<VirtualSessionTransport> alive(this);
+        const auto topology = m_topologyResolve(*m_handle);
+        if (!alive || !authorized(uid)) return;
+        if (!topology) return; // not published yet: retried on the next keyframe
+        if (topology->outputs.size() != 1) {
+            qInfo() << "Display Control: the desktop has" << topology->outputs.size() << "outputs; resize it from the KRDP client";
+            m_displaySize.reset();
+            return;
+        }
+        const auto &output = topology->outputs.first().output;
+        if (output.nativePixels == *m_displaySize) {
+            m_displaySize.reset();
+            return;
+        }
+        scale = VirtualResize::normalizedScale(output.scale);
+    }
+    const QSize target = *std::exchange(m_displaySize, std::nullopt);
+    if (!VirtualResize::validRequest(target, scale) || m_nextResizeId == std::numeric_limits<quint64>::max()) return;
+    m_resizeId = u"display-control-%1"_s.arg(++m_displayResizes);
+    m_resizeFromDisplay = true;
+    m_resizeWorkerId = ++m_nextResizeId;
+    m_resizeGeneration = m_controlGeneration;
+    const auto generation = m_resizeGeneration;
+    const auto workerId = m_resizeWorkerId;
+    m_resizeDeadline.start();
+    qInfo() << "Display Control: resizing the virtual desktop to" << target << "scale" << scale;
+    const QPointer<VirtualSessionTransport> alive(this);
+    const bool dispatched = m_endpoint->resize({workerId, generation, u"virtual-desktop"_s, target, scale});
+    if (!alive) return;
+    if (!dispatched && m_resizeWorkerId == workerId) clearResize();
+}
+
 void VirtualSessionTransport::sendReply(const QJsonObject &record)
 {
     if (!m_connection) return;
@@ -635,6 +831,7 @@ void VirtualSessionTransport::clearResize()
     m_resizeId.clear();
     m_resizeWorkerId = 0;
     m_resizeGeneration = 0;
+    m_resizeFromDisplay = false;
 }
 
 void VirtualSessionTransport::clearTopology()
@@ -1439,7 +1636,14 @@ QJsonObject VirtualSessionTransport::resizeResult(const ConsoleWorkerWire::Resiz
     if (m_resizeId.isEmpty() || result.requestId != m_resizeWorkerId || result.generation != m_resizeGeneration) return {};
     const QString id = m_resizeId;
     const bool current = m_controlGeneration == result.generation && authorized(uid);
+    const bool fromDisplay = m_resizeFromDisplay;
     clearResize();
+    if (fromDisplay) {
+        // Nobody asked over KRDPCTL: no reply. A newer window size may be waiting.
+        if (!result.error.isEmpty()) qWarning().noquote() << "Display Control resize failed:" << result.error;
+        if (current) applyDisplayLayout(uid);
+        return {};
+    }
     return current ? VirtualResizeProtocol::reply(id, result.error) : QJsonObject{};
 }
 
@@ -1452,6 +1656,12 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         const QString type = record.value(u"type"_s).toString();
         if (type == u"device"_s) m_deviceRecordSeen = true;
         else if (type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s)) m_spokeKrdpctl = true;
+        if (type == u"virtual-session"_s) {
+            // Our own client chooses its desktop itself (AUD-D4 applies to stock clients only).
+            m_virtualSessionSeen = true;
+            m_stockGate.stop();
+            m_stockWait.stop();
+        }
     }
     if (m_revoking) return {};
     if (record.value(u"type"_s) == u"topology-query"_s) {

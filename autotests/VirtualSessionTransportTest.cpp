@@ -5,6 +5,7 @@
 #include <VideoStream.h>
 #include <QLocalSocket>
 #include <QTemporaryDir>
+#include <freerdp/error.h>
 #include <QEvent>
 #include <limits>
 #include "VirtualSessionTransport.h"
@@ -1696,6 +1697,364 @@ private Q_SLOTS:
         QVERIFY(!transport.m_playback);
         QCOMPARE(sequence, quint64(0));
     }
+    // --- AUD-D4: stock RDP clients (no `virtual-session` record) ---
+private:
+    struct Stock {
+        VirtualSessionSupervisor *supervisor = nullptr;
+        VirtualSessionControl *control = nullptr;
+        std::function<VirtualSessionControl::CreateResult(quint32)> create; // unset: supervisor.create
+        QList<VirtualSessionControl::InitialOutputs> created;
+        QList<VirtualSessionRegistry::Handle> handles; // what supervisor.create returned for them
+        QMap<quint64, QList<quint32>> refused; // per client: the ERRINFO codes it was closed with
+        QList<quint64> displaced;
+        ClientDisplay::Info display{QSize(1366, 768), {}};
+        VirtualSessionTransport::StockPolicy policy;
+        std::function<VirtualSessionRegistry::Handle(const VirtualSessionRegistry::Handle &)> ready;
+        std::function<VirtualSessionTransport *(quint64)> connect;
+        std::map<QString, QLocalSocket *> workers; // per desktop id
+        bool failLaunch = false;
+    };
+    void stockFixture(const std::function<void(Stock &)> &test)
+    {
+        m_workerDeframer = {};
+        Stock stock;
+        // failLaunch: the desktop's process exits at once, so it is Failed, never ready.
+        VirtualSessionSupervisor supervisor([&stock](quint32, const auto &) -> std::optional<VirtualSessionSupervisor::Launch> {
+            if (stock.failLaunch) return VirtualSessionSupervisor::Launch{u"/usr/bin/false"_s, {}, {}, {}};
+            return VirtualSessionSupervisor::Launch{u"/usr/bin/sleep"_s, {u"60"_s}, {}, {}};
+        });
+        std::map<quint64, QPointer<VirtualSessionTransport>> transports;
+        VirtualSessionControl control(supervisor, [&](quint64 client, const auto &) {
+            if (auto transport = transports[client]) transport->revoke();
+        });
+        control.setDisplacedHandler([&](quint64 client) {
+            stock.displaced.append(client);
+            if (auto transport = transports[client]) transport->displaced();
+        });
+        control.setSelectedCreateHandler([&](quint32 uid, const auto &outputs) {
+            stock.created.append(outputs);
+            if (stock.create) return stock.create(uid);
+            const auto handle = supervisor.create(uid);
+            if (handle) stock.handles.append(*handle);
+            return VirtualSessionControl::CreateResult(handle);
+        });
+        control.setInitialLayoutPreviewCapabilities({.maxOutputs = 16, .maxOutputDimension = 4096, .maxAtlasDimension = 8192});
+        QTemporaryDir dir;
+        std::vector<std::unique_ptr<ConsoleWorkerEndpoint>> endpoints;
+        std::vector<std::unique_ptr<QLocalSocket>> workers;
+        Server server;
+        std::vector<std::unique_ptr<RdpConnection>> connections;
+        quint64 sequence = 0;
+        stock.supervisor = &supervisor;
+        stock.control = &control;
+        // A ready desktop: its capture is proven and an authenticated worker is connected.
+        // The worker endpoint first, as in the host, where readiness is proven by its frames.
+        // (Waits are checked by the tests themselves: attachment, authorized().)
+        stock.ready = [&](const VirtualSessionRegistry::Handle &handle) {
+            auto endpoint = std::make_unique<ConsoleWorkerEndpoint>();
+            const QByteArray token(32, 't');
+            endpoint->listen(dir.filePath(handle.id.left(8) + u".sock"_s), {ConsoleSeat::Adapter::VirtualUser, handle.id, 1000}, token);
+            auto worker = std::make_unique<QLocalSocket>();
+            worker->connectToServer(endpoint->socketName());
+            worker->waitForConnected(1000);
+            worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{handle.id, 1000, token}));
+            worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+            worker->waitForBytesWritten(1000);
+            (void)QTest::qWaitFor([&] { return endpoint->ready(); }, 5000);
+            stock.workers[handle.id] = worker.get();
+            endpoints.push_back(std::move(endpoint));
+            workers.push_back(std::move(worker));
+            (void)QTest::qWaitFor([&] { return supervisor.captureReady(handle); }, 5000);
+            return handle;
+        };
+        stock.connect = [&](quint64 client) {
+            auto connection = std::make_unique<RdpConnection>(&server, -1);
+            // No socket/PAM/capture: remove only this fixture's queued initialization.
+            QCoreApplication::removePostedEvents(connection.get(), QEvent::MetaCall);
+            auto *transport = new VirtualSessionTransport(client, connection.get(), control,
+                [&endpoints](const auto &handle) -> ConsoleWorkerEndpoint * {
+                    for (const auto &endpoint : endpoints)
+                        if (endpoint->target().sessionId == handle.id) return endpoint.get();
+                    return nullptr;
+                }, sequence, connection.get());
+            transport->m_clientDisplayInfo = [&stock] { return stock.display; };
+            transport->m_refused = [&stock, client](quint32 code) { stock.refused[client].append(code); };
+            transport->m_stockGate.setInterval(100);
+            transport->m_stockWait.setInterval(10);
+            if (stock.policy) transport->setStockClientPolicy(stock.policy);
+            transports[client] = transport;
+            connections.push_back(std::move(connection));
+            return transport;
+        };
+        test(stock);
+        connections.clear();
+    }
+    static QJsonObject sessionCommand(const QString &id, const QString &action, const QString &session = {})
+    {
+        QJsonObject record{{u"type"_s, u"virtual-session"_s}, {u"v"_s, 1}, {u"id"_s, id}, {u"action"_s, action}};
+        if (!session.isEmpty()) record.insert(u"session"_s, session);
+        return record;
+    }
+    void stockPaths_data()
+    {
+        QTest::addColumn<bool>("controlChannel");
+        QTest::newRow("no KRDPCTL") << false;
+        QTest::newRow("KRDPCTL without virtual-session") << true;
+    }
+    // A client with KRDPCTL waits for the 3 s gate (here 100 ms); without it the broker picks at once.
+    static void startStock(VirtualSessionTransport &t, bool controlChannel)
+    {
+        t.startStockGate(controlChannel, 1000);
+        if (controlChannel) {
+            QVERIFY(t.m_stockGate.isActive());
+            QVERIFY(!t.m_control->attachment(t.m_client));
+        }
+    }
+
+private Q_SLOTS:
+    void stockClientAttachesMostRecentDesktop_data() { stockPaths_data(); }
+    void stockClientAttachesMostRecentDesktop()
+    {
+        QFETCH(bool, controlChannel);
+        stockFixture([&](Stock &stock) {
+            const auto older = stock.ready(*stock.supervisor->create(1000));
+            const auto newer = stock.ready(*stock.supervisor->create(1000));
+            QVERIFY(stock.supervisor->attach(1000, older.id, 99) && stock.supervisor->disconnect(older, 99)); // both retained
+            // Used order: `newer` first, then `older` (whatever the ids sort as).
+            stock.control->noteUsed(newer.id);
+            stock.control->noteUsed(older.id);
+            auto *t = stock.connect(1);
+            startStock(*t, controlChannel);
+            QTRY_VERIFY(stock.control->attachment(1));
+            QCOMPARE(stock.control->attachment(1)->id, older.id);
+            QVERIFY(t->m_handle && t->m_handle->id == older.id);
+            QVERIFY(t->authorized(1000)); // bound: frames and input flow
+            QVERIFY(stock.created.isEmpty());
+            QVERIFY(stock.refused.isEmpty());
+
+            // A second stock connection of the same user takes that desktop over,
+            // like the owner's own `stop` releases it; the first is told with
+            // ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION.
+            auto *second = stock.connect(2);
+            startStock(*second, controlChannel);
+            QTRY_VERIFY(stock.control->attachment(2));
+            QCOMPARE(stock.control->attachment(2)->id, older.id);
+            QVERIFY(!stock.control->attachment(1));
+            QVERIFY(!t->m_handle);
+            QCOMPARE(stock.displaced, QList<quint64>{1});
+            QTRY_COMPARE(stock.refused.value(1), QList<quint32>{quint32(ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION)});
+            QVERIFY(!stock.refused.contains(2));
+            QVERIFY(stock.created.isEmpty());
+        });
+    }
+
+    void stockClientCreatesDesktopFromStandardMonitorData_data() { stockPaths_data(); }
+    void stockClientCreatesDesktopFromStandardMonitorData()
+    {
+        QFETCH(bool, controlChannel);
+        stockFixture([&](Stock &stock) {
+            // A failed desktop is not "existing": it is never attached.
+            stock.failLaunch = true;
+            const auto failed = stock.supervisor->create(1000);
+            QVERIFY(failed);
+            QTRY_COMPARE(stock.supervisor->list(1000).first().phase, VirtualSessionState::Phase::Failed);
+            stock.failLaunch = false;
+            stock.display = {QSize(1366, 768), {}}; // TS_UD_CS_CORE only
+            auto *t = stock.connect(1);
+            startStock(*t, controlChannel);
+            QTRY_COMPARE(stock.created.size(), 1);
+            const VirtualSessionControl::InitialOutputs expected{{QPoint(0, 0), QSize(1366, 768), 1.0, true}};
+            QCOMPARE(stock.created.first(), expected);
+            QVERIFY(t->m_stockWait.isActive()); // starting: attached once it is ready
+            QVERIFY(!stock.control->attachment(1));
+            // The client's window changed meanwhile (MS-RDPEDISP): applied once bound.
+            t->displayLayout({{QRect(0, 0, 1600, 900), true}}, 1000);
+            QVERIFY(t->m_displaySize);
+            QCOMPARE(stock.handles.size(), 1);
+            const auto created = stock.ready(stock.handles.first());
+            QTRY_VERIFY(stock.control->attachment(1));
+            QCOMPARE(stock.control->attachment(1)->id, created.id);
+            QVERIFY(t->m_handle && t->m_handle->id == created.id);
+            QVERIFY(t->authorized(1000));
+            QVERIFY(!t->m_stockWait.isActive());
+            QVERIFY(stock.refused.isEmpty());
+            std::optional<ConsoleWorkerWire::Resize> resize;
+            QTRY_VERIFY([&] {
+                for (const auto &record : workerRecords(*stock.workers[created.id]))
+                    if (const auto parsed = ConsoleWorkerWire::resize(record)) resize = parsed;
+                return resize.has_value();
+            }());
+            QCOMPARE(resize->pixels, QSize(1600, 900));
+            QCOMPARE(resize->scale, 1.0);
+        });
+    }
+
+    void stockClientGetsSeveralOutputsFromMcsMonitorData()
+    {
+        stockFixture([&](Stock &stock) {
+            // TS_UD_CS_MONITOR: two monitors, the primary on the right.
+            stock.display = {QSize(3840, 1080), {{QRect(-1920, 0, 1920, 1080), false}, {QRect(0, 0, 1920, 1080), true}}};
+            startStock(*stock.connect(1), false);
+            QCOMPARE(stock.created.size(), 1);
+            QCOMPARE(stock.created.first().size(), 2);
+            QVERIFY(stock.created.first()[0].primary);
+            QCOMPARE(stock.created.first()[0].position, QPoint(1920, 0));
+            QCOMPARE(stock.created.first()[1].position, QPoint(0, 0));
+        });
+    }
+
+    void stockClientRefusedWithStandardCode_data()
+    {
+        QTest::addColumn<bool>("controlChannel");
+        QTest::addColumn<QString>("failure");
+        QTest::addColumn<quint32>("code");
+        for (const bool channel : {false, true}) {
+            const char *path = channel ? "KRDPCTL without virtual-session" : "no KRDPCTL";
+            QTest::addRow("%s, slot limit", path) << channel << u"limit"_s << quint32(ERRINFO_CB_DESTINATION_POOL_NOT_FREE);
+            QTest::addRow("%s, create failed", path) << channel << u"failed"_s << quint32(ERRINFO_CB_SESSION_ONLINE_VM_SESSMON_FAILED);
+            QTest::addRow("%s, desktop failed while starting", path) << channel << u"start-failed"_s << quint32(ERRINFO_CB_SESSION_ONLINE_VM_SESSMON_FAILED);
+            QTest::addRow("%s, desktop never ready", path) << channel << u"timeout"_s << quint32(ERRINFO_CB_SESSION_ONLINE_VM_BOOT_TIMEOUT);
+        }
+    }
+    void stockClientRefusedWithStandardCode()
+    {
+        QFETCH(bool, controlChannel);
+        QFETCH(QString, failure);
+        QFETCH(quint32, code);
+        stockFixture([&](Stock &stock) {
+            if (failure == u"limit"_s) {
+                stock.create = [](quint32) { return VirtualSessionControl::CreateResult(VirtualSessionControl::CreateResult::Refusal::Limit); };
+            } else if (failure == u"failed"_s) {
+                stock.create = [](quint32) { return VirtualSessionControl::CreateResult(); };
+            }
+            auto *t = stock.connect(1);
+            t->m_stockWaitLimitMs = failure == u"timeout"_s ? 300 : 20000;
+            stock.failLaunch = failure == u"start-failed"_s;
+            startStock(*t, controlChannel);
+            QTRY_COMPARE(stock.refused.value(1), QList<quint32>{code});
+            QVERIFY(!stock.control->attachment(1));
+            QVERIFY(!t->m_handle);
+            QVERIFY(!t->m_stockWait.isActive() && !t->m_stockGate.isActive());
+            QCOMPARE(stock.created.size(), 1); // one attempt, never a retry loop
+        });
+    }
+
+    void stockClientRefusedByPolicy_data() { stockPaths_data(); }
+    void stockClientRefusedByPolicy()
+    {
+        QFETCH(bool, controlChannel);
+        stockFixture([&](Stock &stock) {
+            const auto existing = stock.ready(*stock.supervisor->create(1000));
+            QList<quint32> asked;
+            stock.policy = [&asked](quint32 uid) {
+                asked.append(uid);
+                return VirtualStockClient::Policy::Refuse;
+            };
+            auto *t = stock.connect(1);
+            startStock(*t, controlChannel);
+            QTRY_COMPARE(stock.refused.value(1), QList<quint32>{quint32(ERRINFO_SERVER_DENIED_CONNECTION)});
+            QCOMPARE(asked, QList<quint32>{1000}); // the authenticated uid's own policy
+            QVERIFY(!stock.control->attachment(1));
+            QVERIFY(stock.created.isEmpty());
+            for (const auto &entry : stock.supervisor->list(1000))
+                if (entry.id == existing.id) QCOMPARE(entry.phase, VirtualSessionState::Phase::Retained);
+        });
+    }
+
+    void ownClientVirtualSessionRecordKeepsItsOwnChoice()
+    {
+        stockFixture([&](Stock &stock) {
+            const auto desktop = stock.ready(*stock.supervisor->create(1000));
+            stock.control->noteUsed(desktop.id);
+            int policyCalls = 0;
+            stock.policy = [&policyCalls](quint32) { ++policyCalls; return VirtualStockClient::Policy::Refuse; };
+            auto *t = stock.connect(1);
+            startStock(*t, true);
+            // Our client lists first and may take its time choosing (a dialog).
+            QVERIFY(t->request(sessionCommand(u"list-1"_s, u"list"_s), 1000).value(u"ok"_s).toBool());
+            QVERIFY(!t->m_stockGate.isActive());
+            QTest::qWait(300); // well past the gate
+            QVERIFY(!stock.control->attachment(1));
+            QVERIFY(stock.created.isEmpty());
+            QVERIFY(stock.refused.isEmpty());
+            QCOMPARE(policyCalls, 0);
+            // Its explicit attach is the unchanged path (bound by the tests above).
+            QVERIFY(stock.control->request(1000, 1, sessionCommand(u"attach-1"_s, u"attach"_s, desktop.id)).value(u"ok"_s).toBool());
+            QCOMPARE(stock.control->attachment(1)->id, desktop.id);
+            // A `virtual-session` record that arrives before authentication finished counts too.
+            auto *early = stock.connect(2);
+            QVERIFY(!early->request(sessionCommand(u"list-2"_s, u"list"_s), 1000).isEmpty());
+            startStock(*early, false);
+            QTest::qWait(150);
+            QVERIFY(!stock.control->attachment(2));
+            QVERIFY(stock.refused.isEmpty());
+        });
+    }
+
+    void displayControlResizesOneOutputDesktop()
+    {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            const auto sentResizes = [&] {
+                QList<ConsoleWorkerWire::Resize> resizes;
+                for (const auto &record : workerRecords(worker))
+                    if (const auto parsed = ConsoleWorkerWire::resize(record)) resizes.append(*parsed);
+                return resizes;
+            };
+            QList<QJsonObject> pushed;
+            t.m_recordPushed = [&pushed](const QJsonObject &record) { pushed.append(record); };
+            // Two monitors cannot drive a one-output desktop: ignored.
+            t.displayLayout({{QRect(0, 0, 1920, 1080), true}, {QRect(1920, 0, 1920, 1080), false}}, 1000);
+            QVERIFY(sentResizes().isEmpty());
+            t.displayLayout({{QRect(0, 0, 1601, 900), true}}, 1000);
+            auto resizes = sentResizes();
+            QCOMPARE(resizes.size(), 1);
+            QCOMPARE(resizes.first().pixels, QSize(1600, 900));
+            QCOMPARE(resizes.first().output, u"virtual-desktop"_s);
+            // A newer window size while that one is in flight waits for it.
+            t.displayLayout({{QRect(0, 0, 1280, 720), true}}, 1000);
+            QVERIFY(sentResizes().isEmpty());
+            // The result is not a KRDPCTL reply (nobody asked over KRDPCTL) ...
+            QVERIFY(t.resizeResult({resizes.first().requestId, resizes.first().generation, {}}, 1000).isEmpty());
+            // ... and the waiting size goes out next.
+            resizes = sentResizes();
+            QCOMPARE(resizes.size(), 1);
+            QCOMPARE(resizes.first().pixels, QSize(1280, 720));
+            QVERIFY(t.resizeResult({resizes.first().requestId, resizes.first().generation, {}}, 1000).isEmpty());
+            QVERIFY(pushed.isEmpty());
+            // KRDPCTL's own `virtual-resize` still gets its reply.
+            QVERIFY(t.request(resizeRequest(), 1000).isEmpty());
+            resizes = sentResizes();
+            QCOMPARE(resizes.size(), 1);
+            QCOMPARE(t.resizeResult({resizes.first().requestId, resizes.first().generation, {}}, 1000).value(u"id"_s).toString(), u"fit-1"_s);
+            // With a published topology, the current size is not resized again,
+            // and a multi-output desktop is left to the KRDP client.
+            RemoteTopologyCatalog catalog;
+            auto current = *catalog.observe({{.backendKey = u"Virtual-0"_s, .name = u"Virtual-0"_s,
+                .nativePixels = QSize(1280, 720), .logicalGeometry = QRect(0, 0, 1024, 576), .scale = 1.25, .enabled = true,
+                .primary = true, .physical = false, .owner = t.m_handle->id}});
+            t.setTopologyResolver([&current](const auto &) { return std::optional(current); });
+            t.displayLayout({{QRect(0, 0, 1280, 720), true}}, 1000);
+            QVERIFY(sentResizes().isEmpty());
+            t.displayLayout({{QRect(0, 0, 1920, 1080), true}}, 1000);
+            resizes = sentResizes();
+            QCOMPARE(resizes.size(), 1);
+            QCOMPARE(resizes.first().scale, 1.25); // the desktop keeps its scale
+            QVERIFY(t.resizeResult({resizes.first().requestId, resizes.first().generation, {}}, 1000).isEmpty());
+            current = *catalog.observe({
+                {.backendKey = u"Virtual-0"_s, .name = u"Virtual-0"_s, .nativePixels = QSize(1280, 720),
+                    .logicalGeometry = QRect(0, 0, 1280, 720), .scale = 1, .enabled = true, .primary = true, .physical = false, .owner = t.m_handle->id},
+                {.backendKey = u"Virtual-1"_s, .name = u"Virtual-1"_s, .nativePixels = QSize(1280, 720),
+                    .logicalGeometry = QRect(1280, 0, 1280, 720), .scale = 1, .enabled = true, .primary = false, .physical = false, .owner = t.m_handle->id}});
+            t.displayLayout({{QRect(0, 0, 1600, 900), true}}, 1000);
+            QVERIFY(sentResizes().isEmpty());
+            QVERIFY(!t.m_displaySize);
+            // Not the owner of an attached desktop: nothing is resized.
+            t.displayLayout({{QRect(0, 0, 1600, 900), true}}, 1001);
+            QVERIFY(sentResizes().isEmpty());
+        });
+    }
+
     void unauthenticatedConnectionCannotCreateOrEnableMedia()
     {
         int launched = 0;

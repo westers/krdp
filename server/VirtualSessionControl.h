@@ -33,7 +33,8 @@ public:
     void disconnected(quint64 client, std::function<void()> revoke);
     std::optional<Handle> attachment(quint64 client) const;
     struct CreateResult {
-        enum class Refusal { Ordinary, Maintenance };
+        // Limit: the per-user or host desktop limit (a stock client is told so).
+        enum class Refusal { Ordinary, Maintenance, Limit };
         std::optional<Handle> handle;
         Refusal refusal = Refusal::Ordinary; // Relevant only without a handle.
         CreateResult() = default;
@@ -63,6 +64,29 @@ public:
     void setDismissHandlers(std::function<bool(quint32, const QString &)> eligible,
                             std::function<DismissResult(quint32, const QString &)> dismiss)
     { m_dismissible = std::move(eligible); m_dismiss = std::move(dismiss); }
+    InitialLayoutPreviewCapabilities initialLayoutCapabilities() const { return m_initialCaps; }
+    /**
+     * AUD-D4: a stock RDP client that never sent a `virtual-session` record.
+     * Attaches the user's most recently used desktop (retained, attached or
+     * starting); one attached to another connection of the same user is taken
+     * over (that connection is released first, then reported to the displaced
+     * handler). Without any, creates one with \a outputs as its first layout.
+     * Starting means: call attachStarted() until it is ready.
+     */
+    struct StockResult {
+        enum class Kind { Attached, Starting, Refused };
+        enum class Reason { Failed, Limit, Maintenance };
+        Kind kind = Kind::Refused;
+        Reason reason = Reason::Failed; // Refused only
+        QString session;
+        std::optional<Handle> handle; // Attached only
+    };
+    StockResult attachStockClient(std::optional<quint32> authenticatedUid, quint64 client, const InitialOutputs &outputs);
+    StockResult attachStarted(std::optional<quint32> authenticatedUid, quint64 client, const QString &session);
+    /** Mark \a session as just used (attach, detach, create; the host adds recovered desktops in journal order). */
+    void noteUsed(const QString &session) { m_recency.insert(session, ++m_useClock); }
+    /** Called for each transport a stock-client takeover released, after the new attach. */
+    void setDisplacedHandler(std::function<void(quint64)> displaced) { m_displaced = std::move(displaced); }
     // Includes release callbacks; nested event loops must not retire registry
     // entries while a command or synchronous revocation is on the stack.
     bool dispatchActive() const { return m_dispatchDepth != 0; }
@@ -87,6 +111,11 @@ private:
     };
     QJsonObject dispatch(quint32 uid, quint64 client, const std::shared_ptr<Transport> &transport, const QJsonObject &request);
     void release(quint64 client, const std::shared_ptr<Transport> &transport, std::function<void()> revoke = {});
+    std::shared_ptr<Transport> stockTransport(std::optional<quint32> uid, quint64 client);
+    StockResult takeOver(quint32 uid, quint64 client, const std::shared_ptr<Transport> &transport, const QString &session);
+    QHash<QString, quint64> m_recency;
+    quint64 m_useClock = 0;
+    std::function<void(quint64)> m_displaced;
     QPointer<VirtualSessionSupervisor> m_supervisor;
     Release m_release;
     std::function<CreateResult(quint32)> m_create;

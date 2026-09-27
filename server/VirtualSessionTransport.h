@@ -4,6 +4,7 @@
 #include "ConsoleWorkerEndpoint.h"
 #include "ConsoleWorkerSession.h"
 #include "RemoteTopologyProtocol.h"
+#include "VirtualStockClient.h"
 #include <RdpConnection.h>
 #include <QPointer>
 #include <QTimer>
@@ -30,6 +31,11 @@ public:
     void setTopologyResolver(ResolveTopology resolve) { m_topologyResolve = std::move(resolve); }
     void revoke();
     void unavailable();
+    /** AUD-D4: VirtualStockClientPolicy for the authenticated uid; unset means attach-or-create. */
+    using StockPolicy = std::function<VirtualStockClient::Policy(quint32)>;
+    void setStockClientPolicy(StockPolicy policy) { m_stockPolicy = std::move(policy); }
+    /** Another connection of this user took this one's desktop over: close with the standard code. */
+    void displaced();
 
 private:
     friend class VirtualSessionTransportTest;
@@ -51,7 +57,38 @@ private:
     QString m_replyRequestId;
     QString m_microphoneRequestId;
     bool bind();
+    bool bind(std::optional<quint32> uid);
     bool activateBinding(const VirtualSessionRegistry::Handle &handle, QPointer<ConsoleWorkerEndpoint> endpoint);
+    bool activateBinding(const VirtualSessionRegistry::Handle &handle, QPointer<ConsoleWorkerEndpoint> endpoint, std::optional<quint32> uid);
+    // --- AUD-D4: stock RDP clients (no `virtual-session` record) ---
+    /** After authentication: bind now without KRDPCTL, or after the 3 s first-record gate with it. */
+    void startStockGate(bool controlChannel, std::optional<quint32> uid);
+    /** The broker picks the desktop: the most recently used one, or a new one (VirtualStockClientPolicy). */
+    void stockClientBind(std::optional<quint32> uid);
+    void stockResult(const VirtualSessionControl::StockResult &result, std::optional<quint32> uid);
+    void stockWaitTick();
+    void stockAttached(std::optional<quint32> uid);
+    void refuseStockClient(VirtualStockClient::Refusal refusal);
+    StockPolicy m_stockPolicy;
+    QTimer m_stockGate;
+    QTimer m_stockWait;
+    QElapsedTimer m_stockWaitAge;
+    int m_stockWaitLimitMs = 60000;
+    QString m_stockSession;
+    std::optional<quint32> m_stockUid;
+    bool m_stockStarted = false;
+    bool m_virtualSessionSeen = false;
+    /** Test seam: the client's standard monitor data (a detached test connection has none). */
+    std::function<ClientDisplay::Info()> m_clientDisplayInfo;
+    /** Test seam: sees each standard error code the connection is closed with. */
+    std::function<void(quint32)> m_refused;
+    // --- MS-RDPEDISP: a standard client's window resize ---
+    void displayLayout(const QList<VideoMonitor> &monitors, std::optional<quint32> uid);
+    /** Resize a one-output desktop to the latest requested size, once no other resize is pending. */
+    void applyDisplayLayout(std::optional<quint32> uid);
+    std::optional<QSize> m_displaySize;
+    bool m_resizeFromDisplay = false;
+    quint64 m_displayResizes = 0;
     bool attachmentMatches(const VirtualSessionRegistry::Handle &handle) const;
     bool authorized() const;
     bool authorized(std::optional<quint32> uid) const;

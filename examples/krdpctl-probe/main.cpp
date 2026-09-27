@@ -54,6 +54,10 @@
  *                               records --apply/--query cannot send, e.g. a raw `chroma`
  *                               request.
  *            --raw-gap MS       the pause between two --raw sends (default 300)
+ *            --disp WxH         also load the standard Display Control channel
+ *                               (MS-RDPEDISP, over drdynvc) and, once the server's caps
+ *                               arrive, ask for a one-monitor WxH desktop the way a
+ *                               stock client does when its window is resized
  *
  * Records go to stdout, one compact JSON object per line, each prefixed with
  * the local time it was read (HH:MM:SS.zzz); everything else to stderr with
@@ -94,6 +98,7 @@
 #include <freerdp/addin.h>
 #include <freerdp/channels/channels.h>
 #include <freerdp/client/audin.h>
+#include <freerdp/client/disp.h>
 #include <freerdp/channels/rdpgfx.h>
 #include <freerdp/client.h>
 #include <freerdp/client/channels.h>
@@ -143,6 +148,9 @@ struct Probe {
     qint64 rawGapMs = RawSequenceGapMs;
     bool gfx = false;
     bool media = false;
+    /** --disp: the one-monitor layout to ask for over MS-RDPEDISP (empty: channel not loaded). */
+    UINT32 dispWidth = 0;
+    UINT32 dispHeight = 0;
     QByteArray microphoneDevice = "probe";
     bool pong = true;
     int timeoutSeconds = 0;
@@ -457,6 +465,42 @@ void onChannelConnected(void *context, const ChannelConnectedEventArgs *e)
     gfx->SurfaceCommand = probeSurfaceCommand;
 }
 
+// ---- --disp: a stock client's window resize over MS-RDPEDISP ----
+
+Probe *g_dispProbe = nullptr;
+
+UINT probeDispCaps(DispClientContext *disp, UINT32 maxMonitors, UINT32 factorA, UINT32 factorB)
+{
+    logf("DISP caps: MaxNumMonitors %u MaxMonitorAreaFactor %ux%u", maxMonitors, factorA, factorB);
+    auto *probe = g_dispProbe;
+    if (!probe || !probe->dispWidth || !disp->SendMonitorLayout) {
+        return CHANNEL_RC_OK;
+    }
+    DISPLAY_CONTROL_MONITOR_LAYOUT layout{};
+    layout.Flags = DISPLAY_CONTROL_MONITOR_PRIMARY;
+    layout.Width = probe->dispWidth;
+    layout.Height = probe->dispHeight;
+    layout.PhysicalWidth = 0;
+    layout.PhysicalHeight = 0;
+    layout.Orientation = ORIENTATION_LANDSCAPE;
+    layout.DesktopScaleFactor = 100;
+    layout.DeviceScaleFactor = 100;
+    const UINT sent = disp->SendMonitorLayout(disp, 1, &layout);
+    logf("DISP layout %ux%u sent (%u)", probe->dispWidth, probe->dispHeight, sent);
+    return CHANNEL_RC_OK;
+}
+
+void onDispConnected(void *context, const ChannelConnectedEventArgs *e)
+{
+    if (std::strcmp(e->name, DISP_DVC_CHANNEL_NAME) != 0) {
+        return;
+    }
+    auto *disp = static_cast<DispClientContext *>(e->pInterface);
+    g_dispProbe = probeOf(static_cast<rdpContext *>(context));
+    disp->DisplayControlCaps = probeDispCaps;
+    logf("DISP channel connected");
+}
+
 // ---- --media's built-in AUDIN device (`--microphone probe`) ----
 
 /*
@@ -560,6 +604,9 @@ BOOL preConnect(freerdp *instance)
         PubSub_SubscribeChannelDisconnected(instance->context->pubSub, freerdp_client_OnChannelDisconnectedEventHandler);
         PubSub_SubscribeChannelConnected(instance->context->pubSub, onChannelConnected);
     }
+    if (probe->dispWidth) {
+        PubSub_SubscribeChannelConnected(instance->context->pubSub, onDispConnected);
+    }
     return TRUE;
 }
 
@@ -590,7 +637,16 @@ BOOL loadChannels(freerdp *instance)
             return FALSE;
         }
     }
-    if (probe->gfx || probe->media) {
+    if (probe->dispWidth) {
+        // What `xfreerdp /dynamic-resolution` loads.
+        const char *const disp[] = {"disp"};
+        if (!freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, TRUE)
+            || !freerdp_client_add_dynamic_channel(settings, ARRAYSIZE(disp), disp)) {
+            logf("could not add the Display Control channel");
+            return FALSE;
+        }
+    }
+    if (probe->gfx || probe->media || probe->dispWidth) {
         // Without --gfx, keep rdpgfx out of the add-ins: KRDP only checks the
         // GCC flag, and this libfreerdp may not decode H.264.
         const BOOL pipeline = freerdp_settings_get_bool(settings, FreeRDP_SupportGraphicsPipeline);
@@ -716,7 +772,7 @@ int usage()
 {
     std::fprintf(stderr,
                  "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
-                 "[--gfx] [--media [--microphone DEV]] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
+                 "[--gfx] [--media [--microphone DEV]] [--disp WxH] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
     return 2;
 }
 
@@ -794,6 +850,13 @@ int main(int argc, char **argv)
             probe.gfx = true;
         } else if (arg == QLatin1String("--media")) {
             probe.media = true;
+        } else if (arg == QLatin1String("--disp") && i + 1 < argc) {
+            const QStringList size = QString::fromLocal8Bit(argv[++i]).split(QLatin1Char('x'));
+            probe.dispWidth = size.size() == 2 ? size[0].toUInt() : 0;
+            probe.dispHeight = size.size() == 2 ? size[1].toUInt() : 0;
+            if (!probe.dispWidth || !probe.dispHeight) {
+                return usage();
+            }
         } else if (arg == QLatin1String("--microphone") && i + 1 < argc) {
             probe.microphoneDevice = QByteArray(argv[++i]);
         } else if (arg == QLatin1String("--raw-gap") && i + 1 < argc) {
@@ -870,7 +933,7 @@ int main(int argc, char **argv)
     instance->VerifyCertificateEx = verifyCertificate;
     instance->VerifyChangedCertificateEx = verifyChangedCertificate;
 
-    if (!applySettings(context->settings, host, port, user, password, probe.gfx || probe.media)) {
+    if (!applySettings(context->settings, host, port, user, password, probe.gfx || probe.media || probe.dispWidth)) {
         logf("settings rejected");
         freerdp_client_context_free(context);
         return 1;

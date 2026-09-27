@@ -128,16 +128,23 @@ target_link_libraries(VirtualSessionControlTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionControlTest COMMAND VirtualSessionControlTest)
 
 add_executable(VirtualSessionTransportTest VirtualSessionTransportTest.cpp
-    ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp ${CMAKE_SOURCE_DIR}/server/VirtualStockClient.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
     ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp)
 target_include_directories(VirtualSessionTransportTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(VirtualSessionTransportTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
 add_test(NAME VirtualSessionTransportTest COMMAND VirtualSessionTransportTest)
 
+# AUD-D4: stock RDP clients on the virtual broker (policy, error codes, first layout, DISP size).
+add_executable(VirtualStockClientTest VirtualStockClientTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualStockClient.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp)
+target_include_directories(VirtualStockClientTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(VirtualStockClientTest PRIVATE Qt6::Test Qt6::Core KRdp KRdpGuardianClient)
+add_test(NAME VirtualStockClientTest COMMAND VirtualStockClientTest)
+
 add_executable(VirtualSessionHostControllerTest VirtualSessionHostControllerTest.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardian.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionStorage.cpp
-    ${CMAKE_SOURCE_DIR}/server/VirtualSessionHostController.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp
+    ${CMAKE_SOURCE_DIR}/server/VirtualSessionHostController.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp ${CMAKE_SOURCE_DIR}/server/VirtualStockClient.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp
     ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp)
@@ -548,7 +555,7 @@ add_test(NAME KrdpctlV2Test COMMAND KrdpctlV2Test)
 # KRDPCTL v2 end to end on 127.0.0.1: the production virtual broker transport and krdpctl-probe.
 if(TARGET krdpctl-probe)
     add_executable(KrdpctlV2LoopbackTest KrdpctlV2LoopbackTest.cpp
-        ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp
+        ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp ${CMAKE_SOURCE_DIR}/server/VirtualStockClient.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp
         ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
         ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp
         ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardianClient.cpp)

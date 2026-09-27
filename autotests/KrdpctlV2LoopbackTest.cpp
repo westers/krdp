@@ -23,6 +23,7 @@
 #include "VirtualSessionControl.h"
 #include "VirtualSessionSupervisor.h"
 #include "VirtualSessionTransport.h"
+#include "VirtualStockClient.h"
 
 using namespace KRdp;
 using namespace Qt::StringLiterals;
@@ -52,6 +53,10 @@ class KrdpctlV2LoopbackTest : public QObject
     std::vector<std::unique_ptr<VirtualSessionTransport>> m_transports;
     quint64 m_sequence = 0;
     quint64 m_nextClient = 0;
+    /** Called once the client authenticated (on the main thread). */
+    std::function<void(RdpConnection *)> m_onAuthenticated;
+    /** Every MS-RDPEDISP layout the server received. */
+    QList<QList<VideoMonitor>> m_displayLayouts;
 
     std::unique_ptr<Server> startServer(Seen &seen)
     {
@@ -66,10 +71,14 @@ class KrdpctlV2LoopbackTest : public QObject
             // The broker's own transport: it sends `capabilities` and answers every record.
             m_transports.push_back(std::make_unique<VirtualSessionTransport>(++m_nextClient, connection, *m_control, VirtualSessionTransport::Resolve{}, m_sequence));
             QPointer<RdpConnection> guard(connection);
-            connect(connection, &RdpConnection::clientDisplayInfoReceived, this, [&seen, guard] {
+            connect(connection, &RdpConnection::clientDisplayInfoReceived, this, [this, &seen, guard] {
                 if (!guard) return;
                 seen.authenticated = guard->isAuthenticated();
                 seen.controlChannel = guard->hasControlChannel();
+                if (m_onAuthenticated) m_onAuthenticated(guard);
+            }, Qt::QueuedConnection);
+            connect(connection, &RdpConnection::displayLayoutRequested, this, [this](const QList<VideoMonitor> &monitors) {
+                m_displayLayouts.append(monitors);
             }, Qt::QueuedConnection);
             connect(connection, &RdpConnection::stateChanged, this, [&seen](RdpConnection::State state) {
                 if (state == RdpConnection::State::Streaming) seen.reachedStreaming = true;
@@ -137,6 +146,8 @@ private Q_SLOTS:
     void cleanup()
     {
         m_transports.clear();
+        m_onAuthenticated = {};
+        m_displayLayouts.clear();
     }
 
     void capabilitiesFirstThenRepliesEchoRequestIds()
@@ -196,6 +207,50 @@ private Q_SLOTS:
         } else {
             QVERIFY2(seen.reachedStreaming, err.constData());
         }
+    }
+
+    // AUD-D4: the broker's refusals of a stock client reach a real libfreerdp
+    // client as the standard Set Error Info code it prints.
+    void stockClientRefusalIsAStandardErrorInfo_data()
+    {
+        QTest::addColumn<int>("refusal");
+        QTest::addColumn<QByteArray>("expected");
+        QTest::newRow("policy") << int(VirtualStockClient::Refusal::Policy) << QByteArray("0x00000007");
+        QTest::newRow("no free slot") << int(VirtualStockClient::Refusal::NoFreeSlot) << QByteArray("0x00000408");
+        QTest::newRow("displaced") << int(VirtualStockClient::Refusal::Displaced) << QByteArray("0x00000005");
+    }
+    void stockClientRefusalIsAStandardErrorInfo()
+    {
+        QFETCH(int, refusal);
+        QFETCH(QByteArray, expected);
+        Seen seen;
+        auto server = startServer(seen);
+        QVERIFY(server);
+        m_onAuthenticated = [refusal](RdpConnection *connection) {
+            connection->closeWithErrorInfo(VirtualStockClient::errorInfo(VirtualStockClient::Refusal(refusal)));
+        };
+        QByteArray out, err;
+        runProbe(server->serverPort(), Password, {u"--silent"_s, u"--no-krdpctl"_s, u"--timeout"_s, u"6"_s}, &out, &err);
+        QVERIFY(seen.authenticated);
+        QVERIFY2(err.contains("server ended the session") && err.contains(expected), err.constData());
+    }
+
+    // MS-RDPEDISP: a stock client's window resize reaches the broker (the
+    // transport turns it into the worker resize; VirtualSessionTransportTest).
+    void displayControlLayoutReachesTheBroker()
+    {
+        Seen seen;
+        auto server = startServer(seen);
+        QVERIFY(server);
+        QByteArray out, err;
+        runProbe(server->serverPort(), Password, {u"--silent"_s, u"--no-krdpctl"_s, u"--disp"_s, u"1600x900"_s, u"--timeout"_s, u"6"_s}, &out, &err);
+        QVERIFY2(err.contains("DISP caps: MaxNumMonitors 16"), err.constData());
+        QVERIFY2(err.contains("DISP layout 1600x900 sent (0)"), err.constData());
+        QTRY_COMPARE(m_displayLayouts.size(), 1);
+        QCOMPARE(m_displayLayouts.first().size(), 1);
+        QCOMPARE(m_displayLayouts.first().first().geometry, QRect(0, 0, 1600, 900));
+        QVERIFY(m_displayLayouts.first().first().primary);
+        QVERIFY(!out.contains("capabilities")); // still no custom data for a stock client
     }
 
     void refusedLoginIsReportedWithAStandardCode()

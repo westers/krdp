@@ -35,6 +35,8 @@ public:
     // Create-only preflight, not the keeper's mandatory held maintenance lease.
     // Empty remains permitted for this unwired stage; no production enforcement.
     bool enableIndependentCreates(VirtualSessionJournal &journal, StartService start = {}, AdmitCreate admission = {});
+    /** AUD-D4: VirtualStockClientPolicy for an authenticated uid (default: the user's own krdpserverrc). */
+    void setStockClientPolicy(VirtualSessionTransport::StockPolicy policy) { m_stockPolicy = std::move(policy); }
 
 private:
     friend class VirtualSessionHostControllerTest;
@@ -66,6 +68,7 @@ private:
     void removeClient(quint64 id);
 
     Prepare m_prepare;
+    VirtualSessionTransport::StockPolicy m_stockPolicy = VirtualStockClient::readUserPolicy;
     std::map<QString, std::unique_ptr<Worker>> m_workers;
     quint64 m_sequence = 0;
     quint64 m_nextClient = 0;

@@ -51,6 +51,12 @@ VirtualSessionHostController::VirtualSessionHostController(Server *server, Prepa
         }
         if (auto *endpoint = resolve(handle)) endpoint->close();
     });
+    // AUD-D4: a stock client took a desktop over from another connection of
+    // the same user; that one is told with the standard error code and closed.
+    m_control.setDisplacedHandler([this](quint64 client) {
+        const auto found = m_clients.find(client);
+        if (found != m_clients.end()) found->second->displaced();
+    });
     connect(server, &Server::newConnectionCreated, this, &VirtualSessionHostController::addClient);
 }
 
@@ -114,6 +120,11 @@ bool VirtualSessionHostController::recover(VirtualSessionJournal &journal, QStri
         if (terminalProof(journal, record, boot)) completed.insert(record.session);
     }
     if (!recoverRecords(*records, boot, error, completed)) return false;
+    // "Most recently used" for stock clients (AUD-D4): nothing was used since
+    // this broker started, so the journal's creation order stands in for it.
+    for (const auto &record : *records) {
+        if (!completed.contains(record.session)) m_control.noteUsed(record.session);
+    }
     m_recoveryBoot = boot;
     m_recoveredJournal = &journal;
     return true;
@@ -164,7 +175,8 @@ VirtualSessionControl::CreateResult VirtualSessionHostController::createIndepend
     const auto existing = m_journal->records();
     // Journal history has a separate bounded capacity; never publish an intent
     // that the next broker would refuse to enumerate.
-    if (!existing || existing->size() >= 256) return {};
+    if (!existing) return {};
+    if (existing->size() >= 256) return VirtualSessionControl::CreateResult(VirtualSessionControl::CreateResult::Refusal::Limit);
     QFile bootFile(QStringLiteral("/proc/sys/kernel/random/boot_id"));
     if (!bootFile.open(QIODevice::ReadOnly)) return {};
     const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
@@ -172,7 +184,9 @@ VirtualSessionControl::CreateResult VirtualSessionHostController::createIndepend
         QUuid::createUuid().toRfc4122() + QUuid::createUuid().toRfc4122()};
     record.initialOutputs = initialOutputs;
     if (!record.valid()) return {};
-    if (!m_supervisor.canAdopt(uid, record.session)) return {};
+    // The per-user and host desktop limits (the registry's slot accounting).
+    if (!m_supervisor.canAdopt(uid, record.session))
+        return VirtualSessionControl::CreateResult(VirtualSessionControl::CreateResult::Refusal::Limit);
     const auto commit = m_commitIntent;
     const bool committed = commit(record);
     if (!alive) return {};
@@ -472,6 +486,7 @@ void VirtualSessionHostController::addClient(RdpConnection *connection)
     auto transport = std::make_unique<VirtualSessionTransport>(id, connection, m_control,
         [this](const auto &handle) { return resolve(handle); }, m_sequence);
     transport->setTopologyResolver([this](const auto &handle) { return topologyFor(handle); });
+    transport->setStockClientPolicy(m_stockPolicy);
     m_clients.emplace(id, std::move(transport));
     connect(connection, &RdpConnection::stateChanged, this, [this, id](RdpConnection::State state) {
         if (state == RdpConnection::State::Closed) removeClient(id);

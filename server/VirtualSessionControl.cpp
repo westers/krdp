@@ -181,6 +181,7 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
         if (!valid()) return uncertain();
         if (!handle) return reply(record, false, handle.refusal == CreateResult::Refusal::Maintenance
             ? QStringLiteral("session creation unavailable during maintenance") : QStringLiteral("session creation refused"));
+        noteUsed(handle->id);
         response.insert(QStringLiteral("session"), handle->id);
         // Accepted is not ready: failed launch/first-frame readiness is exposed
         // by subsequent list requests. No transport is automatically attached.
@@ -194,6 +195,7 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
         const auto handle = supervisor->attach(uid, record.value(QStringLiteral("session")).toString(), client);
         if (!handle) return reply(record, false, QStringLiteral("session unavailable"));
         transport->attached = handle;
+        noteUsed(handle->id);
         response.insert(QStringLiteral("session"), handle->id);
         response.insert(QStringLiteral("state"), QStringLiteral("attached"));
         return response;
@@ -242,6 +244,7 @@ void VirtualSessionControl::release(quint64 client, const std::shared_ptr<Transp
     if (!handle && !revoke) return;
     // Reentrant disconnect must not revoke twice, or erase a successor record.
     if (transport) transport->attached.reset();
+    if (handle) noteUsed(handle->id);
     const auto callback = m_release;
     const auto supervisor = m_supervisor;
     const QPointer<VirtualSessionControl> alive(this);
@@ -263,6 +266,111 @@ void VirtualSessionControl::disconnected(quint64 client, std::function<void()> r
 {
     const auto transport = m_transports.take(client);
     release(client, transport, std::move(revoke));
+}
+
+std::shared_ptr<VirtualSessionControl::Transport> VirtualSessionControl::stockTransport(std::optional<quint32> uid, quint64 client)
+{
+    if (!uid || !*uid || !client || !m_supervisor || dispatchActive()) return {};
+    auto it = m_transports.find(client);
+    if (it == m_transports.end()) it = m_transports.insert(client, std::make_shared<Transport>(Transport{*uid, {}, {}, {}}));
+    return it.value()->uid == *uid ? it.value() : nullptr;
+}
+
+VirtualSessionControl::StockResult VirtualSessionControl::takeOver(quint32 uid, quint64 client,
+    const std::shared_ptr<Transport> &transport, const QString &session)
+{
+    const QPointer<VirtualSessionControl> alive(this);
+    const auto supervisor = m_supervisor;
+    const auto valid = [alive, supervisor, client, transport] {
+        return alive && supervisor && alive->m_transports.value(client) == transport;
+    };
+    StockResult failed;
+    // The owner's other connections to this desktop give it up first (the
+    // same revocation as the owner's own `stop`), then the attach can succeed.
+    QList<QPair<quint64, std::shared_ptr<Transport>>> displaced;
+    for (auto i = m_transports.cbegin(); i != m_transports.cend(); ++i) {
+        if (i.key() != client && (*i)->uid == uid && (*i)->attached && (*i)->attached->id == session) displaced.append({i.key(), i.value()});
+    }
+    for (const auto &[target, value] : displaced) {
+        if (m_transports.value(target) == value) release(target, value);
+        if (!valid()) return failed;
+    }
+    const auto handle = supervisor->attach(uid, session, client);
+    if (!valid()) return failed;
+    if (handle) {
+        transport->attached = handle;
+        noteUsed(handle->id);
+    }
+    const auto notify = m_displaced;
+    for (const auto &[target, value] : displaced) {
+        if (notify) notify(target);
+        if (!valid()) return failed;
+    }
+    if (!handle || !transport->attached || transport->attached->id != handle->id
+        || transport->attached->generation != handle->generation || transport->attached->manager != handle->manager) return failed;
+    return {StockResult::Kind::Attached, StockResult::Reason::Failed, session, handle};
+}
+
+VirtualSessionControl::StockResult VirtualSessionControl::attachStockClient(std::optional<quint32> uid, quint64 client,
+    const InitialOutputs &outputs)
+{
+    const auto transport = stockTransport(uid, client);
+    if (!transport) return {};
+    if (transport->attached) return {StockResult::Kind::Attached, StockResult::Reason::Failed, transport->attached->id, transport->attached};
+    const QPointer<VirtualSessionControl> alive(this);
+    const auto supervisor = m_supervisor;
+    ++m_dispatchDepth;
+    const auto leave = qScopeGuard([alive] { if (alive) --alive->m_dispatchDepth; });
+    using Phase = VirtualSessionState::Phase;
+    std::optional<VirtualSessionRegistry::Summary> best;
+    quint64 bestUse = 0;
+    for (const auto &entry : supervisor->list(*uid)) {
+        if (entry.phase != Phase::Retained && entry.phase != Phase::Attached && entry.phase != Phase::Starting) continue;
+        const quint64 use = m_recency.value(entry.id, 0);
+        if (!best || use > bestUse || (use == bestUse && entry.id > best->id)) {
+            best = entry;
+            bestUse = use;
+        }
+    }
+    if (best) {
+        if (best->phase == Phase::Starting) return {StockResult::Kind::Starting, StockResult::Reason::Failed, best->id, {}};
+        return takeOver(*uid, client, transport, best->id);
+    }
+    CreateResult created;
+    if (m_selectedCreate && m_initialCaps.maxOutputs > 0 && !outputs.isEmpty() && outputs.size() <= m_initialCaps.maxOutputs) {
+        const auto create = m_selectedCreate; // Callback storage can be destroyed by itself.
+        created = create(*uid, outputs);
+    } else {
+        const auto create = m_create;
+        created = create ? create(*uid) : CreateResult(supervisor->create(*uid));
+    }
+    if (!alive || !supervisor || m_transports.value(client) != transport) return {};
+    if (!created) {
+        StockResult refused;
+        if (created.refusal == CreateResult::Refusal::Limit) refused.reason = StockResult::Reason::Limit;
+        else if (created.refusal == CreateResult::Refusal::Maintenance) refused.reason = StockResult::Reason::Maintenance;
+        return refused;
+    }
+    noteUsed(created->id);
+    return {StockResult::Kind::Starting, StockResult::Reason::Failed, created->id, {}};
+}
+
+VirtualSessionControl::StockResult VirtualSessionControl::attachStarted(std::optional<quint32> uid, quint64 client, const QString &session)
+{
+    const auto transport = stockTransport(uid, client);
+    if (!transport) return {};
+    if (transport->attached) return {StockResult::Kind::Attached, StockResult::Reason::Failed, transport->attached->id, transport->attached};
+    const QPointer<VirtualSessionControl> alive(this);
+    ++m_dispatchDepth;
+    const auto leave = qScopeGuard([alive] { if (alive) --alive->m_dispatchDepth; });
+    using Phase = VirtualSessionState::Phase;
+    for (const auto &entry : m_supervisor->list(*uid)) {
+        if (entry.id != session) continue;
+        if (entry.phase == Phase::Starting) return {StockResult::Kind::Starting, StockResult::Reason::Failed, session, {}};
+        if (entry.phase == Phase::Retained || entry.phase == Phase::Attached) return takeOver(*uid, client, transport, session);
+        break;
+    }
+    return {};
 }
 
 std::optional<VirtualSessionControl::Handle> VirtualSessionControl::attachment(quint64 client) const

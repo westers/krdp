@@ -89,6 +89,11 @@ SPDX-License-Identifier: BSD-2-Clause
       <whatsthis>A client that does not use KRDP's own device control (mstsc, FreeRDP, Remmina) gets audio playback when it joins the standard audio channel, and shares its microphone and camera when it accepts them.</whatsthis>
       <default>true</default>
     </entry>
+    <entry name="VirtualStockClientPolicy" type="String">
+      <label>Virtual desktop service: what a standard RDP client gets after signing in (attach-or-create or refuse)</label>
+      <whatsthis>Standard clients (mstsc, FreeRDP, Remmina) cannot choose a virtual desktop. With attach-or-create they resume your most recently used virtual desktop, or get a new one the size of their screen; with refuse they are turned away with a standard error. The KRDP client always lets you choose. Read by the virtual desktop service from your own settings when you sign in.</whatsthis>
+      <default>attach-or-create</default>
+    </entry>
     <entry name="CameraLoopbackDevice" type="String">
       <label>Optional V4L2 loopback device to publish redirected cameras for applications that cannot use PipeWire directly</label>
       <default></default>
