@@ -568,4 +568,22 @@ add_executable(RemoteCameraSetTest RemoteCameraSetTest.cpp)
 target_include_directories(RemoteCameraSetTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(RemoteCameraSetTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME RemoteCameraSetTest COMMAND RemoteCameraSetTest)
+
+add_executable(DeviceToggleLoopTest DeviceToggleLoopTest.cpp
+    ${CMAKE_SOURCE_DIR}/src/PipeWireMicrophone.cpp
+    ${CMAKE_SOURCE_DIR}/src/PipeWireCamera.cpp
+    ${CMAKE_SOURCE_DIR}/src/PipeWireAudioPlayback.cpp)
+target_include_directories(DeviceToggleLoopTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(DeviceToggleLoopTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui PkgConfig::PipeWire)
+if(PIPEWIRE_EXECUTABLE)
+    set(_krdp_device_loop_pipewire "${PIPEWIRE_EXECUTABLE}")
+else()
+    set(_krdp_device_loop_pipewire "pipewire") # not found: the test skips
+endif()
+target_compile_definitions(DeviceToggleLoopTest PRIVATE
+    KRDP_AUDIO_CONFIG_DIR="${CMAKE_SOURCE_DIR}/server"
+    KRDP_PIPEWIRE_EXECUTABLE="${_krdp_device_loop_pipewire}")
+add_test(NAME DeviceToggleLoopTest COMMAND DeviceToggleLoopTest)
+# ~20 s idle; 55-80 s seen under a load average of 25.
+set_tests_properties(DeviceToggleLoopTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 # --- end AUD-WS-D ---
