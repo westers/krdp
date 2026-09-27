@@ -16,6 +16,7 @@
 #include <QTimer>
 
 #include <DeviceControl.h>
+#include <RdpConnection.h>
 
 #include "ConsoleHandoff.h"
 #include "ConsoleWorkerBackoff.h"
@@ -93,6 +94,12 @@ private:
         QString layoutRequestId;
         QString microphoneRequestId;
         bool capabilitiesSent = false;
+        // StandardClientMedia (DEVICES-DESIGN.md §1): either flag set means this
+        // client speaks KRDPCTL and asks for each device itself.
+        bool deviceRecordSeen = false;
+        bool spokeKrdpctl = false;
+        // Its standard AUDIN negotiation is its microphone consent (until it refuses).
+        bool standardMicrophone = false;
     };
 
     void apply(const ConsoleHandoff::Actions &actions);
@@ -132,6 +139,21 @@ private:
     void sendMicrophoneState(Client &client, const DeviceStatus &status);
     DeviceStatus deviceStatus(const Client &client, MediaDevice device) const;
     void onControlDevice(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record, const QJsonObject &incoming);
+    /** Ask the worker for the console microphone for \a client; \a requestId is answered by its acknowledgement. */
+    void dispatchMicrophone(Client &client, const QString &requestId);
+    /**
+     * StandardClientMedia for the admitted controlling client \a id if it never
+     * spoke KRDPCTL (no channel, or nothing known within StandardGateMs of its
+     * admission): playback if it joined RDPSND, the microphone if it has
+     * DRDYNVC (its AUDIN accept is the consent). Viewers get nothing; no camera.
+     */
+    void applyStandardMedia(ConsoleControl::Id id);
+    /** The standard microphone of the controlling client, once the logged-in desktop is ready. */
+    void startStandardMicrophone(Client &client);
+    /// KRDPCTL's first-record gate (as krdpserver's): a channel client that said nothing known by then is a stock client.
+    int m_standardGateMs = 3000;
+    /** Test seam: RdpConnection::standardMediaChannels() (a detached test connection joined nothing). */
+    std::function<std::optional<RdpConnection::StandardMediaChannels>(RdpConnection *)> m_standardChannels;
     QString m_replyRequestId; // the request onControlRecord() is handling
     /** Every record to a client goes out here (replyTo(), device states). */
     void sendRecord(RdpConnection *connection, const QJsonObject &record);

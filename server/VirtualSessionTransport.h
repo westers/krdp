@@ -81,6 +81,17 @@ private:
     bool forwardMicrophone(const QByteArray &pcm, std::optional<quint32> uid);
     QJsonObject deviceReply(MediaDevice device, const DeviceStatus &status) const;
     DeviceStatus deviceStatus(MediaDevice device) const;
+    /**
+     * StandardClientMedia (DEVICES-DESIGN.md §1) for the session's client once
+     * it is bound, if it never spoke KRDPCTL (no `device` record, no other
+     * known record): playback if it joined RDPSND, the microphone if it has
+     * DRDYNVC (its AUDIN accept is the consent). Never the camera.
+     */
+    void applyStandardMedia(std::optional<quint32> uid);
+    /** Test seam: RdpConnection::standardMediaChannels() (a detached test connection joined nothing). */
+    std::function<std::optional<RdpConnection::StandardMediaChannels>(RdpConnection *)> m_standardChannels;
+    bool m_deviceRecordSeen = false;
+    bool m_spokeKrdpctl = false;
     void closed();
     quint64 m_client;
     QPointer<RdpConnection> m_connection;

@@ -193,6 +193,18 @@ public:
      * it was applied.
      */
     bool applyStandardConsent();
+    /** The standard media channels a client joined (MCS join, fixed after connect). */
+    struct StandardMediaChannels {
+        bool playback = false; // RDPSND
+        bool dynamic = false; // DRDYNVC: AUDIN (and RDPECAM) can be offered
+    };
+    /**
+     * Brokers (DEVICES-DESIGN.md §1): StandardClientMedia for a connection whose
+     * devices a broker runs through its worker. Empty if Server::standardClientMedia()
+     * is off; otherwise the standard channels the client joined (known once it
+     * authenticated; nothing before). Any thread.
+     */
+    std::optional<StandardMediaChannels> standardMediaChannels() const;
     /** The last state deviceState() reported for \a device. Any thread. */
     DeviceStatus deviceStatus(MediaDevice device) const;
     /**

@@ -51,7 +51,8 @@ class VirtualSessionTransportTest : public QObject
             {u"width"_s, 1920}, {u"height"_s, 1080}, {u"scale"_s, 1.25}};
     }
     void microphoneFixture(const std::function<void(VirtualSessionTransport &, VirtualSessionControl &,
-                                                    ConsoleWorkerEndpoint &, QLocalSocket &)> &test) {
+                                                    ConsoleWorkerEndpoint &, QLocalSocket &)> &test,
+                           bool standardClientMedia = true) {
         m_workerDeframer = {};
         VirtualSessionSupervisor supervisor([](quint32, const auto &) -> std::optional<VirtualSessionSupervisor::Launch> {
             return VirtualSessionSupervisor::Launch{u"/usr/bin/sleep"_s, {u"60"_s}, {}, {}};
@@ -69,7 +70,8 @@ class VirtualSessionTransportTest : public QObject
         worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{handle->id, 1000, token}));
         worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
         QVERIFY(worker.waitForBytesWritten(1000)); QTRY_VERIFY(endpoint.ready());
-        Server server; RdpConnection connection(&server, -1); quint64 sequence = 0;
+        Server server; server.setStandardClientMedia(standardClientMedia);
+        RdpConnection connection(&server, -1); quint64 sequence = 0;
         // No socket/PAM/capture: remove only this fixture's queued initialization.
         QCoreApplication::removePostedEvents(&connection, QEvent::MetaCall);
         transport = new VirtualSessionTransport(1, &connection, control, {}, sequence, &connection);
@@ -1177,6 +1179,73 @@ private Q_SLOTS:
             QCOMPARE(pushed.size(), 2);
             // After the detach the connection owns nothing: `not-owner`.
             QCOMPARE(t.request(device(u"microphone"_s, u"on"_s), 1000).value(u"code"_s).toString(), u"not-owner"_s);
+        });
+    }
+    // AUD-D3: StandardClientMedia for the session's client. A client without
+    // KRDPCTL gets playback and the microphone from standard negotiation once
+    // it is bound (never the camera, never silenceHost); with the setting off,
+    // or once it spoke KRDPCTL, nothing.
+    static std::optional<RdpConnection::StandardMediaChannels> joinedEverything(RdpConnection *connection) {
+        auto channels = connection->standardMediaChannels();
+        if (channels) channels->playback = channels->dynamic = true;
+        return channels;
+    }
+    void standardClientMediaForTheSessionClient_data() {
+        QTest::addColumn<bool>("enabled");
+        QTest::newRow("StandardClientMedia on") << true;
+        QTest::newRow("StandardClientMedia off") << false;
+    }
+    void standardClientMediaForTheSessionClient() {
+        QFETCH(bool, enabled);
+        QList<QJsonObject> pushed; // outlives the transport (its teardown pushes `revoked`)
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            QVERIFY(!t.m_connection->hasControlChannel());
+            t.m_standardChannels = &VirtualSessionTransportTest::joinedEverything;
+            t.m_recordPushed = [&pushed](const QJsonObject &record) { pushed.append(record); };
+            t.applyStandardMedia(std::nullopt); // no owner identity: nothing
+            QVERIFY(!t.m_playback); QVERIFY(!t.m_microphonePolicy.enabled);
+            t.applyStandardMedia(1001); // not the desktop's owner: nothing
+            QVERIFY(!t.m_playback); QVERIFY(!t.m_microphonePolicy.enabled);
+            workerRecords(worker);
+            t.applyStandardMedia(1000);
+            QCOMPARE(t.m_playback, enabled);
+            QVERIFY(!t.m_silenceHost);
+            QCOMPARE(t.m_microphonePolicy.enabled, enabled);
+            bool mediaOn = false, microphoneOn = false;
+            for (const auto &record : workerRecords(worker)) {
+                if (auto m = ConsoleWorkerWire::media(record); m && m->playback && !m->silenceHost) mediaOn = true;
+                if (auto p = ConsoleWorkerWire::microphonePolicy(record); p && p->enabled) microphoneOn = true;
+            }
+            QCOMPARE(mediaOn, enabled);
+            QCOMPARE(microphoneOn, enabled);
+            QCOMPARE(state(t.request(device(u"camera"_s, u"query"_s), 1000)), u"off"_s);
+            if (!enabled) return;
+            QVERIFY(t.m_microphoneRequestId.isEmpty()); // nothing to answer
+            const auto policy = t.m_microphonePolicy;
+            const auto ack = t.microphoneResult({policy.generation, policy.requestId, {}}, 1000);
+            QCOMPARE(state(ack), u"on"_s); QVERIFY(!ack.contains(u"requestId"_s));
+            QVERIFY(t.m_microphoneReady);
+            t.m_microphonePump.stop(); // Fixture has no PAM.
+            t.applyStandardMedia(1000); // the running source is kept
+            QCOMPARE(t.m_microphonePolicy, policy);
+            QVERIFY(pushed.isEmpty());
+        }, enabled);
+    }
+    void standardClientMediaNotAfterKrdpctl() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &) {
+            t.m_standardChannels = &VirtualSessionTransportTest::joinedEverything;
+            QVERIFY(ok(t.request(device(u"playback"_s, u"off"_s), 1000))); // asks for itself
+            t.applyStandardMedia(1000);
+            QVERIFY(!t.m_playback); QVERIFY(!t.m_microphonePolicy.enabled);
+        });
+        microphoneFixture([&](auto &t, auto &, auto &, auto &) {
+            t.m_standardChannels = &VirtualSessionTransportTest::joinedEverything;
+            t.request(priority(false), 1000); // audio-priority alone does not count
+            QVERIFY(!t.m_spokeKrdpctl);
+            t.request({{u"type"_s, u"virtual-session"_s}, {u"v"_s, 1}, {u"id"_s, u"l"_s}, {u"action"_s, u"list"_s}}, 1000);
+            QVERIFY(t.m_spokeKrdpctl);
+            t.applyStandardMedia(1000);
+            QVERIFY(!t.m_playback); QVERIFY(!t.m_microphonePolicy.enabled);
         });
     }
     void microphonePendingCorrelatedReadinessAndPcm() {

@@ -695,6 +695,11 @@ void ConsoleHostController::setWorkerActive(bool active)
     for (const auto &client : m_clients) {
         client->session->setWorkerActive(active);
     }
+    if (active) {
+        for (const auto &client : m_clients) {
+            startStandardMicrophone(*client);
+        }
+    }
 }
 
 void ConsoleHostController::addClient(RdpConnection *connection)
@@ -759,6 +764,9 @@ void ConsoleHostController::addClient(RdpConnection *connection)
                                        [this, id](MediaDevice device, const DeviceStatus &status, const QString &) {
         if (status.state != DeviceStatus::State::Error) return;
         if (device == MediaDevice::Microphone && m_microphoneClient == id) {
+            for (const auto &client : m_clients) {
+                if (client->id == id) client->standardMicrophone = false; // a standard refusal simply ends it
+            }
             stopMicrophone(status.code, status.message);
             return;
         }
@@ -800,6 +808,14 @@ void ConsoleHostController::addClient(RdpConnection *connection)
                     break;
                 }
             }
+            // StandardClientMedia: a client without KRDPCTL now; a channel client
+            // once the first-record gate has passed without a known record.
+            const QPointer<RdpConnection> admitted(connection);
+            if (admitted && !admitted->hasControlChannel()) {
+                applyStandardMedia(id);
+            } else if (admitted) {
+                QTimer::singleShot(m_standardGateMs, this, [this, id] { applyStandardMedia(id); });
+            }
         }
         if (state == RdpConnection::State::Closed) {
             removeClient(connection);
@@ -823,6 +839,19 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         if (alive) alive->m_replyRequestId = outerRequestId;
     });
     const QString type = record.value(u"type"_s).toString();
+    {
+        // StandardClientMedia is for clients that do not speak KRDPCTL: a
+        // `device` record, or any other record this host knows (not
+        // audio-priority, which never closes krdpserver's gate either).
+        static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s,
+                                         u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s};
+        for (const auto &client : m_clients) {
+            if (client->id != id) continue;
+            if (type == u"device"_s) client->deviceRecordSeen = true;
+            if (known.contains(type)) client->spokeKrdpctl = true;
+            break;
+        }
+    }
     if (type == u"topology-preview"_s) {
         const auto parsed = RemoteTopologyProtocol::previewRequest(record);
         const QString request = record.value(u"id"_s).toString().left(64);
@@ -1279,15 +1308,62 @@ void ConsoleHostController::onControlDevice(RdpConnection *connection, ConsoleCo
         return;
     }
     client.media = media;
+    dispatchMicrophone(client, m_replyRequestId);
+}
+
+void ConsoleHostController::dispatchMicrophone(Client &client, const QString &requestId)
+{
     updateMedia();
-    client.microphoneRequestId = m_replyRequestId; // the worker's acknowledgement answers this request
-    m_microphoneClient = id;
+    client.microphoneRequestId = requestId; // the worker's acknowledgement answers this request
+    m_microphoneClient = client.id;
     m_microphonePolicy = {m_controlGeneration, ++m_nextMicrophoneId, true};
     if (!m_endpoint.setMicrophone(m_microphonePolicy)) {
         stopMicrophone(DeviceControl::Unavailable, u"cannot dispatch microphone startup"_s);
     } else {
         m_microphoneDeadline.start();
     }
+}
+
+void ConsoleHostController::applyStandardMedia(ConsoleControl::Id id)
+{
+    const auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &client) { return client->id == id; });
+    if (found == m_clients.end()) return;
+    auto &client = **found;
+    const QPointer<RdpConnection> connection = client.connection;
+    if (!connection || client.deviceRecordSeen || client.spokeKrdpctl) return;
+    // Only the controlling client: a viewer never gets a microphone, and a
+    // stock viewer cannot ask for playback either (KRDPCTL clients can).
+    if (!m_control.admitted(id) || !m_control.ownsControl(id)) return;
+    const auto channels = m_standardChannels ? m_standardChannels(connection) : connection->standardMediaChannels();
+    if (!channels) return;
+    qInfo() << "StandardClientMedia: console client" << id << "playback" << channels->playback << "microphone" << channels->dynamic;
+    if (channels->playback && !client.media.playback) {
+        auto media = client.media;
+        media.playback = true;
+        media.silenceHost = false; // never silence the host without a request
+        if (m_control.setMedia(id, media)) {
+            client.media = media;
+            connection->setExternalAudioPlayback(true);
+            connection->setDeviceEnabled(MediaDevice::Playback, true);
+            updateMedia();
+        }
+    }
+    client.standardMicrophone = channels->dynamic;
+    startStandardMicrophone(client);
+}
+
+void ConsoleHostController::startStandardMicrophone(Client &client)
+{
+    // `busy`/`not-owner`/`unavailable` rules as for a `device` request; a
+    // desktop that is not ready yet (greeter, lock) is retried when it is.
+    if (!client.standardMicrophone || !client.connection || m_microphoneClient || !m_control.ownsControl(client.id)
+        || !client.externalMicrophone || !m_inputEnabled || !m_endpoint.ready()
+        || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) return;
+    auto media = client.media;
+    media.microphone = true;
+    if (!m_control.setMedia(client.id, media)) return;
+    client.media = media;
+    dispatchMicrophone(client, {});
 }
 
 void ConsoleHostController::removeClient(RdpConnection *connection, ConsoleControl::Id id)

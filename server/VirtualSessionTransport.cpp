@@ -320,7 +320,33 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     m_connection->videoStream()->setEnabled(true);
     if (!bindingCurrent()) return false;
     endpoint->requestKeyFrame();
+    if (!bindingCurrent() || !authorized()) return false;
+    applyStandardMedia(m_connection->authenticatedPamUid());
     return bindingCurrent() && authorized();
+}
+
+void VirtualSessionTransport::applyStandardMedia(std::optional<quint32> uid)
+{
+    if (m_deviceRecordSeen || m_spokeKrdpctl || !m_connection || !authorized(uid) || m_mediaDispatch) return;
+    const auto channels = m_standardChannels ? m_standardChannels(m_connection) : m_connection->standardMediaChannels();
+    if (!channels || !m_connection || !authorized(uid)) return;
+    qInfo() << "StandardClientMedia: virtual client" << m_client << "playback" << channels->playback << "microphone" << channels->dynamic;
+    const QPointer<VirtualSessionTransport> alive(this);
+    if (channels->playback && !m_playback) {
+        m_playback = true;
+        m_silenceHost = false; // never silence the host without a request
+        m_connection->setExternalAudioPlayback(true);
+        m_connection->setDeviceEnabled(MediaDevice::Playback, true);
+        m_endpoint->setMedia({m_playback, m_silenceHost});
+        if (!alive || !m_connection || !authorized(uid)) return;
+    }
+    if (!channels->dynamic || m_microphonePolicy.enabled || !m_externalMicrophone || !m_controlGeneration
+        || m_nextMicrophoneId >= std::numeric_limits<quint64>::max() - 1) return;
+    m_microphonePolicy = {m_controlGeneration, ++m_nextMicrophoneId, true};
+    m_microphoneRequestId.clear(); // nobody to answer: the client has no request
+    m_microphoneDeadline.start();
+    const bool dispatched = m_endpoint->setMicrophone(m_microphonePolicy);
+    if (alive && !dispatched) stopMicrophone();
 }
 
 void VirtualSessionTransport::revoke()
@@ -1419,6 +1445,14 @@ QJsonObject VirtualSessionTransport::resizeResult(const ConsoleWorkerWire::Resiz
 
 QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::optional<quint32> uid)
 {
+    {
+        // StandardClientMedia is for clients that do not speak KRDPCTL: a
+        // `device` record, or any other record this broker knows (not
+        // audio-priority, which never closes krdpserver's gate either).
+        const QString type = record.value(u"type"_s).toString();
+        if (type == u"device"_s) m_deviceRecordSeen = true;
+        else if (type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s)) m_spokeKrdpctl = true;
+    }
     if (m_revoking) return {};
     if (record.value(u"type"_s) == u"topology-query"_s) {
         const auto id = RemoteTopologyProtocol::queryId(record);

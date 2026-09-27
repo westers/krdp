@@ -232,8 +232,14 @@ private Q_SLOTS:
         QVERIFY(server.standardClientMedia()); // the default
         RdpConnection connection(&server, -1);
         QVERIFY(connection.applyStandardConsent());
+        // Brokers: the setting, and the channels the client joined (none before it authenticated).
+        const auto channels = connection.standardMediaChannels();
+        QVERIFY(channels);
+        QVERIFY(!channels->playback);
+        QVERIFY(!channels->dynamic);
         server.setStandardClientMedia(false);
         QVERIFY(!connection.applyStandardConsent());
+        QVERIFY(!connection.standardMediaChannels());
     }
 
     void consentGenerations()

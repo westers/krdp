@@ -725,6 +725,9 @@ public:
         return devices[size_t(device)];
     }
     std::atomic<bool> standardConsentPending = false;
+    // The standard media channels the client joined, recorded at authentication.
+    std::atomic<bool> joinedRdpsnd = false;
+    std::atomic<bool> joinedDrdynvc = false;
     // KRDPCTL `capabilities` was queued, and then a record came back from the
     // client: our own client (isOwnClient()).
     std::atomic<bool> capabilitiesSent = false;
@@ -982,6 +985,14 @@ bool RdpConnection::applyStandardConsent()
     // The session loop decides per device from what the client joined.
     d->standardConsentPending.store(true);
     return true;
+}
+
+std::optional<RdpConnection::StandardMediaChannels> RdpConnection::standardMediaChannels() const
+{
+    if (!d->server || !d->server->standardClientMedia()) {
+        return std::nullopt;
+    }
+    return StandardMediaChannels{d->joinedRdpsnd.load(), d->joinedDrdynvc.load()};
 }
 
 DeviceStatus RdpConnection::deviceStatus(MediaDevice device) const
@@ -1487,6 +1498,12 @@ void RdpConnection::onAuthenticated()
     d->authenticated.store(true);
     d->channelGate.authorize();
     d->inputHandler->initialize(d->peer->context->input);
+    {
+        // Brokers read these from the main thread (standardMediaChannels()).
+        const auto vcm = reinterpret_cast<PeerContext *>(d->peer->context)->virtualChannelManager;
+        d->joinedRdpsnd.store(WTSVirtualChannelManagerIsChannelJoined(vcm, RDPSND_CHANNEL_NAME));
+        d->joinedDrdynvc.store(WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME));
+    }
     // The MCS channel join was complete long before PostConnect, so
     // hasControlChannel() is exact for the clientDisplayInfoReceived() slot.
     // No client record is lost by opening only now: FreeRDP runs PostConnect
