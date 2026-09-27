@@ -76,6 +76,31 @@ private Q_SLOTS:
         QVERIFY(timer.elapsed() < 1000);
         // A directory is not a config file.
         QCOMPARE(VirtualStockClient::readPolicyFile(dir.path(), getuid()), Policy::AttachOrCreate);
+        // An oversized file is never read, not even its first bytes (sparse:
+        // a hostile user must not make the root broker allocate or read it).
+        const QString huge = dir.filePath(u"huge"_s);
+        QFile big(huge);
+        QVERIFY(big.open(QIODevice::WriteOnly));
+        big.write("[General]\nVirtualStockClientPolicy=refuse\n");
+        QVERIFY(big.resize(qint64(64) * 1024 * 1024 * 1024));
+        big.close();
+        timer.restart();
+        QCOMPARE(VirtualStockClient::readPolicyFile(huge, getuid()), Policy::AttachOrCreate);
+        QVERIFY(timer.elapsed() < 1000);
+        // Just within the limit still counts.
+        QVERIFY(big.open(QIODevice::ReadWrite));
+        QVERIFY(big.resize(256 * 1024));
+        big.close();
+        QCOMPARE(VirtualStockClient::readPolicyFile(huge, getuid()), Policy::Refuse);
+        QVERIFY(big.open(QIODevice::ReadWrite));
+        QVERIFY(big.resize(256 * 1024 + 1));
+        big.close();
+        QCOMPARE(VirtualStockClient::readPolicyFile(huge, getuid()), Policy::AttachOrCreate);
+        // A hard link to the user's own file is that file: same owner, same answer.
+        const QString hard = dir.filePath(u"hard"_s);
+        QCOMPARE(::link(QFile::encodeName(path).constData(), QFile::encodeName(hard).constData()), 0);
+        QCOMPARE(VirtualStockClient::readPolicyFile(hard, getuid()), Policy::Refuse);
+        QCOMPARE(VirtualStockClient::readPolicyFile(hard, getuid() + 1), Policy::AttachOrCreate);
     }
 
     void standardErrorCodes()
