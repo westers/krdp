@@ -54,6 +54,7 @@
 #include "PipeWireMicrophone.h"
 #include "PipeWireCamera.h"
 #include "PipeWireAudioPlayback.h"
+#include "RemoteCameraSet.h"
 #include "PreAuthChannelGate.h"
 #include "Server.h"
 #include "VideoStream.h"
@@ -344,7 +345,7 @@ UINT cameraSample(CameraDeviceServerContext *context, const CAM_SAMPLE_RESPONSE 
 }
 
 struct RemoteCameraCollection {
-    std::vector<std::unique_ptr<RemoteCamera>> cameras;
+    RemoteCameraSet<RemoteCamera> cameras;
     QString loopbackDevice;
 };
 
@@ -354,6 +355,14 @@ UINT cameraAdded(CamDevEnumServerContext *enumerator, const CAM_DEVICE_ADDED_NOT
     auto *collection = static_cast<RemoteCameraCollection *>(enumerator->userdata);
     if (!collection || !device->VirtualChannelName) {
         return ERROR_INVALID_DATA;
+    }
+    // AUD-D1: a client may announce the same device again (for example when
+    // it re-enumerates). A second device context on the same channel name
+    // would fight the first for the DVC and publish a second PipeWire node.
+    const QByteArray channelName(device->VirtualChannelName);
+    if (collection->cameras.contains(channelName)) {
+        qCInfo(KRDP) << "RDPECAM ignoring repeated DeviceAddedNotification for" << channelName;
+        return CHANNEL_RC_OK;
     }
     auto camera = std::make_unique<RemoteCamera>();
     camera->loopbackDevice = collection->loopbackDevice;
@@ -373,7 +382,29 @@ UINT cameraAdded(CamDevEnumServerContext *enumerator, const CAM_DEVICE_ADDED_NOT
         || camera->context->Open(camera->context) != CHANNEL_RC_OK) {
         return ERROR_INTERNAL_ERROR;
     }
-    collection->cameras.push_back(std::move(camera));
+    // Only this enumerator thread adds, so the name is still free.
+    collection->cameras.insert(channelName, std::move(camera));
+    return CHANNEL_RC_OK;
+}
+
+UINT cameraRemoved(CamDevEnumServerContext *enumerator, const CAM_DEVICE_REMOVED_NOTIFICATION *device)
+{
+    auto *collection = static_cast<RemoteCameraCollection *>(enumerator->userdata);
+    if (!collection || !device->VirtualChannelName) {
+        return ERROR_INVALID_DATA;
+    }
+    const QByteArray channelName(device->VirtualChannelName);
+    std::unique_ptr<RemoteCamera> camera = collection->cameras.take(channelName);
+    if (!camera) {
+        // Not an error: the add may have failed, or been a duplicate.
+        qCInfo(KRDP) << "RDPECAM DeviceRemovedNotification for an unknown camera" << channelName;
+        return CHANNEL_RC_OK;
+    }
+    qCInfo(KRDP) << "RDPECAM client camera removed:" << channelName;
+    // Outside the set's lock: ~RemoteCamera closes the device channel and
+    // joins its FreeRDP thread (no callback can still use the endpoint), then
+    // destroys the PipeWire endpoint, which removes the virtual camera node.
+    camera.reset();
     return CHANNEL_RC_OK;
 }
 }
@@ -1176,11 +1207,7 @@ void RdpConnection::run(std::stop_token stopToken)
             break;
         }
 
-        for (const auto &camera : d->remoteCameras.cameras) {
-            if (!startCameraIfRequested(camera.get())) {
-                break;
-            }
-        }
+        d->remoteCameras.cameras.forEach(startCameraIfRequested);
 
         if (d->rdpsnd && d->rdpsndActive.load()) {
             const auto send = [&](const QByteArray &pcm) {
@@ -1365,7 +1392,8 @@ bool RdpConnection::onClose()
         cam_dev_enum_server_context_free(d->cameraEnumerator);
         d->cameraEnumerator = nullptr;
     }
-    d->remoteCameras.cameras.clear();
+    // The enumerator thread is joined, so nothing adds or removes any more.
+    d->remoteCameras.cameras.takeAll();
     d->microphoneConsent.setEnabled(false);
     d->microphonePcm.reset(d->microphoneConsent.snapshot().generation);
     if (d->audin) {
@@ -1491,6 +1519,7 @@ bool RdpConnection::initializeAudioChannels()
             d->cameraEnumerator->userdata = &d->remoteCameras;
             d->cameraEnumerator->SelectVersionRequest = cameraSelectVersion;
             d->cameraEnumerator->DeviceAddedNotification = cameraAdded;
+            d->cameraEnumerator->DeviceRemovedNotification = cameraRemoved;
         }
         if (!d->cameraEnumerator || d->cameraEnumerator->Initialize(d->cameraEnumerator, FALSE) != CHANNEL_RC_OK
             || d->cameraEnumerator->Open(d->cameraEnumerator) != CHANNEL_RC_OK) {

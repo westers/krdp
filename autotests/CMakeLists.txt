@@ -560,3 +560,12 @@ if(TARGET krdpctl-probe)
     set_tests_properties(KrdpctlV2LoopbackTest PROPERTIES TIMEOUT 180)
 endif()
 # --- end AUD-WS-L ---
+
+# --- AUD-WS-D ---
+# AUD-D1 server hygiene: RDPECAM device bookkeeping and the PipeWire endpoint
+# toggle loop (private daemon; exits 77 when it can't run one).
+add_executable(RemoteCameraSetTest RemoteCameraSetTest.cpp)
+target_include_directories(RemoteCameraSetTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(RemoteCameraSetTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME RemoteCameraSetTest COMMAND RemoteCameraSetTest)
+# --- end AUD-WS-D ---
