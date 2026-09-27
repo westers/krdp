@@ -583,7 +583,9 @@ class KRDP_NO_EXPORT RdpConnection::Private
 public:
     Server *server = nullptr;
 
-    State state = State::Initial;
+    // AUD-P7: written on the main thread (initialize) and the session thread
+    // (run/onClose), read from both and from VideoStream's threads.
+    std::atomic<State> state = State::Initial;
     // Zero means no OS identity; uid+1 also represents uid0 without ambiguity.
     std::atomic<quint64> authenticatedPamUid = 0;
 
@@ -687,11 +689,10 @@ std::optional<quint32> RdpConnection::authenticatedPamUid() const
 
 void RdpConnection::setState(KRdp::RdpConnection::State newState)
 {
-    if (newState == d->state) {
+    if (d->state.exchange(newState) == newState) {
         return;
     }
 
-    d->state = newState;
     Q_EMIT stateChanged(newState);
 }
 

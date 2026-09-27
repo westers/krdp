@@ -285,8 +285,11 @@ public:
     // entry unless a layout was configured.
     QVector<Surface> surfaces;
 
-    bool pendingReset = true;
-    bool enabled = false;
+    // Set by reset() on the main thread, consumed on the submission thread.
+    std::atomic<bool> pendingReset = true;
+    // AUD-P7: set on the session thread (RdpConnection::run), read on the main
+    // thread (queueFrame) and the submission thread.
+    std::atomic<bool> enabled = false;
     // Written on the FreeRDP peer thread (onCapsAdvertise), read by the submission thread.
     std::atomic<bool> capsConfirmed = false;
 
@@ -552,11 +555,10 @@ bool VideoStream::enabled() const
 
 void VideoStream::setEnabled(bool enabled)
 {
-    if (d->enabled == enabled) {
+    if (d->enabled.exchange(enabled) == enabled) {
         return;
     }
 
-    d->enabled = enabled;
     if (!enabled) {
         std::lock_guard lock(d->frameQueueMutex);
         d->frameQueue.clear();
