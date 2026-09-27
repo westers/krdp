@@ -1,18 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Steve Westers
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
+#include <cerrno>
 #include <csignal>
 #include <filesystem>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QSocketNotifier>
 
 #include <RdpConnection.h>
 #include <Server.h>
 
 #include "ConsoleHostController.h"
+#include "ConsoleSeatWatcher.h"
 #include "ConsoleWorkerLauncher.h"
 
 int main(int argc, char **argv)
@@ -51,20 +55,48 @@ int main(int argc, char **argv)
     server.setUsePAMAuthentication(true);
     server.setAllowAnyPAMUser(true);
 
+    KRdp::ConsoleSeatWatcher seat;
     KRdp::ConsoleWorkerLauncher launcher(parser.value(workerOption));
+    launcher.setSessionLookup([&seat](const QString &id) {
+        return seat.session(id);
+    });
     KRdp::ConsoleHostController host(&server,
-                                     [&launcher](const auto &target, const auto &socketName, const auto &token, QString *error) {
-                                         return launcher.launch(target, socketName, token, error);
-                                     },
+                                     {[&launcher](const auto &target, const auto &socketName, const auto &token, QString *error) {
+                                          return launcher.launch(target, socketName, token, error);
+                                      },
+                                      [&launcher](const QString &socketName, int signal) {
+                                          launcher.signalWorker(socketName, signal);
+                                      }},
                                      parser.value(runtimeOption));
     QObject::connect(&launcher, &KRdp::ConsoleWorkerLauncher::workerExited,
                      &host, &KRdp::ConsoleHostController::workerExited, Qt::QueuedConnection);
+    QObject::connect(&seat, &KRdp::ConsoleSeatWatcher::sessionsChanged, &host, &KRdp::ConsoleHostController::setSeatSessions);
     host.setAudioPriorityDefault(parser.isSet(audioPriorityOption));
     if (!server.start()) {
         return 1;
     }
     host.start();
-    std::signal(SIGINT, [](int) { QCoreApplication::quit(); });
-    std::signal(SIGTERM, [](int) { QCoreApplication::quit(); });
+    seat.start();
+    // Self-pipe: QCoreApplication::quit() is not async-signal-safe. On quit
+    // the launcher's destructor sends SIGTERM to the worker, which restores
+    // the outputs it changed before it exits.
+    static int signalPipe[2] = {-1, -1};
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, signalPipe) == 0) {
+        struct sigaction action{};
+        action.sa_handler = [](int) {
+            const int saved = errno;
+            const char byte = 1;
+            [[maybe_unused]] const auto written = ::write(signalPipe[1], &byte, 1);
+            errno = saved;
+        };
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = SA_RESTART;
+        ::sigaction(SIGINT, &action, nullptr);
+        ::sigaction(SIGTERM, &action, nullptr);
+        auto *notifier = new QSocketNotifier(signalPipe[0], QSocketNotifier::Read, &application);
+        QObject::connect(notifier, &QSocketNotifier::activated, &application, [] {
+            QCoreApplication::quit();
+        });
+    }
     return application.exec();
 }

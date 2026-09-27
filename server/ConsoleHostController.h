@@ -12,9 +12,11 @@
 #include <QHash>
 #include <QJsonObject>
 #include <QMap>
+#include <QPointer>
 #include <QTimer>
 
 #include "ConsoleHandoff.h"
+#include "ConsoleWorkerBackoff.h"
 #include "ConsoleControl.h"
 #include "ConsoleInputState.h"
 #include "ConsoleWorkerEndpoint.h"
@@ -40,20 +42,39 @@ class ConsoleHostController final : public QObject
     Q_OBJECT
 
 public:
-    using WorkerLauncher = std::function<bool(const ConsoleHandoff::Target &, const QString &socketName, const QByteArray &token, QString *error)>;
+    /** The two privileged process operations the system service supplies. */
+    struct WorkerLauncher {
+        /** Start the worker for `target`; `socketName` identifies this launch until workerExited(). */
+        std::function<bool(const ConsoleHandoff::Target &, const QString &socketName, const QByteArray &token, QString *error)> launch;
+        /** Deliver `signal` (SIGTERM/SIGKILL) to the still-running launch `socketName`. */
+        std::function<void(const QString &socketName, int signal)> signal;
+    };
+    /** PAM uid of an authenticated connection; injectable for tests. */
+    using UidResolver = std::function<std::optional<quint32>(RdpConnection *)>;
+
+    /// Stop handshake budget, then SIGTERM, then SIGKILL (AUD-C-2).
+    static constexpr int DrainDeadlineMs = 5000;
+    static constexpr int KillDeadlineMs = 2000;
 
     explicit ConsoleHostController(Server *server, WorkerLauncher launchWorker, QString runtimeDirectory, QObject *parent = nullptr);
     ~ConsoleHostController() override;
     void start();
     void setAudioPriorityDefault(bool enabled);
-    void refreshSeat();
+    /** Latest logind sessions (ConsoleSeatWatcher::sessionsChanged). */
+    void setSeatSessions(const QList<ConsoleSeat::Session> &sessions);
+    /** A launched worker process exited (reaped). The only event that ends a drain. */
     void workerExited(const QString &socketName);
+    void setUidResolver(UidResolver resolver);
 
 private:
     friend class ConsoleHostControllerTest;
+    friend class ConsoleHostLifecycleTest;
     struct Client {
         ConsoleControl::Id id = 0;
-        RdpConnection *connection = nullptr;
+        // Server deletes the connection inside its own Closed emission, before
+        // our Closed slot can run; never dereference it without this guard.
+        QPointer<RdpConnection> connection;
+        std::optional<quint32> uid;
         std::unique_ptr<ConsoleWorkerSession> session;
         QList<QMetaObject::Connection> connections;
         QJsonObject pendingMedia;
@@ -66,8 +87,16 @@ private:
 
     void apply(const ConsoleHandoff::Actions &actions);
     void startWorker(const ConsoleHandoff::Target &target);
+    void stopCurrentWorker();
+    void workerFailed();
+    void retryWorker();
+    void removeWorkerDirectory();
+    void clearPhysicalLease(const char *why);
+    void enforceAdmission();
+    bool admissible(const Client &client) const;
+    void evictClient(ConsoleControl::Id id, const QString &message);
     void setWorkerActive(bool active);
-    void removeClient(RdpConnection *connection);
+    void removeClient(RdpConnection *connection, ConsoleControl::Id id = 0);
     void addClient(RdpConnection *connection);
     void updateMedia();
     void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
@@ -88,7 +117,18 @@ private:
     QString m_runtimeDirectory;
     ConsoleHandoff::State m_handoff;
     ConsoleWorkerEndpoint m_endpoint;
-    QTimer m_seatPoll;
+    QList<ConsoleSeat::Session> m_sessions;
+    UidResolver m_uidOf;
+    // One launched process at a time; a replacement waits for its reaping.
+    QString m_workerSocket;
+    QString m_workerDirectory;
+    bool m_workerAlive = false;
+    QTimer m_drainDeadline;
+    QTimer m_killDeadline;
+    ConsoleWorkerBackoff m_backoff;
+    ConsoleHandoff::Target m_failedTarget;
+    QTimer m_retryTimer;
+    bool m_deferredStart = false;
     std::vector<std::unique_ptr<Client>> m_clients;
     bool m_inputEnabled = false;
     bool m_audioPriorityDefault = false;

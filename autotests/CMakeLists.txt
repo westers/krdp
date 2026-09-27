@@ -447,3 +447,11 @@ target_include_directories(ConsoleOutputJournalTest PRIVATE ${CMAKE_SOURCE_DIR}/
 target_link_libraries(ConsoleOutputJournalTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
 add_test(NAME ConsoleOutputJournalTest COMMAND ConsoleOutputJournalTest)
 set_tests_properties(ConsoleOutputJournalTest PROPERTIES TIMEOUT 60)
+add_executable(ConsoleHostLifecycleTest ConsoleHostLifecycleTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleHostController.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleSeat.cpp)
+target_include_directories(ConsoleHostLifecycleTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleHostLifecycleTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
+add_test(NAME ConsoleHostLifecycleTest COMMAND ConsoleHostLifecycleTest)

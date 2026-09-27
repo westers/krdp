@@ -5,7 +5,11 @@
 #include "AudioPriority.h"
 
 #include <algorithm>
+#include <csignal>
 #include <utility>
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <QDir>
 #include <QRandomGenerator>
@@ -20,6 +24,7 @@
 #include <InputHandler.h>
 #include <LayoutControl.h>
 
+#include "ConsoleAdmission.h"
 #include "ConsoleSeat.h"
 #include "ConsoleWorkerSession.h"
 #include "ConsoleResize.h"
@@ -98,6 +103,26 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     , m_runtimeDirectory(std::move(runtimeDirectory))
 {
     Q_ASSERT(m_server);
+    m_uidOf = [](RdpConnection *connection) -> std::optional<quint32> {
+        return connection ? connection->authenticatedPamUid() : std::nullopt;
+    };
+    m_drainDeadline.setSingleShot(true);
+    m_drainDeadline.setInterval(DrainDeadlineMs);
+    connect(&m_drainDeadline, &QTimer::timeout, this, [this] {
+        if (!m_workerAlive) return;
+        qWarning().noquote() << "Console worker" << m_workerSocket << "did not stop within" << DrainDeadlineMs << "ms; sending SIGTERM";
+        if (m_launchWorker.signal) m_launchWorker.signal(m_workerSocket, SIGTERM);
+        m_killDeadline.start();
+    });
+    m_killDeadline.setSingleShot(true);
+    m_killDeadline.setInterval(KillDeadlineMs);
+    connect(&m_killDeadline, &QTimer::timeout, this, [this] {
+        if (!m_workerAlive) return;
+        qWarning().noquote() << "Console worker" << m_workerSocket << "ignored SIGTERM for" << KillDeadlineMs << "ms; sending SIGKILL";
+        if (m_launchWorker.signal) m_launchWorker.signal(m_workerSocket, SIGKILL);
+    });
+    m_retryTimer.setSingleShot(true);
+    connect(&m_retryTimer, &QTimer::timeout, this, &ConsoleHostController::retryWorker);
     m_experimentalPhysicalTopology = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_CONSOLE_TOPOLOGY") == 1;
     m_experimentalConsoleVirtual = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_CONSOLE_VIRTUAL") == 1;
     m_physicalDeadline.setSingleShot(true);
@@ -156,7 +181,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     connect(&m_microphonePump, &QTimer::timeout, this, [this] {
         if (!m_microphoneReady || !m_inputEnabled || !m_control.ownsControl(m_microphoneClient)) return;
         for (const auto &client : m_clients) {
-            if (client->id != m_microphoneClient) continue;
+            if (client->id != m_microphoneClient || !client->connection) continue;
             const auto pcm = client->connection->takeExternalMicrophone();
             if (!pcm.isEmpty()) {
                 // Never retry stale speech when the worker socket is backed up.
@@ -175,11 +200,11 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             finishResize(result.error);
         }
     });
-    m_seatPoll.setInterval(500);
-    connect(&m_seatPoll, &QTimer::timeout, this, &ConsoleHostController::refreshSeat);
     connect(m_server, &Server::newConnectionCreated, this, &ConsoleHostController::addClient);
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerReady, this, [this](const auto &target) {
         apply(m_handoff.workerReady(target));
+        m_backoff.reset();
+        m_failedTarget = {};
         qInfo() << "Console worker ready:" << target.sessionId << "forwarding" << m_inputEnabled;
         m_endpoint.setControlState({m_controlGeneration, m_control.owner() != 0});
         for (const auto &client : m_clients) {
@@ -197,7 +222,9 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         finishVirtualTopology(u"capture-failed"_s);
         stopMicrophone(u"console microphone worker stopped"_s);
         finishResize(u"console capture worker stopped during resize"_s);
-        apply(m_handoff.workerStopped());
+        // A closed socket is not a reaped process: the worker may still be
+        // restoring outputs. The handoff advances only on workerExited().
+        stopCurrentWorker();
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [this](const VideoFrame &frame) {
         if (!m_inputEnabled || m_pendingPhysical || m_pendingVirtual || m_layoutAwaitingReadback) {
@@ -207,6 +234,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             if (!m_topologyAvailable || !ConsoleFrameLayout::confirmed(frame, m_outputs, m_topologyCatalog.snapshot())) return;
         } else if (frame.monitors.size() > 1) return;
         for (const auto &client : m_clients) {
+            if (!client->connection) continue;
             const QVector<VideoMonitor> desired = frame.monitors.size() > 1 ? frame.monitors : QVector<VideoMonitor>{};
             if (client->wireLayout != desired) {
                 if (!frame.isKeyFrame || (desired.isEmpty() && !m_topologyAvailable && !client->wireLayout.isEmpty())) continue;
@@ -218,7 +246,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::audioReceived, this, [this](const ConsoleWorkerWire::Audio &audio) {
         for (const auto &client : m_clients) {
-            client->connection->submitExternalAudio(audio.pcm);
+            if (client->connection) client->connection->submitExternalAudio(audio.pcm);
         }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [this](const ConsoleWorkerWire::Outputs &outputs) {
@@ -360,11 +388,15 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         updateMedia();
         sendLayouts();
     });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::versionMismatch, this, [](quint16 version) {
+        qWarning().noquote() << "Console worker speaks wire version" << version << "but this broker speaks"
+                             << ConsoleWorkerWire::ProtocolVersion << "- install the paired broker and worker together";
+    });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::protocolError, this, [this](const QString &message) {
         qWarning().noquote() << "Console worker protocol error:" << message;
         setWorkerActive(false);
-        m_endpoint.close();
-        apply(m_handoff.workerStopped());
+        stopCurrentWorker();
+        m_endpoint.close(); // The worker sees its socket close and exits; its reaping retries with backoff.
     });
 }
 
@@ -375,31 +407,152 @@ ConsoleHostController::~ConsoleHostController()
 
 void ConsoleHostController::start()
 {
-    refreshSeat();
-    m_seatPoll.start();
+    apply(m_handoff.reconcile(m_sessions));
 }
 
-void ConsoleHostController::refreshSeat()
+void ConsoleHostController::setUidResolver(UidResolver resolver)
 {
-    QString error;
-    const auto sessions = ConsoleSeat::readLogindSessions(&error);
-    if (sessions.isEmpty() && !error.isEmpty()) {
-        qWarning().noquote() << "Unable to read console seat:" << error;
-        return;
-    }
-    apply(m_handoff.reconcile(sessions));
+    m_uidOf = std::move(resolver);
+}
+
+void ConsoleHostController::setSeatSessions(const QList<ConsoleSeat::Session> &sessions)
+{
+    m_sessions = sessions;
+    // Admission first: an account that may not see the new seat state must be
+    // gone before a worker for it can become ready.
+    enforceAdmission();
+    apply(m_handoff.reconcile(m_sessions));
 }
 
 void ConsoleHostController::workerExited(const QString &socketName)
 {
     // The socket path identifies this launch, including retries for the same
     // logind session. A late exit from an old worker must not stop its successor.
-    if (socketName != m_endpoint.socketName()) {
+    if (!m_workerAlive || socketName != m_workerSocket) {
         return;
     }
+    qInfo().noquote() << "Console worker" << socketName << "exited";
+    workerFailed();
+}
+
+void ConsoleHostController::workerFailed()
+{
+    // The current launch is gone: reaped, or never started. Only now may a
+    // replacement start, so two workers never drive the same seat (AUD-C-7).
+    const auto target = m_handoff.startingTarget().valid() ? m_handoff.startingTarget() : m_handoff.activeTarget();
+    const bool intentional = m_handoff.draining();
+    m_workerAlive = false;
+    m_workerSocket.clear();
+    m_drainDeadline.stop();
+    m_killDeadline.stop();
     setWorkerActive(false);
     m_endpoint.close();
+    removeWorkerDirectory();
+    clearPhysicalLease("console worker exited");
     apply(m_handoff.workerStopped());
+    if (!intentional && !m_workerAlive) {
+        // Crash, failed launch or wire-version mismatch: never relaunch the
+        // same target in a tight loop (AUD-C-6).
+        m_failedTarget = target;
+        const auto step = m_backoff.next();
+        if (step.newLevel) {
+            qWarning().noquote() << "Console worker for session" << target.sessionId << "failed; retrying in" << step.delayMs << "ms";
+        }
+        m_retryTimer.start(step.delayMs);
+    }
+}
+
+void ConsoleHostController::retryWorker()
+{
+    if (m_workerAlive) {
+        return;
+    }
+    if (std::exchange(m_deferredStart, false) && m_handoff.startingTarget().valid()) {
+        startWorker(m_handoff.startingTarget());
+        return;
+    }
+    apply(m_handoff.reconcile(m_sessions));
+}
+
+void ConsoleHostController::stopCurrentWorker()
+{
+    m_endpoint.stopWorker(); // Delivered at once, or right after the worker authenticates.
+    if (m_workerAlive) {
+        if (!m_drainDeadline.isActive() && !m_killDeadline.isActive()) {
+            m_drainDeadline.start();
+        }
+        return;
+    }
+    // Nothing is running (a launch deferred by backoff, or no launcher): the
+    // drain is already over. Deferred, so callers never re-enter apply().
+    QTimer::singleShot(0, this, [this] {
+        if (!m_workerAlive && m_handoff.draining()) {
+            apply(m_handoff.workerStopped());
+        }
+    });
+}
+
+void ConsoleHostController::removeWorkerDirectory()
+{
+    if (m_workerDirectory.isEmpty()) {
+        return;
+    }
+    QDir(m_workerDirectory).removeRecursively();
+    m_workerDirectory.clear();
+}
+
+void ConsoleHostController::clearPhysicalLease(const char *why)
+{
+    // A dead worker holds no compositor lease: its temporary outputs die
+    // with its screencast connection, and the next worker replays the
+    // output-restore journal before it reports Ready (AUD-C-5). Keeping the
+    // lease would refuse every later worker, the greeter included.
+    if (m_physicalLeaseActive || m_consoleCreatorsActive) {
+        qInfo() << "Clearing Console physical lease:" << why;
+    }
+    m_physicalLeaseActive = false;
+    m_consoleCreatorsActive = false;
+    m_physicalLeaseGeneration = 0;
+}
+
+bool ConsoleHostController::admissible(const Client &client) const
+{
+    const auto seat = ConsoleHandoff::targetFor(m_sessions);
+    const auto session = ConsoleSeat::find(m_sessions, seat.sessionId);
+    return ConsoleAdmission::allowed(seat, session && session->locked, client.uid);
+}
+
+void ConsoleHostController::enforceAdmission()
+{
+    QList<ConsoleControl::Id> evicted;
+    for (const auto &client : m_clients) {
+        if (m_control.admitted(client->id) && !admissible(*client)) {
+            evicted.append(client->id);
+        }
+    }
+    for (const auto id : evicted) {
+        evictClient(id, u"the physical console now shows another account's unlocked desktop"_s);
+    }
+}
+
+void ConsoleHostController::evictClient(ConsoleControl::Id id, const QString &message)
+{
+    const auto found = std::find_if(m_clients.cbegin(), m_clients.cend(), [id](const auto &client) { return client->id == id; });
+    if (found == m_clients.cend()) {
+        return;
+    }
+    const QPointer<RdpConnection> connection = (*found)->connection;
+    qWarning().noquote() << "Refusing console client" << id << "(uid" << ((*found)->uid ? QString::number(*(*found)->uid) : u"none"_s) << "):" << message;
+    if (connection) {
+        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"console"_s},
+                                                  {u"code"_s, u"not-owner"_s}, {u"message"_s, message}});
+        // Server deletes the connection when it closes; never do that from
+        // inside one of its own signal emissions or our loops.
+        QMetaObject::invokeMethod(connection, [connection] {
+            if (connection) connection->close();
+        }, Qt::QueuedConnection);
+    }
+    removeClient(connection.data(), id);
 }
 
 void ConsoleHostController::apply(const ConsoleHandoff::Actions &actions)
@@ -411,7 +564,7 @@ void ConsoleHostController::apply(const ConsoleHandoff::Actions &actions)
         setWorkerActive(false);
     }
     if (actions.stopWorker) {
-        m_endpoint.stopWorker();
+        stopCurrentWorker();
     }
     if (actions.startWorker) {
         startWorker(actions.target);
@@ -421,7 +574,7 @@ void ConsoleHostController::apply(const ConsoleHandoff::Actions &actions)
     }
     if (actions.resetGraphics) {
         for (const auto &client : m_clients) {
-            client->connection->videoStream()->reset();
+            if (client->connection) client->connection->videoStream()->reset();
         }
     }
     if (actions.requestKeyFrame) {
@@ -431,6 +584,23 @@ void ConsoleHostController::apply(const ConsoleHandoff::Actions &actions)
 
 void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
 {
+    if (m_workerAlive) {
+        // Unreachable through the handoff (it waits for workerExited), but a
+        // second worker on the same seat must never be launched (AUD-C-7).
+        qWarning() << "Not starting a console worker while the previous one has not exited";
+        stopCurrentWorker();
+        return;
+    }
+    if (m_retryTimer.isActive() && target == m_failedTarget) {
+        m_deferredStart = true; // Backoff still running for this very target.
+        return;
+    }
+    if (!(target == m_failedTarget)) {
+        m_backoff.reset();
+        m_retryTimer.stop();
+        m_deferredStart = false;
+        m_failedTarget = {};
+    }
     m_physicalPreview.reset();
     m_virtualPreview.reset();
     finishPhysicalTopology(u"capture-failed"_s);
@@ -441,11 +611,20 @@ void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
     m_topologyCatalog.resetGeneration();
     finishTopologyQueries(u"capture-failed"_s);
     m_outputs = {}; // Never describe the prior greeter/user's outputs during handoff.
-    if (!QDir().mkpath(m_runtimeDirectory)) {
-        qWarning().noquote() << "Cannot create console runtime directory" << m_runtimeDirectory;
+    QString error;
+    // One private directory per launch, mode 0700 and owned by the worker's
+    // uid: no other local account can reach, pre-empt or replace the socket
+    // (AUD-C-9). The endpoint additionally checks SO_PEERCRED and the token.
+    const QString directory = QDir(m_runtimeDirectory)
+                                  .filePath(QStringLiteral("seat0-%1-%2").arg(target.sessionId).arg(QRandomGenerator::system()->generate64(), 0, 16));
+    if (m_runtimeDirectory.isEmpty() || !QDir().mkpath(m_runtimeDirectory) || ::mkdir(QFile::encodeName(directory).constData(), 0700) != 0
+        || (geteuid() == 0 && ::chown(QFile::encodeName(directory).constData(), target.uid, gid_t(-1)) != 0)) {
+        qWarning().noquote() << "Cannot create console worker directory" << directory;
+        workerFailed();
         return;
     }
-    const QString socketName = QDir(m_runtimeDirectory).filePath(QStringLiteral("seat0-%1-%2.sock").arg(target.sessionId).arg(QRandomGenerator::global()->generate64(), 0, 16));
+    m_workerDirectory = directory;
+    const QString socketName = QDir(directory).filePath(QStringLiteral("worker.sock"));
     QByteArray token;
     token.reserve(32);
     for (int i = 0; i < 4; ++i) {
@@ -454,18 +633,18 @@ void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
             token.append(char(value >> (byte * 8)));
         }
     }
-    QString error;
     if (!m_endpoint.listen(socketName, target, token, &error)) {
         qWarning().noquote() << "Cannot create console worker endpoint:" << error;
+        workerFailed();
         return;
     }
-    if (!m_launchWorker || !m_launchWorker(target, m_endpoint.socketName(), token, &error)) {
+    if (!m_launchWorker.launch || !m_launchWorker.launch(target, m_endpoint.socketName(), token, &error)) {
         qWarning().noquote() << "Cannot launch console worker for session" << target.sessionId << ':' << error;
-        m_endpoint.close();
-        // close() is local and therefore has no disconnected signal. Tell the
-        // handoff state to retry on its next logind poll.
-        apply(m_handoff.workerStopped());
+        workerFailed();
+        return;
     }
+    m_workerAlive = true;
+    m_workerSocket = m_endpoint.socketName();
 }
 
 void ConsoleHostController::setWorkerActive(bool active)
@@ -536,13 +715,32 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     client->connections.append(connect(client->session.get(), &AbstractSession::frameReceived, connection->videoStream(), &VideoStream::queueFrame));
     client->connections.append(connect(client->session.get(), &ConsoleWorkerSession::keyFrameRequested, &m_endpoint, &ConsoleWorkerEndpoint::requestKeyFrame));
     client->connections.append(connect(connection->inputHandler(), &InputHandler::inputEvent, client->session.get(), &AbstractSession::sendEvent));
-    client->connections.append(connect(connection, &RdpConnection::controlRecordReceived, this, [this, connection, id](const QJsonObject &record) {
-        onControlRecord(connection, id, record);
+    // Queued: a record can still be in the event queue after Server deleted
+    // the connection. Only a live connection that is still our client counts.
+    const QPointer<RdpConnection> guarded(connection);
+    client->connections.append(connect(connection, &RdpConnection::controlRecordReceived, this, [this, guarded, id](const QJsonObject &record) {
+        if (!guarded || std::none_of(m_clients.cbegin(), m_clients.cend(), [id](const auto &entry) { return entry->id == id; })) {
+            return;
+        }
+        onControlRecord(guarded, id, record);
     }, Qt::QueuedConnection));
+    // Server erases (deletes) the connection from its own Closed slot, which
+    // runs before ours; Qt then skips our Closed slot. `destroyed` always runs
+    // and is where a disconnected client really leaves (AUD-C-4).
+    client->connections.append(connect(connection, &QObject::destroyed, this, [this, id] {
+        removeClient(nullptr, id);
+    }));
     client->connections.append(connect(connection, &RdpConnection::stateChanged, this, [this, connection, id](RdpConnection::State state) {
         if (state == RdpConnection::State::Streaming) {
             // Running is pre-authentication. Media preflight can also arrive
             // before Streaming; defer it without granting any authority.
+            const auto self = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &entry) { return entry->id == id; });
+            if (self == m_clients.end()) return;
+            (*self)->uid = m_uidOf(connection);
+            if (!admissible(**self)) {
+                evictClient(id, u"this account may not use the physical console now: an unlocked desktop belongs to its own user"_s);
+                return;
+            }
             m_control.admit(id);
             syncControlState();
             sendLayouts();
@@ -963,22 +1161,38 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
     }
 }
 
-void ConsoleHostController::removeClient(RdpConnection *connection)
+void ConsoleHostController::removeClient(RdpConnection *connection, ConsoleControl::Id id)
 {
-    for (const auto &client : m_clients) {
-        if (client->connection == connection) {
-            if (m_physicalPreview && m_physicalPreview->owner == client->id) m_physicalPreview.reset();
-            if (m_virtualPreview && m_virtualPreview->owner == client->id) m_virtualPreview.reset();
-            if (m_pendingPhysical && m_pendingPhysical->owner == client->id) finishPhysicalTopology(u"not-owner"_s);
-            if (m_pendingVirtual && m_pendingVirtual->owner == client->id) finishVirtualTopology(u"not-owner"_s);
-            m_pendingTopology.remove(client->id);
-            if (m_control.ownsControl(client->id)) {
-                releaseInput();
-            }
-            m_control.remove(client->id);
+    // Take the client out first: nothing below may send to a connection that
+    // is closing or already destroyed (its QPointer is then null).
+    std::vector<std::unique_ptr<Client>> removed;
+    for (auto it = m_clients.begin(); it != m_clients.end();) {
+        auto &client = *it;
+        if ((id && client->id == id) || (connection && client->connection == connection) || !client->connection) {
+            removed.push_back(std::move(client));
+            it = m_clients.erase(it);
+        } else {
+            ++it;
         }
     }
-    std::erase_if(m_clients, [connection](const auto &client) { return client->connection == connection; });
+    if (removed.empty()) {
+        return;
+    }
+    for (const auto &client : removed) {
+        for (const auto &handle : std::as_const(client->connections)) {
+            disconnect(handle);
+        }
+        if (m_physicalPreview && m_physicalPreview->owner == client->id) m_physicalPreview.reset();
+        if (m_virtualPreview && m_virtualPreview->owner == client->id) m_virtualPreview.reset();
+        if (m_pendingPhysical && m_pendingPhysical->owner == client->id) finishPhysicalTopology(u"not-owner"_s);
+        if (m_pendingVirtual && m_pendingVirtual->owner == client->id) finishVirtualTopology(u"not-owner"_s);
+        if (m_pendingResize && m_pendingResize->client == client->id) finishResize(u"console client disconnected"_s);
+        m_pendingTopology.remove(client->id);
+        if (m_control.ownsControl(client->id)) {
+            releaseInput();
+        }
+        m_control.remove(client->id);
+    }
     syncControlState();
     updateMedia();
     sendLayouts();
@@ -1016,7 +1230,7 @@ void ConsoleHostController::sendLayouts()
     layout.owner = m_control.owner() ? QString::number(m_control.owner()) : QString();
     layout.caps.cursorMetadata = false;
     for (const auto &client : m_clients) {
-        if (client->wantsLayout && m_control.admitted(client->id)) {
+        if (client->connection && client->wantsLayout && m_control.admitted(client->id)) {
             layout.you = m_control.ownsControl(client->id) ? u"owner"_s : u"viewer"_s;
             auto record = LayoutControl::layoutRecord(layout);
             record.insert(u"consoleResize"_s, true);
@@ -1096,7 +1310,7 @@ void ConsoleHostController::finishPhysicalTopology(const QString &code, const QS
         releaseInput();
         m_inputEnabled = false;
         for (const auto &client : m_clients) client->session->setWorkerActive(false);
-        m_endpoint.stopWorker();
+        stopCurrentWorker();
     }
     for (const auto &client : m_clients) {
         if (client->id != pending->owner) continue;
@@ -1152,7 +1366,7 @@ void ConsoleHostController::finishVirtualTopology(const QString &code, const QSt
         releaseInput();
         m_inputEnabled = false;
         for (const auto &client : m_clients) client->session->setWorkerActive(false);
-        m_endpoint.stopWorker();
+        stopCurrentWorker();
     }
     for (const auto &client : m_clients) {
         if (client->id != pending->owner) continue;
