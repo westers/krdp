@@ -14,6 +14,8 @@
 #include <qpa/qplatformnativeinterface.h>
 #include <qtwaylandclientversion.h>
 
+#include "WaylandRequestVersion.h"
+
 class ScreencastingStreamPrivate : public QtWayland::zkde_screencast_stream_unstable_v1
 {
 public:
@@ -92,6 +94,14 @@ public:
         }
     }
 
+    // AUD-FIX F1: requests newer than the bound version are a protocol error.
+    bool supports(uint32_t sinceVersion) const
+    {
+        const auto *proxy = object();
+        const uint32_t bound = proxy ? wl_proxy_get_version(reinterpret_cast<wl_proxy *>(const_cast<struct ::zkde_screencast_unstable_v1 *>(proxy))) : 0;
+        return KRdp::WaylandRequestVersion::supports(bound, sinceVersion);
+    }
+
     Screencasting *const q;
 };
 
@@ -143,7 +153,7 @@ ScreencastingStream *Screencasting::createWorkspaceStream(Screencasting::CursorM
 
 ScreencastingStream *Screencasting::createRegionStream(QRect g, qreal scale, Screencasting::CursorMode mode)
 {
-    if (!d->isActive()) {
+    if (!d->isActive() || !d->supports(ZKDE_SCREENCAST_UNSTABLE_V1_STREAM_REGION_SINCE_VERSION)) {
         return nullptr;
     }
     auto stream = new ScreencastingStream(this);
@@ -154,7 +164,7 @@ ScreencastingStream *Screencasting::createRegionStream(QRect g, qreal scale, Scr
 
 ScreencastingStream *Screencasting::createVirtualMonitorStream(const QString &name, const QSize &resolution, qreal dpr, Screencasting::CursorMode mode)
 {
-    if (!d->isActive()) {
+    if (!d->isActive() || !d->supports(ZKDE_SCREENCAST_UNSTABLE_V1_STREAM_VIRTUAL_OUTPUT_SINCE_VERSION)) {
         return nullptr;
     }
     auto stream = new ScreencastingStream(this);

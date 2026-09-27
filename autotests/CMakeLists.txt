@@ -618,3 +618,17 @@ if(TARGET krdpctl-probe)
     set_tests_properties(DeviceLoopbackTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 240)
 endif()
 # --- end AUD-WS-D ---
+
+# --- AUD-FIX ---
+# F1: Wayland request version gating (fake-input destroy is since 5).
+if(BUILD_PLASMA_SESSION)
+    add_executable(WaylandRequestVersionTest WaylandRequestVersionTest.cpp)
+    target_include_directories(WaylandRequestVersionTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
+    target_link_libraries(WaylandRequestVersionTest PRIVATE Qt6::Test Qt6::Core Qt::WaylandClient)
+    target_compile_definitions(WaylandRequestVersionTest PRIVATE
+        PLASMA_PROTOCOLS_DIR="${PLASMA_WAYLAND_PROTOCOLS_DIR}"
+        KRDP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    # The generated client-protocol headers come from KRdp's build.
+    add_dependencies(WaylandRequestVersionTest KRdp)
+    add_test(NAME WaylandRequestVersionTest COMMAND WaylandRequestVersionTest)
+endif()

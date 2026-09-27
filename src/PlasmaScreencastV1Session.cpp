@@ -36,6 +36,7 @@
 #include "ScreencastTarget.h"
 #include "StreamRecoveryPolicy.h"
 #include "VideoStream.h"
+#include "WaylandRequestVersion.h"
 #include "WorkspaceFrameGeometry.h"
 #include "krdp_logging.h"
 
@@ -46,7 +47,10 @@ class FakeInput : public QWaylandClientExtensionTemplate<FakeInput>, public QtWa
 {
 public:
     FakeInput()
-        : QWaylandClientExtensionTemplate<FakeInput>(4)
+        // Ask for the version that has the destructor request; Qt binds the
+        // lower of this and what the compositor advertises, so an older KWin
+        // still gets a v4 bind and teardown drops the proxy instead.
+        : QWaylandClientExtensionTemplate<FakeInput>(ORG_KDE_KWIN_FAKE_INPUT_DESTROY_SINCE_VERSION)
     {
         initialize();
         if (isActive()) {
@@ -55,17 +59,42 @@ public:
                 appId = QStringLiteral("org.kde.krdpserver");
             }
             authenticate(appId, QStringLiteral("KRDP remote control"));
+            if (!supports(ORG_KDE_KWIN_FAKE_INPUT_KEYBOARD_KEY_SINCE_VERSION)) {
+                qCWarning(KRDP) << "org_kde_kwin_fake_input is bound at version" << boundVersion()
+                                << "which predates keyboard_key; keyboard input is disabled";
+            }
         }
         Q_ASSERT(isActive());
     }
 
     ~FakeInput() override
     {
-        // AUD-P2: the session owns this object. The destructor request exists
-        // since version 4; an older bind just drops the proxy.
-        if (object() && wl_proxy_get_version(reinterpret_cast<wl_proxy *>(object())) >= 4) {
+        // AUD-P2: the session owns this object. AUD-FIX F1: the destructor
+        // request is since="5" in fake-input.xml; sending it on an older bind
+        // is a protocol error that makes KWin disconnect krdpserver. On an
+        // older bind just free the client-side proxy (the caller has already
+        // sent the key/button releases and flushed).
+        switch (WaylandRequestVersion::teardownFor(boundVersion(), ORG_KDE_KWIN_FAKE_INPUT_DESTROY_SINCE_VERSION)) {
+        case WaylandRequestVersion::Teardown::SendDestructor:
             destroy();
+            break;
+        case WaylandRequestVersion::Teardown::DropProxy:
+            wl_proxy_destroy(reinterpret_cast<wl_proxy *>(object()));
+            init(static_cast<struct ::org_kde_kwin_fake_input *>(nullptr));
+            break;
+        case WaylandRequestVersion::Teardown::None:
+            break;
         }
+    }
+
+    uint32_t boundVersion() const
+    {
+        return object() ? wl_proxy_get_version(reinterpret_cast<wl_proxy *>(const_cast<struct ::org_kde_kwin_fake_input *>(object()))) : 0;
+    }
+
+    bool supports(uint32_t sinceVersion) const
+    {
+        return WaylandRequestVersion::supports(boundVersion(), sinceVersion);
     }
 
     Q_DISABLE_COPY_MOVE(FakeInput)
@@ -308,7 +337,9 @@ public:
         if (kind == PressedInputTracker::Kind::Button) {
             remoteInterface->button(code, 0);
         } else {
-            remoteInterface->keyboard_key(code, 0);
+            if (remoteInterface->supports(ORG_KDE_KWIN_FAKE_INPUT_KEYBOARD_KEY_SINCE_VERSION)) {
+                remoteInterface->keyboard_key(code, 0);
+            }
         }
     }};
     StreamTarget streamTarget = StreamTarget::None;
@@ -814,7 +845,9 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
             return;
         }
         const QPointF logicalPosition = mapToGlobal(me->position());
-        d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(logicalPosition.x()), wl_fixed_from_double(logicalPosition.y()));
+        if (d->remoteInterface->supports(ORG_KDE_KWIN_FAKE_INPUT_POINTER_MOTION_ABSOLUTE_SINCE_VERSION)) {
+            d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(logicalPosition.x()), wl_fixed_from_double(logicalPosition.y()));
+        }
         return;
     }
 
@@ -850,7 +883,9 @@ void PlasmaScreencastV1Session::sendGlobalEvent(const std::shared_ptr<QEvent> &e
         // pointer position can be checked against the monitor the click was
         // meant for, so it is what tells a seam bug from a capture bug.
         qCDebug(KRDP) << "Global pointer motion to" << position << "(workspace logical)";
-        d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(position.x()), wl_fixed_from_double(position.y()));
+        if (d->remoteInterface->supports(ORG_KDE_KWIN_FAKE_INPUT_POINTER_MOTION_ABSOLUTE_SINCE_VERSION)) {
+            d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(position.x()), wl_fixed_from_double(position.y()));
+        }
         return;
     }
 
@@ -894,6 +929,9 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
     }
     case QEvent::KeyPress:
     case QEvent::KeyRelease: {
+        if (!d->remoteInterface->supports(ORG_KDE_KWIN_FAKE_INPUT_KEYBOARD_KEY_SINCE_VERSION)) {
+            return; // warned once when the interface was bound
+        }
         auto ke = std::static_pointer_cast<QKeyEvent>(event);
         auto state = ke->type() == QEvent::KeyPress ? 1 : 0;
 
