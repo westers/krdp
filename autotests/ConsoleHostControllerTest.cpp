@@ -565,6 +565,30 @@ private Q_SLOTS:
         host.microphoneResult({generation, 5, {}});
         QVERIFY(!connection.audioPriorityActive());
     }
+
+    void mediaReplyEchoesItsRequestIdOnce()
+    {
+        // KRDPCTL v2: the `media` answering a request echoes its requestId; a later
+        // unsolicited `media` (a microphone lost after it started) must not repeat it.
+        Server server;
+        RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.addClient(&connection);
+        auto &client = *host.m_clients.front();
+        host.m_control.admit(client.id);
+        host.syncControlState();
+        host.m_inputEnabled = true;
+        const auto generation = host.m_controlGeneration;
+        client.media = {false, false, true};
+        QVERIFY(host.m_control.setMedia(client.id, client.media));
+        client.mediaRequestId = QStringLiteral("media-1");
+        host.m_microphoneClient = client.id;
+        host.m_microphonePolicy = {generation, 1, true};
+        host.m_nextMicrophoneId = 1;
+        host.microphoneResult({generation, 1, {}});
+        QVERIFY(host.m_microphoneReady);
+        QVERIFY(client.mediaRequestId.isEmpty());
+    }
 };
 }
 QTEST_GUILESS_MAIN(KRdp::ConsoleHostControllerTest)

@@ -1101,6 +1101,28 @@ private Q_SLOTS:
             QVERIFY(!t.request(priority(), 1000).value(u"ok"_s).toBool());
         });
     }
+    void microphoneAcknowledgementEchoesTheMediaRequestId() {
+        // KRDPCTL v2: the worker's acknowledgement is the reply to the `media` request, so it
+        // carries that request's requestId; a later failure is unsolicited and carries none.
+        microphoneFixture([&](auto &t, auto &, auto &, auto &) {
+            auto record = media(); record.insert(u"requestId"_s, u"media-1"_s);
+            t.deliverControlRecord(record, 1000);
+            QVERIFY(t.m_replyRequestId.isEmpty());
+            const auto policy = t.m_microphonePolicy; QVERIFY(policy.enabled);
+            const auto ack = t.microphoneResult({policy.generation, policy.requestId, {}}, 1000);
+            QVERIFY(ack.value(u"ok"_s).toBool());
+            QCOMPARE(ack.value(u"requestId"_s).toString(), u"media-1"_s);
+            const auto lost = t.microphoneResult({policy.generation, policy.requestId, u"source lost"_s}, 1000);
+            QVERIFY(!lost.value(u"ok"_s).toBool()); QVERIFY(!lost.contains(u"requestId"_s));
+
+            record.insert(u"requestId"_s, u"media-2"_s);
+            t.deliverControlRecord(record, 1000);
+            QVERIFY(t.m_microphonePolicy.enabled);
+            const auto timeout = t.microphoneTimeout();
+            QVERIFY(!timeout.value(u"ok"_s).toBool());
+            QCOMPARE(timeout.value(u"requestId"_s).toString(), u"media-2"_s);
+        });
+    }
     void microphonePendingCorrelatedReadinessAndPcm() {
         microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
             QVERIFY(t.request(media(), 1000).isEmpty()); // No early success.

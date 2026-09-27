@@ -423,25 +423,28 @@ QJsonObject VirtualSessionTransport::microphoneResult(const ConsoleWorkerWire::M
     if (!m_microphonePolicy.enabled || result.generation != m_microphonePolicy.generation
         || result.requestId != m_microphonePolicy.requestId) return {};
     const QPointer<VirtualSessionTransport> alive(this);
+    // The first result answers the pending `media` request; a later failure is unsolicited.
     if (!authorized(uid) || !result.error.isEmpty()) {
         const QString error = result.error.isEmpty() ? u"virtual microphone authority changed"_s : result.error;
+        const QString requestId = std::exchange(m_microphoneRequestId, {});
         stopMicrophone(uid);
-        return alive ? mediaReply(false, error) : QJsonObject{};
+        return alive ? LayoutControl::withRequestId(mediaReply(false, error), requestId) : QJsonObject{};
     }
     if (m_microphoneReady) return {};
     m_microphoneDeadline.stop();
     m_connection->setMediaPolicy(m_playback, true, false, false);
     m_microphoneReady = true;
     m_microphonePump.start();
-    return mediaReply(true);
+    return LayoutControl::withRequestId(mediaReply(true), std::exchange(m_microphoneRequestId, {}));
 }
 
 QJsonObject VirtualSessionTransport::microphoneTimeout()
 {
     if (!m_microphonePolicy.enabled || m_microphoneReady) return {};
     const QPointer<VirtualSessionTransport> alive(this);
+    const QString requestId = std::exchange(m_microphoneRequestId, {});
     stopMicrophone();
-    return alive ? mediaReply(false, u"virtual microphone worker startup timed out"_s) : QJsonObject{};
+    return alive ? LayoutControl::withRequestId(mediaReply(false, u"virtual microphone worker startup timed out"_s), requestId) : QJsonObject{};
 }
 
 bool VirtualSessionTransport::forwardMicrophone(const QByteArray &pcm, std::optional<quint32> uid)
@@ -500,7 +503,9 @@ void VirtualSessionTransport::deliverControlRecord(const QJsonObject &incoming, 
         if (connection) connection->sendControlRecord(LayoutControl::invalidRequestIdRecord());
         return;
     }
+    const QString outerRequestId = std::exchange(m_replyRequestId, requestId.value);
     const auto response = request(record, uid);
+    if (alive) m_replyRequestId = outerRequestId;
     if (alive && connection && m_connection == connection && !response.isEmpty())
         connection->sendControlRecord(LayoutControl::withRequestId(response, requestId.value));
 }
@@ -1476,6 +1481,7 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
             || m_nextMicrophoneId >= std::numeric_limits<quint64>::max() - 1)
             return mediaReply(false, u"virtual microphone unavailable"_s);
         m_microphonePolicy = {m_controlGeneration, ++m_nextMicrophoneId, true};
+        m_microphoneRequestId = m_replyRequestId; // the worker's acknowledgement answers this request
         m_microphoneDeadline.start();
         const bool dispatched = m_endpoint->setMicrophone(m_microphonePolicy);
         if (!alive || !m_connection) return {};

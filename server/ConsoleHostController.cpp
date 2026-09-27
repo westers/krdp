@@ -1473,7 +1473,7 @@ void ConsoleHostController::sendMedia(Client &client, bool microphone, const QSt
 {
     client.connection->sendControlRecord(LayoutControl::withRequestId(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, error.isEmpty()},
         {u"playback"_s, client.media.playback}, {u"microphone"_s, microphone}, {u"camera"_s, false},
-        {u"silenceHost"_s, client.media.silenceHost}, {u"message"_s, error}}, client.mediaRequestId));
+        {u"silenceHost"_s, client.media.silenceHost}, {u"message"_s, error}}, std::exchange(client.mediaRequestId, {})));
 }
 
 void ConsoleHostController::stopMicrophone(const QString &error)
