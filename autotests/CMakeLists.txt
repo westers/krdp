@@ -435,3 +435,8 @@ add_executable(ScreencastTargetTest ScreencastTargetTest.cpp)
 target_include_directories(ScreencastTargetTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ScreencastTargetTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME ScreencastTargetTest COMMAND ScreencastTargetTest)
+
+add_executable(PressedInputTrackerTest PressedInputTrackerTest.cpp)
+target_include_directories(PressedInputTrackerTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(PressedInputTrackerTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME PressedInputTrackerTest COMMAND PressedInputTrackerTest)

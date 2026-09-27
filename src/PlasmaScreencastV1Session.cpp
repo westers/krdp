@@ -18,6 +18,7 @@
 
 #include <linux/input-event-codes.h>
 #include <sys/mman.h>
+#include <wayland-client-core.h>
 #include <wayland-util.h>
 #include <xkbcommon/xkbcommon.h>
 #include <chrono>
@@ -31,6 +32,7 @@
 #include "qwayland-wayland.h"
 #include "screencasting_p.h"
 
+#include "PressedInputTracker.h"
 #include "ScreencastTarget.h"
 #include "VideoStream.h"
 #include "WorkspaceFrameGeometry.h"
@@ -55,7 +57,32 @@ public:
         }
         Q_ASSERT(isActive());
     }
+
+    ~FakeInput() override
+    {
+        // AUD-P2: the session owns this object. The destructor request exists
+        // since version 4; an older bind just drops the proxy.
+        if (object() && wl_proxy_get_version(reinterpret_cast<wl_proxy *>(object())) >= 4) {
+            destroy();
+        }
+    }
+
+    Q_DISABLE_COPY_MOVE(FakeInput)
 };
+
+namespace
+{
+// Push queued requests (the releases sent on teardown) to the compositor now:
+// a session destroyed at shutdown may not see another event-loop flush.
+void flushWaylandDisplay()
+{
+    if (auto *native = qGuiApp ? qGuiApp->platformNativeInterface() : nullptr) {
+        if (auto *display = static_cast<wl_display *>(native->nativeResourceForIntegration("wl_display"))) {
+            wl_display_flush(display);
+        }
+    }
+}
+}
 
 namespace
 {
@@ -274,7 +301,18 @@ public:
 
     Screencasting m_screencasting;
     ScreencastingStream *request = nullptr;
-    FakeInput *remoteInterface = nullptr;
+    // Declared before pressedInput: its destructor releases through this.
+    std::unique_ptr<FakeInput> remoteInterface;
+    PressedInputTracker pressedInput{[this](PressedInputTracker::Kind kind, uint32_t code) {
+        if (!remoteInterface || !remoteInterface->isActive()) {
+            return;
+        }
+        if (kind == PressedInputTracker::Kind::Button) {
+            remoteInterface->button(code, 0);
+        } else {
+            remoteInterface->keyboard_key(code, 0);
+        }
+    }};
     StreamTarget streamTarget = StreamTarget::None;
     QPointer<QScreen> outputScreen = nullptr;
     // The screen an Output target captures, and the stream index it was
@@ -324,7 +362,7 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
     : AbstractSession()
     , d(std::make_unique<Private>())
 {
-    d->remoteInterface = new FakeInput();
+    d->remoteInterface = std::make_unique<FakeInput>();
 
     connect(KSystemClipboard::instance(), &KSystemClipboard::changed, this, [this](auto mode) {
         // The clipboard is workspace-wide, but MonitorMode=multi runs one
@@ -428,6 +466,14 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
 PlasmaScreencastV1Session::~PlasmaScreencastV1Session()
 {
     qCDebug(KRDP) << "Closing Plasma Remote Session";
+    // AUD-P2: a client that drops, or a rebuild that replaces this session,
+    // must not leave a key or button held down in the compositor.
+    if (!d->pressedInput.empty()) {
+        qCInfo(KRDP) << "Releasing keys and buttons still held by the closing session";
+        d->pressedInput.releaseAll();
+        flushWaylandDisplay();
+    }
+    d->remoteInterface.reset();
 }
 
 void PlasmaScreencastV1Session::start()
@@ -829,6 +875,7 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
         }
         uint state = me->type() == QEvent::MouseButtonPress ? 1 : 0;
         d->remoteInterface->button(button, state);
+        d->pressedInput.button(button, state);
         break;
     }
     case QEvent::Wheel: {
@@ -849,6 +896,7 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
 
         if (ke->nativeScanCode()) {
             d->remoteInterface->keyboard_key(ke->nativeScanCode(), state);
+            d->pressedInput.key(ke->nativeScanCode(), state);
         } else {
             auto keycode = Xkb::self()->keycodeFromKeysym(ke->nativeVirtualKey());
             if (!keycode) {
@@ -858,6 +906,7 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
 
             auto sendKey = [this, state](int keycode) {
                 d->remoteInterface->keyboard_key(keycode, state);
+                d->pressedInput.key(keycode, state);
             };
             switch (keycode->level) {
             case 0:
