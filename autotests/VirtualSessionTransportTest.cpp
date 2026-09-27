@@ -19,10 +19,30 @@ class VirtualSessionTransportTest : public QObject
 {
     Q_OBJECT
     ConsoleWorkerWire::Deframer m_workerDeframer;
-    static QJsonObject media(bool mic = true, bool playback = true, bool camera = false) {
-        return {{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"playback"_s, playback},
-            {u"microphone"_s, mic}, {u"camera"_s, camera}, {u"silenceHost"_s, playback}};
+    static QJsonObject device(const QString &name, const QString &action, std::optional<bool> silenceHost = std::nullopt) {
+        QJsonObject record{{u"type"_s, u"device"_s}, {u"v"_s, 1}, {u"device"_s, name}, {u"action"_s, action}};
+        if (silenceHost) record.insert(u"silenceHost"_s, *silenceHost);
+        return record;
     }
+    // What the old combined `media` request is now: the `device` records a client
+    // sends (playback with silenceHost, then the microphone; a camera is refused).
+    // Returns the last reply: the microphone's (empty while its start is pending).
+    static QJsonObject media(VirtualSessionTransport &t, std::optional<quint32> uid, bool mic = true, bool playback = true, bool camera = false) {
+        if (camera) return t.request(device(u"camera"_s, u"on"_s), uid);
+        const auto reply = t.request(playback ? device(u"playback"_s, u"on"_s, true) : device(u"playback"_s, u"off"_s), uid);
+        if (reply.isEmpty() || reply.value(u"type"_s) != u"device"_s) return reply; // refused, or the transport is gone
+        return t.request(device(u"microphone"_s, mic ? u"on"_s : u"off"_s), uid);
+    }
+    // Through the production identity (RdpConnection's PAM uid), not the test seam.
+    static QJsonObject mediaAsConnection(VirtualSessionTransport &t) {
+        return media(t, t.m_connection ? t.m_connection->authenticatedPamUid() : std::nullopt);
+    }
+    // A settled `device` state without a problem (the old `ok`).
+    static bool ok(const QJsonObject &reply) {
+        const auto state = reply.value(u"state"_s).toString();
+        return reply.value(u"type"_s) == u"device"_s && (state == u"on"_s || state == u"off"_s) && !reply.contains(u"code"_s);
+    }
+    static QString state(const QJsonObject &reply) { return reply.value(u"state"_s).toString(); }
     static QJsonObject priority(bool enabled = true) {
         return {{u"type"_s, u"audio-priority"_s}, {u"v"_s, 1}, {u"id"_s, u"priority-1"_s}, {u"enabled"_s, enabled}};
     }
@@ -31,7 +51,8 @@ class VirtualSessionTransportTest : public QObject
             {u"width"_s, 1920}, {u"height"_s, 1080}, {u"scale"_s, 1.25}};
     }
     void microphoneFixture(const std::function<void(VirtualSessionTransport &, VirtualSessionControl &,
-                                                    ConsoleWorkerEndpoint &, QLocalSocket &)> &test) {
+                                                    ConsoleWorkerEndpoint &, QLocalSocket &)> &test,
+                           bool standardClientMedia = true) {
         m_workerDeframer = {};
         VirtualSessionSupervisor supervisor([](quint32, const auto &) -> std::optional<VirtualSessionSupervisor::Launch> {
             return VirtualSessionSupervisor::Launch{u"/usr/bin/sleep"_s, {u"60"_s}, {}, {}};
@@ -49,7 +70,8 @@ class VirtualSessionTransportTest : public QObject
         worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{handle->id, 1000, token}));
         worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
         QVERIFY(worker.waitForBytesWritten(1000)); QTRY_VERIFY(endpoint.ready());
-        Server server; RdpConnection connection(&server, -1); quint64 sequence = 0;
+        Server server; server.setStandardClientMedia(standardClientMedia);
+        RdpConnection connection(&server, -1); quint64 sequence = 0;
         // No socket/PAM/capture: remove only this fixture's queued initialization.
         QCoreApplication::removePostedEvents(&connection, QEvent::MetaCall);
         transport = new VirtualSessionTransport(1, &connection, control, {}, sequence, &connection);
@@ -944,10 +966,10 @@ private Q_SLOTS:
         for (int mode = 0; mode < 3; ++mode) microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
             QVERIFY(t.request(priority(), 1000).value(u"ok"_s).toBool());
             ConsoleWorkerWire::MicrophonePolicy policy;
-            if (mode == 0) QVERIFY(t.request(media(false, true), 1000).value(u"ok"_s).toBool());
+            if (mode == 0) QVERIFY(ok(media(t, 1000, false, true)));
             else {
-                QVERIFY(t.request(media(true, false), 1000).isEmpty()); policy = t.m_microphonePolicy;
-                QVERIFY(t.microphoneResult({policy.generation, policy.requestId, {}}, 1000).value(u"ok"_s).toBool());
+                QVERIFY(media(t, 1000, true, false).isEmpty()); policy = t.m_microphonePolicy;
+                QVERIFY(ok(t.microphoneResult({policy.generation, policy.requestId, {}}, 1000)));
                 t.m_microphonePump.stop();
             }
             QVERIFY(t.m_connection->audioPriorityActive());
@@ -957,8 +979,8 @@ private Q_SLOTS:
             QSignalSpy local(t.m_connection->videoStream(), &VideoStream::requestedQualityChanged);
             const auto response = mode == 2
                 ? t.microphoneResult({policy.generation, policy.requestId, u"source lost"_s}, 1000)
-                : t.request(media(false, false), 1000);
-            QCOMPARE(response.value(u"ok"_s).toBool(), mode != 2);
+                : media(t, 1000, false, false);
+            QCOMPARE(ok(response), mode != 2);
             QVERIFY(!t.m_connection->audioPriorityActive());
             QVERIFY(!local.isEmpty()); QCOMPARE(local.last().at(0).value<quint8>(), quint8(80));
             bool restored = false;
@@ -970,13 +992,13 @@ private Q_SLOTS:
     }
     void microphoneStartAndFailureKeepPlaybackPriorityQuality() {
         microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
-            QVERIFY(t.request(media(false), 1000).value(u"ok"_s).toBool());
+            QVERIFY(ok(media(t, 1000, false)));
             QVERIFY(t.request(priority(), 1000).value(u"effective"_s).toBool());
             t.m_connection->videoStream()->setQualityCap(45);
             QVERIFY(t.forwardVideoQuality(t.m_controlGeneration, 45, 1000)); workerRecords(worker);
             QSignalSpy local(t.m_connection->videoStream(), &VideoStream::requestedQualityChanged);
-            QVERIFY(t.request(media(true, true), 1000).isEmpty()); const auto policy = t.m_microphonePolicy;
-            QVERIFY(!t.microphoneResult({policy.generation, policy.requestId, u"startup failed"_s}, 1000).value(u"ok"_s).toBool());
+            QVERIFY(media(t, 1000, true, true).isEmpty()); const auto policy = t.m_microphonePolicy;
+            QVERIFY(!ok(t.microphoneResult({policy.generation, policy.requestId, u"startup failed"_s}, 1000)));
             QVERIFY(t.m_connection->audioPriorityActive()); QVERIFY(t.m_playback); QVERIFY(t.m_silenceHost);
             QVERIFY(local.isEmpty());
             for (const auto &record : workerRecords(worker)) QVERIFY(!ConsoleWorkerWire::videoQuality(record));
@@ -984,14 +1006,14 @@ private Q_SLOTS:
     }
     void finalAudioOffRestoreMayDestroyTransport() {
         microphoneFixture([&](auto &t, auto &control, auto &, auto &) {
-            QVERIFY(t.request(media(false), 1000).value(u"ok"_s).toBool());
+            QVERIFY(ok(media(t, 1000, false)));
             QVERIFY(t.request(priority(), 1000).value(u"effective"_s).toBool());
             QPointer<VirtualSessionTransport> alive(&t);
             const auto connection = t.m_connection;
             QObject::connect(connection->videoStream(), &VideoStream::requestedQualityChanged, connection, [alive](quint8 quality) {
                 if (quality == 80 && alive) delete alive.data();
             });
-            QVERIFY(t.request(media(false, false), 1000).isEmpty());
+            QVERIFY(media(t, 1000, false, false).isEmpty());
             QVERIFY(!alive); QVERIFY(!control.attachment(1)); QVERIFY(!connection->audioPriorityActive());
         });
     }
@@ -1024,23 +1046,23 @@ private Q_SLOTS:
             auto reply = t.request(priority(), 1000);
             QVERIFY(reply.value(u"ok"_s).toBool()); QVERIFY(!reply.value(u"effective"_s).toBool());
             QCOMPARE(reply.value(u"id"_s).toString(), u"priority-1"_s);
-            QVERIFY(t.request(media(false, true), 1000).value(u"ok"_s).toBool());
+            QVERIFY(ok(media(t, 1000, false, true)));
             QVERIFY(t.m_connection->audioPriorityActive());
             QVERIFY(t.request(priority(), 1000).value(u"effective"_s).toBool());
             QVERIFY(!t.request(priority(false), 1000).value(u"effective"_s).toBool());
             QVERIFY(!t.m_connection->audioPriorityActive());
-            QVERIFY(t.request(media(true, false), 1000).isEmpty());
+            QVERIFY(media(t, 1000, true, false).isEmpty());
             const auto policy = t.m_microphonePolicy;
             QVERIFY(!t.request(priority(), 1000).value(u"effective"_s).toBool()); // Mic still pending.
-            QVERIFY(t.microphoneResult({policy.generation, policy.requestId, {}}, 1000).value(u"ok"_s).toBool());
+            QVERIFY(ok(t.microphoneResult({policy.generation, policy.requestId, {}}, 1000)));
             t.m_microphonePump.stop(); // No actual PAM/AUDIN in the fixture.
             QVERIFY(t.request(priority(), 1000).value(u"effective"_s).toBool());
-            QVERIFY(t.request(media(false, false), 1000).value(u"ok"_s).toBool());
+            QVERIFY(ok(media(t, 1000, false, false)));
             QVERIFY(!t.m_connection->audioPriorityActive());
             QVERIFY(!t.request(priority(), 1000).value(u"effective"_s).toBool());
             t.revoke();
             QVERIFY(!t.request(priority(), 1000).value(u"ok"_s).toBool());
-            t.m_connection->setMediaPolicy(true, false, false);
+            t.m_connection->setDeviceEnabled(MediaDevice::Playback, true);
             QVERIFY(!t.m_connection->audioPriorityActive()); // No latent override after ownership loss.
         });
     }
@@ -1048,7 +1070,7 @@ private Q_SLOTS:
         microphoneFixture([&](auto &t, auto &control, auto &endpoint, auto &worker) {
             const auto handle = *t.m_handle;
             const auto generation = t.m_controlGeneration;
-            QVERIFY(t.request(media(false), 1000).value(u"ok"_s).toBool());
+            QVERIFY(ok(media(t, 1000, false)));
             QVERIFY(t.request(priority(), 1000).value(u"effective"_s).toBool());
             workerRecords(worker);
             // Production signal delivery is queued and must still refuse this
@@ -1080,7 +1102,7 @@ private Q_SLOTS:
                 {u"id"_s, u"audio-reattach"_s}, {u"action"_s, u"attach"_s}, {u"session"_s, handle.id}}).value(u"ok"_s).toBool());
             QVERIFY(!t.activateBinding(handle, &endpoint));
             const auto next = t.m_controlGeneration; QVERIFY(next != generation);
-            QVERIFY(t.request(media(false), 1000).value(u"ok"_s).toBool());
+            QVERIFY(ok(media(t, 1000, false)));
             QVERIFY(t.request(priority(), 1000).value(u"effective"_s).toBool());
             bool restoredOld = false, initializedNew = false;
             for (const auto &r : workerRecords(worker)) if (auto q = ConsoleWorkerWire::videoQuality(r)) {
@@ -1101,31 +1123,134 @@ private Q_SLOTS:
             QVERIFY(!t.request(priority(), 1000).value(u"ok"_s).toBool());
         });
     }
-    void microphoneAcknowledgementEchoesTheMediaRequestId() {
-        // KRDPCTL v2: the worker's acknowledgement is the reply to the `media` request, so it
+    void microphoneAcknowledgementEchoesTheDeviceRequestId() {
+        // KRDPCTL v2: the worker's acknowledgement is the reply to the `device` request, so it
         // carries that request's requestId; a later failure is unsolicited and carries none.
         microphoneFixture([&](auto &t, auto &, auto &, auto &) {
-            auto record = media(); record.insert(u"requestId"_s, u"media-1"_s);
+            auto record = device(u"microphone"_s, u"on"_s); record.insert(u"requestId"_s, u"mic-1"_s);
             t.deliverControlRecord(record, 1000);
             QVERIFY(t.m_replyRequestId.isEmpty());
             const auto policy = t.m_microphonePolicy; QVERIFY(policy.enabled);
             const auto ack = t.microphoneResult({policy.generation, policy.requestId, {}}, 1000);
-            QVERIFY(ack.value(u"ok"_s).toBool());
-            QCOMPARE(ack.value(u"requestId"_s).toString(), u"media-1"_s);
+            QVERIFY(ok(ack)); QCOMPARE(state(ack), u"on"_s);
+            QCOMPARE(ack.value(u"requestId"_s).toString(), u"mic-1"_s);
             const auto lost = t.microphoneResult({policy.generation, policy.requestId, u"source lost"_s}, 1000);
-            QVERIFY(!lost.value(u"ok"_s).toBool()); QVERIFY(!lost.contains(u"requestId"_s));
+            QVERIFY(!ok(lost)); QVERIFY(!lost.contains(u"requestId"_s));
 
-            record.insert(u"requestId"_s, u"media-2"_s);
+            record.insert(u"requestId"_s, u"mic-2"_s);
             t.deliverControlRecord(record, 1000);
             QVERIFY(t.m_microphonePolicy.enabled);
             const auto timeout = t.microphoneTimeout();
-            QVERIFY(!timeout.value(u"ok"_s).toBool());
-            QCOMPARE(timeout.value(u"requestId"_s).toString(), u"media-2"_s);
+            QCOMPARE(timeout.value(u"code"_s).toString(), u"timeout"_s);
+            QCOMPARE(timeout.value(u"requestId"_s).toString(), u"mic-2"_s);
+            QVERIFY(t.microphoneTimeout().isEmpty()); // answered once
+        });
+    }
+    void deviceCameraUnsupportedQueryAndRevocation() {
+        // AUD-D3: the virtual desktop shares no camera yet; a query still answers; a
+        // detach pushes `off`/`revoked` for what was on, answering a pending start once.
+        microphoneFixture([&](auto &t, auto &, auto &, auto &) {
+            QList<QJsonObject> pushed;
+            t.m_recordPushed = [&pushed](const QJsonObject &record) { pushed.append(record); };
+            const auto camera = t.request(device(u"camera"_s, u"on"_s), 1000);
+            QCOMPARE(camera.value(u"type"_s).toString(), u"error"_s);
+            QCOMPARE(camera.value(u"code"_s).toString(), u"unsupported"_s);
+            QCOMPARE(t.request(device(u"camera"_s, u"reselect"_s), 1000).value(u"code"_s).toString(), u"unsupported"_s);
+            QCOMPARE(state(t.request(device(u"camera"_s, u"query"_s), 1000)), u"off"_s);
+            QCOMPARE(state(t.request(device(u"microphone"_s, u"query"_s))), u"off"_s); // a query needs no ownership
+            auto invalid = device(u"microphone"_s, u"on"_s); invalid.insert(u"silenceHost"_s, true);
+            QCOMPARE(t.request(invalid, 1000).value(u"code"_s).toString(), u"invalid"_s);
+            QVERIFY(ok(t.request(device(u"playback"_s, u"on"_s), 1000)));
+            auto start = device(u"microphone"_s, u"on"_s); start.insert(u"requestId"_s, u"v1"_s);
+            t.deliverControlRecord(start, 1000);
+            QVERIFY(t.m_microphonePolicy.enabled);
+            QCOMPARE(state(t.request(device(u"microphone"_s, u"query"_s), 1000)), u"starting"_s);
+            QVERIFY(pushed.isEmpty());
+            t.revoke();
+            QCOMPARE(pushed.size(), 2);
+            QCOMPARE(pushed.at(0).value(u"device"_s).toString(), u"microphone"_s);
+            QCOMPARE(state(pushed.at(0)), u"off"_s);
+            QCOMPARE(pushed.at(0).value(u"code"_s).toString(), u"revoked"_s);
+            QCOMPARE(pushed.at(0).value(u"requestId"_s).toString(), u"v1"_s);
+            QCOMPARE(pushed.at(1).value(u"device"_s).toString(), u"playback"_s);
+            QCOMPARE(pushed.at(1).value(u"code"_s).toString(), u"revoked"_s);
+            QVERIFY(!pushed.at(1).contains(u"requestId"_s));
+            t.revoke(); // nothing on any more: nothing pushed again
+            QCOMPARE(pushed.size(), 2);
+            // After the detach the connection owns nothing: `not-owner`.
+            QCOMPARE(t.request(device(u"microphone"_s, u"on"_s), 1000).value(u"code"_s).toString(), u"not-owner"_s);
+        });
+    }
+    // AUD-D3: StandardClientMedia for the session's client. A client without
+    // KRDPCTL gets playback and the microphone from standard negotiation once
+    // it is bound (never the camera, never silenceHost); with the setting off,
+    // or once it spoke KRDPCTL, nothing.
+    static std::optional<RdpConnection::StandardMediaChannels> joinedEverything(RdpConnection *connection) {
+        auto channels = connection->standardMediaChannels();
+        if (channels) channels->playback = channels->dynamic = true;
+        return channels;
+    }
+    void standardClientMediaForTheSessionClient_data() {
+        QTest::addColumn<bool>("enabled");
+        QTest::newRow("StandardClientMedia on") << true;
+        QTest::newRow("StandardClientMedia off") << false;
+    }
+    void standardClientMediaForTheSessionClient() {
+        QFETCH(bool, enabled);
+        QList<QJsonObject> pushed; // outlives the transport (its teardown pushes `revoked`)
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            QVERIFY(!t.m_connection->hasControlChannel());
+            t.m_standardChannels = &VirtualSessionTransportTest::joinedEverything;
+            t.m_recordPushed = [&pushed](const QJsonObject &record) { pushed.append(record); };
+            t.applyStandardMedia(std::nullopt); // no owner identity: nothing
+            QVERIFY(!t.m_playback); QVERIFY(!t.m_microphonePolicy.enabled);
+            t.applyStandardMedia(1001); // not the desktop's owner: nothing
+            QVERIFY(!t.m_playback); QVERIFY(!t.m_microphonePolicy.enabled);
+            workerRecords(worker);
+            t.applyStandardMedia(1000);
+            QCOMPARE(t.m_playback, enabled);
+            QVERIFY(!t.m_silenceHost);
+            QCOMPARE(t.m_microphonePolicy.enabled, enabled);
+            bool mediaOn = false, microphoneOn = false;
+            for (const auto &record : workerRecords(worker)) {
+                if (auto m = ConsoleWorkerWire::media(record); m && m->playback && !m->silenceHost) mediaOn = true;
+                if (auto p = ConsoleWorkerWire::microphonePolicy(record); p && p->enabled) microphoneOn = true;
+            }
+            QCOMPARE(mediaOn, enabled);
+            QCOMPARE(microphoneOn, enabled);
+            QCOMPARE(state(t.request(device(u"camera"_s, u"query"_s), 1000)), u"off"_s);
+            if (!enabled) return;
+            QVERIFY(t.m_microphoneRequestId.isEmpty()); // nothing to answer
+            const auto policy = t.m_microphonePolicy;
+            const auto ack = t.microphoneResult({policy.generation, policy.requestId, {}}, 1000);
+            QCOMPARE(state(ack), u"on"_s); QVERIFY(!ack.contains(u"requestId"_s));
+            QVERIFY(t.m_microphoneReady);
+            t.m_microphonePump.stop(); // Fixture has no PAM.
+            t.applyStandardMedia(1000); // the running source is kept
+            QCOMPARE(t.m_microphonePolicy, policy);
+            QVERIFY(pushed.isEmpty());
+        }, enabled);
+    }
+    void standardClientMediaNotAfterKrdpctl() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &) {
+            t.m_standardChannels = &VirtualSessionTransportTest::joinedEverything;
+            QVERIFY(ok(t.request(device(u"playback"_s, u"off"_s), 1000))); // asks for itself
+            t.applyStandardMedia(1000);
+            QVERIFY(!t.m_playback); QVERIFY(!t.m_microphonePolicy.enabled);
+        });
+        microphoneFixture([&](auto &t, auto &, auto &, auto &) {
+            t.m_standardChannels = &VirtualSessionTransportTest::joinedEverything;
+            t.request(priority(false), 1000); // audio-priority alone does not count
+            QVERIFY(!t.m_spokeKrdpctl);
+            t.request({{u"type"_s, u"virtual-session"_s}, {u"v"_s, 1}, {u"id"_s, u"l"_s}, {u"action"_s, u"list"_s}}, 1000);
+            QVERIFY(t.m_spokeKrdpctl);
+            t.applyStandardMedia(1000);
+            QVERIFY(!t.m_playback); QVERIFY(!t.m_microphonePolicy.enabled);
         });
     }
     void microphonePendingCorrelatedReadinessAndPcm() {
         microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
-            QVERIFY(t.request(media(), 1000).isEmpty()); // No early success.
+            QVERIFY(media(t, 1000).isEmpty()); // No early success.
             QVERIFY(!t.m_microphoneReady); QVERIFY(t.m_microphoneDeadline.isActive());
             const auto policy = t.m_microphonePolicy;
             bool enabled = false;
@@ -1136,8 +1261,8 @@ private Q_SLOTS:
             QVERIFY(t.microphoneResult({policy.generation, policy.requestId + 1, {}}, 1000).isEmpty());
             QVERIFY(!t.forwardMicrophone(QByteArray(3840, 'a'), 1000));
             const auto ack = t.microphoneResult({policy.generation, policy.requestId, {}}, 1000);
-            QVERIFY(ack.value(u"ok"_s).toBool()); QVERIFY(ack.value(u"microphone"_s).toBool());
-            QVERIFY(ack.value(u"playback"_s).toBool()); QVERIFY(ack.value(u"silenceHost"_s).toBool());
+            QVERIFY(ok(ack)); QCOMPARE(state(ack), u"on"_s); QCOMPARE(ack.value(u"device"_s).toString(), u"microphone"_s);
+            QVERIFY(t.m_playback); QVERIFY(t.m_silenceHost);
             QVERIFY(!t.m_microphoneDeadline.isActive()); QCOMPARE(t.m_microphonePump.interval(), 20);
             QVERIFY(t.m_microphonePump.isActive());
             t.m_microphonePump.stop(); // Fixture has no PAM; timer correctly refuses that identity.
@@ -1151,8 +1276,8 @@ private Q_SLOTS:
                 QCOMPARE(a->generation, policy.generation); QCOMPARE(a->requestId, policy.requestId); QCOMPARE(a->pcm, pcm); audio = true;
             }
             QVERIFY(audio);
-            const auto off = t.request(media(false), 1000); QVERIFY(off.value(u"ok"_s).toBool());
-            QVERIFY(!off.value(u"microphone"_s).toBool()); QVERIFY(!t.m_microphoneReady);
+            const auto off = media(t, 1000, false); QVERIFY(ok(off));
+            QCOMPARE(state(off), u"off"_s); QVERIFY(!t.m_microphoneReady);
             QVERIFY(!t.m_microphonePump.isActive());
             // No AUDIN producer is injected here. Queue generation/expiry/clearing
             // are exercised separately by RdpAudioPriorityTest, not this empty queue.
@@ -1164,7 +1289,7 @@ private Q_SLOTS:
                 QVERIFY(!p->enabled); QCOMPARE(p->generation, policy.generation); QVERIFY(p->requestId > policy.requestId); disabled = true;
             }
             QVERIFY(disabled);
-            QVERIFY(t.request(media(), 1000).isEmpty()); const auto next = t.m_microphonePolicy;
+            QVERIFY(media(t, 1000).isEmpty()); const auto next = t.m_microphonePolicy;
             QCOMPARE(next.generation, policy.generation); QVERIFY(next.requestId > policy.requestId);
             QVERIFY(t.microphoneResult({policy.generation, policy.requestId, u"late old failure"_s}, 1000).isEmpty());
             QCOMPARE(t.m_microphonePolicy, next); QVERIFY(t.m_microphoneDeadline.isActive());
@@ -1173,24 +1298,25 @@ private Q_SLOTS:
     void microphoneFailuresPreservePlaybackAndSilence() {
         microphoneFixture([&](auto &t, auto &, auto &, auto &) {
             for (bool timeout : {false, true}) {
-                QVERIFY(t.request(media(), 1000).isEmpty()); const auto policy = t.m_microphonePolicy;
+                QVERIFY(media(t, 1000).isEmpty()); const auto policy = t.m_microphonePolicy;
                 const auto reply = timeout ? t.microphoneTimeout()
                     : t.microphoneResult({policy.generation, policy.requestId, u"source failed"_s}, 1000);
-                QVERIFY(!reply.value(u"ok"_s).toBool()); QVERIFY(!reply.value(u"microphone"_s).toBool());
-                QVERIFY(reply.value(u"playback"_s).toBool()); QVERIFY(reply.value(u"silenceHost"_s).toBool());
+                QVERIFY(!ok(reply)); QCOMPARE(state(reply), u"error"_s);
+                QCOMPARE(reply.value(u"code"_s).toString(), timeout ? u"timeout"_s : u"unavailable"_s);
+                QVERIFY(t.m_playback); QVERIFY(t.m_silenceHost);
                 QVERIFY(!t.m_microphonePolicy.enabled); QVERIFY(!t.m_microphoneDeadline.isActive());
                 QVERIFY(t.microphoneResult({policy.generation, policy.requestId, {}}, 1000).isEmpty());
             }
             t.m_externalMicrophone = false;
-            QVERIFY(!t.request(media(), 1000).value(u"ok"_s).toBool()); QVERIFY(t.m_playback); QVERIFY(t.m_silenceHost);
+            QVERIFY(!ok(media(t, 1000))); QVERIFY(t.m_playback); QVERIFY(t.m_silenceHost);
             t.m_externalMicrophone = true;
-            QVERIFY(!t.request(media(true, true, true), 1000).value(u"ok"_s).toBool());
+            QVERIFY(!ok(media(t, 1000, true, true, true)));
         });
     }
     void microphoneDetachRebindAndOverflow() {
         microphoneFixture([&](auto &t, auto &control, auto &endpoint, auto &worker) {
             const auto handle = *t.m_handle;
-            QVERIFY(t.request(media(), 1000).isEmpty()); const auto old = t.m_microphonePolicy;
+            QVERIFY(media(t, 1000).isEmpty()); const auto old = t.m_microphonePolicy;
             control.disconnected(1);
             QVERIFY(!t.m_endpoint); QVERIFY(!t.m_handle); QVERIFY(!t.m_microphonePolicy.enabled);
             QVERIFY(!t.m_microphoneDeadline.isActive()); QVERIFY(!t.m_microphonePump.isActive());
@@ -1201,31 +1327,31 @@ private Q_SLOTS:
             QVERIFY(control.request(1000, 1, {{u"type"_s, u"virtual-session"_s}, {u"v"_s, 1},
                 {u"id"_s, u"reattach"_s}, {u"action"_s, u"attach"_s}, {u"session"_s, handle.id}}).value(u"ok"_s).toBool());
             QVERIFY(!t.activateBinding(handle, &endpoint)); QVERIFY(t.authorized(1000));
-            QVERIFY(t.request(media(), 1000).isEmpty());
+            QVERIFY(media(t, 1000).isEmpty());
             QVERIFY(t.m_microphonePolicy.generation != old.generation);
             QVERIFY(t.microphoneResult({old.generation, old.requestId, {}}, 1000).isEmpty()); QVERIFY(!t.m_microphoneReady);
             t.stopMicrophone();
             t.m_nextMicrophoneId = std::numeric_limits<quint64>::max() - 2;
-            QVERIFY(t.request(media(), 1000).isEmpty());
+            QVERIFY(media(t, 1000).isEmpty());
             QCOMPARE(t.m_microphonePolicy.requestId, std::numeric_limits<quint64>::max() - 1);
-            QVERIFY(t.request(media(false), 1000).value(u"ok"_s).toBool());
+            QVERIFY(ok(media(t, 1000, false)));
             QCOMPARE(t.m_nextMicrophoneId, std::numeric_limits<quint64>::max());
-            QVERIFY(!t.request(media(), 1000).value(u"ok"_s).toBool());
+            QVERIFY(!ok(media(t, 1000)));
             QCOMPARE(t.m_nextMicrophoneId, std::numeric_limits<quint64>::max());
         });
     }
     void microphoneRechecksTargetAndProductionIdentity() {
         microphoneFixture([&](auto &t, auto &, auto &, auto &) {
-            QVERIFY(!t.request(media()).value(u"ok"_s).toBool());
-            QVERIFY(!t.request(media(), 1001).value(u"ok"_s).toBool());
+            QVERIFY(!ok(mediaAsConnection(t)));
+            QVERIFY(!ok(media(t, 1001)));
             const auto handle = *t.m_handle;
             t.m_handle->id = QUuid::createUuid().toString(QUuid::WithoutBraces);
             QVERIFY(!t.authorized(1000)); t.m_handle = handle;
-            QVERIFY(t.request(media(), 1000).isEmpty()); const auto p = t.m_microphonePolicy;
+            QVERIFY(media(t, 1000).isEmpty()); const auto p = t.m_microphonePolicy;
             const auto refused = t.microphoneResult({p.generation, p.requestId, {}}, std::nullopt);
-            QVERIFY(!refused.value(u"ok"_s).toBool()); QVERIFY(!t.m_microphoneReady);
-            QVERIFY(t.request(media(), 1000).isEmpty()); const auto active = t.m_microphonePolicy;
-            QVERIFY(t.microphoneResult({active.generation, active.requestId, {}}, 1000).value(u"ok"_s).toBool());
+            QVERIFY(!ok(refused)); QCOMPARE(refused.value(u"code"_s).toString(), u"revoked"_s); QVERIFY(!t.m_microphoneReady);
+            QVERIFY(media(t, 1000).isEmpty()); const auto active = t.m_microphonePolicy;
+            QVERIFY(ok(t.microphoneResult({active.generation, active.requestId, {}}, 1000)));
             t.pumpMicrophone(); // Production PAM-only identity refuses fixture identity.
             QVERIFY(!t.m_microphoneReady); QVERIFY(!t.m_microphonePump.isActive());
         });
@@ -1244,7 +1370,7 @@ private Q_SLOTS:
                 QVERIFY(worker.waitForBytesWritten(1000)); QTRY_VERIFY(other.ready());
                 t.m_endpoint = &other;
                 QVERIFY(!t.authorized(1000));
-                QVERIFY(!t.request(media(), 1000).value(u"ok"_s).toBool());
+                QVERIFY(!ok(media(t, 1000)));
                 QVERIFY(!t.m_microphonePolicy.enabled);
                 t.m_endpoint = &original;
             }
@@ -1252,14 +1378,14 @@ private Q_SLOTS:
     }
     void microphoneRevokeRejectsReentrantConsent() {
         microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
-            QVERIFY(t.request(media(), 1000).isEmpty()); const auto policy = t.m_microphonePolicy;
+            QVERIFY(media(t, 1000).isEmpty()); const auto policy = t.m_microphonePolicy;
             int callbacks = 0;
             QObject::connect(t.m_connection->videoStream(), &VideoStream::enabledChanged, &t, [&] {
                 if (t.m_connection->videoStream()->enabled()) return;
                 ++callbacks;
                 QVERIFY(t.m_revoking); QVERIFY(!t.m_microphonePolicy.enabled);
                 QVERIFY(!t.m_microphonePump.isActive()); QVERIFY(!t.m_microphoneDeadline.isActive());
-                QVERIFY(t.request(media(), 1000).isEmpty());
+                QVERIFY(media(t, 1000).isEmpty());
                 QVERIFY(t.microphoneResult({policy.generation, policy.requestId, {}}, 1000).isEmpty());
             });
             t.revoke(); QCOMPARE(callbacks, 1);
@@ -1276,8 +1402,8 @@ private Q_SLOTS:
     }
     void microphoneSocketLossPendingAndReady() {
         for (bool ready : {false, true}) microphoneFixture([&](auto &t, auto &control, auto &endpoint, auto &worker) {
-            QVERIFY(t.request(media(), 1000).isEmpty()); const auto policy = t.m_microphonePolicy;
-            if (ready) QVERIFY(t.microphoneResult({policy.generation, policy.requestId, {}}, 1000).value(u"ok"_s).toBool());
+            QVERIFY(media(t, 1000).isEmpty()); const auto policy = t.m_microphonePolicy;
+            if (ready) QVERIFY(ok(t.microphoneResult({policy.generation, policy.requestId, {}}, 1000)));
             worker.abort();
             QTRY_VERIFY(!endpoint.ready());
             QVERIFY(!control.attachment(1)); QVERIFY(!t.m_endpoint); QVERIFY(!t.m_handle);
@@ -1289,8 +1415,8 @@ private Q_SLOTS:
     }
     void microphoneActiveRevokeMayDestroyTransport() {
         microphoneFixture([&](auto &t, auto &control, auto &, auto &worker) {
-            QVERIFY(t.request(media(), 1000).isEmpty()); const auto policy = t.m_microphonePolicy;
-            QVERIFY(t.microphoneResult({policy.generation, policy.requestId, {}}, 1000).value(u"ok"_s).toBool());
+            QVERIFY(media(t, 1000).isEmpty()); const auto policy = t.m_microphonePolicy;
+            QVERIFY(ok(t.microphoneResult({policy.generation, policy.requestId, {}}, 1000)));
             QVERIFY(t.m_microphoneReady); QVERIFY(t.m_microphonePump.isActive());
             const auto connection = t.m_connection;
             QPointer<VirtualSessionTransport> alive(&t);
@@ -1564,10 +1690,9 @@ private Q_SLOTS:
         // Simulate an earlier consent followed by loss of authorization. No
         // real RDP socket, PipeWire graph or desktop is used by this fixture.
         transport.m_playback = true;
-        const auto result = transport.request({{u"type"_s, u"media"_s}, {u"v"_s, 1},
-            {u"playback"_s, false}, {u"microphone"_s, true}, {u"camera"_s, false}});
-        QVERIFY(!result.value(u"ok"_s).toBool());
-        QVERIFY(!result.value(u"playback"_s).toBool());
+        const auto result = transport.request(device(u"microphone"_s, u"on"_s));
+        QCOMPARE(result.value(u"type"_s).toString(), u"error"_s);
+        QCOMPARE(result.value(u"code"_s).toString(), u"not-owner"_s);
         QVERIFY(!transport.m_playback);
         QCOMPARE(sequence, quint64(0));
     }
@@ -1586,8 +1711,9 @@ private Q_SLOTS:
         const auto response = transport.request({{u"type"_s, u"virtual-session"_s}, {u"v"_s, 1}, {u"id"_s, u"1"_s}, {u"action"_s, u"create"_s}});
         QVERIFY(!response.value(u"ok"_s).toBool());
         QCOMPARE(launched, 0);
-        const auto media = transport.request({{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"playback"_s, true}, {u"microphone"_s, false}, {u"camera"_s, false}});
-        QVERIFY(!media.value(u"ok"_s).toBool());
+        const auto playback = transport.request(device(u"playback"_s, u"on"_s));
+        QCOMPARE(playback.value(u"code"_s).toString(), u"not-owner"_s);
+        QVERIFY(!transport.m_playback);
         QVERIFY(!control.attachment(1));
         transport.revoke();
         transport.revoke();

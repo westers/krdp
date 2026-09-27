@@ -4,6 +4,8 @@
 
 #include "Server.h"
 
+#include <atomic>
+
 #include <vector>
 
 #include <QCoreApplication>
@@ -14,6 +16,7 @@
 #include <freerdp/freerdp.h>
 #include <winpr/ssl.h>
 
+#include "PipeWireAudioPlayback.h"
 #include "RdpConnection.h"
 
 #include "krdp_logging.h"
@@ -36,6 +39,7 @@ public:
     std::filesystem::path tlsCertificate;
     std::filesystem::path tlsCertificateKey;
     QString cameraLoopbackDevice;
+    std::atomic<bool> standardClientMedia = true;
     std::chrono::milliseconds handshakeTimeout = std::chrono::seconds(15);
 };
 
@@ -50,6 +54,13 @@ Server::Server(QObject *parent)
 Server::~Server()
 {
     stop();
+    // Join every session first: each one hands its playback endpoint to the
+    // background stop queue on close (AUD-D1). Then let those jobs restore
+    // the host's default sink before the process can exit.
+    d->sessions.clear();
+    if (!PipeWireAudioPlayback::waitForPendingStops(10000)) {
+        qCWarning(KRDP) << "PipeWire audio endpoints were still stopping at shutdown";
+    }
 }
 
 bool Server::tlsFilesUsable(const std::filesystem::path &certificatePath, const std::filesystem::path &keyPath)
@@ -231,6 +242,16 @@ QString Server::cameraLoopbackDevice() const
 void Server::setCameraLoopbackDevice(const QString &device)
 {
     d->cameraLoopbackDevice = device.trimmed();
+}
+
+bool Server::standardClientMedia() const
+{
+    return d->standardClientMedia.load();
+}
+
+void Server::setStandardClientMedia(bool enabled)
+{
+    d->standardClientMedia.store(enabled);
 }
 
 void Server::incomingConnection(qintptr handle)

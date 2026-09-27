@@ -584,6 +584,22 @@ KCM.ScrollViewKCM {
             text: i18nc("@info", "The default for new connections; the KRDP client can change it during a session.")
         }
 
+        QQC2.CheckBox {
+            text: i18nc("@option:check", "Let standard RDP clients share audio, microphone and camera")
+            checked: root.settings.standardClientMedia
+            onToggled: root.settings.standardClientMedia = checked
+            KCM.SettingStateBinding {
+                configObject: root.settings
+                settingName: "standardClientMedia"
+            }
+        }
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 22
+            wrapMode: Text.WordWrap
+            font: Kirigami.Theme.smallFont
+            text: i18nc("@info", "Clients such as the Windows Remote Desktop app, FreeRDP and Remmina ask for these themselves. The KRDP client turns each device on and off during the session.")
+        }
+
         QQC2.TextField {
             Kirigami.FormData.label: i18nc("@label:textbox", "Camera loopback device:")
             Layout.maximumWidth: Kirigami.Units.gridUnit * 10

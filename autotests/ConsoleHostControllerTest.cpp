@@ -566,10 +566,10 @@ private Q_SLOTS:
         QVERIFY(!connection.audioPriorityActive());
     }
 
-    void mediaReplyEchoesItsRequestIdOnce()
+    void microphoneReplyEchoesItsRequestIdOnce()
     {
-        // KRDPCTL v2: the `media` answering a request echoes its requestId; a later
-        // unsolicited `media` (a microphone lost after it started) must not repeat it.
+        // KRDPCTL v2: the `device` answering a request echoes its requestId; a later
+        // unsolicited `device` (a microphone lost after it started) must not repeat it.
         Server server;
         RdpConnection connection(&server, -1);
         ConsoleHostController host(&server, {}, {});
@@ -581,13 +581,298 @@ private Q_SLOTS:
         const auto generation = host.m_controlGeneration;
         client.media = {false, false, true};
         QVERIFY(host.m_control.setMedia(client.id, client.media));
-        client.mediaRequestId = QStringLiteral("media-1");
+        client.microphoneRequestId = QStringLiteral("media-1");
         host.m_microphoneClient = client.id;
         host.m_microphonePolicy = {generation, 1, true};
         host.m_nextMicrophoneId = 1;
         host.microphoneResult({generation, 1, {}});
         QVERIFY(host.m_microphoneReady);
-        QVERIFY(client.mediaRequestId.isEmpty());
+        QVERIFY(client.microphoneRequestId.isEmpty());
+    }
+
+    // --- AUD-D3: the KRDPCTL `device` record on the console ---
+    static QJsonObject deviceRecord(const QString &requestId, const QString &name, const QString &action)
+    {
+        return {{QStringLiteral("type"), QStringLiteral("device")}, {QStringLiteral("v"), 1}, {QStringLiteral("requestId"), requestId},
+                {QStringLiteral("device"), name}, {QStringLiteral("action"), action}};
+    }
+
+    void deviceRecordsOwnerViewerBusyAndUnsupported()
+    {
+        Server server;
+        RdpConnection owner(&server, -1);
+        RdpConnection viewer(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        QList<std::pair<RdpConnection *, QJsonObject>> sent;
+        host.m_recordSent = [&sent](RdpConnection *connection, const QJsonObject &record) {
+            sent.append({connection, record});
+        };
+        host.addClient(&owner);
+        host.addClient(&viewer);
+        const auto ownerId = host.m_clients.at(0)->id;
+        const auto viewerId = host.m_clients.at(1)->id;
+        host.m_control.admit(ownerId);
+        host.m_control.admit(viewerId);
+        host.syncControlState();
+        QVERIFY(host.m_control.ownsControl(ownerId));
+        const auto last = [&sent](RdpConnection *connection) {
+            for (auto it = sent.crbegin(); it != sent.crend(); ++it) {
+                if (it->first == connection) return it->second;
+            }
+            return QJsonObject{};
+        };
+
+        // The camera is not shared on the console yet; a query still answers.
+        host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("c1"), QStringLiteral("camera"), QStringLiteral("on")));
+        QCOMPARE(last(&owner).value(QStringLiteral("type")).toString(), QStringLiteral("error"));
+        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("unsupported"));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("c1"));
+        host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("c2"), QStringLiteral("camera"), QStringLiteral("query")));
+        QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("off"));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("c2"));
+
+        // Playback is per client; silencing the host is the controller's.
+        host.onControlRecord(&viewer, viewerId, deviceRecord(QStringLiteral("p1"), QStringLiteral("playback"), QStringLiteral("on")));
+        QCOMPARE(last(&viewer).value(QStringLiteral("type")).toString(), QStringLiteral("device"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("state")).toString(), QStringLiteral("on"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("requestId")).toString(), QStringLiteral("p1"));
+        auto silent = deviceRecord(QStringLiteral("p2"), QStringLiteral("playback"), QStringLiteral("on"));
+        silent.insert(QStringLiteral("silenceHost"), true);
+        host.onControlRecord(&viewer, viewerId, silent);
+        QCOMPARE(last(&viewer).value(QStringLiteral("code")).toString(), QStringLiteral("not-owner"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("requestId")).toString(), QStringLiteral("p2"));
+        QVERIFY(host.m_control.media().playback);
+        QVERIFY(!host.m_control.media().silenceHost);
+
+        // A viewer cannot share a microphone.
+        host.onControlRecord(&viewer, viewerId, deviceRecord(QStringLiteral("m1"), QStringLiteral("microphone"), QStringLiteral("on")));
+        QCOMPARE(last(&viewer).value(QStringLiteral("type")).toString(), QStringLiteral("error"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("code")).toString(), QStringLiteral("not-owner"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("requestId")).toString(), QStringLiteral("m1"));
+        // The controller without a ready desktop: a state error, not a refusal.
+        host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("m2"), QStringLiteral("microphone"), QStringLiteral("on")));
+        QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("error"));
+        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("unavailable"));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("m2"));
+        QCOMPARE(host.m_microphoneClient, quint64(0));
+
+        // While the controller shares its microphone, anyone else is `busy`.
+        auto &ownerClient = *host.m_clients.at(0);
+        ownerClient.media.microphone = true;
+        QVERIFY(host.m_control.setMedia(ownerId, ownerClient.media));
+        host.m_microphoneClient = ownerId;
+        host.m_microphonePolicy = {host.m_controlGeneration, ++host.m_nextMicrophoneId, true};
+        host.onControlRecord(&viewer, viewerId, deviceRecord(QStringLiteral("m3"), QStringLiteral("microphone"), QStringLiteral("on")));
+        QCOMPARE(last(&viewer).value(QStringLiteral("type")).toString(), QStringLiteral("device"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("state")).toString(), QStringLiteral("error"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("code")).toString(), QStringLiteral("busy"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("requestId")).toString(), QStringLiteral("m3"));
+        QCOMPARE(host.m_microphoneClient, ownerId);
+        // The controller's `off` ends it and is answered with its own requestId.
+        host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("m4"), QStringLiteral("microphone"), QStringLiteral("off")));
+        QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("off"));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("m4"));
+        QCOMPARE(host.m_microphoneClient, quint64(0));
+        QVERIFY(!host.m_control.media().microphone);
+
+        // Malformed: `invalid`, echoing the requestId.
+        auto invalid = deviceRecord(QStringLiteral("x1"), QStringLiteral("microphone"), QStringLiteral("on"));
+        invalid.insert(QStringLiteral("camera"), true);
+        host.onControlRecord(&owner, ownerId, invalid);
+        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("invalid"));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("x1"));
+    }
+
+    void microphoneAsyncReplyAndRevocation()
+    {
+        Server server;
+        RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        QList<QJsonObject> sent;
+        host.m_recordSent = [&sent](RdpConnection *, const QJsonObject &record) {
+            sent.append(record);
+        };
+        host.addClient(&connection);
+        auto &client = *host.m_clients.front();
+        host.m_control.admit(client.id);
+        host.syncControlState();
+        host.m_inputEnabled = true;
+        const auto start = [&](const QString &requestId) -> ConsoleWorkerWire::MicrophonePolicy {
+            client.media = {false, false, true};
+            if (!host.m_control.setMedia(client.id, client.media)) return {};
+            client.microphoneRequestId = requestId;
+            host.m_microphoneClient = client.id;
+            host.m_microphonePolicy = {host.m_controlGeneration, ++host.m_nextMicrophoneId, true};
+            return host.m_microphonePolicy;
+        };
+        // The worker's acknowledgement is the (asynchronous) answer, sent once.
+        auto policy = start(QStringLiteral("a1"));
+        QVERIFY(sent.isEmpty());
+        host.microphoneResult({policy.generation, policy.requestId, {}});
+        QCOMPARE(sent.size(), 1);
+        QCOMPARE(sent.last().value(QStringLiteral("device")).toString(), QStringLiteral("microphone"));
+        QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("on"));
+        QCOMPARE(sent.last().value(QStringLiteral("requestId")).toString(), QStringLiteral("a1"));
+        // A console user change later revokes it: pushed, no requestId.
+        host.setWorkerActive(false);
+        QCOMPARE(sent.size(), 2);
+        QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("off"));
+        QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("revoked"));
+        QVERIFY(!sent.last().contains(QStringLiteral("requestId")));
+        QVERIFY(!host.m_control.media().microphone);
+
+        // Revoked while the start was pending: that request is answered by it.
+        host.m_inputEnabled = true;
+        policy = start(QStringLiteral("a2"));
+        host.setWorkerActive(false);
+        QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("revoked"));
+        QCOMPARE(sent.last().value(QStringLiteral("requestId")).toString(), QStringLiteral("a2"));
+        const auto count = sent.size();
+        host.microphoneResult({policy.generation, policy.requestId, {}}); // late: ignored
+        QCOMPARE(sent.size(), count);
+
+        // A worker failure and the startup deadline are errors, answered once.
+        host.m_inputEnabled = true;
+        policy = start(QStringLiteral("a3"));
+        host.microphoneResult({policy.generation, policy.requestId, QStringLiteral("source failed")});
+        QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("error"));
+        QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("unavailable"));
+        QCOMPARE(sent.last().value(QStringLiteral("requestId")).toString(), QStringLiteral("a3"));
+        policy = start(QStringLiteral("a4"));
+        host.m_microphoneDeadline.setInterval(1);
+        host.m_microphoneDeadline.start();
+        QTRY_COMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("timeout"));
+        QCOMPARE(sent.last().value(QStringLiteral("requestId")).toString(), QStringLiteral("a4"));
+        QVERIFY(client.microphoneRequestId.isEmpty());
+    }
+
+    // --- AUD-D3: StandardClientMedia on the console broker ---
+    // A stock client (no KRDPCTL) that controls the console gets playback and
+    // the microphone from standard negotiation; a viewer never gets a microphone.
+    void standardClientMediaControllerOnly_data()
+    {
+        QTest::addColumn<bool>("enabled");
+        QTest::newRow("StandardClientMedia on") << true;
+        QTest::newRow("StandardClientMedia off") << false;
+    }
+    void standardClientMediaControllerOnly()
+    {
+        QFETCH(bool, enabled);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        Server server;
+        server.setStandardClientMedia(enabled);
+        RdpConnection owner(&server, -1);
+        RdpConnection viewer(&server, -1);
+        ConsoleHostController host(&server, {}, directory.path());
+        // A detached test connection joined nothing: as if RDPSND and DRDYNVC were joined.
+        host.m_standardChannels = [](RdpConnection *connection) {
+            auto channels = connection->standardMediaChannels();
+            if (channels) channels->playback = channels->dynamic = true;
+            return channels;
+        };
+        host.addClient(&owner);
+        host.addClient(&viewer);
+        auto &ownerClient = *host.m_clients.at(0);
+        auto &viewerClient = *host.m_clients.at(1);
+        QVERIFY(!owner.hasControlChannel());
+        // Admission (Streaming) applies it at once to a client without KRDPCTL;
+        // the first admitted client controls the console. The desktop is not
+        // ready yet (no seat): playback now, the microphone waits.
+        host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
+        Q_EMIT owner.stateChanged(RdpConnection::State::Streaming);
+        Q_EMIT viewer.stateChanged(RdpConnection::State::Streaming);
+        QVERIFY(host.m_control.admitted(viewerClient.id));
+        QVERIFY(host.m_control.ownsControl(ownerClient.id));
+        QVERIFY(!viewerClient.media.playback);
+        QCOMPARE(ownerClient.media.playback, enabled);
+        QCOMPARE(host.m_media.playback, enabled);
+        QVERIFY(!ownerClient.media.silenceHost);
+        QCOMPARE(host.m_microphoneClient, quint64(0));
+
+        // The logged-in desktop becomes ready: the controller's microphone starts.
+        const ConsoleHandoff::Target target{ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000};
+        const QByteArray token(24, 'm');
+        QVERIFY(host.m_endpoint.listen(directory.filePath(QStringLiteral("worker.sock")), target, token));
+        QLocalSocket worker;
+        worker.connectToServer(host.m_endpoint.socketName());
+        QVERIFY(worker.waitForConnected(1000));
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), 1000, token})
+            + ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+        QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_VERIFY(host.m_endpoint.ready());
+        host.setWorkerActive(true);
+        if (!enabled) {
+            QCOMPARE(host.m_microphoneClient, quint64(0));
+            host.applyStandardMedia(viewerClient.id);
+            QVERIFY(!viewerClient.media.playback);
+            QVERIFY(!host.m_control.media().playback);
+            QVERIFY(!host.m_control.media().microphone);
+            return;
+        }
+        QCOMPARE(host.m_microphoneClient, ownerClient.id);
+        QVERIFY(host.m_microphonePolicy.enabled);
+        QVERIFY(ownerClient.microphoneRequestId.isEmpty()); // nothing to answer
+        host.microphoneResult({host.m_microphonePolicy.generation, host.m_microphonePolicy.requestId, {}});
+        QVERIFY(host.m_microphoneReady);
+        QVERIFY(host.m_control.media().microphone);
+
+        // A (stock) viewer gets nothing: no microphone, and no playback either.
+        host.applyStandardMedia(viewerClient.id);
+        QVERIFY(!viewerClient.media.playback);
+        QVERIFY(!viewerClient.media.microphone);
+        QCOMPARE(host.m_microphoneClient, ownerClient.id);
+        // Not even while the controller's microphone is off.
+        host.stopMicrophone();
+        ownerClient.standardMicrophone = false;
+        host.applyStandardMedia(viewerClient.id);
+        QCOMPARE(host.m_microphoneClient, quint64(0));
+        viewerClient.standardMicrophone = true; // even if it had been set: a viewer is never started
+        host.startStandardMicrophone(viewerClient);
+        QCOMPARE(host.m_microphoneClient, quint64(0));
+        QVERIFY(!viewerClient.media.microphone);
+    }
+
+    // A client that speaks KRDPCTL asks for each device itself: a `device`
+    // record, or any other known record, keeps StandardClientMedia away.
+    void standardClientMediaNotForKrdpctlClients()
+    {
+        Server server;
+        RdpConnection first(&server, -1);
+        RdpConnection second(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.m_standardChannels = [](RdpConnection *connection) {
+            auto channels = connection->standardMediaChannels();
+            if (channels) channels->playback = channels->dynamic = true;
+            return channels;
+        };
+        host.m_recordSent = [](RdpConnection *, const QJsonObject &) {};
+        host.addClient(&first);
+        host.addClient(&second);
+        auto &a = *host.m_clients.at(0);
+        auto &b = *host.m_clients.at(1);
+        // Before admission: a `device` record is held for replay, and still counts.
+        host.onControlRecord(&first, a.id, deviceRecord(QStringLiteral("d1"), QStringLiteral("playback"), QStringLiteral("off")));
+        QVERIFY(a.deviceRecordSeen);
+        host.m_control.admit(a.id);
+        host.syncControlState();
+        host.applyStandardMedia(a.id);
+        QVERIFY(!a.media.playback);
+        QVERIFY(!a.standardMicrophone);
+        // A known record (a layout `query`) too; audio-priority alone does not.
+        host.m_control.remove(a.id);
+        host.syncControlState();
+        host.m_control.admit(b.id);
+        host.syncControlState();
+        QVERIFY(host.m_control.ownsControl(b.id));
+        host.onControlRecord(&second, b.id, QJsonObject{{QStringLiteral("type"), QStringLiteral("audio-priority")}, {QStringLiteral("v"), 1},
+                                                         {QStringLiteral("id"), QStringLiteral("p")}, {QStringLiteral("enabled"), false}});
+        QVERIFY(!b.spokeKrdpctl);
+        host.onControlRecord(&second, b.id, QJsonObject{{QStringLiteral("type"), QStringLiteral("query")}, {QStringLiteral("v"), 1}});
+        QVERIFY(b.spokeKrdpctl);
+        host.applyStandardMedia(b.id);
+        QVERIFY(!b.media.playback);
+        QVERIFY(!b.standardMicrophone);
     }
 };
 }

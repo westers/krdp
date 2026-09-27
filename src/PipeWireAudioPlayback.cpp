@@ -7,6 +7,7 @@
 #include <QMutexLocker>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QThreadPool>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/raw-utils.h>
 
@@ -55,6 +56,44 @@ void clearMetadataValue(quint32 subject, const QString &key)
 }
 
 constexpr quint32 DefaultMetadataSubject = 0;
+
+// One worker, submission order: two retiring isolated endpoints must restore
+// the default-sink metadata in the order they changed it. The thread exits as
+// soon as the queue is empty. The destructor (static destruction) waits for a
+// job still running, so a process that exits without draining still restores
+// the host's speakers.
+QThreadPool &stopPool()
+{
+    struct Pool {
+        Pool()
+        {
+            pool.setObjectName(QStringLiteral("krdp-audio-stop"));
+            pool.setMaxThreadCount(1);
+            pool.setExpiryTimeout(0);
+        }
+        QThreadPool pool;
+    };
+    static Pool instance;
+    return instance.pool;
+}
+}
+
+void PipeWireAudioPlayback::stopAsync(std::unique_ptr<PipeWireAudioPlayback> endpoint)
+{
+    if (!endpoint) {
+        return;
+    }
+    // QThreadPool needs a copyable callable; the job re-adopts the pointer.
+    PipeWireAudioPlayback *owned = endpoint.release();
+    stopPool().start([owned]() {
+        std::unique_ptr<PipeWireAudioPlayback> endpoint(owned);
+        endpoint->stop();
+    });
+}
+
+bool PipeWireAudioPlayback::waitForPendingStops(int msecs)
+{
+    return stopPool().waitForDone(msecs);
 }
 
 PipeWireAudioPlayback::~PipeWireAudioPlayback()
@@ -68,9 +107,10 @@ bool PipeWireAudioPlayback::start(const QString &targetSink)
     if (m_stream) {
         return true;
     }
-    pw_init(nullptr, nullptr);
+    m_runtime.acquire();
     m_loop = pw_thread_loop_new("krdp-remote-audio", nullptr);
     if (!m_loop) {
+        m_runtime.release();
         return false;
     }
     // PipeWire keeps the supplied event table for the stream lifetime.
@@ -109,6 +149,7 @@ bool PipeWireAudioPlayback::start(const QString &targetSink)
         m_stream = nullptr;
         pw_thread_loop_destroy(m_loop);
         m_loop = nullptr;
+        m_runtime.release();
         return false;
     }
     return true;
@@ -118,6 +159,12 @@ bool PipeWireAudioPlayback::startIsolated(const QString &id)
 {
     if (id.isEmpty()) {
         return false;
+    }
+    // A previous endpoint may still be restoring the defaults on the stop
+    // thread. Recording them before it finishes would save our own old sink
+    // as the "previous" default and restore a sink that no longer exists.
+    if (!waitForPendingStops(5000)) {
+        qWarning() << "Previous PipeWire audio endpoint still restoring the default sink; continuing";
     }
     m_isolatedSinkName = QStringLiteral("krdp.remote-audio.%1").arg(id);
     m_previousDefaultSink = metadataValue(DefaultMetadataSubject, QStringLiteral("default.audio.sink")).value;
@@ -185,6 +232,7 @@ void PipeWireAudioPlayback::stop()
     if (loop) {
         pw_thread_loop_destroy(loop);
     }
+    m_runtime.release();
 }
 
 void PipeWireAudioPlayback::moveExistingPlaybackStreams()

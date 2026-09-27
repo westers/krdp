@@ -28,6 +28,9 @@ target_sources(KRdp PRIVATE
     InputHandler.h
     LayoutControl.cpp
     LayoutControl.h
+    DeviceControl.cpp
+    DeviceControl.h
+    DeviceConsent.h
     PeerContext.cpp
     PeerContext_p.h
     PreAuthChannelGate.cpp
@@ -38,6 +41,8 @@ target_sources(KRdp PRIVATE
     PipeWireCamera.h
     PipeWireAudioPlayback.cpp
     PipeWireAudioPlayback.h
+    PipeWireRuntime.h
+    RemoteCameraSet.h
     PortalSession.cpp
     PortalSession.h
     VideoStream.cpp

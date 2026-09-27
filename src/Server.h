@@ -134,6 +134,15 @@ public:
     void setCameraLoopbackDevice(const QString &device);
 
     /**
+     * StandardClientMedia (DEVICES-DESIGN.md §1, default true): a client that
+     * never sends a KRDPCTL `device` record gets playback, the microphone and
+     * the camera through standard RDP negotiation alone (RdpConnection::
+     * applyStandardConsent()). Thread-safe.
+     */
+    bool standardClientMedia() const;
+    void setStandardClientMedia(bool enabled);
+
+    /**
      * Emitted whenever a new connection is started.
      *
      * \param connection The new connection that was just started.

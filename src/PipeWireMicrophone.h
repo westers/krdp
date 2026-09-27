@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "PipeWireRuntime.h"
+
 #include <QByteArray>
 #include <QMutex>
 #include <QString>
@@ -21,6 +23,8 @@ public:
     bool start(const QString &id);
     void stop();
     State state() const { return m_state.load(); }
+    /** An application on the host is recording from this source (its stream is STREAMING). Any thread. */
+    bool consumerActive() const { return m_streaming.load(); }
     void write(const QByteArray &pcm);
 private:
     static void process(void *data);
@@ -28,7 +32,9 @@ private:
     QMutex m_mutex;
     QByteArray m_pending;
     std::atomic<State> m_state{State::Stopped};
+    std::atomic<bool> m_streaming{false};
     pw_thread_loop *m_loop = nullptr;
     pw_stream *m_stream = nullptr;
+    PipeWireRuntime::Reference m_runtime;
 };
 }

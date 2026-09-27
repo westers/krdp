@@ -39,11 +39,15 @@ private:
     void deliverControlRecord(const QJsonObject &record, std::optional<quint32> uid);
     /** KRDPCTL v2: a record to the client, echoing its request's `id` as `requestId`. */
     void sendReply(const QJsonObject &record);
+    /** An unsolicited record (a device push) to the client. */
+    void pushRecord(const QJsonObject &record);
+    /** Test seam: sees each pushRecord() (a detached test connection drops them). */
+    std::function<void(const QJsonObject &)> m_recordPushed;
     /** KRDPCTL v2: `capabilities`, once, to an authenticated client that opened KRDPCTL. */
     void sendCapabilities();
     bool m_capabilitiesSent = false;
     // KRDPCTL v2: the requestId of the record deliverControlRecord() is handling, and of the
-    // `media` request whose microphone start the worker has yet to acknowledge.
+    // `device` request whose microphone start the worker has yet to acknowledge.
     QString m_replyRequestId;
     QString m_microphoneRequestId;
     bool bind();
@@ -75,7 +79,19 @@ private:
     QJsonObject microphoneTimeout();
     void pumpMicrophone();
     bool forwardMicrophone(const QByteArray &pcm, std::optional<quint32> uid);
-    QJsonObject mediaReply(bool ok, const QString &error = {}) const;
+    QJsonObject deviceReply(MediaDevice device, const DeviceStatus &status) const;
+    DeviceStatus deviceStatus(MediaDevice device) const;
+    /**
+     * StandardClientMedia (DEVICES-DESIGN.md §1) for the session's client once
+     * it is bound, if it never spoke KRDPCTL (no `device` record, no other
+     * known record): playback if it joined RDPSND, the microphone if it has
+     * DRDYNVC (its AUDIN accept is the consent). Never the camera.
+     */
+    void applyStandardMedia(std::optional<quint32> uid);
+    /** Test seam: RdpConnection::standardMediaChannels() (a detached test connection joined nothing). */
+    std::function<std::optional<RdpConnection::StandardMediaChannels>(RdpConnection *)> m_standardChannels;
+    bool m_deviceRecordSeen = false;
+    bool m_spokeKrdpctl = false;
     void closed();
     quint64 m_client;
     QPointer<RdpConnection> m_connection;

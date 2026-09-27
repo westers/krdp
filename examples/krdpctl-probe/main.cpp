@@ -21,6 +21,16 @@
  *   krdpctl-probe HOST PORT USER PASSWORD --silent           join the channel, send nothing
  *                                                            (exercises the server's 3 s gate)
  *   options: --gfx              also load the standard channel add-ins (drdynvc, rdpgfx)
+ *            --media            also join the standard audio channels the way a stock
+ *                               client with sound and a microphone does: RDPSND (static,
+ *                               the silent `fake` backend) and, over drdynvc, AUDIN
+ *                               (ALSA capture). No H.264 is needed; RDPGFX is not
+ *                               loaded (unless --gfx).
+ *            --microphone DEV   what --media's AUDIN captures: `probe` (the default) is a
+ *                               built-in device that delivers 20 ms of silence every
+ *                               20 ms and needs no audio server; anything else is an
+ *                               ALSA capture device name (`null` never blocks, so it
+ *                               floods the channel)
  *            --no-krdpctl       do not join KRDPCTL at all: a stock RDP client (with --silent)
  *                               and FreeRDP's software gdi, so the probe is a complete
  *                               AVC420 client; only useful on a libfreerdp built
@@ -43,6 +53,7 @@
  *                               is an `error` (it is printed either way). For exercising
  *                               records --apply/--query cannot send, e.g. a raw `chroma`
  *                               request.
+ *            --raw-gap MS       the pause between two --raw sends (default 300)
  *
  * Records go to stdout, one compact JSON object per line, each prefixed with
  * the local time it was read (HH:MM:SS.zzz); everything else to stderr with
@@ -64,7 +75,10 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include <map>
+#include <thread>
+#include <vector>
 
 #include <QByteArray>
 #include <QDataStream>
@@ -77,10 +91,13 @@
 #include <QString>
 #include <QTime>
 
+#include <freerdp/addin.h>
 #include <freerdp/channels/channels.h>
+#include <freerdp/client/audin.h>
 #include <freerdp/channels/rdpgfx.h>
 #include <freerdp/client.h>
 #include <freerdp/client/channels.h>
+#include <freerdp/client/cmdline.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
 #include <freerdp/gdi/gfx.h>
@@ -104,7 +121,7 @@ constexpr qint64 ApplySequenceGapMs = 8000;
 constexpr qint64 ApplySequenceReplyCapMs = 30000;
 // Between two --raw sends: fixed, unlike --apply-seq's pacing, since a raw
 // record (e.g. `chroma`) need not get any reply at all to count as accepted.
-constexpr qint64 RawSequenceGapMs = 300;
+constexpr qint64 RawSequenceGapMs = 300; // --raw-gap overrides it
 
 struct Probe {
     Mode mode = Mode::Silent;
@@ -123,7 +140,10 @@ struct Probe {
     QList<QJsonObject> rawBodies;
     /** Sent from the main loop only, after sentRequest; atomic for the same reason as nextApply. */
     std::atomic<int> nextRaw = 0;
+    qint64 rawGapMs = RawSequenceGapMs;
     bool gfx = false;
+    bool media = false;
+    QByteArray microphoneDevice = "probe";
     bool pong = true;
     int timeoutSeconds = 0;
     // --gfx evidence: frames seen per RDPGFX surface id.
@@ -437,6 +457,96 @@ void onChannelConnected(void *context, const ChannelConnectedEventArgs *e)
     gfx->SurfaceCommand = probeSurfaceCommand;
 }
 
+// ---- --media's built-in AUDIN device (`--microphone probe`) ----
+
+/*
+ * A microphone that needs no audio server: after Open it delivers 20 ms of
+ * silence every 20 ms, like a real capture device, until Close. (ALSA's
+ * `null` device never blocks, so it would flood the channel, and a capture
+ * stream on a graph without a session manager never gets data, which blocks
+ * the AUDIN thread and with it drdynvc's close.)
+ */
+struct ProbeAudin {
+    IAudinDevice iface{};
+    AUDIO_FORMAT format{};
+    std::thread thread;
+    std::atomic<bool> stop = false;
+};
+
+UINT probeAudinClose(IAudinDevice *device)
+{
+    auto *audin = reinterpret_cast<ProbeAudin *>(device);
+    audin->stop = true;
+    if (audin->thread.joinable()) {
+        audin->thread.join();
+    }
+    return CHANNEL_RC_OK;
+}
+
+UINT probeAudinOpen(IAudinDevice *device, AudinReceive receive, void *userData)
+{
+    auto *audin = reinterpret_cast<ProbeAudin *>(device);
+    (void)probeAudinClose(device);
+    audin->stop = false;
+    audin->thread = std::thread([audin, receive, userData]() {
+        const size_t align = qMax<size_t>(1, audin->format.nBlockAlign);
+        const size_t bytes = qMax<size_t>(align, (audin->format.nAvgBytesPerSec / 50) / align * align);
+        const std::vector<BYTE> silence(bytes, 0);
+        auto next = std::chrono::steady_clock::now();
+        while (!audin->stop) {
+            if (receive(&audin->format, silence.data(), silence.size(), userData) != CHANNEL_RC_OK) {
+                break;
+            }
+            next += std::chrono::milliseconds(20);
+            std::this_thread::sleep_until(next);
+        }
+    });
+    return CHANNEL_RC_OK;
+}
+
+BOOL probeAudinFormatSupported(IAudinDevice *, const AUDIO_FORMAT *format)
+{
+    return format && format->wFormatTag == WAVE_FORMAT_PCM ? TRUE : FALSE;
+}
+
+UINT probeAudinSetFormat(IAudinDevice *device, const AUDIO_FORMAT *format, UINT32)
+{
+    reinterpret_cast<ProbeAudin *>(device)->format = *format;
+    return CHANNEL_RC_OK;
+}
+
+UINT probeAudinFree(IAudinDevice *device)
+{
+    (void)probeAudinClose(device);
+    delete reinterpret_cast<ProbeAudin *>(device);
+    return CHANNEL_RC_OK;
+}
+
+UINT VCAPITYPE probeAudinEntry(PFREERDP_AUDIN_DEVICE_ENTRY_POINTS entryPoints)
+{
+    auto *audin = new ProbeAudin;
+    audin->iface.Open = probeAudinOpen;
+    audin->iface.FormatSupported = probeAudinFormatSupported;
+    audin->iface.SetFormat = probeAudinSetFormat;
+    audin->iface.Close = probeAudinClose;
+    audin->iface.Free = probeAudinFree;
+    const UINT status = entryPoints->pRegisterAudinDevice(entryPoints->plugin, &audin->iface);
+    if (status != CHANNEL_RC_OK) {
+        delete audin;
+    }
+    return status;
+}
+
+FREERDP_LOAD_CHANNEL_ADDIN_ENTRY_FN g_addinFallback = nullptr;
+
+PVIRTUALCHANNELENTRY probeAddinProvider(LPCSTR name, LPCSTR subsystem, LPCSTR type, DWORD flags)
+{
+    if (name && subsystem && std::strcmp(name, "audin") == 0 && std::strcmp(subsystem, "probe") == 0) {
+        return reinterpret_cast<PVIRTUALCHANNELENTRY>(reinterpret_cast<void *>(probeAudinEntry));
+    }
+    return g_addinFallback ? g_addinFallback(name, subsystem, type, flags) : nullptr;
+}
+
 // ---- freerdp instance callbacks ----
 
 BOOL preConnect(freerdp *instance)
@@ -465,9 +575,34 @@ BOOL preConnect(freerdp *instance)
 BOOL loadChannels(freerdp *instance)
 {
     auto *probe = probeOf(instance->context);
-    if (probe->gfx && !freerdp_client_load_addins(instance->context->channels, instance->context->settings)) {
-        logf("freerdp_client_load_addins failed");
-        return FALSE;
+    auto *settings = instance->context->settings;
+    if (probe->media) {
+        // What `xfreerdp /sound:sys:fake /microphone:sys:alsa,dev:null` asks for.
+        const char *const sound[] = {"rdpsnd", "sys:fake"};
+        const QByteArray device = "dev:" + probe->microphoneDevice;
+        const char *const alsa[] = {"audin", "sys:alsa", device.constData()};
+        const char *const builtin[] = {"audin", "sys:probe"};
+        const bool paced = probe->microphoneDevice == "probe";
+        if (!freerdp_client_add_static_channel(settings, ARRAYSIZE(sound), sound)
+            || !(paced ? freerdp_client_add_dynamic_channel(settings, ARRAYSIZE(builtin), builtin)
+                       : freerdp_client_add_dynamic_channel(settings, ARRAYSIZE(alsa), alsa))) {
+            logf("could not add the media channels");
+            return FALSE;
+        }
+    }
+    if (probe->gfx || probe->media) {
+        // Without --gfx, keep rdpgfx out of the add-ins: KRDP only checks the
+        // GCC flag, and this libfreerdp may not decode H.264.
+        const BOOL pipeline = freerdp_settings_get_bool(settings, FreeRDP_SupportGraphicsPipeline);
+        if (!probe->gfx) {
+            (void)freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE);
+        }
+        const BOOL loaded = freerdp_client_load_addins(instance->context->channels, settings);
+        (void)freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, pipeline);
+        if (!loaded) {
+            logf("freerdp_client_load_addins failed");
+            return FALSE;
+        }
     }
     if (!probe->krdpctl) {
         logf("not joining KRDPCTL (--no-krdpctl)");
@@ -524,7 +659,7 @@ DWORD verifyChangedCertificate(freerdp *, const char *host, UINT16 port, const c
     return 2;
 }
 
-bool applySettings(rdpSettings *s, const QString &host, int port, const QString &user, const QString &password, bool gfx)
+bool applySettings(rdpSettings *s, const QString &host, int port, const QString &user, const QString &password, bool dynamicChannels)
 {
     bool ok = true;
     // Keep libfreerdp's certificate store out of ~/.config/freerdp: a
@@ -566,7 +701,7 @@ bool applySettings(rdpSettings *s, const QString &host, int port, const QString 
     ok &= freerdp_settings_set_bool(s, FreeRDP_NetworkAutoDetect, TRUE);
     ok &= freerdp_settings_set_bool(s, FreeRDP_SupportDisplayControl, FALSE);
     ok &= freerdp_settings_set_bool(s, FreeRDP_RedirectClipboard, FALSE);
-    ok &= freerdp_settings_set_bool(s, FreeRDP_SupportDynamicChannels, gfx ? TRUE : FALSE);
+    ok &= freerdp_settings_set_bool(s, FreeRDP_SupportDynamicChannels, dynamicChannels ? TRUE : FALSE);
     ok &= freerdp_settings_set_bool(s, FreeRDP_UseMultimon, FALSE);
     ok &= freerdp_settings_set_uint32(s, FreeRDP_MonitorCount, 0);
     ok &= freerdp_settings_set_uint32(s, FreeRDP_DesktopWidth, 1920);
@@ -581,7 +716,7 @@ int usage()
 {
     std::fprintf(stderr,
                  "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
-                 "[--gfx] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]...\n");
+                 "[--gfx] [--media [--microphone DEV]] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
     return 2;
 }
 
@@ -657,6 +792,12 @@ int main(int argc, char **argv)
             probe.rawBodies.push_back(body);
         } else if (arg == QLatin1String("--gfx")) {
             probe.gfx = true;
+        } else if (arg == QLatin1String("--media")) {
+            probe.media = true;
+        } else if (arg == QLatin1String("--microphone") && i + 1 < argc) {
+            probe.microphoneDevice = QByteArray(argv[++i]);
+        } else if (arg == QLatin1String("--raw-gap") && i + 1 < argc) {
+            probe.rawGapMs = qMax(0, QString::fromLocal8Bit(argv[++i]).toInt());
         } else if (arg == QLatin1String("--no-krdpctl")) {
             probe.krdpctl = false;
         } else if (arg == QLatin1String("--no-pong")) {
@@ -711,6 +852,10 @@ int main(int argc, char **argv)
     };
 
     rdpContext *context = freerdp_client_context_new(&entryPoints);
+    // After the context: creating it registers libfreerdp's own provider,
+    // which ours falls back to for everything but `audin:sys:probe`.
+    g_addinFallback = freerdp_get_current_addin_provider();
+    (void)freerdp_register_addin_provider(probeAddinProvider, 0);
     if (!context) {
         logf("freerdp_client_context_new failed");
         return 1;
@@ -725,7 +870,7 @@ int main(int argc, char **argv)
     instance->VerifyCertificateEx = verifyCertificate;
     instance->VerifyChangedCertificateEx = verifyChangedCertificate;
 
-    if (!applySettings(context->settings, host, port, user, password, probe.gfx)) {
+    if (!applySettings(context->settings, host, port, user, password, probe.gfx || probe.media)) {
         logf("settings rejected");
         freerdp_client_context_free(context);
         return 1;
@@ -776,7 +921,7 @@ int main(int argc, char **argv)
         if (probe.nextRaw.load() < probe.rawBodies.size() && probe.sentRequest.load() && (!rawStarted || nextRawAt.hasExpired())) {
             rawStarted = true;
             sendNextRaw(&probe);
-            nextRawAt = probe.nextRaw.load() < probe.rawBodies.size() ? QDeadlineTimer(RawSequenceGapMs) : QDeadlineTimer(QDeadlineTimer::Forever);
+            nextRawAt = probe.nextRaw.load() < probe.rawBodies.size() ? QDeadlineTimer(probe.rawGapMs) : QDeadlineTimer(QDeadlineTimer::Forever);
         }
         if (deadline.hasExpired()) {
             logf("timeout after %d s", probe.timeoutSeconds);

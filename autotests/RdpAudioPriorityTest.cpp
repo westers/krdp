@@ -2,10 +2,21 @@
 #include <QTest>
 #include "RdpConnection.h"
 #include "Server.h"
-#include "MicrophoneConsent.h"
+#include "DeviceConsent.h"
 #include "MicrophonePcmQueue.h"
 
 using namespace KRdp;
+
+namespace
+{
+// The consent switches the brokers use (the old setMediaPolicy()).
+void setMedia(RdpConnection &connection, bool playback, bool microphone, bool camera)
+{
+    connection.setDeviceEnabled(MediaDevice::Playback, playback);
+    connection.setDeviceEnabled(MediaDevice::Microphone, microphone);
+    connection.setDeviceEnabled(MediaDevice::Camera, camera);
+}
+}
 
 class RdpAudioPriorityTest : public QObject
 {
@@ -16,7 +27,7 @@ private Q_SLOTS:
         Server server;
         RdpConnection connection(&server, -1);
         QVERIFY(!connection.authenticatedPamUid());
-        connection.setMediaPolicy(true, false, false);
+        setMedia(connection, true, false, false);
         connection.setAudioPriority(true);
         QVERIFY(!connection.authenticatedPamUid());
     }
@@ -56,16 +67,16 @@ private Q_SLOTS:
         QVERIFY(connection.takeExternalMicrophone().isEmpty());
         connection.setAudioPriority(true);
         QVERIFY(!connection.audioPriorityActive());
-        connection.setMediaPolicy(false, true, false);
+        setMedia(connection, false, true, false);
         QVERIFY(connection.audioPriorityActive());
         QVERIFY(connection.takeExternalMicrophone().isEmpty());
-        connection.setMediaPolicy(false, false, false);
+        setMedia(connection, false, false, false);
         QVERIFY(connection.takeExternalMicrophone().isEmpty());
     }
 
-    void microphoneConsentRejectsLateContexts()
+    void deviceConsentRejectsLateContexts()
     {
-        MicrophoneConsent consent;
+        DeviceConsent consent;
         int samples = 0;
         const auto sink = [&] { ++samples; };
         QVERIFY(!consent.deliver(0, sink));
@@ -95,7 +106,7 @@ private Q_SLOTS:
         QVERIFY(!connection.audioPriorityActive());
         connection.setAudioPriorityDefault(true);
         QVERIFY(!connection.audioPriorityActive());
-        connection.setMediaPolicy(false, true, false); // mic only
+        setMedia(connection, false, true, false); // mic only
         QVERIFY(connection.audioPriorityActive());
         connection.setAudioPriority(false);
         QVERIFY(!connection.audioPriorityActive());
@@ -104,17 +115,17 @@ private Q_SLOTS:
         QVERIFY(!connection.audioPriorityActive()); // default reload cannot beat override
         connection.clearAudioPriorityOverride();
         QVERIFY(connection.audioPriorityActive());
-        connection.setMediaPolicy(true, false, false); // playback only
+        setMedia(connection, true, false, false); // playback only
         QVERIFY(connection.audioPriorityActive());
-        connection.setMediaPolicy(true, true, false); // duplex
+        setMedia(connection, true, true, false); // duplex
         QVERIFY(connection.audioPriorityActive());
-        connection.setMediaPolicy(false, false, true); // camera is not audio consent
+        setMedia(connection, false, false, true); // camera is not audio consent
         QVERIFY(!connection.audioPriorityActive());
         connection.setAudioPriorityDefault(false);
         connection.setAudioPriority(true);
-        connection.setMediaPolicy(false, true, false);
+        setMedia(connection, false, true, false);
         QVERIFY(connection.audioPriorityActive());
-        connection.setMediaPolicy(false, false, false);
+        setMedia(connection, false, false, false);
         QVERIFY(!connection.audioPriorityActive());
     }
 };

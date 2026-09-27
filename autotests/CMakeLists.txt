@@ -560,3 +560,54 @@ if(TARGET krdpctl-probe)
     set_tests_properties(KrdpctlV2LoopbackTest PROPERTIES TIMEOUT 180)
 endif()
 # --- end AUD-WS-L ---
+
+# --- AUD-WS-D ---
+# AUD-D1 server hygiene: RDPECAM device bookkeeping and the PipeWire endpoint
+# toggle loop (private daemon; exits 77 when it can't run one).
+add_executable(RemoteCameraSetTest RemoteCameraSetTest.cpp)
+target_include_directories(RemoteCameraSetTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(RemoteCameraSetTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME RemoteCameraSetTest COMMAND RemoteCameraSetTest)
+
+add_executable(DeviceToggleLoopTest DeviceToggleLoopTest.cpp
+    ${CMAKE_SOURCE_DIR}/src/PipeWireMicrophone.cpp
+    ${CMAKE_SOURCE_DIR}/src/PipeWireCamera.cpp
+    ${CMAKE_SOURCE_DIR}/src/PipeWireAudioPlayback.cpp)
+target_include_directories(DeviceToggleLoopTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(DeviceToggleLoopTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui PkgConfig::PipeWire)
+if(PIPEWIRE_EXECUTABLE)
+    set(_krdp_device_loop_pipewire "${PIPEWIRE_EXECUTABLE}")
+else()
+    set(_krdp_device_loop_pipewire "pipewire") # not found: the test skips
+endif()
+target_compile_definitions(DeviceToggleLoopTest PRIVATE
+    KRDP_AUDIO_CONFIG_DIR="${CMAKE_SOURCE_DIR}/server"
+    KRDP_PIPEWIRE_EXECUTABLE="${_krdp_device_loop_pipewire}")
+add_test(NAME DeviceToggleLoopTest COMMAND DeviceToggleLoopTest)
+# ~20 s idle; 55-80 s seen under a load average of 25.
+set_tests_properties(DeviceToggleLoopTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+# AUD-D2/D3: the KRDPCTL `device` record, the `devices` capabilities group,
+# DeviceConsent generations and StandardClientMedia (pure, socket-free).
+add_executable(DeviceControlTest DeviceControlTest.cpp)
+target_include_directories(DeviceControlTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+target_include_directories(DeviceControlTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(DeviceControlTest PRIVATE Qt6::Test Qt6::Core KRdp)
+add_test(NAME DeviceControlTest COMMAND DeviceControlTest)
+# Devices end to end on 127.0.0.1 with krdpctl-probe's standard audio channels:
+# a stock client under StandardClientMedia, and `device` records from our own
+# client. Private PipeWire daemon; exits 77 when it can't run one.
+if(TARGET krdpctl-probe)
+    add_executable(DeviceLoopbackTest DeviceLoopbackTest.cpp)
+    target_include_directories(DeviceLoopbackTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+    target_include_directories(DeviceLoopbackTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+    target_link_libraries(DeviceLoopbackTest PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
+    target_compile_definitions(DeviceLoopbackTest PRIVATE
+        KRDPCTL_PROBE="$<TARGET_FILE:krdpctl-probe>"
+        KRDP_AUDIO_CONFIG_DIR="${CMAKE_SOURCE_DIR}/server"
+        KRDP_PIPEWIRE_EXECUTABLE="${_krdp_device_loop_pipewire}")
+    add_dependencies(DeviceLoopbackTest krdpctl-probe)
+    add_test(NAME DeviceLoopbackTest COMMAND DeviceLoopbackTest)
+    set_tests_properties(DeviceLoopbackTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 240)
+endif()
+# --- end AUD-WS-D ---

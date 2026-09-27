@@ -84,6 +84,11 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>Wake the display when a client starts streaming and keep it awake for the session</label>
       <default>true</default>
     </entry>
+    <entry name="StandardClientMedia" type="Bool">
+      <label>Let standard RDP clients share audio, microphone and camera</label>
+      <whatsthis>A client that does not use KRDP's own device control (mstsc, FreeRDP, Remmina) gets audio playback when it joins the standard audio channel, and shares its microphone and camera when it accepts them.</whatsthis>
+      <default>true</default>
+    </entry>
     <entry name="CameraLoopbackDevice" type="String">
       <label>Optional V4L2 loopback device to publish redirected cameras for applications that cannot use PipeWire directly</label>
       <default></default>

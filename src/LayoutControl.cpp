@@ -413,7 +413,7 @@ QJsonObject invalidRequestIdRecord()
 
 QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
 {
-    return QJsonObject{
+    QJsonObject record{
         {QStringLiteral("type"), QStringLiteral("capabilities")},
         {QStringLiteral("v"), ProtocolVersion},
         {QStringLiteral("protocol"), ChannelProtocol},
@@ -428,6 +428,17 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
                      {QStringLiteral("preview"), capabilities.topologyPreview},
                      {QStringLiteral("apply"), capabilities.topologyApply}}},
     };
+    if (const auto &devices = capabilities.devices) {
+        record.insert(QStringLiteral("devices"),
+                      QJsonObject{
+                          {QStringLiteral("playback"),
+                           QJsonObject{{QStringLiteral("toggle"), devices->playbackToggle}, {QStringLiteral("silenceHost"), devices->playbackSilenceHost}}},
+                          {QStringLiteral("microphone"), QJsonObject{{QStringLiteral("toggle"), devices->microphoneToggle}}},
+                          {QStringLiteral("camera"),
+                           QJsonObject{{QStringLiteral("toggle"), devices->cameraToggle}, {QStringLiteral("reselect"), devices->cameraReselect}}},
+                      });
+    }
+    return record;
 }
 
 QJsonObject errorRecord(const Error &error)

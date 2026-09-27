@@ -54,7 +54,11 @@ private Q_SLOTS:
             QStringLiteral("--format"), QStringLiteral("s16"), QStringLiteral("--target"),
             QStringLiteral("krdp.remote-microphone.pcm-test"), QStringLiteral("-")});
         QVERIFY(recorder.waitForStarted());
-        QTest::qWait(500);
+        // Wait for the real link, not a fixed time: until pw-cat is linked to
+        // the source (its stream is STREAMING), writes only fill the bounded
+        // queue, and under load WirePlumber can take well over the 500 ms this
+        // used to sleep.
+        QTRY_VERIFY_WITH_TIMEOUT(mic.consumerActive(), 10000);
         constexpr double tau = 6.283185307179586;
         int sample = 0;
         for (int packet = 0; packet < 100; ++packet) {
@@ -67,24 +71,39 @@ private Q_SLOTS:
             mic.write(pcm);
             QTest::qWait(20);
         }
-        QTest::qWait(200);
+        // Drain by the graph's clock, not a fixed time: the source holds at most
+        // 0.5 s, so once pw-cat recorded 0.6 s more than it had when the last
+        // packet was written, everything written has been delivered.
+        const qint64 afterWrites = recorder.bytesAvailable();
+        QTRY_VERIFY_WITH_TIMEOUT(recorder.bytesAvailable() >= afterWrites + 48000 * 4 * 6 / 10 || recorder.state() != QProcess::Running, 10000);
         QVERIFY2(recorder.state() == QProcess::Running, recorder.readAllStandardError().constData());
         recorder.terminate();
         QVERIFY(recorder.waitForFinished(3000));
         const QByteArray received = recorder.readAllStandardOutput();
         QVERIFY2(received.size() > 48000, recorder.readAllStandardError().constData());
-        double energy = 0, real = 0, imaginary = 0;
+        // The tone's share of the energy, per 100 ms window (99.7 periods, so
+        // little leakage) and summed without phase. The writer is paced by this
+        // thread's event loop: when it falls behind the graph, the source pads
+        // with silence and the tone resumes with a different phase. One DFT
+        // over the whole recording let those phase jumps cancel the tone
+        // (0.23 was seen under parallel ctest load); per window they cannot.
+        constexpr int Window = 4800;
+        double energy = 0, tone = 0;
         const int frames = received.size() / 4;
-        for (int frame = 0; frame < frames; ++frame) {
-            const double value = qFromLittleEndian<qint16>(received.constData() + frame * 4);
-            energy += value * value;
-            real += value * std::cos(tau * 997 * frame / 48000);
-            imaginary += value * std::sin(tau * 997 * frame / 48000);
+        for (int start = 0; start + Window <= frames; start += Window) {
+            double real = 0, imaginary = 0;
+            for (int frame = start; frame < start + Window; ++frame) {
+                const double value = qFromLittleEndian<qint16>(received.constData() + frame * 4);
+                energy += value * value;
+                real += value * std::cos(tau * 997 * frame / 48000);
+                imaginary += value * std::sin(tau * 997 * frame / 48000);
+            }
+            tone += 2 * (real * real + imaginary * imaginary) / Window;
         }
-        const double toneFraction = energy ? 2 * (real * real + imaginary * imaginary) / (frames * energy) : 0;
+        const double toneFraction = energy ? tone / energy : 0;
         qInfo() << "Microphone PCM frames" << frames << "RMS" << std::sqrt(energy / frames) << "997Hz energy fraction" << toneFraction;
         QVERIFY(energy / frames > 10000);
-        QVERIFY(toneFraction > 0.25);
+        QVERIFY(toneFraction > 0.5); // 0.90-0.98 measured under 16 busy loops plus 24 concurrent runs
         mic.stop();
         policy.terminate();
         QVERIFY(policy.waitForFinished(3000));

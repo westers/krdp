@@ -15,6 +15,9 @@
 #include <QPointer>
 #include <QTimer>
 
+#include <DeviceControl.h>
+#include <RdpConnection.h>
+
 #include "ConsoleHandoff.h"
 #include "ConsoleWorkerBackoff.h"
 #include "ConsoleControl.h"
@@ -80,16 +83,23 @@ private:
         std::optional<quint32> uid;
         std::unique_ptr<ConsoleWorkerSession> session;
         QList<QMetaObject::Connection> connections;
-        QJsonObject pendingMedia;
+        // `device` records that arrived before admission (bounded: the latest per device).
+        QList<QJsonObject> pendingDevices;
         bool wantsLayout = false;
         quint8 videoQuality = 80;
         ConsoleControl::Media media;
         bool externalMicrophone = false;
         QVector<VideoMonitor> wireLayout; // RDPGFX surfaces installed for this client, not the catalog's sorted order.
-        // KRDPCTL v2: the requests the next `layout` / `media` record answers.
+        // KRDPCTL v2: the requests the next `layout` / microphone `device` record answers.
         QString layoutRequestId;
-        QString mediaRequestId;
+        QString microphoneRequestId;
         bool capabilitiesSent = false;
+        // StandardClientMedia (DEVICES-DESIGN.md §1): either flag set means this
+        // client speaks KRDPCTL and asks for each device itself.
+        bool deviceRecordSeen = false;
+        bool spokeKrdpctl = false;
+        // Its standard AUDIN negotiation is its microphone consent (until it refuses).
+        bool standardMicrophone = false;
     };
 
     void apply(const ConsoleHandoff::Actions &actions);
@@ -118,10 +128,37 @@ private:
     void finishPhysicalTopology(const QString &code, const QString &detail = {});
     void finishVirtualTopology(const QString &code, const QString &detail = {});
     QJsonObject consoleTopology(const QString &id) const;
-    void stopMicrophone(const QString &error);
+    /**
+     * End the console microphone. With a \a code (revoked: state `off`;
+     * anything else: `error`) its client is told; a start still pending is
+     * answered either way (its requestId is echoed once).
+     */
+    void stopMicrophone(const QString &code = {}, const QString &message = {});
     void microphoneResult(const ConsoleWorkerWire::MicrophoneResult &result);
-    void sendMedia(Client &client, bool microphone, const QString &error = {});
+    /** A microphone `device` state to \a client, answering its pending request if any. */
+    void sendMicrophoneState(Client &client, const DeviceStatus &status);
+    DeviceStatus deviceStatus(const Client &client, MediaDevice device) const;
+    void onControlDevice(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record, const QJsonObject &incoming);
+    /** Ask the worker for the console microphone for \a client; \a requestId is answered by its acknowledgement. */
+    void dispatchMicrophone(Client &client, const QString &requestId);
+    /**
+     * StandardClientMedia for the admitted controlling client \a id if it never
+     * spoke KRDPCTL (no channel, or nothing known within StandardGateMs of its
+     * admission): playback if it joined RDPSND, the microphone if it has
+     * DRDYNVC (its AUDIN accept is the consent). Viewers get nothing; no camera.
+     */
+    void applyStandardMedia(ConsoleControl::Id id);
+    /** The standard microphone of the controlling client, once the logged-in desktop is ready. */
+    void startStandardMicrophone(Client &client);
+    /// KRDPCTL's first-record gate (as krdpserver's): a channel client that said nothing known by then is a stock client.
+    int m_standardGateMs = 3000;
+    /** Test seam: RdpConnection::standardMediaChannels() (a detached test connection joined nothing). */
+    std::function<std::optional<RdpConnection::StandardMediaChannels>(RdpConnection *)> m_standardChannels;
     QString m_replyRequestId; // the request onControlRecord() is handling
+    /** Every record to a client goes out here (replyTo(), device states). */
+    void sendRecord(RdpConnection *connection, const QJsonObject &record);
+    /** Test seam: sees each record sendRecord() sends (a detached test connection drops them). */
+    std::function<void(RdpConnection *, const QJsonObject &)> m_recordSent;
 
     Server *m_server = nullptr;
     WorkerLauncher m_launchWorker;

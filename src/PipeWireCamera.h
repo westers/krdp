@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "PipeWireRuntime.h"
+
 #include <QByteArray>
 #include <QMutex>
 #include <QString>
@@ -27,17 +29,29 @@ public:
     // virtual source. The RDP session thread consumes this flag before asking
     // the client to open its physical camera.
     bool captureRequested() const;
+    /** The node exists in the graph (PAUSED or STREAMING). Any thread. */
+    bool ready() const { return m_ready.load(); }
+    /**
+     * An application on the host is capturing right now: the stream is
+     * STREAMING, or another process holds the V4L2 loopback open. Unlike
+     * captureRequested() this drops back to false when the consumer leaves.
+     * The loopback check walks /proc; do not call it on every loop iteration.
+     */
+    bool consumerActive() const;
 private:
     static void process(void *data);
     void process();
-    QMutex m_mutex;
+    mutable QMutex m_mutex;
     QByteArray m_pending;
     uint32_t m_width = 0;
     uint32_t m_height = 0;
     int m_loopbackFd = -1;
     QString m_loopbackDevice;
     std::atomic_bool m_captureRequested = false;
+    std::atomic_bool m_ready = false;
+    std::atomic_bool m_streaming = false;
     pw_thread_loop *m_loop = nullptr;
     pw_stream *m_stream = nullptr;
+    PipeWireRuntime::Reference m_runtime;
 };
 }
