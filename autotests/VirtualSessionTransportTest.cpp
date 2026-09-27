@@ -1144,6 +1144,41 @@ private Q_SLOTS:
             QVERIFY(t.microphoneTimeout().isEmpty()); // answered once
         });
     }
+    void deviceCameraUnsupportedQueryAndRevocation() {
+        // AUD-D3: the virtual desktop shares no camera yet; a query still answers; a
+        // detach pushes `off`/`revoked` for what was on, answering a pending start once.
+        microphoneFixture([&](auto &t, auto &, auto &, auto &) {
+            QList<QJsonObject> pushed;
+            t.m_recordPushed = [&pushed](const QJsonObject &record) { pushed.append(record); };
+            const auto camera = t.request(device(u"camera"_s, u"on"_s), 1000);
+            QCOMPARE(camera.value(u"type"_s).toString(), u"error"_s);
+            QCOMPARE(camera.value(u"code"_s).toString(), u"unsupported"_s);
+            QCOMPARE(t.request(device(u"camera"_s, u"reselect"_s), 1000).value(u"code"_s).toString(), u"unsupported"_s);
+            QCOMPARE(state(t.request(device(u"camera"_s, u"query"_s), 1000)), u"off"_s);
+            QCOMPARE(state(t.request(device(u"microphone"_s, u"query"_s))), u"off"_s); // a query needs no ownership
+            auto invalid = device(u"microphone"_s, u"on"_s); invalid.insert(u"silenceHost"_s, true);
+            QCOMPARE(t.request(invalid, 1000).value(u"code"_s).toString(), u"invalid"_s);
+            QVERIFY(ok(t.request(device(u"playback"_s, u"on"_s), 1000)));
+            auto start = device(u"microphone"_s, u"on"_s); start.insert(u"requestId"_s, u"v1"_s);
+            t.deliverControlRecord(start, 1000);
+            QVERIFY(t.m_microphonePolicy.enabled);
+            QCOMPARE(state(t.request(device(u"microphone"_s, u"query"_s), 1000)), u"starting"_s);
+            QVERIFY(pushed.isEmpty());
+            t.revoke();
+            QCOMPARE(pushed.size(), 2);
+            QCOMPARE(pushed.at(0).value(u"device"_s).toString(), u"microphone"_s);
+            QCOMPARE(state(pushed.at(0)), u"off"_s);
+            QCOMPARE(pushed.at(0).value(u"code"_s).toString(), u"revoked"_s);
+            QCOMPARE(pushed.at(0).value(u"requestId"_s).toString(), u"v1"_s);
+            QCOMPARE(pushed.at(1).value(u"device"_s).toString(), u"playback"_s);
+            QCOMPARE(pushed.at(1).value(u"code"_s).toString(), u"revoked"_s);
+            QVERIFY(!pushed.at(1).contains(u"requestId"_s));
+            t.revoke(); // nothing on any more: nothing pushed again
+            QCOMPARE(pushed.size(), 2);
+            // After the detach the connection owns nothing: `not-owner`.
+            QCOMPARE(t.request(device(u"microphone"_s, u"on"_s), 1000).value(u"code"_s).toString(), u"not-owner"_s);
+        });
+    }
     void microphonePendingCorrelatedReadinessAndPcm() {
         microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
             QVERIFY(media(t, 1000).isEmpty()); // No early success.

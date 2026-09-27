@@ -590,6 +590,161 @@ private Q_SLOTS:
         QVERIFY(client.microphoneRequestId.isEmpty());
     }
 
+    // --- AUD-D3: the KRDPCTL `device` record on the console ---
+    static QJsonObject deviceRecord(const QString &requestId, const QString &name, const QString &action)
+    {
+        return {{QStringLiteral("type"), QStringLiteral("device")}, {QStringLiteral("v"), 1}, {QStringLiteral("requestId"), requestId},
+                {QStringLiteral("device"), name}, {QStringLiteral("action"), action}};
+    }
+
+    void deviceRecordsOwnerViewerBusyAndUnsupported()
+    {
+        Server server;
+        RdpConnection owner(&server, -1);
+        RdpConnection viewer(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        QList<std::pair<RdpConnection *, QJsonObject>> sent;
+        host.m_recordSent = [&sent](RdpConnection *connection, const QJsonObject &record) {
+            sent.append({connection, record});
+        };
+        host.addClient(&owner);
+        host.addClient(&viewer);
+        const auto ownerId = host.m_clients.at(0)->id;
+        const auto viewerId = host.m_clients.at(1)->id;
+        host.m_control.admit(ownerId);
+        host.m_control.admit(viewerId);
+        host.syncControlState();
+        QVERIFY(host.m_control.ownsControl(ownerId));
+        const auto last = [&sent](RdpConnection *connection) {
+            for (auto it = sent.crbegin(); it != sent.crend(); ++it) {
+                if (it->first == connection) return it->second;
+            }
+            return QJsonObject{};
+        };
+
+        // The camera is not shared on the console yet; a query still answers.
+        host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("c1"), QStringLiteral("camera"), QStringLiteral("on")));
+        QCOMPARE(last(&owner).value(QStringLiteral("type")).toString(), QStringLiteral("error"));
+        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("unsupported"));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("c1"));
+        host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("c2"), QStringLiteral("camera"), QStringLiteral("query")));
+        QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("off"));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("c2"));
+
+        // Playback is per client; silencing the host is the controller's.
+        host.onControlRecord(&viewer, viewerId, deviceRecord(QStringLiteral("p1"), QStringLiteral("playback"), QStringLiteral("on")));
+        QCOMPARE(last(&viewer).value(QStringLiteral("type")).toString(), QStringLiteral("device"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("state")).toString(), QStringLiteral("on"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("requestId")).toString(), QStringLiteral("p1"));
+        auto silent = deviceRecord(QStringLiteral("p2"), QStringLiteral("playback"), QStringLiteral("on"));
+        silent.insert(QStringLiteral("silenceHost"), true);
+        host.onControlRecord(&viewer, viewerId, silent);
+        QCOMPARE(last(&viewer).value(QStringLiteral("code")).toString(), QStringLiteral("not-owner"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("requestId")).toString(), QStringLiteral("p2"));
+        QVERIFY(host.m_control.media().playback);
+        QVERIFY(!host.m_control.media().silenceHost);
+
+        // A viewer cannot share a microphone.
+        host.onControlRecord(&viewer, viewerId, deviceRecord(QStringLiteral("m1"), QStringLiteral("microphone"), QStringLiteral("on")));
+        QCOMPARE(last(&viewer).value(QStringLiteral("type")).toString(), QStringLiteral("error"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("code")).toString(), QStringLiteral("not-owner"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("requestId")).toString(), QStringLiteral("m1"));
+        // The controller without a ready desktop: a state error, not a refusal.
+        host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("m2"), QStringLiteral("microphone"), QStringLiteral("on")));
+        QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("error"));
+        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("unavailable"));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("m2"));
+        QCOMPARE(host.m_microphoneClient, quint64(0));
+
+        // While the controller shares its microphone, anyone else is `busy`.
+        auto &ownerClient = *host.m_clients.at(0);
+        ownerClient.media.microphone = true;
+        QVERIFY(host.m_control.setMedia(ownerId, ownerClient.media));
+        host.m_microphoneClient = ownerId;
+        host.m_microphonePolicy = {host.m_controlGeneration, ++host.m_nextMicrophoneId, true};
+        host.onControlRecord(&viewer, viewerId, deviceRecord(QStringLiteral("m3"), QStringLiteral("microphone"), QStringLiteral("on")));
+        QCOMPARE(last(&viewer).value(QStringLiteral("type")).toString(), QStringLiteral("device"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("state")).toString(), QStringLiteral("error"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("code")).toString(), QStringLiteral("busy"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("requestId")).toString(), QStringLiteral("m3"));
+        QCOMPARE(host.m_microphoneClient, ownerId);
+        // The controller's `off` ends it and is answered with its own requestId.
+        host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("m4"), QStringLiteral("microphone"), QStringLiteral("off")));
+        QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("off"));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("m4"));
+        QCOMPARE(host.m_microphoneClient, quint64(0));
+        QVERIFY(!host.m_control.media().microphone);
+
+        // Malformed: `invalid`, echoing the requestId.
+        auto invalid = deviceRecord(QStringLiteral("x1"), QStringLiteral("microphone"), QStringLiteral("on"));
+        invalid.insert(QStringLiteral("camera"), true);
+        host.onControlRecord(&owner, ownerId, invalid);
+        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("invalid"));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("x1"));
+    }
+
+    void microphoneAsyncReplyAndRevocation()
+    {
+        Server server;
+        RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        QList<QJsonObject> sent;
+        host.m_recordSent = [&sent](RdpConnection *, const QJsonObject &record) {
+            sent.append(record);
+        };
+        host.addClient(&connection);
+        auto &client = *host.m_clients.front();
+        host.m_control.admit(client.id);
+        host.syncControlState();
+        host.m_inputEnabled = true;
+        const auto start = [&](const QString &requestId) -> ConsoleWorkerWire::MicrophonePolicy {
+            client.media = {false, false, true};
+            if (!host.m_control.setMedia(client.id, client.media)) return {};
+            client.microphoneRequestId = requestId;
+            host.m_microphoneClient = client.id;
+            host.m_microphonePolicy = {host.m_controlGeneration, ++host.m_nextMicrophoneId, true};
+            return host.m_microphonePolicy;
+        };
+        // The worker's acknowledgement is the (asynchronous) answer, sent once.
+        auto policy = start(QStringLiteral("a1"));
+        QVERIFY(sent.isEmpty());
+        host.microphoneResult({policy.generation, policy.requestId, {}});
+        QCOMPARE(sent.size(), 1);
+        QCOMPARE(sent.last().value(QStringLiteral("device")).toString(), QStringLiteral("microphone"));
+        QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("on"));
+        QCOMPARE(sent.last().value(QStringLiteral("requestId")).toString(), QStringLiteral("a1"));
+        // A console user change later revokes it: pushed, no requestId.
+        host.setWorkerActive(false);
+        QCOMPARE(sent.size(), 2);
+        QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("off"));
+        QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("revoked"));
+        QVERIFY(!sent.last().contains(QStringLiteral("requestId")));
+        QVERIFY(!host.m_control.media().microphone);
+
+        // Revoked while the start was pending: that request is answered by it.
+        host.m_inputEnabled = true;
+        policy = start(QStringLiteral("a2"));
+        host.setWorkerActive(false);
+        QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("revoked"));
+        QCOMPARE(sent.last().value(QStringLiteral("requestId")).toString(), QStringLiteral("a2"));
+        const auto count = sent.size();
+        host.microphoneResult({policy.generation, policy.requestId, {}}); // late: ignored
+        QCOMPARE(sent.size(), count);
+
+        // A worker failure and the startup deadline are errors, answered once.
+        host.m_inputEnabled = true;
+        policy = start(QStringLiteral("a3"));
+        host.microphoneResult({policy.generation, policy.requestId, QStringLiteral("source failed")});
+        QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("error"));
+        QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("unavailable"));
+        QCOMPARE(sent.last().value(QStringLiteral("requestId")).toString(), QStringLiteral("a3"));
+        policy = start(QStringLiteral("a4"));
+        host.m_microphoneDeadline.setInterval(1);
+        host.m_microphoneDeadline.start();
+        QTRY_COMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("timeout"));
+        QCOMPARE(sent.last().value(QStringLiteral("requestId")).toString(), QStringLiteral("a4"));
+        QVERIFY(client.microphoneRequestId.isEmpty());
+    }
 };
 }
 QTEST_GUILESS_MAIN(KRdp::ConsoleHostControllerTest)
