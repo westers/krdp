@@ -106,6 +106,39 @@ private Q_SLOTS:
         QVERIFY(!supersededByKeyframe(0, 1));
         QVERIFY(!supersededByKeyframe(1, 0));
     }
+
+    // AUD-P6: SUSPEND_FRAME_ACKNOWLEDGEMENT.
+    void suspendedAcksStopTrackingPendingFrames()
+    {
+        using KRdp::FrameQueuePolicy::FrameAckTracker;
+        FrameAckTracker tracker;
+        for (uint32_t id = 1; id <= 5; ++id) {
+            tracker.frameSent(id);
+        }
+        QCOMPARE(tracker.pending(), 5);
+        QCOMPARE(tracker.acknowledge(1, 3), FrameAckTracker::Ack::Acknowledged);
+        QCOMPARE(tracker.pending(), 4);
+        QCOMPARE(tracker.acknowledge(1, 3), FrameAckTracker::Ack::Unknown);
+
+        // The client suspends: nothing is outstanding, and later frames are
+        // not tracked, so the backlog can never grow while it stays silent.
+        QCOMPARE(tracker.acknowledge(2, FrameAckTracker::SuspendFrameAcknowledgement), FrameAckTracker::Ack::Suspended);
+        QVERIFY(tracker.suspended());
+        QCOMPARE(tracker.pending(), 0);
+        for (uint32_t id = 6; id <= 1000; ++id) {
+            tracker.frameSent(id);
+        }
+        QCOMPARE(tracker.pending(), 0);
+        QCOMPARE(tracker.acknowledge(7, FrameAckTracker::SuspendFrameAcknowledgement), FrameAckTracker::Ack::Unknown);
+
+        // An ordinary ack resumes tracking.
+        QCOMPARE(tracker.acknowledge(1000, 0), FrameAckTracker::Ack::Resumed);
+        QVERIFY(!tracker.suspended());
+        tracker.frameSent(1001);
+        QCOMPARE(tracker.pending(), 1);
+        tracker.clear();
+        QCOMPARE(tracker.pending(), 0);
+    }
 };
 
 QTEST_GUILESS_MAIN(FrameQueuePolicyTest)

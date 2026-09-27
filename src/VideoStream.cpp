@@ -297,7 +297,8 @@ public:
     QQueue<VideoFrame> frameQueue;
     // pendingFrames is inserted on the submission thread (sendFrame) and erased on
     // the FreeRDP peer thread (onFrameAcknowledge).
-    QSet<uint32_t> pendingFrames;
+    // AUD-P6: also knows when the client suspended acknowledgements.
+    FrameQueuePolicy::FrameAckTracker pendingFrames;
     std::mutex pendingFramesMutex;
 
     // Fixed at the client-configured rate; read by the submission thread for its
@@ -747,16 +748,18 @@ void VideoStream::updateAdaptiveQuality()
     }
 
     int pendingNow = 0;
+    bool acksSuspended = false;
     {
         std::lock_guard lock(d->pendingFramesMutex);
-        pendingNow = int(d->pendingFrames.size());
+        pendingNow = d->pendingFrames.pending();
+        acksSuspended = d->pendingFrames.suspended();
     }
     const int minAfterAck = d->minPendingAfterAckSinceDecision.exchange(std::numeric_limits<int>::max());
     // Backlogged = the client never got within BacklogFrames of caught up:
     // neither after any ack this interval nor right now. Idle (pendingNow 0)
     // is never a backlog; a stall with no acks at all is (min(INT_MAX, now)).
     // Suppress only this startup-burst signal; RTT congestion remains active.
-    const bool backlogged = AdaptiveQuality::backlogIsPressure(now - d->streamingSince, minAfterAck, pendingNow);
+    const bool backlogged = AdaptiveQuality::backlogIsPressure(now - d->streamingSince, minAfterAck, pendingNow, acksSuspended);
 
     auto *network = d->session->networkDetection();
     const auto averageRtt = clk::duration_cast<clk::microseconds>(network->averageRTT());
@@ -970,21 +973,30 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
 
 uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frameAcknowledge)
 {
+    static_assert(FrameQueuePolicy::FrameAckTracker::SuspendFrameAcknowledgement == SUSPEND_FRAME_ACKNOWLEDGEMENT);
     auto id = frameAcknowledge->frameId;
 
     std::lock_guard lock(d->pendingFramesMutex);
 
-    auto itr = d->pendingFrames.constFind(id);
-    if (itr == d->pendingFrames.cend()) {
-        qCWarning(KRDP) << "Got frame acknowledge for an unknown frame";
+    switch (d->pendingFrames.acknowledge(id, frameAcknowledge->queueDepth)) {
+    case FrameQueuePolicy::FrameAckTracker::Ack::Unknown:
+        qCDebug(KRDP) << "Got frame acknowledge for an unknown frame" << id;
         return CHANNEL_RC_OK;
+    case FrameQueuePolicy::FrameAckTracker::Ack::Suspended:
+        qCInfo(KRDP) << "Client suspended frame acknowledgements; pending frames no longer count toward adaptive quality";
+        // Nothing is outstanding any more: a suspension counts as caught up.
+        bumpAtomicMin(d->minPendingAfterAckSinceDecision, 0);
+        return CHANNEL_RC_OK;
+    case FrameQueuePolicy::FrameAckTracker::Ack::Resumed:
+        qCInfo(KRDP) << "Client resumed frame acknowledgements";
+        break;
+    case FrameQueuePolicy::FrameAckTracker::Ack::Acknowledged:
+        break;
     }
-
-    d->pendingFrames.erase(itr);
 
     // How far behind the client still is now that this ack landed - see
     // minPendingAfterAckSinceDecision.
-    bumpAtomicMin(d->minPendingAfterAckSinceDecision, int(d->pendingFrames.size()));
+    bumpAtomicMin(d->minPendingAfterAckSinceDecision, d->pendingFrames.pending());
 
     return CHANNEL_RC_OK;
 }
@@ -1193,7 +1205,7 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
 
     {
         std::lock_guard lock(d->pendingFramesMutex);
-        d->pendingFrames.insert(frameId);
+        d->pendingFrames.frameSent(frameId);
     }
 
     RDPGFX_START_FRAME_PDU startFramePdu;
