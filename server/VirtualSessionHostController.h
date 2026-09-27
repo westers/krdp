@@ -34,8 +34,7 @@ public:
     using AdmitCreate = std::function<CreateAdmission(quint32)>;
     // Create-only preflight, not the keeper's mandatory held maintenance lease.
     // Empty remains permitted for this unwired stage; no production enforcement.
-    bool enableIndependentCreates(VirtualSessionJournal &journal, StartService start = {}, AdmitCreate admission = {},
-        bool experimentalInitialLayout = false);
+    bool enableIndependentCreates(VirtualSessionJournal &journal, StartService start = {}, AdmitCreate admission = {});
 
 private:
     friend class VirtualSessionHostControllerTest;

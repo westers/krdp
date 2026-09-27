@@ -11,8 +11,9 @@ KScreen layout and checks compositor geometry before capture, then checks the
 initial encoded keyframes before Ready. A selected Create carrying the exact
 preview ID, token, and selected descriptors now consumes its transport-bound
 proposal before the host callback and persists the normalized v2 record.
-`krdp-virtual-host --experimental-initial-layout` enables this source path for
-isolated testing; it is off by default. Client v0.4.11 adds source-tested
+Since AUD-INT (2026-09-27) this path is always on and advertised as
+`capabilities.virtualSessions.selectedCreate`; `--experimental-initial-layout`
+was removed. Client v0.4.11 adds source-tested
 selection, a proportional drag diagram, explicit preview and one-use Create;
 the deployed Buzz development launcher has it, while the packaged binary
 awaits a user-run install. Native private-compositor/Buzz GUI acceptance is

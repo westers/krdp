@@ -120,7 +120,7 @@ bool VirtualSessionHostController::recover(VirtualSessionJournal &journal, QStri
 }
 
 bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJournal &journal, StartService start,
-    AdmitCreate admission, bool experimentalInitialLayout)
+    AdmitCreate admission)
 {
     if (!m_recoveryAttempted || m_recoveredJournal != &journal || m_nextClient || m_journal
         || (!start && (getuid() || geteuid()))) return false;
@@ -130,11 +130,11 @@ bool VirtualSessionHostController::enableIndependentCreates(VirtualSessionJourna
     m_commitIntent = [&journal](const auto &record) { return journal.insert(record); };
     m_startService = start ? std::move(start) : [this](const auto &unit, const auto &handle) { return startIndependentService(unit, handle); };
     m_control.setCreateHandler([this](quint32 uid) { return createIndependent(uid); });
-    if (experimentalInitialLayout) {
-        m_control.setSelectedCreateHandler([this](quint32 uid, const auto &outputs) { return createIndependent(uid, outputs); });
-        m_control.setInitialLayoutPreviewCapabilities({.maxOutputs = 16, .maxOutputDimension = 4096,
-            .maxAtlasDimension = 8192});
-    }
+    // Selected-screen create is the only create krdp-client offers (KRDPCTL v2
+    // `capabilities.virtualSessions.selectedCreate`), so it is always on.
+    m_control.setSelectedCreateHandler([this](quint32 uid, const auto &outputs) { return createIndependent(uid, outputs); });
+    m_control.setInitialLayoutPreviewCapabilities({.maxOutputs = 16, .maxOutputDimension = 4096,
+        .maxAtlasDimension = 8192});
     m_control.setDismissHandlers([this](quint32 uid, const QString &id) { return dismissalEligible(uid, id); },
         [this](quint32 uid, const QString &id) { return dismissFailure(uid, id); });
     m_supervisor.setGuardianAvailableCallback([this](const auto &handle) {

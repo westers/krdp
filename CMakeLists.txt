@@ -174,8 +174,5 @@ if(KRDP_BUILD_VIRTUAL_TEST_PACKAGE)
         DESTINATION lib/${CMAKE_LIBRARY_ARCHITECTURE}
         COMPONENT KRdpVirtualSessionTest
         FILES_MATCHING PATTERN "libKPipeWire*.so*")
-    install(FILES server/krdp-virtual-initial-layout-test.conf
-        DESTINATION share/krdp/virtual-session/drafts
-        COMPONENT KRdpVirtualSessionTest)
     include(cmake/VirtualTestPackage.cmake)
 endif()

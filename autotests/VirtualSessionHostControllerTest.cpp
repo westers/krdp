@@ -26,6 +26,19 @@ class VirtualSessionHostControllerTest : public QObject
         return r;
     }
 private Q_SLOTS:
+    void selectedCreateIsOfferedByDefault()
+    {
+        // krdp-client offers Create only for selectedCreate; there is no opt-in flag any more.
+        QTemporaryDir dir;
+        auto journal = VirtualSessionJournal::openAt(dir.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal));
+        QVERIFY(!host.m_control.selectedCreateAvailable());
+        QVERIFY(host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        QVERIFY(host.m_control.selectedCreateAvailable());
+        const auto list = host.m_control.request(1000, 1, command(QStringLiteral("list")));
+        QCOMPARE(list.value(QStringLiteral("initialLayout")).toObject().value(QStringLiteral("maxOutputs")), QJsonValue(16));
+    }
     void selectedCreatePersistsNormalizedV2BeforeServiceStart()
     {
         QTemporaryDir dir;
@@ -38,7 +51,7 @@ private Q_SLOTS:
             const auto records = journal->records();
             sawDurable = records && records->size() == starts; // Durable record must exist before start.
             return false;
-        }, {}, true));
+        }));
         auto list = host.m_control.request(1000, 1, command(QStringLiteral("list")));
         QVERIFY(list.value(QStringLiteral("initialLayout")).isObject());
         auto preview = command(QStringLiteral("preview-create"));

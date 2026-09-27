@@ -133,7 +133,7 @@ scripts/package-virtual-test.sh   # build-virtual-package/, prefix /opt/krdp-vir
   `-pam-keeper`, `-session-cleanup`, `-device-entry`). `VirtualSessionControl` is the
   list/preview-create/create/attach/detach/stop protocol (one-use preview tokens), persisted via
   `VirtualSessionJournal`/`Registry`/`Supervisor`. `VirtualInitialLayout`/`VirtualInitialBootstrap`
-  = selected-screen first layout (default-OFF `--experimental-initial-layout`); `VirtualResize*` = Fit.
+  = selected-screen first layout (always on since AUD-INT; the flag is gone); `VirtualResize*` = Fit.
 - **Maintenance guard**: deleted 2026-09-27 (AUD-C1); the full stack is preserved under the git tag
   `archive/maintenance-guard`. The generic create-admission hook (`VirtualSessionHostController::
   CreateAdmission`, `Refusal::Maintenance`) remains but nothing in production sets it.
