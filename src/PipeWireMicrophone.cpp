@@ -27,6 +27,7 @@ bool PipeWireMicrophone::start(const QString &id)
         result.process = PipeWireMicrophone::process;
         result.state_changed = [](void *data, pw_stream_state, pw_stream_state state, const char *) {
             auto *self = static_cast<PipeWireMicrophone *>(data);
+            self->m_streaming = state == PW_STREAM_STATE_STREAMING;
             // PAUSED is a registered source with no consumer yet. Do not wait
             // for STREAMING: applications choose when to open the microphone.
             if (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING) {
@@ -75,6 +76,7 @@ void PipeWireMicrophone::stop()
     if (stream) { pw_stream_disconnect(stream); pw_stream_destroy(stream); }
     if (loop) pw_thread_loop_destroy(loop);
     m_runtime.release();
+    m_streaming = false;
     m_state = State::Stopped;
 }
 void PipeWireMicrophone::write(const QByteArray &pcm)
