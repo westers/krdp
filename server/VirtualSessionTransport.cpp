@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionTransport.h"
+#include "LayoutControl.h"
 #include "AudioPriority.h"
 #include "VirtualResizeProtocol.h"
 #include "VirtualResize.h"
@@ -59,7 +60,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     connect(&m_microphoneDeadline, &QTimer::timeout, this, [this] {
         const QPointer<VirtualSessionTransport> alive(this);
         const auto reply = microphoneTimeout();
-        if (alive && m_connection && !reply.isEmpty()) m_connection->sendControlRecord(reply);
+        if (alive && m_connection && !reply.isEmpty()) sendReply(reply);
     });
     m_microphonePump.setInterval(20);
     connect(&m_microphonePump, &QTimer::timeout, this, &VirtualSessionTransport::pumpMicrophone);
@@ -69,7 +70,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         const auto response = resizeResult({m_resizeWorkerId, m_resizeGeneration,
             u"virtual resize timed out; refresh before retrying"_s},
             m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
-        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+        if (m_connection && !response.isEmpty()) sendReply(response);
     });
     m_topologyDeadline.setSingleShot(true);
     m_topologyDeadline.setInterval(5000);
@@ -77,7 +78,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         const QString id = m_topologyId;
         clearTopology();
         if (m_connection && !id.isEmpty())
-            m_connection->sendControlRecord(RemoteTopologyProtocol::error(id, u"timeout"_s));
+            sendReply(RemoteTopologyProtocol::error(id, u"timeout"_s));
     });
     m_positionDeadline.setSingleShot(true);
     m_positionDeadline.setInterval(15000);
@@ -85,7 +86,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         if (m_positionId.isEmpty()) return;
         const QString id = m_positionId;
         clearPosition();
-        if (m_connection) m_connection->sendControlRecord(RemoteTopologyProtocol::error(id, u"capture-failed"_s));
+        if (m_connection) sendReply(RemoteTopologyProtocol::error(id, u"capture-failed"_s));
     });
     m_addDeadline.setSingleShot(true);
     m_addDeadline.setInterval(20000);
@@ -93,7 +94,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         if (m_addId.isEmpty()) return;
         const QString id = m_addId;
         clearAdd();
-        if (m_connection) m_connection->sendControlRecord(RemoteTopologyProtocol::error(id, u"capture-failed"_s));
+        if (m_connection) sendReply(RemoteTopologyProtocol::error(id, u"capture-failed"_s));
     });
     m_removeDeadline.setSingleShot(true);
     m_removeDeadline.setInterval(20000);
@@ -101,7 +102,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         if (m_removeId.isEmpty()) return;
         const QString id = m_removeId;
         clearRemove();
-        if (m_connection) m_connection->sendControlRecord(RemoteTopologyProtocol::error(id, u"capture-failed"_s));
+        if (m_connection) sendReply(RemoteTopologyProtocol::error(id, u"capture-failed"_s));
     });
     m_topologyResizeDeadline.setSingleShot(true);
     m_topologyResizeDeadline.setInterval(20000);
@@ -109,7 +110,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         if (m_topologyResizeId.isEmpty()) return;
         const QString id = m_topologyResizeId;
         clearTopologyResize();
-        if (m_connection) m_connection->sendControlRecord(RemoteTopologyProtocol::error(id, u"capture-failed"_s));
+        if (m_connection) sendReply(RemoteTopologyProtocol::error(id, u"capture-failed"_s));
     });
     connect(&m_session, &AbstractSession::frameReceived, connection->videoStream(), &VideoStream::queueFrame);
     connect(connection->inputHandler(), &InputHandler::inputEvent, &m_session, &AbstractSession::sendEvent);
@@ -122,6 +123,8 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     connect(connection, &RdpConnection::controlRecordReceived, this, [this](const QJsonObject &record) {
         if (m_connection) deliverControlRecord(record, m_connection->authenticatedPamUid());
     }, Qt::QueuedConnection);
+    // Emitted once the client authenticated (AUD-S1), with KRDPCTL open if it joined it.
+    connect(connection, &RdpConnection::clientDisplayInfoReceived, this, [this] { sendCapabilities(); }, Qt::QueuedConnection);
     connect(connection, &RdpConnection::stateChanged, this, [this](RdpConnection::State state) {
         if (state == RdpConnection::State::Closed) closed();
     }, Qt::QueuedConnection);
@@ -214,7 +217,7 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         m_session.submitFrame(frame);
         if (!alive || !m_connection) return;
         const auto reply = topologyFrame(frame, m_connection->authenticatedPamUid());
-        if (alive && m_connection && !reply.isEmpty()) m_connection->sendControlRecord(reply);
+        if (alive && m_connection && !reply.isEmpty()) sendReply(reply);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::audioReceived, this, [this](const auto &audio) {
         if (m_playback && authorized()) m_connection->submitExternalAudio(audio.pcm);
@@ -225,52 +228,52 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::microphoneFinished, this, [this](const auto &result) {
         const QPointer<VirtualSessionTransport> alive(this);
         const auto reply = microphoneResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
-        if (alive && m_connection && !reply.isEmpty()) m_connection->sendControlRecord(reply);
+        if (alive && m_connection && !reply.isEmpty()) sendReply(reply);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::resizeFinished, this, [this](const auto &result) {
         const auto uid = m_connection ? m_connection->authenticatedPamUid() : std::nullopt;
         const auto response = m_topologyResizeId.isEmpty() ? resizeResult(result, uid) : topologyResizeResult(result, uid);
-        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+        if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::positionFinished, this, [this](const auto &result) {
         const auto response = positionResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
-        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+        if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::positionBatchFinished, this, [this](const auto &result) {
         const auto response = positionResult({result.requestId, result.generation, result.error},
             m_connection ? m_connection->authenticatedPamUid() : std::nullopt, true);
-        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+        if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::managedFitFinished, this, [this](const auto &result) {
         const auto response = topologyResizeResult({result.requestId, result.generation, result.error},
             m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
-        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+        if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::primaryFinished, this, [this](const auto &result) {
         if (!m_topologyPrimaryPending) return;
         const auto response = topologyResizeResult({result.requestId, result.generation, result.error},
             m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
-        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+        if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::mixedFinished, this, [this](const auto &result) {
         if (!m_topologyMixedPending) return;
         const auto response = topologyResizeResult({result.requestId, result.generation, result.error},
             m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
-        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+        if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::mixedCreateFinished, this, [this](const auto &result) {
         if (!m_topologyMixedCreatePending) return;
         const auto response = topologyResizeResult({result.requestId, result.generation, result.error},
             m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
-        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+        if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::addVirtualFinished, this, [this](const auto &result) {
         const auto response = addVirtualResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
-        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+        if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::removeVirtualFinished, this, [this](const auto &result) {
         const auto response = removeVirtualResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
-        if (m_connection && !response.isEmpty()) m_connection->sendControlRecord(response);
+        if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_controlGeneration = ++m_sequence;
     // Capture the binding's generation at connection time, NOT delivery time:
@@ -485,12 +488,46 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record)
     return request(record, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
 }
 
-void VirtualSessionTransport::deliverControlRecord(const QJsonObject &record, std::optional<quint32> uid)
+void VirtualSessionTransport::deliverControlRecord(const QJsonObject &incoming, std::optional<quint32> uid)
 {
     const QPointer<VirtualSessionTransport> alive(this);
     const auto connection = m_connection;
+    // KRDPCTL v2: the requestId comes off before the strict v1 parsers see the record and
+    // goes back on the synchronous reply; an invalid one executes nothing.
+    QJsonObject record = incoming;
+    const auto requestId = LayoutControl::takeRequestId(record);
+    if (requestId.invalid) {
+        if (connection) connection->sendControlRecord(LayoutControl::invalidRequestIdRecord());
+        return;
+    }
     const auto response = request(record, uid);
-    if (alive && connection && m_connection == connection && !response.isEmpty()) connection->sendControlRecord(response);
+    if (alive && connection && m_connection == connection && !response.isEmpty())
+        connection->sendControlRecord(LayoutControl::withRequestId(response, requestId.value));
+}
+
+void VirtualSessionTransport::sendReply(const QJsonObject &record)
+{
+    if (!m_connection) return;
+    // Asynchronous results carry the `id` of the request they answer; v2 clients send
+    // requestId == id for those types, so it is echoed from there.
+    const QJsonValue id = record.value(u"id"_s);
+    m_connection->sendControlRecord(record.contains(u"requestId"_s) || !id.isString()
+        ? record : LayoutControl::withRequestId(record, id.toString()));
+}
+
+void VirtualSessionTransport::sendCapabilities()
+{
+    if (m_capabilitiesSent || !m_connection || !m_connection->isAuthenticated() || !m_connection->hasControlChannel()) return;
+    m_capabilitiesSent = true;
+    LayoutControl::ChannelCapabilities capabilities;
+    capabilities.host = u"virtual"_s;
+    capabilities.virtualList = true;
+    capabilities.virtualCreate = true;
+    capabilities.virtualSelectedCreate = m_control && m_control->selectedCreateAvailable();
+    capabilities.topologyQuery = true;
+    capabilities.topologyPreview = true;
+    capabilities.topologyApply = true;
+    m_connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
 
 void VirtualSessionTransport::clearResize()

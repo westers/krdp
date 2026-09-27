@@ -21,6 +21,7 @@
  *   krdpctl-probe HOST PORT USER PASSWORD --silent           join the channel, send nothing
  *                                                            (exercises the server's 3 s gate)
  *   options: --gfx              also load the standard channel add-ins (drdynvc, rdpgfx)
+ *            --no-krdpctl       do not join KRDPCTL at all: a stock RDP client (with --silent)
  *                               and FreeRDP's software gdi, so the probe is a complete
  *                               AVC420 client; only useful on a libfreerdp built
  *                               WITH_GFX_H264 (buzz's Debian 3.22, not Ubuntu's 3.31).
@@ -107,6 +108,8 @@ constexpr qint64 RawSequenceGapMs = 300;
 
 struct Probe {
     Mode mode = Mode::Silent;
+    /** Join KRDPCTL (off with --no-krdpctl: behave like a stock RDP client). */
+    bool krdpctl = true;
     /** The `apply` bodies, in order: one for --apply, several for --apply-seq. */
     QList<QJsonObject> applyBodies;
     // The first apply is sent from the channel thread (on CHANNEL_EVENT_CONNECTED),
@@ -466,6 +469,10 @@ BOOL loadChannels(freerdp *instance)
         logf("freerdp_client_load_addins failed");
         return FALSE;
     }
+    if (!probe->krdpctl) {
+        logf("not joining KRDPCTL (--no-krdpctl)");
+        return TRUE;
+    }
     if (freerdp_channels_client_load_ex(instance->context->channels, instance->context->settings, krdpctlEntryEx, probe) != 0) {
         logf("could not register the KRDPCTL channel");
         return FALSE;
@@ -574,7 +581,7 @@ int usage()
 {
     std::fprintf(stderr,
                  "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
-                 "[--gfx] [--timeout SECONDS] [--no-pong] [--raw FILE.json]...\n");
+                 "[--gfx] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]...\n");
     return 2;
 }
 
@@ -650,6 +657,8 @@ int main(int argc, char **argv)
             probe.rawBodies.push_back(body);
         } else if (arg == QLatin1String("--gfx")) {
             probe.gfx = true;
+        } else if (arg == QLatin1String("--no-krdpctl")) {
+            probe.krdpctl = false;
         } else if (arg == QLatin1String("--no-pong")) {
             probe.pong = false;
         } else if (arg == QLatin1String("--timeout") && i + 1 < argc) {

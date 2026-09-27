@@ -267,7 +267,7 @@ private:
      */
     void onClientDisplayInfo(SessionWrapper *wrapper);
     /** One `KRDPCTL` record from the wrapper's client (queued from the session thread). */
-    void onControlRecord(SessionWrapper *wrapper, const QJsonObject &record);
+    void onControlRecord(SessionWrapper *wrapper, const QJsonObject &incoming);
     /** The `KRDPCTL` client sent nothing in time: configured MonitorMode. */
     void onControlTimeout(SessionWrapper *wrapper);
     /** buildSessions() or buildVirtualSessions(), whichever the configuration asks for. */

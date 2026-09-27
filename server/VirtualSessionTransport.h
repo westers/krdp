@@ -37,6 +37,11 @@ private:
     // RdpConnection's authenticated PAM identity, never record-supplied identity.
     QJsonObject request(const QJsonObject &record, std::optional<quint32> uid);
     void deliverControlRecord(const QJsonObject &record, std::optional<quint32> uid);
+    /** KRDPCTL v2: a record to the client, echoing its request's `id` as `requestId`. */
+    void sendReply(const QJsonObject &record);
+    /** KRDPCTL v2: `capabilities`, once, to an authenticated client that opened KRDPCTL. */
+    void sendCapabilities();
+    bool m_capabilitiesSent = false;
     bool bind();
     bool activateBinding(const VirtualSessionRegistry::Handle &handle, QPointer<ConsoleWorkerEndpoint> endpoint);
     bool attachmentMatches(const VirtualSessionRegistry::Handle &handle) const;

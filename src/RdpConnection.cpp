@@ -737,6 +737,13 @@ void RdpConnection::close(RdpConnection::CloseReason reason)
             freerdp_set_error_info(d->peer->context->rdp, ERRINFO_GRAPHICS_SUBSYSTEM_FAILED);
         }
         break;
+    case CloseReason::AuthenticationFailed:
+        freerdp_set_error_info(d->peer->context->rdp, ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES);
+        // Send it now as well: Close() sends Deactivate All first, and a client in the
+        // deactivated state ignores the Set Error Info that follows it, reporting the
+        // ultimatum as ERRINFO_LOGOFF_BY_USER instead.
+        freerdp_send_error_info(d->peer->context->rdp);
+        break;
     case CloseReason::None:
         break;
     }
@@ -1319,7 +1326,15 @@ bool RdpConnection::onPostConnect()
     // still in licensing, which FreeRDP correctly rejects as an unexpected
     // channel message. AUDIN is created here too, then opened from the loop
     // only once DRDYNVC reaches READY.
-    if (!authenticated || !initializeAudioChannels()) {
+    if (!authenticated) {
+        // A standard reason every RDP client understands, instead of a bare drop that FreeRDP
+        // reports as a logoff: Close() sends Deactivate All, the Set Error Info PDU and the
+        // Disconnect Provider Ultimatum before PostConnect fails the state machine.
+        qCInfo(KRDP) << "Authentication failed for user" << username << "- telling the client (ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES)";
+        close(CloseReason::AuthenticationFailed);
+        return false;
+    }
+    if (!initializeAudioChannels()) {
         return false;
     }
     if (pamUid) {

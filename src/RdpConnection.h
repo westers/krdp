@@ -69,6 +69,8 @@ public:
         None, ///< No particular reason, e.g. closing due to normal operation
               ///  like client disconnect.
         VideoInitFailed, ///< VideoStream failed to initialize.
+        AuthenticationFailed, ///< The credentials were refused: the client is told with the standard
+                              ///  Set Error Info ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES (KRDPCTL-V2-CONTRACT.md §c).
     };
 
     /**

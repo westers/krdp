@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "ConsoleHostController.h"
+
+#include <QScopeGuard>
 #include "AudioPriority.h"
 
 #include <algorithm>
@@ -751,6 +753,12 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     client->connections.append(connect(connection, &QObject::destroyed, this, [this, id] {
         removeClient(nullptr, id);
     }));
+    // Post-authentication (AUD-S1): KRDPCTL clients hear `capabilities` first; others nothing.
+    client->connections.append(connect(connection, &RdpConnection::clientDisplayInfoReceived, this, [this, id] {
+        for (const auto &client : m_clients) {
+            if (client->id == id) sendCapabilities(*client);
+        }
+    }, Qt::QueuedConnection));
     client->connections.append(connect(connection, &RdpConnection::stateChanged, this, [this, connection, id](RdpConnection::State state) {
         if (state == RdpConnection::State::Streaming) {
             // Running is pre-authentication. Media preflight can also arrive
@@ -782,14 +790,26 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     m_clients.push_back(std::move(client));
 }
 
-void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record)
+void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &incoming)
 {
+    // KRDPCTL v2: requestId off before the strict parsers, echoed on the replies.
+    QJsonObject record = incoming;
+    const auto requestId = LayoutControl::takeRequestId(record);
+    if (requestId.invalid) {
+        connection->sendControlRecord(LayoutControl::invalidRequestIdRecord());
+        return;
+    }
+    const QPointer<ConsoleHostController> alive(this);
+    const QString outerRequestId = std::exchange(m_replyRequestId, requestId.value);
+    const auto restoreRequestId = qScopeGuard([alive, outerRequestId] {
+        if (alive) alive->m_replyRequestId = outerRequestId;
+    });
     const QString type = record.value(u"type"_s).toString();
     if (type == u"topology-preview"_s) {
         const auto parsed = RemoteTopologyProtocol::previewRequest(record);
         const QString request = record.value(u"id"_s).toString().left(64);
-        const auto refuse = [connection](const QString &requestId, const QString &code) {
-            connection->sendControlRecord(RemoteTopologyProtocol::error(requestId, code));
+        const auto refuse = [this, connection](const QString &requestId, const QString &code) {
+            replyTo(connection, RemoteTopologyProtocol::error(requestId, code));
         };
         if (!parsed) { refuse(request, u"invalid"_s); return; }
         if (!m_experimentalPhysicalTopology || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
@@ -843,7 +863,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             m_virtualPreview = VirtualPreview{id, m_controlGeneration, parsed->id, token, snapshot,
                 m_topologyPriorities, proposed, operation, backendKey, {}};
             m_virtualPreview->age.start();
-            connection->sendControlRecord(RemoteTopologyProtocol::previewReply(parsed->id, token, proposed,
+            replyTo(connection, RemoteTopologyProtocol::previewReply(parsed->id, token, proposed,
                 snapshot, u"lease"_s, QJsonArray{u"temporary-console-output"_s}));
             return;
         }
@@ -860,7 +880,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         m_physicalPreview = PhysicalPreview{id, m_controlGeneration, parsed->id, token, *plan, draft.operations, {}};
         m_virtualPreview.reset();
         m_physicalPreview->age.start();
-        connection->sendControlRecord(RemoteTopologyProtocol::previewReply(parsed->id, token,
+        replyTo(connection, RemoteTopologyProtocol::previewReply(parsed->id, token,
             {plan->before.outputs, plan->after, {}}, snapshot, u"lease"_s,
             QJsonArray{u"physical-output-change"_s}));
         return;
@@ -868,8 +888,8 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
     if (type == u"topology-commit"_s) {
         const auto parsed = RemoteTopologyProtocol::commitRequest(record);
         const QString request = record.value(u"id"_s).toString().left(64);
-        const auto refuse = [connection](const QString &requestId, const QString &code) {
-            connection->sendControlRecord(RemoteTopologyProtocol::error(requestId, code));
+        const auto refuse = [this, connection](const QString &requestId, const QString &code) {
+            replyTo(connection, RemoteTopologyProtocol::error(requestId, code));
         };
         if (!parsed) { refuse(request, u"invalid"_s); return; }
         if (!m_experimentalPhysicalTopology || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
@@ -962,23 +982,23 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
     if (type == u"topology-query"_s) {
         const auto requestId = RemoteTopologyProtocol::queryId(record);
         if (!requestId) {
-            connection->sendControlRecord(RemoteTopologyProtocol::error(record.value(u"id"_s).toString().left(64), u"invalid"_s));
+            replyTo(connection, RemoteTopologyProtocol::error(record.value(u"id"_s).toString().left(64), u"invalid"_s));
         } else if (m_pendingPhysical || m_pendingVirtual) {
-            connection->sendControlRecord(RemoteTopologyProtocol::error(*requestId, u"busy"_s));
+            replyTo(connection, RemoteTopologyProtocol::error(*requestId, u"busy"_s));
         } else if (!m_control.admitted(id) || !m_endpoint.ready()) {
-            connection->sendControlRecord(RemoteTopologyProtocol::error(*requestId, u"capture-failed"_s));
+            replyTo(connection, RemoteTopologyProtocol::error(*requestId, u"capture-failed"_s));
         } else {
             m_pendingTopology.insert(id, *requestId);
             if (!m_endpoint.requestTopology()) {
                 m_pendingTopology.remove(id);
-                connection->sendControlRecord(RemoteTopologyProtocol::error(*requestId, u"capture-failed"_s));
+                replyTo(connection, RemoteTopologyProtocol::error(*requestId, u"capture-failed"_s));
                 return;
             }
             QTimer::singleShot(6000, this, [this, id, request = *requestId] {
                 if (m_pendingTopology.value(id) != request) return;
                 m_pendingTopology.remove(id);
                 for (const auto &client : m_clients) if (client->id == id)
-                    client->connection->sendControlRecord(RemoteTopologyProtocol::error(request, u"timeout"_s));
+                    replyTo(client->connection, RemoteTopologyProtocol::error(request, u"timeout"_s));
             });
         }
         return;
@@ -986,19 +1006,19 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
     if (type == u"audio-priority"_s) {
         const auto request = AudioPriority::parse(record);
         if (!request) {
-            connection->sendControlRecord(AudioPriority::reply(record, false, u"invalid audio-priority request"_s));
+            replyTo(connection, AudioPriority::reply(record, false, u"invalid audio-priority request"_s));
         } else if (!m_control.admitted(id) || !m_control.ownsControl(id)) {
-            connection->sendControlRecord(AudioPriority::reply(record, false, u"only the authenticated console controller may change audio priority"_s));
+            replyTo(connection, AudioPriority::reply(record, false, u"only the authenticated console controller may change audio priority"_s));
         } else {
             connection->setAudioPriority(request->enabled);
-            connection->sendControlRecord(AudioPriority::reply(record, connection->audioPriorityActive()));
+            replyTo(connection, AudioPriority::reply(record, connection->audioPriorityActive()));
         }
         return;
     }
     if (type == u"console-resize"_s) {
         const QString requestId = record.value(u"id"_s).toString();
-        const auto refuse = [connection, &requestId](const QString &error) {
-            connection->sendControlRecord(QJsonObject{{u"type"_s, u"console-resize"_s}, {u"v"_s, 1}, {u"id"_s, requestId.left(64)},
+        const auto refuse = [this, connection, &requestId](const QString &error) {
+            replyTo(connection, QJsonObject{{u"type"_s, u"console-resize"_s}, {u"v"_s, 1}, {u"id"_s, requestId.left(64)},
                                                        {u"ok"_s, false}, {u"message"_s, error}});
         };
         const double width = record.value(u"width"_s).toDouble(0);
@@ -1079,8 +1099,8 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
     }
     if (type == u"console-control"_s) {
         const QString action = record.value(u"action"_s).toString();
-        const auto refuse = [connection](const QString &code, const QString &message) {
-            connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"console-control"_s},
+        const auto refuse = [this, connection](const QString &code, const QString &message) {
+            replyTo(connection, QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"console-control"_s},
                                                       {u"code"_s, code}, {u"message"_s, message}});
         };
         if (record.value(u"v"_s).toInt() != 1 || (action != u"acquire"_s && action != u"release"_s)) {
@@ -1105,23 +1125,24 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         syncControlState();
         updateMedia();
         sendLayouts();
-        connection->sendControlRecord(QJsonObject{{u"type"_s, u"console-control"_s}, {u"v"_s, 1}, {u"ok"_s, true}, {u"action"_s, action}});
+        replyTo(connection, QJsonObject{{u"type"_s, u"console-control"_s}, {u"v"_s, 1}, {u"ok"_s, true}, {u"action"_s, action}});
         return;
     }
     if (type == u"query"_s || type == u"attach"_s || type == u"apply"_s) {
         if (record.value(u"v"_s).toInt() != 1 || (type == u"attach"_s && record.value(u"target"_s).toString() != u"physical"_s)) {
-            connection->sendControlRecord(LayoutControl::errorRecord({u"invalid"_s, u"console attach requires v1 and target physical"_s}));
+            replyTo(connection, LayoutControl::errorRecord({u"invalid"_s, u"console attach requires v1 and target physical"_s}));
             return;
         }
         for (const auto &client : m_clients) {
             if (client->id == id) {
                 client->wantsLayout = true;
+                client->layoutRequestId = m_replyRequestId; // the next `layout` answers it
             }
         }
         if (type == u"apply"_s) {
             // This host does not implement monitor changes yet. Explicitly
             // refuse them, then describe the existing physical desktop.
-            connection->sendControlRecord(LayoutControl::errorRecord({u"unsupported"_s, u"physical console monitor changes are not available yet; use attach"_s}));
+            replyTo(connection, LayoutControl::errorRecord({u"unsupported"_s, u"physical console monitor changes are not available yet; use attach"_s}));
         }
         sendLayouts();
         return;
@@ -1134,7 +1155,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             if (client->id == id) {
                 // Bounded: keep only the latest preflight. Failed
                 // authentication discards it with the client.
-                client->pendingMedia = record;
+                client->pendingMedia = incoming; // replayed whole, requestId included
                 break;
             }
         }
@@ -1145,16 +1166,17 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
     const QJsonValue camera = record.value(QLatin1String("camera"));
     const QJsonValue silenceHost = record.value(QLatin1String("silenceHost"));
     if (!playback.isBool() || !microphone.isBool() || !camera.isBool() || (!silenceHost.isUndefined() && !silenceHost.isBool())) {
-        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"invalid"_s}, {u"message"_s, u"media fields must be booleans"_s}});
+        replyTo(connection, QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"invalid"_s}, {u"message"_s, u"media fields must be booleans"_s}});
         return;
     }
     if (camera.toBool()) {
-        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"unsupported"_s}, {u"message"_s, u"physical console camera is not available yet"_s}});
+        replyTo(connection, QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"unsupported"_s}, {u"message"_s, u"physical console camera is not available yet"_s}});
         return;
     }
     const auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &client) { return client->id == id; });
     if (found == m_clients.end()) return;
     auto &client = **found;
+    client.mediaRequestId = m_replyRequestId;
     if (microphone.toBool() && (!client.externalMicrophone || !m_inputEnabled || !m_endpoint.ready()
         || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser)) {
         sendMedia(client, false, u"microphone requires a ready logged-in desktop"_s);
@@ -1162,7 +1184,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
     }
     const ConsoleControl::Media requested{playback.toBool(), silenceHost.toBool(false) && playback.toBool(), microphone.toBool()};
     if (!m_control.setMedia(id, requested)) {
-        connection->sendControlRecord(QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"not-owner"_s}, {u"message"_s, u"only the authenticated console controller may inject microphone audio or silence the host"_s}});
+        replyTo(connection, QJsonObject{{u"type"_s, u"error"_s}, {u"v"_s, 1}, {u"request"_s, u"media"_s}, {u"code"_s, u"not-owner"_s}, {u"message"_s, u"only the authenticated console controller may inject microphone audio or silence the host"_s}});
         return;
     }
     if (m_microphoneClient == id) stopMicrophone({});
@@ -1229,10 +1251,35 @@ void ConsoleHostController::finishTopologyQueries(const QString &error)
         // Queries are accepted only from admitted clients; never answer one
         // that is no longer admitted with the console's monitor topology.
         if (request.isEmpty() || !client->connection || !m_control.admitted(client->id)) continue;
-        client->connection->sendControlRecord(error.isEmpty()
+        replyTo(client->connection, error.isEmpty()
             ? consoleTopology(request)
             : RemoteTopologyProtocol::error(request, error));
     }
+}
+
+void ConsoleHostController::replyTo(RdpConnection *connection, const QJsonObject &record)
+{
+    if (!connection) return;
+    if (!m_replyRequestId.isEmpty() || record.contains(u"requestId"_s)) {
+        connection->sendControlRecord(LayoutControl::withRequestId(record, m_replyRequestId));
+        return;
+    }
+    // An asynchronous result names its request by `id` (v2 clients send requestId == id).
+    const QJsonValue id = record.value(u"id"_s);
+    connection->sendControlRecord(id.isString() ? LayoutControl::withRequestId(record, id.toString()) : record);
+}
+
+void ConsoleHostController::sendCapabilities(Client &client)
+{
+    if (client.capabilitiesSent || !client.connection || !client.connection->isAuthenticated() || !client.connection->hasControlChannel()) return;
+    client.capabilitiesSent = true;
+    LayoutControl::ChannelCapabilities capabilities;
+    capabilities.host = u"console"_s;
+    capabilities.layoutQuery = true; // `query`/`attach` describe the physical desktop; `apply` is refused
+    capabilities.topologyQuery = true;
+    capabilities.topologyPreview = m_experimentalPhysicalTopology || m_experimentalConsoleVirtual;
+    capabilities.topologyApply = capabilities.topologyPreview;
+    client.connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
 
 void ConsoleHostController::sendLayouts()
@@ -1259,7 +1306,7 @@ void ConsoleHostController::sendLayouts()
             layout.you = m_control.ownsControl(client->id) ? u"owner"_s : u"viewer"_s;
             auto record = LayoutControl::layoutRecord(layout);
             record.insert(u"consoleResize"_s, true);
-            client->connection->sendControlRecord(record);
+            client->connection->sendControlRecord(LayoutControl::withRequestId(record, std::exchange(client->layoutRequestId, {})));
         }
     }
 }
@@ -1317,7 +1364,7 @@ void ConsoleHostController::finishResize(const QString &error)
     }
     for (const auto &client : m_clients) {
         if (client->id == pending->client) {
-            client->connection->sendControlRecord(QJsonObject{{u"type"_s, u"console-resize"_s}, {u"v"_s, 1},
+            replyTo(client->connection, QJsonObject{{u"type"_s, u"console-resize"_s}, {u"v"_s, 1},
                                                                {u"id"_s, pending->clientRequest}, {u"ok"_s, error.isEmpty()}, {u"message"_s, error}});
             break;
         }
@@ -1340,15 +1387,15 @@ void ConsoleHostController::finishPhysicalTopology(const QString &code, const QS
     for (const auto &client : m_clients) {
         if (client->id != pending->owner) continue;
         if (pending->resizeReply) {
-            client->connection->sendControlRecord(QJsonObject{{u"type"_s, u"console-resize"_s}, {u"v"_s, 1},
+            replyTo(client->connection, QJsonObject{{u"type"_s, u"console-resize"_s}, {u"v"_s, 1},
                 {u"id"_s, pending->id}, {u"ok"_s, code.isEmpty()},
                 {u"message"_s, detail.isEmpty() ? code : detail.left(1024)}});
         } else if (!code.isEmpty()) {
             auto reply = RemoteTopologyProtocol::error(pending->id, code);
             if (!detail.isEmpty()) reply.insert(u"message"_s, detail.left(1024));
-            client->connection->sendControlRecord(reply);
+            replyTo(client->connection, reply);
         }
-        else client->connection->sendControlRecord(QJsonObject{{u"type"_s, u"topology-result"_s},
+        else replyTo(client->connection, QJsonObject{{u"type"_s, u"topology-result"_s},
             {u"v"_s, 1}, {u"id"_s, pending->id}, {u"ok"_s, true},
             {u"topology"_s, consoleTopology(pending->id)}});
         break;
@@ -1398,8 +1445,8 @@ void ConsoleHostController::finishVirtualTopology(const QString &code, const QSt
         if (!code.isEmpty()) {
             auto reply = RemoteTopologyProtocol::error(pending->id, code);
             if (!detail.isEmpty()) reply.insert(u"message"_s, detail.left(1024));
-            client->connection->sendControlRecord(reply);
-        } else client->connection->sendControlRecord(QJsonObject{{u"type"_s, u"topology-result"_s},
+            replyTo(client->connection, reply);
+        } else replyTo(client->connection, QJsonObject{{u"type"_s, u"topology-result"_s},
             {u"v"_s, 1}, {u"id"_s, pending->id}, {u"ok"_s, true}, {u"topology"_s, consoleTopology(pending->id)}});
         break;
     }
@@ -1424,9 +1471,9 @@ void ConsoleHostController::updateMedia()
 
 void ConsoleHostController::sendMedia(Client &client, bool microphone, const QString &error)
 {
-    client.connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, error.isEmpty()},
+    client.connection->sendControlRecord(LayoutControl::withRequestId(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, 1}, {u"ok"_s, error.isEmpty()},
         {u"playback"_s, client.media.playback}, {u"microphone"_s, microphone}, {u"camera"_s, false},
-        {u"silenceHost"_s, client.media.silenceHost}, {u"message"_s, error}});
+        {u"silenceHost"_s, client.media.silenceHost}, {u"message"_s, error}}, client.mediaRequestId));
 }
 
 void ConsoleHostController::stopMicrophone(const QString &error)
