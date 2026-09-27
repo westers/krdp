@@ -18,6 +18,14 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 build=${KRDP_PKG_BUILD_DIR:-$root/build-pkg}
+# The build directory is deleted piecemeal below: refuse anything that is not
+# clearly a scratch build directory.
+build=$(realpath -m -- "$build")
+if [[ -z $build || $build == / || $build == "$(realpath -m -- "$HOME")" || $build == "$root" ]] \
+    || [[ $build != "$root"/* && $(basename -- "$build") != build-pkg* ]]; then
+    echo "refusing unsafe build directory '$build': it must be inside $root or be named build-pkg*" >&2
+    exit 1
+fi
 kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # westers/opt-015 = v6.6.4 + the KRDP encoder patches (OPT-015/OPT-050).
 kpw_ref=${KPIPEWIRE_REF:-183a140}
@@ -54,7 +62,7 @@ mkdir -p "$build"
 
 # 1. Private KPipeWire, installed to a scratch prefix. Its libraries carry the
 #    package's private RUNPATH so they resolve each other, never the distro's.
-rm -rf "$build/kpipewire-src" "$build/kpipewire-prefix"
+rm -rf "${build:?}/kpipewire-src" "${build:?}/kpipewire-prefix"
 mkdir -p "$build/kpipewire-src"
 git -C "$kpw_src" archive "$kpw_commit" | tar -x -C "$build/kpipewire-src"
 cmake -S "$build/kpipewire-src" -B "$build/kpipewire-build" -G Ninja \
@@ -69,7 +77,7 @@ kpw_libdir="$build/kpipewire-prefix/lib/$multiarch"
 [[ -f "$kpw_libdir/libKPipeWire.so.6" && -f "$kpw_libdir/libKPipeWireRecord.so.6" ]]
 
 # 2. KRdp from the committed tree.
-rm -rf "$build/src"
+rm -rf "${build:?}/src"
 mkdir -p "$build/src"
 git -C "$root" archive "$commit" | tar -x -C "$build/src"
 cmake -S "$build/src" -B "$build/krdp-build" -G Ninja \
@@ -85,9 +93,9 @@ cmake -S "$build/src" -B "$build/krdp-build" -G Ninja \
 cmake --build "$build/krdp-build" -j"$jobs"
 
 # 3. Stage the package tree the way dpkg-gencontrol/dpkg-shlibdeps expect it.
-work="$build/deb"
+work="${build:?}/deb"
 pkgroot="$work/debian/krdp"
-rm -rf "$work"
+rm -rf "${work:?}"
 mkdir -p "$work/debian"
 DESTDIR="$pkgroot" cmake --install "$build/krdp-build"
 
@@ -147,7 +155,7 @@ chmod 0644 "$pkgroot/DEBIAN/md5sums"
 find "$pkgroot" -type d -exec chmod 0755 {} +
 find "$pkgroot" -newermt "@$SOURCE_DATE_EPOCH" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 deb="$build/krdp_${version}_$(dpkg --print-architecture).deb"
-rm -f "$build"/krdp_*.deb
+rm -f "${build:?}"/krdp_*.deb
 dpkg-deb --root-owner-group -Zxz --build "$pkgroot" "$deb"
 
 # 4. Contract checks.

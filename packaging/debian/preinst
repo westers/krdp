@@ -12,10 +12,27 @@ set -e
 backup=/var/backups/krdp-test-migration
 etc=/etc/systemd/system
 
+run_backup=
+
+# Each run gets its own timestamped directory, so an earlier migration's
+# backup is never overwritten.
 move_aside() {
-    mkdir -p -m 0700 "$backup$(dirname "$1")"
-    mv -f "$1" "$backup$1"
-    echo "krdp: moved test leftover $1 to $backup$1"
+    if [ -z "$run_backup" ]; then
+        mkdir -p -m 0700 "$backup"
+        stamp="$backup/$(date +%Y%m%d-%H%M%S)"
+        run_backup=$stamp
+        n=0
+        # mkdir without -p fails if the directory exists: never reuse one.
+        until mkdir -m 0700 "$run_backup" 2>/dev/null; do
+            n=$((n + 1))
+            [ "$n" -lt 100 ] || { echo "krdp: cannot create a backup directory under $backup" >&2; exit 1; }
+            run_backup="$stamp.$n"
+        done
+    fi
+    mkdir -p -m 0700 "$run_backup$(dirname "$1")"
+    mv -n "$1" "$run_backup$1"
+    [ ! -e "$1" ] || { echo "krdp: backup $run_backup$1 already exists, left $1 in place" >&2; return 0; }
+    echo "krdp: moved test leftover $1 to $run_backup$1"
 }
 
 migrate_test_leftovers() {
