@@ -9,7 +9,10 @@
 #include <QStringList>
 #include <QVector>
 
+#include <RemoteMonitorGeometry.h>
 #include <SurfaceLayout.h>
+
+#include <algorithm>
 
 namespace KRdp
 {
@@ -191,6 +194,71 @@ inline DropOutcome dropMonitor(qsizetype count, qsizetype droppedIndex, qsizetyp
         outcome.primary = 0;
     }
     return outcome;
+}
+
+/**
+ * Per-monitor input mapping for a `multi` layout whose monitors are at
+ * different scales (AUD-P8).
+ *
+ * selectMultiLayout() places each surface at its logical origin times its
+ * OWN scale, so at mixed scales the pixel rects gap or overlap, and mapping a
+ * pointer back with one (the primary's) scale lands on the wrong spot of every
+ * other monitor. This re-packs the surfaces without overlap
+ * (RemoteMonitorGeometry::projectToWire(), as a KRDPCTL layout does) and
+ * keeps each entry's own scale and KWin logical origin, which is what
+ * SessionController's input path (RemoteMonitorGeometry::wireToLogical())
+ * maps through. Empty \a scales on the result means uniform scale: the
+ * single-scale path applies unchanged.
+ */
+struct PerMonitorMapping {
+    QVector<VideoMonitor> wire;
+    QVector<qreal> scales;
+    QVector<QPoint> logicalOrigins;
+};
+
+inline bool mixedScales(const QList<ScreenInfo> &screens, const QList<qsizetype> &kept)
+{
+    if (kept.isEmpty()) {
+        return false;
+    }
+    const qreal first = screens.at(kept.first()).devicePixelRatio;
+    return std::any_of(kept.cbegin(), kept.cend(), [&screens, first](qsizetype index) {
+        return !qFuzzyCompare(screens.at(index).devicePixelRatio, first);
+    });
+}
+
+inline PerMonitorMapping perMonitorMapping(const QList<ScreenInfo> &screens, const QList<qsizetype> &kept, const QVector<VideoMonitor> &monitors)
+{
+    PerMonitorMapping result;
+    result.wire = monitors;
+    if (kept.size() != monitors.size() || !mixedScales(screens, kept)) {
+        return result;
+    }
+    QVector<RemoteMonitorGeometry::Output> outputs;
+    outputs.reserve(kept.size());
+    for (qsizetype i = 0; i < kept.size(); ++i) {
+        const auto &screen = screens.at(kept.at(i));
+        const qreal scale = screen.devicePixelRatio > 0.0 ? screen.devicePixelRatio : 1.0;
+        outputs.push_back({screen.logicalGeometry.topLeft(), monitors.at(i).geometry.size(), scale, monitors.at(i).primary});
+        result.scales.push_back(scale);
+        result.logicalOrigins.push_back(screen.logicalGeometry.topLeft());
+    }
+    result.wire = RemoteMonitorGeometry::projectToWire(outputs);
+    return result;
+}
+
+/** A wire-atlas pixel to KWin-global logical, through \a mapping (uniform \a scale when it has none). */
+inline QPointF wireToLogical(const PerMonitorMapping &mapping, qreal scale, const QPointF &pixel)
+{
+    if (mapping.scales.size() != mapping.wire.size() || mapping.wire.isEmpty()) {
+        return pixel / (scale > 0.0 ? scale : 1.0);
+    }
+    QVector<RemoteMonitorGeometry::Output> outputs;
+    outputs.reserve(mapping.wire.size());
+    for (qsizetype i = 0; i < mapping.wire.size(); ++i) {
+        outputs.push_back({mapping.logicalOrigins.at(i), mapping.wire.at(i).geometry.size(), mapping.scales.at(i), mapping.wire.at(i).primary});
+    }
+    return RemoteMonitorGeometry::wireToLogical(pixel, mapping.wire, outputs);
 }
 
 }
