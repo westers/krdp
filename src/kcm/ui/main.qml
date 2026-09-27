@@ -262,7 +262,9 @@ KCM.ScrollViewKCM {
                     entries.push({text: address, value: address});
                 }
                 const current = root.settings.listenAddress;
-                if (current !== "" && !addresses.includes(current)) {
+                // krdpserver reads "*" like "" (every interface): SettingComboBox
+                // shows an unknown value as the first entry, "All interfaces".
+                if (current.trim() !== "" && current.trim() !== "*" && !addresses.includes(current)) {
                     entries.push({text: i18nc("@item:inlistbox %1 an address that no interface has now", "%1 (not present)", current), value: current});
                 }
                 return entries;

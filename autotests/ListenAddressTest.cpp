@@ -27,6 +27,18 @@ private Q_SLOTS:
         QTest::newRow("garbage") << QStringLiteral("300.1.1.1") << false << QString();
     }
 
+    // AUD-INT: the KCM decides "all interfaces" with the same helper, so a
+    // hand-written `*` is not shown as a single address to connect to.
+    void allInterfaces()
+    {
+        QVERIFY(KRdp::listensOnAllInterfaces(QString()));
+        QVERIFY(KRdp::listensOnAllInterfaces(QStringLiteral("  ")));
+        QVERIFY(KRdp::listensOnAllInterfaces(QStringLiteral("*")));
+        QVERIFY(KRdp::listensOnAllInterfaces(QStringLiteral(" * ")));
+        QVERIFY(!KRdp::listensOnAllInterfaces(QStringLiteral("192.168.1.20")));
+        QVERIFY(!KRdp::listensOnAllInterfaces(QStringLiteral("0.0.0.0")));
+    }
+
     void parse()
     {
         QFETCH(QString, value);

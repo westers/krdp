@@ -4,6 +4,7 @@
 
 #include "kcmkrdpserver.h"
 #include "ClientDisplayInfo.h"
+#include "ListenAddress.h"
 #include "ServerCertificate.h"
 #include "ServerSettingsPolicy.h"
 #include "VideoCodecSupport.h"
@@ -450,8 +451,9 @@ bool KRDPServerConfig::isH264Supported()
 QStringList KRDPServerConfig::listenAddressList()
 {
     // With a ListenAddress the server is reachable on that address only.
+    // Empty or `*` means every interface, as krdpserver reads it (AUD-S4).
     const QString configured = m_serverSettings->listenAddress().trimmed();
-    if (!configured.isEmpty()) {
+    if (!KRdp::listensOnAllInterfaces(configured)) {
         return {configured};
     }
     QStringList addressList;

@@ -17,12 +17,19 @@ namespace KRdp
  * std::nullopt means it is not one, and the server refuses to start rather
  * than fall back to listening everywhere.
  */
-inline std::optional<QHostAddress> parseListenAddress(const QString &value)
+/** Whether a ListenAddress value means every interface: empty, blank or `*`. */
+inline bool listensOnAllInterfaces(const QString &value)
 {
     const QString trimmed = value.trimmed();
-    if (trimmed.isEmpty() || trimmed == QLatin1String("*")) {
+    return trimmed.isEmpty() || trimmed == QLatin1String("*");
+}
+
+inline std::optional<QHostAddress> parseListenAddress(const QString &value)
+{
+    if (listensOnAllInterfaces(value)) {
         return QHostAddress(QHostAddress::Any);
     }
+    const QString trimmed = value.trimmed();
     QHostAddress address;
     if (!address.setAddress(trimmed)) {
         return std::nullopt;
