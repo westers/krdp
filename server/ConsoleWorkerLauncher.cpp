@@ -16,9 +16,15 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QProcess>
+#include <QTimer>
+
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #include "ConsoleSeat.h"
+#include "ConsoleSessionReadiness.h"
 #include "ConsoleWorkerWire.h"
 
 namespace KRdp
@@ -86,16 +92,57 @@ QProcessEnvironment environmentFor(const ConsoleSeat::Session &session, QString 
     *error = QStringLiteral("no process in the logind session has a usable Wayland environment");
     return {};
 }
+
+bool socketAcceptsConnections(const QString &path)
+{
+    const QByteArray encoded = QFile::encodeName(path);
+    sockaddr_un address{};
+    if (encoded.isEmpty() || size_t(encoded.size()) >= sizeof(address.sun_path)) {
+        return false;
+    }
+    address.sun_family = AF_UNIX;
+    std::copy(encoded.cbegin(), encoded.cend(), address.sun_path);
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        return false;
+    }
+    // A listening compositor accepts at once; a stale file refuses.
+    const bool connected = ::connect(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) == 0;
+    ::close(fd);
+    return connected;
 }
+}
+
+struct ConsoleWorkerLauncher::Pending {
+    ConsoleHandoff::Target target;
+    QByteArray token;
+    QElapsedTimer waited;
+    int attempt = 0;
+    QString lastReason;
+    QTimer timer;
+};
+
+struct ConsoleWorkerLauncher::Observation {
+    ConsoleSessionReadiness::Observation readiness;
+    ConsoleSessionReadiness::Result result;
+};
 
 ConsoleWorkerLauncher::ConsoleWorkerLauncher(QString workerProgram, QObject *parent)
     : QObject(parent)
     , m_workerProgram(std::move(workerProgram))
+    , m_environmentProbe(environmentFor)
+    , m_socketProbe(socketAcceptsConnections)
+    , m_waitBudgetMs(ConsoleSessionReadiness::WaitBudgetMs)
 {
+    m_starter = [this](const ConsoleHandoff::Target &target, const ConsoleSeat::Session &session, const QString &socketName,
+                       const QByteArray &token, QProcessEnvironment environment, QString *error) {
+        return startProcess(target, session, socketName, token, std::move(environment), error);
+    };
 }
 
 ConsoleWorkerLauncher::~ConsoleWorkerLauncher()
 {
+    m_pending.clear();
     // The broker is going away: do not leave a worker holding the seat.
     for (auto &[socket, process] : m_processes) {
         process->disconnect(this);
@@ -112,8 +159,29 @@ void ConsoleWorkerLauncher::setSessionLookup(SessionLookup lookup)
     m_sessionLookup = std::move(lookup);
 }
 
+void ConsoleWorkerLauncher::setEnvironmentProbe(EnvironmentProbe probe)
+{
+    m_environmentProbe = std::move(probe);
+}
+
+void ConsoleWorkerLauncher::setSocketProbe(SocketProbe probe)
+{
+    m_socketProbe = std::move(probe);
+}
+
+void ConsoleWorkerLauncher::setStarter(Starter starter)
+{
+    m_starter = std::move(starter);
+}
+
 void ConsoleWorkerLauncher::signalWorker(const QString &socketName, int signal)
 {
+    if (m_pending.count(socketName)) {
+        // Nothing runs yet: a stop (or kill) simply cancels the wait.
+        qInfo().noquote() << "Console worker launch" << socketName << "cancelled while waiting for its session";
+        endPending(socketName);
+        return;
+    }
     const auto found = m_processes.find(socketName);
     if (found == m_processes.end() || found->second->state() == QProcess::NotRunning) {
         return;
@@ -122,6 +190,21 @@ void ConsoleWorkerLauncher::signalWorker(const QString &socketName, int signal)
     if (pid > 0) {
         ::kill(pid_t(pid), signal);
     }
+}
+
+ConsoleWorkerLauncher::Observation ConsoleWorkerLauncher::observe(const ConsoleHandoff::Target &target) const
+{
+    Observation observation;
+    auto &readiness = observation.readiness;
+    readiness.expectedUid = target.uid;
+    readiness.session = m_sessionLookup ? m_sessionLookup(target.sessionId) : std::nullopt;
+    if (readiness.session && readiness.session->uid == target.uid && readiness.session->state == QLatin1String("active") && readiness.session->active) {
+        readiness.environment = m_environmentProbe ? m_environmentProbe(*readiness.session, &readiness.environmentError) : QProcessEnvironment();
+        const QString socket = ConsoleSessionReadiness::waylandSocketPath(readiness.environment);
+        readiness.socketConnectable = !socket.isEmpty() && m_socketProbe && m_socketProbe(socket);
+    }
+    observation.result = ConsoleSessionReadiness::evaluate(readiness);
+    return observation;
 }
 
 bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const QString &socketName, const QByteArray &token, QString *error)
@@ -136,18 +219,90 @@ bool ConsoleWorkerLauncher::launch(const ConsoleHandoff::Target &target, const Q
     if (target.adapter != ConsoleSeat::Adapter::Greeter && target.adapter != ConsoleSeat::Adapter::PhysicalUser) {
         return fail(QStringLiteral("physical launcher cannot launch a virtual registry target"));
     }
-    if (m_processes.count(socketName)) {
+    if (m_processes.count(socketName) || m_pending.count(socketName)) {
         return fail(QStringLiteral("a worker for this launch is already running"));
     }
-    const auto found = m_sessionLookup ? m_sessionLookup(target.sessionId) : std::nullopt;
-    if (!found || found->uid != target.uid) {
-        return fail(QStringLiteral("selected logind session disappeared"));
+    auto observation = observe(target);
+    using ConsoleSessionReadiness::Verdict;
+    switch (observation.result.verdict) {
+    case Verdict::Gone:
+        return fail(observation.result.reason);
+    case Verdict::Ready:
+        return m_starter && m_starter(target, *observation.readiness.session, socketName, token, observation.readiness.environment, error);
+    case Verdict::Wait:
+        break;
     }
-    QString environmentError;
-    auto environment = environmentFor(*found, &environmentError);
-    if (environment.isEmpty()) {
-        return fail(environmentError);
+    // AUD-FIX F6: accepted, started once the session is ready.
+    auto pending = std::make_unique<Pending>();
+    pending->target = target;
+    pending->token = token;
+    pending->waited.start();
+    pending->lastReason = observation.result.reason;
+    pending->timer.setSingleShot(true);
+    connect(&pending->timer, &QTimer::timeout, this, [this, socketName] { retryPending(socketName); });
+    pending->timer.start(ConsoleSessionReadiness::retryDelayMs(0));
+    qInfo().noquote() << "Waiting for session" << target.sessionId << "before starting its console worker:" << observation.result.reason;
+    m_pending.emplace(socketName, std::move(pending));
+    return true;
+}
+
+void ConsoleWorkerLauncher::retryPending(const QString &socketName)
+{
+    const auto found = m_pending.find(socketName);
+    if (found == m_pending.end()) {
+        return;
     }
+    auto &pending = *found->second;
+    const auto observation = observe(pending.target);
+    using ConsoleSessionReadiness::Verdict;
+    if (observation.result.verdict == Verdict::Ready) {
+        const auto target = pending.target;
+        const auto token = pending.token;
+        const qint64 waited = pending.waited.elapsed();
+        m_pending.erase(found);
+        QString error;
+        if (m_starter && m_starter(target, *observation.readiness.session, socketName, token, observation.readiness.environment, &error)) {
+            qInfo().noquote() << "Session" << target.sessionId << "ready after" << waited << "ms; console worker started";
+            return;
+        }
+        qWarning().noquote() << "Cannot launch console worker for session" << target.sessionId << ':' << error;
+        // Reported like a process that exited: the broker's failure backoff takes over.
+        QTimer::singleShot(0, this, [this, socketName] { Q_EMIT workerExited(socketName); });
+        return;
+    }
+    if (observation.result.verdict == Verdict::Gone || pending.waited.elapsed() >= m_waitBudgetMs) {
+        qWarning().noquote() << "Not starting the console worker for session" << pending.target.sessionId << "after waiting"
+                             << pending.waited.elapsed() << "ms:" << observation.result.reason;
+        endPending(socketName);
+        return;
+    }
+    if (observation.result.reason != pending.lastReason) {
+        pending.lastReason = observation.result.reason;
+        qInfo().noquote() << "Still waiting for session" << pending.target.sessionId << ':' << observation.result.reason;
+    }
+    pending.timer.start(ConsoleSessionReadiness::retryDelayMs(++pending.attempt));
+}
+
+void ConsoleWorkerLauncher::endPending(const QString &socketName)
+{
+    if (!m_pending.erase(socketName)) {
+        return;
+    }
+    // Never re-enter the broker from inside its own launch/stop call.
+    QTimer::singleShot(0, this, [this, socketName] { Q_EMIT workerExited(socketName); });
+}
+
+bool ConsoleWorkerLauncher::startProcess(const ConsoleHandoff::Target &target, const ConsoleSeat::Session &session, const QString &socketName,
+                                         const QByteArray &token, QProcessEnvironment environment, QString *error)
+{
+    if (error) {
+        error->clear();
+    }
+    const auto fail = [error](const QString &message) {
+        if (error) *error = message;
+        return false;
+    };
+    const auto *found = &session;
     const QString libraryPath = qEnvironmentVariable("LD_LIBRARY_PATH");
     // These descriptor numbers belong to the process whose environment we
     // inspected. The worker must open a fresh connection by display name.

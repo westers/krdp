@@ -660,3 +660,10 @@ if(TARGET krdpctl-probe)
     add_test(NAME ConsoleRefusalLoopbackTest COMMAND ConsoleRefusalLoopbackTest)
     set_tests_properties(ConsoleRefusalLoopbackTest PROPERTIES TIMEOUT 120)
 endif()
+# F6: the console worker starts only once its session is Active and its Wayland socket accepts connections.
+add_executable(ConsoleWorkerLaunchReadinessTest ConsoleWorkerLaunchReadinessTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerLauncher.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleSeat.cpp)
+target_include_directories(ConsoleWorkerLaunchReadinessTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ConsoleWorkerLaunchReadinessTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::DBus Qt6::Network)
+add_test(NAME ConsoleWorkerLaunchReadinessTest COMMAND ConsoleWorkerLaunchReadinessTest)
+set_tests_properties(ConsoleWorkerLaunchReadinessTest PROPERTIES TIMEOUT 60)
