@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "ConsoleResizeSession.h"
+#include <QDebug>
+#include <unistd.h>
 #include <utility>
 using namespace KRdp;
 
@@ -8,6 +10,7 @@ ConsoleResizeSession::ConsoleResizeSession(QObject *parent, ConsoleResizeExecuto
 {
     m_captureDeadline.setSingleShot(true);
     m_captureDeadline.setInterval(10000);
+    connect(&m_executor, &ConsoleResizeExecutor::applying, this, &ConsoleResizeSession::journalApplying);
     connect(&m_executor, &ConsoleResizeExecutor::changing, this, &ConsoleResizeSession::mutationStarting);
     connect(&m_executor, &ConsoleResizeExecutor::finished, this, &ConsoleResizeSession::completed);
     connect(&m_captureDeadline, &QTimer::timeout, this, [this]() {
@@ -60,10 +63,62 @@ void ConsoleResizeSession::request(const ConsoleWorkerWire::Resize &request)
     }
 }
 
+void ConsoleResizeSession::setJournal(OutputRestoreJournal *journal, const QString &session)
+{
+    m_journal = journal;
+    m_journalSession = session;
+}
+
+void ConsoleResizeSession::journalApplying(const ConsoleResize::Plan &plan, bool restoring)
+{
+    if (restoring || !plan.valid()) {
+        return; // A restore only removes entries, once verified.
+    }
+    auto recorded = plan;
+    const auto previous = m_journaled.constFind(plan.output);
+    if (previous != m_journaled.cend() && previous->mode == plan.previousMode && std::abs(previous->scale - plan.previousScale) < 0.000001) {
+        // A repeated Fit still owes the pre-connection mode, as m_held does.
+        recorded.previousMode = previous->previousMode;
+        recorded.previousScale = previous->previousScale;
+    }
+    m_journaled.insert(plan.output, recorded);
+    writeJournal();
+}
+
+void ConsoleResizeSession::writeJournal()
+{
+    if (!m_journal) {
+        return;
+    }
+    OutputRestoreJournal::Entry entry{QString::fromLatin1(OutputRestoreJournal::ConsoleResizeOwner), qint64(getpid()), m_journalSession, {}};
+    for (const auto &plan : std::as_const(m_journaled)) {
+        OutputRestoreJournal::Fields original;
+        OutputRestoreJournal::Fields applied;
+        if (plan.mode != plan.previousMode) {
+            original.mode = plan.previousMode;
+            applied.mode = plan.mode;
+        }
+        if (std::abs(plan.scale - plan.previousScale) > 0.000001) {
+            original.scale = plan.previousScale;
+            applied.scale = plan.scale;
+        }
+        if (!original.empty()) {
+            entry.outputs.append({plan.output, original, applied});
+        }
+    }
+    QString error;
+    if (!m_journal->hold(entry, &error)) {
+        qWarning().noquote() << "Cannot record the console resize for crash recovery:" << error;
+    }
+}
+
 void ConsoleResizeSession::completed(const ConsoleResize::Plan &plan, const QString &error)
 {
     if (m_restoring) {
         m_restoring = false;
+        if (error.isEmpty() && m_journaled.remove(plan.output)) {
+            writeJournal(); // Restored, or superseded by a local change: nothing is owed.
+        }
         if (!error.isEmpty()) {
             m_restoreError = error;
         } else if (plan.observedPixels.isValid() && plan.observedScale > 0) {

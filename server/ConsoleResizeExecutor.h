@@ -23,6 +23,8 @@ public:
     bool busy() const { return m_busy; }
 
 Q_SIGNALS:
+    /** Emitted synchronously right before `plan.apply` (or `plan.restore`) is run. */
+    void applying(const KRdp::ConsoleResize::Plan &plan, bool restoring);
     void changing();
     // Success verifies mode/scale only; caller still waits for capture geometry.
     void finished(const KRdp::ConsoleResize::Plan &plan, const QString &error);

@@ -106,6 +106,7 @@ bool ConsoleResizeExecutor::restore(const ConsoleResize::Plan &plan)
 
 void ConsoleResizeExecutor::apply(ConsoleResize::Plan plan, bool restoring)
 {
+    Q_EMIT applying(plan, restoring); // The restore journal is written before the mode changes.
     Q_EMIT changing();
     run(restoring ? plan.restore : plan.apply, [this, plan, restoring](bool commandOk, const QByteArray &) {
         run({QStringLiteral("-j")}, [this, plan, restoring, commandOk](bool readOk, const QByteArray &snapshot) {

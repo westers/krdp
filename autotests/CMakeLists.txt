@@ -318,7 +318,7 @@ target_include_directories(ConsoleResizeExecutorTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(ConsoleResizeExecutorTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ConsoleResizeExecutorTest COMMAND ConsoleResizeExecutorTest)
 
-add_executable(ConsoleResizeSessionTest ConsoleResizeSessionTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleResizeExecutor.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleResizeSession.cpp)
+add_executable(ConsoleResizeSessionTest ConsoleResizeSessionTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleResizeExecutor.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleResizeSession.cpp ${CMAKE_SOURCE_DIR}/server/OutputRestoreJournal.cpp)
 target_include_directories(ConsoleResizeSessionTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ConsoleResizeSessionTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME ConsoleResizeSessionTest COMMAND ConsoleResizeSessionTest)
@@ -438,3 +438,12 @@ add_executable(OutputRestoreJournalTest OutputRestoreJournalTest.cpp ${CMAKE_SOU
 target_include_directories(OutputRestoreJournalTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(OutputRestoreJournalTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME OutputRestoreJournalTest COMMAND OutputRestoreJournalTest)
+add_executable(ConsoleOutputJournalTest ConsoleOutputJournalTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/OutputRestoreJournal.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleResizeExecutor.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleResizeSession.cpp
+    ${CMAKE_SOURCE_DIR}/server/PhysicalOutputGuard.cpp)
+target_include_directories(ConsoleOutputJournalTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleOutputJournalTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
+add_test(NAME ConsoleOutputJournalTest COMMAND ConsoleOutputJournalTest)
+set_tests_properties(ConsoleOutputJournalTest PROPERTIES TIMEOUT 60)

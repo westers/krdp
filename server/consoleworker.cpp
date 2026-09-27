@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include <algorithm>
+#include <cerrno>
+#include <csignal>
 #include <memory>
 #include <optional>
 #include <vector>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <QAction>
@@ -20,6 +23,7 @@
 #include <QMouseEvent>
 #include <QProcess>
 #include <QScreen>
+#include <QSocketNotifier>
 #include <QTimer>
 #include <QWheelEvent>
 
@@ -43,6 +47,7 @@
 #include "ConsoleTopologyPlan.h"
 #include "ConsoleTopologyLease.h"
 #include "ConsoleTopologyRelease.h"
+#include "OutputRestoreJournal.h"
 #include "RetainedMultiResizePlan.h"
 #include "RetainedMultiPositionPlan.h"
 #include "RetainedMultiFitPlan.h"
@@ -99,6 +104,10 @@ public:
         , m_initialOutputs(std::move(initialOutputs))
         , m_microphone(desktop)
     {
+        if (!m_mode.virtualSession && m_authenticatedDesktop) {
+            // Physical outputs of a logged-in desktop: journal every Fit (AUD-C-3).
+            m_resize.setJournal(&m_outputJournal, m_sessionId);
+        }
         connect(&m_microphone, &ConsoleMicrophoneSession::result, this, [this](const auto &result) {
             if (!m_stopping && m_socket.state() == QLocalSocket::ConnectedState)
                 m_socket.write(ConsoleWorkerWire::frame(result));
@@ -430,6 +439,13 @@ public:
                 m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Audio{pcm}));
             }
         });
+    }
+
+    /** SIGTERM/SIGINT/SIGHUP: restore what this worker changed, then exit (AUD-C-3). */
+    void terminate()
+    {
+        qInfo() << "Console worker terminating on signal; restoring outputs first";
+        shutdown(0);
     }
 
     void connectToBroker()
@@ -1150,6 +1166,7 @@ private:
         if (error.isEmpty() && m_physicalCandidate) {
             m_physicalLease = std::move(m_physicalCandidate);
             m_physicalLeaseGeneration = request.controlGeneration;
+            m_journalBeyondLease = false; // The journal now describes exactly this lease.
         }
         m_physicalPending.reset();
         m_physicalCandidate.reset();
@@ -1177,6 +1194,11 @@ private:
                 [this](const QStringList &arguments) { return runKScreenCommand(arguments); });
             error += recovery.verified ? QStringLiteral("; owned fields reconciled")
                 : QStringLiteral("; recovery not fully verified: ") + recovery.error;
+            if (recovery.verified) {
+                // Back to the previous lease (or nothing); otherwise keep the
+                // wider entry so a later replay can still undo it.
+                if (m_physicalLease ? journalLease(*m_physicalLease) : releaseLeaseJournal()) m_journalBeyondLease = false;
+            }
         }
         finishPhysical(error);
         m_socket.disconnectFromServer(); // Never show stale video or accept stale input after failure.
@@ -1194,6 +1216,9 @@ private:
             [this](const QStringList &arguments) { return runKScreenCommand(arguments); });
         qInfo() << "Physical Console lease released; conditional KScreen reconciliation verified:"
                 << result.verified << result.error;
+        if (result.verified && !m_journalBeyondLease) {
+            releaseLeaseJournal();
+        }
         if (m_socket.state() == QLocalSocket::ConnectedState) {
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLeaseReleased{
                 m_physicalLeaseGeneration, result.verified}));
@@ -1257,6 +1282,12 @@ private:
             reject(QStringLiteral("physical layout lease baseline or control generation changed"));
             return;
         }
+        // Crash safety first: record what to put back before KDE changes.
+        if (!journalLease(*candidate)) {
+            reject(QStringLiteral("cannot record the output-restore journal"));
+            return;
+        }
+        m_journalBeyondLease = true; // Until the candidate is adopted or verifiably undone.
         releaseInput();
         m_physicalPending = request;
         m_physicalCandidate = *candidate;
@@ -1285,6 +1316,23 @@ private:
         } else if (!m_session.restartCaptureForResize(++m_physicalCaptureEpoch)) {
             failPhysical(QStringLiteral("physical layout capture cannot restart"));
         }
+    }
+
+    bool journalLease(const ConsoleTopologyLease::State &lease)
+    {
+        QString error;
+        const bool ok = m_outputJournal.hold({QString::fromLatin1(OutputRestoreJournal::ConsoleLeaseOwner), qint64(getpid()), m_sessionId,
+                                              ConsoleTopologyLease::journalOutputs(lease)}, &error);
+        if (!ok) qWarning().noquote() << "Output-restore journal:" << error;
+        return ok;
+    }
+
+    bool releaseLeaseJournal()
+    {
+        QString error;
+        const bool ok = m_outputJournal.release(QString::fromLatin1(OutputRestoreJournal::ConsoleLeaseOwner), qint64(getpid()), &error);
+        if (!ok) qWarning().noquote() << "Output-restore journal:" << error;
+        return ok;
     }
 
     bool runKScreenCommand(const QStringList &arguments) const
@@ -2457,6 +2505,8 @@ private:
     std::optional<QMap<QString, ConsoleTopologyPlan::Mode>> m_physicalSelected;
     std::optional<ConsoleTopologyLease::State> m_physicalCandidate;
     std::optional<ConsoleTopologyLease::State> m_physicalLease;
+    OutputRestoreJournal m_outputJournal;
+    bool m_journalBeyondLease = false;
     quint64 m_physicalLeaseGeneration = 0;
     quint64 m_physicalCaptureEpoch = 0;
     bool m_physicalCaptureRestartReady = false;
@@ -2540,6 +2590,24 @@ private:
 };
 }
 
+namespace
+{
+/** One bounded kscreen-doctor run; stdout on a clean exit. */
+std::optional<QByteArray> runKScreen(const QStringList &arguments)
+{
+    QProcess command;
+    command.start(QStringLiteral("kscreen-doctor"), arguments);
+    const bool finished = command.waitForStarted(1000) && command.waitForFinished(5000);
+    if (!finished) {
+        command.kill();
+        command.waitForFinished(1000);
+        return std::nullopt;
+    }
+    if (command.exitStatus() != QProcess::NormalExit || command.exitCode() != 0) return std::nullopt;
+    return command.readAllStandardOutput();
+}
+}
+
 int main(int argc, char **argv)
 {
     QGuiApplication application(argc, argv);
@@ -2557,6 +2625,14 @@ int main(int argc, char **argv)
     const QCommandLineOption initialLayoutOption(QStringLiteral("initial-layout"), QStringLiteral("Committed private desktop layout."), QStringLiteral("json"));
     parser.addOptions({socketOption, sessionOption, virtualOption, uidOption, tokenOption, tokenFdOption, desktopOption, initialLayoutOption});
     parser.process(application);
+
+    // The console launcher passes the socket in the environment; the
+    // virtual-session launcher still uses --socket.
+    QString socketName = parser.value(socketOption);
+    if (socketName.isEmpty()) {
+        socketName = qEnvironmentVariable(ConsoleWorkerWire::SocketEnvironment);
+    }
+    qunsetenv(ConsoleWorkerWire::SocketEnvironment); // Not for our children.
 
     bool uidOk = false;
     const quint32 uid = parser.value(uidOption).toUInt(&uidOk);
@@ -2577,12 +2653,52 @@ int main(int argc, char **argv)
         token = QByteArray::fromHex(parser.value(tokenOption).toLatin1());
     }
     if (parser.isSet(tokenOption) == parser.isSet(tokenFdOption) || parser.isSet(sessionOption) == parser.isSet(virtualOption)
-        || !mode || !uidOk || uid == 0 || uid != getuid() || uid != geteuid() || parser.value(socketOption).isEmpty() || token.size() < 16
+        || !mode || !uidOk || uid == 0 || uid != getuid() || uid != geteuid() || socketName.isEmpty() || token.size() < 16
         || !initialOutputs || (parser.isSet(initialLayoutOption) && (!mode->virtualSession || !parser.isSet(desktopOption)))) {
         parser.showHelp(1);
     }
 
-    Worker worker(parser.value(socketOption), *mode, uid, token, parser.isSet(desktopOption), *initialOutputs);
+    Worker worker(socketName, *mode, uid, token, parser.isSet(desktopOption), *initialOutputs);
+
+    // SIGTERM (the broker's drain deadline, or systemd) must restore the
+    // outputs this worker changed before it exits (AUD-C-3). Self-pipe: the
+    // handler only writes a byte; the event loop runs the restore.
+    static int signalPipe[2] = {-1, -1};
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, signalPipe) == 0) {
+        struct sigaction action{};
+        action.sa_handler = [](int) {
+            const int saved = errno;
+            const char byte = 1;
+            [[maybe_unused]] const auto written = ::write(signalPipe[1], &byte, 1);
+            errno = saved;
+        };
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = SA_RESTART;
+        for (const int signal : {SIGTERM, SIGINT, SIGHUP}) {
+            ::sigaction(signal, &action, nullptr);
+        }
+        auto *notifier = new QSocketNotifier(signalPipe[0], QSocketNotifier::Read, &application);
+        QObject::connect(notifier, &QSocketNotifier::activated, &worker, [&worker, notifier] {
+            char byte = 0;
+            [[maybe_unused]] const auto read = ::read(signalPipe[0], &byte, 1);
+            notifier->setEnabled(false); // One restore; a second signal changes nothing.
+            worker.terminate();
+        });
+    }
+
+    if (!mode->virtualSession && parser.isSet(desktopOption)) {
+        // Replay what a crashed or killed predecessor left in this user's
+        // output-restore journal before capturing anything (AUD-C-3/C-5).
+        // The broker never overlaps workers, so that owner is gone by now.
+        const auto result = OutputRestoreJournal().replay(
+            [] { return runKScreen({QStringLiteral("-j")}); },
+            [](const QStringList &arguments) { return runKScreen(arguments).has_value(); },
+            &OutputRestoreJournal::ownerAlive);
+        if (result.restored || result.kept || !result.errors.isEmpty()) {
+            qInfo().noquote() << "Output-restore journal replay: restored" << result.restored << "kept" << result.kept
+                              << "live" << result.skippedLive << result.errors.join(QStringLiteral("; "));
+        }
+    }
     worker.connectToBroker();
     return application.exec();
 }
