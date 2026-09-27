@@ -434,3 +434,7 @@ add_executable(ConsoleWorkerEndpointHardeningTest ConsoleWorkerEndpointHardening
 target_include_directories(ConsoleWorkerEndpointHardeningTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ConsoleWorkerEndpointHardeningTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
 add_test(NAME ConsoleWorkerEndpointHardeningTest COMMAND ConsoleWorkerEndpointHardeningTest)
+add_executable(OutputRestoreJournalTest OutputRestoreJournalTest.cpp ${CMAKE_SOURCE_DIR}/server/OutputRestoreJournal.cpp)
+target_include_directories(OutputRestoreJournalTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(OutputRestoreJournalTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME OutputRestoreJournalTest COMMAND OutputRestoreJournalTest)
