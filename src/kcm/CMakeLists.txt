@@ -13,8 +13,10 @@ kcmutils_generate_module_data(kcm_krdpserver
     SETTINGS_CLASSES KRDPServerSettings
 )
 
+# One schema for krdpserverrc: server/ owns it and the KCM generates its
+# settings class from the same file (AUD-K13).
 kconfig_target_kcfg_file(kcm_krdpserver
-    FILE krdpserversettings.kcfg
+    FILE ${CMAKE_SOURCE_DIR}/server/krdpserversettings.kcfg
     CLASS_NAME KRDPServerSettings
     MUTATORS
     DEFAULT_VALUE_GETTERS

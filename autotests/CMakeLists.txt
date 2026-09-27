@@ -427,3 +427,8 @@ target_include_directories(GfxSurfaceCommandTest PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_include_directories(GfxSurfaceCommandTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
 target_link_libraries(GfxSurfaceCommandTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME GfxSurfaceCommandTest COMMAND GfxSurfaceCommandTest)
+
+# --- AUD-WS-K ---
+# K13: one krdpserverrc schema, owned by server/ and used by the KCM.
+add_test(NAME KcfgSingleSourceTest
+    COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/check-single-kcfg.cmake)
