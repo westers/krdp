@@ -109,8 +109,9 @@ fi
 cat >"$work/debian/changelog" <<EOF
 krdp ($version) resolute; urgency=medium
 
-  * Build of github.com/westers/krdp commit $commit
-    with private KPipeWire $kpw_commit.
+  * Build of github.com/westers/krdp commit
+    $commit,
+    private KPipeWire $kpw_commit.
 
  -- Steve Westers <amiga1.2k@gmail.com>  $(date -u -R -d "@$SOURCE_DATE_EPOCH")
 EOF
