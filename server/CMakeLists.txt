@@ -78,6 +78,8 @@ endif()
 
 if (BUILD_PLASMA_SESSION)
     target_compile_definitions(krdpserver PRIVATE -DWITH_PLASMA_SESSION)
+    target_sources(krdpserver PRIVATE PlasmaBackendProbe.cpp)
+    target_link_libraries(krdpserver PRIVATE Qt6::WaylandClient Qt6::GuiPrivate)
 endif()
 
 configure_file(org.kde.krdpserver.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpserver.desktop @ONLY)

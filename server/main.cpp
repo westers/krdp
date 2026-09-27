@@ -27,6 +27,9 @@
 
 #include "ListenAddress.h"
 #include "PhysicalOutputGuard.h"
+#ifdef WITH_PLASMA_SESSION
+#include "PlasmaBackendProbe.h"
+#endif
 #include "RdpConnection.h"
 #include "Server.h"
 #include "ServerCertificate.h"
@@ -252,8 +255,9 @@ int main(int argc, char **argv)
         {u"restore-outputs"_s, u"Re-enable the physical outputs a crashed virtual-monitor session left disabled, then exit."_s},
         {u"quality"_s, u"Encoding quality of the stream, from 0 (lowest) to 100 (highest)"_s, u"quality"_s},
 #ifdef WITH_PLASMA_SESSION
-        {u"plasma"_s, u"Use Plasma protocols instead of XDP"_s},
+        {u"plasma"_s, u"Use the Plasma protocols (the default on a Plasma session)"_s},
 #endif
+        {u"portal"_s, u"Use the XDG desktop portal instead of the Plasma protocols"_s},
     });
     about.setupCommandLine(&parser);
     parser.process(application);
@@ -370,15 +374,30 @@ int main(int argc, char **argv)
     }
     qInfo() << "KWin primary output:" << SessionController::kwinPrimaryOutputName();
 
+    KRdp::ServerSettings::BackendRequest backendRequest;
+    backendRequest.monitorMode = config->monitorMode();
 #ifdef WITH_PLASMA_SESSION
-    const auto backendChoice = KRdp::ServerSettings::chooseBackend(parser.isSet(u"plasma"_s), config->monitorMode(), true);
+    const bool plasmaFlag = parser.isSet(u"plasma"_s);
+    backendRequest.plasmaBuilt = true;
+    backendRequest.plasmaAvailable = KRdp::ServerSettings::plasmaProtocolsAvailable(KRdp::advertisedWaylandGlobals());
 #else
-    const auto backendChoice = KRdp::ServerSettings::chooseBackend(false, config->monitorMode(), false);
+    const bool plasmaFlag = false;
 #endif
-    // AUD-K5: the stock unit passes no flag; pick Plasma when the mode needs it.
+    if (plasmaFlag && parser.isSet(u"portal"_s)) {
+        qCritical() << "--plasma and --portal are mutually exclusive";
+        return 1;
+    }
+    backendRequest.override = plasmaFlag ? KRdp::ServerSettings::BackendOverride::Plasma
+        : parser.isSet(u"portal"_s)      ? KRdp::ServerSettings::BackendOverride::Portal
+                                         : KRdp::ServerSettings::BackendOverride::None;
+    // AUD-K5 / AUD-FIX F3: the stock unit passes no flag; on a Plasma session
+    // the server picks the Plasma backend itself, and the portal only when the
+    // Plasma protocols are not offered.
+    const auto backendChoice = KRdp::ServerSettings::chooseBackend(backendRequest);
     const bool plasmaSession = backendChoice.backend == KRdp::ServerSettings::Backend::Plasma;
-    if (!backendChoice.automaticReason.isEmpty()) {
-        qInfo().noquote() << "Using the Plasma capture backend:" << backendChoice.automaticReason;
+    qInfo().noquote() << "Using the" << KRdp::ServerSettings::backendName(backendChoice.backend) << "capture backend:" << backendChoice.reason;
+    if (!backendChoice.warning.isEmpty()) {
+        qWarning().noquote() << backendChoice.warning;
     }
     SessionController controller(&server, plasmaSession ? SessionController::SessionType::Plasma : SessionController::SessionType::Portal);
     // A crash with MonitorMode=virtual/replace leaves the state file behind;

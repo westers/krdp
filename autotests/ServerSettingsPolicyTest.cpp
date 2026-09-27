@@ -58,21 +58,62 @@ private Q_SLOTS:
 
     void backendChoice()
     {
-        // --plasma always wins.
-        QCOMPARE(chooseBackend(true, u"workspace"_s, true).backend, Backend::Plasma);
-        QVERIFY(chooseBackend(true, u"workspace"_s, true).automaticReason.isEmpty());
-        // The stock unit (no flag) gets Plasma when the mode needs it...
-        for (const auto &mode : {u"multi"_s, u"virtual"_s, u" Virtual "_s}) {
-            const auto choice = chooseBackend(false, mode, true);
+        auto choose = [](BackendOverride override, const QString &mode, bool built, bool available) {
+            BackendRequest request;
+            request.override = override;
+            request.monitorMode = mode;
+            request.plasmaBuilt = built;
+            request.plasmaAvailable = available;
+            return chooseBackend(request);
+        };
+        const auto allModes = {u"workspace"_s, u"primary"_s, u"specific"_s, u"multi"_s, u"virtual"_s, u" Virtual "_s, QString()};
+
+        // AUD-FIX F3: no flag on a Plasma session -> Plasma for every mode, so
+        // the packaged unit never waits for a portal dialog.
+        for (const auto &mode : allModes) {
+            const auto choice = choose(BackendOverride::None, mode, true, true);
             QCOMPARE(choice.backend, Backend::Plasma);
-            QVERIFY(!choice.automaticReason.isEmpty());
+            QVERIFY(!choice.reason.isEmpty());
+            QVERIFY(choice.warning.isEmpty());
         }
-        // ...and the portal otherwise.
-        for (const auto &mode : {u"workspace"_s, u"primary"_s, u"specific"_s, QString()}) {
-            QCOMPARE(chooseBackend(false, mode, true).backend, Backend::Portal);
+        // Protocols missing -> portal fallback; warn only when the mode needed Plasma.
+        for (const auto &mode : {u"workspace"_s, u"specific"_s, QString()}) {
+            const auto choice = choose(BackendOverride::None, mode, true, false);
+            QCOMPARE(choice.backend, Backend::Portal);
+            QVERIFY(choice.warning.isEmpty());
+        }
+        for (const auto &mode : {u"multi"_s, u"virtual"_s}) {
+            const auto choice = choose(BackendOverride::None, mode, true, false);
+            QCOMPARE(choice.backend, Backend::Portal);
+            QVERIFY(!choice.warning.isEmpty());
         }
         // Without Plasma support there is nothing to choose.
-        QCOMPARE(chooseBackend(false, u"multi"_s, false).backend, Backend::Portal);
+        QCOMPARE(choose(BackendOverride::None, u"multi"_s, false, true).backend, Backend::Portal);
+
+        // --plasma wins, even when the probe saw nothing (with a warning).
+        QCOMPARE(choose(BackendOverride::Plasma, u"workspace"_s, true, true).backend, Backend::Plasma);
+        QVERIFY(choose(BackendOverride::Plasma, u"workspace"_s, true, true).warning.isEmpty());
+        QCOMPARE(choose(BackendOverride::Plasma, u"workspace"_s, true, false).backend, Backend::Plasma);
+        QVERIFY(!choose(BackendOverride::Plasma, u"workspace"_s, true, false).warning.isEmpty());
+        QCOMPARE(choose(BackendOverride::Plasma, u"workspace"_s, false, false).backend, Backend::Portal);
+
+        // --portal wins over an available Plasma session.
+        for (const auto &mode : allModes) {
+            QCOMPARE(choose(BackendOverride::Portal, mode, true, true).backend, Backend::Portal);
+        }
+        QVERIFY(!choose(BackendOverride::Portal, u"virtual"_s, true, true).warning.isEmpty());
+        QVERIFY(choose(BackendOverride::Portal, u"workspace"_s, true, true).warning.isEmpty());
+    }
+
+    void plasmaProtocolsDetected()
+    {
+        const QStringList kwin{u"wl_compositor"_s, u"zkde_screencast_unstable_v1"_s, u"org_kde_kwin_fake_input"_s, u"wl_seat"_s};
+        QVERIFY(plasmaProtocolsAvailable(kwin));
+        // KWin withholds the restricted globals from an unlisted client.
+        QVERIFY(!plasmaProtocolsAvailable({u"wl_compositor"_s, u"wl_seat"_s}));
+        QVERIFY(!plasmaProtocolsAvailable({u"zkde_screencast_unstable_v1"_s}));
+        QVERIFY(!plasmaProtocolsAvailable({u"org_kde_kwin_fake_input"_s}));
+        QVERIFY(!plasmaProtocolsAvailable({}));
     }
 };
 

@@ -70,24 +70,76 @@ inline bool monitorModeNeedsPlasma(const QString &mode)
     return m.compare(QLatin1String("multi"), Qt::CaseInsensitive) == 0 || m.compare(QLatin1String("virtual"), Qt::CaseInsensitive) == 0;
 }
 
-struct BackendChoice {
-    Backend backend = Backend::Portal;
-    // Non-empty when the server picked Plasma on its own (for the log).
-    QString automaticReason;
+// The protocols the Plasma backend needs: screencast v1 for capture and fake
+// input for input injection.
+inline bool plasmaProtocolsAvailable(const QStringList &waylandGlobals)
+{
+    return waylandGlobals.contains(QLatin1String("zkde_screencast_unstable_v1")) && waylandGlobals.contains(QLatin1String("org_kde_kwin_fake_input"));
+}
+
+enum class BackendOverride {
+    None,
+    Plasma, // --plasma
+    Portal, // --portal
 };
 
-// --plasma always wins. Otherwise the server picks Plasma by itself when the
-// configured MonitorMode needs it and Plasma support is built in, so the stock
-// unit (which passes no flag) serves `multi`/`virtual` without a drop-in.
-inline BackendChoice chooseBackend(bool plasmaFlag, const QString &monitorMode, bool plasmaBuilt)
+struct BackendRequest {
+    BackendOverride override = BackendOverride::None;
+    QString monitorMode;
+    bool plasmaBuilt = false;
+    // plasmaProtocolsAvailable() for this session.
+    bool plasmaAvailable = false;
+};
+
+struct BackendChoice {
+    Backend backend = Backend::Portal;
+    // Why this backend, for the startup log.
+    QString reason;
+    // Set when the result cannot serve the configured MonitorMode, or an
+    // override asks for something this build or session cannot do.
+    QString warning;
+};
+
+// AUD-FIX F3 (extends AUD-K5). This fork defaults to the Plasma backend
+// (screencast v1 plus fake input) whenever the Plasma session offers it, so
+// the stock unit never waits for a portal dialog. The portal is the fallback
+// when those protocols are missing. --plasma and --portal override the
+// automatic choice.
+inline BackendChoice chooseBackend(const BackendRequest &request)
 {
-    if (plasmaFlag && plasmaBuilt) {
-        return {Backend::Plasma, {}};
+    const bool needsPlasma = monitorModeNeedsPlasma(request.monitorMode);
+    const QString mode = request.monitorMode.trimmed();
+    switch (request.override) {
+    case BackendOverride::Plasma:
+        if (request.plasmaBuilt) {
+            BackendChoice choice{Backend::Plasma, QStringLiteral("--plasma"), {}};
+            if (!request.plasmaAvailable) {
+                choice.warning = QStringLiteral("--plasma was given but this session does not offer the Plasma screencast and fake-input protocols");
+            }
+            return choice;
+        }
+        return {Backend::Portal, QStringLiteral("--plasma ignored: built without Plasma support"), QStringLiteral("this build has no Plasma backend; using the portal")};
+    case BackendOverride::Portal: {
+        BackendChoice choice{Backend::Portal, QStringLiteral("--portal"), {}};
+        if (needsPlasma) {
+            choice.warning = QStringLiteral("MonitorMode=%1 needs the Plasma backend, but --portal was given").arg(mode);
+        }
+        return choice;
     }
-    if (plasmaBuilt && monitorModeNeedsPlasma(monitorMode)) {
-        return {Backend::Plasma, QStringLiteral("MonitorMode=%1 needs the Plasma backend").arg(monitorMode.trimmed())};
+    case BackendOverride::None:
+        break;
     }
-    return {Backend::Portal, {}};
+    if (request.plasmaBuilt && request.plasmaAvailable) {
+        return {Backend::Plasma, QStringLiteral("Plasma session offers screencast v1 and fake input"), {}};
+    }
+    BackendChoice choice{Backend::Portal,
+                         request.plasmaBuilt ? QStringLiteral("the Plasma screencast and fake-input protocols are not available; falling back to the portal")
+                                             : QStringLiteral("built without Plasma support"),
+                         {}};
+    if (needsPlasma) {
+        choice.warning = QStringLiteral("MonitorMode=%1 needs the Plasma backend, which this session does not offer").arg(mode);
+    }
+    return choice;
 }
 
 // --- AUD-K6: restart detection -------------------------------------------------
