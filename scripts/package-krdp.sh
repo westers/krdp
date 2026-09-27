@@ -60,7 +60,7 @@ git -C "$kpw_src" archive "$kpw_commit" | tar -x -C "$build/kpipewire-src"
 cmake -S "$build/kpipewire-src" -B "$build/kpipewire-build" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DCMAKE_INSTALL_PREFIX="$build/kpipewire-prefix" \
-    -DCMAKE_INSTALL_RPATH="$privdir" \
+    -DKDE_SKIP_RPATH_SETTINGS=TRUE -DCMAKE_INSTALL_RPATH="$privdir" \
     -DKDE_INSTALL_USE_QT_SYS_PATHS=OFF \
     -DBUILD_TESTING=OFF
 cmake --build "$build/kpipewire-build" -j"$jobs"
@@ -76,7 +76,7 @@ cmake -S "$build/src" -B "$build/krdp-build" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DKDE_INSTALL_USE_QT_SYS_PATHS=ON \
-    -DCMAKE_INSTALL_RPATH="$privdir" \
+    -DKDE_SKIP_RPATH_SETTINGS=TRUE -DCMAKE_INSTALL_RPATH="$privdir" \
     -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF \
     -DINSTALL_DIAGNOSTIC_PROBES=OFF \
     -DKRDP_BUILD_SYSTEM_PACKAGE=ON \
@@ -125,9 +125,16 @@ done
 (cd "$pkgroot" && find etc -type f -printf '/%p\n' | sort) >"$pkgroot/DEBIAN/conffiles"
 chmod 0644 "$pkgroot/DEBIAN/conffiles"
 
+# Every ELF file's RUNPATH must be exactly the private directory (or absent):
+# a leaked build path would load libraries from this build tree.
+mapfile -d '' elves < <(find "$pkgroot" -type f -exec sh -c 'head -c4 "$1" | grep -q "^.ELF"' _ {} \; -print0)
+for elf in "${elves[@]}"; do
+    runpath=$(readelf -d "$elf" | sed -n 's/.*(RUNPATH).*\[\(.*\)\]/\1/p')
+    [[ -z "$runpath" || "$runpath" == "$privdir" ]] || { echo "bad RUNPATH $runpath in $elf" >&2; exit 1; }
+done
+
 # Dependencies from the ELF files; the private libraries resolve inside the
 # package (via their RUNPATH) and add no dependency.
-mapfile -d '' elves < <(find "$pkgroot" -type f -exec sh -c 'head -c4 "$1" | grep -q "^.ELF"' _ {} \; -print0)
 (cd "$work" && dpkg-shlibdeps -Tdebian/krdp.substvars -l"$pkgroot$privdir" "${elves[@]}")
 (cd "$work" && dpkg-gencontrol -pkrdp -Pdebian/krdp -Tdebian/krdp.substvars)
 
