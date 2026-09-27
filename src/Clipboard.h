@@ -37,6 +37,14 @@ public:
     Q_SIGNAL void clientDataChanged();
     std::unique_ptr<QMimeData> getClipboard() const;
 
+    /**
+     * Point \a context's client-PDU callbacks at \a clipboard. The callbacks
+     * run on FreeRDP's cliprdr thread; they copy the PDU and hand it to the
+     * main thread without waiting (AUD-P5). Public so a test can drive them
+     * without a peer.
+     */
+    static void installClientCallbacks(CliprdrServerContext *context, Clipboard *clipboard);
+
 private:
     void sendServerData();
 

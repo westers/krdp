@@ -18,9 +18,12 @@
 #include <optional>
 #include <vector>
 
+#include <unistd.h>
+
 #include <QDir>
 #include <QFile>
 #include <QHostAddress>
+#include <QPointer>
 #include <QStandardPaths>
 #include <QTcpSocket>
 #include <QThread>
@@ -584,7 +587,9 @@ class KRDP_NO_EXPORT RdpConnection::Private
 public:
     Server *server = nullptr;
 
-    State state = State::Initial;
+    // AUD-P7: written on the main thread (initialize) and the session thread
+    // (run/onClose), read from both and from VideoStream's threads.
+    std::atomic<State> state = State::Initial;
     // Zero means no OS identity; uid+1 also represents uid0 without ambiguity.
     std::atomic<quint64> authenticatedPamUid = 0;
     // AUD-S1: set once, on the session thread, when PostConnect authentication
@@ -706,11 +711,10 @@ bool RdpConnection::isAuthenticated() const
 
 void RdpConnection::setState(KRdp::RdpConnection::State newState)
 {
-    if (newState == d->state) {
+    if (d->state.exchange(newState) == newState) {
         return;
     }
 
-    d->state = newState;
     Q_EMIT stateChanged(newState);
 }
 
@@ -718,7 +722,9 @@ void RdpConnection::close(RdpConnection::CloseReason reason)
 {
     switch (reason) {
     case CloseReason::VideoInitFailed:
-        freerdp_set_error_info(d->peer->context->rdp, ERRINFO_GRAPHICS_SUBSYSTEM_FAILED);
+        if (d->peer && d->peer->context) {
+            freerdp_set_error_info(d->peer->context->rdp, ERRINFO_GRAPHICS_SUBSYSTEM_FAILED);
+        }
         break;
     case CloseReason::None:
         break;
@@ -924,7 +930,39 @@ bool RdpConnection::readControlChannel()
 
 void RdpConnection::initialize()
 {
+    if (d->socketHandle < 0) {
+        // A detached connection object (no client socket, see the
+        // constructor): there is nothing to set up, and nothing to close.
+        qCDebug(KRDP) << "Connection has no socket; not initializing";
+        return;
+    }
+
     setState(State::Starting);
+
+    // AUD-P3: every early return below closes the peer (and with it the
+    // client socket) and moves the connection to Closed, which is what makes
+    // Server drop it. Without this a failed setup leaked the connection, its
+    // socket and the client waiting on it.
+    auto fail = qScopeGuard([this]() {
+        if (d->peer) {
+            freerdp_peer_context_free(d->peer); // frees the transport, closing an attached socket
+            freerdp_peer_free(d->peer); // closes a socket the transport never took
+            d->peer = nullptr;
+        } else if (d->socketHandle >= 0) {
+            ::close(int(d->socketHandle));
+        }
+        d->socketHandle = -1;
+        // Queued on the server: Server deletes the connection when it sees
+        // Closed, and that must not happen inside this call.
+        QMetaObject::invokeMethod(
+            d->server,
+            [connection = QPointer<RdpConnection>(this)]() {
+                if (connection) {
+                    connection->setState(State::Closed);
+                }
+            },
+            Qt::QueuedConnection);
+    });
 
     d->peer = freerdp_peer_new(d->socketHandle);
     if (!d->peer) {
@@ -958,7 +996,7 @@ void RdpConnection::initialize()
 
     auto key = freerdp_key_new_from_file(d->server->tlsCertificateKey().string().data());
     if (!key) {
-        qCWarning(KRDP) << "Could not read certificate file" << d->server->tlsCertificate().string();
+        qCWarning(KRDP) << "Could not read certificate key file" << d->server->tlsCertificateKey().string();
         return;
     }
     freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerRsaKey, key, 1);
@@ -1027,6 +1065,7 @@ void RdpConnection::initialize()
         return;
     }
 
+    fail.dismiss();
     qCDebug(KRDP) << "Session setup completed, start processing...";
 
     // AUD-S2: a client that has not authenticated within the handshake

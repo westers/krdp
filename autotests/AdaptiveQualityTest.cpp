@@ -113,6 +113,16 @@ private Q_SLOTS:
         QVERIFY(backlogIsPressure(21s, std::numeric_limits<int>::max(), burstDepth));
     }
 
+    // AUD-P6: with acks suspended there is no backlog evidence, however many
+    // frames were sent since.
+    void suspendedAcksAreNeverBacklogPressure()
+    {
+        constexpr int deep = BacklogFrames * 10;
+        QVERIFY(backlogIsPressure(60s, deep, deep));
+        QVERIFY(!backlogIsPressure(60s, deep, deep, true));
+        QVERIFY(!backlogIsPressure(60s, std::numeric_limits<int>::max(), deep, true));
+    }
+
     void rttCongestionStepsDown()
     {
         auto in = clear(60);

@@ -18,6 +18,7 @@
 
 #include <linux/input-event-codes.h>
 #include <sys/mman.h>
+#include <wayland-client-core.h>
 #include <wayland-util.h>
 #include <xkbcommon/xkbcommon.h>
 #include <chrono>
@@ -31,6 +32,9 @@
 #include "qwayland-wayland.h"
 #include "screencasting_p.h"
 
+#include "PressedInputTracker.h"
+#include "ScreencastTarget.h"
+#include "StreamRecoveryPolicy.h"
 #include "VideoStream.h"
 #include "WorkspaceFrameGeometry.h"
 #include "krdp_logging.h"
@@ -54,7 +58,32 @@ public:
         }
         Q_ASSERT(isActive());
     }
+
+    ~FakeInput() override
+    {
+        // AUD-P2: the session owns this object. The destructor request exists
+        // since version 4; an older bind just drops the proxy.
+        if (object() && wl_proxy_get_version(reinterpret_cast<wl_proxy *>(object())) >= 4) {
+            destroy();
+        }
+    }
+
+    Q_DISABLE_COPY_MOVE(FakeInput)
 };
+
+namespace
+{
+// Push queued requests (the releases sent on teardown) to the compositor now:
+// a session destroyed at shutdown may not see another event-loop flush.
+void flushWaylandDisplay()
+{
+    if (auto *native = qGuiApp ? qGuiApp->platformNativeInterface() : nullptr) {
+        if (auto *display = static_cast<wl_display *>(native->nativeResourceForIntegration("wl_display"))) {
+            wl_display_flush(display);
+        }
+    }
+}
+}
 
 namespace
 {
@@ -80,13 +109,10 @@ using ScopedXKBState = std::unique_ptr<struct xkb_state, XKBStateDeleter>;
 using ScopedXKBKeymap = std::unique_ptr<struct xkb_keymap, XKBKeymapDeleter>;
 using ScopedXKBContext = std::unique_ptr<struct xkb_context, XKBContextDeleter>;
 
-// Closed-stream recovery. A DPMS wake makes KWin tear down and re-add every
-// output, so wait for the output set to settle, keep retrying for a while, and
-// only settle for a workspace stream in the last few attempts.
-constexpr int MaxRecoveryAttempts = 24;
-constexpr int RecoveryIntervalMs = 500;
-constexpr int RecoverySettleMs = 750;
-constexpr int WorkspaceFallbackAttempts = 4;
+// Closed-stream recovery; see StreamRecoveryPolicy.h.
+constexpr int MaxRecoveryAttempts = StreamRecoveryPolicy::MaxAttempts;
+constexpr int RecoveryIntervalMs = StreamRecoveryPolicy::IntervalMs;
+constexpr int RecoverySettleMs = StreamRecoveryPolicy::SettleMs;
 
 // KPipeWire tears its produce thread down asynchronously after stop(): start()
 // is a no-op until that thread is gone, and the node ID is cleared once it is.
@@ -109,59 +135,20 @@ QRegion fullFrameDamage(const QSize &size)
     return QRegion(QRect(QPoint(0, 0), size));
 }
 
-QRect logicalRectForStream(int streamIndex)
+// A snapshot of Qt's screen list for ScreencastTarget::resolve(), plus the
+// QScreen pointers at the same indices.
+QList<ScreencastTarget::Screen> screenSnapshot(QList<QScreen *> *pointers = nullptr)
 {
+    QList<ScreencastTarget::Screen> result;
     const auto screens = qGuiApp->screens();
-    if (screens.isEmpty()) {
-        return {};
+    const auto *primaryScreen = qGuiApp->primaryScreen();
+    for (auto *screen : screens) {
+        result.push_back(ScreencastTarget::Screen{.name = screen->name(), .geometry = screen->geometry(), .primary = screen == primaryScreen});
     }
-
-    QRect logicalRect;
-    if (streamIndex < 0 || streamIndex >= screens.size()) {
-        QRegion logicalRegion;
-        for (auto *screen : screens) {
-            logicalRegion += screen->geometry();
-        }
-        logicalRect = logicalRegion.boundingRect();
-    } else {
-        logicalRect = screens.at(streamIndex)->geometry();
+    if (pointers) {
+        *pointers = screens;
     }
-    return logicalRect;
-}
-
-QVector<VideoMonitor> monitorLayoutForStream(int streamIndex, const QRect &logicalRect)
-{
-    QVector<VideoMonitor> monitors;
-    const auto screens = qGuiApp->screens();
-    if (screens.isEmpty()) {
-        return monitors;
-    }
-
-    auto primaryScreen = qGuiApp->primaryScreen();
-    if (streamIndex >= 0 && streamIndex < screens.size()) {
-        const auto geometry = screens.at(streamIndex)->geometry().translated(-logicalRect.topLeft());
-        monitors.push_back(VideoMonitor{
-            .geometry = geometry,
-            .primary = (screens.at(streamIndex) == primaryScreen),
-        });
-    } else {
-        monitors.reserve(screens.size());
-        for (auto *screen : screens) {
-            monitors.push_back(VideoMonitor{
-                .geometry = screen->geometry().translated(-logicalRect.topLeft()),
-                .primary = (screen == primaryScreen),
-            });
-        }
-    }
-
-    if (!std::any_of(monitors.cbegin(), monitors.cend(), [](const auto &monitor) {
-            return monitor.primary;
-        })
-        && !monitors.isEmpty()) {
-        monitors.first().primary = true;
-    }
-
-    return monitors;
+    return result;
 }
 
 template<typename Stream>
@@ -312,10 +299,24 @@ public:
 
     Screencasting m_screencasting;
     ScreencastingStream *request = nullptr;
-    FakeInput *remoteInterface = nullptr;
+    // Declared before pressedInput: its destructor releases through this.
+    std::unique_ptr<FakeInput> remoteInterface;
+    PressedInputTracker pressedInput{[this](PressedInputTracker::Kind kind, uint32_t code) {
+        if (!remoteInterface || !remoteInterface->isActive()) {
+            return;
+        }
+        if (kind == PressedInputTracker::Kind::Button) {
+            remoteInterface->button(code, 0);
+        } else {
+            remoteInterface->keyboard_key(code, 0);
+        }
+    }};
     StreamTarget streamTarget = StreamTarget::None;
     QPointer<QScreen> outputScreen = nullptr;
+    // The screen an Output target captures, and the stream index it was
+    // resolved for; a recovery re-finds the screen by this name (AUD-P1).
     QString targetScreenName;
+    int targetStreamIndex = -1;
     QRect logicalRect;
     QVector<VideoMonitor> monitorLayout;
     std::optional<double> workspaceFrameScaleHint;
@@ -359,7 +360,7 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
     : AbstractSession()
     , d(std::make_unique<Private>())
 {
-    d->remoteInterface = new FakeInput();
+    d->remoteInterface = std::make_unique<FakeInput>();
 
     connect(KSystemClipboard::instance(), &KSystemClipboard::changed, this, [this](auto mode) {
         // The clipboard is workspace-wide, but MonitorMode=multi runs one
@@ -463,6 +464,14 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
 PlasmaScreencastV1Session::~PlasmaScreencastV1Session()
 {
     qCDebug(KRDP) << "Closing Plasma Remote Session";
+    // AUD-P2: a client that drops, or a rebuild that replaces this session,
+    // must not leave a key or button held down in the compositor.
+    if (!d->pressedInput.empty()) {
+        qCInfo(KRDP) << "Releasing keys and buttons still held by the closing session";
+        d->pressedInput.releaseAll();
+        flushWaylandDisplay();
+    }
+    d->remoteInterface.reset();
 }
 
 void PlasmaScreencastV1Session::start()
@@ -515,62 +524,40 @@ void PlasmaScreencastV1Session::attemptStreamRecovery(int attempt)
     const auto screens = qGuiApp->screens();
     const bool screensAvailable = !screens.isEmpty() && screens.first()->geometry().isValid();
     // Hold out for the configured output; only the final attempts may settle for the workspace.
-    const bool allowWorkspaceFallback = attempt >= MaxRecoveryAttempts - WorkspaceFallbackAttempts;
+    const bool allowWorkspaceFallback = StreamRecoveryPolicy::allowWorkspaceFallback(attempt);
 
     bool recovered = false;
     if (screensAvailable) {
         qCInfo(KRDP) << "Attempting to recover display stream (attempt" << (attempt + 1) << "of" << MaxRecoveryAttempts << ", workspace fallback:" << allowWorkspaceFallback << ")";
-        recovered = setupScreencastRequest(allowWorkspaceFallback);
+        recovered = setupScreencastRequest(true, allowWorkspaceFallback);
     } else {
         qCInfo(KRDP) << "No screens available yet (attempt" << (attempt + 1) << "of" << MaxRecoveryAttempts << ")";
     }
-    if (recovered) {
+    switch (StreamRecoveryPolicy::next(attempt, recovered)) {
+    case StreamRecoveryPolicy::Next::Done:
         return;
-    }
-
-    if (attempt + 1 < MaxRecoveryAttempts) {
+    case StreamRecoveryPolicy::Next::Retry:
         qCInfo(KRDP) << "Retrying display stream recovery in" << RecoveryIntervalMs << "ms";
         scheduleStreamRecovery(attempt + 1, RecoveryIntervalMs);
         return;
+    case StreamRecoveryPolicy::Next::GiveUp:
+        // AUD-P4: do not keep a connection that streams nothing. error() makes
+        // the controller close it with a reason the client shows (or, in
+        // multi mode, drop just this monitor).
+        qCWarning(KRDP) << "Display stream recovery failed after" << MaxRecoveryAttempts << "attempts; reporting the session as failed";
+        Q_EMIT error();
+        return;
     }
-    qCWarning(KRDP) << "Display stream recovery failed after" << MaxRecoveryAttempts << "attempts (session kept alive)";
 }
 
-bool PlasmaScreencastV1Session::setupScreencastRequest(bool allowWorkspaceFallback)
+bool PlasmaScreencastV1Session::setupScreencastRequest(bool recovery, bool allowWorkspaceFallback)
 {
     Private::StreamTarget target = Private::StreamTarget::Workspace;
     QPointer<QScreen> outputScreen = nullptr;
-    if (virtualMonitor()) {
-        target = Private::StreamTarget::Virtual;
-    } else {
-        const auto screens = qGuiApp->screens();
-        const auto streamIndex = activeStream();
-        // On recovery, resolve by saved screen name to survive screen list reordering.
-        if (!d->targetScreenName.isEmpty()) {
-            for (auto *screen : screens) {
-                if (screen->name() == d->targetScreenName) {
-                    target = Private::StreamTarget::Output;
-                    outputScreen = screen;
-                    break;
-                }
-            }
-            if (!outputScreen) {
-                if (!allowWorkspaceFallback) {
-                    qCInfo(KRDP) << "Target screen" << d->targetScreenName << "not available yet, waiting for it to return";
-                    return false;
-                }
-                qCWarning(KRDP) << "Target screen" << d->targetScreenName << "no longer available, falling back to workspace";
-            }
-        } else if (streamIndex >= 0 && streamIndex < screens.size()) {
-            target = Private::StreamTarget::Output;
-            outputScreen = screens.at(streamIndex);
-            d->targetScreenName = outputScreen->name();
-        }
-    }
-
     QRect targetLogicalRect;
     QVector<VideoMonitor> targetMonitorLayout;
-    if (target == Private::StreamTarget::Virtual) {
+    if (virtualMonitor()) {
+        target = Private::StreamTarget::Virtual;
         auto vm = virtualMonitor();
         targetLogicalRect = QRect(QPoint(0, 0), vm->size);
         targetMonitorLayout = {
@@ -579,12 +566,32 @@ bool PlasmaScreencastV1Session::setupScreencastRequest(bool allowWorkspaceFallba
                 .primary = true,
             },
         };
-    } else if (target == Private::StreamTarget::Output) {
-        targetLogicalRect = logicalRectForStream(activeStream());
-        targetMonitorLayout = monitorLayoutForStream(activeStream(), targetLogicalRect);
     } else {
-        targetLogicalRect = logicalRectForStream(-1);
-        targetMonitorLayout = monitorLayoutForStream(-1, targetLogicalRect);
+        // The captured screen and the rect input is mapped through come from
+        // the same resolution (AUD-P1). A recovery holds on to the remembered
+        // screen name; an explicit start/refresh follows the stream index.
+        QList<QScreen *> screens;
+        const auto snapshot = screenSnapshot(&screens);
+        const auto resolution =
+            ScreencastTarget::resolve(snapshot, activeStream(), d->targetScreenName, d->targetStreamIndex, recovery, allowWorkspaceFallback);
+        if (resolution.kind == ScreencastTarget::Kind::Wait) {
+            qCInfo(KRDP) << "Target screen" << resolution.name << "not available yet, waiting for it to return";
+            return false;
+        }
+        if (resolution.kind == ScreencastTarget::Kind::Output) {
+            target = Private::StreamTarget::Output;
+            outputScreen = screens.at(resolution.screenIndex);
+            d->targetScreenName = resolution.name;
+            d->targetStreamIndex = activeStream();
+        } else {
+            if (recovery && !d->targetScreenName.isEmpty()) {
+                qCWarning(KRDP) << "Target screen" << d->targetScreenName << "no longer available, falling back to workspace";
+            }
+            d->targetScreenName.clear();
+            d->targetStreamIndex = -1;
+        }
+        targetLogicalRect = resolution.logicalRect;
+        targetMonitorLayout = resolution.monitors;
     }
 
     const bool targetChanged = (d->streamTarget != target);
@@ -633,8 +640,11 @@ bool PlasmaScreencastV1Session::setupScreencastRequest(bool allowWorkspaceFallba
             target = Private::StreamTarget::Workspace;
             d->streamTarget = target;
             d->outputScreen = nullptr;
-            d->logicalRect = logicalRectForStream(-1);
-            d->monitorLayout = monitorLayoutForStream(-1, d->logicalRect);
+            const auto workspace = ScreencastTarget::resolve(screenSnapshot(), -1, {}, -1, false, true);
+            d->targetScreenName.clear();
+            d->targetStreamIndex = -1;
+            d->logicalRect = workspace.logicalRect;
+            d->monitorLayout = workspace.monitors;
             if (!d->logicalRect.isEmpty()) {
                 setLogicalSize(d->logicalRect.size());
             }
@@ -868,6 +878,7 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
         }
         uint state = me->type() == QEvent::MouseButtonPress ? 1 : 0;
         d->remoteInterface->button(button, state);
+        d->pressedInput.button(button, state);
         break;
     }
     case QEvent::Wheel: {
@@ -888,6 +899,7 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
 
         if (ke->nativeScanCode()) {
             d->remoteInterface->keyboard_key(ke->nativeScanCode(), state);
+            d->pressedInput.key(ke->nativeScanCode(), state);
         } else {
             auto keycode = Xkb::self()->keycodeFromKeysym(ke->nativeVirtualKey());
             if (!keycode) {
@@ -897,6 +909,7 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
 
             auto sendKey = [this, state](int keycode) {
                 d->remoteInterface->keyboard_key(keycode, state);
+                d->pressedInput.key(keycode, state);
             };
             switch (keycode->level) {
             case 0:
@@ -1043,7 +1056,7 @@ void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Pa
             : geometry.size() * screen->devicePixelRatio() == size();
         if (matchingPixels && d->logicalRect != geometry) {
             d->logicalRect = geometry;
-            d->monitorLayout = monitorLayoutForStream(-1, geometry);
+            d->monitorLayout = ScreencastTarget::resolve(screenSnapshot(), -1, {}, -1, false, true).monitors;
             setLogicalSize(geometry.size());
             Q_EMIT outputGeometryChanged(geometry);
         }

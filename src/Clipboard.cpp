@@ -8,6 +8,9 @@
 #include <freerdp/peer.h>
 #include <freerdp/server/cliprdr.h>
 
+#include <atomic>
+#include <mutex>
+
 #include "ClipboardText.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
@@ -22,8 +25,6 @@ namespace KRdp
 class KRDP_NO_EXPORT Clipboard::Private
 {
 public:
-    using CliprdrServerContextPtr = std::unique_ptr<CliprdrServerContext, decltype(&cliprdr_server_context_free)>;
-
     Private(Clipboard *qq)
         : q(qq)
     {
@@ -31,16 +32,34 @@ public:
 
     Clipboard *q;
 
-    uint32_t onClientFormatList(const CLIPRDR_FORMAT_LIST *formatList);
-    uint32_t onClientFormatListResponse(const CLIPRDR_FORMAT_LIST_RESPONSE *formatListResponse);
-    uint32_t onClientFormatDataRequest(const CLIPRDR_FORMAT_DATA_REQUEST *formatDataRequest);
-    uint32_t onClientFormatDataResponse(const CLIPRDR_FORMAT_DATA_RESPONSE *formatDataResponse);
+    // The client's PDUs, copied out of FreeRDP's buffers on the cliprdr
+    // thread so they can be handled later on the main thread.
+    struct FormatList {
+        QList<uint32_t> formatIds;
+    };
+    struct FormatDataRequest {
+        uint32_t requestedFormatId = 0;
+    };
+    struct FormatDataResponse {
+        uint16_t msgFlags = 0;
+        QByteArray data;
+    };
+
+    void onClientFormatList(const FormatList &formatList);
+    void onClientFormatDataRequest(const FormatDataRequest &formatDataRequest);
+    void onClientFormatDataResponse(const FormatDataResponse &formatDataResponse);
 
     RdpConnection *session;
 
-    CliprdrServerContextPtr clipContext = CliprdrServerContextPtr(nullptr, cliprdr_server_context_free);
+    // AUD-P7: created on the session thread (initialize()), stopped there
+    // (close()), and written through on the main thread; sendMutex orders
+    // those writes against Stop(). Freed in the destructor only.
+    std::atomic<CliprdrServerContext *> clipContext = nullptr;
+    std::mutex sendMutex;
+    std::atomic<bool> enabled = false;
+    // Set by close(): handlers posted before it and run after it are dropped.
+    std::atomic<bool> closing = false;
 
-    bool enabled = false;
     const QMimeData *serverData = nullptr;
     std::unique_ptr<QMimeData> clientData;
     // The format id of the one data request sent for the client's last format
@@ -48,46 +67,60 @@ public:
     // CF_UNICODETEXT, 8-bit for CF_TEXT/CF_OEMTEXT.
     uint32_t requestedClientFormat = 0;
 
-    template<typename>
-    struct function_arg_trait;
-    template<typename Argument>
-    struct function_arg_trait<uint32_t (Private::*)(Argument)> {
-        typedef Argument argument_t;
-    };
-
-    template<auto func>
-    inline static UINT processInMainThread(Clipboard *clipboard, function_arg_trait<decltype(func)>::argument_t packet)
+    // AUD-P5: hand the PDU to the main thread and return at once. This used
+    // to be a BlockingQueuedConnection: the cliprdr thread waited for the
+    // main thread, and a main thread that was itself waiting for the session
+    // (and so the cliprdr) thread to finish - connection teardown - never
+    // came, a deadlock. Nothing the client is told depends on the handler's
+    // result, so CHANNEL_RC_OK is returned without waiting.
+    template<typename Packet, void (Private::*handler)(const Packet &)>
+    static UINT postToMainThread(Clipboard *clipboard, Packet packet)
     {
-        uint32_t channelState;
+        if (!clipboard || clipboard->d->closing) {
+            return CHANNEL_RC_OK;
+        }
         QMetaObject::invokeMethod(
             clipboard,
-            [clipboard](function_arg_trait<decltype(func)>::argument_t packet) {
-                return ((*clipboard->d).*func)(packet);
+            [clipboard, packet = std::move(packet)]() {
+                if (clipboard->d->closing) {
+                    return;
+                }
+                ((*clipboard->d).*handler)(packet);
             },
-            Qt::BlockingQueuedConnection,
-            qReturnArg(channelState),
-            packet);
-        return channelState;
+            Qt::QueuedConnection);
+        return CHANNEL_RC_OK;
     }
 
     static UINT clientFormatList(CliprdrServerContext *context, const CLIPRDR_FORMAT_LIST *formatList)
     {
-        return processInMainThread<&Private::onClientFormatList>(reinterpret_cast<Clipboard *>(context->custom), formatList);
+        FormatList packet;
+        for (uint32_t i = 0; formatList && i < formatList->numFormats; ++i) {
+            packet.formatIds.append(formatList->formats[i].formatId);
+        }
+        return postToMainThread<FormatList, &Private::onClientFormatList>(static_cast<Clipboard *>(context->custom), std::move(packet));
     }
 
-    static UINT clientFormatListResponse(CliprdrServerContext *context, const CLIPRDR_FORMAT_LIST_RESPONSE *formatListResponse)
+    static UINT clientFormatListResponse(CliprdrServerContext *, const CLIPRDR_FORMAT_LIST_RESPONSE *)
     {
-        return processInMainThread<&Private::onClientFormatListResponse>(reinterpret_cast<Clipboard *>(context->custom), formatListResponse);
+        return CHANNEL_RC_OK;
     }
 
     static UINT clientFormatDataRequest(CliprdrServerContext *context, const CLIPRDR_FORMAT_DATA_REQUEST *formatDataRequest)
     {
-        return processInMainThread<&Private::onClientFormatDataRequest>(reinterpret_cast<Clipboard *>(context->custom), formatDataRequest);
+        FormatDataRequest packet{.requestedFormatId = formatDataRequest ? formatDataRequest->requestedFormatId : 0};
+        return postToMainThread<FormatDataRequest, &Private::onClientFormatDataRequest>(static_cast<Clipboard *>(context->custom), packet);
     }
 
     static UINT clientFormatDataResponse(CliprdrServerContext *context, const CLIPRDR_FORMAT_DATA_RESPONSE *formatDataResponse)
     {
-        return processInMainThread<&Private::onClientFormatDataResponse>(reinterpret_cast<Clipboard *>(context->custom), formatDataResponse);
+        FormatDataResponse packet;
+        if (formatDataResponse) {
+            packet.msgFlags = formatDataResponse->common.msgFlags;
+            if (formatDataResponse->requestedFormatData && formatDataResponse->common.dataLen > 0) {
+                packet.data = QByteArray(reinterpret_cast<const char *>(formatDataResponse->requestedFormatData), qsizetype(formatDataResponse->common.dataLen));
+            }
+        }
+        return postToMainThread<FormatDataResponse, &Private::onClientFormatDataResponse>(static_cast<Clipboard *>(context->custom), std::move(packet));
     }
 };
 
@@ -103,6 +136,18 @@ Clipboard::~Clipboard()
     // setServerData() took ownership of the last announcement; every earlier
     // one was freed by its successor.
     delete d->serverData;
+    if (auto *context = d->clipContext.exchange(nullptr)) {
+        cliprdr_server_context_free(context);
+    }
+}
+
+void Clipboard::installClientCallbacks(CliprdrServerContext *context, Clipboard *clipboard)
+{
+    context->custom = clipboard;
+    context->ClientFormatList = Private::clientFormatList;
+    context->ClientFormatListResponse = Private::clientFormatListResponse;
+    context->ClientFormatDataRequest = Private::clientFormatDataRequest;
+    context->ClientFormatDataResponse = Private::clientFormatDataResponse;
 }
 
 bool Clipboard::initialize()
@@ -113,29 +158,25 @@ bool Clipboard::initialize()
 
     auto peerContext = reinterpret_cast<PeerContext *>(d->session->rdpPeer()->context);
 
-    d->clipContext = Private::CliprdrServerContextPtr{cliprdr_server_context_new(peerContext->virtualChannelManager), cliprdr_server_context_free};
-    if (!d->clipContext) {
+    auto *context = cliprdr_server_context_new(peerContext->virtualChannelManager);
+    if (!context) {
         qCWarning(KRDP) << "Failed creating Clipboard context";
         return false;
     }
 
-    d->clipContext->useLongFormatNames = TRUE;
-    d->clipContext->streamFileClipEnabled = FALSE;
-    d->clipContext->fileClipNoFilePaths = FALSE;
-    d->clipContext->canLockClipData = FALSE;
-    d->clipContext->hasHugeFileSupport = FALSE;
+    context->useLongFormatNames = TRUE;
+    context->streamFileClipEnabled = FALSE;
+    context->fileClipNoFilePaths = FALSE;
+    context->canLockClipData = FALSE;
+    context->hasHugeFileSupport = FALSE;
 
-    d->clipContext->custom = this;
-    d->clipContext->rdpcontext = d->session->rdpPeer()->context;
-
-    d->clipContext->ClientFormatList = Private::clientFormatList;
-    d->clipContext->ClientFormatListResponse = Private::clientFormatListResponse;
-    d->clipContext->ClientFormatDataRequest = Private::clientFormatDataRequest;
-    d->clipContext->ClientFormatDataResponse = Private::clientFormatDataResponse;
+    context->rdpcontext = d->session->rdpPeer()->context;
+    installClientCallbacks(context, this);
+    d->clipContext = context;
 
     // returns 0 on success
     // https://pub.freerdp.com/api/server_2cliprdr__main_8c.html#ab4e8a28c6b4371c2a5f34e8716ab1e9e
-    if (d->clipContext->Start(d->clipContext.get())) {
+    if (context->Start(context)) {
         qCWarning(KRDP) << "Could not start Clipboard context";
         return false;
     };
@@ -152,15 +193,17 @@ bool Clipboard::enabled()
 
 void Clipboard::close()
 {
-    if (!d->clipContext) {
+    d->closing = true;
+    d->enabled = false;
+    auto *context = d->clipContext.load();
+    if (!context) {
         return;
     }
 
-    if (d->clipContext->Stop(d->clipContext.get())) {
+    std::lock_guard lock(d->sendMutex);
+    if (context->Stop(context)) {
         qCWarning(KRDP) << "Could not stop Clipboard context";
-        return;
     };
-    d->enabled = false;
 }
 
 void Clipboard::setServerData(const QMimeData *data)
@@ -180,7 +223,7 @@ std::unique_ptr<QMimeData> Clipboard::getClipboard() const
 
 void Clipboard::sendServerData()
 {
-    if (!d->serverData || !d->enabled) {
+    if (!d->serverData) {
         return;
     }
 
@@ -193,10 +236,13 @@ void Clipboard::sendServerData()
     formatList.common.msgFlags = 0;
     formatList.numFormats = 1;
     formatList.formats = &format;
-    d->clipContext->ServerFormatList(d->clipContext.get(), &formatList);
+    std::lock_guard lock(d->sendMutex);
+    if (auto *context = d->clipContext.load(); context && d->enabled) {
+        context->ServerFormatList(context, &formatList);
+    }
 }
 
-uint32_t Clipboard::Private::onClientFormatList(const CLIPRDR_FORMAT_LIST *formatList)
+void Clipboard::Private::onClientFormatList(const FormatList &formatList)
 {
     // One data request per format list, whatever text formats it announces:
     // a client copy typically lists CF_UNICODETEXT and CF_TEXT together, and
@@ -204,8 +250,7 @@ uint32_t Clipboard::Private::onClientFormatList(const CLIPRDR_FORMAT_LIST *forma
     // on the host per copy (the x2 amplifier in the announce storm). Prefer
     // CF_UNICODETEXT, then CF_TEXT, then CF_OEMTEXT.
     uint32_t wanted = 0;
-    for (uint32_t i = 0; i < formatList->numFormats; ++i) {
-        const auto formatId = formatList->formats[i].formatId;
+    for (const auto formatId : formatList.formatIds) {
         switch (formatId) {
         case CF_UNICODETEXT:
             wanted = formatId;
@@ -227,40 +272,45 @@ uint32_t Clipboard::Private::onClientFormatList(const CLIPRDR_FORMAT_LIST *forma
 
     // Acknowledge the client's format list first (MS-RDPECLIP 3.1.5.2.3:
     // the Format List Response precedes any Format Data Request).
+    std::lock_guard lock(sendMutex);
+    auto *context = clipContext.load();
+    const bool canSend = context && enabled;
     CLIPRDR_FORMAT_LIST_RESPONSE response = {};
     response.common.msgType = CB_FORMAT_LIST_RESPONSE;
     response.common.msgFlags = CB_RESPONSE_OK;
-    clipContext->ServerFormatListResponse(clipContext.get(), &response);
-
-    if (wanted == 0) {
-        qCDebug(KRDP) << "Client announced" << formatList->numFormats << "clipboard formats, none of them text; not requesting data";
-        return CHANNEL_RC_OK;
+    if (canSend) {
+        context->ServerFormatListResponse(context, &response);
     }
 
-    qCDebug(KRDP) << "Client announced" << formatList->numFormats << "clipboard formats; requesting text as format" << wanted;
+    if (wanted == 0) {
+        qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats, none of them text; not requesting data";
+        return;
+    }
+
+    qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats; requesting text as format" << wanted;
     requestedClientFormat = wanted;
     CLIPRDR_FORMAT_DATA_REQUEST formatDataRequest{.common = CLIPRDR_HEADER({.msgType = CB_FORMAT_DATA_REQUEST, .msgFlags = 0, .dataLen = 4}),
                                                   .requestedFormatId = wanted};
-    clipContext->ServerFormatDataRequest(clipContext.get(), &formatDataRequest);
-
-    return CHANNEL_RC_OK;
+    if (canSend) {
+        context->ServerFormatDataRequest(context, &formatDataRequest);
+    }
 }
 
-uint32_t Clipboard::Private::onClientFormatListResponse(const CLIPRDR_FORMAT_LIST_RESPONSE *)
+void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &formatDataRequest)
 {
-    return CHANNEL_RC_OK;
-}
-
-uint32_t Clipboard::Private::onClientFormatDataRequest(const CLIPRDR_FORMAT_DATA_REQUEST *formatDataRequest)
-{
-    if (!serverData || formatDataRequest->requestedFormatId != CF_UNICODETEXT) {
+    std::lock_guard lock(sendMutex);
+    auto *context = clipContext.load();
+    if (!context || !enabled) {
+        return;
+    }
+    if (!serverData || formatDataRequest.requestedFormatId != CF_UNICODETEXT) {
         CLIPRDR_FORMAT_DATA_RESPONSE response = {};
         response.common.msgType = CB_FORMAT_DATA_RESPONSE;
         response.common.msgFlags = CB_RESPONSE_FAIL;
         response.common.dataLen = 0;
         response.requestedFormatData = nullptr;
-        clipContext->ServerFormatDataResponse(clipContext.get(), &response);
-        return CHANNEL_RC_OK;
+        context->ServerFormatDataResponse(context, &response);
+        return;
     }
 
     // CF_UNICODETEXT is CRLF on the wire and requires null-terminated UTF-16LE.
@@ -274,20 +324,18 @@ uint32_t Clipboard::Private::onClientFormatDataRequest(const CLIPRDR_FORMAT_DATA
     response.requestedFormatData = reinterpret_cast<const BYTE *>(utf16Data.constData());
 
     qCDebug(KRDP) << "Serving host clipboard text to the client:" << text.length() << "characters";
-    clipContext->ServerFormatDataResponse(clipContext.get(), &response);
-
-    return CHANNEL_RC_OK;
+    context->ServerFormatDataResponse(context, &response);
 }
 
-uint32_t Clipboard::Private::onClientFormatDataResponse(const CLIPRDR_FORMAT_DATA_RESPONSE *formatDataResponse)
+void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &formatDataResponse)
 {
-    if (!(formatDataResponse->common.msgFlags & CB_RESPONSE_OK)) {
+    if (!(formatDataResponse.msgFlags & CB_RESPONSE_OK)) {
         qCDebug(KRDP) << "Client refused the clipboard data request for format" << requestedClientFormat;
-        return CHANNEL_RC_OK;
+        return;
     }
 
-    const auto *bytes = reinterpret_cast<const char *>(formatDataResponse->requestedFormatData);
-    const auto length = formatDataResponse->common.dataLen;
+    const auto *bytes = formatDataResponse.data.constData();
+    const auto length = qsizetype(formatDataResponse.data.size());
     QString text;
     if (requestedClientFormat == CF_UNICODETEXT) {
         // UTF-16LE with a null terminator; anything shorter than the
@@ -306,7 +354,7 @@ uint32_t Clipboard::Private::onClientFormatDataResponse(const CLIPRDR_FORMAT_DAT
         qCDebug(KRDP) << "Client clipboard text is empty";
         clientData.reset();
         Q_EMIT q->clientDataChanged();
-        return CHANNEL_RC_OK;
+        return;
     }
 
     // Stored LF on the host, whatever the wire carried.
@@ -314,7 +362,5 @@ uint32_t Clipboard::Private::onClientFormatDataResponse(const CLIPRDR_FORMAT_DAT
     clientData->setText(ClipboardText::toHost(text));
     qCDebug(KRDP) << "Client clipboard text received:" << clientData->text().length() << "characters";
     Q_EMIT q->clientDataChanged();
-
-    return CHANNEL_RC_OK;
 }
 }

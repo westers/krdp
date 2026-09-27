@@ -38,9 +38,12 @@ constexpr int BacklogFrames = 4;
 // that expected burst as a backlog signal.
 constexpr auto BacklogWarmupAfterStreamStart = std::chrono::seconds(20);
 
-inline bool backlogIsPressure(std::chrono::steady_clock::duration streamAge, int minimumAfterAck, int pendingNow)
+// With acknowledgements suspended by the client (SUSPEND_FRAME_ACKNOWLEDGEMENT,
+// AUD-P6) there is no ack evidence at all, so no backlog can be claimed; RTT
+// congestion still steers quality.
+inline bool backlogIsPressure(std::chrono::steady_clock::duration streamAge, int minimumAfterAck, int pendingNow, bool acksSuspended = false)
 {
-    if (streamAge < BacklogWarmupAfterStreamStart) {
+    if (acksSuspended || streamAge < BacklogWarmupAfterStreamStart) {
         return false;
     }
     return std::min(minimumAfterAck, pendingNow) >= BacklogFrames;

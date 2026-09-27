@@ -1643,9 +1643,8 @@ SessionController::LayoutUpdate SessionController::refreshMultiLayout()
 
     if (result.mixedScales && !m_warnedMixedScales) {
         m_warnedMixedScales = true;
-        qWarning() << "MonitorMode=multi with monitors at different scales: each monitor's logical origin is multiplied by its own device pixel"
-                   << "ratio, so the pixel rects may gap or overlap, and pointer positions use the primary's scale of" << result.layout.scale
-                   << "- multi is only exact on a uniform scale";
+        qInfo() << "MonitorMode=multi with monitors at different scales: surfaces are packed per monitor and pointer input maps through each"
+                << "monitor's own scale" << result.layout.scales;
     }
 
     // A wrapper that lost a monitor to dropSession() is running fewer sessions
@@ -1659,7 +1658,8 @@ SessionController::LayoutUpdate SessionController::refreshMultiLayout()
     });
 
     if (m_multiMonitor && !wrapperShortOfMonitors && m_layout.monitors == result.layout.monitors && m_streamIndices == result.streamIndices
-        && qFuzzyCompare(m_layout.scale, result.layout.scale)) {
+        && qFuzzyCompare(m_layout.scale, result.layout.scale) && m_layout.scales == result.layout.scales
+        && m_layout.logicalOrigins == result.layout.logicalOrigins) {
         return LayoutUpdate::Unchanged;
     }
 
@@ -1730,9 +1730,14 @@ SessionController::MultiLayoutResult SessionController::computeMultiLayout(int m
             break;
         }
     }
-    result.mixedScales = std::any_of(kept.cbegin(), kept.cend(), [&infos, scale = result.layout.scale](qsizetype index) {
-        return !qFuzzyCompare(infos.at(index).devicePixelRatio, scale);
-    });
+    result.mixedScales = KRdp::MultiLayout::mixedScales(infos, kept);
+    // AUD-P8: at mixed scales each monitor maps input with its own scale and
+    // logical origin, over a non-overlapping wire atlas (toGlobalLogical()).
+    // At a uniform scale scales stays empty and `scale` applies as before.
+    const auto mapping = KRdp::MultiLayout::perMonitorMapping(infos, kept, result.layout.monitors);
+    result.layout.monitors = mapping.wire;
+    result.layout.scales = mapping.scales;
+    result.layout.logicalOrigins = mapping.logicalOrigins;
 
     return result;
 }
@@ -2243,8 +2248,11 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     // desk back and broadcasts `takeover`.
     connect(wrapper.get(), &SessionWrapper::consoleActivityDetected, this, &SessionController::releasePhysicalOutputs, Qt::QueuedConnection);
 
+    // Every sessionError is a capture that failed to start or could not be
+    // recovered (AUD-P4): close with ERRINFO_GRAPHICS_SUBSYSTEM_FAILED so the
+    // client says why instead of reporting a plain disconnect.
     connect(wrapper.get(), &SessionWrapper::sessionError, this, [newConnection] {
-        newConnection->close(KRdp::RdpConnection::CloseReason::None);
+        newConnection->close(KRdp::RdpConnection::CloseReason::VideoInitFailed);
     });
 
     m_wrappers.push_back(std::move(wrapper));

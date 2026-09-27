@@ -328,6 +328,54 @@ private Q_SLOTS:
         QCOMPARE(entries.at(0).origin, QPoint(0, 0));
         QCOMPARE(entries.at(1).origin, QPoint(2560, 0));
     }
+
+    // AUD-P8: at mixed scales every monitor maps input with its own scale.
+    void mixedScalesMapEachMonitorWithItsOwnScale()
+    {
+        // A 100 % primary beside a 200 % laptop panel that KWin places right
+        // after it in logical space.
+        const QVector<ScreenInfo> screens{
+            screen(u"DP-1"_s, QRect(0, 0, 2560, 1440), 1.0, true),
+            screen(u"eDP-1"_s, QRect(2560, 0, 1280, 800), 2.0),
+        };
+        QList<qsizetype> kept;
+        const auto layout = selectMultiLayout(screens, nullptr, &kept);
+        QCOMPARE(layout.size(), 2);
+        QVERIFY(KRdp::MultiLayout::mixedScales(screens, kept));
+
+        const auto mapping = KRdp::MultiLayout::perMonitorMapping(screens, kept, layout);
+        QCOMPARE(mapping.scales, (QVector<qreal>{1.0, 2.0}));
+        QCOMPARE(mapping.logicalOrigins, (QVector<QPoint>{QPoint(0, 0), QPoint(2560, 0)}));
+        // Packed without the gap origin*scale left (eDP-1 used to sit at 5120).
+        QCOMPARE(mapping.wire.at(0).geometry, QRect(0, 0, 2560, 1440));
+        QCOMPARE(mapping.wire.at(1).geometry, QRect(2560, 0, 2560, 1600));
+        QVERIFY(mapping.wire.at(0).primary);
+
+        const qreal primaryScale = 1.0;
+        // On the primary: unchanged.
+        QCOMPARE(KRdp::MultiLayout::wireToLogical(mapping, primaryScale, QPointF(100, 100)), QPointF(100, 100));
+        // On the 200 % panel: its own origin plus local pixels halved, not the
+        // primary's 1:1 (which would put the pointer at x 2760, far off the
+        // panel's middle).
+        QCOMPARE(KRdp::MultiLayout::wireToLogical(mapping, primaryScale, QPointF(2560 + 1280, 800)), QPointF(2560 + 640, 400));
+        QCOMPARE(KRdp::MultiLayout::wireToLogical(mapping, primaryScale, QPointF(2560 + 2558, 1598)), QPointF(2560 + 1279, 799));
+    }
+
+    void uniformScaleKeepsTheSingleScalePath()
+    {
+        const QVector<ScreenInfo> screens{
+            screen(u"DP-1"_s, QRect(0, 0, 1280, 720), 2.0, true),
+            screen(u"HDMI-A-1"_s, QRect(1280, 0, 1280, 720), 2.0),
+        };
+        QList<qsizetype> kept;
+        const auto layout = selectMultiLayout(screens, nullptr, &kept);
+        QVERIFY(!KRdp::MultiLayout::mixedScales(screens, kept));
+        const auto mapping = KRdp::MultiLayout::perMonitorMapping(screens, kept, layout);
+        QVERIFY(mapping.scales.isEmpty());
+        QVERIFY(mapping.logicalOrigins.isEmpty());
+        QCOMPARE(mapping.wire, layout);
+        QCOMPARE(KRdp::MultiLayout::wireToLogical(mapping, 2.0, QPointF(3000, 200)), QPointF(1500, 100));
+    }
 };
 
 QTEST_GUILESS_MAIN(MultiLayoutTest)

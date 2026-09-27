@@ -76,7 +76,10 @@ public:
      *
      * \param server The KRdp::Server instance this session is part of.
      * \param socketHandle A file handle to the socket this session should use
-     *                     for communication.
+     *                     for communication. -1 makes a detached object that
+     *                     never initializes (used by tests); for any other
+     *                     handle a failed initialization closes the socket
+     *                     and moves the connection to Closed.
      */
     explicit RdpConnection(Server *server, qintptr socketHandle);
     ~RdpConnection() override;
