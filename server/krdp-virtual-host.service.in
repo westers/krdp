@@ -1,4 +1,4 @@
-# Draft broker service; not installed pending privileged/runtime/UI acceptance.
+# Retained-desktop broker. Disabled by default; configure /etc/krdp/virtual-host.conf first.
 [Unit]
 Description=KRDP persistent virtual-desktop broker
 After=network-online.target systemd-logind.service

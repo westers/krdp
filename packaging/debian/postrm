@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Steve Westers
+# SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+set -e
+
+if [ "$1" = "remove" ] && [ -z "$DPKG_ROOT" ] && [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+
+if [ "$1" = "purge" ] && [ -z "$DPKG_ROOT" ] && [ -x /usr/bin/deb-systemd-helper ]; then
+    deb-systemd-helper purge krdp-console-host.service krdp-virtual-host.service >/dev/null || true
+    deb-systemd-helper --user purge app-org.kde.krdpserver.service >/dev/null || true
+fi
+
+exit 0

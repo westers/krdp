@@ -107,7 +107,8 @@ if (BUILD_PLASMA_SESSION)
     endif()
 endif()
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpserver.desktop DESTINATION ${KDE_INSTALL_APPDIR})
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/krdp-console-host.service DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR})
+# KDE_INSTALL_SYSTEMDUNITDIR is lib/systemd; system units belong in its system/ subdirectory.
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/krdp-console-host.service DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system)
 install(FILES console-host.conf.example DESTINATION ${KDE_INSTALL_DATADIR}/krdp)
 if (BUILD_PLASMA_SESSION)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpconsoleworker.desktop DESTINATION ${KDE_INSTALL_APPDIR})
@@ -139,4 +140,25 @@ if (BUILD_PLASMA_SESSION)
     install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support/
         DESTINATION ${KDE_INSTALL_DATADIR}/krdp/virtual-session/support
         COMPONENT KRdpVirtualSessionTest EXCLUDE_FROM_ALL)
+endif()
+
+# The krdp system deb (scripts/package-krdp.sh): the retained-desktop broker,
+# its per-desktop helpers and real system units. Both brokers stay disabled
+# (00-krdp-system.preset); an administrator enables them after providing TLS
+# material in /etc/krdp. The worker is shared with the Console host above.
+if(KRDP_BUILD_SYSTEM_PACKAGE)
+    install(TARGETS krdp-virtual-host krdp-virtual-session-entry
+        krdp-virtual-pam-keeper krdp-virtual-session-cleanup
+        krdp-virtual-device-entry krdp-virtual-guardian krdp-virtual-guardianctl
+        DESTINATION ${KDE_INSTALL_BINDIR})
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-host.service
+        ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-session@.service
+        DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system)
+    install(FILES 00-krdp-system.preset DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system-preset)
+    install(FILES krdp-virtual-session.pam DESTINATION /etc/pam.d RENAME krdp-virtual-session)
+    install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/launch-virtual-session.sh
+        ${CMAKE_SOURCE_DIR}/scripts/virtual-session-desktop.sh
+        DESTINATION ${KDE_INSTALL_DATADIR}/krdp/virtual-session)
+    install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support/
+        DESTINATION ${KDE_INSTALL_DATADIR}/krdp/virtual-session/support)
 endif()

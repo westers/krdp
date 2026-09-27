@@ -1,0 +1,34 @@
+Source: krdp
+Section: kde
+Priority: optional
+Maintainer: Steve Westers <amiga1.2k@gmail.com>
+Standards-Version: 4.7.2
+Homepage: https://github.com/westers/krdp
+Rules-Requires-Root: no
+
+Package: krdp
+Architecture: any
+Depends: ${shlibs:Depends},
+         bubblewrap,
+         dbus-daemon,
+         jq,
+         kwin-wayland,
+         libglib2.0-bin,
+         libkf6service-bin,
+         libkscreen-bin,
+         pipewire-bin,
+         plasma-workspace,
+         wireplumber
+Recommends: systemsettings
+Conflicts: kde-config-krdp, krdp-console-test, krdp-virtual-test
+Replaces: kde-config-krdp, krdp-console-test, krdp-virtual-test
+Description: KDE RDP server (Steve's fork) with console and retained desktops
+ KRdp shares a Plasma Wayland desktop over RDP with H.264 (AVC420/AVC444)
+ video, audio, microphone, camera and clipboard redirection.
+ .
+ This build adds the physical-console host (krdp-console-host and
+ krdp-console-worker), which keeps one RDP transport across the SDDM greeter
+ and the seat0 Plasma session, and the retained virtual-desktop broker
+ (krdp-virtual-host) with its guardian, PAM keeper and cleanup helpers.
+ Both system services are installed disabled. It bundles a patched private
+ KPipeWire in /usr/lib/<triplet>/krdp that does not replace the system one.

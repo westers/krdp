@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Steve Westers
+# SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+set -e
+
+# Stop the brokers only when the package is removed, never on upgrade.
+# Running krdp-virtual-session@ desktops are left alone: stopping them would
+# end users' retained sessions.
+if [ "$1" = "remove" ] && [ -z "$DPKG_ROOT" ] && [ -d /run/systemd/system ]; then
+    deb-systemd-invoke stop krdp-console-host.service krdp-virtual-host.service >/dev/null || true
+fi
+
+exit 0

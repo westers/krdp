@@ -1,4 +1,4 @@
-# Draft only: install as /etc/pam.d/krdp-virtual-session after root acceptance.
+# Installed as /etc/pam.d/krdp-virtual-session (krdp package; a draft in test packages).
 # Authentication already happened at the RDP broker; this stack must never
 # become an alternative password-authentication policy.
 auth requisite pam_deny.so

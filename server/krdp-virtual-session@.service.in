@@ -1,5 +1,5 @@
-# Draft independent desktop service; not installed until launcher integration
-# and privileged Sol acceptance are complete. Never PartOf the RDP broker.
+# One retained desktop, started by krdp-virtual-host. Never PartOf the RDP broker:
+# restarting or upgrading the broker must not end running desktops.
 [Unit]
 Description=KRDP retained virtual desktop %i
 After=systemd-user-sessions.service

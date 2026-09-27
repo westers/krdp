@@ -1,0 +1,44 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Steve Westers
+# SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+set -e
+
+# Nothing is enabled, started or restarted here. The user unit follows its
+# upstream preset (never enabled by default); an upgrade from Ubuntu's krdp
+# keeps whatever enablement state deb-systemd-helper recorded for it. The
+# system brokers need TLS material in /etc/krdp first (00-krdp-system.preset).
+# These blocks are debhelper's --no-enable snippets.
+if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ] || [ "$1" = "abort-deconfigure" ] || [ "$1" = "abort-remove" ]; then
+    if [ -z "$DPKG_ROOT" ]; then
+        if deb-systemd-helper --user debian-installed 'app-org.kde.krdpserver.service'; then
+            deb-systemd-helper --user unmask 'app-org.kde.krdpserver.service' >/dev/null || true
+            if deb-systemd-helper --quiet --user was-enabled 'app-org.kde.krdpserver.service'; then
+                deb-systemd-helper --user enable 'app-org.kde.krdpserver.service' >/dev/null || true
+            fi
+        fi
+        deb-systemd-helper --user update-state 'app-org.kde.krdpserver.service' >/dev/null || true
+    fi
+
+    for unit in krdp-console-host.service krdp-virtual-host.service; do
+        if deb-systemd-helper debian-installed "$unit"; then
+            deb-systemd-helper unmask "$unit" >/dev/null || true
+            if deb-systemd-helper --quiet was-enabled "$unit"; then
+                deb-systemd-helper enable "$unit" >/dev/null || true
+            fi
+        fi
+        deb-systemd-helper update-state "$unit" >/dev/null || true
+    done
+
+    if [ -z "$DPKG_ROOT" ] && [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null || true
+        # A running broker keeps its old binaries mapped and speaks the old
+        # paired worker protocol; restarting it is a deliberate deploy step.
+        for unit in krdp-console-host-test.service krdp-console-host.service krdp-virtual-host.service; do
+            if systemctl is-active --quiet "$unit"; then
+                echo "krdp: $unit is still running the previous binaries; restart or stop it deliberately." >&2
+            fi
+        done
+    fi
+fi
+
+exit 0

@@ -1,0 +1,89 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: krdp
+Upstream-Contact: Steve Westers <amiga1.2k@gmail.com>
+Source: https://github.com/westers/krdp
+Comment: Fork of KDE KRdp (https://invent.kde.org/plasma/krdp). The package
+ also bundles a patched private build of KDE KPipeWire
+ (https://invent.kde.org/plasma/kpipewire) in /usr/lib/<triplet>/krdp.
+
+Files: *
+Copyright: 2020-2023 Aleix Pol Gonzalez <aleixpol@kde.org>
+           2023-2024 Arjen Hiemstra <ahiemstra@heimr.nl>
+           2024 Akseli Lahtinen <akselmo@akselmo.dev>
+           2026 Steve Westers <amiga1.2k@gmail.com>
+License: LGPL-2.1-only or LGPL-3.0-only or LicenseRef-KDE-Accepted-LGPL
+
+Files: src/NetworkDetection.cpp
+       src/RdpConnection.cpp
+       src/VideoStream.cpp
+Copyright: 2020-2023 Pascal Nowack
+           2023 Arjen Hiemstra <ahiemstra@heimr.nl>
+License: GPL-2+
+
+Files: CMakeLists.txt */CMakeLists.txt KRdpConfig.cmake.in
+Copyright: 2023 Arjen Hiemstra <ahiemstra@heimr.nl>
+           2024 Akseli Lahtinen <akselmo@akselmo.dev>
+License: BSD-2-clause
+
+Files: *.desktop *.desktop.cmake src/kcm/kcm_krdpserver.json
+Copyright: None
+License: CC0-1.0
+
+Files: kpipewire/*
+Copyright: 2020-2024 Aleix Pol Gonzalez <aleixpol@kde.org>
+           2026 Steve Westers <amiga1.2k@gmail.com>
+License: LGPL-2.1-only or LGPL-3.0-only or LicenseRef-KDE-Accepted-LGPL
+
+License: LGPL-2.1-only
+ On Debian systems, the complete text of the GNU Lesser General Public
+ License version 2.1 can be found in "/usr/share/common-licenses/LGPL-2.1".
+
+License: LGPL-3.0-only
+ On Debian systems, the complete text of the GNU Lesser General Public
+ License version 3 can be found in "/usr/share/common-licenses/LGPL-3".
+
+License: LicenseRef-KDE-Accepted-LGPL
+ This library is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation; either version 3 of the license or (at your
+ option) any later version that is accepted by the membership of KDE e.V.
+ (or its successor approved by the membership of KDE e.V.), which shall act
+ as a proxy as defined in Section 6 of version 3 of the license.
+ .
+ On Debian systems, the complete text of the GNU Lesser General Public
+ License version 3 can be found in "/usr/share/common-licenses/LGPL-3".
+
+License: GPL-2+
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the Free
+ Software Foundation; either version 2 of the License, or (at your option)
+ any later version.
+ .
+ On Debian systems, the complete text of the GNU General Public License
+ version 2 can be found in "/usr/share/common-licenses/GPL-2".
+
+License: BSD-2-clause
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the following conditions are met:
+ .
+ 1. Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+ 2. Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+ .
+ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ POSSIBILITY OF SUCH DAMAGE.
+
+License: CC0-1.0
+ On Debian systems, the complete text of the Creative Commons Zero v1.0
+ Universal license can be found in "/usr/share/common-licenses/CC0-1.0".
