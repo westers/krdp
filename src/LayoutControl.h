@@ -158,6 +158,40 @@ KRDP_EXPORT QJsonObject layoutRecord(const Layout &layout);
 KRDP_EXPORT QJsonObject takeoverRecord(const Layout &layout);
 
 /**
+ * KRDPCTL channel protocol v2 (~/dev/rdp/KRDPCTL-V2-CONTRACT.md): every request may carry a
+ * `requestId`, which every reply to it echoes; the server announces itself with a
+ * `capabilities` record once the client has authenticated. The per-record `v` stays
+ * ProtocolVersion; ChannelProtocol is the channel's version, carried in `capabilities`.
+ */
+constexpr int ChannelProtocol = 2;
+
+struct RequestId {
+    QString value;        ///< empty: the request carried none (its replies are uncorrelated)
+    bool invalid = false; ///< present but not 1-64 of [A-Za-z0-9_-], or not equal to a present `id`
+};
+/** Removes `requestId` from \a record (so type-specific parsers see the v1 shape) and returns it. */
+KRDP_EXPORT RequestId takeRequestId(QJsonObject &record);
+/** \a reply with `requestId` set to \a requestId; unchanged for an empty one. */
+KRDP_EXPORT QJsonObject withRequestId(QJsonObject reply, const QString &requestId);
+/** The refusal of a record whose requestId is invalid (never executed, never correlated). */
+KRDP_EXPORT QJsonObject invalidRequestIdRecord();
+
+/** What a KRDPCTL endpoint offers, as the `capabilities` record says it. */
+struct ChannelCapabilities {
+    QString host; ///< "physical" | "console" | "virtual"
+    bool layoutQuery = false;
+    bool layoutApply = false;
+    bool virtualList = false;
+    bool virtualCreate = false;
+    bool virtualSelectedCreate = false;
+    bool topologyQuery = false;
+    bool topologyPreview = false;
+    bool topologyApply = false;
+    bool operator==(const ChannelCapabilities &) const = default;
+};
+KRDP_EXPORT QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities);
+
+/**
  * \a record plus `"v": 1`, as a 4-byte big-endian length prefix followed by
  * UTF-8 JSON. This `v` is the protocol's ONLY version field: the design
  * doc's `Layout { version: 1, ... }` prose refers to this same wire-level

@@ -454,3 +454,26 @@ target_include_directories(ListenAddressTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ListenAddressTest PRIVATE Qt6::Test Qt6::Core Qt6::Network)
 add_test(NAME ListenAddressTest COMMAND ListenAddressTest)
 # --- end AUD-WS-S ---
+
+# --- AUD-WS-L ---
+# KRDPCTL v2: requestId, capabilities, chroma timing (pure).
+add_executable(KrdpctlV2Test KrdpctlV2Test.cpp)
+target_include_directories(KrdpctlV2Test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+target_include_directories(KrdpctlV2Test SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(KrdpctlV2Test PRIVATE Qt6::Test Qt6::Core KRdp)
+add_test(NAME KrdpctlV2Test COMMAND KrdpctlV2Test)
+# KRDPCTL v2 end to end on 127.0.0.1: the production virtual broker transport and krdpctl-probe.
+if(TARGET krdpctl-probe)
+    add_executable(KrdpctlV2LoopbackTest KrdpctlV2LoopbackTest.cpp
+        ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp
+        ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
+        ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp
+        ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardianClient.cpp)
+    target_include_directories(KrdpctlV2LoopbackTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
+    target_link_libraries(KrdpctlV2LoopbackTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
+    target_compile_definitions(KrdpctlV2LoopbackTest PRIVATE KRDPCTL_PROBE="$<TARGET_FILE:krdpctl-probe>")
+    add_dependencies(KrdpctlV2LoopbackTest krdpctl-probe)
+    add_test(NAME KrdpctlV2LoopbackTest COMMAND KrdpctlV2LoopbackTest)
+    set_tests_properties(KrdpctlV2LoopbackTest PROPERTIES TIMEOUT 180)
+endif()
+# --- end AUD-WS-L ---

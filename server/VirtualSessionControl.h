@@ -57,6 +57,8 @@ public:
     };
     void setInitialLayoutPreviewCapabilities(InitialLayoutPreviewCapabilities caps)
     { m_initialCaps = caps; ++m_initialRevision; }
+    /// Selected-screen creation is offered (KRDPCTL v2 `capabilities.virtualSessions.selectedCreate`).
+    bool selectedCreateAvailable() const { return m_initialCaps.maxOutputs > 0 && bool(m_selectedCreate); }
     enum class DismissResult { Accepted, Unavailable, Uncertain };
     void setDismissHandlers(std::function<bool(quint32, const QString &)> eligible,
                             std::function<DismissResult(quint32, const QString &)> dismiss)

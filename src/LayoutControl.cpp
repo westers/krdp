@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "LayoutControl.h"
+
+#include <QRegularExpression>
 #include "RemoteMonitorGeometry.h"
 
 #include <algorithm>
@@ -375,6 +377,57 @@ std::optional<ChromaRequest> chromaFromJson(const QJsonObject &object)
         *target = value.toInt();
     }
     return request;
+}
+
+RequestId takeRequestId(QJsonObject &record)
+{
+    RequestId result;
+    const auto found = record.constFind(QStringLiteral("requestId"));
+    if (found == record.constEnd()) {
+        return result;
+    }
+    static const QRegularExpression token(QStringLiteral("^[A-Za-z0-9_-]{1,64}$"));
+    const QJsonValue value = *found;
+    record.remove(QStringLiteral("requestId"));
+    const QJsonValue id = record.value(QStringLiteral("id"));
+    if (!value.isString() || !token.match(value.toString()).hasMatch() || (!id.isUndefined() && id != value)) {
+        result.invalid = true;
+        return result;
+    }
+    result.value = value.toString();
+    return result;
+}
+
+QJsonObject withRequestId(QJsonObject reply, const QString &requestId)
+{
+    if (!requestId.isEmpty()) {
+        reply.insert(QStringLiteral("requestId"), requestId);
+    }
+    return reply;
+}
+
+QJsonObject invalidRequestIdRecord()
+{
+    return errorRecord({QStringLiteral("invalid"), QStringLiteral("invalid requestId")});
+}
+
+QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
+{
+    return QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("capabilities")},
+        {QStringLiteral("v"), ProtocolVersion},
+        {QStringLiteral("protocol"), ChannelProtocol},
+        {QStringLiteral("host"), capabilities.host},
+        {QStringLiteral("layout"), QJsonObject{{QStringLiteral("query"), capabilities.layoutQuery}, {QStringLiteral("apply"), capabilities.layoutApply}}},
+        {QStringLiteral("virtualSessions"),
+         QJsonObject{{QStringLiteral("list"), capabilities.virtualList},
+                     {QStringLiteral("create"), capabilities.virtualCreate},
+                     {QStringLiteral("selectedCreate"), capabilities.virtualSelectedCreate}}},
+        {QStringLiteral("topology"),
+         QJsonObject{{QStringLiteral("query"), capabilities.topologyQuery},
+                     {QStringLiteral("preview"), capabilities.topologyPreview},
+                     {QStringLiteral("apply"), capabilities.topologyApply}}},
+    };
 }
 
 QJsonObject errorRecord(const Error &error)

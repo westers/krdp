@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "SessionController.h"
+#include "ChromaMerge.h"
+
+#include <QScopeGuard>
 #include "AudioPriority.h"
 
 #include <algorithm>
@@ -1051,6 +1054,15 @@ public:
     };
     ControlGate controlGate = ControlGate::Undecided;
     QTimer controlTimer;
+    /**
+     * KRDPCTL v2 requestIds (KRDPCTL-V2-CONTRACT.md): the request being handled right now,
+     * which every synchronous reply echoes (replyTo()); the apply the layout executor is
+     * working on, whose error/`layout` echo it when they land; and the one the next
+     * `layout` record answers.
+     */
+    QString replyRequestId;
+    QString applyRequestId;
+    QString layoutReplyRequestId;
     /** This connection's id on the KRDPCTL channel (`layout.owner`, the executor's `owner` fields, logs). */
     QString controlId;
     /** Sessions were built from the host layout (buildLayoutSessions()); kept out of every configured-mode rebuild. */
@@ -2250,6 +2262,17 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     m_wrappers.push_back(std::move(wrapper));
 }
 
+namespace
+{
+/** A reply to the request \a wrapper is handling, echoing its requestId (KRDPCTL v2). */
+void replyTo(SessionWrapper *wrapper, const QJsonObject &record)
+{
+    if (wrapper && wrapper->connection) {
+        wrapper->connection->sendControlRecord(KRdp::LayoutControl::withRequestId(record, wrapper->replyRequestId));
+    }
+}
+}
+
 void SessionController::onClientDisplayInfo(SessionWrapper *wrapper)
 {
     if (!wrapper || !wrapper->connection || wrapper->controlGate != SessionWrapper::ControlGate::Undecided) {
@@ -2262,11 +2285,19 @@ void SessionController::onClientDisplayInfo(SessionWrapper *wrapper)
         return;
     }
     wrapper->controlGate = SessionWrapper::ControlGate::Waiting;
+    // KRDPCTL v2: the channel is only open once the client authenticated (AUD-S1), and only
+    // a client that opened it hears anything: `capabilities` goes first, then the 3 s
+    // first-record gate starts. A stock RDP client (no KRDPCTL) never gets here.
+    KRdp::LayoutControl::ChannelCapabilities capabilities;
+    capabilities.host = u"physical"_s;
+    capabilities.layoutQuery = true;
+    capabilities.layoutApply = true;
+    wrapper->connection->sendControlRecord(KRdp::LayoutControl::capabilitiesRecord(capabilities));
     wrapper->controlTimer.start();
-    qInfo() << "KRDPCTL: client joined the channel; holding the session build for its first record";
+    qInfo() << "KRDPCTL: client joined the channel; capabilities sent, holding the session build for its first record";
 }
 
-void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObject &record)
+void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObject &incoming)
 {
     if (!wrapper || !wrapper->connection) {
         return;
@@ -2278,15 +2309,31 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
         qWarning() << "KRDPCTL: dropping a record from an unauthenticated connection";
         return;
     }
+    // KRDPCTL v2: the requestId is taken off before anything parses the record (the v1
+    // parsers count keys) and echoed on every reply to it; an invalid one is refused
+    // without executing anything.
+    QJsonObject record = incoming;
+    const auto requestId = KRdp::LayoutControl::takeRequestId(record);
+    if (requestId.invalid) {
+        connection->sendControlRecord(KRdp::LayoutControl::invalidRequestIdRecord());
+        return;
+    }
+    const QPointer<SessionWrapper> replying(wrapper);
+    const QString outerRequestId = std::exchange(wrapper->replyRequestId, requestId.value);
+    const auto restoreRequestId = qScopeGuard([replying, outerRequestId] {
+        if (replying) {
+            replying->replyRequestId = outerRequestId;
+        }
+    });
     const QString type = record.value(QLatin1String("type")).toString();
     if (type == QLatin1String("audio-priority")) {
         const auto request = KRdp::AudioPriority::parse(record);
         if (!request) {
-            connection->sendControlRecord(KRdp::AudioPriority::reply(record, false, u"invalid audio-priority request"_s));
+            replyTo(wrapper, KRdp::AudioPriority::reply(record, false, u"invalid audio-priority request"_s));
             return;
         }
         connection->setAudioPriority(request->enabled);
-        connection->sendControlRecord(KRdp::AudioPriority::reply(record, connection->audioPriorityActive()));
+        replyTo(wrapper, KRdp::AudioPriority::reply(record, connection->audioPriorityActive()));
         return; // This policy never consumes the initial layout-selection gate.
     }
     // A record proves the channel: a gate still undecided (cannot happen
@@ -2303,7 +2350,7 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
     // version's record is not interpreted, whatever its type says.
     const int version = record.value(QLatin1String("v")).toInt();
     if (version != KRdp::LayoutControl::ProtocolVersion) {
-        connection->sendControlRecord(
+        replyTo(wrapper, 
             KRdp::LayoutControl::errorRecord({u"unsupported"_s, u"protocol version %1 is not supported; this server speaks %2"_s.arg(version).arg(KRdp::LayoutControl::ProtocolVersion)}));
         if (first) {
             qInfo() << "KRDPCTL: first record has protocol version" << version << "; using the configured MonitorMode";
@@ -2314,7 +2361,7 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
 
     if (type == QLatin1String("query")) {
         const auto layout = layoutFor(wrapper);
-        connection->sendControlRecord(KRdp::LayoutControl::layoutRecord(layout));
+        replyTo(wrapper, KRdp::LayoutControl::layoutRecord(layout));
         if (first) {
             // Soft query: the layout and nothing else; the connection ends
             // when the client hangs up.
@@ -2365,7 +2412,7 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
         return;
     }
 
-    connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"unsupported"_s, u"unknown record type \"%1\""_s.arg(type)}));
+    replyTo(wrapper, KRdp::LayoutControl::errorRecord({u"unsupported"_s, u"unknown record type \"%1\""_s.arg(type)}));
     if (first) {
         // Whatever this client speaks, its first record was not one of ours;
         // serve it as a client without the channel rather than leave it
@@ -2387,7 +2434,7 @@ void SessionController::onControlCodec(SessionWrapper *wrapper, const QJsonObjec
     QVector<KRdp::VideoCodec> ordered;
     for (const QJsonValue &value : codecs) {
         if (!value.isString()) {
-            connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array of hevc and/or av1"_s}));
+            replyTo(wrapper, KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array of hevc and/or av1"_s}));
             return;
         }
         const QString name = value.toString().trimmed().toLower();
@@ -2399,12 +2446,12 @@ void SessionController::onControlCodec(SessionWrapper *wrapper, const QJsonObjec
             ordered.append(KRdp::VideoCodec::Av1);
             continue;
         }
-        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array of hevc and/or av1"_s}));
+        replyTo(wrapper, KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array of hevc and/or av1"_s}));
         return;
     }
     if (!ordered.isEmpty()) selected = ordered.first();
     connection->videoStream()->setPrivateCodecPolicy(ordered, adaptive);
-    connection->sendControlRecord(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"selected"_s, selected ? QLatin1String(KRdp::VideoCodecSupport::codecName(*selected)) : u"avc"_s}});
+    replyTo(wrapper, QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"selected"_s, selected ? QLatin1String(KRdp::VideoCodecSupport::codecName(*selected)) : u"avc"_s}});
     qInfo() << "KRDPCTL: private codec selected" << (selected ? KRdp::VideoCodecSupport::codecName(*selected) : "avc");
 }
 
@@ -2416,13 +2463,13 @@ void SessionController::onControlMedia(SessionWrapper *wrapper, const QJsonObjec
     const QJsonValue camera = record.value(QLatin1String("camera"));
     const QJsonValue silenceHost = record.value(QLatin1String("silenceHost"));
     if (!playback.isBool() || !microphone.isBool() || !camera.isBool() || (!silenceHost.isUndefined() && !silenceHost.isBool())) {
-        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"media playback, microphone, camera, and silenceHost must be booleans"_s}));
+        replyTo(wrapper, KRdp::LayoutControl::errorRecord({u"invalid"_s, u"media playback, microphone, camera, and silenceHost must be booleans"_s}));
         return;
     }
     // A silent host only makes sense when audio is actually redirected.
     const bool isolated = playback.toBool() && silenceHost.toBool(false);
     connection->setMediaPolicy(playback.toBool(), microphone.toBool(), camera.toBool(), isolated);
-    connection->sendControlRecord(QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"playback"_s, playback}, {u"microphone"_s, microphone}, {u"camera"_s, camera}, {u"silenceHost"_s, isolated}});
+    replyTo(wrapper, QJsonObject{{u"type"_s, u"media"_s}, {u"v"_s, KRdp::LayoutControl::ProtocolVersion}, {u"ok"_s, true}, {u"playback"_s, playback}, {u"microphone"_s, microphone}, {u"camera"_s, camera}, {u"silenceHost"_s, isolated}});
 }
 
 void SessionController::onControlTimeout(SessionWrapper *wrapper)
@@ -2480,14 +2527,15 @@ void SessionController::buildConfiguredSessions(SessionWrapper *wrapper)
 
 void SessionController::onControlApply(SessionWrapper *wrapper, const QJsonObject &record, bool first)
 {
-    auto *connection = wrapper->connection.data();
+    // The executor's result (onLayoutApplied()) and the `layout` after it answer this apply.
+    wrapper->applyRequestId = wrapper->replyRequestId;
     const QString id = wrapper->controlId;
     // Whatever goes wrong below, a channel client that asked for a layout
     // is served from the layout there is, as a viewer, rather than from the
     // configured mode or nothing at all.
     auto refuse = [&](const KRdp::LayoutControl::Error &error, const QString &why) {
         qInfo().noquote() << u"apply from %1: %2"_s.arg(id, why);
-        connection->sendControlRecord(KRdp::LayoutControl::errorRecord(error));
+        replyTo(wrapper, KRdp::LayoutControl::errorRecord(error));
         if (first || !wrapper->layoutClient) {
             buildAsViewer(wrapper);
         }
@@ -2595,10 +2643,9 @@ void SessionController::onControlApply(SessionWrapper *wrapper, const QJsonObjec
 void SessionController::onControlAttach(SessionWrapper *wrapper, const QJsonObject &record, bool first)
 {
     Q_UNUSED(first)
-    auto *connection = wrapper->connection.data();
     const QString target = record.value(QLatin1String("target")).toString();
     if (target != QLatin1String("physical")) {
-        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"attach target must be physical"_s}));
+        replyTo(wrapper, KRdp::LayoutControl::errorRecord({u"invalid"_s, u"attach target must be physical"_s}));
         return;
     }
     // Codec/media preflight records deliberately do not pick a session mode.
@@ -2606,11 +2653,11 @@ void SessionController::onControlAttach(SessionWrapper *wrapper, const QJsonObje
     // first-record gate.  Once anything is streaming, changing the source
     // would be indistinguishable from a layout apply and is refused.
     if (!wrapper->sessions.empty() || wrapper->layoutClient) {
-        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"attach is only valid before a session is built"_s}));
+        replyTo(wrapper, KRdp::LayoutControl::errorRecord({u"invalid"_s, u"attach is only valid before a session is built"_s}));
         return;
     }
     if (m_layoutExecutor.controlling() || m_layoutOwner.hasOwner()) {
-        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"a layout-controlled session currently owns the console"_s}));
+        replyTo(wrapper, KRdp::LayoutControl::errorRecord({u"invalid"_s, u"a layout-controlled session currently owns the console"_s}));
         return;
     }
 
@@ -2620,49 +2667,39 @@ void SessionController::onControlAttach(SessionWrapper *wrapper, const QJsonObje
     // creates an off-screen output.  Direct attach means the existing seat's
     // physical outputs, with no call to the layout executor.
     buildSessions(wrapper);
-    connection->sendControlRecord(KRdp::LayoutControl::layoutRecord(layoutFor(wrapper)));
+    replyTo(wrapper, KRdp::LayoutControl::layoutRecord(layoutFor(wrapper)));
     qInfo().noquote() << u"KRDPCTL: %1 attached to the physical console (%2 session(s))"_s.arg(wrapper->controlId).arg(wrapper->sessions.size());
 }
 
 void SessionController::onControlChroma(SessionWrapper *wrapper, const QJsonObject &record, bool first)
 {
-    auto *connection = wrapper->connection.data();
     const QString id = wrapper->controlId;
 
-    const auto request = KRdp::LayoutControl::chromaFromJson(record);
-    if (!request) {
+    // Present fields override; an absent one keeps whatever this connection already has (the
+    // controller's default if nothing has overridden it yet, or an earlier `chroma` from the same
+    // client). Applies to this connection's own sessions only - chroma is not a layout-ownership
+    // concept (A10.4) - and to the running ones at once (ChromaMerge::apply()).
+    const auto result = KRdp::ChromaMerge::apply(wrapper->m_chromaPolicy, KRdp::LayoutControl::chromaFromJson(record), wrapper->sessions);
+    switch (result.outcome) {
+    case KRdp::ChromaMerge::Outcome::Malformed:
         qInfo().noquote() << u"chroma from %1: invalid: malformed chroma (motionGapMs/restMs/maxGapMs must be numbers)"_s.arg(id);
-        connection->sendControlRecord(KRdp::LayoutControl::errorRecord({u"invalid"_s, u"malformed chroma: motionGapMs/restMs/maxGapMs must be numbers when present"_s}));
-    } else {
-        // Present fields override; an absent one keeps whatever this connection already has (the
-        // controller's default if nothing has overridden it yet, or an earlier `chroma` from the
-        // same client) - never AbstractSession/ChromaPolicy's own struct defaults.
-        KRdp::ChromaPolicy merged = wrapper->m_chromaPolicy;
-        if (request->motionGapMs) {
-            merged.motionGapMs = *request->motionGapMs;
-        }
-        if (request->restMs) {
-            merged.restMs = *request->restMs;
-        }
-        if (request->maxGapMs) {
-            merged.maxGapMs = *request->maxGapMs;
-        }
-        if (!merged.isValid()) {
-            qInfo().noquote() << u"chroma from %1: invalid: motionGap=%2 rest=%3 maxGap=%4 (need each in [16,5000] and motionGap <= rest <= maxGap)"_s.arg(id)
-                                      .arg(merged.motionGapMs)
-                                      .arg(merged.restMs)
-                                      .arg(merged.maxGapMs);
-            connection->sendControlRecord(
+        replyTo(wrapper, KRdp::LayoutControl::errorRecord({u"invalid"_s, u"malformed chroma: motionGapMs/restMs/maxGapMs must be numbers when present"_s}));
+        break;
+    case KRdp::ChromaMerge::Outcome::OutOfRange:
+        qInfo().noquote() << u"chroma from %1: invalid: motionGap=%2 rest=%3 maxGap=%4 (need each in [16,5000] and motionGap <= rest <= maxGap)"_s.arg(id)
+                                  .arg(result.policy.motionGapMs)
+                                  .arg(result.policy.restMs)
+                                  .arg(result.policy.maxGapMs);
+        replyTo(wrapper,
                 KRdp::LayoutControl::errorRecord({u"invalid"_s, u"chroma policy must have each of motionGapMs/restMs/maxGapMs in [16,5000] and motionGapMs <= restMs <= maxGapMs"_s}));
-        } else {
-            // Applies to this connection's own sessions only: chroma is not a layout-ownership
-            // concept (A10.4), so it is accepted whether or not this client owns the KRDPCTL layout.
-            wrapper->m_chromaPolicy = merged;
-            for (const auto &session : wrapper->sessions) {
-                session->setChromaPolicy(merged);
-            }
-            qInfo().noquote() << u"chroma policy: motionGap=%1 rest=%2 maxGap=%3 (client)"_s.arg(merged.motionGapMs).arg(merged.restMs).arg(merged.maxGapMs);
-        }
+        break;
+    case KRdp::ChromaMerge::Outcome::Applied:
+        qInfo().noquote() << u"chroma policy: motionGap=%1 rest=%2 maxGap=%3 (client %4, applied to %5 running session(s))"_s.arg(result.policy.motionGapMs)
+                                 .arg(result.policy.restMs)
+                                 .arg(result.policy.maxGapMs)
+                                 .arg(id)
+                                 .arg(wrapper->sessions.size());
+        break;
     }
 
     if (first) {
@@ -2685,7 +2722,7 @@ void SessionController::onLayoutApplied(const HostLayoutExecutor::Result &result
         return;
     }
     if (alive && result.error) {
-        wrapper->connection->sendControlRecord(KRdp::LayoutControl::errorRecord(*result.error));
+        wrapper->connection->sendControlRecord(KRdp::LayoutControl::withRequestId(KRdp::LayoutControl::errorRecord(*result.error), wrapper->applyRequestId));
     }
     // What this apply removed or created is what no session may keep
     // streaming across it; everything else keeps running (Task 4).
@@ -2694,6 +2731,7 @@ void SessionController::onLayoutApplied(const HostLayoutExecutor::Result &result
         // The requester's sessions come from the layout as KWin has it,
         // whether or not everything landed; the `layout` says what that is.
         const bool reset = buildLayoutSessions(wrapper, result.layout, false, changed);
+        wrapper->layoutReplyRequestId = std::exchange(wrapper->applyRequestId, {});
         sendLayout(wrapper, reset);
     }
     // Everyone else on the channel - viewers, and the previous owner after a
@@ -3008,7 +3046,10 @@ void SessionController::sendLayoutNow(SessionWrapper *wrapper, bool takeover)
         return;
     }
     const auto layout = layoutFor(wrapper);
-    wrapper->connection->sendControlRecord(takeover ? KRdp::LayoutControl::takeoverRecord(layout) : KRdp::LayoutControl::layoutRecord(layout));
+    // The `layout` owed to an apply echoes its requestId; a takeover or broadcast is unsolicited.
+    const QString requestId = takeover ? QString() : std::exchange(wrapper->layoutReplyRequestId, {});
+    wrapper->connection->sendControlRecord(KRdp::LayoutControl::withRequestId(
+        takeover ? KRdp::LayoutControl::takeoverRecord(layout) : KRdp::LayoutControl::layoutRecord(layout), requestId));
 }
 
 SessionWrapper *SessionController::wrapperFor(const QString &controlId) const

@@ -62,6 +62,10 @@ private:
         ConsoleControl::Media media;
         bool externalMicrophone = false;
         QVector<VideoMonitor> wireLayout; // RDPGFX surfaces installed for this client, not the catalog's sorted order.
+        // KRDPCTL v2: the requests the next `layout` / `media` record answers.
+        QString layoutRequestId;
+        QString mediaRequestId;
+        bool capabilitiesSent = false;
     };
 
     void apply(const ConsoleHandoff::Actions &actions);
@@ -70,7 +74,10 @@ private:
     void removeClient(RdpConnection *connection);
     void addClient(RdpConnection *connection);
     void updateMedia();
-    void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
+    void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &incoming);
+    /** KRDPCTL v2: a reply echoing the request being handled, or the `id` it answers. */
+    void replyTo(RdpConnection *connection, const QJsonObject &record);
+    void sendCapabilities(Client &client);
     void sendLayouts();
     void finishTopologyQueries(const QString &error = {});
     void releaseInput();
@@ -82,6 +89,7 @@ private:
     void stopMicrophone(const QString &error);
     void microphoneResult(const ConsoleWorkerWire::MicrophoneResult &result);
     void sendMedia(Client &client, bool microphone, const QString &error = {});
+    QString m_replyRequestId; // the request onControlRecord() is handling
 
     Server *m_server = nullptr;
     WorkerLauncher m_launchWorker;
