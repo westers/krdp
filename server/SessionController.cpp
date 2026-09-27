@@ -2180,21 +2180,25 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     // MonitorMode=virtual's one-client rule is applied where the configured
     // build happens (buildConfiguredSessions()), not here: whether this
     // client joined KRDPCTL - and so follows the owner/viewer rules instead,
-    // or only wants a soft `query` - is not known before its capabilities
-    // exchange.
+    // or only wants a soft `query` - is not known before it authenticated.
     auto wrapper = std::make_unique<SessionWrapper>(newConnection, m_sni, &m_displayWakeGuard);
     wrapper->controlId = u"c%1"_s.arg(++m_connectionCounter);
-    // Every mode builds once the capabilities exchange is in (session
-    // thread): that is the first point at which the connection knows whether
-    // the client joined KRDPCTL, whose clients get no session until their
-    // first record (OPT-044), and virtual mode needs the client's desktop
-    // size from the same exchange anyway. Nothing is lost for the other
-    // modes: sessions only start streaming when the video stream is enabled,
-    // which is later still (drdynvc ready), and setSessions() starts them at
-    // once if that has already happened. Both signals are emitted from the
-    // session thread and queued here in order, so a record cannot overtake
-    // the display info; the record connection is made now rather than in
-    // onClientDisplayInfo() so nothing can slip through in between.
+    // Every mode builds once clientDisplayInfoReceived() fires (session
+    // thread), which is after PostConnect authentication succeeded (AUD-S1),
+    // not at the capabilities exchange: an unauthenticated client gets no
+    // session, no KRDPCTL channel and no record handling. That is also the
+    // first point at which the connection knows whether the client has a
+    // usable KRDPCTL channel, whose clients get no session until their first
+    // record (OPT-044); virtual mode needs the client's desktop size, which
+    // the capabilities exchange before it already delivered. Nothing is lost
+    // for the other modes: sessions only start streaming when the video
+    // stream is enabled (drdynvc ready, which run() only sets up once the
+    // client authenticated), and setSessions() starts them at once if that has
+    // already happened. A reactivation re-emits the signal after its
+    // capabilities exchange. Both signals are emitted from the session thread
+    // and queued here in order, so a record cannot overtake the display info;
+    // the record connection is made now rather than in onClientDisplayInfo()
+    // so nothing can slip through in between.
     connect(newConnection, &KRdp::RdpConnection::clientDisplayInfoReceived, wrapper.get(), [this, wrapper = wrapper.get()]() {
         onClientDisplayInfo(wrapper);
     }, Qt::QueuedConnection);
