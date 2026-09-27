@@ -4,6 +4,7 @@
 Reduce encoded bandwidth by leveraging compositor damage metadata and protocol-side region optimization, inspired by ICA/Thinwire and RDPGFX region/caching behavior.
 
 ## Status Snapshot (2026-02-20; clean-up 2026-09-15)
+- Virtual-session maintenance guard ARCHIVED 2026-09-27 (AUD-C1): `VirtualSessionMaintenance*`, `PackageLease`, unattended-upgrade guard, coordinator identity, provisioning receipt, runtime profile, `krdp-virtual-maintenance` and their tests/docs deleted from master; full source kept under git tag `archive/maintenance-guard`, uncommitted WIP in `~/dev/rdp/archive/2026-09-27-maintenance-guard-wip.patch`.
 - OPT-044 status 2026-09-27: 2026-09-22..24 uncommitted snapshot/log notes (monitor-layout Console/virtual source slices through selected-layout create `28a71fc`, isolated Sol/Buzz acceptance, partial native Gate2; plus OPT-043 KCM coverage requirements) squashed into this line; full text archived in `~/dev/rdp/archive/2026-09-27-maintenance-guard-wip.patch`. Native Gate2/3 still open; Hal untouched.
 - `OPT-001` Damage metadata plumbed through encoded stream and consumed in KRDP: `REMOVED` (2026-09-15 — no consumer; KPipeWire does not pair damage 1:1 with encoded packets).
 - `OPT-002` Damage-first send path with rectangle coalescing: `REMOVED` (2026-09-15 — encoder produces full-frame pictures, so full-surface AVC420 region restored per upstream).

@@ -52,7 +52,7 @@ cmake --build ~/dev/krdp/build -j16          # main dev tree: Debug, BUILD_TESTI
 ## Tests
 
 The autotests are QtTest/ECM executables registered by name with `add_test` in
-`autotests/CMakeLists.txt`. There are no labels. Currently 77 tests; the first one is `appstreamtest`.
+`autotests/CMakeLists.txt`. There are no labels. Currently 69 tests; the first one is `appstreamtest`.
 
 ```bash
 ctest --test-dir ~/dev/krdp/build --output-on-failure                  # all
@@ -93,8 +93,8 @@ scripts/package-virtual-test.sh   # build-virtual-package/, prefix /opt/krdp-vir
 - Installing is user-run: stop, install, start, typed into tmux for Steve without pressing Enter.
   Never install only the broker or only the worker, because the internal worker wire version is paired.
 - `docs/virtual-session-test-staging.md` covers `DESTDIR` staging (choose the prefix before building;
-  draft units embed `CMAKE_INSTALL_PREFIX`). `scripts/check-virtual-session-install.sh` and
-  `scripts/inspect-maintenance-launcher.sh` are read-only diagnostics.
+  draft units embed `CMAKE_INSTALL_PREFIX`). `scripts/check-virtual-session-install.sh` is a
+  read-only diagnostic.
 
 ## Architecture
 
@@ -133,12 +133,9 @@ scripts/package-virtual-test.sh   # build-virtual-package/, prefix /opt/krdp-vir
   list/preview-create/create/attach/detach/stop protocol (one-use preview tokens), persisted via
   `VirtualSessionJournal`/`Registry`/`Supervisor`. `VirtualInitialLayout`/`VirtualInitialBootstrap`
   = selected-screen first layout (default-OFF `--experimental-initial-layout`); `VirtualResize*` = Fit.
-- **Maintenance guard** (`VirtualSessionMaintenance*`, `krdp-virtual-maintenance`,
-  `krdp-unattended-upgrade-guard`, `VirtualSessionProvisioningReceipt`, `PackageLease`) refuses *new*
-  virtual desktops while the login runtime is being changed. It uses a root-owned flock and state
-  record under `/var/lib/krdp/maintenance`. It is built but not installed. Specs:
-  `docs/superpowers/specs/2026-09-22-virtual-maintenance-guard-design.md` and
-  `docs/virtual-maintenance-command.md`.
+- **Maintenance guard**: deleted 2026-09-27 (AUD-C1); the full stack is preserved under the git tag
+  `archive/maintenance-guard`. The generic create-admission hook (`VirtualSessionHostController::
+  CreateAdmission`, `Refusal::Maintenance`) remains but nothing in production sets it.
 - Most `server/*.h` files are pure, unit-tested planners/parsers (often header-only); the
   executables wire them together.
 

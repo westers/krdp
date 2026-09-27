@@ -4,17 +4,6 @@
 add_definitions(-DTRANSLATION_DOMAIN=\"krdpserver\")
 
 add_executable(krdpserver)
-# Built for integration tests only; installation waits for complete bootstrap,
-# writer routing, and mandatory keeper admission.
-add_executable(krdp-virtual-maintenance virtualmaintenance.cpp VirtualSessionMaintenanceGuard.cpp PackageLease.cpp)
-target_link_libraries(krdp-virtual-maintenance PRIVATE Qt6::Core)
-add_executable(krdp-unattended-upgrade-guard unattendedupgradeguard.cpp
-    VirtualUnattendedUpgradeGuard.cpp VirtualSessionMaintenanceGuard.cpp PackageLease.cpp)
-target_link_libraries(krdp-unattended-upgrade-guard PRIVATE Qt6::Core)
-# Compile the coordinator draft without producing/installing a runnable helper.
-# Writer-policy parsing is not yet a complete activation/lifetime validator.
-add_library(KRdpMaintenanceBootstrapDraft OBJECT VirtualSessionMaintenanceCoordinator.cpp virtualmaintenancevalidate.cpp)
-target_link_libraries(KRdpMaintenanceBootstrapDraft PRIVATE Qt6::Core Qt6::DBus)
 add_library(KRdpGuardianClient STATIC VirtualSessionGuardianClient.cpp)
 target_sources(KRdpGuardianClient PRIVATE VirtualSessionJournal.cpp)
 target_include_directories(KRdpGuardianClient PRIVATE ${CMAKE_SOURCE_DIR}/src)
