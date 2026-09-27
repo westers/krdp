@@ -467,7 +467,9 @@ private:
         releasePhysicalLease();
         releaseInput();
         m_audioTimer.stop();
-        m_audio.reset();
+        // AUD-D3: stop() of an isolated capture runs synchronous pw-metadata
+        // calls; main() waits for the job after the event loop has ended.
+        PipeWireAudioPlayback::stopAsync(std::move(m_audio));
         m_microphone.stop();
         // Keep the event loop alive until in-flight mutations settle. Successful
         // virtual geometry is retained; only an unfinished Fit may roll back.
@@ -2421,7 +2423,11 @@ private:
             }
             if (const auto media = ConsoleWorkerWire::media(*record)) {
                 m_audioTimer.stop();
-                m_audio.reset();
+                // AUD-D3: the previous capture restores the host's default sink
+                // with blocking pw-metadata calls (up to several seconds) off this
+                // event loop, so input, frames and the broker socket keep flowing.
+                // A new isolated capture waits for that restore first (startIsolated).
+                PipeWireAudioPlayback::stopAsync(std::move(m_audio));
                 if (media->playback) {
                     m_audio = std::make_unique<PipeWireAudioPlayback>();
                     const bool started = media->silenceHost ? m_audio->startIsolated(QStringLiteral("console-%1").arg(m_sessionId))
@@ -2700,5 +2706,8 @@ int main(int argc, char **argv)
         }
     }
     worker.connectToBroker();
-    return application.exec();
+    const int code = application.exec();
+    // A capture stopped by shutdown() may still be restoring the host's default sink.
+    PipeWireAudioPlayback::waitForPendingStops();
+    return code;
 }
