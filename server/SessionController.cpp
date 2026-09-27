@@ -2243,8 +2243,11 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     // desk back and broadcasts `takeover`.
     connect(wrapper.get(), &SessionWrapper::consoleActivityDetected, this, &SessionController::releasePhysicalOutputs, Qt::QueuedConnection);
 
+    // Every sessionError is a capture that failed to start or could not be
+    // recovered (AUD-P4): close with ERRINFO_GRAPHICS_SUBSYSTEM_FAILED so the
+    // client says why instead of reporting a plain disconnect.
     connect(wrapper.get(), &SessionWrapper::sessionError, this, [newConnection] {
-        newConnection->close(KRdp::RdpConnection::CloseReason::None);
+        newConnection->close(KRdp::RdpConnection::CloseReason::VideoInitFailed);
     });
 
     m_wrappers.push_back(std::move(wrapper));

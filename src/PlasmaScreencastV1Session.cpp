@@ -34,6 +34,7 @@
 
 #include "PressedInputTracker.h"
 #include "ScreencastTarget.h"
+#include "StreamRecoveryPolicy.h"
 #include "VideoStream.h"
 #include "WorkspaceFrameGeometry.h"
 #include "krdp_logging.h"
@@ -108,13 +109,10 @@ using ScopedXKBState = std::unique_ptr<struct xkb_state, XKBStateDeleter>;
 using ScopedXKBKeymap = std::unique_ptr<struct xkb_keymap, XKBKeymapDeleter>;
 using ScopedXKBContext = std::unique_ptr<struct xkb_context, XKBContextDeleter>;
 
-// Closed-stream recovery. A DPMS wake makes KWin tear down and re-add every
-// output, so wait for the output set to settle, keep retrying for a while, and
-// only settle for a workspace stream in the last few attempts.
-constexpr int MaxRecoveryAttempts = 24;
-constexpr int RecoveryIntervalMs = 500;
-constexpr int RecoverySettleMs = 750;
-constexpr int WorkspaceFallbackAttempts = 4;
+// Closed-stream recovery; see StreamRecoveryPolicy.h.
+constexpr int MaxRecoveryAttempts = StreamRecoveryPolicy::MaxAttempts;
+constexpr int RecoveryIntervalMs = StreamRecoveryPolicy::IntervalMs;
+constexpr int RecoverySettleMs = StreamRecoveryPolicy::SettleMs;
 
 // KPipeWire tears its produce thread down asynchronously after stop(): start()
 // is a no-op until that thread is gone, and the node ID is cleared once it is.
@@ -526,7 +524,7 @@ void PlasmaScreencastV1Session::attemptStreamRecovery(int attempt)
     const auto screens = qGuiApp->screens();
     const bool screensAvailable = !screens.isEmpty() && screens.first()->geometry().isValid();
     // Hold out for the configured output; only the final attempts may settle for the workspace.
-    const bool allowWorkspaceFallback = attempt >= MaxRecoveryAttempts - WorkspaceFallbackAttempts;
+    const bool allowWorkspaceFallback = StreamRecoveryPolicy::allowWorkspaceFallback(attempt);
 
     bool recovered = false;
     if (screensAvailable) {
@@ -535,16 +533,21 @@ void PlasmaScreencastV1Session::attemptStreamRecovery(int attempt)
     } else {
         qCInfo(KRDP) << "No screens available yet (attempt" << (attempt + 1) << "of" << MaxRecoveryAttempts << ")";
     }
-    if (recovered) {
+    switch (StreamRecoveryPolicy::next(attempt, recovered)) {
+    case StreamRecoveryPolicy::Next::Done:
         return;
-    }
-
-    if (attempt + 1 < MaxRecoveryAttempts) {
+    case StreamRecoveryPolicy::Next::Retry:
         qCInfo(KRDP) << "Retrying display stream recovery in" << RecoveryIntervalMs << "ms";
         scheduleStreamRecovery(attempt + 1, RecoveryIntervalMs);
         return;
+    case StreamRecoveryPolicy::Next::GiveUp:
+        // AUD-P4: do not keep a connection that streams nothing. error() makes
+        // the controller close it with a reason the client shows (or, in
+        // multi mode, drop just this monitor).
+        qCWarning(KRDP) << "Display stream recovery failed after" << MaxRecoveryAttempts << "attempts; reporting the session as failed";
+        Q_EMIT error();
+        return;
     }
-    qCWarning(KRDP) << "Display stream recovery failed after" << MaxRecoveryAttempts << "attempts (session kept alive)";
 }
 
 bool PlasmaScreencastV1Session::setupScreencastRequest(bool recovery, bool allowWorkspaceFallback)

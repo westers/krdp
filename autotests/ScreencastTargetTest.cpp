@@ -4,6 +4,7 @@
 #include <QTest>
 
 #include "ScreencastTarget.h"
+#include "StreamRecoveryPolicy.h"
 
 using namespace Qt::StringLiterals;
 using namespace KRdp;
@@ -114,6 +115,22 @@ private Q_SLOTS:
         const auto outOfRange = resolve(screens, 5, {}, -1, false, true);
         QCOMPARE(outOfRange.kind, Kind::Workspace);
         QVERIFY(resolve({}, 0, {}, -1, false, true).logicalRect.isEmpty());
+    }
+
+    // AUD-P4: the recovery schedule ends in GiveUp, which the session turns
+    // into error() and the controller into a close with a reason.
+    void recoveryGivesUpAfterTheLastAttempt()
+    {
+        using namespace StreamRecoveryPolicy;
+        QCOMPARE(next(0, true), Next::Done);
+        QCOMPARE(next(0, false), Next::Retry);
+        QCOMPARE(next(MaxAttempts - 2, false), Next::Retry);
+        QCOMPARE(next(MaxAttempts - 1, false), Next::GiveUp);
+        QCOMPARE(next(MaxAttempts - 1, true), Next::Done);
+        QVERIFY(!allowWorkspaceFallback(0));
+        QVERIFY(!allowWorkspaceFallback(MaxAttempts - WorkspaceFallbackAttempts - 1));
+        QVERIFY(allowWorkspaceFallback(MaxAttempts - WorkspaceFallbackAttempts));
+        QVERIFY(allowWorkspaceFallback(MaxAttempts - 1));
     }
 };
 
