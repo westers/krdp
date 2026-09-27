@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <filesystem>
 #include <memory>
 
@@ -90,6 +91,12 @@ public:
      */
     bool matchesConfiguredUser(const QString &name, const QString &password) const;
 
+    /**
+     * How long a connection may take from accept to successful PostConnect
+     * authentication before it is closed (AUD-S2). Default 15 s.
+     */
+    std::chrono::milliseconds handshakeTimeout() const;
+    void setHandshakeTimeout(std::chrono::milliseconds timeout);
 
     /** Whether to authenticate against PAM for the user running the daemon
      */

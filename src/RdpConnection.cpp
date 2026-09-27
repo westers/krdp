@@ -24,6 +24,9 @@
 #include <QStandardPaths>
 #include <QTcpSocket>
 #include <QThread>
+#include <QTimer>
+
+#include <sys/socket.h>
 
 #include <freerdp/channels/wtsvc.h>
 #include <freerdp/freerdp.h>
@@ -674,6 +677,13 @@ RdpConnection::~RdpConnection()
     }
 
     if (d->peer) {
+        // The transport owns the socket once the peer is initialized
+        // (freerdp_peer::sockfd is -1 from then on) and nothing else closes
+        // it: without this every closed connection kept its descriptor, and a
+        // client dropped by the handshake timeout never saw the close.
+        if (d->peer->context && d->peer->Disconnect) {
+            d->peer->Disconnect(d->peer);
+        }
         freerdp_peer_free(d->peer);
     }
 }
@@ -1018,6 +1028,22 @@ void RdpConnection::initialize()
     }
 
     qCDebug(KRDP) << "Session setup completed, start processing...";
+
+    // AUD-S2: a client that has not authenticated within the handshake
+    // timeout is dropped. A timer rather than a check in run(): a stalled TLS
+    // handshake blocks the session thread inside freerdp_tls_accept() until
+    // the context's abort event is set or the socket fails.
+    QTimer::singleShot(d->server->handshakeTimeout(), this, [this]() {
+        if (d->authenticated.load() || d->state == State::Closed || !d->peer || !d->peer->context) {
+            return;
+        }
+        qCWarning(KRDP) << "Client did not authenticate within" << d->server->handshakeTimeout().count() << "ms; closing the connection";
+        // The abort event ends a wait inside FreeRDP; shutting the socket
+        // down ends a blocking read (the transport owns the descriptor, but
+        // it is still the one Server accepted).
+        freerdp_abort_connect_context(d->peer->context);
+        ::shutdown(int(d->socketHandle), SHUT_RDWR);
+    });
 
     // Perform actual communication on a separate thread.
     d->thread = std::jthread(std::bind(&RdpConnection::run, this, std::placeholders::_1));

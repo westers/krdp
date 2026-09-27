@@ -34,6 +34,7 @@ public:
     std::filesystem::path tlsCertificate;
     std::filesystem::path tlsCertificateKey;
     QString cameraLoopbackDevice;
+    std::chrono::milliseconds handshakeTimeout = std::chrono::seconds(15);
 };
 
 Server::Server(QObject *parent)
@@ -136,6 +137,16 @@ bool KRdp::Server::matchesConfiguredUser(const QString &name, const QString &pas
         }
     }
     return false;
+}
+
+std::chrono::milliseconds Server::handshakeTimeout() const
+{
+    return d->handshakeTimeout;
+}
+
+void Server::setHandshakeTimeout(std::chrono::milliseconds timeout)
+{
+    d->handshakeTimeout = timeout;
 }
 
 bool Server::usePAMAuthentication() const

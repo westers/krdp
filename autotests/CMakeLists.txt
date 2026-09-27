@@ -436,7 +436,7 @@ target_include_directories(PreAuthChannelGateTest SYSTEM PRIVATE ${FreeRDP_INCLU
 target_link_libraries(PreAuthChannelGateTest PRIVATE Qt6::Test Qt6::Core KRdp freerdp winpr)
 add_test(NAME PreAuthChannelGateTest COMMAND PreAuthChannelGateTest)
 
-# AUD-S1/S3: a real Server on 127.0.0.1 with krdpctl-probe as the client.
+# AUD-S1/S2/S3: a real Server on 127.0.0.1 with krdpctl-probe as the client.
 if(TARGET krdpctl-probe)
     add_executable(RdpPreAuthLoopbackTest RdpPreAuthLoopbackTest.cpp)
     target_include_directories(RdpPreAuthLoopbackTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)

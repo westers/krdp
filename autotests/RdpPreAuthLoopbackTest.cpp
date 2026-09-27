@@ -1,18 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Steve Westers
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
-// AUD-S1/S3 against a real KRdp::Server on 127.0.0.1, driven by the real
-// libfreerdp client in krdpctl-probe. The "handler" is this test's slot on controlRecordReceived,
+// AUD-S1/S2/S3 against a real KRdp::Server on 127.0.0.1, driven by the real
+// libfreerdp client in krdpctl-probe (and by a raw TCP socket for the stalled
+// handshakes). The "handler" is this test's slot on controlRecordReceived,
 // standing in for SessionController.
 
 #include <QDeadlineTimer>
+#include <QElapsedTimer>
 #include <QHostAddress>
 #include <QJsonObject>
 #include <QPointer>
 #include <QProcess>
 #include <QStandardPaths>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 
 #include "LayoutControl.h"
 #include "RdpConnection.h"
@@ -42,7 +46,7 @@ private:
     QString m_certificate;
     QString m_key;
 
-    std::unique_ptr<Server> startServer(Observed &observed)
+    std::unique_ptr<Server> startServer(std::chrono::milliseconds handshakeTimeout, Observed &observed, std::chrono::milliseconds replyDelay = 0ms)
     {
         auto server = std::make_unique<Server>();
         server->setAddress(QHostAddress::LocalHost);
@@ -52,18 +56,21 @@ private:
         // AUD-S3: an entry without a password comes first and must not keep
         // the real user out.
         server->setUsers({{QStringLiteral("blank"), QString()}, {TestUser, Password}});
-        connect(server.get(), &Server::newConnectionCreated, this, [&observed](RdpConnection *connection) {
+        server->setHandshakeTimeout(handshakeTimeout);
+        connect(server.get(), &Server::newConnectionCreated, this, [&observed, replyDelay](RdpConnection *connection) {
             QPointer<RdpConnection> guard(connection);
             connect(connection, &RdpConnection::clientDisplayInfoReceived, connection, [&observed, guard]() {
                 ++observed.displayInfo;
                 observed.controlChannelAtDisplayInfo = guard && guard->hasControlChannel();
             }, Qt::QueuedConnection);
-            connect(connection, &RdpConnection::controlRecordReceived, connection, [&observed, guard](const QJsonObject &record) {
+            connect(connection, &RdpConnection::controlRecordReceived, connection, [&observed, guard, replyDelay](const QJsonObject &record) {
                 const QString type = record.value(QLatin1String("type")).toString();
                 observed.records.append(type);
                 observed.authenticatedBeforeRecord = observed.authenticatedBeforeRecord && observed.displayInfo > 0;
                 if (type == QLatin1String("query")) {
-                    guard->sendControlRecord(LayoutControl::layoutRecord(LayoutControl::Layout{}));
+                    QTimer::singleShot(replyDelay, guard, [guard]() {
+                        guard->sendControlRecord(LayoutControl::layoutRecord(LayoutControl::Layout{}));
+                    });
                 }
             }, Qt::QueuedConnection);
         });
@@ -133,7 +140,7 @@ private Q_SLOTS:
     void authenticatedClientReachesTheHandler()
     {
         Observed observed;
-        auto server = startServer(observed);
+        auto server = startServer(15s, observed);
         QVERIFY(server);
         QByteArray output;
         QCOMPARE(runProbe(server->serverPort(), Password, &output), 0);
@@ -147,7 +154,7 @@ private Q_SLOTS:
     void wrongPasswordNeverReachesAnything()
     {
         Observed observed;
-        auto server = startServer(observed);
+        auto server = startServer(15s, observed);
         QVERIFY(server);
         QVERIFY(runProbe(server->serverPort(), QStringLiteral("wrong")) != 0);
         QTest::qWait(200); // let any queued signal land
@@ -155,6 +162,46 @@ private Q_SLOTS:
         QCOMPARE(observed.displayInfo, 0);
     }
 
+    void handshakeTimeoutSparesAuthenticatedClients()
+    {
+        Observed observed;
+        // The reply comes well after the handshake timeout: an authenticated
+        // connection must not be cut by it.
+        auto server = startServer(500ms, observed, 1500ms);
+        QVERIFY(server);
+        QCOMPARE(runProbe(server->serverPort(), Password), 0);
+        QCOMPARE(observed.records, QStringList{QStringLiteral("query")});
+    }
+
+    void stalledHandshakeIsClosed_data()
+    {
+        QTest::addColumn<QByteArray>("sent");
+        QTest::newRow("silent") << QByteArray();
+        // TPKT + X.224 Connection Request + RDP_NEG_REQ asking for TLS: the
+        // server answers and then waits for a ClientHello that never comes,
+        // blocked inside freerdp_tls_accept().
+        QTest::newRow("tls") << QByteArray::fromHex("030000130ee000000000000100080001000000");
+    }
+
+    void stalledHandshakeIsClosed()
+    {
+        QFETCH(QByteArray, sent);
+        Observed observed;
+        auto server = startServer(500ms, observed);
+        QVERIFY(server);
+        QTcpSocket socket;
+        socket.connectToHost(QHostAddress::LocalHost, server->serverPort());
+        QVERIFY(socket.waitForConnected(5000));
+        if (!sent.isEmpty()) {
+            socket.write(sent);
+            QVERIFY(socket.waitForBytesWritten(5000));
+        }
+        QElapsedTimer elapsed;
+        elapsed.start();
+        QTRY_COMPARE_WITH_TIMEOUT(socket.state(), QAbstractSocket::UnconnectedState, 10000);
+        QVERIFY2(elapsed.elapsed() >= 300, "closed before the timeout");
+        QCOMPARE(observed.displayInfo, 0);
+    }
 };
 
 QTEST_GUILESS_MAIN(RdpPreAuthLoopbackTest)
