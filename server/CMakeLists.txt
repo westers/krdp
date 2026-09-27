@@ -89,9 +89,10 @@ if(KRDP_BUILD_CONSOLE_TEST_PACKAGE)
     install(TARGETS krdp-console-host RUNTIME DESTINATION ${KDE_INSTALL_BINDIR}
         COMPONENT KRdpConsoleTest EXCLUDE_FROM_ALL)
 endif()
-install(TARGETS krdp-console-probe DESTINATION ${KDE_INSTALL_BINDIR})
-install(TARGETS krdp-greeter-probe DESTINATION ${KDE_INSTALL_BINDIR})
-install(TARGETS krdp-audio-route-probe DESTINATION ${KDE_INSTALL_BINDIR})
+# Diagnostic probes are always built but only installed on request.
+if(INSTALL_DIAGNOSTIC_PROBES)
+    install(TARGETS krdp-console-probe krdp-greeter-probe krdp-audio-route-probe DESTINATION ${KDE_INSTALL_BINDIR})
+endif()
 if (BUILD_PLASMA_SESSION)
     install(TARGETS krdp-console-worker DESTINATION ${KDE_INSTALL_BINDIR})
     if(KRDP_BUILD_CONSOLE_TEST_PACKAGE)

@@ -46,7 +46,7 @@ cmake --build ~/dev/krdp/build -j16          # main dev tree: Debug, BUILD_TESTI
 - `build/` points `KPipeWire_DIR`/`CMAKE_PREFIX_PATH` at `.deps/kpipewire` (exact flags in
   `build-kpipewire.sh`; back to system lib: `-UKPipeWire_DIR -DCMAKE_PREFIX_PATH=`). That script
   installs over the library the live service maps (see imported rules).
-- Options: `BUILD_EXAMPLES`, `BUILD_PLASMA_SESSION` (ON); `KRDP_BUILD_{CONSOLE,VIRTUAL}_TEST_PACKAGE`
+- Options: `BUILD_EXAMPLES`, `BUILD_PLASMA_SESSION` (ON); `INSTALL_DIAGNOSTIC_PROBES` (OFF: probes built, not installed); `KRDP_BUILD_{CONSOLE,VIRTUAL}_TEST_PACKAGE`
   (OFF, set only by packaging scripts). KDE clang-format is enforced by the `.git/hooks` pre-commit.
 
 ## Tests

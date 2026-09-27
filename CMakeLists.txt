@@ -34,6 +34,7 @@ include(ECMQmlModule)
 
 option(BUILD_EXAMPLES "Build example applications" ON)
 option(BUILD_PLASMA_SESSION "Build support for Plasma Screencasting extensions" ON)
+option(INSTALL_DIAGNOSTIC_PROBES "Install the krdp-*-probe diagnostic tools (they are always built)" OFF)
 option(KRDP_BUILD_CONSOLE_TEST_PACKAGE "Stage the paired isolated Console test deb" OFF)
 option(KRDP_BUILD_VIRTUAL_TEST_PACKAGE "Stage the paired isolated virtual-session test deb" OFF)
 
