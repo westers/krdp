@@ -337,7 +337,7 @@ int main(int argc, char **argv)
         const auto users = config->users();
         for (const auto &userName : users) {
             const auto readJob = new QKeychain::ReadPasswordJob(QLatin1StringView("KRDP"));
-            readJob->setKey(QLatin1StringView(userName.toLatin1()));
+            readJob->setKey(userName);
             QObject::connect(readJob, &QKeychain::ReadPasswordJob::finished, &server, [userName, readJob, &server]() {
                 KRdp::User user;
                 if (readJob->error() != QKeychain::Error::NoError) {

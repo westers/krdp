@@ -444,3 +444,8 @@ add_executable(ServerSettingsPolicyTest ServerSettingsPolicyTest.cpp)
 target_include_directories(ServerSettingsPolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ServerSettingsPolicyTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ServerSettingsPolicyTest COMMAND ServerSettingsPolicyTest)
+
+# K1/K2/K5/K6/K9/K10: the KCM's logic (kcm_krdpserver_core), with a fake keychain.
+add_executable(KcmSettingsTest KcmSettingsTest.cpp)
+target_link_libraries(KcmSettingsTest PRIVATE Qt6::Test Qt6::Core kcm_krdpserver_core)
+add_test(NAME KcmSettingsTest COMMAND KcmSettingsTest)

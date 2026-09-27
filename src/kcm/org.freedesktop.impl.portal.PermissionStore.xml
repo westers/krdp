@@ -13,6 +13,11 @@
       <arg type="s" name="app" direction="in"/>
       <arg type="as" name="permissions" direction="in"/>
     </method>
+    <method name="DeletePermission">
+      <arg type="s" name="table" direction="in"/>
+      <arg type="s" name="id" direction="in"/>
+      <arg type="s" name="app" direction="in"/>
+    </method>
   </interface>
 </node>
 

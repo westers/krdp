@@ -19,6 +19,10 @@
 class UsersModel : public QAbstractListModel
 {
     Q_OBJECT
+    // AUD-K10: rowCount() always includes the system-user row, so views must
+    // not use `count` to ask "can anybody log in?".
+    Q_PROPERTY(int additionalUserCount READ additionalUserCount NOTIFY loginMethodsChanged)
+    Q_PROPERTY(int loginMethodCount READ loginMethodCount NOTIFY loginMethodsChanged)
 public:
     explicit UsersModel(KRDPServerSettings *settings, QObject *parent = nullptr);
 
@@ -43,9 +47,16 @@ public:
      */
     void setUsers(const QStringList &users);
 
+    /// Users with a stored password (the rows after the system-user row).
+    int additionalUserCount() const;
+    /// additionalUserCount() plus one when system-password login is enabled.
+    int loginMethodCount() const;
+
+Q_SIGNALS:
+    void loginMethodsChanged();
+
 private:
     KRDPServerSettings *m_settings;
     KUser m_currentUser;
-public:
 };
 

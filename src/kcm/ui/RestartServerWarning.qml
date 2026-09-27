@@ -5,19 +5,20 @@
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
+// AUD-K6: shown whenever the running server was started with settings that
+// differ from the saved ones, including after the page was closed and opened.
 Kirigami.InlineMessage {
     type: Kirigami.MessageType.Warning
     position: Kirigami.InlineMessage.Position.Header
     Layout.fillWidth: true
-    visible: false
-    text: i18nc("@info:status", "Restart the server to apply changed settings. This may disconnect active connections.")
+    text: i18nc("@info:status %1 list of setting names", "Restart the server to apply these changed settings: %1. Restarting disconnects active connections.", kcm.restartReasons.join(", "))
     actions: [
         Kirigami.Action {
             icon.name: "system-reboot-symbolic"
-            text: i18n("Restart Server")
+            text: i18nc("@action:button restart the RDP server", "Restart Server")
+            enabled: !kcm.serverBusy
             onTriggered: source => {
                 kcm.restartServer();
-                restartServerWarning.visible = false;
             }
         }
     ]

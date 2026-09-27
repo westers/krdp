@@ -63,7 +63,7 @@ Kirigami.Dialog {
         QQC2.Button {
             id: saveButton
             icon.name: "document-save"
-            enabled: (editUserModal.usernameChanged || editUserModal.passwordChanged) && (usernameField.text !== "" && passwordField.text !== "") && !editUserModal.usernameAlreadyExistsError
+            enabled: !kcm.keychainBusy && (editUserModal.usernameChanged || editUserModal.passwordChanged) && (usernameField.text !== "" && passwordField.text !== "") && !editUserModal.usernameAlreadyExistsError
             text: i18nc("@label:button", "Save")
             QQC2.DialogButtonBox.buttonRole: QQC2.DialogButtonBox.AcceptRole
         }

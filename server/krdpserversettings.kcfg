@@ -95,9 +95,5 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>Whether the current user can log in via PAM</label>
       <default>false</default>
     </entry>
-    <entry name="Autostart" type="Bool">
-      <label>Autostart the server on login</label>
-      <default>false</default>
-    </entry>
   </group>
 </kcfg>
