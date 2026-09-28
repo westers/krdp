@@ -10,6 +10,7 @@
 // - while the link is throttled the server keeps reading: acknowledgements keep arriving;
 // - frames that cannot go are coalesced, and a keyframe is asked for;
 // - the session survives a 5 s block, and once the client reads again it gets a current frame.
+// AUD-FIX6 F2: and a 1 MB (4K) keyframe on a throttled link does not turn into a keyframe loop.
 
 #include <QDeadlineTimer>
 #include <QElapsedTimer>
@@ -220,14 +221,16 @@ private Q_SLOTS:
         connect(&server, &Server::newConnectionCreated, this, [&](RdpConnection *c) {
             connection = c;
             c->videoStream()->setCodecPreference(CodecPreference::Avc420);
-            connect(c, &RdpConnection::stateChanged, this, [&, c] {
+            // Context c, not the test object: a queued slot must not outlive the connection
+            // (the next test runs in the same event loop).
+            connect(c, &RdpConnection::stateChanged, c, [&, c] {
                 if (c->state() == RdpConnection::State::Closed) {
                     closed = true;
                 }
             });
             // What the encoder does for a request: an IDR of the newest picture at once
             // (KPipeWire re-feeds the last captured frame), even when nothing else changes.
-            connect(c->videoStream(), &VideoStream::keyFrameRequested, this, [&](int) {
+            connect(c->videoStream(), &VideoStream::keyFrameRequested, c, [&](int) {
                 ++keyFramesRequested;
                 feed(true);
             }, Qt::QueuedConnection);
@@ -358,6 +361,164 @@ private Q_SLOTS:
         QVERIFY(!closed);
         QCOMPARE(probe.state(), QProcess::Running);
         QVERIFY(keyFramesRequested > 0);
+    }
+
+    // AUD-FIX6 F2: a 4K keyframe (1 MB, eight times the old 128 KiB byte floor) on a throttled
+    // link. Before, the P-frames behind it were coalesced away and another 1 MB keyframe was
+    // requested once a second: the client got one keyframe a second and nothing else (Sol's
+    // console host, 265 KB keyframes, 2026-09-28). Now the P-frames wait for its ack, and
+    // once the link carries them the client gets the full frame rate, with at most one rekey.
+    void hugeKeyFrameOnAThrottledLink()
+    {
+        Server server;
+        server.setAddress(QHostAddress::LocalHost);
+        server.setPort(0);
+        server.setTlsCertificate(m_certificate.toStdString());
+        server.setTlsCertificateKey(m_key.toStdString());
+        server.setUsers({{TestUser, Password}});
+
+        QPointer<RdpConnection> connection;
+        bool closed = false;
+        quint64 seq = 0;
+        int keyFramesFed = 0;
+        const auto feed = [&](bool keyFrame) {
+            if (!connection || connection->state() != RdpConnection::State::Streaming || !connection->videoStream()->enabled()) {
+                return;
+            }
+            VideoFrame frame;
+            frame.size = QSize(3840, 2160);
+            frame.isKeyFrame = keyFrame;
+            // A 4K IDR of a busy desktop, then 8 kB P-frames (about 2 Mbit/s at 30 fps).
+            frame.data = frameData(++seq, keyFrame ? 1000 * 1000 : 8000);
+            frame.presentationTimeStamp = std::chrono::system_clock::now();
+            connection->videoStream()->queueFrame(frame);
+            keyFramesFed += keyFrame ? 1 : 0;
+        };
+        connect(&server, &Server::newConnectionCreated, this, [&](RdpConnection *c) {
+            connection = c;
+            c->videoStream()->setCodecPreference(CodecPreference::Avc420);
+            // Context c, not the test object: a queued slot must not outlive the connection
+            // (the next test runs in the same event loop).
+            connect(c, &RdpConnection::stateChanged, c, [&, c] {
+                if (c->state() == RdpConnection::State::Closed) {
+                    closed = true;
+                }
+            });
+            // The encoder answers a request with an IDR of the newest picture at once.
+            connect(c->videoStream(), &VideoStream::keyFrameRequested, c, [&](int) {
+                feed(true);
+            }, Qt::QueuedConnection);
+        });
+        QVERIFY(server.start());
+
+        ThrottledProxy proxy(server.serverPort());
+        QVERIFY(proxy.listen());
+
+        QTimer feeder;
+        feeder.setInterval(33);
+        connect(&feeder, &QTimer::timeout, this, [&] {
+            feed(seq == 0);
+        });
+
+        QProcess probe;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), m_dir.path());
+        environment.insert(QStringLiteral("HOME"), m_dir.path());
+        probe.setProcessEnvironment(environment);
+        probe.start(QStringLiteral(KRDPCTL_PROBE),
+                    {QStringLiteral("127.0.0.1"), QString::number(proxy.port()), TestUser, QStringLiteral("-"), QStringLiteral("--silent"),
+                     QStringLiteral("--no-krdpctl"), QStringLiteral("--gfx"), QStringLiteral("--gfx-count"), QStringLiteral("--timeout"), QStringLiteral("120")});
+        QVERIFY(probe.waitForStarted(5000));
+        probe.write(Password.toUtf8() + '\n');
+        probe.closeWriteChannel();
+        const auto cleanup = qScopeGuard([&probe] {
+            if (probe.state() != QProcess::NotRunning) {
+                probe.terminate();
+                if (!probe.waitForFinished(5000)) {
+                    probe.kill();
+                    probe.waitForFinished(5000);
+                }
+            }
+        });
+
+        QByteArray log;
+        quint64 lastSeenSeq = 0;
+        int framesSeen = 0;
+        const auto readProbe = [&] {
+            const QByteArray more = probe.readAllStandardError();
+            log += more;
+            for (const QByteArray &line : more.split('\n')) {
+                const int at = line.indexOf("frame seq ");
+                if (at >= 0) {
+                    lastSeenSeq = std::max(lastSeenSeq, line.mid(at + 10).split(' ').value(0).toULongLong());
+                    ++framesSeen;
+                }
+            }
+        };
+        const auto sample = [&](std::chrono::milliseconds duration) {
+            QDeadlineTimer deadline(duration);
+            while (!deadline.hasExpired()) {
+                QTest::qWait(20);
+                readProbe();
+                QVERIFY2(!closed, log.constData());
+                QVERIFY2(probe.state() == QProcess::Running, log.constData());
+            }
+        };
+
+        // Wait for the stream to be up before the throttle and the first frame.
+        QDeadlineTimer upDeadline(30s);
+        while ((!connection || connection->state() != RdpConnection::State::Streaming || !connection->videoStream()->enabled()) && !upDeadline.hasExpired()) {
+            QTest::qWait(20);
+            readProbe();
+            if (probe.state() != QProcess::Running) {
+                break;
+            }
+        }
+        QVERIFY2(connection && connection->state() == RdpConnection::State::Streaming, log.constData());
+        // 6 Mbit/s: the 1 MB keyframe needs well over a second; the P-frames fit easily.
+        proxy.setRate(750 * 1000);
+        feeder.start();
+
+        QDeadlineTimer firstDeadline(30s);
+        while (lastSeenSeq == 0 && !firstDeadline.hasExpired() && probe.state() == QProcess::Running) {
+            QTest::qWait(20);
+            readProbe();
+        }
+        if (lastSeenSeq == 0 && log.contains("does not support H.264")) {
+            QSKIP("this libfreerdp cannot negotiate AVC420 (built WITH_GFX_H264=OFF)");
+        }
+        QVERIFY2(lastSeenSeq >= 1, log.constData());
+        const auto afterKey = connection->videoStream()->flowStats();
+        qInfo() << "keyframe delivered: window" << afterKey.windowBytes / 1024 << "KiB," << afterKey.dropped << "coalesced," << afterKey.keyFrameRequests
+                << "keyframe requests," << afterKey.keyFramesDeferred << "deferred";
+        QVERIFY(afterKey.windowBytes >= 2 * 1000 * 1000);
+
+        // Let the backlog behind the keyframe drain, then count what arrives: still throttled,
+        // but the link now carries the P-frames at the full rate.
+        sample(2s);
+        int before = framesSeen;
+        const quint64 seqBefore = lastSeenSeq;
+        sample(3s);
+        const int throttledFrames = framesSeen - before;
+        qInfo() << "throttled, after the keyframe:" << throttledFrames << "frames in 3 s; client at" << lastSeenSeq << "of" << seq;
+        QVERIFY2(throttledFrames >= 75, log.right(3000).constData()); // >= 25 fps of the fed 30
+        QVERIFY(lastSeenSeq > seqBefore);
+        QVERIFY(seq - lastSeenSeq <= 10); // current, not a growing backlog
+
+        // Unthrottled: still the full rate.
+        proxy.setRate(0);
+        sample(1s);
+        before = framesSeen;
+        sample(2s);
+        const int freeFrames = framesSeen - before;
+        const auto after = connection->videoStream()->flowStats();
+        qInfo() << "unthrottled:" << freeFrames << "frames in 2 s;" << after.dropped << "coalesced," << after.keyFrameRequests << "keyframe requests,"
+                << keyFramesFed << "keyframes fed";
+        QVERIFY(freeFrames >= 50);
+        QVERIFY(after.keyFrameRequests <= 1); // at most one rekey
+        QVERIFY(keyFramesFed <= 2);
+        QVERIFY(!closed);
+        QCOMPARE(probe.state(), QProcess::Running);
     }
 };
 

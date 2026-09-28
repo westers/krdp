@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include <QQueue>
+#include <QDebug>
+
+#include <chrono>
+#include <vector>
 #include <QTest>
 
 #include "FrameQueuePolicy.h"
@@ -26,6 +30,152 @@ QList<int> idsOf(const QQueue<QueuedFrame> &queue)
         ids.push_back(frame.id);
     }
     return ids;
+}
+
+/**
+ * AUD-FIX6 F2: the submission loop of VideoStream over the pure policy, in 1 ms steps. One
+ * monitor at 30 fps; the first frame is a keyframe of \a keyFrameBytes, every later one a
+ * P-frame of \a deltaBytes unless a keyframe was requested (the encoder answers with its
+ * next frame). The client acknowledges a keyframe \a keyFrameAck after it was sent and a
+ * P-frame \a deltaAck after. \a fixed = the AUD-FIX6 rules; false = the AUD-FIX4 ones
+ * (128 KiB floor, four held frames, a request a second), to show the loop they made.
+ */
+struct FlowRun {
+    int keyFramesSent = 0;
+    int requests = 0;
+    int dropped = 0;
+    int keyFrameAckedAtMs = -1;
+    std::vector<int> delivered; // frame ids in send order
+    std::vector<int> deliveredAtMs;
+};
+
+FlowRun simulateFlow(bool fixed, int64_t keyFrameBytes, int64_t deltaBytes, std::chrono::milliseconds keyFrameAck, std::chrono::milliseconds deltaAck,
+                     std::chrono::milliseconds duration, std::chrono::milliseconds stallEvery = {}, std::chrono::milliseconds stallFor = {})
+{
+    using namespace KRdp::FrameQueuePolicy;
+    using namespace std::chrono;
+    using Clock = FrameAckTracker::Clock;
+    struct Frame {
+        int monitorIndex = 0;
+        int id = 0;
+        bool key = false;
+        int64_t bytes = 0;
+    };
+    const auto t0 = Clock::time_point(hours(1));
+    FlowRun run;
+    FrameAckTracker tracker;
+    KeyFramePeak peak;
+    KeyFrameRequestBackoff backoff;
+    Clock::time_point lastLegacyRequest{};
+    QQueue<Frame> queue;
+    std::vector<std::pair<Clock::time_point, uint32_t>> acks;
+    bool starved = false;
+    bool backlog = false;
+    bool keyRequested = false;
+    int nextId = 0;
+    uint32_t frameId = 0;
+    const int fps = 30;
+    for (milliseconds t(0); t < duration; ++t) {
+        const auto now = t0 + t;
+        // The encoder: a frame every 33 ms.
+        if (t.count() % 33 == 0) {
+            Frame frame{.monitorIndex = 0, .id = nextId++, .key = nextId == 1 || keyRequested, .bytes = 0};
+            frame.bytes = frame.key ? keyFrameBytes : deltaBytes;
+            keyRequested = keyRequested && !frame.key;
+            if (fixed && frame.key) {
+                peak.record(frame.bytes, now);
+            }
+            // queueFrame()
+            if (starved && !frame.key) {
+                ++run.dropped;
+            } else {
+                starved = false;
+                if (frame.key) {
+                    dropSupersededFrames(queue, 0);
+                }
+                queue.enqueue(frame);
+            }
+        }
+        // The client's acknowledgements.
+        for (auto it = acks.begin(); it != acks.end();) {
+            if (it->first <= now) {
+                tracker.acknowledge(it->second, 1);
+                if (tracker.acknowledgedKeyFrame() == 0) {
+                    backoff.keyFrameAcknowledged();
+                    if (run.keyFrameAckedAtMs < 0) {
+                        run.keyFrameAckedAtMs = int(t.count());
+                    }
+                }
+                it = acks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        // The submission thread.
+        const auto requestIfStarved = [&] {
+            if (!starved) {
+                return;
+            }
+            bool request = false;
+            if (fixed) {
+                tracker.expire(now, windowLimits(fps, 1, microseconds(0), 0, peak.largest(now)));
+                request = backoff.shouldRequest(now, tracker.keyFrameInFlight(0));
+            } else if (lastLegacyRequest == Clock::time_point{} || now - lastLegacyRequest >= CoalesceKeyFrameMinInterval) {
+                lastLegacyRequest = now;
+                request = true;
+            }
+            if (request) {
+                ++run.requests;
+                keyRequested = true;
+            }
+        };
+        requestIfStarved();
+        while (!queue.isEmpty()) {
+            const auto limits = windowLimits(fps, 1, microseconds(0), 0, fixed ? peak.largest(now) : 0);
+            tracker.expire(now, limits);
+            if (!tracker.canSend(limits)) {
+                backlog = keyFrameBacklog(backlog, tracker.keyFrameInFlight(0), int(queue.size()));
+                int64_t queuedBytes = 0;
+                for (const auto &held : queue) {
+                    queuedBytes += held.bytes;
+                }
+                const int64_t keyFrame = peak.largest(now);
+                std::vector<int> starvedMonitors;
+                if (fixed) {
+                    run.dropped += coalesceHeldFrames(
+                        queue,
+                        [&](int, int count) {
+                            return shouldCoalesce(count, queuedBytes, backlog, keyFrame, keyFrameHoldFrames(fps));
+                        },
+                        starvedMonitors);
+                } else {
+                    run.dropped += coalesceHeldFrames(queue, MaxHeldFramesPerMonitor, starvedMonitors);
+                }
+                if (!starvedMonitors.empty()) {
+                    starved = true;
+                    backlog = false;
+                }
+                requestIfStarved();
+                break;
+            }
+            const Frame frame = queue.dequeue();
+            if (queue.size() <= MaxHeldFramesPerMonitor) {
+                backlog = false;
+            }
+            tracker.frameSent(frameId, frame.bytes, now, frame.key, frame.monitorIndex);
+            // A client that pauses for stallFor every stallEvery acknowledges nothing meanwhile.
+            auto ackAt = t + (frame.key ? keyFrameAck : deltaAck);
+            if (stallEvery.count() > 0 && ackAt % stallEvery < stallFor) {
+                ackAt += stallFor - ackAt % stallEvery;
+            }
+            acks.push_back({t0 + ackAt, frameId});
+            ++frameId;
+            run.keyFramesSent += frame.key ? 1 : 0;
+            run.delivered.push_back(frame.id);
+            run.deliveredAtMs.push_back(int(t.count()));
+        }
+    }
+    return run;
 }
 }
 
@@ -257,6 +407,172 @@ private Q_SLOTS:
         QCOMPARE(silent.expire(t0 + AckTimeout, limits), 4);
         QVERIFY(silent.canSend(limits));
         QCOMPARE(silent.acknowledge(2, 0), FrameAckTracker::Ack::Unknown);
+    }
+
+    // AUD-FIX6 F2: the budget is at least twice the largest recent keyframe.
+    void byteBudgetCoversKeyFrames()
+    {
+        using namespace KRdp::FrameQueuePolicy;
+        using namespace std::chrono_literals;
+        QCOMPARE(windowLimits(30, 1, 0us, 0, 0).bytes, MinInFlightBytes);
+        QCOMPARE(windowLimits(30, 1, 0us, 0, 50000).bytes, MinInFlightBytes);
+        QCOMPARE(windowLimits(30, 1, 0us, 0, 265000).bytes, int64_t(530000));
+        QCOMPARE(windowLimits(30, 1, 0us, 0, 1 << 20).bytes, int64_t(2 << 20));
+        // A measured rate larger than that still wins.
+        QCOMPARE(windowLimits(30, 1, 20000us, 100000, 265000).bytes, int64_t(100000 * 125 * 0.27));
+
+        const auto t0 = KeyFramePeak::Clock::time_point(1h);
+        KeyFramePeak peak;
+        QCOMPARE(peak.largest(t0), int64_t(0));
+        peak.record(265000, t0);
+        peak.record(40000, t0 + 1s);
+        QCOMPARE(peak.largest(t0 + 2s), int64_t(265000));
+        peak.record(300000, t0 + 3s); // the current one is the largest
+        QCOMPARE(peak.largest(t0 + 3s), int64_t(300000));
+        QCOMPARE(peak.largest(t0 + 3s + KeyFrameSizeHorizon - 1ms), int64_t(300000));
+        QCOMPARE(peak.largest(t0 + 3s + KeyFrameSizeHorizon), int64_t(0));
+
+        // The backlog behind a keyframe: from the moment it is in flight until the monitor is
+        // back at MaxHeldFramesPerMonitor queued, acknowledged or not.
+        QVERIFY(keyFrameBacklog(false, true, 0));
+        QVERIFY(keyFrameBacklog(true, false, MaxHeldFramesPerMonitor + 1));
+        QVERIFY(!keyFrameBacklog(true, false, MaxHeldFramesPerMonitor));
+        QVERIFY(!keyFrameBacklog(false, false, 50));
+
+        // Coalescing: never at four or fewer, always beyond the hold; in between only when the
+        // backlog outweighs the keyframe that would replace it, and never behind a keyframe.
+        QVERIFY(!shouldCoalesce(MaxHeldFramesPerMonitor, 1 << 30, false, 0, 60));
+        QVERIFY(shouldCoalesce(61, 0, true, 1 << 20, 60));
+        QVERIFY(shouldCoalesce(5, 60000, false, 48000, 60)); // :3389-sized keyframes: as before
+        QVERIFY(shouldCoalesce(5, 1, false, 0, 60)); // no keyframe seen: as before
+        QVERIFY(!shouldCoalesce(5, 40000, false, 1 << 20, 60)); // 4K keyframe: hold
+        QVERIFY(!shouldCoalesce(30, 1 << 21, true, 1 << 20, 60)); // behind the keyframe: hold
+        QVERIFY(shouldCoalesce(30, 1 << 21, false, 1 << 20, 60));
+
+        QCOMPARE(keyFrameHoldFrames(30), 60);
+        QCOMPARE(keyFrameHoldFrames(1), MaxHeldFramesPerMonitor);
+        QCOMPARE(keyFrameHoldFrames(1000), MaxKeyFrameHoldFrames);
+    }
+
+    // AUD-FIX6 F2: the tracker knows which monitor still has a keyframe out.
+    void trackerKnowsKeyFramesInFlight()
+    {
+        using namespace KRdp::FrameQueuePolicy;
+        using namespace std::chrono_literals;
+        const auto t0 = FrameAckTracker::Clock::time_point(1h);
+        const WindowLimits limits;
+        FrameAckTracker tracker;
+        tracker.frameSent(1, 265000, t0, true, 0);
+        tracker.frameSent(2, 5000, t0, false, 0);
+        tracker.frameSent(3, 90000, t0, true, 1);
+        QVERIFY(tracker.keyFrameInFlight(0));
+        QVERIFY(tracker.keyFrameInFlight(1));
+        QVERIFY(!tracker.keyFrameInFlight(2));
+        tracker.acknowledge(2, 1);
+        QCOMPARE(tracker.acknowledgedKeyFrame(), -1);
+        tracker.acknowledge(1, 1);
+        QCOMPARE(tracker.acknowledgedKeyFrame(), 0);
+        QVERIFY(!tracker.keyFrameInFlight(0));
+        tracker.acknowledge(1, 1); // again: unknown
+        QCOMPARE(tracker.acknowledgedKeyFrame(), -1);
+        // One never acknowledged stops counting after AckTimeout.
+        tracker.expire(t0 + AckTimeout, limits);
+        QVERIFY(!tracker.keyFrameInFlight(1));
+    }
+
+    // AUD-FIX6 F2: keyframe requests after a drop wait for the keyframe in flight, back off
+    // 1 s, 2 s, 4 s ... up to the cap, and an acknowledged keyframe resets that.
+    void keyFrameRequestsBackOff()
+    {
+        using namespace KRdp::FrameQueuePolicy;
+        using namespace std::chrono_literals;
+        const auto t0 = KeyFrameRequestBackoff::Clock::time_point(1h);
+        KeyFrameRequestBackoff backoff;
+        QVERIFY(!backoff.shouldRequest(t0, true)); // a keyframe is still out
+        QVERIFY(backoff.shouldRequest(t0, false));
+        auto last = t0;
+        for (const auto gap : {1000ms, 2000ms, 4000ms, 8000ms, 16000ms, 16000ms}) {
+            QVERIFY(!backoff.shouldRequest(last + gap - 1ms, false));
+            QVERIFY(backoff.shouldRequest(last + gap, false));
+            last += gap;
+        }
+        QVERIFY(!backoff.shouldRequest(last + 1h, true));
+        backoff.keyFrameAcknowledged();
+        QCOMPARE(backoff.interval(), std::chrono::milliseconds(1000));
+        QVERIFY(!backoff.shouldRequest(last + 999ms, false));
+        QVERIFY(backoff.shouldRequest(last + 1s, false));
+    }
+
+    // AUD-FIX6 F2, the Sol :3391 case: a 265 KB keyframe (over the 128 KiB floor) the client
+    // takes 400 ms to acknowledge, 6 kB P-frames at 30 fps. Before, the P-frames behind it were
+    // dropped and another 265 KB keyframe requested, once a second; now they wait, go out after
+    // the ack, and no keyframe is ever requested.
+    void keyFrameOverBudgetDoesNotLoop()
+    {
+        using namespace std::chrono_literals;
+        const auto before = simulateFlow(false, 265000, 6000, 400ms, 20ms, 10s);
+        qInfo() << "AUD-FIX4 rules:" << before.keyFramesSent << "keyframes," << before.requests << "requests," << before.dropped << "dropped,"
+                << before.delivered.size() << "sent";
+        QVERIFY(before.requests >= 5); // the loop this fixes
+        QVERIFY(before.keyFramesSent >= 5);
+
+        const auto run = simulateFlow(true, 265000, 6000, 400ms, 20ms, 10s);
+        qInfo() << "AUD-FIX6 rules:" << run.keyFramesSent << "keyframes," << run.requests << "requests," << run.dropped << "dropped," << run.delivered.size()
+                << "sent";
+        QCOMPARE(run.keyFramesSent, 1);
+        QCOMPARE(run.requests, 0);
+        QCOMPARE(run.dropped, 0);
+        QCOMPARE(run.keyFrameAckedAtMs, 400);
+        // Every frame, in order: the deltas behind the keyframe were delivered, not replaced.
+        QVERIFY(run.delivered.size() >= 295);
+        for (size_t i = 0; i < run.delivered.size(); ++i) {
+            QCOMPARE(run.delivered[i], int(i));
+        }
+        // Frames sent after the ack keep up with the encoder: the last one went out within
+        // two frame intervals of being made.
+        QVERIFY(run.deliveredAtMs.back() - run.delivered.back() * 33 <= 66);
+    }
+
+    // AUD-FIX6 F2: a 4K keyframe (1 MB) the client needs 1.5 s for: still one keyframe, no
+    // request, and the deltas behind it follow once it is acknowledged.
+    void hugeKeyFrameIsHeldBehind()
+    {
+        using namespace std::chrono_literals;
+        const auto run = simulateFlow(true, 1 << 20, 20000, 1500ms, 20ms, 8s);
+        QCOMPARE(run.keyFramesSent, 1);
+        QCOMPARE(run.requests, 0);
+        QCOMPARE(run.dropped, 0);
+        for (size_t i = 0; i < run.delivered.size(); ++i) {
+            QCOMPARE(run.delivered[i], int(i));
+        }
+        QVERIFY(run.deliveredAtMs.back() - run.delivered.back() * 33 <= 66);
+    }
+
+    // AUD-FIX6 F2: with a 1 MB keyframe out of the way, a client that pauses now and then
+    // (busy: 300 ms without acks every 2 s) does not cost a 1 MB rekey each time.
+    void ackJitterDoesNotRekeyABigKeyFrame()
+    {
+        using namespace std::chrono_literals;
+        const auto run = simulateFlow(true, 1 << 20, 8000, 200ms, 20ms, 10s, 2s, 300ms);
+        QCOMPARE(run.keyFramesSent, 1);
+        QCOMPARE(run.requests, 0);
+        QCOMPARE(run.dropped, 0);
+        const auto before = simulateFlow(false, 1 << 20, 8000, 200ms, 20ms, 10s, 2s, 300ms);
+        qInfo() << "AUD-FIX4 rules:" << before.keyFramesSent << "keyframes," << before.requests << "requests";
+        QVERIFY(before.requests >= 3);
+    }
+
+    // AUD-FIX6 F2: a keyframe that is never acknowledged (a client that stopped acking) gets
+    // the frames behind it coalesced after keyFrameHoldFrames(); the next request waits for
+    // the ack timeout instead of queueing another keyframe behind it every second.
+    void unacknowledgedKeyFrameDefersTheRequest()
+    {
+        using namespace KRdp::FrameQueuePolicy;
+        using namespace std::chrono_literals;
+        const auto run = simulateFlow(true, 265000, 6000, 1h, 1h, 15s);
+        QVERIFY(run.dropped > 0);
+        QCOMPARE(run.requests, 1); // after AckTimeout, not before
+        QCOMPARE(run.keyFramesSent, 2);
     }
 
     // AUD-FIX4 D1: while the window is full a monitor keeps at most MaxHeldFramesPerMonitor

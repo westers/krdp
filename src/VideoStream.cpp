@@ -406,7 +406,20 @@ public:
     // Monitors whose queued frames were coalesced away: their P-frames are dropped until a
     // keyframe arrives (queueFrame()). Guarded by frameQueueMutex, like the queue.
     std::vector<char> starvedMonitors;
-    std::vector<clk::steady_clock::time_point> starvedKeyFrameRequestAt;
+    // AUD-FIX6 F2: per monitor, when a starved monitor may ask for a keyframe (guarded by
+    // frameQueueMutex); the largest recent keyframe (frameQueueMutex) and its size for the
+    // byte budget (any thread); the monitors whose keyframe was acknowledged since the
+    // submission thread last looked (bit per monitor, set on the peer thread).
+    std::vector<FrameQueuePolicy::KeyFrameRequestBackoff> keyFrameBackoff;
+    // Monitors whose frames piled up behind an unacknowledged keyframe: they may keep
+    // keyFrameHoldFrames() queued until that backlog has drained to MaxHeldFramesPerMonitor,
+    // even after the keyframe was acknowledged (frameQueueMutex).
+    std::vector<char> keyFrameBacklog;
+    FrameQueuePolicy::KeyFramePeak keyFramePeak;
+    std::atomic<qint64> keyFramePeakBytes = 0;
+    std::atomic<quint64> keyFramesAcknowledged = 0;
+    // Submission thread only: a deferred request was logged (once per stream).
+    bool loggedKeyFrameDeferred = false;
     // Time frames waited for the window and frames coalesced since the last decision
     // (updateAdaptiveQuality() reads and resets them).
     std::atomic<qint64> heldNsSinceDecision = 0;
@@ -424,11 +437,25 @@ public:
     std::atomic<quint64> statAcknowledged = 0;
     std::atomic<quint64> statDropped = 0;
     std::atomic<quint64> statKeyFrameRequests = 0;
+    std::atomic<quint64> statKeyFramesDeferred = 0;
     std::atomic<bool> statSuspended = false;
 
     FrameQueuePolicy::WindowLimits windowLimits() const
     {
-        return FrameQueuePolicy::windowLimits(requestedFrameRate.load(), surfaceCount.load(), clk::microseconds(windowMinRttUs.load()), windowRateKbps.load());
+        return FrameQueuePolicy::windowLimits(requestedFrameRate.load(),
+                                              surfaceCount.load(),
+                                              clk::microseconds(windowMinRttUs.load()),
+                                              windowRateKbps.load(),
+                                              keyFramePeakBytes.load());
+    }
+    // Call with frameQueueMutex held.
+    void ensureMonitor(int monitorIndex)
+    {
+        if (monitorIndex >= 0 && size_t(monitorIndex) >= starvedMonitors.size()) {
+            starvedMonitors.resize(size_t(monitorIndex) + 1, 0);
+            keyFrameBackoff.resize(size_t(monitorIndex) + 1);
+            keyFrameBacklog.resize(size_t(monitorIndex) + 1, 0);
+        }
     }
     // Call with frameQueueMutex held.
     bool starved(int monitorIndex) const
@@ -439,6 +466,7 @@ public:
     void clearStarved()
     {
         std::fill(starvedMonitors.begin(), starvedMonitors.end(), 0);
+        std::fill(keyFrameBacklog.begin(), keyFrameBacklog.end(), 0);
     }
     // Backlog evidence for the adaptive-quality decision: the smallest number
     // of frames still unacknowledged right after any ack since the last
@@ -574,6 +602,11 @@ bool VideoStream::initialize()
                 // queueFrame() clearing it whenever a new keyframe arrives, and
                 // while the window is full by holdFrames().
                 nextFrame = d->frameQueue.takeFirst();
+                // AUD-FIX6 F2: no monitor has more than MaxHeldFramesPerMonitor waiting any
+                // more, so any backlog behind a keyframe has drained.
+                if (d->frameQueue.size() <= FrameQueuePolicy::MaxHeldFramesPerMonitor) {
+                    std::fill(d->keyFrameBacklog.begin(), d->keyFrameBacklog.end(), 0);
+                }
             }
             if (!sendFrame(nextFrame)) {
                 // Caps were reset between dequeue and send (e.g. a client
@@ -638,6 +671,13 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
 
     {
         std::lock_guard lock(d->frameQueueMutex);
+        // AUD-FIX6 F2: the byte budget covers twice the largest recent keyframe, this one
+        // included, so the P-frames behind a big keyframe can follow it.
+        const auto now = clk::steady_clock::now();
+        if (frame.isKeyFrame && !frame.data.isEmpty()) {
+            d->keyFramePeak.record(frame.data.size() + frame.aux.size(), now);
+        }
+        d->keyFramePeakBytes = d->keyFramePeak.largest(now);
         // AUD-FIX4 D1: this monitor's queued frames were coalesced away while the
         // window was full, so a P-frame has no reference on the client: drop it
         // until the keyframe that was asked for (or the next organic one) arrives.
@@ -1359,6 +1399,9 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
     std::lock_guard lock(d->pendingFramesMutex);
 
     const auto ack = d->pendingFrames.acknowledge(id, frameAcknowledge->queueDepth);
+    if (const int monitor = d->pendingFrames.acknowledgedKeyFrame(); monitor >= 0 && monitor < 64) {
+        d->keyFramesAcknowledged.fetch_or(quint64(1) << monitor);
+    }
     if ((ack == FrameQueuePolicy::FrameAckTracker::Ack::Acknowledged || ack == FrameQueuePolicy::FrameAckTracker::Ack::Suspended)
         && !d->graphicsDelivered.exchange(true)) {
         qCDebug(KRDP) << "The client acknowledged its first frame";
@@ -1474,6 +1517,7 @@ VideoStream::FlowStats VideoStream::flowStats() const
     stats.acknowledged = d->statAcknowledged.load();
     stats.dropped = d->statDropped.load();
     stats.keyFrameRequests = d->statKeyFrameRequests.load();
+    stats.keyFramesDeferred = d->statKeyFramesDeferred.load();
     stats.acksSuspended = d->statSuspended.load();
     return stats;
 }
@@ -1497,20 +1541,62 @@ bool VideoStream::windowOpen(clk::steady_clock::time_point now)
 
 void VideoStream::holdFrames(clk::steady_clock::time_point now)
 {
+    // AUD-FIX6 F2: a monitor whose keyframe is still unacknowledged keeps up to
+    // keyFrameHoldFrames() frames waiting behind it instead of MaxHeldFramesPerMonitor:
+    // dropping them would only make it ask for another keyframe as big as the one in flight.
+    // Once the keyframe is acknowledged that backlog may drain before the normal limit applies
+    // again. The two locks are never held together.
+    std::vector<int> queued;
+    std::vector<qint64> queuedBytes;
+    {
+        std::lock_guard queueLock(d->frameQueueMutex);
+        for (const auto &frame : std::as_const(d->frameQueue)) {
+            if (frame.monitorIndex >= 0) {
+                if (size_t(frame.monitorIndex) >= queued.size()) {
+                    queued.resize(size_t(frame.monitorIndex) + 1, 0);
+                    queuedBytes.resize(size_t(frame.monitorIndex) + 1, 0);
+                }
+                ++queued[size_t(frame.monitorIndex)];
+                queuedBytes[size_t(frame.monitorIndex)] += frame.data.size() + frame.aux.size();
+            }
+        }
+    }
+    std::vector<char> keyFrameInFlight(queued.size(), 0);
+    if (!queued.empty()) {
+        std::lock_guard lock(d->pendingFramesMutex);
+        for (size_t monitor = 0; monitor < queued.size(); ++monitor) {
+            keyFrameInFlight[monitor] = d->pendingFrames.keyFrameInFlight(int(monitor));
+        }
+    }
+    const int keyFrameHold = FrameQueuePolicy::keyFrameHoldFrames(d->requestedFrameRate.load());
     std::vector<int> starved;
     int dropped = 0;
     {
         std::lock_guard lock(d->frameQueueMutex);
-        dropped = FrameQueuePolicy::coalesceHeldFrames(d->frameQueue, FrameQueuePolicy::MaxHeldFramesPerMonitor, starved);
+        for (size_t monitor = 0; monitor < queued.size(); ++monitor) {
+            if (!queued[monitor] && !keyFrameInFlight[monitor]) {
+                continue;
+            }
+            d->ensureMonitor(int(monitor));
+            char &backlog = d->keyFrameBacklog[monitor];
+            backlog = FrameQueuePolicy::keyFrameBacklog(backlog, keyFrameInFlight[monitor], queued[monitor]);
+        }
+        const qint64 keyFrameBytes = d->keyFramePeakBytes.load();
+        const auto coalesce = [&](int monitor, int count) {
+            const bool known = monitor >= 0 && size_t(monitor) < queuedBytes.size();
+            const bool backlog = monitor >= 0 && size_t(monitor) < d->keyFrameBacklog.size() && d->keyFrameBacklog[size_t(monitor)];
+            // A monitor not counted above (a negative index) keeps the AUD-FIX4 rule.
+            return known ? FrameQueuePolicy::shouldCoalesce(count, queuedBytes[size_t(monitor)], backlog, keyFrameBytes, keyFrameHold)
+                         : count > FrameQueuePolicy::MaxHeldFramesPerMonitor;
+        };
+        dropped = FrameQueuePolicy::coalesceHeldFrames(d->frameQueue, coalesce, starved);
         for (const int monitor : starved) {
             if (monitor < 0) {
                 continue;
             }
-            if (size_t(monitor) >= d->starvedMonitors.size()) {
-                d->starvedMonitors.resize(size_t(monitor) + 1, 0);
-                d->starvedKeyFrameRequestAt.resize(size_t(monitor) + 1);
-            }
+            d->ensureMonitor(monitor);
             d->starvedMonitors[size_t(monitor)] = 1;
+            d->keyFrameBacklog[size_t(monitor)] = 0;
         }
     }
     if (dropped > 0) {
@@ -1544,18 +1630,56 @@ void VideoStream::holdFrames(clk::steady_clock::time_point now)
 
 void VideoStream::requestStarvedKeyFrames(clk::steady_clock::time_point now)
 {
-    std::vector<int> request;
+    // AUD-FIX6 F2: an acknowledged keyframe resets its monitor's back-off; a monitor whose
+    // keyframe is still unacknowledged asks for none (see KeyFrameRequestBackoff).
+    const quint64 acknowledged = d->keyFramesAcknowledged.exchange(0);
+    std::vector<char> keyFrameInFlight;
     {
         std::lock_guard lock(d->frameQueueMutex);
+        keyFrameInFlight.assign(d->starvedMonitors.size(), 0);
+    }
+    if (!keyFrameInFlight.empty()) {
+        // A starved monitor's P-frames are dropped before they queue, so windowOpen() may not
+        // run: expire here too, or a keyframe the client never acknowledges would hold the
+        // request back for good instead of for AckTimeout.
+        const auto limits = d->windowLimits();
+        std::lock_guard lock(d->pendingFramesMutex);
+        if (const int timedOut = d->pendingFrames.expire(now, limits); timedOut > 0 && !d->loggedAckTimeout) {
+            d->loggedAckTimeout = true;
+            qCWarning(KRDP) << "The client left" << timedOut << "frame(s) unacknowledged for"
+                            << clk::duration_cast<clk::seconds>(FrameQueuePolicy::AckTimeout).count() << "s; no longer counting them as in flight";
+        }
+        for (size_t monitor = 0; monitor < keyFrameInFlight.size(); ++monitor) {
+            keyFrameInFlight[monitor] = d->pendingFrames.keyFrameInFlight(int(monitor));
+        }
+    }
+    std::vector<int> request;
+    std::vector<int> deferred;
+    {
+        std::lock_guard lock(d->frameQueueMutex);
+        for (size_t monitor = 0; monitor < d->keyFrameBackoff.size(); ++monitor) {
+            if (monitor < 64 && (acknowledged & (quint64(1) << monitor))) {
+                d->keyFrameBackoff[monitor].keyFrameAcknowledged();
+            }
+        }
         for (size_t monitor = 0; monitor < d->starvedMonitors.size(); ++monitor) {
             if (!d->starvedMonitors[monitor]) {
                 continue;
             }
-            auto &last = d->starvedKeyFrameRequestAt[monitor];
-            if (last == clk::steady_clock::time_point{} || now - last >= FrameQueuePolicy::CoalesceKeyFrameMinInterval) {
-                last = now;
+            const bool inFlight = monitor < keyFrameInFlight.size() && keyFrameInFlight[monitor];
+            if (d->keyFrameBackoff[monitor].shouldRequest(now, inFlight)) {
                 request.push_back(int(monitor));
+            } else if (inFlight) {
+                deferred.push_back(int(monitor));
             }
+        }
+    }
+    if (!deferred.empty()) {
+        d->statKeyFramesDeferred.fetch_add(1, std::memory_order_relaxed);
+        if (!d->loggedKeyFrameDeferred) {
+            d->loggedKeyFrameDeferred = true;
+            qCInfo(KRDP) << "Video: frames of monitor" << deferred.front()
+                         << "were coalesced while its keyframe is still unacknowledged; the next keyframe is requested once it is";
         }
     }
     for (const int monitor : request) {
@@ -1700,7 +1824,7 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
 
     {
         std::lock_guard lock(d->pendingFramesMutex);
-        d->pendingFrames.frameSent(frameId, frame.data.size() + frame.aux.size());
+        d->pendingFrames.frameSent(frameId, frame.data.size() + frame.aux.size(), clk::steady_clock::now(), frame.isKeyFrame && !frame.data.isEmpty(), frame.monitorIndex);
         const int inFlight = d->pendingFrames.inFlightFrames();
         d->statInFlight = inFlight;
         int seen = d->statMaxInFlight.load(std::memory_order_relaxed);

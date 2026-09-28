@@ -222,6 +222,7 @@ public:
         quint64 acknowledged = 0;
         quint64 dropped = 0; ///< frames coalesced away while the window was full
         quint64 keyFrameRequests = 0; ///< keyframes asked for after coalescing
+        quint64 keyFramesDeferred = 0; ///< AUD-FIX6 F2: looks at a starved monitor that found its keyframe still unacknowledged
         bool acksSuspended = false;
     };
     FlowStats flowStats() const;
