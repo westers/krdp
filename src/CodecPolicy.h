@@ -277,6 +277,25 @@ constexpr double ProbeCeilingShare = 0.85;
 /// The encoder "runs at the cap" when its target is at least this share of it.
 constexpr double AtCapShare = 0.95;
 constexpr auto RecoverHold = std::chrono::seconds(20);
+/**
+ * AUD-FIX12 (cray, c27909d: hardware AV1 on a sustained 6 Mbit/s tbf): without a software
+ * HEVC/AV1 encoder to probe with, "RecoverHold without a congestion signal" read the throttled
+ * but uncongested state as recovered: the delivery throttle held the source at 5-8 fps and
+ * adaptive quality sat low, so the stream fit the link, stayed clear, and the link counted as
+ * recovered about 40 s after it turned slow while the tbf was still on. Clear alone is no
+ * headroom. Without a probing encoder the way back now needs both:
+ * - a rung of the rate ladder: the goodput held at least ProbeGrowth times the highest rate
+ *   proven so far (at first the goodput the link turned slow at, slowEntryKbps) for ProbeHold
+ *   (doubled for every failed rung, up to 2^ProbeMaxDoublings) with no congestion signal at all.
+ *   Congestion during a rung is a failed probe; a goodput under the rung's rate starts it over.
+ *   Each success raises the proven rate (provenKbps, the rung's lowest goodput);
+ * - once a rung has proven ProbeGrowth over the entry rate: RecoverHold (with the flap back-off)
+ *   clear *and* unrestrained, i.e. the delivery throttle off and adaptive quality at its cap, so
+ *   the stream sends everything the encoder makes and the link carries it.
+ * A throttled link can never do either: its goodput cannot exceed the throttle, and an
+ * unrestrained stream runs into congestion. A still desktop proves nothing and stays slow.
+ */
+constexpr double RungGrowth = ProbeGrowth;
 constexpr auto RecoverFlapWindow = std::chrono::seconds(120);
 constexpr int RecoverFlapMaxDoublings = 4;
 
@@ -337,6 +356,8 @@ struct Input {
     std::optional<quint8> quality;
     /// Adaptive quality's cap; unknown = the quality-based slow-link signals are off (SlowWindow).
     std::optional<quint8> qualityCap;
+    /// AUD-FIX12: the delivery throttle holds the source under the policy's frame rate.
+    bool throttled = false;
 };
 
 /// One step()'s view of the link, kept for the slow-link window (SlowWindow).
@@ -376,6 +397,13 @@ struct State {
     quint32 probeFromKbps = 0; ///< the cap before the last up-probe (what a failed probe goes back to)
     Clock::time_point recoveredAt{}; ///< the last recovery from a slow link
     int recoverFlaps = 0; ///< slow links that came back soon after a recovery (RecoverFlapWindow)
+    // AUD-FIX12: the rate ladder of a slow link without a probing encoder (RungGrowth).
+    quint32 slowEntryKbps = 0; ///< the goodput when the link turned slow
+    quint32 provenKbps = 0; ///< the highest rate a rung (or the software probe's cap) held without congestion (0 = none yet)
+    Clock::time_point rungSince{}; ///< the current rung's run at the higher rate (epoch = none)
+    quint32 rungMinKbps = 0; ///< the lowest goodput of that run
+    int rungFailures = 0; ///< failed rungs in a row, for the back-off
+    Clock::time_point unrestrainedSince{}; ///< clear, unthrottled and at the quality cap since (epoch = not)
     EncoderSettings applied; ///< what the last step() reported
     /// Reopens of the running encoder that settings changes caused (preset steps, a bitrate change
     /// without Backends::liveBitrate, a backend change); codec switches are not counted.
@@ -394,6 +422,8 @@ struct Decision {
     bool restartsEncoder = false;
     /// Only the target bitrate changed (no preset, backend or frame-rate change).
     bool bitrateOnly = false;
+    /// AUD-FIX12: why the link state flipped in this step (empty when it did not).
+    QString linkReason;
 };
 
 /// A Decision with only its choice, change flag and reason set (the rest default).
@@ -506,6 +536,7 @@ inline void updateLinkCap(State &state, const Input &in, Clock::time_point now)
         if (state.lastProbeAt != Clock::time_point{}) {
             state.probeFailures = 0; // the previous probe held
         }
+        state.provenKbps = std::max(state.provenKbps, state.linkKbps); // AUD-FIX12: the stats' capacity
         wanted = bounded(state.linkKbps * ProbeGrowth);
         if (wanted != state.linkKbps) {
             probe = true;
@@ -536,6 +567,57 @@ inline quint32 wantedTarget(const State &state, const Input &in)
         target = in.congested ? std::min(target, state.linkKbps) : state.linkKbps;
     }
     return std::max(target, MinTargetKbps);
+}
+
+inline void resetRungs(State &state)
+{
+    state.slowEntryKbps = 0;
+    state.provenKbps = 0;
+    state.rungSince = {};
+    state.rungMinKbps = 0;
+    state.rungFailures = 0;
+    state.unrestrainedSince = {};
+}
+
+/**
+ * AUD-FIX12: one step of the rate ladder of a slow link without a probing encoder (see
+ * RungGrowth), and the unrestrained run the recovery needs after it.
+ */
+inline void climbRung(State &state, const Input &in, Clock::time_point now)
+{
+    const bool atCap = !in.quality || !in.qualityCap || *in.quality >= *in.qualityCap;
+    if (in.congested || in.throttled || !atCap) {
+        state.unrestrainedSince = {};
+    } else if (state.unrestrainedSince == Clock::time_point{}) {
+        state.unrestrainedSince = now;
+    }
+    if (!in.bandwidthKbps || state.slowEntryKbps == 0) {
+        return;
+    }
+    const quint32 goodput = *in.bandwidthKbps;
+    const double rate = std::max(state.provenKbps, state.slowEntryKbps) * RungGrowth;
+    if (in.congested) {
+        if (state.rungSince != Clock::time_point{}) {
+            state.rungFailures = std::min(state.rungFailures + 1, ProbeMaxDoublings); // a failed probe backs off
+        }
+        state.rungSince = {};
+        return;
+    }
+    if (goodput < rate) {
+        state.rungSince = {}; // the rung must run at the higher rate throughout
+        return;
+    }
+    if (state.rungSince == Clock::time_point{}) {
+        state.rungSince = now;
+        state.rungMinKbps = goodput;
+        return;
+    }
+    state.rungMinKbps = std::min(state.rungMinKbps, goodput);
+    if (now - state.rungSince >= ProbeHold * (1 << std::clamp(state.rungFailures, 0, ProbeMaxDoublings))) {
+        state.provenKbps = state.rungMinKbps;
+        state.rungFailures = 0;
+        state.rungSince = {};
+    }
 }
 
 /**
@@ -634,10 +716,17 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
                 slowBecause = detail::judgeSlowWindow(state, in, now);
             }
             if (!slowBecause.isEmpty()) {
+                // AUD-FIX12: the rate ladder starts at the most the link delivered while it looked slow.
+                quint32 entry = *in.bandwidthKbps;
+                for (const auto &sample : std::as_const(state.linkWindow)) {
+                    entry = std::max(entry, sample.kbps);
+                }
                 state.slowLink = true;
                 state.slowSince = {};
                 state.clearSince = {};
                 state.linkWindow.clear();
+                detail::resetRungs(state);
+                state.slowEntryKbps = std::max<quint32>(entry, MinTargetKbps);
                 if (state.recoveredAt != Clock::time_point{}) {
                     // Slow again soon after a recovery: the next one needs a longer clear run.
                     state.recoverFlaps = now - state.recoveredAt < RecoverFlapWindow ? std::min(state.recoverFlaps + 1, RecoverFlapMaxDoublings) : 0;
@@ -657,19 +746,25 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
                 state.fillSince = {};
                 state.linkWindow.clear();
                 state.recoveredAt = now;
+                detail::resetRungs(state);
                 linkReason = QStringLiteral("link recovered (%1 kbit/s)").arg(*in.bandwidthKbps);
             }
         }
+    }
+    if (in.adaptive && state.slowLink && !(state.current && softwarePrivate(*state.current) && in.mode != SoftwareEncoding::Never)) {
+        detail::climbRung(state, in, now);
     }
     if (in.adaptive && state.slowLink && state.clearSince != Clock::time_point{}) {
         const bool probing = state.current && softwarePrivate(*state.current) && in.mode != SoftwareEncoding::Never;
         const double ceiling = slowBelowKbps(in.pixels);
         const auto hold = RecoverHold * (1 << std::clamp(state.recoverFlaps, 0, RecoverFlapMaxDoublings));
-        // Probing: sending at the ceiling for the hold. Otherwise: clear for the hold.
-        const auto from = probing ? state.fillSince : state.clearSince;
+        // Probing: sending at the ceiling for the hold. Otherwise (AUD-FIX12): a rung proved
+        // headroom, then unrestrained and clear for the hold.
+        const auto from = probing ? state.fillSince : std::max(state.clearSince, state.unrestrainedSince);
+        const bool headroom = state.slowEntryKbps > 0 && state.provenKbps >= state.slowEntryKbps * RungGrowth;
         const bool ready = probing ? state.fillSince != Clock::time_point{} && state.linkKbps >= ceiling * ProbeCeilingShare
                                          && now - std::max(state.fillSince, state.linkChangedAt) >= hold
-                                   : now - state.clearSince >= hold;
+                                   : headroom && state.unrestrainedSince != Clock::time_point{} && now - from >= hold;
         if (ready) {
             state.slowLink = false;
             state.slowSince = {};
@@ -680,7 +775,8 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
             state.recoveredAt = now;
             const auto held = std::chrono::duration_cast<std::chrono::seconds>(now - (probing ? std::max(from, state.linkChangedAt) : from)).count();
             linkReason = probing ? QStringLiteral("link recovered (%1 kbit/s for %2 s without congestion)").arg(*in.bandwidthKbps).arg(held)
-                                 : QStringLiteral("link recovered (no congestion for %1 s)").arg(held);
+                                 : QStringLiteral("link recovered (%1 kbit/s proven, then unrestrained without congestion for %2 s)").arg(state.provenKbps).arg(held);
+            detail::resetRungs(state);
         }
     }
 
@@ -761,6 +857,7 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
 
     const Choice want = select(in, state, now);
     const auto finish = [&](Decision d) {
+        d.linkReason = linkReason;
         // Target bitrate (software HEVC/AV1): adaptive quality's bitrate, capped by a slow link.
         // Where the change is live (libx265) it applies at once. Where it reopens the encoder
         // (SVT-AV1) it waits RestartBitrateInterval after the last reconfiguration, needs a

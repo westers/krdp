@@ -5,6 +5,7 @@
 
 #include "AdaptiveQuality.h"
 #include "CodecPolicy.h"
+#include "FrameQueuePolicy.h"
 
 #include <QTest>
 
@@ -206,10 +207,162 @@ std::optional<int> replaySolS1(State &state, Clock::time_point &now, int fromMs,
 
 }
 
+/**
+ * AUD-FIX12: cray's session (c27909d, 2026-09-28): two 1920x1080 outputs of hardware AV1 with a
+ * 30 fps test pattern, as VideoStream runs it every 1.5 s: the real AdaptiveQuality and
+ * DeliveryThrottle, then the codec policy. The encoder wants ~16 Mbit/s at quality 80 and 30 fps
+ * (scaled by 2^((q-80)/20) and the frame rate); the link carries up to \a capacity(t); more
+ * demand than that is congestion and a full window.
+ */
+struct CraySession {
+    State state;
+    Input in;
+    Clock::time_point now = T0;
+    int quality = 80;
+    Clock::time_point lastStepDown{};
+    KRdp::FrameQueuePolicy::DeliveryThrottle throttle;
+    Clock::duration longestClearWhileThrottled{}; ///< the old rule's evidence: clear runs under a tbf
+    Clock::time_point clearSince{};
+    CraySession()
+    {
+        Encoders e;
+        e.avc = {true, true};
+        e.hevc = {true, true};
+        e.av1 = {true, true};
+        in = input(SoftwareEncoding::Auto, e);
+        in.pixels = 3840LL * 1194LL;
+        in.qualityCap = 80;
+        step(state, in, now);
+    }
+    void tick(quint32 capacity, bool throttledLink)
+    {
+        using namespace std::chrono;
+        now += 1500ms;
+        const double offered = std::min(throttle.rate(60), 30);
+        const double demand = 16000.0 * std::exp2((quality - 80) / 20.0) * offered / 30.0;
+        const double carried = std::min(demand, double(capacity));
+        const double delivered = demand > 0 ? offered * carried / demand : 0;
+        const bool pressure = demand > capacity;
+        const bool congested = demand > capacity * 0.97;
+        const auto result = KRdp::AdaptiveQuality::step({
+            .current = quality,
+            .cap = 80,
+            .averageRtt = congested ? microseconds(60000) : microseconds(10000),
+            .minimumRtt = microseconds(10000),
+            .backlogged = pressure,
+            .climbAllowed = now - lastStepDown >= KRdp::AdaptiveQuality::ClimbHoldAfterStepDown,
+        });
+        if (result.next < quality) lastStepDown = now;
+        quality = result.next;
+        throttle.update(now, 60, offered, delivered, pressure);
+        in.quality = quint8(quality);
+        in.congested = congested;
+        in.bandwidthKbps = quint32(carried);
+        in.throttled = throttle.active();
+        step(state, in, now);
+        if (congested || !throttledLink) {
+            clearSince = {};
+        } else if (clearSince == Clock::time_point{}) {
+            clearSince = now;
+        } else {
+            longestClearWhileThrottled = std::max(longestClearWhileThrottled, now - clearSince);
+        }
+    }
+};
+
 class CodecPolicyTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    // AUD-FIX12: a hardware codec on a sustained 6 Mbit/s throttle stays slow (cray cleared ~40 s
+    // after turning slow, throttle still on), and recovers within 90 s once it is removed.
+    void hardwareSlowLinkNeedsHeadroom()
+    {
+        CraySession cray;
+        std::optional<Clock::time_point> slowAt;
+        while (cray.now - T0 < 30s && !slowAt) {
+            cray.tick(6000, true);
+            if (cray.state.slowLink) slowAt = cray.now;
+        }
+        QVERIFY2(slowAt, "a 6 Mbit/s throttle under a 16 Mbit/s stream never turned slow");
+        QCOMPARE(*cray.state.current, (Choice{Family::Av1, true}));
+        // Six minutes of throttle: slow throughout.
+        while (cray.now - *slowAt < 360s) {
+            cray.tick(6000, true);
+            QVERIFY2(cray.state.slowLink, qPrintable(QStringLiteral("the slow link cleared %1 s into the throttle")
+                                                         .arg(std::chrono::duration_cast<std::chrono::seconds>(cray.now - *slowAt).count())));
+        }
+        qInfo() << "throttled: slow" << std::chrono::duration_cast<std::chrono::seconds>(*slowAt - T0).count() << "s in; longest clear run under it"
+                << std::chrono::duration_cast<std::chrono::seconds>(cray.longestClearWhileThrottled).count() << "s; entry" << cray.state.slowEntryKbps
+                << "kbit/s, proven" << cray.state.provenKbps << ", failed rungs" << cray.state.rungFailures;
+        // Throttle removed.
+        const auto removed = cray.now;
+        while (cray.state.slowLink && cray.now - removed < 300s) cray.tick(1000000, false);
+        const auto took = std::chrono::duration_cast<std::chrono::seconds>(cray.now - removed);
+        qInfo() << "recovered after" << took.count() << "s; proven" << cray.state.provenKbps;
+        QVERIFY(!cray.state.slowLink);
+        QVERIFY2(took <= 90s, qPrintable(QStringLiteral("recovery took %1 s").arg(took.count())));
+        // And stays recovered.
+        const auto recovered = cray.now;
+        while (cray.now - recovered < 300s) {
+            cray.tick(1000000, false);
+            QVERIFY(!cray.state.slowLink);
+        }
+    }
+
+    // AUD-FIX12: a rung that runs into congestion is a failed probe and the next one waits longer;
+    // a goodput under the rung's rate starts it over; a still desktop proves nothing.
+    void rungsBackOffAndNeedTheHigherRate()
+    {
+        Encoders e;
+        e.avc = {true, true};
+        e.av1 = {true, false};
+        auto in = input(SoftwareEncoding::Auto, e, {Family::Av1});
+        in.qualityCap = 80;
+        in.quality = 80;
+        State state;
+        auto now = T0;
+        step(state, in, now);
+        in.bandwidthKbps = 4000;
+        in.congested = true;
+        run(state, in, now, 9s);
+        QVERIFY(state.slowLink);
+        QCOMPARE(state.slowEntryKbps, 4000u);
+        // 5.9 Mbit/s clear: under 1.5x, no rung.
+        in.congested = false;
+        in.bandwidthKbps = 5900;
+        run(state, in, now, 30s);
+        QCOMPARE(state.provenKbps, 0u);
+        QVERIFY(state.slowLink);
+        // 6.5 Mbit/s for 6 s, then congestion: a failed rung.
+        in.bandwidthKbps = 6500;
+        run(state, in, now, 6s);
+        in.congested = true;
+        run(state, in, now, 1500ms);
+        QCOMPARE(state.rungFailures, 1);
+        QCOMPARE(state.provenKbps, 0u);
+        // The next rung needs 2 x ProbeHold.
+        in.congested = false;
+        const auto rungStart = now;
+        in.throttled = true; // a rung does not need an unrestrained stream, the recovery does
+        while (state.provenKbps == 0 && now - rungStart < 60s) run(state, in, now, 1500ms);
+        QVERIFY(now - rungStart >= ProbeHold * 2);
+        QCOMPARE(state.provenKbps, 6500u);
+        QCOMPARE(state.rungFailures, 0);
+        // Proven 1.5x the entry rate, but throttled: no recovery however long it stays clear.
+        run(state, in, now, 120s);
+        QVERIFY(state.slowLink);
+        // Unrestrained and clear for RecoverHold: recovered.
+        in.throttled = false;
+        QString reason;
+        for (const auto until = now + RecoverHold + 3s; now < until && state.slowLink;) {
+            now += 1500ms;
+            reason = step(state, in, now).linkReason;
+        }
+        QVERIFY(!state.slowLink);
+        QVERIFY2(reason.contains(u"proven"), qPrintable(reason));
+    }
+
     void parsesModes()
     {
         QCOMPARE(parseSoftwareEncoding(u"auto"), SoftwareEncoding::Auto);

@@ -1328,6 +1328,8 @@ void VideoStream::stepCodecPolicy(bool congested)
     in.quality = d->quality.load();
     // AUD-FIX5 D2: quality held under its cap while congestion keeps coming back is a slow link.
     in.qualityCap = d->qualityCap.load();
+    // AUD-FIX12: a throttled source proves no headroom on a slow link.
+    in.throttled = d->deliveryThrottle.active();
     if (!d->codecPolicy.current->hardware) {
         in.encodeLoadP95 = d->encodeLoad.p95();
     }
@@ -1337,11 +1339,16 @@ void VideoStream::stepCodecPolicy(bool congested)
         qCDebug(KRDP).noquote() << "Codec policy:" << decision.reason;
     }
     if (d->codecPolicy.slowLink != wasSlow) {
+        // AUD-FIX12: at info level (the rollout's slow-link check found no journal line).
+        qCInfo(KRDP).noquote() << (d->codecPolicy.slowLink ? QStringLiteral("Video: the link is slow:") : QStringLiteral("Video: the link is no longer slow:"))
+                               << (!decision.linkReason.isEmpty() ? decision.linkReason : QStringLiteral("goodput %1 kbit/s").arg(in.bandwidthKbps.value_or(0)));
         d->stats->setSlowLink(d->codecPolicy.slowLink); // samples at 1 Hz on a slow link
         d->stats->event(Stats::EventKind::SlowLink, [this, &decision, &in] {
             const QString goodput = in.bandwidthKbps ? QStringLiteral(" (%1 kbit/s)").arg(*in.bandwidthKbps) : QString();
-            const bool linkReason = decision.reason.contains(QLatin1String("slow link")) || decision.reason.contains(QLatin1String("link recovered"));
-            return statsDetail(linkReason ? decision.reason : (d->codecPolicy.slowLink ? QStringLiteral("slow link") : QStringLiteral("link recovered")) + goodput);
+            if (!decision.linkReason.isEmpty()) {
+                return statsDetail(decision.linkReason);
+            }
+            return statsDetail((d->codecPolicy.slowLink ? QStringLiteral("slow link") : QStringLiteral("link recovered")) + goodput);
         });
     }
     applyCodecDecision(decision);
