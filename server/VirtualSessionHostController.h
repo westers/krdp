@@ -39,6 +39,16 @@ public:
     void setStockClientPolicy(VirtualSessionTransport::StockPolicy policy) { m_stockPolicy = std::move(policy); }
     /** AUD-FIX7: the codec policy every new connection offers (unset: AVC only). */
     void setVideoCodecHost(const VideoCodecHost &host) { m_videoHost = host; }
+    /**
+     * AUD-FIX8: whether a desktop's session unit (krdp-virtual-session@<id>.service) is still
+     * running: true, false, or nullopt when that cannot be told (treated as running). A recovered
+     * record whose desktop is still running is adopted again, never retired. Default: systemd.
+     */
+    using SessionAlive = std::function<std::optional<bool>(const QString &session)>;
+    void setSessionAliveCheck(SessionAlive check) { m_sessionAlive = std::move(check); }
+    static std::optional<bool> sessionUnitAlive(const QString &session);
+    /// Re-adoptions of one still-running recovered desktop before its row is left Failed.
+    static constexpr int MaxReadoptions = 3;
 
 private:
     friend class VirtualSessionHostControllerTest;
@@ -95,6 +105,9 @@ private:
     // Records recovered at startup whose desktop has not yet been captured;
     // one that fails first is retired (AUD-FIX F5).
     std::map<QString, VirtualSessionJournal::Record> m_recoveredPending;
+    std::map<QString, int> m_readoptions;
+    SessionAlive m_sessionAlive = &VirtualSessionHostController::sessionUnitAlive;
+    bool stillRunning(const VirtualSessionJournal::Record &record) const;
     VirtualSessionSupervisor m_supervisor;
     VirtualSessionControl m_control;
     std::map<quint64, std::unique_ptr<VirtualSessionTransport>> m_clients;

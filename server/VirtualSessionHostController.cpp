@@ -13,6 +13,7 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDBusObjectPath>
+#include <QDBusVariant>
 #include <unistd.h>
 
 namespace KRdp
@@ -296,6 +297,39 @@ bool VirtualSessionHostController::retireRecord(VirtualSessionJournal &journal, 
     return true;
 }
 
+std::optional<bool> VirtualSessionHostController::sessionUnitAlive(const QString &session)
+{
+    auto bus = QDBusConnection::systemBus();
+    if (!bus.isConnected()) return std::nullopt;
+    const QString systemd = QStringLiteral("org.freedesktop.systemd1");
+    auto get = QDBusMessage::createMethodCall(systemd, QStringLiteral("/org/freedesktop/systemd1"),
+        QStringLiteral("org.freedesktop.systemd1.Manager"), QStringLiteral("GetUnit"));
+    get.setArguments({QStringLiteral("krdp-virtual-session@%1.service").arg(session)});
+    const auto unit = bus.call(get, QDBus::Block, 3000);
+    if (unit.type() == QDBusMessage::ErrorMessage) {
+        // Not loaded at all: nothing of it runs.
+        if (unit.errorName() == QLatin1String("org.freedesktop.systemd1.NoSuchUnit")) return false;
+        return std::nullopt;
+    }
+    const auto path = unit.arguments().value(0).value<QDBusObjectPath>().path();
+    if (path.isEmpty()) return std::nullopt;
+    auto property = QDBusMessage::createMethodCall(systemd, path, QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    property.setArguments({QStringLiteral("org.freedesktop.systemd1.Unit"), QStringLiteral("ActiveState")});
+    const auto state = bus.call(property, QDBus::Block, 3000);
+    if (state.type() == QDBusMessage::ErrorMessage) return std::nullopt;
+    const QString active = state.arguments().value(0).value<QDBusVariant>().variant().toString();
+    if (active.isEmpty()) return std::nullopt;
+    // inactive/failed: the unit's cgroup is empty (KillMode=mixed); anything else still runs.
+    return active != QLatin1String("inactive") && active != QLatin1String("failed");
+}
+
+bool VirtualSessionHostController::stillRunning(const VirtualSessionJournal::Record &record) const
+{
+    const auto check = m_sessionAlive;
+    // Unknown counts as running: retiring is only for a desktop that is provably gone.
+    return !check || check(record.session) != std::optional<bool>(false);
+}
+
 void VirtualSessionHostController::retireFailedRecovery(const QString &session)
 {
     const auto found = m_recoveredPending.find(session);
@@ -312,7 +346,29 @@ void VirtualSessionHostController::retireFailedRecovery(const QString &session)
         m_recoveredPending.erase(found);
         return;
     }
-    retireRecord(*m_recoveredJournal, record, QStringLiteral("its recovered desktop failed before it was ever captured"));
+    // AUD-FIX8: 23b328a's broker retired Sol's cefbcbb6 and 4783de1e here while their units still
+    // ran (their workers were refused, B1). A desktop that still runs is adopted again - its
+    // desktop script starts a fresh worker as soon as the socket is back - never retired.
+    if (stillRunning(record)) {
+        int &attempts = m_readoptions[session];
+        if (attempts < MaxReadoptions && m_supervisor.retireUnadopted(record.identity())) {
+            ++attempts;
+            m_workers.erase(session);
+            if (adopt(record.identity(), record.workerSocket())) {
+                qWarning().noquote() << "Virtual desktop" << session << "(uid" << record.uid << ") failed before it was captured,"
+                                     << "but its session unit still runs: adopted again, attempt" << attempts << "of" << MaxReadoptions;
+                return; // still pending: a second failure comes back here
+            }
+            m_supervisor.rememberUnavailable(record.identity());
+        }
+        m_recoveredPending.erase(session);
+        qWarning().noquote() << "Kept virtual desktop record" << session << "(uid" << record.uid << "): it never delivered a picture"
+                             << "to this broker, but its session unit still runs, so it was not retired. It is listed as failed;"
+                             << "the next broker start adopts it again, or end it with"
+                             << QStringLiteral("`systemctl stop krdp-virtual-session@%1.service`.").arg(session);
+        return;
+    }
+    retireRecord(*m_recoveredJournal, record, QStringLiteral("its recovered desktop failed before it was ever captured and its session unit is gone"));
     m_recoveredPending.erase(session);
 }
 
@@ -398,8 +454,13 @@ bool VirtualSessionHostController::recoverRecords(const QVector<VirtualSessionJo
         }
         // AUD-FIX F5: a record this broker cannot adopt (no runtime, occupied
         // lease, unusable endpoint) is moved aside rather than kept as a Failed
-        // row. Never a new spawn either way.
-        if (m_recoveredJournal && retireRecord(*m_recoveredJournal, record, QStringLiteral("its desktop could not be adopted")))
+        // row. Never a new spawn either way. AUD-FIX8: unless its session unit
+        // still runs - then it stays a (dismissible) Failed row and the next
+        // broker start tries again.
+        if (record.boot == boot && stillRunning(record)) {
+            qWarning().noquote() << "Could not adopt virtual desktop" << record.session << "(uid" << record.uid << "),"
+                                 << "but its session unit still runs: kept, listed as failed, not retired";
+        } else if (m_recoveredJournal && retireRecord(*m_recoveredJournal, record, QStringLiteral("its desktop could not be adopted")))
             continue;
         // Retirement failed: keep a visible intent (Failed rows hold no slot).
         if (!reserved && !m_supervisor.rememberUnavailable(record.identity())) return refuse();

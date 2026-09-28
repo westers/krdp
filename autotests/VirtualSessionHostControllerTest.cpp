@@ -5,6 +5,7 @@
 #include <QTemporaryDir>
 #include <QScopeGuard>
 #include <QSignalSpy>
+#include <QPointer>
 #include "VirtualSessionGuardian.h"
 #include "VirtualSessionHostController.h"
 #include "ConsoleWorkerOutbox.h"
@@ -838,6 +839,130 @@ private Q_SLOTS:
         QVERIFY(!host.m_supervisor.recreate(1000, handle->id));
         QVERIFY(!host.m_supervisor.forget(1000, handle->id));
         QVERIFY(host.m_workers.empty());
+    }
+    // AUD-FIX8: Sol's 23b328a broker retired two recovered desktops whose units still ran (their
+    // workers were refused before Ready). A recovered record that fails before capture is adopted
+    // again while its session unit runs, and retired only once the unit is gone.
+    void recoveredDesktopStillRunningIsAdoptedNotRetired_data()
+    {
+        QTest::addColumn<std::optional<bool>>("unitAlive");
+        QTest::addColumn<bool>("keepsFailing");
+        QTest::newRow("unit running") << std::optional<bool>(true) << false;
+        QTest::newRow("unit state unknown") << std::optional<bool>() << false;
+        QTest::newRow("unit running, worker keeps failing") << std::optional<bool>(true) << true;
+        QTest::newRow("unit gone") << std::optional<bool>(false) << false;
+    }
+    void recoveredDesktopStillRunningIsAdoptedNotRetired()
+    {
+        QFETCH(std::optional<bool>, unitAlive);
+        QFETCH(bool, keepsFailing);
+        if (!getuid()) QSKIP("Guardian requires a nonroot desktop UID");
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        QFile bootFile(QStringLiteral("/proc/sys/kernel/random/boot_id"));
+        QVERIFY(bootFile.open(QIODevice::ReadOnly));
+        const auto boot = QString::fromLatin1(bootFile.readAll()).trimmed();
+        const QString userRuntime = QStringLiteral("/run/user/%1").arg(getuid());
+        if (!QFileInfo(userRuntime).isDir()) QSKIP("No user runtime directory for canonical recovery-path fixture");
+        const QString base = userRuntime + QStringLiteral("/krdp-virtual");
+        const bool createdBase = QDir().mkdir(base);
+        auto cleanBase = qScopeGuard([&] { if (createdBase) QDir().rmdir(base); });
+        if (createdBase) QVERIFY(!chmod(QFile::encodeName(base).constData(), 0700));
+        const VirtualSessionJournal::Record record{quint32(getuid()), uuid(), uuid(), uuid(), boot, QByteArray(32, 'k')};
+        const QString runtime = QFileInfo(record.workerSocket()).absolutePath();
+        QVERIFY(QDir().mkdir(runtime));
+        auto cleanRuntime = qScopeGuard([&] { QDir(runtime).removeRecursively(); });
+        QVERIFY(!chmod(QFile::encodeName(runtime).constData(), 0700));
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr);
+        QVERIFY(journal); QVERIFY(journal->insert(record));
+        VirtualSessionGuardian guardian;
+        QVERIFY(guardian.start(getuid(), record.session, record.token, record.identity().socket,
+            {QStringLiteral("/usr/bin/sleep"), {QStringLiteral("60")}, {}, {}}, nullptr, record.incarnation));
+        QTRY_COMPARE(guardian.phase(), QStringLiteral("running"));
+
+        Server server;
+        VirtualSessionHostController host(&server, {});
+        int checks = 0;
+        host.setSessionAliveCheck([&](const QString &session) {
+            ++checks;
+            return session == record.session ? unitAlive : std::optional<bool>(false);
+        });
+        QVERIFY(host.recover(*journal));
+        QTRY_VERIFY(host.m_workers.contains(record.session));
+        QPointer<ConsoleWorkerEndpoint> firstEndpoint = host.m_workers.at(record.session)->endpoint.get();
+        // The worker is refused or never confirms capture: the supervisor gives up on it.
+        host.m_supervisor.captureUnavailable(host.m_workers.at(record.session)->handle);
+        bool retired = false;
+        if (unitAlive == std::optional<bool>(false)) {
+            QTRY_VERIFY(!host.m_workers.contains(record.session));
+            QVERIFY(journal->readRecord(record.session, nullptr, &retired)); QVERIFY(retired);
+            QVERIFY(host.m_supervisor.list(getuid()).isEmpty());
+            return;
+        }
+        // Adopted again: a fresh endpoint listens on the worker socket and the row is Starting, not Failed.
+        QTRY_VERIFY(host.m_workers.contains(record.session) && host.m_workers.at(record.session)->endpoint.get() != firstEndpoint
+            && QFileInfo::exists(record.workerSocket()));
+        QVERIFY(checks >= 1);
+        QVERIFY(journal->readRecord(record.session, nullptr, &retired)); QVERIFY(!retired);
+        QCOMPARE(host.m_supervisor.list(getuid()).first().phase, VirtualSessionState::Phase::Starting);
+        if (keepsFailing) {
+            // Bounded: after MaxReadoptions it stays a Failed row with its record, never retired.
+            for (int attempt = 1; attempt <= VirtualSessionHostController::MaxReadoptions; ++attempt) {
+                QTRY_VERIFY(host.m_workers.contains(record.session));
+                host.m_supervisor.captureUnavailable(host.m_workers.at(record.session)->handle);
+                QTest::qWait(50);
+            }
+            QTRY_COMPARE(host.m_supervisor.list(getuid()).first().phase, VirtualSessionState::Phase::Failed);
+            QTest::qWait(100);
+            QCOMPARE(host.m_supervisor.list(getuid()).first().phase, VirtualSessionState::Phase::Failed);
+            QVERIFY(journal->readRecord(record.session, nullptr, &retired)); QVERIFY(!retired);
+            QVERIFY(!host.m_recoveredPending.contains(record.session));
+            return;
+        }
+        // The desktop script's fresh worker, in the real order, now gets through.
+        QLocalSocket worker;
+        worker.connectToServer(record.workerSocket());
+        QVERIFY(worker.waitForConnected(1000));
+        ConsoleWorkerOutbox outbox([&worker](const QByteArray &bytes) { worker.write(bytes); });
+        outbox.hello({record.session, quint32(getuid()), record.token});
+        outbox.caps({});
+        outbox.report({ConsoleWorkerWire::EncoderReport::Event::Backend, VideoCodec::Avc420, true});
+        outbox.ready();
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Outputs{{{QStringLiteral("Virtual-1"), QRect(0, 0, 1280, 720), 1, true}}}));
+        VideoFrame frame; frame.size = QSize(1280, 720); frame.data = "fixture"; frame.isKeyFrame = true;
+        frame.monitors = {{QRect(0, 0, 1280, 720), true}};
+        worker.write(ConsoleWorkerWire::frame(frame));
+        QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_COMPARE(host.m_supervisor.list(getuid()).first().phase, VirtualSessionState::Phase::Retained);
+        QVERIFY(journal->readRecord(record.session, nullptr, &retired)); QVERIFY(!retired);
+    }
+    // AUD-FIX8: a this-boot record this broker cannot adopt is kept (Failed, dismissible) while its
+    // session unit still runs; one whose unit is gone is retired as before (AUD-FIX F5).
+    void unadoptableRecordOfARunningUnitIsKept()
+    {
+        QFile bootFile(QStringLiteral("/proc/sys/kernel/random/boot_id"));
+        QVERIFY(bootFile.open(QIODevice::ReadOnly));
+        const auto boot = QString::fromLatin1(bootFile.readAll()).trimmed();
+        const auto uuid = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces); };
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr);
+        QVERIFY(journal);
+        const VirtualSessionJournal::Record running{1000, uuid(), uuid(), uuid(), boot, QByteArray(32, 'a')};
+        const VirtualSessionJournal::Record gone{1000, uuid(), uuid(), uuid(), boot, QByteArray(32, 'b')};
+        QVERIFY(journal->insert(running)); QVERIFY(journal->insert(gone));
+        Server server;
+        VirtualSessionHostController host(&server, {});
+        host.setSessionAliveCheck([&](const QString &session) { return session == running.session; });
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("^Could not adopt virtual desktop .*still runs: kept")));
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("^Retired virtual desktop record .*could not be adopted")));
+        QVERIFY(host.recover(*journal));
+        bool retired = true;
+        QVERIFY(journal->readRecord(running.session, nullptr, &retired)); QVERIFY(!retired);
+        QVERIFY(journal->readRecord(gone.session, nullptr, &retired)); QVERIFY(retired);
+        const auto rows = host.m_supervisor.list(1000);
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().id, running.session);
+        QCOMPARE(rows.first().phase, VirtualSessionState::Phase::Failed);
     }
     void journalRecoveryReattachesOnlyAfterNewAuthenticatedCapture()
     {
