@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QTest>
 #include <QSignalSpy>
 #include <Server.h>
@@ -1149,7 +1151,7 @@ private Q_SLOTS:
     }
     void deviceCameraUnsupportedQueryAndRevocation() {
         // AUD-D3: the virtual desktop shares no camera yet; a query still answers; a
-        // detach pushes `off`/`revoked` for what was on, answering a pending start once.
+        // detach pushes `off`/`detached` for what was on, answering a pending start once.
         microphoneFixture([&](auto &t, auto &, auto &, auto &) {
             QList<QJsonObject> pushed;
             t.m_recordPushed = [&pushed](const QJsonObject &record) { pushed.append(record); };
@@ -1171,10 +1173,10 @@ private Q_SLOTS:
             QCOMPARE(pushed.size(), 2);
             QCOMPARE(pushed.at(0).value(u"device"_s).toString(), u"microphone"_s);
             QCOMPARE(state(pushed.at(0)), u"off"_s);
-            QCOMPARE(pushed.at(0).value(u"code"_s).toString(), u"revoked"_s);
+            QCOMPARE(pushed.at(0).value(u"code"_s).toString(), u"detached"_s);
             QCOMPARE(pushed.at(0).value(u"requestId"_s).toString(), u"v1"_s);
             QCOMPARE(pushed.at(1).value(u"device"_s).toString(), u"playback"_s);
-            QCOMPARE(pushed.at(1).value(u"code"_s).toString(), u"revoked"_s);
+            QCOMPARE(pushed.at(1).value(u"code"_s).toString(), u"detached"_s);
             QVERIFY(!pushed.at(1).contains(u"requestId"_s));
             t.revoke(); // nothing on any more: nothing pushed again
             QCOMPARE(pushed.size(), 2);
@@ -1198,7 +1200,7 @@ private Q_SLOTS:
     }
     void standardClientMediaForTheSessionClient() {
         QFETCH(bool, enabled);
-        QList<QJsonObject> pushed; // outlives the transport (its teardown pushes `revoked`)
+        QList<QJsonObject> pushed; // outlives the transport (its teardown pushes `detached`)
         microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
             QVERIFY(!t.m_connection->hasControlChannel());
             t.m_standardChannels = &VirtualSessionTransportTest::joinedEverything;
@@ -1350,7 +1352,7 @@ private Q_SLOTS:
             QVERIFY(!t.authorized(1000)); t.m_handle = handle;
             QVERIFY(media(t, 1000).isEmpty()); const auto p = t.m_microphonePolicy;
             const auto refused = t.microphoneResult({p.generation, p.requestId, {}}, std::nullopt);
-            QVERIFY(!ok(refused)); QCOMPARE(refused.value(u"code"_s).toString(), u"revoked"_s); QVERIFY(!t.m_microphoneReady);
+            QVERIFY(!ok(refused)); QCOMPARE(refused.value(u"code"_s).toString(), u"detached"_s); QVERIFY(!t.m_microphoneReady);
             QVERIFY(media(t, 1000).isEmpty()); const auto active = t.m_microphonePolicy;
             QVERIFY(ok(t.microphoneResult({active.generation, active.requestId, {}}, 1000)));
             t.pumpMicrophone(); // Production PAM-only identity refuses fixture identity.
@@ -1988,6 +1990,92 @@ private Q_SLOTS:
             QTest::qWait(150);
             QVERIFY(!stock.control->attachment(2));
             QVERIFY(stock.refused.isEmpty());
+        });
+    }
+
+    // AUD-FIX2 F2: our client's first record on :3395 was `codec` (then unsupported here), so
+    // the broker took it for a stock client and bound a desktop for it behind its back. A
+    // client that speaks KRDPCTL v2 (a requestId, or any record this broker knows) is never
+    // bound automatically; `codec` is answered (AVC); StandardClientMedia stays off.
+    void krdpctlClientIsNeverBoundAutomatically()
+    {
+        stockFixture([&](Stock &stock) {
+            const auto desktop = stock.ready(*stock.supervisor->create(1000));
+            stock.control->noteUsed(desktop.id);
+            int policyCalls = 0;
+            stock.policy = [&policyCalls](quint32) { ++policyCalls; return VirtualStockClient::Policy::AttachOrCreate; };
+            auto *t = stock.connect(1);
+            startStock(*t, true);
+            const auto answer = t->request(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, 1}, {u"codecs"_s, QJsonArray{u"hevc"_s}}}, 1000);
+            QCOMPARE(answer.value(u"type"_s).toString(), u"codec"_s);
+            QCOMPARE(answer.value(u"selected"_s).toString(), u"avc"_s);
+            QVERIFY(!answer.contains(u"backend"_s));
+            QVERIFY(t->m_krdpctlClient);
+            QVERIFY(t->m_spokeKrdpctl);
+            QTest::qWait(300); // well past the gate
+            QVERIFY(!stock.control->attachment(1));
+            QCOMPARE(policyCalls, 0);
+            QVERIFY(stock.refused.isEmpty());
+            QVERIFY(stock.created.isEmpty());
+
+            // Even a type the broker does not know counts, when it carries a requestId.
+            auto *other = stock.connect(2);
+            startStock(*other, true);
+            other->deliverControlRecord(QJsonObject{{u"type"_s, u"hello"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r1"_s}}, 1000);
+            QTest::qWait(300);
+            QVERIFY(!stock.control->attachment(2));
+            QCOMPARE(policyCalls, 0);
+            // Its own explicit choice still works.
+            const auto attached = stock.control->request(1000, 2, sessionCommand(u"attach-2"_s, u"attach"_s, desktop.id));
+            QVERIFY2(attached.value(u"ok"_s).toBool(), qPrintable(QString::fromUtf8(QJsonDocument(attached).toJson(QJsonDocument::Compact))));
+            QCOMPARE(stock.control->attachment(2)->id, desktop.id);
+        });
+    }
+
+    // Unchanged for stock clients: KRDPCTL opened but nothing v2 in it (no requestId, unknown type).
+    void channelWithoutV2RecordIsStillAStockClient()
+    {
+        stockFixture([&](Stock &stock) {
+            const auto desktop = stock.ready(*stock.supervisor->create(1000));
+            stock.control->noteUsed(desktop.id);
+            auto *t = stock.connect(1);
+            startStock(*t, true);
+            t->deliverControlRecord(QJsonObject{{u"type"_s, u"hello"_s}, {u"v"_s, 1}}, 1000);
+            QVERIFY(!t->m_krdpctlClient);
+            QTRY_VERIFY(stock.control->attachment(1));
+            QCOMPARE(stock.control->attachment(1)->id, desktop.id);
+        });
+    }
+
+    // AUD-FIX2 F4: the same user opens the desktop on another device with our client: an
+    // explicit attach takes it over, and the first connection hears why before 0x5.
+    void ownClientTakeOverTellsTheOtherDevice()
+    {
+        stockFixture([&](Stock &stock) {
+            const auto desktop = stock.ready(*stock.supervisor->create(1000));
+            auto *first = stock.connect(1);
+            QList<QJsonObject> pushed;
+            first->m_recordPushed = [&pushed](const QJsonObject &record) { pushed.append(record); };
+            first->m_capabilitiesSent = true; // it joined KRDPCTL
+            // (Control level: this fixture's connections have no PAM identity to bind capture with.)
+            const auto attached = stock.control->request(1000, 1, sessionCommand(u"attach-1"_s, u"attach"_s, desktop.id));
+            QVERIFY2(attached.value(u"ok"_s).toBool(), qPrintable(QString::fromUtf8(QJsonDocument(attached).toJson(QJsonDocument::Compact))));
+            QCOMPARE(stock.control->attachment(1)->id, desktop.id);
+
+            stock.connect(2);
+            const auto taken = stock.control->request(1000, 2, sessionCommand(u"attach-2"_s, u"attach"_s, desktop.id));
+            QVERIFY2(taken.value(u"ok"_s).toBool(), qPrintable(QString::fromUtf8(QJsonDocument(taken).toJson(QJsonDocument::Compact))));
+            QCOMPARE(stock.control->attachment(2)->id, desktop.id);
+            QVERIFY(!stock.control->attachment(1));
+            QCOMPARE(stock.displaced, QList<quint64>{1});
+            QTRY_VERIFY(std::any_of(pushed.cbegin(), pushed.cend(), [](const QJsonObject &r) { return r.value(u"type"_s) == u"session-end"_s; }));
+            const auto end = *std::find_if(pushed.cbegin(), pushed.cend(), [](const QJsonObject &r) { return r.value(u"type"_s) == u"session-end"_s; });
+            QCOMPARE(end.value(u"reason"_s).toString(), u"opened-elsewhere"_s);
+            QCOMPARE(end.value(u"errorInfo"_s).toInteger(), qint64(ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION));
+            QVERIFY(!end.contains(u"requestId"_s));
+            QVERIFY(stock.refused.value(1).isEmpty()); // the record goes out before the close
+            QTRY_COMPARE(stock.refused.value(1), QList<quint32>{quint32(ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION)});
+            QVERIFY(!stock.refused.contains(2));
         });
     }
 

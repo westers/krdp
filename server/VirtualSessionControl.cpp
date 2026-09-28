@@ -192,7 +192,22 @@ QJsonObject VirtualSessionControl::dispatch(quint32 uid, quint64 client, const s
     }
     if (action == QStringLiteral("attach")) {
         if (transport->attached) return reply(record, false, QStringLiteral("detach current session first"));
-        const auto handle = supervisor->attach(uid, record.value(QStringLiteral("session")).toString(), client);
+        const QString session = record.value(QStringLiteral("session")).toString();
+        // AUD-FIX2 F4: a desktop the same user's other connection holds is taken over, as for a
+        // stock client: that connection is told it was opened from another device (a
+        // `session-end` record, then ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION).
+        const bool heldByOwnConnection = std::any_of(m_transports.cbegin(), m_transports.cend(), [&](const auto &other) {
+            return other != transport && other->uid == uid && other->attached && other->attached->id == session;
+        });
+        if (heldByOwnConnection) {
+            const auto result = takeOver(uid, client, transport, session);
+            if (!valid()) return uncertain();
+            if (result.kind != StockResult::Kind::Attached || !transport->attached) return reply(record, false, QStringLiteral("session unavailable"));
+            response.insert(QStringLiteral("session"), session);
+            response.insert(QStringLiteral("state"), QStringLiteral("attached"));
+            return response;
+        }
+        const auto handle = supervisor->attach(uid, session, client);
         if (!handle) return reply(record, false, QStringLiteral("session unavailable"));
         transport->attached = handle;
         noteUsed(handle->id);

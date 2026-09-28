@@ -88,7 +88,10 @@ KRDP_EXPORT QString stateName(DeviceStatus::State state);
 /** `code` values of a `device` state record. */
 inline const QString Declined = QStringLiteral("declined");
 inline const QString Unavailable = QStringLiteral("unavailable");
-inline const QString Revoked = QStringLiteral("revoked");
+inline const QString Revoked = QStringLiteral("revoked"); ///< console: the console user or controller changed
+/// Virtual broker (AUD-FIX2): this connection no longer holds the virtual desktop (detached,
+/// ended, or opened from another device); "revoked" wording about the console does not apply.
+inline const QString Detached = QStringLiteral("detached");
 inline const QString Busy = QStringLiteral("busy");
 inline const QString Timeout = QStringLiteral("timeout");
 }

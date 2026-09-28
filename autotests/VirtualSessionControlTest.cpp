@@ -479,19 +479,30 @@ private Q_SLOTS:
         QTRY_VERIFY(ready || (ready = supervisor.captureReady(*handle)));
         QVERIFY(control.request(1000, 1, command(QStringLiteral("a"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
         QVERIFY(control.attachment(1));
-        QVERIFY(!control.request(1000, 2, command(QStringLiteral("a"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
+        // AUD-FIX2 F4: the owner's other connection takes an attached desktop over (the same user
+        // opened it from another device); the first connection is released and displaced.
+        QList<quint64> displaced;
+        control.setDisplacedHandler([&displaced](quint64 client) { displaced.append(client); });
+        QVERIFY(control.request(1000, 2, command(QStringLiteral("a"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
+        QVERIFY(!control.attachment(1));
+        QCOMPARE(control.attachment(2)->generation, handle->generation);
+        QCOMPARE(displaced, QList<quint64>{1});
+        // A connection already holding a desktop still has to detach first.
+        QVERIFY(!control.request(1000, 2, command(QStringLiteral("again"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
+        QVERIFY(control.request(1000, 1, command(QStringLiteral("take-back"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
+        QCOMPARE(displaced, (QList<quint64>{1, 2}));
         QVERIFY(control.request(1000, 1, command(QStringLiteral("maintenance-detach"), QStringLiteral("detach"))).value(QStringLiteral("ok")).toBool());
         QVERIFY(!control.attachment(1));
         QVERIFY(control.request(1000, 1, command(QStringLiteral("maintenance-reattach"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
         control.disconnected(1);
-        QCOMPARE(released, (QList<quint64>{1, 1}));
+        QCOMPARE(released, (QList<quint64>{1, 2, 1, 1}));
         QVERIFY(!control.attachment(1));
         QCOMPARE(supervisor.list(1000).first().phase, Phase::Retained);
         QVERIFY(control.request(1000, 2, command(QStringLiteral("a2"), QStringLiteral("attach"), id)).value(QStringLiteral("ok")).toBool());
         QCOMPARE(control.attachment(2)->generation, handle->generation);
         // Another transport of the authenticated owner may explicitly stop it.
         QVERIFY(control.request(1000, 3, command(QStringLiteral("s"), QStringLiteral("stop"), id)).value(QStringLiteral("ok")).toBool());
-        QCOMPARE(released, (QList<quint64>{1, 1, 2}));
+        QCOMPARE(released, (QList<quint64>{1, 2, 1, 1, 2}));
         QVERIFY(!control.attachment(2));
         QTRY_COMPARE(supervisor.list(1000).first().phase, Phase::Absent);
         QCOMPARE(refusedCreates, 1); // List/attach/reconnect/stop never call admission.

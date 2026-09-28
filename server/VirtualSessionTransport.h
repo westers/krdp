@@ -129,6 +129,11 @@ private:
     std::function<std::optional<RdpConnection::StandardMediaChannels>(RdpConnection *)> m_standardChannels;
     bool m_deviceRecordSeen = false;
     bool m_spokeKrdpctl = false;
+    // AUD-FIX2 F2: a KRDPCTL v2 client (a record with a requestId, or any record type this
+    // broker knows): it picks its desktop itself and is never bound by the stock-client rule.
+    bool m_krdpctlClient = false;
+    void noteKrdpctlClient();
+    QTimer m_displacedClose; // F4: closes a displaced KRDPCTL client after its `session-end`
     void closed();
     quint64 m_client;
     QPointer<RdpConnection> m_connection;

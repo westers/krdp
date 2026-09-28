@@ -77,8 +77,17 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     m_stockGate.setSingleShot(true);
     m_stockGate.setInterval(3000);
     connect(&m_stockGate, &QTimer::timeout, this, [this] {
+        if (m_krdpctlClient && !m_virtualSessionSeen) {
+            // AUD-FIX2 F2: a KRDPCTL v2 client chooses its desktop itself (`virtual-session`
+            // list, then attach or create); it is never bound for it, however long it takes.
+            qInfo() << "Virtual client" << m_client << "speaks KRDPCTL but has not chosen a desktop yet; waiting for its virtual-session record";
+            return;
+        }
         if (!m_virtualSessionSeen) stockClientBind(m_stockUid);
     });
+    m_displacedClose.setSingleShot(true);
+    m_displacedClose.setInterval(250); // the session thread flushes the `session-end` record first
+    connect(&m_displacedClose, &QTimer::timeout, this, [this] { refuseStockClient(VirtualStockClient::Refusal::Displaced); });
     m_stockWait.setInterval(250);
     connect(&m_stockWait, &QTimer::timeout, this, &VirtualSessionTransport::stockWaitTick);
     m_microphoneDeadline.setSingleShot(true);
@@ -400,7 +409,7 @@ void VirtualSessionTransport::revoke()
         m_connection->setAudioPriorityDefault(false);
         m_connection->clearAudioPriorityOverride();
     }
-    // A device that was on is pushed as `off`/`revoked` once the teardown is
+    // A device that was on is pushed as `off`/`detached` once the teardown is
     // done; a microphone start still pending is answered with it (echo once).
     const bool microphoneWasOn = m_microphonePolicy.enabled;
     const QString microphoneRequestId = std::exchange(m_microphoneRequestId, {});
@@ -454,7 +463,7 @@ void VirtualSessionTransport::revoke()
     }
     if (!alive) return;
     if (m_connection && m_connection->state() != RdpConnection::State::Closed) {
-        const DeviceStatus revoked{DeviceStatus::State::Off, false, DeviceControl::Revoked, u"the virtual desktop was detached from this connection"_s};
+        const DeviceStatus revoked{DeviceStatus::State::Off, false, DeviceControl::Detached, u"the virtual desktop is no longer attached to this connection"_s};
         if (microphoneWasOn) pushRecord(LayoutControl::withRequestId(DeviceControl::stateRecord(MediaDevice::Microphone, revoked), microphoneRequestId));
         if (!alive) return;
         if (playbackWasOn) pushRecord(DeviceControl::stateRecord(MediaDevice::Playback, revoked));
@@ -534,7 +543,7 @@ QJsonObject VirtualSessionTransport::microphoneResult(const ConsoleWorkerWire::M
     // The first result answers the pending `device` request; a later failure is unsolicited.
     if (!authorized(uid) || !result.error.isEmpty()) {
         const DeviceStatus status = result.error.isEmpty()
-            ? DeviceStatus{DeviceStatus::State::Off, false, DeviceControl::Revoked, u"virtual microphone authority changed"_s}
+            ? DeviceStatus{DeviceStatus::State::Off, false, DeviceControl::Detached, u"this connection no longer holds the virtual desktop"_s}
             : DeviceStatus{DeviceStatus::State::Error, false, DeviceControl::Unavailable, result.error};
         const QString requestId = std::exchange(m_microphoneRequestId, {});
         stopMicrophone(uid);
@@ -575,7 +584,7 @@ void VirtualSessionTransport::pumpMicrophone()
         stopMicrophone();
         if (alive)
             pushRecord(deviceReply(MediaDevice::Microphone,
-                {DeviceStatus::State::Off, false, DeviceControl::Revoked, u"virtual microphone authority changed"_s}));
+                {DeviceStatus::State::Off, false, DeviceControl::Detached, u"this connection no longer holds the virtual desktop"_s}));
         return;
     }
     // Queue drains at most 20ms, expires old speech, and never retries backlog
@@ -623,11 +632,23 @@ void VirtualSessionTransport::deliverControlRecord(const QJsonObject &incoming, 
         if (connection) connection->sendControlRecord(LayoutControl::invalidRequestIdRecord());
         return;
     }
+    // Only a KRDPCTL v2 client sends a requestId (the contract requires one on every request).
+    if (!requestId.value.isEmpty()) noteKrdpctlClient();
     const QString outerRequestId = std::exchange(m_replyRequestId, requestId.value);
     const auto response = request(record, uid);
     if (alive) m_replyRequestId = outerRequestId;
     if (alive && connection && m_connection == connection && !response.isEmpty())
         connection->sendControlRecord(LayoutControl::withRequestId(response, requestId.value));
+}
+
+void VirtualSessionTransport::noteKrdpctlClient()
+{
+    if (m_krdpctlClient) return;
+    m_krdpctlClient = true;
+    m_spokeKrdpctl = true; // StandardClientMedia is for stock clients only
+    if (m_stockGate.isActive()) {
+        qInfo() << "Virtual client" << m_client << "speaks KRDPCTL v2: no automatic desktop; it chooses one itself";
+    }
 }
 
 void VirtualSessionTransport::startStockGate(bool controlChannel, std::optional<quint32> uid)
@@ -645,7 +666,7 @@ void VirtualSessionTransport::startStockGate(bool controlChannel, std::optional<
 
 void VirtualSessionTransport::stockClientBind(std::optional<quint32> uid)
 {
-    if (m_virtualSessionSeen || m_revoking || !m_control || !m_connection || !uid || !*uid) return;
+    if (m_virtualSessionSeen || m_krdpctlClient || m_revoking || !m_control || !m_connection || !uid || !*uid) return;
     const QPointer<VirtualSessionTransport> alive(this);
     const auto policyOf = m_stockPolicy;
     const auto policy = policyOf ? policyOf(*uid) : VirtualStockClient::Policy::AttachOrCreate;
@@ -740,7 +761,18 @@ void VirtualSessionTransport::refuseStockClient(VirtualStockClient::Refusal refu
 void VirtualSessionTransport::displaced()
 {
     // Queued: the takeover that caused this is still on the stack.
-    QTimer::singleShot(0, this, [this] { refuseStockClient(VirtualStockClient::Refusal::Displaced); });
+    QTimer::singleShot(0, this, [this] {
+        // AUD-FIX2 F4: the standard code (0x5, which FreeRDP words as "another user connected")
+        // plus, for a KRDPCTL client, what really happened: the same user opened this desktop
+        // from another device. The record goes out first; the close follows once it is sent.
+        if (m_capabilitiesSent && m_connection) { // capabilities went out: it joined KRDPCTL
+            pushRecord(LayoutControl::sessionEndRecord(u"opened-elsewhere"_s, VirtualStockClient::errorInfo(VirtualStockClient::Refusal::Displaced),
+                                                       u"This desktop was opened from another device."_s));
+            m_displacedClose.start();
+            return;
+        }
+        refuseStockClient(VirtualStockClient::Refusal::Displaced);
+    });
 }
 
 void VirtualSessionTransport::displayLayout(const QList<VideoMonitor> &monitors, std::optional<quint32> uid)
@@ -1655,7 +1687,11 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         // audio-priority, which never closes krdpserver's gate either).
         const QString type = record.value(u"type"_s).toString();
         if (type == u"device"_s) m_deviceRecordSeen = true;
-        else if (type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s)) m_spokeKrdpctl = true;
+        else if (type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s) m_spokeKrdpctl = true;
+        // Any record this broker knows (not audio-priority, which our client may send first
+        // without a desktop in mind) marks a KRDPCTL client: never bound automatically.
+        if (type == u"device"_s || type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s)
+            noteKrdpctlClient();
         if (type == u"virtual-session"_s) {
             // Our own client chooses its desktop itself (AUD-D4 applies to stock clients only).
             m_virtualSessionSeen = true;
@@ -1695,6 +1731,13 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
     if (record.value(u"type"_s) == u"topology-fit-preview"_s) return topologyFitPreview(record, uid);
     if (record.value(u"type"_s) == u"topology-commit"_s) return topologyCommit(record, uid);
     if (record.value(u"type"_s) == u"virtual-resize"_s) return requestResize(record, uid);
+    if (record.value(u"type"_s) == u"codec"_s) {
+        // Virtual desktops stream AVC420 from their worker; there is no private codec here
+        // (no `video` group in capabilities). Answered, not refused, so a client that asks
+        // anyway learns it at once (AUD-FIX2 F2).
+        if (!record.value(u"codecs"_s).isArray()) return LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array"_s});
+        return LayoutControl::codecRecord(u"avc"_s, std::nullopt, u"virtual desktops stream AVC only"_s);
+    }
     if (record.value(u"type"_s) == u"audio-priority"_s) {
         const auto parsed = AudioPriority::parse(record);
         if (!parsed) return AudioPriority::reply(record, false, u"invalid audio-priority request"_s);
@@ -1771,7 +1814,7 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
                 && authorized(uid);
         };
         const auto revoked = [this] {
-            return deviceReply(MediaDevice::Microphone, {DeviceStatus::State::Off, false, DeviceControl::Revoked, u"virtual desktop authority changed"_s});
+            return deviceReply(MediaDevice::Microphone, {DeviceStatus::State::Off, false, DeviceControl::Detached, u"this connection no longer holds the virtual desktop"_s});
         };
         const bool on = device.action == DeviceControl::Action::On;
         if (device.device == MediaDevice::Playback) {
@@ -1788,7 +1831,7 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
                 if (!alive || !m_connection) return {};
             }
             if (!bindingCurrent())
-                return deviceReply(MediaDevice::Playback, {DeviceStatus::State::Off, false, DeviceControl::Revoked, u"virtual desktop authority changed"_s});
+                return deviceReply(MediaDevice::Playback, {DeviceStatus::State::Off, false, DeviceControl::Detached, u"this connection no longer holds the virtual desktop"_s});
             return deviceReply(MediaDevice::Playback, deviceStatus(MediaDevice::Playback));
         }
         // Microphone: any change ends the current source first (a new `on` is a
