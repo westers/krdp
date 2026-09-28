@@ -54,6 +54,34 @@ void applyChromaPolicyIfSupported(Stream *stream, const ChromaPolicy &policy)
     }
 }
 template<typename Stream>
+void applySoftwareSettingsIfSupported(Stream *stream, const CodecPolicy::EncoderSettings &settings)
+{
+    if constexpr (requires(Stream *s) {
+                      s->setSoftwarePreset(Stream::SoftwarePreset::Efficient);
+                      s->setTargetBitrate(quint32(0));
+                  }) {
+        using Preset = typename Stream::SoftwarePreset;
+        const Preset preset = settings.preset == CodecPolicy::Preset::Fastest ? Preset::Fastest
+            : settings.preset == CodecPolicy::Preset::Balanced               ? Preset::Balanced
+                                                                              : Preset::Efficient;
+        // KPipeWire ignores an unchanged value, and the hardware encoders ignore both.
+        stream->setSoftwarePreset(preset);
+        stream->setTargetBitrate(settings.targetKbps);
+    }
+}
+template<typename Stream, typename Session>
+void connectActiveBackendIfSupported(Stream *stream, Session *session)
+{
+    if constexpr (requires(Stream *s) { s->activeEncoderBackend(); }) {
+        QObject::connect(stream, &Stream::activeEncoderBackendChanged, session, [session](typename Stream::EncoderBackend backend) {
+            if (backend == Stream::EncoderBackend::None) {
+                return; // stopped, or nothing could be opened (the stream reports that itself)
+            }
+            Q_EMIT session->encoderBackendReported(session->videoCodec(), backend == Stream::EncoderBackend::Hardware);
+        });
+    }
+}
+template<typename Stream>
 const char *activeChromaName(Stream *stream)
 {
     if constexpr (requires(Stream *s) { s->activeChromaMode(); }) {
@@ -139,6 +167,8 @@ public:
     VideoCodec codec = VideoCodec::Avc420;
     bool chromaEnabled = true;
     ChromaPolicy chromaPolicy;
+    std::optional<CodecPolicy::EncoderSettings> encoderSettings;
+    std::optional<bool> runningHardware; ///< the backend the running encoder reported
 };
 
 AbstractSession::AbstractSession()
@@ -214,6 +244,32 @@ void AbstractSession::setVideoCodec(VideoCodec codec)
 VideoCodec AbstractSession::videoCodec() const
 {
     return d->codec;
+}
+
+void AbstractSession::setEncoderSettings(const CodecPolicy::EncoderSettings &settings)
+{
+    // Only a backend other than the one really running needs a restart (after KPipeWire's own
+    // H.264 fallback the policy follows the running backend, which must not restart it).
+    const bool backendChanged = d->runningHardware && *d->runningHardware != settings.hardware;
+    d->encoderSettings = settings;
+    if (!d->encodedStream) {
+        return;
+    }
+    applySoftwareSettingsIfSupported(d->encodedStream.get(), settings);
+    if (backendChanged && d->encodedStream->isActive()) {
+        // Same codec, other backend: the backend policy applies from the next start. (With a
+        // codec change as well, the second restart request joins the first.)
+        qCInfo(KRDP) << "Encoder backend changed to" << (settings.hardware ? "hardware" : "software") << "on a running stream; restarting the encoder";
+        restartStreamForCodecChange();
+    }
+}
+
+std::optional<bool> AbstractSession::encoderHardware() const
+{
+    if (!d->encoderSettings) {
+        return std::nullopt;
+    }
+    return d->encoderSettings->hardware;
 }
 
 void AbstractSession::setChromaEnabled(bool enabled)
@@ -366,8 +422,15 @@ PipeWireEncodedStream *AbstractSession::stream()
         applyChromaModeIfSupported(d->encodedStream.get(), d->codec);
         applyAuxEnabledIfSupported(d->encodedStream.get(), d->chromaEnabled);
         applyChromaPolicyIfSupported(d->encodedStream.get(), d->chromaPolicy);
+        if (d->encoderSettings) {
+            applySoftwareSettingsIfSupported(d->encodedStream.get(), *d->encoderSettings);
+        }
         connectChromaTimingIfSupported(d->encodedStream.get(), this);
         connectActiveChromaModeIfSupported(d->encodedStream.get(), this);
+        connectActiveBackendIfSupported(d->encodedStream.get(), this);
+        connect(this, &AbstractSession::encoderBackendReported, this, [this](VideoCodec, bool hardware) {
+            d->runningHardware = hardware;
+        });
     }
     return d->encodedStream.get();
 }

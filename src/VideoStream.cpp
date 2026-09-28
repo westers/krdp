@@ -358,6 +358,10 @@ public:
     bool codecPolicyAdaptive = true;
     CodecPolicy::State codecPolicy;
     CodecPolicy::LoadWindow encodeLoad;
+    // What the sessions' encoders were last told (encoderSettingsChanged); main thread only.
+    std::optional<CodecPolicy::EncoderSettings> encoderSettings;
+    // The backend an encoder of the current codec reported, and whether the client heard it.
+    std::optional<bool> reportedHardware;
     // Encode-cost sampling for the CPU guard: process CPU time per encoded frame, spread over
     // the cores, against the frame budget. framesEncoded counts queueFrame() calls.
     std::atomic<int> framesEncoded = 0;
@@ -417,6 +421,7 @@ VideoStream::VideoStream(RdpConnection *session)
     // FreeRDP peer thread) and, once S2+ send them, chromaTimingReported.
     qRegisterMetaType<KRdp::VideoCodec>();
     qRegisterMetaType<KRdp::ChromaTimingReport>();
+    qRegisterMetaType<KRdp::CodecPolicy::EncoderSettings>();
 
     d->adaptiveTimer.setInterval(QualityUpdateInterval);
     d->adaptiveTimer.setTimerType(Qt::CoarseTimer);
@@ -747,6 +752,7 @@ CodecPolicy::Decision VideoStream::setPrivateCodecPolicy(const QVector<VideoCode
     d->codecPolicyActive = !d->clientFamilies.isEmpty();
     d->codecPolicy = {};
     d->encodeLoad.clear();
+    d->reportedHardware.reset();
 
     CodecPolicy::Input in;
     in.mode = d->softwareEncoding;
@@ -754,6 +760,7 @@ CodecPolicy::Decision VideoStream::setPrivateCodecPolicy(const QVector<VideoCode
     in.client = d->clientFamilies;
     in.adaptive = false; // the first choice never waits for a link measurement
     const auto decision = CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now());
+    applyEncoderSettings(decision.settings);
     setPrivateCodec(privateCodecOf(decision.choice.family));
     qCInfo(KRDP).nospace() << "Codec policy (" << CodecPolicy::softwareEncodingName(d->softwareEncoding) << "): "
                            << CodecPolicy::familyName(decision.choice.family) << (decision.choice.hardware ? " in hardware" : " in software")
@@ -782,11 +789,29 @@ void VideoStream::privateCodecUnavailable(VideoCodec codec)
 
 void VideoStream::applyCodecDecision(const CodecPolicy::Decision &decision)
 {
+    if (decision.settingsChanged) {
+        // A preset, bitrate or frame-rate change reopens or re-budgets the encoder: the load
+        // samples from before it (and the one with the reopen stall) no longer apply.
+        d->encodeLoad.clear();
+        d->cpuNsAtLastSample = -1;
+        if (!decision.changed) {
+            const auto &s = decision.settings;
+            qCInfo(KRDP).noquote() << QStringLiteral("Codec policy: %1 in %2, preset %3, %4, %5: %6")
+                                          .arg(QLatin1String(CodecPolicy::familyName(decision.choice.family)),
+                                               s.hardware ? QStringLiteral("hardware") : QStringLiteral("software"),
+                                               QLatin1String(CodecPolicy::presetName(s.preset)),
+                                               s.targetKbps ? QStringLiteral("%1 kbit/s").arg(s.targetKbps) : QStringLiteral("quality mode"),
+                                               s.maxFrameRate ? QStringLiteral("max %1 fps").arg(s.maxFrameRate) : QStringLiteral("no frame-rate cap"),
+                                               decision.settingsReason);
+        }
+        applyEncoderSettings(decision.settings);
+    }
     if (!decision.changed) {
         return;
     }
     d->encodeLoad.clear();
     d->cpuNsAtLastSample = -1;
+    d->reportedHardware.reset();
     setPrivateCodec(privateCodecOf(decision.choice.family));
     qCInfo(KRDP).noquote() << QStringLiteral("Codec policy: switching to %1 in %2: %3")
                                   .arg(QLatin1String(CodecPolicy::familyName(decision.choice.family)),
@@ -796,6 +821,60 @@ void VideoStream::applyCodecDecision(const CodecPolicy::Decision &decision)
     d->session->sendControlRecord(LayoutControl::codecRecord(QString::fromLatin1(CodecPolicy::familyName(decision.choice.family)),
                                                              decision.choice.hardware,
                                                              decision.reason));
+}
+
+void VideoStream::applyEncoderSettings(const CodecPolicy::EncoderSettings &settings)
+{
+    const bool changed = d->encoderSettings != settings;
+    d->encoderSettings = settings;
+    // The frame-rate cap (software HEVC/AV1 at 30 fps, the CPU guard's last step) is what the
+    // sessions ask the capture for and the budget the CPU guard measures against.
+    const int rate = settings.maxFrameRate > 0 ? std::min(settings.maxFrameRate, CodecPolicy::DefaultFrameRate) : CodecPolicy::DefaultFrameRate;
+    if (d->requestedFrameRate.exchange(rate) != rate) {
+        qCInfo(KRDP) << "Video frame rate:" << rate << "fps";
+        Q_EMIT requestedFrameRateChanged();
+    }
+    if (changed) {
+        Q_EMIT encoderSettingsChanged(settings);
+    }
+}
+
+std::optional<CodecPolicy::EncoderSettings> VideoStream::encoderSettings() const
+{
+    return d->encoderSettings;
+}
+
+void VideoStream::encoderBackendReported(VideoCodec codec, bool hardware)
+{
+    qCInfo(KRDP).noquote() << QStringLiteral("Encoder backend: %1 in %2").arg(QLatin1String(VideoCodecSupport::codecName(codec)), hardware ? QStringLiteral("hardware") : QStringLiteral("software"));
+    if (!d->codecPolicyActive || !d->codecPolicy.current || d->codecPolicy.current->family != familyOf(codec)) {
+        return; // a stock client (nothing announced), or a report from before a codec switch
+    }
+    const bool announced = d->codecPolicy.current->hardware;
+    if (d->reportedHardware == hardware) {
+        return;
+    }
+    d->reportedHardware = hardware;
+    if (announced == hardware) {
+        return;
+    }
+    // KPipeWire fell back (h264_vaapi -> libx264): follow the encoder that really runs.
+    qCWarning(KRDP).noquote() << QStringLiteral("Codec policy: %1 runs in %2, not %3 as chosen; following the encoder")
+                                     .arg(QLatin1String(CodecPolicy::familyName(d->codecPolicy.current->family)),
+                                          hardware ? QStringLiteral("hardware") : QStringLiteral("software"),
+                                          announced ? QStringLiteral("hardware") : QStringLiteral("software"));
+    d->codecPolicy.current->hardware = hardware;
+    d->codecPolicy.applied.hardware = hardware;
+    if (d->encoderSettings) {
+        auto settings = *d->encoderSettings;
+        settings.hardware = hardware; // the sessions do not restart for what already runs
+        applyEncoderSettings(settings);
+    }
+    d->encodeLoad.clear();
+    d->cpuNsAtLastSample = -1;
+    d->session->sendControlRecord(LayoutControl::codecRecord(QString::fromLatin1(CodecPolicy::familyName(d->codecPolicy.current->family)),
+                                                             hardware,
+                                                             QStringLiteral("encoder backend: %1").arg(hardware ? QStringLiteral("hardware") : QStringLiteral("software"))));
 }
 
 void VideoStream::stepCodecPolicy(bool congested)

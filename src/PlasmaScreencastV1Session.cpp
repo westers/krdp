@@ -182,17 +182,6 @@ QList<ScreencastTarget::Screen> screenSnapshot(QList<QScreen *> *pointers = null
 }
 
 template<typename Stream>
-void setFullColorRangeIfSupported(Stream *stream)
-{
-    if constexpr (requires(Stream *s) {
-                      s->setColorRange(typename Stream::ColorRange{});
-                      Stream::ColorRange::Full;
-                  }) {
-        stream->setColorRange(Stream::ColorRange::Full);
-    }
-}
-
-template<typename Stream>
 bool requestKeyFrameIfSupported(Stream *stream)
 {
     if constexpr (requires(Stream *s) { s->requestKeyFrame(); }) {
@@ -767,13 +756,14 @@ void PlasmaScreencastV1Session::attachEncodedStream(uint nodeId, bool streamWasA
 
     encodedStream->setNodeId(nodeId);
     encodedStream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed);
-    if (!d->streamConfigured) {
-        setFullColorRangeIfSupported(encodedStream);
-    }
     // setEncoder() must happen before start(), including a deferred restart after a negotiated
-    // private-codec change; KPipeWire keeps it as the next produce's encoder choice.
-    const bool encoderMatches = EncoderSelection::apply(encodedStream, videoCodec());
-    qCDebug(KRDP) << "Using PipeWire encoder for" << VideoCodecSupport::codecName(videoCodec()) << ':' << int(encodedStream->encoder());
+    // private-codec change; KPipeWire keeps it as the next produce's encoder choice. apply() also
+    // sets the backend policy (before setEncoder()) and the codec's colour range: full for AVC,
+    // limited for HEVC/AV1 (see EncoderSelection::colorRangeFor()).
+    const auto hardware = encoderHardware();
+    const bool encoderMatches = EncoderSelection::apply(encodedStream, videoCodec(), hardware);
+    qCDebug(KRDP) << "Using PipeWire encoder for" << VideoCodecSupport::codecName(videoCodec()) << ':' << int(encodedStream->encoder()) << "backend"
+                  << (hardware ? (*hardware ? "hardware" : "software") : "default");
     if (!encoderMatches) {
         // Never label one codec's bytes with another's id: have the connection move off it now,
         // before start() (direct connection), then the stream restarts with the new codec.

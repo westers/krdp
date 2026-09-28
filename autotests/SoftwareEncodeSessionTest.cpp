@@ -14,6 +14,12 @@
 // first packet, stop, destroy) must leave /proc/self/fd and /proc/self/task
 // at the baseline taken after one warm-up session.
 //
+// WS-E (software HEVC/AV1): with VA-API broken the same way, a stream configured exactly as
+// KRdp's session configures it for software HEVC or AV1 (EncoderSelection::apply() with the
+// software backend: SoftwareOnly policy, limited colour range) must deliver decodable HEVC/AV1,
+// report the software backend, and tag the pictures limited range (krdp-client ignores the tag
+// and assumes limited).
+//
 // Frames come from a pw_stream video source inside this test (BGRx 320x240,
 // memfd buffers, driven at 30 fps by a timer), linked by hand to KPipeWire's
 // input stream on a private PipeWire daemon (private runtime dir and config,
@@ -21,6 +27,8 @@
 // creates proves the test never talks to the desktop's PipeWire. Exits 77
 // (skip) when that daemon can't be started or no software H.264 encoder
 // exists.
+
+#include "EncoderSelection.h"
 
 #include <PipeWireEncodedStream>
 
@@ -46,10 +54,13 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/frame.h>
+#include <libavutil/pixdesc.h>
 }
 
 #include <atomic>
 #include <cstdio>
+#include <functional>
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
@@ -58,6 +69,9 @@ extern "C" {
 #include <set>
 #include <vector>
 #include <unistd.h>
+
+using KRdp::VideoCodec;
+namespace EncoderSelection = KRdp::EncoderSelection;
 
 namespace
 {
@@ -603,12 +617,15 @@ class SoftwareEncodeSessionTest : public QObject
         int packets = 0;
         int keyFrames = 0;
         QByteArray firstPacket;
+        QList<QByteArray> data; ///< the first packets, for decoding
+        QList<PipeWireBaseEncodedStream::EncoderBackend> backends; ///< activeEncoderBackendChanged
         QString error;
     };
 
     // One KRdp-style encode session: create, start, wait for packets, stop,
-    // wait for the produce thread to finish, destroy.
-    SessionResult runSession(int wantPackets)
+    // wait for the produce thread to finish, destroy. \a configure picks the
+    // encoder (default: H264Main, the stock-client path).
+    SessionResult runSession(int wantPackets, const std::function<void(PipeWireEncodedStream *)> &configure = {})
     {
         SessionResult result;
         auto *stream = new PipeWireEncodedStream;
@@ -616,6 +633,9 @@ class SoftwareEncodeSessionTest : public QObject
         connect(stream, &PipeWireEncodedStream::newPacket, stream, [&result](const PipeWireEncodedStream::Packet &packet) {
             if (result.packets == 0) {
                 result.firstPacket = packet.data();
+            }
+            if (result.data.size() < 16) {
+                result.data.append(packet.data());
             }
             ++result.packets;
             if (packet.isKeyFrame()) {
@@ -625,8 +645,15 @@ class SoftwareEncodeSessionTest : public QObject
         connect(stream, &PipeWireBaseEncodedStream::errorFound, stream, [&result](const QString &error) {
             result.error = error;
         });
+        connect(stream, &PipeWireBaseEncodedStream::activeEncoderBackendChanged, stream, [&result](PipeWireBaseEncodedStream::EncoderBackend backend) {
+            result.backends.append(backend);
+        });
         stream->setNodeId(m_sourceNode);
-        stream->setEncoder(PipeWireBaseEncodedStream::H264Main);
+        if (configure) {
+            configure(stream);
+        } else {
+            stream->setEncoder(PipeWireBaseEncodedStream::H264Main);
+        }
         stream->setEncodingPreference(PipeWireBaseEncodedStream::EncodingPreference::Speed); // as KRdp's sessions do
         stream->setMaxFramerate(30, 1);
         stream->start();
@@ -677,6 +704,74 @@ class SoftwareEncodeSessionTest : public QObject
               qPrintable(types.join(QLatin1Char(','))), result.packets, result.keyFrames);
     }
 
+    // A software HEVC/AV1 session configured the way KRdp's session does it for the software
+    // backend; the packets must decode to limited-range 4:2:0 pictures of the source's size.
+    void verifyPrivateCodecInSoftware(VideoCodec codec)
+    {
+        const bool hevc = codec == VideoCodec::Hevc;
+        const auto encoder = hevc ? PipeWireBaseEncodedStream::HEVCMain : PipeWireBaseEncodedStream::AV1Main;
+        if (!(PipeWireBaseEncodedStream::availableEncoderBackends(encoder) & PipeWireBaseEncodedStream::EncoderBackend::Software)) {
+            QSKIP(hevc ? "no libx265 in libavcodec" : "no libsvtav1/libaom-av1 in libavcodec");
+        }
+        // Hardware is off for the whole process (LIBVA_DRIVER_NAME), as with KRDP_FORCE_SOFTWARE_ENCODING.
+        QVERIFY(!(PipeWireBaseEncodedStream::availableEncoderBackends(encoder) & PipeWireBaseEncodedStream::EncoderBackend::Hardware));
+        bool matched = false;
+        const SessionResult result = runSession(5, [&](PipeWireEncodedStream *stream) {
+            matched = EncoderSelection::apply(stream, codec, false);
+            QCOMPARE(stream->encoderBackendPolicy(), PipeWireBaseEncodedStream::EncoderBackendPolicy::SoftwareOnly);
+        });
+        QVERIFY2(matched, "EncoderSelection::apply() did not get the private codec's encoder");
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        QVERIFY2(result.packets >= 5, qPrintable(QStringLiteral("%1 packets within %2 ms").arg(result.packets).arg(WaitMs)));
+        QVERIFY(result.keyFrames >= 1);
+        QVERIFY2(result.backends.contains(PipeWireBaseEncodedStream::EncoderBackend::Software),
+                 qPrintable(QStringLiteral("backend reports: %1").arg(result.backends.size())));
+        QVERIFY(!result.backends.contains(PipeWireBaseEncodedStream::EncoderBackend::Hardware));
+
+        const AVCodec *decoder = hevc ? avcodec_find_decoder(AV_CODEC_ID_HEVC) : avcodec_find_decoder_by_name("libdav1d");
+        if (!decoder && !hevc) {
+            decoder = avcodec_find_decoder_by_name("libaom-av1");
+        }
+        if (!decoder) {
+            QSKIP("no software decoder to check the stream with");
+        }
+        AVCodecContext *context = avcodec_alloc_context3(decoder);
+        QVERIFY(context && avcodec_open2(context, decoder, nullptr) >= 0);
+        AVFrame *frame = av_frame_alloc();
+        AVPacket *packet = av_packet_alloc();
+        int decoded = 0;
+        AVColorRange range = AVCOL_RANGE_UNSPECIFIED;
+        QSize size;
+        for (const QByteArray &data : result.data) {
+            av_packet_unref(packet);
+            QVERIFY(av_new_packet(packet, int(data.size())) >= 0);
+            std::memcpy(packet->data, data.constData(), size_t(data.size()));
+            if (avcodec_send_packet(context, packet) < 0) {
+                continue;
+            }
+            while (avcodec_receive_frame(context, frame) >= 0) {
+                if (decoded++ == 0) {
+                    range = frame->color_range;
+                    size = QSize(frame->width, frame->height);
+                }
+                av_frame_unref(frame);
+            }
+        }
+        avcodec_send_packet(context, nullptr);
+        while (avcodec_receive_frame(context, frame) >= 0) {
+            ++decoded;
+            av_frame_unref(frame);
+        }
+        av_packet_free(&packet);
+        av_frame_free(&frame);
+        avcodec_free_context(&context);
+        qInfo("%s: %d packets, %d key frames, %d decoded, first picture %dx%d range %s", hevc ? "HEVC" : "AV1", result.packets, result.keyFrames, decoded,
+              size.width(), size.height(), av_color_range_name(range));
+        QVERIFY2(decoded >= 1, "the software stream does not decode");
+        QVERIFY(size.width() >= Width && size.height() >= Height);
+        QCOMPARE(range, AVCOL_RANGE_MPEG); // limited
+    }
+
 private Q_SLOTS:
     void initTestCase()
     {
@@ -715,6 +810,16 @@ private Q_SLOTS:
         }
         qputenv("KPIPEWIRE_FORCE_ENCODER", "libx264");
         verifyH264(runSession(3));
+    }
+
+    // WS-E: HEVC and AV1 with hardware off, software backend, as the codec policy asks for them.
+    void hevcInSoftware()
+    {
+        verifyPrivateCodecInSoftware(VideoCodec::Hevc);
+    }
+    void av1InSoftware()
+    {
+        verifyPrivateCodecInSoftware(VideoCodec::Av1);
     }
 
     // F5: sequential sessions leave no fd or thread behind.

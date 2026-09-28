@@ -32,6 +32,14 @@ CodecPolicy::Encoders sol()
     e.avc = {false, true};
     return e;
 }
+CodecPolicy::Encoders softwareOnly() // WS-E: libx264, libx265, SVT-AV1, no GPU
+{
+    CodecPolicy::Encoders e;
+    e.avc = {false, true};
+    e.hevc = {false, true};
+    e.av1 = {false, true};
+    return e;
+}
 }
 
 class VideoStreamCodecTest : public QObject
@@ -105,6 +113,58 @@ private Q_SLOTS:
         f.stream()->setEncoderPolicy(e, CodecPolicy::SoftwareEncoding::Prefer);
         QCOMPARE(f.stream()->setPrivateCodecPolicy({VideoCodec::Av1}, true).choice, (CodecPolicy::Choice{Family::Av1, false}));
         QCOMPARE(f.stream()->negotiatedCodec(), VideoCodec::Av1);
+    }
+
+    // WS-E: software AV1 chosen: the sessions hear the backend, preset and 30 fps cap before
+    // the codec change that restarts their encoders.
+    void softwareCodecSettingsReachSessionsFirst()
+    {
+        Fixture f;
+        QStringList order;
+        connect(f.stream(), &VideoStream::encoderSettingsChanged, f.stream(), [&order](const CodecPolicy::EncoderSettings &) {
+            order << QStringLiteral("settings");
+        });
+        connect(f.stream(), &VideoStream::negotiatedCodecChanged, f.stream(), [&order](VideoCodec) {
+            order << QStringLiteral("codec");
+        });
+        QSignalSpy rate(f.stream(), &VideoStream::requestedFrameRateChanged);
+        f.stream()->setEncoderPolicy(softwareOnly(), CodecPolicy::SoftwareEncoding::Prefer);
+        QCOMPARE(f.stream()->requestedFrameRate(), 60u);
+        const auto d = f.stream()->setPrivateCodecPolicy({VideoCodec::Hevc, VideoCodec::Av1}, true);
+        QCOMPARE(d.choice, (CodecPolicy::Choice{Family::Av1, false}));
+        QCOMPARE(order, (QStringList{QStringLiteral("settings"), QStringLiteral("codec")}));
+        QCOMPARE(f.stream()->encoderSettings(), (CodecPolicy::EncoderSettings{false, CodecPolicy::Preset::Efficient, 0, 30}));
+        QCOMPARE(f.stream()->requestedFrameRate(), 30u);
+        QCOMPARE(rate.size(), 1);
+        // Back to AVC only: full rate again.
+        f.stream()->setPrivateCodecPolicy({}, true);
+        QCOMPARE(f.stream()->requestedFrameRate(), 60u);
+        QCOMPARE(f.stream()->encoderSettings()->maxFrameRate, 0);
+    }
+
+    // The backend the encoder really opened on wins over the one chosen: KPipeWire's H.264
+    // fallback from h264_vaapi to libx264 is followed and pushed to the own client.
+    void reportedBackendIsFollowed()
+    {
+        Fixture f;
+        auto e = hal();
+        e.hevc = {};
+        e.av1 = {};
+        f.stream()->setEncoderPolicy(e, CodecPolicy::SoftwareEncoding::Auto);
+        QCOMPARE(f.stream()->setPrivateCodecPolicy({VideoCodec::Hevc}, true).choice, (CodecPolicy::Choice{Family::Avc, true}));
+        QVERIFY(f.stream()->encoderSettings()->hardware);
+        QSignalSpy settings(f.stream(), &VideoStream::encoderSettingsChanged);
+        f.stream()->encoderBackendReported(VideoCodec::Avc444v2, true); // as chosen: nothing to do
+        QCOMPARE(settings.size(), 0);
+        f.stream()->encoderBackendReported(VideoCodec::Hevc, false); // not the current codec: stale
+        QCOMPARE(settings.size(), 0);
+        // The `codec` push with backend "software" (no channel here, so it is dropped with a warning).
+        QTest::ignoreMessage(QtWarningMsg, "KRDPCTL: dropping a \"codec\" record, the channel is not open");
+        f.stream()->encoderBackendReported(VideoCodec::Avc444v2, false);
+        QCOMPARE(settings.size(), 1);
+        QVERIFY(!f.stream()->encoderSettings()->hardware);
+        f.stream()->encoderBackendReported(VideoCodec::Avc444v2, false); // reported once
+        QCOMPARE(settings.size(), 1);
     }
 };
 

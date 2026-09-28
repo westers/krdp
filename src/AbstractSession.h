@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "CodecPolicy.h"
 #include "VideoCodecSupport.h"
 #include "krdp_export.h"
 
@@ -85,6 +86,21 @@ public:
      * connection off \a codec (VideoStream::privateCodecUnavailable()).
      */
     Q_SIGNAL void encoderUnavailable(KRdp::VideoCodec codec);
+    /**
+     * What the codec policy wants the encoder to run with (WS-E): the backend (applied as
+     * KPipeWire's backend policy at the next start; a change on a running stream with the same
+     * codec restarts it), the software HEVC/AV1 preset and target bitrate (applied live; a
+     * change reopens that encoder: a short stall and a keyframe). Never called for a stock
+     * client, which keeps KPipeWire's defaults.
+     */
+    void setEncoderSettings(const CodecPolicy::EncoderSettings &settings);
+    /// The backend setEncoderSettings() chose; nullopt before (KPipeWire's HardwareFirst).
+    std::optional<bool> encoderHardware() const;
+    /**
+     * The encoder of \a codec opened on the hardware (VA-API) or software backend: KPipeWire's
+     * activeEncoderBackendChanged, emitted at each encoder start (not for "none").
+     */
+    Q_SIGNAL void encoderBackendReported(KRdp::VideoCodec codec, bool hardware);
 
     /**
      * Re-create the capture stream after the display topology changed.

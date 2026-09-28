@@ -128,6 +128,9 @@ public:
         // (S3) runs on the main thread like the other VideoStream signals above but is queued to match.
         connect(connection->videoStream(), &KRdp::VideoStream::negotiatedCodecChanged, this, &SessionWrapper::onNegotiatedCodecChanged, Qt::QueuedConnection);
         connect(connection->videoStream(), &KRdp::VideoStream::requestedChromaChanged, this, &SessionWrapper::onRequestedChromaChanged, Qt::QueuedConnection);
+        // Queued like negotiatedCodecChanged and emitted before it, so a restarted encoder opens
+        // with the chosen backend, preset and bitrate (WS-E).
+        connect(connection->videoStream(), &KRdp::VideoStream::encoderSettingsChanged, this, &SessionWrapper::onEncoderSettingsChanged, Qt::QueuedConnection);
 
         connect(connection, &QObject::destroyed, this, &SessionWrapper::onConnectionDestroyed);
         // From the frame submission thread; see layoutRecordPending.
@@ -422,6 +425,9 @@ public:
         const bool multi = !layout.isEmpty();
         for (const auto &entry : sessions) {
             auto *session = entry.get();
+            if (const auto settings = videoStream->encoderSettings()) {
+                session->setEncoderSettings(*settings);
+            }
             session->setVideoCodec(videoStream->codecForSessions());
             session->setChromaEnabled(m_chromaEnabled);
             session->setChromaPolicy(m_chromaPolicy);
@@ -429,6 +435,8 @@ public:
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::chromaCapabilityChanged, this, &SessionWrapper::onChromaCapabilityChanged));
             // Direct: the codec id must change before the stream starts with the fallback encoder.
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::encoderUnavailable, videoStream, &KRdp::VideoStream::privateCodecUnavailable, Qt::DirectConnection));
+            // The backend the encoder really opened on: logged, and reported to an own client.
+            m_sessionConnections.append(connect(session, &KRdp::AbstractSession::encoderBackendReported, videoStream, &KRdp::VideoStream::encoderBackendReported));
             // At most once every 30 s per wrapper: server/*.cpp has no access to the KRDP logging
             // category (plain qInfo()/qWarning() here), and one line per second would flood the journal.
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::chromaTimingReported, this, [this](const KRdp::ChromaTimingReport &r) {
@@ -848,6 +856,13 @@ public:
     {
         for (const auto &session : sessions) {
             session->setVideoCodec(codec);
+        }
+    }
+
+    void onEncoderSettingsChanged(const KRdp::CodecPolicy::EncoderSettings &settings)
+    {
+        for (const auto &session : sessions) {
+            session->setEncoderSettings(settings);
         }
     }
 

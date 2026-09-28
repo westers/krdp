@@ -171,6 +171,24 @@ public:
      */
     void privateCodecUnavailable(VideoCodec codec);
     /**
+     * A session's encoder for \a codec opened on the hardware or software backend
+     * (AbstractSession::encoderBackendReported). Logged; when it is not the backend the codec
+     * policy announced for the current codec (KPipeWire's H.264 fallback from h264_vaapi to
+     * libx264), the policy follows the real backend (the CPU guard applies to software) and an
+     * own client gets a `codec` push with the real `backend`. Main thread only.
+     */
+    void encoderBackendReported(VideoCodec codec, bool hardware);
+    /**
+     * What the encoders should run with besides the codec (backend, software preset, target
+     * bitrate, frame-rate cap); nullopt until the client's `codec` request. Main thread only.
+     */
+    std::optional<CodecPolicy::EncoderSettings> encoderSettings() const;
+    /**
+     * encoderSettings() changed. Emitted before the matching negotiatedCodecChanged, so a
+     * restarted encoder opens with its backend, preset and bitrate. Main thread.
+     */
+    Q_SIGNAL void encoderSettingsChanged(const KRdp::CodecPolicy::EncoderSettings &settings);
+    /**
      * The codec chosen in onCapsAdvertise() from this preference and the
      * client's caps. nullopt until the client has advertised its caps.
      * May be read from any thread.
@@ -216,6 +234,7 @@ private:
     void stepCodecPolicy(bool congested);
     /// Applies a changed decision: the codec id, the encoder restart, the `codec` push.
     void applyCodecDecision(const CodecPolicy::Decision &decision);
+    void applyEncoderSettings(const CodecPolicy::EncoderSettings &settings);
 
     /**
      * Send ResetGraphics for \a monitors (already in RDP desktop space, with
