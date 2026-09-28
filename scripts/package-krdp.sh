@@ -27,8 +27,9 @@ if [[ -z $build || $build == / || $build == "$(realpath -m -- "$HOME")" || $buil
     exit 1
 fi
 kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
-# westers/opt-015 = v6.6.4 + the KRDP encoder patches (OPT-015/OPT-050).
-kpw_ref=${KPIPEWIRE_REF:-183a140}
+# aud-fix2-dmabuf-egl = westers/opt-015 (v6.6.4 + the KRDP encoder patches, OPT-015/OPT-050)
+# + the DmaBufHandler EGL/GBM leak fix (AUD-FIX2 F5).
+kpw_ref=${KPIPEWIRE_REF:-e31f7e8}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 
