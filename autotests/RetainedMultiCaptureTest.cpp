@@ -4,8 +4,9 @@
 #include <QFile>
 #include <QTest>
 
-#include "RetainedMultiCapture.h"
+#include "ClientStyleDecoder.h"
 #include "ConsoleTopologyReadback.h"
+#include "RetainedMultiCapture.h"
 
 using KRdp::RetainedMultiCapture;
 using KRdp::VideoFrame;
@@ -29,6 +30,20 @@ VideoFrame packet(QSize pixels, QSize logical, const QByteArray &data, bool keyf
     frame.isKeyFrame = keyframe;
     frame.monitors = {{QRect(QPoint(0, 0), logical), true}};
     return frame;
+}
+
+/// A real VCN motion packet (autotests/data/motion-chain): 0 is the keyframe, 1-3 its deltas.
+QByteArray motion(KRdp::VideoCodec codec, int number)
+{
+    const QString extension = codec == KRdp::VideoCodec::Av1 ? QStringLiteral("av1") : codec == KRdp::VideoCodec::Hevc ? QStringLiteral("hevc") : QStringLiteral("h264");
+    QFile file(QFINDTESTDATA(QStringLiteral("data/motion-chain/1280x720-%1.%2").arg(number).arg(extension)));
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    return file.readAll();
+}
+
+QVector<RetainedMultiCapture::Screen> sideBySide()
+{
+    return {{QStringLiteral("Virtual-0"), QRect(0, 0, 1280, 720), true}, {QStringLiteral("Virtual-1"), QRect(1280, 0, 1280, 720), false}};
 }
 
 QVector<RetainedMultiCapture::Screen> screens()
@@ -301,6 +316,116 @@ private Q_SLOTS:
         QCOMPARE(confirmed->outputs[1].logical.topLeft(), QPoint(1280, 100));
         QCOMPARE(ready.atlas[0].geometry.size(), QSize(1920, 1080));
         QVERIFY(!ready.atlas[0].geometry.intersects(ready.atlas[1].geometry));
+    }
+
+    void heldPacketsKeepEveryOutputsReferenceChain_data()
+    {
+        QTest::addColumn<int>("codecId");
+        QTest::newRow("av1") << int(KRdp::VideoCodec::Av1);
+        QTest::newRow("hevc") << int(KRdp::VideoCodec::Hevc);
+        QTest::newRow("h264") << int(KRdp::VideoCodec::Avc420);
+    }
+
+    // AUD-FIX11 R6 (cray): output 0 proves itself, keeps encoding (motion) while output 1 has
+    // not yet, then output 1 proves itself. 299cd25..f9c57f5 published output 0's keyframe and
+    // dropped the deltas in between, so its next delta referenced a frame the client never got:
+    // libdav1d rejected it ("Invalid data"), FFmpeg's HEVC decoder showed nothing. Every
+    // packet after an output's proof keyframe now reaches the client, in order.
+    void heldPacketsKeepEveryOutputsReferenceChain()
+    {
+        QFETCH(int, codecId);
+        const auto codec = KRdp::VideoCodec(codecId);
+        const QSize size(1280, 720);
+        QVector<QByteArray> chain;
+        for (int i = 0; i < 4; ++i) chain << motion(codec, i);
+        for (const auto &packet : std::as_const(chain)) QVERIFY(!packet.isEmpty());
+
+        RetainedMultiCapture set;
+        QVERIFY(set.configure(sideBySide()));
+        QVector<VideoFrame> delivered; // what the worker writes to the broker, in order
+        const auto submit = [&](qsizetype output, int number) {
+            const auto result = set.submit(output, packet(size, size, chain[number], number == 0, codec));
+            delivered += result.frames;
+            delivered += result.held;
+            return result;
+        };
+        // A delta before this output's proof keyframe is never sent.
+        QVERIFY(submit(0, 3).frames.isEmpty());
+        QCOMPARE(set.heldPackets(0), 0);
+        QVERIFY(submit(0, 0).frames.isEmpty());
+        QVERIFY(submit(0, 1).frames.isEmpty());
+        QVERIFY(submit(0, 2).frames.isEmpty());
+        QCOMPARE(set.heldPackets(0), 2);
+        QVERIFY(!set.ready());
+        const auto ready = submit(1, 0);
+        QVERIFY(ready.becameReady);
+        // The published evidence stays the keyframes, one per output, in output order.
+        QCOMPARE(ready.frames.size(), 2);
+        QCOMPARE(ready.frames[0].monitorIndex, 0);
+        QCOMPARE(ready.frames[1].monitorIndex, 1);
+        QCOMPARE(ready.held.size(), 2);
+        for (const auto &held : ready.held) {
+            QCOMPARE(held.monitorIndex, 0);
+            QVERIFY(!held.isKeyFrame);
+            QCOMPARE(held.monitors, ready.atlas);
+        }
+        QCOMPARE(ready.held[0].data, chain[1]);
+        QCOMPARE(ready.held[1].data, chain[2]);
+        QCOMPARE(set.heldPackets(0), 0);
+        const auto live = submit(0, 3);
+        QCOMPARE(live.frames.size(), 1);
+
+        // krdp-client decodes that, per surface, from the first packet on.
+        KRdp::ClientStyle::Decoder client;
+        for (const auto &frame : std::as_const(delivered)) {
+            QVERIFY2(client.feed(frame.monitorIndex, codec, frame.data), qPrintable(client.error()));
+        }
+        QVERIFY2(client.missingPictures().isEmpty(), qPrintable(client.missingPictures()));
+        QCOMPARE(client.surfaces().value(0).pictures, 4);
+        QCOMPARE(client.surfaces().value(1).pictures, 1);
+    }
+
+    // What an output may hold is bounded: past it, its proof is given up and a new keyframe is
+    // asked for, and the layout waits for it.
+    void heldPacketsAreBoundedAndThenAskForAKeyframe()
+    {
+        const auto codec = KRdp::VideoCodec::Av1;
+        const QSize size(1280, 720);
+        RetainedMultiCapture set;
+        QVERIFY(set.configure(sideBySide()));
+        QVERIFY(set.submit(0, packet(size, size, motion(codec, 0), true, codec)).keyFrameRequests.isEmpty());
+        for (qsizetype i = 0; i < RetainedMultiCapture::MaxHeldPackets; ++i) {
+            QVERIFY(set.submit(0, packet(size, size, motion(codec, 1), false, codec)).keyFrameRequests.isEmpty());
+        }
+        QCOMPARE(set.heldPackets(0), RetainedMultiCapture::MaxHeldPackets);
+        const auto overflow = set.submit(0, packet(size, size, motion(codec, 1), false, codec));
+        QCOMPARE(overflow.keyFrameRequests, QVector<qsizetype>{0});
+        QCOMPARE(set.heldPackets(0), 0);
+        // Output 0 has no proof any more: output 1's keyframe alone does not publish the layout.
+        QVERIFY(!set.submit(1, packet(size, size, motion(codec, 0), true, codec)).becameReady);
+        QVERIFY(set.submit(0, packet(size, size, motion(codec, 0), true, codec)).becameReady);
+    }
+
+    // The replaced encoder's last packets are not part of the new codec's chain, and a keyframe
+    // that proves nothing (another size) restarts the chain without a proof.
+    void heldChainIgnoresStragglersAndRestartsOnUnprovenKeyframes()
+    {
+        const QSize size(1280, 720);
+        RetainedMultiCapture set;
+        QVERIFY(set.configure(sideBySide()));
+        QVERIFY(set.submit(0, packet(size, size, motion(KRdp::VideoCodec::Hevc, 0), true, KRdp::VideoCodec::Hevc)).frames.isEmpty());
+        QVERIFY(set.submit(0, packet(size, size, motion(KRdp::VideoCodec::Avc420, 1), false, KRdp::VideoCodec::Avc420)).frames.isEmpty());
+        QCOMPARE(set.heldPackets(0), 0);
+        QVERIFY(set.submit(0, packet(size, size, motion(KRdp::VideoCodec::Hevc, 1), false, KRdp::VideoCodec::Hevc)).frames.isEmpty());
+        QCOMPARE(set.heldPackets(0), 1);
+        // A keyframe whose payload shows 1920x1080 for a 1280x720 frame: not a proof, and it
+        // starts a new chain.
+        QVERIFY(set.submit(0, packet(size, size, fixture(QStringLiteral("1920x1080-hal"), QStringLiteral("hevc")), true, KRdp::VideoCodec::Hevc)).frames.isEmpty());
+        QCOMPARE(set.heldPackets(0), 0);
+        QVERIFY(!set.submit(1, packet(size, size, motion(KRdp::VideoCodec::Hevc, 0), true, KRdp::VideoCodec::Hevc)).becameReady);
+        const auto ready = set.submit(0, packet(size, size, motion(KRdp::VideoCodec::Hevc, 0), true, KRdp::VideoCodec::Hevc));
+        QVERIFY(ready.becameReady);
+        QVERIFY(ready.held.isEmpty());
     }
 };
 

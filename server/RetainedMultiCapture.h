@@ -34,8 +34,19 @@ public:
         bool becameReady = false;
         ConsoleWorkerWire::Outputs outputs;
         QVector<VideoMonitor> atlas;
+        /// Once ready: the frame to send now. On becameReady: each output's proof keyframe,
+        /// output i at index i (the published evidence), to be sent before \a held.
         QVector<VideoFrame> frames;
+        /// AUD-FIX11 R6: on becameReady, the packets each output encoded after its proof
+        /// keyframe while the others proved themselves, in the order they were produced.
+        QVector<VideoFrame> held;
+        /// Outputs whose held packets had to be given up: they need a new keyframe to prove.
+        QVector<qsizetype> keyFrameRequests;
     };
+
+    /// AUD-FIX11 R6: what one output may hold while the others prove themselves: ~2 s at 60 fps.
+    static constexpr qsizetype MaxHeldPackets = 120;
+    static constexpr qsizetype MaxHeldBytes = 64 * 1024 * 1024;
 
     bool configure(const QVector<Screen> &screens)
     {
@@ -107,14 +118,24 @@ public:
         // codec change at attach), not only H.264: an H.264-only check never became ready again.
         const auto codec = frame.codec.value_or(VideoCodec::Avc420);
         // AUD-FIX10 R5: the keyframe shows this size (AMD AV1 codes 1920x1080 as 1920x1082).
-        if (!frame.isKeyFrame || !encodedKeyframeShows(codec, frame.data, frame.size)) return result;
+        if (!frame.isKeyFrame || !encodedKeyframeShows(codec, frame.data, frame.size)) {
+            // AUD-FIX11 R6: an output that has proven itself keeps encoding while the others
+            // prove themselves, and its next packets reference those it encoded in between.
+            // Dropping them broke every decoder's reference chain: libdav1d rejects the first
+            // AV1 frame after the gap ("Invalid data"), H.264/HEVC show corruption until the
+            // next keyframe. So they are held, in order, and published after the keyframe.
+            hold(index, frame, codec, result);
+            return result;
+        }
         if (m_keyframeCodec && *m_keyframeCodec != codec) {
             // The encoders changed codec while the layout was being proven: one published layout
             // never mixes codecs, so every output proves itself again in the new one.
             m_keyframes = QVector<std::optional<VideoFrame>>(m_screens.size());
+            m_held = QVector<QVector<Held>>(m_screens.size());
         }
         m_keyframeCodec = codec;
         m_keyframes[index] = frame;
+        m_held[index].clear(); // a new keyframe starts the chain again
         m_sizes[index] = frame.size;
         m_scales[index] = *scale;
         if (std::any_of(m_keyframes.cbegin(), m_keyframes.cend(), [](const auto &packet) { return !packet; })) return result;
@@ -152,18 +173,70 @@ public:
             stamped.monitors = m_atlas;
             result.frames.append(std::move(stamped));
         }
+        // Every output's held packets, in the order the encoders produced them, each after its
+        // own output's keyframe.
+        QVector<Held> held;
+        for (const auto &chain : std::as_const(m_held)) held += chain;
+        std::sort(held.begin(), held.end(), [](const Held &a, const Held &b) {
+            return a.sequence < b.sequence;
+        });
+        for (auto &packet : held) {
+            packet.frame.monitors = m_atlas;
+            result.held.append(std::move(packet.frame));
+        }
         m_keyframes.clear();
+        m_held.clear();
         m_keyframeCodec.reset();
         return result;
     }
 
+    /// Packets held for \a index behind its proof keyframe (tests).
+    qsizetype heldPackets(qsizetype index) const
+    {
+        return index >= 0 && index < m_held.size() ? m_held[index].size() : 0;
+    }
+
 private:
+    struct Held {
+        quint64 sequence = 0;
+        VideoFrame frame;
+    };
+
+    /// A packet of an output that is not a proof: kept behind that output's proof keyframe (if
+    /// it has one, of the same codec and size), else dropped - nothing before a proof is sent.
+    void hold(qsizetype index, const VideoFrame &frame, VideoCodec codec, Result &result)
+    {
+        auto &chain = m_held[index];
+        if (!m_keyframes[index]) return; // before this output's proof keyframe: never sent
+        if (codec != m_keyframeCodec) return; // the replaced encoder's last packets: not this chain
+        if (frame.isKeyFrame || frame.size != m_keyframes[index]->size) {
+            // A keyframe that proves nothing (another size) restarts the reference chain
+            // without a proof: this output must prove itself again.
+            m_keyframes[index].reset();
+            chain.clear();
+            return;
+        }
+        qsizetype bytes = frame.data.size() + frame.aux.size();
+        for (const auto &packet : std::as_const(chain)) bytes += packet.frame.data.size() + packet.frame.aux.size();
+        if (chain.size() >= MaxHeldPackets || bytes > MaxHeldBytes) {
+            // The other outputs take too long: give this proof up and ask for a new keyframe.
+            m_keyframes[index].reset();
+            chain.clear();
+            result.keyFrameRequests.append(index);
+            return;
+        }
+        auto stamped = frame;
+        stamped.monitorIndex = int(index);
+        chain.append({m_sequence++, std::move(stamped)});
+    }
+
     void clearFrames()
     {
         m_ready = false;
         m_outputs = {};
         m_atlas.clear();
         m_keyframes = QVector<std::optional<VideoFrame>>(m_screens.size());
+        m_held = QVector<QVector<Held>>(m_screens.size());
         m_keyframeCodec.reset();
         m_sizes = QVector<QSize>(m_screens.size());
         m_scales = QVector<qreal>(m_screens.size());
@@ -171,6 +244,8 @@ private:
 
     QVector<Screen> m_screens;
     QVector<std::optional<VideoFrame>> m_keyframes;
+    QVector<QVector<Held>> m_held; ///< per output, the packets after its proof keyframe (AUD-FIX11)
+    quint64 m_sequence = 0;
     std::optional<VideoCodec> m_keyframeCodec; ///< the codec of the keyframes held in m_keyframes
     QVector<QSize> m_sizes;
     QVector<qreal> m_scales;

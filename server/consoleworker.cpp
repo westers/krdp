@@ -983,6 +983,10 @@ private:
     {
         if (m_creatorReleaseActive || m_creatorReleaseFinished) return;
         const auto result = m_multiCapture.submit(index, frame);
+        for (const qsizetype output : result.keyFrameRequests) {
+            // AUD-FIX11: it held too much while the others proved themselves; prove again.
+            if (output >= 0 && output < qsizetype(m_multiSessions.size())) m_multiSessions[size_t(output)]->requestKeyFrame();
+        }
         if (result.reset) {
             releaseInput();
             m_multiReady = false;
@@ -1121,6 +1125,9 @@ private:
         }
         if (!m_multiReady) return;
         for (const auto &packet : result.frames) m_socket.write(ConsoleWorkerWire::frame(packet));
+        // AUD-FIX11 R6: then what each output encoded after its proof keyframe, so every
+        // output's reference chain reaches the client unbroken.
+        for (const auto &packet : result.held) m_socket.write(ConsoleWorkerWire::frame(packet));
         if (result.becameReady && m_positionPending) {
             const auto request = *m_positionPending;
             if (!m_control.active || m_control.generation != request.generation) {
