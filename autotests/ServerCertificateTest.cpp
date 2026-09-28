@@ -249,6 +249,63 @@ private Q_SLOTS:
         QVERIFY(QFile::remove(real.key));
         QVERIFY(!ensureSystem(linked, u"x"_s, kNow, owner).ok);
     }
+
+    // AUD-FIX8: a directory others can write lets them replace the key (Sol's
+    // /opt/krdp-console/cert). A dedicated one is repaired to 0755; a shared one is refused.
+    void brokerCertificateDirectoryIsMadeSafe()
+    {
+        QTemporaryDir dir;
+        const uint owner = ::geteuid();
+        const auto mode = [](const QString &path) {
+            struct stat st{};
+            return ::stat(QFile::encodeName(path).constData(), &st) == 0 ? int(st.st_mode & 07777) : -1;
+        };
+        // Dedicated, group/other-writable, with an existing pair: repaired, pair kept.
+        const QString certDir = dir.filePath(u"opt/krdp-console/cert"_s);
+        const Paths paths{certDir + u"/krdp.crt"_s, certDir + u"/krdp.key"_s};
+        QVERIFY(ensureSystem(paths, u"sol"_s, kNow, owner).ok);
+        const auto before = inspect(paths).sha256Fingerprint;
+        QVERIFY(::chmod(QFile::encodeName(certDir).constData(), 0777) == 0);
+        const auto repaired = ensureSystem(paths, u"sol"_s, kNow.addDays(1), owner);
+        QVERIFY2(repaired.ok, qPrintable(repaired.error));
+        QCOMPARE(mode(certDir), 0755);
+        QCOMPARE(mode(paths.key), 0600);
+        QCOMPARE(repaired.info.sha256Fingerprint, before);
+        QVERIFY2(repaired.notes.join(u' ').contains(u"mode 777) could be written by others"_s), qPrintable(repaired.notes.join(u'|')));
+        // Safe now: nothing more to say about the directory.
+        const auto again = ensureSystem(paths, u"sol"_s, kNow.addDays(2), owner);
+        QVERIFY(again.ok);
+        QVERIFY(!again.notes.join(u' ').contains(certDir));
+
+        // Shared (other files in it) and writable by others: refused, nothing written.
+        const QString shared = dir.filePath(u"shared"_s);
+        QVERIFY(QDir().mkpath(shared));
+        QFile other(shared + u"/notes.txt"_s);
+        QVERIFY(other.open(QIODevice::WriteOnly));
+        other.close();
+        QVERIFY(::chmod(QFile::encodeName(shared).constData(), 0775) == 0);
+        const Paths inShared{shared + u"/krdp.crt"_s, shared + u"/krdp.key"_s};
+        const auto refused = ensureSystem(inShared, u"sol"_s, kNow, owner);
+        QVERIFY(!refused.ok);
+        QVERIFY2(refused.error.contains(u"chown root:root, chmod 0755"_s), qPrintable(refused.error));
+        QVERIFY(!QFile::exists(inShared.key));
+        QCOMPARE(mode(shared), 0775);
+
+        // A sticky world-writable directory (/tmp-like) is never "ours", even when empty.
+        const QString sticky = dir.filePath(u"sticky"_s);
+        QVERIFY(QDir().mkpath(sticky));
+        QVERIFY(::chmod(QFile::encodeName(sticky).constData(), 01777) == 0);
+        QVERIFY(!ensureSystem({sticky + u"/k.crt"_s, sticky + u"/k.key"_s}, u"sol"_s, kNow, owner).ok);
+
+        // A new directory is created 0755 whatever the umask.
+        const mode_t previous = ::umask(077);
+        const QString fresh = dir.filePath(u"etc/krdp-new"_s);
+        const auto created = ensureSystem({fresh + u"/c.crt"_s, fresh + u"/c.key"_s}, u"ace"_s, kNow, owner);
+        ::umask(previous);
+        QVERIFY2(created.ok, qPrintable(created.error));
+        QCOMPARE(mode(fresh), 0755);
+        QCOMPARE(mode(fresh + u"/c.key"_s), 0600);
+    }
 };
 
 QTEST_GUILESS_MAIN(ServerCertificateTest)

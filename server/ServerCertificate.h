@@ -87,7 +87,10 @@ EnsureResult ensure(const Paths &paths, const QString &commonName, const QDateTi
  * service needs:
  * - both paths must be absolute;
  * - a missing parent directory is created 0755 (not with the service's umask, so the other
- *   /etc/krdp files stay readable);
+ *   /etc/krdp files stay readable) and owned by \a owner;
+ * - AUD-FIX8: an existing parent directory owned by another user, or group/other-writable, could
+ *   let that user replace the key. When it holds only this certificate and key it is repaired
+ *   (owner \a owner, group root, mode 0755) and noted; a shared one is an error (no listening);
  * - an existing key is made owned by \a owner (the service's euid) and mode 0600, an existing
  *   certificate owned by \a owner and not group/other-writable; each repair is noted;
  * - a symlinked certificate or key is the administrator's: it is checked and noted but never

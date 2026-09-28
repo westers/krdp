@@ -3,6 +3,8 @@
 
 #include "ServerCertificate.h"
 
+#include <algorithm>
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -328,22 +330,55 @@ SystemResult ensureSystem(const Paths &paths, const QString &commonName, const Q
         return result;
     }
 
+    // AUD-FIX8: the directory holding the key decides who can replace it. It must belong to
+    // root (or the service's euid) and be writable by nobody else. Sol's /opt/krdp-console/cert
+    // was the greeter user's (sddm), from before the host ran as root.
+    const QStringList ours{QFileInfo(paths.certificate).fileName(), QFileInfo(paths.key).fileName()};
     for (const auto &path : {paths.certificate, paths.key}) {
         const QString dir = QFileInfo(path).absolutePath();
+        const QByteArray dirName = QFile::encodeName(dir);
         struct stat st{};
-        if (::lstat(QFile::encodeName(dir).constData(), &st) != 0) {
-            if (!QDir().mkpath(dir)) {
-                result.error = u"cannot create %1"_s.arg(dir);
+        if (::lstat(dirName.constData(), &st) != 0) {
+            if (!QDir().mkpath(dir) || ::chmod(dirName.constData(), 0755) != 0) {
+                result.error = u"cannot create %1 (0755)"_s.arg(dir);
                 return result;
             }
-            ::chmod(QFile::encodeName(dir).constData(), 0755);
+            if (::lstat(dirName.constData(), &st) == 0 && st.st_uid != owner && ::chown(dirName.constData(), owner, gid_t(-1)) != 0) {
+                result.error = u"cannot make %1 owned by uid %2"_s.arg(dir).arg(owner);
+                return result;
+            }
             result.notes << u"created %1 (0755)"_s.arg(dir);
-        } else if (!S_ISDIR(st.st_mode)) {
+            continue;
+        }
+        if (!S_ISDIR(st.st_mode)) {
             result.error = u"%1 is not a directory"_s.arg(dir);
             return result;
-        } else if ((st.st_mode & (S_IWGRP | S_IWOTH)) || (st.st_uid != owner && st.st_uid != 0)) {
-            result.notes << u"%1 can be written by others than its owner or root: they could replace the key"_s.arg(dir);
         }
+        const mode_t mode = st.st_mode & 07777;
+        const bool foreignOwner = st.st_uid != owner && st.st_uid != 0;
+        if (!foreignOwner && !(mode & (S_IWGRP | S_IWOTH))) {
+            continue; // safe
+        }
+        // Only a directory that holds nothing but this certificate and key (and their atomic-write
+        // temporaries) is ours to repair; a shared one (a sticky /tmp, a home directory) is refused.
+        bool dedicated = !(mode & S_ISVTX);
+        const auto entries = QDir(dir).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot);
+        for (const auto &entry : entries) {
+            if (!std::any_of(ours.begin(), ours.end(), [&entry](const QString &name) { return entry == name || entry.startsWith(name + u'.'); })) {
+                dedicated = false;
+            }
+        }
+        const QString what = u"%1 (uid %2, mode %3)"_s.arg(dir).arg(st.st_uid).arg(QString::number(mode, 8));
+        if (!dedicated) {
+            result.error = u"%1 can be written by others than root, who could replace the key, and it holds other files: make it "
+                           u"root-owned and not group/other-writable (chown root:root, chmod 0755), or move the certificate"_s.arg(what);
+            return result;
+        }
+        if ((foreignOwner && ::chown(dirName.constData(), owner, 0) != 0) || ::chmod(dirName.constData(), 0755) != 0) {
+            result.error = u"%1 can be written by others than root, who could replace the key, and could not be repaired"_s.arg(what);
+            return result;
+        }
+        result.notes << u"%1 could be written by others than root, who could replace the key; now uid %2, mode 755"_s.arg(what).arg(owner);
     }
 
     // Existing files: owner and mode. Never touches what they contain.
