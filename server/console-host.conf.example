@@ -7,6 +7,10 @@ KRDP_CONSOLE_CERTIFICATE_KEY=/etc/krdp/console.key
 # Private codecs (HEVC/AV1) in software: auto (default), never or prefer.
 #KRDP_CONSOLE_SOFTWARE_ENCODING=auto
 
+# VA-API driver for the capture workers, like krdpserver's VaapiDriverMode: auto (default; a
+# LIBVA_DRIVER_NAME set in the desktop session is respected), off, radeonsi, iHD or i965.
+#KRDP_CONSOLE_VAAPI_DRIVER=auto
+
 # Bind as needed; port 3389 must not also be owned by the user-session server.
 KRDP_CONSOLE_ADDRESS=0.0.0.0
 KRDP_CONSOLE_PORT=3389

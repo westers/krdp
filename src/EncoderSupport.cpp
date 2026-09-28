@@ -3,6 +3,7 @@
 
 #include "EncoderSupport.h"
 
+#include "RenderNodes.h"
 #include "krdp_logging.h"
 
 #include <PipeWireEncodedStream>
@@ -75,6 +76,7 @@ struct Hardware {
 };
 
 /// Like KPipeWire's VaapiUtils: the first render node that can encode H.264 is the VAAPI device.
+/// (Name order; in a virtual desktop there is only the granted node.)
 Hardware probeHardware()
 {
     Hardware hw;
@@ -83,9 +85,11 @@ Hardware probeHardware()
     }
     const int previousLevel = av_log_get_level();
     av_log_set_level(AV_LOG_QUIET); // a failing trial is expected, not an error
-    const auto nodes = QDir(QStringLiteral("/dev/dri")).entryList({QStringLiteral("renderD*")}, QDir::System, QDir::Name);
-    for (const QString &name : nodes) {
-        const QByteArray path = QByteArrayLiteral("/dev/dri/") + name.toLatin1();
+    // AUD-FIX8 B3: stat()-based, so a bind-mounted node in a virtual desktop's sandbox counts;
+    // the node the launcher granted (KRDP_RENDER_NODE) first.
+    const auto nodes = RenderNodes::ordered(RenderNodes::preferredFromEnvironment());
+    for (const QString &node : nodes) {
+        const QByteArray path = QFile::encodeName(node);
         AVBufferRef *device = nullptr;
         if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_VAAPI, path.constData(), nullptr, 0) < 0) {
             continue;

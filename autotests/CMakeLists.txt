@@ -377,6 +377,13 @@ target_include_directories(ConsoleWorkerEndpointTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(ConsoleWorkerEndpointTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
 add_test(NAME ConsoleWorkerEndpointTest COMMAND ConsoleWorkerEndpointTest)
 
+# AUD-FIX8 B3: render nodes in a virtual desktop's sandbox (bwrap), groups, VaapiDriverMode.
+add_executable(RenderAccessTest RenderAccessTest.cpp)
+target_include_directories(RenderAccessTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(RenderAccessTest PRIVATE Qt6::Test Qt6::Core KRdp)
+add_test(NAME RenderAccessTest COMMAND RenderAccessTest)
+set_tests_properties(RenderAccessTest PROPERTIES TIMEOUT 120)
+
 # AUD-FIX8: the worker -> broker order (ConsoleWorkerOutbox, the class the real worker sends through).
 add_executable(ConsoleWorkerOrderTest ConsoleWorkerOrderTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
 target_include_directories(ConsoleWorkerOrderTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)

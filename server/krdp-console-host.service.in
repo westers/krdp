@@ -20,8 +20,9 @@ Environment=KRDP_CONSOLE_CERTIFICATE=/etc/krdp/console.crt
 Environment=KRDP_CONSOLE_CERTIFICATE_KEY=/etc/krdp/console.key
 # Private codecs in software (HEVC/AV1): auto, never or prefer (KRDPCTL-V2-CONTRACT.md (e)).
 Environment=KRDP_CONSOLE_SOFTWARE_ENCODING=auto
+Environment=KRDP_CONSOLE_VAAPI_DRIVER=auto
 EnvironmentFile=-/etc/krdp/console-host.conf
-ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-host --worker ${KRDP_CONSOLE_WORKER} --certificate ${KRDP_CONSOLE_CERTIFICATE} --certificate-key ${KRDP_CONSOLE_CERTIFICATE_KEY} --address ${KRDP_CONSOLE_ADDRESS} --port ${KRDP_CONSOLE_PORT} --runtime-directory /run/krdp-console --software-encoding ${KRDP_CONSOLE_SOFTWARE_ENCODING}
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-host --worker ${KRDP_CONSOLE_WORKER} --certificate ${KRDP_CONSOLE_CERTIFICATE} --certificate-key ${KRDP_CONSOLE_CERTIFICATE_KEY} --address ${KRDP_CONSOLE_ADDRESS} --port ${KRDP_CONSOLE_PORT} --runtime-directory /run/krdp-console --software-encoding ${KRDP_CONSOLE_SOFTWARE_ENCODING} --vaapi-driver ${KRDP_CONSOLE_VAAPI_DRIVER}
 RuntimeDirectory=krdp-console
 RuntimeDirectoryMode=0711
 Restart=on-failure

@@ -21,6 +21,7 @@
 #include "ConsoleHostController.h"
 #include "ConsoleSeatWatcher.h"
 #include "ConsoleWorkerLauncher.h"
+#include "VaapiDriverMode.h"
 #include "HostCertificate.h"
 #include "VideoCodecHost.h"
 
@@ -39,7 +40,8 @@ int main(int argc, char **argv)
     const QCommandLineOption runtimeOption(QStringLiteral("runtime-directory"), QStringLiteral("Host-owned worker socket directory."), QStringLiteral("path"), QStringLiteral("/run/krdp-console"));
     const QCommandLineOption audioPriorityOption(QStringLiteral("prefer-audio-quality"), QStringLiteral("Default to audio-first congestion steering for the controlling client (live client overrides allowed)."));
     const QCommandLineOption softwareEncodingOption(QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto"));
-    parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, softwareEncodingOption});
+    const QCommandLineOption vaapiDriverOption(QStringLiteral("vaapi-driver"), QStringLiteral("VaapiDriverMode for the capture workers: auto, off, radeonsi, iHD or i965."), QStringLiteral("mode"), QStringLiteral("auto"));
+    parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, softwareEncodingOption, vaapiDriverOption});
     parser.process(application);
 
     if (geteuid() != 0) {
@@ -50,8 +52,9 @@ int main(int argc, char **argv)
     bool portOk = false;
     const quint16 port = parser.value(portOption).toUShort(&portOk);
     const auto softwareEncoding = KRdp::parseHostSoftwareEncoding(parser.value(softwareEncodingOption));
+    const auto vaapiDriver = KRdp::VaapiDriverMode::normalize(parser.value(vaapiDriverOption));
     if (!portOk || port == 0 || parser.value(workerOption).isEmpty() || parser.value(certificateOption).isEmpty() || parser.value(keyOption).isEmpty()
-        || !softwareEncoding) {
+        || !softwareEncoding || !vaapiDriver) {
         parser.showHelp(1);
     }
     // AUD-FIX7: the host keeps its own certificate valid (created when missing, renewed when
@@ -71,6 +74,8 @@ int main(int argc, char **argv)
 
     KRdp::ConsoleSeatWatcher seat;
     KRdp::ConsoleWorkerLauncher launcher(parser.value(workerOption));
+    launcher.setVaapiDriverMode(*vaapiDriver);
+    qInfo().noquote() << "Console host worker VaapiDriverMode:" << *vaapiDriver;
     launcher.setSessionLookup([&seat](const QString &id) {
         return seat.session(id);
     });

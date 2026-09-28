@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionHostController.h"
+#include "RenderAccess.h"
 #include "WorkspaceFrameGeometry.h"
 #include "RemoteMonitorGeometry.h"
 #include <algorithm>
@@ -211,6 +212,7 @@ VirtualSessionControl::CreateResult VirtualSessionHostController::createIndepend
         m_creationBlocked = true;
         return {};
     }
+    warnRenderAccess(uid);
     // From here every failure leaves a durable intent, never a second start.
     const auto handle = m_supervisor.adopt(record.identity(), true);
     if (!handle) return {};
@@ -221,6 +223,16 @@ VirtualSessionControl::CreateResult VirtualSessionHostController::createIndepend
     if (!alive) return {};
     if (!started) m_supervisor.captureUnavailable(*handle);
     return handle;
+}
+
+void VirtualSessionHostController::warnRenderAccess(quint32 uid)
+{
+    if (!uid || m_renderWarned.contains(uid)) return;
+    m_renderWarned.insert(uid);
+    const QString warning = RenderAccess::warningFor(uid,
+        QStringLiteral("a virtual desktop still encodes in hardware (it gets a private copy of its granted node, owned by the "
+                       "user), but the user's console and krdpserver sessions need the group"));
+    if (!warning.isEmpty()) qWarning().noquote() << warning;
 }
 
 bool VirtualSessionHostController::startIndependentService(const QString &unit, const VirtualSessionRegistry::Handle &handle)

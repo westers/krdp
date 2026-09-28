@@ -31,6 +31,7 @@ target_link_libraries(krdp-virtual-host PRIVATE Qt6::Core Qt6::Gui Qt6::Network 
 configure_file(krdp-virtual-host.service.in ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-host.service @ONLY)
 add_executable(krdp-virtual-device-entry virtualdeviceentry.cpp)
 target_link_libraries(krdp-virtual-device-entry PRIVATE Qt6::Core)
+target_include_directories(krdp-virtual-device-entry PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_executable(krdp-virtual-guardian virtualguardian.cpp VirtualSessionGuardian.cpp VirtualSessionStorage.cpp)
 target_link_libraries(krdp-virtual-guardian PRIVATE Qt6::Core Qt6::Network)
 add_executable(krdp-virtual-guardianctl virtualguardianctl.cpp VirtualSessionGuardianClient.cpp)

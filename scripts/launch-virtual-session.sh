@@ -3,7 +3,7 @@
 # loss does not. This is not a sandbox against other applications of the UID.
 set -euo pipefail
 umask 077
-runtime= profile= session= session_uid= worker= support= width= height= initial_layout=
+runtime= profile= session= session_uid= worker= support= width= height= initial_layout= vaapi_driver=auto
 allowed_pci=()
 while (( $# )); do
     [[ $# -ge 2 ]] || exit 1
@@ -11,6 +11,7 @@ while (( $# )); do
         --runtime) runtime=$2;; --profile) profile=$2;; --session) session=$2;;
         --uid) session_uid=$2;; --worker) worker=$2;; --support) support=$2;;
         --width) width=$2;; --height) height=$2;; --initial-layout) initial_layout=$2;; --allow-render-pci) allowed_pci+=("$2");;
+        --vaapi-driver) vaapi_driver=$2;;
         *) echo 'Unknown namespace-launch option' >&2; exit 1;;
     esac
     shift 2
@@ -51,7 +52,7 @@ for required in virtual-session-bus.conf virtual-session-pipewire.conf; do [[ -f
 inner=$(dirname "$(realpath -e "$0")")/virtual-session-desktop.sh
 [[ -f $inner ]]
 
-render_bindings=() render_environment=() selected=
+render_bindings=() render_environment=() selected= render_node=
 for pci in "${allowed_pci[@]}"; do
     [[ $pci =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[01][0-9a-f]\.[0-7]$ ]] || exit 1
 done
@@ -80,10 +81,20 @@ for pci in "${allowed_pci[@]}"; do
     [[ $permitted == true ]] || continue
     for node in "${candidate[@]}"; do render_bindings+=(--dev-bind "$node" "$node"); done
     render_environment=("${candidate_environment[@]}")
+    render_node=$render
     selected=$pci
     break
 done
 [[ -n $selected ]] || { echo 'No permitted render GPU is accessible; no fallback to physical DRM.' >&2; exit 1; }
+# AUD-FIX8 B3: the worker's encoder probe tries the granted node first, and gets the
+# administrator's VaapiDriverMode (KRDP_VIRTUAL_VAAPI_DRIVER) the way krdpserver applies it.
+[[ $vaapi_driver =~ ^(auto|off|radeonsi|iHD|i965)$ ]]
+render_environment+=(KRDP_RENDER_NODE="$render_node")
+case $vaapi_driver in
+    auto) ;;
+    off) render_environment+=(KRDP_AUTO_VAAPI_DRIVER=0);;
+    *) render_environment+=(KRDP_FORCE_VAAPI_DRIVER="$vaapi_driver" LIBVA_DRIVER_NAME="$vaapi_driver");;
+esac
 
 # Seed missing settings only. Never overwrite a retained user's profile.
 cp -rn "$support/defaults/." "$profile/config/"
@@ -97,7 +108,7 @@ apparmor_query=()
 if [[ -e /sys/kernel/security/apparmor/.access ]]; then
     apparmor_query=(--bind /sys/kernel/security/apparmor/.access /sys/kernel/security/apparmor/.access)
 fi
-printf 'Selected isolated render GPU %s; desktop %s\n' "$selected" "$session"
+printf 'Selected isolated render GPU %s (%s, VaapiDriverMode %s); desktop %s\n' "$selected" "$render_node" "$vaapi_driver" "$session"
 exec env -i PATH=/usr/bin:/bin HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" LANG=C.UTF-8 \
     XDG_RUNTIME_DIR="$runtime" XDG_CONFIG_HOME="$profile/config" XDG_CACHE_HOME="$profile/cache" \
     XDG_STATE_HOME="$profile/state" XDG_DATA_HOME="$profile/data" XDG_CONFIG_DIRS="$runtime/config-defaults" \

@@ -38,6 +38,7 @@
 #include "VirtualResizeSession.h"
 #include "H264KeyframeSize.h"
 #include "EncoderSupport.h"
+#include "RdpConnection.h"
 #include "TakeoverDetector.h"
 #include "PipeWireAudioPlayback.h"
 #include "ConsoleMicrophoneSession.h"
@@ -2702,6 +2703,13 @@ int main(int argc, char **argv)
     QGuiApplication application(argc, argv);
     application.setDesktopFileName(QStringLiteral("org.kde.krdpconsoleworker"));
     KRdp::EncoderSupport::applyProcessOverrides(); // KRDP_FORCE_SOFTWARE_ENCODING, before any encoder
+    // AUD-FIX8 B3: the broker's VaapiDriverMode arrives as KRDP_FORCE_VAAPI_DRIVER /
+    // KRDP_AUTO_VAAPI_DRIVER (console launcher, virtual-desktop launcher); resolve LIBVA_DRIVER_NAME
+    // the way krdpserver does, before the encoder probe and before any encoder opens.
+    KRdp::selectVaapiDriver();
+    if (!qEnvironmentVariableIsEmpty("KRDP_RENDER_NODE") || qEnvironmentVariableIsSet("LIBVA_DRIVER_NAME"))
+        qInfo().noquote() << "Worker VAAPI: render node" << qEnvironmentVariable("KRDP_RENDER_NODE", QStringLiteral("(first usable)"))
+                          << "driver" << qEnvironmentVariable("LIBVA_DRIVER_NAME", QStringLiteral("(libva default)"));
     QCommandLineParser parser;
     parser.addHelpOption();
     const QCommandLineOption socketOption(QStringLiteral("socket"), QStringLiteral("Broker socket path."), QStringLiteral("path"));

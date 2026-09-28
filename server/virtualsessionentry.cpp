@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 // Independent root service entry, never setuid or invoked with RDP-supplied argv.
+#include "VaapiDriverMode.h"
 #include "VirtualSessionServicePlan.h"
 #include "VirtualSessionServiceScope.h"
 #include "VirtualSessionServiceOwner.h"
@@ -55,7 +56,7 @@ int main(int argc, char **argv)
     QCoreApplication app(argc, argv);
     QCommandLineParser parser;
     parser.addHelpOption();
-    for (const auto &name : {"session", "device-entry", "guardian", "pam-keeper", "launcher", "worker", "support", "render-pci"})
+    for (const auto &name : {"session", "device-entry", "guardian", "pam-keeper", "launcher", "worker", "support", "render-pci", "vaapi-driver"})
         parser.addOption({QString::fromLatin1(name), QStringLiteral("Trusted service launch parameter"), QStringLiteral("value")});
     parser.process(app);
     if (getuid() || geteuid()) return refused("explicit root service required");
@@ -82,7 +83,10 @@ int main(int argc, char **argv)
     const auto keeper = parser.value(QStringLiteral("pam-keeper"));
     const KRdp::VirtualSessionLaunchPlan::Configuration config{parser.value(QStringLiteral("launcher")),
         parser.value(QStringLiteral("worker")), parser.value(QStringLiteral("support")),
-        parser.value(QStringLiteral("render-pci")).split(QLatin1Char(','), Qt::KeepEmptyParts), {1280, 720}};
+        parser.value(QStringLiteral("render-pci")).split(QLatin1Char(','), Qt::KeepEmptyParts), {1280, 720},
+        KRdp::VaapiDriverMode::normalize(parser.value(QStringLiteral("vaapi-driver"))).value_or(QString())};
+    // AUD-FIX8 B3: KRDP_VIRTUAL_VAAPI_DRIVER (auto, off, radeonsi, iHD, i965) for the desktop's worker.
+    if (config.vaapiDriver.isEmpty()) return refused("VaapiDriverMode (KRDP_VIRTUAL_VAAPI_DRIVER)");
     const auto plan = KRdp::VirtualSessionServicePlan::build(*record, boot,
         {record->uid, QString::fromLocal8Bit(account.pw_name), QString::fromLocal8Bit(account.pw_dir)}, config, device, guardian);
     if (!plan) return refused("boot or trusted launch policy");

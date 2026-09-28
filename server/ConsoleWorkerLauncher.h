@@ -9,6 +9,7 @@
 #include <optional>
 
 #include <QObject>
+#include <QSet>
 #include <QProcess>
 
 #include "ConsoleHandoff.h"
@@ -38,6 +39,9 @@ public:
     void setSocketProbe(SocketProbe probe);
     void setStarter(Starter starter);
     void setWaitBudgetMs(int budgetMs) { m_waitBudgetMs = budgetMs; }
+    /** AUD-FIX8: the host's VaapiDriverMode (VaapiDriverMode::normalize()) for every worker. */
+    void setVaapiDriverMode(const QString &mode) { m_vaapiDriverMode = mode; }
+    QString vaapiDriverMode() const { return m_vaapiDriverMode; }
     /**
      * Start a worker for @p target. When the session is not ready yet (AUD-FIX
      * F6: not Active, no Wayland environment, or its socket not accepting
@@ -70,6 +74,8 @@ private:
     SocketProbe m_socketProbe;
     Starter m_starter;
     int m_waitBudgetMs;
+    QString m_vaapiDriverMode = QStringLiteral("auto");
+    QSet<uid_t> m_renderWarned; // one render-group warning per user
     std::map<QString, std::unique_ptr<QProcess>> m_processes;
     std::map<QString, std::unique_ptr<Pending>> m_pending;
 };

@@ -55,6 +55,9 @@ private:
     VirtualSessionControl::CreateResult createIndependent(quint32 uid,
         const VirtualSessionControl::InitialOutputs &initialOutputs = {});
     bool startIndependentService(const QString &unit, const VirtualSessionRegistry::Handle &handle);
+    // AUD-FIX8: once per user, a warning naming `usermod -aG render <user>` when it lacks the group.
+    void warnRenderAccess(quint32 uid);
+    QSet<quint32> m_renderWarned;
     struct Worker {
         VirtualSessionRegistry::Handle handle;
         std::unique_ptr<VirtualSessionBrokerLease> lease; // destroyed after endpoint

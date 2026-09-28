@@ -22,6 +22,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include "RenderAccess.h"
+
 namespace {
 struct Device { QByteArray path; dev_t number; };
 bool snapshot(const QByteArray &path, std::vector<Device> &devices)
@@ -100,6 +102,12 @@ int main(int argc, char **argv)
         && buffer.size() < 1048576) buffer.resize(buffer.size() * 2);
     if (result || !resolved || account.pw_uid != uid || account.pw_gid == gid_t(-1)) return fail("OS account resolution");
     const gid_t gid = account.pw_gid;
+    // AUD-FIX8 B3: the desktop runs with the user's full group list (render, video, audio, ...)
+    // like any login, not with none. The granted GPU node is also chowned to the user below, so
+    // the encoder does not depend on it; files and devices the groups grant elsewhere do.
+    // Resolved here, before any namespace or privilege change (NSS may use nscd/sssd).
+    const auto supplementary = KRdp::RenderAccess::userGroups(account.pw_name, gid);
+    if (!supplementary || supplementary->size() > 65536) return fail("OS account group resolution");
 
     const auto allow = parser.values(QStringLiteral("allow-render-pci"));
     const QRegularExpression pci(QStringLiteral("^[0-9a-f]{4}:[0-9a-f]{2}:[01][0-9a-f]\\.[0-7]$"));
@@ -184,7 +192,7 @@ int main(int argc, char **argv)
         if (prctl(PR_CAPBSET_DROP, capability, 0, 0, 0)) return fail("bounding capability drop");
     }
     if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)
-        || prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0) || setgroups(0, nullptr)
+        || prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0) || setgroups(supplementary->size(), supplementary->data())
         || setresgid(gid, gid, gid) || setresuid(uid, uid, uid)
         || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) return fail("privilege drop");
     __user_cap_header_struct header{_LINUX_CAPABILITY_VERSION_3, 0};

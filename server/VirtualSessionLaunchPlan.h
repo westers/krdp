@@ -29,6 +29,8 @@ struct VirtualSessionLaunchPlan {
         QString supportDirectory;
         QStringList allowedRenderPci; // stable identities, never renderD indexes
         QSize initialSize{1280, 720};
+        /// AUD-FIX8 B3: VaapiDriverMode for the desktop's worker (VaapiDriverMode::normalize()).
+        QString vaapiDriver = QStringLiteral("auto");
     };
     QString program;
     QStringList arguments;
@@ -86,6 +88,11 @@ struct VirtualSessionLaunchPlan {
             }
             unique.append(device);
         }
+        static const QStringList vaapiDrivers{QStringLiteral("auto"), QStringLiteral("off"), QStringLiteral("radeonsi"),
+                                              QStringLiteral("iHD"), QStringLiteral("i965")};
+        if (!vaapiDrivers.contains(config.vaapiDriver)) {
+            return refuse(QStringLiteral("VaapiDriverMode must be auto, off, radeonsi, iHD or i965"));
+        }
         VirtualSessionLaunchPlan plan;
         // Production receives the fresh identity already persisted by the broker;
         // diagnostics allocate it here. This does not authorize runtime reuse:
@@ -102,6 +109,8 @@ struct VirtualSessionLaunchPlan {
             QStringLiteral("--support"), config.supportDirectory, QStringLiteral("--width"), QString::number(config.initialSize.width()),
             QStringLiteral("--height"), QString::number(config.initialSize.height())};
         for (const auto &device : unique) plan.arguments.append({QStringLiteral("--allow-render-pci"), device});
+        if (config.vaapiDriver != QLatin1String("auto"))
+            plan.arguments.append({QStringLiteral("--vaapi-driver"), config.vaapiDriver});
         // No inherited display, bus, systemd-manager, Qt plugin, loader, or
         // physical-session audio environment. The namespace supplies its own.
         plan.environment.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin:/bin"));

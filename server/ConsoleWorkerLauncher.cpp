@@ -3,6 +3,9 @@
 
 #include "ConsoleWorkerLauncher.h"
 
+#include "RenderAccess.h"
+#include "VaapiDriverMode.h"
+
 #include <algorithm>
 #include <csignal>
 #include <grp.h>
@@ -317,6 +320,8 @@ bool ConsoleWorkerLauncher::startProcess(const ConsoleHandoff::Target &target, c
     }
     // Keep the per-launch socket path out of argv (world-readable /proc).
     environment.insert(QString::fromLatin1(ConsoleWorkerWire::SocketEnvironment), socketName);
+    // AUD-FIX8 B3: the host's VaapiDriverMode, resolved by the worker like krdpserver does.
+    VaapiDriverMode::apply(environment, m_vaapiDriverMode);
 
     // All name-service lookups happen here, before fork: getpwuid() and
     // getgrouplist() may allocate, lock or talk to nscd/sssd, none of which is
@@ -326,18 +331,20 @@ bool ConsoleWorkerLauncher::startProcess(const ConsoleHandoff::Target &target, c
         return fail(QStringLiteral("selected uid has no passwd entry"));
     }
     const gid_t gid = account->pw_gid;
-    std::vector<gid_t> groups(32);
-    int groupCount = int(groups.size());
-    if (getgrouplist(account->pw_name, gid, groups.data(), &groupCount) < 0) {
-        if (groupCount <= 0 || groupCount > 65536) {
-            return fail(QStringLiteral("cannot resolve the selected user's groups"));
-        }
-        groups.resize(size_t(groupCount));
-        if (getgrouplist(account->pw_name, gid, groups.data(), &groupCount) < 0) {
-            return fail(QStringLiteral("cannot resolve the selected user's groups"));
-        }
+    // The user's full group list (render, video, ...), as initgroups() would install it.
+    const auto resolvedGroups = RenderAccess::userGroups(account->pw_name, gid);
+    if (!resolvedGroups) {
+        return fail(QStringLiteral("cannot resolve the selected user's groups"));
     }
-    groups.resize(size_t(groupCount));
+    const std::vector<gid_t> groups = *resolvedGroups;
+    // The greeter's user (sddm) lives on the seat's ACL by design; only desktop users are told.
+    if (target.adapter != ConsoleSeat::Adapter::Greeter && !m_renderWarned.contains(target.uid)) {
+        m_renderWarned.insert(target.uid);
+        const QString warning = RenderAccess::missingGroupWarning(QString::fromLocal8Bit(account->pw_name), target.uid, groups,
+            RenderAccess::nodes(), QStringLiteral("its console worker can use the GPU only through the seat's ACL, so hardware "
+                                                  "encoding can be missing (e.g. from the greeter or after a seat change)"));
+        if (!warning.isEmpty()) qWarning().noquote() << warning;
+    }
 
     int tokenPipe[2] = {-1, -1};
     if (pipe2(tokenPipe, O_CLOEXEC) != 0) {

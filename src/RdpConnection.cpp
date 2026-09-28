@@ -68,6 +68,7 @@
 #include <KUser>
 #include <QScopeGuard>
 
+#include "RenderNodes.h"
 #include "krdp_logging.h"
 
 namespace fs = std::filesystem;
@@ -107,11 +108,15 @@ QByteArray preferredIntelDriver()
 std::vector<RenderNodeInfo> renderNodes()
 {
     std::vector<RenderNodeInfo> nodes;
-    const QDir driDir(QStringLiteral("/dev/dri"));
-    const auto entries = driDir.entryList({QStringLiteral("renderD*")}, QDir::System | QDir::Readable, QDir::Name);
+    // AUD-FIX8 B3: stat()-based (a bind-mounted node in a sandbox is DT_REG to readdir()).
+    const auto entries = RenderNodes::list();
     nodes.reserve(entries.size());
 
-    for (const auto &entry : entries) {
+    for (const auto &path : entries) {
+        if (::access(QFile::encodeName(path).constData(), R_OK) != 0) {
+            continue;
+        }
+        const QString entry = path.section(QLatin1Char('/'), -1);
         const auto vendorPath = QStringLiteral("/sys/class/drm/%1/device/vendor").arg(entry);
         const auto vendorId = readTrimmedFile(vendorPath);
         if (vendorId.isEmpty()) {
@@ -119,7 +124,7 @@ std::vector<RenderNodeInfo> renderNodes()
         }
 
         nodes.push_back(RenderNodeInfo{
-            .renderNode = QFile::encodeName(driDir.absoluteFilePath(entry)),
+            .renderNode = QFile::encodeName(path),
             .vendorId = vendorId,
         });
     }
