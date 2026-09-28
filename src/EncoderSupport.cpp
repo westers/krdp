@@ -184,6 +184,21 @@ bool softwareBackend(Family family)
     return false; // no software HEVC/AV1 in this KPipeWire
 }
 
+/**
+ * Whether the software encoder of \a family changes its target bitrate in place (no reopen):
+ * KPipeWire's softwareBitrateChangeIsLive() (AUD-SWENC: libx264, libx265). False with a KPipeWire
+ * without it, where every software HEVC/AV1 bitrate change reopened the encoder.
+ */
+template<typename Stream>
+bool liveBitrateChange(Family family)
+{
+    if constexpr (requires(typename Stream::Encoder e) { Stream::softwareBitrateChangeIsLive(e); }) {
+        const auto encoder = encoderOf<Stream>(family);
+        return encoder && Stream::softwareBitrateChangeIsLive(*encoder);
+    }
+    return false;
+}
+
 std::optional<Backends> parseBackends(const QString &value)
 {
     if (value == QLatin1String("none")) return Backends{};
@@ -219,10 +234,14 @@ bool applyOverride(Encoders &encoders, const QString &spec)
         const auto backends = parseBackends(parts.at(1).trimmed().toLower());
         if (!backends) return false;
         const QString codec = parts.at(0).trimmed().toLower();
-        if (codec == QLatin1String("avc")) result.avc = *backends;
-        else if (codec == QLatin1String("hevc")) result.hevc = *backends;
-        else if (codec == QLatin1String("av1")) result.av1 = *backends;
-        else return false;
+        Backends *target = codec == QLatin1String("avc") ? &result.avc
+            : codec == QLatin1String("hevc")             ? &result.hevc
+            : codec == QLatin1String("av1")              ? &result.av1
+                                                         : nullptr;
+        if (!target) return false;
+        const bool live = target->liveBitrate; // a property of the encoder, not of the override
+        *target = *backends;
+        target->liveBitrate = live;
     }
     encoders = result;
     return true;
@@ -244,6 +263,7 @@ Probe probeUncached()
         Backends &b = result.encoders.of(family);
         b.hardware = trialOpened && kpipewireOffersHardware<PipeWireEncodedStream>(suggested, family);
         b.software = (family == Family::Avc ? avcOffered : true) && softwareBackend<PipeWireEncodedStream>(family);
+        b.liveBitrate = b.software && liveBitrateChange<PipeWireEncodedStream>(family);
     }
     result.avc444Hardware = kpipewireHasChroma444<PipeWireEncodedStream>() && result.encoders.avc.hardware;
     result.renderNode = hw.node;

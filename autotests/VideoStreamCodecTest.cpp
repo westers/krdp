@@ -129,11 +129,15 @@ private Q_SLOTS:
         });
         QSignalSpy rate(f.stream(), &VideoStream::requestedFrameRateChanged);
         f.stream()->setEncoderPolicy(softwareOnly(), CodecPolicy::SoftwareEncoding::Prefer);
+        f.stream()->setQualityCap(70);
         QCOMPARE(f.stream()->requestedFrameRate(), 60u);
         const auto d = f.stream()->setPrivateCodecPolicy({VideoCodec::Hevc, VideoCodec::Av1}, true);
         QCOMPARE(d.choice, (CodecPolicy::Choice{Family::Av1, false}));
         QCOMPARE(order, (QStringList{QStringLiteral("settings"), QStringLiteral("codec")}));
-        QCOMPARE(f.stream()->encoderSettings(), (CodecPolicy::EncoderSettings{false, CodecPolicy::Preset::Efficient, 0, 30}));
+        // Software AV1 opens in bitrate mode at the quality's bitrate (1080p until surfaces exist),
+        // so adaptive quality later moves the bitrate instead of reopening for a CRF change.
+        const quint32 kbps = CodecPolicy::qualityKbps(70, CodecPolicy::ReferencePixels);
+        QCOMPARE(f.stream()->encoderSettings(), (CodecPolicy::EncoderSettings{false, CodecPolicy::Preset::Efficient, kbps, 30}));
         QCOMPARE(f.stream()->requestedFrameRate(), 30u);
         QCOMPARE(rate.size(), 1);
         // Back to AVC only: full rate again.

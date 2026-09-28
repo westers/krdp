@@ -37,6 +37,18 @@ bool kpipewireHardware(PipeWireEncodedStream::Encoder encoder)
     }
     return true; // an older KPipeWire: only the trial open decides
 }
+/// Whether the linked KPipeWire changes the software bitrate of \a encoder in place (AUD-SWENC).
+bool kpipewireLiveBitrate(PipeWireEncodedStream::Encoder encoder)
+{
+    if constexpr (requires { PipeWireEncodedStream::softwareBitrateChangeIsLive(encoder); }) {
+        return PipeWireEncodedStream::softwareBitrateChangeIsLive(encoder);
+    }
+    return false;
+}
+bool sameBackends(const Backends &b, bool hardware, bool software)
+{
+    return b.hardware == hardware && b.software == software;
+}
 }
 
 class EncoderSupportTest : public QObject
@@ -58,6 +70,10 @@ private Q_SLOTS:
         QVERIFY(!EncoderSupport::applyOverride(e, u"vp9=hw"_s));
         QVERIFY(!EncoderSupport::applyOverride(e, u"avc"_s));
         QCOMPARE(e, before);
+        // The live-bitrate flag describes the encoder, not the backend choice: an override keeps it.
+        e.hevc.liveBitrate = true;
+        QVERIFY(EncoderSupport::applyOverride(e, u"hevc=sw"_s));
+        QCOMPARE(e.hevc, (Backends{false, true, true}));
     }
 
     void hardwareForcedOff()
@@ -68,8 +84,11 @@ private Q_SLOTS:
         const auto probe = EncoderSupport::probeUncached();
         QCOMPARE(probe.encoders.avc.hardware, false);
         // Software HEVC/AV1 are still offered: hardware off is what they are for.
-        QCOMPARE(probe.encoders.hevc, (Backends{false, kpipewireSoftware(PipeWireEncodedStream::HEVCMain)}));
-        QCOMPARE(probe.encoders.av1, (Backends{false, kpipewireSoftware(PipeWireEncodedStream::AV1Main)}));
+        QVERIFY(sameBackends(probe.encoders.hevc, false, kpipewireSoftware(PipeWireEncodedStream::HEVCMain)));
+        QVERIFY(sameBackends(probe.encoders.av1, false, kpipewireSoftware(PipeWireEncodedStream::AV1Main)));
+        // libx265 changes its bitrate in place (adaptive quality without reopens); SVT-AV1 cannot.
+        QCOMPARE(probe.encoders.hevc.liveBitrate, probe.encoders.hevc.software && kpipewireLiveBitrate(PipeWireEncodedStream::HEVCMain));
+        QVERIFY(!probe.encoders.av1.liveBitrate);
         QCOMPARE(probe.encoders.hevc.software, avcodec_find_encoder_by_name("libx265") != nullptr);
         QCOMPARE(probe.encoders.av1.software, avcodec_find_encoder_by_name("libsvtav1") || avcodec_find_encoder_by_name("libaom-av1"));
         QVERIFY(!probe.avc444Hardware);
@@ -136,8 +155,8 @@ private Q_SLOTS:
         qputenv("KRDP_FORCE_SOFTWARE_ENCODING", "1"); // keep the host's GPU out of it
         qputenv("KRDP_ENCODERS", "avc=sw,hevc=hw");
         const auto probe = EncoderSupport::probeUncached();
-        QCOMPARE(probe.encoders.avc, (Backends{false, true}));
-        QCOMPARE(probe.encoders.hevc, (Backends{true, false}));
+        QVERIFY(sameBackends(probe.encoders.avc, false, true));
+        QVERIFY(sameBackends(probe.encoders.hevc, true, false));
         qunsetenv("KRDP_ENCODERS");
         qunsetenv("KRDP_FORCE_SOFTWARE_ENCODING");
     }

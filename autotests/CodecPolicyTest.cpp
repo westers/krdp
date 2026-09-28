@@ -3,6 +3,7 @@
 
 // AUD-FIX2 F1: the codec/backend policy behind `SoftwareEncoding` (src/CodecPolicy.h).
 
+#include "AdaptiveQuality.h"
 #include "CodecPolicy.h"
 
 #include <QTest>
@@ -31,10 +32,62 @@ Encoders sol() // no hardware at all, libx264 only
 Encoders softwareEverything() // KPipeWire with libx265/SVT-AV1 (WS-E), no GPU
 {
     Encoders e;
-    e.avc = {false, true};
-    e.hevc = {false, true};
-    e.av1 = {false, true};
+    e.avc = {false, true, true};
+    e.hevc = {false, true, true}; // libx265 changes its bitrate in place (AUD-SWENC)
+    e.av1 = {false, true, false}; // SVT-AV1 reopens for every change
     return e;
+}
+
+/**
+ * Adaptive quality (the real KRdp::AdaptiveQuality::step()) and the codec policy, as
+ * VideoStream::updateAdaptiveQuality() runs them every 1.5 s: quality first, then the policy
+ * with that quality. The link alternates between congested (RTT 60 ms over a 10 ms minimum)
+ * and clear in \a pattern-long phases. Returns the number of quality changes; \a restartTimes
+ * receives when the policy restarted the encoder, \a bitrateChanges each target change.
+ */
+struct AdaptiveRun {
+    int qualityChanges = 0;
+    QList<Clock::time_point> restartTimes;
+    QList<std::pair<quint32, quint32>> bitrateChanges; ///< from, to
+};
+AdaptiveRun runAdaptiveQuality(State &state, Input in, Clock::time_point &now, std::chrono::seconds duration, QList<std::chrono::seconds> pattern)
+{
+    using namespace std::chrono;
+    AdaptiveRun run;
+    int quality = 80;
+    Clock::time_point lastStepDown{};
+    const auto start = now;
+    const auto end = now + duration;
+    while (now < end) {
+        now += 1500ms;
+        // Which phase: even = congested, odd = clear, cycling through the pattern.
+        auto t = duration_cast<seconds>(now - start);
+        seconds cycle{0};
+        for (const auto p : pattern) cycle += p;
+        t = seconds(t.count() % cycle.count());
+        int phase = 0;
+        for (; phase < pattern.size() && t >= pattern[phase]; ++phase) t -= pattern[phase];
+        const bool congested = phase % 2 == 0;
+        const auto result = KRdp::AdaptiveQuality::step({
+            .current = quality,
+            .cap = 80,
+            .averageRtt = congested ? microseconds(60000) : microseconds(10000),
+            .minimumRtt = microseconds(10000),
+            .backlogged = false,
+            .climbAllowed = now - lastStepDown >= KRdp::AdaptiveQuality::ClimbHoldAfterStepDown,
+        });
+        if (result.next < quality) lastStepDown = now;
+        if (result.next != quality) ++run.qualityChanges;
+        quality = result.next;
+        in.quality = quint8(quality);
+        in.congested = congested;
+        const quint32 before = state.applied.targetKbps;
+        const int restarts = state.encoderRestarts;
+        const auto d = step(state, in, now);
+        if (state.encoderRestarts != restarts) run.restartTimes.append(now);
+        if (d.settingsChanged && d.settings.targetKbps != before) run.bitrateChanges.append({before, d.settings.targetKbps});
+    }
+    return run;
 }
 Input input(SoftwareEncoding mode, Encoders encoders, QList<Family> client = {Family::Hevc, Family::Av1})
 {
@@ -452,7 +505,11 @@ private Q_SLOTS:
         }
         QVERIFY(targets.size() >= 3);
         QCOMPARE(targets.first(), 2125u);
-        QCOMPARE(targets.last(), quint32(slowBelowKbps(ReferencePixels)));
+        // The link cap grows to the slow-link threshold; the target stops at adaptive quality's
+        // bitrate (quality 80 here), within one AV1 restart step (20 %) of it.
+        QCOMPARE(state.linkKbps, quint32(slowBelowKbps(ReferencePixels)));
+        QVERIFY(targets.last() <= qualityKbps(DefaultQuality, ReferencePixels));
+        QVERIFY(targets.last() >= qualityKbps(DefaultQuality, ReferencePixels) / (1 + RestartBitrateMinChange));
         QVERIFY(state.slowLink); // 1.7 Mbit/s never proves a fast link
 
         // A small change (< 15 %) is not worth a reopen.
@@ -505,6 +562,198 @@ private Q_SLOTS:
         QVERIFY(d.changed);
         QCOMPARE(d.choice, (Choice{Family::Av1, false}));
         QVERIFY(now - state.lastSwitch < 1ms);
+    }
+
+    // AUD-SWENC: adaptive quality's steps become target bitrates on software HEVC/AV1.
+    void qualityMapsToBitrate()
+    {
+        const quint32 at80 = qualityKbps(80, ReferencePixels);
+        QVERIFY2(at80 > 6000 && at80 < 6500, qPrintable(QString::number(at80))); // 0.1 bit/pixel at 1080p30
+        QVERIFY(std::abs(double(qualityKbps(100, ReferencePixels)) - 2.0 * at80) <= 2); // +20 points = twice the bits
+        QVERIFY(std::abs(double(qualityKbps(60, ReferencePixels)) - at80 / 2.0) <= 2);
+        QVERIFY(std::abs(double(qualityKbps(80, 2 * ReferencePixels)) - 2.0 * at80) <= 2); // two monitors
+        QCOMPARE(qualityKbps(250, ReferencePixels), qualityKbps(100, ReferencePixels)); // quality is 0..100
+        QCOMPARE(qualityKbps(10, 1), MinTargetKbps); // never below the floor
+        quint32 previous = 0;
+        for (int q = 0; q <= 100; q += 5) {
+            const quint32 kbps = qualityKbps(quint8(q), ReferencePixels);
+            QVERIFY(kbps >= previous);
+            previous = kbps;
+        }
+        // One adaptive-quality step down (10) is a 29 % cut, one step up (5) +19 %.
+        QVERIFY(double(qualityKbps(70, ReferencePixels)) / at80 < 0.72);
+        QVERIFY(double(qualityKbps(85, ReferencePixels)) / at80 > 1.18);
+
+        // In the policy: software HEVC/AV1 always run in bitrate mode at the quality's bitrate,
+        // capped by a slow link; hardware and software H.264 stay in quality mode.
+        State sw;
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Hevc});
+        in.quality = 50;
+        QCOMPARE(step(sw, in, T0).settings.targetKbps, qualityKbps(50, ReferencePixels));
+        State hw;
+        QCOMPARE(step(hw, input(SoftwareEncoding::Auto, hal()), T0).settings.targetKbps, 0u);
+        State avc;
+        QCOMPARE(step(avc, input(SoftwareEncoding::Auto, sol()), T0).settings.targetKbps, 0u);
+        QVERIFY(restartsEncoder(Family::Av1, softwareEverything().av1, {false, Preset::Efficient, 3000, 30}, {false, Preset::Efficient, 2000, 30}));
+        QVERIFY(!restartsEncoder(Family::Hevc, softwareEverything().hevc, {false, Preset::Efficient, 3000, 30}, {false, Preset::Efficient, 2000, 30}));
+        QVERIFY(restartsEncoder(Family::Hevc, softwareEverything().hevc, {false, Preset::Efficient, 3000, 30}, {false, Preset::Balanced, 3000, 30}));
+        QVERIFY(restartsEncoder(Family::Hevc, softwareEverything().hevc, {false, Preset::Efficient, 0, 30}, {false, Preset::Efficient, 3000, 30}));
+        QVERIFY(!restartsEncoder(Family::Hevc, softwareEverything().hevc, {false, Preset::Efficient, 3000, 30}, {false, Preset::Efficient, 3000, 15}));
+    }
+
+    // With libx265 (live bitrate), every adaptive-quality change reaches the encoder as a live
+    // bitrate change, and none restarts it.
+    void adaptiveQualityNeverRestartsHevc()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Hevc});
+        State state;
+        auto now = T0;
+        QCOMPARE(step(state, in, now).choice, (Choice{Family::Hevc, false}));
+        using namespace std::chrono_literals;
+        const auto run = runAdaptiveQuality(state, in, now, 300s, {6s, 20s, 3s, 12s});
+        qInfo() << "hevc:" << run.qualityChanges << "quality changes," << run.bitrateChanges.size() << "live bitrate changes," << state.encoderRestarts << "restarts";
+        QVERIFY(run.qualityChanges >= 30);
+        QCOMPARE(state.encoderRestarts, 0);
+        QVERIFY(run.restartTimes.isEmpty());
+        QCOMPARE(run.bitrateChanges.size(), run.qualityChanges); // each one applied at once
+        QCOMPARE(*state.current, (Choice{Family::Hevc, false})); // never left the codec
+    }
+
+    // Without a live bitrate change (SVT-AV1 reopens), the same run restarts the encoder only
+    // rarely: at least RestartBitrateInterval apart and only for a >= 20 % step.
+    void adaptiveQualityRestartsAv1RateLimited()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Av1});
+        State state;
+        auto now = T0;
+        QCOMPARE(step(state, in, now).choice, (Choice{Family::Av1, false}));
+        using namespace std::chrono_literals;
+        const auto run = runAdaptiveQuality(state, in, now, 300s, {6s, 20s, 3s, 12s});
+        qInfo() << "av1:" << run.qualityChanges << "quality changes," << state.encoderRestarts << "restarts";
+        QVERIFY(run.qualityChanges >= 30);
+        QVERIFY(state.encoderRestarts > 0); // it still follows the quality
+        QVERIFY(state.encoderRestarts <= 300 / 5);
+        QVERIFY(state.encoderRestarts * 2 < run.qualityChanges);
+        for (qsizetype i = 1; i < run.restartTimes.size(); ++i) {
+            QVERIFY(run.restartTimes[i] - run.restartTimes[i - 1] >= RestartBitrateInterval);
+        }
+        for (const auto &[from, to] : run.bitrateChanges) {
+            QVERIFY(std::abs(double(to) - from) / from >= RestartBitrateMinChange);
+        }
+        // (Before AUD-SWENC each of these quality changes was a CRF change: a reopen each.)
+        // A KPipeWire without the live libx265 path: HEVC is rate-limited the same way.
+        auto old = softwareEverything();
+        old.hevc.liveBitrate = false;
+        auto hevcIn = input(SoftwareEncoding::Prefer, old, {Family::Hevc});
+        State hevc;
+        auto t = T0;
+        step(hevc, hevcIn, t);
+        const auto oldRun = runAdaptiveQuality(hevc, hevcIn, t, 300s, {6s, 20s, 3s, 12s});
+        QVERIFY(hevc.encoderRestarts <= 300 / 5);
+        QVERIFY(hevc.encoderRestarts * 2 < oldRun.qualityChanges);
+    }
+
+    // The CPU guard steps a preset back up after a sustained low load, one real level at a time.
+    void presetStepsBackUpAfterSustainedLowLoad_data()
+    {
+        QTest::addColumn<int>("family");
+        QTest::addColumn<QList<Preset>>("ladder");
+        QTest::newRow("hevc") << int(Family::Hevc) << QList<Preset>{Preset::Balanced, Preset::Efficient};
+        QTest::newRow("av1") << int(Family::Av1) << QList<Preset>{Preset::Efficient}; // Fastest = Balanced in SVT-AV1 2.3
+    }
+    void presetStepsBackUpAfterSustainedLowLoad()
+    {
+        QFETCH(int, family);
+        QFETCH(QList<Preset>, ladder);
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family(family)});
+        State state;
+        auto now = T0;
+        QCOMPARE(step(state, in, now).choice, (Choice{Family(family), false}));
+        state.preset = Preset::Fastest; // where the guard left it
+        in.encodeLoadP95 = 0.35;
+        QList<Preset> presets;
+        QList<Clock::time_point> when;
+        const auto lowSince = now;
+        for (int i = 0; i < 100; ++i) {
+            now += 1500ms;
+            const auto d = step(state, in, now);
+            QVERIFY(!d.changed);
+            if (d.settingsChanged && d.settings.preset != Preset::Fastest && (presets.isEmpty() || presets.last() != d.settings.preset)) {
+                presets.append(d.settings.preset);
+                when.append(now);
+                QVERIFY2(d.settingsReason.contains(u"preset"), qPrintable(d.settingsReason));
+                QVERIFY(d.restartsEncoder);
+            }
+        }
+        QCOMPARE(presets, ladder);
+        QVERIFY(when.first() - lowSince >= PresetRecoverHold);
+        for (qsizetype i = 1; i < when.size(); ++i) {
+            QVERIFY(when[i] - when[i - 1] >= PresetRecoverHold); // one level per sustained window
+        }
+        // A load between the thresholds (no guard step down, no step up) changes nothing.
+        State middle;
+        auto t = T0;
+        step(middle, in, t);
+        middle.preset = Preset::Fastest;
+        middle.applied.preset = Preset::Fastest;
+        in.encodeLoadP95 = 0.55;
+        for (int i = 0; i < 100; ++i) {
+            t += 1500ms;
+            QVERIFY(!step(middle, in, t).settingsChanged);
+        }
+        QCOMPARE(middle.preset, Preset::Fastest);
+    }
+
+    // A load only the faster preset can carry: raising the preset overloads it, the guard steps
+    // it down again, and so on. The flap guard (PresetFlapWindow, doubling) keeps that rare.
+    void presetRecoveryDoesNotFlap()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Hevc});
+        State state;
+        auto now = T0;
+        step(state, in, now);
+        state.preset = Preset::Balanced;
+        state.applied.preset = Preset::Balanced;
+        QList<Clock::time_point> changes;
+        for (int i = 0; i < 400; ++i) { // 10 minutes
+            now += 1500ms;
+            // x265 veryfast costs about twice superfast here: 0.38 -> 0.76, over the 0.70 limit.
+            in.encodeLoadP95 = state.preset == Preset::Efficient ? 0.76 : 0.38;
+            const auto d = step(state, in, now);
+            QVERIFY(!d.changed);
+            QVERIFY(state.preset != Preset::Fastest); // superfast carries it; never further down
+            if (d.settingsChanged) changes.append(now);
+        }
+        qInfo() << changes.size() << "preset changes in 10 minutes";
+        QVERIFY(changes.size() >= 2); // it did try the slower preset
+        QVERIFY(changes.size() <= 6); // about 30 without the flap guard (up after 30 s, down 10 s later)
+        QCOMPARE(state.preset, Preset::Balanced);
+    }
+
+    // On the way back up the frame rate comes first (the guard's last step down), then the preset.
+    void frameRateRecoversBeforePreset()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Hevc});
+        State state;
+        auto now = T0;
+        step(state, in, now);
+        state.preset = Preset::Fastest;
+        state.applied.preset = Preset::Fastest;
+        state.guardFrameRate = 15;
+        state.applied.maxFrameRate = 15;
+        in.encodeLoadP95 = 0.2;
+        QStringList order;
+        for (int i = 0; i < 120; ++i) {
+            now += 1500ms;
+            const auto d = step(state, in, now);
+            if (d.settingsChanged && d.settingsReason.contains(u"frame rate")) order << QStringLiteral("rate");
+            if (d.settingsChanged && d.settingsReason.contains(u"preset")) order << QStringLiteral("preset");
+        }
+        // 15 -> 30 fps is visible; 30 -> uncapped is not (software HEVC stays at 30 fps) but must
+        // come first too: the preset waits for the guard's frame-rate step to be undone.
+        QCOMPARE(order, (QStringList{QStringLiteral("rate"), QStringLiteral("preset"), QStringLiteral("preset")}));
+        QCOMPARE(state.preset, Preset::Efficient);
+        QVERIFY(!state.guardFrameRate);
     }
 
     void loadWindowP95()

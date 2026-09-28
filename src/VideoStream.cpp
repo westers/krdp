@@ -24,6 +24,7 @@
 #include <QQueue>
 #include <QRect>
 #include <QStringList>
+#include <QScopeGuard>
 #include <QThread>
 #include <QTimer>
 
@@ -759,6 +760,10 @@ CodecPolicy::Decision VideoStream::setPrivateCodecPolicy(const QVector<VideoCode
     in.encoders = d->encoders;
     in.client = d->clientFamilies;
     in.adaptive = false; // the first choice never waits for a link measurement
+    in.quality = d->quality.load(); // software HEVC/AV1 start at this quality's bitrate
+    if (d->surfacePixels.load() > 0) {
+        in.pixels = d->surfacePixels.load(); // else 1080p until the surfaces exist
+    }
     const auto decision = CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now());
     applyEncoderSettings(decision.settings);
     setPrivateCodec(privateCodecOf(decision.choice.family));
@@ -781,6 +786,10 @@ void VideoStream::privateCodecUnavailable(VideoCodec codec)
     in.encoders = d->encoders;
     in.client = d->clientFamilies;
     in.adaptive = d->codecPolicyAdaptive;
+    in.quality = d->quality.load();
+    if (d->surfacePixels.load() > 0) {
+        in.pixels = d->surfacePixels.load();
+    }
     d->codecPolicy.lastSwitch = {}; // a wrong stream cannot wait for the switch interval
     auto decision = CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now());
     decision.reason = QStringLiteral("encoder unavailable");
@@ -789,7 +798,15 @@ void VideoStream::privateCodecUnavailable(VideoCodec codec)
 
 void VideoStream::applyCodecDecision(const CodecPolicy::Decision &decision)
 {
-    if (decision.settingsChanged) {
+    if (decision.settingsChanged && !decision.changed && decision.bitrateOnly && !decision.restartsEncoder) {
+        // A live bitrate change (adaptive quality on libx265) keeps the encoder and its budget:
+        // the load window stays, and it is logged at debug level (it can happen every interval).
+        qCDebug(KRDP).noquote() << QStringLiteral("Codec policy: %1 target bitrate %2 kbit/s, in place (%3 encoder restarts so far)")
+                                       .arg(QLatin1String(CodecPolicy::familyName(decision.choice.family)))
+                                       .arg(decision.settings.targetKbps)
+                                       .arg(d->codecPolicy.encoderRestarts);
+        applyEncoderSettings(decision.settings);
+    } else if (decision.settingsChanged) {
         // A preset, bitrate or frame-rate change reopens or re-budgets the encoder: the load
         // samples from before it (and the one with the reopen stall) no longer apply.
         d->encodeLoad.clear();
@@ -802,7 +819,9 @@ void VideoStream::applyCodecDecision(const CodecPolicy::Decision &decision)
                                                QLatin1String(CodecPolicy::presetName(s.preset)),
                                                s.targetKbps ? QStringLiteral("%1 kbit/s").arg(s.targetKbps) : QStringLiteral("quality mode"),
                                                s.maxFrameRate ? QStringLiteral("max %1 fps").arg(s.maxFrameRate) : QStringLiteral("no frame-rate cap"),
-                                               decision.settingsReason);
+                                               decision.settingsReason
+                                                   + (decision.restartsEncoder ? QStringLiteral(" (encoder restart %1)").arg(d->codecPolicy.encoderRestarts)
+                                                                               : QString()));
         }
         applyEncoderSettings(decision.settings);
     }
@@ -908,6 +927,9 @@ void VideoStream::stepCodecPolicy(bool congested)
     }
     in.congested = congested;
     in.pixels = std::max<qint64>(d->surfacePixels.load(), 1);
+    // Software HEVC/AV1 follow adaptive quality through their target bitrate (a CRF change would
+    // reopen the encoder; libx265 changes its bitrate in place): CodecPolicy::qualityKbps().
+    in.quality = d->quality.load();
     if (!d->codecPolicy.current->hardware) {
         in.encodeLoadP95 = d->encodeLoad.p95();
     }
@@ -955,6 +977,14 @@ void VideoStream::setChromaCapable(bool capable)
 
 void VideoStream::updateAdaptiveQuality()
 {
+    std::optional<bool> policyCongested;
+    // The codec policy steps after adaptive quality, on every path out of here, so a software
+    // HEVC/AV1 target bitrate follows this interval's quality at once.
+    const auto policyStep = qScopeGuard([this, &policyCongested] {
+        if (policyCongested) {
+            stepCodecPolicy(*policyCongested);
+        }
+    });
     if (d->codecPolicyActive && d->surfacePixels.load() > 0 && clk::steady_clock::now() - d->streamingSince >= WarmupAfterStreamStart) {
         // The codec policy runs whether or not adaptive quality does. Congestion as
         // AdaptiveQuality sees it: RTT inflation, or the client several frames behind.
@@ -967,7 +997,7 @@ void VideoStream::updateAdaptiveQuality()
         const bool congested = AdaptiveQuality::rttCongested(clk::duration_cast<clk::microseconds>(network->averageRTT()),
                                                              clk::duration_cast<clk::microseconds>(network->minimumRTT()))
             || pending >= AdaptiveQuality::BacklogFrames;
-        stepCodecPolicy(congested);
+        policyCongested = congested;
     }
     const bool audioPriority = d->session->audioPriorityActive();
     if (!d->adaptiveQuality.load() && !audioPriority) {

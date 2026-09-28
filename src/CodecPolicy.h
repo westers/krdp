@@ -67,6 +67,9 @@ inline const char *familyName(Family f)
 struct Backends {
     bool hardware = false;
     bool software = false;
+    /// The software encoder applies a new target bitrate in place, without a reopen (KPipeWire
+    /// softwareBitrateChangeIsLive(): libx264, libx265). False: every change reopens (SVT-AV1).
+    bool liveBitrate = false;
     bool any() const { return hardware || software; }
     bool operator==(const Backends &) const = default;
 };
@@ -117,11 +120,20 @@ inline std::optional<Preset> nextPreset(Family f, Preset p)
     }
     return std::nullopt;
 }
+/// The next slower (better-compressing) preset that changes the encoder of \a f, skipping a
+/// step that does nothing (AV1 Fastest -> Balanced is the same SVT-AV1 preset, so -> Efficient).
+inline std::optional<Preset> previousPreset(Family f, Preset p)
+{
+    for (int previous = int(p) - 1; previous >= int(Preset::Efficient); --previous) {
+        if (presetLevel(f, Preset(previous)) != presetLevel(f, p)) return Preset(previous);
+    }
+    return std::nullopt;
+}
 
 /**
  * What the running encoder is told besides its codec (WS-E): the backend, the software preset,
- * the target bitrate (0 = quality mode, driven by adaptive quality) and a frame-rate cap
- * (0 = none).
+ * the target bitrate (0 = quality mode; software HEVC/AV1 always run in bitrate mode, the target
+ * following adaptive quality, see qualityKbps()) and a frame-rate cap (0 = none).
  */
 struct EncoderSettings {
     bool hardware = false;
@@ -168,13 +180,48 @@ constexpr int SoftwarePrivateMaxFrameRate = 30;
 constexpr int DefaultFrameRate = 60;
 /// The CPU guard's last step halves the frame rate, never below this.
 constexpr int MinFrameRate = 15;
-/// Slow-link target bitrate: this share of the measured goodput while congested, at least
-/// MinTargetKbps, at most the slow-link threshold; it grows by TargetGrowth per step while the
-/// link is not congested, and changes only by at least TargetMinChange (a reopen per change).
+/// The guard steps a software preset back up (slower, better compression) once the p95 load has
+/// stayed under this share of the frame budget for PresetRecoverHold. Hysteresis against
+/// CpuGuardLimit: a slower preset costs up to ~1.6x (PERF.md: x265 superfast -> veryfast), so
+/// 0.40 lands at most around 0.64, still under the 0.70 limit.
+constexpr double PresetRecoverBelow = 0.40;
+constexpr auto PresetRecoverHold = std::chrono::seconds(30);
+/// A preset the guard had to step down again soon after raising it (within this long) is not
+/// raised again for this long, doubled for every further such flap (up to 8x): a load that
+/// only the faster preset can carry settles on it instead of flapping.
+constexpr auto PresetFlapWindow = std::chrono::seconds(120);
+constexpr int PresetFlapMaxDoublings = 3;
+/// Slow-link cap on the target bitrate: this share of the measured goodput while congested, at
+/// least MinTargetKbps, at most the slow-link threshold; it grows by TargetGrowth per
+/// MinReconfigureInterval while the link is not congested, and moves only by at least
+/// TargetMinChange.
 constexpr double TargetShareOfGoodput = 0.85;
 constexpr quint32 MinTargetKbps = 300;
 constexpr double TargetGrowth = 1.25;
 constexpr double TargetMinChange = 0.15;
+
+/**
+ * Adaptive quality on software HEVC/AV1 (AUD-SWENC): its quality steps become target-bitrate
+ * changes instead of CRF changes, because a CRF change reopens the encoder (a stall and a
+ * keyframe per step) while libx265 changes its bitrate in place. qualityKbps() is the mapping:
+ * ReferenceBitsPerPixel at ReferenceQuality, halving every QualityPerHalving points (the VA-API /
+ * x265 quality mapping moves the QP by 0.28 per point, and ~6 QP halve the bitrate), for the
+ * software private-codec frame rate (SoftwarePrivateMaxFrameRate).
+ */
+constexpr int ReferenceQuality = 80;
+constexpr double ReferenceBitsPerPixel = 0.10; ///< 1080p30: ~6.2 Mbit/s at quality 80
+constexpr double QualityPerHalving = 20.0;
+constexpr quint8 DefaultQuality = 80;
+/// A live (in-place) bitrate change smaller than this is not worth sending.
+constexpr double LiveBitrateMinChange = 0.05;
+/**
+ * Where a bitrate change reopens the encoder (Backends::liveBitrate false: SVT-AV1), a change
+ * waits until the last reconfiguration is at least this old and must move the target by at least
+ * RestartBitrateMinChange: an AV1 reopen (~150 ms) then costs at most 3 % of the time.
+ */
+constexpr auto RestartBitrateInterval = std::chrono::seconds(5);
+constexpr double RestartBitrateMinChange = 0.20;
+static_assert(std::chrono::milliseconds(150) * 33 <= RestartBitrateInterval, "a bitrate reopen stall must stay under ~3 % of its interval");
 
 inline double scale(qint64 pixels)
 {
@@ -182,6 +229,14 @@ inline double scale(qint64 pixels)
 }
 inline double slowBelowKbps(qint64 pixels) { return SlowBelowMbps1080p * 1000.0 * scale(pixels); }
 inline double fastAboveKbps(qint64 pixels) { return FastAboveMbps1080p * 1000.0 * scale(pixels); }
+
+/// The target bitrate for adaptive quality \a quality (0-100) on \a pixels (all surfaces).
+inline quint32 qualityKbps(quint8 quality, qint64 pixels)
+{
+    const double bpp = ReferenceBitsPerPixel * std::exp2((double(std::min<quint8>(quality, 100)) - ReferenceQuality) / QualityPerHalving);
+    const double kbps = double(std::max<qint64>(pixels, 1)) * SoftwarePrivateMaxFrameRate * bpp / 1000.0;
+    return quint32(std::max(kbps, double(MinTargetKbps)));
+}
 
 struct Input {
     SoftwareEncoding mode = SoftwareEncoding::Auto;
@@ -194,6 +249,8 @@ struct Input {
     /// The running *software* encoder's p95 per-frame encode time over its frame budget
     /// (1.0 = the whole budget). Unknown (or a hardware encoder): no CPU guard.
     std::optional<double> encodeLoadP95;
+    /// The adaptive-quality value (the cap when adaptive quality is off); unknown = DefaultQuality.
+    std::optional<quint8> quality;
 };
 
 struct State {
@@ -205,9 +262,18 @@ struct State {
     std::array<Clock::time_point, 3> softwareBlockedUntil{}; ///< per Family, by the CPU guard
     Preset preset = Preset::Efficient; ///< of the current software HEVC/AV1 encoder
     std::optional<int> guardFrameRate; ///< the CPU guard's frame-rate cap (its last step)
-    quint32 targetKbps = 0; ///< slow-link target bitrate of a software HEVC/AV1 encoder
-    Clock::time_point lastReconfigure{}; ///< codec switch, preset step, bitrate or guard frame-rate change
+    quint32 targetKbps = 0; ///< target bitrate of a software HEVC/AV1 encoder (quality, capped by the link)
+    quint32 linkKbps = 0; ///< the slow-link cap on it (0 = none)
+    Clock::time_point linkChangedAt{};
+    Clock::time_point lastReconfigure{}; ///< codec switch, preset step, bitrate reopen or guard frame-rate change
+    Clock::time_point lowLoadSince{}; ///< since when the load is under PresetRecoverBelow (epoch = not)
+    Clock::time_point presetRaisedAt{}; ///< the last preset step back up
+    Clock::time_point presetRaiseBlockedUntil{}; ///< flap guard (PresetFlapWindow)
+    int presetFlaps = 0; ///< raises the guard had to undo, for the flap guard's back-off
     EncoderSettings applied; ///< what the last step() reported
+    /// Reopens of the running encoder that settings changes caused (preset steps, a bitrate change
+    /// without Backends::liveBitrate, a backend change); codec switches are not counted.
+    int encoderRestarts = 0;
 };
 
 struct Decision {
@@ -217,6 +283,11 @@ struct Decision {
     EncoderSettings settings; ///< always set: what the encoder should run with now
     bool settingsChanged = false; ///< settings differ from the previous step() (or first step)
     QString settingsReason; ///< why, when settingsChanged without a codec change
+    /// The settings change reopens the running encoder (see State::encoderRestarts). False for a
+    /// live bitrate change and a frame-rate change; not set for a codec switch.
+    bool restartsEncoder = false;
+    /// Only the target bitrate changed (no preset, backend or frame-rate change).
+    bool bitrateOnly = false;
 };
 
 inline bool softwarePrivate(const Choice &c)
@@ -268,31 +339,62 @@ inline Choice select(const Input &in, const State &state, Clock::time_point now)
     return {Family::Avc, in.encoders.avc.hardware};
 }
 
+/**
+ * Whether going from \a from to \a to reopens a running \a family encoder: a preset or backend
+ * change, a switch between quality and bitrate mode, or a new bitrate on an encoder without
+ * Backends::liveBitrate. A frame-rate cap only changes what the capture delivers.
+ */
+inline bool restartsEncoder(Family family, const Backends &backends, const EncoderSettings &from, const EncoderSettings &to)
+{
+    if (from.hardware != to.hardware || from.preset != to.preset) return true;
+    if (from.targetKbps == to.targetKbps) return false;
+    if (from.targetKbps == 0 || to.targetKbps == 0) return true;
+    return family != Family::Avc && !backends.liveBitrate;
+}
+
 namespace detail
 {
-/// The slow-link target bitrate for \a state's software HEVC/AV1 encoder (0: quality mode).
-inline quint32 wantedTarget(const State &state, const Input &in)
+/// Updates \a state's slow-link cap (0 when the link is not slow or the encoder is not software HEVC/AV1).
+inline void updateLinkCap(State &state, const Input &in, Clock::time_point now)
 {
     if (!state.current || !softwarePrivate(*state.current) || !state.slowLink || !in.adaptive || in.mode == SoftwareEncoding::Never) {
-        return 0;
+        state.linkKbps = 0;
+        return;
     }
     const double cap = slowBelowKbps(in.pixels);
     const auto bounded = [cap](double kbps) {
         return quint32(std::clamp(kbps, double(MinTargetKbps), std::max(cap, double(MinTargetKbps))));
     };
+    quint32 wanted = state.linkKbps;
     if (!in.bandwidthKbps) {
-        return state.targetKbps ? state.targetKbps : bounded(cap);
+        wanted = state.linkKbps ? state.linkKbps : bounded(cap);
+    } else if (const double link = *in.bandwidthKbps * TargetShareOfGoodput; state.linkKbps == 0) {
+        wanted = bounded(link);
+    } else if (in.congested) {
+        // Goodput is demand-limited: while the link keeps up it only shows what the encoder sent,
+        // so it lowers the cap only under congestion and the cap grows back otherwise.
+        wanted = bounded(std::min(double(state.linkKbps), link));
+    } else {
+        wanted = bounded(state.linkKbps * TargetGrowth);
     }
-    const double link = *in.bandwidthKbps * TargetShareOfGoodput;
-    if (state.targetKbps == 0) {
-        return bounded(link);
+    if (wanted == state.linkKbps) return;
+    const double change = state.linkKbps ? std::abs(double(wanted) - state.linkKbps) / state.linkKbps : 1.0;
+    if (state.linkKbps == 0 || (now - state.linkChangedAt >= MinReconfigureInterval && change >= TargetMinChange)) {
+        state.linkKbps = wanted;
+        state.linkChangedAt = now;
     }
-    // Goodput is demand-limited: while the link keeps up it only shows what the encoder sent,
-    // so it lowers the target only under congestion and the target grows back otherwise.
-    if (in.congested) {
-        return bounded(std::min(double(state.targetKbps), link));
+}
+
+/// The target bitrate \a state's encoder should run with: for software HEVC/AV1 the adaptive
+/// quality's bitrate, capped by the slow link; 0 (quality mode) for everything else.
+inline quint32 wantedTarget(const State &state, const Input &in)
+{
+    if (!state.current || !softwarePrivate(*state.current)) {
+        return 0;
     }
-    return bounded(state.targetKbps * TargetGrowth);
+    quint32 target = qualityKbps(in.quality.value_or(DefaultQuality), in.pixels);
+    if (state.linkKbps) target = std::min(target, state.linkKbps);
+    return std::max(target, MinTargetKbps);
 }
 }
 
@@ -340,12 +442,20 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
     QString guardReason;
     QString settingsReason;
     bool presetStepPending = false;
+    bool presetChanged = false;
     if (overBudget && softwarePrivate(*state.current)) {
         if (const auto next = nextPreset(state.current->family, state.preset)) {
             presetStepPending = true;
             if (reconfigureAllowed) {
+                if (state.presetRaisedAt != Clock::time_point{} && now - state.presetRaisedAt < PresetFlapWindow) {
+                    // The preset raised shortly before could not hold: do not raise it again soon.
+                    state.presetRaiseBlockedUntil = now + PresetFlapWindow * (1 << std::min(state.presetFlaps, PresetFlapMaxDoublings));
+                    ++state.presetFlaps;
+                }
                 state.preset = *next;
                 state.lastReconfigure = now;
+                state.lowLoadSince = {};
+                presetChanged = true;
                 settingsReason = loadText() + QStringLiteral("; preset %1").arg(QLatin1String(presetName(*next)));
             }
         }
@@ -359,17 +469,36 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
         }
     }
 
+    // Low-load window for stepping the preset back up (see PresetRecoverBelow).
+    const bool lowLoad = state.current && softwarePrivate(*state.current) && in.encodeLoadP95 && *in.encodeLoadP95 < PresetRecoverBelow;
+    if (!lowLoad) {
+        state.lowLoadSince = {};
+    } else if (state.lowLoadSince == Clock::time_point{}) {
+        state.lowLoadSince = now;
+    }
+
     const Choice want = select(in, state, now);
     const auto finish = [&](Decision d) {
-        // Bitrate (slow link, software HEVC/AV1): a change reopens the encoder, so it waits for
-        // the reconfiguration interval and a meaningful step. Leaving bitrate mode is immediate.
+        // Target bitrate (software HEVC/AV1): adaptive quality's bitrate, capped by a slow link.
+        // Where the change is live (libx265) it applies at once. Where it reopens the encoder
+        // (SVT-AV1) it waits RestartBitrateInterval after the last reconfiguration, needs a
+        // RestartBitrateMinChange step and gives way to a CPU-guard preset step that is waiting;
+        // it rides along for free with a preset step. Entering or leaving bitrate mode happens only
+        // with a codec switch (the settings reach the sessions before the encoder restarts).
+        detail::updateLinkCap(state, in, now);
         const quint32 target = detail::wantedTarget(state, in);
         if (target != state.targetKbps) {
             const bool first = state.targetKbps == 0 || target == 0;
             const double change = state.targetKbps ? std::abs(double(target) - state.targetKbps) / state.targetKbps : 1.0;
-            const bool allowed = now - state.lastReconfigure >= MinReconfigureInterval; // not in the step that reconfigured
-            if (first || (allowed && change >= TargetMinChange)) {
-                if (!d.changed) state.lastReconfigure = now;
+            const bool live = state.current && state.current->family != Family::Avc ? in.encoders.of(state.current->family).liveBitrate : true;
+            bool apply = first || d.changed || presetChanged;
+            if (!apply && live) {
+                apply = change >= LiveBitrateMinChange;
+            } else if (!apply) {
+                apply = !presetStepPending && now - state.lastReconfigure >= RestartBitrateInterval && change >= RestartBitrateMinChange;
+            }
+            if (apply) {
+                if (!d.changed && !live && !presetChanged) state.lastReconfigure = now;
                 if (settingsReason.isEmpty()) {
                     settingsReason = target ? QStringLiteral("target bitrate %1 kbit/s").arg(target) : QStringLiteral("quality mode");
                 }
@@ -378,7 +507,14 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
         }
         d.settings = settingsOf(state);
         d.settingsChanged = d.settings != state.applied;
-        if (d.settingsChanged && !d.changed) d.settingsReason = settingsReason;
+        if (d.settingsChanged && !d.changed) {
+            d.settingsReason = settingsReason;
+            auto withoutBitrate = state.applied;
+            withoutBitrate.targetKbps = d.settings.targetKbps;
+            d.bitrateOnly = withoutBitrate == d.settings;
+            d.restartsEncoder = state.current && restartsEncoder(state.current->family, in.encoders.of(state.current->family), state.applied, d.settings);
+            if (d.restartsEncoder) ++state.encoderRestarts;
+        }
         state.applied = d.settings;
         return d;
     };
@@ -408,6 +544,21 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
                 state.lastReconfigure = now;
                 settingsReason = QStringLiteral("CPU guard: load recovered; frame rate %1").arg(to);
             }
+        } else if (!state.guardFrameRate && lowLoad && reconfigureAllowed && now - state.lowLoadSince >= PresetRecoverHold && now >= state.presetRaiseBlockedUntil) {
+            // The ladder back up, in reverse: the frame rate first (above), then the preset, one
+            // (real) level per PresetRecoverHold of low load.
+            if (const auto previous = previousPreset(state.current->family, state.preset)) {
+                state.preset = *previous;
+                state.lastReconfigure = now;
+                state.lowLoadSince = {};
+                state.presetRaisedAt = now;
+                presetChanged = true;
+                settingsReason = QStringLiteral("CPU guard: software %1 at %2% of the frame budget (p95) for %3 s; preset %4")
+                                     .arg(QLatin1String(familyName(state.current->family)))
+                                     .arg(qRound(*in.encodeLoadP95 * 100))
+                                     .arg(std::chrono::duration_cast<std::chrono::seconds>(PresetRecoverHold).count())
+                                     .arg(QLatin1String(presetName(*previous)));
+            }
         }
         return finish({want, false, {}});
     }
@@ -426,6 +577,11 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
     state.lastReconfigure = now;
     state.guardFrameRate.reset();
     state.targetKbps = 0;
+    state.linkKbps = 0;
+    state.lowLoadSince = {};
+    state.presetRaisedAt = {};
+    state.presetRaiseBlockedUntil = {};
+    state.presetFlaps = 0;
     state.preset = fromGuard && softwarePrivate(want) ? Preset::Fastest : Preset::Efficient;
     return finish({want, true, reason});
 }
