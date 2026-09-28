@@ -154,3 +154,4 @@ live KPipeWire patches are in `~/dev/rdp/kpipewire-vaapi-fix/patches-6.6.4/`. `p
   virtual broker :3395). Buzz is the client laptop. OPT-044 topology work is source-only unless the
   HANDOFF Log says otherwise.
 - The untracked `kpipewire_6.6.3*` tarballs in the repo root are not part of the tree. Leave them alone.
+- AMD VAAPI encoders pad coded sizes (AV1 with no display size: 1920x1080 -> 1920x1082); rules and table in `docs/amd-encoder-padding.md`.
