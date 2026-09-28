@@ -7,6 +7,7 @@
 #include <QSignalSpy>
 #include "VirtualSessionGuardian.h"
 #include "VirtualSessionHostController.h"
+#include "ConsoleWorkerOutbox.h"
 #include <QJsonArray>
 
 namespace { int dismissalFailSync = 0; }
@@ -695,6 +696,89 @@ private Q_SLOTS:
             child = guardian.processId(); QVERIFY(child > 0);
         }
         QCOMPARE(guardian.phase(), QStringLiteral("running")); QCOMPARE(guardian.processId(), child);
+    }
+    // AUD-FIX8 B1: the virtual worker's real order (ConsoleWorkerOutbox): Hello, EncoderCaps and
+    // encoder reports while the bootstrap keyframe is awaited, then Ready, Outputs and the frame.
+    // Replays 23b328a's recorded order as well: the desktop must reach Retained either way.
+    void independentCreateAcceptsTheRealWorkerOrder_data()
+    {
+        QTest::addColumn<bool>("recordedFix7");
+        QTest::newRow("outbox") << false;
+        QTest::newRow("recorded 23b328a") << true;
+    }
+    void independentCreateAcceptsTheRealWorkerOrder()
+    {
+        QFETCH(bool, recordedFix7);
+        if (!getuid()) QSKIP("Nonroot guardian fixture");
+        const QString userRuntime = QStringLiteral("/run/user/%1").arg(getuid());
+        if (!QFileInfo(userRuntime).isDir()) QSKIP("No canonical user runtime");
+        const QString base = userRuntime + QStringLiteral("/krdp-virtual");
+        const bool createdBase = QDir().mkdir(base);
+        auto cleanBase = qScopeGuard([&] { if (createdBase) QDir().rmdir(base); });
+        if (createdBase) QVERIFY(!chmod(QFile::encodeName(base).constData(), 0700));
+        QString runtime;
+        auto cleanRuntime = qScopeGuard([&] { if (!runtime.isEmpty()) QDir(runtime).removeRecursively(); });
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr);
+        QVERIFY(journal);
+        VirtualSessionGuardian guardian;
+        {
+            Server server;
+            VirtualSessionHostController host(&server, {});
+            QVERIFY(host.recover(*journal));
+            QVERIFY(host.enableIndependentCreates(*journal, [&](const auto &, const auto &) {
+                const auto records = journal->records();
+                if (!records || records->size() != 1) return false;
+                const auto &r = records->first();
+                const QString path = QFileInfo(r.workerSocket()).absolutePath();
+                if (!QDir().mkdir(path)) return false;
+                runtime = path;
+                if (chmod(QFile::encodeName(path).constData(), 0700)) return false;
+                return guardian.start(getuid(), r.session, r.token, r.identity().socket,
+                    {QStringLiteral("/usr/bin/sleep"), {QStringLiteral("60")}, {}, {}}, nullptr, r.incarnation);
+            }));
+            const auto handle = host.createIndependent(getuid());
+            QVERIFY(handle);
+            QTRY_VERIFY(host.m_workers.contains(handle->id));
+            auto *endpoint = host.m_workers.at(handle->id)->endpoint.get();
+            QStringList errors;
+            connect(endpoint, &ConsoleWorkerEndpoint::protocolError, this, [&errors](const QString &e) { errors << e; });
+            QSignalSpy reports(endpoint, &ConsoleWorkerEndpoint::encoderReported);
+            const auto r = journal->records()->first();
+            QLocalSocket worker; worker.connectToServer(r.workerSocket());
+            QVERIFY(worker.waitForConnected(1000));
+            ConsoleWorkerWire::EncoderCaps caps;
+            caps.encoders.avc = {true, true};
+            caps.encoders.hevc = {true, true};
+            const ConsoleWorkerWire::EncoderReport backend{ConsoleWorkerWire::EncoderReport::Event::Backend, VideoCodec::Avc420, true};
+            const ConsoleWorkerWire::EncoderReport unavailable{ConsoleWorkerWire::EncoderReport::Event::Unavailable, VideoCodec::Hevc, false};
+            ConsoleWorkerOutbox outbox([&worker](const QByteArray &record) { worker.write(record); });
+            if (recordedFix7) {
+                worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{r.session, quint32(getuid()), r.token})
+                    + ConsoleWorkerWire::frame(caps) + ConsoleWorkerWire::frame(backend) + ConsoleWorkerWire::frame(unavailable)
+                    + ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+            } else {
+                outbox.hello({r.session, quint32(getuid()), r.token});
+                outbox.caps(caps);
+                outbox.report(backend);
+                outbox.report(unavailable);
+                QVERIFY(worker.waitForBytesWritten(1000));
+                QTest::qWait(30);
+                QVERIFY(!endpoint->ready());
+                outbox.ready();
+            }
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Outputs{{{QStringLiteral("Virtual-1"), QRect(0, 0, 1280, 720), 1, true}}}));
+            VideoFrame frame; frame.size = QSize(1280, 720); frame.data = "fixture"; frame.isKeyFrame = true;
+            frame.monitors = {{QRect(0, 0, 1280, 720), true}};
+            worker.write(ConsoleWorkerWire::frame(frame)); QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(host.m_supervisor.list(getuid()).first().phase, VirtualSessionState::Phase::Retained);
+            QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+            QCOMPARE(reports.count(), 2);
+            QCOMPARE(reports.at(0).at(0).value<ConsoleWorkerWire::EncoderReport>(), backend);
+            QCOMPARE(reports.at(1).at(0).value<ConsoleWorkerWire::EncoderReport>(), unavailable);
+            QCOMPARE(endpoint->encoderCaps(), std::optional(caps));
+            QVERIFY(host.m_supervisor.attach(getuid(), handle->id, 1));
+        }
     }
     void independentCreatePersistsBeforeOneStartAndDeduplicates()
     {

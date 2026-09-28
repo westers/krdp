@@ -377,6 +377,12 @@ target_include_directories(ConsoleWorkerEndpointTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(ConsoleWorkerEndpointTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
 add_test(NAME ConsoleWorkerEndpointTest COMMAND ConsoleWorkerEndpointTest)
 
+# AUD-FIX8: the worker -> broker order (ConsoleWorkerOutbox, the class the real worker sends through).
+add_executable(ConsoleWorkerOrderTest ConsoleWorkerOrderTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
+target_include_directories(ConsoleWorkerOrderTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleWorkerOrderTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
+add_test(NAME ConsoleWorkerOrderTest COMMAND ConsoleWorkerOrderTest)
+
 add_executable(ConsoleWorkerSessionTest ConsoleWorkerSessionTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp)
 target_include_directories(ConsoleWorkerSessionTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ConsoleWorkerSessionTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)

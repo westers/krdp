@@ -32,6 +32,7 @@
 #include <KGlobalAccel>
 
 #include "ConsoleWorkerWire.h"
+#include "ConsoleWorkerOutbox.h"
 #include "ConsoleInputState.h"
 #include "ConsoleResizeSession.h"
 #include "VirtualResizeSession.h"
@@ -188,7 +189,7 @@ public:
         connect(&m_encoderLoadTimer, &QTimer::timeout, this, [this] {
             timespec ts{};
             if (m_control.active && m_socket.state() == QLocalSocket::ConnectedState && clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0) {
-                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderLoad{qint64(ts.tv_sec) * 1000000000LL + ts.tv_nsec}));
+                m_outbox.load(ConsoleWorkerWire::EncoderLoad{qint64(ts.tv_sec) * 1000000000LL + ts.tv_nsec});
             }
         });
         m_encoderLoadTimer.start();
@@ -203,12 +204,13 @@ public:
         });
         connect(&m_socket, &QLocalSocket::connected, this, [this]() {
             m_connectTimeout.stop();
-            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{m_sessionId, m_uid, m_token}));
+            // AUD-FIX8: Hello, EncoderCaps, Ready, then the rest (ConsoleWorkerOutbox).
+            m_outbox.hello(ConsoleWorkerWire::Hello{m_sessionId, m_uid, m_token});
             // AUD-FIX7: the encoders this worker really has (its user, its render node): the
             // broker's codec policy chooses among these.
             const auto &probe = EncoderSupport::probe();
             m_encoderCaps = {probe.encoders, probe.avc444Hardware, probe.renderNode};
-            m_socket.write(ConsoleWorkerWire::frame(m_encoderCaps));
+            m_outbox.caps(m_encoderCaps);
             if (m_initialOutputs.isEmpty()) startCapture();
             else startBootstrap();
         });
@@ -296,7 +298,7 @@ public:
             if (m_mode.virtualSession) m_virtualResize.captureStateChanged(m_virtualCaptureEpoch, active);
             if (active && !m_captureReady) {
                 m_captureReady = true;
-                if (m_initialOutputs.isEmpty()) m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+                if (m_initialOutputs.isEmpty()) m_outbox.ready();
             }
         });
         connect(&m_session, &AbstractSession::frameReceived, this, [this](const VideoFrame &frame) {
@@ -347,7 +349,7 @@ public:
                         || encodedKeyframeSize(frame.codec.value_or(VideoCodec::Avc420), frame.data) != std::optional(m_initialOutputs.first().pixels)
                         || !readback || !bootstrapMatches(*readback)) return;
                     m_initialReadySent = true;
-                    m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+                    m_outbox.ready();
                 }
                 if (m_mode.virtualSession) {
                     const QSize payloadPixels = m_virtualResize.changing() && frame.isKeyFrame
@@ -1010,7 +1012,7 @@ private:
                     return;
                 }
                 m_initialReadySent = true;
-                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+                m_outbox.ready();
             }
             if (!m_mode.virtualSession) {
                 m_resize.captured(result.outputs, true);
@@ -1101,7 +1103,7 @@ private:
             m_multiReady = true;
             if (!m_captureReady) {
                 m_captureReady = true;
-                if (m_initialOutputs.isEmpty()) m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+                if (m_initialOutputs.isEmpty()) m_outbox.ready();
             }
             m_socket.write(ConsoleWorkerWire::frame(result.outputs));
             m_session.setStreamingEnabled(false); // No oversized workspace encoder in multi mode.
@@ -2299,13 +2301,15 @@ private:
 
     void reportEncoderEvents(AbstractSession *session)
     {
+        // AUD-FIX8: the encoder opens before capture is confirmed; the outbox holds a report
+        // made before Ready and sends it right after (the broker accepts nothing else first).
         connect(session, &AbstractSession::encoderUnavailable, this, [this](VideoCodec codec) {
             if (m_socket.state() == QLocalSocket::ConnectedState)
-                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderReport{ConsoleWorkerWire::EncoderReport::Event::Unavailable, codec, false}));
+                m_outbox.report({ConsoleWorkerWire::EncoderReport::Event::Unavailable, codec, false});
         });
         connect(session, &AbstractSession::encoderBackendReported, this, [this](VideoCodec codec, bool hardware) {
             if (m_socket.state() == QLocalSocket::ConnectedState)
-                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderReport{ConsoleWorkerWire::EncoderReport::Event::Backend, codec, hardware}));
+                m_outbox.report({ConsoleWorkerWire::EncoderReport::Event::Backend, codec, hardware});
         });
     }
 
@@ -2568,6 +2572,7 @@ private:
     CaptureWorkerMode m_mode;
     bool m_authenticatedDesktop = false;
     QLocalSocket m_socket;
+    ConsoleWorkerOutbox m_outbox{[this](const QByteArray &record) { m_socket.write(record); }};
     ConsoleWorkerWire::Deframer m_deframer;
     PlasmaScreencastV1Session m_session;
     RetainedMultiCapture m_multiCapture;

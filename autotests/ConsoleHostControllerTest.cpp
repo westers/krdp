@@ -2,6 +2,8 @@
 #include "ConsoleHostController.h"
 #include "ConsoleFrameLayout.h"
 #include "ConsoleWorkerSession.h"
+#include "ConsoleWorkerOutbox.h"
+#include <QSignalSpy>
 #include "RdpConnection.h"
 #include "Server.h"
 #include "VideoStream.h"
@@ -949,6 +951,55 @@ private Q_SLOTS:
         host.applyStandardMedia(b.id);
         QVERIFY(!b.media.playback);
         QVERIFY(!b.standardMicrophone);
+    }
+
+    // AUD-FIX8 B1: the console worker's real order - Hello, EncoderCaps, the encoder's backend
+    // report (it opens before capture is confirmed), Ready - through ConsoleWorkerOutbox, the class
+    // the worker sends through. 23b328a's broker rejected that worker; the controlling client's
+    // codec bridge must now get the report, after Ready.
+    void consoleWorkerRealOrderReachesTheController()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        Server server;
+        RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, directory.path());
+        host.addClient(&connection);
+        const auto id = host.m_clients.front()->id;
+        host.m_control.admit(id);
+        host.syncControlState();
+        QVERIFY(host.m_control.ownsControl(id));
+        QSignalSpy backend(host.m_clients.front()->session.get(), &AbstractSession::encoderBackendReported);
+        QStringList order;
+        connect(&host.m_endpoint, &ConsoleWorkerEndpoint::workerReady, this, [&order] { order << QStringLiteral("ready"); });
+        connect(&host.m_endpoint, &ConsoleWorkerEndpoint::encoderReported, this, [&order] { order << QStringLiteral("report"); });
+        QStringList errors;
+        connect(&host.m_endpoint, &ConsoleWorkerEndpoint::protocolError, this, [&errors](const QString &e) { errors << e; });
+        const ConsoleHandoff::Target target{ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), quint32(getuid())};
+        const QByteArray token(24, 'r');
+        QVERIFY(host.m_endpoint.listen(directory.filePath(QStringLiteral("worker.sock")), target, token));
+        QLocalSocket worker;
+        worker.connectToServer(host.m_endpoint.socketName());
+        QVERIFY(worker.waitForConnected(1000));
+        ConsoleWorkerOutbox outbox([&worker](const QByteArray &record) { worker.write(record); });
+        outbox.hello({target.sessionId, target.uid, token});
+        ConsoleWorkerWire::EncoderCaps caps;
+        caps.encoders.avc = {true, true};
+        outbox.caps(caps);
+        outbox.report({ConsoleWorkerWire::EncoderReport::Event::Backend, VideoCodec::Avc420, true});
+        QVERIFY(worker.waitForBytesWritten(1000));
+        QTest::qWait(30);
+        QVERIFY(!host.m_endpoint.ready());
+        QVERIFY(errors.isEmpty());
+        outbox.ready();
+        QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_VERIFY(host.m_endpoint.ready());
+        QTRY_COMPARE(backend.count(), 1);
+        QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+        QCOMPARE(order, (QStringList{QStringLiteral("ready"), QStringLiteral("report")}));
+        QCOMPARE(backend.first().at(0).value<VideoCodec>(), VideoCodec::Avc420);
+        QVERIFY(backend.first().at(1).toBool());
+        QCOMPARE(host.m_endpoint.encoderCaps(), std::optional(caps));
     }
 };
 }

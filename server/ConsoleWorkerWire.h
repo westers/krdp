@@ -28,6 +28,13 @@ namespace KRdp::ConsoleWorkerWire
 // versions are not accepted. Broker and worker must always upgrade together.
 // 2 (AUD-FIX7): Frame carries the codec that produced it; EncoderCaps,
 // EncoderConfig, EncoderReport and EncoderLoad carry the codec policy.
+//
+// Worker -> broker order (AUD-FIX8; ConsoleWorkerOutbox is the worker's side):
+//   Hello, [EncoderCaps], Ready, then any record. Before Ready the broker also
+//   accepts EncoderReport (held and applied right after Ready), EncoderLoad
+//   and Error (the worker's reason for failing); anything else fails it.
+// Broker -> worker: nothing but Stop before the worker authenticated, and
+//   nothing but Stop/RequestKeyFrame before Ready.
 constexpr quint16 ProtocolVersion = 2;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;

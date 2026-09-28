@@ -37,6 +37,8 @@ public:
     /// Pre-authentication limits (AUD-C-9).
     static constexpr int AuthenticationTimeoutMs = 5000;
     static constexpr qsizetype MaxPreAuthenticationBytes = 64 * 1024;
+    /// AUD-FIX8: encoder reports held between Hello and Ready (applied right after Ready).
+    static constexpr qsizetype MaxEarlyReports = 64;
 
     bool listen(const QString &socketName, const ConsoleHandoff::Target &target, const QByteArray &token, QString *error = nullptr);
     void close();
@@ -127,6 +129,7 @@ private:
     bool m_stopRequested = false;
     QTimer m_authenticationDeadline;
     std::optional<ConsoleWorkerWire::EncoderCaps> m_encoderCaps;
+    QVector<ConsoleWorkerWire::EncoderReport> m_earlyReports;
     qint64 m_workerCpuNs = -1;
 };
 }

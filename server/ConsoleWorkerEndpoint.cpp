@@ -8,6 +8,8 @@
 
 #include <sys/socket.h>
 
+#include <utility>
+
 namespace KRdp
 {
 ConsoleWorkerEndpoint::ConsoleWorkerEndpoint(QObject *parent)
@@ -87,6 +89,7 @@ void ConsoleWorkerEndpoint::close()
     m_ready = false;
     m_stopRequested = false;
     m_encoderCaps.reset();
+    m_earlyReports.clear();
     m_workerCpuNs = -1;
 }
 
@@ -325,15 +328,45 @@ bool ConsoleWorkerEndpoint::processRecords()
             continue;
         }
         if (!m_ready) {
+            // AUD-FIX8: the worker's encoder opens before capture is confirmed. Its reports may
+            // legitimately precede Ready (a 23b328a worker sends them then): hold them and apply
+            // them right after Ready. Load samples are only useful while controlled.
+            if (const auto report = ConsoleWorkerWire::encoderReport(*record)) {
+                if (m_earlyReports.size() >= MaxEarlyReports) {
+                    fail(QStringLiteral("worker sent too many encoder reports before confirming capture"));
+                    return false;
+                }
+                m_earlyReports.append(*report);
+                continue;
+            }
+            if (const auto load = ConsoleWorkerWire::encoderLoad(*record)) {
+                m_workerCpuNs = load->cpuNs;
+                continue;
+            }
+            if (record->kind == ConsoleWorkerWire::Kind::Error) {
+                const QString reason = QString::fromUtf8(record->payload.left(256)).trimmed();
+                fail(reason.isEmpty() ? QStringLiteral("worker failed before confirming capture")
+                                      : QStringLiteral("worker failed before confirming capture: %1").arg(reason));
+                return false;
+            }
             if (record->kind != ConsoleWorkerWire::Kind::Ready || !record->payload.isEmpty()) {
-                fail(QStringLiteral("worker did not confirm active capture"));
+                fail(QStringLiteral("worker did not confirm active capture (record %1 before Ready)").arg(int(record->kind)));
                 return false;
             }
             if (m_stopRequested) {
+                m_earlyReports.clear();
                 continue; // A worker being drained never becomes the input endpoint.
             }
             m_ready = true;
             Q_EMIT workerReady(m_target);
+            // Listeners may have closed or replaced the worker; apply the held reports only to
+            // the worker that confirmed capture.
+            const auto early = std::exchange(m_earlyReports, {});
+            for (const auto &report : early) {
+                if (!m_worker || !m_ready) break;
+                Q_EMIT encoderReported(report);
+            }
+            if (!m_worker) return false;
             continue;
         }
         if (const auto frame = ConsoleWorkerWire::videoFrame(*record)) {
@@ -406,6 +439,7 @@ void ConsoleWorkerEndpoint::workerDisconnected()
     m_ready = false;
     m_deframer = {};
     m_encoderCaps.reset();
+    m_earlyReports.clear();
     m_workerCpuNs = -1;
     if (wasReady) {
         Q_EMIT workerStopped();
