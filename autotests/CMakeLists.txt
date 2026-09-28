@@ -477,6 +477,18 @@ if(TARGET krdpctl-probe)
     set_tests_properties(VideoFlowLoopbackTest PROPERTIES TIMEOUT 180)
 endif()
 
+# AUD-FIX5: a stock client that stalls on (or ignores) a clipboard request still gets its picture.
+if(TARGET krdpctl-probe)
+    add_executable(ClipboardStallLoopbackTest ClipboardStallLoopbackTest.cpp)
+    target_include_directories(ClipboardStallLoopbackTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
+    target_include_directories(ClipboardStallLoopbackTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+    target_link_libraries(ClipboardStallLoopbackTest PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
+    target_compile_definitions(ClipboardStallLoopbackTest PRIVATE KRDPCTL_PROBE="$<TARGET_FILE:krdpctl-probe>")
+    add_dependencies(ClipboardStallLoopbackTest krdpctl-probe)
+    add_test(NAME ClipboardStallLoopbackTest COMMAND ClipboardStallLoopbackTest)
+    set_tests_properties(ClipboardStallLoopbackTest PROPERTIES TIMEOUT 180)
+endif()
+
 # AUD-S4: ListenAddress parsing (header-only, server/).
 add_executable(ListenAddressTest ListenAddressTest.cpp)
 target_include_directories(ListenAddressTest PRIVATE ${CMAKE_SOURCE_DIR}/server)

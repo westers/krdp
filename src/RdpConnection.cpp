@@ -812,6 +812,8 @@ RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
     d->cursor = std::make_unique<Cursor>(this);
     d->networkDetection = std::make_unique<NetworkDetection>(this);
     d->clipboard = std::make_unique<Clipboard>(this);
+    // AUD-FIX5: the clipboard asks the client for nothing before the client has a picture.
+    connect(d->videoStream.get(), &VideoStream::graphicsDelivered, d->clipboard.get(), &Clipboard::setGraphicsDelivered, Qt::QueuedConnection);
 
     QMetaObject::invokeMethod(this, &RdpConnection::initialize, Qt::QueuedConnection);
 }

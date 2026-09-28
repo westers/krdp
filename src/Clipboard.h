@@ -45,6 +45,23 @@ public:
      */
     static void installClientCallbacks(CliprdrServerContext *context, Clipboard *clipboard);
 
+    /**
+     * AUD-FIX5: the client has a picture (VideoStream::graphicsDelivered()). Until then the
+     * server sends the client no clipboard request and no clipboard announcement, only the
+     * protocol's format-list responses: a stock client (wlfreerdp3 3.22 on an unlocked KDE
+     * desktop) that blocks its connection on the local clipboard read a data request starts
+     * must not be kept from its graphics setup by it. DeliveredFallback after the first client
+     * format list the clipboard goes ahead anyway (a client that never acknowledges a frame).
+     */
+    void setGraphicsDelivered();
+
+    /// How long the client's format lists are collected before one data request goes out.
+    static constexpr int FormatListSettleMs = 250;
+    /// A data request not answered for this long no longer holds back the next one.
+    static constexpr int ResponseTimeoutMs = 5000;
+    /// See setGraphicsDelivered().
+    static constexpr int DeliveredFallbackMs = 15000;
+
 private:
     void sendServerData();
 

@@ -8,6 +8,10 @@
 #include <freerdp/peer.h>
 #include <freerdp/server/cliprdr.h>
 
+#include <QMetaMethod>
+#include <QScopeGuard>
+#include <QTimer>
+
 #include <atomic>
 #include <mutex>
 
@@ -66,6 +70,21 @@ public:
     // list, so the response can be decoded as what was asked for: UTF-16 for
     // CF_UNICODETEXT, 8-bit for CF_TEXT/CF_OEMTEXT.
     uint32_t requestedClientFormat = 0;
+
+    // AUD-FIX5: requests to the client wait for its first picture, and there is
+    // at most one on the wire. A stock wlfreerdp3 announces its clipboard once per
+    // Wayland MIME type (Sol journal: three or four format lists within 6 ms at
+    // connect, each drawing a request) and reads the local clipboard for every
+    // request synchronously, which on an unlocked KDE desktop stopped it before
+    // it ever sent its RDPGFX caps. All main-thread state.
+    bool graphicsDelivered = false;
+    uint32_t pendingFormat = 0; // text format of the latest list, not requested yet (0 = none)
+    uint32_t outstandingFormat = 0; // the request on the wire (0 = none)
+    bool pendingServerAnnounce = false;
+    QTimer settleTimer; // Clipboard::FormatListSettleMs
+    QTimer responseTimer; // Clipboard::ResponseTimeoutMs
+    QTimer deliveredFallback; // Clipboard::DeliveredFallbackMs
+    void requestPending();
 
     // AUD-P5: hand the PDU to the main thread and return at once. This used
     // to be a BlockingQueuedConnection: the cliprdr thread waited for the
@@ -129,6 +148,25 @@ Clipboard::Clipboard(RdpConnection *session)
     , d(std::make_unique<Private>(this))
 {
     d->session = session;
+
+    d->settleTimer.setSingleShot(true);
+    d->settleTimer.setInterval(FormatListSettleMs);
+    connect(&d->settleTimer, &QTimer::timeout, this, [this]() {
+        d->requestPending();
+    });
+    d->responseTimer.setSingleShot(true);
+    d->responseTimer.setInterval(ResponseTimeoutMs);
+    connect(&d->responseTimer, &QTimer::timeout, this, [this]() {
+        qCDebug(KRDP) << "Client did not answer the clipboard data request for format" << d->outstandingFormat << "within" << ResponseTimeoutMs << "ms";
+        d->outstandingFormat = 0;
+        d->requestPending();
+    });
+    d->deliveredFallback.setSingleShot(true);
+    d->deliveredFallback.setInterval(DeliveredFallbackMs);
+    connect(&d->deliveredFallback, &QTimer::timeout, this, [this]() {
+        qCInfo(KRDP) << "The client acknowledged no frame" << DeliveredFallbackMs << "ms after its first clipboard format list; serving the clipboard anyway";
+        setGraphicsDelivered();
+    });
 }
 
 Clipboard::~Clipboard()
@@ -221,11 +259,30 @@ std::unique_ptr<QMimeData> Clipboard::getClipboard() const
     return std::move(d->clientData);
 }
 
+void Clipboard::setGraphicsDelivered()
+{
+    if (d->graphicsDelivered || d->closing) {
+        return;
+    }
+    d->graphicsDelivered = true;
+    d->deliveredFallback.stop();
+    if (d->pendingServerAnnounce) {
+        sendServerData();
+    }
+    d->requestPending();
+}
+
 void Clipboard::sendServerData()
 {
     if (!d->serverData) {
         return;
     }
+    if (!d->graphicsDelivered) {
+        // AUD-FIX5: announced once the client has its picture (setGraphicsDelivered()).
+        d->pendingServerAnnounce = true;
+        return;
+    }
+    d->pendingServerAnnounce = false;
 
     CLIPRDR_FORMAT format = {};
     format.formatId = CF_UNICODETEXT;
@@ -284,16 +341,56 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
 
     if (wanted == 0) {
         qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats, none of them text; not requesting data";
+        pendingFormat = 0; // what an earlier list offered is gone
         return;
     }
 
-    qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats; requesting text as format" << wanted;
+    // AUD-FIX5: the request itself goes out from requestPending(): once the client has
+    // its picture, after the lists stop coming (FormatListSettleMs), for the latest list
+    // only and never while an earlier request is unanswered.
     requestedClientFormat = wanted;
-    CLIPRDR_FORMAT_DATA_REQUEST formatDataRequest{.common = CLIPRDR_HEADER({.msgType = CB_FORMAT_DATA_REQUEST, .msgFlags = 0, .dataLen = 4}),
-                                                  .requestedFormatId = wanted};
-    if (canSend) {
-        context->ServerFormatDataRequest(context, &formatDataRequest);
+    pendingFormat = wanted;
+    if (!graphicsDelivered) {
+        qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats; text (format" << wanted
+                      << ") will be requested once the client has a picture";
+        if (!deliveredFallback.isActive()) {
+            deliveredFallback.start();
+        }
+        return;
     }
+    qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats; text is format" << wanted;
+    settleTimer.start();
+}
+
+void Clipboard::Private::requestPending()
+{
+    if (closing || !graphicsDelivered || pendingFormat == 0 || settleTimer.isActive()) {
+        return;
+    }
+    if (outstandingFormat != 0) {
+        return; // the response (or ResponseTimeoutMs) comes back here
+    }
+    if (!q->isSignalConnected(QMetaMethod::fromSignal(&Clipboard::clientDataChanged))) {
+        // The console host has no session clipboard to write to: asking the client
+        // would only make it read its own clipboard for nothing.
+        qCDebug(KRDP) << "Nothing here takes the client's clipboard; not requesting it";
+        pendingFormat = 0;
+        return;
+    }
+
+    std::lock_guard lock(sendMutex);
+    auto *context = clipContext.load();
+    if (!context || !enabled) {
+        return;
+    }
+    qCDebug(KRDP) << "Requesting the client's clipboard text as format" << pendingFormat;
+    requestedClientFormat = pendingFormat;
+    outstandingFormat = pendingFormat;
+    pendingFormat = 0;
+    CLIPRDR_FORMAT_DATA_REQUEST formatDataRequest{.common = CLIPRDR_HEADER({.msgType = CB_FORMAT_DATA_REQUEST, .msgFlags = 0, .dataLen = 4}),
+                                                  .requestedFormatId = requestedClientFormat};
+    context->ServerFormatDataRequest(context, &formatDataRequest);
+    responseTimer.start();
 }
 
 void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &formatDataRequest)
@@ -329,6 +426,17 @@ void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &form
 
 void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &formatDataResponse)
 {
+    // The answer to the request on the wire (or a late one, decoded as the last asked-for
+    // format); a newer format list may be waiting for its request.
+    if (outstandingFormat != 0) {
+        requestedClientFormat = outstandingFormat;
+    }
+    outstandingFormat = 0;
+    responseTimer.stop();
+    const auto next = qScopeGuard([this]() {
+        requestPending();
+    });
+
     if (!(formatDataResponse.msgFlags & CB_RESPONSE_OK)) {
         qCDebug(KRDP) << "Client refused the clipboard data request for format" << requestedClientFormat;
         return;

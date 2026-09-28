@@ -349,6 +349,7 @@ public:
     // not because it's true today.
     std::atomic<quint8> quality = 100; // current adaptive value
     std::atomic<quint8> qualityCap = 100; // configured Quality
+    std::atomic<bool> graphicsDelivered = false; // see VideoStream::graphicsDelivered()
     std::atomic<bool> adaptiveQuality = true;
     // setCodecPreference()/codecPreference() are main-thread only (set before
     // caps are advertised); onCapsAdvertise() (peer thread) only reads it.
@@ -1356,6 +1357,11 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
     std::lock_guard lock(d->pendingFramesMutex);
 
     const auto ack = d->pendingFrames.acknowledge(id, frameAcknowledge->queueDepth);
+    if ((ack == FrameQueuePolicy::FrameAckTracker::Ack::Acknowledged || ack == FrameQueuePolicy::FrameAckTracker::Ack::Suspended)
+        && !d->graphicsDelivered.exchange(true)) {
+        qCDebug(KRDP) << "The client acknowledged its first frame";
+        Q_EMIT graphicsDelivered();
+    }
     d->statInFlight = d->pendingFrames.inFlightFrames();
     d->statSuspended = d->pendingFrames.suspended();
     switch (ack) {

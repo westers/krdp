@@ -227,6 +227,14 @@ public:
     FlowStats flowStats() const;
 
     /**
+     * AUD-FIX5: emitted once, when the client acknowledged its first frame (or suspended
+     * acknowledgements): it has the graphics pipeline up and a picture. From the FreeRDP peer
+     * thread; connect with Qt::QueuedConnection. Clipboard waits for it before asking the client
+     * for anything (a stock client that blocks on the request must still get its picture).
+     */
+    Q_SIGNAL void graphicsDelivered();
+
+    /**
      * Emitted when the adaptive-quality chroma rung requests the chroma stream be shed or restored
      * (S3). Stubbed out here (unemitted) so SessionController's connect compiles before S3 lands.
      */

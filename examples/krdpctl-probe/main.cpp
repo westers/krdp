@@ -60,6 +60,15 @@
  *                               the 16-byte marker "KRDPSEQ:" + a little-endian uint64 (the
  *                               in-flight window loopback test feeds such frames). Frame
  *                               acknowledgements are sent as usual.
+ *            --clipboard MODE   also load the standard clipboard channel (cliprdr) and, on the
+ *                               server's Monitor Ready, announce text the way wlfreerdp3 does
+ *                               (one format list per Wayland MIME type: three lists at once).
+ *                               Every server data request is logged as `clipboard data request
+ *                               for format N`, then MODE: `answer` (UTF-16 text at once), `slow`
+ *                               (after 3 s), `never` (no answer; the client carries on) or
+ *                               `stall` (no answer, and the whole client stops reading from the
+ *                               server, as wlfreerdp3 3.22 does when its synchronous read of the
+ *                               local clipboard never returns: AUD-FIX5)
  *            --disp WxH         also load the standard Display Control channel
  *                               (MS-RDPEDISP, over drdynvc) and, once the server's caps
  *                               arrive, ask for a one-monitor WxH desktop the way a
@@ -106,6 +115,7 @@
 #include <freerdp/addin.h>
 #include <freerdp/channels/channels.h>
 #include <freerdp/client/audin.h>
+#include <freerdp/client/cliprdr.h>
 #include <freerdp/client/disp.h>
 #include <freerdp/channels/rdpgfx.h>
 #include <freerdp/client.h>
@@ -166,6 +176,12 @@ struct Probe {
     std::map<UINT16, unsigned> framesPerSurface;
     /** --gfx-count: count and report markers instead of decoding. */
     bool gfxCountOnly = false;
+    /** --clipboard MODE (empty: no cliprdr). */
+    QByteArray clipboardMode;
+    /** --clipboard stall: a data request arrived; the main loop stops reading. */
+    std::atomic<bool> clipboardStalled = false;
+    /** Set before the disconnect: releases a stalled or slow clipboard handler. */
+    std::atomic<bool> stopping = false;
 
     // Channel plumbing, filled by the entry point and the init event.
     CHANNEL_ENTRY_POINTS_FREERDP_EX entryPoints{};
@@ -487,6 +503,114 @@ void onChannelConnected(void *context, const ChannelConnectedEventArgs *e)
     gfx->SurfaceCommand = probeSurfaceCommand;
 }
 
+// ---- --clipboard: a stock client's clipboard (wlfreerdp3-like) ----
+
+Probe *g_clipboardProbe = nullptr;
+
+UINT probeClipboardMonitorReady(CliprdrClientContext *cliprdr, const CLIPRDR_MONITOR_READY *)
+{
+    CLIPRDR_GENERAL_CAPABILITY_SET general{};
+    general.capabilitySetType = CB_CAPSTYPE_GENERAL;
+    general.capabilitySetLength = 12;
+    general.version = CB_CAPS_VERSION_2;
+    general.generalFlags = CB_USE_LONG_FORMAT_NAMES;
+    CLIPRDR_CAPABILITIES caps{};
+    caps.cCapabilitiesSets = 1;
+    caps.capabilitySets = reinterpret_cast<CLIPRDR_CAPABILITY_SET *>(&general);
+    UINT rc = cliprdr->ClientCapabilities(cliprdr, &caps);
+    // wlfreerdp3 sends its whole list again for every MIME type the compositor offers.
+    std::vector<CLIPRDR_FORMAT> formats;
+    for (const UINT32 id : {UINT32(CF_TEXT), UINT32(CF_OEMTEXT), UINT32(CF_UNICODETEXT), UINT32(CF_DIB), UINT32(CF_TIFF)}) {
+        CLIPRDR_FORMAT format{};
+        format.formatId = id;
+        formats.push_back(format);
+        if (formats.size() < 3) {
+            continue;
+        }
+        CLIPRDR_FORMAT_LIST list{};
+        list.common.msgType = CB_FORMAT_LIST;
+        list.numFormats = UINT32(formats.size());
+        list.formats = formats.data();
+        rc |= cliprdr->ClientFormatList(cliprdr, &list);
+        logf("clipboard: announced %u formats", list.numFormats);
+    }
+    return rc;
+}
+
+UINT probeClipboardServerCapabilities(CliprdrClientContext *, const CLIPRDR_CAPABILITIES *)
+{
+    return CHANNEL_RC_OK;
+}
+
+UINT probeClipboardServerFormatList(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_LIST *list)
+{
+    logf("clipboard: server announced %u formats", list ? list->numFormats : 0);
+    CLIPRDR_FORMAT_LIST_RESPONSE response{};
+    response.common.msgType = CB_FORMAT_LIST_RESPONSE;
+    response.common.msgFlags = CB_RESPONSE_OK;
+    return cliprdr->ClientFormatListResponse(cliprdr, &response);
+}
+
+UINT probeClipboardServerFormatListResponse(CliprdrClientContext *, const CLIPRDR_FORMAT_LIST_RESPONSE *)
+{
+    return CHANNEL_RC_OK;
+}
+
+UINT probeClipboardServerFormatDataResponse(CliprdrClientContext *, const CLIPRDR_FORMAT_DATA_RESPONSE *)
+{
+    return CHANNEL_RC_OK;
+}
+
+UINT probeClipboardServerFormatDataRequest(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_DATA_REQUEST *request)
+{
+    auto *probe = g_clipboardProbe;
+    logf("clipboard data request for format %u", request ? request->requestedFormatId : 0);
+    if (!probe) {
+        return CHANNEL_RC_OK;
+    }
+    const auto waitUntil = [probe](QDeadlineTimer deadline) {
+        while (!deadline.hasExpired() && !g_interrupted && !probe->stopping) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    };
+    if (probe->clipboardMode == "never") {
+        return CHANNEL_RC_OK;
+    }
+    if (probe->clipboardMode == "stall") {
+        logf("clipboard: stalling the whole client, as a blocked local clipboard read does");
+        probe->clipboardStalled = true;
+        waitUntil(QDeadlineTimer(QDeadlineTimer::Forever));
+        return CHANNEL_RC_OK;
+    }
+    if (probe->clipboardMode == "slow") {
+        waitUntil(QDeadlineTimer(3000));
+    }
+    static const char16_t text[] = u"probe clipboard";
+    CLIPRDR_FORMAT_DATA_RESPONSE response{};
+    response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+    response.common.msgFlags = CB_RESPONSE_OK;
+    response.common.dataLen = sizeof(text);
+    response.requestedFormatData = reinterpret_cast<const BYTE *>(text);
+    logf("clipboard: answering the data request");
+    return cliprdr->ClientFormatDataResponse(cliprdr, &response);
+}
+
+void onCliprdrConnected(void *context, const ChannelConnectedEventArgs *e)
+{
+    if (std::strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) != 0) {
+        return;
+    }
+    auto *cliprdr = static_cast<CliprdrClientContext *>(e->pInterface);
+    g_clipboardProbe = probeOf(static_cast<rdpContext *>(context));
+    cliprdr->MonitorReady = probeClipboardMonitorReady;
+    cliprdr->ServerCapabilities = probeClipboardServerCapabilities;
+    cliprdr->ServerFormatList = probeClipboardServerFormatList;
+    cliprdr->ServerFormatListResponse = probeClipboardServerFormatListResponse;
+    cliprdr->ServerFormatDataRequest = probeClipboardServerFormatDataRequest;
+    cliprdr->ServerFormatDataResponse = probeClipboardServerFormatDataResponse;
+    logf("clipboard channel connected (mode %s)", g_clipboardProbe ? g_clipboardProbe->clipboardMode.constData() : "?");
+}
+
 // ---- --disp: a stock client's window resize over MS-RDPEDISP ----
 
 Probe *g_dispProbe = nullptr;
@@ -629,6 +753,9 @@ BOOL preConnect(freerdp *instance)
     if (probe->dispWidth) {
         PubSub_SubscribeChannelConnected(instance->context->pubSub, onDispConnected);
     }
+    if (!probe->clipboardMode.isEmpty()) {
+        PubSub_SubscribeChannelConnected(instance->context->pubSub, onCliprdrConnected);
+    }
     return TRUE;
 }
 
@@ -668,7 +795,7 @@ BOOL loadChannels(freerdp *instance)
             return FALSE;
         }
     }
-    if (probe->gfx || probe->media || probe->dispWidth) {
+    if (probe->gfx || probe->media || probe->dispWidth || !probe->clipboardMode.isEmpty()) {
         // Without --gfx, keep rdpgfx out of the add-ins: KRDP only checks the
         // GCC flag, and this libfreerdp may not decode H.264.
         const BOOL pipeline = freerdp_settings_get_bool(settings, FreeRDP_SupportGraphicsPipeline);
@@ -737,7 +864,7 @@ DWORD verifyChangedCertificate(freerdp *, const char *host, UINT16 port, const c
     return 2;
 }
 
-bool applySettings(rdpSettings *s, const QString &host, int port, const QString &user, const QString &password, bool dynamicChannels)
+bool applySettings(rdpSettings *s, const QString &host, int port, const QString &user, const QString &password, bool dynamicChannels, bool clipboard)
 {
     bool ok = true;
     // Keep libfreerdp's certificate store out of ~/.config/freerdp: a
@@ -778,7 +905,7 @@ bool applySettings(rdpSettings *s, const QString &host, int port, const QString 
     ok &= freerdp_settings_set_bool(s, FreeRDP_DesktopResize, TRUE);
     ok &= freerdp_settings_set_bool(s, FreeRDP_NetworkAutoDetect, TRUE);
     ok &= freerdp_settings_set_bool(s, FreeRDP_SupportDisplayControl, FALSE);
-    ok &= freerdp_settings_set_bool(s, FreeRDP_RedirectClipboard, FALSE);
+    ok &= freerdp_settings_set_bool(s, FreeRDP_RedirectClipboard, clipboard ? TRUE : FALSE);
     ok &= freerdp_settings_set_bool(s, FreeRDP_SupportDynamicChannels, dynamicChannels ? TRUE : FALSE);
     ok &= freerdp_settings_set_bool(s, FreeRDP_UseMultimon, FALSE);
     ok &= freerdp_settings_set_uint32(s, FreeRDP_MonitorCount, 0);
@@ -794,7 +921,7 @@ int usage()
 {
     std::fprintf(stderr,
                  "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
-                 "[--gfx [--gfx-count]] [--media [--microphone DEV]] [--disp WxH] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
+                 "[--gfx [--gfx-count]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
     return 2;
 }
 
@@ -896,6 +1023,11 @@ int main(int argc, char **argv)
             probe.microphoneDevice = QByteArray(argv[++i]);
         } else if (arg == QLatin1String("--raw-gap") && i + 1 < argc) {
             probe.rawGapMs = qMax(0, QString::fromLocal8Bit(argv[++i]).toInt());
+        } else if (arg == QLatin1String("--clipboard") && i + 1 < argc) {
+            probe.clipboardMode = QByteArray(argv[++i]);
+            if (probe.clipboardMode != "answer" && probe.clipboardMode != "slow" && probe.clipboardMode != "never" && probe.clipboardMode != "stall") {
+                return usage();
+            }
         } else if (arg == QLatin1String("--no-krdpctl")) {
             probe.krdpctl = false;
         } else if (arg == QLatin1String("--no-pong")) {
@@ -968,7 +1100,7 @@ int main(int argc, char **argv)
     instance->VerifyCertificateEx = verifyCertificate;
     instance->VerifyChangedCertificateEx = verifyChangedCertificate;
 
-    if (!applySettings(context->settings, host, port, user, password, probe.gfx || probe.media || probe.dispWidth)) {
+    if (!applySettings(context->settings, host, port, user, password, probe.gfx || probe.media || probe.dispWidth, !probe.clipboardMode.isEmpty())) {
         logf("settings rejected");
         freerdp_client_context_free(context);
         return 1;
@@ -1032,6 +1164,11 @@ int main(int argc, char **argv)
             exitCode = done(&probe) ? 0 : 4;
             break;
         }
+        if (probe.clipboardStalled) {
+            // --clipboard stall: the client reads nothing more from the server.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
         const DWORD count = freerdp_get_event_handles(context, handles, MAXIMUM_WAIT_OBJECTS);
         if (count == 0) {
             logf("no event handles");
@@ -1072,6 +1209,7 @@ int main(int argc, char **argv)
         logf("%u frame(s) received%s", total, qPrintable(perSurface));
     }
 
+    probe.stopping = true;
     freerdp_disconnect(instance);
     freerdp_client_context_free(context);
     return exitCode;
