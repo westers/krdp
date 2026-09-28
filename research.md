@@ -57,6 +57,7 @@ Reduce encoded bandwidth and latency of the KRdp fork (compositor damage, RDPGFX
 - Maintenance guard ABANDONED 2026-09-27 — virtual-session maintenance guard (`VirtualSessionMaintenance*`, `PackageLease`, unattended-upgrade guard, `krdp-virtual-maintenance`) deleted from master (AUD-C1 `8e13f63`); source at tag `archive/maintenance-guard`, WIP in `~/dev/rdp/archive/2026-09-27-maintenance-guard-wip.patch`.
 - AUD-2026-09-27 audit fixes DONE (code; Hal deploy pending) — security/pre-auth (WS-S), physical session (WS-P), console broker/worker (WS-C), KCM/settings (WS-K), KRDPCTL v2 (WS-L) and the Sol phase-3 fixes F1-F6, merged to master `00a98fe`; client 0.5.0 (`v0.5.0` tag not yet created); plan `~/dev/rdp/AUDIT-FIX-PLAN.md`, evidence `~/dev/rdp/evidence/2026-09-27-audit-phase3-sol/`, per-workstream detail in the archive.
 - WS-D devices DONE 2026-09-27 — playback, microphone and camera switch on/off during a session (KRDPCTL `device` record, `StandardClientMedia` for stock clients, console/virtual broker mapping): server on master (`3f8a18c..72cdffe`), client 0.5.0 Devices menu; open: mstsc, a real camera and live Sol/Buzz toggling; design `~/dev/rdp/DEVICES-DESIGN.md`.
+- AUD-FIX2 client-acceptance fixes DONE 2026-09-27 (code; host deploy pending) — F1 codec: per-codec hardware/software encoder probe (`src/EncoderSupport*`), `SoftwareEncoding=auto|never|prefer` policy with slow-link/CPU-guard/anti-flap (`src/CodecPolicy.h`), `codec` answers only what the host can encode and the codec id always matches the encoder, `capabilities.video`; F2 a KRDPCTL v2 client on :3395 is never auto-bound (`codec` answered AVC); virtual device revocations use code `detached`; takeover sends `session-end` `opened-elsewhere` before 0x5 and explicit `attach` takes over the user's other connection; F5 KPipeWire `DmaBufHandler` EGL/GBM leak (sync_file per software session) fixed in KPipeWire `aud-fix2-dmabuf-egl` `e31f7e8`; contract `~/dev/rdp/KRDPCTL-V2-CONTRACT.md` (e)/(f); evidence `~/dev/rdp/evidence/2026-09-27-audit-phase3-client/`.
 - Stock clients on the virtual host DONE 2026-09-27 — a client without KRDPCTL attaches the user's most recent virtual desktop or creates one from its monitor data; `VirtualStockClientPolicy` (KCM combo, `refuse` -> ERRINFO 0x7), opt-in MS-RDPEDISP resize (`54de0d2`); open: live sdl-freerdp3 test on Sol/Buzz.
 
 ## Runtime settings (quick reference)
@@ -65,7 +66,10 @@ Reduce encoded bandwidth and latency of the KRdp fork (compositor damage, RDPGFX
 ### Runtime Environment Variables
 - `KRDP_FORCE_VAAPI_DRIVER=<driver>`: force VAAPI driver selection in KRDP startup/device probing.
 - `KRDP_AUTO_VAAPI_DRIVER=0`: disable KRDP automatic VAAPI driver selection.
-- `KPIPEWIRE_FORCE_ENCODER=libx264`: honoured by KPipeWire itself if the user sets it; as of the 2026-09-15 clean-up KRDP no longer reads or writes this variable.
+- `KPIPEWIRE_FORCE_ENCODER=libx264`: honoured by KPipeWire itself if the user sets it; KRDP sets it only for `KRDP_FORCE_SOFTWARE_ENCODING` (below) and never overrides a value the user set.
+- `KRDP_FORCE_SOFTWARE_ENCODING=1` (AUD-FIX2): no hardware encoder is used or advertised; KPipeWire H.264 forced to libx264 (or libopenh264).
+- `KRDP_ENCODERS=avc=hw+sw,hevc=hw,av1=none` (AUD-FIX2, tests/diagnosis): replaces the encoder probe's answer per codec (`hw`, `sw`, `hw+sw`, `none`).
+- `KPIPEWIRE_DMABUF_RENDER_NODE=/dev/dri/renderD128` (private KPipeWire, tests): DmaBufHandler uses its own GBM display on that node instead of the application's EGL display.
 - (removed 2026-09-15) `KRDP_EXPERIMENTAL_AVC444*` / `KRDP_EXPERIMENTAL_TRUE_AVC444` / `KRDP_ENABLE_TILE_CACHE` / `KRDP_ENABLE_STALL_WATCHDOG`: the features behind these flags were deleted.
 
 ### Current Display-Change Recovery Behavior (2026-09-15)

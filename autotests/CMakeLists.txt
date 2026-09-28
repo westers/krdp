@@ -669,6 +669,14 @@ add_test(NAME ConsoleWorkerLaunchReadinessTest COMMAND ConsoleWorkerLaunchReadin
 set_tests_properties(ConsoleWorkerLaunchReadinessTest PROPERTIES TIMEOUT 60)
 
 # --- AUD-FIX2 ---
+# F5: a software-encoded session's DmaBufHandler releases its EGL context, display, GBM device and fds.
+pkg_check_modules(GBM IMPORTED_TARGET gbm)
+if(TARGET PkgConfig::GBM AND TARGET K::KPipeWireDmaBuf)
+    add_executable(DmaBufHandlerLeakTest DmaBufHandlerLeakTest.cpp)
+    target_link_libraries(DmaBufHandlerLeakTest PRIVATE Qt6::Test Qt6::Gui K::KPipeWire K::KPipeWireDmaBuf PkgConfig::GBM)
+    add_test(NAME DmaBufHandlerLeakTest COMMAND DmaBufHandlerLeakTest)
+    set_tests_properties(DmaBufHandlerLeakTest PROPERTIES TIMEOUT 60)
+endif()
 # F1: SoftwareEncoding codec/backend policy (thresholds, hysteresis, CPU guard, switch interval).
 add_executable(CodecPolicyTest CodecPolicyTest.cpp)
 target_include_directories(CodecPolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -679,6 +687,8 @@ add_executable(EncoderSupportTest EncoderSupportTest.cpp)
 target_link_libraries(EncoderSupportTest PRIVATE Qt6::Test KRdp PkgConfig::AVCodec)
 add_test(NAME EncoderSupportTest COMMAND EncoderSupportTest)
 set_tests_properties(EncoderSupportTest PROPERTIES TIMEOUT 60)
+# F1/F5: software H.264 with VA-API unusable, and no per-session fd/thread leak (private PipeWire).
+include(SoftwareEncodeSessionTest.cmake)
 # F1: the codec id always matches the encoder KPipeWire actually settled on.
 add_executable(EncoderSelectionTest EncoderSelectionTest.cpp)
 target_include_directories(EncoderSelectionTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
