@@ -26,6 +26,7 @@
 #include <QSet>
 
 #include <map>
+#include <tuple>
 
 #include <unistd.h>
 
@@ -58,7 +59,7 @@ env PIPEWIRE_CONFIG_DIR="$KRDP_SERVER_DIR" PIPEWIRE_CONFIG_NAME=virtual-session-
 wait_for "$R/pipewire-0"
 env WIREPLUMBER_CONFIG_DIR=/usr/share/wireplumber wireplumber --profile policy >"$HOME/wireplumber.log" 2>&1 & children="$children $!"
 kbuildsycoca6 --noincremental >"$HOME/sycoca.log" 2>&1
-kwin_wayland --virtual --width 1280 --height 720 --output-count "$KRDP_E2E_OUTPUTS" --socket wayland-0 \
+kwin_wayland --virtual --width "$KRDP_E2E_WIDTH" --height "$KRDP_E2E_HEIGHT" --output-count "$KRDP_E2E_OUTPUTS" --socket wayland-0 \
     --no-lockscreen --no-global-shortcuts --no-kactivities >"$HOME/kwin.log" 2>&1 & children="$children $!"
 wait_for "$R/wayland-0"
 sleep 1
@@ -127,13 +128,13 @@ private Q_SLOTS:
     void cleanupTestCase();
 
 private:
-    /// The session with \a outputs KWin virtual outputs, started on first use (nullptr: failed).
-    PrivateSession *session(int outputs);
+    /// The session with \a outputs KWin virtual outputs of \a size, started on first use (nullptr: failed).
+    PrivateSession *session(int outputs, QSize size = QSize(1280, 720));
     /// Starts one worker in \a session behind \a endpoint and records what it sends into \a run.
     bool startWorker(PrivateSession &session, bool virtualDesktop, ConsoleWorkerEndpoint &endpoint, WorkerRun &run);
     void stopWorker(PrivateSession &session, ConsoleWorkerEndpoint &endpoint);
 
-    std::map<int, PrivateSession> m_sessions;
+    std::map<std::tuple<int, int, int>, PrivateSession> m_sessions;
     QString m_skip;
     QString m_renderNode;
 };
@@ -159,12 +160,24 @@ void WorkerEndToEndTest::initTestCase()
     }
 }
 
-PrivateSession *WorkerEndToEndTest::session(int outputs)
+PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size)
 {
-    if (const auto it = m_sessions.find(outputs); it != m_sessions.end()) {
+    const auto key = std::tuple(outputs, size.width(), size.height());
+    if (const auto it = m_sessions.find(key); it != m_sessions.end()) {
         return it->second.process ? &it->second : nullptr;
     }
-    auto &s = m_sessions[outputs];
+    // Sessions of another output size are ended first (the rows run one size after another).
+    for (auto &[other, running] : m_sessions) {
+        if ((std::get<1>(other) != size.width() || std::get<2>(other) != size.height()) && running.process
+            && running.process->state() != QProcess::NotRunning) {
+            running.process->terminate();
+            if (!running.process->waitForFinished(5000)) {
+                running.process->kill();
+                running.process->waitForFinished(5000);
+            }
+        }
+    }
+    auto &s = m_sessions[key];
     const QString userRuntime = QStringLiteral("/run/user/%1").arg(getuid());
     // A short path: the Wayland and PipeWire socket names must fit sockaddr_un.
     const QString runtimeBase = QFileInfo(userRuntime).isDir() ? userRuntime : QDir::tempPath();
@@ -233,6 +246,8 @@ PrivateSession *WorkerEndToEndTest::session(int outputs)
     set("KRDP_SERVER_DIR", QStringLiteral(KRDP_SERVER_DIR));
     set("KRDP_CONSOLE_WORKER", workerProgram());
     set("KRDP_E2E_OUTPUTS", QString::number(outputs));
+    set("KRDP_E2E_WIDTH", QString::number(size.width()));
+    set("KRDP_E2E_HEIGHT", QString::number(size.height()));
     if (qEnvironmentVariableIsSet("KRDP_E2E_LOGGING_RULES")) set("QT_LOGGING_RULES", qEnvironmentVariable("KRDP_E2E_LOGGING_RULES"));
 
     auto process = std::make_unique<QProcess>();
@@ -390,18 +405,26 @@ void WorkerEndToEndTest::codecSwitchAtAttach_data()
     // moves the encoders from AVC to a hardware HEVC/AV1 at once ("immediate": in the same read as
     // the new grant, as on ace and cray) or after the grant's capture refresh has published its
     // outputs ("late"). Two outputs take the per-output (multi) capture path, one the single one.
+    // AUD-FIX10 R5: at 1920x1080 AMD's AV1 codes 1082 rows (HEVC 1088 with a conformance window);
+    // 299cd25 never proved such a layout (0 frames on cray). 1280x720 aligns exactly and hid it.
     QTest::addColumn<bool>("virtualDesktop");
     QTest::addColumn<int>("outputs");
     QTest::addColumn<int>("codecId");
     QTest::addColumn<bool>("late");
-    for (const bool virtualDesktop : {true, false}) {
-        for (const int outputs : {2, 1}) {
-            for (const auto codec : {VideoCodec::Hevc, VideoCodec::Av1}) {
-                for (const bool late : {false, true}) {
-                    if (late && outputs == 1) continue;
-                    QTest::addRow("%s %d-output %s %s", virtualDesktop ? "virtual" : "console", outputs,
-                                  codec == VideoCodec::Hevc ? "hevc" : "av1", late ? "late" : "immediate")
-                        << virtualDesktop << outputs << int(codec) << late;
+    QTest::addColumn<QSize>("size");
+    for (const QSize size : {QSize(1280, 720), QSize(1920, 1080), QSize(2560, 1440), QSize(3840, 2160)}) {
+        for (const bool virtualDesktop : {true, false}) {
+            for (const int outputs : {2, 1}) {
+                for (const auto codec : {VideoCodec::Hevc, VideoCodec::Av1}) {
+                    for (const bool late : {false, true}) {
+                        if (late && outputs == 1) continue;
+                        // The 720p rows keep AUD-FIX9's names.
+                        const QByteArray prefix = size == QSize(1280, 720) ? QByteArray()
+                                                                          : QStringLiteral("%1x%2 ").arg(size.width()).arg(size.height()).toLatin1();
+                        QTest::addRow("%s%s %d-output %s %s", prefix.constData(), virtualDesktop ? "virtual" : "console", outputs,
+                                      codec == VideoCodec::Hevc ? "hevc" : "av1", late ? "late" : "immediate")
+                            << virtualDesktop << outputs << int(codec) << late << size;
+                    }
                 }
             }
         }
@@ -414,11 +437,12 @@ void WorkerEndToEndTest::codecSwitchAtAttach()
     QFETCH(int, outputs);
     QFETCH(int, codecId);
     QFETCH(bool, late);
+    QFETCH(QSize, size);
     const auto codec = VideoCodec(codecId);
     if (!m_skip.isEmpty()) {
         QSKIP(qPrintable(m_skip));
     }
-    auto *s = session(outputs);
+    auto *s = session(outputs, size);
     QVERIFY(s);
     if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
     if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
@@ -477,16 +501,17 @@ void WorkerEndToEndTest::codecSwitchAtAttach()
     clock.start();
     QVERIFY(endpoint.setEncoderConfig(target));
 
-    // Within 2 s: a decodable keyframe of the new codec, at the output size, for every output.
+    // Within 2 s: a decodable keyframe of the new codec that shows the output size, for every output.
     QSet<int> decoded;
+    QSize coded;
     qsizetype checked = mark;
     qint64 elapsed = -1;
     while (clock.elapsed() < 2000 && alive()) {
         for (; checked < run.frames.size(); ++checked) {
             const auto &frame = run.frames[checked];
-            if (frame.isKeyFrame && frame.codec == codec && frame.size == QSize(1280, 720)
-                && encodedKeyframeSize(codec, frame.data) == std::optional(frame.size)) {
+            if (frame.isKeyFrame && frame.codec == codec && frame.size == size && encodedKeyframeShows(codec, frame.data, size)) {
                 decoded.insert(outputs > 1 ? frame.monitorIndex : 0);
+                if (const auto keyframe = encodedKeyframe(codec, frame.data)) coded = keyframe->coded;
             }
         }
         if (decoded.size() == outputs) {
@@ -501,7 +526,7 @@ void WorkerEndToEndTest::codecSwitchAtAttach()
     int oldCodec = 0;
     for (qsizetype i = mark; i < run.frames.size(); ++i) (run.frames[i].codec == codec ? newCodec : oldCodec)++;
     qInfo().noquote() << VideoCodecSupport::codecName(codec) << "at attach:" << decoded.size() << "of" << outputs
-                      << "outputs decoded in" << elapsed << "ms;" << newCodec << "new-codec and" << oldCodec << "older frames after the switch;"
+                      << "outputs decoded in" << elapsed << "ms (coded" << coded << "for" << size << ");" << newCodec << "new-codec and" << oldCodec << "older frames after the switch;"
                       << (run.outputs - outputsBefore) << "layouts published since the grant; order" << run.order.join(QStringLiteral(", "));
     QVERIFY2(decoded.size() == outputs, "no decodable keyframe of the new codec from every output within 2 s");
     if (outputs > 1) QVERIFY2(run.outputs > outputsBefore, "the new client's capture never published its outputs (KScreen readback)");

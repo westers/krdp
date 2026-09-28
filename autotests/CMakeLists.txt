@@ -397,7 +397,7 @@ if(TARGET krdp-console-worker)
         KRDP_SERVER_DIR="${CMAKE_SOURCE_DIR}/server")
     add_dependencies(WorkerEndToEndTest krdp-console-worker)
     add_test(NAME WorkerEndToEndTest COMMAND WorkerEndToEndTest)
-    set_tests_properties(WorkerEndToEndTest PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+    set_tests_properties(WorkerEndToEndTest PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
 endif()
 
 # AUD-FIX8: the worker -> broker order (ConsoleWorkerOutbox, the class the real worker sends through).
