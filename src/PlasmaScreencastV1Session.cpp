@@ -181,6 +181,23 @@ QList<ScreencastTarget::Screen> screenSnapshot(QList<QScreen *> *pointers = null
     return result;
 }
 
+/**
+ * The AVC444 chroma (aux) half of a packet, with a KPipeWire that has it (the private build);
+ * stock KPipeWire's Packet has no aux(). A template, so the requires-expression is checked on
+ * substitution instead of making a stock build ill-formed.
+ */
+template<typename Packet>
+void copyAuxIfSupported(VideoFrame &frame, const Packet &packet)
+{
+    if constexpr (requires(const Packet &p) {
+                      p.aux();
+                      p.auxIsKey();
+                  }) {
+        frame.aux = packet.aux();
+        frame.auxIsKeyFrame = packet.auxIsKey();
+    }
+}
+
 template<typename Stream>
 bool requestKeyFrameIfSupported(Stream *stream)
 {
@@ -1081,13 +1098,7 @@ void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Pa
     frameData.size = size();
     frameData.data = data.data();
     frameData.isKeyFrame = data.isKeyFrame();
-    if constexpr (requires(const PipeWireEncodedStream::Packet &p) {
-                      p.aux();
-                      p.auxIsKey();
-                  }) {
-        frameData.aux = data.aux();
-        frameData.auxIsKeyFrame = data.auxIsKey();
-    }
+    copyAuxIfSupported(frameData, data);
     frameData.monitors = d->monitorLayout;
     frameData.monitorIndex = monitorIndex();
     frameData.damage = fullFrameDamage(frameData.size);
