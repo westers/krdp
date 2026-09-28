@@ -445,6 +445,10 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
         }
         record.insert(QStringLiteral("video"), QJsonObject{{QStringLiteral("codecs"), codecs}, {QStringLiteral("softwareEncoding"), video->softwareEncoding}});
     }
+    if (const auto &stats = capabilities.stats) {
+        record.insert(QStringLiteral("stats"),
+                      QJsonObject{{QStringLiteral("maxRateHz"), stats->maxRateHz}, {QStringLiteral("events"), stats->events}, {QStringLiteral("tcp"), stats->tcp}});
+    }
     return record;
 }
 

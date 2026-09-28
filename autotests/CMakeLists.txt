@@ -765,3 +765,11 @@ add_executable(VideoStreamCodecTest VideoStreamCodecTest.cpp)
 target_include_directories(VideoStreamCodecTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(VideoStreamCodecTest PRIVATE Qt6::Test Qt6::Core KRdp)
 add_test(NAME VideoStreamCodecTest COMMAND VideoStreamCodecTest)
+
+# --- STATS ---
+# STATS-S5: the KRDPCTL `stats` request, records and reporter (STATS-PANEL-DESIGN.md §5).
+add_executable(StatsRequestTest StatsRequestTest.cpp)
+target_include_directories(StatsRequestTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(StatsRequestTest PRIVATE Qt6::Test Qt6::Core KRdp)
+add_test(NAME StatsRequestTest COMMAND StatsRequestTest)
+# --- end STATS ---

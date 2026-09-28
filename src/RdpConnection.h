@@ -114,6 +114,18 @@ public:
      */
     qint64 socketQueuedBytes() const;
 
+    /** What the kernel's TCP_INFO says about this connection's socket (Linux). */
+    struct TcpInfo {
+        qint64 rttUs = 0; ///< smoothed round-trip time
+        qint64 rttVarUs = 0; ///< its mean deviation (jitter)
+        quint64 totalRetransmits = 0; ///< segments retransmitted since the connection opened
+    };
+    /**
+     * getsockopt(TCP_INFO) on the connection's socket; nullopt when unknown (no socket, closed,
+     * or the call failed). Any thread. The KRDPCTL `stats` samples' link figures.
+     */
+    std::optional<TcpInfo> tcpInfo() const;
+
     /** FreeRDP context of this peer (null before it exists), so a host can
      * set a standard error-info disconnect reason before close(). */
     rdpContext *freerdpContext() const;

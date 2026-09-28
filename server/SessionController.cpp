@@ -47,6 +47,7 @@
 #include "TakeoverDetector.h"
 #include "VideoStream.h"
 #include "CodecRequest.h"
+#include "StatsRequest.h"
 
 using namespace Qt::StringLiterals;
 
@@ -438,6 +439,12 @@ public:
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::encoderUnavailable, videoStream, &KRdp::VideoStream::privateCodecUnavailable, Qt::DirectConnection));
             // The backend the encoder really opened on: logged, and reported to an own client.
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::encoderBackendReported, videoStream, &KRdp::VideoStream::encoderBackendReported));
+            // KRDPCTL stats: the AVC444 encoder's measured queue->packet time is its encode time.
+            m_sessionConnections.append(connect(session, &KRdp::AbstractSession::chromaTimingReported, videoStream, [videoStream](const KRdp::ChromaTimingReport &r) {
+                if (r.encodeMainAvg > 0) {
+                    videoStream->setMeasuredEncodeTime(double(r.encodeMainAvg) / 1000.0);
+                }
+            }));
             // At most once every 30 s per wrapper: server/*.cpp has no access to the KRDP logging
             // category (plain qInfo()/qWarning() here), and one line per second would flood the journal.
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::chromaTimingReported, this, [this](const KRdp::ChromaTimingReport &r) {
@@ -2371,6 +2378,7 @@ void SessionController::onClientDisplayInfo(SessionWrapper *wrapper)
     capabilities.layoutApply = true;
     capabilities.devices = KRdp::PhysicalDeviceControl::Capabilities;
     capabilities.video = KRdp::EncoderSupport::videoCapabilities(encodersForBackend(), m_softwareEncoding);
+    capabilities.stats = KRdp::LayoutControl::StatsCapabilities{};
     wrapper->connection->sendControlRecord(KRdp::LayoutControl::capabilitiesRecord(capabilities));
     wrapper->controlTimer.start();
     qInfo() << "KRDPCTL: client joined the channel; capabilities sent, holding the session build for its first record";
@@ -2426,7 +2434,8 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
     const bool first = wrapper->controlGate == SessionWrapper::ControlGate::Undecided || wrapper->controlGate == SessionWrapper::ControlGate::Waiting;
     // `codec` is a preflight capability record: it precedes the initial apply but does not
     // itself decide the layout-control gate.
-    const bool codecPreflight = type == QLatin1String("codec") && first;
+    // So is `stats` (the stats panel may be opened at any time, also before the layout choice).
+    const bool codecPreflight = (type == QLatin1String("codec") || type == QLatin1String("stats")) && first;
     if (first && !codecPreflight) {
         wrapper->controlTimer.stop();
     }
@@ -2444,7 +2453,7 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
         return;
     }
 
-    static const QSet<QString> knownTypes{u"query"_s, u"apply"_s, u"attach"_s, u"chroma"_s, u"codec"_s, u"pong"_s};
+    static const QSet<QString> knownTypes{u"query"_s, u"apply"_s, u"attach"_s, u"chroma"_s, u"codec"_s, u"stats"_s, u"pong"_s};
     if (knownTypes.contains(type)) {
         wrapper->spokeKrdpctl = true;
     }
@@ -2480,6 +2489,19 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
 
     if (type == QLatin1String("codec")) {
         onControlCodec(wrapper, record);
+        return;
+    }
+
+    if (type == QLatin1String("stats")) {
+        // Shared handler (StatsRequest, also used by the brokers): this connection's own stream.
+        const auto request = KRdp::StatsRequest::parse(record);
+        if (!request) {
+            replyTo(wrapper, KRdp::StatsRequest::invalidRecord());
+            return;
+        }
+        QString log;
+        replyTo(wrapper, KRdp::StatsRequest::apply(*connection->videoStream(), *request, &log));
+        qDebug().noquote() << log;
         return;
     }
 

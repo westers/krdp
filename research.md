@@ -48,6 +48,7 @@ Reduce encoded bandwidth and latency of the KRdp fork (compositor damage, RDPGFX
 - `OPT-048` DONE 2026-09-19 — empty-damage frames skipped before encode (KPipeWire `a181fa2`, patch `0011`); open: the idle-desk saving was not measured, upstream KWin MR not filed.
 - `OPT-049` OPEN — on Hal, a layout release that coincides with the lock screen appearing kills the greeter and the lock is not re-armed; first item after the audit; until fixed, check `LockedHint` after output-changing runs.
 - `OPT-050` OPEN — conferencing redirection for the own client (RDPSND playback, AUDIN mic -> per-session PipeWire source, RDPECAM camera -> PipeWire/V4L2); browser WebRTC and console-mic acceptance done, device on/off now per WS-D below; open: an external bidirectional call, console camera; evidence `~/dev/rdp/evidence/console-audio-client.yI3kMD/`.
+- `OPT-051` WIP 2026-09-28 — stats panel, server side (`STATS-PANEL-DESIGN.md` §5, contract (g)): KRDPCTL `stats` subscribe/unsubscribe, `stats-sample` (1-4 Hz, 1 Hz on a slow link) and `stats-event` from `StatsReporter` in every host's `VideoStream`, TCP_INFO, worker `EncoderStats` (wire v3), RDPGFX QoE acks recorded (OPT-023 input); client side and live checks outstanding.
 - `S1` DONE `29277e8` — clipboard bridge on the Plasma session.
 - `S2` DONE `dd416c8` — clipboard echo suppression, one request per format list, CRLF/LF normalisation.
 - `S3` DONE `046126d` — `multi` ignores `Virtual-*` screens.

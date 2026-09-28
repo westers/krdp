@@ -209,6 +209,19 @@ struct VideoCapabilities {
     bool operator==(const VideoCapabilities &) const = default;
 };
 
+/**
+ * The optional `stats` group of `capabilities` (STATS-PANEL-DESIGN.md §5, contract (g)): the host
+ * answers `stats` subscribe/unsubscribe and sends `stats-sample` records at up to \a maxRateHz,
+ * `stats-event` records when \a events, and TCP_INFO link figures (RTT variance, retransmits)
+ * when \a tcp. Missing: the client measures on its own side only.
+ */
+struct StatsCapabilities {
+    int maxRateHz = 4;
+    bool events = true;
+    bool tcp = true;
+    bool operator==(const StatsCapabilities &) const = default;
+};
+
 /** What a KRDPCTL endpoint offers, as the `capabilities` record says it. */
 struct ChannelCapabilities {
     QString host; ///< "physical" | "console" | "virtual"
@@ -222,6 +235,7 @@ struct ChannelCapabilities {
     bool topologyApply = false;
     std::optional<DeviceCapabilities> devices; ///< absent: no `devices` group, no runtime device control
     std::optional<VideoCapabilities> video; ///< absent: no `video` group, AVC only, no `codec` record
+    std::optional<StatsCapabilities> stats; ///< absent: no `stats` group, no `stats` record
     bool operator==(const ChannelCapabilities &) const = default;
 };
 KRDP_EXPORT QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities);

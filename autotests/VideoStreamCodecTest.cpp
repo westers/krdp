@@ -7,9 +7,11 @@
 
 #include "RdpConnection.h"
 #include "Server.h"
+#include "StatsReporter.h"
 #include "VideoStream.h"
 
 #include <QCoreApplication>
+#include <QJsonObject>
 #include <QSignalSpy>
 #include <QTest>
 
@@ -189,6 +191,165 @@ private Q_SLOTS:
         QVERIFY(!f.stream()->encoderSettings()->hardware);
         f.stream()->encoderBackendReported(VideoCodec::Avc444v2, false); // reported once
         QCOMPARE(settings.size(), 1);
+    }
+
+    // STATS-S5: nothing runs for stats until a client subscribes: no timer, and the events the
+    // codec policy raises never reach the sink (their text is not even built).
+    void noStatsTimerWhileUnsubscribed()
+    {
+        Fixture f;
+        QList<QJsonObject> sent;
+        f.stream()->statsReporter()->setSink([&sent](const QJsonObject &record) {
+            sent << record;
+            return true;
+        });
+        QVERIFY(!f.stream()->statsSubscribed());
+        QVERIFY(!f.stream()->statsReporter()->timerActive());
+        f.stream()->setEncoderPolicy(softwareOnly(), CodecPolicy::SoftwareEncoding::Prefer);
+        f.stream()->setPrivateCodecPolicy({VideoCodec::Hevc, VideoCodec::Av1}, true); // codec, settings, frame rate
+        f.stream()->privateCodecUnavailable(VideoCodec::Av1);
+        QTest::qWait(300);
+        QVERIFY(sent.isEmpty());
+        QVERIFY(!f.stream()->statsReporter()->timerActive());
+
+        QSignalSpy changed(f.stream(), &VideoStream::statsSubscriptionChanged);
+        QCOMPARE(f.stream()->setStatsSubscription(2), 2);
+        QVERIFY(f.stream()->statsReporter()->timerActive());
+        QCOMPARE(changed.size(), 1);
+        QCOMPARE(f.stream()->setStatsSubscription(0), 0);
+        QVERIFY(!f.stream()->statsReporter()->timerActive());
+        QCOMPARE(changed.size(), 2);
+        QCOMPARE(changed.last().first().toBool(), false);
+    }
+
+    // Without a channel (the client hung up) the first sample ends the subscription.
+    void subscriptionEndsWithTheChannel()
+    {
+        Fixture f;
+        QVERIFY(!f.connection.hasControlChannel());
+        QCOMPARE(f.stream()->setStatsSubscription(4), 4);
+        QTRY_VERIFY_WITH_TIMEOUT(!f.stream()->statsSubscribed(), 1000);
+        QVERIFY(!f.stream()->statsReporter()->timerActive());
+    }
+
+    // Codec switches, backend reports, frame-rate changes and CPU-guard steps become events.
+    void statsEventsOnCodecSwitchesAndGuardSteps()
+    {
+        Fixture f;
+        QList<QJsonObject> sent;
+        f.stream()->statsReporter()->setSink([&sent](const QJsonObject &record) {
+            sent << record;
+            return true;
+        });
+        QCOMPARE(f.stream()->setStatsSubscription(1), 1);
+        const auto events = [&sent](const QString &kind) {
+            QList<QJsonObject> matching;
+            for (const auto &record : std::as_const(sent)) {
+                if (record.value(QLatin1String("type")).toString() == QLatin1String("stats-event") && record.value(QLatin1String("kind")).toString() == kind) {
+                    matching << record;
+                }
+            }
+            return matching;
+        };
+
+        // The client's `codec` request: software AV1 (prefer) at 30 fps.
+        f.stream()->setEncoderPolicy(softwareOnly(), CodecPolicy::SoftwareEncoding::Prefer);
+        f.stream()->setPrivateCodecPolicy({VideoCodec::Hevc, VideoCodec::Av1}, true);
+        QCOMPARE(events(QStringLiteral("codec")).size(), 1);
+        QCOMPARE(events(QStringLiteral("codec")).last().value(QLatin1String("codec")).toString(), QStringLiteral("av1"));
+        QCOMPARE(events(QStringLiteral("codec")).last().value(QLatin1String("backend")).toString(), QStringLiteral("software"));
+        QCOMPARE(events(QStringLiteral("throttle")).size(), 1);
+        QVERIFY(events(QStringLiteral("throttle")).last().value(QLatin1String("reason")).toString().contains(QLatin1String("30 fps")));
+
+        // The encoder turns out unable: an immediate switch, with its reason.
+        f.stream()->privateCodecUnavailable(VideoCodec::Av1);
+        auto codec = events(QStringLiteral("codec"));
+        QCOMPARE(codec.size(), 2);
+        QCOMPARE(codec.last().value(QLatin1String("reason")).toString(), QStringLiteral("encoder unavailable"));
+        QCOMPARE(codec.last().value(QLatin1String("codec")).toString(), QStringLiteral("hevc"));
+
+        // The CPU guard: a preset step (no codec change) and a step away from the codec.
+        CodecPolicy::Decision preset;
+        preset.choice = {CodecPolicy::Family::Hevc, false};
+        preset.settings = {false, CodecPolicy::Preset::Balanced, f.stream()->encoderSettings()->targetKbps, 30};
+        preset.settingsChanged = true;
+        preset.restartsEncoder = true;
+        preset.settingsReason = QStringLiteral("CPU guard: software hevc at 82% of the frame budget (p95); preset balanced");
+        f.stream()->applyCodecDecision(preset);
+        QCOMPARE(events(QStringLiteral("cpu-guard")).size(), 1);
+        QCOMPARE(events(QStringLiteral("cpu-guard")).last().value(QLatin1String("reason")).toString(), preset.settingsReason);
+        QCOMPARE(events(QStringLiteral("codec")).size(), 2); // not a codec switch
+
+        CodecPolicy::Decision away = CodecPolicy::makeDecision({CodecPolicy::Family::Avc, false}, true,
+                                                               QStringLiteral("CPU guard: software hevc at 91% of the frame budget (p95); not retried for 5 min"));
+        away.settings = {false, CodecPolicy::Preset::Efficient, 0, 0};
+        away.settingsChanged = true;
+        f.stream()->applyCodecDecision(away);
+        codec = events(QStringLiteral("codec"));
+        QCOMPARE(codec.size(), 3);
+        QVERIFY(codec.last().value(QLatin1String("reason")).toString().startsWith(QLatin1String("CPU guard")));
+        QCOMPARE(events(QStringLiteral("cpu-guard")).size(), 2);
+        QCOMPARE(events(QStringLiteral("throttle")).size(), 2); // back to 60 fps
+
+        // A bitrate reopen that is not the guard: `settings`.
+        CodecPolicy::Decision bitrate;
+        bitrate.choice = {CodecPolicy::Family::Avc, false};
+        bitrate.settings = {false, CodecPolicy::Preset::Efficient, 0, 0};
+        bitrate.settings.targetKbps = 3000;
+        bitrate.settingsChanged = true;
+        bitrate.restartsEncoder = true;
+        bitrate.settingsReason = QStringLiteral("target bitrate 3000 kbit/s");
+        f.stream()->applyCodecDecision(bitrate);
+        QCOMPARE(events(QStringLiteral("settings")).size(), 1);
+
+        // The encoder that really runs: a backend report is an event once per change.
+        f.stream()->encoderBackendReported(VideoCodec::Avc420, false);
+        f.stream()->encoderBackendReported(VideoCodec::Avc420, false);
+        codec = events(QStringLiteral("codec"));
+        QCOMPARE(codec.size(), 4);
+        QCOMPARE(codec.last().value(QLatin1String("reason")).toString(), QStringLiteral("encoder backend: software"));
+
+        // Events and samples share one sequence.
+        for (int i = 1; i < sent.size(); ++i) {
+            QCOMPARE(sent.at(i).value(QLatin1String("seq")).toInteger(), sent.at(i - 1).value(QLatin1String("seq")).toInteger() + 1);
+        }
+        f.stream()->setStatsSubscription(0);
+    }
+
+    // What a sample reads from a real stream.
+    void statsSnapshotFollowsThePolicy()
+    {
+        Fixture f;
+        f.stream()->setEncoderPolicy(hal(), CodecPolicy::SoftwareEncoding::Auto);
+        f.stream()->setQualityCap(70);
+        auto s = f.stream()->statsSnapshot();
+        QVERIFY(s.codec.isEmpty()); // no caps, no codec request yet
+        QVERIFY(!s.hardware);
+        QVERIFY(!s.adaptive);
+        QCOMPARE(s.mode, QStringLiteral("auto"));
+        QCOMPARE(s.guardState, QStringLiteral("ok"));
+        QVERIFY(s.surfaces.isEmpty());
+        f.stream()->setPrivateCodecPolicy({VideoCodec::Hevc}, false);
+        s = f.stream()->statsSnapshot();
+        QCOMPARE(s.codec, QStringLiteral("hevc"));
+        QCOMPARE(s.chroma, QStringLiteral("420"));
+        QCOMPARE(s.hardware, std::optional<bool>(true));
+        QVERIFY(s.preset.isEmpty()); // hardware
+        QCOMPARE(s.adaptive, std::optional<bool>(false));
+        QCOMPARE(s.qualityCap, 70);
+        QCOMPARE(s.frameRateCap, 60);
+        QCOMPARE(s.encoderRestarts, std::optional<quint64>(0));
+        QVERIFY(!s.encodeLoadP95);
+        QVERIFY(!s.framesSkipped);
+        // A worker's EncoderStats (stage 6) and a measured encode time.
+        f.stream()->addWorkerEncoderStats(30, 2, 4.2);
+        s = f.stream()->statsSnapshot();
+        QCOMPARE(s.framesSkipped, std::optional<quint64>(2));
+        QCOMPARE(s.framesEncoded, quint64(30));
+        QCOMPARE(s.encodeMs, std::optional<double>(4.2));
+        // Stage 7: no QoE acknowledgement yet.
+        QVERIFY(!f.stream()->clientQoe());
+        QCOMPARE(s.qoeFrames, quint64(0));
     }
 };
 

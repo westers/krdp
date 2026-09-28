@@ -53,6 +53,10 @@ target_sources(KRdp PRIVATE
     NetworkDetection.h
     CodecRequest.cpp
     CodecRequest.h
+    StatsReporter.cpp
+    StatsReporter.h
+    StatsRequest.cpp
+    StatsRequest.h
     EncoderSupport.cpp
     EncoderSupport.h
     EncoderSelection.h

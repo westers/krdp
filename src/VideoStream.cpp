@@ -10,6 +10,7 @@
 #include "VideoStream.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -38,6 +39,7 @@
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
+#include "StatsReporter.h"
 #include "SurfaceChain.h"
 
 #include "krdp_logging.h"
@@ -265,9 +267,10 @@ uint32_t gfxFrameAcknowledge(RdpgfxServerContext *context, const RDPGFX_FRAME_AC
     return stream->onFrameAcknowledge(frameAcknowledge);
 }
 
-uint32_t gfxQoEFrameAcknowledge(RdpgfxServerContext *, const RDPGFX_QOE_FRAME_ACKNOWLEDGE_PDU *)
+uint32_t gfxQoEFrameAcknowledge(RdpgfxServerContext *context, const RDPGFX_QOE_FRAME_ACKNOWLEDGE_PDU *qoe)
 {
-    return CHANNEL_RC_OK;
+    auto stream = reinterpret_cast<VideoStream *>(context->custom);
+    return stream->onQoeFrameAcknowledge(qoe);
 }
 
 struct Surface {
@@ -482,6 +485,39 @@ public:
     std::atomic<quint64> statKeyFrameRequests = 0;
     std::atomic<quint64> statKeyFramesDeferred = 0;
     std::atomic<bool> statSuspended = false;
+    // KRDPCTL `stats` (StatsReporter): what samples read besides flowStats(). The counters only
+    // grow and cost one relaxed add per frame whether or not anyone is subscribed.
+    std::unique_ptr<StatsReporter> stats;
+    std::atomic<quint64> statBytesSent = 0;
+    std::atomic<quint64> statKeyFramesSent = 0;
+    std::array<std::atomic<quint64>, MaxMonitorLayoutCount> statSurfaceSent{};
+    std::array<std::atomic<quint64>, MaxMonitorLayoutCount> statSurfaceCoalesced{};
+    std::array<std::atomic<quint64>, MaxMonitorLayoutCount> statSurfaceKeyFrames{};
+    std::atomic<qint64> desktopSize = 0; ///< width << 32 | height of the last ResetGraphics
+    // Stage 7: RDPGFX QoE frame acknowledgements (peer thread).
+    std::atomic<quint64> qoeFrames = 0;
+    std::atomic<quint64> qoeDecodeMs = 0;
+    std::atomic<quint64> qoeRenderMs = 0;
+    std::atomic<quint32> qoeLastFrame = 0;
+    std::atomic<quint32> qoeLastTimes = 0; ///< timeDiffSE << 16 | timeDiffEDR
+    // Main thread: the last congestion verdict, the backend an encoder last reported, and what a
+    // worker's EncoderStats and a measured encode time said.
+    bool statCongested = false;
+    std::optional<std::pair<int, bool>> reportedBackend; ///< codec family, hardware
+    bool workerStats = false;
+    quint64 workerFramesEncoded = 0;
+    quint64 workerFramesSkipped = 0;
+    std::optional<double> measuredEncodeMs;
+    clk::steady_clock::time_point measuredEncodeAt{};
+    // Any thread: the backend stats events carry (-1 = unknown), refreshed on the main thread.
+    std::atomic<int> statsBackend = -1;
+
+    void countSurfaceCoalesced(int monitorIndex, quint64 count = 1)
+    {
+        if (monitorIndex >= 0 && monitorIndex < MaxMonitorLayoutCount) {
+            statSurfaceCoalesced[size_t(monitorIndex)].fetch_add(count, std::memory_order_relaxed);
+        }
+    }
 
     FrameQueuePolicy::WindowLimits windowLimits() const
     {
@@ -553,6 +589,20 @@ VideoStream::VideoStream(RdpConnection *session)
     d->adaptiveTimer.setInterval(QualityUpdateInterval);
     d->adaptiveTimer.setTimerType(Qt::CoarseTimer);
     connect(&d->adaptiveTimer, &QTimer::timeout, this, &VideoStream::updateAdaptiveQuality);
+
+    d->stats = std::make_unique<StatsReporter>(
+        [this] {
+            return statsSnapshot();
+        },
+        [this](const QJsonObject &record) {
+            // Only a KRDPCTL client ever subscribes; the subscription ends with its channel.
+            if (!d->session->hasControlChannel()) {
+                return false;
+            }
+            d->session->sendControlRecord(record);
+            return true;
+        });
+    connect(d->stats.get(), &StatsReporter::subscriptionChanged, this, &VideoStream::statsSubscriptionChanged);
 }
 
 VideoStream::~VideoStream()
@@ -738,6 +788,7 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
         if (d->starved(frame.monitorIndex)) {
             if (!frame.isKeyFrame || frame.data.isEmpty()) {
                 d->statDropped.fetch_add(1, std::memory_order_relaxed);
+                d->countSurfaceCoalesced(frame.monitorIndex);
                 d->droppedSinceDecision.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
@@ -783,6 +834,9 @@ bool VideoStream::requestRefresh()
     const int surfaces = std::max(1, d->surfaceCount.load());
     qCInfo(KRDP) << "Client asked for a refresh; requesting a keyframe for" << surfaces << "surface(s)";
     d->statKeyFrameRequests.fetch_add(1, std::memory_order_relaxed);
+    d->stats->event(Stats::EventKind::KeyFrame, [this, surfaces] {
+        return statsDetail(QStringLiteral("keyframe requested for %1 surface(s): the client asked for a refresh").arg(surfaces));
+    });
     for (int monitor = 0; monitor < surfaces; ++monitor) {
         Q_EMIT keyFrameRequested(monitor);
     }
@@ -939,6 +993,11 @@ std::optional<VideoCodec> privateCodecOf(CodecPolicy::Family family)
     }
     return std::nullopt;
 }
+/// A codec-policy reason that is one of the CPU guard's own steps (not a retry after a hold).
+bool isGuardStep(const QString &reason)
+{
+    return reason.startsWith(QLatin1String("CPU guard")) && !reason.startsWith(QLatin1String("CPU guard: retrying"));
+}
 qint64 processCpuNs()
 {
     timespec ts{};
@@ -992,6 +1051,11 @@ CodecPolicy::Decision VideoStream::setPrivateCodecPolicy(const QVector<VideoCode
     const auto decision = CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now());
     applyEncoderSettings(decision.settings);
     setPrivateCodec(privateCodecOf(decision.choice.family));
+    d->stats->setSlowLink(d->codecPolicy.slowLink);
+    updateStatsBackend();
+    d->stats->event(Stats::EventKind::Codec, [this, &decision] {
+        return statsDetail(decision.reason.isEmpty() ? QStringLiteral("the client's codec request") : decision.reason);
+    });
     qCInfo(KRDP).nospace() << "Codec policy (" << CodecPolicy::softwareEncodingName(d->softwareEncoding) << "): "
                            << CodecPolicy::familyName(decision.choice.family) << (decision.choice.hardware ? " in hardware" : " in software")
                            << " for a client decoding avc" << (d->clientFamilies.contains(CodecPolicy::Family::Hevc) ? "+hevc" : "")
@@ -1087,6 +1151,13 @@ void VideoStream::applyCodecDecision(const CodecPolicy::Decision &decision)
                                                                                : QString()));
         }
         applyEncoderSettings(decision.settings);
+        if (!decision.changed) {
+            // A preset step, a bitrate reopen, a frame-rate cap: the CPU guard's own steps are
+            // `cpu-guard`, the rest `settings`.
+            d->stats->event(isGuardStep(decision.settingsReason) ? Stats::EventKind::CpuGuard : Stats::EventKind::Settings, [this, &decision] {
+                return statsDetail(decision.settingsReason);
+            });
+        }
     }
     if (!decision.changed) {
         return;
@@ -1099,6 +1170,15 @@ void VideoStream::applyCodecDecision(const CodecPolicy::Decision &decision)
                                   .arg(QLatin1String(CodecPolicy::familyName(decision.choice.family)),
                                        decision.choice.hardware ? QStringLiteral("hardware") : QStringLiteral("software"),
                                        decision.reason);
+    updateStatsBackend();
+    d->stats->event(Stats::EventKind::Codec, [this, &decision] {
+        return statsDetail(decision.reason);
+    });
+    if (isGuardStep(decision.reason)) {
+        d->stats->event(Stats::EventKind::CpuGuard, [this, &decision] {
+            return statsDetail(decision.reason);
+        });
+    }
     // Unsolicited: no requestId. Only our own client ever gets here (it sent `codec`).
     d->session->sendControlRecord(LayoutControl::codecRecord(QString::fromLatin1(CodecPolicy::familyName(decision.choice.family)),
                                                              decision.choice.hardware,
@@ -1126,6 +1206,10 @@ void VideoStream::refreshFrameRate()
     const int rate = d->deliveryThrottle.rate(d->policyFrameRate);
     if (d->requestedFrameRate.exchange(rate) != rate) {
         qCInfo(KRDP) << "Video frame rate:" << rate << "fps" << (d->deliveryThrottle.active() ? "(throttled to what the client takes)" : "");
+        d->stats->event(Stats::EventKind::Throttle, [this, rate] {
+            return statsDetail(d->deliveryThrottle.active() ? QStringLiteral("frame rate %1 fps: throttled to what the client takes").arg(rate)
+                                                            : QStringLiteral("frame rate %1 fps").arg(rate));
+        });
         Q_EMIT requestedFrameRateChanged();
     }
 }
@@ -1138,6 +1222,15 @@ std::optional<CodecPolicy::EncoderSettings> VideoStream::encoderSettings() const
 void VideoStream::encoderBackendReported(VideoCodec codec, bool hardware)
 {
     qCInfo(KRDP).noquote() << QStringLiteral("Encoder backend: %1 in %2").arg(QLatin1String(VideoCodecSupport::codecName(codec)), hardware ? QStringLiteral("hardware") : QStringLiteral("software"));
+    // Stats (every client, a stock codec choice included): the backend that really encodes.
+    const std::pair<int, bool> reported{int(familyOf(codec)), hardware};
+    if (d->reportedBackend != reported) {
+        d->reportedBackend = reported;
+        updateStatsBackend();
+        d->stats->event(Stats::EventKind::Codec, [this, hardware] {
+            return statsDetail(QStringLiteral("encoder backend: %1").arg(hardware ? QStringLiteral("hardware") : QStringLiteral("software")));
+        });
+    }
     if (!d->codecPolicyActive || !d->codecPolicy.current || d->codecPolicy.current->family != familyOf(codec)) {
         return; // a stock client (nothing announced), or a report from before a codec switch
     }
@@ -1156,6 +1249,7 @@ void VideoStream::encoderBackendReported(VideoCodec codec, bool hardware)
                                           announced ? QStringLiteral("hardware") : QStringLiteral("software"));
     d->codecPolicy.current->hardware = hardware;
     d->codecPolicy.applied.hardware = hardware;
+    updateStatsBackend();
     if (d->encoderSettings) {
         auto settings = *d->encoderSettings;
         settings.hardware = hardware; // the sessions do not restart for what already runs
@@ -1219,9 +1313,18 @@ void VideoStream::stepCodecPolicy(bool congested)
     if (!d->codecPolicy.current->hardware) {
         in.encodeLoadP95 = d->encodeLoad.p95();
     }
+    const bool wasSlow = d->codecPolicy.slowLink;
     const auto decision = CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now());
     if (!decision.changed && !decision.reason.isEmpty()) {
         qCDebug(KRDP).noquote() << "Codec policy:" << decision.reason;
+    }
+    if (d->codecPolicy.slowLink != wasSlow) {
+        d->stats->setSlowLink(d->codecPolicy.slowLink); // samples at 1 Hz on a slow link
+        d->stats->event(Stats::EventKind::SlowLink, [this, &decision, &in] {
+            const QString goodput = in.bandwidthKbps ? QStringLiteral(" (%1 kbit/s)").arg(*in.bandwidthKbps) : QString();
+            const bool linkReason = decision.reason.contains(QLatin1String("slow link")) || decision.reason.contains(QLatin1String("link recovered"));
+            return statsDetail(linkReason ? decision.reason : (d->codecPolicy.slowLink ? QStringLiteral("slow link") : QStringLiteral("link recovered")) + goodput);
+        });
     }
     applyCodecDecision(decision);
 }
@@ -1316,6 +1419,7 @@ void VideoStream::updateAdaptiveQuality()
     const qint64 heldNs = d->heldNsSinceDecision.exchange(0);
     const int coalesced = d->droppedSinceDecision.exchange(0);
     const bool windowPressure = clk::nanoseconds(heldNs) >= WindowPressureHeld || coalesced > 0;
+    d->statCongested = windowPressure;
     updateDeliveryThrottle(windowPressure);
 
     std::optional<bool> policyCongested;
@@ -1339,6 +1443,7 @@ void VideoStream::updateAdaptiveQuality()
                                                              clk::duration_cast<clk::microseconds>(network->minimumRTT()))
             || pending >= d->backlogFrames.load() || windowPressure;
         policyCongested = congested;
+        d->statCongested = congested;
     }
     const bool audioPriority = d->session->audioPriorityActive();
     if (!d->adaptiveQuality.load() && !audioPriority) {
@@ -1404,6 +1509,7 @@ void VideoStream::updateAdaptiveQuality()
     }
     const quint8 bounded = quint8(std::min<int>(result.next, d->qualityCap.load()));
     const bool chromaChanged = chromaAvailable && result.chromaEnabled != chromaNow;
+    d->statCongested = d->statCongested || result.congested || backlogged;
     if (bounded < current || (chromaChanged && !result.chromaEnabled)) {
         d->lastStepDown = now; // shedding chroma is a step down: the climb hold applies to it too
     }
@@ -1420,6 +1526,17 @@ void VideoStream::updateAdaptiveQuality()
                   << "us, pending min-after-ack" << (minAfterAck == std::numeric_limits<int>::max() ? -1 : minAfterAck) << "now" << pendingNow
                   << ", window held" << clk::duration_cast<clk::milliseconds>(clk::nanoseconds(heldNs)).count() << "ms, coalesced" << coalesced << ", goodput" << network->bandwidth() << "kbit/s, cap"
                   << d->qualityCap.load() << ")";
+    d->stats->event(Stats::EventKind::Quality, [&] {
+        QStringList what;
+        if (bounded != current) {
+            what << QStringLiteral("quality %1 -> %2 (cap %3)").arg(current).arg(bounded).arg(d->qualityCap.load());
+        }
+        if (chromaChanged) {
+            what << (result.chromaEnabled ? QStringLiteral("chroma stream restored") : QStringLiteral("chroma stream shed"));
+        }
+        return statsDetail(what.join(QStringLiteral("; ")) + QStringLiteral(": ")
+                           + (result.congested ? QStringLiteral("congested") : (backlogged ? QStringLiteral("the client is behind") : QStringLiteral("clear"))));
+    });
     if (chromaChanged) {
         Q_EMIT requestedChromaChanged(result.chromaEnabled);
     }
@@ -1663,6 +1780,7 @@ bool VideoStream::performReset(const QSize &desktopSize, const QVector<VideoMoni
 
     d->surfacePixels = totalPixels;
     d->surfaceCount = std::max<int>(1, surfaces.size());
+    d->desktopSize = (qint64(desktopSize.width()) << 32) | qint64(quint32(desktopSize.height()));
     // resize() keeps the timestamps of the surfaces that survive this reset,
     // so a reset storm still cannot ask the encoder for more than one keyframe
     // per KeyFrameRequestMinInterval per surface.
@@ -1725,8 +1843,12 @@ void VideoStream::holdFrames(clk::steady_clock::time_point now)
     int dropped = 0;
     {
         std::lock_guard lock(d->frameQueueMutex);
-        const auto coalesce = [&](int, int count) {
-            return FrameQueuePolicy::shouldCoalesce(count, keyFrameHold);
+        const auto coalesce = [&](int monitor, int count) {
+            const bool drop = FrameQueuePolicy::shouldCoalesce(count, keyFrameHold);
+            if (drop) {
+                d->countSurfaceCoalesced(monitor, quint64(count));
+            }
+            return drop;
         };
         dropped = FrameQueuePolicy::coalesceHeldFrames(d->frameQueue, coalesce, starved);
         for (const int monitor : starved) {
@@ -1741,6 +1863,15 @@ void VideoStream::holdFrames(clk::steady_clock::time_point now)
     if (dropped > 0) {
         d->statDropped.fetch_add(quint64(dropped), std::memory_order_relaxed);
         d->droppedSinceDecision.fetch_add(dropped, std::memory_order_relaxed);
+        d->stats->event(Stats::EventKind::Coalesce, [this, dropped, &starved] {
+            QStringList monitors;
+            for (const int monitor : starved) {
+                monitors << QString::number(monitor);
+            }
+            return statsDetail(QStringLiteral("the client is behind: dropped %1 queued frame(s) of monitor %2, keyframe requested")
+                                   .arg(dropped)
+                                   .arg(monitors.join(QLatin1Char(','))));
+        });
         if (d->lastWindowLog == clk::steady_clock::time_point{} || now - d->lastWindowLog >= WindowLogInterval) {
             d->lastWindowLog = now;
             const auto limits = d->windowLimits();
@@ -1815,6 +1946,15 @@ void VideoStream::requestStarvedKeyFrames(clk::steady_clock::time_point now)
                          << "were coalesced while its keyframe is still unacknowledged; the next keyframe is requested once it is";
         }
     }
+    if (!request.empty()) {
+        d->stats->event(Stats::EventKind::KeyFrame, [this, &request] {
+            QStringList monitors;
+            for (const int monitor : request) {
+                monitors << QString::number(monitor);
+            }
+            return statsDetail(QStringLiteral("keyframe requested for monitor %1: its frames were coalesced").arg(monitors.join(QLatin1Char(','))));
+        });
+    }
     for (const int monitor : request) {
         // Outside the lock, like sendFrame()'s request. The encoder answers with an IDR of
         // the newest picture (KPipeWire re-feeds the last captured frame for a request), so
@@ -1847,6 +1987,7 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
             qCInfo(KRDP) << "Dropping queued" << VideoCodecSupport::codecName(*frame.codec) << "frames: the connection now sends" << VideoCodecSupport::codecName(codec);
         }
         d->statDropped.fetch_add(1, std::memory_order_relaxed);
+        d->countSurfaceCoalesced(frame.monitorIndex);
         return true;
     }
     d->droppedAtSendFamily = -1;
@@ -1974,6 +2115,7 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
                     }
                 }
                 d->statDropped.fetch_add(1, std::memory_order_relaxed);
+                d->countSurfaceCoalesced(frame.monitorIndex);
                 const auto now = clk::steady_clock::now();
                 auto &lastRequest = d->lastKeyFrameRequest[frame.monitorIndex];
                 if (lastRequest == clk::steady_clock::time_point{} || (now - lastRequest) >= KeyFrameRequestMinInterval) {
@@ -2030,6 +2172,17 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         }
     }
     d->statSent.fetch_add(1, std::memory_order_relaxed);
+    d->statBytesSent.fetch_add(quint64(frame.data.size() + frame.aux.size()), std::memory_order_relaxed);
+    const bool keyFrame = frame.isKeyFrame && !frame.data.isEmpty();
+    if (keyFrame) {
+        d->statKeyFramesSent.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (frame.monitorIndex >= 0 && frame.monitorIndex < MaxMonitorLayoutCount) {
+        d->statSurfaceSent[size_t(frame.monitorIndex)].fetch_add(1, std::memory_order_relaxed);
+        if (keyFrame) {
+            d->statSurfaceKeyFrames[size_t(frame.monitorIndex)].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 
     RDPGFX_START_FRAME_PDU startFramePdu;
     RDPGFX_END_FRAME_PDU endFramePdu;
@@ -2048,6 +2201,220 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
     d->gfxContext->EndFrame(d->gfxContext.get(), &endFramePdu);
 
     return true;
+}
+
+uint32_t VideoStream::onQoeFrameAcknowledge(const RDPGFX_QOE_FRAME_ACKNOWLEDGE_PDU *qoe)
+{
+    // Stage 7 (MS-RDPEGFX 2.2.2.21): the standard way a client tells the server how long its
+    // decode (timeDiffSE) and the step to the screen (timeDiffEDR) took. Recorded for the stats.
+    if (!qoe) {
+        return CHANNEL_RC_OK;
+    }
+    d->qoeDecodeMs.fetch_add(qoe->timeDiffSE, std::memory_order_relaxed);
+    d->qoeRenderMs.fetch_add(qoe->timeDiffEDR, std::memory_order_relaxed);
+    d->qoeLastFrame.store(qoe->frameId, std::memory_order_relaxed);
+    d->qoeLastTimes.store((quint32(qoe->timeDiffSE) << 16) | qoe->timeDiffEDR, std::memory_order_relaxed);
+    d->qoeFrames.fetch_add(1, std::memory_order_release);
+    return CHANNEL_RC_OK;
+}
+
+std::optional<VideoStream::ClientQoe> VideoStream::clientQoe() const
+{
+    if (d->qoeFrames.load(std::memory_order_acquire) == 0) {
+        return std::nullopt;
+    }
+    const quint32 times = d->qoeLastTimes.load(std::memory_order_relaxed);
+    return ClientQoe{d->qoeLastFrame.load(std::memory_order_relaxed), quint16(times >> 16), quint16(times & 0xffff)};
+}
+
+int VideoStream::setStatsSubscription(int rateHz)
+{
+    if (rateHz <= 0) {
+        d->stats->unsubscribe();
+        return 0;
+    }
+    d->stats->setSlowLink(d->codecPolicy.slowLink);
+    return d->stats->subscribe(rateHz);
+}
+
+StatsReporter *VideoStream::statsReporter() const
+{
+    return d->stats.get();
+}
+
+bool VideoStream::statsSubscribed() const
+{
+    return d->stats->subscribed();
+}
+
+void VideoStream::addWorkerEncoderStats(quint32 framesEncoded, quint32 framesSkipped, std::optional<double> encodeMs)
+{
+    if (!d->workerStats) {
+        // The first report: the totals start from what this process counted so far, so the
+        // next sample's delta is the worker's interval, not everything before it.
+        d->workerStats = true;
+        d->workerFramesEncoded = quint64(std::max(d->framesEncoded.load(), 0));
+    }
+    d->workerFramesEncoded += framesEncoded;
+    d->workerFramesSkipped += framesSkipped;
+    if (encodeMs) {
+        setMeasuredEncodeTime(*encodeMs);
+    }
+}
+
+void VideoStream::setMeasuredEncodeTime(double ms)
+{
+    if (!std::isfinite(ms) || ms < 0) {
+        return;
+    }
+    d->measuredEncodeMs = ms;
+    d->measuredEncodeAt = clk::steady_clock::now();
+}
+
+std::optional<bool> VideoStream::statsHardware() const
+{
+    if (d->codecPolicyActive && d->codecPolicy.current) {
+        return d->codecPolicy.current->hardware;
+    }
+    if (d->reportedBackend && d->reportedBackend->first == int(familyOf(codecForSessions()))) {
+        return d->reportedBackend->second;
+    }
+    return std::nullopt;
+}
+
+void VideoStream::updateStatsBackend()
+{
+    const auto hardware = statsHardware();
+    d->statsBackend = hardware ? int(*hardware) : -1;
+}
+
+Stats::EventDetail VideoStream::statsDetail(const QString &reason) const
+{
+    Stats::EventDetail detail;
+    detail.reason = reason;
+    if (const auto codec = negotiatedCodec()) {
+        detail.codec = QString::fromLatin1(CodecPolicy::familyName(familyOf(*codec)));
+    }
+    if (const int backend = d->statsBackend.load(std::memory_order_relaxed); backend >= 0) {
+        detail.hardware = backend != 0;
+    }
+    return detail;
+}
+
+Stats::Snapshot VideoStream::statsSnapshot() const
+{
+    // Main thread (the reporter's timer): the codec policy state is read where it is written.
+    Stats::Snapshot s;
+    const auto now = clk::steady_clock::now();
+    if (const auto codec = negotiatedCodec()) {
+        s.codec = QString::fromLatin1(CodecPolicy::familyName(familyOf(*codec)));
+        s.chroma = VideoCodecSupport::isAvc444(*codec) ? QStringLiteral("444") : QStringLiteral("420");
+    }
+    s.hardware = statsHardware();
+    if (s.hardware && !*s.hardware && !s.codec.isEmpty()) {
+        s.preset = Stats::encoderPresetName(s.codec, d->encoderSettings ? int(d->encoderSettings->preset) : 0);
+    }
+    if (const qint64 packed = d->desktopSize.load(); packed > 0) {
+        s.size = QSize(int(packed >> 32), int(packed & 0xffffffff));
+    }
+    s.frameRate = d->requestedFrameRate.load();
+    s.frameRateCap = d->policyFrameRate;
+    s.quality = d->quality.load();
+    s.qualityCap = d->qualityCap.load();
+    if (d->encoderSettings && d->encoderSettings->targetKbps > 0) {
+        s.targetKbps = d->encoderSettings->targetKbps;
+    }
+    s.bytesSent = d->statBytesSent.load();
+    s.framesSent = d->statSent.load();
+    s.framesAcked = d->statAcknowledged.load();
+    s.coalesced = d->statDropped.load();
+    s.keyframes = d->statKeyFramesSent.load();
+    s.keyframeRequests = d->statKeyFrameRequests.load();
+    if (d->codecPolicyActive) {
+        s.encoderRestarts = quint64(std::max(d->codecPolicy.encoderRestarts, 0));
+    }
+    s.framesEncoded = d->workerStats ? d->workerFramesEncoded : quint64(std::max(d->framesEncoded.load(), 0));
+    if (d->workerStats) {
+        s.framesSkipped = d->workerFramesSkipped;
+    }
+    if (d->codecPolicyActive && d->codecPolicy.current && !d->codecPolicy.current->hardware) {
+        s.encodeLoadP95 = d->encodeLoad.p95();
+    }
+    if (d->measuredEncodeMs && now - d->measuredEncodeAt <= clk::seconds(5)) {
+        s.encodeMs = d->measuredEncodeMs;
+    } else if (s.encodeLoadP95) {
+        s.encodeMs = *s.encodeLoadP95 * 1000.0 / std::max(1, s.frameRate); // the CPU guard's estimate
+    }
+
+    s.inFlight = d->statInFlight.load();
+    s.window = d->statWindowFrames.load();
+    s.windowBytes = d->statWindowBytes.load();
+    if (const qint64 ack = d->windowAckLatencyUs.load(); ack > 0) {
+        s.ackLatencyMs = double(ack) / 1000.0;
+    }
+    s.acksSuspended = d->statSuspended.load();
+    s.throttled = d->deliveryThrottle.active();
+    s.qoeFrames = d->qoeFrames.load(std::memory_order_acquire);
+    s.qoeDecodeMs = d->qoeDecodeMs.load(std::memory_order_relaxed);
+    s.qoeRenderMs = d->qoeRenderMs.load(std::memory_order_relaxed);
+
+    const auto plausibleMs = [](auto duration) -> std::optional<double> {
+        const double ms = clk::duration<double, std::milli>(duration).count();
+        return ms > 0 && ms < 60000 ? std::optional<double>(ms) : std::nullopt;
+    };
+    const auto tcp = d->session->tcpInfo();
+    if (auto *network = d->session->networkDetection()) {
+        s.rttMs = plausibleMs(network->averageRTT());
+        s.rttMinMs = plausibleMs(network->minimumRTT());
+        s.goodputSamples = network->validBandwidthSamples();
+        if (s.goodputSamples > 0) {
+            s.goodputKbps = network->bandwidth();
+        }
+    }
+    if (tcp) {
+        if (!s.rttMs && tcp->rttUs > 0) {
+            s.rttMs = double(tcp->rttUs) / 1000.0;
+        }
+        s.rttVarMs = double(tcp->rttVarUs) / 1000.0;
+        s.retransmits = tcp->totalRetransmits;
+    }
+    if (const qint64 queued = d->session->socketQueuedBytes(); queued >= 0) {
+        s.sendQueueBytes = queued;
+    }
+    s.congested = d->statCongested;
+    s.slow = d->codecPolicy.slowLink;
+
+    s.mode = QString::fromLatin1(CodecPolicy::softwareEncodingName(d->softwareEncoding));
+    if (d->codecPolicyActive) {
+        s.adaptive = d->codecPolicyAdaptive;
+        std::optional<qint64> retry;
+        for (const auto family : {CodecPolicy::Family::Avc, CodecPolicy::Family::Hevc, CodecPolicy::Family::Av1}) {
+            const auto until = d->codecPolicy.softwareBlockedUntil[size_t(family)];
+            if (now < until) {
+                s.heldBack << QString::fromLatin1(CodecPolicy::familyName(family));
+                const qint64 seconds = clk::duration_cast<clk::seconds>(until - now + clk::milliseconds(999)).count();
+                retry = retry ? std::min(*retry, seconds) : seconds;
+            }
+        }
+        if (retry) {
+            s.retryInS = int(std::min<qint64>(*retry, std::numeric_limits<int>::max()));
+        }
+        const auto &current = d->codecPolicy.current;
+        const bool stepped = current && !current->hardware
+            && ((current->family != CodecPolicy::Family::Avc && d->codecPolicy.preset != CodecPolicy::Preset::Efficient) || d->codecPolicy.guardFrameRate);
+        s.guardState = stepped ? QStringLiteral("stepped") : !s.heldBack.isEmpty() ? QStringLiteral("holding") : QStringLiteral("ok");
+    }
+
+    const int surfaces = d->surfacePixels.load() > 0 ? std::clamp(d->surfaceCount.load(), 1, MaxMonitorLayoutCount) : 0;
+    s.surfaces.reserve(surfaces);
+    for (int i = 0; i < surfaces; ++i) {
+        s.surfaces.append(Stats::SurfaceCounters{
+            d->statSurfaceSent[size_t(i)].load(std::memory_order_relaxed),
+            d->statSurfaceCoalesced[size_t(i)].load(std::memory_order_relaxed),
+            d->statSurfaceKeyFrames[size_t(i)].load(std::memory_order_relaxed),
+        });
+    }
+    return s;
 }
 }
 

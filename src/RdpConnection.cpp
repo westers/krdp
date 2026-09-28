@@ -33,6 +33,9 @@
 
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <cstddef>
 
 #include <linux/sockios.h>
 
@@ -969,6 +972,19 @@ qint64 RdpConnection::socketQueuedBytes() const
         return -1;
     }
     return queued;
+}
+
+std::optional<RdpConnection::TcpInfo> RdpConnection::tcpInfo() const
+{
+    if (d->socketHandle < 0 || d->state == State::Closed) {
+        return std::nullopt;
+    }
+    tcp_info info{};
+    socklen_t length = sizeof(info);
+    if (::getsockopt(int(d->socketHandle), IPPROTO_TCP, TCP_INFO, &info, &length) != 0 || length < offsetof(tcp_info, tcpi_total_retrans) + sizeof(info.tcpi_total_retrans)) {
+        return std::nullopt;
+    }
+    return TcpInfo{qint64(info.tcpi_rtt), qint64(info.tcpi_rttvar), quint64(info.tcpi_total_retrans)};
 }
 
 NetworkDetection *RdpConnection::networkDetection() const

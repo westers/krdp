@@ -26,10 +26,18 @@
 #include "VideoFrame.h"
 #include "krdp_export.h"
 
+class VideoStreamCodecTest;
+
 namespace KRdp
 {
 
 class RdpConnection;
+class StatsReporter;
+namespace Stats
+{
+struct Snapshot;
+struct EventDetail;
+}
 
 /**
  * A class that encapsulates an RdpGfx video stream.
@@ -256,6 +264,41 @@ public:
     FlowStats flowStats() const;
 
     /**
+     * KRDPCTL `stats` (STATS-PANEL-DESIGN.md §5): \a rateHz > 0 subscribes this connection to
+     * `stats-sample` records at that rate (clamped to 1-4 Hz, 1 Hz while the link is slow) and to
+     * `stats-event` records; 0 unsubscribes. Returns the rate samples go out at (0 =
+     * unsubscribed). Main thread only. The subscription also ends when the control channel is gone.
+     */
+    int setStatsSubscription(int rateHz);
+    /// The connection's stats reporter (never null).
+    StatsReporter *statsReporter() const;
+    /// Whether a KRDPCTL client is subscribed to stats (a worker then sends EncoderStats).
+    bool statsSubscribed() const;
+    Q_SIGNAL void statsSubscriptionChanged(bool subscribed);
+    /**
+     * Stage 6 (EncoderStats): what the encoding worker reported for its last interval: frames its
+     * encoders produced, frames it did not forward, and a measured encode time per frame (nullopt =
+     * unknown). Main thread only.
+     */
+    void addWorkerEncoderStats(quint32 framesEncoded, quint32 framesSkipped, std::optional<double> encodeMs);
+    /// A measured per-frame encode time (e.g. the AVC444 encoder's timing report). Main thread only.
+    void setMeasuredEncodeTime(double ms);
+    /// What the next `stats-sample` would be built from (tests). Main thread only.
+    Stats::Snapshot statsSnapshot() const;
+    /**
+     * Stage 7: the last RDPGFX_QOE_FRAME_ACKNOWLEDGE_PDU the client sent (MS-RDPEGFX 2.2.2.21):
+     * timeDiffSE = ms from the start to the end of the frame's decode, timeDiffEDR = ms from the
+     * end of decoding to its render. nullopt before the client sent one. Any thread. `stats-sample`
+     * carries their averages over the interval (flow.clientDecodeMs / clientRenderMs).
+     */
+    struct ClientQoe {
+        quint32 frameId = 0;
+        quint16 timeDiffSE = 0;
+        quint16 timeDiffEDR = 0;
+    };
+    std::optional<ClientQoe> clientQoe() const;
+
+    /**
      * AUD-FIX5: emitted once, when the client acknowledged its first frame (or suspended
      * acknowledgements): it has the graphics pipeline up and a picture. From the FreeRDP peer
      * thread; connect with Qt::QueuedConnection. Clipboard waits for it before asking the client
@@ -276,13 +319,22 @@ public:
     void setChromaCapable(bool capable);
 
 private:
+    friend class ::VideoStreamCodecTest; // drives applyCodecDecision() with the CPU guard's decisions
     friend BOOL gfxChannelIdAssigned(RdpgfxServerContext *, uint32_t);
     friend uint32_t gfxCapsAdvertise(RdpgfxServerContext *, const RDPGFX_CAPS_ADVERTISE_PDU *);
     friend uint32_t gfxFrameAcknowledge(RdpgfxServerContext *, const RDPGFX_FRAME_ACKNOWLEDGE_PDU *);
+    friend uint32_t gfxQoEFrameAcknowledge(RdpgfxServerContext *, const RDPGFX_QOE_FRAME_ACKNOWLEDGE_PDU *);
 
     bool onChannelIdAssigned(uint32_t channelId);
     uint32_t onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdvertise);
     uint32_t onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frameAcknowledge);
+    uint32_t onQoeFrameAcknowledge(const RDPGFX_QOE_FRAME_ACKNOWLEDGE_PDU *qoe);
+    /// The backend of the encoder that runs for stats (the policy's, or the last report). Main thread.
+    std::optional<bool> statsHardware() const;
+    /// Refreshes the backend stats events made on other threads carry. Main thread.
+    void updateStatsBackend();
+    /// A stats event's detail: \a reason plus the codec and backend of the moment. Any thread.
+    Stats::EventDetail statsDetail(const QString &reason) const;
 
     // Driven by the main-thread adaptive timer, which fires every
     // QualityUpdateInterval while streaming (started in initialize(), stopped

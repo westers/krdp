@@ -84,6 +84,27 @@ class LayoutControlTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    // STATS-S5: the optional `stats` group (KRDPCTL-V2-CONTRACT.md (g)); absent unless set.
+    void capabilitiesStatsGroup()
+    {
+        ChannelCapabilities caps;
+        caps.host = QStringLiteral("physical");
+        const auto without = capabilitiesRecord(caps);
+        QVERIFY(!without.contains(QStringLiteral("stats")));
+        caps.stats = StatsCapabilities{};
+        const auto record = capabilitiesRecord(caps);
+        const auto stats = record.value(QStringLiteral("stats")).toObject();
+        QCOMPARE(stats, (QJsonObject{{QStringLiteral("maxRateHz"), 4}, {QStringLiteral("events"), true}, {QStringLiteral("tcp"), true}}));
+        QCOMPARE(record.value(QStringLiteral("protocol")).toInt(), ChannelProtocol);
+        caps.stats = StatsCapabilities{2, false, false};
+        const auto limited = capabilitiesRecord(caps).value(QStringLiteral("stats")).toObject();
+        QCOMPARE(limited.value(QStringLiteral("maxRateHz")).toInt(), 2);
+        QCOMPARE(limited.value(QStringLiteral("events")).toBool(true), false);
+        QCOMPARE(limited.value(QStringLiteral("tcp")).toBool(true), false);
+        // The whole record stays well inside the 64 KiB frame.
+        QVERIFY(frame(record).size() < 1024);
+    }
+
     void audioPriorityRequestValidation()
     {
         QJsonObject record{{QStringLiteral("type"), QStringLiteral("audio-priority")},
