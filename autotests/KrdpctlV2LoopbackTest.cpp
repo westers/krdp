@@ -231,6 +231,68 @@ private Q_SLOTS:
         QVERIFY(answer.value(u"ok"_s).toBool());
     }
 
+    // STATS-S6: a real client (krdpctl-probe) subscribes to stats on the virtual broker, gets
+    // `stats-sample` records at the rate it asked for, unsubscribes, and gets no more.
+    void statsSubscribeSamplesThenUnsubscribe()
+    {
+        Seen seen;
+        auto server = startServer(seen);
+        QVERIFY(server);
+        const QString bogus = writeJson(u"stats-bogus.json"_s, {{u"type"_s, u"stats"_s}, {u"v"_s, 1}, {u"requestId"_s, u"s0"_s},
+                                                             {u"action"_s, u"subscribe"_s}, {u"rateHz"_s, u"fast"_s}});
+        const QString subscribe = writeJson(u"stats-on.json"_s, {{u"type"_s, u"stats"_s}, {u"v"_s, 1}, {u"requestId"_s, u"s1"_s},
+                                                               {u"action"_s, u"subscribe"_s}, {u"rateHz"_s, 4}});
+        const QString unsubscribe = writeJson(u"stats-off.json"_s, {{u"type"_s, u"stats"_s}, {u"v"_s, 1}, {u"requestId"_s, u"s2"_s},
+                                                                  {u"action"_s, u"unsubscribe"_s}});
+        QByteArray out, err;
+        // bogus at once, subscribe 2 s later, unsubscribe 2 s after that, then 2+ s of silence.
+        const int code = runProbe(server->serverPort(), Password,
+                                  {u"--silent"_s, u"--raw"_s, bogus, u"--raw"_s, subscribe, u"--raw"_s, unsubscribe, u"--raw-gap"_s, u"2000"_s,
+                                   u"--timeout"_s, u"7"_s},
+                                  &out, &err);
+        QVERIFY2(code == 0, err.constData());
+        const auto records = replies(out);
+        QVERIFY2(!records.isEmpty(), out.constData());
+        QCOMPARE(records.first().value(u"type"_s).toString(), u"capabilities"_s);
+        QCOMPARE(records.first().value(u"stats"_s).toObject(),
+                 (QJsonObject{{u"maxRateHz"_s, 4}, {u"events"_s, true}, {u"tcp"_s, true}}));
+        qsizetype subscribed = -1, unsubscribed = -1;
+        for (qsizetype i = 0; i < records.size(); ++i) {
+            const auto &record = records.at(i);
+            if (record.value(u"requestId"_s) == u"s0"_s) {
+                QCOMPARE(record.value(u"type"_s).toString(), u"error"_s);
+                QCOMPARE(record.value(u"code"_s).toString(), u"invalid"_s);
+                QCOMPARE(subscribed, -1); // nothing subscribed by the bad request
+            } else if (record.value(u"requestId"_s) == u"s1"_s) {
+                QCOMPARE(record, (QJsonObject{{u"type"_s, u"stats"_s}, {u"v"_s, 1}, {u"requestId"_s, u"s1"_s}, {u"state"_s, u"subscribed"_s}, {u"rateHz"_s, 4}}));
+                subscribed = i;
+            } else if (record.value(u"requestId"_s) == u"s2"_s) {
+                QCOMPARE(record, (QJsonObject{{u"type"_s, u"stats"_s}, {u"v"_s, 1}, {u"requestId"_s, u"s2"_s}, {u"state"_s, u"unsubscribed"_s}}));
+                unsubscribed = i;
+            }
+        }
+        QVERIFY2(subscribed > 0 && unsubscribed > subscribed, out.constData());
+        QList<QJsonObject> samples;
+        for (qsizetype i = 0; i < records.size(); ++i) {
+            const bool sample = records.at(i).value(u"type"_s) == u"stats-sample"_s;
+            QVERIFY2(!sample || (i > subscribed && i < unsubscribed), "a stats-sample outside the subscription");
+            if (sample) samples << records.at(i);
+        }
+        // 2 s at 4 Hz: about 8.
+        QVERIFY2(samples.size() >= 6 && samples.size() <= 10, qPrintable(QString::number(samples.size())));
+        for (qsizetype i = 0; i < samples.size(); ++i) {
+            const auto &sample = samples.at(i);
+            QVERIFY(!sample.contains(u"requestId"_s));
+            QVERIFY2(std::abs(sample.value(u"intervalMs"_s).toInt() - 250) <= 80, qPrintable(QString::number(sample.value(u"intervalMs"_s).toInt())));
+            if (i > 0) QVERIFY(sample.value(u"seq"_s).toInteger() > samples.at(i - 1).value(u"seq"_s).toInteger());
+            const auto link = sample.value(u"link"_s).toObject();
+            // TCP_INFO on the broker's real socket.
+            QVERIFY2(link.contains(u"rttVarMs"_s) && link.contains(u"retransmits"_s) && link.contains(u"sendQueueKiB"_s),
+                     QJsonDocument(sample).toJson(QJsonDocument::Compact).constData());
+            QVERIFY(QJsonDocument(sample).toJson(QJsonDocument::Compact).size() < 2048);
+        }
+    }
+
     void clientWithoutKrdpctlGetsNoCustomData()
     {
         Seen seen;

@@ -25,6 +25,7 @@
 #include <VideoCodecSupport.h>
 #include <InputHandler.h>
 #include <LayoutControl.h>
+#include <StatsRequest.h>
 
 #include "ConsoleAdmission.h"
 #include "ConsoleSeat.h"
@@ -846,7 +847,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         // `device` record, or any other record this host knows (not
         // audio-priority, which never closes krdpserver's gate either).
         static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s,
-                                         u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s};
+                                         u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s, u"stats"_s};
         for (const auto &client : m_clients) {
             if (client->id != id) continue;
             if (type == u"device"_s) client->deviceRecordSeen = true;
@@ -889,6 +890,19 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         replyTo(connection, LayoutControl::codecRecord(u"avc"_s, stream->encoderPolicy().avc.hardware,
             m_control.admitted(id) ? u"another client is watching this console: AVC for everyone"_s
                                    : u"the console codec is chosen once this client controls it alone"_s));
+        return;
+    }
+    if (type == u"stats"_s) {
+        // KRDPCTL stats (StatsRequest, as krdpserver): this connection's own stream. A viewer may
+        // subscribe too; its samples describe what it receives.
+        const auto parsed = StatsRequest::parse(record);
+        if (!parsed) {
+            replyTo(connection, StatsRequest::invalidRecord());
+            return;
+        }
+        QString log;
+        replyTo(connection, StatsRequest::apply(*connection->videoStream(), *parsed, &log));
+        qDebug().noquote() << "Console client" << id << log;
         return;
     }
     if (type == u"topology-preview"_s) {
@@ -1488,6 +1502,7 @@ void ConsoleHostController::sendCapabilities(Client &client)
     capabilities.topologyApply = capabilities.topologyPreview;
     capabilities.devices = ConsoleDeviceCapabilities;
     if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, m_videoHost->mode);
+    capabilities.stats = LayoutControl::StatsCapabilities{};
     client.connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
 

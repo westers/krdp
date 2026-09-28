@@ -194,6 +194,13 @@ public:
             }
         });
         m_encoderLoadTimer.start();
+        // STATS-S6: EncoderStats once a second while the controlling connection's client is
+        // subscribed to stats (EncoderConfig::statsWanted); the outbox never sends one before Ready.
+        m_encoderStatsTimer.setInterval(ConsoleWorkerWire::EncoderStatsIntervalMs);
+        connect(&m_encoderStatsTimer, &QTimer::timeout, this, &Worker::sendEncoderStats);
+        connect(&m_session, &AbstractSession::chromaTimingReported, this, [this](const ChromaTimingReport &report) {
+            if (report.encodeMainAvg > 0) m_statsEncodeUs = qint32(std::min<qint64>(report.encodeMainAvg, 10000000));
+        });
         connect(&m_session, &AbstractSession::cursorUpdate, this, [this](const PipeWireCursor &cursor) {
             if (m_mode.physicalActions() && m_control.active && !m_resize.changing() && m_session.outputGeometryResolved()
                 && m_takeover.observed(m_session.mapToGlobal(cursor.position).toPoint(), m_clock.elapsed())) {
@@ -303,6 +310,7 @@ public:
             }
         });
         connect(&m_session, &AbstractSession::frameReceived, this, [this](const VideoFrame &frame) {
+            ++m_statsEncoded; // STATS-S6: every packet the encoder made, forwarded or not
             if (m_creatorReleaseActive || m_creatorReleaseFinished) return;
             // A single-output Console keeps this workspace producer alive
             // until KWin publishes the new screen. Its old-size frames must
@@ -411,9 +419,9 @@ public:
                     // surface. At fractional scale those are different axes.
                     VideoFrame rdpFrame = frame;
                     rdpFrame.monitors = {VideoMonitor{.geometry = QRect(QPoint(0, 0), frame.size), .primary = true}};
-                    m_socket.write(ConsoleWorkerWire::frame(rdpFrame));
+                    writeVideo(rdpFrame);
                 } else {
-                    m_socket.write(ConsoleWorkerWire::frame(frame));
+                    writeVideo(frame);
                 }
                 // Only this frame's validated output geometry may complete Fit,
                 // never metadata cached before a resize or a compositor handoff.
@@ -955,6 +963,7 @@ private:
             reportEncoderEvents(session.get());
             session->setVideoQuality(m_multiQuality);
             connect(session.get(), &AbstractSession::frameReceived, this, [this, i, epoch](const VideoFrame &frame) {
+                ++m_statsEncoded; // STATS-S6
                 if (m_multiMode && epoch == m_multiEpoch) onMultiFrame(i, frame);
             });
             connect(session.get(), &AbstractSession::error, this, [this, epoch] {
@@ -1124,10 +1133,10 @@ private:
             }
         }
         if (!m_multiReady) return;
-        for (const auto &packet : result.frames) m_socket.write(ConsoleWorkerWire::frame(packet));
+        for (const auto &packet : result.frames) writeVideo(packet);
         // AUD-FIX11 R6: then what each output encoded after its proof keyframe, so every
         // output's reference chain reaches the client unbroken.
-        for (const auto &packet : result.held) m_socket.write(ConsoleWorkerWire::frame(packet));
+        for (const auto &packet : result.held) writeVideo(packet);
         if (result.becameReady && m_positionPending) {
             const auto request = *m_positionPending;
             if (!m_control.active || m_control.generation != request.generation) {
@@ -2283,6 +2292,7 @@ private:
         const bool codecChanged = config.codec != m_encoderConfig.codec;
         m_encoderConfig = config;
         m_encoderConfigured = true;
+        updateEncoderStatsTimer();
         if (codecChanged) {
             qInfo().noquote() << "Encoder: codec" << VideoCodecSupport::codecName(config.codec)
                               << (config.settings ? (config.settings->hardware ? "in hardware" : "in software") : "(default backend)")
@@ -2321,8 +2331,39 @@ private:
         // The backend the H.264 encoder had before any policy (hardware first when there is one).
         reset.settings = CodecPolicy::EncoderSettings{.hardware = m_encoderCaps.encoders.avc.hardware};
         m_encoderConfig = reset;
+        updateEncoderStatsTimer();
         applyEncoderConfig(m_session);
         applyEncoderConfigToMultiSessions();
+    }
+
+    /** One VideoFrame to the broker (counted for EncoderStats). */
+    void writeVideo(const VideoFrame &frame)
+    {
+        m_socket.write(ConsoleWorkerWire::frame(frame));
+        ++m_statsForwarded;
+    }
+
+    /** STATS-S6: the stats timer runs only while the current EncoderConfig asks for EncoderStats. */
+    void updateEncoderStatsTimer()
+    {
+        if (m_encoderConfig.statsWanted == m_encoderStatsTimer.isActive()) return;
+        m_statsEncoded = 0;
+        m_statsForwarded = 0;
+        m_statsEncodeUs = -1;
+        m_statsInterval.start();
+        if (m_encoderConfig.statsWanted) m_encoderStatsTimer.start();
+        else m_encoderStatsTimer.stop();
+    }
+
+    void sendEncoderStats()
+    {
+        ConsoleWorkerWire::EncoderStats stats;
+        stats.intervalMs = quint32(std::clamp<qint64>(m_statsInterval.restart(), 1, 60000));
+        stats.framesEncoded = quint32(std::min<quint64>(std::exchange(m_statsEncoded, 0), 100000));
+        const quint64 forwarded = std::exchange(m_statsForwarded, 0);
+        stats.framesSkipped = stats.framesEncoded > forwarded ? quint32(stats.framesEncoded - forwarded) : 0;
+        stats.encodeUs = std::exchange(m_statsEncodeUs, -1);
+        if (m_encoderConfig.statsWanted && m_control.active && m_socket.state() == QLocalSocket::ConnectedState) m_outbox.stats(stats);
     }
 
     void applyEncoderConfig(AbstractSession &session)
@@ -2700,6 +2741,11 @@ private:
     bool m_encoderConfigured = false;
     bool m_multiCodecDeferred = false; ///< AUD-FIX9: m_multiSessions still run an older config (being replaced)
     QTimer m_encoderLoadTimer;
+    QTimer m_encoderStatsTimer;
+    QElapsedTimer m_statsInterval;
+    quint64 m_statsEncoded = 0;
+    quint64 m_statsForwarded = 0;
+    qint32 m_statsEncodeUs = -1;
     bool m_captureReady = false;
     ConsoleWorkerWire::Outputs m_outputs;
     bool m_topologyQueryPending = false;

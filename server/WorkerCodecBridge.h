@@ -31,7 +31,9 @@ class VideoStream;
  *   generation this bridge is bound with;
  * - its encoder events (EncoderReport) come back as the proxy session's AbstractSession signals,
  *   connected to the stream exactly as krdpserver connects a local session's;
- * - its process CPU time (EncoderLoad) is the CPU guard's input.
+ * - its process CPU time (EncoderLoad) is the CPU guard's input;
+ * - while the connection's KRDPCTL client is subscribed to stats, EncoderConfig asks for
+ *   EncoderStats (STATS-S6), which feed the stream's `stats-sample` records.
  */
 class WorkerCodecBridge : public QObject
 {

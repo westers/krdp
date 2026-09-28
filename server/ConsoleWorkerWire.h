@@ -29,13 +29,17 @@ namespace KRdp::ConsoleWorkerWire
 // 2 (AUD-FIX7): Frame carries the codec that produced it; EncoderCaps,
 // EncoderConfig, EncoderReport and EncoderLoad carry the codec policy.
 //
+// 3 (STATS-S6): EncoderConfig carries statsWanted; EncoderStats (worker -> broker, 1 Hz, only
+// while the current EncoderConfig asks for it) carries the encoder's frame counts and encode time.
+//
 // Worker -> broker order (AUD-FIX8; ConsoleWorkerOutbox is the worker's side):
 //   Hello, [EncoderCaps], Ready, then any record. Before Ready the broker also
 //   accepts EncoderReport (held and applied right after Ready), EncoderLoad
-//   and Error (the worker's reason for failing); anything else fails it.
+//   and Error (the worker's reason for failing); anything else - EncoderStats
+//   included - fails it.
 // Broker -> worker: nothing but Stop before the worker authenticated, and
 //   nothing but Stop/RequestKeyFrame before Ready.
-constexpr quint16 ProtocolVersion = 2;
+constexpr quint16 ProtocolVersion = 3;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -85,8 +89,9 @@ enum class Kind : quint8 {
     EncoderConfig,
     EncoderReport,
     EncoderLoad,
+    EncoderStats,
 };
-constexpr Kind LastKind = Kind::EncoderLoad;
+constexpr Kind LastKind = Kind::EncoderStats;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;
@@ -122,6 +127,9 @@ struct EncoderConfig {
     VideoCodec codec = VideoCodec::Avc420;
     std::optional<CodecPolicy::EncoderSettings> settings;
     quint32 frameRate = CodecPolicy::DefaultFrameRate;
+    /// STATS-S6: a KRDPCTL client of this connection is subscribed to stats, so the worker sends
+    /// EncoderStats every EncoderStatsIntervalMs (after Ready, never before).
+    bool statsWanted = false;
     bool operator==(const EncoderConfig &) const = default;
 };
 
@@ -139,6 +147,22 @@ constexpr int EncoderLoadIntervalMs = 250;
 struct EncoderLoad {
     qint64 cpuNs = 0;
     bool operator==(const EncoderLoad &) const = default;
+};
+
+/**
+ * STATS-S6, worker -> broker, every EncoderStatsIntervalMs while the current EncoderConfig has
+ * statsWanted and this worker is controlled: over the last interval, the frames its encoders
+ * produced, how many of them it did not forward (a layout proof, a Fit, a switch), and the
+ * encoder's measured time per frame in microseconds (-1 = unknown: KPipeWire reports it only for
+ * its AVC444 encoder).
+ */
+constexpr int EncoderStatsIntervalMs = 1000;
+struct EncoderStats {
+    quint32 intervalMs = 0;
+    quint32 framesEncoded = 0;
+    quint32 framesSkipped = 0;
+    qint32 encodeUs = -1;
+    bool operator==(const EncoderStats &) const = default;
 };
 
 struct Record {
@@ -1338,7 +1362,7 @@ inline QByteArray frame(const EncoderConfig &config)
     stream.setByteOrder(QDataStream::BigEndian);
     stream << config.generation << wireCodec(config.codec) << config.settings.has_value();
     const auto settings = config.settings.value_or(CodecPolicy::EncoderSettings{});
-    stream << settings.hardware << quint8(settings.preset) << settings.targetKbps << qint32(settings.maxFrameRate) << config.frameRate;
+    stream << settings.hardware << quint8(settings.preset) << settings.targetKbps << qint32(settings.maxFrameRate) << config.frameRate << config.statsWanted;
     return frame(Kind::EncoderConfig, payload);
 }
 
@@ -1355,7 +1379,7 @@ inline std::optional<EncoderConfig> encoderConfig(const Record &record)
     CodecPolicy::EncoderSettings settings;
     quint8 preset = 0;
     qint32 maxFrameRate = 0;
-    stream >> config.generation >> codec >> hasSettings >> settings.hardware >> preset >> settings.targetKbps >> maxFrameRate >> config.frameRate;
+    stream >> config.generation >> codec >> hasSettings >> settings.hardware >> preset >> settings.targetKbps >> maxFrameRate >> config.frameRate >> config.statsWanted;
     const auto decoded = codecFromWire(codec);
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !config.generation || !decoded || preset > quint8(CodecPolicy::Preset::Fastest)
         || maxFrameRate < 0 || maxFrameRate > 240 || config.frameRate < 1 || config.frameRate > 240 || settings.targetKbps > 1000000) {
@@ -1419,6 +1443,31 @@ inline std::optional<EncoderLoad> encoderLoad(const Record &record)
     EncoderLoad load;
     stream >> load.cpuNs;
     return stream.status() == QDataStream::Ok && load.cpuNs >= 0 ? std::optional<EncoderLoad>(load) : std::nullopt;
+}
+
+inline QByteArray frame(const EncoderStats &stats)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << stats.intervalMs << stats.framesEncoded << stats.framesSkipped << stats.encodeUs;
+    return frame(Kind::EncoderStats, payload);
+}
+
+inline std::optional<EncoderStats> encoderStats(const Record &record)
+{
+    if (record.kind != Kind::EncoderStats || record.payload.size() != 16) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    EncoderStats stats;
+    stream >> stats.intervalMs >> stats.framesEncoded >> stats.framesSkipped >> stats.encodeUs;
+    if (stream.status() != QDataStream::Ok || stats.intervalMs == 0 || stats.intervalMs > 60000 || stats.framesSkipped > stats.framesEncoded
+        || stats.framesEncoded > 100000 || stats.encodeUs < -1 || stats.encodeUs > 10000000) {
+        return std::nullopt;
+    }
+    return stats;
 }
 
 inline QByteArray frame(const VideoFrame &video)

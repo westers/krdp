@@ -27,7 +27,9 @@ namespace KRdp
  * It is held here and sent right after Ready, in order (the latest per event and codec; a
  * bounded number). An EncoderLoad before Ready is dropped: only the current CPU time matters and
  * the next one follows within EncoderLoadIntervalMs. The broker also tolerates reports that arrive
- * before Ready (an older worker), but a worker must not rely on it.
+ * before Ready (an older worker), but a worker must not rely on it. EncoderStats (STATS-S6) is
+ * never sent before Ready either: one made then is dropped (the broker fails a worker that sends
+ * one before Ready).
  */
 class ConsoleWorkerOutbox
 {
@@ -99,6 +101,14 @@ public:
     {
         if (m_readySent) {
             m_writer(ConsoleWorkerWire::frame(load));
+        }
+    }
+
+    /** STATS-S6: after Ready only; a report made before it is dropped (the next follows in 1 s). */
+    void stats(const ConsoleWorkerWire::EncoderStats &stats)
+    {
+        if (m_readySent) {
+            m_writer(ConsoleWorkerWire::frame(stats));
         }
     }
 

@@ -105,6 +105,8 @@ Q_SIGNALS:
     void microphoneFinished(const KRdp::ConsoleWorkerWire::MicrophoneResult &result);
     void encoderCapsReceived(const KRdp::ConsoleWorkerWire::EncoderCaps &caps);
     void encoderReported(const KRdp::ConsoleWorkerWire::EncoderReport &report);
+    /** STATS-S6: the worker's EncoderStats (only after Ready; one before Ready fails the worker). */
+    void encoderStatsReceived(const KRdp::ConsoleWorkerWire::EncoderStats &stats);
     void protocolError(const QString &message);
     /** The worker speaks another paired wire version; always followed by protocolError. */
     void versionMismatch(quint16 workerVersion);

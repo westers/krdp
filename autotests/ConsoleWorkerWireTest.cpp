@@ -34,6 +34,7 @@ private Q_SLOTS:
     void physicalLayoutRecordsRequireConsentAndCompleteBefore();
     void addVirtualRecordsAreBoundedAndCorrelated();
     void encoderRecordsRoundTripAndAreBounded();
+    void encoderStatsRoundTripAndAreBounded();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
 };
@@ -510,7 +511,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(2));
+    QCOMPARE(ProtocolVersion, quint16(3));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -520,6 +521,7 @@ void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
     caps.renderNode = QStringLiteral("/dev/dri/renderD128");
     EncoderConfig config{7, VideoCodec::Av1, CodecPolicy::EncoderSettings{false, CodecPolicy::Preset::Fastest, 4500, 30}, 30};
     EncoderConfig plain{8, VideoCodec::Avc420, std::nullopt, 17};
+    plain.statsWanted = true; // STATS-S6
     const EncoderReport report{EncoderReport::Event::Backend, VideoCodec::Hevc, true};
     const EncoderReport unavailable{EncoderReport::Event::Unavailable, VideoCodec::Av1, false};
     deframer.feed(frame(caps) + frame(config) + frame(plain) + frame(report) + frame(unavailable) + frame(EncoderLoad{123456789}));
@@ -549,6 +551,50 @@ void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
     QVERIFY(rejected(badCodec));
     Record oversized{Kind::EncoderCaps, QByteArray(5000, '\0')};
     QVERIFY(!encoderCaps(oversized));
+}
+
+void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
+{
+    // STATS-S6: worker -> broker, 1 Hz, while EncoderConfig::statsWanted.
+    Deframer deframer;
+    const EncoderStats hardware{1003, 30, 2, -1};
+    const EncoderStats measured{998, 60, 0, 4200};
+    deframer.feed(frame(hardware) + frame(measured));
+    const auto first = deframer.next();
+    QVERIFY(first);
+    QCOMPARE(first->kind, Kind::EncoderStats);
+    QCOMPARE(encoderStats(*first), std::optional(hardware));
+    QVERIFY(!encoderLoad(*first) && !encoderReport(*first));
+    QCOMPARE(encoderStats(*deframer.next()), std::optional(measured));
+    QVERIFY(!deframer.next());
+    QCOMPARE(deframer.takeInvalidCount(), 0);
+    QCOMPARE(LastKind, Kind::EncoderStats);
+
+    const auto rejected = [](const EncoderStats &stats) {
+        Deframer d;
+        d.feed(frame(stats));
+        const auto record = d.next();
+        return record && !encoderStats(*record);
+    };
+    QVERIFY(rejected({0, 30, 0, -1})); // no interval
+    QVERIFY(rejected({1000, 10, 11, -1})); // more skipped than encoded
+    QVERIFY(rejected({1000, 30, 0, -2})); // encode time below "unknown"
+    QVERIFY(rejected({1000, 200000, 0, -1})); // implausible frame count
+    auto truncated = *[] {
+        Deframer d;
+        d.feed(frame(EncoderStats{1000, 30, 0, -1}));
+        return d.next();
+    }();
+    truncated.payload.chop(1);
+    QVERIFY(!encoderStats(truncated));
+    // EncoderConfig's statsWanted survives the wire both ways.
+    EncoderConfig wanted{9, VideoCodec::Hevc, std::nullopt, 30};
+    for (const bool on : {true, false}) {
+        wanted.statsWanted = on;
+        Deframer d;
+        d.feed(frame(wanted));
+        QCOMPARE(encoderConfig(*d.next())->statsWanted, on);
+    }
 }
 
 void ConsoleWorkerWireTest::roundTripsNormalizedInput()

@@ -22,6 +22,8 @@ WorkerCodecBridge::WorkerCodecBridge(VideoStream *stream, ConsoleWorkerSession *
     connect(stream, &VideoStream::negotiatedCodecChanged, this, [this] { send(false); }, Qt::QueuedConnection);
     connect(stream, &VideoStream::encoderSettingsChanged, this, [this] { send(false); }, Qt::QueuedConnection);
     connect(stream, &VideoStream::requestedFrameRateChanged, this, [this] { send(false); }, Qt::QueuedConnection);
+    // STATS-S6: the worker reports EncoderStats only while this connection's client is subscribed.
+    connect(stream, &VideoStream::statsSubscriptionChanged, this, [this] { send(false); });
     // The worker's encoder events, re-emitted by the proxy session, go where krdpserver sends a
     // local session's (SessionController::setSessions()).
     connect(session, &AbstractSession::encoderUnavailable, stream, &VideoStream::privateCodecUnavailable);
@@ -51,6 +53,12 @@ void WorkerCodecBridge::bind(ConsoleWorkerEndpoint *endpoint, quint64 generation
     m_endpointConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::encoderReported, this, [this](const ConsoleWorkerWire::EncoderReport &report) {
         if (m_session) {
             m_session->reportEncoder(report);
+        }
+    }));
+    m_endpointConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::encoderStatsReceived, this, [this](const ConsoleWorkerWire::EncoderStats &stats) {
+        if (m_stream && m_stream->statsSubscribed()) {
+            m_stream->addWorkerEncoderStats(stats.framesEncoded, stats.framesSkipped,
+                                            stats.encodeUs >= 0 ? std::optional<double>(stats.encodeUs / 1000.0) : std::nullopt);
         }
     }));
     m_endpointConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::workerReady, this, [this] {
@@ -93,6 +101,7 @@ std::optional<ConsoleWorkerWire::EncoderConfig> WorkerCodecBridge::config() cons
     config.codec = m_stream->codecForSessions();
     config.settings = m_stream->encoderSettings();
     config.frameRate = std::clamp<quint32>(m_stream->requestedFrameRate(), 1, 240);
+    config.statsWanted = m_stream->statsSubscribed();
     return config;
 }
 

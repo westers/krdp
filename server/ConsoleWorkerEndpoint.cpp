@@ -409,6 +409,8 @@ bool ConsoleWorkerEndpoint::processRecords()
             Q_EMIT encoderReported(*report);
         } else if (const auto load = ConsoleWorkerWire::encoderLoad(*record)) {
             m_workerCpuNs = load->cpuNs;
+        } else if (const auto stats = ConsoleWorkerWire::encoderStats(*record)) {
+            Q_EMIT encoderStatsReceived(*stats);
         } else {
             fail(QStringLiteral("unexpected worker record"));
             return false;

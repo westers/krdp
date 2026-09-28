@@ -129,6 +129,8 @@ private Q_SLOTS:
     void tooManyEarlyReportsFail();
     void anythingElseBeforeReadyStillFails();
     void drainedWorkerDropsEarlyReports();
+    void encoderStatsNeverPrecedeReady();
+    void encoderStatsBeforeReadyFailTheWorker();
 };
 
 void ConsoleWorkerOrderTest::outboxHoldsEncoderReportsUntilReady()
@@ -329,6 +331,74 @@ void ConsoleWorkerOrderTest::drainedWorkerDropsEarlyReports()
     QVERIFY(h.errors.isEmpty());
     QVERIFY(!h.endpoint.ready());
     QVERIFY(h.events.isEmpty());
+}
+
+void ConsoleWorkerOrderTest::encoderStatsNeverPrecedeReady()
+{
+    // STATS-S6: the worker's EncoderStats go out after Ready only (the Ready-order rule AUD-FIX8
+    // made for EncoderReport): one made before it - the stats timer can fire while capture is
+    // still being confirmed - is dropped, not held (the next one follows in a second).
+    QByteArray sent;
+    ConsoleWorkerOutbox outbox([&sent](const QByteArray &record) {
+        sent += record;
+    });
+    const ConsoleWorkerWire::EncoderStats stats{1000, 30, 1, -1};
+    outbox.stats(stats); // before Hello
+    outbox.hello({QStringLiteral("3"), 1000, QByteArray(24, 't')});
+    outbox.caps(probeCaps());
+    outbox.stats(stats); // before Ready
+    auto before = records(sent);
+    QCOMPARE(before.size(), 2);
+    QCOMPARE(before[0].kind, Wire::Hello);
+    QCOMPARE(before[1].kind, Wire::EncoderCaps);
+    outbox.ready();
+    QCOMPARE(records(sent).size(), 3); // Ready, and no stats held for it
+    outbox.stats(stats);
+    const auto all = records(sent);
+    QCOMPARE(all.size(), 4);
+    QCOMPARE(all[2].kind, Wire::Ready);
+    QCOMPARE(ConsoleWorkerWire::encoderStats(all[3]), std::optional(stats));
+    // A new connection starts over: nothing before its Ready again.
+    sent.clear();
+    outbox.hello({QStringLiteral("3"), 1000, QByteArray(24, 't')});
+    outbox.stats(stats);
+    QCOMPARE(records(sent).size(), 1);
+
+    // The broker delivers them once the worker is ready.
+    Harness h(ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"));
+    QVERIFY(h.start());
+    QList<ConsoleWorkerWire::EncoderStats> received;
+    QObject::connect(&h.endpoint, &ConsoleWorkerEndpoint::encoderStatsReceived, &h.endpoint, [&received](const auto &s) {
+        received << s;
+    });
+    auto worker = h.outbox();
+    worker.hello({h.target.sessionId, h.target.uid, h.token});
+    worker.stats(stats);
+    worker.ready();
+    worker.stats(stats);
+    h.flush();
+    QTRY_COMPARE(received.size(), 1);
+    QVERIFY2(h.errors.isEmpty(), qPrintable(h.errors.join(QLatin1Char('\n'))));
+    QCOMPARE(received.first(), stats);
+}
+
+void ConsoleWorkerOrderTest::encoderStatsBeforeReadyFailTheWorker()
+{
+    // A worker that ignores the order (EncoderStats before Ready) is failed like any other
+    // record before Ready: the broker never takes stats from a worker that did not confirm capture.
+    Harness h(ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"));
+    QVERIFY(h.start());
+    int received = 0;
+    QObject::connect(&h.endpoint, &ConsoleWorkerEndpoint::encoderStatsReceived, &h.endpoint, [&received](const auto &) {
+        ++received;
+    });
+    h.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{h.target.sessionId, h.target.uid, h.token})
+                   + ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderStats{1000, 30, 0, -1}) + ConsoleWorkerWire::frame(Wire::Ready));
+    h.flush();
+    QTRY_COMPARE(h.errors.size(), 1);
+    QVERIFY(h.errors.first().startsWith(QStringLiteral("worker did not confirm active capture")));
+    QVERIFY(!h.endpoint.ready());
+    QCOMPARE(received, 0);
 }
 
 QTEST_GUILESS_MAIN(ConsoleWorkerOrderTest)

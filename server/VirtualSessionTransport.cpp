@@ -7,6 +7,7 @@
 #include "VirtualResize.h"
 #include "RemoteMonitorGeometry.h"
 #include "CodecRequest.h"
+#include "StatsRequest.h"
 #include <InputHandler.h>
 #include <VideoStream.h>
 #include <QScopeGuard>
@@ -868,6 +869,7 @@ void VirtualSessionTransport::sendCapabilities()
     capabilities.topologyApply = true;
     capabilities.devices = VirtualDeviceCapabilities;
     if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, m_videoHost->mode);
+    capabilities.stats = LayoutControl::StatsCapabilities{};
     m_connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
 
@@ -1701,10 +1703,12 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         // audio-priority, which never closes krdpserver's gate either).
         const QString type = record.value(u"type"_s).toString();
         if (type == u"device"_s) m_deviceRecordSeen = true;
-        else if (type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s) m_spokeKrdpctl = true;
+        else if (type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s || type == u"stats"_s)
+            m_spokeKrdpctl = true;
         // Any record this broker knows (not audio-priority, which our client may send first
         // without a desktop in mind) marks a KRDPCTL client: never bound automatically.
-        if (type == u"device"_s || type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s)
+        if (type == u"device"_s || type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s
+            || type == u"stats"_s)
             noteKrdpctlClient();
         if (type == u"virtual-session"_s) {
             // Our own client chooses its desktop itself (AUD-D4 applies to stock clients only).
@@ -1757,6 +1761,17 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         QString log;
         const auto reply = CodecRequest::apply(*m_connection->videoStream(), *parsed, &log);
         qInfo().noquote() << "Virtual client" << m_client << log;
+        return reply;
+    }
+    if (record.value(u"type"_s) == u"stats"_s) {
+        // KRDPCTL stats: this connection's own stream (StatsRequest, as krdpserver). Like `codec`
+        // it needs no desktop; while none is attached the samples show an idle stream.
+        const auto parsed = StatsRequest::parse(record);
+        if (!parsed) return StatsRequest::invalidRecord();
+        if (!m_connection) return {};
+        QString log;
+        const auto reply = StatsRequest::apply(*m_connection->videoStream(), *parsed, &log);
+        qDebug().noquote() << "Virtual client" << m_client << log;
         return reply;
     }
     if (record.value(u"type"_s) == u"audio-priority"_s) {
