@@ -347,14 +347,18 @@ public:
                     const auto readback = frame.isKeyFrame ? readKScreen() : std::nullopt;
                     if (!frame.isKeyFrame || !m_captureReady || outputs.monitors.size() != 1
                         || frame.size != m_initialOutputs.first().pixels
-                        || encodedKeyframeSize(frame.codec.value_or(VideoCodec::Avc420), frame.data) != std::optional(m_initialOutputs.first().pixels)
+                        || !encodedKeyframeShows(frame.codec.value_or(VideoCodec::Avc420), frame.data, m_initialOutputs.first().pixels)
                         || !readback || !bootstrapMatches(*readback)) return;
                     m_initialReadySent = true;
                     m_outbox.ready();
                 }
                 if (m_mode.virtualSession) {
-                    const QSize payloadPixels = m_virtualResize.changing() && frame.isKeyFrame
-                        ? encodedKeyframeSize(frame.codec.value_or(VideoCodec::Avc420), frame.data).value_or(QSize{}) : QSize{};
+                    // AUD-FIX10 R5: a keyframe that shows the metadata size (AMD AV1's padded
+                    // 1920x1082 for 1920x1080) proves that size; else report what it shows.
+                    const auto payloadCodec = frame.codec.value_or(VideoCodec::Avc420);
+                    const QSize payloadPixels = !m_virtualResize.changing() || !frame.isKeyFrame ? QSize{}
+                        : encodedKeyframeShows(payloadCodec, frame.data, frame.size) ? frame.size
+                        : encodedKeyframeSize(payloadCodec, frame.data).value_or(QSize{});
                     if (m_virtualResize.changing() && frame.isKeyFrame)
                         qInfo() << "Virtual Fit keyframe epoch" << m_virtualCaptureEpoch
                                 << "payload" << payloadPixels << "metadata" << frame.size

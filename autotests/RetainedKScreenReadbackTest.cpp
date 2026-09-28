@@ -551,6 +551,41 @@ private Q_SLOTS:
         }
     }
 
+    // AUD-FIX10 R5: AMD VCN codes a 1920x1080 AV1 output as 1920x1082 (no render size); 299cd25
+    // compared that with the native pixels and never published cray's layout. HEVC carries a
+    // conformance window (1088 -> 1080) and matches exactly.
+    void readbackAcceptsAmdPaddedAv1Keyframes()
+    {
+        auto state = decoded(root());
+        QVERIFY(state);
+        state->outputs[0].nativePixels = QSize(1920, 1080);
+        state->outputs[0].logicalGeometry = QRect(0, 0, 1536, 864);
+        state->outputs[1].nativePixels = QSize(1920, 1080);
+        state->outputs[1].logicalGeometry = QRect(1536, 100, 1920, 1080);
+        const KRdp::ConsoleWorkerWire::Outputs worker{{
+            {QStringLiteral("Virtual-0"), QRect(0, 0, 1536, 864), 1.25, true},
+            {QStringLiteral("Virtual-1"), QRect(1536, 100, 1920, 1080), 1.0, false},
+        }};
+        for (const auto &[codec, name] : {std::pair{KRdp::VideoCodec::Av1, "1920x1080-hal.av1"}, std::pair{KRdp::VideoCodec::Av1, "1920x1080-cray.av1"},
+                                          std::pair{KRdp::VideoCodec::Hevc, "1920x1080-hal.hevc"}, std::pair{KRdp::VideoCodec::Hevc, "1920x1080-cray.hevc"}}) {
+            QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/%1").arg(QLatin1String(name))));
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            KRdp::VideoFrame first;
+            first.size = QSize(1920, 1080);
+            first.data = file.readAll();
+            first.isKeyFrame = true;
+            first.codec = codec;
+            auto second = first;
+            second.monitorIndex = 1;
+            QVERIFY2(matchesPublished(*state, worker, {first, second}), name);
+            // Not a proof of another output size outside the padding.
+            state->outputs[1].nativePixels = QSize(1920, 1072);
+            second.size = QSize(1920, 1072);
+            QVERIFY2(!matchesPublished(*state, worker, {first, second}), name);
+            state->outputs[1].nativePixels = QSize(1920, 1080);
+        }
+    }
+
     void preservesNegativeCompositorOriginSeparateFromAtlas()
     {
         auto object = root();

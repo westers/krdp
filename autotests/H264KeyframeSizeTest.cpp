@@ -6,8 +6,8 @@
 class H264KeyframeSizeTest : public QObject
 {
     Q_OBJECT
-    QByteArray fixture(const QString &size) {
-        QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/%1.h264").arg(size)));
+    QByteArray fixture(const QString &size, const QString &extension = QStringLiteral("h264")) {
+        QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/%1.%2").arg(size, extension)));
         if (!file.open(QIODevice::ReadOnly)) return {};
         return file.readAll();
     }
@@ -53,6 +53,120 @@ private Q_SLOTS:
         QVERIFY(!KRdp::h264KeyframeSize(unsupported));
         const auto oversized = fixture(QStringLiteral("4098x200")); QVERIFY(!oversized.isEmpty());
         QVERIFY(!KRdp::h264KeyframeSize(oversized));
+    }
+    // AUD-FIX10 R5: coded vs display size of real hardware keyframes (Hal's 780M and cray's
+    // Strix Halo, FFmpeg 8.0.1 VA-API on radeonsi) and of the H.264 fixtures.
+    void codedAndDisplaySizes_data()
+    {
+        QTest::addColumn<QString>("name");
+        QTest::addColumn<QString>("extension");
+        QTest::addColumn<int>("codec");
+        QTest::addColumn<QSize>("coded");
+        QTest::addColumn<QSize>("display");
+        QTest::addColumn<bool>("signalled");
+        const int avc = int(KRdp::VideoCodec::Avc420), hevc = int(KRdp::VideoCodec::Hevc), av1 = int(KRdp::VideoCodec::Av1);
+        const auto h264 = QStringLiteral("h264"), h265 = QStringLiteral("hevc"), obu = QStringLiteral("av1");
+        QTest::newRow("h264 1080p cropped") << QStringLiteral("1920x1080") << h264 << avc << QSize(1920, 1088) << QSize(1920, 1080) << true;
+        QTest::newRow("h264 1366 cropped") << QStringLiteral("1366x768") << h264 << avc << QSize(1376, 768) << QSize(1366, 768) << true;
+        QTest::newRow("hevc 720p") << QStringLiteral("1280x720") << h265 << hevc << QSize(1280, 720) << QSize(1280, 720) << true;
+        QTest::newRow("hevc 1080p hal") << QStringLiteral("1920x1080-hal") << h265 << hevc << QSize(1920, 1088) << QSize(1920, 1080) << true;
+        QTest::newRow("hevc 1080p cray") << QStringLiteral("1920x1080-cray") << h265 << hevc << QSize(1920, 1088) << QSize(1920, 1080) << true;
+        QTest::newRow("hevc 1366 hal") << QStringLiteral("1366x768-hal") << h265 << hevc << QSize(1408, 768) << QSize(1366, 768) << true;
+        QTest::newRow("av1 720p") << QStringLiteral("1280x720") << obu << av1 << QSize(1280, 720) << QSize(1280, 720) << false;
+        QTest::newRow("av1 1080p hal") << QStringLiteral("1920x1080-hal") << obu << av1 << QSize(1920, 1082) << QSize(1920, 1082) << false;
+        QTest::newRow("av1 1080p cray") << QStringLiteral("1920x1080-cray") << obu << av1 << QSize(1920, 1082) << QSize(1920, 1082) << false;
+        QTest::newRow("av1 1366 hal") << QStringLiteral("1366x768-hal") << obu << av1 << QSize(1408, 768) << QSize(1408, 768) << false;
+        QTest::newRow("av1 render 1080") << QStringLiteral("1920x1080-render1080") << obu << av1 << QSize(1920, 1082) << QSize(1920, 1080) << true;
+        QTest::newRow("av1 render 1076") << QStringLiteral("1920x1080-render1076") << obu << av1 << QSize(1920, 1082) << QSize(1920, 1076) << true;
+    }
+    void codedAndDisplaySizes()
+    {
+        QFETCH(QString, name); QFETCH(QString, extension); QFETCH(int, codec);
+        QFETCH(QSize, coded); QFETCH(QSize, display); QFETCH(bool, signalled);
+        const auto packet = fixture(name, extension); QVERIFY(!packet.isEmpty());
+        const auto keyframe = KRdp::encodedKeyframe(KRdp::VideoCodec(codec), packet);
+        QVERIFY(keyframe);
+        QCOMPARE(keyframe->coded, coded);
+        QCOMPARE(keyframe->display, display);
+        QCOMPARE(keyframe->displaySignalled, signalled);
+        QCOMPARE(KRdp::encodedKeyframeSize(KRdp::VideoCodec(codec), packet), std::optional(display));
+    }
+
+    // AUD-FIX10 R5: which output size a keyframe proves. 299cd25 compared the AV1 frame size
+    // (1920x1082) with the output (1920x1080), so cray's layout was never confirmed.
+    void showsOutput_data()
+    {
+        QTest::addColumn<QString>("name");
+        QTest::addColumn<QString>("extension");
+        QTest::addColumn<int>("codec");
+        QTest::addColumn<QSize>("output");
+        QTest::addColumn<bool>("shows");
+        const int avc = int(KRdp::VideoCodec::Avc420), hevc = int(KRdp::VideoCodec::Hevc), av1 = int(KRdp::VideoCodec::Av1);
+        const auto h264 = QStringLiteral("h264"), h265 = QStringLiteral("hevc"), obu = QStringLiteral("av1");
+        QTest::newRow("av1 hal 1082 shows 1080") << QStringLiteral("1920x1080-hal") << obu << av1 << QSize(1920, 1080) << true;
+        QTest::newRow("av1 cray 1082 shows 1080") << QStringLiteral("1920x1080-cray") << obu << av1 << QSize(1920, 1080) << true;
+        QTest::newRow("av1 hal 1408 shows 1366") << QStringLiteral("1366x768-hal") << obu << av1 << QSize(1366, 768) << true;
+        QTest::newRow("av1 720p exact") << QStringLiteral("1280x720") << obu << av1 << QSize(1280, 720) << true;
+        // Never smaller than the output, never past its alignment (64 wide, 16 high).
+        QTest::newRow("av1 1082 not 1920x1084") << QStringLiteral("1920x1080-hal") << obu << av1 << QSize(1920, 1084) << false;
+        QTest::newRow("av1 1082 not 1920x1072") << QStringLiteral("1920x1080-hal") << obu << av1 << QSize(1920, 1072) << false;
+        QTest::newRow("av1 1082 not 1856x1080") << QStringLiteral("1920x1080-hal") << obu << av1 << QSize(1856, 1080) << false;
+        QTest::newRow("av1 720p not 1280x704") << QStringLiteral("1280x720") << obu << av1 << QSize(1280, 704) << false;
+        QTest::newRow("av1 1408 not 1344x768") << QStringLiteral("1366x768-hal") << obu << av1 << QSize(1344, 768) << false;
+        QTest::newRow("av1 empty output") << QStringLiteral("1280x720") << obu << av1 << QSize() << false;
+        // A signalled render size is exact: no alignment tolerance.
+        QTest::newRow("av1 render 1080 shows 1080") << QStringLiteral("1920x1080-render1080") << obu << av1 << QSize(1920, 1080) << true;
+        QTest::newRow("av1 render 1080 not 1082") << QStringLiteral("1920x1080-render1080") << obu << av1 << QSize(1920, 1082) << false;
+        QTest::newRow("av1 render 1076 not 1080") << QStringLiteral("1920x1080-render1076") << obu << av1 << QSize(1920, 1080) << false;
+        QTest::newRow("av1 render 1076 shows 1076") << QStringLiteral("1920x1080-render1076") << obu << av1 << QSize(1920, 1076) << true;
+        // HEVC and H.264 carry their crop: exact only.
+        QTest::newRow("hevc hal 1080") << QStringLiteral("1920x1080-hal") << h265 << hevc << QSize(1920, 1080) << true;
+        QTest::newRow("hevc cray 1080") << QStringLiteral("1920x1080-cray") << h265 << hevc << QSize(1920, 1080) << true;
+        QTest::newRow("hevc 1080 not 1088") << QStringLiteral("1920x1080-hal") << h265 << hevc << QSize(1920, 1088) << false;
+        QTest::newRow("hevc 1366") << QStringLiteral("1366x768-hal") << h265 << hevc << QSize(1366, 768) << true;
+        QTest::newRow("hevc 1366 not 1408") << QStringLiteral("1366x768-hal") << h265 << hevc << QSize(1408, 768) << false;
+        QTest::newRow("h264 1080") << QStringLiteral("1920x1080") << h264 << avc << QSize(1920, 1080) << true;
+        QTest::newRow("h264 1080 not 1088") << QStringLiteral("1920x1080") << h264 << avc << QSize(1920, 1088) << false;
+        QTest::newRow("h264 1080 not 1078") << QStringLiteral("1920x1080") << h264 << avc << QSize(1920, 1078) << false;
+        // The codec label must match the bytes.
+        QTest::newRow("av1 bytes as hevc") << QStringLiteral("1920x1080-hal") << obu << hevc << QSize(1920, 1080) << false;
+        QTest::newRow("hevc bytes as av1") << QStringLiteral("1920x1080-hal") << h265 << av1 << QSize(1920, 1080) << false;
+        QTest::newRow("av1 bytes as h264") << QStringLiteral("1920x1080-hal") << obu << avc << QSize(1920, 1080) << false;
+    }
+    void showsOutput()
+    {
+        QFETCH(QString, name); QFETCH(QString, extension); QFETCH(int, codec); QFETCH(QSize, output); QFETCH(bool, shows);
+        const auto packet = fixture(name, extension); QVERIFY(!packet.isEmpty());
+        QCOMPARE(KRdp::encodedKeyframeShows(KRdp::VideoCodec(codec), packet, output), shows);
+    }
+
+    // The AV1 header walk rejects what it cannot read rather than guess a size.
+    void rejectsBrokenAv1Headers()
+    {
+        const auto packet = fixture(QStringLiteral("1920x1080-hal"), QStringLiteral("av1")); QVERIFY(!packet.isEmpty());
+        const auto av1 = KRdp::VideoCodec::Av1;
+        QVERIFY(KRdp::encodedKeyframeShows(av1, packet, QSize(1920, 1080)));
+        for (qsizetype cut = 1; cut < packet.size(); ++cut) {
+            QVERIFY2(!KRdp::encodedKeyframeShows(av1, packet.left(cut), QSize(1920, 1080)), qPrintable(QStringLiteral("cut at %1").arg(cut)));
+        }
+        // Two sequence headers.
+        const qsizetype sequence = 2; // after the temporal delimiter 12 00
+        QCOMPARE(quint8(packet[sequence]), quint8(0x0a));
+        const qsizetype sequenceSize = 2 + quint8(packet[sequence + 1]);
+        auto twice = packet;
+        twice.insert(sequence, packet.mid(sequence, sequenceSize));
+        QVERIFY(!KRdp::encodedKeyframe(av1, twice));
+        // No sequence header before the frame header.
+        auto missing = packet;
+        missing.remove(sequence, sequenceSize);
+        QVERIFY(!KRdp::encodedKeyframe(av1, missing));
+        // An OBU without obu_has_size_field, and the forbidden bit.
+        auto unsized = packet;
+        unsized[0] = char(quint8(unsized[0]) & ~0x02);
+        QVERIFY(!KRdp::encodedKeyframe(av1, unsized));
+        auto forbidden = packet;
+        forbidden[0] = char(quint8(forbidden[0]) | 0x80);
+        QVERIFY(!KRdp::encodedKeyframe(av1, forbidden));
     }
     void rejectsIncompleteMultislice_data()
     {

@@ -95,6 +95,31 @@ private Q_SLOTS:
         }
     }
 
+    // AUD-FIX10 R5: a 1920x1080 console output in AMD hardware AV1 (coded 1920x1082, no render
+    // size) or HEVC (1088, conformance window) confirms; 299cd25 refused the AV1 keyframe.
+    void amdPaddedKeyframeConfirmsA1080pLayout()
+    {
+        for (const auto &[codec, name] : {std::pair{KRdp::VideoCodec::Av1, "1920x1080-hal.av1"}, std::pair{KRdp::VideoCodec::Av1, "1920x1080-cray.av1"},
+                                          std::pair{KRdp::VideoCodec::Hevc, "1920x1080-hal.hevc"}, std::pair{KRdp::VideoCodec::Hevc, "1920x1080-cray.hevc"}}) {
+            QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/%1").arg(QLatin1String(name))));
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            KRdp::VideoFrame captured;
+            captured.size = QSize(1920, 1080);
+            captured.data = file.readAll();
+            captured.isKeyFrame = true;
+            captured.codec = codec;
+            captured.monitors = {{QRect(0, 0, 1920, 1080), true}};
+            KRdp::ConsoleWorkerWire::Outputs outputs;
+            outputs.monitors = {{QStringLiteral("DP-1"), QRect(0, 0, 1920, 1080), 1, true}};
+            KRdp::RetainedKScreenReadback::Snapshot fresh;
+            fresh.outputs = {{.backendKey = QStringLiteral("DP-1"), .name = QStringLiteral("DP-1"), .nativePixels = QSize(1920, 1080),
+                .logicalGeometry = QRect(0, 0, 1920, 1080), .scale = 1, .enabled = true, .primary = true, .physical = true, .owner = {}}};
+            QVERIFY2(KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, captured), name);
+            captured.data.truncate(40); // headers alone
+            QVERIFY2(!KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, captured), name);
+        }
+    }
+
     void independentPhysicalKeyframesConfirmEveryOutput()
     {
         QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/1280x720.h264")));

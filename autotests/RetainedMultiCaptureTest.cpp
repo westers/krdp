@@ -117,6 +117,45 @@ private Q_SLOTS:
         QVERIFY(!mislabelled.ready());
     }
 
+    // AUD-FIX10 R5: two 1920x1080 outputs in AMD hardware AV1 (coded 1920x1082, no render size,
+    // Hal's 780M and cray's Strix Halo) or HEVC (1088 with a conformance window) prove the layout.
+    // 299cd25 compared the AV1 frame size with the output and never became ready (0 frames on cray).
+    void provesA1080pLayoutWithAmdPaddedKeyframes_data()
+    {
+        QTest::addColumn<int>("codec");
+        QTest::addColumn<QString>("name");
+        QTest::addColumn<QString>("extension");
+        QTest::newRow("av1 hal") << int(KRdp::VideoCodec::Av1) << QStringLiteral("1920x1080-hal") << QStringLiteral("av1");
+        QTest::newRow("av1 cray") << int(KRdp::VideoCodec::Av1) << QStringLiteral("1920x1080-cray") << QStringLiteral("av1");
+        QTest::newRow("hevc hal") << int(KRdp::VideoCodec::Hevc) << QStringLiteral("1920x1080-hal") << QStringLiteral("hevc");
+        QTest::newRow("hevc cray") << int(KRdp::VideoCodec::Hevc) << QStringLiteral("1920x1080-cray") << QStringLiteral("hevc");
+    }
+    void provesA1080pLayoutWithAmdPaddedKeyframes()
+    {
+        QFETCH(int, codec);
+        QFETCH(QString, name);
+        QFETCH(QString, extension);
+        const auto data = fixture(name, extension);
+        QVERIFY(!data.isEmpty());
+        const auto kind = KRdp::VideoCodec(codec);
+        const QSize size(1920, 1080);
+        RetainedMultiCapture set;
+        QVERIFY(set.configure({{QStringLiteral("Virtual-0"), QRect(QPoint(0, 0), size), true},
+            {QStringLiteral("Virtual-1"), QRect(QPoint(1920, 0), size), false}}));
+        QVERIFY(!set.submit(0, packet(size, size, data, true, kind)).becameReady);
+        const auto ready = set.submit(1, packet(size, size, data, true, kind));
+        QVERIFY(ready.becameReady);
+        QCOMPARE(ready.frames.size(), 2);
+        QCOMPARE(ready.atlas[0].geometry.size(), size);
+        // The same keyframe is no proof of an output it cannot show.
+        RetainedMultiCapture other;
+        QVERIFY(other.configure({{QStringLiteral("Virtual-0"), QRect(0, 0, 1920, 1200), true},
+            {QStringLiteral("Virtual-1"), QRect(1920, 0, 1920, 1200), false}}));
+        QVERIFY(other.submit(0, packet(QSize(1920, 1200), QSize(1920, 1200), data, true, kind)).frames.isEmpty());
+        QVERIFY(other.submit(1, packet(QSize(1920, 1200), QSize(1920, 1200), data, true, kind)).frames.isEmpty());
+        QVERIFY(!other.ready());
+    }
+
     // AUD-FIX9 R1, the attach sequence as the capture sees it: a published AVC layout, the new
     // grant's refresh (invalidate), one output's AVC keyframe, then the codec change reaches the
     // encoders. The layout is proven again entirely in the new codec, never with mixed codecs.

@@ -106,7 +106,8 @@ public:
         // AUD-FIX9 R1: the proof is a keyframe of the codec that produced it (HEVC/AV1 after a
         // codec change at attach), not only H.264: an H.264-only check never became ready again.
         const auto codec = frame.codec.value_or(VideoCodec::Avc420);
-        if (!frame.isKeyFrame || encodedKeyframeSize(codec, frame.data) != frame.size) return result;
+        // AUD-FIX10 R5: the keyframe shows this size (AMD AV1 codes 1920x1080 as 1920x1082).
+        if (!frame.isKeyFrame || !encodedKeyframeShows(codec, frame.data, frame.size)) return result;
         if (m_keyframeCodec && *m_keyframeCodec != codec) {
             // The encoders changed codec while the layout was being proven: one published layout
             // never mixes codecs, so every output proves itself again in the new one.
