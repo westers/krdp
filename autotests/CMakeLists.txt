@@ -667,3 +667,26 @@ target_include_directories(ConsoleWorkerLaunchReadinessTest PRIVATE ${CMAKE_SOUR
 target_link_libraries(ConsoleWorkerLaunchReadinessTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::DBus Qt6::Network)
 add_test(NAME ConsoleWorkerLaunchReadinessTest COMMAND ConsoleWorkerLaunchReadinessTest)
 set_tests_properties(ConsoleWorkerLaunchReadinessTest PROPERTIES TIMEOUT 60)
+
+# --- AUD-FIX2 ---
+# F1: SoftwareEncoding codec/backend policy (thresholds, hysteresis, CPU guard, switch interval).
+add_executable(CodecPolicyTest CodecPolicyTest.cpp)
+target_include_directories(CodecPolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(CodecPolicyTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME CodecPolicyTest COMMAND CodecPolicyTest)
+# F1: the per-codec hardware/software encoder probe, with hardware forced off.
+add_executable(EncoderSupportTest EncoderSupportTest.cpp)
+target_link_libraries(EncoderSupportTest PRIVATE Qt6::Test KRdp PkgConfig::AVCodec)
+add_test(NAME EncoderSupportTest COMMAND EncoderSupportTest)
+set_tests_properties(EncoderSupportTest PROPERTIES TIMEOUT 60)
+# F1: the codec id always matches the encoder KPipeWire actually settled on.
+add_executable(EncoderSelectionTest EncoderSelectionTest.cpp)
+target_include_directories(EncoderSelectionTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(EncoderSelectionTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(EncoderSelectionTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME EncoderSelectionTest COMMAND EncoderSelectionTest)
+# F1: VideoStream answers `codec` from the host's encoders and drops a private codec the encoder lacks.
+add_executable(VideoStreamCodecTest VideoStreamCodecTest.cpp)
+target_include_directories(VideoStreamCodecTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(VideoStreamCodecTest PRIVATE Qt6::Test Qt6::Core KRdp)
+add_test(NAME VideoStreamCodecTest COMMAND VideoStreamCodecTest)

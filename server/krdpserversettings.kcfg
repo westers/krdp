@@ -40,6 +40,10 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>Video codec: auto (AVC444v2/AVC444 when the client supports it, else AVC420), avc420 (always), avc444 (auto, warning when the client cannot)</label>
       <default>auto</default>
     </entry>
+    <entry name="SoftwareEncoding" type="String">
+      <label>Software video encoding: auto (hardware encoders first; software only when there is no hardware encoder, or for better compression on a slow link), never (hardware only; H.264 in software only as the last resort), prefer (the best-compressing codec, in software if needed)</label>
+      <default>auto</default>
+    </entry>
     <entry name="PreferAudioQuality" type="Bool">
       <label>Prefer playback and microphone quality and latency over video quality under congestion; clients may override this live</label>
       <default>false</default>

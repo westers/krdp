@@ -19,6 +19,7 @@
 #include <freerdp/server/rdpgfx.h>
 
 #include "SurfaceLayout.h"
+#include "CodecPolicy.h"
 #include "VideoCodecSupport.h"
 #include "VideoFrame.h"
 #include "krdp_export.h"
@@ -148,11 +149,27 @@ public:
      */
     void setCodecPreference(CodecPreference preference);
     CodecPreference codecPreference() const;
-    /// Select an own-client vendor codec after KRDPCTL capability exchange. Main thread only.
+    /**
+     * Select an own-client vendor codec after KRDPCTL capability exchange; nullopt = back to
+     * the AVC codec the client's caps selected. Main thread only.
+     */
     void setPrivateCodec(std::optional<VideoCodec> codec);
-    /// Ordered own-client codecs plus whether sustained RTT pressure may move from the
-    /// first to the second and later restore it. Main thread only.
-    void setPrivateCodecPolicy(const QVector<VideoCodec> &codecs, bool adaptive);
+    /**
+     * The encoders this host has and its `SoftwareEncoding` (AUD-FIX2). Set before the client's
+     * `codec` request; main thread only. Without it only AVC is ever chosen.
+     */
+    void setEncoderPolicy(const CodecPolicy::Encoders &encoders, CodecPolicy::SoftwareEncoding mode);
+    /**
+     * The client's `codec` request: the private codecs it decodes (empty = AVC only) and whether
+     * the server may switch codec mid-session (link and CPU, CodecPolicy). Chooses at once and
+     * returns the choice, which the caller answers with. Main thread only.
+     */
+    CodecPolicy::Decision setPrivateCodecPolicy(const QVector<VideoCodec> &codecs, bool adaptive);
+    /**
+     * The running encoder could not produce \a codec (KPipeWire fell back to another encoder):
+     * never choose it again on this connection, switch away at once and tell the client.
+     */
+    void privateCodecUnavailable(VideoCodec codec);
     /**
      * The codec chosen in onCapsAdvertise() from this preference and the
      * client's caps. nullopt until the client has advertised its caps.
@@ -195,6 +212,10 @@ private:
     // QualityUpdateInterval while streaming (started in initialize(), stopped
     // in close()); this slot therefore runs on VideoStream's own (main) thread.
     Q_SLOT void updateAdaptiveQuality();
+    /// One CodecPolicy step (link, CPU guard, switch interval); from updateAdaptiveQuality().
+    void stepCodecPolicy(bool congested);
+    /// Applies a changed decision: the codec id, the encoder restart, the `codec` push.
+    void applyCodecDecision(const CodecPolicy::Decision &decision);
 
     /**
      * Send ResetGraphics for \a monitors (already in RDP desktop space, with

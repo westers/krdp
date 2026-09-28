@@ -438,7 +438,42 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
                            QJsonObject{{QStringLiteral("toggle"), devices->cameraToggle}, {QStringLiteral("reselect"), devices->cameraReselect}}},
                       });
     }
+    if (const auto &video = capabilities.video) {
+        QJsonArray codecs;
+        for (const auto &offer : video->codecs) {
+            codecs.append(QJsonObject{{QStringLiteral("name"), offer.name}, {QStringLiteral("hw"), offer.hardware}, {QStringLiteral("sw"), offer.software}});
+        }
+        record.insert(QStringLiteral("video"), QJsonObject{{QStringLiteral("codecs"), codecs}, {QStringLiteral("softwareEncoding"), video->softwareEncoding}});
+    }
     return record;
+}
+
+QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, const QString &reason)
+{
+    QJsonObject record{
+        {QStringLiteral("type"), QStringLiteral("codec")},
+        {QStringLiteral("v"), ProtocolVersion},
+        {QStringLiteral("ok"), true},
+        {QStringLiteral("selected"), selected},
+    };
+    if (hardware) {
+        record.insert(QStringLiteral("backend"), *hardware ? QStringLiteral("hardware") : QStringLiteral("software"));
+    }
+    if (!reason.isEmpty()) {
+        record.insert(QStringLiteral("reason"), reason);
+    }
+    return record;
+}
+
+QJsonObject sessionEndRecord(const QString &reason, quint32 errorInfo, const QString &message)
+{
+    return QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("session-end")},
+        {QStringLiteral("v"), ProtocolVersion},
+        {QStringLiteral("reason"), reason},
+        {QStringLiteral("errorInfo"), qint64(errorInfo)},
+        {QStringLiteral("message"), message},
+    };
 }
 
 QJsonObject errorRecord(const Error &error)

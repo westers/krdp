@@ -5,6 +5,7 @@
 // `capabilities` record, and the per-connection chroma timing (ChromaMerge).
 
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QTest>
 
 #include "ChromaMerge.h"
@@ -90,6 +91,36 @@ private Q_SLOTS:
         QCOMPARE(record.value(u"virtualSessions"_s).toObject().size(), 3);
         QCOMPARE(record.value(u"topology"_s).toObject().size(), 3);
         QVERIFY(!record.contains(u"requestId"_s)); // unsolicited
+        QVERIFY(!record.contains(u"video"_s)); // optional group, brokers leave it out
+    }
+
+    // AUD-FIX2 F1: krdpserver advertises the codecs it can really encode, per backend.
+    void capabilitiesVideoGroup()
+    {
+        LayoutControl::ChannelCapabilities caps;
+        caps.host = u"physical"_s;
+        caps.video = LayoutControl::VideoCapabilities{{{u"avc420"_s, false, true}, {u"hevc"_s, true, false}}, u"auto"_s};
+        const auto video = LayoutControl::capabilitiesRecord(caps).value(u"video"_s).toObject();
+        QCOMPARE(video.value(u"softwareEncoding"_s).toString(), u"auto"_s);
+        const auto codecs = video.value(u"codecs"_s).toArray();
+        QCOMPARE(codecs.size(), 2);
+        QCOMPARE(codecs.at(0).toObject(), (QJsonObject{{u"name"_s, u"avc420"_s}, {u"hw"_s, false}, {u"sw"_s, true}}));
+        QCOMPARE(codecs.at(1).toObject(), (QJsonObject{{u"name"_s, u"hevc"_s}, {u"hw"_s, true}, {u"sw"_s, false}}));
+    }
+
+    void codecRecordShape()
+    {
+        const auto reply = LayoutControl::withRequestId(LayoutControl::codecRecord(u"avc"_s, false, u"no usable encoder for hevc on this host"_s), u"r1"_s);
+        QCOMPARE(reply.value(u"type"_s).toString(), u"codec"_s);
+        QCOMPARE(reply.value(u"ok"_s).toBool(), true);
+        QCOMPARE(reply.value(u"selected"_s).toString(), u"avc"_s);
+        QCOMPARE(reply.value(u"backend"_s).toString(), u"software"_s);
+        QCOMPARE(reply.value(u"requestId"_s).toString(), u"r1"_s);
+        QVERIFY(reply.value(u"reason"_s).toString().contains(u"hevc"_s));
+        const auto push = LayoutControl::codecRecord(u"av1"_s, true);
+        QCOMPARE(push.value(u"backend"_s).toString(), u"hardware"_s);
+        QVERIFY(!push.contains(u"reason"_s));
+        QVERIFY(!push.contains(u"requestId"_s));
     }
 
     // A stock client never sends `chroma`: its connection keeps the krdpserverrc default.

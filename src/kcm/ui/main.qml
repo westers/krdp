@@ -457,6 +457,24 @@ KCM.ScrollViewKCM {
             ]
         }
 
+        SettingComboBox {
+            id: softwareEncodingCombo
+            Kirigami.FormData.label: i18nc("@label:listbox", "Software encoding:")
+            configObject: root.settings
+            settingName: "softwareEncoding"
+            model: [
+                {text: i18nc("@item:inlistbox software video encoding", "Use it when hardware encoding isn't available"), value: "auto"},
+                {text: i18nc("@item:inlistbox software video encoding", "Prefer the best compression, even in software"), value: "prefer"},
+                {text: i18nc("@item:inlistbox software video encoding", "Only as a last resort"), value: "never"}
+            ]
+        }
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 22
+            wrapMode: Text.WordWrap
+            font: Kirigami.Theme.smallFont
+            text: i18nc("@info", "Use software encoding when hardware encoding isn't available (uses more CPU). On a slow connection the KRDP client may get a better-compressing codec encoded in software, as long as the processor keeps up.")
+        }
+
         QQC2.CheckBox {
             id: adaptiveQualityCheck
             text: i18nc("@option:check", "Adapt quality to the network")

@@ -32,6 +32,7 @@
 #include "qwayland-wayland.h"
 #include "screencasting_p.h"
 
+#include "EncoderSelection.h"
 #include "PressedInputTracker.h"
 #include "ScreencastTarget.h"
 #include "StreamRecoveryPolicy.h"
@@ -189,29 +190,6 @@ void setFullColorRangeIfSupported(Stream *stream)
                   }) {
         stream->setColorRange(Stream::ColorRange::Full);
     }
-}
-
-template<typename Stream>
-void setPreferredEncoder(Stream *stream, VideoCodec codec)
-{
-    auto encoder = PipeWireEncodedStream::H264Baseline;
-    if constexpr (requires(Stream *s) {
-                      s->suggestedEncoders();
-                  }) {
-        const auto suggested = stream->suggestedEncoders();
-        if (suggested.contains(PipeWireEncodedStream::H264Main)) {
-            encoder = PipeWireEncodedStream::H264Main;
-        }
-        if constexpr (requires { Stream::HEVCMain; Stream::AV1Main; }) {
-            if (codec == VideoCodec::Hevc && suggested.contains(Stream::HEVCMain)) {
-                encoder = Stream::HEVCMain;
-            } else if (codec == VideoCodec::Av1 && suggested.contains(Stream::AV1Main)) {
-                encoder = Stream::AV1Main;
-            }
-        }
-    }
-    stream->setEncoder(encoder);
-    qCDebug(KRDP) << "Using PipeWire encoder for" << VideoCodecSupport::codecName(codec) << ':' << int(encoder);
 }
 
 template<typename Stream>
@@ -794,7 +772,15 @@ void PlasmaScreencastV1Session::attachEncodedStream(uint nodeId, bool streamWasA
     }
     // setEncoder() must happen before start(), including a deferred restart after a negotiated
     // private-codec change; KPipeWire keeps it as the next produce's encoder choice.
-    setPreferredEncoder(encodedStream, videoCodec());
+    const bool encoderMatches = EncoderSelection::apply(encodedStream, videoCodec());
+    qCDebug(KRDP) << "Using PipeWire encoder for" << VideoCodecSupport::codecName(videoCodec()) << ':' << int(encodedStream->encoder());
+    if (!encoderMatches) {
+        // Never label one codec's bytes with another's id: have the connection move off it now,
+        // before start() (direct connection), then the stream restarts with the new codec.
+        qCCritical(KRDP) << "Codec mismatch: the encoder cannot produce" << VideoCodecSupport::codecName(videoCodec())
+                         << "(encoder" << int(encodedStream->encoder()) << "); falling back";
+        Q_EMIT encoderUnavailable(videoCodec());
+    }
 
     if (!d->streamSignalsConnected) {
         connect(encodedStream, &PipeWireEncodedStream::newPacket, this, &PlasmaScreencastV1Session::onPacketReceived);

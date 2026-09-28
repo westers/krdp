@@ -1,0 +1,132 @@
+// SPDX-FileCopyrightText: 2026 Steve Westers
+// SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+
+// AUD-FIX2 F1: the encoder probe. With hardware forced off (KRDP_FORCE_SOFTWARE_ENCODING,
+// the switch the SoftwareEncodeSessionTest also uses) H.264 must still be available in
+// software, HEVC/AV1 must not be offered (no software encoder for them yet), and KPipeWire
+// must be pointed at the software H.264 encoder. The real probe must never claim a codec
+// KPipeWire cannot produce.
+
+#include "EncoderSupport.h"
+
+#include <QTest>
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+}
+
+using namespace KRdp;
+using namespace Qt::StringLiterals;
+using CodecPolicy::Backends;
+
+class EncoderSupportTest : public QObject
+{
+    Q_OBJECT
+private Q_SLOTS:
+    void overrideParses()
+    {
+        CodecPolicy::Encoders e;
+        QVERIFY(EncoderSupport::applyOverride(e, u"avc=hw+sw, hevc=hw ,av1=sw"_s));
+        QCOMPARE(e.avc, (Backends{true, true}));
+        QCOMPARE(e.hevc, (Backends{true, false}));
+        QCOMPARE(e.av1, (Backends{false, true}));
+        QVERIFY(EncoderSupport::applyOverride(e, u"hevc=none"_s));
+        QCOMPARE(e.hevc, Backends{});
+        QCOMPARE(e.avc, (Backends{true, true})); // untouched
+        const auto before = e;
+        QVERIFY(!EncoderSupport::applyOverride(e, u"avc=gpu"_s));
+        QVERIFY(!EncoderSupport::applyOverride(e, u"vp9=hw"_s));
+        QVERIFY(!EncoderSupport::applyOverride(e, u"avc"_s));
+        QCOMPARE(e, before);
+    }
+
+    void hardwareForcedOff()
+    {
+        qputenv("KRDP_FORCE_SOFTWARE_ENCODING", "1");
+        qunsetenv("KPIPEWIRE_FORCE_ENCODER");
+        qunsetenv("KRDP_ENCODERS");
+        const auto probe = EncoderSupport::probeUncached();
+        QCOMPARE(probe.encoders.avc.hardware, false);
+        QCOMPARE(probe.encoders.hevc, Backends{});
+        QCOMPARE(probe.encoders.av1, Backends{});
+        QVERIFY(!probe.avc444Hardware);
+        QVERIFY(probe.renderNode.isEmpty());
+        const bool softwareH264 = avcodec_find_encoder_by_name("libx264") || avcodec_find_encoder_by_name("libopenh264");
+        QCOMPARE(probe.encoders.avc.software, softwareH264);
+        QVERIFY(EncoderSupport::describe(probe).contains(u"KRDP_FORCE_SOFTWARE_ENCODING"_s));
+
+        EncoderSupport::applyProcessOverrides();
+        const QByteArray forced = qgetenv("KPIPEWIRE_FORCE_ENCODER");
+        QVERIFY(forced == "libx264" || forced == "libopenh264");
+        // An explicit KPipeWire choice is left alone.
+        qputenv("KPIPEWIRE_FORCE_ENCODER", "libopenh264");
+        EncoderSupport::applyProcessOverrides();
+        QCOMPARE(qgetenv("KPIPEWIRE_FORCE_ENCODER"), QByteArray("libopenh264"));
+
+        // The policy then always lands on software AVC, whatever the client asks for.
+        CodecPolicy::State state;
+        CodecPolicy::Input in;
+        in.encoders = probe.encoders;
+        in.client = {CodecPolicy::Family::Hevc, CodecPolicy::Family::Av1};
+        for (const auto mode : {CodecPolicy::SoftwareEncoding::Auto, CodecPolicy::SoftwareEncoding::Never, CodecPolicy::SoftwareEncoding::Prefer}) {
+            in.mode = mode;
+            CodecPolicy::State fresh;
+            QCOMPARE(CodecPolicy::step(fresh, in, CodecPolicy::Clock::now()).choice, (CodecPolicy::Choice{CodecPolicy::Family::Avc, false}));
+        }
+        qunsetenv("KRDP_FORCE_SOFTWARE_ENCODING");
+        qunsetenv("KPIPEWIRE_FORCE_ENCODER");
+    }
+
+    void videoCapabilitiesListOnlyUsableCodecs()
+    {
+        EncoderSupport::Probe sol;
+        sol.encoders.avc = {false, true};
+        auto video = EncoderSupport::videoCapabilities(sol, CodecPolicy::SoftwareEncoding::Auto);
+        QCOMPARE(video.softwareEncoding, u"auto"_s);
+        QCOMPARE(video.codecs.size(), 1); // no hevc/av1 without an encoder, no avc444 without hardware
+        QCOMPARE(video.codecs.first(), (LayoutControl::VideoCodecOffer{u"avc420"_s, false, true}));
+
+        EncoderSupport::Probe future; // hardware HEVC, software-only AV1
+        future.encoders.avc = {true, true};
+        future.encoders.hevc = {true, false};
+        future.encoders.av1 = {false, true};
+        future.avc444Hardware = true;
+        video = EncoderSupport::videoCapabilities(future, CodecPolicy::SoftwareEncoding::Prefer);
+        QCOMPARE(video.codecs.size(), 4);
+        QCOMPARE(video.codecs.at(1), (LayoutControl::VideoCodecOffer{u"avc444"_s, true, false}));
+        QCOMPARE(video.codecs.at(3), (LayoutControl::VideoCodecOffer{u"av1"_s, false, true}));
+        // `never` never uses the software-only AV1; H.264 software stays (last resort).
+        video = EncoderSupport::videoCapabilities(future, CodecPolicy::SoftwareEncoding::Never);
+        QCOMPARE(video.codecs.size(), 3);
+        QCOMPARE(video.codecs.first(), (LayoutControl::VideoCodecOffer{u"avc420"_s, true, true}));
+        QCOMPARE(video.codecs.last().name, u"hevc"_s);
+    }
+
+    void environmentOverrideWins()
+    {
+        qputenv("KRDP_FORCE_SOFTWARE_ENCODING", "1"); // keep the host's GPU out of it
+        qputenv("KRDP_ENCODERS", "avc=sw,hevc=hw");
+        const auto probe = EncoderSupport::probeUncached();
+        QCOMPARE(probe.encoders.avc, (Backends{false, true}));
+        QCOMPARE(probe.encoders.hevc, (Backends{true, false}));
+        qunsetenv("KRDP_ENCODERS");
+        qunsetenv("KRDP_FORCE_SOFTWARE_ENCODING");
+    }
+
+    // On this host, whatever it has: never more than KPipeWire can be asked for.
+    void realProbeIsConsistent()
+    {
+        const auto probe = EncoderSupport::probeUncached();
+        qInfo().noquote() << "this host:" << EncoderSupport::describe(probe);
+        QVERIFY(!probe.encoders.hevc.software); // no software HEVC in KPipeWire yet
+        QVERIFY(!probe.encoders.av1.software);
+        if (probe.encoders.hevc.hardware || probe.encoders.av1.hardware) {
+            QVERIFY(probe.encoders.avc.hardware); // same VAAPI device
+        }
+        QCOMPARE(probe.avc444Hardware && !probe.encoders.avc.hardware, false);
+        QCOMPARE(probe.renderNode.isEmpty(), !probe.encoders.avc.hardware);
+    }
+};
+
+QTEST_GUILESS_MAIN(EncoderSupportTest)
+#include "EncoderSupportTest.moc"

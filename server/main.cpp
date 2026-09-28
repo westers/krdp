@@ -35,6 +35,7 @@
 #include "ServerCertificate.h"
 #include "ServerSettingsPolicy.h"
 #include "SessionController.h"
+#include "EncoderSupport.h"
 #include "VideoCodecSupport.h"
 #include "krdp_version.h"
 #include "krdpserversettings.h"
@@ -86,6 +87,15 @@ QString normalizedMonitorMode(QString mode)
     }
     qWarning() << "Unknown MonitorMode value" << mode << "falling back to workspace";
     return u"workspace"_s;
+}
+
+KRdp::CodecPolicy::SoftwareEncoding softwareEncodingFrom(const QString &value)
+{
+    if (const auto parsed = KRdp::CodecPolicy::parseSoftwareEncoding(value)) {
+        return *parsed;
+    }
+    qWarning() << "Unknown SoftwareEncoding value" << value << "(auto|never|prefer); using auto";
+    return KRdp::CodecPolicy::SoftwareEncoding::Auto;
 }
 
 KRdp::CodecPreference codecPreferenceFrom(const QString &value)
@@ -281,6 +291,8 @@ int main(int argc, char **argv)
     // Resolve LIBVA_DRIVER_NAME once at startup (was previously done lazily on
     // the first connection behind a once-per-process guard).
     KRdp::selectVaapiDriver();
+    // KRDP_FORCE_SOFTWARE_ENCODING: before any encoder exists (AUD-FIX2 F1).
+    KRdp::EncoderSupport::applyProcessOverrides();
 
     auto parserValueWithDefault = [&parser](QAnyStringView option, auto defaultValue) {
         auto optionString = option.toString();
@@ -458,6 +470,10 @@ int main(int argc, char **argv)
     controller.setAdaptiveQuality(config->adaptiveQuality());
     controller.setAudioPriorityDefault(config->preferAudioQuality());
     controller.setCodecPreference(codecPreferenceFrom(config->codec()));
+    controller.setSoftwareEncoding(softwareEncodingFrom(config->softwareEncoding()));
+    // Which codecs this host can really encode, and how (AUD-FIX2 F1): after the VAAPI
+    // driver choice above, once; the result goes into every `capabilities` and codec choice.
+    controller.setVideoEncoders(KRdp::EncoderSupport::probe());
     controller.setChromaPolicyDefaults(chromaPolicyFrom(config));
     controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
 
@@ -502,6 +518,7 @@ int main(int argc, char **argv)
         controller.setAdaptiveQuality(config->adaptiveQuality());
         controller.setAudioPriorityDefault(config->preferAudioQuality());
         controller.setCodecPreference(codecPreferenceFrom(config->codec()));
+        controller.setSoftwareEncoding(softwareEncodingFrom(config->softwareEncoding()));
         const auto chromaPolicy = chromaPolicyFrom(config);
         controller.setChromaPolicyDefaults(chromaPolicy);
         controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
@@ -516,7 +533,7 @@ int main(int argc, char **argv)
         qInfo() << "Runtime config applied: quality" << config->quality() << "adaptive" << config->adaptiveQuality() << "monitorMode" << config->monitorMode()
                 << "monitorIndex" << config->monitorIndex() << "virtualPolicy" << config->virtualMonitorPolicy() << "virtualLayout" << config->virtualMonitorLayout()
                 << "wakeDisplay" << config->wakeDisplayOnConnect() << "vaapiMode" << config->vaapiDriverMode() << "port" << listenPort << "from" << runtimeConfigPath
-                << "codec" << config->codec() << "chroma" << QStringLiteral("%1/%2/%3").arg(chromaPolicy.motionGapMs).arg(chromaPolicy.restMs).arg(chromaPolicy.maxGapMs)
+                << "codec" << config->codec() << "softwareEncoding" << config->softwareEncoding() << "chroma" << QStringLiteral("%1/%2/%3").arg(chromaPolicy.motionGapMs).arg(chromaPolicy.restMs).arg(chromaPolicy.maxGapMs)
                 << "cameraLoopback" << config->cameraLoopbackDevice() << "standardClientMedia" << config->standardClientMedia();
     };
 
@@ -604,7 +621,7 @@ int main(int argc, char **argv)
     const auto sessionType = KRdp::ServerSettings::backendName(backendChoice.backend);
     const auto startupChromaPolicy = controller.chromaPolicyDefaults();
     const auto startupChromaText = QStringLiteral("%1/%2/%3").arg(startupChromaPolicy.motionGapMs).arg(startupChromaPolicy.restMs).arg(startupChromaPolicy.maxGapMs);
-    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9 codec=%10 chroma=%11 cameraLoopback=%12")
+    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9 codec=%10 chroma=%11 cameraLoopback=%12 softwareEncoding=%13 encoders=[%14]")
                              .arg(sessionType,
                                   streamTarget,
                                   QString::number(port),
@@ -616,7 +633,9 @@ int main(int argc, char **argv)
                                   config->adaptiveQuality() ? u"1"_s : u"0"_s,
                                   QLatin1String(KRdp::VideoCodecSupport::preferenceName(controller.codecPreference())),
                                   startupChromaText,
-                                  config->cameraLoopbackDevice());
+                                  config->cameraLoopbackDevice(),
+                                  QLatin1String(KRdp::CodecPolicy::softwareEncodingName(controller.softwareEncoding())),
+                                  KRdp::EncoderSupport::describe(KRdp::EncoderSupport::probe()));
 
     if (!server.start()) {
         return -1;

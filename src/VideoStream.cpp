@@ -17,12 +17,14 @@
 #include <limits>
 #include <mutex>
 #include <thread>
+#include <time.h>
 #include <vector>
 
 #include <QDateTime>
 #include <QQueue>
 #include <QRect>
 #include <QStringList>
+#include <QThread>
 #include <QTimer>
 
 #include <freerdp/freerdp.h>
@@ -31,6 +33,7 @@
 #include "AdaptiveQuality.h"
 #include "FrameQueuePolicy.h"
 #include "GfxSurfaceCommand.h"
+#include "LayoutControl.h"
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
@@ -343,10 +346,23 @@ public:
     // -1 = standard RDPGFX negotiation. Set by the main-thread KRDPCTL preflight before
     // sessions exist; read by the peer and submission threads beside negotiatedCodec.
     std::atomic<int> privateCodec = -1;
-    QVector<VideoCodec> privateCodecOrder;
-    bool adaptivePrivateCodec = false;
-    clk::steady_clock::time_point codecPressureSince;
-    clk::steady_clock::time_point codecClearSince;
+    // The AVC codec the client's caps selected (onCapsAdvertise, peer thread); -1 = none yet.
+    // What setPrivateCodec(nullopt) goes back to.
+    std::atomic<int> capsCodec = -1;
+    // AUD-FIX2 codec policy (CodecPolicy.h); main thread only. Active once the client asked for
+    // at least one private codec.
+    CodecPolicy::Encoders encoders; // default: none, so only AVC until setEncoderPolicy()
+    CodecPolicy::SoftwareEncoding softwareEncoding = CodecPolicy::SoftwareEncoding::Auto;
+    bool codecPolicyActive = false;
+    QList<CodecPolicy::Family> clientFamilies;
+    bool codecPolicyAdaptive = true;
+    CodecPolicy::State codecPolicy;
+    CodecPolicy::LoadWindow encodeLoad;
+    // Encode-cost sampling for the CPU guard: process CPU time per encoded frame, spread over
+    // the cores, against the frame budget. framesEncoded counts queueFrame() calls.
+    std::atomic<int> framesEncoded = 0;
+    int framesAtLastSample = 0;
+    qint64 cpuNsAtLastSample = -1;
     // -1 = not negotiated yet (no CapsAdvertise received). Written on the
     // FreeRDP peer thread (onCapsAdvertise), read from any thread via
     // negotiatedCodec()/codecForSessions().
@@ -526,6 +542,7 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
     if (d->session->state() != RdpConnection::State::Streaming || !d->enabled) {
         return;
     }
+    d->framesEncoded.fetch_add(1, std::memory_order_relaxed); // the codec policy's CPU guard
 
     {
         std::lock_guard lock(d->frameQueueMutex);
@@ -672,22 +689,154 @@ void VideoStream::setPrivateCodec(std::optional<VideoCodec> codec)
 {
     const int value = codec ? int(*codec) : -1;
     d->privateCodec.store(value);
-    if (codec) {
-        const int previous = d->negotiatedCodec.exchange(value);
-        if (previous != value) {
-            Q_EMIT negotiatedCodecChanged(*codec);
-        }
+    // Back to AVC: the codec the caps selected, not whatever private codec ran before, so the
+    // RDPGFX codec id always matches the encoder the sessions restart with.
+    // Without caps yet: undecided again (onCapsAdvertise() decides), and sessions go back to
+    // the codec they are built for before caps.
+    const int next = codec ? value : d->capsCodec.load();
+    const int previous = d->negotiatedCodec.exchange(next);
+    if (previous != next) {
+        Q_EMIT negotiatedCodecChanged(next >= 0 ? VideoCodec(next) : VideoCodecSupport::expectedCodec(d->codecPreference));
     }
 }
 
-void VideoStream::setPrivateCodecPolicy(const QVector<VideoCodec> &codecs, bool adaptive)
+namespace
 {
-    const bool currentIsAllowed = negotiatedCodec().has_value() && codecs.contains(*negotiatedCodec());
-    d->privateCodecOrder = codecs;
-    d->adaptivePrivateCodec = adaptive && codecs.size() > 1;
-    d->codecPressureSince = {};
-    d->codecClearSince = {};
-    if (!currentIsAllowed) setPrivateCodec(codecs.isEmpty() ? std::nullopt : std::optional<VideoCodec>(codecs.first()));
+CodecPolicy::Family familyOf(VideoCodec codec)
+{
+    return codec == VideoCodec::Hevc ? CodecPolicy::Family::Hevc : codec == VideoCodec::Av1 ? CodecPolicy::Family::Av1 : CodecPolicy::Family::Avc;
+}
+std::optional<VideoCodec> privateCodecOf(CodecPolicy::Family family)
+{
+    switch (family) {
+    case CodecPolicy::Family::Hevc:
+        return VideoCodec::Hevc;
+    case CodecPolicy::Family::Av1:
+        return VideoCodec::Av1;
+    case CodecPolicy::Family::Avc:
+        break;
+    }
+    return std::nullopt;
+}
+qint64 processCpuNs()
+{
+    timespec ts{};
+    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0) {
+        return -1;
+    }
+    return qint64(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+}
+
+void VideoStream::setEncoderPolicy(const CodecPolicy::Encoders &encoders, CodecPolicy::SoftwareEncoding mode)
+{
+    d->encoders = encoders;
+    d->softwareEncoding = mode;
+}
+
+CodecPolicy::Decision VideoStream::setPrivateCodecPolicy(const QVector<VideoCodec> &codecs, bool adaptive)
+{
+    d->clientFamilies.clear();
+    for (const VideoCodec codec : codecs) {
+        const auto family = familyOf(codec);
+        if (family != CodecPolicy::Family::Avc && !d->clientFamilies.contains(family)) {
+            d->clientFamilies.append(family);
+        }
+    }
+    d->codecPolicyAdaptive = adaptive;
+    d->codecPolicyActive = !d->clientFamilies.isEmpty();
+    d->codecPolicy = {};
+    d->encodeLoad.clear();
+
+    CodecPolicy::Input in;
+    in.mode = d->softwareEncoding;
+    in.encoders = d->encoders;
+    in.client = d->clientFamilies;
+    in.adaptive = false; // the first choice never waits for a link measurement
+    const auto decision = CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now());
+    setPrivateCodec(privateCodecOf(decision.choice.family));
+    qCInfo(KRDP).nospace() << "Codec policy (" << CodecPolicy::softwareEncodingName(d->softwareEncoding) << "): "
+                           << CodecPolicy::familyName(decision.choice.family) << (decision.choice.hardware ? " in hardware" : " in software")
+                           << " for a client decoding avc" << (d->clientFamilies.contains(CodecPolicy::Family::Hevc) ? "+hevc" : "")
+                           << (d->clientFamilies.contains(CodecPolicy::Family::Av1) ? "+av1" : "") << (adaptive ? "" : ", fixed");
+    return decision;
+}
+
+void VideoStream::privateCodecUnavailable(VideoCodec codec)
+{
+    const auto family = familyOf(codec);
+    if (family == CodecPolicy::Family::Avc || !d->codecPolicyActive) {
+        return;
+    }
+    d->encoders.of(family) = {};
+    CodecPolicy::Input in;
+    in.mode = d->softwareEncoding;
+    in.encoders = d->encoders;
+    in.client = d->clientFamilies;
+    in.adaptive = d->codecPolicyAdaptive;
+    d->codecPolicy.lastSwitch = {}; // a wrong stream cannot wait for the switch interval
+    auto decision = CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now());
+    decision.reason = QStringLiteral("encoder unavailable");
+    applyCodecDecision(decision);
+}
+
+void VideoStream::applyCodecDecision(const CodecPolicy::Decision &decision)
+{
+    if (!decision.changed) {
+        return;
+    }
+    d->encodeLoad.clear();
+    d->cpuNsAtLastSample = -1;
+    setPrivateCodec(privateCodecOf(decision.choice.family));
+    qCInfo(KRDP).noquote() << QStringLiteral("Codec policy: switching to %1 in %2: %3")
+                                  .arg(QLatin1String(CodecPolicy::familyName(decision.choice.family)),
+                                       decision.choice.hardware ? QStringLiteral("hardware") : QStringLiteral("software"),
+                                       decision.reason);
+    // Unsolicited: no requestId. Only our own client ever gets here (it sent `codec`).
+    d->session->sendControlRecord(LayoutControl::codecRecord(QString::fromLatin1(CodecPolicy::familyName(decision.choice.family)),
+                                                             decision.choice.hardware,
+                                                             decision.reason));
+}
+
+void VideoStream::stepCodecPolicy(bool congested)
+{
+    if (!d->codecPolicyActive || !d->codecPolicy.current) {
+        return;
+    }
+    // CPU guard input: only a software encoder has one.
+    const qint64 cpuNs = processCpuNs();
+    const int frames = d->framesEncoded.load();
+    if (!d->codecPolicy.current->hardware && cpuNs >= 0 && d->cpuNsAtLastSample >= 0) {
+        const int encoded = frames - d->framesAtLastSample;
+        if (encoded >= 5) {
+            const double cores = std::max(1, QThread::idealThreadCount());
+            const double perFrameMs = double(cpuNs - d->cpuNsAtLastSample) / 1e6 / encoded / cores;
+            const double budgetMs = 1000.0 / std::max(1, d->requestedFrameRate.load());
+            d->encodeLoad.add(perFrameMs / budgetMs);
+        }
+    }
+    d->cpuNsAtLastSample = cpuNs;
+    d->framesAtLastSample = frames;
+
+    auto *network = d->session->networkDetection();
+    CodecPolicy::Input in;
+    in.mode = d->softwareEncoding;
+    in.encoders = d->encoders;
+    in.client = d->clientFamilies;
+    in.adaptive = d->codecPolicyAdaptive;
+    if (network && network->validBandwidthSamples() >= 2) {
+        in.bandwidthKbps = network->bandwidth();
+    }
+    in.congested = congested;
+    in.pixels = std::max<qint64>(d->surfacePixels.load(), 1);
+    if (!d->codecPolicy.current->hardware) {
+        in.encodeLoadP95 = d->encodeLoad.p95();
+    }
+    const auto decision = CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now());
+    if (!decision.changed && !decision.reason.isEmpty()) {
+        qCDebug(KRDP).noquote() << "Codec policy:" << decision.reason;
+    }
+    applyCodecDecision(decision);
 }
 
 std::optional<VideoCodec> VideoStream::negotiatedCodec() const
@@ -727,6 +876,20 @@ void VideoStream::setChromaCapable(bool capable)
 
 void VideoStream::updateAdaptiveQuality()
 {
+    if (d->codecPolicyActive && d->surfacePixels.load() > 0 && clk::steady_clock::now() - d->streamingSince >= WarmupAfterStreamStart) {
+        // The codec policy runs whether or not adaptive quality does. Congestion as
+        // AdaptiveQuality sees it: RTT inflation, or the client several frames behind.
+        auto *network = d->session->networkDetection();
+        int pending = 0;
+        {
+            std::lock_guard lock(d->pendingFramesMutex);
+            pending = d->pendingFrames.suspended() ? 0 : d->pendingFrames.pending();
+        }
+        const bool congested = AdaptiveQuality::rttCongested(clk::duration_cast<clk::microseconds>(network->averageRTT()),
+                                                             clk::duration_cast<clk::microseconds>(network->minimumRTT()))
+            || pending >= AdaptiveQuality::BacklogFrames;
+        stepCodecPolicy(congested);
+    }
     const bool audioPriority = d->session->audioPriorityActive();
     if (!d->adaptiveQuality.load() && !audioPriority) {
         // A live priority override can temporarily enable steering even when
@@ -782,43 +945,6 @@ void VideoStream::updateAdaptiveQuality()
         .chromaEnabled = chromaNow,
         .preferAudioQuality = audioPriority,
     });
-
-    // Codec changes are intentionally much slower than QP/chroma steering. A short RTT
-    // spike must not pay for an encoder restart and IDR; nor should a WAN with a naturally
-    // high but stable base RTT bounce codecs. Only a material inflated RTT for 12 seconds
-    // falls back one ordered private codec, and 60 stable seconds restore the preference.
-    constexpr auto CodecPressureAfter = std::chrono::seconds(12);
-    constexpr auto CodecRestoreAfter = std::chrono::seconds(60);
-    constexpr auto CodecMinimumRtt = std::chrono::milliseconds(100);
-    constexpr auto CodecClearMargin = std::chrono::milliseconds(10);
-    const bool pressured = result.congested && averageRtt >= CodecMinimumRtt;
-    const bool clear = !result.congested && averageRtt <= minimumRtt + CodecClearMargin;
-    if (d->adaptivePrivateCodec && d->privateCodecOrder.size() > 1) {
-        const VideoCodec preferred = d->privateCodecOrder.first();
-        const VideoCodec fallback = d->privateCodecOrder.at(1);
-        const auto currentCodec = negotiatedCodec();
-        if (currentCodec == preferred && pressured) {
-            if (d->codecPressureSince == clk::steady_clock::time_point{}) d->codecPressureSince = now;
-            if (now - d->codecPressureSince >= CodecPressureAfter) {
-                qCInfo(KRDP) << "Adaptive private codec:" << VideoCodecSupport::codecName(preferred) << "->" << VideoCodecSupport::codecName(fallback) << "after sustained RTT pressure" << averageRtt.count() << "us";
-                setPrivateCodec(fallback);
-                d->codecPressureSince = {};
-                d->codecClearSince = {};
-            }
-        } else {
-            d->codecPressureSince = {};
-        }
-        if (currentCodec == fallback && clear) {
-            if (d->codecClearSince == clk::steady_clock::time_point{}) d->codecClearSince = now;
-            if (now - d->codecClearSince >= CodecRestoreAfter) {
-                qCInfo(KRDP) << "Adaptive private codec:" << VideoCodecSupport::codecName(fallback) << "->" << VideoCodecSupport::codecName(preferred) << "after stable RTT" << averageRtt.count() << "us";
-                setPrivateCodec(preferred);
-                d->codecClearSince = {};
-            }
-        } else if (currentCodec != fallback) {
-            d->codecClearSince = {};
-        }
-    }
 
     // The cap or the adaptive-quality flag may have changed while step() ran;
     // re-check both before committing so a stale result never overshoots a
@@ -948,7 +1074,9 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
     // the previous codec stays the best guess until the caps parsed just above
     // settle on a new one a few lines later.
     const int privateCodec = d->privateCodec.load();
-    const VideoCodec codec = privateCodec >= 0 ? VideoCodec(privateCodec) : VideoCodecSupport::codecFor(selectedCaps->version, selectedCaps->capSet.flags, d->codecPreference);
+    const VideoCodec capsCodec = VideoCodecSupport::codecFor(selectedCaps->version, selectedCaps->capSet.flags, d->codecPreference);
+    d->capsCodec.store(int(capsCodec));
+    const VideoCodec codec = privateCodec >= 0 ? VideoCodec(privateCodec) : capsCodec;
     const int previous = d->negotiatedCodec.exchange(int(codec));
     qCInfo(KRDP).noquote() << QStringLiteral("GFX caps confirmed: %1 codec=%2").arg(QLatin1String(capVersionToString(selectedCaps->version)), QLatin1String(VideoCodecSupport::codecName(codec)));
     if (previous != int(codec)) {

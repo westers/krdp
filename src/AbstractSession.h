@@ -79,6 +79,12 @@ public:
      * fallback (activeChromaModeChanged). Emitted on every encoder start and on a fallback.
      */
     Q_SIGNAL void chromaCapabilityChanged(bool capable);
+    /**
+     * The encoder cannot produce \a codec (a private codec this KPipeWire or GPU lacks); the
+     * stream will run H.264. Emitted before the stream starts: connect directly and move the
+     * connection off \a codec (VideoStream::privateCodecUnavailable()).
+     */
+    Q_SIGNAL void encoderUnavailable(KRdp::VideoCodec codec);
 
     /**
      * Re-create the capture stream after the display topology changed.

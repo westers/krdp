@@ -111,6 +111,7 @@ private Q_SLOTS:
         settings.setSystemUserEnabled(true);
         settings.setQuality(60);
         settings.setCodec(u"avc420"_s);
+        settings.setSoftwareEncoding(u"prefer"_s);
         settings.setMonitorMode(u"virtual"_s);
         settings.setListenAddress(u"192.168.1.5"_s);
         settings.setAutogenerateCertificates(false);
@@ -126,6 +127,7 @@ private Q_SLOTS:
         QVERIFY(settings.systemUserEnabled());
         QCOMPARE(settings.quality(), settings.defaultQualityValue());
         QCOMPARE(settings.codec(), u"auto"_s);
+        QCOMPARE(settings.softwareEncoding(), u"auto"_s);
         QCOMPARE(settings.monitorMode(), u"workspace"_s);
         QCOMPARE(settings.listenAddress(), QString());
         QVERIFY(settings.autogenerateCertificates());

@@ -51,6 +51,10 @@ target_sources(KRdp PRIVATE
     Cursor.h
     NetworkDetection.cpp
     NetworkDetection.h
+    EncoderSupport.cpp
+    EncoderSupport.h
+    EncoderSelection.h
+    CodecPolicy.h
 )
 
 ecm_qt_declare_logging_category(KRdp
@@ -96,6 +100,8 @@ target_link_libraries(KRdp PUBLIC
     XKB::XKB
     PkgConfig::PipeWire
 )
+
+target_link_libraries(KRdp PRIVATE PkgConfig::AVCodec)
 
 set_target_properties(KRdp PROPERTIES
     VERSION ${PROJECT_VERSION}

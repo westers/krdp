@@ -190,6 +190,25 @@ struct DeviceCapabilities {
     bool operator==(const DeviceCapabilities &) const = default;
 };
 
+/**
+ * One entry of the optional `video.codecs` list of `capabilities` (AUD-FIX2): a codec this
+ * host can encode, and with which backends. `avc420` is always listed; `avc444` only with a
+ * hardware 4:4:4 encoder; `hevc`/`av1` only when an encoder for them really exists.
+ */
+struct VideoCodecOffer {
+    QString name; ///< "avc420" | "avc444" | "hevc" | "av1"
+    bool hardware = false;
+    bool software = false;
+    bool operator==(const VideoCodecOffer &) const = default;
+};
+
+/** The optional `video` group of `capabilities`: only `krdpserver` sends it. */
+struct VideoCapabilities {
+    QList<VideoCodecOffer> codecs;
+    QString softwareEncoding; ///< the host's SoftwareEncoding: "auto" | "never" | "prefer"
+    bool operator==(const VideoCapabilities &) const = default;
+};
+
 /** What a KRDPCTL endpoint offers, as the `capabilities` record says it. */
 struct ChannelCapabilities {
     QString host; ///< "physical" | "console" | "virtual"
@@ -202,9 +221,26 @@ struct ChannelCapabilities {
     bool topologyPreview = false;
     bool topologyApply = false;
     std::optional<DeviceCapabilities> devices; ///< absent: no `devices` group, no runtime device control
+    std::optional<VideoCapabilities> video; ///< absent: no `video` group, AVC only, no `codec` record
     bool operator==(const ChannelCapabilities &) const = default;
 };
 KRDP_EXPORT QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities);
+
+/**
+ * The `codec` record (AUD-FIX2): the answer to a `codec` request (with its requestId) and the
+ * push when the server switches codec mid-session (without one). \a selected is "avc", "hevc"
+ * or "av1"; \a hardware says which backend encodes it; \a reason is a short English note
+ * ("initial choice", "slow link (…)", "CPU guard: …", "encoder unavailable"). Without
+ * \a hardware (the virtual broker) the record has no `backend`.
+ */
+KRDP_EXPORT QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, const QString &reason = {});
+
+/**
+ * `session-end` (AUD-FIX2 F4), unsolicited, sent to a KRDPCTL client just before the server
+ * closes its connection, with the standard Set Error Info code it closes with. \a reason:
+ * "opened-elsewhere" = the same user opened this desktop from another device (ERRINFO 0x5).
+ */
+KRDP_EXPORT QJsonObject sessionEndRecord(const QString &reason, quint32 errorInfo, const QString &message);
 
 /**
  * \a record plus `"v": 1`, as a 4-byte big-endian length prefix followed by

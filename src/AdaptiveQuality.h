@@ -53,6 +53,12 @@ inline bool backlogIsPressure(std::chrono::steady_clock::duration streamAge, int
 // instead of sawtoothing every interval.
 constexpr auto ClimbHoldAfterStepDown = std::chrono::seconds(5);
 
+/// RTT inflation: the average at least CongestionRttMargin and 1.5x above the minimum.
+inline bool rttCongested(std::chrono::microseconds averageRtt, std::chrono::microseconds minimumRtt)
+{
+    return minimumRtt.count() > 0 && (averageRtt - minimumRtt) >= CongestionRttMargin && averageRtt * 2 > minimumRtt * 3;
+}
+
 struct Input {
     int current;
     int cap;
@@ -94,7 +100,7 @@ struct Result {
 inline Result step(const Input &in)
 {
     const int hi = std::max(in.cap, MinQuality);
-    const bool congested = in.minimumRtt.count() > 0 && (in.averageRtt - in.minimumRtt) >= CongestionRttMargin && in.averageRtt * 2 > in.minimumRtt * 3;
+    const bool congested = rttCongested(in.averageRtt, in.minimumRtt);
     const bool chromaOn = !in.chromaAvailable || in.chromaEnabled;
 
     int next = in.current;

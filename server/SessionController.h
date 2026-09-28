@@ -5,6 +5,7 @@
 
 #include "ClientDisplayInfo.h"
 #include "DisplayWakeGuard.h"
+#include "EncoderSupport.h"
 #include "HostLayoutExecutor.h"
 #include "LayoutControl.h"
 #include "LayoutOwner.h"
@@ -181,6 +182,14 @@ public:
     void setAudioPriorityDefault(bool enabled);
     void setCodecPreference(KRdp::CodecPreference preference);
     KRdp::CodecPreference codecPreference() const;
+    /**
+     * `krdpserverrc` `SoftwareEncoding` and the encoders this host has (AUD-FIX2 F1). The next
+     * connection's codec policy and its `capabilities.video`; the private codecs only on the
+     * Plasma backend (the portal backend encodes H.264 only).
+     */
+    void setSoftwareEncoding(KRdp::CodecPolicy::SoftwareEncoding mode);
+    KRdp::CodecPolicy::SoftwareEncoding softwareEncoding() const;
+    void setVideoEncoders(const KRdp::EncoderSupport::Probe &probe);
     /**
      * AVC444 aux-stream timing default (OPT-045b, design §10 A10.2): `krdpserverrc`'s
      * `Avc444MotionGapMs`/`Avc444RestMs`/`Avc444MaxGapMs`, already validated by the caller. Applies to
@@ -383,6 +392,9 @@ private:
     bool m_adaptiveQuality = true;
     bool m_audioPriorityDefault = false;
     KRdp::CodecPreference m_codecPreference = KRdp::CodecPreference::Auto;
+    KRdp::CodecPolicy::SoftwareEncoding m_softwareEncoding = KRdp::CodecPolicy::SoftwareEncoding::Auto;
+    KRdp::EncoderSupport::Probe m_encoderProbe; // default: no encoders known, AVC only
+    KRdp::EncoderSupport::Probe encodersForBackend() const;
     // AVC444 aux-stream timing default (OPT-045b, design §10 A10.2): applied to every new
     // connection's sessions; a client's own KRDPCTL `chroma` can override it for that connection.
     KRdp::ChromaPolicy m_chromaPolicyDefault;
