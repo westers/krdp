@@ -7,6 +7,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <chrono>
 #include <optional>
 
 #include <QElapsedTimer>
@@ -84,8 +85,16 @@ struct Snapshot {
     std::optional<double> rttMs;
     std::optional<double> rttMinMs;
     std::optional<double> rttVarMs;
-    std::optional<quint32> goodputKbps;
-    int goodputSamples = 0;
+    /// AUD-FIX12: NetworkDetection's bandwidth measurement: what the server sent, as the client
+    /// received it (demand-limited: never more than the session had to send). Was goodputKbps.
+    std::optional<quint32> sentKbps;
+    int sentSamples = 0;
+    /// AUD-FIX12: an estimate of what the path can carry, only when there is real evidence
+    /// (CapacityEstimate: network-limited TCP delivery-rate samples; or the slow-link probe's
+    /// highest rate held without congestion). Absent when unknown.
+    std::optional<quint32> capacityKbps;
+    QString capacitySource; ///< "tcp" | "probe" (with capacityKbps)
+    std::optional<bool> appLimited; ///< the latest TCP delivery-rate sample was application-limited
     std::optional<quint64> retransmits; ///< TCP_INFO total retransmits (running total)
     std::optional<qint64> sendQueueBytes;
     bool congested = false;
@@ -97,6 +106,32 @@ struct Snapshot {
     QStringList heldBack; ///< codec families the CPU guard holds back
     std::optional<int> retryInS; ///< until the first held-back codec may be tried again
     QVector<SurfaceCounters> surfaces;
+};
+
+/**
+ * AUD-FIX12: the path capacity TCP itself measured. The kernel keeps a delivery-rate sample per
+ * ACK (tcpi_delivery_rate) and flags the ones taken while the sender had less to send than the
+ * path could take (tcpi_delivery_rate_app_limited). Only the others say something about the
+ * path: the highest of them over the last Window is the estimate (like BBR's bottleneck
+ * filter). A session that never fills its path (most of them: a LAN, a still desktop) has none,
+ * and then there is no estimate. Not thread-safe.
+ */
+class KRDP_EXPORT CapacityEstimate
+{
+public:
+    using Clock = std::chrono::steady_clock;
+    static constexpr auto Window = std::chrono::seconds(10);
+    void sample(Clock::time_point now, quint64 bytesPerSecond, bool appLimited);
+    /// The estimate in kbit/s, if a network-limited sample lies within Window of \a now.
+    std::optional<quint32> kbps(Clock::time_point now) const;
+    void clear();
+
+private:
+    struct Entry {
+        Clock::time_point at;
+        quint64 bytesPerSecond = 0;
+    };
+    QVector<Entry> m_samples; ///< network-limited samples of the last Window
 };
 
 /// The `stats-sample` for \a current, with counters as deltas against \a previous.

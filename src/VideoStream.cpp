@@ -440,6 +440,8 @@ public:
     std::vector<FrameQueuePolicy::KeyFrameRequestBackoff> keyFrameBackoff;
     // AUD-FIX12: per monitor, the run of frames dropped for want of a keyframe (frameQueueMutex).
     std::vector<FrameQueuePolicy::SurfaceSilence> silence;
+    // AUD-FIX12: TCP's network-limited delivery rate (stats samples; the main thread).
+    Stats::CapacityEstimate capacity;
     // Monitors whose frames piled up behind an unacknowledged keyframe: they may keep
     // keyFrameHoldFrames() queued until that backlog has drained to MaxHeldFramesPerMonitor,
     // even after the keyframe was acknowledged (frameQueueMutex).
@@ -2423,9 +2425,9 @@ Stats::Snapshot VideoStream::statsSnapshot() const
     if (auto *network = d->session->networkDetection()) {
         s.rttMs = plausibleMs(network->averageRTT());
         s.rttMinMs = plausibleMs(network->minimumRTT());
-        s.goodputSamples = network->validBandwidthSamples();
-        if (s.goodputSamples > 0) {
-            s.goodputKbps = network->bandwidth();
+        s.sentSamples = network->validBandwidthSamples();
+        if (s.sentSamples > 0) {
+            s.sentKbps = network->bandwidth();
         }
     }
     if (tcp) {
@@ -2434,6 +2436,19 @@ Stats::Snapshot VideoStream::statsSnapshot() const
         }
         s.rttVarMs = double(tcp->rttVarUs) / 1000.0;
         s.retransmits = tcp->totalRetransmits;
+        if (tcp->deliveryRateBytesPerSecond > 0) {
+            s.appLimited = tcp->deliveryRateAppLimited;
+        }
+        d->capacity.sample(now, tcp->deliveryRateBytesPerSecond, tcp->deliveryRateAppLimited);
+    }
+    // AUD-FIX12: capacity only with evidence: TCP's network-limited delivery rate, else (on a slow
+    // link) the highest rate the slow-link probe held without congestion. Never the send rate.
+    if (const auto measured = d->capacity.kbps(now)) {
+        s.capacityKbps = measured;
+        s.capacitySource = QStringLiteral("tcp");
+    } else if (d->codecPolicy.slowLink && d->codecPolicy.provenKbps > 0) {
+        s.capacityKbps = d->codecPolicy.provenKbps;
+        s.capacitySource = QStringLiteral("probe");
     }
     if (const qint64 queued = d->session->socketQueuedBytes(); queued >= 0) {
         s.sendQueueBytes = queued;

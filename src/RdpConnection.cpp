@@ -984,7 +984,16 @@ std::optional<RdpConnection::TcpInfo> RdpConnection::tcpInfo() const
     if (::getsockopt(int(d->socketHandle), IPPROTO_TCP, TCP_INFO, &info, &length) != 0 || length < offsetof(tcp_info, tcpi_total_retrans) + sizeof(info.tcpi_total_retrans)) {
         return std::nullopt;
     }
-    return TcpInfo{qint64(info.tcpi_rtt), qint64(info.tcpi_rttvar), quint64(info.tcpi_total_retrans)};
+    TcpInfo result{qint64(info.tcpi_rtt), qint64(info.tcpi_rttvar), quint64(info.tcpi_total_retrans)};
+    if (length >= offsetof(tcp_info, tcpi_delivery_rate) + sizeof(info.tcpi_delivery_rate)) {
+        // glibc's tcp_info leaves out <linux/tcp.h>'s tcpi_delivery_rate_app_limited: bit 0 of the
+        // byte after tcpi_snd_wscale/tcpi_rcv_wscale (the one before tcpi_rto).
+        static_assert(offsetof(tcp_info, tcpi_rto) == 8, "tcp_info layout: the app-limited bit is byte 7");
+        const auto *bytes = reinterpret_cast<const unsigned char *>(&info);
+        result.deliveryRateBytesPerSecond = quint64(info.tcpi_delivery_rate);
+        result.deliveryRateAppLimited = (bytes[offsetof(tcp_info, tcpi_rto) - 1] & 0x1) != 0;
+    }
+    return result;
 }
 
 NetworkDetection *RdpConnection::networkDetection() const

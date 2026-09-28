@@ -146,7 +146,7 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
     }
 
     QJsonObject link{
-        {QStringLiteral("goodputSamples"), current.goodputSamples},
+        {QStringLiteral("sentSamples"), current.sentSamples},
         {QStringLiteral("congested"), current.congested},
         {QStringLiteral("slow"), current.slow},
     };
@@ -159,8 +159,15 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
     if (current.rttVarMs) {
         link.insert(QStringLiteral("rttVarMs"), oneDecimal(*current.rttVarMs));
     }
-    if (current.goodputKbps) {
-        link.insert(QStringLiteral("goodputKbps"), qint64(*current.goodputKbps));
+    if (current.sentKbps) {
+        link.insert(QStringLiteral("sentKbps"), qint64(*current.sentKbps));
+    }
+    if (current.capacityKbps && !current.capacitySource.isEmpty()) {
+        link.insert(QStringLiteral("capacityKbps"), qint64(*current.capacityKbps));
+        link.insert(QStringLiteral("capacitySource"), current.capacitySource);
+    }
+    if (current.appLimited) {
+        link.insert(QStringLiteral("appLimited"), *current.appLimited);
     }
     if (current.retransmits) {
         // The first sample after a subscription has a previous snapshot too (taken at subscribe).
@@ -208,6 +215,35 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
         {QStringLiteral("policy"), policy},
         {QStringLiteral("surfaces"), surfaces},
     };
+}
+
+void CapacityEstimate::sample(Clock::time_point now, quint64 bytesPerSecond, bool appLimited)
+{
+    m_samples.removeIf([now](const Entry &e) {
+        return now - e.at > Window;
+    });
+    if (!appLimited && bytesPerSecond > 0) {
+        m_samples.append({now, bytesPerSecond});
+    }
+}
+
+std::optional<quint32> CapacityEstimate::kbps(Clock::time_point now) const
+{
+    quint64 best = 0;
+    for (const auto &e : m_samples) {
+        if (now - e.at <= Window) {
+            best = std::max(best, e.bytesPerSecond);
+        }
+    }
+    if (best == 0) {
+        return std::nullopt;
+    }
+    return quint32(std::min<quint64>(best * 8 / 1000, std::numeric_limits<quint32>::max()));
+}
+
+void CapacityEstimate::clear()
+{
+    m_samples.clear();
 }
 
 QJsonObject eventRecord(EventKind kind, quint64 seq, const EventDetail &detail)

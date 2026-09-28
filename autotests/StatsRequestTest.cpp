@@ -74,8 +74,11 @@ Stats::Snapshot busy(quint64 scale)
     s.rttMs = 1234.56;
     s.rttMinMs = 1234.56;
     s.rttVarMs = 1234.56;
-    s.goodputKbps = 9999999;
-    s.goodputSamples = 99999;
+    s.sentKbps = 9999999;
+    s.sentSamples = 99999;
+    s.capacityKbps = 9999999;
+    s.capacitySource = u"probe"_s;
+    s.appLimited = false;
     s.retransmits = 99999 * scale;
     s.sendQueueBytes = 99999999;
     s.congested = true;
@@ -211,8 +214,9 @@ private Q_SLOTS:
         QCOMPARE(flow.value(u"clientDecodeMs"_s).toDouble(), 10.0);
         const auto link = record.value(u"link"_s).toObject();
         QCOMPARE(keys(link),
-                 (QSet<QString>{u"rttMs"_s, u"rttMinMs"_s, u"rttVarMs"_s, u"goodputKbps"_s, u"goodputSamples"_s, u"retransmits"_s,
-                                u"sendQueueKiB"_s, u"congested"_s, u"slow"_s}));
+                 (QSet<QString>{u"rttMs"_s, u"rttMinMs"_s, u"rttVarMs"_s, u"sentKbps"_s, u"sentSamples"_s, u"capacityKbps"_s,
+                                u"capacitySource"_s, u"appLimited"_s, u"retransmits"_s, u"sendQueueKiB"_s, u"congested"_s, u"slow"_s}));
+        QCOMPARE(link.value(u"capacitySource"_s).toString(), u"probe"_s);
         QCOMPARE(link.value(u"retransmits"_s).toInteger(), 99999);
         const auto policy = record.value(u"policy"_s).toObject();
         QCOMPARE(keys(policy), (QSet<QString>{u"mode"_s, u"adaptive"_s, u"cpuGuard"_s}));
@@ -242,7 +246,9 @@ private Q_SLOTS:
         }
         QCOMPARE(video.value(u"sentKbps"_s).toInt(-1), 0);
         const auto link = record.value(u"link"_s).toObject();
-        for (const auto &key : {u"rttMs"_s, u"rttMinMs"_s, u"rttVarMs"_s, u"goodputKbps"_s, u"retransmits"_s, u"sendQueueKiB"_s}) {
+        // AUD-FIX12: no capacity without evidence (and never the send rate standing in for it).
+        for (const auto &key : {u"rttMs"_s, u"rttMinMs"_s, u"rttVarMs"_s, u"sentKbps"_s, u"capacityKbps"_s, u"capacitySource"_s, u"appLimited"_s,
+                                u"retransmits"_s, u"sendQueueKiB"_s, u"goodputKbps"_s}) {
             QVERIFY2(!link.contains(key), qPrintable(key));
         }
         QVERIFY(!record.value(u"flow"_s).toObject().contains(u"clientDecodeMs"_s));
@@ -254,6 +260,27 @@ private Q_SLOTS:
         before.encoderRestarts = 5;
         after.encoderRestarts = 1;
         QCOMPARE(Stats::sampleRecord(after, before, 500, 1).value(u"video"_s).toObject().value(u"encoderRestarts"_s).toInt(), 1);
+    }
+
+    // AUD-FIX12: the capacity estimate takes only network-limited TCP delivery-rate samples, the
+    // highest of the last 10 s; application-limited ones (a LAN with room to spare) give none.
+    void capacityNeedsNetworkLimitedSamples()
+    {
+        using namespace std::chrono_literals;
+        Stats::CapacityEstimate estimate;
+        const auto t0 = std::chrono::steady_clock::time_point{} + 1h;
+        for (int i = 0; i < 20; ++i) estimate.sample(t0 + i * 500ms, 125'000'000, true); // 1 Gbit/s, app-limited
+        QVERIFY(!estimate.kbps(t0 + 10s));
+        estimate.sample(t0 + 10s, 750'000, false); // 6 Mbit/s, network-limited (a tbf queue)
+        estimate.sample(t0 + 11s, 700'000, false);
+        QCOMPARE(estimate.kbps(t0 + 11s), std::optional<quint32>(6000));
+        estimate.sample(t0 + 12s, 125'000'000, true);
+        QCOMPARE(estimate.kbps(t0 + 12s), std::optional<quint32>(6000));
+        // Ten seconds later the evidence is gone.
+        QCOMPARE(estimate.kbps(t0 + 20s + 500ms), std::optional<quint32>(5600));
+        QVERIFY(!estimate.kbps(t0 + 22s));
+        estimate.sample(t0 + 23s, 0, false); // no sample yet
+        QVERIFY(!estimate.kbps(t0 + 23s));
     }
 
     void eventShape()

@@ -119,6 +119,11 @@ public:
         qint64 rttUs = 0; ///< smoothed round-trip time
         qint64 rttVarUs = 0; ///< its mean deviation (jitter)
         quint64 totalRetransmits = 0; ///< segments retransmitted since the connection opened
+        /// AUD-FIX12: the kernel's latest delivery-rate sample (tcpi_delivery_rate, bytes/s; 0 = none)
+        quint64 deliveryRateBytesPerSecond = 0;
+        /// ...and whether it was application-limited (tcpi_delivery_rate_app_limited): the sender
+        /// had less to send than the path could take, so the rate says nothing about the path.
+        bool deliveryRateAppLimited = true;
     };
     /**
      * getsockopt(TCP_INFO) on the connection's socket; nullopt when unknown (no socket, closed,
