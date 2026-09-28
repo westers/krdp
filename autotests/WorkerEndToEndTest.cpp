@@ -25,15 +25,18 @@
 #include <QHash>
 #include <QSet>
 
+#include <functional>
 #include <map>
 #include <tuple>
 
 #include <unistd.h>
 
+#include "ClientStyleDecoder.h"
 #include "ConsoleWorkerEndpoint.h"
 #include "EncoderSupport.h"
 #include "H264KeyframeSize.h"
 #include "RenderNodes.h"
+#include "SurfaceChain.h"
 #include "VideoCodecSupport.h"
 
 using namespace KRdp;
@@ -63,6 +66,11 @@ kwin_wayland --virtual --width "$KRDP_E2E_WIDTH" --height "$KRDP_E2E_HEIGHT" --o
     --no-lockscreen --no-global-shortcuts --no-kactivities >"$HOME/kwin.log" 2>&1 & children="$children $!"
 wait_for "$R/wayland-0"
 sleep 1
+# Motion, as on cray (testsrc2 at 30 fps in the desktop): every output keeps encoding delta frames.
+if [ -n "${KRDP_E2E_MOTION:-}" ]; then
+    env WAYLAND_DISPLAY=wayland-0 SDL_VIDEODRIVER=wayland ffplay -loglevel error -an -fs -f lavfi \
+        -i "testsrc2=size=${KRDP_E2E_WIDTH}x${KRDP_E2E_HEIGHT}:rate=30" >"$HOME/motion.log" 2>&1 & children="$children $!"
+fi
 : >"$R/session-ready"
 set +e
 # One worker per broker socket, like the desktop loop; worker-args says which kind (console or virtual).
@@ -75,6 +83,75 @@ while true; do
     echo $? >"$R/worker-exit"
 done
 )SH";
+
+/**
+ * AUD-FIX11 R6: what the broker delivers to a client from the frames its endpoint received, and
+ * whether that client decodes it. The broker's rules are applied as VideoStream applies them:
+ * a frame of another codec family than the connection's is never sent (queueFrame/sendFrame),
+ * a new monitor layout (the published atlas) means new surfaces (performReset), and each
+ * surface's SurfaceChain lets nothing of a codec out before a keyframe of it with in-band
+ * headers. GfxSurfaceCommand passes a private payload through unchanged, and AVC420's bitstream
+ * whole (GfxSurfaceCommandTest). The client is krdp-client 0.5.5: ClientStyle::Decoder, from the
+ * first delivered packet on, one decoder per surface.
+ */
+struct Delivery {
+    QString error; ///< the first packet the client would reject, empty if none
+    QStringList firstPackets; ///< the first few packets per surface, with their OBU/NAL types
+    QHash<int, int> pictures; ///< decoded pictures per monitor index
+    QHash<int, int> deltas; ///< delivered delta frames per monitor index
+    int delivered = 0;
+    int held = 0; ///< held back by a SurfaceChain (no keyframe of the codec yet)
+};
+
+Delivery deliverAndDecode(const QVector<VideoFrame> &frames, qsizetype from, const std::function<VideoCodec(qsizetype)> &connectionCodec)
+{
+    Delivery delivery;
+    ClientStyle::Decoder client;
+    QHash<int, SurfaceChain> chains;
+    QHash<int, int> surfaceOf;
+    QVector<VideoMonitor> layout;
+    int nextSurface = 1;
+    bool first = true;
+    for (qsizetype i = from; i < frames.size(); ++i) {
+        const auto &frame = frames[i];
+        const VideoCodec connection = connectionCodec(i);
+        const VideoCodec produced = frame.codec.value_or(connection);
+        if (codecFamily(produced) != codecFamily(connection)) continue;
+        if (first || frame.monitors != layout) {
+            // A new layout: VideoStream's reset creates new surfaces (new ids, new decoders).
+            first = false;
+            layout = frame.monitors;
+            chains.clear();
+            surfaceOf.clear();
+        }
+        const int monitor = frame.monitors.size() > 1 ? frame.monitorIndex : 0;
+        if (!surfaceOf.contains(monitor)) surfaceOf[monitor] = nextSurface++;
+        const int surface = surfaceOf[monitor];
+        if (chains[surface].admit(produced, frame.codec.has_value(), frame.isKeyFrame, frame.data) != SurfaceChain::Verdict::Send) {
+            ++delivery.held;
+            continue;
+        }
+        ++delivery.delivered;
+        if (!frame.isKeyFrame) ++delivery.deltas[monitor];
+        // krdp-client keys its private decoders by surface; FreeRDP's AVC decoder is its own.
+        const int key = codecFamily(produced) == 0 ? -surface : surface;
+        if (client.surfaces().value(key).packets < 3) {
+            delivery.firstPackets << QStringLiteral("surface %1 (monitor %2) %3 %4 %5 bytes: %6")
+                                         .arg(surface)
+                                         .arg(monitor)
+                                         .arg(QLatin1String(VideoCodecSupport::codecName(produced)), frame.isKeyFrame ? QStringLiteral("key") : QStringLiteral("delta"))
+                                         .arg(frame.data.size())
+                                         .arg(ClientStyle::unitTypes(produced, frame.data));
+        }
+        if (!client.feed(key, produced, frame.data)) {
+            delivery.error = client.error();
+            return delivery;
+        }
+        delivery.pictures[monitor] = client.surfaces().value(key).pictures;
+    }
+    delivery.error = client.missingPictures(); // every delivered frame is a picture on the client
+    return delivery;
+}
 }
 
 /// One private headless session (bwrap, D-Bus without activation, PipeWire, WirePlumber, KWin).
@@ -128,13 +205,14 @@ private Q_SLOTS:
     void cleanupTestCase();
 
 private:
-    /// The session with \a outputs KWin virtual outputs of \a size, started on first use (nullptr: failed).
-    PrivateSession *session(int outputs, QSize size = QSize(1280, 720));
+    /// The session with \a outputs KWin virtual outputs of \a size, started on first use (nullptr:
+    /// failed). With \a motion (and ffplay installed), a test pattern plays full screen in it.
+    PrivateSession *session(int outputs, QSize size = QSize(1280, 720), bool motion = false);
     /// Starts one worker in \a session behind \a endpoint and records what it sends into \a run.
     bool startWorker(PrivateSession &session, bool virtualDesktop, ConsoleWorkerEndpoint &endpoint, WorkerRun &run);
     void stopWorker(PrivateSession &session, ConsoleWorkerEndpoint &endpoint);
 
-    std::map<std::tuple<int, int, int>, PrivateSession> m_sessions;
+    std::map<std::tuple<int, int, int, bool>, PrivateSession> m_sessions;
     QString m_skip;
     QString m_renderNode;
 };
@@ -160,15 +238,15 @@ void WorkerEndToEndTest::initTestCase()
     }
 }
 
-PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size)
+PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion)
 {
-    const auto key = std::tuple(outputs, size.width(), size.height());
+    const auto key = std::tuple(outputs, size.width(), size.height(), motion);
     if (const auto it = m_sessions.find(key); it != m_sessions.end()) {
         return it->second.process ? &it->second : nullptr;
     }
-    // Sessions of another output size are ended first (the rows run one size after another).
+    // Sessions of another output size or motion are ended first (the rows run one size after another).
     for (auto &[other, running] : m_sessions) {
-        if ((std::get<1>(other) != size.width() || std::get<2>(other) != size.height()) && running.process
+        if ((std::get<1>(other) != size.width() || std::get<2>(other) != size.height() || std::get<3>(other) != motion) && running.process
             && running.process->state() != QProcess::NotRunning) {
             running.process->terminate();
             if (!running.process->waitForFinished(5000)) {
@@ -248,6 +326,9 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size)
     set("KRDP_E2E_OUTPUTS", QString::number(outputs));
     set("KRDP_E2E_WIDTH", QString::number(size.width()));
     set("KRDP_E2E_HEIGHT", QString::number(size.height()));
+    // AUD-FIX11: motion as on cray (testsrc2 at 30 fps); KRDP_E2E_MOTION=0 turns it off.
+    if (motion && qEnvironmentVariable("KRDP_E2E_MOTION") != QLatin1String("0") && !QStandardPaths::findExecutable(QStringLiteral("ffplay")).isEmpty())
+        set("KRDP_E2E_MOTION", QStringLiteral("1"));
     if (qEnvironmentVariableIsSet("KRDP_E2E_LOGGING_RULES")) set("QT_LOGGING_RULES", qEnvironmentVariable("KRDP_E2E_LOGGING_RULES"));
 
     auto process = std::make_unique<QProcess>();
@@ -435,14 +516,16 @@ void WorkerEndToEndTest::codecSwitchAtAttach_data()
     for (const QSize size : {QSize(1280, 720), QSize(1920, 1080), QSize(2560, 1440), QSize(3840, 2160)}) {
         for (const bool virtualDesktop : {true, false}) {
             for (const int outputs : {2, 1}) {
-                for (const auto codec : {VideoCodec::Hevc, VideoCodec::Av1}) {
+                for (const auto codec : {VideoCodec::Hevc, VideoCodec::Av1, VideoCodec::Avc420}) {
                     for (const bool late : {false, true}) {
                         if (late && outputs == 1) continue;
+                        // AUD-FIX11: H.264 at attach (no switch), for the decode check, at 1080p.
+                        if (codec == VideoCodec::Avc420 && (late || size != QSize(1920, 1080))) continue;
                         // The 720p rows keep AUD-FIX9's names.
                         const QByteArray prefix = size == QSize(1280, 720) ? QByteArray()
                                                                           : QStringLiteral("%1x%2 ").arg(size.width()).arg(size.height()).toLatin1();
                         QTest::addRow("%s%s %d-output %s %s", prefix.constData(), virtualDesktop ? "virtual" : "console", outputs,
-                                      codec == VideoCodec::Hevc ? "hevc" : "av1", late ? "late" : "immediate")
+                                      codec == VideoCodec::Hevc ? "hevc" : codec == VideoCodec::Av1 ? "av1" : "h264", late ? "late" : "immediate")
                             << virtualDesktop << outputs << int(codec) << late << size;
                     }
                 }
@@ -462,7 +545,7 @@ void WorkerEndToEndTest::codecSwitchAtAttach()
     if (!m_skip.isEmpty()) {
         QSKIP(qPrintable(m_skip));
     }
-    auto *s = session(outputs, size);
+    auto *s = session(outputs, size, true);
     QVERIFY(s);
     if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
     if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
@@ -490,8 +573,9 @@ void WorkerEndToEndTest::codecSwitchAtAttach()
     QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
     QVERIFY2(endpoint.ready(), "the real worker never confirmed capture");
     QVERIFY(run.caps);
-    const auto &backends = run.caps->encoders.of(codec == VideoCodec::Hevc ? CodecPolicy::Family::Hevc : CodecPolicy::Family::Av1);
-    const auto host = EncoderSupport::probeUncached().encoders.of(codec == VideoCodec::Hevc ? CodecPolicy::Family::Hevc : CodecPolicy::Family::Av1);
+    const auto family = codec == VideoCodec::Hevc ? CodecPolicy::Family::Hevc : codec == VideoCodec::Av1 ? CodecPolicy::Family::Av1 : CodecPolicy::Family::Avc;
+    const auto &backends = run.caps->encoders.of(family);
+    const auto host = EncoderSupport::probeUncached().encoders.of(family);
     if (!backends.hardware) {
         QVERIFY2(!host.hardware, "the host has this hardware encoder but the sandboxed worker does not see it");
         stopWorker(*s, endpoint);
@@ -549,10 +633,43 @@ void WorkerEndToEndTest::codecSwitchAtAttach()
                       << "outputs decoded in" << elapsed << "ms (coded" << coded << "for" << size << ");" << newCodec << "new-codec and" << oldCodec << "older frames after the switch;"
                       << (run.outputs - outputsBefore) << "layouts published since the grant; order" << run.order.join(QStringLiteral(", "));
     QVERIFY2(decoded.size() == outputs, "no decodable keyframe of the new codec from every output within 2 s");
+
+    // AUD-FIX11 R6: the client decodes what the broker delivers, from the first packet on. On
+    // cray, libdav1d rejected the first AV1 delta after an output's proof keyframe: the packets
+    // that output encoded while the other proved itself had been dropped.
+    QTest::qWait(1000); // the new codec's delta frames (motion: ffplay in the session)
+    // KRDP_E2E_DUMP=DIR: every frame since the grant, one file each, and an index (OBU/NAL types).
+    if (const QString dump = qEnvironmentVariable("KRDP_E2E_DUMP"); !dump.isEmpty()) {
+        QDir().mkpath(dump);
+        QFile index(dump + QStringLiteral("/index.txt"));
+        QVERIFY(index.open(QIODevice::WriteOnly));
+        for (qsizetype i = grantMark; i < run.frames.size(); ++i) {
+            const auto &f = run.frames[i];
+            const auto c = f.codec.value_or(VideoCodec::Avc420);
+            const QString name = QStringLiteral("%1-m%2-%3%4.bin").arg(i - grantMark, 4, 10, QLatin1Char('0')).arg(f.monitorIndex)
+                                     .arg(QLatin1String(VideoCodecSupport::codecName(c)), f.isKeyFrame ? QStringLiteral("-key") : QString());
+            QFile out(dump + QLatin1Char('/') + name);
+            QVERIFY(out.open(QIODevice::WriteOnly));
+            out.write(f.data);
+            index.write(QStringLiteral("%1 %2 %3x%4 monitors=%5 %6 %7\n").arg(name, i < mark ? QStringLiteral("pre") : QStringLiteral("post"))
+                            .arg(f.size.width()).arg(f.size.height()).arg(f.monitors.size()).arg(f.data.size())
+                            .arg(ClientStyle::unitTypes(c, f.data)).toUtf8());
+        }
+    }
+    const auto delivery = deliverAndDecode(run.frames, grantMark, [&](qsizetype i) {
+        // Immediate: the client's codec was chosen at connect, as on cray. Late: AVC first.
+        return late && i < mark ? VideoCodec::Avc420 : codec;
+    });
+    qInfo().noquote() << "Delivered from the grant on:" << delivery.delivered << "packets," << delivery.held << "held back by a surface's chain; deltas per output"
+                      << delivery.deltas << "; pictures" << delivery.pictures << "\n  " << delivery.firstPackets.join(QStringLiteral("\n   "));
+    QVERIFY2(delivery.error.isEmpty(), qPrintable(QStringLiteral("the client would reject %1\nfirst packets:\n%2").arg(delivery.error, delivery.firstPackets.join(QLatin1Char('\n')))));
+    for (int monitor = 0; monitor < outputs; ++monitor) {
+        QVERIFY2(delivery.pictures.value(monitor) >= 1, qPrintable(QStringLiteral("output %1 showed no picture").arg(monitor)));
+    }
     if (outputs > 1) QVERIFY2(run.outputs > outputsBefore, "the new client's capture never published its outputs (KScreen readback)");
     const QString since = s->workerLogSince(grantLog);
     const QString restart = QStringLiteral("Codec changed to %1 on a running stream").arg(QLatin1String(VideoCodecSupport::codecName(codec)));
-    if (outputs > 1 && !late) {
+    if (outputs > 1 && !late && codec != VideoCodec::Avc420) {
         // The codec arrived with the grant: the refreshed captures open in it; the streams they
         // replace never restart their encoders first (the ace/cray sequence).
         QVERIFY2(since.contains(QStringLiteral("Refreshing per-output captures for a new client")), qPrintable(since));
