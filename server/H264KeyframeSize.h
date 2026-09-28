@@ -4,6 +4,8 @@
 #include <QSize>
 #include <optional>
 
+#include "VideoCodec.h"
+
 namespace KRdp
 {
 // Independent payload evidence for a resize completion. Called only on
@@ -11,4 +13,11 @@ namespace KRdp
 // Requires self-contained Annex-B SPS/PPS/IDR, bounded dimensions and a clean
 // software decode. No hardware device or persistent decoder is created.
 std::optional<QSize> h264KeyframeSize(const QByteArray &packet);
+/**
+ * AUD-FIX7: the same evidence for the codec the worker's encoder produced (VideoFrame::codec):
+ * h264KeyframeSize() for AVC; for HEVC and AV1 FFmpeg's parser must report a 4:2:0 keyframe of
+ * bounded, even dimensions, and a software decoder, when this FFmpeg has one, must decode it
+ * cleanly to that size.
+ */
+std::optional<QSize> encodedKeyframeSize(VideoCodec codec, const QByteArray &packet);
 }

@@ -6,6 +6,7 @@
 #include "VirtualResizeProtocol.h"
 #include "VirtualResize.h"
 #include "RemoteMonitorGeometry.h"
+#include "CodecRequest.h"
 #include <InputHandler.h>
 #include <VideoStream.h>
 #include <QScopeGuard>
@@ -148,6 +149,9 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         if (m_connection) sendReply(RemoteTopologyProtocol::error(id, u"capture-failed"_s));
     });
     connect(&m_session, &AbstractSession::frameReceived, connection->videoStream(), &VideoStream::queueFrame);
+    // AUD-FIX7: the worker encodes what this connection's VideoStream decides (codec, settings,
+    // frame rate - which also carries the delivery throttle for stock clients).
+    m_codec = std::make_unique<WorkerCodecBridge>(connection->videoStream(), &m_session);
     connect(connection->inputHandler(), &InputHandler::inputEvent, &m_session, &AbstractSession::sendEvent);
     connect(&m_session, &ConsoleWorkerSession::keyFrameRequested, this, [this] {
         if (authorized()) m_endpoint->requestKeyFrame();
@@ -185,6 +189,12 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
 }
 
 VirtualSessionTransport::~VirtualSessionTransport() { closed(); }
+
+void VirtualSessionTransport::setVideoCodecHost(const VideoCodecHost &host)
+{
+    m_videoHost = host;
+    if (m_connection) m_connection->videoStream()->setEncoderPolicy(host.probe.encoders, host.mode);
+}
 
 bool VirtualSessionTransport::authorized() const
 {
@@ -354,6 +364,8 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     if (!bindingCurrent()) return false;
     endpoint->setVideoQuality({generation, 80});
     if (!bindingCurrent()) return false;
+    m_codec->bind(endpoint, generation); // the worker's own encoders, then this connection's config
+    if (!bindingCurrent()) return false;
     m_session.setWorkerActive(true);
     if (!bindingCurrent()) return false;
     // reset() only sets pendingReset; setEnabled() emits enabledChanged.
@@ -428,6 +440,7 @@ void VirtualSessionTransport::revoke()
     // Clear local binding before any signal/callback can reenter teardown.
     for (const auto &connection : m_workerConnections) QObject::disconnect(connection);
     m_workerConnections.clear();
+    if (m_codec) m_codec->unbind(); // the worker resets its encoders with the control change below
     m_endpoint = nullptr;
     m_handle.reset();
     m_wireLayout.clear();
@@ -854,6 +867,7 @@ void VirtualSessionTransport::sendCapabilities()
     capabilities.topologyPreview = true;
     capabilities.topologyApply = true;
     capabilities.devices = VirtualDeviceCapabilities;
+    if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, m_videoHost->mode);
     m_connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
 
@@ -1732,11 +1746,18 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
     if (record.value(u"type"_s) == u"topology-commit"_s) return topologyCommit(record, uid);
     if (record.value(u"type"_s) == u"virtual-resize"_s) return requestResize(record, uid);
     if (record.value(u"type"_s) == u"codec"_s) {
-        // Virtual desktops stream AVC420 from their worker; there is no private codec here
-        // (no `video` group in capabilities). Answered, not refused, so a client that asks
-        // anyway learns it at once (AUD-FIX2 F2).
-        if (!record.value(u"codecs"_s).isArray()) return LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array"_s});
-        return LayoutControl::codecRecord(u"avc"_s, std::nullopt, u"virtual desktops stream AVC only"_s);
+        // AUD-FIX7: the connection's codec policy, as krdpserver's (CodecRequest). It is the
+        // connection's preference, so it may come before any desktop is attached; the worker
+        // gets the choice when one is (WorkerCodecBridge). A broker without a VideoCodecHost
+        // (no `video` group) still answers AVC only, without `backend` (AUD-FIX2 F2).
+        if (!record.value(u"codecs"_s).isArray()) return CodecRequest::invalidRecord();
+        const auto parsed = CodecRequest::parse(record);
+        if (!parsed) return CodecRequest::invalidRecord();
+        if (!m_videoHost || !m_connection) return LayoutControl::codecRecord(u"avc"_s, std::nullopt, u"virtual desktops stream AVC only"_s);
+        QString log;
+        const auto reply = CodecRequest::apply(*m_connection->videoStream(), *parsed, &log);
+        qInfo().noquote() << "Virtual client" << m_client << log;
+        return reply;
     }
     if (record.value(u"type"_s) == u"audio-priority"_s) {
         const auto parsed = AudioPriority::parse(record);

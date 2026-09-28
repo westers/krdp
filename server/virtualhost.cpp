@@ -2,7 +2,11 @@
 #include "VirtualSessionHostController.h"
 #include "VirtualSessionLaunchPlan.h"
 #include "VirtualHostTls.h"
+#include "HostCertificate.h"
+#include "VideoCodecHost.h"
 #include <QCoreApplication>
+#include <QTimer>
+#include <chrono>
 #include <QCommandLineParser>
 #include <QFile>
 #include <QFileInfo>
@@ -28,6 +32,7 @@ int main(int argc, char **argv)
     parser.addOption({QStringLiteral("certificate-key"), QStringLiteral("Absolute TLS private-key path."), QStringLiteral("path")});
     parser.addOption({QStringLiteral("address"), QStringLiteral("Numeric listen address."), QStringLiteral("address"), QStringLiteral("0.0.0.0")});
     parser.addOption({QStringLiteral("port"), QStringLiteral("Listen port, independent of the physical-console listener."), QStringLiteral("port"), QStringLiteral("3395")});
+    parser.addOption({QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto")});
     parser.process(application);
     if (getuid() || geteuid()) { qCritical("Virtual host requires an explicit root service invocation"); return 1; }
     bool validPort = false;
@@ -37,9 +42,17 @@ int main(int argc, char **argv)
     const auto readableFile = [](const QString &path) {
         return KRdp::VirtualSessionLaunchPlan::absoluteCleanPath(path) && QFileInfo(path).isFile() && QFileInfo(path).isReadable();
     };
-    if (!parser.positionalArguments().isEmpty() || !validPort || !port || address.isNull()
-        || !readableFile(certificate) || !readableFile(key)) {
-        qCritical("Virtual host requires valid address, port and readable absolute TLS files"); return 1;
+    const auto softwareEncoding = KRdp::parseHostSoftwareEncoding(parser.value(QStringLiteral("software-encoding")));
+    if (!parser.positionalArguments().isEmpty() || !validPort || !port || address.isNull() || !softwareEncoding
+        || !KRdp::VirtualSessionLaunchPlan::absoluteCleanPath(certificate) || !KRdp::VirtualSessionLaunchPlan::absoluteCleanPath(key)) {
+        qCritical("Virtual host requires valid address, port, software encoding and absolute TLS paths"); return 1;
+    }
+    // AUD-FIX7: the host keeps its own certificate valid (created when missing, renewed when
+    // expired or within 30 days of it, a valid one kept), like krdpserver's (AUD-K3).
+    const KRdp::ServerCertificate::Paths certificatePaths{certificate, key};
+    if (!KRdp::ensureHostCertificate(certificatePaths, "krdp-virtual-host")) return 1;
+    if (!readableFile(certificate) || !readableFile(key)) {
+        qCritical("Virtual host requires readable absolute TLS files"); return 1;
     }
     if (!KRdp::validVirtualHostTls(certificate, key)) {
         qCritical("Virtual host requires a matching PEM certificate and unencrypted private key"); return 1;
@@ -63,11 +76,24 @@ int main(int argc, char **argv)
     server.setTlsCertificateKey(std::filesystem::path(key.toStdString()));
     server.setUsePAMAuthentication(true); server.setAllowAnyPAMUser(true);
     KRdp::VirtualSessionHostController host(&server, {});
+    // AUD-FIX7: what `capabilities.video` offers and each connection's codec policy starts from;
+    // a desktop's worker probes its own encoders and replaces this estimate once it reports.
+    KRdp::EncoderSupport::applyProcessOverrides();
+    const KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding};
+    qInfo().noquote() << "Virtual host video encoders:" << KRdp::EncoderSupport::describe(videoHost.probe) << "- SoftwareEncoding"
+                      << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode);
+    host.setVideoCodecHost(videoHost);
     if (!host.recover(*journal, &error) || !host.enableIndependentCreates(*journal)) {
         qCritical().noquote() << "Virtual host recovery refused:" << error; return 1;
     }
     // Never expose a listener with partially imported or unavailable journal state.
     // Individual failed desktop intents remain listed; they are not replacements.
     if (!server.start()) return 1;
+    QTimer certificateRenewal;
+    certificateRenewal.setInterval(std::chrono::hours(12));
+    QObject::connect(&certificateRenewal, &QTimer::timeout, &application, [certificatePaths] {
+        KRdp::ensureHostCertificate(certificatePaths, "krdp-virtual-host");
+    });
+    certificateRenewal.start();
     return application.exec();
 }

@@ -1099,6 +1099,7 @@ void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Pa
     frameData.data = data.data();
     frameData.isKeyFrame = data.isKeyFrame();
     copyAuxIfSupported(frameData, data);
+    frameData.codec = EncoderSelection::producedCodec(stream(), videoCodec());
     frameData.monitors = d->monitorLayout;
     frameData.monitorIndex = monitorIndex();
     frameData.damage = fullFrameDamage(frameData.size);

@@ -11,6 +11,9 @@
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QSocketNotifier>
+#include <QTimer>
+
+#include <chrono>
 
 #include <RdpConnection.h>
 #include <Server.h>
@@ -18,6 +21,8 @@
 #include "ConsoleHostController.h"
 #include "ConsoleSeatWatcher.h"
 #include "ConsoleWorkerLauncher.h"
+#include "HostCertificate.h"
+#include "VideoCodecHost.h"
 
 int main(int argc, char **argv)
 {
@@ -33,7 +38,8 @@ int main(int argc, char **argv)
     const QCommandLineOption portOption(QStringLiteral("port"), QStringLiteral("Listen port."), QStringLiteral("port"), QStringLiteral("3389"));
     const QCommandLineOption runtimeOption(QStringLiteral("runtime-directory"), QStringLiteral("Host-owned worker socket directory."), QStringLiteral("path"), QStringLiteral("/run/krdp-console"));
     const QCommandLineOption audioPriorityOption(QStringLiteral("prefer-audio-quality"), QStringLiteral("Default to audio-first congestion steering for the controlling client (live client overrides allowed)."));
-    parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption});
+    const QCommandLineOption softwareEncodingOption(QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto"));
+    parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, softwareEncodingOption});
     parser.process(application);
 
     if (geteuid() != 0) {
@@ -43,8 +49,16 @@ int main(int argc, char **argv)
 
     bool portOk = false;
     const quint16 port = parser.value(portOption).toUShort(&portOk);
-    if (!portOk || port == 0 || parser.value(workerOption).isEmpty() || parser.value(certificateOption).isEmpty() || parser.value(keyOption).isEmpty()) {
+    const auto softwareEncoding = KRdp::parseHostSoftwareEncoding(parser.value(softwareEncodingOption));
+    if (!portOk || port == 0 || parser.value(workerOption).isEmpty() || parser.value(certificateOption).isEmpty() || parser.value(keyOption).isEmpty()
+        || !softwareEncoding) {
         parser.showHelp(1);
+    }
+    // AUD-FIX7: the host keeps its own certificate valid (created when missing, renewed when
+    // expired or within 30 days of it, a valid one kept), like krdpserver's (AUD-K3).
+    const KRdp::ServerCertificate::Paths certificatePaths{parser.value(certificateOption), parser.value(keyOption)};
+    if (!KRdp::ensureHostCertificate(certificatePaths, "krdp-console-host")) {
+        return 1;
     }
 
     KRdp::Server server;
@@ -72,11 +86,24 @@ int main(int argc, char **argv)
                      &host, &KRdp::ConsoleHostController::workerExited, Qt::QueuedConnection);
     QObject::connect(&seat, &KRdp::ConsoleSeatWatcher::sessionsChanged, &host, &KRdp::ConsoleHostController::setSeatSessions);
     host.setAudioPriorityDefault(parser.isSet(audioPriorityOption));
+    // AUD-FIX7: what `capabilities.video` offers and the controlling connection's codec policy
+    // starts from; the worker probes its own encoders and replaces this once it reports.
+    KRdp::EncoderSupport::applyProcessOverrides();
+    const KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding};
+    qInfo().noquote() << "Console host video encoders:" << KRdp::EncoderSupport::describe(videoHost.probe) << "- SoftwareEncoding"
+                      << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode);
+    host.setVideoCodecHost(videoHost);
     if (!server.start()) {
         return 1;
     }
     host.start();
     seat.start();
+    QTimer certificateRenewal;
+    certificateRenewal.setInterval(std::chrono::hours(12));
+    QObject::connect(&certificateRenewal, &QTimer::timeout, &application, [certificatePaths] {
+        KRdp::ensureHostCertificate(certificatePaths, "krdp-console-host");
+    });
+    certificateRenewal.start();
     // Self-pipe: QCoreApplication::quit() is not async-signal-safe. On quit
     // the launcher's destructor sends SIGTERM to the worker, which restores
     // the outputs it changed before it exits.

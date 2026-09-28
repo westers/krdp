@@ -33,6 +33,7 @@ private Q_SLOTS:
     void mixedCreateRecordsAreBoundedAndCorrelated();
     void physicalLayoutRecordsRequireConsentAndCompleteBefore();
     void addVirtualRecordsAreBoundedAndCorrelated();
+    void encoderRecordsRoundTripAndAreBounded();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
 };
@@ -495,6 +496,59 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
     QCOMPARE(received->auxIsKeyFrame, sent.auxIsKeyFrame);
     QCOMPARE(received->monitorIndex, sent.monitorIndex);
     QCOMPARE(received->monitors, sent.monitors);
+    QVERIFY(!received->codec); // unknown stays unknown
+    // AUD-FIX7 (wire v2): the producing codec travels with the frame.
+    sent.codec = VideoCodec::Hevc;
+    deframer.feed(frame(sent));
+    const auto hevc = deframer.next();
+    QVERIFY(hevc);
+    QCOMPARE(videoFrame(*hevc)->codec, std::optional<VideoCodec>(VideoCodec::Hevc));
+    Record bad = *hevc;
+    bad.payload[bad.payload.size() - 1] = char(MaxWireCodec + 1);
+    QVERIFY(!videoFrame(bad));
+}
+
+void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
+{
+    QCOMPARE(ProtocolVersion, quint16(2));
+    Deframer deframer;
+    EncoderCaps caps;
+    caps.encoders.avc = {true, true, true};
+    caps.encoders.hevc = {true, false, false};
+    caps.encoders.av1 = {false, true, false};
+    caps.avc444Hardware = true;
+    caps.renderNode = QStringLiteral("/dev/dri/renderD128");
+    EncoderConfig config{7, VideoCodec::Av1, CodecPolicy::EncoderSettings{false, CodecPolicy::Preset::Fastest, 4500, 30}, 30};
+    EncoderConfig plain{8, VideoCodec::Avc420, std::nullopt, 17};
+    const EncoderReport report{EncoderReport::Event::Backend, VideoCodec::Hevc, true};
+    const EncoderReport unavailable{EncoderReport::Event::Unavailable, VideoCodec::Av1, false};
+    deframer.feed(frame(caps) + frame(config) + frame(plain) + frame(report) + frame(unavailable) + frame(EncoderLoad{123456789}));
+    QCOMPARE(encoderCaps(*deframer.next()), std::optional(caps));
+    QCOMPARE(encoderConfig(*deframer.next()), std::optional(config));
+    QCOMPARE(encoderConfig(*deframer.next()), std::optional(plain));
+    QCOMPARE(encoderReport(*deframer.next()), std::optional(report));
+    QCOMPARE(encoderReport(*deframer.next()), std::optional(unavailable));
+    const auto load = deframer.next();
+    QCOMPARE(encoderLoad(*load), std::optional(EncoderLoad{123456789}));
+    QVERIFY(!deframer.next());
+    QCOMPARE(deframer.takeInvalidCount(), 0);
+
+    // Bounds: no generation, no frame rate, an unknown codec or preset, a negative CPU time.
+    const auto rejected = [](const QByteArray &bytes) {
+        Deframer d;
+        d.feed(bytes);
+        const auto record = d.next();
+        return record && !encoderConfig(*record) && !encoderReport(*record) && !encoderLoad(*record);
+    };
+    QVERIFY(rejected(frame(EncoderConfig{0, VideoCodec::Hevc, std::nullopt, 30})));
+    QVERIFY(rejected(frame(EncoderConfig{1, VideoCodec::Hevc, std::nullopt, 0})));
+    QVERIFY(rejected(frame(EncoderConfig{1, VideoCodec::Hevc, CodecPolicy::EncoderSettings{false, CodecPolicy::Preset(9), 0, 0}, 30})));
+    QVERIFY(rejected(frame(EncoderLoad{-1})));
+    auto badCodec = frame(report);
+    badCodec[badCodec.size() - 2] = char(0); // codec "none"
+    QVERIFY(rejected(badCodec));
+    Record oversized{Kind::EncoderCaps, QByteArray(5000, '\0')};
+    QVERIFY(!encoderCaps(oversized));
 }
 
 void ConsoleWorkerWireTest::roundTripsNormalizedInput()

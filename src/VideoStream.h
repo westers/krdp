@@ -5,6 +5,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -183,6 +184,20 @@ public:
      */
     void encoderBackendReported(VideoCodec codec, bool hardware);
     /**
+     * AUD-FIX7: the encoders the process that really encodes has (a console/virtual worker's own
+     * probe) replace setEncoderPolicy()'s. When the running private codec has no encoder of the
+     * chosen backend there, the policy moves off it at once (`codec` push "encoder unavailable").
+     * Main thread only.
+     */
+    void updateEncoderPolicy(const CodecPolicy::Encoders &encoders);
+    /// Whether the client asked for a private codec (setPrivateCodecPolicy() with a non-empty list).
+    bool privateCodecPolicyActive() const;
+    /**
+     * AUD-FIX7: the CPU guard's input, the encoding process's CPU time in ns (monotonic; -1 =
+     * unknown). Default: this process. A broker whose worker encodes passes the worker's report.
+     */
+    void setEncoderCpuTimeSource(std::function<qint64()> source);
+    /**
      * What the encoders should run with besides the codec (backend, software preset, target
      * bitrate, frame-rate cap); nullopt until the client's `codec` request. Main thread only.
      */
@@ -224,6 +239,9 @@ public:
         quint64 keyFrameRequests = 0; ///< keyframes asked for after coalescing
         quint64 keyFramesDeferred = 0; ///< AUD-FIX6 F2: looks at a starved monitor that found its keyframe still unacknowledged
         bool acksSuspended = false;
+        qint64 ackLatencyUs = 0; ///< AUD-FIX7 F2: the recent frame-ack latency (p75) the window follows
+        int frameRate = 0; ///< the frame rate asked of the source (throttled or not)
+        bool linkClear = false; ///< the socket had sent everything at the last window check
     };
     FlowStats flowStats() const;
 
@@ -264,6 +282,12 @@ private:
     void stepCodecPolicy(bool congested);
     /// Applies a changed decision: the codec id, the encoder restart, the `codec` push.
     void applyCodecDecision(const CodecPolicy::Decision &decision);
+    /// A policy step outside the interval (the switch interval does not apply), with \a reason.
+    void restepCodecPolicyNow(const QString &reason);
+    /// AUD-FIX7 F2: the frame rate asked of the source: the policy's, or the delivery throttle's.
+    void refreshFrameRate();
+    /// AUD-FIX7 F2: one delivery-throttle step per adaptive interval; also the backlog threshold.
+    void updateDeliveryThrottle(bool windowPressure);
     void applyEncoderSettings(const CodecPolicy::EncoderSettings &settings);
 
     /**

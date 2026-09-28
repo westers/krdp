@@ -396,6 +396,16 @@ struct Decision {
     bool bitrateOnly = false;
 };
 
+/// A Decision with only its choice, change flag and reason set (the rest default).
+inline Decision makeDecision(const Choice &choice, bool changed, const QString &reason)
+{
+    Decision d;
+    d.choice = choice;
+    d.changed = changed;
+    d.reason = reason;
+    return d;
+}
+
 inline bool softwarePrivate(const Choice &c)
 {
     return !c.hardware && c.family != Family::Avc;
@@ -799,7 +809,7 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
         state.lastSwitch = now;
         state.lastReconfigure = now;
         state.preset = Preset::Efficient;
-        return finish({want, true, QStringLiteral("initial choice")});
+        return finish(makeDecision(want, true, QStringLiteral("initial choice")));
     }
     if (want == *state.current) {
         // Third step: nowhere left to go (no faster preset, no other codec): lower the frame rate.
@@ -836,7 +846,7 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
                                      .arg(QLatin1String(presetName(*previous)));
             }
         }
-        return finish({want, false, {}});
+        return finish(makeDecision(want, false, {}));
     }
     // AUD-FIX5 D5: a codec whose guard block ran out is a retry, not a change of encoders or of
     // what the client decodes (the reason used to say so).
@@ -852,7 +862,7 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
         : guardRetry                               ? retryText()
                                                    : QStringLiteral("encoders or client codecs changed");
     if (now - state.lastSwitch < MinSwitchInterval) {
-        return finish({*state.current, false, reason + QStringLiteral(" (waiting for the switch interval)")});
+        return finish(makeDecision(*state.current, false, reason + QStringLiteral(" (waiting for the switch interval)")));
     }
     // A new encoder: the guard's frame-rate step and bitrate start over. After the guard left a
     // software codec, the next software codec starts at its fastest preset (PERF.md: AV1 M11,
@@ -876,7 +886,7 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
     state.presetRaiseBlockedUntil = {};
     state.presetFlaps = 0;
     state.preset = fromGuard && softwarePrivate(want) ? Preset::Fastest : Preset::Efficient;
-    return finish({want, true, reason});
+    return finish(makeDecision(want, true, reason));
 }
 
 /**

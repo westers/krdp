@@ -1,6 +1,11 @@
-# Required TLS material for krdp-console-host.service.
+# TLS material for krdp-console-host.service. The host creates a self-signed ECDSA P-256
+# certificate (10 years) here when there is none, renews it within 30 days of expiry and keeps
+# a valid one; a symlinked pair is left to the administrator.
 KRDP_CONSOLE_CERTIFICATE=/etc/krdp/console.crt
 KRDP_CONSOLE_CERTIFICATE_KEY=/etc/krdp/console.key
+
+# Private codecs (HEVC/AV1) in software: auto (default), never or prefer.
+#KRDP_CONSOLE_SOFTWARE_ENCODING=auto
 
 # Bind as needed; port 3389 must not also be owned by the user-session server.
 KRDP_CONSOLE_ADDRESS=0.0.0.0

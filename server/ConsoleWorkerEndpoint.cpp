@@ -86,6 +86,8 @@ void ConsoleWorkerEndpoint::close()
     m_authenticated = false;
     m_ready = false;
     m_stopRequested = false;
+    m_encoderCaps.reset();
+    m_workerCpuNs = -1;
 }
 
 bool ConsoleWorkerEndpoint::ready() const
@@ -224,6 +226,14 @@ bool ConsoleWorkerEndpoint::setVideoQuality(const ConsoleWorkerWire::VideoQualit
     return m_worker->write(ConsoleWorkerWire::frame(quality)) >= 0;
 }
 
+bool ConsoleWorkerEndpoint::setEncoderConfig(const ConsoleWorkerWire::EncoderConfig &config)
+{
+    if (!m_ready || !m_worker || !config.generation) {
+        return false;
+    }
+    return m_worker->write(ConsoleWorkerWire::frame(config)) >= 0;
+}
+
 bool ConsoleWorkerEndpoint::setMicrophone(const ConsoleWorkerWire::MicrophonePolicy &policy)
 {
     if (!m_ready || !m_worker || !policy.generation || !policy.requestId) return false;
@@ -308,6 +318,12 @@ bool ConsoleWorkerEndpoint::processRecords()
             }
             continue;
         }
+        // AUD-FIX7: the worker's encoder probe comes right after Hello, before Ready.
+        if (const auto caps = ConsoleWorkerWire::encoderCaps(*record)) {
+            m_encoderCaps = *caps;
+            Q_EMIT encoderCapsReceived(*caps);
+            continue;
+        }
         if (!m_ready) {
             if (record->kind != ConsoleWorkerWire::Kind::Ready || !record->payload.isEmpty()) {
                 fail(QStringLiteral("worker did not confirm active capture"));
@@ -356,6 +372,10 @@ bool ConsoleWorkerEndpoint::processRecords()
             Q_EMIT removeVirtualFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::microphoneResult(*record)) {
             Q_EMIT microphoneFinished(*result);
+        } else if (const auto report = ConsoleWorkerWire::encoderReport(*record)) {
+            Q_EMIT encoderReported(*report);
+        } else if (const auto load = ConsoleWorkerWire::encoderLoad(*record)) {
+            m_workerCpuNs = load->cpuNs;
         } else {
             fail(QStringLiteral("unexpected worker record"));
             return false;
@@ -385,6 +405,8 @@ void ConsoleWorkerEndpoint::workerDisconnected()
     m_authenticated = false;
     m_ready = false;
     m_deframer = {};
+    m_encoderCaps.reset();
+    m_workerCpuNs = -1;
     if (wasReady) {
         Q_EMIT workerStopped();
     }

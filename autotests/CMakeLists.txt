@@ -130,7 +130,7 @@ add_test(NAME VirtualSessionControlTest COMMAND VirtualSessionControlTest)
 add_executable(VirtualSessionTransportTest VirtualSessionTransportTest.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp ${CMAKE_SOURCE_DIR}/server/VirtualStockClient.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
-    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp)
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/WorkerCodecBridge.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp)
 target_include_directories(VirtualSessionTransportTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(VirtualSessionTransportTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
 add_test(NAME VirtualSessionTransportTest COMMAND VirtualSessionTransportTest)
@@ -146,7 +146,7 @@ add_executable(VirtualSessionHostControllerTest VirtualSessionHostControllerTest
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardian.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionStorage.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionHostController.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp ${CMAKE_SOURCE_DIR}/server/VirtualStockClient.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp
-    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/WorkerCodecBridge.cpp
     ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp)
 target_include_directories(VirtualSessionHostControllerTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(VirtualSessionHostControllerTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
@@ -342,7 +342,7 @@ add_test(NAME ConsoleResizeSessionTest COMMAND ConsoleResizeSessionTest)
 
 add_executable(VirtualResizeTest VirtualResizeTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResizeExecutor.cpp)
 add_executable(H264KeyframeSizeTest H264KeyframeSizeTest.cpp ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp)
-target_include_directories(H264KeyframeSizeTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_include_directories(H264KeyframeSizeTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(H264KeyframeSizeTest PRIVATE Qt6::Test Qt6::Core PkgConfig::AVCodec)
 add_test(NAME H264KeyframeSizeTest COMMAND H264KeyframeSizeTest)
 set_tests_properties(H264KeyframeSizeTest PROPERTIES TIMEOUT 30)
@@ -385,7 +385,7 @@ add_test(NAME ConsoleWorkerSessionTest COMMAND ConsoleWorkerSessionTest)
 add_executable(ConsoleHostControllerTest ConsoleHostControllerTest.cpp
     ${CMAKE_SOURCE_DIR}/server/ConsoleHostController.cpp
     ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
-    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/WorkerCodecBridge.cpp
     ${CMAKE_SOURCE_DIR}/server/ConsoleSeat.cpp)
 target_include_directories(ConsoleHostControllerTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ConsoleHostControllerTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
@@ -569,7 +569,7 @@ set_tests_properties(ConsoleOutputJournalTest PROPERTIES TIMEOUT 60)
 add_executable(ConsoleHostLifecycleTest ConsoleHostLifecycleTest.cpp
     ${CMAKE_SOURCE_DIR}/server/ConsoleHostController.cpp
     ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
-    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/WorkerCodecBridge.cpp
     ${CMAKE_SOURCE_DIR}/server/ConsoleSeat.cpp)
 target_include_directories(ConsoleHostLifecycleTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ConsoleHostLifecycleTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
@@ -586,7 +586,7 @@ if(TARGET krdpctl-probe)
     add_executable(KrdpctlV2LoopbackTest KrdpctlV2LoopbackTest.cpp
         ${CMAKE_SOURCE_DIR}/server/VirtualSessionTransport.cpp ${CMAKE_SOURCE_DIR}/server/VirtualStockClient.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionControl.cpp
         ${CMAKE_SOURCE_DIR}/server/VirtualSessionSupervisor.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
-        ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp
+        ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/WorkerCodecBridge.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp
         ${CMAKE_SOURCE_DIR}/server/VirtualSessionGuardianClient.cpp)
     target_include_directories(KrdpctlV2LoopbackTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
     target_link_libraries(KrdpctlV2LoopbackTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
@@ -679,7 +679,7 @@ if(TARGET krdpctl-probe)
     add_executable(ConsoleRefusalLoopbackTest ConsoleRefusalLoopbackTest.cpp
         ${CMAKE_SOURCE_DIR}/server/ConsoleHostController.cpp
         ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
-        ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp
+        ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/WorkerCodecBridge.cpp
         ${CMAKE_SOURCE_DIR}/server/ConsoleSeat.cpp)
     target_include_directories(ConsoleRefusalLoopbackTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
     target_include_directories(ConsoleRefusalLoopbackTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})

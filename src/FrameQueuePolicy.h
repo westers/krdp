@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -77,15 +78,26 @@ void dropSupersededFrames(Queue &queue, int keyframeMonitorIndex)
  * queue, and so how long the peer loop can go without reading.
  *
  * The window is a frame count and a byte budget:
- * - frames: the frames that fit in one minimum RTT plus AckAllowance at the
- *   current frame rate, per surface, between MinInFlightFrames and
- *   MaxInFlightFrames (a LAN at 60 fps gets 4, a 100 ms path 8);
+ * - frames: the frames that fit in one RTT plus AckAllowance at the current
+ *   frame rate, per surface, between MinInFlightFrames and MaxInFlightFrames
+ *   (a LAN at 60 fps gets 4, a 100 ms path 10). AUD-FIX7 F2: while the link
+ *   is clear, the RTT is the larger of the minimum network RTT and the recent
+ *   frame-ack latency
+ *   (FrameAckTracker::ackLatency(), p75 of the last AckLatencyRecent), so a
+ *   client that takes 285 ms to decode and present - Sol's stock client on
+ *   :3391, 2026-09-28 - gets the 11 frames it needs for 30 fps instead of 4
+ *   (which capped it at 14 fps and turned the queue behind the window into a
+ *   keyframe a second);
  * - bytes: the measured rate for one minimum RTT plus InFlightByteHorizon,
  *   at least MinInFlightBytes. A single frame larger than the budget (a
- *   keyframe) still goes out when nothing else is in flight.
+ *   keyframe) still goes out when nothing else is in flight. AUD-FIX7 F2:
+ *   while the link is clear (the socket has sent what it was given, so the
+ *   delay is the client's, not the link's) it also covers the frame window of
+ *   average frames plus the largest keyframe; on a congested link it stays the
+ *   link's, so the D1 bound on what FreeRDP queues holds.
  */
 constexpr int MinInFlightFrames = 4;
-constexpr int MaxInFlightFrames = 8;
+constexpr int MaxInFlightFrames = 16;
 constexpr auto AckAllowance = std::chrono::milliseconds(60);
 constexpr int64_t MinInFlightBytes = 128 * 1024;
 constexpr auto InFlightByteHorizon = std::chrono::milliseconds(250);
@@ -117,6 +129,8 @@ constexpr int MaxHeldFramesPerMonitor = 4;
  */
 constexpr auto CoalesceKeyFrameMinInterval = std::chrono::seconds(1);
 constexpr auto CoalesceKeyFrameMaxInterval = std::chrono::seconds(16);
+/// AUD-FIX7 F2: the keyframe-request back-off starts over only after this long without a drop.
+constexpr auto BackoffQuietReset = std::chrono::seconds(10);
 
 /**
  * AUD-FIX6 F2: keyframes and the byte budget.
@@ -142,6 +156,19 @@ constexpr auto KeyFrameSizeHorizon = std::chrono::seconds(30);
 constexpr auto KeyFrameHold = std::chrono::seconds(2);
 constexpr int MaxKeyFrameHoldFrames = 240;
 
+/**
+ * AUD-FIX7 F2: the frame-ack latency the window follows. The p75 of the
+ * acknowledgements of the last AckLatencyRecent (at least AckLatencyMinSamples
+ * of them: fewer, and the last AckLatencyMinSamples of the horizon count;
+ * none there, unknown); its floor, the smallest of the last
+ * AckLatencyHorizon, is the client's own pipeline delay (decode and present)
+ * without queueing, which sets how many frames behind a healthy client is.
+ */
+constexpr auto AckLatencyRecent = std::chrono::seconds(2);
+constexpr auto AckLatencyHorizon = std::chrono::seconds(10);
+constexpr int AckLatencyMinSamples = 8;
+constexpr size_t AckLatencyMaxSamples = 1024;
+
 struct WindowLimits {
     int frames = MinInFlightFrames;
     int64_t bytes = MinInFlightBytes;
@@ -153,21 +180,69 @@ struct WindowLimits {
  * The window for \a frameRate (per surface, capped rate), \a surfaces
  * surfaces, a minimum RTT of \a minimumRtt (0 = unknown), a measured
  * rate of \a rateKbps (0 = unknown) and the largest recent keyframe
- * \a keyFrameBytes (0 = none seen; AUD-FIX6 F2).
+ * \a keyFrameBytes (0 = none seen; AUD-FIX6 F2). AUD-FIX7 F2: with
+ * \a linkClear, the recent frame-ack latency \a ackLatency (0 = unknown) sizes
+ * the frame count when it is longer than the minimum RTT, and the byte budget
+ * covers that many frames of \a averageFrameBytes plus the keyframe.
  */
-inline WindowLimits windowLimits(int frameRate, int surfaces, std::chrono::microseconds minimumRtt, uint32_t rateKbps, int64_t keyFrameBytes = 0)
+inline WindowLimits windowLimits(int frameRate,
+                                 int surfaces,
+                                 std::chrono::microseconds minimumRtt,
+                                 uint32_t rateKbps,
+                                 int64_t keyFrameBytes = 0,
+                                 std::chrono::microseconds ackLatency = {},
+                                 int64_t averageFrameBytes = 0,
+                                 bool linkClear = false)
 {
     using namespace std::chrono;
     const int count = std::max(1, surfaces);
     const auto rtt = std::max(minimumRtt, microseconds(0));
-    const double seconds = duration<double>(rtt + AckAllowance).count();
+    // Only a clear link lets the ack latency size the window: on a congested one the ack latency
+    // is the link's queue, and a bigger window would only lengthen it (the D1 bound).
+    const auto frameRtt = linkClear ? std::max(rtt, ackLatency) : rtt;
+    const double seconds = duration<double>(frameRtt + AckAllowance).count();
     const int frames = int(std::ceil(std::max(1, frameRate) * count * seconds));
     WindowLimits limits;
     limits.frames = std::clamp(frames, MinInFlightFrames * count, MaxInFlightFrames * count);
     const double bytes = double(rateKbps) * 1000.0 / 8.0 * duration<double>(rtt + InFlightByteHorizon).count();
-    limits.bytes = std::max({MinInFlightBytes, int64_t(bytes), KeyFrameBudgetFactor * std::max<int64_t>(0, keyFrameBytes)});
+    const int64_t keyFrame = std::max<int64_t>(0, keyFrameBytes);
+    limits.bytes = std::max({MinInFlightBytes, int64_t(bytes), KeyFrameBudgetFactor * keyFrame});
+    if (linkClear && ackLatency > rtt && averageFrameBytes > 0) {
+        // The client, not the link, holds the frames: let the byte budget follow the frame window.
+        limits.bytes = std::max(limits.bytes, int64_t(double(limits.frames) * double(averageFrameBytes) * 1.25) + keyFrame);
+    }
     limits.suspendedLifetime = duration_cast<microseconds>(SuspendedFrameLifetime) + rtt;
     return limits;
+}
+
+/**
+ * AUD-FIX7 F2: whether the link carried what was sent: the socket's queue
+ * (\a socketQueuedBytes, SIOCOUTQ: unsent plus unacknowledged by TCP; -1 =
+ * unknown) is under LinkClearBytes (or the largest recent keyframe). On a slow
+ * link the frames in flight sit in that queue; with a slow client they are
+ * already across. False while unknown. VideoStream also requires LinkClearHold
+ * of clear checks in a row.
+ */
+constexpr int64_t LinkClearBytes = 64 * 1024;
+/// A link counts as clear only once no check saw it otherwise for this long (hysteresis).
+constexpr auto LinkClearHold = std::chrono::seconds(2);
+inline bool linkClear(int64_t socketQueuedBytes, int64_t keyFrameBytes = 0)
+{
+    // A keyframe on its way out of a fast socket is not congestion.
+    return socketQueuedBytes >= 0 && socketQueuedBytes < std::max(LinkClearBytes, keyFrameBytes);
+}
+
+/**
+ * AUD-FIX7 F2: how many unacknowledged frames a client that keeps up still
+ * has: its pipeline delay (\a baseAckLatency, FrameAckTracker's floor) at
+ * \a frameRate on \a surfaces surfaces. The adaptive-quality backlog rule
+ * reads a client as behind only beyond this (AdaptiveQuality::BacklogFrames
+ * at least), so a slow-but-steady decoder is not "congested".
+ */
+inline int backlogFrames(int frameRate, int surfaces, std::chrono::microseconds baseAckLatency, int minimum)
+{
+    const double frames = std::ceil(std::max(1, frameRate) * std::max(1, surfaces) * std::chrono::duration<double>(baseAckLatency).count());
+    return std::max(minimum, int(frames) + 1);
 }
 
 /**
@@ -242,8 +317,11 @@ private:
  * (the answer would only queue behind it, and the frames behind it are the
  * ones that were dropped). Otherwise the first request goes at once, the next
  * CoalesceKeyFrameMinInterval later, then 2x, 4x, ... up to
- * CoalesceKeyFrameMaxInterval. An acknowledged keyframe of the monitor resets
- * the back-off. Not thread-safe; one per monitor.
+ * CoalesceKeyFrameMaxInterval. AUD-FIX7 F2: an acknowledged keyframe no longer
+ * resets the back-off (a client that acks every keyframe and falls behind
+ * again got a request a second: 76 in 77 s on Sol's :3391); only
+ * BackoffQuietReset without a drop does (dropped()). Not thread-safe; one per
+ * monitor.
  */
 class KeyFrameRequestBackoff
 {
@@ -262,12 +340,16 @@ public:
         ++m_requests;
         return true;
     }
-    /** A keyframe of this monitor was acknowledged. */
-    void keyFrameAcknowledged()
+    /**
+     * Frames of this monitor were coalesced away at \a now. The first drop after
+     * BackoffQuietReset without one starts the back-off over.
+     */
+    void dropped(Clock::time_point now)
     {
-        if (m_requests > 1) {
-            m_requests = 1; // the next request still waits CoalesceKeyFrameMinInterval after the last one
+        if (m_lastDrop != Clock::time_point{} && now - m_lastDrop >= BackoffQuietReset) {
+            m_requests = 0;
         }
+        m_lastDrop = now;
     }
     /** The wait after the last request before the next may go. */
     std::chrono::milliseconds interval() const
@@ -284,7 +366,8 @@ public:
 
 private:
     Clock::time_point m_lastRequest{};
-    int m_requests = 0; // since the last acknowledged keyframe
+    Clock::time_point m_lastDrop{};
+    int m_requests = 0; // since the back-off last started over
 };
 
 /**
@@ -337,7 +420,7 @@ public:
         }
     }
 
-    Ack acknowledge(uint32_t frameId, uint32_t queueDepth)
+    Ack acknowledge(uint32_t frameId, uint32_t queueDepth, Clock::time_point now = Clock::now())
     {
         m_acknowledgedKeyFrame = -1;
         if (queueDepth == SuspendFrameAcknowledgement) {
@@ -352,10 +435,50 @@ public:
             m_suspended = false;
             m_recent.clear();
             m_recentBytes = 0;
-            erase(frameId);
+            erase(frameId, now);
             return Ack::Resumed;
         }
-        return erase(frameId) ? Ack::Acknowledged : Ack::Unknown;
+        return erase(frameId, now) ? Ack::Acknowledged : Ack::Unknown;
+    }
+
+    /**
+     * AUD-FIX7 F2: the p75 of the send-to-ack latency of the frames acknowledged
+     * in the last AckLatencyRecent before \a now (or of the last
+     * AckLatencyMinSamples in AckLatencyHorizon when fewer came); 0 when the
+     * horizon has fewer than that (unknown).
+     */
+    std::chrono::microseconds ackLatency(Clock::time_point now) const
+    {
+        // The last AckLatencyRecent, or - when acks are sparse (a stall, a slow link) - the last
+        // AckLatencyMinSamples of the horizon, so the window does not collapse while nothing is acked.
+        std::vector<Clock::duration> recent;
+        for (auto it = m_ackLatencies.rbegin(); it != m_ackLatencies.rend() && now - it->at < AckLatencyHorizon; ++it) {
+            if (now - it->at >= AckLatencyRecent && int(recent.size()) >= AckLatencyMinSamples) {
+                break;
+            }
+            recent.push_back(it->latency);
+        }
+        if (int(recent.size()) < AckLatencyMinSamples) {
+            return {};
+        }
+        const size_t index = (recent.size() * 3) / 4;
+        std::nth_element(recent.begin(), recent.begin() + index, recent.end());
+        return std::chrono::duration_cast<std::chrono::microseconds>(recent[index]);
+    }
+    /**
+     * AUD-FIX7 F2: the smallest ack latency of the last AckLatencyHorizon: the
+     * client's own delay without queueing. 0 with fewer than
+     * AckLatencyMinSamples acknowledgements in that time.
+     */
+    std::chrono::microseconds baseAckLatency(Clock::time_point now) const
+    {
+        int samples = 0;
+        std::optional<Clock::duration> lowest;
+        for (auto it = m_ackLatencies.rbegin(); it != m_ackLatencies.rend() && now - it->at < AckLatencyHorizon; ++it) {
+            ++samples;
+            lowest = lowest ? std::min(*lowest, it->latency) : it->latency;
+        }
+        return samples >= AckLatencyMinSamples && lowest ? std::chrono::duration_cast<std::chrono::microseconds>(*lowest) : std::chrono::microseconds(0);
     }
 
     /**
@@ -457,11 +580,18 @@ private:
         bool keyFrame = false;
         int monitorIndex = 0;
     };
-    bool erase(uint32_t frameId)
+    bool erase(uint32_t frameId, Clock::time_point now)
     {
         const auto it = m_pending.find(frameId);
         if (it == m_pending.end()) {
             return false;
+        }
+        if (now >= it->second.sentAt) {
+            while (!m_ackLatencies.empty()
+                   && (m_ackLatencies.size() >= AckLatencyMaxSamples || now - m_ackLatencies.front().at >= AckLatencyHorizon)) {
+                m_ackLatencies.pop_front();
+            }
+            m_ackLatencies.push_back({now, now - it->second.sentAt});
         }
         if (it->second.keyFrame) {
             m_acknowledgedKeyFrame = it->second.monitorIndex;
@@ -482,6 +612,11 @@ private:
     int64_t m_recentBytes = 0;
     bool m_suspended = false;
     int m_acknowledgedKeyFrame = -1;
+    struct AckLatency {
+        Clock::time_point at;
+        Clock::duration latency;
+    };
+    std::deque<AckLatency> m_ackLatencies; // oldest first, AckLatencyHorizon at most
 };
 
 /**
@@ -528,29 +663,102 @@ int coalesceHeldFrames(Queue &queue, int maxHeld, std::vector<int> &starved)
 }
 
 /**
- * AUD-FIX6 F2: whether a monitor with \a queued frames (\a queuedBytes) held
- * while the window is full is coalesced (its frames dropped, a keyframe
- * requested). Not at MaxHeldFramesPerMonitor or fewer; always beyond
- * \a keyFrameHold (keyFrameHoldFrames(), the latency bound). In between:
- * never while the monitor works off the frames behind its keyframe
- * (\a keyFrameBacklog), and otherwise only when the backlog is at least as
- * big as the keyframe that would replace it (\a keyFrameBytes, the largest
- * recent one; 0 = unknown): trading a few P-frames for a 1 MB keyframe on a
- * link that is merely slow to acknowledge is how a big keyframe loops.
+ * Whether a monitor with \a queued frames held while the window is full is
+ * coalesced (its frames dropped, a keyframe requested). AUD-FIX7 F2: only
+ * beyond \a keyFrameHold (keyFrameHoldFrames(), the latency bound). Dropping
+ * a queued encoded P-frame breaks the reference chain, so every coalesce
+ * costs a keyframe - the loop Sol's :3391 showed (a request a second while
+ * the backlog was merely "as big as a keyframe"). Below the bound frames wait,
+ * and the source slows down instead (DeliveryThrottle: fewer frames are
+ * captured and encoded, none is thrown away after encoding).
  */
-inline bool shouldCoalesce(int queued, int64_t queuedBytes, bool keyFrameBacklog, int64_t keyFrameBytes, int keyFrameHold)
+inline bool shouldCoalesce(int queued, int keyFrameHold)
 {
-    if (queued <= MaxHeldFramesPerMonitor) {
-        return false;
-    }
-    if (queued > keyFrameHold) {
-        return true;
-    }
-    if (keyFrameBacklog) {
-        return false;
-    }
-    return queuedBytes >= keyFrameBytes;
+    return queued > std::max(MaxHeldFramesPerMonitor, keyFrameHold);
 }
+
+/**
+ * AUD-FIX7 F2: slow the source down instead of dropping encoded frames. Once
+ * per adaptive interval (1.5 s): when frames had to wait behind a full window
+ * (\a pressure) and the source made clearly more than the client took
+ * (\a offered over ThrottleOutpaced times \a delivered, frames per second and
+ * surface), the frame rate asked of the capture drops to
+ * ThrottleDeliveredShare of what the client took, not below
+ * MinThrottledFrameRate. A quiet desktop whose one keyframe waited is not
+ * throttled (it offers no more than gets through), and a stream that could
+ * not deliver anything keeps its rate (a stall is the ack timeout's
+ * business). After ThrottleRaiseAfter without pressure it climbs by
+ * ThrottleRaiseStep, back to \a cap (throttle off). Pressure within the wait
+ * after a raise doubles the next wait (anti-flap, up to ThrottleMaxRaiseWait);
+ * ThrottleCalm without pressure resets it. Not thread-safe.
+ */
+constexpr int MinThrottledFrameRate = 5;
+constexpr double ThrottleDeliveredShare = 0.9;
+constexpr double ThrottleOutpaced = 1.15;
+constexpr double ThrottleRaiseStep = 1.5;
+constexpr auto ThrottleRaiseAfter = std::chrono::seconds(3);
+constexpr auto ThrottleMaxRaiseWait = std::chrono::seconds(24);
+constexpr auto ThrottleCalm = std::chrono::seconds(60);
+
+class DeliveryThrottle
+{
+public:
+    using Clock = std::chrono::steady_clock;
+    /** One interval; returns the frame rate to ask for (\a cap when not throttled). */
+    int update(Clock::time_point now, int cap, double offered, double delivered, bool pressure)
+    {
+        cap = std::max(1, cap);
+        if (pressure) {
+            const int current = rate(cap);
+            const int target = std::max(std::min(MinThrottledFrameRate, cap), int(std::floor(delivered * ThrottleDeliveredShare)));
+            if (delivered > 0 && offered > delivered * ThrottleOutpaced && target < current) {
+                if (m_raisedAt != Clock::time_point{} && now - m_raisedAt <= m_raiseWait * 2) {
+                    m_raiseWait = std::min<Clock::duration>(m_raiseWait * 2, ThrottleMaxRaiseWait); // that raise was too much
+                }
+                m_rate = target;
+                m_raisedAt = {};
+                m_changedAt = now;
+            }
+            m_lastPressure = now;
+        } else if (m_rate > 0) {
+            const auto quietSince = std::max(m_changedAt, m_lastPressure);
+            if (now - quietSince >= m_raiseWait) {
+                const int raised = int(std::ceil(m_rate * ThrottleRaiseStep));
+                m_rate = raised >= cap ? 0 : raised;
+                m_raisedAt = now;
+                m_changedAt = now;
+            }
+        }
+        if (m_lastPressure != Clock::time_point{} && now - m_lastPressure >= ThrottleCalm) {
+            m_raiseWait = ThrottleRaiseAfter;
+        }
+        return rate(cap);
+    }
+    /** The frame rate under \a cap. */
+    int rate(int cap) const
+    {
+        return m_rate > 0 ? std::min(m_rate, cap) : cap;
+    }
+    bool active() const
+    {
+        return m_rate > 0;
+    }
+    std::chrono::milliseconds raiseWait() const
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(m_raiseWait);
+    }
+    void reset()
+    {
+        *this = {};
+    }
+
+private:
+    int m_rate = 0; // 0 = not throttled
+    Clock::time_point m_changedAt{};
+    Clock::time_point m_raisedAt{};
+    Clock::time_point m_lastPressure{};
+    Clock::duration m_raiseWait = ThrottleRaiseAfter;
+};
 
 }
 }

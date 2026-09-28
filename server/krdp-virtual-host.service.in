@@ -13,8 +13,14 @@ Type=exec
 User=root
 Environment=KRDP_VIRTUAL_ADDRESS=0.0.0.0
 Environment=KRDP_VIRTUAL_PORT=3395
+# The host creates this certificate when it is missing and renews it when it expires within
+# 30 days (AUD-FIX7); /etc/krdp/virtual-host.conf may point elsewhere.
+Environment=KRDP_VIRTUAL_CERTIFICATE=/etc/krdp/virtual-host.crt
+Environment=KRDP_VIRTUAL_CERTIFICATE_KEY=/etc/krdp/virtual-host.key
+# Private codecs in software (HEVC/AV1): auto, never or prefer (KRDPCTL-V2-CONTRACT.md (e)).
+Environment=KRDP_VIRTUAL_SOFTWARE_ENCODING=auto
 EnvironmentFile=-/etc/krdp/virtual-host.conf
-ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/krdp/virtual-host @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-host --certificate ${KRDP_VIRTUAL_CERTIFICATE} --certificate-key ${KRDP_VIRTUAL_CERTIFICATE_KEY} --address ${KRDP_VIRTUAL_ADDRESS} --port ${KRDP_VIRTUAL_PORT}
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/krdp/virtual-host @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-host --certificate ${KRDP_VIRTUAL_CERTIFICATE} --certificate-key ${KRDP_VIRTUAL_CERTIFICATE_KEY} --address ${KRDP_VIRTUAL_ADDRESS} --port ${KRDP_VIRTUAL_PORT} --software-encoding ${KRDP_VIRTUAL_SOFTWARE_ENCODING}
 StateDirectory=krdp/virtual-sessions krdp/virtual-host
 StateDirectoryMode=0700
 UMask=0077

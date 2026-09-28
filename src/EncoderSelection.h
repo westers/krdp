@@ -96,4 +96,20 @@ bool apply(Stream *stream, VideoCodec codec, std::optional<bool> hardware = std:
     }
     return actual == Stream::H264Main || actual == Stream::H264Baseline;
 }
+
+/**
+ * The codec the encoder \a stream runs actually produces (AUD-FIX7, the per-frame tag
+ * VideoFrame::codec): HEVC/AV1 for HEVCMain/AV1Main, otherwise H.264 - \a configured when that is
+ * an AVC variant (AVC420/AVC444 differ in chroma mode, not in the encoder), else AVC420.
+ */
+template<typename Stream>
+VideoCodec producedCodec(const Stream *stream, VideoCodec configured)
+{
+    if constexpr (requires { Stream::HEVCMain; Stream::AV1Main; }) {
+        const auto actual = stream->encoder();
+        if (actual == Stream::HEVCMain) return VideoCodec::Hevc;
+        if (actual == Stream::AV1Main) return VideoCodec::Av1;
+    }
+    return configured == VideoCodec::Hevc || configured == VideoCodec::Av1 ? VideoCodec::Avc420 : configured;
+}
 }

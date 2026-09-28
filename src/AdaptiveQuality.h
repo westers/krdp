@@ -41,12 +41,15 @@ constexpr auto BacklogWarmupAfterStreamStart = std::chrono::seconds(20);
 // With acknowledgements suspended by the client (SUSPEND_FRAME_ACKNOWLEDGEMENT,
 // AUD-P6) there is no ack evidence at all, so no backlog can be claimed; RTT
 // congestion still steers quality.
-inline bool backlogIsPressure(std::chrono::steady_clock::duration streamAge, int minimumAfterAck, int pendingNow, bool acksSuspended = false)
+// AUD-FIX7 F2: \a threshold is BacklogFrames or, for a client whose own pipeline (decode and
+// present) keeps more frames unacknowledged, FrameQueuePolicy::backlogFrames().
+inline bool backlogIsPressure(std::chrono::steady_clock::duration streamAge, int minimumAfterAck, int pendingNow, bool acksSuspended = false,
+                              int threshold = BacklogFrames)
 {
     if (acksSuspended || streamAge < BacklogWarmupAfterStreamStart) {
         return false;
     }
-    return std::min(minimumAfterAck, pendingNow) >= BacklogFrames;
+    return std::min(minimumAfterAck, pendingNow) >= std::max(threshold, BacklogFrames);
 }
 
 // After a step down, hold before climbing again so a limited link settles

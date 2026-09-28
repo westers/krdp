@@ -60,9 +60,10 @@ class ConsoleWorkerEndpointHardeningTest : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
-    void wireVersionIsResetToOne()
+    void wireVersionIsTwo()
     {
-        QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(1));
+        // Reset to 1 on 2026-09-27 (AUD-C-6); 2 since AUD-FIX7 (codec-tagged frames, encoder records).
+        QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(2));
     }
 
     void stopBeforeAuthenticationIsDeliveredAfterIt()

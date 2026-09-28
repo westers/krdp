@@ -33,6 +33,8 @@ public:
 
     void setWorkerActive(bool active);
     void submitFrame(const VideoFrame &frame);
+    /** AUD-FIX7: the worker's encoder event, as this session's AbstractSession signal. */
+    void reportEncoder(const ConsoleWorkerWire::EncoderReport &report);
 
 Q_SIGNALS:
     void keyFrameRequested();

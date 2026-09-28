@@ -14,8 +14,14 @@ StartLimitBurst=10
 Type=exec
 User=root
 Environment=KRDP_CONSOLE_WORKER=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-worker
+# The host creates this certificate when it is missing and renews it when it expires within
+# 30 days (AUD-FIX7); /etc/krdp/console-host.conf may point elsewhere.
+Environment=KRDP_CONSOLE_CERTIFICATE=/etc/krdp/console.crt
+Environment=KRDP_CONSOLE_CERTIFICATE_KEY=/etc/krdp/console.key
+# Private codecs in software (HEVC/AV1): auto, never or prefer (KRDPCTL-V2-CONTRACT.md (e)).
+Environment=KRDP_CONSOLE_SOFTWARE_ENCODING=auto
 EnvironmentFile=-/etc/krdp/console-host.conf
-ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-host --worker ${KRDP_CONSOLE_WORKER} --certificate ${KRDP_CONSOLE_CERTIFICATE} --certificate-key ${KRDP_CONSOLE_CERTIFICATE_KEY} --address ${KRDP_CONSOLE_ADDRESS} --port ${KRDP_CONSOLE_PORT} --runtime-directory /run/krdp-console
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-host --worker ${KRDP_CONSOLE_WORKER} --certificate ${KRDP_CONSOLE_CERTIFICATE} --certificate-key ${KRDP_CONSOLE_CERTIFICATE_KEY} --address ${KRDP_CONSOLE_ADDRESS} --port ${KRDP_CONSOLE_PORT} --runtime-directory /run/krdp-console --software-encoding ${KRDP_CONSOLE_SOFTWARE_ENCODING}
 RuntimeDirectory=krdp-console
 RuntimeDirectoryMode=0711
 Restart=on-failure

@@ -4,13 +4,18 @@
 // AUD-K3: generation and renewal decisions for the server's own certificate,
 // with an injected clock.
 
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimeZone>
 
 #include "ServerCertificate.h"
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <freerdp/crypto/certificate.h>
 #include <freerdp/crypto/privatekey.h>
@@ -159,6 +164,90 @@ private Q_SLOTS:
         const auto result = ensure(paths, u"host"_s, kNow);
         QVERIFY(!result.ok);
         QVERIFY(!result.error.isEmpty());
+    }
+
+    // AUD-FIX7: the brokers' certificates (/etc/krdp/virtual-host.{crt,key}, console.{crt,key}),
+    // as the root hosts manage them: missing -> created (key 0600, certificate 0644, a new
+    // directory 0755), valid -> kept, expiring or expired -> renewed, a loose key mode repaired,
+    // a symlinked pair left to the administrator.
+    void brokerCertificateIsCreatedRenewedAndKept()
+    {
+        QTemporaryDir dir;
+        const Paths paths{dir.filePath(u"etc/krdp/virtual-host.crt"_s), dir.filePath(u"etc/krdp/virtual-host.key"_s)};
+        const uint owner = ::geteuid();
+        const auto mode = [](const QString &path) {
+            struct stat st{};
+            return ::stat(QFile::encodeName(path).constData(), &st) == 0 ? int(st.st_mode & 07777) : -1;
+        };
+
+        // Missing: created.
+        const auto created = ensureSystem(paths, u"ace"_s, kNow, owner);
+        QVERIFY2(created.ok, qPrintable(created.error));
+        QVERIFY(created.generated);
+        QCOMPARE(created.decision, Decision::GenerateMissing);
+        QCOMPARE(created.info.algorithm, u"ECDSA P-256"_s);
+        QCOMPARE(created.info.notAfter, kNow.addDays(kValidityDays));
+        QVERIFY(!created.info.sha256Fingerprint.isEmpty());
+        QCOMPARE(mode(paths.key), 0600);
+        QCOMPARE(mode(paths.certificate), 0644);
+        QCOMPARE(mode(dir.filePath(u"etc/krdp"_s)), 0755);
+
+        // Valid (a day later, or nine years on): kept, never rotated.
+        for (const auto &when : {kNow.addDays(1), kNow.addYears(9)}) {
+            const auto kept = ensureSystem(paths, u"ace"_s, when, owner);
+            QVERIFY(kept.ok);
+            QVERIFY(!kept.generated);
+            QCOMPARE(kept.decision, Decision::UseExisting);
+            QCOMPARE(kept.info.sha256Fingerprint, created.info.sha256Fingerprint);
+        }
+
+        // A key others can read: made private, and still the same certificate.
+        QVERIFY(QFile::setPermissions(paths.key, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther));
+        const auto repaired = ensureSystem(paths, u"ace"_s, kNow.addDays(2), owner);
+        QVERIFY(repaired.ok && !repaired.generated);
+        QCOMPARE(mode(paths.key), 0600);
+        QCOMPARE(repaired.info.sha256Fingerprint, created.info.sha256Fingerprint);
+        QVERIFY2(repaired.notes.join(u' ').contains(u"mode 644; now 600"_s), qPrintable(repaired.notes.join(u'|')));
+
+        // Within 30 days of expiry: renewed.
+        const auto soon = ensureSystem(paths, u"ace"_s, kNow.addDays(kValidityDays - 10), owner);
+        QVERIFY(soon.ok && soon.generated);
+        QCOMPARE(soon.decision, Decision::GenerateExpiringSoon);
+        QVERIFY(soon.info.sha256Fingerprint != created.info.sha256Fingerprint);
+        QCOMPARE(mode(paths.key), 0600);
+
+        // Expired (Sol's :3395 certificate, 2026-09-23): renewed.
+        QVERIFY(generate(paths, u"sol"_s, kNow.addDays(-400), 365, nullptr));
+        QVERIFY(inspect(paths).notAfter < kNow);
+        const auto expired = ensureSystem(paths, u"sol"_s, kNow, owner);
+        QVERIFY(expired.ok && expired.generated);
+        QCOMPARE(expired.decision, Decision::GenerateExpired);
+        QCOMPARE(expired.info.notAfter, kNow.addDays(kValidityDays));
+    }
+
+    void brokerCertificateLeavesSymlinksAndRelativePathsAlone()
+    {
+        QTemporaryDir dir;
+        const uint owner = ::geteuid();
+        QCOMPARE(ensureSystem({u"krdp.crt"_s, u"krdp.key"_s}, u"x"_s, kNow, owner).ok, false);
+
+        const Paths real{dir.filePath(u"real.crt"_s), dir.filePath(u"real.key"_s)};
+        QVERIFY(generate(real, u"admin"_s, kNow.addDays(-3000), 3010, nullptr)); // valid, but within 30 days
+        const Paths linked{dir.filePath(u"etc/console.crt"_s), dir.filePath(u"etc/console.key"_s)};
+        QVERIFY(QDir().mkpath(dir.filePath(u"etc"_s)));
+        QVERIFY(QFile::link(real.certificate, linked.certificate));
+        QVERIFY(QFile::link(real.key, linked.key));
+        const auto before = inspect(real).sha256Fingerprint;
+        const auto result = ensureSystem(linked, u"x"_s, kNow, owner);
+        QVERIFY(result.ok);
+        QVERIFY(result.administratorManaged);
+        QVERIFY(!result.generated);
+        QCOMPARE(inspect(real).sha256Fingerprint, before); // never replaced
+        QVERIFY(QFileInfo(linked.certificate).isSymLink());
+        QVERIFY(result.notes.join(u' ').contains(u"replace it"_s));
+        // A dangling one is an error, not something to paper over.
+        QVERIFY(QFile::remove(real.key));
+        QVERIFY(!ensureSystem(linked, u"x"_s, kNow, owner).ok);
     }
 };
 

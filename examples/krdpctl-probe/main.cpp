@@ -60,6 +60,9 @@
  *                               the 16-byte marker "KRDPSEQ:" + a little-endian uint64 (the
  *                               in-flight window loopback test feeds such frames). Frame
  *                               acknowledgements are sent as usual.
+ *            --gfx-ack-delay MS with --gfx: acknowledge every frame MS after its EndFrame
+ *                               instead of at once, each on its own clock (pipelined, like a
+ *                               client whose decode and present take that long; AUD-FIX7 F2).
  *            --clipboard MODE   also load the standard clipboard channel (cliprdr) and, on the
  *                               server's Monitor Ready, announce text the way wlfreerdp3 does
  *                               (one format list per Wayland MIME type: three lists at once).
@@ -105,7 +108,10 @@
 #include <cstdio>
 #include <cstring>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <map>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -185,6 +191,8 @@ struct Probe {
     std::map<UINT16, unsigned> framesPerSurface;
     /** --gfx-count: count and report markers instead of decoding. */
     bool gfxCountOnly = false;
+    /** --gfx-ack-delay: acknowledge each frame this long after its EndFrame (0: FreeRDP acks at once). */
+    int gfxAckDelayMs = 0;
     /** --clipboard MODE (empty: no cliprdr). */
     QByteArray clipboardMode;
     /** --clipboard stall: a data request arrived; the main loop stops reading. */
@@ -465,6 +473,76 @@ BOOL VCAPITYPE krdpctlEntryEx(PCHANNEL_ENTRY_POINTS_EX entryPoints, PVOID initHa
 
 pcRdpgfxResetGraphics g_gdiResetGraphics = nullptr;
 pcRdpgfxSurfaceCommand g_gdiSurfaceCommand = nullptr;
+pcRdpgfxEndFrame g_gdiEndFrame = nullptr;
+pcRdpgfxOnOpen g_previousOnOpen = nullptr;
+
+/**
+ * --gfx-ack-delay: FreeRDP's own acknowledgement is switched off in OnOpen, and this thread
+ * sends each frame's FRAME_ACKNOWLEDGE its delay after the frame's EndFrame.
+ */
+struct DelayedAcks {
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::deque<std::pair<std::chrono::steady_clock::time_point, RDPGFX_FRAME_ACKNOWLEDGE_PDU>> due;
+    RdpgfxClientContext *gfx = nullptr;
+    UINT32 decoded = 0;
+    bool active = false;
+    std::jthread thread;
+
+    void start(RdpgfxClientContext *context)
+    {
+        std::lock_guard lock(mutex);
+        gfx = context;
+        if (active) {
+            return;
+        }
+        active = true;
+        thread = std::jthread([this](std::stop_token token) {
+            std::unique_lock lock(mutex);
+            while (!token.stop_requested()) {
+                if (due.empty()) {
+                    wake.wait_for(lock, std::chrono::milliseconds(50));
+                    continue;
+                }
+                const auto at = due.front().first;
+                if (std::chrono::steady_clock::now() < at) {
+                    wake.wait_until(lock, at);
+                    continue;
+                }
+                auto ack = due.front().second;
+                due.pop_front();
+                auto *context = gfx;
+                lock.unlock();
+                if (context && context->FrameAcknowledge) {
+                    (void)context->FrameAcknowledge(context, &ack);
+                }
+                lock.lock();
+            }
+        });
+    }
+    void add(UINT32 frameId, int delayMs)
+    {
+        std::lock_guard lock(mutex);
+        RDPGFX_FRAME_ACKNOWLEDGE_PDU ack{};
+        ack.queueDepth = QUEUE_DEPTH_UNAVAILABLE;
+        ack.frameId = frameId;
+        ack.totalFramesDecoded = ++decoded;
+        due.emplace_back(std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs), ack);
+        wake.notify_one();
+    }
+    void stop()
+    {
+        if (thread.joinable()) {
+            thread.request_stop();
+            wake.notify_all();
+            thread.join();
+        }
+        std::lock_guard lock(mutex);
+        gfx = nullptr;
+        active = false;
+    }
+};
+DelayedAcks g_delayedAcks;
 // gfx->custom is gdi's own (rdpGdi *), so the probe is reached another way.
 Probe *g_gfxProbe = nullptr;
 
@@ -502,6 +580,26 @@ UINT probeSurfaceCommand(RdpgfxClientContext *gfx, const RDPGFX_SURFACE_COMMAND 
     return g_gdiSurfaceCommand ? g_gdiSurfaceCommand(gfx, cmd) : CHANNEL_RC_OK;
 }
 
+UINT probeOnOpen(RdpgfxClientContext *gfx, BOOL *doCapsAdvertise, BOOL *sendFrameAcks)
+{
+    UINT error = g_previousOnOpen ? g_previousOnOpen(gfx, doCapsAdvertise, sendFrameAcks) : CHANNEL_RC_OK;
+    if (g_gfxProbe && g_gfxProbe->gfxAckDelayMs > 0 && sendFrameAcks) {
+        *sendFrameAcks = FALSE; // probeEndFrame() acknowledges, late
+        g_delayedAcks.start(gfx);
+        logf("acknowledging frames %d ms after their end", g_gfxProbe->gfxAckDelayMs);
+    }
+    return error;
+}
+
+UINT probeEndFrame(RdpgfxClientContext *gfx, const RDPGFX_END_FRAME_PDU *pdu)
+{
+    const UINT error = g_gdiEndFrame ? g_gdiEndFrame(gfx, pdu) : CHANNEL_RC_OK;
+    if (g_gfxProbe && g_gfxProbe->gfxAckDelayMs > 0) {
+        g_delayedAcks.add(pdu->frameId, g_gfxProbe->gfxAckDelayMs);
+    }
+    return error;
+}
+
 void onChannelConnected(void *context, const ChannelConnectedEventArgs *e)
 {
     // Subscribed after the generic handler, so gdi has installed its
@@ -515,6 +613,12 @@ void onChannelConnected(void *context, const ChannelConnectedEventArgs *e)
     g_gdiSurfaceCommand = gfx->SurfaceCommand;
     gfx->ResetGraphics = probeResetGraphics;
     gfx->SurfaceCommand = probeSurfaceCommand;
+    if (g_gfxProbe && g_gfxProbe->gfxAckDelayMs > 0) {
+        g_gdiEndFrame = gfx->EndFrame;
+        g_previousOnOpen = gfx->OnOpen;
+        gfx->EndFrame = probeEndFrame;
+        gfx->OnOpen = probeOnOpen;
+    }
 }
 
 // ---- --clipboard: a stock client's clipboard (wlfreerdp3-like) ----
@@ -990,7 +1094,7 @@ int usage()
 {
     std::fprintf(stderr,
                  "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
-                 "[--gfx [--gfx-count]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall|refuse-then-stall] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
+                 "[--gfx [--gfx-count] [--gfx-ack-delay MS]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall|refuse-then-stall] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
     return 2;
 }
 
@@ -1079,6 +1183,11 @@ int main(int argc, char **argv)
             probe.gfx = true;
         } else if (arg == QLatin1String("--gfx-count")) {
             probe.gfxCountOnly = true;
+        } else if (arg == QLatin1String("--gfx-ack-delay") && i + 1 < argc) {
+            probe.gfxAckDelayMs = QString::fromLocal8Bit(argv[++i]).toInt();
+            if (probe.gfxAckDelayMs <= 0 || probe.gfxAckDelayMs > 10000) {
+                return usage();
+            }
         } else if (arg == QLatin1String("--media")) {
             probe.media = true;
         } else if (arg == QLatin1String("--disp") && i + 1 < argc) {
@@ -1285,6 +1394,7 @@ int main(int argc, char **argv)
     }
 
     probe.stopping = true;
+    g_delayedAcks.stop(); // before the channel and its context go away
     freerdp_disconnect(instance);
     freerdp_client_context_free(context);
     return exitCode;

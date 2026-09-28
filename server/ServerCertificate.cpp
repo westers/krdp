@@ -12,6 +12,9 @@
 
 #include <memory>
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <openssl/asn1.h>
 #include <openssl/bio.h>
 #include <openssl/evp.h>
@@ -295,6 +298,90 @@ EnsureResult ensure(const Paths &paths, const QString &commonName, const QDateTi
     if (!result.ok) {
         result.error = u"the generated certificate could not be read back"_s;
     }
+    return result;
+}
+
+SystemResult ensureSystem(const Paths &paths, const QString &commonName, const QDateTime &now, uint owner)
+{
+    SystemResult result;
+    if (paths.certificate.isEmpty() || paths.key.isEmpty() || !QDir::isAbsolutePath(paths.certificate) || !QDir::isAbsolutePath(paths.key)) {
+        result.error = u"the certificate and key paths must be absolute"_s;
+        return result;
+    }
+    bool symlinked = false;
+    for (const auto &path : {paths.certificate, paths.key}) {
+        if (QFileInfo(path).isSymLink()) {
+            symlinked = true;
+            result.notes << u"%1 is a symlink: managed by the administrator, never replaced"_s.arg(path);
+        }
+    }
+    if (symlinked) {
+        result.administratorManaged = true;
+        result.info = inspect(paths);
+        result.decision = decide(result.info, now);
+        result.ok = result.info.usable();
+        if (!result.ok) {
+            result.error = u"the symlinked certificate or key is %1"_s.arg(describe(result.decision));
+        } else if (needsGeneration(result.decision)) {
+            result.notes << u"the symlinked certificate %1; replace it"_s.arg(describe(result.decision));
+        }
+        return result;
+    }
+
+    for (const auto &path : {paths.certificate, paths.key}) {
+        const QString dir = QFileInfo(path).absolutePath();
+        struct stat st{};
+        if (::lstat(QFile::encodeName(dir).constData(), &st) != 0) {
+            if (!QDir().mkpath(dir)) {
+                result.error = u"cannot create %1"_s.arg(dir);
+                return result;
+            }
+            ::chmod(QFile::encodeName(dir).constData(), 0755);
+            result.notes << u"created %1 (0755)"_s.arg(dir);
+        } else if (!S_ISDIR(st.st_mode)) {
+            result.error = u"%1 is not a directory"_s.arg(dir);
+            return result;
+        } else if ((st.st_mode & (S_IWGRP | S_IWOTH)) || (st.st_uid != owner && st.st_uid != 0)) {
+            result.notes << u"%1 can be written by others than its owner or root: they could replace the key"_s.arg(dir);
+        }
+    }
+
+    // Existing files: owner and mode. Never touches what they contain.
+    const auto repair = [&](const QString &path, mode_t forbidden, mode_t wanted) -> bool {
+        const QByteArray name = QFile::encodeName(path);
+        struct stat st{};
+        if (::lstat(name.constData(), &st) != 0) {
+            return true; // missing: generate() writes it with the right mode
+        }
+        if (!S_ISREG(st.st_mode)) {
+            result.error = u"%1 is not a regular file"_s.arg(path);
+            return false;
+        }
+        if (st.st_uid != owner) {
+            if (::chown(name.constData(), owner, gid_t(-1)) == 0) {
+                result.notes << u"%1 was owned by uid %2; now by uid %3"_s.arg(path).arg(st.st_uid).arg(owner);
+            } else {
+                result.notes << u"%1 is owned by uid %2, not %3, and could not be changed"_s.arg(path).arg(st.st_uid).arg(owner);
+            }
+        }
+        const mode_t mode = st.st_mode & 07777;
+        if (mode & forbidden) {
+            const mode_t fixed = wanted ? wanted : (mode & ~forbidden);
+            if (::chmod(name.constData(), fixed) == 0) {
+                result.notes << u"%1 had mode %2; now %3"_s.arg(path, QString::number(mode, 8), QString::number(fixed, 8));
+            } else {
+                result.error = u"%1 has mode %2 and cannot be made private"_s.arg(path, QString::number(mode, 8));
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!repair(paths.key, 077 | S_ISUID | S_ISGID | S_ISVTX | S_IXUSR, 0600) || !repair(paths.certificate, S_IWGRP | S_IWOTH | S_ISUID | S_ISGID | S_ISVTX, 0)) {
+        return result;
+    }
+
+    const auto ensured = ensure(paths, commonName, now);
+    static_cast<EnsureResult &>(result) = ensured;
     return result;
 }
 }

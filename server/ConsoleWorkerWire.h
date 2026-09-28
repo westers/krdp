@@ -19,13 +19,16 @@
 #include <QVector>
 #include <QSet>
 
+#include "CodecPolicy.h"
 #include "VideoFrame.h"
 
 namespace KRdp::ConsoleWorkerWire
 {
 // Paired broker/worker wire. Reset to 1 on 2026-09-27 (AUD-C-6); older
 // versions are not accepted. Broker and worker must always upgrade together.
-constexpr quint16 ProtocolVersion = 1;
+// 2 (AUD-FIX7): Frame carries the codec that produced it; EncoderCaps,
+// EncoderConfig, EncoderReport and EncoderLoad carry the codec policy.
+constexpr quint16 ProtocolVersion = 2;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -71,6 +74,64 @@ enum class Kind : quint8 {
     PhysicalLayout,
     PhysicalLayoutResult,
     PhysicalLeaseReleased,
+    EncoderCaps,
+    EncoderConfig,
+    EncoderReport,
+    EncoderLoad,
+};
+constexpr Kind LastKind = Kind::EncoderLoad;
+
+/// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
+constexpr quint8 MaxWireCodec = 5;
+inline quint8 wireCodec(std::optional<VideoCodec> codec)
+{
+    return codec ? quint8(int(*codec) + 1) : quint8(0);
+}
+inline std::optional<VideoCodec> codecFromWire(quint8 value)
+{
+    return value == 0 || value > MaxWireCodec ? std::nullopt : std::optional<VideoCodec>(VideoCodec(int(value) - 1));
+}
+
+/**
+ * AUD-FIX7, worker -> broker, right after Hello: the encoders this worker really has
+ * (EncoderSupport::probe() in the worker, which runs as the desktop's user on the desktop's
+ * render node). The broker's codec policy chooses among these.
+ */
+struct EncoderCaps {
+    CodecPolicy::Encoders encoders;
+    bool avc444Hardware = false;
+    QString renderNode;
+    bool operator==(const EncoderCaps &) const = default;
+};
+
+/**
+ * AUD-FIX7, broker -> worker: what the controlling connection's codec policy wants the
+ * worker's encoders to run (VideoStream::codecForSessions(), encoderSettings() - absent for a
+ * client that never asked for a codec, so KPipeWire's defaults stay - and requestedFrameRate(),
+ * which also carries the delivery throttle). Applied only for the current control generation.
+ */
+struct EncoderConfig {
+    quint64 generation = 0;
+    VideoCodec codec = VideoCodec::Avc420;
+    std::optional<CodecPolicy::EncoderSettings> settings;
+    quint32 frameRate = CodecPolicy::DefaultFrameRate;
+    bool operator==(const EncoderConfig &) const = default;
+};
+
+/** AUD-FIX7, worker -> broker: AbstractSession::encoderUnavailable / encoderBackendReported. */
+struct EncoderReport {
+    enum class Event : quint8 { Unavailable = 1, Backend = 2 };
+    Event event = Event::Backend;
+    VideoCodec codec = VideoCodec::Avc420;
+    bool hardware = false;
+    bool operator==(const EncoderReport &) const = default;
+};
+
+/** AUD-FIX7, worker -> broker, every EncoderLoadIntervalMs while controlled: its process CPU time (the CPU guard's input). */
+constexpr int EncoderLoadIntervalMs = 250;
+struct EncoderLoad {
+    qint64 cpuNs = 0;
+    bool operator==(const EncoderLoad &) const = default;
 };
 
 struct Record {
@@ -1224,6 +1285,135 @@ inline QByteArray frame(Kind kind, const QByteArray &payload)
     return result;
 }
 
+namespace detail
+{
+inline void writeBackends(QDataStream &stream, const CodecPolicy::Backends &b)
+{
+    stream << b.hardware << b.software << b.liveBitrate;
+}
+inline void readBackends(QDataStream &stream, CodecPolicy::Backends &b)
+{
+    stream >> b.hardware >> b.software >> b.liveBitrate;
+}
+}
+
+inline QByteArray frame(const EncoderCaps &caps)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    detail::writeBackends(stream, caps.encoders.avc);
+    detail::writeBackends(stream, caps.encoders.hevc);
+    detail::writeBackends(stream, caps.encoders.av1);
+    stream << caps.avc444Hardware << caps.renderNode.left(256);
+    return frame(Kind::EncoderCaps, payload);
+}
+
+inline std::optional<EncoderCaps> encoderCaps(const Record &record)
+{
+    if (record.kind != Kind::EncoderCaps || record.payload.size() > 4096) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    EncoderCaps caps;
+    detail::readBackends(stream, caps.encoders.avc);
+    detail::readBackends(stream, caps.encoders.hevc);
+    detail::readBackends(stream, caps.encoders.av1);
+    stream >> caps.avc444Hardware >> caps.renderNode;
+    return stream.status() == QDataStream::Ok && stream.atEnd() && caps.renderNode.size() <= 256 ? std::optional<EncoderCaps>(caps) : std::nullopt;
+}
+
+inline QByteArray frame(const EncoderConfig &config)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << config.generation << wireCodec(config.codec) << config.settings.has_value();
+    const auto settings = config.settings.value_or(CodecPolicy::EncoderSettings{});
+    stream << settings.hardware << quint8(settings.preset) << settings.targetKbps << qint32(settings.maxFrameRate) << config.frameRate;
+    return frame(Kind::EncoderConfig, payload);
+}
+
+inline std::optional<EncoderConfig> encoderConfig(const Record &record)
+{
+    if (record.kind != Kind::EncoderConfig) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    EncoderConfig config;
+    quint8 codec = 0;
+    bool hasSettings = false;
+    CodecPolicy::EncoderSettings settings;
+    quint8 preset = 0;
+    qint32 maxFrameRate = 0;
+    stream >> config.generation >> codec >> hasSettings >> settings.hardware >> preset >> settings.targetKbps >> maxFrameRate >> config.frameRate;
+    const auto decoded = codecFromWire(codec);
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !config.generation || !decoded || preset > quint8(CodecPolicy::Preset::Fastest)
+        || maxFrameRate < 0 || maxFrameRate > 240 || config.frameRate < 1 || config.frameRate > 240 || settings.targetKbps > 1000000) {
+        return std::nullopt;
+    }
+    config.codec = *decoded;
+    settings.preset = CodecPolicy::Preset(preset);
+    settings.maxFrameRate = maxFrameRate;
+    if (hasSettings) {
+        config.settings = settings;
+    }
+    return config;
+}
+
+inline QByteArray frame(const EncoderReport &report)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << quint8(report.event) << wireCodec(report.codec) << report.hardware;
+    return frame(Kind::EncoderReport, payload);
+}
+
+inline std::optional<EncoderReport> encoderReport(const Record &record)
+{
+    if (record.kind != Kind::EncoderReport) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    quint8 event = 0;
+    quint8 codec = 0;
+    EncoderReport report;
+    stream >> event >> codec >> report.hardware;
+    const auto decoded = codecFromWire(codec);
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !decoded
+        || (event != quint8(EncoderReport::Event::Unavailable) && event != quint8(EncoderReport::Event::Backend))) {
+        return std::nullopt;
+    }
+    report.event = EncoderReport::Event(event);
+    report.codec = *decoded;
+    return report;
+}
+
+inline QByteArray frame(const EncoderLoad &load)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << load.cpuNs;
+    return frame(Kind::EncoderLoad, payload);
+}
+
+inline std::optional<EncoderLoad> encoderLoad(const Record &record)
+{
+    if (record.kind != Kind::EncoderLoad || record.payload.size() != 8) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    EncoderLoad load;
+    stream >> load.cpuNs;
+    return stream.status() == QDataStream::Ok && load.cpuNs >= 0 ? std::optional<EncoderLoad>(load) : std::nullopt;
+}
+
 inline QByteArray frame(const VideoFrame &video)
 {
     QByteArray payload;
@@ -1233,6 +1423,7 @@ inline QByteArray frame(const VideoFrame &video)
     for (const VideoMonitor &monitor : video.monitors) {
         stream << monitor.geometry << monitor.primary;
     }
+    stream << wireCodec(video.codec); // v2
     return frame(Kind::Frame, payload);
 }
 
@@ -1265,6 +1456,12 @@ inline std::optional<VideoFrame> videoFrame(const Record &record)
         }
         video.monitors.append(monitor);
     }
+    quint8 codec = 0;
+    stream >> codec;
+    if (stream.status() != QDataStream::Ok || codec > MaxWireCodec) {
+        return std::nullopt;
+    }
+    video.codec = codecFromWire(codec);
     return stream.atEnd() ? std::optional<VideoFrame>(video) : std::nullopt;
 }
 
@@ -1345,7 +1542,7 @@ public:
             ++m_invalid;
             return std::nullopt;
         }
-        if (stream.status() != QDataStream::Ok || !stream.atEnd() || type < quint8(Kind::Hello) || type > quint8(Kind::PhysicalLeaseReleased)) {
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || type < quint8(Kind::Hello) || type > quint8(LastKind)) {
             ++m_invalid;
             return std::nullopt;
         }

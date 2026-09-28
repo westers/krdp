@@ -553,6 +553,7 @@ void VirtualSessionHostController::addClient(RdpConnection *connection)
         [this](const auto &handle) { return resolve(handle); }, m_sequence);
     transport->setTopologyResolver([this](const auto &handle) { return topologyFor(handle); });
     transport->setStockClientPolicy(m_stockPolicy);
+    if (m_videoHost) transport->setVideoCodecHost(*m_videoHost);
     m_clients.emplace(id, std::move(transport));
     connect(connection, &RdpConnection::stateChanged, this, [this, id](RdpConnection::State state) {
         if (state == RdpConnection::State::Closed) removeClient(id);

@@ -97,4 +97,53 @@ std::optional<QSize> h264KeyframeSize(const QByteArray &packet)
     if (avcodec_receive_frame(context, frame) != AVERROR_EOF) return {};
     return dimensions;
 }
+
+std::optional<QSize> encodedKeyframeSize(VideoCodec codec, const QByteArray &packet)
+{
+    if (codec != VideoCodec::Hevc && codec != VideoCodec::Av1) return h264KeyframeSize(packet);
+    if (packet.isEmpty() || packet.size() > 16 * 1024 * 1024) return {};
+    const AVCodecID id = codec == VideoCodec::Hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_AV1;
+    AVCodecParserContext *parser = av_parser_init(id);
+    const AVCodec *decoder = avcodec_find_decoder(id);
+    AVCodecContext *context = avcodec_alloc_context3(decoder); // a null codec gives a parser-only context
+    AVFrame *frame = av_frame_alloc();
+    AVPacket *input = av_packet_alloc();
+    const auto cleanup = qScopeGuard([&] {
+        av_packet_free(&input); av_frame_free(&frame);
+        if (parser) av_parser_close(parser);
+        avcodec_free_context(&context);
+    });
+    if (!parser || !context || !frame || !input) return {};
+    context->max_pixels = 4096LL * 4096;
+    context->thread_count = 1;
+    parser->flags |= PARSER_FLAG_COMPLETE_FRAMES;
+    QByteArray padded = packet;
+    padded.append(QByteArray(AV_INPUT_BUFFER_PADDING_SIZE, '\0'));
+    uint8_t *parsed = nullptr;
+    int parsedSize = 0;
+    const int consumed = av_parser_parse2(parser, context, &parsed, &parsedSize,
+        reinterpret_cast<const uint8_t *>(padded.constData()), int(packet.size()), AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+    // Some parsers only fill the codec context's dimensions.
+    const int width = parser->width > 0 ? parser->width : context->width;
+    const int height = parser->height > 0 ? parser->height : context->height;
+    if (consumed != packet.size() || !parsed || parsedSize <= 0 || parser->key_frame != 1
+        || width < 320 || width > 4096 || height < 200 || height > 4096 || width % 2 || height % 2
+        || (parser->format >= 0 && parser->format != AV_PIX_FMT_YUV420P && parser->format != AV_PIX_FMT_YUVJ420P
+            && parser->format != AV_PIX_FMT_NV12)) return {};
+    const QSize dimensions(width, height);
+    if (!decoder || avcodec_open2(context, decoder, nullptr) < 0) {
+        return dimensions; // no software decoder here (an FFmpeg without dav1d): the parser's word
+    }
+    if (av_new_packet(input, int(packet.size())) < 0) return {};
+    std::memcpy(input->data, packet.constData(), packet.size());
+    if (avcodec_send_packet(context, input) < 0) return {};
+    int received = avcodec_receive_frame(context, frame);
+    if (received == AVERROR(EAGAIN)) {
+        if (avcodec_send_packet(context, nullptr) < 0) return {};
+        received = avcodec_receive_frame(context, frame);
+    }
+    if (received < 0 || frame->decode_error_flags || (frame->flags & AV_FRAME_FLAG_CORRUPT)
+        || QSize(frame->width, frame->height) != dimensions) return {};
+    return dimensions;
+}
 }

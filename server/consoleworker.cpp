@@ -8,6 +8,7 @@
 #include <optional>
 #include <vector>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <QAction>
@@ -35,6 +36,7 @@
 #include "ConsoleResizeSession.h"
 #include "VirtualResizeSession.h"
 #include "H264KeyframeSize.h"
+#include "EncoderSupport.h"
 #include "TakeoverDetector.h"
 #include "PipeWireAudioPlayback.h"
 #include "ConsoleMicrophoneSession.h"
@@ -180,6 +182,16 @@ public:
             KGlobalAccel::self()->setDefaultShortcut(&m_reclaimAction, {shortcut});
             KGlobalAccel::self()->setShortcut(&m_reclaimAction, {shortcut});
         }
+        reportEncoderEvents(&m_session);
+        // AUD-FIX7: the broker's CPU guard reads this process's CPU time while it is controlled.
+        m_encoderLoadTimer.setInterval(ConsoleWorkerWire::EncoderLoadIntervalMs);
+        connect(&m_encoderLoadTimer, &QTimer::timeout, this, [this] {
+            timespec ts{};
+            if (m_control.active && m_socket.state() == QLocalSocket::ConnectedState && clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0) {
+                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderLoad{qint64(ts.tv_sec) * 1000000000LL + ts.tv_nsec}));
+            }
+        });
+        m_encoderLoadTimer.start();
         connect(&m_session, &AbstractSession::cursorUpdate, this, [this](const PipeWireCursor &cursor) {
             if (m_mode.physicalActions() && m_control.active && !m_resize.changing() && m_session.outputGeometryResolved()
                 && m_takeover.observed(m_session.mapToGlobal(cursor.position).toPoint(), m_clock.elapsed())) {
@@ -192,6 +204,11 @@ public:
         connect(&m_socket, &QLocalSocket::connected, this, [this]() {
             m_connectTimeout.stop();
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{m_sessionId, m_uid, m_token}));
+            // AUD-FIX7: the encoders this worker really has (its user, its render node): the
+            // broker's codec policy chooses among these.
+            const auto &probe = EncoderSupport::probe();
+            m_encoderCaps = {probe.encoders, probe.avc444Hardware, probe.renderNode};
+            m_socket.write(ConsoleWorkerWire::frame(m_encoderCaps));
             if (m_initialOutputs.isEmpty()) startCapture();
             else startBootstrap();
         });
@@ -327,14 +344,14 @@ public:
                     const auto readback = frame.isKeyFrame ? readKScreen() : std::nullopt;
                     if (!frame.isKeyFrame || !m_captureReady || outputs.monitors.size() != 1
                         || frame.size != m_initialOutputs.first().pixels
-                        || h264KeyframeSize(frame.data) != std::optional(m_initialOutputs.first().pixels)
+                        || encodedKeyframeSize(frame.codec.value_or(VideoCodec::Avc420), frame.data) != std::optional(m_initialOutputs.first().pixels)
                         || !readback || !bootstrapMatches(*readback)) return;
                     m_initialReadySent = true;
                     m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
                 }
                 if (m_mode.virtualSession) {
                     const QSize payloadPixels = m_virtualResize.changing() && frame.isKeyFrame
-                        ? h264KeyframeSize(frame.data).value_or(QSize{}) : QSize{};
+                        ? encodedKeyframeSize(frame.codec.value_or(VideoCodec::Avc420), frame.data).value_or(QSize{}) : QSize{};
                     if (m_virtualResize.changing() && frame.isKeyFrame)
                         qInfo() << "Virtual Fit keyframe epoch" << m_virtualCaptureEpoch
                                 << "payload" << payloadPixels << "metadata" << frame.size
@@ -667,7 +684,7 @@ private:
     void startCapture()
     {
         m_session.setActiveStream(-1); // Capture this compositor's complete workspace.
-        m_session.setVideoCodec(VideoCodec::Avc420);
+        applyEncoderConfig(m_session); // AVC420 until the controlling connection's policy says otherwise
         // Match the desktop server's quality baseline. Leaving this unset
         // selects libx264's CRF35 fallback, visibly damaging desktop text.
         m_session.setVideoQuality(80);
@@ -926,7 +943,8 @@ private:
             session->setParent(this);
             session->setActiveStream(int(i));
             session->setMonitorIndex(int(i));
-            session->setVideoCodec(VideoCodec::Avc420);
+            applyEncoderConfig(*session);
+            reportEncoderEvents(session.get());
             session->setVideoQuality(m_multiQuality);
             connect(session.get(), &AbstractSession::frameReceived, this, [this, i, epoch](const VideoFrame &frame) {
                 if (m_multiMode && epoch == m_multiEpoch) onMultiFrame(i, frame);
@@ -2243,6 +2261,54 @@ private:
         m_multiSettle.start(0); // KWin/QScreen reconfiguration must precede capture success.
     }
 
+    /** AUD-FIX7: what the controlling connection's codec policy wants the encoders to run. */
+    void setEncoderConfig(const ConsoleWorkerWire::EncoderConfig &config)
+    {
+        const bool codecChanged = config.codec != m_encoderConfig.codec;
+        m_encoderConfig = config;
+        m_encoderConfigured = true;
+        if (codecChanged) {
+            qInfo().noquote() << "Encoder: codec" << VideoCodecSupport::codecName(config.codec)
+                              << (config.settings ? (config.settings->hardware ? "in hardware" : "in software") : "(default backend)")
+                              << config.frameRate << "fps";
+        }
+        applyEncoderConfig(m_session);
+        for (const auto &session : m_multiSessions) applyEncoderConfig(*session);
+    }
+
+    /** A control change: back to AVC420 with KPipeWire's backend and the full frame rate. */
+    void resetEncoderConfig()
+    {
+        if (!m_encoderConfigured) return;
+        m_encoderConfigured = false;
+        ConsoleWorkerWire::EncoderConfig reset;
+        // The backend the H.264 encoder had before any policy (hardware first when there is one).
+        reset.settings = CodecPolicy::EncoderSettings{.hardware = m_encoderCaps.encoders.avc.hardware};
+        m_encoderConfig = reset;
+        applyEncoderConfig(m_session);
+        for (const auto &session : m_multiSessions) applyEncoderConfig(*session);
+    }
+
+    void applyEncoderConfig(AbstractSession &session)
+    {
+        // Settings first: a restarted encoder opens with its backend, preset and bitrate.
+        if (m_encoderConfig.settings) session.setEncoderSettings(*m_encoderConfig.settings);
+        session.setVideoFrameRate(m_encoderConfig.frameRate);
+        session.setVideoCodec(m_encoderConfig.codec);
+    }
+
+    void reportEncoderEvents(AbstractSession *session)
+    {
+        connect(session, &AbstractSession::encoderUnavailable, this, [this](VideoCodec codec) {
+            if (m_socket.state() == QLocalSocket::ConnectedState)
+                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderReport{ConsoleWorkerWire::EncoderReport::Event::Unavailable, codec, false}));
+        });
+        connect(session, &AbstractSession::encoderBackendReported, this, [this](VideoCodec codec, bool hardware) {
+            if (m_socket.state() == QLocalSocket::ConnectedState)
+                m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderReport{ConsoleWorkerWire::EncoderReport::Event::Backend, codec, hardware}));
+        });
+    }
+
     void reclaimConsole()
     {
         if (!m_mode.physicalActions() || !m_control.active) {
@@ -2295,6 +2361,7 @@ private:
                     m_session.setVideoQuality(80);
                     m_multiQuality = 80;
                     for (const auto &session : m_multiSessions) session->setVideoQuality(80);
+                    resetEncoderConfig(); // AUD-FIX7: a new grant starts from AVC; its connection says more
                     m_control = *control;
                     m_microphone.setControl(*control);
                     if (m_mode.virtualSession) m_virtualResize.setControl(*control);
@@ -2325,6 +2392,12 @@ private:
             if (record->kind == ConsoleWorkerWire::Kind::Stop && record->payload.isEmpty()) {
                 shutdown(0);
                 return;
+            }
+            if (const auto config = ConsoleWorkerWire::encoderConfig(*record)) {
+                if (m_control.active && config->generation == m_control.generation) {
+                    setEncoderConfig(*config);
+                }
+                continue;
             }
             if (const auto quality = ConsoleWorkerWire::videoQuality(*record)) {
                 if (ConsoleWorkerWire::mayApplyQuality(*quality, m_control)) {
@@ -2579,6 +2652,11 @@ private:
     ConsoleMicrophoneSession m_microphone;
     QTimer m_connectTimeout;
     QTimer m_audioTimer;
+    // AUD-FIX7: the codec policy's encoder config (AVC420 until the controlling connection's).
+    ConsoleWorkerWire::EncoderCaps m_encoderCaps;
+    ConsoleWorkerWire::EncoderConfig m_encoderConfig;
+    bool m_encoderConfigured = false;
+    QTimer m_encoderLoadTimer;
     bool m_captureReady = false;
     ConsoleWorkerWire::Outputs m_outputs;
     bool m_topologyQueryPending = false;
@@ -2618,6 +2696,7 @@ int main(int argc, char **argv)
 {
     QGuiApplication application(argc, argv);
     application.setDesktopFileName(QStringLiteral("org.kde.krdpconsoleworker"));
+    KRdp::EncoderSupport::applyProcessOverrides(); // KRDP_FORCE_SOFTWARE_ENCODING, before any encoder
     QCommandLineParser parser;
     parser.addHelpOption();
     const QCommandLineOption socketOption(QStringLiteral("socket"), QStringLiteral("Broker socket path."), QStringLiteral("path"));

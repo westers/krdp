@@ -90,6 +90,15 @@ void ConsoleWorkerSession::setWorkerActive(bool active)
     setExternalStreamActive(active);
 }
 
+void ConsoleWorkerSession::reportEncoder(const ConsoleWorkerWire::EncoderReport &report)
+{
+    if (report.event == ConsoleWorkerWire::EncoderReport::Event::Unavailable) {
+        Q_EMIT encoderUnavailable(report.codec);
+    } else {
+        Q_EMIT encoderBackendReported(report.codec, report.hardware);
+    }
+}
+
 void ConsoleWorkerSession::submitFrame(const VideoFrame &frame)
 {
     if (!streamActive()) {

@@ -6,11 +6,13 @@
 // behind a proxy in this test that throttles and then blocks the server-to-client direction,
 // the way the Sol/Buzz tbf run saturated the link. The test feeds numbered frames at 30 fps
 // straight into the connection's VideoStream (standing in for the encoder) and checks:
-// - the frames in flight (sent, not acknowledged) never exceed the window;
+// - the frames in flight (sent, not acknowledged) never exceed the window's cap;
 // - while the link is throttled the server keeps reading: acknowledgements keep arriving;
 // - frames that cannot go are coalesced, and a keyframe is asked for;
 // - the session survives a 5 s block, and once the client reads again it gets a current frame.
 // AUD-FIX6 F2: and a 1 MB (4K) keyframe on a throttled link does not turn into a keyframe loop.
+// AUD-FIX7 F2: and a client that is slow to acknowledge (285 ms) on a fat link gets the full rate
+// without rekeys.
 
 #include <QDeadlineTimer>
 #include <QElapsedTimer>
@@ -295,7 +297,10 @@ private Q_SLOTS:
                     const auto stats = connection->videoStream()->flowStats();
                     maxInFlight = std::max(maxInFlight, stats.inFlight);
                     windowFrames = std::min(windowFrames, stats.windowFrames > 0 ? stats.windowFrames : windowFrames);
-                    QVERIFY2(stats.inFlight <= stats.windowFrames, qPrintable(QStringLiteral("%1 in flight, window %2").arg(stats.inFlight).arg(stats.windowFrames)));
+                    // AUD-FIX7 F2: the window follows the ack latency, so it can shrink below what
+                    // is already out (a send only ever goes into an open window); never beyond the cap.
+                    QVERIFY2(stats.inFlight <= FrameQueuePolicy::MaxInFlightFrames,
+                             qPrintable(QStringLiteral("%1 in flight, window %2").arg(stats.inFlight).arg(stats.windowFrames)));
                 }
                 QVERIFY2(!closed, log.constData());
                 QVERIFY2(probe.state() == QProcess::Running, log.constData());
@@ -317,12 +322,14 @@ private Q_SLOTS:
         QVERIFY2(lastSeenSeq >= 10, log.constData());
         QVERIFY(connection);
         sample(2s);
+        if (QTest::currentTestFailed()) return; // the connection may be gone
         const auto before = connection->videoStream()->flowStats();
         qInfo() << "unthrottled:" << before.sent << "sent," << before.acknowledged << "acked, window" << before.windowFrames;
 
         // Throttled to 0.5 Mbit/s: a sixth of the stream.
         proxy.setRate(64 * 1024);
         sample(8s);
+        if (QTest::currentTestFailed()) return; // the connection may be gone
         const auto throttled = connection->videoStream()->flowStats();
         qInfo() << "throttled:" << throttled.sent - before.sent << "sent," << throttled.acknowledged - before.acknowledged << "acked,"
                 << throttled.dropped - before.dropped << "coalesced," << throttled.keyFrameRequests - before.keyFrameRequests << "keyframe requests, max in flight"
@@ -334,9 +341,11 @@ private Q_SLOTS:
         // Blocked: the client reads nothing for 5 s.
         proxy.setBlocked(true);
         sample(5s);
+        if (QTest::currentTestFailed()) return; // the connection may be gone
         // The desktop stops changing just before the client resumes: the newest picture is this.
         feeding = false;
         sample(300ms);
+        if (QTest::currentTestFailed()) return; // the connection may be gone
         const quint64 newest = seq;
         const auto blocked = connection->videoStream()->flowStats();
         qInfo() << "blocked:" << blocked.sent - throttled.sent << "sent," << blocked.dropped - throttled.dropped << "coalesced; newest frame" << newest
@@ -349,11 +358,13 @@ private Q_SLOTS:
         QDeadlineTimer current(10s);
         while (lastSeenSeq < newest && !current.hasExpired()) {
             sample(50ms);
+            if (QTest::currentTestFailed()) return; // the connection may be gone
         }
         qInfo() << "resumed: client at frame" << lastSeenSeq << "of" << seq << "; max in flight" << maxInFlight << "window" << windowFrames;
         QVERIFY2(lastSeenSeq >= newest, log.right(4000).constData());
         feeding = true;
         sample(2s);
+        if (QTest::currentTestFailed()) return; // the connection may be gone
         const auto after = connection->videoStream()->flowStats();
         QVERIFY(after.acknowledged > blocked.acknowledged);
         QVERIFY(maxInFlight <= FrameQueuePolicy::MaxInFlightFrames);
@@ -496,9 +507,11 @@ private Q_SLOTS:
         // Let the backlog behind the keyframe drain, then count what arrives: still throttled,
         // but the link now carries the P-frames at the full rate.
         sample(2s);
+        if (QTest::currentTestFailed()) return; // the connection may be gone
         int before = framesSeen;
         const quint64 seqBefore = lastSeenSeq;
         sample(3s);
+        if (QTest::currentTestFailed()) return; // the connection may be gone
         const int throttledFrames = framesSeen - before;
         qInfo() << "throttled, after the keyframe:" << throttledFrames << "frames in 3 s; client at" << lastSeenSeq << "of" << seq;
         QVERIFY2(throttledFrames >= 75, log.right(3000).constData()); // >= 25 fps of the fed 30
@@ -508,8 +521,10 @@ private Q_SLOTS:
         // Unthrottled: still the full rate.
         proxy.setRate(0);
         sample(1s);
+        if (QTest::currentTestFailed()) return; // the connection may be gone
         before = framesSeen;
         sample(2s);
+        if (QTest::currentTestFailed()) return; // the connection may be gone
         const int freeFrames = framesSeen - before;
         const auto after = connection->videoStream()->flowStats();
         qInfo() << "unthrottled:" << freeFrames << "frames in 2 s;" << after.dropped << "coalesced," << after.keyFrameRequests << "keyframe requests,"
@@ -517,6 +532,147 @@ private Q_SLOTS:
         QVERIFY(freeFrames >= 50);
         QVERIFY(after.keyFrameRequests <= 1); // at most one rekey
         QVERIFY(keyFramesFed <= 2);
+        QVERIFY(!closed);
+        QCOMPARE(probe.state(), QProcess::Running);
+    }
+
+    // AUD-FIX7 F2, the Sol :3391 case end to end: a client that acknowledges each frame 285 ms
+    // after it arrived (krdpctl-probe --gfx-ack-delay: decode and present time, not the link)
+    // on a fat link, 30 fps of 64 KiB P-frames and a 130 KB IDR every 100 frames. The window of
+    // four (from the minimum RTT) capped it at 14 fps and rekeyed about once a second; now the
+    // window follows the ack latency: the full rate and no rekey.
+    void slowAckingClientKeepsFullRate()
+    {
+        Server server;
+        server.setAddress(QHostAddress::LocalHost);
+        server.setPort(0);
+        server.setTlsCertificate(m_certificate.toStdString());
+        server.setTlsCertificateKey(m_key.toStdString());
+        server.setUsers({{TestUser, Password}});
+
+        QPointer<RdpConnection> connection;
+        bool closed = false;
+        quint64 seq = 0;
+        int sinceKeyFrame = 0;
+        int keyFramesRequested = 0;
+        const auto feed = [&](bool keyFrame) {
+            if (!connection || connection->state() != RdpConnection::State::Streaming || !connection->videoStream()->enabled()) {
+                return;
+            }
+            VideoFrame frame;
+            frame.size = QSize(1920, 1080);
+            frame.isKeyFrame = keyFrame;
+            frame.data = frameData(++seq, keyFrame ? 130000 : 64 * 1024);
+            frame.presentationTimeStamp = std::chrono::system_clock::now();
+            connection->videoStream()->queueFrame(frame);
+            sinceKeyFrame = keyFrame ? 0 : sinceKeyFrame + 1;
+        };
+        connect(&server, &Server::newConnectionCreated, this, [&](RdpConnection *c) {
+            connection = c;
+            c->videoStream()->setCodecPreference(CodecPreference::Avc420);
+            connect(c, &RdpConnection::stateChanged, c, [&, c] {
+                if (c->state() == RdpConnection::State::Closed) {
+                    closed = true;
+                }
+            });
+            connect(c->videoStream(), &VideoStream::keyFrameRequested, c, [&](int) {
+                ++keyFramesRequested;
+                feed(true);
+            }, Qt::QueuedConnection);
+        });
+        QVERIFY(server.start());
+
+        // The encoder: the frame rate the stream asks for (30 here; less if it throttles).
+        QElapsedTimer clock;
+        clock.start();
+        qint64 nextFrameMs = 0;
+        QTimer feeder;
+        feeder.setInterval(2);
+        feeder.setTimerType(Qt::PreciseTimer);
+        connect(&feeder, &QTimer::timeout, this, [&] {
+            if (!connection || clock.elapsed() < nextFrameMs) {
+                return;
+            }
+            const int rate = std::clamp<int>(int(connection->videoStream()->requestedFrameRate()), 1, 30);
+            nextFrameMs = std::max(nextFrameMs + 1000 / rate, clock.elapsed() - 1000 / rate);
+            feed(seq == 0 || sinceKeyFrame + 1 >= 100);
+        });
+        feeder.start();
+
+        QProcess probe;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), m_dir.path());
+        environment.insert(QStringLiteral("HOME"), m_dir.path());
+        probe.setProcessEnvironment(environment);
+        probe.start(QStringLiteral(KRDPCTL_PROBE),
+                    {QStringLiteral("127.0.0.1"), QString::number(server.serverPort()), TestUser, QStringLiteral("-"), QStringLiteral("--silent"),
+                     QStringLiteral("--no-krdpctl"), QStringLiteral("--gfx"), QStringLiteral("--gfx-count"), QStringLiteral("--gfx-ack-delay"), QStringLiteral("285"),
+                     QStringLiteral("--timeout"), QStringLiteral("120")});
+        QVERIFY(probe.waitForStarted(5000));
+        probe.write(Password.toUtf8() + '\n');
+        probe.closeWriteChannel();
+        const auto cleanup = qScopeGuard([&probe] {
+            if (probe.state() != QProcess::NotRunning) {
+                probe.terminate();
+                if (!probe.waitForFinished(5000)) {
+                    probe.kill();
+                    probe.waitForFinished(5000);
+                }
+            }
+        });
+
+        QByteArray log;
+        quint64 lastSeenSeq = 0;
+        int framesSeen = 0;
+        const auto readProbe = [&] {
+            const QByteArray more = probe.readAllStandardError();
+            log += more;
+            for (const QByteArray &line : more.split('\n')) {
+                const int at = line.indexOf("frame seq ");
+                if (at >= 0) {
+                    lastSeenSeq = std::max(lastSeenSeq, line.mid(at + 10).split(' ').value(0).toULongLong());
+                    ++framesSeen;
+                }
+            }
+        };
+        const auto sample = [&](std::chrono::milliseconds duration) {
+            QDeadlineTimer deadline(duration);
+            while (!deadline.hasExpired()) {
+                QTest::qWait(20);
+                readProbe();
+                QVERIFY2(!closed, log.constData());
+                QVERIFY2(probe.state() == QProcess::Running, log.constData());
+            }
+        };
+        QDeadlineTimer upDeadline(30s);
+        while (lastSeenSeq < 10 && !upDeadline.hasExpired() && probe.state() == QProcess::Running) {
+            QTest::qWait(20);
+            readProbe();
+        }
+        if (lastSeenSeq == 0 && log.contains("does not support H.264")) {
+            QSKIP("this libfreerdp cannot negotiate AVC420 (built WITH_GFX_H264=OFF)");
+        }
+        QVERIFY2(lastSeenSeq >= 10, log.constData());
+        QVERIFY2(log.contains("acknowledging frames 285 ms after their end"), log.constData());
+        // Settle: the window learns the ack latency; a throttle from the first seconds lifts.
+        sample(12s);
+        if (QTest::currentTestFailed()) return; // the connection may be gone
+        const auto before = connection->videoStream()->flowStats();
+        const int seenBefore = framesSeen;
+        const int requestsBefore = keyFramesRequested;
+        sample(30s);
+        if (QTest::currentTestFailed()) return; // the connection may be gone
+        const auto after = connection->videoStream()->flowStats();
+        const int delivered = framesSeen - seenBefore;
+        qInfo() << "slow acks:" << delivered << "frames in 30 s," << keyFramesRequested - requestsBefore << "keyframe requests,"
+                << after.dropped - before.dropped << "coalesced; ack latency" << after.ackLatencyUs / 1000 << "ms, window" << after.windowFrames << "frames"
+                << after.windowBytes / 1024 << "KiB, frame rate" << after.frameRate << (after.linkClear ? "(link clear)" : "");
+        QVERIFY(after.ackLatencyUs >= 250000);
+        QVERIFY(after.windowFrames >= 10);
+        QVERIFY2(delivered >= 27 * 30, log.right(3000).constData()); // >= 27 fps of 30
+        QVERIFY(keyFramesRequested - requestsBefore <= 1); // at most one rekey (the limit is 1 a minute)
+        QCOMPARE(after.dropped, before.dropped);
+        QVERIFY(seq - lastSeenSeq <= 16); // current: the window's worth behind, no backlog
         QVERIFY(!closed);
         QCOMPARE(probe.state(), QProcess::Running);
     }

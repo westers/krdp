@@ -5,9 +5,9 @@
 #include <cstdint>
 #include <optional>
 #include <freerdp/channels/rdpgfx.h>
+#include "VideoCodec.h"
 namespace KRdp
 {
-enum class VideoCodec { Avc420, Avc444, Avc444v2, Hevc, Av1 };
 enum class CodecPreference { Auto, Avc420, Avc444 };
 /// Per-second encoder cost report, mirrored from the private KPipeWire's ChromaTiming (microseconds).
 struct ChromaTimingReport {

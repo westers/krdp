@@ -4,7 +4,9 @@
 #include <QQueue>
 #include <QDebug>
 
+#include <algorithm>
 #include <chrono>
+#include <deque>
 #include <vector>
 #include <QTest>
 
@@ -33,24 +35,51 @@ QList<int> idsOf(const QQueue<QueuedFrame> &queue)
 }
 
 /**
- * AUD-FIX6 F2: the submission loop of VideoStream over the pure policy, in 1 ms steps. One
- * monitor at 30 fps; the first frame is a keyframe of \a keyFrameBytes, every later one a
- * P-frame of \a deltaBytes unless a keyframe was requested (the encoder answers with its
- * next frame). The client acknowledges a keyframe \a keyFrameAck after it was sent and a
- * P-frame \a deltaAck after. \a fixed = the AUD-FIX6 rules; false = the AUD-FIX4 ones
- * (128 KiB floor, four held frames, a request a second), to show the loop they made.
+ * The submission loop of VideoStream over the pure policy, in 1 ms steps. One monitor; the
+ * encoder makes a frame every 1000 / rate ms (30 fps, or less while the AUD-FIX7 delivery
+ * throttle holds it back); the first frame is a keyframe of \a keyFrameBytes, and so is every
+ * \a gop-th one (0: none) and the answer to a request; the rest are P-frames of \a deltaBytes.
+ * The link carries \a linkBytesPerSecond (0: unlimited) and the client acknowledges a frame
+ * \a keyFrameAck (keyframes) or \a deltaAck after it arrived. \a fixed = the current rules;
+ * false = the AUD-FIX4 ones (a window of four from the minimum RTT, a 128 KiB floor, four held
+ * frames, a request a second), to show the loops they made.
  */
 struct FlowRun {
     int keyFramesSent = 0;
     int requests = 0;
     int dropped = 0;
     int keyFrameAckedAtMs = -1;
+    int maxInFlight = 0;
+    int64_t maxInFlightBytes = 0;
+    int minFrameRate = 30;
+    int framesMade = 0;
     std::vector<int> delivered; // frame ids in send order
-    std::vector<int> deliveredAtMs;
+    std::vector<int> deliveredAtMs; // when they were sent
+    std::vector<int> madeAtMs; // when they were made, by id
+    std::vector<int> ackedAtMs; // acknowledgement times, in order
+    /** Frames acknowledged in [fromMs, toMs), per second. */
+    double ackRate(int fromMs, int toMs) const
+    {
+        const auto n = std::count_if(ackedAtMs.cbegin(), ackedAtMs.cend(), [&](int t) {
+            return t >= fromMs && t < toMs;
+        });
+        return double(n) * 1000.0 / double(toMs - fromMs);
+    }
 };
 
-FlowRun simulateFlow(bool fixed, int64_t keyFrameBytes, int64_t deltaBytes, std::chrono::milliseconds keyFrameAck, std::chrono::milliseconds deltaAck,
-                     std::chrono::milliseconds duration, std::chrono::milliseconds stallEvery = {}, std::chrono::milliseconds stallFor = {})
+struct FlowSetup {
+    int64_t keyFrameBytes = 48000;
+    int64_t deltaBytes = 12000;
+    std::chrono::milliseconds keyFrameAck{20};
+    std::chrono::milliseconds deltaAck{20};
+    std::chrono::milliseconds duration{10000};
+    std::chrono::milliseconds stallEvery{};
+    std::chrono::milliseconds stallFor{};
+    int gop = 0;
+    int64_t linkBytesPerSecond = 0;
+};
+
+FlowRun simulateFlow(bool fixed, const FlowSetup &setup)
 {
     using namespace KRdp::FrameQueuePolicy;
     using namespace std::chrono;
@@ -66,22 +95,45 @@ FlowRun simulateFlow(bool fixed, int64_t keyFrameBytes, int64_t deltaBytes, std:
     FrameAckTracker tracker;
     KeyFramePeak peak;
     KeyFrameRequestBackoff backoff;
+    DeliveryThrottle throttle;
     Clock::time_point lastLegacyRequest{};
     QQueue<Frame> queue;
     std::vector<std::pair<Clock::time_point, uint32_t>> acks;
     bool starved = false;
-    bool backlog = false;
     bool keyRequested = false;
     int nextId = 0;
     uint32_t frameId = 0;
-    const int fps = 30;
-    for (milliseconds t(0); t < duration; ++t) {
+    const int cap = 30;
+    int rate = cap;
+    milliseconds nextFrameAt(0);
+    int sinceKey = 0;
+    int64_t averageDelta = 0;
+    // The link: bytes still to deliver, and when the last byte sent so far arrives.
+    milliseconds linkFreeAt(0);
+    std::deque<std::pair<milliseconds, int64_t>> onLink; // (arrives at, bytes)
+    int64_t onLinkBytes = 0;
+    // One adaptive interval: held time and coalesced frames.
+    milliseconds heldThisInterval(0);
+    int coalescedThisInterval = 0;
+    int ackedThisInterval = 0;
+    int madeThisInterval = 0;
+    for (milliseconds t(0); t < setup.duration; ++t) {
         const auto now = t0 + t;
-        // The encoder: a frame every 33 ms.
-        if (t.count() % 33 == 0) {
-            Frame frame{.monitorIndex = 0, .id = nextId++, .key = nextId == 1 || keyRequested, .bytes = 0};
-            frame.bytes = frame.key ? keyFrameBytes : deltaBytes;
+        while (!onLink.empty() && onLink.front().first <= t) {
+            onLinkBytes -= onLink.front().second;
+            onLink.pop_front();
+        }
+        // The encoder.
+        if (t >= nextFrameAt) {
+            nextFrameAt = t + milliseconds(1000 / std::max(1, rate));
+            const bool gopKey = setup.gop > 0 && sinceKey + 1 >= setup.gop;
+            Frame frame{.monitorIndex = 0, .id = nextId++, .key = nextId == 1 || keyRequested || gopKey, .bytes = 0};
+            frame.bytes = frame.key ? setup.keyFrameBytes : setup.deltaBytes;
+            sinceKey = frame.key ? 0 : sinceKey + 1;
             keyRequested = keyRequested && !frame.key;
+            run.madeAtMs.push_back(int(t.count()));
+            ++run.framesMade;
+            ++madeThisInterval;
             if (fixed && frame.key) {
                 peak.record(frame.bytes, now);
             }
@@ -99,18 +151,34 @@ FlowRun simulateFlow(bool fixed, int64_t keyFrameBytes, int64_t deltaBytes, std:
         // The client's acknowledgements.
         for (auto it = acks.begin(); it != acks.end();) {
             if (it->first <= now) {
-                tracker.acknowledge(it->second, 1);
-                if (tracker.acknowledgedKeyFrame() == 0) {
-                    backoff.keyFrameAcknowledged();
-                    if (run.keyFrameAckedAtMs < 0) {
-                        run.keyFrameAckedAtMs = int(t.count());
-                    }
+                tracker.acknowledge(it->second, 1, now);
+                if (tracker.acknowledgedKeyFrame() == 0 && run.keyFrameAckedAtMs < 0) {
+                    run.keyFrameAckedAtMs = int(t.count());
                 }
+                run.ackedAtMs.push_back(int(t.count()));
+                ++ackedThisInterval;
                 it = acks.erase(it);
             } else {
                 ++it;
             }
         }
+        // updateAdaptiveQuality(): the delivery throttle, every 1.5 s.
+        if (fixed && t.count() > 0 && t.count() % 1500 == 0) {
+            const bool pressure = heldThisInterval >= milliseconds(200) || coalescedThisInterval > 0;
+            rate = throttle.update(now, cap, madeThisInterval / 1.5, ackedThisInterval / 1.5, pressure);
+            run.minFrameRate = std::min(run.minFrameRate, rate);
+            heldThisInterval = milliseconds(0);
+            coalescedThisInterval = 0;
+            ackedThisInterval = 0;
+            madeThisInterval = 0;
+        }
+        const auto limitsNow = [&] {
+            if (!fixed) {
+                return windowLimits(cap, 1, microseconds(0), 0, 0);
+            }
+            const bool clear = linkClear(setup.linkBytesPerSecond > 0 ? onLinkBytes : 0);
+            return windowLimits(rate, 1, microseconds(0), 0, peak.largest(now), tracker.ackLatency(now), averageDelta, clear);
+        };
         // The submission thread.
         const auto requestIfStarved = [&] {
             if (!starved) {
@@ -118,7 +186,7 @@ FlowRun simulateFlow(bool fixed, int64_t keyFrameBytes, int64_t deltaBytes, std:
             }
             bool request = false;
             if (fixed) {
-                tracker.expire(now, windowLimits(fps, 1, microseconds(0), 0, peak.largest(now)));
+                tracker.expire(now, limitsNow());
                 request = backoff.shouldRequest(now, tracker.keyFrameInFlight(0));
             } else if (lastLegacyRequest == Clock::time_point{} || now - lastLegacyRequest >= CoalesceKeyFrameMinInterval) {
                 lastLegacyRequest = now;
@@ -131,42 +199,50 @@ FlowRun simulateFlow(bool fixed, int64_t keyFrameBytes, int64_t deltaBytes, std:
         };
         requestIfStarved();
         while (!queue.isEmpty()) {
-            const auto limits = windowLimits(fps, 1, microseconds(0), 0, fixed ? peak.largest(now) : 0);
+            const auto limits = limitsNow();
             tracker.expire(now, limits);
             if (!tracker.canSend(limits)) {
-                backlog = keyFrameBacklog(backlog, tracker.keyFrameInFlight(0), int(queue.size()));
-                int64_t queuedBytes = 0;
-                for (const auto &held : queue) {
-                    queuedBytes += held.bytes;
-                }
-                const int64_t keyFrame = peak.largest(now);
+                ++heldThisInterval;
                 std::vector<int> starvedMonitors;
+                int dropped = 0;
                 if (fixed) {
-                    run.dropped += coalesceHeldFrames(
+                    dropped = coalesceHeldFrames(
                         queue,
                         [&](int, int count) {
-                            return shouldCoalesce(count, queuedBytes, backlog, keyFrame, keyFrameHoldFrames(fps));
+                            return shouldCoalesce(count, keyFrameHoldFrames(rate));
                         },
                         starvedMonitors);
                 } else {
-                    run.dropped += coalesceHeldFrames(queue, MaxHeldFramesPerMonitor, starvedMonitors);
+                    dropped = coalesceHeldFrames(queue, MaxHeldFramesPerMonitor, starvedMonitors);
                 }
+                run.dropped += dropped;
+                coalescedThisInterval += dropped;
                 if (!starvedMonitors.empty()) {
                     starved = true;
-                    backlog = false;
+                    backoff.dropped(now);
                 }
                 requestIfStarved();
                 break;
             }
             const Frame frame = queue.dequeue();
-            if (queue.size() <= MaxHeldFramesPerMonitor) {
-                backlog = false;
-            }
             tracker.frameSent(frameId, frame.bytes, now, frame.key, frame.monitorIndex);
+            if (!frame.key) {
+                averageDelta = averageDelta == 0 ? frame.bytes : averageDelta + (frame.bytes - averageDelta) / 16;
+            }
+            run.maxInFlight = std::max(run.maxInFlight, tracker.inFlightFrames());
+            run.maxInFlightBytes = std::max(run.maxInFlightBytes, tracker.inFlightBytes());
+            // On the link, then the client's own delay.
+            milliseconds arrives = t;
+            if (setup.linkBytesPerSecond > 0) {
+                linkFreeAt = std::max(linkFreeAt, t) + milliseconds(frame.bytes * 1000 / setup.linkBytesPerSecond);
+                arrives = linkFreeAt;
+                onLink.push_back({arrives, frame.bytes});
+                onLinkBytes += frame.bytes;
+            }
             // A client that pauses for stallFor every stallEvery acknowledges nothing meanwhile.
-            auto ackAt = t + (frame.key ? keyFrameAck : deltaAck);
-            if (stallEvery.count() > 0 && ackAt % stallEvery < stallFor) {
-                ackAt += stallFor - ackAt % stallEvery;
+            auto ackAt = arrives + (frame.key ? setup.keyFrameAck : setup.deltaAck);
+            if (setup.stallEvery.count() > 0 && ackAt % setup.stallEvery < setup.stallFor) {
+                ackAt += setup.stallFor - ackAt % setup.stallEvery;
             }
             acks.push_back({t0 + ackAt, frameId});
             ++frameId;
@@ -176,6 +252,25 @@ FlowRun simulateFlow(bool fixed, int64_t keyFrameBytes, int64_t deltaBytes, std:
         }
     }
     return run;
+}
+
+FlowRun simulateFlow(bool fixed, int64_t keyFrameBytes, int64_t deltaBytes, std::chrono::milliseconds keyFrameAck, std::chrono::milliseconds deltaAck,
+                     std::chrono::milliseconds duration, std::chrono::milliseconds stallEvery = {}, std::chrono::milliseconds stallFor = {})
+{
+    return simulateFlow(fixed,
+                        FlowSetup{.keyFrameBytes = keyFrameBytes,
+                                  .deltaBytes = deltaBytes,
+                                  .keyFrameAck = keyFrameAck,
+                                  .deltaAck = deltaAck,
+                                  .duration = duration,
+                                  .stallEvery = stallEvery,
+                                  .stallFor = stallFor});
+}
+
+/// How long after it was made the last frame sent went out.
+int lastFrameLatencyMs(const FlowRun &run)
+{
+    return run.deliveredAtMs.back() - run.madeAtMs[size_t(run.delivered.back())];
 }
 }
 
@@ -432,22 +527,13 @@ private Q_SLOTS:
         QCOMPARE(peak.largest(t0 + 3s + KeyFrameSizeHorizon - 1ms), int64_t(300000));
         QCOMPARE(peak.largest(t0 + 3s + KeyFrameSizeHorizon), int64_t(0));
 
-        // The backlog behind a keyframe: from the moment it is in flight until the monitor is
-        // back at MaxHeldFramesPerMonitor queued, acknowledged or not.
-        QVERIFY(keyFrameBacklog(false, true, 0));
-        QVERIFY(keyFrameBacklog(true, false, MaxHeldFramesPerMonitor + 1));
-        QVERIFY(!keyFrameBacklog(true, false, MaxHeldFramesPerMonitor));
-        QVERIFY(!keyFrameBacklog(false, false, 50));
-
-        // Coalescing: never at four or fewer, always beyond the hold; in between only when the
-        // backlog outweighs the keyframe that would replace it, and never behind a keyframe.
-        QVERIFY(!shouldCoalesce(MaxHeldFramesPerMonitor, 1 << 30, false, 0, 60));
-        QVERIFY(shouldCoalesce(61, 0, true, 1 << 20, 60));
-        QVERIFY(shouldCoalesce(5, 60000, false, 48000, 60)); // :3389-sized keyframes: as before
-        QVERIFY(shouldCoalesce(5, 1, false, 0, 60)); // no keyframe seen: as before
-        QVERIFY(!shouldCoalesce(5, 40000, false, 1 << 20, 60)); // 4K keyframe: hold
-        QVERIFY(!shouldCoalesce(30, 1 << 21, true, 1 << 20, 60)); // behind the keyframe: hold
-        QVERIFY(shouldCoalesce(30, 1 << 21, false, 1 << 20, 60));
+        // AUD-FIX7 F2: coalescing (which costs a keyframe) only beyond the hold, the latency
+        // bound; below it frames wait and the source is throttled instead.
+        QVERIFY(!shouldCoalesce(MaxHeldFramesPerMonitor, 60));
+        QVERIFY(!shouldCoalesce(5, 60));
+        QVERIFY(!shouldCoalesce(60, 60));
+        QVERIFY(shouldCoalesce(61, 60));
+        QVERIFY(shouldCoalesce(MaxHeldFramesPerMonitor + 1, 1)); // never fewer than MaxHeldFramesPerMonitor held
 
         QCOMPARE(keyFrameHoldFrames(30), 60);
         QCOMPARE(keyFrameHoldFrames(1), MaxHeldFramesPerMonitor);
@@ -480,8 +566,9 @@ private Q_SLOTS:
         QVERIFY(!tracker.keyFrameInFlight(1));
     }
 
-    // AUD-FIX6 F2: keyframe requests after a drop wait for the keyframe in flight, back off
-    // 1 s, 2 s, 4 s ... up to the cap, and an acknowledged keyframe resets that.
+    // AUD-FIX6 F2: keyframe requests after a drop wait for the keyframe in flight and back off
+    // 1 s, 2 s, 4 s ... up to the cap. AUD-FIX7 F2: an acknowledged keyframe does not reset
+    // that; BackoffQuietReset without a drop does.
     void keyFrameRequestsBackOff()
     {
         using namespace KRdp::FrameQueuePolicy;
@@ -497,10 +584,156 @@ private Q_SLOTS:
             last += gap;
         }
         QVERIFY(!backoff.shouldRequest(last + 1h, true));
-        backoff.keyFrameAcknowledged();
+        // Drops that keep coming keep the back-off at the cap.
+        backoff.dropped(last + 1s);
+        backoff.dropped(last + 9s);
+        QCOMPARE(backoff.interval(), std::chrono::milliseconds(16000));
+        QVERIFY(!backoff.shouldRequest(last + 15s, false));
+        // The first drop after 10 s without one starts it over.
+        backoff.dropped(last + 19s);
         QCOMPARE(backoff.interval(), std::chrono::milliseconds(1000));
-        QVERIFY(!backoff.shouldRequest(last + 999ms, false));
-        QVERIFY(backoff.shouldRequest(last + 1s, false));
+        QVERIFY(backoff.shouldRequest(last + 19s, false));
+        QVERIFY(!backoff.shouldRequest(last + 19s + 999ms, false));
+        QVERIFY(backoff.shouldRequest(last + 20s, false));
+    }
+
+    // AUD-FIX7 F2: the window follows the frame-ack latency, and a clear link lets the byte
+    // budget follow it; a congested one keeps the link's budget.
+    void windowFollowsAckLatency()
+    {
+        using namespace KRdp::FrameQueuePolicy;
+        using namespace std::chrono_literals;
+        // Sol's stock client on :3391: 285 ms from send to ack on a LAN; 30 fps x 0.345 s = 11.
+        auto limits = windowLimits(30, 1, 1000us, 0, 130000, 285000us, 65536, true);
+        QCOMPARE(limits.frames, 11);
+        QCOMPARE(limits.bytes, int64_t(11 * 65536 * 1.25) + 130000);
+        // The same ack latency behind a congested link is the link's queue: neither follows it.
+        limits = windowLimits(30, 1, 1000us, 0, 130000, 285000us, 65536, false);
+        QCOMPARE(limits.frames, MinInFlightFrames);
+        QCOMPARE(limits.bytes, int64_t(260000));
+        // An ack latency under the RTT changes nothing; the ceiling holds.
+        QCOMPARE(windowLimits(60, 1, 50000us, 0, 0, 10000us, 65536, true), windowLimits(60, 1, 50000us, 0));
+        QCOMPARE(windowLimits(60, 1, 1000us, 0, 0, 2s, 1000, true).frames, MaxInFlightFrames);
+        QCOMPARE(windowLimits(30, 2, 1000us, 0, 0, 2s, 1000, true).frames, 2 * MaxInFlightFrames);
+
+        QVERIFY(linkClear(0));
+        QVERIFY(linkClear(LinkClearBytes - 1));
+        QVERIFY(!linkClear(LinkClearBytes));
+        QVERIFY(!linkClear(-1)); // unknown
+
+        // Frames a steady client is behind by nature: 285 ms at 30 fps -> 9 (+1).
+        QCOMPARE(backlogFrames(30, 1, 285000us, 4), 10);
+        QCOMPARE(backlogFrames(60, 1, 20000us, 4), 4);
+        QCOMPARE(backlogFrames(30, 1, 0us, 4), 4);
+
+        // The tracker's view: p75 of the last 2 s, floor of the last 10 s.
+        const auto t0 = FrameAckTracker::Clock::time_point(1h);
+        FrameAckTracker tracker;
+        QCOMPARE(tracker.ackLatency(t0), 0us);
+        for (uint32_t id = 0; id < 40; ++id) {
+            const auto sent = t0 + id * 33ms;
+            tracker.frameSent(id, 1000, sent);
+            tracker.acknowledge(id, 1, sent + (id % 4 == 3 ? 400ms : 280ms));
+        }
+        const auto end = t0 + 39 * 33ms + 400ms;
+        QCOMPARE(tracker.ackLatency(end), 400000us); // one in four is slow: the p75
+        QCOMPARE(tracker.baseAckLatency(end), 280000us);
+        // Nothing acked lately: the last eight of the horizon (ids 32..39: two of them slow).
+        QCOMPARE(tracker.ackLatency(end + AckLatencyRecent), 400000us);
+        QCOMPARE(tracker.ackLatency(end + AckLatencyHorizon), 0us); // nothing left: unknown
+        QCOMPARE(tracker.baseAckLatency(end + AckLatencyHorizon), 0us);
+    }
+
+    // AUD-FIX7 F2: the delivery throttle.
+    void deliveryThrottleFollowsTheClient()
+    {
+        using namespace KRdp::FrameQueuePolicy;
+        using namespace std::chrono_literals;
+        const auto t0 = DeliveryThrottle::Clock::time_point(1h);
+        DeliveryThrottle throttle;
+        QCOMPARE(throttle.update(t0, 30, 30, 30, false), 30);
+        QVERIFY(!throttle.active());
+        // A quiet desktop whose keyframe waited: it offered no more than got through.
+        QCOMPARE(throttle.update(t0 + 1500ms, 30, 2, 2, true), 30);
+        QVERIFY(!throttle.active());
+        // Behind a full window, 30 made and 14 taken: ask for 12.
+        QCOMPARE(throttle.update(t0 + 3s, 30, 30, 14, true), 12);
+        QVERIFY(throttle.active());
+        // Still behind: 12 made, 10 taken -> 9.
+        QCOMPARE(throttle.update(t0 + 4500ms, 30, 12, 10, true), 9);
+        // No acks at all (a stall): no change.
+        QCOMPARE(throttle.update(t0 + 6s, 30, 9, 0, true), 9);
+        // Never below the floor, never above the cap.
+        QCOMPARE(throttle.update(t0 + 7500ms, 30, 9, 2, true), MinThrottledFrameRate);
+        QCOMPARE(throttle.rate(3), 3);
+        // Quiet for ThrottleRaiseAfter: up by half at a time, then off.
+        QCOMPARE(throttle.update(t0 + 9s, 30, 5, 5, false), MinThrottledFrameRate);
+        QCOMPARE(throttle.update(t0 + 10500ms, 30, 5, 5, false), 8);
+        QCOMPARE(throttle.update(t0 + 12s, 30, 8, 8, false), 8);
+        QCOMPARE(throttle.update(t0 + 13500ms, 30, 8, 8, false), 12);
+        // Pressure right after a raise doubles the wait before the next one.
+        QCOMPARE(throttle.update(t0 + 15s, 30, 12, 10, true), 9);
+        QCOMPARE(throttle.raiseWait(), std::chrono::milliseconds(6000));
+        QCOMPARE(throttle.update(t0 + 19500ms, 30, 9, 9, false), 9);
+        QCOMPARE(throttle.update(t0 + 21s, 30, 9, 9, false), 14);
+        for (int i = 0; i < 8; ++i) {
+            throttle.update(t0 + 21s + (i + 1) * 7s, 30, 30, 30, false);
+        }
+        QVERIFY(!throttle.active());
+        QCOMPARE(throttle.rate(30), 30);
+        // A minute without pressure: the raise wait is back to its start.
+        throttle.update(t0 + 200s, 30, 30, 30, false);
+        QCOMPARE(throttle.raiseWait(), std::chrono::milliseconds(3000));
+    }
+
+    // AUD-FIX7 F2, the Sol :3391 case (2026-09-28): 30 fps of 64 KiB P-frames, a 130 KB IDR
+    // every 100 frames, a client that acknowledges 285 ms after a frame arrives, on a link with
+    // plenty of room. The AUD-FIX4 window of four capped it at 14 fps and rekeyed about once a
+    // second; now the window covers the client's delay: the full rate, no rekey.
+    void slowAckingClientKeepsFullRate()
+    {
+        using namespace std::chrono_literals;
+        const FlowSetup sol{.keyFrameBytes = 130000,
+                            .deltaBytes = 65536,
+                            .keyFrameAck = 285ms,
+                            .deltaAck = 285ms,
+                            .duration = 60s,
+                            .gop = 100};
+        const auto before = simulateFlow(false, sol);
+        qInfo() << "AUD-FIX4 rules:" << before.ackRate(10000, 60000) << "fps," << before.requests << "requests in 60 s," << before.dropped << "dropped";
+        QVERIFY(before.requests >= 30); // the loop this fixes
+        QVERIFY(before.ackRate(10000, 60000) < 20);
+
+        const auto run = simulateFlow(true, sol);
+        qInfo() << "current rules:" << run.ackRate(10000, 60000) << "fps," << run.requests << "requests in 60 s," << run.dropped << "dropped, max"
+                << run.maxInFlight << "in flight, lowest frame rate" << run.minFrameRate;
+        QVERIFY(run.requests <= 1); // at most one rekey a minute
+        QCOMPARE(run.dropped, 0);
+        QVERIFY(run.ackRate(10000, 60000) >= 29.0);
+        QVERIFY(run.maxInFlight <= KRdp::FrameQueuePolicy::MaxInFlightFrames);
+        QVERIFY(lastFrameLatencyMs(run) <= 66);
+    }
+
+    // AUD-FIX7 F2: a link that carries a sixth of the stream (0.5 Mbit/s for 2.9). The window's
+    // bytes stay the link's (it is not clear), the source slows to what gets through instead of
+    // frames being dropped after encoding, and the latency stays bounded.
+    void throttledLinkSlowsTheSource()
+    {
+        using namespace std::chrono_literals;
+        const FlowSetup thin{.keyFrameBytes = 48000, .deltaBytes = 12000, .keyFrameAck = 20ms, .deltaAck = 20ms, .duration = 30s, .gop = 100,
+                             .linkBytesPerSecond = 64 * 1024};
+        const auto before = simulateFlow(false, thin);
+        qInfo() << "AUD-FIX4 rules:" << before.requests << "requests," << before.dropped << "dropped," << before.ackRate(10000, 30000) << "fps";
+        const auto run = simulateFlow(true, thin);
+        qInfo() << "current rules:" << run.requests << "requests," << run.dropped << "dropped," << run.ackRate(10000, 30000) << "fps, lowest frame rate"
+                << run.minFrameRate << ", max" << run.maxInFlightBytes << "bytes in flight, last frame" << lastFrameLatencyMs(run) << "ms old";
+        QVERIFY(before.requests >= 10);
+        QVERIFY(run.requests <= 2);
+        QVERIFY(run.minFrameRate <= 8); // the source followed the link
+        QVERIFY(run.ackRate(10000, 30000) >= 3.5); // and what it makes gets through
+        // The link's budget (the floor, plus the frame that crossed it), not the frame window's.
+        QVERIFY(run.maxInFlightBytes <= KRdp::FrameQueuePolicy::MinInFlightBytes + 48000);
+        QVERIFY(lastFrameLatencyMs(run) <= 1500);
     }
 
     // AUD-FIX6 F2, the Sol :3391 case: a 265 KB keyframe (over the 128 KiB floor) the client
@@ -517,7 +750,7 @@ private Q_SLOTS:
         QVERIFY(before.keyFramesSent >= 5);
 
         const auto run = simulateFlow(true, 265000, 6000, 400ms, 20ms, 10s);
-        qInfo() << "AUD-FIX6 rules:" << run.keyFramesSent << "keyframes," << run.requests << "requests," << run.dropped << "dropped," << run.delivered.size()
+        qInfo() << "current rules:" << run.keyFramesSent << "keyframes," << run.requests << "requests," << run.dropped << "dropped," << run.delivered.size()
                 << "sent";
         QCOMPARE(run.keyFramesSent, 1);
         QCOMPARE(run.requests, 0);
@@ -530,7 +763,7 @@ private Q_SLOTS:
         }
         // Frames sent after the ack keep up with the encoder: the last one went out within
         // two frame intervals of being made.
-        QVERIFY(run.deliveredAtMs.back() - run.delivered.back() * 33 <= 66);
+        QVERIFY(lastFrameLatencyMs(run) <= 66);
     }
 
     // AUD-FIX6 F2: a 4K keyframe (1 MB) the client needs 1.5 s for: still one keyframe, no
@@ -545,7 +778,7 @@ private Q_SLOTS:
         for (size_t i = 0; i < run.delivered.size(); ++i) {
             QCOMPARE(run.delivered[i], int(i));
         }
-        QVERIFY(run.deliveredAtMs.back() - run.delivered.back() * 33 <= 66);
+        QVERIFY(lastFrameLatencyMs(run) <= 66);
     }
 
     // AUD-FIX6 F2: with a 1 MB keyframe out of the way, a client that pauses now and then

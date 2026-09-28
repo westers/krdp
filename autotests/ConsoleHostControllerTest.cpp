@@ -4,6 +4,8 @@
 #include "ConsoleWorkerSession.h"
 #include "RdpConnection.h"
 #include "Server.h"
+#include "VideoStream.h"
+#include <QJsonArray>
 #include <QMouseEvent>
 #include <QLocalSocket>
 #include <QTemporaryDir>
@@ -595,6 +597,80 @@ private Q_SLOTS:
     {
         return {{QStringLiteral("type"), QStringLiteral("device")}, {QStringLiteral("v"), 1}, {QStringLiteral("requestId"), requestId},
                 {QStringLiteral("device"), name}, {QStringLiteral("action"), action}};
+    }
+
+    // AUD-FIX7: the console's one worker encodes for every client, so the controlling client's
+    // private codec runs only while it is the only one admitted: a viewer turns the console back
+    // to AVC (a `codec` push), and its leaving brings the private codec back.
+    void codecPolicyRunsWhileTheControllerIsAlone()
+    {
+        Server server;
+        RdpConnection owner(&server, -1);
+        RdpConnection viewer(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        VideoCodecHost video;
+        video.probe.encoders.avc = {true, true, true};
+        video.probe.encoders.hevc = {true, false, false};
+        host.setVideoCodecHost(video);
+        QList<std::pair<RdpConnection *, QJsonObject>> sent;
+        host.m_recordSent = [&sent](RdpConnection *connection, const QJsonObject &record) {
+            sent.append({connection, record});
+        };
+        const auto last = [&sent](RdpConnection *connection) {
+            for (auto it = sent.crbegin(); it != sent.crend(); ++it) {
+                if (it->first == connection) return it->second;
+            }
+            return QJsonObject{};
+        };
+        const auto codec = [](const QString &requestId) {
+            return QJsonObject{{QStringLiteral("type"), QStringLiteral("codec")}, {QStringLiteral("v"), 1}, {QStringLiteral("requestId"), requestId},
+                               {QStringLiteral("codecs"), QJsonArray{QStringLiteral("hevc")}}};
+        };
+        host.addClient(&owner);
+        const auto ownerId = host.m_clients.at(0)->id;
+        // Asked before admission (right after `capabilities`): AVC for now.
+        host.onControlRecord(&owner, ownerId, codec(QStringLiteral("k0")));
+        QCOMPARE(last(&owner).value(QStringLiteral("selected")).toString(), QStringLiteral("avc"));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("k0"));
+        // Admitted and in control, alone: the policy starts (a push, no requestId).
+        host.m_control.admit(ownerId);
+        host.syncControlState();
+        host.syncCodecPolicy();
+        QVERIFY(host.m_control.ownsControl(ownerId));
+        QCOMPARE(last(&owner).value(QStringLiteral("selected")).toString(), QStringLiteral("hevc"));
+        QCOMPARE(last(&owner).value(QStringLiteral("backend")).toString(), QStringLiteral("hardware"));
+        QVERIFY(!last(&owner).contains(QStringLiteral("requestId")));
+        QCOMPARE(owner.videoStream()->codecForSessions(), VideoCodec::Hevc);
+        auto &bridge = *host.m_clients.at(0)->codec;
+        QVERIFY(bridge.bound());
+        QCOMPARE(bridge.config()->codec, VideoCodec::Hevc);
+        QCOMPARE(bridge.config()->generation, host.m_controlGeneration);
+        // Asked again while alone: answered directly.
+        host.onControlRecord(&owner, ownerId, codec(QStringLiteral("k1")));
+        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("k1"));
+        QCOMPARE(last(&owner).value(QStringLiteral("selected")).toString(), QStringLiteral("hevc"));
+
+        // A viewer joins: AVC for everyone.
+        host.addClient(&viewer);
+        const auto viewerId = host.m_clients.at(1)->id;
+        host.m_control.admit(viewerId);
+        host.syncControlState();
+        host.syncCodecPolicy();
+        QVERIFY(host.m_control.ownsControl(ownerId));
+        QCOMPARE(last(&owner).value(QStringLiteral("selected")).toString(), QStringLiteral("avc"));
+        QVERIFY(last(&owner).value(QStringLiteral("reason")).toString().contains(QStringLiteral("another client")));
+        QCOMPARE(owner.videoStream()->codecForSessions(), VideoCodec::Avc420);
+        QVERIFY(!host.m_clients.at(1)->codec->bound()); // only the controller steers the worker
+        // The viewer cannot choose the console's codec.
+        host.onControlRecord(&viewer, viewerId, codec(QStringLiteral("v1")));
+        QCOMPARE(last(&viewer).value(QStringLiteral("selected")).toString(), QStringLiteral("avc"));
+        QCOMPARE(last(&viewer).value(QStringLiteral("requestId")).toString(), QStringLiteral("v1"));
+        QCOMPARE(viewer.videoStream()->codecForSessions(), VideoCodec::Avc420);
+
+        // The viewer leaves: the controller's private codec is back.
+        host.removeClient(&viewer, viewerId);
+        QCOMPARE(last(&owner).value(QStringLiteral("selected")).toString(), QStringLiteral("hevc"));
+        QCOMPARE(owner.videoStream()->codecForSessions(), VideoCodec::Hevc);
     }
 
     void deviceRecordsOwnerViewerBusyAndUnsupported()

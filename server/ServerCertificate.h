@@ -5,6 +5,7 @@
 
 #include <QDateTime>
 #include <QString>
+#include <QStringList>
 
 // AUD-K3: the per-user server owns its TLS certificate. With
 // AutogenerateCertificates=true it keeps a self-signed ECDSA P-256 certificate
@@ -78,4 +79,24 @@ struct EnsureResult {
 
 // inspect() + decide() + generate() when needed + inspect() again.
 EnsureResult ensure(const Paths &paths, const QString &commonName, const QDateTime &now);
+
+/**
+ * AUD-FIX7: the certificate of a root broker (the console host and the virtual-desktop host),
+ * at the paths its /etc/krdp/ .conf file names. ensure() - created when missing or unusable, renewed
+ * when expired or within kRenewBeforeDays, a valid one kept - plus the file hygiene a root
+ * service needs:
+ * - both paths must be absolute;
+ * - a missing parent directory is created 0755 (not with the service's umask, so the other
+ *   /etc/krdp files stay readable);
+ * - an existing key is made owned by \a owner (the service's euid) and mode 0600, an existing
+ *   certificate owned by \a owner and not group/other-writable; each repair is noted;
+ * - a symlinked certificate or key is the administrator's: it is checked and noted but never
+ *   replaced or changed (an unusable one is an error, an expiring one only a note).
+ * New files are written by generate(): key 0600, certificate 0644, owned by the euid.
+ */
+struct SystemResult : EnsureResult {
+    QStringList notes; ///< repairs and warnings, for the log
+    bool administratorManaged = false; ///< a symlink: checked, never replaced
+};
+SystemResult ensureSystem(const Paths &paths, const QString &commonName, const QDateTime &now, uint owner);
 }

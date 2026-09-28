@@ -25,6 +25,9 @@
 #include "ConsoleWorkerEndpoint.h"
 #include "ConsoleTopologyPlan.h"
 #include "RemoteTopologyCatalog.h"
+#include "CodecRequest.h"
+#include "VideoCodecHost.h"
+#include "WorkerCodecBridge.h"
 
 namespace KRdp
 {
@@ -65,6 +68,12 @@ public:
     ~ConsoleHostController() override;
     void start();
     void setAudioPriorityDefault(bool enabled);
+    /**
+     * AUD-FIX7: offer the codec policy (`capabilities.video`, `codec`) with \a host's encoders and
+     * SoftwareEncoding (unset: AVC only). The one worker encodes for every client, so a private
+     * codec runs only while the controlling client is the only one admitted; otherwise AVC.
+     */
+    void setVideoCodecHost(const VideoCodecHost &host) { m_videoHost = host; }
     /** Latest logind sessions (ConsoleSeatWatcher::sessionsChanged). */
     void setSeatSessions(const QList<ConsoleSeat::Session> &sessions);
     /** A launched worker process exited (reaped). The only event that ends a drain. */
@@ -82,6 +91,10 @@ private:
         QPointer<RdpConnection> connection;
         std::optional<quint32> uid;
         std::unique_ptr<ConsoleWorkerSession> session;
+        // AUD-FIX7: this client's codec policy -> the worker, while it holds control.
+        std::unique_ptr<WorkerCodecBridge> codec;
+        std::optional<CodecRequest::Request> codecRequest;
+        bool codecApplied = false; // its private-codec policy is live (it is alone and in control)
         QList<QMetaObject::Connection> connections;
         // `device` records that arrived before admission (bounded: the latest per device).
         QList<QJsonObject> pendingDevices;
@@ -181,6 +194,9 @@ private:
     std::vector<std::unique_ptr<Client>> m_clients;
     bool m_inputEnabled = false;
     bool m_audioPriorityDefault = false;
+    std::optional<VideoCodecHost> m_videoHost;
+    /** AUD-FIX7: bind the controller's codec bridge; a private codec only while it is alone. */
+    void syncCodecPolicy();
     ConsoleControl m_control;
     ConsoleControl::Id m_nextClientId = 0;
     bool m_mediaConfigured = false;

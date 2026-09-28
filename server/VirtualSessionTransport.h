@@ -5,7 +5,10 @@
 #include "ConsoleWorkerSession.h"
 #include "RemoteTopologyProtocol.h"
 #include "VirtualStockClient.h"
+#include "VideoCodecHost.h"
+#include "WorkerCodecBridge.h"
 #include <RdpConnection.h>
+#include <memory>
 #include <QPointer>
 #include <QTimer>
 #include <QElapsedTimer>
@@ -36,6 +39,12 @@ public:
     void setStockClientPolicy(StockPolicy policy) { m_stockPolicy = std::move(policy); }
     /** Another connection of this user took this one's desktop over: close with the standard code. */
     void displaced();
+    /**
+     * AUD-FIX7: offer the codec policy (`capabilities.video`, `codec`) with \a host's encoders and
+     * SoftwareEncoding. Unset: AVC only, no `video` group (the pre-AUD-FIX7 answer). Call before
+     * the client authenticates.
+     */
+    void setVideoCodecHost(const VideoCodecHost &host);
 
 private:
     friend class VirtualSessionTransportTest;
@@ -144,6 +153,8 @@ private:
     QPointer<ConsoleWorkerEndpoint> m_endpoint;
     std::optional<VirtualSessionRegistry::Handle> m_handle;
     ConsoleWorkerSession m_session;
+    std::optional<VideoCodecHost> m_videoHost;
+    std::unique_ptr<WorkerCodecBridge> m_codec; // after m_session: destroyed first
     QVector<VideoMonitor> m_wireLayout;
     QList<QMetaObject::Connection> m_workerConnections;
     bool m_playback = false;

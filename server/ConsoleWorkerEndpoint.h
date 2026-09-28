@@ -55,6 +55,18 @@ public:
     void setMedia(const ConsoleWorkerWire::Media &media);
     void setControlState(const ConsoleWorkerWire::ControlState &state);
     bool setVideoQuality(const ConsoleWorkerWire::VideoQuality &quality);
+    /** AUD-FIX7: the controlling connection's codec, encoder settings and frame rate. */
+    bool setEncoderConfig(const ConsoleWorkerWire::EncoderConfig &config);
+    /** AUD-FIX7: the worker's own encoder probe (sent after Hello); nullopt until it arrives. */
+    std::optional<ConsoleWorkerWire::EncoderCaps> encoderCaps() const
+    {
+        return m_encoderCaps;
+    }
+    /** AUD-FIX7: the worker's last reported process CPU time (ns), -1 = none yet. */
+    qint64 workerCpuNs() const
+    {
+        return m_workerCpuNs;
+    }
     bool setMicrophone(const ConsoleWorkerWire::MicrophonePolicy &policy);
     bool sendMicrophoneAudio(const ConsoleWorkerWire::MicrophoneAudio &audio);
     bool resize(const ConsoleWorkerWire::Resize &request);
@@ -89,6 +101,8 @@ Q_SIGNALS:
     void addVirtualFinished(const KRdp::ConsoleWorkerWire::AddVirtualResult &result);
     void removeVirtualFinished(const KRdp::ConsoleWorkerWire::RemoveVirtualResult &result);
     void microphoneFinished(const KRdp::ConsoleWorkerWire::MicrophoneResult &result);
+    void encoderCapsReceived(const KRdp::ConsoleWorkerWire::EncoderCaps &caps);
+    void encoderReported(const KRdp::ConsoleWorkerWire::EncoderReport &report);
     void protocolError(const QString &message);
     /** The worker speaks another paired wire version; always followed by protocolError. */
     void versionMismatch(quint16 workerVersion);
@@ -112,5 +126,7 @@ private:
     bool m_ready = false;
     bool m_stopRequested = false;
     QTimer m_authenticationDeadline;
+    std::optional<ConsoleWorkerWire::EncoderCaps> m_encoderCaps;
+    qint64 m_workerCpuNs = -1;
 };
 }

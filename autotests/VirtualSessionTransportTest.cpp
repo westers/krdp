@@ -2166,6 +2166,111 @@ private Q_SLOTS:
         transport.revoke();
         QCOMPARE(sequence, quint64(0));
     }
+
+    // AUD-FIX7: the virtual host's codec policy. The `codec` request is answered from the host's
+    // encoders (a fake probe here: hardware HEVC, software AV1); the choice goes to the bound
+    // worker with the binding's generation; the worker's own probe replaces the host's, and a
+    // private codec it cannot encode is left at once.
+    void codecPolicyRunsThroughTheWorker()
+    {
+        microphoneFixture([&](auto &t, auto &, auto &endpoint, auto &worker) {
+            VideoCodecHost host;
+            host.probe.encoders.avc = {true, true, true};
+            host.probe.encoders.hevc = {true, false, false};
+            host.probe.encoders.av1 = {false, true, false};
+            t.setVideoCodecHost(host);
+            workerRecords(worker);
+            QVERIFY(t.m_codec->bound());
+            const auto configs = [&](QLocalSocket &socket) {
+                QList<ConsoleWorkerWire::EncoderConfig> result;
+                for (int i = 0; i < 5; ++i) {
+                    for (const auto &record : workerRecords(socket)) {
+                        if (const auto config = ConsoleWorkerWire::encoderConfig(record)) result.append(*config);
+                    }
+                }
+                return result;
+            };
+
+            // The client decodes HEVC and AV1; on a normal link the hardware codec wins.
+            const auto reply = t.request(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, 1}, {u"codecs"_s, QJsonArray{u"hevc"_s, u"av1"_s}}}, 1000);
+            QCOMPARE(reply.value(u"type"_s).toString(), u"codec"_s);
+            QCOMPARE(reply.value(u"selected"_s).toString(), u"hevc"_s);
+            QCOMPARE(reply.value(u"backend"_s).toString(), u"hardware"_s);
+            auto *stream = t.m_connection->videoStream();
+            QCOMPARE(stream->codecForSessions(), VideoCodec::Hevc);
+            auto sent = configs(worker);
+            QVERIFY(!sent.isEmpty());
+            QCOMPARE(sent.last().generation, t.m_controlGeneration);
+            QCOMPARE(sent.last().codec, VideoCodec::Hevc);
+            QVERIFY(sent.last().settings && sent.last().settings->hardware);
+
+            // The worker's own probe has no HEVC encoder (another render node): AVC at once.
+            ConsoleWorkerWire::EncoderCaps caps;
+            caps.encoders.avc = {true, true, true};
+            worker.write(ConsoleWorkerWire::frame(caps));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_VERIFY(endpoint.encoderCaps().has_value());
+            QTRY_COMPARE(stream->codecForSessions(), VideoCodec::Avc420);
+            sent = configs(worker);
+            QVERIFY(!sent.isEmpty());
+            QCOMPARE(sent.last().codec, VideoCodec::Avc420);
+
+            // Encoder events and the CPU time come back through the endpoint.
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderLoad{987654321}));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(endpoint.workerCpuNs(), qint64(987654321));
+            QSignalSpy backend(&t.m_session, &AbstractSession::encoderBackendReported);
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderReport{ConsoleWorkerWire::EncoderReport::Event::Backend, VideoCodec::Avc420, false}));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(backend.size(), 1);
+            QCOMPARE(backend.first().at(1).toBool(), false);
+
+            // Detached: the bridge stops steering (the worker resets with the control change).
+            t.revoke();
+            QVERIFY(!t.m_codec->bound());
+        });
+    }
+
+    // AUD-FIX7: forced software selection: only software HEVC, SoftwareEncoding=prefer. The
+    // worker gets the software backend and the 30 fps cap of software HEVC/AV1; under `auto`
+    // on a normal link the same host answers AVC and says why.
+    void codecPolicyForcedSoftwareSelection()
+    {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            VideoCodecHost host;
+            host.probe.encoders.avc = {false, true, true};
+            host.probe.encoders.hevc = {false, true, true};
+            host.mode = CodecPolicy::SoftwareEncoding::Auto;
+            t.setVideoCodecHost(host);
+            auto reply = t.request(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, 1}, {u"codecs"_s, QJsonArray{u"hevc"_s}}}, 1000);
+            QCOMPARE(reply.value(u"selected"_s).toString(), u"avc"_s);
+            QCOMPARE(reply.value(u"backend"_s).toString(), u"software"_s);
+            QVERIFY2(reply.value(u"reason"_s).toString().contains(u"software not selected"_s), qPrintable(reply.value(u"reason"_s).toString()));
+
+            host.mode = CodecPolicy::SoftwareEncoding::Prefer;
+            t.setVideoCodecHost(host);
+            workerRecords(worker);
+            reply = t.request(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, 1}, {u"codecs"_s, QJsonArray{u"hevc"_s}}, {u"adaptive"_s, false}}, 1000);
+            QCOMPARE(reply.value(u"selected"_s).toString(), u"hevc"_s);
+            QCOMPARE(reply.value(u"backend"_s).toString(), u"software"_s);
+            std::optional<ConsoleWorkerWire::EncoderConfig> last;
+            for (int i = 0; i < 5; ++i) {
+                for (const auto &record : workerRecords(worker)) {
+                    if (const auto config = ConsoleWorkerWire::encoderConfig(record)) last = *config;
+                }
+            }
+            QVERIFY(last);
+            QCOMPARE(last->codec, VideoCodec::Hevc);
+            QVERIFY(last->settings && !last->settings->hardware);
+            QCOMPARE(last->settings->maxFrameRate, CodecPolicy::SoftwarePrivateMaxFrameRate);
+            QCOMPARE(last->frameRate, quint32(CodecPolicy::SoftwarePrivateMaxFrameRate));
+
+            // Not an array, or not hevc/av1: invalid, nothing changes.
+            QCOMPARE(t.request(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, 1}, {u"codecs"_s, u"hevc"_s}}, 1000).value(u"code"_s).toString(), u"invalid"_s);
+            QCOMPARE(t.request(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, 1}, {u"codecs"_s, QJsonArray{u"vp9"_s}}}, 1000).value(u"code"_s).toString(), u"invalid"_s);
+            QCOMPARE(t.m_connection->videoStream()->codecForSessions(), VideoCodec::Hevc);
+        });
+    }
 };
 }
 QTEST_GUILESS_MAIN(KRdp::VirtualSessionTransportTest)

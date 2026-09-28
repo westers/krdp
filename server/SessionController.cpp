@@ -46,6 +46,7 @@
 #include "RemoteMonitorGeometry.h"
 #include "TakeoverDetector.h"
 #include "VideoStream.h"
+#include "CodecRequest.h"
 
 using namespace Qt::StringLiterals;
 
@@ -2508,47 +2509,16 @@ void SessionController::onControlRecord(SessionWrapper *wrapper, const QJsonObje
 
 void SessionController::onControlCodec(SessionWrapper *wrapper, const QJsonObject &record)
 {
-    auto *connection = wrapper->connection.data();
-    const QJsonArray codecs = record.value(QLatin1String("codecs")).toArray();
-    const bool adaptive = record.value(QLatin1String("adaptive")).toBool(true);
-    // `codecs` lists the private codecs the client decodes (an empty list: AVC only). The
-    // server picks among them and AVC by its SoftwareEncoding policy and the encoders this
-    // host really has (AUD-FIX2 F1): Sol's KPipeWire has no HEVC encoder, and a HEVC answer
-    // there labelled H.264 bytes 0x8001. `adaptive: false` pins the first choice.
-    QVector<KRdp::VideoCodec> requested;
-    QStringList requestedNames;
-    for (const QJsonValue &value : codecs) {
-        if (!value.isString()) {
-            replyTo(wrapper, KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array of hevc and/or av1"_s}));
-            return;
-        }
-        const QString name = value.toString().trimmed().toLower();
-        if (name == QLatin1String("hevc")) {
-            requested.append(KRdp::VideoCodec::Hevc);
-        } else if (name == QLatin1String("av1")) {
-            requested.append(KRdp::VideoCodec::Av1);
-        } else {
-            replyTo(wrapper, KRdp::LayoutControl::errorRecord({u"invalid"_s, u"codec codecs must be an array of hevc and/or av1"_s}));
-            return;
-        }
-        requestedNames.append(name);
+    // `codecs` lists the private codecs the client decodes (an empty list: AVC only); the
+    // shared handler (CodecRequest, also used by the console and virtual brokers) applies it.
+    const auto request = KRdp::CodecRequest::parse(record);
+    if (!request) {
+        replyTo(wrapper, KRdp::CodecRequest::invalidRecord());
+        return;
     }
-    const auto decision = connection->videoStream()->setPrivateCodecPolicy(requested, adaptive);
-    const QString selected = QString::fromLatin1(KRdp::CodecPolicy::familyName(decision.choice.family));
-    QString reason = decision.reason;
-    if (decision.choice.family == KRdp::CodecPolicy::Family::Avc && !requested.isEmpty()) {
-        // AUD-FIX4 D5: say why, accurately: no encoder at all, or software ones the policy did
-        // not pick (a normal link under SoftwareEncoding=auto).
-        QList<KRdp::CodecPolicy::Family> families;
-        for (const auto codec : std::as_const(requested)) {
-            families.append(codec == KRdp::VideoCodec::Hevc ? KRdp::CodecPolicy::Family::Hevc : KRdp::CodecPolicy::Family::Av1);
-        }
-        reason = KRdp::CodecPolicy::avcChoiceReason(connection->videoStream()->encoderPolicy(), connection->videoStream()->softwareEncoding(), adaptive, families);
-    }
-    replyTo(wrapper, KRdp::LayoutControl::codecRecord(selected, decision.choice.hardware, reason));
-    qInfo().noquote() << u"KRDPCTL: codec asked [%1], selected %2 (%3)%4"_s.arg(requestedNames.join(u','), selected,
-                                                                            decision.choice.hardware ? u"hardware"_s : u"software"_s,
-                                                                            reason.isEmpty() ? QString() : u": "_s + reason);
+    QString log;
+    replyTo(wrapper, KRdp::CodecRequest::apply(*wrapper->connection->videoStream(), *request, &log));
+    qInfo().noquote() << log;
 }
 
 void SessionController::onControlDevice(SessionWrapper *wrapper, const QJsonObject &record)

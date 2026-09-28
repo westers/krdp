@@ -37,6 +37,8 @@ public:
     bool enableIndependentCreates(VirtualSessionJournal &journal, StartService start = {}, AdmitCreate admission = {});
     /** AUD-D4: VirtualStockClientPolicy for an authenticated uid (default: the user's own krdpserverrc). */
     void setStockClientPolicy(VirtualSessionTransport::StockPolicy policy) { m_stockPolicy = std::move(policy); }
+    /** AUD-FIX7: the codec policy every new connection offers (unset: AVC only). */
+    void setVideoCodecHost(const VideoCodecHost &host) { m_videoHost = host; }
 
 private:
     friend class VirtualSessionHostControllerTest;
@@ -73,6 +75,7 @@ private:
 
     Prepare m_prepare;
     VirtualSessionTransport::StockPolicy m_stockPolicy = VirtualStockClient::readUserPolicy;
+    std::optional<VideoCodecHost> m_videoHost;
     std::map<QString, std::unique_ptr<Worker>> m_workers;
     quint64 m_sequence = 0;
     quint64 m_nextClient = 0;

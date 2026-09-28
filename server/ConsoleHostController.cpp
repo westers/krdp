@@ -703,10 +703,11 @@ void ConsoleHostController::setWorkerActive(bool active)
 
 void ConsoleHostController::addClient(RdpConnection *connection)
 {
-    // The initial cross-session worker owns a single AVC 4:2:0 encoder. Do
-    // not let a capable own client negotiate AVC444/private codecs until the
-    // broker can renegotiate and restart that worker atomically.
+    // The cross-session worker's H.264 encoder is 4:2:0: no AVC444. Private codecs (HEVC/AV1)
+    // go through the codec policy (AUD-FIX7, syncCodecPolicy()): the worker restarts its encoder
+    // for them, and only while the controlling client is the only one watching.
     connection->videoStream()->setCodecPreference(CodecPreference::Avc420);
+    if (m_videoHost) connection->videoStream()->setEncoderPolicy(m_videoHost->probe.encoders, m_videoHost->mode);
     connection->videoStream()->setQualityCap(80);
     // Preserve the console's fixed baseline unless audio priority explicitly
     // enables congestion steering for its controlling connection.
@@ -723,6 +724,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
         }
     });
     client->session->setWorkerActive(m_inputEnabled);
+    client->codec = std::make_unique<WorkerCodecBridge>(connection->videoStream(), client->session.get());
     client->connections.append(connect(connection->videoStream(), &VideoStream::requestedQualityChanged,
                                        this, [this, id](quint8 quality) {
         for (const auto &entry : m_clients) {
@@ -793,6 +795,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
             }
             m_control.admit(id);
             syncControlState();
+            syncCodecPolicy();
             sendLayouts();
             // Frames were withheld until now; start this client on a key frame.
             m_endpoint.requestKeyFrame();
@@ -843,13 +846,50 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         // `device` record, or any other record this host knows (not
         // audio-priority, which never closes krdpserver's gate either).
         static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s,
-                                         u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s};
+                                         u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s};
         for (const auto &client : m_clients) {
             if (client->id != id) continue;
             if (type == u"device"_s) client->deviceRecordSeen = true;
             if (known.contains(type)) client->spokeKrdpctl = true;
             break;
         }
+    }
+    if (type == u"codec"_s) {
+        // AUD-FIX7: the connection's codec preference (CodecRequest, as krdpserver). It runs
+        // while this client controls the console alone (syncCodecPolicy()); otherwise the answer
+        // is AVC and a `codec` push follows when that changes.
+        const auto parsed = CodecRequest::parse(record);
+        if (!parsed) {
+            replyTo(connection, CodecRequest::invalidRecord());
+            return;
+        }
+        auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &entry) { return entry->id == id; });
+        if (found == m_clients.end()) return;
+        auto &client = **found;
+        if (!m_videoHost) {
+            replyTo(connection, LayoutControl::codecRecord(u"avc"_s, std::nullopt, u"this console streams AVC only"_s));
+            return;
+        }
+        client.codecRequest = *parsed;
+        client.codecApplied = false;
+        int admitted = 0;
+        for (const auto &entry : m_clients) {
+            if (entry->connection && m_control.admitted(entry->id)) ++admitted;
+        }
+        auto *stream = connection->videoStream();
+        if (m_control.ownsControl(id) && admitted == 1 && m_control.admitted(id)) {
+            QString log;
+            replyTo(connection, CodecRequest::apply(*stream, *parsed, &log));
+            client.codecApplied = true;
+            qInfo().noquote() << "Console client" << id << log;
+            return;
+        }
+        // Not (yet) alone in control: AVC now; the policy starts when it is (a push).
+        stream->setPrivateCodecPolicy({}, parsed->adaptive);
+        replyTo(connection, LayoutControl::codecRecord(u"avc"_s, stream->encoderPolicy().avc.hardware,
+            m_control.admitted(id) ? u"another client is watching this console: AVC for everyone"_s
+                                   : u"the console codec is chosen once this client controls it alone"_s));
+        return;
     }
     if (type == u"topology-preview"_s) {
         const auto parsed = RemoteTopologyProtocol::previewRequest(record);
@@ -1398,6 +1438,7 @@ void ConsoleHostController::removeClient(RdpConnection *connection, ConsoleContr
         m_control.remove(client->id);
     }
     syncControlState();
+    syncCodecPolicy();
     updateMedia();
     sendLayouts();
 }
@@ -1446,6 +1487,7 @@ void ConsoleHostController::sendCapabilities(Client &client)
     capabilities.topologyPreview = m_experimentalPhysicalTopology || m_experimentalConsoleVirtual;
     capabilities.topologyApply = capabilities.topologyPreview;
     capabilities.devices = ConsoleDeviceCapabilities;
+    if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, m_videoHost->mode);
     client.connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
 
@@ -1510,6 +1552,40 @@ void ConsoleHostController::syncControlState()
             client->connection->clearAudioPriorityOverride();
             client->connection->setAudioPriorityDefault(m_audioPriorityDefault && m_control.ownsControl(client->id));
             client->videoQuality = 80;
+        }
+        // AUD-FIX7: the new controller's codec bridge steers the worker under the new generation.
+        for (const auto &client : m_clients) {
+            if (!client->codec) continue;
+            if (m_workerOwner && m_control.ownsControl(client->id)) client->codec->bind(&m_endpoint, m_controlGeneration);
+            else client->codec->unbind();
+        }
+    }
+}
+
+void ConsoleHostController::syncCodecPolicy()
+{
+    int admitted = 0;
+    for (const auto &client : m_clients) {
+        if (client->connection && m_control.admitted(client->id)) ++admitted;
+    }
+    for (const auto &client : m_clients) {
+        if (!client->connection || !client->codec) continue;
+        const bool owner = m_control.ownsControl(client->id);
+        const bool eligible = m_videoHost && client->codecRequest && owner && admitted == 1 && m_control.admitted(client->id);
+        auto *stream = client->connection->videoStream();
+        if (eligible && !client->codecApplied) {
+            QString log;
+            const auto record = CodecRequest::apply(*stream, *client->codecRequest, &log);
+            client->codecApplied = true;
+            qInfo().noquote() << "Console client" << client->id << log;
+            sendRecord(client->connection, record); // unsolicited: it is alone and in control now
+        } else if (!eligible && client->codecApplied) {
+            client->codecApplied = false;
+            stream->setPrivateCodecPolicy({}, client->codecRequest ? client->codecRequest->adaptive : true);
+            const QString reason = owner ? u"another client is watching this console: AVC for everyone"_s
+                                         : u"only the controlling client chooses the console's codec"_s;
+            qInfo().noquote() << "Console client" << client->id << "back to AVC:" << reason;
+            sendRecord(client->connection, LayoutControl::codecRecord(u"avc"_s, stream->encoderPolicy().avc.hardware, reason));
         }
     }
 }

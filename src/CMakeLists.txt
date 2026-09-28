@@ -51,6 +51,8 @@ target_sources(KRdp PRIVATE
     Cursor.h
     NetworkDetection.cpp
     NetworkDetection.h
+    CodecRequest.cpp
+    CodecRequest.h
     EncoderSupport.cpp
     EncoderSupport.h
     EncoderSelection.h

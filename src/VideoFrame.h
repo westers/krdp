@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <memory>
+#include <optional>
 
 #include <QByteArray>
 #include <QRegion>
@@ -13,10 +14,10 @@
 #include <QVector>
 
 #include "SurfaceLayout.h"
+#include "VideoCodec.h"
 
 namespace KRdp
 {
-
 /**
  * A frame of compressed video data.
  *
@@ -58,6 +59,14 @@ struct VideoFrame {
      * Index of the surface this frame belongs to (0 unless MonitorMode=multi).
      */
     int monitorIndex = 0;
+    /**
+     * The codec of the encoder that produced \a data (AUD-FIX7): an AVC variant, Hevc or Av1.
+     * nullopt = unknown (the session did not say). VideoStream::queueFrame() drops a frame whose
+     * codec family is not the one the connection currently sends, so bytes of one codec never
+     * go out under another codec's RDPGFX id around a codec switch - which matters most when the
+     * encoder runs in another process (the console/virtual worker).
+     */
+    std::optional<VideoCodec> codec;
     /**
      * When was this frame presented.
      */

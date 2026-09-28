@@ -10,6 +10,7 @@
 #include <QDeadlineTimer>
 #include <QFile>
 #include <QHostAddress>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
@@ -57,6 +58,8 @@ class KrdpctlV2LoopbackTest : public QObject
     std::function<void(RdpConnection *)> m_onAuthenticated;
     /** Every MS-RDPEDISP layout the server received. */
     QList<QList<VideoMonitor>> m_displayLayouts;
+    /** AUD-FIX7: the codec policy the transports offer (unset: AVC only, no `video`). */
+    std::optional<VideoCodecHost> m_videoHost;
 
     std::unique_ptr<Server> startServer(Seen &seen)
     {
@@ -70,6 +73,7 @@ class KrdpctlV2LoopbackTest : public QObject
             ++seen.connections;
             // The broker's own transport: it sends `capabilities` and answers every record.
             m_transports.push_back(std::make_unique<VirtualSessionTransport>(++m_nextClient, connection, *m_control, VirtualSessionTransport::Resolve{}, m_sequence));
+            if (m_videoHost) m_transports.back()->setVideoCodecHost(*m_videoHost);
             QPointer<RdpConnection> guard(connection);
             connect(connection, &RdpConnection::clientDisplayInfoReceived, this, [this, &seen, guard] {
                 if (!guard) return;
@@ -148,6 +152,7 @@ private Q_SLOTS:
         m_transports.clear();
         m_onAuthenticated = {};
         m_displayLayouts.clear();
+        m_videoHost.reset();
     }
 
     void capabilitiesFirstThenRepliesEchoRequestIds()
@@ -186,6 +191,44 @@ private Q_SLOTS:
         for (const auto &record : records)
             refused = refused || (record.value(u"message"_s) == u"invalid requestId"_s && !record.contains(u"requestId"_s));
         QVERIFY2(refused, out.constData());
+    }
+
+    // AUD-FIX7: the virtual host offers the codecs it can encode in `capabilities.video` and
+    // answers `codec` (with its requestId) from its codec policy, as krdpserver does.
+    void virtualHostOffersCodecsAndAnswersWithRequestId()
+    {
+        VideoCodecHost host;
+        host.probe.encoders.avc = {true, true, true};
+        host.probe.encoders.hevc = {true, false, false};
+        host.probe.encoders.av1 = {false, true, false};
+        m_videoHost = host;
+        Seen seen;
+        auto server = startServer(seen);
+        QVERIFY(server);
+        const QString codec = writeJson(u"codec.json"_s, {{u"type"_s, u"codec"_s}, {u"v"_s, 1}, {u"requestId"_s, u"c1"_s},
+                                                        {u"codecs"_s, QJsonArray{u"hevc"_s, u"av1"_s}}, {u"adaptive"_s, true}});
+        QByteArray out, err;
+        const int code = runProbe(server->serverPort(), Password, {u"--silent"_s, u"--raw"_s, codec, u"--timeout"_s, u"6"_s}, &out, &err);
+        QVERIFY2(code == 0, err.constData());
+        const auto records = replies(out);
+        QVERIFY2(records.size() >= 2, out.constData());
+        const auto capabilities = records.first();
+        QCOMPARE(capabilities.value(u"type"_s).toString(), u"capabilities"_s);
+        QCOMPARE(capabilities.value(u"host"_s).toString(), u"virtual"_s);
+        const auto video = capabilities.value(u"video"_s).toObject();
+        QCOMPARE(video.value(u"softwareEncoding"_s).toString(), u"auto"_s);
+        QMap<QString, QJsonObject> offers;
+        for (const auto &entry : video.value(u"codecs"_s).toArray()) offers.insert(entry.toObject().value(u"name"_s).toString(), entry.toObject());
+        QCOMPARE(offers.keys(), (QStringList{u"av1"_s, u"avc420"_s, u"hevc"_s}));
+        QVERIFY(offers[u"hevc"_s].value(u"hw"_s).toBool() && !offers[u"hevc"_s].value(u"sw"_s).toBool());
+        QVERIFY(!offers[u"av1"_s].value(u"hw"_s).toBool() && offers[u"av1"_s].value(u"sw"_s).toBool());
+        QJsonObject answer;
+        for (const auto &record : records)
+            if (record.value(u"requestId"_s).toString() == u"c1"_s) answer = record;
+        QCOMPARE(answer.value(u"type"_s).toString(), u"codec"_s);
+        QCOMPARE(answer.value(u"selected"_s).toString(), u"hevc"_s);
+        QCOMPARE(answer.value(u"backend"_s).toString(), u"hardware"_s);
+        QVERIFY(answer.value(u"ok"_s).toBool());
     }
 
     void clientWithoutKrdpctlGetsNoCustomData()
