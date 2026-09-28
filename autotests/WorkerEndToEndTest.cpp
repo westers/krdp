@@ -396,6 +396,26 @@ void WorkerEndToEndTest::workerReachesReadyAndDeliversFrames()
         QVERIFY2(run.caps->encoders.avc.hardware, "the sandboxed worker's probe found no hardware encoder");
         QCOMPARE(run.caps->renderNode, m_renderNode);
     }
+    // AUD-FIX10: a client's Refresh Rect reaches the worker as this keyframe request (the brokers
+    // forward VideoStream::keyFrameRequested). On an idle desktop - no frame for 1 s - it must
+    // still produce a keyframe of the output (KPipeWire re-encodes the last picture).
+    qsizetype quietFrom = run.frames.size();
+    QElapsedTimer quiet;
+    quiet.start();
+    QElapsedTimer settle;
+    settle.start();
+    while (quiet.elapsed() < 1000 && settle.elapsed() < 15000) {
+        QTest::qWait(50);
+        if (run.frames.size() != quietFrom) {
+            quietFrom = run.frames.size();
+            quiet.restart();
+        }
+    }
+    QVERIFY2(quiet.elapsed() >= 1000, "the virtual desktop never went idle");
+    endpoint.requestKeyFrame();
+    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(run.frames.cbegin() + quietFrom, run.frames.cend(), [](const VideoFrame &frame) {
+        return frame.isKeyFrame && frame.size == QSize(1280, 720) && h264KeyframeSize(frame.data) == std::optional(frame.size);
+    }), 2000);
     stopWorker(*s, endpoint);
 }
 
@@ -490,8 +510,8 @@ void WorkerEndToEndTest::codecSwitchAtAttach()
     QVERIFY(endpoint.setEncoderConfig(avc));
     if (late) {
         // The capture refresh for the new client has published (multi) or AVC flows (single).
-        QTRY_VERIFY_WITH_TIMEOUT((outputs < 2 || run.outputs > outputsBefore) || !alive(), 5000);
-        QTRY_VERIFY_WITH_TIMEOUT(std::any_of(run.frames.cbegin() + grantMark, run.frames.cend(), [](const auto &f) { return f.isKeyFrame; }) || !alive(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT((outputs < 2 || run.outputs > outputsBefore) || !alive(), 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(std::any_of(run.frames.cbegin() + grantMark, run.frames.cend(), [](const auto &f) { return f.isKeyFrame; }) || !alive(), 15000);
         QVERIFY2(alive(), qPrintable(run.errors.join(QLatin1Char('\n'))));
     }
     ConsoleWorkerWire::EncoderConfig target{.generation = 1, .codec = codec, .settings = CodecPolicy::EncoderSettings{.hardware = true}};

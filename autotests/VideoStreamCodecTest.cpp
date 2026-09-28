@@ -57,6 +57,26 @@ class VideoStreamCodecTest : public QObject
     };
 
 private Q_SLOTS:
+    // AUD-FIX10: a Refresh Rect asks every surface for a keyframe, at most once per second per
+    // client, and nothing while the client has suppressed output.
+    void refreshRequestsKeyFramesRateLimited()
+    {
+        Fixture f;
+        QSignalSpy requested(f.stream(), &VideoStream::keyFrameRequested);
+        f.stream()->setEnabled(false);
+        QVERIFY(!f.stream()->requestRefresh());
+        QCOMPARE(requested.count(), 0);
+        f.stream()->setEnabled(true);
+        QVERIFY(f.stream()->requestRefresh());
+        QCOMPARE(requested.count(), 1);
+        QCOMPARE(requested.first().first().toInt(), 0);
+        QVERIFY(!f.stream()->requestRefresh());
+        QCOMPARE(requested.count(), 1);
+        QTest::qWait(int(VideoStream::RefreshMinInterval.count()) + 50);
+        QVERIFY(f.stream()->requestRefresh());
+        QCOMPARE(requested.count(), 2);
+    }
+
     // Sol: the client asks for HEVC+AV1, the host has neither: AVC, and nothing says 0x8001.
     void noEncoderMeansAvc()
     {

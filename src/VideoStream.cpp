@@ -337,6 +337,8 @@ public:
     // (e.g. repeated caps re-advertisement) does not restart the encoder more
     // than once per KeyFrameRequestMinInterval. One timestamp per surface.
     QVector<clk::steady_clock::time_point> lastKeyFrameRequest;
+    // AUD-FIX10: the last Refresh Rect that asked for keyframes (steady_clock ticks; 0 = never).
+    std::atomic<clk::steady_clock::rep> lastRefresh = 0;
     // Latches so a frame for a surface that does not exist, a frame whose size
     // does not match its surface, a failed CreateSurface or a session reporting
     // a broken layout is reported once and not once per frame. The first three
@@ -752,6 +754,28 @@ void VideoStream::reset()
 bool VideoStream::enabled() const
 {
     return d->enabled;
+}
+
+bool VideoStream::requestRefresh()
+{
+    if (!d->enabled) {
+        return false;
+    }
+    const auto now = clk::steady_clock::now().time_since_epoch().count();
+    auto last = d->lastRefresh.load();
+    do {
+        if (last != 0 && clk::steady_clock::duration(now - last) < RefreshMinInterval) {
+            qCDebug(KRDP) << "Refresh Rect within" << RefreshMinInterval.count() << "ms of the last one; ignored";
+            return false;
+        }
+    } while (!d->lastRefresh.compare_exchange_weak(last, now));
+    const int surfaces = std::max(1, d->surfaceCount.load());
+    qCInfo(KRDP) << "Client asked for a refresh; requesting a keyframe for" << surfaces << "surface(s)";
+    d->statKeyFrameRequests.fetch_add(1, std::memory_order_relaxed);
+    for (int monitor = 0; monitor < surfaces; ++monitor) {
+        Q_EMIT keyFrameRequested(monitor);
+    }
+    return true;
 }
 
 void VideoStream::setEnabled(bool enabled)

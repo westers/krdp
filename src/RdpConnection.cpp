@@ -681,6 +681,17 @@ BOOL suppressOutput(rdpContext *context, uint8_t allow, const RECTANGLE_16 *)
     return FALSE;
 }
 
+// AUD-FIX10: FreeRDP_RefreshRect is advertised; a Refresh Rect PDU asks for a repaint. The
+// encoded stream has no partial repaint, so every surface gets a keyframe (rate-limited).
+BOOL refreshRect(rdpContext *context, BYTE count, const RECTANGLE_16 *)
+{
+    auto peerContext = reinterpret_cast<PeerContext *>(context);
+    if (peerContext && peerContext->connection) {
+        peerContext->connection->onRefreshRect(count);
+    }
+    return TRUE;
+}
+
 class KRDP_NO_EXPORT RdpConnection::Private
 {
 public:
@@ -1418,6 +1429,7 @@ void RdpConnection::initialize()
     d->peer->PostConnect = peerPostConnect;
 
     d->peer->context->update->SuppressOutput = suppressOutput;
+    d->peer->context->update->RefreshRect = refreshRect;
 
     // AUD-S1: every static (and so every dynamic) channel PDU goes through the
     // gate; the channel manager installed its hook in newPeerContext().
@@ -2152,6 +2164,12 @@ bool RdpConnection::onSuppressOutput(uint8_t allow)
     }
 
     return true;
+}
+
+void RdpConnection::onRefreshRect(int areas)
+{
+    qCDebug(KRDP) << "Refresh Rect for" << areas << "area(s)";
+    d->videoStream->requestRefresh();
 }
 
 freerdp_peer *RdpConnection::rdpPeer() const

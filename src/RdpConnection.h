@@ -275,6 +275,7 @@ private:
     friend BOOL peerActivate(freerdp_peer *);
     friend BOOL peerPostConnect(freerdp_peer *);
     friend BOOL suppressOutput(rdpContext *, uint8_t, const RECTANGLE_16 *);
+    friend BOOL refreshRect(rdpContext *, BYTE, const RECTANGLE_16 *);
 
     friend class Cursor;
     friend class VideoStream;
@@ -295,6 +296,7 @@ private:
     /** Session thread, from onPostConnect(): open the pre-authentication gate. */
     void onAuthenticated();
     bool onSuppressOutput(uint8_t allow);
+    void onRefreshRect(int areas);
     /** Session thread: bring each device's channels in line with its consent. False only on a fatal error. */
     bool reconcileDevices();
     bool reconcilePlayback();

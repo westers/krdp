@@ -60,6 +60,11 @@
  *                               the 16-byte marker "KRDPSEQ:" + a little-endian uint64 (the
  *                               in-flight window loopback test feeds such frames). Frame
  *                               acknowledgements are sent as usual.
+ *            --refresh-rect-idle MS  with --gfx: once frames arrived and none has for MS, send
+ *                               RDP Refresh Rect PDUs for the whole desktop, once, and log
+ *                               `refresh rect sent (N)` (what krdp-client 0.5.5 does when a
+ *                               private codec shows nothing on an idle desktop; AUD-FIX10)
+ *            --refresh-rect-count N  that many Refresh Rect PDUs back to back (default 1)
  *            --gfx-ack-delay MS with --gfx: acknowledge every frame MS after its EndFrame
  *                               instead of at once, each on its own clock (pipelined, like a
  *                               client whose decode and present take that long; AUD-FIX7 F2).
@@ -193,6 +198,12 @@ struct Probe {
     bool gfxCountOnly = false;
     /** --gfx-ack-delay: acknowledge each frame this long after its EndFrame (0: FreeRDP acks at once). */
     int gfxAckDelayMs = 0;
+    /** --refresh-rect-idle / --refresh-rect-count (0: never). */
+    int refreshRectIdleMs = 0;
+    int refreshRectCount = 1;
+    /** Surface commands seen (any surface), and when the last one arrived (ms since epoch). */
+    std::atomic<quint64> gfxFrames = 0;
+    std::atomic<qint64> lastGfxFrameAt = 0;
     /** --clipboard MODE (empty: no cliprdr). */
     QByteArray clipboardMode;
     /** --clipboard stall: a data request arrived; the main loop stops reading. */
@@ -561,6 +572,8 @@ UINT probeSurfaceCommand(RdpgfxClientContext *gfx, const RDPGFX_SURFACE_COMMAND 
 {
     if (auto *probe = g_gfxProbe) {
         const unsigned count = ++probe->framesPerSurface[cmd->surfaceId];
+        ++probe->gfxFrames;
+        probe->lastGfxFrameAt = QDateTime::currentMSecsSinceEpoch();
         if (count == 1) {
             logf("first frame on surface %u (codec %u, %ux%u)", cmd->surfaceId, cmd->codecId, cmd->width, cmd->height);
         }
@@ -1094,7 +1107,7 @@ int usage()
 {
     std::fprintf(stderr,
                  "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
-                 "[--gfx [--gfx-count] [--gfx-ack-delay MS]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall|refuse-then-stall] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
+                 "[--gfx [--gfx-count] [--gfx-ack-delay MS] [--refresh-rect-idle MS [--refresh-rect-count N]]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall|refuse-then-stall] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
     return 2;
 }
 
@@ -1183,6 +1196,10 @@ int main(int argc, char **argv)
             probe.gfx = true;
         } else if (arg == QLatin1String("--gfx-count")) {
             probe.gfxCountOnly = true;
+        } else if (arg == QLatin1String("--refresh-rect-idle") && i + 1 < argc) {
+            probe.refreshRectIdleMs = QString::fromLocal8Bit(argv[++i]).toInt();
+        } else if (arg == QLatin1String("--refresh-rect-count") && i + 1 < argc) {
+            probe.refreshRectCount = std::max(1, QString::fromLocal8Bit(argv[++i]).toInt());
         } else if (arg == QLatin1String("--gfx-ack-delay") && i + 1 < argc) {
             probe.gfxAckDelayMs = QString::fromLocal8Bit(argv[++i]).toInt();
             if (probe.gfxAckDelayMs <= 0 || probe.gfxAckDelayMs > 10000) {
@@ -1347,6 +1364,19 @@ int main(int argc, char **argv)
             // --clipboard refuse-then-stall: a real copy on the client.
             probe.clipboardCopyAt = 0;
             probeClipboardAnnounce(probe.cliprdr, "copied");
+        }
+        if (const qint64 last = probe.lastGfxFrameAt.load(); probe.refreshRectIdleMs > 0 && probe.gfxFrames.load() > 0
+            && QDateTime::currentMSecsSinceEpoch() - last >= probe.refreshRectIdleMs) {
+            // --refresh-rect-idle: the desktop went quiet; ask the server to repaint it (once).
+            probe.refreshRectIdleMs = 0;
+            const RECTANGLE_16 area{0, 0, UINT16(freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopWidth) - 1),
+                                    UINT16(freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopHeight) - 1)};
+            int sent = 0;
+            for (int i = 0; i < probe.refreshRectCount; ++i) {
+                if (context->update && context->update->RefreshRect && context->update->RefreshRect(context, 1, &area)) ++sent;
+            }
+            logf("refresh rect sent (%d) after %lld ms without a frame, %llu frames so far", sent,
+                 static_cast<long long>(QDateTime::currentMSecsSinceEpoch() - last), static_cast<unsigned long long>(probe.gfxFrames.load()));
         }
         if (probe.clipboardStalled) {
             // --clipboard stall: the client reads nothing more from the server.

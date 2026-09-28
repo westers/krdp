@@ -116,6 +116,16 @@ public:
     Q_SIGNAL void keyFrameRequested(int monitorIndex);
 
     /**
+     * AUD-FIX10: the client asked for a repaint (RDP Refresh Rect, [MS-RDPBCGR] 2.2.11.2), e.g.
+     * krdp-client 0.5.5 when a private-codec decoder has seen no frame on an idle desktop. Every
+     * surface's session is asked for a keyframe (keyFrameRequested) at most once per
+     * RefreshMinInterval per client; while output is suppressed nothing is asked (allowing it
+     * asks anyway). Returns whether keyframes were requested. Any thread.
+     */
+    bool requestRefresh();
+    static constexpr std::chrono::milliseconds RefreshMinInterval{1000};
+
+    /**
      * A ResetGraphics (with its surfaces) has just gone out for \a monitors,
      * in RDP desktop space. Emitted from the frame submission thread;
      * connect with Qt::QueuedConnection. What a `KRDPCTL` `layout` record

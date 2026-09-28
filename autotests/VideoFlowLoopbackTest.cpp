@@ -13,6 +13,8 @@
 // AUD-FIX6 F2: and a 1 MB (4K) keyframe on a throttled link does not turn into a keyframe loop.
 // AUD-FIX7 F2: and a client that is slow to acknowledge (285 ms) on a fat link gets the full rate
 // without rekeys.
+// AUD-FIX10: and a Refresh Rect from the client on an idle stream asks the encoder for a keyframe
+// (at most one per second, however many PDUs), which then reaches the client.
 
 #include <QDeadlineTimer>
 #include <QElapsedTimer>
@@ -379,6 +381,128 @@ private Q_SLOTS:
     // requested once a second: the client got one keyframe a second and nothing else (Sol's
     // console host, 265 KB keyframes, 2026-09-28). Now the P-frames wait for its ack, and
     // once the link carries them the client gets the full frame rate, with at most one rekey.
+    // AUD-FIX10: FreeRDP_RefreshRect was advertised but never handled. krdp-client 0.5.5 sends a
+    // Refresh Rect when its private codec shows nothing on an idle desktop; stock clients send one
+    // after minimising or on a repaint. It must reach the encoder as a keyframe request.
+    void refreshRectOnAnIdleStreamGetsAKeyframe()
+    {
+        Server server;
+        server.setAddress(QHostAddress::LocalHost);
+        server.setPort(0);
+        server.setTlsCertificate(m_certificate.toStdString());
+        server.setTlsCertificateKey(m_key.toStdString());
+        server.setUsers({{TestUser, Password}});
+
+        QPointer<RdpConnection> connection;
+        quint64 seq = 0;
+        QVector<quint64> keyFrameSeqs;
+        const auto feed = [&](bool keyFrame) {
+            if (!connection || connection->state() != RdpConnection::State::Streaming || !connection->videoStream()->enabled()) {
+                return;
+            }
+            VideoFrame frame;
+            frame.size = QSize(640, 480);
+            frame.isKeyFrame = keyFrame;
+            frame.data = frameData(++seq, keyFrame ? 48000 : 12000);
+            frame.presentationTimeStamp = std::chrono::system_clock::now();
+            connection->videoStream()->queueFrame(frame);
+            if (keyFrame) keyFrameSeqs.append(seq);
+        };
+        int keyFramesRequested = 0;
+        bool idle = false;
+        connect(&server, &Server::newConnectionCreated, this, [&](RdpConnection *c) {
+            connection = c;
+            c->videoStream()->setCodecPreference(CodecPreference::Avc420);
+            // The encoder's answer to a request: an IDR of the newest picture, even when idle.
+            connect(c->videoStream(), &VideoStream::keyFrameRequested, c, [&](int) {
+                ++keyFramesRequested;
+                feed(true);
+            }, Qt::QueuedConnection);
+        });
+        QVERIFY(server.start());
+
+        // 20 frames (a keyframe first), then nothing: an idle desktop.
+        QTimer feeder;
+        feeder.setInterval(33);
+        connect(&feeder, &QTimer::timeout, this, [&] {
+            if (seq >= 20) {
+                idle = true;
+                feeder.stop();
+                return;
+            }
+            feed(seq == 0);
+        });
+        feeder.start();
+
+        QProcess probe;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), m_dir.path());
+        environment.insert(QStringLiteral("HOME"), m_dir.path());
+        probe.setProcessEnvironment(environment);
+        // Three Refresh Rect PDUs at once after 1.5 s without a frame: one keyframe request.
+        probe.start(QStringLiteral(KRDPCTL_PROBE),
+                    {QStringLiteral("127.0.0.1"), QString::number(server.serverPort()), TestUser, QStringLiteral("-"), QStringLiteral("--silent"),
+                     QStringLiteral("--no-krdpctl"), QStringLiteral("--gfx"), QStringLiteral("--gfx-count"), QStringLiteral("--refresh-rect-idle"),
+                     QStringLiteral("1500"), QStringLiteral("--refresh-rect-count"), QStringLiteral("3"), QStringLiteral("--timeout"), QStringLiteral("60")});
+        QVERIFY(probe.waitForStarted(5000));
+        probe.write(Password.toUtf8() + '\n');
+        probe.closeWriteChannel();
+        const auto cleanup = qScopeGuard([&probe] {
+            if (probe.state() != QProcess::NotRunning) {
+                probe.terminate();
+                if (!probe.waitForFinished(5000)) {
+                    probe.kill();
+                    probe.waitForFinished(5000);
+                }
+            }
+        });
+        QByteArray log;
+        QVector<quint64> seen;
+        const auto readProbe = [&] {
+            const QByteArray more = probe.readAllStandardError();
+            log += more;
+            for (const QByteArray &line : more.split('\n')) {
+                const int at = line.indexOf("frame seq ");
+                if (at >= 0) seen.append(line.mid(at + 10).split(' ').value(0).toULongLong());
+            }
+        };
+        QDeadlineTimer connectDeadline(30s);
+        while ((!idle || seen.size() < 20) && !connectDeadline.hasExpired() && probe.state() == QProcess::Running) {
+            QTest::qWait(50);
+            readProbe();
+        }
+        if (seen.isEmpty() && log.contains("does not support H.264")) {
+            QSKIP("this libfreerdp cannot negotiate AVC420 (built WITH_GFX_H264=OFF)");
+        }
+        QVERIFY2(seen.size() >= 20, log.constData());
+        const int requestsWhenIdle = keyFramesRequested;
+        const qsizetype seenWhenIdle = seen.size();
+
+        // The probe's Refresh Rect after 1.5 s of silence: a keyframe request, and that keyframe
+        // (the only frame fed after the idle start) reaches the client.
+        QDeadlineTimer refreshDeadline(10s);
+        while (!log.contains("refresh rect sent") && !refreshDeadline.hasExpired() && probe.state() == QProcess::Running) {
+            QTest::qWait(50);
+            readProbe();
+        }
+        QVERIFY2(log.contains("refresh rect sent (3)"), log.constData());
+        QTRY_VERIFY_WITH_TIMEOUT((readProbe(), seen.size() > seenWhenIdle), 5000);
+        QCOMPARE(keyFramesRequested, requestsWhenIdle + 1);
+        QVERIFY(keyFrameSeqs.size() >= 2);
+        QCOMPARE(seen.last(), keyFrameSeqs.last());
+        QCOMPARE(seen.last(), quint64(21));
+        // Three PDUs within a second: one request, not three.
+        QTest::qWait(1200);
+        readProbe();
+        QCOMPARE(keyFramesRequested, requestsWhenIdle + 1);
+        QCOMPARE(seen.size(), seenWhenIdle + 1);
+        // After a second the next Refresh Rect is honoured again (straight on the stream).
+        QVERIFY(connection);
+        QVERIFY(connection->videoStream()->requestRefresh());
+        QTRY_COMPARE_WITH_TIMEOUT(keyFramesRequested, requestsWhenIdle + 2, 2000);
+        QVERIFY(!connection->videoStream()->requestRefresh());
+    }
+
     void hugeKeyFrameOnAThrottledLink()
     {
         Server server;
