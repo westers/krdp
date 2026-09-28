@@ -68,7 +68,15 @@
  *                               (after 3 s), `never` (no answer; the client carries on) or
  *                               `stall` (no answer, and the whole client stops reading from the
  *                               server, as wlfreerdp3 3.22 does when its synchronous read of the
- *                               local clipboard never returns: AUD-FIX5)
+ *                               local clipboard never returns: AUD-FIX5), or
+ *                               `refuse-then-stall` (wlfreerdp3 3.22 as seen live, AUD-FIX6 F1:
+ *                               the first request is refused, a real copy on the client
+ *                               follows 1 s later - `clipboard: copied` - and any later
+ *                               request stalls the client as `stall` does). In every mode a
+ *                               server format list with text is requested at once, the text is
+ *                               logged as `clipboard: server text "..."`, and then announced
+ *                               back (`clipboard: echoed`), the way Klipper re-owns what the
+ *                               client just pasted from the server.
  *            --disp WxH         also load the standard Display Control channel
  *                               (MS-RDPEDISP, over drdynvc) and, once the server's caps
  *                               arrive, ask for a one-monitor WxH desktop the way a
@@ -103,6 +111,7 @@
 
 #include <QByteArray>
 #include <QDataStream>
+#include <QDateTime>
 #include <QDeadlineTimer>
 #include <QDir>
 #include <QFile>
@@ -180,6 +189,11 @@ struct Probe {
     QByteArray clipboardMode;
     /** --clipboard stall: a data request arrived; the main loop stops reading. */
     std::atomic<bool> clipboardStalled = false;
+    /** --clipboard refuse-then-stall: data requests seen so far. */
+    std::atomic<int> clipboardRequests = 0;
+    /** --clipboard refuse-then-stall: when the main loop makes the client's "real copy" (ms since epoch, 0 = none). */
+    std::atomic<qint64> clipboardCopyAt = 0;
+    CliprdrClientContext *cliprdr = nullptr;
     /** Set before the disconnect: releases a stalled or slow clipboard handler. */
     std::atomic<bool> stopping = false;
 
@@ -507,6 +521,24 @@ void onChannelConnected(void *context, const ChannelConnectedEventArgs *e)
 
 Probe *g_clipboardProbe = nullptr;
 
+/// One format list with text, the way a client announces a copy.
+UINT probeClipboardAnnounce(CliprdrClientContext *cliprdr, const char *what)
+{
+    std::vector<CLIPRDR_FORMAT> formats;
+    for (const UINT32 id : {UINT32(CF_TEXT), UINT32(CF_OEMTEXT), UINT32(CF_UNICODETEXT)}) {
+        CLIPRDR_FORMAT format{};
+        format.formatId = id;
+        formats.push_back(format);
+    }
+    CLIPRDR_FORMAT_LIST list{};
+    list.common.msgType = CB_FORMAT_LIST;
+    list.numFormats = UINT32(formats.size());
+    list.formats = formats.data();
+    const UINT rc = cliprdr->ClientFormatList(cliprdr, &list);
+    logf("clipboard: %s", what);
+    return rc;
+}
+
 UINT probeClipboardMonitorReady(CliprdrClientContext *cliprdr, const CLIPRDR_MONITOR_READY *)
 {
     CLIPRDR_GENERAL_CAPABILITY_SET general{};
@@ -548,7 +580,20 @@ UINT probeClipboardServerFormatList(CliprdrClientContext *cliprdr, const CLIPRDR
     CLIPRDR_FORMAT_LIST_RESPONSE response{};
     response.common.msgType = CB_FORMAT_LIST_RESPONSE;
     response.common.msgFlags = CB_RESPONSE_OK;
-    return cliprdr->ClientFormatListResponse(cliprdr, &response);
+    UINT rc = cliprdr->ClientFormatListResponse(cliprdr, &response);
+    // A clipboard manager on the client reads the new selection at once.
+    bool text = false;
+    for (UINT32 i = 0; list && i < list->numFormats; ++i) {
+        text |= list->formats[i].formatId == CF_UNICODETEXT;
+    }
+    if (text) {
+        CLIPRDR_FORMAT_DATA_REQUEST request{};
+        request.common.msgType = CB_FORMAT_DATA_REQUEST;
+        request.common.dataLen = 4;
+        request.requestedFormatId = CF_UNICODETEXT;
+        rc |= cliprdr->ClientFormatDataRequest(cliprdr, &request);
+    }
+    return rc;
 }
 
 UINT probeClipboardServerFormatListResponse(CliprdrClientContext *, const CLIPRDR_FORMAT_LIST_RESPONSE *)
@@ -556,9 +601,16 @@ UINT probeClipboardServerFormatListResponse(CliprdrClientContext *, const CLIPRD
     return CHANNEL_RC_OK;
 }
 
-UINT probeClipboardServerFormatDataResponse(CliprdrClientContext *, const CLIPRDR_FORMAT_DATA_RESPONSE *)
+UINT probeClipboardServerFormatDataResponse(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_DATA_RESPONSE *response)
 {
-    return CHANNEL_RC_OK;
+    if (!response || !(response->common.msgFlags & CB_RESPONSE_OK) || !response->requestedFormatData || response->common.dataLen < 2) {
+        logf("clipboard: server refused its text");
+        return CHANNEL_RC_OK;
+    }
+    const QString text = QString::fromUtf16(reinterpret_cast<const char16_t *>(response->requestedFormatData), response->common.dataLen / 2 - 1);
+    logf("clipboard: server text \"%s\"", qPrintable(text));
+    // ... and the clipboard manager re-owns it: the client announces it back.
+    return probeClipboardAnnounce(cliprdr, "echoed");
 }
 
 UINT probeClipboardServerFormatDataRequest(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_DATA_REQUEST *request)
@@ -574,6 +626,20 @@ UINT probeClipboardServerFormatDataRequest(CliprdrClientContext *cliprdr, const 
         }
     };
     if (probe->clipboardMode == "never") {
+        return CHANNEL_RC_OK;
+    }
+    if (probe->clipboardMode == "refuse-then-stall") {
+        if (probe->clipboardRequests.fetch_add(1) == 0) {
+            CLIPRDR_FORMAT_DATA_RESPONSE refusal{};
+            refusal.common.msgType = CB_FORMAT_DATA_RESPONSE;
+            refusal.common.msgFlags = CB_RESPONSE_FAIL;
+            logf("clipboard: refused");
+            probe->clipboardCopyAt = QDateTime::currentMSecsSinceEpoch() + 1000;
+            return cliprdr->ClientFormatDataResponse(cliprdr, &refusal);
+        }
+        logf("clipboard: stalling the whole client, as a blocked local clipboard read does");
+        probe->clipboardStalled = true;
+        waitUntil(QDeadlineTimer(QDeadlineTimer::Forever));
         return CHANNEL_RC_OK;
     }
     if (probe->clipboardMode == "stall") {
@@ -602,6 +668,9 @@ void onCliprdrConnected(void *context, const ChannelConnectedEventArgs *e)
     }
     auto *cliprdr = static_cast<CliprdrClientContext *>(e->pInterface);
     g_clipboardProbe = probeOf(static_cast<rdpContext *>(context));
+    if (g_clipboardProbe) {
+        g_clipboardProbe->cliprdr = cliprdr;
+    }
     cliprdr->MonitorReady = probeClipboardMonitorReady;
     cliprdr->ServerCapabilities = probeClipboardServerCapabilities;
     cliprdr->ServerFormatList = probeClipboardServerFormatList;
@@ -921,7 +990,7 @@ int usage()
 {
     std::fprintf(stderr,
                  "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
-                 "[--gfx [--gfx-count]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
+                 "[--gfx [--gfx-count]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall|refuse-then-stall] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
     return 2;
 }
 
@@ -1025,7 +1094,8 @@ int main(int argc, char **argv)
             probe.rawGapMs = qMax(0, QString::fromLocal8Bit(argv[++i]).toInt());
         } else if (arg == QLatin1String("--clipboard") && i + 1 < argc) {
             probe.clipboardMode = QByteArray(argv[++i]);
-            if (probe.clipboardMode != "answer" && probe.clipboardMode != "slow" && probe.clipboardMode != "never" && probe.clipboardMode != "stall") {
+            if (probe.clipboardMode != "answer" && probe.clipboardMode != "slow" && probe.clipboardMode != "never" && probe.clipboardMode != "stall"
+                && probe.clipboardMode != "refuse-then-stall") {
                 return usage();
             }
         } else if (arg == QLatin1String("--no-krdpctl")) {
@@ -1163,6 +1233,11 @@ int main(int argc, char **argv)
             logf("server ended the session: %s (0x%08x)", freerdp_get_error_info_string(info), info);
             exitCode = done(&probe) ? 0 : 4;
             break;
+        }
+        if (const qint64 copyAt = probe.clipboardCopyAt.load(); copyAt > 0 && QDateTime::currentMSecsSinceEpoch() >= copyAt && probe.cliprdr) {
+            // --clipboard refuse-then-stall: a real copy on the client.
+            probe.clipboardCopyAt = 0;
+            probeClipboardAnnounce(probe.cliprdr, "copied");
         }
         if (probe.clipboardStalled) {
             // --clipboard stall: the client reads nothing more from the server.

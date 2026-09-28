@@ -61,6 +61,11 @@ public:
     static constexpr int ResponseTimeoutMs = 5000;
     /// See setGraphicsDelivered().
     static constexpr int DeliveredFallbackMs = 15000;
+    /**
+     * AUD-FIX6 F1: a client format list this soon after the server announced or served its
+     * own text is taken for that text coming back, and not requested.
+     */
+    static constexpr int EchoWindowMs = 2000;
 
 private:
     void sendServerData();

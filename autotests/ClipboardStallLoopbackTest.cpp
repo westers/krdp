@@ -17,9 +17,15 @@
 // - `never` (the request is ignored, the client carries on): frames keep coming;
 // - `answer`: the client's text still arrives, with one request for the three lists;
 // - no clipboard consumer (the console host): no request at all.
+// AUD-FIX6 F1 (wlfreerdp3 3.22 live, 2026-09-28: refuses the first request; after a real copy on
+// its side it never answers again and stops drawing):
+// - `refuse-then-stall`: one request only, whatever the client announces afterwards; its
+//   picture keeps coming and the host's clipboard still reaches it;
+// - the client announcing back the host's own text (Klipper re-owning a paste) is not requested.
 
 #include <QDeadlineTimer>
 #include <QHostAddress>
+#include <QMimeData>
 #include <QPointer>
 #include <QProcess>
 #include <QScopeGuard>
@@ -279,6 +285,80 @@ private Q_SLOTS:
         run.wait(std::chrono::milliseconds(Clipboard::FormatListSettleMs + 1500));
         QCOMPARE(run.count("clipboard: announced"), 3);
         QCOMPARE(run.count("clipboard data request"), 0);
+    }
+
+    // AUD-FIX6 F1: the stock client that refuses the first request and hangs on the next one
+    // is asked once. Its later copy is not requested, its picture keeps coming, and the host's
+    // clipboard still reaches it (and its echo of that is not requested either).
+    void refusingClientIsAskedOnlyOnce()
+    {
+        Run run;
+        QVERIFY(start(run, "refuse-then-stall", true));
+        QVERIFY2(run.waitFor(30s, [&run] {
+            return run.count("clipboard: refused") > 0 || run.probe.state() != QProcess::Running;
+        }),
+                 run.log.constData());
+        if (run.lastSeenSeq == 0 && run.log.contains("does not support H.264")) {
+            QSKIP("this libfreerdp cannot negotiate AVC420 (built WITH_GFX_H264=OFF)");
+        }
+        // The client's real copy, 1 s later, and time for the server to (not) ask for it.
+        QVERIFY2(run.waitFor(5s, [&run] {
+            return run.count("clipboard: copied") > 0;
+        }),
+                 run.log.constData());
+        run.wait(std::chrono::milliseconds(Clipboard::FormatListSettleMs + 1000));
+
+        // Host to client still works.
+        auto *data = new QMimeData;
+        data->setText(QStringLiteral("host text for the client"));
+        run.connection->clipboard()->setServerData(data);
+        QVERIFY2(run.waitFor(10s, [&run] {
+            return run.count("clipboard: server text \"host text for the client\"") > 0;
+        }),
+                 run.log.right(3000).constData());
+        QVERIFY(run.waitFor(5s, [&run] {
+            return run.count("clipboard: echoed") > 0;
+        }));
+
+        // The picture keeps coming well after all of that.
+        const quint64 before = run.lastSeenSeq;
+        run.wait(3s);
+        qInfo() << "frames: at the host copy" << before << ", 3 s later" << run.lastSeenSeq;
+        QVERIFY2(run.lastSeenSeq >= before + 60, run.log.right(3000).constData());
+        QCOMPARE(run.count("clipboard data request"), 1);
+        QCOMPARE(run.count("stalling the whole client"), 0);
+        QCOMPARE(run.clientTextChanges, 0);
+        QVERIFY(!run.closed);
+        QCOMPARE(run.probe.state(), QProcess::Running);
+    }
+
+    // AUD-FIX6 F1: a client that answers, then announces back the text the host just gave it
+    // (a clipboard manager re-owning the paste), is not asked for that echo.
+    void echoOfTheHostTextIsNotRequested()
+    {
+        Run run;
+        QVERIFY(start(run, "answer", true));
+        QVERIFY2(run.waitFor(30s, [&run] {
+            return run.clientTextChanges > 0 || run.probe.state() != QProcess::Running;
+        }),
+                 run.log.constData());
+        if (run.lastSeenSeq == 0 && run.log.contains("does not support H.264")) {
+            QSKIP("this libfreerdp cannot negotiate AVC420 (built WITH_GFX_H264=OFF)");
+        }
+        QCOMPARE(run.count("clipboard data request"), 1);
+
+        auto *data = new QMimeData;
+        data->setText(QStringLiteral("host text"));
+        run.connection->clipboard()->setServerData(data);
+        QVERIFY2(run.waitFor(10s, [&run] {
+            return run.count("clipboard: echoed") > 0;
+        }),
+                 run.log.right(3000).constData());
+        QVERIFY(run.count("clipboard: server text \"host text\"") > 0);
+        run.wait(std::chrono::milliseconds(Clipboard::FormatListSettleMs + 1000));
+        QCOMPARE(run.count("clipboard data request"), 1);
+        QCOMPARE(run.clientTextChanges, 1);
+        QVERIFY(!run.closed);
     }
 };
 

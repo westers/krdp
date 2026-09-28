@@ -8,6 +8,7 @@
 #include <freerdp/peer.h>
 #include <freerdp/server/cliprdr.h>
 
+#include <QElapsedTimer>
 #include <QMetaMethod>
 #include <QScopeGuard>
 #include <QTimer>
@@ -86,6 +87,24 @@ public:
     QTimer deliveredFallback; // Clipboard::DeliveredFallbackMs
     void requestPending();
 
+    // AUD-FIX6 F1: a stock wlfreerdp3 3.22 refuses the first data request, and after a real
+    // copy on its side never answers again and stops drawing (its synchronous Wayland read
+    // under the lock its event loop needs). So:
+    // - a client format list within EchoWindowMs of the server announcing or serving its own
+    //   text is taken for that text coming back (Klipper re-owning what the client just
+    //   pasted from us) and not requested; a response carrying exactly that text is not
+    //   written back to the host either;
+    // - after one refused (a stock client) or unanswered (any client) request the client is
+    //   not asked again this session. Host-to-client copies keep working.
+    bool clientRequestsDisabled = false;
+    QElapsedTimer serverClipboardActivity; // last announce or serve of the host's text
+    QString lastServerText; // what that was, as host text (LF)
+    bool isEcho() const
+    {
+        return serverClipboardActivity.isValid() && serverClipboardActivity.elapsed() < Clipboard::EchoWindowMs;
+    }
+    void disableClientRequests(const char *why);
+
     // AUD-P5: hand the PDU to the main thread and return at once. This used
     // to be a BlockingQueuedConnection: the cliprdr thread waited for the
     // main thread, and a main thread that was itself waiting for the session
@@ -159,7 +178,9 @@ Clipboard::Clipboard(RdpConnection *session)
     connect(&d->responseTimer, &QTimer::timeout, this, [this]() {
         qCDebug(KRDP) << "Client did not answer the clipboard data request for format" << d->outstandingFormat << "within" << ResponseTimeoutMs << "ms";
         d->outstandingFormat = 0;
-        d->requestPending();
+        // AUD-FIX6 F1: a client that does not answer may be stuck on its own clipboard;
+        // asking it again is what froze wlfreerdp3.
+        d->disableClientRequests("did not answer");
     });
     d->deliveredFallback.setSingleShot(true);
     d->deliveredFallback.setInterval(DeliveredFallbackMs);
@@ -295,6 +316,8 @@ void Clipboard::sendServerData()
     formatList.formats = &format;
     std::lock_guard lock(d->sendMutex);
     if (auto *context = d->clipContext.load(); context && d->enabled) {
+        d->lastServerText = ClipboardText::toHost(d->serverData->text());
+        d->serverClipboardActivity.start();
         context->ServerFormatList(context, &formatList);
     }
 }
@@ -344,6 +367,18 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
         pendingFormat = 0; // what an earlier list offered is gone
         return;
     }
+    if (clientRequestsDisabled) {
+        qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats; not requesting them (the client failed a request before)";
+        pendingFormat = 0;
+        return;
+    }
+    if (isEcho()) {
+        // AUD-FIX6 F1: the host's own text coming back, not a copy on the client.
+        qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats" << serverClipboardActivity.elapsed()
+                      << "ms after the host's clipboard went to it; taking it for an echo and not requesting it";
+        pendingFormat = 0;
+        return;
+    }
 
     // AUD-FIX5: the request itself goes out from requestPending(): once the client has
     // its picture, after the lists stop coming (FormatListSettleMs), for the latest list
@@ -362,9 +397,25 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
     settleTimer.start();
 }
 
+void Clipboard::Private::disableClientRequests(const char *why)
+{
+    pendingFormat = 0;
+    settleTimer.stop();
+    if (clientRequestsDisabled) {
+        return;
+    }
+    clientRequestsDisabled = true;
+    qCInfo(KRDP).nospace() << "Clipboard: the client " << why
+                           << " a clipboard data request; not asking it for its clipboard again this session (copies from the host to the client still work)";
+}
+
 void Clipboard::Private::requestPending()
 {
     if (closing || !graphicsDelivered || pendingFormat == 0 || settleTimer.isActive()) {
+        return;
+    }
+    if (clientRequestsDisabled) {
+        pendingFormat = 0;
         return;
     }
     if (outstandingFormat != 0) {
@@ -421,6 +472,8 @@ void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &form
     response.requestedFormatData = reinterpret_cast<const BYTE *>(utf16Data.constData());
 
     qCDebug(KRDP) << "Serving host clipboard text to the client:" << text.length() << "characters";
+    lastServerText = ClipboardText::toHost(serverData->text());
+    serverClipboardActivity.start();
     context->ServerFormatDataResponse(context, &response);
 }
 
@@ -439,6 +492,12 @@ void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &fo
 
     if (!(formatDataResponse.msgFlags & CB_RESPONSE_OK)) {
         qCDebug(KRDP) << "Client refused the clipboard data request for format" << requestedClientFormat;
+        // AUD-FIX6 F1: a stock client that refuses is not asked again (wlfreerdp3 3.22
+        // refuses the first request and hangs on a later one). Our own client may refuse one
+        // (its clipboard changed under it) and is asked again next time.
+        if (!session || !session->isOwnClient()) {
+            disableClientRequests("refused");
+        }
         return;
     }
 
@@ -462,6 +521,12 @@ void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &fo
         qCDebug(KRDP) << "Client clipboard text is empty";
         clientData.reset();
         Q_EMIT q->clientDataChanged();
+        return;
+    }
+
+    // AUD-FIX6 F1: the host's own text coming back; writing it would only announce it again.
+    if (!lastServerText.isNull() && ClipboardText::toHost(text) == lastServerText) {
+        qCDebug(KRDP) << "Client clipboard text is the host's own; not writing it back";
         return;
     }
 
