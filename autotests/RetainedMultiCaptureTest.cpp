@@ -12,16 +12,18 @@ using KRdp::VideoFrame;
 
 namespace
 {
-QByteArray fixture(const QString &size)
+QByteArray fixture(const QString &size, const QString &extension = QStringLiteral("h264"))
 {
-    QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/%1.h264").arg(size)));
+    QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/%1.%2").arg(size, extension)));
     if (!file.open(QIODevice::ReadOnly)) return {};
     return file.readAll();
 }
 
-VideoFrame packet(QSize pixels, QSize logical, const QByteArray &data, bool keyframe = true)
+VideoFrame packet(QSize pixels, QSize logical, const QByteArray &data, bool keyframe = true,
+                  std::optional<KRdp::VideoCodec> codec = std::nullopt)
 {
     VideoFrame frame;
+    frame.codec = codec;
     frame.size = pixels;
     frame.data = data;
     frame.isKeyFrame = keyframe;
@@ -74,6 +76,82 @@ private Q_SLOTS:
         const auto next = set.submit(1, packet(QSize(1280, 720), QSize(1280, 720), QByteArrayLiteral("p-frame"), false));
         QCOMPARE(next.frames.size(), 1);
         QCOMPARE(next.frames.first().monitorIndex, 1);
+    }
+
+    void provesLayoutWithHevcAndAv1Keyframes_data()
+    {
+        QTest::addColumn<int>("codec");
+        QTest::addColumn<QString>("extension");
+        QTest::newRow("hevc") << int(KRdp::VideoCodec::Hevc) << QStringLiteral("hevc");
+        QTest::newRow("av1") << int(KRdp::VideoCodec::Av1) << QStringLiteral("av1");
+    }
+
+    // AUD-FIX9 R1: after a codec change at attach, the refreshed per-output captures deliver
+    // HEVC/AV1 keyframes. 7a4a01b only accepted H.264 here, so the layout never became ready
+    // again (no "Retained KScreen readback confirmed", no frames) on ace (HEVC) and cray (AV1).
+    void provesLayoutWithHevcAndAv1Keyframes()
+    {
+        QFETCH(int, codec);
+        QFETCH(QString, extension);
+        const auto data = fixture(QStringLiteral("1280x720"), extension);
+        QVERIFY(!data.isEmpty());
+        const auto kind = KRdp::VideoCodec(codec);
+        RetainedMultiCapture set;
+        QVERIFY(set.configure({{QStringLiteral("Virtual-0"), QRect(0, 0, 1280, 720), true},
+            {QStringLiteral("Virtual-1"), QRect(1280, 0, 1280, 720), false}}));
+        QVERIFY(!set.submit(0, packet(QSize(1280, 720), QSize(1280, 720), data, true, kind)).becameReady);
+        const auto ready = set.submit(1, packet(QSize(1280, 720), QSize(1280, 720), data, true, kind));
+        QVERIFY(ready.becameReady);
+        QCOMPARE(ready.frames.size(), 2);
+        for (const auto &frame : ready.frames) QCOMPARE(frame.codec, std::optional(kind));
+        // The same bytes labelled as H.264 (or unlabelled) are no proof.
+        RetainedMultiCapture mislabelled;
+        QVERIFY(mislabelled.configure({{QStringLiteral("Virtual-0"), QRect(0, 0, 1280, 720), true},
+            {QStringLiteral("Virtual-1"), QRect(1280, 0, 1280, 720), false}}));
+        QVERIFY(mislabelled.submit(0, packet(QSize(1280, 720), QSize(1280, 720), data)).frames.isEmpty());
+        QVERIFY(mislabelled.submit(1, packet(QSize(1280, 720), QSize(1280, 720), data, true, KRdp::VideoCodec::Avc420)).frames.isEmpty());
+        QVERIFY(!mislabelled.ready());
+        // Headers alone are no proof either.
+        QVERIFY(mislabelled.submit(0, packet(QSize(1280, 720), QSize(1280, 720), data.left(20), true, kind)).frames.isEmpty());
+        QVERIFY(mislabelled.submit(1, packet(QSize(1280, 720), QSize(1280, 720), data.left(20), true, kind)).frames.isEmpty());
+        QVERIFY(!mislabelled.ready());
+    }
+
+    // AUD-FIX9 R1, the attach sequence as the capture sees it: a published AVC layout, the new
+    // grant's refresh (invalidate), one output's AVC keyframe, then the codec change reaches the
+    // encoders. The layout is proven again entirely in the new codec, never with mixed codecs.
+    void codecChangeWhileProvingNeedsEveryOutputInTheNewCodec()
+    {
+        const auto avc = fixture(QStringLiteral("1280x720"));
+        const auto hevc = fixture(QStringLiteral("1280x720"), QStringLiteral("hevc"));
+        QVERIFY(!avc.isEmpty()); QVERIFY(!hevc.isEmpty());
+        const QSize size(1280, 720);
+        RetainedMultiCapture set;
+        QVERIFY(set.configure({{QStringLiteral("Virtual-0"), QRect(0, 0, 1280, 720), true},
+            {QStringLiteral("Virtual-1"), QRect(1280, 0, 1280, 720), false}}));
+        QVERIFY(!set.submit(0, packet(size, size, avc, true, KRdp::VideoCodec::Avc420)).becameReady);
+        QVERIFY(set.submit(1, packet(size, size, avc, true, KRdp::VideoCodec::Avc420)).becameReady);
+
+        set.invalidate(); // Refreshing per-output captures for a new client
+        QVERIFY(!set.ready());
+        QVERIFY(set.submit(0, packet(size, size, avc, true, KRdp::VideoCodec::Avc420)).frames.isEmpty());
+        // The encoders switch to HEVC: output 1 proves itself in HEVC; output 0's AVC proof is void.
+        QVERIFY(set.submit(1, packet(size, size, hevc, true, KRdp::VideoCodec::Hevc)).frames.isEmpty());
+        QVERIFY(!set.ready());
+        const auto ready = set.submit(0, packet(size, size, hevc, true, KRdp::VideoCodec::Hevc));
+        QVERIFY(ready.becameReady);
+        QCOMPARE(ready.frames.size(), 2);
+        for (const auto &frame : ready.frames) QCOMPARE(frame.codec, std::optional(KRdp::VideoCodec::Hevc));
+
+        // A later codec change on the published layout (the encoder swap on the same capture
+        // streams) keeps it published: the new codec's frames flow without a new layout.
+        const auto av1 = fixture(QStringLiteral("1280x720"), QStringLiteral("av1"));
+        QVERIFY(!av1.isEmpty());
+        const auto next = set.submit(0, packet(size, size, av1, true, KRdp::VideoCodec::Av1));
+        QVERIFY(!next.reset); QVERIFY(!next.becameReady);
+        QCOMPARE(next.frames.size(), 1);
+        QCOMPARE(next.frames.first().codec, std::optional(KRdp::VideoCodec::Av1));
+        QVERIFY(set.ready());
     }
 
     void refusesMetadataOnlyProofAndResetsOnSizeChange()

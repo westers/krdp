@@ -44,9 +44,9 @@ std::optional<Snapshot> decoded(const QJsonObject &object)
     return parse(QJsonDocument(object).toJson(), QStringLiteral("lease-1"));
 }
 
-QByteArray keyframe()
+QByteArray keyframe(const char *extension = "h264")
 {
-    QFile file(QFINDTESTDATA("data/virtual-fit/1280x720.h264"));
+    QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/1280x720.%1").arg(QLatin1String(extension))));
     if (!file.open(QIODevice::ReadOnly)) return {};
     return file.readAll();
 }
@@ -521,6 +521,34 @@ private Q_SLOTS:
         second.size = QSize(1280, 720);
         second.data = QByteArrayLiteral("fake-keyframe");
         QVERIFY(!matchesPublished(*state, worker, {first, second}));
+    }
+
+    // AUD-FIX9 R1: the readback that publishes a new client's layout checks each keyframe in the
+    // codec that produced it (HEVC/AV1 after a codec change at attach).
+    void readbackAcceptsKeyframesOfTheCodecThatProducedThem()
+    {
+        const auto state = decoded(root());
+        QVERIFY(state);
+        const KRdp::ConsoleWorkerWire::Outputs worker{{
+            {QStringLiteral("Virtual-0"), QRect(0, 0, 1024, 576), 1.25, true},
+            {QStringLiteral("Virtual-1"), QRect(1024, 100, 1280, 720), 1.0, false},
+        }};
+        for (const auto &[codec, extension] : {std::pair{KRdp::VideoCodec::Hevc, "hevc"}, std::pair{KRdp::VideoCodec::Av1, "av1"}}) {
+            KRdp::VideoFrame first;
+            first.size = QSize(1280, 720);
+            first.data = keyframe(extension);
+            QVERIFY(!first.data.isEmpty());
+            first.isKeyFrame = true;
+            first.codec = codec;
+            auto second = first;
+            second.monitorIndex = 1;
+            QVERIFY(matchesPublished(*state, worker, {first, second}));
+            second.codec = KRdp::VideoCodec::Avc420; // not H.264 bytes
+            QVERIFY(!matchesPublished(*state, worker, {first, second}));
+            second.codec = codec;
+            second.data.truncate(20); // headers alone
+            QVERIFY(!matchesPublished(*state, worker, {first, second}));
+        }
     }
 
     void preservesNegativeCompositorOriginSeparateFromAtlas()

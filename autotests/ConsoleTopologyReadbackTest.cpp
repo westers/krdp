@@ -71,6 +71,30 @@ private Q_SLOTS:
         QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, captured));
     }
 
+    // AUD-FIX9 R1: a console client that runs HEVC/AV1 proves the physical layout with keyframes
+    // of that codec.
+    void keyframeOfTheRunningCodecConfirmsTheLayout()
+    {
+        for (const auto &[codec, extension] : {std::pair{KRdp::VideoCodec::Hevc, "hevc"}, std::pair{KRdp::VideoCodec::Av1, "av1"}}) {
+            QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/1280x720.%1").arg(QLatin1String(extension))));
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            KRdp::VideoFrame captured;
+            captured.size = QSize(1280, 720);
+            captured.data = file.readAll();
+            captured.isKeyFrame = true;
+            captured.codec = codec;
+            captured.monitors = {{QRect(0, 0, 1280, 720), true}};
+            KRdp::ConsoleWorkerWire::Outputs outputs;
+            outputs.monitors = {{QStringLiteral("DP-1"), QRect(0, 0, 1280, 720), 1, true}};
+            KRdp::RetainedKScreenReadback::Snapshot fresh;
+            fresh.outputs = {{.backendKey = QStringLiteral("DP-1"), .name = QStringLiteral("DP-1"), .nativePixels = QSize(1280, 720),
+                .logicalGeometry = QRect(0, 0, 1280, 720), .scale = 1, .enabled = true, .primary = true, .physical = true, .owner = {}}};
+            QVERIFY(KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, captured));
+            captured.codec.reset(); // unlabelled bytes are taken as H.264, which these are not
+            QVERIFY(!KRdp::ConsoleTopologyReadback::confirmed(fresh, outputs, captured));
+        }
+    }
+
     void independentPhysicalKeyframesConfirmEveryOutput()
     {
         QFile file(QFINDTESTDATA(QStringLiteral("data/virtual-fit/1280x720.h264")));

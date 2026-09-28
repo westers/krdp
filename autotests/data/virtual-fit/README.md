@@ -41,3 +41,21 @@ when decoder error concealment is forced to zero. Keep its default error
 resilience bookkeeping, but reject all reported decode/concealment errors.
 Tests also remove and half-truncate every individual IDR slice in all three
 multi-slice fixtures: no repaired incomplete picture may acknowledge Fit.
+
+## HEVC and AV1 (AUD-FIX9)
+
+`1280x720.hevc` (Annex-B, 339 bytes) and `1280x720.av1` (low-overhead OBUs, 85 bytes) are the same
+blue picture as one keyframe each, encoded in hardware like KPipeWire's HEVC/AV1 path, with
+FFmpeg 8.0.1 VA-API (radeonsi, Radeon 780M):
+
+```sh
+ffmpeg -vaapi_device /dev/dri/renderD128 -f lavfi -i color=c=blue:s=1280x720:r=1 \
+  -vf format=nv12,hwupload -frames:v 1 -c:v hevc_vaapi -f hevc 1280x720.hevc   # av1_vaapi, -f obu
+```
+
+`ffprobe -show_entries frame=width,height,key_frame`: 1280x720, key_frame=1. SHA256s:
+
+```
+2811fdd18aee1f026273426d24739676f05b3088444561cf4a4fc8eaabf26e95  1280x720.hevc
+df4e539f96e560b61f08d8d398d5879d433d670eb2acd966ca37677bc46588d8  1280x720.av1
+```

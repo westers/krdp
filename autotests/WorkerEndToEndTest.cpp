@@ -22,6 +22,10 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QUuid>
+#include <QHash>
+#include <QSet>
+
+#include <map>
 
 #include <unistd.h>
 
@@ -29,6 +33,7 @@
 #include "EncoderSupport.h"
 #include "H264KeyframeSize.h"
 #include "RenderNodes.h"
+#include "VideoCodecSupport.h"
 
 using namespace KRdp;
 
@@ -53,7 +58,7 @@ env PIPEWIRE_CONFIG_DIR="$KRDP_SERVER_DIR" PIPEWIRE_CONFIG_NAME=virtual-session-
 wait_for "$R/pipewire-0"
 env WIREPLUMBER_CONFIG_DIR=/usr/share/wireplumber wireplumber --profile policy >"$HOME/wireplumber.log" 2>&1 & children="$children $!"
 kbuildsycoca6 --noincremental >"$HOME/sycoca.log" 2>&1
-kwin_wayland --virtual --width 1280 --height 720 --output-count 1 --socket wayland-0 \
+kwin_wayland --virtual --width 1280 --height 720 --output-count "$KRDP_E2E_OUTPUTS" --socket wayland-0 \
     --no-lockscreen --no-global-shortcuts --no-kactivities >"$HOME/kwin.log" 2>&1 & children="$children $!"
 wait_for "$R/wayland-0"
 sleep 1
@@ -71,6 +76,44 @@ done
 )SH";
 }
 
+/// One private headless session (bwrap, D-Bus without activation, PipeWire, WirePlumber, KWin).
+struct PrivateSession {
+    std::unique_ptr<QTemporaryDir> runtime;
+    std::unique_ptr<QTemporaryDir> home;
+    std::unique_ptr<QProcess> process;
+    QString skip;
+
+    /// The worker log written since \a offset (a size() from before).
+    QString workerLogSince(qint64 offset) const
+    {
+        QFile file(home->path() + QStringLiteral("/worker.log"));
+        if (!file.open(QIODevice::ReadOnly) || !file.seek(offset)) return {};
+        return QString::fromUtf8(file.readAll());
+    }
+    qint64 workerLogSize() const
+    {
+        return QFileInfo(home->path() + QStringLiteral("/worker.log")).size();
+    }
+
+    QString log(const QString &name, int tail = 3000) const
+    {
+        QFile file(home->path() + QLatin1Char('/') + name);
+        return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll().right(tail)) : QString();
+    }
+};
+
+/// What the broker's endpoint saw from one real worker.
+struct WorkerRun {
+    QStringList order;
+    QStringList errors;
+    std::optional<ConsoleWorkerWire::EncoderCaps> caps;
+    QVector<VideoFrame> frames;
+    int outputs = 0;
+    int keyframes = 0;
+    QSize keyframeSize;
+    bool payloadMatches = false;
+};
+
 class WorkerEndToEndTest : public QObject
 {
     Q_OBJECT
@@ -79,23 +122,21 @@ private Q_SLOTS:
     void initTestCase();
     void workerReachesReadyAndDeliversFrames_data();
     void workerReachesReadyAndDeliversFrames();
+    void codecSwitchAtAttach_data();
+    void codecSwitchAtAttach();
     void cleanupTestCase();
 
 private:
-    QString log(const QString &name, int tail = 3000) const;
+    /// The session with \a outputs KWin virtual outputs, started on first use (nullptr: failed).
+    PrivateSession *session(int outputs);
+    /// Starts one worker in \a session behind \a endpoint and records what it sends into \a run.
+    bool startWorker(PrivateSession &session, bool virtualDesktop, ConsoleWorkerEndpoint &endpoint, WorkerRun &run);
+    void stopWorker(PrivateSession &session, ConsoleWorkerEndpoint &endpoint);
 
-    std::unique_ptr<QTemporaryDir> m_runtime;
-    std::unique_ptr<QTemporaryDir> m_home;
-    std::unique_ptr<QProcess> m_session;
+    std::map<int, PrivateSession> m_sessions;
     QString m_skip;
     QString m_renderNode;
 };
-
-QString WorkerEndToEndTest::log(const QString &name, int tail) const
-{
-    QFile file(m_home->path() + QLatin1Char('/') + name);
-    return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll().right(tail)) : QString();
-}
 
 void WorkerEndToEndTest::initTestCase()
 {
@@ -116,21 +157,31 @@ void WorkerEndToEndTest::initTestCase()
         m_skip = QStringLiteral("no render node: KWin needs one for OpenGL compositing and screencast");
         return;
     }
+}
+
+PrivateSession *WorkerEndToEndTest::session(int outputs)
+{
+    if (const auto it = m_sessions.find(outputs); it != m_sessions.end()) {
+        return it->second.process ? &it->second : nullptr;
+    }
+    auto &s = m_sessions[outputs];
     const QString userRuntime = QStringLiteral("/run/user/%1").arg(getuid());
     // A short path: the Wayland and PipeWire socket names must fit sockaddr_un.
     const QString runtimeBase = QFileInfo(userRuntime).isDir() ? userRuntime : QDir::tempPath();
-    m_runtime = std::make_unique<QTemporaryDir>(runtimeBase + QStringLiteral("/krdp-e2e-XXXXXX"));
-    m_home = std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/krdp-e2e-home-XXXXXX"));
-    QVERIFY(m_runtime->isValid() && m_home->isValid());
-    QVERIFY(QFile::setPermissions(m_runtime->path(), QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    for (const auto *dir : {"config", "data/applications", "cache", "state"}) {
-        QVERIFY(QDir(m_home->path()).mkpath(QString::fromLatin1(dir)));
+    s.runtime = std::make_unique<QTemporaryDir>(runtimeBase + QStringLiteral("/krdp-e2e-XXXXXX"));
+    s.home = std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/krdp-e2e-home-XXXXXX"));
+    if (!s.runtime->isValid() || !s.home->isValid()
+        || !QFile::setPermissions(s.runtime->path(), QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner)) {
+        return nullptr;
     }
-    const QString runtime = m_runtime->path();
-    const QString home = m_home->path();
+    for (const auto *dir : {"config", "data/applications", "cache", "state"}) {
+        if (!QDir(s.home->path()).mkpath(QString::fromLatin1(dir))) return nullptr;
+    }
+    const QString runtime = s.runtime->path();
+    const QString home = s.home->path();
 
     QFile bus(runtime + QStringLiteral("/bus.conf"));
-    QVERIFY(bus.open(QIODevice::WriteOnly));
+    if (!bus.open(QIODevice::WriteOnly)) return nullptr;
     // No <servicedir>/<standard_session_servicedirs/>: nothing can be activated on this bus.
     bus.write(QStringLiteral("<!DOCTYPE busconfig PUBLIC \"-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN\"\n"
                              " \"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd\">\n"
@@ -142,7 +193,7 @@ void WorkerEndToEndTest::initTestCase()
     bus.close();
     // KWin grants the screencast and fake-input protocols to this exact worker executable.
     QFile desktop(home + QStringLiteral("/data/applications/org.kde.krdpconsoleworker.desktop"));
-    QVERIFY(desktop.open(QIODevice::WriteOnly));
+    if (!desktop.open(QIODevice::WriteOnly)) return nullptr;
     desktop.write(QStringLiteral("[Desktop Entry]\nType=Application\nName=KRDP Virtual Capture\nNoDisplay=true\nExec=%1\n"
                                  "X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1,org_kde_kwin_fake_input\n")
                       .arg(workerProgram())
@@ -181,32 +232,94 @@ void WorkerEndToEndTest::initTestCase()
     set("KRDP_RENDER_NODE", m_renderNode); // as the launcher exports the node it granted
     set("KRDP_SERVER_DIR", QStringLiteral(KRDP_SERVER_DIR));
     set("KRDP_CONSOLE_WORKER", workerProgram());
+    set("KRDP_E2E_OUTPUTS", QString::number(outputs));
     if (qEnvironmentVariableIsSet("KRDP_E2E_LOGGING_RULES")) set("QT_LOGGING_RULES", qEnvironmentVariable("KRDP_E2E_LOGGING_RULES"));
 
-    m_session = std::make_unique<QProcess>();
-    m_session->setProcessEnvironment(env);
-    m_session->setWorkingDirectory(home);
-    m_session->setStandardOutputFile(home + QStringLiteral("/session.log"));
-    m_session->setStandardErrorFile(home + QStringLiteral("/session.log"), QIODevice::Append);
-    m_session->start(QStandardPaths::findExecutable(QStringLiteral("bwrap")),
-                     {QStringLiteral("--unshare-pid"), QStringLiteral("--die-with-parent"), QStringLiteral("--ro-bind"), QStringLiteral("/"), QStringLiteral("/"),
-                      QStringLiteral("--proc"), QStringLiteral("/proc"), QStringLiteral("--dev"), QStringLiteral("/dev"), QStringLiteral("--dev-bind"),
-                      m_renderNode, m_renderNode, QStringLiteral("--bind"), runtime, runtime, QStringLiteral("--bind"), home, home,
-                      QStringLiteral("/bin/bash"), QStringLiteral("-c"), QString::fromLatin1(SessionScript)});
-    QVERIFY(m_session->waitForStarted(5000));
+    auto process = std::make_unique<QProcess>();
+    process->setProcessEnvironment(env);
+    process->setWorkingDirectory(home);
+    process->setStandardOutputFile(home + QStringLiteral("/session.log"));
+    process->setStandardErrorFile(home + QStringLiteral("/session.log"), QIODevice::Append);
+    process->start(QStandardPaths::findExecutable(QStringLiteral("bwrap")),
+                   {QStringLiteral("--unshare-pid"), QStringLiteral("--die-with-parent"), QStringLiteral("--ro-bind"), QStringLiteral("/"), QStringLiteral("/"),
+                    QStringLiteral("--proc"), QStringLiteral("/proc"), QStringLiteral("--dev"), QStringLiteral("/dev"), QStringLiteral("--dev-bind"),
+                    m_renderNode, m_renderNode, QStringLiteral("--bind"), runtime, runtime, QStringLiteral("--bind"), home, home,
+                    QStringLiteral("/bin/bash"), QStringLiteral("-c"), QString::fromLatin1(SessionScript)});
+    if (!process->waitForStarted(5000)) return nullptr;
     QElapsedTimer timer;
     timer.start();
-    while (!QFileInfo::exists(runtime + QStringLiteral("/session-ready")) && m_session->state() == QProcess::Running && timer.elapsed() < 60000) {
+    while (!QFileInfo::exists(runtime + QStringLiteral("/session-ready")) && process->state() == QProcess::Running && timer.elapsed() < 60000) {
         QTest::qWait(50);
     }
+    s.process = std::move(process);
     if (!QFileInfo::exists(runtime + QStringLiteral("/session-ready"))) {
-        qWarning().noquote() << "session.log:" << log(QStringLiteral("session.log")) << "\nkwin.log:" << log(QStringLiteral("kwin.log"));
-        if (m_session->state() != QProcess::Running && log(QStringLiteral("session.log")).contains(QStringLiteral("bwrap"))) {
-            m_skip = QStringLiteral("bwrap cannot create a sandbox here");
-            return;
-        }
-        QFAIL("the private headless session did not come up");
+        qWarning().noquote() << "session.log:" << s.log(QStringLiteral("session.log")) << "\nkwin.log:" << s.log(QStringLiteral("kwin.log"));
+        s.skip = s.process->state() != QProcess::Running && s.log(QStringLiteral("session.log")).contains(QStringLiteral("bwrap"))
+            ? QStringLiteral("bwrap cannot create a sandbox here")
+            : QStringLiteral("!the private headless session did not come up");
     }
+    return &s;
+}
+
+bool WorkerEndToEndTest::startWorker(PrivateSession &s, bool virtualDesktop, ConsoleWorkerEndpoint &endpoint, WorkerRun &run)
+{
+    const QString runtime = s.runtime->path();
+    const QString id = virtualDesktop ? QUuid::createUuid().toString(QUuid::WithoutBraces) : QStringLiteral("c1");
+    QFile::remove(runtime + QStringLiteral("/worker-exit"));
+    QFile args(runtime + QStringLiteral("/worker-args"));
+    if (!args.open(QIODevice::WriteOnly)) return false;
+    args.write((virtualDesktop ? QStringLiteral("--virtual-session\n%1\n") : QStringLiteral("--logind-session\n%1\n")).arg(id).toUtf8());
+    args.close();
+    const QByteArray token = QUuid::createUuid().toRfc4122() + QUuid::createUuid().toRfc4122();
+    QFile tokenFile(runtime + QStringLiteral("/worker-token"));
+    if (!tokenFile.open(QIODevice::WriteOnly) || !tokenFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)) return false;
+    tokenFile.write(token);
+    tokenFile.close();
+
+    connect(&endpoint, &ConsoleWorkerEndpoint::encoderCapsReceived, this, [&run](const auto &value) {
+        run.caps = value;
+        run.order << QStringLiteral("caps");
+    });
+    connect(&endpoint, &ConsoleWorkerEndpoint::workerReady, this, [&run](const auto &) {
+        run.order << QStringLiteral("ready");
+    });
+    connect(&endpoint, &ConsoleWorkerEndpoint::encoderReported, this, [&run](const auto &report) {
+        run.order << QStringLiteral("report:%1:%2").arg(int(report.codec)).arg(report.hardware ? QStringLiteral("hw") : QStringLiteral("sw"));
+    });
+    connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&run](const auto &) {
+        ++run.outputs;
+        if (!run.order.contains(QStringLiteral("outputs"))) run.order << QStringLiteral("outputs");
+    });
+    connect(&endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [&run](const VideoFrame &frame) {
+        run.frames.append(frame);
+        if (frame.isKeyFrame) {
+            ++run.keyframes;
+            run.keyframeSize = frame.size;
+            run.payloadMatches = h264KeyframeSize(frame.data) == std::optional(frame.size);
+            if (!run.order.contains(QStringLiteral("keyframe"))) run.order << QStringLiteral("keyframe");
+        }
+    });
+    connect(&endpoint, &ConsoleWorkerEndpoint::protocolError, this, [&run](const QString &message) {
+        run.errors << message;
+    });
+    // The session's loop starts the worker as soon as this socket exists (virtual-session-desktop.sh).
+    QString error;
+    if (!endpoint.listen(runtime + QStringLiteral("/worker.sock"),
+                         {virtualDesktop ? ConsoleSeat::Adapter::VirtualUser : ConsoleSeat::Adapter::PhysicalUser, id, quint32(getuid())}, token, &error)) {
+        qWarning().noquote() << "listen:" << error;
+        return false;
+    }
+    return true;
+}
+
+void WorkerEndToEndTest::stopWorker(PrivateSession &s, ConsoleWorkerEndpoint &endpoint)
+{
+    const QString exitFile = s.runtime->path() + QStringLiteral("/worker-exit");
+    endpoint.stopWorker();
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(exitFile), 15000);
+    QFile exitCode(exitFile);
+    QVERIFY(exitCode.open(QIODevice::ReadOnly));
+    QCOMPARE(exitCode.readAll().trimmed(), QByteArray("0"));
 }
 
 void WorkerEndToEndTest::workerReachesReadyAndDeliversFrames_data()
@@ -222,107 +335,215 @@ void WorkerEndToEndTest::workerReachesReadyAndDeliversFrames()
     if (!m_skip.isEmpty()) {
         QSKIP(qPrintable(m_skip));
     }
-    const QString runtime = m_runtime->path();
-    const QString session = virtualDesktop ? QUuid::createUuid().toString(QUuid::WithoutBraces) : QStringLiteral("c1");
-    QFile::remove(runtime + QStringLiteral("/worker-exit"));
-    QFile args(runtime + QStringLiteral("/worker-args"));
-    QVERIFY(args.open(QIODevice::WriteOnly));
-    args.write((virtualDesktop ? QStringLiteral("--virtual-session\n%1\n") : QStringLiteral("--logind-session\n%1\n")).arg(session).toUtf8());
-    args.close();
-    const QByteArray token = QUuid::createUuid().toRfc4122() + QUuid::createUuid().toRfc4122();
-    QFile tokenFile(runtime + QStringLiteral("/worker-token"));
-    QVERIFY(tokenFile.open(QIODevice::WriteOnly));
-    QVERIFY(tokenFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner));
-    tokenFile.write(token);
-    tokenFile.close();
+    auto *s = session(1);
+    QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
 
     ConsoleWorkerEndpoint endpoint;
-    QStringList order;
-    QStringList errors;
-    std::optional<ConsoleWorkerWire::EncoderCaps> caps;
-    int keyframes = 0;
-    int frames = 0;
-    QSize keyframeSize;
-    bool payloadMatches = false;
-    connect(&endpoint, &ConsoleWorkerEndpoint::encoderCapsReceived, this, [&](const auto &value) {
-        caps = value;
-        order << QStringLiteral("caps");
-    });
-    connect(&endpoint, &ConsoleWorkerEndpoint::workerReady, this, [&](const auto &) {
-        order << QStringLiteral("ready");
+    WorkerRun run;
+    connect(&endpoint, &ConsoleWorkerEndpoint::workerReady, this, [&endpoint](const auto &) {
         endpoint.setControlState({1, true});
         endpoint.requestKeyFrame();
     });
-    connect(&endpoint, &ConsoleWorkerEndpoint::encoderReported, this, [&](const auto &report) {
-        order << QStringLiteral("report:%1:%2").arg(int(report.codec)).arg(report.hardware ? QStringLiteral("hw") : QStringLiteral("sw"));
-    });
-    connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&](const auto &) {
-        if (!order.contains(QStringLiteral("outputs"))) order << QStringLiteral("outputs");
-    });
-    connect(&endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [&](const VideoFrame &frame) {
-        ++frames;
-        if (frame.isKeyFrame) {
-            ++keyframes;
-            keyframeSize = frame.size;
-            payloadMatches = h264KeyframeSize(frame.data) == std::optional(frame.size);
-            if (!order.contains(QStringLiteral("keyframe"))) order << QStringLiteral("keyframe");
-        }
-    });
-    connect(&endpoint, &ConsoleWorkerEndpoint::protocolError, this, [&](const QString &message) {
-        errors << message;
-    });
     const auto dumpLogs = qScopeGuard([&] {
         if (!QTest::currentTestFailed()) return;
-        qWarning().noquote() << "worker.log:\n" << log(QStringLiteral("worker.log"), 4000) << "\nkwin.log:\n" << log(QStringLiteral("kwin.log"), 2000)
-                             << "\nsession.log:\n" << log(QStringLiteral("session.log"), 1000) << "\nsycoca.log:\n" << log(QStringLiteral("sycoca.log"), 1500);
+        qWarning().noquote() << "worker.log:\n" << s->log(QStringLiteral("worker.log"), 4000) << "\nkwin.log:\n" << s->log(QStringLiteral("kwin.log"), 2000)
+                             << "\nsession.log:\n" << s->log(QStringLiteral("session.log"), 1000) << "\nsycoca.log:\n" << s->log(QStringLiteral("sycoca.log"), 1500);
     });
-    // The session's loop starts the worker as soon as this socket exists (virtual-session-desktop.sh).
-    QString error;
-    QVERIFY2(endpoint.listen(runtime + QStringLiteral("/worker.sock"), {virtualDesktop ? ConsoleSeat::Adapter::VirtualUser : ConsoleSeat::Adapter::PhysicalUser, session, quint32(getuid())}, token, &error),
-             qPrintable(error));
-    const QString exitFile = runtime + QStringLiteral("/worker-exit");
+    QVERIFY(startWorker(*s, virtualDesktop, endpoint, run));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    // Whatever failed, the session's loop must be free for the next worker.
+    const auto reap = qScopeGuard([&] {
+        if (QFileInfo::exists(exitFile)) return;
+        endpoint.stopWorker();
+        if (!QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 15000)) qWarning("the worker did not stop");
+    });
 
-    QTRY_VERIFY_WITH_TIMEOUT(endpoint.ready() || !errors.isEmpty() || QFileInfo::exists(exitFile), 45000);
-    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+    QTRY_VERIFY_WITH_TIMEOUT(endpoint.ready() || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 45000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
     QVERIFY2(endpoint.ready(), "the real worker never confirmed capture");
-    QTRY_VERIFY_WITH_TIMEOUT(keyframes >= 1 || !errors.isEmpty() || QFileInfo::exists(exitFile), 30000);
-    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
-    QVERIFY(keyframes >= 1);
-    QCOMPARE(keyframeSize, QSize(1280, 720));
-    QVERIFY(payloadMatches);
-    qInfo().noquote() << "Real worker order:" << order.join(QStringLiteral(", ")) << "-" << frames << "frames," << keyframes << "keyframes on"
-                      << m_renderNode;
+    QTRY_VERIFY_WITH_TIMEOUT(run.keyframes >= 1 || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 30000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    QVERIFY(run.keyframes >= 1);
+    QCOMPARE(run.keyframeSize, QSize(1280, 720));
+    QVERIFY(run.payloadMatches);
+    qInfo().noquote() << "Real worker order:" << run.order.join(QStringLiteral(", ")) << "-" << run.frames.size() << "frames," << run.keyframes
+                      << "keyframes on" << m_renderNode;
     // Hello (authentication), EncoderCaps, Ready, then everything else - and no pre-Ready failure.
-    QCOMPARE(order.value(0), QStringLiteral("caps"));
-    QCOMPARE(order.value(1), QStringLiteral("ready"));
-    QCOMPARE(order.count(QStringLiteral("caps")), 1);
-    QCOMPARE(order.count(QStringLiteral("ready")), 1);
-    QVERIFY(caps);
+    QCOMPARE(run.order.value(0), QStringLiteral("caps"));
+    QCOMPARE(run.order.value(1), QStringLiteral("ready"));
+    QCOMPARE(run.order.count(QStringLiteral("caps")), 1);
+    QCOMPARE(run.order.count(QStringLiteral("ready")), 1);
+    QVERIFY(run.caps);
     if (!EncoderSupport::probeUncached().renderNode.isEmpty()) {
         // B3: the worker's own probe, inside the sandbox, sees the host's hardware encoder.
-        QVERIFY2(caps->encoders.avc.hardware, "the sandboxed worker's probe found no hardware encoder");
-        QCOMPARE(caps->renderNode, m_renderNode);
+        QVERIFY2(run.caps->encoders.avc.hardware, "the sandboxed worker's probe found no hardware encoder");
+        QCOMPARE(run.caps->renderNode, m_renderNode);
     }
+    stopWorker(*s, endpoint);
+}
 
-    endpoint.stopWorker();
-    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(exitFile), 15000);
-    QFile exitCode(exitFile);
-    QVERIFY(exitCode.open(QIODevice::ReadOnly));
-    QCOMPARE(exitCode.readAll().trimmed(), QByteArray("0"));
+void WorkerEndToEndTest::codecSwitchAtAttach_data()
+{
+    // AUD-FIX9 R1: a client attaches to a worker that is Ready and idle, and its codec policy
+    // moves the encoders from AVC to a hardware HEVC/AV1 at once ("immediate": in the same read as
+    // the new grant, as on ace and cray) or after the grant's capture refresh has published its
+    // outputs ("late"). Two outputs take the per-output (multi) capture path, one the single one.
+    QTest::addColumn<bool>("virtualDesktop");
+    QTest::addColumn<int>("outputs");
+    QTest::addColumn<int>("codecId");
+    QTest::addColumn<bool>("late");
+    for (const bool virtualDesktop : {true, false}) {
+        for (const int outputs : {2, 1}) {
+            for (const auto codec : {VideoCodec::Hevc, VideoCodec::Av1}) {
+                for (const bool late : {false, true}) {
+                    if (late && outputs == 1) continue;
+                    QTest::addRow("%s %d-output %s %s", virtualDesktop ? "virtual" : "console", outputs,
+                                  codec == VideoCodec::Hevc ? "hevc" : "av1", late ? "late" : "immediate")
+                        << virtualDesktop << outputs << int(codec) << late;
+                }
+            }
+        }
+    }
+}
+
+void WorkerEndToEndTest::codecSwitchAtAttach()
+{
+    QFETCH(bool, virtualDesktop);
+    QFETCH(int, outputs);
+    QFETCH(int, codecId);
+    QFETCH(bool, late);
+    const auto codec = VideoCodec(codecId);
+    if (!m_skip.isEmpty()) {
+        QSKIP(qPrintable(m_skip));
+    }
+    auto *s = session(outputs);
+    QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+
+    ConsoleWorkerEndpoint endpoint;
+    WorkerRun run;
+    const auto dumpLogs = qScopeGuard([&] {
+        if (!QTest::currentTestFailed()) return;
+        qWarning().noquote() << "worker.log:\n" << s->log(QStringLiteral("worker.log"), 6000) << "\nkwin.log:\n" << s->log(QStringLiteral("kwin.log"), 1500);
+    });
+    QVERIFY(startWorker(*s, virtualDesktop, endpoint, run));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    // Whatever failed, the session's loop must be free for the next worker.
+    const auto reap = qScopeGuard([&] {
+        if (QFileInfo::exists(exitFile)) return;
+        endpoint.stopWorker();
+        if (!QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 15000)) qWarning("the worker did not stop");
+    });
+    const auto alive = [&] {
+        return run.errors.isEmpty() && !QFileInfo::exists(exitFile);
+    };
+
+    // Ready with no client: the retained desktop idles until someone attaches.
+    QTRY_VERIFY_WITH_TIMEOUT(endpoint.ready() || !alive(), 45000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    QVERIFY2(endpoint.ready(), "the real worker never confirmed capture");
+    QVERIFY(run.caps);
+    const auto &backends = run.caps->encoders.of(codec == VideoCodec::Hevc ? CodecPolicy::Family::Hevc : CodecPolicy::Family::Av1);
+    const auto host = EncoderSupport::probeUncached().encoders.of(codec == VideoCodec::Hevc ? CodecPolicy::Family::Hevc : CodecPolicy::Family::Av1);
+    if (!backends.hardware) {
+        QVERIFY2(!host.hardware, "the host has this hardware encoder but the sandboxed worker does not see it");
+        stopWorker(*s, endpoint);
+        QSKIP("no hardware encoder for this codec on this host");
+    }
+    QTest::qWait(500); // let the pre-attach capture go idle
+
+    // The attach, in the broker's order: the grant, a keyframe request and the connection's first
+    // (AVC) codec config (WorkerCodecBridge::bind), then the private codec it negotiated.
+    const qsizetype outputsBefore = run.outputs;
+    const qsizetype grantMark = run.frames.size();
+    const qint64 grantLog = s->workerLogSize();
+    endpoint.setControlState({1, true});
+    endpoint.requestKeyFrame();
+    ConsoleWorkerWire::EncoderConfig avc{.generation = 1, .codec = VideoCodec::Avc420, .settings = CodecPolicy::EncoderSettings{.hardware = true}};
+    QVERIFY(endpoint.setEncoderConfig(avc));
+    if (late) {
+        // The capture refresh for the new client has published (multi) or AVC flows (single).
+        QTRY_VERIFY_WITH_TIMEOUT((outputs < 2 || run.outputs > outputsBefore) || !alive(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(std::any_of(run.frames.cbegin() + grantMark, run.frames.cend(), [](const auto &f) { return f.isKeyFrame; }) || !alive(), 5000);
+        QVERIFY2(alive(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    }
+    ConsoleWorkerWire::EncoderConfig target{.generation = 1, .codec = codec, .settings = CodecPolicy::EncoderSettings{.hardware = true}};
+    const qsizetype mark = run.frames.size();
+    const qsizetype outputsAtSwitch = run.outputs;
+    QElapsedTimer clock;
+    clock.start();
+    QVERIFY(endpoint.setEncoderConfig(target));
+
+    // Within 2 s: a decodable keyframe of the new codec, at the output size, for every output.
+    QSet<int> decoded;
+    qsizetype checked = mark;
+    qint64 elapsed = -1;
+    while (clock.elapsed() < 2000 && alive()) {
+        for (; checked < run.frames.size(); ++checked) {
+            const auto &frame = run.frames[checked];
+            if (frame.isKeyFrame && frame.codec == codec && frame.size == QSize(1280, 720)
+                && encodedKeyframeSize(codec, frame.data) == std::optional(frame.size)) {
+                decoded.insert(outputs > 1 ? frame.monitorIndex : 0);
+            }
+        }
+        if (decoded.size() == outputs) {
+            elapsed = clock.elapsed();
+            break;
+        }
+        QTest::qWait(10);
+    }
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    QVERIFY2(!QFileInfo::exists(exitFile), "the worker exited");
+    int newCodec = 0;
+    int oldCodec = 0;
+    for (qsizetype i = mark; i < run.frames.size(); ++i) (run.frames[i].codec == codec ? newCodec : oldCodec)++;
+    qInfo().noquote() << VideoCodecSupport::codecName(codec) << "at attach:" << decoded.size() << "of" << outputs
+                      << "outputs decoded in" << elapsed << "ms;" << newCodec << "new-codec and" << oldCodec << "older frames after the switch;"
+                      << (run.outputs - outputsBefore) << "layouts published since the grant; order" << run.order.join(QStringLiteral(", "));
+    QVERIFY2(decoded.size() == outputs, "no decodable keyframe of the new codec from every output within 2 s");
+    if (outputs > 1) QVERIFY2(run.outputs > outputsBefore, "the new client's capture never published its outputs (KScreen readback)");
+    const QString since = s->workerLogSince(grantLog);
+    const QString restart = QStringLiteral("Codec changed to %1 on a running stream").arg(QLatin1String(VideoCodecSupport::codecName(codec)));
+    if (outputs > 1 && !late) {
+        // The codec arrived with the grant: the refreshed captures open in it; the streams they
+        // replace never restart their encoders first (the ace/cray sequence).
+        QVERIFY2(since.contains(QStringLiteral("Refreshing per-output captures for a new client")), qPrintable(since));
+        QVERIFY2(!since.contains(restart), qPrintable(since));
+    }
+    if (outputs > 1 && late) {
+        // A codec change on a live, published layout swaps the encoders on the same capture
+        // streams: no capture refresh, no new layout.
+        QCOMPARE(since.count(restart), outputs);
+        QCOMPARE(run.outputs, outputsAtSwitch);
+    }
+    // Once an output has sent the new codec, it never goes back to the old one.
+    QHash<int, bool> switched;
+    for (qsizetype i = mark; i < run.frames.size(); ++i) {
+        const auto &frame = run.frames[i];
+        const int index = outputs > 1 ? frame.monitorIndex : 0;
+        if (frame.codec == codec) switched[index] = true;
+        else QVERIFY2(!switched.value(index), "an older codec's frame followed the new codec's");
+    }
+    stopWorker(*s, endpoint);
 }
 
 void WorkerEndToEndTest::cleanupTestCase()
 {
-    if (m_session && m_session->state() != QProcess::NotRunning) {
-        // bwrap is the PID namespace's init: its exit ends every process of the session.
-        m_session->terminate();
-        if (!m_session->waitForFinished(5000)) {
-            m_session->kill();
-            m_session->waitForFinished(5000);
+    for (auto &[outputs, s] : m_sessions) {
+        if (s.process && s.process->state() != QProcess::NotRunning) {
+            // bwrap is the PID namespace's init: its exit ends every process of the session.
+            s.process->terminate();
+            if (!s.process->waitForFinished(5000)) {
+                s.process->kill();
+                s.process->waitForFinished(5000);
+            }
         }
+        if (s.runtime) s.runtime->remove();
+        if (s.home) s.home->remove();
     }
-    if (m_runtime) m_runtime->remove();
-    if (m_home) m_home->remove();
 }
 
 QTEST_GUILESS_MAIN(WorkerEndToEndTest)
