@@ -196,6 +196,11 @@ if(PIPEWIRE_EXECUTABLE AND PW_DUMP_EXECUTABLE AND JQ_EXECUTABLE AND TIMEOUT_EXEC
             --config-file=${CMAKE_SOURCE_DIR}/server/virtual-session-bus.conf
             -- $<TARGET_FILE:PipeWireMicrophoneTest> sourcePcmDelivery)
         set_tests_properties(PipeWireMicrophonePcmTest PROPERTIES TIMEOUT 20)
+        # N1: the microphone's `inUse` follows linked consumers and clears when the last one leaves.
+        add_test(NAME PipeWireMicrophoneInUseTest COMMAND ${DBUS_RUN_SESSION_EXECUTABLE}
+            --config-file=${CMAKE_SOURCE_DIR}/server/virtual-session-bus.conf
+            -- $<TARGET_FILE:PipeWireMicrophoneTest> inUseFollowsLinkedConsumers)
+        set_tests_properties(PipeWireMicrophoneInUseTest PROPERTIES TIMEOUT 40)
     endif()
     if(WIREPLUMBER_EXECUTABLE AND PW_CAT_EXECUTABLE AND FFMPEG_EXECUTABLE AND DBUS_RUN_SESSION_EXECUTABLE)
         add_test(NAME VirtualSessionAudioPcmTest COMMAND ${DBUS_RUN_SESSION_EXECUTABLE}

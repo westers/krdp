@@ -110,6 +110,81 @@ private Q_SLOTS:
         daemon.terminate();
         QVERIFY(daemon.waitForFinished(3000));
     }
+    // N1: "in use" means a consumer is linked to the source, and it clears when the last one
+    // leaves (the source's own stream keeps STREAMING without a consumer, so that was never it).
+    void inUseFollowsLinkedConsumers()
+    {
+        QTemporaryDir runtime(QStringLiteral("/run/user/%1/krdp-mic-inuse-XXXXXX").arg(getuid()));
+        QVERIFY(runtime.isValid());
+        qputenv("PIPEWIRE_RUNTIME_DIR", runtime.path().toUtf8());
+        qputenv("PIPEWIRE_REMOTE", "pipewire-0");
+        auto env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("XDG_RUNTIME_DIR"), runtime.path());
+        env.insert(QStringLiteral("XDG_CONFIG_HOME"), runtime.path() + QStringLiteral("/config"));
+        env.insert(QStringLiteral("XDG_STATE_HOME"), runtime.path() + QStringLiteral("/state"));
+        env.insert(QStringLiteral("XDG_CACHE_HOME"), runtime.path() + QStringLiteral("/cache"));
+        env.insert(QStringLiteral("PULSE_RUNTIME_PATH"), runtime.path() + QStringLiteral("/pulse"));
+        env.insert(QStringLiteral("PIPEWIRE_CONFIG_DIR"), QStringLiteral(KRDP_AUDIO_CONFIG_DIR));
+        env.insert(QStringLiteral("PIPEWIRE_CONFIG_NAME"), QStringLiteral("virtual-session-pipewire.conf"));
+        QProcess daemon;
+        daemon.setProcessEnvironment(env);
+        daemon.start(QStringLiteral(KRDP_PIPEWIRE_EXECUTABLE), QStringList{});
+        QVERIFY(daemon.waitForStarted());
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(runtime.path() + QStringLiteral("/pipewire-0")), 3000);
+        env.remove(QStringLiteral("PIPEWIRE_CONFIG_DIR"));
+        env.remove(QStringLiteral("PIPEWIRE_CONFIG_NAME"));
+        QProcess policy;
+        env.insert(QStringLiteral("WIREPLUMBER_CONFIG_DIR"), QStringLiteral("/usr/share/wireplumber"));
+        policy.setProcessEnvironment(env);
+        policy.start(QStringLiteral("wireplumber"), {QStringLiteral("--profile"), QStringLiteral("policy")});
+        QVERIFY(policy.waitForStarted());
+
+        KRdp::PipeWireMicrophone mic;
+        QVERIFY(mic.start(QStringLiteral("inuse-test")));
+        QTRY_COMPARE_WITH_TIMEOUT(mic.state(), KRdp::PipeWireMicrophone::State::Ready, 3000);
+        QTest::qWait(500);
+        QVERIFY(!mic.consumerActive()); // a registered source nobody records from
+        for (int round = 0; round < 2; ++round) {
+            QProcess recorder;
+            recorder.setProcessEnvironment(env);
+            recorder.start(QStringLiteral("pw-record"), {QStringLiteral("--target"), QStringLiteral("krdp.remote-microphone.inuse-test"), QStringLiteral("/dev/null")});
+            QVERIFY(recorder.waitForStarted());
+            QTRY_VERIFY_WITH_TIMEOUT(mic.consumerActive(), 10000); // linked by WirePlumber
+            QVERIFY2(recorder.state() == QProcess::Running, recorder.readAllStandardError().constData());
+            recorder.terminate();
+            QVERIFY(recorder.waitForFinished(3000));
+            // The client's indicator is polled every 500 ms: the last consumer leaving must show within ~1 s.
+            QTRY_VERIFY_WITH_TIMEOUT(!mic.consumerActive(), 1000);
+            QCOMPARE(mic.state(), KRdp::PipeWireMicrophone::State::Ready); // still a usable source
+        }
+        // A level meter (a PulseAudio peak-detect stream, e.g. Plasma's volume applet) is linked
+        // and keeps the source running, but it does not record: not "in use".
+        QProcess meter;
+        meter.setProcessEnvironment(env);
+        meter.start(QStringLiteral("pw-record"), {QStringLiteral("-P"), QStringLiteral("{ stream.monitor = true }"), QStringLiteral("--target"),
+                                                  QStringLiteral("krdp.remote-microphone.inuse-test"), QStringLiteral("/dev/null")});
+        QVERIFY(meter.waitForStarted());
+        QTest::qWait(1500);
+        QVERIFY2(meter.state() == QProcess::Running, meter.readAllStandardError().constData());
+        QVERIFY(!mic.consumerActive());
+        // A real recording alongside the meter is in use; when it leaves, the meter alone is not.
+        QProcess recorder;
+        recorder.setProcessEnvironment(env);
+        recorder.start(QStringLiteral("pw-record"), {QStringLiteral("--target"), QStringLiteral("krdp.remote-microphone.inuse-test"), QStringLiteral("/dev/null")});
+        QVERIFY(recorder.waitForStarted());
+        QTRY_VERIFY_WITH_TIMEOUT(mic.consumerActive(), 10000);
+        recorder.terminate();
+        QVERIFY(recorder.waitForFinished(3000));
+        QTRY_VERIFY_WITH_TIMEOUT(!mic.consumerActive(), 1000);
+        meter.terminate();
+        QVERIFY(meter.waitForFinished(3000));
+        mic.stop();
+        QVERIFY(!mic.consumerActive());
+        policy.terminate();
+        QVERIFY(policy.waitForFinished(3000));
+        daemon.terminate();
+        QVERIFY(daemon.waitForFinished(3000));
+    }
     void sourceReadinessAndTeardown()
     {
         // Never connect to the desktop's graph, even when startup fails.
