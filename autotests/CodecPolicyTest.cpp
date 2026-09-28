@@ -109,6 +109,101 @@ Decision run(State &state, const Input &in, Clock::time_point &now, std::chrono:
     }
     return last;
 }
+/**
+ * AUD-FIX5 D2: the link as the policy saw it in the Sol S1 pass (2026-09-28, 1920x1080, SoftwareEncoding=auto,
+ * evidence/2026-09-28-final-round/sol/s11-S1-journal.txt), reconstructed from the adaptive-quality
+ * lines (logged only when the quality changes; a tick without a line was clear, except at the
+ * floor) and the bandwidth measurements. The link got slow on its own at ~T+23 s (the send rate fell
+ * from 15.5 to ~3 Mbit/s with fq_codel still in place), the 6 Mbit/s tbf came at T+44.0 s, the first
+ * congestion under it at T+57 s, the tbf went at T+194 s; T+218 s on is the free link with
+ * full-screen mandelbrot (goodput 10-52 Mbit/s, a congestion blip every 12-30 s).
+ */
+struct SolTick {
+    int ms;
+    int congested;
+    int kbps;
+    int quality;
+};
+// Generated from s11-S1-journal.txt: one entry per 1.5 s adaptive-quality tick from 23:47:52.100 CDT.
+// {ms since the first tick, congested, goodput kbit/s, adaptive quality}
+constexpr SolTick SolS1[] = {
+    {0, 1, 1356, 65}, {1500, 1, 1384, 55}, {3000, 0, 1468, 55}, {4500, 0, 1468, 55}, {6000, 0, 2628, 55},
+    {7500, 0, 2815, 60}, {9000, 0, 4263, 65}, {10500, 0, 4263, 70}, {12000, 0, 6573, 75}, {13500, 0, 10381, 75},
+    {15000, 0, 12622, 75}, {16500, 0, 12622, 75}, {18000, 0, 12900, 75}, {19500, 0, 13611, 75}, {21000, 0, 14285, 75},
+    {22500, 0, 14285, 75}, {24000, 1, 14338, 65}, {25500, 1, 10757, 55}, {27000, 0, 7049, 55}, {28500, 0, 7049, 55},
+    {30000, 0, 4927, 55}, {31500, 1, 3861, 45}, {33000, 1, 3019, 35}, {34500, 1, 3019, 25}, {36000, 1, 2692, 15},
+    {37500, 0, 2209, 15}, {39000, 0, 1963, 15}, {40500, 0, 1963, 15}, {42000, 0, 1964, 20}, {43500, 0, 2100, 25},
+    {45000, 0, 2117, 30}, {46500, 0, 2117, 35}, {48000, 0, 2162, 40}, {49500, 0, 2127, 45}, {51000, 0, 2102, 50},
+    {52500, 0, 2102, 55}, {54000, 0, 2445, 60}, {55500, 0, 3887, 65}, {57000, 1, 2660, 55}, {58500, 1, 2660, 45},
+    {60000, 0, 2482, 45}, {61500, 0, 2405, 45}, {63000, 0, 2305, 45}, {64500, 0, 2305, 50}, {66000, 0, 2184, 55},
+    {67500, 0, 2480, 60}, {69000, 0, 3941, 65}, {70500, 1, 3941, 55}, {72000, 1, 3353, 45}, {73500, 0, 2711, 45},
+    {75000, 0, 2346, 45}, {76500, 0, 2346, 45}, {78000, 0, 2151, 50}, {79500, 0, 2237, 55}, {81000, 0, 2716, 60},
+    {82500, 0, 2716, 65}, {84000, 1, 4003, 55}, {85500, 0, 3389, 55}, {87000, 0, 3252, 55}, {88500, 0, 3252, 55},
+    {90000, 0, 3034, 60}, {91500, 0, 4247, 65}, {93000, 1, 4672, 55}, {94500, 1, 4672, 45}, {96000, 0, 3486, 45},
+    {97500, 0, 2931, 45}, {99000, 0, 2503, 45}, {100500, 0, 2503, 50}, {102000, 0, 2303, 55}, {103500, 0, 2514, 60},
+    {105000, 0, 3848, 65}, {106500, 1, 3848, 55}, {108000, 1, 4263, 45}, {109500, 0, 4217, 45}, {111000, 0, 4401, 45},
+    {112500, 0, 4401, 45}, {114000, 0, 4333, 50}, {115500, 0, 3840, 55}, {117000, 0, 4047, 60}, {118500, 1, 4047, 50},
+    {120000, 0, 4014, 50}, {121500, 0, 3415, 50}, {123000, 0, 3260, 50}, {124500, 0, 3260, 55}, {126000, 0, 3846, 60},
+    {127500, 1, 3748, 50}, {129000, 0, 3273, 50}, {130500, 0, 3273, 50}, {132000, 0, 3214, 50}, {133500, 0, 3009, 55},
+    {135000, 0, 3009, 60}, {136500, 1, 4137, 50}, {138000, 1, 3898, 40}, {139500, 0, 2979, 40}, {141000, 0, 2387, 40},
+    {142500, 0, 2387, 40}, {144000, 0, 2155, 45}, {145500, 0, 2298, 50}, {147000, 0, 2298, 55}, {148500, 1, 3384, 45},
+    {150000, 0, 3433, 45}, {151500, 0, 2962, 45}, {153000, 0, 2870, 45}, {154500, 0, 2870, 50}, {156000, 1, 3675, 40},
+    {157500, 1, 3496, 30}, {159000, 0, 3132, 30}, {160500, 0, 3132, 30}, {162000, 0, 2761, 30}, {163500, 0, 2630, 35},
+    {165000, 1, 2630, 25}, {166500, 0, 2632, 25}, {168000, 0, 2682, 25}, {169500, 0, 2797, 25}, {171000, 0, 2797, 30},
+    {172500, 0, 2921, 35}, {174000, 0, 3121, 40}, {175500, 0, 3203, 45}, {177000, 0, 3203, 50}, {178500, 1, 3659, 40},
+    {180000, 1, 4904, 30}, {181500, 0, 4228, 30}, {183000, 0, 4228, 30}, {184500, 0, 3817, 30}, {186000, 0, 3411, 35},
+    {187500, 0, 3040, 40}, {189000, 0, 3040, 45}, {190500, 0, 3072, 50}, {192000, 1, 4247, 40}, {193500, 0, 3813, 40},
+    {195000, 1, 3813, 30}, {196500, 1, 3569, 20}, {198000, 1, 3424, 10}, {199500, 1, 7903, 10}, {201000, 1, 7903, 10},
+    {202500, 1, 5463, 10}, {204000, 0, 4203, 15}, {205500, 0, 4203, 20}, {207000, 0, 3685, 25}, {208500, 0, 3284, 30},
+    {210000, 0, 3065, 35}, {211500, 0, 2809, 40}, {213000, 0, 2809, 45}, {214500, 0, 2722, 50}, {216000, 0, 3071, 55},
+    {217500, 0, 4346, 60}, {219000, 0, 4346, 65}, {220500, 0, 16666, 70}, {222000, 0, 30047, 75}, {223500, 1, 39197, 65},
+    {225000, 1, 39197, 55}, {226500, 0, 24982, 55}, {228000, 0, 15534, 55}, {229500, 0, 10769, 55}, {231000, 0, 10769, 60},
+    {232500, 0, 12950, 65}, {234000, 0, 15653, 70}, {235500, 0, 23159, 75}, {237000, 0, 23159, 75}, {238500, 0, 28935, 75},
+    {240000, 0, 30831, 75}, {241500, 0, 30932, 75}, {243000, 0, 30932, 75}, {244500, 0, 36985, 75}, {246000, 0, 32713, 75},
+    {247500, 0, 31348, 75}, {249000, 0, 31348, 75}, {250500, 0, 32480, 75}, {252000, 0, 30804, 75}, {253500, 0, 29546, 75},
+    {255000, 0, 29546, 75}, {256500, 0, 28983, 75}, {258000, 0, 29172, 75}, {259500, 0, 28459, 75}, {261000, 0, 28459, 75},
+    {262500, 0, 30997, 75}, {264000, 0, 27919, 75}, {265500, 0, 29127, 75}, {267000, 0, 29127, 75}, {268500, 0, 30590, 75},
+    {270000, 0, 30778, 75}, {271500, 0, 33351, 75}, {273000, 0, 33351, 75}, {274500, 0, 31055, 75}, {276000, 0, 33060, 75},
+    {277500, 0, 33060, 75}, {279000, 0, 34069, 75}, {280500, 0, 32614, 75}, {282000, 0, 35907, 75}, {283500, 0, 35907, 75},
+    {285000, 0, 35323, 75}, {286500, 0, 35744, 75}, {288000, 0, 35006, 75}, {289500, 0, 35006, 75}, {291000, 0, 36516, 75},
+    {292500, 0, 32383, 75}, {294000, 0, 34393, 75}, {295500, 0, 34393, 75}, {297000, 0, 33579, 75}, {298500, 0, 33748, 75},
+    {300000, 0, 42144, 75}, {301500, 0, 42144, 75}, {303000, 0, 37994, 75}, {304500, 0, 39280, 75}, {306000, 0, 36831, 75},
+    {307500, 0, 36831, 75}, {309000, 0, 34179, 75}, {310500, 0, 38341, 75}, {312000, 0, 41088, 75}, {313500, 0, 41088, 75},
+    {315000, 0, 38247, 75}, {316500, 0, 41595, 75}, {318000, 0, 43240, 75}, {319500, 0, 43240, 75}, {321000, 0, 43956, 75},
+    {322500, 0, 40200, 75}, {324000, 1, 42029, 65}, {325500, 0, 42029, 65}, {327000, 0, 30822, 65}, {328500, 0, 26232, 65},
+    {330000, 0, 26506, 70}, {331500, 0, 26506, 75}, {333000, 0, 32356, 75}, {334500, 0, 39761, 75}, {336000, 0, 37645, 75},
+    {337500, 0, 37645, 75}, {339000, 0, 41471, 75}, {340500, 0, 43727, 75}, {342000, 1, 52465, 65}, {343500, 1, 52465, 55},
+    {345000, 0, 34741, 55}, {346500, 0, 20449, 55}, {348000, 0, 13735, 55}, {349500, 0, 13735, 60}, {351000, 0, 13735, 65},
+    {352500, 0, 20092, 70}, {354000, 1, 25802, 60}, {355500, 1, 25802, 50}, {357000, 0, 19060, 50}, {358500, 0, 12366, 50},
+    {360000, 0, 9103, 50}, {361500, 0, 9103, 55}, {363000, 0, 7762, 60}, {364500, 0, 9959, 65}, {366000, 0, 13120, 70},
+    {367500, 0, 13120, 75}, {369000, 0, 20965, 75}, {370500, 0, 28273, 75}, {372000, 0, 32931, 75}, {373500, 0, 32931, 75},
+    {375000, 0, 35581, 75}, {376500, 0, 38559, 75}, {378000, 0, 37789, 75}, {379500, 0, 37789, 75}, {381000, 1, 42040, 65},
+    {382500, 1, 36806, 55}, {384000, 0, 21212, 55}, {385500, 0, 21212, 55}, {387000, 0, 11311, 55}, {388500, 0, 6362, 60},
+    {390000, 0, 3888, 65}, {391500, 0, 3888, 70}, {393000, 0, 2652, 75}, {394500, 0, 2032, 75},
+};
+constexpr int SolS1QualityCap = 75;
+
+/// Replays SolS1 from \a fromMs to \a toMs into \a state (1080p, adaptive, own client with HEVC/AV1,
+/// Sol's software encoders). Returns the time of the first switch to a slow-link codec, if any.
+std::optional<int> replaySolS1(State &state, Clock::time_point &now, int fromMs, int toMs, QString *reason = nullptr)
+{
+    auto in = input(SoftwareEncoding::Auto, softwareEverything());
+    in.qualityCap = SolS1QualityCap;
+    for (const auto &tick : SolS1) {
+        if (tick.ms < fromMs || tick.ms > toMs) continue;
+        now = T0 + std::chrono::milliseconds(tick.ms);
+        in.congested = tick.congested;
+        in.bandwidthKbps = quint32(tick.kbps);
+        in.quality = quint8(tick.quality);
+        const auto d = step(state, in, now);
+        if (state.slowLink) {
+            if (reason) *reason = d.reason;
+            return tick.ms;
+        }
+    }
+    return std::nullopt;
+}
+
 }
 
 class CodecPolicyTest : public QObject
@@ -314,11 +409,13 @@ private Q_SLOTS:
 
         // Hardware has no guard; the blocked software backends stay blocked for CpuBlockFor.
         in.encodeLoadP95.reset();
-        run(state, in, now, 60s);
+        run(state, in, now, 270s);
         QCOMPARE(*state.current, (Choice{Family::Avc, true}));
-        run(state, in, now, 90s);
+        d = run(state, in, now, 60s);
         QCOMPARE(*state.current, (Choice{Family::Av1, false})); // tried again after the block
-        QCOMPARE(state.preset, Preset::Efficient); // not a guard switch
+        // AUD-FIX5 D5: said as a retry, at the preset the guard needed last time.
+        QVERIFY2(d.reason.startsWith(u"CPU guard: retrying software av1 after 3"), qPrintable(d.reason));
+        QCOMPARE(state.preset, Preset::Fastest);
     }
 
     // HEVC's ladder has three real presets: veryfast -> superfast -> ultrafast, then the codec.
@@ -1014,6 +1111,217 @@ private Q_SLOTS:
         QCOMPARE(order, (QStringList{QStringLiteral("rate"), QStringLiteral("preset"), QStringLiteral("preset")}));
         QCOMPARE(state.preset, Preset::Efficient);
         QVERIFY(!state.guardFrameRate);
+    }
+
+    // AUD-FIX5 D2: the Sol S1 pass replayed (SolS1). Under the 6 Mbit/s tbf congestion came in
+    // 1.5-3 s runs every 9-14 s (the D1 in-flight cap drains the backlog), so "5 s unbroken" never
+    // fired and the link was never judged slow. The window must see it within ~15 s of the first
+    // congestion.
+    void slowLinkFromTheSolThrottle()
+    {
+        const auto firstCongestedFrom = [](int fromMs) {
+            for (const auto &tick : SolS1) {
+                if (tick.ms >= fromMs && tick.congested) return tick.ms;
+            }
+            return -1;
+        };
+        // From just before the tbf.
+        State state;
+        auto now = T0;
+        QString reason;
+        const auto at = replaySolS1(state, now, 43000, 194000, &reason);
+        QVERIFY(at);
+        const int first = firstCongestedFrom(44000);
+        qInfo() << "tbf pass: first congestion at T+" << first / 1000.0 << "s, slow at T+" << *at / 1000.0 << "s:" << reason;
+        QVERIFY(*at - first <= 15000);
+        QVERIFY2(reason.startsWith(u"slow link (congested in"), qPrintable(reason));
+        QCOMPARE(*state.current, (Choice{Family::Av1, false}));
+        QCOMPARE(state.applied.maxFrameRate, 30);
+        QVERIFY(state.applied.targetKbps > 0 && state.applied.targetKbps < 6000);
+
+        // From the end of the stream's warm-up: the link that went slow before the tbf (send
+        // rate down to ~3 Mbit/s at T+23 s) is caught as well.
+        State early;
+        auto t = T0;
+        const auto earlyAt = replaySolS1(early, t, 20000, 194000);
+        QVERIFY(earlyAt);
+        const int earlyFirst = firstCongestedFrom(20000);
+        qInfo() << "from warm-up: first congestion at T+" << earlyFirst / 1000.0 << "s, slow at T+" << *earlyAt / 1000.0 << "s";
+        QVERIFY(*earlyAt - earlyFirst <= 15000);
+    }
+
+    // AUD-FIX5 D2: ...and back once the throttle is gone (the AUD-FIX4 recovery, from the state
+    // the replay left): AV1 at the probed cap, the link then carries anything.
+    void solThrottleRemovedReturnsToAvc()
+    {
+        State state;
+        auto now = T0;
+        QVERIFY(replaySolS1(state, now, 43000, 194000));
+        auto in = input(SoftwareEncoding::Auto, softwareEverything());
+        in.quality = 75;
+        in.qualityCap = SolS1QualityCap;
+        const auto removed = now;
+        Decision back{};
+        while (softwarePrivate(*state.current) && now - removed < 300s) {
+            now += 1500ms;
+            const quint32 demand = softwarePrivate(*state.current) ? state.applied.targetKbps : 20000u;
+            in.bandwidthKbps = demand;
+            in.congested = false;
+            const auto d = step(state, in, now);
+            if (d.changed) back = d;
+        }
+        const auto took = std::chrono::duration_cast<std::chrono::seconds>(now - removed);
+        qInfo() << "back to avc after" << took.count() << "s:" << back.reason;
+        QCOMPARE(*state.current, (Choice{Family::Avc, false}));
+        QVERIFY2(back.reason.contains(u"link recovered"), qPrintable(back.reason));
+        QVERIFY(took <= (ProbeHold + RestartBitrateRaiseInterval + 3s) * 4 + RecoverHold + 10s);
+    }
+
+    // AUD-FIX5 D2: a normal link with a congestion blip now and then is not slow, even when its
+    // goodput is demand-limited under the threshold. The real adaptive quality climbs back to its
+    // cap between blips; and the Sol free-link stretch (mandelbrot, T+218 s on) stays normal.
+    void normalLinkWithShortCongestionIsNotSlow()
+    {
+        using namespace std::chrono;
+        State sol;
+        auto t = T0;
+        QVERIFY(!replaySolS1(sol, t, 218000, 1000000));
+        QCOMPARE(*sol.current, (Choice{Family::Avc, false}));
+
+        // \a congestedAt(tick): whether tick n is congested; \a kbpsAt(tick): the goodput.
+        const auto simulate = [](const auto &congestedAt, const auto &kbpsAt, int ticks) -> std::optional<int> {
+            auto in = input(SoftwareEncoding::Auto, softwareEverything());
+            in.qualityCap = 75;
+            State state;
+            auto now = T0;
+            int quality = 75;
+            Clock::time_point lastStepDown{};
+            for (int n = 0; n < ticks; ++n) {
+                now += 1500ms;
+                const bool congested = congestedAt(n);
+                const auto result = KRdp::AdaptiveQuality::step({
+                    .current = quality,
+                    .cap = 75,
+                    .averageRtt = congested ? microseconds(60000) : microseconds(10000),
+                    .minimumRtt = microseconds(10000),
+                    .backlogged = false,
+                    .climbAllowed = now - lastStepDown >= KRdp::AdaptiveQuality::ClimbHoldAfterStepDown,
+                });
+                if (result.next < quality) lastStepDown = now;
+                quality = result.next;
+                in.quality = quint8(quality);
+                in.congested = congested;
+                in.bandwidthKbps = quint32(kbpsAt(n));
+                const auto d = step(state, in, now);
+                if (state.slowLink) {
+                    qInfo() << "slow at tick" << n << ":" << d.reason;
+                    return n;
+                }
+            }
+            return std::nullopt;
+        };
+        // 30 min: a one-tick blip every 30 s and a two-tick one every 60 s, in between (so a blip
+        // every 15 s on average); 4-12 Mbit/s (a light desktop never fills a LAN).
+        const auto blips = [](int n) {
+            return n % 20 == 5 || n % 40 == 15 || n % 40 == 16;
+        };
+        const auto light = [](int n) {
+            return 4000 + (n * 7919) % 8000;
+        };
+        QVERIFY(!simulate(blips, light, 1200));
+        // The same link at 40 Mbit/s of motion: never slow either.
+        QVERIFY(!simulate(blips, [](int) { return 40000; }, 1200));
+        // The Sol pattern with the same adaptive quality: two congested ticks every 8 (12 s), 2-4.5
+        // Mbit/s. Slow within 15 s of the first congestion (tick 0).
+        const auto saturated = [](int n) {
+            return n % 8 < 2;
+        };
+        const auto slow = simulate(saturated, [](int n) { return 2000 + (n * 7919) % 2500; }, 200);
+        QVERIFY(slow);
+        QVERIFY(*slow * 1500 <= 15000);
+    }
+
+    // AUD-FIX5 D5 (Sol S2, `prefer`): after the guard's AV1 -> HEVC -> AVC fallback, AV1's block ran
+    // out after 120 s and the policy went round again twice (reason "encoders or client codecs
+    // changed"). Now a retry says so, and under sustained heavy load the retries back off: 5, 10,
+    // 20, 40, 60 min, the failed retry falling straight through to AVC.
+    void guardRetryBacksOff()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything());
+        State state;
+        auto now = T0;
+        QCOMPARE(step(state, in, now).choice, (Choice{Family::Av1, false}));
+        struct Switch {
+            Clock::time_point at;
+            Choice to;
+            QString reason;
+        };
+        QList<Switch> switches;
+        // Full-screen motion for 3 h: no software HEVC/AV1 preset keeps up; libx264 does (0.55).
+        while (now - T0 < 3h) {
+            now += 1500ms;
+            in.encodeLoadP95 = softwarePrivate(*state.current) ? 1.3 : 0.55;
+            const auto d = step(state, in, now);
+            if (d.changed) switches.append({now, d.choice, d.reason});
+        }
+        QList<Clock::time_point> retries;
+        for (const auto &s : switches) {
+            QVERIFY2(!s.reason.contains(u"encoders or client codecs changed"), qPrintable(s.reason));
+            if (s.reason.startsWith(u"CPU guard: retrying")) {
+                retries.append(s.at);
+                QVERIFY2(s.reason.contains(u"retrying software av1 after"), qPrintable(s.reason)); // the best codec, not HEVC
+            }
+        }
+        qInfo() << switches.size() << "switches," << retries.size() << "retries in 3 h";
+        for (const auto &s : switches) {
+            qInfo().noquote() << "  +" << std::chrono::duration_cast<std::chrono::seconds>(s.at - T0).count() << "s" << familyName(s.to.family) << ":" << s.reason;
+        }
+        // No more than one retry in any 10 min.
+        for (qsizetype i = 1; i < retries.size(); ++i) {
+            QVERIFY(retries[i] - retries[i - 1] >= 10min);
+        }
+        // The gaps grow: 5 min (+ the fallback), then about 10, 20, 40, 60 (the cap).
+        QVERIFY(retries.size() >= 4);
+        QVERIFY(retries[1] - retries[0] > retries[0] - T0);
+        QVERIFY(retries[2] - retries[1] > retries[1] - retries[0]);
+        QVERIFY(retries.last() - retries[retries.size() - 2] <= CpuBlockMax + 2min);
+        // Every failed retry goes AV1 -> AVC directly (HEVC is held back too): two switches each.
+        QVERIFY(switches.size() <= 2 + 2 * retries.size() + 1);
+    }
+
+    // D5: the back-off starts over once the content gets lighter: the running encoder stays under
+    // PresetRecoverBelow for GuardForgiveAfter.
+    void guardBackOffStartsOverWhenTheLoadDrops()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything());
+        State state;
+        auto now = T0;
+        step(state, in, now);
+        const auto heavy = [&](Clock::duration duration) {
+            const auto end = now + duration;
+            while (now < end) {
+                now += 1500ms;
+                in.encodeLoadP95 = softwarePrivate(*state.current) ? 1.3 : 0.55;
+                step(state, in, now);
+            }
+        };
+        heavy(8min); // fallback, one failed retry at 5 min
+        QCOMPARE(state.guardRejections[size_t(Family::Av1)], 2);
+        QCOMPARE(*state.current, (Choice{Family::Avc, false}));
+        // Light content on libx264 for 6 min.
+        const auto end = now + 6min;
+        while (now < end) {
+            now += 1500ms;
+            in.encodeLoadP95 = 0.2;
+            step(state, in, now);
+        }
+        QCOMPARE(state.guardRejections[size_t(Family::Av1)], 0);
+        QCOMPARE(state.guardRejections[size_t(Family::Hevc)], 0);
+        // The next AV1 retry (its 10 min block ran out meanwhile) that fails is blocked 5 min, not 20.
+        heavy(3min);
+        QCOMPARE(state.guardRejections[size_t(Family::Av1)], 1);
+        const auto blockedFor = state.softwareBlockedUntil[size_t(Family::Av1)] - state.guardBlockedAt[size_t(Family::Av1)];
+        QVERIFY(blockedFor == Clock::duration(CpuBlockFor));
     }
 
     void loadWindowP95()

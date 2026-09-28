@@ -148,14 +148,56 @@ struct EncoderSettings {
 constexpr double SlowBelowMbps1080p = 15.0;
 constexpr double FastAboveMbps1080p = 25.0;
 constexpr qint64 ReferencePixels = 1920LL * 1080LL;
-/// How long the link must look slow (or fast again) before the state flips.
+/// How long the link must look slow without a break (or fast again) before the state flips.
 constexpr auto LinkHold = std::chrono::seconds(5);
+/**
+ * AUD-FIX5 D2: the slow-link judgement over a sliding window. Since the AUD-FIX4 D1 in-flight cap,
+ * a saturated link no longer stays congested: the cap drains the backlog and adaptive quality
+ * drops the bitrate, so congestion clears within 1.5-6 s and comes back 9-14 s later (Sol, 6 Mbit/s
+ * tbf, 2026-09-28: congested in 20-40 % of the 1.5 s samples, adaptive quality swinging 30-65
+ * under its cap of 75, goodput 2-4.7 Mbit/s). "LinkHold without a break" never saw that. Over the
+ * last SlowWindow, with the goodput of every sample under the slow threshold (the link delivers
+ * less than a normal link would even while saturated), the link is slow when
+ * - it was congested in at least SlowCongestedShare of the samples, or
+ * - congestion came back (at least SlowEpisodes separate congested runs) while adaptive quality
+ *   never got back to its cap (the link cannot carry what is asked for), or
+ * - adaptive quality sat at its floor (SlowQualityFloor or less, under its cap) and was still hit
+ *   by congestion.
+ * A normal link with a congestion blip now and then gets back to its cap between blips, and its
+ * goodput under motion passes the threshold. The old rule (LinkHold of unbroken congestion) still
+ * applies. The window is judged once its oldest sample is SlowWindowFull old (samples come every
+ * 1.5 s) and starts empty after every change of the link state.
+ */
+constexpr auto SlowWindow = std::chrono::seconds(15);
+constexpr auto SlowWindowFull = std::chrono::milliseconds(13000);
+constexpr double SlowCongestedShare = 0.6;
+constexpr int SlowEpisodes = 2;
+constexpr int SlowQualityFloor = 15; ///< AdaptiveQuality::MinQuality plus one step up
 /// No two switches closer than this (the first choice is not a switch).
 constexpr auto MinSwitchInterval = std::chrono::seconds(10);
 /// The software encoder's p95 per-frame encode time must stay under this share of the frame budget.
 constexpr double CpuGuardLimit = 0.70;
-/// A software backend the guard stepped away from is not picked again for this long.
-constexpr auto CpuBlockFor = std::chrono::seconds(120);
+/**
+ * A software backend the guard stepped away from is not picked again for CpuBlockFor, doubled for
+ * every earlier time the guard stepped away from it (AUD-FIX5 D5: 5, 10, 20, 40, then 60 min).
+ * With a fixed 120 s, full-screen motion on Sol cycled AV1 -> HEVC -> AVC every 2 min, each
+ * cycle three encoder reopens and keyframes. When the guard steps away from a codec it had
+ * already stepped away from before, the other codecs it rejected earlier are held back as long,
+ * so a failed retry falls straight through to the codec that carried the load. The count starts
+ * over (GuardForgiveAfter) once the running software encoder has stayed under PresetRecoverBelow
+ * of its frame budget for that long: the content or the load really got lighter.
+ */
+constexpr auto CpuBlockFor = std::chrono::minutes(5);
+constexpr auto CpuBlockMax = std::chrono::minutes(60);
+constexpr auto GuardForgiveAfter = std::chrono::minutes(5);
+inline std::chrono::seconds guardBlockFor(int earlierRejections)
+{
+    auto block = std::chrono::duration_cast<std::chrono::seconds>(CpuBlockFor);
+    for (int i = 0; i < earlierRejections && block < CpuBlockMax; ++i) {
+        block *= 2;
+    }
+    return std::min(block, std::chrono::duration_cast<std::chrono::seconds>(CpuBlockMax));
+}
 
 /**
  * A live preset or bitrate change on software HEVC/AV1 reopens the encoder: one stall of about
@@ -293,15 +335,30 @@ struct Input {
     std::optional<double> encodeLoadP95;
     /// The adaptive-quality value (the cap when adaptive quality is off); unknown = DefaultQuality.
     std::optional<quint8> quality;
+    /// Adaptive quality's cap; unknown = the quality-based slow-link signals are off (SlowWindow).
+    std::optional<quint8> qualityCap;
+};
+
+/// One step()'s view of the link, kept for the slow-link window (SlowWindow).
+struct LinkSample {
+    Clock::time_point at;
+    bool congested = false;
+    quint32 kbps = 0;
+    bool belowCap = false; ///< adaptive quality under its cap (both known)
+    bool atFloor = false; ///< ...and at SlowQualityFloor or less
 };
 
 struct State {
     std::optional<Choice> current;
     bool slowLink = false;
-    Clock::time_point slowSince{}; ///< epoch = not counting
+    Clock::time_point slowSince{}; ///< unbroken congestion since (epoch = not counting)
+    QList<LinkSample> linkWindow; ///< the last SlowWindow of samples while the link is not slow
     Clock::time_point fastSince{};
     Clock::time_point lastSwitch{};
     std::array<Clock::time_point, 3> softwareBlockedUntil{}; ///< per Family, by the CPU guard
+    std::array<int, 3> guardRejections{}; ///< per Family: how often the guard stepped away from it (D5 back-off)
+    std::array<Clock::time_point, 3> guardBlockedAt{}; ///< per Family: the guard's last step away (epoch = retried since)
+    Clock::time_point guardCalmSince{}; ///< software encoder under PresetRecoverBelow since (GuardForgiveAfter)
     Preset preset = Preset::Efficient; ///< of the current software HEVC/AV1 encoder
     std::optional<int> guardFrameRate; ///< the CPU guard's frame-rate cap (its last step)
     quint32 targetKbps = 0; ///< target bitrate of a software HEVC/AV1 encoder (quality, capped by the link)
@@ -470,6 +527,61 @@ inline quint32 wantedTarget(const State &state, const Input &in)
     }
     return std::max(target, MinTargetKbps);
 }
+
+/**
+ * AUD-FIX5 D2: adds this step's sample to \a state's slow-link window and judges the window
+ * (see SlowWindow). Returns why the link is slow, or an empty string. Needs \a in's goodput.
+ */
+inline QString judgeSlowWindow(State &state, const Input &in, Clock::time_point now)
+{
+    LinkSample sample;
+    sample.at = now;
+    sample.congested = in.congested;
+    sample.kbps = *in.bandwidthKbps;
+    if (in.quality && in.qualityCap) {
+        sample.belowCap = *in.quality < *in.qualityCap;
+        sample.atFloor = sample.belowCap && *in.quality <= SlowQualityFloor;
+    }
+    auto &window = state.linkWindow;
+    window.append(sample);
+    while (!window.isEmpty() && now - window.first().at > SlowWindow) {
+        window.removeFirst();
+    }
+    if (now - window.first().at < SlowWindowFull) {
+        return {};
+    }
+    const double threshold = slowBelowKbps(in.pixels);
+    int congested = 0;
+    int episodes = 0;
+    bool belowCap = true;
+    bool atFloor = true;
+    quint32 maxKbps = 0;
+    for (qsizetype i = 0; i < window.size(); ++i) {
+        const auto &s = window.at(i);
+        if (s.kbps >= threshold) {
+            return {}; // the link delivered what a normal one does
+        }
+        maxKbps = std::max(maxKbps, s.kbps);
+        if (s.congested) {
+            ++congested;
+            if (i == 0 || !window.at(i - 1).congested) ++episodes;
+        }
+        belowCap = belowCap && s.belowCap;
+        atFloor = atFloor && s.atFloor;
+    }
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now - window.first().at).count();
+    const QString counts = QStringLiteral("congested in %1 of %2 samples over %3 s, at most %4 kbit/s").arg(congested).arg(window.size()).arg(seconds).arg(maxKbps);
+    if (congested >= SlowCongestedShare * window.size()) {
+        return counts;
+    }
+    if (belowCap && episodes >= SlowEpisodes) {
+        return counts + QStringLiteral(", %1 times, adaptive quality under its cap throughout").arg(episodes);
+    }
+    if (atFloor && congested > 0) {
+        return counts + QStringLiteral(", adaptive quality at its floor");
+    }
+    return {};
+}
 }
 
 inline Decision step(State &state, const Input &in, Clock::time_point now)
@@ -490,25 +602,37 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
         state.fillSince = now;
     }
     // Link state, with hysteresis. Goodput alone is demand-limited (a still desktop sends
-    // little), so "slow" also needs congestion; "fast again" needs goodput proving capacity,
-    // or (AUD-FIX4 D2) the probed cap staying clear at its ceiling.
+    // little), so "slow" also needs congestion, unbroken for LinkHold or (AUD-FIX5 D2) recurring
+    // over SlowWindow; "fast again" needs goodput proving capacity, or (AUD-FIX4 D2) the probed
+    // cap staying clear at its ceiling.
+    if (!in.adaptive) {
+        state.linkWindow.clear();
+    }
     if (in.adaptive && in.bandwidthKbps) {
         const double kbps = *in.bandwidthKbps;
         if (!state.slowLink) {
             const bool slowSample = kbps < slowBelowKbps(in.pixels) && in.congested;
+            QString slowBecause;
             if (!slowSample) {
                 state.slowSince = {};
             } else if (state.slowSince == Clock::time_point{}) {
                 state.slowSince = now;
             } else if (now - state.slowSince >= LinkHold) {
+                slowBecause = QStringLiteral("%1 kbit/s").arg(*in.bandwidthKbps);
+            }
+            if (slowBecause.isEmpty()) {
+                slowBecause = detail::judgeSlowWindow(state, in, now);
+            }
+            if (!slowBecause.isEmpty()) {
                 state.slowLink = true;
                 state.slowSince = {};
                 state.clearSince = {};
+                state.linkWindow.clear();
                 if (state.recoveredAt != Clock::time_point{}) {
                     // Slow again soon after a recovery: the next one needs a longer clear run.
                     state.recoverFlaps = now - state.recoveredAt < RecoverFlapWindow ? std::min(state.recoverFlaps + 1, RecoverFlapMaxDoublings) : 0;
                 }
-                linkReason = QStringLiteral("slow link (%1 kbit/s)").arg(*in.bandwidthKbps);
+                linkReason = QStringLiteral("slow link (%1)").arg(slowBecause);
             }
         } else {
             const bool fastSample = kbps > fastAboveKbps(in.pixels);
@@ -521,6 +645,7 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
                 state.fastSince = {};
                 state.clearSince = {};
                 state.fillSince = {};
+                state.linkWindow.clear();
                 state.recoveredAt = now;
                 linkReason = QStringLiteral("link recovered (%1 kbit/s)").arg(*in.bandwidthKbps);
             }
@@ -541,6 +666,7 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
             state.fastSince = {};
             state.clearSince = {};
             state.fillSince = {};
+            state.linkWindow.clear();
             state.recoveredAt = now;
             const auto held = std::chrono::duration_cast<std::chrono::seconds>(now - (probing ? std::max(from, state.linkChangedAt) : from)).count();
             linkReason = probing ? QStringLiteral("link recovered (%1 kbit/s for %2 s without congestion)").arg(*in.bandwidthKbps).arg(held)
@@ -578,13 +704,41 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
             }
         }
     }
-    // Second step: step away from this software codec (blocked for CpuBlockFor).
+    // Second step: step away from this software codec, blocked for CpuBlockFor with the AUD-FIX5
+    // D5 back-off (guardBlockFor()).
     if (overBudget && !presetStepPending && reconfigureAllowed) {
-        auto &blocked = state.softwareBlockedUntil[size_t(state.current->family)];
+        const Family family = state.current->family;
+        auto &blocked = state.softwareBlockedUntil[size_t(family)];
         if (now >= blocked) {
-            blocked = now + CpuBlockFor;
-            guardReason = loadText();
+            const auto blockFor = guardBlockFor(state.guardRejections[size_t(family)]);
+            const bool again = state.guardRejections[size_t(family)] > 0;
+            blocked = now + blockFor;
+            state.guardRejections[size_t(family)] = std::min(state.guardRejections[size_t(family)] + 1, 16);
+            state.guardBlockedAt[size_t(family)] = now;
+            if (again && family != Family::Avc) {
+                // A retry that failed: the other codecs the guard rejected before wait as long,
+                // so this falls through to the codec that carried the load.
+                for (const Family other : {Family::Hevc, Family::Av1}) {
+                    const auto i = size_t(other);
+                    if (other != family && state.guardRejections[i] > 0 && state.softwareBlockedUntil[i] < blocked) {
+                        state.softwareBlockedUntil[i] = blocked;
+                        state.guardBlockedAt[i] = now;
+                    }
+                }
+            }
+            guardReason = loadText()
+                + QStringLiteral("; not retried for %1 min").arg(std::chrono::duration_cast<std::chrono::minutes>(blockFor).count());
         }
+    }
+    // D5: a software encoder that stays well within its budget for GuardForgiveAfter means the
+    // content or the load got lighter: the back-off starts over (blocks already running stay).
+    const bool calm = state.current && !state.current->hardware && in.encodeLoadP95 && *in.encodeLoadP95 < PresetRecoverBelow;
+    if (!calm) {
+        state.guardCalmSince = {};
+    } else if (state.guardCalmSince == Clock::time_point{}) {
+        state.guardCalmSince = now;
+    } else if (now - state.guardCalmSince >= GuardForgiveAfter) {
+        state.guardRejections.fill(0);
     }
 
     // Low-load window for stepping the preset back up (see PresetRecoverBelow).
@@ -684,16 +838,30 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
         }
         return finish({want, false, {}});
     }
+    // AUD-FIX5 D5: a codec whose guard block ran out is a retry, not a change of encoders or of
+    // what the client decodes (the reason used to say so).
+    const auto wantIndex = size_t(want.family);
+    const bool guardRetry = softwarePrivate(want) && state.guardBlockedAt[wantIndex] != Clock::time_point{} && now >= state.softwareBlockedUntil[wantIndex];
+    const auto retryText = [&] {
+        return QStringLiteral("CPU guard: retrying software %1 after %2 s held back")
+            .arg(QLatin1String(familyName(want.family)))
+            .arg(std::chrono::duration_cast<std::chrono::seconds>(now - state.guardBlockedAt[wantIndex]).count());
+    };
     const QString reason = !guardReason.isEmpty() ? guardReason
         : !linkReason.isEmpty()                    ? linkReason
+        : guardRetry                               ? retryText()
                                                    : QStringLiteral("encoders or client codecs changed");
     if (now - state.lastSwitch < MinSwitchInterval) {
         return finish({*state.current, false, reason + QStringLiteral(" (waiting for the switch interval)")});
     }
     // A new encoder: the guard's frame-rate step and bitrate start over. After the guard left a
     // software codec, the next software codec starts at its fastest preset (PERF.md: AV1 M11,
-    // then HEVC ultrafast); otherwise at the efficient one.
-    const bool fromGuard = !guardReason.isEmpty();
+    // then HEVC ultrafast); so does a guard retry (it needed that preset last time); otherwise
+    // the efficient one.
+    const bool fromGuard = !guardReason.isEmpty() || guardRetry;
+    if (softwarePrivate(want)) {
+        state.guardBlockedAt[wantIndex] = {}; // this retry is used up
+    }
     state.current = want;
     state.lastSwitch = now;
     state.lastReconfigure = now;

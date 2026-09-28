@@ -1051,6 +1051,8 @@ void VideoStream::stepCodecPolicy(bool congested)
     // Software HEVC/AV1 follow adaptive quality through their target bitrate (a CRF change would
     // reopen the encoder; libx265 changes its bitrate in place): CodecPolicy::qualityKbps().
     in.quality = d->quality.load();
+    // AUD-FIX5 D2: quality held under its cap while congestion keeps coming back is a slow link.
+    in.qualityCap = d->qualityCap.load();
     if (!d->codecPolicy.current->hardware) {
         in.encodeLoadP95 = d->encodeLoad.p95();
     }
