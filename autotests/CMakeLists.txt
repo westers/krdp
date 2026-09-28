@@ -465,6 +465,18 @@ if(TARGET krdpctl-probe)
     set_tests_properties(RdpPreAuthLoopbackTest PROPERTIES TIMEOUT 180)
 endif()
 
+# AUD-FIX4 D1: the in-flight window on a throttled and then blocked link, end to end.
+if(TARGET krdpctl-probe)
+    add_executable(VideoFlowLoopbackTest VideoFlowLoopbackTest.cpp)
+    target_include_directories(VideoFlowLoopbackTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
+    target_include_directories(VideoFlowLoopbackTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+    target_link_libraries(VideoFlowLoopbackTest PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
+    target_compile_definitions(VideoFlowLoopbackTest PRIVATE KRDPCTL_PROBE="$<TARGET_FILE:krdpctl-probe>")
+    add_dependencies(VideoFlowLoopbackTest krdpctl-probe)
+    add_test(NAME VideoFlowLoopbackTest COMMAND VideoFlowLoopbackTest)
+    set_tests_properties(VideoFlowLoopbackTest PROPERTIES TIMEOUT 180)
+endif()
+
 # AUD-S4: ListenAddress parsing (header-only, server/).
 add_executable(ListenAddressTest ListenAddressTest.cpp)
 target_include_directories(ListenAddressTest PRIVATE ${CMAKE_SOURCE_DIR}/server)

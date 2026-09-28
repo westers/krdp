@@ -53,6 +53,15 @@ constexpr auto QualityUpdateInterval = clk::milliseconds(1500);
 // Don't take adaptive-quality decisions until NetworkDetection has had a few
 // RTT probes (every 70 ms) to establish a minimum-RTT baseline.
 constexpr auto WarmupAfterStreamStart = clk::seconds(3);
+// AUD-FIX4 D1: while the in-flight window is full the submission thread looks
+// again this often (an ack also wakes it at once).
+constexpr auto WindowPollInterval = clk::milliseconds(10);
+// A decision interval in which frames waited this long in total for the window,
+// or any frame was coalesced away, counts as congestion for adaptive quality and
+// the codec policy.
+constexpr auto WindowPressureHeld = clk::milliseconds(200);
+// Between two info-level "window full" lines.
+constexpr auto WindowLogInterval = clk::seconds(5);
 
 // Atomically lowers `value` to `candidate` if it's lower, otherwise leaves it
 // alone. Used to track how close the client got to caught up since the
@@ -363,11 +372,13 @@ public:
     std::optional<CodecPolicy::EncoderSettings> encoderSettings;
     // The backend an encoder of the current codec reported, and whether the client heard it.
     std::optional<bool> reportedHardware;
-    // Encode-cost sampling for the CPU guard: process CPU time per encoded frame, spread over
-    // the cores, against the frame budget. framesEncoded counts queueFrame() calls.
+    // Encode-cost sampling for the CPU guard (CodecPolicy::encodeLoadSample()): process CPU time
+    // per encoded frame over the encoder's parallelism, against the frame budget, and the
+    // delivered frame rate. framesEncoded counts queueFrame() calls.
     std::atomic<int> framesEncoded = 0;
     int framesAtLastSample = 0;
     qint64 cpuNsAtLastSample = -1;
+    clk::steady_clock::time_point loadSampledAt{};
     // -1 = not negotiated yet (no CapsAdvertise received). Written on the
     // FreeRDP peer thread (onCapsAdvertise), read from any thread via
     // negotiatedCodec()/codecForSessions().
@@ -386,6 +397,48 @@ public:
     // thread) rebuilds the surfaces. Summed because one quality steers every
     // session feeding this connection.
     std::atomic<qint64> surfacePixels = 0;
+    // AUD-FIX4 D1: the in-flight window. Its inputs are refreshed on the main thread
+    // (updateAdaptiveQuality()) and read by the submission thread.
+    std::atomic<qint64> windowMinRttUs = 0;
+    std::atomic<quint32> windowRateKbps = 0;
+    std::atomic<int> surfaceCount = 1;
+    // Monitors whose queued frames were coalesced away: their P-frames are dropped until a
+    // keyframe arrives (queueFrame()). Guarded by frameQueueMutex, like the queue.
+    std::vector<char> starvedMonitors;
+    std::vector<clk::steady_clock::time_point> starvedKeyFrameRequestAt;
+    // Time frames waited for the window and frames coalesced since the last decision
+    // (updateAdaptiveQuality() reads and resets them).
+    std::atomic<qint64> heldNsSinceDecision = 0;
+    std::atomic<int> droppedSinceDecision = 0;
+    // Submission thread only. heldSince: the last look at a full window (epoch = not held).
+    clk::steady_clock::time_point heldSince{};
+    clk::steady_clock::time_point lastWindowLog{};
+    bool loggedAckTimeout = false;
+    // flowStats().
+    std::atomic<int> statInFlight = 0;
+    std::atomic<int> statMaxInFlight = 0;
+    std::atomic<int> statWindowFrames = FrameQueuePolicy::MinInFlightFrames;
+    std::atomic<qint64> statWindowBytes = FrameQueuePolicy::MinInFlightBytes;
+    std::atomic<quint64> statSent = 0;
+    std::atomic<quint64> statAcknowledged = 0;
+    std::atomic<quint64> statDropped = 0;
+    std::atomic<quint64> statKeyFrameRequests = 0;
+    std::atomic<bool> statSuspended = false;
+
+    FrameQueuePolicy::WindowLimits windowLimits() const
+    {
+        return FrameQueuePolicy::windowLimits(requestedFrameRate.load(), surfaceCount.load(), clk::microseconds(windowMinRttUs.load()), windowRateKbps.load());
+    }
+    // Call with frameQueueMutex held.
+    bool starved(int monitorIndex) const
+    {
+        return monitorIndex >= 0 && size_t(monitorIndex) < starvedMonitors.size() && starvedMonitors[size_t(monitorIndex)];
+    }
+    // Call with frameQueueMutex held.
+    void clearStarved()
+    {
+        std::fill(starvedMonitors.begin(), starvedMonitors.end(), 0);
+    }
     // Backlog evidence for the adaptive-quality decision: the smallest number
     // of frames still unacknowledged right after any ack since the last
     // decision (INT_MAX = no ack since). Lowered on the connection thread in
@@ -472,6 +525,8 @@ bool VideoStream::initialize()
                 continue;
             }
 
+            requestStarvedKeyFrames(clk::steady_clock::now());
+
             VideoFrame nextFrame;
             {
                 std::unique_lock lock(d->frameQueueMutex);
@@ -485,10 +540,38 @@ bool VideoStream::initialize()
                 if (d->frameQueue.isEmpty()) {
                     continue;
                 }
+            }
+
+            // AUD-FIX4 D1: never more than the window in flight. While it is full the
+            // frames wait here (coalesced beyond MaxHeldFramesPerMonitor), and the peer
+            // thread, whose channel queue now holds at most a window of video, gets
+            // back to reading the client's acks and input.
+            const auto now = clk::steady_clock::now();
+            if (!windowOpen(now)) {
+                // Counted as it goes, so a hold that lasts past a decision still shows in it.
+                if (d->heldSince != clk::steady_clock::time_point{}) {
+                    d->heldNsSinceDecision.fetch_add(clk::duration_cast<clk::nanoseconds>(now - d->heldSince).count(), std::memory_order_relaxed);
+                }
+                d->heldSince = now;
+                holdFrames(now);
+                std::unique_lock lock(d->frameQueueMutex);
+                d->frameQueueCondition.wait_for(lock, WindowPollInterval); // an ack notifies
+                continue;
+            }
+            if (d->heldSince != clk::steady_clock::time_point{}) {
+                d->heldNsSinceDecision.fetch_add(clk::duration_cast<clk::nanoseconds>(now - d->heldSince).count(), std::memory_order_relaxed);
+                d->heldSince = {};
+            }
+            {
+                std::lock_guard lock(d->frameQueueMutex);
+                if (d->frameQueue.isEmpty()) {
+                    continue; // cleared meanwhile (layout change, disable)
+                }
                 // Always send in order: every encoded P-frame references the one
                 // before it, so skipping a queued frame would corrupt the client's
                 // decode until the next keyframe. The queue is bounded by
-                // queueFrame() clearing it whenever a new keyframe arrives.
+                // queueFrame() clearing it whenever a new keyframe arrives, and
+                // while the window is full by holdFrames().
                 nextFrame = d->frameQueue.takeFirst();
             }
             if (!sendFrame(nextFrame)) {
@@ -530,11 +613,13 @@ void VideoStream::close()
     {
         std::lock_guard lock(d->pendingFramesMutex);
         d->pendingFrames.clear();
+        d->statInFlight = 0;
         bumpAtomicMin(d->minPendingAfterAckSinceDecision, 0);
     }
     {
         std::lock_guard lock(d->frameQueueMutex);
         d->frameQueue.clear();
+        d->clearStarved();
     }
 
     d->gfxContext->Close(d->gfxContext.get());
@@ -552,6 +637,17 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
 
     {
         std::lock_guard lock(d->frameQueueMutex);
+        // AUD-FIX4 D1: this monitor's queued frames were coalesced away while the
+        // window was full, so a P-frame has no reference on the client: drop it
+        // until the keyframe that was asked for (or the next organic one) arrives.
+        if (d->starved(frame.monitorIndex)) {
+            if (!frame.isKeyFrame || frame.data.isEmpty()) {
+                d->statDropped.fetch_add(1, std::memory_order_relaxed);
+                d->droppedSinceDecision.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            d->starvedMonitors[size_t(frame.monitorIndex)] = 0;
+        }
         // A keyframe supersedes everything of its OWN monitor still waiting to
         // be sent, so that monitor's queue can never grow beyond one keyframe
         // interval. Never drop anything else: encoded P-frames must be sent in
@@ -585,6 +681,7 @@ void VideoStream::setEnabled(bool enabled)
     if (!enabled) {
         std::lock_guard lock(d->frameQueueMutex);
         d->frameQueue.clear();
+        d->clearStarved();
     }
     Q_EMIT enabledChanged();
 }
@@ -662,6 +759,7 @@ void VideoStream::setMonitorLayout(const QVector<VideoMonitor> &layout)
     // layoutMutex, and queueFrame() takes frameQueueMutex alone.
     std::lock_guard queueLock(d->frameQueueMutex);
     d->frameQueue.clear();
+    d->clearStarved(); // the new surfaces start from keyframes (sendFrame() asks for them)
 }
 
 void VideoStream::setAdaptiveQuality(bool enabled)
@@ -738,6 +836,16 @@ void VideoStream::setEncoderPolicy(const CodecPolicy::Encoders &encoders, CodecP
 {
     d->encoders = encoders;
     d->softwareEncoding = mode;
+}
+
+CodecPolicy::Encoders VideoStream::encoderPolicy() const
+{
+    return d->encoders;
+}
+
+CodecPolicy::SoftwareEncoding VideoStream::softwareEncoding() const
+{
+    return d->softwareEncoding;
 }
 
 CodecPolicy::Decision VideoStream::setPrivateCodecPolicy(const QVector<VideoCodec> &codecs, bool adaptive)
@@ -904,17 +1012,29 @@ void VideoStream::stepCodecPolicy(bool congested)
     // CPU guard input: only a software encoder has one.
     const qint64 cpuNs = processCpuNs();
     const int frames = d->framesEncoded.load();
+    const auto sampledAt = clk::steady_clock::now();
     if (!d->codecPolicy.current->hardware && cpuNs >= 0 && d->cpuNsAtLastSample >= 0) {
-        const int encoded = frames - d->framesAtLastSample;
-        if (encoded >= 5) {
-            const double cores = std::max(1, QThread::idealThreadCount());
-            const double perFrameMs = double(cpuNs - d->cpuNsAtLastSample) / 1e6 / encoded / cores;
-            const double budgetMs = 1000.0 / std::max(1, d->requestedFrameRate.load());
-            d->encodeLoad.add(perFrameMs / budgetMs);
+        // AUD-FIX4 D3: the estimated encode time per frame against the frame budget, over the
+        // encoder's own threads (not every core), plus delivered frames falling short of the cap.
+        const auto family = d->codecPolicy.current->family;
+        bool forcedOk = false;
+        const int forced = qEnvironmentVariableIntValue("KPIPEWIRE_SW_ENCODER_THREADS", &forcedOk);
+        const int threads = CodecPolicy::softwareEncoderThreads(family, QThread::idealThreadCount(), forcedOk ? std::optional<int>(forced) : std::nullopt);
+        const double seconds = clk::duration<double>(sampledAt - d->loadSampledAt).count();
+        const auto sample = CodecPolicy::encodeLoadSample(double(cpuNs - d->cpuNsAtLastSample) / 1e6,
+                                                          frames - d->framesAtLastSample,
+                                                          seconds,
+                                                          std::max(1, d->requestedFrameRate.load()),
+                                                          family,
+                                                          threads,
+                                                          d->surfaceCount.load());
+        if (sample) {
+            d->encodeLoad.add(*sample);
         }
     }
     d->cpuNsAtLastSample = cpuNs;
     d->framesAtLastSample = frames;
+    d->loadSampledAt = sampledAt;
 
     auto *network = d->session->networkDetection();
     CodecPolicy::Input in;
@@ -977,6 +1097,17 @@ void VideoStream::setChromaCapable(bool capable)
 
 void VideoStream::updateAdaptiveQuality()
 {
+    // AUD-FIX4 D1: the in-flight window follows the path (minimum RTT) and the rate the link
+    // carries; and a window that held frames back, or had to coalesce them, is congestion.
+    auto *networkForWindow = d->session->networkDetection();
+    if (networkForWindow) {
+        d->windowMinRttUs = clk::duration_cast<clk::microseconds>(networkForWindow->minimumRTT()).count();
+        d->windowRateKbps = networkForWindow->validBandwidthSamples() >= 2 ? quint32(networkForWindow->bandwidth()) : 0u;
+    }
+    const qint64 heldNs = d->heldNsSinceDecision.exchange(0);
+    const int coalesced = d->droppedSinceDecision.exchange(0);
+    const bool windowPressure = clk::nanoseconds(heldNs) >= WindowPressureHeld || coalesced > 0;
+
     std::optional<bool> policyCongested;
     // The codec policy steps after adaptive quality, on every path out of here, so a software
     // HEVC/AV1 target bitrate follows this interval's quality at once.
@@ -996,7 +1127,7 @@ void VideoStream::updateAdaptiveQuality()
         }
         const bool congested = AdaptiveQuality::rttCongested(clk::duration_cast<clk::microseconds>(network->averageRTT()),
                                                              clk::duration_cast<clk::microseconds>(network->minimumRTT()))
-            || pending >= AdaptiveQuality::BacklogFrames;
+            || pending >= AdaptiveQuality::BacklogFrames || windowPressure;
         policyCongested = congested;
     }
     const bool audioPriority = d->session->audioPriorityActive();
@@ -1033,7 +1164,7 @@ void VideoStream::updateAdaptiveQuality()
     // neither after any ack this interval nor right now. Idle (pendingNow 0)
     // is never a backlog; a stall with no acks at all is (min(INT_MAX, now)).
     // Suppress only this startup-burst signal; RTT congestion remains active.
-    const bool backlogged = AdaptiveQuality::backlogIsPressure(now - d->streamingSince, minAfterAck, pendingNow, acksSuspended);
+    const bool backlogged = AdaptiveQuality::backlogIsPressure(now - d->streamingSince, minAfterAck, pendingNow, acksSuspended) || windowPressure;
 
     auto *network = d->session->networkDetection();
     const auto averageRtt = clk::duration_cast<clk::microseconds>(network->averageRTT());
@@ -1076,7 +1207,8 @@ void VideoStream::updateAdaptiveQuality()
     }
     qCDebug(KRDP) << "Adaptive quality ->" << bounded << "chroma=" << (chromaAvailable ? (result.chromaEnabled ? "on" : "off") : "n/a") << "("
                   << (result.congested ? "congested" : (backlogged ? "backlogged" : "clear")) << "rtt avg" << averageRtt.count() << "min" << minimumRtt.count()
-                  << "us, pending min-after-ack" << (minAfterAck == std::numeric_limits<int>::max() ? -1 : minAfterAck) << "now" << pendingNow << ", goodput" << network->bandwidth() << "kbit/s, cap"
+                  << "us, pending min-after-ack" << (minAfterAck == std::numeric_limits<int>::max() ? -1 : minAfterAck) << "now" << pendingNow
+                  << ", window held" << clk::duration_cast<clk::milliseconds>(clk::nanoseconds(heldNs)).count() << "ms, coalesced" << coalesced << ", goodput" << network->bandwidth() << "kbit/s, cap"
                   << d->qualityCap.load() << ")";
     if (chromaChanged) {
         Q_EMIT requestedChromaChanged(result.chromaEnabled);
@@ -1117,6 +1249,7 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         d->surfacePixels = 0;
         std::lock_guard lock(d->pendingFramesMutex);
         d->pendingFrames.clear();
+        d->statInFlight = 0;
         bumpAtomicMin(d->minPendingAfterAckSinceDecision, 0);
     }
 
@@ -1215,14 +1348,22 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
     static_assert(FrameQueuePolicy::FrameAckTracker::SuspendFrameAcknowledgement == SUSPEND_FRAME_ACKNOWLEDGEMENT);
     auto id = frameAcknowledge->frameId;
 
+    // AUD-FIX4 D1: an ack may open the in-flight window; wake the submission thread
+    // (after the lock below is released).
+    const auto wake = qScopeGuard([this] {
+        d->frameQueueCondition.notify_one();
+    });
     std::lock_guard lock(d->pendingFramesMutex);
 
-    switch (d->pendingFrames.acknowledge(id, frameAcknowledge->queueDepth)) {
+    const auto ack = d->pendingFrames.acknowledge(id, frameAcknowledge->queueDepth);
+    d->statInFlight = d->pendingFrames.inFlightFrames();
+    d->statSuspended = d->pendingFrames.suspended();
+    switch (ack) {
     case FrameQueuePolicy::FrameAckTracker::Ack::Unknown:
         qCDebug(KRDP) << "Got frame acknowledge for an unknown frame" << id;
         return CHANNEL_RC_OK;
     case FrameQueuePolicy::FrameAckTracker::Ack::Suspended:
-        qCInfo(KRDP) << "Client suspended frame acknowledgements; pending frames no longer count toward adaptive quality";
+        qCInfo(KRDP) << "Client suspended frame acknowledgements; pending frames no longer count toward adaptive quality, and the in-flight window becomes a time and socket budget";
         // Nothing is outstanding any more: a suspension counts as caught up.
         bumpAtomicMin(d->minPendingAfterAckSinceDecision, 0);
         return CHANNEL_RC_OK;
@@ -1230,6 +1371,7 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
         qCInfo(KRDP) << "Client resumed frame acknowledgements";
         break;
     case FrameQueuePolicy::FrameAckTracker::Ack::Acknowledged:
+        d->statAcknowledged.fetch_add(1, std::memory_order_relaxed);
         break;
     }
 
@@ -1303,6 +1445,7 @@ bool VideoStream::performReset(const QSize &desktopSize, const QVector<VideoMoni
     }
 
     d->surfacePixels = totalPixels;
+    d->surfaceCount = std::max<int>(1, surfaces.size());
     // resize() keeps the timestamps of the surfaces that survive this reset,
     // so a reset storm still cannot ask the encoder for more than one keyframe
     // per KeyFrameRequestMinInterval per surface.
@@ -1310,6 +1453,111 @@ bool VideoStream::performReset(const QSize &desktopSize, const QVector<VideoMoni
     d->loggedCreateSurfaceFailure = false;
 
     return true;
+}
+
+VideoStream::FlowStats VideoStream::flowStats() const
+{
+    FlowStats stats;
+    stats.inFlight = d->statInFlight.load();
+    stats.maxInFlight = d->statMaxInFlight.load();
+    stats.windowFrames = d->statWindowFrames.load();
+    stats.windowBytes = d->statWindowBytes.load();
+    stats.sent = d->statSent.load();
+    stats.acknowledged = d->statAcknowledged.load();
+    stats.dropped = d->statDropped.load();
+    stats.keyFrameRequests = d->statKeyFrameRequests.load();
+    stats.acksSuspended = d->statSuspended.load();
+    return stats;
+}
+
+bool VideoStream::windowOpen(clk::steady_clock::time_point now)
+{
+    const auto limits = d->windowLimits();
+    d->statWindowFrames = limits.frames;
+    d->statWindowBytes = limits.bytes;
+    std::lock_guard lock(d->pendingFramesMutex);
+    if (const int timedOut = d->pendingFrames.expire(now, limits); timedOut > 0 && !d->loggedAckTimeout) {
+        d->loggedAckTimeout = true;
+        qCWarning(KRDP) << "The client left" << timedOut << "frame(s) unacknowledged for"
+                        << clk::duration_cast<clk::seconds>(FrameQueuePolicy::AckTimeout).count() << "s; no longer counting them as in flight";
+    }
+    d->statInFlight = d->pendingFrames.inFlightFrames();
+    d->statSuspended = d->pendingFrames.suspended();
+    const qint64 socketQueued = d->pendingFrames.suspended() ? d->session->socketQueuedBytes() : -1;
+    return d->pendingFrames.canSend(limits, socketQueued);
+}
+
+void VideoStream::holdFrames(clk::steady_clock::time_point now)
+{
+    std::vector<int> starved;
+    int dropped = 0;
+    {
+        std::lock_guard lock(d->frameQueueMutex);
+        dropped = FrameQueuePolicy::coalesceHeldFrames(d->frameQueue, FrameQueuePolicy::MaxHeldFramesPerMonitor, starved);
+        for (const int monitor : starved) {
+            if (monitor < 0) {
+                continue;
+            }
+            if (size_t(monitor) >= d->starvedMonitors.size()) {
+                d->starvedMonitors.resize(size_t(monitor) + 1, 0);
+                d->starvedKeyFrameRequestAt.resize(size_t(monitor) + 1);
+            }
+            d->starvedMonitors[size_t(monitor)] = 1;
+        }
+    }
+    if (dropped > 0) {
+        d->statDropped.fetch_add(quint64(dropped), std::memory_order_relaxed);
+        d->droppedSinceDecision.fetch_add(dropped, std::memory_order_relaxed);
+        if (d->lastWindowLog == clk::steady_clock::time_point{} || now - d->lastWindowLog >= WindowLogInterval) {
+            d->lastWindowLog = now;
+            const auto limits = d->windowLimits();
+            int inFlight = 0;
+            qint64 bytes = 0;
+            {
+                std::lock_guard lock(d->pendingFramesMutex);
+                inFlight = d->pendingFrames.inFlightFrames();
+                bytes = d->pendingFrames.inFlightBytes();
+            }
+            QStringList monitors;
+            for (const int monitor : starved) {
+                monitors << QString::number(monitor);
+            }
+            qCInfo(KRDP).noquote() << QStringLiteral("Video: the client is behind (%1 frames, %2 KiB in flight; window %3 frames, %4 KiB); dropped %5 queued frame(s) of monitor %6, keyframe requested")
+                                          .arg(inFlight)
+                                          .arg(bytes / 1024)
+                                          .arg(limits.frames)
+                                          .arg(limits.bytes / 1024)
+                                          .arg(dropped)
+                                          .arg(monitors.join(QLatin1Char(',')));
+        }
+    }
+    requestStarvedKeyFrames(now);
+}
+
+void VideoStream::requestStarvedKeyFrames(clk::steady_clock::time_point now)
+{
+    std::vector<int> request;
+    {
+        std::lock_guard lock(d->frameQueueMutex);
+        for (size_t monitor = 0; monitor < d->starvedMonitors.size(); ++monitor) {
+            if (!d->starvedMonitors[monitor]) {
+                continue;
+            }
+            auto &last = d->starvedKeyFrameRequestAt[monitor];
+            if (last == clk::steady_clock::time_point{} || now - last >= FrameQueuePolicy::CoalesceKeyFrameMinInterval) {
+                last = now;
+                request.push_back(int(monitor));
+            }
+        }
+    }
+    for (const int monitor : request) {
+        // Outside the lock, like sendFrame()'s request. The encoder answers with an IDR of
+        // the newest picture (KPipeWire re-feeds the last captured frame for a request), so
+        // what the client sees next is current, even on a desktop that stopped changing.
+        d->statKeyFrameRequests.fetch_add(1, std::memory_order_relaxed);
+        qCDebug(KRDP) << "Frames of monitor" << monitor << "were coalesced away; requesting a keyframe";
+        Q_EMIT keyFrameRequested(monitor);
+    }
 }
 
 bool VideoStream::sendFrame(const VideoFrame &frame)
@@ -1444,8 +1692,14 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
 
     {
         std::lock_guard lock(d->pendingFramesMutex);
-        d->pendingFrames.frameSent(frameId);
+        d->pendingFrames.frameSent(frameId, frame.data.size() + frame.aux.size());
+        const int inFlight = d->pendingFrames.inFlightFrames();
+        d->statInFlight = inFlight;
+        int seen = d->statMaxInFlight.load(std::memory_order_relaxed);
+        while (inFlight > seen && !d->statMaxInFlight.compare_exchange_weak(seen, inFlight, std::memory_order_relaxed)) {
+        }
     }
+    d->statSent.fetch_add(1, std::memory_order_relaxed);
 
     RDPGFX_START_FRAME_PDU startFramePdu;
     RDPGFX_END_FRAME_PDU endFramePdu;

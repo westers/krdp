@@ -2537,7 +2537,13 @@ void SessionController::onControlCodec(SessionWrapper *wrapper, const QJsonObjec
     const QString selected = QString::fromLatin1(KRdp::CodecPolicy::familyName(decision.choice.family));
     QString reason = decision.reason;
     if (decision.choice.family == KRdp::CodecPolicy::Family::Avc && !requested.isEmpty()) {
-        reason = u"no usable encoder for %1 on this host"_s.arg(requestedNames.join(u'/'));
+        // AUD-FIX4 D5: say why, accurately: no encoder at all, or software ones the policy did
+        // not pick (a normal link under SoftwareEncoding=auto).
+        QList<KRdp::CodecPolicy::Family> families;
+        for (const auto codec : std::as_const(requested)) {
+            families.append(codec == KRdp::VideoCodec::Hevc ? KRdp::CodecPolicy::Family::Hevc : KRdp::CodecPolicy::Family::Av1);
+        }
+        reason = KRdp::CodecPolicy::avcChoiceReason(connection->videoStream()->encoderPolicy(), connection->videoStream()->softwareEncoding(), adaptive, families);
     }
     replyTo(wrapper, KRdp::LayoutControl::codecRecord(selected, decision.choice.hardware, reason));
     qInfo().noquote() << u"KRDPCTL: codec asked [%1], selected %2 (%3)%4"_s.arg(requestedNames.join(u','), selected,

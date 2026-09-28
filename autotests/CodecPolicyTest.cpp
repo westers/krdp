@@ -494,37 +494,297 @@ private Q_SLOTS:
         QCOMPARE(s.settings.targetKbps, 1700u);
         QVERIFY2(s.settingsReason.contains(u"target bitrate 1700"), qPrintable(s.settingsReason));
 
-        // Not congested: grows 25 % per interval, never above the slow-link threshold.
-        in.congested = false;
-        in.bandwidthKbps = 1700; // demand-limited: the encoder only sent what it was allowed
-        QList<quint32> targets;
-        for (int i = 0; i < 100; ++i) {
-            now += 1500ms;
-            s = step(state, in, now);
-            if (s.settingsChanged) targets.append(s.settings.targetKbps);
-        }
-        QVERIFY(targets.size() >= 3);
-        QCOMPARE(targets.first(), 2125u);
-        // The link cap grows to the slow-link threshold; the target stops at adaptive quality's
-        // bitrate (quality 80 here), within one AV1 restart step (20 %) of it.
-        QCOMPARE(state.linkKbps, quint32(slowBelowKbps(ReferencePixels)));
-        QVERIFY(targets.last() <= qualityKbps(DefaultQuality, ReferencePixels));
-        QVERIFY(targets.last() >= qualityKbps(DefaultQuality, ReferencePixels) / (1 + RestartBitrateMinChange));
-        QVERIFY(state.slowLink); // 1.7 Mbit/s never proves a fast link
-
         // A small change (< 15 %) is not worth a reopen.
-        in.congested = true;
-        in.bandwidthKbps = quint32(slowBelowKbps(ReferencePixels) / TargetShareOfGoodput * 0.9);
+        in.bandwidthKbps = quint32(1700 / TargetShareOfGoodput * 0.9);
         now += 11s;
         s = step(state, in, now);
         QVERIFY(!s.settingsChanged);
 
-        // Link recovered: back to hardware HEVC in quality mode.
+        // AUD-FIX4 D2: not congested, the cap is probed up 50 % after every 10 s clear, up to the
+        // slow-link threshold; 20 s clear there is sustained headroom: back to hardware HEVC. The
+        // goodput stays demand-limited (the encoder sends what it may), which the old "above
+        // 25 Mbit/s" rule could never see.
         in.congested = false;
-        in.bandwidthKbps = 30000;
-        run(state, in, now, 20s);
+        QList<quint32> caps;
+        QList<Clock::time_point> capTimes;
+        Decision back{};
+        const auto clearFrom = now;
+        for (int i = 0; i < 200 && state.slowLink; ++i) {
+            now += 1500ms;
+            in.bandwidthKbps = state.applied.targetKbps;
+            const quint32 before = state.linkKbps;
+            s = step(state, in, now);
+            if (state.linkKbps != before && state.linkKbps != 0) {
+                caps.append(state.linkKbps);
+                capTimes.append(now);
+            }
+            if (s.changed) back = s;
+        }
+        const quint32 ceiling = quint32(slowBelowKbps(ReferencePixels));
+        QVERIFY(caps.size() >= 4);
+        QCOMPARE(caps.first(), 2550u); // 1700 x 1.5
+        for (qsizetype i = 1; i < caps.size(); ++i) {
+            QCOMPARE(caps[i], std::min(ceiling, quint32(caps[i - 1] * ProbeGrowth)));
+            QVERIFY(capTimes[i] - capTimes[i - 1] >= ProbeHold);
+        }
+        QCOMPARE(caps.last(), ceiling);
+        QVERIFY(!state.slowLink);
+        QVERIFY(back.changed);
+        QVERIFY2(back.reason.contains(u"without congestion"), qPrintable(back.reason));
+        QVERIFY(now - capTimes.last() >= RecoverHold);
+        // Bounded: per step ProbeHold sending at the cap, after AV1's raise interval.
+        QVERIFY(now - clearFrom <= (ProbeHold + RestartBitrateRaiseInterval + 3s) * caps.size() + RecoverHold + 5s);
         QCOMPARE(*state.current, (Choice{Family::Hevc, true}));
         QCOMPARE(state.applied.targetKbps, 0u);
+    }
+
+    // AUD-FIX4 D2 (Sol, 2026-09-27 pass 3): a 6 Mbit/s throttle sends the stream to software
+    // AV1; once the throttle is gone the policy must come back to AVC in bounded time (it stayed
+    // on AV1 for the rest of the run: goodput 3-8 Mbit/s never passed "25 Mbit/s"), and then stay.
+    void throttleRemovedReturnsToAvc()
+    {
+        auto in = input(SoftwareEncoding::Auto, softwareEverything());
+        in.quality = 75;
+        State state;
+        auto now = T0;
+        QCOMPARE(step(state, in, now).choice, (Choice{Family::Avc, false})); // no hardware: libx264
+        // The link: `capacity` kbit/s. AVC in quality mode on motion wants 20 Mbit/s; software
+        // AV1 sends its target. Goodput is what got through; more demand than capacity is
+        // congestion (RTT up, the window full).
+        quint32 capacity = 6000;
+        QList<std::pair<Clock::time_point, Choice>> switches;
+        const auto tick = [&] {
+            now += 1500ms;
+            const quint32 demand = softwarePrivate(*state.current) ? state.applied.targetKbps : 20000u;
+            in.bandwidthKbps = std::min(demand, capacity);
+            in.congested = demand > capacity;
+            const auto d = step(state, in, now);
+            if (d.changed) switches.append({now, d.choice});
+            return d;
+        };
+        while (now - T0 < 60s) tick();
+        QVERIFY(state.slowLink);
+        QCOMPARE(*state.current, (Choice{Family::Av1, false}));
+        QCOMPARE(switches.size(), 1);
+
+        // Throttle removed.
+        capacity = 100000;
+        const auto removed = now;
+        Decision back{};
+        while (softwarePrivate(*state.current) && now - removed < 300s) {
+            const auto d = tick();
+            if (d.changed) back = d;
+        }
+        const auto took = now - removed;
+        qInfo() << "back to avc after" << std::chrono::duration_cast<std::chrono::seconds>(took).count() << "s:" << back.reason;
+        QCOMPARE(*state.current, (Choice{Family::Avc, false}));
+        QVERIFY2(back.reason.contains(u"link recovered"), qPrintable(back.reason));
+        // Bounded: a probe that failed under the throttle waits up to 8x ProbeHold, then three
+        // steps from ~5 Mbit/s to 15 (each after AV1's raise interval), then RecoverHold.
+        QVERIFY(took <= ProbeHold * (1 << ProbeMaxDoublings) + (ProbeHold + RestartBitrateRaiseInterval + 3s) * 3 + RecoverHold + 10s);
+        // And it stays: 10 min of a good link, no more switches.
+        const auto settled = switches.size();
+        while (now - removed < 900s) tick();
+        QCOMPARE(switches.size(), settled);
+        QVERIFY(!state.slowLink);
+    }
+
+    // AUD-FIX4 D2: a link that really is slow never "recovers" (the probe keeps running into
+    // congestion, and backs off), and when a recovery does not hold the next one waits longer;
+    // switches never come closer than MinSwitchInterval.
+    void recoveryDoesNotFlap()
+    {
+        // \a avcKbps / \a av1Kbps: what the link carries for each stream (AVC in quality mode on
+        // motion wants 20 Mbit/s, software AV1 sends its target).
+        const auto simulate = [](quint32 avcKbps, quint32 av1Kbps, std::chrono::seconds duration, int *failedProbes = nullptr) {
+            auto in = input(SoftwareEncoding::Auto, softwareEverything());
+            in.quality = 75;
+            State state;
+            auto now = T0;
+            step(state, in, now);
+            QList<std::pair<Clock::time_point, Choice>> switches;
+            int congestedTicks = 0;
+            int probes = 0;
+            while (now - T0 < duration) {
+                now += 1500ms;
+                const bool av1 = softwarePrivate(*state.current);
+                const quint32 demand = av1 ? state.applied.targetKbps : 20000u;
+                const quint32 capacity = av1 ? av1Kbps : avcKbps;
+                in.bandwidthKbps = std::min(demand, capacity);
+                in.congested = demand > capacity;
+                if (in.congested && av1) ++congestedTicks;
+                const auto before = state.lastProbeAt;
+                const auto d = step(state, in, now);
+                if (state.lastProbeAt != before && state.lastProbeAt == now) ++probes;
+                if (d.changed) switches.append({now, d.choice});
+            }
+            if (failedProbes) *failedProbes = congestedTicks;
+            qInfo() << "avc" << avcKbps << "av1" << av1Kbps << ":" << switches.size() << "switches," << probes << "probes," << congestedTicks << "congested AV1 ticks in"
+                    << duration.count() << "s";
+            return switches;
+        };
+        // 5 and 14.8 Mbit/s: AV1 once, and there it stays; the probes that run into the link
+        // back off, so AV1 is congested only a small part of the time.
+        for (const quint32 kbps : {5000u, 14800u}) {
+            int congested = 0;
+            const auto switches = simulate(kbps, kbps, 1800s, &congested);
+            QCOMPARE(switches.size(), 1);
+            QCOMPARE(switches.first().second, (Choice{Family::Av1, false}));
+            QVERIFY(congested < 1800 / 1.5 * 0.15);
+        }
+        // 16 Mbit/s is not slow for AVC (over 15): no switch at all.
+        auto switches = simulate(16000, 16000, 1800s);
+        QCOMPARE(switches.size(), 0);
+        // A link that carries AV1 at the ceiling cleanly but reads slow and congested for AVC:
+        // every recovery fails, and each AV1 stretch before the next try is longer (back-off).
+        switches = simulate(12000, 100000, 3600s);
+        QVERIFY(switches.size() >= 4);
+        for (qsizetype i = 1; i < switches.size(); ++i) {
+            QVERIFY(switches[i].first - switches[i - 1].first >= MinSwitchInterval);
+        }
+        QList<Clock::duration> av1Stays;
+        for (qsizetype i = 1; i < switches.size(); ++i) {
+            if (switches[i - 1].second.family == Family::Av1 && switches[i].second.family == Family::Avc) {
+                av1Stays.append(switches[i].first - switches[i - 1].first);
+            }
+        }
+        QVERIFY(av1Stays.size() >= 3);
+        QVERIFY(av1Stays[1] > av1Stays[0]);
+        QVERIFY(av1Stays[2] > av1Stays[1]);
+        QVERIFY(switches.size() <= 3600 / 120); // the back-off: a try every ~5 minutes at most
+    }
+
+    // AUD-FIX4 D3 (Sol pass 3): Mandelbrot on software AV1 ran krdpserver at 180 % of a core
+    // (p95 314 %) and delivered 13-23 of 30 fps, but the guard divided by all 16 threads and
+    // never fired. The sample now estimates the encode time over the encoder's own threads.
+    void cpuGuardSeesTheSolMandelbrot()
+    {
+        const int threads = softwareEncoderThreads(Family::Av1, 16);
+        QCOMPARE(threads, 8);
+        QCOMPARE(softwareEncoderThreads(Family::Avc, 16), 16);
+        QCOMPARE(softwareEncoderThreads(Family::Hevc, 4), 2);
+        QCOMPARE(softwareEncoderThreads(Family::Av1, 16, 4), 4); // KPIPEWIRE_SW_ENCODER_THREADS
+        // One 1.5 s interval: 180 % CPU, 17 fps delivered.
+        const double cpuMs = 1.80 * 1500;
+        const int frames = 25;
+        const double oldSample = cpuMs / frames / 16 / (1000.0 / 30);
+        QVERIFY(oldSample < CpuGuardLimit); // why it never fired: ~0.2
+        const auto mandelbrot = encodeLoadSample(cpuMs, frames, 1.5, 30, Family::Av1, threads);
+        QVERIFY(mandelbrot);
+        qInfo() << "mandelbrot sample" << *mandelbrot << "(was" << oldSample << ")";
+        QVERIFY(*mandelbrot > CpuGuardLimit);
+        // Its p95 (314 %) is far over, too.
+        QVERIFY(*encodeLoadSample(3.14 * 1500, frames, 1.5, 30, Family::Av1, threads) > 1.5);
+        // testsrc2 on AV1 M10 (157 %, 28 fps) kept up in pass 3: under the limit.
+        QVERIFY(*encodeLoadSample(1.57 * 1500, 42, 1.5, 30, Family::Av1, threads) < CpuGuardLimit);
+        // PERF.md, SVT-AV1 M10 video on Sol: 189 % at a full 30 fps, mean latency 18.2 ms.
+        QVERIFY(std::abs(estimatedEncodeMs(1.89 * 1500, 45, Family::Av1, threads) - 18.2) < 3.0);
+        // libx264 at 90 % (pass 1, AVC in software): nowhere near.
+        QVERIFY(*encodeLoadSample(0.90 * 1500, 45, 1.5, 30, Family::Avc, 16) < 0.2);
+        // A still desktop: too few frames to judge, or cheap ones with a background CPU.
+        QVERIFY(!encodeLoadSample(0.05 * 1500, 3, 1.5, 30, Family::Av1, threads));
+        QVERIFY(*encodeLoadSample(0.05 * 1500, 6, 1.5, 30, Family::Av1, threads) < 0.35);
+        // Delivered frames short of the cap while the encoder is busy count on their own.
+        const double busy = *encodeLoadSample(1.20 * 1500, 30, 1.5, 30, Family::Av1, threads); // 20 fps
+        QVERIFY(busy > CpuGuardLimit);
+        QVERIFY(*encodeLoadSample(1.20 * 1500, 45, 1.5, 30, Family::Av1, threads) < CpuGuardLimit); // the same CPU at 30 fps
+    }
+
+    // AUD-FIX4 D3: encode times like the Mandelbrot case (p95 about 50 ms at 30 fps) step the
+    // preset down within the guard's window.
+    void cpuGuardStepsDownOnMandelbrotEncodeTimes()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Av1});
+        State state;
+        auto now = T0;
+        QCOMPARE(step(state, in, now).choice, (Choice{Family::Av1, false}));
+        const int threads = softwareEncoderThreads(Family::Av1, 16);
+        const auto intervalSample = [&](double encodeMs, int frames) {
+            const double cpuMs = encodeMs * softwareEncoderParallelism(Family::Av1, threads) * frames;
+            return *encodeLoadSample(cpuMs, frames, 1.5, 30, Family::Av1, threads);
+        };
+        LoadWindow window;
+        for (int i = 0; i < 8; ++i) { // 12 s of a desktop: 10 ms per frame
+            now += 1500ms;
+            window.add(intervalSample(10, 45));
+            in.encodeLoadP95 = window.p95();
+            QVERIFY(!step(state, in, now).settingsChanged);
+        }
+        QCOMPARE(state.preset, Preset::Efficient);
+        const auto motion = now;
+        Decision stepped{};
+        for (int i = 0; i < LoadWindow::Size && state.preset == Preset::Efficient; ++i) {
+            now += 1500ms;
+            // Mandelbrot: 40-50 ms per frame, 20-25 fps delivered.
+            window.add(intervalSample(i % 2 ? 50 : 40, i % 2 ? 30 : 37));
+            in.encodeLoadP95 = window.p95();
+            stepped = step(state, in, now);
+        }
+        QCOMPARE(state.preset, Preset::Balanced); // SVT M10 -> M11
+        QVERIFY(now - motion <= 1500ms * LoadWindow::Size);
+        QVERIFY2(stepped.settingsReason.contains(u"CPU guard"), qPrintable(stepped.settingsReason));
+    }
+
+    // AUD-FIX4 D4 (Sol pass 3): adaptive quality swinging every ~6 s (549 <-> 5231 kbit/s) reopened
+    // SVT-AV1 26 times in 4.5 min. Non-live restarts are now >= 10 s apart (rises >= 20 s), need a
+    // 30 % change, and the changes that come while one waits merge into one.
+    void av1RestartsAreSpacedOnASwingingQuality()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Av1});
+        State state;
+        auto now = T0;
+        step(state, in, now);
+        QList<Clock::time_point> restarts;
+        QList<std::pair<quint32, quint32>> changes;
+        int qualitySwings = 0;
+        quint8 last = 0;
+        for (auto t = 0s; t < 300s;) {
+            now += 1500ms;
+            t = std::chrono::duration_cast<std::chrono::seconds>(now - T0);
+            const quint8 quality = (t.count() / 6) % 2 ? 35 : 75;
+            if (quality != last) ++qualitySwings;
+            last = quality;
+            in.quality = quality;
+            const quint32 before = state.applied.targetKbps;
+            const int count = state.encoderRestarts;
+            const auto d = step(state, in, now);
+            if (state.encoderRestarts != count) {
+                restarts.append(now);
+                changes.append({before, d.settings.targetKbps});
+            }
+        }
+        qInfo() << restarts.size() << "AV1 restarts for" << qualitySwings << "quality swings in 300 s";
+        QVERIFY(qualitySwings >= 45);
+        QVERIFY(!restarts.isEmpty());
+        QVERIFY(restarts.size() <= 300 / 10);
+        for (qsizetype i = 1; i < restarts.size(); ++i) {
+            QVERIFY(restarts[i] - restarts[i - 1] >= MinReconfigureInterval);
+            if (changes[i].second > changes[i].first) {
+                QVERIFY(restarts[i] - restarts[i - 1] >= RestartBitrateRaiseInterval);
+            }
+        }
+        for (const auto &[from, to] : changes) {
+            QVERIFY(std::abs(double(to) - from) / from >= RestartBitrateMinChange);
+        }
+    }
+
+    // AUD-FIX4 D5: the reply says why AVC, accurately.
+    void avcReasonIsAccurate()
+    {
+        const QList<Family> both{Family::Hevc, Family::Av1};
+        QCOMPARE(avcChoiceReason(softwareEverything(), SoftwareEncoding::Auto, true, both),
+                 QStringLiteral("hardware encoder not available for hevc/av1; software not selected (link not slow)"));
+        QCOMPARE(avcChoiceReason(sol(), SoftwareEncoding::Auto, true, both), QStringLiteral("no encoder for hevc/av1 on this host"));
+        QVERIFY(avcChoiceReason(softwareEverything(), SoftwareEncoding::Never, true, both).contains(u"software encoding is off"));
+        QVERIFY(avcChoiceReason(softwareEverything(), SoftwareEncoding::Auto, false, both).contains(u"fixed its codec"));
+        auto mixed = sol();
+        mixed.av1 = {false, true};
+        QCOMPARE(avcChoiceReason(mixed, SoftwareEncoding::Auto, true, both),
+                 QStringLiteral("no encoder for hevc on this host; hardware encoder not available for av1; software not selected (link not slow)"));
+        // And the policy agrees: Sol with software HEVC/AV1 on a normal link answers AVC.
+        auto in = input(SoftwareEncoding::Auto, softwareEverything());
+        State state;
+        QCOMPARE(step(state, in, T0).choice.family, Family::Avc);
     }
 
     // Stall budget: a reopen (HEVC ~45 ms, AV1 ~150 ms) at most once per interval.
@@ -620,7 +880,7 @@ private Q_SLOTS:
     }
 
     // Without a live bitrate change (SVT-AV1 reopens), the same run restarts the encoder only
-    // rarely: at least RestartBitrateInterval apart and only for a >= 20 % step.
+    // rarely: at least RestartBitrateInterval apart and only for a >= 30 % step.
     void adaptiveQualityRestartsAv1RateLimited()
     {
         auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Av1});

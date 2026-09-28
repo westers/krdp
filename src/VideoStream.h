@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <optional>
 
@@ -159,6 +160,9 @@ public:
      * `codec` request; main thread only. Without it only AVC is ever chosen.
      */
     void setEncoderPolicy(const CodecPolicy::Encoders &encoders, CodecPolicy::SoftwareEncoding mode);
+    /// What setEncoderPolicy() set (less any encoder found unusable since). Main thread only.
+    CodecPolicy::Encoders encoderPolicy() const;
+    CodecPolicy::SoftwareEncoding softwareEncoding() const;
     /**
      * The client's `codec` request: the private codecs it decodes (empty = AVC only) and whether
      * the server may switch codec mid-session (link and CPU, CodecPolicy). Chooses at once and
@@ -204,6 +208,23 @@ public:
      * thread (onCapsAdvertise); connect with Qt::QueuedConnection.
      */
     Q_SIGNAL void negotiatedCodecChanged(KRdp::VideoCodec codec);
+
+    /**
+     * AUD-FIX4 D1: the in-flight window (FrameQueuePolicy::windowLimits()) and what it did.
+     * Safe to read from any thread; the counters only grow.
+     */
+    struct FlowStats {
+        int inFlight = 0; ///< frames sent and not yet acknowledged (while suspended: sent recently)
+        int maxInFlight = 0; ///< the most ever in flight right after a send
+        int windowFrames = 0; ///< the current frame limit
+        qint64 windowBytes = 0; ///< the current byte budget
+        quint64 sent = 0;
+        quint64 acknowledged = 0;
+        quint64 dropped = 0; ///< frames coalesced away while the window was full
+        quint64 keyFrameRequests = 0; ///< keyframes asked for after coalescing
+        bool acksSuspended = false;
+    };
+    FlowStats flowStats() const;
 
     /**
      * Emitted when the adaptive-quality chroma rung requests the chroma stream be shed or restored
@@ -253,6 +274,12 @@ private:
      * then keeps the frame at the head of the queue instead of dropping it.
      */
     bool sendFrame(const VideoFrame &frame);
+    /// AUD-FIX4 D1 (submission thread): whether the in-flight window has room for a frame now.
+    bool windowOpen(std::chrono::steady_clock::time_point now);
+    /// AUD-FIX4 D1 (submission thread): coalesce what waits while the window is full.
+    void holdFrames(std::chrono::steady_clock::time_point now);
+    /// AUD-FIX4 D1 (submission thread): (re)request keyframes for monitors whose P-frames are dropped.
+    void requestStarvedKeyFrames(std::chrono::steady_clock::time_point now);
 
     class Private;
     const std::unique_ptr<Private> d;

@@ -106,6 +106,14 @@ public:
      */
     bool isAuthenticated() const;
 
+    /**
+     * Bytes the kernel still holds for this connection's socket (Linux SIOCOUTQ: unsent
+     * plus unacknowledged by the peer's TCP), or -1 when unknown (no socket, or closed).
+     * Any thread. AUD-FIX4 D1: the backpressure signal while the client suspended RDPGFX
+     * frame acknowledgements.
+     */
+    qint64 socketQueuedBytes() const;
+
     /** FreeRDP context of this peer (null before it exists), so a host can
      * set a standard error-info disconnect reason before close(). */
     rdpContext *freerdpContext() const;

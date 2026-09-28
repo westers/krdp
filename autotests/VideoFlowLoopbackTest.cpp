@@ -1,0 +1,366 @@
+// SPDX-FileCopyrightText: 2026 Steve Westers
+// SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+
+// AUD-FIX4 D1 end to end: a real KRdp::Server on 127.0.0.1, krdpctl-probe (the real libfreerdp
+// client, RDPGFX with frame acknowledgements, --gfx-count so the fake frames are not decoded)
+// behind a proxy in this test that throttles and then blocks the server-to-client direction,
+// the way the Sol/Buzz tbf run saturated the link. The test feeds numbered frames at 30 fps
+// straight into the connection's VideoStream (standing in for the encoder) and checks:
+// - the frames in flight (sent, not acknowledged) never exceed the window;
+// - while the link is throttled the server keeps reading: acknowledgements keep arriving;
+// - frames that cannot go are coalesced, and a keyframe is asked for;
+// - the session survives a 5 s block, and once the client reads again it gets a current frame.
+
+#include <QDeadlineTimer>
+#include <QElapsedTimer>
+#include <QHostAddress>
+#include <QPointer>
+#include <QProcess>
+#include <QScopeGuard>
+#include <QStandardPaths>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QTemporaryDir>
+#include <QTest>
+#include <QTimer>
+
+#include <memory>
+#include <vector>
+
+#include "FrameQueuePolicy.h"
+#include "RdpConnection.h"
+#include "Server.h"
+#include "VideoStream.h"
+
+using namespace KRdp;
+using namespace std::chrono_literals;
+
+namespace
+{
+const QString TestUser = QStringLiteral("alice");
+const QString Password = QStringLiteral("correct horse");
+
+/**
+ * A TCP proxy whose server-to-client direction can be throttled to a byte rate or blocked.
+ * The upstream socket's read buffer is small, so a slow or stopped reader pushes back on the
+ * server's socket like a slow link does; the client-to-server direction is never held.
+ */
+class ThrottledProxy : public QObject
+{
+public:
+    explicit ThrottledProxy(quint16 target)
+        : m_target(target)
+    {
+        connect(&m_server, &QTcpServer::newConnection, this, &ThrottledProxy::accept);
+        m_tick.setInterval(5);
+        connect(&m_tick, &QTimer::timeout, this, &ThrottledProxy::pump);
+        m_tick.start();
+        m_clock.start();
+    }
+    bool listen()
+    {
+        return m_server.listen(QHostAddress::LocalHost, 0);
+    }
+    quint16 port() const
+    {
+        return m_server.serverPort();
+    }
+    /// 0 = unlimited.
+    void setRate(qint64 bytesPerSecond)
+    {
+        m_rate = bytesPerSecond;
+        m_tokens = 0;
+    }
+    void setBlocked(bool blocked)
+    {
+        m_blocked = blocked;
+    }
+    qint64 forwardedToClient() const
+    {
+        return m_forwarded;
+    }
+
+private:
+    struct Pair {
+        QTcpSocket *client = nullptr;
+        std::unique_ptr<QTcpSocket> upstream;
+    };
+
+    void accept()
+    {
+        while (auto *client = m_server.nextPendingConnection()) {
+            auto pair = std::make_unique<Pair>();
+            pair->client = client;
+            pair->upstream = std::make_unique<QTcpSocket>();
+            pair->upstream->setReadBufferSize(32 * 1024);
+            pair->upstream->connectToHost(QHostAddress::LocalHost, m_target);
+            pair->upstream->waitForConnected(5000);
+            pair->upstream->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption, 32 * 1024);
+            auto *upstream = pair->upstream.get();
+            connect(client, &QTcpSocket::readyRead, upstream, [client, upstream] {
+                upstream->write(client->readAll());
+            });
+            connect(client, &QTcpSocket::disconnected, upstream, [upstream] {
+                upstream->disconnectFromHost();
+            });
+            connect(upstream, &QTcpSocket::disconnected, client, [client] {
+                client->disconnectFromHost();
+            });
+            m_pairs.push_back(std::move(pair));
+        }
+    }
+
+    void pump()
+    {
+        const qint64 elapsedMs = m_clock.restart();
+        if (m_blocked) {
+            return;
+        }
+        if (m_rate > 0) {
+            m_tokens = std::min<qint64>(m_tokens + m_rate * elapsedMs / 1000, m_rate / 10 + 1);
+        }
+        for (const auto &pair : m_pairs) {
+            if (!pair->client || pair->client->state() != QAbstractSocket::ConnectedState) {
+                continue;
+            }
+            qint64 budget = m_rate > 0 ? m_tokens : pair->upstream->bytesAvailable();
+            if (budget <= 0) {
+                continue;
+            }
+            const QByteArray chunk = pair->upstream->read(budget);
+            if (chunk.isEmpty()) {
+                continue;
+            }
+            pair->client->write(chunk);
+            m_forwarded += chunk.size();
+            if (m_rate > 0) {
+                m_tokens -= chunk.size();
+            }
+        }
+    }
+
+    QTcpServer m_server;
+    quint16 m_target;
+    std::vector<std::unique_ptr<Pair>> m_pairs;
+    QTimer m_tick;
+    QElapsedTimer m_clock;
+    qint64 m_rate = 0;
+    qint64 m_tokens = 0;
+    bool m_blocked = false;
+    qint64 m_forwarded = 0;
+};
+
+/// The last 16 bytes of every fed frame: "KRDPSEQ:" + the sequence number (little endian).
+QByteArray frameData(quint64 seq, int size)
+{
+    QByteArray data(size, '\x5a');
+    QByteArray tail("KRDPSEQ:");
+    for (int i = 0; i < 8; ++i) {
+        tail.append(char((seq >> (8 * i)) & 0xff));
+    }
+    data.replace(size - tail.size(), tail.size(), tail);
+    return data;
+}
+}
+
+class VideoFlowLoopbackTest : public QObject
+{
+    Q_OBJECT
+    QTemporaryDir m_dir;
+    QString m_certificate;
+    QString m_key;
+
+private Q_SLOTS:
+    void initTestCase()
+    {
+        QVERIFY(m_dir.isValid());
+        const QString openssl = QStandardPaths::findExecutable(QStringLiteral("openssl"));
+        if (openssl.isEmpty()) {
+            QSKIP("openssl is needed to make the test certificate");
+        }
+        m_certificate = m_dir.filePath(QStringLiteral("server.crt"));
+        m_key = m_dir.filePath(QStringLiteral("server.key"));
+        QProcess process;
+        process.start(openssl,
+                      {QStringLiteral("req"), QStringLiteral("-x509"), QStringLiteral("-newkey"), QStringLiteral("rsa:2048"), QStringLiteral("-nodes"),
+                       QStringLiteral("-keyout"), m_key, QStringLiteral("-out"), m_certificate, QStringLiteral("-days"), QStringLiteral("1"),
+                       QStringLiteral("-subj"), QStringLiteral("/CN=krdp-test")});
+        QVERIFY(process.waitForFinished(30000));
+        QCOMPARE(process.exitCode(), 0);
+    }
+
+    void saturatedLinkKeepsTheSession()
+    {
+        Server server;
+        server.setAddress(QHostAddress::LocalHost);
+        server.setPort(0);
+        server.setTlsCertificate(m_certificate.toStdString());
+        server.setTlsCertificateKey(m_key.toStdString());
+        server.setUsers({{TestUser, Password}});
+
+        QPointer<RdpConnection> connection;
+        bool closed = false;
+        quint64 seq = 0;
+        int sinceKeyFrame = 0;
+        bool feeding = true;
+        const auto feed = [&](bool keyFrame) {
+            if (!connection || connection->state() != RdpConnection::State::Streaming || !connection->videoStream()->enabled()) {
+                return;
+            }
+            VideoFrame frame;
+            frame.size = QSize(640, 480);
+            frame.isKeyFrame = keyFrame;
+            // ~2.9 Mbit/s of P-frames at 30 fps; a keyframe is four times as big.
+            frame.data = frameData(++seq, keyFrame ? 48000 : 12000);
+            frame.presentationTimeStamp = std::chrono::system_clock::now();
+            connection->videoStream()->queueFrame(frame);
+            sinceKeyFrame = keyFrame ? 0 : sinceKeyFrame + 1;
+        };
+        int keyFramesRequested = 0;
+        connect(&server, &Server::newConnectionCreated, this, [&](RdpConnection *c) {
+            connection = c;
+            c->videoStream()->setCodecPreference(CodecPreference::Avc420);
+            connect(c, &RdpConnection::stateChanged, this, [&, c] {
+                if (c->state() == RdpConnection::State::Closed) {
+                    closed = true;
+                }
+            });
+            // What the encoder does for a request: an IDR of the newest picture at once
+            // (KPipeWire re-feeds the last captured frame), even when nothing else changes.
+            connect(c->videoStream(), &VideoStream::keyFrameRequested, this, [&](int) {
+                ++keyFramesRequested;
+                feed(true);
+            }, Qt::QueuedConnection);
+        });
+        QVERIFY(server.start());
+
+        ThrottledProxy proxy(server.serverPort());
+        QVERIFY(proxy.listen());
+
+        QTimer feeder;
+        feeder.setInterval(33);
+        connect(&feeder, &QTimer::timeout, this, [&] {
+            if (feeding) {
+                feed(sinceKeyFrame >= 60 || seq == 0);
+            }
+        });
+        feeder.start();
+
+        QProcess probe;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), m_dir.path());
+        environment.insert(QStringLiteral("HOME"), m_dir.path()); // FreeRDP's known-hosts file
+        probe.setProcessEnvironment(environment);
+        // The password goes over stdin ("-"), never on the command line.
+        probe.start(QStringLiteral(KRDPCTL_PROBE),
+                    {QStringLiteral("127.0.0.1"), QString::number(proxy.port()), TestUser, QStringLiteral("-"), QStringLiteral("--silent"),
+                     QStringLiteral("--no-krdpctl"), QStringLiteral("--gfx"), QStringLiteral("--gfx-count"), QStringLiteral("--timeout"), QStringLiteral("120")});
+        QVERIFY(probe.waitForStarted(5000));
+        probe.write(Password.toUtf8() + '\n');
+        probe.closeWriteChannel();
+        const auto cleanup = qScopeGuard([&probe] {
+            if (probe.state() != QProcess::NotRunning) {
+                probe.terminate();
+                if (!probe.waitForFinished(5000)) {
+                    probe.kill();
+                    probe.waitForFinished(5000);
+                }
+            }
+        });
+
+        QByteArray log;
+        quint64 lastSeenSeq = 0;
+        const auto readProbe = [&] {
+            const QByteArray more = probe.readAllStandardError();
+            log += more;
+            for (const QByteArray &line : more.split('\n')) {
+                const int at = line.indexOf("frame seq ");
+                if (at >= 0) {
+                    const QList<QByteArray> parts = line.mid(at + 10).split(' ');
+                    lastSeenSeq = std::max(lastSeenSeq, parts.value(0).toULongLong());
+                }
+            }
+        };
+        int maxInFlight = 0;
+        int windowFrames = FrameQueuePolicy::MaxInFlightFrames;
+        const auto sample = [&](std::chrono::milliseconds duration) {
+            QDeadlineTimer deadline(duration);
+            while (!deadline.hasExpired()) {
+                QTest::qWait(20);
+                readProbe();
+                if (connection) {
+                    const auto stats = connection->videoStream()->flowStats();
+                    maxInFlight = std::max(maxInFlight, stats.inFlight);
+                    windowFrames = std::min(windowFrames, stats.windowFrames > 0 ? stats.windowFrames : windowFrames);
+                    QVERIFY2(stats.inFlight <= stats.windowFrames, qPrintable(QStringLiteral("%1 in flight, window %2").arg(stats.inFlight).arg(stats.windowFrames)));
+                }
+                QVERIFY2(!closed, log.constData());
+                QVERIFY2(probe.state() == QProcess::Running, log.constData());
+            }
+        };
+
+        // Connected, streaming, frames arriving and acknowledged.
+        QDeadlineTimer connectDeadline(30s);
+        while ((lastSeenSeq < 10 || !connection || connection->videoStream()->flowStats().acknowledged < 10) && !connectDeadline.hasExpired()) {
+            QTest::qWait(50);
+            readProbe();
+            if (probe.state() != QProcess::Running) {
+                break;
+            }
+        }
+        if (lastSeenSeq == 0 && log.contains("does not support H.264")) {
+            QSKIP("this libfreerdp cannot negotiate AVC420 (built WITH_GFX_H264=OFF)");
+        }
+        QVERIFY2(lastSeenSeq >= 10, log.constData());
+        QVERIFY(connection);
+        sample(2s);
+        const auto before = connection->videoStream()->flowStats();
+        qInfo() << "unthrottled:" << before.sent << "sent," << before.acknowledged << "acked, window" << before.windowFrames;
+
+        // Throttled to 0.5 Mbit/s: a sixth of the stream.
+        proxy.setRate(64 * 1024);
+        sample(8s);
+        const auto throttled = connection->videoStream()->flowStats();
+        qInfo() << "throttled:" << throttled.sent - before.sent << "sent," << throttled.acknowledged - before.acknowledged << "acked,"
+                << throttled.dropped - before.dropped << "coalesced," << throttled.keyFrameRequests - before.keyFrameRequests << "keyframe requests, max in flight"
+                << maxInFlight;
+        QVERIFY(throttled.acknowledged - before.acknowledged >= 10); // the server kept reading acks
+        QVERIFY(throttled.dropped > before.dropped); // what could not go was coalesced
+        QVERIFY(throttled.keyFrameRequests > before.keyFrameRequests);
+
+        // Blocked: the client reads nothing for 5 s.
+        proxy.setBlocked(true);
+        sample(5s);
+        // The desktop stops changing just before the client resumes: the newest picture is this.
+        feeding = false;
+        sample(300ms);
+        const quint64 newest = seq;
+        const auto blocked = connection->videoStream()->flowStats();
+        qInfo() << "blocked:" << blocked.sent - throttled.sent << "sent," << blocked.dropped - throttled.dropped << "coalesced; newest frame" << newest
+                << ", client saw" << lastSeenSeq;
+        QVERIFY(lastSeenSeq < newest);
+
+        // The client reads again: it gets a current frame, and the session is still there.
+        proxy.setBlocked(false);
+        proxy.setRate(0);
+        QDeadlineTimer current(10s);
+        while (lastSeenSeq < newest && !current.hasExpired()) {
+            sample(50ms);
+        }
+        qInfo() << "resumed: client at frame" << lastSeenSeq << "of" << seq << "; max in flight" << maxInFlight << "window" << windowFrames;
+        QVERIFY2(lastSeenSeq >= newest, log.right(4000).constData());
+        feeding = true;
+        sample(2s);
+        const auto after = connection->videoStream()->flowStats();
+        QVERIFY(after.acknowledged > blocked.acknowledged);
+        QVERIFY(maxInFlight <= FrameQueuePolicy::MaxInFlightFrames);
+        QVERIFY(after.maxInFlight <= FrameQueuePolicy::MaxInFlightFrames);
+        QVERIFY(!closed);
+        QCOMPARE(probe.state(), QProcess::Running);
+        QVERIFY(keyFramesRequested > 0);
+    }
+};
+
+QTEST_GUILESS_MAIN(VideoFlowLoopbackTest)
+
+#include "VideoFlowLoopbackTest.moc"

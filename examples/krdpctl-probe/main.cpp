@@ -54,6 +54,12 @@
  *                               records --apply/--query cannot send, e.g. a raw `chroma`
  *                               request.
  *            --raw-gap MS       the pause between two --raw sends (default 300)
+ *            --gfx-count        with --gfx: do not decode the frames (gdi's surface command is
+ *                               not called, so any payload is accepted); instead print
+ *                               `frame seq N surface S` for every frame whose data ends in
+ *                               the 16-byte marker "KRDPSEQ:" + a little-endian uint64 (the
+ *                               in-flight window loopback test feeds such frames). Frame
+ *                               acknowledgements are sent as usual.
  *            --disp WxH         also load the standard Display Control channel
  *                               (MS-RDPEDISP, over drdynvc) and, once the server's caps
  *                               arrive, ask for a one-monitor WxH desktop the way a
@@ -62,7 +68,9 @@
  * Records go to stdout, one compact JSON object per line, each prefixed with
  * the local time it was read (HH:MM:SS.zzz); everything else to stderr with
  * the same prefix, so a record can be placed against the server's log and
- * against the ResetGraphics line --gfx prints. The password is never printed.
+ * against the ResetGraphics line --gfx prints. The password is never printed;
+ * give PASSWORD as `-` to read it from the first line of stdin instead of the
+ * command line.
  * Once any --raw was given, replies are printed as `reply: <json>` (no time
  * prefix) instead, so a test script can grep for them independent of the
  * clock.
@@ -156,6 +164,8 @@ struct Probe {
     int timeoutSeconds = 0;
     // --gfx evidence: frames seen per RDPGFX surface id.
     std::map<UINT16, unsigned> framesPerSurface;
+    /** --gfx-count: count and report markers instead of decoding. */
+    bool gfxCountOnly = false;
 
     // Channel plumbing, filled by the entry point and the init event.
     CHANNEL_ENTRY_POINTS_FREERDP_EX entryPoints{};
@@ -445,6 +455,18 @@ UINT probeSurfaceCommand(RdpgfxClientContext *gfx, const RDPGFX_SURFACE_COMMAND 
         const unsigned count = ++probe->framesPerSurface[cmd->surfaceId];
         if (count == 1) {
             logf("first frame on surface %u (codec %u, %ux%u)", cmd->surfaceId, cmd->codecId, cmd->width, cmd->height);
+        }
+        if (probe->gfxCountOnly) {
+            static constexpr char Magic[] = "KRDPSEQ:";
+            constexpr size_t MagicSize = sizeof(Magic) - 1;
+            if (cmd->data && cmd->length >= MagicSize + 8 && std::memcmp(cmd->data + cmd->length - 8 - MagicSize, Magic, MagicSize) == 0) {
+                quint64 seq = 0;
+                for (int i = 7; i >= 0; --i) {
+                    seq = (seq << 8) | cmd->data[cmd->length - 8 + size_t(i)];
+                }
+                logf("frame seq %llu surface %u", static_cast<unsigned long long>(seq), cmd->surfaceId);
+            }
+            return CHANNEL_RC_OK;
         }
     }
     return g_gdiSurfaceCommand ? g_gdiSurfaceCommand(gfx, cmd) : CHANNEL_RC_OK;
@@ -772,7 +794,7 @@ int usage()
 {
     std::fprintf(stderr,
                  "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
-                 "[--gfx] [--media [--microphone DEV]] [--disp WxH] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
+                 "[--gfx [--gfx-count]] [--media [--microphone DEV]] [--disp WxH] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
     return 2;
 }
 
@@ -811,7 +833,18 @@ int main(int argc, char **argv)
     const QString host = QString::fromLocal8Bit(argv[1]);
     const int port = QString::fromLocal8Bit(argv[2]).toInt();
     const QString user = QString::fromLocal8Bit(argv[3]);
-    const QString password = QString::fromLocal8Bit(argv[4]);
+    QString password = QString::fromLocal8Bit(argv[4]);
+    if (password == QLatin1String("-")) {
+        // Kept off the command line (ps, /proc/PID/cmdline): the first line of stdin.
+        char line[1024] = {};
+        if (!std::fgets(line, sizeof(line), stdin)) {
+            logf("no password on stdin");
+            return 2;
+        }
+        line[std::strcspn(line, "\r\n")] = '\0';
+        password = QString::fromLocal8Bit(line);
+        std::memset(line, 0, sizeof(line));
+    }
     if (port <= 0 || port > 65535) {
         return usage();
     }
@@ -848,6 +881,8 @@ int main(int argc, char **argv)
             probe.rawBodies.push_back(body);
         } else if (arg == QLatin1String("--gfx")) {
             probe.gfx = true;
+        } else if (arg == QLatin1String("--gfx-count")) {
+            probe.gfxCountOnly = true;
         } else if (arg == QLatin1String("--media")) {
             probe.media = true;
         } else if (arg == QLatin1String("--disp") && i + 1 < argc) {

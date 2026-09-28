@@ -31,7 +31,10 @@
 #include <QThread>
 #include <QTimer>
 
+#include <sys/ioctl.h>
 #include <sys/socket.h>
+
+#include <linux/sockios.h>
 
 #include <freerdp/channels/wtsvc.h>
 #include <freerdp/freerdp.h>
@@ -936,6 +939,18 @@ ClientDisplay::Info RdpConnection::clientDisplayInfo() const
 {
     std::lock_guard lock(d->clientDisplayMutex);
     return d->clientDisplay;
+}
+
+qint64 RdpConnection::socketQueuedBytes() const
+{
+    if (d->socketHandle < 0 || d->state == State::Closed) {
+        return -1;
+    }
+    int queued = 0;
+    if (::ioctl(int(d->socketHandle), SIOCOUTQ, &queued) != 0) {
+        return -1;
+    }
+    return queued;
 }
 
 NetworkDetection *RdpConnection::networkDetection() const

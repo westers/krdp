@@ -6,6 +6,7 @@
 #include <QList>
 #include <QMetaType>
 #include <QString>
+#include <QStringList>
 #include <QStringView>
 
 #include <algorithm>
@@ -192,13 +193,50 @@ constexpr auto PresetRecoverHold = std::chrono::seconds(30);
 constexpr auto PresetFlapWindow = std::chrono::seconds(120);
 constexpr int PresetFlapMaxDoublings = 3;
 /// Slow-link cap on the target bitrate: this share of the measured goodput while congested, at
-/// least MinTargetKbps, at most the slow-link threshold; it grows by TargetGrowth per
-/// MinReconfigureInterval while the link is not congested, and moves only by at least
-/// TargetMinChange.
+/// least MinTargetKbps, at most the slow-link threshold (the probe ceiling); it moves only by at
+/// least TargetMinChange and at most once per MinReconfigureInterval.
 constexpr double TargetShareOfGoodput = 0.85;
 constexpr quint32 MinTargetKbps = 300;
-constexpr double TargetGrowth = 1.25;
 constexpr double TargetMinChange = 0.15;
+/**
+ * AUD-FIX4 D2: the way back from a slow link. Goodput only counts what the server sends, and a
+ * software HEVC/AV1 target never exceeded the slow threshold (at the default quality 75 it is
+ * 5.2 Mbit/s at 1080p), so "goodput above FastAboveMbps" could not happen and the slow-link
+ * choice was one-way. A stream that only sends what its quality asks for proves nothing about
+ * the link either: 5.2 Mbit/s fits a 6 Mbit/s throttle and a gigabit LAN alike. So on a slow link
+ * the software encoder's target *is* the probed link cap, and the cap is probed upward:
+ * - "clear" = no congestion signal at all: no RTT inflation, the client never several frames
+ *   behind, and the in-flight window never full (VideoStream's window pressure). While clear the
+ *   target is the cap; under congestion it is also held under adaptive quality's bitrate, so it
+ *   drops at once where the encoder changes its bitrate live;
+ * - "sending at the cap" = clear, the encoder runs at (about) the cap, and the goodput is at
+ *   least ProbeFillShare of its target: the content really uses what the link is given;
+ * - after ProbeHold sending at the cap, the cap grows by ProbeGrowth (an up-probe, the target
+ *   with it). Congestion drops it to TargetShareOfGoodput of the goodput; congestion soon after
+ *   a probe is a failed probe, and each one doubles the next ProbeHold (up to
+ *   2^ProbeMaxDoublings), so a link that really is slow is only probed now and then;
+ * - once the cap is at the probe ceiling (slowBelowKbps) and the stream kept sending at it for
+ *   RecoverHold, the link has shown sustained headroom: back to the normal choice (the hardware
+ *   or preferred codec). Without a software HEVC/AV1 encoder to probe with (the slow-link choice
+ *   was AVC anyway), RecoverHold clear is enough.
+ * Content that never fills the cap (a still desktop) proves nothing and keeps the slow-link
+ * codec, which costs little on such content; the first motion that fills it resumes the probe.
+ * The old rule (goodput above FastAboveMbps for LinkHold) still recovers at once.
+ * Anti-flap: switches stay MinSwitchInterval apart, and a slow link that comes back within
+ * RecoverFlapWindow of a recovery doubles the next RecoverHold (up to 2^RecoverFlapMaxDoublings).
+ */
+constexpr auto ProbeHold = std::chrono::seconds(10);
+constexpr double ProbeGrowth = 1.5;
+constexpr double ProbeFillShare = 0.6;
+constexpr int ProbeMaxDoublings = 3;
+/// A cap this close to the ceiling counts as there (under 1 / (1 + TargetMinChange), so a cap
+/// can never get stuck just below the ceiling).
+constexpr double ProbeCeilingShare = 0.85;
+/// The encoder "runs at the cap" when its target is at least this share of it.
+constexpr double AtCapShare = 0.95;
+constexpr auto RecoverHold = std::chrono::seconds(20);
+constexpr auto RecoverFlapWindow = std::chrono::seconds(120);
+constexpr int RecoverFlapMaxDoublings = 4;
 
 /**
  * Adaptive quality on software HEVC/AV1 (AUD-SWENC): its quality steps become target-bitrate
@@ -217,11 +255,15 @@ constexpr double LiveBitrateMinChange = 0.05;
 /**
  * Where a bitrate change reopens the encoder (Backends::liveBitrate false: SVT-AV1), a change
  * waits until the last reconfiguration is at least this old and must move the target by at least
- * RestartBitrateMinChange: an AV1 reopen (~150 ms) then costs at most 3 % of the time.
+ * RestartBitrateMinChange. AUD-FIX4 D4: the contract's MinReconfigureInterval (it was 5 s and
+ * 20 %, and a swinging adaptive quality reopened SVT-AV1 every 6 s on Sol: 26 IDRs in 4.5 min).
+ * A rise waits RestartBitrateRaiseInterval (drop fast, climb slowly); changes that come while one
+ * waits merge into the one that is applied (the target is recomputed every step).
  */
-constexpr auto RestartBitrateInterval = std::chrono::seconds(5);
-constexpr double RestartBitrateMinChange = 0.20;
-static_assert(std::chrono::milliseconds(150) * 33 <= RestartBitrateInterval, "a bitrate reopen stall must stay under ~3 % of its interval");
+constexpr auto RestartBitrateInterval = MinReconfigureInterval;
+constexpr auto RestartBitrateRaiseInterval = std::chrono::seconds(20);
+constexpr double RestartBitrateMinChange = 0.30;
+static_assert(std::chrono::milliseconds(150) * 50 <= RestartBitrateInterval, "a bitrate reopen stall must stay under ~2 % of its interval");
 
 inline double scale(qint64 pixels)
 {
@@ -270,6 +312,13 @@ struct State {
     Clock::time_point presetRaisedAt{}; ///< the last preset step back up
     Clock::time_point presetRaiseBlockedUntil{}; ///< flap guard (PresetFlapWindow)
     int presetFlaps = 0; ///< raises the guard had to undo, for the flap guard's back-off
+    Clock::time_point clearSince{}; ///< slow link: since when no congestion signal (epoch = not clear)
+    Clock::time_point fillSince{}; ///< slow link: since when sending at the cap (epoch = not)
+    Clock::time_point lastProbeAt{}; ///< the last up-probe (epoch = none pending judgement)
+    int probeFailures = 0; ///< failed up-probes in a row (congestion soon after), for the back-off
+    quint32 probeFromKbps = 0; ///< the cap before the last up-probe (what a failed probe goes back to)
+    Clock::time_point recoveredAt{}; ///< the last recovery from a slow link
+    int recoverFlaps = 0; ///< slow links that came back soon after a recovery (RecoverFlapWindow)
     EncoderSettings applied; ///< what the last step() reported
     /// Reopens of the running encoder that settings changes caused (preset steps, a bitrate change
     /// without Backends::liveBitrate, a backend change); codec switches are not counted.
@@ -366,20 +415,41 @@ inline void updateLinkCap(State &state, const Input &in, Clock::time_point now)
         return quint32(std::clamp(kbps, double(MinTargetKbps), std::max(cap, double(MinTargetKbps))));
     };
     quint32 wanted = state.linkKbps;
+    bool probe = false;
     if (!in.bandwidthKbps) {
         wanted = state.linkKbps ? state.linkKbps : bounded(cap);
     } else if (const double link = *in.bandwidthKbps * TargetShareOfGoodput; state.linkKbps == 0) {
         wanted = bounded(link);
     } else if (in.congested) {
         // Goodput is demand-limited: while the link keeps up it only shows what the encoder sent,
-        // so it lowers the cap only under congestion and the cap grows back otherwise.
+        // so it lowers the cap only under congestion and the cap is probed back up otherwise.
         wanted = bounded(std::min(double(state.linkKbps), link));
-    } else {
-        wanted = bounded(state.linkKbps * TargetGrowth);
+        if (state.lastProbeAt != Clock::time_point{} && now - state.lastProbeAt < ProbeHold * 2) {
+            // The probe was too much: undo it now, not after MinReconfigureInterval.
+            state.probeFailures = std::min(state.probeFailures + 1, ProbeMaxDoublings);
+            state.lastProbeAt = {};
+            state.linkKbps = std::min(state.linkKbps, std::max(wanted, state.probeFromKbps));
+            state.linkChangedAt = now;
+            return;
+        }
+        state.lastProbeAt = {};
+    } else if (state.fillSince != Clock::time_point{}
+               && now - std::max(state.fillSince, state.linkChangedAt) >= ProbeHold * (1 << std::clamp(state.probeFailures, 0, ProbeMaxDoublings))) {
+        // Up-probe: the stream sent at this cap, clear, for ProbeHold (longer after failed probes).
+        if (state.lastProbeAt != Clock::time_point{}) {
+            state.probeFailures = 0; // the previous probe held
+        }
+        wanted = bounded(state.linkKbps * ProbeGrowth);
+        if (wanted != state.linkKbps) {
+            probe = true;
+            state.lastProbeAt = now;
+            state.probeFromKbps = state.linkKbps;
+        }
     }
     if (wanted == state.linkKbps) return;
     const double change = state.linkKbps ? std::abs(double(wanted) - state.linkKbps) / state.linkKbps : 1.0;
-    if (state.linkKbps == 0 || (now - state.linkChangedAt >= MinReconfigureInterval && change >= TargetMinChange)) {
+    // A probe step is applied whatever its size (the last one to the ceiling may be small).
+    if (state.linkKbps == 0 || (now - state.linkChangedAt >= MinReconfigureInterval && (change >= TargetMinChange || probe))) {
         state.linkKbps = wanted;
         state.linkChangedAt = now;
     }
@@ -393,7 +463,11 @@ inline quint32 wantedTarget(const State &state, const Input &in)
         return 0;
     }
     quint32 target = qualityKbps(in.quality.value_or(DefaultQuality), in.pixels);
-    if (state.linkKbps) target = std::min(target, state.linkKbps);
+    if (state.linkKbps) {
+        // AUD-FIX4 D2: on a slow link the cap is the target while the link is clear (the up-probe
+        // needs the stream to use it); under congestion adaptive quality may hold it lower.
+        target = in.congested ? std::min(target, state.linkKbps) : state.linkKbps;
+    }
     return std::max(target, MinTargetKbps);
 }
 }
@@ -401,8 +475,23 @@ inline quint32 wantedTarget(const State &state, const Input &in)
 inline Decision step(State &state, const Input &in, Clock::time_point now)
 {
     QString linkReason;
+    // The clear run (no congestion signal) and the run of sending at the cap, which the up-probe
+    // and the recovery count on (AUD-FIX4 D2).
+    if (!state.slowLink || !in.adaptive || in.congested) {
+        state.clearSince = {};
+    } else if (state.clearSince == Clock::time_point{}) {
+        state.clearSince = now;
+    }
+    const bool atCap = state.linkKbps > 0 && state.targetKbps >= state.linkKbps * AtCapShare;
+    const bool filling = state.clearSince != Clock::time_point{} && atCap && in.bandwidthKbps && *in.bandwidthKbps >= ProbeFillShare * state.targetKbps;
+    if (!filling) {
+        state.fillSince = {};
+    } else if (state.fillSince == Clock::time_point{}) {
+        state.fillSince = now;
+    }
     // Link state, with hysteresis. Goodput alone is demand-limited (a still desktop sends
-    // little), so "slow" also needs congestion; "fast again" needs goodput proving capacity.
+    // little), so "slow" also needs congestion; "fast again" needs goodput proving capacity,
+    // or (AUD-FIX4 D2) the probed cap staying clear at its ceiling.
     if (in.adaptive && in.bandwidthKbps) {
         const double kbps = *in.bandwidthKbps;
         if (!state.slowLink) {
@@ -414,6 +503,11 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
             } else if (now - state.slowSince >= LinkHold) {
                 state.slowLink = true;
                 state.slowSince = {};
+                state.clearSince = {};
+                if (state.recoveredAt != Clock::time_point{}) {
+                    // Slow again soon after a recovery: the next one needs a longer clear run.
+                    state.recoverFlaps = now - state.recoveredAt < RecoverFlapWindow ? std::min(state.recoverFlaps + 1, RecoverFlapMaxDoublings) : 0;
+                }
                 linkReason = QStringLiteral("slow link (%1 kbit/s)").arg(*in.bandwidthKbps);
             }
         } else {
@@ -425,8 +519,32 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
             } else if (now - state.fastSince >= LinkHold) {
                 state.slowLink = false;
                 state.fastSince = {};
+                state.clearSince = {};
+                state.fillSince = {};
+                state.recoveredAt = now;
                 linkReason = QStringLiteral("link recovered (%1 kbit/s)").arg(*in.bandwidthKbps);
             }
+        }
+    }
+    if (in.adaptive && state.slowLink && state.clearSince != Clock::time_point{}) {
+        const bool probing = state.current && softwarePrivate(*state.current) && in.mode != SoftwareEncoding::Never;
+        const double ceiling = slowBelowKbps(in.pixels);
+        const auto hold = RecoverHold * (1 << std::clamp(state.recoverFlaps, 0, RecoverFlapMaxDoublings));
+        // Probing: sending at the ceiling for the hold. Otherwise: clear for the hold.
+        const auto from = probing ? state.fillSince : state.clearSince;
+        const bool ready = probing ? state.fillSince != Clock::time_point{} && state.linkKbps >= ceiling * ProbeCeilingShare
+                                         && now - std::max(state.fillSince, state.linkChangedAt) >= hold
+                                   : now - state.clearSince >= hold;
+        if (ready) {
+            state.slowLink = false;
+            state.slowSince = {};
+            state.fastSince = {};
+            state.clearSince = {};
+            state.fillSince = {};
+            state.recoveredAt = now;
+            const auto held = std::chrono::duration_cast<std::chrono::seconds>(now - (probing ? std::max(from, state.linkChangedAt) : from)).count();
+            linkReason = probing ? QStringLiteral("link recovered (%1 kbit/s for %2 s without congestion)").arg(*in.bandwidthKbps).arg(held)
+                                 : QStringLiteral("link recovered (no congestion for %1 s)").arg(held);
         }
     }
 
@@ -495,7 +613,11 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
             if (!apply && live) {
                 apply = change >= LiveBitrateMinChange;
             } else if (!apply) {
-                apply = !presetStepPending && now - state.lastReconfigure >= RestartBitrateInterval && change >= RestartBitrateMinChange;
+                // The slow-link cap moves by at least TargetMinChange (or a probe step) and at
+                // most once per MinReconfigureInterval already; the target follows it whole.
+                const bool capDriven = state.linkKbps && target == state.linkKbps;
+                const auto interval = target > state.targetKbps ? RestartBitrateRaiseInterval : RestartBitrateInterval;
+                apply = !presetStepPending && now - state.lastReconfigure >= interval && (change >= RestartBitrateMinChange || capDriven);
             }
             if (apply) {
                 if (!d.changed && !live && !presetChanged) state.lastReconfigure = now;
@@ -578,12 +700,111 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
     state.guardFrameRate.reset();
     state.targetKbps = 0;
     state.linkKbps = 0;
+    state.fillSince = {};
+    state.lastProbeAt = {};
+    state.probeFailures = 0;
     state.lowLoadSince = {};
     state.presetRaisedAt = {};
     state.presetRaiseBlockedUntil = {};
     state.presetFlaps = 0;
     state.preset = fromGuard && softwarePrivate(want) ? Preset::Fastest : Preset::Efficient;
     return finish({want, true, reason});
+}
+
+/**
+ * AUD-FIX4 D3: the CPU guard's per-interval sample. It used to divide the process CPU time per
+ * frame by every hardware thread (16 on Sol), so 0.70 of the budget meant ~11 busy cores and the
+ * guard never fired, even with SVT-AV1 at 180 % CPU delivering 13-23 of 30 fps. KRdp cannot see
+ * a software encoder's per-frame latency, so it estimates it: CPU time per frame over the
+ * encoder's *effective* parallelism, its own thread count (KPipeWire: clamp(cores / 2, 2, 8) for
+ * libx265/SVT-AV1, min(cores, 16) for libx264; KPIPEWIRE_SW_ENCODER_THREADS overrides) times
+ * how much of that a frame really uses. PERF.md measured, at 1080p30 on Sol with 8 threads:
+ * SVT-AV1 M10 video 63 ms CPU per frame at 18.2 ms mean latency, desktop 32-38 ms at 10.1;
+ * x265 veryfast video 120 ms at 36.5, desktop 42-56 ms at 14.8-18.4 (about 3.3 threads' worth,
+ * so 0.4 of 8); libx264 23 ms at 3.0 with 16 threads (0.45).
+ * Delivered frames per surface under ShortfallShare of the frame-rate cap, while the encoder is
+ * busy (estimate >= ShortfallMinLoad of the budget) and frames still flow (>= ShortfallFloorShare,
+ * i.e. motion, not a still desktop), count too: the sample is scaled by cap / delivered.
+ */
+constexpr double PrivateSoftwareParallelShare = 0.40;
+constexpr double AvcSoftwareParallelShare = 0.45;
+constexpr double ShortfallShare = 0.75;
+constexpr double ShortfallFloorShare = 0.30;
+constexpr double ShortfallMinLoad = 0.35;
+/// The CPU guard needs at least this many frames in an interval to take a sample.
+constexpr int MinFramesPerLoadSample = 5;
+
+/// The software encoder's thread count for \a family, as KPipeWire picks it on a host with
+/// \a idealThreads hardware threads (\a forced: KPIPEWIRE_SW_ENCODER_THREADS, HEVC/AV1 only).
+inline int softwareEncoderThreads(Family family, int idealThreads, std::optional<int> forced = std::nullopt)
+{
+    if (family == Family::Avc) return std::clamp(idealThreads, 1, 16);
+    if (forced && *forced > 0) return std::min(*forced, 64);
+    return std::clamp(idealThreads / 2, 2, 8);
+}
+/// How many threads' worth of CPU one frame of \a family's software encoder can use at once.
+inline double softwareEncoderParallelism(Family family, int threads)
+{
+    return std::max(1.0, threads * (family == Family::Avc ? AvcSoftwareParallelShare : PrivateSoftwareParallelShare));
+}
+/// Estimated encode time per frame for \a cpuMs process CPU time over \a frames frames.
+inline double estimatedEncodeMs(double cpuMs, int frames, Family family, int threads)
+{
+    return cpuMs / std::max(1, frames) / softwareEncoderParallelism(family, threads);
+}
+/**
+ * The load sample (1.0 = the whole frame budget) for \a cpuMs process CPU time spent over
+ * \a seconds, in which \a frames frames were encoded on \a surfaces surfaces at a cap of
+ * \a frameRate fps. nullopt when there were too few frames to judge.
+ */
+inline std::optional<double> encodeLoadSample(double cpuMs, int frames, double seconds, int frameRate, Family family, int threads, int surfaces = 1)
+{
+    if (frames < MinFramesPerLoadSample || seconds <= 0 || frameRate <= 0) return std::nullopt;
+    const double budgetMs = 1000.0 / frameRate;
+    double load = estimatedEncodeMs(cpuMs, frames, family, threads) / budgetMs;
+    const double delivered = frames / seconds / std::max(1, surfaces);
+    if (load >= ShortfallMinLoad && delivered < frameRate * ShortfallShare && delivered >= frameRate * ShortfallFloorShare) {
+        load = std::max(load, load * frameRate / delivered);
+    }
+    return load;
+}
+
+/**
+ * AUD-FIX4 D5: why a client that asked for \a requested (HEVC/AV1) gets AVC. It used to say "no
+ * usable encoder" even when software encoders exist and the policy simply did not pick them.
+ */
+inline QString avcChoiceReason(const Encoders &encoders, SoftwareEncoding mode, bool adaptive, const QList<Family> &requested)
+{
+    QStringList none, softwareOnly;
+    for (const Family f : requested) {
+        if (f == Family::Avc) continue;
+        const Backends &b = encoders.of(f);
+        if (b.hardware) continue; // a hardware one exists: AVC only if the policy stepped away
+        (b.software ? softwareOnly : none).append(QString::fromLatin1(familyName(f)));
+    }
+    QStringList parts;
+    if (!none.isEmpty()) {
+        parts << QStringLiteral("no encoder for %1 on this host").arg(none.join(QLatin1Char('/')));
+    }
+    if (!softwareOnly.isEmpty()) {
+        const QString names = softwareOnly.join(QLatin1Char('/'));
+        switch (mode) {
+        case SoftwareEncoding::Never:
+            parts << QStringLiteral("hardware encoder not available for %1; software encoding is off (SoftwareEncoding=never)").arg(names);
+            break;
+        case SoftwareEncoding::Auto:
+            parts << (adaptive ? QStringLiteral("hardware encoder not available for %1; software not selected (link not slow)").arg(names)
+                               : QStringLiteral("hardware encoder not available for %1; software only on a slow link, and this client fixed its codec").arg(names));
+            break;
+        case SoftwareEncoding::Prefer:
+            parts << QStringLiteral("software %1 held back by the CPU guard").arg(names);
+            break;
+        }
+    }
+    if (parts.isEmpty()) {
+        return QStringLiteral("hevc/av1 held back by the codec policy");
+    }
+    return parts.join(QStringLiteral("; "));
 }
 
 /// p95 over a sliding window of per-interval encode-load samples (see Input::encodeLoadP95).
