@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Steve Westers
+# SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+
+# Build the single `krdp` system deb (normal /usr paths) from committed
+# sources. It never installs anything and never touches ~/dev/krdp/build or
+# ~/dev/krdp/.deps: both KRdp and the private KPipeWire are built from
+# `git archive` exports inside the build directory.
+#
+# Environment:
+#   KRDP_PKG_BUILD_DIR  build directory (default: <checkout>/build-pkg)
+#   KPIPEWIRE_SRC       KPipeWire git repository (default: ~/dev/kpipewire)
+#   KPIPEWIRE_REF       KPipeWire commit to bundle (default: the pinned one below)
+#   JOBS                parallel jobs (default: nproc / 3)
+#   KRDP_PKG_ALLOW_DIRTY=1  build HEAD even with uncommitted changes (they are
+#                       NOT included; only HEAD is exported)
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+build=${KRDP_PKG_BUILD_DIR:-$root/build-pkg}
+# The build directory is deleted piecemeal below: refuse anything that is not
+# clearly a scratch build directory.
+build=$(realpath -m -- "$build")
+if [[ -z $build || $build == / || $build == "$(realpath -m -- "$HOME")" || $build == "$root" ]] \
+    || [[ $build != "$root"/* && $(basename -- "$build") != build-pkg* ]]; then
+    echo "refusing unsafe build directory '$build': it must be inside $root or be named build-pkg*" >&2
+    exit 1
+fi
+kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
+# westers/opt-015 = v6.6.4 + the KRDP encoder patches (OPT-015/OPT-050).
+kpw_ref=${KPIPEWIRE_REF:-183a140}
+jobs=${JOBS:-$(( $(nproc) / 3 ))}
+(( jobs >= 1 )) || jobs=1
+
+multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+privdir=/usr/lib/$multiarch/krdp
+
+for tool in cmake ninja git file dpkg-shlibdeps dpkg-gencontrol dpkg-deb; do
+    command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 1; }
+done
+
+if [[ -n $(git -C "$root" status --porcelain --untracked-files=no) && ${KRDP_PKG_ALLOW_DIRTY:-0} != 1 ]]; then
+    echo "uncommitted changes in $root; commit them or set KRDP_PKG_ALLOW_DIRTY=1" >&2
+    exit 1
+fi
+
+commit=$(git -C "$root" rev-parse HEAD)
+revision=${commit:0:7}
+kpw_commit=$(git -C "$kpw_src" rev-parse --verify "$kpw_ref^{commit}")
+# Reproducible: timestamps and the version come from the commit, not the clock.
+export SOURCE_DATE_EPOCH=$(git -C "$root" log -1 --format=%ct "$commit")
+project_version=$(sed -n 's/^set(PROJECT_VERSION "\([0-9.]*\)")/\1/p' "$root/CMakeLists.txt")
+stamp=$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y%m%d%H%M)
+version="$project_version+git$stamp.$revision-1"
+export TZ=UTC LC_ALL=C.UTF-8
+
+# Distro hardening/reproducibility flags (-ffile-prefix-map, relro, ...).
+eval "$(DEB_BUILD_MAINT_OPTIONS=hardening=+all dpkg-buildflags --export=sh)"
+
+echo "krdp $version (krdp $commit, kpipewire $kpw_commit), $jobs jobs, in $build"
+mkdir -p "$build"
+
+# 1. Private KPipeWire, installed to a scratch prefix. Its libraries carry the
+#    package's private RUNPATH so they resolve each other, never the distro's.
+rm -rf "${build:?}/kpipewire-src" "${build:?}/kpipewire-prefix"
+mkdir -p "$build/kpipewire-src"
+git -C "$kpw_src" archive "$kpw_commit" | tar -x -C "$build/kpipewire-src"
+cmake -S "$build/kpipewire-src" -B "$build/kpipewire-build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_INSTALL_PREFIX="$build/kpipewire-prefix" \
+    -DKDE_SKIP_RPATH_SETTINGS=TRUE -DCMAKE_INSTALL_RPATH="$privdir" \
+    -DKDE_INSTALL_USE_QT_SYS_PATHS=OFF \
+    -DBUILD_TESTING=OFF
+cmake --build "$build/kpipewire-build" -j"$jobs"
+cmake --install "$build/kpipewire-build"
+kpw_libdir="$build/kpipewire-prefix/lib/$multiarch"
+[[ -f "$kpw_libdir/libKPipeWire.so.6" && -f "$kpw_libdir/libKPipeWireRecord.so.6" ]]
+
+# 2. KRdp from the committed tree.
+rm -rf "${build:?}/src"
+mkdir -p "$build/src"
+git -C "$root" archive "$commit" | tar -x -C "$build/src"
+cmake -S "$build/src" -B "$build/krdp-build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DKDE_INSTALL_USE_QT_SYS_PATHS=ON \
+    -DKDE_SKIP_RPATH_SETTINGS=TRUE -DCMAKE_INSTALL_RPATH="$privdir" \
+    -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF \
+    -DINSTALL_DIAGNOSTIC_PROBES=OFF \
+    -DKRDP_BUILD_SYSTEM_PACKAGE=ON \
+    -DKPipeWire_DIR="$kpw_libdir/cmake/KPipeWire" \
+    -DKRDP_PRIVATE_KPIPEWIRE_LIBDIR="$kpw_libdir"
+cmake --build "$build/krdp-build" -j"$jobs"
+
+# 3. Stage the package tree the way dpkg-gencontrol/dpkg-shlibdeps expect it.
+work="${build:?}/deb"
+pkgroot="$work/debian/krdp"
+rm -rf "${work:?}"
+mkdir -p "$work/debian"
+DESTDIR="$pkgroot" cmake --install "$build/krdp-build"
+
+# Strip like dh_strip (no -dbgsym package).
+while IFS= read -r -d '' file; do
+    if file -b "$file" | grep -q 'ELF .*shared object'; then
+        strip --remove-section=.comment --remove-section=.note --strip-unneeded "$file"
+    else
+        strip --remove-section=.comment --remove-section=.note "$file"
+    fi
+done < <(find "$pkgroot" -type f -exec sh -c 'head -c4 "$1" | grep -q "^.ELF"' _ {} \; -print0)
+
+doc="$pkgroot/usr/share/doc/krdp"
+install -d "$doc"
+install -m 0644 "$root/packaging/debian/copyright" "$doc/copyright"
+if [[ -s "$root/packaging/debian/lintian-overrides" ]]; then
+    install -D -m 0644 "$root/packaging/debian/lintian-overrides" "$pkgroot/usr/share/lintian/overrides/krdp"
+fi
+cat >"$work/debian/changelog" <<EOF
+krdp ($version) resolute; urgency=medium
+
+  * Build of github.com/westers/krdp commit
+    $commit,
+    private KPipeWire $kpw_commit.
+
+ -- Steve Westers <amiga1.2k@gmail.com>  $(date -u -R -d "@$SOURCE_DATE_EPOCH")
+EOF
+gzip -9n <"$work/debian/changelog" >"$doc/changelog.Debian.gz"
+chmod 0644 "$doc/changelog.Debian.gz"
+cp "$root/packaging/debian/control" "$work/debian/control"
+
+install -d -m 0755 "$pkgroot/DEBIAN"
+for script in preinst postinst prerm postrm; do
+    install -m 0755 "$root/packaging/debian/$script" "$pkgroot/DEBIAN/$script"
+done
+(cd "$pkgroot" && find etc -type f -printf '/%p\n' | sort) >"$pkgroot/DEBIAN/conffiles"
+chmod 0644 "$pkgroot/DEBIAN/conffiles"
+
+# Every ELF file's RUNPATH must be exactly the private directory (or absent):
+# a leaked build path would load libraries from this build tree.
+mapfile -d '' elves < <(find "$pkgroot" -type f -exec sh -c 'head -c4 "$1" | grep -q "^.ELF"' _ {} \; -print0)
+for elf in "${elves[@]}"; do
+    runpath=$(readelf -d "$elf" | sed -n 's/.*(RUNPATH).*\[\(.*\)\]/\1/p')
+    [[ -z "$runpath" || "$runpath" == "$privdir" ]] || { echo "bad RUNPATH $runpath in $elf" >&2; exit 1; }
+done
+
+# Dependencies from the ELF files; the private libraries resolve inside the
+# package (via their RUNPATH) and add no dependency.
+(cd "$work" && dpkg-shlibdeps -Tdebian/krdp.substvars -l"$pkgroot$privdir" "${elves[@]}")
+(cd "$work" && dpkg-gencontrol -pkrdp -Pdebian/krdp -Tdebian/krdp.substvars)
+
+(cd "$pkgroot" && find . -path ./DEBIAN -prune -o -type f -printf '%P\0' | sort -z \
+    | xargs -0 md5sum) >"$pkgroot/DEBIAN/md5sums"
+chmod 0644 "$pkgroot/DEBIAN/md5sums"
+
+# Normalise modes and timestamps, then build.
+find "$pkgroot" -type d -exec chmod 0755 {} +
+find "$pkgroot" -newermt "@$SOURCE_DATE_EPOCH" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
+deb="$build/krdp_${version}_$(dpkg --print-architecture).deb"
+rm -f "${build:?}"/krdp_*.deb
+dpkg-deb --root-owner-group -Zxz --build "$pkgroot" "$deb"
+
+# 4. Contract checks.
+[[ $(dpkg-deb -f "$deb" Package) == krdp && $(dpkg-deb -f "$deb" Version) == "$version" ]]
+contents=$(dpkg-deb -c "$deb" | awk '{print $6}')
+for path in ./usr/bin/krdpserver ./usr/bin/krdp-console-host ./usr/bin/krdp-console-worker \
+    ./usr/bin/krdp-virtual-host ./usr/bin/krdp-virtual-session-entry ./usr/bin/krdp-virtual-pam-keeper \
+    ./usr/bin/krdp-virtual-session-cleanup ./usr/bin/krdp-virtual-device-entry \
+    ./usr/bin/krdp-virtual-guardian ./usr/bin/krdp-virtual-guardianctl \
+    ".$privdir/libKRdp.so.6" ".$privdir/libKPipeWire.so.6" ".$privdir/libKPipeWireDmaBuf.so.6" \
+    ".$privdir/libKPipeWireRecord.so.6" \
+    ./usr/lib/systemd/user/app-org.kde.krdpserver.service \
+    ./usr/lib/systemd/system/krdp-console-host.service ./usr/lib/systemd/system/krdp-virtual-host.service \
+    ./usr/lib/systemd/system/krdp-virtual-session@.service \
+    ./usr/lib/systemd/system-preset/00-krdp-system.preset ./usr/lib/systemd/user-preset/00-krdp.preset \
+    ./etc/pam.d/krdp-virtual-session \
+    ./usr/share/krdp/virtual-session/launch-virtual-session.sh \
+    ./usr/share/applications/org.kde.krdpserver.desktop \
+    ./usr/share/applications/org.kde.krdpconsoleworker.desktop \
+    "./usr/lib/$multiarch/qt6/plugins/plasma/kcms/systemsettings/kcm_krdpserver.so"; do
+    grep -qxF -- "$path" <<<"$contents" || { echo "missing from package: $path" >&2; exit 1; }
+done
+if grep -E -- '-probe$|^\./opt/|/cmake/|/lib[^/]*\.so$|/include/' <<<"$contents"; then
+    echo "package contains probes, /opt paths or development files" >&2
+    exit 1
+fi
+echo "krdp system deb: $deb"

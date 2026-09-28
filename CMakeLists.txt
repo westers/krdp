@@ -37,6 +37,7 @@ option(BUILD_PLASMA_SESSION "Build support for Plasma Screencasting extensions" 
 option(INSTALL_DIAGNOSTIC_PROBES "Install the krdp-*-probe diagnostic tools (they are always built)" OFF)
 option(KRDP_BUILD_CONSOLE_TEST_PACKAGE "Stage the paired isolated Console test deb" OFF)
 option(KRDP_BUILD_VIRTUAL_TEST_PACKAGE "Stage the paired isolated virtual-session test deb" OFF)
+option(KRDP_BUILD_SYSTEM_PACKAGE "Install layout of the krdp system deb (set only by scripts/package-krdp.sh)" OFF)
 
 find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED Core Quick Gui Network DBus WaylandClient Qml)
 
@@ -64,6 +65,27 @@ endif()
 
 find_package(Systemd 254 QUIET)
 set_package_properties(Systemd PROPERTIES TYPE OPTIONAL PURPOSE "If available, used by KCM to integrate with systemd to enable/disable the service and show logs")
+
+# The system package keeps libKRdp and the private KPipeWire out of the public
+# library path: both are fork-private ABIs that must not shadow the distro's
+# libKPipeWire*.so.6 for other applications. Binaries reach them via RUNPATH.
+set(KRDP_LIBRARY_INSTALL_DIR "${KDE_INSTALL_LIBDIR}")
+if(KRDP_BUILD_SYSTEM_PACKAGE)
+    if(KRDP_BUILD_CONSOLE_TEST_PACKAGE OR KRDP_BUILD_VIRTUAL_TEST_PACKAGE OR NOT BUILD_PLASMA_SESSION
+        OR INSTALL_DIAGNOSTIC_PROBES OR NOT CMAKE_INSTALL_PREFIX STREQUAL "/usr")
+        message(FATAL_ERROR "The system package needs Plasma support, prefix /usr, no test packages and no diagnostic probes")
+    endif()
+    if(NOT Systemd_FOUND)
+        message(FATAL_ERROR "The system package needs libsystemd for the KCM's service integration")
+    endif()
+    if(NOT IS_DIRECTORY "${KRDP_PRIVATE_KPIPEWIRE_LIBDIR}")
+        message(FATAL_ERROR "Set KRDP_PRIVATE_KPIPEWIRE_LIBDIR to the private KPipeWire multiarch lib directory")
+    endif()
+    set(KRDP_LIBRARY_INSTALL_DIR "${KDE_INSTALL_LIBDIR}/krdp")
+    if(NOT CMAKE_INSTALL_RPATH STREQUAL "${CMAKE_INSTALL_PREFIX}/${KRDP_LIBRARY_INSTALL_DIR}")
+        message(FATAL_ERROR "Set CMAKE_INSTALL_RPATH to ${CMAKE_INSTALL_PREFIX}/${KRDP_LIBRARY_INSTALL_DIR}")
+    endif()
+endif()
 
 find_package(PAM REQUIRED)
 # Top level so both server/ (certificate helper) and src/kcm (which links it) see OpenSSL::Crypto.
@@ -113,12 +135,15 @@ configure_package_config_file(
     INSTALL_DESTINATION ${KDE_INSTALL_CMAKEPACKAGEDIR}/KRdp
 )
 
-install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/KRdpConfig.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/KRdpConfigVersion.cmake"
-    DESTINATION ${KDE_INSTALL_CMAKEPACKAGEDIR}/KRdp
-    COMPONENT Devel
-)
+# libKRdp is private in the system package, so it ships no development files.
+if(NOT KRDP_BUILD_SYSTEM_PACKAGE)
+    install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/KRdpConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/KRdpConfigVersion.cmake"
+        DESTINATION ${KDE_INSTALL_CMAKEPACKAGEDIR}/KRdp
+        COMPONENT Devel
+    )
+endif()
 
 feature_summary(WHAT ALL FATAL_ON_MISSING_REQUIRED_PACKAGES)
 
@@ -175,4 +200,12 @@ if(KRDP_BUILD_VIRTUAL_TEST_PACKAGE)
         COMPONENT KRdpVirtualSessionTest
         FILES_MATCHING PATTERN "libKPipeWire*.so*")
     include(cmake/VirtualTestPackage.cmake)
+endif()
+
+if(KRDP_BUILD_SYSTEM_PACKAGE)
+    # Runtime libraries only: the unversioned libKPipeWire*.so links are for builds.
+    install(DIRECTORY "${KRDP_PRIVATE_KPIPEWIRE_LIBDIR}/"
+        DESTINATION ${KRDP_LIBRARY_INSTALL_DIR}
+        FILES_MATCHING PATTERN "libKPipeWire*.so.*"
+        PATTERN "cmake" EXCLUDE PATTERN "qml" EXCLUDE)
 endif()

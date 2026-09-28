@@ -1,0 +1,88 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Steve Westers
+# SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+set -e
+
+# Migration from the isolated /opt test packages (krdp-console-test,
+# krdp-virtual-test). Those packages had no maintainer scripts; their units
+# and PAM stack were copied into /etc by hand. Units there shadow this
+# package's units in /usr/lib/systemd/system and would keep starting the /opt
+# binaries, so move them to a backup directory. Only files that are clearly
+# test leftovers are touched, nothing is deleted and no service is stopped.
+backup=/var/backups/krdp-test-migration
+etc=/etc/systemd/system
+
+run_backup=
+
+# Each run gets its own timestamped directory, so an earlier migration's
+# backup is never overwritten.
+move_aside() {
+    if [ -z "$run_backup" ]; then
+        mkdir -p -m 0700 "$backup"
+        stamp="$backup/$(date +%Y%m%d-%H%M%S)"
+        run_backup=$stamp
+        n=0
+        # mkdir without -p fails if the directory exists: never reuse one.
+        until mkdir -m 0700 "$run_backup" 2>/dev/null; do
+            n=$((n + 1))
+            [ "$n" -lt 100 ] || { echo "krdp: cannot create a backup directory under $backup" >&2; exit 1; }
+            run_backup="$stamp.$n"
+        done
+    fi
+    mkdir -p -m 0700 "$run_backup$(dirname "$1")"
+    mv -n "$1" "$run_backup$1"
+    [ ! -e "$1" ] || { echo "krdp: backup $run_backup$1 already exists, left $1 in place" >&2; return 0; }
+    echo "krdp: moved test leftover $1 to $run_backup$1"
+}
+
+migrate_test_leftovers() {
+    # The Console test unit and its drop-ins exist only for the /opt install.
+    for path in "$etc/krdp-console-host-test.service" "$etc"/krdp-console-host-test.service.d/*; do
+        if [ -f "$path" ] && [ ! -L "$path" ]; then
+            move_aside "$path"
+        fi
+    done
+    # These names are shared with this package: move only /opt-bound copies.
+    for path in "$etc/krdp-virtual-host.service" "$etc"/krdp-virtual-host.service.d/*.conf \
+        "$etc/krdp-virtual-session@.service" "$etc"/krdp-virtual-session@.service.d/*.conf \
+        "$etc/krdp-console-host.service" "$etc"/krdp-console-host.service.d/*.conf; do
+        if [ -f "$path" ] && [ ! -L "$path" ] \
+            && grep -q -e /opt/krdp-console/ -e /opt/krdp-virtual-service-test/ "$path"; then
+            move_aside "$path"
+        fi
+    done
+    for dir in "$etc"/krdp-console-host-test.service.d "$etc"/krdp-virtual-host.service.d \
+        "$etc"/krdp-virtual-session@.service.d "$etc"/krdp-console-host.service.d; do
+        if [ -d "$dir" ]; then
+            rmdir --ignore-fail-on-non-empty "$dir"
+        fi
+    done
+    # Enablement links left dangling by the moves above.
+    for link in "$etc"/*.wants/krdp-console-host-test.service "$etc"/*.wants/krdp-virtual-host.service \
+        "$etc"/*.wants/krdp-console-host.service; do
+        if [ -L "$link" ] && [ ! -e "$link" ]; then
+            rm -f "$link"
+            echo "krdp: removed dangling enablement link $link"
+        fi
+    done
+    # The unowned draft PAM stack from the virtual test install. An unchanged
+    # copy is replaced by this package's conffile instead of prompting.
+    pam=/etc/pam.d/krdp-virtual-session
+    if [ -f "$pam" ] && ! dpkg-query -S "$pam" >/dev/null 2>&1; then
+        case "$(sha256sum "$pam" | cut -d' ' -f1)" in
+        00adefed33a79b52b04afc79ceadc434ae1744f18e5f025a3170766c45ee7ed3)
+            move_aside "$pam"
+            ;;
+        esac
+    fi
+}
+
+case "$1" in
+install|upgrade)
+    if [ -z "$DPKG_ROOT" ]; then
+        migrate_test_leftovers
+    fi
+    ;;
+esac
+
+exit 0
