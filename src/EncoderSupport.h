@@ -12,18 +12,20 @@
 /**
  * Which video encoders this host really has (AUD-FIX2 F1), per codec and backend.
  *
- * - **Hardware** (VAAPI): KPipeWire must offer the encoder (`suggestedEncoders()`, and for
- *   HEVC/AV1 a KPipeWire built with them) *and* a trial `avcodec_open2()` of `h264_vaapi` /
- *   `hevc_vaapi` / `av1_vaapi` on the VAAPI render node must succeed - a driver that only
- *   advertises a profile (nvidia-vaapi-driver) does not count.
+ * - **Hardware** (VAAPI): KPipeWire must offer the encoder in hardware (the Hardware bit of
+ *   `availableEncoderBackends()`; with an older KPipeWire, `suggestedEncoders()`) *and* a trial
+ *   `avcodec_open2()` of `h264_vaapi` / `hevc_vaapi` / `av1_vaapi` on the VAAPI render node must
+ *   succeed - a driver that only advertises a profile (nvidia-vaapi-driver) does not count.
  * - **Software**: H.264 = libx264 or libopenh264 in libavcodec (KPipeWire's own fallback
- *   order after h264_vaapi). HEVC and AV1 in software are false until KPipeWire's
- *   `makeEncoder()` gains a software path for them (libx265 / SVT-AV1, a separate
- *   workstream); softwareBackend() is the one place that then reports them.
+ *   order after h264_vaapi). HEVC = libx265 and AV1 = libsvtav1/libaom-av1, reported by a
+ *   KPipeWire with the WS-E software path (the Software bit of `availableEncoderBackends()`);
+ *   false with an older or stock KPipeWire.
  *
  * Environment (tests, diagnosis):
  * - `KRDP_FORCE_SOFTWARE_ENCODING=1`: report no hardware at all, and applyProcessOverrides()
  *   makes KPipeWire skip h264_vaapi too (`KPIPEWIRE_FORCE_ENCODER=libx264`, or libopenh264).
+ *   Software HEVC/AV1 stay available; the codec policy then picks them with the SoftwareOnly
+ *   backend policy (EncoderSelection::apply()).
  * - `KRDP_ENCODERS=avc=hw+sw,hevc=hw,av1=none`: replace the probe's answer (per codec
  *   `hw`, `sw`, `hw+sw` or `none`; codecs not named keep the probed value).
  */

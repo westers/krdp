@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Steve Westers
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
-// AUD-FIX2 F1: the encoder probe. With hardware forced off (KRDP_FORCE_SOFTWARE_ENCODING,
+// AUD-FIX2 F1 / WS-E: the encoder probe. With hardware forced off (KRDP_FORCE_SOFTWARE_ENCODING,
 // the switch the SoftwareEncodeSessionTest also uses) H.264 must still be available in
-// software, HEVC/AV1 must not be offered (no software encoder for them yet), and KPipeWire
-// must be pointed at the software H.264 encoder. The real probe must never claim a codec
-// KPipeWire cannot produce.
+// software, HEVC/AV1 exactly when KPipeWire reports a software backend for them (libx265,
+// libsvtav1), and KPipeWire must be pointed at the software H.264 encoder. The real probe must
+// never claim a codec KPipeWire cannot produce.
 
 #include "EncoderSupport.h"
 
+#include <PipeWireEncodedStream>
 #include <QTest>
 
 extern "C" {
@@ -18,6 +19,25 @@ extern "C" {
 using namespace KRdp;
 using namespace Qt::StringLiterals;
 using CodecPolicy::Backends;
+
+namespace
+{
+/// What the linked KPipeWire itself says about the software backend of \a encoder.
+bool kpipewireSoftware(PipeWireEncodedStream::Encoder encoder)
+{
+    if constexpr (requires { PipeWireEncodedStream::availableEncoderBackends(encoder); }) {
+        return bool(PipeWireEncodedStream::availableEncoderBackends(encoder) & PipeWireEncodedStream::EncoderBackend::Software);
+    }
+    return false;
+}
+bool kpipewireHardware(PipeWireEncodedStream::Encoder encoder)
+{
+    if constexpr (requires { PipeWireEncodedStream::availableEncoderBackends(encoder); }) {
+        return bool(PipeWireEncodedStream::availableEncoderBackends(encoder) & PipeWireEncodedStream::EncoderBackend::Hardware);
+    }
+    return true; // an older KPipeWire: only the trial open decides
+}
+}
 
 class EncoderSupportTest : public QObject
 {
@@ -47,8 +67,11 @@ private Q_SLOTS:
         qunsetenv("KRDP_ENCODERS");
         const auto probe = EncoderSupport::probeUncached();
         QCOMPARE(probe.encoders.avc.hardware, false);
-        QCOMPARE(probe.encoders.hevc, Backends{});
-        QCOMPARE(probe.encoders.av1, Backends{});
+        // Software HEVC/AV1 are still offered: hardware off is what they are for.
+        QCOMPARE(probe.encoders.hevc, (Backends{false, kpipewireSoftware(PipeWireEncodedStream::HEVCMain)}));
+        QCOMPARE(probe.encoders.av1, (Backends{false, kpipewireSoftware(PipeWireEncodedStream::AV1Main)}));
+        QCOMPARE(probe.encoders.hevc.software, avcodec_find_encoder_by_name("libx265") != nullptr);
+        QCOMPARE(probe.encoders.av1.software, avcodec_find_encoder_by_name("libsvtav1") || avcodec_find_encoder_by_name("libaom-av1"));
         QVERIFY(!probe.avc444Hardware);
         QVERIFY(probe.renderNode.isEmpty());
         const bool softwareH264 = avcodec_find_encoder_by_name("libx264") || avcodec_find_encoder_by_name("libopenh264");
@@ -63,16 +86,22 @@ private Q_SLOTS:
         EncoderSupport::applyProcessOverrides();
         QCOMPARE(qgetenv("KPIPEWIRE_FORCE_ENCODER"), QByteArray("libopenh264"));
 
-        // The policy then always lands on software AVC, whatever the client asks for.
-        CodecPolicy::State state;
+        // The policy then never picks a hardware encoder: software AVC on a normal link, and
+        // under `prefer` the best software codec the client decodes.
         CodecPolicy::Input in;
         in.encoders = probe.encoders;
         in.client = {CodecPolicy::Family::Hevc, CodecPolicy::Family::Av1};
-        for (const auto mode : {CodecPolicy::SoftwareEncoding::Auto, CodecPolicy::SoftwareEncoding::Never, CodecPolicy::SoftwareEncoding::Prefer}) {
+        for (const auto mode : {CodecPolicy::SoftwareEncoding::Auto, CodecPolicy::SoftwareEncoding::Never}) {
             in.mode = mode;
             CodecPolicy::State fresh;
             QCOMPARE(CodecPolicy::step(fresh, in, CodecPolicy::Clock::now()).choice, (CodecPolicy::Choice{CodecPolicy::Family::Avc, false}));
         }
+        in.mode = CodecPolicy::SoftwareEncoding::Prefer;
+        CodecPolicy::State prefer;
+        const auto choice = CodecPolicy::step(prefer, in, CodecPolicy::Clock::now()).choice;
+        QVERIFY(!choice.hardware);
+        const auto best = probe.encoders.av1.software ? CodecPolicy::Family::Av1 : probe.encoders.hevc.software ? CodecPolicy::Family::Hevc : CodecPolicy::Family::Avc;
+        QCOMPARE(choice.family, best);
         qunsetenv("KRDP_FORCE_SOFTWARE_ENCODING");
         qunsetenv("KPIPEWIRE_FORCE_ENCODER");
     }
@@ -118,8 +147,12 @@ private Q_SLOTS:
     {
         const auto probe = EncoderSupport::probeUncached();
         qInfo().noquote() << "this host:" << EncoderSupport::describe(probe);
-        QVERIFY(!probe.encoders.hevc.software); // no software HEVC in KPipeWire yet
-        QVERIFY(!probe.encoders.av1.software);
+        // Software HEVC/AV1 exactly as KPipeWire reports them (not its suggestedEncoders(),
+        // which lists software-only HEVC/AV1 too); hardware never without KPipeWire's Hardware bit.
+        QCOMPARE(probe.encoders.hevc.software, kpipewireSoftware(PipeWireEncodedStream::HEVCMain));
+        QCOMPARE(probe.encoders.av1.software, kpipewireSoftware(PipeWireEncodedStream::AV1Main));
+        QVERIFY(!probe.encoders.hevc.hardware || kpipewireHardware(PipeWireEncodedStream::HEVCMain));
+        QVERIFY(!probe.encoders.av1.hardware || kpipewireHardware(PipeWireEncodedStream::AV1Main));
         if (probe.encoders.hevc.hardware || probe.encoders.av1.hardware) {
             QVERIFY(probe.encoders.avc.hardware); // same VAAPI device
         }

@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 
 #include <mutex>
+#include <optional>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -104,27 +105,59 @@ Hardware probeHardware()
     return hw;
 }
 
-/// What this KPipeWire build can be asked for (a stock KPipeWire has no HEVC/AV1 at all).
+/// The KPipeWire encoder value of \a family (H264Main for AVC); nullopt: this KPipeWire has none.
 template<typename Stream>
-Backends kpipewireOffers(const QList<typename Stream::Encoder> &suggested, Family family)
+std::optional<typename Stream::Encoder> encoderOf(Family family)
 {
-    Backends offered;
     switch (family) {
     case Family::Avc:
-        offered.hardware = offered.software = suggested.contains(Stream::H264Main) || suggested.contains(Stream::H264Baseline);
-        break;
+        return Stream::H264Main;
     case Family::Hevc:
         if constexpr (requires { Stream::HEVCMain; }) {
-            offered.hardware = suggested.contains(Stream::HEVCMain);
+            return Stream::HEVCMain;
         }
         break;
     case Family::Av1:
         if constexpr (requires { Stream::AV1Main; }) {
-            offered.hardware = suggested.contains(Stream::AV1Main);
+            return Stream::AV1Main;
         }
         break;
     }
-    return offered;
+    return std::nullopt;
+}
+
+template<typename Stream>
+constexpr bool kpipewireHasBackends()
+{
+    return requires(typename Stream::Encoder e) { Stream::availableEncoderBackends(e); };
+}
+
+/**
+ * Whether this KPipeWire build can be asked for \a family in hardware. With backend reporting
+ * (WS-E) that is the Hardware bit of availableEncoderBackends(): suggestedEncoders() now also
+ * lists HEVC/AV1 when only libx265/libsvtav1 exist. A KPipeWire without it suggests HEVC/AV1
+ * only for VA-API, and a stock one has no HEVC/AV1 at all.
+ */
+template<typename Stream>
+bool kpipewireOffersHardware(const QList<typename Stream::Encoder> &suggested, Family family)
+{
+    if constexpr (kpipewireHasBackends<Stream>()) {
+        using Backend = typename Stream::EncoderBackend;
+        const auto hardware = [](typename Stream::Encoder e) {
+            return bool(Stream::availableEncoderBackends(e) & Backend::Hardware);
+        };
+        if (family == Family::Avc) {
+            return hardware(Stream::H264Main) || hardware(Stream::H264Baseline);
+        }
+        const auto encoder = encoderOf<Stream>(family);
+        return encoder && hardware(*encoder);
+    } else {
+        if (family == Family::Avc) {
+            return suggested.contains(Stream::H264Main) || suggested.contains(Stream::H264Baseline);
+        }
+        const auto encoder = encoderOf<Stream>(family);
+        return encoder && suggested.contains(*encoder);
+    }
 }
 
 template<typename Stream>
@@ -134,19 +167,21 @@ constexpr bool kpipewireHasChroma444()
 }
 
 /**
- * Software encoders KPipeWire's makeEncoder() falls back to. The hook for software HEVC
- * (libx265) and AV1 (SVT-AV1): report them here once KPipeWire can encode them.
+ * Software encoders KPipeWire's makeEncoder() can open: H.264 = libx264 or libopenh264 (its
+ * fallback after h264_vaapi); HEVC = libx265 and AV1 = libsvtav1 (or libaom-av1) with a
+ * KPipeWire that has the WS-E software path, which reports them itself.
  */
+template<typename Stream>
 bool softwareBackend(Family family)
 {
-    switch (family) {
-    case Family::Avc:
+    if (family == Family::Avc) {
         return hasEncoder("libx264") || hasEncoder("libopenh264");
-    case Family::Hevc:
-    case Family::Av1:
-        return false; // not in KPipeWire yet
     }
-    return false;
+    if constexpr (kpipewireHasBackends<Stream>()) {
+        const auto encoder = encoderOf<Stream>(family);
+        return encoder && bool(Stream::availableEncoderBackends(*encoder) & Stream::EncoderBackend::Software);
+    }
+    return false; // no software HEVC/AV1 in this KPipeWire
 }
 
 std::optional<Backends> parseBackends(const QString &value)
@@ -203,12 +238,12 @@ Probe probeUncached()
 
     PipeWireEncodedStream stream;
     const auto suggested = stream.suggestedEncoders();
+    const bool avcOffered = suggested.contains(PipeWireEncodedStream::H264Main) || suggested.contains(PipeWireEncodedStream::H264Baseline);
     for (const Family family : CodecPolicy::BestCompressionFirst) {
-        const Backends offered = kpipewireOffers<PipeWireEncodedStream>(suggested, family);
-        const bool hardware = family == Family::Avc ? hw.avc : family == Family::Hevc ? hw.hevc : hw.av1;
+        const bool trialOpened = family == Family::Avc ? hw.avc : family == Family::Hevc ? hw.hevc : hw.av1;
         Backends &b = result.encoders.of(family);
-        b.hardware = offered.hardware && hardware;
-        b.software = (family == Family::Avc ? offered.software : true) && softwareBackend(family);
+        b.hardware = trialOpened && kpipewireOffersHardware<PipeWireEncodedStream>(suggested, family);
+        b.software = (family == Family::Avc ? avcOffered : true) && softwareBackend<PipeWireEncodedStream>(family);
     }
     result.avc444Hardware = kpipewireHasChroma444<PipeWireEncodedStream>() && result.encoders.avc.hardware;
     result.renderNode = hw.node;
