@@ -18,6 +18,7 @@
 
 #include <QDeadlineTimer>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QHostAddress>
 #include <QPointer>
 #include <QProcess>
@@ -501,6 +502,113 @@ private Q_SLOTS:
         QVERIFY(connection->videoStream()->requestRefresh());
         QTRY_COMPARE_WITH_TIMEOUT(keyFramesRequested, requestsWhenIdle + 2, 2000);
         QVERIFY(!connection->videoStream()->requestRefresh());
+    }
+
+    // AUD-FIX11 R6: a surface gets nothing of a codec before a keyframe of it with its headers
+    // in band (a delta first, or a keyframe that no fresh decoder can start from, never reaches
+    // the client; the encoder is asked for a keyframe instead), and a frame of another codec than
+    // the connection's never goes out. Real VCN H.264 packets carry the probe's marker at the end.
+    void aSurfaceGetsNothingBeforeAKeyframeWithHeaders()
+    {
+        Server server;
+        server.setAddress(QHostAddress::LocalHost);
+        server.setPort(0);
+        server.setTlsCertificate(m_certificate.toStdString());
+        server.setTlsCertificateKey(m_key.toStdString());
+        server.setUsers({{TestUser, Password}});
+
+        const auto fixture = [](int number) {
+            QFile file(QFINDTESTDATA(QStringLiteral("data/motion-chain/1280x720-%1.h264").arg(number)));
+            return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+        };
+        const QByteArray keyframe = fixture(0);
+        QVERIFY(!keyframe.isEmpty());
+        // The IDR slice alone: its SPS/PPS went nowhere (extradata a client never gets).
+        const QByteArray headerless = keyframe.mid(keyframe.indexOf(QByteArray("\x00\x00\x01\x65", 4)));
+        QVERIFY(headerless.size() > 4 && headerless.size() < keyframe.size());
+        struct Step {
+            QByteArray data;
+            bool keyFrame;
+            VideoCodec codec;
+        };
+        const QVector<Step> script{
+            {fixture(1), false, VideoCodec::Avc420}, // 1: a delta on a fresh surface
+            {headerless, true, VideoCodec::Avc420}, // 2: a keyframe without SPS/PPS
+            {keyframe, true, VideoCodec::Avc420}, // 3: starts the chain
+            {fixture(1), false, VideoCodec::Avc420}, // 4
+            {fixture(2), false, VideoCodec::Hevc}, // 5: another codec's packet
+            {fixture(2), false, VideoCodec::Avc420}, // 6
+        };
+        QPointer<RdpConnection> connection;
+        qsizetype next = 0;
+        int keyFramesRequested = 0;
+        const auto feed = [&] {
+            if (next >= script.size() || !connection || connection->state() != RdpConnection::State::Streaming || !connection->videoStream()->enabled()) {
+                return;
+            }
+            const auto &step = script[next++];
+            VideoFrame frame;
+            frame.size = QSize(1280, 720);
+            frame.isKeyFrame = step.keyFrame;
+            frame.codec = step.codec;
+            frame.data = step.data + frameData(quint64(next), 16);
+            frame.presentationTimeStamp = std::chrono::system_clock::now();
+            connection->videoStream()->queueFrame(frame);
+        };
+        connect(&server, &Server::newConnectionCreated, this, [&](RdpConnection *c) {
+            connection = c;
+            c->videoStream()->setCodecPreference(CodecPreference::Avc420);
+            connect(c->videoStream(), &VideoStream::keyFrameRequested, c, [&](int) {
+                ++keyFramesRequested;
+            }, Qt::QueuedConnection);
+        });
+        QVERIFY(server.start());
+        // One frame at a time, so none is superseded in the queue before the surface rule sees it.
+        QTimer feeder;
+        feeder.setInterval(250);
+        connect(&feeder, &QTimer::timeout, this, feed);
+        feeder.start();
+
+        QProcess probe;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), m_dir.path());
+        environment.insert(QStringLiteral("HOME"), m_dir.path());
+        probe.setProcessEnvironment(environment);
+        probe.start(QStringLiteral(KRDPCTL_PROBE),
+                    {QStringLiteral("127.0.0.1"), QString::number(server.serverPort()), TestUser, QStringLiteral("-"), QStringLiteral("--silent"),
+                     QStringLiteral("--no-krdpctl"), QStringLiteral("--gfx"), QStringLiteral("--gfx-count"), QStringLiteral("--timeout"), QStringLiteral("60")});
+        QVERIFY(probe.waitForStarted(5000));
+        probe.write(Password.toUtf8() + '\n');
+        probe.closeWriteChannel();
+        const auto cleanup = qScopeGuard([&probe] {
+            if (probe.state() != QProcess::NotRunning) {
+                probe.terminate();
+                if (!probe.waitForFinished(5000)) {
+                    probe.kill();
+                    probe.waitForFinished(5000);
+                }
+            }
+        });
+        QByteArray log;
+        QVector<quint64> seen;
+        QDeadlineTimer deadline(30s);
+        while ((next < script.size() || seen.size() < 3) && !deadline.hasExpired() && probe.state() == QProcess::Running) {
+            QTest::qWait(50);
+            const QByteArray more = probe.readAllStandardError();
+            log += more;
+            for (const QByteArray &line : more.split('\n')) {
+                const int at = line.indexOf("frame seq ");
+                if (at >= 0) seen.append(line.mid(at + 10).split(' ').value(0).toULongLong());
+            }
+        }
+        if (seen.isEmpty() && log.contains("does not support H.264")) {
+            QSKIP("this libfreerdp cannot negotiate AVC420 (built WITH_GFX_H264=OFF)");
+        }
+        QTest::qWait(500);
+        log += probe.readAllStandardError();
+        QCOMPARE(seen, (QVector<quint64>{3, 4, 6}));
+        // The delta on the fresh surface asked for a keyframe (then rate-limited for 2 s).
+        QVERIFY(keyFramesRequested >= 1);
     }
 
     void hugeKeyFrameOnAThrottledLink()

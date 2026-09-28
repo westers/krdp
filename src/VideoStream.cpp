@@ -38,6 +38,7 @@
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
+#include "SurfaceChain.h"
 
 #include "krdp_logging.h"
 
@@ -278,6 +279,12 @@ struct Surface {
     // needs the decoder the main IDR set up, so it is dropped until this is true; a re-created
     // surface (performReset()) starts a fresh Surface and so starts over.
     bool keyFrameSent = false;
+    // AUD-FIX11 R6: which codec's reference chain this surface's decoder on the client is in.
+    SurfaceChain chain;
+    // The private codec family (HEVC/AV1) first sent on this surface: krdp-client opens one
+    // decoder per surface for the first private codec it sees there and keeps it, so another
+    // private codec needs new surfaces (a graphics reset) and with them new decoders.
+    std::optional<int> privateFamily;
 };
 
 class KRDP_NO_EXPORT VideoStream::Private
@@ -346,6 +353,10 @@ public:
     // is still reported.
     bool loggedUnknownSurface = false;
     bool loggedSizeMismatch = false;
+    // AUD-FIX11: log each kind of chain drop once per reset, not per frame.
+    bool loggedChainWait = false;
+    bool loggedHeaderless = false;
+    std::atomic<int> droppedAtSendFamily = -1;
     bool loggedCreateSurfaceFailure = false;
     bool warnedInvalidLayout = false;
 
@@ -1828,8 +1839,23 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         return true;
     }
 
+    // AUD-FIX11 R6: a frame queued before a codec switch is never sent under the new codec's id
+    // (queueFrame() checked it against the codec of that moment).
+    if (frame.codec && codecFamily(*frame.codec) != codecFamily(codec)) {
+        const int produced = codecFamily(*frame.codec);
+        if (d->droppedAtSendFamily.exchange(produced) != produced) {
+            qCInfo(KRDP) << "Dropping queued" << VideoCodecSupport::codecName(*frame.codec) << "frames: the connection now sends" << VideoCodecSupport::codecName(codec);
+        }
+        d->statDropped.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    d->droppedAtSendFamily = -1;
+    const VideoCodec produced = frame.codec.value_or(codec);
+    const int family = codecFamily(produced);
+
     Surface surface;
     bool requestKeyFrame = false;
+    bool send = true;
     {
         std::lock_guard lock(d->layoutMutex);
 
@@ -1849,7 +1875,12 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         // only a new layout resizes them. Without one the single surface still
         // follows the frame, exactly as it did before per-monitor surfaces.
         const bool frameSizeChanged = target && d->configuredLayout.isEmpty() && target->size != frame.size;
-        if (d->pendingReset || d->monitorLayout != plan.monitors || !target || frameSizeChanged) {
+        // AUD-FIX11: HEVC <-> AV1 on a surface whose client decoder is the other one.
+        const bool privateDecoderChange = target && family != 0 && target->privateFamily && *target->privateFamily != family;
+        if (privateDecoderChange) {
+            qCInfo(KRDP) << "Recreating the surfaces for" << VideoCodecSupport::codecName(produced) << "(the client's decoders are for another codec)";
+        }
+        if (d->pendingReset || d->monitorLayout != plan.monitors || !target || frameSizeChanged || privateDecoderChange) {
             d->pendingReset = false;
             d->monitorLayout = plan.monitors;
             // performReset() sends ResetGraphics, CreateSurface and
@@ -1873,6 +1904,8 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
             // rest of the stream.
             d->loggedUnknownSurface = false;
             d->loggedSizeMismatch = false;
+            d->loggedChainWait = false;
+            d->loggedHeaderless = false;
 
             // A freshly created surface has no reference picture. If the frame we
             // are about to send cannot serve as this surface's keyframe (e.g. after a caps
@@ -1907,6 +1940,7 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         // FreeRDP's client-side avc420 decode rejects a region rect larger
         // than the decoded picture without telling the server anything.
         if (!d->configuredLayout.isEmpty() && target->size != frame.size) {
+            target->chain.broken(); // this frame is part of its encoder's chain
             if (!d->loggedSizeMismatch) {
                 d->loggedSizeMismatch = true;
                 qCWarning(KRDP) << "Dropping frames for monitor" << frame.monitorIndex << ": the frame is" << frame.size << "but its surface is" << target->size
@@ -1921,10 +1955,43 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         if (auxOnly && !target->keyFrameSent) {
             return true;
         }
-        if (frame.isKeyFrame) {
-            target->keyFrameSent = true;
+        // AUD-FIX11 R6: nothing of a codec before a keyframe of it, with its headers in band, has
+        // gone out on this surface; a surface whose chain broke waits for the next one. (A fresh
+        // surface after a codec switch or a layout proof otherwise got the first packets of a
+        // chain whose start the client never saw: libdav1d rejected them as invalid data.)
+        if (!auxOnly) {
+            const auto verdict = target->chain.admit(produced, frame.codec.has_value(), frame.isKeyFrame, frame.data);
+            if (verdict != SurfaceChain::Verdict::Send) {
+                bool &logged = verdict == SurfaceChain::Verdict::WaitForKeyFrame ? d->loggedChainWait : d->loggedHeaderless;
+                if (!logged) {
+                    logged = true;
+                    if (verdict == SurfaceChain::Verdict::WaitForKeyFrame) {
+                        qCInfo(KRDP) << "Holding back" << VideoCodecSupport::codecName(produced) << "delta frames on monitor" << frame.monitorIndex
+                                     << "until a keyframe of that codec starts its surface";
+                    } else {
+                        qCWarning(KRDP) << "Dropping a" << VideoCodecSupport::codecName(produced) << "keyframe for monitor" << frame.monitorIndex
+                                        << "without in-band codec headers: no client decoder can start from it";
+                    }
+                }
+                d->statDropped.fetch_add(1, std::memory_order_relaxed);
+                const auto now = clk::steady_clock::now();
+                auto &lastRequest = d->lastKeyFrameRequest[frame.monitorIndex];
+                if (lastRequest == clk::steady_clock::time_point{} || (now - lastRequest) >= KeyFrameRequestMinInterval) {
+                    lastRequest = now;
+                    requestKeyFrame = true;
+                }
+                send = false;
+            }
         }
-        surface = *target;
+        if (send) {
+            if (family != 0 && !target->privateFamily) {
+                target->privateFamily = family;
+            }
+            if (frame.isKeyFrame) {
+                target->keyFrameSent = true;
+            }
+            surface = *target;
+        }
     }
 
     if (requestKeyFrame) {
@@ -1933,6 +2000,9 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         // leaving lying around.
         qCDebug(KRDP) << "Surface (re)created on a non-keyframe, requesting a keyframe from the encoder for monitor" << frame.monitorIndex;
         Q_EMIT keyFrameRequested(frame.monitorIndex);
+    }
+    if (!send) {
+        return true; // dropped (AUD-FIX11): not a failure to retry
     }
 
     auto frameId = d->frameId++;

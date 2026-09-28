@@ -29,6 +29,7 @@
 // exists.
 
 #include "EncoderSelection.h"
+#include "SurfaceChain.h"
 
 #include <PipeWireEncodedStream>
 
@@ -618,6 +619,7 @@ class SoftwareEncodeSessionTest : public QObject
         int keyFrames = 0;
         QByteArray firstPacket;
         QList<QByteArray> data; ///< the first packets, for decoding
+        QList<QByteArray> keyFrameData; ///< the first keyframes (AUD-FIX11: headers in band)
         QList<PipeWireBaseEncodedStream::EncoderBackend> backends; ///< activeEncoderBackendChanged
         QString error;
     };
@@ -640,6 +642,7 @@ class SoftwareEncodeSessionTest : public QObject
             ++result.packets;
             if (packet.isKeyFrame()) {
                 ++result.keyFrames;
+                if (result.keyFrameData.size() < 4) result.keyFrameData.append(packet.data());
             }
         });
         connect(stream, &PipeWireBaseEncodedStream::errorFound, stream, [&result](const QString &error) {
@@ -700,6 +703,8 @@ class SoftwareEncodeSessionTest : public QObject
             types << QString::number(type);
         }
         QVERIFY2(nals.contains(7), qPrintable(QStringLiteral("no SPS in the first packet; NAL types %1").arg(types.join(QLatin1Char(',')))));
+        // AUD-FIX11: every keyframe carries its SPS/PPS in band (a client never gets extradata).
+        for (const QByteArray &keyFrame : result.keyFrameData) QVERIFY(KRdp::keyframeCarriesHeaders(VideoCodec::Avc420, keyFrame));
         qInfo("first packet: %lld bytes, NAL types %s; %d packets, %d key frames", static_cast<long long>(result.firstPacket.size()),
               qPrintable(types.join(QLatin1Char(','))), result.packets, result.keyFrames);
     }
@@ -724,6 +729,8 @@ class SoftwareEncodeSessionTest : public QObject
         QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
         QVERIFY2(result.packets >= 5, qPrintable(QStringLiteral("%1 packets within %2 ms").arg(result.packets).arg(WaitMs)));
         QVERIFY(result.keyFrames >= 1);
+        // AUD-FIX11: every keyframe carries its VPS/SPS/PPS or sequence header in band.
+        for (const QByteArray &keyFrame : result.keyFrameData) QVERIFY(KRdp::keyframeCarriesHeaders(codec, keyFrame));
         QVERIFY2(result.backends.contains(PipeWireBaseEncodedStream::EncoderBackend::Software),
                  qPrintable(QStringLiteral("backend reports: %1").arg(result.backends.size())));
         QVERIFY(!result.backends.contains(PipeWireBaseEncodedStream::EncoderBackend::Hardware));

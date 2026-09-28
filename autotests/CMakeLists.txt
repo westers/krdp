@@ -341,6 +341,13 @@ target_link_libraries(ConsoleResizeSessionTest PRIVATE Qt6::Test Qt6::Core Qt6::
 add_test(NAME ConsoleResizeSessionTest COMMAND ConsoleResizeSessionTest)
 
 add_executable(VirtualResizeTest VirtualResizeTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResizeExecutor.cpp)
+# AUD-FIX11 R6: no packets on a surface before a keyframe of their codec with in-band headers.
+add_executable(SurfaceChainTest SurfaceChainTest.cpp)
+target_include_directories(SurfaceChainTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(SurfaceChainTest PRIVATE Qt6::Test Qt6::Core PkgConfig::AVCodec)
+add_test(NAME SurfaceChainTest COMMAND SurfaceChainTest)
+set_tests_properties(SurfaceChainTest PROPERTIES TIMEOUT 30)
+
 add_executable(H264KeyframeSizeTest H264KeyframeSizeTest.cpp ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp)
 target_include_directories(H264KeyframeSizeTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(H264KeyframeSizeTest PRIVATE Qt6::Test Qt6::Core PkgConfig::AVCodec)
