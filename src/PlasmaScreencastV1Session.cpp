@@ -4,6 +4,8 @@
 
 #include "PlasmaScreencastV1Session.h"
 
+#include "EncoderWatchdog.h"
+
 #include <QGuiApplication>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -149,6 +151,8 @@ constexpr int RecoverySettleMs = StreamRecoveryPolicy::SettleMs;
 // Poll for that before attaching a replacement node.
 constexpr int StreamRestartPollMs = 10;
 constexpr auto StreamRestartTimeout = std::chrono::milliseconds(5000);
+// AUD-FIX12: how long a watchdog restart lets the wedged producer pause before stopping it again.
+constexpr auto ForcedTeardownAfter = std::chrono::milliseconds(60);
 
 // How long a requested virtual output may take to show up as a QScreen. The
 // spike saw it within one screencast round trip; 5 s is generous.
@@ -369,6 +373,14 @@ public:
     // asynchronous changed that still carries the bytes we just wrote.
     bool writingClientClipboard = false;
     QString lastClientText;
+    // AUD-FIX12: requests the encoder never answers restart it (EncoderWatchdog.h).
+    EncoderWatchdog::Watchdog watchdog;
+    QTimer watchdogTimer;
+    int watchdogRestarts = 0;
+    // A watchdog restart: the old producer is wedged and never finishes draining its queue on
+    // its own, so it is told to stop a second time once it has paused (see pollEncoderWatchdog()).
+    bool forceTeardown = false;
+    bool forcedSecondStop = false;
 };
 
 PlasmaScreencastV1Session::PlasmaScreencastV1Session()
@@ -440,10 +452,22 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
     connect(&d->streamRestartTimer, &QTimer::timeout, this, [this]() {
         auto encodedStream = stream();
         const bool tornDown = encodedStream->nodeId() == 0;
-        if (!tornDown && (std::chrono::steady_clock::now() - d->streamRestartWaitStarted) < StreamRestartTimeout) {
+        const auto waited = std::chrono::steady_clock::now() - d->streamRestartWaitStarted;
+        if (!tornDown && d->forceTeardown && !d->forcedSecondStop && waited >= ForcedTeardownAfter) {
+            // AUD-FIX12: KPipeWire's producer waits for its queues to drain before it tears
+            // down, and a wedged one (a dead filter graph) never drains. Once paused, a second
+            // stop() destroys it at once (PipeWireProduce::deactivate on a paused stream).
+            d->forcedSecondStop = true;
+            qCInfo(KRDP) << "Monitor" << monitorIndex() << ": the wedged encoder did not drain; tearing it down";
+            encodedStream->stop();
+            return;
+        }
+        if (!tornDown && waited < StreamRestartTimeout) {
             return;
         }
         d->streamRestartTimer.stop();
+        d->forceTeardown = false;
+        d->forcedSecondStop = false;
         if (!tornDown) {
             if (d->resizeRestartEpoch) {
                 // Do not label a still-running old encoder a new capture
@@ -468,6 +492,9 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
         }
         attachEncodedStream(d->pendingNodeId, true);
     });
+
+    d->watchdogTimer.setInterval(EncoderWatchdog::Watchdog::TickInterval);
+    connect(&d->watchdogTimer, &QTimer::timeout, this, &PlasmaScreencastV1Session::pollEncoderWatchdog);
 
     d->virtualScreenTimer.setSingleShot(true);
     connect(&d->virtualScreenTimer, &QTimer::timeout, this, [this]() {
@@ -735,6 +762,8 @@ void PlasmaScreencastV1Session::requestKeyFrame()
     if (!d->streamConfigured || nodeId == 0 || !streamingRequested()) {
         return;
     }
+    d->watchdog.keyFrameRequested(std::chrono::steady_clock::now());
+    startEncoderWatchdog();
     if (requestKeyFrameIfSupported(encodedStream)) {
         qCDebug(KRDP) << "Requested a keyframe from the encoder for the new surface";
         return;
@@ -762,6 +791,7 @@ void PlasmaScreencastV1Session::restartStreamForCodecChange()
         // Already restarting; it picks the new mode up.
         return;
     }
+    encoderReconfigured();
     qCDebug(KRDP) << "Restarting encoded stream on node" << nodeId << "for the codec change";
     restartEncodedStream(nodeId); // setChromaMode() is applied at the next start(); the new stream opens with an IDR
 }
@@ -1111,7 +1141,67 @@ void PlasmaScreencastV1Session::onPacketReceived(const PipeWireEncodedStream::Pa
         });
     }
 
+    d->watchdog.packet(std::chrono::steady_clock::now(), frameData.isKeyFrame);
     Q_EMIT frameReceived(frameData);
+}
+
+void PlasmaScreencastV1Session::encoderReconfigured()
+{
+    d->watchdog.arm(std::chrono::steady_clock::now());
+    startEncoderWatchdog();
+}
+
+void PlasmaScreencastV1Session::startEncoderWatchdog()
+{
+    if (!d->watchdogTimer.isActive()) {
+        d->watchdogTimer.start();
+    }
+}
+
+void PlasmaScreencastV1Session::pollEncoderWatchdog()
+{
+    const auto now = std::chrono::steady_clock::now();
+    auto encodedStream = stream();
+    const uint nodeId = encodedStream->nodeId();
+    const bool running = d->streamConfigured && nodeId != 0 && streamingRequested();
+    if (!running || d->streamRestartTimer.isActive()) {
+        // Stopped: nothing is owed. Restarting: the new stream opens with an IDR.
+        if (!running) {
+            d->watchdog.reset();
+        }
+        if (!d->watchdog.needsTimer(now)) {
+            d->watchdogTimer.stop();
+        }
+        return;
+    }
+    switch (d->watchdog.poll(now)) {
+    case EncoderWatchdog::Action::None:
+        break;
+    case EncoderWatchdog::Action::Probe:
+        qCDebug(KRDP) << "Monitor" << monitorIndex() << "went silent after a reconfiguration; asking the encoder for a keyframe";
+        requestKeyFrameIfSupported(encodedStream);
+        break;
+    case EncoderWatchdog::Action::Retry:
+        qCDebug(KRDP) << "Monitor" << monitorIndex() << ": no keyframe yet; asking the encoder again";
+        requestKeyFrameIfSupported(encodedStream);
+        break;
+    case EncoderWatchdog::Action::Restart:
+        ++d->watchdogRestarts;
+        qCWarning(KRDP) << "Monitor" << monitorIndex() << ": the encoder answered no keyframe request within"
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(EncoderWatchdog::RestartAfter).count()
+                        << "ms; restarting its encoder (restart" << d->watchdogRestarts << "of this session)";
+        Q_EMIT encoderWatchdogRestarted();
+        d->forceTeardown = true;
+        d->forcedSecondStop = false;
+        restartEncodedStream(nodeId);
+        break;
+    case EncoderWatchdog::Action::GiveUp:
+        qCWarning(KRDP) << "Monitor" << monitorIndex() << ": the restarted encoder produced no keyframe either; waiting for the next request";
+        break;
+    }
+    if (!d->watchdog.needsTimer(now)) {
+        d->watchdogTimer.stop();
+    }
 }
 
 }

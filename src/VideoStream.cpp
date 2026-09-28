@@ -438,6 +438,8 @@ public:
     // byte budget (any thread); the monitors whose keyframe was acknowledged since the
     // submission thread last looked (bit per monitor, set on the peer thread).
     std::vector<FrameQueuePolicy::KeyFrameRequestBackoff> keyFrameBackoff;
+    // AUD-FIX12: per monitor, the run of frames dropped for want of a keyframe (frameQueueMutex).
+    std::vector<FrameQueuePolicy::SurfaceSilence> silence;
     // Monitors whose frames piled up behind an unacknowledged keyframe: they may keep
     // keyFrameHoldFrames() queued until that backlog has drained to MaxHeldFramesPerMonitor,
     // even after the keyframe was acknowledged (frameQueueMutex).
@@ -484,6 +486,7 @@ public:
     std::atomic<quint64> statDropped = 0;
     std::atomic<quint64> statKeyFrameRequests = 0;
     std::atomic<quint64> statKeyFramesDeferred = 0;
+    std::atomic<quint64> statKeyFramesForced = 0; ///< AUD-FIX12 (SurfaceSilence)
     std::atomic<bool> statSuspended = false;
     // KRDPCTL `stats` (StatsReporter): what samples read besides flowStats(). The counters only
     // grow and cost one relaxed add per frame whether or not anyone is subscribed.
@@ -537,6 +540,17 @@ public:
             starvedMonitors.resize(size_t(monitorIndex) + 1, 0);
             keyFrameBackoff.resize(size_t(monitorIndex) + 1);
         }
+        if (monitorIndex >= 0 && size_t(monitorIndex) >= silence.size()) {
+            silence.resize(size_t(monitorIndex) + 1);
+        }
+    }
+    // Call with frameQueueMutex held (AUD-FIX12).
+    void droppedForKeyFrame(int monitorIndex, clk::steady_clock::time_point now)
+    {
+        if (monitorIndex >= 0 && monitorIndex < MaxMonitorLayoutCount) {
+            ensureMonitor(monitorIndex);
+            silence[size_t(monitorIndex)].dropped(now);
+        }
     }
     // Call with frameQueueMutex held.
     bool starved(int monitorIndex) const
@@ -547,6 +561,9 @@ public:
     void clearStarved()
     {
         std::fill(starvedMonitors.begin(), starvedMonitors.end(), 0);
+        for (auto &run : silence) {
+            run.delivered(); // new surfaces (or none): nothing is owed to the old ones
+        }
     }
     // Backlog evidence for the adaptive-quality decision: the smallest number
     // of frames still unacknowledged right after any ack since the last
@@ -790,6 +807,7 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
                 d->statDropped.fetch_add(1, std::memory_order_relaxed);
                 d->countSurfaceCoalesced(frame.monitorIndex);
                 d->droppedSinceDecision.fetch_add(1, std::memory_order_relaxed);
+                d->droppedForKeyFrame(frame.monitorIndex, now);
                 return;
             }
             d->starvedMonitors[size_t(frame.monitorIndex)] = 0;
@@ -1924,6 +1942,7 @@ void VideoStream::requestStarvedKeyFrames(clk::steady_clock::time_point now)
     }
     std::vector<int> request;
     std::vector<int> deferred;
+    std::vector<std::pair<int, int>> forced; // monitor, forced requests in its silent run
     {
         std::lock_guard lock(d->frameQueueMutex);
         for (size_t monitor = 0; monitor < d->starvedMonitors.size(); ++monitor) {
@@ -1936,6 +1955,28 @@ void VideoStream::requestStarvedKeyFrames(clk::steady_clock::time_point now)
             } else if (inFlight) {
                 deferred.push_back(int(monitor));
             }
+        }
+        // AUD-FIX12: a surface that has dropped every frame for SilentSurfaceLimit asks again,
+        // whatever the back-off or a keyframe in flight says (starved or chain-waiting alike).
+        for (size_t monitor = 0; monitor < d->silence.size(); ++monitor) {
+            auto &run = d->silence[monitor];
+            if (run.shouldForce(now)) {
+                if (std::find(request.begin(), request.end(), int(monitor)) == request.end()) {
+                    request.push_back(int(monitor));
+                }
+                forced.emplace_back(int(monitor), run.forced());
+                std::erase(deferred, int(monitor));
+            }
+        }
+    }
+    for (const auto &[monitor, count] : forced) {
+        d->statKeyFramesForced.fetch_add(1, std::memory_order_relaxed);
+        if (count == 1) {
+            qCInfo(KRDP).noquote() << QStringLiteral("Video: monitor %1 has dropped every frame for %2 ms waiting for a keyframe; asking for one again")
+                                          .arg(monitor)
+                                          .arg(clk::duration_cast<clk::milliseconds>(FrameQueuePolicy::SilentSurfaceLimit).count());
+        } else {
+            qCDebug(KRDP) << "Monitor" << monitor << "still has no keyframe; forced request" << count;
         }
     }
     if (!deferred.empty()) {
@@ -2142,6 +2183,15 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         // leaving lying around.
         qCDebug(KRDP) << "Surface (re)created on a non-keyframe, requesting a keyframe from the encoder for monitor" << frame.monitorIndex;
         Q_EMIT keyFrameRequested(frame.monitorIndex);
+    }
+    {
+        // AUD-FIX12: the surface's silent run, after layoutMutex is released (lock order above).
+        std::lock_guard lock(d->frameQueueMutex);
+        if (!send) {
+            d->droppedForKeyFrame(frame.monitorIndex, clk::steady_clock::now());
+        } else if (frame.monitorIndex >= 0 && size_t(frame.monitorIndex) < d->silence.size()) {
+            d->silence[size_t(frame.monitorIndex)].delivered();
+        }
     }
     if (!send) {
         return true; // dropped (AUD-FIX11): not a failure to retry

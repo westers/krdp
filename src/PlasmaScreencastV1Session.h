@@ -48,6 +48,8 @@ public:
     Q_SIGNAL void captureRestartReady(quint64 epoch);
     Q_SIGNAL void captureRestartFailed(quint64 epoch);
     void requestKeyFrame() override;
+    /// AUD-FIX12: the EncoderWatchdog restarted this session's encoder (its requests went unanswered).
+    Q_SIGNAL void encoderWatchdogRestarted();
 
     void sendEvent(const std::shared_ptr<QEvent> &event) override;
     void sendGlobalEvent(const std::shared_ptr<QEvent> &event) override;
@@ -58,6 +60,7 @@ public:
 
 protected:
     void restartStreamForCodecChange() override;
+    void encoderReconfigured() override;
 
 private:
     void injectNonMotionEvent(const std::shared_ptr<QEvent> &event);
@@ -68,6 +71,8 @@ private:
     void restartEncodedStream(uint nodeId);
     void attachEncodedStream(uint nodeId, bool streamWasActive);
     void onPacketReceived(const PipeWireEncodedStream::Packet &data);
+    void startEncoderWatchdog();
+    void pollEncoderWatchdog();
     void watchForVirtualScreen();
     bool adoptVirtualScreen(QScreen *screen);
     void updateVirtualGeometry(const QRect &geometry, bool adopted = false);

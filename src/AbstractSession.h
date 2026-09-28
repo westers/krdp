@@ -293,6 +293,12 @@ protected:
      */
     virtual void restartStreamForCodecChange();
 
+    /**
+     * AUD-FIX12: the running encoded stream was reconfigured (frame rate, quality). The default
+     * does nothing; PlasmaScreencastV1Session arms its EncoderWatchdog.
+     */
+    virtual void encoderReconfigured();
+
 private:
     // Replaces the signal-to-signal connect at stream()'s activeChanged: re-emits
     // streamActiveChanged, logs the encoder line, and reports the chroma capability.

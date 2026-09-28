@@ -202,6 +202,8 @@ private Q_SLOTS:
     void workerReachesReadyAndDeliversFrames();
     void codecSwitchAtAttach_data();
     void codecSwitchAtAttach();
+    void coalesceKeepsEveryOutputAlive_data();
+    void coalesceKeepsEveryOutputAlive();
     void cleanupTestCase();
 
 private:
@@ -242,7 +244,13 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
 {
     const auto key = std::tuple(outputs, size.width(), size.height(), motion);
     if (const auto it = m_sessions.find(key); it != m_sessions.end()) {
-        return it->second.process ? &it->second : nullptr;
+        if (!it->second.process || it->second.process->state() != QProcess::NotRunning) {
+            return it->second.process ? &it->second : nullptr;
+        }
+        // AUD-FIX12: ended when rows of another size ran; start it again.
+        if (it->second.runtime) it->second.runtime->remove();
+        if (it->second.home) it->second.home->remove();
+        m_sessions.erase(it);
     }
     // Sessions of another output size or motion are ended first (the rows run one size after another).
     for (auto &[other, running] : m_sessions) {
@@ -330,6 +338,7 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
     if (motion && qEnvironmentVariable("KRDP_E2E_MOTION") != QLatin1String("0") && !QStandardPaths::findExecutable(QStringLiteral("ffplay")).isEmpty())
         set("KRDP_E2E_MOTION", QStringLiteral("1"));
     if (qEnvironmentVariableIsSet("KRDP_E2E_LOGGING_RULES")) set("QT_LOGGING_RULES", qEnvironmentVariable("KRDP_E2E_LOGGING_RULES"));
+    if (qEnvironmentVariableIsSet("KRDP_E2E_MESSAGE_PATTERN")) set("QT_MESSAGE_PATTERN", qEnvironmentVariable("KRDP_E2E_MESSAGE_PATTERN"));
 
     auto process = std::make_unique<QProcess>();
     process->setProcessEnvironment(env);
@@ -689,6 +698,173 @@ void WorkerEndToEndTest::codecSwitchAtAttach()
         if (frame.codec == codec) switched[index] = true;
         else QVERIFY2(!switched.value(index), "an older codec's frame followed the new codec's");
     }
+    stopWorker(*s, endpoint);
+}
+
+void WorkerEndToEndTest::coalesceKeepsEveryOutputAlive_data()
+{
+    // AUD-FIX12 (ace, c27909d): a client falls behind a full window; the broker throttles the
+    // frame rate to what it takes (60 -> 6 fps), coalesces the moving output's queued frames and
+    // asks for a keyframe, then raises the rate step by step (9, 14, 21, 32, 48, 60 fps) as the
+    // window drains. On ace (HEVC hardware, two 1920x1080 outputs) monitor 0 sent its keyframe and
+    // one delta, then nothing for 61 s. Replays the broker's sequence (timings from ace's journal)
+    // against the real worker and asserts that the moving output is never silent for more than 2 s.
+    QTest::addColumn<int>("codecId");
+    QTest::newRow("hevc") << int(VideoCodec::Hevc);
+    QTest::newRow("h264") << int(VideoCodec::Avc420);
+    QTest::newRow("av1") << int(VideoCodec::Av1);
+}
+
+void WorkerEndToEndTest::coalesceKeepsEveryOutputAlive()
+{
+    QFETCH(int, codecId);
+    const auto codec = VideoCodec(codecId);
+    const QSize size(1920, 1080);
+    if (!m_skip.isEmpty()) {
+        QSKIP(qPrintable(m_skip));
+    }
+    auto *s = session(2, size, true);
+    QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+    if (qEnvironmentVariableIsEmpty("KRDP_E2E_MOTION") && QStandardPaths::findExecutable(QStringLiteral("ffplay")).isEmpty()) QSKIP("no ffplay for motion");
+
+    ConsoleWorkerEndpoint endpoint;
+    WorkerRun run;
+    QVector<qint64> arrivals; // ms on \a clock, parallel to run.frames
+    QElapsedTimer clock;
+    clock.start();
+    connect(&endpoint, &ConsoleWorkerEndpoint::frameReceived, this, [&arrivals, &clock](const VideoFrame &) {
+        arrivals.append(clock.elapsed());
+    });
+    const qint64 logStart = s->workerLogSize();
+    const auto dumpLogs = qScopeGuard([&] {
+        if (!QTest::currentTestFailed()) return;
+        qWarning().noquote() << "worker.log:\n" << s->workerLogSince(logStart).right(8000);
+    });
+    QVERIFY(startWorker(*s, true, endpoint, run));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    const auto reap = qScopeGuard([&] {
+        if (QFileInfo::exists(exitFile)) return;
+        endpoint.stopWorker();
+        if (!QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 15000)) qWarning("the worker did not stop");
+    });
+    const auto alive = [&] {
+        return run.errors.isEmpty() && !QFileInfo::exists(exitFile);
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(endpoint.ready() || !alive(), 45000);
+    QVERIFY2(endpoint.ready(), "the real worker never confirmed capture");
+    QVERIFY(run.caps);
+    const auto family = codec == VideoCodec::Hevc ? CodecPolicy::Family::Hevc : codec == VideoCodec::Av1 ? CodecPolicy::Family::Av1 : CodecPolicy::Family::Avc;
+    if (!run.caps->encoders.of(family).hardware) {
+        stopWorker(*s, endpoint);
+        QSKIP("no hardware encoder for this codec on this host");
+    }
+
+    // Attach as the broker does, straight into the codec.
+    endpoint.setControlState({1, true});
+    endpoint.requestKeyFrame();
+    ConsoleWorkerWire::EncoderConfig config{.generation = 1, .codec = codec, .settings = CodecPolicy::EncoderSettings{.hardware = true}};
+    QVERIFY(endpoint.setEncoderConfig(config));
+    // Both outputs published in the codec, and motion on one of them.
+    const qsizetype attachMark = run.frames.size();
+    QHash<int, int> deltas;
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&] {
+            deltas.clear();
+            for (qsizetype i = attachMark; i < run.frames.size(); ++i) {
+                const auto &f = run.frames[i];
+                if (f.codec == codec && !f.isKeyFrame && f.monitors.size() == 2) ++deltas[f.monitorIndex];
+            }
+            return std::any_of(deltas.cbegin(), deltas.cend(), [](int n) { return n >= 30; }) || !alive();
+        }(),
+        20000);
+    QVERIFY2(alive(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    int moving = 0;
+    for (auto it = deltas.cbegin(); it != deltas.cend(); ++it) {
+        if (it.value() > deltas.value(moving)) moving = it.key();
+    }
+
+    // Adaptive quality moved before the coalesce (each change reopens a VA-API encoder).
+    const int qualitySteps = qEnvironmentVariableIsSet("KRDP_E2E_QUALITY_STEPS") ? qEnvironmentVariableIntValue("KRDP_E2E_QUALITY_STEPS") : 16;
+    for (int i = 0; i < qualitySteps && alive(); ++i) {
+        QVERIFY(endpoint.setVideoQuality({1, quint8(i % 2 ? 80 : 70)}));
+        QTest::qWait(250);
+    }
+    // KRDP_E2E_RATE_FLAPS=N: N extra frame-rate changes 150 ms apart first (each renegotiates the
+    // PipeWire stream), to make KPipeWire's failed VA-API import more likely.
+    for (int i = 0; i < qEnvironmentVariableIntValue("KRDP_E2E_RATE_FLAPS") && alive(); ++i) {
+        config.frameRate = i % 2 ? 60 : 6;
+        QVERIFY(endpoint.setEncoderConfig(config));
+        QTest::qWait(150);
+    }
+    config.frameRate = 60;
+    QVERIFY(endpoint.setEncoderConfig(config));
+    // The broker's sequence on ace (14:29:34.555 throttle to 6 fps, .566 coalesce + keyframe,
+    // then raises at +6.0, +10.5, +15.0, +18.0, +21.0 and +25.5 s).
+    const qsizetype mark = run.frames.size();
+    const qint64 start = clock.elapsed();
+    const auto setRate = [&](quint32 fps) {
+        config.frameRate = fps;
+        QVERIFY(endpoint.setEncoderConfig(config));
+    };
+    // First, short cycles of the same pair (throttle to 6 fps, keyframe request d ms later, back
+    // to 60 fps): the renegotiation races the keyframe request's re-feed of the last captured
+    // buffer, and on a lost race KPipeWire's import of that buffer fails for good (see
+    // EncoderWatchdog.h). KRDP_E2E_CYCLES sets how many (default 8).
+    const int cycles = qEnvironmentVariableIsSet("KRDP_E2E_CYCLES") ? qEnvironmentVariableIntValue("KRDP_E2E_CYCLES") : 8;
+    for (int i = 0; i < cycles && alive(); ++i) {
+        setRate(6);
+        QTest::qWait((i * 17) % 60);
+        endpoint.requestKeyFrame();
+        QTest::qWait(1500);
+        setRate(60);
+        QTest::qWait(1000);
+    }
+    const qint64 sequence = clock.elapsed();
+    setRate(6);
+    endpoint.requestKeyFrame();
+    const QVector<std::pair<qint64, quint32>> raises{{6000, 9}, {10500, 14}, {15000, 21}, {18000, 32}, {21000, 48}, {25500, 60}};
+    const qint64 runFor = qEnvironmentVariableIntValue("KRDP_E2E_COALESCE_SECONDS") > 0 ? qEnvironmentVariableIntValue("KRDP_E2E_COALESCE_SECONDS") * 1000LL : 30000;
+    qsizetype next = 0;
+    while (clock.elapsed() - sequence < runFor && alive()) {
+        if (next < raises.size() && clock.elapsed() - sequence >= raises[next].first) setRate(raises[next++].second);
+        QTest::qWait(20);
+    }
+    QVERIFY2(alive(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+
+    // Every output's frames since the coalesce, and the moving one's longest silence.
+    qint64 last = start;
+    qint64 longest = 0;
+    qint64 longestAt = 0;
+    QHash<int, int> sent;
+    QHash<int, int> keyframes;
+    for (qsizetype i = mark; i < run.frames.size(); ++i) {
+        const auto &f = run.frames[i];
+        ++sent[f.monitorIndex];
+        if (f.isKeyFrame) ++keyframes[f.monitorIndex];
+        if (f.monitorIndex != moving) continue;
+        if (arrivals.value(i) - last > longest) {
+            longest = arrivals.value(i) - last;
+            longestAt = last - start;
+        }
+        last = arrivals.value(i);
+    }
+    const qint64 end = clock.elapsed();
+    if (end - last > longest) {
+        longest = end - last;
+        longestAt = last - start;
+    }
+    const QString since = s->workerLogSince(logStart);
+    qInfo().noquote() << VideoCodecSupport::codecName(codec) << "coalesce on output" << moving << ": frames per output" << sent << ", keyframes" << keyframes
+                      << "; the moving output's longest silence" << longest << "ms from +" << longestAt << "ms; watchdog restarts:"
+                      << since.count(QStringLiteral("restarting its encoder"));
+    // KRDP_E2E_WORKER_LOG=FILE: the worker's log of this run.
+    if (const QString path = qEnvironmentVariable("KRDP_E2E_WORKER_LOG"); !path.isEmpty()) {
+        QFile out(path);
+        if (out.open(QIODevice::WriteOnly)) out.write(since.toUtf8());
+    }
+    QVERIFY2(longest <= 2000, qPrintable(QStringLiteral("output %1 was silent for %2 ms (from +%3 ms)").arg(moving).arg(longest).arg(longestAt)));
     stopWorker(*s, endpoint);
 }
 

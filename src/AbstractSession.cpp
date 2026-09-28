@@ -218,9 +218,13 @@ void AbstractSession::setVirtualMonitor(const VirtualMonitor &virtualMonitor)
 
 void AbstractSession::setVideoQuality(quint8 quality)
 {
+    const bool changed = d->quality != quality;
     d->quality = quality;
     if (d->encodedStream) {
         d->encodedStream->setQuality(quality);
+        if (changed) {
+            encoderReconfigured(); // a VA-API encoder reopens at the new QP
+        }
     }
 }
 
@@ -286,6 +290,10 @@ void AbstractSession::setChromaPolicy(const ChromaPolicy &policy)
     if (d->encodedStream) {
         applyChromaPolicyIfSupported(d->encodedStream.get(), policy);
     }
+}
+
+void AbstractSession::encoderReconfigured()
+{
 }
 
 void AbstractSession::restartStreamForCodecChange()
@@ -379,8 +387,12 @@ void AbstractSession::setStreamingEnabled(bool enable)
 
 void AbstractSession::setVideoFrameRate(quint32 framerate)
 {
+    const bool changed = d->frameRate != framerate;
     d->frameRate = framerate;
     if (d->encodedStream) {
+        if (changed) {
+            encoderReconfigured(); // KPipeWire renegotiates the PipeWire stream
+        }
         d->encodedStream->setMaxFramerate({framerate, 1});
         // this buffers 1 second of frames and drops after that
         d->encodedStream->setMaxPendingFrames(framerate);

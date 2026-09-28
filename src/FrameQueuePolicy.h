@@ -371,6 +371,67 @@ private:
 };
 
 /**
+ * AUD-FIX12: how long a surface may drop every frame it gets while it waits for a keyframe
+ * (starved behind a coalesce: queueFrame(); a chain waiting for a keyframe of its codec:
+ * sendFrame()) before the keyframe is asked for again, whatever the back-off
+ * (KeyFrameRequestBackoff) or an unacknowledged keyframe in flight says; and again every
+ * SilentSurfaceRetry while it still sends nothing. Frames are being captured, so the picture
+ * must not freeze: on ace (c27909d) the back-off and the unacked-keyframe rule could hold a
+ * starved monitor for up to 16 s and 10 s. The session's EncoderWatchdog restarts an encoder
+ * that answers none of these requests.
+ */
+constexpr auto SilentSurfaceLimit = std::chrono::milliseconds(1000);
+constexpr auto SilentSurfaceRetry = std::chrono::milliseconds(1000);
+
+/** AUD-FIX12: one surface's run of dropped frames since it last sent one (see SilentSurfaceLimit). Not thread-safe. */
+class SurfaceSilence
+{
+public:
+    using Clock = std::chrono::steady_clock;
+    /** A frame of this surface was dropped for want of a keyframe at \a now. */
+    void dropped(Clock::time_point now)
+    {
+        if (m_since == Clock::time_point{}) {
+            m_since = now;
+        }
+    }
+    /** A frame of this surface went out. */
+    void delivered()
+    {
+        m_since = {};
+        m_lastForced = {};
+        m_forced = 0;
+    }
+    /** Whether to ask for a keyframe now regardless of the back-off; if so, it is counted. */
+    bool shouldForce(Clock::time_point now)
+    {
+        if (m_since == Clock::time_point{} || now - m_since < SilentSurfaceLimit) {
+            return false;
+        }
+        if (m_lastForced != Clock::time_point{} && now - m_lastForced < SilentSurfaceRetry) {
+            return false;
+        }
+        m_lastForced = now;
+        ++m_forced;
+        return true;
+    }
+    /** Forced requests in this run. */
+    int forced() const
+    {
+        return m_forced;
+    }
+    Clock::time_point silentSince() const
+    {
+        return m_since;
+    }
+
+private:
+    Clock::time_point m_since{};
+    Clock::time_point m_lastForced{};
+    int m_forced = 0;
+};
+
+/**
  * The frames sent and not yet acknowledged, and whether the client suspended
  * acknowledgements (AUD-P6).
  *

@@ -235,6 +235,13 @@ target_include_directories(FrameQueuePolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(FrameQueuePolicyTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME FrameQueuePolicyTest COMMAND FrameQueuePolicyTest)
 
+# AUD-FIX12: the encoder watchdog and the silent-surface rule (no surface silent > 2 s).
+add_executable(EncoderWatchdogTest EncoderWatchdogTest.cpp)
+target_include_directories(EncoderWatchdogTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(EncoderWatchdogTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME EncoderWatchdogTest COMMAND EncoderWatchdogTest)
+set_tests_properties(EncoderWatchdogTest PROPERTIES TIMEOUT 60)
+
 add_executable(ClientDisplayInfoTest ClientDisplayInfoTest.cpp)
 target_include_directories(ClientDisplayInfoTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ClientDisplayInfoTest PRIVATE Qt6::Test Qt6::Core)
