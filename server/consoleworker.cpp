@@ -929,6 +929,7 @@ private:
         m_multiMode = true;
         m_lastPhysicalKeyframe.reset();
         m_multiSessions.clear();
+        m_multiCodecDeferred = false; // the new sessions open with m_encoderConfig
         m_multiPublishedFrames.clear();
         m_wireAtlas.clear();
         m_logicalOutputs.clear();
@@ -1378,6 +1379,7 @@ private:
         m_multiResizePending.reset();
         m_multiResizePlan.reset();
         m_multiResizeNeedsRestart = false;
+        if (m_multiCodecDeferred) applyEncoderConfigToMultiSessions(); // the sessions stay after all
         m_multiResizeDeadline.stop();
         m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{request.requestId, request.generation, error}));
     }
@@ -2276,6 +2278,26 @@ private:
                               << config.frameRate << "fps";
         }
         applyEncoderConfig(m_session);
+        applyEncoderConfigToMultiSessions();
+    }
+
+    /**
+     * AUD-FIX9 R1: per-output sessions that syncCaptureMode() is about to replace (a new client's
+     * capture refresh, a layout change) keep their encoders; the replacements open with the
+     * current config. The live ones swap the encoder on the same capture node, which opens with
+     * an IDR (restartStreamForCodecChange()); RetainedMultiCapture proves a layout in any codec.
+     */
+    void applyEncoderConfigToMultiSessions()
+    {
+        if (m_multiMode && m_multiResizeNeedsRestart) {
+            if (!m_multiSessions.empty()) {
+                m_multiCodecDeferred = true;
+                qInfo().noquote() << "Encoder config for the refreshed per-output captures:"
+                                  << VideoCodecSupport::codecName(m_encoderConfig.codec);
+            }
+            return;
+        }
+        m_multiCodecDeferred = false;
         for (const auto &session : m_multiSessions) applyEncoderConfig(*session);
     }
 
@@ -2289,7 +2311,7 @@ private:
         reset.settings = CodecPolicy::EncoderSettings{.hardware = m_encoderCaps.encoders.avc.hardware};
         m_encoderConfig = reset;
         applyEncoderConfig(m_session);
-        for (const auto &session : m_multiSessions) applyEncoderConfig(*session);
+        applyEncoderConfigToMultiSessions();
     }
 
     void applyEncoderConfig(AbstractSession &session)
@@ -2366,6 +2388,24 @@ private:
                     m_session.setVideoQuality(80);
                     m_multiQuality = 80;
                     for (const auto &session : m_multiSessions) session->setVideoQuality(80);
+                    if (multiNewGrant) {
+                        // An idle compositor may not deliver any new damage after
+                        // readiness or after a former RDP client exits. A keyframe request cannot
+                        // recover when the old encoder has no reusable last frame.
+                        // Recreate only the private capture streams; the retained
+                        // compositor, outputs and apps are left untouched. Hold
+                        // input until fresh per-output packets and KScreen agree.
+                        // AUD-FIX9 R1: armed before any codec config of the new grant, so the
+                        // refreshed captures open in the new client's codec instead of the old
+                        // streams restarting their encoders just before they are replaced.
+                        ++m_multiEpoch;
+                        m_multiReady = false;
+                        m_multiCapture.invalidate();
+                        m_multiPublishedFrames.clear();
+                        m_multiResizeNeedsRestart = true;
+                        m_multiSettle.start(0);
+                        qInfo() << "Refreshing per-output captures for a new client";
+                    }
                     resetEncoderConfig(); // AUD-FIX7: a new grant starts from AVC; its connection says more
                     m_control = *control;
                     m_microphone.setControl(*control);
@@ -2375,21 +2415,6 @@ private:
                     m_takeover = {};
                     if (control->active) {
                         m_takeover.armed(m_clock.elapsed());
-                    }
-                    if (multiNewGrant) {
-                        // An idle compositor may not deliver any new damage after
-                        // readiness or after a former RDP client exits. A keyframe request cannot
-                        // recover when the old encoder has no reusable last frame.
-                        // Recreate only the private capture streams; the retained
-                        // compositor, outputs and apps are left untouched. Hold
-                        // input until fresh per-output packets and KScreen agree.
-                        ++m_multiEpoch;
-                        m_multiReady = false;
-                        m_multiCapture.invalidate();
-                        m_multiPublishedFrames.clear();
-                        m_multiResizeNeedsRestart = true;
-                        m_multiSettle.start(0);
-                        qInfo() << "Refreshing per-output captures for a new client";
                     }
                 }
                 continue;
@@ -2662,6 +2687,7 @@ private:
     ConsoleWorkerWire::EncoderCaps m_encoderCaps;
     ConsoleWorkerWire::EncoderConfig m_encoderConfig;
     bool m_encoderConfigured = false;
+    bool m_multiCodecDeferred = false; ///< AUD-FIX9: m_multiSessions still run an older config (being replaced)
     QTimer m_encoderLoadTimer;
     bool m_captureReady = false;
     ConsoleWorkerWire::Outputs m_outputs;

@@ -151,7 +151,7 @@ inline bool matchesPublished(const Snapshot &readback, const ConsoleWorkerWire::
         });
         if (frame == keyframes.cend() || frameIndexes.contains(frame->monitorIndex)
             || !frame->isKeyFrame || frame->size != it->nativePixels
-            || h264KeyframeSize(frame->data) != it->nativePixels) return false;
+            || encodedKeyframeSize(frame->codec.value_or(VideoCodec::Avc420), frame->data) != it->nativePixels) return false;
         frameIndexes.insert(frame->monitorIndex);
     }
     return matched.size() == readback.outputs.size() && frameIndexes.size() == keyframes.size();

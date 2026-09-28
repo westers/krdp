@@ -103,7 +103,16 @@ public:
             result.frames.append(std::move(stamped));
             return result;
         }
-        if (!frame.isKeyFrame || h264KeyframeSize(frame.data) != frame.size) return result;
+        // AUD-FIX9 R1: the proof is a keyframe of the codec that produced it (HEVC/AV1 after a
+        // codec change at attach), not only H.264: an H.264-only check never became ready again.
+        const auto codec = frame.codec.value_or(VideoCodec::Avc420);
+        if (!frame.isKeyFrame || encodedKeyframeSize(codec, frame.data) != frame.size) return result;
+        if (m_keyframeCodec && *m_keyframeCodec != codec) {
+            // The encoders changed codec while the layout was being proven: one published layout
+            // never mixes codecs, so every output proves itself again in the new one.
+            m_keyframes = QVector<std::optional<VideoFrame>>(m_screens.size());
+        }
+        m_keyframeCodec = codec;
         m_keyframes[index] = frame;
         m_sizes[index] = frame.size;
         m_scales[index] = *scale;
@@ -143,6 +152,7 @@ public:
             result.frames.append(std::move(stamped));
         }
         m_keyframes.clear();
+        m_keyframeCodec.reset();
         return result;
     }
 
@@ -153,12 +163,14 @@ private:
         m_outputs = {};
         m_atlas.clear();
         m_keyframes = QVector<std::optional<VideoFrame>>(m_screens.size());
+        m_keyframeCodec.reset();
         m_sizes = QVector<QSize>(m_screens.size());
         m_scales = QVector<qreal>(m_screens.size());
     }
 
     QVector<Screen> m_screens;
     QVector<std::optional<VideoFrame>> m_keyframes;
+    std::optional<VideoCodec> m_keyframeCodec; ///< the codec of the keyframes held in m_keyframes
     QVector<QSize> m_sizes;
     QVector<qreal> m_scales;
     ConsoleWorkerWire::Outputs m_outputs;

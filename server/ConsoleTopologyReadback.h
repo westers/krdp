@@ -21,7 +21,7 @@ namespace KRdp::ConsoleTopologyReadback
 inline std::optional<ConsoleWorkerWire::Topology> confirmed(const RetainedKScreenReadback::Snapshot &kscreen,
     const ConsoleWorkerWire::Outputs &worker, const VideoFrame &frame)
 {
-    if (!frame.isKeyFrame || h264KeyframeSize(frame.data) != frame.size
+    if (!frame.isKeyFrame || encodedKeyframeSize(frame.codec.value_or(VideoCodec::Avc420), frame.data) != frame.size
         || kscreen.outputs.isEmpty() || kscreen.outputs.size() != worker.monitors.size()
         || frame.monitors.size() != worker.monitors.size() || frame.monitorIndex != 0) return {};
     QRect workspace;
