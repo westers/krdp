@@ -384,6 +384,22 @@ target_link_libraries(RenderAccessTest PRIVATE Qt6::Test Qt6::Core KRdp)
 add_test(NAME RenderAccessTest COMMAND RenderAccessTest)
 set_tests_properties(RenderAccessTest PROPERTIES TIMEOUT 120)
 
+# AUD-FIX8: end to end - the real krdp-console-worker (sandboxed like a virtual desktop's) in a
+# private headless session (own D-Bus without activation, PipeWire, WirePlumber, kwin_wayland
+# --virtual) against the real broker endpoint: Ready, encoder caps and H.264 keyframes.
+if(TARGET krdp-console-worker)
+    add_executable(WorkerEndToEndTest WorkerEndToEndTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
+        ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp)
+    target_include_directories(WorkerEndToEndTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+    target_link_libraries(WorkerEndToEndTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp PkgConfig::AVCodec)
+    target_compile_definitions(WorkerEndToEndTest PRIVATE
+        KRDP_CONSOLE_WORKER="$<TARGET_FILE:krdp-console-worker>"
+        KRDP_SERVER_DIR="${CMAKE_SOURCE_DIR}/server")
+    add_dependencies(WorkerEndToEndTest krdp-console-worker)
+    add_test(NAME WorkerEndToEndTest COMMAND WorkerEndToEndTest)
+    set_tests_properties(WorkerEndToEndTest PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+endif()
+
 # AUD-FIX8: the worker -> broker order (ConsoleWorkerOutbox, the class the real worker sends through).
 add_executable(ConsoleWorkerOrderTest ConsoleWorkerOrderTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
 target_include_directories(ConsoleWorkerOrderTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
