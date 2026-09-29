@@ -24,7 +24,7 @@ Conflicts: kde-config-krdp, krdp-console-test, krdp-virtual-test
 Breaks: krdp (>= 6.6.80~)
 Replaces: krdp (>= 6.6.80~), kde-config-krdp, krdp-console-test, krdp-virtual-test
 Description: Farside RDP server with console and retained desktops
- KRdp shares a Plasma Wayland desktop over RDP with H.264 (AVC420/AVC444)
+ Farside shares a Plasma Wayland desktop over RDP with H.264 (AVC420/AVC444)
  video, audio, microphone, camera and clipboard redirection.
  .
  Farside adds the physical-console host (farside-console-host and
