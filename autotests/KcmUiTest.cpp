@@ -248,7 +248,7 @@ private Q_SLOTS:
         QTest::newRow("video and audio") << u"VideoAudioPage.qml"_s << u"videoAudioPage"_s << u"Video and Audio"_s
                                          << QStringList{u"colorDetailCombo"_s, u"busyNetworkColumn"_s, u"standardMediaCheck"_s};
         QTest::newRow("advanced") << u"AdvancedPage.qml"_s << u"advancedPage"_s << u"Advanced"_s
-                                  << QStringList{u"listenAddressCombo"_s, u"portField"_s, u"vaapiCombo"_s, u"softwareEncodingCombo"_s, u"fallbackSizeField"_s,
+                                  << QStringList{u"listenAddressCombo"_s, u"portField"_s, u"vaapiCombo"_s, u"softwareEncodingCombo"_s, u"av1TilesCombo"_s, u"fallbackSizeField"_s,
                                                  u"cameraCombo"_s, u"developerToggle"_s};
     }
 
@@ -271,6 +271,54 @@ private Q_SLOTS:
         checkReachable(page, keyItems);
         const auto warnings = takeMessages();
         m_module->pop();
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
+    }
+
+    void av1TilesComboFollowsTheSetting()
+    {
+        // AV1-Q: Advanced > Encoding > "AV1 tiles": Automatic (recommended), 1, 2, 4, 8, 16,
+        // bound to krdpserverrc Av1Tiles ("auto" or the count).
+        auto *settings = m_module->mainUi()->property("settings").value<QObject *>();
+        QVERIFY(settings);
+        QCOMPARE(settings->property("av1Tiles").toString(), u"auto"_s);
+
+        m_module->push(u"AdvancedPage.qml"_s);
+        auto *page = m_module->subPage(m_module->depth() - 2);
+        QVERIFY(page);
+        showPage(page, {1280, 800});
+        auto *combo = page->findChild<QQuickItem *>(u"av1TilesCombo"_s);
+        QVERIFY(combo);
+        QCOMPARE(combo->property("count").toInt(), 6);
+        QStringList texts;
+        QStringList values;
+        for (int i = 0; i < 6; ++i) {
+            QString text;
+            QVariant value;
+            QVERIFY(QMetaObject::invokeMethod(combo, "textAt", Q_RETURN_ARG(QString, text), Q_ARG(int, i)));
+            QVERIFY(QMetaObject::invokeMethod(combo, "valueAt", Q_RETURN_ARG(QVariant, value), Q_ARG(int, i)));
+            texts << text;
+            values << value.toString();
+        }
+        QCOMPARE(texts, QStringList({u"Automatic (recommended)"_s, u"1"_s, u"2"_s, u"4"_s, u"8"_s, u"16"_s}));
+        QCOMPARE(values, QStringList({u"auto"_s, u"1"_s, u"2"_s, u"4"_s, u"8"_s, u"16"_s}));
+        QCOMPARE(combo->property("currentIndex").toInt(), 0);
+        auto *note = page->findChild<QQuickItem *>(u"av1TilesNote"_s);
+        QVERIFY(note && note->isVisible());
+        QCOMPARE(note->property("text").toString(), u"More tiles let slower computers decode AV1 faster, at a small size cost."_s);
+
+        // The user picks 8: the setting follows.
+        combo->setProperty("currentIndex", 4);
+        QVERIFY(QMetaObject::invokeMethod(combo, "activated", Q_ARG(int, 4)));
+        QCOMPARE(settings->property("av1Tiles").toString(), u"8"_s);
+        // The setting changes (Defaults, a reload): the combo follows.
+        settings->setProperty("av1Tiles", u"16"_s);
+        QCoreApplication::processEvents();
+        QCOMPARE(combo->property("currentIndex").toInt(), 5);
+        settings->setProperty("av1Tiles", u"auto"_s);
+        QCoreApplication::processEvents();
+        QCOMPARE(combo->property("currentIndex").toInt(), 0);
+        m_module->pop();
+        const auto warnings = takeMessages();
         QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
     }
 

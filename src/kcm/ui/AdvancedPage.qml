@@ -142,6 +142,35 @@ KCM.SimpleKCM {
             }
         }
 
+        ColumnLayout {
+            Kirigami.FormData.label: i18nc("@label:listbox", "AV1 tiles:")
+            Kirigami.FormData.buddyFor: av1TilesCombo
+            spacing: Kirigami.Units.smallSpacing
+            SettingComboBox {
+                id: av1TilesCombo
+                objectName: "av1TilesCombo"
+                configObject: root.settings
+                settingName: "av1Tiles"
+                model: [
+                    {text: i18nc("@item:inlistbox AV1 tiles", "Automatic (recommended)"), value: "auto"},
+                    {text: i18nc("@item:inlistbox AV1 tile count", "1"), value: "1"},
+                    {text: i18nc("@item:inlistbox AV1 tile count", "2"), value: "2"},
+                    {text: i18nc("@item:inlistbox AV1 tile count", "4"), value: "4"},
+                    {text: i18nc("@item:inlistbox AV1 tile count", "8"), value: "8"},
+                    {text: i18nc("@item:inlistbox AV1 tile count", "16"), value: "16"}
+                ]
+            }
+            QQC2.Label {
+                objectName: "av1TilesNote"
+                Layout.fillWidth: true
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 20
+                wrapMode: Text.Wrap
+                font: Kirigami.Theme.smallFont
+                color: Kirigami.Theme.disabledTextColor
+                text: i18nc("@info", "More tiles let slower computers decode AV1 faster, at a small size cost.")
+            }
+        }
+
         // --- Virtual monitors -----------------------------------------------
         Item {
             Kirigami.FormData.isSection: true
