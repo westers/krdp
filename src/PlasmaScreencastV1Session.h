@@ -64,6 +64,9 @@ protected:
 
 private:
     void injectNonMotionEvent(const std::shared_ptr<QEvent> &event);
+    /// AUD-FIX14: after injected pointer input pauses, make KWin record the cursor again.
+    void armCursorSettle();
+    void settleCursor();
     void scheduleStreamRecovery(int attempt, int delayMs);
     void attemptStreamRecovery(int attempt);
     bool setupScreencastRequest(bool recovery = false, bool allowWorkspaceFallback = true);

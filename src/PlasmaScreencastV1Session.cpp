@@ -381,6 +381,19 @@ public:
     // its own, so it is told to stop a second time once it has paused (see pollEncoderWatchdog()).
     bool forceTeardown = false;
     bool forcedSecondStop = false;
+
+    // AUD-FIX14: KWin 6.6 records a changed cursor only with its next move or repaint of the
+    // output (ScreenCastStream::invalidateCursor only marks the bitmap stale). An application sets
+    // its cursor (Konsole's I-beam: a cursor surface or a cursor-shape-v1 shape) only after it
+    // heard of a move, i.e. after KWin recorded that move, so with the pointer at rest the new
+    // shape would never reach the client. Once the injected pointer input pauses, the pointer is
+    // moved by one wl_fixed step (1/256 logical px) and straight back, CursorSettleDelaysMs after
+    // the last event: KWin records the cursor again, with the new bitmap, and the pointer ends
+    // where the client put it.
+    static constexpr int CursorSettleDelaysMs[] = {60, 300};
+    QTimer cursorSettleTimer;
+    int cursorSettleStep = 0;
+    std::optional<QPointF> lastPointer; // KWin-global logical, as fake input got it
 };
 
 PlasmaScreencastV1Session::PlasmaScreencastV1Session()
@@ -434,6 +447,9 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
         qCDebug(KRDP) << "Announcing system clipboard change to the client, formats:" << formats;
         Q_EMIT clipboardDataChanged(newData);
     });
+
+    d->cursorSettleTimer.setSingleShot(true);
+    connect(&d->cursorSettleTimer, &QTimer::timeout, this, &PlasmaScreencastV1Session::settleCursor);
 
     d->recoveryTimer.setSingleShot(true);
     connect(&d->recoveryTimer, &QTimer::timeout, this, [this]() {
@@ -870,6 +886,8 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
         const QPointF logicalPosition = mapToGlobal(me->position());
         if (d->remoteInterface->supports(ORG_KDE_KWIN_FAKE_INPUT_POINTER_MOTION_ABSOLUTE_SINCE_VERSION)) {
             d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(logicalPosition.x()), wl_fixed_from_double(logicalPosition.y()));
+            d->lastPointer = logicalPosition;
+            armCursorSettle();
         }
         return;
     }
@@ -908,11 +926,42 @@ void PlasmaScreencastV1Session::sendGlobalEvent(const std::shared_ptr<QEvent> &e
         qCDebug(KRDP) << "Global pointer motion to" << position << "(workspace logical)";
         if (d->remoteInterface->supports(ORG_KDE_KWIN_FAKE_INPUT_POINTER_MOTION_ABSOLUTE_SINCE_VERSION)) {
             d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(position.x()), wl_fixed_from_double(position.y()));
+            d->lastPointer = position;
+            armCursorSettle();
         }
         return;
     }
 
     injectNonMotionEvent(event);
+}
+
+void PlasmaScreencastV1Session::armCursorSettle()
+{
+    // Keys do not arm it: a nudge is a pointer motion, and an application that hides its pointer
+    // while one types (Konsole can) would show it again.
+    if (!d->lastPointer) {
+        return;
+    }
+    d->cursorSettleStep = 0;
+    d->cursorSettleTimer.start(Private::CursorSettleDelaysMs[0]);
+}
+
+void PlasmaScreencastV1Session::settleCursor()
+{
+    auto encodedStream = stream();
+    if (!d->lastPointer || !encodedStream || !encodedStream->isActive() || !d->remoteInterface->isActive()
+        || !d->remoteInterface->supports(ORG_KDE_KWIN_FAKE_INPUT_POINTER_MOTION_ABSOLUTE_SINCE_VERSION)) {
+        return;
+    }
+    const wl_fixed_t x = wl_fixed_from_double(d->lastPointer->x());
+    const wl_fixed_t y = wl_fixed_from_double(d->lastPointer->y());
+    // Right, not left: a pointer on the workspace's left edge would be clamped and not move. A
+    // client's rightmost pixel maps to at most width - 1 logical px, so this stays on the output.
+    d->remoteInterface->pointer_motion_absolute(x + 1, y);
+    d->remoteInterface->pointer_motion_absolute(x, y);
+    if (++d->cursorSettleStep < int(std::size(Private::CursorSettleDelaysMs))) {
+        d->cursorSettleTimer.start(Private::CursorSettleDelaysMs[d->cursorSettleStep]);
+    }
 }
 
 // Buttons, wheel and keys carry no position, so they are identical for the
@@ -937,6 +986,7 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
         uint state = me->type() == QEvent::MouseButtonPress ? 1 : 0;
         d->remoteInterface->button(button, state);
         d->pressedInput.button(button, state);
+        armCursorSettle(); // a click changes cursors too (a drag, a busy application)
         break;
     }
     case QEvent::Wheel: {
@@ -948,6 +998,7 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
         if (delta.x() != 0) {
             d->remoteInterface->axis(WL_POINTER_AXIS_HORIZONTAL_SCROLL, wl_fixed_from_double(delta.x() / 120.0));
         }
+        armCursorSettle(); // scrolling moves content, and another cursor, under the pointer
         break;
     }
     case QEvent::KeyPress:

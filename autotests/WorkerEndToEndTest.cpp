@@ -214,6 +214,8 @@ private Q_SLOTS:
     void cursorShapeReachesTheBroker();
     void av1TilesAndBitrate_data();
     void av1TilesAndBitrate();
+    void clientCursorReachesTheBrokerAtRest_data();
+    void clientCursorReachesTheBrokerAtRest();
     void cleanupTestCase();
 
 private:
@@ -1128,6 +1130,153 @@ void WorkerEndToEndTest::av1TilesAndBitrate()
     const auto delivery = deliverAndDecode(run.frames, first, [](qsizetype) { return VideoCodec::Av1; });
     QVERIFY2(delivery.error.isEmpty(), qPrintable(QStringLiteral("the client would reject %1").arg(delivery.error)));
     QVERIFY(delivery.pictures.value(0) >= 1);
+    stopWorker(*s, endpoint);
+}
+
+void WorkerEndToEndTest::clientCursorReachesTheBrokerAtRest_data()
+{
+    QTest::addColumn<bool>("virtualDesktop");
+    QTest::newRow("virtual desktop (:3395)") << true;
+    QTest::newRow("console session (:3391)") << false;
+}
+
+void WorkerEndToEndTest::clientCursorReachesTheBrokerAtRest()
+{
+    // AUD-FIX14: a cursor the application under the pointer sets itself, as Konsole's I-beam over
+    // its text: a cursor surface of its own (wl_pointer.set_cursor, an shm buffer) or a
+    // cursor-shape-v1 shape. The application sets it only once it heard of the move, after KWin
+    // recorded that move - and KWin 6.6 records a changed cursor only with its next move or
+    // repaint (ScreenCastStream::invalidateCursor schedules nothing). Each step here is ONE move
+    // and then a pointer at rest: the worker must still report the application's exact shape.
+    using Shape = ConsoleWorkerWire::CursorShape;
+    QFETCH(bool, virtualDesktop);
+    if (!m_skip.isEmpty()) {
+        QSKIP(qPrintable(m_skip));
+    }
+    auto *s = session(1, QSize(1280, 720), false, true);
+    QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+
+    ConsoleWorkerEndpoint endpoint;
+    WorkerRun run;
+    QVector<Shape> cursors;
+    connect(&endpoint, &ConsoleWorkerEndpoint::cursorShapeReceived, this, [&cursors](const Shape &shape) {
+        cursors.append(shape);
+    });
+    connect(&endpoint, &ConsoleWorkerEndpoint::workerReady, this, [&endpoint](const auto &) {
+        endpoint.setControlState({1, true});
+        endpoint.requestKeyFrame();
+    });
+    const auto dumpLogs = qScopeGuard([&] {
+        if (!QTest::currentTestFailed()) return;
+        QStringList seen;
+        for (const auto &shape : cursors)
+            seen << QStringLiteral("%1 %2x%3 hot %4,%5")
+                        .arg(int(shape.type))
+                        .arg(shape.size.width())
+                        .arg(shape.size.height())
+                        .arg(shape.hotspot.x())
+                        .arg(shape.hotspot.y());
+        qWarning().noquote() << "cursor records:" << seen.join(QStringLiteral(", ")) << "\nworker.log:\n" << s->log(QStringLiteral("worker.log"), 4000)
+                             << "\nkwin.log:\n" << s->log(QStringLiteral("kwin.log"), 2000) << "\ncursor-client.log:\n"
+                             << s->log(QStringLiteral("cursor-client.log"), 2000);
+    });
+    // The window's cursor follows the pointer (CursorShapeClient `regions`).
+    {
+        QFile control(s->runtime->path() + QStringLiteral("/cursor-shape"));
+        QVERIFY(control.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        control.write("regions");
+    }
+    QTest::qWait(300); // the client polls its control file every 50 ms
+    QVERIFY(startWorker(*s, virtualDesktop, endpoint, run));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    const auto reap = qScopeGuard([&] {
+        if (QFileInfo::exists(exitFile)) return;
+        endpoint.stopWorker();
+        if (!QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 15000)) qWarning("the worker did not stop");
+    });
+    QTRY_VERIFY_WITH_TIMEOUT(endpoint.ready() || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 45000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    QVERIFY(endpoint.ready());
+
+    const auto move = [&endpoint](QPointF to) {
+        ConsoleWorkerWire::Input input;
+        input.type = ConsoleWorkerWire::Input::Type::Mouse;
+        input.eventType = QEvent::MouseMove;
+        input.position = to;
+        endpoint.sendInput(input);
+    };
+    const auto solid = [](QSize size, QPoint hotspot, QRgb argb) {
+        Shape shape;
+        shape.type = Shape::Type::Image;
+        shape.size = size;
+        shape.hotspot = hotspot;
+        const QImage image = QImage(size, QImage::Format_ARGB32);
+        QImage filled = image;
+        filled.fill(argb);
+        for (int y = 0; y < size.height(); ++y)
+            shape.pixels.append(reinterpret_cast<const char *>(filled.constScanLine(y)), qsizetype(size.width()) * 4);
+        return shape;
+    };
+    const Shape bitmapA = solid(QSize(20, 14), QPoint(5, 9), qRgba(255, 0, 255, 255));
+    const Shape bitmapB = solid(QSize(32, 24), QPoint(30, 2), qRgba(0, 255, 255, 255));
+    const auto describe = [](const std::optional<Shape> &shape) {
+        if (!shape) return QStringLiteral("nothing");
+        return QStringLiteral("type %1 %2x%3 hot %4,%5")
+            .arg(int(shape->type))
+            .arg(shape->size.width())
+            .arg(shape->size.height())
+            .arg(shape->hotspot.x())
+            .arg(shape->hotspot.y());
+    };
+    const auto last = [&cursors]() -> std::optional<Shape> {
+        if (cursors.isEmpty()) return std::nullopt;
+        return cursors.constLast();
+    };
+    // One move, then rest: the shape must arrive while the pointer stays put.
+    const auto moveOnceAndExpect = [&](QPointF to, const std::function<bool(const Shape &)> &expected, const char *what) {
+        move(to);
+        const bool arrived = QTest::qWaitFor(
+            [&] {
+                return last() && expected(*last());
+            },
+            5000);
+        if (!arrived) qWarning().noquote() << what << "did not arrive; last record:" << describe(last());
+        return arrived;
+    };
+
+    // Left third: the client's own cursor surface A.
+    QVERIFY(moveOnceAndExpect({200, 300}, [&](const Shape &shape) { return shape == bitmapA; }, "cursor surface A (20x14 hot 5,9)"));
+    // Middle third: the I-beam (cursor-shape-v1 `text`), a themed image unlike A and B.
+    QVERIFY(moveOnceAndExpect(
+        {640, 300},
+        [&](const Shape &shape) {
+            return shape.type == Shape::Type::Image && shape != bitmapA && shape != bitmapB && shape.size.width() >= 8;
+        },
+        "I-beam"));
+    const Shape ibeam = *last();
+    // Right third: cursor surface B.
+    QVERIFY(moveOnceAndExpect({1100, 300}, [&](const Shape &shape) { return shape == bitmapB; }, "cursor surface B (32x24 hot 30,2)"));
+    // Back to A (a surface replacing a surface), then the I-beam again.
+    QVERIFY(moveOnceAndExpect({210, 310}, [&](const Shape &shape) { return shape == bitmapA; }, "cursor surface A again"));
+    QVERIFY(moveOnceAndExpect({650, 310}, [&](const Shape &shape) { return shape == ibeam; }, "I-beam again"));
+    // Moves within one region change nothing.
+    const qsizetype before = cursors.size();
+    for (int i = 0; i < 10; ++i) {
+        move({600.0 + 5 * i, 320.0});
+        QTest::qWait(30);
+    }
+    QTest::qWait(600);
+    QCOMPARE(cursors.size(), before);
+
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    qInfo().noquote() << "cursor records:" << cursors.size() << "ibeam" << ibeam.size << "hot" << ibeam.hotspot;
+    {
+        QFile control(s->runtime->path() + QStringLiteral("/cursor-shape"));
+        QVERIFY(control.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        control.write("arrow");
+    }
     stopWorker(*s, endpoint);
 }
 
