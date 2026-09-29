@@ -8,6 +8,15 @@ set -eu
 old=/etc/krdp
 new=/etc/farside
 install -d -m 0700 "$new"
+# Sol's console certificate predates /etc/krdp. Copy it into Farside's
+# configuration directory so the new unit has no dependency on a legacy path.
+for kind in crt key; do
+    source_file="/opt/krdp-console/cert/krdp.$kind"
+    target_file="$new/console.$kind"
+    if [ -f "$source_file" ] && [ ! -L "$source_file" ] && [ ! -e "$target_file" ]; then
+        cp -a --no-clobber "$source_file" "$target_file"
+    fi
+done
 copy_config() {
     name=$1
     [ -f "$old/$name" ] && [ ! -L "$old/$name" ] || return 0
@@ -15,6 +24,8 @@ copy_config() {
     tmp=$(mktemp "$new/.${name}.XXXXXX")
     if sed -e 's/KRDP_/FARSIDE_/g' -e 's@/etc/krdp/@/etc/farside/@g' \
         -e 's@/usr/bin/krdp-@/usr/bin/farside-@g' \
+        -e 's@/opt/krdp-console/cert/krdp.crt@/etc/farside/console.crt@g' \
+        -e 's@/opt/krdp-console/cert/krdp.key@/etc/farside/console.key@g' \
         -e 's@/usr/share/krdp/@/usr/share/farside/@g' "$old/$name" >"$tmp"; then
         chmod --reference="$old/$name" "$tmp"
         mv -n "$tmp" "$new/$name"
@@ -53,6 +64,8 @@ for pair in 'krdp-console-host.service farside-console-host.service' \
         tmp=$(mktemp "$target_dir/.copy.XXXXXX")
         sed -e 's/KRDP_/FARSIDE_/g' -e 's@/etc/krdp/@/etc/farside/@g' \
             -e 's@/usr/bin/krdp-@/usr/bin/farside-@g' \
+            -e 's@/opt/krdp-console/cert/krdp.crt@/etc/farside/console.crt@g' \
+            -e 's@/opt/krdp-console/cert/krdp.key@/etc/farside/console.key@g' \
             -e 's@/usr/share/krdp/@/usr/share/farside/@g' "$source_file" >"$tmp"
         chmod --reference="$source_file" "$tmp"
         mv -n "$tmp" "$target_file"

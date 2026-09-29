@@ -15,6 +15,12 @@ if [[ -e $new ]]; then
     # A previous copy is safe to keep. Mixing two independently written
     # journals would make session records ambiguous.
     if [[ -e /var/lib/farside/migrated-journal ]]; then exit 0; fi
+    if diff -qr -- "$old" "$new" >/dev/null; then
+        records=$(find "$new" -maxdepth 1 -type f -name '*.json' | wc -l)
+        printf 'copied %s records\n' "$records" > /var/lib/farside/migrated-journal
+        chmod 0600 /var/lib/farside/migrated-journal
+        exit 0
+    fi
     echo "Refusing to merge with an existing $new; inspect it first." >&2
     exit 1
 fi
