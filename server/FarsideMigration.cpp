@@ -18,6 +18,8 @@
 #include <QTimer>
 #include <qt6keychain/keychain.h>
 
+#include <utility>
+
 Q_LOGGING_CATEGORY(FARSIDE_MIGRATION, "farside.server.migration")
 
 namespace
@@ -87,10 +89,10 @@ void FarsideMigration::copyUserFiles()
     const QString state = QStandardPaths::writableLocation(QStandardPaths::StateLocation);
     const QString oldRc = config + QStringLiteral("/krdpserverrc");
     const QString newRc = config + QStringLiteral("/farsideserverrc");
+    bool copiedRc = false;
     if (QFileInfo::exists(oldRc) && !QFileInfo::exists(newRc) && !QFileInfo(oldRc).isSymLink()) {
         if (copyIfAbsent(oldRc, newRc, true)) {
-            QFile file(newRc);
-            if (file.open(QIODevice::Append)) file.write("\n[FarsideMigration]\nMigratedFrom=krdpserverrc\n");
+            copiedRc = true;
         } else {
             qCWarning(FARSIDE_MIGRATION) << "Could not copy the old server settings";
         }
@@ -101,6 +103,22 @@ void FarsideMigration::copyUserFiles()
         if (QFileInfo::exists(source) && !copyIfAbsent(source, target, true)) {
             qCWarning(FARSIDE_MIGRATION) << "Could not copy server certificate material";
         }
+    }
+    if (copiedRc) {
+        // The old managed certificate paths can be present even when automatic
+        // certificates are enabled. Point only those exact legacy values at
+        // the copied files; preserve any custom certificate paths.
+        const auto migratedConfig = KSharedConfig::openConfig(newRc, KConfig::SimpleConfig);
+        KConfigGroup general(migratedConfig, QStringLiteral("General"));
+        for (const auto &entry : {std::pair{QStringLiteral("Certificate"), QStringLiteral("crt")},
+                                  std::pair{QStringLiteral("CertificateKey"), QStringLiteral("key")}}) {
+            const QString source = data + QStringLiteral("/krdpserver/krdp.") + entry.second;
+            const QString target = data + QStringLiteral("/farside-server/server.") + entry.second;
+            if (QFileInfo::exists(target) && general.readEntry(entry.first) == source) general.writeEntry(entry.first, target);
+        }
+        migratedConfig->sync();
+        QFile file(newRc);
+        if (file.open(QIODevice::Append)) file.write("\n[FarsideMigration]\nMigratedFrom=krdpserverrc\n");
     }
     copyIfAbsent(state + QStringLiteral("/krdp/output-restore.json"), state + QStringLiteral("/farside/output-restore.json"), true);
     copyIfAbsent(state + QStringLiteral("/krdp-serverstaterc"), state + QStringLiteral("/farside-serverstaterc"), true);

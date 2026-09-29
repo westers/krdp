@@ -3,6 +3,8 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <KConfigGroup>
+#include <KSharedConfig>
 #include <QFileInfo>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -25,7 +27,10 @@ private Q_SLOTS:
             if (!file.open(QIODevice::WriteOnly)) return false;
             return file.write(bytes) == bytes.size();
         };
-        const QByteArray oldRc("[General]\nMonitorMode=multi\nUsers=steve\n");
+        const QByteArray oldRc = QStringLiteral("[General]\nMonitorMode=multi\nUsers=steve\nCertificate=%1/krdpserver/krdp.crt\n"
+                                                 "CertificateKey=%1/krdpserver/krdp.key\n")
+                                     .arg(data)
+                                     .toUtf8();
         const QByteArray oldCert("test-certificate-unchanged");
         QVERIFY(write(config + QStringLiteral("/krdpserverrc"), oldRc));
         QVERIFY(write(data + QStringLiteral("/krdpserver/krdp.crt"), oldCert));
@@ -35,8 +40,12 @@ private Q_SLOTS:
         FarsideMigration::copyUserFiles();
         QFile settings(config + QStringLiteral("/farsideserverrc"));
         QVERIFY(settings.open(QIODevice::ReadOnly));
-        QVERIFY(settings.readAll().startsWith(oldRc));
+        QVERIFY(settings.readAll().contains("MigratedFrom=krdpserverrc"));
         settings.close();
+        const auto migratedConfig = KSharedConfig::openConfig(settings.fileName(), KConfig::SimpleConfig);
+        KConfigGroup general(migratedConfig, QStringLiteral("General"));
+        QCOMPARE(general.readEntry("Certificate"), data + QStringLiteral("/farside-server/server.crt"));
+        QCOMPARE(general.readEntry("CertificateKey"), data + QStringLiteral("/farside-server/server.key"));
         QFile cert(data + QStringLiteral("/farside-server/server.crt"));
         QVERIFY(cert.open(QIODevice::ReadOnly));
         QCOMPARE(cert.readAll(), oldCert);
