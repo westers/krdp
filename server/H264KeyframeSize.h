@@ -54,4 +54,9 @@ QSize encodedKeyframeAlignment(VideoCodec codec);
  * PrivateFrameGeometry.h) crops exactly these AMD sizes to the surface.
  */
 bool encodedKeyframeShows(VideoCodec codec, const QByteArray &packet, QSize pixels);
+/**
+ * AV1-Q: the tile layout (width = TileCols, height = TileRows, AV1 spec tile_info()) of the shown
+ * key frame at the start of an AV1 temporal unit with its sequence header; nullopt otherwise.
+ */
+std::optional<QSize> av1KeyframeTiles(const QByteArray &packet);
 }

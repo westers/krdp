@@ -54,6 +54,40 @@ private Q_SLOTS:
         const auto oversized = fixture(QStringLiteral("4098x200")); QVERIFY(!oversized.isEmpty());
         QVERIFY(!KRdp::h264KeyframeSize(oversized));
     }
+    // AV1-Q: the tile layout in real keyframe headers (tile_info(), uniform and non-uniform
+    // spacing). Hal's 780M (FFmpeg 8.0.1 av1_vaapi -tiles 1xN on radeonsi) codes rows only;
+    // SVT-AV1 2.3.0 tile-columns=1:tile-rows=1 codes 2x2. FFmpeg's trace_headers agrees.
+    void av1Tiles_data()
+    {
+        QTest::addColumn<QString>("name");
+        QTest::addColumn<QSize>("tiles"); // columns x rows
+        QTest::newRow("hal one tile") << QStringLiteral("1920x1080-hal") << QSize(1, 1);
+        QTest::newRow("cray one tile") << QStringLiteral("1920x1080-cray") << QSize(1, 1);
+        QTest::newRow("720p one tile") << QStringLiteral("1280x720") << QSize(1, 1);
+        QTest::newRow("hal 4 rows, uniform") << QStringLiteral("1920x1080-hal-tiles1x4") << QSize(1, 4);
+        QTest::newRow("hal 8 rows, non-uniform") << QStringLiteral("1920x1080-hal-tiles1x8") << QSize(1, 8);
+        QTest::newRow("hal 16 rows at 1080p") << QStringLiteral("1920x1080-hal-tiles1x16") << QSize(1, 16);
+        QTest::newRow("hal 16 rows at 4K") << QStringLiteral("3840x2160-hal-tiles1x16") << QSize(1, 16);
+        QTest::newRow("svt 2x2") << QStringLiteral("1920x1080-svt-tiles2x2") << QSize(2, 2);
+    }
+    void av1Tiles()
+    {
+        QFETCH(QString, name);
+        QFETCH(QSize, tiles);
+        const auto packet = fixture(name, QStringLiteral("av1"));
+        QVERIFY(!packet.isEmpty());
+        QCOMPARE(KRdp::av1KeyframeTiles(packet), std::optional<QSize>(tiles));
+        // Tiles change nothing about the display-size proof (R5).
+        QVERIFY(KRdp::encodedKeyframe(KRdp::VideoCodec::Av1, packet));
+    }
+    void av1TilesNeedAKeyframeHeader()
+    {
+        QVERIFY(!KRdp::av1KeyframeTiles({}));
+        QVERIFY(!KRdp::av1KeyframeTiles(QByteArray("garbage")));
+        const auto packet = fixture(QStringLiteral("1920x1080-hal-tiles1x8"), QStringLiteral("av1"));
+        QVERIFY(!packet.isEmpty());
+        QVERIFY(!KRdp::av1KeyframeTiles(packet.left(12))); // the sequence header alone
+    }
     // AUD-FIX10 R5: coded vs display size of real hardware keyframes (Hal's 780M and cray's
     // Strix Halo, FFmpeg 8.0.1 VA-API on radeonsi) and of the H.264 fixtures.
     void codedAndDisplaySizes_data()

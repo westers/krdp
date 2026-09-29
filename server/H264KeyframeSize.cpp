@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "H264KeyframeSize.h"
+#include <algorithm>
 #include <QScopeGuard>
 #include <cstring>
 extern "C" {
@@ -139,6 +140,17 @@ public:
         }
         return f(zeros) + (uint32_t(1) << zeros) - 1;
     }
+    /// ns(n), spec 4.10.7: a value in 0..n-1.
+    uint32_t ns(uint32_t n)
+    {
+        if (n <= 1) return 0;
+        int w = 0;
+        for (uint32_t x = n; x; x >>= 1) ++w; // FloorLog2(n) + 1
+        const uint32_t m = (uint32_t(1) << w) - n;
+        const uint32_t v = f(w - 1);
+        if (v < m) return v;
+        return (v << 1) - m + f(1);
+    }
 
 private:
     const uint8_t *m_data;
@@ -166,6 +178,7 @@ struct Av1Sequence {
     int forceIntegerMv = 0;
     int orderHintBits = 0;
     bool superres = false;
+    bool use128 = false;
 };
 
 // AV1 spec 5.5.1 sequence_header_obu(), up to enable_superres.
@@ -218,7 +231,7 @@ std::optional<Av1Sequence> av1Sequence(Av1Bits bits)
         const int delta = int(bits.f(4)) + 2;
         seq.frameIdLength = int(bits.f(3)) + 1 + delta;
     }
-    bits.f(1); // use_128x128_superblock
+    seq.use128 = bits.f(1); // use_128x128_superblock
     bits.f(1); // enable_filter_intra
     bits.f(1); // enable_intra_edge_filter
     seq.forceScreenContentTools = 2; // SELECT_SCREEN_CONTENT_TOOLS
@@ -240,7 +253,57 @@ struct Av1FrameSize {
     QSize frame; // UpscaledWidth x FrameHeight: what a decoder outputs
     QSize render;
     bool renderSignalled = false;
+    QSize tiles; // AV1-Q: TileCols x TileRows (tile_info()); empty when the header stops earlier
 };
+
+int tileLog2(int blockSize, int target)
+{
+    int k = 0;
+    while ((blockSize << k) < target) ++k;
+    return k;
+}
+
+// AV1 spec 5.9.15 tile_info(): TileCols x TileRows.
+QSize av1TileInfo(Av1Bits &bits, bool use128, int frameWidth, int frameHeight)
+{
+    const int miCols = 2 * ((frameWidth + 7) >> 3);
+    const int miRows = 2 * ((frameHeight + 7) >> 3);
+    const int sbCols = use128 ? (miCols + 31) >> 5 : (miCols + 15) >> 4;
+    const int sbRows = use128 ? (miRows + 31) >> 5 : (miRows + 15) >> 4;
+    const int sbShift = use128 ? 5 : 4;
+    const int sbSize = sbShift + 2;
+    const int maxTileWidthSb = 4096 >> sbSize;
+    int maxTileAreaSb = (4096 * 2304) >> (2 * sbSize);
+    const int minLog2TileCols = tileLog2(maxTileWidthSb, sbCols);
+    const int maxLog2TileCols = tileLog2(1, std::min(sbCols, 64));
+    const int maxLog2TileRows = tileLog2(1, std::min(sbRows, 64));
+    const int minLog2Tiles = std::max(minLog2TileCols, tileLog2(maxTileAreaSb, sbRows * sbCols));
+    int tileCols = 0;
+    int tileRows = 0;
+    if (bits.f(1)) { // uniform_tile_spacing_flag
+        int colsLog2 = minLog2TileCols;
+        while (colsLog2 < maxLog2TileCols && bits.f(1)) ++colsLog2; // increment_tile_cols_log2
+        const int tileWidthSb = (sbCols + (1 << colsLog2) - 1) >> colsLog2;
+        for (int start = 0; start < sbCols; start += tileWidthSb) ++tileCols;
+        int rowsLog2 = std::max(minLog2Tiles - colsLog2, 0);
+        while (rowsLog2 < maxLog2TileRows && bits.f(1)) ++rowsLog2; // increment_tile_rows_log2
+        const int tileHeightSb = (sbRows + (1 << rowsLog2) - 1) >> rowsLog2;
+        for (int start = 0; start < sbRows; start += tileHeightSb) ++tileRows;
+    } else {
+        int widestTileSb = 0;
+        for (int start = 0; start < sbCols && bits.ok(); ++tileCols) {
+            const int sizeSb = int(bits.ns(uint32_t(std::min(sbCols - start, maxTileWidthSb)))) + 1; // width_in_sbs_minus_1
+            widestTileSb = std::max(sizeSb, widestTileSb);
+            start += sizeSb;
+        }
+        maxTileAreaSb = minLog2Tiles > 0 ? (sbRows * sbCols) >> (minLog2Tiles + 1) : sbRows * sbCols;
+        const int maxTileHeightSb = std::max(maxTileAreaSb / std::max(widestTileSb, 1), 1);
+        for (int start = 0; start < sbRows && bits.ok(); ++tileRows) {
+            start += int(bits.ns(uint32_t(std::min(sbRows - start, maxTileHeightSb)))) + 1; // height_in_sbs_minus_1
+        }
+    }
+    return bits.ok() ? QSize(tileCols, tileRows) : QSize();
+}
 
 // AV1 spec 5.9.2 uncompressed_header() of a shown KEY_FRAME, up to render_size().
 std::optional<Av1FrameSize> av1KeyFrameSize(Av1Bits bits, const Av1Sequence &seq, int temporalId, int spatialId)
@@ -253,7 +316,7 @@ std::optional<Av1FrameSize> av1KeyFrameSize(Av1Bits bits, const Av1Sequence &seq
         if (seq.decoderModelInfo && !seq.equalPictureInterval) bits.f(seq.framePresentationTimeLength);
         // showable_frame is implied; error_resilient_mode = 1 for a shown key frame.
     }
-    bits.f(1); // disable_cdf_update
+    const bool disableCdfUpdate = bits.f(1);
     const int screenContentTools = seq.forceScreenContentTools == 2 ? int(bits.f(1)) : seq.forceScreenContentTools;
     if (screenContentTools && seq.forceIntegerMv == 2) bits.f(1); // force_integer_mv
     if (seq.frameIdNumbers) bits.f(seq.frameIdLength); // current_frame_id
@@ -276,7 +339,11 @@ std::optional<Av1FrameSize> av1KeyFrameSize(Av1Bits bits, const Av1Sequence &seq
         height = int(bits.f(seq.frameHeightBits)) + 1;
     }
     // superres_params(): the decoder outputs UpscaledWidth, the size before the downscale.
-    if (seq.superres && bits.f(1)) bits.f(3);
+    int codedWidth = width; // FrameWidth
+    if (seq.superres && bits.f(1)) {
+        const int denominator = int(bits.f(3)) + 9;
+        codedWidth = (width * 8 + denominator / 2) / denominator;
+    }
     size.frame = QSize(width, height);
     size.renderSignalled = bits.f(1); // render_and_frame_size_different
     size.render = size.frame;
@@ -285,6 +352,12 @@ std::optional<Av1FrameSize> av1KeyFrameSize(Av1Bits bits, const Av1Sequence &seq
         size.render = QSize(renderWidth, int(bits.f(16)) + 1);
     }
     if (!bits.ok()) return {};
+    // AV1-Q: on to tile_info(). An intra frame has no reference setup in between.
+    if (screenContentTools && codedWidth == width) bits.f(1); // allow_intrabc
+    if (!seq.reduced && !disableCdfUpdate) bits.f(1); // disable_frame_end_update_cdf
+    Av1Bits tileBits = bits;
+    const QSize tiles = av1TileInfo(tileBits, seq.use128, codedWidth, height);
+    if (tileBits.ok()) size.tiles = tiles;
     return size;
 }
 
@@ -333,6 +406,13 @@ std::optional<Av1FrameSize> av1TemporalUnitSize(const QByteArray &packet)
     }
     return {};
 }
+}
+
+std::optional<QSize> av1KeyframeTiles(const QByteArray &packet)
+{
+    const auto frame = av1TemporalUnitSize(packet);
+    if (!frame || frame->tiles.isEmpty()) return {};
+    return frame->tiles;
 }
 
 std::optional<QSize> h264KeyframeSize(const QByteArray &packet)

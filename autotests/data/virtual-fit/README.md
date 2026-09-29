@@ -95,3 +95,17 @@ f176ba6c4f3252b53244a3b573aa5f92f76cae0c218847a9e0924b7e9e3fef58  1366x768-hal.h
 38071652de20588036b5707f27213a639b1a86744adb2da754c136408611f1ba  1920x1080-render1080.av1
 92c54c1b478619c7b4f43f4042ae73d77361ac0f9d368ba554a324fb9e50bbd3  1920x1080-render1076.av1
 ```
+
+AV1-Q (2026-09-29): AV1 tile fixtures, one black key frame each (`-f obu`), for `H264KeyframeSizeTest::av1Tiles`.
+`*-hal-tiles1xN.av1`: Hal's 780M, FFmpeg 8.0.1 `av1_vaapi -rc_mode CQP -global_quality 100 -bf 0 -tiles 1xN` (radeonsi codes
+rows only: 1x4 = 4 uniform rows, 1x8 = 8 non-uniform rows, 1x16 = 16 rows). `1920x1080-svt-tiles2x2.av1`: SVT-AV1 2.3.0
+`-preset 12 -crf 50 -svtav1-params pred-struct=1:tile-columns=1:tile-rows=1` (2x2). FFmpeg's `trace_headers` agrees
+with the test on every tile count. SHA256s:
+
+```
+112860ed8470d220522c3684bd2d745aed66566a8160475dd53e4f4e19b42d74  1920x1080-hal-tiles1x16.av1
+7baaea5abbe17bb97612d8aa96c879a9e3c9aca2de922afdc5ccc75d67455c47  1920x1080-hal-tiles1x4.av1
+364d94dd0d9d1584610b6aee2101e852b7b78c6a9f5765fd84ba75296dab272c  1920x1080-hal-tiles1x8.av1
+a71aa64d832158f3b2a1a44a7edeb627163ee4341cecf757978ebd8fb4426438  1920x1080-svt-tiles2x2.av1
+7331e35aec5d0aed9b69a0caaef94b68a048f37cb7474edaaa6b207007a10f94  3840x2160-hal-tiles1x16.av1
+```
