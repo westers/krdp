@@ -22,7 +22,7 @@ bool VirtualSessionLogin::matches(uid_t owner, pid_t expectedLeader, const QStri
         && uid == owner && leader == quint32(expectedLeader)
         && QRegularExpression(QStringLiteral("\\A[A-Za-z0-9_-]{1,64}\\z")).match(id).hasMatch()
         && id == pamId && runtime == pamRuntime && runtime == QStringLiteral("/run/user/%1").arg(owner)
-        && service == QStringLiteral("krdp-virtual-session")
+        && service == QStringLiteral("farside-virtual-session")
         && type == QStringLiteral("wayland") && sessionClass == QStringLiteral("background")
         && (state == QStringLiteral("active") || state == QStringLiteral("online"))
         && seat.isEmpty() && tty.isEmpty() && display.isEmpty() && virtualTerminal == 0

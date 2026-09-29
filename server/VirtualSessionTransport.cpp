@@ -56,9 +56,9 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     Q_ASSERT(client && connection);
     // Source-only private-compositor switch. Never enabled by a client record
     // or by the installed service's default environment.
-    m_experimentalMultiResize = qEnvironmentVariable("KRDP_EXPERIMENTAL_MULTI_RESIZE") == u"1"_s;
-    m_experimentalPrimary = qEnvironmentVariable("KRDP_EXPERIMENTAL_MULTI_PRIMARY") == u"1"_s;
-    m_experimentalMixed = qEnvironmentVariable("KRDP_EXPERIMENTAL_MULTI_MIXED") == u"1"_s;
+    m_experimentalMultiResize = qEnvironmentVariable("FARSIDE_EXPERIMENTAL_MULTI_RESIZE") == u"1"_s;
+    m_experimentalPrimary = qEnvironmentVariable("FARSIDE_EXPERIMENTAL_MULTI_PRIMARY") == u"1"_s;
+    m_experimentalMixed = qEnvironmentVariable("FARSIDE_EXPERIMENTAL_MULTI_MIXED") == u"1"_s;
     connection->setAudioPriorityDefault(false);
     connection->clearAudioPriorityOverride();
     connection->videoStream()->setCodecPreference(CodecPreference::Avc420);

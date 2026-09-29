@@ -50,7 +50,7 @@ bool identity(const QVariantMap &fields, const Session &listed, const VirtualSes
         && get("Id") == listed.id && uid == record.uid && listed.uid == record.uid
         && userPath.path() == QStringLiteral("/org/freedesktop/login1/user/_%1").arg(record.uid)
         && listed.seat.isEmpty() && seatName.isEmpty() && seatPath.path() == QStringLiteral("/")
-        && get("Desktop") == virtualLoginTag(record.launch) && get("Service") == QStringLiteral("krdp-virtual-session")
+        && get("Desktop") == virtualLoginTag(record.launch) && get("Service") == QStringLiteral("farside-virtual-session")
         && get("Type") == QStringLiteral("wayland") && get("Class") == QStringLiteral("background")
         && (state == QStringLiteral("opening") || state == QStringLiteral("online")
             || state == QStringLiteral("active") || state == QStringLiteral("closing"))

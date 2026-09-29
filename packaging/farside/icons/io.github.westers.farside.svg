@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Farside application icon, Breeze style: a rounded square in Breeze blue with two
+     overlapping monitors in white, one per remote screen. 64x64 viewBox. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3daee9"/>
+      <stop offset="1" stop-color="#1d99f3"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="12" ry="12" fill="url(#bg)"/>
+  <!-- rear monitor, up and to the right -->
+  <g fill="#ffffff">
+    <rect x="26" y="12" width="30" height="20" rx="3" ry="3"/>
+    <rect x="38" y="32" width="6" height="2"/>
+    <rect x="33" y="34" width="16" height="2" rx="1" ry="1"/>
+  </g>
+  <!-- front monitor, down and to the left; its outline is the background blue so the two
+       read as separate screens where they overlap -->
+  <g fill="#ffffff" stroke="#1d99f3" stroke-width="2" stroke-linejoin="round">
+    <rect x="9" y="28" width="30" height="20" rx="3" ry="3"/>
+    <rect x="21" y="48" width="6" height="2" stroke="none"/>
+    <rect x="16" y="50" width="16" height="2" rx="1" ry="1" stroke="none"/>
+  </g>
+</svg>

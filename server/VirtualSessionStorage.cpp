@@ -82,7 +82,7 @@ std::unique_ptr<VirtualSessionStorage> VirtualSessionStorage::prepareAt(quint32 
     }
     // Do not depend on mutable/shared permissions in an existing .local tree
     // and never chmod that user-owned tree to accommodate the service.
-    Fd profiles(child(homeFd.value, ".krdp-virtual", uid, true));
+    Fd profiles(child(homeFd.value, ".farside-virtual", uid, true));
     Fd sessions(child(profiles.value, "sessions", uid, true));
     Fd profile(child(sessions.value, session.toLatin1().constData(), uid, true));
     if (profile.value < 0) return refuse(QStringLiteral("Cannot create or validate private persistent profile"));
@@ -99,7 +99,7 @@ std::unique_ptr<VirtualSessionStorage> VirtualSessionStorage::prepareAt(quint32 
         Fd subdir(child(profile.value, name, uid, true));
         if (subdir.value < 0) return refuse(QStringLiteral("Unsafe persistent profile subdirectory"));
     }
-    Fd runtimes(child(runtimeFd.value, "krdp-virtual", uid, true));
+    Fd runtimes(child(runtimeFd.value, "farside-virtual", uid, true));
     Fd runtime(child(runtimes.value, launch.toLatin1().constData(), uid, true, true));
     if (runtime.value < 0) return refuse(QStringLiteral("Runtime must be a new private directory; adoption requires separate validation"));
     Fd secret(openat(runtime.value, "worker-token", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
@@ -112,8 +112,8 @@ std::unique_ptr<VirtualSessionStorage> VirtualSessionStorage::prepareAt(quint32 
         written += count;
     }
     if (fsync(secret.value)) return refuse(QStringLiteral("Cannot flush worker credential"));
-    result->m_runtimePath = runtimeBase + QStringLiteral("/krdp-virtual/") + launch;
-    result->m_profilePath = home + QStringLiteral("/.krdp-virtual/sessions/") + session;
+    result->m_runtimePath = runtimeBase + QStringLiteral("/farside-virtual/") + launch;
+    result->m_profilePath = home + QStringLiteral("/.farside-virtual/sessions/") + session;
     result->m_sessionId = session;
     result->m_ownerUid = uid;
     if (error) error->clear();

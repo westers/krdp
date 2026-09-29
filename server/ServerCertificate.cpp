@@ -133,8 +133,8 @@ bool writeAtomically(const QString &path, const QByteArray &data, QFileDevice::P
 
 Paths defaultPaths()
 {
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + u"/krdpserver"_s;
-    return {dir + u"/krdp.crt"_s, dir + u"/krdp.key"_s};
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + u"/farside-server"_s;
+    return {dir + u"/server.crt"_s, dir + u"/server.key"_s};
 }
 
 Info inspect(const Paths &paths)
@@ -242,7 +242,7 @@ bool generate(const Paths &paths, const QString &commonName, const QDateTime &no
     std::unique_ptr<BIGNUM, Deleter<BIGNUM, BN_free>> serialNumber(BN_bin2bn(serialBytes, sizeof(serialBytes), nullptr));
     const qint64 notBefore = now.toSecsSinceEpoch() - 3600;
     const qint64 notAfter = now.addDays(validityDays).toSecsSinceEpoch();
-    const QByteArray cn = (commonName.isEmpty() ? u"krdpserver"_s : commonName).left(64).toUtf8();
+    const QByteArray cn = (commonName.isEmpty() ? u"Farside Server"_s : commonName).left(64).toUtf8();
 
     X509_NAME *name = X509_get_subject_name(cert.get());
     const bool built = serialNumber && X509_set_version(cert.get(), X509_VERSION_3) == 1

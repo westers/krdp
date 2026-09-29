@@ -199,12 +199,12 @@ OutputRestoreJournal::OutputRestoreJournal(QString path)
 
 QString OutputRestoreJournal::defaultPath()
 {
-    const QString overridden = qEnvironmentVariable("KRDP_OUTPUT_RESTORE_JOURNAL");
+    const QString overridden = qEnvironmentVariable("FARSIDE_OUTPUT_RESTORE_JOURNAL");
     if (!overridden.isEmpty()) return overridden;
     // One path for every krdp process of this user, whatever its app name.
     QString state = qEnvironmentVariable("XDG_STATE_HOME");
     if (state.isEmpty() || !QDir::isAbsolutePath(state)) state = QDir::homePath() + QLatin1String("/.local/state");
-    return state + QLatin1String("/krdp/output-restore.json");
+    return state + QLatin1String("/farside/output-restore.json");
 }
 
 QByteArray OutputRestoreJournal::serialize(const QVector<Entry> &entries)

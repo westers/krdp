@@ -1,0 +1,82 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+set -eu
+[ "$1" = configure ] || exit 0
+
+# Copy only. Stock KDE KRDP and the old fork remain recoverable from their own
+# config, certificates and unit drop-ins. This script never starts a service.
+old=/etc/krdp
+new=/etc/farside
+install -d -m 0700 "$new"
+copy_config() {
+    name=$1
+    [ -f "$old/$name" ] && [ ! -L "$old/$name" ] || return 0
+    [ ! -e "$new/$name" ] && [ ! -L "$new/$name" ] || return 0
+    tmp=$(mktemp "$new/.${name}.XXXXXX")
+    if sed -e 's/KRDP_/FARSIDE_/g' -e 's@/etc/krdp/@/etc/farside/@g' \
+        -e 's@/usr/bin/krdp-@/usr/bin/farside-@g' \
+        -e 's@/usr/share/krdp/@/usr/share/farside/@g' "$old/$name" >"$tmp"; then
+        chmod --reference="$old/$name" "$tmp"
+        mv -n "$tmp" "$new/$name"
+    fi
+    [ ! -e "$tmp" ] || rm -f "$tmp"
+}
+for config in virtual-host.conf virtual-session.conf console-host.conf; do copy_config "$config"; done
+for file in "$old"/*.crt "$old"/*.key; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    target="$new/${file##*/}"
+    [ -e "$target" ] || cp -a --no-clobber "$file" "$target"
+done
+
+# The journal is copied when the old session units are quiescent. If retained
+# desktops are still running, the rollout migrates it after stopping the broker
+# while leaving those desktops untouched.
+if [ -d /var/lib/krdp/virtual-sessions ] && [ ! -e /var/lib/farside/virtual-sessions ]; then
+    if ! systemctl list-units --all --no-legend 'krdp-virtual-session@*.service' 2>/dev/null | grep -q ' active '; then
+        install -d -m 0700 /var/lib/farside
+        cp -a /var/lib/krdp/virtual-sessions /var/lib/farside/virtual-sessions
+    fi
+fi
+
+for pair in 'krdp-console-host.service farside-console-host.service' \
+            'krdp-virtual-host.service farside-virtual-host.service' \
+            'krdp-virtual-session@.service farside-virtual-session@.service'; do
+    set -- $pair
+    source_dir="/etc/systemd/system/$1.d"
+    target_dir="/etc/systemd/system/$2.d"
+    [ -d "$source_dir" ] || continue
+    install -d -m 0755 "$target_dir"
+    for source_file in "$source_dir"/*.conf; do
+        [ -f "$source_file" ] && [ ! -L "$source_file" ] || continue
+        target_file="$target_dir/${source_file##*/}"
+        [ ! -e "$target_file" ] || continue
+        tmp=$(mktemp "$target_dir/.copy.XXXXXX")
+        sed -e 's/KRDP_/FARSIDE_/g' -e 's@/etc/krdp/@/etc/farside/@g' \
+            -e 's@/usr/bin/krdp-@/usr/bin/farside-@g' \
+            -e 's@/usr/share/krdp/@/usr/share/farside/@g' "$source_file" >"$tmp"
+        chmod --reference="$source_file" "$tmp"
+        mv -n "$tmp" "$target_file"
+        [ ! -e "$tmp" ] || rm -f "$tmp"
+    done
+done
+
+if command -v deb-systemd-helper >/dev/null; then
+    for pair in 'krdp-console-host.service farside-console-host.service' \
+                'krdp-virtual-host.service farside-virtual-host.service'; do
+        set -- $pair
+        if deb-systemd-helper --quiet was-enabled "$1"; then
+            deb-systemd-helper enable "$2" >/dev/null || true
+            install -d -m 0700 /var/lib/farside
+            printf '%s\n' "$1 -> $2" >>/var/lib/farside/migrated-units
+        fi
+        deb-systemd-helper update-state "$2" >/dev/null || true
+    done
+    if deb-systemd-helper --quiet --user was-enabled app-org.kde.krdpserver.service; then
+        deb-systemd-helper --user enable app-io.github.westers.farside.server.service >/dev/null || true
+    fi
+    deb-systemd-helper --user update-state app-io.github.westers.farside.server.service >/dev/null || true
+fi
+if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+exit 0

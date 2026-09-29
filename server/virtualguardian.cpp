@@ -87,8 +87,8 @@ int main(int argc, char **argv)
         environment.insert(QStringLiteral("HOME"), QString::fromLocal8Bit(account.pw_dir));
         environment.insert(QStringLiteral("USER"), QString::fromLocal8Bit(account.pw_name));
         environment.insert(QStringLiteral("LOGNAME"), QString::fromLocal8Bit(account.pw_name));
-        environment.insert(QStringLiteral("KRDP_VIRTUAL_RUNTIME"), storage->runtimeDirectory());
-        environment.insert(QStringLiteral("KRDP_VIRTUAL_PROFILE"), storage->profileDirectory());
+        environment.insert(QStringLiteral("FARSIDE_VIRTUAL_RUNTIME"), storage->runtimeDirectory());
+        environment.insert(QStringLiteral("FARSIDE_VIRTUAL_PROFILE"), storage->profileDirectory());
         started = guardian.startPrepared(getuid(), parser.value(QStringLiteral("session")), token, std::move(storage),
             {arguments.first(), arguments.mid(1), environment, childSetup}, &error, incarnation);
     } else {

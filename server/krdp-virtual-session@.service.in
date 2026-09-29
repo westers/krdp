@@ -1,7 +1,7 @@
-# One retained desktop, started by krdp-virtual-host. Never PartOf the RDP broker:
+# One retained desktop, started by farside-virtual-host. Never PartOf the RDP broker:
 # restarting or upgrading the broker must not end running desktops.
 [Unit]
-Description=KRDP retained virtual desktop %i
+Description=Farside retained virtual desktop %i
 After=systemd-user-sessions.service
 
 [Service]
@@ -9,12 +9,12 @@ Type=exec
 User=root
 Slice=system.slice
 Delegate=no
-Environment=KRDP_VIRTUAL_RENDER_PCI=
-Environment=KRDP_VIRTUAL_VAAPI_DRIVER=auto
-EnvironmentFile=-/etc/krdp/virtual-session.conf
-ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-session-entry --session %i --device-entry @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-device-entry --guardian @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-guardian --pam-keeper @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-pam-keeper --launcher @CMAKE_INSTALL_PREFIX@/share/krdp/virtual-session/launch-virtual-session.sh --worker @CMAKE_INSTALL_PREFIX@/bin/krdp-console-worker --support @CMAKE_INSTALL_PREFIX@/share/krdp/virtual-session/support --render-pci ${KRDP_VIRTUAL_RENDER_PCI} --vaapi-driver ${KRDP_VIRTUAL_VAAPI_DRIVER}
+Environment=FARSIDE_VIRTUAL_RENDER_PCI=
+Environment=FARSIDE_VIRTUAL_VAAPI_DRIVER=auto
+EnvironmentFile=-/etc/farside/virtual-session.conf
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-session-entry --session %i --device-entry @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-device-entry --guardian @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-guardian --pam-keeper @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-pam-keeper --launcher @CMAKE_INSTALL_PREFIX@/share/farside/virtual-session/launch-virtual-session.sh --worker @CMAKE_INSTALL_PREFIX@/bin/farside-console-worker --support @CMAKE_INSTALL_PREFIX@/share/farside/virtual-session/support --render-pci ${FARSIDE_VIRTUAL_RENDER_PCI} --vaapi-driver ${FARSIDE_VIRTUAL_VAAPI_DRIVER}
 UMask=0077
-ExecStopPost=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-session-cleanup --session %i
+ExecStopPost=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-session-cleanup --session %i
 StandardInput=null
 StandardOutput=journal
 StandardError=journal

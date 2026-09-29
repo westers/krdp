@@ -92,7 +92,7 @@ Policy readUserPolicy(quint32 uid)
         buffer.resize(buffer.size() * 2);
     }
     if (status || !resolved || !account.pw_dir || account.pw_dir[0] != '/') return Policy::AttachOrCreate;
-    const QString path = QFile::decodeName(account.pw_dir) + QStringLiteral("/.config/krdpserverrc");
+    const QString path = QFile::decodeName(account.pw_dir) + QStringLiteral("/.config/farsideserverrc");
     // Open with the user's own file-system identity (Linux, this thread only):
     // the broker never reads, through this path, a file the user cannot.
     const auto previousUid = setfsuid(uid);

@@ -28,7 +28,7 @@ std::unique_ptr<VirtualSessionPam> VirtualSessionPam::open(uid_t uid, const QByt
     auto &s = *session;
     s.m_beforeClose = std::move(beforeClose);
     pam_handle_t *handle = nullptr;
-    s.m_status = pam_start("krdp-virtual-session", account.constData(), &s.m_conversation, &handle);
+    s.m_status = pam_start("farside-virtual-session", account.constData(), &s.m_conversation, &handle);
     // The output is undefined on failure; only a successful start transfers
     // ownership to us. Never pass a failed start's output back to PAM.
     if (s.m_status != PAM_SUCCESS || !handle) return {};

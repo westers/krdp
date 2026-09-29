@@ -97,7 +97,7 @@ bool Server::start()
 
     if (!listen(d->address, d->port)) {
         // NOTE: We cannot use QTcpServer methods to get the server address and port because it won't initialize them if listen fails.
-        qCCritical(KRDP) << "Unable to listen for connections on" << d->address << d->port;
+        qCCritical(KRDP) << "Unable to listen for connections on" << d->address << d->port << errorString();
         return false;
     }
 

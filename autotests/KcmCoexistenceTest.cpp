@@ -304,9 +304,11 @@ private Q_SLOTS:
 
     void beforeTheRenameOnlyThePortCounts()
     {
-        // Today Farside still installs the stock names: the two can't be told
-        // apart by unit or binary, so a stranger on the port is "another program".
-        const auto identity = Farside::defaultIdentity();
+        // An older same-name build cannot be told apart from stock by unit or
+        // binary, so a stranger on the port is "another program".
+        auto identity = Farside::defaultIdentity();
+        identity.serverUnit = identity.stockUnit;
+        identity.serverExecutables = identity.stockExecutables;
         QVERIFY(!identity.stockIsDistinct());
         Inputs inputs;
         inputs.port = 3389;
@@ -322,7 +324,7 @@ private Q_SLOTS:
     void identityNamesOnePlace()
     {
         const auto identity = Farside::defaultIdentity();
-        QCOMPARE(identity.serverUnit, u"app-org.kde.krdpserver.service"_s);
+        QCOMPARE(identity.serverUnit, u"app-io.github.westers.farside.server.service"_s);
         QCOMPARE(identity.stockUnit, u"app-org.kde.krdpserver.service"_s);
         QCOMPARE(identity.stockPort, quint16(3389));
         QVERIFY(identity.reservedPorts.contains(3391));
@@ -404,7 +406,10 @@ private Q_SLOTS:
 
     void stopDoesNothingBeforeTheRename()
     {
-        Rig rig(Farside::defaultIdentity());
+        auto identity = Farside::defaultIdentity();
+        identity.serverUnit = identity.stockUnit;
+        identity.serverExecutables = identity.stockExecutables;
+        Rig rig(identity);
         rig.controller->stopStockAndStartServer();
         rig.controller->disableStockAutostart();
         QVERIFY(!rig.controller->busy());

@@ -3,6 +3,7 @@
 #include "VirtualSessionProcessIdentity.h"
 #include "VirtualInitialLayout.h"
 #include <QFile>
+#include <QFileInfo>
 #include <QDir>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -100,19 +101,24 @@ QByteArray VirtualSessionJournal::Record::initialLayoutJson() const {
     return initialOutputs.isEmpty() || !valid() ? QByteArray() : QJsonDocument(outputArray(initialOutputs)).toJson(QJsonDocument::Compact);
 }
 VirtualSessionGuardianClient::Identity VirtualSessionJournal::Record::identity() const {
-    return {uid, session, incarnation, QStringLiteral("/run/user/%1/krdp-virtual/%2/guardian.sock").arg(uid).arg(launch), token};
+    const QString oldSocket = QStringLiteral("/run/user/%1/krdp-virtual/%2/guardian.sock").arg(uid).arg(launch);
+    const QString socket = QFileInfo::exists(oldSocket) ? oldSocket
+        : QStringLiteral("/run/user/%1/farside-virtual/%2/guardian.sock").arg(uid).arg(launch);
+    return {uid, session, incarnation, socket, token};
 }
 QString VirtualSessionJournal::Record::workerSocket() const {
-    return QStringLiteral("/run/user/%1/krdp-virtual/%2/worker.sock").arg(uid).arg(launch);
+    const QString oldSocket = QStringLiteral("/run/user/%1/krdp-virtual/%2/worker.sock").arg(uid).arg(launch);
+    return QFileInfo::exists(oldSocket) ? oldSocket
+        : QStringLiteral("/run/user/%1/farside-virtual/%2/worker.sock").arg(uid).arg(launch);
 }
 VirtualSessionJournal::~VirtualSessionJournal() { close(m_directory); }
 std::unique_ptr<VirtualSessionJournal> VirtualSessionJournal::open(QString *error) {
     if (getuid() || geteuid()) { fail(error, QStringLiteral("Journal requires the root service")); return {}; }
-    return openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error);
+    return openAt(QStringLiteral("/var/lib/farside/virtual-sessions"), 0, error);
 }
 std::optional<VirtualSessionJournal::Record> VirtualSessionJournal::readLaunchIntent(const QString &session, QString *error, bool allowRetired) {
     if (getuid() || geteuid()) { fail(error, QStringLiteral("Launch intent requires the root service")); return {}; }
-    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    auto journal = openAt(QStringLiteral("/var/lib/farside/virtual-sessions"), 0, error, false);
     if (!journal) return {};
     bool retired = false;
     auto record = journal->readRecord(session, error, &retired);
@@ -129,7 +135,7 @@ std::optional<QVector<VirtualSessionJournal::Record::InitialOutput>> VirtualSess
 }
 bool VirtualSessionJournal::claimLaunch(const Record &expected, QString *error) {
     if (getuid() || geteuid()) return fail(error, QStringLiteral("Launch claim requires the root service"));
-    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    auto journal = openAt(QStringLiteral("/var/lib/farside/virtual-sessions"), 0, error, false);
     return journal && journal->claimRecord(expected, error);
 }
 bool VirtualSessionJournal::recordKeeper(const Record &expected, QString *error) {
@@ -138,12 +144,12 @@ bool VirtualSessionJournal::recordKeeper(const Record &expected, QString *error)
     const int fd = int(syscall(SYS_pidfd_open, getpid(), 0));
     const auto identity = virtualPidfdIdentity(fd);
     if (fd >= 0) close(fd);
-    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    auto journal = openAt(QStringLiteral("/var/lib/farside/virtual-sessions"), 0, error, false);
     return birth && identity && journal && journal->writeKeeper(expected, {getpid(), *birth, *identity}, error);
 }
 bool VirtualSessionJournal::recordReconciled(const Record &expected, QString *error) {
     if (getuid() || geteuid()) return fail(error, QStringLiteral("Reconciliation evidence requires root"));
-    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    auto journal = openAt(QStringLiteral("/var/lib/farside/virtual-sessions"), 0, error, false);
     return journal && journal->writeReconciled(expected, error);
 }
 bool VirtualSessionJournal::writeReconciled(const Record &expected, QString *error) {
@@ -151,7 +157,7 @@ bool VirtualSessionJournal::writeReconciled(const Record &expected, QString *err
 }
 bool VirtualSessionJournal::recordOrderedExit(const Record &expected, QString *error) {
     if (getuid() || geteuid()) return fail(error, QStringLiteral("Ordered-exit evidence requires root"));
-    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    auto journal = openAt(QStringLiteral("/var/lib/farside/virtual-sessions"), 0, error, false);
     return journal && journal->writeOrderedExit(expected, error);
 }
 bool VirtualSessionJournal::writeOrderedExit(const Record &expected, QString *error) {
@@ -232,12 +238,12 @@ std::optional<bool> VirtualSessionJournal::readOutcome(const Record &expected, O
 std::optional<VirtualSessionJournal::Keeper> VirtualSessionJournal::readKeeper(const Record &expected, bool *missing, QString *error) {
     if (missing) *missing = false;
     if (getuid() || geteuid()) { fail(error, QStringLiteral("Keeper record requires root")); return {}; }
-    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    auto journal = openAt(QStringLiteral("/var/lib/farside/virtual-sessions"), 0, error, false);
     return journal ? journal->readKeeperRecord(expected, missing, error) : std::nullopt;
 }
 bool VirtualSessionJournal::recordKeeperClosed(const Record &expected, QString *error) {
     if (getuid() || geteuid()) return fail(error, QStringLiteral("Keeper close requires root"));
-    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    auto journal = openAt(QStringLiteral("/var/lib/farside/virtual-sessions"), 0, error, false);
     if (!journal) return false;
     const auto keeper = journal->readKeeperRecord(expected, nullptr, error);
     const auto ticks = virtualProcessStartTime(getpid());
@@ -249,7 +255,7 @@ bool VirtualSessionJournal::recordKeeperClosed(const Record &expected, QString *
 }
 std::optional<bool> VirtualSessionJournal::keeperClosed(const Record &expected, const Keeper &keeper, QString *error) {
     if (getuid() || geteuid()) { fail(error, QStringLiteral("Keeper close requires root")); return {}; }
-    auto journal = openAt(QStringLiteral("/var/lib/krdp/virtual-sessions"), 0, error, false);
+    auto journal = openAt(QStringLiteral("/var/lib/farside/virtual-sessions"), 0, error, false);
     return journal ? journal->readKeeperClosed(expected, keeper, error) : std::nullopt;
 }
 bool VirtualSessionJournal::writeKeeperClosed(const Record &expected, const Keeper &keeper, QString *error) {

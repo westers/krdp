@@ -2,7 +2,7 @@
 # Inside the guardian's PID/mount/bus namespace only. Do not invoke on seat0.
 set -euo pipefail
 umask 077
-[[ ( $# == 5 || $# == 6 ) && $(id -u) != 0 && $XDG_RUNTIME_DIR == /run/user/"$(id -u)"/krdp-virtual/* ]]
+[[ ( $# == 5 || $# == 6 ) && $(id -u) != 0 && $XDG_RUNTIME_DIR == /run/user/"$(id -u)"/farside-virtual/* ]]
 [[ ! -S /run/dbus/system_bus_socket && ! -S /run/user/"$(id -u)"/bus ]]
 session=$1 worker=$2 support=$3 width=$4 height=$5
 layout_args=()

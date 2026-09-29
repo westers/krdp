@@ -175,7 +175,7 @@ inline QString configFileKey(const QString &configFilePath)
 
 inline QString runtimeDirectory()
 {
-    return QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation) + QStringLiteral("/krdpserver");
+    return QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation) + QStringLiteral("/farside-server");
 }
 
 inline QString loadedStatePath(const QString &configFilePath)

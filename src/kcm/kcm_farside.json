@@ -1,0 +1,13 @@
+{
+    "KPlugin": {
+        "Description": "Configure Farside Remote Desktop",
+        "FormFactors": [
+            "desktop",
+            "handset",
+            "phone"
+        ],
+        "Icon": "io.github.westers.farside",
+        "Name": "Farside Remote Desktop"
+    },
+    "X-KDE-Keywords": "Farside,RDP,remote desktop"
+}

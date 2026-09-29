@@ -1,3 +1,4 @@
+#include "FarsideEnv.h"
 // SPDX-FileCopyrightText: 2026 Steve Westers
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
@@ -28,16 +29,17 @@
 int main(int argc, char **argv)
 {
     QCoreApplication application(argc, argv);
-    application.setApplicationName(QStringLiteral("krdp-console-host"));
+    Farside::warnLegacyEnvironment();
+    application.setApplicationName(QStringLiteral("farside-console-host"));
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Persistent physical-console RDP host."));
     parser.addHelpOption();
-    const QCommandLineOption workerOption(QStringLiteral("worker"), QStringLiteral("Installed krdp-console-worker executable."), QStringLiteral("path"));
+    const QCommandLineOption workerOption(QStringLiteral("worker"), QStringLiteral("Installed farside-console-worker executable."), QStringLiteral("path"));
     const QCommandLineOption certificateOption(QStringLiteral("certificate"), QStringLiteral("TLS certificate."), QStringLiteral("path"));
     const QCommandLineOption keyOption(QStringLiteral("certificate-key"), QStringLiteral("TLS private key."), QStringLiteral("path"));
     const QCommandLineOption addressOption(QStringLiteral("address"), QStringLiteral("Listen address."), QStringLiteral("address"), QStringLiteral("0.0.0.0"));
     const QCommandLineOption portOption(QStringLiteral("port"), QStringLiteral("Listen port."), QStringLiteral("port"), QStringLiteral("3389"));
-    const QCommandLineOption runtimeOption(QStringLiteral("runtime-directory"), QStringLiteral("Host-owned worker socket directory."), QStringLiteral("path"), QStringLiteral("/run/krdp-console"));
+    const QCommandLineOption runtimeOption(QStringLiteral("runtime-directory"), QStringLiteral("Host-owned worker socket directory."), QStringLiteral("path"), QStringLiteral("/run/farside-console"));
     const QCommandLineOption audioPriorityOption(QStringLiteral("prefer-audio-quality"), QStringLiteral("Default to audio-first congestion steering for the controlling client (live client overrides allowed)."));
     const QCommandLineOption softwareEncodingOption(QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto"));
     const QCommandLineOption av1TilesOption(QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto"));
@@ -46,7 +48,7 @@ int main(int argc, char **argv)
     parser.process(application);
 
     if (geteuid() != 0) {
-        qCritical("krdp-console-host must run as root to enter selected logind sessions");
+        qCritical("farside-console-host must run as root to enter selected logind sessions");
         return 1;
     }
 
@@ -61,7 +63,7 @@ int main(int argc, char **argv)
     // AUD-FIX7: the host keeps its own certificate valid (created when missing, renewed when
     // expired or within 30 days of it, a valid one kept), like krdpserver's (AUD-K3).
     const KRdp::ServerCertificate::Paths certificatePaths{parser.value(certificateOption), parser.value(keyOption)};
-    if (!KRdp::ensureHostCertificate(certificatePaths, "krdp-console-host")) {
+    if (!KRdp::ensureHostCertificate(certificatePaths, "farside-console-host")) {
         return 1;
     }
 
@@ -96,7 +98,7 @@ int main(int argc, char **argv)
     // starts from; the worker probes its own encoders and replaces this once it reports.
     KRdp::EncoderSupport::applyProcessOverrides();
     const KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding,
-                                         KRdp::parseHostAv1Tiles(parser.value(av1TilesOption), "krdp-console-host")};
+                                         KRdp::parseHostAv1Tiles(parser.value(av1TilesOption), "farside-console-host")};
     qInfo().noquote() << "Console host video encoders:" << KRdp::EncoderSupport::describe(videoHost.probe) << "- SoftwareEncoding"
                       << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode) << "- AV1 tiles" << KRdp::CodecPolicy::av1TilesName(videoHost.av1Tiles);
     host.setVideoCodecHost(videoHost);
@@ -108,7 +110,7 @@ int main(int argc, char **argv)
     QTimer certificateRenewal;
     certificateRenewal.setInterval(std::chrono::hours(12));
     QObject::connect(&certificateRenewal, &QTimer::timeout, &application, [certificatePaths] {
-        KRdp::ensureHostCertificate(certificatePaths, "krdp-console-host");
+        KRdp::ensureHostCertificate(certificatePaths, "farside-console-host");
     });
     certificateRenewal.start();
     // Self-pipe: QCoreApplication::quit() is not async-signal-safe. On quit

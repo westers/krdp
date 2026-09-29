@@ -11,9 +11,9 @@ Identity defaultIdentity()
 {
     Identity identity;
     // RENAME STAGE: Farside's names. Change these three.
-    identity.serverUnit = u"app-org.kde.krdpserver.service"_s;
-    identity.serverExecutables = {u"/usr/bin/krdpserver"_s};
-    identity.virtualHostUnit = u"krdp-virtual-host.service"_s;
+    identity.serverUnit = u"app-io.github.westers.farside.server.service"_s;
+    identity.serverExecutables = {u"/usr/bin/farside-server"_s};
+    identity.virtualHostUnit = u"farside-virtual-host.service"_s;
 
     // KDE's stock krdp package: keep.
     identity.stockUnit = u"app-org.kde.krdpserver.service"_s;

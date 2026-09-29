@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 [Unit]
-Description=KRDP persistent physical-console host
+Description=Farside physical-console host
 After=network-online.target systemd-logind.service
 Wants=network-online.target
 
@@ -13,19 +13,19 @@ StartLimitBurst=10
 [Service]
 Type=exec
 User=root
-Environment=KRDP_CONSOLE_WORKER=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-worker
+Environment=FARSIDE_CONSOLE_WORKER=@CMAKE_INSTALL_PREFIX@/bin/farside-console-worker
 # The host creates this certificate when it is missing and renews it when it expires within
-# 30 days (AUD-FIX7); /etc/krdp/console-host.conf may point elsewhere.
-Environment=KRDP_CONSOLE_CERTIFICATE=/etc/krdp/console.crt
-Environment=KRDP_CONSOLE_CERTIFICATE_KEY=/etc/krdp/console.key
+# 30 days (AUD-FIX7); /etc/farside/console-host.conf may point elsewhere.
+Environment=FARSIDE_CONSOLE_CERTIFICATE=/etc/farside/console.crt
+Environment=FARSIDE_CONSOLE_CERTIFICATE_KEY=/etc/farside/console.key
 # Private codecs in software (HEVC/AV1): auto, never or prefer (KRDPCTL-V2-CONTRACT.md (e)).
-Environment=KRDP_CONSOLE_SOFTWARE_ENCODING=auto
+Environment=FARSIDE_CONSOLE_SOFTWARE_ENCODING=auto
 # AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16 (KRDPCTL-V2-CONTRACT.md (e)).
-Environment=KRDP_CONSOLE_AV1_TILES=auto
-Environment=KRDP_CONSOLE_VAAPI_DRIVER=auto
-EnvironmentFile=-/etc/krdp/console-host.conf
-ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-host --worker ${KRDP_CONSOLE_WORKER} --certificate ${KRDP_CONSOLE_CERTIFICATE} --certificate-key ${KRDP_CONSOLE_CERTIFICATE_KEY} --address ${KRDP_CONSOLE_ADDRESS} --port ${KRDP_CONSOLE_PORT} --runtime-directory /run/krdp-console --software-encoding ${KRDP_CONSOLE_SOFTWARE_ENCODING} --av1-tiles ${KRDP_CONSOLE_AV1_TILES} --vaapi-driver ${KRDP_CONSOLE_VAAPI_DRIVER}
-RuntimeDirectory=krdp-console
+Environment=FARSIDE_CONSOLE_AV1_TILES=auto
+Environment=FARSIDE_CONSOLE_VAAPI_DRIVER=auto
+EnvironmentFile=-/etc/farside/console-host.conf
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/farside-console-host --worker ${FARSIDE_CONSOLE_WORKER} --certificate ${FARSIDE_CONSOLE_CERTIFICATE} --certificate-key ${FARSIDE_CONSOLE_CERTIFICATE_KEY} --address ${FARSIDE_CONSOLE_ADDRESS} --port ${FARSIDE_CONSOLE_PORT} --runtime-directory /run/farside-console --software-encoding ${FARSIDE_CONSOLE_SOFTWARE_ENCODING} --av1-tiles ${FARSIDE_CONSOLE_AV1_TILES} --vaapi-driver ${FARSIDE_CONSOLE_VAAPI_DRIVER}
+RuntimeDirectory=farside-console
 RuntimeDirectoryMode=0711
 Restart=on-failure
 RestartSec=3

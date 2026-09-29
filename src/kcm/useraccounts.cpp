@@ -9,7 +9,7 @@
 
 QString KeychainPasswordStore::serviceName()
 {
-    return QStringLiteral("KRDP");
+    return QStringLiteral("Farside Server");
 }
 
 namespace
@@ -55,7 +55,18 @@ void KeychainPasswordStore::deletePassword(const QString &user, Done done)
 
 void KeychainPasswordStore::readPassword(const QString &user, ReadDone done)
 {
-    startJob<QKeychain::ReadPasswordJob>(this, user, [done](QKeychain::ReadPasswordJob *job) {
+    startJob<QKeychain::ReadPasswordJob>(this, user, [this, user, done](QKeychain::ReadPasswordJob *job) {
+        if (job->error() == QKeychain::EntryNotFound) {
+            auto *legacy = new QKeychain::ReadPasswordJob(QStringLiteral("KRDP"), this);
+            legacy->setAutoDelete(true);
+            legacy->setKey(user);
+            connect(legacy, &QKeychain::Job::finished, this, [legacy, done]() {
+                const bool ok = legacy->error() == QKeychain::NoError;
+                done(ok, ok ? legacy->textData() : QString(), legacy->errorString());
+            });
+            legacy->start();
+            return;
+        }
         const bool ok = job->error() == QKeychain::NoError;
         done(ok, ok ? job->textData() : QString(), job->errorString());
     });

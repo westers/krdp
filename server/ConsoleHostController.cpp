@@ -134,8 +134,8 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     });
     m_retryTimer.setSingleShot(true);
     connect(&m_retryTimer, &QTimer::timeout, this, &ConsoleHostController::retryWorker);
-    m_experimentalPhysicalTopology = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_CONSOLE_TOPOLOGY") == 1;
-    m_experimentalConsoleVirtual = qEnvironmentVariableIntValue("KRDP_EXPERIMENTAL_CONSOLE_VIRTUAL") == 1;
+    m_experimentalPhysicalTopology = qEnvironmentVariableIntValue("FARSIDE_EXPERIMENTAL_CONSOLE_TOPOLOGY") == 1;
+    m_experimentalConsoleVirtual = qEnvironmentVariableIntValue("FARSIDE_EXPERIMENTAL_CONSOLE_VIRTUAL") == 1;
     m_physicalDeadline.setSingleShot(true);
     m_physicalDeadline.setInterval(45000);
     connect(&m_physicalDeadline, &QTimer::timeout, this, [this] {

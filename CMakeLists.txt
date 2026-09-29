@@ -81,7 +81,7 @@ if(KRDP_BUILD_SYSTEM_PACKAGE)
     if(NOT IS_DIRECTORY "${KRDP_PRIVATE_KPIPEWIRE_LIBDIR}")
         message(FATAL_ERROR "Set KRDP_PRIVATE_KPIPEWIRE_LIBDIR to the private KPipeWire multiarch lib directory")
     endif()
-    set(KRDP_LIBRARY_INSTALL_DIR "${KDE_INSTALL_LIBDIR}/krdp")
+    set(KRDP_LIBRARY_INSTALL_DIR "${KDE_INSTALL_LIBDIR}/farside")
     if(NOT CMAKE_INSTALL_RPATH STREQUAL "${CMAKE_INSTALL_PREFIX}/${KRDP_LIBRARY_INSTALL_DIR}")
         message(FATAL_ERROR "Set CMAKE_INSTALL_RPATH to ${CMAKE_INSTALL_PREFIX}/${KRDP_LIBRARY_INSTALL_DIR}")
     endif()
@@ -152,7 +152,9 @@ kde_clang_format(${ALL_CLANG_FORMAT_SOURCE_FILES})
 
 kde_configure_git_pre_commit_hook(CHECKS CLANG_FORMAT)
 
-ki18n_install(po)
+if(NOT KRDP_BUILD_SYSTEM_PACKAGE)
+    ki18n_install(po)
+endif()
 
 if(KRDP_BUILD_CONSOLE_TEST_PACKAGE)
     if(NOT BUILD_PLASMA_SESSION OR NOT CMAKE_INSTALL_PREFIX STREQUAL "/opt/krdp-console")
@@ -204,6 +206,10 @@ endif()
 
 if(KRDP_BUILD_SYSTEM_PACKAGE)
     # Runtime libraries only: the unversioned libKPipeWire*.so links are for builds.
+    install(FILES packaging/farside/icons/io.github.westers.farside.svg
+        DESTINATION ${KDE_INSTALL_FULL_ICONDIR}/hicolor/scalable/apps)
+    install(PROGRAMS scripts/migrate-user-unit.sh scripts/migrate-retained-journal.sh
+        DESTINATION ${KDE_INSTALL_DATADIR}/farside)
     install(DIRECTORY "${KRDP_PRIVATE_KPIPEWIRE_LIBDIR}/"
         DESTINATION ${KRDP_LIBRARY_INSTALL_DIR}
         FILES_MATCHING PATTERN "libKPipeWire*.so.*"

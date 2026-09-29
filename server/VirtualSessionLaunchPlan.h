@@ -97,9 +97,9 @@ struct VirtualSessionLaunchPlan {
         // Production receives the fresh identity already persisted by the broker;
         // diagnostics allocate it here. This does not authorize runtime reuse:
         // the executor still refuses any preexisting generation's socket/token.
-        plan.runtimeDirectory = QStringLiteral("/run/user/%1/krdp-virtual/%2")
+        plan.runtimeDirectory = QStringLiteral("/run/user/%1/farside-virtual/%2")
             .arg(account.uid).arg(recordedLaunch.isEmpty() ? QUuid::createUuid().toString(QUuid::WithoutBraces) : recordedLaunch);
-        plan.profileDirectory = account.home + QStringLiteral("/.krdp-virtual/sessions/") + session;
+        plan.profileDirectory = account.home + QStringLiteral("/.farside-virtual/sessions/") + session;
         plan.socketPath = plan.runtimeDirectory + QStringLiteral("/worker.sock");
         plan.tokenPath = plan.runtimeDirectory + QStringLiteral("/worker-token");
         plan.program = config.launcher;

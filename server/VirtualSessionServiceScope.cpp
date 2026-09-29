@@ -39,7 +39,7 @@ bool ownedDirectory(int fd)
 QByteArray VirtualSessionServiceScope::expectedMembership(const QString &session)
 {
     if (QUuid(session).isNull() || QUuid(session).toString(QUuid::WithoutBraces) != session) return {};
-    return QByteArray("0::/system.slice/krdp-virtual-session@") + session.toLatin1() + ".service\n";
+    return QByteArray("0::/system.slice/farside-virtual-session@") + session.toLatin1() + ".service\n";
 }
 std::unique_ptr<VirtualSessionServiceScope> VirtualSessionServiceScope::open(const QString &session)
 {
@@ -50,7 +50,7 @@ std::unique_ptr<VirtualSessionServiceScope> VirtualSessionServiceScope::open(con
     if (!ownedDirectory(root.value) || fstatfs(root.value, &fs) || fs.f_type != CGROUP2_SUPER_MAGIC) return {};
     Fd slice(openat(root.value, "system.slice", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
     if (!ownedDirectory(slice.value)) return {};
-    const QByteArray name = "krdp-virtual-session@" + session.toLatin1() + ".service";
+    const QByteArray name = "farside-virtual-session@" + session.toLatin1() + ".service";
     Fd unit(openat(slice.value, name.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
     if (!ownedDirectory(unit.value)) return {};
     auto result = std::unique_ptr<VirtualSessionServiceScope>(new VirtualSessionServiceScope(unit.value, membership));

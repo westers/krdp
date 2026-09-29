@@ -86,7 +86,7 @@ int main(int argc, char **argv)
         parser.value(QStringLiteral("render-pci")).split(QLatin1Char(','), Qt::KeepEmptyParts), {1280, 720},
         KRdp::VaapiDriverMode::normalize(parser.value(QStringLiteral("vaapi-driver"))).value_or(QString())};
     // AUD-FIX8 B3: KRDP_VIRTUAL_VAAPI_DRIVER (auto, off, radeonsi, iHD, i965) for the desktop's worker.
-    if (config.vaapiDriver.isEmpty()) return refused("VaapiDriverMode (KRDP_VIRTUAL_VAAPI_DRIVER)");
+    if (config.vaapiDriver.isEmpty()) return refused("VaapiDriverMode (FARSIDE_VIRTUAL_VAAPI_DRIVER)");
     const auto plan = KRdp::VirtualSessionServicePlan::build(*record, boot,
         {record->uid, QString::fromLocal8Bit(account.pw_name), QString::fromLocal8Bit(account.pw_dir)}, config, device, guardian);
     if (!plan) return refused("boot or trusted launch policy");
@@ -131,7 +131,7 @@ int main(int argc, char **argv)
         qCritical("Virtual desktop extinction uncertain; requesting failed service teardown, PAM cleanup unproven");
         auto stop = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.systemd1"),
             QStringLiteral("/org/freedesktop/systemd1"), QStringLiteral("org.freedesktop.systemd1.Manager"), QStringLiteral("StopUnit"));
-        stop.setArguments({QStringLiteral("krdp-virtual-session@%1.service").arg(session), QStringLiteral("replace")});
+        stop.setArguments({QStringLiteral("farside-virtual-session@%1.service").arg(session), QStringLiteral("replace")});
         QDBusConnection::systemBus().asyncCall(stop, 3000);
         // Also bound bus failure: exiting the dedicated unit's main process
         // invokes its KillMode=mixed fallback. Bypass QProcess destructors,

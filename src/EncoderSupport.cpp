@@ -216,7 +216,7 @@ std::optional<Backends> parseBackends(const QString &value)
 
 bool softwareForced()
 {
-    const QByteArray value = qgetenv("KRDP_FORCE_SOFTWARE_ENCODING");
+    const QByteArray value = qgetenv("FARSIDE_FORCE_SOFTWARE_ENCODING");
     return !value.isEmpty() && value != "0";
 }
 
@@ -227,7 +227,7 @@ void applyProcessOverrides()
     }
     const QByteArray encoder = hasEncoder("libx264") ? QByteArrayLiteral("libx264") : QByteArrayLiteral("libopenh264");
     qputenv("KPIPEWIRE_FORCE_ENCODER", encoder);
-    qCInfo(KRDP) << "KRDP_FORCE_SOFTWARE_ENCODING: KPipeWire H.264 forced to" << encoder;
+    qCInfo(KRDP) << "FARSIDE_FORCE_SOFTWARE_ENCODING: KPipeWire H.264 forced to" << encoder;
 }
 
 bool applyOverride(Encoders &encoders, const QString &spec)
@@ -283,13 +283,13 @@ Probe probeUncached()
     result.avc444Hardware = kpipewireHasChroma444<PipeWireEncodedStream>() && result.encoders.avc.hardware;
     result.renderNode = hw.node;
 
-    const QString spec = qEnvironmentVariable("KRDP_ENCODERS");
+    const QString spec = qEnvironmentVariable("FARSIDE_ENCODERS");
     if (!spec.isEmpty()) {
         if (applyOverride(result.encoders, spec)) {
             result.avc444Hardware = result.avc444Hardware && result.encoders.avc.hardware;
-            qCInfo(KRDP) << "KRDP_ENCODERS override:" << spec;
+            qCInfo(KRDP) << "FARSIDE_ENCODERS override:" << spec;
         } else {
-            qCWarning(KRDP) << "Ignoring an invalid KRDP_ENCODERS value:" << spec;
+            qCWarning(KRDP) << "Ignoring an invalid FARSIDE_ENCODERS value:" << spec;
         }
     }
     qCInfo(KRDP).noquote() << QStringLiteral("Video encoders: %1 (probed in %2 ms)").arg(describe(result)).arg(timer.elapsed());
@@ -341,7 +341,7 @@ QString describe(const Probe &probe)
         text += QStringLiteral(" on %1").arg(probe.renderNode);
     }
     if (softwareForced()) {
-        text += QStringLiteral(" (KRDP_FORCE_SOFTWARE_ENCODING)");
+        text += QStringLiteral(" (FARSIDE_FORCE_SOFTWARE_ENCODING)");
     }
     return text;
 }

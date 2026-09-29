@@ -66,6 +66,6 @@ inline QStringList ordered(const QString &preferred, const QString &directory = 
 /// The node the virtual-desktop launcher granted (KRDP_RENDER_NODE), empty when unset.
 inline QString preferredFromEnvironment()
 {
-    return qEnvironmentVariable("KRDP_RENDER_NODE");
+    return qEnvironmentVariable("FARSIDE_RENDER_NODE");
 }
 }

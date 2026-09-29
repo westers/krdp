@@ -866,8 +866,8 @@ private Q_SLOTS:
             QCOMPARE(loaded.uid, r.uid); QCOMPARE(loaded.session, r.session);
             QCOMPARE(loaded.incarnation, r.incarnation); QCOMPARE(loaded.boot, r.boot);
             QCOMPARE(loaded.token, r.token); QCOMPARE(loaded.launch, r.launch);
-            QCOMPARE(loaded.identity().socket, QStringLiteral("/run/user/1000/krdp-virtual/%1/guardian.sock").arg(r.launch));
-            QCOMPARE(loaded.workerSocket(), QStringLiteral("/run/user/1000/krdp-virtual/%1/worker.sock").arg(r.launch));
+            QCOMPARE(loaded.identity().socket, QStringLiteral("/run/user/1000/farside-virtual/%1/guardian.sock").arg(r.launch));
+            QCOMPARE(loaded.workerSocket(), QStringLiteral("/run/user/1000/farside-virtual/%1/worker.sock").arg(r.launch));
         }
     }
     void refusesUnsafeDirectory() {

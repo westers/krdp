@@ -30,7 +30,7 @@ bool trustedPolicy()
 {
     // Refuse a missing service instead of allowing PAM's fallback to "other".
     // The supported root-installed policy and its includes are an install gate.
-    QString path = QStringLiteral("/etc/pam.d/krdp-virtual-session");
+    QString path = QStringLiteral("/etc/pam.d/farside-virtual-session");
     if (QFileInfo(path).canonicalFilePath() != path) return false;
     bool file = true;
     while (true) {

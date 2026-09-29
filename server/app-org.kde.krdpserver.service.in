@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 # SPDX-FileCopyrightText: 2024 Akseli Lahtinen <akselmo@akselmo.dev>
 [Unit]
-Description=KRDP Server
+Description=Farside Server
 After=plasma-xdg-desktop-portal-kde.service
 After=plasma-core.target
 
@@ -12,8 +12,9 @@ StartLimitBurst=5
 
 [Service]
 Type=exec
-ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdpserver
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/farside-server
 Restart=on-failure
+RestartPreventExitStatus=75
 RestartSec=3
 
 [Install]

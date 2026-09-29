@@ -1,0 +1,35 @@
+Source: farside
+Section: kde
+Priority: optional
+Maintainer: Steve Westers <amiga1.2k@gmail.com>
+Standards-Version: 4.7.2
+Homepage: https://github.com/westers/krdp
+Rules-Requires-Root: no
+
+Package: farside-server
+Architecture: any
+Depends: ${shlibs:Depends},
+         bubblewrap,
+         dbus-daemon,
+         jq,
+         kwin-wayland,
+         libglib2.0-bin,
+         libkf6service-bin,
+         libkscreen-bin,
+         pipewire-bin,
+         plasma-workspace,
+         wireplumber
+Recommends: systemsettings
+Conflicts: kde-config-krdp, krdp-console-test, krdp-virtual-test
+Breaks: krdp (>= 6.6.80~)
+Replaces: krdp (>= 6.6.80~), kde-config-krdp, krdp-console-test, krdp-virtual-test
+Description: Farside RDP server with console and retained desktops
+ KRdp shares a Plasma Wayland desktop over RDP with H.264 (AVC420/AVC444)
+ video, audio, microphone, camera and clipboard redirection.
+ .
+ Farside adds the physical-console host (farside-console-host and
+ farside-console-worker), which keeps one RDP transport across the SDDM greeter
+ and the seat0 Plasma session, and the retained virtual-desktop broker
+ (farside-virtual-host) with its guardian, PAM keeper and cleanup helpers.
+ Both system services are installed disabled. It bundles a patched private
+ KPipeWire in /usr/lib/<triplet>/farside that does not replace the system one.

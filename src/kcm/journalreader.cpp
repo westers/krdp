@@ -64,7 +64,7 @@ QStringList readServiceJournal(const QString &unit, const QString &invocationId,
     if (!addMatch(journal, QStringLiteral("USER_UNIT=%1").arg(unit)) || sd_journal_add_disjunction(journal) != 0
         || !addMatch(journal, QStringLiteral("_SYSTEMD_USER_UNIT=%1").arg(unit)) || sd_journal_add_conjunction(journal) != 0
         || !addMatch(journal, QStringLiteral("_SYSTEMD_INVOCATION_ID=%1").arg(invocationId)) || sd_journal_add_conjunction(journal) != 0
-        || !addMatch(journal, QStringLiteral("SYSLOG_IDENTIFIER=krdpserver"))) {
+        || !addMatch(journal, QStringLiteral("SYSLOG_IDENTIFIER=farside-server"))) {
         return {};
     }
 

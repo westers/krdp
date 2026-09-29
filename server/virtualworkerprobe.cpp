@@ -44,7 +44,7 @@ int main(int argc, char **argv)
     if (arguments.size() != 1 && !managed && !multi) return 1;
     const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     const QFileInfo runtimeInfo(runtime);
-    const QString prefix = managed ? QStringLiteral("/run/user/%1/krdp-virtual/").arg(getuid())
+    const QString prefix = managed ? QStringLiteral("/run/user/%1/farside-virtual/").arg(getuid())
         : QStringLiteral("/run/user/%1/krdp-headless.").arg(getuid());
     struct stat runtimePermissions{};
     if (!getuid() || getuid() != geteuid() || !runtime.startsWith(prefix)
@@ -88,7 +88,7 @@ int main(int argc, char **argv)
     environment.insert(QStringLiteral("WAYLAND_DISPLAY"), QStringLiteral("wayland-0"));
     environment.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("wayland"));
     worker.setProcessEnvironment(environment);
-    worker.setProgram(QCoreApplication::applicationDirPath() + QStringLiteral("/krdp-console-worker"));
+    worker.setProgram(QCoreApplication::applicationDirPath() + QStringLiteral("/farside-console-worker"));
     worker.setArguments({QStringLiteral("--socket"), endpoint.socketName(), QStringLiteral("--virtual-session"), id,
                          QStringLiteral("--uid"), QString::number(getuid()), QStringLiteral("--token-fd"), QStringLiteral("0"),
                          QStringLiteral("--desktop-media")});

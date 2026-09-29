@@ -165,7 +165,7 @@ int main(int argc, char **argv)
     umask(0077);
     // No mount operation is allowed before both isolation gates succeed.
     if (unshare(CLONE_NEWNS) || mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr)) return fail("private mount namespace");
-    if (mount("krdp-virtual-devices", "/dev", "tmpfs", MS_NOSUID | MS_NOEXEC, "mode=0755,size=1048576")) return fail("private device filesystem");
+    if (mount("farside-virtual-devices", "/dev", "tmpfs", MS_NOSUID | MS_NOEXEC, "mode=0755,size=1048576")) return fail("private device filesystem");
     if (mkdir("/dev/dri", 0755) || mkdir("/dev/dri/by-path", 0755)) return fail("private device directories");
     // umask must not make these root-owned directories inaccessible to the UID.
     if (chmod("/dev/dri", 0755) || chmod("/dev/dri/by-path", 0755)) return fail("private device traversal");

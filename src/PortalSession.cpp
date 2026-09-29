@@ -306,13 +306,13 @@ void PortalSession::onCreateSession(uint code, const QVariantMap &result)
         {QStringLiteral("persist_mode"), PermissionsPersistUntilExplicitlyRevoked},
     };
     // name is set explicitly as this is also used by the KCM
-    KConfigGroup restorationGroup = KSharedConfig::openStateConfig(QStringLiteral("krdp-serverstaterc"))->group(QStringLiteral("General"));
+    KConfigGroup restorationGroup = KSharedConfig::openStateConfig(QStringLiteral("farside-serverstaterc"))->group(QStringLiteral("General"));
     QString restoreToken = restorationGroup.readEntry(QStringLiteral("restorationToken"));
 
     // this is a compatibility path for krdp < 6.3 that used a different name and in .config
     // in 6.4 onwards it can be killed
     if (restoreToken.isEmpty()) {
-        KConfigGroup restorationGroup = KSharedConfig::openConfig(QStringLiteral("krdp-serverrc"))->group(QStringLiteral("General"));
+        KConfigGroup restorationGroup = KSharedConfig::openConfig(QStringLiteral("farside-serverrc"))->group(QStringLiteral("General"));
         restoreToken = restorationGroup.readEntry(QStringLiteral("restorationToken"));
     } // end compat
 
@@ -370,7 +370,7 @@ void KRdp::PortalSession::onSessionStarted(uint code, const QVariantMap &result)
         return;
     }
 
-    KConfigGroup restorationGroup = KSharedConfig::openStateConfig(QStringLiteral("krdp-serverstaterc"))->group(QStringLiteral("General"));
+    KConfigGroup restorationGroup = KSharedConfig::openStateConfig(QStringLiteral("farside-serverstaterc"))->group(QStringLiteral("General"));
     restorationGroup.writeEntry("restorationToken", result.value(QStringLiteral("restore_token")));
 
     const auto streams = qdbus_cast<QList<PortalSessionStream>>(result.value(QStringLiteral("streams")));

@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: 2023 Arjen Hiemstra <ahiemstra@heimr.nl>
 # SPDX-License-Identifier: BSD-2-Clause
 
-add_definitions(-DTRANSLATION_DOMAIN=\"krdpserver\")
+add_definitions(-DTRANSLATION_DOMAIN=\"farside-server\")
 
 add_executable(krdpserver)
+add_library(KRdpLegacyMigration STATIC FarsideMigration.cpp)
+set_target_properties(KRdpLegacyMigration PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(KRdpLegacyMigration PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(KRdpLegacyMigration PUBLIC Qt6::Core Qt6::DBus KF6::ConfigCore qt6keychain)
 # AUD-K3: certificate generation/renewal; also linked by the KCM to show the fingerprint.
 add_library(KRdpServerCertificate STATIC ServerCertificate.cpp)
 set_target_properties(KRdpServerCertificate PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -39,6 +43,7 @@ target_link_libraries(krdp-virtual-guardianctl PRIVATE Qt6::Core Qt6::Network)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support)
 configure_file(virtual-session-bus.conf ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support/virtual-session-bus.conf COPYONLY)
 configure_file(virtual-session-pipewire.conf ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support/virtual-session-pipewire.conf COPYONLY)
+file(REMOVE_RECURSE ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support/defaults)
 file(COPY ${CMAKE_SOURCE_DIR}/scripts/virtual-probe-config/ DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support/defaults)
 file(COPY ${CMAKE_SOURCE_DIR}/scripts/virtual-session-locked-config/ DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support/locked-config)
 add_executable(krdp-console-host consolehost.cpp ConsoleSeat.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp WorkerCodecBridge.cpp ConsoleHostController.cpp ConsoleWorkerLauncher.cpp)
@@ -69,7 +74,7 @@ kconfig_target_kcfg_file(krdpserver FILE krdpserversettings.kcfg CLASS_NAME Serv
 target_include_directories(krdpserver PRIVATE ${CMAKE_BINARY_DIR})
 target_include_directories(krdp-audio-route-probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-target_link_libraries(krdpserver PRIVATE KRdpServerCertificate Qt6::Gui Qt6::Network Qt6::DBus KF6::CoreAddons KF6::ConfigGui KF6::DBusAddons KF6::Crash KRdp qt6keychain KF6::StatusNotifierItem KF6::I18n KF6::GlobalAccel)
+target_link_libraries(krdpserver PRIVATE KRdpLegacyMigration KRdpServerCertificate Qt6::Gui Qt6::Network Qt6::DBus KF6::CoreAddons KF6::ConfigGui KF6::DBusAddons KF6::Crash KRdp qt6keychain KF6::StatusNotifierItem KF6::I18n KF6::GlobalAccel)
 target_link_libraries(krdp-console-host PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp KRdpServerCertificate)
 target_link_libraries(krdp-console-probe PRIVATE Qt6::Core Qt6::DBus)
 target_link_libraries(krdp-greeter-probe PRIVATE Qt6::Core Qt6::Gui)
@@ -84,12 +89,20 @@ if (BUILD_PLASMA_SESSION)
     target_link_libraries(krdpserver PRIVATE Qt6::WaylandClient Qt6::GuiPrivate)
 endif()
 
-configure_file(org.kde.krdpserver.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpserver.desktop @ONLY)
+configure_file(org.kde.krdpserver.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/io.github.westers.farside.server.desktop @ONLY)
 configure_file(krdp-console-host.service.in ${CMAKE_CURRENT_BINARY_DIR}/krdp-console-host.service @ONLY)
 if (BUILD_PLASMA_SESSION)
-    configure_file(org.kde.krdpconsoleworker.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpconsoleworker.desktop @ONLY)
+    configure_file(org.kde.krdpconsoleworker.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/io.github.westers.farside.consoleworker.desktop @ONLY)
 endif()
-configure_file(app-org.kde.krdpserver.service.in ${CMAKE_CURRENT_BINARY_DIR}/app-org.kde.krdpserver.service @ONLY)
+configure_file(app-org.kde.krdpserver.service.in ${CMAKE_CURRENT_BINARY_DIR}/app-io.github.westers.farside.server.service @ONLY)
+
+if(KRDP_BUILD_SYSTEM_PACKAGE)
+    set_target_properties(krdpserver PROPERTIES OUTPUT_NAME farside-server)
+    foreach(helper console-host console-worker virtual-host virtual-session-entry virtual-pam-keeper
+        virtual-session-cleanup virtual-device-entry virtual-guardian virtual-guardianctl)
+        set_target_properties(krdp-${helper} PROPERTIES OUTPUT_NAME farside-${helper})
+    endforeach()
+endif()
 
 install(TARGETS krdpserver DESTINATION ${KDE_INSTALL_BINDIR})
 install(TARGETS krdp-console-host DESTINATION ${KDE_INSTALL_BINDIR})
@@ -108,15 +121,15 @@ if (BUILD_PLASMA_SESSION)
             COMPONENT KRdpConsoleTest EXCLUDE_FROM_ALL)
     endif()
 endif()
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpserver.desktop DESTINATION ${KDE_INSTALL_APPDIR})
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/io.github.westers.farside.server.desktop DESTINATION ${KDE_INSTALL_APPDIR})
 # KDE_INSTALL_SYSTEMDUNITDIR is lib/systemd; system units belong in its system/ subdirectory.
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/krdp-console-host.service DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system)
-install(FILES console-host.conf.example DESTINATION ${KDE_INSTALL_DATADIR}/krdp)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/krdp-console-host.service DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system RENAME farside-console-host.service)
+install(FILES console-host.conf.example DESTINATION ${KDE_INSTALL_DATADIR}/farside)
 if (BUILD_PLASMA_SESSION)
-    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpconsoleworker.desktop DESTINATION ${KDE_INSTALL_APPDIR})
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/io.github.westers.farside.consoleworker.desktop DESTINATION ${KDE_INSTALL_APPDIR})
 endif()
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/app-org.kde.krdpserver.service DESTINATION ${KDE_INSTALL_SYSTEMDUSERUNITDIR})
-install(FILES 00-krdp.preset DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/user-preset)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/app-io.github.westers.farside.server.service DESTINATION ${KDE_INSTALL_SYSTEMDUSERUNITDIR})
+install(FILES 00-krdp.preset DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/user-preset RENAME 00-farside.preset)
 
 # Explicit staging only. Default installs must not enable the unfinished root
 # virtual service. Policy/unit drafts go under share, never active configuration.
@@ -153,14 +166,13 @@ if(KRDP_BUILD_SYSTEM_PACKAGE)
         krdp-virtual-pam-keeper krdp-virtual-session-cleanup
         krdp-virtual-device-entry krdp-virtual-guardian krdp-virtual-guardianctl
         DESTINATION ${KDE_INSTALL_BINDIR})
-    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-host.service
-        ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-session@.service
-        DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system)
-    install(FILES 00-krdp-system.preset DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system-preset)
-    install(FILES krdp-virtual-session.pam DESTINATION /etc/pam.d RENAME krdp-virtual-session)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-host.service DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system RENAME farside-virtual-host.service)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-session@.service DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system RENAME farside-virtual-session@.service)
+    install(FILES 00-krdp-system.preset DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system-preset RENAME 00-farside-system.preset)
+    install(FILES krdp-virtual-session.pam DESTINATION /etc/pam.d RENAME farside-virtual-session)
     install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/launch-virtual-session.sh
         ${CMAKE_SOURCE_DIR}/scripts/virtual-session-desktop.sh
-        DESTINATION ${KDE_INSTALL_DATADIR}/krdp/virtual-session)
+        DESTINATION ${KDE_INSTALL_DATADIR}/farside/virtual-session)
     install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support/
-        DESTINATION ${KDE_INSTALL_DATADIR}/krdp/virtual-session/support)
+        DESTINATION ${KDE_INSTALL_DATADIR}/farside/virtual-session/support)
 endif()

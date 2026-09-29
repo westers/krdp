@@ -21,12 +21,12 @@ int main(int argc, char **argv)
     char name[256] = {};
     if (gethostname(name, sizeof(name) - 1)) return 1;
     const auto hostName = QByteArray(name).split('.').first();
-    const bool buzzIntel = hostName == "buzz" && qgetenv("KRDP_BUZZ_INTEL_PRIVATE") == "1";
+    const bool buzzIntel = hostName == "buzz" && qgetenv("FARSIDE_BUZZ_INTEL_PRIVATE") == "1";
     if ((hostName != "sol" && !buzzIntel) || (buzzIntel && (!mixed || adopting))
         || !getuid() || getuid() != geteuid() || (arguments.size() != 2 && !adopting && !multi)) return 1;
     const auto script = adopting ? QString() : arguments.at(multi ? 2 : 1);
     if (!adopting && !QDir::isAbsolutePath(script)) return 1;
-    QTemporaryDir runtime(QStringLiteral("/run/user/%1/krdp-virtual-host.XXXXXX").arg(getuid()));
+    QTemporaryDir runtime(QStringLiteral("/run/user/%1/farside-virtual-host.XXXXXX").arg(getuid()));
     if (!runtime.isValid()) return 1;
     runtime.setAutoRemove(false);
     qInfo().noquote() << "PAM host probe evidence:" << runtime.path();
@@ -62,7 +62,7 @@ int main(int argc, char **argv)
         env.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin:/bin"));
         env.insert(QStringLiteral("HOME"), QDir::homePath());
         if (buzzIntel) {
-            env.insert(QStringLiteral("KRDP_BUZZ_INTEL_PRIVATE"), QStringLiteral("1"));
+            env.insert(QStringLiteral("FARSIDE_BUZZ_INTEL_PRIVATE"), QStringLiteral("1"));
             env.insert(QStringLiteral("LD_LIBRARY_PATH"), qEnvironmentVariable("LD_LIBRARY_PATH"));
         }
         qInfo().noquote() << "PAM-owned desktop" << handle.id << "uid" << uid << "runtime" << desktop.path();
@@ -87,7 +87,7 @@ int main(int argc, char **argv)
         }
         close(0);
         const auto desktop = arguments[4];
-        if (!desktop.startsWith(QStringLiteral("/run/user/%1/krdp-virtual/").arg(getuid()))) return 1;
+        if (!desktop.startsWith(QStringLiteral("/run/user/%1/farside-virtual/").arg(getuid()))) return 1;
         if (!host.adopt({quint32(getuid()), arguments[2], arguments[3], desktop + QStringLiteral("/guardian.sock"), token},
                 desktop + QStringLiteral("/worker.sock"))) return 1;
         qInfo().noquote() << "Adopting retained desktop" << arguments[2] << "without owning its process lifetime";

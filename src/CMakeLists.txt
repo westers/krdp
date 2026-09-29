@@ -67,8 +67,8 @@ target_sources(KRdp PRIVATE
 ecm_qt_declare_logging_category(KRdp
     HEADER krdp_logging.h
     IDENTIFIER KRDP
-    CATEGORY_NAME org.kde.krdp
-    DESCRIPTION "KRdp"
+    CATEGORY_NAME farside.server
+    DESCRIPTION "Farside Server"
     EXPORT KRdp
     DEFAULT_SEVERITY Debug
 )
@@ -116,6 +116,7 @@ set_target_properties(KRdp PROPERTIES
 )
 
 if(KRDP_BUILD_SYSTEM_PACKAGE)
+    set_target_properties(KRdp PROPERTIES OUTPUT_NAME FarsideRdp SOVERSION 1)
     install(TARGETS KRdp LIBRARY DESTINATION ${KRDP_LIBRARY_INSTALL_DIR} NAMELINK_SKIP)
 else()
     install(TARGETS KRdp DESTINATION ${KDE_INSTALL_LIBDIR})
@@ -125,6 +126,6 @@ if(KRDP_BUILD_CONSOLE_TEST_PACKAGE)
         COMPONENT KRdpConsoleTest EXCLUDE_FROM_ALL)
 endif()
 
-ecm_qt_install_logging_categories(EXPORT KRdp DESTINATION ${KDE_INSTALL_LOGGINGCATEGORIESDIR})
+ecm_qt_install_logging_categories(EXPORT KRdp FILE farside.categories DESTINATION ${KDE_INSTALL_LOGGINGCATEGORIESDIR})
 
 add_subdirectory(kcm)

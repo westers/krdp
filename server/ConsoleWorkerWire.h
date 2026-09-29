@@ -49,7 +49,7 @@ constexpr quint16 ProtocolVersion = 5;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
-constexpr const char *SocketEnvironment = "KRDP_CONSOLE_WORKER_SOCKET";
+constexpr const char *SocketEnvironment = "FARSIDE_CONSOLE_WORKER_SOCKET";
 
 enum class Kind : quint8 {
     Hello = 1,

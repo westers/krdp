@@ -218,7 +218,7 @@ VirtualSessionControl::CreateResult VirtualSessionHostController::createIndepend
     const auto handle = m_supervisor.adopt(record.identity(), true);
     if (!handle) return {};
     m_newIntents.emplace(record.session, record);
-    const QString unit = QStringLiteral("krdp-virtual-session@%1.service").arg(record.session);
+    const QString unit = QStringLiteral("farside-virtual-session@%1.service").arg(record.session);
     const auto start = m_startService;
     const bool started = start(unit, *handle);
     if (!alive) return {};
@@ -302,25 +302,27 @@ std::optional<bool> VirtualSessionHostController::sessionUnitAlive(const QString
     auto bus = QDBusConnection::systemBus();
     if (!bus.isConnected()) return std::nullopt;
     const QString systemd = QStringLiteral("org.freedesktop.systemd1");
-    auto get = QDBusMessage::createMethodCall(systemd, QStringLiteral("/org/freedesktop/systemd1"),
-        QStringLiteral("org.freedesktop.systemd1.Manager"), QStringLiteral("GetUnit"));
-    get.setArguments({QStringLiteral("krdp-virtual-session@%1.service").arg(session)});
-    const auto unit = bus.call(get, QDBus::Block, 3000);
-    if (unit.type() == QDBusMessage::ErrorMessage) {
-        // Not loaded at all: nothing of it runs.
-        if (unit.errorName() == QLatin1String("org.freedesktop.systemd1.NoSuchUnit")) return false;
-        return std::nullopt;
+    for (const QString &unitName : {QStringLiteral("farside-virtual-session@%1.service").arg(session),
+                                    QStringLiteral("krdp-virtual-session@%1.service").arg(session)}) {
+        auto get = QDBusMessage::createMethodCall(systemd, QStringLiteral("/org/freedesktop/systemd1"),
+            QStringLiteral("org.freedesktop.systemd1.Manager"), QStringLiteral("GetUnit"));
+        get.setArguments({unitName});
+        const auto unit = bus.call(get, QDBus::Block, 3000);
+        if (unit.type() == QDBusMessage::ErrorMessage) {
+            if (unit.errorName() == QLatin1String("org.freedesktop.systemd1.NoSuchUnit")) continue;
+            return std::nullopt;
+        }
+        const auto path = unit.arguments().value(0).value<QDBusObjectPath>().path();
+        if (path.isEmpty()) return std::nullopt;
+        auto property = QDBusMessage::createMethodCall(systemd, path, QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+        property.setArguments({QStringLiteral("org.freedesktop.systemd1.Unit"), QStringLiteral("ActiveState")});
+        const auto state = bus.call(property, QDBus::Block, 3000);
+        if (state.type() == QDBusMessage::ErrorMessage) return std::nullopt;
+        const QString active = state.arguments().value(0).value<QDBusVariant>().variant().toString();
+        if (active.isEmpty()) return std::nullopt;
+        if (active != QLatin1String("inactive") && active != QLatin1String("failed")) return true;
     }
-    const auto path = unit.arguments().value(0).value<QDBusObjectPath>().path();
-    if (path.isEmpty()) return std::nullopt;
-    auto property = QDBusMessage::createMethodCall(systemd, path, QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
-    property.setArguments({QStringLiteral("org.freedesktop.systemd1.Unit"), QStringLiteral("ActiveState")});
-    const auto state = bus.call(property, QDBus::Block, 3000);
-    if (state.type() == QDBusMessage::ErrorMessage) return std::nullopt;
-    const QString active = state.arguments().value(0).value<QDBusVariant>().variant().toString();
-    if (active.isEmpty()) return std::nullopt;
-    // inactive/failed: the unit's cgroup is empty (KillMode=mixed); anything else still runs.
-    return active != QLatin1String("inactive") && active != QLatin1String("failed");
+    return false;
 }
 
 bool VirtualSessionHostController::stillRunning(const VirtualSessionJournal::Record &record) const
@@ -365,7 +367,7 @@ void VirtualSessionHostController::retireFailedRecovery(const QString &session)
         qWarning().noquote() << "Kept virtual desktop record" << session << "(uid" << record.uid << "): it never delivered a picture"
                              << "to this broker, but its session unit still runs, so it was not retired. It is listed as failed;"
                              << "the next broker start adopts it again, or end it with"
-                             << QStringLiteral("`systemctl stop krdp-virtual-session@%1.service`.").arg(session);
+                             << QStringLiteral("`systemctl stop farside-virtual-session@%1.service`.").arg(session);
         return;
     }
     retireRecord(*m_recoveredJournal, record, QStringLiteral("its recovered desktop failed before it was ever captured and its session unit is gone"));

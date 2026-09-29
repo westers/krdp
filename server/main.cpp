@@ -1,3 +1,4 @@
+#include "FarsideEnv.h"
 // SPDX-FileCopyrightText: 2023 Arjen Hiemstra <ahiemstra@heimr.nl>
 //
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
@@ -39,6 +40,7 @@
 #include "VideoCodecSupport.h"
 #include "krdp_version.h"
 #include "krdpserversettings.h"
+#include "FarsideMigration.h"
 
 using namespace Qt::StringLiterals;
 
@@ -162,18 +164,18 @@ void applyVaapiDriverMode(const QString &mode)
 {
     const auto normalizedMode = normalizedVaapiDriverMode(mode);
     if (normalizedMode == u"auto"_s) {
-        qunsetenv("KRDP_FORCE_VAAPI_DRIVER");
-        qunsetenv("KRDP_AUTO_VAAPI_DRIVER");
+        qunsetenv("FARSIDE_FORCE_VAAPI_DRIVER");
+        qunsetenv("FARSIDE_AUTO_VAAPI_DRIVER");
         return;
     }
     if (normalizedMode == u"off"_s) {
-        qunsetenv("KRDP_FORCE_VAAPI_DRIVER");
-        qputenv("KRDP_AUTO_VAAPI_DRIVER", "0");
+        qunsetenv("FARSIDE_FORCE_VAAPI_DRIVER");
+        qputenv("FARSIDE_AUTO_VAAPI_DRIVER", "0");
         return;
     }
 
-    qunsetenv("KRDP_AUTO_VAAPI_DRIVER");
-    qputenv("KRDP_FORCE_VAAPI_DRIVER", normalizedMode.toLatin1());
+    qunsetenv("FARSIDE_AUTO_VAAPI_DRIVER");
+    qputenv("FARSIDE_FORCE_VAAPI_DRIVER", normalizedMode.toLatin1());
 }
 
 QString envValueOrUnset(const char *name)
@@ -246,12 +248,13 @@ void writeLoadedState(const QString &configFilePath, const ServerConfig *config,
 int main(int argc, char **argv)
 {
     QApplication application{argc, argv};
-    application.setApplicationName(u"krdp-server"_s);
-    application.setApplicationDisplayName(u"KRDP Server"_s);
+    Farside::warnLegacyEnvironment();
+    application.setApplicationName(u"farside-server"_s);
+    application.setApplicationDisplayName(u"Farside Server"_s);
     // Ensure Wayland privilege checks resolve to the installed desktop file.
-    application.setDesktopFileName(u"org.kde.krdpserver"_s);
+    application.setDesktopFileName(u"io.github.westers.farside.server"_s);
 
-    KAboutData about(u"krdp-server"_s, u"KRDP Server"_s, QStringLiteral(KRdp_VERSION_STRING));
+    KAboutData about(u"farside-server"_s, u"Farside Server"_s, QStringLiteral(KRdp_VERSION_STRING));
     KAboutData::setApplicationData(about);
 
     KCrash::initialize();
@@ -280,6 +283,8 @@ int main(int argc, char **argv)
     });
     about.setupCommandLine(&parser);
     parser.process(application);
+    FarsideMigration::copyUserFiles();
+    FarsideMigration::migrateCredentialsAndPermission();
     about.processCommandLine(&parser);
 
     if (parser.isSet(u"restore-outputs"_s)) {
@@ -365,12 +370,23 @@ int main(int argc, char **argv)
 
         const auto users = config->users();
         for (const auto &userName : users) {
-            const auto readJob = new QKeychain::ReadPasswordJob(QLatin1StringView("KRDP"));
+            const auto readJob = new QKeychain::ReadPasswordJob(QLatin1StringView("Farside Server"));
             readJob->setKey(userName);
             QObject::connect(readJob, &QKeychain::ReadPasswordJob::finished, &server, [userName, readJob, &server]() {
                 KRdp::User user;
                 if (readJob->error() != QKeychain::Error::NoError) {
-                    qWarning() << "requestPassword: Failed to read password of " << userName << " because of error: " << readJob->error();
+                    // A locked wallet can leave migration pending. Keep existing
+                    // logins usable while the copy is retried on the next start.
+                    auto *legacy = new QKeychain::ReadPasswordJob(QLatin1StringView("KRDP"), &server);
+                    legacy->setKey(userName);
+                    QObject::connect(legacy, &QKeychain::ReadPasswordJob::finished, &server, [userName, legacy, &server]() {
+                        if (legacy->error() != QKeychain::NoError) {
+                            qWarning() << "Could not read the Farside or legacy password for" << userName;
+                            return;
+                        }
+                        server.addUser({userName, legacy->textData()});
+                    });
+                    legacy->start();
                     return;
                 }
                 user.name = userName;
@@ -487,12 +503,12 @@ int main(int argc, char **argv)
     controller.setChromaPolicyDefaults(chromaPolicyFrom(config));
     controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
 
-    auto runtimeConfig = KSharedConfig::openConfig(QStringLiteral("krdpserverrc"));
+    auto runtimeConfig = KSharedConfig::openConfig(QStringLiteral("farsideserverrc"));
     // Also logged on every reload: KConfig's --notify broadcasts by file NAME,
     // so a second instance started with its own XDG_CONFIG_HOME makes every
     // other krdpserver reload too. Saying which file this process actually
     // read is what tells a reload of one's own config from that cross-talk.
-    const QString runtimeConfigPath = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + QStringLiteral("/krdpserverrc");
+    const QString runtimeConfigPath = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + QStringLiteral("/farsideserverrc");
     // Applies persisted-config changes (quality, monitor target, wake, VAAPI).
     // It must NOT force a display refresh: a quality-slider write should never
     // touch the stream. setMonitorIndex() self-guards and only re-creates the
@@ -632,14 +648,14 @@ int main(int argc, char **argv)
     const auto sessionType = KRdp::ServerSettings::backendName(backendChoice.backend);
     const auto startupChromaPolicy = controller.chromaPolicyDefaults();
     const auto startupChromaText = QStringLiteral("%1/%2/%3").arg(startupChromaPolicy.motionGapMs).arg(startupChromaPolicy.restMs).arg(startupChromaPolicy.maxGapMs);
-    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9 codec=%10 chroma=%11 cameraLoopback=%12 softwareEncoding=%13 encoders=[%14] av1Tiles=%15")
+    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 FARSIDE_FORCE_VAAPI_DRIVER=%6 FARSIDE_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9 codec=%10 chroma=%11 cameraLoopback=%12 softwareEncoding=%13 encoders=[%14] av1Tiles=%15")
                              .arg(sessionType,
                                   streamTarget,
                                   QString::number(port),
                                   QString::number(quality),
                                   vaapiDriverMode,
-                                  envValueOrUnset("KRDP_FORCE_VAAPI_DRIVER"),
-                                  envValueOrUnset("KRDP_AUTO_VAAPI_DRIVER"),
+                                  envValueOrUnset("FARSIDE_FORCE_VAAPI_DRIVER"),
+                                  envValueOrUnset("FARSIDE_AUTO_VAAPI_DRIVER"),
                                   config->wakeDisplayOnConnect() ? u"1"_s : u"0"_s,
                                   config->adaptiveQuality() ? u"1"_s : u"0"_s,
                                   QLatin1String(KRdp::VideoCodecSupport::preferenceName(controller.codecPreference())),
@@ -650,6 +666,10 @@ int main(int argc, char **argv)
                                   KRdp::CodecPolicy::av1TilesName(controller.av1Tiles()));
 
     if (!server.start()) {
+        if (server.serverError() == QAbstractSocket::AddressInUseError) {
+            qCritical() << "Port" << port << "is in use; Farside will not restart until it is free";
+            return 75;
+        }
         return -1;
     }
     writeLoadedState(runtimeConfigPath, config, backendChoice.backend);

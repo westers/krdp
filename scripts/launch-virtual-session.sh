@@ -37,8 +37,8 @@ if [[ -n $initial_layout ]]; then
     ' <<<"$initial_layout" >/dev/null
     layout_args=("$initial_layout")
 fi
-[[ $runtime == /run/user/"$session_uid"/krdp-virtual/* && $runtime == "${KRDP_VIRTUAL_RUNTIME:-}" ]]
-[[ $profile == "$HOME/.krdp-virtual/sessions/$session" && $profile == "${KRDP_VIRTUAL_PROFILE:-}" ]]
+[[ $runtime == /run/user/"$session_uid"/farside-virtual/* && $runtime == "${FARSIDE_VIRTUAL_RUNTIME:-}" ]]
+[[ $profile == "$HOME/.farside-virtual/sessions/$session" && $profile == "${FARSIDE_VIRTUAL_PROFILE:-}" ]]
 for directory in "$runtime" "$profile" "$profile/config" "$profile/data" "$profile/cache" "$profile/state"; do
     [[ -d $directory && -O $directory && $(realpath -e "$directory") == "$directory" && $(stat -c %a "$directory") == 700 ]]
 done
@@ -89,23 +89,23 @@ done
 # AUD-FIX8 B3: the worker's encoder probe tries the granted node first, and gets the
 # administrator's VaapiDriverMode (KRDP_VIRTUAL_VAAPI_DRIVER) the way krdpserver applies it.
 [[ $vaapi_driver =~ ^(auto|off|radeonsi|iHD|i965)$ ]]
-render_environment+=(KRDP_RENDER_NODE="$render_node")
+render_environment+=(FARSIDE_RENDER_NODE="$render_node")
 case $vaapi_driver in
     auto) ;;
-    off) render_environment+=(KRDP_AUTO_VAAPI_DRIVER=0);;
-    *) render_environment+=(KRDP_FORCE_VAAPI_DRIVER="$vaapi_driver" LIBVA_DRIVER_NAME="$vaapi_driver");;
+    off) render_environment+=(FARSIDE_AUTO_VAAPI_DRIVER=0);;
+    *) render_environment+=(FARSIDE_FORCE_VAAPI_DRIVER="$vaapi_driver" LIBVA_DRIVER_NAME="$vaapi_driver");;
 esac
 
 # Seed missing settings only. Never overwrite a retained user's profile.
 cp -rn "$support/defaults/." "$profile/config/"
 mkdir -p "$profile/data/applications" "$runtime/config-defaults"
 [[ $(realpath -e "$profile/data/applications") == "$profile/data/applications" ]]
-[[ ! -L $profile/data/applications/org.kde.krdpconsoleworker.desktop ]]
+[[ ! -L $profile/data/applications/io.github.westers.farside.consoleworker.desktop ]]
 ln -s /etc/xdg/menus "$runtime/config-defaults/menus"
 # FARSIDE-VLOCK: the lock screen cannot authenticate under no_new_privs; lock it off.
 cp "$support/locked-config/kscreenlockerrc" "$support/locked-config/kdeglobals" "$runtime/config-defaults/"
-printf '[Desktop Entry]\nType=Application\nName=KRDP Virtual Capture\nNoDisplay=true\nExec=%s\nX-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1,org_kde_kwin_fake_input\n' "$worker" \
-    >"$profile/data/applications/org.kde.krdpconsoleworker.desktop"
+printf '[Desktop Entry]\nType=Application\nName=Farside Virtual Capture\nNoDisplay=true\nExec=%s\nX-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1,org_kde_kwin_fake_input\n' "$worker" \
+    >"$profile/data/applications/io.github.westers.farside.consoleworker.desktop"
 apparmor_query=()
 if [[ -e /sys/kernel/security/apparmor/.access ]]; then
     apparmor_query=(--bind /sys/kernel/security/apparmor/.access /sys/kernel/security/apparmor/.access)

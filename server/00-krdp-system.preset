@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Steve Westers
 # SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
-# The system brokers need TLS material in /etc/krdp and must not take port 3389
-# from the user-session krdpserver, so an administrator enables them explicitly.
-disable krdp-console-host.service
-disable krdp-virtual-host.service
+# The system brokers need TLS material in /etc/farside and must not take port 3389
+# from the user-session farside-server, so an administrator enables them explicitly.
+disable farside-console-host.service
+disable farside-virtual-host.service

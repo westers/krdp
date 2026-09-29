@@ -8,7 +8,7 @@ SPDX-License-Identifier: BSD-2-Clause
       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
       xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
       http://www.kde.org/standards/kcfg/1.0/kcfg.xsd" >
-  <kcfgfile name="krdpserverrc"/>
+  <kcfgfile name="farsideserverrc"/>
   <group name="General">
     <entry name="ListenPort" type="Int">
       <label>The port the server listens on</label>
@@ -66,7 +66,7 @@ SPDX-License-Identifier: BSD-2-Clause
     </entry>
     <entry name="MonitorMode" type="String">
       <label>Display target mode (workspace, primary, specific, multi, virtual)</label>
-      <default>workspace</default>
+      <default>multi</default>
     </entry>
     <entry name="MonitorIndex" type="Int">
       <label>Display target monitor ID when monitor mode is specific</label>

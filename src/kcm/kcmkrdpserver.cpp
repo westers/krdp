@@ -6,6 +6,7 @@
 #include "ClientDisplayInfo.h"
 #include "ListenAddress.h"
 #include "ServerCertificate.h"
+#include "FarsideMigration.h"
 #include "ServerSettingsPolicy.h"
 #include "VideoCodecSupport.h"
 #include "hostdevices.h"
@@ -49,7 +50,7 @@
 
 using namespace Qt::StringLiterals;
 
-K_PLUGIN_CLASS_WITH_JSON(KRDPServerConfig, "kcm_krdpserver.json")
+K_PLUGIN_CLASS_WITH_JSON(KRDPServerConfig, "kcm_farside.json")
 
 static const QString dbusSystemdDestination = u"org.freedesktop.systemd1"_s;
 static const QString dbusSystemdPath = u"/org/freedesktop/systemd1"_s;
@@ -63,7 +64,7 @@ namespace
 QString configFilePath()
 {
     // Same expression as krdpserver's runtimeConfigPath (server/main.cpp).
-    return QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + u"/krdpserverrc"_s;
+    return QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + u"/farsideserverrc"_s;
 }
 
 bool processAlive(qint64 pid)
@@ -123,10 +124,11 @@ KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
     // Deliberately not a child: KQuickManagedConfigModule would discover it
     // and treat Users/Certificate like any other setting in its Defaults
     // state (AUD-K1); this module manages it itself.
-    , m_serverSettings(new KRDPServerSettings(nullptr))
+    , m_serverSettings([]() { FarsideMigration::copyUserFiles(); return new KRDPServerSettings(nullptr); }())
     , m_usersModel(new UsersModel(m_serverSettings, this))
     , m_runtimeWatcher(new QFileSystemWatcher(this))
 {
+    FarsideMigration::migrateCredentialsAndPermission();
     setButtons(Help | Apply | Default);
     QQmlEngine::setObjectOwnership(m_serverSettings, QQmlEngine::CppOwnership);
 
@@ -477,8 +479,8 @@ void KRDPServerConfig::setPortalPreauthorized(bool preauthorized)
                                                                       QDBusConnection::sessionBus(),
                                                                       this);
     // WARNING: The app_id org.kde.krdpserver must match the service name on the systemd side!
-    auto reply = preauthorized ? iface->SetPermission(u"kde-authorized"_s, /* create = */ true, u"remote-desktop"_s, u"org.kde.krdpserver"_s, {u"yes"_s})
-                               : iface->DeletePermission(u"kde-authorized"_s, u"remote-desktop"_s, u"org.kde.krdpserver"_s);
+    auto reply = preauthorized ? iface->SetPermission(u"kde-authorized"_s, /* create = */ true, u"remote-desktop"_s, u"io.github.westers.farside.server"_s, {u"yes"_s})
+                               : iface->DeletePermission(u"kde-authorized"_s, u"remote-desktop"_s, u"io.github.westers.farside.server"_s);
     auto watcher = new QDBusPendingCallWatcher(reply, this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [watcher, iface, preauthorized]() {
         watcher->deleteLater();

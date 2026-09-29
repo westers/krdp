@@ -59,7 +59,7 @@ public:
         if (isActive()) {
             auto appId = qGuiApp->desktopFileName();
             if (appId.isEmpty()) {
-                appId = QStringLiteral("org.kde.krdpserver");
+                appId = QStringLiteral("io.github.westers.farside.server");
             }
             authenticate(appId, QStringLiteral("KRDP remote control"));
             if (!supports(ORG_KDE_KWIN_FAKE_INPUT_KEYBOARD_KEY_SINCE_VERSION)) {

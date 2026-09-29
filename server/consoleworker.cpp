@@ -1,3 +1,4 @@
+#include "FarsideEnv.h"
 // SPDX-FileCopyrightText: 2026 Steve Westers
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
@@ -177,7 +178,7 @@ public:
             && QDBusConnection::sessionBus().interface()->isServiceRegistered(QStringLiteral("org.kde.kglobalaccel"))) {
             m_reclaimAction.setText(QStringLiteral("Reclaim physical console"));
             m_reclaimAction.setObjectName(QStringLiteral("reclaim-console"));
-            m_reclaimAction.setProperty("componentName", QStringLiteral("krdp-console-worker"));
+            m_reclaimAction.setProperty("componentName", QStringLiteral("farside-console-worker"));
             m_reclaimAction.setProperty("componentDisplayName", QStringLiteral("KRDP Physical Console"));
             m_reclaimAction.setEnabled(false);
             connect(&m_reclaimAction, &QAction::triggered, this, &Worker::reclaimConsole);
@@ -2832,14 +2833,15 @@ std::optional<QByteArray> runKScreen(const QStringList &arguments)
 int main(int argc, char **argv)
 {
     QGuiApplication application(argc, argv);
-    application.setDesktopFileName(QStringLiteral("org.kde.krdpconsoleworker"));
+    Farside::warnLegacyEnvironment();
+    application.setDesktopFileName(QStringLiteral("io.github.westers.farside.consoleworker"));
     KRdp::EncoderSupport::applyProcessOverrides(); // KRDP_FORCE_SOFTWARE_ENCODING, before any encoder
     // AUD-FIX8 B3: the broker's VaapiDriverMode arrives as KRDP_FORCE_VAAPI_DRIVER /
     // KRDP_AUTO_VAAPI_DRIVER (console launcher, virtual-desktop launcher); resolve LIBVA_DRIVER_NAME
     // the way krdpserver does, before the encoder probe and before any encoder opens.
     KRdp::selectVaapiDriver();
-    if (!qEnvironmentVariableIsEmpty("KRDP_RENDER_NODE") || qEnvironmentVariableIsSet("LIBVA_DRIVER_NAME"))
-        qInfo().noquote() << "Worker VAAPI: render node" << qEnvironmentVariable("KRDP_RENDER_NODE", QStringLiteral("(first usable)"))
+    if (!qEnvironmentVariableIsEmpty("FARSIDE_RENDER_NODE") || qEnvironmentVariableIsSet("LIBVA_DRIVER_NAME"))
+        qInfo().noquote() << "Worker VAAPI: render node" << qEnvironmentVariable("FARSIDE_RENDER_NODE", QStringLiteral("(first usable)"))
                           << "driver" << qEnvironmentVariable("LIBVA_DRIVER_NAME", QStringLiteral("(libva default)"));
     QCommandLineParser parser;
     parser.addHelpOption();

@@ -169,7 +169,7 @@ private Q_SLOTS:
         const QString config = qEnvironmentVariable("XDG_CONFIG_HOME");
         QVERIFY2(config.startsWith(QDir::tempPath()) || config.contains(u"/build"_s), "run through ctest: it sets a throwaway XDG_CONFIG_HOME");
         QDir().mkpath(config);
-        QFile rc(config + u"/krdpserverrc"_s);
+        QFile rc(config + u"/farsideserverrc"_s);
         QVERIFY(rc.open(QIODevice::WriteOnly | QIODevice::Truncate));
         rc.write("[General]\nUsers=buzz\nSystemUserEnabled=true\nListenPort=1\n");
         rc.close();

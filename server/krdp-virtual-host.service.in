@@ -1,6 +1,6 @@
-# Retained-desktop broker. Disabled by default; configure /etc/krdp/virtual-host.conf first.
+# Retained-desktop broker. Disabled by default; configure /etc/farside/virtual-host.conf first.
 [Unit]
-Description=KRDP persistent virtual-desktop broker
+Description=Farside virtual-desktop broker
 After=network-online.target systemd-logind.service
 Wants=network-online.target
 
@@ -11,19 +11,19 @@ StartLimitBurst=10
 [Service]
 Type=exec
 User=root
-Environment=KRDP_VIRTUAL_ADDRESS=0.0.0.0
-Environment=KRDP_VIRTUAL_PORT=3395
+Environment=FARSIDE_VIRTUAL_ADDRESS=0.0.0.0
+Environment=FARSIDE_VIRTUAL_PORT=3395
 # The host creates this certificate when it is missing and renews it when it expires within
-# 30 days (AUD-FIX7); /etc/krdp/virtual-host.conf may point elsewhere.
-Environment=KRDP_VIRTUAL_CERTIFICATE=/etc/krdp/virtual-host.crt
-Environment=KRDP_VIRTUAL_CERTIFICATE_KEY=/etc/krdp/virtual-host.key
+# 30 days (AUD-FIX7); /etc/farside/virtual-host.conf may point elsewhere.
+Environment=FARSIDE_VIRTUAL_CERTIFICATE=/etc/farside/virtual-host.crt
+Environment=FARSIDE_VIRTUAL_CERTIFICATE_KEY=/etc/farside/virtual-host.key
 # Private codecs in software (HEVC/AV1): auto, never or prefer (KRDPCTL-V2-CONTRACT.md (e)).
-Environment=KRDP_VIRTUAL_SOFTWARE_ENCODING=auto
+Environment=FARSIDE_VIRTUAL_SOFTWARE_ENCODING=auto
 # AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16 (KRDPCTL-V2-CONTRACT.md (e)).
-Environment=KRDP_VIRTUAL_AV1_TILES=auto
-EnvironmentFile=-/etc/krdp/virtual-host.conf
-ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/krdp/virtual-host @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-host --certificate ${KRDP_VIRTUAL_CERTIFICATE} --certificate-key ${KRDP_VIRTUAL_CERTIFICATE_KEY} --address ${KRDP_VIRTUAL_ADDRESS} --port ${KRDP_VIRTUAL_PORT} --software-encoding ${KRDP_VIRTUAL_SOFTWARE_ENCODING} --av1-tiles ${KRDP_VIRTUAL_AV1_TILES}
-StateDirectory=krdp/virtual-sessions krdp/virtual-host
+Environment=FARSIDE_VIRTUAL_AV1_TILES=auto
+EnvironmentFile=-/etc/farside/virtual-host.conf
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/farside/virtual-host @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-host --certificate ${FARSIDE_VIRTUAL_CERTIFICATE} --certificate-key ${FARSIDE_VIRTUAL_CERTIFICATE_KEY} --address ${FARSIDE_VIRTUAL_ADDRESS} --port ${FARSIDE_VIRTUAL_PORT} --software-encoding ${FARSIDE_VIRTUAL_SOFTWARE_ENCODING} --av1-tiles ${FARSIDE_VIRTUAL_AV1_TILES}
+StateDirectory=farside/virtual-sessions farside/virtual-host
 StateDirectoryMode=0700
 UMask=0077
 KillMode=control-group

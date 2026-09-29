@@ -1,3 +1,4 @@
+#include "FarsideEnv.h"
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionHostController.h"
 #include "VirtualSessionLaunchPlan.h"
@@ -24,7 +25,8 @@ int main(int argc, char **argv)
     sigemptyset(&terminationMask); sigaddset(&terminationMask, SIGTERM); sigaddset(&terminationMask, SIGINT);
     if (sigprocmask(SIG_BLOCK, &terminationMask, nullptr)) return 1;
     QCoreApplication application(argc, argv);
-    application.setApplicationName(QStringLiteral("krdp-virtual-host"));
+    Farside::warnLegacyEnvironment();
+    application.setApplicationName(QStringLiteral("farside-virtual-host"));
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Persistent virtual-desktop RDP broker; does not attach to the physical console."));
     parser.addHelpOption();
@@ -51,7 +53,7 @@ int main(int argc, char **argv)
     // AUD-FIX7: the host keeps its own certificate valid (created when missing, renewed when
     // expired or within 30 days of it, a valid one kept), like krdpserver's (AUD-K3).
     const KRdp::ServerCertificate::Paths certificatePaths{certificate, key};
-    if (!KRdp::ensureHostCertificate(certificatePaths, "krdp-virtual-host")) return 1;
+    if (!KRdp::ensureHostCertificate(certificatePaths, "farside-virtual-host")) return 1;
     if (!readableFile(certificate) || !readableFile(key)) {
         qCritical("Virtual host requires readable absolute TLS files"); return 1;
     }
@@ -81,7 +83,7 @@ int main(int argc, char **argv)
     // a desktop's worker probes its own encoders and replaces this estimate once it reports.
     KRdp::EncoderSupport::applyProcessOverrides();
     const KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding,
-                                         KRdp::parseHostAv1Tiles(parser.value(QStringLiteral("av1-tiles")), "krdp-virtual-host")};
+                                         KRdp::parseHostAv1Tiles(parser.value(QStringLiteral("av1-tiles")), "farside-virtual-host")};
     qInfo().noquote() << "Virtual host video encoders:" << KRdp::EncoderSupport::describe(videoHost.probe) << "- SoftwareEncoding"
                       << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode) << "- AV1 tiles" << KRdp::CodecPolicy::av1TilesName(videoHost.av1Tiles);
     host.setVideoCodecHost(videoHost);
@@ -94,7 +96,7 @@ int main(int argc, char **argv)
     QTimer certificateRenewal;
     certificateRenewal.setInterval(std::chrono::hours(12));
     QObject::connect(&certificateRenewal, &QTimer::timeout, &application, [certificatePaths] {
-        KRdp::ensureHostCertificate(certificatePaths, "krdp-virtual-host");
+        KRdp::ensureHostCertificate(certificatePaths, "farside-virtual-host");
     });
     certificateRenewal.start();
     return application.exec();

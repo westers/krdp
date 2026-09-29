@@ -3,4 +3,4 @@
 # SPDX-License-Identifier: CC0-1.0
 
 $EXTRACTRC ../../server/krdpserversettings.kcfg >> rc.cpp
-$XGETTEXT `find . -name "*.cpp" -o -name "*.qml"` -o $podir/kcm_krdpserver.pot
+$XGETTEXT `find . -name "*.cpp" -o -name "*.qml"` -o $podir/kcm_farside.pot

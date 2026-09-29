@@ -3,4 +3,4 @@
 
 # This service should never be enabled by default, irrespective of
 # distro policy regarding the default enablement state of user units.
-disable app-org.kde.krdpserver.service
+disable app-io.github.westers.farside.server.service

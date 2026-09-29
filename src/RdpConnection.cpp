@@ -488,17 +488,17 @@ void KRdp::selectVaapiDriver()
         return;
     }
 
-    if (qEnvironmentVariableIsSet("KRDP_FORCE_VAAPI_DRIVER")) {
-        const auto forcedDriver = qgetenv("KRDP_FORCE_VAAPI_DRIVER");
+    if (qEnvironmentVariableIsSet("FARSIDE_FORCE_VAAPI_DRIVER")) {
+        const auto forcedDriver = qgetenv("FARSIDE_FORCE_VAAPI_DRIVER");
         if (!forcedDriver.isEmpty()) {
             qputenv("LIBVA_DRIVER_NAME", forcedDriver);
             g_autoAppliedVaapiDriver = true;
-            qCInfo(KRDP) << "Using forced VAAPI driver from KRDP_FORCE_VAAPI_DRIVER:" << forcedDriver;
+            qCInfo(KRDP) << "Using forced VAAPI driver from FARSIDE_FORCE_VAAPI_DRIVER:" << forcedDriver;
         }
         return;
     }
-    if (qEnvironmentVariableIntValue("KRDP_AUTO_VAAPI_DRIVER") == 0 && qEnvironmentVariableIsSet("KRDP_AUTO_VAAPI_DRIVER")) {
-        qCDebug(KRDP) << "Skipping automatic VAAPI driver selection due to KRDP_AUTO_VAAPI_DRIVER=0";
+    if (qEnvironmentVariableIntValue("FARSIDE_AUTO_VAAPI_DRIVER") == 0 && qEnvironmentVariableIsSet("FARSIDE_AUTO_VAAPI_DRIVER")) {
+        qCDebug(KRDP) << "Skipping automatic VAAPI driver selection due to FARSIDE_AUTO_VAAPI_DRIVER=0";
         return;
     }
 

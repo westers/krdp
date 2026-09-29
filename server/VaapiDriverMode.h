@@ -34,12 +34,12 @@ inline std::optional<QString> normalize(const QString &value)
  */
 inline void apply(QProcessEnvironment &environment, const QString &normalized)
 {
-    environment.remove(QStringLiteral("KRDP_FORCE_VAAPI_DRIVER"));
-    environment.remove(QStringLiteral("KRDP_AUTO_VAAPI_DRIVER"));
+    environment.remove(QStringLiteral("FARSIDE_FORCE_VAAPI_DRIVER"));
+    environment.remove(QStringLiteral("FARSIDE_AUTO_VAAPI_DRIVER"));
     if (normalized == QLatin1String("off")) {
-        environment.insert(QStringLiteral("KRDP_AUTO_VAAPI_DRIVER"), QStringLiteral("0"));
+        environment.insert(QStringLiteral("FARSIDE_AUTO_VAAPI_DRIVER"), QStringLiteral("0"));
     } else if (normalized != QLatin1String("auto") && !normalized.isEmpty()) {
-        environment.insert(QStringLiteral("KRDP_FORCE_VAAPI_DRIVER"), normalized);
+        environment.insert(QStringLiteral("FARSIDE_FORCE_VAAPI_DRIVER"), normalized);
         // The administrator's choice wins over one inherited from the desktop session.
         environment.insert(QStringLiteral("LIBVA_DRIVER_NAME"), normalized);
     }
