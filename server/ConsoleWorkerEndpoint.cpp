@@ -411,6 +411,9 @@ bool ConsoleWorkerEndpoint::processRecords()
             m_workerCpuNs = load->cpuNs;
         } else if (const auto stats = ConsoleWorkerWire::encoderStats(*record)) {
             Q_EMIT encoderStatsReceived(*stats);
+        } else if (const auto cursor = ConsoleWorkerWire::cursorShape(*record)) {
+            m_cursorShape = *cursor;
+            Q_EMIT cursorShapeReceived(*cursor);
         } else {
             fail(QStringLiteral("unexpected worker record"));
             return false;
@@ -443,6 +446,7 @@ void ConsoleWorkerEndpoint::workerDisconnected()
     m_encoderCaps.reset();
     m_earlyReports.clear();
     m_workerCpuNs = -1;
+    m_cursorShape.reset();
     if (wasReady) {
         Q_EMIT workerStopped();
     }

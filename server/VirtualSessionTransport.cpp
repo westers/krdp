@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionTransport.h"
+#include "CursorTracker.h"
 #include "LayoutControl.h"
 #include "DeviceControl.h"
 #include "AudioPriority.h"
@@ -300,6 +301,12 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::audioReceived, this, [this](const auto &audio) {
         if (m_playback && authorized()) m_connection->submitExternalAudio(audio.pcm);
     }));
+    // FIX-CURSOR: the desktop's cursor shape as RDP pointer updates; the current one right away
+    // (a reattach, or a client arriving after the last change).
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::cursorShapeReceived, this, [this](const ConsoleWorkerWire::CursorShape &shape) {
+        if (authorized()) CursorTracker::apply(*m_connection->cursor(), shape);
+    }));
+    if (const auto shape = endpoint->cursorShape(); shape && authorized()) CursorTracker::apply(*m_connection->cursor(), *shape);
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::workerStopped, this, [this] {
         unavailable(); // desktop remains supervised independently
     }));

@@ -32,6 +32,9 @@ namespace KRdp::ConsoleWorkerWire
 // 3 (STATS-S6): EncoderConfig carries statsWanted; EncoderStats (worker -> broker, 1 Hz, only
 // while the current EncoderConfig asks for it) carries the encoder's frame counts and encode time.
 //
+// 4 (FIX-CURSOR): Cursor (worker -> broker, after Ready): the desktop's cursor shape - hidden,
+// the default arrow, or a bitmap with its hotspot - whenever it changes, never its position.
+//
 // Worker -> broker order (AUD-FIX8; ConsoleWorkerOutbox is the worker's side):
 //   Hello, [EncoderCaps], Ready, then any record. Before Ready the broker also
 //   accepts EncoderReport (held and applied right after Ready), EncoderLoad
@@ -39,7 +42,7 @@ namespace KRdp::ConsoleWorkerWire
 //   included - fails it.
 // Broker -> worker: nothing but Stop before the worker authenticated, and
 //   nothing but Stop/RequestKeyFrame before Ready.
-constexpr quint16 ProtocolVersion = 3;
+constexpr quint16 ProtocolVersion = 4;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -90,8 +93,9 @@ enum class Kind : quint8 {
     EncoderReport,
     EncoderLoad,
     EncoderStats,
+    Cursor,
 };
-constexpr Kind LastKind = Kind::EncoderStats;
+constexpr Kind LastKind = Kind::Cursor;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;
@@ -163,6 +167,25 @@ struct EncoderStats {
     quint32 framesSkipped = 0;
     qint32 encodeUs = -1;
     bool operator==(const EncoderStats &) const = default;
+};
+
+/**
+ * FIX-CURSOR, worker -> broker, after Ready: the cursor shape the desktop shows now (KWin's
+ * screencast cursor metadata, merged over every captured output). Sent only when it changes and
+ * at most every CursorShape::MinIntervalMs; the broker turns it into RDP pointer updates.
+ * `pixels` is `size` in QImage::Format_ARGB32 (straight alpha, 4 * width bytes per row) and is
+ * present only for Image. The broker's clients get no position: RDP clients move their own pointer.
+ */
+struct CursorShape {
+    enum class Type : quint8 { Hidden = 1, Default = 2, Image = 3 };
+    /// RDP's largest pointer (TS_LARGE_POINTER); anything bigger is sent as Default.
+    static constexpr int MaxDimension = 384;
+    static constexpr int MinIntervalMs = 16;
+    Type type = Type::Default;
+    QPoint hotspot;
+    QSize size{0, 0};
+    QByteArray pixels;
+    bool operator==(const CursorShape &) const = default;
 };
 
 struct Record {
@@ -1452,6 +1475,49 @@ inline QByteArray frame(const EncoderStats &stats)
     stream.setByteOrder(QDataStream::BigEndian);
     stream << stats.intervalMs << stats.framesEncoded << stats.framesSkipped << stats.encodeUs;
     return frame(Kind::EncoderStats, payload);
+}
+
+inline QByteArray frame(const CursorShape &cursor)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << quint8(cursor.type) << qint16(cursor.hotspot.x()) << qint16(cursor.hotspot.y()) << quint16(cursor.size.width())
+           << quint16(cursor.size.height()) << cursor.pixels;
+    return frame(Kind::Cursor, payload);
+}
+
+inline std::optional<CursorShape> cursorShape(const Record &record)
+{
+    constexpr qsizetype MaxPayload = 16 + qsizetype(CursorShape::MaxDimension) * CursorShape::MaxDimension * 4;
+    if (record.kind != Kind::Cursor || record.payload.size() > MaxPayload) {
+        return std::nullopt;
+    }
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    quint8 type = 0;
+    qint16 x = 0;
+    qint16 y = 0;
+    quint16 width = 0;
+    quint16 height = 0;
+    CursorShape cursor;
+    stream >> type >> x >> y >> width >> height >> cursor.pixels;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || type < quint8(CursorShape::Type::Hidden) || type > quint8(CursorShape::Type::Image)) {
+        return std::nullopt;
+    }
+    cursor.type = CursorShape::Type(type);
+    cursor.hotspot = QPoint(x, y);
+    cursor.size = QSize(width, height);
+    if (cursor.type == CursorShape::Type::Image) {
+        // The worker runs as another user: the broker sizes RDP pointer PDUs from this.
+        if (width < 1 || height < 1 || width > CursorShape::MaxDimension || height > CursorShape::MaxDimension
+            || cursor.pixels.size() != qsizetype(width) * height * 4 || x < 0 || y < 0 || x >= width || y >= height) {
+            return std::nullopt;
+        }
+    } else if (width != 0 || height != 0 || x != 0 || y != 0 || !cursor.pixels.isEmpty()) {
+        return std::nullopt;
+    }
+    return cursor;
 }
 
 inline std::optional<EncoderStats> encoderStats(const Record &record)

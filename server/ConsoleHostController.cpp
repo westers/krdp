@@ -5,6 +5,7 @@
 
 #include <QScopeGuard>
 #include "AudioPriority.h"
+#include "CursorTracker.h"
 
 #include <algorithm>
 #include <csignal>
@@ -255,6 +256,12 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
                 client->wireLayout = desired;
             }
             client->session->submitFrame(frame);
+        }
+    });
+    // FIX-CURSOR: the console's cursor shape as RDP pointer updates, to every admitted client.
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::cursorShapeReceived, this, [this](const ConsoleWorkerWire::CursorShape &shape) {
+        for (const auto &client : m_clients) {
+            if (client->connection && m_control.admitted(client->id)) CursorTracker::apply(*client->connection->cursor(), shape);
         }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::audioReceived, this, [this](const ConsoleWorkerWire::Audio &audio) {
@@ -795,6 +802,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
                 return;
             }
             m_control.admit(id);
+            if (const auto shape = m_endpoint.cursorShape()) CursorTracker::apply(*connection->cursor(), *shape);
             syncControlState();
             syncCodecPolicy();
             sendLayouts();
@@ -1524,7 +1532,8 @@ void ConsoleHostController::sendLayouts()
         layout.monitors.append(monitor);
     }
     layout.owner = m_control.owner() ? QString::number(m_control.owner()) : QString();
-    layout.caps.cursorMetadata = false;
+    // FIX-CURSOR: the worker forwards the console's cursor shape (Cursor records), so the
+    // default caps.cursorMetadata = true is now true here too.
     for (const auto &client : m_clients) {
         if (client->connection && client->wantsLayout && m_control.admitted(client->id)) {
             layout.you = m_control.ownsControl(client->id) ? u"owner"_s : u"viewer"_s;

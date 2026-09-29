@@ -51,10 +51,19 @@ public:
     Cursor(RdpConnection *session);
     ~Cursor();
 
+    /**
+     * Shows \a update's image. An update made before the connection streams (or while it is
+     * not) is kept and sent once it does, like hide() and showDefault(): only the latest counts.
+     */
     void update(const CursorUpdate &update);
+    /** The pointer disappears on the client (PointerSystem SYSPTR_NULL). */
+    void hide();
+    /** The client's default pointer (PointerSystem SYSPTR_DEFAULT). */
+    void showDefault();
 
 private:
     void setCursorType(CursorType type);
+    void applyPending();
 
     class Private;
     const std::unique_ptr<Private> d;

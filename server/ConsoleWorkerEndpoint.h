@@ -69,6 +69,11 @@ public:
     {
         return m_workerCpuNs;
     }
+    /** FIX-CURSOR: the worker's current cursor shape (latest Cursor record); nullopt until one arrives. */
+    std::optional<ConsoleWorkerWire::CursorShape> cursorShape() const
+    {
+        return m_cursorShape;
+    }
     bool setMicrophone(const ConsoleWorkerWire::MicrophonePolicy &policy);
     bool sendMicrophoneAudio(const ConsoleWorkerWire::MicrophoneAudio &audio);
     bool resize(const ConsoleWorkerWire::Resize &request);
@@ -107,6 +112,8 @@ Q_SIGNALS:
     void encoderReported(const KRdp::ConsoleWorkerWire::EncoderReport &report);
     /** STATS-S6: the worker's EncoderStats (only after Ready; one before Ready fails the worker). */
     void encoderStatsReceived(const KRdp::ConsoleWorkerWire::EncoderStats &stats);
+    /** FIX-CURSOR: the desktop's cursor shape changed (also in cursorShape()). */
+    void cursorShapeReceived(const KRdp::ConsoleWorkerWire::CursorShape &shape);
     void protocolError(const QString &message);
     /** The worker speaks another paired wire version; always followed by protocolError. */
     void versionMismatch(quint16 workerVersion);
@@ -133,5 +140,6 @@ private:
     std::optional<ConsoleWorkerWire::EncoderCaps> m_encoderCaps;
     QVector<ConsoleWorkerWire::EncoderReport> m_earlyReports;
     qint64 m_workerCpuNs = -1;
+    std::optional<ConsoleWorkerWire::CursorShape> m_cursorShape;
 };
 }

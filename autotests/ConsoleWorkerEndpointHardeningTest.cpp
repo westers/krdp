@@ -60,11 +60,12 @@ class ConsoleWorkerEndpointHardeningTest : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
-    void wireVersionIsThree()
+    void wireVersionIsFour()
     {
         // Reset to 1 on 2026-09-27 (AUD-C-6); 2 since AUD-FIX7 (codec-tagged frames, encoder
-        // records); 3 since STATS-S6 (EncoderConfig::statsWanted, EncoderStats).
-        QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(3));
+        // records); 3 since STATS-S6 (EncoderConfig::statsWanted, EncoderStats); 4 since
+        // FIX-CURSOR (Cursor).
+        QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(4));
     }
 
     void stopBeforeAuthenticationIsDeliveredAfterIt()

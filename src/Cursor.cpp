@@ -6,6 +6,9 @@
 
 #include <QHash>
 
+#include <optional>
+#include <utility>
+
 #include <freerdp/freerdp.h>
 #include <freerdp/peer.h>
 
@@ -36,6 +39,10 @@ public:
     CursorUpdate *lastUsedCursor = nullptr;
 
     QHash<uint32_t, CursorUpdate> cursorCache;
+
+    // FIX-CURSOR: the latest request made while the connection was not streaming yet.
+    std::optional<CursorType> pendingType;
+    CursorUpdate pendingImage;
 };
 
 Cursor::Cursor(RdpConnection *session)
@@ -43,6 +50,52 @@ Cursor::Cursor(RdpConnection *session)
     , d(std::make_unique<Private>())
 {
     d->session = session;
+    // The connection's own thread announces Streaming; the pointer PDUs go out from here.
+    connect(session, &RdpConnection::stateChanged, this, [this](RdpConnection::State state) {
+        if (state == RdpConnection::State::Streaming) {
+            applyPending();
+        }
+    }, Qt::QueuedConnection);
+}
+
+void Cursor::applyPending()
+{
+    const auto type = std::exchange(d->pendingType, std::nullopt);
+    if (!type || d->session->state() != RdpConnection::State::Streaming) {
+        d->pendingType = type;
+        return;
+    }
+    switch (*type) {
+    case CursorType::Hidden:
+        hide();
+        break;
+    case CursorType::SystemDefault:
+        showDefault();
+        break;
+    case CursorType::Image:
+        update(std::exchange(d->pendingImage, {}));
+        break;
+    }
+}
+
+void Cursor::hide()
+{
+    if (d->session->state() != RdpConnection::State::Streaming) {
+        d->pendingType = CursorType::Hidden;
+        d->pendingImage = {};
+        return;
+    }
+    setCursorType(CursorType::Hidden);
+}
+
+void Cursor::showDefault()
+{
+    if (d->session->state() != RdpConnection::State::Streaming) {
+        d->pendingType = CursorType::SystemDefault;
+        d->pendingImage = {};
+        return;
+    }
+    setCursorType(CursorType::SystemDefault);
 }
 
 Cursor::~Cursor()
@@ -51,19 +104,25 @@ Cursor::~Cursor()
 
 void Cursor::update(const Cursor::CursorUpdate &update)
 {
-    if (d->session->state() != RdpConnection::State::Streaming) {
-        return;
-    }
-
     // Ignore updates with no image
     if (update.image.isNull()) {
         return;
     }
 
+    if (d->session->state() != RdpConnection::State::Streaming) {
+        d->pendingType = CursorType::Image;
+        d->pendingImage = update;
+        return;
+    }
+
     auto image = update.image;
-    // RDP cannot handle cursor images larger than 384x384 px. If we get such an
-    // image, discard it and use the system default cursor instead.
-    if (image.width() > 384 || image.height() > 384) {
+    auto settings = d->session->rdpPeerContext()->settings;
+    // RDP cannot handle cursor images larger than 384x384 px, and nothing of 96 px or more
+    // without the client's large pointer support. If we get such an image, discard it and use
+    // the system default cursor instead. Without a pointer cache there is no PointerCached.
+    const bool large = image.width() >= 96 || image.height() >= 96;
+    if (image.width() > 384 || image.height() > 384 || (large && !freerdp_settings_get_uint32(settings, FreeRDP_LargePointerFlag))
+        || freerdp_settings_get_uint32(settings, FreeRDP_PointerCacheSize) == 0) {
         setCursorType(CursorType::SystemDefault);
         return;
     }
@@ -105,7 +164,7 @@ void Cursor::update(const Cursor::CursorUpdate &update)
 
     // Evict least recently used cursor from the cache if it has grown too large.
     if (d->cursorCache.size() >= freerdp_settings_get_uint32(d->session->rdpPeerContext()->settings, FreeRDP_PointerCacheSize)) {
-        auto lru = std::min_element(d->cursorCache.cbegin(), d->cursorCache.cend(), [](const CursorUpdate &first, const CursorUpdate &second) {
+        const auto lru = std::min_element(d->cursorCache.cbegin(), d->cursorCache.cend(), [](const CursorUpdate &first, const CursorUpdate &second) {
             return first.lastUsed < second.lastUsed;
         });
         newCursor.cacheId = lru->cacheId;

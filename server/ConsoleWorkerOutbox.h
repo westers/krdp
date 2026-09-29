@@ -4,6 +4,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <utility>
 
 #include <QByteArray>
@@ -29,7 +30,8 @@ namespace KRdp
  * the next one follows within EncoderLoadIntervalMs. The broker also tolerates reports that arrive
  * before Ready (an older worker), but a worker must not rely on it. EncoderStats (STATS-S6) is
  * never sent before Ready either: one made then is dropped (the broker fails a worker that sends
- * one before Ready).
+ * one before Ready). A Cursor (FIX-CURSOR) made before Ready is held, only the latest, and sent
+ * right after Ready and the held reports: the client must see the shape the desktop starts with.
  */
 class ConsoleWorkerOutbox
 {
@@ -48,6 +50,7 @@ public:
         m_helloSent = false;
         m_readySent = false;
         m_held.clear();
+        m_heldCursor.reset();
     }
 
     void hello(const ConsoleWorkerWire::Hello &hello)
@@ -75,6 +78,22 @@ public:
         const auto held = std::exchange(m_held, {});
         for (const auto &report : held) {
             m_writer(ConsoleWorkerWire::frame(report));
+        }
+        if (const auto cursor = std::exchange(m_heldCursor, std::nullopt)) {
+            m_writer(ConsoleWorkerWire::frame(*cursor));
+        }
+    }
+
+    /** FIX-CURSOR: the desktop's cursor shape; before Ready only the latest is kept. */
+    void cursor(const ConsoleWorkerWire::CursorShape &cursor)
+    {
+        if (!m_helloSent) {
+            return;
+        }
+        if (m_readySent) {
+            m_writer(ConsoleWorkerWire::frame(cursor));
+        } else {
+            m_heldCursor = cursor;
         }
     }
 
@@ -130,5 +149,6 @@ private:
     bool m_helloSent = false;
     bool m_readySent = false;
     QVector<ConsoleWorkerWire::EncoderReport> m_held;
+    std::optional<ConsoleWorkerWire::CursorShape> m_heldCursor;
 };
 }

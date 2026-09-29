@@ -33,6 +33,7 @@
 
 #include "ConsoleWorkerWire.h"
 #include "ConsoleWorkerOutbox.h"
+#include "CursorTracker.h"
 #include "ConsoleInputState.h"
 #include "ConsoleResizeSession.h"
 #include "VirtualResizeSession.h"
@@ -202,11 +203,18 @@ public:
             if (report.encodeMainAvg > 0) m_statsEncodeUs = qint32(std::min<qint64>(report.encodeMainAvg, 10000000));
         });
         connect(&m_session, &AbstractSession::cursorUpdate, this, [this](const PipeWireCursor &cursor) {
-            if (m_mode.physicalActions() && m_control.active && !m_resize.changing() && m_session.outputGeometryResolved()
+            reportCursor(WorkspaceCursorSource, cursor);
+            if (cursor.visible && m_mode.physicalActions() && m_control.active && !m_resize.changing() && m_session.outputGeometryResolved()
                 && m_takeover.observed(m_session.mapToGlobal(cursor.position).toPoint(), m_clock.elapsed())) {
                 reclaimConsole();
             }
         });
+        // FIX-CURSOR: a capture that stopped no longer says where the cursor is.
+        connect(&m_session, &AbstractSession::streamActiveChanged, this, [this](bool active) {
+            if (!active) forgetCursorSource(WorkspaceCursorSource);
+        });
+        m_cursorTimer.setSingleShot(true);
+        connect(&m_cursorTimer, &QTimer::timeout, this, &Worker::flushCursor);
         connect(&m_session, &AbstractSession::outputGeometryChanged, this, [this](const QRect &) {
             m_takeover.outputMoved(m_clock.elapsed());
         });
@@ -214,6 +222,8 @@ public:
             m_connectTimeout.stop();
             // AUD-FIX8: Hello, EncoderCaps, Ready, then the rest (ConsoleWorkerOutbox).
             m_outbox.hello(ConsoleWorkerWire::Hello{m_sessionId, m_uid, m_token});
+            m_cursor.resend(); // FIX-CURSOR: held by the outbox until Ready
+            flushCursor();
             // AUD-FIX7: the encoders this worker really has (its user, its render node): the
             // broker's codec policy chooses among these.
             const auto &probe = EncoderSupport::probe();
@@ -971,10 +981,21 @@ private:
                 m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, QByteArrayLiteral("per-output capture failed")));
                 m_socket.disconnectFromServer();
             });
+            // FIX-CURSOR: every output's capture votes on the cursor (KWin reports it on the one it is over).
+            const quint64 cursorSource = quint64(i) + 1;
+            connect(session.get(), &AbstractSession::cursorUpdate, this, [this, cursorSource](const PipeWireCursor &cursor) {
+                reportCursor(cursorSource, cursor);
+            });
+            connect(session.get(), &AbstractSession::streamActiveChanged, this, [this, cursorSource](bool active) {
+                if (!active) forgetCursorSource(cursorSource);
+            });
+            connect(session.get(), &QObject::destroyed, this, [this, cursorSource] {
+                forgetCursorSource(cursorSource);
+            });
             if (!m_mode.virtualSession) {
                 auto *producer = session.get();
                 connect(producer, &AbstractSession::cursorUpdate, this, [this, producer](const PipeWireCursor &cursor) {
-                    if (m_mode.physicalActions() && m_control.active && !m_resize.changing()
+                    if (cursor.visible && m_mode.physicalActions() && m_control.active && !m_resize.changing()
                         && producer->outputGeometryResolved()
                         && m_takeover.observed(producer->mapToGlobal(cursor.position).toPoint(), m_clock.elapsed()))
                         reclaimConsole();
@@ -986,6 +1007,29 @@ private:
             m_multiSessions.push_back(std::move(session));
         }
         for (const auto &session : m_multiSessions) session->setStreamingEnabled(true);
+    }
+
+    // FIX-CURSOR: shape and visibility only; the client moves its own pointer.
+    void reportCursor(quint64 source, const PipeWireCursor &cursor)
+    {
+        m_cursor.report(source, cursor, m_clock.elapsed());
+        flushCursor();
+    }
+
+    void forgetCursorSource(quint64 source)
+    {
+        m_cursor.forget(source, m_clock.elapsed());
+        flushCursor();
+    }
+
+    /** Sends the cursor shape if one is due, else waits until it is (rate limit, hide delay). */
+    void flushCursor()
+    {
+        if (!m_outbox.helloSent()) return; // resent from Hello on
+        const qint64 now = m_clock.elapsed();
+        if (const auto shape = m_cursor.take(now)) m_outbox.cursor(*shape);
+        const qint64 due = m_cursor.dueIn(now);
+        if (due > 0) m_cursorTimer.start(int(std::min<qint64>(due, 1000)));
     }
 
     void onMultiFrame(qsizetype index, const VideoFrame &frame)
@@ -2651,6 +2695,10 @@ private:
     bool m_authenticatedDesktop = false;
     QLocalSocket m_socket;
     ConsoleWorkerOutbox m_outbox{[this](const QByteArray &record) { m_socket.write(record); }};
+    // FIX-CURSOR: the desktop's cursor shape, merged over the captures, rate-limited to the broker.
+    static constexpr quint64 WorkspaceCursorSource = 0; // m_session; per-output captures are 1 + index
+    CursorTracker m_cursor;
+    QTimer m_cursorTimer;
     ConsoleWorkerWire::Deframer m_deframer;
     PlasmaScreencastV1Session m_session;
     RetainedMultiCapture m_multiCapture;

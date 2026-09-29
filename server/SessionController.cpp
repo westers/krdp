@@ -32,6 +32,8 @@
 
 #include <Clipboard.h>
 #include <Cursor.h>
+
+#include "CursorTracker.h"
 #include <InputHandler.h>
 #include <PortalSession.h>
 #include <RdpConnection.h>
@@ -117,6 +119,8 @@ public:
     {
         m_sni = sni;
         m_clock.start();
+        m_cursorTimer.setSingleShot(true);
+        connect(&m_cursorTimer, &QTimer::timeout, this, &SessionWrapper::flushCursor);
 
         connect(connection->videoStream(), &KRdp::VideoStream::enabledChanged, this, &SessionWrapper::onVideoStreamEnabledChanged, Qt::QueuedConnection);
         connect(connection->videoStream(), &KRdp::VideoStream::requestedFrameRateChanged, this, &SessionWrapper::onRequestedFrameRateChanged, Qt::QueuedConnection);
@@ -410,6 +414,7 @@ public:
         m_sessionConnections.clear();
 
         sessions = std::move(newSessions);
+        m_cursorTracker.resetSources(m_clock.elapsed());
         layout = newLayout;
         if (!(layout.scale > 0.0)) {
             layout.scale = 1.0;
@@ -739,13 +744,16 @@ public:
             return;
         }
 
-        // Only the image and its hotspot reach the client: RDP moves the
-        // pointer client-side, so there is no position here to translate
-        // between the per-monitor sessions and RDP desktop space.
-        KRdp::Cursor::CursorUpdate update;
-        update.hotspot = cursor.hotspot;
-        update.image = cursor.texture;
-        connection->cursor()->update(update);
+        // Only the image, its hotspot and whether it is shown reach the
+        // client: RDP moves the pointer client-side, so there is no position
+        // here to translate between the per-monitor sessions and RDP desktop
+        // space. FIX-CURSOR: merged over the sessions (KWin reports the cursor
+        // absent on every output it is not over) and rate-limited.
+        m_cursorTracker.report(quintptr(session), cursor, m_clock.elapsed());
+        flushCursor();
+        if (!cursor.visible) {
+            return; // no position: hidden, or on another session's output
+        }
 
         // The position is where the pointer really is on the captured (here:
         // the virtual) output, in capture pixels; mapped into KWin-global
@@ -787,6 +795,22 @@ public:
                 qInfo() << "Console activity detected; restoring the physical outputs (the KRDPCTL layout is released, its owner kept)";
                 Q_EMIT consoleActivityDetected();
             }
+        }
+    }
+
+    /** FIX-CURSOR: the cursor shape to the client if one is due, else when it is. */
+    void flushCursor()
+    {
+        if (!connection) {
+            return;
+        }
+        const qint64 now = m_clock.elapsed();
+        if (const auto shape = m_cursorTracker.take(now)) {
+            KRdp::CursorTracker::apply(*connection->cursor(), *shape);
+        }
+        const qint64 due = m_cursorTracker.dueIn(now);
+        if (due > 0) {
+            m_cursorTimer.start(int(std::min<qint64>(due, 1000)));
         }
     }
 
@@ -1126,6 +1150,8 @@ public:
      */
     bool layoutApplyInFlight = false;
     QElapsedTimer m_clock;
+    KRdp::CursorTracker m_cursorTracker;
+    QTimer m_cursorTimer;
     QPointer<KRdp::RdpConnection> connection;
     KStatusNotifierItem *m_sni;
     DisplayWakeGuard *m_displayWakeGuard;
