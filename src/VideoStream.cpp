@@ -1329,14 +1329,17 @@ void VideoStream::encoderBackendReported(VideoCodec codec, bool hardware)
 
 void VideoStream::stepCodecPolicy(bool congested)
 {
-    if (!d->codecPolicyActive || !d->codecPolicy.current) {
+    if (!d->codecPolicy.current) {
         return;
     }
+    // AUD-FIX14: a client that decodes only AVC gets no codec policy, but its link state still
+    // counts (the stats' slow link and limit, the capacity probe): CodecPolicy::stepLink().
+    const bool steering = d->codecPolicyActive;
     // CPU guard input: only a software encoder has one.
     const qint64 cpuNs = d->cpuTimeSource ? d->cpuTimeSource() : processCpuNs();
     const int frames = d->framesEncoded.load();
     const auto sampledAt = clk::steady_clock::now();
-    if (!d->codecPolicy.current->hardware && cpuNs >= 0 && d->cpuNsAtLastSample >= 0) {
+    if (steering && !d->codecPolicy.current->hardware && cpuNs >= 0 && d->cpuNsAtLastSample >= 0) {
         // AUD-FIX4 D3: the estimated encode time per frame against the frame budget, over the
         // encoder's own threads (not every core), plus delivered frames falling short of the cap.
         const auto family = d->codecPolicy.current->family;
@@ -1395,7 +1398,7 @@ void VideoStream::stepCodecPolicy(bool congested)
         in.encodeLoadP95 = d->encodeLoad.p95();
     }
     const bool wasSlow = d->codecPolicy.slowLink;
-    const auto decision = CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now());
+    const auto decision = steering ? CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now()) : CodecPolicy::stepLink(d->codecPolicy, in, clk::steady_clock::now());
     if (!decision.changed && !decision.reason.isEmpty()) {
         qCDebug(KRDP).noquote() << "Codec policy:" << decision.reason;
     }
@@ -1424,7 +1427,9 @@ void VideoStream::stepCodecPolicy(bool congested)
             Q_EMIT keyFrameRequested(monitor);
         }
     }
-    applyCodecDecision(decision);
+    if (steering) {
+        applyCodecDecision(decision);
+    }
 }
 
 std::optional<VideoCodec> VideoStream::negotiatedCodec() const
@@ -1574,7 +1579,7 @@ void VideoStream::updateAdaptiveQuality()
             stepCodecPolicy(*policyCongested);
         }
     });
-    if (d->codecPolicyActive && d->surfacePixels.load() > 0 && clk::steady_clock::now() - d->streamingSince >= WarmupAfterStreamStart) {
+    if (d->codecPolicy.current && d->surfacePixels.load() > 0 && clk::steady_clock::now() - d->streamingSince >= WarmupAfterStreamStart) {
         // The codec policy runs whether or not adaptive quality does. Congestion as
         // AdaptiveQuality sees it: RTT inflation, or the client several frames behind.
         auto *network = d->session->networkDetection();

@@ -800,6 +800,47 @@ private Q_SLOTS:
         QCOMPARE(*state.current, (Choice{Family::Avc, false}));
     }
 
+    // AUD-FIX14: with socket figures the link state is tracked for a pinned client and for one that
+    // decodes only AVC (stepLink: no codec policy) - the stats' slow link and limit - while the
+    // codec never changes; the capacity verdict alone decides, the way back after CapacityFastHold.
+    void linkStateWithoutSteering()
+    {
+        for (const bool avcOnly : {false, true}) {
+            auto in = input(SoftwareEncoding::Auto, softwareEverything(), avcOnly ? QList<Family>{} : QList<Family>{Family::Hevc, Family::Av1});
+            in.adaptive = false;
+            State state;
+            auto now = T0;
+            step(state, in, now);
+            const auto first = *state.current;
+            const auto tick = [&] {
+                now += 1500ms;
+                return avcOnly ? stepLink(state, in, now) : step(state, in, now);
+            };
+            in.bandwidthKbps = 5500;
+            in.networkLimited = false;
+            in.linkSlow = false;
+            for (int i = 0; i < 10; ++i) tick();
+            QVERIFY(!state.slowLink);
+            in.networkLimited = true;
+            in.linkSlow = true;
+            in.linkWhy = QStringLiteral("TCP capacity at most 5800 kbit/s");
+            const auto entered = tick();
+            QVERIFY(state.slowLink);
+            QVERIFY2(entered.linkReason.contains(u"5800"), qPrintable(entered.linkReason));
+            in.linkSlow = false;
+            in.networkLimited = false;
+            in.linkFast = true;
+            in.capacityNow = true;
+            QString reason;
+            const auto from = now;
+            while (state.slowLink && now - from < 30s) reason = tick().linkReason;
+            QVERIFY(!state.slowLink);
+            QVERIFY(now - from >= CapacityFastHold);
+            QVERIFY2(reason.contains(u"recovered"), qPrintable(reason));
+            QCOMPARE(*state.current, first);
+        }
+    }
+
     // p95 over 70 % of the budget: the preset first (AV1 M10 -> M11; M12 = M11 is skipped), then
     // AV1(sw) -> HEVC(sw, at its fastest preset) -> the hardware codec (here AVC); each step at
     // least MinReconfigureInterval after the previous one.

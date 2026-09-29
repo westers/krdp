@@ -943,6 +943,22 @@ inline QString judgeSlowWindow(State &state, const Input &in, Clock::time_point 
 }
 }
 
+/**
+ * AUD-FIX14: the link state alone, for a stream the codec policy does not steer (a client that
+ * decodes only AVC): the capacity-driven slow link (Input::linkSlow) for the stats' slow link and
+ * limit, and the capacity probe. Nothing else in \a state changes; the choice is kept.
+ */
+inline Decision stepLink(State &state, const Input &in, Clock::time_point now)
+{
+    Decision d;
+    if (state.current) d.choice = *state.current;
+    d.settings = state.applied;
+    if (in.linkSlow) {
+        d.capacityProbe = detail::stepCapacityLink(state, in, now, d.linkReason);
+    }
+    return d;
+}
+
 inline Decision step(State &state, const Input &in, Clock::time_point now)
 {
     QString linkReason;
@@ -968,8 +984,9 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
         state.linkWindow.clear();
     }
     bool capacityProbe = false;
-    if (in.adaptive && in.linkSlow) {
-        // AUD-FIX14: socket figures: the measured capacity decides.
+    if (in.linkSlow) {
+        // AUD-FIX14: socket figures: the measured capacity decides. Tracked for a pinned client
+        // too (the stats' slow link and limit); only an adaptive one changes its codec for it.
         capacityProbe = detail::stepCapacityLink(state, in, now, linkReason);
     } else if (in.adaptive && in.bandwidthKbps) {
         const double kbps = *in.bandwidthKbps;
