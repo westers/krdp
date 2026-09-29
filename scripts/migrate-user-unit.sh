@@ -21,6 +21,10 @@ if [[ -d $old_dir ]]; then
     done
 fi
 systemctl --user daemon-reload
-if [[ $(systemctl --user is-enabled "$old" 2>/dev/null || true) == enabled ]]; then
+# Removing the old package can leave its per-user wants symlink pointing at a
+# missing unit. systemctl then reports "not-found" even though the user had
+# enabled it, so keep that recorded choice during the migration.
+old_wants=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/plasma-workspace.target.wants/$old
+if [[ $(systemctl --user is-enabled "$old" 2>/dev/null || true) == enabled || -L $old_wants ]]; then
     systemctl --user enable "$new"
 fi
