@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Steve Westers
 # SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
-# Build the single `krdp` system deb (normal /usr paths) from committed
+# Build the single `farside-server` system deb (normal /usr paths) from committed
 # sources. It never installs anything and never touches ~/dev/krdp/build or
 # ~/dev/krdp/.deps: both KRdp and the private KPipeWire are built from
 # `git archive` exports inside the build directory.
@@ -46,7 +46,7 @@ for tool in cmake ninja git file dpkg-shlibdeps dpkg-gencontrol dpkg-deb; do
 done
 
 if [[ -n $(git -C "$root" status --porcelain --untracked-files=no) && ${KRDP_PKG_ALLOW_DIRTY:-0} != 1 ]]; then
-    echo "uncommitted changes in $root; commit them or set FARSIDE_PKG_ALLOW_DIRTY=1" >&2
+    echo "uncommitted changes in $root; commit them or set KRDP_PKG_ALLOW_DIRTY=1" >&2
     exit 1
 fi
 
@@ -121,7 +121,7 @@ if [[ -s "$root/packaging/farside/lintian-overrides" ]]; then
     install -D -m 0644 "$root/packaging/farside/lintian-overrides" "$pkgroot/usr/share/lintian/overrides/farside-server"
 fi
 cat >"$work/debian/changelog" <<EOF
-farside-server ($version) resolute; urgency=medium
+farside ($version) resolute; urgency=medium
 
   * Build of github.com/westers/krdp commit
     $commit,
