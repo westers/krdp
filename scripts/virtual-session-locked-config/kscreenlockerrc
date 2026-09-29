@@ -1,0 +1,10 @@
+# FARSIDE-VLOCK: installed into the desktop's XDG_CONFIG_DIRS, never its profile.
+# The desktop runs under bwrap with no_new_privs, so the setgid unix_chkpwd that
+# the kde PAM stack needs cannot read /etc/shadow and the lock screen can never
+# accept a password. Every reconnect is already authenticated by the RDP login,
+# so automatic locking is off, and [$i] keeps a retained profile from re-enabling it.
+[Daemon][$i]
+Autolock=false
+Lock=false
+LockOnResume=false
+LockOnStart=false

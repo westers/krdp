@@ -170,6 +170,13 @@ if(DBUS_RUN_SESSION_EXECUTABLE AND GDBUS_EXECUTABLE AND BASH_EXECUTABLE)
         -- ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSessionBusTest.sh)
 endif()
 
+find_program(KREADCONFIG6_EXECUTABLE kreadconfig6)
+if(KREADCONFIG6_EXECUTABLE AND BASH_EXECUTABLE)
+    add_test(NAME VirtualSessionLockConfigTest COMMAND ${BASH_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSessionLockConfigTest.sh ${KREADCONFIG6_EXECUTABLE}
+        ${CMAKE_SOURCE_DIR}/scripts/virtual-session-locked-config ${CMAKE_SOURCE_DIR}/scripts/launch-virtual-session.sh)
+endif()
+
 find_program(PIPEWIRE_EXECUTABLE pipewire)
 if(PIPEWIRE_EXECUTABLE)
     add_executable(PipeWireMicrophoneTest PipeWireMicrophoneTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleMicrophoneSession.h ${CMAKE_SOURCE_DIR}/src/PipeWireMicrophone.cpp)

@@ -1,0 +1,4 @@
+# FARSIDE-VLOCK: no manual lock either (Meta+L, the D-Bus Lock call, Plasma's
+# Lock menu entries); see kscreenlockerrc next to this file.
+[KDE Action Restrictions][$i]
+action/lock_screen=false

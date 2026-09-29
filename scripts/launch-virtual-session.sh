@@ -47,7 +47,7 @@ done
 # Exec in a desktop file must be a single literal path, not desktop-entry syntax.
 [[ $worker =~ ^/[A-Za-z0-9_./-]+$ && -x $worker && $(realpath -e "$worker") == "$worker" ]]
 [[ $support == /* && $(realpath -e "$support") == "$support" ]]
-for required in virtual-session-bus.conf virtual-session-pipewire.conf; do [[ -f $support/$required ]]; done
+for required in virtual-session-bus.conf virtual-session-pipewire.conf locked-config/kscreenlockerrc locked-config/kdeglobals; do [[ -f $support/$required ]]; done
 [[ -d $support/defaults && ${#allowed_pci[@]} -gt 0 ]]
 inner=$(dirname "$(realpath -e "$0")")/virtual-session-desktop.sh
 [[ -f $inner ]]
@@ -102,6 +102,8 @@ mkdir -p "$profile/data/applications" "$runtime/config-defaults"
 [[ $(realpath -e "$profile/data/applications") == "$profile/data/applications" ]]
 [[ ! -L $profile/data/applications/org.kde.krdpconsoleworker.desktop ]]
 ln -s /etc/xdg/menus "$runtime/config-defaults/menus"
+# FARSIDE-VLOCK: the lock screen cannot authenticate under no_new_privs; lock it off.
+cp "$support/locked-config/kscreenlockerrc" "$support/locked-config/kdeglobals" "$runtime/config-defaults/"
 printf '[Desktop Entry]\nType=Application\nName=KRDP Virtual Capture\nNoDisplay=true\nExec=%s\nX-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1,org_kde_kwin_fake_input\n' "$worker" \
     >"$profile/data/applications/org.kde.krdpconsoleworker.desktop"
 apparmor_query=()
