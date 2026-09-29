@@ -1,6 +1,6 @@
 {
     "KPlugin": {
-        "Description": "Configure Remote Desktop",
+        "Description": "Configure Farside Remote Desktop",
         "Description[ar]": "اضبط سطح المكتب بعيد",
         "Description[az]": "İş masasına uzaqdan girişi tənzimləmək",
         "Description[bg]": "Настройване на отдалечено работно място",
@@ -45,7 +45,7 @@
             "phone"
         ],
         "Icon": "preferences-system-network-remote",
-        "Name": "Remote Desktop",
+        "Name": "Farside Remote Desktop",
         "Name[ar]": "سطح المكتب بعيد",
         "Name[az]": "Uzaq iş masası",
         "Name[bg]": "Отдалечено работно място",
@@ -86,7 +86,7 @@
         "Name[zh_CN]": "远程桌面",
         "Name[zh_TW]": "遠端桌面"
     },
-    "X-KDE-Keywords": "KRDP,remote desktop",
+    "X-KDE-Keywords": "Farside,RDP,remote desktop,KRDP",
     "X-KDE-Keywords[ar]": "سطح المكتب بعيد,كردب",
     "X-KDE-Keywords[az]": "KRDP,remote desktop,uzaq iş masası",
     "X-KDE-Keywords[bg]": "KRDP,отдалечено работно място",
