@@ -85,6 +85,10 @@
  *                               logged as `clipboard: server text "..."`, and then announced
  *                               back (`clipboard: echoed`), the way Klipper re-owns what the
  *                               client just pasted from the server.
+ *            --log-pointer      log every RDP pointer update the server sends, as it arrives:
+ *                               `pointer: new WxH hot X,Y bpp B cache I` (PointerNew; `large`
+ *                               for PointerLarge, `color` for PointerColor), `pointer: cached I`,
+ *                               `pointer: system null|default` (FIX-CURSOR)
  *            --disp WxH         also load the standard Display Control channel
  *                               (MS-RDPEDISP, over drdynvc) and, once the server's caps
  *                               arrive, ask for a one-monitor WxH desktop the way a
@@ -108,6 +112,7 @@
  */
 
 #include <atomic>
+#include <utility>
 #include <cstdarg>
 #include <csignal>
 #include <cstdio>
@@ -144,6 +149,7 @@
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
 #include <freerdp/gdi/gfx.h>
+#include <freerdp/pointer.h>
 #include <freerdp/svc.h>
 #include <winpr/wlog.h>
 #include <winpr/wtsapi.h>
@@ -186,6 +192,13 @@ struct Probe {
     qint64 rawGapMs = RawSequenceGapMs;
     bool gfx = false;
     bool media = false;
+    /** --log-pointer: log the server's pointer updates (the originals still run). */
+    bool logPointer = false;
+    pPointerSystem pointerSystem = nullptr;
+    pPointerColor pointerColor = nullptr;
+    pPointerNew pointerNew = nullptr;
+    pPointerCached pointerCached = nullptr;
+    pPointerLarge pointerLarge = nullptr;
     /** --disp: the one-monitor layout to ask for over MS-RDPEDISP (empty: channel not loaded). */
     UINT32 dispWidth = 0;
     UINT32 dispHeight = 0;
@@ -1016,6 +1029,44 @@ BOOL desktopResize(rdpContext *context)
     return gdi_resize(context->gdi, width, height);
 }
 
+BOOL logPointerSystem(rdpContext *context, const POINTER_SYSTEM_UPDATE *update)
+{
+    logf("pointer: system %s", update->type == SYSPTR_NULL ? "null" : update->type == SYSPTR_DEFAULT ? "default" : "other");
+    const auto original = probeOf(context)->pointerSystem;
+    return original ? original(context, update) : TRUE;
+}
+
+BOOL logPointerColor(rdpContext *context, const POINTER_COLOR_UPDATE *update)
+{
+    logf("pointer: color %ux%u hot %u,%u bpp 24 cache %u", update->width, update->height, update->hotSpotX, update->hotSpotY, update->cacheIndex);
+    const auto original = probeOf(context)->pointerColor;
+    return original ? original(context, update) : TRUE;
+}
+
+BOOL logPointerNew(rdpContext *context, const POINTER_NEW_UPDATE *update)
+{
+    const auto &color = update->colorPtrAttr;
+    logf("pointer: new %ux%u hot %u,%u bpp %u cache %u xor %u", color.width, color.height, color.hotSpotX, color.hotSpotY, update->xorBpp, color.cacheIndex,
+         color.lengthXorMask);
+    const auto original = probeOf(context)->pointerNew;
+    return original ? original(context, update) : TRUE;
+}
+
+BOOL logPointerCached(rdpContext *context, const POINTER_CACHED_UPDATE *update)
+{
+    logf("pointer: cached %u", update->cacheIndex);
+    const auto original = probeOf(context)->pointerCached;
+    return original ? original(context, update) : TRUE;
+}
+
+BOOL logPointerLarge(rdpContext *context, const POINTER_LARGE_UPDATE *update)
+{
+    logf("pointer: large %ux%u hot %u,%u bpp %u cache %u xor %u", update->width, update->height, update->hotSpotX, update->hotSpotY, update->xorBpp,
+         update->cacheIndex, update->lengthXorMask);
+    const auto original = probeOf(context)->pointerLarge;
+    return original ? original(context, update) : TRUE;
+}
+
 BOOL postConnect(freerdp *instance)
 {
     auto *probe = probeOf(instance->context);
@@ -1025,6 +1076,14 @@ BOOL postConnect(freerdp *instance)
             return FALSE;
         }
         instance->context->update->DesktopResize = desktopResize;
+    }
+    if (probe->logPointer) {
+        rdpPointerUpdate *pointer = instance->context->update->pointer;
+        probe->pointerSystem = std::exchange(pointer->PointerSystem, logPointerSystem);
+        probe->pointerColor = std::exchange(pointer->PointerColor, logPointerColor);
+        probe->pointerNew = std::exchange(pointer->PointerNew, logPointerNew);
+        probe->pointerCached = std::exchange(pointer->PointerCached, logPointerCached);
+        probe->pointerLarge = std::exchange(pointer->PointerLarge, logPointerLarge);
     }
     logf("connected (security protocol %u)", freerdp_settings_get_uint32(instance->context->settings, FreeRDP_SelectedProtocol));
     return TRUE;
@@ -1107,7 +1166,7 @@ int usage()
 {
     std::fprintf(stderr,
                  "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
-                 "[--gfx [--gfx-count] [--gfx-ack-delay MS] [--refresh-rect-idle MS [--refresh-rect-count N]]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall|refuse-then-stall] [--no-krdpctl] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
+                 "[--gfx [--gfx-count] [--gfx-ack-delay MS] [--refresh-rect-idle MS [--refresh-rect-count N]]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall|refuse-then-stall] [--no-krdpctl] [--log-pointer] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
     return 2;
 }
 
@@ -1194,6 +1253,8 @@ int main(int argc, char **argv)
             probe.rawBodies.push_back(body);
         } else if (arg == QLatin1String("--gfx")) {
             probe.gfx = true;
+        } else if (arg == QLatin1String("--log-pointer")) {
+            probe.logPointer = true;
         } else if (arg == QLatin1String("--gfx-count")) {
             probe.gfxCountOnly = true;
         } else if (arg == QLatin1String("--refresh-rect-idle") && i + 1 < argc) {

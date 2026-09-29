@@ -71,6 +71,12 @@ if [ -n "${KRDP_E2E_MOTION:-}" ]; then
     env WAYLAND_DISPLAY=wayland-0 SDL_VIDEODRIVER=wayland ffplay -loglevel error -an -fs -f lavfi \
         -i "testsrc2=size=${KRDP_E2E_WIDTH}x${KRDP_E2E_HEIGHT}:rate=30" >"$HOME/motion.log" 2>&1 & children="$children $!"
 fi
+# FIX-CURSOR: a full-screen window whose cursor shape follows $R/cursor-shape.
+if [ -n "${KRDP_E2E_CURSOR_CLIENT:-}" ]; then
+    echo arrow >"$R/cursor-shape"
+    env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland "$KRDP_E2E_CURSOR_CLIENT" "$R/cursor-shape" >"$HOME/cursor-client.log" 2>&1 & children="$children $!"
+    sleep 1
+fi
 : >"$R/session-ready"
 set +e
 # One worker per broker socket, like the desktop loop; worker-args says which kind (console or virtual).
@@ -204,17 +210,20 @@ private Q_SLOTS:
     void codecSwitchAtAttach();
     void coalesceKeepsEveryOutputAlive_data();
     void coalesceKeepsEveryOutputAlive();
+    void cursorShapeReachesTheBroker_data();
+    void cursorShapeReachesTheBroker();
     void cleanupTestCase();
 
 private:
     /// The session with \a outputs KWin virtual outputs of \a size, started on first use (nullptr:
     /// failed). With \a motion (and ffplay installed), a test pattern plays full screen in it.
-    PrivateSession *session(int outputs, QSize size = QSize(1280, 720), bool motion = false);
+    /// With \a cursorClient, CursorShapeClient runs full screen in it (FIX-CURSOR).
+    PrivateSession *session(int outputs, QSize size = QSize(1280, 720), bool motion = false, bool cursorClient = false);
     /// Starts one worker in \a session behind \a endpoint and records what it sends into \a run.
     bool startWorker(PrivateSession &session, bool virtualDesktop, ConsoleWorkerEndpoint &endpoint, WorkerRun &run);
     void stopWorker(PrivateSession &session, ConsoleWorkerEndpoint &endpoint);
 
-    std::map<std::tuple<int, int, int, bool>, PrivateSession> m_sessions;
+    std::map<std::tuple<int, int, int, bool, bool>, PrivateSession> m_sessions;
     QString m_skip;
     QString m_renderNode;
 };
@@ -240,9 +249,9 @@ void WorkerEndToEndTest::initTestCase()
     }
 }
 
-PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion)
+PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion, bool cursorClient)
 {
-    const auto key = std::tuple(outputs, size.width(), size.height(), motion);
+    const auto key = std::tuple(outputs, size.width(), size.height(), motion, cursorClient);
     if (const auto it = m_sessions.find(key); it != m_sessions.end()) {
         if (!it->second.process || it->second.process->state() != QProcess::NotRunning) {
             return it->second.process ? &it->second : nullptr;
@@ -254,7 +263,9 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
     }
     // Sessions of another output size or motion are ended first (the rows run one size after another).
     for (auto &[other, running] : m_sessions) {
-        if ((std::get<1>(other) != size.width() || std::get<2>(other) != size.height() || std::get<3>(other) != motion) && running.process
+        if ((std::get<1>(other) != size.width() || std::get<2>(other) != size.height() || std::get<3>(other) != motion
+             || std::get<4>(other) != cursorClient)
+            && running.process
             && running.process->state() != QProcess::NotRunning) {
             running.process->terminate();
             if (!running.process->waitForFinished(5000)) {
@@ -337,6 +348,7 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
     // AUD-FIX11: motion as on cray (testsrc2 at 30 fps); KRDP_E2E_MOTION=0 turns it off.
     if (motion && qEnvironmentVariable("KRDP_E2E_MOTION") != QLatin1String("0") && !QStandardPaths::findExecutable(QStringLiteral("ffplay")).isEmpty())
         set("KRDP_E2E_MOTION", QStringLiteral("1"));
+    if (cursorClient) set("KRDP_E2E_CURSOR_CLIENT", QStringLiteral(KRDP_E2E_CURSOR_CLIENT));
     if (qEnvironmentVariableIsSet("KRDP_E2E_LOGGING_RULES")) set("QT_LOGGING_RULES", qEnvironmentVariable("KRDP_E2E_LOGGING_RULES"));
     if (qEnvironmentVariableIsSet("KRDP_E2E_MESSAGE_PATTERN")) set("QT_MESSAGE_PATTERN", qEnvironmentVariable("KRDP_E2E_MESSAGE_PATTERN"));
 
@@ -865,6 +877,131 @@ void WorkerEndToEndTest::coalesceKeepsEveryOutputAlive()
         if (out.open(QIODevice::WriteOnly)) out.write(since.toUtf8());
     }
     QVERIFY2(longest <= 2000, qPrintable(QStringLiteral("output %1 was silent for %2 ms (from +%3 ms)").arg(moving).arg(longest).arg(longestAt)));
+    stopWorker(*s, endpoint);
+}
+
+void WorkerEndToEndTest::cursorShapeReachesTheBroker_data()
+{
+    QTest::addColumn<bool>("virtualDesktop");
+    QTest::newRow("virtual desktop (:3395)") << true;
+    QTest::newRow("console session (:3391)") << false;
+}
+
+void WorkerEndToEndTest::cursorShapeReachesTheBroker()
+{
+    // FIX-CURSOR: KWin changes the cursor over a window (arrow -> I-beam -> hidden -> resize ->
+    // arrow); the real worker must report each shape to the broker as a Cursor record, with the
+    // bitmap, and never for a mere move.
+    using Shape = ConsoleWorkerWire::CursorShape;
+    QFETCH(bool, virtualDesktop);
+    if (!m_skip.isEmpty()) {
+        QSKIP(qPrintable(m_skip));
+    }
+    auto *s = session(1, QSize(1280, 720), false, true);
+    QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+
+    ConsoleWorkerEndpoint endpoint;
+    WorkerRun run;
+    QVector<Shape> cursors;
+    connect(&endpoint, &ConsoleWorkerEndpoint::cursorShapeReceived, this, [&cursors](const Shape &shape) {
+        cursors.append(shape);
+    });
+    connect(&endpoint, &ConsoleWorkerEndpoint::workerReady, this, [&endpoint](const auto &) {
+        endpoint.setControlState({1, true});
+        endpoint.requestKeyFrame();
+    });
+    const auto dumpLogs = qScopeGuard([&] {
+        if (!QTest::currentTestFailed()) return;
+        QStringList seen;
+        for (const auto &shape : cursors)
+            seen << QStringLiteral("%1 %2x%3").arg(int(shape.type)).arg(shape.size.width()).arg(shape.size.height());
+        qWarning().noquote() << "cursor records:" << seen.join(QStringLiteral(", ")) << "\nworker.log:\n" << s->log(QStringLiteral("worker.log"), 4000)
+                             << "\nkwin.log:\n" << s->log(QStringLiteral("kwin.log"), 2000) << "\ncursor-client.log:\n"
+                             << s->log(QStringLiteral("cursor-client.log"), 1000);
+    });
+    QVERIFY(startWorker(*s, virtualDesktop, endpoint, run));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    const auto reap = qScopeGuard([&] {
+        if (QFileInfo::exists(exitFile)) return;
+        endpoint.stopWorker();
+        if (!QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 15000)) qWarning("the worker did not stop");
+    });
+    QTRY_VERIFY_WITH_TIMEOUT(endpoint.ready() || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 45000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    QVERIFY(endpoint.ready());
+
+    const auto move = [&endpoint](QPointF to) {
+        ConsoleWorkerWire::Input input;
+        input.type = ConsoleWorkerWire::Input::Type::Mouse;
+        input.eventType = QEvent::MouseMove;
+        input.position = to;
+        endpoint.sendInput(input);
+    };
+    const auto setShape = [&](const char *word) {
+        QFile control(s->runtime->path() + QStringLiteral("/cursor-shape"));
+        QVERIFY(control.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        control.write(word);
+    };
+    const auto lastImage = [&cursors]() -> std::optional<Shape> {
+        for (auto it = cursors.crbegin(); it != cursors.crend(); ++it) {
+            if (it->type == Shape::Type::Image) return *it;
+        }
+        return std::nullopt;
+    };
+    // The pointer onto the window (it is full screen): KWin shows the client's arrow.
+    move({600, 300});
+    move({640, 360});
+    QTRY_VERIFY_WITH_TIMEOUT(lastImage(), 15000);
+    const Shape arrow = *lastImage();
+    QVERIFY(arrow.size.width() >= 8 && arrow.size.width() <= Shape::MaxDimension);
+    QCOMPARE(arrow.pixels.size(), qsizetype(arrow.size.width()) * arrow.size.height() * 4);
+
+    // Moves alone send nothing.
+    const qsizetype beforeMoves = cursors.size();
+    for (int i = 0; i < 30; ++i) {
+        move({400.0 + 10 * i, 300.0 + 5 * i});
+        QTest::qWait(20);
+    }
+    QTest::qWait(300);
+    QCOMPARE(cursors.size(), beforeMoves);
+
+    // KWin sends a changed bitmap with its next record of the output (a move or a repaint): the
+    // pointer keeps moving by a pixel, as a hand on a mouse does, until the shape arrives.
+    int nudge = 0;
+    const auto whileMoving = [&](const std::function<bool()> &arrived) {
+        QElapsedTimer timer;
+        timer.start();
+        while (!arrived() && timer.elapsed() < 10000) {
+            move({640.0 + (++nudge % 2), 360.0});
+            QTest::qWait(50);
+        }
+        return arrived();
+    };
+    // The I-beam (a text field): a new bitmap.
+    setShape("ibeam");
+    QVERIFY(whileMoving([&] {
+        return cursors.constLast().type == Shape::Type::Image && cursors.constLast().pixels != arrow.pixels;
+    }));
+    const Shape ibeam = cursors.constLast();
+    // Hidden (a full-screen video): Hidden, not an image.
+    setShape("blank");
+    QVERIFY(whileMoving([&] {
+        return cursors.constLast().type == Shape::Type::Hidden;
+    }));
+    // A window edge's resize cursor: shown again, a third bitmap.
+    setShape("sizehor");
+    QVERIFY(whileMoving([&] {
+        return cursors.constLast().type == Shape::Type::Image && cursors.constLast().pixels != ibeam.pixels && cursors.constLast().pixels != arrow.pixels;
+    }));
+    // And back to the arrow.
+    setShape("arrow");
+    QVERIFY(whileMoving([&] {
+        return cursors.constLast() == arrow;
+    }));
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    qInfo().noquote() << "cursor records:" << cursors.size() << "arrow" << arrow.size << "hot" << arrow.hotspot << "ibeam" << ibeam.size << "hot" << ibeam.hotspot;
     stopWorker(*s, endpoint);
 }
 

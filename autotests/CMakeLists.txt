@@ -398,6 +398,13 @@ target_include_directories(ConsoleWorkerEndpointTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(ConsoleWorkerEndpointTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
 add_test(NAME ConsoleWorkerEndpointTest COMMAND ConsoleWorkerEndpointTest)
 
+# FIX-CURSOR: the cursor shape tracker, the worker wire's Cursor record, the outbox and the endpoint.
+add_executable(CursorShapeTest CursorShapeTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
+target_include_directories(CursorShapeTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(CursorShapeTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
+add_test(NAME CursorShapeTest COMMAND CursorShapeTest)
+set_tests_properties(CursorShapeTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # AUD-FIX8 B3: render nodes in a virtual desktop's sandbox (bwrap), groups, VaapiDriverMode.
 add_executable(RenderAccessTest RenderAccessTest.cpp)
 target_include_directories(RenderAccessTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
@@ -409,14 +416,18 @@ set_tests_properties(RenderAccessTest PROPERTIES TIMEOUT 120)
 # private headless session (own D-Bus without activation, PipeWire, WirePlumber, kwin_wayland
 # --virtual) against the real broker endpoint: Ready, encoder caps and H.264 keyframes.
 if(TARGET krdp-console-worker)
+    # FIX-CURSOR: a Wayland window that changes its cursor shape on request.
+    add_executable(krdp-e2e-cursor-client CursorShapeClient.cpp)
+    target_link_libraries(krdp-e2e-cursor-client PRIVATE Qt6::Gui)
     add_executable(WorkerEndToEndTest WorkerEndToEndTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
         ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp)
     target_include_directories(WorkerEndToEndTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
     target_link_libraries(WorkerEndToEndTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp PkgConfig::AVCodec)
     target_compile_definitions(WorkerEndToEndTest PRIVATE
         KRDP_CONSOLE_WORKER="$<TARGET_FILE:krdp-console-worker>"
-        KRDP_SERVER_DIR="${CMAKE_SOURCE_DIR}/server")
-    add_dependencies(WorkerEndToEndTest krdp-console-worker)
+        KRDP_SERVER_DIR="${CMAKE_SOURCE_DIR}/server"
+        KRDP_E2E_CURSOR_CLIENT="$<TARGET_FILE:krdp-e2e-cursor-client>")
+    add_dependencies(WorkerEndToEndTest krdp-console-worker krdp-e2e-cursor-client)
     add_test(NAME WorkerEndToEndTest COMMAND WorkerEndToEndTest)
     set_tests_properties(WorkerEndToEndTest PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
 endif()
@@ -525,6 +536,18 @@ if(TARGET krdpctl-probe)
     add_dependencies(VideoFlowLoopbackTest krdpctl-probe)
     add_test(NAME VideoFlowLoopbackTest COMMAND VideoFlowLoopbackTest)
     set_tests_properties(VideoFlowLoopbackTest PROPERTIES TIMEOUT 180)
+endif()
+
+# FIX-CURSOR: a worker's Cursor records become RDP pointer updates at a real libfreerdp client.
+if(TARGET krdpctl-probe)
+    add_executable(CursorLoopbackTest CursorLoopbackTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
+    target_include_directories(CursorLoopbackTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+    target_include_directories(CursorLoopbackTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+    target_link_libraries(CursorLoopbackTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
+    target_compile_definitions(CursorLoopbackTest PRIVATE KRDPCTL_PROBE="$<TARGET_FILE:krdpctl-probe>")
+    add_dependencies(CursorLoopbackTest krdpctl-probe)
+    add_test(NAME CursorLoopbackTest COMMAND CursorLoopbackTest)
+    set_tests_properties(CursorLoopbackTest PROPERTIES TIMEOUT 180 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
 # AUD-FIX5: a stock client that stalls on (or ignores) a clipboard request still gets its picture.
