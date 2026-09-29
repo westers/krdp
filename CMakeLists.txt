@@ -206,7 +206,7 @@ endif()
 
 if(KRDP_BUILD_SYSTEM_PACKAGE)
     # Runtime libraries only: the unversioned libKPipeWire*.so links are for builds.
-    install(FILES packaging/farside/icons/io.github.westers.farside.svg
+    install(FILES packaging/farside/icons/io.github.westers.farside.server.svg
         DESTINATION ${KDE_INSTALL_FULL_ICONDIR}/hicolor/scalable/apps)
     install(PROGRAMS scripts/migrate-user-unit.sh scripts/migrate-retained-journal.sh
         DESTINATION ${KDE_INSTALL_DATADIR}/farside)

@@ -2,7 +2,7 @@
 [Desktop Entry]
 Type=Application
 Exec=@CMAKE_INSTALL_PREFIX@/bin/farside-server
-Icon=io.github.westers.farside
+Icon=io.github.westers.farside.server
 Terminal=false
 NoDisplay=true
 Name=Farside Server

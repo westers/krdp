@@ -181,6 +181,7 @@ for path in ./usr/bin/farside-server ./usr/bin/farside-console-host ./usr/bin/fa
     ./usr/share/farside/virtual-session/launch-virtual-session.sh \
     ./usr/share/applications/io.github.westers.farside.server.desktop \
     ./usr/share/applications/io.github.westers.farside.consoleworker.desktop \
+    ./usr/share/icons/hicolor/scalable/apps/io.github.westers.farside.server.svg \
     "./usr/lib/$multiarch/qt6/plugins/plasma/kcms/systemsettings/kcm_farside.so"; do
     grep -qxF -- "$path" <<<"$contents" || { echo "missing from package: $path" >&2; exit 1; }
 done
@@ -190,6 +191,10 @@ if grep -E -- '-probe$|^\./opt/|/cmake/|/lib[^/]*\.so$|/include/' <<<"$contents"
 fi
 if grep -E '^\./(usr/bin/krdp|usr/lib/systemd/(user|system)/.*krdp|usr/share/applications/(org\.kde\.krdp|kcm_krdp)|usr/share/qlogging-categories6/(krdp|kcm_krdp)|usr/share/farside/.*/krdpserverrc|usr/lib/[^/]+/krdp/)' <<<"$contents"; then
     echo "Farside package still installs a KRDP identity" >&2
+    exit 1
+fi
+if grep -qxF './usr/share/icons/hicolor/scalable/apps/io.github.westers.farside.svg' <<<"$contents"; then
+    echo 'the server icon path overlaps farside-client' >&2
     exit 1
 fi
 echo "farside-server system deb: $deb"

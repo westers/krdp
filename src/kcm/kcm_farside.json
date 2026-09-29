@@ -6,7 +6,7 @@
             "handset",
             "phone"
         ],
-        "Icon": "io.github.westers.farside",
+        "Icon": "io.github.westers.farside.server",
         "Name": "Farside Remote Desktop"
     },
     "X-KDE-Keywords": "Farside,RDP,remote desktop"
