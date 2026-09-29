@@ -360,6 +360,27 @@ constexpr auto RecoverHold = std::chrono::seconds(20);
  * count as restraint.
  */
 constexpr double RungGrowth = ProbeGrowth;
+/**
+ * AUD-FIX14 (cray a312776, Buzz on Wi-Fi): with socket figures (Input::linkSlow set) the slow link
+ * follows the measured capacity alone (LinkEvidence::Verdict::slow / fast, which judge it over
+ * windows with percentiles, so RTT spikes and retransmits only corroborate):
+ * - enter at once on Input::linkSlow (the capacity stayed under the threshold for its window);
+ * - leave once Input::linkFast has held for CapacityFastHold (doubled for every flap, see
+ *   RecoverFlapWindow), whatever the delivery throttle or adaptive quality do; the old ways back
+ *   (goodput above FastAboveMbps, the software probe at its ceiling) still count;
+ * - while slow with no capacity sample (a sender that never fills the path proves nothing), a
+ *   capacity probe (Decision::capacityProbe: VideoStream asks every surface for a keyframe, a burst
+ *   TCP can measure the path with) every CapacityProbeHold, doubled for every probe that measured
+ *   no recovery (up to 2^ProbeMaxDoublings). A probe burst the path absorbed without one
+ *   network-limited sample (the sender stayed application-limited, the queue clear, for
+ *   CapacityProbeJudge) is headroom too: CapacityProbesAbsorbed of them in a row recover;
+ * - the software HEVC/AV1 cap rises to TargetShareOfGoodput of the measured capacity while the
+ *   link is clear, so the stream itself probes as high as TCP says the path goes.
+ */
+constexpr auto CapacityFastHold = std::chrono::seconds(5);
+constexpr auto CapacityProbeHold = std::chrono::seconds(10);
+constexpr auto CapacityProbeJudge = std::chrono::seconds(6);
+constexpr int CapacityProbesAbsorbed = 2;
 constexpr auto RecoverFlapWindow = std::chrono::seconds(120);
 constexpr int RecoverFlapMaxDoublings = 4;
 
@@ -443,6 +464,16 @@ struct Input {
     /// AUD-FIX13: TCP's capacity estimate (Stats::CapacityEstimate, network-limited delivery-rate
     /// samples); with networkLimited false it proves a rung like the goodput does.
     std::optional<quint32> capacityKbps;
+    /**
+     * AUD-FIX14: the windowed capacity verdict (LinkEvidence::Verdict::slow). Set: it alone enters
+     * a slow link, and linkFast leaves it (see CapacityFastHold). nullopt = no socket figures: the
+     * old rules (congestion, goodput, the rung ladder).
+     */
+    std::optional<bool> linkSlow;
+    bool linkFast = false; ///< LinkEvidence::Verdict::fast
+    QString linkWhy; ///< LinkEvidence::Verdict::linkWhy
+    bool capacityNow = false; ///< this interval had a TCP capacity sample
+    bool linkIdle = false; ///< the sender is application-limited and the send queue clear
 };
 
 /// AUD-FIX13: congestion the network is responsible for (see Input::networkLimited).
@@ -495,6 +526,15 @@ struct State {
     quint32 rungMinKbps = 0; ///< the lowest goodput of that run
     int rungFailures = 0; ///< failed rungs in a row, for the back-off
     Clock::time_point unrestrainedSince{}; ///< clear, unthrottled and at the quality cap since (epoch = not)
+    // AUD-FIX14: the capacity-driven slow link (Input::linkSlow).
+    Clock::time_point slowEnteredAt{}; ///< when the link last turned slow
+    Clock::time_point capacityFastSince{}; ///< Input::linkFast without a break since (epoch = not)
+    Clock::time_point capacityProbeAt{}; ///< the last capacity probe (epoch = none yet)
+    bool capacityProbePending = false; ///< the last probe is still being judged (CapacityProbeJudge)
+    bool capacityProbeMeasured = false; ///< ...and a capacity sample came since
+    bool capacityProbeBusy = false; ///< ...and the sender was not idle at some point since
+    int capacityProbeMisses = 0; ///< probes in a row that proved nothing (back-off)
+    int capacityProbesAbsorbed = 0; ///< probes in a row the path absorbed (CapacityProbesAbsorbed)
     EncoderSettings applied; ///< what the last step() reported
     /// Reopens of the running encoder that settings changes caused (preset steps, a bitrate change
     /// without Backends::liveBitrate, a backend change); codec switches are not counted.
@@ -515,6 +555,8 @@ struct Decision {
     bool bitrateOnly = false;
     /// AUD-FIX12: why the link state flipped in this step (empty when it did not).
     QString linkReason;
+    /// AUD-FIX14: request a keyframe on every surface: a burst TCP can measure the path with.
+    bool capacityProbe = false;
 };
 
 /// A Decision with only its choice, change flag and reason set (the rest default).
@@ -621,6 +663,16 @@ inline void updateLinkCap(State &state, const Input &in, Clock::time_point now)
             return;
         }
         state.lastProbeAt = {};
+    } else if (in.linkSlow && in.capacityKbps && double(*in.capacityKbps) * TargetShareOfGoodput >= state.linkKbps * (1.0 + TargetMinChange)) {
+        // AUD-FIX14: TCP measured the path well above the cap while the link is clear: raise it
+        // there (a probe the stream makes with its own frames).
+        wanted = bounded(double(*in.capacityKbps) * TargetShareOfGoodput);
+        if (wanted > state.linkKbps) {
+            probe = true;
+            state.lastProbeAt = now;
+            state.probeFromKbps = state.linkKbps;
+            state.provenKbps = std::max(state.provenKbps, state.linkKbps);
+        }
     } else if (state.fillSince != Clock::time_point{}
                && now - std::max(state.fillSince, state.linkChangedAt) >= ProbeHold * (1 << std::clamp(state.probeFailures, 0, ProbeMaxDoublings))) {
         // Up-probe: the stream sent at this cap, clear, for ProbeHold (longer after failed probes).
@@ -726,6 +778,115 @@ inline void climbRung(State &state, const Input &in, Clock::time_point now)
     }
 }
 
+inline void resetCapacityProbe(State &state)
+{
+    state.capacityFastSince = {};
+    state.capacityProbeAt = {};
+    state.capacityProbePending = false;
+    state.capacityProbeMeasured = false;
+    state.capacityProbeBusy = false;
+    state.capacityProbeMisses = 0;
+    state.capacityProbesAbsorbed = 0;
+}
+
+/**
+ * AUD-FIX14: one step of the capacity-driven slow link (Input::linkSlow set; see CapacityFastHold).
+ * Sets \a linkReason when the link state flips; returns whether to probe the capacity now.
+ */
+inline bool stepCapacityLink(State &state, const Input &in, Clock::time_point now, QString &linkReason)
+{
+    const auto seconds = [](auto d) {
+        return std::chrono::duration_cast<std::chrono::seconds>(d).count();
+    };
+    if (!state.slowLink) {
+        state.fastSince = {};
+        if (!*in.linkSlow) {
+            return false;
+        }
+        state.slowLink = true;
+        state.slowSince = {};
+        state.clearSince = {};
+        state.fillSince = {};
+        state.linkWindow.clear();
+        resetRungs(state);
+        resetCapacityProbe(state);
+        state.slowEnteredAt = now;
+        state.slowEntryKbps = std::max<quint32>(in.bandwidthKbps.value_or(0), MinTargetKbps);
+        if (state.recoveredAt != Clock::time_point{}) {
+            // Slow again soon after a recovery: the next one needs a longer hold.
+            state.recoverFlaps = now - state.recoveredAt < RecoverFlapWindow ? std::min(state.recoverFlaps + 1, RecoverFlapMaxDoublings) : 0;
+        }
+        linkReason = QStringLiteral("slow link (%1)").arg(in.linkWhy);
+        return false;
+    }
+    const auto recover = [&](const QString &why) {
+        state.slowLink = false;
+        state.slowSince = {};
+        state.fastSince = {};
+        state.clearSince = {};
+        state.fillSince = {};
+        state.linkWindow.clear();
+        state.recoveredAt = now;
+        resetRungs(state);
+        resetCapacityProbe(state);
+        linkReason = QStringLiteral("link recovered (%1)").arg(why);
+    };
+    const auto hold = CapacityFastHold * (1 << std::clamp(state.recoverFlaps, 0, RecoverFlapMaxDoublings));
+    // The measured capacity.
+    if (!in.linkFast) {
+        state.capacityFastSince = {};
+    } else if (state.capacityFastSince == Clock::time_point{}) {
+        state.capacityFastSince = now;
+    }
+    if (state.capacityFastSince != Clock::time_point{} && now - state.capacityFastSince >= hold) {
+        recover(QStringLiteral("%1, held %2 s").arg(in.linkWhy).arg(seconds(now - state.capacityFastSince)));
+        return false;
+    }
+    // Goodput above the fast threshold proves the capacity as well (the old rule).
+    if (in.bandwidthKbps && *in.bandwidthKbps > fastAboveKbps(in.pixels)) {
+        if (state.fastSince == Clock::time_point{}) {
+            state.fastSince = now;
+        } else if (now - state.fastSince >= std::max<Clock::duration>(LinkHold, hold)) {
+            recover(QStringLiteral("%1 kbit/s sent").arg(*in.bandwidthKbps));
+            return false;
+        }
+    } else {
+        state.fastSince = {};
+    }
+    // The capacity probe: judge the last one, then maybe send the next.
+    if (state.capacityProbePending) {
+        state.capacityProbeMeasured = state.capacityProbeMeasured || in.capacityNow;
+        state.capacityProbeBusy = state.capacityProbeBusy || !in.linkIdle || linkCongested(in);
+        if (now - state.capacityProbeAt >= CapacityProbeJudge) {
+            state.capacityProbePending = false;
+            if (!state.capacityProbeMeasured && !state.capacityProbeBusy) {
+                // The path took the burst without one network-limited sample: headroom.
+                ++state.capacityProbesAbsorbed;
+                if (state.capacityProbesAbsorbed >= CapacityProbesAbsorbed) {
+                    recover(QStringLiteral("%1 capacity probes absorbed without a network-limited sample").arg(state.capacityProbesAbsorbed));
+                    return false;
+                }
+            } else {
+                state.capacityProbesAbsorbed = 0;
+                state.capacityProbeMisses = std::min(state.capacityProbeMisses + 1, ProbeMaxDoublings);
+            }
+        }
+        return false;
+    }
+    if (in.capacityNow || linkCongested(in)) {
+        return false; // TCP is measuring already, or the link is busy
+    }
+    const auto since = std::max(state.slowEnteredAt, state.capacityProbeAt);
+    if (now - since < CapacityProbeHold * (1 << std::clamp(state.capacityProbeMisses, 0, ProbeMaxDoublings))) {
+        return false;
+    }
+    state.capacityProbeAt = now;
+    state.capacityProbePending = true;
+    state.capacityProbeMeasured = false;
+    state.capacityProbeBusy = false;
+    return true;
+}
+
 /**
  * AUD-FIX5 D2: adds this step's sample to \a state's slow-link window and judges the window
  * (see SlowWindow). Returns why the link is slow, or an empty string. Needs \a in's goodput.
@@ -806,7 +967,11 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
     if (!in.adaptive) {
         state.linkWindow.clear();
     }
-    if (in.adaptive && in.bandwidthKbps) {
+    bool capacityProbe = false;
+    if (in.adaptive && in.linkSlow) {
+        // AUD-FIX14: socket figures: the measured capacity decides.
+        capacityProbe = detail::stepCapacityLink(state, in, now, linkReason);
+    } else if (in.adaptive && in.bandwidthKbps) {
         const double kbps = *in.bandwidthKbps;
         if (!state.slowLink) {
             // AUD-FIX13: congestion only with evidence that the network is the limit.
@@ -858,11 +1023,14 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
             }
         }
     }
-    if (in.adaptive && state.slowLink && !(state.current && softwarePrivate(*state.current) && in.mode != SoftwareEncoding::Never)) {
+    if (in.adaptive && !in.linkSlow && state.slowLink && !(state.current && softwarePrivate(*state.current) && in.mode != SoftwareEncoding::Never)) {
         detail::climbRung(state, in, now);
     }
-    if (in.adaptive && state.slowLink && state.clearSince != Clock::time_point{}) {
-        const bool probing = state.current && softwarePrivate(*state.current) && in.mode != SoftwareEncoding::Never;
+    const bool softwareProbing = state.current && softwarePrivate(*state.current) && in.mode != SoftwareEncoding::Never;
+    // With socket figures only the software probe's own way back remains here (the rung ladder
+    // gave way to the capacity).
+    if (in.adaptive && state.slowLink && state.clearSince != Clock::time_point{} && (!in.linkSlow || softwareProbing)) {
+        const bool probing = softwareProbing;
         const double ceiling = slowBelowKbps(in.pixels);
         const auto hold = RecoverHold * (1 << std::clamp(state.recoverFlaps, 0, RecoverFlapMaxDoublings));
         // Probing: sending at the ceiling for the hold. Otherwise (AUD-FIX12): a rung proved
@@ -884,6 +1052,7 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
             linkReason = probing ? QStringLiteral("link recovered (%1 kbit/s for %2 s without congestion)").arg(*in.bandwidthKbps).arg(held)
                                  : QStringLiteral("link recovered (%1 kbit/s proven, then unrestrained without congestion for %2 s)").arg(state.provenKbps).arg(held);
             detail::resetRungs(state);
+            detail::resetCapacityProbe(state);
         }
     }
 
@@ -965,6 +1134,7 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
     const Choice want = select(in, state, now);
     const auto finish = [&](Decision d) {
         d.linkReason = linkReason;
+        d.capacityProbe = capacityProbe;
         // Target bitrate (software HEVC/AV1): adaptive quality's bitrate, capped by a slow link.
         // Where the change is live (libx265) it applies at once. Where it reopens the encoder
         // (SVT-AV1) it waits RestartBitrateInterval after the last reconfiguration, needs a

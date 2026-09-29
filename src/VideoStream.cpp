@@ -1383,6 +1383,14 @@ void VideoStream::stepCodecPolicy(bool congested)
     in.throttledByLink = d->linkVerdict.throttledByLink;
     in.clientLimited = d->linkVerdict.clientLimited;
     in.capacityKbps = d->linkCapacityKbps;
+    // AUD-FIX14: with socket figures the windowed capacity verdict decides the slow link.
+    if (d->linkVerdict.network) {
+        in.linkSlow = d->linkVerdict.slow;
+        in.linkFast = d->linkVerdict.fast;
+        in.linkWhy = d->linkVerdict.linkWhy;
+        in.capacityNow = d->linkVerdict.capacityNow;
+        in.linkIdle = d->linkVerdict.idle;
+    }
     if (!d->codecPolicy.current->hardware) {
         in.encodeLoadP95 = d->encodeLoad.p95();
     }
@@ -1403,6 +1411,18 @@ void VideoStream::stepCodecPolicy(bool congested)
             }
             return statsDetail((d->codecPolicy.slowLink ? QStringLiteral("slow link") : QStringLiteral("link recovered")) + goodput);
         });
+    }
+    if (decision.capacityProbe) {
+        // AUD-FIX14: a keyframe on every surface is a burst TCP can measure the path with.
+        const int surfaces = std::max(1, d->surfaceCount.load());
+        qCInfo(KRDP).noquote() << QStringLiteral("Video: probing the link's capacity (slow link, no TCP capacity sample): requesting a keyframe for %1 surface(s)").arg(surfaces);
+        d->statKeyFrameRequests.fetch_add(1, std::memory_order_relaxed);
+        d->stats->event(Stats::EventKind::KeyFrame, [this, surfaces] {
+            return statsDetail(QStringLiteral("keyframe requested for %1 surface(s): capacity probe on a slow link").arg(surfaces));
+        });
+        for (int monitor = 0; monitor < surfaces; ++monitor) {
+            Q_EMIT keyFrameRequested(monitor);
+        }
     }
     applyCodecDecision(decision);
 }
@@ -1489,6 +1509,7 @@ void VideoStream::judgeLink(bool congested)
 {
     const auto now = clk::steady_clock::now();
     LinkEvidence::Signals in;
+    in.at = now;
     in.congested = congested;
     in.throttled = d->deliveryThrottle.active();
     in.slowBelowKbps = CodecPolicy::slowBelowKbps(std::max<qint64>(d->surfacePixels.load(), 1));
@@ -1514,7 +1535,7 @@ void VideoStream::judgeLink(bool congested)
     const auto &current = d->codecPolicy.current;
     const auto p95 = d->codecPolicyActive && current && !current->hardware ? d->encodeLoad.p95() : std::nullopt;
     const bool encoderOverBudget = p95 && *p95 > CodecPolicy::CpuGuardLimit;
-    d->limit = LinkEvidence::classify(d->codecPolicy.slowLink, congested, d->linkVerdict, encoderOverBudget);
+    d->limit = LinkEvidence::classify(d->codecPolicy.slowLink, d->linkVerdict, encoderOverBudget);
 
     if (d->linkVerdict.clientLimitedChanged) {
         const QString reason = d->linkVerdict.clientLimited

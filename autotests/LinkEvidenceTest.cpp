@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Steve Westers
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
-// AUD-FIX13: telling a slow link from a slow client by the socket (src/LinkEvidence.h).
+// AUD-FIX13/AUD-FIX14: telling a slow link from a slow client by the socket, over windows
+// (src/LinkEvidence.h).
 
 #include "LinkEvidence.h"
 
 #include <QTest>
 
 using namespace KRdp::LinkEvidence;
+using namespace std::chrono_literals;
 
 namespace
 {
@@ -31,6 +33,11 @@ Signals slowClient(const Socket &socket, std::optional<quint32> capacity = 38800
     in.slowBelowKbps = 33000;
     return in;
 }
+/// A deterministic jitter in [0, 1) for interval \a i.
+double jitter(int i)
+{
+    return double((i * 7919 + 13) % 101) / 101.0;
+}
 }
 
 class LinkEvidenceTest : public QObject
@@ -42,75 +49,176 @@ private Q_SLOTS:
     void slowClientOnFatLink()
     {
         State state;
-        auto v = judge(state, slowClient(lan()));
-        QCOMPARE(v.network, std::optional<bool>(false));
-        QVERIFY(v.headroom);
-        QVERIFY(!v.clientLimited);
+        Verdict v;
+        for (int i = 0; i < ClientLimitedAfter - 1; ++i) {
+            v = judge(state, slowClient(lan()));
+            QCOMPARE(v.network, std::optional<bool>(false));
+            QVERIFY(v.headroom);
+            QVERIFY(!v.clientLimited);
+        }
         v = judge(state, slowClient(lan()));
         QVERIFY(v.clientLimited);
         QVERIFY(v.clientLimitedChanged);
         QVERIFY2(v.why.contains(u"38800"), qPrintable(v.why));
-        QCOMPARE(classify(false, true, v, false), Limit::Client);
-        // Without a capacity estimate the application-limited sender is headroom enough.
-        v = judge(state, slowClient(lan(), std::nullopt));
-        QVERIFY(v.clientLimited);
+        QCOMPARE(classify(false, v, false), Limit::Client);
+        // A while without any capacity sample: the application-limited sender is headroom enough.
+        for (int i = 0; i < 10; ++i) {
+            v = judge(state, slowClient(lan(), std::nullopt));
+            QVERIFY(v.clientLimited);
+        }
         QVERIFY(!v.clientLimitedChanged);
     }
 
-    // A tbf: every socket signal on its own is network evidence and ends client-limited at once.
-    void networkEvidence_data()
+    // AUD-FIX14 (cray a312776, Buzz on 5 GHz Wi-Fi and busy): TCP's RTT swinging 23-61 ms over a
+    // 3 ms minimum, retransmits in bursts, the capacity estimate 17-51 Mbit/s, 6-15 Mbit/s sent,
+    // the client behind: never link-bound, never slow, and client-limited.
+    void wifiNoiseIsNotEvidence()
     {
-        QTest::addColumn<int>("kind");
-        QTest::newRow("retransmits") << 0;
-        QTest::newRow("tcp rtt inflated") << 1;
-        QTest::newRow("capacity under the threshold") << 2;
-        QTest::newRow("send queue growing") << 3;
-    }
-    void networkEvidence()
-    {
-        QFETCH(int, kind);
         State state;
-        judge(state, slowClient(lan()));
-        QVERIFY(judge(state, slowClient(lan())).clientLimited);
-        auto socket = lan();
-        auto in = slowClient(socket);
-        switch (kind) {
-        case 0:
-            socket.totalRetransmits = 5;
-            break;
-        case 1:
-            socket.rttUs = 261000;
-            break;
-        case 2:
-            in.capacityKbps = 5800;
-            break;
-        case 3:
-            socket.queuedBytes = 100 * 1024;
-            in.socket = socket;
-            judge(state, in); // backed up once: not yet evidence
-            socket.queuedBytes = 180 * 1024;
-            break;
+        quint64 retransmits = 0;
+        int clientLimited = 0;
+        for (int i = 0; i < 400; ++i) {
+            Signals in;
+            in.congested = jitter(i) < 0.8;
+            in.throttled = true;
+            in.slowBelowKbps = 30000;
+            in.sentKbps = quint32(6000 + 9000 * jitter(i + 3));
+            in.capacityKbps = i % 9 == 4 ? std::nullopt : std::optional<quint32>(quint32(17000 + 34000 * jitter(i + 7)));
+            Socket s;
+            s.minRttUs = 3000;
+            s.rttUs = qint64(23000 + 38000 * jitter(i + 11));
+            retransmits += i % 5 == 0 ? 4 : (i % 3 == 0 ? 2 : 0);
+            s.totalRetransmits = retransmits;
+            s.queuedBytes = qint64(20000 + 90000 * jitter(i + 5)); // a frame or two in flight
+            s.appLimited = jitter(i + 1) < 0.6;
+            in.socket = s;
+            const auto v = judge(state, in);
+            QVERIFY2(!v.slow && !*v.network, qPrintable(QStringLiteral("interval %1: %2").arg(i).arg(v.linkWhy)));
+            QCOMPARE(classify(false, v, false) == Limit::Link, false);
+            clientLimited += v.clientLimited ? 1 : 0;
         }
-        in.socket = socket;
-        const auto v = judge(state, in);
-        QCOMPARE(v.network, std::optional<bool>(true));
-        QVERIFY(!v.headroom);
-        QVERIFY(!v.clientLimited);
-        QVERIFY(!v.why.isEmpty());
-        QCOMPARE(classify(false, true, v, false), Limit::Link);
+        QVERIFY2(clientLimited > 300, qPrintable(QString::number(clientLimited)));
     }
 
-    // Small signals are not evidence: one retransmit, a Wi-Fi-sized RTT wobble, a keyframe in the queue.
-    void noiseIsNotEvidence()
+    // A 6 Mbit/s tbf: the capacity estimate at the throttle, about what is sent: slow once the
+    // window is full, and client-limited ends at once.
+    void capacityUnderThresholdIsSlow()
     {
         State state;
-        auto socket = lan();
-        judge(state, slowClient(socket));
-        socket.totalRetransmits = 1;
-        socket.rttUs = 15000; // 7.5x a 2 ms minimum, but only 13 ms over it
-        socket.queuedBytes = 200 * 1024; // backed up once, not twice
-        const auto v = judge(state, slowClient(socket));
-        QCOMPARE(v.network, std::optional<bool>(false));
+        for (int i = 0; i < 12; ++i) judge(state, slowClient(lan()));
+        QVERIFY(judge(state, slowClient(lan())).clientLimited);
+        std::optional<int> slowAt;
+        for (int i = 0; i < 20 && !slowAt; ++i) {
+            auto in = slowClient(lan(), quint32(5700 + 600 * jitter(i)));
+            in.sentKbps = quint32(5200 + 1300 * jitter(i + 1));
+            const auto v = judge(state, in);
+            if (v.slow) {
+                slowAt = i;
+                QCOMPARE(v.network, std::optional<bool>(true));
+                QVERIFY(!v.clientLimited);
+                QVERIFY(v.throttledByLink);
+                QCOMPARE(classify(false, v, false), Limit::Link);
+                QVERIFY2(v.linkWhy.contains(u"TCP capacity"), qPrintable(v.linkWhy));
+            }
+        }
+        QVERIFY(slowAt);
+        // The window (SlowWindow) has to be mostly throttled samples first.
+        QVERIFY2(*slowAt >= 3 && *slowAt <= 8, qPrintable(QString::number(*slowAt)));
+    }
+
+    // A client-paced stream filling a throttled path only in bursts: 1.4x the sent rate is link-bound
+    // only with the RTT inflated and retransmits alongside (they corroborate, never decide).
+    void corroborationTipsABorderlineWindow()
+    {
+        for (const bool corroborated : {false, true}) {
+            State state;
+            bool slow = false;
+            quint64 retransmits = 0;
+            for (int i = 0; i < 20; ++i) {
+                auto socket = lan();
+                if (corroborated) {
+                    socket.rttUs = 80000;
+                    retransmits += 3;
+                    socket.totalRetransmits = retransmits;
+                }
+                auto in = slowClient(socket, 6000);
+                in.sentKbps = 4300;
+                slow = slow || judge(state, in).slow;
+            }
+            QCOMPARE(slow, corroborated);
+        }
+        // Retransmits and RTT alone, with the capacity well above the sent rate: nothing.
+        State state;
+        quint64 retransmits = 0;
+        for (int i = 0; i < 20; ++i) {
+            auto socket = lan();
+            socket.rttUs = 80000;
+            retransmits += 5;
+            socket.totalRetransmits = retransmits;
+            const auto v = judge(state, slowClient(socket, 20000));
+            QVERIFY(!v.slow);
+            QCOMPARE(v.network, std::optional<bool>(false));
+        }
+    }
+
+    // Without any capacity sample, a send queue that keeps growing under congestion is the link's.
+    void queueWithoutCapacity()
+    {
+        for (const bool congested : {false, true}) {
+            State state;
+            bool slow = false;
+            qint64 queued = 64 * 1024;
+            for (int i = 0; i < 12; ++i) {
+                auto socket = lan();
+                queued += 16 * 1024;
+                socket.queuedBytes = queued;
+                socket.appLimited = false;
+                auto in = slowClient(socket, std::nullopt);
+                in.congested = congested;
+                slow = slow || judge(state, in).slow;
+            }
+            QCOMPARE(slow, congested);
+        }
+    }
+
+    // The way back: the median capacity over RecoverWindow at the recovery threshold (the slow
+    // threshold, or RecoverGrowth x what the path carried while it was link-bound); gaps and a
+    // few low samples do not matter, RTT spikes and retransmits do not stop it.
+    void recoveryFollowsTheMedianCapacity()
+    {
+        State state;
+        for (int i = 0; i < 12; ++i) {
+            auto in = slowClient(lan(), 6000);
+            in.sentKbps = 5800;
+            judge(state, in);
+        }
+        QCOMPARE(state.boundKbps, 6000u);
+        std::optional<int> fastAt;
+        quint64 retransmits = 0;
+        for (int i = 0; i < 30 && !fastAt; ++i) {
+            auto socket = lan();
+            socket.rttUs = 45000;
+            retransmits += 2;
+            socket.totalRetransmits = retransmits;
+            // Wi-Fi: 28-33 Mbit/s measured (under the 33 Mbit/s threshold), a gap every third.
+            auto in = slowClient(socket, i % 3 == 2 ? std::nullopt : std::optional<quint32>(quint32(28000 + 5000 * jitter(i))));
+            in.sentKbps = 9000;
+            const auto v = judge(state, in);
+            QVERIFY(!(v.slow && v.fast));
+            if (v.fast) {
+                fastAt = i;
+                QCOMPARE(v.recoverKbps, 2.0 * state.boundKbps);
+            }
+        }
+        QVERIFY(fastAt);
+        QVERIFY2(*fastAt >= 5 && *fastAt <= 11, qPrintable(QString::number(*fastAt)));
+        // Still throttled: no way back.
+        State throttled;
+        for (int i = 0; i < 60; ++i) {
+            auto in = slowClient(lan(), quint32(5500 + 3000 * jitter(i)));
+            in.sentKbps = quint32(3000 + 2500 * jitter(i + 2));
+            QVERIFY(!judge(throttled, in).fast);
+        }
     }
 
     // The receiver's window limiting the sender is the client's limit: its queue and a low
@@ -124,19 +232,17 @@ private Q_SLOTS:
         socket.queuedBytes = 100 * 1024;
         socket.appLimited = false;
         judge(state, slowClient(socket, 4000));
-        socket.busyUs = 2500000;
-        socket.rwndLimitedUs = 1200000; // 80 % of the busy time
-        socket.queuedBytes = 300 * 1024;
-        auto v = judge(state, slowClient(socket, 4000));
-        QVERIFY(v.rwndLimited);
-        QCOMPARE(v.network, std::optional<bool>(false));
-        QVERIFY(v.headroom);
-        // Retransmits still count whoever limits the window.
-        socket.busyUs = 4000000;
-        socket.rwndLimitedUs = 2400000;
-        socket.totalRetransmits = 4;
-        v = judge(state, slowClient(socket, 4000));
-        QCOMPARE(v.network, std::optional<bool>(true));
+        Verdict v;
+        for (int i = 0; i < 12; ++i) {
+            socket.busyUs = *socket.busyUs + 1500000;
+            socket.rwndLimitedUs = *socket.rwndLimitedUs + 1200000; // 80 % of the busy time
+            socket.queuedBytes += 30 * 1024;
+            v = judge(state, slowClient(socket, 4000));
+            QVERIFY(v.rwndLimited);
+            QCOMPARE(v.network, std::optional<bool>(false));
+            QVERIFY(v.headroom);
+        }
+        QVERIFY(v.clientLimited);
     }
 
     // No socket figures: unknown, never client-limited; callers keep the old rule.
@@ -149,8 +255,9 @@ private Q_SLOTS:
         for (int i = 0; i < 4; ++i) {
             const auto v = judge(state, in);
             QVERIFY(!v.network);
+            QVERIFY(!v.slow);
             QVERIFY(!v.clientLimited);
-            QCOMPARE(classify(false, true, v, false), Limit::None);
+            QCOMPARE(classify(false, v, false), Limit::None);
         }
     }
 
@@ -158,57 +265,50 @@ private Q_SLOTS:
     void hysteresisAndPriority()
     {
         State state;
-        judge(state, slowClient(lan()));
-        auto v = judge(state, slowClient(lan()));
+        Verdict v;
+        for (int i = 0; i < ClientLimitedAfter; ++i) v = judge(state, slowClient(lan()));
         QVERIFY(v.clientLimited);
         auto calm = slowClient(lan());
         calm.congested = false;
         calm.throttled = false;
-        v = judge(state, calm);
-        QVERIFY(v.clientLimited); // one calm interval is not enough
+        for (int i = 0; i < ClientLimitedAfter - 1; ++i) {
+            v = judge(state, calm);
+            QVERIFY(v.clientLimited); // not enough calm intervals yet
+        }
         v = judge(state, calm);
         QVERIFY(!v.clientLimited);
         QVERIFY(v.clientLimitedChanged);
-        QCOMPARE(classify(false, false, v, false), Limit::None);
-        QCOMPARE(classify(true, false, v, true), Limit::Link); // a slow link first
-        QCOMPARE(classify(false, false, v, true), Limit::Encoder);
+        QCOMPARE(classify(false, v, false), Limit::None);
+        QCOMPARE(classify(true, v, true), Limit::Link); // a slow link first
+        QCOMPARE(classify(false, v, true), Limit::Encoder);
         QCOMPARE(QByteArray(limitName(Limit::Client)), QByteArray("client"));
         QCOMPARE(QByteArray(limitName(Limit::None)), QByteArray("none"));
     }
 
     // A throttle the link engaged stays the link's while the paced stream fits (no congestion, the
-    // sender application-limited), until TCP measures the path above the slow threshold again.
+    // sender application-limited), until TCP measures the path with room again.
     void throttleCause()
     {
         State state;
-        auto socket = lan();
-        auto tbf = slowClient(socket, 5800);
-        socket.totalRetransmits = 6;
-        socket.rttUs = 261000;
-        tbf.socket = socket;
-        auto v = judge(state, tbf);
+        auto tbf = slowClient(lan(), 5800);
+        tbf.sentKbps = 5600;
+        Verdict v;
+        for (int i = 0; i < 8; ++i) v = judge(state, tbf);
         QVERIFY(v.throttledByLink);
-        QCOMPARE(classify(false, true, v, false), Limit::Link);
-        auto fits = slowClient(lan(), std::nullopt);
+        QCOMPARE(classify(false, v, false), Limit::Link);
+        auto fits = slowClient(lan(), 5800);
+        fits.sentKbps = 5000;
         fits.congested = false;
-        auto calm = lan();
-        calm.totalRetransmits = 6;
-        fits.socket = calm;
-        for (int i = 0; i < 4; ++i) {
-            v = judge(state, fits);
-            QCOMPARE(v.network, std::optional<bool>(false));
-            QVERIFY(v.headroom); // application-limited
-            QVERIFY(v.throttledByLink);
-            QVERIFY(!v.clientLimited);
-            QCOMPARE(classify(false, false, v, false), Limit::Link);
-        }
-        fits.capacityKbps = 38800; // the tbf went away
         v = judge(state, fits);
+        QVERIFY(v.throttledByLink);
+        QVERIFY(!v.clientLimited);
+        fits.capacityKbps = 38800; // the tbf went away
+        for (int i = 0; i < 8; ++i) v = judge(state, fits);
+        QCOMPARE(v.network, std::optional<bool>(false));
         QVERIFY(!v.throttledByLink);
         QCOMPARE(v.throttleCause, Cause::None);
         // The client's own pressure makes it the client's throttle.
-        judge(state, slowClient(calm));
-        v = judge(state, slowClient(calm));
+        for (int i = 0; i < ClientLimitedAfter; ++i) v = judge(state, slowClient(lan()));
         QCOMPARE(v.throttleCause, Cause::Client);
         QVERIFY(v.clientLimited);
     }
@@ -226,6 +326,14 @@ private Q_SLOTS:
         QVERIFY(!rttInflated(s));
         s.minRttUs = 0;
         QVERIFY(!rttInflated(s));
+    }
+
+    void percentiles()
+    {
+        QCOMPARE(percentile({5, 1, 3}, 0.5), 3u);
+        QCOMPARE(percentile({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 0.65), 7u);
+        QCOMPARE(percentile({4}, 0.99), 4u);
+        QCOMPARE(percentile({4, 9}, 0.0), 4u);
     }
 };
 

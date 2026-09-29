@@ -812,6 +812,11 @@ add_executable(LinkEvidenceTest LinkEvidenceTest.cpp)
 target_include_directories(LinkEvidenceTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(LinkEvidenceTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME LinkEvidenceTest COMMAND LinkEvidenceTest)
+# AUD-FIX14: the a312776 (Wi-Fi) and 573fa31 gate traces replayed through LinkEvidence and the codec policy.
+add_executable(SlowLinkReplayTest SlowLinkReplayTest.cpp)
+target_include_directories(SlowLinkReplayTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(SlowLinkReplayTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME SlowLinkReplayTest COMMAND SlowLinkReplayTest)
 # F1: the per-codec hardware/software encoder probe, with hardware forced off.
 add_executable(EncoderSupportTest EncoderSupportTest.cpp)
 target_link_libraries(EncoderSupportTest PRIVATE Qt6::Test KRdp PkgConfig::AVCodec)

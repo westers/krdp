@@ -301,6 +301,8 @@ struct SlowClientSession {
     qint64 queued = 0;
     int clientLimitedTicks = 0;
     int ticks = 0;
+    int probes = 0;
+    QString lastLinkReason;
     SlowClientSession()
     {
         Encoders e;
@@ -350,6 +352,16 @@ struct SlowClientSession {
             queued = std::max<qint64>(queued, 96 * 1024) + 32 * 1024;
             socket.appLimited = false;
             sig.capacityKbps = quint32(linkKbps * 0.97);
+        } else if (linkKbps <= 30000) {
+            // AUD-FIX14: a paced stream that fits a tbf on average still meets its bucket with every
+            // frame burst: queueing (cray a312776: RDP round trip 116-313 ms, ~3 retransmits a second
+            // with 2.5-7.1 Mbit/s sent) but a queue that drains.
+            socket.rttUs = 120000;
+            retransmits += 2;
+            queued = 0;
+            socket.appLimited = false;
+            // TCP keeps measuring the bucket's rate (5.7-6.3 Mbit/s with 2.5-7.1 sent).
+            sig.capacityKbps = quint32(linkKbps * 0.97);
         } else {
             socket.rttUs = 2500;
             queued = 0;
@@ -357,6 +369,7 @@ struct SlowClientSession {
             // Window bursts are network-limited now and then; the estimate is their 10 s maximum:
             // present, with a 15 s gap every minute.
             if (linkKbps > 30000 && ticks % 40 >= 10) sig.capacityKbps = 38800;
+
         }
         socket.totalRetransmits = retransmits;
         socket.queuedBytes = queued;
@@ -372,8 +385,15 @@ struct SlowClientSession {
         in.throttledByLink = verdict.throttledByLink;
         in.clientLimited = verdict.clientLimited;
         in.capacityKbps = sig.capacityKbps;
-        step(state, in, now);
-        limit = KRdp::LinkEvidence::classify(state.slowLink, pressure, verdict, false);
+        in.linkSlow = verdict.slow; // AUD-FIX14, as VideoStream::stepCodecPolicy() passes it
+        in.linkFast = verdict.fast;
+        in.linkWhy = verdict.linkWhy;
+        in.capacityNow = verdict.capacityNow;
+        in.linkIdle = verdict.idle;
+        const auto decision = step(state, in, now);
+        probes += decision.capacityProbe ? 1 : 0;
+        if (!decision.linkReason.isEmpty()) lastLinkReason = decision.linkReason;
+        limit = KRdp::LinkEvidence::classify(state.slowLink, verdict, false);
         if (qEnvironmentVariableIsSet("KRDP_SIM_TRACE")) {
             qInfo().noquote() << QStringLiteral("t=%1 q=%2 fps=%3 demand=%4 link=%5 client=%6 net=%7 cl=%8 slow=%9 thr=%10")
                                      .arg(std::chrono::duration_cast<std::chrono::milliseconds>(now - T0).count() / 1000.0)
