@@ -4,6 +4,7 @@
 #pragma once
 
 #include <QString>
+#include <QtGlobal>
 
 #include <optional>
 
@@ -21,7 +22,20 @@ namespace KRdp
 struct VideoCodecHost {
     EncoderSupport::Probe probe;
     CodecPolicy::SoftwareEncoding mode = CodecPolicy::SoftwareEncoding::Auto;
+    /// AV1-Q: `--av1-tiles` / KRDP_*_AV1_TILES (CodecPolicy::parseAv1Tiles(); 0 = automatic).
+    int av1Tiles = CodecPolicy::Av1TilesAutomatic;
 };
+
+/**
+ * AV1-Q: `--av1-tiles` / KRDP_*_AV1_TILES: auto (default, also for an empty value), 1, 2, 4, 8 or
+ * 16. Anything else is logged and taken as auto: a typo must not keep the broker from starting.
+ */
+inline int parseHostAv1Tiles(const QString &value, const char *who)
+{
+    if (const auto tiles = CodecPolicy::parseAv1Tiles(value)) return *tiles;
+    qWarning("%s: unknown AV1 tile setting '%s' (auto, 1, 2, 4, 8 or 16); using auto", who, qPrintable(value));
+    return CodecPolicy::Av1TilesAutomatic;
+}
 
 /// `--software-encoding` / KRDP_*_SOFTWARE_ENCODING: auto (default, also for an empty value), never or prefer.
 inline std::optional<CodecPolicy::SoftwareEncoding> parseHostSoftwareEncoding(const QString &value)

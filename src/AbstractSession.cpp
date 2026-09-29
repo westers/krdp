@@ -68,6 +68,10 @@ void applySoftwareSettingsIfSupported(Stream *stream, const CodecPolicy::Encoder
         stream->setSoftwarePreset(preset);
         stream->setTargetBitrate(settings.targetKbps);
     }
+    // AV1-Q: KPipeWire fe44b96 and older have no AV1 tile setting (one tile).
+    if constexpr (requires(Stream *s) { s->setAv1Tiles(0); }) {
+        stream->setAv1Tiles(settings.av1Tiles);
+    }
 }
 template<typename Stream, typename Session>
 void connectActiveBackendIfSupported(Stream *stream, Session *session)

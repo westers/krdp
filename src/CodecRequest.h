@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "CodecPolicy.h"
 #include "VideoCodecSupport.h"
 #include "krdp_export.h"
 
@@ -27,6 +28,9 @@ struct Request {
     QVector<VideoCodec> codecs; ///< Hevc/Av1 the client decodes; empty = AVC only
     QStringList names; ///< as the client sent them (lower case), for the log
     bool adaptive = true;
+    /// AV1-Q: `decode`, the client's decode path per codec ("hw"/"sw"; anything else, or no
+    /// `decode`, is Unknown: optional and never an error, so older clients are unaffected).
+    CodecPolicy::ClientDecode decode;
     bool operator==(const Request &) const = default;
 };
 

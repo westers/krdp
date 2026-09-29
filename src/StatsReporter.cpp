@@ -129,6 +129,9 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
     if (current.encodeMs) {
         video.insert(QStringLiteral("encodeMs"), oneDecimal(*current.encodeMs));
     }
+    if (current.av1Tiles) {
+        video.insert(QStringLiteral("av1Tiles"), *current.av1Tiles); // 0 = the encoder's per-resolution rule
+    }
 
     QJsonObject flow{
         {QStringLiteral("inFlight"), current.inFlight},
@@ -191,6 +194,17 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
         {QStringLiteral("cpuGuard"), guard},
         {QStringLiteral("limit"), current.limit.isEmpty() ? QStringLiteral("none") : current.limit},
     };
+    {
+        // AV1-Q: the decode path per codec the client reported, only the codecs it named.
+        QJsonObject decode;
+        const auto put = [&decode](const char *name, CodecPolicy::DecodePath path) {
+            if (path != CodecPolicy::DecodePath::Unknown) decode.insert(QLatin1String(name), QLatin1String(CodecPolicy::decodePathName(path)));
+        };
+        put("avc", current.decode.avc);
+        put("hevc", current.decode.hevc);
+        put("av1", current.decode.av1);
+        if (!decode.isEmpty()) policy.insert(QStringLiteral("decode"), decode);
+    }
     if (current.adaptive) {
         policy.insert(QStringLiteral("adaptive"), *current.adaptive);
     }

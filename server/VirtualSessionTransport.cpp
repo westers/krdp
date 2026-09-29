@@ -195,7 +195,10 @@ VirtualSessionTransport::~VirtualSessionTransport() { closed(); }
 void VirtualSessionTransport::setVideoCodecHost(const VideoCodecHost &host)
 {
     m_videoHost = host;
-    if (m_connection) m_connection->videoStream()->setEncoderPolicy(host.probe.encoders, host.mode);
+    if (m_connection) {
+        m_connection->videoStream()->setEncoderPolicy(host.probe.encoders, host.mode);
+        m_connection->videoStream()->setAv1TilesSetting(host.av1Tiles);
+    }
 }
 
 bool VirtualSessionTransport::authorized() const

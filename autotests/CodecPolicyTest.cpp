@@ -391,6 +391,29 @@ class CodecPolicyTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    // AV1-Q: krdpserverrc Av1Tiles / --av1-tiles, and what Automatic resolves to.
+    void av1TileSettingParsesAndResolves()
+    {
+        QCOMPARE(parseAv1Tiles(u"auto"), std::optional<int>(Av1TilesAutomatic));
+        QCOMPARE(parseAv1Tiles(u" AUTO "), std::optional<int>(Av1TilesAutomatic));
+        QCOMPARE(parseAv1Tiles(u""), std::optional<int>(Av1TilesAutomatic));
+        for (const int n : {1, 2, 4, 8, 16}) {
+            QCOMPARE(parseAv1Tiles(QString::number(n)), std::optional<int>(n));
+            QCOMPARE(av1TilesName(n), QString::number(n));
+        }
+        QCOMPARE(av1TilesName(Av1TilesAutomatic), QStringLiteral("auto"));
+        for (const auto bad : {u"3", u"0", u"32", u"-4", u"many", u"8x1"}) {
+            QVERIFY2(!parseAv1Tiles(bad), qPrintable(QString(bad)));
+        }
+        // A manual count always wins; Automatic: one tile for a hardware decoder, else the
+        // encoder's per-resolution rule (0), also when the client did not say.
+        QCOMPARE(resolveAv1Tiles(8, DecodePath::Hardware), 8);
+        QCOMPARE(resolveAv1Tiles(1, DecodePath::Software), 1);
+        QCOMPARE(resolveAv1Tiles(Av1TilesAutomatic, DecodePath::Hardware), 1);
+        QCOMPARE(resolveAv1Tiles(Av1TilesAutomatic, DecodePath::Software), 0);
+        QCOMPARE(resolveAv1Tiles(Av1TilesAutomatic, DecodePath::Unknown), 0);
+    }
+
     // AUD-FIX12: a hardware codec on a sustained 6 Mbit/s throttle stays slow (cray cleared ~40 s
     // after turning slow, throttle still on), and recovers within 90 s once it is removed.
     void hardwareSlowLinkNeedsHeadroom()

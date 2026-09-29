@@ -51,6 +51,59 @@ inline const char *softwareEncodingName(SoftwareEncoding mode)
     return "?";
 }
 
+/**
+ * AV1-Q: the host's AV1 tile setting (krdpserverrc `Av1Tiles`, the brokers' `--av1-tiles`):
+ * 0 = automatic, else a tile count (1, 2, 4, 8 or 16). Tiles let a software AV1 decoder (dav1d)
+ * decode one picture on several threads (evidence/2026-09-28-buzz-av1-decode: 47 -> 116 fps at
+ * 1080p with 8 rows and 8 threads); a hardware decoder gains nothing and pays the small size cost.
+ */
+constexpr int Av1TilesAutomatic = 0;
+constexpr std::array<int, 5> Av1TileCounts{1, 2, 4, 8, 16};
+inline std::optional<int> parseAv1Tiles(QStringView value)
+{
+    const QString v = value.trimmed().toString().toLower();
+    if (v.isEmpty() || v == QLatin1String("auto")) return Av1TilesAutomatic;
+    bool ok = false;
+    const int tiles = v.toInt(&ok);
+    if (ok && std::find(Av1TileCounts.cbegin(), Av1TileCounts.cend(), tiles) != Av1TileCounts.cend()) return tiles;
+    return std::nullopt;
+}
+inline QString av1TilesName(int tiles)
+{
+    return tiles == Av1TilesAutomatic ? QStringLiteral("auto") : QString::number(tiles);
+}
+
+/// AV1-Q: how the client decodes a codec (KRDPCTL `codec` request `decode`; Unknown = not said).
+enum class DecodePath { Unknown, Hardware, Software };
+inline const char *decodePathName(DecodePath path)
+{
+    switch (path) {
+    case DecodePath::Hardware: return "hw";
+    case DecodePath::Software: return "sw";
+    case DecodePath::Unknown: break;
+    }
+    return "unknown";
+}
+struct ClientDecode {
+    DecodePath avc = DecodePath::Unknown;
+    DecodePath hevc = DecodePath::Unknown;
+    DecodePath av1 = DecodePath::Unknown;
+    bool operator==(const ClientDecode &) const = default;
+};
+
+/**
+ * The tile count an AV1 encoder is told (EncoderSettings::av1Tiles): a manual \a setting always;
+ * Automatic gives 1 tile to a client that decodes AV1 in hardware (tiles only cost it size) and
+ * 0 - KPipeWire's per-resolution rule (hardware: 4 rows up to 1080p, 8 up to 1440p, 16 above;
+ * software: 2/4/8 tiles, columns first) - to a software decoder or an unknown one (a stock or
+ * older client), where they are safe and cheap.
+ */
+inline int resolveAv1Tiles(int setting, DecodePath av1)
+{
+    if (setting != Av1TilesAutomatic) return setting;
+    return av1 == DecodePath::Hardware ? 1 : 0;
+}
+
 /// Codec families, in ascending order of compression. Avc = the RDPGFX AVC codec (420/444/444v2)
 /// the client's caps select; Hevc/Av1 = the private codecs (0x8001/0x8002).
 enum class Family { Avc = 0, Hevc = 1, Av1 = 2 };
@@ -134,13 +187,17 @@ inline std::optional<Preset> previousPreset(Family f, Preset p)
 /**
  * What the running encoder is told besides its codec (WS-E): the backend, the software preset,
  * the target bitrate (0 = quality mode; software HEVC/AV1 always run in bitrate mode, the target
- * following adaptive quality, see qualityKbps()) and a frame-rate cap (0 = none).
+ * following adaptive quality, see qualityKbps()), a frame-rate cap (0 = none) and the AV1 tiles.
  */
 struct EncoderSettings {
     bool hardware = false;
     Preset preset = Preset::Efficient;
     quint32 targetKbps = 0;
     int maxFrameRate = 0;
+    /// AV1-Q: AV1 tile count for KPipeWire's setAv1Tiles() (0 = its per-resolution rule; see
+    /// resolveAv1Tiles()). Set by VideoStream from the host setting and the client's decode path,
+    /// not by the policy; other codecs ignore it.
+    int av1Tiles = 0;
     bool operator==(const EncoderSettings &) const = default;
 };
 

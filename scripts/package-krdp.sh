@@ -31,9 +31,10 @@ kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # OPT-015/OPT-050, + the DmaBufHandler EGL/GBM leak fix, AUD-FIX2 F5) + WS-E software HEVC
 # (libx265) and AV1 (libsvtav1) with backend policies, presets and a target bitrate, + libx265
 # bitrate/CRF changes in place (AUD-SWENC, 02d475d) + a hidden cursor reported from the
-# screencast metadata (FIX-CURSOR, fe44b96; PipeWireCursor::visible). Those libraries come in through
+# screencast metadata (FIX-CURSOR, fe44b96; PipeWireCursor::visible) + AV1's own quantiser scale and AV1
+# tiles (AV1-Q, fdfa037; setAv1Tiles(), quantizerForQuality()). Those libraries come in through
 # libavcodec's own Depends (dpkg-shlibdeps: libavcodec62).
-kpw_ref=${KPIPEWIRE_REF:-fe44b96}
+kpw_ref=${KPIPEWIRE_REF:-fdfa037}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 

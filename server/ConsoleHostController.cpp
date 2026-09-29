@@ -715,7 +715,10 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     // go through the codec policy (AUD-FIX7, syncCodecPolicy()): the worker restarts its encoder
     // for them, and only while the controlling client is the only one watching.
     connection->videoStream()->setCodecPreference(CodecPreference::Avc420);
-    if (m_videoHost) connection->videoStream()->setEncoderPolicy(m_videoHost->probe.encoders, m_videoHost->mode);
+    if (m_videoHost) {
+        connection->videoStream()->setEncoderPolicy(m_videoHost->probe.encoders, m_videoHost->mode);
+        connection->videoStream()->setAv1TilesSetting(m_videoHost->av1Tiles);
+    }
     connection->videoStream()->setQualityCap(80);
     // Preserve the console's fixed baseline unless audio priority explicitly
     // enables congestion steering for its controlling connection.

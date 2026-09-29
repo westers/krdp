@@ -7,6 +7,10 @@ KRDP_CONSOLE_CERTIFICATE_KEY=/etc/krdp/console.key
 # Private codecs (HEVC/AV1) in software: auto (default), never or prefer.
 #KRDP_CONSOLE_SOFTWARE_ENCODING=auto
 
+# AV1 tiles for the Farside client: auto (default: tile rows by picture height when the client
+# decodes AV1 in software or does not say, one tile when it decodes in hardware), 1, 2, 4, 8 or 16.
+#KRDP_CONSOLE_AV1_TILES=auto
+
 # VA-API driver for the capture workers, like krdpserver's VaapiDriverMode: auto (default; a
 # LIBVA_DRIVER_NAME set in the desktop session is respected), off, radeonsi, iHD or i965.
 #KRDP_CONSOLE_VAAPI_DRIVER=auto

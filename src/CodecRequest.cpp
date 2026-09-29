@@ -15,6 +15,16 @@ std::optional<Request> parse(const QJsonObject &record)
     const QJsonValue codecs = record.value(QLatin1String("codecs"));
     Request request;
     request.adaptive = record.value(QLatin1String("adaptive")).toBool(true);
+    if (const QJsonValue decode = record.value(QLatin1String("decode")); decode.isObject()) {
+        const QJsonObject paths = decode.toObject();
+        const auto path = [&paths](const char *codec) {
+            const QString value = paths.value(QLatin1String(codec)).toString().trimmed().toLower();
+            return value == QLatin1String("hw") ? CodecPolicy::DecodePath::Hardware
+                : value == QLatin1String("sw")  ? CodecPolicy::DecodePath::Software
+                                                : CodecPolicy::DecodePath::Unknown;
+        };
+        request.decode = {path("avc"), path("hevc"), path("av1")};
+    }
     if (codecs.isUndefined()) {
         return request; // no list: AVC only (krdpserver has always read it so)
     }
@@ -48,6 +58,8 @@ QJsonObject apply(VideoStream &stream, const Request &request, QString *log)
     // The server picks among the client's codecs and AVC by its SoftwareEncoding policy and the
     // encoders this host really has (AUD-FIX2 F1: Sol's KPipeWire had no HEVC encoder, and a HEVC
     // answer there labelled H.264 bytes 0x8001). `adaptive: false` pins the first choice.
+    // AV1-Q: the decode paths first, so the first encoder settings already carry the AV1 tiles.
+    stream.setClientDecode(request.decode);
     const auto decision = stream.setPrivateCodecPolicy(request.codecs, request.adaptive);
     const QString selected = QString::fromLatin1(CodecPolicy::familyName(decision.choice.family));
     QString reason = decision.reason;
@@ -61,11 +73,19 @@ QJsonObject apply(VideoStream &stream, const Request &request, QString *log)
         reason = CodecPolicy::avcChoiceReason(stream.encoderPolicy(), stream.softwareEncoding(), request.adaptive, families);
     }
     if (log) {
-        *log = QStringLiteral("KRDPCTL: codec asked [%1], selected %2 (%3)%4")
+        *log = QStringLiteral("KRDPCTL: codec asked [%1] (decode avc=%5 hevc=%6 av1=%7), selected %2 (%3)%4")
                    .arg(request.names.join(QLatin1Char(',')),
                         selected,
                         decision.choice.hardware ? QStringLiteral("hardware") : QStringLiteral("software"),
-                        reason.isEmpty() ? QString() : QStringLiteral(": ") + reason);
+                        reason.isEmpty() ? QString() : QStringLiteral(": ") + reason,
+                        QLatin1String(CodecPolicy::decodePathName(request.decode.avc)),
+                        QLatin1String(CodecPolicy::decodePathName(request.decode.hevc)),
+                        QLatin1String(CodecPolicy::decodePathName(request.decode.av1)));
+        if (decision.choice.family == CodecPolicy::Family::Av1) {
+            *log += QStringLiteral("; AV1 tiles %1 (setting %2)")
+                        .arg(stream.av1Tiles() ? QString::number(stream.av1Tiles()) : QStringLiteral("per resolution"),
+                             CodecPolicy::av1TilesName(stream.av1TilesSetting()));
+        }
     }
     return LayoutControl::codecRecord(selected, decision.choice.hardware, reason);
 }

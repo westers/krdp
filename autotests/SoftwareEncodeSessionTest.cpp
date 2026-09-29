@@ -29,6 +29,7 @@
 // exists.
 
 #include "EncoderSelection.h"
+#include "H264KeyframeSize.h"
 #include "SurfaceChain.h"
 
 #include <PipeWireEncodedStream>
@@ -827,6 +828,33 @@ private Q_SLOTS:
     void av1InSoftware()
     {
         verifyPrivateCodecInSoftware(VideoCodec::Av1);
+    }
+
+    // AV1-Q: software AV1 (SVT-AV1) codes the tiles the stream asks for: automatic = 2 columns
+    // up to 1080p, a manual count columns first. The keyframe header says so (tile_info()).
+    void av1InSoftwareTiles_data()
+    {
+        QTest::addColumn<int>("tiles");
+        QTest::addColumn<QSize>("layout"); // columns x rows
+        QTest::newRow("automatic") << 0 << QSize(2, 1);
+        QTest::newRow("one tile") << 1 << QSize(1, 1);
+        QTest::newRow("four tiles") << 4 << QSize(2, 2);
+    }
+    void av1InSoftwareTiles()
+    {
+        QFETCH(int, tiles);
+        QFETCH(QSize, layout);
+        if (PipeWireBaseEncodedStream::softwareEncoderName(PipeWireBaseEncodedStream::AV1Main) != "libsvtav1") {
+            QSKIP("no libsvtav1 in libavcodec");
+        }
+        QCOMPARE(PipeWireBaseEncodedStream::av1TileLayout(PipeWireBaseEncodedStream::EncoderBackend::Software, QSize(Width, Height), tiles), layout);
+        const SessionResult result = runSession(3, [&](PipeWireEncodedStream *stream) {
+            QVERIFY(EncoderSelection::apply(stream, VideoCodec::Av1, false));
+            stream->setAv1Tiles(tiles);
+        });
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        QVERIFY(!result.keyFrameData.isEmpty());
+        QCOMPARE(KRdp::av1KeyframeTiles(result.keyFrameData.first()), std::optional<QSize>(layout));
     }
 
     // F5: sequential sessions leave no fd or thread behind.

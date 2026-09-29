@@ -1623,6 +1623,20 @@ KRdp::CodecPolicy::SoftwareEncoding SessionController::softwareEncoding() const
     return m_softwareEncoding;
 }
 
+void SessionController::setAv1Tiles(int tiles)
+{
+    if (m_av1Tiles == tiles) {
+        return;
+    }
+    m_av1Tiles = tiles;
+    qInfo() << "Av1Tiles" << KRdp::CodecPolicy::av1TilesName(tiles) << "- applies to the next connection";
+}
+
+int SessionController::av1Tiles() const
+{
+    return m_av1Tiles;
+}
+
 void SessionController::setVideoEncoders(const KRdp::EncoderSupport::Probe &probe)
 {
     m_encoderProbe = probe;
@@ -2325,6 +2339,7 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     }, Qt::QueuedConnection);
     newConnection->videoStream()->setCodecPreference(m_codecPreference);
     newConnection->videoStream()->setEncoderPolicy(encodersForBackend().encoders, m_softwareEncoding);
+    newConnection->videoStream()->setAv1TilesSetting(m_av1Tiles);
     // Seeded from the controller's configured default; a client's own `chroma` (onControlChroma())
     // overrides it for this connection only, before any session is created (setSessions() applies
     // whatever wrapper->m_chromaPolicy holds at that point).

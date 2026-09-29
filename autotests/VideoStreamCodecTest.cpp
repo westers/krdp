@@ -5,12 +5,15 @@
 // encoders the host really has, the codec sessions are built for follows, and an encoder that
 // turns out not to produce the private codec moves the connection off it at once.
 
+#include "CodecRequest.h"
 #include "RdpConnection.h"
 #include "Server.h"
 #include "StatsReporter.h"
 #include "VideoStream.h"
 
 #include <QCoreApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QSignalSpy>
 #include <QTest>
@@ -317,6 +320,89 @@ private Q_SLOTS:
     }
 
     // What a sample reads from a real stream.
+    // AV1-Q: the `codec` request's `decode` map is optional; only "hw"/"sw" count.
+    void codecRequestReadsTheDecodePaths()
+    {
+        const auto parse = [](const char *json) {
+            return CodecRequest::parse(QJsonDocument::fromJson(json).object());
+        };
+        auto r = parse(R"({"codecs":["hevc","av1"],"decode":{"avc":"hw","hevc":"hw","av1":"sw"}})");
+        QVERIFY(r);
+        QCOMPARE(r->decode, (CodecPolicy::ClientDecode{CodecPolicy::DecodePath::Hardware, CodecPolicy::DecodePath::Hardware, CodecPolicy::DecodePath::Software}));
+        r = parse(R"({"codecs":["av1"]})"); // an older client
+        QVERIFY(r);
+        QCOMPARE(r->decode, CodecPolicy::ClientDecode{});
+        r = parse(R"({"codecs":["av1"],"decode":{"av1":"gpu","hevc":1,"vp9":"hw"}})"); // unknown values and codecs
+        QVERIFY(r);
+        QCOMPARE(r->decode, CodecPolicy::ClientDecode{});
+        r = parse(R"({"codecs":["av1"],"decode":"hw"})"); // not an object: ignored, not an error
+        QVERIFY(r);
+        QCOMPARE(r->decode, CodecPolicy::ClientDecode{});
+        r = parse(R"({"codecs":[],"decode":{"avc":"SW"}})");
+        QVERIFY(r);
+        QCOMPARE(r->decode.avc, CodecPolicy::DecodePath::Software);
+    }
+
+    // AV1-Q: the AV1 tile count the encoders get: a manual setting always; Automatic is one tile
+    // for a client decoding AV1 in hardware, else KPipeWire's per-resolution rows (0).
+    void av1TilesFollowTheSettingAndTheDecoder_data()
+    {
+        QTest::addColumn<QString>("setting");
+        QTest::addColumn<QString>("decode"); // the client's decode.av1; empty = not sent
+        QTest::addColumn<int>("tiles");
+        QTest::newRow("auto, software decoder") << QStringLiteral("auto") << QStringLiteral("sw") << 0;
+        QTest::newRow("auto, hardware decoder") << QStringLiteral("auto") << QStringLiteral("hw") << 1;
+        QTest::newRow("auto, decoder unknown") << QStringLiteral("auto") << QString() << 0;
+        QTest::newRow("8, hardware decoder") << QStringLiteral("8") << QStringLiteral("hw") << 8;
+        QTest::newRow("1, software decoder") << QStringLiteral("1") << QStringLiteral("sw") << 1;
+        QTest::newRow("16, decoder unknown") << QStringLiteral("16") << QString() << 16;
+    }
+
+    void av1TilesFollowTheSettingAndTheDecoder()
+    {
+        QFETCH(QString, setting);
+        QFETCH(QString, decode);
+        QFETCH(int, tiles);
+        Fixture f;
+        f.stream()->setEncoderPolicy(hal(), CodecPolicy::SoftwareEncoding::Auto);
+        f.stream()->setAv1TilesSetting(*CodecPolicy::parseAv1Tiles(setting));
+        QSignalSpy settings(f.stream(), &VideoStream::encoderSettingsChanged);
+        QJsonObject record{{QStringLiteral("codecs"), QJsonArray{QStringLiteral("hevc"), QStringLiteral("av1")}}};
+        if (!decode.isEmpty()) {
+            record.insert(QStringLiteral("decode"), QJsonObject{{QStringLiteral("avc"), QStringLiteral("hw")}, {QStringLiteral("av1"), decode}});
+        }
+        const auto request = CodecRequest::parse(record);
+        QVERIFY(request);
+        QString log;
+        const auto reply = CodecRequest::apply(*f.stream(), *request, &log);
+        QCOMPARE(reply.value(QStringLiteral("selected")).toString(), QStringLiteral("av1"));
+        QVERIFY2(log.contains(QStringLiteral("AV1 tiles")), qPrintable(log));
+        QCOMPARE(f.stream()->av1Tiles(), tiles);
+        QVERIFY(f.stream()->encoderSettings());
+        QCOMPARE(f.stream()->encoderSettings()->av1Tiles, tiles);
+        // The sessions hear it with the first settings, before the codec switch.
+        QVERIFY(!settings.isEmpty());
+        QCOMPARE(settings.last().at(0).value<CodecPolicy::EncoderSettings>().av1Tiles, tiles);
+
+        // Stats: the client's decode paths and the tile count.
+        const auto snapshot = f.stream()->statsSnapshot();
+        QCOMPARE(snapshot.av1Tiles, std::optional<int>(tiles));
+        const auto sample = Stats::sampleRecord(snapshot, Stats::Snapshot{}, 1000, 1);
+        QCOMPARE(sample.value(QStringLiteral("video")).toObject().value(QStringLiteral("av1Tiles")).toInt(-1), tiles);
+        const auto decodeRecord = sample.value(QStringLiteral("policy")).toObject().value(QStringLiteral("decode")).toObject();
+        if (decode.isEmpty()) {
+            QVERIFY(decodeRecord.isEmpty());
+        } else {
+            QCOMPARE(decodeRecord.value(QStringLiteral("av1")).toString(), decode);
+            QCOMPARE(decodeRecord.value(QStringLiteral("avc")).toString(), QStringLiteral("hw"));
+            QVERIFY(!decodeRecord.contains(QStringLiteral("hevc")));
+        }
+
+        // A later setting change (a reload between connections) re-resolves at once.
+        f.stream()->setAv1TilesSetting(4);
+        QCOMPARE(f.stream()->encoderSettings()->av1Tiles, 4);
+    }
+
     void statsSnapshotFollowsThePolicy()
     {
         Fixture f;

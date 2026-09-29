@@ -17,6 +17,7 @@
 #include <QStringList>
 #include <QVector>
 
+#include "CodecPolicy.h"
 #include "krdp_export.h"
 
 class QTimer;
@@ -102,6 +103,9 @@ struct Snapshot {
     // policy
     QString mode; ///< SoftwareEncoding: "auto" | "never" | "prefer"
     std::optional<bool> adaptive; ///< the client's `codec` `adaptive`; absent without a `codec` request
+    CodecPolicy::ClientDecode decode; ///< AV1-Q: the client's `codec` `decode` (Unknown = not said)
+    /// AV1-Q: the AV1 tile count the encoder was told (0 = KPipeWire's per-resolution rule); AV1 only
+    std::optional<int> av1Tiles;
     QString guardState = QStringLiteral("ok"); ///< "ok" | "stepped" | "holding"
     QStringList heldBack; ///< codec families the CPU guard holds back
     /// AUD-FIX13: what holds the stream back (LinkEvidence::Limit): "link" | "encoder" | "client" | "none"

@@ -826,6 +826,10 @@ target_include_directories(EncoderSelectionTest SYSTEM PRIVATE ${FreeRDP_INCLUDE
 target_link_libraries(EncoderSelectionTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME EncoderSelectionTest COMMAND EncoderSelectionTest)
 # F1: VideoStream answers `codec` from the host's encoders and drops a private codec the encoder lacks.
+# AV1-Q: quality -> quantiser per codec and AV1 tile layouts of the linked KPipeWire.
+add_executable(EncoderTuningTest EncoderTuningTest.cpp)
+target_link_libraries(EncoderTuningTest PRIVATE Qt6::Test Qt6::Core K::KPipeWireRecord)
+add_test(NAME EncoderTuningTest COMMAND EncoderTuningTest)
 add_executable(VideoStreamCodecTest VideoStreamCodecTest.cpp)
 target_include_directories(VideoStreamCodecTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(VideoStreamCodecTest PRIVATE Qt6::Test Qt6::Core KRdp)

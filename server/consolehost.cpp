@@ -40,8 +40,9 @@ int main(int argc, char **argv)
     const QCommandLineOption runtimeOption(QStringLiteral("runtime-directory"), QStringLiteral("Host-owned worker socket directory."), QStringLiteral("path"), QStringLiteral("/run/krdp-console"));
     const QCommandLineOption audioPriorityOption(QStringLiteral("prefer-audio-quality"), QStringLiteral("Default to audio-first congestion steering for the controlling client (live client overrides allowed)."));
     const QCommandLineOption softwareEncodingOption(QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto"));
+    const QCommandLineOption av1TilesOption(QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto"));
     const QCommandLineOption vaapiDriverOption(QStringLiteral("vaapi-driver"), QStringLiteral("VaapiDriverMode for the capture workers: auto, off, radeonsi, iHD or i965."), QStringLiteral("mode"), QStringLiteral("auto"));
-    parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, softwareEncodingOption, vaapiDriverOption});
+    parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, softwareEncodingOption, av1TilesOption, vaapiDriverOption});
     parser.process(application);
 
     if (geteuid() != 0) {
@@ -94,9 +95,10 @@ int main(int argc, char **argv)
     // AUD-FIX7: what `capabilities.video` offers and the controlling connection's codec policy
     // starts from; the worker probes its own encoders and replaces this once it reports.
     KRdp::EncoderSupport::applyProcessOverrides();
-    const KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding};
+    const KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding,
+                                         KRdp::parseHostAv1Tiles(parser.value(av1TilesOption), "krdp-console-host")};
     qInfo().noquote() << "Console host video encoders:" << KRdp::EncoderSupport::describe(videoHost.probe) << "- SoftwareEncoding"
-                      << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode);
+                      << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode) << "- AV1 tiles" << KRdp::CodecPolicy::av1TilesName(videoHost.av1Tiles);
     host.setVideoCodecHost(videoHost);
     if (!server.start()) {
         return 1;

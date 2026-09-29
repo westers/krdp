@@ -183,6 +183,18 @@ public:
     CodecPolicy::Encoders encoderPolicy() const;
     CodecPolicy::SoftwareEncoding softwareEncoding() const;
     /**
+     * AV1-Q: the host's AV1 tile setting (CodecPolicy::parseAv1Tiles(): 0 = automatic) and the
+     * client's decode path per codec (the `codec` request's `decode`; set before
+     * setPrivateCodecPolicy()). Together they give encoderSettings()->av1Tiles
+     * (CodecPolicy::resolveAv1Tiles()). Main thread only.
+     */
+    void setAv1TilesSetting(int tiles);
+    int av1TilesSetting() const;
+    void setClientDecode(const CodecPolicy::ClientDecode &decode);
+    CodecPolicy::ClientDecode clientDecode() const;
+    /// The AV1 tile count the encoders are told (EncoderSettings::av1Tiles).
+    int av1Tiles() const;
+    /**
      * The client's `codec` request: the private codecs it decodes (empty = AVC only) and whether
      * the server may switch codec mid-session (link and CPU, CodecPolicy). Chooses at once and
      * returns the choice, which the caller answers with. Main thread only.

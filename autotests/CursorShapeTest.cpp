@@ -203,7 +203,7 @@ void CursorShapeTest::wireRoundTrip()
     QCOMPARE(roundTrip(hide), std::optional(hide));
     QCOMPARE(roundTrip(Shape{}), std::optional(Shape{}));
     QCOMPARE(ConsoleWorkerWire::LastKind, ConsoleWorkerWire::Kind::Cursor);
-    QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(4));
+    QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(5)); // 4 brought Cursor; 5 (AV1-Q) the AV1 tiles
 }
 
 void CursorShapeTest::wireRejectsMalformed()

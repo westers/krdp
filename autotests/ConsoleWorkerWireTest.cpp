@@ -511,7 +511,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(4));
+    QCOMPARE(ProtocolVersion, quint16(5));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -519,7 +519,8 @@ void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
     caps.encoders.av1 = {false, true, false};
     caps.avc444Hardware = true;
     caps.renderNode = QStringLiteral("/dev/dri/renderD128");
-    EncoderConfig config{7, VideoCodec::Av1, CodecPolicy::EncoderSettings{false, CodecPolicy::Preset::Fastest, 4500, 30}, 30};
+    // AV1-Q (wire v5): the AV1 tile count travels with the settings.
+    EncoderConfig config{7, VideoCodec::Av1, CodecPolicy::EncoderSettings{false, CodecPolicy::Preset::Fastest, 4500, 30, 8}, 30};
     EncoderConfig plain{8, VideoCodec::Avc420, std::nullopt, 17};
     plain.statsWanted = true; // STATS-S6
     const EncoderReport report{EncoderReport::Event::Backend, VideoCodec::Hevc, true};
@@ -545,6 +546,12 @@ void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
     QVERIFY(rejected(frame(EncoderConfig{0, VideoCodec::Hevc, std::nullopt, 30})));
     QVERIFY(rejected(frame(EncoderConfig{1, VideoCodec::Hevc, std::nullopt, 0})));
     QVERIFY(rejected(frame(EncoderConfig{1, VideoCodec::Hevc, CodecPolicy::EncoderSettings{false, CodecPolicy::Preset(9), 0, 0}, 30})));
+    {
+        // AV1-Q: a tile count above AV1's 64 is refused.
+        QByteArray tooManyTiles = frame(EncoderConfig{1, VideoCodec::Av1, CodecPolicy::EncoderSettings{true, CodecPolicy::Preset::Efficient, 0, 0, 16}, 30});
+        tooManyTiles[tooManyTiles.size() - 1] = char(65);
+        QVERIFY(rejected(tooManyTiles));
+    }
     QVERIFY(rejected(frame(EncoderLoad{-1})));
     auto badCodec = frame(report);
     badCodec[badCodec.size() - 2] = char(0); // codec "none"

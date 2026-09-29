@@ -20,9 +20,11 @@ Environment=KRDP_CONSOLE_CERTIFICATE=/etc/krdp/console.crt
 Environment=KRDP_CONSOLE_CERTIFICATE_KEY=/etc/krdp/console.key
 # Private codecs in software (HEVC/AV1): auto, never or prefer (KRDPCTL-V2-CONTRACT.md (e)).
 Environment=KRDP_CONSOLE_SOFTWARE_ENCODING=auto
+# AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16 (KRDPCTL-V2-CONTRACT.md (e)).
+Environment=KRDP_CONSOLE_AV1_TILES=auto
 Environment=KRDP_CONSOLE_VAAPI_DRIVER=auto
 EnvironmentFile=-/etc/krdp/console-host.conf
-ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-host --worker ${KRDP_CONSOLE_WORKER} --certificate ${KRDP_CONSOLE_CERTIFICATE} --certificate-key ${KRDP_CONSOLE_CERTIFICATE_KEY} --address ${KRDP_CONSOLE_ADDRESS} --port ${KRDP_CONSOLE_PORT} --runtime-directory /run/krdp-console --software-encoding ${KRDP_CONSOLE_SOFTWARE_ENCODING} --vaapi-driver ${KRDP_CONSOLE_VAAPI_DRIVER}
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdp-console-host --worker ${KRDP_CONSOLE_WORKER} --certificate ${KRDP_CONSOLE_CERTIFICATE} --certificate-key ${KRDP_CONSOLE_CERTIFICATE_KEY} --address ${KRDP_CONSOLE_ADDRESS} --port ${KRDP_CONSOLE_PORT} --runtime-directory /run/krdp-console --software-encoding ${KRDP_CONSOLE_SOFTWARE_ENCODING} --av1-tiles ${KRDP_CONSOLE_AV1_TILES} --vaapi-driver ${KRDP_CONSOLE_VAAPI_DRIVER}
 RuntimeDirectory=krdp-console
 RuntimeDirectoryMode=0711
 Restart=on-failure

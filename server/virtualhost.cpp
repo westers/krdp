@@ -33,6 +33,7 @@ int main(int argc, char **argv)
     parser.addOption({QStringLiteral("address"), QStringLiteral("Numeric listen address."), QStringLiteral("address"), QStringLiteral("0.0.0.0")});
     parser.addOption({QStringLiteral("port"), QStringLiteral("Listen port, independent of the physical-console listener."), QStringLiteral("port"), QStringLiteral("3395")});
     parser.addOption({QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto")});
+    parser.addOption({QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto")});
     parser.process(application);
     if (getuid() || geteuid()) { qCritical("Virtual host requires an explicit root service invocation"); return 1; }
     bool validPort = false;
@@ -79,9 +80,10 @@ int main(int argc, char **argv)
     // AUD-FIX7: what `capabilities.video` offers and each connection's codec policy starts from;
     // a desktop's worker probes its own encoders and replaces this estimate once it reports.
     KRdp::EncoderSupport::applyProcessOverrides();
-    const KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding};
+    const KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding,
+                                         KRdp::parseHostAv1Tiles(parser.value(QStringLiteral("av1-tiles")), "krdp-virtual-host")};
     qInfo().noquote() << "Virtual host video encoders:" << KRdp::EncoderSupport::describe(videoHost.probe) << "- SoftwareEncoding"
-                      << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode);
+                      << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode) << "- AV1 tiles" << KRdp::CodecPolicy::av1TilesName(videoHost.av1Tiles);
     host.setVideoCodecHost(videoHost);
     if (!host.recover(*journal, &error) || !host.enableIndependentCreates(*journal)) {
         qCritical().noquote() << "Virtual host recovery refused:" << error; return 1;

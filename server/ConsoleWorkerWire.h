@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <optional>
 #include <cmath>
 #include <utility>
@@ -35,6 +36,8 @@ namespace KRdp::ConsoleWorkerWire
 // 4 (FIX-CURSOR): Cursor (worker -> broker, after Ready): the desktop's cursor shape - hidden,
 // the default arrow, or a bitmap with its hotspot - whenever it changes, never its position.
 //
+// 5 (AV1-Q): EncoderConfig's settings carry the AV1 tile count (EncoderSettings::av1Tiles).
+//
 // Worker -> broker order (AUD-FIX8; ConsoleWorkerOutbox is the worker's side):
 //   Hello, [EncoderCaps], Ready, then any record. Before Ready the broker also
 //   accepts EncoderReport (held and applied right after Ready), EncoderLoad
@@ -42,7 +45,7 @@ namespace KRdp::ConsoleWorkerWire
 //   included - fails it.
 // Broker -> worker: nothing but Stop before the worker authenticated, and
 //   nothing but Stop/RequestKeyFrame before Ready.
-constexpr quint16 ProtocolVersion = 4;
+constexpr quint16 ProtocolVersion = 5;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -1385,7 +1388,8 @@ inline QByteArray frame(const EncoderConfig &config)
     stream.setByteOrder(QDataStream::BigEndian);
     stream << config.generation << wireCodec(config.codec) << config.settings.has_value();
     const auto settings = config.settings.value_or(CodecPolicy::EncoderSettings{});
-    stream << settings.hardware << quint8(settings.preset) << settings.targetKbps << qint32(settings.maxFrameRate) << config.frameRate << config.statsWanted;
+    stream << settings.hardware << quint8(settings.preset) << settings.targetKbps << qint32(settings.maxFrameRate) << config.frameRate << config.statsWanted
+           << quint8(std::clamp(settings.av1Tiles, 0, 64));
     return frame(Kind::EncoderConfig, payload);
 }
 
@@ -1402,15 +1406,18 @@ inline std::optional<EncoderConfig> encoderConfig(const Record &record)
     CodecPolicy::EncoderSettings settings;
     quint8 preset = 0;
     qint32 maxFrameRate = 0;
-    stream >> config.generation >> codec >> hasSettings >> settings.hardware >> preset >> settings.targetKbps >> maxFrameRate >> config.frameRate >> config.statsWanted;
+    quint8 av1Tiles = 0;
+    stream >> config.generation >> codec >> hasSettings >> settings.hardware >> preset >> settings.targetKbps >> maxFrameRate >> config.frameRate >> config.statsWanted
+        >> av1Tiles;
     const auto decoded = codecFromWire(codec);
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !config.generation || !decoded || preset > quint8(CodecPolicy::Preset::Fastest)
-        || maxFrameRate < 0 || maxFrameRate > 240 || config.frameRate < 1 || config.frameRate > 240 || settings.targetKbps > 1000000) {
+        || maxFrameRate < 0 || maxFrameRate > 240 || config.frameRate < 1 || config.frameRate > 240 || settings.targetKbps > 1000000 || av1Tiles > 64) {
         return std::nullopt;
     }
     config.codec = *decoded;
     settings.preset = CodecPolicy::Preset(preset);
     settings.maxFrameRate = maxFrameRate;
+    settings.av1Tiles = av1Tiles;
     if (hasSettings) {
         config.settings = settings;
     }

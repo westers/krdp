@@ -212,6 +212,8 @@ private Q_SLOTS:
     void coalesceKeepsEveryOutputAlive();
     void cursorShapeReachesTheBroker_data();
     void cursorShapeReachesTheBroker();
+    void av1TilesAndBitrate_data();
+    void av1TilesAndBitrate();
     void cleanupTestCase();
 
 private:
@@ -1002,6 +1004,130 @@ void WorkerEndToEndTest::cursorShapeReachesTheBroker()
     }));
     QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
     qInfo().noquote() << "cursor records:" << cursors.size() << "arrow" << arrow.size << "hot" << arrow.hotspot << "ibeam" << ibeam.size << "hot" << ibeam.hotspot;
+    stopWorker(*s, endpoint);
+}
+
+void WorkerEndToEndTest::av1TilesAndBitrate_data()
+{
+    // AV1-Q on this host's real AV1 encoder (Hal's 780M): the tile count the broker resolves from
+    // the host setting and the client's decode path (CodecPolicy::resolveAv1Tiles()) reaches the
+    // worker's encoder, the keyframe header shows those tile rows, the display-size proof (R5)
+    // and the client-style decode of every packet (R6) still pass, and full-screen motion at
+    // 30 fps and the default quality (80) stays in a sane bitrate range (it was near-lossless).
+    QTest::addColumn<QSize>("size");
+    QTest::addColumn<int>("setting"); // Av1Tiles: 0 = auto
+    QTest::addColumn<int>("decode"); // the client's decode.av1 (CodecPolicy::DecodePath)
+    QTest::addColumn<QSize>("tiles"); // columns x rows in the keyframe header
+    QTest::addColumn<double>("maxMbps");
+    const int sw = int(CodecPolicy::DecodePath::Software), hw = int(CodecPolicy::DecodePath::Hardware), unknown = int(CodecPolicy::DecodePath::Unknown);
+    QTest::newRow("1080p auto, software decoder") << QSize(1920, 1080) << 0 << sw << QSize(1, 4) << 30.0;
+    QTest::newRow("1080p auto, decoder unknown") << QSize(1920, 1080) << 0 << unknown << QSize(1, 4) << 30.0;
+    QTest::newRow("1080p auto, hardware decoder") << QSize(1920, 1080) << 0 << hw << QSize(1, 1) << 30.0;
+    QTest::newRow("1080p 8 tiles") << QSize(1920, 1080) << 8 << hw << QSize(1, 8) << 30.0;
+    QTest::newRow("1440p auto, software decoder") << QSize(2560, 1440) << 0 << sw << QSize(1, 8) << 50.0;
+}
+
+void WorkerEndToEndTest::av1TilesAndBitrate()
+{
+    QFETCH(QSize, size);
+    QFETCH(int, setting);
+    QFETCH(int, decode);
+    QFETCH(QSize, tiles);
+    QFETCH(double, maxMbps);
+    if (!m_skip.isEmpty()) {
+        QSKIP(qPrintable(m_skip));
+    }
+    auto *s = session(1, size, true);
+    QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+    if (QStandardPaths::findExecutable(QStringLiteral("ffplay")).isEmpty()) QSKIP("ffplay is not installed: no motion to measure");
+
+    ConsoleWorkerEndpoint endpoint;
+    WorkerRun run;
+    const auto dumpLogs = qScopeGuard([&] {
+        if (!QTest::currentTestFailed()) return;
+        qWarning().noquote() << "worker.log:\n" << s->log(QStringLiteral("worker.log"), 6000);
+    });
+    QVERIFY(startWorker(*s, true, endpoint, run));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    const auto reap = qScopeGuard([&] {
+        if (QFileInfo::exists(exitFile)) return;
+        endpoint.stopWorker();
+        if (!QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 15000)) qWarning("the worker did not stop");
+    });
+    const auto alive = [&] {
+        return run.errors.isEmpty() && !QFileInfo::exists(exitFile);
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(endpoint.ready() || !alive(), 45000);
+    QVERIFY2(endpoint.ready(), "the real worker never confirmed capture");
+    QVERIFY(run.caps);
+    if (!run.caps->encoders.av1.hardware) {
+        QVERIFY2(!EncoderSupport::probeUncached().encoders.av1.hardware, "the host has a hardware AV1 encoder but the sandboxed worker does not see it");
+        stopWorker(*s, endpoint);
+        QSKIP("no hardware AV1 encoder on this host");
+    }
+
+    // What the broker sends for this client: AV1 in hardware at 30 fps with the resolved tiles.
+    const int av1Tiles = CodecPolicy::resolveAv1Tiles(setting, CodecPolicy::DecodePath(decode));
+    endpoint.setControlState({1, true});
+    endpoint.requestKeyFrame();
+    ConsoleWorkerWire::EncoderConfig config{.generation = 1, .codec = VideoCodec::Av1,
+                                            .settings = CodecPolicy::EncoderSettings{.hardware = true, .av1Tiles = av1Tiles}, .frameRate = 30};
+    const qsizetype mark = run.frames.size();
+    QVERIFY(endpoint.setEncoderConfig(config));
+
+    // The first AV1 keyframe: the display-size proof (R5) and the tile rows.
+    std::optional<QSize> headerTiles;
+    qsizetype first = -1;
+    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(run.frames.cbegin() + mark, run.frames.cend(), [](const auto &f) {
+                                 return f.isKeyFrame && f.codec == VideoCodec::Av1;
+                             }) || !alive(),
+                             15000);
+    QVERIFY2(alive(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    for (qsizetype i = mark; i < run.frames.size(); ++i) {
+        const auto &frame = run.frames[i];
+        if (frame.isKeyFrame && frame.codec == VideoCodec::Av1) {
+            QVERIFY2(encodedKeyframeShows(VideoCodec::Av1, frame.data, size), "the AV1 keyframe does not prove the output size (R5)");
+            headerTiles = av1KeyframeTiles(frame.data);
+            first = i;
+            break;
+        }
+    }
+    QCOMPARE(headerTiles, std::optional<QSize>(tiles));
+
+    // Five seconds of motion at the default quality (80).
+    QElapsedTimer clock;
+    clock.start();
+    QTest::qWait(5000);
+    QVERIFY2(alive(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    const qint64 elapsedMs = clock.elapsed();
+    qint64 bytes = 0;
+    int frames = 0;
+    for (qsizetype i = first + 1; i < run.frames.size(); ++i) {
+        if (run.frames[i].codec != VideoCodec::Av1) continue;
+        bytes += run.frames[i].data.size();
+        ++frames;
+    }
+    const double mbps = double(bytes) * 8.0 / 1000.0 / double(elapsedMs);
+    const double fps = frames * 1000.0 / double(elapsedMs);
+    qInfo().noquote() << QStringLiteral("AV1 %1x%2, setting %3, decode %4 -> tiles %5x%6 (columns x rows); %7 frames in %8 ms (%9 fps), %10 Mbit/s")
+                             .arg(size.width()).arg(size.height())
+                             .arg(CodecPolicy::av1TilesName(setting), QLatin1String(CodecPolicy::decodePathName(CodecPolicy::DecodePath(decode))))
+                             .arg(headerTiles->width()).arg(headerTiles->height())
+                             .arg(frames).arg(elapsedMs).arg(fps, 0, 'f', 1).arg(mbps, 0, 'f', 1);
+    QVERIFY2(fps >= 10.0, "the motion stalled");
+    QVERIFY2(mbps > 0.2, "no motion reached the encoder");
+    QVERIFY2(mbps <= maxMbps, qPrintable(QStringLiteral("%1 Mbit/s at quality 80 (limit %2)").arg(mbps).arg(maxMbps)));
+
+    // Every later keyframe keeps the tiles; every packet decodes the way the client decodes (R6).
+    for (qsizetype i = first; i < run.frames.size(); ++i) {
+        const auto &frame = run.frames[i];
+        if (frame.isKeyFrame && frame.codec == VideoCodec::Av1) QCOMPARE(av1KeyframeTiles(frame.data), std::optional<QSize>(tiles));
+    }
+    const auto delivery = deliverAndDecode(run.frames, first, [](qsizetype) { return VideoCodec::Av1; });
+    QVERIFY2(delivery.error.isEmpty(), qPrintable(QStringLiteral("the client would reject %1").arg(delivery.error)));
+    QVERIFY(delivery.pictures.value(0) >= 1);
     stopWorker(*s, endpoint);
 }
 

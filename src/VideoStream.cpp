@@ -386,6 +386,9 @@ public:
     // at least one private codec.
     CodecPolicy::Encoders encoders; // default: none, so only AVC until setEncoderPolicy()
     CodecPolicy::SoftwareEncoding softwareEncoding = CodecPolicy::SoftwareEncoding::Auto;
+    // AV1-Q: the host's AV1 tile setting and the client's decode paths (main thread only).
+    int av1TilesSetting = CodecPolicy::Av1TilesAutomatic;
+    CodecPolicy::ClientDecode clientDecode;
     bool codecPolicyActive = false;
     QList<CodecPolicy::Family> clientFamilies;
     bool codecPolicyAdaptive = true;
@@ -1047,6 +1050,37 @@ CodecPolicy::Encoders VideoStream::encoderPolicy() const
     return d->encoders;
 }
 
+void VideoStream::setAv1TilesSetting(int tiles)
+{
+    d->av1TilesSetting = tiles;
+    if (d->encoderSettings) {
+        applyEncoderSettings(*d->encoderSettings); // a settings reload between connections: re-resolve
+    }
+}
+
+int VideoStream::av1TilesSetting() const
+{
+    return d->av1TilesSetting;
+}
+
+void VideoStream::setClientDecode(const CodecPolicy::ClientDecode &decode)
+{
+    d->clientDecode = decode;
+    if (d->encoderSettings) {
+        applyEncoderSettings(*d->encoderSettings);
+    }
+}
+
+CodecPolicy::ClientDecode VideoStream::clientDecode() const
+{
+    return d->clientDecode;
+}
+
+int VideoStream::av1Tiles() const
+{
+    return CodecPolicy::resolveAv1Tiles(d->av1TilesSetting, d->clientDecode.av1);
+}
+
 CodecPolicy::SoftwareEncoding VideoStream::softwareEncoding() const
 {
     return d->softwareEncoding;
@@ -1213,8 +1247,11 @@ void VideoStream::applyCodecDecision(const CodecPolicy::Decision &decision)
                                                              decision.reason));
 }
 
-void VideoStream::applyEncoderSettings(const CodecPolicy::EncoderSettings &settings)
+void VideoStream::applyEncoderSettings(const CodecPolicy::EncoderSettings &policySettings)
 {
+    // AV1-Q: the tile count is the host's and the client's, not the policy's.
+    auto settings = policySettings;
+    settings.av1Tiles = av1Tiles();
     const bool changed = d->encoderSettings != settings;
     d->encoderSettings = settings;
     // The frame-rate cap (software HEVC/AV1 at 30 fps, the CPU guard's last step) is what the
@@ -2517,6 +2554,10 @@ Stats::Snapshot VideoStream::statsSnapshot() const
     s.limit = QString::fromLatin1(LinkEvidence::limitName(d->limit));
 
     s.mode = QString::fromLatin1(CodecPolicy::softwareEncodingName(d->softwareEncoding));
+    s.decode = d->clientDecode;
+    if (s.codec == QLatin1String("av1") && d->encoderSettings) {
+        s.av1Tiles = d->encoderSettings->av1Tiles;
+    }
     if (d->codecPolicyActive) {
         s.adaptive = d->codecPolicyAdaptive;
         std::optional<qint64> retry;

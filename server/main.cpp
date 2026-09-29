@@ -89,6 +89,15 @@ QString normalizedMonitorMode(QString mode)
     return u"workspace"_s;
 }
 
+int av1TilesFrom(const QString &value)
+{
+    if (const auto parsed = KRdp::CodecPolicy::parseAv1Tiles(value)) {
+        return *parsed;
+    }
+    qWarning() << "Unknown Av1Tiles value" << value << "(auto|1|2|4|8|16); using auto";
+    return KRdp::CodecPolicy::Av1TilesAutomatic;
+}
+
 KRdp::CodecPolicy::SoftwareEncoding softwareEncodingFrom(const QString &value)
 {
     if (const auto parsed = KRdp::CodecPolicy::parseSoftwareEncoding(value)) {
@@ -471,6 +480,7 @@ int main(int argc, char **argv)
     controller.setAudioPriorityDefault(config->preferAudioQuality());
     controller.setCodecPreference(codecPreferenceFrom(config->codec()));
     controller.setSoftwareEncoding(softwareEncodingFrom(config->softwareEncoding()));
+    controller.setAv1Tiles(av1TilesFrom(config->av1Tiles()));
     // Which codecs this host can really encode, and how (AUD-FIX2 F1): after the VAAPI
     // driver choice above, once; the result goes into every `capabilities` and codec choice.
     controller.setVideoEncoders(KRdp::EncoderSupport::probe());
@@ -519,6 +529,7 @@ int main(int argc, char **argv)
         controller.setAudioPriorityDefault(config->preferAudioQuality());
         controller.setCodecPreference(codecPreferenceFrom(config->codec()));
         controller.setSoftwareEncoding(softwareEncodingFrom(config->softwareEncoding()));
+        controller.setAv1Tiles(av1TilesFrom(config->av1Tiles()));
         const auto chromaPolicy = chromaPolicyFrom(config);
         controller.setChromaPolicyDefaults(chromaPolicy);
         controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
@@ -533,7 +544,7 @@ int main(int argc, char **argv)
         qInfo() << "Runtime config applied: quality" << config->quality() << "adaptive" << config->adaptiveQuality() << "monitorMode" << config->monitorMode()
                 << "monitorIndex" << config->monitorIndex() << "virtualPolicy" << config->virtualMonitorPolicy() << "virtualLayout" << config->virtualMonitorLayout()
                 << "wakeDisplay" << config->wakeDisplayOnConnect() << "vaapiMode" << config->vaapiDriverMode() << "port" << listenPort << "from" << runtimeConfigPath
-                << "codec" << config->codec() << "softwareEncoding" << config->softwareEncoding() << "chroma" << QStringLiteral("%1/%2/%3").arg(chromaPolicy.motionGapMs).arg(chromaPolicy.restMs).arg(chromaPolicy.maxGapMs)
+                << "codec" << config->codec() << "softwareEncoding" << config->softwareEncoding() << "av1Tiles" << config->av1Tiles() << "chroma" << QStringLiteral("%1/%2/%3").arg(chromaPolicy.motionGapMs).arg(chromaPolicy.restMs).arg(chromaPolicy.maxGapMs)
                 << "cameraLoopback" << config->cameraLoopbackDevice() << "standardClientMedia" << config->standardClientMedia();
     };
 
@@ -621,7 +632,7 @@ int main(int argc, char **argv)
     const auto sessionType = KRdp::ServerSettings::backendName(backendChoice.backend);
     const auto startupChromaPolicy = controller.chromaPolicyDefaults();
     const auto startupChromaText = QStringLiteral("%1/%2/%3").arg(startupChromaPolicy.motionGapMs).arg(startupChromaPolicy.restMs).arg(startupChromaPolicy.maxGapMs);
-    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9 codec=%10 chroma=%11 cameraLoopback=%12 softwareEncoding=%13 encoders=[%14]")
+    qInfo().noquote() << QStringLiteral("KRDP startup summary: session=%1 stream=%2 port=%3 quality=%4 vaapiMode=%5 KRDP_FORCE_VAAPI_DRIVER=%6 KRDP_AUTO_VAAPI_DRIVER=%7 wakeDisplay=%8 adaptive=%9 codec=%10 chroma=%11 cameraLoopback=%12 softwareEncoding=%13 encoders=[%14] av1Tiles=%15")
                              .arg(sessionType,
                                   streamTarget,
                                   QString::number(port),
@@ -635,7 +646,8 @@ int main(int argc, char **argv)
                                   startupChromaText,
                                   config->cameraLoopbackDevice(),
                                   QLatin1String(KRdp::CodecPolicy::softwareEncodingName(controller.softwareEncoding())),
-                                  KRdp::EncoderSupport::describe(KRdp::EncoderSupport::probe()));
+                                  KRdp::EncoderSupport::describe(KRdp::EncoderSupport::probe()),
+                                  KRdp::CodecPolicy::av1TilesName(controller.av1Tiles()));
 
     if (!server.start()) {
         return -1;

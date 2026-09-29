@@ -19,8 +19,10 @@ Environment=KRDP_VIRTUAL_CERTIFICATE=/etc/krdp/virtual-host.crt
 Environment=KRDP_VIRTUAL_CERTIFICATE_KEY=/etc/krdp/virtual-host.key
 # Private codecs in software (HEVC/AV1): auto, never or prefer (KRDPCTL-V2-CONTRACT.md (e)).
 Environment=KRDP_VIRTUAL_SOFTWARE_ENCODING=auto
+# AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16 (KRDPCTL-V2-CONTRACT.md (e)).
+Environment=KRDP_VIRTUAL_AV1_TILES=auto
 EnvironmentFile=-/etc/krdp/virtual-host.conf
-ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/krdp/virtual-host @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-host --certificate ${KRDP_VIRTUAL_CERTIFICATE} --certificate-key ${KRDP_VIRTUAL_CERTIFICATE_KEY} --address ${KRDP_VIRTUAL_ADDRESS} --port ${KRDP_VIRTUAL_PORT} --software-encoding ${KRDP_VIRTUAL_SOFTWARE_ENCODING}
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/krdp/virtual-host @CMAKE_INSTALL_PREFIX@/bin/krdp-virtual-host --certificate ${KRDP_VIRTUAL_CERTIFICATE} --certificate-key ${KRDP_VIRTUAL_CERTIFICATE_KEY} --address ${KRDP_VIRTUAL_ADDRESS} --port ${KRDP_VIRTUAL_PORT} --software-encoding ${KRDP_VIRTUAL_SOFTWARE_ENCODING} --av1-tiles ${KRDP_VIRTUAL_AV1_TILES}
 StateDirectory=krdp/virtual-sessions krdp/virtual-host
 StateDirectoryMode=0700
 UMask=0077

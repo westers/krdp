@@ -189,6 +189,9 @@ public:
      */
     void setSoftwareEncoding(KRdp::CodecPolicy::SoftwareEncoding mode);
     KRdp::CodecPolicy::SoftwareEncoding softwareEncoding() const;
+    /// AV1-Q: krdpserverrc `Av1Tiles` (CodecPolicy::parseAv1Tiles(): 0 = automatic); applies to the next connection.
+    void setAv1Tiles(int tiles);
+    int av1Tiles() const;
     void setVideoEncoders(const KRdp::EncoderSupport::Probe &probe);
     /**
      * AVC444 aux-stream timing default (OPT-045b, design §10 A10.2): `krdpserverrc`'s
@@ -393,6 +396,7 @@ private:
     bool m_audioPriorityDefault = false;
     KRdp::CodecPreference m_codecPreference = KRdp::CodecPreference::Auto;
     KRdp::CodecPolicy::SoftwareEncoding m_softwareEncoding = KRdp::CodecPolicy::SoftwareEncoding::Auto;
+    int m_av1Tiles = KRdp::CodecPolicy::Av1TilesAutomatic;
     KRdp::EncoderSupport::Probe m_encoderProbe; // default: no encoders known, AVC only
     KRdp::EncoderSupport::Probe encodersForBackend() const;
     // AVC444 aux-stream timing default (OPT-045b, design §10 A10.2): applied to every new
