@@ -3,12 +3,13 @@
 
 #include "hostdevices.h"
 
-#include <QCollator>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 
 #include <algorithm>
+#include <limits>
+#include <utility>
 
 using namespace Qt::StringLiterals;
 
@@ -38,7 +39,9 @@ QStringList vaapiDrivers(const QStringList &driverDirs)
 
 QList<VideoDevice> loopbackCameras(const QString &sysRoot, const QString &devRoot)
 {
-    QList<VideoDevice> devices;
+    // Sorted by node number (video2 before video11). A QCollator in numeric
+    // mode does this only in locales with collation data, not under C/POSIX.
+    QList<std::pair<qulonglong, VideoDevice>> numbered;
     const QDir classDir(sysRoot + u"/class/video4linux"_s);
     const auto entries = classDir.entryList({u"video*"_s}, QDir::Dirs | QDir::System | QDir::NoDotAndDotDot);
     for (const auto &entry : entries) {
@@ -54,13 +57,18 @@ QList<VideoDevice> loopbackCameras(const QString &sysRoot, const QString &devRoo
         if (name.open(QIODevice::ReadOnly)) {
             device.name = QString::fromUtf8(name.readAll()).trimmed();
         }
+        bool ok = false;
+        const qulonglong number = QStringView(entry).mid(5).toULongLong(&ok); // "video" + N
+        numbered.append({ok ? number : std::numeric_limits<qulonglong>::max(), device});
+    }
+    std::stable_sort(numbered.begin(), numbered.end(), [](const auto &a, const auto &b) {
+        return a.first != b.first ? a.first < b.first : a.second.path < b.second.path;
+    });
+    QList<VideoDevice> devices;
+    devices.reserve(numbered.size());
+    for (const auto &[number, device] : std::as_const(numbered)) {
         devices << device;
     }
-    QCollator collator;
-    collator.setNumericMode(true);
-    std::sort(devices.begin(), devices.end(), [&collator](const VideoDevice &a, const VideoDevice &b) {
-        return collator.compare(a.path, b.path) < 0;
-    });
     return devices;
 }
 }
