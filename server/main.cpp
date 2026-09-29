@@ -255,7 +255,10 @@ int main(int argc, char **argv)
     application.setDesktopFileName(u"io.github.westers.farside.server"_s);
 
     KAboutData about(u"farside-server"_s, u"Farside Server"_s, QStringLiteral(KRdp_VERSION_STRING));
+    about.setOrganizationDomain("westers.github.io");
+    about.setDesktopFileName(u"io.github.westers.farside.server"_s);
     KAboutData::setApplicationData(about);
+    application.setDesktopFileName(u"io.github.westers.farside.server"_s);
 
     KCrash::initialize();
 
