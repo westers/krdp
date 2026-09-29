@@ -7,6 +7,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QVariant>
 
 class KRDPServerSettings;
 
@@ -34,3 +35,8 @@ bool resettableSettingsAreDefault(const KRDPServerSettings *settings);
 
 // AUD-K6: the saved values of the settings krdpserver reads only at startup.
 KRdp::ServerSettings::StartupSettings startupSettingsFrom(const KRDPServerSettings *settings);
+
+// Writes one setting to krdpserverrc at once, without saving the page's other
+// unapplied edits (like the user list), and reloads it into `settings`.
+// Returns false for an unknown key.
+bool saveSettingNow(KRDPServerSettings *settings, const QString &key, const QVariant &value);

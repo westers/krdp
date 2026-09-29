@@ -12,6 +12,10 @@ add_library(kcm_krdpserver_core STATIC
     usersmodel.cpp
     serviceinfo.cpp
     journalreader.cpp
+    farsideidentity.cpp
+    coexistence.cpp
+    systemdservicemanager.cpp
+    hostdevices.cpp
 )
 set_target_properties(kcm_krdpserver_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(kcm_krdpserver_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_SOURCE_DIR}/server)
@@ -40,6 +44,7 @@ ecm_qt_declare_logging_category(kcm_krdpserver_core
 
 target_link_libraries(kcm_krdpserver_core PUBLIC
     Qt::Core
+    Qt::DBus
     KF6::ConfigGui
     KF6::CoreAddons
     KF6::I18n

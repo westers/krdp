@@ -17,7 +17,7 @@ Kirigami.Dialog {
     property bool usernameAlreadyExistsError: false
 
     showCloseButton: false
-    title: oldUsername === "" ? i18nc("@title:window", "Add new user") : i18nc("@title:window", "Modify user")
+    title: oldUsername === "" ? i18nc("@title:window", "Add User") : i18nc("@title:window", "Edit User")
 
     Connections {
         target: kcm
@@ -75,7 +75,7 @@ Kirigami.Dialog {
 
         QQC2.TextField {
             id: usernameField
-            Kirigami.FormData.label: i18nc("@label:textbox", "Username:")
+            Kirigami.FormData.label: i18nc("@label:textbox", "User name:")
             Layout.fillWidth: true
             text: editUserModal.oldUsername
             KCM.SettingStateBinding {
@@ -89,8 +89,9 @@ Kirigami.Dialog {
         }
 
         QQC2.Label {
-            text: i18nc("@info", "Username already exists!")
+            text: i18nc("@info", "There is already a user with this name.")
             visible: editUserModal.usernameAlreadyExistsError
+            color: Kirigami.Theme.negativeTextColor
         }
 
         Kirigami.PasswordField {

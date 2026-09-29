@@ -11,8 +11,8 @@ Kirigami.PromptDialog {
     property string errorText
 
     showCloseButton: false
-    title: i18nc("@title:window", "Keychain error")
-    subtitle: i18nc("@info", "Received following error with password keychain: %1", errorText)
+    title: i18nc("@title:window", "Password Storage Error")
+    subtitle: i18nc("@info %1 error text", "The password could not be read or saved: %1", errorText)
 
     standardButtons: Kirigami.Dialog.Ok
 }

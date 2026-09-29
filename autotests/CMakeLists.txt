@@ -590,6 +590,29 @@ add_executable(KcmSettingsTest KcmSettingsTest.cpp)
 target_link_libraries(KcmSettingsTest PRIVATE Qt6::Test Qt6::Core kcm_krdpserver_core)
 add_test(NAME KcmSettingsTest COMMAND KcmSettingsTest)
 
+# FARSIDE-KCM: Farside next to KDE's own remote desktop (stock detection and
+# the page's actions, against a fake /proc and a fake systemd), host checks.
+add_executable(KcmCoexistenceTest KcmCoexistenceTest.cpp)
+target_link_libraries(KcmCoexistenceTest PRIVATE Qt6::Test Qt6::Core kcm_krdpserver_core)
+add_test(NAME KcmCoexistenceTest COMMAND KcmCoexistenceTest)
+
+# FARSIDE-KCM: the built settings page and its sub-pages load without warnings,
+# and the main page's key items are reachable and don't overlap at 1280x800.
+# Offscreen, with a throwaway config and no session bus: nothing of the user's
+# (config, keychain, services) is read or touched.
+find_package(Qt6 REQUIRED COMPONENTS Quick Qml Widgets)
+add_executable(KcmUiTest KcmUiTest.cpp)
+target_link_libraries(KcmUiTest PRIVATE Qt6::Test Qt6::Quick Qt6::Qml Qt6::Widgets KF6::KCMUtilsQuick KF6::CoreAddons)
+target_compile_definitions(KcmUiTest PRIVATE KCM_PLUGIN_PATH="$<TARGET_FILE:kcm_krdpserver>")
+add_dependencies(KcmUiTest kcm_krdpserver)
+add_test(NAME KcmUiTest COMMAND KcmUiTest)
+set(_kcm_ui_home ${CMAKE_CURRENT_BINARY_DIR}/KcmUiTest-home)
+file(MAKE_DIRECTORY ${_kcm_ui_home}/run)
+file(CHMOD ${_kcm_ui_home}/run DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+set_tests_properties(KcmUiTest PROPERTIES
+    TIMEOUT 120
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=org.kde.desktop;XDG_CONFIG_HOME=${_kcm_ui_home}/config;XDG_DATA_HOME=${_kcm_ui_home}/data;XDG_STATE_HOME=${_kcm_ui_home}/state;XDG_CACHE_HOME=${_kcm_ui_home}/cache;XDG_RUNTIME_DIR=${_kcm_ui_home}/run;DBUS_SESSION_BUS_ADDRESS=unix:path=${_kcm_ui_home}/no-bus;LANGUAGE=en_US;LC_ALL=C.UTF-8")
+
 # --- AUD-WS-C ---
 # Console broker/worker audit fixes (AUD-C-1 .. AUD-C-10).
 add_executable(ConsoleWorkerEndpointHardeningTest ConsoleWorkerEndpointHardeningTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)

@@ -5,6 +5,8 @@
 
 #include "krdpserversettings.h"
 
+#include <KConfigGroup>
+
 PreservedSettings PreservedSettings::capture(const KRDPServerSettings *settings)
 {
     return {settings->certificate(), settings->certificateKey(), settings->users(), settings->systemUserEnabled()};
@@ -44,4 +46,21 @@ KRdp::ServerSettings::StartupSettings startupSettingsFrom(const KRDPServerSettin
             settings->certificateKey(),
             settings->users(),
             settings->systemUserEnabled()};
+}
+
+bool saveSettingNow(KRDPServerSettings *settings, const QString &key, const QVariant &value)
+{
+    auto *item = settings->findItem(key);
+    if (!item) {
+        return false;
+    }
+    // The generated setter emits <Key>Changed, so bindings on the page follow.
+    QString property = key;
+    property[0] = property.at(0).toLower();
+    settings->setProperty(property.toLatin1().constData(), value);
+    KConfigGroup group(settings->config(), item->group());
+    group.writeEntry(key, value);
+    settings->config()->sync();
+    item->readConfig(settings->config());
+    return true;
 }

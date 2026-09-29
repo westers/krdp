@@ -8,16 +8,19 @@
 #include "ServerCertificate.h"
 #include "ServerSettingsPolicy.h"
 #include "VideoCodecSupport.h"
+#include "hostdevices.h"
 #include "journalreader.h"
 #include "krdpkcm_logging.h"
 #include "krdpserverdata.h"
 #include "krdpserversettings.h"
 #include "settingsdefaults.h"
+#include "systemdservicemanager.h"
 #include <PipeWireRecord>
 
 #include <KConfigGroup>
 #include <KLocalizedString>
 #include <KPluginFactory>
+#include <KUser>
 #include <QClipboard>
 #include <QDBusArgument>
 #include <QDBusConnection>
@@ -50,8 +53,6 @@ K_PLUGIN_CLASS_WITH_JSON(KRDPServerConfig, "kcm_krdpserver.json")
 
 static const QString dbusSystemdDestination = u"org.freedesktop.systemd1"_s;
 static const QString dbusSystemdPath = u"/org/freedesktop/systemd1"_s;
-static const QString krdpServerUnit = u"app-org.kde.krdpserver.service"_s;
-static const QString dbusKrdpServerServicePath = u"/org/freedesktop/systemd1/unit/app_2dorg_2ekde_2ekrdpserver_2eservice"_s;
 static const QString dbusSystemdUnitInterface = u"org.freedesktop.systemd1.Unit"_s;
 static const QString dbusSystemdServiceInterface = u"org.freedesktop.systemd1.Service"_s;
 static const QString dbusSystemdManagerInterface = u"org.freedesktop.systemd1.Manager"_s;
@@ -70,9 +71,24 @@ bool processAlive(qint64 pid)
     return pid > 0 && (::kill(pid_t(pid), 0) == 0 || errno == EPERM);
 }
 
-QDBusMessage unitPropertyGet(const QString &interface, const QString &property)
+// systemd's object path for a unit: every byte outside [A-Za-z0-9] as _xx.
+QString unitObjectPath(const QString &unit)
 {
-    auto msg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusKrdpServerServicePath, dbusSystemdPropertiesInterface, u"Get"_s);
+    QString path = u"/org/freedesktop/systemd1/unit/"_s;
+    const QByteArray name = unit.toUtf8();
+    for (const char c : name) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+            path += QLatin1Char(c);
+        } else {
+            path += u"_%1"_s.arg(uchar(c), 2, 16, QLatin1Char('0'));
+        }
+    }
+    return path;
+}
+
+QDBusMessage unitPropertyGet(const QString &unitPath, const QString &interface, const QString &property)
+{
+    auto msg = QDBusMessage::createMethodCall(dbusSystemdDestination, unitPath, dbusSystemdPropertiesInterface, u"Get"_s);
     msg.setArguments({interface, property});
     return msg;
 }
@@ -166,8 +182,37 @@ KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
     m_runtimeWatcher->addPath(KRdp::ServerSettings::runtimeDirectory());
     connect(m_runtimeWatcher, &QFileSystemWatcher::directoryChanged, this, &KRDPServerConfig::refreshRestartState);
 
+    m_identity = Farside::defaultIdentity();
+    m_unitPath = unitObjectPath(m_identity.serverUnit);
+    m_coexistence = new Coexistence::Controller(std::make_unique<SystemdServiceManager>(QDBusConnection::sessionBus()),
+                                                m_identity,
+                                                u"/proc"_s,
+                                                []() {
+                                                    // The port the server uses: the saved one.
+                                                    KRDPServerSettings saved(nullptr);
+                                                    saved.load();
+                                                    return quint16(saved.listenPort());
+                                                },
+                                                this);
+    QQmlEngine::setObjectOwnership(m_coexistence, QQmlEngine::CppOwnership);
+    connect(m_coexistence, &Coexistence::Controller::startServerRequested, this, [this]() {
+        toggleServer(true);
+    });
+    connect(m_coexistence, &Coexistence::Controller::portChangeRequested, this, &KRDPServerConfig::applyListenPort);
+    connect(m_coexistence, &Coexistence::Controller::lastErrorChanged, this, [this]() {
+        if (!m_coexistence->lastError().isEmpty()) {
+            setErrorMessage(i18nc("@info %1 error text", "Could not change KDE Remote Desktop: %1", m_coexistence->lastError()));
+        }
+    });
+    // Another program can take or free the port at any time.
+    m_coexistenceTimer = new QTimer(this);
+    m_coexistenceTimer->setInterval(5000);
+    connect(m_coexistenceTimer, &QTimer::timeout, m_coexistence, &Coexistence::Controller::refresh);
+    m_coexistenceTimer->start();
+    connect(this, &KRDPServerConfig::serverStatusChanged, m_coexistence, &Coexistence::Controller::refresh);
+
     QDBusConnection::sessionBus().connect(dbusSystemdDestination,
-                                          dbusKrdpServerServicePath,
+                                          m_unitPath,
                                           dbusSystemdPropertiesInterface,
                                           u"PropertiesChanged"_s,
                                           this,
@@ -176,7 +221,9 @@ KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
 
 KRDPServerConfig::~KRDPServerConfig()
 {
-    delete m_serverSettings;
+    // The base class destroys the pages after this; their bindings must not
+    // see the settings object vanish first.
+    m_serverSettings->deleteLater();
 }
 
 QString KRDPServerConfig::toLocalFile(const QUrl &url)
@@ -229,6 +276,7 @@ void KRDPServerConfig::load()
     readServiceCommandLine();
     refreshRestartState();
     refreshCertificateInfo();
+    m_coexistence->refresh();
 }
 
 void KRDPServerConfig::save()
@@ -237,6 +285,7 @@ void KRDPServerConfig::save()
     m_serverSettings->save();
     applyAutostart();
     refreshRestartState();
+    m_coexistence->refresh();
     Q_EMIT krdpServerSettingsChanged();
 }
 
@@ -316,17 +365,17 @@ QStringList KRDPServerConfig::restartReasons() const
 QString KRDPServerConfig::settingLabel(const QString &key) const
 {
     static const QHash<QString, KLocalizedString> labels{
-        {u"ListenPort"_s, ki18nc("@info name of a setting", "Listening port")},
+        {u"ListenPort"_s, ki18nc("@info name of a setting", "Port")},
         {u"ListenAddress"_s, ki18nc("@info name of a setting", "Listening address")},
         {u"AutogenerateCertificates"_s, ki18nc("@info name of a setting", "Certificate")},
         {u"Certificate"_s, ki18nc("@info name of a setting", "Certificate")},
         {u"CertificateKey"_s, ki18nc("@info name of a setting", "Certificate")},
-        {u"Users"_s, ki18nc("@info name of a setting", "Users")},
-        {u"SystemUserEnabled"_s, ki18nc("@info name of a setting", "System user login")},
+        {u"Users"_s, ki18nc("@info name of a setting", "Other users")},
+        {u"SystemUserEnabled"_s, ki18nc("@info name of a setting", "Your account's sign-in")},
         {u"Passwords"_s, ki18nc("@info name of a setting", "Passwords")},
-        {u"Backend"_s, ki18nc("@info name of a setting", "Display target (needs the Plasma capture backend)")},
-        {u"MonitorMode"_s, ki18nc("@info name of a setting", "Display target")},
-        {u"Quality"_s, ki18nc("@info name of a setting", "Video quality")},
+        {u"Backend"_s, ki18nc("@info name of a setting", "Screens")},
+        {u"MonitorMode"_s, ki18nc("@info name of a setting", "Screens")},
+        {u"Quality"_s, ki18nc("@info name of a setting", "Quality")},
     };
     const auto it = labels.constFind(key);
     return it == labels.constEnd() ? key : it->toString();
@@ -504,6 +553,62 @@ QStringList KRDPServerConfig::availableMonitorIds() const
     return monitors;
 }
 
+QVariantList KRDPServerConfig::monitors() const
+{
+    QVariantList monitors;
+    const auto screens = qGuiApp->screens();
+    auto *primary = qGuiApp->primaryScreen();
+    for (int i = 0; i < screens.size(); ++i) {
+        const auto *screen = screens.at(i);
+        const auto geometry = screen->geometry();
+        const QString name = screen->name().isEmpty() ? i18nc("@item:inlistbox %1 monitor number", "Monitor %1", i + 1) : screen->name();
+        // Sizes without digit grouping ("2560", not "2,560").
+        const QString width = QString::number(geometry.width());
+        const QString height = QString::number(geometry.height());
+        const QString text = screen == primary ? i18nc("@item:inlistbox monitor name, width, height", "%1 (%2×%3, primary)", name, width, height)
+                                               : i18nc("@item:inlistbox monitor name, width, height", "%1 (%2×%3)", name, width, height);
+        monitors.append(QVariantMap{{u"index"_s, i}, {u"name"_s, name}, {u"text"_s, text}});
+    }
+    return monitors;
+}
+
+QStringList KRDPServerConfig::vaapiDrivers() const
+{
+    return HostDevices::vaapiDrivers();
+}
+
+QVariantList KRDPServerConfig::loopbackCameras() const
+{
+    QVariantList cameras;
+    const auto devices = HostDevices::loopbackCameras();
+    for (const auto &device : devices) {
+        cameras.append(QVariantMap{{u"path"_s, device.path}, {u"name"_s, device.name}});
+    }
+    return cameras;
+}
+
+void KRDPServerConfig::applyListenPort(int port)
+{
+    if (!isValidPort(QString::number(port))) {
+        return;
+    }
+    saveSettingNow(m_serverSettings, u"ListenPort"_s, port);
+    settingsChanged();
+    Q_EMIT krdpServerSettingsChanged();
+    if (isServerRunning()) {
+        restartServer();
+    } else {
+        toggleServer(true);
+    }
+    refreshRestartState();
+    m_coexistence->refresh();
+}
+
+QString KRDPServerConfig::systemUserName() const
+{
+    return KUser().loginName();
+}
+
 QString KRDPServerConfig::hostName() const
 {
     return QHostInfo::localHostName();
@@ -545,13 +650,13 @@ void KRDPServerConfig::readAutostart()
         return;
     }
     auto msg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusSystemdPath, dbusSystemdManagerInterface, u"GetUnitFileState"_s);
-    msg.setArguments({krdpServerUnit});
+    msg.setArguments({m_identity.serverUnit});
     auto watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(msg), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
         w->deleteLater();
         QDBusPendingReply<QString> reply(*w);
         if (reply.isError()) {
-            qCWarning(KRDPKCM) << "Cannot read the unit file state of" << krdpServerUnit << reply.error().message();
+            qCWarning(KRDPKCM) << "Cannot read the unit file state of" << m_identity.serverUnit << reply.error().message();
             return;
         }
         const bool enabled = reply.value() == "enabled"_L1 || reply.value() == "enabled-runtime"_L1;
@@ -576,9 +681,9 @@ void KRDPServerConfig::applyAutostart()
                                               dbusSystemdManagerInterface,
                                               enabled ? u"EnableUnitFiles"_s : u"DisableUnitFiles"_s);
     if (enabled) {
-        msg.setArguments({QStringList(krdpServerUnit), false, true});
+        msg.setArguments({QStringList(m_identity.serverUnit), false, true});
     } else {
-        msg.setArguments({QStringList(krdpServerUnit), false});
+        msg.setArguments({QStringList(m_identity.serverUnit), false});
     }
     auto watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(msg), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, enabled](QDBusPendingCallWatcher *w) {
@@ -597,7 +702,7 @@ void KRDPServerConfig::applyAutostart()
 
 void KRDPServerConfig::toggleServer(const bool enabled)
 {
-    auto msg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusKrdpServerServicePath, dbusSystemdUnitInterface, enabled ? u"Start"_s : u"Stop"_s);
+    auto msg = QDBusMessage::createMethodCall(dbusSystemdDestination, m_unitPath, dbusSystemdUnitInterface, enabled ? u"Start"_s : u"Stop"_s);
     msg.setArguments({u"replace"_s});
     qCDebug(KRDPKCM) << "Toggling KRDP Server to" << enabled << "over QDBus";
     // Grant before starting so the portal backend does not prompt; revoke
@@ -620,7 +725,7 @@ void KRDPServerConfig::toggleServer(const bool enabled)
 void KRDPServerConfig::restartServer()
 {
     qCDebug(KRDPKCM) << "Restarting KRDP Server";
-    auto restartMsg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusKrdpServerServicePath, dbusSystemdUnitInterface, u"Restart"_s);
+    auto restartMsg = QDBusMessage::createMethodCall(dbusSystemdDestination, m_unitPath, dbusSystemdUnitInterface, u"Restart"_s);
     restartMsg.setArguments({u"replace"_s});
     auto watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(restartMsg), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
@@ -638,7 +743,7 @@ void KRDPServerConfig::readServiceCommandLine()
     if (!managementAvailable()) {
         return;
     }
-    auto execWatcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(unitPropertyGet(dbusSystemdServiceInterface, u"ExecStart"_s)), this);
+    auto execWatcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(unitPropertyGet(m_unitPath, dbusSystemdServiceInterface, u"ExecStart"_s)), this);
     connect(execWatcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
         w->deleteLater();
         const QDBusPendingReply<QDBusVariant> reply(*w);
@@ -660,7 +765,7 @@ void KRDPServerConfig::readServiceCommandLine()
         Q_EMIT serviceCommandLineChanged();
     });
 
-    auto dropInWatcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(unitPropertyGet(dbusSystemdUnitInterface, u"DropInPaths"_s)), this);
+    auto dropInWatcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(unitPropertyGet(m_unitPath, dbusSystemdUnitInterface, u"DropInPaths"_s)), this);
     connect(dropInWatcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
         w->deleteLater();
         const QDBusPendingReply<QDBusVariant> reply(*w);
@@ -689,12 +794,12 @@ QStringList KRDPServerConfig::serviceDropIns() const
 
 void KRDPServerConfig::updateServerStatus()
 {
-    auto watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(unitPropertyGet(dbusSystemdUnitInterface, u"ActiveState"_s)), this);
+    auto watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(unitPropertyGet(m_unitPath, dbusSystemdUnitInterface, u"ActiveState"_s)), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
         w->deleteLater();
         const QDBusPendingReply<QDBusVariant> reply(*w);
         if (reply.isError()) {
-            qCWarning(KRDPKCM) << "Cannot read the state of" << krdpServerUnit << reply.error().message();
+            qCWarning(KRDPKCM) << "Cannot read the state of" << m_identity.serverUnit << reply.error().message();
             setServerStatus(SystemdService::Unknown);
             return;
         }
@@ -704,7 +809,7 @@ void KRDPServerConfig::updateServerStatus()
             qCWarning(KRDPKCM) << "Systemd unit replied with unknown state:" << activeState;
         }
         if (status == SystemdService::Failed) {
-            auto idWatcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(unitPropertyGet(dbusSystemdUnitInterface, u"InvocationID"_s)),
+            auto idWatcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(unitPropertyGet(m_unitPath, dbusSystemdUnitInterface, u"InvocationID"_s)),
                                                          this);
             connect(idWatcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
                 w->deleteLater();
@@ -723,8 +828,9 @@ void KRDPServerConfig::fetchJournal(const QString &invocationId)
 {
     // AUD-K7: sd_journal can take a while on a big journal; keep it off the GUI thread.
     QPointer self(this);
-    QThreadPool::globalInstance()->start([self, invocationId]() {
-        const auto lines = readServiceJournal(krdpServerUnit, invocationId, 20);
+    const QString unit = m_identity.serverUnit;
+    QThreadPool::globalInstance()->start([self, unit, invocationId]() {
+        const auto lines = readServiceJournal(unit, invocationId, 20);
         QMetaObject::invokeMethod(
             QCoreApplication::instance(),
             [self, lines]() {

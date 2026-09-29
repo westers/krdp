@@ -11,13 +11,18 @@ Kirigami.PromptDialog {
     property string selectedUsername
 
     showCloseButton: false
-    title: i18nc("@title:window", "Discard user?")
-    subtitle: i18nc("@info", "Are you sure you want to discard following user: %1?", selectedUsername)
+    title: i18nc("@title:window", "Remove User?")
+    subtitle: i18nc("@info %1 user name", "%1 will no longer be able to sign in to Farside.", selectedUsername)
 
-    standardButtons: Kirigami.Dialog.Discard | Kirigami.Dialog.Cancel
-
-    onDiscarded: {
-        kcm.deleteUser(selectedUsername);
-        deleteUserModal.close();
-    }
+    standardButtons: Kirigami.Dialog.Cancel
+    customFooterActions: [
+        Kirigami.Action {
+            icon.name: "edit-delete-remove-symbolic"
+            text: i18nc("@action:button", "Remove User")
+            onTriggered: {
+                kcm.deleteUser(deleteUserModal.selectedUsername);
+                deleteUserModal.close();
+            }
+        }
+    ]
 }

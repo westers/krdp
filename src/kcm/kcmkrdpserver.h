@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "coexistence.h"
+#include "farsideidentity.h"
 #include "krdpserversettings.h"
 #include "serviceinfo.h"
 #include "useraccounts.h"
@@ -12,6 +14,7 @@
 
 class QAbstractItemModel;
 class QFileSystemWatcher;
+class QTimer;
 
 class KRDPServerConfig : public KQuickManagedConfigModule
 {
@@ -49,6 +52,10 @@ public:
     Q_PROPERTY(bool plasmaBackendAvailable READ plasmaBackendAvailable CONSTANT)
 
     Q_PROPERTY(QAbstractItemModel *users READ usersModel CONSTANT)
+    // The account the system-password sign-in belongs to.
+    Q_PROPERTY(QString systemUserName READ systemUserName CONSTANT)
+    // KDE's own remote desktop next to Farside (REBRAND-PLAN.md §3/§4).
+    Q_PROPERTY(Coexistence::Controller *coexistence READ coexistence CONSTANT)
 
     Q_INVOKABLE QString toLocalFile(const QUrl &url);
 
@@ -65,6 +72,15 @@ public:
     Q_INVOKABLE void toggleServer(const bool enabled);
     Q_INVOKABLE void restartServer();
     Q_INVOKABLE void copyAddressToClipboard(const QString &address);
+    // Monitors as [{index, name, text}], in the server's index order.
+    Q_INVOKABLE QVariantList monitors() const;
+    // Installed VAAPI drivers the server can be told to use.
+    Q_INVOKABLE QStringList vaapiDrivers() const;
+    // v4l2loopback devices as [{path, name}].
+    Q_INVOKABLE QVariantList loopbackCameras() const;
+    // Saves ListenPort at once (other unapplied edits stay unapplied) and
+    // starts or restarts the server on it.
+    Q_INVOKABLE void applyListenPort(int port);
     Q_INVOKABLE KRDPServerSettings *settings() const
     {
         return m_serverSettings;
@@ -100,6 +116,11 @@ public:
     QString certificatePath() const;
 
     QString hostName() const;
+    QString systemUserName() const;
+    Coexistence::Controller *coexistence() const
+    {
+        return m_coexistence;
+    }
     bool managementAvailable() const;
     bool plasmaBackendAvailable() const;
     QAbstractItemModel *usersModel() const
@@ -142,6 +163,10 @@ private:
     Q_SLOT void servicePropertiesChanged();
 
     KRDPServerSettings *m_serverSettings;
+    Farside::Identity m_identity;
+    QString m_unitPath;
+    Coexistence::Controller *m_coexistence;
+    QTimer *m_coexistenceTimer;
     UsersModel *m_usersModel;
     UserAccounts *m_userAccounts;
     QFileSystemWatcher *m_runtimeWatcher;
