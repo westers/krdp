@@ -3,6 +3,7 @@
 
 #include "EncoderSupport.h"
 
+#include "RdpConnection.h"
 #include "RenderNodes.h"
 #include "krdp_logging.h"
 
@@ -256,6 +257,16 @@ Probe probeUncached()
     QElapsedTimer timer;
     timer.start();
     Probe result;
+    // AUD-TESTFIX: probe with the VAAPI driver the encoders will use. Without
+    // LIBVA_DRIVER_NAME on a mixed AMD + NVIDIA host (Hal), libva loads the decode-only
+    // nvidia driver for the NVIDIA node, which answers vaGetConfigAttributes(EncSlice)
+    // with success and leaves the value unset; KPipeWire's VaapiUtils reads that
+    // uninitialised value and so picks its render node at random (then AV1/HEVC hardware
+    // came and went between runs). selectVaapiDriver() sets radeonsi there, as krdpserver
+    // and the worker do at start-up; the virtual and console hosts did not, until now.
+    // Also when software is forced: KPipeWire's VaapiUtils is a per-process singleton that
+    // this probe creates (suggestedEncoders()), and later encoders and probes reuse it.
+    selectVaapiDriver();
     const bool forced = softwareForced();
     const Hardware hw = forced ? Hardware{} : probeHardware();
 

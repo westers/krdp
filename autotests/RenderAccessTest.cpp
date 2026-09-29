@@ -70,6 +70,7 @@ private Q_SLOTS:
     void listUsesStatNotTheEntryType();
     void bindMountedNodeIsListedInSandbox();
     void probeInSandboxFindsTheHostsHardware();
+    void probeIsStableWithoutADriverName();
     void preferredNodeComesFirst();
     void accessThroughOwnerGroupOrOther();
     void warningNamesTheFix();
@@ -113,6 +114,28 @@ void RenderAccessTest::probeInSandboxFindsTheHostsHardware()
     if (!sandboxed) QSKIP("bwrap cannot create a sandbox here");
     // Before AUD-FIX8 this was "avc sw, hevc sw, av1 sw, avc444 none" with a hardware host.
     QCOMPARE(QString::fromUtf8(lastLine(*sandboxed)), EncoderSupport::describe(host));
+}
+
+void RenderAccessTest::probeIsStableWithoutADriverName()
+{
+    // AUD-TESTFIX: with no LIBVA_DRIVER_NAME on a mixed AMD + NVIDIA host, KPipeWire picked its
+    // VAAPI node from an uninitialised value (the nvidia driver's vaGetConfigAttributes), so
+    // "av1 hw" came and went between processes (probeInSandboxFindsTheHostsHardware failed 4-5
+    // in 12 under ctest). The probe now selects the driver first: every fresh process agrees.
+    const auto host = EncoderSupport::probeUncached();
+    if (host.renderNode.isEmpty()) QSKIP("no hardware encoder on this host");
+    for (int run = 0; run < 3; ++run) {
+        QProcess process;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.remove(QStringLiteral("LIBVA_DRIVER_NAME"));
+        environment.remove(QStringLiteral("KRDP_RENDER_NODE"));
+        environment.insert(QStringLiteral("LIBVA_MESSAGING_LEVEL"), QStringLiteral("1"));
+        process.setProcessEnvironment(environment);
+        process.start(QCoreApplication::applicationFilePath(), {QStringLiteral("--probe")});
+        QVERIFY(process.waitForFinished(60000));
+        QCOMPARE(process.exitCode(), 0);
+        QCOMPARE(QString::fromUtf8(lastLine(process.readAllStandardOutput().trimmed())), EncoderSupport::describe(host));
+    }
 }
 
 void RenderAccessTest::preferredNodeComesFirst()
