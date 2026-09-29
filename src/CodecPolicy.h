@@ -294,6 +294,13 @@ constexpr auto RecoverHold = std::chrono::seconds(20);
  *   the stream sends everything the encoder makes and the link carries it.
  * A throttled link can never do either: its goodput cannot exceed the throttle, and an
  * unrestrained stream runs into congestion. A still desktop proves nothing and stays slow.
+ *
+ * AUD-FIX13 (cray, 573fa31: Buzz decoding AV1 in software at 10-14 fps kept the delivery throttle
+ * on for the whole session, so "unrestrained" never came and the slow link stuck 3+ min after the
+ * tbf went): congestion here is only the network's (Input::networkLimited); a rung may be proven
+ * by TCP's network-limited delivery rate (Input::capacityKbps) while the link is clear; and while
+ * the client is the limit (Input::clientLimited) its throttle and a quality under the cap do not
+ * count as restraint.
  */
 constexpr double RungGrowth = ProbeGrowth;
 constexpr auto RecoverFlapWindow = std::chrono::seconds(120);
@@ -358,7 +365,34 @@ struct Input {
     std::optional<quint8> qualityCap;
     /// AUD-FIX12: the delivery throttle holds the source under the policy's frame rate.
     bool throttled = false;
+    /**
+     * AUD-FIX13: whether this interval's congestion is the network's (LinkEvidence::judge():
+     * socket-level evidence). Only congestion with it counts towards a slow link, fails a rung or
+     * breaks a clear run. nullopt = no socket figures: congestion counts as the link's (the old rule).
+     */
+    std::optional<bool> networkLimited;
+    /**
+     * AUD-FIX13: the delivery throttle holds the source down because the link could not carry
+     * more (LinkEvidence::Verdict::throttledByLink). The paced stream fits the path and shows no
+     * congestion, but the link is what limits it: counts as the link's congestion.
+     */
+    bool throttledByLink = false;
+    /**
+     * AUD-FIX13: the client, not the link, holds the stream back (LinkEvidence: acks slow, the
+     * link with headroom). Its delivery throttle and adaptive quality under the cap then prove
+     * nothing about the link, so they do not keep a slow link from recovering.
+     */
+    bool clientLimited = false;
+    /// AUD-FIX13: TCP's capacity estimate (Stats::CapacityEstimate, network-limited delivery-rate
+    /// samples); with networkLimited false it proves a rung like the goodput does.
+    std::optional<quint32> capacityKbps;
 };
+
+/// AUD-FIX13: congestion the network is responsible for (see Input::networkLimited).
+inline bool linkCongested(const Input &in)
+{
+    return (in.congested && in.networkLimited.value_or(true)) || in.throttledByLink;
+}
 
 /// One step()'s view of the link, kept for the slow-link window (SlowWindow).
 struct LinkSample {
@@ -517,7 +551,7 @@ inline void updateLinkCap(State &state, const Input &in, Clock::time_point now)
         wanted = state.linkKbps ? state.linkKbps : bounded(cap);
     } else if (const double link = *in.bandwidthKbps * TargetShareOfGoodput; state.linkKbps == 0) {
         wanted = bounded(link);
-    } else if (in.congested) {
+    } else if (linkCongested(in)) {
         // Goodput is demand-limited: while the link keeps up it only shows what the encoder sent,
         // so it lowers the cap only under congestion and the cap is probed back up otherwise.
         wanted = bounded(std::min(double(state.linkKbps), link));
@@ -586,17 +620,32 @@ inline void resetRungs(State &state)
 inline void climbRung(State &state, const Input &in, Clock::time_point now)
 {
     const bool atCap = !in.quality || !in.qualityCap || *in.quality >= *in.qualityCap;
-    if (in.congested || in.throttled || !atCap) {
+    // AUD-FIX13: a throttle and a quality under the cap that the client causes (it decodes slower
+    // than the link delivers) do not restrain what the link is shown; only the link's congestion does.
+    const bool congested = linkCongested(in);
+    // ...nor does a throttle (or quality) still climbing back once TCP measures the path above the
+    // slow threshold with no network evidence: the path is not what holds the stream back.
+    const bool pathClear = in.networkLimited == false && in.capacityKbps && double(*in.capacityKbps) >= slowBelowKbps(in.pixels);
+    if (congested || (!in.clientLimited && !pathClear && (in.throttled || !atCap))) {
         state.unrestrainedSince = {};
     } else if (state.unrestrainedSince == Clock::time_point{}) {
         state.unrestrainedSince = now;
     }
-    if (!in.bandwidthKbps || state.slowEntryKbps == 0) {
+    if (state.slowEntryKbps == 0) {
         return;
     }
-    const quint32 goodput = *in.bandwidthKbps;
+    // AUD-FIX13: TCP's own network-limited delivery rate proves a rate as well as the goodput does
+    // (a slow client keeps the goodput down however fat the link is), while the link is clear.
+    std::optional<quint32> rateSeen = in.bandwidthKbps;
+    if (in.capacityKbps && !congested && in.networkLimited == false) {
+        rateSeen = std::max(rateSeen.value_or(0), *in.capacityKbps);
+    }
+    if (!rateSeen) {
+        return;
+    }
+    const quint32 goodput = *rateSeen;
     const double rate = std::max(state.provenKbps, state.slowEntryKbps) * RungGrowth;
-    if (in.congested) {
+    if (congested) {
         if (state.rungSince != Clock::time_point{}) {
             state.rungFailures = std::min(state.rungFailures + 1, ProbeMaxDoublings); // a failed probe backs off
         }
@@ -628,7 +677,7 @@ inline QString judgeSlowWindow(State &state, const Input &in, Clock::time_point 
 {
     LinkSample sample;
     sample.at = now;
-    sample.congested = in.congested;
+    sample.congested = linkCongested(in); // AUD-FIX13: the network's congestion only
     sample.kbps = *in.bandwidthKbps;
     if (in.quality && in.qualityCap) {
         sample.belowCap = *in.quality < *in.qualityCap;
@@ -681,7 +730,7 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
     QString linkReason;
     // The clear run (no congestion signal) and the run of sending at the cap, which the up-probe
     // and the recovery count on (AUD-FIX4 D2).
-    if (!state.slowLink || !in.adaptive || in.congested) {
+    if (!state.slowLink || !in.adaptive || linkCongested(in)) {
         state.clearSince = {};
     } else if (state.clearSince == Clock::time_point{}) {
         state.clearSince = now;
@@ -703,7 +752,8 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
     if (in.adaptive && in.bandwidthKbps) {
         const double kbps = *in.bandwidthKbps;
         if (!state.slowLink) {
-            const bool slowSample = kbps < slowBelowKbps(in.pixels) && in.congested;
+            // AUD-FIX13: congestion only with evidence that the network is the limit.
+            const bool slowSample = kbps < slowBelowKbps(in.pixels) && linkCongested(in);
             QString slowBecause;
             if (!slowSample) {
                 state.slowSince = {};

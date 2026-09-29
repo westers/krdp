@@ -35,6 +35,8 @@ const char *eventKindName(EventKind kind)
         return "throttle";
     case EventKind::Quality:
         return "quality";
+    case EventKind::ClientLimited:
+        return "client-limited";
     }
     return "?";
 }
@@ -187,6 +189,7 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
     QJsonObject policy{
         {QStringLiteral("mode"), current.mode},
         {QStringLiteral("cpuGuard"), guard},
+        {QStringLiteral("limit"), current.limit.isEmpty() ? QStringLiteral("none") : current.limit},
     };
     if (current.adaptive) {
         policy.insert(QStringLiteral("adaptive"), *current.adaptive);

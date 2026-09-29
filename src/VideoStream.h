@@ -350,6 +350,9 @@ private:
     void refreshFrameRate();
     /// AUD-FIX7 F2: one delivery-throttle step per adaptive interval; also the backlog threshold.
     void updateDeliveryThrottle(bool windowPressure);
+    /// AUD-FIX13: one LinkEvidence step per adaptive interval (before the codec policy's): the
+    /// socket's view of \a congested, the client-limited state and the stats' `policy.limit`.
+    void judgeLink(bool congested);
     void applyEncoderSettings(const CodecPolicy::EncoderSettings &settings);
 
     /**

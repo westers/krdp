@@ -61,6 +61,7 @@ target_sources(KRdp PRIVATE
     EncoderSupport.h
     EncoderSelection.h
     CodecPolicy.h
+    LinkEvidence.h
 )
 
 ecm_qt_declare_logging_category(KRdp

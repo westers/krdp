@@ -36,6 +36,7 @@
 #include "FrameQueuePolicy.h"
 #include "GfxSurfaceCommand.h"
 #include "LayoutControl.h"
+#include "LinkEvidence.h"
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
@@ -440,8 +441,15 @@ public:
     std::vector<FrameQueuePolicy::KeyFrameRequestBackoff> keyFrameBackoff;
     // AUD-FIX12: per monitor, the run of frames dropped for want of a keyframe (frameQueueMutex).
     std::vector<FrameQueuePolicy::SurfaceSilence> silence;
-    // AUD-FIX12: TCP's network-limited delivery rate (stats samples; the main thread).
+    // AUD-FIX12: TCP's network-limited delivery rate (stats samples and, AUD-FIX13, every
+    // adaptive interval; the main thread).
     Stats::CapacityEstimate capacity;
+    // AUD-FIX13: the socket's view of each interval's congestion (main thread): whether the
+    // network or the client holds the stream back (LinkEvidence), and the stats' `policy.limit`.
+    LinkEvidence::State linkEvidence;
+    LinkEvidence::Verdict linkVerdict;
+    std::optional<quint32> linkCapacityKbps;
+    LinkEvidence::Limit limit = LinkEvidence::Limit::None;
     // Monitors whose frames piled up behind an unacknowledged keyframe: they may keep
     // keyFrameHoldFrames() queued until that backlog has drained to MaxHeldFramesPerMonitor,
     // even after the keyframe was acknowledged (frameQueueMutex).
@@ -1332,6 +1340,12 @@ void VideoStream::stepCodecPolicy(bool congested)
     in.qualityCap = d->qualityCap.load();
     // AUD-FIX12: a throttled source proves no headroom on a slow link.
     in.throttled = d->deliveryThrottle.active();
+    // AUD-FIX13: only congestion with socket evidence is the network's; a client-limited stream's
+    // throttle is the client's. judgeLink() ran just before.
+    in.networkLimited = d->linkVerdict.network;
+    in.throttledByLink = d->linkVerdict.throttledByLink;
+    in.clientLimited = d->linkVerdict.clientLimited;
+    in.capacityKbps = d->linkCapacityKbps;
     if (!d->codecPolicy.current->hardware) {
         in.encodeLoadP95 = d->encodeLoad.p95();
     }
@@ -1434,6 +1448,48 @@ void VideoStream::updateDeliveryThrottle(bool windowPressure)
     }
 }
 
+void VideoStream::judgeLink(bool congested)
+{
+    const auto now = clk::steady_clock::now();
+    LinkEvidence::Signals in;
+    in.congested = congested;
+    in.throttled = d->deliveryThrottle.active();
+    in.slowBelowKbps = CodecPolicy::slowBelowKbps(std::max<qint64>(d->surfacePixels.load(), 1));
+    if (auto *network = d->session->networkDetection(); network && network->validBandwidthSamples() >= 2) {
+        in.sentKbps = quint32(network->bandwidth());
+    }
+    if (const auto tcp = d->session->tcpInfo()) {
+        d->capacity.sample(now, tcp->deliveryRateBytesPerSecond, tcp->deliveryRateAppLimited);
+        LinkEvidence::Socket socket;
+        socket.rttUs = tcp->rttUs;
+        socket.minRttUs = tcp->minRttUs;
+        socket.totalRetransmits = tcp->totalRetransmits;
+        socket.queuedBytes = d->session->socketQueuedBytes();
+        socket.appLimited = tcp->deliveryRateBytesPerSecond == 0 || tcp->deliveryRateAppLimited;
+        socket.busyUs = tcp->busyUs;
+        socket.rwndLimitedUs = tcp->rwndLimitedUs;
+        in.socket = socket;
+    }
+    d->linkCapacityKbps = d->capacity.kbps(now);
+    in.capacityKbps = d->linkCapacityKbps;
+    d->linkVerdict = LinkEvidence::judge(d->linkEvidence, in);
+
+    const auto &current = d->codecPolicy.current;
+    const auto p95 = d->codecPolicyActive && current && !current->hardware ? d->encodeLoad.p95() : std::nullopt;
+    const bool encoderOverBudget = p95 && *p95 > CodecPolicy::CpuGuardLimit;
+    d->limit = LinkEvidence::classify(d->codecPolicy.slowLink, congested, d->linkVerdict, encoderOverBudget);
+
+    if (d->linkVerdict.clientLimitedChanged) {
+        const QString reason = d->linkVerdict.clientLimited
+            ? QStringLiteral("client-limited: the client takes fewer frames than are sent while the link has headroom (%1)").arg(d->linkVerdict.why)
+            : QStringLiteral("no longer client-limited%1").arg(d->linkVerdict.why.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(d->linkVerdict.why));
+        qCInfo(KRDP).noquote() << "Video:" << reason;
+        d->stats->event(Stats::EventKind::ClientLimited, [this, &reason] {
+            return statsDetail(reason);
+        });
+    }
+}
+
 void VideoStream::updateAdaptiveQuality()
 {
     // AUD-FIX4 D1: the in-flight window follows the path (minimum RTT) and the rate the link
@@ -1453,6 +1509,9 @@ void VideoStream::updateAdaptiveQuality()
     // The codec policy steps after adaptive quality, on every path out of here, so a software
     // HEVC/AV1 target bitrate follows this interval's quality at once.
     const auto policyStep = qScopeGuard([this, &policyCongested] {
+        if (d->surfacePixels.load() > 0) {
+            judgeLink(policyCongested.value_or(d->statCongested)); // AUD-FIX13: before the policy reads it
+        }
         if (policyCongested) {
             stepCodecPolicy(*policyCongested);
         }
@@ -2455,6 +2514,7 @@ Stats::Snapshot VideoStream::statsSnapshot() const
     }
     s.congested = d->statCongested;
     s.slow = d->codecPolicy.slowLink;
+    s.limit = QString::fromLatin1(LinkEvidence::limitName(d->limit));
 
     s.mode = QString::fromLatin1(CodecPolicy::softwareEncodingName(d->softwareEncoding));
     if (d->codecPolicyActive) {

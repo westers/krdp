@@ -777,6 +777,11 @@ add_executable(CodecPolicyTest CodecPolicyTest.cpp)
 target_include_directories(CodecPolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(CodecPolicyTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME CodecPolicyTest COMMAND CodecPolicyTest)
+# AUD-FIX13: a slow link or a slow client, by the socket's evidence.
+add_executable(LinkEvidenceTest LinkEvidenceTest.cpp)
+target_include_directories(LinkEvidenceTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(LinkEvidenceTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME LinkEvidenceTest COMMAND LinkEvidenceTest)
 # F1: the per-codec hardware/software encoder probe, with hardware forced off.
 add_executable(EncoderSupportTest EncoderSupportTest.cpp)
 target_link_libraries(EncoderSupportTest PRIVATE Qt6::Test KRdp PkgConfig::AVCodec)

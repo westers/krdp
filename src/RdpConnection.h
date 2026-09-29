@@ -124,6 +124,12 @@ public:
         /// ...and whether it was application-limited (tcpi_delivery_rate_app_limited): the sender
         /// had less to send than the path could take, so the rate says nothing about the path.
         bool deliveryRateAppLimited = true;
+        /// AUD-FIX13 (LinkEvidence): the kernel's windowed minimum RTT (tcpi_min_rtt, us; 0 = unknown)
+        qint64 minRttUs = 0;
+        /// ...time busy sending and time limited by the peer's receive window (running totals, us);
+        /// absent on a kernel without them
+        std::optional<quint64> busyUs;
+        std::optional<quint64> rwndLimitedUs;
     };
     /**
      * getsockopt(TCP_INFO) on the connection's socket; nullopt when unknown (no socket, closed,

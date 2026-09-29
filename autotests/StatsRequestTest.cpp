@@ -86,6 +86,7 @@ Stats::Snapshot busy(quint64 scale)
     s.mode = u"prefer"_s;
     s.adaptive = true;
     s.guardState = u"holding"_s;
+    s.limit = u"encoder"_s; // AUD-FIX13: the longest value
     s.heldBack = {u"hevc"_s, u"av1"_s};
     s.retryInS = 3599;
     for (int i = 0; i < 16; ++i) {
@@ -219,7 +220,8 @@ private Q_SLOTS:
         QCOMPARE(link.value(u"capacitySource"_s).toString(), u"probe"_s);
         QCOMPARE(link.value(u"retransmits"_s).toInteger(), 99999);
         const auto policy = record.value(u"policy"_s).toObject();
-        QCOMPARE(keys(policy), (QSet<QString>{u"mode"_s, u"adaptive"_s, u"cpuGuard"_s}));
+        QCOMPARE(keys(policy), (QSet<QString>{u"mode"_s, u"adaptive"_s, u"cpuGuard"_s, u"limit"_s}));
+        QCOMPARE(policy.value(u"limit"_s).toString(), u"encoder"_s);
         QCOMPARE(policy.value(u"cpuGuard"_s).toObject(),
                  (QJsonObject{{u"state"_s, u"holding"_s}, {u"heldBack"_s, QJsonArray{u"hevc"_s, u"av1"_s}}, {u"retryInS"_s, 3599}}));
         const auto surfaces = record.value(u"surfaces"_s).toArray();
@@ -254,6 +256,7 @@ private Q_SLOTS:
         QVERIFY(!record.value(u"flow"_s).toObject().contains(u"clientDecodeMs"_s));
         QVERIFY(!record.value(u"policy"_s).toObject().contains(u"adaptive"_s));
         QCOMPARE(record.value(u"policy"_s).toObject().value(u"cpuGuard"_s).toObject(), (QJsonObject{{u"state"_s, u"ok"_s}}));
+        QCOMPARE(record.value(u"policy"_s).toObject().value(u"limit"_s).toString(), u"none"_s); // AUD-FIX13: always present
         QCOMPARE(record.value(u"surfaces"_s).toArray().size(), 0);
         // A counter that went down (the policy restarted its count) counts from zero.
         Stats::Snapshot before = empty, after = empty;
@@ -289,7 +292,8 @@ private Q_SLOTS:
         QCOMPARE(record,
                  (QJsonObject{{u"type"_s, u"stats-event"_s}, {u"v"_s, 1}, {u"seq"_s, 43}, {u"kind"_s, u"cpu-guard"_s},
                               {u"reason"_s, u"CPU guard: software av1 at 82% ..."_s}, {u"codec"_s, u"hevc"_s}, {u"backend"_s, u"software"_s}}));
-        const QStringList kinds{u"codec"_s, u"settings"_s, u"keyframe"_s, u"coalesce"_s, u"slow-link"_s, u"cpu-guard"_s, u"throttle"_s, u"quality"_s};
+        const QStringList kinds{u"codec"_s, u"settings"_s, u"keyframe"_s, u"coalesce"_s, u"slow-link"_s, u"cpu-guard"_s, u"throttle"_s, u"quality"_s,
+                                u"client-limited"_s};
         for (int i = 0; i < Stats::EventKindCount; ++i) {
             QCOMPARE(QString::fromLatin1(Stats::eventKindName(Stats::EventKind(i))), kinds.at(i));
         }

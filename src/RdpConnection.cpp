@@ -993,6 +993,13 @@ std::optional<RdpConnection::TcpInfo> RdpConnection::tcpInfo() const
         result.deliveryRateBytesPerSecond = quint64(info.tcpi_delivery_rate);
         result.deliveryRateAppLimited = (bytes[offsetof(tcp_info, tcpi_rto) - 1] & 0x1) != 0;
     }
+    if (length >= offsetof(tcp_info, tcpi_min_rtt) + sizeof(info.tcpi_min_rtt)) {
+        result.minRttUs = qint64(info.tcpi_min_rtt == ~0u ? 0 : info.tcpi_min_rtt);
+    }
+    if (length >= offsetof(tcp_info, tcpi_rwnd_limited) + sizeof(info.tcpi_rwnd_limited)) {
+        result.busyUs = quint64(info.tcpi_busy_time);
+        result.rwndLimitedUs = quint64(info.tcpi_rwnd_limited);
+    }
     return result;
 }
 

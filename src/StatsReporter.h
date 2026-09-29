@@ -31,8 +31,8 @@ namespace KRdp
 namespace Stats
 {
 /// The `kind` of a `stats-event`.
-enum class EventKind { Codec, Settings, KeyFrame, Coalesce, SlowLink, CpuGuard, Throttle, Quality };
-constexpr int EventKindCount = 8;
+enum class EventKind { Codec, Settings, KeyFrame, Coalesce, SlowLink, CpuGuard, Throttle, Quality, ClientLimited };
+constexpr int EventKindCount = 9;
 KRDP_EXPORT const char *eventKindName(EventKind kind);
 
 /// One RDPGFX surface's running totals (index = VideoFrame::monitorIndex).
@@ -104,6 +104,8 @@ struct Snapshot {
     std::optional<bool> adaptive; ///< the client's `codec` `adaptive`; absent without a `codec` request
     QString guardState = QStringLiteral("ok"); ///< "ok" | "stepped" | "holding"
     QStringList heldBack; ///< codec families the CPU guard holds back
+    /// AUD-FIX13: what holds the stream back (LinkEvidence::Limit): "link" | "encoder" | "client" | "none"
+    QString limit = QStringLiteral("none");
     std::optional<int> retryInS; ///< until the first held-back codec may be tried again
     QVector<SurfaceCounters> surfaces;
 };

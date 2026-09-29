@@ -6,6 +6,7 @@
 #include "AdaptiveQuality.h"
 #include "CodecPolicy.h"
 #include "FrameQueuePolicy.h"
+#include "LinkEvidence.h"
 
 #include <QTest>
 
@@ -270,6 +271,122 @@ struct CraySession {
     }
 };
 
+/**
+ * AUD-FIX13: cray's 573fa31 session (2026-09-28, evidence/2026-09-28-release-573fa31/cray L2): hardware AV1
+ * on 3840x1194, a 30 fps test pattern, and Buzz decoding AV1 in software: it takes \a clientFps
+ * frames a second whatever the link. Every 1.5 s, as VideoStream runs it: the real
+ * AdaptiveQuality and DeliveryThrottle, then LinkEvidence on the socket's figures, then the
+ * policy. The socket is modelled from what cray showed:
+ * - the link carries up to \a linkKbps. More demand than that queues on the path: TCP's RTT
+ *   inflates (261 ms under the tbf), segments are retransmitted (750 in 3.5 min), the send queue
+ *   grows, and TCP measures the link's rate (5.8 Mbit/s) in network-limited samples;
+ * - a client slower than the source keeps the frame window full and the RDP round trip (answered
+ *   by the client's busy thread) inflated, but TCP's RTT stays at the LAN's, nothing is
+ *   retransmitted, the socket drains, the sender is application-limited, and TCP's capacity
+ *   estimate (window bursts) reads 38.8 Mbit/s, with a 15 s gap every minute.
+ * The goodput is the average send rate (NetworkDetection read more, ~17.4 Mbit/s, from bursts:
+ * the average is the harder case for both the declaration and the recovery).
+ */
+struct SlowClientSession {
+    State state;
+    Input in;
+    Clock::time_point now = T0;
+    int quality = 80;
+    Clock::time_point lastStepDown{};
+    KRdp::FrameQueuePolicy::DeliveryThrottle throttle;
+    KRdp::LinkEvidence::State evidence;
+    KRdp::LinkEvidence::Verdict verdict;
+    KRdp::LinkEvidence::Limit limit = KRdp::LinkEvidence::Limit::None;
+    quint64 retransmits = 0;
+    qint64 queued = 0;
+    int clientLimitedTicks = 0;
+    int ticks = 0;
+    SlowClientSession()
+    {
+        Encoders e;
+        e.avc = {true, true};
+        e.hevc = {true, true};
+        e.av1 = {true, true};
+        in = input(SoftwareEncoding::Auto, e);
+        in.pixels = 3840LL * 1194LL;
+        in.qualityCap = 80;
+        step(state, in, now);
+    }
+    void tick(double linkKbps, double clientFps)
+    {
+        using namespace std::chrono;
+        now += 1500ms;
+        ++ticks;
+        const double offered = std::min(throttle.rate(60), 30);
+        const double perFrame = 16000.0 * std::exp2((quality - 80) / 20.0) / 30.0; // kbit per frame
+        const double demand = perFrame * offered;
+        const double linkFps = perFrame > 0 ? linkKbps / perFrame : offered;
+        const double delivered = std::min({offered, clientFps, linkFps});
+        const bool linkBound = demand > linkKbps * 0.97;
+        const bool clientBound = offered > clientFps * 1.02;
+        const bool pressure = linkBound || clientBound;
+        const auto result = KRdp::AdaptiveQuality::step({
+            .current = quality,
+            .cap = 80,
+            .averageRtt = pressure ? microseconds(60000) : microseconds(10000),
+            .minimumRtt = microseconds(10000),
+            .backlogged = pressure,
+            .climbAllowed = now - lastStepDown >= KRdp::AdaptiveQuality::ClimbHoldAfterStepDown,
+        });
+        if (result.next < quality) lastStepDown = now;
+        quality = result.next;
+        throttle.update(now, 60, offered, delivered, pressure);
+
+        KRdp::LinkEvidence::Signals sig;
+        sig.congested = pressure;
+        sig.throttled = throttle.active();
+        sig.slowBelowKbps = slowBelowKbps(in.pixels);
+        sig.sentKbps = quint32(perFrame * delivered);
+        KRdp::LinkEvidence::Socket socket;
+        socket.minRttUs = 2000;
+        if (linkBound) {
+            socket.rttUs = 261000;
+            retransmits += 5;
+            queued = std::max<qint64>(queued, 96 * 1024) + 32 * 1024;
+            socket.appLimited = false;
+            sig.capacityKbps = quint32(linkKbps * 0.97);
+        } else {
+            socket.rttUs = 2500;
+            queued = 0;
+            socket.appLimited = true;
+            // Window bursts are network-limited now and then; the estimate is their 10 s maximum:
+            // present, with a 15 s gap every minute.
+            if (linkKbps > 30000 && ticks % 40 >= 10) sig.capacityKbps = 38800;
+        }
+        socket.totalRetransmits = retransmits;
+        socket.queuedBytes = queued;
+        sig.socket = socket;
+        verdict = KRdp::LinkEvidence::judge(evidence, sig);
+        if (verdict.clientLimited) ++clientLimitedTicks;
+
+        in.quality = quint8(quality);
+        in.congested = pressure;
+        in.bandwidthKbps = sig.sentKbps;
+        in.throttled = throttle.active();
+        in.networkLimited = verdict.network;
+        in.throttledByLink = verdict.throttledByLink;
+        in.clientLimited = verdict.clientLimited;
+        in.capacityKbps = sig.capacityKbps;
+        step(state, in, now);
+        limit = KRdp::LinkEvidence::classify(state.slowLink, pressure, verdict, false);
+        if (qEnvironmentVariableIsSet("KRDP_SIM_TRACE")) {
+            qInfo().noquote() << QStringLiteral("t=%1 q=%2 fps=%3 demand=%4 link=%5 client=%6 net=%7 cl=%8 slow=%9 thr=%10")
+                                     .arg(std::chrono::duration_cast<std::chrono::milliseconds>(now - T0).count() / 1000.0)
+                                     .arg(quality).arg(offered).arg(int(demand)).arg(linkBound).arg(clientBound)
+                                     .arg(verdict.network.value_or(false)).arg(verdict.clientLimited).arg(state.slowLink).arg(throttle.rate(60))
+                                 + QStringLiteral(" tbl=%1 cap=%2 entry=%3 proven=%4 rung=%5 unr=%6 clear=%7 bw=%8")
+                                       .arg(verdict.throttledByLink).arg(sig.capacityKbps.value_or(0)).arg(state.slowEntryKbps).arg(state.provenKbps)
+                                       .arg(state.rungSince != Clock::time_point{}).arg(state.unrestrainedSince != Clock::time_point{})
+                                       .arg(state.clearSince != Clock::time_point{}).arg(*in.bandwidthKbps);
+        }
+    }
+};
+
 class CodecPolicyTest : public QObject
 {
     Q_OBJECT
@@ -361,6 +478,138 @@ private Q_SLOTS:
         }
         QVERIFY(!state.slowLink);
         QVERIFY2(reason.contains(u"proven"), qPrintable(reason));
+    }
+
+    // AUD-FIX13: cray's fat LAN with a client that decodes 12 of 30 fps: never a slow link, AV1 in
+    // hardware throughout, the stream classified client-limited (the old rule: slow 9-46 s in).
+    void slowClientOnFatLinkIsNotASlowLink()
+    {
+        SlowClientSession cray;
+        while (cray.now - T0 < 600s) {
+            cray.tick(1000000, 12);
+            QVERIFY2(!cray.state.slowLink, qPrintable(QStringLiteral("slow link %1 s in (%2)")
+                                                          .arg(std::chrono::duration_cast<std::chrono::seconds>(cray.now - T0).count())
+                                                          .arg(cray.verdict.why)));
+            QCOMPARE(*cray.state.current, (Choice{Family::Av1, true}));
+        }
+        QVERIFY(cray.throttle.active()); // the delivery throttle still paces the source to the client
+        QVERIFY2(cray.clientLimitedTicks > cray.ticks * 9 / 10, qPrintable(QString::number(cray.clientLimitedTicks)));
+        QCOMPARE(cray.limit, KRdp::LinkEvidence::Limit::Client);
+
+        // The same session without socket figures is judged as before (congestion is the link's).
+        CraySession blind;
+        blind.in.pixels = 3840LL * 1194LL;
+        State legacy;
+        auto in = blind.in;
+        in.bandwidthKbps = 8300;
+        in.congested = true;
+        auto now = T0;
+        run(legacy, in, now, 9s);
+        QVERIFY(legacy.slowLink);
+    }
+
+    // AUD-FIX13: a real throttle under a slow client still turns slow, stays slow for its 3.5 min,
+    // and the link recovers within ~90 s of its removal although the client stays slow (573fa31: no
+    // recovery 3+ min later). The throttle must be the tighter limit: a 12 fps client paced to 10 fps
+    // sends 5.3 Mbit/s, which a 6 Mbit/s tbf carries (rightly not a slow link, see
+    // clientPacedStreamThatFitsIsNotSlow); cray L2's client took 10-14 fps.
+    void throttleUnderSlowClientStillSlowAndRecovers_data()
+    {
+        QTest::addColumn<double>("tbfKbps");
+        QTest::addColumn<double>("clientFps");
+        QTest::newRow("6 Mbit/s tbf, 14 fps client") << 6000.0 << 14.0;
+        QTest::newRow("3 Mbit/s tbf, 12 fps client") << 3000.0 << 12.0;
+        QTest::newRow("6 Mbit/s tbf, 30 fps client") << 6000.0 << 30.0;
+    }
+    void throttleUnderSlowClientStillSlowAndRecovers()
+    {
+        QFETCH(double, tbfKbps);
+        QFETCH(double, clientFps);
+        SlowClientSession cray;
+        while (cray.now - T0 < 20s) cray.tick(1000000, clientFps); // the unthrottled start
+        QVERIFY(!cray.state.slowLink);
+        const auto tbf = cray.now;
+        std::optional<Clock::time_point> slowAt;
+        while (cray.now - tbf < 40s && !slowAt) {
+            cray.tick(tbfKbps, clientFps);
+            if (cray.state.slowLink) slowAt = cray.now;
+        }
+        QVERIFY2(slowAt, "a 6 Mbit/s throttle never turned slow");
+        qInfo() << "slow" << std::chrono::duration_cast<std::chrono::seconds>(*slowAt - tbf).count() << "s after the tbf; entry" << cray.state.slowEntryKbps;
+        QCOMPARE(cray.limit, KRdp::LinkEvidence::Limit::Link);
+        while (cray.now - tbf < 210s) {
+            cray.tick(tbfKbps, clientFps);
+            QVERIFY2(cray.state.slowLink, qPrintable(QStringLiteral("cleared %1 s into the throttle")
+                                                         .arg(std::chrono::duration_cast<std::chrono::seconds>(cray.now - tbf).count())));
+            QCOMPARE(cray.limit, KRdp::LinkEvidence::Limit::Link);
+        }
+        const auto removed = cray.now;
+        while (cray.state.slowLink && cray.now - removed < 300s) cray.tick(1000000, clientFps);
+        const auto took = std::chrono::duration_cast<std::chrono::seconds>(cray.now - removed);
+        qInfo() << "recovered" << took.count() << "s after removal; proven" << cray.state.provenKbps << "kbit/s; throttle"
+                << (cray.throttle.active() ? "on" : "off");
+        QVERIFY(!cray.state.slowLink);
+        QVERIFY2(took <= 90s, qPrintable(QStringLiteral("recovery took %1 s").arg(took.count())));
+        // The client is still slow: the source is still paced, and it stays recovered.
+        const auto recovered = cray.now;
+        while (cray.now - recovered < 300s) {
+            cray.tick(1000000, clientFps);
+            QVERIFY(!cray.state.slowLink);
+        }
+        if (clientFps < 30) {
+            QCOMPARE(cray.limit, KRdp::LinkEvidence::Limit::Client);
+        } else {
+            QCOMPARE(cray.limit, KRdp::LinkEvidence::Limit::None);
+        }
+    }
+
+    // AUD-FIX13: a tbf that carries more than the client takes (12 Mbit/s for a 12 fps client, 6.4
+    // Mbit/s at quality 80) is not the limit: no slow link, no heavier codec, client-limited.
+    void clientSlowerThanAThrottledLinkIsNotSlow()
+    {
+        SlowClientSession cray;
+        while (cray.now - T0 < 20s) cray.tick(1000000, 12);
+        while (cray.now - T0 < 300s) {
+            cray.tick(12000, 12);
+            QVERIFY2(!cray.state.slowLink, qPrintable(cray.verdict.why));
+        }
+        QCOMPARE(*cray.state.current, (Choice{Family::Av1, true}));
+        QCOMPARE(cray.limit, KRdp::LinkEvidence::Limit::Client);
+    }
+
+    // AUD-FIX13: while the client paces a slow link's source, a throttle that is the link's own
+    // (no TCP capacity above the rung) still keeps it slow however clear it looks.
+    void clientLimitedThrottleProvesNoRungByItself()
+    {
+        Encoders e;
+        e.avc = {true, true};
+        e.av1 = {true, false};
+        auto in = input(SoftwareEncoding::Auto, e, {Family::Av1});
+        in.qualityCap = 80;
+        in.quality = 80;
+        State state;
+        auto now = T0;
+        step(state, in, now);
+        in.bandwidthKbps = 4000;
+        in.congested = true;
+        in.networkLimited = true;
+        run(state, in, now, 9s);
+        QVERIFY(state.slowLink);
+        // Clear, client-limited, throttled, no capacity estimate, goodput under the rung: slow.
+        in.congested = true; // the client's backlog
+        in.networkLimited = false;
+        in.clientLimited = true;
+        in.throttled = true;
+        in.bandwidthKbps = 5000;
+        run(state, in, now, 180s);
+        QVERIFY(state.slowLink);
+        QCOMPARE(state.provenKbps, 0u);
+        // TCP measures 30 Mbit/s of network-limited delivery: a rung, then 20 s unrestrained by the link.
+        in.capacityKbps = 30000;
+        const auto from = now;
+        while (state.slowLink && now - from < 120s) run(state, in, now, 1500ms);
+        QVERIFY(!state.slowLink);
+        QVERIFY2(now - from <= ProbeHold + RecoverHold + 6s, qPrintable(QString::number(std::chrono::duration_cast<std::chrono::seconds>(now - from).count())));
     }
 
     void parsesModes()
