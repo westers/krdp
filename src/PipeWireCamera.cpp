@@ -170,13 +170,16 @@ void PipeWireCamera::stop()
         m_stream = nullptr;
         m_loop = nullptr;
         m_registry = nullptr;
-        m_outputLinks.clear();
         loopbackFd = m_loopbackFd;
         m_loopbackFd = -1;
         m_loopbackDevice.clear();
         m_pending.clear();
     }
     if (loop) pw_thread_loop_stop(loop);
+    {
+        QMutexLocker lock(&m_mutex);
+        m_outputLinks.clear();
+    }
     if (registry) {
         spa_hook_remove(&m_registryListener);
         pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry));
