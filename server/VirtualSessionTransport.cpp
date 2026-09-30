@@ -113,9 +113,10 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     connect(connection, &RdpConnection::externalCameraFormat, this, [this](quint64 epoch, quint32 width, quint32 height, quint32 fps) {
         if (!m_connection || epoch != m_connection->externalCameraEpoch() || !m_endpoint || !m_cameraPolicy.enabled || !authorized()) return;
         if (!m_endpoint->setCameraFormat({m_cameraPolicy.generation, m_cameraPolicy.requestId, width, height, fps})) {
+            const QPointer<VirtualSessionTransport> alive(this);
             const QString requestId = std::exchange(m_cameraRequestId, {});
             stopCamera();
-            if (m_connection) pushRecord(LayoutControl::withRequestId(deviceReply(MediaDevice::Camera,
+            if (alive && m_connection) pushRecord(LayoutControl::withRequestId(deviceReply(MediaDevice::Camera,
                 {DeviceStatus::State::Error, false, DeviceControl::Unavailable, u"cannot dispatch virtual camera format"_s}), requestId));
         }
     }, Qt::QueuedConnection);
@@ -688,10 +689,12 @@ QJsonObject VirtualSessionTransport::cameraResult(const ConsoleWorkerWire::Camer
 QJsonObject VirtualSessionTransport::cameraTimeout()
 {
     if (!m_cameraPolicy.enabled || m_cameraReady) return {};
+    const QPointer<VirtualSessionTransport> alive(this);
     const QString requestId = std::exchange(m_cameraRequestId, {});
     stopCamera();
-    return LayoutControl::withRequestId(deviceReply(MediaDevice::Camera,
-        {DeviceStatus::State::Error, false, DeviceControl::Timeout, u"virtual camera worker startup timed out"_s}), requestId);
+    return alive ? LayoutControl::withRequestId(deviceReply(MediaDevice::Camera,
+        {DeviceStatus::State::Error, false, DeviceControl::Timeout, u"virtual camera worker startup timed out"_s}), requestId)
+        : QJsonObject{};
 }
 
 bool VirtualSessionTransport::forwardMicrophone(const QByteArray &pcm, std::optional<quint32> uid)
