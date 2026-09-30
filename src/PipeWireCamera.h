@@ -6,13 +6,16 @@
 #include "PipeWireRuntime.h"
 
 #include <QByteArray>
+#include <QHash>
 #include <QMutex>
 #include <QString>
+#include <spa/utils/hook.h>
 
 #include <atomic>
 
 struct pw_stream;
 struct pw_thread_loop;
+struct pw_registry;
 
 namespace KRdp
 {
@@ -31,18 +34,17 @@ public:
     bool captureRequested() const;
     /** The node exists in the graph (PAUSED or STREAMING). Any thread. */
     bool ready() const { return m_ready.load(); }
-    /**
-     * An application on the host is capturing right now: the stream is
-     * STREAMING, or another process holds the V4L2 loopback open. Unlike
-     * captureRequested() this drops back to false when the consumer leaves.
-     * The loopback check walks /proc; do not call it on every loop iteration.
-     */
+    /** True while a PipeWire input is linked or a V4L2 reader holds the loopback. */
     bool consumerActive() const;
 private:
     static void process(void *data);
     void process();
+    static void registryGlobal(void *data, uint32_t id, uint32_t permissions,
+                               const char *type, uint32_t version, const spa_dict *props);
+    static void registryGlobalRemove(void *data, uint32_t id);
     mutable QMutex m_mutex;
     QByteArray m_pending;
+    QHash<uint32_t, uint32_t> m_outputLinks; // link id -> output node id
     uint32_t m_width = 0;
     uint32_t m_height = 0;
     int m_loopbackFd = -1;
@@ -50,8 +52,11 @@ private:
     std::atomic_bool m_captureRequested = false;
     std::atomic_bool m_ready = false;
     std::atomic_bool m_streaming = false;
+    std::atomic<uint32_t> m_nodeId = UINT32_MAX;
     pw_thread_loop *m_loop = nullptr;
     pw_stream *m_stream = nullptr;
+    pw_registry *m_registry = nullptr;
+    spa_hook m_registryListener{};
     PipeWireRuntime::Reference m_runtime;
 };
 }

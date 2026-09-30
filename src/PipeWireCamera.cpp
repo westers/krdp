@@ -8,6 +8,8 @@
 #include <QFile>
 #include <QMutexLocker>
 #include <QDebug>
+#include <cstring>
+#include <cstdlib>
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <pipewire/pipewire.h>
@@ -71,6 +73,7 @@ bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, u
             auto *self = static_cast<PipeWireCamera *>(data);
             self->m_ready = state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING;
             self->m_streaming = state == PW_STREAM_STATE_STREAMING;
+            if (self->m_stream && self->m_ready) self->m_nodeId = pw_stream_get_node_id(self->m_stream);
         };
         return result;
     }();
@@ -86,8 +89,31 @@ bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, u
     format.framerate.denom = 1;
     const spa_pod *params[] = {spa_format_video_raw_build(&builder, SPA_PARAM_EnumFormat, &format)};
     const auto flags = static_cast<pw_stream_flags>(PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS);
-    if (!m_stream || pw_stream_connect(m_stream, PW_DIRECTION_OUTPUT, PW_ID_ANY, flags, params, 1) < 0 || pw_thread_loop_start(m_loop) < 0) {
+    if (!m_stream || pw_stream_connect(m_stream, PW_DIRECTION_OUTPUT, PW_ID_ANY, flags, params, 1) < 0) {
         if (m_stream) pw_stream_destroy(m_stream);
+        m_stream = nullptr;
+        pw_thread_loop_destroy(m_loop);
+        m_loop = nullptr;
+        m_runtime.release();
+        return false;
+    }
+    if (auto *core = pw_stream_get_core(m_stream)) m_registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
+    if (m_registry) {
+        static const pw_registry_events registryEvents = {
+            .version = PW_VERSION_REGISTRY_EVENTS,
+            .global = PipeWireCamera::registryGlobal,
+            .global_remove = PipeWireCamera::registryGlobalRemove,
+        };
+        pw_registry_add_listener(m_registry, &m_registryListener, &registryEvents, this);
+    }
+    if (!m_registry || pw_thread_loop_start(m_loop) < 0) {
+        if (m_registry) {
+            spa_hook_remove(&m_registryListener);
+            pw_proxy_destroy(reinterpret_cast<pw_proxy *>(m_registry));
+            m_registry = nullptr;
+        }
+        pw_stream_disconnect(m_stream);
+        pw_stream_destroy(m_stream);
         m_stream = nullptr;
         pw_thread_loop_destroy(m_loop);
         m_loop = nullptr;
@@ -134,19 +160,27 @@ void PipeWireCamera::stop()
 {
     pw_stream *stream = nullptr;
     pw_thread_loop *loop = nullptr;
+    pw_registry *registry = nullptr;
     int loopbackFd = -1;
     {
         QMutexLocker lock(&m_mutex);
         stream = m_stream;
         loop = m_loop;
+        registry = m_registry;
         m_stream = nullptr;
         m_loop = nullptr;
+        m_registry = nullptr;
+        m_outputLinks.clear();
         loopbackFd = m_loopbackFd;
         m_loopbackFd = -1;
         m_loopbackDevice.clear();
         m_pending.clear();
     }
     if (loop) pw_thread_loop_stop(loop);
+    if (registry) {
+        spa_hook_remove(&m_registryListener);
+        pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry));
+    }
     if (stream) { pw_stream_disconnect(stream); pw_stream_destroy(stream); }
     if (loop) pw_thread_loop_destroy(loop);
     m_runtime.release();
@@ -156,6 +190,7 @@ void PipeWireCamera::stop()
     m_captureRequested.store(false, std::memory_order_release);
     m_ready = false;
     m_streaming = false;
+    m_nodeId = PW_ID_ANY;
 }
 
 void PipeWireCamera::writeMjpeg(const QByteArray &jpeg)
@@ -206,15 +241,37 @@ bool PipeWireCamera::captureRequested() const
 
 bool PipeWireCamera::consumerActive() const
 {
-    if (m_streaming.load()) {
-        return true;
-    }
     QString device;
     {
         QMutexLocker lock(&m_mutex);
+        const auto nodeId = m_nodeId.load();
+        for (const auto outputNode : m_outputLinks) {
+            if (nodeId != PW_ID_ANY && outputNode == nodeId) return true;
+        }
         device = m_loopbackDevice;
     }
     return hasExternalV4l2Consumer(device);
+}
+
+void PipeWireCamera::registryGlobal(void *data, uint32_t id, uint32_t, const char *type,
+                                    uint32_t, const spa_dict *props)
+{
+    if (!type || std::strcmp(type, PW_TYPE_INTERFACE_Link) != 0 || !props) return;
+    const auto *value = spa_dict_lookup(props, PW_KEY_LINK_OUTPUT_NODE);
+    if (!value) return;
+    char *end = nullptr;
+    const auto outputNode = std::strtoul(value, &end, 10);
+    if (end == value || *end || outputNode > UINT32_MAX) return;
+    auto *self = static_cast<PipeWireCamera *>(data);
+    QMutexLocker lock(&self->m_mutex);
+    self->m_outputLinks.insert(id, uint32_t(outputNode));
+}
+
+void PipeWireCamera::registryGlobalRemove(void *data, uint32_t id)
+{
+    auto *self = static_cast<PipeWireCamera *>(data);
+    QMutexLocker lock(&self->m_mutex);
+    self->m_outputLinks.remove(id);
 }
 
 void PipeWireCamera::process(void *data) { static_cast<PipeWireCamera *>(data)->process(); }
