@@ -252,6 +252,29 @@ bool ConsoleWorkerEndpoint::sendMicrophoneAudio(const ConsoleWorkerWire::Microph
     return m_worker->write(ConsoleWorkerWire::frame(audio)) >= 0;
 }
 
+bool ConsoleWorkerEndpoint::setCamera(const ConsoleWorkerWire::CameraPolicy &policy)
+{
+    if (!m_ready || !m_worker || !policy.generation || !policy.requestId) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(policy)) >= 0;
+}
+
+bool ConsoleWorkerEndpoint::setCameraFormat(const ConsoleWorkerWire::CameraFormat &format)
+{
+    if (!m_ready || !m_worker || !format.generation || !format.requestId
+        || !format.width || format.width > 4096 || !format.height || format.height > 4096
+        || !format.fps || format.fps > 120) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(format)) >= 0;
+}
+
+bool ConsoleWorkerEndpoint::sendCameraFrame(const ConsoleWorkerWire::CameraFrame &sample)
+{
+    // A slow desktop must not accumulate stale webcam frames or unbounded memory.
+    if (!m_ready || !m_worker || m_worker->bytesToWrite() > 2 * ConsoleWorkerWire::MaxCameraJpegBytes
+        || !sample.generation || !sample.requestId || sample.jpeg.isEmpty()
+        || sample.jpeg.size() > ConsoleWorkerWire::MaxCameraJpegBytes) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(sample)) >= 0;
+}
+
 void ConsoleWorkerEndpoint::acceptConnection()
 {
     QLocalSocket *candidate = m_server->nextPendingConnection();
@@ -405,6 +428,10 @@ bool ConsoleWorkerEndpoint::processRecords()
             Q_EMIT removeVirtualFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::microphoneResult(*record)) {
             Q_EMIT microphoneFinished(*result);
+        } else if (const auto result = ConsoleWorkerWire::cameraResult(*record)) {
+            Q_EMIT cameraFinished(*result);
+        } else if (const auto demand = ConsoleWorkerWire::cameraDemand(*record)) {
+            Q_EMIT cameraDemand(*demand);
         } else if (const auto report = ConsoleWorkerWire::encoderReport(*record)) {
             Q_EMIT encoderReported(*report);
         } else if (const auto load = ConsoleWorkerWire::encoderLoad(*record)) {

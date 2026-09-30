@@ -5,6 +5,7 @@
 
 #include "ConsoleWorkerWire.h"
 #include "ConsoleMicrophoneWire.h"
+#include "ConsoleCameraWire.h"
 
 using namespace KRdp;
 using namespace KRdp::ConsoleWorkerWire;
@@ -25,6 +26,7 @@ private Q_SLOTS:
     void rejectsOversizedRecord();
     void videoQualityIsBoundedAndGenerationScoped();
     void microphoneRecordsAreBoundedAndCorrelated();
+    void cameraRecordsAreBoundedAndCorrelated();
     void positionRecordsAreBoundedAndCorrelated();
     void positionBatchRecordsAreBoundedAndCorrelated();
     void managedFitRecordsAreBoundedAndCorrelated();
@@ -409,6 +411,37 @@ void ConsoleWorkerWireTest::microphoneRecordsAreBoundedAndCorrelated()
     }
 }
 
+void ConsoleWorkerWireTest::cameraRecordsAreBoundedAndCorrelated()
+{
+    Deframer reader;
+    const CameraPolicy policy{5, 17, true, QStringLiteral("/dev/v4l/by-id/remote-camera")};
+    const CameraFormat format{5, 17, 1920, 1080, 30};
+    const CameraFrame sample{5, 17, QByteArray::fromHex("ffd8ffe00010ffd9")};
+    const CameraResult result{5, 17, {}};
+    const CameraDemand demand{5, 17, true, true};
+    reader.feed(frame(policy) + frame(format) + frame(sample) + frame(result) + frame(demand));
+    QCOMPARE(cameraPolicy(*reader.next()), std::optional(policy));
+    QCOMPARE(cameraFormat(*reader.next()), std::optional(format));
+    QCOMPARE(cameraFrame(*reader.next()), std::optional(sample));
+    QCOMPARE(cameraResult(*reader.next()), std::optional(result));
+    QCOMPARE(cameraDemand(*reader.next()), std::optional(demand));
+
+    const auto rejected = [](const auto &bad, auto parse) {
+        Deframer d;
+        d.feed(frame(bad));
+        const auto record = d.next();
+        return record && !parse(*record);
+    };
+    QVERIFY(rejected(CameraPolicy{0, 17, true, {}}, cameraPolicy));
+    QVERIFY(rejected(CameraPolicy{5, 17, true, QStringLiteral("relative/path")}, cameraPolicy));
+    QVERIFY(rejected(CameraFormat{5, 17, 0, 1080, 30}, cameraFormat));
+    QVERIFY(rejected(CameraFormat{5, 17, 1920, 1080, 121}, cameraFormat));
+    QVERIFY(rejected(CameraFrame{5, 17, "not a JPEG"}, cameraFrame));
+    QVERIFY(rejected(CameraFrame{5, 17, QByteArray(MaxCameraJpegBytes + 1, 'x')}, cameraFrame));
+    QVERIFY(rejected(CameraResult{5, 0, {}}, cameraResult));
+    QVERIFY(rejected(CameraDemand{0, 17, true, false}, cameraDemand));
+}
+
 void ConsoleWorkerWireTest::videoQualityIsBoundedAndGenerationScoped()
 {
     Deframer reader;
@@ -511,7 +544,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(5));
+    QCOMPARE(ProtocolVersion, quint16(6));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -575,7 +608,7 @@ void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
     QCOMPARE(encoderStats(*deframer.next()), std::optional(measured));
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 0);
-    QCOMPARE(LastKind, Kind::Cursor);
+    QCOMPARE(LastKind, Kind::CameraDemand);
 
     const auto rejected = [](const EncoderStats &stats) {
         Deframer d;

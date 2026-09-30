@@ -3,6 +3,7 @@
 
 #pragma once
 #include "ConsoleMicrophoneWire.h"
+#include "ConsoleCameraWire.h"
 
 #include <memory>
 
@@ -76,6 +77,9 @@ public:
     }
     bool setMicrophone(const ConsoleWorkerWire::MicrophonePolicy &policy);
     bool sendMicrophoneAudio(const ConsoleWorkerWire::MicrophoneAudio &audio);
+    bool setCamera(const ConsoleWorkerWire::CameraPolicy &policy);
+    bool setCameraFormat(const ConsoleWorkerWire::CameraFormat &format);
+    bool sendCameraFrame(const ConsoleWorkerWire::CameraFrame &sample);
     bool resize(const ConsoleWorkerWire::Resize &request);
     bool position(const ConsoleWorkerWire::Position &request);
     bool positionBatch(const ConsoleWorkerWire::PositionBatch &request);
@@ -108,6 +112,8 @@ Q_SIGNALS:
     void addVirtualFinished(const KRdp::ConsoleWorkerWire::AddVirtualResult &result);
     void removeVirtualFinished(const KRdp::ConsoleWorkerWire::RemoveVirtualResult &result);
     void microphoneFinished(const KRdp::ConsoleWorkerWire::MicrophoneResult &result);
+    void cameraFinished(const KRdp::ConsoleWorkerWire::CameraResult &result);
+    void cameraDemand(const KRdp::ConsoleWorkerWire::CameraDemand &demand);
     void encoderCapsReceived(const KRdp::ConsoleWorkerWire::EncoderCaps &caps);
     void encoderReported(const KRdp::ConsoleWorkerWire::EncoderReport &report);
     /** STATS-S6: the worker's EncoderStats (only after Ready; one before Ready fails the worker). */

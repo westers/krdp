@@ -44,6 +44,7 @@
 #include "TakeoverDetector.h"
 #include "PipeWireAudioPlayback.h"
 #include "ConsoleMicrophoneSession.h"
+#include "ConsoleCameraSession.h"
 #include "CaptureWorkerMode.h"
 #include "RetainedMultiCapture.h"
 #include "RetainedMultiInput.h"
@@ -109,6 +110,7 @@ public:
         , m_authenticatedDesktop(desktop)
         , m_initialOutputs(std::move(initialOutputs))
         , m_microphone(desktop)
+        , m_camera(desktop)
     {
         if (!m_mode.virtualSession && m_authenticatedDesktop) {
             // Physical outputs of a logged-in desktop: journal every Fit (AUD-C-3).
@@ -117,6 +119,14 @@ public:
         connect(&m_microphone, &ConsoleMicrophoneSession::result, this, [this](const auto &result) {
             if (!m_stopping && m_socket.state() == QLocalSocket::ConnectedState)
                 m_socket.write(ConsoleWorkerWire::frame(result));
+        });
+        connect(&m_camera, &ConsoleCameraSession::result, this, [this](const auto &result) {
+            if (!m_stopping && m_socket.state() == QLocalSocket::ConnectedState)
+                m_socket.write(ConsoleWorkerWire::frame(result));
+        });
+        connect(&m_camera, &ConsoleCameraSession::demand, this, [this](const auto &demand) {
+            if (!m_stopping && m_socket.state() == QLocalSocket::ConnectedState)
+                m_socket.write(ConsoleWorkerWire::frame(demand));
         });
         m_clock.start();
         connect(&m_resize, &ConsoleResizeSession::mutationStarting, this, [this]() {
@@ -514,6 +524,7 @@ private:
         // calls; main() waits for the job after the event loop has ended.
         PipeWireAudioPlayback::stopAsync(std::move(m_audio));
         m_microphone.stop();
+        m_camera.stop();
         // Keep the event loop alive until in-flight mutations settle. Successful
         // virtual geometry is retained; only an unfinished Fit may roll back.
         if (m_mode.virtualSession) m_virtualResize.stop();
@@ -2447,6 +2458,7 @@ private:
             m_socket.disconnectFromServer(); // A new worker must prove fresh capture before any new grant.
         }
         m_microphone.setControl(m_control);
+        m_camera.setControl(m_control);
         m_session.setVideoQuality(80);
         m_resize.setControl(m_control);
         m_reclaimAction.setEnabled(false);
@@ -2506,6 +2518,7 @@ private:
                     resetEncoderConfig(); // AUD-FIX7: a new grant starts from AVC; its connection says more
                     m_control = *control;
                     m_microphone.setControl(*control);
+                    m_camera.setControl(*control);
                     if (m_mode.virtualSession) m_virtualResize.setControl(*control);
                     else m_resize.setControl(*control);
                     m_reclaimAction.setEnabled(m_mode.physicalActions() && control->active);
@@ -2540,6 +2553,18 @@ private:
             }
             if (const auto audio = ConsoleWorkerWire::microphoneAudio(*record)) {
                 m_microphone.audio(*audio);
+                continue;
+            }
+            if (const auto policy = ConsoleWorkerWire::cameraPolicy(*record)) {
+                m_camera.request(*policy);
+                continue;
+            }
+            if (const auto format = ConsoleWorkerWire::cameraFormat(*record)) {
+                m_camera.format(*format);
+                continue;
+            }
+            if (const auto sample = ConsoleWorkerWire::cameraFrame(*record)) {
+                m_camera.frame(*sample);
                 continue;
             }
             if (const auto request = ConsoleWorkerWire::resize(*record)) {
@@ -2782,6 +2807,7 @@ private:
     bool m_physicalResizeReadyForCapture = false;
     std::unique_ptr<PipeWireAudioPlayback> m_audio;
     ConsoleMicrophoneSession m_microphone;
+    ConsoleCameraSession m_camera;
     QTimer m_connectTimeout;
     QTimer m_audioTimer;
     // AUD-FIX7: the codec policy's encoder config (AVC420 until the controlling connection's).

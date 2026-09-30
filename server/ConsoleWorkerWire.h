@@ -45,7 +45,8 @@ namespace KRdp::ConsoleWorkerWire
 //   included - fails it.
 // Broker -> worker: nothing but Stop before the worker authenticated, and
 //   nothing but Stop/RequestKeyFrame before Ready.
-constexpr quint16 ProtocolVersion = 5;
+// 6 (WS-D camera): camera policy, format, compressed samples and worker demand.
+constexpr quint16 ProtocolVersion = 6;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -97,8 +98,13 @@ enum class Kind : quint8 {
     EncoderLoad,
     EncoderStats,
     Cursor,
+    CameraPolicy,
+    CameraFormat,
+    CameraFrame,
+    CameraResult,
+    CameraDemand,
 };
-constexpr Kind LastKind = Kind::Cursor;
+constexpr Kind LastKind = Kind::CameraDemand;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;
