@@ -45,6 +45,7 @@ public:
      * the client authenticates.
      */
     void setVideoCodecHost(const VideoCodecHost &host);
+    void setVideoQualityPolicy(quint8 cap, bool adaptive);
 
 private:
     friend class VirtualSessionTransportTest;
@@ -158,6 +159,8 @@ private:
     std::optional<VirtualSessionRegistry::Handle> m_handle;
     ConsoleWorkerSession m_session;
     std::optional<VideoCodecHost> m_videoHost;
+    quint8 m_qualityCap = 80;
+    bool m_adaptiveQuality = false;
     std::unique_ptr<WorkerCodecBridge> m_codec; // after m_session: destroyed first
     QVector<VideoMonitor> m_wireLayout;
     QList<QMetaObject::Connection> m_workerConnections;

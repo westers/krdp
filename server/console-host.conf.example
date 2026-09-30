@@ -1,20 +1,24 @@
-# TLS material for krdp-console-host.service. The host creates a self-signed ECDSA P-256
+# TLS material for farside-console-host.service. The host creates a self-signed ECDSA P-256
 # certificate (10 years) here when there is none, renews it within 30 days of expiry and keeps
 # a valid one; a symlinked pair is left to the administrator.
-KRDP_CONSOLE_CERTIFICATE=/etc/krdp/console.crt
-KRDP_CONSOLE_CERTIFICATE_KEY=/etc/krdp/console.key
+FARSIDE_CONSOLE_CERTIFICATE=/etc/farside/console.crt
+FARSIDE_CONSOLE_CERTIFICATE_KEY=/etc/farside/console.key
+
+# Video quality cap and congestion adaptation. Adaptation defaults to false.
+#FARSIDE_CONSOLE_QUALITY=80
+#FARSIDE_CONSOLE_ADAPTIVE_QUALITY=false
 
 # Private codecs (HEVC/AV1) in software: auto (default), never or prefer.
-#KRDP_CONSOLE_SOFTWARE_ENCODING=auto
+#FARSIDE_CONSOLE_SOFTWARE_ENCODING=auto
 
 # AV1 tiles for the Farside client: auto (default: tile rows by picture height when the client
 # decodes AV1 in software or does not say, one tile when it decodes in hardware), 1, 2, 4, 8 or 16.
-#KRDP_CONSOLE_AV1_TILES=auto
+#FARSIDE_CONSOLE_AV1_TILES=auto
 
 # VA-API driver for the capture workers, like krdpserver's VaapiDriverMode: auto (default; a
 # LIBVA_DRIVER_NAME set in the desktop session is respected), off, radeonsi, iHD or i965.
-#KRDP_CONSOLE_VAAPI_DRIVER=auto
+#FARSIDE_CONSOLE_VAAPI_DRIVER=auto
 
-# Bind as needed; port 3389 must not also be owned by the user-session server.
-KRDP_CONSOLE_ADDRESS=0.0.0.0
-KRDP_CONSOLE_PORT=3389
+# Keep Console separate from the stock KRDP or legacy Farside user server on :3389.
+FARSIDE_CONSOLE_ADDRESS=0.0.0.0
+FARSIDE_CONSOLE_PORT=3391

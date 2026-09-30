@@ -68,6 +68,7 @@ public:
     ~ConsoleHostController() override;
     void start();
     void setAudioPriorityDefault(bool enabled);
+    void setVideoQualityPolicy(quint8 cap, bool adaptive) { m_qualityCap = cap; m_adaptiveQuality = adaptive; }
     /**
      * AUD-FIX7: offer the codec policy (`capabilities.video`, `codec`) with \a host's encoders and
      * SoftwareEncoding (unset: AVC only). The one worker encodes for every client, so a private
@@ -202,6 +203,8 @@ private:
     bool m_inputEnabled = false;
     bool m_audioPriorityDefault = false;
     std::optional<VideoCodecHost> m_videoHost;
+    quint8 m_qualityCap = 80;
+    bool m_adaptiveQuality = false;
     /** AUD-FIX7: bind the controller's codec bridge; a private codec only while it is alone. */
     void syncCodecPolicy();
     ConsoleControl m_control;

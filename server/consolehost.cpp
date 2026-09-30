@@ -41,10 +41,12 @@ int main(int argc, char **argv)
     const QCommandLineOption portOption(QStringLiteral("port"), QStringLiteral("Listen port."), QStringLiteral("port"), QStringLiteral("3389"));
     const QCommandLineOption runtimeOption(QStringLiteral("runtime-directory"), QStringLiteral("Host-owned worker socket directory."), QStringLiteral("path"), QStringLiteral("/run/farside-console"));
     const QCommandLineOption audioPriorityOption(QStringLiteral("prefer-audio-quality"), QStringLiteral("Default to audio-first congestion steering for the controlling client (live client overrides allowed)."));
+    const QCommandLineOption qualityOption(QStringLiteral("quality"), QStringLiteral("Maximum video quality, 0 to 100."), QStringLiteral("quality"), QStringLiteral("80"));
+    const QCommandLineOption adaptiveQualityOption(QStringLiteral("adaptive-quality"), QStringLiteral("Steer video quality under link congestion: true or false."), QStringLiteral("enabled"), QStringLiteral("false"));
     const QCommandLineOption softwareEncodingOption(QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto"));
     const QCommandLineOption av1TilesOption(QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto"));
     const QCommandLineOption vaapiDriverOption(QStringLiteral("vaapi-driver"), QStringLiteral("VaapiDriverMode for the capture workers: auto, off, radeonsi, iHD or i965."), QStringLiteral("mode"), QStringLiteral("auto"));
-    parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, softwareEncodingOption, av1TilesOption, vaapiDriverOption});
+    parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, qualityOption, adaptiveQualityOption, softwareEncodingOption, av1TilesOption, vaapiDriverOption});
     parser.process(application);
 
     if (geteuid() != 0) {
@@ -54,9 +56,14 @@ int main(int argc, char **argv)
 
     bool portOk = false;
     const quint16 port = parser.value(portOption).toUShort(&portOk);
+    bool qualityOk = false;
+    const int quality = parser.value(qualityOption).toInt(&qualityOk);
+    const auto adaptiveValue = parser.value(adaptiveQualityOption);
     const auto softwareEncoding = KRdp::parseHostSoftwareEncoding(parser.value(softwareEncodingOption));
     const auto vaapiDriver = KRdp::VaapiDriverMode::normalize(parser.value(vaapiDriverOption));
     if (!portOk || port == 0 || parser.value(workerOption).isEmpty() || parser.value(certificateOption).isEmpty() || parser.value(keyOption).isEmpty()
+        || !qualityOk || quality < 0 || quality > 100
+        || (adaptiveValue != QLatin1String("true") && adaptiveValue != QLatin1String("false"))
         || !softwareEncoding || !vaapiDriver) {
         parser.showHelp(1);
     }
@@ -94,6 +101,7 @@ int main(int argc, char **argv)
                      &host, &KRdp::ConsoleHostController::workerExited, Qt::QueuedConnection);
     QObject::connect(&seat, &KRdp::ConsoleSeatWatcher::sessionsChanged, &host, &KRdp::ConsoleHostController::setSeatSessions);
     host.setAudioPriorityDefault(parser.isSet(audioPriorityOption));
+    host.setVideoQualityPolicy(quint8(quality), adaptiveValue == QLatin1String("true"));
     // AUD-FIX7: what `capabilities.video` offers and the controlling connection's codec policy
     // starts from; the worker probes its own encoders and replaces this once it reports.
     KRdp::EncoderSupport::applyProcessOverrides();

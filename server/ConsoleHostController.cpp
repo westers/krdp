@@ -747,13 +747,13 @@ void ConsoleHostController::addClient(RdpConnection *connection)
         connection->videoStream()->setEncoderPolicy(m_videoHost->probe.encoders, m_videoHost->mode);
         connection->videoStream()->setAv1TilesSetting(m_videoHost->av1Tiles);
     }
-    connection->videoStream()->setQualityCap(80);
-    // Preserve the console's fixed baseline unless audio priority explicitly
-    // enables congestion steering for its controlling connection.
-    connection->videoStream()->setAdaptiveQuality(false);
+    connection->videoStream()->setQualityCap(m_qualityCap);
+    // Keep the configured quality cap; adaptation is explicitly configured.
+    connection->videoStream()->setAdaptiveQuality(m_adaptiveQuality);
     auto client = std::make_unique<Client>();
     const auto id = client->id = ++m_nextClientId;
     client->connection = connection;
+    client->videoQuality = m_qualityCap;
     client->externalMicrophone = connection->enableExternalMicrophone();
     client->externalCamera = connection->enableExternalCamera();
     client->session = std::make_unique<ConsoleWorkerSession>([this, id](const ConsoleWorkerWire::Input &input) {
@@ -1656,11 +1656,11 @@ void ConsoleHostController::syncControlState()
         for (const auto &client : m_clients) {
             // A new controller must explicitly reapply its live preference;
             // no previous ownership period may carry a latent shared policy.
+            client->videoQuality = m_qualityCap;
             client->connection->setAudioPriority(false);
-            client->connection->videoStream()->setQualityCap(80);
+            client->connection->videoStream()->setQualityCap(m_qualityCap);
             client->connection->clearAudioPriorityOverride();
             client->connection->setAudioPriorityDefault(m_audioPriorityDefault && m_control.ownsControl(client->id));
-            client->videoQuality = 80;
         }
         // AUD-FIX7: the new controller's codec bridge steers the worker under the new generation.
         for (const auto &client : m_clients) {

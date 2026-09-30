@@ -454,13 +454,19 @@ void ConsoleWorkerWireTest::videoQualityIsBoundedAndGenerationScoped()
     QVERIFY(!mayApplyQuality(request, {41, true}));
     QVERIFY(!mayApplyQuality(request, {42, false}));
     QVERIFY(!mayApplyQuality({0, 60}, {0, true}));
+    const VideoQuality minimum{42, 0};
+    reader.feed(frame(minimum));
+    const auto minimumRecord = reader.next();
+    QVERIFY(minimumRecord);
+    QCOMPARE(videoQuality(*minimumRecord), std::optional<VideoQuality>(minimum));
+    QVERIFY(mayApplyQuality(minimum, {42, true}));
     auto invalid = *record;
     invalid.payload.chop(1);
     QVERIFY(!videoQuality(invalid));
     invalid = *record;
     invalid.payload.append('x');
     QVERIFY(!videoQuality(invalid));
-    for (const auto bad : {VideoQuality{0, 60}, VideoQuality{42, 9}, VideoQuality{42, 101}}) {
+    for (const auto bad : {VideoQuality{0, 60}, VideoQuality{42, 101}}) {
         reader.feed(frame(bad));
         const auto malformed = reader.next();
         QVERIFY(malformed);

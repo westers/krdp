@@ -93,6 +93,23 @@ class VirtualSessionTransportTest : public QObject
         return records;
     }
 private Q_SLOTS:
+    void configuredVideoQualityFlowsToVirtualWorker()
+    {
+        microphoneFixture([&](auto &transport, auto &, auto &, auto &worker) {
+            transport.setVideoQualityPolicy(37, true);
+            QCOMPARE(transport.m_qualityCap, quint8(37));
+            workerRecords(worker);
+            QVERIFY(transport.forwardVideoQuality(transport.m_controlGeneration, 37, 1000));
+            bool restored = false;
+            for (const auto &record : workerRecords(worker)) {
+                if (const auto quality = ConsoleWorkerWire::videoQuality(record)) {
+                    if (quality->quality == 37) restored = true;
+                }
+            }
+            QVERIFY(restored);
+        });
+    }
+
     void mixedCreateBindsNewOutputAndWholeLayoutToOneCapturedCommit() {
         microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
             workerRecords(worker);
@@ -1086,7 +1103,8 @@ private Q_SLOTS:
                 QCOMPARE(q->generation, generation); QCOMPARE(q->quality, quint8(45)); seen = true;
             }
             QVERIFY(seen);
-            QVERIFY(!t.forwardVideoQuality(generation, 9, 1000));
+            QVERIFY(t.forwardVideoQuality(generation, 9, 1000));
+            workerRecords(worker);
             QVERIFY(!t.forwardVideoQuality(generation, 101, 1000));
             QVERIFY(!t.forwardVideoQuality(generation, 40, 1001));
             QVERIFY(t.request(priority(false), 1000).value(u"ok"_s).toBool());

@@ -1080,7 +1080,7 @@ inline std::optional<VideoQuality> videoQuality(const Record &record)
     stream.setByteOrder(QDataStream::BigEndian);
     VideoQuality quality;
     stream >> quality.generation >> quality.quality;
-    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !quality.generation || quality.quality < 10 || quality.quality > 100) {
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !quality.generation || quality.quality > 100) {
         return std::nullopt;
     }
     return quality;
@@ -1089,7 +1089,7 @@ inline std::optional<VideoQuality> videoQuality(const Record &record)
 inline bool mayApplyQuality(const VideoQuality &quality, const ControlState &control)
 {
     return control.active && control.generation != 0 && quality.generation == control.generation
-        && quality.quality >= 10 && quality.quality <= 100;
+        && quality.quality <= 100;
 }
 
 inline QByteArray frame(const ControlState &state, Kind kind = Kind::ControlState)

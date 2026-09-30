@@ -62,7 +62,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     connection->setAudioPriorityDefault(false);
     connection->clearAudioPriorityOverride();
     connection->videoStream()->setCodecPreference(CodecPreference::Avc420);
-    connection->videoStream()->setQualityCap(80);
+    connection->videoStream()->setQualityCap(m_qualityCap);
     connection->videoStream()->setAdaptiveQuality(false);
     connection->videoStream()->setEnabled(false);
     connection->setExternalAudioPlayback(true); // broker must never open host PipeWire
@@ -226,6 +226,16 @@ void VirtualSessionTransport::setVideoCodecHost(const VideoCodecHost &host)
     if (m_connection) {
         m_connection->videoStream()->setEncoderPolicy(host.probe.encoders, host.mode);
         m_connection->videoStream()->setAv1TilesSetting(host.av1Tiles);
+    }
+}
+
+void VirtualSessionTransport::setVideoQualityPolicy(quint8 cap, bool adaptive)
+{
+    m_qualityCap = cap;
+    m_adaptiveQuality = adaptive;
+    if (m_connection) {
+        m_connection->videoStream()->setQualityCap(cap);
+        m_connection->videoStream()->setAdaptiveQuality(adaptive);
     }
 }
 
@@ -414,7 +424,7 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         }, Qt::QueuedConnection));
     endpoint->setControlState({m_controlGeneration, true});
     if (!bindingCurrent()) return false;
-    endpoint->setVideoQuality({generation, 80});
+    endpoint->setVideoQuality({generation, m_qualityCap});
     if (!bindingCurrent()) return false;
     m_codec->bind(endpoint, generation); // the worker's own encoders, then this connection's config
     if (!bindingCurrent()) return false;
@@ -515,7 +525,7 @@ void VirtualSessionTransport::revoke()
     if (endpoint) {
         // Reset the retained desktop encoder before withdrawing the old grant.
         // Its generation prevents this reset affecting a replacement owner.
-        if (generation) endpoint->setVideoQuality({generation, 80});
+        if (generation) endpoint->setVideoQuality({generation, m_qualityCap});
         if (!alive) return;
         if (endpoint) endpoint->setControlState({sequence, false});
         if (!alive) return;
@@ -529,7 +539,7 @@ void VirtualSessionTransport::revoke()
         // tearing down (possibly from a quality callback deleting this object).
         {
             const QSignalBlocker quiet(m_connection->videoStream());
-            m_connection->videoStream()->setQualityCap(80);
+            m_connection->videoStream()->setQualityCap(m_qualityCap);
         }
         if (!alive) return;
         if (!m_connection) { m_revoking = false; return; }
@@ -555,10 +565,10 @@ void VirtualSessionTransport::revoke()
 
 bool VirtualSessionTransport::forwardVideoQuality(quint64 generation, quint8 quality, std::optional<quint32> uid)
 {
-    if (!generation || generation != m_controlGeneration || !authorized(uid) || quality < 10 || quality > 100) return false;
+    if (!generation || generation != m_controlGeneration || !authorized(uid) || quality > 100) return false;
     // Off/final-audio-off also neutralizes a queued reduction from the same
-    // binding. Virtual desktops retain their fixed 80 cap outside priority.
-    const quint8 bounded = m_connection->audioPriorityActive() ? std::min<quint8>(quality, 80) : 80;
+    // binding. Virtual desktops return to the configured cap outside priority.
+    const quint8 bounded = (m_connection->audioPriorityActive() || m_adaptiveQuality) ? std::min(quality, m_qualityCap) : m_qualityCap;
     return m_endpoint->setVideoQuality({generation, bounded});
 }
 
@@ -568,9 +578,9 @@ void VirtualSessionTransport::restoreFixedVideoQuality(std::optional<quint32> ui
     const QPointer<VirtualSessionTransport> alive(this);
     // Worker writes require current ownership. Local reset remains necessary
     // after ownership/endpoint loss, but must never reset a replacement worker.
-    forwardVideoQuality(m_controlGeneration, 80, uid);
+    if (!m_adaptiveQuality) forwardVideoQuality(m_controlGeneration, m_qualityCap, uid);
     if (!alive || !m_connection || m_connection->audioPriorityActive()) return;
-    m_connection->videoStream()->setQualityCap(80); // May synchronously destroy/reenter this transport.
+    m_connection->videoStream()->setQualityCap(m_qualityCap); // May synchronously destroy/reenter this transport.
 }
 
 QJsonObject VirtualSessionTransport::deviceReply(MediaDevice device, const DeviceStatus &status) const
@@ -1898,9 +1908,9 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         const bool effective = m_connection->audioPriorityActive();
         if (!effective) {
             // Immediate restore; do not wait for another desktop frame.
-            forwardVideoQuality(m_controlGeneration, 80, uid);
+            if (!m_adaptiveQuality) forwardVideoQuality(m_controlGeneration, m_qualityCap, uid);
             if (!alive || !m_connection) return {};
-            m_connection->videoStream()->setQualityCap(80);
+            m_connection->videoStream()->setQualityCap(m_qualityCap);
             if (!alive || !m_connection) return {};
         }
         if (generation != m_controlGeneration || !authorized(uid))

@@ -223,7 +223,7 @@ bool ConsoleWorkerEndpoint::removeVirtual(const ConsoleWorkerWire::RemoveVirtual
 
 bool ConsoleWorkerEndpoint::setVideoQuality(const ConsoleWorkerWire::VideoQuality &quality)
 {
-    if (!m_ready || !m_worker || !quality.generation || quality.quality < 10 || quality.quality > 100) {
+    if (!m_ready || !m_worker || !quality.generation || quality.quality > 100) {
         return false;
     }
     return m_worker->write(ConsoleWorkerWire::frame(quality)) >= 0;

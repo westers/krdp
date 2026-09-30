@@ -19,6 +19,19 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void configuredVideoQualityIsUsedForNewConsoleOwner()
+    {
+        Server server;
+        RdpConnection connection(&server, -1);
+        QSignalSpy quality(connection.videoStream(), &VideoStream::requestedQualityChanged);
+        ConsoleHostController host(&server, {}, {});
+        host.setVideoQualityPolicy(37, true);
+        host.addClient(&connection);
+        QCOMPARE(host.m_clients.front()->videoQuality, quint8(37));
+        QVERIFY(!quality.isEmpty());
+        QCOMPARE(quality.last().at(0).value<quint8>(), quint8(37));
+    }
+
     void multiOutputFrameRequiresCapturedPixelAtlas()
     {
         // The catalog sorts by backend key; capture/surface indices instead

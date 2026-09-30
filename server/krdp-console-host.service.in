@@ -20,11 +20,13 @@ Environment=FARSIDE_CONSOLE_CERTIFICATE=/etc/farside/console.crt
 Environment=FARSIDE_CONSOLE_CERTIFICATE_KEY=/etc/farside/console.key
 # Private codecs in software (HEVC/AV1): auto, never or prefer (KRDPCTL-V2-CONTRACT.md (e)).
 Environment=FARSIDE_CONSOLE_SOFTWARE_ENCODING=auto
+Environment=FARSIDE_CONSOLE_QUALITY=80
+Environment=FARSIDE_CONSOLE_ADAPTIVE_QUALITY=false
 # AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16 (KRDPCTL-V2-CONTRACT.md (e)).
 Environment=FARSIDE_CONSOLE_AV1_TILES=auto
 Environment=FARSIDE_CONSOLE_VAAPI_DRIVER=auto
 EnvironmentFile=-/etc/farside/console-host.conf
-ExecStart=@CMAKE_INSTALL_PREFIX@/bin/farside-console-host --worker ${FARSIDE_CONSOLE_WORKER} --certificate ${FARSIDE_CONSOLE_CERTIFICATE} --certificate-key ${FARSIDE_CONSOLE_CERTIFICATE_KEY} --address ${FARSIDE_CONSOLE_ADDRESS} --port ${FARSIDE_CONSOLE_PORT} --runtime-directory /run/farside-console --software-encoding ${FARSIDE_CONSOLE_SOFTWARE_ENCODING} --av1-tiles ${FARSIDE_CONSOLE_AV1_TILES} --vaapi-driver ${FARSIDE_CONSOLE_VAAPI_DRIVER}
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/farside-console-host --worker ${FARSIDE_CONSOLE_WORKER} --certificate ${FARSIDE_CONSOLE_CERTIFICATE} --certificate-key ${FARSIDE_CONSOLE_CERTIFICATE_KEY} --address ${FARSIDE_CONSOLE_ADDRESS} --port ${FARSIDE_CONSOLE_PORT} --runtime-directory /run/farside-console --quality ${FARSIDE_CONSOLE_QUALITY} --adaptive-quality ${FARSIDE_CONSOLE_ADAPTIVE_QUALITY} --software-encoding ${FARSIDE_CONSOLE_SOFTWARE_ENCODING} --av1-tiles ${FARSIDE_CONSOLE_AV1_TILES} --vaapi-driver ${FARSIDE_CONSOLE_VAAPI_DRIVER}
 RuntimeDirectory=farside-console
 RuntimeDirectoryMode=0711
 Restart=on-failure
