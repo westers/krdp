@@ -14,6 +14,18 @@ entries in `research.md` remain the roadmap identifiers.
 
 ## Execution checkpoint (2026-09-30)
 
+- Later Console feedback: Steve requested Sol session 429 unlock; verified and
+  completed (`LockedHint=no`). Historical emergency-mode locker and Discover
+  faults share the Fontconfig/Qt fallback stack. A standalone offscreen probe
+  fails with Sol's old user font cache and passes with a clean cache. The old
+  cache was backed up and regenerated; current Chrome's isolated launch creates
+  no incompatible version links, and the greeter survives a bounded offscreen
+  test. The actual PolicyKit reproduction, real lock/unlock check and original
+  output-release race remain open; T01/T02/T03 are not closed by cache repair.
+- T14 retained Virtual hardware HEVC motion now passes functionally on Buzz/Sol
+  for about a minute, with changing snapshots, hardware VAAPI decoding and
+  NVENC worker/backend reports. No resize/two-screen/failure or quiet-performance
+  claim; T14 remains PARTIAL. See the ledger's latest evidence references.
 - T04 shared authenticated-user preference reader/parser is implemented in server
   source `60e2659`; full authentication, worker parity and KCM acceptance remain.
 - T09 explicit client types and T19 health explanations are accepted in client
