@@ -1171,11 +1171,13 @@ private Q_SLOTS:
         // A new consent period invalidates the old worker result. Detach answers
         // a pending camera request exactly once, with the other devices.
         microphoneFixture([&](auto &t, auto &, auto &, auto &) {
+            t.setCameraLoopbackDevice(u"/dev/video42"_s);
             QList<QJsonObject> pushed;
             t.m_recordPushed = [&pushed](const QJsonObject &record) { pushed.append(record); };
             auto camera = device(u"camera"_s, u"on"_s); camera.insert(u"requestId"_s, u"c1"_s);
             t.deliverControlRecord(camera, 1000);
             QVERIFY(t.m_cameraPolicy.enabled);
+            QCOMPARE(t.m_cameraPolicy.loopbackDevice, u"/dev/video42"_s);
             const auto oldCamera = t.m_cameraPolicy;
             QCOMPARE(state(t.request(device(u"camera"_s, u"query"_s), 1000)), u"starting"_s);
             camera.insert(u"action"_s, u"reselect"_s); camera.insert(u"requestId"_s, u"c2"_s);

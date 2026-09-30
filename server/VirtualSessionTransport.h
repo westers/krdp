@@ -46,6 +46,7 @@ public:
      */
     void setVideoCodecHost(const VideoCodecHost &host);
     void setVideoQualityPolicy(quint8 cap, bool adaptive);
+    void setCameraLoopbackDevice(const QString &device) { m_cameraLoopbackDevice = device; }
 
 private:
     friend class VirtualSessionTransportTest;
@@ -161,6 +162,7 @@ private:
     std::optional<VideoCodecHost> m_videoHost;
     quint8 m_qualityCap = 80;
     bool m_adaptiveQuality = false;
+    QString m_cameraLoopbackDevice;
     std::unique_ptr<WorkerCodecBridge> m_codec; // after m_session: destroyed first
     QVector<VideoMonitor> m_wireLayout;
     QList<QMetaObject::Connection> m_workerConnections;

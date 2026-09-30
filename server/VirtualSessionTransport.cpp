@@ -468,7 +468,7 @@ void VirtualSessionTransport::applyStandardMedia(std::optional<quint32> uid)
     if (!alive || !m_connection || !authorized(uid)) return;
     if (channels->dynamic && !m_cameraPolicy.enabled && m_externalCamera && m_controlGeneration
         && m_nextCameraId < std::numeric_limits<quint64>::max() - 1) {
-        m_cameraPolicy = {m_controlGeneration, ++m_nextCameraId, true, {}};
+        m_cameraPolicy = {m_controlGeneration, ++m_nextCameraId, true, m_cameraLoopbackDevice};
         m_cameraRequestId.clear();
         m_cameraDeadline.start();
         if (m_endpoint->setCamera(m_cameraPolicy)) m_connection->setDeviceEnabled(MediaDevice::Camera, true);
@@ -2005,7 +2005,7 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
             if (!m_externalCamera || !m_controlGeneration || m_nextCameraId >= std::numeric_limits<quint64>::max() - 1)
                 return deviceReply(MediaDevice::Camera, {DeviceStatus::State::Error, false, DeviceControl::Unavailable,
                     u"virtual camera unavailable"_s});
-            m_cameraPolicy = {m_controlGeneration, ++m_nextCameraId, true, {}};
+            m_cameraPolicy = {m_controlGeneration, ++m_nextCameraId, true, m_cameraLoopbackDevice};
             m_cameraRequestId = m_replyRequestId;
             m_cameraDeadline.start();
             const bool dispatched = m_endpoint->setCamera(m_cameraPolicy);

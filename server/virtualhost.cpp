@@ -36,6 +36,8 @@ int main(int argc, char **argv)
     parser.addOption({QStringLiteral("port"), QStringLiteral("Listen port, independent of the physical-console listener."), QStringLiteral("port"), QStringLiteral("3395")});
     parser.addOption({QStringLiteral("quality"), QStringLiteral("Maximum video quality, 0 to 100."), QStringLiteral("quality"), QStringLiteral("80")});
     parser.addOption({QStringLiteral("adaptive-quality"), QStringLiteral("Steer video quality under link congestion: true or false."), QStringLiteral("enabled"), QStringLiteral("false")});
+    parser.addOption({QStringLiteral("standard-client-media"), QStringLiteral("Enable standard RDP audio and camera consent: true or false."), QStringLiteral("enabled"), QStringLiteral("true")});
+    parser.addOption({QStringLiteral("camera-loopback-device"), QStringLiteral("V4L2 loopback path in the desktop worker, or none."), QStringLiteral("path"), QStringLiteral("none")});
     parser.addOption({QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto")});
     parser.addOption({QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto")});
     parser.process(application);
@@ -45,6 +47,8 @@ int main(int argc, char **argv)
     bool validQuality = false;
     const int quality = parser.value(QStringLiteral("quality")).toInt(&validQuality);
     const auto adaptiveValue = parser.value(QStringLiteral("adaptive-quality"));
+    const auto standardMediaValue = parser.value(QStringLiteral("standard-client-media"));
+    const auto cameraLoopback = parser.value(QStringLiteral("camera-loopback-device"));
     const QHostAddress address(parser.value(QStringLiteral("address")));
     const auto certificate = parser.value(QStringLiteral("certificate")), key = parser.value(QStringLiteral("certificate-key"));
     const auto readableFile = [](const QString &path) {
@@ -53,6 +57,8 @@ int main(int argc, char **argv)
     const auto softwareEncoding = KRdp::parseHostSoftwareEncoding(parser.value(QStringLiteral("software-encoding")));
     if (!parser.positionalArguments().isEmpty() || !validPort || !port || !validQuality || quality < 0 || quality > 100
         || (adaptiveValue != QLatin1String("true") && adaptiveValue != QLatin1String("false")) || address.isNull() || !softwareEncoding
+        || (standardMediaValue != QLatin1String("true") && standardMediaValue != QLatin1String("false"))
+        || (cameraLoopback != QLatin1String("none") && !cameraLoopback.startsWith(QLatin1String("/dev/")))
         || !KRdp::VirtualSessionLaunchPlan::absoluteCleanPath(certificate) || !KRdp::VirtualSessionLaunchPlan::absoluteCleanPath(key)) {
         qCritical("Virtual host requires valid address, port, software encoding and absolute TLS paths"); return 1;
     }
@@ -84,7 +90,10 @@ int main(int argc, char **argv)
     server.setTlsCertificate(std::filesystem::path(certificate.toStdString()));
     server.setTlsCertificateKey(std::filesystem::path(key.toStdString()));
     server.setUsePAMAuthentication(true); server.setAllowAnyPAMUser(true);
+    server.setStandardClientMedia(standardMediaValue == QLatin1String("true"));
+    if (cameraLoopback != QLatin1String("none")) server.setCameraLoopbackDevice(cameraLoopback);
     KRdp::VirtualSessionHostController host(&server, {});
+    host.setCameraLoopbackDevice(server.cameraLoopbackDevice());
     host.setVideoQualityPolicy(quint8(quality), adaptiveValue == QLatin1String("true"));
     // AUD-FIX7: what `capabilities.video` offers and each connection's codec policy starts from;
     // a desktop's worker probes its own encoders and replaces this estimate once it reports.

@@ -124,7 +124,7 @@ endif()
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/io.github.westers.farside.server.desktop DESTINATION ${KDE_INSTALL_APPDIR})
 # KDE_INSTALL_SYSTEMDUNITDIR is lib/systemd; system units belong in its system/ subdirectory.
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/krdp-console-host.service DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system RENAME farside-console-host.service)
-install(FILES console-host.conf.example DESTINATION ${KDE_INSTALL_DATADIR}/farside)
+install(FILES console-host.conf.example virtual-host.conf.example DESTINATION ${KDE_INSTALL_DATADIR}/farside)
 if (BUILD_PLASMA_SESSION)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/io.github.westers.farside.consoleworker.desktop DESTINATION ${KDE_INSTALL_APPDIR})
 endif()

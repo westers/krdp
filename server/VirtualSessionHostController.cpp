@@ -630,6 +630,7 @@ void VirtualSessionHostController::addClient(RdpConnection *connection)
     transport->setStockClientPolicy(m_stockPolicy);
     if (m_videoHost) transport->setVideoCodecHost(*m_videoHost);
     transport->setVideoQualityPolicy(m_qualityCap, m_adaptiveQuality);
+    transport->setCameraLoopbackDevice(m_cameraLoopbackDevice);
     m_clients.emplace(id, std::move(transport));
     connect(connection, &RdpConnection::stateChanged, this, [this, id](RdpConnection::State state) {
         if (state == RdpConnection::State::Closed) removeClient(id);

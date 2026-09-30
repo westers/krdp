@@ -1,0 +1,13 @@
+# Optional overrides for farside-virtual-host.service.
+# Copy to /etc/farside/virtual-host.conf and restart that service.
+FARSIDE_VIRTUAL_ADDRESS=0.0.0.0
+FARSIDE_VIRTUAL_PORT=3395
+FARSIDE_VIRTUAL_CERTIFICATE=/etc/farside/virtual-host.crt
+FARSIDE_VIRTUAL_CERTIFICATE_KEY=/etc/farside/virtual-host.key
+
+#FARSIDE_VIRTUAL_QUALITY=80
+#FARSIDE_VIRTUAL_ADAPTIVE_QUALITY=false
+#FARSIDE_VIRTUAL_STANDARD_CLIENT_MEDIA=true
+#FARSIDE_VIRTUAL_CAMERA_LOOPBACK_DEVICE=none
+#FARSIDE_VIRTUAL_SOFTWARE_ENCODING=auto
+#FARSIDE_VIRTUAL_AV1_TILES=auto

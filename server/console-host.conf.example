@@ -7,6 +7,8 @@ FARSIDE_CONSOLE_CERTIFICATE_KEY=/etc/farside/console.key
 # Video quality cap and congestion adaptation. Adaptation defaults to false.
 #FARSIDE_CONSOLE_QUALITY=80
 #FARSIDE_CONSOLE_ADAPTIVE_QUALITY=false
+#FARSIDE_CONSOLE_STANDARD_CLIENT_MEDIA=true
+#FARSIDE_CONSOLE_CAMERA_LOOPBACK_DEVICE=none
 
 # Private codecs (HEVC/AV1) in software: auto (default), never or prefer.
 #FARSIDE_CONSOLE_SOFTWARE_ENCODING=auto
