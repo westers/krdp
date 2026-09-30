@@ -16,16 +16,18 @@ entries in `research.md` remain the roadmap identifiers.
 
 - T04 shared authenticated-user preference reader/parser is implemented in server
   source `60e2659`; full authentication, worker parity and KCM acceptance remain.
-- T09 explicit client types and T19 health explanations are source-accepted in
-  client `e247d54`. Focused tests and Buzz-to-Sol default/custom-port type checks
-  passed. Package delivery remains T27; existing saved routes are not cut over.
+- T09 explicit client types and T19 health explanations are accepted in client
+  `e247d54`, released as 0.6.3 (`2df38a7`) to all six hosts. Focused tests and
+  Buzz-to-Sol default/custom-port and packaged HEVC/type gates passed. Existing
+  saved routes are not cut over. Sol client rollback/return passed; Hal was last.
 - T01's bounded debugger window captured only an idle stack. The debugger has
   detached; the original authentication crash is still undiagnosed.
-- T21's dialog and strict certificate/cache acceptance passed in client
-  `e247d54`/`3d16e97`. No current stale preload source was found on Hal/Sol/Buzz;
-  package delivery remains T27.
-- Fleet installation is still the starting baseline below. No new server
-  preferences may ship before their matching KCM controls are accepted.
+- T21's dialog and strict certificate/cache product fixes passed and ship in
+  0.6.3. The remaining Hal preload warning comes from old running Codex parents,
+  despite clean current startup files/manager environment; voluntary Codex
+  relaunch is a user-owned cleanup gate. It remains recorded as PARTIAL.
+- All installed clients are now 0.6.3; servers remain the starting baseline
+  below. No new server preferences may ship before matching KCM acceptance.
 
 Live task status and exact evidence:
 `.superpowers/sdd/2026-09-30-farside-remaining-work/progress.md`.
