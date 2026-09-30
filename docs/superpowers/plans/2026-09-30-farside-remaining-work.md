@@ -1,12 +1,34 @@
 # Farside remaining work: implementation and acceptance plan
 
-Date: 2026-09-30. Status: PLANNED. Requested by Steve after the Sol/Hal `f255ee2` deployment.
+Date: 2026-09-30. Status: execution in progress; no consolidation cutover accepted.
+Requested by Steve after the Sol/Hal `f255ee2` deployment.
 
 ## Outcome and scope
 
 Farside offers two connection types: **Console**, the existing desktop including sign-in and lock screens, and **Virtual**, a separate retained desktop. Complete the authentication fix, preserve the useful features of the old per-user server in those two types, migrate configuration and saved connections, then remove the redundant implementation. Finish the remaining camera, NVIDIA, reliability, performance and client UX work as separately accepted tasks.
 
-This document plans the work; it does not mark the remaining implementations or live acceptance as completed. Task IDs below are local to this plan. Existing `OPT-###` entries in `research.md` remain the roadmap identifiers.
+Each task below specifies instructions, completion criteria and evidence. The
+execution ledger records current status; a source acceptance is distinguished
+from T27 package delivery. Task IDs are local to this plan. Existing `OPT-###`
+entries in `research.md` remain the roadmap identifiers.
+
+## Execution checkpoint (2026-09-30)
+
+- T04 shared authenticated-user preference reader/parser is implemented in server
+  source `60e2659`; full authentication, worker parity and KCM acceptance remain.
+- T09 explicit client types and T19 health explanations are source-accepted in
+  client `e247d54`. Focused tests and Buzz-to-Sol default/custom-port type checks
+  passed. Package delivery remains T27; existing saved routes are not cut over.
+- T01's bounded debugger window captured only an idle stack. The debugger has
+  detached; the original authentication crash is still undiagnosed.
+- T21's dialog and strict certificate/cache acceptance passed in client
+  `e247d54`/`3d16e97`. No current stale preload source was found on Hal/Sol/Buzz;
+  package delivery remains T27.
+- Fleet installation is still the starting baseline below. No new server
+  preferences may ship before their matching KCM controls are accepted.
+
+Live task status and exact evidence:
+`.superpowers/sdd/2026-09-30-farside-remaining-work/progress.md`.
 
 ## Verified starting point
 
