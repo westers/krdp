@@ -282,6 +282,17 @@ public:
     bool enableExternalMicrophone();
     /** Drain at most 20ms of fresh, currently consented 48kHz stereo S16 PCM. */
     QByteArray takeExternalMicrophone();
+    /** Select a worker-owned camera source before initialization; the broker relays RDPECAM samples. */
+    bool enableExternalCamera();
+    /** Worker readiness and demand, scoped to the current camera consent period. Any thread. */
+    void setExternalCameraState(bool ready, bool capture, bool inUse);
+    /** Release the single queued sample after the broker forwarded or dropped it. */
+    void acknowledgeExternalCameraFrame(quint64 epoch);
+    quint64 externalCameraEpoch() const;
+    /** Emitted from a FreeRDP channel thread; receivers must use queued connections. */
+    Q_SIGNAL void externalCameraFormat(quint64 epoch, quint32 width, quint32 height, quint32 fps);
+    /** Compressed JPEG from the client, with at most one queued frame per connection. */
+    Q_SIGNAL void externalCameraFrame(quint64 epoch, const QByteArray &jpeg);
     bool audioPriorityActive() const;
     /** Select PCM supplied by a session worker instead of this process's PipeWire graph. */
     void setExternalAudioPlayback(bool enabled);

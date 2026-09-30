@@ -102,10 +102,12 @@ private:
         quint8 videoQuality = 80;
         ConsoleControl::Media media;
         bool externalMicrophone = false;
+        bool externalCamera = false;
         QVector<VideoMonitor> wireLayout; // RDPGFX surfaces installed for this client, not the catalog's sorted order.
         // KRDPCTL v2: the requests the next `layout` / microphone `device` record answers.
         QString layoutRequestId;
         QString microphoneRequestId;
+        QString cameraRequestId;
         bool capabilitiesSent = false;
         // StandardClientMedia (DEVICES-DESIGN.md §1): either flag set means this
         // client speaks KRDPCTL and asks for each device itself.
@@ -113,6 +115,7 @@ private:
         bool spokeKrdpctl = false;
         // Its standard AUDIN negotiation is its microphone consent (until it refuses).
         bool standardMicrophone = false;
+        bool standardCamera = false;
     };
 
     void apply(const ConsoleHandoff::Actions &actions);
@@ -147,6 +150,10 @@ private:
      * answered either way (its requestId is echoed once).
      */
     void stopMicrophone(const QString &code = {}, const QString &message = {});
+    void stopCamera(const QString &code = {}, const QString &message = {});
+    void cameraResult(const ConsoleWorkerWire::CameraResult &result);
+    void startCamera(Client &client, const QString &requestId);
+    void startStandardCamera(Client &client);
     void microphoneResult(const ConsoleWorkerWire::MicrophoneResult &result);
     /** A microphone `device` state to \a client, answering its pending request if any. */
     void sendMicrophoneState(Client &client, const DeviceStatus &status);
@@ -278,5 +285,11 @@ private:
     bool m_microphoneReady = false;
     QTimer m_microphoneDeadline;
     QTimer m_microphonePump;
+    ConsoleControl::Id m_cameraClient = 0;
+    ConsoleWorkerWire::CameraPolicy m_cameraPolicy;
+    quint64 m_nextCameraId = 0;
+    bool m_cameraReady = false;
+    bool m_cameraInUse = false;
+    QTimer m_cameraDeadline;
 };
 }

@@ -19,7 +19,7 @@ public:
     explicit ConsoleCameraSession(bool desktop, QObject *parent = nullptr)
         : QObject(parent), m_desktop(desktop)
     {
-        m_timer.setInterval(100);
+        m_timer.setInterval(250);
         connect(&m_timer, &QTimer::timeout, this, [this] {
             if (!m_ready && m_source.ready()) {
                 m_ready = true;
@@ -30,8 +30,8 @@ public:
                 return;
             }
             if (!m_ready) return;
-            const bool capture = m_source.captureRequested();
             const bool inUse = m_source.consumerActive();
+            const bool capture = inUse;
             if (capture != m_capture || inUse != m_inUse) {
                 m_capture = capture;
                 m_inUse = inUse;

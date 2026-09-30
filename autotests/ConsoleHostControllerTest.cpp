@@ -700,10 +700,10 @@ private Q_SLOTS:
             return QJsonObject{};
         };
 
-        // The camera is not shared on the console yet; a query still answers.
+        // A logged-in, ready worker is required before a camera can start.
         host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("c1"), QStringLiteral("camera"), QStringLiteral("on")));
-        QCOMPARE(last(&owner).value(QStringLiteral("type")).toString(), QStringLiteral("error"));
-        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("unsupported"));
+        QCOMPARE(last(&owner).value(QStringLiteral("type")).toString(), QStringLiteral("device"));
+        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("unavailable"));
         QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("c1"));
         host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("c2"), QStringLiteral("camera"), QStringLiteral("query")));
         QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("off"));
@@ -822,6 +822,40 @@ private Q_SLOTS:
         QTRY_COMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("timeout"));
         QCOMPARE(sent.last().value(QStringLiteral("requestId")).toString(), QStringLiteral("a4"));
         QVERIFY(client.microphoneRequestId.isEmpty());
+    }
+
+    void cameraAsyncReplyAndRevocation()
+    {
+        Server server;
+        RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        QList<QJsonObject> sent;
+        host.m_recordSent = [&sent](RdpConnection *, const QJsonObject &record) { sent.append(record); };
+        host.addClient(&connection);
+        const auto id = host.m_clients.front()->id;
+        host.m_control.admit(id);
+        host.syncControlState();
+        host.m_inputEnabled = true;
+        const auto start = [&](const QString &requestId) {
+            host.m_cameraClient = id;
+            host.m_cameraReady = false;
+            host.m_clients.front()->cameraRequestId = requestId;
+            host.m_cameraPolicy = {host.m_controlGeneration, ++host.m_nextCameraId, true, {}};
+            return host.m_cameraPolicy;
+        };
+        const auto old = start(QStringLiteral("camera-1"));
+        const auto next = start(QStringLiteral("camera-2"));
+        host.cameraResult({old.generation, old.requestId, {}});
+        QVERIFY(sent.isEmpty());
+        host.cameraResult({next.generation, next.requestId, {}});
+        QCOMPARE(sent.size(), 1);
+        QCOMPARE(sent.last().value(QStringLiteral("device")).toString(), QStringLiteral("camera"));
+        QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("on"));
+        QCOMPARE(sent.last().value(QStringLiteral("requestId")).toString(), QStringLiteral("camera-2"));
+        host.setWorkerActive(false);
+        QCOMPARE(sent.size(), 2);
+        QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("off"));
+        QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("revoked"));
     }
 
     // --- AUD-D3: StandardClientMedia on the console broker ---

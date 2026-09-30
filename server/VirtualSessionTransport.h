@@ -65,6 +65,7 @@ private:
     // `device` request whose microphone start the worker has yet to acknowledge.
     QString m_replyRequestId;
     QString m_microphoneRequestId;
+    QString m_cameraRequestId;
     bool bind();
     bool bind(std::optional<quint32> uid);
     bool activateBinding(const VirtualSessionRegistry::Handle &handle, QPointer<ConsoleWorkerEndpoint> endpoint);
@@ -121,6 +122,9 @@ private:
     void clearResize();
     void stopMicrophone();
     void stopMicrophone(std::optional<quint32> uid);
+    void stopCamera();
+    QJsonObject cameraResult(const ConsoleWorkerWire::CameraResult &, std::optional<quint32> uid);
+    QJsonObject cameraTimeout();
     QJsonObject microphoneResult(const ConsoleWorkerWire::MicrophoneResult &, std::optional<quint32> uid);
     QJsonObject microphoneTimeout();
     void pumpMicrophone();
@@ -160,13 +164,19 @@ private:
     bool m_playback = false;
     bool m_silenceHost = false;
     bool m_externalMicrophone = false;
+    bool m_externalCamera = false;
     bool m_microphoneReady = false;
+    bool m_cameraReady = false;
+    bool m_cameraInUse = false;
     bool m_revoking = false;
     bool m_mediaDispatch = false;
     quint64 m_controlGeneration = 0;
     quint64 m_nextMicrophoneId = 0;
     ConsoleWorkerWire::MicrophonePolicy m_microphonePolicy;
+    quint64 m_nextCameraId = 0;
+    ConsoleWorkerWire::CameraPolicy m_cameraPolicy;
     QTimer m_microphoneDeadline;
+    QTimer m_cameraDeadline;
     QTimer m_microphonePump;
     QTimer m_resizeDeadline;
     QTimer m_topologyDeadline;

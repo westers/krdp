@@ -188,6 +188,30 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         stopMicrophone(DeviceControl::Timeout, u"microphone worker startup timed out"_s);
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::microphoneFinished, this, &ConsoleHostController::microphoneResult);
+    m_cameraDeadline.setSingleShot(true);
+    m_cameraDeadline.setInterval(5000);
+    connect(&m_cameraDeadline, &QTimer::timeout, this, [this] {
+        stopCamera(DeviceControl::Timeout, u"camera worker startup timed out"_s);
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::cameraFinished, this, &ConsoleHostController::cameraResult);
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::cameraDemand, this, [this](const auto &demand) {
+        if (!m_cameraClient || !m_cameraReady || demand.generation != m_cameraPolicy.generation
+            || demand.requestId != m_cameraPolicy.requestId) return;
+        for (const auto &client : m_clients) {
+            if (client->id != m_cameraClient || !client->connection) continue;
+            if (!m_control.ownsControl(client->id) || !m_inputEnabled) {
+                stopCamera(DeviceControl::Revoked, u"console camera authority changed"_s);
+                return;
+            }
+            client->connection->setExternalCameraState(true, demand.capture, demand.inUse);
+            if (m_cameraInUse != demand.inUse) {
+                m_cameraInUse = demand.inUse;
+                sendRecord(client->connection, DeviceControl::stateRecord(MediaDevice::Camera,
+                    {DeviceStatus::State::On, demand.inUse, {}, {}}));
+            }
+            return;
+        }
+    });
     m_microphonePump.setInterval(20);
     connect(&m_microphonePump, &QTimer::timeout, this, [this] {
         if (!m_microphoneReady || !m_inputEnabled || !m_control.ownsControl(m_microphoneClient)) return;
@@ -232,6 +256,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         finishPhysicalTopology(u"capture-failed"_s);
         finishVirtualTopology(u"capture-failed"_s);
         stopMicrophone(DeviceControl::Unavailable, u"console microphone worker stopped"_s);
+        stopCamera(DeviceControl::Unavailable, u"console camera worker stopped"_s);
         finishResize(u"console capture worker stopped during resize"_s);
         // A closed socket is not a reaped process: the worker may still be
         // restoring outputs. The handoff advances only on workerExited().
@@ -424,6 +449,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
 ConsoleHostController::~ConsoleHostController()
 {
     stopMicrophone();
+    stopCamera();
 }
 
 void ConsoleHostController::start()
@@ -695,6 +721,7 @@ void ConsoleHostController::setWorkerActive(bool active)
         m_topologyCatalog.resetGeneration();
         finishTopologyQueries(u"capture-failed"_s);
         stopMicrophone(DeviceControl::Revoked, u"console session changed; microphone consent must be renewed"_s);
+        stopCamera(DeviceControl::Revoked, u"console session changed; camera consent must be renewed"_s);
         finishResize(u"console capture worker changed during resize"_s);
         releaseInput();
     }
@@ -705,6 +732,7 @@ void ConsoleHostController::setWorkerActive(bool active)
     if (active) {
         for (const auto &client : m_clients) {
             startStandardMicrophone(*client);
+            startStandardCamera(*client);
         }
     }
 }
@@ -727,6 +755,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     const auto id = client->id = ++m_nextClientId;
     client->connection = connection;
     client->externalMicrophone = connection->enableExternalMicrophone();
+    client->externalCamera = connection->enableExternalCamera();
     client->session = std::make_unique<ConsoleWorkerSession>([this, id](const ConsoleWorkerWire::Input &input) {
         if (m_inputEnabled && !m_pendingPhysical && !m_pendingVirtual && !m_layoutAwaitingReadback
             && m_control.ownsControl(id)) {
@@ -764,6 +793,19 @@ void ConsoleHostController::addClient(RdpConnection *connection)
         }
         onControlRecord(guarded, id, record);
     }, Qt::QueuedConnection));
+    client->connections.append(connect(connection, &RdpConnection::externalCameraFormat, this,
+                                       [this, guarded, id](quint64 epoch, quint32 width, quint32 height, quint32 fps) {
+        if (!guarded || epoch != guarded->externalCameraEpoch() || m_cameraClient != id || !m_cameraPolicy.enabled) return;
+        if (!m_endpoint.setCameraFormat({m_cameraPolicy.generation, m_cameraPolicy.requestId, width, height, fps}))
+            stopCamera(DeviceControl::Unavailable, u"cannot dispatch camera format"_s);
+    }, Qt::QueuedConnection));
+    client->connections.append(connect(connection, &RdpConnection::externalCameraFrame, this,
+                                       [this, guarded, id](quint64 epoch, const QByteArray &jpeg) {
+        if (!guarded) return;
+        if (epoch == guarded->externalCameraEpoch() && m_cameraClient == id && m_cameraReady && m_control.ownsControl(id) && m_inputEnabled)
+            m_endpoint.sendCameraFrame({m_cameraPolicy.generation, m_cameraPolicy.requestId, jpeg});
+        guarded->acknowledgeExternalCameraFrame(epoch);
+    }, Qt::QueuedConnection));
     // Server erases (deletes) the connection from its own Closed slot, which
     // runs before ours; Qt then skips our Closed slot. `destroyed` always runs
     // and is where a disconnected client really leaves (AUD-C-4).
@@ -780,6 +822,11 @@ void ConsoleHostController::addClient(RdpConnection *connection)
                 if (client->id == id) client->standardMicrophone = false; // a standard refusal simply ends it
             }
             stopMicrophone(status.code, status.message);
+            return;
+        }
+        if (device == MediaDevice::Camera && m_cameraClient == id) {
+            for (const auto &client : m_clients) if (client->id == id) client->standardCamera = false;
+            stopCamera(status.code, status.message);
             return;
         }
         for (const auto &client : m_clients) {
@@ -1265,13 +1312,13 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
 
 namespace
 {
-/** What `device` can do on the physical console (DEVICES-DESIGN.md §3): no camera yet (risk 5). */
+/** Device controls implemented by the Console broker and logged-in worker. */
 constexpr LayoutControl::DeviceCapabilities ConsoleDeviceCapabilities{
     .playbackToggle = true,
     .playbackSilenceHost = true,
     .microphoneToggle = true,
-    .cameraToggle = false,
-    .cameraReselect = false,
+    .cameraToggle = true,
+    .cameraReselect = true,
 };
 }
 
@@ -1285,7 +1332,8 @@ DeviceStatus ConsoleHostController::deviceStatus(const Client &client, MediaDevi
         if (m_microphoneClient != client.id) return {};
         return {m_microphoneReady ? State::On : State::Starting, false, {}, {}};
     case MediaDevice::Camera:
-        break;
+        if (m_cameraClient != client.id) return {};
+        return {m_cameraReady ? State::On : State::Starting, m_cameraInUse, {}, {}};
     }
     return {};
 }
@@ -1335,6 +1383,37 @@ void ConsoleHostController::onControlDevice(RdpConnection *connection, ConsoleCo
         connection->setDeviceEnabled(MediaDevice::Playback, media.playback);
         updateMedia();
         replyTo(connection, DeviceControl::stateRecord(MediaDevice::Playback, deviceStatus(client, MediaDevice::Playback)));
+        return;
+    }
+    if (request.device == MediaDevice::Camera) {
+        if (request.action == DeviceControl::Action::Off) {
+            if (m_cameraClient == id) {
+                client.cameraRequestId.clear();
+                stopCamera();
+            }
+            replyTo(connection, DeviceControl::stateRecord(MediaDevice::Camera, {}));
+            return;
+        }
+        if (m_cameraClient && m_cameraClient != id) {
+            replyTo(connection, DeviceControl::stateRecord(MediaDevice::Camera,
+                {State::Error, false, DeviceControl::Busy, u"another client is sharing its camera with this console"_s}));
+            return;
+        }
+        if (!m_control.ownsControl(id)) {
+            replyTo(connection, LayoutControl::errorRecord({u"not-owner"_s, u"only the client controlling this console can share a camera"_s}));
+            return;
+        }
+        if (!client.externalCamera || !m_inputEnabled || !m_endpoint.ready()
+            || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
+            replyTo(connection, DeviceControl::stateRecord(MediaDevice::Camera,
+                {State::Error, false, DeviceControl::Unavailable, u"camera requires a ready logged-in desktop"_s}));
+            return;
+        }
+        if (m_cameraClient == id) {
+            client.cameraRequestId.clear();
+            stopCamera();
+        }
+        startCamera(client, m_replyRequestId);
         return;
     }
     // Microphone.
@@ -1413,7 +1492,9 @@ void ConsoleHostController::applyStandardMedia(ConsoleControl::Id id)
         }
     }
     client.standardMicrophone = channels->dynamic;
+    client.standardCamera = channels->dynamic;
     startStandardMicrophone(client);
+    startStandardCamera(client);
 }
 
 void ConsoleHostController::startStandardMicrophone(Client &client)
@@ -1567,6 +1648,7 @@ void ConsoleHostController::syncControlState()
         finishPhysicalTopology(u"not-owner"_s);
         finishVirtualTopology(u"not-owner"_s);
         stopMicrophone(DeviceControl::Revoked, u"console control changed; microphone disabled"_s);
+        stopCamera(DeviceControl::Revoked, u"console control changed; camera disabled"_s);
         finishResize(u"console control changed during resize"_s);
         m_workerOwner = m_control.owner();
         ++m_controlGeneration;
@@ -1786,6 +1868,82 @@ void ConsoleHostController::microphoneResult(const ConsoleWorkerWire::Microphone
         m_microphoneReady = true;
         m_microphonePump.start();
         sendMicrophoneState(*client, {DeviceStatus::State::On, false, {}, {}});
+        break;
+    }
+}
+
+void ConsoleHostController::startCamera(Client &client, const QString &requestId)
+{
+    m_cameraClient = client.id;
+    m_cameraReady = false;
+    m_cameraInUse = false;
+    client.cameraRequestId = requestId;
+    m_cameraPolicy = {m_controlGeneration, ++m_nextCameraId, true, m_server->cameraLoopbackDevice()};
+    client.connection->setExternalCameraState(false, false, false);
+    if (!m_endpoint.setCamera(m_cameraPolicy)) {
+        stopCamera(DeviceControl::Unavailable, u"cannot dispatch camera startup"_s);
+        return;
+    }
+    // Opening RDPECAM asks the client for its formats. The worker cannot
+    // create a source until it receives one of those formats.
+    client.connection->setDeviceEnabled(MediaDevice::Camera, true);
+    m_cameraDeadline.start();
+}
+
+void ConsoleHostController::startStandardCamera(Client &client)
+{
+    if (!client.standardCamera || !client.connection || m_cameraClient || !m_control.ownsControl(client.id)
+        || !client.externalCamera || !m_inputEnabled || !m_endpoint.ready()
+        || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) return;
+    startCamera(client, {});
+}
+
+void ConsoleHostController::stopCamera(const QString &code, const QString &message)
+{
+    m_cameraDeadline.stop();
+    m_cameraReady = false;
+    m_cameraInUse = false;
+    const auto id = std::exchange(m_cameraClient, 0);
+    if (!id) return;
+    for (const auto &client : m_clients) {
+        if (client->id != id) continue;
+        if (client->connection) {
+            client->connection->setExternalCameraState(false, false, false);
+            client->connection->setDeviceEnabled(MediaDevice::Camera, false);
+        }
+        if ((!code.isEmpty() || !client->cameraRequestId.isEmpty()) && client->connection) {
+            const auto state = code.isEmpty() || code == DeviceControl::Revoked ? DeviceStatus::State::Off : DeviceStatus::State::Error;
+            sendRecord(client->connection, LayoutControl::withRequestId(
+                DeviceControl::stateRecord(MediaDevice::Camera, {state, false, code, message}),
+                std::exchange(client->cameraRequestId, {})));
+        }
+        break;
+    }
+    m_endpoint.setCamera({m_cameraPolicy.generation, ++m_nextCameraId, false, {}});
+    m_cameraPolicy = {};
+}
+
+void ConsoleHostController::cameraResult(const ConsoleWorkerWire::CameraResult &result)
+{
+    if (!m_cameraClient || result.generation != m_cameraPolicy.generation
+        || result.requestId != m_cameraPolicy.requestId) return;
+    if (!result.error.isEmpty()) {
+        stopCamera(DeviceControl::Unavailable, result.error);
+        return;
+    }
+    if (m_cameraReady) return;
+    if (!m_inputEnabled || !m_control.ownsControl(m_cameraClient)) {
+        stopCamera(DeviceControl::Revoked, u"console camera authority changed"_s);
+        return;
+    }
+    for (const auto &client : m_clients) {
+        if (client->id != m_cameraClient || !client->connection) continue;
+        m_cameraDeadline.stop();
+        m_cameraReady = true;
+        client->connection->setExternalCameraState(true, false, false);
+        sendRecord(client->connection, LayoutControl::withRequestId(
+            DeviceControl::stateRecord(MediaDevice::Camera, {DeviceStatus::State::On, false, {}, {}}),
+            std::exchange(client->cameraRequestId, {})));
         break;
     }
 }

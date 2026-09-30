@@ -284,8 +284,15 @@ struct RemoteCamera {
     bool receivedSample = false;
     CAM_MEDIA_TYPE_DESCRIPTION format{};
     QString loopbackDevice;
-    bool streamStarted = false;
+    std::atomic<bool> streamStarted = false;
+    std::atomic<bool> stopPending = false;
     std::unique_ptr<PipeWireCamera> endpoint;
+    RdpConnection *connection = nullptr;
+    bool external = false;
+    std::atomic<bool> *workerCapture = nullptr;
+    std::atomic<bool> *framePending = nullptr;
+    std::atomic<quint64> *currentEpoch = nullptr;
+    quint64 epoch = 0;
     // Set (device thread) once endpoint exists; the session thread only
     // touches endpoint after seeing it.
     std::atomic<bool> endpointStarted = false;
@@ -301,6 +308,10 @@ struct RemoteCamera {
 UINT cameraSuccess(CameraDeviceServerContext *context, const CAM_SUCCESS_RESPONSE *)
 {
     auto *camera = static_cast<RemoteCamera *>(context->userdata);
+    if (camera && camera->stopPending.exchange(false)) {
+        qCInfo(KRDP) << "RDPECAM stream stopped after worker demand ended";
+        return CHANNEL_RC_OK;
+    }
     qCInfo(KRDP) << "RDPECAM success response" << (camera && camera->activated ? "stream started" : "device activated");
     if (!camera->activated) {
         camera->activated = true;
@@ -353,8 +364,16 @@ UINT cameraMediaTypes(CameraDeviceServerContext *context, const CAM_MEDIA_TYPE_L
         }
     }
     camera->format = *selected;
-    camera->endpoint = std::make_unique<PipeWireCamera>();
     const uint32_t fps = camera->format.FrameRateDenominator ? camera->format.FrameRateNumerator / camera->format.FrameRateDenominator : 30;
+    if (camera->external) {
+        if (!camera->connection || !camera->format.Width || camera->format.Width > 4096
+            || !camera->format.Height || camera->format.Height > 4096 || !fps || fps > 120) return ERROR_INVALID_DATA;
+        camera->endpointStarted.store(true);
+        if (camera->epoch == camera->currentEpoch->load())
+            Q_EMIT camera->connection->externalCameraFormat(camera->epoch, camera->format.Width, camera->format.Height, fps);
+        return CHANNEL_RC_OK;
+    }
+    camera->endpoint = std::make_unique<PipeWireCamera>();
     if (!camera->endpoint->start(QString::number(reinterpret_cast<quintptr>(camera)), camera->format.Width, camera->format.Height, fps, camera->loopbackDevice)) {
         qCWarning(KRDP) << "Failed to create PipeWire remote camera source";
         camera->endpoint.reset();
@@ -368,7 +387,21 @@ UINT cameraMediaTypes(CameraDeviceServerContext *context, const CAM_MEDIA_TYPE_L
 
 bool startCameraIfRequested(RemoteCamera *camera)
 {
-    if (!camera || !camera->endpointStarted.load() || camera->streamStarted || !camera->endpoint->captureRequested()) {
+    if (!camera || !camera->endpointStarted.load()) return true;
+    const bool demand = camera->external ? camera->workerCapture->load() : camera->endpoint->captureRequested();
+    if (camera->external && camera->streamStarted.load() && !demand && !camera->stopPending.load()) {
+        CAM_STOP_STREAMS_REQUEST stop{};
+        camera->stopPending.store(true);
+        const UINT status = camera->context->StopStreamsRequest(camera->context, &stop);
+        if (status != CHANNEL_RC_OK) {
+            camera->stopPending.store(false);
+            qCWarning(KRDP) << "RDPECAM could not stop camera after worker demand ended" << status;
+            return false;
+        }
+        camera->streamStarted.store(false);
+        return true;
+    }
+    if (camera->streamStarted.load() || camera->stopPending.load() || !demand) {
         return true;
     }
     CAM_START_STREAMS_REQUEST request{};
@@ -380,7 +413,7 @@ bool startCameraIfRequested(RemoteCamera *camera)
         qCWarning(KRDP) << "RDPECAM could not start camera on local demand" << status;
         return false;
     }
-    camera->streamStarted = true;
+    camera->streamStarted.store(true);
     qCInfo(KRDP) << "RDPECAM starting camera for a local PipeWire/V4L2 consumer";
     return true;
 }
@@ -388,12 +421,24 @@ bool startCameraIfRequested(RemoteCamera *camera)
 UINT cameraSample(CameraDeviceServerContext *context, const CAM_SAMPLE_RESPONSE *response)
 {
     auto *camera = static_cast<RemoteCamera *>(context->userdata);
-    if (!camera || !camera->endpoint || response->StreamIndex != 0 || !response->Sample || !response->SampleSize) return ERROR_INVALID_DATA;
+    if (!camera || (!camera->external && !camera->endpoint) || response->StreamIndex != 0 || !response->Sample || !response->SampleSize) return ERROR_INVALID_DATA;
+    if (camera->external && !camera->streamStarted.load()) return CHANNEL_RC_OK;
     if (!camera->receivedSample) {
         camera->receivedSample = true;
         qCInfo(KRDP) << "RDPECAM receiving camera samples (first frame bytes)" << response->SampleSize;
     }
-    camera->endpoint->writeMjpeg(QByteArray(reinterpret_cast<const char *>(response->Sample), response->SampleSize));
+    if (camera->external) {
+        // The FreeRDP callback must never queue an unbounded number of webcam frames
+        // while the desktop worker is slow or absent. The broker acknowledges even
+        // a dropped frame after it has tried to write the worker socket.
+        if (response->SampleSize <= 8 * 1024 * 1024 && camera->epoch == camera->currentEpoch->load()
+            && !camera->framePending->exchange(true)) {
+            Q_EMIT camera->connection->externalCameraFrame(camera->epoch,
+                QByteArray(reinterpret_cast<const char *>(response->Sample), response->SampleSize));
+        }
+    } else {
+        camera->endpoint->writeMjpeg(QByteArray(reinterpret_cast<const char *>(response->Sample), response->SampleSize));
+    }
     CAM_SAMPLE_REQUEST request{};
     request.StreamIndex = 0;
     const UINT status = context->SampleRequest(context, &request);
@@ -404,6 +449,13 @@ UINT cameraSample(CameraDeviceServerContext *context, const CAM_SAMPLE_RESPONSE 
 struct RemoteCameraCollection {
     RemoteCameraSet<RemoteCamera> cameras;
     QString loopbackDevice;
+    RdpConnection *connection = nullptr;
+    bool external = false; // selected before initialization, like external microphone
+    std::atomic<bool> workerReady = false;
+    std::atomic<bool> workerCapture = false;
+    std::atomic<bool> workerInUse = false;
+    std::atomic<bool> framePending = false;
+    std::atomic<quint64> epoch = 1;
     // The enumerator answered Select Version (enumerator thread): the client
     // accepted the channel, whether or not it then offers a camera.
     std::atomic<bool> versionSeen = false;
@@ -435,8 +487,18 @@ UINT cameraAdded(CamDevEnumServerContext *enumerator, const CAM_DEVICE_ADDED_NOT
         qCInfo(KRDP) << "RDPECAM ignoring repeated DeviceAddedNotification for" << channelName;
         return CHANNEL_RC_OK;
     }
+    if (collection->external && collection->cameras.size() >= 1) {
+        qCInfo(KRDP) << "RDPECAM worker bridge is using the first offered camera";
+        return CHANNEL_RC_OK;
+    }
     auto camera = std::make_unique<RemoteCamera>();
     camera->loopbackDevice = collection->loopbackDevice;
+    camera->connection = collection->connection;
+    camera->external = collection->external;
+    camera->workerCapture = &collection->workerCapture;
+    camera->framePending = &collection->framePending;
+    camera->currentEpoch = &collection->epoch;
+    camera->epoch = collection->epoch.load();
     camera->context = camera_device_server_context_new(enumerator->vcm);
     if (!camera->context) {
         return ERROR_NOT_ENOUGH_MEMORY;
@@ -819,6 +881,7 @@ RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
 {
     d->server = server;
     d->socketHandle = socketHandle;
+    d->remoteCameras.connection = this;
 
     d->inputHandler = std::make_unique<InputHandler>(this);
     d->videoStream = std::make_unique<VideoStream>(this);
@@ -1061,6 +1124,10 @@ void RdpConnection::requestDevice(MediaDevice device, DeviceControl::Action acti
 void RdpConnection::setDeviceEnabled(MediaDevice device, bool enabled, bool silenceHost)
 {
     auto &slot = d->slot(device);
+    if (device == MediaDevice::Camera && d->remoteCameras.external) {
+        d->remoteCameras.epoch.fetch_add(1);
+        d->remoteCameras.framePending.store(false);
+    }
     if (device == MediaDevice::Playback) {
         slot.silenceHost.store(enabled && silenceHost);
     }
@@ -1168,6 +1235,31 @@ bool RdpConnection::enableExternalMicrophone()
     if (d->state != State::Initial) return false;
     d->externalMicrophone = true;
     return true;
+}
+
+bool RdpConnection::enableExternalCamera()
+{
+    if (d->state != State::Initial) return false;
+    d->remoteCameras.external = true;
+    return true;
+}
+
+void RdpConnection::setExternalCameraState(bool ready, bool capture, bool inUse)
+{
+    if (!d->remoteCameras.external) return;
+    d->remoteCameras.workerReady.store(ready);
+    d->remoteCameras.workerCapture.store(ready && capture);
+    d->remoteCameras.workerInUse.store(ready && inUse);
+}
+
+void RdpConnection::acknowledgeExternalCameraFrame(quint64 epoch)
+{
+    if (epoch == d->remoteCameras.epoch.load()) d->remoteCameras.framePending.store(false);
+}
+
+quint64 RdpConnection::externalCameraEpoch() const
+{
+    return d->remoteCameras.epoch.load();
 }
 
 QByteArray RdpConnection::takeExternalMicrophone()
@@ -2134,7 +2226,7 @@ bool RdpConnection::reconcileCamera()
 
     size_t ready = 0;
     d->remoteCameras.cameras.forEach([&ready](RemoteCamera *camera) {
-        if (camera->endpointStarted.load() && camera->endpoint->ready()) {
+        if (camera->endpointStarted.load() && (camera->external ? camera->connection->d->remoteCameras.workerReady.load() : camera->endpoint->ready())) {
             ++ready;
         }
         return true;
@@ -2164,7 +2256,7 @@ bool RdpConnection::reconcileCamera()
             slot.nextInUsePoll = now + 2 * InUsePollInterval; // the loopback check walks /proc
             bool inUse = false;
             d->remoteCameras.cameras.forEach([&inUse](RemoteCamera *camera) {
-                inUse = camera->endpointStarted.load() && camera->endpoint->consumerActive();
+                inUse = camera->endpointStarted.load() && (camera->external ? camera->connection->d->remoteCameras.workerInUse.load() : camera->endpoint->consumerActive());
                 return !inUse;
             });
             if (inUse != slot.status.inUse) {

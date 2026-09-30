@@ -22,13 +22,13 @@ namespace KRdp
 {
 namespace
 {
-/** What `device` can do on a virtual desktop (DEVICES-DESIGN.md §3): no camera yet (risk 5). */
+/** Device controls implemented by the Virtual broker and desktop worker. */
 constexpr LayoutControl::DeviceCapabilities VirtualDeviceCapabilities{
     .playbackToggle = true,
     .playbackSilenceHost = true,
     .microphoneToggle = true,
-    .cameraToggle = false,
-    .cameraReselect = false,
+    .cameraToggle = true,
+    .cameraReselect = true,
 };
 
 bool frameMatchesTopology(const VideoFrame &frame, const RemoteTopologyCatalog::Snapshot &snapshot)
@@ -67,8 +67,10 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     connection->videoStream()->setEnabled(false);
     connection->setExternalAudioPlayback(true); // broker must never open host PipeWire
     m_externalMicrophone = connection->enableExternalMicrophone();
+    m_externalCamera = connection->enableExternalCamera();
     connection->setDeviceEnabled(MediaDevice::Playback, false);
     connection->setDeviceEnabled(MediaDevice::Microphone, false);
+    connection->setDeviceEnabled(MediaDevice::Camera, false);
     // A standard client resizes the desktop through MS-RDPEDISP (its window
     // size); ours uses `virtual-resize` and never joins that channel.
     connection->setDisplayControlEnabled(true);
@@ -102,6 +104,27 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     });
     m_microphonePump.setInterval(20);
     connect(&m_microphonePump, &QTimer::timeout, this, &VirtualSessionTransport::pumpMicrophone);
+    m_cameraDeadline.setSingleShot(true);
+    m_cameraDeadline.setInterval(5000);
+    connect(&m_cameraDeadline, &QTimer::timeout, this, [this] {
+        const auto reply = cameraTimeout();
+        if (m_connection && !reply.isEmpty()) sendReply(reply);
+    });
+    connect(connection, &RdpConnection::externalCameraFormat, this, [this](quint64 epoch, quint32 width, quint32 height, quint32 fps) {
+        if (!m_connection || epoch != m_connection->externalCameraEpoch() || !m_endpoint || !m_cameraPolicy.enabled || !authorized()) return;
+        if (!m_endpoint->setCameraFormat({m_cameraPolicy.generation, m_cameraPolicy.requestId, width, height, fps})) {
+            const QString requestId = std::exchange(m_cameraRequestId, {});
+            stopCamera();
+            if (m_connection) pushRecord(LayoutControl::withRequestId(deviceReply(MediaDevice::Camera,
+                {DeviceStatus::State::Error, false, DeviceControl::Unavailable, u"cannot dispatch virtual camera format"_s}), requestId));
+        }
+    }, Qt::QueuedConnection);
+    connect(connection, &RdpConnection::externalCameraFrame, this, [this](quint64 epoch, const QByteArray &jpeg) {
+        if (!m_connection) return;
+        if (epoch == m_connection->externalCameraEpoch() && m_endpoint && m_cameraReady && m_cameraPolicy.enabled && authorized())
+            m_endpoint->sendCameraFrame({m_cameraPolicy.generation, m_cameraPolicy.requestId, jpeg});
+        m_connection->acknowledgeExternalCameraFrame(epoch);
+    }, Qt::QueuedConnection);
     m_resizeDeadline.setSingleShot(true);
     m_resizeDeadline.setInterval(60000);
     connect(&m_resizeDeadline, &QTimer::timeout, this, [this] {
@@ -179,6 +202,10 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         if (device == MediaDevice::Microphone && m_microphonePolicy.enabled) {
             const QString requestId = std::exchange(m_microphoneRequestId, {});
             stopMicrophone();
+            if (alive) pushRecord(LayoutControl::withRequestId(deviceReply(device, status), requestId));
+        } else if (device == MediaDevice::Camera && m_cameraPolicy.enabled) {
+            const QString requestId = std::exchange(m_cameraRequestId, {});
+            stopCamera();
             if (alive) pushRecord(LayoutControl::withRequestId(deviceReply(device, status), requestId));
         } else if (device == MediaDevice::Playback && m_playback) {
             pushRecord(deviceReply(device, status));
@@ -318,6 +345,19 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         const auto reply = microphoneResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
         if (alive && m_connection && !reply.isEmpty()) sendReply(reply);
     }));
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::cameraFinished, this, [this](const auto &result) {
+        const auto reply = cameraResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        if (m_connection && !reply.isEmpty()) sendReply(reply);
+    }));
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::cameraDemand, this, [this](const auto &demand) {
+        if (!m_connection || !m_cameraReady || !m_cameraPolicy.enabled || !authorized()
+            || demand.generation != m_cameraPolicy.generation || demand.requestId != m_cameraPolicy.requestId) return;
+        m_connection->setExternalCameraState(true, demand.capture, demand.inUse);
+        if (m_cameraInUse != demand.inUse) {
+            m_cameraInUse = demand.inUse;
+            pushRecord(deviceReply(MediaDevice::Camera, {DeviceStatus::State::On, demand.inUse, {}, {}}));
+        }
+    }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::resizeFinished, this, [this](const auto &result) {
         const auto uid = m_connection ? m_connection->authenticatedPamUid() : std::nullopt;
         const auto response = m_topologyResizeId.isEmpty() ? resizeResult(result, uid) : topologyResizeResult(result, uid);
@@ -406,13 +446,23 @@ void VirtualSessionTransport::applyStandardMedia(std::optional<quint32> uid)
         m_endpoint->setMedia({m_playback, m_silenceHost});
         if (!alive || !m_connection || !authorized(uid)) return;
     }
-    if (!channels->dynamic || m_microphonePolicy.enabled || !m_externalMicrophone || !m_controlGeneration
-        || m_nextMicrophoneId >= std::numeric_limits<quint64>::max() - 1) return;
-    m_microphonePolicy = {m_controlGeneration, ++m_nextMicrophoneId, true};
-    m_microphoneRequestId.clear(); // nobody to answer: the client has no request
-    m_microphoneDeadline.start();
-    const bool dispatched = m_endpoint->setMicrophone(m_microphonePolicy);
-    if (alive && !dispatched) stopMicrophone();
+    if (channels->dynamic && !m_microphonePolicy.enabled && m_externalMicrophone && m_controlGeneration
+        && m_nextMicrophoneId < std::numeric_limits<quint64>::max() - 1) {
+        m_microphonePolicy = {m_controlGeneration, ++m_nextMicrophoneId, true};
+        m_microphoneRequestId.clear(); // nobody to answer: the client has no request
+        m_microphoneDeadline.start();
+        const bool dispatched = m_endpoint->setMicrophone(m_microphonePolicy);
+        if (alive && !dispatched) stopMicrophone();
+    }
+    if (!alive || !m_connection || !authorized(uid)) return;
+    if (channels->dynamic && !m_cameraPolicy.enabled && m_externalCamera && m_controlGeneration
+        && m_nextCameraId < std::numeric_limits<quint64>::max() - 1) {
+        m_cameraPolicy = {m_controlGeneration, ++m_nextCameraId, true, {}};
+        m_cameraRequestId.clear();
+        m_cameraDeadline.start();
+        if (m_endpoint->setCamera(m_cameraPolicy)) m_connection->setDeviceEnabled(MediaDevice::Camera, true);
+        else stopCamera();
+    }
 }
 
 void VirtualSessionTransport::revoke()
@@ -436,10 +486,13 @@ void VirtualSessionTransport::revoke()
     // done; a microphone start still pending is answered with it (echo once).
     const bool microphoneWasOn = m_microphonePolicy.enabled;
     const QString microphoneRequestId = std::exchange(m_microphoneRequestId, {});
+    const bool cameraWasOn = m_cameraPolicy.enabled;
+    const QString cameraRequestId = std::exchange(m_cameraRequestId, {});
     const bool playbackWasOn = m_playback;
     // Invalidate local consent before dispatch, while the old endpoint is still
     // pinned. Nested requests/binds cannot acquire a replacement during revoke.
     stopMicrophone();
+    stopCamera();
     if (!alive) return;
     const auto endpoint = m_endpoint;
     const auto generation = m_controlGeneration;
@@ -482,6 +535,7 @@ void VirtualSessionTransport::revoke()
         m_connection->videoStream()->setMonitorLayout({});
         m_connection->setDeviceEnabled(MediaDevice::Playback, false);
         m_connection->setDeviceEnabled(MediaDevice::Microphone, false);
+        m_connection->setDeviceEnabled(MediaDevice::Camera, false);
         if (!alive) return;
         if (m_connection) m_connection->videoStream()->setEnabled(false); // discard old desktop frames
     }
@@ -489,6 +543,8 @@ void VirtualSessionTransport::revoke()
     if (m_connection && m_connection->state() != RdpConnection::State::Closed) {
         const DeviceStatus revoked{DeviceStatus::State::Off, false, DeviceControl::Detached, u"the virtual desktop is no longer attached to this connection"_s};
         if (microphoneWasOn) pushRecord(LayoutControl::withRequestId(DeviceControl::stateRecord(MediaDevice::Microphone, revoked), microphoneRequestId));
+        if (!alive) return;
+        if (cameraWasOn) pushRecord(LayoutControl::withRequestId(DeviceControl::stateRecord(MediaDevice::Camera, revoked), cameraRequestId));
         if (!alive) return;
         if (playbackWasOn) pushRecord(DeviceControl::stateRecord(MediaDevice::Playback, revoked));
         if (!alive) return;
@@ -530,7 +586,7 @@ DeviceStatus VirtualSessionTransport::deviceStatus(MediaDevice device) const
     case MediaDevice::Microphone:
         return {m_microphoneReady ? State::On : m_microphonePolicy.enabled ? State::Starting : State::Off, false, {}, {}};
     case MediaDevice::Camera:
-        break;
+        return {m_cameraReady ? State::On : m_cameraPolicy.enabled ? State::Starting : State::Off, m_cameraInUse, {}, {}};
     }
     return {};
 }
@@ -591,6 +647,51 @@ QJsonObject VirtualSessionTransport::microphoneTimeout()
     return alive ? LayoutControl::withRequestId(deviceReply(MediaDevice::Microphone,
                        {DeviceStatus::State::Error, false, DeviceControl::Timeout, u"virtual microphone worker startup timed out"_s}), requestId)
                  : QJsonObject{};
+}
+
+void VirtualSessionTransport::stopCamera()
+{
+    m_cameraDeadline.stop();
+    const auto policy = m_cameraPolicy;
+    m_cameraPolicy = {};
+    m_cameraReady = m_cameraInUse = false;
+    if (m_connection) {
+        m_connection->setExternalCameraState(false, false, false);
+        m_connection->setDeviceEnabled(MediaDevice::Camera, false);
+    }
+    if (policy.enabled && m_endpoint && m_nextCameraId != std::numeric_limits<quint64>::max())
+        m_endpoint->setCamera({policy.generation, ++m_nextCameraId, false, {}});
+}
+
+QJsonObject VirtualSessionTransport::cameraResult(const ConsoleWorkerWire::CameraResult &result,
+                                                  std::optional<quint32> uid)
+{
+    if (!m_cameraPolicy.enabled || result.generation != m_cameraPolicy.generation
+        || result.requestId != m_cameraPolicy.requestId) return {};
+    const QPointer<VirtualSessionTransport> alive(this);
+    if (!authorized(uid) || !result.error.isEmpty()) {
+        const DeviceStatus status = result.error.isEmpty()
+            ? DeviceStatus{DeviceStatus::State::Off, false, DeviceControl::Detached, u"this connection no longer holds the virtual desktop"_s}
+            : DeviceStatus{DeviceStatus::State::Error, false, DeviceControl::Unavailable, result.error};
+        const QString requestId = std::exchange(m_cameraRequestId, {});
+        stopCamera();
+        return alive ? LayoutControl::withRequestId(deviceReply(MediaDevice::Camera, status), requestId) : QJsonObject{};
+    }
+    if (m_cameraReady) return {};
+    m_cameraDeadline.stop();
+    m_cameraReady = true;
+    m_connection->setExternalCameraState(true, false, false);
+    return LayoutControl::withRequestId(deviceReply(MediaDevice::Camera, {DeviceStatus::State::On, false, {}, {}}),
+                                        std::exchange(m_cameraRequestId, {}));
+}
+
+QJsonObject VirtualSessionTransport::cameraTimeout()
+{
+    if (!m_cameraPolicy.enabled || m_cameraReady) return {};
+    const QString requestId = std::exchange(m_cameraRequestId, {});
+    stopCamera();
+    return LayoutControl::withRequestId(deviceReply(MediaDevice::Camera,
+        {DeviceStatus::State::Error, false, DeviceControl::Timeout, u"virtual camera worker startup timed out"_s}), requestId);
 }
 
 bool VirtualSessionTransport::forwardMicrophone(const QByteArray &pcm, std::optional<quint32> uid)
@@ -1843,6 +1944,7 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
             // A refused request must not leave an earlier consent running: end
             // this connection's devices locally (never another attachment's worker).
             stopMicrophone(uid);
+            stopCamera();
             if (!alive || !m_connection) return {};
             m_playback = m_silenceHost = false;
             m_connection->setDeviceEnabled(MediaDevice::Playback, false);
@@ -1879,6 +1981,31 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
             if (!bindingCurrent())
                 return deviceReply(MediaDevice::Playback, {DeviceStatus::State::Off, false, DeviceControl::Detached, u"this connection no longer holds the virtual desktop"_s});
             return deviceReply(MediaDevice::Playback, deviceStatus(MediaDevice::Playback));
+        }
+        if (device.device == MediaDevice::Camera) {
+            stopCamera(); // on/reselect starts a fresh RDPECAM enumeration
+            if (!alive || !m_connection) return {};
+            if (!bindingCurrent())
+                return deviceReply(MediaDevice::Camera, {DeviceStatus::State::Off, false, DeviceControl::Detached,
+                    u"this connection no longer holds the virtual desktop"_s});
+            if (device.action == DeviceControl::Action::Off) return deviceReply(MediaDevice::Camera, {});
+            if (!m_externalCamera || !m_controlGeneration || m_nextCameraId >= std::numeric_limits<quint64>::max() - 1)
+                return deviceReply(MediaDevice::Camera, {DeviceStatus::State::Error, false, DeviceControl::Unavailable,
+                    u"virtual camera unavailable"_s});
+            m_cameraPolicy = {m_controlGeneration, ++m_nextCameraId, true, {}};
+            m_cameraRequestId = m_replyRequestId;
+            m_cameraDeadline.start();
+            const bool dispatched = m_endpoint->setCamera(m_cameraPolicy);
+            if (!alive || !m_connection) return {};
+            if (!bindingCurrent()) return {};
+            if (!dispatched) {
+                m_cameraRequestId.clear();
+                stopCamera();
+                return deviceReply(MediaDevice::Camera, {DeviceStatus::State::Error, false, DeviceControl::Unavailable,
+                    u"cannot dispatch virtual camera startup"_s});
+            }
+            m_connection->setDeviceEnabled(MediaDevice::Camera, true);
+            return {}; // the worker source's ready result answers the request
         }
         // Microphone: any change ends the current source first (a new `on` is a
         // new consent period with a new worker request).
