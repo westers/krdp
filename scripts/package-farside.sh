@@ -32,16 +32,17 @@ kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # (libx265) and AV1 (libsvtav1) with backend policies, presets and a target bitrate, + libx265
 # bitrate/CRF changes in place (AUD-SWENC, 02d475d) + a hidden cursor reported from the
 # screencast metadata (FIX-CURSOR, fe44b96; PipeWireCursor::visible) + AV1's own quantiser scale and AV1
-# tiles (AV1-Q, fdfa037; setAv1Tiles(), quantizerForQuality()). Those libraries come in through
+# tiles (AV1-Q, fdfa037; setAv1Tiles(), quantizerForQuality()) + Sol HEVC NVENC fallback
+# (OPT-046, 9d6b08c). Those libraries come in through
 # libavcodec's own Depends (dpkg-shlibdeps: libavcodec62).
-kpw_ref=${KPIPEWIRE_REF:-fdfa037}
+kpw_ref=${KPIPEWIRE_REF:-9d6b08c}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 
 multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
 privdir=/usr/lib/$multiarch/farside
 
-for tool in cmake ninja git file dpkg-shlibdeps dpkg-gencontrol dpkg-deb; do
+for tool in cmake ninja git patch file dpkg-shlibdeps dpkg-gencontrol dpkg-deb; do
     command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 1; }
 done
 

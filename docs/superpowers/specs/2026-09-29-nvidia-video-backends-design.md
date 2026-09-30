@@ -1,0 +1,45 @@
+# NVIDIA video backends: Sol first
+
+Status: Sol priorities and the one-device-per-stream policy approved by Steve, 2026-09-29. Sol's RTX 2070 and driver 595.91.07 opened NVENC, and KPipeWire's synthetic HEVC GPU test passed there. Live capture and RDP acceptance remain open. Steve's separate Vulkan AV1 shader encoder may become an additional backend later.
+
+## Decision
+
+Keep codec, implementation backend, and physical device as separate choices. One encoded screen stream uses one encoder instance on one device; each client surface uses one decoder instance on one device. Different screens and sessions may select different devices. Do not stripe a single frame across AMD and NVIDIA. Cross-device transfer, synchronization, independent codec state, and packet assembly add cost and failure modes; no measured benefit warrants it. NVIDIA's own multi-NVENC split-frame feature is separate and driver-managed.
+
+Available implementations are CPU software, existing VA-API on AMD and Intel, new NVIDIA NVENC/NVDEC through FFmpeg CUDA, and possibly Intel QSV later. Vulkan Video is a possible future interface to video hardware when its queue and codec extensions are present, not a generic shader fallback. A custom codec in Vulkan compute shaders is a separate research project. Keep AMD VA-API as a first-class backend; the proposed four-path list omitted it.
+
+For Sol, target HEVC Main 4:2:0 NVENC first, then AVC420 NVENC. Turing supports HEVC and AVC encode/decode, not AV1 encode/decode. Hal's RTX 4090 can add AV1 NVENC/NVDEC after the Sol gate; Hal's AMD APU remains its automatic encoding preference to avoid opportunistically consuming the 4090 used for AI. AVC444's existing VA-API composite path is left on VA-API until an NVENC-specific stream compatibility design and measurement are complete.
+
+## Device model and selection
+
+Probe every allowed render/encode device per codec by opening an actual encoder/decoder context, not by the presence of an FFmpeg encoder name. Record `{codec, direction, backend, stable PCI BDF, display name, node/ordinal, available}`. The physical device ID is stable policy identity; `/dev/dri/renderD*` and CUDA ordinals are session-local implementation details. Match the selected PCI identity to the FFmpeg CUDA device explicitly. If mapping cannot be proven, do not advertise that device as selectable. For sandboxed virtual hosts, grant the NVIDIA device nodes and libraries to the worker or report them unavailable; the broker should not infer worker capabilities from its own process.
+
+The per-stream policy is `auto`, `software`, `vaapi:<PCI BDF>`, or `nvenc:<PCI BDF>` for encoding, with analogous `nvdec` for decoding. `auto` ranks only devices that really open the requested codec. Prefer the capture GPU when it has a suitable hardware engine, then other hardware, then policy-allowed software. On Hal this chooses AMD by default; on Sol it chooses NVIDIA. An explicit unavailable device returns an error and a truthful fallback or codec renegotiation; it must never label software bytes as hardware. A client may request a backend in Advanced settings/KRDPCTL, while the host's configured allow-list and capacity guard retain final authority. Expose actual backend and device in stats rather than only `hardware=true`.
+
+Do not dynamically migrate an active stream when GPU load changes: restart with a new keyframe at a stream boundary after measured sustained pressure or encoder failure. AI utilization alone is not an admission veto because NVENC/NVDEC are dedicated engines, but insufficient VRAM, failed context allocation, excessive copy/conversion time, or measured encode latency are. Begin with manual override plus a conservative fixed default; add adaptive placement only after Sol/Hal timings show a useful threshold. Do not reserve VRAM based solely on an `nvidia-smi` snapshot.
+
+## Implementation slices
+
+1. **Read-only Sol gate:** in the console and virtual worker contexts, record `nvidia-smi -L`, PCI ID, driver version, accessible `/dev/nvidia*` and render node, FFmpeg encoder availability, CUDA hwdevice/context open, and a short isolated HEVC NVENC encode/decode. Check the current capture's DMA-BUF format/modifier and EGL download on Sol. No claim of hardware support follows from `ffmpeg -encoders` alone. Capture current CPU/GPU/VRAM/AI load before performance runs.
+2. **Server/KPipeWire HEVC:** add an FFmpeg `hevc_nvenc` encoder accepting system-memory YUV420P initially. Reuse the existing DMA-BUF-to-CPU download and color conversion path so NVENC can receive frames; measure the copy and conversion cost. Use Main 4:2:0, limited range, low-latency settings, no B frames or lookahead, the existing bitrate/quality and IDR controls, packet ownership, and timestamps. Probe `hevc_nvenc` with the same selected device and settings. KPipeWire's current Hardware/Software bit grows an internal concrete backend/device identity; the server must not advertise NVENC before KPipeWire can create it. Preserve software fallback semantics and codec-tag correctness.
+3. **Sol live gate:** Buzz -> isolated Sol server, HEVC NVENC selected and hardware decoded on Buzz. Verify first image, motion, resize, IDR/reconnect, bitrate and quality controls, 1- and 2-screen sessions, encoder failure fallback, and actual backend/device stats. Compare p50/p95 capture-download, conversion, encode, end-to-end latency and CPU use against Sol software HEVC and AVC under recorded ambient AI load. Use the existing Sol/Buzz test-host safeguards; keep Hal out of live tests.
+4. **Client NVDEC:** replace the single VA-API probe with a per-codec list of usable VA-API and CUDA decoder devices. On private HEVC/AV1 surfaces, FFmpeg's native decoder selects `AV_PIX_FMT_CUDA` for NVDEC on the chosen device, downloads decoded NV12/P010 via `av_hwframe_transfer_data`, then uses the existing swscale/presentation path. Preserve software retry and truthful `decode` capability announcements. A client setting may select `auto`, software, VA-API device, or NVDEC device; report the actual decoder backend/device. Test decode on a NVIDIA client host before release. Hal is a packaging/offscreen check only until Steve performs a hands-on pass.
+5. **Broaden:** add AVC420 NVENC, then Ada AV1 NVENC/NVDEC with codec-specific limits. Revisit zero-copy capture/import and GPU-side color conversion only if the measured CPU staging cost blocks the latency or CPU target. Consider auto placement across independent screens only after device identity, load, and transfer costs are observed.
+
+## Acceptance and unresolved gates
+
+- Sol must actually open `hevc_nvenc` within its service sandbox, encode a decodable first IDR, and sustain the target desktop rate with bounded latency. Its RTX 2070 must never advertise hardware AV1.
+- Backend/device shown in logs, stats, and KRDPCTL must match the context that encoded or decoded frames, including after fallback/restart.
+- A selected GPU failure must not corrupt the video codec tag or produce a black screen; recovery switches at a keyframe or reconnects with an explicit reason.
+- Two screens may independently use devices, but one frame is never split across vendors.
+- No Hal service restart or live connection test is part of the Sol gate. Any eventual Hal package deployment follows the standing zero-established-connections check.
+
+Open before release: current Sol service GPU visibility and FFmpeg/NVIDIA driver compatibility; DMA-BUF import/download behavior in Sol's console and virtual desktops; the exact PCI-to-CUDA mapping available in the installed FFmpeg build; whether CPU staging meets latency targets; and a real NVIDIA client host for NVDEC acceptance.
+
+## First slice progress (2026-09-29, not released)
+
+The Sol single-NVIDIA-GPU path is committed in private KPipeWire `9d6b08c` and staged in server `src/EncoderSupport.cpp`. It probes a real FFmpeg CUDA 0 + HEVC NVENC context and uses KPipeWire's system-memory 4:2:0 conversion/upload path. VA-API remains first on hosts such as Hal. `scripts/package-farside.sh` pins that KPipeWire commit. On Sol, a short FFmpeg encode decoded and KPipeWire's GPU-gated 30-frame test passed low-latency packet output, requested IDR and decode from the IDR; its backend policy test selected NVENC as hardware. Device identity and selection, detailed backend telemetry, and live bitrate/latency admission remain future slices.
+
+The HEVC NVDEC client path is applied to the client repository on `main` `eb528cc`; it is not committed or released yet. Its CUDA probe runs only when the VA-API probe lacks HEVC. It decodes private HEVC through FFmpeg's native CUDA hwaccel and downloads to the existing presentation path. The isolated client build and `DecodeCapsTest` passed (CUDA-only HEVC request/`decode` map included); no NVIDIA GPU decode or RDP picture test has run.
+
+Full access is active. Sol SSH, driver/device visibility and NVIDIA tests passed; live Buzz-to-Sol RDP verification and package deployment are still pending. The current source is not yet a validated Farside release.

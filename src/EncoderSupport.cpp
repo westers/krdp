@@ -69,6 +69,35 @@ bool trialOpen(AVBufferRef *device, const char *encoder)
     return ok;
 }
 
+/// KPipeWire's first NVENC slice accepts system-memory YUV420P and uploads to CUDA internally.
+/// A codec name in FFmpeg is not enough: the worker must be able to open its CUDA device.
+bool trialNvencHevc()
+{
+    const AVCodec *codec = avcodec_find_encoder_by_name("hevc_nvenc");
+    if (!codec) return false;
+    AVBufferRef *device = nullptr;
+    if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_CUDA, "0", nullptr, 0) < 0) return false;
+    AVCodecContext *context = avcodec_alloc_context3(codec);
+    if (!context) {
+        av_buffer_unref(&device);
+        return false;
+    }
+    context->width = context->height = 256;
+    context->time_base = {1, 60};
+    context->framerate = {60, 1};
+    context->pix_fmt = AV_PIX_FMT_YUV420P;
+    context->max_b_frames = 0;
+    context->hw_device_ctx = av_buffer_ref(device);
+    AVDictionary *options = nullptr;
+    av_dict_set(&options, "preset", "p3", 0);
+    av_dict_set(&options, "tune", "ull", 0);
+    const bool ok = avcodec_open2(context, codec, &options) >= 0;
+    av_dict_free(&options);
+    avcodec_free_context(&context);
+    av_buffer_unref(&device);
+    return ok;
+}
+
 struct Hardware {
     bool avc = false;
     bool hevc = false;
@@ -268,7 +297,13 @@ Probe probeUncached()
     // this probe creates (suggestedEncoders()), and later encoders and probes reuse it.
     selectVaapiDriver();
     const bool forced = softwareForced();
-    const Hardware hw = forced ? Hardware{} : probeHardware();
+    Hardware hw = forced ? Hardware{} : probeHardware();
+    // Prefer VA-API when it already handles HEVC (Hal's AMD capture GPU). Sol's NVIDIA
+    // worker has no VA-API encoder and gains HEVC through NVENC if CUDA really opens.
+    if (!forced && !hw.hevc && trialNvencHevc()) {
+        hw.hevc = true;
+        if (hw.node.isEmpty()) hw.node = QStringLiteral("CUDA device 0 (HEVC NVENC)");
+    }
 
     PipeWireEncodedStream stream;
     const auto suggested = stream.suggestedEncoders();
