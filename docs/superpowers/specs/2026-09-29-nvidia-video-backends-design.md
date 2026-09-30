@@ -1,6 +1,6 @@
 # NVIDIA video backends: Sol first
 
-Status: Sol priorities and the one-device-per-stream policy approved by Steve, 2026-09-29. Sol's RTX 2070 and driver 595.91.07 opened NVENC, and KPipeWire's synthetic HEVC GPU test passed there. Live capture and RDP acceptance remain open. Steve's separate Vulkan AV1 shader encoder may become an additional backend later.
+Status: Sol priorities and the one-device-per-stream policy approved by Steve, 2026-09-29. First Sol HEVC NVENC and client NVDEC slice deployed 22:54 CDT: synthetic GPU test and live console first-frame tests passed; motion/performance, virtual worker and per-device selection remain open. Steve's separate Vulkan AV1 shader encoder may become an additional backend later.
 
 ## Decision
 
@@ -36,10 +36,10 @@ Do not dynamically migrate an active stream when GPU load changes: restart with 
 
 Open before release: current Sol service GPU visibility and FFmpeg/NVIDIA driver compatibility; DMA-BUF import/download behavior in Sol's console and virtual desktops; the exact PCI-to-CUDA mapping available in the installed FFmpeg build; whether CPU staging meets latency targets; and a real NVIDIA client host for NVDEC acceptance.
 
-## First slice progress (2026-09-29, not released)
+## First slice progress (2026-09-29, deployed on Sol server and Sol/Buzz/Hal clients)
 
-The Sol single-NVIDIA-GPU path is committed in private KPipeWire `9d6b08c` and staged in server `src/EncoderSupport.cpp`. It probes a real FFmpeg CUDA 0 + HEVC NVENC context and uses KPipeWire's system-memory 4:2:0 conversion/upload path. VA-API remains first on hosts such as Hal. `scripts/package-farside.sh` pins that KPipeWire commit. On Sol, a short FFmpeg encode decoded and KPipeWire's GPU-gated 30-frame test passed low-latency packet output, requested IDR and decode from the IDR; its backend policy test selected NVENC as hardware. Device identity and selection, detailed backend telemetry, and live bitrate/latency admission remain future slices.
+The Sol single-NVIDIA-GPU path is committed in private KPipeWire `9d6b08c` and server `4b737f0`, packaged and installed on Sol. It probes a real FFmpeg CUDA 0 + HEVC NVENC context and uses KPipeWire's system-memory 4:2:0 conversion/upload path. VA-API remains first on hosts such as Hal. `scripts/package-farside.sh` pins that KPipeWire commit. On Sol, a short FFmpeg encode decoded and KPipeWire's GPU-gated 30-frame test passed low-latency packet output, requested IDR and decode from the IDR; its backend policy test selected NVENC as hardware. Buzz's packaged GUI requested HEVC from Sol console, and Sol sent 1920×1080 HEVC first frames, decoded/presented through Buzz VAAPI. Device identity and selection, detailed backend telemetry, and live bitrate/latency admission remain future slices.
 
-The HEVC NVDEC client path is applied to the client repository on `main` `eb528cc`; it is not committed or released yet. Its CUDA probe runs only when the VA-API probe lacks HEVC. It decodes private HEVC through FFmpeg's native CUDA hwaccel and downloads to the existing presentation path. The isolated client build and `DecodeCapsTest` passed (CUDA-only HEVC request/`decode` map included); no NVIDIA GPU decode or RDP picture test has run.
+The HEVC NVDEC client path is released as `v0.6.2` (`066517d`) and installed on Sol, Buzz and Hal. It probes CUDA even when VA-API is present, uses VA-API by default, and permits a fresh process to prefer NVDEC with `FARSIDE_HEVC_DECODER=nvdec`. It decodes private HEVC through FFmpeg's native CUDA hwaccel and downloads to the existing presentation path. The focused `DecodeCapsTest` and retained 0.6.1 `SessionWindowTest` passed. An isolated Sol client connected to Sol console with that override and logged `NVDEC CUDA 0` plus a presented first frame. Hal's client was installed and checked offscreen; Steve will do its hands-on test.
 
-Full access is active. Sol SSH, driver/device visibility and NVIDIA tests passed; live Buzz-to-Sol RDP verification and package deployment are still pending. The current source is not yet a validated Farside release.
+The first-frame functional gate and targeted deployment are recorded in `~/dev/rdp/evidence/2026-09-29-nvenc-sol/SUMMARY.md`. Sol's AI workload occupied about 3.2 GiB VRAM during this gate, so no steady-state performance claim follows. The virtual worker, moving desktop, resize, two-screen session, bitrate/fallback behavior, PCI device selection and Hal hands-on NVDEC check remain open.
