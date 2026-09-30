@@ -40,7 +40,7 @@ int main(int argc, char **argv)
     const QCommandLineOption addressOption(QStringLiteral("address"), QStringLiteral("Listen address."), QStringLiteral("address"), QStringLiteral("0.0.0.0"));
     const QCommandLineOption portOption(QStringLiteral("port"), QStringLiteral("Listen port."), QStringLiteral("port"), QStringLiteral("3389"));
     const QCommandLineOption runtimeOption(QStringLiteral("runtime-directory"), QStringLiteral("Host-owned worker socket directory."), QStringLiteral("path"), QStringLiteral("/run/farside-console"));
-    const QCommandLineOption audioPriorityOption(QStringLiteral("prefer-audio-quality"), QStringLiteral("Default to audio-first congestion steering for the controlling client (live client overrides allowed)."));
+    const QCommandLineOption audioPriorityOption(QStringLiteral("prefer-audio-quality"), QStringLiteral("Default to audio-first congestion steering for the controlling client: true or false (live client overrides allowed)."), QStringLiteral("enabled"), QStringLiteral("false"));
     const QCommandLineOption qualityOption(QStringLiteral("quality"), QStringLiteral("Maximum video quality, 0 to 100."), QStringLiteral("quality"), QStringLiteral("80"));
     const QCommandLineOption adaptiveQualityOption(QStringLiteral("adaptive-quality"), QStringLiteral("Steer video quality under link congestion: true or false."), QStringLiteral("enabled"), QStringLiteral("false"));
     const QCommandLineOption standardMediaOption(QStringLiteral("standard-client-media"), QStringLiteral("Enable standard RDP audio and camera consent: true or false."), QStringLiteral("enabled"), QStringLiteral("true"));
@@ -61,6 +61,7 @@ int main(int argc, char **argv)
     bool qualityOk = false;
     const int quality = parser.value(qualityOption).toInt(&qualityOk);
     const auto adaptiveValue = parser.value(adaptiveQualityOption);
+    const auto audioPriorityValue = parser.value(audioPriorityOption);
     const auto standardMediaValue = parser.value(standardMediaOption);
     const auto cameraLoopback = parser.value(cameraLoopbackOption);
     const auto softwareEncoding = KRdp::parseHostSoftwareEncoding(parser.value(softwareEncodingOption));
@@ -68,6 +69,7 @@ int main(int argc, char **argv)
     if (!portOk || port == 0 || parser.value(workerOption).isEmpty() || parser.value(certificateOption).isEmpty() || parser.value(keyOption).isEmpty()
         || !qualityOk || quality < 0 || quality > 100
         || (adaptiveValue != QLatin1String("true") && adaptiveValue != QLatin1String("false"))
+        || (audioPriorityValue != QLatin1String("true") && audioPriorityValue != QLatin1String("false"))
         || (standardMediaValue != QLatin1String("true") && standardMediaValue != QLatin1String("false"))
         || (cameraLoopback != QLatin1String("none") && !cameraLoopback.startsWith(QLatin1String("/dev/")))
         || !softwareEncoding || !vaapiDriver) {
@@ -108,7 +110,7 @@ int main(int argc, char **argv)
     QObject::connect(&launcher, &KRdp::ConsoleWorkerLauncher::workerExited,
                      &host, &KRdp::ConsoleHostController::workerExited, Qt::QueuedConnection);
     QObject::connect(&seat, &KRdp::ConsoleSeatWatcher::sessionsChanged, &host, &KRdp::ConsoleHostController::setSeatSessions);
-    host.setAudioPriorityDefault(parser.isSet(audioPriorityOption));
+    host.setAudioPriorityDefault(audioPriorityValue == QLatin1String("true"));
     host.setVideoQualityPolicy(quint8(quality), adaptiveValue == QLatin1String("true"));
     // AUD-FIX7: what `capabilities.video` offers and the controlling connection's codec policy
     // starts from; the worker probes its own encoders and replaces this once it reports.

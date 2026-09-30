@@ -1086,6 +1086,24 @@ private Q_SLOTS:
             QVERIFY(!t.m_connection->audioPriorityActive()); // No latent override after ownership loss.
         });
     }
+    void audioPriorityDefaultFollowsVirtualOwnership() {
+        microphoneFixture([&](auto &t, auto &control, auto &endpoint, auto &) {
+            const auto handle = *t.m_handle;
+            t.setAudioPriorityDefault(true);
+            QVERIFY(!t.m_connection->audioPriorityActive());
+            control.disconnected(1);
+            QVERIFY(control.request(1000, 1, {{u"type"_s, u"virtual-session"_s}, {u"v"_s, 1},
+                {u"id"_s, u"audio-default-reattach"_s}, {u"action"_s, u"attach"_s},
+                {u"session"_s, handle.id}}).value(u"ok"_s).toBool());
+            QVERIFY(!t.activateBinding(handle, &endpoint)); // Socket-free fixture has no PAM identity.
+            t.m_connection->setDeviceEnabled(MediaDevice::Playback, true);
+            QVERIFY(t.m_connection->audioPriorityActive());
+            t.m_connection->setAudioPriority(false);
+            QVERIFY(!t.m_connection->audioPriorityActive());
+            t.revoke();
+            QVERIFY(!t.m_connection->audioPriorityActive());
+        });
+    }
     void audioPriorityWorkerQualityAndStaleBinding() {
         microphoneFixture([&](auto &t, auto &control, auto &endpoint, auto &worker) {
             const auto handle = *t.m_handle;

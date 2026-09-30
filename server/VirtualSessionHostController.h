@@ -40,6 +40,7 @@ public:
     /** AUD-FIX7: the codec policy every new connection offers (unset: AVC only). */
     void setVideoCodecHost(const VideoCodecHost &host) { m_videoHost = host; }
     void setVideoQualityPolicy(quint8 cap, bool adaptive) { m_qualityCap = cap; m_adaptiveQuality = adaptive; }
+    void setAudioPriorityDefault(bool enabled) { m_audioPriorityDefault = enabled; }
     void setCameraLoopbackDevice(const QString &device) { m_cameraLoopbackDevice = device; }
     /**
      * AUD-FIX8: whether a desktop's session unit (krdp-virtual-session@<id>.service) is still
@@ -93,6 +94,7 @@ private:
     std::optional<VideoCodecHost> m_videoHost;
     quint8 m_qualityCap = 80;
     bool m_adaptiveQuality = false;
+    bool m_audioPriorityDefault = false;
     QString m_cameraLoopbackDevice;
     std::map<QString, std::unique_ptr<Worker>> m_workers;
     quint64 m_sequence = 0;

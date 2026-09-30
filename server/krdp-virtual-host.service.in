@@ -21,12 +21,13 @@ Environment=FARSIDE_VIRTUAL_CERTIFICATE_KEY=/etc/farside/virtual-host.key
 Environment=FARSIDE_VIRTUAL_SOFTWARE_ENCODING=auto
 Environment=FARSIDE_VIRTUAL_QUALITY=80
 Environment=FARSIDE_VIRTUAL_ADAPTIVE_QUALITY=false
+Environment=FARSIDE_VIRTUAL_PREFER_AUDIO_QUALITY=false
 Environment=FARSIDE_VIRTUAL_STANDARD_CLIENT_MEDIA=true
 Environment=FARSIDE_VIRTUAL_CAMERA_LOOPBACK_DEVICE=none
 # AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16 (KRDPCTL-V2-CONTRACT.md (e)).
 Environment=FARSIDE_VIRTUAL_AV1_TILES=auto
 EnvironmentFile=-/etc/farside/virtual-host.conf
-ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/farside/virtual-host @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-host --certificate ${FARSIDE_VIRTUAL_CERTIFICATE} --certificate-key ${FARSIDE_VIRTUAL_CERTIFICATE_KEY} --address ${FARSIDE_VIRTUAL_ADDRESS} --port ${FARSIDE_VIRTUAL_PORT} --quality ${FARSIDE_VIRTUAL_QUALITY} --adaptive-quality ${FARSIDE_VIRTUAL_ADAPTIVE_QUALITY} --standard-client-media ${FARSIDE_VIRTUAL_STANDARD_CLIENT_MEDIA} --camera-loopback-device ${FARSIDE_VIRTUAL_CAMERA_LOOPBACK_DEVICE} --software-encoding ${FARSIDE_VIRTUAL_SOFTWARE_ENCODING} --av1-tiles ${FARSIDE_VIRTUAL_AV1_TILES}
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/farside/virtual-host @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-host --certificate ${FARSIDE_VIRTUAL_CERTIFICATE} --certificate-key ${FARSIDE_VIRTUAL_CERTIFICATE_KEY} --address ${FARSIDE_VIRTUAL_ADDRESS} --port ${FARSIDE_VIRTUAL_PORT} --quality ${FARSIDE_VIRTUAL_QUALITY} --adaptive-quality ${FARSIDE_VIRTUAL_ADAPTIVE_QUALITY} --prefer-audio-quality ${FARSIDE_VIRTUAL_PREFER_AUDIO_QUALITY} --standard-client-media ${FARSIDE_VIRTUAL_STANDARD_CLIENT_MEDIA} --camera-loopback-device ${FARSIDE_VIRTUAL_CAMERA_LOOPBACK_DEVICE} --software-encoding ${FARSIDE_VIRTUAL_SOFTWARE_ENCODING} --av1-tiles ${FARSIDE_VIRTUAL_AV1_TILES}
 StateDirectory=farside/virtual-sessions farside/virtual-host
 StateDirectoryMode=0700
 UMask=0077

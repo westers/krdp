@@ -36,6 +36,7 @@ int main(int argc, char **argv)
     parser.addOption({QStringLiteral("port"), QStringLiteral("Listen port, independent of the physical-console listener."), QStringLiteral("port"), QStringLiteral("3395")});
     parser.addOption({QStringLiteral("quality"), QStringLiteral("Maximum video quality, 0 to 100."), QStringLiteral("quality"), QStringLiteral("80")});
     parser.addOption({QStringLiteral("adaptive-quality"), QStringLiteral("Steer video quality under link congestion: true or false."), QStringLiteral("enabled"), QStringLiteral("false")});
+    parser.addOption({QStringLiteral("prefer-audio-quality"), QStringLiteral("Default to audio-first congestion steering for the attached client: true or false (live client overrides allowed)."), QStringLiteral("enabled"), QStringLiteral("false")});
     parser.addOption({QStringLiteral("standard-client-media"), QStringLiteral("Enable standard RDP audio and camera consent: true or false."), QStringLiteral("enabled"), QStringLiteral("true")});
     parser.addOption({QStringLiteral("camera-loopback-device"), QStringLiteral("V4L2 loopback path in the desktop worker, or none."), QStringLiteral("path"), QStringLiteral("none")});
     parser.addOption({QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto")});
@@ -47,6 +48,7 @@ int main(int argc, char **argv)
     bool validQuality = false;
     const int quality = parser.value(QStringLiteral("quality")).toInt(&validQuality);
     const auto adaptiveValue = parser.value(QStringLiteral("adaptive-quality"));
+    const auto audioPriorityValue = parser.value(QStringLiteral("prefer-audio-quality"));
     const auto standardMediaValue = parser.value(QStringLiteral("standard-client-media"));
     const auto cameraLoopback = parser.value(QStringLiteral("camera-loopback-device"));
     const QHostAddress address(parser.value(QStringLiteral("address")));
@@ -57,6 +59,7 @@ int main(int argc, char **argv)
     const auto softwareEncoding = KRdp::parseHostSoftwareEncoding(parser.value(QStringLiteral("software-encoding")));
     if (!parser.positionalArguments().isEmpty() || !validPort || !port || !validQuality || quality < 0 || quality > 100
         || (adaptiveValue != QLatin1String("true") && adaptiveValue != QLatin1String("false")) || address.isNull() || !softwareEncoding
+        || (audioPriorityValue != QLatin1String("true") && audioPriorityValue != QLatin1String("false"))
         || (standardMediaValue != QLatin1String("true") && standardMediaValue != QLatin1String("false"))
         || (cameraLoopback != QLatin1String("none") && !cameraLoopback.startsWith(QLatin1String("/dev/")))
         || !KRdp::VirtualSessionLaunchPlan::absoluteCleanPath(certificate) || !KRdp::VirtualSessionLaunchPlan::absoluteCleanPath(key)) {
@@ -95,6 +98,7 @@ int main(int argc, char **argv)
     KRdp::VirtualSessionHostController host(&server, {});
     host.setCameraLoopbackDevice(server.cameraLoopbackDevice());
     host.setVideoQualityPolicy(quint8(quality), adaptiveValue == QLatin1String("true"));
+    host.setAudioPriorityDefault(audioPriorityValue == QLatin1String("true"));
     // AUD-FIX7: what `capabilities.video` offers and each connection's codec policy starts from;
     // a desktop's worker probes its own encoders and replaces this estimate once it reports.
     KRdp::EncoderSupport::applyProcessOverrides();

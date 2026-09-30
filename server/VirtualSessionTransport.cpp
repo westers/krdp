@@ -415,6 +415,8 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_controlGeneration = ++m_sequence;
+    m_connection->clearAudioPriorityOverride();
+    m_connection->setAudioPriorityDefault(m_audioPriorityDefault);
     // Capture the binding's generation at connection time, NOT delivery time:
     // disconnect does not retract already queued signals from the RDP thread.
     const auto generation = m_controlGeneration;
