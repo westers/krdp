@@ -285,6 +285,7 @@ struct RemoteCamera {
     CAM_MEDIA_TYPE_DESCRIPTION format{};
     QString loopbackDevice;
     std::atomic<bool> streamStarted = false;
+    std::atomic<bool> startPending = false;
     std::atomic<bool> stopPending = false;
     std::unique_ptr<PipeWireCamera> endpoint;
     RdpConnection *connection = nullptr;
@@ -308,15 +309,23 @@ struct RemoteCamera {
 UINT cameraSuccess(CameraDeviceServerContext *context, const CAM_SUCCESS_RESPONSE *)
 {
     auto *camera = static_cast<RemoteCamera *>(context->userdata);
-    if (camera && camera->stopPending.exchange(false)) {
-        qCInfo(KRDP) << "RDPECAM stream stopped after worker demand ended";
-        return CHANNEL_RC_OK;
-    }
-    qCInfo(KRDP) << "RDPECAM success response" << (camera && camera->activated ? "stream started" : "device activated");
-    if (!camera->activated) {
+    if (camera && !camera->activated) {
+        qCInfo(KRDP) << "RDPECAM success response device activated";
         camera->activated = true;
         CAM_STREAM_LIST_REQUEST request{};
         return context->StreamListRequest(context, &request);
+    }
+    if (camera && camera->startPending.exchange(false)) {
+        qCInfo(KRDP) << "RDPECAM success response stream started";
+        // Demand may have ended while the asynchronous start reply was in
+        // flight. The session loop will send StopStreams before another pull.
+        if (camera->external && !camera->workerCapture->load()) return CHANNEL_RC_OK;
+    } else if (camera && camera->stopPending.exchange(false)) {
+        qCInfo(KRDP) << "RDPECAM stream stopped after worker demand ended";
+        return CHANNEL_RC_OK;
+    } else {
+        qCWarning(KRDP) << "RDPECAM unexpected success response";
+        return CHANNEL_RC_OK;
     }
     // RDPECAM is pull based: a started stream does not produce a frame until
     // the server asks for one, and each subsequent frame needs another pull.
@@ -389,7 +398,8 @@ bool startCameraIfRequested(RemoteCamera *camera)
 {
     if (!camera || !camera->endpointStarted.load()) return true;
     const bool demand = camera->external ? camera->workerCapture->load() : camera->endpoint->captureRequested();
-    if (camera->external && camera->streamStarted.load() && !demand && !camera->stopPending.load()) {
+    if (camera->external && camera->streamStarted.load() && !demand
+        && !camera->startPending.load() && !camera->stopPending.load()) {
         CAM_STOP_STREAMS_REQUEST stop{};
         camera->stopPending.store(true);
         const UINT status = camera->context->StopStreamsRequest(camera->context, &stop);
@@ -401,15 +411,17 @@ bool startCameraIfRequested(RemoteCamera *camera)
         camera->streamStarted.store(false);
         return true;
     }
-    if (camera->streamStarted.load() || camera->stopPending.load() || !demand) {
+    if (camera->streamStarted.load() || camera->startPending.load() || camera->stopPending.load() || !demand) {
         return true;
     }
     CAM_START_STREAMS_REQUEST request{};
     request.N_Infos = 1;
     request.StartStreamsInfo[0].StreamIndex = 0;
     request.StartStreamsInfo[0].MediaTypeDescription = camera->format;
+    camera->startPending.store(true);
     const UINT status = camera->context->StartStreamsRequest(camera->context, &request);
     if (status != CHANNEL_RC_OK) {
+        camera->startPending.store(false);
         qCWarning(KRDP) << "RDPECAM could not start camera on local demand" << status;
         return false;
     }
