@@ -41,6 +41,7 @@ public:
     void setVideoCodecHost(const VideoCodecHost &host) { m_videoHost = host; }
     void setVideoQualityPolicy(quint8 cap, bool adaptive) { m_qualityCap = cap; m_adaptiveQuality = adaptive; }
     void setAudioPriorityDefault(bool enabled) { m_audioPriorityDefault = enabled; }
+    void setUserSettingsReader(BrokerUserSettings::Reader reader) { m_userSettingsReader = std::move(reader); }
     void setCameraLoopbackDevice(const QString &device) { m_cameraLoopbackDevice = device; }
     /**
      * AUD-FIX8: whether a desktop's session unit (krdp-virtual-session@<id>.service) is still
@@ -91,6 +92,7 @@ private:
 
     Prepare m_prepare;
     VirtualSessionTransport::StockPolicy m_stockPolicy = VirtualStockClient::readUserPolicy;
+    BrokerUserSettings::Reader m_userSettingsReader;
     std::optional<VideoCodecHost> m_videoHost;
     quint8 m_qualityCap = 80;
     bool m_adaptiveQuality = false;

@@ -7,6 +7,7 @@
 #include "VirtualStockClient.h"
 #include "VideoCodecHost.h"
 #include "WorkerCodecBridge.h"
+#include "BrokerUserSettings.h"
 #include <RdpConnection.h>
 #include <memory>
 #include <QPointer>
@@ -47,6 +48,7 @@ public:
     void setVideoCodecHost(const VideoCodecHost &host);
     void setVideoQualityPolicy(quint8 cap, bool adaptive);
     void setAudioPriorityDefault(bool enabled) { m_audioPriorityDefault = enabled; }
+    void setUserSettingsReader(BrokerUserSettings::Reader reader) { m_userSettingsReader = std::move(reader); }
     void setCameraLoopbackDevice(const QString &device) { m_cameraLoopbackDevice = device; }
 
 private:
@@ -162,6 +164,10 @@ private:
     ConsoleWorkerSession m_session;
     std::optional<VideoCodecHost> m_videoHost;
     quint8 m_qualityCap = 80;
+    BrokerUserSettings::Reader m_userSettingsReader;
+    bool m_preferencesLoaded = false;
+    bool m_userStandardMedia = true;
+    void loadUserSettings(std::optional<quint32> uid);
     bool m_audioPriorityDefault = false;
     bool m_adaptiveQuality = false;
     QString m_cameraLoopbackDevice;

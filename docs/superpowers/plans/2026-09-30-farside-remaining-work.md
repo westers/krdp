@@ -37,6 +37,7 @@ Deployment evidence: [Sol/Hal rollout](../../../../rdp/evidence/2026-09-30-parit
 8. Run focused tests appropriate to the change, then its listed acceptance checks. Preserve logs, package/commit hashes, environment and observed limitations under `~/dev/rdp/evidence/<date>-<task>/`. A build or a mock UI alone does not satisfy a live behavior requirement.
 9. Mark each task `PLANNED`, `IN PROGRESS`, `PARTIAL`, or `DONE <date>` in this plan's execution ledger. `PARTIAL` must identify the missing gate, dependency or hardware. An unavailable test environment does not count as a pass.
 10. Record completed work in the handoff Log and relevant `research.md` entry. Commit only intended files. Push server changes to `github`, client changes to `origin`; export KPipeWire patches without pushing that repository. Follow the existing client version/tag/package procedure for client releases.
+11. Steve's execution scope is only T01–T28. Record newly discovered bugs outside this scope in the ledger's `deferred-issues.md` for his later review; do not fix them in this goal. If a task requires his feedback, name the specific decision or acceptance evidence needed and continue independent tasks.
 
 ## Order and dependency register
 

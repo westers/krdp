@@ -851,6 +851,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
                 evictClient(id, u"this account may not use the physical console now: an unlocked desktop belongs to its own user"_s);
                 return;
             }
+            loadUserSettings(**self);
             m_control.admit(id);
             if (const auto shape = m_endpoint.cursorShape()) CursorTracker::apply(*connection->cursor(), *shape);
             syncControlState();
@@ -883,6 +884,28 @@ void ConsoleHostController::addClient(RdpConnection *connection)
         }
     }));
     m_clients.push_back(std::move(client));
+}
+
+void ConsoleHostController::loadUserSettings(Client &client)
+{
+    if (client.preferencesLoaded || !client.connection || !m_userSettingsReader) return;
+    const auto uid = m_uidOf(client.connection);
+    if (!uid || !*uid) return;
+    client.preferencesLoaded = true;
+    const auto result = m_userSettingsReader(*uid);
+    if (!result.error.isEmpty()) {
+        qWarning() << "Console user preferences rejected for uid" << *uid << result.error;
+        return;
+    }
+    client.preferences = result.preferences;
+    auto *stream = client.connection->videoStream();
+    client.videoQuality = client.preferences.quality.value_or(m_qualityCap);
+    stream->setQualityCap(client.videoQuality);
+    stream->setAdaptiveQuality(client.preferences.adaptiveQuality.value_or(m_adaptiveQuality));
+    if (m_videoHost) {
+        stream->setEncoderPolicy(m_videoHost->probe.encoders, client.preferences.softwareEncoding.value_or(m_videoHost->mode));
+        stream->setAv1TilesSetting(client.preferences.av1Tiles.value_or(m_videoHost->av1Tiles));
+    }
 }
 
 void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &incoming)
@@ -1473,7 +1496,7 @@ void ConsoleHostController::applyStandardMedia(ConsoleControl::Id id)
     if (found == m_clients.end()) return;
     auto &client = **found;
     const QPointer<RdpConnection> connection = client.connection;
-    if (!connection || client.deviceRecordSeen || client.spokeKrdpctl) return;
+    if (!connection || client.deviceRecordSeen || client.spokeKrdpctl || !client.preferences.standardClientMedia.value_or(true)) return;
     // Only the controlling client: a viewer never gets a microphone, and a
     // stock viewer cannot ask for playback either (KRDPCTL clients can).
     if (!m_control.admitted(id) || !m_control.ownsControl(id)) return;
@@ -1585,6 +1608,7 @@ void ConsoleHostController::replyTo(RdpConnection *connection, const QJsonObject
 void ConsoleHostController::sendCapabilities(Client &client)
 {
     if (client.capabilitiesSent || !client.connection || !client.connection->isAuthenticated() || !client.connection->hasControlChannel()) return;
+    loadUserSettings(client);
     client.capabilitiesSent = true;
     LayoutControl::ChannelCapabilities capabilities;
     capabilities.host = u"console"_s;
@@ -1593,7 +1617,7 @@ void ConsoleHostController::sendCapabilities(Client &client)
     capabilities.topologyPreview = m_experimentalPhysicalTopology || m_experimentalConsoleVirtual;
     capabilities.topologyApply = capabilities.topologyPreview;
     capabilities.devices = ConsoleDeviceCapabilities;
-    if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, m_videoHost->mode);
+    if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, client.preferences.softwareEncoding.value_or(m_videoHost->mode));
     capabilities.stats = LayoutControl::StatsCapabilities{};
     client.connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
@@ -1656,11 +1680,13 @@ void ConsoleHostController::syncControlState()
         for (const auto &client : m_clients) {
             // A new controller must explicitly reapply its live preference;
             // no previous ownership period may carry a latent shared policy.
-            client->videoQuality = m_qualityCap;
+            client->videoQuality = client->preferences.quality.value_or(m_qualityCap);
             client->connection->setAudioPriority(false);
-            client->connection->videoStream()->setQualityCap(m_qualityCap);
+            client->connection->videoStream()->setQualityCap(client->videoQuality);
+            client->connection->videoStream()->setAdaptiveQuality(client->preferences.adaptiveQuality.value_or(m_adaptiveQuality));
             client->connection->clearAudioPriorityOverride();
-            client->connection->setAudioPriorityDefault(m_audioPriorityDefault && m_control.ownsControl(client->id));
+            client->connection->setAudioPriorityDefault(client->preferences.preferAudioQuality.value_or(m_audioPriorityDefault)
+                && m_control.ownsControl(client->id));
         }
         // AUD-FIX7: the new controller's codec bridge steers the worker under the new generation.
         for (const auto &client : m_clients) {
@@ -1703,7 +1729,7 @@ void ConsoleHostController::setAudioPriorityDefault(bool enabled)
 {
     m_audioPriorityDefault = enabled;
     for (const auto &client : m_clients) {
-        client->connection->setAudioPriorityDefault(enabled && m_control.ownsControl(client->id));
+        client->connection->setAudioPriorityDefault(client->preferences.preferAudioQuality.value_or(enabled) && m_control.ownsControl(client->id));
     }
 }
 

@@ -631,6 +631,7 @@ void VirtualSessionHostController::addClient(RdpConnection *connection)
     if (m_videoHost) transport->setVideoCodecHost(*m_videoHost);
     transport->setVideoQualityPolicy(m_qualityCap, m_adaptiveQuality);
     transport->setAudioPriorityDefault(m_audioPriorityDefault);
+    transport->setUserSettingsReader(m_userSettingsReader);
     transport->setCameraLoopbackDevice(m_cameraLoopbackDevice);
     m_clients.emplace(id, std::move(transport));
     connect(connection, &RdpConnection::stateChanged, this, [this, id](RdpConnection::State state) {

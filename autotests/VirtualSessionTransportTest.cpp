@@ -93,6 +93,46 @@ class VirtualSessionTransportTest : public QObject
         return records;
     }
 private Q_SLOTS:
+    void perUserDefaultsApplyOnceAndRejectInvalidTransactions()
+    {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &) {
+            int reads = 0;
+            quint32 seenUid = 0;
+            t.setVideoCodecHost({});
+            t.setUserSettingsReader([&](quint32 uid) {
+                ++reads;
+                seenUid = uid;
+                return BrokerUserSettings::parse("[General]\nQuality=43\nAdaptiveQuality=true\nPreferAudioQuality=true\n"
+                    "StandardClientMedia=false\nSoftwareEncoding=prefer\nAv1Tiles=8\nVirtualStockClientPolicy=refuse\n");
+            });
+            t.loadUserSettings(std::nullopt);
+            QCOMPARE(reads, 0);
+            t.loadUserSettings(1000);
+            QCOMPARE(reads, 1);
+            QCOMPARE(seenUid, quint32(1000));
+            QCOMPARE(t.m_qualityCap, quint8(43));
+            QVERIFY(t.m_adaptiveQuality);
+            QVERIFY(t.m_audioPriorityDefault);
+            QVERIFY(!t.m_userStandardMedia);
+            QCOMPARE(t.m_connection->videoStream()->av1TilesSetting(), 8);
+            QCOMPARE(t.m_connection->videoStream()->softwareEncoding(), CodecPolicy::SoftwareEncoding::Prefer);
+            QCOMPARE(t.m_stockPolicy(1000), VirtualStockClient::Policy::Refuse);
+            t.loadUserSettings(1001);
+            QCOMPARE(reads, 1);
+            t.revoke();
+            QCOMPARE(t.m_qualityCap, quint8(43));
+            QVERIFY(t.m_audioPriorityDefault); // Default retained; override/consent are cleared by revoke.
+        });
+        microphoneFixture([&](auto &t, auto &, auto &, auto &) {
+            t.setUserSettingsReader([](quint32) {
+                return BrokerUserSettings::parse("[General]\nQuality=43\nPreferAudioQuality=true\nAv1Tiles=3\n");
+            });
+            t.loadUserSettings(1000);
+            QCOMPARE(t.m_qualityCap, quint8(80));
+            QVERIFY(!t.m_audioPriorityDefault);
+        });
+    }
+
     void configuredVideoQualityFlowsToVirtualWorker()
     {
         microphoneFixture([&](auto &transport, auto &, auto &, auto &worker) {

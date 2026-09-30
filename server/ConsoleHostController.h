@@ -28,6 +28,7 @@
 #include "CodecRequest.h"
 #include "VideoCodecHost.h"
 #include "WorkerCodecBridge.h"
+#include "BrokerUserSettings.h"
 
 namespace KRdp
 {
@@ -68,6 +69,7 @@ public:
     ~ConsoleHostController() override;
     void start();
     void setAudioPriorityDefault(bool enabled);
+    void setUserSettingsReader(BrokerUserSettings::Reader reader) { m_userSettingsReader = std::move(reader); }
     void setVideoQualityPolicy(quint8 cap, bool adaptive) { m_qualityCap = cap; m_adaptiveQuality = adaptive; }
     /**
      * AUD-FIX7: offer the codec policy (`capabilities.video`, `codec`) with \a host's encoders and
@@ -101,6 +103,8 @@ private:
         QList<QJsonObject> pendingDevices;
         bool wantsLayout = false;
         quint8 videoQuality = 80;
+        BrokerUserSettings::Preferences preferences;
+        bool preferencesLoaded = false;
         ConsoleControl::Media media;
         bool externalMicrophone = false;
         bool externalCamera = false;
@@ -132,6 +136,7 @@ private:
     void setWorkerActive(bool active);
     void removeClient(RdpConnection *connection, ConsoleControl::Id id = 0);
     void addClient(RdpConnection *connection);
+    void loadUserSettings(Client &client);
     void updateMedia();
     void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &incoming);
     /** KRDPCTL v2: a reply echoing the request being handled, or the `id` it answers. */
@@ -202,6 +207,7 @@ private:
     std::vector<std::unique_ptr<Client>> m_clients;
     bool m_inputEnabled = false;
     bool m_audioPriorityDefault = false;
+    BrokerUserSettings::Reader m_userSettingsReader;
     std::optional<VideoCodecHost> m_videoHost;
     quint8 m_qualityCap = 80;
     bool m_adaptiveQuality = false;

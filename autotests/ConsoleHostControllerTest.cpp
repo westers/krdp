@@ -19,6 +19,53 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void perUserDefaultsSurviveControlTransferWithoutCrossingAccounts()
+    {
+        Server server;
+        RdpConnection first(&server, -1), second(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        int reads = 0;
+        std::optional<quint32> firstUid;
+        host.setUidResolver([&](RdpConnection *connection) {
+            return connection == &first ? firstUid : std::optional<quint32>(1001);
+        });
+        host.setUserSettingsReader([&](quint32 uid) {
+            ++reads;
+            return BrokerUserSettings::parse(uid == 1000
+                ? "[General]\nQuality=43\nAdaptiveQuality=false\nPreferAudioQuality=true\nAv1Tiles=8\nSoftwareEncoding=prefer\n"
+                : "[General]\nQuality=64\nPreferAudioQuality=false\nAv1Tiles=2\nSoftwareEncoding=never\n");
+        });
+        host.setVideoCodecHost({});
+        host.addClient(&first);
+        host.addClient(&second);
+        auto &a = *host.m_clients[0];
+        auto &b = *host.m_clients[1];
+        host.loadUserSettings(a);
+        QCOMPARE(reads, 0); // No authenticated identity: no user-file read.
+        firstUid = 1000;
+        host.loadUserSettings(a);
+        host.loadUserSettings(b);
+        QCOMPARE(reads, 2);
+        QCOMPARE(first.videoStream()->av1TilesSetting(), 8);
+        QCOMPARE(second.videoStream()->av1TilesSetting(), 2);
+        QCOMPARE(first.videoStream()->softwareEncoding(), CodecPolicy::SoftwareEncoding::Prefer);
+        QCOMPARE(second.videoStream()->softwareEncoding(), CodecPolicy::SoftwareEncoding::Never);
+        host.m_control.admit(a.id);
+        host.m_control.admit(b.id);
+        host.syncControlState();
+        a.videoQuality = 10; // A reduced/live setting from the first ownership period.
+        QVERIFY(host.m_control.release(a.id));
+        host.syncControlState();
+        QVERIFY(host.m_control.acquire(b.id));
+        host.syncControlState();
+        QCOMPARE(a.videoQuality, quint8(43));
+        QCOMPARE(b.videoQuality, quint8(64));
+        QCOMPARE(a.preferences.preferAudioQuality, std::optional(true));
+        QCOMPARE(b.preferences.preferAudioQuality, std::optional(false));
+        host.loadUserSettings(a);
+        QCOMPARE(reads, 2); // Snapshot once per connection; no read of another owner.
+    }
+
     void configuredVideoQualityIsUsedForNewConsoleOwner()
     {
         Server server;

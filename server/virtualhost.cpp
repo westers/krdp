@@ -99,6 +99,9 @@ int main(int argc, char **argv)
     host.setCameraLoopbackDevice(server.cameraLoopbackDevice());
     host.setVideoQualityPolicy(quint8(quality), adaptiveValue == QLatin1String("true"));
     host.setAudioPriorityDefault(audioPriorityValue == QLatin1String("true"));
+    host.setUserSettingsReader(KRdp::BrokerUserSettings::readUser);
+    // User preferences (including this field) are one validated transaction.
+    host.setStockClientPolicy([](quint32) { return KRdp::VirtualStockClient::Policy::AttachOrCreate; });
     // AUD-FIX7: what `capabilities.video` offers and each connection's codec policy starts from;
     // a desktop's worker probes its own encoders and replaces this estimate once it reports.
     KRdp::EncoderSupport::applyProcessOverrides();

@@ -239,6 +239,31 @@ void VirtualSessionTransport::setVideoQualityPolicy(quint8 cap, bool adaptive)
     }
 }
 
+void VirtualSessionTransport::loadUserSettings(std::optional<quint32> uid)
+{
+    if (m_preferencesLoaded || !uid || !*uid || !m_connection || !m_userSettingsReader) return;
+    m_preferencesLoaded = true;
+    const auto result = m_userSettingsReader(*uid);
+    if (!result.error.isEmpty()) {
+        qWarning() << "Virtual user preferences rejected for uid" << *uid << result.error;
+        return;
+    }
+    const auto &p = result.preferences;
+    setVideoQualityPolicy(p.quality.value_or(m_qualityCap), p.adaptiveQuality.value_or(m_adaptiveQuality));
+    m_audioPriorityDefault = p.preferAudioQuality.value_or(m_audioPriorityDefault);
+    m_userStandardMedia = p.standardClientMedia.value_or(true);
+    if (m_videoHost) {
+        auto host = *m_videoHost;
+        host.mode = p.softwareEncoding.value_or(host.mode);
+        host.av1Tiles = p.av1Tiles.value_or(host.av1Tiles);
+        setVideoCodecHost(host);
+    }
+    if (p.virtualStockClientPolicy) {
+        const auto policy = *VirtualStockClient::parsePolicy(*p.virtualStockClientPolicy);
+        m_stockPolicy = [policy](quint32) { return policy; };
+    }
+}
+
 bool VirtualSessionTransport::authorized() const
 {
     return authorized(m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
@@ -446,7 +471,7 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
 
 void VirtualSessionTransport::applyStandardMedia(std::optional<quint32> uid)
 {
-    if (m_deviceRecordSeen || m_spokeKrdpctl || !m_connection || !authorized(uid) || m_mediaDispatch) return;
+    if (m_deviceRecordSeen || m_spokeKrdpctl || !m_connection || !authorized(uid) || m_mediaDispatch || !m_userStandardMedia) return;
     const auto channels = m_standardChannels ? m_standardChannels(m_connection) : m_connection->standardMediaChannels();
     if (!channels || !m_connection || !authorized(uid)) return;
     qInfo() << "StandardClientMedia: virtual client" << m_client << "playback" << channels->playback << "microphone" << channels->dynamic;
@@ -793,6 +818,7 @@ void VirtualSessionTransport::noteKrdpctlClient()
 
 void VirtualSessionTransport::startStockGate(bool controlChannel, std::optional<quint32> uid)
 {
+    loadUserSettings(uid);
     if (m_stockStarted) return;
     m_stockStarted = true;
     m_stockUid = uid;
@@ -984,6 +1010,7 @@ void VirtualSessionTransport::pushRecord(const QJsonObject &record)
 void VirtualSessionTransport::sendCapabilities()
 {
     if (m_capabilitiesSent || !m_connection || !m_connection->isAuthenticated() || !m_connection->hasControlChannel()) return;
+    loadUserSettings(m_connection->authenticatedPamUid());
     m_capabilitiesSent = true;
     LayoutControl::ChannelCapabilities capabilities;
     capabilities.host = u"virtual"_s;

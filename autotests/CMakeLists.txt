@@ -852,3 +852,14 @@ add_executable(FarsideMigrationTest FarsideMigrationTest.cpp)
 target_include_directories(FarsideMigrationTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(FarsideMigrationTest PRIVATE Qt6::Test KRdpLegacyMigration)
 add_test(NAME FarsideMigrationTest COMMAND FarsideMigrationTest)
+
+# Shared broker preferences and the bounded, per-uid configuration reader.
+add_executable(BrokerUserSettingsTest BrokerUserSettingsTest.cpp)
+target_link_libraries(BrokerUserSettingsTest PRIVATE Qt6::Test KRdpBrokerUserSettings)
+add_test(NAME BrokerUserSettingsTest COMMAND BrokerUserSettingsTest)
+foreach(target VirtualSessionTransportTest VirtualStockClientTest VirtualSessionHostControllerTest
+        ConsoleHostControllerTest ConsoleHostLifecycleTest ConsoleRefusalLoopbackTest KrdpctlV2LoopbackTest)
+    if(TARGET ${target})
+        target_link_libraries(${target} PRIVATE KRdpBrokerUserSettings)
+    endif()
+endforeach()

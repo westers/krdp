@@ -111,6 +111,7 @@ int main(int argc, char **argv)
                      &host, &KRdp::ConsoleHostController::workerExited, Qt::QueuedConnection);
     QObject::connect(&seat, &KRdp::ConsoleSeatWatcher::sessionsChanged, &host, &KRdp::ConsoleHostController::setSeatSessions);
     host.setAudioPriorityDefault(audioPriorityValue == QLatin1String("true"));
+    host.setUserSettingsReader(KRdp::BrokerUserSettings::readUser);
     host.setVideoQualityPolicy(quint8(quality), adaptiveValue == QLatin1String("true"));
     // AUD-FIX7: what `capabilities.video` offers and the controlling connection's codec policy
     // starts from; the worker probes its own encoders and replaces this once it reports.

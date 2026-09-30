@@ -3,24 +3,17 @@
 #include "VirtualStockClient.h"
 #include "VirtualInitialLayout.h"
 #include "VirtualResize.h"
+#include "UserConfiguration.h"
 
 #include <QFile>
 #include <freerdp/error.h>
 
 #include <algorithm>
-#include <fcntl.h>
-#include <pwd.h>
-#include <sys/fsuid.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <vector>
 
 namespace KRdp::VirtualStockClient
 {
 namespace
 {
-constexpr qint64 MaxConfigBytes = 256 * 1024;
-
 int evenWithin(int value, int minimum, int maximum)
 {
     value = std::clamp(value, minimum, maximum);
@@ -63,44 +56,14 @@ Policy policyFromConfig(const QByteArray &contents)
 
 Policy readPolicyFile(const QString &path, quint32 uid)
 {
-    const int fd = ::open(QFile::encodeName(path).constData(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
-    if (fd < 0) return Policy::AttachOrCreate;
-    struct stat info{};
-    QByteArray contents;
-    if (fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_uid == uid && info.st_size >= 0 && info.st_size <= MaxConfigBytes) {
-        contents.resize(qsizetype(info.st_size));
-        qsizetype total = 0;
-        while (total < contents.size()) {
-            const ssize_t got = ::read(fd, contents.data() + total, size_t(contents.size() - total));
-            if (got <= 0) break;
-            total += got;
-        }
-        contents.truncate(total);
-    }
-    ::close(fd);
-    return policyFromConfig(contents);
+    const auto data = UserConfiguration::readFile(path, uid);
+    return data ? policyFromConfig(*data) : Policy::AttachOrCreate;
 }
 
 Policy readUserPolicy(quint32 uid)
 {
-    if (!uid) return Policy::AttachOrCreate;
-    passwd account{};
-    passwd *resolved = nullptr;
-    std::vector<char> buffer(4096);
-    int status = 0;
-    while ((status = getpwuid_r(uid, &account, buffer.data(), buffer.size(), &resolved)) == ERANGE && buffer.size() < 1048576) {
-        buffer.resize(buffer.size() * 2);
-    }
-    if (status || !resolved || !account.pw_dir || account.pw_dir[0] != '/') return Policy::AttachOrCreate;
-    const QString path = QFile::decodeName(account.pw_dir) + QStringLiteral("/.config/farsideserverrc");
-    // Open with the user's own file-system identity (Linux, this thread only):
-    // the broker never reads, through this path, a file the user cannot.
-    const auto previousUid = setfsuid(uid);
-    const auto previousGid = setfsgid(account.pw_gid);
-    const Policy policy = readPolicyFile(path, uid);
-    setfsgid(previousGid);
-    setfsuid(previousUid);
-    return policy;
+    const auto data = UserConfiguration::readUser(uid);
+    return data ? policyFromConfig(*data) : Policy::AttachOrCreate;
 }
 
 quint32 errorInfo(Refusal refusal)
