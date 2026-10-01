@@ -24,6 +24,7 @@
 #include "ChromaPolicy.h"
 #include "ChromaTimingReport.h"
 #include "MonitorCapturePolicy.h"
+#include "ConsoleVirtualOutputPolicy.h"
 #include "VideoFrame.h"
 
 namespace KRdp::ConsoleWorkerWire
@@ -55,7 +56,8 @@ namespace KRdp::ConsoleWorkerWire
 // capability in EncoderReport, distinct from encoder backend.
 // 9 (T05): complete per-output AVC444 costs, bound to the control generation.
 // 10 (T06): Console monitor capture selection in current-owner EncoderConfig.
-constexpr quint16 ProtocolVersion = 10;
+// 11 (T06): generation-bound Console temporary-output policy and client display tuple.
+constexpr quint16 ProtocolVersion = 11;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -157,6 +159,7 @@ struct EncoderConfig {
     ChromaPolicy chroma;
     bool chromaEnabled = true;
     MonitorCapturePolicy capture;
+    ConsoleVirtualOutputPolicy consoleVirtual;
     bool operator==(const EncoderConfig &) const = default;
 };
 
@@ -1463,7 +1466,12 @@ inline QByteArray frame(const EncoderConfig &config)
     stream << settings.hardware << quint8(settings.preset) << settings.targetKbps << qint32(settings.maxFrameRate) << config.frameRate << config.statsWanted
            << quint8(std::clamp(settings.av1Tiles, 0, 64))
            << qint32(config.chroma.motionGapMs) << qint32(config.chroma.restMs) << qint32(config.chroma.maxGapMs) << config.chromaEnabled
-           << quint8(config.capture.mode) << qint32(config.capture.index);
+           << quint8(config.capture.mode) << qint32(config.capture.index)
+           << quint8(config.consoleVirtual.enabled) << quint8(config.consoleVirtual.policy) << quint8(config.consoleVirtual.layout)
+           << config.consoleVirtual.fallback << config.consoleVirtual.client.desktopSize << quint32(config.consoleVirtual.client.monitors.size());
+    for (const auto &monitor : config.consoleVirtual.client.monitors)
+        stream << qint32(monitor.geometry.x()) << qint32(monitor.geometry.y())
+               << qint32(monitor.geometry.width()) << qint32(monitor.geometry.height()) << quint8(monitor.primary);
     return frame(Kind::EncoderConfig, payload);
 }
 
@@ -1487,10 +1495,31 @@ inline std::optional<EncoderConfig> encoderConfig(const Record &record)
         >> av1Tiles >> motionGap >> rest >> maxGap >> config.chromaEnabled >> captureMode >> monitorIndex;
     config.chroma = {motionGap, rest, maxGap};
     config.capture = {MonitorCapturePolicy::Mode(captureMode), monitorIndex};
+    quint8 virtualEnabled = 0, virtualPolicy = 0, virtualLayout = 0;
+    quint32 monitorCount = 0;
+    stream >> virtualEnabled >> virtualPolicy >> virtualLayout >> config.consoleVirtual.fallback
+        >> config.consoleVirtual.client.desktopSize >> monitorCount;
+    if (stream.status() != QDataStream::Ok || virtualEnabled > 1
+        || virtualPolicy > quint8(ConsoleVirtualOutputPolicy::Policy::Extend)
+        || virtualLayout > quint8(ConsoleVirtualOutputPolicy::Layout::Physical)
+        || monitorCount > ClientDisplay::MaxMonitors) return {};
+    config.consoleVirtual.enabled = virtualEnabled;
+    config.consoleVirtual.policy = ConsoleVirtualOutputPolicy::Policy(virtualPolicy);
+    config.consoleVirtual.layout = ConsoleVirtualOutputPolicy::Layout(virtualLayout);
+    for (quint32 i = 0; i < monitorCount; ++i) {
+        qint32 x = 0, y = 0, width = 0, height = 0;
+        quint8 primary = 0;
+        stream >> x >> y >> width >> height >> primary;
+        if (stream.status() != QDataStream::Ok || x < -ClientDisplay::MaxCoordinate || x > ClientDisplay::MaxCoordinate
+            || y < -ClientDisplay::MaxCoordinate || y > ClientDisplay::MaxCoordinate || primary > 1
+            || !ClientDisplay::usable(QSize(width, height))) return {};
+        config.consoleVirtual.client.monitors.append({QRect(x, y, width, height), bool(primary)});
+    }
     const auto decoded = codecFromWire(codec);
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !config.generation || !decoded || preset > quint8(CodecPolicy::Preset::Fastest)
         || maxFrameRate < 0 || maxFrameRate > 240 || config.frameRate < 1 || config.frameRate > 240 || settings.targetKbps > 1000000 || av1Tiles > 64
-        || !config.chroma.isValid() || !config.capture.isValid()) {
+        || !config.chroma.isValid() || !config.capture.isValid() || !config.consoleVirtual.isValid()
+        || (config.consoleVirtual.enabled && config.capture != MonitorCapturePolicy{})) {
         return std::nullopt;
     }
     config.codec = *decoded;

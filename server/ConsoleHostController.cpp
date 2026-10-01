@@ -858,7 +858,10 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     // Post-authentication (AUD-S1): KRDPCTL clients hear `capabilities` first; others nothing.
     client->connections.append(connect(connection, &RdpConnection::clientDisplayInfoReceived, this, [this, id] {
         for (const auto &client : m_clients) {
-            if (client->id == id) sendCapabilities(*client);
+            if (client->id == id) {
+                updateClientDisplayPolicy(*client);
+                sendCapabilities(*client);
+            }
         }
     }, Qt::QueuedConnection));
     client->connections.append(connect(connection, &RdpConnection::stateChanged, this, [this, connection, id](RdpConnection::State state) {
@@ -918,6 +921,7 @@ void ConsoleHostController::loadUserSettings(Client &client)
         return;
     }
     client.preferences = result.preferences;
+    updateClientDisplayPolicy(client);
     client.codec->setChromaPolicy(client.preferences.chroma.value_or(ChromaPolicy{}));
     if (const auto capture = MonitorCapturePolicy::parse(client.preferences.monitorMode.value_or(u"multi"_s),
                                                         client.preferences.monitorIndex.value_or(0)))
@@ -930,6 +934,21 @@ void ConsoleHostController::loadUserSettings(Client &client)
         stream->setEncoderPolicy(m_videoHost->probe.encoders, client.preferences.softwareEncoding.value_or(m_videoHost->mode));
         stream->setAv1TilesSetting(client.preferences.av1Tiles.value_or(m_videoHost->av1Tiles));
     }
+}
+
+void ConsoleHostController::updateClientDisplayPolicy(Client &client)
+{
+    // RDP display information can arrive before authentication. Only this
+    // connection's admitted identity/preferences may supply a policy; the
+    // bridge transmits it only while bound to the current control generation.
+    if (!client.preferencesLoaded || !client.connection || !client.codec) return;
+    const auto uid = m_uidOf(client.connection);
+    if (!uid || !*uid || (client.uid && client.uid != uid)) return;
+    const auto &p = client.preferences;
+    const auto policy = ConsoleVirtualOutputPolicy::parse(p.monitorMode == std::optional(u"virtual"_s),
+        p.virtualMonitorPolicy.value_or(u"replace"_s), p.virtualMonitorLayout.value_or(u"client"_s),
+        p.virtualMonitorFallbackSize.value_or(QSize(1920, 1080)), client.connection->clientDisplayInfo());
+    if (policy) client.codec->setConsoleVirtualPolicy(*policy);
 }
 
 void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &incoming)

@@ -19,6 +19,52 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void consoleVirtualPolicyIsIdentityAndControllerScoped()
+    {
+        Server server;
+        RdpConnection first(&server, -1), second(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        std::optional<quint32> firstUid;
+        host.setUidResolver([&](RdpConnection *connection) {
+            return connection == &first ? firstUid : std::optional<quint32>(1001);
+        });
+        int reads = 0;
+        host.setUserSettingsReader([&](quint32 uid) {
+            ++reads;
+            return BrokerUserSettings::parse(uid == 1000
+                ? "[General]\nMonitorMode=virtual\nVirtualMonitorPolicy=extend\nVirtualMonitorLayout=physical\nVirtualMonitorFallbackSize=1600x900\n"
+                : "[General]\nMonitorMode=virtual\nVirtualMonitorPolicy=replace\nVirtualMonitorLayout=single\nVirtualMonitorFallbackSize=1280x720\n");
+        });
+        host.addClient(&first); host.addClient(&second);
+        auto &a = *host.m_clients[0]; auto &b = *host.m_clients[1];
+        host.updateClientDisplayPolicy(a);
+        QVERIFY(!a.codec->consoleVirtualPolicy().enabled); QCOMPARE(reads, 0);
+        firstUid = 1000; a.uid = firstUid; b.uid = 1001;
+        host.loadUserSettings(a); host.loadUserSettings(b); QCOMPARE(reads, 2);
+        QVERIFY(a.codec->consoleVirtualPolicy().enabled);
+        QCOMPARE(a.codec->consoleVirtualPolicy().policy, ConsoleVirtualOutputPolicy::Policy::Extend);
+        QCOMPARE(a.codec->consoleVirtualPolicy().layout, ConsoleVirtualOutputPolicy::Layout::Physical);
+        QCOMPARE(a.codec->consoleVirtualPolicy().client.desktopSize, QSize(1600, 900));
+        QCOMPARE(b.codec->consoleVirtualPolicy().client.desktopSize, QSize(1280, 720));
+        host.m_control.admit(a.id); host.m_control.admit(b.id); host.syncControlState();
+        QVERIFY(a.codec->bound()); QVERIFY(!b.codec->bound());
+        QCOMPARE(a.codec->config()->consoleVirtual, a.codec->consoleVirtualPolicy());
+        const auto formerGeneration = a.codec->config()->generation;
+        const auto saved = a.codec->consoleVirtualPolicy();
+        firstUid = 1002; a.preferences.virtualMonitorFallbackSize = QSize(1920, 1080);
+        host.updateClientDisplayPolicy(a); QCOMPARE(a.codec->consoleVirtualPolicy(), saved); // Cannot read/apply another identity.
+        firstUid = 1000;
+        a.preferences.virtualMonitorFallbackSize = QSize(0, 0);
+        host.updateClientDisplayPolicy(a); QCOMPARE(a.codec->consoleVirtualPolicy(), saved); // Invalid changes are atomic.
+        QVERIFY(host.m_control.release(a.id)); host.syncControlState();
+        QVERIFY(host.m_control.acquire(b.id)); host.syncControlState();
+        QVERIFY(!a.codec->bound()); QVERIFY(b.codec->bound());
+        QCOMPARE(b.codec->config()->consoleVirtual, b.codec->consoleVirtualPolicy());
+        QVERIFY(b.codec->config()->generation > formerGeneration);
+        QCOMPARE(b.codec->config()->consoleVirtual.layout, ConsoleVirtualOutputPolicy::Layout::Single);
+        QCOMPARE(reads, 2);
+    }
+
     void savedAvcPreferenceAppliesOnlyToTheSoleAdmittedController()
     {
         Server server;

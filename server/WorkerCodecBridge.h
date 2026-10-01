@@ -58,6 +58,8 @@ public:
     ChromaPolicy chromaPolicy() const { return m_chromaPolicy; }
     bool setCapturePolicy(const MonitorCapturePolicy &policy);
     MonitorCapturePolicy capturePolicy() const { return m_capturePolicy; }
+    bool setConsoleVirtualPolicy(const ConsoleVirtualOutputPolicy &policy);
+    ConsoleVirtualOutputPolicy consoleVirtualPolicy() const { return m_consoleVirtualPolicy; }
 
 private:
     void send(bool force);
@@ -69,6 +71,7 @@ private:
     quint64 m_generation = 0;
     ChromaPolicy m_chromaPolicy;
     MonitorCapturePolicy m_capturePolicy;
+    ConsoleVirtualOutputPolicy m_consoleVirtualPolicy;
     std::optional<ConsoleWorkerWire::EncoderConfig> m_sent;
     QList<QMetaObject::Connection> m_endpointConnections;
     std::array<QElapsedTimer, 16> m_costLogs;

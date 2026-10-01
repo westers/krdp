@@ -39,6 +39,7 @@ private Q_SLOTS:
     void encoderStatsRoundTripAndAreBounded();
     void chromaCostsRoundTripAndAreBounded();
     void captureSelectionAndWireBounds();
+    void consoleVirtualPolicyTupleIsBounded();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
 };
@@ -552,7 +553,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(10));
+    QCOMPARE(ProtocolVersion, quint16(11));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -593,9 +594,15 @@ void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
     QVERIFY(rejected(frame(EncoderConfig{1, VideoCodec::Hevc, CodecPolicy::EncoderSettings{false, CodecPolicy::Preset(9), 0, 0}, 30})));
     {
         // AV1-Q: a tile count above AV1's 64 is refused.
-        QByteArray tooManyTiles = frame(EncoderConfig{1, VideoCodec::Av1, CodecPolicy::EncoderSettings{true, CodecPolicy::Preset::Efficient, 0, 0, 16}, 30});
-        tooManyTiles[tooManyTiles.size() - 19] = char(65);
-        QVERIFY(rejected(tooManyTiles));
+        Deframer tiles;
+        tiles.feed(frame(EncoderConfig{1, VideoCodec::Av1, CodecPolicy::EncoderSettings{true, CodecPolicy::Preset::Efficient, 0, 0, 16}, 30}));
+        auto tooManyTiles = tiles.next(); QVERIFY(tooManyTiles);
+        QVERIFY(encoderConfig(*tooManyTiles));
+        // Offset from the start of EncoderConfig, independent of appended
+        // policy fields. Assert the intended field before corrupting it.
+        QCOMPARE(quint8(tooManyTiles->payload[25]), quint8(16));
+        tooManyTiles->payload[25] = char(65);
+        QVERIFY(!encoderConfig(*tooManyTiles));
     }
     QVERIFY(rejected(frame(EncoderLoad{-1})));
     auto badCodec = frame(report);
@@ -644,6 +651,40 @@ void ConsoleWorkerWireTest::captureSelectionAndWireBounds()
     QVERIFY(!Policy{}.select(2, -1));
     QCOMPARE(Policy::parse(QStringLiteral("primary")), std::optional(Policy{Policy::Mode::Primary, 0}));
     QVERIFY(!Policy::parse(QStringLiteral("virtual"))); // Separate output lease lifecycle remains T06.
+}
+
+void ConsoleWorkerWireTest::consoleVirtualPolicyTupleIsBounded()
+{
+    EncoderConfig config; config.generation = 42;
+    config.consoleVirtual = *ConsoleVirtualOutputPolicy::parse(true, QStringLiteral("extend"), QStringLiteral("physical"),
+        QSize(1600, 900), {QSize(3200, 1080), {{QRect(0, 0, 1280, 720), false}, {QRect(1280, 0, 1920, 1080), true}}});
+    Deframer d; d.feed(frame(config));
+    const auto record = d.next(); QVERIFY(record);
+    QCOMPARE(encoderConfig(*record), std::optional(config));
+    const auto rejected = [](const Record &record) { return !encoderConfig(record); };
+    auto bad = *record; bad.payload.chop(1); QVERIFY(rejected(bad));
+    bad = *record; bad.payload.append('x'); QVERIFY(rejected(bad));
+    bad = *record; bad.payload[bad.payload.size() - 1] = char(2); QVERIFY(rejected(bad)); // Strict primary Boolean.
+    const auto policyOffset = record->payload.size() - (3 + 8 + 8 + 4 + 17 * 2);
+    for (int offset = 0; offset < 3; ++offset) {
+        bad = *record; bad.payload[policyOffset + offset] = char(255); QVERIFY(rejected(bad));
+    }
+    bad = *record; bad.payload[policyOffset + 3 + 8 + 8 + 3] = char(17); QVERIFY(rejected(bad)); // Bounded before allocation.
+    for (int field = 0; field < 7; ++field) {
+        auto invalid = config;
+        switch (field) {
+        case 0: invalid.consoleVirtual.fallback = QSize(1919, 1080); break;
+        case 1: invalid.consoleVirtual.client.monitors[1].primary = false; break;
+        case 2: invalid.consoleVirtual.client.monitors[1].geometry.moveTo(100, 0); break;
+        case 3: invalid.consoleVirtual.client.monitors[0].geometry.setWidth(4097); break;
+        case 4: invalid.consoleVirtual.client.desktopSize = QSize(0, 0); break;
+        case 5: invalid.consoleVirtual.client.monitors[1].geometry.moveTo(-32768, 0); break;
+        case 6: invalid.capture = {MonitorCapturePolicy::Mode::Specific, 1}; break;
+        }
+        d.feed(frame(invalid)); const auto invalidRecord = d.next(); QVERIFY(invalidRecord); QVERIFY(rejected(*invalidRecord));
+    }
+    config.consoleVirtual.enabled = false;
+    d.feed(frame(config)); QCOMPARE(encoderConfig(*d.next()), std::optional(config));
 }
 
 void ConsoleWorkerWireTest::chromaCostsRoundTripAndAreBounded()

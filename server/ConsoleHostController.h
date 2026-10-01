@@ -137,6 +137,7 @@ private:
     void removeClient(RdpConnection *connection, ConsoleControl::Id id = 0);
     void addClient(RdpConnection *connection);
     void loadUserSettings(Client &client);
+    void updateClientDisplayPolicy(Client &client);
     void updateMedia();
     void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &incoming);
     /** KRDPCTL v2: a reply echoing the request being handled, or the `id` it answers. */

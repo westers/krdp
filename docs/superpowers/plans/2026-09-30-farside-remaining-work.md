@@ -238,6 +238,20 @@ Client-created Console outputs/restore/lifecycle, mixed-scale client interaction
 full limits/persistence and T08/package gates remain. Evidence
 `~/dev/rdp/evidence/2026-09-30-t06-capture/SUMMARY.md`.
 
+**2026-09-30 temporary-output policy/planning checkpoint (PARTIAL, unshipped):**
+Paired wire11 carries the complete authenticated Console owner's replace/extend,
+client/single/physical, fallback and canonical RDP display tuple. Identity/control
+transfer, strict wire bounds and atomic invalid changes are covered. A pure
+creator plan checks fresh physical/complete inventory, stable-name collisions,
+foreign-output parking, output count/coordinate limits, per-surface sizes and
+fractional physical mirror geometry. Eight focused suites pass; the planner's
+final name/priority validation has a separate passing targeted rerun. Production
+targets build in the scratch tree. No live test/package/config/service change.
+The worker validates the tuple but does not yet create configured outputs; native
+creator/guard/journal/restore/takeover/login/failure lifecycle and the remaining
+T06/T03/T08 gates above remain. Pure geometry is not mixed-scale client acceptance.
+Evidence `~/dev/rdp/evidence/2026-09-30-t06-virtual-policy/SUMMARY.md`.
+
 ### T07 — Preserve display wake and inhibition
 
 **Instructions:** Integrate the existing `DisplayWakeGuard` semantics into the desktop workers or equivalent user-session mechanism, not a root broker's session bus. Honor the configured wake policy and acquire/release inhibition with streaming ownership. Keep display power management distinct from unlocking and from Virtual's intentional lock policy. Handle pending D-Bus replies and teardown without leaking inhibition.
