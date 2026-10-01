@@ -10,6 +10,7 @@
 #include "serviceinfo.h"
 #include "useraccounts.h"
 #include "usersmodel.h"
+#include "brokerauthenticationsettings.h"
 #include <KQuickManagedConfigModule>
 
 class QAbstractItemModel;
@@ -22,6 +23,8 @@ class KRDPServerConfig : public KQuickManagedConfigModule
 public:
     explicit KRDPServerConfig(QObject *parent, const KPluginMetaData &data);
     ~KRDPServerConfig() override;
+    Q_PROPERTY(BrokerAuthenticationSettings *brokerAuthentication READ brokerAuthentication CONSTANT)
+    BrokerAuthenticationSettings *brokerAuthentication() const { return m_brokerAuthentication; }
 
     Q_PROPERTY(SystemdService::Status serverStatus READ serverStatus NOTIFY serverStatusChanged)
     Q_PROPERTY(bool serverRunning READ isServerRunning NOTIFY serverStatusChanged)
@@ -150,6 +153,7 @@ Q_SIGNALS:
     void certificateInfoChanged();
 
 private:
+    BrokerAuthenticationSettings *m_brokerAuthentication = nullptr;
     void setServerStatus(SystemdService::Status status);
     void setErrorMessage(const QString &errorMessage);
     void setPortalPreauthorized(bool preauthorized);

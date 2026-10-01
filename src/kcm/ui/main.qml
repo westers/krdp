@@ -529,6 +529,11 @@ KCM.SimpleKCM {
             objectName: "pageButtons"
             Layout.fillWidth: true
             Layout.maximumWidth: Kirigami.Units.gridUnit * 30
+            QQC2.Button {
+                objectName: "brokerSignInButton"
+                text: i18nc("@action:button", "Console and Virtual Sign-In…")
+                onClicked: root.openPage("BrokerSignInPage")
+            }
             spacing: Kirigami.Units.smallSpacing
 
             QQC2.Button {

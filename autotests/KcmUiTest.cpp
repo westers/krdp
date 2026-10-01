@@ -175,7 +175,7 @@ private Q_SLOTS:
         rc.close();
 
         m_engine = std::make_shared<QQmlEngine>();
-        const KPluginMetaData metaData(QStringLiteral(KCM_PLUGIN_PATH), KPluginMetaData::AllowEmptyMetaData);
+        const KPluginMetaData metaData(qEnvironmentVariable("FARSIDE_KCM_TEST_PLUGIN_PATH", QStringLiteral(KCM_PLUGIN_PATH)), KPluginMetaData::AllowEmptyMetaData);
         QVERIFY2(metaData.isValid(), KCM_PLUGIN_PATH);
         const auto result = KQuickConfigModuleLoader::loadModule(metaData, this, {}, m_engine);
         QVERIFY2(result.plugin, qPrintable(result.errorText));
@@ -242,6 +242,8 @@ private Q_SLOTS:
         QTest::addColumn<QString>("objectName");
         QTest::addColumn<QString>("title");
         QTest::addColumn<QStringList>("keyItems");
+        QTest::newRow("broker sign-in") << u"BrokerSignInPage.qml"_s << u"brokerSignInPage"_s << u"Console and Virtual Sign-In"_s
+                                       << QStringList{u"loadBrokerAuthentication"_s, u"saveBrokerAuthentication"_s};
         QTest::newRow("users") << u"UsersPage.qml"_s << u"usersPage"_s << u"Users and Security"_s
                                << QStringList{u"systemUserCheck"_s, u"usersFrame"_s, u"certificateStateRow"_s, u"ownCertificateCheck"_s};
         QTest::newRow("screens") << u"ScreensPage.qml"_s << u"screensPage"_s << u"Screens and Displays"_s << QStringList{u"shareColumn"_s, u"wakeCheck"_s};

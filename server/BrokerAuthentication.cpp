@@ -178,7 +178,9 @@ Result readFile(const QString &path, bool required)
         || after.st_mode != before.st_mode || after.st_mtim.tv_sec != before.st_mtim.tv_sec
         || after.st_mtim.tv_nsec != before.st_mtim.tv_nsec || after.st_ctim.tv_sec != before.st_ctim.tv_sec
         || after.st_ctim.tv_nsec != before.st_ctim.tv_nsec) return failed();
-    return parse(contents, resolveAccount);
+    auto result = parse(contents, resolveAccount);
+    if (result.policy) result.document = contents;
+    return result;
 }
 
 bool apply(Server &server, const Route &route)

@@ -17,6 +17,7 @@ Depends: ${shlibs:Depends},
          libkf6service-bin,
          libkscreen-bin,
          pipewire-bin,
+         pkexec,
          plasma-workspace,
          wireplumber
 Recommends: systemsettings

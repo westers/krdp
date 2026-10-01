@@ -20,10 +20,10 @@ by standard channel consent. Client device overrides still require authenticated
 ownership and reset on ownership loss. Audio priority applies only with enabled
 media; selecting it is not consent to capture microphone/camera.
 
-The source implementation currently applies Codec, Quality, AdaptiveQuality,
-PreferAudioQuality, SoftwareEncoding, Av1Tiles, StandardClientMedia and
-VirtualStockClientPolicy and WakeDisplayOnConnect. Remaining parsed preferences are held for their task's
-worker integration. Parsing alone does not claim support. Production broker entry
+The source implementation applies the shared video/chroma/audio preferences,
+Console capture/temporary-output policy, Virtual stock-client policy and worker
+wake demand. The dated checkpoints below distinguish implementation, source
+verification and still-open native gates. Parsing alone does not claim support. Production broker entry
 points enable the reader; socket-free tests inject it and never read Hal's actual
 settings. Legacy per-user serving remains in place until all parity gates pass.
 
@@ -61,8 +61,8 @@ the required save/reconnect behavior; live reload is not implemented by this sli
 | StandardClientMedia | true | Host ceiling AND user preference AND consent / both | User may opt out; never turns denied host permission on; T11/T12 live media |
 | VirtualStockClientPolicy | attach-or-create | User preference / Virtual | Same validated transaction; attach-or-create/refuse applied before stock-client gate |
 | CameraLoopbackDevice | empty | Host device grant / both | Existing host CLI path; user config cannot select/grant arbitrary device; equivalent device mapping T04/T08/T11 |
-| Users | empty | Host admission / credentials bound to original owner | Root policy maps salted password verifiers to the original owner's OS UID; real RDP alias authentication passes without a forged PAM identity. T08 editing and T10 migration/retained desktop gates remain |
-| SystemUserEnabled | false | Host admission / both | Root policy selects independent PAM any/allow-list/disabled routes. Canonical PAM account admission and denial pass on Sol; T10 preserves legacy owner-only/disabled effective values |
+| Users | empty | Host admission / credentials bound to original owner | Root policy maps salted password verifiers to the original owner's OS UID; real RDP alias authentication passes without a forged PAM identity. T08 revision-bound helper and scoped sign-in page now pass pure, private root-filesystem and Buzz UI gates; installed authorization/restart, broader T08 and T10 migration/retained desktop gates remain |
+| SystemUserEnabled | false | Host admission / both | Root policy selects independent PAM any/allow-list/disabled routes. Canonical PAM account admission and denial pass on Sol; new T08 page/helper edit the two routes separately without exposing verifiers. Installed save/restart and T10 preservation of legacy owner-only/disabled effective values remain |
 
 ## Other settings and overrides
 

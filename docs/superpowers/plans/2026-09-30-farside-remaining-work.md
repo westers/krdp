@@ -409,6 +409,27 @@ remain. Evidence: `~/dev/rdp/evidence/2026-09-30-t07-display-wake/SUMMARY.md`.
 
 **Evidence:** Config-to-UI coverage audit, populated-state screenshots on non-Hal hosts, invalid-value and save/reload checks, and the outstanding live dual-KCM acceptance matrix.
 
+**2026-10-01 authentication-settings checkpoint (PARTIAL, unshipped):** A
+fixed-path privileged helper edits only root Console/Virtual admission policy,
+using bounded stdin, exact revision checks before/after password derivation,
+cooperating-writer lock, root0600 atomic replacement and the production parser.
+Public snapshots contain only PAM/alias/owner metadata. Unchanged aliases retain
+their verifier only for the same route/alias/owner; new/rebound aliases need a
+new password. KCM exposes a scoped sign-in page with load/stage/save/reload,
+password masking/clearing and explicit restart help; cancellation/denial keeps
+pending edits. Three pure suites, 17 isolated root filesystem cases on Sol,
+Buzz populated page flow and all 13 real KCM plugin UI cases pass. Initial
+QML lexical binding/dialog sizing and fixture-owner-call errors were corrected;
+failed logs are retained. Generated policy XML/package contracts and pkexec
+dependency are wired; no installed package or policy change.
+These are separate helper/protocol/UI gates, not a real installed pkexec/password/
+broker-restart round trip. The main page still manages legacy service/settings;
+correct Console/Virtual service status/actions, host listener/TLS/device controls,
+atomic shared preference bindings/help, legacy UI cutover/migration, live stock
+coexistence and T27 package/rollback/deployment remain independent work.
+Spec: `../specs/2026-10-01-broker-settings-design.md`. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t08-auth-editor/SUMMARY.md`.
+
 ### T09 — Make client types explicitly Console or Virtual
 
 **Instructions:** Add an explicit persisted type and select it when creating/editing a connection. Use authenticated capabilities to validate behavior; a custom port must not change the type. Replace the old `physicalConsole` distinction throughout form, cards, session identity, menus, topology and device paths. Keep an internal migration representation only while old saved entries are awaiting T10. Standard RDP hosts retain their appropriate existing-desktop behavior.

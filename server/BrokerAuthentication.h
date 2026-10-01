@@ -39,6 +39,9 @@ using AccountResolver = std::function<std::optional<quint32>(const QString &)>;
 struct Result {
     std::optional<Policy> policy;
     QString error; // Structural reason only; never verifier, password or file contents.
+    // Safe file reader's exact bytes, for revision-bound privileged editing.
+    // Never expose this document to the unprivileged settings UI.
+    QByteArray document = {};
 };
 
 Result parse(const QByteArray &contents, const AccountResolver &resolve);
