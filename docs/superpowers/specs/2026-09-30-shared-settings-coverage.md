@@ -55,6 +55,24 @@ not actual installed/drop-in/runtime readback. The settings design specifies
 those remaining host/TLS/device/authorization and UI gates. Evidence
 `~/dev/rdp/evidence/2026-10-01-t08-host-format/SUMMARY.md`.
 
+## Privileged host storage source checkpoint (2026-10-01)
+
+The fixed three-scope helper uses the typed model for full preserving root0600
+transactions. Revision/presence/scope, safe files/parents/locks and descriptor-
+anchored atomic publication are checked. Explicit TLS keep/existing/standard/
+import operations never permit an arbitrary write path; imported complete
+private generations use managed symlink aliases and preserve old references.
+The GPU resolver is shared with actual namespace device authority. Camera
+loopback availability/OS permission is separate from normal PipeWire delivery;
+Virtual loopback grant parity is still unimplemented and marked unavailable,
+while positive Console loopback hardware cannot be tested on Sol currently.
+Seven full pure/boundary suites and22 actual private Sol root helper checks
+pass; real host/auth/user/TLS hashes and installed broker PIDs preserved.
+This is privileged filesystem source acceptance, not UI/installed authorization/
+runtime readback. Main cutover, scoped host page, native worker parity, migration/
+live stock coexistence and delivery stay open. Evidence
+`~/dev/rdp/evidence/2026-10-01-t08-host-writer/SUMMARY.md`.
+
 ## Complete legacy schema inventory
 
 Defaults below describe `krdpserversettings.kcfg`; broker defaults can be explicitly

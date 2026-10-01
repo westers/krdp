@@ -888,6 +888,9 @@ target_link_libraries(DisplayWakeGuardTest PRIVATE Qt6::Test Qt6::Core Qt6::DBus
 
 add_executable(BrokerUserSettingsTest BrokerUserSettingsTest.cpp)
 add_executable(BrokerHostSettingsTest BrokerHostSettingsTest.cpp)
+add_executable(BrokerHostAdminTest BrokerHostAdminTest.cpp)
+target_link_libraries(BrokerHostAdminTest PRIVATE Qt6::Test KRdpBrokerHostAdmin)
+add_test(NAME BrokerHostAdminTest COMMAND BrokerHostAdminTest)
 target_compile_definitions(BrokerHostSettingsTest PRIVATE HOST_SETTINGS_SOURCE="${CMAKE_SOURCE_DIR}")
 target_link_libraries(BrokerHostSettingsTest PRIVATE Qt6::Test KRdpBrokerHostSettings)
 add_test(NAME BrokerHostSettingsTest COMMAND BrokerHostSettingsTest)

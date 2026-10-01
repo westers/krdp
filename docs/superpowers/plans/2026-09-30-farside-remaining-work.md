@@ -484,6 +484,25 @@ scope. That helper, complete host UI, legacy main cutover, installed authorizati
 T10/live stock coexistence and T27 still remain. Evidence:
 `~/dev/rdp/evidence/2026-10-01-t08-host-format/SUMMARY.md`.
 
+**2026-10-01 root host-writer checkpoint (PARTIAL, unshipped):**
+Fixed three-scope stdin helper now performs revision-bound root0600 atomic saves,
+directory/file/lock inspection, sync and independent readback. Keep/existing/
+standard/import TLS operations are explicit. New private complete generations
+publish both managed paths together; failed publication removes only staged
+material, and old generations/standard fingerprints remain untouched. Shared
+bounded noninteractive certificate inspection rejects invalid/mismatched/
+encrypted/expired/future imports. Shared actual GPU device authority validates
+changed stable PCI grants. Seven full pure/boundary suites and22 isolated Sol
+root helper checks pass. Actual host/auth/user/TLS hashes and broker PIDs are
+preserved, root fixture removed. Own fixed PolicyKit action and package contracts
+are wired; no installed action/package change. Replies explicitly do not claim
+runtime application. The scoped host UI, actual installed/drop-in/readback,
+installed authorization/restart, legacy main cutover, migration/coexistence and
+T27 remain. Positive Console loopback hardware is unavailable on Sol; Virtual
+loopback namespace grants remain separate T05/T08 implementation, not fulfilled
+by metadata/refusal. Standard PipeWire camera remains separate. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t08-host-writer/SUMMARY.md`.
+
 ### T09 — Make client types explicitly Console or Virtual
 
 **Instructions:** Add an explicit persisted type and select it when creating/editing a connection. Use authenticated capabilities to validate behavior; a custom port must not change the type. Replace the old `physicalConsole` distinction throughout form, cards, session identity, menus, topology and device paths. Keep an internal migration representation only while old saved entries are awaiting T10. Standard RDP hosts retain their appropriate existing-desktop behavior.

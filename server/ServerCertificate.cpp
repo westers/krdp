@@ -139,13 +139,22 @@ Paths defaultPaths()
 
 Info inspect(const Paths &paths)
 {
-    Info info;
-    info.certificateExists = !paths.certificate.isEmpty() && QFileInfo::exists(paths.certificate);
-    info.keyExists = !paths.key.isEmpty() && QFileInfo::exists(paths.key);
     bool ok = false;
     const auto certPem = readBounded(paths.certificate, &ok);
+    const auto keyPem = readBounded(paths.key, &ok);
+    auto info = inspectPem(certPem, keyPem);
+    info.certificateExists = !paths.certificate.isEmpty() && QFileInfo::exists(paths.certificate);
+    info.keyExists = !paths.key.isEmpty() && QFileInfo::exists(paths.key);
+    return info;
+}
+
+Info inspectPem(const QByteArray &certPem, const QByteArray &keyPem)
+{
+    Info info;
+    info.certificateExists = !certPem.isEmpty();
+    info.keyExists = !keyPem.isEmpty();
     X509Ptr cert;
-    if (ok) {
+    if (!certPem.isEmpty() && certPem.size() <= kMaxPemBytes) {
         BioPtr bio(BIO_new_mem_buf(certPem.constData(), int(certPem.size())));
         cert.reset(bio ? PEM_read_bio_X509(bio.get(), nullptr, noPassphrase, nullptr) : nullptr);
     }
@@ -163,9 +172,8 @@ Info inspect(const Paths &paths)
         }
     }
 
-    const auto keyPem = readBounded(paths.key, &ok);
     PKeyPtr key;
-    if (ok) {
+    if (!keyPem.isEmpty() && keyPem.size() <= kMaxPemBytes) {
         BioPtr bio(BIO_new_mem_buf(keyPem.constData(), int(keyPem.size())));
         key.reset(bio ? PEM_read_bio_PrivateKey(bio.get(), nullptr, noPassphrase, nullptr) : nullptr);
     }

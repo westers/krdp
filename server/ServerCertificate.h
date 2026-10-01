@@ -4,6 +4,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QByteArray>
 #include <QString>
 #include <QStringList>
 
@@ -49,6 +50,9 @@ struct Info {
 // Reads the certificate and key without prompting for a passphrase. Never
 // logs key material.
 Info inspect(const Paths &paths);
+// Bounded in-memory inspection for privileged FD reads and TLS imports. Never
+// prompts for a passphrase; only public certificate metadata is returned.
+Info inspectPem(const QByteArray &certificate, const QByteArray &key);
 
 enum class Decision {
     UseExisting,

@@ -23,30 +23,14 @@
 #include <vector>
 
 #include "RenderAccess.h"
+#include "VirtualGpuDevices.h"
 
 namespace {
-struct Device { QByteArray path; dev_t number; };
+using Device = KRdp::VirtualGpuDevices::Device;
 bool snapshot(const QByteArray &path, std::vector<Device> &devices)
 {
     struct stat info{};
     if (lstat(path.constData(), &info) || !S_ISCHR(info.st_mode)) return false;
-    devices.push_back({path, info.st_rdev});
-    return true;
-}
-
-bool snapshotDriverNode(const QByteArray &path, const QString &driver, uint minorNumber, std::vector<Device> &devices)
-{
-    QFile registrations(QStringLiteral("/proc/devices"));
-    if (!registrations.open(QIODevice::ReadOnly)) return false;
-    const auto characters = QString::fromUtf8(registrations.read(65536)).section(QStringLiteral("Block devices:"), 0, 0);
-    const auto match = QRegularExpression(QStringLiteral("^\\s*([0-9]+)\\s+%1\\s*$").arg(QRegularExpression::escape(driver)),
-        QRegularExpression::MultilineOption).match(characters);
-    bool ok = false;
-    const uint majorNumber = match.captured(1).toUInt(&ok);
-    if (!match.hasMatch() || !ok) return false;
-    struct stat info{};
-    if (lstat(path.constData(), &info) || !S_ISCHR(info.st_mode)
-        || major(info.st_rdev) != majorNumber || minor(info.st_rdev) != minorNumber) return false;
     devices.push_back({path, info.st_rdev});
     return true;
 }
@@ -120,33 +104,11 @@ int main(int argc, char **argv)
     std::vector<Device> gpu;
     QString selected, render;
     for (const auto &bdf : allow) {
-        const auto candidateRender = QFileInfo(QStringLiteral("/dev/dri/by-path/pci-%1-render").arg(bdf)).canonicalFilePath();
-        if (!QRegularExpression(QStringLiteral("^/dev/dri/renderD[0-9]+$")).match(candidateRender).hasMatch()) continue;
-        const auto device = QFileInfo(QStringLiteral("/sys/class/drm/%1/device").arg(QFileInfo(candidateRender).fileName())).canonicalFilePath();
-        if (device.isEmpty() || QFileInfo(device).fileName() != bdf) continue;
-        const auto driver = QFileInfo(QFileInfo(device + QStringLiteral("/driver")).canonicalFilePath()).fileName();
-        std::vector<Device> nodes;
-        if (!snapshot(QFile::encodeName(candidateRender), nodes)) continue;
-        const auto number = nodes.front().number;
-        const auto deviceNumber = QStringLiteral("%1:%2").arg(major(number)).arg(minor(number));
-        QFile sysfsNumber(QStringLiteral("/sys/class/drm/%1/dev").arg(QFileInfo(candidateRender).fileName()));
-        if (!sysfsNumber.open(QIODevice::ReadOnly) || sysfsNumber.read(128).trimmed() != deviceNumber.toLatin1()
-            || QFileInfo(QStringLiteral("/sys/dev/char/%1/device").arg(deviceNumber)).canonicalFilePath() != device) continue;
-        if (driver == QStringLiteral("nvidia")) {
-            QFile information(QStringLiteral("/proc/driver/nvidia/gpus/%1/information").arg(bdf));
-            if (!information.open(QIODevice::ReadOnly)) continue;
-            const auto match = QRegularExpression(QStringLiteral("^Device Minor:\\s+([0-9]+)\\s*$"), QRegularExpression::MultilineOption)
-                .match(QString::fromUtf8(information.read(65536)));
-            bool minorOk = false;
-            const auto minor = match.captured(1).toUInt(&minorOk);
-            if (!match.hasMatch() || !minorOk || minor > 255
-                || !snapshotDriverNode("/dev/nvidia" + QByteArray::number(minor), QStringLiteral("nvidia"), minor, nodes)
-                || !snapshotDriverNode("/dev/nvidiactl", QStringLiteral("nvidiactl"), 255, nodes)
-                || !snapshotDriverNode("/dev/nvidia-uvm", QStringLiteral("nvidia-uvm"), 0, nodes)) continue;
-        } else if (driver != QStringLiteral("amdgpu") && driver != QStringLiteral("i915") && driver != QStringLiteral("xe")) continue;
-        selected = bdf;
-        render = candidateRender;
-        gpu = std::move(nodes);
+        const auto selection = KRdp::VirtualGpuDevices::resolve(bdf);
+        if (!selection) continue;
+        selected = selection->pci;
+        render = selection->render;
+        gpu = selection->nodes;
         break;
     }
     if (gpu.empty()) return fail("no approved GPU has a complete supported device set");

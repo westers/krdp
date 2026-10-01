@@ -179,6 +179,8 @@ for path in ./usr/bin/farside-server ./usr/bin/farside-console-host ./usr/bin/fa
     ./usr/lib/systemd/system/farside-virtual-session@.service \
     "./usr/lib/$multiarch/libexec/farside-authentication-helper" \
     ./usr/share/polkit-1/actions/org.farside.authentication.policy \
+    "./usr/lib/$multiarch/libexec/farside-host-settings-helper" \
+    ./usr/share/polkit-1/actions/org.farside.hostsettings.policy \
     ./usr/lib/systemd/system-preset/00-farside-system.preset ./usr/lib/systemd/user-preset/00-farside.preset \
     ./etc/pam.d/farside-virtual-session \
     ./usr/share/farside/virtual-session/launch-virtual-session.sh \
