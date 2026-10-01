@@ -1,7 +1,8 @@
 # Farside: one task at a time
 
 Date: 2026-10-01. Target agent: `gpt-6.1-sol`.
-Status: plan prepared; no implementation or deployment started by this revision.
+Status: N01 accepted in source on 2026-10-01; no deployment. N02 is proposed next,
+only after Steve selects it. Existing Goal remains paused.
 
 ## Start here
 
@@ -11,7 +12,7 @@ resume a Goal, execute the whole queue, or start the next task automatically.
 The existing Goal remains paused. Superpowers workflows and automatic delegation
 are not required. Existing plans, tests, code and evidence remain useful inputs.
 
-**First task to select: N01, protect wallet migration.** The following two tasks
+**N01 is complete in source; next task to select: N02, client candidate.** The next two tasks
 produce actual client and server packages. Native acceptance then uses those
 packages instead of accumulating more disconnected source checkpoints.
 
@@ -30,7 +31,7 @@ parent T-task being complete. New test quantity alone does not count as delivery
 | Monitors/video | Quiet Sol private worker single/two-screen HEVC creation/resize/Fit/decoded restoration passes; client UI and protocol evidence exists | Final packaged Console RDP, broader topology lifecycle; earlier loaded CUDA OOM/fallback is unresolved |
 | Discover/locker | Font-cache cause demonstrated and repaired on Sol; Steve confirms Console Discover password entry and ordinary lock/unlock work | Virtual/failure/restart matrix and original lock/output-release race; agent's original failing trace still missing |
 | Migration | `d437511c` effective-settings planner; 26-field schema, 17 explicit defaults, owner/locks/conflicts/revisions; 13 pure suites and 32 migration cases pass | Durable apply/backup/recovery/rollback, profiles/trust/retained integration; wallet retry overwrite risk |
-| Wallets | Review used code and migration metadata only; originals untouched | Buzz metadata reports three pending entries; actual reconciliation has not been verified |
+| Wallets | N01 disables automatic wallet copying in client/server; existing metadata preserved, initial metadata create-only/private; no real wallet access | Source accepted, unshipped. Buzz’s three pending entries still require N16 reconciliation |
 | Runtime | Steve reports on October 1 that **both Buzz and Sol now have no AI workloads**; both are available for testing. Last measured Sol snapshot had active brokers and SDDM greeter | Recheck current load/login before live work; no AI does not establish a signed-in Console owner or a measured performance result |
 
 The old ledger records **2 done, 15 partial, 10 planned and 1 documentation task
@@ -131,6 +132,13 @@ test-host installation is useful progress but does not close the full parent.
 Only start a row after Steve selects it and its prerequisite result exists.
 
 ### N01 — Protect both wallet retry paths (T10)
+
+**DONE in source, 2026-10-01.** Client `41b6cd9`; server commit recorded in the
+shared handoff. Automatic password copying removed because QtKeychain has no
+create-only write. Two focused migration suites pass (client 7/server 8 Qt cases);
+full affected client/server executables compile. Neither migration suite links
+QtKeychain; normal explicit storage and server read fallback remain. Evidence:
+`~/dev/rdp/evidence/2026-10-01-n01-wallet-guards/SUMMARY.md`. Not deployed.
 
 **Do:** Inspect client `src/core/LegacyMigration.cpp` and server
 `server/FarsideMigration.cpp`. Remove blind startup/diagnostic copying. Preserve
@@ -361,7 +369,7 @@ do not duplicate its long history here or close a task by renaming it.
 | T07 Wake | Partial; Console component accepted | N11 |
 | T08 Settings/coexistence | Partial; scoped source UI accepted | N04/N14 |
 | T09 Client types | Delivered 0.6.3 | Reuse; changed paths only in N05 |
-| T10 Migration | Partial; planner only, wallet overwrite risk | N01/N15/N16 |
+| T10 Migration | Partial; planner and N01 source guard accepted, unshipped | N15/N16; N01 done |
 | T11 Camera/media | Partial; transport/demand evidence | N12 |
 | T12 Standard clients | Planned | N13 |
 | T13 Legacy retirement | Planned; old route retained | N17 |
@@ -407,5 +415,5 @@ affected progress rows and a short handoff, then stop. Do not start another task
   Changing a product acceptance requirement needs an explicit recorded decision;
   optimizing execution does not silently drop features or mark partial work done.
 
-Planning-only checkpoint: no wallet access, candidate build/install, host restart,
+Initial planning checkpoint: no wallet access, candidate build/install, host restart,
 model/configuration change or Goal activation is part of creating this document.

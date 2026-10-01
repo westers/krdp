@@ -287,7 +287,8 @@ int main(int argc, char **argv)
     about.setupCommandLine(&parser);
     parser.process(application);
     FarsideMigration::copyUserFiles();
-    FarsideMigration::migrateCredentialsAndPermission();
+    FarsideMigration::recordPendingCredentials();
+    FarsideMigration::migratePermission();
     about.processCommandLine(&parser);
 
     if (parser.isSet(u"restore-outputs"_s)) {

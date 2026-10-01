@@ -41,6 +41,13 @@ planner currently prepares complete legacy effective preferences and reports
 conflicts without writing a destination. Durable transactions and fleet cutover
 remain pending; this is not an installed migration command.
 
+**Wallet safety (source, unreleased):** automatic rename password copying is
+disabled; QtKeychain does not expose create-only writes. Startup records pending
+credential IDs only when no migration state exists and preserves existing state.
+The legacy server still reads its existing credential namespaces for login; its
+portal permission migration is separate. No wallet reset or plaintext fallback
+is introduced. Actual credential reconciliation remains a migration task.
+
 # Running the example server
 
 The example server requires a username and password to be provided on the command line, which will be used when connecting from an RDP client. They can be provided using the `-u` and `-p` command line parameters, respectively. For example:

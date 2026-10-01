@@ -32,7 +32,7 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/org.farside.authentication.policy DEST
 add_library(KRdpLegacyMigration STATIC FarsideMigration.cpp)
 set_target_properties(KRdpLegacyMigration PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(KRdpLegacyMigration PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(KRdpLegacyMigration PUBLIC Qt6::Core Qt6::DBus KF6::ConfigCore qt6keychain)
+target_link_libraries(KRdpLegacyMigration PUBLIC Qt6::Core Qt6::DBus KF6::ConfigCore)
 # AUD-K3: certificate generation/renewal; also linked by the KCM to show the fingerprint.
 add_library(KRdpServerCertificate STATIC ServerCertificate.cpp)
 set_target_properties(KRdpServerCertificate PROPERTIES POSITION_INDEPENDENT_CODE ON)
