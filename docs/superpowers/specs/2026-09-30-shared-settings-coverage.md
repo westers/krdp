@@ -153,6 +153,20 @@ owned two-screen integration needs independent implementation. No deployment;
 T06 and the T05 loaded failure/fallback gates remain open. Evidence:
 `~/dev/rdp/evidence/2026-10-01-t06-owned-rdp/SUMMARY.md`.
 
+The later 2026-10-01 checkpoint adds explicit client Console monitor
+advertisement (`ef692be`), default off and independent of local mapping or
+retired assignments. Three pure suites/Buzz form12 and actual two-screen
+GUI-to-engine settings pass; closed-port plumbing is not actual RDP acceptance.
+After Steve paused AI work, seven private Sol worker cases pass, including
+single/two hardware HEVC resize/Fit/decoded frames/exact restoration. Initial
+Extend placement reasserts the requested tuple after KWin connector replay;
+capture waits for KScreen/Qt agreement. Post-Ready worker failures retain a
+bounded reason and fail closed. Per-process render-group fixture access changes
+no account/device permission. Sol's physical UID1000 desktop is absent at the
+greeter; final real Console RDP and broader T06/T03/T08/T27 gates remain open.
+No installed delivery or performance acceptance. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t06-monitor-request/SUMMARY.md`.
+
 ## Remaining gates
 
 - T04 authentication source gates pass: immutable root policy, explicit alias

@@ -356,6 +356,28 @@ RDP integration remains independent implementation work. Final software Fit,
 loaded fallback, lifecycle/mixed-scale/persistence and T03/T08/T27 gates stay
 open. Evidence `~/dev/rdp/evidence/2026-10-01-t06-owned-rdp/SUMMARY.md`.
 
+**2026-10-01 monitor-request/quiet-worker checkpoint (PARTIAL, unshipped):**
+Client `ef692be` adds an explicit persisted Console monitor request, default off
+for new/existing profiles. App freezes current physical-pixel inventory before
+the engine starts; bounded settings send the standard FreeRDP monitor block.
+Retired assignments/local mapping do not enable it; Virtual and inventory
+queries never request this layout. Three pure suites and Buzz real edit-form12
+pass. Buzz actual GUI/engine with two offscreen screens reports MonitorCount2,
+but a closed-port probe is not real RDP integration acceptance.
+Steve paused Sol AI work (GPU169MiB used/7616MiB free, no compute apps). Seven
+private native worker cases pass (nine including setup/cleanup, no failures or
+skips), including hardware HEVC single/two creation, resize/Fit, decoded frames
+and exact restoration. Quiet HEVC exposed KWin replaying overlapping connector
+positions after mode repair; initial Extend placement now uses the requested
+tuple, capture waits for KScreen/Qt agreement, and worker failures preserve their
+bounded reason after Ready. Logged-out render ACL required only per-process
+fixture render-group access; account/device permissions unchanged.
+Installed brokers/greeter/config preserved, no deployment or Hal live test.
+Sol is still at greeter1043; final real Console RDP requires a UID1000 KDE owner.
+Broader T06 lifecycle/mirror/mixed-scale/persistence and T03/T08/T27 gates, plus
+the earlier loaded CUDA OOM/fallback investigation, remain independent work.
+Evidence `~/dev/rdp/evidence/2026-10-01-t06-monitor-request/SUMMARY.md`.
+
 ### T07 — Preserve display wake and inhibition
 
 **Instructions:** Integrate the existing `DisplayWakeGuard` semantics into the desktop workers or equivalent user-session mechanism, not a root broker's session bus. Honor the configured wake policy and acquire/release inhibition with streaming ownership. Keep display power management distinct from unlocking and from Virtual's intentional lock policy. Handle pending D-Bus replies and teardown without leaking inhibition.

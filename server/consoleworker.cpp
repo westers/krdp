@@ -581,7 +581,7 @@ private:
             && OutputRestoreJournal::plan(entry, restored).arguments.isEmpty();
     }
 
-    bool parkConsoleVirtualOutputs()
+    bool parkConsoleVirtualOutputs(bool usePlannedLayout = false)
     {
         if (!m_consoleVirtualPlan) return false;
         const auto json = readKScreenJson();
@@ -595,7 +595,12 @@ private:
         }
         if (std::none_of(survivors.cbegin(), survivors.cend(), [](const auto &o) { return o.enabled; })) return false;
         const QPoint anchor = OutputSnapshot::rightmostEnabledAnchor(survivors);
-        const auto bounds = OutputSnapshot::enabledUnion(temporary);
+        QRect bounds = OutputSnapshot::enabledUnion(temporary);
+        if (usePlannedLayout) {
+            bounds = {};
+            for (const auto &output : m_consoleVirtualPlan->outputs)
+                bounds |= RemoteMonitorGeometry::logicalRect(output.position, output.pixels, output.scale);
+        }
         std::sort(survivors.begin(), survivors.end(), [](const auto &a, const auto &b) { return a.priority < b.priority; });
         QStringList arguments;
         int priority = 1;
@@ -607,7 +612,10 @@ private:
         for (const auto &output : planned) {
             const auto found = std::find_if(temporary.cbegin(), temporary.cend(), [&output](const auto &o) { return o.name == output.name; });
             if (found == temporary.cend()) continue; // An unresolved creator need not have exposed an output.
-            const QPoint position = found->position - bounds.topLeft() + anchor;
+            // A replayed connector layout may overlap after its modes are
+            // repaired. Initial placement uses the validated requested tuple;
+            // later release/reclaim parking preserves the current resized tuple.
+            const QPoint position = (usePlannedLayout ? output.position : found->position) - bounds.topLeft() + anchor;
             if (position.x() < -32767 || position.x() > 32767 || position.y() < -32767 || position.y() > 32767 || priority > 16) return false;
             arguments << QStringLiteral("output.%1.position.%2,%3").arg(output.name).arg(position.x()).arg(position.y())
                       << QStringLiteral("output.%1.priority.%2").arg(output.name).arg(priority++);
@@ -622,7 +630,8 @@ private:
             if (std::none_of(temporary.cbegin(), temporary.cend(), [&output](const auto &o) { return o.name == output.name; })) continue;
             const auto expected = std::find_if(m_consoleVirtualPlan->outputs.cbegin(), m_consoleVirtualPlan->outputs.cend(), [&output](const auto &o) { return o.name == output.name; });
             const auto actual = std::find_if(readback.cbegin(), readback.cend(), [&output](const auto &o) { return o.name == output.name; });
-            if (actual == readback.cend() || !actual->enabled || actual->position != expected->position || actual->priority < 2) return false;
+            if (actual == readback.cend() || !actual->enabled || actual->position != expected->position || actual->priority < 2
+                || (usePlannedLayout && (actual->size != expected->pixels || !VirtualResize::sameScale(actual->scale, expected->scale)))) return false;
         }
         return true;
     }
@@ -778,7 +787,7 @@ private:
         }
         if (!m_consoleVirtualReplaced) {
             if (!m_consoleOutputGuard.release() || !restoreConsoleVirtualSnapshot(*m_consoleVirtualRestore)
-                || !parkConsoleVirtualOutputs()) {
+                || !parkConsoleVirtualOutputs(true)) {
                 failConsoleVirtual(QStringLiteral("Console extend layout could not be verified")); return;
             }
         }
@@ -1081,6 +1090,19 @@ private:
         if (!m_initialOutputs.isEmpty() && !m_bootstrapComplete) return;
         const auto screens = qGuiApp->screens();
         for (auto *screen : screens) watchScreen(screen);
+        if (m_consoleVirtualPlan) {
+            // KScreen commits before Qt has necessarily observed every output's
+            // new position and mode. Never open captures from a transient tuple,
+            // including overlapping old/new geometries after connector replay.
+            const auto json = readKScreenJson();
+            const auto current = json ? ConsoleVirtualOutputReadback::parse(*json, m_sessionId, *m_consoleVirtualPlan) : std::nullopt;
+            const bool screensAgree = current && std::all_of(current->outputs.cbegin(), current->outputs.cend(), [&screens](const auto &output) {
+                return std::any_of(screens.cbegin(), screens.cend(), [&output](const auto *screen) {
+                    return screen->name() == output.backendKey && screen->geometry() == output.logicalGeometry;
+                });
+            });
+            if (!screensAgree) { m_multiSettle.start(200); return; }
+        }
         if (!m_mode.virtualSession && m_multiMode && m_resize.changing() && !m_physicalResizeReadyForCapture) {
             m_multiSettle.start(200); // Wait for the physical KScreen executor's readback before recapture.
             return;
@@ -1352,6 +1374,8 @@ private:
         for (const auto &screen : inventory) workspace |= screen.logicalGeometry;
         m_workspaceOrigin = workspace.topLeft();
         if (!m_multiCapture.configure(inventory, selectedSingle ? 1 : 2)) {
+            for (const auto &screen : inventory)
+                qWarning() << "Rejected capture output" << screen.name << screen.logicalGeometry << "primary" << screen.primary;
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, QByteArrayLiteral("unsupported retained monitor arrangement")));
             m_socket.disconnectFromServer();
             return;

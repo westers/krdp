@@ -3,6 +3,7 @@
 
 #include "ConsoleWorkerEndpoint.h"
 
+#include <QDebug>
 #include <QLocalServer>
 #include <QLocalSocket>
 
@@ -370,6 +371,13 @@ bool ConsoleWorkerEndpoint::processRecords()
             Q_EMIT encoderCapsReceived(*caps);
             continue;
         }
+        if (record->kind == ConsoleWorkerWire::Kind::Error) {
+            const QString reason = QString::fromUtf8(record->payload.left(256)).trimmed();
+            const QString context = m_ready ? QStringLiteral("worker capture failed")
+                                           : QStringLiteral("worker failed before confirming capture");
+            fail(reason.isEmpty() ? context : QStringLiteral("%1: %2").arg(context, reason));
+            return false;
+        }
         if (!m_ready) {
             // AUD-FIX8: the worker's encoder opens before capture is confirmed. Its reports may
             // legitimately precede Ready (a 23b328a worker sends them then): hold them and apply
@@ -385,12 +393,6 @@ bool ConsoleWorkerEndpoint::processRecords()
             if (const auto load = ConsoleWorkerWire::encoderLoad(*record)) {
                 m_workerCpuNs = load->cpuNs;
                 continue;
-            }
-            if (record->kind == ConsoleWorkerWire::Kind::Error) {
-                const QString reason = QString::fromUtf8(record->payload.left(256)).trimmed();
-                fail(reason.isEmpty() ? QStringLiteral("worker failed before confirming capture")
-                                      : QStringLiteral("worker failed before confirming capture: %1").arg(reason));
-                return false;
             }
             if (record->kind != ConsoleWorkerWire::Kind::Ready || !record->payload.isEmpty()) {
                 fail(QStringLiteral("worker did not confirm active capture (record %1 before Ready)").arg(int(record->kind)));
@@ -464,6 +466,8 @@ bool ConsoleWorkerEndpoint::processRecords()
             m_cursorShape = *cursor;
             Q_EMIT cursorShapeReceived(*cursor);
         } else {
+            qWarning() << "Rejected worker record kind" << static_cast<quint8>(record->kind)
+                       << "payload bytes" << record->payload.size();
             fail(QStringLiteral("unexpected worker record"));
             return false;
         }

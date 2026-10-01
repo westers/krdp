@@ -570,21 +570,34 @@ void WorkerEndToEndTest::consoleConfiguredOutputs_data()
     QTest::addColumn<bool>("physicalAliases");
     QTest::addColumn<bool>("replace");
     QTest::addColumn<bool>("withdraw");
-    QTest::newRow("Console single extend with foreign outputs, withdraw") << 1 << false << false << false << true;
-    QTest::newRow("Console two extend with physical fixture, stop") << 2 << false << true << false << false;
-    QTest::newRow("Console two replace with physical fixture, withdraw") << 2 << false << true << true << true;
-    QTest::newRow("Console single replace with physical fixture, stop") << 1 << false << true << true << false;
-    QTest::newRow("Virtual ignores Console temporary-output policy") << 2 << true << false << true << false;
+    QTest::addColumn<int>("codecId");
+    QTest::newRow("Console single extend with foreign outputs, withdraw") << 1 << false << false << false << true << int(VideoCodec::Avc420);
+    QTest::newRow("Console two extend with physical fixture, stop") << 2 << false << true << false << false << int(VideoCodec::Avc420);
+    QTest::newRow("Console two replace with physical fixture, withdraw") << 2 << false << true << true << true << int(VideoCodec::Avc420);
+    QTest::newRow("Console single replace with physical fixture, stop") << 1 << false << true << true << false << int(VideoCodec::Avc420);
+    QTest::newRow("Virtual ignores Console temporary-output policy") << 2 << true << false << true << false << int(VideoCodec::Avc420);
+    QTest::newRow("HEVC Console single extend, resize Fit withdraw") << 1 << false << false << false << true << int(VideoCodec::Hevc);
+    QTest::newRow("HEVC Console two extend, resize Fit stop") << 2 << false << false << false << false << int(VideoCodec::Hevc);
 }
 
 void WorkerEndToEndTest::consoleConfiguredOutputs()
 {
-    QFETCH(int, count); QFETCH(bool, virtualDesktop); QFETCH(bool, physicalAliases); QFETCH(bool, replace); QFETCH(bool, withdraw);
+    QFETCH(int, count); QFETCH(int, codecId);
+    const auto codec = VideoCodec(codecId); QFETCH(bool, virtualDesktop); QFETCH(bool, physicalAliases); QFETCH(bool, replace); QFETCH(bool, withdraw);
     if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
     auto *s = session(2); QVERIFY(s);
     if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
     if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
     ConsoleWorkerEndpoint endpoint; WorkerRun run;
+    QVector<ConsoleWorkerWire::EncoderReport> reports;
+    connect(&endpoint, &ConsoleWorkerEndpoint::encoderReported, this, [&](const auto &report) { reports.append(report); });
+    const auto verifiedHardware = [&] {
+        return codec != VideoCodec::Hevc || (std::any_of(reports.cbegin(), reports.cend(), [&](const auto &report) {
+            return report.event == ConsoleWorkerWire::EncoderReport::Event::Backend && report.codec == codec && report.hardware;
+        }) && std::none_of(reports.cbegin(), reports.cend(), [&](const auto &report) {
+            return report.event == ConsoleWorkerWire::EncoderReport::Event::Backend && report.codec == codec && !report.hardware;
+        }));
+    };
     ConsoleWorkerWire::Outputs outputs;
     std::optional<ConsoleWorkerWire::Topology> topology;
     std::optional<ConsoleWorkerWire::PhysicalLeaseReleased> released;
@@ -661,7 +674,10 @@ sys.exit(result.returncode)
     const auto baseline = ConsoleVirtualOutputRestore::snapshot(*baselineJson, QStringLiteral("fixture")); QVERIFY(baseline);
     run.frames.clear(); endpoint.setControlState({1, true});
     ConsoleWorkerWire::EncoderConfig config; config.generation = 1;
-    config.settings = CodecPolicy::EncoderSettings{.hardware = false};
+    config.codec = codec;
+    config.settings = CodecPolicy::EncoderSettings{.hardware = codec == VideoCodec::Hevc};
+    if (codec == VideoCodec::Hevc) { QVERIFY(run.caps); QVERIFY(run.caps->encoders.hevc.hardware); }
+    reports.clear();
     ClientDisplay::Info client{QSize(1600, 900), {}};
     if (count == 2) client = {QSize(2560, 720), {{QRect(0, 0, 1280, 720), true}, {QRect(1280, 0, 1280, 720), false}}};
     config.consoleVirtual = *ConsoleVirtualOutputPolicy::parse(true, replace ? QStringLiteral("replace") : QStringLiteral("extend"),
@@ -677,7 +693,7 @@ sys.exit(result.returncode)
     QTRY_VERIFY_WITH_TIMEOUT((expected() && !run.frames.isEmpty()) || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 60000);
     QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(expected());
     const auto isProof = [&](const auto &frame) {
-        return frame.isKeyFrame && frame.size == QSize(!virtualDesktop && count == 1 ? 1600 : 1280, !virtualDesktop && count == 1 ? 900 : 720)
+        return frame.isKeyFrame && frame.codec == codec && frame.size == QSize(!virtualDesktop && count == 1 ? 1600 : 1280, !virtualDesktop && count == 1 ? 900 : 720)
             && frame.monitors.size() == (virtualDesktop ? 2 : count);
     };
     endpoint.requestKeyFrame();
@@ -691,12 +707,13 @@ sys.exit(result.returncode)
     ClientStyle::Decoder decoder;
     for (int index = 0; index < (virtualDesktop ? 2 : count); ++index) {
         const auto packet = std::find_if(run.frames.cbegin(), run.frames.cend(), [&](const auto &frame) {
-            return frame.isKeyFrame && frame.monitorIndex == index && frame.size == proofFrame.size
+            return frame.isKeyFrame && frame.codec == codec && frame.monitorIndex == index && frame.size == proofFrame.size
                 && frame.monitors == proofFrame.monitors;
         });
         QVERIFY(packet != run.frames.cend());
-        QVERIFY2(decoder.feed(index + 1, VideoCodec::Avc420, packet->data), qPrintable(decoder.error()));
+        QVERIFY2(decoder.feed(index + 1, codec, packet->data), qPrintable(decoder.error()));
         QCOMPARE(decoder.surfaces().value(index + 1).lastPicture, packet->size);
+        QVERIFY(verifiedHardware());
     }
     if (!virtualDesktop) {
         const auto activeJson = query(); QVERIFY(activeJson);
@@ -744,7 +761,7 @@ sys.exit(result.returncode)
         const auto freshDecodedOutputs = [&](const RetainedKScreenReadback::Snapshot &expected) {
             for (int index = 0; index < expected.outputs.size(); ++index) {
                 const auto found = std::find_if(run.frames.cbegin(), run.frames.cend(), [&](const auto &frame) {
-                    return frame.isKeyFrame && frame.monitorIndex == index && frame.size == expected.outputs[index].nativePixels
+                    return frame.isKeyFrame && frame.codec == codec && frame.monitorIndex == index && frame.size == expected.outputs[index].nativePixels
                         && frame.monitors.size() == expected.outputs.size();
                 });
                 if (found == run.frames.cend()) return false;
@@ -755,10 +772,10 @@ sys.exit(result.returncode)
             ClientStyle::Decoder fresh;
             for (int index = 0; index < expected.outputs.size(); ++index) {
                 const auto packet = std::find_if(run.frames.cbegin(), run.frames.cend(), [&](const auto &frame) {
-                    return frame.isKeyFrame && frame.monitorIndex == index && frame.size == expected.outputs[index].nativePixels
+                    return frame.isKeyFrame && frame.codec == codec && frame.monitorIndex == index && frame.size == expected.outputs[index].nativePixels
                         && frame.monitors.size() == expected.outputs.size();
                 });
-                if (packet == run.frames.cend() || !fresh.feed(index + 1, VideoCodec::Avc420, packet->data)
+                if (packet == run.frames.cend() || !fresh.feed(index + 1, codec, packet->data)
                     || fresh.surfaces().value(index + 1).lastPicture != packet->size) return false;
             }
             return true;
@@ -772,11 +789,11 @@ sys.exit(result.returncode)
         QVERIFY(ConsoleVirtualOutputMutation::preservesForeign(*activeJson, *resizedJson, QStringLiteral("fixture"), owned));
         const auto resized = ConsoleVirtualOutputReadback::parse(*resizedJson, QStringLiteral("fixture"), owned); QVERIFY(resized);
         QCOMPARE(resized->outputs.last().nativePixels, QSize(960, 540)); QCOMPARE(resized->outputs.last().scale, 1.25);
-        QTRY_VERIFY_WITH_TIMEOUT(freshDecodedOutputs(*resized), 15000); QVERIFY(decodeFresh(*resized));
+        QTRY_VERIFY_WITH_TIMEOUT(freshDecodedOutputs(*resized), 15000); QVERIFY(decodeFresh(*resized)); QVERIFY(verifiedHardware());
 
         ConsoleWorkerWire::ManagedFit fit{104, 1, projected->outputs.first().backendKey, QSize(1024, 768), 1, {}};
         if (count == 2) fit.relations.append({fit.output, selected, 1, 0});
-        run.frames.clear(); QVERIFY(endpoint.managedFit(fit));
+        run.frames.clear(); reports.clear(); QVERIFY(endpoint.managedFit(fit));
         QTRY_VERIFY_WITH_TIMEOUT(fitResults.contains(104) || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 30000);
         QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(fitResults.contains(104));
         QVERIFY2(fitResults[104].error.isEmpty(), qPrintable(fitResults[104].error));
@@ -789,7 +806,7 @@ sys.exit(result.returncode)
             QCOMPARE(fitted->outputs.last().nativePixels, QSize(960, 540)); QCOMPARE(fitted->outputs.last().scale, 1.25);
             QCOMPARE(fitted->outputs.last().logicalGeometry.topLeft(), fitted->outputs.first().logicalGeometry.topLeft() + QPoint(1024, 0));
         }
-        QTRY_VERIFY_WITH_TIMEOUT(freshDecodedOutputs(*fitted), 15000); QVERIFY(decodeFresh(*fitted));
+        QTRY_VERIFY_WITH_TIMEOUT(freshDecodedOutputs(*fitted), 15000); QVERIFY(decodeFresh(*fitted)); QVERIFY(verifiedHardware());
         topology.reset(); QVERIFY(endpoint.requestTopology());
         QTRY_VERIFY_WITH_TIMEOUT(topology.has_value(), 10000); QVERIFY(!topology->complete);
         QCOMPARE(topology->outputs.size(), count);
@@ -816,7 +833,7 @@ sys.exit(result.returncode)
     }
     QFile code(exitFile); QVERIFY(code.open(QIODevice::ReadOnly)); QCOMPARE(code.readAll().trimmed(), QByteArray("0"));
     qInfo() << "Configured Console outputs:" << count << "physical fixture" << physicalAliases << "replace" << replace
-            << "Virtual" << virtualDesktop << "release" << (released ? released->verified : true) << "decoded" << proofFrame.size;
+            << "codec" << int(codec) << "HEVC hardware verified" << (codec == VideoCodec::Hevc && verifiedHardware()) << "Virtual" << virtualDesktop << "release" << (released ? released->verified : true) << "decoded" << proofFrame.size;
 }
 
 void WorkerEndToEndTest::workerReachesReadyAndDeliversFrames_data()

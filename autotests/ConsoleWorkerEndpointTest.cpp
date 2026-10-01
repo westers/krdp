@@ -22,7 +22,49 @@ private Q_SLOTS:
     void rejectsTakeoverBeforeCaptureReady();
     void rejectsWrongWorkerToken();
     void displayDemandRequiresHelloButNotFirstCapture();
+    void reportsWorkerFailures_data();
+    void reportsWorkerFailures();
 };
+
+void ConsoleWorkerEndpointTest::reportsWorkerFailures_data()
+{
+    QTest::addColumn<bool>("ready");
+    QTest::addColumn<QByteArray>("reason");
+    QTest::newRow("before-ready") << false << QByteArray("unsupported retained monitor arrangement");
+    QTest::newRow("after-ready") << true << QByteArray("unsupported retained monitor arrangement");
+    QTest::newRow("empty-after-ready") << true << QByteArray();
+    QTest::newRow("bounded-after-ready") << true << QByteArray(512, 'x');
+}
+
+void ConsoleWorkerEndpointTest::reportsWorkerFailures()
+{
+    QFETCH(bool, ready);
+    QFETCH(QByteArray, reason);
+    QTemporaryDir directory;
+    ConsoleWorkerEndpoint endpoint;
+    const ConsoleHandoff::Target target{ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), quint32(getuid())};
+    const QByteArray token(24, 'e');
+    QVERIFY(endpoint.listen(directory.filePath(QStringLiteral("error.sock")), target, token));
+    QSignalSpy errors(&endpoint, &ConsoleWorkerEndpoint::protocolError);
+    QLocalSocket worker;
+    worker.connectToServer(endpoint.socketName());
+    QVERIFY(worker.waitForConnected());
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{target.sessionId, target.uid, token}));
+    worker.flush();
+    QTRY_VERIFY(endpoint.authenticated());
+    if (ready) {
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+        worker.flush();
+        QTRY_VERIFY(endpoint.ready());
+    }
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, reason));
+    worker.flush();
+    QTRY_COMPARE(errors.size(), 1);
+    const QString context = ready ? QStringLiteral("worker capture failed") : QStringLiteral("worker failed before confirming capture");
+    QCOMPARE(errors.first().first().toString(), reason.isEmpty() ? context : context + QStringLiteral(": ") + QString::fromUtf8(reason.left(256)));
+    QVERIFY(!endpoint.ready());
+    QTRY_COMPARE(worker.state(), QLocalSocket::UnconnectedState);
+}
 
 void ConsoleWorkerEndpointTest::displayDemandRequiresHelloButNotFirstCapture()
 {
