@@ -398,3 +398,20 @@ Sol installed brokers141254/141255 remain active. Source only: installed
 authorization/restart, native worker/camera parity, T10/live stock coexistence,
 standard clients and T27 gates remain. Evidence
 `~/dev/rdp/evidence/2026-10-01-t08-main-cutover/SUMMARY.md`.
+
+### T10 effective legacy settings planner (2026-10-01, PARTIAL, unshipped)
+
+The embedded pinned26-field legacy type/default profile matches f255ee2 and
+4b308bd. Actual KConfig parsing and the generated settings class agree on all
+omitted/explicit17 preferences and seven host facts; PAM-enabled/disabled and
+exact aliases retain the original daemon owner. No root listener/TLS/device/
+admission write or certificate trust is inferred. All legacy locks are recorded;
+preference locks and unknown bytes survive canonical prepared output. Explicit
+unchanged-snapshot upgrade mode is required; equal bytes are not file identity.
+Separate destination conflicts/locked inheritance fail the whole plan. Rerun is
+byte-identical, revisions bind owner/mode/full source/destination presence and
+bytes, and public manifests exclude private data. Thirteen full pure suites
+pass7.52s, migration32 including generated-class/production-parser agreement.
+No destination/wallet/service change. Durable backup/apply/rollback, actual
+secret/policy/client/retained/trust integration and live fleet gates remain.
+Evidence `~/dev/rdp/evidence/2026-10-01-t10-settings-planner/SUMMARY.md`.

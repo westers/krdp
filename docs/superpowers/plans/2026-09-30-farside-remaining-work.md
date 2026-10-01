@@ -577,6 +577,27 @@ edit or benchmark. Evidence:
 
 **Evidence:** Sanitized migration manifest, backup hashes, verified destination fingerprints, secret-store success/failure counts without values, connect/rollback results and remaining exceptions.
 
+**2026-10-01 legacy settings planner checkpoint (PARTIAL, unshipped):** The
+bounded private planner reads actual KConfig snapshot semantics and embeds the
+pinned26-field legacy type/default profile, matching both deployed baselines.
+All17 preferences become explicit canonical production-parser values. Seven
+host facts and owner-only/disabled PAM/owner-bound alias facts remain private
+pending authorized reconciliation; no listener/trust/device/policy migration is
+inferred. Group/individual locks, comments/unknown bytes, aliases/escaped lists,
+same-file explicit unchanged-snapshot mode, separate destination conflicts,
+complete presence/content/owner/mode revisions and byte-identical rerun verified.
+Public manifests contain counts/revisions and fixed unresolved actions only.
+Thirteen full pure suites pass7.52s; migration32 includes actual generated legacy
+settings agreement and malformed/UTF-8/marker/conflict/privacy gates. Initial
+include collision, lazy UTF-8 conversion and fixture failures corrected; missing
+old regression binary built, final run has no failures/skips. This component
+does not write destinations or call a wallet/daemon/authorization helper.
+Durable safe backups/journaling/apply/rollback, root policy/secret integration,
+client/retained/trust and actual fleet migration remain independent work. Goal
+ACTIVE, T10/P0 PARTIAL. Spec:
+`docs/superpowers/specs/2026-10-01-console-virtual-migration-design.md`; evidence:
+`~/dev/rdp/evidence/2026-10-01-t10-settings-planner/SUMMARY.md`.
+
 ### T11 — Complete camera and redirected-media acceptance
 
 **Instructions:** Use a real Buzz camera and consumer/conferencing application in Sol Console and Virtual. Exercise off/on, reselect between two available sources, consumer open/close, disconnect, worker loss and ownership takeover. If a second camera is unavailable, retain that acceptance as pending. Check the remote source belongs to the selected desktop. Include microphone/playback consent and host-silencing behavior, and the optional V4L2 bridge where configured.

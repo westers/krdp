@@ -35,6 +35,12 @@ Desktop remains configured in its own module. The old route, config and secret
 storage remain migration inputs until T10/T13 acceptance; this UI cutover does
 not retire the installed legacy listener.
 
+The [consolidation migration design](docs/superpowers/specs/2026-10-01-console-virtual-migration-design.md)
+defines dry-run, backup, credential/trust preservation and rollback. Its source
+planner currently prepares complete legacy effective preferences and reports
+conflicts without writing a destination. Durable transactions and fleet cutover
+remain pending; this is not an installed migration command.
+
 # Running the example server
 
 The example server requires a username and password to be provided on the command line, which will be used when connecting from an RDP client. They can be provided using the `-u` and `-p` command line parameters, respectively. For example:

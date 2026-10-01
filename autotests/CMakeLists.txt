@@ -920,6 +920,11 @@ target_link_libraries(BrokerHostSettingsNativeProbe PRIVATE KRdpBrokerHostSettin
 # Actual systemd transient fixture units run manually on Sol, never default CTest.
 target_link_libraries(BrokerUserSettingsTest PRIVATE Qt6::Test KRdpBrokerUserSettings)
 add_test(NAME BrokerUserSettingsTest COMMAND BrokerUserSettingsTest)
+add_executable(LegacySettingsMigrationTest LegacySettingsMigrationTest.cpp)
+target_include_directories(LegacySettingsMigrationTest BEFORE PRIVATE ${CMAKE_BINARY_DIR}/src/kcm)
+target_link_libraries(LegacySettingsMigrationTest PRIVATE Qt6::Test KRdpSettingsMigration kcm_krdpserver_core)
+add_test(NAME LegacySettingsMigrationTest COMMAND LegacySettingsMigrationTest)
+set_tests_properties(LegacySettingsMigrationTest PROPERTIES TIMEOUT 30 LABELS "pure")
 add_executable(BrokerPreferencesTest BrokerPreferencesTest.cpp)
 target_link_libraries(BrokerPreferencesTest PRIVATE Qt6::Test kcm_krdpserver_core)
 add_test(NAME BrokerPreferencesTest COMMAND BrokerPreferencesTest)

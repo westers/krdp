@@ -13,6 +13,12 @@ set_target_properties(KRdpBrokerUserSettings PROPERTIES POSITION_INDEPENDENT_COD
 target_include_directories(KRdpBrokerUserSettings PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src)
 target_include_directories(KRdpBrokerUserSettings SYSTEM PUBLIC ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
 target_link_libraries(KRdpBrokerUserSettings PUBLIC Qt6::Core)
+add_library(KRdpSettingsMigration STATIC LegacySettingsMigration.cpp)
+set_target_properties(KRdpSettingsMigration PROPERTIES POSITION_INDEPENDENT_CODE ON AUTOMOC OFF)
+target_include_directories(KRdpSettingsMigration PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(KRdpSettingsMigration PUBLIC KRdpBrokerUserSettings KRdpBrokerHostSettings PRIVATE KF6::ConfigCore)
+qt_add_resources(KRdpSettingsMigration farside_legacy_schema PREFIX "/farside/migration"
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}" FILES krdpserversettings.kcfg)
 add_library(KRdpBrokerAuthentication STATIC BrokerAuthentication.cpp BrokerAuthenticationAdmin.cpp)
 set_target_properties(KRdpBrokerAuthentication PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(KRdpBrokerAuthentication PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
