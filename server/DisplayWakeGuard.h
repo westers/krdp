@@ -7,6 +7,7 @@
 #include <optional>
 
 #include <QObject>
+#include <QDBusConnection>
 
 /**
  * Wakes the local display when the first RDP session starts streaming and
@@ -26,6 +27,8 @@ class DisplayWakeGuard : public QObject
     Q_OBJECT
 public:
     explicit DisplayWakeGuard(QObject *parent = nullptr);
+    /** Use an explicitly selected desktop bus (isolated integration tests). */
+    DisplayWakeGuard(const QDBusConnection &connection, QObject *parent = nullptr);
     ~DisplayWakeGuard() override;
 
     /**
@@ -69,4 +72,7 @@ private:
     int m_activeSessions = 0;
     bool m_inhibitPending = false;
     std::optional<uint> m_inhibitCookie;
+    QString m_inhibitOwner;
+    QDBusConnection m_connection;
+    quint64 m_wakeSerial = 0;
 };

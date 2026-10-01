@@ -251,6 +251,7 @@ void VirtualSessionTransport::loadUserSettings(std::optional<quint32> uid)
     const auto &p = result.preferences;
     setVideoQualityPolicy(p.quality.value_or(m_qualityCap), p.adaptiveQuality.value_or(m_adaptiveQuality));
     m_audioPriorityDefault = p.preferAudioQuality.value_or(m_audioPriorityDefault);
+    m_wakeDisplayOnConnect = p.wakeDisplayOnConnect.value_or(m_wakeDisplayOnConnect);
     m_userStandardMedia = p.standardClientMedia.value_or(true);
     if (m_videoHost) {
         auto host = *m_videoHost;
@@ -445,6 +446,10 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     // Capture the binding's generation at connection time, NOT delivery time:
     // disconnect does not retract already queued signals from the RDP thread.
     const auto generation = m_controlGeneration;
+    m_workerConnections.append(connect(m_connection->videoStream(), &VideoStream::enabledChanged,
+        this, [this, generation] {
+            syncDisplayPolicy(generation, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        }, Qt::QueuedConnection));
     m_workerConnections.append(connect(m_connection->videoStream(), &VideoStream::requestedQualityChanged,
         this, [this, generation](quint8 quality) {
             forwardVideoQuality(generation, quality, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
@@ -462,6 +467,8 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     m_wireLayout.clear();
     m_connection->videoStream()->setMonitorLayout({});
     m_connection->videoStream()->setEnabled(true);
+    if (!bindingCurrent()) return false;
+    syncDisplayPolicy(generation, uid);
     if (!bindingCurrent()) return false;
     endpoint->requestKeyFrame();
     if (!bindingCurrent() || !authorized(uid)) return false;
@@ -554,6 +561,8 @@ void VirtualSessionTransport::revoke()
         // Its generation prevents this reset affecting a replacement owner.
         if (generation) endpoint->setVideoQuality({generation, m_qualityCap});
         if (!alive) return;
+        if (endpoint) endpoint->setDisplayPolicy(false, false);
+        if (!alive) return;
         if (endpoint) endpoint->setControlState({sequence, false});
         if (!alive) return;
         if (endpoint) endpoint->setMedia({false, false});
@@ -597,6 +606,13 @@ bool VirtualSessionTransport::forwardVideoQuality(quint64 generation, quint8 qua
     // binding. Virtual desktops return to the configured cap outside priority.
     const quint8 bounded = (m_connection->audioPriorityActive() || m_adaptiveQuality) ? std::min(quality, m_qualityCap) : m_qualityCap;
     return m_endpoint->setVideoQuality({generation, bounded});
+}
+
+bool VirtualSessionTransport::syncDisplayPolicy(quint64 generation, std::optional<quint32> uid)
+{
+    if (!generation || generation != m_controlGeneration || !authorized(uid)) return false;
+    const bool active = m_connection->videoStream()->enabled();
+    return m_endpoint->setDisplayPolicy(active, active && m_wakeDisplayOnConnect);
 }
 
 void VirtualSessionTransport::restoreFixedVideoQuality(std::optional<quint32> uid)

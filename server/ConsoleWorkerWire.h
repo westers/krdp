@@ -44,9 +44,11 @@ namespace KRdp::ConsoleWorkerWire
 //   and Error (the worker's reason for failing); anything else - EncoderStats
 //   included - fails it.
 // Broker -> worker: nothing but Stop before the worker authenticated, and
-//   nothing but Stop/RequestKeyFrame before Ready.
+//   only Stop/RequestKeyFrame/DisplayPolicy before Ready. DisplayPolicy requires
+//   the authenticated Hello and conveys streaming demand, never input authority.
 // 6 (WS-D camera): camera policy, format, compressed samples and worker demand.
-constexpr quint16 ProtocolVersion = 6;
+// 7 (T07): per-desktop display wake/inhibition, also before first capture.
+constexpr quint16 ProtocolVersion = 7;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -103,8 +105,9 @@ enum class Kind : quint8 {
     CameraFrame,
     CameraResult,
     CameraDemand,
+    DisplayPolicy,
 };
-constexpr Kind LastKind = Kind::CameraDemand;
+constexpr Kind LastKind = Kind::DisplayPolicy;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;
@@ -1055,6 +1058,40 @@ struct ControlState {
     bool active = false;
     bool operator==(const ControlState &) const = default;
 };
+
+/** Broker -> authenticated desktop worker. Revision is endpoint-local and
+ * strictly increases; independent from input ownership because viewers also
+ * need usable capture. No display mutation/unlock permission is granted. */
+struct DisplayPolicy {
+    quint64 revision = 0;
+    bool active = false;
+    bool wakeEnabled = false;
+    bool operator==(const DisplayPolicy &) const = default;
+};
+
+inline QByteArray frame(const DisplayPolicy &policy)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << policy.revision << quint8(policy.active) << quint8(policy.wakeEnabled);
+    return frame(Kind::DisplayPolicy, payload);
+}
+
+inline std::optional<DisplayPolicy> displayPolicy(const Record &record)
+{
+    if (record.kind != Kind::DisplayPolicy || record.payload.size() != 10) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    DisplayPolicy policy;
+    quint8 active = 0, wake = 0;
+    stream >> policy.revision >> active >> wake;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !policy.revision
+        || active > 1 || wake > 1 || (!active && wake)) return std::nullopt;
+    policy.active = active;
+    policy.wakeEnabled = wake;
+    return policy;
+}
 
 struct VideoQuality {
     quint64 generation = 0;

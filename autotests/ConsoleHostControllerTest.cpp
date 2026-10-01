@@ -19,6 +19,39 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void displayPolicyTracksAdmittedViewersAcrossControlTransfer()
+    {
+        Server server;
+        RdpConnection first(&server, -1), second(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.m_sessions = {{QStringLiteral("3"), QStringLiteral("westers"), QStringLiteral("seat0"),
+            QStringLiteral("wayland"), QStringLiteral("user"), QStringLiteral("active"), true, 1000}};
+        host.addClient(&first);
+        host.addClient(&second);
+        auto &owner = *host.m_clients[0];
+        auto &viewer = *host.m_clients[1];
+        owner.uid = viewer.uid = 1000;
+        first.videoStream()->setEnabled(true);
+        second.videoStream()->setEnabled(true);
+        QVERIFY(!host.displayPolicy().active); // Streaming alone conveys no admission.
+        host.m_control.admit(owner.id);
+        host.m_control.admit(viewer.id);
+        owner.preferences.wakeDisplayOnConnect = false;
+        viewer.preferences.wakeDisplayOnConnect = true;
+        QVERIFY(host.displayPolicy().active && host.displayPolicy().wakeEnabled);
+        QVERIFY(host.m_control.acquire(owner.id));
+        QVERIFY(host.m_control.release(owner.id));
+        QVERIFY(host.m_control.acquire(viewer.id));
+        QVERIFY(host.displayPolicy().wakeEnabled); // Input ownership does not remove viewer demand.
+        second.videoStream()->setEnabled(false);
+        QVERIFY(host.displayPolicy().active && !host.displayPolicy().wakeEnabled);
+        first.videoStream()->setEnabled(false);
+        QVERIFY(!host.displayPolicy().active);
+        second.videoStream()->setEnabled(true);
+        viewer.uid = 1001; // A different account on the unlocked seat is inadmissible.
+        QVERIFY(!host.displayPolicy().active);
+    }
+
     void perUserDefaultsSurviveControlTransferWithoutCrossingAccounts()
     {
         Server server;

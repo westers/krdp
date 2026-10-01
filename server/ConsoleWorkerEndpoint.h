@@ -57,6 +57,9 @@ public:
     void sendInput(const ConsoleWorkerWire::Input &input);
     void setMedia(const ConsoleWorkerWire::Media &media);
     void setControlState(const ConsoleWorkerWire::ControlState &state);
+    /** Authenticated demand, including before Ready when DPMS can block capture.
+     * Latest desired state is sent when Hello authenticates. No input grant. */
+    bool setDisplayPolicy(bool active, bool wakeEnabled);
     bool setVideoQuality(const ConsoleWorkerWire::VideoQuality &quality);
     /** AUD-FIX7: the controlling connection's codec, encoder settings and frame rate. */
     bool setEncoderConfig(const ConsoleWorkerWire::EncoderConfig &config);
@@ -92,6 +95,7 @@ public:
     bool removeVirtual(const ConsoleWorkerWire::RemoveVirtual &request);
 
 Q_SIGNALS:
+    void workerAuthenticated(const KRdp::ConsoleHandoff::Target &target);
     void workerReady(const KRdp::ConsoleHandoff::Target &target);
     void workerStopped();
     void frameReceived(const KRdp::VideoFrame &frame);
@@ -147,5 +151,6 @@ private:
     QVector<ConsoleWorkerWire::EncoderReport> m_earlyReports;
     qint64 m_workerCpuNs = -1;
     std::optional<ConsoleWorkerWire::CursorShape> m_cursorShape;
+    std::optional<ConsoleWorkerWire::DisplayPolicy> m_displayPolicy;
 };
 }

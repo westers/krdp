@@ -88,6 +88,7 @@ void ConsoleWorkerEndpoint::close()
     m_authenticated = false;
     m_ready = false;
     m_stopRequested = false;
+    m_displayPolicy.reset();
     m_encoderCaps.reset();
     m_earlyReports.clear();
     m_workerCpuNs = -1;
@@ -157,6 +158,21 @@ void ConsoleWorkerEndpoint::setControlState(const ConsoleWorkerWire::ControlStat
     if (m_ready && m_worker) {
         m_worker->write(ConsoleWorkerWire::frame(state));
     }
+}
+
+bool ConsoleWorkerEndpoint::setDisplayPolicy(bool active, bool wakeEnabled)
+{
+    wakeEnabled &= active;
+    if (m_stopRequested) return false;
+    if (m_displayPolicy && m_displayPolicy->active == active && m_displayPolicy->wakeEnabled == wakeEnabled) return true;
+    const auto revision = m_displayPolicy ? m_displayPolicy->revision + 1 : quint64(1);
+    if (!revision) {
+        stopWorker(); // Never wrap and replay a stale grant.
+        return false;
+    }
+    m_displayPolicy = ConsoleWorkerWire::DisplayPolicy{revision, active, wakeEnabled};
+    if (!m_authenticated || !m_worker) return true; // Desired state only, no pre-auth bytes.
+    return m_worker->write(ConsoleWorkerWire::frame(*m_displayPolicy)) >= 0;
 }
 
 bool ConsoleWorkerEndpoint::resize(const ConsoleWorkerWire::Resize &request)
@@ -341,7 +357,11 @@ bool ConsoleWorkerEndpoint::processRecords()
             m_authenticationDeadline.stop();
             if (m_stopRequested) {
                 send(ConsoleWorkerWire::Kind::Stop);
+            } else {
+                if (m_displayPolicy) m_worker->write(ConsoleWorkerWire::frame(*m_displayPolicy));
+                Q_EMIT workerAuthenticated(m_target);
             }
+            if (!m_worker) return false;
             continue;
         }
         // AUD-FIX7: the worker's encoder probe comes right after Hello, before Ready.
@@ -474,6 +494,7 @@ void ConsoleWorkerEndpoint::workerDisconnected()
     m_earlyReports.clear();
     m_workerCpuNs = -1;
     m_cursorShape.reset();
+    m_displayPolicy.reset();
     if (wasReady) {
         Q_EMIT workerStopped();
     }

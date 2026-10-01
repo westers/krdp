@@ -21,7 +21,46 @@ private Q_SLOTS:
     void rejectsFramesBeforeCaptureReady();
     void rejectsTakeoverBeforeCaptureReady();
     void rejectsWrongWorkerToken();
+    void displayDemandRequiresHelloButNotFirstCapture();
 };
+
+void ConsoleWorkerEndpointTest::displayDemandRequiresHelloButNotFirstCapture()
+{
+    QTemporaryDir directory;
+    ConsoleWorkerEndpoint endpoint;
+    const ConsoleHandoff::Target target{ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), quint32(getuid())};
+    const QByteArray token(24, 'd');
+    QVERIFY(endpoint.listen(directory.filePath(QStringLiteral("wake.sock")), target, token));
+    QVERIFY(endpoint.setDisplayPolicy(true, true));
+    QLocalSocket worker;
+    worker.connectToServer(endpoint.socketName());
+    QVERIFY(worker.waitForConnected());
+    QTest::qWait(20);
+    QCOMPARE(worker.bytesAvailable(), 0); // No pre-authentication policy or input grant.
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{target.sessionId, target.uid, token}));
+    worker.flush();
+    QTRY_VERIFY(endpoint.authenticated());
+    QVERIFY(!endpoint.ready());
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    ConsoleWorkerWire::Deframer reader;
+    reader.feed(worker.readAll());
+    const auto first = reader.next();
+    QVERIFY(first);
+    const auto wake = ConsoleWorkerWire::displayPolicy(*first);
+    QVERIFY(wake && wake->active && wake->wakeEnabled);
+    endpoint.setControlState({99, true}); // Input remains gated before Ready.
+    QVERIFY(endpoint.setDisplayPolicy(false, false));
+    QTRY_VERIFY(worker.bytesAvailable() > 0);
+    reader.feed(worker.readAll());
+    const auto second = reader.next();
+    QVERIFY(second);
+    const auto release = ConsoleWorkerWire::displayPolicy(*second);
+    QVERIFY(release && !release->active && !release->wakeEnabled);
+    QVERIFY(release->revision > wake->revision);
+    QVERIFY(!reader.next()); // In particular, no early ControlState.
+    endpoint.stopWorker();
+    QVERIFY(!endpoint.setDisplayPolicy(true, true));
+}
 
 void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
 {

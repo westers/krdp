@@ -103,7 +103,7 @@ private Q_SLOTS:
                 ++reads;
                 seenUid = uid;
                 return BrokerUserSettings::parse("[General]\nQuality=43\nAdaptiveQuality=true\nPreferAudioQuality=true\n"
-                    "StandardClientMedia=false\nSoftwareEncoding=prefer\nAv1Tiles=8\nVirtualStockClientPolicy=refuse\n");
+                    "StandardClientMedia=false\nSoftwareEncoding=prefer\nAv1Tiles=8\nVirtualStockClientPolicy=refuse\nWakeDisplayOnConnect=false\n");
             });
             t.loadUserSettings(std::nullopt);
             QCOMPARE(reads, 0);
@@ -114,6 +114,7 @@ private Q_SLOTS:
             QVERIFY(t.m_adaptiveQuality);
             QVERIFY(t.m_audioPriorityDefault);
             QVERIFY(!t.m_userStandardMedia);
+            QVERIFY(!t.m_wakeDisplayOnConnect);
             QCOMPARE(t.m_connection->videoStream()->av1TilesSetting(), 8);
             QCOMPARE(t.m_connection->videoStream()->softwareEncoding(), CodecPolicy::SoftwareEncoding::Prefer);
             QCOMPARE(t.m_stockPolicy(1000), VirtualStockClient::Policy::Refuse);
@@ -130,6 +131,32 @@ private Q_SLOTS:
             t.loadUserSettings(1000);
             QCOMPARE(t.m_qualityCap, quint8(80));
             QVERIFY(!t.m_audioPriorityDefault);
+        });
+    }
+
+    void displayPolicyRequiresCurrentBindingAndReleasesOnRevoke()
+    {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            workerRecords(worker);
+            const auto generation = t.m_controlGeneration;
+            QVERIFY(!t.syncDisplayPolicy(generation, 1001));
+            QVERIFY(!t.syncDisplayPolicy(generation + 1, 1000));
+            QVERIFY(workerRecords(worker).isEmpty());
+            t.m_wakeDisplayOnConnect = false;
+            QVERIFY(t.syncDisplayPolicy(generation, 1000));
+            std::optional<ConsoleWorkerWire::DisplayPolicy> active;
+            for (const auto &record : workerRecords(worker)) {
+                if (const auto policy = ConsoleWorkerWire::displayPolicy(record)) active = policy;
+            }
+            QVERIFY(active && active->active && !active->wakeEnabled);
+            t.revoke();
+            std::optional<ConsoleWorkerWire::DisplayPolicy> released;
+            for (const auto &record : workerRecords(worker)) {
+                if (const auto policy = ConsoleWorkerWire::displayPolicy(record)) released = policy;
+            }
+            QVERIFY(released && !released->active && !released->wakeEnabled);
+            QVERIFY(released->revision > active->revision);
+            QVERIFY(!t.syncDisplayPolicy(generation, 1000));
         });
     }
 

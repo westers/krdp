@@ -170,6 +170,21 @@ Start T01 and develop the independent parity work while awaiting a user-triggere
 
 **Evidence:** Power-state/capture and inhibition-cookie lifecycle observations, async teardown tests, and lock-state checks.
 
+**2026-09-30 source checkpoint (PARTIAL, unshipped):** Worker session/private-bus
+guard integration, authenticated pre-Ready display demand, admitted viewer
+aggregation, current Virtual binding/revoke policy and delayed-reply teardown
+are implemented on paired wire v7. Five focused pure suites and the isolated
+D-Bus guard suite pass. Buzz → a bounded Sol scratch Console broker :3397 wakes
+after requested DPMS-off, presents the actual lock screen, retains one cookie
+through two viewers/owner departure, and releases after the last disconnect.
+An injected test-worker SIGKILL removes its cookie; its replacement recovers
+capture and final disconnect releases the new cookie. LockedHint stays yes
+during the locked test; an explicit restoration unlock is recorded separately.
+WakeDisplayOnConnect=false sends no wake/inhibit request; temporary preferences
+are restored byte-for-byte. No installed service, retained desktop or Hal test.
+Virtual native namespace policy acceptance and matching T08 KCM/package gates
+remain. Evidence: `~/dev/rdp/evidence/2026-09-30-t07-display-wake/SUMMARY.md`.
+
 ### T08 — Complete the KDE settings page and stock coexistence
 
 **Instructions:** Update the separate Farside KCM to control the new shared model and the correct Console/Virtual services. Label host versus user scope, client overrides and live/restart requirements. Provide privileged handling only where host settings require it; saving per-user preferences must not rewrite host-admin policy. Cover the settings from T04–T07 and update this task's checklist as GPU controls land in T16. Preserve stock KDE KRDP's separate identity.

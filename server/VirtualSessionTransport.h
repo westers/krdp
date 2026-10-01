@@ -108,6 +108,7 @@ private:
     bool authorized() const;
     bool authorized(std::optional<quint32> uid) const;
     bool forwardVideoQuality(quint64 generation, quint8 quality, std::optional<quint32> uid);
+    bool syncDisplayPolicy(quint64 generation, std::optional<quint32> uid);
     void restoreFixedVideoQuality(std::optional<quint32> uid);
     QJsonObject requestResize(const QJsonObject &, std::optional<quint32> uid);
     QJsonObject resizeResult(const ConsoleWorkerWire::ResizeResult &, std::optional<quint32> uid);
@@ -169,6 +170,7 @@ private:
     bool m_userStandardMedia = true;
     void loadUserSettings(std::optional<quint32> uid);
     bool m_audioPriorityDefault = false;
+    bool m_wakeDisplayOnConnect = true;
     bool m_adaptiveQuality = false;
     QString m_cameraLoopbackDevice;
     std::unique_ptr<WorkerCodecBridge> m_codec; // after m_session: destroyed first

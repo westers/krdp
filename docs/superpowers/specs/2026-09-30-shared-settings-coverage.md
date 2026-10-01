@@ -22,7 +22,7 @@ media; selecting it is not consent to capture microphone/camera.
 
 The source implementation currently applies Quality, AdaptiveQuality,
 PreferAudioQuality, SoftwareEncoding, Av1Tiles, StandardClientMedia and
-VirtualStockClientPolicy. Remaining parsed preferences are held for their task's
+VirtualStockClientPolicy and WakeDisplayOnConnect. Remaining parsed preferences are held for their task's
 worker integration. Parsing alone does not claim support. Production broker entry
 points enable the reader; socket-free tests inject it and never read Hal's actual
 settings. Legacy per-user serving remains in place until all parity gates pass.
@@ -57,7 +57,7 @@ the required save/reconnect behavior; live reload is not implemented by this sli
 | VirtualMonitorLayout | client | User preference / Console's client-created outputs | client/single/physical parsed; retained Virtual topology remains separate; T06 |
 | VirtualMonitorFallbackSize | 1920x1080 | User preference / output creation | Even bounded dimensions parsed; hardware limits still enforced at application; T06 |
 | VaapiDriverMode | auto | Host device setup plus user backend preference / both | Process/worker setting remains host-controlled; driver choices cannot mutate root broker environment; equivalent T05/T15/T16 |
-| WakeDisplayOnConnect | true | User preference / Console physical seat; Virtual own desktop only | Parsed; worker session-bus integration T07 |
+| WakeDisplayOnConnect | true | User preference / Console physical seat; Virtual own desktop only | Applied through authenticated wire v7 DisplayPolicy, worker session/private bus; Console live enabled/disabled/viewer/failure gates pass; Virtual native and KCM gates remain |
 | StandardClientMedia | true | Host ceiling AND user preference AND consent / both | User may opt out; never turns denied host permission on; T11/T12 live media |
 | VirtualStockClientPolicy | attach-or-create | User preference / Virtual | Same validated transaction; attach-or-create/refuse applied before stock-client gate |
 | CameraLoopbackDevice | empty | Host device grant / both | Existing host CLI path; user config cannot select/grant arbitrary device; equivalent device mapping T04/T08/T11 |
@@ -78,6 +78,18 @@ per-device consent/reselection, display-control/layout/resize and supported topo
 operations. Worker generations and ownership checks remain authoritative; no new
 record chooses a configuration UID. Worker loss/rebinding clears previous owner's
 overrides and reapplies the new connection's validated defaults.
+
+Display demand is independent of input ownership: Console aggregates eligible,
+admitted, streaming viewers and enables waking/inhibition if any of them wants
+it. A worker may receive this policy after authenticated Hello, before capture
+Ready, so sleeping outputs cannot prevent the wake that makes capture usable.
+No input/layout authority is granted before Ready. Strictly increasing policy
+revisions reject stale reactivation after release. Virtual sends demand only
+for its current authenticated attachment and releases it on revoke. Its worker
+uses the private desktop bus; root broker buses are never used for this policy.
+The paired broker/worker wire is now v7 in source; installed fleet remains v6.
+Delayed Inhibit replies release their cookies even after guard destruction,
+using the replying service's unique owner rather than a replacement service.
 
 ## Remaining gates
 

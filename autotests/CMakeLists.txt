@@ -854,6 +854,17 @@ target_link_libraries(FarsideMigrationTest PRIVATE Qt6::Test KRdpLegacyMigration
 add_test(NAME FarsideMigrationTest COMMAND FarsideMigrationTest)
 
 # Shared broker preferences and the bounded, per-uid configuration reader.
+add_executable(DisplayWakePolicyTest DisplayWakePolicyTest.cpp)
+target_include_directories(DisplayWakePolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(DisplayWakePolicyTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
+add_test(NAME DisplayWakePolicyTest COMMAND DisplayWakePolicyTest)
+
+add_executable(DisplayWakeGuardTest DisplayWakeGuardTest.cpp ../server/DisplayWakeGuard.cpp)
+target_include_directories(DisplayWakeGuardTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(DisplayWakeGuardTest PRIVATE Qt6::Test Qt6::Core Qt6::DBus)
+# Explicitly invoked inside a fresh private dbus-run-session on Sol; do not add
+# this daemon integration check to the default ctest set or run it on Hal.
+
 add_executable(BrokerUserSettingsTest BrokerUserSettingsTest.cpp)
 target_link_libraries(BrokerUserSettingsTest PRIVATE Qt6::Test KRdpBrokerUserSettings)
 add_test(NAME BrokerUserSettingsTest COMMAND BrokerUserSettingsTest)

@@ -9,6 +9,8 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDebug>
+#include <QPointer>
+#include <utility>
 
 using namespace Qt::StringLiterals;
 
@@ -23,10 +25,32 @@ QDBusMessage screenSaverCall(const QString &method)
 {
     return QDBusMessage::createMethodCall(u"org.freedesktop.ScreenSaver"_s, u"/ScreenSaver"_s, u"org.freedesktop.ScreenSaver"_s, method);
 }
+
+// A delayed Inhibit reply can arrive after the guard/worker was destroyed.
+// Keep just the reply watcher alive and release on the same desktop bus and
+// unique service owner. Never send an old cookie to a replacement service.
+void releaseCookie(const QDBusConnection &connection, uint cookie, const QString &owner)
+{
+    auto message = QDBusMessage::createMethodCall(owner.isEmpty() ? u"org.freedesktop.ScreenSaver"_s : owner,
+        u"/ScreenSaver"_s, u"org.freedesktop.ScreenSaver"_s, u"UnInhibit"_s);
+    message << cookie;
+    auto *watcher = new QDBusPendingCallWatcher(connection.asyncCall(message));
+    QObject::connect(watcher, &QDBusPendingCallWatcher::finished, watcher, [watcher] {
+        const QDBusPendingReply<> reply = *watcher;
+        if (reply.isError()) qWarning() << "Failed to release desktop inhibition:" << reply.error().message();
+        watcher->deleteLater();
+    });
+}
 }
 
 DisplayWakeGuard::DisplayWakeGuard(QObject *parent)
+    : DisplayWakeGuard(QDBusConnection::sessionBus(), parent)
+{
+}
+
+DisplayWakeGuard::DisplayWakeGuard(const QDBusConnection &connection, QObject *parent)
     : QObject(parent)
+    , m_connection(connection)
 {
 }
 
@@ -44,6 +68,8 @@ void DisplayWakeGuard::setEnabled(bool enabled)
         return;
     }
     m_enabled = enabled;
+
+    if (!enabled) ++m_wakeSerial; // Invalidate an outstanding wake/fallback.
 
     if (!m_enabled && m_inhibitCookie.has_value()) {
         uninhibit();
@@ -74,6 +100,8 @@ void DisplayWakeGuard::release()
         return;
     }
 
+    ++m_wakeSerial;
+
     // If the Inhibit reply is still in flight, its handler releases the cookie.
     if (m_inhibitCookie.has_value()) {
         uninhibit();
@@ -87,9 +115,11 @@ void DisplayWakeGuard::wakeNow()
 
 void DisplayWakeGuard::wakeDisplay()
 {
-    auto watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(powerManagementCall(u"wakeup"_s)), this);
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher]() {
+    const auto serial = ++m_wakeSerial;
+    auto watcher = new QDBusPendingCallWatcher(m_connection.asyncCall(powerManagementCall(u"wakeup"_s)), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, serial]() {
         watcher->deleteLater();
+        if (serial != m_wakeSerial) return;
         QDBusPendingReply<> reply = *watcher;
         if (reply.isError()) {
             qWarning() << "PowerDevil wakeup failed, falling back to ScreenSaver.SimulateUserActivity:" << reply.error().message();
@@ -103,9 +133,11 @@ void DisplayWakeGuard::wakeDisplay()
 
 void DisplayWakeGuard::simulateUserActivity()
 {
-    auto watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(screenSaverCall(u"SimulateUserActivity"_s)), this);
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher]() {
+    const auto serial = m_wakeSerial;
+    auto watcher = new QDBusPendingCallWatcher(m_connection.asyncCall(screenSaverCall(u"SimulateUserActivity"_s)), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, serial]() {
         watcher->deleteLater();
+        if (serial != m_wakeSerial) return;
         QDBusPendingReply<> reply = *watcher;
         if (reply.isError()) {
             qWarning() << "ScreenSaver.SimulateUserActivity failed:" << reply.error().message();
@@ -125,23 +157,33 @@ void DisplayWakeGuard::inhibit()
     m_inhibitPending = true;
 
     auto message = screenSaverCall(u"Inhibit"_s);
-    message << u"krdpserver"_s << u"Remote desktop session active"_s;
-    auto watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message), this);
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher]() {
+    message << u"Farside"_s << u"Remote desktop session active"_s;
+    // Intentionally not parented to the guard: its reply must retire even if
+    // teardown happens before ScreenSaver answers. The watcher owns its slot.
+    const QPointer<DisplayWakeGuard> guard(this);
+    const auto connection = m_connection;
+    auto watcher = new QDBusPendingCallWatcher(connection.asyncCall(message));
+    connect(watcher, &QDBusPendingCallWatcher::finished, watcher, [guard, connection, watcher]() {
         watcher->deleteLater();
-        m_inhibitPending = false;
+        if (guard) guard->m_inhibitPending = false;
 
         QDBusPendingReply<uint> reply = *watcher;
         if (reply.isError()) {
             qWarning() << "Failed to inhibit screen power management:" << reply.error().message();
             return;
         }
-        m_inhibitCookie = reply.value();
-        qInfo() << "Inhibited screen power management for the remote desktop session, cookie" << *m_inhibitCookie;
+        const auto owner = reply.reply().service();
+        if (!guard) {
+            releaseCookie(connection, reply.value(), owner);
+            return;
+        }
+        guard->m_inhibitCookie = reply.value();
+        guard->m_inhibitOwner = owner;
+        qInfo() << "Inhibited screen power management for the remote desktop session, cookie" << *guard->m_inhibitCookie;
 
         // The last session may already have ended while the call was in flight.
-        if (m_activeSessions == 0 || !m_enabled) {
-            uninhibit();
+        if (guard->m_activeSessions == 0 || !guard->m_enabled) {
+            guard->uninhibit();
         }
     });
 }
@@ -151,15 +193,6 @@ void DisplayWakeGuard::uninhibit()
     const auto cookie = *m_inhibitCookie;
     m_inhibitCookie.reset();
 
-    auto message = screenSaverCall(u"UnInhibit"_s);
-    message << cookie;
-    auto watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message), this);
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [watcher]() {
-        watcher->deleteLater();
-        QDBusPendingReply<> reply = *watcher;
-        if (reply.isError()) {
-            qWarning() << "Failed to release screen power management inhibition:" << reply.error().message();
-        }
-    });
+    releaseCookie(m_connection, cookie, std::exchange(m_inhibitOwner, {}));
     qInfo() << "Released screen power management inhibition, cookie" << cookie;
 }

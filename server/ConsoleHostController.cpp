@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "ConsoleHostController.h"
+#include "DisplayWakePolicy.h"
 
 #include <QScopeGuard>
 #include "AudioPriority.h"
@@ -236,6 +237,9 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         }
     });
     connect(m_server, &Server::newConnectionCreated, this, &ConsoleHostController::addClient);
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::workerAuthenticated, this, [this](const auto &) {
+        syncDisplayPolicy(); // Wake can be necessary before capture proves Ready.
+    });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerReady, this, [this](const auto &target) {
         apply(m_handoff.workerReady(target));
         m_backoff.reset();
@@ -474,6 +478,7 @@ void ConsoleHostController::setSeatSessions(const QList<ConsoleSeat::Session> &s
     // gone before a worker for it can become ready.
     enforceAdmission();
     apply(m_handoff.reconcile(m_sessions));
+    syncDisplayPolicy();
 }
 
 void ConsoleHostController::workerExited(const QString &socketName)
@@ -780,7 +785,10 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     client->connections.append(connect(connection->videoStream(), &VideoStream::keyFrameRequested,
                                        &m_endpoint, [this](int) { m_endpoint.requestKeyFrame(); }, Qt::QueuedConnection));
     client->connections.append(connect(connection->videoStream(), &VideoStream::enabledChanged,
-                                       &m_endpoint, [this]() { m_endpoint.requestKeyFrame(); }, Qt::QueuedConnection));
+                                       &m_endpoint, [this]() {
+        syncDisplayPolicy();
+        m_endpoint.requestKeyFrame();
+    }, Qt::QueuedConnection));
     client->connections.append(connect(client->session.get(), &AbstractSession::frameReceived, connection->videoStream(), &VideoStream::queueFrame));
     client->connections.append(connect(client->session.get(), &ConsoleWorkerSession::keyFrameRequested, &m_endpoint, &ConsoleWorkerEndpoint::requestKeyFrame));
     client->connections.append(connect(connection->inputHandler(), &InputHandler::inputEvent, client->session.get(), &AbstractSession::sendEvent));
@@ -1695,6 +1703,24 @@ void ConsoleHostController::syncControlState()
             else client->codec->unbind();
         }
     }
+    syncDisplayPolicy();
+}
+
+ConsoleWorkerWire::DisplayPolicy ConsoleHostController::displayPolicy() const
+{
+    QVector<DisplayViewer> viewers;
+    for (const auto &client : m_clients) {
+        viewers.append({client->connection && m_control.admitted(client->id) && admissible(*client),
+                        client->connection && client->connection->videoStream()->enabled(),
+                        client->preferences.wakeDisplayOnConnect.value_or(true)});
+    }
+    return displayPolicyFor(viewers);
+}
+
+void ConsoleHostController::syncDisplayPolicy()
+{
+    const auto policy = displayPolicy();
+    m_endpoint.setDisplayPolicy(policy.active, policy.wakeEnabled);
 }
 
 void ConsoleHostController::syncCodecPolicy()

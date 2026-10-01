@@ -55,6 +55,8 @@
 #include "ConsoleTopologyLease.h"
 #include "ConsoleTopologyRelease.h"
 #include "OutputRestoreJournal.h"
+#include "DisplayWakeGuard.h"
+#include "DisplayWakePolicy.h"
 #include "RetainedMultiResizePlan.h"
 #include "RetainedMultiPositionPlan.h"
 #include "RetainedMultiFitPlan.h"
@@ -514,6 +516,8 @@ private:
             return;
         }
         m_stopping = true;
+        m_displayWake.setEnabled(false);
+        if (m_displayPolicy.current().active) m_displayWake.release();
         m_exitCode = code;
         if (m_physicalPending) failPhysical(QStringLiteral("physical Console worker stopped during layout change"));
         beginConsoleCreatorRelease();
@@ -2472,6 +2476,19 @@ private:
         }
         m_deframer.feed(m_socket.readAll());
         while (const auto record = m_deframer.next()) {
+            if (record->kind == ConsoleWorkerWire::Kind::DisplayPolicy) {
+                const auto policy = ConsoleWorkerWire::displayPolicy(*record);
+                if (!policy) { shutdown(1); return; }
+                const bool wasActive = m_displayPolicy.current().active;
+                if (m_displayPolicy.accept(*policy)) {
+                    m_displayWake.setEnabled(policy->wakeEnabled);
+                    if (policy->active != wasActive) {
+                        if (policy->active) m_displayWake.acquire();
+                        else m_displayWake.release();
+                    }
+                }
+                continue;
+            }
             if (const auto control = ConsoleWorkerWire::controlState(*record)) {
                 if (*control != m_control) {
                     if (m_physicalPending) {
@@ -2813,6 +2830,8 @@ private:
     // AUD-FIX7: the codec policy's encoder config (AVC420 until the controlling connection's).
     ConsoleWorkerWire::EncoderCaps m_encoderCaps;
     ConsoleWorkerWire::EncoderConfig m_encoderConfig;
+    DisplayWakeGuard m_displayWake; // Always the worker's desktop/private bus, never root's bus.
+    DisplayWakePolicy m_displayPolicy;
     bool m_encoderConfigured = false;
     bool m_multiCodecDeferred = false; ///< AUD-FIX9: m_multiSessions still run an older config (being replaced)
     QTimer m_encoderLoadTimer;

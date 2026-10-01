@@ -146,6 +146,8 @@ private:
     void finishTopologyQueries(const QString &error = {});
     void releaseInput();
     void syncControlState();
+    void syncDisplayPolicy();
+    ConsoleWorkerWire::DisplayPolicy displayPolicy() const;
     void finishResize(const QString &error);
     void finishPhysicalTopology(const QString &code, const QString &detail = {});
     void finishVirtualTopology(const QString &code, const QString &detail = {});
