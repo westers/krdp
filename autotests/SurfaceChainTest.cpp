@@ -104,12 +104,16 @@ private Q_SLOTS:
     }
 
     // A codec switch on a live surface: the new codec's deltas (and the old codec's leftovers)
-    // wait for the new codec's keyframe; AVC420/AVC444 are one H.264 chain.
+    // wait for the new codec's keyframe, including encoder changes420/444/v2.
     void aCodecSwitchNeedsTheNewCodecsKeyframe()
     {
         SurfaceChain chain;
         QCOMPARE(chain.admit(VideoCodec::Avc420, true, true, motion(VideoCodec::Avc420, 0)), SurfaceChain::Verdict::Send);
+        QCOMPARE(chain.admit(VideoCodec::Avc444v2, true, false, motion(VideoCodec::Avc420, 1)), SurfaceChain::Verdict::WaitForKeyFrame);
+        QCOMPARE(chain.admit(VideoCodec::Avc444v2, true, true, motion(VideoCodec::Avc420, 0)), SurfaceChain::Verdict::Send);
         QCOMPARE(chain.admit(VideoCodec::Avc444v2, true, false, motion(VideoCodec::Avc420, 1)), SurfaceChain::Verdict::Send);
+        QCOMPARE(chain.admit(VideoCodec::Avc420, true, false, motion(VideoCodec::Avc420, 1)), SurfaceChain::Verdict::WaitForKeyFrame);
+        QCOMPARE(chain.admit(VideoCodec::Avc444, true, false, motion(VideoCodec::Avc420, 1)), SurfaceChain::Verdict::WaitForKeyFrame);
         QCOMPARE(chain.admit(VideoCodec::Av1, true, false, motion(VideoCodec::Av1, 1)), SurfaceChain::Verdict::WaitForKeyFrame);
         QCOMPARE(chain.admit(VideoCodec::Av1, true, true, motion(VideoCodec::Av1, 0)), SurfaceChain::Verdict::Send);
         QCOMPARE(chain.admit(VideoCodec::Avc420, true, false, motion(VideoCodec::Avc420, 2)), SurfaceChain::Verdict::WaitForKeyFrame);

@@ -19,6 +19,49 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void savedAvcPreferenceAppliesOnlyToTheSoleAdmittedController()
+    {
+        Server server;
+        RdpConnection first(&server, -1), second(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.m_sessions = {{QStringLiteral("3"), QStringLiteral("westers"), QStringLiteral("seat0"),
+            QStringLiteral("wayland"), QStringLiteral("user"), QStringLiteral("active"), true, 1000}};
+        host.addClient(&first); host.addClient(&second);
+        auto &a = *host.m_clients[0]; auto &b = *host.m_clients[1];
+        a.uid = b.uid = 1000;
+        a.preferences.codec = CodecPreference::Avc444;
+        host.m_control.admit(a.id);
+        host.syncControlState();
+        QCOMPARE(first.videoStream()->codecPreference(), CodecPreference::Avc444);
+        QCOMPARE(first.videoStream()->codecForSessions(), VideoCodec::Avc420); // No worker probe yet.
+        first.videoStream()->setAvc444Available(true);
+        QCOMPARE(first.videoStream()->codecForSessions(), VideoCodec::Avc444v2);
+        host.m_control.admit(b.id);
+        host.syncCodecPolicy();
+        QCOMPARE(first.videoStream()->codecPreference(), CodecPreference::Avc420);
+        QCOMPARE(first.videoStream()->codecForSessions(), VideoCodec::Avc420);
+        QCOMPARE(second.videoStream()->codecForSessions(), VideoCodec::Avc420);
+        host.m_control.remove(b.id);
+        host.syncCodecPolicy();
+        QCOMPARE(first.videoStream()->codecPreference(), CodecPreference::Avc444);
+        QCOMPARE(first.videoStream()->codecForSessions(), VideoCodec::Avc444v2);
+        a.preferences.codec = CodecPreference::Avc420;
+        host.syncCodecPolicy();
+        QCOMPARE(first.videoStream()->codecForSessions(), VideoCodec::Avc420);
+        QVERIFY(host.m_control.release(a.id));
+        host.syncControlState();
+        QCOMPARE(first.videoStream()->codecPreference(), CodecPreference::Avc420);
+        a.preferences.codec = CodecPreference::Avc444;
+        QVERIFY(host.m_control.acquire(a.id));
+        host.syncControlState();
+        QCOMPARE(first.videoStream()->codecPreference(), CodecPreference::Avc444);
+        QCOMPARE(first.videoStream()->codecForSessions(), VideoCodec::Avc420); // New binding needs a probe.
+        a.preferences.codec = CodecPreference::Avc444;
+        a.uid = 1001; // Prior admission does not retain another user's unlocked desktop grant.
+        host.syncCodecPolicy();
+        QCOMPARE(first.videoStream()->codecPreference(), CodecPreference::Avc420);
+    }
+
     void chromaPolicyIsControllerScopedAndResetsAfterTransfer()
     {
         Server server;

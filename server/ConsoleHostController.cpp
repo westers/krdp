@@ -745,10 +745,10 @@ void ConsoleHostController::setWorkerActive(bool active)
 
 void ConsoleHostController::addClient(RdpConnection *connection)
 {
-    // The cross-session worker's H.264 encoder is 4:2:0: no AVC444. Private codecs (HEVC/AV1)
-    // go through the codec policy (AUD-FIX7, syncCodecPolicy()): the worker restarts its encoder
-    // for them, and only while the controlling client is the only one watching.
+    // Shared viewers use AVC420. A sole admitted controller may use its saved
+    // AVC preference or private codec; the bound worker's actual probe gates444.
     connection->videoStream()->setCodecPreference(CodecPreference::Avc420);
+    connection->videoStream()->setAvc444Available(false);
     if (m_videoHost) {
         connection->videoStream()->setEncoderPolicy(m_videoHost->probe.encoders, m_videoHost->mode);
         connection->videoStream()->setAv1TilesSetting(m_videoHost->av1Tiles);
@@ -864,7 +864,6 @@ void ConsoleHostController::addClient(RdpConnection *connection)
             m_control.admit(id);
             if (const auto shape = m_endpoint.cursorShape()) CursorTracker::apply(*connection->cursor(), *shape);
             syncControlState();
-            syncCodecPolicy();
             sendLayouts();
             // Frames were withheld until now; start this client on a key frame.
             m_endpoint.requestKeyFrame();
@@ -1590,7 +1589,6 @@ void ConsoleHostController::removeClient(RdpConnection *connection, ConsoleContr
         m_control.remove(client->id);
     }
     syncControlState();
-    syncCodecPolicy();
     updateMedia();
     sendLayouts();
 }
@@ -1719,6 +1717,7 @@ void ConsoleHostController::syncControlState()
             else client->codec->unbind();
         }
     }
+    syncCodecPolicy();
     syncDisplayPolicy();
 }
 
@@ -1750,6 +1749,8 @@ void ConsoleHostController::syncCodecPolicy()
         const bool owner = m_control.ownsControl(client->id);
         const bool eligible = m_videoHost && client->codecRequest && owner && admitted == 1 && m_control.admitted(client->id);
         auto *stream = client->connection->videoStream();
+        const bool alone = owner && admitted == 1 && m_control.admitted(client->id) && admissible(*client);
+        stream->setCodecPreference(alone ? client->preferences.codec.value_or(CodecPreference::Auto) : CodecPreference::Avc420);
         if (eligible && !client->codecApplied) {
             QString log;
             const auto record = CodecRequest::apply(*stream, *client->codecRequest, &log);

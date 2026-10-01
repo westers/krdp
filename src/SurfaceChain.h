@@ -91,28 +91,29 @@ public:
     /// Whether a frame of \a codec may go out on this surface now (and, if so, record it).
     Verdict admit(VideoCodec codec, bool codecKnown, bool isKeyFrame, const QByteArray &data)
     {
-        const int family = codecFamily(codec);
         if (isKeyFrame) {
             if (codecKnown && !keyframeCarriesHeaders(codec, data)) {
-                m_family.reset();
+                m_codec.reset();
                 return Verdict::KeyFrameWithoutHeaders;
             }
-            m_family = family;
+            m_codec = codec;
             return Verdict::Send;
         }
-        return m_family == family ? Verdict::Send : Verdict::WaitForKeyFrame;
+        // A new AVC format also opens a new encoder/auxiliary chain. Its deltas
+        // cannot reference the prior420/444/v2 encoder's decoded picture.
+        return m_codec == codec ? Verdict::Send : Verdict::WaitForKeyFrame;
     }
     /// A frame of this surface's chain was not sent: the next one must be a keyframe.
     void broken()
     {
-        m_family.reset();
+        m_codec.reset();
     }
     std::optional<int> family() const
     {
-        return m_family;
+        return m_codec ? std::optional(codecFamily(*m_codec)) : std::nullopt;
     }
 
 private:
-    std::optional<int> m_family;
+    std::optional<VideoCodec> m_codec;
 };
 }

@@ -185,6 +185,22 @@ and multi-screen adaptive gates, telemetry and controlled audio acceptance remai
 along with T08. No package/config cutover or installed service restart. Evidence
 `~/dev/rdp/evidence/2026-09-30-t05-chroma-policy/SUMMARY.md`.
 
+**2026-09-30 AVC preference source checkpoint (PARTIAL, unshipped):** Both brokers
+apply the saved standard AVC preference within actual client capabilities and
+current worker availability. Shared Console viewers use420; sole admitted owner
+and current Virtual attachment may use444. Control release/acquire and viewer
+departure recompute policy; auxiliary/software failure revokes444, unbind clears
+availability and replacement applies its own probe. Private HEVC/AV1 stays active
+and falls back using current AVC policy. Codec choice is a single atomic snapshot,
+queued consumers read current policy, and exact format changes discard stale
+packets until a header-bearing keyframe. Eight focused suites pass. Sol/Buzz
+one/two-viewer streams prove real AVC420 fallback when saved444 is unavailable;
+this does not establish actual444 auxiliary encoding. Hardware444/multi-screen/
+adaptive/telemetry/audio and matching T08/package gates remain. Settings restored
+byte-for-byte, scratch listener/TLS/desktop permission removed, installed services
+and physical/private desktop processes preserved. Evidence
+`~/dev/rdp/evidence/2026-09-30-t05-avc-selection/SUMMARY.md`.
+
 ### T06 — Complete monitor capture and layout parity
 
 **Instructions:** Preserve Console's single-monitor, whole-workspace and independent-monitor capture choices, selection and coordinate handling. Carry the useful per-client virtual-output replace/extend/fallback behavior into Console with verified restore and local takeover. Keep these capture/layout choices distinct from the connection type. Preserve Virtual's selected-layout creation, retained topology and standard-client attach-or-create behavior. Use the existing topology/restore code where it fits; do not extend frozen experiments beyond the required parity without recording why.

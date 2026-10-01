@@ -884,8 +884,12 @@ public:
         }
     }
 
-    void onNegotiatedCodecChanged(KRdp::VideoCodec codec)
+    void onNegotiatedCodecChanged(KRdp::VideoCodec)
     {
+        if (!connection) return;
+        // Caps and authenticated policy can change on different threads. A
+        // queued notification may already be superseded when it reaches us.
+        const auto codec = connection->videoStream()->codecForSessions();
         for (const auto &session : sessions) {
             session->setVideoCodec(codec);
         }

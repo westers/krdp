@@ -103,7 +103,7 @@ private Q_SLOTS:
                 ++reads;
                 seenUid = uid;
                 return BrokerUserSettings::parse("[General]\nQuality=43\nAdaptiveQuality=true\nPreferAudioQuality=true\n"
-                    "StandardClientMedia=false\nSoftwareEncoding=prefer\nAv1Tiles=8\nVirtualStockClientPolicy=refuse\nWakeDisplayOnConnect=false\nAvc444MotionGapMs=200\nAvc444RestMs=300\nAvc444MaxGapMs=1200\n");
+                    "StandardClientMedia=false\nSoftwareEncoding=prefer\nAv1Tiles=8\nVirtualStockClientPolicy=refuse\nWakeDisplayOnConnect=false\nAvc444MotionGapMs=200\nAvc444RestMs=300\nAvc444MaxGapMs=1200\nCodec=avc444\n");
             });
             t.loadUserSettings(std::nullopt);
             QCOMPARE(reads, 0);
@@ -118,6 +118,7 @@ private Q_SLOTS:
             QCOMPARE(t.m_connection->videoStream()->av1TilesSetting(), 8);
             QCOMPARE(t.m_connection->videoStream()->softwareEncoding(), CodecPolicy::SoftwareEncoding::Prefer);
             QCOMPARE(t.m_stockPolicy(1000), VirtualStockClient::Policy::Refuse);
+            QCOMPARE(t.m_connection->videoStream()->codecPreference(), CodecPreference::Avc444);
             QCOMPARE(t.m_codec->chromaPolicy(), (ChromaPolicy{200, 300, 1200}));
             t.loadUserSettings(1001);
             QCOMPARE(reads, 1);
@@ -2334,6 +2335,64 @@ private Q_SLOTS:
             QCOMPARE(t.m_codec->chromaPolicy(), initial);
             QVERIFY(!t.m_codec->config());
             Q_UNUSED(endpoint);
+        });
+    }
+
+    void savedAvcPreferenceUsesTheCurrentWorkerAndRevokesOnAuxiliaryFailure()
+    {
+        microphoneFixture([&](auto &t, auto &, auto &endpoint, auto &worker) {
+            t.setUserSettingsReader([](quint32) {
+                return BrokerUserSettings::parse("[General]\nCodec=avc444\n");
+            });
+            t.loadUserSettings(1000);
+            auto *stream = t.m_connection->videoStream();
+            QCOMPARE(stream->codecPreference(), CodecPreference::Avc444);
+            QCOMPARE(stream->codecForSessions(), VideoCodec::Avc420);
+            workerRecords(worker);
+            ConsoleWorkerWire::EncoderCaps caps;
+            caps.encoders.avc = {true, true, true};
+            caps.avc444Hardware = true;
+            worker.write(ConsoleWorkerWire::frame(caps));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_VERIFY(endpoint.encoderCaps().has_value());
+            QTRY_COMPARE(stream->codecForSessions(), VideoCodec::Avc444v2);
+            std::optional<ConsoleWorkerWire::EncoderConfig> last;
+            for (int i = 0; i < 5; ++i)
+                for (const auto &r : workerRecords(worker))
+                    if (const auto config = ConsoleWorkerWire::encoderConfig(r)) last = config;
+            QVERIFY(last);
+            QCOMPARE(last->codec, VideoCodec::Avc444v2);
+            QCOMPARE(last->generation, t.m_controlGeneration);
+            // A report from another codec cannot disable the selected AVC encoder.
+            QSignalSpy backend(&t.m_session, &AbstractSession::encoderBackendReported);
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderReport{
+                ConsoleWorkerWire::EncoderReport::Event::Backend, VideoCodec::Hevc, false}));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(backend.size(), 1);
+            QCOMPARE(stream->codecForSessions(), VideoCodec::Avc444v2);
+            // Lost auxiliary encoding changes the actual wire format to AVC420.
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderReport{
+                ConsoleWorkerWire::EncoderReport::Event::ChromaCapability, VideoCodec::Avc444v2, false, false}));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(stream->codecForSessions(), VideoCodec::Avc420);
+            last.reset();
+            for (int i = 0; i < 5; ++i)
+                for (const auto &r : workerRecords(worker))
+                    if (const auto config = ConsoleWorkerWire::encoderConfig(r)) last = config;
+            QVERIFY(last);
+            QCOMPARE(last->codec, VideoCodec::Avc420);
+            QCOMPARE(last->generation, t.m_controlGeneration);
+            // Binding a new worker applies its own probe; revoked reports have no authority.
+            t.m_codec->bind(&endpoint, t.m_controlGeneration);
+            QCOMPARE(stream->codecForSessions(), VideoCodec::Avc444v2);
+            t.revoke();
+            QCOMPARE(stream->codecForSessions(), VideoCodec::Avc420);
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderReport{
+                ConsoleWorkerWire::EncoderReport::Event::ChromaCapability, VideoCodec::Avc444v2, false, true}));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTest::qWait(20);
+            QCOMPARE(stream->codecForSessions(), VideoCodec::Avc420);
+            QVERIFY(!t.m_codec->config());
         });
     }
 

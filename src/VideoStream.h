@@ -163,12 +163,15 @@ public:
     Q_SIGNAL void requestedQualityChanged(quint8 quality);
 
     /**
-     * Set which codec family the client should be offered. Call before caps
-     * are advertised (main thread only); a change does not affect a
-     * connection that has already negotiated.
+     * Set the standard AVC preference (main thread). Applies within the formats
+     * allowed by the client's saved GFX caps and actual encoder availability;
+     * an active private codec keeps running and uses this on AVC fallback.
      */
     void setCodecPreference(CodecPreference preference);
     CodecPreference codecPreference() const;
+    /** Workers start unavailable until their own probe arrives. A running
+     * encoder fallback can revoke availability. Does not expand client caps. */
+    void setAvc444Available(bool available);
     /**
      * Select an own-client vendor codec after KRDPCTL capability exchange; nullopt = back to
      * the AVC codec the client's caps selected. Main thread only.

@@ -53,6 +53,16 @@ void WorkerCodecBridge::bind(ConsoleWorkerEndpoint *endpoint, quint64 generation
     m_generation = generation;
     m_endpointConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::encoderCapsReceived, this, &WorkerCodecBridge::applyCaps));
     m_endpointConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::encoderReported, this, [this](const ConsoleWorkerWire::EncoderReport &report) {
+        const QPointer<WorkerCodecBridge> alive(this);
+        if (m_stream && report.codec == m_stream->codecForSessions()) {
+            const bool avcSoftware = report.event == ConsoleWorkerWire::EncoderReport::Event::Backend
+                && !report.hardware && report.codec != VideoCodec::Hevc && report.codec != VideoCodec::Av1;
+            const bool avc444Lost = VideoCodecSupport::isAvc444(report.codec)
+                && (report.event == ConsoleWorkerWire::EncoderReport::Event::Unavailable
+                    || (report.event == ConsoleWorkerWire::EncoderReport::Event::ChromaCapability && !report.chromaCapable));
+            if (avcSoftware || avc444Lost) m_stream->setAvc444Available(false);
+        }
+        if (!alive) return;
         if (m_session) {
             m_session->reportEncoder(report);
         }
@@ -81,7 +91,11 @@ void WorkerCodecBridge::unbind()
     m_endpoint = nullptr;
     m_generation = 0;
     m_sent.reset();
-    if (m_stream) m_stream->setChromaCapable(false);
+    if (m_stream) {
+        const QPointer<WorkerCodecBridge> alive(this);
+        m_stream->setChromaCapable(false);
+        if (alive && m_stream) m_stream->setAvc444Available(false);
+    }
 }
 
 bool WorkerCodecBridge::setChromaPolicy(const ChromaPolicy &policy)
@@ -135,6 +149,7 @@ void WorkerCodecBridge::send(bool force)
 
 void WorkerCodecBridge::applyCaps(const ConsoleWorkerWire::EncoderCaps &caps)
 {
+    const QPointer<WorkerCodecBridge> alive(this);
     if (!m_stream) {
         return;
     }
@@ -145,9 +160,11 @@ void WorkerCodecBridge::applyCaps(const ConsoleWorkerWire::EncoderCaps &caps)
                                                : b.software         ? QStringLiteral("sw")
                                                                     : QStringLiteral("none"));
     };
-    qInfo().noquote() << QStringLiteral("Worker video encoders: %1, %2, %3%4")
+    qInfo().noquote() << QStringLiteral("Worker video encoders: %1, %2, %3%4; AVC444 %5")
                              .arg(one("avc", caps.encoders.avc), one("hevc", caps.encoders.hevc), one("av1", caps.encoders.av1),
-                                  caps.renderNode.isEmpty() ? QString() : QStringLiteral(" on ") + caps.renderNode);
+                                  caps.renderNode.isEmpty() ? QString() : QStringLiteral(" on ") + caps.renderNode,
+                                  caps.avc444Hardware ? QStringLiteral("available") : QStringLiteral("unavailable"));
     m_stream->updateEncoderPolicy(caps.encoders);
+    if (alive && m_stream) m_stream->setAvc444Available(caps.avc444Hardware);
 }
 }

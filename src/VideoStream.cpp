@@ -8,6 +8,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoStream.h"
+#include "AvcCodecSelection.h"
 
 #include <algorithm>
 #include <array>
@@ -53,11 +54,6 @@ namespace clk = std::chrono;
 constexpr uint16_t MaxRdpCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int MaxMonitorLayoutCount = 16;
 constexpr auto KeyFrameRequestMinInterval = clk::seconds(2);
-/// AUD-FIX7: AVC420/AVC444/AVC444v2 are one encoder family (H.264); HEVC and AV1 each their own.
-constexpr int codecFamilyIndex(VideoCodec codec)
-{
-    return codec == VideoCodec::Hevc ? 1 : codec == VideoCodec::Av1 ? 2 : 0;
-}
 constexpr auto QualityUpdateInterval = clk::milliseconds(1500);
 // Don't take adaptive-quality decisions until NetworkDetection has had a few
 // RTT probes (every 70 ms) to establish a minimum-RTT baseline.
@@ -373,15 +369,7 @@ public:
     std::atomic<quint8> qualityCap = 100; // configured Quality
     std::atomic<bool> graphicsDelivered = false; // see VideoStream::graphicsDelivered()
     std::atomic<bool> adaptiveQuality = true;
-    // setCodecPreference()/codecPreference() are main-thread only (set before
-    // caps are advertised); onCapsAdvertise() (peer thread) only reads it.
-    CodecPreference codecPreference = CodecPreference::Auto;
-    // -1 = standard RDPGFX negotiation. Set by the main-thread KRDPCTL preflight before
-    // sessions exist; read by the peer and submission threads beside negotiatedCodec.
-    std::atomic<int> privateCodec = -1;
-    // The AVC codec the client's caps selected (onCapsAdvertise, peer thread); -1 = none yet.
-    // What setPrivateCodec(nullopt) goes back to.
-    std::atomic<int> capsCodec = -1;
+    AvcCodecSelection codecSelection;
     // AUD-FIX2 codec policy (CodecPolicy.h); main thread only. Active once the client asked for
     // at least one private codec.
     CodecPolicy::Encoders encoders; // default: none, so only AVC until setEncoderPolicy()
@@ -411,10 +399,6 @@ public:
     int framesAtLastSample = 0;
     qint64 cpuNsAtLastSample = -1;
     clk::steady_clock::time_point loadSampledAt{};
-    // -1 = not negotiated yet (no CapsAdvertise received). Written on the
-    // FreeRDP peer thread (onCapsAdvertise), read from any thread via
-    // negotiatedCodec()/codecForSessions().
-    std::atomic<int> negotiatedCodec = -1;
     // The adaptive-quality chroma rung's state (AdaptiveQuality::Input::chromaEnabled/
     // Result::chromaEnabled), and whether the running encoder actually reports the aux stream
     // (setChromaCapable(), from AbstractSession::chromaCapabilityChanged via SessionWrapper).
@@ -791,8 +775,8 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
     // the old encoder's last frames (a worker process's still in flight on its socket) are
     // dropped; the new encoder opens with a keyframe.
     if (frame.codec) {
-        const int produced = codecFamilyIndex(*frame.codec);
-        if (produced != codecFamilyIndex(codecForSessions())) {
+        const int produced = int(*frame.codec);
+        if (*frame.codec != codecForSessions()) {
             if (d->droppedCodecFamily.exchange(produced) != produced) {
                 qCInfo(KRDP) << "Dropping" << VideoCodecSupport::codecName(*frame.codec) << "frames: the connection now sends"
                              << VideoCodecSupport::codecName(codecForSessions());
@@ -983,27 +967,22 @@ void VideoStream::setAdaptiveQuality(bool enabled)
 
 void VideoStream::setCodecPreference(CodecPreference preference)
 {
-    d->codecPreference = preference;
+    if (const auto changed = d->codecSelection.setPreference(preference)) Q_EMIT negotiatedCodecChanged(*changed);
 }
 
 CodecPreference VideoStream::codecPreference() const
 {
-    return d->codecPreference;
+    return d->codecSelection.preference();
+}
+
+void VideoStream::setAvc444Available(bool available)
+{
+    if (const auto changed = d->codecSelection.setAvc444Available(available)) Q_EMIT negotiatedCodecChanged(*changed);
 }
 
 void VideoStream::setPrivateCodec(std::optional<VideoCodec> codec)
 {
-    const int value = codec ? int(*codec) : -1;
-    d->privateCodec.store(value);
-    // Back to AVC: the codec the caps selected, not whatever private codec ran before, so the
-    // RDPGFX codec id always matches the encoder the sessions restart with.
-    // Without caps yet: undecided again (onCapsAdvertise() decides), and sessions go back to
-    // the codec they are built for before caps.
-    const int next = codec ? value : d->capsCodec.load();
-    const int previous = d->negotiatedCodec.exchange(next);
-    if (previous != next) {
-        Q_EMIT negotiatedCodecChanged(next >= 0 ? VideoCodec(next) : VideoCodecSupport::expectedCodec(d->codecPreference));
-    }
+    if (const auto changed = d->codecSelection.setPrivateCodec(codec)) Q_EMIT negotiatedCodecChanged(*changed);
 }
 
 namespace
@@ -1434,13 +1413,12 @@ void VideoStream::stepCodecPolicy(bool congested)
 
 std::optional<VideoCodec> VideoStream::negotiatedCodec() const
 {
-    const int v = d->negotiatedCodec.load();
-    return v < 0 ? std::nullopt : std::optional<VideoCodec>(VideoCodec(v));
+    return d->codecSelection.negotiated();
 }
 
 VideoCodec VideoStream::codecForSessions() const
 {
-    return negotiatedCodec().value_or(VideoCodecSupport::expectedCodec(d->codecPreference));
+    return d->codecSelection.forSessions();
 }
 
 bool VideoStream::requestedChroma() const
@@ -1796,18 +1774,15 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
     // Not reset to -1 on a re-advertisement (see the capsConfirmed branch above):
     // the previous codec stays the best guess until the caps parsed just above
     // settle on a new one a few lines later.
-    const int privateCodec = d->privateCodec.load();
-    const VideoCodec capsCodec = VideoCodecSupport::codecFor(selectedCaps->version, selectedCaps->capSet.flags, d->codecPreference);
-    d->capsCodec.store(int(capsCodec));
-    const VideoCodec codec = privateCodec >= 0 ? VideoCodec(privateCodec) : capsCodec;
-    const int previous = d->negotiatedCodec.exchange(int(codec));
+    const auto changed = d->codecSelection.acceptCaps(selectedCaps->version, selectedCaps->capSet.flags);
+    const VideoCodec codec = codecForSessions();
     qCInfo(KRDP).noquote() << QStringLiteral("GFX caps confirmed: %1 codec=%2").arg(QLatin1String(capVersionToString(selectedCaps->version)), QLatin1String(VideoCodecSupport::codecName(codec)));
-    if (previous != int(codec)) {
+    if (changed) {
         // Gated on the codec actually (re)settling on avc420, not on every advertisement: a client
         // that re-sends CapsAdvertise with the same unsupported result (e.g. mstsc) would otherwise
         // log this every time instead of once per negotiation.
-        if (d->codecPreference == CodecPreference::Avc444 && codec == VideoCodec::Avc420) {
-            qCWarning(KRDP) << "Codec=avc444 requested but this client advertises no AVC444 support (caps" << capVersionToString(selectedCaps->version) << "); using avc420";
+        if (codecPreference() == CodecPreference::Avc444 && codec == VideoCodec::Avc420) {
+            qCWarning(KRDP) << "Codec=avc444 requested but client caps or encoder availability require avc420 (caps" << capVersionToString(selectedCaps->version) << ")";
         }
         if (!d->chromaEnabled.exchange(true)) { // a fresh negotiation starts with chroma on
             Q_EMIT requestedChromaChanged(true);
@@ -2158,8 +2133,8 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
 
     // AUD-FIX11 R6: a frame queued before a codec switch is never sent under the new codec's id
     // (queueFrame() checked it against the codec of that moment).
-    if (frame.codec && codecFamily(*frame.codec) != codecFamily(codec)) {
-        const int produced = codecFamily(*frame.codec);
+    if (frame.codec && *frame.codec != codec) {
+        const int produced = int(*frame.codec);
         if (d->droppedAtSendFamily.exchange(produced) != produced) {
             qCInfo(KRDP) << "Dropping queued" << VideoCodecSupport::codecName(*frame.codec) << "frames: the connection now sends" << VideoCodecSupport::codecName(codec);
         }

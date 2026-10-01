@@ -497,6 +497,11 @@ target_include_directories(VideoCodecSupportTest PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_include_directories(VideoCodecSupportTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
 target_link_libraries(VideoCodecSupportTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VideoCodecSupportTest COMMAND VideoCodecSupportTest)
+add_executable(AvcCodecSelectionTest AvcCodecSelectionTest.cpp)
+target_include_directories(AvcCodecSelectionTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(AvcCodecSelectionTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(AvcCodecSelectionTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME AvcCodecSelectionTest COMMAND AvcCodecSelectionTest)
 
 # GfxSurfaceCommand.h uses the RDPGFX bitmap stream structs (FreeRDP headers only, nothing
 # linked) plus QSize, so it needs Qt6::Gui in addition to VideoCodecSupportTest's set above.

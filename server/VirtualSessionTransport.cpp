@@ -63,6 +63,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     connection->setAudioPriorityDefault(false);
     connection->clearAudioPriorityOverride();
     connection->videoStream()->setCodecPreference(CodecPreference::Avc420);
+    connection->videoStream()->setAvc444Available(false);
     connection->videoStream()->setQualityCap(m_qualityCap);
     connection->videoStream()->setAdaptiveQuality(false);
     connection->videoStream()->setEnabled(false);
@@ -250,6 +251,7 @@ void VirtualSessionTransport::loadUserSettings(std::optional<quint32> uid)
         return;
     }
     const auto &p = result.preferences;
+    m_connection->videoStream()->setCodecPreference(p.codec.value_or(CodecPreference::Auto));
     m_chromaDefaults = p.chroma.value_or(ChromaPolicy{});
     m_codec->setChromaPolicy(m_chromaDefaults);
     setVideoQualityPolicy(p.quality.value_or(m_qualityCap), p.adaptiveQuality.value_or(m_adaptiveQuality));

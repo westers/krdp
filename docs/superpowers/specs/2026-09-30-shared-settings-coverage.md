@@ -20,7 +20,7 @@ by standard channel consent. Client device overrides still require authenticated
 ownership and reset on ownership loss. Audio priority applies only with enabled
 media; selecting it is not consent to capture microphone/camera.
 
-The source implementation currently applies Quality, AdaptiveQuality,
+The source implementation currently applies Codec, Quality, AdaptiveQuality,
 PreferAudioQuality, SoftwareEncoding, Av1Tiles, StandardClientMedia and
 VirtualStockClientPolicy and WakeDisplayOnConnect. Remaining parsed preferences are held for their task's
 worker integration. Parsing alone does not claim support. Production broker entry
@@ -44,7 +44,7 @@ the required save/reconnect behavior; live reload is not implemented by this sli
 | CertificateKey | empty | Host admin / both | Independent service TLS, never accepted from user preferences; T08/T10 |
 | Quality | 75 | User preference / both | Validated 0–100, inherited host default 80 when missing; owner reset retains user's cap |
 | AdaptiveQuality | true | User preference / both | Validated Boolean; missing inherits host default false; T05 live recovery |
-| Codec | auto | User preference / both | auto/avc420/avc444 parsed; AVC444 worker parity and application T05 |
+| Codec | auto | User preference / both | auto/avc420/avc444 applied within actual client caps and current worker availability. Console shared viewers use AVC420; sole admitted controller and current Virtual owner honor saved preference. Runtime auxiliary/software fallback revokes444. Actual AVC444 bytes/adaptive acceptance and T08 remain |
 | SoftwareEncoding | auto | User preference / both | auto/never/prefer applied to connection encoder policy; T05 live backend parity |
 | Av1Tiles | auto | User preference / both | auto/1/2/4/8/16 applied to connection, worker bridge; T05 live headers |
 | PreferAudioQuality | false | User preference + owner override / both | Applied/reset; T05 measured audio acceptance |
@@ -98,10 +98,23 @@ Virtual requires its current authenticated attachment. Partial timing updates
 merge atomically over that owner's current tuple. Control transfer/desktop detach
 restore validated user defaults, and old worker reports cannot steer a revoked
 bridge. Acceptance acknowledges policy only, not AVC444 availability. Six focused
-suites and native Sol Console HEVC/dormant-policy transfer pass. AVC444 codec
-preference/actual auxiliary bytes, timing telemetry, native Virtual/multi-screen
+suites and native Sol Console HEVC/dormant-policy transfer pass. AVC444
+actual auxiliary bytes, timing telemetry, native Virtual/multi-screen
 adaptive gates and matching KCM remain T05/T08. Evidence
 `~/dev/rdp/evidence/2026-09-30-t05-chroma-policy/SUMMARY.md`.
+
+The later T05 AVC checkpoint applies saved codec preference dynamically within
+the client's advertised standard formats and the bound worker's actual probe.
+Private HEVC/AV1 retains authority; its AVC fallback uses current preferences
+and capabilities. A lost auxiliary encoder or software fallback removes444
+availability. Shared Console viewers use420; control release/acquire and final
+viewer departure recompute policy. Unbind clears availability, and a replacement
+worker applies its own probe. Old format packets cannot be sent with a new
+codec ID; changing420/444/v2 requires a header-bearing keyframe. Selection uses
+one atomic read snapshot, and queued consumers read current policy. Eight pure
+suites and native Sol/Buzz one/two-viewer AVC420 fallback pass. This is a negative
+availability gate on Sol, not AVC444 hardware acceptance. Evidence
+`~/dev/rdp/evidence/2026-09-30-t05-avc-selection/SUMMARY.md`.
 
 ## Remaining gates
 
