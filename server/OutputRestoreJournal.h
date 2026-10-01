@@ -51,6 +51,7 @@ public:
     static constexpr int Version = 1;
     static constexpr const char *ConsoleResizeOwner = "console-resize";
     static constexpr const char *ConsoleLeaseOwner = "console-lease";
+    static constexpr const char *ConsoleVirtualOwner = "console-virtual-outputs";
     static constexpr const char *OutputGuardOwner = "physical-output-guard";
 
     struct Fields {

@@ -80,6 +80,26 @@ inline std::optional<ConsoleWorkerWire::Topology> confirmedSelection(const Retai
     return result;
 }
 
+inline std::optional<ConsoleWorkerWire::Topology> confirmedProjection(const RetainedKScreenReadback::Snapshot &projection,
+    const ConsoleWorkerWire::Outputs &worker, const QVector<VideoFrame> &keyframes)
+{
+    if (!(worker.monitors.size() == 1
+        ? RetainedKScreenReadback::matchesCapturedSubset(projection, worker, keyframes)
+        : RetainedKScreenReadback::matchesPublished(projection, worker, keyframes))) return {};
+    ConsoleWorkerWire::Topology result;
+    result.complete = false;
+    int secondary = 2;
+    for (const auto &published : worker.monitors) {
+        const auto output = std::find_if(projection.outputs.cbegin(), projection.outputs.cend(), [&published](const auto &entry) {
+            return entry.backendKey == published.name;
+        });
+        if (output == projection.outputs.cend()) return {};
+        result.outputs.append({output->name, output->nativePixels, output->logicalGeometry, output->scale,
+            output->primary, quint8(output->primary ? 1 : secondary++), false});
+    }
+    return result;
+}
+
 // The capture proof above does not contain KScreen's complete priority order.
 // Bind the exact order from the *same* fresh JSON/snapshot before publishing a
 // broker topology; boolean primary or QScreen enumeration cannot reconstruct it.

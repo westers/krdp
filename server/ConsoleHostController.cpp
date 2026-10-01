@@ -169,6 +169,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         }
         m_physicalLeaseActive = false;
         m_consoleCreatorsActive = false;
+        m_configuredConsoleOutputs = false;
         m_physicalLeaseGeneration = 0;
     });
     const auto virtualFinished = [this](quint64 requestId, quint64 generation, const QString &error, bool add) {
@@ -247,6 +248,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         m_failedTarget = {};
         qInfo() << "Console worker ready:" << target.sessionId << "forwarding" << m_inputEnabled;
         m_endpoint.setControlState({m_controlGeneration, m_control.owner() != 0});
+        armConfiguredConsoleOutputs();
         for (const auto &client : m_clients) {
             if (m_control.ownsControl(client->id)) {
                 m_endpoint.setVideoQuality({m_controlGeneration, client->videoQuality});
@@ -310,7 +312,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         const bool wasMulti = m_outputs.monitors.size() > 1;
         const auto capture = capturePolicy();
         const bool selected = capture.mode == MonitorCapturePolicy::Mode::Primary
-            || capture.mode == MonitorCapturePolicy::Mode::Specific;
+            || capture.mode == MonitorCapturePolicy::Mode::Specific || m_configuredConsoleOutputs;
         const bool independentTransition = ((changed && (outputs.monitors.size() > 1 || wasMulti)) || selected)
             && !m_pendingPhysical && !m_pendingVirtual;
         if (changed) {
@@ -334,8 +336,12 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         const auto capture = capturePolicy();
         const bool selected = capture.mode == MonitorCapturePolicy::Mode::Primary
             || capture.mode == MonitorCapturePolicy::Mode::Specific;
+        const bool ownedProjection = m_configuredConsoleOutputs && std::all_of(topology.outputs.cbegin(), topology.outputs.cend(), [](const auto &output) {
+            return !output.physical;
+        });
         if (topology.outputs.isEmpty() || topology.outputs.size() != m_outputs.monitors.size()
-            || (!topology.complete && (!selected || topology.outputs.size() != 1))) {
+            || (m_configuredConsoleOutputs && (!ownedProjection || topology.complete))
+            || (!topology.complete && !ownedProjection && (!selected || topology.outputs.size() != 1))) {
             m_topologyAvailable = false;
             m_topologyPriorities.clear();
             m_topologyCatalog.resetGeneration();
@@ -582,6 +588,7 @@ void ConsoleHostController::clearPhysicalLease(const char *why)
     }
     m_physicalLeaseActive = false;
     m_consoleCreatorsActive = false;
+    m_configuredConsoleOutputs = false;
     m_physicalLeaseGeneration = 0;
 }
 
@@ -1689,7 +1696,7 @@ void ConsoleHostController::sendLayouts()
     for (const auto &output : m_outputs.monitors) {
         LayoutControl::HostMonitor monitor;
         monitor.id = monitor.name = output.name;
-        monitor.kind = LayoutControl::Kind::Real;
+        monitor.kind = m_configuredConsoleOutputs ? LayoutControl::Kind::Virtual : LayoutControl::Kind::Real;
         monitor.size = output.geometry.size() * output.scale;
         monitor.position = output.geometry.topLeft();
         monitor.scale = output.scale;
@@ -1703,7 +1710,7 @@ void ConsoleHostController::sendLayouts()
         if (client->connection && client->wantsLayout && m_control.admitted(client->id)) {
             layout.you = m_control.ownsControl(client->id) ? u"owner"_s : u"viewer"_s;
             auto record = LayoutControl::layoutRecord(layout);
-            record.insert(u"consoleResize"_s, true);
+            record.insert(u"consoleResize"_s, !m_configuredConsoleOutputs);
             client->connection->sendControlRecord(LayoutControl::withRequestId(record, std::exchange(client->layoutRequestId, {})));
         }
     }
@@ -1752,9 +1759,28 @@ void ConsoleHostController::syncControlState()
             if (m_workerOwner && m_control.ownsControl(client->id)) client->codec->bind(&m_endpoint, m_controlGeneration);
             else client->codec->unbind();
         }
+        armConfiguredConsoleOutputs();
     }
     syncCodecPolicy();
     syncDisplayPolicy();
+}
+
+void ConsoleHostController::armConfiguredConsoleOutputs()
+{
+    if (m_configuredConsoleOutputs || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) return;
+    for (const auto &client : m_clients) {
+        if (!m_control.ownsControl(client->id) || !client->codec || !client->codec->consoleVirtualPolicy().enabled) continue;
+        m_configuredConsoleOutputs = true;
+        m_consoleCreatorsActive = true;
+        m_physicalLeaseActive = true;
+        m_physicalLeaseGeneration = m_controlGeneration;
+        m_layoutAwaitingReadback = true;
+        m_topologyAvailable = false;
+        m_topologyComplete = false;
+        m_topologyPriorities.clear();
+        m_topologyCatalog.resetGeneration();
+        return;
+    }
 }
 
 ConsoleWorkerWire::DisplayPolicy ConsoleHostController::displayPolicy() const

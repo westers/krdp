@@ -19,6 +19,47 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void configuredConsoleProjectionWaitsForOwnedReadbackAndVerifiedRelease()
+    {
+        QTemporaryDir runtime; QVERIFY(runtime.isValid());
+        Server server; RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        QString error;
+        QVERIFY(host.m_endpoint.listen(runtime.filePath(QStringLiteral("worker.sock")),
+            {ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000}, QByteArray(32, 'x'), &error));
+        host.addClient(&connection);
+        auto &client = *host.m_clients.front();
+        QVERIFY(client.codec->setConsoleVirtualPolicy(*ConsoleVirtualOutputPolicy::parse(true, QStringLiteral("extend"),
+            QStringLiteral("client"), QSize(1280, 720), {})));
+        host.m_control.admit(client.id); host.syncControlState();
+        QVERIFY(host.m_configuredConsoleOutputs); QVERIFY(host.m_physicalLeaseActive); QVERIFY(host.m_layoutAwaitingReadback);
+        host.m_inputEnabled = true; client.session->setWorkerActive(true);
+        const ConsoleWorkerWire::Outputs outputs{{
+            {QStringLiteral("Virtual-owned-0"), QRect(0, 0, 1280, 720), 1, true},
+            {QStringLiteral("Virtual-owned-1"), QRect(1280, 0, 1280, 720), 1, false}}, QPoint(2560, 0)};
+        Q_EMIT host.m_endpoint.outputsReceived(outputs);
+        ConsoleWorkerWire::Topology projected{{
+            {QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(2560, 0, 1280, 720), 1, true, 1, false},
+            {QStringLiteral("Virtual-owned-1"), QSize(1280, 720), QRect(3840, 0, 1280, 720), 1, false, 2, false}}, false};
+        auto unauthorized = projected; unauthorized.outputs[1].physical = true;
+        Q_EMIT host.m_endpoint.topologyReceived(unauthorized);
+        QVERIFY(!host.m_topologyAvailable); QVERIFY(host.m_layoutAwaitingReadback);
+        auto complete = projected; complete.complete = true;
+        Q_EMIT host.m_endpoint.topologyReceived(complete);
+        QVERIFY(!host.m_topologyAvailable); QVERIFY(host.m_layoutAwaitingReadback);
+        Q_EMIT host.m_endpoint.topologyReceived(projected);
+        QVERIFY(host.m_topologyAvailable); QVERIFY(!host.m_topologyComplete); QVERIFY(!host.m_layoutAwaitingReadback);
+        VideoFrame frame; frame.size = QSize(1280, 720); frame.isKeyFrame = true;
+        frame.monitors = {{QRect(0, 0, 1280, 720), true}, {QRect(1280, 0, 1280, 720), false}};
+        Q_EMIT host.m_endpoint.frameReceived(frame); QCOMPARE(client.wireLayout, frame.monitors);
+        const auto generation = host.m_controlGeneration;
+        QVERIFY(host.m_control.release(client.id)); host.syncControlState();
+        QVERIFY(!host.m_inputEnabled); QVERIFY(host.m_physicalLeaseActive);
+        Q_EMIT host.m_endpoint.physicalLeaseReleased({generation, false}); QVERIFY(host.m_physicalLeaseActive);
+        Q_EMIT host.m_endpoint.physicalLeaseReleased({generation, true});
+        QVERIFY(!host.m_physicalLeaseActive); QVERIFY(!host.m_configuredConsoleOutputs); QVERIFY(!host.m_inputEnabled);
+    }
+
     void consoleVirtualPolicyIsIdentityAndControllerScoped()
     {
         Server server;

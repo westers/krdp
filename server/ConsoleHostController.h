@@ -138,6 +138,7 @@ private:
     void addClient(RdpConnection *connection);
     void loadUserSettings(Client &client);
     void updateClientDisplayPolicy(Client &client);
+    void armConfiguredConsoleOutputs();
     void updateMedia();
     void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &incoming);
     /** KRDPCTL v2: a reply echoing the request being handled, or the `id` it answers. */
@@ -274,6 +275,7 @@ private:
     bool m_experimentalConsoleVirtual = false; // Separate from physical edits until the client accepts mixed lease inventory.
     bool m_physicalLeaseActive = false; // Fail closed if a worker vanishes before verified release.
     bool m_consoleCreatorsActive = false;
+    bool m_configuredConsoleOutputs = false;
     quint64 m_physicalLeaseGeneration = 0;
     std::optional<PhysicalPreview> m_physicalPreview;
     std::optional<PendingPhysical> m_pendingPhysical;

@@ -127,10 +127,21 @@ private Q_SLOTS:
         QVERIFY(host.m_handoff.draining());
         QTRY_VERIFY(worker.bytesAvailable() > 0); // Stop reached the authenticated worker.
         ConsoleWorkerWire::Deframer fromBroker;
-        fromBroker.feed(worker.readAll());
-        const auto stop = fromBroker.next();
-        QVERIFY(stop);
-        QCOMPARE(stop->kind, ConsoleWorkerWire::Kind::Stop);
+        bool stopReceived = false, unexpected = false;
+        QTRY_VERIFY([&] {
+            fromBroker.feed(worker.readAll());
+            while (const auto record = fromBroker.next()) {
+                if (record->kind == ConsoleWorkerWire::Kind::Stop) stopReceived = true;
+                else {
+                    // Authenticated pre-Ready display policy is sent before
+                    // the drain. It must not demand activity without viewers.
+                    const auto display = ConsoleWorkerWire::displayPolicy(*record);
+                    unexpected = unexpected || !display || display->active;
+                }
+            }
+            return stopReceived;
+        }());
+        QVERIFY(!unexpected);
 
         // Ready while draining must not grant input or start anything.
         worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));

@@ -296,8 +296,8 @@ target_include_directories(VirtualInitialLayoutTest PRIVATE ${CMAKE_SOURCE_DIR}/
 target_link_libraries(VirtualInitialLayoutTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualInitialLayoutTest COMMAND VirtualInitialLayoutTest)
 
-add_executable(RetainedKScreenReadbackTest RetainedKScreenReadbackTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp)
-target_include_directories(RetainedKScreenReadbackTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src)
+add_executable(RetainedKScreenReadbackTest RetainedKScreenReadbackTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp ${CMAKE_SOURCE_DIR}/server/OutputRestoreJournal.cpp)
+target_include_directories(RetainedKScreenReadbackTest PRIVATE ${CMAKE_SOURCE_DIR}/server ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
 target_link_libraries(RetainedKScreenReadbackTest PRIVATE Qt6::Test Qt6::Gui PkgConfig::AVCodec)
 add_test(NAME RetainedKScreenReadbackTest COMMAND RetainedKScreenReadbackTest)
 
@@ -425,7 +425,7 @@ if(TARGET krdp-console-worker)
     add_executable(krdp-e2e-cursor-client CursorShapeClient.cpp)
     target_link_libraries(krdp-e2e-cursor-client PRIVATE Qt6::Gui)
     add_executable(WorkerEndToEndTest WorkerEndToEndTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
-        ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp)
+        ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp ${CMAKE_SOURCE_DIR}/server/OutputRestoreJournal.cpp)
     target_include_directories(WorkerEndToEndTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
     target_link_libraries(WorkerEndToEndTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp PkgConfig::AVCodec)
     target_compile_definitions(WorkerEndToEndTest PRIVATE

@@ -650,7 +650,7 @@ private Q_SLOTS:
         if (!getuid()) QSKIP("Nonroot guardian fixture");
         const QString userRuntime = QStringLiteral("/run/user/%1").arg(getuid());
         if (!QFileInfo(userRuntime).isDir()) QSKIP("No canonical user runtime");
-        const QString base = userRuntime + QStringLiteral("/krdp-virtual");
+        const QString base = userRuntime + QStringLiteral("/farside-virtual");
         const bool createdBase = QDir().mkdir(base);
         auto cleanBase = qScopeGuard([&] { if (createdBase) QDir().rmdir(base); });
         if (createdBase) QVERIFY(!chmod(QFile::encodeName(base).constData(), 0700));
@@ -713,7 +713,7 @@ private Q_SLOTS:
         if (!getuid()) QSKIP("Nonroot guardian fixture");
         const QString userRuntime = QStringLiteral("/run/user/%1").arg(getuid());
         if (!QFileInfo(userRuntime).isDir()) QSKIP("No canonical user runtime");
-        const QString base = userRuntime + QStringLiteral("/krdp-virtual");
+        const QString base = userRuntime + QStringLiteral("/farside-virtual");
         const bool createdBase = QDir().mkdir(base);
         auto cleanBase = qScopeGuard([&] { if (createdBase) QDir().rmdir(base); });
         if (createdBase) QVERIFY(!chmod(QFile::encodeName(base).constData(), 0700));
@@ -795,7 +795,7 @@ private Q_SLOTS:
             ++starts;
             const auto records = journal->records();
             persistedBeforeStart = records && records->size() == 1 && records->first().session == handle.id
-                && unit == QStringLiteral("krdp-virtual-session@%1.service").arg(handle.id);
+                && unit == QStringLiteral("farside-virtual-session@%1.service").arg(handle.id);
             return true; // accepted request, no guardian or capture yet
         }));
         const QJsonObject request{{QStringLiteral("type"), QStringLiteral("virtual-session")}, {QStringLiteral("v"), 1},
@@ -863,7 +863,7 @@ private Q_SLOTS:
         const auto boot = QString::fromLatin1(bootFile.readAll()).trimmed();
         const QString userRuntime = QStringLiteral("/run/user/%1").arg(getuid());
         if (!QFileInfo(userRuntime).isDir()) QSKIP("No user runtime directory for canonical recovery-path fixture");
-        const QString base = userRuntime + QStringLiteral("/krdp-virtual");
+        const QString base = userRuntime + QStringLiteral("/farside-virtual");
         const bool createdBase = QDir().mkdir(base);
         auto cleanBase = qScopeGuard([&] { if (createdBase) QDir().rmdir(base); });
         if (createdBase) QVERIFY(!chmod(QFile::encodeName(base).constData(), 0700));
@@ -973,7 +973,7 @@ private Q_SLOTS:
         const auto boot = QString::fromLatin1(bootFile.readAll()).trimmed();
         const QString userRuntime = QStringLiteral("/run/user/%1").arg(getuid());
         if (!QFileInfo(userRuntime).isDir()) QSKIP("No user runtime directory for canonical recovery-path fixture");
-        const QString base = userRuntime + QStringLiteral("/krdp-virtual");
+        const QString base = userRuntime + QStringLiteral("/farside-virtual");
         const bool createdBase = QDir().mkdir(base);
         auto cleanBase = qScopeGuard([&] { if (createdBase) QDir().rmdir(base); });
         if (createdBase) QVERIFY(!chmod(QFile::encodeName(base).constData(), 0700));

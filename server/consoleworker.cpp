@@ -65,6 +65,9 @@
 #include "RetainedMultiMixedCreatePlan.h"
 #include "VirtualSessionJournal.h"
 #include "VirtualInitialBootstrap.h"
+#include "ConsoleVirtualOutputReadback.h"
+#include "ConsoleVirtualOutputRestore.h"
+#include "PhysicalOutputGuard.h"
 
 using namespace KRdp;
 
@@ -331,7 +334,7 @@ public:
         });
         connect(&m_session, &AbstractSession::frameReceived, this, [this](const VideoFrame &frame) {
             ++m_statsEncoded; // STATS-S6: every packet the encoder made, forwarded or not
-            if (m_creatorReleaseActive || m_creatorReleaseFinished) return;
+            if (m_creatorReleaseActive || m_creatorReleaseFinished || m_consoleVirtualPlan) return;
             if (m_captureSelectionPending && !m_multiMode && !frame.isKeyFrame) return;
             // A single-output Console keeps this workspace producer alive
             // until KWin publishes the new screen. Its old-size frames must
@@ -476,6 +479,8 @@ public:
         connect(&m_multiSettle, &QTimer::timeout, this, &Worker::syncCaptureMode);
         m_bootstrapPoll.setInterval(200);
         connect(&m_bootstrapPoll, &QTimer::timeout, this, &Worker::pollBootstrap);
+        m_consoleVirtualPoll.setInterval(200);
+        connect(&m_consoleVirtualPoll, &QTimer::timeout, this, &Worker::pollConsoleVirtual);
         connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, [this] { m_multiSettle.start(); });
         connect(qGuiApp, &QGuiApplication::screenAdded, this, [this](QScreen *screen) {
             watchScreen(screen);
@@ -538,15 +543,254 @@ private:
         else m_resize.stop();
     }
 
+    void invalidateConsoleCapture()
+    {
+        releaseInput();
+        ++m_multiEpoch;
+        m_captureSelectionPending = true;
+        m_multiReady = false;
+        m_multiCapture.invalidate();
+        m_multiPublishedFrames.clear();
+        m_lastPhysicalKeyframe.reset();
+        m_multiResizeNeedsRestart = true;
+        m_session.setStreamingEnabled(false);
+        m_multiSessions.clear();
+    }
+
+    QSet<QString> configuredCreatorNames() const
+    {
+        QSet<QString> names;
+        if (m_consoleVirtualPlan)
+            for (const auto &output : m_consoleVirtualPlan->outputs) names.insert(output.name);
+        return names;
+    }
+
+    bool restoreConsoleVirtualSnapshot(const OutputRestoreJournal::Entry &entry)
+    {
+        const auto json = readKScreenJson();
+        bool ok = false;
+        const auto current = json ? OutputRestoreJournal::parseCurrent(*json, &ok) : QVector<OutputRestoreJournal::Current>{};
+        if (!ok) return false;
+        const auto plan = OutputRestoreJournal::plan(entry, current);
+        if (!plan.missing.isEmpty() || (!plan.arguments.isEmpty() && !runKScreenCommand(plan.arguments))) return false;
+        const auto after = readKScreenJson();
+        bool parsed = false;
+        const auto restored = after ? OutputRestoreJournal::parseCurrent(*after, &parsed) : QVector<OutputRestoreJournal::Current>{};
+        return parsed && OutputRestoreJournal::plan(entry, restored).missing.isEmpty()
+            && OutputRestoreJournal::plan(entry, restored).arguments.isEmpty();
+    }
+
+    bool parkConsoleVirtualOutputs()
+    {
+        if (!m_consoleVirtualPlan) return false;
+        const auto json = readKScreenJson();
+        if (!json) return false;
+        const auto current = OutputSnapshot::parse(*json);
+        const auto owned = configuredCreatorNames();
+        QVector<OutputSnapshot::Output> survivors, temporary;
+        for (const auto &output : current) {
+            if (owned.contains(output.name)) temporary.append(output);
+            else survivors.append(output);
+        }
+        if (std::none_of(survivors.cbegin(), survivors.cend(), [](const auto &o) { return o.enabled; })) return false;
+        const QPoint anchor = OutputSnapshot::rightmostEnabledAnchor(survivors);
+        const auto bounds = OutputSnapshot::enabledUnion(temporary);
+        std::sort(survivors.begin(), survivors.end(), [](const auto &a, const auto &b) { return a.priority < b.priority; });
+        QStringList arguments;
+        int priority = 1;
+        for (const auto &output : survivors) {
+            if (output.enabled) arguments.append(QStringLiteral("output.%1.priority.%2").arg(output.name).arg(priority++));
+        }
+        auto planned = m_consoleVirtualPlan->outputs;
+        std::stable_sort(planned.begin(), planned.end(), [](const auto &a, const auto &b) { return a.primary && !b.primary; });
+        for (const auto &output : planned) {
+            const auto found = std::find_if(temporary.cbegin(), temporary.cend(), [&output](const auto &o) { return o.name == output.name; });
+            if (found == temporary.cend()) continue; // An unresolved creator need not have exposed an output.
+            const QPoint position = found->position - bounds.topLeft() + anchor;
+            if (position.x() < -32767 || position.x() > 32767 || position.y() < -32767 || position.y() > 32767 || priority > 16) return false;
+            arguments << QStringLiteral("output.%1.position.%2,%3").arg(output.name).arg(position.x()).arg(position.y())
+                      << QStringLiteral("output.%1.priority.%2").arg(output.name).arg(priority++);
+            for (auto &entry : m_consoleVirtualPlan->outputs) if (entry.name == output.name) entry.position = entry.parkPosition = position;
+        }
+        m_takeover.outputMoved(m_clock.elapsed());
+        if (!arguments.isEmpty() && !runKScreenCommand(arguments)) return false;
+        const auto after = readKScreenJson();
+        if (!after) return false;
+        const auto readback = OutputSnapshot::parse(*after);
+        for (const auto &output : planned) {
+            if (std::none_of(temporary.cbegin(), temporary.cend(), [&output](const auto &o) { return o.name == output.name; })) continue;
+            const auto expected = std::find_if(m_consoleVirtualPlan->outputs.cbegin(), m_consoleVirtualPlan->outputs.cend(), [&output](const auto &o) { return o.name == output.name; });
+            const auto actual = std::find_if(readback.cbegin(), readback.cend(), [&output](const auto &o) { return o.name == output.name; });
+            if (actual == readback.cend() || !actual->enabled || actual->position != expected->position || actual->priority < 2) return false;
+        }
+        return true;
+    }
+
+    void failConsoleVirtual(const QString &reason)
+    {
+        qWarning().noquote() << "Configured Console outputs:" << reason;
+        if (m_consoleVirtualPlan && m_consoleVirtualPlan->outputs.size() > 1 && !m_consoleVirtualForceSingle && !m_stopping)
+            m_consoleVirtualFallback = true;
+        else if (m_socket.state() == QLocalSocket::ConnectedState)
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, reason.toUtf8()));
+        if (!beginConsoleCreatorRelease()) shutdown(1);
+    }
+
+    void startConsoleVirtual()
+    {
+        if (m_mode.virtualSession || !m_authenticatedDesktop || m_stopping || !m_control.active
+            || !m_encoderConfig.consoleVirtual.enabled || m_consoleVirtualPlan) return;
+        invalidateConsoleCapture();
+        const auto json = readKScreenJson();
+        const auto initial = json ? ConsoleVirtualOutputRestore::snapshot(*json, m_sessionId) : std::nullopt;
+        if (!initial) { failConsoleVirtual(QStringLiteral("cannot journal the current Console output layout")); return; }
+        // Another live output writer must finish first; a second Console
+        // worker must not snapshot its temporary arrangement as the baseline.
+        QString journalError;
+        const auto entries = m_outputJournal.entries(&journalError);
+        if (!journalError.isEmpty() || std::any_of(entries.cbegin(), entries.cend(), [](const auto &entry) {
+            return entry.pid != qint64(getpid()) && OutputRestoreJournal::ownerAlive(entry.pid);
+        })) { failConsoleVirtual(QStringLiteral("another output lease or unreadable restore journal is active")); return; }
+        const auto inventory = OutputSnapshot::parse(*json);
+        const auto panels = OutputSnapshot::physicalOnly(inventory);
+        const bool physical = std::any_of(panels.cbegin(), panels.cend(), [](const auto &o) { return o.enabled; });
+        if (physical && !m_consoleOutputGuard.beginLayoutControl()) {
+            failConsoleVirtual(QStringLiteral("cannot hold physical outputs before Console monitor creation")); return;
+        }
+        const auto maximum = QJsonDocument::fromJson(*json).object().value(QStringLiteral("screen")).toObject().value(QStringLiteral("maxActiveOutputsCount"));
+        // KScreen's KWayland backend publishes its current output-device count
+        // as maxActiveOutputsCount, not a screencast creator capacity. KWin
+        // increases it when a new virtual output appears. Validate that fresh
+        // inventory, then bound dynamic creation by our sixteen-output limit;
+        // creator errors and native readback still decide whether it worked.
+        const auto plan = RetainedKScreenReadback::integer(maximum, 1, 16) && maximum.toInt() >= inventory.size()
+            ? ConsoleVirtualOutputPlan::build(m_encoderConfig.consoleVirtual,
+                physical ? m_consoleOutputGuard.physicalOutputs() : QVector<OutputSnapshot::Output>{}, inventory,
+                m_consoleVirtualForceSingle) : std::nullopt;
+        if (!plan || !m_outputJournal.hold(*initial, &journalError)) {
+            m_consoleOutputGuard.cancelLayoutControl(); // No creator or display mutation has run yet.
+            failConsoleVirtual(QStringLiteral("requested Console output layout is unavailable or cannot be journaled")); return;
+        }
+        m_consoleVirtualRestore = *initial;
+        m_consoleVirtualPlan = *plan;
+        ++m_consoleVirtualEpoch;
+        m_consoleVirtualApplied = false;
+        m_consoleVirtualReplaced = false;
+        m_consoleVirtualIndex = 0;
+        m_consoleVirtualAge.start();
+        m_consoleVirtualSettle.invalidate();
+        m_consoleVirtualPoll.start();
+        pollConsoleVirtual();
+    }
+
+    void pollConsoleVirtual()
+    {
+        if (!m_consoleVirtualPlan || m_stopping || m_creatorReleaseActive || m_consoleVirtualApplied) return;
+        if (!m_control.active || m_encoderConfig.generation != m_control.generation) {
+            beginConsoleCreatorRelease(); return;
+        }
+        if (m_consoleVirtualAge.elapsed() >= 90000) {
+            failConsoleVirtual(QStringLiteral("configured Console outputs did not settle before their deadline")); return;
+        }
+        if (m_consoleVirtualCreator) {
+            const auto &output = m_consoleVirtualPlan->outputs[m_consoleVirtualIndex];
+            const auto json = readKScreenJson();
+            const auto outputs = json ? OutputSnapshot::parse(*json) : QVector<OutputSnapshot::Output>{};
+            const auto found = std::find_if(outputs.cbegin(), outputs.cend(), [&output](const auto &o) { return o.name == output.name; });
+            if (!m_consoleVirtualCreator->streamActive() || !m_consoleVirtualCreator->outputGeometryResolved()
+                || found == outputs.cend() || !found->enabled || found->size != output.pixels
+                || !VirtualResize::sameScale(found->scale, output.scale)) { m_consoleVirtualSettle.invalidate(); return; }
+            if (!m_consoleVirtualSettle.isValid()) { m_consoleVirtualSettle.start(); return; }
+            if (m_consoleVirtualSettle.elapsed() < 400) return;
+            m_ownedCreators.emplace_back(output.name, std::move(m_consoleVirtualCreator));
+            ++m_consoleVirtualIndex;
+            m_consoleVirtualSettle.invalidate();
+        }
+        if (m_consoleVirtualIndex < m_consoleVirtualPlan->outputs.size()) {
+            const auto &output = m_consoleVirtualPlan->outputs[m_consoleVirtualIndex];
+            m_consoleVirtualCreator = std::make_unique<PlasmaScreencastV1Session>();
+            m_consoleVirtualCreator->setVirtualMonitor(VirtualMonitor{output.name.mid(8), output.pixels, output.scale});
+            applyEncoderConfig(*m_consoleVirtualCreator);
+            m_consoleVirtualCreator->setVideoQuality(m_multiQuality);
+            const auto index = m_consoleVirtualIndex;
+            const auto epoch = m_consoleVirtualEpoch;
+            connect(m_consoleVirtualCreator.get(), &AbstractSession::error, this, [this, index, epoch] {
+                if (m_consoleVirtualPlan && !m_creatorReleaseActive && index == m_consoleVirtualIndex && epoch == m_consoleVirtualEpoch)
+                    failConsoleVirtual(QStringLiteral("KWin rejected a configured Console monitor"));
+            }, Qt::QueuedConnection);
+            connect(m_consoleVirtualCreator.get(), &AbstractSession::virtualOutputUnresolved, this, [this, index, epoch] {
+                if (m_consoleVirtualPlan && !m_creatorReleaseActive && index == m_consoleVirtualIndex && epoch == m_consoleVirtualEpoch)
+                    failConsoleVirtual(QStringLiteral("configured Console monitor did not resolve"));
+            }, Qt::QueuedConnection);
+            m_consoleVirtualCreator->setStreamingEnabled(true);
+            return;
+        }
+        QVector<OutputSnapshot::Placement> placements;
+        QString primary;
+        for (const auto &output : m_consoleVirtualPlan->outputs) {
+            placements.append({output.name, output.position});
+            if (output.primary) primary = output.name;
+        }
+        if (m_consoleVirtualPlan->replace) {
+            m_consoleVirtualReplaced = m_consoleOutputGuard.applyReplace(placements, primary);
+            if (!m_consoleVirtualReplaced) qWarning() << "Console replace could not be verified; restoring and continuing as extend";
+        }
+        if (!m_consoleVirtualReplaced) {
+            if (!m_consoleOutputGuard.release() || !restoreConsoleVirtualSnapshot(*m_consoleVirtualRestore)
+                || !parkConsoleVirtualOutputs()) {
+                failConsoleVirtual(QStringLiteral("Console extend layout could not be verified")); return;
+            }
+        }
+        m_takeover.outputMoved(m_clock.elapsed());
+        m_takeover.armed(m_clock.elapsed());
+        m_consoleVirtualApplied = true;
+        m_consoleVirtualPoll.stop();
+        m_multiSettle.start(400); // Qt screens must catch up with KScreen before capture opens.
+    }
+
+    bool prepareConsoleVirtualRelease()
+    {
+        if (!m_consoleVirtualPlan || !m_consoleVirtualRestore) return false;
+        m_consoleOutputGuard.clearParkPlacements();
+        if (!m_consoleOutputGuard.release()) return false;
+        if ((!m_consoleVirtualApplied || m_consoleVirtualReplaced)
+            && !restoreConsoleVirtualSnapshot(*m_consoleVirtualRestore)) return false;
+        if (!parkConsoleVirtualOutputs()) return false;
+        const auto json = readKScreenJson();
+        const auto owned = configuredCreatorNames();
+        const auto survivors = json ? ConsoleVirtualOutputRestore::snapshot(*json, m_sessionId, owned) : std::nullopt;
+        QString error;
+        if (!survivors || !m_outputJournal.hold(*survivors, &error)) return false;
+        m_consoleVirtualRelease = *survivors;
+        // Keep the journal through KWin's removal/reconfiguration, including
+        // a crash between physical restoration and creator retirement.
+        m_multiSessions.clear();
+        m_consoleVirtualCreator.reset();
+        m_ownedCreators.clear();
+        m_consoleVirtualCreatorsDropped = true;
+        m_consoleVirtualSettle.invalidate();
+        return true;
+    }
+
     bool beginConsoleCreatorRelease()
     {
-        if (m_mode.virtualSession || (m_ownedCreators.empty() && !m_addPending && !m_removePending)
-            || m_creatorReleaseActive) return false;
+        if (m_mode.virtualSession || (m_ownedCreators.empty() && !m_addPending && !m_removePending && !m_consoleVirtualPlan)
+            || m_creatorReleaseActive || m_creatorReleaseFinished) return false;
         releaseInput();
         m_creatorReleaseActive = true;
         m_multiReady = false;
         m_lastPhysicalKeyframe.reset();
         m_multiPublishedFrames.clear();
+        if (m_consoleVirtualPlan) {
+            ++m_consoleVirtualEpoch;
+            m_consoleVirtualPoll.stop();
+            m_creatorReleaseGeneration = m_control.generation;
+            m_creatorReleaseAge.start();
+            prepareConsoleVirtualRelease();
+            m_creatorReleasePoll.start();
+            QTimer::singleShot(0, this, &Worker::pollConsoleCreatorRelease);
+            return true;
+        }
         QSet<QString> owned;
         for (const auto &creator : m_ownedCreators) owned.insert(creator.first);
         if (m_addPending) owned.insert(m_addPending->output);
@@ -567,6 +811,22 @@ private:
     void pollConsoleCreatorRelease()
     {
         if (!m_creatorReleaseActive) return;
+        if (m_consoleVirtualPlan) {
+            if (!m_consoleVirtualCreatorsDropped) prepareConsoleVirtualRelease();
+            const auto json = m_consoleVirtualCreatorsDropped ? readKScreenJson() : std::nullopt;
+            const bool matches = json && m_consoleVirtualRelease
+                && ConsoleVirtualOutputRestore::matches(*m_consoleVirtualRelease, *json, configuredCreatorNames());
+            if (matches) {
+                if (!m_consoleVirtualSettle.isValid()) m_consoleVirtualSettle.start();
+                if (m_consoleVirtualSettle.elapsed() >= 500) { finishConsoleCreatorRelease(true); return; }
+            } else {
+                m_consoleVirtualSettle.invalidate();
+                if (m_consoleVirtualCreatorsDropped && m_consoleVirtualRelease)
+                    restoreConsoleVirtualSnapshot(*m_consoleVirtualRelease);
+            }
+            if (m_creatorReleaseAge.elapsed() >= 15000) finishConsoleCreatorRelease(false);
+            return;
+        }
         const auto json = m_creatorReleasePlan ? readKScreenJson() : std::nullopt;
         if (json && ConsoleCreatorLease::matchesReleased(*m_creatorReleasePlan, *json, m_sessionId)) {
             finishConsoleCreatorRelease(true);
@@ -577,11 +837,33 @@ private:
 
     void finishConsoleCreatorRelease(bool verified)
     {
+        const bool configured = m_consoleVirtualPlan.has_value();
+        const bool fallback = configured && verified && m_consoleVirtualFallback && !m_stopping
+            && m_control.active && m_encoderConfig.generation == m_control.generation;
+        if (configured && verified) {
+            QString error;
+            verified = m_outputJournal.release(QString::fromLatin1(OutputRestoreJournal::ConsoleVirtualOwner), qint64(getpid()), &error);
+            if (!verified) qWarning().noquote() << "Console output journal release:" << error;
+        }
         m_creatorReleasePoll.stop();
         m_creatorReleaseFinished = true;
         m_creatorReleaseActive = false;
         m_creatorReleasePlan.reset();
         qInfo() << "Console creator lease release verified:" << verified;
+        if (configured && verified) {
+            m_consoleVirtualPlan.reset();
+            m_consoleVirtualRestore.reset();
+            m_consoleVirtualRelease.reset();
+            m_consoleVirtualCreatorsDropped = false;
+            m_consoleVirtualFallback = false;
+            if (fallback) {
+                m_consoleVirtualForceSingle = true;
+                m_creatorReleaseFinished = false;
+                m_creatorReleaseGeneration = 0;
+                startConsoleVirtual();
+                return;
+            }
+        }
         if (m_socket.state() == QLocalSocket::ConnectedState) {
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::PhysicalLeaseReleased{
                 m_creatorReleaseGeneration, verified}));
@@ -592,6 +874,8 @@ private:
         if (m_stopping) {
             if (!verified) m_exitCode = 1;
             if (m_outputStopDone) QCoreApplication::exit(m_exitCode);
+        } else if (configured) {
+            shutdown(verified ? 0 : 1); // Replacement proves restored capture before the next grant.
         } else if (m_socket.state() == QLocalSocket::ConnectedState) {
             m_socket.disconnectFromServer(); // A replacement worker must prove fresh capture.
         } else {
@@ -752,6 +1036,7 @@ private:
     void syncCaptureMode()
     {
         if (m_stopping || m_creatorReleaseActive || m_creatorReleaseFinished) return;
+        if (m_consoleVirtualPlan && !m_consoleVirtualApplied) return;
         if (!m_initialOutputs.isEmpty() && !m_bootstrapComplete) return;
         const auto screens = qGuiApp->screens();
         for (auto *screen : screens) watchScreen(screen);
@@ -868,9 +1153,11 @@ private:
         const auto policy = m_mode.virtualSession ? MonitorCapturePolicy{} : m_encoderConfig.capture;
         int primaryIndex = int(screens.indexOf(qGuiApp->primaryScreen()));
         if (primaryIndex < 0 && !screens.isEmpty()) primaryIndex = 0;
-        if (!m_mode.virtualSession && policy.mode == MonitorCapturePolicy::Mode::Primary) {
+        if (!m_consoleVirtualPlan && (m_mode.virtualSession || policy.mode == MonitorCapturePolicy::Mode::Primary
+            || policy.mode == MonitorCapturePolicy::Mode::Multi)) {
             // Qt's primary can differ in a headless worker. Prefer KScreen's
-            // primary when a complete authoritative readback is available.
+            // primary when a complete authoritative readback is available,
+            // including a retained desktop after temporary outputs disappear.
             if (const auto readback = readKScreen()) {
                 for (const auto &output : readback->outputs) {
                     if (!output.primary) continue;
@@ -879,7 +1166,15 @@ private:
                 }
             }
         }
-        const auto selection = policy.select(int(screens.size()), primaryIndex);
+        auto selection = policy.select(int(screens.size()), primaryIndex);
+        if (m_consoleVirtualPlan) {
+            selection = MonitorCapturePolicy::Selection{};
+            for (const auto &output : m_consoleVirtualPlan->outputs) {
+                const auto screen = std::find_if(screens.cbegin(), screens.cend(), [&output](const auto *s) { return s->name() == output.name; });
+                if (screen == screens.cend()) { m_multiSettle.start(200); return; }
+                selection->indices.append(int(std::distance(screens.cbegin(), screen)));
+            }
+        }
         if (!selection) {
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error,
                 QByteArrayLiteral("configured Console monitor is unavailable")));
@@ -887,7 +1182,8 @@ private:
             return;
         }
         const bool selectedSingle = policy.mode == MonitorCapturePolicy::Mode::Primary
-            || policy.mode == MonitorCapturePolicy::Mode::Specific;
+            || policy.mode == MonitorCapturePolicy::Mode::Specific
+            || (m_consoleVirtualPlan && m_consoleVirtualPlan->outputs.size() == 1);
         if (selection->workspace || (screens.size() < 2 && !selectedSingle)) {
             if (m_mixedCreatePending) {
                 finishMixedCreate(QStringLiteral("multi-output capture disappeared during mixed creation"));
@@ -942,7 +1238,14 @@ private:
         const auto *primary = screens[primaryIndex];
         for (const int index : selection->indices) {
             const auto *screen = screens[index];
-            inventory.append({screen->name(), screen->geometry(), selectedSingle || screen == primary});
+            bool isPrimary = selectedSingle || screen == primary;
+            if (m_consoleVirtualPlan) {
+                const auto owned = std::find_if(m_consoleVirtualPlan->outputs.cbegin(), m_consoleVirtualPlan->outputs.cend(), [screen](const auto &output) {
+                    return output.name == screen->name();
+                });
+                isPrimary = owned->primary;
+            }
+            inventory.append({screen->name(), screen->geometry(), isPrimary});
         }
         if (m_multiResizePending && m_multiResizePlan) {
             const bool screensAgree = std::all_of(m_multiResizePlan->after.cbegin(), m_multiResizePlan->after.cend(), [&screens](const auto &output) {
@@ -1102,10 +1405,12 @@ private:
             // query/mismatch must not masquerade as topology success.
             const auto kscreenJson = readKScreenJson();
             const auto kscreen = kscreenJson
-                ? RetainedKScreenReadback::parse(*kscreenJson, m_sessionId) : std::nullopt;
+                ? (m_consoleVirtualPlan ? ConsoleVirtualOutputReadback::parse(*kscreenJson, m_sessionId, *m_consoleVirtualPlan)
+                    : RetainedKScreenReadback::parse(*kscreenJson, m_sessionId)) : std::nullopt;
             const bool selectedSingle = !m_mode.virtualSession
                 && (m_encoderConfig.capture.mode == MonitorCapturePolicy::Mode::Primary
-                    || m_encoderConfig.capture.mode == MonitorCapturePolicy::Mode::Specific);
+                    || m_encoderConfig.capture.mode == MonitorCapturePolicy::Mode::Specific
+                    || (m_consoleVirtualPlan && m_consoleVirtualPlan->outputs.size() == 1));
             const bool matches = kscreen && (selectedSingle
                 ? RetainedKScreenReadback::matchesCapturedSubset(*kscreen, result.outputs, result.frames)
                 : RetainedKScreenReadback::matchesPublished(*kscreen, result.outputs, result.frames));
@@ -1302,6 +1607,11 @@ private:
         const QVector<VideoFrame> &frames) const
     {
         const auto json = readKScreenJson();
+        if (m_consoleVirtualPlan) {
+            const auto projected = json ? ConsoleVirtualOutputReadback::parse(*json, m_sessionId, *m_consoleVirtualPlan) : std::nullopt;
+            return markOwnedConsoleOutputs(projected
+                ? ConsoleTopologyReadback::confirmedProjection(*projected, outputs, frames) : std::nullopt);
+        }
         const auto kscreen = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
         const bool selected = !m_mode.virtualSession
             && (m_encoderConfig.capture.mode == MonitorCapturePolicy::Mode::Primary
@@ -2399,6 +2709,13 @@ private:
     /** AUD-FIX7: what the controlling connection's codec policy wants the encoders to run. */
     void setEncoderConfig(const ConsoleWorkerWire::EncoderConfig &config)
     {
+        const bool virtualChanged = !m_mode.virtualSession && config.consoleVirtual != m_encoderConfig.consoleVirtual;
+        if (virtualChanged && m_consoleVirtualPlan) {
+            // A new requested tuple must never mutate creators under the old
+            // captured coordinates. Restore and let a replacement apply it.
+            beginConsoleCreatorRelease();
+            return;
+        }
         const bool codecChanged = config.codec != m_encoderConfig.codec;
         const bool captureChanged = !m_mode.virtualSession && config.capture != m_encoderConfig.capture;
         if (config.chroma != m_encoderConfig.chroma || config.chromaEnabled != m_encoderConfig.chromaEnabled)
@@ -2426,6 +2743,7 @@ private:
         }
         applyEncoderConfig(m_session);
         applyEncoderConfigToMultiSessions();
+        if (virtualChanged && config.consoleVirtual.enabled) startConsoleVirtual();
     }
 
     /**
@@ -2551,6 +2869,19 @@ private:
         if (!m_mode.physicalActions() || !m_control.active) {
             return;
         }
+        if (m_consoleVirtualPlan && m_consoleVirtualApplied) {
+            invalidateConsoleCapture();
+            if (!m_consoleOutputGuard.release() || (m_consoleVirtualReplaced
+                && !restoreConsoleVirtualSnapshot(*m_consoleVirtualRestore)) || !parkConsoleVirtualOutputs()) {
+                failConsoleVirtual(QStringLiteral("local monitor reclaim could not restore the Console layout")); return;
+            }
+            m_consoleVirtualReplaced = false;
+            m_consoleVirtualPlan->replace = false;
+            m_takeover.latch();
+            m_multiSettle.start(400);
+            qInfo() << "Local Console monitors restored; remote temporary monitors continue as extend";
+            return;
+        }
         releaseInput();
         m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalTakeover));
         m_control.active = false; // Gate immediately, before the host's acknowledgement.
@@ -2593,7 +2924,7 @@ private:
                         failPhysical(QStringLiteral("physical layout authority changed during capture"));
                         return;
                     }
-                    if (!m_mode.virtualSession && (!m_ownedCreators.empty() || m_addPending || m_removePending)
+                    if (!m_mode.virtualSession && (!m_ownedCreators.empty() || m_addPending || m_removePending || m_consoleVirtualPlan)
                         && (!control->active || control->generation != m_control.generation)) {
                         beginConsoleCreatorRelease();
                         return;
@@ -2683,6 +3014,11 @@ private:
                 continue;
             }
             if (const auto request = ConsoleWorkerWire::resize(*record)) {
+                if (m_consoleVirtualPlan) {
+                    m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{request->requestId, request->generation,
+                        QStringLiteral("configured Console monitors require output-specific resize") }));
+                    continue;
+                }
                 if (m_physicalPending) {
                     m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{
                         request->requestId, request->generation,
@@ -2893,6 +3229,21 @@ private:
     RetainedKScreenReadback::Snapshot m_addBefore;
     std::unique_ptr<PlasmaScreencastV1Session> m_addCreator;
     std::vector<std::pair<QString, std::unique_ptr<PlasmaScreencastV1Session>>> m_ownedCreators;
+    PhysicalOutputGuard m_consoleOutputGuard;
+    std::optional<ConsoleVirtualOutputPlan::Plan> m_consoleVirtualPlan;
+    std::optional<OutputRestoreJournal::Entry> m_consoleVirtualRestore;
+    std::optional<OutputRestoreJournal::Entry> m_consoleVirtualRelease;
+    std::unique_ptr<PlasmaScreencastV1Session> m_consoleVirtualCreator;
+    QTimer m_consoleVirtualPoll;
+    QElapsedTimer m_consoleVirtualAge;
+    QElapsedTimer m_consoleVirtualSettle;
+    qsizetype m_consoleVirtualIndex = 0;
+    quint64 m_consoleVirtualEpoch = 0;
+    bool m_consoleVirtualApplied = false;
+    bool m_consoleVirtualReplaced = false;
+    bool m_consoleVirtualCreatorsDropped = false;
+    bool m_consoleVirtualFallback = false;
+    bool m_consoleVirtualForceSingle = false;
     QVector<VirtualSessionJournal::Record::InitialOutput> m_initialOutputs;
     QTimer m_bootstrapPoll;
     QElapsedTimer m_bootstrapAge;
@@ -3072,6 +3423,10 @@ int main(int argc, char **argv)
         if (result.restored || result.kept || !result.errors.isEmpty()) {
             qInfo().noquote() << "Output-restore journal replay: restored" << result.restored << "kept" << result.kept
                               << "live" << result.skippedLive << result.errors.join(QStringLiteral("; "));
+        }
+        if (result.kept || !result.errors.isEmpty()) {
+            qCritical() << "Console capture refused while output recovery remains unverified";
+            return 1;
         }
     }
     worker.connectToBroker();

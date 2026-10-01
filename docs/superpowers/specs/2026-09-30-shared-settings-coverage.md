@@ -53,8 +53,8 @@ the required save/reconnect behavior; live reload is not implemented by this sli
 | Avc444MaxGapMs | 1500 | User preference + owner override / both | Same shared validated/reset policy; out-of-range/inconsistent merge refused atomically |
 | MonitorMode | multi | User preference / Console; Virtual layout is separate | workspace/primary/specific/multi applied through current-owner wire10; selected projection/aggregate forwarding and five native worker cases pass. Client-created virtual output mode/restore and other T06 gates remain |
 | MonitorIndex | 0 | User preference / Console specific capture | Current-owner specific capture uses actual QScreen index with its own surface/global origin; unavailable selection fails without whole-workspace fallback. Remaining T06 lifecycle/client gates open |
-| VirtualMonitorPolicy | replace | User preference / Console's client-created outputs | Complete current-owner policy transported/validated on wire11; pure replace/extend/parking plan tested. Worker creation/restore/local takeover still T06, lock race T03 |
-| VirtualMonitorLayout | client | User preference / Console's client-created outputs | wire11 carries client/single/physical and canonical native RDP display tuple; planner preserves native pixels and fractional physical scale. Executable creation/capture proof still T06; retained Virtual topology remains separate |
+| VirtualMonitorPolicy | replace | User preference / Console's client-created outputs | Current-owner wire11 policy now creates owned outputs under guard/journal; real private Sol replace/extend and Stop/withdraw exact restore pass. Native local takeover/worker loss/login/failure and T03 lock race remain |
+| VirtualMonitorLayout | client | User preference / Console's client-created outputs | Client single/two-output creation and every-screen decode pass on Sol; owned projection cannot grant full-layout writes. Pure planner preserves fractional physical mirror; native mirror/mixed-scale/client interaction, resize/Fit and retained persistence remain |
 | VirtualMonitorFallbackSize | 1920x1080 | User preference / output creation | Even bounded size and normalized peer fallback transported on wire11; per-surface/single fallback planner tested. Dynamic native limits and lifecycle acceptance remain T06 |
 | VaapiDriverMode | auto | Host device setup plus user backend preference / both | Process/worker setting remains host-controlled; driver choices cannot mutate root broker environment; equivalent T05/T15/T16 |
 | WakeDisplayOnConnect | true | User preference / Console physical seat; Virtual own desktop only | Applied through authenticated wire v7 DisplayPolicy, worker session/private bus; Console live enabled/disabled/viewer/failure gates pass; Virtual native and KCM gates remain |
@@ -220,3 +220,12 @@ Virtual capture/layout remains separate. Five real-worker Sol cases and focused
 broker/input/authority checks pass; client-created Console outputs, lifecycle,
 limits, full retained persistence and matching T08 acceptance remain T06/T08.
 Evidence `~/dev/rdp/evidence/2026-09-30-t06-capture/SUMMARY.md`.
+
+Wire11 configured Console output lifecycle is now implemented in source. Nine
+focused suites, five strengthened private Sol worker cases and 61 corrected
+Virtual controller cases pass. Separate KScreen queries verify fixture baseline
+enable/disable and exact restoration; every screen decodes. Connector aliases
+are test-only, so physical hardware behavior is not accepted. Native takeover,
+failure/worker loss/login, mixed-scale client interaction, resize/Fit, retained
+persistence and T03/T08/package gates remain. Evidence
+`~/dev/rdp/evidence/2026-09-30-t06-virtual-lifecycle/SUMMARY.md`.

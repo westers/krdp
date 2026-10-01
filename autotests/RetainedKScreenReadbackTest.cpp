@@ -12,6 +12,8 @@
 #include "RetainedMultiPrimaryPlan.h"
 #include "RetainedMultiMixedPlan.h"
 #include "RetainedMultiMixedCreatePlan.h"
+#include "ConsoleVirtualOutputReadback.h"
+#include "ConsoleVirtualOutputRestore.h"
 
 using namespace KRdp::RetainedKScreenReadback;
 
@@ -56,6 +58,57 @@ class RetainedKScreenReadbackTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void configuredCaptureProjectsOnlyOwnedOutputsWithDisabledPhysicals()
+    {
+        auto object = root();
+        auto values = object[QStringLiteral("outputs")].toArray();
+        auto panel = output(QStringLiteral("DP-1"), 3, 0, 0, 1, 0);
+        panel.insert(QStringLiteral("enabled"), false); values.append(panel);
+        object.insert(QStringLiteral("outputs"), values);
+        const auto json = QJsonDocument(object).toJson();
+        QVERIFY(!parse(json, QStringLiteral("console"))); // Full topology stays strict.
+        KRdp::ConsoleVirtualOutputPlan::Plan owned;
+        owned.outputs = {{QStringLiteral("Virtual-1"), QSize(1280, 720), QPoint(1024, 100), QPoint(1024, 100), true}};
+        const auto projection = KRdp::ConsoleVirtualOutputReadback::parse(json, QStringLiteral("console"), owned);
+        QVERIFY(projection); QCOMPARE(projection->outputs.size(), 1); QVERIFY(projection->outputs.first().primary);
+        KRdp::ConsoleWorkerWire::Outputs published{{{QStringLiteral("Virtual-1"), QRect(0, 0, 1280, 720), 1, true}}, QPoint(1024, 100)};
+        KRdp::VideoFrame frame; frame.size = QSize(1280, 720); frame.isKeyFrame = true; frame.data = keyframe();
+        frame.monitors = {{QRect(QPoint(0, 0), frame.size), true}};
+        const auto captured = KRdp::ConsoleTopologyReadback::confirmedProjection(*projection, published, {frame});
+        QVERIFY(captured); QVERIFY(!captured->complete); QVERIFY(!captured->outputs.first().physical);
+        QCOMPARE(captured->outputs.first().logical, QRect(1024, 100, 1280, 720));
+        owned.outputs.first().name = QStringLiteral("Virtual-missing");
+        QVERIFY(!KRdp::ConsoleVirtualOutputReadback::parse(json, QStringLiteral("console"), owned));
+        owned.outputs.first().name = QStringLiteral("Virtual-1");
+        auto disabledOwned = values; auto target = disabledOwned[1].toObject(); target.insert(QStringLiteral("enabled"), false); disabledOwned[1] = target;
+        object.insert(QStringLiteral("outputs"), disabledOwned);
+        QVERIFY(!KRdp::ConsoleVirtualOutputReadback::parse(QJsonDocument(object).toJson(), QStringLiteral("console"), owned));
+        object.insert(QStringLiteral("outputs"), values); auto duplicate = panel; duplicate.insert(QStringLiteral("id"), 2);
+        values.append(duplicate); object.insert(QStringLiteral("outputs"), values);
+        QVERIFY(!KRdp::ConsoleVirtualOutputReadback::parse(QJsonDocument(object).toJson(), QStringLiteral("console"), owned));
+    }
+
+    void configuredReleaseRequiresRestoredSurvivorsAndNoOwnedOutputs()
+    {
+        auto object = root();
+        auto values = object[QStringLiteral("outputs")].toArray();
+        auto panel = output(QStringLiteral("DP-1"), 3, 0, 0, 1, 3); values.append(panel);
+        object.insert(QStringLiteral("outputs"), values);
+        const QSet<QString> retired{QStringLiteral("Virtual-1")};
+        const auto entry = KRdp::ConsoleVirtualOutputRestore::snapshot(QJsonDocument(object).toJson(), QStringLiteral("console"), retired);
+        QVERIFY(entry); QCOMPARE(entry->outputs.size(), 2);
+        QVERIFY(!KRdp::ConsoleVirtualOutputRestore::matches(*entry, QJsonDocument(object).toJson(), retired));
+        values.removeAt(1); object.insert(QStringLiteral("outputs"), values);
+        QVERIFY(KRdp::ConsoleVirtualOutputRestore::matches(*entry, QJsonDocument(object).toJson(), retired));
+        auto moved = values[1].toObject(); moved.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 100}, {QStringLiteral("y"), 0}});
+        values[1] = moved; object.insert(QStringLiteral("outputs"), values);
+        QVERIFY(!KRdp::ConsoleVirtualOutputRestore::matches(*entry, QJsonDocument(object).toJson(), retired));
+        moved.insert(QStringLiteral("enabled"), QStringLiteral("false")); values[1] = moved; object.insert(QStringLiteral("outputs"), values);
+        QVERIFY(!KRdp::ConsoleVirtualOutputRestore::snapshot(QJsonDocument(object).toJson(), QStringLiteral("console")));
+        QVERIFY(!KRdp::ConsoleVirtualOutputRestore::snapshot(QJsonDocument(root()).toJson(), QStringLiteral("console"),
+            {QStringLiteral("Virtual-0"), QStringLiteral("Virtual-1")}));
+    }
+
     void selectedNonPrimaryOutputProofDoesNotAuthorizeFullTopology()
     {
         const auto snapshot = decoded(root()); QVERIFY(snapshot);

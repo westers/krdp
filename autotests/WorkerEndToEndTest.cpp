@@ -38,6 +38,7 @@
 #include "RenderNodes.h"
 #include "SurfaceChain.h"
 #include "VideoCodecSupport.h"
+#include "ConsoleVirtualOutputRestore.h"
 
 using namespace KRdp;
 
@@ -208,6 +209,8 @@ private Q_SLOTS:
     void workerReachesReadyAndDeliversFrames();
     void consoleCaptureSelection_data();
     void consoleCaptureSelection();
+    void consoleConfiguredOutputs_data();
+    void consoleConfiguredOutputs();
     void codecSwitchAtAttach_data();
     void codecSwitchAtAttach();
     void coalesceKeepsEveryOutputAlive_data();
@@ -322,7 +325,7 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
     const auto set = [&env](const char *name, const QString &value) {
         env.insert(QString::fromLatin1(name), value);
     };
-    set("PATH", QStringLiteral("/usr/bin:/bin"));
+    set("PATH", home + QStringLiteral("/tools:/usr/bin:/bin"));
     set("HOME", home);
     set("USER", qEnvironmentVariable("USER"));
     set("LOGNAME", qEnvironmentVariable("USER"));
@@ -557,6 +560,175 @@ void WorkerEndToEndTest::consoleCaptureSelection()
     QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
     QCOMPARE(outputs.monitors.size(), 2);
     stopWorker(*s, endpoint);
+}
+
+void WorkerEndToEndTest::consoleConfiguredOutputs_data()
+{
+    QTest::addColumn<int>("count");
+    QTest::addColumn<bool>("virtualDesktop");
+    QTest::addColumn<bool>("physicalAliases");
+    QTest::addColumn<bool>("replace");
+    QTest::addColumn<bool>("withdraw");
+    QTest::newRow("Console single extend with foreign outputs, withdraw") << 1 << false << false << false << true;
+    QTest::newRow("Console two extend with physical fixture, stop") << 2 << false << true << false << false;
+    QTest::newRow("Console two replace with physical fixture, withdraw") << 2 << false << true << true << true;
+    QTest::newRow("Console single replace with physical fixture, stop") << 1 << false << true << true << false;
+    QTest::newRow("Virtual ignores Console temporary-output policy") << 2 << true << false << true << false;
+}
+
+void WorkerEndToEndTest::consoleConfiguredOutputs()
+{
+    QFETCH(int, count); QFETCH(bool, virtualDesktop); QFETCH(bool, physicalAliases); QFETCH(bool, replace); QFETCH(bool, withdraw);
+    if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
+    auto *s = session(2); QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+    ConsoleWorkerEndpoint endpoint; WorkerRun run;
+    ConsoleWorkerWire::Outputs outputs;
+    std::optional<ConsoleWorkerWire::Topology> topology;
+    std::optional<ConsoleWorkerWire::PhysicalLeaseReleased> released;
+    connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&](const auto &value) { outputs = value; });
+    connect(&endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [&](const auto &value) { topology = value; });
+    connect(&endpoint, &ConsoleWorkerEndpoint::physicalLeaseReleased, this, [&](const auto &value) { released = value; });
+    const auto logs = qScopeGuard([&] {
+        if (QTest::currentTestFailed()) qWarning().noquote() << "worker.log:" << s->log(QStringLiteral("worker.log"), 18000)
+            << "kwin.log:" << s->log(QStringLiteral("kwin.log"), 5000);
+    });
+    QVERIFY(startWorker(*s, virtualDesktop, endpoint, run));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    const QString marker = s->runtime->path() + QStringLiteral("/physical-baseline");
+    const auto reap = qScopeGuard([&] {
+        if (!QFileInfo::exists(exitFile)) { endpoint.stopWorker(); (void)QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 30000); }
+        QFile::remove(marker);
+    });
+    QTRY_VERIFY_WITH_TIMEOUT((endpoint.ready() && outputs.monitors.size() == 2) || !run.errors.isEmpty(), 45000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    QVERIFY(endpoint.ready()); const auto initial = outputs;
+    // The private compositor has genuine KWin outputs, but names them Virtual.
+    // Alias only its two baseline connector names in this fixture so the real
+    // PhysicalOutputGuard can disable/restore them. Creation, KScreen commands,
+    // encoded streams and release remain real. No production classification is
+    // changed; this is compositor lifecycle evidence, not hardware acceptance.
+    if (physicalAliases) {
+        const QString tools = s->home->path() + QStringLiteral("/tools");
+        QVERIFY(QDir().mkpath(tools));
+        QFile wrapper(tools + QStringLiteral("/kscreen-doctor"));
+        QVERIFY(wrapper.open(QIODevice::WriteOnly));
+        wrapper.write(R"PY(#!/usr/bin/python3
+import json, os, pathlib, subprocess, sys
+marker = pathlib.Path(os.environ['XDG_RUNTIME_DIR']) / 'physical-baseline'
+aliases = json.loads(marker.read_text()) if marker.exists() else {}
+args = []
+for arg in sys.argv[1:]:
+    for real, alias in aliases.items():
+        prefix = 'output.' + alias + '.'
+        if arg.startswith(prefix):
+            arg = 'output.' + real + '.' + arg[len(prefix):]
+            break
+    args.append(arg)
+result = subprocess.run(['/usr/bin/kscreen-doctor', *args], capture_output=True)
+data = result.stdout
+if '-j' in args and result.returncode == 0 and aliases:
+    value = json.loads(data)
+    for output in value.get('outputs', []):
+        output['name'] = aliases.get(output.get('name'), output.get('name'))
+    data = json.dumps(value).encode()
+sys.stdout.buffer.write(data)
+sys.stderr.buffer.write(result.stderr)
+sys.exit(result.returncode)
+)PY");
+        wrapper.close(); QVERIFY(wrapper.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QJsonObject aliases;
+        for (int i = 0; i < initial.monitors.size(); ++i) aliases.insert(initial.monitors[i].name, QStringLiteral("DP-test-%1").arg(i));
+        QFile file(marker); QVERIFY(file.open(QIODevice::WriteOnly)); file.write(QJsonDocument(aliases).toJson()); file.close();
+    }
+    const auto query = [&]() -> std::optional<QByteArray> {
+        QProcess command;
+        auto environment = s->process->processEnvironment();
+        environment.insert(QStringLiteral("WAYLAND_DISPLAY"), QStringLiteral("wayland-0"));
+        environment.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("wayland"));
+        command.setProcessEnvironment(environment);
+        const QString wrapper = s->home->path() + QStringLiteral("/tools/kscreen-doctor");
+        command.start(QFileInfo::exists(wrapper) ? wrapper : QStringLiteral("/usr/bin/kscreen-doctor"), {QStringLiteral("-j")});
+        if (!command.waitForStarted(1000) || !command.waitForFinished(5000)) {
+            command.kill(); command.waitForFinished(1000); return {};
+        }
+        if (command.exitStatus() != QProcess::NormalExit || command.exitCode() != 0) return {};
+        return command.readAllStandardOutput();
+    };
+    const auto baselineJson = query(); QVERIFY(baselineJson);
+    const auto baseline = ConsoleVirtualOutputRestore::snapshot(*baselineJson, QStringLiteral("fixture")); QVERIFY(baseline);
+    run.frames.clear(); endpoint.setControlState({1, true});
+    ConsoleWorkerWire::EncoderConfig config; config.generation = 1;
+    config.settings = CodecPolicy::EncoderSettings{.hardware = false};
+    ClientDisplay::Info client{QSize(1600, 900), {}};
+    if (count == 2) client = {QSize(2560, 720), {{QRect(0, 0, 1280, 720), true}, {QRect(1280, 0, 1280, 720), false}}};
+    config.consoleVirtual = *ConsoleVirtualOutputPolicy::parse(true, replace ? QStringLiteral("replace") : QStringLiteral("extend"),
+        QStringLiteral("client"), QSize(1600, 900), client);
+    QVERIFY(endpoint.setEncoderConfig(config)); endpoint.requestKeyFrame();
+    const auto expected = [&] {
+        return outputs.monitors.size() == (virtualDesktop ? 2 : count)
+            && std::all_of(outputs.monitors.cbegin(), outputs.monitors.cend(), [&](const auto &output) {
+                return virtualDesktop ? std::any_of(initial.monitors.cbegin(), initial.monitors.cend(), [&](const auto &old) { return old.name == output.name; })
+                    : output.name.startsWith(QStringLiteral("Virtual-krdp-m"));
+            });
+    };
+    QTRY_VERIFY_WITH_TIMEOUT((expected() && !run.frames.isEmpty()) || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 60000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(expected());
+    const auto proof = std::find_if(run.frames.cbegin(), run.frames.cend(), [&](const auto &frame) {
+        return frame.isKeyFrame && frame.size == QSize(!virtualDesktop && count == 1 ? 1600 : 1280, !virtualDesktop && count == 1 ? 900 : 720)
+            && frame.monitors.size() == (virtualDesktop ? 2 : count);
+    });
+    QVERIFY(proof != run.frames.cend()); const auto proofFrame = *proof;
+    ClientStyle::Decoder decoder;
+    for (int index = 0; index < (virtualDesktop ? 2 : count); ++index) {
+        const auto packet = std::find_if(run.frames.cbegin(), run.frames.cend(), [&](const auto &frame) {
+            return frame.isKeyFrame && frame.monitorIndex == index && frame.size == proofFrame.size
+                && frame.monitors == proofFrame.monitors;
+        });
+        QVERIFY(packet != run.frames.cend());
+        QVERIFY2(decoder.feed(index + 1, VideoCodec::Avc420, packet->data), qPrintable(decoder.error()));
+        QCOMPARE(decoder.surfaces().value(index + 1).lastPicture, packet->size);
+    }
+    if (!virtualDesktop) {
+        const auto activeJson = query(); QVERIFY(activeJson);
+        bool parsed = false;
+        const auto active = OutputRestoreJournal::parseCurrent(*activeJson, &parsed); QVERIFY(parsed);
+        QCOMPARE(active.size(), baseline->outputs.size() + count);
+        for (const auto &original : baseline->outputs) {
+            const auto actual = std::find_if(active.cbegin(), active.cend(), [&](const auto &output) { return output.name == original.name; });
+            QVERIFY(actual != active.cend()); QCOMPARE(actual->enabled, !(physicalAliases && replace));
+        }
+        QFile held(s->home->path() + QStringLiteral("/state/farside/output-restore.json"));
+        QVERIFY(held.open(QIODevice::ReadOnly));
+        const auto entries = OutputRestoreJournal::parse(held.readAll()); QVERIFY(entries);
+        QVERIFY(std::any_of(entries->cbegin(), entries->cend(), [](const auto &entry) {
+            return entry.owner == QString::fromLatin1(OutputRestoreJournal::ConsoleVirtualOwner);
+        }));
+        QVERIFY(endpoint.requestTopology());
+        QTRY_VERIFY_WITH_TIMEOUT(topology.has_value() || !run.errors.isEmpty(), 15000);
+        QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(topology);
+        QVERIFY(!topology->complete); QCOMPARE(topology->outputs.size(), count);
+        QVERIFY(std::all_of(topology->outputs.cbegin(), topology->outputs.cend(), [](const auto &output) { return !output.physical; }));
+    } else {
+        QTest::qWait(1000); QVERIFY(expected());
+    }
+    if (withdraw) endpoint.setControlState({2, false});
+    else endpoint.stopWorker();
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(exitFile), 30000);
+    const auto restoredJson = query(); QVERIFY(restoredJson);
+    QVERIFY(ConsoleVirtualOutputRestore::matches(*baseline, *restoredJson));
+    if (!virtualDesktop) {
+        QVERIFY(released); QVERIFY(released->verified); QCOMPARE(released->controlGeneration, quint64(1));
+        QFile journal(s->home->path() + QStringLiteral("/state/farside/output-restore.json"));
+        if (journal.exists()) {
+            QVERIFY(journal.open(QIODevice::ReadOnly));
+            const auto entries = OutputRestoreJournal::parse(journal.readAll()); QVERIFY(entries); QVERIFY(entries->isEmpty());
+        }
+    }
+    QFile code(exitFile); QVERIFY(code.open(QIODevice::ReadOnly)); QCOMPARE(code.readAll().trimmed(), QByteArray("0"));
+    qInfo() << "Configured Console outputs:" << count << "physical fixture" << physicalAliases << "replace" << replace
+            << "Virtual" << virtualDesktop << "release" << (released ? released->verified : true) << "decoded" << proofFrame.size;
 }
 
 void WorkerEndToEndTest::workerReachesReadyAndDeliversFrames_data()
