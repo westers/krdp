@@ -202,8 +202,8 @@ void CursorShapeTest::wireRoundTrip()
     hide.type = Shape::Type::Hidden;
     QCOMPARE(roundTrip(hide), std::optional(hide));
     QCOMPARE(roundTrip(Shape{}), std::optional(Shape{}));
-    QCOMPARE(ConsoleWorkerWire::LastKind, ConsoleWorkerWire::Kind::Cursor);
-    QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(5)); // 4 brought Cursor; 5 (AV1-Q) the AV1 tiles
+    QCOMPARE(ConsoleWorkerWire::LastKind, ConsoleWorkerWire::Kind::ChromaTiming);
+    QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(9)); // paired protocol, including camera/display/chroma costs
 }
 
 void CursorShapeTest::wireRejectsMalformed()

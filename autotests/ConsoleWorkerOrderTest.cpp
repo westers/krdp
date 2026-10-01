@@ -130,6 +130,7 @@ private Q_SLOTS:
     void anythingElseBeforeReadyStillFails();
     void drainedWorkerDropsEarlyReports();
     void encoderStatsNeverPrecedeReady();
+    void chromaCostsRequireReadyAndStayBounded();
     void encoderStatsBeforeReadyFailTheWorker();
 };
 
@@ -380,6 +381,37 @@ void ConsoleWorkerOrderTest::encoderStatsNeverPrecedeReady()
     QTRY_COMPARE(received.size(), 1);
     QVERIFY2(h.errors.isEmpty(), qPrintable(h.errors.join(QLatin1Char('\n'))));
     QCOMPARE(received.first(), stats);
+}
+
+void ConsoleWorkerOrderTest::chromaCostsRequireReadyAndStayBounded()
+{
+    ConsoleWorkerWire::ChromaTiming cost{7, VideoCodec::Avc444v2, 0, {}};
+    cost.timing.splitVariant = QStringLiteral("avx2");
+    cost.timing.frames = 30; cost.timing.auxMaxGap = 2;
+    Harness h(ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"));
+    QVERIFY(h.start());
+    int received = 0;
+    QObject::connect(&h.endpoint, &ConsoleWorkerEndpoint::chromaTimingReceived, &h.endpoint, [&](const auto &report) {
+        QCOMPARE(report, cost); ++received;
+    });
+    auto outbox = h.outbox();
+    outbox.chromaTiming(cost);
+    outbox.hello({h.target.sessionId, h.target.uid, h.token});
+    outbox.chromaTiming(cost);
+    outbox.ready(); h.flush();
+    QVERIFY(h.errors.isEmpty()); QCOMPARE(received, 0);
+    outbox.chromaTiming(cost); h.flush(); QTRY_COMPARE(received, 1);
+    // Invalid worker input is refused rather than forwarded as current costs.
+    auto invalid = cost; invalid.timing.encodeMainAvg = -1;
+    h.worker.write(ConsoleWorkerWire::frame(invalid)); h.flush();
+    QTRY_COMPARE(h.errors.size(), 1); QCOMPARE(received, 1);
+
+    Harness early(ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"));
+    QVERIFY(early.start());
+    early.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{early.target.sessionId, early.target.uid, early.token})
+                       + ConsoleWorkerWire::frame(cost) + ConsoleWorkerWire::frame(Wire::Ready));
+    early.flush(); QTRY_COMPARE(early.errors.size(), 1);
+    QVERIFY(!early.endpoint.ready());
 }
 
 void ConsoleWorkerOrderTest::encoderStatsBeforeReadyFailTheWorker()

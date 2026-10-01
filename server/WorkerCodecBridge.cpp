@@ -30,6 +30,9 @@ WorkerCodecBridge::WorkerCodecBridge(VideoStream *stream, ConsoleWorkerSession *
     connect(session, &AbstractSession::encoderUnavailable, stream, &VideoStream::privateCodecUnavailable);
     connect(session, &AbstractSession::encoderBackendReported, stream, &VideoStream::encoderBackendReported);
     connect(session, &AbstractSession::chromaCapabilityChanged, stream, &VideoStream::setChromaCapable);
+    connect(session, &AbstractSession::chromaTimingReported, stream, [stream](const ChromaTimingReport &timing) {
+        if (timing.encodeMainAvg > 0) stream->setMeasuredEncodeTime(double(timing.encodeMainAvg) / 1000.0);
+    });
     stream->setEncoderCpuTimeSource([this]() -> qint64 {
         return m_endpoint && m_generation ? m_endpoint->workerCpuNs() : -1;
     });
@@ -76,6 +79,16 @@ void WorkerCodecBridge::bind(ConsoleWorkerEndpoint *endpoint, quint64 generation
     m_endpointConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::workerReady, this, [this] {
         resend(); // a replacement worker behind the same endpoint starts from its defaults
     }));
+    m_endpointConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::chromaTimingReceived, this, [this](const ConsoleWorkerWire::ChromaTiming &report) {
+        if (!m_stream || !m_session || report.generation != m_generation || report.codec != m_stream->codecForSessions()
+            || report.monitorIndex < 0 || report.monitorIndex >= int(m_costLogs.size())) return;
+        auto &clock = m_costLogs.at(report.monitorIndex);
+        if (!clock.isValid() || clock.elapsed() >= 30000) {
+            clock.start();
+            qInfo().noquote() << report.timing.costSummary() << "monitor" << report.monitorIndex;
+        }
+        m_session->reportChromaTiming(report.timing);
+    }));
     if (const auto caps = endpoint->encoderCaps()) {
         applyCaps(*caps);
     }
@@ -91,6 +104,7 @@ void WorkerCodecBridge::unbind()
     m_endpoint = nullptr;
     m_generation = 0;
     m_sent.reset();
+    m_costLogs = {};
     if (m_stream) {
         const QPointer<WorkerCodecBridge> alive(this);
         m_stream->setChromaCapable(false);

@@ -2338,6 +2338,48 @@ private Q_SLOTS:
         });
     }
 
+    void chromaCostsReachOnlyTheCurrentCodecAndGeneration()
+    {
+        microphoneFixture([&](auto &t, auto &, auto &endpoint, auto &worker) {
+            auto *stream = t.m_connection->videoStream();
+            stream->setCodecPreference(CodecPreference::Avc444);
+            ConsoleWorkerWire::EncoderCaps caps;
+            caps.encoders.avc = {true, true, true}; caps.avc444Hardware = true;
+            worker.write(ConsoleWorkerWire::frame(caps));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(stream->codecForSessions(), VideoCodec::Avc444v2);
+            QSignalSpy timing(&t.m_session, &AbstractSession::chromaTimingReported);
+            int delivered = 0;
+            QObject::connect(&endpoint, &ConsoleWorkerEndpoint::chromaTimingReceived, &t, [&](const auto &) { ++delivered; });
+            ConsoleWorkerWire::ChromaTiming report{t.m_controlGeneration, VideoCodec::Avc444v2, 1, {}};
+            report.timing.frames = 30; report.timing.auxMaxGap = 3;
+            report.timing.splitVariant = u"avx2"_s;
+            report.timing.encodeMainAvg = 4200; report.timing.encodeMainMax = 5000;
+            worker.write(ConsoleWorkerWire::frame(report));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(timing.size(), 1);
+            QCOMPARE(qvariant_cast<ChromaTimingReport>(timing.first().first()), report.timing);
+            auto stale = report; ++stale.generation;
+            auto oldCodec = report; oldCodec.codec = VideoCodec::Avc444;
+            worker.write(ConsoleWorkerWire::frame(stale) + ConsoleWorkerWire::frame(oldCodec));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(delivered, 3); QCOMPARE(timing.size(), 1);
+            // A later binding cannot consume costs sent under the previous generation.
+            t.m_codec->bind(&endpoint, report.generation + 1);
+            worker.write(ConsoleWorkerWire::frame(report));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(delivered, 4); QCOMPARE(timing.size(), 1);
+            ++report.generation;
+            worker.write(ConsoleWorkerWire::frame(report));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(timing.size(), 2);
+            t.revoke();
+            worker.write(ConsoleWorkerWire::frame(report));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(delivered, 6); QCOMPARE(timing.size(), 2);
+        });
+    }
+
     void savedAvcPreferenceUsesTheCurrentWorkerAndRevokesOnAuxiliaryFailure()
     {
         microphoneFixture([&](auto &t, auto &, auto &endpoint, auto &worker) {

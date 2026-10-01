@@ -457,21 +457,7 @@ public:
                     return;
                 }
                 m_lastCostLog.start();
-                qInfo().noquote() << QStringLiteral("AVC444 cost: frames %1 aux sent %2 skipped-motion %3 rest-refresh %4 rewrite-failures %5 split=%6 download avg %7 max %8 us split avg %9 max %10 us upload avg %11 max %12 us main queue->packet avg %13 aux %14 us")
-                                          .arg(r.frames)
-                                          .arg(r.auxSent)
-                                          .arg(r.auxSkippedMotion)
-                                          .arg(r.auxRestRefresh)
-                                          .arg(r.rewriteFailures)
-                                          .arg(r.splitVariant)
-                                          .arg(r.downloadAvg)
-                                          .arg(r.downloadMax)
-                                          .arg(r.splitAvg)
-                                          .arg(r.splitMax)
-                                          .arg(r.uploadAvg)
-                                          .arg(r.uploadMax)
-                                          .arg(r.encodeMainAvg)
-                                          .arg(r.encodeAuxAvg);
+                qInfo().noquote() << r.costSummary();
             }));
             // The session is passed along: a cursor sample's position is
             // local to the output that session captures (see onCursorUpdate()).

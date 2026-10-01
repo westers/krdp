@@ -87,7 +87,7 @@ No input/layout authority is granted before Ready. Strictly increasing policy
 revisions reject stale reactivation after release. Virtual sends demand only
 for its current authenticated attachment and releases it on revoke. Its worker
 uses the private desktop bus; root broker buses are never used for this policy.
-The paired broker/worker wire is now v8 in source; installed fleet remains v6.
+The paired broker/worker wire is now v9 in source; installed fleet remains v6.
 Delayed Inhibit replies release their cookies even after guard destruction,
 using the replying service's unique owner rather than a replacement service.
 
@@ -204,3 +204,10 @@ explicit missing, nonroot-owned, group-readable, malformed, symlink and FIFO
 policies before listening. Installed services/desktops remain unchanged; scratch
 credentials/TLS copies/desktop permission entry were removed. Evidence:
 `~/dev/rdp/evidence/2026-09-30-t04-auth-scopes/SUMMARY.md`.
+
+Wire9 additionally returns complete per-output chroma costs, including auxiliary
+max-gap and stage min/avg/max. Current generation/exact codec and binding checks
+reject stale reports. Primary/per-output producers participate; complete bounded
+rate-limited logs and measured encode time survive without stats subscription.
+Ten focused suites pass. Actual444/native timing and T08 gates remain; evidence
+`~/dev/rdp/evidence/2026-09-30-t05-chroma-costs/SUMMARY.md`.

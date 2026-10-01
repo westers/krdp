@@ -22,6 +22,7 @@
 
 #include "CodecPolicy.h"
 #include "ChromaPolicy.h"
+#include "ChromaTimingReport.h"
 #include "VideoFrame.h"
 
 namespace KRdp::ConsoleWorkerWire
@@ -51,7 +52,8 @@ namespace KRdp::ConsoleWorkerWire
 // 7 (T07): per-desktop display wake/inhibition, also before first capture.
 // 8 (T05): complete chroma timing/demand in EncoderConfig; actual chroma
 // capability in EncoderReport, distinct from encoder backend.
-constexpr quint16 ProtocolVersion = 8;
+// 9 (T05): complete per-output AVC444 costs, bound to the control generation.
+constexpr quint16 ProtocolVersion = 9;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -109,8 +111,9 @@ enum class Kind : quint8 {
     CameraResult,
     CameraDemand,
     DisplayPolicy,
+    ChromaTiming,
 };
-constexpr Kind LastKind = Kind::DisplayPolicy;
+constexpr Kind LastKind = Kind::ChromaTiming;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;
@@ -170,6 +173,18 @@ struct EncoderLoad {
     qint64 cpuNs = 0;
     bool operator==(const EncoderLoad &) const = default;
 };
+
+/// After Ready and only under the active encoder/control generation.
+struct ChromaTiming {
+    quint64 generation = 0;
+    VideoCodec codec = VideoCodec::Avc444v2;
+    int monitorIndex = 0;
+    ChromaTimingReport timing;
+    bool operator==(const ChromaTiming &) const = default;
+};
+// Keep cost reports valid under severe external GPU/CPU stalls; do not reuse
+// EncoderStats' ten-second presentation cap for the raw timing measurements.
+constexpr qint64 MaxChromaTimingUs = 3600000000LL;
 
 /**
  * STATS-S6, worker -> broker, every EncoderStatsIntervalMs while the current EncoderConfig has
@@ -1536,6 +1551,62 @@ inline QByteArray frame(const EncoderStats &stats)
     stream.setByteOrder(QDataStream::BigEndian);
     stream << stats.intervalMs << stats.framesEncoded << stats.framesSkipped << stats.encodeUs;
     return frame(Kind::EncoderStats, payload);
+}
+
+inline QByteArray frame(const ChromaTiming &report)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    const auto &r = report.timing;
+    stream << report.generation << wireCodec(report.codec) << qint32(report.monitorIndex)
+           << qint32(r.frames) << qint32(r.auxSent) << qint32(r.auxSkippedMotion)
+           << qint32(r.auxRestRefresh) << qint32(r.auxMaxGap) << qint32(r.rewriteFailures)
+           << r.splitVariant << r.downloadAvg << r.downloadMax << r.splitAvg << r.splitMax
+           << r.uploadAvg << r.uploadMax << r.encodeMainAvg << r.encodeMainMax
+           << r.encodeAuxAvg << r.encodeAuxMax << r.downloadMin << r.splitMin << r.uploadMin
+           << r.encodeMainMin << r.encodeAuxMin;
+    return frame(Kind::ChromaTiming, payload);
+}
+
+inline std::optional<ChromaTiming> chromaTiming(const Record &record)
+{
+    if (record.kind != Kind::ChromaTiming || record.payload.size() > 256) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    ChromaTiming report;
+    quint8 codec = 0;
+    qint32 monitor = 0, frames = 0, sent = 0, skipped = 0, rest = 0, gap = 0, failures = 0;
+    auto &r = report.timing;
+    stream >> report.generation >> codec >> monitor >> frames >> sent >> skipped >> rest >> gap >> failures
+           >> r.splitVariant >> r.downloadAvg >> r.downloadMax >> r.splitAvg >> r.splitMax
+           >> r.uploadAvg >> r.uploadMax >> r.encodeMainAvg >> r.encodeMainMax
+           >> r.encodeAuxAvg >> r.encodeAuxMax >> r.downloadMin >> r.splitMin >> r.uploadMin
+           >> r.encodeMainMin >> r.encodeAuxMin;
+    const auto parsedCodec = codecFromWire(codec);
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !report.generation
+        || !parsedCodec || (*parsedCodec != VideoCodec::Avc444 && *parsedCodec != VideoCodec::Avc444v2)
+        || monitor < 0 || monitor >= 16 || r.splitVariant.isEmpty() || r.splitVariant.size() > 32) return std::nullopt;
+    for (const auto ch : r.splitVariant) {
+        const auto c = ch.unicode();
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) return std::nullopt;
+    }
+    // At-rest auxiliary refreshes are independent of main-frame counters.
+    for (const auto count : {frames, sent, skipped, rest, gap, failures})
+        if (count < 0 || count > 100000) return std::nullopt;
+    for (const auto pair : {std::pair{r.downloadAvg, r.downloadMax}, std::pair{r.splitAvg, r.splitMax},
+                           std::pair{r.uploadAvg, r.uploadMax}, std::pair{r.encodeMainAvg, r.encodeMainMax},
+                           std::pair{r.encodeAuxAvg, r.encodeAuxMax}})
+        if (pair.first < 0 || pair.first > pair.second || pair.second > MaxChromaTimingUs) return std::nullopt;
+    for (const auto pair : {std::pair{r.downloadMin, r.downloadAvg}, std::pair{r.splitMin, r.splitAvg},
+                           std::pair{r.uploadMin, r.uploadAvg}, std::pair{r.encodeMainMin, r.encodeMainAvg},
+                           std::pair{r.encodeAuxMin, r.encodeAuxAvg}})
+        if (pair.first < 0 || pair.first > pair.second) return std::nullopt;
+    report.codec = *parsedCodec;
+    report.monitorIndex = monitor;
+    r.frames = frames; r.auxSent = sent; r.auxSkippedMotion = skipped;
+    r.auxRestRefresh = rest; r.auxMaxGap = gap; r.rewriteFailures = failures;
+    return report;
 }
 
 inline QByteArray frame(const CursorShape &cursor)

@@ -212,9 +212,6 @@ public:
         // subscribed to stats (EncoderConfig::statsWanted); the outbox never sends one before Ready.
         m_encoderStatsTimer.setInterval(ConsoleWorkerWire::EncoderStatsIntervalMs);
         connect(&m_encoderStatsTimer, &QTimer::timeout, this, &Worker::sendEncoderStats);
-        connect(&m_session, &AbstractSession::chromaTimingReported, this, [this](const ChromaTimingReport &report) {
-            if (report.encodeMainAvg > 0) m_statsEncodeUs = qint32(std::min<qint64>(report.encodeMainAvg, 10000000));
-        });
         connect(&m_session, &AbstractSession::cursorUpdate, this, [this](const PipeWireCursor &cursor) {
             reportCursor(WorkspaceCursorSource, cursor);
             if (cursor.visible && m_mode.physicalActions() && m_control.active && !m_resize.changing() && m_session.outputGeometryResolved()
@@ -2454,6 +2451,20 @@ private:
         connect(session, &AbstractSession::chromaCapabilityChanged, this, [this, session](bool capable) {
             if (m_socket.state() == QLocalSocket::ConnectedState)
                 m_outbox.report({ConsoleWorkerWire::EncoderReport::Event::ChromaCapability, session->videoCodec(), false, capable});
+        });
+        connect(session, &AbstractSession::chromaTimingReported, this, [this, session](const ChromaTimingReport &report) {
+            const auto codec = session->videoCodec();
+            const bool currentCapture = m_multiMode
+                ? std::any_of(m_multiSessions.begin(), m_multiSessions.end(), [session](const auto &entry) { return entry.get() == session; })
+                : session == &m_session;
+            if (!m_control.active || !m_encoderConfigured || m_encoderConfig.generation != m_control.generation
+                || !currentCapture || codec != m_encoderConfig.codec || !VideoCodecSupport::isAvc444(codec)
+                || m_socket.state() != QLocalSocket::ConnectedState) return;
+            // Every primary/per-output capture participates. Use the slowest
+            // reported main average for the aggregate stats interval.
+            if (report.encodeMainAvg > 0)
+                m_statsEncodeUs = std::max(m_statsEncodeUs, qint32(std::min<qint64>(report.encodeMainAvg, 10000000)));
+            m_outbox.chromaTiming({m_control.generation, codec, session->monitorIndex(), report});
         });
     }
 

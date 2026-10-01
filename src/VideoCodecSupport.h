@@ -7,16 +7,10 @@
 #include <freerdp/channels/rdpgfx.h>
 #include "VideoCodec.h"
 #include "ChromaPolicy.h"
+#include "ChromaTimingReport.h"
 namespace KRdp
 {
 enum class CodecPreference { Auto, Avc420, Avc444 };
-/// Per-second encoder cost report, mirrored from the private KPipeWire's ChromaTiming (microseconds).
-struct ChromaTimingReport {
-    int frames = 0, auxSent = 0, auxSkippedMotion = 0, auxRestRefresh = 0, rewriteFailures = 0;
-    QString splitVariant;
-    qint64 downloadAvg = 0, downloadMax = 0, splitAvg = 0, splitMax = 0, uploadAvg = 0, uploadMax = 0;
-    qint64 encodeMainAvg = 0, encodeMainMax = 0, encodeAuxAvg = 0, encodeAuxMax = 0;   // queued -> packet latency per context
-};
 namespace VideoCodecSupport
 {
 inline std::optional<CodecPreference> parseCodecPreference(QStringView value)
@@ -48,5 +42,4 @@ inline VideoCodec expectedCodec(CodecPreference preference) { return preference 
 }
 }
 Q_DECLARE_METATYPE(KRdp::VideoCodec)
-Q_DECLARE_METATYPE(KRdp::ChromaTimingReport)
 Q_DECLARE_METATYPE(KRdp::ChromaPolicy)

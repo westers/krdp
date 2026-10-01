@@ -134,6 +134,7 @@ void connectChromaTimingIfSupported(Stream *stream, Session *session)
             r.auxSent = t.auxSent;
             r.auxSkippedMotion = t.auxSkippedMotion;
             r.auxRestRefresh = t.auxRestRefresh;
+            if constexpr (requires { t.auxMaxGap; }) r.auxMaxGap = t.auxMaxGap;
             r.rewriteFailures = t.rewriteFailures;
             r.splitVariant = QString::fromLatin1(t.splitVariant);
             r.downloadAvg = t.downloadAvg;
@@ -146,6 +147,11 @@ void connectChromaTimingIfSupported(Stream *stream, Session *session)
             r.encodeMainMax = t.encodeMainMax;
             r.encodeAuxAvg = t.encodeAuxAvg;
             r.encodeAuxMax = t.encodeAuxMax;
+            r.downloadMin = t.downloadMin;
+            r.splitMin = t.splitMin;
+            r.uploadMin = t.uploadMin;
+            r.encodeMainMin = t.encodeMainMin;
+            r.encodeAuxMin = t.encodeAuxMin;
             Q_EMIT session->chromaTimingReported(r);
         });
     }

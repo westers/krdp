@@ -4,10 +4,12 @@
 #pragma once
 
 #include <optional>
+#include <array>
 
 #include <QList>
 #include <QObject>
 #include <QPointer>
+#include <QElapsedTimer>
 
 #include "ConsoleWorkerWire.h"
 
@@ -66,5 +68,6 @@ private:
     ChromaPolicy m_chromaPolicy;
     std::optional<ConsoleWorkerWire::EncoderConfig> m_sent;
     QList<QMetaObject::Connection> m_endpointConnections;
+    std::array<QElapsedTimer, 16> m_costLogs;
 };
 }

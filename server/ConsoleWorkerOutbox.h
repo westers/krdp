@@ -131,6 +131,12 @@ public:
         }
     }
 
+    /** Costs are current intervals, never held across initial capture. */
+    void chromaTiming(const ConsoleWorkerWire::ChromaTiming &timing)
+    {
+        if (m_readySent) m_writer(ConsoleWorkerWire::frame(timing));
+    }
+
     bool helloSent() const
     {
         return m_helloSent;

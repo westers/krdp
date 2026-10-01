@@ -204,6 +204,17 @@ byte-for-byte, scratch listener/TLS/desktop permission removed, installed servic
 and physical/private desktop processes preserved. Evidence
 `~/dev/rdp/evidence/2026-09-30-t05-avc-selection/SUMMARY.md`.
 
+**2026-09-30 chroma cost telemetry checkpoint (PARTIAL, unshipped):** Paired
+wire9 carries complete per-output min/avg/max costs and auxiliary max-gap under
+the current generation/exact AVC444 codec. All capture producers participate;
+broker unbind/rebind rejects stale costs. Legacy and broker logs share one full
+format with per-output rate limits; measured encode time works without a stats
+subscription. Ten focused suites and scratch production-target builds pass.
+Raw bounded reports tolerate external-load stalls beyond the existing aggregate
+presentation cap. No actual444 hardware/native timing or performance claim;
+remaining T05/T08/package gates are unchanged. Evidence
+`~/dev/rdp/evidence/2026-09-30-t05-chroma-costs/SUMMARY.md`.
+
 ### T06 — Complete monitor capture and layout parity
 
 **Instructions:** Preserve Console's single-monitor, whole-workspace and independent-monitor capture choices, selection and coordinate handling. Carry the useful per-client virtual-output replace/extend/fallback behavior into Console with verified restore and local takeover. Keep these capture/layout choices distinct from the connection type. Preserve Virtual's selected-layout creation, retained topology and standard-client attach-or-create behavior. Use the existing topology/restore code where it fits; do not extend frozen experiments beyond the required parity without recording why.

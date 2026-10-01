@@ -35,6 +35,8 @@ public:
     void submitFrame(const VideoFrame &frame);
     /** AUD-FIX7: the worker's encoder event, as this session's AbstractSession signal. */
     void reportEncoder(const ConsoleWorkerWire::EncoderReport &report);
+    /** Already checked against the bridge's current codec and binding. */
+    void reportChromaTiming(const ChromaTimingReport &report);
 
 Q_SIGNALS:
     void keyFrameRequested();

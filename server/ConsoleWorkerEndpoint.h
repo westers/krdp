@@ -122,6 +122,7 @@ Q_SIGNALS:
     void encoderReported(const KRdp::ConsoleWorkerWire::EncoderReport &report);
     /** STATS-S6: the worker's EncoderStats (only after Ready; one before Ready fails the worker). */
     void encoderStatsReceived(const KRdp::ConsoleWorkerWire::EncoderStats &stats);
+    void chromaTimingReceived(const KRdp::ConsoleWorkerWire::ChromaTiming &timing);
     /** FIX-CURSOR: the desktop's cursor shape changed (also in cursorShape()). */
     void cursorShapeReceived(const KRdp::ConsoleWorkerWire::CursorShape &shape);
     void protocolError(const QString &message);

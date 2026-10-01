@@ -110,4 +110,9 @@ void ConsoleWorkerSession::submitFrame(const VideoFrame &frame)
     setLogicalSize(frame.size);
     Q_EMIT frameReceived(frame);
 }
+
+void ConsoleWorkerSession::reportChromaTiming(const ChromaTimingReport &report)
+{
+    Q_EMIT chromaTimingReported(report);
+}
 }

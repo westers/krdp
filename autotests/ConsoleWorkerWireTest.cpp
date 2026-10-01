@@ -37,6 +37,7 @@ private Q_SLOTS:
     void addVirtualRecordsAreBoundedAndCorrelated();
     void encoderRecordsRoundTripAndAreBounded();
     void encoderStatsRoundTripAndAreBounded();
+    void chromaCostsRoundTripAndAreBounded();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
 };
@@ -550,7 +551,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(8));
+    QCOMPARE(ProtocolVersion, quint16(9));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -607,6 +608,55 @@ void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
     QVERIFY(!encoderCaps(oversized));
 }
 
+void ConsoleWorkerWireTest::chromaCostsRoundTripAndAreBounded()
+{
+    ChromaTiming cost{7, VideoCodec::Avc444v2, 1, {}};
+    auto &r = cost.timing;
+    r.frames = 33; r.auxSent = 9; r.auxSkippedMotion = 24;
+    r.auxRestRefresh = 2; r.auxMaxGap = 3; r.rewriteFailures = 1;
+    r.splitVariant = QStringLiteral("avx512");
+    r.downloadMin = 1; r.downloadAvg = 2; r.downloadMax = 3;
+    r.splitMin = 4; r.splitAvg = 5; r.splitMax = 6;
+    r.uploadMin = 7; r.uploadAvg = 8; r.uploadMax = 9;
+    r.encodeMainMin = 1000; r.encodeMainAvg = 2000; r.encodeMainMax = 3000;
+    r.encodeAuxMin = 1100; r.encodeAuxAvg = 2200; r.encodeAuxMax = 3300;
+    Deframer d; d.feed(frame(cost)); const auto record = d.next(); QVERIFY(record);
+    QCOMPARE(chromaTiming(*record), std::optional(cost));
+    QVERIFY(cost.timing.costSummary().contains(QStringLiteral("aux max-gap 3")));
+    QVERIFY(cost.timing.costSummary().contains(QStringLiteral("min download 1 split 4 upload 7 main 1000 aux 1100")));
+    auto malformed = *record;
+    malformed.payload.chop(1); QVERIFY(!chromaTiming(malformed));
+    malformed = *record; malformed.payload.append('x'); QVERIFY(!chromaTiming(malformed));
+    malformed = *record; malformed.payload = QByteArray(257, 'x'); QVERIFY(!chromaTiming(malformed));
+    const auto rejected = [](const ChromaTiming &cost) {
+        Deframer d; d.feed(frame(cost)); const auto record = d.next();
+        return record && !chromaTiming(*record);
+    };
+    for (int mode = 0; mode < 11; ++mode) {
+        auto invalid = cost;
+        switch (mode) {
+        case 0: invalid.generation = 0; break;
+        case 1: invalid.codec = VideoCodec::Avc420; break;
+        case 2: invalid.monitorIndex = -1; break;
+        case 3: invalid.monitorIndex = 16; break;
+        case 4: invalid.timing.auxMaxGap = -1; break;
+        case 5: invalid.timing.frames = 100001; break;
+        case 6: invalid.timing.splitVariant = QStringLiteral("avx512\nspoofed log"); break;
+        case 7: invalid.timing.splitVariant = QString(33, QLatin1Char('a')); break;
+        case 8: invalid.timing.encodeMainAvg = 4000; break;
+        case 9: invalid.timing.encodeAuxMin = -1; break;
+        case 10: invalid.timing.downloadMax = MaxChromaTimingUs + 1; break;
+        }
+        QVERIFY(rejected(invalid));
+    }
+    // The encoder can report an auxiliary-only at-rest refresh with no main frames.
+    cost.codec = VideoCodec::Avc444; cost.timing.frames = 0;
+    cost.timing.auxSent = 0; cost.timing.auxRestRefresh = 2;
+    d.feed(frame(cost)); QCOMPARE(chromaTiming(*d.next()), std::optional(cost));
+    cost.timing.encodeMainMax = 30000000; // External AI workloads may stall the GPU beyond10s.
+    d.feed(frame(cost)); QCOMPARE(chromaTiming(*d.next()), std::optional(cost));
+}
+
 void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
 {
     // STATS-S6: worker -> broker, 1 Hz, while EncoderConfig::statsWanted.
@@ -622,7 +672,7 @@ void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
     QCOMPARE(encoderStats(*deframer.next()), std::optional(measured));
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 0);
-    QCOMPARE(LastKind, Kind::DisplayPolicy);
+    QCOMPARE(LastKind, Kind::ChromaTiming);
 
     const auto rejected = [](const EncoderStats &stats) {
         Deframer d;

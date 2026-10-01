@@ -458,6 +458,8 @@ bool ConsoleWorkerEndpoint::processRecords()
             m_workerCpuNs = load->cpuNs;
         } else if (const auto stats = ConsoleWorkerWire::encoderStats(*record)) {
             Q_EMIT encoderStatsReceived(*stats);
+        } else if (const auto timing = ConsoleWorkerWire::chromaTiming(*record)) {
+            Q_EMIT chromaTimingReceived(*timing);
         } else if (const auto cursor = ConsoleWorkerWire::cursorShape(*record)) {
             m_cursorShape = *cursor;
             Q_EMIT cursorShapeReceived(*cursor);
