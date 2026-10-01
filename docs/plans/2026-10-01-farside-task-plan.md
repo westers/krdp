@@ -214,6 +214,29 @@ certificates, profiles, holds and physical greeter PIDs preserved. Installed
 helpers/policies/KCM resources verified. Actual KCM cancel/save/explicit restart/
 readback authorization flow still open. No pre-existing retained desktop at cutover.
 
+**October 1 follow-up:** The actual installed KCM loads on Sol's signed-in
+Console desktop and invokes the production authorization path. Automation cannot
+enter the KDE password field: its accessibility interface exposes Text, not
+EditableText. Initial attempts timed out before any settings save; the remaining
+Farside challenge was cancelled and temporary accessibility enablement restored.
+No agent restart or policy bypass. The camera report exposed missing server
+loopback setup; the installed helper saved only Console `CameraLoopbackDevice`
+with revision validation/TLS keep, an explicit restart at zero connections applied
+it, and runtime inspection verified `/dev/video10`. This proves helper/save/runtime
+behavior, **not** normal KCM authentication acceptance. Existing rollback evidence
+is reused. Evidence: `~/dev/rdp/evidence/2026-10-01-n04-installed-settings/SUMMARY.md`.
+
+**Remaining manual check (Sol, installed df517e8):** Open Farside Host Settings,
+load Console with normal KDE administrator authentication. Stage loopback `none`,
+cancel its Save authorization, and verify the draft remains while saved/runtime
+`/dev/video10` is unchanged. Restore draft `/dev/video10`; make a reversible
+quality change, authorize Save, verify runtime still has the previous quality,
+and explicitly restart Console when its connection can be interrupted. Inspect
+runtime for the saved quality, then restore the original quality through the same
+flow. Pass requires cancellation without a write, an authorized scoped save,
+explicit restart and matching runtime readback; do not change TLS, wallets or
+Virtual settings. These are the only remaining N04 acceptance steps.
+
 Prerequisite N03. **Do:** Inventory active connections/retained workers; schedule
 safe restart without discarding desktops. Install candidate; verify running
 broker/worker identities and policies. From Buzz, exercise actual KCM cancellation,
@@ -312,6 +335,17 @@ Reuse accepted Console DPMS/multi-viewer/failure evidence; verify any changed pa
 and neither mode unlocks a locked Console. Installed settings apply as documented.
 
 ### N12 — Finish camera and redirected media (T11)
+
+**PARTIAL, 2026-10-01 user-reported Console camera fix:** Sol had no V4L2 devices
+or loopback module despite the Hal client reporting mapping. Installed the five
+new loopback/DKMS/tool packages without upgrades/removals, configured persistent
+`/dev/video10` with `exclusive_caps=1` and normal desktop `uaccess` permissions,
+and applied the Console path through the installed helper plus explicit restart.
+Runtime path, device identity, preserved Virtual/TLS settings and apt holds pass.
+Hal must reconnect, enable mapping and reopen Camera/refresh Meet to check device
+visibility and live video. No real Hal-camera frames or call accepted yet; camera
+off means this exclusive device advertises output rather than capture. See
+[Console camera setup](../console-camera.md). No product binary/version change.
 
 **Do:** Select the missing Console or Virtual case: namespace/device grants,
 on/off/reselect, second camera, LED or external bidirectional call. Reuse existing

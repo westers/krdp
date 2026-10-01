@@ -37,6 +37,10 @@ Desktop remains configured in its own module. The old route, config and secret
 storage remain migration inputs until T10/T13 acceptance; this UI cutover does
 not retire the installed legacy listener.
 
+Console camera redirection needs a configured server V4L2 loopback device for
+apps that enumerate `/dev/video*`. See [Console camera setup](docs/console-camera.md)
+for installation, permissions, explicit restart and application checks.
+
 The [consolidation migration design](docs/superpowers/specs/2026-10-01-console-virtual-migration-design.md)
 defines dry-run, backup, credential/trust preservation and rollback. Its source
 planner currently prepares complete legacy effective preferences and reports
