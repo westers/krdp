@@ -1,6 +1,6 @@
 # Farside remaining work: implementation and acceptance plan
 
-Date: 2026-09-30. Status: execution in progress; no consolidation cutover accepted.
+Date: 2026-09-30. Status: paused at Steve's request on 2026-10-01; no consolidation cutover accepted.
 Requested by Steve after the Sol/Hal `f255ee2` deployment.
 
 ## Outcome and scope
@@ -43,6 +43,15 @@ milestone criteria below. Keep implementation, source acceptance and installed
 delivery distinct in the ledger.
 
 ## Execution checkpoint (2026-09-30)
+
+**2026-10-01 pause and release assessment:** Steve requested a checkpoint stop,
+an assessment of client/server releases, and a plan to finish. Source checkpoint
+`d437511c` is pushed: T10 effective-settings planner, 13 pure suites passing,
+32 migration cases, no durable apply or secret-store access. Installed releases
+remain unchanged. The [release and completion plan](2026-10-01-farside-release-and-completion.md)
+puts wallet overwrite protection first, then client/server package candidates
+and installed/native/rollback gates. Full T01–T28 scope and original completion
+criteria remain in force; this is a user-requested pause, not goal completion.
 
 - Later Console feedback: Steve requested Sol session 429 unlock; verified and
   completed (`LockedHint=no`). Historical emergency-mode locker and Discover
