@@ -27,6 +27,38 @@ dialog cancellation (126) and denied authorization (127) preserve pending edits.
 This behavior and the sanitized execution environment are specified by
 [polkit's upstream manual](https://raw.githubusercontent.com/polkit-org/polkit/master/docs/man/pkexec.xml).
 
+## System service controls
+
+The service model addresses only `farside-console-host.service` and
+`farside-virtual-host.service` on systemd's system bus. The existing stock/legacy
+user-manager coexistence adapter stays separate. Opening the service page reads
+state without starting/stopping anything; read-only polling updates externally
+changed state. Unknown, missing, masked and invalid units never enable a start
+or restart action. Boot startup distinguishes persistent `enabled` from
+`enabled-runtime`, and static/indirect/generated states do not offer a writable
+boot checkbox.
+
+Start/stop/restart use the fixed manager methods, `replace`, and normal systemd
+PolicyKit authorization with D-Bus interactive authorization allowed. Subscribe
+before queueing and match the exact returned job path/unit. `JobRemoved` can
+precede the method reply; retain bounded early completions. A queued method
+reply alone is not success. Failed/cancelled/timeout jobs, manager replacement
+and authorization denial keep an explanation and require actual state readback.
+Operation generations prevent a late callback from completing a newer request.
+
+Enable/disable use persistent unit-file operations (`runtime=false`, no force),
+followed by explicit manager Reload and fresh status. If files change but Reload
+fails, preserve that explanation while displaying actual file state. Startup
+changes never imply that the service is currently running. The actual service
+manager API and authorization are documented in
+[systemd's upstream D-Bus manual](https://raw.githubusercontent.com/systemd/systemd/main/man/org.freedesktop.systemd1.xml).
+Stop/restart needs an explicit in-page confirmation that clients will disconnect.
+The model serializes operations and blocks repeats until readback completes.
+
+Pure state/lifetime/denial tests, private Sol D-Bus API/job-order tests and Buzz
+populated UI evidence accept this component only. Installed-policy real
+authorization and broker restart acceptance remain T08/T27 gates.
+
 ## Authentication transaction
 
 - Read the fixed `/etc/farside/authentication.json` using the same safe reader
@@ -62,6 +94,6 @@ Production installed policy is never the test write target.
 
 The real KCM needs populated Buzz screenshots and save/reload/cancel/restart
 round trips to the intended brokers, plus live stock/Farside coexistence. All
-remaining preference, listener/TLS/device administration, service UI, migration
+remaining preference, listener/TLS/device administration, main-page cutover, migration
 and T27 package/rollback gates remain necessary. This component alone does not
 complete T08 or the P0 milestone.

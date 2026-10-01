@@ -129,6 +129,8 @@ KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
     , m_runtimeWatcher(new QFileSystemWatcher(this))
 {
     m_brokerAuthentication = new BrokerAuthenticationSettings(this);
+    m_brokerServices = new BrokerServices(this);
+    QQmlEngine::setObjectOwnership(m_brokerServices, QQmlEngine::CppOwnership);
     QQmlEngine::setObjectOwnership(m_brokerAuthentication, QQmlEngine::CppOwnership);
     FarsideMigration::migrateCredentialsAndPermission();
     setButtons(Help | Apply | Default);

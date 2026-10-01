@@ -244,6 +244,8 @@ private Q_SLOTS:
         QTest::addColumn<QStringList>("keyItems");
         QTest::newRow("broker sign-in") << u"BrokerSignInPage.qml"_s << u"brokerSignInPage"_s << u"Console and Virtual Sign-In"_s
                                        << QStringList{u"loadBrokerAuthentication"_s, u"saveBrokerAuthentication"_s};
+        QTest::newRow("broker services") << u"BrokerServicesPage.qml"_s << u"brokerServicesPage"_s << u"Console and Virtual Services"_s
+                                       << QStringList{u"refreshBrokerServices"_s};
         QTest::newRow("users") << u"UsersPage.qml"_s << u"usersPage"_s << u"Users and Security"_s
                                << QStringList{u"systemUserCheck"_s, u"usersFrame"_s, u"certificateStateRow"_s, u"ownCertificateCheck"_s};
         QTest::newRow("screens") << u"ScreensPage.qml"_s << u"screensPage"_s << u"Screens and Displays"_s << QStringList{u"shareColumn"_s, u"wakeCheck"_s};

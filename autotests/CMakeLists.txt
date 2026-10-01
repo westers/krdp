@@ -899,6 +899,19 @@ add_executable(BrokerAuthenticationSettingsTest BrokerAuthenticationSettingsTest
 target_link_libraries(BrokerAuthenticationSettingsTest PRIVATE Qt6::Test kcm_krdpserver_core)
 target_compile_definitions(BrokerAuthenticationSettingsTest PRIVATE AUTH_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/authentication-admin-protocol.py")
 add_test(NAME BrokerAuthenticationSettingsTest COMMAND BrokerAuthenticationSettingsTest)
+add_executable(BrokerServicesTest BrokerServicesTest.cpp)
+target_link_libraries(BrokerServicesTest PRIVATE Qt6::Test kcm_krdpserver_core)
+add_test(NAME BrokerServicesTest COMMAND BrokerServicesTest)
+add_executable(BrokerServicesBusTest BrokerServicesBusTest.cpp)
+target_link_libraries(BrokerServicesBusTest PRIVATE Qt6::Test kcm_krdpserver_core)
+# Private D-Bus and actual system read-only checks run manually on Sol. Never
+# add this daemon-dependent executable to Hal's pure test selection.
+add_executable(BrokerServicesPageTest BrokerServicesPageTest.cpp)
+target_link_libraries(BrokerServicesPageTest PRIVATE Qt6::Test Qt6::Quick Qt6::Qml Qt6::Widgets KF6::I18nQml kcm_krdpserver_core)
+target_compile_definitions(BrokerServicesPageTest PRIVATE SERVICE_PAGE="${CMAKE_SOURCE_DIR}/src/kcm/ui/BrokerServicesPage.qml")
+add_test(NAME BrokerServicesPageTest COMMAND BrokerServicesPageTest)
+set_tests_properties(BrokerServicesPageTest PROPERTIES TIMEOUT 45 LABELS "gui;non-hal"
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=org.kde.desktop")
 add_executable(BrokerSignInPageTest BrokerSignInPageTest.cpp)
 target_link_libraries(BrokerSignInPageTest PRIVATE Qt6::Test Qt6::Quick Qt6::Qml Qt6::Widgets KF6::I18nQml kcm_krdpserver_core)
 target_compile_definitions(BrokerSignInPageTest PRIVATE AUTH_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/authentication-admin-protocol.py" AUTH_PAGE="${CMAKE_SOURCE_DIR}/src/kcm/ui/BrokerSignInPage.qml")

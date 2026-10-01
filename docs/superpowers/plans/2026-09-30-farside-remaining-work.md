@@ -430,6 +430,22 @@ coexistence and T27 package/rollback/deployment remain independent work.
 Spec: `../specs/2026-10-01-broker-settings-design.md`. Evidence:
 `~/dev/rdp/evidence/2026-10-01-t08-auth-editor/SUMMARY.md`.
 
+**2026-10-01 system-service settings checkpoint (PARTIAL, unshipped):**
+A separate two-route page now reads the system Console/Virtual services and
+offers normal authorized start/stop/restart and persistent startup controls.
+Stop/restart confirms client disconnection. Job completion is matched by exact
+unit/path, including signals before method replies; queued replies alone never
+report success. Shared connection subscriptions and manager replacement/late
+callbacks are handled. File changes/reload/actual status are separate; errors
+survive readback/polling, and unknown/masked/static/runtime startup states have
+appropriate controls. Pure model/lifetime tests, twelve private Sol bus cases
+(including setup/cleanup and production read-only installed broker state), Buzz
+page flow and fourteen compiled KCM cases pass. This does not restart installed
+brokers or accept installed PolicyKit dialogs. Main-page legacy cutover, host
+listen/TLS/device administration, atomic user-preference bindings/help, T10/live
+stock coexistence and T27 delivery remain independent work. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t08-services/SUMMARY.md`.
+
 ### T09 — Make client types explicitly Console or Virtual
 
 **Instructions:** Add an explicit persisted type and select it when creating/editing a connection. Use authenticated capabilities to validate behavior; a custom port must not change the type. Replace the old `physicalConsole` distinction throughout form, cards, session identity, menus, topology and device paths. Keep an internal migration representation only while old saved entries are awaiting T10. Standard RDP hosts retain their appropriate existing-desktop behavior.

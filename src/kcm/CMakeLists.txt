@@ -17,6 +17,7 @@ add_library(kcm_krdpserver_core STATIC
     systemdservicemanager.cpp
     hostdevices.cpp
     brokerauthenticationsettings.cpp
+    brokerservices.cpp
 )
 set_target_properties(kcm_krdpserver_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_definitions(kcm_krdpserver_core PRIVATE FARSIDE_AUTHENTICATION_HELPER="${KDE_INSTALL_FULL_LIBEXECDIR}/farside-authentication-helper")
