@@ -57,6 +57,22 @@ class RetainedMultiCaptureTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void selectedOutputHasItsOwnPixelAtlasAndGlobalOrigin()
+    {
+        RetainedMultiCapture set;
+        const QVector<RetainedMultiCapture::Screen> one{{QStringLiteral("DP-2"), QRect(-1280, 100, 1280, 720), true}};
+        QVERIFY(!set.configure(one)); // Full multi-layout contract remains two or more.
+        QVERIFY(set.configure(one, 1));
+        const auto ready = set.submit(0, packet(QSize(1920, 1080), QSize(1280, 720), fixture(QStringLiteral("1920x1080"))));
+        QVERIFY(ready.becameReady);
+        QCOMPARE(ready.outputs.compositorOrigin, QPoint(-1280, 100));
+        QCOMPARE(ready.outputs.monitors.first().geometry, QRect(0, 0, 1280, 720));
+        QCOMPARE(ready.outputs.monitors.first().scale, 1.5);
+        QCOMPARE(ready.frames.first().monitorIndex, 0);
+        QCOMPARE(ready.atlas.first().geometry, QRect(0, 0, 1920, 1080));
+        QVERIFY(!set.configure(one, 0));
+    }
+
     void waitsForEveryIndependentlyDecodedOutput()
     {
         RetainedMultiCapture set;

@@ -23,6 +23,7 @@
 #include "CodecPolicy.h"
 #include "ChromaPolicy.h"
 #include "ChromaTimingReport.h"
+#include "MonitorCapturePolicy.h"
 #include "VideoFrame.h"
 
 namespace KRdp::ConsoleWorkerWire
@@ -53,7 +54,8 @@ namespace KRdp::ConsoleWorkerWire
 // 8 (T05): complete chroma timing/demand in EncoderConfig; actual chroma
 // capability in EncoderReport, distinct from encoder backend.
 // 9 (T05): complete per-output AVC444 costs, bound to the control generation.
-constexpr quint16 ProtocolVersion = 9;
+// 10 (T06): Console monitor capture selection in current-owner EncoderConfig.
+constexpr quint16 ProtocolVersion = 10;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -154,6 +156,7 @@ struct EncoderConfig {
     bool statsWanted = false;
     ChromaPolicy chroma;
     bool chromaEnabled = true;
+    MonitorCapturePolicy capture;
     bool operator==(const EncoderConfig &) const = default;
 };
 
@@ -1201,6 +1204,7 @@ struct TopologyOutput {
 
 struct Topology {
     QVector<TopologyOutput> outputs;
+    bool complete = true; // False for a capture projection; never grants full-layout mutations.
     bool operator==(const Topology &) const = default;
 };
 
@@ -1212,6 +1216,7 @@ inline QByteArray frame(const Topology &topology)
     stream << quint32(topology.outputs.size());
     for (const auto &output : topology.outputs)
         stream << output.name << output.pixels << output.logical << output.scale << output.primary << output.priority << output.physical;
+    stream << quint8(topology.complete ? 1 : 0);
     return frame(Kind::Topology, payload);
 }
 
@@ -1244,7 +1249,10 @@ inline std::optional<Topology> topology(const Record &record)
         primaries += output.primary;
         result.outputs.append(output);
     }
-    return stream.status() == QDataStream::Ok && stream.atEnd() && (count == 0 || (primaries == 1 && priorities.size() == count))
+    quint8 complete = 0;
+    stream >> complete;
+    result.complete = complete == 1;
+    return stream.status() == QDataStream::Ok && stream.atEnd() && complete <= 1 && (count == 0 || (primaries == 1 && priorities.size() == count))
         ? std::optional<Topology>(result) : std::nullopt;
 }
 
@@ -1454,7 +1462,8 @@ inline QByteArray frame(const EncoderConfig &config)
     const auto settings = config.settings.value_or(CodecPolicy::EncoderSettings{});
     stream << settings.hardware << quint8(settings.preset) << settings.targetKbps << qint32(settings.maxFrameRate) << config.frameRate << config.statsWanted
            << quint8(std::clamp(settings.av1Tiles, 0, 64))
-           << qint32(config.chroma.motionGapMs) << qint32(config.chroma.restMs) << qint32(config.chroma.maxGapMs) << config.chromaEnabled;
+           << qint32(config.chroma.motionGapMs) << qint32(config.chroma.restMs) << qint32(config.chroma.maxGapMs) << config.chromaEnabled
+           << quint8(config.capture.mode) << qint32(config.capture.index);
     return frame(Kind::EncoderConfig, payload);
 }
 
@@ -1472,14 +1481,16 @@ inline std::optional<EncoderConfig> encoderConfig(const Record &record)
     quint8 preset = 0;
     qint32 maxFrameRate = 0;
     quint8 av1Tiles = 0;
-    qint32 motionGap = 0, rest = 0, maxGap = 0;
+    qint32 motionGap = 0, rest = 0, maxGap = 0, monitorIndex = 0;
+    quint8 captureMode = 0;
     stream >> config.generation >> codec >> hasSettings >> settings.hardware >> preset >> settings.targetKbps >> maxFrameRate >> config.frameRate >> config.statsWanted
-        >> av1Tiles >> motionGap >> rest >> maxGap >> config.chromaEnabled;
+        >> av1Tiles >> motionGap >> rest >> maxGap >> config.chromaEnabled >> captureMode >> monitorIndex;
     config.chroma = {motionGap, rest, maxGap};
+    config.capture = {MonitorCapturePolicy::Mode(captureMode), monitorIndex};
     const auto decoded = codecFromWire(codec);
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !config.generation || !decoded || preset > quint8(CodecPolicy::Preset::Fastest)
         || maxFrameRate < 0 || maxFrameRate > 240 || config.frameRate < 1 || config.frameRate > 240 || settings.targetKbps > 1000000 || av1Tiles > 64
-        || !config.chroma.isValid()) {
+        || !config.chroma.isValid() || !config.capture.isValid()) {
         return std::nullopt;
     }
     config.codec = *decoded;

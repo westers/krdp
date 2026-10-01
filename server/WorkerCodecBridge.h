@@ -56,6 +56,8 @@ public:
     /** Validated connection policy; unchanged on invalid input. Main thread. */
     bool setChromaPolicy(const ChromaPolicy &policy);
     ChromaPolicy chromaPolicy() const { return m_chromaPolicy; }
+    bool setCapturePolicy(const MonitorCapturePolicy &policy);
+    MonitorCapturePolicy capturePolicy() const { return m_capturePolicy; }
 
 private:
     void send(bool force);
@@ -66,6 +68,7 @@ private:
     QPointer<ConsoleWorkerEndpoint> m_endpoint;
     quint64 m_generation = 0;
     ChromaPolicy m_chromaPolicy;
+    MonitorCapturePolicy m_capturePolicy;
     std::optional<ConsoleWorkerWire::EncoderConfig> m_sent;
     QList<QMetaObject::Connection> m_endpointConnections;
     std::array<QElapsedTimer, 16> m_costLogs;

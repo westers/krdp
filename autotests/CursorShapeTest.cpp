@@ -203,7 +203,7 @@ void CursorShapeTest::wireRoundTrip()
     QCOMPARE(roundTrip(hide), std::optional(hide));
     QCOMPARE(roundTrip(Shape{}), std::optional(Shape{}));
     QCOMPARE(ConsoleWorkerWire::LastKind, ConsoleWorkerWire::Kind::ChromaTiming);
-    QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(9)); // paired protocol, including camera/display/chroma costs
+    QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(10)); // paired protocol, including Console capture selection
 }
 
 void CursorShapeTest::wireRejectsMalformed()

@@ -157,6 +157,27 @@ inline bool matchesPublished(const Snapshot &readback, const ConsoleWorkerWire::
     return matched.size() == readback.outputs.size() && frameIndexes.size() == keyframes.size();
 }
 
+// Capture of one selected Console output is a projection, not a full topology
+// proof. Keep matchesPublished's full-layout contract unchanged for mutations.
+inline bool matchesCapturedSubset(const Snapshot &readback, const ConsoleWorkerWire::Outputs &worker,
+    const QVector<VideoFrame> &keyframes)
+{
+    if (worker.monitors.size() != 1 || keyframes.size() != 1) return false;
+    const auto &published = worker.monitors.first();
+    const auto found = std::find_if(readback.outputs.cbegin(), readback.outputs.cend(), [&published](const auto &output) {
+        return output.backendKey == published.name;
+    });
+    if (found == readback.outputs.cend()) return false;
+    const auto &frame = keyframes.first();
+    return worker.compositorOrigin == found->logicalGeometry.topLeft()
+        && published.geometry == QRect(QPoint(0, 0), found->logicalGeometry.size())
+        && published.primary && VirtualResize::sameScale(published.scale, found->scale)
+        && frame.monitorIndex == 0 && frame.isKeyFrame && frame.size == found->nativePixels
+        && frame.monitors.size() == 1 && frame.monitors.first().geometry == QRect(QPoint(0, 0), frame.size)
+        && frame.monitors.first().primary
+        && encodedKeyframeShows(frame.codec.value_or(VideoCodec::Avc420), frame.data, found->nativePixels);
+}
+
 struct Placement {
     QString outputName;
     QPoint logicalPosition;

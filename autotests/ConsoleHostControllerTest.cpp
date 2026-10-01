@@ -152,8 +152,8 @@ private Q_SLOTS:
         host.setUserSettingsReader([&](quint32 uid) {
             ++reads;
             return BrokerUserSettings::parse(uid == 1000
-                ? "[General]\nQuality=43\nAdaptiveQuality=false\nPreferAudioQuality=true\nAv1Tiles=8\nSoftwareEncoding=prefer\nAvc444MotionGapMs=200\nAvc444RestMs=300\nAvc444MaxGapMs=1200\n"
-                : "[General]\nQuality=64\nPreferAudioQuality=false\nAv1Tiles=2\nSoftwareEncoding=never\n");
+                ? "[General]\nQuality=43\nAdaptiveQuality=false\nPreferAudioQuality=true\nAv1Tiles=8\nSoftwareEncoding=prefer\nAvc444MotionGapMs=200\nAvc444RestMs=300\nAvc444MaxGapMs=1200\nMonitorMode=specific\nMonitorIndex=1\n"
+                : "[General]\nQuality=64\nPreferAudioQuality=false\nAv1Tiles=2\nSoftwareEncoding=never\nMonitorMode=workspace\n");
         });
         host.setVideoCodecHost({});
         host.addClient(&first);
@@ -171,6 +171,8 @@ private Q_SLOTS:
         QCOMPARE(first.videoStream()->softwareEncoding(), CodecPolicy::SoftwareEncoding::Prefer);
         QCOMPARE(a.codec->chromaPolicy(), (ChromaPolicy{200, 300, 1200}));
         QCOMPARE(second.videoStream()->softwareEncoding(), CodecPolicy::SoftwareEncoding::Never);
+        QCOMPARE(a.codec->capturePolicy(), (MonitorCapturePolicy{MonitorCapturePolicy::Mode::Specific, 1}));
+        QCOMPARE(b.codec->capturePolicy(), (MonitorCapturePolicy{MonitorCapturePolicy::Mode::Workspace, 0}));
         host.m_control.admit(a.id);
         host.m_control.admit(b.id);
         host.syncControlState();
@@ -198,6 +200,68 @@ private Q_SLOTS:
         QCOMPARE(host.m_clients.front()->videoQuality, quint8(37));
         QVERIFY(!quality.isEmpty());
         QCOMPARE(quality.last().at(0).value<quint8>(), quint8(37));
+    }
+
+    void selectedCaptureWaitsForProjectionAndCannotGrantLayoutWrites()
+    {
+        Server server; RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.addClient(&connection);
+        auto &client = *host.m_clients.front();
+        host.m_control.admit(client.id); host.syncControlState();
+        host.m_inputEnabled = true; client.session->setWorkerActive(true);
+        host.m_experimentalPhysicalTopology = host.m_experimentalConsoleVirtual = true;
+        client.codec->setCapturePolicy({MonitorCapturePolicy::Mode::Specific, 1});
+        QSignalSpy received(client.session.get(), &AbstractSession::frameReceived);
+        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("DP-2"), QRect(0, 0, 1280, 720), 1.5, true}}, QPoint(-1280, 100)});
+        QVERIFY(host.m_layoutAwaitingReadback);
+        VideoFrame frame; frame.size = QSize(1920, 1080); frame.isKeyFrame = true;
+        frame.monitors = {{QRect(0, 0, 1920, 1080), true}};
+        Q_EMIT host.m_endpoint.frameReceived(frame);
+        QVERIFY(received.isEmpty());
+        ConsoleWorkerWire::Topology projection;
+        projection.complete = false;
+        projection.outputs = {{QStringLiteral("DP-2"), frame.size, QRect(-1280, 100, 1280, 720), 1.5, true, 1, true}};
+        Q_EMIT host.m_endpoint.topologyReceived(projection);
+        QVERIFY(!host.m_layoutAwaitingReadback);
+        QVERIFY(host.m_topologyAvailable); QVERIFY(!host.m_topologyComplete);
+        Q_EMIT host.m_endpoint.frameReceived(frame);
+        QCOMPARE(received.size(), 1);
+        QVERIFY(client.wireLayout.isEmpty()); // One surface for this selected screen.
+        const auto caps = host.consoleTopology(QStringLiteral("projection")).value(QStringLiteral("capabilities")).toObject();
+        QVERIFY(!caps.value(QStringLiteral("add")).toBool());
+        QVERIFY(!caps.value(QStringLiteral("remove")).toBool());
+        QVERIFY(!caps.value(QStringLiteral("consoleVirtual")).toBool());
+        auto wrong = frame; wrong.size.rwidth() -= 2;
+        Q_EMIT host.m_endpoint.frameReceived(wrong);
+        QCOMPARE(received.size(), 1);
+    }
+
+    void workspaceCaptureKeepsOneAggregateSurface()
+    {
+        Server server; RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.addClient(&connection);
+        auto &client = *host.m_clients.front();
+        host.m_control.admit(client.id); host.syncControlState();
+        host.m_inputEnabled = true; client.session->setWorkerActive(true);
+        client.codec->setCapturePolicy({MonitorCapturePolicy::Mode::Workspace, 0});
+        const QVector<VideoMonitor> monitors{{QRect(0, 0, 1280, 720), true}, {QRect(1280, 0, 1280, 720), false}};
+        client.wireLayout = monitors; // Previous independent-screen ownership period.
+        Q_EMIT host.m_endpoint.outputsReceived({{
+            {QStringLiteral("DP-1"), monitors[0].geometry, 1, true},
+            {QStringLiteral("DP-2"), monitors[1].geometry, 1, false}}, QPoint(100, 50)});
+        Q_EMIT host.m_endpoint.topologyReceived({{
+            {QStringLiteral("DP-1"), QSize(1280, 720), QRect(100, 50, 1280, 720), 1, true, 1, true},
+            {QStringLiteral("DP-2"), QSize(1280, 720), QRect(1380, 50, 1280, 720), 1, false, 2, true}}});
+        QSignalSpy received(client.session.get(), &AbstractSession::frameReceived);
+        VideoFrame frame; frame.size = QSize(2560, 720); frame.monitors = monitors; frame.isKeyFrame = true;
+        Q_EMIT host.m_endpoint.frameReceived(frame);
+        QCOMPARE(received.size(), 1);
+        QVERIFY(client.wireLayout.isEmpty()); // Never partition an aggregate encoded payload.
+        auto wrong = frame; wrong.monitors[1].geometry.moveLeft(1281);
+        Q_EMIT host.m_endpoint.frameReceived(wrong);
+        QCOMPARE(received.size(), 1);
     }
 
     void multiOutputFrameRequiresCapturedPixelAtlas()

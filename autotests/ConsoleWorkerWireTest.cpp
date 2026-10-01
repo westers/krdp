@@ -38,6 +38,7 @@ private Q_SLOTS:
     void encoderRecordsRoundTripAndAreBounded();
     void encoderStatsRoundTripAndAreBounded();
     void chromaCostsRoundTripAndAreBounded();
+    void captureSelectionAndWireBounds();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
 };
@@ -551,7 +552,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(9));
+    QCOMPARE(ProtocolVersion, quint16(10));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -593,7 +594,7 @@ void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
     {
         // AV1-Q: a tile count above AV1's 64 is refused.
         QByteArray tooManyTiles = frame(EncoderConfig{1, VideoCodec::Av1, CodecPolicy::EncoderSettings{true, CodecPolicy::Preset::Efficient, 0, 0, 16}, 30});
-        tooManyTiles[tooManyTiles.size() - 14] = char(65);
+        tooManyTiles[tooManyTiles.size() - 19] = char(65);
         QVERIFY(rejected(tooManyTiles));
     }
     QVERIFY(rejected(frame(EncoderLoad{-1})));
@@ -606,6 +607,43 @@ void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
     QVERIFY(rejected(frame(plain)));
     Record oversized{Kind::EncoderCaps, QByteArray(5000, '\0')};
     QVERIFY(!encoderCaps(oversized));
+}
+
+void ConsoleWorkerWireTest::captureSelectionAndWireBounds()
+{
+    using Policy = KRdp::MonitorCapturePolicy;
+    for (const auto mode : {Policy::Mode::Multi, Policy::Mode::Workspace, Policy::Mode::Primary, Policy::Mode::Specific}) {
+        EncoderConfig config;
+        config.generation = 42;
+        config.capture = {mode, 1};
+        Deframer d; d.feed(frame(config));
+        QCOMPARE(encoderConfig(*d.next()), std::optional(config));
+        auto selection = config.capture.select(3, 2);
+        QVERIFY(selection);
+        if (mode == Policy::Mode::Workspace) { QVERIFY(selection->workspace); QVERIFY(selection->indices.isEmpty()); }
+        else if (mode == Policy::Mode::Primary) QCOMPARE(selection->indices, QVector<int>{2});
+        else if (mode == Policy::Mode::Specific) QCOMPARE(selection->indices, QVector<int>{1});
+        else QCOMPARE(selection->indices, (QVector<int>{0, 1, 2}));
+    }
+    EncoderConfig invalid; invalid.generation = 1;
+    for (const auto bad : {Policy{Policy::Mode(255), 0}, Policy{Policy::Mode::Specific, -1}, Policy{Policy::Mode::Specific, 65536}}) {
+        invalid.capture = bad;
+        Deframer d; d.feed(frame(invalid)); QVERIFY(!encoderConfig(*d.next()));
+    }
+    Topology projected{{{QStringLiteral("DP-2"), QSize(1280, 720), QRect(1280, 0, 1280, 720), 1, true, 1, true}}, false};
+    Deframer projection; projection.feed(frame(projected));
+    const auto record = projection.next(); QVERIFY(record);
+    QCOMPARE(topology(*record), std::optional(projected));
+    auto badProjection = *record; badProjection.payload[badProjection.payload.size() - 1] = char(2);
+    QVERIFY(!topology(badProjection));
+    badProjection = *record; badProjection.payload.chop(1); QVERIFY(!topology(badProjection));
+    const Policy missing{Policy::Mode::Specific, 2};
+    QVERIFY(!missing.select(2, 0)); // Never fall back to exposing the whole workspace.
+    QVERIFY(!Policy{}.select(0, 0));
+    QVERIFY(!Policy{}.select(17, 0));
+    QVERIFY(!Policy{}.select(2, -1));
+    QCOMPARE(Policy::parse(QStringLiteral("primary")), std::optional(Policy{Policy::Mode::Primary, 0}));
+    QVERIFY(!Policy::parse(QStringLiteral("virtual"))); // Separate output lease lifecycle remains T06.
 }
 
 void ConsoleWorkerWireTest::chromaCostsRoundTripAndAreBounded()

@@ -56,6 +56,32 @@ class RetainedKScreenReadbackTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void selectedNonPrimaryOutputProofDoesNotAuthorizeFullTopology()
+    {
+        const auto snapshot = decoded(root()); QVERIFY(snapshot);
+        KRdp::ConsoleWorkerWire::Outputs selected;
+        selected.compositorOrigin = QPoint(1024, 100);
+        selected.monitors = {{QStringLiteral("Virtual-1"), QRect(0, 0, 1280, 720), 1.0, true}};
+        KRdp::VideoFrame frame;
+        frame.size = QSize(1280, 720); frame.isKeyFrame = true; frame.data = keyframe();
+        frame.monitors = {{QRect(QPoint(0, 0), frame.size), true}};
+        QVERIFY(matchesCapturedSubset(*snapshot, selected, {frame}));
+        QVERIFY(!matchesPublished(*snapshot, selected, {frame}));
+        QVERIFY(!KRdp::ConsoleTopologyReadback::confirmedMulti(*snapshot, selected, {frame}));
+        const auto projection = KRdp::ConsoleTopologyReadback::confirmedSelection(*snapshot, selected, {frame});
+        QVERIFY(projection); QVERIFY(!projection->complete);
+        QCOMPARE(projection->outputs.first().logical, QRect(1024, 100, 1280, 720));
+        QVERIFY(projection->outputs.first().primary);
+        auto invalid = selected; invalid.compositorOrigin += QPoint(1, 0);
+        QVERIFY(!matchesCapturedSubset(*snapshot, invalid, {frame}));
+        invalid = selected; invalid.monitors[0].scale = 1.25;
+        QVERIFY(!matchesCapturedSubset(*snapshot, invalid, {frame}));
+        invalid = selected; invalid.monitors[0].name = QStringLiteral("missing");
+        QVERIFY(!matchesCapturedSubset(*snapshot, invalid, {frame}));
+        frame.isKeyFrame = false;
+        QVERIFY(!matchesCapturedSubset(*snapshot, selected, {frame}));
+    }
+
     void mixedCreationPreflightsFinalLayoutAcrossCreatorStage()
     {
         namespace Create = KRdp::RetainedMultiMixedCreatePlan;

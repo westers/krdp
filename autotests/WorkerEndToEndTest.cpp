@@ -122,7 +122,7 @@ Delivery deliverAndDecode(const QVector<VideoFrame> &frames, qsizetype from, con
         const auto &frame = frames[i];
         const VideoCodec connection = connectionCodec(i);
         const VideoCodec produced = frame.codec.value_or(connection);
-        if (codecFamily(produced) != codecFamily(connection)) continue;
+        if (produced != connection) continue;
         if (first || frame.monitors != layout) {
             // A new layout: VideoStream's reset creates new surfaces (new ids, new decoders).
             first = false;
@@ -206,6 +206,8 @@ private Q_SLOTS:
     void initTestCase();
     void workerReachesReadyAndDeliversFrames_data();
     void workerReachesReadyAndDeliversFrames();
+    void consoleCaptureSelection_data();
+    void consoleCaptureSelection();
     void codecSwitchAtAttach_data();
     void codecSwitchAtAttach();
     void coalesceKeepsEveryOutputAlive_data();
@@ -246,6 +248,7 @@ void WorkerEndToEndTest::initTestCase()
     }
     // The node this host encodes on (else any); the session gets only that one, like a virtual desktop.
     m_renderNode = EncoderSupport::probeUncached().renderNode;
+    if (!m_renderNode.startsWith(QStringLiteral("/dev/dri/renderD")) || !QFileInfo::exists(m_renderNode)) m_renderNode.clear();
     if (m_renderNode.isEmpty()) m_renderNode = RenderNodes::list().value(0);
     if (m_renderNode.isEmpty()) {
         m_skip = QStringLiteral("no render node: KWin needs one for OpenGL compositing and screencast");
@@ -306,7 +309,7 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
                   .toUtf8());
     bus.close();
     // KWin grants the screencast and fake-input protocols to this exact worker executable.
-    QFile desktop(home + QStringLiteral("/data/applications/org.kde.krdpconsoleworker.desktop"));
+    QFile desktop(home + QStringLiteral("/data/applications/io.github.westers.farside.consoleworker.desktop"));
     if (!desktop.open(QIODevice::WriteOnly)) return nullptr;
     desktop.write(QStringLiteral("[Desktop Entry]\nType=Application\nName=KRDP Virtual Capture\nNoDisplay=true\nExec=%1\n"
                                  "X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1,org_kde_kwin_fake_input\n")
@@ -344,7 +347,8 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
     set("__GLX_VENDOR_LIBRARY_NAME", QStringLiteral("mesa"));
     set("LIBVA_MESSAGING_LEVEL", QStringLiteral("1"));
     set("KRDP_RENDER_NODE", m_renderNode); // as the launcher exports the node it granted
-    set("KRDP_SERVER_DIR", QStringLiteral(KRDP_SERVER_DIR));
+    set("KRDP_SERVER_DIR", qEnvironmentVariable("KRDP_E2E_SERVER_DIR", QStringLiteral(KRDP_SERVER_DIR)));
+    if (qEnvironmentVariableIsSet("LD_LIBRARY_PATH")) set("LD_LIBRARY_PATH", qEnvironmentVariable("LD_LIBRARY_PATH"));
     set("KRDP_CONSOLE_WORKER", workerProgram());
     set("KRDP_E2E_OUTPUTS", QString::number(outputs));
     set("KRDP_E2E_WIDTH", QString::number(size.width()));
@@ -356,16 +360,27 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
     if (qEnvironmentVariableIsSet("KRDP_E2E_LOGGING_RULES")) set("QT_LOGGING_RULES", qEnvironmentVariable("KRDP_E2E_LOGGING_RULES"));
     if (qEnvironmentVariableIsSet("KRDP_E2E_MESSAGE_PATTERN")) set("QT_MESSAGE_PATTERN", qEnvironmentVariable("KRDP_E2E_MESSAGE_PATTERN"));
 
+    QStringList deviceBindings;
+    if (qEnvironmentVariable("KRDP_E2E_NVIDIA") == QStringLiteral("1")) {
+        // Explicit acceptance fixture only: use the real NVIDIA compositor
+        // devices with existing permissions, never a display/modesetting node.
+        for (const auto *name : {"/dev/nvidia0", "/dev/nvidiactl", "/dev/nvidia-uvm"}) {
+            if (!QFileInfo::exists(QString::fromLatin1(name))) return nullptr;
+            deviceBindings << QStringLiteral("--dev-bind") << QString::fromLatin1(name) << QString::fromLatin1(name);
+        }
+        set("__EGL_VENDOR_LIBRARY_FILENAMES", QStringLiteral("/usr/share/glvnd/egl_vendor.d/10_nvidia.json"));
+        set("__GLX_VENDOR_LIBRARY_NAME", QStringLiteral("nvidia"));
+    }
     auto process = std::make_unique<QProcess>();
     process->setProcessEnvironment(env);
     process->setWorkingDirectory(home);
     process->setStandardOutputFile(home + QStringLiteral("/session.log"));
     process->setStandardErrorFile(home + QStringLiteral("/session.log"), QIODevice::Append);
     process->start(QStandardPaths::findExecutable(QStringLiteral("bwrap")),
-                   {QStringLiteral("--unshare-pid"), QStringLiteral("--die-with-parent"), QStringLiteral("--ro-bind"), QStringLiteral("/"), QStringLiteral("/"),
+                   QStringList{QStringLiteral("--unshare-pid"), QStringLiteral("--die-with-parent"), QStringLiteral("--ro-bind"), QStringLiteral("/"), QStringLiteral("/"),
                     QStringLiteral("--proc"), QStringLiteral("/proc"), QStringLiteral("--dev"), QStringLiteral("/dev"), QStringLiteral("--dev-bind"),
-                    m_renderNode, m_renderNode, QStringLiteral("--bind"), runtime, runtime, QStringLiteral("--bind"), home, home,
-                    QStringLiteral("/bin/bash"), QStringLiteral("-c"), QString::fromLatin1(SessionScript)});
+                    m_renderNode, m_renderNode, QStringLiteral("--bind"), runtime, runtime, QStringLiteral("--bind"), home, home}
+                    + deviceBindings + QStringList{QStringLiteral("/bin/bash"), QStringLiteral("-c"), QString::fromLatin1(SessionScript)});
     if (!process->waitForStarted(5000)) return nullptr;
     QElapsedTimer timer;
     timer.start();
@@ -443,6 +458,107 @@ void WorkerEndToEndTest::stopWorker(PrivateSession &s, ConsoleWorkerEndpoint &en
     QCOMPARE(exitCode.readAll().trimmed(), QByteArray("0"));
 }
 
+void WorkerEndToEndTest::consoleCaptureSelection_data()
+{
+    QTest::addColumn<int>("captureMode");
+    QTest::addColumn<bool>("virtualDesktop");
+    using Mode = MonitorCapturePolicy::Mode;
+    QTest::newRow("Console workspace") << int(Mode::Workspace) << false;
+    QTest::newRow("Console primary") << int(Mode::Primary) << false;
+    QTest::newRow("Console specific index1") << int(Mode::Specific) << false;
+    QTest::newRow("Console independent screens") << int(Mode::Multi) << false;
+    QTest::newRow("Virtual preserves retained layout") << int(Mode::Specific) << true;
+}
+
+void WorkerEndToEndTest::consoleCaptureSelection()
+{
+    QFETCH(int, captureMode);
+    QFETCH(bool, virtualDesktop);
+    if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
+    auto *s = session(2);
+    QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+    ConsoleWorkerEndpoint endpoint;
+    WorkerRun run;
+    ConsoleWorkerWire::Outputs outputs;
+    std::optional<ConsoleWorkerWire::Topology> topology;
+    connect(&endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [&](const auto &value) { topology = value; });
+    connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&](const auto &value) { outputs = value; });
+    const auto logs = qScopeGuard([&] {
+        if (QTest::currentTestFailed()) qWarning().noquote() << "worker.log:" << s->log(QStringLiteral("worker.log"), 12000)
+            << "kwin.log:" << s->log(QStringLiteral("kwin.log"), 5000);
+    });
+    QVERIFY(startWorker(*s, virtualDesktop, endpoint, run));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    const auto reap = qScopeGuard([&] {
+        if (!QFileInfo::exists(exitFile)) { endpoint.stopWorker(); (void)QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 15000); }
+    });
+    QTRY_VERIFY_WITH_TIMEOUT((endpoint.ready() && outputs.monitors.size() == 2) || !run.errors.isEmpty(), 45000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    QVERIFY(endpoint.ready());
+    QCOMPARE(outputs.monitors.size(), 2);
+    const auto initial = outputs;
+    const auto mode = MonitorCapturePolicy::Mode(captureMode);
+    const bool selected = !virtualDesktop && (mode == MonitorCapturePolicy::Mode::Primary || mode == MonitorCapturePolicy::Mode::Specific);
+    const bool workspace = !virtualDesktop && mode == MonitorCapturePolicy::Mode::Workspace;
+    QString expectedName;
+    if (selected) {
+        if (mode == MonitorCapturePolicy::Mode::Specific) expectedName = initial.monitors[1].name;
+        else for (const auto &screen : initial.monitors) if (screen.primary) expectedName = screen.name;
+    }
+    run.frames.clear();
+    endpoint.setControlState({1, true});
+    ConsoleWorkerWire::EncoderConfig config;
+    config.generation = 1;
+    config.settings = CodecPolicy::EncoderSettings{.hardware = false};
+    config.capture = {mode, 1};
+    QVERIFY(endpoint.setEncoderConfig(config));
+    endpoint.requestKeyFrame();
+    const auto validPacket = [&](const VideoFrame &frame) {
+        return frame.isKeyFrame && frame.monitors.size() == (selected ? 1 : 2)
+            && frame.size == QSize(workspace ? 2560 : 1280, 720)
+            && h264KeyframeSize(frame.data) == std::optional(frame.size);
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(run.frames.cbegin(), run.frames.cend(), validPacket) || !run.errors.isEmpty(), 45000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    const auto proof = std::find_if(run.frames.cbegin(), run.frames.cend(), validPacket);
+    QVERIFY(proof != run.frames.cend());
+    const auto proofFrame = *proof; // Event processing below may grow run.frames.
+    ClientStyle::Decoder decoder;
+    QVERIFY2(decoder.feed(1, VideoCodec::Avc420, proofFrame.data), qPrintable(decoder.error()));
+    QCOMPARE(decoder.surfaces().value(1).lastPicture, proofFrame.size);
+    QCOMPARE(outputs.monitors.size(), selected ? 1 : 2);
+    if (selected) {
+        QCOMPARE(outputs.monitors.first().name, expectedName);
+        const auto original = std::find_if(initial.monitors.cbegin(), initial.monitors.cend(), [&](const auto &screen) { return screen.name == expectedName; });
+        QVERIFY(original != initial.monitors.cend());
+        QCOMPARE(outputs.compositorOrigin, initial.compositorOrigin + original->geometry.topLeft());
+        QCOMPARE(proofFrame.monitors.first().geometry, QRect(0, 0, 1280, 720));
+        QVERIFY(outputs.monitors.first().primary);
+    }
+    if (!virtualDesktop) {
+        QVERIFY(endpoint.requestTopology());
+        QTRY_VERIFY_WITH_TIMEOUT(topology.has_value() || !run.errors.isEmpty(), 15000);
+        QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+        QVERIFY(topology);
+        QCOMPARE(topology->outputs.size(), selected ? 1 : 2);
+        QCOMPARE(topology->complete, !selected);
+    }
+    qInfo() << "Capture mode" << captureMode << "Virtual" << virtualDesktop << "outputs" << outputs.monitors.size()
+            << "origin" << outputs.compositorOrigin << "decoded" << proofFrame.size;
+    // Withdrawal discards the old owner's selection and restores full capture.
+    run.frames.clear();
+    endpoint.setControlState({2, false});
+    endpoint.requestKeyFrame();
+    QTRY_VERIFY_WITH_TIMEOUT((outputs.monitors.size() == 2 && std::any_of(run.frames.cbegin(), run.frames.cend(), [](const auto &frame) {
+        return frame.isKeyFrame && frame.monitors.size() == 2 && frame.size == QSize(1280, 720);
+    })) || !run.errors.isEmpty(), 45000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    QCOMPARE(outputs.monitors.size(), 2);
+    stopWorker(*s, endpoint);
+}
+
 void WorkerEndToEndTest::workerReachesReadyAndDeliversFrames_data()
 {
     QTest::addColumn<bool>("virtualDesktop");
@@ -497,7 +613,7 @@ void WorkerEndToEndTest::workerReachesReadyAndDeliversFrames()
     QCOMPARE(run.order.count(QStringLiteral("caps")), 1);
     QCOMPARE(run.order.count(QStringLiteral("ready")), 1);
     QVERIFY(run.caps);
-    if (!EncoderSupport::probeUncached().renderNode.isEmpty()) {
+    if (EncoderSupport::probeUncached().encoders.avc.hardware) {
         // B3: the worker's own probe, inside the sandbox, sees the host's hardware encoder.
         QVERIFY2(run.caps->encoders.avc.hardware, "the sandboxed worker's probe found no hardware encoder");
         QCOMPARE(run.caps->renderNode, m_renderNode);

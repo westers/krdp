@@ -48,7 +48,7 @@ public:
     static constexpr qsizetype MaxHeldPackets = 120;
     static constexpr qsizetype MaxHeldBytes = 64 * 1024 * 1024;
 
-    bool configure(const QVector<Screen> &screens)
+    bool configure(const QVector<Screen> &screens, int minimumCount = 2)
     {
         const auto reject = [this] {
             m_screens.clear();
@@ -65,7 +65,7 @@ public:
             names.insert(screen.name);
             if (screen.primary) ++primary;
         }
-        if (screens.size() < 2 || screens.size() > 16 || primary != 1) return reject();
+        if (minimumCount < 1 || minimumCount > 2 || screens.size() < minimumCount || screens.size() > 16 || primary != 1) return reject();
         for (qsizetype i = 0; i < screens.size(); ++i) {
             for (qsizetype j = i + 1; j < screens.size(); ++j) {
                 if (screens[i].logicalGeometry.intersects(screens[j].logicalGeometry)) return reject();

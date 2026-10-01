@@ -332,6 +332,7 @@ public:
         connect(&m_session, &AbstractSession::frameReceived, this, [this](const VideoFrame &frame) {
             ++m_statsEncoded; // STATS-S6: every packet the encoder made, forwarded or not
             if (m_creatorReleaseActive || m_creatorReleaseFinished) return;
+            if (m_captureSelectionPending && !m_multiMode && !frame.isKeyFrame) return;
             // A single-output Console keeps this workspace producer alive
             // until KWin publishes the new screen. Its old-size frames must
             // not escape while Add is changing the output set.
@@ -369,6 +370,11 @@ public:
                         outputs.monitors.append({screens[i]->name(), frame.monitors[i].geometry,
                                                  scale, frame.monitors[i].primary});
                     }
+                }
+                if (m_captureSelectionPending) {
+                    if (outputs.monitors.isEmpty() || !frame.isKeyFrame
+                        || !encodedKeyframeShows(frame.codec.value_or(VideoCodec::Avc420), frame.data, frame.size)) return;
+                    m_captureSelectionPending = false;
                 }
                 if (outputs.monitors.isEmpty()) m_lastPhysicalKeyframe.reset();
                 if (m_mode.virtualSession && !m_initialOutputs.isEmpty() && !m_initialReadySent) {
@@ -858,7 +864,31 @@ private:
             });
             if (!screensAgree) { m_multiSettle.start(200); return; }
         }
-        if (screens.size() < 2) {
+        // Retained Virtual topology is independent of Console capture preferences.
+        const auto policy = m_mode.virtualSession ? MonitorCapturePolicy{} : m_encoderConfig.capture;
+        int primaryIndex = int(screens.indexOf(qGuiApp->primaryScreen()));
+        if (primaryIndex < 0 && !screens.isEmpty()) primaryIndex = 0;
+        if (!m_mode.virtualSession && policy.mode == MonitorCapturePolicy::Mode::Primary) {
+            // Qt's primary can differ in a headless worker. Prefer KScreen's
+            // primary when a complete authoritative readback is available.
+            if (const auto readback = readKScreen()) {
+                for (const auto &output : readback->outputs) {
+                    if (!output.primary) continue;
+                    for (int i = 0; i < screens.size(); ++i)
+                        if (screens[i]->name() == output.backendKey) primaryIndex = i;
+                }
+            }
+        }
+        const auto selection = policy.select(int(screens.size()), primaryIndex);
+        if (!selection) {
+            m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error,
+                QByteArrayLiteral("configured Console monitor is unavailable")));
+            m_socket.disconnectFromServer();
+            return;
+        }
+        const bool selectedSingle = policy.mode == MonitorCapturePolicy::Mode::Primary
+            || policy.mode == MonitorCapturePolicy::Mode::Specific;
+        if (selection->workspace || (screens.size() < 2 && !selectedSingle)) {
             if (m_mixedCreatePending) {
                 finishMixedCreate(QStringLiteral("multi-output capture disappeared during mixed creation"));
                 m_socket.disconnectFromServer();
@@ -897,7 +927,10 @@ private:
                 m_outputs = {};
                 m_lastPhysicalKeyframe.reset();
                 m_session.setStreamingEnabled(true);
+            } else if (m_captureSelectionPending) {
+                m_session.requestKeyFrame();
             }
+            m_multiResizeNeedsRestart = false;
             return;
         }
         if (m_virtualResize.changing()) {
@@ -905,9 +938,12 @@ private:
             return; // Do not replace the verified single-output Fit producer mid-transaction.
         }
         QVector<RetainedMultiCapture::Screen> inventory;
-        inventory.reserve(screens.size());
-        const auto *primary = qGuiApp->primaryScreen() ? qGuiApp->primaryScreen() : screens.first();
-        for (const auto *screen : screens) inventory.append({screen->name(), screen->geometry(), screen == primary});
+        inventory.reserve(selection->indices.size());
+        const auto *primary = screens[primaryIndex];
+        for (const int index : selection->indices) {
+            const auto *screen = screens[index];
+            inventory.append({screen->name(), screen->geometry(), selectedSingle || screen == primary});
+        }
         if (m_multiResizePending && m_multiResizePlan) {
             const bool screensAgree = std::all_of(m_multiResizePlan->after.cbegin(), m_multiResizePlan->after.cend(), [&screens](const auto &output) {
                 return std::any_of(screens.cbegin(), screens.cend(), [&output](const auto *screen) {
@@ -969,18 +1005,18 @@ private:
         m_wireAtlas.clear();
         m_logicalOutputs.clear();
         QRect workspace;
-        for (const auto *screen : screens) workspace |= screen->geometry();
+        for (const auto &screen : inventory) workspace |= screen.logicalGeometry;
         m_workspaceOrigin = workspace.topLeft();
-        if (!m_multiCapture.configure(inventory)) {
+        if (!m_multiCapture.configure(inventory, selectedSingle ? 1 : 2)) {
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, QByteArrayLiteral("unsupported retained monitor arrangement")));
             m_socket.disconnectFromServer();
             return;
         }
         const auto epoch = m_multiEpoch;
-        for (qsizetype i = 0; i < screens.size(); ++i) {
+        for (qsizetype i = 0; i < selection->indices.size(); ++i) {
             auto session = std::make_unique<PlasmaScreencastV1Session>();
             session->setParent(this);
-            session->setActiveStream(int(i));
+            session->setActiveStream(selection->indices[i]);
             session->setMonitorIndex(int(i));
             applyEncoderConfig(*session);
             reportEncoderEvents(session.get());
@@ -1067,7 +1103,13 @@ private:
             const auto kscreenJson = readKScreenJson();
             const auto kscreen = kscreenJson
                 ? RetainedKScreenReadback::parse(*kscreenJson, m_sessionId) : std::nullopt;
-            if (!kscreen || !RetainedKScreenReadback::matchesPublished(*kscreen, result.outputs, result.frames)) {
+            const bool selectedSingle = !m_mode.virtualSession
+                && (m_encoderConfig.capture.mode == MonitorCapturePolicy::Mode::Primary
+                    || m_encoderConfig.capture.mode == MonitorCapturePolicy::Mode::Specific);
+            const bool matches = kscreen && (selectedSingle
+                ? RetainedKScreenReadback::matchesCapturedSubset(*kscreen, result.outputs, result.frames)
+                : RetainedKScreenReadback::matchesPublished(*kscreen, result.outputs, result.frames));
+            if (!matches) {
                 qWarning() << "KScreen readback did not match all captured outputs";
                 if (m_physicalPending) {
                     failPhysical(QStringLiteral("physical layout differs from independent captured outputs"));
@@ -1177,6 +1219,7 @@ private:
                 m_logicalOutputs.append({output.geometry.topLeft(), result.frames[i].size, output.scale, output.primary});
             }
             m_multiReady = true;
+            m_captureSelectionPending = false;
             if (!m_captureReady) {
                 m_captureReady = true;
                 if (m_initialOutputs.isEmpty()) m_outbox.ready();
@@ -1237,6 +1280,11 @@ private:
         for (const auto &creator : m_ownedCreators) owned.insert(creator.first);
         if (m_addPending) owned.insert(m_addPending->output);
         if (m_mixedCreatePending) owned.insert(m_mixedCreatePending->newOutput);
+        if (!topology->complete) {
+            QSet<QString> captured;
+            for (const auto &output : topology->outputs) captured.insert(output.name);
+            owned.intersect(captured);
+        }
         return ConsoleTopologyReadback::withOwnedVirtuals(std::move(*topology), owned);
     }
 
@@ -1255,6 +1303,11 @@ private:
     {
         const auto json = readKScreenJson();
         const auto kscreen = json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+        const bool selected = !m_mode.virtualSession
+            && (m_encoderConfig.capture.mode == MonitorCapturePolicy::Mode::Primary
+                || m_encoderConfig.capture.mode == MonitorCapturePolicy::Mode::Specific);
+        if (selected) return markOwnedConsoleOutputs(kscreen
+            ? ConsoleTopologyReadback::confirmedSelection(*kscreen, outputs, frames) : std::nullopt);
         const auto captured = kscreen ? ConsoleTopologyReadback::confirmedMulti(*kscreen, outputs, frames) : std::nullopt;
         return markOwnedConsoleOutputs(captured
             ? ConsoleTopologyReadback::withPriorities(*captured, *json, *kscreen) : std::nullopt);
@@ -2347,6 +2400,7 @@ private:
     void setEncoderConfig(const ConsoleWorkerWire::EncoderConfig &config)
     {
         const bool codecChanged = config.codec != m_encoderConfig.codec;
+        const bool captureChanged = !m_mode.virtualSession && config.capture != m_encoderConfig.capture;
         if (config.chroma != m_encoderConfig.chroma || config.chromaEnabled != m_encoderConfig.chromaEnabled)
             qInfo() << "Chroma policy: motionGap" << config.chroma.motionGapMs << "rest" << config.chroma.restMs
                     << "maxGap" << config.chroma.maxGapMs << "enabled" << config.chromaEnabled;
@@ -2357,6 +2411,18 @@ private:
             qInfo().noquote() << "Encoder: codec" << VideoCodecSupport::codecName(config.codec)
                               << (config.settings ? (config.settings->hardware ? "in hardware" : "in software") : "(default backend)")
                               << config.frameRate << "fps";
+        }
+        if (captureChanged) {
+            releaseInput();
+            ++m_multiEpoch; // Reject queued packets from the previous selection immediately.
+            m_captureSelectionPending = true;
+            m_multiReady = false;
+            m_multiCapture.invalidate();
+            m_multiPublishedFrames.clear();
+            m_lastPhysicalKeyframe.reset();
+            m_multiResizeNeedsRestart = true;
+            m_multiSettle.start(0);
+            qInfo() << "Console capture policy: mode" << int(config.capture.mode) << "index" << config.capture.index;
         }
         applyEncoderConfig(m_session);
         applyEncoderConfigToMultiSessions();
@@ -2390,7 +2456,19 @@ private:
         ConsoleWorkerWire::EncoderConfig reset;
         // The backend the H.264 encoder had before any policy (hardware first when there is one).
         reset.settings = CodecPolicy::EncoderSettings{.hardware = m_encoderCaps.encoders.avc.hardware};
+        const bool captureChanged = !m_mode.virtualSession && m_encoderConfig.capture != reset.capture;
         m_encoderConfig = reset;
+        if (captureChanged) {
+            releaseInput();
+            ++m_multiEpoch; // Reject queued packets from the previous selection immediately.
+            m_captureSelectionPending = true;
+            m_multiReady = false;
+            m_multiCapture.invalidate();
+            m_multiPublishedFrames.clear();
+            m_lastPhysicalKeyframe.reset();
+            m_multiResizeNeedsRestart = true;
+            m_multiSettle.start(0);
+        }
         updateEncoderStatsTimer();
         applyEncoderConfig(m_session);
         applyEncoderConfigToMultiSessions();
@@ -2707,7 +2785,7 @@ private:
                 if (!m_control.active || m_physicalPending || m_creatorReleaseActive || m_creatorReleaseFinished
                     || ((!m_mode.virtualSession) && (m_addPending || m_removePending))
                     || !(m_mode.virtualSession ? m_virtualResize.inputAllowed() : m_resize.inputAllowed())
-                    || (m_multiMode && !m_multiReady)) {
+                    || m_captureSelectionPending || (m_multiMode && !m_multiReady)) {
                     continue;
                 }
                 const auto mapped = m_multiMode
@@ -2840,6 +2918,7 @@ private:
     quint64 m_multiEpoch = 0;
     quint8 m_multiQuality = 80;
     bool m_multiMode = false;
+    bool m_captureSelectionPending = false;
     bool m_multiReady = false;
     bool m_physicalResizeReadyForCapture = false;
     std::unique_ptr<PipeWireAudioPlayback> m_audio;

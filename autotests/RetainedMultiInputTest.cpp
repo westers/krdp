@@ -60,6 +60,20 @@ private Q_SLOTS:
         QVERIFY(RetainedMultiInput::positionBeforeDispatch(wheel));
     }
 
+    void mapsSelectedFractionalScreenWithoutUsingThePhysicalPrimaryOrigin()
+    {
+        using namespace KRdp;
+        const QVector<RemoteMonitorGeometry::Output> logical{{{0, 0}, {1920, 1080}, 1.5, true}};
+        const auto wire = RemoteMonitorGeometry::projectToWire(logical);
+        ConsoleWorkerWire::Input pointer;
+        pointer.type = ConsoleWorkerWire::Input::Type::Mouse;
+        pointer.eventType = QEvent::MouseMove;
+        pointer.position = {600, 300};
+        const auto mapped = RetainedMultiInput::toCompositor(pointer, wire, logical, QPoint(-1280, 100));
+        QVERIFY(mapped);
+        QCOMPARE(mapped->position, QPointF(-880, 300));
+    }
+
     void refusesMissingOrNonFiniteLayoutButKeepsKeyboardPositionless()
     {
         using namespace KRdp;

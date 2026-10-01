@@ -271,15 +271,19 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         if (!m_inputEnabled || m_pendingPhysical || m_pendingVirtual || m_layoutAwaitingReadback) {
             return;
         }
-        if (m_outputs.monitors.size() > 1) {
-            if (!m_topologyAvailable || !ConsoleFrameLayout::confirmed(frame, m_outputs, m_topologyCatalog.snapshot())) return;
+        const bool workspace = capturePolicy().mode == MonitorCapturePolicy::Mode::Workspace;
+        if (m_outputs.monitors.size() > 1 || (m_topologyAvailable && !m_topologyComplete)) {
+            const bool confirmed = workspace
+                ? ConsoleFrameLayout::workspaceConfirmed(frame, m_outputs, m_topologyCatalog.snapshot())
+                : ConsoleFrameLayout::confirmed(frame, m_outputs, m_topologyCatalog.snapshot());
+            if (!m_topologyAvailable || !confirmed) return;
         } else if (frame.monitors.size() > 1) return;
         for (const auto &client : m_clients) {
             // AUD-C-1: the session thread can mark a stream enabled before the
             // main-thread authenticated owner UID check has admitted it. Only admitted clients
             // may see the console, not even its monitor layout.
             if (!client->connection || !m_control.admitted(client->id)) continue;
-            const QVector<VideoMonitor> desired = frame.monitors.size() > 1 ? frame.monitors : QVector<VideoMonitor>{};
+            const QVector<VideoMonitor> desired = !workspace && frame.monitors.size() > 1 ? frame.monitors : QVector<VideoMonitor>{};
             if (client->wireLayout != desired) {
                 if (!frame.isKeyFrame || (desired.isEmpty() && !m_topologyAvailable && !client->wireLayout.isEmpty())) continue;
                 client->connection->videoStream()->setMonitorLayout(desired);
@@ -304,7 +308,10 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         qInfo() << "Console capture outputs:" << outputs.monitors.size() << "forwarding" << m_inputEnabled << "clients" << m_clients.size();
         const bool changed = outputs != m_outputs;
         const bool wasMulti = m_outputs.monitors.size() > 1;
-        const bool independentTransition = changed && (outputs.monitors.size() > 1 || wasMulti)
+        const auto capture = capturePolicy();
+        const bool selected = capture.mode == MonitorCapturePolicy::Mode::Primary
+            || capture.mode == MonitorCapturePolicy::Mode::Specific;
+        const bool independentTransition = ((changed && (outputs.monitors.size() > 1 || wasMulti)) || selected)
             && !m_pendingPhysical && !m_pendingVirtual;
         if (changed) {
             m_topologyAvailable = false;
@@ -324,7 +331,11 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         if (independentTransition) m_endpoint.requestTopology();
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [this](const ConsoleWorkerWire::Topology &topology) {
-        if (topology.outputs.isEmpty() || topology.outputs.size() != m_outputs.monitors.size()) {
+        const auto capture = capturePolicy();
+        const bool selected = capture.mode == MonitorCapturePolicy::Mode::Primary
+            || capture.mode == MonitorCapturePolicy::Mode::Specific;
+        if (topology.outputs.isEmpty() || topology.outputs.size() != m_outputs.monitors.size()
+            || (!topology.complete && (!selected || topology.outputs.size() != 1))) {
             m_topologyAvailable = false;
             m_topologyPriorities.clear();
             m_topologyCatalog.resetGeneration();
@@ -364,6 +375,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             m_topologyPriorities.clear();
             m_topologyCatalog.resetGeneration();
         } else m_topologyPriorities = priorities;
+        m_topologyComplete = m_topologyAvailable && topology.complete;
         finishTopologyQueries(m_topologyAvailable ? QString() : u"capture-failed"_s);
         const bool republishedLayout = m_topologyAvailable && m_layoutAwaitingReadback
             && !m_pendingPhysical && !m_pendingVirtual;
@@ -907,6 +919,9 @@ void ConsoleHostController::loadUserSettings(Client &client)
     }
     client.preferences = result.preferences;
     client.codec->setChromaPolicy(client.preferences.chroma.value_or(ChromaPolicy{}));
+    if (const auto capture = MonitorCapturePolicy::parse(client.preferences.monitorMode.value_or(u"multi"_s),
+                                                        client.preferences.monitorIndex.value_or(0)))
+        client.codec->setCapturePolicy(*capture);
     auto *stream = client.connection->videoStream();
     client.videoQuality = client.preferences.quality.value_or(m_qualityCap);
     stream->setQualityCap(client.videoQuality);
@@ -1015,7 +1030,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             replyTo(connection, RemoteTopologyProtocol::error(requestId, code));
         };
         if (!parsed) { refuse(request, u"invalid"_s); return; }
-        if (!m_experimentalPhysicalTopology || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
+        if (!m_experimentalPhysicalTopology || !m_topologyComplete || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
             refuse(parsed->id, u"unsupported"_s); return;
         }
         if (!m_control.ownsControl(id) || !m_inputEnabled || !m_endpoint.ready()) {
@@ -1095,7 +1110,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             replyTo(connection, RemoteTopologyProtocol::error(requestId, code));
         };
         if (!parsed) { refuse(request, u"invalid"_s); return; }
-        if (!m_experimentalPhysicalTopology || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
+        if (!m_experimentalPhysicalTopology || !m_topologyComplete || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
             refuse(parsed->id, u"unsupported"_s); return;
         }
         if (!m_control.ownsControl(id) || !m_inputEnabled || !m_endpoint.ready()) {
@@ -1247,7 +1262,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             refuse(u"physical output is not in the active capture layout"_s);
             return;
         }
-        if (m_experimentalPhysicalTopology && m_endpoint.target().adapter == ConsoleSeat::Adapter::PhysicalUser) {
+        if (m_experimentalPhysicalTopology && m_topologyComplete && m_endpoint.target().adapter == ConsoleSeat::Adapter::PhysicalUser) {
             // A legacy Fit must share the same original physical baseline as
             // visual topology edits. Its separate resize helper would restore
             // asynchronously after the topology lease had already released.
@@ -1635,7 +1650,9 @@ void ConsoleHostController::sendCapabilities(Client &client)
     capabilities.host = u"console"_s;
     capabilities.layoutQuery = true; // `query`/`attach` describe the physical desktop; `apply` is refused
     capabilities.topologyQuery = true;
-    capabilities.topologyPreview = m_experimentalPhysicalTopology || m_experimentalConsoleVirtual;
+    const auto capture = capturePolicy();
+    const bool fullCapture = capture.mode != MonitorCapturePolicy::Mode::Primary && capture.mode != MonitorCapturePolicy::Mode::Specific;
+    capabilities.topologyPreview = fullCapture && (m_experimentalPhysicalTopology || m_experimentalConsoleVirtual);
     capabilities.topologyApply = capabilities.topologyPreview;
     capabilities.devices = ConsoleDeviceCapabilities;
     if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, client.preferences.softwareEncoding.value_or(m_videoHost->mode));
@@ -1738,6 +1755,13 @@ void ConsoleHostController::syncDisplayPolicy()
     m_endpoint.setDisplayPolicy(policy.active, policy.wakeEnabled);
 }
 
+MonitorCapturePolicy ConsoleHostController::capturePolicy() const
+{
+    for (const auto &client : m_clients)
+        if (client->codec && m_control.ownsControl(client->id)) return client->codec->capturePolicy();
+    return {};
+}
+
 void ConsoleHostController::syncCodecPolicy()
 {
     int admitted = 0;
@@ -1830,13 +1854,13 @@ void ConsoleHostController::finishPhysicalTopology(const QString &code, const QS
 QJsonObject ConsoleHostController::consoleTopology(const QString &id) const
 {
     const bool writable = m_experimentalPhysicalTopology && m_endpoint.target().adapter == ConsoleSeat::Adapter::PhysicalUser
-        && m_inputEnabled && m_topologyAvailable;
+        && m_inputEnabled && m_topologyAvailable && m_topologyComplete;
     auto record = RemoteTopologyProtocol::consoleReadOnly(id, m_topologyCatalog.snapshot(), writable);
     auto caps = record.value(u"capabilities"_s).toObject();
     const auto &outputs = m_topologyCatalog.snapshot().outputs;
     // This describes the lease inventory even for viewers/control handoff;
     // only the active authenticated controller gets write capabilities.
-    const bool virtualLease = m_experimentalConsoleVirtual && m_topologyAvailable;
+    const bool virtualLease = m_experimentalConsoleVirtual && m_topologyAvailable && m_topologyComplete;
     caps.insert(u"consoleVirtual"_s, virtualLease);
     caps.insert(u"add"_s, writable && virtualLease && outputs.size() < 16
         && (!m_physicalLeaseActive || m_consoleCreatorsActive));

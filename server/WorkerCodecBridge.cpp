@@ -121,6 +121,15 @@ bool WorkerCodecBridge::setChromaPolicy(const ChromaPolicy &policy)
     return true;
 }
 
+bool WorkerCodecBridge::setCapturePolicy(const MonitorCapturePolicy &policy)
+{
+    if (!policy.isValid()) return false;
+    if (policy == m_capturePolicy) return true;
+    m_capturePolicy = policy;
+    send(false);
+    return true;
+}
+
 bool WorkerCodecBridge::bound() const
 {
     return m_endpoint && m_generation;
@@ -144,6 +153,7 @@ std::optional<ConsoleWorkerWire::EncoderConfig> WorkerCodecBridge::config() cons
     config.statsWanted = m_stream->statsSubscribed();
     config.chroma = m_chromaPolicy;
     config.chromaEnabled = m_stream->requestedChroma();
+    config.capture = m_capturePolicy;
     return config;
 }
 

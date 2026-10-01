@@ -223,6 +223,21 @@ remaining T05/T08/package gates are unchanged. Evidence
 
 **Evidence:** Before/after output inventory, restore journal results, captured layout/keyframe proof, manual pointer/drag checks and focused lifecycle tests.
 
+**2026-09-30 capture-selection source checkpoint (PARTIAL, unshipped):**
+Paired wire10 carries authenticated Console owner workspace/primary/specific/
+multi choices and MonitorIndex. Selected capture uses actual output index and
+pixel atlas/global origin; stale epochs/input are gated, withdrawal resets
+selection. Workspace keeps one aggregate surface. Selected readback is explicitly
+incomplete and cannot authorize full-layout mutations; broker forwarding is
+covered independently. Retained Virtual capture remains its committed layout.
+Thirteen focused suites accepted (old cursor wire assertion corrected/rerun),
+and five real-worker rows on a private two-output Sol compositor pass with parsed
+and decoded H.264, readback and release/reset proof. Installed services/desktop
+PIDs preserved; no Hal live test or performance claim under high GPU load.
+Client-created Console outputs/restore/lifecycle, mixed-scale client interaction,
+full limits/persistence and T08/package gates remain. Evidence
+`~/dev/rdp/evidence/2026-09-30-t06-capture/SUMMARY.md`.
+
 ### T07 — Preserve display wake and inhibition
 
 **Instructions:** Integrate the existing `DisplayWakeGuard` semantics into the desktop workers or equivalent user-session mechanism, not a root broker's session bus. Honor the configured wake policy and acquire/release inhibition with streaming ownership. Keep display power management distinct from unlocking and from Virtual's intentional lock policy. Handle pending D-Bus replies and teardown without leaking inhibition.

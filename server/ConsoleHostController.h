@@ -215,6 +215,7 @@ private:
     bool m_adaptiveQuality = false;
     /** AUD-FIX7: bind the controller's codec bridge; a private codec only while it is alone. */
     void syncCodecPolicy();
+    MonitorCapturePolicy capturePolicy() const;
     ConsoleControl m_control;
     ConsoleControl::Id m_nextClientId = 0;
     bool m_mediaConfigured = false;
@@ -222,6 +223,7 @@ private:
     ConsoleWorkerWire::Outputs m_outputs;
     RemoteTopologyCatalog m_topologyCatalog;
     bool m_topologyAvailable = false;
+    bool m_topologyComplete = false;
     bool m_layoutAwaitingReadback = false;
     QMap<QString, int> m_topologyPriorities; // Exact same-worker KScreen order, never inferred from primary flags.
     QHash<ConsoleControl::Id, QString> m_pendingTopology;

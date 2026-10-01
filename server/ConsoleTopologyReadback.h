@@ -64,6 +64,22 @@ inline std::optional<ConsoleWorkerWire::Topology> confirmedMulti(const RetainedK
     return result;
 }
 
+// A selected screen has a valid capture/input projection but cannot prove the
+// other outputs or authorize a whole-layout edit. Promote only this projection's
+// screen to primary; do not claim KDE's physical priority order changed.
+inline std::optional<ConsoleWorkerWire::Topology> confirmedSelection(const RetainedKScreenReadback::Snapshot &kscreen,
+    const ConsoleWorkerWire::Outputs &worker, const QVector<VideoFrame> &keyframes)
+{
+    if (!RetainedKScreenReadback::matchesCapturedSubset(kscreen, worker, keyframes)) return {};
+    const auto found = std::find_if(kscreen.outputs.cbegin(), kscreen.outputs.cend(), [&worker](const auto &output) {
+        return output.backendKey == worker.monitors.first().name;
+    });
+    ConsoleWorkerWire::Topology result;
+    result.complete = false;
+    result.outputs.append({found->name, found->nativePixels, found->logicalGeometry, found->scale, true, 1, true});
+    return result;
+}
+
 // The capture proof above does not contain KScreen's complete priority order.
 // Bind the exact order from the *same* fresh JSON/snapshot before publishing a
 // broker topology; boolean primary or QScreen enumeration cannot reconstruct it.

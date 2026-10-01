@@ -51,8 +51,8 @@ the required save/reconnect behavior; live reload is not implemented by this sli
 | Avc444MotionGapMs | 100 | User preference + owner override / both | Complete tuple forwarded/applied to workers on wire8; current-owner partial overrides and reset tested. Actual AVC444/auxiliary bytes and T08 gates remain |
 | Avc444RestMs | 150 | User preference + owner override / both | Same shared validated/reset policy; native Console HEVC dormant-policy transfer passes, native auxiliary encoding remains T05 |
 | Avc444MaxGapMs | 1500 | User preference + owner override / both | Same shared validated/reset policy; out-of-range/inconsistent merge refused atomically |
-| MonitorMode | multi | User preference / Console; Virtual layout is separate | workspace/primary/specific/multi/virtual parsed; capture/layout parity T06 |
-| MonitorIndex | 0 | User preference / Console specific capture | Nonnegative index parsed; worker selection T06 |
+| MonitorMode | multi | User preference / Console; Virtual layout is separate | workspace/primary/specific/multi applied through current-owner wire10; selected projection/aggregate forwarding and five native worker cases pass. Client-created virtual output mode/restore and other T06 gates remain |
+| MonitorIndex | 0 | User preference / Console specific capture | Current-owner specific capture uses actual QScreen index with its own surface/global origin; unavailable selection fails without whole-workspace fallback. Remaining T06 lifecycle/client gates open |
 | VirtualMonitorPolicy | replace | User preference / Console's client-created outputs | replace/extend parsed; restore/local takeover T06, lock race T03 |
 | VirtualMonitorLayout | client | User preference / Console's client-created outputs | client/single/physical parsed; retained Virtual topology remains separate; T06 |
 | VirtualMonitorFallbackSize | 1920x1080 | User preference / output creation | Even bounded dimensions parsed; hardware limits still enforced at application; T06 |
@@ -87,7 +87,7 @@ No input/layout authority is granted before Ready. Strictly increasing policy
 revisions reject stale reactivation after release. Virtual sends demand only
 for its current authenticated attachment and releases it on revoke. Its worker
 uses the private desktop bus; root broker buses are never used for this policy.
-The paired broker/worker wire is now v9 in source; installed fleet remains v6.
+The paired broker/worker wire is now v10 in source; installed fleet remains v6.
 Delayed Inhibit replies release their cookies even after guard destruction,
 using the replying service's unique owner rather than a replacement service.
 
@@ -211,3 +211,12 @@ reject stale reports. Primary/per-output producers participate; complete bounded
 rate-limited logs and measured encode time survive without stats subscription.
 Ten focused suites pass. Actual444/native timing and T08 gates remain; evidence
 `~/dev/rdp/evidence/2026-09-30-t05-chroma-costs/SUMMARY.md`.
+
+Wire10 carries Console capture preferences under the current control generation.
+Selected capture readback is a projection explicitly distinct from complete
+physical topology. It cannot grant full-layout editing; workspace payloads retain
+one aggregate surface, independent mode retains per-output surfaces. Retained
+Virtual capture/layout remains separate. Five real-worker Sol cases and focused
+broker/input/authority checks pass; client-created Console outputs, lifecycle,
+limits, full retained persistence and matching T08 acceptance remain T06/T08.
+Evidence `~/dev/rdp/evidence/2026-09-30-t06-capture/SUMMARY.md`.
