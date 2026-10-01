@@ -22,12 +22,14 @@ WorkerCodecBridge::WorkerCodecBridge(VideoStream *stream, ConsoleWorkerSession *
     connect(stream, &VideoStream::negotiatedCodecChanged, this, [this] { send(false); }, Qt::QueuedConnection);
     connect(stream, &VideoStream::encoderSettingsChanged, this, [this] { send(false); }, Qt::QueuedConnection);
     connect(stream, &VideoStream::requestedFrameRateChanged, this, [this] { send(false); }, Qt::QueuedConnection);
+    connect(stream, &VideoStream::requestedChromaChanged, this, [this] { send(false); }, Qt::QueuedConnection);
     // STATS-S6: the worker reports EncoderStats only while this connection's client is subscribed.
     connect(stream, &VideoStream::statsSubscriptionChanged, this, [this] { send(false); });
     // The worker's encoder events, re-emitted by the proxy session, go where krdpserver sends a
     // local session's (SessionController::setSessions()).
     connect(session, &AbstractSession::encoderUnavailable, stream, &VideoStream::privateCodecUnavailable);
     connect(session, &AbstractSession::encoderBackendReported, stream, &VideoStream::encoderBackendReported);
+    connect(session, &AbstractSession::chromaCapabilityChanged, stream, &VideoStream::setChromaCapable);
     stream->setEncoderCpuTimeSource([this]() -> qint64 {
         return m_endpoint && m_generation ? m_endpoint->workerCpuNs() : -1;
     });
@@ -79,6 +81,16 @@ void WorkerCodecBridge::unbind()
     m_endpoint = nullptr;
     m_generation = 0;
     m_sent.reset();
+    if (m_stream) m_stream->setChromaCapable(false);
+}
+
+bool WorkerCodecBridge::setChromaPolicy(const ChromaPolicy &policy)
+{
+    if (!policy.isValid()) return false;
+    if (m_chromaPolicy == policy) return true;
+    m_chromaPolicy = policy;
+    send(false);
+    return true;
 }
 
 bool WorkerCodecBridge::bound() const
@@ -102,6 +114,8 @@ std::optional<ConsoleWorkerWire::EncoderConfig> WorkerCodecBridge::config() cons
     config.settings = m_stream->encoderSettings();
     config.frameRate = std::clamp<quint32>(m_stream->requestedFrameRate(), 1, 240);
     config.statsWanted = m_stream->statsSubscribed();
+    config.chroma = m_chromaPolicy;
+    config.chromaEnabled = m_stream->requestedChroma();
     return config;
 }
 

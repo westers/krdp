@@ -550,7 +550,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(7));
+    QCOMPARE(ProtocolVersion, quint16(8));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -562,14 +562,18 @@ void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
     EncoderConfig config{7, VideoCodec::Av1, CodecPolicy::EncoderSettings{false, CodecPolicy::Preset::Fastest, 4500, 30, 8}, 30};
     EncoderConfig plain{8, VideoCodec::Avc420, std::nullopt, 17};
     plain.statsWanted = true; // STATS-S6
+    plain.chroma = {200, 350, 1200};
+    plain.chromaEnabled = false;
     const EncoderReport report{EncoderReport::Event::Backend, VideoCodec::Hevc, true};
     const EncoderReport unavailable{EncoderReport::Event::Unavailable, VideoCodec::Av1, false};
-    deframer.feed(frame(caps) + frame(config) + frame(plain) + frame(report) + frame(unavailable) + frame(EncoderLoad{123456789}));
+    const EncoderReport chroma{EncoderReport::Event::ChromaCapability, VideoCodec::Avc444v2, false, true};
+    deframer.feed(frame(caps) + frame(config) + frame(plain) + frame(report) + frame(unavailable) + frame(chroma) + frame(EncoderLoad{123456789}));
     QCOMPARE(encoderCaps(*deframer.next()), std::optional(caps));
     QCOMPARE(encoderConfig(*deframer.next()), std::optional(config));
     QCOMPARE(encoderConfig(*deframer.next()), std::optional(plain));
     QCOMPARE(encoderReport(*deframer.next()), std::optional(report));
     QCOMPARE(encoderReport(*deframer.next()), std::optional(unavailable));
+    QCOMPARE(encoderReport(*deframer.next()), std::optional(chroma));
     const auto load = deframer.next();
     QCOMPARE(encoderLoad(*load), std::optional(EncoderLoad{123456789}));
     QVERIFY(!deframer.next());
@@ -588,13 +592,17 @@ void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
     {
         // AV1-Q: a tile count above AV1's 64 is refused.
         QByteArray tooManyTiles = frame(EncoderConfig{1, VideoCodec::Av1, CodecPolicy::EncoderSettings{true, CodecPolicy::Preset::Efficient, 0, 0, 16}, 30});
-        tooManyTiles[tooManyTiles.size() - 1] = char(65);
+        tooManyTiles[tooManyTiles.size() - 14] = char(65);
         QVERIFY(rejected(tooManyTiles));
     }
     QVERIFY(rejected(frame(EncoderLoad{-1})));
     auto badCodec = frame(report);
-    badCodec[badCodec.size() - 2] = char(0); // codec "none"
+    badCodec[badCodec.size() - 3] = char(0); // codec "none"
     QVERIFY(rejected(badCodec));
+    plain.chroma = {400, 200, 1200};
+    QVERIFY(rejected(frame(plain)));
+    plain.chroma = {16, 16, 5001};
+    QVERIFY(rejected(frame(plain)));
     Record oversized{Kind::EncoderCaps, QByteArray(5000, '\0')};
     QVERIFY(!encoderCaps(oversized));
 }

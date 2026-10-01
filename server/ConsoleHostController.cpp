@@ -3,6 +3,7 @@
 
 #include "ConsoleHostController.h"
 #include "DisplayWakePolicy.h"
+#include "ChromaMerge.h"
 
 #include <QScopeGuard>
 #include "AudioPriority.h"
@@ -906,6 +907,7 @@ void ConsoleHostController::loadUserSettings(Client &client)
         return;
     }
     client.preferences = result.preferences;
+    client.codec->setChromaPolicy(client.preferences.chroma.value_or(ChromaPolicy{}));
     auto *stream = client.connection->videoStream();
     client.videoQuality = client.preferences.quality.value_or(m_qualityCap);
     stream->setQualityCap(client.videoQuality);
@@ -936,13 +938,26 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         // `device` record, or any other record this host knows (not
         // audio-priority, which never closes krdpserver's gate either).
         static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s,
-                                         u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s, u"stats"_s};
+                                         u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s, u"stats"_s, u"chroma"_s};
         for (const auto &client : m_clients) {
             if (client->id != id) continue;
             if (type == u"device"_s) client->deviceRecordSeen = true;
             if (known.contains(type)) client->spokeKrdpctl = true;
             break;
         }
+    }
+    if (type == u"chroma"_s) {
+        const auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &entry) { return entry->id == id; });
+        if (found == m_clients.end()) return;
+        auto &client = **found;
+        if (!m_control.admitted(id) || !m_control.ownsControl(id) || !admissible(client)) {
+            replyTo(connection, LayoutControl::errorRecord({u"not-owner"_s, u"only the admitted console controller may change chroma policy"_s}));
+            return;
+        }
+        const auto merged = ChromaMerge::merge(client.codec->chromaPolicy(), LayoutControl::chromaFromJson(record));
+        if (merged.outcome == ChromaMerge::Outcome::Applied) client.codec->setChromaPolicy(merged.policy);
+        replyTo(connection, ChromaMerge::brokerReply(merged));
+        return;
     }
     if (type == u"codec"_s) {
         // AUD-FIX7: the connection's codec preference (CodecRequest, as krdpserver). It runs
@@ -1692,6 +1707,7 @@ void ConsoleHostController::syncControlState()
             client->connection->setAudioPriority(false);
             client->connection->videoStream()->setQualityCap(client->videoQuality);
             client->connection->videoStream()->setAdaptiveQuality(client->preferences.adaptiveQuality.value_or(m_adaptiveQuality));
+            client->codec->setChromaPolicy(client->preferences.chroma.value_or(ChromaPolicy{}));
             client->connection->clearAudioPriorityOverride();
             client->connection->setAudioPriorityDefault(client->preferences.preferAudioQuality.value_or(m_audioPriorityDefault)
                 && m_control.ownsControl(client->id));

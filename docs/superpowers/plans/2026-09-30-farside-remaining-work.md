@@ -173,6 +173,18 @@ Evidence `~/dev/rdp/evidence/2026-09-30-t04-auth-scopes/SUMMARY.md`.
 
 **Evidence:** One- and two-screen control matrix, hardware/software and codec/chroma logs, ownership/worker replacement tests, measured audio delivery and matching KCM coverage in T08.
 
+**2026-09-30 chroma source checkpoint (PARTIAL, unshipped):** Paired wire8 sends
+complete validated timing and adaptive auxiliary demand to capture workers,
+including replacement per-screen encoders. Both brokers apply authenticated-user
+defaults and accept current-owner partial timing overrides. Control transfer and
+desktop detach reset overrides; worker capability returns separately from backend.
+Six focused suites pass. Buzz→bounded Sol Console sends600/900/1900, the real
+worker receives it and HEVC capture/snapshot continues. This proves dormant policy
+transfer while HEVC is active. Actual AVC444 codec/auxiliary bytes, native Virtual
+and multi-screen adaptive gates, telemetry and controlled audio acceptance remain,
+along with T08. No package/config cutover or installed service restart. Evidence
+`~/dev/rdp/evidence/2026-09-30-t05-chroma-policy/SUMMARY.md`.
+
 ### T06 — Complete monitor capture and layout parity
 
 **Instructions:** Preserve Console's single-monitor, whole-workspace and independent-monitor capture choices, selection and coordinate handling. Carry the useful per-client virtual-output replace/extend/fallback behavior into Console with verified restore and local takeover. Keep these capture/layout choices distinct from the connection type. Preserve Virtual's selected-layout creation, retained topology and standard-client attach-or-create behavior. Use the existing topology/restore code where it fits; do not extend frozen experiments beyond the required parity without recording why.

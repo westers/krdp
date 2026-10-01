@@ -21,6 +21,7 @@
 #include <QSet>
 
 #include "CodecPolicy.h"
+#include "ChromaPolicy.h"
 #include "VideoFrame.h"
 
 namespace KRdp::ConsoleWorkerWire
@@ -48,7 +49,9 @@ namespace KRdp::ConsoleWorkerWire
 //   the authenticated Hello and conveys streaming demand, never input authority.
 // 6 (WS-D camera): camera policy, format, compressed samples and worker demand.
 // 7 (T07): per-desktop display wake/inhibition, also before first capture.
-constexpr quint16 ProtocolVersion = 7;
+// 8 (T05): complete chroma timing/demand in EncoderConfig; actual chroma
+// capability in EncoderReport, distinct from encoder backend.
+constexpr quint16 ProtocolVersion = 8;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -146,15 +149,18 @@ struct EncoderConfig {
     /// STATS-S6: a KRDPCTL client of this connection is subscribed to stats, so the worker sends
     /// EncoderStats every EncoderStatsIntervalMs (after Ready, never before).
     bool statsWanted = false;
+    ChromaPolicy chroma;
+    bool chromaEnabled = true;
     bool operator==(const EncoderConfig &) const = default;
 };
 
 /** AUD-FIX7, worker -> broker: AbstractSession::encoderUnavailable / encoderBackendReported. */
 struct EncoderReport {
-    enum class Event : quint8 { Unavailable = 1, Backend = 2 };
+    enum class Event : quint8 { Unavailable = 1, Backend = 2, ChromaCapability = 3 };
     Event event = Event::Backend;
     VideoCodec codec = VideoCodec::Avc420;
     bool hardware = false;
+    bool chromaCapable = false;
     bool operator==(const EncoderReport &) const = default;
 };
 
@@ -1432,7 +1438,8 @@ inline QByteArray frame(const EncoderConfig &config)
     stream << config.generation << wireCodec(config.codec) << config.settings.has_value();
     const auto settings = config.settings.value_or(CodecPolicy::EncoderSettings{});
     stream << settings.hardware << quint8(settings.preset) << settings.targetKbps << qint32(settings.maxFrameRate) << config.frameRate << config.statsWanted
-           << quint8(std::clamp(settings.av1Tiles, 0, 64));
+           << quint8(std::clamp(settings.av1Tiles, 0, 64))
+           << qint32(config.chroma.motionGapMs) << qint32(config.chroma.restMs) << qint32(config.chroma.maxGapMs) << config.chromaEnabled;
     return frame(Kind::EncoderConfig, payload);
 }
 
@@ -1450,11 +1457,14 @@ inline std::optional<EncoderConfig> encoderConfig(const Record &record)
     quint8 preset = 0;
     qint32 maxFrameRate = 0;
     quint8 av1Tiles = 0;
+    qint32 motionGap = 0, rest = 0, maxGap = 0;
     stream >> config.generation >> codec >> hasSettings >> settings.hardware >> preset >> settings.targetKbps >> maxFrameRate >> config.frameRate >> config.statsWanted
-        >> av1Tiles;
+        >> av1Tiles >> motionGap >> rest >> maxGap >> config.chromaEnabled;
+    config.chroma = {motionGap, rest, maxGap};
     const auto decoded = codecFromWire(codec);
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !config.generation || !decoded || preset > quint8(CodecPolicy::Preset::Fastest)
-        || maxFrameRate < 0 || maxFrameRate > 240 || config.frameRate < 1 || config.frameRate > 240 || settings.targetKbps > 1000000 || av1Tiles > 64) {
+        || maxFrameRate < 0 || maxFrameRate > 240 || config.frameRate < 1 || config.frameRate > 240 || settings.targetKbps > 1000000 || av1Tiles > 64
+        || !config.chroma.isValid()) {
         return std::nullopt;
     }
     config.codec = *decoded;
@@ -1472,7 +1482,7 @@ inline QByteArray frame(const EncoderReport &report)
     QByteArray payload;
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
-    stream << quint8(report.event) << wireCodec(report.codec) << report.hardware;
+    stream << quint8(report.event) << wireCodec(report.codec) << report.hardware << report.chromaCapable;
     return frame(Kind::EncoderReport, payload);
 }
 
@@ -1486,10 +1496,11 @@ inline std::optional<EncoderReport> encoderReport(const Record &record)
     quint8 event = 0;
     quint8 codec = 0;
     EncoderReport report;
-    stream >> event >> codec >> report.hardware;
+    stream >> event >> codec >> report.hardware >> report.chromaCapable;
     const auto decoded = codecFromWire(codec);
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !decoded
-        || (event != quint8(EncoderReport::Event::Unavailable) && event != quint8(EncoderReport::Event::Backend))) {
+        || (event != quint8(EncoderReport::Event::Unavailable) && event != quint8(EncoderReport::Event::Backend)
+            && event != quint8(EncoderReport::Event::ChromaCapability))) {
         return std::nullopt;
     }
     report.event = EncoderReport::Event(event);

@@ -48,9 +48,9 @@ the required save/reconnect behavior; live reload is not implemented by this sli
 | SoftwareEncoding | auto | User preference / both | auto/never/prefer applied to connection encoder policy; T05 live backend parity |
 | Av1Tiles | auto | User preference / both | auto/1/2/4/8/16 applied to connection, worker bridge; T05 live headers |
 | PreferAudioQuality | false | User preference + owner override / both | Applied/reset; T05 measured audio acceptance |
-| Avc444MotionGapMs | 100 | User preference + owner override / both | Parsed with whole timing tuple validation; worker policy T05 |
-| Avc444RestMs | 150 | User preference + owner override / both | Parsed with whole timing tuple validation; worker policy T05 |
-| Avc444MaxGapMs | 1500 | User preference + owner override / both | Parsed with whole timing tuple validation; worker policy T05 |
+| Avc444MotionGapMs | 100 | User preference + owner override / both | Complete tuple forwarded/applied to workers on wire8; current-owner partial overrides and reset tested. Actual AVC444/auxiliary bytes and T08 gates remain |
+| Avc444RestMs | 150 | User preference + owner override / both | Same shared validated/reset policy; native Console HEVC dormant-policy transfer passes, native auxiliary encoding remains T05 |
+| Avc444MaxGapMs | 1500 | User preference + owner override / both | Same shared validated/reset policy; out-of-range/inconsistent merge refused atomically |
 | MonitorMode | multi | User preference / Console; Virtual layout is separate | workspace/primary/specific/multi/virtual parsed; capture/layout parity T06 |
 | MonitorIndex | 0 | User preference / Console specific capture | Nonnegative index parsed; worker selection T06 |
 | VirtualMonitorPolicy | replace | User preference / Console's client-created outputs | replace/extend parsed; restore/local takeover T06, lock race T03 |
@@ -87,9 +87,21 @@ No input/layout authority is granted before Ready. Strictly increasing policy
 revisions reject stale reactivation after release. Virtual sends demand only
 for its current authenticated attachment and releases it on revoke. Its worker
 uses the private desktop bus; root broker buses are never used for this policy.
-The paired broker/worker wire is now v7 in source; installed fleet remains v6.
+The paired broker/worker wire is now v8 in source; installed fleet remains v6.
 Delayed Inhibit replies release their cookies even after guard destruction,
 using the replying service's unique owner rather than a replacement service.
+
+Wire8 also carries complete chroma timing and adaptive auxiliary demand to every
+worker encoder. Actual auxiliary capability reports return separately from
+backend reports. Console overrides require an admitted current controller;
+Virtual requires its current authenticated attachment. Partial timing updates
+merge atomically over that owner's current tuple. Control transfer/desktop detach
+restore validated user defaults, and old worker reports cannot steer a revoked
+bridge. Acceptance acknowledges policy only, not AVC444 availability. Six focused
+suites and native Sol Console HEVC/dormant-policy transfer pass. AVC444 codec
+preference/actual auxiliary bytes, timing telemetry, native Virtual/multi-screen
+adaptive gates and matching KCM remain T05/T08. Evidence
+`~/dev/rdp/evidence/2026-09-30-t05-chroma-policy/SUMMARY.md`.
 
 ## Remaining gates
 

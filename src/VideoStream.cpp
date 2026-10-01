@@ -1443,6 +1443,11 @@ VideoCodec VideoStream::codecForSessions() const
     return negotiatedCodec().value_or(VideoCodecSupport::expectedCodec(d->codecPreference));
 }
 
+bool VideoStream::requestedChroma() const
+{
+    return d->chromaEnabled.load();
+}
+
 void VideoStream::setChromaCapable(bool capable)
 {
     if (d->chromaCapable.exchange(capable) == capable) {

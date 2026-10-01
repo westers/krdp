@@ -103,7 +103,7 @@ private Q_SLOTS:
                 ++reads;
                 seenUid = uid;
                 return BrokerUserSettings::parse("[General]\nQuality=43\nAdaptiveQuality=true\nPreferAudioQuality=true\n"
-                    "StandardClientMedia=false\nSoftwareEncoding=prefer\nAv1Tiles=8\nVirtualStockClientPolicy=refuse\nWakeDisplayOnConnect=false\n");
+                    "StandardClientMedia=false\nSoftwareEncoding=prefer\nAv1Tiles=8\nVirtualStockClientPolicy=refuse\nWakeDisplayOnConnect=false\nAvc444MotionGapMs=200\nAvc444RestMs=300\nAvc444MaxGapMs=1200\n");
             });
             t.loadUserSettings(std::nullopt);
             QCOMPARE(reads, 0);
@@ -118,6 +118,7 @@ private Q_SLOTS:
             QCOMPARE(t.m_connection->videoStream()->av1TilesSetting(), 8);
             QCOMPARE(t.m_connection->videoStream()->softwareEncoding(), CodecPolicy::SoftwareEncoding::Prefer);
             QCOMPARE(t.m_stockPolicy(1000), VirtualStockClient::Policy::Refuse);
+            QCOMPARE(t.m_codec->chromaPolicy(), (ChromaPolicy{200, 300, 1200}));
             t.loadUserSettings(1001);
             QCOMPARE(reads, 1);
             t.revoke();
@@ -2286,6 +2287,56 @@ private Q_SLOTS:
     // encoders (a fake probe here: hardware HEVC, software AV1); the choice goes to the bound
     // worker with the binding's generation; the worker's own probe replaces the host's, and a
     // private codec it cannot encode is left at once.
+    void chromaPolicyTraversesWorkerAndCannotCrossAttachment()
+    {
+        microphoneFixture([&](auto &t, auto &, auto &endpoint, auto &worker) {
+            workerRecords(worker);
+            const ChromaPolicy initial{200, 300, 1200};
+            t.m_chromaDefaults = initial;
+            QVERIFY(t.m_codec->setChromaPolicy(initial));
+            const QJsonObject request{{u"type"_s, u"chroma"_s}, {u"v"_s, 1}, {u"motionGapMs"_s, 250}};
+            QCOMPARE(t.request(request, 1001).value(u"code"_s).toString(), u"not-owner"_s);
+            QCOMPARE(t.m_codec->chromaPolicy(), initial);
+            QVERIFY(t.request(request, 1000).value(u"ok"_s).toBool());
+            std::optional<ConsoleWorkerWire::EncoderConfig> last;
+            for (int i = 0; i < 5; ++i)
+                for (const auto &record : workerRecords(worker))
+                    if (const auto config = ConsoleWorkerWire::encoderConfig(record)) last = *config;
+            QVERIFY(last);
+            QCOMPARE(last->generation, t.m_controlGeneration);
+            QCOMPARE(last->chroma, (ChromaPolicy{250, 300, 1200}));
+            QVERIFY(last->chromaEnabled);
+            auto invalid = request;
+            invalid[u"restMs"_s] = 100;
+            QCOMPARE(t.request(invalid, 1000).value(u"code"_s).toString(), u"invalid"_s);
+            QCOMPARE(t.m_codec->chromaPolicy(), last->chroma);
+            invalid[u"restMs"_s] = u"bad"_s;
+            QCOMPARE(t.request(invalid, 1000).value(u"code"_s).toString(), u"invalid"_s);
+            // Actual capability comes back independently of backend telemetry.
+            QSignalSpy chroma(&t.m_session, &AbstractSession::chromaCapabilityChanged);
+            QSignalSpy backend(&t.m_session, &AbstractSession::encoderBackendReported);
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderReport{
+                ConsoleWorkerWire::EncoderReport::Event::ChromaCapability, VideoCodec::Avc444v2, false, true}));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTRY_COMPARE(chroma.size(), 1);
+            QCOMPARE(chroma.first().first().toBool(), true);
+            QCOMPARE(backend.size(), 0);
+            t.revoke();
+            QCOMPARE(t.m_codec->chromaPolicy(), initial);
+            QVERIFY(!t.m_codec->bound());
+            QCOMPARE(t.request(request, 1000).value(u"code"_s).toString(), u"not-owner"_s);
+            // An old worker cannot make a revoked bridge steer or change policy.
+            workerRecords(worker);
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::EncoderReport{
+                ConsoleWorkerWire::EncoderReport::Event::ChromaCapability, VideoCodec::Avc444v2, false, true}));
+            QVERIFY(worker.waitForBytesWritten(1000));
+            QTest::qWait(20);
+            QCOMPARE(t.m_codec->chromaPolicy(), initial);
+            QVERIFY(!t.m_codec->config());
+            Q_UNUSED(endpoint);
+        });
+    }
+
     void codecPolicyRunsThroughTheWorker()
     {
         microphoneFixture([&](auto &t, auto &, auto &endpoint, auto &worker) {

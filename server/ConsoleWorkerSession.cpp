@@ -94,6 +94,8 @@ void ConsoleWorkerSession::reportEncoder(const ConsoleWorkerWire::EncoderReport 
 {
     if (report.event == ConsoleWorkerWire::EncoderReport::Event::Unavailable) {
         Q_EMIT encoderUnavailable(report.codec);
+    } else if (report.event == ConsoleWorkerWire::EncoderReport::Event::ChromaCapability) {
+        Q_EMIT chromaCapabilityChanged(report.chromaCapable);
     } else {
         Q_EMIT encoderBackendReported(report.codec, report.hardware);
     }

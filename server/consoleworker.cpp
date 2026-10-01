@@ -2350,6 +2350,9 @@ private:
     void setEncoderConfig(const ConsoleWorkerWire::EncoderConfig &config)
     {
         const bool codecChanged = config.codec != m_encoderConfig.codec;
+        if (config.chroma != m_encoderConfig.chroma || config.chromaEnabled != m_encoderConfig.chromaEnabled)
+            qInfo() << "Chroma policy: motionGap" << config.chroma.motionGapMs << "rest" << config.chroma.restMs
+                    << "maxGap" << config.chroma.maxGapMs << "enabled" << config.chromaEnabled;
         m_encoderConfig = config;
         m_encoderConfigured = true;
         updateEncoderStatsTimer();
@@ -2430,6 +2433,8 @@ private:
     {
         // Settings first: a restarted encoder opens with its backend, preset and bitrate.
         if (m_encoderConfig.settings) session.setEncoderSettings(*m_encoderConfig.settings);
+        session.setChromaPolicy(m_encoderConfig.chroma);
+        session.setChromaEnabled(m_encoderConfig.chromaEnabled);
         session.setVideoFrameRate(m_encoderConfig.frameRate);
         session.setVideoCodec(m_encoderConfig.codec);
     }
@@ -2445,6 +2450,10 @@ private:
         connect(session, &AbstractSession::encoderBackendReported, this, [this](VideoCodec codec, bool hardware) {
             if (m_socket.state() == QLocalSocket::ConnectedState)
                 m_outbox.report({ConsoleWorkerWire::EncoderReport::Event::Backend, codec, hardware});
+        });
+        connect(session, &AbstractSession::chromaCapabilityChanged, this, [this, session](bool capable) {
+            if (m_socket.state() == QLocalSocket::ConnectedState)
+                m_outbox.report({ConsoleWorkerWire::EncoderReport::Event::ChromaCapability, session->videoCodec(), false, capable});
         });
     }
 

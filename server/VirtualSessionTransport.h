@@ -171,6 +171,7 @@ private:
     void loadUserSettings(std::optional<quint32> uid);
     bool m_audioPriorityDefault = false;
     bool m_wakeDisplayOnConnect = true;
+    ChromaPolicy m_chromaDefaults;
     bool m_adaptiveQuality = false;
     QString m_cameraLoopbackDevice;
     std::unique_ptr<WorkerCodecBridge> m_codec; // after m_session: destroyed first

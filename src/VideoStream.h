@@ -323,6 +323,8 @@ public:
      * (S3). Stubbed out here (unemitted) so SessionController's connect compiles before S3 lands.
      */
     Q_SIGNAL void requestedChromaChanged(bool enabled);
+    /** Current adaptive chroma demand, readable from any thread. */
+    bool requestedChroma() const;
     /**
      * Whether the running encoder actually produces the chroma stream, as reported by the session(s)
      * (AbstractSession::chromaCapabilityChanged). Stub: stores nothing until S3 uses it to AND the

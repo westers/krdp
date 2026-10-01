@@ -9,6 +9,7 @@
 #include "RemoteMonitorGeometry.h"
 #include "CodecRequest.h"
 #include "StatsRequest.h"
+#include "ChromaMerge.h"
 #include <InputHandler.h>
 #include <VideoStream.h>
 #include <QScopeGuard>
@@ -249,6 +250,8 @@ void VirtualSessionTransport::loadUserSettings(std::optional<quint32> uid)
         return;
     }
     const auto &p = result.preferences;
+    m_chromaDefaults = p.chroma.value_or(ChromaPolicy{});
+    m_codec->setChromaPolicy(m_chromaDefaults);
     setVideoQualityPolicy(p.quality.value_or(m_qualityCap), p.adaptiveQuality.value_or(m_adaptiveQuality));
     m_audioPriorityDefault = p.preferAudioQuality.value_or(m_audioPriorityDefault);
     m_wakeDisplayOnConnect = p.wakeDisplayOnConnect.value_or(m_wakeDisplayOnConnect);
@@ -549,7 +552,10 @@ void VirtualSessionTransport::revoke()
     // Clear local binding before any signal/callback can reenter teardown.
     for (const auto &connection : m_workerConnections) QObject::disconnect(connection);
     m_workerConnections.clear();
-    if (m_codec) m_codec->unbind(); // the worker resets its encoders with the control change below
+    if (m_codec) {
+        m_codec->unbind(); // the worker resets its encoders with the control change below
+        m_codec->setChromaPolicy(m_chromaDefaults); // Old attachment overrides never reach a replacement.
+    }
     m_endpoint = nullptr;
     m_handle.reset();
     m_wireLayout.clear();
@@ -1872,12 +1878,12 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         // audio-priority, which never closes krdpserver's gate either).
         const QString type = record.value(u"type"_s).toString();
         if (type == u"device"_s) m_deviceRecordSeen = true;
-        else if (type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s || type == u"stats"_s)
+        else if (type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s || type == u"stats"_s || type == u"chroma"_s)
             m_spokeKrdpctl = true;
         // Any record this broker knows (not audio-priority, which our client may send first
         // without a desktop in mind) marks a KRDPCTL client: never bound automatically.
         if (type == u"device"_s || type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s
-            || type == u"stats"_s)
+            || type == u"stats"_s || type == u"chroma"_s)
             noteKrdpctlClient();
         if (type == u"virtual-session"_s) {
             // Our own client chooses its desktop itself (AUD-D4 applies to stock clients only).
@@ -1918,6 +1924,12 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
     if (record.value(u"type"_s) == u"topology-fit-preview"_s) return topologyFitPreview(record, uid);
     if (record.value(u"type"_s) == u"topology-commit"_s) return topologyCommit(record, uid);
     if (record.value(u"type"_s) == u"virtual-resize"_s) return requestResize(record, uid);
+    if (record.value(u"type"_s) == u"chroma"_s) {
+        if (!authorized(uid)) return LayoutControl::errorRecord({u"not-owner"_s, u"only the authenticated attached virtual owner may change chroma policy"_s});
+        const auto merged = ChromaMerge::merge(m_codec->chromaPolicy(), LayoutControl::chromaFromJson(record));
+        if (merged.outcome == ChromaMerge::Outcome::Applied) m_codec->setChromaPolicy(merged.policy);
+        return ChromaMerge::brokerReply(merged);
+    }
     if (record.value(u"type"_s) == u"codec"_s) {
         // AUD-FIX7: the connection's codec policy, as krdpserver's (CodecRequest). It is the
         // connection's preference, so it may come before any desktop is attached; the worker

@@ -19,6 +19,50 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void chromaPolicyIsControllerScopedAndResetsAfterTransfer()
+    {
+        Server server;
+        RdpConnection first(&server, -1), second(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.m_sessions = {{QStringLiteral("3"), QStringLiteral("westers"), QStringLiteral("seat0"),
+            QStringLiteral("wayland"), QStringLiteral("user"), QStringLiteral("active"), true, 1000}};
+        host.addClient(&first);
+        host.addClient(&second);
+        auto &a = *host.m_clients[0];
+        auto &b = *host.m_clients[1];
+        a.uid = b.uid = 1000;
+        a.preferences.chroma = ChromaPolicy{200, 300, 1200};
+        b.preferences.chroma = ChromaPolicy{250, 400, 1500};
+        host.m_control.admit(a.id);
+        host.m_control.admit(b.id);
+        host.syncControlState();
+        QJsonObject reply;
+        host.m_recordSent = [&](auto *, const QJsonObject &record) { reply = record; };
+        const QJsonObject request{{QStringLiteral("type"), QStringLiteral("chroma")}, {QStringLiteral("v"), 1},
+            {QStringLiteral("motionGapMs"), 280}};
+        host.onControlRecord(&second, b.id, request);
+        QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("not-owner"));
+        host.onControlRecord(&first, a.id, request);
+        QVERIFY(reply.value(QStringLiteral("ok")).toBool());
+        QCOMPARE(a.codec->chromaPolicy().motionGapMs, 280);
+        QCOMPARE(a.codec->chromaPolicy().restMs, 300);
+        auto invalid = request;
+        invalid[QStringLiteral("motionGapMs")] = 350;
+        host.onControlRecord(&first, a.id, invalid);
+        QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("invalid"));
+        QCOMPARE(a.codec->chromaPolicy().motionGapMs, 280);
+        QVERIFY(host.m_control.release(a.id));
+        host.syncControlState();
+        QVERIFY(host.m_control.acquire(b.id));
+        host.syncControlState();
+        QCOMPARE(a.codec->chromaPolicy(), *a.preferences.chroma);
+        QCOMPARE(b.codec->chromaPolicy(), *b.preferences.chroma);
+        b.uid = 1001; // A no-longer-admissible identity cannot retain its old grant.
+        host.onControlRecord(&second, b.id, request);
+        QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("not-owner"));
+        QCOMPARE(b.codec->chromaPolicy(), *b.preferences.chroma);
+    }
+
     void displayPolicyTracksAdmittedViewersAcrossControlTransfer()
     {
         Server server;
@@ -65,7 +109,7 @@ private Q_SLOTS:
         host.setUserSettingsReader([&](quint32 uid) {
             ++reads;
             return BrokerUserSettings::parse(uid == 1000
-                ? "[General]\nQuality=43\nAdaptiveQuality=false\nPreferAudioQuality=true\nAv1Tiles=8\nSoftwareEncoding=prefer\n"
+                ? "[General]\nQuality=43\nAdaptiveQuality=false\nPreferAudioQuality=true\nAv1Tiles=8\nSoftwareEncoding=prefer\nAvc444MotionGapMs=200\nAvc444RestMs=300\nAvc444MaxGapMs=1200\n"
                 : "[General]\nQuality=64\nPreferAudioQuality=false\nAv1Tiles=2\nSoftwareEncoding=never\n");
         });
         host.setVideoCodecHost({});
@@ -82,6 +126,7 @@ private Q_SLOTS:
         QCOMPARE(first.videoStream()->av1TilesSetting(), 8);
         QCOMPARE(second.videoStream()->av1TilesSetting(), 2);
         QCOMPARE(first.videoStream()->softwareEncoding(), CodecPolicy::SoftwareEncoding::Prefer);
+        QCOMPARE(a.codec->chromaPolicy(), (ChromaPolicy{200, 300, 1200}));
         QCOMPARE(second.videoStream()->softwareEncoding(), CodecPolicy::SoftwareEncoding::Never);
         host.m_control.admit(a.id);
         host.m_control.admit(b.id);

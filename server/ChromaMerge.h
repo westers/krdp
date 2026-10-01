@@ -48,6 +48,16 @@ inline Result merge(const ChromaPolicy &current, const std::optional<LayoutContr
     return result;
 }
 
+/** Broker acknowledgement; this accepts timing policy, not codec capability. */
+inline QJsonObject brokerReply(const Result &result)
+{
+    if (result.outcome != Outcome::Applied)
+        return LayoutControl::errorRecord({QStringLiteral("invalid"), QStringLiteral("invalid AVC444 chroma timing policy")});
+    return {{QStringLiteral("type"), QStringLiteral("chroma")}, {QStringLiteral("v"), 1}, {QStringLiteral("ok"), true},
+            {QStringLiteral("motionGapMs"), result.policy.motionGapMs}, {QStringLiteral("restMs"), result.policy.restMs},
+            {QStringLiteral("maxGapMs"), result.policy.maxGapMs}};
+}
+
 /**
  * merge(), and when it applies: \a current (the connection's policy, what sessions built later
  * start with) takes it, and every session in \a sessions (already running - the encoder applies
