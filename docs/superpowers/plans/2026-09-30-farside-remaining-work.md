@@ -12,6 +12,36 @@ execution ledger records current status; a source acceptance is distinguished
 from T27 package delivery. Task IDs are local to this plan. Existing `OPT-###`
 entries in `research.md` remain the roadmap identifiers.
 
+## Goal execution contract (Steve-approved revision, 2026-09-30)
+
+Implement only T01–T28 in this plan. Record newly discovered out-of-scope
+defects in `deferred-issues.md` for Steve's review without fixing them. Persist
+through errors and continue independent work while waiting for feedback.
+
+**Next delivery milestone:** Complete P0 (T01–T13), including the applicable
+T27 package/deployment and T28 documentation gates, before expanding NVIDIA
+support or later UX work. Existing accepted P1 work remains valid. P0 is
+delivered only when its task acceptance, migration, rollback and fleet gates
+are satisfied; a source checkpoint or a build does not close it.
+
+**Feedback requirement:** A task may be reported as requiring Steve's feedback
+only after its independent implementation and agent-run verification are
+finished. Record the task ID, exact remaining test or decision, host/session
+type, source/package version, steps or decision options, pass criteria,
+evidence already collected, and what the answer will unblock. Ask for that
+specific result and continue other available work. An unfinished implementation,
+unattempted agent-run test, unavailable environment or dependency alone does
+not qualify as requiring feedback; where Steve must provide hardware or access,
+identify the exact provision needed.
+
+**Goal stopping condition:** Every T01–T28 task is either accepted with its
+required evidence or has only a documented, specific Steve-owned test or
+decision remaining, and no independent work remains. Feedback-dependent tasks
+stay `PARTIAL`; reaching this stopping condition does not declare those tasks,
+P0 or the full plan delivered. Full delivery still requires the task and
+milestone criteria below. Keep implementation, source acceptance and installed
+delivery distinct in the ledger.
+
 ## Execution checkpoint (2026-09-30)
 
 - Later Console feedback: Steve requested Sol session 429 unlock; verified and
