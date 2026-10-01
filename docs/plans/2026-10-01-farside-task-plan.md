@@ -1,8 +1,8 @@
 # Farside: one task at a time
 
 Date: 2026-10-01. Target agent: `gpt-6.1-sol`.
-Status: N01 accepted in source on 2026-10-01; no deployment. N02 is proposed next,
-only after Steve selects it. Existing Goal remains paused.
+Status: N01 accepted in source and N02 client candidate complete on 2026-10-01;
+no deployment. N03 is proposed next, only after Steve selects it. Goal remains paused.
 
 ## Start here
 
@@ -12,9 +12,9 @@ resume a Goal, execute the whole queue, or start the next task automatically.
 The existing Goal remains paused. Superpowers workflows and automatic delegation
 are not required. Existing plans, tests, code and evidence remain useful inputs.
 
-**N01 is complete in source; next task to select: N02, client candidate.** The next two tasks
-produce actual client and server packages. Native acceptance then uses those
-packages instead of accumulating more disconnected source checkpoints.
+**N02 is complete: client 0.6.4 candidate; next task to select: N03, server candidate.**
+Native acceptance then uses those packages. Installed clients remain 0.6.3;
+the candidate has not been launched or installed.
 
 This file replaces the execution process in the September 30 goal contract and
 October 1 release plan. It preserves the T01–T28 feature scope, existing acceptance
@@ -25,12 +25,12 @@ parent T-task being complete. New test quantity alone does not count as delivery
 
 | Area | Already done | Still missing |
 |---|---|---|
-| Delivered client | 0.6.3 / `2df38a7`, all six hosts; T09 types and T19 health explanations accepted | Client `ef692be` has three unshipped commits: owned Console resize/Fit, capability guard and explicit initial monitor opt-in |
+| Delivered client | 0.6.3 / `2df38a7`, all six hosts; T09 types and T19 health explanations accepted. N02 builds candidate 0.6.4 / `afed6fb` with debug actions OFF | Candidate contains owned Console resize/Fit, capability guard, explicit initial monitor opt-in and N01 wallet guard; N05 live acceptance/N06 deployment remain |
 | Delivered server | `f255ee2` Sol/Hal; `4b308bd` Buzz/ace/cray/marvin; wire 6 | Compiled source checkpoint `d437511c`, wire 11, is unshipped; documentation checkpoint `8c239d31` follows it |
 | Settings/auth | Scoped authentication, services, 17 preferences, 25 host/session controls and runtime inspection implemented; `44726890` removes legacy KCM adapters | Real installed password/cancel/save/restart, effective runtime policy and live stock coexistence |
 | Monitors/video | Quiet Sol private worker single/two-screen HEVC creation/resize/Fit/decoded restoration passes; client UI and protocol evidence exists | Final packaged Console RDP, broader topology lifecycle; earlier loaded CUDA OOM/fallback is unresolved |
 | Discover/locker | Font-cache cause demonstrated and repaired on Sol; Steve confirms Console Discover password entry and ordinary lock/unlock work | Virtual/failure/restart matrix and original lock/output-release race; agent's original failing trace still missing |
-| Migration | `d437511c` effective-settings planner; 26-field schema, 17 explicit defaults, owner/locks/conflicts/revisions; 13 pure suites and 32 migration cases pass | Durable apply/backup/recovery/rollback, profiles/trust/retained integration; wallet retry overwrite risk |
+| Migration | `d437511c` effective-settings planner; 26-field schema, 17 explicit defaults, owner/locks/conflicts/revisions; 13 pure suites and 32 migration cases pass | Durable apply/backup/recovery/rollback, profiles/trust/retained integration; N01 guard still awaits deployment |
 | Wallets | N01 disables automatic wallet copying in client/server; existing metadata preserved, initial metadata create-only/private; no real wallet access | Source accepted, unshipped. Buzz’s three pending entries still require N16 reconciliation |
 | Runtime | Steve reports on October 1 that **both Buzz and Sol now have no AI workloads**; both are available for testing. Last measured Sol snapshot had active brokers and SDDM greeter | Recheck current load/login before live work; no AI does not establish a signed-in Console owner or a measured performance result |
 
@@ -157,6 +157,20 @@ targets compile, focused checks pass, originals and metadata preserved. Commit
 both repositories as needed. Buzz's three passwords remain a separate N16 result.
 
 ### N02 — Produce the client 0.6.4 candidate (T06/T27)
+
+**DONE as an artifact, 2026-10-01.** Source `afed6fbbe3efb72a4a9631fa6eaa5dc388b991bd`
+committed/pushed; clean detached build, RelWithDebInfo, debug actions OFF.
+Candidate: `~/dev/rdp/debs/candidates/client/0.6.4/farside-client-0.6.4-Linux.deb`.
+SHA256: `afa933d2e6db35ac1e70c4b49feafab0385ef78a92102f757784afcea519f8f2`.
+Metainfo, package paths/modes/licenses and all seven ELF dependencies pass.
+FreeRDP dependency floor increases from 3.0.0 to 3.11.1; Buzz/Sol held 3.31+h264.2
+satisfies it. Both apt simulations propose only client 0.6.3 → 0.6.4, no removals
+or dependency upgrades; installed 0.6.3 and all holds unchanged. Exact archived
+0.6.3 rollback hash `b76401ce9786f18ed8e2fcf3b0f73f51d042a65c3bd39c0b63a25a572456ddfd`
+verified and archive unchanged. No candidate launch, install, tag, real wallet
+access or performance claim. N01 tests reused. Evidence:
+`~/dev/rdp/evidence/2026-10-01-n02-client-candidate/SUMMARY.md`.
+T06/T27 remain partial; N03 proposed, not started.
 
 Prerequisite N01. **Do:** Freeze `ef692be` plus N01/release fixes; update actual
 Farside version/metainfo/README, build committed sources with debug actions OFF.
@@ -386,7 +400,7 @@ do not duplicate its long history here or close a task by renaming it.
 | T24 Sessions page | Planned | N28 |
 | T25 UX | Planned | N29 |
 | T26 Performance/visual | Partial; functional/load snapshots only | N30 |
-| T27 Releases | Partial; 0.6.3 client fleet delivered | N02–N06/N18; included in later deliveries |
+| T27 Releases | Partial; 0.6.3 client fleet delivered; N02 0.6.4 candidate artifact done | N03–N06/N18; included in later deliveries |
 | T28 Documentation | Ongoing | This plan + short affected-row/handoff updates per task |
 
 ### Prompt for a fresh task
