@@ -41,6 +41,20 @@ acceptance remains separate from worker/native and installed delivery. Main-page
 legacy cutover and host listener/TLS/device administration still remain T08.
 Evidence `~/dev/rdp/evidence/2026-10-01-t08-preferences/SUMMARY.md`.
 
+## Host document source checkpoint (2026-10-01)
+
+BrokerHostSettings supplies exact typed Console12, Virtual host11 and Virtual
+session2 field/environment maps, defaults and bounded document editing. It
+preserves unrelated administrator syntax and excludes it from public snapshots.
+Actual systemd259 on Sol accepts the raw and saved documents in six disposable
+unit checks; five full pure suites pass. Console source unit address/port defaults
+now match its example0.0.0.0/3391. No installed unit/config/service change.
+This component does not authorize arbitrary TLS paths/device grants or implement
+the root writer/UI. Its effective map is shipped defaults plus the document,
+not actual installed/drop-in/runtime readback. The settings design specifies
+those remaining host/TLS/device/authorization and UI gates. Evidence
+`~/dev/rdp/evidence/2026-10-01-t08-host-format/SUMMARY.md`.
+
 ## Complete legacy schema inventory
 
 Defaults below describe `krdpserversettings.kcfg`; broker defaults can be explicitly

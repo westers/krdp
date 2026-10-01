@@ -13,6 +13,8 @@ StartLimitBurst=10
 [Service]
 Type=exec
 User=root
+Environment=FARSIDE_CONSOLE_ADDRESS=0.0.0.0
+Environment=FARSIDE_CONSOLE_PORT=3391
 Environment=FARSIDE_CONSOLE_WORKER=@CMAKE_INSTALL_PREFIX@/bin/farside-console-worker
 # The host creates this certificate when it is missing and renews it when it expires within
 # 30 days (AUD-FIX7); /etc/farside/console-host.conf may point elsewhere.

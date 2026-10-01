@@ -467,6 +467,23 @@ cutover, host listener/TLS/device editor, real installed authorization/restart,
 T10/live stock coexistence and T27 remain independent work. Evidence:
 `~/dev/rdp/evidence/2026-10-01-t08-preferences/SUMMARY.md`.
 
+**2026-10-01 host-document settings checkpoint (PARTIAL, unshipped):**
+A pure bounded typed model now covers Console12, Virtual host11 and Virtual
+session2 fields, fixed file/environment names, validation and unit defaults.
+Quoted/multiline/continuation/duplicate statements round trip while unrelated
+administrator bytes remain private and unchanged. Missing PCI means no grant.
+The Console source unit supplies explicit address/port defaults0.0.0.0/3391;
+installed units and legacy3389 remain unchanged. Five complete pure suites pass,
+including reconciled old-name launch fixture expectations. Six actual systemd259
+Sol disposable-unit checks verify raw and saved documents against the real
+EnvironmentFile parser. Broker PIDs/preferences preserved, fixtures removed.
+This proves typed format and serialization, not authorized host administration.
+The spec now defines fixed root writing, revision/atomic/readback, TLS existing/
+import/standard paths, device checks, runtime overrides and restart/new-desktop
+scope. That helper, complete host UI, legacy main cutover, installed authorization,
+T10/live stock coexistence and T27 still remain. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t08-host-format/SUMMARY.md`.
+
 ### T09 — Make client types explicitly Console or Virtual
 
 **Instructions:** Add an explicit persisted type and select it when creating/editing a connection. Use authenticated capabilities to validate behavior; a custom port must not change the type. Replace the old `physicalConsole` distinction throughout form, cards, session identity, menus, topology and device paths. Keep an internal migration representation only while old saved entries are awaiting T10. Standard RDP hosts retain their appropriate existing-desktop behavior.

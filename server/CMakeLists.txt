@@ -4,6 +4,10 @@
 add_definitions(-DTRANSLATION_DOMAIN=\"farside-server\")
 
 add_executable(krdpserver)
+add_library(KRdpBrokerHostSettings STATIC BrokerHostSettings.cpp)
+set_target_properties(KRdpBrokerHostSettings PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(KRdpBrokerHostSettings PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(KRdpBrokerHostSettings PUBLIC Qt6::Core Qt6::Network)
 add_library(KRdpBrokerUserSettings STATIC BrokerUserSettings.cpp UserConfiguration.cpp)
 set_target_properties(KRdpBrokerUserSettings PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(KRdpBrokerUserSettings PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src)

@@ -9,8 +9,9 @@ class VirtualSessionLaunchPlanTest : public QObject
     Q_OBJECT
     const QString id = u"a512ca25-048d-42f6-a2ed-a2bb2da22f22"_s;
     const VirtualSessionLaunchPlan::Account account{1000, u"user"_s, u"/home/user"_s};
-    const VirtualSessionLaunchPlan::Configuration config{u"/usr/libexec/krdp/launch-virtual-session"_s,
-        u"/usr/bin/krdp-console-worker"_s, u"/usr/share/krdp"_s, {u"0000:09:00.0"_s, u"0000:c5:00.0"_s}, {1280, 720}};
+    const VirtualSessionLaunchPlan::Configuration config{u"/usr/share/farside/virtual-session/launch-virtual-session.sh"_s,
+        u"/usr/bin/farside-console-worker"_s, u"/usr/share/farside/virtual-session/support"_s,
+        {u"0000:09:00.0"_s, u"0000:c5:00.0"_s}, {1280, 720}};
 private Q_SLOTS:
     void recordedLaunchIdentityIsNotRegenerated()
     {
@@ -18,7 +19,7 @@ private Q_SLOTS:
         const auto first = VirtualSessionLaunchPlan::build(1000, account, id, config, nullptr, launch);
         const auto second = VirtualSessionLaunchPlan::build(1000, account, id, config, nullptr, launch);
         QVERIFY(first); QVERIFY(second);
-        QCOMPARE(first->runtimeDirectory, QStringLiteral("/run/user/1000/krdp-virtual/") + launch);
+        QCOMPARE(first->runtimeDirectory, QStringLiteral("/run/user/1000/farside-virtual/") + launch);
         QCOMPARE(first->runtimeDirectory, second->runtimeDirectory);
         QCOMPARE(first->arguments, second->arguments);
         QVERIFY(first->arguments.contains(first->runtimeDirectory));
@@ -30,8 +31,8 @@ private Q_SLOTS:
     {
         const auto plan = VirtualSessionLaunchPlan::build(1000, account, id, config);
         QVERIFY(plan);
-        QVERIFY(plan->runtimeDirectory.startsWith(u"/run/user/1000/krdp-virtual/"_s));
-        QCOMPARE(plan->profileDirectory, u"/home/user/.krdp-virtual/sessions/"_s + id);
+        QVERIFY(plan->runtimeDirectory.startsWith(u"/run/user/1000/farside-virtual/"_s));
+        QCOMPARE(plan->profileDirectory, u"/home/user/.farside-virtual/sessions/"_s + id);
         QVERIFY(!plan->environment.inheritsFromParent());
         QCOMPARE(plan->environment.keys().size(), 5);
         QVERIFY(!plan->environment.contains(u"DISPLAY"_s));

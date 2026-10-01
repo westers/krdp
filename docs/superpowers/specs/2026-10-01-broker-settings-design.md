@@ -68,6 +68,86 @@ cancelled discard, reload, locked/default inheritance and preservation of host
 and secret-bearing unrelated entries. This does not complete the legacy main
 page cutover, host administration, native worker or package/deployment gates.
 
+## Typed host documents and administration contract
+
+`BrokerHostSettings` defines twelve Console fields, eleven Virtual host fields
+and two Virtual-session fields. Exact environment names and defaults match the
+shipped system unit templates. Console keeps port3391 until migration; its
+command-line default3389 is separate. Adding explicit address/port Environment
+defaults to the Console template makes removing those file overrides meaningful
+without moving the legacy listener. No installed unit is changed by this source
+checkpoint. Missing RenderPci means no GPU grant; it never means all devices.
+
+Each scope has one fixed filename under `/etc/farside`: console-host.conf,
+virtual-host.conf or virtual-session.conf. The editor submits only typed public
+keys, never an environment fragment, write path, executable, shell or service
+name. The bounded UTF-8 parser follows EnvironmentFile quoting/continuation and
+last-assignment semantics, preserves unknown administrator bytes and excludes
+them from public metadata. Unterminated quotes/continuations, invalid characters,
+invalid recognized values and wrong scopes fail closed. Canonical booleans in an
+existing file must match the actual brokers' accepted text; drafts normalize
+before serialization. Desired overrides are complete, omitted fields inherit
+unit defaults, and unchanged effective overrides preserve the original bytes.
+All affected duplicate statements are replaced or removed in full, including
+multiline values. This is not shell expansion. Semantics were checked against
+[upstream systemd documentation](https://raw.githubusercontent.com/systemd/systemd/main/man/systemd.exec.xml)
+and its [EnvironmentFile parser](https://raw.githubusercontent.com/systemd/systemd/main/src/basic/env-file.c).
+
+The pure snapshot's `effective` map describes shipped defaults plus that
+document. It does not establish installed runtime state: systemd drop-ins and
+other EnvironmentFiles can override it. Final administration must inspect the
+actual fixed units and expose a differing/custom unit configuration explicitly,
+without claiming that a successful file save already applied to a running host.
+
+The remaining fixed-purpose root helper must implement the following contract:
+
+1. A bounded stdin read/save request chooses only the three named scopes; an
+   expected revision covers presence and the complete file. Public replies expose
+   only recognized values, revision and bounded TLS/device metadata. Unknown
+   entries, key material and raw files never reach QML or diagnostics.
+2. Inspect safe root-owned `/etc/farside` and files, take a fixed safe per-scope
+   lock, recheck the complete revision and directory identity, validate the full
+   candidate, atomically replace that one file root0600 through its directory
+   descriptor, sync and independently read back. Scope saves are separate; never
+   imply a transaction across all three files. Denial/cancel/invalid/stale input
+   preserves installed bytes and pending UI edits. Post-commit errors explicitly
+   report a saved-but-unverified result.
+3. TLS path edits select existing safe root-administered, bounded, matching PEM
+   pairs. Validate parents, targets, unencrypted keys and actual public metadata
+   without prompting or exporting a key. Unchanged administrator-managed symlinks
+   and supported custom paths retain their existing broker semantics. A new
+   arbitrary missing path cannot authorize the broker to overwrite a root file.
+4. Certificate import carries bounded certificate/key bytes over stdin after
+   caller-side file reading; it never gives the helper an arbitrary input/write
+   filename. Stage both files in a new exclusive generation beneath a fixed root
+   TLS-import subtree, inspect the pair, then atomically publish both configured
+   paths in that scope's single environment file. Final root-owned symlink aliases
+   mark imported material administrator-managed for ensureHostCertificate, so
+   automatic renewal never replaces an imported certificate with a self-signed
+   one. Reject mismatched/encrypted/expired imports; show fingerprint/expiry and
+   renewal responsibility. Clean only uncommitted generations. Preserve old
+   generations while any running host can still reference them.
+5. Returning to the standard TLS paths changes only those two configured paths,
+   preserves existing files/fingerprints and accurately reports whether their
+   current material is generated or administrator-managed. Explicit regeneration
+   needs its own reviewed operation; ordinary Defaults/Save cannot regenerate.
+6. Camera-loopback paths require actual device-type/loopback checks. Virtual
+   render grants remain canonical distinct PCI identities resolved by the current
+   production device authority; no renderD index, arbitrary device path, global
+   ACL/account change or unsupported GPU backend/selection feature is introduced.
+   VA-API driver policy retains auto/off/radeonsi/iHD/i965 behavior.
+
+Host listener/TLS/video/media changes require an explicit separate restart of
+the relevant broker, with client-disconnection confirmation. Virtual-session
+render/driver changes apply to newly created desktop namespaces; restarting the
+broker cannot change a retained desktop's device grants. Explain this in the UI
+without terminating existing desktops. User preferences apply on reconnect and
+cannot rewrite these host policies. The host UI must include every whitelisted
+field, defaults, validation, load/save/discard flows and actual populated Buzz
+evidence. Source helper/TLS/device tests, installed authorization/cancel/restart,
+both auth scopes, live stock coexistence, migration and package/rollback delivery
+remain required gates after the pure format component.
+
 ## System service controls
 
 The service model addresses only `farside-console-host.service` and

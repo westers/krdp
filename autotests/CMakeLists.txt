@@ -887,6 +887,13 @@ target_link_libraries(DisplayWakeGuardTest PRIVATE Qt6::Test Qt6::Core Qt6::DBus
 # this daemon integration check to the default ctest set or run it on Hal.
 
 add_executable(BrokerUserSettingsTest BrokerUserSettingsTest.cpp)
+add_executable(BrokerHostSettingsTest BrokerHostSettingsTest.cpp)
+target_compile_definitions(BrokerHostSettingsTest PRIVATE HOST_SETTINGS_SOURCE="${CMAKE_SOURCE_DIR}")
+target_link_libraries(BrokerHostSettingsTest PRIVATE Qt6::Test KRdpBrokerHostSettings)
+add_test(NAME BrokerHostSettingsTest COMMAND BrokerHostSettingsTest)
+add_executable(BrokerHostSettingsNativeProbe BrokerHostSettingsNativeProbe.cpp)
+target_link_libraries(BrokerHostSettingsNativeProbe PRIVATE KRdpBrokerHostSettings)
+# Actual systemd transient fixture units run manually on Sol, never default CTest.
 target_link_libraries(BrokerUserSettingsTest PRIVATE Qt6::Test KRdpBrokerUserSettings)
 add_test(NAME BrokerUserSettingsTest COMMAND BrokerUserSettingsTest)
 add_executable(BrokerPreferencesTest BrokerPreferencesTest.cpp)
