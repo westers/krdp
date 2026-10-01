@@ -248,6 +248,76 @@ native worker/camera gates, T10 migration/live stock coexistence and T27 package
 rollback/fleet delivery remain; T08/P0 is PARTIAL. Evidence:
 `~/dev/rdp/evidence/2026-10-01-t08-host-ui/SUMMARY.md`.
 
+## Runtime inspection contract
+
+Explicit Inspect Running Host uses the same fixed authorized helper with a new
+read-only operation. It never starts/stops/reloads a service. Only the Console
+and Virtual fixed unit names are permitted. Session grants retain new-desktop
+scope; one broker process cannot prove every retained namespace changed.
+
+Read the system manager's unique owner and query that owner for the fixed unit's
+loaded Unit/Service properties. Inspect actual merged Environment, ordered
+EnvironmentFiles, ExecStart, fragment/drop-in paths and NeedDaemonReload. Honor
+EnvironmentFile order and UnsetEnvironment; PassEnvironment, PAM/login
+environment, unsupported expansion/commands and incomplete known fields cannot
+be guessed from source defaults. Projection describes the loaded unit and
+current files, rather than rereading possibly newer unit text as loaded state.
+Root-owned safe bounded regular reads preserve unknown environment bytes privately;
+arbitrary command/environment text never becomes public metadata. Other files,
+drop-ins, literal/custom settings or fixed-file omission remain visibly custom.
+Missing required files, unsafe/invalid values and unknown mapping fail projection.
+
+For an active broker, pin MainPID with pidfd before inspecting /proc. Require
+root real/effective/saved/fs identities, exact unit control group, stable process
+start ticks and executable inode matching the trusted installed fixed broker.
+Parse only recognized explicit command-line options. Do not infer absent fields
+from a different source version's CLI defaults. Recheck pidfd liveness, process
+identity/argv, manager owner and all relevant unit/process properties after reads;
+replacement, exit, manager reload or stale file identity fails that sample.
+Deleted/replaced binaries and custom commands are explicitly unverifiable.
+
+Public versioned data contains scope, unit/state, PID, bounded known startup
+values, current unit projection, missing/differing field names and fixed reason
+codes. It distinguishes missing/inactive/partial/custom/different/verified/stale/
+denied/unavailable state and stored file revision. A mismatch does not disable
+safe editing; it explains why Save is not Apply. Running values mean verified
+startup arguments, not live per-user overrides, successful listening, loaded TLS
+fingerprint or supported media behavior. Current stored TLS metadata remains
+separate from a certificate already loaded by a process. No raw arguments,
+unrecognized env values, authentication verifiers or key bytes reach QML/logs.
+
+Pure mapping/identity/public-schema tests run with injected data on Hal. Private
+typed manager/replacement/denial fixtures and actual read-only installed process
+agreement run on Sol. Populated runtime/difference/unavailable GUI evidence runs
+on Buzz. Task acceptance and delivery still require the installed password/cancel/save ->
+explicit restart -> runtime/auth-scope round trip and all other release gates.
+Property types follow [systemd's D-Bus interface](https://raw.githubusercontent.com/systemd/systemd/main/man/org.freedesktop.systemd1.xml).
+
+### Runtime inspection source checkpoint (2026-10-01, unshipped)
+
+Fixed read-only helper operation, private typed unit/environment/process reader
+and explicit page inspection now implement this contract. Safe regular file
+identity includes both the lexical entry and resolved target across repeated
+reads, including replacements with identical bytes. Manager/unit ownership and
+metadata are checked again after final file/process probes. Public schema rejects
+contradictory verification flags/states as well as private or mistyped fields.
+
+Eight complete pure suites pass; Sol native16 covers typed queries, root file
+safety, drop-ins/custom literals, omission/inactive/reload/denial, changing file,
+process/executable/manager identity and actual installed Console/Virtual startup
+agreement. The exact helper passes both installed read-only operations and the
+previous22 isolated root writer checks without changing installed files or PIDs.
+Buzz page13 and compiled KCM16 pass, with nine populated runtime states, width640,
+preserved drafts/TLS/unknown-save state and readable warning screenshots. Fixture
+compile/type/revision/widget errors were corrected and retained as evidence.
+All test handles are terminal and own remote fixture directories removed.
+
+Main legacy cutover, installed normal authorization/restart into both admission
+scopes, native worker/camera parity, T10 migration/live stock coexistence and T27
+package/rollback/fleet gates remain independent work. Virtual loopback remains
+T05/T08; unavailable is not acceptance. T08/P0 PARTIAL, goal ACTIVE. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t08-runtime/SUMMARY.md`.
+
 ## System service controls
 
 The service model addresses only `farside-console-host.service` and

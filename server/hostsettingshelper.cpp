@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 // Fixed-purpose privileged stdin protocol. No caller-supplied write path/argv.
 #include "BrokerHostAdmin.h"
+#include "BrokerHostRuntimeReader.h"
 #include "ServerCertificate.h"
 #include "VirtualGpuDevices.h"
 #include "VirtualSessionLaunchPlan.h"
@@ -300,9 +301,27 @@ int main(int argc, char **argv)
     const auto scope = BrokerHostAdmin::scope(request[u"scope"_s].toString());
     const auto operation = request[u"operation"_s].toString();
     if (!scope || !request[u"scope"_s].isString() || !request[u"version"_s].isDouble() || request[u"version"_s].toDouble() != 1
-        || (operation != u"read" && operation != u"save") || (operation == u"read" && request.size() != 3)) return fail(u"invalid host settings request"_s);
+        || (operation != u"read" && operation != u"save" && operation != u"inspect-runtime")
+        || (operation != u"save" && request.size() != 3)
+        || (operation == u"inspect-runtime" && *scope == Scope::VirtualSession)) return fail(u"invalid host settings request"_s);
     const Fd directory(policyDirectory());
     if (directory.value < 0) return fail(u"Farside settings directory is unavailable or unsafe"_s);
+    if (operation == u"inspect-runtime") {
+        // Read-only inspection must not create a policy lock or touch TLS. The
+        // complete stored file/directory is rechecked around the independent
+        // fixed-unit/process reader instead.
+        const auto current = readSettings(directory.value, *scope);
+        if (!current.error.isEmpty()) return fail(current.error);
+        const auto parsed = BrokerHostSettings::parse(*scope, current.bytes);
+        if (!parsed.error.isEmpty()) return fail(parsed.error);
+        const auto revision = BrokerHostAdmin::revision(*scope, current.exists, current.bytes);
+        auto runtime = BrokerHostRuntime::inspect(*scope, parsed.effective, revision, QDBusConnection::systemBus());
+        const auto after = readSettings(directory.value, *scope);
+        if (!directoryStillCurrent(directory.value) || !after.error.isEmpty() || current.exists != after.exists || current.bytes != after.bytes)
+            runtime = BrokerHostRuntime::summarize(*scope, {}, {}, {}, parsed.effective, revision,
+                BrokerHostRuntime::installedContract(*scope), u"stale"_s);
+        return reply({{u"runtime"_s, runtime}}, 0);
+    }
     const QByteArray lockName = ".host-settings-" + BrokerHostAdmin::scopeName(*scope).toUtf8() + ".lock";
     // flock does not need a writable descriptor on the local policy filesystem.
     // This also allows a read on an existing safe lock during a read-only boot.

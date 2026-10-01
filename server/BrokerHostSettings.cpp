@@ -230,6 +230,17 @@ Snapshot parse(Scope scope, const QByteArray &contents)
     }
     return result;
 }
+EnvironmentRead privateEnvironment(const QByteArray &contents)
+{
+    const auto document = scan(contents);
+    EnvironmentRead result;
+    result.error = document.error;
+    if (!result.error.isEmpty()) return result;
+    static const QRegularExpression name(u"\\A[A-Za-z_][A-Za-z0-9_]*\\z"_s);
+    for (const auto &item : document.assignments)
+        if (name.match(item.name).hasMatch()) result.assignments[item.name] = item.value;
+    return result;
+}
 EditResult edit(Scope scope, const QByteArray &original, const QVariantMap &desired)
 {
     const auto current = parse(scope, original);

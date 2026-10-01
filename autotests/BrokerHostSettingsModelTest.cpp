@@ -110,6 +110,49 @@ private Q_SLOTS:
         BrokerHostSettings missing(Scope::Console, u"/nonexistent/farside-test-helper"_s, {}, 500);
         QVERIFY(missing.reload()); QTRY_VERIFY(!missing.busy()); QVERIFY(!missing.loaded()); QVERIFY(!missing.outcomeUnknown());
     }
+    void runtimeInspectionPreservesDraftsTlsAndApplicationState() {
+        QTemporaryDir dir;
+        BrokerHostSettings settings(Scope::Console, u"/usr/bin/python3"_s, arguments(dir), 3000),
+            session(Scope::VirtualSession, u"/usr/bin/python3"_s, arguments(dir), 3000);
+        QVERIFY(!settings.inspectRuntime()); QVERIFY(session.reload()); QTRY_VERIFY(!session.busy()); QVERIFY(!session.inspectRuntime());
+        QVERIFY(settings.reload()); QTRY_VERIFY(!settings.busy()); QVERIFY(settings.setValue(u"Port"_s, u"3501"_s));
+        QVERIFY(settings.chooseTls(u"import"_s));
+        KRdp::ServerCertificate::Paths paths{dir.filePath(u"fixture.crt"_s), dir.filePath(u"fixture.key"_s)}; QString error;
+        QVERIFY(KRdp::ServerCertificate::generate(paths, u"fixture"_s, QDateTime::currentDateTimeUtc(), 10, &error));
+        QVERIFY(settings.importTls(QUrl::fromLocalFile(paths.certificate), QUrl::fromLocalFile(paths.key)));
+        const auto pending=settings.values(), certificate=settings.importMetadata();
+        mode(dir,"runtime-different"); QVERIFY(settings.inspectRuntime()); QVERIFY(!settings.save()); QTRY_VERIFY(!settings.busy());
+        QVERIFY2(settings.error().isEmpty(),qPrintable(settings.error())); QCOMPARE(settings.runtime()[u"state"_s],u"different"_s);
+        QCOMPARE(settings.runtime()[u"running"_s].toMap()[u"Quality"_s],u"55"_s);
+        QCOMPARE(settings.values(),pending); QCOMPARE(settings.importMetadata(),certificate); QCOMPARE(settings.tlsMode(),u"import"_s);
+        QVERIFY(settings.modified()); QVERIFY(settings.canSave()); QVERIFY(!settings.applicationRequired()); QVERIFY(!settings.runtimeStale());
+        QVERIFY(!settings.runtimeCheckedAt().isEmpty()); mode(dir,"success"); QVERIFY(settings.save()); QTRY_VERIFY(!settings.busy());
+        QVERIFY(settings.applicationRequired()); QVERIFY(settings.runtimeStale()); QVERIFY(settings.importMetadata().isEmpty());
+        QVERIFY(settings.inspectRuntime()); QTRY_VERIFY(!settings.busy()); QVERIFY(!settings.runtimeStale()); QVERIFY(settings.applicationRequired());
+        QVERIFY(settings.setValue(u"Port"_s,u"3502"_s)); mode(dir,"crash-after-save"); QVERIFY(settings.save()); QTRY_VERIFY(!settings.busy());
+        QVERIFY(settings.outcomeUnknown()); mode(dir,"success"); QVERIFY(settings.inspectRuntime()); QTRY_VERIFY(!settings.busy());
+        QVERIFY(settings.outcomeUnknown()); QVERIFY(!settings.canSave()); QVERIFY(settings.modified()); QVERIFY(settings.runtimeStale());
+    }
+    void runtimeFailuresAndPartialReplies_data() {
+        QTest::addColumn<QByteArray>("modeName");QTest::addColumn<bool>("accepted");QTest::addColumn<bool>("stale");
+        for(const auto &name:{"cancel","denied","timeout","malformed","oversized","wrong-scope","private-field","runtime-lie"})
+            QTest::newRow(name)<<QByteArray(name)<<false<<true;
+        for(const auto &name:{"runtime-partial","runtime-custom","runtime-unavailable","runtime-denied","runtime-reload"})
+            QTest::newRow(name)<<QByteArray(name)<<true<<false;
+        QTest::newRow("revision")<<QByteArray("runtime-revision")<<true<<true;
+        QTest::newRow("changed")<<QByteArray("runtime-stale")<<true<<true;
+    }
+    void runtimeFailuresAndPartialReplies() {
+        QFETCH(QByteArray,modeName);QFETCH(bool,accepted);QFETCH(bool,stale);QTemporaryDir dir;
+        BrokerHostSettings settings(Scope::Console,u"/usr/bin/python3"_s,arguments(dir),modeName=="timeout"?200:3000);
+        QVERIFY(settings.reload());QTRY_VERIFY(!settings.busy());QVERIFY(settings.inspectRuntime());QTRY_VERIFY(!settings.busy());
+        QVERIFY(!settings.runtime().isEmpty());QVERIFY(settings.setValue(u"Quality"_s,u"92"_s)); const auto pending=settings.values();
+        mode(dir,modeName);QVERIFY(settings.inspectRuntime());QTRY_VERIFY(!settings.busy());
+        QCOMPARE(settings.runtime().isEmpty(),!accepted);QCOMPARE(settings.runtimeStale(),stale);
+        QCOMPARE(settings.values(),pending);QVERIFY(settings.modified());QVERIFY(settings.canSave());QVERIFY(!settings.outcomeUnknown());
+        QVERIFY(!QJsonDocument::fromVariant(settings.runtime()).toJson().contains("fixture-private"));
+        if(!accepted) { QVERIFY(settings.runtimeCheckedAt().isEmpty());QVERIFY(!settings.error().isEmpty()); }
+    }
 };
 QTEST_GUILESS_MAIN(BrokerHostSettingsModelTest)
 #include "BrokerHostSettingsModelTest.moc"

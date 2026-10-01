@@ -10,6 +10,7 @@
 #include <QQuickWindow>
 #include <QTemporaryDir>
 #include <QTest>
+#include <functional>
 using namespace Qt::StringLiterals;
 class BrokerHostsPageTest : public QObject {
     Q_OBJECT
@@ -29,6 +30,71 @@ class BrokerHostsPageTest : public QObject {
         auto *context = new KLocalizedQmlContext(&engine); context->setTranslationDomain(u"kcm_farside"_s); engine.rootContext()->setContextObject(context);
     }
 private Q_SLOTS:
+    void runtimeInspectionStatesAndWidth_data() {
+        QTest::addColumn<QByteArray>("modeName");QTest::addColumn<QString>("summary");
+        QTest::newRow("matching")<<QByteArray("success")<<u"agree with stored settings"_s;
+        QTest::newRow("custom")<<QByteArray("runtime-custom")<<u"Custom unit"_s;
+        QTest::newRow("different")<<QByteArray("runtime-different")<<u"differ from stored"_s;
+        QTest::newRow("partial")<<QByteArray("runtime-partial")<<u"incomplete"_s;
+        QTest::newRow("reload")<<QByteArray("runtime-reload")<<u"incomplete"_s;
+        QTest::newRow("unavailable")<<QByteArray("runtime-unavailable")<<u"unavailable"_s;
+        QTest::newRow("stale")<<QByteArray("runtime-stale")<<u"changed during inspection"_s;
+        QTest::newRow("denied")<<QByteArray("runtime-denied")<<u"not authorized"_s;
+        QTest::newRow("revision")<<QByteArray("runtime-revision")<<u"agree with stored settings"_s;
+    }
+    void runtimeInspectionStatesAndWidth() {
+        QFETCH(QByteArray,modeName);QFETCH(QString,summary);QTemporaryDir dir;
+        BrokerHostSettings console(Scope::Console,u"/usr/bin/python3"_s,arguments(dir),3000),
+            virtualHost(Scope::Virtual,u"/usr/bin/python3"_s,arguments(dir),3000),
+            session(Scope::VirtualSession,u"/usr/bin/python3"_s,arguments(dir),3000);
+        QQmlEngine engine;localize(engine);QStringList warnings;
+        connect(&engine,&QQmlEngine::warnings,this,[&](const auto &errors){for(const auto &error:errors)warnings.append(error.toString());});
+        QQmlComponent component(&engine,pageUrl());QVERIFY2(component.isReady(),qPrintable(component.errorString()));
+        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"consoleSettings"_s,QVariant::fromValue(&console)},
+            {u"virtualSettings"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)}}));
+        QVERIFY2(object,qPrintable(component.errorString()));auto *page=qobject_cast<QQuickItem *>(object.data());QVERIFY(page);
+        QQuickWindow window;window.resize(640,800);page->setParentItem(window.contentItem());page->setSize(window.size());window.show();
+        const auto item=[&](const QString &name){return find(page,name);};
+        auto *inspect=item(u"inspectHostRuntime"_s);QVERIFY(inspect);QVERIFY(!inspect->property("enabled").toBool());
+        QVERIFY(console.reload());QTRY_VERIFY(!console.busy());QVERIFY(console.setValue(u"Quality"_s,u"92"_s));
+        writeMode(dir,modeName);QVERIFY(QMetaObject::invokeMethod(inspect,"clicked"));QTRY_VERIFY(!console.busy());
+        QVERIFY2(console.error().isEmpty(),qPrintable(console.error()));QVERIFY(console.modified());QVERIFY(!console.applicationRequired());
+        QTRY_VERIFY(item(u"hostRuntimeSummary"_s)->property("text").toString().contains(summary));
+        QCOMPARE(item(u"hostRuntimeStale"_s)->property("visible").toBool(),modeName=="runtime-stale" || modeName=="runtime-revision");
+        if(modeName=="runtime-stale" || modeName=="runtime-revision") {
+            auto *message=qobject_cast<QQuickItem *>(item(u"hostRuntimeStale"_s));QVERIFY(message);
+            std::function<bool(QQuickItem *)> readable=[&](QQuickItem *parent) {
+                for(auto *child:parent->childItems()) {
+                    if((child->inherits("QQuickText")||child->inherits("QQuickTextEdit"))&&child->property("text")==message->property("text")) {
+                        qreal opacity=1;
+                        for(auto *ancestor=child;ancestor;ancestor=ancestor->parentItem())opacity*=ancestor->opacity();
+                        if(child->isVisible()&&opacity>0.95&&child->height()>0)return true;
+                    }
+                    if(readable(child))return true;
+                }
+                return false;
+            };
+            QTRY_VERIFY(readable(message)); // catch a blank animated warning under a hidden ancestor
+        }
+        QCOMPARE(item(u"hostRuntimeMissing"_s)->property("visible").toBool(),modeName=="runtime-partial");
+        QCOMPARE(item(u"hostRuntimeDifferences"_s)->property("visible").toBool(),modeName=="runtime-different");
+        QVERIFY(item(u"showHostRuntimeValues"_s)->setProperty("checked",true));QTRY_VERIFY(item(u"runtime_Port"_s));
+        auto *flickable=page->property("flickable").value<QQuickItem *>();QVERIFY(flickable);QTest::qWait(100);
+        auto *content=flickable->property("contentItem").value<QQuickItem *>();QVERIFY(content);
+        for(const auto &row:console.definitions()) {
+            const auto key=row.toMap()[u"key"_s].toString();auto *label=qobject_cast<QQuickItem *>(item(u"runtime_"_s+key));QVERIFY(label);
+            const auto rect=label->mapRectToItem(content,QRectF(0,0,label->width(),label->height()));
+            QVERIFY2(rect.left()>=-0.5&&rect.right()<=flickable->width()+0.5,qPrintable(key));
+        }
+        if(modeName=="runtime-partial")QVERIFY(item(u"runtime_Quality"_s)->property("text").toString().contains(u"not observed"));
+        if(modeName=="runtime-different")QVERIFY(item(u"runtime_Quality"_s)->property("text").toString().contains(u"55"));
+        const auto screenshots=qEnvironmentVariable("FARSIDE_HOST_SCREENSHOTS");
+        if(!screenshots.isEmpty())QVERIFY(window.grabWindow().save(screenshots+u"/runtime-"_s+QString::fromUtf8(modeName)+u".png"_s));
+        writeMode(dir,"cancel");QVERIFY(QMetaObject::invokeMethod(inspect,"clicked"));QTRY_VERIFY(!console.busy());
+        QVERIFY(console.runtime().isEmpty());QVERIFY(console.modified());QVERIFY(!item(u"hostRuntimeSummary"_s)->property("visible").toBool());
+        auto *selector=item(u"hostScope"_s);QVERIFY(selector->setProperty("currentIndex",2));QVERIFY(!inspect->property("visible").toBool());
+        QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s)));page->setParentItem(nullptr);
+    }
     void actualFieldsScopeDraftsDefaultsCancelDiscardAndWidth() {
         QTemporaryDir dir;
         BrokerHostSettings console(Scope::Console, u"/usr/bin/python3"_s, arguments(dir), 3000),

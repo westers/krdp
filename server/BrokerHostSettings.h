@@ -25,6 +25,10 @@ struct Snapshot {
 // Only whitelisted fields reach public snapshots. Unknown administrator entries
 // remain private, including their complete quoting and continuation syntax.
 Snapshot parse(Scope scope, const QByteArray &contents);
+// Privileged runtime projection only. Unknown assignments remain private and
+// must never be passed to a public snapshot, QML property or diagnostic.
+struct EnvironmentRead { QMap<QString, QString> assignments; QString error; };
+EnvironmentRead privateEnvironment(const QByteArray &contents);
 struct EditResult { QByteArray contents; QString error; };
 // Desired is the complete override map; absence inherits the shipped unit
 // default. Caller cannot provide arbitrary environment names or raw fragments.

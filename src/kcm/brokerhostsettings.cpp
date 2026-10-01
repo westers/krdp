@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "brokerhostsettings.h"
 #include "BrokerHostAdmin.h"
+#include "BrokerHostRuntime.h"
 #include "ServerCertificate.h"
 #include <KLocalizedString>
 #include <QFile>
@@ -116,6 +117,8 @@ QVariantMap BrokerHostSettings::metadata() const
 }
 void BrokerHostSettings::clearImport() { wipe(m_certificate); wipe(m_key); m_importMetadata.clear(); }
 bool BrokerHostSettings::modified() const { return loaded() && (m_pending != m_snapshot[u"values"_s].toObject().toVariantMap() || m_tlsMode != u"keep"); }
+bool BrokerHostSettings::runtimeStale() const { return m_runtime.isEmpty() || !loaded()
+    || m_runtime[u"state"_s].toString() == u"stale" || m_runtime[u"storedRevision"_s] != m_snapshot[u"revision"_s]; }
 bool BrokerHostSettings::reject(const QString &error) { m_error = error; Q_EMIT changed(); return false; }
 QString BrokerHostSettings::validationError() const
 {
@@ -201,6 +204,12 @@ void BrokerHostSettings::discard()
     clearImport(); m_error.clear(); Q_EMIT changed();
 }
 bool BrokerHostSettings::reload() { return start({{u"version"_s, 1}, {u"operation"_s, u"read"_s}, {u"scope"_s, scope()}}, false); }
+bool BrokerHostSettings::inspectRuntime()
+{
+    if (!loaded() || busy() || m_scope == Scope::VirtualSession) return false;
+    m_runtime = {}; m_runtimeCheckedAt.clear();
+    return start({{u"version"_s, 1}, {u"operation"_s, u"inspect-runtime"_s}, {u"scope"_s, scope()}}, false);
+}
 bool BrokerHostSettings::save()
 {
     if (!canSave()) return false;
@@ -221,6 +230,7 @@ bool BrokerHostSettings::start(QJsonObject request, bool saving)
     auto input = std::make_shared<PrivateBuffer>(QJsonDocument(request).toJson(QJsonDocument::Compact));
     if (input->bytes.size() > Admin::MaximumRequestBytes) return reject(i18nc("@info", "Host settings request is too large."));
     auto *process = new QProcess(this); m_process = process; m_error.clear();
+    const bool inspecting = request[u"operation"_s].toString() == u"inspect-runtime";
     process->setProgram(m_program); process->setArguments(m_arguments);
     auto output = std::make_shared<QByteArray>();
     auto failed = std::make_shared<bool>(false);
@@ -246,7 +256,7 @@ bool BrokerHostSettings::start(QJsonObject request, bool saving)
         m_process = nullptr; process->deleteLater(); reject(i18nc("@info", "Farside host administration could not start."));
     });
     connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-        [this, process, output, failed, timer, saving](int code, QProcess::ExitStatus status) {
+        [this, process, output, failed, timer, saving, inspecting](int code, QProcess::ExitStatus status) {
         if (m_process != process) return;
         timer->stop(); m_process = nullptr; output->append(process->readAllStandardOutput()); process->deleteLater();
         if (*failed) { wipe(*output); Q_EMIT changed(); return; }
@@ -265,7 +275,8 @@ bool BrokerHostSettings::start(QJsonObject request, bool saving)
         }
         const auto reply = document.object();
         const QStringList allowed = reply.contains(u"error"_s) ? QStringList{u"error"_s, u"saved"_s}
-            : saving ? QStringList{u"snapshot"_s, u"saved"_s, u"restartRequired"_s, u"newDesktopRequired"_s} : QStringList{u"snapshot"_s};
+            : saving ? QStringList{u"snapshot"_s, u"saved"_s, u"restartRequired"_s, u"newDesktopRequired"_s}
+                : inspecting ? QStringList{u"runtime"_s} : QStringList{u"snapshot"_s};
         bool structure = reply.size() == (reply.contains(u"error"_s) ? reply.contains(u"saved"_s) ? 2 : 1 : allowed.size());
         for (auto it = reply.begin(); it != reply.end(); ++it) if (!allowed.contains(it.key())) structure = false;
         if (reply.contains(u"error"_s) && (!reply[u"error"_s].isString()
@@ -282,6 +293,13 @@ bool BrokerHostSettings::start(QJsonObject request, bool saving)
             reject(reason.contains(u"changed") ? i18nc("@info", "Stored settings changed. Reload before saving; pending edits are preserved.")
                 : reply[u"saved"_s].toBool() ? i18nc("@info", "Settings were saved but verification failed. Reload before applying them.")
                 : i18nc("@info", "Host administration refused the request. Check fields, TLS material and device availability. Pending edits are preserved.")); return;
+        }
+        if (inspecting) {
+            if (!reply[u"runtime"_s].isObject() || !KRdp::BrokerHostRuntime::validPublic(m_scope, reply[u"runtime"_s].toObject())) {
+                reject(i18nc("@info", "Invalid running-host inspection reply. Pending edits are preserved.")); return;
+            }
+            m_runtime = reply[u"runtime"_s].toObject(); m_runtimeCheckedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+            Q_EMIT changed(); return;
         }
         const auto snapshot = reply[u"snapshot"_s].toObject();
         if (!validSnapshot(m_scope, snapshot) || (saving && (!reply[u"saved"_s].isBool() || !reply[u"saved"_s].toBool()

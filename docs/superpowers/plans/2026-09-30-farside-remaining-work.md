@@ -522,6 +522,25 @@ installed authorization/restart, native worker/camera gates, T10/live stock
 coexistence and T27. Unavailable Virtual loopback is still T05/T08 work. Evidence:
 `~/dev/rdp/evidence/2026-10-01-t08-host-ui/SUMMARY.md`.
 
+**2026-10-01 runtime inspection checkpoint (PARTIAL, unshipped):**
+The fixed read-only host helper now independently inspects the loaded Console/
+Virtual system units, ordered safe environment files, overrides and root broker
+process identity/startup arguments. It never infers omitted CLI defaults, starts
+a service or presents stored TLS metadata as a loaded certificate. Changing file/
+PID/executable/manager identity fails the sample; only normalized recognized
+values and fixed reasons reach the page. Explicit inspection presents custom,
+differing, incomplete, reload, missing/inactive, stale and unavailable states,
+revision/timestamp and differences while preserving drafts/TLS/unknown-save state.
+Eight pure suites, Sol native16 plus actual installed helper read-only agreement,
+exact-helper writer22 and Buzz page13/KCM16 pass; readable warning/width640
+screenshots reviewed. All fixtures exit and installed config/profiles/broker PIDs
+are preserved. Sol remains quiet but at SDDMgreeter1043, without a physical
+UID1000 Console owner. No installed delivery, Hal live test or benchmark.
+Main legacy cutover, installed normal authorization/restart, native worker/camera
+parity, T10/live stock coexistence and T27 remain; Virtual loopback is still
+T05/T08 work. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t08-runtime/SUMMARY.md`.
+
 ### T09 — Make client types explicitly Console or Virtual
 
 **Instructions:** Add an explicit persisted type and select it when creating/editing a connection. Use authenticated capabilities to validate behavior; a custom port must not change the type. Replace the old `physicalConsole` distinction throughout form, cards, session identity, menus, topology and device paths. Keep an internal migration representation only while old saved entries are awaiting T10. Standard RDP hosts retain their appropriate existing-desktop behavior.

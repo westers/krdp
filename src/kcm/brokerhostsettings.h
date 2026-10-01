@@ -17,6 +17,9 @@ class BrokerHostSettings : public QObject {
     Q_PROPERTY(QVariantList definitions READ definitions CONSTANT)
     Q_PROPERTY(QVariantMap metadata READ metadata NOTIFY changed)
     Q_PROPERTY(QVariantMap importMetadata READ importMetadata NOTIFY changed)
+    Q_PROPERTY(QVariantMap runtime READ runtime NOTIFY changed)
+    Q_PROPERTY(bool runtimeStale READ runtimeStale NOTIFY changed)
+    Q_PROPERTY(QString runtimeCheckedAt READ runtimeCheckedAt NOTIFY changed)
     Q_PROPERTY(QString tlsMode READ tlsMode NOTIFY changed)
     Q_PROPERTY(bool loaded READ loaded NOTIFY changed)
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
@@ -37,6 +40,9 @@ public:
     QVariantList definitions() const;
     QVariantMap metadata() const;
     QVariantMap importMetadata() const { return m_importMetadata; }
+    QVariantMap runtime() const { return m_runtime.toVariantMap(); }
+    bool runtimeStale() const;
+    QString runtimeCheckedAt() const { return m_runtimeCheckedAt; }
     QString tlsMode() const { return m_tlsMode; }
     bool loaded() const { return !m_snapshot.isEmpty(); }
     bool busy() const { return m_process != nullptr; }
@@ -46,6 +52,7 @@ public:
     bool outcomeUnknown() const { return m_outcomeUnknown; }
     QString error() const;
     Q_INVOKABLE bool reload();
+    Q_INVOKABLE bool inspectRuntime();
     Q_INVOKABLE bool save();
     Q_INVOKABLE bool setValue(const QString &key, const QString &value);
     Q_INVOKABLE bool inherit(const QString &key);
@@ -67,6 +74,8 @@ private:
     int m_timeoutMs;
     QProcess *m_process = nullptr;
     QJsonObject m_snapshot;
+    QJsonObject m_runtime;
+    QString m_runtimeCheckedAt;
     QVariantMap m_pending, m_importMetadata;
     QByteArray m_certificate, m_key;
     QString m_tlsMode = QStringLiteral("keep"), m_error;

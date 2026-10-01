@@ -1,5 +1,6 @@
 # Test-only subprocess fixture. Never reads or writes installed host settings.
 import json
+import hashlib
 import os
 import pathlib
 import sys
@@ -34,6 +35,40 @@ if mode == 'stderr':
 if mode == 'malformed':
     print('fixture-private-diagnostic')
     sys.exit(0)
+if request['operation'] == 'inspect-runtime':
+    assert scope != 'session' and set(request) == {'version', 'operation', 'scope'}
+    effective = defaults | state['values']
+    runtime = {'version': 1, 'scope': scope, 'unit': 'farside-' + scope + '-host.service',
+               'storedRevision': state['revision'], 'state': 'verified', 'loadState': 'loaded',
+               'activeState': 'active', 'subState': 'running', 'pid': 42, 'custom': False,
+               'needsReload': False, 'configuredVerified': True, 'runningVerified': True,
+               'configured': effective.copy(), 'running': effective.copy(), 'missing': [],
+               'reasons': [], 'configuredDifferences': [], 'runningDifferences': []}
+    if mode == 'runtime-different':
+        runtime |= {'state': 'different', 'runningDifferences': ['Quality']}
+        runtime['running']['Quality'] = '55'
+    if mode == 'runtime-custom':
+        runtime |= {'state': 'custom', 'custom': True}
+    if mode == 'runtime-partial':
+        runtime |= {'state': 'partial', 'runningVerified': False, 'missing': ['Quality'], 'reasons': ['missing-field']}
+        del runtime['running']['Quality']
+    if mode in ('runtime-unavailable', 'runtime-stale', 'runtime-denied'):
+        state_name = mode.removeprefix('runtime-')
+        runtime |= {'state': state_name, 'configuredVerified': False, 'runningVerified': False,
+                    'configured': {}, 'running': {}, 'reasons': [state_name]}
+    if mode == 'runtime-reload':
+        runtime |= {'state': 'partial', 'needsReload': True, 'configuredVerified': False,
+                    'configured': {}, 'reasons': ['manager-reload']}
+    if mode == 'runtime-revision':
+        runtime['storedRevision'] = 'c' * 64
+    if mode == 'wrong-scope':
+        runtime['scope'] = 'virtual' if scope == 'console' else 'console'
+    if mode == 'private-field':
+        runtime['argv'] = ['fixture-private-diagnostic']
+    if mode == 'runtime-lie':
+        runtime['pid'] = 0
+    print(json.dumps({'runtime': runtime}))
+    sys.exit(0)
 if request['operation'] == 'save':
     assert set(request).issubset({'version', 'operation', 'scope', 'revision', 'values', 'tls'})
     if mode == 'stale' or request['revision'] != state['revision']:
@@ -48,7 +83,7 @@ if request['operation'] == 'save':
         (base / 'import-seen').write_text('stdin only')
         state['values']['Certificate'] = '/etc/farside/tls-imports/fixture/certificate.crt'
         state['values']['CertificateKey'] = '/etc/farside/tls-imports/fixture/private.key'
-    state['revision'] = 'b' * 64
+    state['revision'] = hashlib.sha256(json.dumps(state['values'], sort_keys=True).encode()).hexdigest()
     state_file.write_text(json.dumps(state))
     if mode == 'crash-after-save':
         os.kill(os.getpid(), 9)
