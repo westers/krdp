@@ -20,8 +20,11 @@ entries in `research.md` remain the roadmap identifiers.
   fails with Sol's old user font cache and passes with a clean cache. The old
   cache was backed up and regenerated; current Chrome's isolated launch creates
   no incompatible version links, and the greeter survives a bounded offscreen
-  test. The actual PolicyKit reproduction, real lock/unlock check and original
-  output-release race remain open; T01/T02/T03 are not closed by cache repair.
+  test. Steve subsequently confirms both normal lock-screen and Discover
+  password entry work on Sol Console. Two successful authorization grants are
+  logged with the same agent PID158549/NRestarts0. Completed PackageKit
+  operations, the full Console/Virtual failure/restart matrix, original agent
+  stack and output-release race remain open; T01/T02/T03 remain PARTIAL.
 - T14 retained Virtual hardware HEVC motion now passes functionally on Buzz/Sol
   for about a minute, with changing snapshots, hardware VAAPI decoding and
   NVENC worker/backend reports. No resize/two-screen/failure or quiet-performance
