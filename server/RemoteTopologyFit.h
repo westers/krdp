@@ -147,4 +147,25 @@ inline Plan plan(const RemoteTopologyDraft::Snapshot &snapshot, const RemoteTopo
     if (!result.proposal.valid()) result.error = result.proposal.error;
     return result;
 }
+
+// An owned Console projection can start beyond the captured atlas limits.
+// Apply those limits to its workspace, then return compositor coordinates.
+// This helper does not establish ownership or preserve uncaptured outputs.
+inline Plan planInWorkspace(const RemoteTopologyDraft::Snapshot &snapshot,
+    const RemoteTopologyDraft::Capabilities &caps, RemoteTopologyDraft::Request base,
+    const QString &selected, const QSize &pixels, qreal scale, const QVector<Relation> &relations)
+{
+    QRect workspace;
+    for (const auto &entry : snapshot.outputs) workspace |= entry.output.logicalGeometry;
+    const QPoint origin = workspace.topLeft();
+    auto local = snapshot;
+    for (auto &entry : local.outputs) entry.output.logicalGeometry.translate(-origin);
+    auto result = plan(local, caps, std::move(base), selected, pixels, scale, relations);
+    if (!result.valid()) return result;
+    result.proposal.before = snapshot.outputs;
+    for (auto &entry : result.proposal.after) entry.output.logicalGeometry.translate(origin);
+    for (auto &operation : result.request.operations)
+        if (operation.kind == RemoteTopologyDraft::Operation::Kind::Move) operation.position += origin;
+    return result;
+}
 }

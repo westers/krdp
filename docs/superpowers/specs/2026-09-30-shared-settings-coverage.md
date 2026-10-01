@@ -51,10 +51,10 @@ the required save/reconnect behavior; live reload is not implemented by this sli
 | Avc444MotionGapMs | 100 | User preference + owner override / both | Complete tuple forwarded/applied to workers on wire8; current-owner partial overrides and reset tested. Actual AVC444/auxiliary bytes and T08 gates remain |
 | Avc444RestMs | 150 | User preference + owner override / both | Same shared validated/reset policy; native Console HEVC dormant-policy transfer passes, native auxiliary encoding remains T05 |
 | Avc444MaxGapMs | 1500 | User preference + owner override / both | Same shared validated/reset policy; out-of-range/inconsistent merge refused atomically |
-| MonitorMode | multi | User preference / Console; Virtual layout is separate | workspace/primary/specific/multi applied through current-owner wire10; selected projection/aggregate forwarding and five native worker cases pass. Client-created virtual output mode/restore and other T06 gates remain |
+| MonitorMode | multi | User preference / Console; Virtual layout is separate | workspace/primary/specific/multi applied through current-owner wire10; wire11 configured temporary output creation/restore and worker-owned resize/Fit pass native worker gates. Broker/client transaction gates pass separately; real RDP integration and other T06 gates remain |
 | MonitorIndex | 0 | User preference / Console specific capture | Current-owner specific capture uses actual QScreen index with its own surface/global origin; unavailable selection fails without whole-workspace fallback. Remaining T06 lifecycle/client gates open |
 | VirtualMonitorPolicy | replace | User preference / Console's client-created outputs | Current-owner wire11 policy now creates owned outputs under guard/journal; real private Sol replace/extend and Stop/withdraw exact restore pass. Native local takeover/worker loss/login/failure and T03 lock race remain |
-| VirtualMonitorLayout | client | User preference / Console's client-created outputs | Client single/two-output creation and every-screen decode pass on Sol; owned projection cannot grant full-layout writes. Pure planner preserves fractional physical mirror; native mirror/mixed-scale/client interaction, resize/Fit and retained persistence remain |
+| VirtualMonitorLayout | client | User preference / Console's client-created outputs | Client single/two-output creation, every-screen decode and worker-owned resize/Fit pass on Sol. Revision-bound one-use broker transactions and explicit client capability/ownership/UI gates pass separately; owned projection cannot grant full-layout writes. Native real RDP/mirror/mixed-scale/client interaction and retained persistence remain |
 | VirtualMonitorFallbackSize | 1920x1080 | User preference / output creation | Even bounded size and normalized peer fallback transported on wire11; per-surface/single fallback planner tested. Dynamic native limits and lifecycle acceptance remain T06 |
 | VaapiDriverMode | auto | Host device setup plus user backend preference / both | Process/worker setting remains host-controlled; driver choices cannot mutate root broker environment; equivalent T05/T15/T16 |
 | WakeDisplayOnConnect | true | User preference / Console physical seat; Virtual own desktop only | Applied through authenticated wire v7 DisplayPolicy, worker session/private bus; Console live enabled/disabled/viewer/failure gates pass; Virtual native and KCM gates remain |
@@ -87,7 +87,7 @@ No input/layout authority is granted before Ready. Strictly increasing policy
 revisions reject stale reactivation after release. Virtual sends demand only
 for its current authenticated attachment and releases it on revoke. Its worker
 uses the private desktop bus; root broker buses are never used for this policy.
-The paired broker/worker wire is now v10 in source; installed fleet remains v6.
+The paired broker/worker wire is now v11 in source; installed fleet remains v6.
 Delayed Inhibit replies release their cookies even after guard destruction,
 using the replying service's unique owner rather than a replacement service.
 
@@ -115,6 +115,32 @@ one atomic read snapshot, and queued consumers read current policy. Eight pure
 suites and native Sol/Buzz one/two-viewer AVC420 fallback pass. This is a negative
 availability gate on Sol, not AVC444 hardware acceptance. Evidence
 `~/dev/rdp/evidence/2026-09-30-t05-avc-selection/SUMMARY.md`.
+
+## Configured Console output resize and Fit (T06 source checkpoint)
+
+The verified incomplete Console projection advertises `consoleOwned` together
+with `consoleVirtual`, lease lifetime, virtual kind and physical-console owner
+for every output. These flags describe creator ownership; connector names alone
+grant no authority. Only the current admitted controller with a Ready worker
+gets resize/scale capabilities. Viewers get the same inventory without write
+capabilities. Add/remove, position, primary and physicalChange stay unavailable.
+Physical-layout experiments remain off by default.
+
+Single or multiple owned outputs can preview output-specific resize or Fit with
+dependent edge reflow. The broker binds a one-use token to full before inventory,
+priorities, topology revision/generation, controller generation and lifetime.
+Worker dispatch resolves stable output IDs and edge relations to backend keys.
+Successful worker results trigger independent exact topology/capture readback;
+wrong/stale result kinds cannot advance a transaction. A partial result stops
+forwarding and requires verified output restoration before lease release.
+
+The client requires the explicit ownership capability and exact owner/kind for
+all outputs, rejects broad physical/foreign authority, and permits single-output
+Fit without physical consent. Pure parser/transaction and Buzz offscreen dialog
+gates pass. Five private Sol worker cases pass with decoded resize/Fit frames and
+exact restoration. These separate checks do not yet establish real RDP transaction
+integration or complete T06/T03/T08/T27 acceptance. Evidence:
+`~/dev/rdp/evidence/2026-09-30-t06-owned-transactions/SUMMARY.md`.
 
 ## Remaining gates
 

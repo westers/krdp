@@ -37,20 +37,14 @@ inline std::optional<Plan> make(const RetainedKScreenReadback::Snapshot &before,
     RemoteTopologyCatalog::Snapshot snapshot;
     snapshot.generation = QStringLiteral("worker-fit-preflight");
     snapshot.revision = 1;
-    QRect workspace;
-    for (const auto &output : before.outputs) workspace |= output.logicalGeometry;
-    const QPoint origin = workspace.topLeft();
-    for (auto output : before.outputs) {
-        output.logicalGeometry.translate(-origin);
-        snapshot.outputs.append({output.backendKey, output});
-    }
+    for (const auto &output : before.outputs) snapshot.outputs.append({output.backendKey, output});
     RemoteTopologyDraft::Request request;
     request.generation = snapshot.generation;
     request.expectedRevision = snapshot.revision;
     request.owner = owner;
     const RemoteTopologyDraft::Capabilities caps{.moveVirtual = true, .resizeVirtual = true,
         .maxOutputs = 16, .maxOutputDimension = 4096, .maxAtlasDimension = 8192};
-    const auto fit = RemoteTopologyFit::plan(snapshot, caps, request, selected, pixels, scale, relations);
+    const auto fit = RemoteTopologyFit::planInWorkspace(snapshot, caps, request, selected, pixels, scale, relations);
     if (!fit.valid() || fit.request.operations.size() > 16) return {};
     Plan result;
     result.before = before;
@@ -62,7 +56,7 @@ inline std::optional<Plan> make(const RetainedKScreenReadback::Snapshot &before,
             if (result.resizeChanged || operation.id != selected) return {};
             result.resizeChanged = true;
         } else if (operation.kind == RemoteTopologyDraft::Operation::Kind::Move) {
-            const auto position = operation.position + origin;
+            const auto position = operation.position;
             if (position.x() < 0 || position.y() < 0) return {};
             result.placements.append({operation.id, position});
         } else return {};
@@ -70,7 +64,6 @@ inline std::optional<Plan> make(const RetainedKScreenReadback::Snapshot &before,
     if (!result.placements.isEmpty() && !RetainedKScreenReadback::positionArguments(before, result.placements)) return {};
     for (const auto &entry : fit.proposal.after) {
         auto output = entry.output;
-        output.logicalGeometry.translate(origin);
         if (output.logicalGeometry.x() < 0 || output.logicalGeometry.y() < 0) return {};
         result.after.append(output);
     }

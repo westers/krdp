@@ -320,6 +320,26 @@ T03/T08/T27 gates above stay open. Installed services/desktops/retained session
 and lock state preserved; no Hal live test or performance claim. Evidence
 `~/dev/rdp/evidence/2026-09-30-t06-owned-resize/SUMMARY.md`.
 
+**2026-09-30 owned resize/Fit broker/client checkpoint (PARTIAL, unshipped):**
+Broker preview/commit now uses explicit configured creator ownership, exact
+before inventory/priorities and one-use revision/generation/controller-bound
+tokens. Backend dispatch and exact independent topology readback are tested;
+wrong result kinds/IDs/generations cannot advance the transaction, and partial
+readback stops forwarding while retaining the restoration lease. Viewers cannot
+write. Client validates `consoleOwned` and every output's owner/kind; owned
+single or multiple outputs can resize/Fit without physical consent while
+add/remove/position/primary/physical changes stay unavailable. Fit planning
+shares one workspace translation helper with the worker.
+Four focused server suites, the complete client topology suite and nine Buzz
+offscreen dialog cases pass. The final private Sol worker regression passes five
+cases (seven with setup/cleanup), with decoded frames and exact restoration.
+These are separate broker/client/worker gates; actual RDP transaction integration,
+native physical mirror/mixed-scale/pointer/drag, takeover/loss/login/failure,
+retained persistence/limits and T03/T08/T27 remain independent work.
+Fleet/services/retained session and locked state are preserved; no Hal live test
+or performance claim. Evidence:
+`~/dev/rdp/evidence/2026-09-30-t06-owned-transactions/SUMMARY.md`.
+
 ### T07 — Preserve display wake and inhibition
 
 **Instructions:** Integrate the existing `DisplayWakeGuard` semantics into the desktop workers or equivalent user-session mechanism, not a root broker's session bus. Honor the configured wake policy and acquire/release inhibition with streaming ownership. Keep display power management distinct from unlocking and from Virtual's intentional lock policy. Handle pending D-Bus replies and teardown without leaking inhibition.

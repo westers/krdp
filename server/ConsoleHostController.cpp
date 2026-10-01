@@ -174,7 +174,8 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     });
     const auto virtualFinished = [this](quint64 requestId, quint64 generation, const QString &error, bool add) {
         if (!m_pendingVirtual || m_pendingVirtual->serial != requestId
-            || m_pendingVirtual->controlGeneration != generation || m_pendingVirtual->add != add) return;
+            || m_pendingVirtual->controlGeneration != generation || m_pendingVirtual->ownedMutation
+            || m_pendingVirtual->add != add) return;
         if (!error.isEmpty()) { finishVirtualTopology(u"partial"_s, error); return; }
         m_pendingVirtual->waitingReadback = true;
         if (!m_endpoint.requestTopology()) finishVirtualTopology(u"capture-failed"_s);
@@ -234,9 +235,23 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         finishResize(u"physical resize timed out"_s);
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::resizeFinished, this, [this](const auto &result) {
+        if (m_pendingVirtual && m_pendingVirtual->ownedMutation && !m_pendingVirtual->managedFit
+            && result.requestId == m_pendingVirtual->serial && result.generation == m_pendingVirtual->controlGeneration) {
+            if (!result.error.isEmpty()) { finishVirtualTopology(u"partial"_s, result.error); return; }
+            m_pendingVirtual->waitingReadback = true;
+            if (!m_endpoint.requestTopology()) finishVirtualTopology(u"capture-failed"_s);
+            return;
+        }
         if (m_pendingResize && result.requestId == m_pendingResize->requestId && result.generation == m_pendingResize->generation) {
             finishResize(result.error);
         }
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::managedFitFinished, this, [this](const auto &result) {
+        if (!m_pendingVirtual || !m_pendingVirtual->ownedMutation || !m_pendingVirtual->managedFit
+            || result.requestId != m_pendingVirtual->serial || result.generation != m_pendingVirtual->controlGeneration) return;
+        if (!result.error.isEmpty()) { finishVirtualTopology(u"partial"_s, result.error); return; }
+        m_pendingVirtual->waitingReadback = true;
+        if (!m_endpoint.requestTopology()) finishVirtualTopology(u"capture-failed"_s);
     });
     connect(m_server, &Server::newConnectionCreated, this, &ConsoleHostController::addClient);
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerAuthenticated, this, [this](const auto &) {
@@ -406,7 +421,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             const auto pending = *m_pendingVirtual;
             const auto &snapshot = m_topologyCatalog.snapshot();
             bool matches = m_topologyAvailable && snapshot.generation == pending.before.generation
-                && snapshot.revision == pending.before.revision + 1
+                && snapshot.revision == pending.before.revision + (pending.draft.before != pending.draft.after ? 1 : 0)
                 && snapshot.outputs.size() == pending.draft.after.size();
             if (matches) {
                 QSet<QString> survivors;
@@ -415,7 +430,10 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
                 }
                 matches = priorityOrder(pending.priorities, survivors) == priorityOrder(m_topologyPriorities, survivors);
             }
-            if (matches && pending.add) {
+            if (matches && pending.ownedMutation) {
+                matches = configuredOutputTopology() && snapshot.outputs == pending.draft.after
+                    && m_topologyPriorities == pending.priorities;
+            } else if (matches && pending.add) {
                 const auto added = std::find_if(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [&pending](const auto &entry) {
                     return entry.output.backendKey == pending.backendKey;
                 });
@@ -958,6 +976,88 @@ void ConsoleHostController::updateClientDisplayPolicy(Client &client)
     if (policy) client.codec->setConsoleVirtualPolicy(*policy);
 }
 
+bool ConsoleHostController::configuredOutputTopology() const
+{
+    const auto &outputs = m_topologyCatalog.snapshot().outputs;
+    return m_configuredConsoleOutputs && m_physicalLeaseActive && m_topologyAvailable && !m_topologyComplete
+        && !m_layoutAwaitingReadback && m_endpoint.target().adapter == ConsoleSeat::Adapter::PhysicalUser
+        && m_physicalLeaseGeneration == m_controlGeneration && !outputs.isEmpty()
+        && std::all_of(outputs.cbegin(), outputs.cend(), [](const auto &entry) {
+            return !entry.output.physical && entry.output.enabled && entry.output.owner == u"physical-console"_s;
+        });
+}
+
+bool ConsoleHostController::previewOwnedTopology(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record)
+{
+    if (!m_configuredConsoleOutputs) return false;
+    const bool managedFit = record.value(u"type"_s) == u"topology-fit-preview"_s;
+    const QString request = record.value(u"id"_s).toString().left(64);
+    const auto refuse = [this, connection, &request](const QString &code) {
+        replyTo(connection, RemoteTopologyProtocol::error(request, code));
+        return true;
+    };
+    QString generation, outputId;
+    quint64 revision = 0;
+    QSize pixels;
+    double scale = 1;
+    QVector<RemoteTopologyFit::Relation> relations;
+    if (managedFit) {
+        const auto parsed = RemoteTopologyProtocol::fitPreviewRequest(record);
+        if (!parsed) return refuse(u"invalid"_s);
+        generation = parsed->generation; revision = parsed->expectedRevision; outputId = parsed->output;
+        pixels = parsed->pixels; scale = parsed->scale; relations = parsed->relations;
+    } else {
+        const auto parsed = RemoteTopologyProtocol::previewRequest(record);
+        if (!parsed || parsed->draft.allowPhysicalChange || parsed->draft.allowRemoval
+            || parsed->draft.operations.size() != 1
+            || parsed->draft.operations.first().kind != RemoteTopologyDraft::Operation::Kind::Resize) return refuse(u"unsupported"_s);
+        const auto &operation = parsed->draft.operations.first();
+        generation = parsed->draft.generation; revision = parsed->draft.expectedRevision;
+        outputId = operation.id; pixels = operation.pixels; scale = operation.scale;
+    }
+    if (!m_control.ownsControl(id) || !m_inputEnabled || !m_endpoint.ready()) return refuse(u"not-owner"_s);
+    if (!configuredOutputTopology() || m_topologyPriorities.isEmpty()) return refuse(u"capture-failed"_s);
+    if (m_pendingVirtual || m_pendingPhysical || m_pendingResize) return refuse(u"busy"_s);
+    const auto snapshot = m_topologyCatalog.snapshot();
+    if (generation != snapshot.generation) return refuse(u"stale-generation"_s);
+    if (revision != snapshot.revision) return refuse(u"stale-revision"_s);
+    const auto selected = std::find_if(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [&outputId](const auto &entry) { return entry.id == outputId; });
+    if (selected == snapshot.outputs.cend()) return refuse(u"stale-output"_s);
+    if (pixels.width() < 320 || pixels.height() < 200 || pixels.width() > 4096 || pixels.height() > 4096
+        || pixels.width() % 2 || pixels.height() % 2 || !std::isfinite(scale) || scale < 1 || scale > 4) return refuse(u"invalid"_s);
+    RemoteTopologyDraft::Request base;
+    base.generation = generation; base.expectedRevision = revision; base.owner = u"physical-console"_s;
+    const auto fit = RemoteTopologyFit::planInWorkspace(snapshot,
+        {.moveVirtual = true, .resizeVirtual = true, .maxOutputs = 16, .maxOutputDimension = 4096, .maxAtlasDimension = 8192},
+        base, outputId, pixels, scale, relations);
+    if (!fit.valid()) return refuse(fit.error);
+    for (const auto &entry : fit.proposal.after) {
+        const auto &geometry = entry.output.logicalGeometry;
+        if (geometry.x() < 0 || geometry.y() < 0 || qint64(geometry.x()) + geometry.width() > 32768
+            || qint64(geometry.y()) + geometry.height() > 32768) return refuse(u"limit"_s);
+    }
+    QString token;
+    for (int i = 0; i < 4; ++i) token += QString::number(QRandomGenerator::system()->generate64(), 16).rightJustified(16, QLatin1Char('0'));
+    VirtualPreview preview{id, m_controlGeneration, request, token, snapshot, m_topologyPriorities, fit.proposal,
+        {.kind = RemoteTopologyDraft::Operation::Kind::Resize, .id = outputId, .position = {}, .pixels = pixels, .scale = scale},
+        selected->output.backendKey, {}, true, managedFit, {}};
+    for (const auto &relation : relations) {
+        const auto backend = [&snapshot](const QString &stableId) {
+            const auto found = std::find_if(snapshot.outputs.cbegin(), snapshot.outputs.cend(), [&stableId](const auto &entry) { return entry.id == stableId; });
+            return found == snapshot.outputs.cend() ? QString{} : found->output.backendKey;
+        };
+        const auto parent = backend(relation.parent), child = backend(relation.child);
+        if (parent.isEmpty() || child.isEmpty()) return refuse(u"stale-output"_s);
+        preview.fitRelations.append({parent, child, quint8(relation.edge), relation.offset});
+    }
+    preview.age.start();
+    m_physicalPreview.reset();
+    m_virtualPreview = std::move(preview);
+    replyTo(connection, RemoteTopologyProtocol::previewReply(request, token, fit.proposal, snapshot, u"lease"_s,
+        QJsonArray{u"temporary-console-output"_s}));
+    return true;
+}
+
 void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &incoming)
 {
     // KRDPCTL v2: requestId off before the strict parsers, echoed on the replies.
@@ -1049,6 +1149,8 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         qDebug().noquote() << "Console client" << id << log;
         return;
     }
+    if ((type == u"topology-preview"_s || type == u"topology-fit-preview"_s)
+        && previewOwnedTopology(connection, id, record)) return;
     if (type == u"topology-preview"_s) {
         const auto parsed = RemoteTopologyProtocol::previewRequest(record);
         const QString request = record.value(u"id"_s).toString().left(64);
@@ -1136,7 +1238,8 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             replyTo(connection, RemoteTopologyProtocol::error(requestId, code));
         };
         if (!parsed) { refuse(request, u"invalid"_s); return; }
-        if (!m_experimentalPhysicalTopology || !m_topologyComplete || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
+        if ((!configuredOutputTopology() && (!m_experimentalPhysicalTopology || !m_topologyComplete))
+            || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
             refuse(parsed->id, u"unsupported"_s); return;
         }
         if (!m_control.ownsControl(id) || !m_inputEnabled || !m_endpoint.ready()) {
@@ -1158,7 +1261,30 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
                 || preview->priorities != m_topologyPriorities || preview->controlGeneration != m_controlGeneration) {
                 refuse(parsed->id, u"stale-revision"_s); return;
             }
+            if (m_configuredConsoleOutputs && !preview->ownedMutation) {
+                refuse(parsed->id, u"unsupported"_s); return;
+            }
             if (++m_nextPhysicalId == 0) { refuse(parsed->id, u"capture-failed"_s); return; }
+            if (preview->ownedMutation) {
+                if (!configuredOutputTopology()) { refuse(parsed->id, u"not-owner"_s); return; }
+                const auto selected = std::find_if(before.outputs.cbegin(), before.outputs.cend(), [&preview](const auto &entry) {
+                    return entry.id == preview->operation.id && entry.output.backendKey == preview->backendKey;
+                });
+                if (selected == before.outputs.cend() || selected->output.physical || selected->output.owner != u"physical-console"_s) {
+                    refuse(parsed->id, u"not-owner"_s); return;
+                }
+                releaseInput();
+                m_pendingVirtual = PendingVirtual{id, parsed->id, m_nextPhysicalId, m_controlGeneration,
+                    before, preview->priorities, preview->draft, preview->backendKey, false, false, true, preview->managedFit};
+                m_physicalDeadline.start();
+                const bool sent = preview->managedFit
+                    ? m_endpoint.managedFit({m_nextPhysicalId, m_controlGeneration, preview->backendKey,
+                        preview->operation.pixels, preview->operation.scale, preview->fitRelations})
+                    : m_endpoint.resize({m_nextPhysicalId, m_controlGeneration, preview->backendKey,
+                        preview->operation.pixels, preview->operation.scale});
+                if (!sent) finishVirtualTopology(u"capture-failed"_s);
+                return;
+            }
             const bool add = preview->operation.kind == RemoteTopologyDraft::Operation::Kind::AddVirtual;
             const auto backendKey = preview->backendKey;
             if (!add) {
@@ -1196,6 +1322,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             }
             return;
         }
+        if (m_configuredConsoleOutputs) { refuse(parsed->id, u"invalid"_s); return; }
         if (!m_physicalPreview || m_physicalPreview->owner != id || m_physicalPreview->id != parsed->id
             || m_physicalPreview->token != parsed->token || !m_physicalPreview->age.isValid()
             || m_physicalPreview->age.elapsed() >= RemoteTopologyProtocol::PreviewLifetimeMs) {
@@ -1643,7 +1770,7 @@ void ConsoleHostController::finishTopologyQueries(const QString &error)
         // that is no longer admitted with the console's monitor topology.
         if (request.isEmpty() || !client->connection || !m_control.admitted(client->id)) continue;
         replyTo(client->connection, error.isEmpty()
-            ? consoleTopology(request)
+            ? consoleTopology(request, client->id)
             : RemoteTopologyProtocol::error(request, error));
     }
 }
@@ -1887,7 +2014,7 @@ void ConsoleHostController::finishPhysicalTopology(const QString &code, const QS
         }
         else replyTo(client->connection, QJsonObject{{u"type"_s, u"topology-result"_s},
             {u"v"_s, 1}, {u"id"_s, pending->id}, {u"ok"_s, true},
-            {u"topology"_s, consoleTopology(pending->id)}});
+            {u"topology"_s, consoleTopology(pending->id, pending->owner)}});
         break;
     }
     if (code.isEmpty()) {
@@ -1896,17 +2023,24 @@ void ConsoleHostController::finishPhysicalTopology(const QString &code, const QS
     }
 }
 
-QJsonObject ConsoleHostController::consoleTopology(const QString &id) const
+QJsonObject ConsoleHostController::consoleTopology(const QString &id, ConsoleControl::Id requester) const
 {
     const bool writable = m_experimentalPhysicalTopology && m_endpoint.target().adapter == ConsoleSeat::Adapter::PhysicalUser
-        && m_inputEnabled && m_topologyAvailable && m_topologyComplete;
+        && m_control.ownsControl(requester) && m_inputEnabled && m_topologyAvailable && m_topologyComplete;
     auto record = RemoteTopologyProtocol::consoleReadOnly(id, m_topologyCatalog.snapshot(), writable);
     auto caps = record.value(u"capabilities"_s).toObject();
     const auto &outputs = m_topologyCatalog.snapshot().outputs;
     // This describes the lease inventory even for viewers/control handoff;
     // only the active authenticated controller gets write capabilities.
     const bool virtualLease = m_experimentalConsoleVirtual && m_topologyAvailable && m_topologyComplete;
-    caps.insert(u"consoleVirtual"_s, virtualLease);
+    const bool owned = configuredOutputTopology();
+    const bool ownedWritable = owned && m_control.ownsControl(requester) && m_inputEnabled && m_endpoint.ready();
+    caps.insert(u"consoleVirtual"_s, virtualLease || owned);
+    caps.insert(u"consoleOwned"_s, owned);
+    if (owned) {
+        caps.insert(u"resize"_s, ownedWritable);
+        caps.insert(u"scale"_s, ownedWritable);
+    }
     caps.insert(u"add"_s, writable && virtualLease && outputs.size() < 16
         && (!m_physicalLeaseActive || m_consoleCreatorsActive));
     caps.insert(u"remove"_s, writable && virtualLease && outputs.size() > 1 && m_consoleCreatorsActive
@@ -1914,7 +2048,7 @@ QJsonObject ConsoleHostController::consoleTopology(const QString &id) const
             return !entry.output.physical && entry.output.owner == u"physical-console"_s
                 && !entry.output.primary && entry.output.backendKey.startsWith(u"Virtual-krdp-added-"_s);
         }));
-    caps.insert(u"multiOutputCapture"_s, writable && outputs.size() > 1);
+    caps.insert(u"multiOutputCapture"_s, (writable || owned) && outputs.size() > 1);
     record.insert(u"capabilities"_s, caps);
     return record;
 }
@@ -1937,7 +2071,7 @@ void ConsoleHostController::finishVirtualTopology(const QString &code, const QSt
             if (!detail.isEmpty()) reply.insert(u"message"_s, detail.left(1024));
             replyTo(client->connection, reply);
         } else replyTo(client->connection, QJsonObject{{u"type"_s, u"topology-result"_s},
-            {u"v"_s, 1}, {u"id"_s, pending->id}, {u"ok"_s, true}, {u"topology"_s, consoleTopology(pending->id)}});
+            {u"v"_s, 1}, {u"id"_s, pending->id}, {u"ok"_s, true}, {u"topology"_s, consoleTopology(pending->id, pending->owner)}});
         break;
     }
     if (code.isEmpty()) {

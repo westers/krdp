@@ -153,7 +153,9 @@ private:
     void finishResize(const QString &error);
     void finishPhysicalTopology(const QString &code, const QString &detail = {});
     void finishVirtualTopology(const QString &code, const QString &detail = {});
-    QJsonObject consoleTopology(const QString &id) const;
+    QJsonObject consoleTopology(const QString &id, ConsoleControl::Id requester) const;
+    bool configuredOutputTopology() const;
+    bool previewOwnedTopology(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
     /**
      * End the console microphone. With a \a code (revoked: state `off`;
      * anything else: `error`) its client is told; a start still pending is
@@ -258,6 +260,9 @@ private:
         RemoteTopologyDraft::Operation operation;
         QString backendKey;
         QElapsedTimer age;
+        bool ownedMutation = false;
+        bool managedFit = false;
+        QVector<ConsoleWorkerWire::FitRelation> fitRelations;
     };
     struct PendingVirtual {
         ConsoleControl::Id owner = 0;
@@ -270,6 +275,8 @@ private:
         QString backendKey;
         bool add = false;
         bool waitingReadback = false;
+        bool ownedMutation = false;
+        bool managedFit = false;
     };
     bool m_experimentalPhysicalTopology = false;
     bool m_experimentalConsoleVirtual = false; // Separate from physical edits until the client accepts mixed lease inventory.

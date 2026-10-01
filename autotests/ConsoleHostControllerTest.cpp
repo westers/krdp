@@ -19,6 +19,163 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void configuredOwnedResizeFitTransactions_data()
+    {
+        QTest::addColumn<int>("count"); QTest::addColumn<bool>("fit");
+        QTest::addColumn<bool>("noOp"); QTest::addColumn<bool>("wrongReadback");
+        QTest::newRow("single resize") << 1 << false << false << false;
+        QTest::newRow("single Fit") << 1 << true << false << false;
+        QTest::newRow("single no-op Fit") << 1 << true << true << false;
+        QTest::newRow("two resize") << 2 << false << false << false;
+        QTest::newRow("two Fit at large global origin") << 2 << true << false << false;
+        QTest::newRow("wrong owned readback fails closed") << 2 << true << false << true;
+    }
+
+    void configuredOwnedResizeFitTransactions()
+    {
+        QFETCH(int, count); QFETCH(bool, fit); QFETCH(bool, noOp); QFETCH(bool, wrongReadback);
+        QTemporaryDir runtime; QVERIFY(runtime.isValid());
+        Server server; RdpConnection connection(&server, -1), viewer(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
+        const QByteArray credential(32, 't');
+        QVERIFY(host.m_endpoint.listen(runtime.filePath(QStringLiteral("worker.sock")),
+            {ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000}, credential));
+        host.addClient(&connection); host.addClient(&viewer);
+        const auto id = host.m_clients.front()->id, viewerId = host.m_clients.back()->id;
+        QVERIFY(host.m_clients.front()->codec->setConsoleVirtualPolicy(*ConsoleVirtualOutputPolicy::parse(true,
+            QStringLiteral("extend"), QStringLiteral("client"), QSize(1280, 720), {})));
+        host.m_control.admit(id); host.m_control.admit(viewerId); host.syncControlState();
+        QLocalSocket worker; worker.connectToServer(host.m_endpoint.socketName()); QVERIFY(worker.waitForConnected(1000));
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), 1000, credential})
+            + ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready)); QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_VERIFY(host.m_endpoint.ready()); host.m_inputEnabled = true;
+        ConsoleWorkerWire::Topology initial; initial.complete = false;
+        ConsoleWorkerWire::Outputs outputs;
+        for (int i = 0; i < count; ++i) {
+            const auto name = QStringLiteral("Virtual-krdp-m%1-1280x720").arg(i);
+            outputs.monitors.append({name, QRect(i * 1280, 0, 1280, 720), 1, i == 0});
+            initial.outputs.append({name, QSize(1280, 720), QRect(16384 + i * 1280, 0, 1280, 720), 1, i == 0, quint8(i + 1), false});
+        }
+        outputs.compositorOrigin = QPoint(16384, 0);
+        Q_EMIT host.m_endpoint.outputsReceived(outputs); Q_EMIT host.m_endpoint.topologyReceived(initial);
+        QVERIFY(host.configuredOutputTopology()); QVERIFY(!host.m_experimentalPhysicalTopology); QVERIFY(!host.m_experimentalConsoleVirtual);
+        const auto ownerCaps = host.consoleTopology(QStringLiteral("query"), id).value(QStringLiteral("capabilities")).toObject();
+        QVERIFY(ownerCaps.value(QStringLiteral("consoleOwned")).toBool()); QVERIFY(ownerCaps.value(QStringLiteral("resize")).toBool());
+        QVERIFY(!ownerCaps.value(QStringLiteral("physicalChange")).toBool()); QVERIFY(!ownerCaps.value(QStringLiteral("position")).toBool());
+        QVERIFY(!ownerCaps.value(QStringLiteral("add")).toBool()); QVERIFY(!ownerCaps.value(QStringLiteral("primary")).toBool());
+        const auto viewerCaps = host.consoleTopology(QStringLiteral("query"), viewerId).value(QStringLiteral("capabilities")).toObject();
+        QVERIFY(viewerCaps.value(QStringLiteral("consoleOwned")).toBool()); QVERIFY(!viewerCaps.value(QStringLiteral("resize")).toBool());
+        QJsonObject reply;
+        host.m_recordSent = [&](RdpConnection *, const QJsonObject &record) { reply = record; };
+        const auto before = host.m_topologyCatalog.snapshot();
+        const auto selected = before.outputs[fit ? 0 : count - 1];
+        const QSize pixels = noOp ? QSize(1280, 720) : fit ? QSize(1024, 768) : QSize(960, 540);
+        QJsonObject request{{QStringLiteral("type"), fit ? QStringLiteral("topology-fit-preview") : QStringLiteral("topology-preview")},
+            {QStringLiteral("v"), 1}, {QStringLiteral("id"), QStringLiteral("owned")},
+            {QStringLiteral("generation"), before.generation}, {QStringLiteral("expectedRevision"), double(before.revision)}};
+        const QJsonObject dimensions{{QStringLiteral("width"), pixels.width()}, {QStringLiteral("height"), pixels.height()}};
+        if (fit) {
+            QJsonArray relations;
+            if (count == 2) relations.append(QJsonObject{{QStringLiteral("parent"), before.outputs[0].id},
+                {QStringLiteral("child"), before.outputs[1].id}, {QStringLiteral("edge"), QStringLiteral("right")}, {QStringLiteral("offset"), 0}});
+            request.insert(QStringLiteral("output"), selected.id); request.insert(QStringLiteral("pixels"), dimensions);
+            request.insert(QStringLiteral("scale"), 1); request.insert(QStringLiteral("relations"), relations);
+        } else {
+            request.insert(QStringLiteral("allowRemoval"), false); request.insert(QStringLiteral("allowPhysicalChange"), false);
+            request.insert(QStringLiteral("operations"), QJsonArray{QJsonObject{{QStringLiteral("op"), QStringLiteral("resize")},
+                {QStringLiteral("output"), selected.id}, {QStringLiteral("pixels"), dimensions}, {QStringLiteral("scale"), 1.25}}});
+        }
+        host.onControlRecord(&viewer, viewerId, request); QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("not-owner"));
+        auto stale = request; stale.insert(QStringLiteral("expectedRevision"), double(before.revision + 1));
+        host.onControlRecord(&connection, id, stale); QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("stale-revision"));
+        host.onControlRecord(&connection, id, request); QVERIFY(host.m_virtualPreview); QVERIFY(host.m_virtualPreview->ownedMutation);
+        QCOMPARE(reply.value(QStringLiteral("type")).toString(), QStringLiteral("topology-preview"));
+        const auto expected = host.m_virtualPreview->draft.after;
+        const QJsonObject commit{{QStringLiteral("type"), QStringLiteral("topology-commit")}, {QStringLiteral("v"), 1},
+            {QStringLiteral("id"), QStringLiteral("owned")}, {QStringLiteral("token"), host.m_virtualPreview->token},
+            {QStringLiteral("generation"), before.generation}, {QStringLiteral("expectedRevision"), double(before.revision)}};
+        host.onControlRecord(&viewer, viewerId, commit); QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("not-owner"));
+        QVERIFY(host.m_virtualPreview); QVERIFY(!host.m_pendingVirtual);
+        auto staleCommit = commit; staleCommit.insert(QStringLiteral("expectedRevision"), double(before.revision + 1));
+        host.onControlRecord(&connection, id, staleCommit); QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("stale-revision"));
+        QVERIFY(!host.m_virtualPreview); QVERIFY(!host.m_pendingVirtual);
+        host.onControlRecord(&connection, id, commit); QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("invalid"));
+        host.onControlRecord(&connection, id, request); QVERIFY(host.m_virtualPreview);
+        auto currentCommit = commit; currentCommit.insert(QStringLiteral("token"), host.m_virtualPreview->token);
+        auto oldGeneration = currentCommit; oldGeneration.insert(QStringLiteral("generation"), QStringLiteral("retired"));
+        host.onControlRecord(&connection, id, oldGeneration); QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("stale-generation"));
+        QVERIFY(!host.m_virtualPreview); QVERIFY(!host.m_pendingVirtual);
+        host.onControlRecord(&connection, id, request); QVERIFY(host.m_virtualPreview);
+        currentCommit.insert(QStringLiteral("token"), host.m_virtualPreview->token);
+        host.m_virtualPreview->age.invalidate();
+        host.onControlRecord(&connection, id, currentCommit); QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("invalid"));
+        QVERIFY(!host.m_virtualPreview); QVERIFY(!host.m_pendingVirtual);
+        host.onControlRecord(&connection, id, request); QVERIFY(host.m_virtualPreview);
+        currentCommit.insert(QStringLiteral("token"), host.m_virtualPreview->token);
+        host.onControlRecord(&connection, id, currentCommit); QVERIFY(host.m_pendingVirtual); QVERIFY(!host.m_virtualPreview);
+        const auto serial = host.m_pendingVirtual->serial, generation = host.m_pendingVirtual->controlGeneration;
+        host.onControlRecord(&connection, id, currentCommit); QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("busy"));
+        ConsoleWorkerWire::Deframer dispatched;
+        int resizeCommands = 0, fitCommands = 0;
+        QElapsedTimer deadline; deadline.start();
+        while (resizeCommands + fitCommands == 0 && deadline.elapsed() < 1000) {
+            QCoreApplication::processEvents();
+            if (!worker.bytesAvailable()) worker.waitForReadyRead(20);
+            dispatched.feed(worker.readAll());
+            while (const auto record = dispatched.next()) {
+                if (const auto command = ConsoleWorkerWire::resize(*record)) {
+                    ++resizeCommands;
+                    QCOMPARE(command->requestId, serial); QCOMPARE(command->generation, generation);
+                    QCOMPARE(command->output, selected.output.backendKey); QCOMPARE(command->pixels, pixels);
+                    QCOMPARE(command->scale, 1.25);
+                }
+                if (const auto command = ConsoleWorkerWire::managedFit(*record)) {
+                    ++fitCommands;
+                    QCOMPARE(command->requestId, serial); QCOMPARE(command->generation, generation);
+                    QCOMPARE(command->output, selected.output.backendKey); QCOMPARE(command->pixels, pixels);
+                    QCOMPARE(command->scale, 1.0); QCOMPARE(command->relations.size(), count - 1);
+                    if (count == 2) {
+                        QCOMPARE(command->relations.first().parent, before.outputs[0].output.backendKey);
+                        QCOMPARE(command->relations.first().child, before.outputs[1].output.backendKey);
+                        QCOMPARE(command->relations.first().edge, quint8(1));
+                        QCOMPARE(command->relations.first().offset, 0);
+                    }
+                }
+            }
+        }
+        QCOMPARE(resizeCommands, fit ? 0 : 1); QCOMPARE(fitCommands, fit ? 1 : 0);
+        Q_EMIT host.m_endpoint.addVirtualFinished({serial, generation, {}}); QVERIFY(!host.m_pendingVirtual->waitingReadback);
+        Q_EMIT host.m_endpoint.resizeFinished({serial + 1, generation, {}}); QVERIFY(!host.m_pendingVirtual->waitingReadback);
+        Q_EMIT host.m_endpoint.managedFitFinished({serial, generation + 1, {}}); QVERIFY(!host.m_pendingVirtual->waitingReadback);
+        if (fit) Q_EMIT host.m_endpoint.managedFitFinished({serial, generation, {}});
+        else Q_EMIT host.m_endpoint.resizeFinished({serial, generation, {}});
+        QVERIFY(host.m_pendingVirtual); QVERIFY(host.m_pendingVirtual->waitingReadback);
+        ConsoleWorkerWire::Topology verified; verified.complete = false;
+        ConsoleWorkerWire::Outputs captured;
+        QRect workspace;
+        for (const auto &entry : expected) workspace |= entry.output.logicalGeometry;
+        for (int i = 0; i < expected.size(); ++i) {
+            auto output = expected[i].output;
+            if (wrongReadback && i == 0) { output.nativePixels = QSize(1000, 768); output.logicalGeometry.setWidth(1000); }
+            captured.monitors.append({output.backendKey, output.logicalGeometry.translated(-workspace.topLeft()), output.scale, output.primary});
+            verified.outputs.append({output.backendKey, output.nativePixels, output.logicalGeometry, output.scale,
+                output.primary, quint8(i + 1), false});
+        }
+        captured.compositorOrigin = workspace.topLeft();
+        Q_EMIT host.m_endpoint.outputsReceived(captured); QVERIFY(host.m_pendingVirtual);
+        Q_EMIT host.m_endpoint.topologyReceived(verified); QVERIFY(!host.m_pendingVirtual);
+        QVERIFY(host.m_physicalLeaseActive); // Socket/result is not verified creator release.
+        if (wrongReadback) {
+            QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("partial")); QVERIFY(!host.m_inputEnabled);
+        } else {
+            QVERIFY(reply.value(QStringLiteral("ok")).toBool()); QVERIFY(host.m_inputEnabled);
+            QCOMPARE(host.m_topologyCatalog.snapshot().revision, before.revision + (noOp ? 0 : 1));
+            QCOMPARE(host.m_topologyCatalog.snapshot().outputs, expected);
+            host.onControlRecord(&connection, id, currentCommit); QCOMPARE(reply.value(QStringLiteral("code")).toString(), QStringLiteral("invalid"));
+        }
+    }
+
     void configuredConsoleProjectionWaitsForOwnedReadbackAndVerifiedRelease()
     {
         QTemporaryDir runtime; QVERIFY(runtime.isValid());
@@ -315,7 +472,7 @@ private Q_SLOTS:
         Q_EMIT host.m_endpoint.frameReceived(frame);
         QCOMPARE(received.size(), 1);
         QVERIFY(client.wireLayout.isEmpty()); // One surface for this selected screen.
-        const auto caps = host.consoleTopology(QStringLiteral("projection")).value(QStringLiteral("capabilities")).toObject();
+        const auto caps = host.consoleTopology(QStringLiteral("projection"), client.id).value(QStringLiteral("capabilities")).toObject();
         QVERIFY(!caps.value(QStringLiteral("add")).toBool());
         QVERIFY(!caps.value(QStringLiteral("remove")).toBool());
         QVERIFY(!caps.value(QStringLiteral("consoleVirtual")).toBool());
@@ -476,10 +633,10 @@ private Q_SLOTS:
             QRect(0, 0, 1280, 720), 1, true, 1, true}}});
         QVERIFY(host.m_topologyAvailable);
         auto before = host.m_topologyCatalog.snapshot();
-        QVERIFY(!host.consoleTopology(QStringLiteral("query")).value(QStringLiteral("capabilities")).toObject()
+        QVERIFY(!host.consoleTopology(QStringLiteral("query"), id).value(QStringLiteral("capabilities")).toObject()
             .value(QStringLiteral("add")).toBool()); // Physical-only opt-in does not expose new Console virtual writes.
         host.m_experimentalConsoleVirtual = true;
-        QVERIFY(host.consoleTopology(QStringLiteral("query")).value(QStringLiteral("capabilities")).toObject()
+        QVERIFY(host.consoleTopology(QStringLiteral("query"), id).value(QStringLiteral("capabilities")).toObject()
             .value(QStringLiteral("add")).toBool());
         const auto preview = [&](const QString &request, const QString &operation, const QString &output,
                                  bool allowRemoval, quint64 revision) {
@@ -551,7 +708,7 @@ private Q_SLOTS:
         const auto addedId = std::find_if(before.outputs.cbegin(), before.outputs.cend(), [&add](const auto &entry) {
             return entry.output.backendKey == add.backendKey;
         })->id;
-        QVERIFY(host.consoleTopology(QStringLiteral("query")).value(QStringLiteral("capabilities")).toObject()
+        QVERIFY(host.consoleTopology(QStringLiteral("query"), id).value(QStringLiteral("capabilities")).toObject()
             .value(QStringLiteral("remove")).toBool());
         host.onControlRecord(&connection, id, preview(QStringLiteral("remove"), QStringLiteral("remove"), addedId, true, before.revision));
         QVERIFY(host.m_virtualPreview);
