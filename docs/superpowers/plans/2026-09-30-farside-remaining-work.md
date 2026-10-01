@@ -541,6 +541,26 @@ parity, T10/live stock coexistence and T27 remain; Virtual loopback is still
 T05/T08 work. Evidence:
 `~/dev/rdp/evidence/2026-10-01-t08-runtime/SUMMARY.md`.
 
+**2026-10-01 main settings module checkpoint (PARTIAL, unshipped):** The compiled
+KCM now owns only six scoped Console/Virtual models and provides a shared desktop/
+mobile navigation page, actual system-service status and explicit page actions.
+Saved endpoints/public certificate metadata are shown only after explicit load;
+pending edits and inspected startup values are separate. Legacy wallet/user/
+certificate/service/coexistence/runtime/encoder-probe instantiation and16 old
+editable QML assets are removed. Shared legacy policy/storage and installed old
+route remain T10/T13 inputs. No opening/global-save/default migration or implicit
+authorization/service mutation. Eight full pure suites6.49s and Buzz actual
+main11/compiled-module14/Services3/Hosts13 pass; width640, mobile, route scopes,
+private legacy fixture and real config/profile preservation verified. Initial
+fixture compile/visual-item lookup failures corrected and retained. README and
+config-to-UI coverage now match source. This does not prove live wallet migration,
+installed authorization/restart, worker/camera/Virtual loopback parity, native
+stock coexistence/standard clients or T27 package/rollback/deployment. Sol quiet
+GPU169MiB used/7616MiB free/4%, no compute apps, still SDDMgreeter1043; SSH/manager
+sessions are not a Console owner. Fleet unchanged; no Hal live test, KPipeWire
+edit or benchmark. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t08-main-cutover/SUMMARY.md`.
+
 ### T09 — Make client types explicitly Console or Virtual
 
 **Instructions:** Add an explicit persisted type and select it when creating/editing a connection. Use authenticated capabilities to validate behavior; a custom port must not change the type. Replace the old `physicalConsole` distinction throughout form, cards, session identity, menus, topology and device paths. Keep an internal migration representation only while old saved entries are awaiting T10. Standard RDP hosts retain their appropriate existing-desktop behavior.

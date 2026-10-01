@@ -14,6 +14,7 @@ KCM.SimpleKCM {
     property var consoleSettings: kcm.consoleHostSettings
     property var virtualSettings: kcm.virtualHostSettings
     property var sessionSettings: kcm.virtualSessionSettings
+    property int initialScope: 0
     readonly property var host: scopeChoice.currentIndex === 0 ? consoleSettings : scopeChoice.currentIndex === 1 ? virtualSettings : sessionSettings
     readonly property bool session: host.scope === "session"
     readonly property var certificate: host.metadata.tls || ({})
@@ -77,6 +78,7 @@ KCM.SimpleKCM {
         }
         QQC2.ComboBox {
             id: scopeChoice
+            currentIndex: root.initialScope
             objectName: "hostScope"
             model: [i18nc("@item:inlistbox", "Console Host"), i18nc("@item:inlistbox", "Virtual Host"), i18nc("@item:inlistbox", "New Virtual Desktops")]
             implicitContentWidthPolicy: QQC2.ComboBox.WidestText

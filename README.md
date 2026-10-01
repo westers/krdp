@@ -3,42 +3,37 @@
 Library and examples for creating an RDP server.
 
 
-# Remote Desktop KCM
+# Farside Remote Desktop settings
 
-![Remote Desktop Settings Window](https://cdn.kde.org/screenshots/krdp/krdp-settings.png)
+The fork's Networking settings module manages **Console** and **Virtual** through
+four scoped pages. Desktop and mobile use the same navigation page. This is the
+current **unshipped source** implementation (2026-10-01); installed releases still
+use their previous module until the live authorization, migration, coexistence
+and package gates in [the remaining-work plan](docs/superpowers/plans/2026-09-30-farside-remaining-work.md)
+pass. The example-server sections below also describe retained legacy behavior.
 
-Remote Desktop System Settings page (KCM) that lives in the Networking category.
+| Page | Scope | When a saved change takes effect |
+|---|---|---|
+| Services | The two fixed system services; actual status, explicit start/stop/restart and start at boot | Service operations are explicit. Restart disconnects that host's clients; changing start at boot alone does not restart it. |
+| Host Settings | Console's 12 fields, Virtual host's 11 fields and new Virtual Desktop's two device-grant fields | Host settings require administrator authorization and an explicit service restart. New-desktop grants apply only to newly created Virtual desktops. |
+| Sign-In Settings | Independent Console/Virtual PAM admission and aliases bound to their original OS account | Administrator authorization, then an explicit restart of both brokers. Passwords/verifiers are never readable settings. |
+| Your Preferences | The current canonical account's 17 validated video, audio, capture, wake and Virtual-client preferences | Reconnect. Missing fields inherit host policy; client overrides and consent still apply within host permissions. |
 
-Features:
-- User can toggle the server (running the`krdpserver` binary) on and off using a toggle switch.
-- The server can be set to auto-start at session login.
-- The KCM uses SystemD DBus messages to toggle the server on and off and auto-start it.
-- User can easily add, modify, and remove usernames and passwords that are allowed to connect to the server.
-- User can change the port of the server.
-    - Do note that the address is currently set to `0.0.0.0`, which means any interface that accepts connections for `krdpserver` will work.
-- Certificates can be auto-generated (this is done by default), or the user can supply their own certificates.
-- Video quality can be changed between responsiveness and quality.
-    - Do note that in software encoding mode, the quality slider might not necessarily do anything. This seems to be an encoder issue.
-- Display target can be set to stream the full workspace, primary monitor only, or a specific monitor by ID.
-    - A read-only monitor ID map shows which ID corresponds to which screen.
-- VAAPI hardware encoder driver can be configured (automatic, disabled, AMD radeonsi, or Intel iHD).
-- The KCM will do some basic sanity-checking and warn the user about the following issues:
-    - Password manager inaccessible (for KRDP user passwords)
-    - No supported H264 encoder
-    - Failures with generating certificates
+Host Settings includes listen address/port, TLS, defaults and device policy.
+TLS actions explicitly keep current settings, use existing material, select the
+standard paths or import a checked matching certificate/key pair. Private keys
+stay out of the displayed metadata. Stored public fingerprints and saved endpoints
+appear after an explicit host load; pending edits never replace them. Separate
+runtime inspection reports loaded unit/environment and verified startup values,
+including overrides or unavailable information. It does not prove a listening
+socket or the certificate actually loaded by a running broker.
 
-Not all setting changes require a server restart. Settings that take effect
-immediately without disconnecting active sessions:
-- Video quality
-- Display target, monitor ID
-- VAAPI driver mode
-- Autostart on login
-
-Settings that require a server restart (the KCM will show a warning banner):
-- Listening port
-- User credentials (add/modify/remove)
-- System user authentication toggle
-- Certificate configuration (auto-generate toggle, certificate paths)
+Each page has its own load/save/discard/reset actions and scope help. Opening the
+module does not migrate settings, edit credentials, start a server, grant portal
+permissions or probe encoders. There is no global Apply/Defaults. KDE Remote
+Desktop remains configured in its own module. The old route, config and secret
+storage remain migration inputs until T10/T13 acceptance; this UI cutover does
+not retire the installed legacy listener.
 
 # Running the example server
 
@@ -235,8 +230,10 @@ its own port and config directory, e.g. `XDG_CONFIG_HOME=<tmp> krdpserver
 --certificate-key <key>` with `MonitorMode=multi` in that instance's
 `krdpserverrc`.
 
-The KDE Remote Desktop settings page exposes this as **Display target** and
-**Monitor ID**, and shows the current monitor ID map (`0: <screen name>`, etc.).
+The current Farside source settings module exposes Console capture preferences
+as **Monitor mode** and **Monitor ID** in Your Preferences. Saved preferences
+apply on reconnect. Virtual desktop layout remains a separate preference;
+physical/owned-output and retained-desktop live acceptance is tracked in T06.
 
 # Known Working and Not-Working Clients
 
@@ -387,18 +384,19 @@ line per entry.
 On mixed-GPU systems, KRDP now attempts to avoid decode-only VAAPI backends by
 auto-selecting a non-NVIDIA `LIBVA_DRIVER_NAME` when possible.
 
-The persisted KCM/config key is `General/VaapiDriverMode` with these values:
+The legacy config key `General/VaapiDriverMode` remains T10 migration input.
+The current source Host Settings page edits Console's `VaapiDriver` and new
+Virtual Desktop's `VaapiDriver` independently, with these values:
 
 - `auto` (default): automatic mixed-GPU selection.
 - `off`: disable KRDP VAAPI driver auto-selection.
 - `radeonsi`: force AMD VAAPI driver.
 - `iHD`: force Intel VAAPI driver (runtime fallback to `i965` remains available).
 
-Note for NVIDIA-only systems: current KRDP hardware encode integration is
-VAAPI-based. NVIDIA acceleration typically uses NVENC instead, so KRDP falls
-back to software (`libx264`) via KPipeWire's own internal encoder fallback
-unless a non-NVIDIA VAAPI encode path is present. This is an API-path
-limitation, not raw GPU compute performance.
+This policy controls the VAAPI path; it is not a general GPU/backend selector.
+Console and Virtual also have a first HEVC NVENC implementation. Complete GPU
+selection, fallback, AVC and Ada AV1 support remain tracked in the
+[NVIDIA backend design](docs/superpowers/specs/2026-09-29-nvidia-video-backends-design.md).
 
 Manual environment override examples:
 

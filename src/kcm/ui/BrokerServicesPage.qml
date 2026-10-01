@@ -12,20 +12,6 @@ KCM.SimpleKCM {
     title: i18nc("@title:window", "Console and Virtual Services")
     property var administration: kcm.brokerServices
 
-    function status(service) {
-        if (!service.known) return i18nc("@info:status", "Status unavailable");
-        if (service.loadState === "not-found") return i18nc("@info:status", "Not installed");
-        if (service.loadState === "masked" || service.unitFileState.startsWith("masked")) return i18nc("@info:status", "Blocked by the administrator");
-        switch (service.activeState) {
-        case "active": return i18nc("@info:status", "Running");
-        case "inactive": return i18nc("@info:status", "Stopped");
-        case "failed": return i18nc("@info:status", "Failed");
-        case "activating": return i18nc("@info:status", "Starting…");
-        case "deactivating": return i18nc("@info:status", "Stopping…");
-        case "reloading": return i18nc("@info:status", "Reloading…");
-        default: return i18nc("@info:status", "Status unavailable");
-        }
-    }
     function request(route, operation) {
         if (operation === "start") administration.perform(route, operation);
         else {
@@ -65,9 +51,9 @@ KCM.SimpleKCM {
                     level: 3
                     text: section.modelData.route === "console" ? i18nc("@title:group", "Console") : i18nc("@title:group", "Virtual")
                 }
-                QQC2.Label {
+                BrokerServiceStatus {
                     objectName: section.modelData.route + "ServiceStatus"
-                    text: root.status(section.modelData)
+                    service: section.modelData
                 }
                 Kirigami.InlineMessage {
                     Layout.fillWidth: true

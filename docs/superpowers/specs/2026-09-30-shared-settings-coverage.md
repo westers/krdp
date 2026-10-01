@@ -102,7 +102,7 @@ the required save/reconnect behavior; live reload is not implemented by this sli
 | VirtualMonitorPolicy | replace | User preference / Console's client-created outputs | Current-owner wire11 policy now creates owned outputs under guard/journal; real private Sol replace/extend and Stop/withdraw exact restore pass. Native local takeover/worker loss/login/failure and T03 lock race remain |
 | VirtualMonitorLayout | client | User preference / Console's client-created outputs | Client single/two-output creation, every-screen decode and worker-owned resize/Fit pass on Sol. Revision-bound one-use broker transactions and explicit client capability/ownership/UI gates pass separately; owned projection cannot grant full-layout writes. Native real RDP/mirror/mixed-scale/client interaction and retained persistence remain |
 | VirtualMonitorFallbackSize | 1920x1080 | User preference / output creation | Even bounded size and normalized peer fallback transported on wire11; per-surface/single fallback planner tested. Dynamic native limits and lifecycle acceptance remain T06 |
-| VaapiDriverMode | auto | Host device setup plus user backend preference / both | Process/worker setting remains host-controlled; driver choices cannot mutate root broker environment; equivalent T05/T15/T16 |
+| VaapiDriverMode | auto | Host device setup / Console and new Virtual Desktop | Console/new-desktop VaapiDriver is edited through scoped Host Settings; not one of the17 user preference fields. Restart/new-desktop scope and actual GPU grants remain authoritative; T10 translates legacy input, broader selection T15/T16 |
 | WakeDisplayOnConnect | true | User preference / Console physical seat; Virtual own desktop only | Applied through authenticated wire v7 DisplayPolicy, worker session/private bus; Console live enabled/disabled/viewer/failure gates pass; Virtual native and KCM gates remain |
 | StandardClientMedia | true | Host ceiling AND user preference AND consent / both | User may opt out; never turns denied host permission on; T11/T12 live media |
 | VirtualStockClientPolicy | attach-or-create | User preference / Virtual | Same validated transaction; attach-or-create/refuse applied before stock-client gate |
@@ -356,3 +356,45 @@ drop-in/running-field readback and main legacy cutover remain, alongside install
 PolicyKit/restart, worker/camera parity, T10/live stock coexistence and T27 gates.
 Virtual loopback unavailable does not complete T05/T08; no benchmark or Hal live
 test. Evidence ~/dev/rdp/evidence/2026-10-01-t08-host-ui/SUMMARY.md.
+
+### T08 runtime inspection source checkpoint (2026-10-01)
+
+Source9c2bb5b8 adds fixed read-only Console/Virtual runtime inspection. Loaded
+unit/current safe environment files and verified root broker startup arguments
+are separate from saved defaults/drafts and certificate metadata. Omitted CLI
+defaults remain unknown; custom/different/partial/stale/unavailable states are
+explicit. Eight pure suites, Sol native16 plus actual installed read-only
+agreement, writer22 and Buzz page13/KCM16 pass. This is source acceptance, not
+installed authorization, listener/loaded-TLS proof or deployment. Evidence
+`~/dev/rdp/evidence/2026-10-01-t08-runtime/SUMMARY.md`.
+
+### T08 main module cutover checkpoint (2026-10-01, PARTIAL, unshipped)
+
+The compiled module now owns only six scoped models and offers Help. Desktop and
+mobile share one navigation page; explicit actions own saving/defaulting/restart.
+It does not instantiate legacy settings, wallet/users, certificate readers,
+user-manager/coexistence adapters, runtime watchers or PipeWire encoder probes.
+The16 old editable QML assets and generated legacy module-data/portal interface
+are removed. Shared legacy storage/policy code remains for T10/T13; QtKeychain
+remains linked through that core and its removal is not claimed.
+
+| Configuration surface | Current source UI / effect | Remaining gate |
+|---|---|---|
+| Independent PAM admission and owner-bound aliases | Sign-In Settings; explicit authorized save, restart both brokers | Installed password/cancel/restart, live allowed/denied and T10 credential migration |
+| Console12 / Virtual host11 / Virtual session2 | Host Settings; independent drafts, validated root helper, TLS keep/existing/standard/import; restart or newly created desktop | Installed authorization/restart, worker/device parity; Virtual loopback namespace grant still unimplemented |
+| All17 recognized per-user preferences | Your Preferences; canonical account only, inheritance/validation, atomic preserving save, reconnect | Remaining T05–T07/T11 native parity and T10 default migration |
+| Two fixed system services and start at boot | Services; actual typed system-bus status, explicit authorized actions and restart confirmation | Installed operation/cancel and native stock/Farside independence |
+| Saved endpoints/public certificate metadata versus inspected startup | Main and Host Settings; explicit load, saved snapshot only, pending edits separate, freshness/verification gates | No listening socket or loaded TLS claim; installed end-to-end acceptance |
+| Stock KDE Remote Desktop | Separate module; no stock controls or automatic changes in Farside | Live dual-module/package coexistence |
+| Legacy per-user settings, route and secrets | Retained migration input; no editable route in the new module | T10 migration/rollback and T13 gated retirement |
+
+Eight complete pure suites pass6.49s. Buzz actual populated main page11, compiled
+module14, Services3 and Hosts13 pass without failures/skips/QML warnings. Real
+desktop/mobile resources, all navigation scopes, nine status states, saved versus
+staged endpoints, width640 and inherited global actions are covered. Five private
+legacy config/certificate/secret fixtures and real Buzz config/profile hashes
+stay unchanged; the secret fixture is not a real wallet migration test. Final
+Sol installed brokers141254/141255 remain active. Source only: installed
+authorization/restart, native worker/camera parity, T10/live stock coexistence,
+standard clients and T27 gates remain. Evidence
+`~/dev/rdp/evidence/2026-10-01-t08-main-cutover/SUMMARY.md`.

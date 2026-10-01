@@ -16,6 +16,9 @@
 #include <KQuickConfigModuleLoader>
 
 #include <QApplication>
+#include <QCryptographicHash>
+#include <QQmlContext>
+#include <QProcess>
 #include <QDir>
 #include <QFile>
 #include <QMutex>
@@ -77,6 +80,13 @@ QQuickItem *flickableOf(QQuickItem *page)
 {
     return page->property("flickable").value<QQuickItem *>();
 }
+QQuickItem *findItem(QQuickItem *parent, const QString &name)
+{
+    if (parent->objectName() == name) return parent;
+    if (auto *item = parent->findChild<QQuickItem *>(name)) return item;
+    for (auto *child : parent->childItems()) if (auto *item = findItem(child, name)) return item;
+    return nullptr;
+}
 }
 
 class KcmUiTest : public QObject
@@ -87,6 +97,8 @@ class KcmUiTest : public QObject
     std::shared_ptr<QQmlEngine> m_engine;
     KQuickConfigModule *m_module = nullptr;
     QQuickWindow *m_window = nullptr;
+    QMap<QString, QByteArray> m_preserved;
+    QByteArray readFixture(const QString &path) { QFile file(path); if (!file.open(QIODevice::ReadOnly)) return {}; return file.readAll(); }
 
     // What kcmshell/System Settings leave for the page: the window minus the
     // title bar above it and the Help/Defaults/Apply bar below it.
@@ -127,7 +139,7 @@ class KcmUiTest : public QObject
 
         QList<std::pair<QString, QRectF>> rects;
         for (const auto &name : names) {
-            auto *item = page->findChild<QQuickItem *>(name);
+            auto *item = findItem(page, name);
             QVERIFY2(item, qPrintable(u"missing item "_s + name));
             QVERIFY2(item->isVisible(), qPrintable(name + u" is hidden"_s));
             QVERIFY2(item->width() > 0 && item->height() > 0, qPrintable(name + u" has no size"_s));
@@ -164,15 +176,16 @@ private Q_SLOTS:
     {
         previousHandler = qInstallMessageHandler(collect);
 
-        // The server's settings for this run: one extra user, a port nothing
-        // listens on, so the page shows its ordinary state.
+        // Legacy settings/TLS/secret fixtures must remain byte-identical even
+        // when the new module opens or its inherited global actions are called.
         const QString config = qEnvironmentVariable("XDG_CONFIG_HOME");
         QVERIFY2(config.startsWith(QDir::tempPath()) || config.contains(u"/build"_s), "run through ctest: it sets a throwaway XDG_CONFIG_HOME");
         QDir().mkpath(config);
-        QFile rc(config + u"/farsideserverrc"_s);
-        QVERIFY(rc.open(QIODevice::WriteOnly | QIODevice::Truncate));
-        rc.write("[General]\nUsers=buzz\nSystemUserEnabled=true\nListenPort=1\n");
-        rc.close();
+        for (const auto &name : {u"farsideserverrc"_s, u"krdpserverrc"_s, u"legacy.crt"_s, u"legacy.key"_s, u"legacy-wallet.fixture"_s}) {
+            const auto path=config+u"/"_s+name;QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly|QIODevice::Truncate));
+            const QByteArray bytes="[General]\nUsers=legacy-fixture\nSystemUserEnabled=true\nListenPort=1\nUnrelatedFixture=preserve\n";
+            QCOMPARE(file.write(bytes),bytes.size());file.close();m_preserved[path]=QCryptographicHash::hash(bytes,QCryptographicHash::Sha256);
+        }
 
         m_engine = std::make_shared<QQmlEngine>();
         const KPluginMetaData metaData(qEnvironmentVariable("FARSIDE_KCM_TEST_PLUGIN_PATH", QStringLiteral(KCM_PLUGIN_PATH)), KPluginMetaData::AllowEmptyMetaData);
@@ -190,6 +203,8 @@ private Q_SLOTS:
 
     void cleanupTestCase()
     {
+        for(auto it=m_preserved.begin();it!=m_preserved.end();++it)
+            QCOMPARE(QCryptographicHash::hash(readFixture(it.key()),QCryptographicHash::Sha256),it.value());
         delete m_window;
         qInstallMessageHandler(previousHandler);
     }
@@ -217,9 +232,7 @@ private Q_SLOTS:
     {
         QFETCH(QSize, window);
         auto *page = showPage(m_module->mainUi(), window);
-        // (Autostart is hidden here: there is no systemd on this test's bus.)
-        QVERIFY(page->findChild<QQuickItem *>(u"autostartCheck"_s));
-        checkReachable(page, {u"statusRow"_s, u"connectRow"_s, u"fingerprintRow"_s, u"signInRow"_s, u"screensCombo"_s, u"qualityRow"_s, u"pageButtons"_s});
+        checkReachable(page, {u"brokerScopeDescription"_s, u"refreshBrokerStatus"_s, u"consoleHostHeading"_s, u"consoleHostStatus"_s, u"consoleHostSettingsLink"_s, u"virtualHostHeading"_s, u"virtualHostStatus"_s, u"virtualHostSettingsLink"_s, u"administrationScopeHelp"_s, u"pageButtons"_s, u"stockScopeNotice"_s});
         if (window.height() < 500) {
             // Too small for everything: the page must scroll (so the checks
             // above really scrolled), not squeeze or stack its parts.
@@ -228,8 +241,8 @@ private Q_SLOTS:
                      qPrintable(u"content %1, view %2, page %3"_s.arg(flickable->property("contentHeight").toReal()).arg(flickable->height()).arg(page->height())));
         }
         // All four ways into the sub-pages.
-        for (const auto &button : {u"usersPageButton"_s, u"screensPageButton"_s, u"videoAudioPageButton"_s, u"advancedPageButton"_s}) {
-            auto *item = page->findChild<QQuickItem *>(button);
+        for (const auto &button : {u"brokerServicesLink"_s, u"brokerSignInButton"_s, u"brokerPreferencesLink"_s, u"brokerHostsLink"_s}) {
+            auto *item = findItem(page, button);
             QVERIFY(item && item->isVisible() && item->width() > 0);
         }
         const auto warnings = takeMessages();
@@ -250,14 +263,7 @@ private Q_SLOTS:
                                           << QStringList{u"loadBrokerPreferences"_s,u"saveBrokerPreferences"_s,u"defaultBrokerPreferences"_s};
         QTest::newRow("broker hosts") << u"BrokerHostsPage.qml"_s << u"brokerHostsPage"_s << u"Console and Virtual Host Settings"_s
                                     << QStringList{u"hostScope"_s, u"loadHostSettings"_s, u"saveHostSettings"_s, u"defaultHostSettings"_s};
-        QTest::newRow("users") << u"UsersPage.qml"_s << u"usersPage"_s << u"Users and Security"_s
-                               << QStringList{u"systemUserCheck"_s, u"usersFrame"_s, u"certificateStateRow"_s, u"ownCertificateCheck"_s};
-        QTest::newRow("screens") << u"ScreensPage.qml"_s << u"screensPage"_s << u"Screens and Displays"_s << QStringList{u"shareColumn"_s, u"wakeCheck"_s};
-        QTest::newRow("video and audio") << u"VideoAudioPage.qml"_s << u"videoAudioPage"_s << u"Video and Audio"_s
-                                         << QStringList{u"colorDetailCombo"_s, u"busyNetworkColumn"_s, u"standardMediaCheck"_s};
-        QTest::newRow("advanced") << u"AdvancedPage.qml"_s << u"advancedPage"_s << u"Advanced"_s
-                                  << QStringList{u"listenAddressCombo"_s, u"portField"_s, u"vaapiCombo"_s, u"softwareEncodingCombo"_s, u"av1TilesCombo"_s, u"fallbackSizeField"_s,
-                                                 u"cameraCombo"_s, u"developerToggle"_s};
+
     }
 
     void subPagesLoadWithoutWarnings()
@@ -282,83 +288,47 @@ private Q_SLOTS:
         QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
     }
 
-    void av1TilesComboFollowsTheSetting()
-    {
-        // AV1-Q: Advanced > Encoding > "AV1 tiles": Automatic (recommended), 1, 2, 4, 8, 16,
-        // bound to krdpserverrc Av1Tiles ("auto" or the count).
-        auto *settings = m_module->mainUi()->property("settings").value<QObject *>();
-        QVERIFY(settings);
-        QCOMPARE(settings->property("av1Tiles").toString(), u"auto"_s);
-
-        m_module->push(u"AdvancedPage.qml"_s);
-        auto *page = m_module->subPage(m_module->depth() - 2);
-        QVERIFY(page);
-        showPage(page, {1280, 800});
-        auto *combo = page->findChild<QQuickItem *>(u"av1TilesCombo"_s);
-        QVERIFY(combo);
-        QCOMPARE(combo->property("count").toInt(), 6);
-        QStringList texts;
-        QStringList values;
-        for (int i = 0; i < 6; ++i) {
-            QString text;
-            QVariant value;
-            QVERIFY(QMetaObject::invokeMethod(combo, "textAt", Q_RETURN_ARG(QString, text), Q_ARG(int, i)));
-            QVERIFY(QMetaObject::invokeMethod(combo, "valueAt", Q_RETURN_ARG(QVariant, value), Q_ARG(int, i)));
-            texts << text;
-            values << value.toString();
+    void moduleOpeningAndGlobalActionsPreserveLegacyAndKeepModelsLazy() {
+        for(const auto &name:{"settings()","toggleServer(bool)","restartServer()","applyListenPort(int)","addUser(QString,QString)","readPasswordFromWallet(QString)"})
+            QVERIFY(m_module->metaObject()->indexOfMethod(name)<0);
+        QVERIFY(m_module->metaObject()->indexOfProperty("coexistence")<0);
+        QCOMPARE(int(m_module->buttons()),int(KAbstractConfigModule::Help));
+        for(const auto &name:{"consoleHostSettings","virtualHostSettings","virtualSessionSettings","brokerAuthentication","brokerPreferences"}) {
+            auto *model=m_module->property(name).value<QObject *>();QVERIFY(model);QVERIFY(!model->property("loaded").toBool());
         }
-        QCOMPARE(texts, QStringList({u"Automatic (recommended)"_s, u"1"_s, u"2"_s, u"4"_s, u"8"_s, u"16"_s}));
-        QCOMPARE(values, QStringList({u"auto"_s, u"1"_s, u"2"_s, u"4"_s, u"8"_s, u"16"_s}));
-        QCOMPARE(combo->property("currentIndex").toInt(), 0);
-        auto *note = page->findChild<QQuickItem *>(u"av1TilesNote"_s);
-        QVERIFY(note && note->isVisible());
-        QCOMPARE(note->property("text").toString(), u"More tiles let slower computers decode AV1 faster, at a small size cost."_s);
-
-        // The user picks 8: the setting follows.
-        combo->setProperty("currentIndex", 4);
-        QVERIFY(QMetaObject::invokeMethod(combo, "activated", Q_ARG(int, 4)));
-        QCOMPARE(settings->property("av1Tiles").toString(), u"8"_s);
-        // The setting changes (Defaults, a reload): the combo follows.
-        settings->setProperty("av1Tiles", u"16"_s);
-        QCoreApplication::processEvents();
-        QCOMPARE(combo->property("currentIndex").toInt(), 5);
-        settings->setProperty("av1Tiles", u"auto"_s);
-        QCoreApplication::processEvents();
-        QCOMPARE(combo->property("currentIndex").toInt(), 0);
-        m_module->pop();
-        const auto warnings = takeMessages();
-        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
+        m_module->defaults();m_module->save();m_module->load();
+        QVERIFY(m_module->findChildren<QProcess *>().isEmpty());
+        for(const auto &name:{"consoleHostSettings","virtualHostSettings","virtualSessionSettings","brokerAuthentication","brokerPreferences"}) {
+            auto *model=m_module->property(name).value<QObject *>();QVERIFY(model);QVERIFY(!model->property("loaded").toBool());
+        }
+        for(auto it=m_preserved.begin();it!=m_preserved.end();++it)
+            QCOMPARE(QCryptographicHash::hash(readFixture(it.key()),QCryptographicHash::Sha256),it.value());
+        for(const auto &file:{u"UsersPage.qml"_s,u"ScreensPage.qml"_s,u"VideoAudioPage.qml"_s,u"AdvancedPage.qml"_s,u"EditUserModal.qml"_s})
+            QVERIFY(!QFile::exists(u":/kcm/kcm_farside/"_s+file));
+    }
+    void hostNavigationSelectsScope_data() {
+        QTest::addColumn<QString>("route");QTest::addColumn<int>("index");
+        QTest::newRow("Console")<<u"console"_s<<0;QTest::newRow("Virtual")<<u"virtual"_s<<1;
+    }
+    void hostNavigationSelectsScope() {
+        QFETCH(QString,route);QFETCH(int,index);auto *main=m_module->mainUi();
+        auto *button=findItem(main,route+u"HostSettingsLink"_s);QVERIFY(button);
+        const auto depth=m_module->depth();QVERIFY(QMetaObject::invokeMethod(button,"clicked"));QCOMPARE(m_module->depth(),depth+1);
+        auto *page=m_module->subPage(m_module->depth()-2);QVERIFY(page);QCOMPARE(page->objectName(),u"brokerHostsPage"_s);
+        auto *selector=findItem(page,u"hostScope"_s);QVERIFY(selector);QCOMPARE(selector->property("currentIndex").toInt(),index);
+        auto *host=page->property("host").value<QObject *>();QVERIFY(host);QCOMPARE(host->property("scope").toString(),route);
+        QVERIFY(!host->property("loaded").toBool());m_module->pop();
+        const auto warnings=takeMessages();QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
+    }
+    void phoneEntryUsesTheSameScopedPage() {
+        QQmlComponent component(m_engine.get(),QUrl(u"qrc:/kcm/kcm_farside/main_phone.qml"_s));QVERIFY2(component.isReady(),qPrintable(component.errorString()));
+        QScopedPointer<QObject> object(component.create(QQmlEngine::contextForObject(m_module->mainUi())));QVERIFY2(object,qPrintable(component.errorString()));
+        auto *page=qobject_cast<QQuickItem *>(object.data());QVERIFY(page);QCOMPARE(page->objectName(),u"mainPage"_s);
+        showPage(page,{640,800});checkReachable(page,{u"consoleHostStatus"_s,u"virtualHostStatus"_s,u"pageButtons"_s});
+        QVERIFY(!page->findChild<QObject *>(u"serverSwitch"_s));page->setParentItem(nullptr);
+        const auto warnings=takeMessages();QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
     }
 
-    void usersPageShowsAPlaceholderWhenEmpty()
-    {
-        auto *settings = m_module->mainUi()->property("settings").value<QObject *>();
-        QVERIFY(settings);
-        const auto users = settings->property("users");
-        settings->setProperty("users", QStringList());
-
-        m_module->push(u"UsersPage.qml"_s);
-        auto *page = m_module->subPage(m_module->depth() - 2);
-        QVERIFY(page);
-        showPage(page, {1280, 800});
-        auto *placeholder = page->findChild<QQuickItem *>(u"usersPlaceholder"_s);
-        QVERIFY(placeholder);
-        QVERIFY(placeholder->isVisible());
-        QCOMPARE(placeholder->property("text").toString(), u"No other users"_s);
-
-        settings->setProperty("systemUserEnabled", false);
-        QCoreApplication::processEvents();
-        QCOMPARE(placeholder->property("text").toString(), u"No one can sign in yet"_s);
-        checkReachable(page, {u"systemUserCheck"_s, u"usersPlaceholder"_s, u"ownCertificateCheck"_s});
-
-        settings->setProperty("users", users);
-        settings->setProperty("systemUserEnabled", true);
-        QCoreApplication::processEvents();
-        QVERIFY(!placeholder->isVisible());
-        m_module->pop();
-        const auto warnings = takeMessages();
-        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
-    }
 };
 
 QTEST_MAIN(KcmUiTest)

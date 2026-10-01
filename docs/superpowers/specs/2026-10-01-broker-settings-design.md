@@ -27,6 +27,37 @@ dialog cancellation (126) and denied authorization (127) preserve pending edits.
 This behavior and the sanitized execution environment are specified by
 [polkit's upstream manual](https://raw.githubusercontent.com/polkit-org/polkit/master/docs/man/pkexec.xml).
 
+## Main-page cutover contract
+
+The module is a navigation shell for the fixed Console/Virtual system service,
+host, sign-in and per-user preference models. Its desktop and mobile entry points
+use one shared page. The module must not instantiate the old per-user settings,
+wallet/account editor, user-manager service/coexistence controller, certificate
+reader, runtime watcher or encoder probe. Opening/loading/saving/defaulting this
+shell cannot migrate legacy credentials, grant portal permission, write config,
+start a server or modify stock KDE KRDP. Legacy originals and the separate stock
+adapter remain migration inputs/independent code until T10/T13 gates pass.
+
+Only explicit scoped page actions save/reset/restart; the shell offers Help,
+without misleading global Apply/Defaults. It shows both actual system-service
+states and scoped pending/application notices. Read-only polling never substitutes
+a user-daemon status or guessed codec capability. It identifies stored listener
+and public certificate information only after an explicit host load, using saved
+snapshot metadata rather than pending drafts. Custom units/runtime differences
+remain separately inspected. No stored address/fingerprint implies listening or
+an already loaded certificate. Navigation to each host selects its correct scope;
+separate drafts survive leaving/reopening pages. Stock KDE configuration is owned
+by its own module; the shell has no stock stop/disable or legacy start action.
+
+Source acceptance requires the real compiled module, desktop/mobile shared page,
+all four scoped routes and populated/unavailable/failed/transitional states on
+Buzz, including small-window reachability and saved-versus-staged information.
+Opening and inherited global save/default/load must preserve exact legacy config,
+certificate/secret fixture and production profile hashes. Old editable legacy
+pages must not remain packaged or exposed through the new module. Existing shared
+policy/storage/helper tests remain required; live installed authorization/restart,
+stock dual-KCM scope, migration and package gates are still separate task gates.
+
 ## Shared preference transaction
 
 The editor uses the canonical account-home `~/.config/farsideserverrc`, sharing
