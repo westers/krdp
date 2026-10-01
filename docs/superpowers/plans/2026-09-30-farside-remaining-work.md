@@ -3,6 +3,12 @@
 Date: 2026-09-30. Status: paused at Steve's request on 2026-10-01; no consolidation cutover accepted.
 Requested by Steve after the Sol/Hal `f255ee2` deployment.
 
+**Execution process superseded (2026-10-01):** Steve chose one task at a time,
+without automatic Goals or Superpowers workflows. Use the [new task plan](../../plans/2026-10-01-farside-task-plan.md)
+for execution and current accounting. This document retains product requirements,
+acceptance details and historical evidence; its old goal/persistence instructions
+are not current. Buzz/Sol are available for testing with no AI workloads per Steve.
+
 ## Outcome and scope
 
 Farside offers two connection types: **Console**, the existing desktop including sign-in and lock screens, and **Virtual**, a separate retained desktop. Complete the authentication fix, preserve the useful features of the old per-user server in those two types, migrate configuration and saved connections, then remove the redundant implementation. Finish the remaining camera, NVIDIA, reliability, performance and client UX work as separately accepted tasks.

@@ -5,6 +5,10 @@ shipping new client/server releases, and a new plan. He explicitly emphasized
 wallet care. Execution pauses after this assessment is recorded; no candidate
 build, package installation, service restart or wallet operation occurred here.
 
+**Execution process superseded later on October 1:** Use the [task-by-task plan](../../plans/2026-10-01-farside-task-plan.md)
+for individually selected work and bounded verification. This assessment remains
+a reference; do not automatically resume R1–R6 or the paused Goal.
+
 ## Governing scope
 
 The [T01–T28 plan](2026-09-30-farside-remaining-work.md) retains its scope,
