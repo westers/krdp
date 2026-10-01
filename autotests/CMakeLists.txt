@@ -458,6 +458,16 @@ target_include_directories(ConsoleHostControllerTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(ConsoleHostControllerTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp)
 add_test(NAME ConsoleHostControllerTest COMMAND ConsoleHostControllerTest)
 
+# Manual, bounded Sol/Buzz RDP fixture; not installed or part of automatic ctest.
+add_executable(ConsoleOwnedRdpHost ConsoleOwnedRdpHost.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleHostController.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerSession.cpp ${CMAKE_SOURCE_DIR}/server/WorkerCodecBridge.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleSeat.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleSeatWatcher.h
+    ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerLauncher.cpp)
+target_include_directories(ConsoleOwnedRdpHost PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleOwnedRdpHost PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp KRdpBrokerAuthentication KRdpBrokerUserSettings)
+
 add_executable(RdpAudioPriorityTest RdpAudioPriorityTest.cpp)
 target_include_directories(RdpAudioPriorityTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(RdpAudioPriorityTest PRIVATE Qt6::Test Qt6::Core KRdp)

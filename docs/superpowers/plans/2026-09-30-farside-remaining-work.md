@@ -340,6 +340,22 @@ Fleet/services/retained session and locked state are preserved; no Hal live test
 or performance claim. Evidence:
 `~/dev/rdp/evidence/2026-09-30-t06-owned-transactions/SUMMARY.md`.
 
+**2026-10-01 real-RDP attempt (PARTIAL, unshipped):** A bounded Sol private
+compositor/production PAM/broker/worker fixture and Buzz client verify owned
+single resize, rev2, fresh HEVC decode and exact independent output restoration.
+Final Fit fails with CUDA context out-of-memory and a partial transaction;
+external AI holds about6.8GiB of8GiB, but our allocation lifetime has not been
+ruled out. The software rerun is not accepted because actual Console session429
+signed out during the run; its cause awaits clarification. Console/Virtual
+brokers remain active, but user3389, PolicyKit and retained desktop are now
+inactive. Configuration hash remains unchanged. The fixture now aborts when
+the UID1000 physical desktop disappears or becomes a greeter. Final host/client
+builds and Buzz dialog9 pass; no installed update or Hal live test.
+The client still omits its initial standard monitor tuple, so owned two-screen
+RDP integration remains independent implementation work. Final software Fit,
+loaded fallback, lifecycle/mixed-scale/persistence and T03/T08/T27 gates stay
+open. Evidence `~/dev/rdp/evidence/2026-10-01-t06-owned-rdp/SUMMARY.md`.
+
 ### T07 — Preserve display wake and inhibition
 
 **Instructions:** Integrate the existing `DisplayWakeGuard` semantics into the desktop workers or equivalent user-session mechanism, not a root broker's session bus. Honor the configured wake policy and acquire/release inhibition with streaming ownership. Keep display power management distinct from unlocking and from Virtual's intentional lock policy. Handle pending D-Bus replies and teardown without leaking inhibition.

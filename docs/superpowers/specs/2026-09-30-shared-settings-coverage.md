@@ -142,6 +142,17 @@ exact restoration. These separate checks do not yet establish real RDP transacti
 integration or complete T06/T03/T08/T27 acceptance. Evidence:
 `~/dev/rdp/evidence/2026-09-30-t06-owned-transactions/SUMMARY.md`.
 
+The 2026-10-01 private real-RDP attempt verifies PAM, owned single resize/rev2,
+fresh decoded HEVC dimensions and exact restoration. Final Fit fails with CUDA
+out-of-memory under external AI load; it is not accepted. The software rerun
+lost its actual Console owner to signout before capture. The bounded manual
+host now aborts on loss of UID1000's physical desktop. Final source builds and
+Buzz offscreen dialog9 pass, including a transient capability boolean fix.
+Own-client initial standard monitor advertisement remains absent, so native
+owned two-screen integration needs independent implementation. No deployment;
+T06 and the T05 loaded failure/fallback gates remain open. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t06-owned-rdp/SUMMARY.md`.
+
 ## Remaining gates
 
 - T04 authentication source gates pass: immutable root policy, explicit alias
