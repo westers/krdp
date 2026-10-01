@@ -22,6 +22,7 @@
 #include "ConsoleHostController.h"
 #include "ConsoleSeatWatcher.h"
 #include "ConsoleWorkerLauncher.h"
+#include "BrokerAuthentication.h"
 #include "VaapiDriverMode.h"
 #include "HostCertificate.h"
 #include "VideoCodecHost.h"
@@ -35,6 +36,7 @@ int main(int argc, char **argv)
     parser.setApplicationDescription(QStringLiteral("Persistent physical-console RDP host."));
     parser.addHelpOption();
     const QCommandLineOption workerOption(QStringLiteral("worker"), QStringLiteral("Installed farside-console-worker executable."), QStringLiteral("path"));
+    const QCommandLineOption authenticationOption(QStringLiteral("authentication-policy"), QStringLiteral("Root-owned shared Console/Virtual authentication policy; restart to reload."), QStringLiteral("path"), QStringLiteral("/etc/farside/authentication.json"));
     const QCommandLineOption certificateOption(QStringLiteral("certificate"), QStringLiteral("TLS certificate."), QStringLiteral("path"));
     const QCommandLineOption keyOption(QStringLiteral("certificate-key"), QStringLiteral("TLS private key."), QStringLiteral("path"));
     const QCommandLineOption addressOption(QStringLiteral("address"), QStringLiteral("Listen address."), QStringLiteral("address"), QStringLiteral("0.0.0.0"));
@@ -48,11 +50,16 @@ int main(int argc, char **argv)
     const QCommandLineOption softwareEncodingOption(QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto"));
     const QCommandLineOption av1TilesOption(QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto"));
     const QCommandLineOption vaapiDriverOption(QStringLiteral("vaapi-driver"), QStringLiteral("VaapiDriverMode for the capture workers: auto, off, radeonsi, iHD or i965."), QStringLiteral("mode"), QStringLiteral("auto"));
-    parser.addOptions({workerOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, qualityOption, adaptiveQualityOption, standardMediaOption, cameraLoopbackOption, softwareEncodingOption, av1TilesOption, vaapiDriverOption});
+    parser.addOptions({workerOption, authenticationOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, qualityOption, adaptiveQualityOption, standardMediaOption, cameraLoopbackOption, softwareEncodingOption, av1TilesOption, vaapiDriverOption});
     parser.process(application);
 
     if (geteuid() != 0) {
         qCritical("farside-console-host must run as root to enter selected logind sessions");
+        return 1;
+    }
+    const auto authentication = KRdp::BrokerAuthentication::readFile(parser.value(authenticationOption), parser.isSet(authenticationOption));
+    if (!authentication.policy) {
+        qCritical().noquote() << authentication.error;
         return 1;
     }
 
@@ -87,8 +94,7 @@ int main(int argc, char **argv)
     server.setPort(port);
     server.setTlsCertificate(std::filesystem::path(parser.value(certificateOption).toStdString()));
     server.setTlsCertificateKey(std::filesystem::path(parser.value(keyOption).toStdString()));
-    server.setUsePAMAuthentication(true);
-    server.setAllowAnyPAMUser(true);
+    if (!KRdp::BrokerAuthentication::apply(server, authentication.policy->route(KRdp::BrokerAuthentication::Desktop::Console))) return 1;
     server.setStandardClientMedia(standardMediaValue == QLatin1String("true"));
     if (cameraLoopback != QLatin1String("none")) server.setCameraLoopbackDevice(cameraLoopback);
 

@@ -75,7 +75,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     // size); ours uses `virtual-resize` and never joins that channel.
     connection->setDisplayControlEnabled(true);
     connect(connection, &RdpConnection::displayLayoutRequested, this, [this](const QList<VideoMonitor> &monitors) {
-        if (m_connection) displayLayout(monitors, m_connection->authenticatedPamUid());
+        if (m_connection) displayLayout(monitors, m_connection->authenticatedUserUid());
     }, Qt::QueuedConnection);
     // AUD-D4: the same 3 s first-record gate krdpserver has. A client that
     // sends no `virtual-session` record by then gets the broker's choice.
@@ -131,7 +131,7 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     connect(&m_resizeDeadline, &QTimer::timeout, this, [this] {
         const auto response = resizeResult({m_resizeWorkerId, m_resizeGeneration,
             u"virtual resize timed out; refresh before retrying"_s},
-            m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+            m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) sendReply(response);
     });
     m_topologyDeadline.setSingleShot(true);
@@ -186,14 +186,14 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         if (authorized()) m_endpoint->requestKeyFrame();
     }, Qt::QueuedConnection);
     connect(connection, &RdpConnection::controlRecordReceived, this, [this](const QJsonObject &record) {
-        if (m_connection) deliverControlRecord(record, m_connection->authenticatedPamUid());
+        if (m_connection) deliverControlRecord(record, m_connection->authenticatedUserUid());
     }, Qt::QueuedConnection);
     // Emitted once the client authenticated (AUD-S1), with KRDPCTL open if it joined it.
     connect(connection, &RdpConnection::clientDisplayInfoReceived, this, [this] {
         const QPointer<VirtualSessionTransport> alive(this);
         sendCapabilities();
         if (alive && m_connection && m_connection->isAuthenticated())
-            startStockGate(m_connection->hasControlChannel(), m_connection->authenticatedPamUid());
+            startStockGate(m_connection->hasControlChannel(), m_connection->authenticatedUserUid());
     }, Qt::QueuedConnection);
     // The connection's own channel work fails after the broker said `on`: the
     // client refused AUDIN, or never joined RDPSND. Pass it on.
@@ -267,13 +267,13 @@ void VirtualSessionTransport::loadUserSettings(std::optional<quint32> uid)
 
 bool VirtualSessionTransport::authorized() const
 {
-    return authorized(m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+    return authorized(m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
 }
 
 bool VirtualSessionTransport::authorized(std::optional<quint32> uid) const
 {
     // The explicit identity is private to socket-free tests. Production callers
-    // supply only RdpConnection's PAM identity, never a control-record field.
+    // supply only RdpConnection's authenticated owner identity, never a control-record field.
     if (m_revoking || !m_control || !m_connection || !m_endpoint || !m_endpoint->ready() || !m_handle) return false;
     const auto attached = m_control->attachment(m_client);
     const auto target = m_endpoint->target();
@@ -292,7 +292,7 @@ bool VirtualSessionTransport::attachmentMatches(const VirtualSessionRegistry::Ha
 
 bool VirtualSessionTransport::bind()
 {
-    return bind(m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+    return bind(m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
 }
 
 bool VirtualSessionTransport::bind(std::optional<quint32> uid)
@@ -318,13 +318,13 @@ bool VirtualSessionTransport::bind(std::optional<quint32> uid)
 
 bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Handle &expected, QPointer<ConsoleWorkerEndpoint> endpoint)
 {
-    return activateBinding(expected, endpoint, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+    return activateBinding(expected, endpoint, m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
 }
 
 bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Handle &expected, QPointer<ConsoleWorkerEndpoint> endpoint,
     std::optional<quint32> uid)
 {
-    // bind() has validated endpoint and PAM identity. Keep the continuation
+    // bind() has validated endpoint and authenticated owner identity. Keep the continuation
     // separate so callback invalidation can be tested without fabricating PAM.
     const auto handle = expected;
     const QPointer<VirtualSessionTransport> alive(this);
@@ -359,10 +359,10 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         m_session.submitFrame(frame);
         if (!alive || !m_connection) return;
         if (m_displaySize && frame.isKeyFrame) {
-            applyDisplayLayout(m_connection->authenticatedPamUid());
+            applyDisplayLayout(m_connection->authenticatedUserUid());
             if (!alive || !m_connection) return;
         }
-        const auto reply = topologyFrame(frame, m_connection->authenticatedPamUid());
+        const auto reply = topologyFrame(frame, m_connection->authenticatedUserUid());
         if (alive && m_connection && !reply.isEmpty()) sendReply(reply);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::audioReceived, this, [this](const auto &audio) {
@@ -379,11 +379,11 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::microphoneFinished, this, [this](const auto &result) {
         const QPointer<VirtualSessionTransport> alive(this);
-        const auto reply = microphoneResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        const auto reply = microphoneResult(result, m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         if (alive && m_connection && !reply.isEmpty()) sendReply(reply);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::cameraFinished, this, [this](const auto &result) {
-        const auto reply = cameraResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        const auto reply = cameraResult(result, m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         if (m_connection && !reply.isEmpty()) sendReply(reply);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::cameraDemand, this, [this](const auto &demand) {
@@ -396,48 +396,48 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         }
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::resizeFinished, this, [this](const auto &result) {
-        const auto uid = m_connection ? m_connection->authenticatedPamUid() : std::nullopt;
+        const auto uid = m_connection ? m_connection->authenticatedUserUid() : std::nullopt;
         const auto response = m_topologyResizeId.isEmpty() ? resizeResult(result, uid) : topologyResizeResult(result, uid);
         if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::positionFinished, this, [this](const auto &result) {
-        const auto response = positionResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        const auto response = positionResult(result, m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::positionBatchFinished, this, [this](const auto &result) {
         const auto response = positionResult({result.requestId, result.generation, result.error},
-            m_connection ? m_connection->authenticatedPamUid() : std::nullopt, true);
+            m_connection ? m_connection->authenticatedUserUid() : std::nullopt, true);
         if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::managedFitFinished, this, [this](const auto &result) {
         const auto response = topologyResizeResult({result.requestId, result.generation, result.error},
-            m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+            m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::primaryFinished, this, [this](const auto &result) {
         if (!m_topologyPrimaryPending) return;
         const auto response = topologyResizeResult({result.requestId, result.generation, result.error},
-            m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+            m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::mixedFinished, this, [this](const auto &result) {
         if (!m_topologyMixedPending) return;
         const auto response = topologyResizeResult({result.requestId, result.generation, result.error},
-            m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+            m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::mixedCreateFinished, this, [this](const auto &result) {
         if (!m_topologyMixedCreatePending) return;
         const auto response = topologyResizeResult({result.requestId, result.generation, result.error},
-            m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+            m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::addVirtualFinished, this, [this](const auto &result) {
-        const auto response = addVirtualResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        const auto response = addVirtualResult(result, m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::removeVirtualFinished, this, [this](const auto &result) {
-        const auto response = removeVirtualResult(result, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+        const auto response = removeVirtualResult(result, m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         if (m_connection && !response.isEmpty()) sendReply(response);
     }));
     m_controlGeneration = ++m_sequence;
@@ -448,11 +448,11 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     const auto generation = m_controlGeneration;
     m_workerConnections.append(connect(m_connection->videoStream(), &VideoStream::enabledChanged,
         this, [this, generation] {
-            syncDisplayPolicy(generation, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+            syncDisplayPolicy(generation, m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         }, Qt::QueuedConnection));
     m_workerConnections.append(connect(m_connection->videoStream(), &VideoStream::requestedQualityChanged,
         this, [this, generation](quint8 quality) {
-            forwardVideoQuality(generation, quality, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+            forwardVideoQuality(generation, quality, m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
         }, Qt::QueuedConnection));
     endpoint->setControlState({m_controlGeneration, true});
     if (!bindingCurrent()) return false;
@@ -647,7 +647,7 @@ DeviceStatus VirtualSessionTransport::deviceStatus(MediaDevice device) const
 
 void VirtualSessionTransport::stopMicrophone()
 {
-    stopMicrophone(m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+    stopMicrophone(m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
 }
 
 void VirtualSessionTransport::stopMicrophone(std::optional<quint32> uid)
@@ -771,7 +771,7 @@ void VirtualSessionTransport::pumpMicrophone()
     // Queue drains at most 20ms, expires old speech, and never retries backlog
     // rejected by the worker socket. No PipeWire object exists in this broker.
     const auto pcm = m_connection->takeExternalMicrophone();
-    forwardMicrophone(pcm, m_connection->authenticatedPamUid());
+    forwardMicrophone(pcm, m_connection->authenticatedUserUid());
 }
 
 void VirtualSessionTransport::closed()
@@ -798,7 +798,7 @@ void VirtualSessionTransport::unavailable()
 
 QJsonObject VirtualSessionTransport::request(const QJsonObject &record)
 {
-    return request(record, m_connection ? m_connection->authenticatedPamUid() : std::nullopt);
+    return request(record, m_connection ? m_connection->authenticatedUserUid() : std::nullopt);
 }
 
 void VirtualSessionTransport::deliverControlRecord(const QJsonObject &incoming, std::optional<quint32> uid)
@@ -1026,7 +1026,7 @@ void VirtualSessionTransport::pushRecord(const QJsonObject &record)
 void VirtualSessionTransport::sendCapabilities()
 {
     if (m_capabilitiesSent || !m_connection || !m_connection->isAuthenticated() || !m_connection->hasControlChannel()) return;
-    loadUserSettings(m_connection->authenticatedPamUid());
+    loadUserSettings(m_connection->authenticatedUserUid());
     m_capabilitiesSent = true;
     LayoutControl::ChannelCapabilities capabilities;
     capabilities.host = u"virtual"_s;

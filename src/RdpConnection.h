@@ -100,6 +100,12 @@ public:
      */
     std::optional<quint32> authenticatedPamUid() const;
 
+    /** Desktop owner's OS UID established by PAM, or an explicit trusted
+     * custom-credential mapping. Empty for unscoped legacy configured users,
+     * before successful authentication and after close. The PAM-only getter
+     * stays empty for mapped credentials; these never masquerade as PAM. */
+    std::optional<quint32> authenticatedUserUid() const;
+
     /** Whether PostConnect authentication (PAM or a configured user) has
      * succeeded on this connection. Thread-safe; never reset. Until then no
      * channel data, input or control record from the client is delivered.

@@ -26,8 +26,11 @@ entries in `research.md` remain the roadmap identifiers.
   for about a minute, with changing snapshots, hardware VAAPI decoding and
   NVENC worker/backend reports. No resize/two-screen/failure or quiet-performance
   claim; T14 remains PARTIAL. See the ledger's latest evidence references.
-- T04 shared authenticated-user preference reader/parser is implemented in server
-  source `60e2659`; full authentication, worker parity and KCM acceptance remain.
+- T04 shared authenticated-user preferences and immutable root authentication
+  scopes are implemented in source. Console PAM/alias video and both brokers'
+  allowed/denied authentication gates pass on Sol/Buzz. The Virtual auth fixture
+  intentionally launches no desktop; T08 privileged editing and T10 actual
+  credential/retained-desktop migration remain. See shared settings coverage.
 - T09 explicit client types and T19 health explanations are accepted in client
   `e247d54`, released as 0.6.3 (`2df38a7`) to all six hosts. Focused tests and
   Buzz-to-Sol default/custom-port and packaged HEVC/type gates passed. Existing
@@ -145,6 +148,22 @@ Start T01 and develop the independent parity work while awaiting a user-triggere
 **Done means:** A setting/feature coverage table accounts for every working legacy field, including authentication/users, listen address/port, TLS, video/audio/media, monitor and wake settings. Both broker paths consume the validated model. Invalid/unauthorized values cannot partially apply or change another user's policy. Authentication and authorization behavior, including denied accounts, has focused tests and Sol live evidence. Any feature needing more implementation is assigned to T05–T08 rather than marked silently unsupported and discarded.
 
 **Evidence:** Schema/scope/default/restart matrix, migration mapping, validation/authority tests and authentication results.
+
+**2026-09-30 authentication source checkpoint (unshipped):** Both production
+entry points validate a root-owned policy before startup. Independent PAM
+any/allow-list/disabled scopes and explicit custom alias → original desktop-owner
+UID mappings are implemented. Verifiers use salted PBKDF2-SHA256, not plaintext.
+Identities remain absent until authentication; custom credentials never publish
+a PAM identity or bypass seat/retained-session authorization. Policy snapshots
+require restart. Twenty policy and eleven real RDP loopback entries pass; three
+existing authority suites pass. Buzz → bounded Sol Console accepts PAM/custom
+alias with first frames and rejects a valid but disallowed OS account. The
+production Virtual controller/transport authentication fixture independently
+accepts mapped/PAM identities and rejects disabled/wrong credentials. Both
+production CLIs reject six unsafe/malformed policy cases before listening.
+T08 privileged editing/help and T10 preserved legacy credentials/actual retained
+desktop migration remain required before release; installed fleet is unchanged.
+Evidence `~/dev/rdp/evidence/2026-09-30-t04-auth-scopes/SUMMARY.md`.
 
 ### T05 — Complete video and audio policy parity
 

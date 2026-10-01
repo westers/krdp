@@ -6,7 +6,9 @@
 
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <optional>
 
 #include <QTcpServer>
 
@@ -109,6 +111,15 @@ public:
     void setUsePAMAuthentication(bool usePAM);
     bool allowAnyPAMUser() const;
     void setAllowAnyPAMUser(bool allow);
+
+    /** Install an immutable administrator-owned broker authentication snapshot
+     * before listening. Custom credentials explicitly map to a desktop owner's
+     * nonroot OS UID; their login name is never an OS identity claim. Refuses
+     * changes while listening or while registered peers remain. */
+    bool setBrokerAuthenticationPolicy(bool usePAM, std::function<bool(quint32)> pamAdmission,
+        std::function<std::optional<quint32>(const QString &, const QString &)> mappedCredentials);
+    bool acceptsPamIdentity(quint32 uid) const;
+    std::optional<quint32> mappedCredentialIdentity(const QString &name, const QString &password) const;
 
     /**
      * The path of a certificate file to use for encrypting communications.

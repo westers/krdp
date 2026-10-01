@@ -61,8 +61,8 @@ the required save/reconnect behavior; live reload is not implemented by this sli
 | StandardClientMedia | true | Host ceiling AND user preference AND consent / both | User may opt out; never turns denied host permission on; T11/T12 live media |
 | VirtualStockClientPolicy | attach-or-create | User preference / Virtual | Same validated transaction; attach-or-create/refuse applied before stock-client gate |
 | CameraLoopbackDevice | empty | Host device grant / both | Existing host CLI path; user config cannot select/grant arbitrary device; equivalent device mapping T04/T08/T11 |
-| Users | empty | Host admission / credentials bound to original owner | Preserve existing custom credentials until an equivalent identity mapping is implemented/tested; T04/T08/T10; do not discard |
-| SystemUserEnabled | false | Host admission / both | Brokers currently PAM-enabled; legacy switch/effective owner equivalence and denied-account coverage remain T04/T08/T10 |
+| Users | empty | Host admission / credentials bound to original owner | Root policy maps salted password verifiers to the original owner's OS UID; real RDP alias authentication passes without a forged PAM identity. T08 editing and T10 migration/retained desktop gates remain |
+| SystemUserEnabled | false | Host admission / both | Root policy selects independent PAM any/allow-list/disabled routes. Canonical PAM account admission and denial pass on Sol; T10 preserves legacy owner-only/disabled effective values |
 
 ## Other settings and overrides
 
@@ -93,10 +93,89 @@ using the replying service's unique owner rather than a replacement service.
 
 ## Remaining gates
 
-- T04 is partial until account-admission/custom-credential equivalence, complete
-  authority tests, reload behavior and live allowed/denied authentication pass.
+- T04 authentication source gates pass: immutable root policy, explicit alias
+  owner identity, canonical PAM admission, rejected credentials and unsafe-file
+  startup refusal. T08 administrator editing and T10 legacy credential migration
+  and actual retained-desktop equivalence remain unshipped. See the contract below.
 - T05–T07 must implement the unapplied rows with no unexplained feature loss.
 - T08 must wire matching KCM scope/help/reconnect behavior and dual-KCM acceptance.
 - T10 must test omitted default values, backups, credentials and independent trust.
 - Both brokers must pass live per-user gates on Sol before any package rollout.
   No Hal live tests; no legacy route retirement from this implementation alone.
+
+## Root authentication contract (T04 source checkpoint)
+
+Both broker entry points load `/etc/farside/authentication.json` before starting
+listeners or desktop controllers. `--authentication-policy` selects an explicit
+path. It must be a root-owned regular file with no group/other permissions,
+at most 65536 bytes, no final symlink and a consistent bounded read. Invalid
+Console **or** Virtual policy refuses the complete startup transaction. Schema
+version 1 requires exactly `version`, `console`, and `virtual`; each route has
+`pam` and `credentials`. Route/credential fields and types are validated, and
+duplicate credential aliases or canonical account UIDs are refused. JSON object
+keys use Qt JSON's semantics; this does not claim duplicate object-key rejection.
+
+```json
+{
+  "version": 1,
+  "console": {
+    "pam": {"mode": "allow-list", "accounts": ["westers"]},
+    "credentials": []
+  },
+  "virtual": {
+    "pam": {"mode": "disabled", "accounts": []},
+    "credentials": []
+  }
+}
+```
+
+`pam.mode` accepts `any`, `allow-list`, or `disabled`. Only allow-list permits a
+nonempty accounts array. Every listed account resolves to a nonroot canonical
+OS UID before listening. Existing PAM authentication and account-management
+checks still precede admission. Each route can carry up to 128 aliases, each
+with exactly `alias`, `owner` and `verifier`. The owner must resolve to a nonroot
+OS account; the alias is never interpreted as an account name. The verifier
+format is `pbkdf2-sha256$600000$<32 lowercase hex salt>$<64 lowercase hex digest>`.
+Salt is 16 random bytes; password UTF-8 bytes use PBKDF2-HMAC-SHA256. Digest
+comparison is constant-time; no plaintext password is stored in this policy.
+
+Successful PAM publishes both PAM UID and desktop-owner UID. Successful custom
+credentials publish only their explicitly granted desktop-owner UID. Neither
+identity exists before authentication or after close. Console seat admission
+and all Virtual ownership/control/media paths use this owner identity, never
+a UID or username claimed in a client record. Unscoped legacy `Server::users`
+credentials cannot bypass an installed broker policy. Each authenticated owner's
+preferences come from that owner's filesystem identity, even if the alias
+spells another account's name. PAM is attempted first when enabled; an explicit
+custom grant is a separate fallback and does not masquerade as PAM authentication.
+
+Policy and account-resolution snapshots are installed before listening and
+cannot be changed while listening or registered peers remain. Administrator
+edits/account changes require broker restart; an existing stream retains its
+snapshot. User preferences remain read on fresh authenticated connections.
+
+**Missing-default and migration boundary:** An absent *implicit default* policy
+preserves the currently deployed brokers' PAM-any-nonroot admission and has no
+custom aliases. An absent explicitly selected file fails startup. This default
+is not the legacy per-user migration policy: T10 must materialize
+`SystemUserEnabled=true` as an allow-list containing the original daemon owner,
+or `false` as disabled. Every migrated legacy custom user must retain that
+original owner's UID and exact alias/password semantics. Do not resolve the
+alias as its owner or use `any` to migrate owner-only admission. Preserve old
+wallet/config/routes until T10 backups, destination trust and rollback gates
+pass. T08 must provide matching privileged editing/help/restart behavior before
+this source checkpoint is packaged.
+
+Sol source acceptance: 20 policy tests and 11 real RDP loopback entries passed;
+three existing authority suites passed. Buzz → bounded scratch Console :3397
+accepted PAM and a custom alias with HEVC first frames and snapshots, while an
+empty PAM allow-list rejected the valid OS password. A separate bounded :3398
+fixture uses the production Virtual controller/transport and an empty private
+registry with no desktop launcher: it accepts alias owner UID1000 with no PAM
+identity and separately accepts real PAM UID1000; disabled PAM and wrong
+passwords are refused. This proves authentication/control acceptance, not a
+retained Virtual desktop migration. Both production CLI entry points reject
+explicit missing, nonroot-owned, group-readable, malformed, symlink and FIFO
+policies before listening. Installed services/desktops remain unchanged; scratch
+credentials/TLS copies/desktop permission entry were removed. Evidence:
+`~/dev/rdp/evidence/2026-09-30-t04-auth-scopes/SUMMARY.md`.

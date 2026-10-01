@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionHostController.h"
 #include "VirtualSessionLaunchPlan.h"
+#include "BrokerAuthentication.h"
 #include "VirtualHostTls.h"
 #include "HostCertificate.h"
 #include "VideoCodecHost.h"
@@ -30,6 +31,7 @@ int main(int argc, char **argv)
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Persistent virtual-desktop RDP broker; does not attach to the physical console."));
     parser.addHelpOption();
+    parser.addOption({QStringLiteral("authentication-policy"), QStringLiteral("Root-owned shared Console/Virtual authentication policy; restart to reload."), QStringLiteral("path"), QStringLiteral("/etc/farside/authentication.json")});
     parser.addOption({QStringLiteral("certificate"), QStringLiteral("Absolute TLS certificate path."), QStringLiteral("path")});
     parser.addOption({QStringLiteral("certificate-key"), QStringLiteral("Absolute TLS private-key path."), QStringLiteral("path")});
     parser.addOption({QStringLiteral("address"), QStringLiteral("Numeric listen address."), QStringLiteral("address"), QStringLiteral("0.0.0.0")});
@@ -43,6 +45,8 @@ int main(int argc, char **argv)
     parser.addOption({QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto")});
     parser.process(application);
     if (getuid() || geteuid()) { qCritical("Virtual host requires an explicit root service invocation"); return 1; }
+    const auto authentication = KRdp::BrokerAuthentication::readFile(parser.value(QStringLiteral("authentication-policy")), parser.isSet(QStringLiteral("authentication-policy")));
+    if (!authentication.policy) { qCritical().noquote() << authentication.error; return 1; }
     bool validPort = false;
     const auto port = parser.value(QStringLiteral("port")).toUShort(&validPort);
     bool validQuality = false;
@@ -92,7 +96,7 @@ int main(int argc, char **argv)
     server.setAddress(address); server.setPort(port);
     server.setTlsCertificate(std::filesystem::path(certificate.toStdString()));
     server.setTlsCertificateKey(std::filesystem::path(key.toStdString()));
-    server.setUsePAMAuthentication(true); server.setAllowAnyPAMUser(true);
+    if (!KRdp::BrokerAuthentication::apply(server, authentication.policy->route(KRdp::BrokerAuthentication::Desktop::Virtual))) return 1;
     server.setStandardClientMedia(standardMediaValue == QLatin1String("true"));
     if (cameraLoopback != QLatin1String("none")) server.setCameraLoopbackDevice(cameraLoopback);
     KRdp::VirtualSessionHostController host(&server, {});

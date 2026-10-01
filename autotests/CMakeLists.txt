@@ -868,6 +868,16 @@ target_link_libraries(DisplayWakeGuardTest PRIVATE Qt6::Test Qt6::Core Qt6::DBus
 add_executable(BrokerUserSettingsTest BrokerUserSettingsTest.cpp)
 target_link_libraries(BrokerUserSettingsTest PRIVATE Qt6::Test KRdpBrokerUserSettings)
 add_test(NAME BrokerUserSettingsTest COMMAND BrokerUserSettingsTest)
+add_executable(BrokerAuthenticationTest BrokerAuthenticationTest.cpp)
+target_link_libraries(BrokerAuthenticationTest PRIVATE Qt6::Test KRdpBrokerAuthentication)
+add_test(NAME BrokerAuthenticationTest COMMAND BrokerAuthenticationTest)
+add_executable(BrokerAuthenticationVirtualProbe BrokerAuthenticationVirtualProbe.cpp
+    ../server/VirtualSessionHostController.cpp ../server/VirtualSessionTransport.cpp ../server/VirtualStockClient.cpp
+    ../server/VirtualSessionControl.cpp ../server/VirtualSessionSupervisor.cpp ../server/ConsoleWorkerEndpoint.cpp
+    ../server/ConsoleWorkerSession.cpp ../server/WorkerCodecBridge.cpp ../server/VirtualResize.cpp)
+target_link_libraries(BrokerAuthenticationVirtualProbe PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus
+    KRdp KRdpGuardianClient KRdpBrokerUserSettings KRdpBrokerAuthentication)
+# Explicit Sol-only bounded real-RDP gate, never a default CTest/Hal daemon test.
 foreach(target VirtualSessionTransportTest VirtualStockClientTest VirtualSessionHostControllerTest
         ConsoleHostControllerTest ConsoleHostLifecycleTest ConsoleRefusalLoopbackTest KrdpctlV2LoopbackTest)
     if(TARGET ${target})

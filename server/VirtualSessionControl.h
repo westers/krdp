@@ -15,7 +15,7 @@ class VirtualSessionControlTest;
 namespace KRdp
 {
 /** Server-side virtual-session command dispatch. The broker supplies a unique
- * transport ID and RdpConnection::authenticatedPamUid(), never JSON identity.
+ * transport ID and RdpConnection::authenticatedUserUid(), never JSON identity.
  * Release must synchronously revoke that transport's input/media destination.
  * Not advertised until the broker wires capture, release and transport lifetime.
  */

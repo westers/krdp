@@ -35,6 +35,8 @@ public:
     QList<User> users;
     bool usePamAuthentication = false;
     bool allowAnyPamUser = false;
+    std::function<bool(quint32)> pamAdmission;
+    std::function<std::optional<quint32>(const QString &, const QString &)> mappedCredentials;
 
     std::filesystem::path tlsCertificate;
     std::filesystem::path tlsCertificateKey;
@@ -165,6 +167,7 @@ void KRdp::Server::addUser(const User &user)
 
 bool KRdp::Server::matchesConfiguredUser(const QString &name, const QString &password) const
 {
+    if (d->mappedCredentials) return false; // Broker grants must carry their explicit desktop-owner scope.
     for (const auto &user : std::as_const(d->users)) {
         if (user.name.isEmpty() || user.password.isEmpty()) {
             continue;
@@ -204,6 +207,29 @@ bool Server::allowAnyPAMUser() const
 void Server::setAllowAnyPAMUser(bool allow)
 {
     d->allowAnyPamUser = allow;
+}
+
+bool Server::setBrokerAuthenticationPolicy(bool usePAM, std::function<bool(quint32)> pamAdmission,
+    std::function<std::optional<quint32>(const QString &, const QString &)> mappedCredentials)
+{
+    if (isListening() || !d->sessions.empty() || !pamAdmission || !mappedCredentials) return false;
+    d->usePamAuthentication = usePAM;
+    d->allowAnyPamUser = true;
+    d->pamAdmission = std::move(pamAdmission);
+    d->mappedCredentials = std::move(mappedCredentials);
+    return true;
+}
+
+bool Server::acceptsPamIdentity(quint32 uid) const
+{
+    return !d->pamAdmission || d->pamAdmission(uid);
+}
+
+std::optional<quint32> Server::mappedCredentialIdentity(const QString &name, const QString &password) const
+{
+    if (!d->mappedCredentials) return {};
+    const auto uid = d->mappedCredentials(name, password);
+    return uid && *uid && *uid != quint32(-1) ? uid : std::nullopt;
 }
 
 std::filesystem::path Server::tlsCertificate() const

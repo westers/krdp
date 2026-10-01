@@ -109,7 +109,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
 {
     Q_ASSERT(m_server);
     m_uidOf = [](RdpConnection *connection) -> std::optional<quint32> {
-        return connection ? connection->authenticatedPamUid() : std::nullopt;
+        return connection ? connection->authenticatedUserUid() : std::nullopt;
     };
     m_refuse = [](RdpConnection *connection, quint32 errorInfo) {
         // A Set Error Info PDU, so mstsc, stock FreeRDP and Remmina show a
@@ -275,7 +275,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         } else if (frame.monitors.size() > 1) return;
         for (const auto &client : m_clients) {
             // AUD-C-1: the session thread can mark a stream enabled before the
-            // main-thread PAM uid check has admitted it. Only admitted clients
+            // main-thread authenticated owner UID check has admitted it. Only admitted clients
             // may see the console, not even its monitor layout.
             if (!client->connection || !m_control.admitted(client->id)) continue;
             const QVector<VideoMonitor> desired = frame.monitors.size() > 1 ? frame.monitors : QVector<VideoMonitor>{};

@@ -35,6 +35,8 @@ struct Observed {
     int displayInfo = 0;
     bool controlChannelAtDisplayInfo = false;
     bool authenticatedBeforeRecord = true;
+    bool identityEmptyBeforeAuthentication = true;
+    std::optional<quint32> ownerUid, pamUid;
 };
 }
 
@@ -46,7 +48,8 @@ private:
     QString m_certificate;
     QString m_key;
 
-    std::unique_ptr<Server> startServer(std::chrono::milliseconds handshakeTimeout, Observed &observed, std::chrono::milliseconds replyDelay = 0ms)
+    std::unique_ptr<Server> startServer(std::chrono::milliseconds handshakeTimeout, Observed &observed, std::chrono::milliseconds replyDelay = 0ms,
+        const std::function<void(Server &)> &configure = {})
     {
         auto server = std::make_unique<Server>();
         server->setAddress(QHostAddress::LocalHost);
@@ -57,11 +60,17 @@ private:
         // the real user out.
         server->setUsers({{QStringLiteral("blank"), QString()}, {TestUser, Password}});
         server->setHandshakeTimeout(handshakeTimeout);
+        if (configure) configure(*server);
         connect(server.get(), &Server::newConnectionCreated, this, [&observed, replyDelay](RdpConnection *connection) {
+            observed.identityEmptyBeforeAuthentication &= !connection->authenticatedUserUid() && !connection->authenticatedPamUid();
             QPointer<RdpConnection> guard(connection);
             connect(connection, &RdpConnection::clientDisplayInfoReceived, connection, [&observed, guard]() {
                 ++observed.displayInfo;
                 observed.controlChannelAtDisplayInfo = guard && guard->hasControlChannel();
+                if (guard) {
+                    observed.ownerUid = guard->authenticatedUserUid();
+                    observed.pamUid = guard->authenticatedPamUid();
+                }
             }, Qt::QueuedConnection);
             connect(connection, &RdpConnection::controlRecordReceived, connection, [&observed, guard, replyDelay](const QJsonObject &record) {
                 const QString type = record.value(QLatin1String("type")).toString();
@@ -80,14 +89,14 @@ private:
         return server;
     }
 
-    int runProbe(quint16 port, const QString &password, QByteArray *output = nullptr)
+    int runProbe(quint16 port, const QString &password, QByteArray *output = nullptr, const QString &username = TestUser)
     {
         QProcess probe;
         auto environment = QProcessEnvironment::systemEnvironment();
         environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), m_dir.path());
         probe.setProcessEnvironment(environment);
         probe.start(QStringLiteral(KRDPCTL_PROBE),
-                    {QStringLiteral("127.0.0.1"), QString::number(port), TestUser, password, QStringLiteral("--query"), QStringLiteral("--timeout"), QStringLiteral("10")});
+                    {QStringLiteral("127.0.0.1"), QString::number(port), username, password, QStringLiteral("--query"), QStringLiteral("--timeout"), QStringLiteral("10")});
         if (!probe.waitForStarted(5000)) {
             return -1;
         }
@@ -149,6 +158,53 @@ private Q_SLOTS:
         QCOMPARE(observed.displayInfo, 1);
         QVERIFY(observed.controlChannelAtDisplayInfo);
         QVERIFY(observed.authenticatedBeforeRecord);
+        QVERIFY(!observed.ownerUid); // Unscoped legacy credentials do not manufacture an OS identity.
+    }
+
+    void mappedCredentialHasOwnerScopeButNoPamClaim_data()
+    {
+        QTest::addColumn<QString>("alias");
+        QTest::addColumn<QString>("password");
+        QTest::newRow("ascii") << TestUser << Password;
+        QTest::newRow("unicode") << QStringLiteral("επισκέπτης") << QStringLiteral("test-β-password");
+    }
+
+    void mappedCredentialHasOwnerScopeButNoPamClaim()
+    {
+        QFETCH(QString, alias);
+        QFETCH(QString, password);
+        Observed observed;
+        auto server = startServer(15s, observed, 0ms, [alias, password](Server &server) {
+            QVERIFY(server.setBrokerAuthenticationPolicy(false, [](quint32) { return false; },
+                [alias, password](const QString &name, const QString &candidate) -> std::optional<quint32> {
+                    return name == alias && candidate == password ? std::optional<quint32>(1000) : std::nullopt;
+                }));
+        });
+        QVERIFY(server);
+        QCOMPARE(runProbe(server->serverPort(), password, nullptr, alias), 0);
+        QVERIFY(observed.identityEmptyBeforeAuthentication);
+        QCOMPARE(observed.ownerUid, std::optional<quint32>(1000));
+        QVERIFY(!observed.pamUid);
+        QVERIFY(observed.authenticatedBeforeRecord);
+    }
+
+    void mappedCredentialRefusesWrongPasswordAndRootIdentity()
+    {
+        for (const quint32 uid : {quint32(0), quint32(-1), quint32(1000)}) {
+            Observed observed;
+            auto server = startServer(15s, observed, 0ms, [uid](Server &server) {
+                QVERIFY(server.setBrokerAuthenticationPolicy(false, [](quint32) { return false; },
+                    [uid](const QString &name, const QString &password) -> std::optional<quint32> {
+                        return name == TestUser && password == Password ? std::optional(uid) : std::nullopt;
+                    }));
+            });
+            QVERIFY(server);
+            const auto secret = uid == 1000 ? QStringLiteral("wrong") : Password;
+            QVERIFY(runProbe(server->serverPort(), secret) != 0);
+            QVERIFY(observed.records.isEmpty());
+            QCOMPARE(observed.displayInfo, 0);
+            QVERIFY(!observed.ownerUid && !observed.pamUid);
+        }
     }
 
     void wrongPasswordNeverReachesAnything()

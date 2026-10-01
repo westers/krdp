@@ -779,6 +779,7 @@ public:
     std::atomic<State> state = State::Initial;
     // Zero means no OS identity; uid+1 also represents uid0 without ambiguity.
     std::atomic<quint64> authenticatedPamUid = 0;
+    std::atomic<quint64> authenticatedUserUid = 0;
     // AUD-S1: set once, on the session thread, when PostConnect authentication
     // succeeded. Until then channelGate drops every channel PDU, no input
     // callback is installed, KRDPCTL is not opened and clientDisplayInfoReceived
@@ -949,6 +950,12 @@ RdpConnection::State RdpConnection::state() const
 std::optional<quint32> RdpConnection::authenticatedPamUid() const
 {
     const auto encoded = d->authenticatedPamUid.load();
+    return encoded ? std::optional<quint32>(quint32(encoded - 1)) : std::nullopt;
+}
+
+std::optional<quint32> RdpConnection::authenticatedUserUid() const
+{
+    const auto encoded = d->authenticatedUserUid.load();
     return encoded ? std::optional<quint32>(quint32(encoded - 1)) : std::nullopt;
 }
 
@@ -1799,6 +1806,7 @@ bool RdpConnection::onActivate()
 bool RdpConnection::onPostConnect()
 {
     d->authenticatedPamUid.store(0);
+    d->authenticatedUserUid.store(0);
     qCInfo(KRDP) << "New client connected:" << d->peer->hostname << freerdp_peer_os_major_type_string(d->peer) << freerdp_peer_os_minor_type_string(d->peer);
 
     rdpSettings *settings = d->peer->context->settings;
@@ -1811,17 +1819,33 @@ bool RdpConnection::onPostConnect()
     const QString password = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Password));
 
     bool authenticated = false;
-    std::optional<quint32> pamUid;
+    std::optional<quint32> pamUid, ownerUid;
     if (d->server->usePAMAuthentication()) {
         qCDebug(KRDP) << "Attempting authenticating user with PAM";
         if (d->server->allowAnyPAMUser() || username == KUser().loginName()) {
             pamUid = pamAuthenticate(username, password);
-            if (pamUid && (d->server->allowAnyPAMUser() || *pamUid == KUser().userId().nativeId())) {
+            if (pamUid && (d->server->allowAnyPAMUser() || *pamUid == KUser().userId().nativeId())
+                && d->server->acceptsPamIdentity(*pamUid)) {
                 qCDebug(KRDP) << "PAM authentication succeeded for user" << username;
                 authenticated = true;
+                ownerUid = pamUid;
             } else {
+                if (pamUid && !d->server->acceptsPamIdentity(*pamUid))
+                    qCInfo(KRDP) << "PAM authenticated account is not admitted by broker policy";
                 pamUid.reset();
             }
+        }
+    }
+
+    if (!authenticated) {
+        // The broker policy's aliases/verifiers use Unicode text. Decode the
+        // actual UTF-8 RDP fields; preserve the separate legacy/PAM path above.
+        ownerUid = d->server->mappedCredentialIdentity(
+            QString::fromUtf8(freerdp_settings_get_string(settings, FreeRDP_Username)),
+            QString::fromUtf8(freerdp_settings_get_string(settings, FreeRDP_Password)));
+        if (ownerUid) {
+            qCDebug(KRDP) << "Custom credential authenticated for an explicitly configured desktop owner";
+            authenticated = true;
         }
     }
 
@@ -1846,6 +1870,7 @@ bool RdpConnection::onPostConnect()
     if (pamUid) {
         d->authenticatedPamUid.store(quint64(*pamUid) + 1);
     }
+    if (ownerUid) d->authenticatedUserUid.store(quint64(*ownerUid) + 1);
     onAuthenticated();
     return true;
 }
@@ -1853,6 +1878,7 @@ bool RdpConnection::onPostConnect()
 bool RdpConnection::onClose()
 {
     d->authenticatedPamUid.store(0);
+    d->authenticatedUserUid.store(0);
     d->playbackSending = false;
     if (d->rdpsnd) {
         d->rdpsndState.active.store(false);
