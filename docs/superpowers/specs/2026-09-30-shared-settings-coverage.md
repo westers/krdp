@@ -337,3 +337,22 @@ capability validation and UI integration remain; this does not expose or ship
 the feature yet. Native physical hardware/mixed-scale client/persistence and
 T03/T08/package gates remain. Evidence
 `~/dev/rdp/evidence/2026-09-30-t06-owned-resize/SUMMARY.md`.
+
+
+### T08 host page source checkpoint (2026-10-01)
+
+All25 Console/Virtual host/session fields now have separate lazy immutable-scope
+models and actual KCM controls bound to the fixed root writer. Unit defaults,
+staged invalid values, preserve/discard/reload, denial/cancel and TLS explicit
+keep/existing/standard/import flows are verified. Caller-side regular-file PEM
+reads stay bounded; private input buffers never become readable properties, and
+new file selections invalidate the previously checked pair. Bounded sanitized
+replies and unknown-save outcomes require reload before another save.
+Seven pure suites, four populated Buzz page cases and sixteen compiled KCM cases
+pass; native-style screenshots and every field at width640 are accepted. Actual
+Buzz config/profiles and Sol installed broker PIDs are preserved. Source is
+unshipped. Stored/default maps are not installed/runtime proof; fixed actual-unit/
+drop-in/running-field readback and main legacy cutover remain, alongside installed
+PolicyKit/restart, worker/camera parity, T10/live stock coexistence and T27 gates.
+Virtual loopback unavailable does not complete T05/T08; no benchmark or Hal live
+test. Evidence ~/dev/rdp/evidence/2026-10-01-t08-host-ui/SUMMARY.md.

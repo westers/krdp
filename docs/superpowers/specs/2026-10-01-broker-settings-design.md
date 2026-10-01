@@ -204,6 +204,50 @@ pure/boundary suites and twenty-two isolated Sol root filesystem cases accept
 this component; no installed state changes. Evidence:
 `~/dev/rdp/evidence/2026-10-01-t08-host-writer/SUMMARY.md`.
 
+## Host page source checkpoint
+
+The KCM now owns three lazy models with immutable Console, Virtual and
+Virtual-session scopes. Opening the plugin/page never starts authorization or
+reads host files. Explicit Load/Save uses the fixed pkexec executable, disabled
+text agent and fixed host helper path; executable/timing injection exists only
+in C++ tests. Drafts and checked import material stay separate across sections.
+All25 typed fields have choices/text controls, unit defaults, staging validation,
+discard/reload confirmation and broker-restart/new-desktop help. Defaults reset
+TLS paths explicitly without regenerating material or touching authentication.
+
+Local file selection carries only URLs to the unprivileged model. Nonblocking
+FD inspection rejects FIFO/device/oversized/changing files before bounded reads;
+the shared parser checks current matching unencrypted PEM. C++ keeps the import
+buffers private and clears them on replacement/discard/success/destruction.
+Readable metadata contains only the public certificate fingerprint/algorithm/
+dates. A newly accepted file selection invalidates the previous checked pair.
+Helper requests use stdin, never argv/environment or caller-controlled root
+input paths. Standard and Import remove both path fields; Existing includes both.
+
+Replies are bounded and validated against the immutable scope, full typed
+defaults/effective map, revision and public metadata schema. Stderr/arbitrary
+error text is never forwarded to QML. Normal cancellation/denial preserves
+pending edits. Crash, timeout, malformed saved response and post-publication
+verification failure preserve drafts and require a reload before another save;
+they never claim the file is unchanged. Process lifetime gates prevent concurrent
+requests. File saving never restarts either host or modifies an existing desktop.
+
+The page names stored state explicitly. RuntimeVerified remains false; actual
+installed units/drop-ins/running-field readback is still independent work.
+Virtual loopback is disabled with a reason, while an existing override can be
+reset without being presented as functional. Namespace loopback parity and
+positive Console device acceptance remain T05/T08. GPU PCI fields control access
+to new desktop namespaces; encoder selection remains T15/T16.
+
+Seven complete pure suites, four Buzz populated-page cases and sixteen actual
+compiled KCM cases pass, with width640/scope/cancel/invalid/default/import flow
+and readable native-style screenshots. Corrected fixture compile and target-name
+errors are retained. No installed state changed. Main legacy cutover, runtime
+readback, installed pkexec/password/cancel/restart into both admission scopes,
+native worker/camera gates, T10 migration/live stock coexistence and T27 package/
+rollback/fleet delivery remain; T08/P0 is PARTIAL. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t08-host-ui/SUMMARY.md`.
+
 ## System service controls
 
 The service model addresses only `farside-console-host.service` and

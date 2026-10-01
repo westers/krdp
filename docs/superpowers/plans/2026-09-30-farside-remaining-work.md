@@ -503,6 +503,25 @@ loopback namespace grants remain separate T05/T08 implementation, not fulfilled
 by metadata/refusal. Standard PipeWire camera remains separate. Evidence:
 `~/dev/rdp/evidence/2026-10-01-t08-host-writer/SUMMARY.md`.
 
+**2026-10-01 host-page checkpoint (PARTIAL, unshipped):**
+Three lazy immutable-scope models and a complete25-field page now bind the
+accepted root writer through fixed normal pkexec. Drafts remain independent;
+unit defaults, invalid staging, discard/reload confirmation and explicit
+broker-restart/new-desktop scope work. TLS keep/existing/standard/import have
+complete dual-path contracts, bounded caller-side regular-file PEM reading,
+private buffers/public fingerprint/expiry and fresh-selection invalidation.
+Cancellation/denial preserves drafts; bounded invalid/crashed/timed-out/saved-but-
+unverified results require reload instead of claiming unchanged state. Seven
+pure suites, Buzz populated page4 and compiled KCM16 pass; width640 and native
+screenshots accepted. Initial fixture compile/target-name errors corrected and
+retained. Actual Buzz config/profile hashes and Sol brokers141254/141255 remain
+unchanged. Sol GPU169MiB used/7616MiB free/no compute apps, still greeter1043;
+UID1000 SSH/manager sessions are not a physical KDE owner. No benchmark or Hal
+live test. Runtime readback and main legacy cutover remain independent, as do
+installed authorization/restart, native worker/camera gates, T10/live stock
+coexistence and T27. Unavailable Virtual loopback is still T05/T08 work. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t08-host-ui/SUMMARY.md`.
+
 ### T09 — Make client types explicitly Console or Virtual
 
 **Instructions:** Add an explicit persisted type and select it when creating/editing a connection. Use authenticated capabilities to validate behavior; a custom port must not change the type. Replace the old `physicalConsole` distinction throughout form, cards, session identity, menus, topology and device paths. Keep an internal migration representation only while old saved entries are awaiting T10. Standard RDP hosts retain their appropriate existing-desktop behavior.

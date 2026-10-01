@@ -13,6 +13,7 @@
 #include "brokerauthenticationsettings.h"
 #include "brokerservices.h"
 #include "brokerpreferences.h"
+#include "brokerhostsettings.h"
 #include <KQuickManagedConfigModule>
 
 class QAbstractItemModel;
@@ -31,6 +32,12 @@ public:
     BrokerServices *brokerServices() const { return m_brokerServices; }
     Q_PROPERTY(BrokerPreferences *brokerPreferences READ brokerPreferences CONSTANT)
     BrokerPreferences *brokerPreferences() const { return m_brokerPreferences; }
+    Q_PROPERTY(BrokerHostSettings *consoleHostSettings READ consoleHostSettings CONSTANT)
+    BrokerHostSettings *consoleHostSettings() const { return m_consoleHostSettings; }
+    Q_PROPERTY(BrokerHostSettings *virtualHostSettings READ virtualHostSettings CONSTANT)
+    BrokerHostSettings *virtualHostSettings() const { return m_virtualHostSettings; }
+    Q_PROPERTY(BrokerHostSettings *virtualSessionSettings READ virtualSessionSettings CONSTANT)
+    BrokerHostSettings *virtualSessionSettings() const { return m_virtualSessionSettings; }
 
     Q_PROPERTY(SystemdService::Status serverStatus READ serverStatus NOTIFY serverStatusChanged)
     Q_PROPERTY(bool serverRunning READ isServerRunning NOTIFY serverStatusChanged)
@@ -162,6 +169,9 @@ private:
     BrokerAuthenticationSettings *m_brokerAuthentication = nullptr;
     BrokerServices *m_brokerServices = nullptr;
     BrokerPreferences *m_brokerPreferences = nullptr;
+    BrokerHostSettings *m_consoleHostSettings = nullptr;
+    BrokerHostSettings *m_virtualHostSettings = nullptr;
+    BrokerHostSettings *m_virtualSessionSettings = nullptr;
     void setServerStatus(SystemdService::Status status);
     void setErrorMessage(const QString &errorMessage);
     void setPortalPreauthorized(bool preauthorized);

@@ -19,9 +19,11 @@ add_library(kcm_krdpserver_core STATIC
     brokerauthenticationsettings.cpp
     brokerservices.cpp
     brokerpreferences.cpp
+    brokerhostsettings.cpp
 )
 set_target_properties(kcm_krdpserver_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_definitions(kcm_krdpserver_core PRIVATE FARSIDE_AUTHENTICATION_HELPER="${KDE_INSTALL_FULL_LIBEXECDIR}/farside-authentication-helper")
+target_compile_definitions(kcm_krdpserver_core PRIVATE FARSIDE_HOST_SETTINGS_HELPER="${KDE_INSTALL_FULL_LIBEXECDIR}/farside-host-settings-helper")
 target_include_directories(kcm_krdpserver_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_SOURCE_DIR}/server)
 
 # One schema for krdpserverrc: server/ owns it and the KCM generates its
@@ -55,6 +57,7 @@ target_link_libraries(kcm_krdpserver_core PUBLIC
     KRdpServerCertificate
     KRdpLegacyMigration
     KRdpBrokerUserSettings
+    KRdpBrokerHostAdmin
     PRIVATE
     qt6keychain
 )

@@ -131,6 +131,12 @@ KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
     m_brokerAuthentication = new BrokerAuthenticationSettings(this);
     m_brokerServices = new BrokerServices(this);
     m_brokerPreferences = new BrokerPreferences(this);
+    m_consoleHostSettings = new BrokerHostSettings(BrokerHostSettings::Scope::Console, this);
+    m_virtualHostSettings = new BrokerHostSettings(BrokerHostSettings::Scope::Virtual, this);
+    m_virtualSessionSettings = new BrokerHostSettings(BrokerHostSettings::Scope::VirtualSession, this);
+    QQmlEngine::setObjectOwnership(m_consoleHostSettings, QQmlEngine::CppOwnership);
+    QQmlEngine::setObjectOwnership(m_virtualHostSettings, QQmlEngine::CppOwnership);
+    QQmlEngine::setObjectOwnership(m_virtualSessionSettings, QQmlEngine::CppOwnership);
     QQmlEngine::setObjectOwnership(m_brokerPreferences, QQmlEngine::CppOwnership);
     QQmlEngine::setObjectOwnership(m_brokerServices, QQmlEngine::CppOwnership);
     QQmlEngine::setObjectOwnership(m_brokerAuthentication, QQmlEngine::CppOwnership);
