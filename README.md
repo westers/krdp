@@ -7,10 +7,12 @@ Library and examples for creating an RDP server.
 
 The fork's Networking settings module manages **Console** and **Virtual** through
 four scoped pages. Desktop and mobile use the same navigation page. This is the
-current **unshipped source** implementation (2026-10-01); installed releases still
-use their previous module until the live authorization, migration, coexistence
-and package gates in [the remaining-work plan](docs/superpowers/plans/2026-09-30-farside-remaining-work.md)
-pass. The example-server sections below also describe retained legacy behavior.
+implementation is installed on **Hal, Buzz and Sol** as server `df517e8`
+(2026-10-01); Ace, Cray and Marvin retain their previous release. Package,
+rollback and basic connection gates pass. Installed authorization, migration and
+coexistence acceptance remains open in [the task plan](docs/plans/2026-10-01-farside-task-plan.md).
+Existing service routes are preserved. The example-server sections below also
+describe retained legacy behavior.
 
 | Page | Scope | When a saved change takes effect |
 |---|---|---|

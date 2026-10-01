@@ -1,8 +1,9 @@
 # Farside: one task at a time
 
 Date: 2026-10-01. Target agent: `gpt-6.1-sol`.
-Status: N01 accepted in source and N02 client candidate complete on 2026-10-01;
-no deployment. N03 is proposed next, only after Steve selects it. Goal remains paused.
+Status: N01/N02/N03 artifacts complete; Steve explicitly requested client/server
+updates on Hal, Buzz and Sol on 2026-10-01. Those installations and basic gates
+passed. Remaining N04/N05 integration acceptance is open. Goal remains paused.
 
 ## Start here
 
@@ -12,9 +13,10 @@ resume a Goal, execute the whole queue, or start the next task automatically.
 The existing Goal remains paused. Superpowers workflows and automatic delegation
 are not required. Existing plans, tests, code and evidence remain useful inputs.
 
-**N02 is complete: client 0.6.4 candidate; next task to select: N03, server candidate.**
-Native acceptance then uses those packages. Installed clients remain 0.6.3;
-the candidate has not been launched or installed.
+**Requested three-host update complete:** Hal, Buzz and Sol have client 0.6.4
+and server `df517e8`; other hosts remain unchanged. Next tasks to select are the
+remaining installed N04/N05 checks. This installation request does not close
+their broader acceptance criteria or authorize further tasks.
 
 This file replaces the execution process in the September 30 goal contract and
 October 1 release plan. It preserves the T01–T28 feature scope, existing acceptance
@@ -25,13 +27,13 @@ parent T-task being complete. New test quantity alone does not count as delivery
 
 | Area | Already done | Still missing |
 |---|---|---|
-| Delivered client | 0.6.3 / `2df38a7`, all six hosts; T09 types and T19 health explanations accepted. N02 builds candidate 0.6.4 / `afed6fb` with debug actions OFF | Candidate contains owned Console resize/Fit, capability guard, explicit initial monitor opt-in and N01 wallet guard; N05 live acceptance/N06 deployment remain |
-| Delivered server | `f255ee2` Sol/Hal; `4b308bd` Buzz/ace/cray/marvin; wire 6 | Compiled source checkpoint `d437511c`, wire 11, is unshipped; documentation checkpoint `8c239d31` follows it |
+| Delivered client | 0.6.4 / `afed6fb` Hal/Buzz/Sol, debug actions OFF; 0.6.3 / `2df38a7` Ace/Cray/Marvin | Remaining N05 monitor acceptance and N06 fleet rollout/tag |
+| Delivered server | `df517e8` Hal/Buzz/Sol, wire 11, private KPipeWire `9d6b08c`; `4b308bd` other hosts, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
 | Settings/auth | Scoped authentication, services, 17 preferences, 25 host/session controls and runtime inspection implemented; `44726890` removes legacy KCM adapters | Real installed password/cancel/save/restart, effective runtime policy and live stock coexistence |
 | Monitors/video | Quiet Sol private worker single/two-screen HEVC creation/resize/Fit/decoded restoration passes; client UI and protocol evidence exists | Final packaged Console RDP, broader topology lifecycle; earlier loaded CUDA OOM/fallback is unresolved |
 | Discover/locker | Font-cache cause demonstrated and repaired on Sol; Steve confirms Console Discover password entry and ordinary lock/unlock work | Virtual/failure/restart matrix and original lock/output-release race; agent's original failing trace still missing |
-| Migration | `d437511c` effective-settings planner; 26-field schema, 17 explicit defaults, owner/locks/conflicts/revisions; 13 pure suites and 32 migration cases pass | Durable apply/backup/recovery/rollback, profiles/trust/retained integration; N01 guard still awaits deployment |
-| Wallets | N01 disables automatic wallet copying in client/server; existing metadata preserved, initial metadata create-only/private; no real wallet access | Source accepted, unshipped. Buzz’s three pending entries still require N16 reconciliation |
+| Migration | `d437511c` effective-settings planner and N01 guard included in Hal/Buzz/Sol packages | Durable apply/backup/recovery/rollback, profiles/trust/retained integration; guard deployment to remaining hosts |
+| Wallets | N01 automatic copying disabled in installed Hal/Buzz/Sol client/server; no direct wallet operations during deployment | Buzz’s three pending entries still require N16 reconciliation; other hosts retain older retry code |
 | Runtime | Steve reports on October 1 that **both Buzz and Sol now have no AI workloads**; both are available for testing. Last measured Sol snapshot had active brokers and SDDM greeter | Recheck current load/login before live work; no AI does not establish a signed-in Console owner or a measured performance result |
 
 The old ledger records **2 done, 15 partial, 10 planned and 1 documentation task
@@ -138,7 +140,8 @@ shared handoff. Automatic password copying removed because QtKeychain has no
 create-only write. Two focused migration suites pass (client 7/server 8 Qt cases);
 full affected client/server executables compile. Neither migration suite links
 QtKeychain; normal explicit storage and server read fallback remain. Evidence:
-`~/dev/rdp/evidence/2026-10-01-n01-wallet-guards/SUMMARY.md`. Not deployed.
+`~/dev/rdp/evidence/2026-10-01-n01-wallet-guards/SUMMARY.md`.
+Now included in Hal/Buzz/Sol installed packages; other hosts await deployment.
 
 **Do:** Inspect client `src/core/LegacyMigration.cpp` and server
 `server/FarsideMigration.cpp`. Remove blind startup/diagnostic copying. Preserve
@@ -172,6 +175,10 @@ access or performance claim. N01 tests reused. Evidence:
 `~/dev/rdp/evidence/2026-10-01-n02-client-candidate/SUMMARY.md`.
 T06/T27 remain partial; N03 proposed, not started.
 
+Subsequently installed on Hal/Buzz/Sol at Steve's explicit three-host request;
+see the deployment evidence below. The preceding paragraph records the original
+N02 artifact completion boundary.
+
 Prerequisite N01. **Do:** Freeze `ef692be` plus N01/release fixes; update actual
 Farside version/metainfo/README, build committed sources with debug actions OFF.
 Archive exact 0.6.3 rollback; verify hash/dependencies and Sol/Buzz apt simulation.
@@ -182,6 +189,15 @@ rollback recorded. No live acceptance or fleet delivery claimed. No further UI w
 
 ### N03 — Produce the paired server candidate (T04–T08/T27)
 
+**DONE as an artifact, 2026-10-01.** Clean `df517e8` source,
+`scripts/package-farside.sh`, pinned KPipeWire `9d6b08c`, jobs 3; no main build or
+private library source changes. Package `6.6.80+git202610012028.df517e8-1`, SHA256
+`4d938f5b4ba2b4ca374974aeb31123f54e1b70c676606318cfd0783fb0aeb383`, archived at
+`~/dev/rdp/debs/candidates/server/df517e8/`. Contract/RUNPATH/dependency/helper/
+policy/KCM/unit/PAM checks pass; all three apt simulations change only the two
+requested packages. Exact prior server/client rollback artifacts preserved.
+Subsequent installation explicitly requested by Steve; original parent gates remain.
+
 Prerequisite N01. **Do:** Freeze `d437511c` plus guard/package fixes in a new clean
 checkout; `scripts/package-farside.sh`, pinned library, bounded jobs. Check ELF/
 RUNPATH, helpers/policies, KCM resources, units/PAM/conffiles and apt/path conflicts.
@@ -191,6 +207,12 @@ Archive exact per-host rollback; do not touch Hal's old build or dependencies.
 dependencies and Sol/Buzz simulations pass. Fix only packaging failures; no install.
 
 ### N04 — Install and prove server rollback on Sol (T08/T27)
+
+**PARTIAL, 2026-10-01.** Sol install → exact server/client rollback → return
+passes with active broker/current-worker binary checks. Existing settings,
+certificates, profiles, holds and physical greeter PIDs preserved. Installed
+helpers/policies/KCM resources verified. Actual KCM cancel/save/explicit restart/
+readback authorization flow still open. No pre-existing retained desktop at cutover.
 
 Prerequisite N03. **Do:** Inventory active connections/retained workers; schedule
 safe restart without discarding desktops. Install candidate; verify running
@@ -204,6 +226,15 @@ the exact scheduling requirement. Sol remains a test candidate, not fleet delive
 
 ### N05 — Accept the packaged client on Buzz/Sol (T06/T09/T27)
 
+**PARTIAL, 2026-10-01.** Packaged client 0.6.4 authenticated/disconnected from
+Sol Console and Virtual; Console application received HEVC with hardware encode
+and Intel VAAPI decode. Sol client rollback/return passes. Private client profiles
+and bus prevent wallet activation; gates request no monitor changes or devices.
+Virtual connection created one new retained desktop, then normal systemd stop
+cleaned that test desktop; durable audit records retained. Virtual stream/monitor
+resize/Fit/opt-in/reconnect/restore and full remembered-password checks still open.
+Sol physical seat remains SDDM greeter; no signed-in Console owner.
+
 Prerequisites N02/N04. **Do:** Test actual package: Console/Virtual, custom ports,
 current installed server behavior and new advertised capabilities, explicit monitor
 opt-in, owned one/two-screen resize/Fit, decoded frames, reconnect and exact restore.
@@ -215,6 +246,12 @@ and rollback pass. Missing Sol physical owner is a named prerequisite, not a cue
 to run more unit tests. Failures get only the needed fix and affected rerun.
 
 ### N06 — Release/deploy the accepted client (T27)
+
+**PARTIAL deployment, 2026-10-01.** At Steve's explicit request, Hal/Buzz/Sol
+client0.6.4 and serverdf517e8 installed; Hal last, no live test. Existing Hal/Buzz
+user :3389 and Sol Console/Virtual routes retained. No full acceptance/tag/fleet
+release claim; Ace/Cray/Marvin unchanged. Goal remains paused. Evidence for this
+bounded three-host update: `~/dev/rdp/evidence/2026-10-01-three-host-update/SUMMARY.md`.
 
 Prerequisite N05. **Do:** Publish version/tag/source, archive the verified package,
 install intended hosts preserving holds/profiles/trust and existing windows; Hal last.
@@ -400,7 +437,7 @@ do not duplicate its long history here or close a task by renaming it.
 | T24 Sessions page | Planned | N28 |
 | T25 UX | Planned | N29 |
 | T26 Performance/visual | Partial; functional/load snapshots only | N30 |
-| T27 Releases | Partial; 0.6.3 client fleet delivered; N02 0.6.4 candidate artifact done | N03–N06/N18; included in later deliveries |
+| T27 Releases | Partial; N02/N03 artifacts complete; client0.6.4/serverdf517e8 Hal/Buzz/Sol installed, other hosts unchanged | Remaining N04/N05 integration, N06 fleet/tag and N18 consolidation; later deliveries |
 | T28 Documentation | Ongoing | This plan + short affected-row/handoff updates per task |
 
 ### Prompt for a fresh task
