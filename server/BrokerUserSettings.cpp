@@ -5,22 +5,22 @@
 #include <QMap>
 #include <QRegularExpression>
 #include <QStringList>
+#include <type_traits>
 
 using namespace Qt::StringLiterals;
 
 namespace KRdp::BrokerUserSettings
 {
-Result parse(const QByteArray &contents)
+Fields fields(const QByteArray &contents)
 {
-    if (contents.size() > UserConfiguration::MaximumBytes || contents.contains('\0'))
-        return {{}, QStringLiteral("configuration is oversized or contains NUL")};
-    QMap<QString, QString> fields;
+    Fields result;
     bool general = false;
     for (const auto &raw : contents.split('\n')) {
         const auto line = raw.trimmed();
         if (line.isEmpty() || line.startsWith('#')) continue;
         if (line.startsWith('[')) {
             general = line == "[General]" || line == "[General][$i]";
+            if (line == "[General][$i]") result.immutableGroup = true;
             continue;
         }
         if (!general) continue;
@@ -29,10 +29,21 @@ Result parse(const QByteArray &contents)
         auto key = line.left(equals).trimmed();
         // Only nonlocalized values and KConfig's immutable marker participate.
         // Do not expand [$e] expressions using a privileged broker environment.
-        if (key.endsWith("[$i]")) key.chop(4);
+        const bool immutable = key.endsWith("[$i]");
+        if (immutable) key.chop(4);
         if (key.contains('[')) continue;
-        fields.insert(QString::fromUtf8(key), QString::fromUtf8(line.mid(equals + 1)).trimmed());
+        const auto name = QString::fromUtf8(key);
+        result.values.insert(name, QString::fromUtf8(line.mid(equals + 1)).trimmed());
+        if (immutable) result.immutable.insert(name);
     }
+    return result;
+}
+
+Result parse(const QByteArray &contents)
+{
+    if (contents.size() > UserConfiguration::MaximumBytes || contents.contains('\0'))
+        return {{}, QStringLiteral("configuration is oversized or contains NUL")};
+    const auto fields = BrokerUserSettings::fields(contents).values;
     Preferences p;
     QString error;
     const auto integer = [&](const QString &key, int low, int high, auto &target) {
@@ -106,5 +117,104 @@ Result readUser(quint32 uid)
 {
     const auto data = UserConfiguration::readUser(uid);
     return data ? parse(*data) : Result{};
+}
+
+QStringList preferenceKeys()
+{
+    return {u"Quality"_s, u"AdaptiveQuality"_s, u"PreferAudioQuality"_s, u"Codec"_s, u"SoftwareEncoding"_s, u"Av1Tiles"_s,
+        u"Avc444MotionGapMs"_s, u"Avc444RestMs"_s, u"Avc444MaxGapMs"_s, u"MonitorMode"_s, u"MonitorIndex"_s,
+        u"VirtualMonitorPolicy"_s, u"VirtualMonitorLayout"_s, u"VirtualMonitorFallbackSize"_s,
+        u"WakeDisplayOnConnect"_s, u"StandardClientMedia"_s, u"VirtualStockClientPolicy"_s};
+}
+
+QVariantMap publicValues(const Preferences &p, const Fields &fields)
+{
+    QVariantMap result;
+    const auto put = [&](const QString &key, const auto &value) {
+        if (value && fields.values.contains(key)) {
+            if constexpr (std::is_same_v<typename std::decay_t<decltype(value)>::value_type, bool>)
+                result.insert(key, *value ? u"true"_s : u"false"_s);
+            else result.insert(key, QString::number(*value));
+        }
+    };
+    put(u"Quality"_s, p.quality); put(u"AdaptiveQuality"_s, p.adaptiveQuality); put(u"PreferAudioQuality"_s, p.preferAudioQuality);
+    put(u"MonitorIndex"_s, p.monitorIndex); put(u"WakeDisplayOnConnect"_s, p.wakeDisplayOnConnect); put(u"StandardClientMedia"_s, p.standardClientMedia);
+    if (p.codec) result.insert(u"Codec"_s, *p.codec == CodecPreference::Auto ? u"auto"_s : *p.codec == CodecPreference::Avc420 ? u"avc420"_s : u"avc444"_s);
+    if (p.softwareEncoding) result.insert(u"SoftwareEncoding"_s, QString::fromLatin1(CodecPolicy::softwareEncodingName(*p.softwareEncoding)));
+    if (p.av1Tiles) result.insert(u"Av1Tiles"_s, CodecPolicy::av1TilesName(*p.av1Tiles));
+    for (const auto &[key, value] : {std::pair{u"MonitorMode"_s, p.monitorMode}, {u"VirtualMonitorPolicy"_s, p.virtualMonitorPolicy},
+            {u"VirtualMonitorLayout"_s, p.virtualMonitorLayout}, {u"VirtualStockClientPolicy"_s, p.virtualStockClientPolicy}})
+        if (value) result.insert(key, *value);
+    if (p.virtualMonitorFallbackSize) {
+        const QString size = QString::number(p.virtualMonitorFallbackSize->width()) + u"x"_s + QString::number(p.virtualMonitorFallbackSize->height());
+        result.insert(u"VirtualMonitorFallbackSize"_s, size);
+    }
+    if (p.chroma) {
+        for (const auto &[key, value] : {std::pair{u"Avc444MotionGapMs"_s, p.chroma->motionGapMs}, {u"Avc444RestMs"_s, p.chroma->restMs}, {u"Avc444MaxGapMs"_s, p.chroma->maxGapMs}})
+            if (fields.values.contains(key)) result.insert(key, QString::number(value));
+    }
+    return result;
+}
+
+Edit edit(const QByteArray &original, const QVariantMap &desired)
+{
+    const auto parsed = parse(original);
+    if (!parsed.error.isEmpty()) return {{}, parsed.error};
+    const auto oldFields = fields(original);
+    const auto oldValues = publicValues(parsed.preferences, oldFields);
+    const auto keys = preferenceKeys();
+    for (auto it = desired.cbegin(); it != desired.cend(); ++it) {
+        const auto value = it.value().toString();
+        if (!keys.contains(it.key()) || it.value().metaType() != QMetaType::fromType<QString>() || value.size() > 256
+            || value.contains(QChar::Null) || value.contains(u'\n') || value.contains(u'\r')) return {{}, u"Invalid preference update"_s};
+    }
+    QByteArray submitted("[General]\n");
+    for (auto it = desired.cbegin(); it != desired.cend(); ++it) submitted += it.key().toUtf8() + '=' + it.value().toString().toUtf8() + '\n';
+    const auto submittedResult = parse(submitted);
+    if (!submittedResult.error.isEmpty()) return {{}, submittedResult.error};
+    const auto canonical = publicValues(submittedResult.preferences, fields(submitted));
+    for (const auto &key : keys) {
+        if ((oldFields.immutableGroup || oldFields.immutable.contains(key))
+            && (canonical.contains(key) != oldValues.contains(key) || canonical.value(key) != oldValues.value(key)))
+            return {{}, u"Preference is locked: "_s + key};
+    }
+    if (canonical == oldValues) return {original, {}};
+    // Preserve every unedited line exactly, including comments, host/legacy
+    // data, localized/expanded keys and repeated sections. Insert the new
+    // whitelist once into the last General section.
+    const auto lines = original.split('\n');
+    QList<QByteArray> kept;
+    bool general = false;
+    qsizetype insertion = -1;
+    for (qsizetype i = 0; i < lines.size(); ++i) {
+        const auto raw = lines[i]; const auto line = raw.trimmed();
+        if (line.startsWith('[')) {
+            general = line == "[General]" || line == "[General][$i]";
+            if (general) insertion = kept.size() + 1;
+        }
+        const auto equals = line.indexOf('=');
+        const auto name = QString::fromUtf8(line.left(equals).trimmed());
+        const bool editable = general && equals > 0 && keys.contains(name) && !oldFields.immutableGroup && !oldFields.immutable.contains(name);
+        if (!editable) kept.append(raw + (i + 1 < lines.size() ? QByteArrayLiteral("\n") : QByteArray()));
+        if (general) insertion = kept.size();
+    }
+    QByteArray block;
+    const QByteArray newline = original.contains("\r\n") ? QByteArrayLiteral("\r\n") : QByteArrayLiteral("\n");
+    for (const auto &key : keys) {
+        if (canonical.contains(key) && !oldFields.immutableGroup && !oldFields.immutable.contains(key))
+            block += key.toUtf8() + '=' + canonical.value(key).toString().toUtf8() + newline;
+    }
+    if (insertion < 0 && !block.isEmpty()) { insertion = kept.size(); block.prepend(QByteArrayLiteral("[General]") + newline); }
+    if (!block.isEmpty()) {
+        if (insertion > 0 && !kept[insertion - 1].isEmpty() && !kept[insertion - 1].endsWith('\n')) kept[insertion - 1].append(newline);
+        kept.insert(insertion, block);
+    }
+    QByteArray document;
+    for (const auto &line : kept) document.append(line);
+    const auto valid = parse(document);
+    if (!valid.error.isEmpty()) return {{}, valid.error};
+    const auto applied = publicValues(valid.preferences, fields(document));
+    if (applied != canonical) return {{}, u"Preference update did not match readback"_s};
+    return {document, {}};
 }
 }

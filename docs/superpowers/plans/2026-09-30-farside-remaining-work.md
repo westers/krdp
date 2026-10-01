@@ -446,6 +446,27 @@ listen/TLS/device administration, atomic user-preference bindings/help, T10/live
 stock coexistence and T27 delivery remain independent work. Evidence:
 `~/dev/rdp/evidence/2026-10-01-t08-services/SUMMARY.md`.
 
+**2026-10-01 shared-preference settings checkpoint (PARTIAL, unshipped):**
+The scoped KCM page now binds all seventeen parsed preference fields, with
+separate Console display/session/Virtual compatibility help, per-field host
+inheritance, locked-key preservation, staged validation, explicit save/reload/
+discard/default actions and reconnect help. Public metadata excludes raw legacy/
+host/credential fields. Shared lexical/value parsing preserves unrelated bytes,
+repeated sections and localized/expanded/immutable entries. Atomic user0600
+writes take a safe lock, reject stale full-document snapshots and use an
+inspected directory descriptor; new directories are private even with umask0002.
+Four pure suites pass. Sol's private canonical-home namespace verifies production
+editor save -> authenticated reader agreement for every field and restored host
+inheritance despite unrelated HOME/XDG; four cases including setup/cleanup pass.
+Buzz actual page4 (all bindings, keyboard edit, invalid/stale/cancel/default,
+width640 geometry) and compiled KCM15 pass, with populated screenshots reviewed.
+Actual Sol preferences/broker PIDs and Buzz config/profile hashes preserved;
+private fixtures removed. This is reader/storage/UI acceptance, not native
+worker codec/display/audio or installed package acceptance. Main-page legacy
+cutover, host listener/TLS/device editor, real installed authorization/restart,
+T10/live stock coexistence and T27 remain independent work. Evidence:
+`~/dev/rdp/evidence/2026-10-01-t08-preferences/SUMMARY.md`.
+
 ### T09 — Make client types explicitly Console or Virtual
 
 **Instructions:** Add an explicit persisted type and select it when creating/editing a connection. Use authenticated capabilities to validate behavior; a custom port must not change the type. Replace the old `physicalConsole` distinction throughout form, cards, session identity, menus, topology and device paths. Keep an internal migration representation only while old saved entries are awaiting T10. Standard RDP hosts retain their appropriate existing-desktop behavior.

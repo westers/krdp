@@ -18,6 +18,7 @@ add_library(kcm_krdpserver_core STATIC
     hostdevices.cpp
     brokerauthenticationsettings.cpp
     brokerservices.cpp
+    brokerpreferences.cpp
 )
 set_target_properties(kcm_krdpserver_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_definitions(kcm_krdpserver_core PRIVATE FARSIDE_AUTHENTICATION_HELPER="${KDE_INSTALL_FULL_LIBEXECDIR}/farside-authentication-helper")
@@ -53,6 +54,7 @@ target_link_libraries(kcm_krdpserver_core PUBLIC
     KF6::I18n
     KRdpServerCertificate
     KRdpLegacyMigration
+    KRdpBrokerUserSettings
     PRIVATE
     qt6keychain
 )

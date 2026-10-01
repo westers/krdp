@@ -539,6 +539,11 @@ KCM.SimpleKCM {
                 text: i18nc("@action:button", "Console and Virtual Services…")
                 onClicked: root.openPage("BrokerServicesPage")
             }
+            QQC2.Button {
+                objectName: "brokerPreferencesLink"
+                text: i18nc("@action:button", "Your Console and Virtual Preferences…")
+                onClicked: root.openPage("BrokerPreferencesPage")
+            }
             spacing: Kirigami.Units.smallSpacing
 
             QQC2.Button {

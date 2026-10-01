@@ -130,6 +130,8 @@ KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
 {
     m_brokerAuthentication = new BrokerAuthenticationSettings(this);
     m_brokerServices = new BrokerServices(this);
+    m_brokerPreferences = new BrokerPreferences(this);
+    QQmlEngine::setObjectOwnership(m_brokerPreferences, QQmlEngine::CppOwnership);
     QQmlEngine::setObjectOwnership(m_brokerServices, QQmlEngine::CppOwnership);
     QQmlEngine::setObjectOwnership(m_brokerAuthentication, QQmlEngine::CppOwnership);
     FarsideMigration::migrateCredentialsAndPermission();

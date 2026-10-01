@@ -7,6 +7,9 @@
 #include <QByteArray>
 #include <QSize>
 #include <QString>
+#include <QMap>
+#include <QSet>
+#include <QVariantMap>
 #include <functional>
 #include <optional>
 
@@ -42,4 +45,17 @@ struct Result {
 using Reader = std::function<Result(quint32)>;
 Result parse(const QByteArray &contents);
 Result readUser(quint32 authenticatedUid);
+struct Fields {
+    QMap<QString, QString> values;
+    QSet<QString> immutable;
+    bool immutableGroup = false;
+};
+/** Shared lexical rules for production parsing and preservation-aware editing. */
+Fields fields(const QByteArray &contents);
+QStringList preferenceKeys();
+/** Canonical public values only, excluding all host/legacy/credential keys. */
+QVariantMap publicValues(const Preferences &preferences, const Fields &fields);
+struct Edit { QByteArray document; QString error; };
+/** Complete desired whitelist; missing entries inherit host defaults. */
+Edit edit(const QByteArray &original, const QVariantMap &desired);
 }

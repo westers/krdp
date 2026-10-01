@@ -27,6 +27,20 @@ verification and still-open native gates. Parsing alone does not claim support. 
 points enable the reader; socket-free tests inject it and never read Hal's actual
 settings. Legacy per-user serving remains in place until all parity gates pass.
 
+## Shared preference UI/storage source checkpoint (2026-10-01)
+
+All seventeen recognized preference fields now have actual scoped KCM bindings,
+translated help, optional host inheritance and production-parser validation.
+Per-field/default reset preserves immutable values and unrelated host/legacy/
+credential entries. Saves are atomic user0600 and revision-bound to the entire
+document; they never broadcast reload notifications and require reconnect.
+The page never exposes raw config, listener/TLS/admission or device grant fields.
+Four pure suites, Sol private canonical-home editor/reader agreement4, Buzz
+actual complete-field page4 (including width640) and real KCM15 pass. Source
+acceptance remains separate from worker/native and installed delivery. Main-page
+legacy cutover and host listener/TLS/device administration still remain T08.
+Evidence `~/dev/rdp/evidence/2026-10-01-t08-preferences/SUMMARY.md`.
+
 ## Complete legacy schema inventory
 
 Defaults below describe `krdpserversettings.kcfg`; broker defaults can be explicitly

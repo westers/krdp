@@ -38,7 +38,9 @@ std::optional<QByteArray> readFile(const QString &path, quint32 uid)
     return data;
 }
 
-std::optional<QByteArray> readUser(quint32 uid)
+namespace {
+struct Account { gid_t gid; QString path; };
+std::optional<Account> accountFor(quint32 uid)
 {
     if (!uid) return std::nullopt;
     passwd account{};
@@ -47,16 +49,29 @@ std::optional<QByteArray> readUser(quint32 uid)
     int status = 0;
     while ((status = ::getpwuid_r(uid, &account, buffer.data(), buffer.size(), &resolved)) == ERANGE && buffer.size() < 1048576)
         buffer.resize(buffer.size() * 2);
-    if (status || !resolved || !account.pw_dir || account.pw_dir[0] != '/') return std::nullopt;
-    const QString path = QFile::decodeName(account.pw_dir) + QStringLiteral("/.config/farsideserverrc");
-    const auto previousGid = ::setfsgid(account.pw_gid);
+    if (status || !resolved || account.pw_uid != uid || !account.pw_dir || account.pw_dir[0] != '/') return std::nullopt;
+    return Account{account.pw_gid, QFile::decodeName(account.pw_dir) + QStringLiteral("/.config/farsideserverrc")};
+}
+}
+
+std::optional<QString> userPath(quint32 uid)
+{
+    const auto account = accountFor(uid);
+    return account ? std::optional(account->path) : std::nullopt;
+}
+
+std::optional<QByteArray> readUser(quint32 uid)
+{
+    const auto account = accountFor(uid);
+    if (!account) return std::nullopt;
+    const auto previousGid = ::setfsgid(account->gid);
     const auto previousUid = ::setfsuid(uid);
     const auto restoreIdentity = qScopeGuard([previousGid, previousUid] {
         ::setfsuid(previousUid);
         ::setfsgid(previousGid);
     });
     // These Linux calls return the old identity even when a switch failed.
-    if (::setfsuid(uid_t(-1)) != uid_t(uid) || ::setfsgid(gid_t(-1)) != account.pw_gid) return std::nullopt;
-    return readFile(path, uid);
+    if (uid_t(::setfsuid(uid_t(-1))) != uid_t(uid) || gid_t(::setfsgid(gid_t(-1))) != account->gid) return std::nullopt;
+    return readFile(account->path, uid);
 }
 }

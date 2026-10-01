@@ -27,6 +27,47 @@ dialog cancellation (126) and denied authorization (127) preserve pending edits.
 This behavior and the sanitized execution environment are specified by
 [polkit's upstream manual](https://raw.githubusercontent.com/polkit-org/polkit/master/docs/man/pkexec.xml).
 
+## Shared preference transaction
+
+The editor uses the canonical account-home `~/.config/farsideserverrc`, sharing
+UserConfiguration's UID resolver and BrokerUserSettings' lexical/value parser.
+Process HOME/XDG, another user's file, the system host environment or a QML path
+cannot select the production target. Merely opening the module does not load or
+write preferences; the scoped page loads explicitly. Tests inject a scratch
+directory through C++ only.
+
+The public model exposes the seventeen recognized preference fields, locked-key
+metadata and translated field choices/help. Raw configuration and legacy/host/
+credential keys never reach QML. A missing value means host inheritance, rather
+than a guessed legacy default; Console and Virtual may have different defaults.
+Individual missing AVC444 timing values use the production parser's built-in
+tuple when any timing override exists. All timing fields unset inherits the
+broker's chroma policy. Save and Reset to host settings are explicit page actions;
+preferences apply on reconnect and never broadcast KConfig reload notifications.
+
+Edits preserve unrecognized/host/legacy/comment/localized/expanded entries and
+unrelated sections. Duplicate editable fields are replaced once in the last
+General section. Key/group immutable markers are respected; defaults remove only
+unlocked preferences. All submitted fields/types/line boundaries and the entire
+result validate through the same production parser. Invalid staged values stay
+visible for correction and disable save. Invalid existing recognized values or
+unsafe files fail loading without guessing a replacement.
+
+Save requires an unchanged complete document/existence snapshot, not only matching
+preference fields. Cooperating writers take a safe per-directory user lock.
+Bounded nonblocking regular-file reads reject foreign owners/final symlinks/FIFO/
+oversized or inconsistent reads; unsafe file/directory/lock permissions fail.
+Safe existing user-owned config-directory symlinks remain compatible with the
+broker reader. An inspected directory descriptor anchors atomic user0600 writes;
+sync and independent parsed readback precede the saved/reconnect notice. Failure
+after commit is reported as saved-but-unverified, never as unchanged.
+
+Full parser/editor storage tests plus actual populated Buzz controls must prove
+all seventeen bindings, actual text/choice edits, invalid/stale save refusal,
+cancelled discard, reload, locked/default inheritance and preservation of host
+and secret-bearing unrelated entries. This does not complete the legacy main
+page cutover, host administration, native worker or package/deployment gates.
+
 ## System service controls
 
 The service model addresses only `farside-console-host.service` and

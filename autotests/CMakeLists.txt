@@ -889,6 +889,18 @@ target_link_libraries(DisplayWakeGuardTest PRIVATE Qt6::Test Qt6::Core Qt6::DBus
 add_executable(BrokerUserSettingsTest BrokerUserSettingsTest.cpp)
 target_link_libraries(BrokerUserSettingsTest PRIVATE Qt6::Test KRdpBrokerUserSettings)
 add_test(NAME BrokerUserSettingsTest COMMAND BrokerUserSettingsTest)
+add_executable(BrokerPreferencesTest BrokerPreferencesTest.cpp)
+target_link_libraries(BrokerPreferencesTest PRIVATE Qt6::Test kcm_krdpserver_core)
+add_test(NAME BrokerPreferencesTest COMMAND BrokerPreferencesTest)
+add_executable(BrokerPreferencesNativeTest BrokerPreferencesNativeTest.cpp)
+target_link_libraries(BrokerPreferencesNativeTest PRIVATE Qt6::Test kcm_krdpserver_core)
+# Manual Sol private-home namespace gate; never register against real HOME.
+add_executable(BrokerPreferencesPageTest BrokerPreferencesPageTest.cpp)
+target_link_libraries(BrokerPreferencesPageTest PRIVATE Qt6::Test Qt6::Quick Qt6::Qml Qt6::Widgets KF6::I18nQml kcm_krdpserver_core)
+target_compile_definitions(BrokerPreferencesPageTest PRIVATE PREFERENCES_PAGE="${CMAKE_SOURCE_DIR}/src/kcm/ui/BrokerPreferencesPage.qml")
+add_test(NAME BrokerPreferencesPageTest COMMAND BrokerPreferencesPageTest)
+set_tests_properties(BrokerPreferencesPageTest PROPERTIES TIMEOUT 45 LABELS "gui;non-hal"
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=org.kde.desktop")
 add_executable(BrokerAuthenticationTest BrokerAuthenticationTest.cpp)
 target_link_libraries(BrokerAuthenticationTest PRIVATE Qt6::Test KRdpBrokerAuthentication)
 add_test(NAME BrokerAuthenticationTest COMMAND BrokerAuthenticationTest)

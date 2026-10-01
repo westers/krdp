@@ -246,6 +246,8 @@ private Q_SLOTS:
                                        << QStringList{u"loadBrokerAuthentication"_s, u"saveBrokerAuthentication"_s};
         QTest::newRow("broker services") << u"BrokerServicesPage.qml"_s << u"brokerServicesPage"_s << u"Console and Virtual Services"_s
                                        << QStringList{u"refreshBrokerServices"_s};
+        QTest::newRow("broker preferences") << u"BrokerPreferencesPage.qml"_s << u"brokerPreferencesPage"_s << u"Your Console and Virtual Preferences"_s
+                                          << QStringList{u"loadBrokerPreferences"_s,u"saveBrokerPreferences"_s,u"defaultBrokerPreferences"_s};
         QTest::newRow("users") << u"UsersPage.qml"_s << u"usersPage"_s << u"Users and Security"_s
                                << QStringList{u"systemUserCheck"_s, u"usersFrame"_s, u"certificateStateRow"_s, u"ownCertificateCheck"_s};
         QTest::newRow("screens") << u"ScreensPage.qml"_s << u"screensPage"_s << u"Screens and Displays"_s << QStringList{u"shareColumn"_s, u"wakeCheck"_s};
