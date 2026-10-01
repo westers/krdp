@@ -21,14 +21,14 @@ struct Plan {
     bool changed = false;
 };
 
-// One-output mode/scale change only. The full inventory, ownership and pixel
-// atlas are preflighted before KScreen is allowed to mutate anything. Managed
-// dependent reflow belongs to the later multi-operation Fit transaction.
+// One-output mode/scale change within the supplied owned inventory. Console
+// projections additionally require complete-inventory checks to preserve
+// foreign outputs. Managed dependent reflow uses the Fit transaction.
 inline std::optional<Plan> make(const RetainedKScreenReadback::Snapshot &before, const QString &owner,
     const QString &output, QSize pixels, double scale)
 {
     if (owner.isEmpty() || !RetainedKScreenReadback::outputName(output)
-        || !VirtualResize::validRequest(pixels, scale) || before.outputs.size() < 2
+        || !VirtualResize::validRequest(pixels, scale) || before.outputs.isEmpty()
         || before.outputs.size() > 16) return {};
     const auto found = std::find_if(before.outputs.cbegin(), before.outputs.cend(), [&output](const auto &candidate) {
         return candidate.backendKey == output;

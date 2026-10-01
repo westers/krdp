@@ -39,6 +39,7 @@
 #include "SurfaceChain.h"
 #include "VideoCodecSupport.h"
 #include "ConsoleVirtualOutputRestore.h"
+#include "ConsoleVirtualOutputMutation.h"
 
 using namespace KRdp;
 
@@ -675,10 +676,17 @@ sys.exit(result.returncode)
     };
     QTRY_VERIFY_WITH_TIMEOUT((expected() && !run.frames.isEmpty()) || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 60000);
     QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(expected());
-    const auto proof = std::find_if(run.frames.cbegin(), run.frames.cend(), [&](const auto &frame) {
+    const auto isProof = [&](const auto &frame) {
         return frame.isKeyFrame && frame.size == QSize(!virtualDesktop && count == 1 ? 1600 : 1280, !virtualDesktop && count == 1 ? 900 : 720)
             && frame.monitors.size() == (virtualDesktop ? 2 : count);
-    });
+    };
+    endpoint.requestKeyFrame();
+    QTRY_VERIFY_WITH_TIMEOUT(std::all_of(outputs.monitors.cbegin(), outputs.monitors.cend(), [&](const auto &output) {
+        const auto index = std::distance(outputs.monitors.cbegin(), std::find_if(outputs.monitors.cbegin(), outputs.monitors.cend(),
+            [&](const auto &candidate) { return candidate.name == output.name; }));
+        return std::any_of(run.frames.cbegin(), run.frames.cend(), [&](const auto &frame) { return isProof(frame) && frame.monitorIndex == index; });
+    }), 15000);
+    const auto proof = std::find_if(run.frames.cbegin(), run.frames.cend(), isProof);
     QVERIFY(proof != run.frames.cend()); const auto proofFrame = *proof;
     ClientStyle::Decoder decoder;
     for (int index = 0; index < (virtualDesktop ? 2 : count); ++index) {
@@ -710,6 +718,86 @@ sys.exit(result.returncode)
         QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(topology);
         QVERIFY(!topology->complete); QCOMPARE(topology->outputs.size(), count);
         QVERIFY(std::all_of(topology->outputs.cbegin(), topology->outputs.cend(), [](const auto &output) { return !output.physical; }));
+        ConsoleVirtualOutputPlan::Plan owned;
+        for (const auto &output : outputs.monitors) {
+            owned.outputs.append({output.name, {}, {}, {}, output.primary});
+        }
+        const auto projected = ConsoleVirtualOutputReadback::parse(*activeJson, QStringLiteral("fixture"), owned);
+        QVERIFY(projected);
+        QHash<quint64, ConsoleWorkerWire::ResizeResult> resizeResults;
+        QHash<quint64, ConsoleWorkerWire::ManagedFitResult> fitResults;
+        QObject mutationObserver;
+        connect(&endpoint, &ConsoleWorkerEndpoint::resizeFinished, &mutationObserver, [&](const auto &value) { resizeResults.insert(value.requestId, value); });
+        connect(&endpoint, &ConsoleWorkerEndpoint::managedFitFinished, &mutationObserver, [&](const auto &value) { fitResults.insert(value.requestId, value); });
+        const QString selected = projected->outputs.last().backendKey;
+        // A stale controller and a baseline (foreign) output confer no authority.
+        QVERIFY(endpoint.resize({101, 9, selected, QSize(960, 540), 1.25}));
+        QTRY_VERIFY_WITH_TIMEOUT(resizeResults.contains(101), 5000);
+        QVERIFY(!resizeResults[101].error.isEmpty()); QCOMPARE(resizeResults[101].generation, quint64(9));
+        QVERIFY(endpoint.resize({102, 1, baseline->outputs.first().name, QSize(960, 540), 1.25}));
+        QTRY_VERIFY_WITH_TIMEOUT(resizeResults.contains(102), 5000);
+        QVERIFY(!resizeResults[102].error.isEmpty());
+        const auto untouched = query(); QVERIFY(untouched);
+        const auto activeSnapshot = ConsoleVirtualOutputRestore::snapshot(*activeJson, QStringLiteral("fixture")); QVERIFY(activeSnapshot);
+        QVERIFY(ConsoleVirtualOutputRestore::matches(*activeSnapshot, *untouched));
+
+        const auto freshDecodedOutputs = [&](const RetainedKScreenReadback::Snapshot &expected) {
+            for (int index = 0; index < expected.outputs.size(); ++index) {
+                const auto found = std::find_if(run.frames.cbegin(), run.frames.cend(), [&](const auto &frame) {
+                    return frame.isKeyFrame && frame.monitorIndex == index && frame.size == expected.outputs[index].nativePixels
+                        && frame.monitors.size() == expected.outputs.size();
+                });
+                if (found == run.frames.cend()) return false;
+            }
+            return true;
+        };
+        const auto decodeFresh = [&](const RetainedKScreenReadback::Snapshot &expected) {
+            ClientStyle::Decoder fresh;
+            for (int index = 0; index < expected.outputs.size(); ++index) {
+                const auto packet = std::find_if(run.frames.cbegin(), run.frames.cend(), [&](const auto &frame) {
+                    return frame.isKeyFrame && frame.monitorIndex == index && frame.size == expected.outputs[index].nativePixels
+                        && frame.monitors.size() == expected.outputs.size();
+                });
+                if (packet == run.frames.cend() || !fresh.feed(index + 1, VideoCodec::Avc420, packet->data)
+                    || fresh.surfaces().value(index + 1).lastPicture != packet->size) return false;
+            }
+            return true;
+        };
+        run.frames.clear();
+        QVERIFY(endpoint.resize({103, 1, selected, QSize(960, 540), 1.25}));
+        QTRY_VERIFY_WITH_TIMEOUT(resizeResults.contains(103) || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 30000);
+        QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(resizeResults.contains(103));
+        QVERIFY2(resizeResults[103].error.isEmpty(), qPrintable(resizeResults[103].error));
+        const auto resizedJson = query(); QVERIFY(resizedJson);
+        QVERIFY(ConsoleVirtualOutputMutation::preservesForeign(*activeJson, *resizedJson, QStringLiteral("fixture"), owned));
+        const auto resized = ConsoleVirtualOutputReadback::parse(*resizedJson, QStringLiteral("fixture"), owned); QVERIFY(resized);
+        QCOMPARE(resized->outputs.last().nativePixels, QSize(960, 540)); QCOMPARE(resized->outputs.last().scale, 1.25);
+        QTRY_VERIFY_WITH_TIMEOUT(freshDecodedOutputs(*resized), 15000); QVERIFY(decodeFresh(*resized));
+
+        ConsoleWorkerWire::ManagedFit fit{104, 1, projected->outputs.first().backendKey, QSize(1024, 768), 1, {}};
+        if (count == 2) fit.relations.append({fit.output, selected, 1, 0});
+        run.frames.clear(); QVERIFY(endpoint.managedFit(fit));
+        QTRY_VERIFY_WITH_TIMEOUT(fitResults.contains(104) || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 30000);
+        QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(fitResults.contains(104));
+        QVERIFY2(fitResults[104].error.isEmpty(), qPrintable(fitResults[104].error));
+        const auto fitJson = query(); QVERIFY(fitJson);
+        QVERIFY(ConsoleVirtualOutputMutation::preservesForeign(*activeJson, *fitJson, QStringLiteral("fixture"), owned));
+        const auto fitted = ConsoleVirtualOutputReadback::parse(*fitJson, QStringLiteral("fixture"), owned); QVERIFY(fitted);
+        QCOMPARE(fitted->outputs.first().nativePixels, QSize(1024, 768)); QCOMPARE(fitted->outputs.first().scale, 1.0);
+        QCOMPARE(fitted->outputs.first().logicalGeometry.topLeft(), projected->outputs.first().logicalGeometry.topLeft());
+        if (count == 2) {
+            QCOMPARE(fitted->outputs.last().nativePixels, QSize(960, 540)); QCOMPARE(fitted->outputs.last().scale, 1.25);
+            QCOMPARE(fitted->outputs.last().logicalGeometry.topLeft(), fitted->outputs.first().logicalGeometry.topLeft() + QPoint(1024, 0));
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(freshDecodedOutputs(*fitted), 15000); QVERIFY(decodeFresh(*fitted));
+        topology.reset(); QVERIFY(endpoint.requestTopology());
+        QTRY_VERIFY_WITH_TIMEOUT(topology.has_value(), 10000); QVERIFY(!topology->complete);
+        QCOMPARE(topology->outputs.size(), count);
+        for (int i = 0; i < count; ++i) {
+            QCOMPARE(topology->outputs[i].logical, fitted->outputs[i].logicalGeometry);
+            QCOMPARE(topology->outputs[i].pixels, fitted->outputs[i].nativePixels);
+            QCOMPARE(topology->outputs[i].scale, fitted->outputs[i].scale);
+        }
     } else {
         QTest::qWait(1000); QVERIFY(expected());
     }

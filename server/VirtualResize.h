@@ -9,8 +9,9 @@
 
 namespace KRdp::VirtualResize
 {
-// Only the explicitly virtual-launched, unprivileged worker may use this
-// planner. Output names alone never establish compositor isolation.
+// Callers must establish either an explicitly virtual-launched compositor or
+// exact ownership of a Console creator output, and preserve foreign outputs.
+// Output names alone never establish isolation or mutation authority.
 struct Mode {
     QString id;
     QSize pixels;

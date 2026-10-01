@@ -14,6 +14,7 @@
 #include "RetainedMultiMixedCreatePlan.h"
 #include "ConsoleVirtualOutputReadback.h"
 #include "ConsoleVirtualOutputRestore.h"
+#include "ConsoleVirtualOutputMutation.h"
 
 using namespace KRdp::RetainedKScreenReadback;
 
@@ -58,6 +59,55 @@ class RetainedKScreenReadbackTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void ownedSingleResizeAndFitPreserveForeignOutputs()
+    {
+        const auto json = QJsonDocument(root()).toJson();
+        KRdp::ConsoleVirtualOutputPlan::Plan owned;
+        owned.outputs = {{QStringLiteral("Virtual-1"), QSize(1280, 720), QPoint(1024, 100), QPoint(1024, 100), true}};
+        const auto before = KRdp::ConsoleVirtualOutputReadback::parse(json, QStringLiteral("console"), owned); QVERIFY(before);
+        const auto resize = KRdp::RetainedMultiResizePlan::make(*before, QStringLiteral("console"), QStringLiteral("Virtual-1"), QSize(1024, 768), 1);
+        QVERIFY(resize); QVERIFY(KRdp::ConsoleVirtualOutputMutation::allowed(json, QStringLiteral("console"), owned, resize->after));
+        const auto fit = KRdp::RetainedMultiFitPlan::make(*before, QStringLiteral("console"), QStringLiteral("Virtual-1"), QSize(1024, 768), 1, {});
+        QVERIFY(fit); QCOMPARE(fit->after.first().logicalGeometry, QRect(1024, 100, 1024, 768));
+        QVERIFY(KRdp::ConsoleVirtualOutputMutation::allowed(json, QStringLiteral("console"), owned, fit->after));
+        auto overlap = resize->after; overlap[0].logicalGeometry.moveTopLeft(QPoint(500, 0));
+        QVERIFY(!KRdp::ConsoleVirtualOutputMutation::allowed(json, QStringLiteral("console"), owned, overlap));
+        auto foreign = resize->after; foreign[0].backendKey = QStringLiteral("Virtual-0");
+        QVERIFY(!KRdp::ConsoleVirtualOutputMutation::allowed(json, QStringLiteral("console"), owned, foreign));
+        auto malformed = root(); auto inventory = malformed[QStringLiteral("outputs")].toArray();
+        auto survivor = inventory[0].toObject(); survivor.insert(QStringLiteral("size"), QJsonObject{}); inventory[0] = survivor;
+        malformed.insert(QStringLiteral("outputs"), inventory);
+        QVERIFY(!KRdp::ConsoleVirtualOutputMutation::allowed(QJsonDocument(malformed).toJson(), QStringLiteral("console"), owned, resize->after));
+        auto object = root(); auto values = object[QStringLiteral("outputs")].toArray();
+        auto target = values[1].toObject(); target.insert(QStringLiteral("scale"), 1.5); values[1] = target;
+        object.insert(QStringLiteral("outputs"), values);
+        QVERIFY(KRdp::ConsoleVirtualOutputMutation::preservesForeign(json, QJsonDocument(object).toJson(), QStringLiteral("console"), owned));
+        auto rotated = object; auto rotatedValues = values;
+        auto rotatedForeign = rotatedValues[0].toObject(); rotatedForeign.insert(QStringLiteral("rotation"), 2); rotatedValues[0] = rotatedForeign;
+        rotated.insert(QStringLiteral("outputs"), rotatedValues);
+        QVERIFY(!KRdp::ConsoleVirtualOutputMutation::preservesForeign(json, QJsonDocument(rotated).toJson(), QStringLiteral("console"), owned));
+        auto other = values[0].toObject(); other.insert(QStringLiteral("priority"), 3); values[0] = other;
+        object.insert(QStringLiteral("outputs"), values);
+        QVERIFY(!KRdp::ConsoleVirtualOutputMutation::preservesForeign(json, QJsonDocument(object).toJson(), QStringLiteral("console"), owned));
+    }
+
+    void ownedFitUsesCapturedWorkspaceLimitsAtLargeGlobalOrigin()
+    {
+        auto object = root(); auto values = object[QStringLiteral("outputs")].toArray();
+        for (int i = 0; i < 2; ++i) {
+            auto output = values[i].toObject(); output.insert(QStringLiteral("scale"), 1);
+            output.insert(QStringLiteral("pos"), QJsonObject{{QStringLiteral("x"), 16384 + i * 1280}, {QStringLiteral("y"), 0}});
+            values[i] = output;
+        }
+        object.insert(QStringLiteral("outputs"), values);
+        const auto before = decoded(object); QVERIFY(before);
+        const auto fit = KRdp::RetainedMultiFitPlan::make(*before, QStringLiteral("lease-1"), QStringLiteral("Virtual-0"), QSize(1600, 900), 1,
+            {{QStringLiteral("Virtual-0"), QStringLiteral("Virtual-1"), KRdp::RemoteTopologyFit::Relation::Edge::Right, 0}});
+        QVERIFY(fit); QCOMPARE(fit->after[0].logicalGeometry, QRect(16384, 0, 1600, 900));
+        QCOMPARE(fit->after[1].logicalGeometry, QRect(17984, 0, 1280, 720));
+        QCOMPARE(fit->placements.first().logicalPosition, QPoint(17984, 0));
+    }
+
     void configuredCaptureProjectsOnlyOwnedOutputsWithDisabledPhysicals()
     {
         auto object = root();

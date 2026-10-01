@@ -24,19 +24,26 @@ struct Plan {
 };
 
 // Backend-key relations must already have been resolved from the broker's
-// generation-scoped IDs. This is only a whole-layout worker preflight: it does
-// not authorize a transaction or mutate KWin. The broker must bind the exact
-// relations/after-state to a revisioned one-use preview before dispatch.
+// generation-scoped IDs. This plans within the supplied owned inventory; it
+// does not authorize a transaction or mutate KWin. A Console projection also
+// needs separate complete-inventory checks to preserve foreign outputs. The
+// broker must bind the exact after-state to a revisioned one-use preview.
 inline std::optional<Plan> make(const RetainedKScreenReadback::Snapshot &before, const QString &owner,
     const QString &selected, QSize pixels, double scale, const QVector<RemoteTopologyFit::Relation> &relations)
 {
     if (owner.isEmpty() || !RetainedKScreenReadback::outputName(selected)
-        || !VirtualResize::validRequest(pixels, scale) || before.outputs.size() < 2
+        || !VirtualResize::validRequest(pixels, scale) || before.outputs.isEmpty()
         || before.outputs.size() > 16 || relations.size() > 16) return {};
     RemoteTopologyCatalog::Snapshot snapshot;
     snapshot.generation = QStringLiteral("worker-fit-preflight");
     snapshot.revision = 1;
-    for (const auto &output : before.outputs) snapshot.outputs.append({output.backendKey, output});
+    QRect workspace;
+    for (const auto &output : before.outputs) workspace |= output.logicalGeometry;
+    const QPoint origin = workspace.topLeft();
+    for (auto output : before.outputs) {
+        output.logicalGeometry.translate(-origin);
+        snapshot.outputs.append({output.backendKey, output});
+    }
     RemoteTopologyDraft::Request request;
     request.generation = snapshot.generation;
     request.expectedRevision = snapshot.revision;
@@ -55,14 +62,17 @@ inline std::optional<Plan> make(const RetainedKScreenReadback::Snapshot &before,
             if (result.resizeChanged || operation.id != selected) return {};
             result.resizeChanged = true;
         } else if (operation.kind == RemoteTopologyDraft::Operation::Kind::Move) {
-            if (operation.position.x() < 0 || operation.position.y() < 0) return {};
-            result.placements.append({operation.id, operation.position});
+            const auto position = operation.position + origin;
+            if (position.x() < 0 || position.y() < 0) return {};
+            result.placements.append({operation.id, position});
         } else return {};
     }
     if (!result.placements.isEmpty() && !RetainedKScreenReadback::positionArguments(before, result.placements)) return {};
     for (const auto &entry : fit.proposal.after) {
-        if (entry.output.logicalGeometry.x() < 0 || entry.output.logicalGeometry.y() < 0) return {};
-        result.after.append(entry.output);
+        auto output = entry.output;
+        output.logicalGeometry.translate(origin);
+        if (output.logicalGeometry.x() < 0 || output.logicalGeometry.y() < 0) return {};
+        result.after.append(output);
     }
     result.changed = fit.proposal.after != fit.proposal.before;
     return result;

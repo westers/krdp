@@ -67,6 +67,7 @@
 #include "VirtualInitialBootstrap.h"
 #include "ConsoleVirtualOutputReadback.h"
 #include "ConsoleVirtualOutputRestore.h"
+#include "ConsoleVirtualOutputMutation.h"
 #include "PhysicalOutputGuard.h"
 
 using namespace KRdp;
@@ -683,6 +684,19 @@ private:
         pollConsoleVirtual();
     }
 
+    bool restoreConsoleCreatorMode(const QByteArray &json, const ConsoleVirtualOutputPlan::Output &output, qsizetype count)
+    {
+        auto observed = *m_consoleVirtualPlan;
+        observed.outputs.resize(count);
+        const auto state = VirtualResize::snapshotForOutput(json, output.name, nullptr);
+        const auto mode = state ? VirtualResize::matchingMode(*state, output.pixels, state->current.refresh) : std::nullopt;
+        if (!state || !mode || !runKScreenCommand(VirtualResize::select(*state, *mode, output.scale))) return false;
+        const auto verifiedJson = readKScreenJson();
+        const auto verified = verifiedJson ? VirtualResize::snapshotForOutput(*verifiedJson, output.name, nullptr) : std::nullopt;
+        return verified && VirtualResize::matches(*verified, {*state, output.pixels, output.scale})
+            && ConsoleVirtualOutputMutation::preservesForeign(json, *verifiedJson, m_sessionId, observed);
+    }
+
     void pollConsoleVirtual()
     {
         if (!m_consoleVirtualPlan || m_stopping || m_creatorReleaseActive || m_consoleVirtualApplied) return;
@@ -697,6 +711,18 @@ private:
             const auto json = readKScreenJson();
             const auto outputs = json ? OutputSnapshot::parse(*json) : QVector<OutputSnapshot::Output>{};
             const auto found = std::find_if(outputs.cbegin(), outputs.cend(), [&output](const auto &o) { return o.name == output.name; });
+            if (found != outputs.cend() && found->enabled
+                && (found->size != output.pixels || !VirtualResize::sameScale(found->scale, output.scale))) {
+                // KWin can remember a resized mode/scale for this connector
+                // name after its creator was retired. Establish this creator's
+                // requested native mode before creating the next output; an
+                // old remembered geometry must not choose its parking anchor.
+                if (!restoreConsoleCreatorMode(*json, output, m_consoleVirtualIndex + 1)) {
+                    failConsoleVirtual(QStringLiteral("created Console monitor mode could not be restored without changing foreign outputs")); return;
+                }
+                m_consoleVirtualSettle.invalidate();
+                return; // Wait for Qt/stream geometry to settle independently.
+            }
             if (!m_consoleVirtualCreator->streamActive() || !m_consoleVirtualCreator->outputGeometryResolved()
                 || found == outputs.cend() || !found->enabled || found->size != output.pixels
                 || !VirtualResize::sameScale(found->scale, output.scale)) { m_consoleVirtualSettle.invalidate(); return; }
@@ -724,6 +750,21 @@ private:
             }, Qt::QueuedConnection);
             m_consoleVirtualCreator->setStreamingEnabled(true);
             return;
+        }
+        // Adding a later connector can replay KWin's remembered configuration
+        // for an earlier one. Recheck the entire owned tuple after creation.
+        const auto json = readKScreenJson();
+        const auto created = json ? ConsoleVirtualOutputReadback::parse(*json, m_sessionId, *m_consoleVirtualPlan) : std::nullopt;
+        if (!created) return;
+        for (const auto &output : m_consoleVirtualPlan->outputs) {
+            const auto actual = std::find_if(created->outputs.cbegin(), created->outputs.cend(), [&output](const auto &entry) { return entry.backendKey == output.name; });
+            if (actual == created->outputs.cend()) return;
+            if (actual->nativePixels != output.pixels || !VirtualResize::sameScale(actual->scale, output.scale)) {
+                if (!restoreConsoleCreatorMode(*json, output, m_consoleVirtualPlan->outputs.size())) {
+                    failConsoleVirtual(QStringLiteral("created Console tuple could not regain its requested modes")); return;
+                }
+                return; // Observe one fresh stable tuple before changing positions.
+            }
         }
         QVector<OutputSnapshot::Placement> placements;
         QString primary;
@@ -1468,12 +1509,14 @@ private:
                 return;
             }
             if (m_multiResizePending && (!m_multiResizePlan || !RetainedMultiResizePlan::matches(*m_multiResizePlan, *kscreen)
+                || !mutationPreservesForeign(m_multiResizeBeforeJson, *kscreenJson)
                 || !m_control.active || m_control.generation != m_multiResizePending->generation)) {
                 finishMultiResize(QStringLiteral("resized output or peers differ after captured readback"));
                 m_socket.disconnectFromServer();
                 return;
             }
             if (m_multiFitPending && (!m_multiFitPlan || !RetainedMultiFitPlan::matches(*m_multiFitPlan, *kscreen)
+                || !mutationPreservesForeign(m_multiFitBeforeJson, *kscreenJson)
                 || !m_control.active || m_control.generation != m_multiFitPending->generation)) {
                 finishMultiFit(QStringLiteral("Fit output or dependents differ after captured readback"));
                 m_socket.disconnectFromServer();
@@ -1575,6 +1618,32 @@ private:
     {
         const auto json = readKScreenJson();
         return json ? RetainedKScreenReadback::parse(*json, m_sessionId) : std::nullopt;
+    }
+
+    std::optional<RetainedKScreenReadback::Snapshot> ownedOrRetainedReadback(const QByteArray &json) const
+    {
+        return m_consoleVirtualPlan ? ConsoleVirtualOutputReadback::parse(json, m_sessionId, *m_consoleVirtualPlan)
+                                   : RetainedKScreenReadback::parse(json, m_sessionId);
+    }
+
+    bool mutationCaptureMatches(const RetainedKScreenReadback::Snapshot &readback) const
+    {
+        return m_consoleVirtualPlan && readback.outputs.size() == 1
+            ? RetainedKScreenReadback::matchesCapturedSubset(readback, m_outputs, m_multiPublishedFrames)
+            : RetainedKScreenReadback::matchesPublished(readback, m_outputs, m_multiPublishedFrames);
+    }
+
+    bool mutationAllowed(const QByteArray &json, const QVector<RemoteTopologyCatalog::Output> &after) const
+    {
+        return m_mode.virtualSession || (m_consoleVirtualPlan && m_consoleVirtualApplied
+            && !m_creatorReleaseActive && !m_creatorReleaseFinished
+            && ConsoleVirtualOutputMutation::allowed(json, m_sessionId, *m_consoleVirtualPlan, after));
+    }
+
+    bool mutationPreservesForeign(const QByteArray &before, const QByteArray &after) const
+    {
+        return m_mode.virtualSession || (m_consoleVirtualPlan
+            && ConsoleVirtualOutputMutation::preservesForeign(before, after, m_sessionId, *m_consoleVirtualPlan));
     }
 
     std::optional<ConsoleWorkerWire::Topology> markOwnedConsoleOutputs(
@@ -1818,6 +1887,7 @@ private:
         const auto request = *m_multiResizePending;
         m_multiResizePending.reset();
         m_multiResizePlan.reset();
+        m_multiResizeBeforeJson.clear();
         m_multiResizeNeedsRestart = false;
         if (m_multiCodecDeferred) applyEncoderConfigToMultiSessions(); // the sessions stay after all
         m_multiResizeDeadline.stop();
@@ -1832,19 +1902,20 @@ private:
         if (!error.isEmpty() && m_multiFitPlan && m_multiFitOriginalState && m_multiFitAppliedMode
             && m_control.active && m_control.generation == request.generation) {
             const auto currentJson = readKScreenJson();
-            const auto current = currentJson ? RetainedKScreenReadback::parse(*currentJson, m_sessionId) : std::nullopt;
+            const auto current = currentJson ? ownedOrRetainedReadback(*currentJson) : std::nullopt;
             const auto selected = currentJson
                 ? VirtualResize::snapshotForOutput(*currentJson, request.output, nullptr) : std::nullopt;
-            if (current && selected) {
+            if (current && selected && mutationPreservesForeign(m_multiFitBeforeJson, *currentJson)) {
                 const auto restore = RetainedMultiFitPlan::recoveryArguments(*m_multiFitPlan, *current,
                     *selected, *m_multiFitOriginalState, *m_multiFitAppliedMode);
                 if (restore && (restore->isEmpty() || runKScreenCommand(*restore))) {
                     const auto verifiedJson = readKScreenJson();
                     const auto verified = verifiedJson
-                        ? RetainedKScreenReadback::parse(*verifiedJson, m_sessionId) : std::nullopt;
+                        ? ownedOrRetainedReadback(*verifiedJson) : std::nullopt;
                     const auto restoredMode = verifiedJson
                         ? VirtualResize::snapshotForOutput(*verifiedJson, request.output, nullptr) : std::nullopt;
-                    if (verified && verified->outputs == m_multiFitPlan->before.outputs && restoredMode
+                    if (verified && verified->outputs == m_multiFitPlan->before.outputs
+                        && mutationPreservesForeign(m_multiFitBeforeJson, *verifiedJson) && restoredMode
                         && restoredMode->current.id == m_multiFitOriginalState->current.id
                         && VirtualResize::sameScale(restoredMode->scale, m_multiFitOriginalState->scale)) {
                         finalError += QStringLiteral("; original layout restored");
@@ -1854,6 +1925,7 @@ private:
         }
         m_multiFitPending.reset();
         m_multiFitPlan.reset();
+        m_multiFitBeforeJson.clear();
         m_multiFitOriginalState.reset();
         m_multiFitAppliedMode.reset();
         m_multiFitDeadline.stop();
@@ -1865,15 +1937,16 @@ private:
         const auto reject = [this, &request](const QString &error) {
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ManagedFitResult{request.requestId, request.generation, error}));
         };
-        if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
+        if ((!m_mode.virtualSession && (!m_consoleVirtualPlan || !m_consoleVirtualApplied))
+            || m_stopping || m_creatorReleaseActive || !m_multiMode || !m_multiReady || m_multiPublishedFrames.isEmpty()
             || !m_control.active || m_control.generation != request.generation || m_positionPending
             || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending) {
             reject(QStringLiteral("managed Fit unavailable or not authorized"));
             return;
         }
         const auto beforeJson = readKScreenJson();
-        const auto before = beforeJson ? RetainedKScreenReadback::parse(*beforeJson, m_sessionId) : std::nullopt;
-        if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)) {
+        const auto before = beforeJson ? ownedOrRetainedReadback(*beforeJson) : std::nullopt;
+        if (!before || !mutationCaptureMatches(*before)) {
             reject(QStringLiteral("fresh compositor readback differs from capture"));
             return;
         }
@@ -1883,7 +1956,7 @@ private:
                 static_cast<RemoteTopologyFit::Relation::Edge>(relation.edge), relation.offset});
         }
         const auto plan = RetainedMultiFitPlan::make(*before, m_sessionId, request.output, request.pixels, request.scale, relations);
-        if (!plan) {
+        if (!plan || !mutationAllowed(*beforeJson, plan->after)) {
             reject(QStringLiteral("managed Fit conflicts with retained output arrangement"));
             return;
         }
@@ -1899,9 +1972,9 @@ private:
                 return;
             }
             const auto addedJson = readKScreenJson();
-            const auto unchanged = addedJson ? RetainedKScreenReadback::parse(*addedJson, m_sessionId) : std::nullopt;
+            const auto unchanged = addedJson ? ownedOrRetainedReadback(*addedJson) : std::nullopt;
             state = addedJson ? VirtualResize::snapshotForOutput(*addedJson, request.output, &parseError) : std::nullopt;
-            if (!unchanged || unchanged->outputs != before->outputs || !state
+            if (!unchanged || unchanged->outputs != before->outputs || !mutationPreservesForeign(*beforeJson, *addedJson) || !state
                 || !VirtualResize::sameOutput(*state, originalState)
                 || state->current.id != originalState.current.id || state->current.pixels != originalState.current.pixels
                 || state->current.refresh != originalState.current.refresh
@@ -1922,6 +1995,7 @@ private:
         m_multiPublishedFrames.clear();
         m_multiFitPending = request;
         m_multiFitPlan = *plan;
+        m_multiFitBeforeJson = *beforeJson;
         m_multiFitOriginalState = originalState;
         m_multiFitAppliedMode = mode.value_or(state->current);
         m_multiFitDeadline.start();
@@ -1930,8 +2004,10 @@ private:
             m_socket.disconnectFromServer();
             return;
         }
-        const auto after = readKScreen();
-        if (!after || !RetainedMultiFitPlan::matches(*plan, *after)) {
+        const auto afterJson = readKScreenJson();
+        const auto after = afterJson ? ownedOrRetainedReadback(*afterJson) : std::nullopt;
+        if (!after || !RetainedMultiFitPlan::matches(*plan, *after)
+            || !mutationPreservesForeign(*beforeJson, *afterJson)) {
             finishMultiFit(QStringLiteral("managed Fit readback differs from preview"));
             m_socket.disconnectFromServer();
             return;
@@ -2387,20 +2463,21 @@ private:
         const auto reject = [this, &request](const QString &error) {
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{request.requestId, request.generation, error}));
         };
-        if (!m_mode.virtualSession || !m_multiMode || !m_multiReady || m_multiPublishedFrames.size() < 2
+        if ((!m_mode.virtualSession && (!m_consoleVirtualPlan || !m_consoleVirtualApplied))
+            || m_stopping || m_creatorReleaseActive || !m_multiMode || !m_multiReady || m_multiPublishedFrames.isEmpty()
             || !m_control.active || m_control.generation != request.generation
             || m_positionPending || m_addPending || m_removePending || m_multiResizePending || m_multiFitPending || m_primaryPending || m_mixedPending || m_mixedCreatePending) {
             reject(QStringLiteral("multi-output resize unavailable or not authorized"));
             return;
         }
         const auto beforeJson = readKScreenJson();
-        const auto before = beforeJson ? RetainedKScreenReadback::parse(*beforeJson, m_sessionId) : std::nullopt;
-        if (!before || !RetainedKScreenReadback::matchesPublished(*before, m_outputs, m_multiPublishedFrames)) {
+        const auto before = beforeJson ? ownedOrRetainedReadback(*beforeJson) : std::nullopt;
+        if (!before || !mutationCaptureMatches(*before)) {
             reject(QStringLiteral("fresh compositor readback differs from capture"));
             return;
         }
         const auto plan = RetainedMultiResizePlan::make(*before, m_sessionId, request.output, request.pixels, request.scale);
-        if (!plan) {
+        if (!plan || !mutationAllowed(*beforeJson, plan->after)) {
             reject(QStringLiteral("resize overlaps or exceeds retained-output limits"));
             return;
         }
@@ -2426,9 +2503,9 @@ private:
                 return;
             }
             const auto addedJson = readKScreenJson();
-            const auto unchanged = addedJson ? RetainedKScreenReadback::parse(*addedJson, m_sessionId) : std::nullopt;
+            const auto unchanged = addedJson ? ownedOrRetainedReadback(*addedJson) : std::nullopt;
             state = addedJson ? VirtualResize::snapshotForOutput(*addedJson, request.output, &parseError) : std::nullopt;
-            if (!unchanged || unchanged->outputs != before->outputs || !state
+            if (!unchanged || unchanged->outputs != before->outputs || !mutationPreservesForeign(*beforeJson, *addedJson) || !state
                 || !VirtualResize::sameOutput(*state, originalState)
                 || state->current.id != originalState.current.id || state->current.pixels != originalState.current.pixels
                 || state->current.refresh != originalState.current.refresh
@@ -2450,14 +2527,17 @@ private:
         m_multiPublishedFrames.clear();
         m_multiResizePending = request;
         m_multiResizePlan = *plan;
+        m_multiResizeBeforeJson = *beforeJson;
         m_multiResizeDeadline.start();
         if (!runKScreenCommand(VirtualResize::select(*state, *mode, request.scale))) {
             finishMultiResize(QStringLiteral("virtual mode/scale apply failed"));
             m_socket.disconnectFromServer();
             return;
         }
-        const auto after = readKScreen();
-        if (!after || !RetainedMultiResizePlan::matches(*plan, *after)) {
+        const auto afterJson = readKScreenJson();
+        const auto after = afterJson ? ownedOrRetainedReadback(*afterJson) : std::nullopt;
+        if (!after || !RetainedMultiResizePlan::matches(*plan, *after)
+            || !mutationPreservesForeign(*beforeJson, *afterJson)) {
             finishMultiResize(QStringLiteral("mode/scale readback differs from preview"));
             m_socket.disconnectFromServer();
             return;
@@ -3014,11 +3094,6 @@ private:
                 continue;
             }
             if (const auto request = ConsoleWorkerWire::resize(*record)) {
-                if (m_consoleVirtualPlan) {
-                    m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{request->requestId, request->generation,
-                        QStringLiteral("configured Console monitors require output-specific resize") }));
-                    continue;
-                }
                 if (m_physicalPending) {
                     m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ResizeResult{
                         request->requestId, request->generation,
@@ -3026,7 +3101,7 @@ private:
                     continue;
                 }
                 releaseInput();
-                if (m_mode.virtualSession && m_multiMode) multiResize(*request);
+                if ((m_mode.virtualSession || m_consoleVirtualPlan) && m_multiMode) multiResize(*request);
                 else if (m_mode.virtualSession) m_virtualResize.request(*request);
                 else m_resize.request(*request);
                 continue;
@@ -3203,9 +3278,11 @@ private:
     QTimer m_multiResizeDeadline;
     std::optional<ConsoleWorkerWire::Resize> m_multiResizePending;
     std::optional<RetainedMultiResizePlan::Plan> m_multiResizePlan;
+    QByteArray m_multiResizeBeforeJson;
     QTimer m_multiFitDeadline;
     std::optional<ConsoleWorkerWire::ManagedFit> m_multiFitPending;
     std::optional<RetainedMultiFitPlan::Plan> m_multiFitPlan;
+    QByteArray m_multiFitBeforeJson;
     std::optional<VirtualResize::Snapshot> m_multiFitOriginalState;
     std::optional<VirtualResize::Mode> m_multiFitAppliedMode;
     QTimer m_primaryDeadline;

@@ -301,6 +301,25 @@ persistence/limits and T08/T27 gates remain. Installed fleet/services/retained
 desktop preserved; no Hal live test or performance claim. Evidence
 `~/dev/rdp/evidence/2026-09-30-t06-virtual-lifecycle/SUMMARY.md`.
 
+**2026-09-30 owned resize/Fit worker checkpoint (PARTIAL, unshipped):**
+Configured Console creator outputs now use the shared output-specific resize
+and managed Fit planners, including owned single output and fractional scale.
+Complete fresh inventories bound authority and preserve every foreign output;
+custom-mode preparation, apply and captured keyframe proof verify preservation.
+Fit limits use the captured workspace independently of its global Extend origin.
+Native sequence testing exposed KWin replaying remembered modes when a later
+connector is created; creation now rechecks/restores the entire requested tuple.
+Four focused pure suites and five strengthened private Sol worker cases pass
+(seven including setup/cleanup, no skips), with stale/foreign resize refusal,
+fresh decoded frames after resize/Fit, dependent placement, incomplete topology
+and exact final restoration. Connector aliases are not physical hardware proof.
+Broker one-use preview/commit, client capability/ownership acceptance and UI
+integration remain independent work before this feature is exposed/deployed.
+All remaining lifecycle/mirror/mixed-scale interaction/retained persistence,
+T03/T08/T27 gates above stay open. Installed services/desktops/retained session
+and lock state preserved; no Hal live test or performance claim. Evidence
+`~/dev/rdp/evidence/2026-09-30-t06-owned-resize/SUMMARY.md`.
+
 ### T07 — Preserve display wake and inhibition
 
 **Instructions:** Integrate the existing `DisplayWakeGuard` semantics into the desktop workers or equivalent user-session mechanism, not a root broker's session bus. Honor the configured wake policy and acquire/release inhibition with streaming ownership. Keep display power management distinct from unlocking and from Virtual's intentional lock policy. Handle pending D-Bus replies and teardown without leaking inhibition.

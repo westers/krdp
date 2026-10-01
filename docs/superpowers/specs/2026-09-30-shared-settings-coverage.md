@@ -229,3 +229,14 @@ are test-only, so physical hardware behavior is not accepted. Native takeover,
 failure/worker loss/login, mixed-scale client interaction, resize/Fit, retained
 persistence and T03/T08/package gates remain. Evidence
 `~/dev/rdp/evidence/2026-09-30-t06-virtual-lifecycle/SUMMARY.md`.
+
+Configured Console owned output-specific resize/Fit is now implemented at the
+worker boundary, including single output, fractional scale, dependent reflow
+and large global Extend origins. Complete foreign-output preservation and
+fresh per-output decoding/restoration pass in five private Sol native cases;
+four pure suites pass. Recreation restores requested modes even when KWin
+replays an old connector configuration. Broker preview/commit, client ownership
+capability validation and UI integration remain; this does not expose or ship
+the feature yet. Native physical hardware/mixed-scale client/persistence and
+T03/T08/package gates remain. Evidence
+`~/dev/rdp/evidence/2026-09-30-t06-owned-resize/SUMMARY.md`.
