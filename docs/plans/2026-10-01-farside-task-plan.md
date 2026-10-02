@@ -208,6 +208,15 @@ dependencies and Sol/Buzz simulations pass. Fix only packaging failures; no inst
 
 ### N04 — Install and prove server rollback on Sol (T08/T27)
 
+**Native capture comparison follow-up, 2026-10-02:** Steve required screen
+captures compared with the accepted sketches. Source `ed92e059` corrects the
+observed placement/headings/wrapping/help/readiness gaps. All ten native pages
+and relevant states are captured from the final stripped package; Main3/KCM14
+pass. Server `6.6.80+git202610020550.ed92e05-1` is archived and staged on Sol,
+not installed while its Console RDP session is active. Sol remains `a087e159`.
+See [comparison](../design/2026-10-02-settings-capture-comparison.md); N04 manual
+authorization and Steve’s visual acceptance remain open.
+
 **Approved redesign implementation, 2026-10-02:** Steve accepted the overview and
 KCM subpage design and requested full implementation. New organization, separate
 certificate draft, TLS-preserving ordinary defaults, incomplete Custom values,

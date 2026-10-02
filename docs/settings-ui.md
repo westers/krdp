@@ -81,6 +81,14 @@ Use the existing scoped widget/KCM fixtures and visually inspect their rendered
 pages on Buzz. Actual administrator-dialog acceptance remains the separate N04
 manual check; UI fixture success does not substitute for it. No Hal live testing.
 
+Before delivering a layout change, capture the actual packaged QML pages and
+relevant dialog/expanded/empty/populated states, then compare them with the
+approved design. Fix demonstrated layout differences and retain a reviewable
+comparison gallery. Passing widget tests alone does not establish visual
+agreement. Record theme and fixture-state differences explicitly. The
+[October 2 comparison](design/2026-10-02-settings-capture-comparison.md)
+documents the first complete comparison with the approved sketches.
+
 ## Qt skills and design review (2026-10-01)
 
 Steve requested installing and using The Qt Company's skills after rejecting

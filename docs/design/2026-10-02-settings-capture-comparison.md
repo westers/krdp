@@ -9,11 +9,13 @@ certificate import states, narrow hardware page and selected baseline captures.
 ## Method
 
 The initial captures load the exact stripped KCM module from the Sol-deployed
-`a087e159` package. Revised captures load the corrected compiled module on Buzz.
+`a087e159` package. Final revised captures load the exact stripped module from
+`ed92e059` / `6.6.80+git202610020550.ed92e05-1` on Buzz.
 Both use native KDE controls, a private D-Bus/XDG environment, offscreen software
 rendering and populated bounded fixtures. They do not capture Hal's work display
 or reveal saved passwords, actual private keys, or private host configuration.
-The final package is captured again before delivery.
+The final packaged main-page capture check (3 cases) and KCM suite (14 cases)
+both pass without QML warnings.
 
 The SVGs are layout sketches with example values. Native fonts, theme spacing,
 button shapes and switches are expected to differ. These captures show the KCM
@@ -45,3 +47,13 @@ this follow-up changes presentation only.
 Normal installed administrator authorization, Save and explicit Restart require
 the existing Sol manual checklist. Steve's visual approval remains separate.
 No live camera, codec, network or performance result is inferred from fixtures.
+
+## Delivery state
+
+Corrected source `ed92e059` is committed and pushed. Package `6.6.80+git202610020550.ed92e05-1`
+is built and archived read-only under `~/dev/rdp/debs/candidates/server/ed92e05/`
+(SHA-256 `e1691038174882cc305e7608bf5a1f99840609fa3a725153bdfbc1aae03f7942`). It is staged on Sol
+with the exact prior server/client packages and guarded deployment script in
+`/tmp/farside-settings-comparison-release/`. **Not installed:** Sol has an active
+Console RDP session. Its installed server remains `a087e159`; all clients and
+other hosts remain unchanged. Do not restart the active session.
