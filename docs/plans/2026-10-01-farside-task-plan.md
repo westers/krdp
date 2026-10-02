@@ -226,7 +226,10 @@ it, and runtime inspection verified `/dev/video10`. This proves helper/save/runt
 behavior, **not** normal KCM authentication acceptance. Existing rollback evidence
 is reused. Evidence: `~/dev/rdp/evidence/2026-10-01-n04-installed-settings/SUMMARY.md`.
 
-**Remaining manual check (Sol, installed df517e8):** Open Farside Host Settings,
+**Remaining manual check (Sol, installed 65243df7):** Read-only inspection on
+October 1 confirms stored and running quality `80`, camera `/dev/video10`,
+port `3391`, and runtime `verified`. Use [the short manual checklist](2026-10-01-sol-settings-acceptance.md).
+Steve has selected this manual check. Open Farside Host Settings,
 load Console with normal KDE administrator authentication. Stage loopback `none`,
 cancel its Save authorization, and verify the draft remains while saved/runtime
 `/dev/video10` is unchanged. Restore draft `/dev/video10`; make a reversible
@@ -336,6 +339,11 @@ and neither mode unlocks a locked Console. Installed settings apply as documente
 
 ### N12 — Finish camera and redirected media (T11)
 
+**User acceptance, 2026-10-01:** Steve reports “it worked” after server65243df7
+delivery and the Hal→Sol BRIO trace. The reported Console camera failure is
+resolved. No further camera retest is needed for that issue. Separate app-specific,
+switching/LED/bidirectional-call and Virtual requirements remain open; N12 is partial.
+
 **PARTIAL, 2026-10-01 BRIO/PipeWire fix delivered to Sol:** `c48db896` caps
 publication at 30 fps (BRIO first MJPEG mode is 640×480/120 fps; Camera filters
 out that fixed rate). `765ced19` negotiates full RGBA frame buffers and bounds
@@ -348,8 +356,8 @@ Installed test caught stale Console worker object in reused package cache;
 0.6.5 sufficient; Hal/Buzz servers stay2828a7c. Intermediate765ced1 is marked
 REJECTED, not a deployable candidate. Settings/certs/profiles/holds/desktop/client
 PIDs preserved; only Sol server package changes. Source prerequisites4 pass and
-native/capture evidence reused, no wider matrix. Hal→Sol BRIO/Camera/Meet user
-confirmation and switching/LED/call/Virtual requirements remain open. Evidence:
+native/capture evidence reused, no wider matrix. User camera confirmation was
+subsequently received (above); switching/LED/call/Virtual requirements remain open. Evidence:
 `~/dev/rdp/evidence/2026-10-01-camera-app-debug/SUMMARY.md`.
 
 **PARTIAL, 2026-10-01 readiness fix delivered:** server `2828a7c` and client0.6.5
