@@ -32,7 +32,7 @@ KCM.SimpleKCM {
         QQC2.Label {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
-            text: i18nc("@info", "These services belong to this computer. Changes apply immediately and may require administrator authentication. Console shares the desktop or sign-in screen; Virtual provides separate retained desktops.")
+            text: i18nc("@info", "Start, stop, or restart remote desktops on this computer. Changes may require administrator authentication.")
         }
         QQC2.Button {
             objectName: "refreshBrokerServices"
@@ -43,15 +43,16 @@ KCM.SimpleKCM {
         }
         Repeater {
             model: root.administration.services
-            delegate: ColumnLayout {
+            delegate: Kirigami.FormLayout {
                 id: section
                 required property var modelData
                 Layout.fillWidth: true
-                Kirigami.Heading {
-                    level: 3
-                    text: section.modelData.route === "console" ? i18nc("@title:group", "Console") : i18nc("@title:group", "Virtual")
+                Item {
+                    Kirigami.FormData.isSection: true
+                    Kirigami.FormData.label: section.modelData.route === "console" ? i18nc("@title:group", "Console") : i18nc("@title:group", "Virtual")
                 }
                 BrokerServiceStatus {
+                    Kirigami.FormData.label: i18nc("@label", "Status:")
                     objectName: section.modelData.route + "ServiceStatus"
                     service: section.modelData
                 }
@@ -62,6 +63,7 @@ KCM.SimpleKCM {
                     text: section.modelData.error
                 }
                 RowLayout {
+                    Kirigami.FormData.label: i18nc("@label", "Service:")
                     QQC2.Button {
                         objectName: section.modelData.route + "ServiceStart"
                         text: i18nc("@action:button", "Start")
@@ -87,6 +89,7 @@ KCM.SimpleKCM {
                 }
                 QQC2.CheckBox {
                     id: startup
+                    Kirigami.FormData.label: i18nc("@label", "Startup:")
                     objectName: section.modelData.route + "ServiceAutostart"
                     text: i18nc("@option:check", "Start when this computer boots")
                     enabled: section.modelData.canAutostart
@@ -99,10 +102,15 @@ KCM.SimpleKCM {
                 QQC2.Label {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
-                    text: section.modelData.unitFileState === "enabled-runtime"
-                        ? i18nc("@info", "Enabled temporarily for this boot. Select the startup option to enable it for future boots.")
-                        : i18nc("@info", "Startup changes do not start or stop the service. Sign-in policy changes require restarting both services.")
+                    visible: section.modelData.unitFileState === "enabled-runtime"
+                    text: i18nc("@info", "Enabled for this boot only. Select startup to enable future boots.")
                 }
+            }
+        }
+        RowLayout {
+            QQC2.Label { text: i18nc("@info", "Restarting disconnects this host's clients.") }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18nc("@info:tooltip", "Startup changes apply on the next boot and do not start or stop the service. Restart both services after changing sign-in permissions.")
             }
         }
     }
@@ -116,7 +124,14 @@ KCM.SimpleKCM {
         x: Math.max(0, (root.width - width) / 2)
         y: Math.max(0, (root.height - height) / 2)
         title: operation === "stop" ? i18nc("@title:window", "Stop Service") : i18nc("@title:window", "Restart Service")
-        standardButtons: QQC2.Dialog.Ok | QQC2.Dialog.Cancel
+        footer: QQC2.DialogButtonBox {
+            standardButtons: QQC2.Dialog.Cancel
+            QQC2.Button {
+                text: confirmOperation.operation === "stop" ? i18nc("@action:button", "Stop") : i18nc("@action:button", "Restart")
+                QQC2.DialogButtonBox.buttonRole: QQC2.DialogButtonBox.ActionRole
+                onClicked: confirmOperation.accept()
+            }
+        }
         contentItem: QQC2.Label {
             wrapMode: Text.Wrap
             text: confirmOperation.route === "console"

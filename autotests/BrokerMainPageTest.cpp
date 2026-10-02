@@ -24,9 +24,10 @@ class MainTransport : public BrokerServiceTransport {
     Q_OBJECT
 public:
     BrokerServiceState state{true,u"loaded"_s,u"active"_s,u"running"_s,u"enabled"_s,42};
-    int mutations=0;
+    int mutations=0, lastRoute=-1;
+    Operation lastOperation=Start;
     void query(int,QueryDone done) override { done(state,{}); }
-    void operate(int,Operation,Done done) override { ++mutations;done({}); }
+    void operate(int route,Operation operation,Done done) override { ++mutations;lastRoute=route;lastOperation=operation;done({}); }
 };
 class BrokerMainPageTest : public QObject {
     Q_OBJECT
@@ -77,6 +78,10 @@ private Q_SLOTS:
         QVERIFY(!console.loaded());QVERIFY(!virtualHost.loaded());QVERIFY(!auth.loaded());QVERIFY(!preferences.loaded());
         QCOMPARE(item(u"consoleHostStatus"_s)->property("text").toString(),label);QCOMPARE(item(u"virtualHostStatus"_s)->property("text").toString(),label);
         QVERIFY(!item(u"consoleStoredEndpointRow"_s)->property("visible").toBool());
+        const auto screenshots=qEnvironmentVariable("FARSIDE_MAIN_SCREENSHOTS");
+        if(!screenshots.isEmpty()&&state==u"active") {
+            QTest::qWait(150);QVERIFY(window.grabWindow().save(screenshots+u"/main-fresh.png"_s));
+        }
         QVERIFY(click(u"consoleHostSettingsLink"_s));QCOMPARE(navigation.page,u"BrokerHostsPage.qml"_s);QCOMPARE(navigation.initial[u"initialScope"_s].toInt(),0);
         QVERIFY(click(u"virtualHostSettingsLink"_s));QCOMPARE(navigation.initial[u"initialScope"_s].toInt(),1);
         for(const auto &host:{&console,&virtualHost}) { QVERIFY(host->reload());QTRY_VERIFY(!host->busy());QVERIFY(host->loaded()); }
@@ -100,14 +105,25 @@ private Q_SLOTS:
             qMakePair(u"brokerPreferencesLink"_s,u"BrokerPreferencesPage.qml"_s),qMakePair(u"brokerHostsLink"_s,u"BrokerHostsPage.qml"_s)}) {
             QVERIFY(click(pair.first));QCOMPARE(navigation.page,pair.second);
         }
+        QCOMPARE(navigation.initial[u"initialScope"_s].toInt(),2);
         QVERIFY(click(u"refreshBrokerStatus"_s));QCOMPARE(transport.mutations,0);
+        if(state==u"active") {
+            auto *toggle=item(u"consoleHostEnabled"_s);QVERIFY(toggle);
+            QVERIFY(toggle->setProperty("checked",false));QVERIFY(QMetaObject::invokeMethod(toggle,"clicked"));
+            auto *confirm=item(u"confirmMainServiceStop"_s);QVERIFY(confirm);QTRY_VERIFY(confirm->property("visible").toBool());
+            QCOMPARE(transport.mutations,0);QVERIFY(QMetaObject::invokeMethod(confirm,"reject"));
+            QCOMPARE(transport.mutations,0);QVERIFY(toggle->property("checked").toBool());
+            QVERIFY(toggle->setProperty("checked",false));QVERIFY(QMetaObject::invokeMethod(toggle,"clicked"));
+            QVERIFY(QMetaObject::invokeMethod(confirm,"accept"));QTRY_COMPARE(transport.mutations,1);
+            QCOMPARE(transport.lastRoute,0);QCOMPARE(transport.lastOperation,BrokerServiceTransport::Stop);
+            QTest::qWait(200);
+        }
         QTest::qWait(100);auto *flickable=page->property("flickable").value<QQuickItem *>();QVERIFY(flickable);
         auto *content=flickable->property("contentItem").value<QQuickItem *>();QVERIFY(content);
         for(const auto &name:{u"consoleStoredEndpoint"_s,u"consoleStoredFingerprint"_s,u"consoleHostApply"_s,u"pageButtons"_s,u"stockScopeNotice"_s}) {
             auto *control=qobject_cast<QQuickItem *>(item(name));QVERIFY(control);const auto rect=control->mapRectToItem(content,QRectF(0,0,control->width(),control->height()));
             QVERIFY2(rect.left()>=-0.5&&rect.right()<=flickable->width()+0.5,qPrintable(name));
         }
-        const auto screenshots=qEnvironmentVariable("FARSIDE_MAIN_SCREENSHOTS");
         if(!screenshots.isEmpty())QVERIFY(window.grabWindow().save(screenshots+u"/main-"_s+state+u".png"_s));
         QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));page->setParentItem(nullptr);
     }

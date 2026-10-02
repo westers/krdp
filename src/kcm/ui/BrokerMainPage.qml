@@ -36,103 +36,122 @@ KCM.SimpleKCM {
     }
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
-        QQC2.Label {
-            objectName: "brokerScopeDescription"
+        RowLayout {
             Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: i18nc("@info", "Console shares this computer's desktop or sign-in screen. Virtual provides separate desktops that can be reattached later. Select the matching connection type in your Farside client.")
-        }
-        QQC2.Button {
-            objectName: "refreshBrokerStatus"
-            icon.name: "view-refresh"
-            text: i18nc("@action:button", "Refresh Status")
-            enabled: !root.administration.busy
-            onClicked: root.administration.refresh()
+            QQC2.Label {
+                objectName: "brokerScopeDescription"
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: i18nc("@info", "Connect to this computer's desktop, or use a separate virtual desktop.")
+            }
+            QQC2.ToolButton {
+                objectName: "refreshBrokerStatus"
+                text: i18nc("@action", "Refresh Status")
+                icon.name: "view-refresh"
+                display: QQC2.AbstractButton.IconOnly
+                QQC2.ToolTip.text: text
+                QQC2.ToolTip.visible: hovered
+                enabled: !root.administration.busy
+                onClicked: root.administration.refresh()
+            }
         }
         Repeater {
+            id: summaries
             model: root.administration.services
-            delegate: ColumnLayout {
+            delegate: Kirigami.FormLayout {
                 id: route
                 required property var modelData
                 readonly property var host: modelData.route === "console" ? root.consoleHost : root.virtualHost
                 readonly property var stored: host.metadata.effective || ({})
                 readonly property var tls: host.metadata.tls || ({})
                 Layout.fillWidth: true
-                Kirigami.Heading {
+                Kirigami.Separator {
                     objectName: route.modelData.route + "HostHeading"
-                    level: 2
-                    text: route.modelData.route === "console" ? i18nc("@title:group", "Console") : i18nc("@title:group", "Virtual")
+                    Kirigami.FormData.isSection: true
+                    Kirigami.FormData.label: route.modelData.route === "console" ? i18nc("@title:group", "Console") : i18nc("@title:group", "Virtual")
                 }
-                BrokerServiceStatus {
-                    objectName: route.modelData.route + "HostStatus"
-                    service: route.modelData
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
+                RowLayout {
+                    Kirigami.FormData.label: i18nc("@label", "Remote desktop:")
+                    QQC2.Switch {
+                        objectName: route.modelData.route + "HostEnabled"
+                        text: i18nc("@option:check", "Enabled")
+                        Accessible.name: route.modelData.route === "console" ? i18nc("@option:check", "Console enabled") : i18nc("@option:check", "Virtual enabled")
+                        checked: route.modelData.activeState === "active" || route.modelData.activeState === "reloading"
+                        enabled: route.modelData.canStart || route.modelData.canStop
+                        onClicked: {
+                            if (checked) root.administration.perform(route.modelData.route, "start");
+                            else { stopDialog.route = route.modelData.route; stopDialog.open(); }
+                            checked = Qt.binding(() => route.modelData.activeState === "active" || route.modelData.activeState === "reloading");
+                        }
+                    }
+                    BrokerServiceStatus { objectName: route.modelData.route + "HostStatus"; service: route.modelData }
+                    Kirigami.ContextualHelpButton {
+                        toolTipText: route.modelData.route === "console"
+                            ? i18nc("@info:tooltip", "Console shares this computer's desktop, sign-in screen, and lock screen.")
+                            : i18nc("@info:tooltip", "Virtual creates separate desktops that can be disconnected and resumed later.")
+                    }
                 }
-                QQC2.Label {
+                Kirigami.InlineMessage {
                     objectName: route.modelData.route + "HostError"
                     Layout.fillWidth: true
-                    wrapMode: Text.Wrap
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 24
                     visible: route.modelData.error !== ""
+                    type: Kirigami.MessageType.Error
                     text: route.modelData.error
-                }
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    visible: !route.host.loaded
-                    text: i18nc("@info", "Open Host Settings and load this host to see its stored address and certificate. Administrator authentication may be required.")
                 }
                 RowLayout {
                     objectName: route.modelData.route + "StoredEndpointRow"
-                    Layout.fillWidth: true
+                    Kirigami.FormData.label: i18nc("@label", "Saved address:")
                     visible: route.host.loaded
                     Kirigami.SelectableLabel {
                         objectName: route.modelData.route + "StoredEndpoint"
                         Layout.fillWidth: true
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 18
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 20
                         wrapMode: Text.Wrap
-                        text: i18nc("@info", "Stored endpoint: %1", root.endpoint(route.stored))
+                        text: root.endpoint(route.stored)
                     }
-                    QQC2.Button {
+                    QQC2.ToolButton {
                         objectName: route.modelData.route + "CopyStoredEndpoint"
                         icon.name: "edit-copy"
-                        text: i18nc("@action:button", "Copy")
+                        text: i18nc("@action:button", "Copy Address")
+                        display: QQC2.AbstractButton.IconOnly
+                        QQC2.ToolTip.text: text
+                        QQC2.ToolTip.visible: hovered
                         enabled: root.endpoint(route.stored) !== ""
                         onClicked: root.navigation.copyAddressToClipboard(root.endpoint(route.stored))
                     }
-                }
-                QQC2.Label {
-                    objectName: route.modelData.route + "StoredFingerprint"
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    visible: (route.tls.fingerprint || "") !== ""
-                    text: i18nc("@info", "Stored certificate SHA-256: %1", route.tls.fingerprint || "")
+                    Kirigami.ContextualHelpButton {
+                        toolTipText: i18nc("@info:tooltip", "This address comes from saved settings. Inspect the running host in Host Settings to check the address currently in use.")
+                    }
                 }
                 QQC2.Label {
                     objectName: route.modelData.route + "InspectedEndpoint"
+                    Kirigami.FormData.label: i18nc("@label", "Running address:")
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     visible: route.host.runtimeCheckedAt !== "" && !route.host.runtimeStale && route.host.runtime.runningVerified === true
-                    text: i18nc("@info", "Inspected startup endpoint: %1 (checked at %2).", root.endpoint(route.host.runtime.running), route.host.runtimeCheckedAt)
+                    text: root.endpoint(route.host.runtime.running)
                 }
-                QQC2.Label {
+                Kirigami.SelectableLabel {
+                    objectName: route.modelData.route + "StoredFingerprint"
+                    Kirigami.FormData.label: i18nc("@label", "Saved fingerprint:")
                     Layout.fillWidth: true
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 18
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 20
                     wrapMode: Text.Wrap
-                    visible: route.host.loaded
-                    text: i18nc("@info", "Stored information does not prove the current listener or loaded certificate. Use Inspect Running Host in Host Settings to compare startup values.")
+                    visible: route.host.loaded && (route.tls.fingerprint || "") !== ""
+                    text: route.tls.fingerprint || ""
                 }
-                QQC2.Label {
-                    objectName: route.modelData.route + "HostPending"
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    visible: route.host.modified
-                    text: i18nc("@info", "Unsaved host edits are kept in Host Settings.")
-                }
-                QQC2.Label {
+                QQC2.Label { objectName: route.modelData.route + "HostPending"; visible: route.host.modified; text: i18nc("@info", "Unsaved changes in Host Settings.") }
+                Kirigami.InlineMessage {
                     objectName: route.modelData.route + "HostApply"
                     Layout.fillWidth: true
-                    wrapMode: Text.Wrap
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 24
                     visible: route.host.applicationRequired
-                    text: i18nc("@info", "Host settings were saved. Use Services for an explicit restart, then inspect startup values. Restarting disconnects this host's clients.")
+                    text: i18nc("@info", "Settings saved. Restart this service to apply them.")
                 }
                 QQC2.Button {
                     objectName: route.modelData.route + "HostSettingsLink"
@@ -142,75 +161,61 @@ KCM.SimpleKCM {
                 }
             }
         }
-        QQC2.Label {
-            objectName: "administrationScopeHelp"
+        Kirigami.FormLayout {
             Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: i18nc("@info", "Host settings, sign-in policy and services belong to this computer. Your preferences belong to your account and apply when you reconnect. Each section has its own Save and reset actions.")
-        }
-        QQC2.Label {
-            objectName: "signInPendingNotice"
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            visible: root.authentication.modified
-            text: i18nc("@info", "Unsaved sign-in edits are kept in Sign-In Settings.")
-        }
-        QQC2.Label {
-            objectName: "signInSavedNotice"
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            visible: root.authentication.lastSaveRequiresRestart
-            text: i18nc("@info", "Sign-in policy was saved. Restart both services to apply it.")
-        }
-        QQC2.Label {
-            objectName: "preferencesPendingNotice"
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            visible: root.preferences.modified
-            text: i18nc("@info", "Unsaved account preferences are kept in Your Preferences.")
-        }
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            visible: root.preferences.reconnectRequired
-            text: i18nc("@info", "Saved account preferences apply when you reconnect.")
-        }
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            visible: root.sessionSettings.modified || root.sessionSettings.applicationRequired
-            text: i18nc("@info", "New Virtual Desktop settings are managed in Host Settings. Saved device grants apply only to newly created desktops.")
-        }
-        Flow {
-            objectName: "pageButtons"
-            Layout.fillWidth: true
-            spacing: Kirigami.Units.smallSpacing
-            QQC2.Button {
-                objectName: "brokerServicesLink"
-                text: i18nc("@action:button", "Services…")
-                onClicked: root.openPage("BrokerServicesPage")
+            Item { Kirigami.FormData.isSection: true }
+            Flow {
+                objectName: "pageButtons"
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+                QQC2.Button { objectName: "brokerSignInButton"; text: i18nc("@action:button", "Sign-In…"); icon.name: "system-users"; onClicked: root.openPage("BrokerSignInPage") }
+                QQC2.Button { objectName: "brokerPreferencesLink"; text: i18nc("@action:button", "Preferences…"); icon.name: "preferences-desktop"; onClicked: root.openPage("BrokerPreferencesPage") }
+                QQC2.Button { objectName: "brokerServicesLink"; text: i18nc("@action:button", "Services…"); icon.name: "system-run"; onClicked: root.openPage("BrokerServicesPage") }
             }
-            QQC2.Button {
-                objectName: "brokerSignInButton"
-                text: i18nc("@action:button", "Sign-In Settings…")
-                onClicked: root.openPage("BrokerSignInPage")
+            RowLayout {
+                QQC2.Button {
+                    objectName: "brokerHostsLink"
+                    text: i18nc("@action:button", "Virtual Desktop Defaults…")
+                    icon.name: "video-display"
+                    onClicked: root.navigation.push("BrokerHostsPage.qml", {initialScope: 2})
+                }
+                Kirigami.ContextualHelpButton {
+                    objectName: "administrationScopeHelp"
+                    toolTipText: i18nc("@info:tooltip", "Host settings and sign-in permissions apply to this computer and require administrator authentication. Preferences apply to the signed-in account. New Virtual Desktop settings apply only when creating a desktop.")
+                }
             }
-            QQC2.Button {
-                objectName: "brokerPreferencesLink"
-                text: i18nc("@action:button", "Your Preferences…")
-                onClicked: root.openPage("BrokerPreferencesPage")
-            }
-            QQC2.Button {
-                objectName: "brokerHostsLink"
-                text: i18nc("@action:button", "Host Settings…")
-                onClicked: root.openPage("BrokerHostsPage")
+            QQC2.Label { objectName: "signInPendingNotice"; visible: root.authentication.modified; text: i18nc("@info", "Unsaved sign-in changes.") }
+            QQC2.Label { objectName: "signInSavedNotice"; visible: root.authentication.lastSaveRequiresRestart; text: i18nc("@info", "Restart both services to apply sign-in changes.") }
+            QQC2.Label { objectName: "preferencesPendingNotice"; visible: root.preferences.modified; text: i18nc("@info", "Unsaved preferences.") }
+            QQC2.Label { visible: root.preferences.reconnectRequired; text: i18nc("@info", "Reconnect to apply saved preferences.") }
+            QQC2.Label { visible: root.sessionSettings.modified || root.sessionSettings.applicationRequired; text: i18nc("@info", "New Virtual Desktop settings have pending changes.") }
+            QQC2.Label {
+                objectName: "stockScopeNotice"
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: i18nc("@info", "KDE Remote Desktop has its own settings page.")
+                color: Kirigami.Theme.disabledTextColor
             }
         }
-        QQC2.Label {
-            objectName: "stockScopeNotice"
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: i18nc("@info", "KDE Remote Desktop is configured separately in its own settings page. Farside's Console and Virtual services use their own settings and certificates.")
+    }
+    QQC2.Dialog {
+        id: stopDialog
+        objectName: "confirmMainServiceStop"
+        property string route
+        modal: true
+        title: route === "console" ? i18nc("@title:window", "Stop Console") : i18nc("@title:window", "Stop Virtual")
+        footer: QQC2.DialogButtonBox {
+            standardButtons: QQC2.Dialog.Cancel
+            QQC2.Button {
+                text: i18nc("@action:button", "Stop")
+                QQC2.DialogButtonBox.buttonRole: QQC2.DialogButtonBox.ActionRole
+                onClicked: stopDialog.accept()
+            }
         }
+        width: Math.min(root.width - Kirigami.Units.largeSpacing * 2, Kirigami.Units.gridUnit * 26)
+        x: Math.max(0, (root.width - width) / 2)
+        y: Math.max(0, (root.height - height) / 2)
+        contentItem: QQC2.Label { wrapMode: Text.Wrap; text: i18nc("@info", "Stopping this service disconnects its remote clients.") }
+        onAccepted: root.administration.perform(route, "stop")
     }
 }

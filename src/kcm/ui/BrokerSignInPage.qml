@@ -26,7 +26,7 @@ KCM.SimpleKCM {
         QQC2.Label {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
-            text: i18nc("@info", "These host settings control who can connect to Console and Virtual. Administrator authentication is required to load or save them. Personal video, monitor and audio preferences are saved separately.")
+            text: i18nc("@info", "Choose who can connect. Loading and saving require administrator authentication.")
         }
         Kirigami.InlineMessage {
             objectName: "brokerAuthenticationError"
@@ -42,7 +42,9 @@ KCM.SimpleKCM {
             type: Kirigami.MessageType.Information
             text: i18nc("@info", "Sign-in policy saved. Restart both Console and Virtual services to load it. Existing connections are not changed by saving.")
         }
-        RowLayout {
+        Flow {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.smallSpacing
             QQC2.Button {
                 objectName: "loadBrokerAuthentication"
                 text: root.administration.loaded ? i18nc("@action:button", "Reload Policy…") : i18nc("@action:button", "Load Policy…")
@@ -108,8 +110,8 @@ KCM.SimpleKCM {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     text: section.modelData === "console"
-                        ? i18nc("@info", "System-account passwords use PAM. Console control still requires the logged-in desktop owner's identity; other admitted accounts do not gain control.")
-                        : i18nc("@info", "System-account passwords use PAM. Virtual desktops belong to the authenticated system account.")
+                        ? i18nc("@info", "Console control is limited to the signed-in desktop owner.")
+                        : i18nc("@info", "Virtual desktops belong to the account used to sign in.")
                 }
                 Repeater {
                     model: section.route.credentials || []
@@ -130,16 +132,16 @@ KCM.SimpleKCM {
                         }
                     }
                 }
-                QQC2.Button {
-                    objectName: section.modelData + "AddAlias"
-                    text: i18nc("@action:button", "Add Remote Login…")
-                    icon.name: "list-add"
-                    onClicked: root.editAlias(section.modelData, "", "")
-                }
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    text: i18nc("@info", "Remote logins use a separate password and an explicitly selected system account. Their spelling never chooses the desktop owner. Leave an existing password blank to keep it; changing the owner requires a new password.")
+                RowLayout {
+                    QQC2.Button {
+                        objectName: section.modelData + "AddAlias"
+                        text: i18nc("@action:button", "Add Remote Login…")
+                        icon.name: "list-add"
+                        onClicked: root.editAlias(section.modelData, "", "")
+                    }
+                    Kirigami.ContextualHelpButton {
+                        toolTipText: i18nc("@info:tooltip", "System-account passwords are checked using the computer's normal authentication. Remote logins use a separate password and the system account selected here; the remote login name never chooses the desktop owner.")
+                    }
                 }
                 Kirigami.Separator { Layout.fillWidth: true }
             }
@@ -173,6 +175,12 @@ KCM.SimpleKCM {
             QQC2.TextField { id: aliasName; objectName: "brokerAliasName"; Kirigami.FormData.label: i18nc("@label", "Remote login:"); readOnly: aliasDialog.existing }
             QQC2.TextField { id: ownerName; objectName: "brokerAliasOwner"; Kirigami.FormData.label: i18nc("@label", "System account:") }
             QQC2.TextField { id: aliasPassword; objectName: "brokerAliasPassword"; Kirigami.FormData.label: i18nc("@label", "New password:"); echoMode: QQC2.TextField.Password }
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                visible: aliasDialog.existing
+                text: i18nc("@info", "Leave blank to keep the password. Changing the account requires a new password.")
+            }
             QQC2.Label { text: root.administration.error; visible: text !== ""; wrapMode: Text.Wrap }
         }
         footer: QQC2.DialogButtonBox {

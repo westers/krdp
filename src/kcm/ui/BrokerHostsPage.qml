@@ -21,6 +21,10 @@ KCM.SimpleKCM {
     property url certificateFile
     property url privateKeyFile
     readonly property var runtime: host.runtime
+    // Keep the form objects alive across scope changes. Replacing labelled
+    // delegates during a switch races Kirigami's deferred label updates.
+    readonly property var allDefinitions: consoleSettings.definitions.concat(virtualSettings.definitions, sessionSettings.definitions)
+        .filter((row, index, rows) => rows.findIndex(candidate => candidate.key === row.key && candidate.group === row.group) === index)
     function fieldNames(keys) {
         return (keys || []).map(key => { const definition = host.definitions.find(row => row.key === key); return definition ? definition.label : key; }).join(", ");
     }
@@ -74,14 +78,23 @@ KCM.SimpleKCM {
         QQC2.Label {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
-            text: i18nc("@info", "These settings belong to the system host and require administrator authorization. Console shares the signed-in desktop; Virtual provides separate desktops. Each section saves separately, and switching sections preserves its unsaved changes.")
+            text: i18nc("@info", "Configure this host. Loading and saving require administrator authentication.")
         }
-        QQC2.ComboBox {
+        Kirigami.FormLayout {
+            Layout.fillWidth: true
+            RowLayout {
+                Kirigami.FormData.label: i18nc("@label", "Settings for:")
+                QQC2.ComboBox {
             id: scopeChoice
             currentIndex: root.initialScope
             objectName: "hostScope"
             model: [i18nc("@item:inlistbox", "Console Host"), i18nc("@item:inlistbox", "Virtual Host"), i18nc("@item:inlistbox", "New Virtual Desktops")]
             implicitContentWidthPolicy: QQC2.ComboBox.WidestText
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18nc("@info:tooltip", "Console shares this computer's desktop. Virtual provides separate desktops. New Virtual Desktop settings apply only to newly created desktops. Each section saves separately; switching sections preserves unsaved changes.")
+                }
+            }
         }
         Kirigami.InlineMessage {
             objectName: "hostError"
@@ -95,8 +108,8 @@ KCM.SimpleKCM {
             Layout.fillWidth: true
             visible: root.host.applicationRequired
             type: Kirigami.MessageType.Information
-            text: root.session ? i18nc("@info", "Saved settings apply to newly created Virtual desktops. Existing desktops retain their device grants; restarting the broker does not change them.")
-                : i18nc("@info", "Settings saved. Use Console and Virtual Services to explicitly restart this host when ready; restarting disconnects its clients. Inspect the host separately to check its startup values.")
+            text: root.session ? i18nc("@info", "Settings saved. New Virtual desktops will use them.")
+                : i18nc("@info", "Settings saved. Restart this host in Services to apply them.")
         }
         Flow {
             Layout.fillWidth: true
@@ -118,15 +131,23 @@ KCM.SimpleKCM {
                 enabled: root.host.canSave
                 onClicked: root.host.save()
             }
-            QQC2.Button {
+            QQC2.ToolButton {
                 objectName: "defaultHostSettings"
                 text: i18nc("@action:button", "Use Unit Defaults")
+                icon.name: "document-revert"
+                display: QQC2.AbstractButton.IconOnly
+                QQC2.ToolTip.text: text
+                QQC2.ToolTip.visible: hovered
                 enabled: root.host.loaded && !root.host.busy
                 onClicked: { root.host.defaults(); root.clearFileSelection(); }
             }
-            QQC2.Button {
+            QQC2.ToolButton {
                 objectName: "discardHostSettings"
                 text: i18nc("@action:button", "Discard Changes")
+                icon.name: "edit-undo"
+                display: QQC2.AbstractButton.IconOnly
+                QQC2.ToolTip.text: text
+                QQC2.ToolTip.visible: hovered
                 enabled: root.host.modified && !root.host.busy
                 onClicked: { root.host.discard(); root.clearFileSelection(); }
             }
@@ -142,8 +163,8 @@ KCM.SimpleKCM {
         QQC2.Label {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
-            text: root.session ? i18nc("@info", "GPU permissions and VA-API policy apply only when a desktop namespace is created. Empty GPU identities grant no GPU. This does not select an encoder or split work between GPUs.")
-                : i18nc("@info", "Host changes need an explicit broker restart. Use unit default removes only that field's stored override. Values shown here describe the stored file and shipped defaults; custom systemd units or drop-ins can differ, and a successful save does not prove the running host uses them.")
+            text: root.session ? i18nc("@info", "Changes apply to newly created Virtual desktops.")
+                : i18nc("@info", "Save changes, then restart the host in Services to apply them.")
         }
         ColumnLayout {
             Layout.fillWidth: true
@@ -229,27 +250,36 @@ KCM.SimpleKCM {
                 }
             }
         }
-        ColumnLayout {
+        Kirigami.FormLayout {
             visible: root.host.loaded && !root.session
             Layout.fillWidth: true
-            Kirigami.Heading { level: 3; text: i18nc("@title:group", "TLS Certificate") }
+            Item { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Certificate") }
             QQC2.Label {
+                Kirigami.FormData.label: i18nc("@label", "Saved certificate:")
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                text: i18nc("@info", "Stored certificate state: %1.", root.certificateState(root.certificate.state))
+                text: root.certificateState(root.certificate.state)
+            }
+            Kirigami.SelectableLabel {
+                Kirigami.FormData.label: i18nc("@label", "Fingerprint:")
+                Layout.fillWidth: true
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 18
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 25
+                wrapMode: Text.Wrap
+                visible: (root.certificate.fingerprint || "") !== ""
+                text: root.certificate.fingerprint || ""
             }
             QQC2.Label {
+                Kirigami.FormData.label: i18nc("@label", "Validity:")
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 visible: (root.certificate.fingerprint || "") !== ""
-                text: i18nc("@info", "SHA-256: %1. Valid from %2 until %3.", root.certificate.fingerprint || "", root.certificate.notBefore || "", root.certificate.notAfter || "")
+                text: i18nc("@info", "%1 to %2", root.certificate.notBefore || "", root.certificate.notAfter || "")
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 25
             }
-            QQC2.Label {
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                text: root.certificate.administratorManaged ? i18nc("@info", "The administrator manages this material and its renewal. The broker will preserve it.")
-                    : i18nc("@info", "At the standard paths, the broker can generate missing or renew eligible material on restart. Saving or choosing defaults never regenerates a certificate.")
-            }
+            RowLayout {
+                Kirigami.FormData.label: i18nc("@label", "Source:")
             QQC2.ComboBox {
                 id: tlsChoice
                 objectName: "hostTlsOperation"
@@ -267,16 +297,25 @@ KCM.SimpleKCM {
                 currentIndex: { for (let i = 0; i < model.length; ++i) if (model[i].value === root.host.tlsMode) return i; return 0; }
                 onActivated: { root.host.chooseTls(currentValue); root.clearFileSelection(); }
             }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: root.certificate.administratorManaged ? i18nc("@info:tooltip", "The administrator manages this certificate and its renewal. Farside preserves it.")
+                        : i18nc("@info:tooltip", "Farside can generate missing or renew eligible certificates at the standard paths when restarted. Saving settings never regenerates a certificate. These details describe the saved material; the running host may have loaded a different certificate.")
+                }
+            }
             QQC2.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 visible: root.host.tlsMode === "standard"
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 25
                 text: i18nc("@info", "Both path overrides will be removed. Existing certificates, keys and previous imports are preserved. Clients may need to verify the standard certificate's fingerprint after restart.")
             }
             ColumnLayout {
                 visible: root.host.tlsMode === "import"
                 enabled: !root.host.busy
                 Layout.fillWidth: true
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 25
                 Flow {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
@@ -312,73 +351,101 @@ KCM.SimpleKCM {
             }
         }
         Repeater {
-            model: root.host.loaded ? root.host.definitions : []
-            delegate: ColumnLayout {
-                id: row
-                required property var modelData
-                required property int index
-                readonly property string key: modelData.key
-                readonly property bool overridden: Object.prototype.hasOwnProperty.call(root.host.values, key)
-                readonly property string value: overridden ? root.host.values[key] : ""
-                readonly property var choices: modelData.choices
-                readonly property bool tlsPath: key === "Certificate" || key === "CertificateKey"
-                readonly property bool available: !root.host.busy && (!tlsPath || root.host.tlsMode === "existing") && !(root.host.scope === "virtual" && key === "CameraLoopbackDevice")
+            model: root.allDefinitions.map(row => row.group).filter((group, index, groups) => groups.indexOf(group) === index)
+            delegate: Kirigami.FormLayout {
+                id: group
+                required property string modelData
                 Layout.fillWidth: true
-                Kirigami.Heading {
-                    level: 3
-                    visible: row.index === 0 || root.host.definitions[row.index - 1].group !== row.modelData.group
-                    text: row.modelData.group
-                }
-                QQC2.Label { text: row.modelData.label }
-                QQC2.ComboBox {
-                    objectName: row.choices.length > 0 ? "host_" + row.key : ""
-                    visible: row.choices.length > 0
-                    enabled: row.available
-                    model: row.choices
-                    textRole: "text"
-                    valueRole: "value"
-                    implicitContentWidthPolicy: QQC2.ComboBox.WidestText
-                    Layout.maximumWidth: root.width - Kirigami.Units.largeSpacing * 2
-                    currentIndex: { for (let i = 0; i < row.choices.length; ++i) if (row.choices[i].value === row.value) return i; return 0; }
-                    onActivated: {
-                        if (currentValue === "") root.host.inherit(row.key);
-                        else root.host.setValue(row.key, currentValue);
-                    }
-                }
-                RowLayout {
-                    visible: row.choices.length === 0
-                    Layout.fillWidth: true
-                    QQC2.TextField {
-                        objectName: row.choices.length === 0 ? "host_" + row.key : ""
-                        enabled: row.available
-                        Layout.fillWidth: true
-                        Layout.maximumWidth: Kirigami.Units.gridUnit * 25
-                        text: row.value
-                        placeholderText: root.host.unitDefaults[row.key] === "" ? i18nc("@info:placeholder", "No GPU grant") : i18nc("@info:placeholder", "Unit default: %1", root.host.unitDefaults[row.key])
-                        maximumLength: 4096
-                        onTextEdited: {
-                            if (text === "" && row.key !== "RenderPci" && !row.tlsPath) root.host.inherit(row.key);
-                            else root.host.setValue(row.key, text);
+                visible: root.host.loaded && root.host.definitions.some(row => row.group === group.modelData)
+                Item { Kirigami.FormData.isSection: true; Kirigami.FormData.label: group.modelData }
+                Repeater {
+                    model: root.allDefinitions.filter(row => row.group === group.modelData)
+                    delegate: ColumnLayout {
+                        id: row
+                        required property var modelData
+                        readonly property string key: modelData.key
+                        readonly property var definition: root.host.definitions.find(field => field.key === row.key && field.group === group.modelData)
+                        readonly property bool overridden: Object.prototype.hasOwnProperty.call(root.host.values, key)
+                        readonly property string value: overridden ? root.host.values[key] : ""
+                        readonly property var choices: definition ? definition.choices : []
+                        readonly property bool tlsPath: key === "Certificate" || key === "CertificateKey"
+                        readonly property bool available: !root.host.busy && (!tlsPath || root.host.tlsMode === "existing") && !(root.host.scope === "virtual" && key === "CameraLoopbackDevice")
+                        visible: row.definition !== undefined
+                        Kirigami.FormData.label: (row.definition ? row.definition.label : row.modelData.label) + ":"
+                        Kirigami.FormData.buddyFor: inputs
+                        RowLayout {
+                            id: inputs
+                            Layout.fillWidth: true
+                            onActiveFocusChanged: if (activeFocus) (row.choices.length > 0 ? choice : textValue).forceActiveFocus()
+                            QQC2.Slider {
+                                visible: row.key === "Quality"
+                                enabled: row.available
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: Kirigami.Units.gridUnit * 6
+                                Layout.maximumWidth: Kirigami.Units.gridUnit * 12
+                                from: 0
+                                to: 100
+                                stepSize: 1
+                                value: Number(row.overridden ? row.value : root.host.unitDefaults[row.key]) || 0
+                                Accessible.name: row.modelData.label
+                                onMoved: root.host.setValue(row.key, String(Math.round(value)))
+                            }
+                            QQC2.ComboBox {
+                                id: choice
+                                objectName: row.definition && row.choices.length > 0 ? "host_" + row.key : ""
+                                visible: row.choices.length > 0
+                                enabled: row.available
+                                Accessible.name: row.definition ? row.definition.label : ""
+                                model: row.choices
+                                textRole: "text"
+                                valueRole: "value"
+                                Layout.fillWidth: true
+                                Layout.maximumWidth: Kirigami.Units.gridUnit * 25
+                                implicitContentWidthPolicy: QQC2.ComboBox.WidestText
+                                currentIndex: { for (let i = 0; i < row.choices.length; ++i) if (row.choices[i].value === row.value) return i; return 0; }
+                                onActivated: {
+                                    if (currentValue === "") root.host.inherit(row.key);
+                                    else root.host.setValue(row.key, currentValue);
+                                }
+                            }
+                            QQC2.TextField {
+                                id: textValue
+                                objectName: row.definition && row.choices.length === 0 ? "host_" + row.key : ""
+                                visible: row.choices.length === 0
+                                enabled: row.available
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * (row.key === "Quality" ? 4 : 18)
+                                Layout.maximumWidth: Kirigami.Units.gridUnit * 25
+                                Accessible.name: row.modelData.label
+                                text: row.value
+                                placeholderText: row.key === "Quality" ? (root.host.unitDefaults[row.key] || "")
+                                    : !root.host.unitDefaults[row.key] ? i18nc("@info:placeholder", "No GPU grant") : i18nc("@info:placeholder", "Unit default: %1", root.host.unitDefaults[row.key])
+                                maximumLength: 4096
+                                onTextEdited: {
+                                    if (text === "" && row.key !== "RenderPci" && !row.tlsPath) root.host.inherit(row.key);
+                                    else root.host.setValue(row.key, text);
+                                }
+                            }
+                            QQC2.ToolButton {
+                                objectName: "inheritHost_" + row.key
+                                visible: !row.tlsPath
+                                enabled: !root.host.busy && row.overridden
+                                icon.name: "edit-undo"
+                                text: i18nc("@action:button", "Use Unit Default")
+                                display: QQC2.AbstractButton.IconOnly
+                                QQC2.ToolTip.text: text
+                                QQC2.ToolTip.visible: hovered
+                                onClicked: root.host.inherit(row.key)
+                            }
+                            Kirigami.ContextualHelpButton { toolTipText: row.definition ? row.definition.help : "" }
+                        }
+                        QQC2.Label {
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            visible: row.key === "CameraLoopbackDevice"
+                            text: i18nc("@info", "Device: %1", root.host.metadata.cameraLoopback ? root.host.metadata.cameraLoopback.state : "")
                         }
                     }
-                    QQC2.ToolButton {
-                        objectName: "inheritHost_" + row.key
-                        visible: !row.tlsPath
-                        enabled: !root.host.busy && row.overridden
-                        icon.name: "edit-undo"
-                        text: i18nc("@action:button", "Use unit default")
-                        display: QQC2.AbstractButton.IconOnly
-                        QQC2.ToolTip.text: text
-                        QQC2.ToolTip.visible: hovered
-                        onClicked: root.host.inherit(row.key)
-                    }
-                }
-                QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: row.modelData.help }
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    visible: row.key === "CameraLoopbackDevice"
-                    text: i18nc("@info", "Stored device availability: %1.", root.host.metadata.cameraLoopback ? root.host.metadata.cameraLoopback.state : "")
                 }
             }
         }

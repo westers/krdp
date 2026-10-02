@@ -18,7 +18,7 @@ KCM.SimpleKCM {
         QQC2.Label {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
-            text: i18nc("@info", "These preferences belong to your system account. Video and audio apply to Console and Virtual; display selection applies to Console. Host permissions and client support still determine what is available. Save, then reconnect to apply changes.")
+            text: i18nc("@info", "Set preferences for this account. Save, then reconnect to apply them.")
         }
         Kirigami.InlineMessage {
             objectName: "brokerPreferenceError"
@@ -34,7 +34,9 @@ KCM.SimpleKCM {
             type: Kirigami.MessageType.Information
             text: i18nc("@info", "Preferences saved. Reconnect to use them; current connections are unchanged.")
         }
-        RowLayout {
+        Flow {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.smallSpacing
             QQC2.Button {
                 objectName: "loadBrokerPreferences"
                 text: root.preferences.loaded ? i18nc("@action:button", "Reload Preferences…") : i18nc("@action:button", "Load Preferences")
@@ -58,80 +60,87 @@ KCM.SimpleKCM {
                 onClicked: root.preferences.defaults()
             }
         }
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: i18nc("@info", "Use host setting leaves that preference unset. Console and Virtual can have different host defaults. A locked setting is preserved. AVC444 timing uses the built-in values for individual unset timing fields when any timing override is present.")
-        }
         Repeater {
-            model: root.preferences.loaded ? root.preferences.definitions : []
-            delegate: ColumnLayout {
-                id: row
-                required property var modelData
-                required property int index
-                readonly property string key: modelData.key
-                readonly property bool locked: root.preferences.lockedKeys.includes(key)
-                readonly property bool overridden: Object.prototype.hasOwnProperty.call(root.preferences.values, key)
-                readonly property string value: overridden ? root.preferences.values[key] : ""
-                readonly property var choices: modelData.choices
+            model: root.preferences.loaded ? root.preferences.definitions.map(row => row.group).filter((group, index, groups) => groups.indexOf(group) === index) : []
+            delegate: Kirigami.FormLayout {
+                id: group
+                required property string modelData
                 Layout.fillWidth: true
-                Kirigami.Heading {
-                    level: 3
-                    visible: row.index === 0 || root.preferences.definitions[row.index - 1].group !== row.modelData.group
-                    text: row.modelData.group
-                }
-                QQC2.Label { text: row.modelData.label }
-                QQC2.ComboBox {
-                    objectName: row.choices.length > 0 ? "preference_" + row.key : ""
-                    visible: row.choices.length > 0
-                    enabled: !row.locked
-                    model: row.choices
-                    textRole: "text"
-                    valueRole: "value"
-                    implicitContentWidthPolicy: QQC2.ComboBox.WidestText
-                    Layout.maximumWidth: root.width - Kirigami.Units.largeSpacing * 2
-                    currentIndex: {
-                        for (let i = 0; i < row.choices.length; ++i) if (row.choices[i].value === row.value) return i;
-                        return 0;
-                    }
-                    onActivated: {
-                        if (currentValue === "") root.preferences.inherit(row.key);
-                        else root.preferences.setValue(row.key, currentValue);
-                    }
-                }
-                RowLayout {
-                    visible: row.choices.length === 0
-                    enabled: !row.locked
-                    QQC2.TextField {
-                        id: textValue
-                        objectName: row.choices.length === 0 ? "preference_" + row.key : ""
-                        text: row.value
-                        placeholderText: i18nc("@info:placeholder", "Use host setting")
-                        maximumLength: 256
-                        Layout.preferredWidth: Kirigami.Units.gridUnit * 16
-                        onTextEdited: {
-                            if (text === "") root.preferences.inherit(row.key);
-                            else root.preferences.setValue(row.key, text);
+                Item { Kirigami.FormData.isSection: true; Kirigami.FormData.label: group.modelData }
+                Repeater {
+                    model: root.preferences.definitions.filter(row => row.group === group.modelData)
+                    delegate: RowLayout {
+                        id: row
+                        required property var modelData
+                        readonly property string key: modelData.key
+                        readonly property bool locked: root.preferences.lockedKeys.includes(key)
+                        readonly property bool overridden: Object.prototype.hasOwnProperty.call(root.preferences.values, key)
+                        readonly property string value: overridden ? root.preferences.values[key] : ""
+                        readonly property var choices: modelData.choices
+                        Kirigami.FormData.label: row.modelData.label + ":"
+                        Kirigami.FormData.buddyFor: row.choices.length > 0 ? choice : textValue
+                        QQC2.ComboBox {
+                            id: choice
+                            objectName: row.choices.length > 0 ? "preference_" + row.key : ""
+                            visible: row.choices.length > 0
+                            enabled: !row.locked
+                            model: row.choices
+                            textRole: "text"
+                            valueRole: "value"
+                            Layout.fillWidth: true
+                            Layout.maximumWidth: Kirigami.Units.gridUnit * 25
+                            implicitContentWidthPolicy: QQC2.ComboBox.WidestText
+                            currentIndex: {
+                                for (let i = 0; i < row.choices.length; ++i) if (row.choices[i].value === row.value) return i;
+                                return 0;
+                            }
+                            onActivated: {
+                                if (currentValue === "") root.preferences.inherit(row.key);
+                                else root.preferences.setValue(row.key, currentValue);
+                            }
+                        }
+                        QQC2.TextField {
+                            id: textValue
+                            objectName: row.choices.length === 0 ? "preference_" + row.key : ""
+                            visible: row.choices.length === 0
+                            enabled: !row.locked
+                            Accessible.name: row.modelData.label
+                            text: row.value
+                            placeholderText: i18nc("@info:placeholder", "Use host setting")
+                            maximumLength: 256
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 18
+                            Layout.maximumWidth: Kirigami.Units.gridUnit * 25
+                            onTextEdited: {
+                                if (text === "") root.preferences.inherit(row.key);
+                                else root.preferences.setValue(row.key, text);
+                            }
+                        }
+                        QQC2.ToolButton {
+                            objectName: "inherit_" + row.key
+                            visible: row.choices.length === 0
+                            icon.name: "edit-undo"
+                            text: i18nc("@action:button", "Use Host Setting")
+                            display: QQC2.AbstractButton.IconOnly
+                            enabled: !row.locked && row.overridden
+                            QQC2.ToolTip.text: text
+                            QQC2.ToolTip.visible: hovered
+                            onClicked: root.preferences.inherit(row.key)
+                        }
+                        Kirigami.ContextualHelpButton {
+                            toolTipText: row.modelData.help + (row.locked ? " " + i18nc("@info", "This setting is locked by the administrator.") : "")
                         }
                     }
-                    QQC2.ToolButton {
-                        objectName: "inherit_" + row.key
-                        icon.name: "edit-undo"
-                        text: i18nc("@action:button", "Use host setting")
-                        display: QQC2.AbstractButton.IconOnly
-                        enabled: row.overridden
-                        QQC2.ToolTip.text: text
-                        QQC2.ToolTip.visible: hovered
-                        onClicked: root.preferences.inherit(row.key)
-                    }
-                }
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    text: row.modelData.help + (row.locked ? " " + i18nc("@info", "This setting is locked.") : "")
                 }
             }
         }
+        RowLayout {
+            QQC2.Label { text: i18nc("@info", "Unset preferences use the host's settings."); color: Kirigami.Theme.disabledTextColor }
+            Kirigami.ContextualHelpButton {
+                toolTipText: i18nc("@info:tooltip", "Video and audio preferences apply to Console and Virtual; display selection applies to Console. Host permissions and client support determine availability. Console and Virtual may have different defaults. Locked settings are preserved. Unset AVC444 timing fields use built-in values when any timing override is present.")
+            }
+        }
+
     }
     QQC2.Dialog {
         id: discardDialog

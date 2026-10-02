@@ -126,6 +126,7 @@ private Q_SLOTS:
             for (const auto &definition : model->definitions()) {
                 const auto row = definition.toMap(); const auto key = row[u"key"_s].toString();
                 QTRY_VERIFY(item(u"host_"_s + key)); auto *control = item(u"host_"_s + key); ++fields;
+                QTRY_VERIFY2(control->property("visible").toBool(),qPrintable(key + u" hidden in its scope"_s));
                 if (model == &virtualHost && key == u"CameraLoopbackDevice") { QVERIFY(!control->property("enabled").toBool()); continue; }
                 const auto choices = row[u"choices"_s].toList();
                 if (choices.isEmpty()) { QVERIFY(control->setProperty("text", desired[key])); QVERIFY(QMetaObject::invokeMethod(control, "textEdited")); }
