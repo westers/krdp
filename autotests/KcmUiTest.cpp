@@ -143,7 +143,11 @@ class KcmUiTest : public QObject
             QVERIFY2(item, qPrintable(u"missing item "_s + name));
             QVERIFY2(item->isVisible(), qPrintable(name + u" is hidden"_s));
             QVERIFY2(item->width() > 0 && item->height() > 0, qPrintable(name + u" has no size"_s));
-            QVERIFY2(content->isAncestorOf(item), qPrintable(name + u" is not in the scrolling content"_s));
+            if (!content->isAncestorOf(item)) {
+                const auto bounds=item->mapRectToItem(page,QRectF(0,0,item->width(),item->height()));
+                QVERIFY2(bounds.left()>=-0.5 && bounds.right()<=page->width()+0.5 && bounds.bottom()<=page->height()+0.5,qPrintable(name));
+                continue;
+            }
 
             const QRectF r = item->mapRectToItem(content, QRectF(0, 0, item->width(), item->height()));
             QVERIFY2(r.top() >= -0.5 && r.bottom() <= contentHeight + 0.5,
@@ -194,6 +198,7 @@ private Q_SLOTS:
         QVERIFY2(result.plugin, qPrintable(result.errorText));
         m_module = result.plugin;
         m_module->load();
+        QVERIFY2(m_module->mainUi(), "main.qml did not load; stop before inspecting its controls");
 
         m_window = new QQuickWindow;
         m_window->resize(1280, 800);
@@ -232,19 +237,25 @@ private Q_SLOTS:
     {
         QFETCH(QSize, window);
         auto *page = showPage(m_module->mainUi(), window);
-        checkReachable(page, {u"brokerScopeDescription"_s, u"refreshBrokerStatus"_s, u"consoleHostHeading"_s, u"consoleHostStatus"_s, u"consoleHostSettingsLink"_s, u"virtualHostHeading"_s, u"virtualHostStatus"_s, u"virtualHostSettingsLink"_s, u"administrationScopeHelp"_s, u"pageButtons"_s, u"stockScopeNotice"_s});
-        if (window.height() < 500) {
-            // Too small for everything: the page must scroll (so the checks
-            // above really scrolled), not squeeze or stack its parts.
-            auto *flickable = flickableOf(page);
-            QVERIFY2(flickable->property("contentHeight").toReal() > flickable->height(),
-                     qPrintable(u"content %1, view %2, page %3"_s.arg(flickable->property("contentHeight").toReal()).arg(flickable->height()).arg(page->height())));
+        page->setProperty("currentTab", 0);
+        checkReachable(page, {u"consoleHostEnabled"_s, u"consoleHostStatus"_s, u"consoleServiceDetails"_s, u"unlockHostSettings"_s});
+        for (int tab = 0; tab < 4; ++tab) {
+            QVERIFY(page->setProperty("currentTab", tab));
+            QCoreApplication::processEvents();
+            auto *tabs = findItem(page,u"settingsTabs"_s); QVERIFY(tabs && tabs->isVisible());
+            QVERIFY(tabs->width() <= page->width());
+            const auto buttonName = tab < 2 ? u"saveHostSettings"_s : tab == 2 ? u"saveBrokerAuthentication"_s : u"saveBrokerPreferences"_s;
+            // Find the visible footer; another tab's editor remains alive.
+            const auto visibleFind = [&](auto &&self, QQuickItem *parent) -> QQuickItem * {
+                if (parent->objectName() == buttonName && parent->isVisible()) return parent;
+                for (auto *child : parent->childItems()) if (auto *item = self(self, child)) return item;
+                return nullptr;
+            };
+            auto *save = visibleFind(visibleFind,page); QVERIFY(save && save->width()>0 && save->height()>0);
+            const auto bounds=save->mapRectToItem(page,QRectF(0,0,save->width(),save->height()));
+            QVERIFY2(bounds.left()>=-0.5 && bounds.right()<=page->width()+0.5 && bounds.bottom()<=page->height()+0.5,qPrintable(u"tab %1 footer %2 bounds (%3,%4)..(%5,%6) page %7x%8"_s.arg(tab).arg(buttonName).arg(bounds.left()).arg(bounds.top()).arg(bounds.right()).arg(bounds.bottom()).arg(page->width()).arg(page->height())));
         }
-        // All four ways into the sub-pages.
-        for (const auto &button : {u"brokerServicesLink"_s, u"brokerSignInButton"_s, u"brokerPreferencesLink"_s, u"brokerHostsLink"_s}) {
-            auto *item = findItem(page, button);
-            QVERIFY(item && item->isVisible() && item->width() > 0);
-        }
+        page->setProperty("currentTab", 0);
         const auto warnings = takeMessages();
         QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
     }
@@ -311,20 +322,19 @@ private Q_SLOTS:
         QTest::newRow("Console")<<u"console"_s<<0;QTest::newRow("Virtual")<<u"virtual"_s<<1;
     }
     void hostNavigationSelectsScope() {
-        QFETCH(QString,route);QFETCH(int,index);auto *main=m_module->mainUi();
-        auto *button=findItem(main,route+u"HostSettingsLink"_s);QVERIFY(button);
-        const auto depth=m_module->depth();QVERIFY(QMetaObject::invokeMethod(button,"clicked"));QCOMPARE(m_module->depth(),depth+1);
-        auto *page=m_module->subPage(m_module->depth()-2);QVERIFY(page);QCOMPARE(page->objectName(),u"brokerHostsPage"_s);
-        auto *selector=findItem(page,u"hostScope"_s);QVERIFY(selector);QCOMPARE(selector->property("currentIndex").toInt(),index);
-        auto *host=page->property("host").value<QObject *>();QVERIFY(host);QCOMPARE(host->property("scope").toString(),route);
-        QVERIFY(!host->property("loaded").toBool());m_module->pop();
-        const auto warnings=takeMessages();QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
+        QFETCH(QString,route); QFETCH(int,index); auto *main=m_module->mainUi();
+        QVERIFY(main->setProperty("currentTab",index));
+        auto *page=findItem(main,index==0?u"consoleSettingsPage"_s:u"virtualSettingsPage"_s); QVERIFY(page);
+        QCOMPARE(page->property("fixedScope").toInt(),index);
+        auto *host=page->property("host").value<QObject *>(); QVERIFY(host); QCOMPARE(host->property("scope").toString(),route);
+        QVERIFY(!host->property("loaded").toBool()); main->setProperty("currentTab",0);
+        const auto warnings=takeMessages(); QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
     }
     void phoneEntryUsesTheSameScopedPage() {
         QQmlComponent component(m_engine.get(),QUrl(u"qrc:/kcm/kcm_farside/main_phone.qml"_s));QVERIFY2(component.isReady(),qPrintable(component.errorString()));
         QScopedPointer<QObject> object(component.create(QQmlEngine::contextForObject(m_module->mainUi())));QVERIFY2(object,qPrintable(component.errorString()));
         auto *page=qobject_cast<QQuickItem *>(object.data());QVERIFY(page);QCOMPARE(page->objectName(),u"mainPage"_s);
-        showPage(page,{640,800});checkReachable(page,{u"consoleHostStatus"_s,u"virtualHostStatus"_s,u"pageButtons"_s});
+        showPage(page,{640,800});checkReachable(page,{u"consoleHostStatus"_s,u"consoleHostEnabled"_s,u"consoleServiceDetails"_s});
         QVERIFY(!page->findChild<QObject *>(u"serverSwitch"_s));page->setParentItem(nullptr);
         const auto warnings=takeMessages();QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
     }

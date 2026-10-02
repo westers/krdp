@@ -103,7 +103,7 @@ private Q_SLOTS:
         QQmlEngine engine; localize(engine); QStringList warnings;
         connect(&engine, &QQmlEngine::warnings, this, [&](const auto &errors) { for (const auto &error : errors) warnings.append(error.toString()); });
         QQmlComponent component(&engine, pageUrl()); QVERIFY2(component.isReady(), qPrintable(component.errorString()));
-        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"consoleSettings"_s, QVariant::fromValue(&console)},
+        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"showAdvanced"_s, true}, {u"consoleSettings"_s, QVariant::fromValue(&console)},
             {u"virtualSettings"_s, QVariant::fromValue(&virtualHost)}, {u"sessionSettings"_s, QVariant::fromValue(&session)}}));
         QVERIFY2(object, qPrintable(component.errorString())); auto *page = qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
         QQuickWindow window; window.resize(1000, 900); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
@@ -129,7 +129,13 @@ private Q_SLOTS:
                 QTRY_VERIFY2(control->property("visible").toBool(),qPrintable(key + u" hidden in its scope"_s));
                 if (model == &virtualHost && key == u"CameraLoopbackDevice") { QVERIFY(!control->property("enabled").toBool()); continue; }
                 const auto choices = row[u"choices"_s].toList();
-                if (choices.isEmpty()) { QVERIFY(control->setProperty("text", desired[key])); QVERIFY(QMetaObject::invokeMethod(control, "textEdited")); }
+                if (control->metaObject()->indexOfProperty("checkState") >= 0) {
+                    QVERIFY(control->setProperty("checkState", int(desired[key].toString() == u"true"_s ? Qt::Checked : Qt::Unchecked)));
+                    QVERIFY(QMetaObject::invokeMethod(control, "clicked"));
+                } else if (control->metaObject()->indexOfProperty("from") >= 0) {
+                    QVERIFY(control->setProperty("value", desired[key].toInt()));
+                    QVERIFY(QMetaObject::invokeMethod(control, "valueModified"));
+                } else if (choices.isEmpty()) { QVERIFY(control->setProperty("text", desired[key])); QVERIFY(QMetaObject::invokeMethod(control, "textEdited")); }
                 else {
                     int selected = -1; for (int i = 0; i < choices.size(); ++i) if (choices[i].toMap()[u"value"_s] == desired[key]) selected = i;
                     QVERIFY(selected >= 0); QVERIFY(control->setProperty("currentIndex", selected)); QVERIFY(QMetaObject::invokeMethod(control, "activated", Q_ARG(int, selected)));
@@ -161,11 +167,11 @@ private Q_SLOTS:
         QCOMPARE(fields, 25);
         QVERIFY(selector->setProperty("currentIndex", 0)); QTRY_VERIFY(item(u"host_Quality"_s));
         auto *quality = qobject_cast<QQuickItem *>(item(u"host_Quality"_s)); QVERIFY(quality); quality->forceActiveFocus();
-        QTest::keyClick(&window, Qt::Key_A, Qt::ControlModifier); QTest::keyClick(&window, Qt::Key_8); QTest::keyClick(&window, Qt::Key_8);
+        QTest::keyClick(&window, Qt::Key_A, Qt::ControlModifier); QTest::keyClick(&window, Qt::Key_8); QTest::keyClick(&window, Qt::Key_8); QTest::keyClick(&window, Qt::Key_Return);
         QTRY_COMPARE(console.values()[u"Quality"_s].toString(), u"88"_s);
-        auto *port = item(u"host_Port"_s); QVERIFY(port); QVERIFY(port->setProperty("text", u"70000"_s)); QVERIFY(QMetaObject::invokeMethod(port, "textEdited"));
+        auto *port = item(u"host_Port"_s); QVERIFY(port); QCOMPARE(port->property("to").toInt(),65535); QVERIFY(console.setValue(u"Port"_s, u"70000"_s));
         QVERIFY(!item(u"saveHostSettings"_s)->property("enabled").toBool()); QVERIFY(console.modified());
-        QVERIFY(port->setProperty("text", u"3401"_s)); QVERIFY(QMetaObject::invokeMethod(port, "textEdited"));
+        QVERIFY(port->setProperty("value", 3401)); QVERIFY(QMetaObject::invokeMethod(port, "valueModified"));
         QVERIFY(selector->setProperty("currentIndex", 1)); QVERIFY(click(u"defaultHostSettings"_s)); QVERIFY(virtualHost.values().isEmpty());
         QCOMPARE(console.values()[u"Quality"_s].toString(), u"88"_s);
         for (const auto &failure : {QByteArray("cancel"), QByteArray("denied"), QByteArray("stale")}) {
@@ -176,7 +182,7 @@ private Q_SLOTS:
         QTRY_VERIFY(dialog->property("visible").toBool()); QVERIFY(QMetaObject::invokeMethod(dialog, "reject")); QVERIFY(virtualHost.modified());
         QVERIFY(click(u"loadHostSettings"_s)); QVERIFY(QMetaObject::invokeMethod(dialog, "accept")); QTRY_VERIFY(!virtualHost.busy());
         QVERIFY(!virtualHost.modified()); QCOMPARE(virtualHost.values()[u"Quality"_s].toString(), u"93"_s);
-        QVERIFY(selector->setProperty("currentIndex", 0)); QTRY_COMPARE(item(u"host_Quality"_s)->property("text").toString(), u"88"_s);
+        QVERIFY(selector->setProperty("currentIndex", 0)); QTRY_COMPARE(item(u"host_Quality"_s)->property("value").toInt(), 88);
         QVERIFY(click(u"discardHostSettings"_s)); QVERIFY(!console.modified());
         QVERIFY(click(u"defaultHostSettings"_s)); QCOMPARE(console.tlsMode(), u"standard"_s); QVERIFY(console.values().isEmpty());
         QVERIFY(click(u"saveHostSettings"_s)); QTRY_VERIFY(!console.busy()); QVERIFY(console.values().isEmpty());
@@ -187,7 +193,7 @@ private Q_SLOTS:
         BrokerHostSettings console(Scope::Console, u"/usr/bin/python3"_s, arguments(dir), 3000),
             virtualHost(Scope::Virtual, u"/usr/bin/python3"_s, arguments(dir), 3000), session(Scope::VirtualSession, u"/usr/bin/python3"_s, arguments(dir), 3000);
         QQmlEngine engine; localize(engine); QQmlComponent component(&engine, pageUrl());
-        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"consoleSettings"_s, QVariant::fromValue(&console)},
+        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"showAdvanced"_s, true}, {u"consoleSettings"_s, QVariant::fromValue(&console)},
             {u"virtualSettings"_s, QVariant::fromValue(&virtualHost)}, {u"sessionSettings"_s, QVariant::fromValue(&session)}}));
         QVERIFY2(object, qPrintable(component.errorString())); auto *page = qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
         QQuickWindow window; window.resize(1000, 900); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();

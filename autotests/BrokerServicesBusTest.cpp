@@ -109,6 +109,22 @@ private Q_SLOTS:
         QVERIFY(row(model,1)[u"canStart"_s].toBool()); QVERIFY(!manager->methods.contains(u"StartUnit"_s));
         manager->malformed=true; model.refresh(); QTRY_VERIFY(!model.busy()); QVERIFY(!row(model,0)[u"known"_s].toBool()); QVERIFY(!row(model,1)[u"canStart"_s].toBool());
     }
+    void externalStateChangesRefreshWithoutPolling() {
+        SystemBrokerServiceTransport transport(*client); BrokerServices model(&transport); model.refresh(); QTRY_VERIFY(!model.busy());
+        QTRY_VERIFY(manager->methods.contains(u"Subscribe"_s));
+        manager->states[0].activeState=u"failed"_s;
+        auto signal=QDBusMessage::createSignal(u"/org/freedesktop/systemd1/unit/console"_s,u"org.freedesktop.DBus.Properties"_s,u"PropertiesChanged"_s);
+        signal.setArguments({u"org.freedesktop.systemd1.Unit"_s,QVariantMap{{u"ActiveState"_s,u"failed"_s}},QStringList{}});
+        QVERIFY(server->send(signal)); QTRY_COMPARE(row(model,0)[u"activeState"_s].toString(),u"failed"_s);
+        manager->states[1].activeState=u"active"_s; manager->states[1].mainPid=111;
+        manager->signalJob(u"/org/freedesktop/systemd1/job/998"_s,BrokerServiceTransport::unit(1),u"done"_s);
+        QTRY_COMPARE(row(model,1)[u"mainPid"_s].toUInt(),111u);
+        QTRY_VERIFY(!model.busy());
+        const auto reads=manager->methods.count(u"LoadUnit"_s);
+        signal.setArguments({u"org.freedesktop.systemd1.Unit"_s,QVariantMap{{u"Description"_s,u"Unrelated metadata"_s}},QStringList{}});
+        QVERIFY(server->send(signal)); QTest::qWait(100); QCOMPARE(manager->methods.count(u"LoadUnit"_s),reads);
+        QVERIFY(!manager->methods.contains(u"StartUnit"_s)); QVERIFY(!manager->methods.contains(u"StopUnit"_s));
+    }
     void startJob_data() { QTest::addColumn<bool>("early"); QTest::newRow("signal-before-reply")<<true; QTest::newRow("signal-after-reply")<<false; }
     void startJob() {
         QFETCH(bool,early); manager->early=early; SystemBrokerServiceTransport transport(*client); BrokerServices model(&transport); model.refresh(); QTRY_VERIFY(!model.busy());

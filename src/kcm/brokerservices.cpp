@@ -58,21 +58,43 @@ SystemBrokerServiceTransport::SystemBrokerServiceTransport(const QDBusConnection
     m_bus.connect(service, managerPath, manager, u"UnitFilesChanged"_s, this, SLOT(unitFilesChanged()));
     auto *owner = new QDBusServiceWatcher(service, m_bus, QDBusServiceWatcher::WatchForOwnerChange, this);
     connect(owner, &QDBusServiceWatcher::serviceOwnerChanged, this, &SystemBrokerServiceTransport::managerOwnerChanged);
+    subscribe();
+}
+
+void SystemBrokerServiceTransport::subscribe()
+{
+    if (m_subscribed || m_subscriptionPending) return;
+    m_subscriptionPending = true;
+    const auto epoch = m_managerGeneration;
+    request<QDBusPendingReply<>>(m_bus, call(u"Subscribe"_s), this, [this, epoch](const auto &reply) {
+        if (epoch != m_managerGeneration) return;
+        m_subscriptionPending = false;
+        m_subscribed = !reply.isError() || reply.error().name() == u"org.freedesktop.systemd1.AlreadySubscribed"_s;
+    });
 }
 
 void SystemBrokerServiceTransport::query(int route, QueryDone done)
 {
     const auto name = unit(route);
     if (name.isEmpty()) { done({}, u"Invalid host service"_s); return; }
+    subscribe();
     const auto epoch = m_managerGeneration;
     const auto originalDone = std::move(done);
     done = [this, epoch, originalDone](BrokerServiceState state, const QString &error) {
         originalDone(epoch == m_managerGeneration ? state : BrokerServiceState{},
             epoch == m_managerGeneration ? error : u"System service manager changed; refresh its state"_s);
     };
-    request<QDBusPendingReply<QDBusObjectPath>>(m_bus, call(u"LoadUnit"_s, {name}), this, [this, name, done](const auto &loaded) {
+    request<QDBusPendingReply<QDBusObjectPath>>(m_bus, call(u"LoadUnit"_s, {name}), this, [this, route, name, done](const auto &loaded) {
         if (loaded.isError()) { done({}, loaded.error().message()); return; }
         const auto path = loaded.value().path();
+        if (m_unitPaths[route] != path) {
+            if (!m_unitPaths[route].isEmpty())
+                m_bus.disconnect(service, m_unitPaths[route], properties, u"PropertiesChanged"_s,
+                                 this, SLOT(unitPropertiesChanged(QString,QVariantMap,QStringList)));
+            m_unitPaths[route] = path;
+            m_bus.connect(service, path, properties, u"PropertiesChanged"_s,
+                          this, SLOT(unitPropertiesChanged(QString,QVariantMap,QStringList)));
+        }
         auto message = QDBusMessage::createMethodCall(service, path, properties, u"GetAll"_s);
         message.setArguments({unitInterface});
         request<QDBusPendingReply<QVariantMap>>(m_bus, message, this, [this, name, path, done](const auto &reply) {
@@ -156,14 +178,22 @@ void SystemBrokerServiceTransport::operate(int route, Operation operation, Done 
 
 void SystemBrokerServiceTransport::jobRemoved(uint, const QDBusObjectPath &path, const QString &name, const QString &result)
 {
-    if (!m_done || name != m_unit) return;
+    if (name != unit(0) && name != unit(1)) return;
+    if (!m_done || name != m_unit) { Q_EMIT changed(); return; }
     if (m_job.isEmpty()) { if (m_earlyJobs.size() < 64) m_earlyJobs.insert(path.path(), result); return; }
     if (path.path() == m_job) finish(result == u"done"_s ? QString() : u"Service job did not complete: "_s + result);
 }
 void SystemBrokerServiceTransport::unitFilesChanged() { Q_EMIT changed(); }
+void SystemBrokerServiceTransport::unitPropertiesChanged(const QString &interface, const QVariantMap &values, const QStringList &invalidated)
+{
+    if (interface != unitInterface && interface != u"org.freedesktop.systemd1.Service"_s) return;
+    for (const auto &key : {u"LoadState"_s, u"ActiveState"_s, u"SubState"_s, u"MainPID"_s}) {
+        if (values.contains(key) || invalidated.contains(key)) { Q_EMIT changed(); return; }
+    }
+}
 void SystemBrokerServiceTransport::managerOwnerChanged(const QString &, const QString &, const QString &)
 {
-    ++m_managerGeneration; m_subscribed = false;
+    ++m_managerGeneration; m_subscribed = m_subscriptionPending = false;
     if (m_done) finish(u"System service manager changed during the operation; refresh its state"_s);
     Q_EMIT changed();
 }

@@ -11,6 +11,7 @@ KCM.SimpleKCM {
     objectName: "brokerPreferencesPage"
     title: i18nc("@title:window", "Your Console and Virtual Preferences")
     property var preferences: kcm.brokerPreferences
+    property bool showAdvanced: false
     // Explicit load keeps plugin construction and UI-load tests from reading
     // the work desktop's real configuration.
     ColumnLayout {
@@ -34,105 +35,30 @@ KCM.SimpleKCM {
             type: Kirigami.MessageType.Information
             text: i18nc("@info", "Preferences saved. Reconnect to use them; current connections are unchanged.")
         }
-        Flow {
-            Layout.fillWidth: true
-            spacing: Kirigami.Units.smallSpacing
-            QQC2.Button {
-                objectName: "loadBrokerPreferences"
-                text: root.preferences.loaded ? i18nc("@action:button", "Reload Preferences…") : i18nc("@action:button", "Load Preferences")
-                icon.name: "view-refresh"
-                onClicked: {
-                    if (root.preferences.modified) discardDialog.open();
-                    else root.preferences.reload();
-                }
-            }
-            QQC2.Button {
-                objectName: "saveBrokerPreferences"
-                text: i18nc("@action:button", "Save Preferences")
-                icon.name: "document-save"
-                enabled: root.preferences.canSave
-                onClicked: root.preferences.save()
-            }
-            QQC2.Button {
-                objectName: "defaultBrokerPreferences"
-                text: i18nc("@action:button", "Use Host Settings")
-                enabled: root.preferences.loaded
-                onClicked: root.preferences.defaults()
-            }
+        QQC2.Button {
+            objectName: "unlockBrokerPreferences"
+            visible: !root.preferences.loaded
+            text: i18nc("@action:button", "Load My Preferences")
+            onClicked: root.preferences.reload()
         }
-        Repeater {
-            model: root.preferences.loaded ? root.preferences.definitions.map(row => row.group).filter((group, index, groups) => groups.indexOf(group) === index) : []
-            delegate: Kirigami.FormLayout {
-                id: group
-                required property string modelData
-                Layout.fillWidth: true
-                Item { Kirigami.FormData.isSection: true; Kirigami.FormData.label: group.modelData }
-                Repeater {
-                    model: root.preferences.definitions.filter(row => row.group === group.modelData)
-                    delegate: RowLayout {
-                        id: row
-                        required property var modelData
-                        readonly property string key: modelData.key
-                        readonly property bool locked: root.preferences.lockedKeys.includes(key)
-                        readonly property bool overridden: Object.prototype.hasOwnProperty.call(root.preferences.values, key)
-                        readonly property string value: overridden ? root.preferences.values[key] : ""
-                        readonly property var choices: modelData.choices
-                        Kirigami.FormData.label: row.modelData.label + ":"
-                        Kirigami.FormData.buddyFor: row.choices.length > 0 ? choice : textValue
-                        QQC2.ComboBox {
-                            id: choice
-                            objectName: row.choices.length > 0 ? "preference_" + row.key : ""
-                            visible: row.choices.length > 0
-                            enabled: !row.locked
-                            model: row.choices
-                            textRole: "text"
-                            valueRole: "value"
-                            Layout.fillWidth: true
-                            Layout.maximumWidth: Kirigami.Units.gridUnit * 25
-                            implicitContentWidthPolicy: QQC2.ComboBox.WidestText
-                            currentIndex: {
-                                for (let i = 0; i < row.choices.length; ++i) if (row.choices[i].value === row.value) return i;
-                                return 0;
-                            }
-                            onActivated: {
-                                if (currentValue === "") root.preferences.inherit(row.key);
-                                else root.preferences.setValue(row.key, currentValue);
-                            }
-                        }
-                        QQC2.TextField {
-                            id: textValue
-                            objectName: row.choices.length === 0 ? "preference_" + row.key : ""
-                            visible: row.choices.length === 0
-                            enabled: !row.locked
-                            Accessible.name: row.modelData.label
-                            text: row.value
-                            placeholderText: i18nc("@info:placeholder", "Use host setting")
-                            maximumLength: 256
-                            Layout.fillWidth: true
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 18
-                            Layout.maximumWidth: Kirigami.Units.gridUnit * 25
-                            onTextEdited: {
-                                if (text === "") root.preferences.inherit(row.key);
-                                else root.preferences.setValue(row.key, text);
-                            }
-                        }
-                        QQC2.ToolButton {
-                            objectName: "inherit_" + row.key
-                            visible: row.choices.length === 0
-                            icon.name: "edit-undo"
-                            text: i18nc("@action:button", "Use Host Setting")
-                            display: QQC2.AbstractButton.IconOnly
-                            enabled: !row.locked && row.overridden
-                            QQC2.ToolTip.text: text
-                            QQC2.ToolTip.visible: hovered
-                            onClicked: root.preferences.inherit(row.key)
-                        }
-                        Kirigami.ContextualHelpButton {
-                            toolTipText: row.modelData.help + (row.locked ? " " + i18nc("@info", "This setting is locked by the administrator.") : "")
-                        }
-                    }
-                }
+        Kirigami.FormLayout {
+            Layout.fillWidth: true
+            visible: root.preferences.loaded
+            Item { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Video") }
+            Repeater { model: root.preferences.definitions.filter(row => ["Quality", "AdaptiveQuality", "Codec"].includes(row.key)); delegate: preferenceField }
+            Item { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Console displays") }
+            Repeater { model: root.preferences.definitions.filter(row => ["MonitorMode", "MonitorIndex", "VirtualMonitorPolicy", "VirtualMonitorLayout", "VirtualMonitorFallbackSize"].includes(row.key)); delegate: preferenceField }
+            Item { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Audio and session") }
+            Repeater { model: root.preferences.definitions.filter(row => ["PreferAudioQuality", "StandardClientMedia", "WakeDisplayOnConnect"].includes(row.key)); delegate: preferenceField }
+            QQC2.Button {
+                objectName: "preferenceAdvancedButton"
+                text: root.showAdvanced ? i18nc("@action:button", "Hide advanced options") : i18nc("@action:button", "Advanced options")
+                icon.name: root.showAdvanced ? "arrow-down" : "arrow-right"
+                flat: true
+                onClicked: root.showAdvanced = !root.showAdvanced
             }
+            Item { visible: root.showAdvanced; Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Encoding and compatibility") }
+            Repeater { model: root.preferences.definitions.filter(row => ["SoftwareEncoding", "Av1Tiles", "Avc444MotionGapMs", "Avc444RestMs", "Avc444MaxGapMs", "VirtualStockClientPolicy"].includes(row.key)); delegate: preferenceField }
         }
         RowLayout {
             QQC2.Label { text: i18nc("@info", "Unset preferences use the host's settings."); color: Kirigami.Theme.disabledTextColor }
@@ -141,6 +67,41 @@ KCM.SimpleKCM {
             }
         }
 
+    }
+    Component {
+        id: preferenceField
+        BrokerSettingField {
+            id: field
+            required property var modelData
+            readonly property bool advanced: ["SoftwareEncoding", "Av1Tiles", "Avc444MotionGapMs", "Avc444RestMs", "Avc444MaxGapMs", "VirtualStockClientPolicy"].includes(modelData.key)
+            settings: root.preferences
+            definition: modelData
+            prefix: "preference_"
+            accountPreference: true
+            visible: !advanced || root.showAdvanced
+            editable: !root.preferences.lockedKeys.includes(key)
+            showHelp: advanced || !editable || ["VirtualMonitorPolicy", "VirtualMonitorLayout", "WakeDisplayOnConnect"].includes(key)
+            QQC2.Label {
+                Layout.fillWidth: true
+                visible: !field.editable
+                text: i18nc("@info", "Locked by the administrator")
+                color: Kirigami.Theme.disabledTextColor
+            }
+        }
+    }
+    footer: QQC2.ToolBar {
+        contentItem: RowLayout {
+            QQC2.Button { objectName: "defaultBrokerPreferences"; text: i18nc("@action:button", "Use Host Settings"); enabled: root.preferences.loaded; onClicked: root.preferences.defaults() }
+            QQC2.ToolButton {
+                objectName: "loadBrokerPreferences"
+                icon.name: "view-refresh"; text: i18nc("@action:button", "Reload Preferences…")
+                display: QQC2.AbstractButton.IconOnly
+                QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered
+                onClicked: { if (root.preferences.modified) discardDialog.open(); else root.preferences.reload(); }
+            }
+            Item { Layout.fillWidth: true }
+            QQC2.Button { objectName: "saveBrokerPreferences"; text: i18nc("@action:button", "Save Preferences"); icon.name: "document-save"; enabled: root.preferences.canSave; onClicked: root.preferences.save() }
+        }
     }
     QQC2.Dialog {
         id: discardDialog

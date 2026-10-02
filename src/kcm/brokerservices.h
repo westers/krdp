@@ -39,7 +39,9 @@ public:
 private:
     Q_SLOT void jobRemoved(uint id, const QDBusObjectPath &path, const QString &unit, const QString &result);
     Q_SLOT void unitFilesChanged();
+    Q_SLOT void unitPropertiesChanged(const QString &interface, const QVariantMap &values, const QStringList &invalidated);
     Q_SLOT void managerOwnerChanged(const QString &, const QString &, const QString &);
+    void subscribe();
     void finish(const QString &error);
     QDBusConnection m_bus;
     QTimer m_deadline;
@@ -48,6 +50,8 @@ private:
     QMap<QString, QString> m_earlyJobs;
     quint64 m_generation = 0, m_managerGeneration = 0;
     bool m_subscribed = false;
+    bool m_subscriptionPending = false;
+    std::array<QString, 2> m_unitPaths;
 };
 
 class BrokerServices : public QObject {

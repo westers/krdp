@@ -21,12 +21,6 @@ KCM.SimpleKCM {
         }
     }
     Component.onCompleted: administration.refresh()
-    Timer {
-        interval: 5000
-        running: root.visible && !root.administration.busy
-        repeat: true
-        onTriggered: root.administration.refresh(false)
-    }
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
         QQC2.Label {
@@ -42,10 +36,11 @@ KCM.SimpleKCM {
             onClicked: root.administration.refresh()
         }
         Repeater {
-            model: root.administration.services
+            model: 2
             delegate: Kirigami.FormLayout {
                 id: section
-                required property var modelData
+                required property int index
+                readonly property var modelData: root.administration.services[index]
                 Layout.fillWidth: true
                 Item {
                     Kirigami.FormData.isSection: true

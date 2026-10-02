@@ -30,13 +30,13 @@ private Q_SLOTS:
         auto *localized=new KLocalizedQmlContext(&engine); localized->setTranslationDomain(u"kcm_farside"_s); engine.rootContext()->setContextObject(localized);
         QQmlComponent component(&engine,QUrl::fromLocalFile(qEnvironmentVariable("FARSIDE_PREFERENCES_TEST_PAGE",QString::fromUtf8(PREFERENCES_PAGE))));
         QVERIFY2(component.isReady(),qPrintable(component.errorString()));
-        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"preferences"_s,QVariant::fromValue(&preferences)}}));
+        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"showAdvanced"_s,true},{u"preferences"_s,QVariant::fromValue(&preferences)}}));
         QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
         QQuickWindow window; window.resize(1000,900); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
         const auto item=[&](const QString &name) { return find(page,name); };
         QVERIFY(!preferences.loaded()); QVERIFY(QMetaObject::invokeMethod(item(u"loadBrokerPreferences"_s),"clicked")); QVERIFY(preferences.loaded());
         QTRY_VERIFY(item(u"preference_Quality"_s)); auto *quality=qobject_cast<QQuickItem *>(item(u"preference_Quality"_s)); QVERIFY(quality);
-        quality->forceActiveFocus(); QTest::keyClick(&window,Qt::Key_A,Qt::ControlModifier); QTest::keyClick(&window,Qt::Key_9); QTest::keyClick(&window,Qt::Key_5);
+        quality->forceActiveFocus(); QTest::keyClick(&window,Qt::Key_A,Qt::ControlModifier); QTest::keyClick(&window,Qt::Key_9); QTest::keyClick(&window,Qt::Key_5); QTest::keyClick(&window,Qt::Key_Return);
         QTRY_COMPARE(preferences.values()[u"Quality"_s].toString(),u"95"_s);
         QVERIFY(!item(u"preference_Av1Tiles"_s)->property("enabled").toBool());
         const QVariantMap desired{{u"Quality"_s,u"91"_s},{u"AdaptiveQuality"_s,u"true"_s},{u"PreferAudioQuality"_s,u"true"_s},{u"Codec"_s,u"avc444"_s},
@@ -47,7 +47,13 @@ private Q_SLOTS:
             const auto row=definition.toMap(); const auto key=row[u"key"_s].toString(); auto *control=item(u"preference_"_s+key); QVERIFY2(control,qPrintable(key));
             if(preferences.lockedKeys().contains(key)) continue;
             const auto choices=row[u"choices"_s].toList();
-            if(choices.isEmpty()) { QVERIFY(control->setProperty("text",desired[key].toString())); QVERIFY(QMetaObject::invokeMethod(control,"textEdited")); }
+            if(control->metaObject()->indexOfProperty("checkState")>=0) {
+                QVERIFY(control->setProperty("checkState",int(desired[key].toString()==u"true"_s?Qt::Checked:Qt::Unchecked)));
+                QVERIFY(QMetaObject::invokeMethod(control,"clicked"));
+            } else if(control->metaObject()->indexOfProperty("from")>=0) {
+                QVERIFY(control->setProperty("value",desired[key].toInt()));
+                QVERIFY(QMetaObject::invokeMethod(control,"valueModified"));
+            } else if(choices.isEmpty()) { QVERIFY(control->setProperty("text",desired[key].toString())); QVERIFY(QMetaObject::invokeMethod(control,"textEdited")); }
             else {
                 int index=-1; for(int i=0;i<choices.size();++i) if(choices[i].toMap()[u"value"_s]==desired[key]) index=i;
                 QVERIFY(index>=0); QVERIFY(control->setProperty("currentIndex",index)); QVERIFY(QMetaObject::invokeMethod(control,"activated",Q_ARG(int,index)));
@@ -55,8 +61,8 @@ private Q_SLOTS:
             QCOMPARE(preferences.values()[key],desired[key]);
         }
         QCOMPARE(preferences.values(),desired);
-        QVERIFY(quality->setProperty("text",u"101"_s)); QVERIFY(QMetaObject::invokeMethod(quality,"textEdited")); QVERIFY(!item(u"saveBrokerPreferences"_s)->property("enabled").toBool());
-        QVERIFY(preferences.error().contains(u"Quality"_s)); QVERIFY(quality->setProperty("text",u"91"_s)); QVERIFY(QMetaObject::invokeMethod(quality,"textEdited"));
+        QCOMPARE(quality->property("to").toInt(),100); QVERIFY(preferences.setValue(u"Quality"_s,u"101"_s)); QVERIFY(!item(u"saveBrokerPreferences"_s)->property("enabled").toBool());
+        QVERIFY(preferences.error().contains(u"Quality"_s)); QVERIFY(quality->setProperty("value",91)); QVERIFY(QMetaObject::invokeMethod(quality,"valueModified"));
         QVERIFY(QMetaObject::invokeMethod(item(u"saveBrokerPreferences"_s),"clicked")); QVERIFY(!preferences.modified()); QVERIFY(preferences.reconnectRequired());
         QCOMPARE(BrokerUserSettings::parse(read(path)).preferences.quality,std::optional<quint8>(91)); QVERIFY(read(path).contains("Password=fixture-secret-only\n"));
         auto *flickable=page->property("flickable").value<QQuickItem *>(); QVERIFY(flickable); QTest::qWait(400);
@@ -78,7 +84,7 @@ private Q_SLOTS:
             QVERIFY2(bounds.left()>=-0.5 && bounds.right()<=flickable->width()+0.5,qPrintable(key+u" needs horizontal scrolling at width640"_s));
         }
         QVERIFY(QMetaObject::invokeMethod(item(u"defaultBrokerPreferences"_s),"clicked")); QCOMPARE(preferences.values(),QVariantMap({{u"Av1Tiles"_s,u"8"_s}}));
-        QTRY_COMPARE(quality->property("text").toString(),QString()); QVERIFY(QMetaObject::invokeMethod(item(u"saveBrokerPreferences"_s),"clicked"));
+        QTRY_VERIFY(item(u"inherit_Quality"_s)->property("checked").toBool()); QVERIFY(QMetaObject::invokeMethod(item(u"saveBrokerPreferences"_s),"clicked"));
         QVERIFY(!BrokerUserSettings::parse(read(path)).preferences.quality); QVERIFY(read(path).contains("Certificate=/root/fixture.pem\n"));
         QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s))); page->setParentItem(nullptr);
     }
@@ -87,7 +93,7 @@ private Q_SLOTS:
         BrokerPreferences preferences(dir.path()); QQmlEngine engine;
         auto *localized=new KLocalizedQmlContext(&engine); localized->setTranslationDomain(u"kcm_farside"_s); engine.rootContext()->setContextObject(localized);
         QQmlComponent component(&engine,QUrl::fromLocalFile(qEnvironmentVariable("FARSIDE_PREFERENCES_TEST_PAGE",QString::fromUtf8(PREFERENCES_PAGE))));
-        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"preferences"_s,QVariant::fromValue(&preferences)}}));
+        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"showAdvanced"_s,true},{u"preferences"_s,QVariant::fromValue(&preferences)}}));
         QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QQuickWindow window;
         window.resize(1000,900); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
         const auto item=[&](const QString &name) { return find(page,name); };

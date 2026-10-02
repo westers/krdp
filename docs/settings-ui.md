@@ -7,29 +7,61 @@ per-user service controls or legacy configuration adapters.
 
 ## Layout
 
-- A short opening page: Console and Virtual status, enabled controls, and
-  links to their settings. Stopping requires confirmation and targets only
-  the selected service; the controls reflect actual state after cancellation.
-- Native `KCM.SimpleKCM`, `Kirigami.FormLayout`, section labels, Qt controls,
-  system fonts, theme colors, and Kirigami spacing.
-- Short descriptions and adjacent `ContextualHelpButton` explanations.
-  Show errors and pending application notices only when relevant. Keep essential
-  consequences visible, including restart/disconnect and password preservation.
-- Align field labels beside controls on wide windows, and let FormLayout put
-  labels above controls at narrow widths. Bound long fingerprints and technical
-  text so they do not force every form into the narrow layout.
-- Quality offers a slider and editable numeric value. Opening or refreshing
-  the page must not snap or change the saved value.
-- Keep all host/session fields and account preferences available in their scope.
-  Field inheritance, locked preferences, unavailable Virtual camera, certificate
-  operations, drafts, validation, and runtime inspection retain their model behavior.
-- Load/save remain explicit and scoped. Saving settings never restarts a service.
-  Services use descriptive Stop/Restart confirmations and separate startup controls.
+- Persistent Console, Virtual, Access and My Preferences tabs, using native
+  `QQC2.TabBar`/`StackLayout` inside `KCM.AbstractKCM`. Each content page uses
+  `KCM.SimpleKCM` and keeps its own scroll position and draft alive.
+- Console and Virtual show enable/status and known saved/inspected addresses;
+  they never present a staged endpoint as the address currently in use. Service
+  details offer startup, explicit restart/stop and manual status refresh without
+  loading administrator settings. Stopping/restarting confirms disconnection.
+- Common host video/device settings come first. Connection/encoding tuning is
+  under Advanced. Virtual has separate Connection settings and New desktop
+  defaults sections, with independent saves. Console display sharing belongs to
+  the account's My Preferences; Console links there explicitly.
+- Access contains remote-login permissions and certificate details dialogs.
+  Certificates use the existing per-host draft. Dialog saves are labelled Save
+  Console/Virtual Settings and explain that other pending host settings are
+  included. Certificate Standard Paths/Reset affect only TLS fields, preserving
+  other pending settings. Reload confirms discarding the entire host draft.
+- One `Kirigami.FormLayout` aligns each editor's labels. Section headings,
+  theme colors/fonts and Kirigami spacing are native. Long fingerprints/help
+  are bounded; small windows scroll the form while the footer remains visible.
+- Quality uses a slider and bounded editable `SpinBox`; ports, monitor indices
+  and AVC444 intervals also use bounded spin boxes, with units for intervals.
+  Commit numeric input on Enter/focus loss. Model resets/scope changes must update
+  the controls; opening/refreshing must never snap or change stored values.
+- Boolean fields use tri-state `CheckBox` controls: partial means inherited,
+  checked/unchecked means explicit On/Off. Host inheritance shows the unit
+  default; unknown inherited account numbers show a dash and Use host setting.
+  Other choices use `ComboBox`. Locked account fields remain disabled/preserved.
+- Scoped Save/Reset/Defaults actions sit in fixed footers. Save never restarts a
+  service. A pending restart notice offers the explicit, confirmed restart.
+  Administrator reads/saves remain explicit; opening tabs never invokes a helper
+  or silently reads account configuration. Existing global Apply is not repurposed.
+- Common fields have short labels. Contextual help is reserved for unfamiliar
+  options and locked settings. Per-field reset controls retain space while hidden
+  so changes cannot shift neighbouring inputs. Camera prerequisites/unavailability
+  stay visible; bridge configuration is not presented as a camera-sharing toggle.
 
-Host form objects stay alive during scope switches. Identify fields by both key
+## Refresh and object lifetime
+
+The former five-second timers repeatedly assigned a fresh `QVariantList` to
+service Repeaters, destroying their delegates and restarting form layout work.
+Both timers are removed. The transport subscribes to systemd unit property/job,
+unit-file and manager-owner events; user actions still read back actual state.
+Manual Refresh remains available. Unrelated unit properties are ignored.
+
+Never bind a widget-creating Repeater to the changing `services` list. The
+remaining direct Services page uses fixed indices; the main page has static
+Console/Virtual editors. Service updates must preserve editor identity, focus,
+unfinished text, geometry, scroll position and drafts.
+
+Host field objects stay alive during scope switches. Identify fields by both key
 and group: VA-API policy occurs in different groups across host/session schemas.
 Avoid transient repeated forms linked as twins; Kirigami's deferred twin/label
-updates can otherwise run after those objects have been destroyed.
+updates can otherwise run after those objects have been destroyed. StackLayout
+pages need explicit zero minimum dimensions so small windows can shrink them
+and retain visible footers.
 
 ## KDE references reviewed
 
