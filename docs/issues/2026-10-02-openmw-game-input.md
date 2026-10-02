@@ -319,3 +319,23 @@ Virtual:3395 connection is active; disconnect requested under the standing
 zero-incoming rule. Delivery details/hash are in the new evidence SUMMARY.md.
 Client0.6.7 remains current. The staged update reloads only the Farside native
 bridge after all owners disconnect, keeping the game and compositor alive.
+
+### Follow-up installed after disconnect (2026-10-02)
+
+Sol now runs `a8c7d6ff` / `6.6.80+git202610021704.a8c7d6f-1`. Only the server
+package changed; client0.6.7 stays current. Console339378/Virtual339379/user339385
+are active/NRestarts0, runtime80/video10/3391 is verified, preservation checks
+pass and exact rollback is root-private at
+`~/farside-released-game-motion-backup-20261002-sol`. KWin292332/OpenMW322976
+were preserved. User's actual gameplay verification remains open.
+
+Caught and corrected KWin/Qt plugin caching: object unload/reload under the old
+filename retained the old library. New helper
+`scripts/reload-farside-pointer-capture.sh` uses a root-owned content-versioned
+copy of the installed library after zero incoming RDP/no current native lease.
+The running compositor now maps `farside-pointer-capture-6ea04af5be54.so`; byte
+identity, mapped inode, new bridge epoch and supported/unleased snapshot verified.
+Old inactive library mappings may remain until KWin exits. Warm upgrades must use
+this helper; fresh compositor starts load the ordinary packaged path normally.
+See new evidence SUMMARY.md and `released-motion-versioned-reload.log`.
+No compositor/game restart, game settings/save or wallet operation occurred.
