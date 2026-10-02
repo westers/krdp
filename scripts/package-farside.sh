@@ -69,7 +69,9 @@ mkdir -p "$build"
 
 # 1. Private KPipeWire, installed to a scratch prefix. Its libraries carry the
 #    package's private RUNPATH so they resolve each other, never the distro's.
-rm -rf "${build:?}/kpipewire-src" "${build:?}/kpipewire-prefix"
+# git archive uses the commit timestamp. A new export can be older than objects
+# from a previous build, so Ninja's timestamp checks cannot validate that cache.
+rm -rf "${build:?}/kpipewire-src" "${build:?}/kpipewire-prefix" "${build:?}/kpipewire-build"
 mkdir -p "$build/kpipewire-src"
 git -C "$kpw_src" archive "$kpw_commit" | tar -x -C "$build/kpipewire-src"
 cmake -S "$build/kpipewire-src" -B "$build/kpipewire-build" -G Ninja \
@@ -84,7 +86,7 @@ kpw_libdir="$build/kpipewire-prefix/lib/$multiarch"
 [[ -f "$kpw_libdir/libKPipeWire.so.6" && -f "$kpw_libdir/libKPipeWireRecord.so.6" ]]
 
 # 2. KRdp from the committed tree.
-rm -rf "${build:?}/src"
+rm -rf "${build:?}/src" "${build:?}/farside-build"
 mkdir -p "$build/src"
 git -C "$root" archive "$commit" | tar -x -C "$build/src"
 cmake -S "$build/src" -B "$build/farside-build" -G Ninja \
