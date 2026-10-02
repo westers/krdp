@@ -14,7 +14,7 @@ The existing Goal remains paused. Superpowers workflows and automatic delegation
 are not required. Existing plans, tests, code and evidence remain useful inputs.
 
 **Requested three-host update complete:** Hal, Buzz and Sol have client 0.6.5
-and server `2828a7c` (camera readiness follow-up); other hosts remain unchanged. Next tasks to select are the
+and server `2828a7c` (camera readiness follow-up); Sol now has camera fixes `65243df7`; other hosts remain unchanged. Next tasks to select are the
 remaining installed N04/N05 checks. This installation request does not close
 their broader acceptance criteria or authorize further tasks.
 
@@ -28,7 +28,7 @@ parent T-task being complete. New test quantity alone does not count as delivery
 | Area | Already done | Still missing |
 |---|---|---|
 | Delivered client | 0.6.5 / `82fe55e` Hal/Buzz/Sol, debug actions OFF; 0.6.3 / `2df38a7` Ace/Cray/Marvin | Remaining N05 monitor acceptance and N06 fleet rollout/tag |
-| Delivered server | `2828a7c` Hal/Buzz/Sol, wire 11, private KPipeWire `9d6b08c`; `4b308bd` other hosts, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
+| Delivered server | `65243df7` Sol, `2828a7c` Hal/Buzz, wire 11, private KPipeWire `9d6b08c`; `4b308bd` other hosts, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
 | Settings/auth | Scoped authentication, services, 17 preferences, 25 host/session controls and runtime inspection implemented; `44726890` removes legacy KCM adapters | Real installed password/cancel/save/restart, effective runtime policy and live stock coexistence |
 | Monitors/video | Quiet Sol private worker single/two-screen HEVC creation/resize/Fit/decoded restoration passes; client UI and protocol evidence exists | Final packaged Console RDP, broader topology lifecycle; earlier loaded CUDA OOM/fallback is unresolved |
 | Discover/locker | Font-cache cause demonstrated and repaired on Sol; Steve confirms Console Discover password entry and ordinary lock/unlock work | Virtual/failure/restart matrix and original lock/output-release race; agent's original failing trace still missing |
@@ -335,6 +335,22 @@ Reuse accepted Console DPMS/multi-viewer/failure evidence; verify any changed pa
 and neither mode unlocks a locked Console. Installed settings apply as documented.
 
 ### N12 — Finish camera and redirected media (T11)
+
+**PARTIAL, 2026-10-01 BRIO/PipeWire fix delivered to Sol:** `c48db896` caps
+publication at 30 fps (BRIO first MJPEG mode is 640×480/120 fps; Camera filters
+out that fixed rate). `765ced19` negotiates full RGBA frame buffers and bounds
+chunk writes; previous source supplied empty chunks to a linked app. Native
+Camera's normal portal discovers corrected source and starts synthetic preview;
+actual source before/after reproduces rejection/empty buffers and corrected capture.
+Installed test caught stale Console worker object in reused package cache;
+`65243df7` clears both build caches, clean package installed Sol only and then
+**30 complete nonzero actual camera frames** pass Buzz→Sol→PipeWire. Client
+0.6.5 sufficient; Hal/Buzz servers stay2828a7c. Intermediate765ced1 is marked
+REJECTED, not a deployable candidate. Settings/certs/profiles/holds/desktop/client
+PIDs preserved; only Sol server package changes. Source prerequisites4 pass and
+native/capture evidence reused, no wider matrix. Hal→Sol BRIO/Camera/Meet user
+confirmation and switching/LED/call/Virtual requirements remain open. Evidence:
+`~/dev/rdp/evidence/2026-10-01-camera-app-debug/SUMMARY.md`.
 
 **PARTIAL, 2026-10-01 readiness fix delivered:** server `2828a7c` and client0.6.5
 `82fe55e` installed on Sol/Buzz/Hal. A missing or invalid Console bridge disables

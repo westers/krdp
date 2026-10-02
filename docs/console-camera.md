@@ -47,6 +47,11 @@ Do not make the device world writable.
 
 ## Use and verify
 
+The server publishes at most 30 fps even when a client webcam advertises a faster
+capture mode. Explicit PipeWire frame buffer allocation is required for native
+camera apps; these fixes are in server `65243df7` (Sol delivery; source fixes `c48db896`/`765ced19`), following the
+readiness release `2828a7c`. Client 0.6.5 is sufficient for this server update.
+
 Reconnect the client, explicitly select a camera and enable mapping. Open or
 refresh the remote Camera application or browser camera selector. The V4L2 name
 is **Farside Remote Camera**. With `exclusive_caps=1`, the device advertises
@@ -63,7 +68,7 @@ by copying the Console path into Virtual settings.
 
 ## Sol deployment, 2026-10-01
 
-Sol runs server `2828a7c`, with `v4l2loopback` 0.15.3 on kernel
+Sol runs server `65243df7`, with `v4l2loopback` 0.15.3 on kernel
 `7.0.0-34-generic`. Dedicated `farside-camera.conf` files in both module config
 directories create `/dev/video10` with `exclusive_caps=1`; the desktop user has a
 normal `uaccess` read/write ACL. Only Console's loopback setting changed. The
@@ -71,9 +76,13 @@ installed settings helper saved it with TLS kept; an explicit service restart
 and runtime readback verified `/dev/video10`. Real Hal-camera application
 acceptance is tracked separately in the task plan and deployment evidence.
 
-Installed Buzz → Sol Console testing delivered10 frames through `/dev/video10`;
-PipeWire camera enumeration and desktop portal presence also pass. Hal → Sol
-Camera/Meet preview remains unverified: Sol was locked during the native Camera
-check, so its window suspended the stream. Reconnect, unlock and enable sharing
-before reopening Camera or refreshing the browser. This is an acceptance limit,
-not a demonstrated cause of the earlier application failure.
+Installed Buzz → Sol Console V4L2 testing delivered 10 frames during setup.
+The October 1 follow-up found BRIO's first MJPEG mode advertised 120 fps, which
+Camera filters out, and missing PipeWire buffer allocation, which produced empty
+frames. Server `65243df7` caps publication at 30 fps and allocates full frames.
+The package build also clears stale object caches; intermediate `765ced1` is
+marked rejected. The corrected installed worker delivered 30 complete frames
+containing actual camera data through PipeWire; native Camera opened a synthetic
+120 fps input published at 30 fps through its normal portal and started preview.
+Hal → Sol Camera/Meet user confirmation is still pending. Reconnect, enable
+sharing, and close/reopen Camera or refresh the browser after enabling mapping.
