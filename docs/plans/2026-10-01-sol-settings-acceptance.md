@@ -1,6 +1,6 @@
 # Sol: remaining installed settings acceptance (N04)
 
-Server `65243df7`, package `6.6.80+git202610020049.65243df-1`.
+Server `87d8a24`, package `6.6.80+git202610020123.87d8a24-1`.
 October 1 read-only baseline: stored and running quality **80**, Console camera
 **/dev/video10**, port **3391**, runtime **verified**. Existing package rollback
 and helper checks are already accepted; do not repeat them.
