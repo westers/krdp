@@ -1,5 +1,55 @@
 # OpenMW mouse capture over Farside RDP (OPT-054)
 
+## Capture synchronization follow-up (Steve, 2026-10-02)
+
+Steve confirms installed0.6.6 capture works and selecting the View-menu action
+again successfully recaptures. Right Ctrl is release-only; host-key chords such
+as Right Ctrl+T continue to work, releasing capture before running the chord.
+The remaining bug is **client/host capture disagreement**: local release leaves
+OpenMW/KWin constrained, with hidden or stale game cursor behavior. Showing a
+local arrow alone is insufficient. Closing an OpenMW menu also needs a defined
+relationship between the app's capture request and local capture.
+
+Requirements for the paired follow-up:
+
+1. Observe actual KWin pointer-lock requests and activation, separately from
+   confinement, cursor visibility and fullscreen. Read the current state when
+   the observer attaches; subscribe to subsequent changes. Capture is not a
+   cached client boolean and a server started after OpenMW must see its existing
+   request without requiring the game to toggle it.
+2. Track app-requested lock, host permission/actual lock, user capture intent,
+   and local compositor-confirmed lock separately. On an admitted controlling
+   connection, explicitly released local input must suspend the host constraint
+   too; continue to honor ordinary visible remote cursor shapes.
+3. A game menu temporarily removes the app request: release the local lock.
+   Its return may resume an already armed user capture intent only while the
+   view is active and the pointer is deliberately in it. Right Ctrl cancels that
+   intent; no immediate automatic recapture after explicit release.
+4. Reconnect starts free under the agreed manual-entry policy and takes a fresh
+   host snapshot. A still-existing app request enables/explains the explicit
+   capture action, but does not override the prior manual release. Native lock
+   confirmation and a host acknowledgement precede a successful capture claim.
+5. On disconnect/owner loss/worker death remove Farside's host override and
+   restore normal local compositor behavior. Sol's physical user/apps control
+   capture when no controlling RDP client exists. The observer may keep reading
+   state without clients; durable historical state is unnecessary.
+6. Bind commands/replies/snapshots to connection, current owner generation and
+   compositor epoch. Reject delayed work after takeover, reconnect or compositor
+   restart. A disappearing hook releases local input and reports unavailable,
+   rather than claiming synchronization succeeded.
+7. KWin6.6.6's native SDK exports `setEnableConstraints(bool)`, current surfaces'
+   locked-pointer objects/signals, and runtime plugin loading. Ordinary D-Bus
+   has no equivalent capture API. A native integration must match exact KWin
+   ABI, cooperate with its own temporary overrides (e.g. Alt+Tab), expire a dead
+   worker's lease and avoid changing compositor permissions or desktop locking.
+   SDK was downloaded/extracted only; no plugin installed or live KWin changed.
+
+Client-only cursor fallback has a focused production-QML regression check on
+Buzz: release while host hidden, menu image→hidden changes, explicit recapture
+and second release. This does not establish host synchronization and is not a
+new deployed release. Evidence: `~/dev/rdp/evidence/2026-10-02-cursor-release/`.
+Paired compositor/protocol implementation remains open; 0.6.6 is still installed.
+
 ## Delivery (2026-10-02)
 
 **Paired implementation deployed; sustained gameplay acceptance remains manual.**
