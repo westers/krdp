@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <pipewire/pipewire.h>
+#include <spa/param/buffers.h>
 #include <spa/param/video/raw-utils.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -75,6 +76,24 @@ bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, u
         pw_stream_events result{};
         result.version = PW_VERSION_STREAM_EVENTS;
         result.process = PipeWireCamera::process;
+        result.param_changed = [](void *data, uint32_t id, const spa_pod *param) {
+            if (id != SPA_PARAM_Format || !param) return;
+            auto *self = static_cast<PipeWireCamera *>(data);
+            QMutexLocker lock(&self->m_mutex);
+            if (!self->m_stream) return;
+            // Video buffers need an explicit byte size; the default allocation
+            // can contain no pixel storage, even while the graph link is active.
+            uint8_t storage[256];
+            spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
+            const spa_pod *params[] = {static_cast<const spa_pod *>(spa_pod_builder_add_object(&builder,
+                SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+                SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(8, 2, 16),
+                SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1),
+                SPA_PARAM_BUFFERS_size, SPA_POD_Int(self->m_width * self->m_height * 4),
+                SPA_PARAM_BUFFERS_stride, SPA_POD_Int(self->m_width * 4),
+                SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_MemFd))))};
+            pw_stream_update_params(self->m_stream, params, 1);
+        };
         result.state_changed = [](void *data, pw_stream_state, pw_stream_state state, const char *) {
             auto *self = static_cast<PipeWireCamera *>(data);
             self->m_ready = state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING;
@@ -309,9 +328,10 @@ void PipeWireCamera::process()
     pw_buffer *buffer = pw_stream_dequeue_buffer(m_stream);
     if (!buffer || !buffer->buffer || !buffer->buffer->n_datas) return;
     spa_data &data = buffer->buffer->datas[0];
-    if (!data.data) { pw_stream_queue_buffer(m_stream, buffer); return; }
-    const uint32_t bytes = qMin<uint32_t>(data.maxsize - data.chunk->offset, m_width * m_height * 4);
-    if (uint32_t(m_pending.size()) == m_width * m_height * 4) memcpy(static_cast<uint8_t *>(data.data) + data.chunk->offset, m_pending.constData(), bytes);
+    const uint32_t bytes = m_width * m_height * 4;
+    if (!data.data || !data.chunk || data.maxsize < bytes) { pw_stream_queue_buffer(m_stream, buffer); return; }
+    data.chunk->offset = 0;
+    if (uint32_t(m_pending.size()) == bytes) memcpy(data.data, m_pending.constData(), bytes);
     else memset(static_cast<uint8_t *>(data.data) + data.chunk->offset, 0, bytes);
     data.chunk->size = bytes;
     data.chunk->stride = m_width * 4;
