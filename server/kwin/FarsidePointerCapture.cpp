@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <plugin.h>
 #include <input.h>
+#include <input_event.h>
 #include <pointer_input.h>
 #include <workspace.h>
 #include <window.h>
@@ -25,11 +26,12 @@ namespace {
 constexpr auto Path = "/org/kde/KWin/FarsidePointerCapture";
 // No input injection, cursor heuristics or permissions changes. This object lives
 // inside the exact-version compositor and observes its real constraint objects.
-class Bridge final : public KWin::Plugin, protected QDBusContext {
+class Bridge final : public KWin::Plugin, public KWin::InputEventFilter, protected QDBusContext {
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "org.farside.PointerCapture1")
 public:
-    Bridge() : m_epoch(QUuid::createUuid().toString(QUuid::WithoutBraces)), m_peerWatch(QString(), QDBusConnection::sessionBus(), QDBusServiceWatcher::WatchForUnregistration) {
+    Bridge() : KWin::InputEventFilter(KWin::InputFilterOrder::InputMethod), m_epoch(QUuid::createUuid().toString(QUuid::WithoutBraces)), m_peerWatch(QString(), QDBusConnection::sessionBus(), QDBusServiceWatcher::WatchForUnregistration) {
+        KWin::input()->installInputEventFilter(this);
         m_expiry.setSingleShot(true); m_expiry.setInterval(6000);
         connect(&m_expiry, &QTimer::timeout, this, &Bridge::restore);
         connect(&m_peerWatch, &QDBusServiceWatcher::serviceUnregistered, this, &Bridge::restore);
@@ -45,8 +47,20 @@ public:
         observe();
     }
     ~Bridge() override {
+        KWin::input()->uninstallInputEventFilter(this);
         restore();
         QDBusConnection::sessionBus().unregisterObject(QString::fromLatin1(Path));
+    }
+    bool pointerMotion(KWin::PointerMotionEvent *event) override {
+        // Unlocking a constraint does not silence ordinary wl_pointer motion:
+        // Xwayland games can still turn it into mouse-look. Keep KWin's cursor
+        // position/focus updates, but don't forward remote motion to that game.
+        // Physical input, decorations, other windows and actual game menus keep
+        // their normal behavior. This filter only exists for our current lease.
+        if (m_peer.isEmpty() || m_enabled || blocked() || !event->device
+            || !event->device->inherits("KWin::FakeInputDevice")) return false;
+        auto focused = KWin::waylandServer()->seat()->focusedPointerSurface();
+        return focused && focused->lockedPointer();
     }
 public Q_SLOTS:
     QString Snapshot() { observe(); return encoded(); }

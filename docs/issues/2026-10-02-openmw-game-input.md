@@ -283,3 +283,30 @@ Evidence and exact rollback directories are recorded in
 Full360/sustained gameplay, physical takeover, Virtual gameplay and Steve's Hal
 hands-on check remain open. Existing client windows must be reopened. No game
 settings/saves, wallet or Hal live test were touched. No Goal/automatic next task.
+
+## Released game still receives motion — 2026-10-02 follow-up
+
+Steve reports synchronized capture is much better, but the active game still
+receives mouse movement while released. Client0.6.7 intentionally resumes
+ordinary absolute desktop input; suspending a pointer constraint alone does not
+silence the surface's ordinary motion events.
+
+The native host bridge now consumes fake-input motion aimed at a surface that
+still has a real pointer-lock request, only while its current lease is released.
+KWin cursor position and focus updates happen before this filter, so moving out
+of the game into another desktop window remains possible. Physical devices,
+window decorations, clicks, wheel and keyboard retain normal handling; when a
+real game menu removes the lock request, its ordinary pointer motion works again.
+Captured and unleased sessions retain their earlier behavior. No client/protocol
+change is needed. Integration follows upstream KWin6.6.6 pointer dispatch and
+forwarding, checked against [pointer_input.cpp](https://github.com/KDE/kwin/blob/v6.6.6/src/pointer_input.cpp)
+and [input.cpp](https://github.com/KDE/kwin/blob/v6.6.6/src/input.cpp).
+
+One isolated Sol native regression gate passes: actual released game gets no
+ordinary motion (including after re-entry), another window receives motion while
+the game stays active, and removal of the game's lock request restores menu
+motion. Existing native lock/owner/expiry checks in the same binary pass too
+(5 including setup/cleanup). Evidence
+`~/dev/rdp/evidence/2026-10-02-released-game-motion/native-test.log`.
+No running compositor/game or active connection was changed. Package/deployment
+and Steve's actual OpenMW verification are pending at this source checkpoint.

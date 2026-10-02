@@ -13,6 +13,15 @@
 #include "qwayland-fake-input.h"
 #include "qwayland-pointer-constraints-unstable-v1.h"
 #include <linux/input-event-codes.h>
+class MotionCounter : public QObject {
+public:
+    int moves = 0;
+protected:
+    bool eventFilter(QObject *, QEvent *event) override {
+        if (event->type() == QEvent::MouseMove) ++moves;
+        return false;
+    }
+};
 class Input : public QWaylandClientExtensionTemplate<Input>, public QtWayland::org_kde_kwin_fake_input {
 public: Input() : QWaylandClientExtensionTemplate<Input>(4) {}
 };
@@ -114,6 +123,55 @@ private Q_SLOTS:
         QDBusReply<QString> held=bridge.call(QStringLiteral("SetPolicy"),epoch.toString(),QStringLiteral("9"),false);
         QVERIFY(held.isValid()); QTRY_VERIFY(!lock.active);
         QTRY_VERIFY_WITH_TIMEOUT(lock.active, 7000);
+    }
+
+    void releasedGameDoesNotReceiveMotionButDesktopAndMenuDo() {
+        Input input; Constraints constraints; QQuickWindow game, desktop;
+        MotionCounter gameEvents, desktopEvents;
+        game.installEventFilter(&gameEvents); desktop.installEventFilter(&desktopEvents);
+        QTRY_VERIFY(input.isActive() && constraints.isActive());
+        input.authenticate(QStringLiteral("Farside test"), QStringLiteral("Isolated released motion gate"));
+        desktop.showMaximized(); QTRY_VERIFY(desktop.isExposed());
+        game.setGeometry(100,100,900,600); game.show(); QTRY_VERIFY(game.isExposed());
+        auto move = [&](const QPoint &pos) { input.pointer_motion_absolute(wl_fixed_from_double(pos.x()), wl_fixed_from_double(pos.y())); };
+        // Wayland clients cannot choose/report global window positions. These
+        // points are inside the centered game and the surrounding desktop on
+        // the fixture's explicitly sized 1600x800 output.
+        const QPoint inside(400,300);
+        move(inside); input.button(BTN_LEFT,1); input.button(BTN_LEFT,0); QTRY_VERIFY(game.isActive());
+        const auto app=qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>();
+        const auto native=game.nativeInterface<QNativeInterface::Private::QWaylandWindow>();
+        auto lock=std::make_unique<Lock>(constraints.lock_pointer(native->surface(),app->pointer(),nullptr,
+            QtWayland::zwp_pointer_constraints_v1::lifetime_persistent));
+        QTRY_VERIFY(lock->active);
+        QDBusInterface bridge(QStringLiteral("org.kde.KWin"),QStringLiteral("/org/kde/KWin/FarsidePointerCapture"),QStringLiteral("org.farside.PointerCapture1"));
+        auto call=[&](const QString &method,const QVariantList &args=QVariantList{}) {
+            const QDBusReply<QString> result=bridge.callWithArgumentList(QDBus::Block,method,args);
+            return QJsonDocument::fromJson(result.value().toUtf8()).object();
+        };
+        const auto epoch=call(QStringLiteral("Snapshot")).value(QStringLiteral("epoch")).toString();
+        QVERIFY(!epoch.isEmpty());
+        QVERIFY(!call(QStringLiteral("SetPolicy"),{epoch,QStringLiteral("10"),false}).contains(QStringLiteral("error")));
+        QTRY_VERIFY(!lock->active); QTest::qWait(100);
+        const int releasedMoves=gameEvents.moves;
+        move(inside+QPoint(30,0)); move(inside+QPoint(60,0)); QTest::qWait(100);
+        QCOMPARE(gameEvents.moves,releasedMoves);
+        // Hovering the other window must work even while the game is active.
+        const QPoint outside(100,750);
+        move(outside); QTest::qWait(100);
+        const int desktopMoves=desktopEvents.moves;
+        move(outside+QPoint(30,0)); QTRY_VERIFY(desktopEvents.moves>desktopMoves);
+        QVERIFY(game.isActive());
+        // Returning to the game cannot start leaking motion again.
+        move(inside); QTest::qWait(100);
+        const int reenteredMoves=gameEvents.moves;
+        move(inside+QPoint(90,0)); QTest::qWait(100);
+        QCOMPARE(gameEvents.moves,reenteredMoves);
+        // Opening a real menu removes the app's lock request, so motion resumes.
+        lock.reset(); QTRY_VERIFY(!call(QStringLiteral("Snapshot")).value(QStringLiteral("requested")).toBool());
+        const int menuMoves=gameEvents.moves;
+        move(inside+QPoint(120,0)); QTRY_VERIFY(gameEvents.moves>menuMoves);
+        call(QStringLiteral("Release"),{epoch,QStringLiteral("10")});
     }
 
 };
