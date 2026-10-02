@@ -429,13 +429,15 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
                      {QStringLiteral("apply"), capabilities.topologyApply}}},
     };
     if (const auto &devices = capabilities.devices) {
+        QJsonObject camera{{QStringLiteral("toggle"), devices->cameraToggle}, {QStringLiteral("reselect"), devices->cameraReselect}};
+        if (!devices->cameraUnavailableReason.isEmpty())
+            camera.insert(QStringLiteral("unavailableReason"), devices->cameraUnavailableReason.left(1024));
         record.insert(QStringLiteral("devices"),
                       QJsonObject{
                           {QStringLiteral("playback"),
                            QJsonObject{{QStringLiteral("toggle"), devices->playbackToggle}, {QStringLiteral("silenceHost"), devices->playbackSilenceHost}}},
                           {QStringLiteral("microphone"), QJsonObject{{QStringLiteral("toggle"), devices->microphoneToggle}}},
-                          {QStringLiteral("camera"),
-                           QJsonObject{{QStringLiteral("toggle"), devices->cameraToggle}, {QStringLiteral("reselect"), devices->cameraReselect}}},
+                          {QStringLiteral("camera"), camera},
                       });
     }
     if (const auto &video = capabilities.video) {

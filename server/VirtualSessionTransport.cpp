@@ -3,6 +3,7 @@
 #include "CursorTracker.h"
 #include "LayoutControl.h"
 #include "DeviceControl.h"
+#include "CameraAvailability.h"
 #include "AudioPriority.h"
 #include "VirtualResizeProtocol.h"
 #include "VirtualResize.h"
@@ -24,13 +25,13 @@ namespace KRdp
 namespace
 {
 /** Device controls implemented by the Virtual broker and desktop worker. */
-constexpr LayoutControl::DeviceCapabilities VirtualDeviceCapabilities{
+const LayoutControl::DeviceCapabilities VirtualDeviceCapabilities = CameraAvailability::capabilities({
     .playbackToggle = true,
     .playbackSilenceHost = true,
     .microphoneToggle = true,
     .cameraToggle = true,
     .cameraReselect = true,
-};
+}, CameraAvailability::virtualReason());
 
 bool frameMatchesTopology(const VideoFrame &frame, const RemoteTopologyCatalog::Snapshot &snapshot)
 {
@@ -505,7 +506,7 @@ void VirtualSessionTransport::applyStandardMedia(std::optional<quint32> uid)
         if (alive && !dispatched) stopMicrophone();
     }
     if (!alive || !m_connection || !authorized(uid)) return;
-    if (channels->dynamic && !m_cameraPolicy.enabled && m_externalCamera && m_controlGeneration
+    if (VirtualDeviceCapabilities.cameraToggle && channels->dynamic && !m_cameraPolicy.enabled && m_externalCamera && m_controlGeneration
         && m_nextCameraId < std::numeric_limits<quint64>::max() - 1) {
         m_cameraPolicy = {m_controlGeneration, ++m_nextCameraId, true, m_cameraLoopbackDevice};
         m_cameraRequestId.clear();

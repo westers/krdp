@@ -45,6 +45,7 @@
 
 #include "LayoutSessionDiff.h"
 #include "PhysicalDeviceControl.h"
+#include "CameraAvailability.h"
 #include "RemoteMonitorGeometry.h"
 #include "TakeoverDetector.h"
 #include "VideoStream.h"
@@ -2407,7 +2408,8 @@ void SessionController::onClientDisplayInfo(SessionWrapper *wrapper)
     capabilities.host = u"physical"_s;
     capabilities.layoutQuery = true;
     capabilities.layoutApply = true;
-    capabilities.devices = KRdp::PhysicalDeviceControl::Capabilities;
+    capabilities.devices = KRdp::CameraAvailability::capabilities(KRdp::PhysicalDeviceControl::Capabilities,
+        KRdp::CameraAvailability::reason(m_server->cameraLoopbackDevice()));
     capabilities.video = KRdp::EncoderSupport::videoCapabilities(encodersForBackend(), m_softwareEncoding);
     capabilities.stats = KRdp::LayoutControl::StatsCapabilities{};
     wrapper->connection->sendControlRecord(KRdp::LayoutControl::capabilitiesRecord(capabilities));
@@ -2579,7 +2581,9 @@ void SessionController::onControlDevice(SessionWrapper *wrapper, const QJsonObje
     wrapper->deviceRecordSeen = true;
     // Refused at once, or answered later from the session loop (deviceState,
     // connected in onNewConnection()) with this record's requestId.
-    if (const auto refused = KRdp::PhysicalDeviceControl::request(*wrapper->connection, record, wrapper->replyRequestId)) {
+    if (const auto refused = KRdp::PhysicalDeviceControl::request(*wrapper->connection, record, wrapper->replyRequestId,
+        KRdp::CameraAvailability::capabilities(KRdp::PhysicalDeviceControl::Capabilities,
+            KRdp::CameraAvailability::reason(m_server->cameraLoopbackDevice())))) {
         wrapper->connection->sendControlRecord(*refused);
     }
 }

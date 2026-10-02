@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "PipeWireCamera.h"
+#include "CameraAvailability.h"
 
 #include <QImage>
 #include <QDir>
@@ -55,7 +56,12 @@ bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, u
 {
     QMutexLocker lock(&m_mutex);
     if (m_stream) return true;
+    m_error.clear();
     if (!width || !height) return false;
+    if (!loopbackDevice.isEmpty()) {
+        m_error = CameraAvailability::reason(loopbackDevice);
+        if (!m_error.isEmpty()) return false;
+    }
     m_runtime.acquire();
     m_width = width;
     m_height = height;
@@ -121,10 +127,17 @@ bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, u
         return false;
     }
     if (!loopbackDevice.isEmpty()) {
+        const auto bridgeFailed = [&](const QString &reason) {
+            m_error = reason;
+            lock.unlock();
+            stop();
+            return false;
+        };
         const auto path = QFile::encodeName(loopbackDevice);
         m_loopbackFd = open(path.constData(), O_WRONLY | O_NONBLOCK | O_CLOEXEC);
         if (m_loopbackFd < 0) {
             qWarning() << "KRDP remote camera could not open V4L2 loopback" << loopbackDevice;
+            return bridgeFailed(QStringLiteral("The remote desktop cannot open its camera bridge. An administrator must check device permissions and whether another session is using it."));
         } else {
             v4l2_format format{};
             format.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
@@ -140,13 +153,15 @@ bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, u
                 qWarning() << "KRDP remote camera could not configure V4L2 loopback" << loopbackDevice;
                 close(m_loopbackFd);
                 m_loopbackFd = -1;
+                return bridgeFailed(QStringLiteral("The remote camera bridge cannot use the selected camera format. An administrator must check the loopback device; try another camera format."));
             } else {
                 // v4l2loopback with exclusive_caps only advertises CAPTURE
                 // after it has received a frame. A black frame makes the
                 // camera discoverable without opening the redirected camera.
                 const QByteArray black(int(m_width * m_height * 2), char(16));
-                if (write(m_loopbackFd, black.constData(), size_t(black.size())) < 0) {
+                if (write(m_loopbackFd, black.constData(), size_t(black.size())) != black.size()) {
                     qWarning() << "KRDP remote camera could not prime V4L2 loopback" << loopbackDevice;
+                    return bridgeFailed(QStringLiteral("The remote camera bridge could not publish a capture device. An administrator must check the loopback device."));
                 }
                 m_loopbackDevice = loopbackDevice;
                 qInfo() << "KRDP remote camera publishing V4L2 loopback" << loopbackDevice << m_width << 'x' << m_height;
@@ -229,8 +244,9 @@ void PipeWireCamera::writeMjpeg(const QByteArray &jpeg)
             }
         }
         const auto written = write(m_loopbackFd, yuyv.constData(), size_t(yuyv.size()));
-        if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        if ((written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) || (written >= 0 && written != yuyv.size())) {
             qWarning() << "KRDP remote camera V4L2 loopback write failed; disabling it";
+            m_error = QStringLiteral("The remote camera bridge stopped accepting video. An administrator must check the loopback device before camera sharing can resume.");
             close(m_loopbackFd);
             m_loopbackFd = -1;
         }

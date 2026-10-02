@@ -1254,24 +1254,23 @@ private Q_SLOTS:
             QVERIFY(t.microphoneTimeout().isEmpty()); // answered once
         });
     }
-    void deviceCameraStartReselectAndRevocation() {
-        // A new consent period invalidates the old worker result. Detach answers
-        // a pending camera request exactly once, with the other devices.
+    void deviceCameraNamespaceRefusalAndMediaRevocation() {
+        // A configured host path cannot grant access inside the desktop namespace.
+        // Refuse camera activation/reselection; preserve other media and teardown.
         microphoneFixture([&](auto &t, auto &, auto &, auto &) {
             t.setCameraLoopbackDevice(u"/dev/video42"_s);
             QList<QJsonObject> pushed;
             t.m_recordPushed = [&pushed](const QJsonObject &record) { pushed.append(record); };
-            auto camera = device(u"camera"_s, u"on"_s); camera.insert(u"requestId"_s, u"c1"_s);
-            t.deliverControlRecord(camera, 1000);
-            QVERIFY(t.m_cameraPolicy.enabled);
-            QCOMPARE(t.m_cameraPolicy.loopbackDevice, u"/dev/video42"_s);
-            const auto oldCamera = t.m_cameraPolicy;
-            QCOMPARE(state(t.request(device(u"camera"_s, u"query"_s), 1000)), u"starting"_s);
-            camera.insert(u"action"_s, u"reselect"_s); camera.insert(u"requestId"_s, u"c2"_s);
-            t.deliverControlRecord(camera, 1000);
-            QVERIFY(t.m_cameraPolicy.enabled);
-            QVERIFY(t.m_cameraPolicy.requestId != oldCamera.requestId);
-            QVERIFY(t.cameraResult({oldCamera.generation, oldCamera.requestId, {}}, 1000).isEmpty());
+            auto camera = device(u"camera"_s, u"on"_s);
+            const auto refused = t.request(camera, 1000);
+            QVERIFY(!t.m_cameraPolicy.enabled);
+            QCOMPARE(refused.value(u"code"_s).toString(), u"unsupported"_s);
+            QVERIFY(refused.value(u"message"_s).toString().contains(u"Console"_s));
+            QCOMPARE(state(t.request(device(u"camera"_s, u"query"_s), 1000)), u"off"_s);
+            camera.insert(u"action"_s, u"reselect"_s);
+            QCOMPARE(t.request(camera, 1000).value(u"code"_s).toString(), u"unsupported"_s);
+            QVERIFY(!t.m_cameraPolicy.enabled);
+            QVERIFY(t.cameraResult({1, 1, {}}, 1000).isEmpty());
             QCOMPARE(state(t.request(device(u"microphone"_s, u"query"_s))), u"off"_s); // a query needs no ownership
             auto invalid = device(u"microphone"_s, u"on"_s); invalid.insert(u"silenceHost"_s, true);
             QCOMPARE(t.request(invalid, 1000).value(u"code"_s).toString(), u"invalid"_s);
@@ -1282,19 +1281,16 @@ private Q_SLOTS:
             QCOMPARE(state(t.request(device(u"microphone"_s, u"query"_s), 1000)), u"starting"_s);
             QVERIFY(pushed.isEmpty());
             t.revoke();
-            QCOMPARE(pushed.size(), 3);
+            QCOMPARE(pushed.size(), 2);
             QCOMPARE(pushed.at(0).value(u"device"_s).toString(), u"microphone"_s);
             QCOMPARE(state(pushed.at(0)), u"off"_s);
             QCOMPARE(pushed.at(0).value(u"code"_s).toString(), u"detached"_s);
             QCOMPARE(pushed.at(0).value(u"requestId"_s).toString(), u"v1"_s);
-            QCOMPARE(pushed.at(1).value(u"device"_s).toString(), u"camera"_s);
+            QCOMPARE(pushed.at(1).value(u"device"_s).toString(), u"playback"_s);
             QCOMPARE(pushed.at(1).value(u"code"_s).toString(), u"detached"_s);
-            QCOMPARE(pushed.at(1).value(u"requestId"_s).toString(), u"c2"_s);
-            QCOMPARE(pushed.at(2).value(u"device"_s).toString(), u"playback"_s);
-            QCOMPARE(pushed.at(2).value(u"code"_s).toString(), u"detached"_s);
-            QVERIFY(!pushed.at(2).contains(u"requestId"_s));
+            QVERIFY(!pushed.at(1).contains(u"requestId"_s));
             t.revoke(); // nothing on any more: nothing pushed again
-            QCOMPARE(pushed.size(), 3);
+            QCOMPARE(pushed.size(), 2);
             // After the detach the connection owns nothing: `not-owner`.
             QCOMPARE(t.request(device(u"microphone"_s, u"on"_s), 1000).value(u"code"_s).toString(), u"not-owner"_s);
         });
@@ -1337,8 +1333,8 @@ private Q_SLOTS:
             }
             QCOMPARE(mediaOn, enabled);
             QCOMPARE(microphoneOn, enabled);
-            QCOMPARE(cameraOn, enabled);
-            QCOMPARE(state(t.request(device(u"camera"_s, u"query"_s), 1000)), enabled ? u"starting"_s : u"off"_s);
+            QVERIFY(!cameraOn); // no usable bridge in the Virtual desktop namespace
+            QCOMPARE(state(t.request(device(u"camera"_s, u"query"_s), 1000)), u"off"_s);
             if (!enabled) return;
             QVERIFY(t.m_microphoneRequestId.isEmpty()); // nothing to answer
             const auto policy = t.m_microphonePolicy;

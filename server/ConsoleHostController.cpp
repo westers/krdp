@@ -36,6 +36,7 @@
 #include "ConsoleResize.h"
 #include "ConsoleFrameLayout.h"
 #include "RemoteTopologyProtocol.h"
+#include "CameraAvailability.h"
 
 using namespace Qt::StringLiterals;
 
@@ -1526,7 +1527,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
 namespace
 {
 /** Device controls implemented by the Console broker and logged-in worker. */
-constexpr LayoutControl::DeviceCapabilities ConsoleDeviceCapabilities{
+const LayoutControl::DeviceCapabilities ConsoleDeviceCapabilities{
     .playbackToggle = true,
     .playbackSilenceHost = true,
     .microphoneToggle = true,
@@ -1573,7 +1574,9 @@ void ConsoleHostController::onControlDevice(RdpConnection *connection, ConsoleCo
         return;
     }
     const auto request = std::get<DeviceControl::Request>(parsed);
-    if (const auto refused = DeviceControl::checkSupported(request, ConsoleDeviceCapabilities)) {
+    const auto deviceCapabilities = CameraAvailability::capabilities(ConsoleDeviceCapabilities,
+        CameraAvailability::reason(m_server->cameraLoopbackDevice()));
+    if (const auto refused = DeviceControl::checkSupported(request, deviceCapabilities)) {
         replyTo(connection, LayoutControl::errorRecord(*refused));
         return;
     }
@@ -1807,7 +1810,8 @@ void ConsoleHostController::sendCapabilities(Client &client)
     const bool fullCapture = capture.mode != MonitorCapturePolicy::Mode::Primary && capture.mode != MonitorCapturePolicy::Mode::Specific;
     capabilities.topologyPreview = fullCapture && (m_experimentalPhysicalTopology || m_experimentalConsoleVirtual);
     capabilities.topologyApply = capabilities.topologyPreview;
-    capabilities.devices = ConsoleDeviceCapabilities;
+    capabilities.devices = CameraAvailability::capabilities(ConsoleDeviceCapabilities,
+        CameraAvailability::reason(m_server->cameraLoopbackDevice()));
     if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, client.preferences.softwareEncoding.value_or(m_videoHost->mode));
     capabilities.stats = LayoutControl::StatsCapabilities{};
     client.connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
@@ -2164,6 +2168,7 @@ void ConsoleHostController::startCamera(Client &client, const QString &requestId
 
 void ConsoleHostController::startStandardCamera(Client &client)
 {
+    if (!CameraAvailability::reason(m_server->cameraLoopbackDevice()).isEmpty()) return;
     if (!client.standardCamera || !client.connection || m_cameraClient || !m_control.ownsControl(client.id)
         || !client.externalCamera || !m_inputEnabled || !m_endpoint.ready()
         || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) return;

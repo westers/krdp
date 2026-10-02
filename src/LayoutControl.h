@@ -187,6 +187,8 @@ struct DeviceCapabilities {
     bool microphoneToggle = false;
     bool cameraToggle = false;
     bool cameraReselect = false;
+    /** Why camera sharing cannot be enabled; empty when available. */
+    QString cameraUnavailableReason = {};
     bool operator==(const DeviceCapabilities &) const = default;
 };
 

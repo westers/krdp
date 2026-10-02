@@ -10,6 +10,7 @@
 #include <QTest>
 
 #include "DeviceConsent.h"
+#include "CameraAvailability.h"
 #include "DeviceControl.h"
 #include "LayoutControl.h"
 #include "PhysicalDeviceControl.h"
@@ -128,6 +129,27 @@ private Q_SLOTS:
         auto noSilence = broker;
         noSilence.playbackSilenceHost = false;
         QCOMPARE(refused({MediaDevice::Playback, Action::On, true}, noSilence), QStringLiteral("unsupported"));
+    }
+
+    void missingCameraBridgeDisablesOnlyCameraAndExplainsRepair()
+    {
+        const auto reason = CameraAvailability::reason(QStringLiteral("none"));
+        QVERIFY(reason.contains(QStringLiteral("v4l2loopback-dkms")));
+        QVERIFY(reason.contains(QStringLiteral("restart")));
+        const auto caps = CameraAvailability::capabilities(PhysicalDeviceControl::Capabilities, reason);
+        QVERIFY(!caps.cameraToggle && !caps.cameraReselect);
+        QVERIFY(caps.playbackToggle && caps.microphoneToggle);
+        const auto error = DeviceControl::checkSupported({MediaDevice::Camera, DeviceControl::Action::On}, caps);
+        QVERIFY(error);
+        QCOMPARE(error->message, reason);
+        QVERIFY(!DeviceControl::checkSupported({MediaDevice::Camera, DeviceControl::Action::Off}, caps));
+        QVERIFY(!DeviceControl::checkSupported({MediaDevice::Camera, DeviceControl::Action::Query}, caps));
+        LayoutControl::ChannelCapabilities channel; channel.devices = caps;
+        QCOMPARE(LayoutControl::capabilitiesRecord(channel).value(QStringLiteral("devices")).toObject()
+            .value(QStringLiteral("camera")).toObject().value(QStringLiteral("unavailableReason")).toString(), reason);
+        QVERIFY(!CameraAvailability::reason(QStringLiteral("/dev/video999999")).isEmpty());
+        QVERIFY(!CameraAvailability::reason(QStringLiteral("/dev/null")).isEmpty());
+        QVERIFY(!CameraAvailability::virtualReason().isEmpty());
     }
 
     void stateRecordShape()

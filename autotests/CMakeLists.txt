@@ -722,6 +722,12 @@ target_include_directories(RemoteCameraSetTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(RemoteCameraSetTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME RemoteCameraSetTest COMMAND RemoteCameraSetTest)
 
+add_executable(CameraPrerequisitesTest CameraPrerequisitesTest.cpp
+    ${CMAKE_SOURCE_DIR}/server/ConsoleCameraSession.h ${CMAKE_SOURCE_DIR}/src/PipeWireCamera.cpp)
+target_include_directories(CameraPrerequisitesTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(CameraPrerequisitesTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui PkgConfig::PipeWire)
+add_test(NAME CameraPrerequisitesTest COMMAND CameraPrerequisitesTest)
+
 add_executable(DeviceToggleLoopTest DeviceToggleLoopTest.cpp
     ${CMAKE_SOURCE_DIR}/src/PipeWireMicrophone.cpp
     ${CMAKE_SOURCE_DIR}/src/PipeWireCamera.cpp

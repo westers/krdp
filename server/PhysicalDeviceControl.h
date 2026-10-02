@@ -21,7 +21,7 @@ namespace KRdp
 namespace PhysicalDeviceControl
 {
 /** On a logged-in desktop everything can be switched. */
-constexpr LayoutControl::DeviceCapabilities Capabilities{
+inline const LayoutControl::DeviceCapabilities Capabilities{
     .playbackToggle = true,
     .playbackSilenceHost = true,
     .microphoneToggle = true,
@@ -35,14 +35,15 @@ constexpr LayoutControl::DeviceCapabilities Capabilities{
  * when the request went to \a connection, which answers it through
  * RdpConnection::deviceState (send that with stateRecord()).
  */
-inline std::optional<QJsonObject> request(RdpConnection &connection, const QJsonObject &record, const QString &requestId)
+inline std::optional<QJsonObject> request(RdpConnection &connection, const QJsonObject &record, const QString &requestId,
+    const LayoutControl::DeviceCapabilities &capabilities = Capabilities)
 {
     const auto parsed = DeviceControl::parseRequest(record);
     if (const auto *error = std::get_if<LayoutControl::Error>(&parsed)) {
         return LayoutControl::withRequestId(LayoutControl::errorRecord(*error), requestId);
     }
     const auto device = std::get<DeviceControl::Request>(parsed);
-    if (const auto refused = DeviceControl::checkSupported(device, Capabilities)) {
+    if (const auto refused = DeviceControl::checkSupported(device, capabilities)) {
         return LayoutControl::withRequestId(LayoutControl::errorRecord(*refused), requestId);
     }
     connection.requestDevice(device.device, device.action, device.silenceHost, requestId);

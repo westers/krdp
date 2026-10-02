@@ -5,6 +5,15 @@ user. It publishes a PipeWire camera source. Applications that enumerate V4L2
 cameras also need a `v4l2loopback` device on the **server**. A client reporting
 that a camera is mapped does not prove that an application can open it.
 
+The camera readiness change advertises sharing only when a configured V4L2
+loopback exists. Client 0.6.5 shows **Camera — Unavailable** and a **Why is camera
+sharing unavailable?** entry with setup instructions. It closes the camera gate
+and suppresses initial camera requests when the host reports this condition.
+Actual producer permissions/format/initial-frame failures are still checked in
+the desktop worker and return an error instead of a successful mapping. Virtual
+camera sharing is explicitly unavailable until its device namespace includes a
+bridge. These source changes require the updated server and client packages.
+
 ## Configure the server
 
 On Ubuntu, install `v4l2loopback-dkms` and `v4l2loopback-utils`. DKMS needs headers

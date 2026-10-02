@@ -122,6 +122,10 @@ std::optional<LayoutControl::Error> checkSupported(const Request &request, const
         break;
     }
     if (!toggle) {
+        // Off must remain possible if a bridge disappears during a session.
+        if (request.device == MediaDevice::Camera && request.action == Action::Off) return std::nullopt;
+        if (request.device == MediaDevice::Camera && !capabilities->cameraUnavailableReason.isEmpty())
+            return unsupported(capabilities->cameraUnavailableReason);
         return unsupported(QStringLiteral("this host cannot switch the %1 during a session").arg(name));
     }
     if (request.action == Action::Reselect && (request.device != MediaDevice::Camera || !capabilities->cameraReselect)) {

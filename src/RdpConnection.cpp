@@ -11,6 +11,7 @@
 #include "AdaptiveQuality.h"
 #include "DeviceConsent.h"
 #include "MicrophonePcmQueue.h"
+#include "CameraAvailability.h"
 
 #include <array>
 #include <atomic>
@@ -2224,6 +2225,14 @@ bool RdpConnection::reconcileCamera()
     };
 
     if (slot.applied != consent.generation) {
+        if (!d->remoteCameras.external) {
+            const auto reason = CameraAvailability::reason(d->server->cameraLoopbackDevice());
+            if (!reason.isEmpty()) {
+                slot.applied = consent.generation;
+                fail(DeviceControl::Unavailable, reason);
+                return true;
+            }
+        }
         if (!WTSVirtualChannelManagerIsChannelJoined(vcm, DRDYNVC_SVC_CHANNEL_NAME)) {
             slot.applied = consent.generation;
             fail(DeviceControl::Unavailable, QStringLiteral("the client has no dynamic virtual channels"));
@@ -2263,12 +2272,21 @@ bool RdpConnection::reconcileCamera()
     }
 
     size_t ready = 0;
-    d->remoteCameras.cameras.forEach([&ready](RemoteCamera *camera) {
+    QString cameraError;
+    d->remoteCameras.cameras.forEach([&ready, &cameraError](RemoteCamera *camera) {
+        if (!camera->external && camera->endpoint && !camera->endpoint->error().isEmpty()) {
+            cameraError = camera->endpoint->error();
+            return false;
+        }
         if (camera->endpointStarted.load() && (camera->external ? camera->connection->d->remoteCameras.workerReady.load() : camera->endpoint->ready())) {
             ++ready;
         }
         return true;
     });
+    if (!cameraError.isEmpty()) {
+        fail(DeviceControl::Unavailable, cameraError);
+        return true;
+    }
     switch (slot.status.state) {
     case State::Starting:
         if (ready > 0) {

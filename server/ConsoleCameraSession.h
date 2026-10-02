@@ -21,6 +21,11 @@ public:
     {
         m_timer.setInterval(250);
         connect(&m_timer, &QTimer::timeout, this, [this] {
+            if (!m_source.error().isEmpty()) {
+                Q_EMIT result({m_control.generation, m_request, m_source.error()});
+                stop();
+                return;
+            }
             if (!m_ready && m_source.ready()) {
                 m_ready = true;
                 Q_EMIT result({m_control.generation, m_request, {}});
@@ -72,7 +77,8 @@ public:
             || format.requestId != m_request || m_source.ready()) return false;
         if (!m_source.start(QStringLiteral("console-%1-%2").arg(format.generation).arg(format.requestId),
                             format.width, format.height, format.fps, m_loopbackDevice)) {
-            Q_EMIT result({m_control.generation, m_request, QStringLiteral("camera source startup failed")});
+            Q_EMIT result({m_control.generation, m_request, m_source.error().isEmpty()
+                ? QStringLiteral("The remote desktop could not start its camera source. Check that PipeWire is running, then reconnect.") : m_source.error()});
             stop();
             return false;
         }

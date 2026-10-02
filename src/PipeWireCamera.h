@@ -34,6 +34,8 @@ public:
     bool captureRequested() const;
     /** The node exists in the graph (PAUSED or STREAMING). Any thread. */
     bool ready() const { return m_ready.load(); }
+    /** Startup or producer failure, read by the session thread. */
+    QString error() const { return m_error; }
     /** True while a PipeWire input is linked or a V4L2 reader holds the loopback. */
     bool consumerActive() const;
 private:
@@ -49,6 +51,7 @@ private:
     uint32_t m_height = 0;
     int m_loopbackFd = -1;
     QString m_loopbackDevice;
+    QString m_error;
     std::atomic_bool m_captureRequested = false;
     std::atomic_bool m_ready = false;
     std::atomic_bool m_streaming = false;
