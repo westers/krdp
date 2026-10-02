@@ -261,3 +261,25 @@ desktop. Steve's active Hal→Sol Console connection and OpenMW PID322976 are
 preserved. Build paired candidates, stage rollback, wait for zero incoming RDP,
 then run the bounded Buzz→Sol game check and give Steve the Hal client for
 hands-on menu/host-key/reconnect acceptance. Do not restart the compositor/game.
+
+## Capture synchronization deployed (2026-10-02)
+
+Sol now runs paired server `bdd0af84` / `6.6.80+git202610021538.bdd0af8-1`;
+production client0.6.7 (source9fd622f, debug actions OFF) is installed on Sol,
+Buzz and Hal. Hal/Buzz servers and other hosts are unchanged. Zero incoming RDP
+was verified at Sol cutover; exact config/TLS/profile/module/hold/work-client-AI
+PIDs and service enablement were preserved. Console333465/Virtual333466/user333474
+are active/NRestarts0; runtime80/video10/3391 is verified. OpenMW322976 stays running.
+
+One bounded Buzz private-compositor -> installed Sol Console check passed:
+initial snapshot finds the already-running game, explicit capture activates the
+host lock, Escape opens the real menu and clears request/permission/lock, closing
+the menu restores armed capture, RightCtrl suspends the host lock, disconnect
+restores local constraints and reconnect starts free under a new generation.
+Screenshots confirm actual game menu/return and client free/captured status.
+Evidence and exact rollback directories are recorded in
+`~/dev/rdp/evidence/2026-10-02-cursor-release/SUMMARY.md`.
+
+Full360/sustained gameplay, physical takeover, Virtual gameplay and Steve's Hal
+hands-on check remain open. Existing client windows must be reopened. No game
+settings/saves, wallet or Hal live test were touched. No Goal/automatic next task.
