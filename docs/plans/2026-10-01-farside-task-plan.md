@@ -14,7 +14,7 @@ The existing Goal remains paused. Superpowers workflows and automatic delegation
 are not required. Existing plans, tests, code and evidence remain useful inputs.
 
 **Requested three-host update complete:** Hal, Buzz and Sol have client 0.6.5
-and server `2828a7c` (camera readiness follow-up); Sol now has camera, settings-menu and KDE layout fixes `dab6926`; other hosts remain unchanged. Next tasks to select are the
+and server `2828a7c` (camera readiness follow-up); Sol now has camera, settings-menu, tabbed layout and refresh-jitter fixes `ec5e252`; other hosts remain unchanged. Next tasks to select are the
 remaining installed N04/N05 checks. This installation request does not close
 their broader acceptance criteria or authorize further tasks.
 
@@ -28,7 +28,7 @@ parent T-task being complete. New test quantity alone does not count as delivery
 | Area | Already done | Still missing |
 |---|---|---|
 | Delivered client | 0.6.5 / `82fe55e` Hal/Buzz/Sol, debug actions OFF; 0.6.3 / `2df38a7` Ace/Cray/Marvin | Remaining N05 monitor acceptance and N06 fleet rollout/tag |
-| Delivered server | `dab6926` Sol, `2828a7c` Hal/Buzz, wire 11, private KPipeWire `9d6b08c`; `4b308bd` other hosts, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
+| Delivered server | `ec5e252` Sol, `2828a7c` Hal/Buzz, wire 11, private KPipeWire `9d6b08c`; `4b308bd` other hosts, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
 | Settings/auth | Scoped authentication, services, 17 preferences, 25 host/session controls and runtime inspection implemented; `44726890` removes legacy KCM adapters | Real installed password/cancel/save/restart, effective runtime policy and live stock coexistence |
 | Monitors/video | Quiet Sol private worker single/two-screen HEVC creation/resize/Fit/decoded restoration passes; client UI and protocol evidence exists | Final packaged Console RDP, broader topology lifecycle; earlier loaded CUDA OOM/fallback is unresolved |
 | Discover/locker | Font-cache cause demonstrated and repaired on Sol; Steve confirms Console Discover password entry and ordinary lock/unlock work | Virtual/failure/restart matrix and original lock/output-release race; agent's original failing trace still missing |
@@ -208,6 +208,19 @@ dependencies and Sol/Buzz simulations pass. Fix only packaging failures; no inst
 
 ### N04 — Install and prove server rollback on Sol (T08/T27)
 
+**Tabbed design and refresh correction delivered, 2026-10-01:** Steve requested
+implementing the proposed Qt layout and stopping refresh jitter. `ec5e2524` uses
+persistent Console/Virtual/Access/My Preferences tabs, aligned forms and fixed
+scoped footers, native numeric/boolean controls, advanced sections and certificate
+dialogs. Removed both5s timers and changing-list delegate recreation; systemd
+events update status without recreating editors. Focus/partial text/geometry/
+drafts/no-periodic-query and native small-window/package checks pass. Clean
+serverec5e252 installed on Sol, preservation and startup values80/video10/3391
+verified. Clients/Hal/Buzz unchanged. Selected correction finished; N04 manual
+native authorization and full T08 remain open. Updated manual checklist and
+[UI conventions](../settings-ui.md); evidence
+`~/dev/rdp/evidence/2026-10-01-settings-tabs/SUMMARY.md`.
+
 **KDE presentation correction delivered, 2026-10-01:** Steve requested Claude's
 prior KDE style and reading the KDE guides. `dab6926f` restores native aligned
 forms, concise Console/Virtual enable/status controls, contextual help and quality
@@ -245,10 +258,10 @@ it, and runtime inspection verified `/dev/video10`. This proves helper/save/runt
 behavior, **not** normal KCM authentication acceptance. Existing rollback evidence
 is reused. Evidence: `~/dev/rdp/evidence/2026-10-01-n04-installed-settings/SUMMARY.md`.
 
-**Remaining manual check (Sol, installed dab6926):** Read-only inspection on
+**Remaining manual check (Sol, installed ec5e252):** Read-only inspection on
 October 1 confirms stored and running quality `80`, camera `/dev/video10`,
 port `3391`, and runtime `verified`. Use [the short manual checklist](2026-10-01-sol-settings-acceptance.md).
-Steve has selected this manual check. Open Farside Host Settings,
+Steve has selected this manual check. Open Farside’s Console tab,
 load Console with normal KDE administrator authentication. Stage loopback `none`,
 cancel its Save authorization, and verify the draft remains while saved/runtime
 `/dev/video10` is unchanged. Restore draft `/dev/video10`; make a reversible
