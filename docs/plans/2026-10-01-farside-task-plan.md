@@ -13,8 +13,13 @@ resume a Goal, execute the whole queue, or start the next task automatically.
 The existing Goal remains paused. Superpowers workflows and automatic delegation
 are not required. Existing plans, tests, code and evidence remain useful inputs.
 
-**Requested three-host update complete:** Hal, Buzz and Sol have client 0.6.5
-and server `2828a7c` (camera readiness follow-up); Sol now has the approved settings redesign and capture-comparison corrections `ed92e059`, including camera, settings-menu and refresh fixes. Ace separately updated to server `ec5e252` and client0.6.5; Cray/Marvin remain unchanged. Next tasks to select are the
+**Current delivery:** Hal, Buzz and Sol have client 0.6.6;
+Hal/Buzz server `2828a7c` (camera readiness follow-up), Sol server `00e74e43`
+(game input plus approved settings redesign and capture-comparison corrections).
+OPT-054 paired game-input implementation and native Buzz→Sol gate delivered;
+Steve's sustained Hal gameplay acceptance and automatic-lock observer remain open.
+See [game-input record](../issues/2026-10-02-openmw-game-input.md).
+Ace separately updated to server `ec5e252` and client0.6.5; Cray/Marvin remain unchanged. Next tasks to select are the
 remaining installed N04/N05 checks. This installation request does not close
 their broader acceptance criteria or authorize further tasks.
 
@@ -27,8 +32,8 @@ parent T-task being complete. New test quantity alone does not count as delivery
 
 | Area | Already done | Still missing |
 |---|---|---|
-| Delivered client | 0.6.5 / `82fe55e` Hal/Buzz/Sol, debug actions OFF; 0.6.5 / `82fe55e` Ace; 0.6.3 / `2df38a7` Cray/Marvin | Remaining N05 monitor acceptance and N06 fleet rollout/tag |
-| Delivered server | `ed92e059` Sol, `2828a7c` Hal/Buzz, wire 11, private KPipeWire `9d6b08c`; `ec5e252` Ace; `4b308bd` Cray/Marvin, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
+| Delivered client | 0.6.6 / `f3eabab` product Hal/Buzz/Sol, debug actions OFF; 0.6.5 / `82fe55e` Ace; 0.6.3 / `2df38a7` Cray/Marvin | Remaining N05 monitor acceptance and N06 fleet rollout |
+| Delivered server | `00e74e43` Sol, wire12; `2828a7c` Hal/Buzz, wire11; private KPipeWire `9d6b08c`; `ec5e252` Ace; `4b308bd` Cray/Marvin, wire6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
 | Settings/auth | Scoped authentication, services, 17 preferences, 25 host/session controls and runtime inspection implemented; `44726890` removes legacy KCM adapters | Real installed password/cancel/save/restart, effective runtime policy and live stock coexistence |
 | Monitors/video | Quiet Sol private worker single/two-screen HEVC creation/resize/Fit/decoded restoration passes; client UI and protocol evidence exists | Final packaged Console RDP, broader topology lifecycle; earlier loaded CUDA OOM/fallback is unresolved |
 | Discover/locker | Font-cache cause demonstrated and repaired on Sol; Steve confirms Console Discover password entry and ordinary lock/unlock work | Virtual/failure/restart matrix and original lock/output-release race; agent's original failing trace still missing |

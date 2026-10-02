@@ -1,8 +1,44 @@
 # OpenMW mouse capture over Farside RDP (OPT-054)
 
-## Implementation progress (2026-10-02)
+## Delivery (2026-10-02)
 
-**IN PROGRESS — paired mouse and keyboard delivery; no separate partial rollout.**
+**Paired implementation deployed; sustained gameplay acceptance remains manual.**
+
+- Sol server `00e74e4395` / `6.6.80+git202610020702.00e74e4-1`;
+  client **0.6.6** installed on Sol, Buzz and Hal. Hal/Buzz servers remain
+  `2828a7c`; Ace/Cray/Marvin are unchanged by this task.
+- Server package SHA256 `75fa789efc80afa45ae04dac0d7294db127f40d111db9c6de707d331aa73967e`;
+  client package SHA256 `fdcc468b390b240995240f437d4b9114fe421cdc81d39c6446ea96a6f23e5dd3`.
+  Clean committed exports; production client debug actions OFF.
+- Native Buzz → installed Sol Console check passed using the committed client
+  with debug actions in a separate software KWin instance. Actual native local
+  relative motion (three 800.25-pixel events) changed OpenMW's view; capture hint
+  appeared only after lock confirmation. Bounded W down/up reached the game and
+  the scene changed slightly near a crate. Right Ctrl removed capture; Escape
+  opened and closed the game menu. Client remained owner throughout. This is
+  not a measured 360-degree turn or unconstrained walking acceptance.
+- Separate native lock gate passed: compositor confirmation, fractional motion,
+  manual release, focus/hide release, no automatic recapture and fullscreen
+  re-entry. The private test compositor allowed its synthetic driver only;
+  actual desktop permissions and Buzz's locked session were unchanged.
+- Focused RDP/wire/input/device classification suites and generation-bound
+  takeover/held-W cleanup pass. Earlier native keyboard baseline also showed
+  A/S movement while owner. Intermittent original revocation was not reproduced;
+  the cursor-based takeover mechanism that could explain it has been replaced.
+- Deployment preserved configuration/TLS/profiles/holds/service enablement,
+  work/client/AI processes and OpenMW PID322976. Sol Console328097 and
+  Virtual328098 active/NRestarts0; stored/running80, `/dev/video10`,3391 match.
+  Root-private rollback directories: `~/farside-game-input-backup-20261002-sol`,
+  and `~/farside-game-input-backup-20261002-{buzz,hal}-client` on each host.
+- Reopen Hal's client; choose **View → Capture Mouse for Games** and move into
+  the view. Right Ctrl releases; Escape reaches OpenMW. Steve checks repeated
+  turns, free walking/stopping and mouse buttons. Full Virtual game, actual
+  physical-seat takeover and ordinary multi-window drag were not live-tested.
+  Automatic remote-lock observation remains deferred as described below.
+
+## Implementation record (2026-10-02)
+
+The following records the paired implementation and its earlier diagnosis.
 
 - A native Buzz → installed Sol baseline shows gameplay and actual movement after
   bounded 300 ms A and S holds through Qt's keyboard path. Scan codes/down/up are
@@ -23,7 +59,7 @@
 - Client has explicit View → Capture Mouse for Games, native compositor-confirmed
   pointer lock/relative motion, host-key release, focus/hide/surface/disconnect/
   ownership cleanup, fractional deltas and shortcut inhibition while captured.
-  Native capture and packaged acceptance are still pending.
+  Native capture and installed-server acceptance are recorded above.
 - Automatic capture was investigated separately after Steve's proposed behavior.
   KWin6.6.6 distinguishes surface `lockedPointer()` from `confinedPointer()`.
   Ordinary scripting/D-Bus does not expose it. The native plugin API explicitly
@@ -126,5 +162,5 @@ absolute `pointer_motion_absolute` requests.
   restarts, preservation of the running game/configuration/desktop, and rollback.
   User confirms game behavior; no gameplay acceptance from packet receipt alone.
 
-This is a scoped implementation proposal, not a new Goal, automatic queue run,
-or a claim that gaming support is already implemented.
+Implementation is delivered; the full user gameplay criteria above remain open.
+This task creates no Goal or automatic queue run.
