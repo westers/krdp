@@ -188,6 +188,7 @@ for path in ./usr/bin/farside-server ./usr/bin/farside-console-host ./usr/bin/fa
     ./usr/share/farside/virtual-session/launch-virtual-session.sh \
     ./usr/share/applications/io.github.westers.farside.server.desktop \
     ./usr/share/applications/io.github.westers.farside.consoleworker.desktop \
+    ./usr/share/applications/kcm_farside.desktop \
     ./usr/share/icons/hicolor/scalable/apps/io.github.westers.farside.server.svg \
     "./usr/lib/$multiarch/qt6/plugins/plasma/kcms/systemsettings/kcm_farside.so"; do
     grep -qxF -- "$path" <<<"$contents" || { echo "missing from package: $path" >&2; exit 1; }

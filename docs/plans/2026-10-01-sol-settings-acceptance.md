@@ -7,7 +7,10 @@ and helper checks are already accepted; do not repeat them.
 
 ## Manual check
 
-Use Sol's System Settings → **Farside Remote Desktop** → Console **Host Settings**.
+Use Sol's System Settings → **Security & Privacy** → **Farside Remote Desktop**
+→ Console **Host Settings**. If using server65243df7 or another build missing
+the menu category, run `kcmshell6 kcm_farside` in a terminal inside Sol's desktop
+to open the installed module directly.
 Choose **Console Host**, then **Load Settings…**, using normal KDE administrator
 authentication. No password needs to be shared in chat.
 

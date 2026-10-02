@@ -9,5 +9,7 @@
         "Icon": "io.github.westers.farside.server",
         "Name": "Farside Remote Desktop"
     },
-    "X-KDE-Keywords": "Farside,RDP,remote desktop"
+    "X-KDE-Keywords": "Farside,RDP,remote desktop",
+    "X-KDE-System-Settings-Parent-Category": "security-privacy",
+    "X-KDE-Weight": 35
 }
