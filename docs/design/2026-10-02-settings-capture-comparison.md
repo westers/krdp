@@ -54,6 +54,10 @@ Corrected source `ed92e059` is committed and pushed. Package `6.6.80+git20261002
 is built and archived read-only under `~/dev/rdp/debs/candidates/server/ed92e05/`
 (SHA-256 `e1691038174882cc305e7608bf5a1f99840609fa3a725153bdfbc1aae03f7942`). It is staged on Sol
 with the exact prior server/client packages and guarded deployment script in
-`/tmp/farside-settings-comparison-release/`. **Not installed:** Sol has an active
-Console RDP session. Its installed server remains `a087e159`; all clients and
-other hosts remain unchanged. Do not restart the active session.
+`/tmp/farside-settings-comparison-release/`. **Delivered after disconnection:** Steve disconnected from Console. The guarded
+update changed only the Sol server, with zero incoming RDP/settings windows/retained
+desktops. Exact config/TLS/profile/holds/work/client/AI and running OpenMW PID322976
+were preserved. Console324312/Virtual324313/user324319 are active/NRestarts0;
+stored/startup Quality80, CameraLoopbackDevice=/dev/video10, Port3391 are verified.
+Root-private rollback is `~/farside-settings-comparison-backup-20261002-sol`.
+All clients remain0.6.5; other hosts remain unchanged.

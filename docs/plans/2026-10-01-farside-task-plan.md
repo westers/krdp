@@ -14,7 +14,7 @@ The existing Goal remains paused. Superpowers workflows and automatic delegation
 are not required. Existing plans, tests, code and evidence remain useful inputs.
 
 **Requested three-host update complete:** Hal, Buzz and Sol have client 0.6.5
-and server `2828a7c` (camera readiness follow-up); Sol now has the approved settings redesign `a087e159`, including camera, settings-menu and refresh fixes. Ace separately updated to server `ec5e252` and client0.6.5; Cray/Marvin remain unchanged. Next tasks to select are the
+and server `2828a7c` (camera readiness follow-up); Sol now has the approved settings redesign and capture-comparison corrections `ed92e059`, including camera, settings-menu and refresh fixes. Ace separately updated to server `ec5e252` and client0.6.5; Cray/Marvin remain unchanged. Next tasks to select are the
 remaining installed N04/N05 checks. This installation request does not close
 their broader acceptance criteria or authorize further tasks.
 
@@ -28,7 +28,7 @@ parent T-task being complete. New test quantity alone does not count as delivery
 | Area | Already done | Still missing |
 |---|---|---|
 | Delivered client | 0.6.5 / `82fe55e` Hal/Buzz/Sol, debug actions OFF; 0.6.5 / `82fe55e` Ace; 0.6.3 / `2df38a7` Cray/Marvin | Remaining N05 monitor acceptance and N06 fleet rollout/tag |
-| Delivered server | `a087e159` Sol, `2828a7c` Hal/Buzz, wire 11, private KPipeWire `9d6b08c`; `ec5e252` Ace; `4b308bd` Cray/Marvin, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
+| Delivered server | `ed92e059` Sol, `2828a7c` Hal/Buzz, wire 11, private KPipeWire `9d6b08c`; `ec5e252` Ace; `4b308bd` Cray/Marvin, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
 | Settings/auth | Scoped authentication, services, 17 preferences, 25 host/session controls and runtime inspection implemented; `44726890` removes legacy KCM adapters | Real installed password/cancel/save/restart, effective runtime policy and live stock coexistence |
 | Monitors/video | Quiet Sol private worker single/two-screen HEVC creation/resize/Fit/decoded restoration passes; client UI and protocol evidence exists | Final packaged Console RDP, broader topology lifecycle; earlier loaded CUDA OOM/fallback is unresolved |
 | Discover/locker | Font-cache cause demonstrated and repaired on Sol; Steve confirms Console Discover password entry and ordinary lock/unlock work | Virtual/failure/restart matrix and original lock/output-release race; agent's original failing trace still missing |
@@ -212,8 +212,9 @@ dependencies and Sol/Buzz simulations pass. Fix only packaging failures; no inst
 captures compared with the accepted sketches. Source `ed92e059` corrects the
 observed placement/headings/wrapping/help/readiness gaps. All ten native pages
 and relevant states are captured from the final stripped package; Main3/KCM14
-pass. Server `6.6.80+git202610020550.ed92e05-1` is archived and staged on Sol,
-not installed while its Console RDP session is active. Sol remains `a087e159`.
+pass. Server `6.6.80+git202610020550.ed92e05-1` is archived and installed on Sol after
+Steve disconnected; config/TLS/profile/holds/work/client/AI/OpenMW and enablement
+preservation passed. Runtime80/video10/3391 verified; private a087 rollback exists.
 See [comparison](../design/2026-10-02-settings-capture-comparison.md); N04 manual
 authorization and Steve’s visual acceptance remain open.
 

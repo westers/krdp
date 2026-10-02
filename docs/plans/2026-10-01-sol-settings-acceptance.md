@@ -1,6 +1,6 @@
 # Sol: remaining installed settings acceptance (N04)
 
-Server `a087e159`, package `6.6.80+git202610020518.a087e15-1`.
+Server `ed92e059`, package `6.6.80+git202610020550.ed92e05-1`.
 October 2 installed readback: stored and running quality **80**, Console camera
 **/dev/video10**, port **3391**, runtime **verified**. Existing package rollback
 and helper checks are already accepted; do not repeat them.
