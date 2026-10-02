@@ -14,7 +14,7 @@ The existing Goal remains paused. Superpowers workflows and automatic delegation
 are not required. Existing plans, tests, code and evidence remain useful inputs.
 
 **Requested three-host update complete:** Hal, Buzz and Sol have client 0.6.5
-and server `2828a7c` (camera readiness follow-up); Sol now has camera and settings-menu fixes `87d8a24`; other hosts remain unchanged. Next tasks to select are the
+and server `2828a7c` (camera readiness follow-up); Sol now has camera, settings-menu and KDE layout fixes `dab6926`; other hosts remain unchanged. Next tasks to select are the
 remaining installed N04/N05 checks. This installation request does not close
 their broader acceptance criteria or authorize further tasks.
 
@@ -28,7 +28,7 @@ parent T-task being complete. New test quantity alone does not count as delivery
 | Area | Already done | Still missing |
 |---|---|---|
 | Delivered client | 0.6.5 / `82fe55e` Hal/Buzz/Sol, debug actions OFF; 0.6.3 / `2df38a7` Ace/Cray/Marvin | Remaining N05 monitor acceptance and N06 fleet rollout/tag |
-| Delivered server | `87d8a24` Sol, `2828a7c` Hal/Buzz, wire 11, private KPipeWire `9d6b08c`; `4b308bd` other hosts, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
+| Delivered server | `dab6926` Sol, `2828a7c` Hal/Buzz, wire 11, private KPipeWire `9d6b08c`; `4b308bd` other hosts, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
 | Settings/auth | Scoped authentication, services, 17 preferences, 25 host/session controls and runtime inspection implemented; `44726890` removes legacy KCM adapters | Real installed password/cancel/save/restart, effective runtime policy and live stock coexistence |
 | Monitors/video | Quiet Sol private worker single/two-screen HEVC creation/resize/Fit/decoded restoration passes; client UI and protocol evidence exists | Final packaged Console RDP, broader topology lifecycle; earlier loaded CUDA OOM/fallback is unresolved |
 | Discover/locker | Font-cache cause demonstrated and repaired on Sol; Steve confirms Console Discover password entry and ordinary lock/unlock work | Virtual/failure/restart matrix and original lock/output-release race; agent's original failing trace still missing |
@@ -208,6 +208,17 @@ dependencies and Sol/Buzz simulations pass. Fix only packaging failures; no inst
 
 ### N04 — Install and prove server rollback on Sol (T08/T27)
 
+**KDE presentation correction delivered, 2026-10-01:** Steve requested Claude's
+prior KDE style and reading the KDE guides. `dab6926f` restores native aligned
+forms, concise Console/Virtual enable/status controls, contextual help and quality
+slider/value, retaining current scoped models and explicit authorization/save/
+restart. Clean serverdab6926 installed on Sol only; existing settings and desktop
+processes preserved, runtime still quality80/camera /dev/video10/port3391 verified.
+Focused injected page checks, actual packaged KCM and rendered Buzz fixture review
+pass. This finishes the selected UI correction; manual N04 and full T08 stay open.
+Follow [settings UI conventions](../settings-ui.md); evidence
+`~/dev/rdp/evidence/2026-10-01-kde-settings-ui/SUMMARY.md`.
+
 **Settings-panel blocker resolved, 2026-10-01:** Steve could not find Farside in
 System Settings. `87d8a24a` restores the missing category; clean server87d8a24
 installed on Sol, with exact preservation and startup readback accepted. The module
@@ -234,7 +245,7 @@ it, and runtime inspection verified `/dev/video10`. This proves helper/save/runt
 behavior, **not** normal KCM authentication acceptance. Existing rollback evidence
 is reused. Evidence: `~/dev/rdp/evidence/2026-10-01-n04-installed-settings/SUMMARY.md`.
 
-**Remaining manual check (Sol, installed 87d8a24):** Read-only inspection on
+**Remaining manual check (Sol, installed dab6926):** Read-only inspection on
 October 1 confirms stored and running quality `80`, camera `/dev/video10`,
 port `3391`, and runtime `verified`. Use [the short manual checklist](2026-10-01-sol-settings-acceptance.md).
 Steve has selected this manual check. Open Farside Host Settings,

@@ -1,11 +1,15 @@
 # Sol: remaining installed settings acceptance (N04)
 
-Server `87d8a24`, package `6.6.80+git202610020123.87d8a24-1`.
+Server `dab6926`, package `6.6.80+git202610020215.dab6926-1`.
 October 1 read-only baseline: stored and running quality **80**, Console camera
 **/dev/video10**, port **3391**, runtime **verified**. Existing package rollback
 and helper checks are already accepted; do not repeat them.
 
 ## Manual check
+
+This package restores the KDE form presentation. Cancel/save/explicit restart
+steps below remain unchanged; Defaults and Discard appear as labelled tooltip
+icons on the host page. No need to repeat the accepted camera or rollback checks.
 
 Use Sol's System Settings → **Security & Privacy** → **Farside Remote Desktop**
 → Console **Host Settings**. If using server65243df7 or another build missing
