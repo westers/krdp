@@ -8,6 +8,8 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QJsonDocument>
+#include <QUuid>
 
 #include <unistd.h>
 
@@ -66,6 +68,44 @@ private Q_SLOTS:
         // records); 3 since STATS-S6 (EncoderConfig::statsWanted, EncoderStats); 4 since
         // FIX-CURSOR (Cursor); 5 since AV1-Q (EncoderConfig carries the AV1 tile count).
         QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(11));
+    }
+
+    void pointerPolicyRequiresFreshWorkerGrantAndSnapshot()
+    {
+        QTemporaryDir directory;
+        ConsoleWorkerEndpoint endpoint;
+        QVERIFY(endpoint.listen(directory.filePath(QStringLiteral("w.sock")), self(), Token));
+        QLocalSocket worker;
+        worker.connectToServer(endpoint.socketName());
+        QVERIFY(worker.waitForConnected(1000));
+        QTRY_VERIFY(endpoint.m_worker);
+        worker.write(hello() + ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+        QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_VERIFY(endpoint.ready());
+        endpoint.setControlState({7,true});
+        const auto epoch=QUuid::createUuid().toString(QUuid::WithoutBraces);
+        QJsonObject state{{QStringLiteral("v"),1},{QStringLiteral("supported"),true},
+            {QStringLiteral("generation"),QStringLiteral("7")},{QStringLiteral("epoch"),epoch},
+            {QStringLiteral("revision"),QStringLiteral("1")},{QStringLiteral("requested"),true},
+            {QStringLiteral("locked"),true},{QStringLiteral("leased"),false},
+            {QStringLiteral("permitted"),false},{QStringLiteral("blocked"),false}};
+        QJsonObject request{{QStringLiteral("v"),1},{QStringLiteral("id"),QStringLiteral("capture")},
+            {QStringLiteral("generation"),QStringLiteral("7")},{QStringLiteral("epoch"),epoch},{QStringLiteral("enabled"),true}};
+        QVERIFY(!endpoint.setPointerCapture(request)); // No compositor snapshot yet.
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::PointerState,QJsonDocument(state).toJson(QJsonDocument::Compact)));
+        QTRY_VERIFY(!endpoint.pointerState().isEmpty());
+        QVERIFY(endpoint.setPointerCapture(request));
+        request.insert(QStringLiteral("generation"),QStringLiteral("6"));
+        QVERIFY(!endpoint.setPointerCapture(request));
+        request.insert(QStringLiteral("generation"),QStringLiteral("7"));
+        request.insert(QStringLiteral("epoch"),QUuid::createUuid().toString(QUuid::WithoutBraces));
+        QVERIFY(!endpoint.setPointerCapture(request));
+        endpoint.setControlState({8,false});
+        QVERIFY(endpoint.pointerState().isEmpty());
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::PointerState,QJsonDocument(state).toJson(QJsonDocument::Compact)));
+        QTest::qWait(20);
+        QVERIFY(endpoint.pointerState().isEmpty()); // Late old-owner state cannot revive permission.
+        QVERIFY(!endpoint.setPointerCapture(request));
     }
 
     void stopBeforeAuthenticationIsDeliveredAfterIt()

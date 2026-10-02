@@ -51,6 +51,7 @@ public:
         m_readySent = false;
         m_held.clear();
         m_heldCursor.reset();
+        m_heldPointer.clear();
     }
 
     void hello(const ConsoleWorkerWire::Hello &hello)
@@ -75,6 +76,7 @@ public:
         }
         m_readySent = true;
         m_writer(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+        if (!m_heldPointer.isEmpty()) m_writer(std::exchange(m_heldPointer, {}));
         const auto held = std::exchange(m_held, {});
         for (const auto &report : held) {
             m_writer(ConsoleWorkerWire::frame(report));
@@ -95,6 +97,13 @@ public:
         } else {
             m_heldCursor = cursor;
         }
+    }
+
+    void pointerState(const QByteArray &record)
+    {
+        if (!m_helloSent) return;
+        if (m_readySent) m_writer(record);
+        else m_heldPointer = record;
     }
 
     void report(const ConsoleWorkerWire::EncoderReport &report)
@@ -152,6 +161,7 @@ public:
 
 private:
     Writer m_writer;
+    QByteArray m_heldPointer;
     bool m_helloSent = false;
     bool m_readySent = false;
     QVector<ConsoleWorkerWire::EncoderReport> m_held;

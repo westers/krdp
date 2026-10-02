@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "ConsoleWorkerEndpoint.h"
+#include "PointerCaptureProtocol.h"
 
 #include <QDebug>
 #include <QLocalServer>
@@ -65,6 +66,7 @@ bool ConsoleWorkerEndpoint::listen(const QString &socketName, const ConsoleHando
 
 void ConsoleWorkerEndpoint::dropWorker()
 {
+    m_pointerState = {}; m_pointerControl = {};
     m_authenticationDeadline.stop();
     if (m_worker) {
         QLocalSocket *socket = m_worker;
@@ -162,9 +164,20 @@ void ConsoleWorkerEndpoint::reclaimConsole(quint64 generation)
 
 void ConsoleWorkerEndpoint::setControlState(const ConsoleWorkerWire::ControlState &state)
 {
+    if (state != m_pointerControl) m_pointerState = {};
+    m_pointerControl = state;
     if (m_ready && m_worker) {
         m_worker->write(ConsoleWorkerWire::frame(state));
     }
+}
+
+bool ConsoleWorkerEndpoint::setPointerCapture(const QJsonObject &request)
+{
+    if (!m_ready || !m_worker || !m_pointerControl.active || !PointerCaptureProtocol::request(request)
+        || request.value(QStringLiteral("generation")).toString() != QString::number(m_pointerControl.generation)
+        || request.value(QStringLiteral("epoch")) != m_pointerState.value(QStringLiteral("epoch"))
+        || !m_pointerState.value(QStringLiteral("supported")).toBool()) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::PointerCapture, QJsonDocument(request).toJson(QJsonDocument::Compact))) >= 0;
 }
 
 bool ConsoleWorkerEndpoint::setDisplayPolicy(bool active, bool wakeEnabled)
@@ -420,7 +433,13 @@ bool ConsoleWorkerEndpoint::processRecords()
             if (!m_worker) return false;
             continue;
         }
-        if (const auto frame = ConsoleWorkerWire::videoFrame(*record)) {
+        if (record->kind == ConsoleWorkerWire::Kind::PointerState) {
+            const auto state = PointerCaptureProtocol::decode(record->payload);
+            if (!PointerCaptureProtocol::state(state)) { fail(QStringLiteral("invalid worker pointer state")); return false; }
+            if (state.value(QStringLiteral("generation")).toString() == QString::number(m_pointerControl.generation)) {
+                m_pointerState = state; Q_EMIT pointerStateReceived(state);
+            }
+        } else if (const auto frame = ConsoleWorkerWire::videoFrame(*record)) {
             Q_EMIT frameReceived(*frame);
         } else if (const auto input = ConsoleWorkerWire::input(*record)) {
             Q_EMIT inputReceived(*input);
@@ -492,6 +511,7 @@ bool ConsoleWorkerEndpoint::processRecords()
 
 void ConsoleWorkerEndpoint::workerDisconnected()
 {
+    m_pointerState = {}; m_pointerControl = {};
     const bool wasReady = m_ready;
     m_authenticationDeadline.stop();
     if (m_worker) {

@@ -58,7 +58,8 @@ namespace KRdp::ConsoleWorkerWire
 // 10 (T06): Console monitor capture selection in current-owner EncoderConfig.
 // 11 (T06): generation-bound Console temporary-output policy and client display tuple.
 // 12 (OPT-054): relative pointer input and physical-device reclaim requests.
-constexpr quint16 ProtocolVersion = 12;
+// 13 (OPT-054): native pointer capture policy and observed state.
+constexpr quint16 ProtocolVersion = 13;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -118,8 +119,10 @@ enum class Kind : quint8 {
     DisplayPolicy,
     ChromaTiming,
     ReclaimConsole,
+    PointerCapture,
+    PointerState,
 };
-constexpr Kind LastKind = Kind::ReclaimConsole;
+constexpr Kind LastKind = Kind::PointerState;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;

@@ -214,3 +214,50 @@ absolute `pointer_motion_absolute` requests.
 
 Implementation is delivered; the full user gameplay criteria above remain open.
 This task creates no Goal or automatic queue run.
+
+## Capture synchronization implementation (2026-10-02)
+
+Implemented a disabled-by-default exact KWin 6.6.6 native bridge, shared worker
+D-Bus adapter, paired wire 13, authenticated current-owner routing in both
+Console and Virtual, and client 0.6.7 capture intent/acknowledgement handling.
+The bridge snapshots actual lock requests (including pre-existing games),
+separates request/activation/permission, and reads actual Alt+Tab grab state.
+Confinement/cursor hiding/fullscreen are not automatic capture signals.
+
+Right Ctrl releases local capture and suspends host constraints. A real app
+unlock (usually a game menu) temporarily releases local capture without cancelling
+armed intent; a renewed request resumes only in an active view with the pointer
+inside. An explicit release cancels intent. Reconnect and new owner/compositor
+grants start free. Relative input waits for local lock and correlated native host
+acknowledgement. Epochs, decimal generations/revisions, bounded IDs/records and
+current authenticated broker ownership reject stale commands/replies. Owner loss,
+worker shutdown/bus death and a six-second lease deadline restore local behavior.
+Only the client renews the lease (every two seconds); the worker cannot keep a
+stalled client's capture override alive. An acknowledgement timeout sends a
+compensating free request and stops renewal. No UI status polling was added.
+
+The system package includes the native plugin, compiles the matching extracted
+`kwin-dev`, and pins its exact `libkwin6`/`kwin-wayland` Debian versions. This is
+private ABI integration: upgrades require a rebuilt/revalidated bridge. Missing
+support disables synchronized capture with an explanation. Standard/older endpoints
+retain the existing manual relative-input fallback without claiming synchronization.
+
+Focused evidence: `~/dev/rdp/evidence/2026-10-02-cursor-release/`:
+
+- Native isolated Sol compositor: pre-existing lock, free/recapture, app lock
+  destruction/recreation, stale generation/epoch, real worker adapter grant change,
+  disconnect cleanup and lease expiry (4 including setup/cleanup).
+- Worker endpoint: snapshot required, current generation/epoch, revoked grant and
+  old-state rejection (3 including setup/cleanup).
+- Production QML on Buzz: visible released pointer, preserved temporary-unlock
+  intent, explicit-release suppression and manual recapture (4 including setup/cleanup).
+- Real client model: notification cannot grant input, matching acknowledgement
+  required, old IDs/generations rejected, revoked permission and reset clear input
+  (3 including setup/cleanup).
+
+These are focused behavior gates, not full gameplay/Virtual acceptance. At this
+source checkpoint no native plugin or paired release is installed on a live
+desktop. Steve's active Hal→Sol Console connection and OpenMW PID322976 are
+preserved. Build paired candidates, stage rollback, wait for zero incoming RDP,
+then run the bounded Buzz→Sol game check and give Steve the Hal client for
+hands-on menu/host-key/reconnect acceptance. Do not restart the compositor/game.

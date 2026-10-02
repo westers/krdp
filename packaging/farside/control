@@ -9,6 +9,7 @@ Rules-Requires-Root: no
 Package: farside-server
 Architecture: any
 Depends: ${shlibs:Depends},
+         ${farside:kwinDepends},
          bubblewrap,
          dbus-daemon,
          jq,

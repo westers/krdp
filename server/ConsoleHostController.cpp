@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "ConsoleHostController.h"
+#include "PointerCaptureProtocol.h"
 #include "DisplayWakePolicy.h"
 #include "ChromaMerge.h"
 
@@ -311,6 +312,12 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         }
     });
     // FIX-CURSOR: the console's cursor shape as RDP pointer updates, to every admitted client.
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::pointerStateReceived, this, [this](const QJsonObject &state) {
+        if (state.value(u"generation"_s).toString() != QString::number(m_controlGeneration)) return;
+        for (const auto &client : m_clients)
+            if (client->capabilitiesSent && client->connection && m_control.admitted(client->id) && m_control.ownsControl(client->id) && admissible(*client))
+                replyTo(client->connection, state);
+    });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::cursorShapeReceived, this, [this](const ConsoleWorkerWire::CursorShape &shape) {
         for (const auto &client : m_clients) {
             if (client->connection && m_control.admitted(client->id)) CursorTracker::apply(*client->connection->cursor(), shape);
@@ -1079,13 +1086,29 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         // `device` record, or any other record this host knows (not
         // audio-priority, which never closes krdpserver's gate either).
         static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s,
-                                         u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s, u"stats"_s, u"chroma"_s};
+                                         u"pointer-capture"_s, u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s, u"stats"_s, u"chroma"_s};
         for (const auto &client : m_clients) {
             if (client->id != id) continue;
             if (type == u"device"_s) client->deviceRecordSeen = true;
             if (known.contains(type)) client->spokeKrdpctl = true;
             break;
         }
+    }
+    if (type == u"pointer-capture-query"_s) {
+        if (m_control.admitted(id) && m_control.ownsControl(id) && !m_endpoint.pointerState().isEmpty()) {
+            auto state = m_endpoint.pointerState(); state.remove(u"id"_s); replyTo(connection, state);
+        }
+        return;
+    }
+    if (type == u"pointer-capture"_s) {
+        const auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &entry) { return entry->id == id; });
+        if (found == m_clients.end() || !m_control.admitted(id) || !m_control.ownsControl(id) || !admissible(**found)
+            || !m_endpoint.setPointerCapture(record)) {
+            replyTo(connection, QJsonObject{{u"type"_s, u"pointer-capture-state"_s}, {u"v"_s, 1}, {u"supported"_s, false},
+                {u"id"_s, record.value(u"id"_s)}, {u"generation"_s, QString::number(m_controlGeneration)},
+                {u"error"_s, u"Pointer capture is unavailable or this connection no longer controls the desktop."_s}});
+        }
+        return;
     }
     if (type == u"chroma"_s) {
         const auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &entry) { return entry->id == id; });
@@ -1804,6 +1827,7 @@ void ConsoleHostController::sendCapabilities(Client &client)
     client.capabilitiesSent = true;
     LayoutControl::ChannelCapabilities capabilities;
     capabilities.host = u"console"_s;
+    capabilities.pointerCaptureSync = true;
     capabilities.layoutQuery = true; // `query`/`attach` describe the physical desktop; `apply` is refused
     capabilities.topologyQuery = true;
     const auto capture = capturePolicy();
@@ -1843,6 +1867,9 @@ void ConsoleHostController::sendLayouts()
             auto record = LayoutControl::layoutRecord(layout);
             record.insert(u"consoleResize"_s, !m_configuredConsoleOutputs);
             client->connection->sendControlRecord(LayoutControl::withRequestId(record, std::exchange(client->layoutRequestId, {})));
+            if (m_control.ownsControl(client->id) && !m_endpoint.pointerState().isEmpty()) {
+                auto state = m_endpoint.pointerState(); state.remove(u"id"_s); replyTo(client->connection, state);
+            }
         }
     }
 }

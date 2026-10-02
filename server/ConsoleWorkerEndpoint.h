@@ -12,6 +12,7 @@
 #include <QTimer>
 
 #include "ConsoleHandoff.h"
+#include <QJsonObject>
 #include "ConsoleWorkerWire.h"
 
 class QLocalServer;
@@ -58,6 +59,8 @@ public:
     void setMedia(const ConsoleWorkerWire::Media &media);
     void reclaimConsole(quint64 generation);
     void setControlState(const ConsoleWorkerWire::ControlState &state);
+    bool setPointerCapture(const QJsonObject &request);
+    QJsonObject pointerState() const { return m_pointerState; }
     /** Authenticated demand, including before Ready when DPMS can block capture.
      * Latest desired state is sent when Hello authenticates. No input grant. */
     bool setDisplayPolicy(bool active, bool wakeEnabled);
@@ -125,6 +128,7 @@ Q_SIGNALS:
     void encoderStatsReceived(const KRdp::ConsoleWorkerWire::EncoderStats &stats);
     void chromaTimingReceived(const KRdp::ConsoleWorkerWire::ChromaTiming &timing);
     /** FIX-CURSOR: the desktop's cursor shape changed (also in cursorShape()). */
+    void pointerStateReceived(const QJsonObject &state);
     void cursorShapeReceived(const KRdp::ConsoleWorkerWire::CursorShape &shape);
     void protocolError(const QString &message);
     /** The worker speaks another paired wire version; always followed by protocolError. */
@@ -143,6 +147,8 @@ private:
     std::unique_ptr<QLocalServer> m_server;
     QPointer<QLocalSocket> m_worker;
     ConsoleWorkerWire::Deframer m_deframer;
+    ConsoleWorkerWire::ControlState m_pointerControl;
+    QJsonObject m_pointerState;
     ConsoleHandoff::Target m_target;
     QByteArray m_token;
     bool m_authenticated = false;

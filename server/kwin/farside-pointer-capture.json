@@ -1,0 +1,8 @@
+{
+    "KPlugin": {
+        "Name": "Farside pointer capture",
+        "Description": "Synchronize remote pointer capture with actual application locks",
+        "License": "GPL-3.0-or-later",
+        "EnabledByDefault": false
+    }
+}

@@ -35,6 +35,8 @@
 
 #include "ConsoleWorkerWire.h"
 #include "ConsoleWorkerOutbox.h"
+#include "KWinPointerCapture.h"
+#include "PointerCaptureProtocol.h"
 #include "CursorTracker.h"
 #include "ConsoleInputState.h"
 #include "ConsoleResizeSession.h"
@@ -120,6 +122,9 @@ public:
         , m_microphone(desktop)
         , m_camera(desktop)
     {
+        connect(&m_pointerCapture, &KWinPointerCapture::stateChanged, this, [this](const QJsonObject &state) {
+            m_outbox.pointerState(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::PointerState, QJsonDocument(state).toJson(QJsonDocument::Compact)));
+        });
         if (!m_mode.virtualSession && m_authenticatedDesktop) {
             // Physical outputs of a logged-in desktop: journal every Fit (AUD-C-3).
             m_resize.setJournal(&m_outputJournal, m_sessionId);
@@ -516,6 +521,7 @@ public:
 private:
     void shutdown(int code)
     {
+        m_pointerCapture.stop();
         if (m_stopping) {
             return;
         }
@@ -2968,6 +2974,7 @@ private:
         releaseInput();
         m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalTakeover));
         m_control.active = false; // Gate immediately, before the host's acknowledgement.
+        m_pointerCapture.setControl(m_control);
         if (beginConsoleCreatorRelease()) return;
         if (m_physicalLease) {
             releasePhysicalLease();
@@ -3045,12 +3052,17 @@ private:
                     }
                     resetEncoderConfig(); // AUD-FIX7: a new grant starts from AVC; its connection says more
                     m_control = *control;
+                    m_pointerCapture.setControl(*control);
                     m_microphone.setControl(*control);
                     m_camera.setControl(*control);
                     if (m_mode.virtualSession) m_virtualResize.setControl(*control);
                     else m_resize.setControl(*control);
                     m_reclaimAction.setEnabled(m_mode.physicalActions() && control->active);
                 }
+                continue;
+            }
+            if (record->kind == ConsoleWorkerWire::Kind::PointerCapture) {
+                m_pointerCapture.request(PointerCaptureProtocol::decode(record->payload));
                 continue;
             }
             if (const auto request = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::ReclaimConsole)) {
@@ -3195,6 +3207,8 @@ private:
                 continue;
             }
             if (const auto input = ConsoleWorkerWire::input(*record)) {
+                if (input->type == ConsoleWorkerWire::Input::Type::RelativePointer && !m_pointerCapture.permitsRelativeInput()
+                    && input->eventType != QEvent::MouseButtonRelease) continue;
                 if (!m_control.active || m_physicalPending || m_creatorReleaseActive || m_creatorReleaseFinished
                     || ((!m_mode.virtualSession) && (m_addPending || m_removePending))
                     || !(m_mode.virtualSession ? m_virtualResize.inputAllowed() : m_resize.inputAllowed())
@@ -3365,6 +3379,7 @@ private:
     ConsoleWorkerWire::Outputs m_outputs;
     bool m_topologyQueryPending = false;
     std::optional<VideoFrame> m_lastPhysicalKeyframe;
+    KWinPointerCapture m_pointerCapture;
     ConsoleInputState m_inputState;
     QElapsedTimer m_clock;
     QAction m_reclaimAction;

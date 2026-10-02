@@ -428,6 +428,7 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
                      {QStringLiteral("preview"), capabilities.topologyPreview},
                      {QStringLiteral("apply"), capabilities.topologyApply}}},
     };
+    if (capabilities.pointerCaptureSync) record.insert(QStringLiteral("pointerCaptureSync"), true);
     if (const auto &devices = capabilities.devices) {
         QJsonObject camera{{QStringLiteral("toggle"), devices->cameraToggle}, {QStringLiteral("reselect"), devices->cameraReselect}};
         if (!devices->cameraUnavailableReason.isEmpty())

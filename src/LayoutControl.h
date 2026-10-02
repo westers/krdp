@@ -226,6 +226,7 @@ struct StatsCapabilities {
 
 /** What a KRDPCTL endpoint offers, as the `capabilities` record says it. */
 struct ChannelCapabilities {
+    bool pointerCaptureSync = false;
     QString host; ///< "physical" | "console" | "virtual"
     bool layoutQuery = false;
     bool layoutApply = false;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionTransport.h"
+#include "PointerCaptureProtocol.h"
 #include "CursorTracker.h"
 #include "LayoutControl.h"
 #include "DeviceControl.h"
@@ -376,6 +377,9 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     }));
     // FIX-CURSOR: the desktop's cursor shape as RDP pointer updates; the current one right away
     // (a reattach, or a client arriving after the last change).
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::pointerStateReceived, this, [this, bindingCurrent](const QJsonObject &state) {
+        if (bindingCurrent() && authorized() && state.value(u"generation"_s).toString() == QString::number(m_controlGeneration)) sendReply(state);
+    }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::cursorShapeReceived, this, [this](const ConsoleWorkerWire::CursorShape &shape) {
         if (authorized()) CursorTracker::apply(*m_connection->cursor(), shape);
     }));
@@ -1039,6 +1043,7 @@ void VirtualSessionTransport::sendCapabilities()
     m_capabilitiesSent = true;
     LayoutControl::ChannelCapabilities capabilities;
     capabilities.host = u"virtual"_s;
+    capabilities.pointerCaptureSync = true;
     capabilities.virtualList = true;
     capabilities.virtualCreate = true;
     capabilities.virtualSelectedCreate = m_control && m_control->selectedCreateAvailable();
@@ -1881,12 +1886,12 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         // audio-priority, which never closes krdpserver's gate either).
         const QString type = record.value(u"type"_s).toString();
         if (type == u"device"_s) m_deviceRecordSeen = true;
-        else if (type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s || type == u"stats"_s || type == u"chroma"_s)
+        else if (type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s || type == u"stats"_s || type == u"chroma"_s || type == u"pointer-capture"_s)
             m_spokeKrdpctl = true;
         // Any record this broker knows (not audio-priority, which our client may send first
         // without a desktop in mind) marks a KRDPCTL client: never bound automatically.
         if (type == u"device"_s || type == u"virtual-session"_s || type == u"virtual-resize"_s || type.startsWith(u"topology-"_s) || type == u"codec"_s
-            || type == u"stats"_s || type == u"chroma"_s)
+            || type == u"stats"_s || type == u"chroma"_s || type == u"pointer-capture"_s)
             noteKrdpctlClient();
         if (type == u"virtual-session"_s) {
             // Our own client chooses its desktop itself (AUD-D4 applies to stock clients only).
@@ -1896,6 +1901,16 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         }
     }
     if (m_revoking) return {};
+    if (record.value(u"type"_s) == u"pointer-capture-query"_s) {
+        if (!authorized(uid) || !m_endpoint) return {};
+        auto state = m_endpoint->pointerState(); state.remove(u"id"_s); return state;
+    }
+    if (record.value(u"type"_s) == u"pointer-capture"_s) {
+        if (authorized(uid) && m_endpoint && m_endpoint->setPointerCapture(record)) return {};
+        return {{u"type"_s, u"pointer-capture-state"_s}, {u"v"_s, 1}, {u"supported"_s, false},
+            {u"id"_s, record.value(u"id"_s)}, {u"generation"_s, QString::number(m_controlGeneration)},
+            {u"error"_s, u"Pointer capture is unavailable or this connection no longer controls the desktop."_s}};
+    }
     if (record.value(u"type"_s) == u"topology-query"_s) {
         const auto id = RemoteTopologyProtocol::queryId(record);
         if (!id) return RemoteTopologyProtocol::error(record.value(u"id"_s).toString().left(64), u"invalid"_s);

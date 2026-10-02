@@ -108,6 +108,26 @@ rm -rf "${work:?}"
 mkdir -p "$work/debian"
 DESTDIR="$pkgroot" cmake --install "$build/farside-build"
 
+# The pointer observer uses KWin's private plugin ABI: compile its exact SDK and
+# pin the installed compositor/library together. Never silently omit it.
+kwin_version=$(dpkg-query -W -f='${Version}' libkwin6)
+[[ $(dpkg-query -W -f='${Version}' kwin-wayland) == "$kwin_version" ]] || {
+    echo 'KWin executable and library versions differ' >&2; exit 1;
+}
+rm -rf "${build:?}/kwin-sdk" "${build:?}/kwin-capture-build"
+mkdir -p "$build/kwin-sdk"
+(cd "$build/kwin-sdk" && apt-get download "kwin-dev=$kwin_version")
+mapfile -t kwin_sdks < <(find "$build/kwin-sdk" -maxdepth 1 -name '*.deb')
+[[ ${#kwin_sdks[@]} == 1 && $(dpkg-deb -f "${kwin_sdks[0]}" Version) == "$kwin_version" ]]
+dpkg-deb -x "${kwin_sdks[0]}" "$build/kwin-sdk/root"
+cmake -S "$build/src/server/kwin" -B "$build/kwin-capture-build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR="lib/$multiarch" \
+    -DFARSIDE_KWIN_INCLUDE_DIR="$build/kwin-sdk/root/usr/include/kwin"
+cmake --build "$build/kwin-capture-build" -j"$jobs"
+DESTDIR="$pkgroot" cmake --install "$build/kwin-capture-build"
+
+
 # Strip like dh_strip (no -dbgsym package).
 while IFS= read -r -d '' file; do
     if file -b "$file" | grep -q 'ELF .*shared object'; then
@@ -154,6 +174,7 @@ done
 # Dependencies from the ELF files; the private libraries resolve inside the
 # package (via their RUNPATH) and add no dependency.
 (cd "$work" && dpkg-shlibdeps -Tdebian/farside-server.substvars -l"$pkgroot$privdir" "${elves[@]}")
+printf 'farside:kwinDepends=libkwin6 (= %s), kwin-wayland (= %s)\n' "$kwin_version" "$kwin_version" >>"$work/debian/farside-server.substvars"
 (cd "$work" && dpkg-gencontrol -pfarside-server -Pdebian/farside-server -Tdebian/farside-server.substvars)
 
 (cd "$pkgroot" && find . -path ./DEBIAN -prune -o -type f -printf '%P\0' | sort -z \
@@ -170,7 +191,7 @@ dpkg-deb --root-owner-group -Zxz --build "$pkgroot" "$deb"
 # 4. Contract checks.
 [[ $(dpkg-deb -f "$deb" Package) == farside-server && $(dpkg-deb -f "$deb" Version) == "$version" ]]
 contents=$(dpkg-deb -c "$deb" | awk '{print $6}')
-for path in ./usr/bin/farside-server ./usr/bin/farside-console-host ./usr/bin/farside-console-worker \
+for path in "./usr/lib/$multiarch/qt6/plugins/kwin/plugins/farside-pointer-capture.so" ./usr/bin/farside-server ./usr/bin/farside-console-host ./usr/bin/farside-console-worker \
     ./usr/bin/farside-virtual-host ./usr/bin/farside-virtual-session-entry ./usr/bin/farside-virtual-pam-keeper \
     ./usr/bin/farside-virtual-session-cleanup ./usr/bin/farside-virtual-device-entry \
     ./usr/bin/farside-virtual-guardian ./usr/bin/farside-virtual-guardianctl \
