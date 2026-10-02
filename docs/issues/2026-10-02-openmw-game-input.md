@@ -310,3 +310,12 @@ motion. Existing native lock/owner/expiry checks in the same binary pass too
 `~/dev/rdp/evidence/2026-10-02-released-game-motion/native-test.log`.
 No running compositor/game or active connection was changed. Package/deployment
 and Steve's actual OpenMW verification are pending at this source checkpoint.
+
+Production candidate `a8c7d6ff` / `6.6.80+git202610021704.a8c7d6f-1` is now
+built, package-contract checked and staged with exact rollback on Sol at
+`~/farside-released-game-motion-release`. Exact stripped packaged native gate5
+passes; apt simulation upgrades only the server. Not installed: Steve's Hal→Sol
+Virtual:3395 connection is active; disconnect requested under the standing
+zero-incoming rule. Delivery details/hash are in the new evidence SUMMARY.md.
+Client0.6.7 remains current. The staged update reloads only the Farside native
+bridge after all owners disconnect, keeping the game and compositor alive.
