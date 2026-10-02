@@ -32,6 +32,8 @@ public:
     Q_INVOKABLE bool setPam(const QString &route, const QString &mode, const QStringList &accounts);
     Q_INVOKABLE bool setAlias(const QString &route, const QString &alias, const QString &owner, const QString &password);
     Q_INVOKABLE bool removeAlias(const QString &route, const QString &alias);
+    Q_INVOKABLE void discard();
+    Q_INVOKABLE bool undoRemoveAlias();
 Q_SIGNALS:
     void changed();
 private:
@@ -44,4 +46,6 @@ private:
     QJsonObject m_snapshot, m_pending;
     QString m_error;
     bool m_lastSaveRequiresRestart = false;
+    QJsonObject m_removedAlias;
+    QString m_removedRoute;
 };

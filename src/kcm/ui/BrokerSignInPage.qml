@@ -9,73 +9,33 @@ import org.kde.kcmutils as KCM
 KCM.SimpleKCM {
     id: root
     objectName: "brokerSignInPage"
-    title: i18nc("@title:window", "Console and Virtual Sign-In")
     property var administration: kcm.brokerAuthentication
-    property var consoleSettings: null
-    property var virtualSettings: null
-    property var sessionSettings: null
     property var serviceAdministration: null
-
+    property bool removedPending: false
+    title: i18nc("@title:window", "Who Can Connect")
     function editAlias(route, alias, owner) {
-        aliasDialog.route = route;
-        aliasDialog.existing = alias !== "";
-        aliasName.text = alias;
-        ownerName.text = owner;
-        aliasPassword.text = "";
-        aliasDialog.open();
+        aliasDialog.route = route; aliasDialog.existing = alias !== ""; aliasDialog.originalOwner = owner;
+        aliasName.text = alias; ownerName.text = owner; aliasPassword.text = ""; aliasDialog.open();
     }
-
+    Connections { target: root.administration; function onChanged() { if (!root.administration.modified) root.removedPending = false; } }
     ColumnLayout {
+      ColumnLayout {
+        Layout.fillWidth: true
+        Layout.maximumWidth: Kirigami.Units.gridUnit * 38
+        Layout.alignment: Qt.AlignLeft
         spacing: Kirigami.Units.largeSpacing
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: i18nc("@info", "Choose who can connect. Loading and saving require administrator authentication.")
-        }
+        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Permissions for both services. Loading and saving require administrator authorization. Save policy changes, then restart both services.") }
+        Kirigami.InlineMessage { objectName: "brokerAuthenticationError"; Layout.fillWidth: true; visible: root.administration.error !== ""; type: Kirigami.MessageType.Error; text: root.administration.error }
         Kirigami.InlineMessage {
-            objectName: "brokerAuthenticationError"
-            Layout.fillWidth: true
-            visible: root.administration.error !== ""
-            type: Kirigami.MessageType.Error
-            text: root.administration.error
+            objectName: "brokerAuthenticationRestart"; Layout.fillWidth: true; visible: root.administration.lastSaveRequiresRestart; type: Kirigami.MessageType.Information
+            text: i18nc("@info", "Access policy saved. Restart Console and Virtual to load it. Saving does not change existing connections.")
+            actions: [
+                Kirigami.Action { text: i18nc("@action", "Restart Console…"); enabled: root.serviceAdministration && root.serviceAdministration.services[0].canRestart; onTriggered: { restartConfirmation.route = "console"; restartConfirmation.open(); } },
+                Kirigami.Action { text: i18nc("@action", "Restart Virtual…"); enabled: root.serviceAdministration && root.serviceAdministration.services[1].canRestart; onTriggered: { restartConfirmation.route = "virtual"; restartConfirmation.open(); } }
+            ]
         }
-        Kirigami.InlineMessage {
-            objectName: "brokerAuthenticationRestart"
-            Layout.fillWidth: true
-            visible: root.administration.lastSaveRequiresRestart
-            type: Kirigami.MessageType.Information
-            text: i18nc("@info", "Sign-in policy saved. Restart both Console and Virtual services to load it. Existing connections are not changed by saving.")
-        }
-        QQC2.Button {
-            objectName: "unlockBrokerAuthentication"
-            text: i18nc("@action:button", "Load Administrator Settings…")
-            icon.name: "document-edit"
-            visible: !root.administration.loaded
-            enabled: !root.administration.busy
-            onClicked: root.administration.reload()
-        }
-        Kirigami.FormLayout {
-            Layout.fillWidth: true
-            visible: root.consoleSettings !== null && root.virtualSettings !== null
-            Item { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Certificates") }
-            Repeater {
-                model: ["console", "virtual"]
-                delegate: RowLayout {
-                    id: certificateRow
-                    required property string modelData
-                    readonly property var host: modelData === "console" ? root.consoleSettings : root.virtualSettings
-                    Kirigami.FormData.label: modelData === "console" ? i18nc("@label", "Console:") : i18nc("@label", "Virtual:")
-                    QQC2.Label {
-                        text: certificateRow.host && certificateRow.host.loaded ? (certificateRow.host.metadata.tls || {}).state || i18nc("@info", "Unavailable") : i18nc("@info", "Not loaded")
-                    }
-                    QQC2.Button {
-                        objectName: certificateRow.modelData + "CertificateDetails"
-                        text: i18nc("@action:button", "Details…")
-                        onClicked: { certificateDialog.scope = certificateRow.modelData === "console" ? 0 : 1; certificateDialog.open(); }
-                    }
-                }
-            }
-        }
+        QQC2.Button { objectName: "unlockBrokerAuthentication"; visible: !root.administration.loaded; text: i18nc("@action:button", "Load Administrator Settings…"); icon.name: "document-edit"; enabled: !root.administration.busy; onClicked: root.administration.reload() }
+        Kirigami.InlineMessage { visible: root.removedPending; Layout.fillWidth: true; text: i18nc("@info", "Remote login removed from this draft. Save the access policy to apply it."); actions: Kirigami.Action { text: i18nc("@action", "Undo Remove"); onTriggered: { root.administration.undoRemoveAlias(); root.removedPending = false; } } }
         Repeater {
             model: ["console", "virtual"]
             delegate: ColumnLayout {
@@ -91,24 +51,27 @@ KCM.SimpleKCM {
                     text: section.modelData === "console" ? i18nc("@title:group", "Console") : i18nc("@title:group", "Virtual")
                 }
                 Kirigami.FormLayout {
+            wideMode: width >= Kirigami.Units.gridUnit * 32;
+            Layout.alignment: Qt.AlignLeft
                     Layout.fillWidth: true
                     QQC2.ComboBox {
                         objectName: section.modelData + "PamMode"
                         Kirigami.FormData.label: i18nc("@label", "System accounts:")
                         implicitContentWidthPolicy: QQC2.ComboBox.WidestText
-                        Layout.minimumWidth: Kirigami.Units.gridUnit * 16
+                        Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24
                         textRole: "text"
                         valueRole: "value"
                         model: [
-                            {text: i18nc("@item:inlistbox", "Any non-root system account"), value: "any"},
-                            {text: i18nc("@item:inlistbox", "Only listed system accounts"), value: "allow-list"},
-                            {text: i18nc("@item:inlistbox", "No system accounts"), value: "disabled"}
+                            {text: i18nc("@item:inlistbox", "All eligible accounts"), value: "any"},
+                            {text: i18nc("@item:inlistbox", "Selected accounts"), value: "allow-list"},
+                            {text: i18nc("@item:inlistbox", "Disabled"), value: "disabled"}
                         ]
                         currentIndex: section.pam.mode === "any" ? 0 : section.pam.mode === "allow-list" ? 1 : 2
                         onActivated: root.administration.setPam(section.modelData, currentValue,
                             currentValue === "allow-list" ? section.pam.accounts : [])
                     }
                     QQC2.TextField {
+                        Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24
                         objectName: section.modelData + "PamAccounts"
                         Kirigami.FormData.label: i18nc("@label", "Allowed accounts:")
                         visible: section.pam.mode === "allow-list"
@@ -138,7 +101,7 @@ KCM.SimpleKCM {
                         contentItem: RowLayout {
                             QQC2.Label { Layout.fillWidth: true; text: i18nc("@info %1 remote login %2 desktop owner", "%1 → %2", account.modelData.alias, account.modelData.owner); elide: Text.ElideRight }
                             QQC2.ToolButton { text: i18nc("@action:button", "Edit…"); onClicked: root.editAlias(section.modelData, account.modelData.alias, account.modelData.owner) }
-                            QQC2.ToolButton { text: i18nc("@action:button", "Remove"); onClicked: root.administration.removeAlias(section.modelData, account.modelData.alias) }
+                            QQC2.ToolButton { text: i18nc("@action:button", "Remove"); onClicked: { if (root.administration.removeAlias(section.modelData, account.modelData.alias)) root.removedPending = true; } }
                         }
                     }
                 }
@@ -156,98 +119,61 @@ KCM.SimpleKCM {
                 Kirigami.Separator { Layout.fillWidth: true }
             }
         }
+        QQC2.Label { visible: root.administration.modified; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Unsaved changes · access policy only."); color: Kirigami.Theme.disabledTextColor }
+    }
     }
     footer: QQC2.ToolBar {
         contentItem: RowLayout {
-            QQC2.ToolButton {
-                objectName: "loadBrokerAuthentication"
-                icon.name: "view-refresh"; text: i18nc("@action:button", "Reload Policy…")
-                display: QQC2.AbstractButton.IconOnly
-                QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered
-                enabled: !root.administration.busy
-                onClicked: { if (root.administration.modified) discardDialog.open(); else root.administration.reload(); }
-            }
+            QQC2.Button { objectName: "discardBrokerAuthentication"; text: i18nc("@action:button", "Revert Changes"); enabled: root.administration.modified && !root.administration.busy; onClicked: root.administration.discard() }
+            QQC2.ToolButton { objectName: "loadBrokerAuthentication"; icon.name: "view-refresh"; text: i18nc("@action:button", "Reload Policy…"); display: QQC2.AbstractButton.IconOnly; QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered; enabled: !root.administration.busy; onClicked: { if (root.administration.modified) reloadConfirmation.open(); else root.administration.reload(); } }
             Item { Layout.fillWidth: true }
-            QQC2.BusyIndicator { running: root.administration.busy; Layout.preferredWidth: Kirigami.Units.gridUnit; Layout.preferredHeight: Kirigami.Units.gridUnit; opacity: running ? 1 : 0 }
-            QQC2.Button { objectName: "saveBrokerAuthentication"; text: i18nc("@action:button", "Save Access Policy…"); icon.name: "document-save"; enabled: root.administration.loaded && root.administration.modified && !root.administration.busy; onClicked: root.administration.save() }
+            QQC2.BusyIndicator { running: root.administration.busy; visible: running; Layout.preferredWidth: Kirigami.Units.gridUnit; Layout.preferredHeight: Kirigami.Units.gridUnit }
+            QQC2.Button { objectName: "saveBrokerAuthentication"; text: i18nc("@action:button", "Save Access Policy…"); enabled: root.administration.loaded && root.administration.modified && !root.administration.busy; onClicked: root.administration.save() }
         }
     }
-    QQC2.Dialog {
-        id: certificateDialog
-        objectName: "certificateDetailsDialog"
-        parent: root
-        modal: true
-        property int scope: 0
-        title: scope === 0 ? i18nc("@title:window", "Console Certificate") : i18nc("@title:window", "Virtual Certificate")
-        width: Math.min(root.width - 12, Kirigami.Units.gridUnit * 42)
-        height: Math.min(root.height - 12, Kirigami.Units.gridUnit * 34)
-        x: Math.max(0, (root.width - width) / 2); y: Math.max(0, (root.height - height) / 2)
-        standardButtons: QQC2.Dialog.Close
-        contentItem: Loader {
-            id: certificateLoader
-            active: root.consoleSettings !== null && root.virtualSettings !== null && root.sessionSettings !== null
-            sourceComponent: Component {
-            BrokerHostsPage {
-            certificateOnly: true
-            fixedScope: certificateDialog.scope
-            consoleSettings: root.consoleSettings
-            virtualSettings: root.virtualSettings
-            sessionSettings: root.sessionSettings
-            }
-            }
-        }
+    Kirigami.PromptDialog {
+        parent: root.QQC2.Overlay.overlay
+        popupType: QQC2.Popup.Item
+        id: reloadConfirmation
+        title: i18nc("@title:window", "Reload Access Policy?"); subtitle: i18nc("@info", "Discard unsaved access-policy changes and reload saved values?")
+        standardButtons: Kirigami.Dialog.Cancel
+        customFooterActions: Kirigami.Action { text: i18nc("@action:button", "Discard and Reload"); onTriggered: { reloadConfirmation.close(); root.administration.reload(); } }
     }
-    QQC2.Dialog {
-        id: discardDialog
-        parent: root
-        width: Math.min(root.width - 24, Kirigami.Units.gridUnit * 25)
-        x: Math.max(0, (root.width - width) / 2)
-        y: Math.max(0, (root.height - height) / 2)
-        title: i18nc("@title:window", "Discard Sign-In Edits?")
-        modal: true
-        standardButtons: QQC2.Dialog.Discard | QQC2.Dialog.Cancel
-        onDiscarded: root.administration.reload()
-        contentItem: QQC2.Label { text: i18nc("@info", "Reloading discards pending sign-in changes."); wrapMode: Text.Wrap }
+    Kirigami.PromptDialog {
+        parent: root.QQC2.Overlay.overlay
+        popupType: QQC2.Popup.Item
+        id: restartConfirmation; property string route: "console"
+        title: route === "console" ? i18nc("@title:window", "Restart Console?") : i18nc("@title:window", "Restart Virtual?")
+        subtitle: i18nc("@info", "Remote clients using this service will disconnect. The other service is unaffected.")
+        standardButtons: Kirigami.Dialog.Cancel
+        customFooterActions: Kirigami.Action { text: i18nc("@action:button", "Restart"); onTriggered: { restartConfirmation.close(); root.serviceAdministration.perform(restartConfirmation.route, "restart"); } }
     }
-    QQC2.Dialog {
-        id: aliasDialog
-        parent: root
-        width: Math.min(root.width - 24, Kirigami.Units.gridUnit * 25)
-        x: Math.max(0, (root.width - width) / 2)
-        y: Math.max(0, (root.height - height) / 2)
-        objectName: "brokerAliasDialog"
+    Kirigami.Dialog {
+        id: aliasDialog; objectName: "brokerAliasDialog"
         property string route: "console"
         property bool existing: false
+        property string originalOwner: ""
+        readonly property bool passwordRequired: !existing || ownerName.text !== originalOwner
         title: existing ? i18nc("@title:window", "Edit Remote Login") : i18nc("@title:window", "Add Remote Login")
-        modal: true
+        preferredWidth: Kirigami.Units.gridUnit * 28
+        standardButtons: Kirigami.Dialog.Cancel
         onClosed: aliasPassword.text = ""
-        contentItem: Kirigami.FormLayout {
-            QQC2.TextField { id: aliasName; objectName: "brokerAliasName"; Kirigami.FormData.label: i18nc("@label", "Remote login:"); readOnly: aliasDialog.existing }
-            QQC2.TextField { id: ownerName; objectName: "brokerAliasOwner"; Kirigami.FormData.label: i18nc("@label", "System account:") }
-            QQC2.TextField { id: aliasPassword; objectName: "brokerAliasPassword"; Kirigami.FormData.label: i18nc("@label", "New password:"); echoMode: QQC2.TextField.Password }
-            QQC2.Label {
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                visible: aliasDialog.existing
-                text: i18nc("@info", "Leave blank to keep the password. Changing the account requires a new password.")
-            }
-            QQC2.Label { text: root.administration.error; visible: text !== ""; wrapMode: Text.Wrap }
+        Kirigami.FormLayout {
+            wideMode: width >= Kirigami.Units.gridUnit * 32;
+            Layout.alignment: Qt.AlignLeft
+            QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Stage this login in the access policy. Save that policy separately to apply it.") }
+            QQC2.TextField { id: aliasName; objectName: "brokerAliasName"; Kirigami.FormData.label: i18nc("@label", "Remote login:"); readOnly: aliasDialog.existing; maximumLength: 256; Layout.fillWidth: true }
+            QQC2.TextField { id: ownerName; objectName: "brokerAliasOwner"; Kirigami.FormData.label: i18nc("@label", "Desktop account:"); maximumLength: 256; Layout.fillWidth: true }
+            QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Enter an existing system login name. The server verifies account eligibility when saving."); color: Kirigami.Theme.disabledTextColor }
+            Kirigami.PasswordField { id: aliasPassword; objectName: "brokerAliasPassword"; Kirigami.FormData.label: i18nc("@label", "New password:"); maximumLength: 4096; Layout.fillWidth: true }
+            QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: aliasDialog.passwordRequired ? i18nc("@info", "A new password is required for a new login or changed desktop account.") : i18nc("@info", "Leave blank to keep the password. Stored passwords are never displayed.") }
+            QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; visible: root.administration.error !== ""; text: root.administration.error }
         }
-        footer: QQC2.DialogButtonBox {
-            QQC2.Button {
-                objectName: "stageBrokerAlias"
-                text: i18nc("@action:button", "Keep Changes")
-                enabled: aliasName.text !== "" && ownerName.text !== ""
-                QQC2.DialogButtonBox.buttonRole: QQC2.DialogButtonBox.ActionRole
-                onClicked: {
-                    if (root.administration.setAlias(aliasDialog.route, aliasName.text, ownerName.text, aliasPassword.text)) aliasDialog.close();
-                }
-            }
-            QQC2.Button {
-                text: i18nc("@action:button", "Cancel")
-                QQC2.DialogButtonBox.buttonRole: QQC2.DialogButtonBox.RejectRole
-                onClicked: aliasDialog.close()
-            }
+        customFooterActions: Kirigami.Action {
+            objectName: "stageBrokerAlias"
+            text: aliasDialog.existing ? i18nc("@action", "Update Policy") : i18nc("@action", "Add to Policy")
+            enabled: aliasName.text.trim() !== "" && ownerName.text.trim() !== "" && (!aliasDialog.passwordRequired || aliasPassword.text !== "") && !root.administration.busy
+            onTriggered: if (root.administration.setAlias(aliasDialog.route, aliasName.text.trim(), ownerName.text.trim(), aliasPassword.text)) aliasDialog.close()
         }
     }
 }

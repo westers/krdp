@@ -28,6 +28,8 @@ class BrokerHostSettings : public QObject {
     Q_PROPERTY(bool applicationRequired READ applicationRequired NOTIFY changed)
     Q_PROPERTY(bool outcomeUnknown READ outcomeUnknown NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
+    Q_PROPERTY(QObject *certificateDraft READ certificateDraft CONSTANT)
+    Q_PROPERTY(bool canStageCertificate READ canStageCertificate NOTIFY changed)
 public:
     using Scope = KRdp::BrokerHostSettings::Scope;
     explicit BrokerHostSettings(Scope scope, QObject *parent = nullptr);
@@ -51,6 +53,11 @@ public:
     bool applicationRequired() const { return m_applicationRequired; }
     bool outcomeUnknown() const { return m_outcomeUnknown; }
     QString error() const;
+    QObject *certificateDraft();
+    bool canStageCertificate() const;
+    Q_INVOKABLE bool beginCertificateEdit();
+    Q_INVOKABLE bool stageCertificateEdit();
+    Q_INVOKABLE void cancelCertificateEdit();
     Q_INVOKABLE bool reload();
     Q_INVOKABLE bool inspectRuntime();
     Q_INVOKABLE bool save();
@@ -80,4 +87,6 @@ private:
     QByteArray m_certificate, m_key;
     QString m_tlsMode = QStringLiteral("keep"), m_error;
     bool m_applicationRequired = false, m_outcomeUnknown = false;
+    BrokerHostSettings *m_certificateDraft = nullptr;
+    bool m_draftOnly = false;
 };

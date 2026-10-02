@@ -143,6 +143,61 @@ QString BrokerHostSettings::validationError() const
 }
 QString BrokerHostSettings::error() const { return !m_error.isEmpty() ? m_error : validationError(); }
 bool BrokerHostSettings::canSave() const { return modified() && !busy() && !m_outcomeUnknown && validationError().isEmpty(); }
+QObject *BrokerHostSettings::certificateDraft()
+{
+    if (m_draftOnly || m_scope == Scope::VirtualSession) return nullptr;
+    if (!m_certificateDraft) {
+        m_certificateDraft = new BrokerHostSettings(m_scope, m_program, m_arguments, m_timeoutMs, this);
+        m_certificateDraft->m_draftOnly = true;
+    }
+    return m_certificateDraft;
+}
+bool BrokerHostSettings::canStageCertificate() const
+{
+    return m_draftOnly && loaded() && validationError().isEmpty();
+}
+bool BrokerHostSettings::beginCertificateEdit()
+{
+    if (!loaded() || busy() || m_outcomeUnknown || !certificateDraft()) return false;
+    auto *draft = m_certificateDraft;
+    draft->clearImport();
+    draft->m_snapshot = m_snapshot;
+    draft->m_pending.clear();
+    for (const auto &key : {u"Certificate"_s, u"CertificateKey"_s})
+        if (m_pending.contains(key)) draft->m_pending[key] = m_pending[key];
+    draft->m_tlsMode = m_tlsMode;
+    draft->m_certificate = m_certificate; draft->m_key = m_key;
+    draft->m_importMetadata = m_importMetadata;
+    draft->m_error.clear();
+    Q_EMIT draft->changed();
+    return true;
+}
+bool BrokerHostSettings::stageCertificateEdit()
+{
+    auto *draft = m_certificateDraft;
+    if (busy() || m_outcomeUnknown || !draft || !draft->canStageCertificate()) return false;
+    if (draft->m_snapshot[u"revision"_s] != m_snapshot[u"revision"_s])
+        return draft->reject(i18nc("@info", "Host settings changed. Cancel and reopen the certificate editor before staging these changes."));
+    for (const auto &key : {u"Certificate"_s, u"CertificateKey"_s}) {
+        m_pending.remove(key);
+        if (draft->m_pending.contains(key)) m_pending[key] = draft->m_pending[key];
+    }
+    clearImport();
+    m_tlsMode = draft->m_tlsMode;
+    m_certificate = draft->m_certificate; m_key = draft->m_key;
+    m_importMetadata = draft->m_importMetadata;
+    cancelCertificateEdit();
+    m_error.clear(); Q_EMIT changed();
+    return true;
+}
+void BrokerHostSettings::cancelCertificateEdit()
+{
+    if (!m_certificateDraft) return;
+    m_certificateDraft->clearImport();
+    m_certificateDraft->m_snapshot = {}; m_certificateDraft->m_pending.clear();
+    m_certificateDraft->m_tlsMode = u"keep"_s; m_certificateDraft->m_error.clear();
+    Q_EMIT m_certificateDraft->changed();
+}
 bool BrokerHostSettings::setValue(const QString &key, const QString &value)
 {
     if (!loaded() || busy() || !Host::keys(m_scope).contains(key) || value.size() > Host::MaximumValue || value.contains(QChar::Null)
@@ -194,7 +249,9 @@ void BrokerHostSettings::clearTlsImport()
 void BrokerHostSettings::defaults()
 {
     if (!loaded() || busy()) return;
-    m_pending.clear(); clearImport(); m_tlsMode = m_scope == Scope::VirtualSession ? u"keep"_s : u"standard"_s;
+    // Ordinary defaults do not change certificates or a staged private import.
+    for (const auto &key : m_pending.keys())
+        if (key != u"Certificate" && key != u"CertificateKey") m_pending.remove(key);
     m_error.clear(); Q_EMIT changed();
 }
 void BrokerHostSettings::discard()
@@ -226,7 +283,8 @@ bool BrokerHostSettings::save()
 }
 bool BrokerHostSettings::start(QJsonObject request, bool saving)
 {
-    if (busy()) return false;
+    // The local certificate editor can validate/stage, never invoke helpers.
+    if (busy() || m_draftOnly) return false;
     auto input = std::make_shared<PrivateBuffer>(QJsonDocument(request).toJson(QJsonDocument::Compact));
     if (input->bytes.size() > Admin::MaximumRequestBytes) return reject(i18nc("@info", "Host settings request is too large."));
     auto *process = new QProcess(this); m_process = process; m_error.clear();

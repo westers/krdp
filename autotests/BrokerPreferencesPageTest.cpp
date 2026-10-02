@@ -44,17 +44,23 @@ private Q_SLOTS:
             {u"MonitorMode"_s,u"specific"_s},{u"MonitorIndex"_s,u"2"_s},{u"VirtualMonitorPolicy"_s,u"extend"_s},{u"VirtualMonitorLayout"_s,u"physical"_s},
             {u"VirtualMonitorFallbackSize"_s,u"2560x1440"_s},{u"WakeDisplayOnConnect"_s,u"false"_s},{u"StandardClientMedia"_s,u"false"_s},{u"VirtualStockClientPolicy"_s,u"refuse"_s}};
         for(const auto &definition:preferences.definitions()) {
-            const auto row=definition.toMap(); const auto key=row[u"key"_s].toString(); auto *control=item(u"preference_"_s+key); QVERIFY2(control,qPrintable(key));
+            const auto row=definition.toMap(); const auto key=row[u"key"_s].toString(); auto *control=item(key==u"VirtualMonitorFallbackSize" ? u"inherit_"_s+key : u"preference_"_s+key); QVERIFY2(control,qPrintable(key));
             if(preferences.lockedKeys().contains(key)) continue;
             const auto choices=row[u"choices"_s].toList();
-            if(control->metaObject()->indexOfProperty("checkState")>=0) {
-                QVERIFY(control->setProperty("checkState",int(desired[key].toString()==u"true"_s?Qt::Checked:Qt::Unchecked)));
-                QVERIFY(QMetaObject::invokeMethod(control,"clicked"));
+            if (key == u"VirtualMonitorFallbackSize") {
+                QVERIFY(item(u"inherit_"_s+key)->setProperty("currentIndex",1));
+                QVERIFY(QMetaObject::invokeMethod(item(u"inherit_"_s+key),"activated",Q_ARG(int,1)));
+                for (const auto &dimension : {QString(u"Width"_s), QString(u"Height"_s)}) {
+                    auto *spin=item(u"preference_Fallback"_s+dimension); QVERIFY(spin);
+                    QVERIFY(spin->setProperty("value",dimension==u"Width" ? 2560 : 1440));
+                    QVERIFY(QMetaObject::invokeMethod(spin,"valueModified"));
+                }
             } else if(control->metaObject()->indexOfProperty("from")>=0) {
+                auto *mode=item(u"inherit_"_s+key); QVERIFY(mode);
+                QVERIFY(mode->setProperty("currentIndex",1)); QVERIFY(QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,1)));
                 QVERIFY(control->setProperty("value",desired[key].toInt()));
                 QVERIFY(QMetaObject::invokeMethod(control,"valueModified"));
-            } else if(choices.isEmpty()) { QVERIFY(control->setProperty("text",desired[key].toString())); QVERIFY(QMetaObject::invokeMethod(control,"textEdited")); }
-            else {
+            } else {
                 int index=-1; for(int i=0;i<choices.size();++i) if(choices[i].toMap()[u"value"_s]==desired[key]) index=i;
                 QVERIFY(index>=0); QVERIFY(control->setProperty("currentIndex",index)); QVERIFY(QMetaObject::invokeMethod(control,"activated",Q_ARG(int,index)));
             }
@@ -79,12 +85,12 @@ private Q_SLOTS:
         window.resize(640,700); page->setSize(window.size()); QTest::qWait(200);
         auto *content=flickable->property("contentItem").value<QQuickItem *>(); QVERIFY(content);
         for(const auto &key:BrokerUserSettings::preferenceKeys()) {
-            auto *control=qobject_cast<QQuickItem *>(item(u"preference_"_s+key)); QVERIFY(control);
+            auto *control=qobject_cast<QQuickItem *>(item(key==u"VirtualMonitorFallbackSize" ? u"inherit_"_s+key : u"preference_"_s+key)); QVERIFY(control);
             const auto bounds=control->mapRectToItem(content,QRectF(0,0,control->width(),control->height()));
             QVERIFY2(bounds.left()>=-0.5 && bounds.right()<=flickable->width()+0.5,qPrintable(key+u" needs horizontal scrolling at width640"_s));
         }
         QVERIFY(QMetaObject::invokeMethod(item(u"defaultBrokerPreferences"_s),"clicked")); QCOMPARE(preferences.values(),QVariantMap({{u"Av1Tiles"_s,u"8"_s}}));
-        QTRY_VERIFY(item(u"inherit_Quality"_s)->property("checked").toBool()); QVERIFY(QMetaObject::invokeMethod(item(u"saveBrokerPreferences"_s),"clicked"));
+        QTRY_VERIFY(item(u"inherit_Quality"_s)->property("currentIndex").toInt()==0); QVERIFY(QMetaObject::invokeMethod(item(u"saveBrokerPreferences"_s),"clicked"));
         QVERIFY(!BrokerUserSettings::parse(read(path)).preferences.quality); QVERIFY(read(path).contains("Certificate=/root/fixture.pem\n"));
         QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s))); page->setParentItem(nullptr);
     }
@@ -100,9 +106,10 @@ private Q_SLOTS:
         QVERIFY(QMetaObject::invokeMethod(item(u"loadBrokerPreferences"_s),"clicked")); QTRY_VERIFY(item(u"preference_Quality"_s));
         QVERIFY(preferences.setValue(u"Quality"_s,u"88"_s)); const QByteArray changed("[General]\nQuality=51\n# external\n"); write(path,changed);
         QVERIFY(QMetaObject::invokeMethod(item(u"saveBrokerPreferences"_s),"clicked")); QCOMPARE(read(path),changed); QVERIFY(preferences.error().contains(u"changed"_s));
-        QVERIFY(QMetaObject::invokeMethod(item(u"loadBrokerPreferences"_s),"clicked")); auto *dialog=item(u"discardBrokerPreferences"_s); QVERIFY(dialog);
+        QVERIFY(QMetaObject::invokeMethod(item(u"loadBrokerPreferences"_s),"clicked")); auto *dialog=item(u"reloadBrokerPreferences"_s); QVERIFY(dialog);
         QTRY_VERIFY(dialog->property("visible").toBool()); QVERIFY(QMetaObject::invokeMethod(dialog,"reject")); QCOMPARE(preferences.values()[u"Quality"_s].toString(),u"88"_s);
-        QVERIFY(QMetaObject::invokeMethod(item(u"loadBrokerPreferences"_s),"clicked")); QVERIFY(QMetaObject::invokeMethod(dialog,"accept"));
+        QTest::qWait(300); // Wait for the native modal exit before reopening it.
+        QVERIFY(QMetaObject::invokeMethod(item(u"loadBrokerPreferences"_s),"clicked")); QVERIFY(QMetaObject::invokeMethod(item(u"reloadPreferenceAccept"_s),"triggered"));
         QCOMPARE(preferences.values()[u"Quality"_s].toString(),u"51"_s); QVERIFY(!preferences.modified()); page->setParentItem(nullptr);
     }
 };

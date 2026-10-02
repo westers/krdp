@@ -27,8 +27,8 @@ parent T-task being complete. New test quantity alone does not count as delivery
 
 | Area | Already done | Still missing |
 |---|---|---|
-| Delivered client | 0.6.5 / `82fe55e` Hal/Buzz/Sol, debug actions OFF; 0.6.3 / `2df38a7` Ace/Cray/Marvin | Remaining N05 monitor acceptance and N06 fleet rollout/tag |
-| Delivered server | `ec5e252` Sol, `2828a7c` Hal/Buzz, wire 11, private KPipeWire `9d6b08c`; `4b308bd` other hosts, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
+| Delivered client | 0.6.5 / `82fe55e` Hal/Buzz/Sol, debug actions OFF; 0.6.5 / `82fe55e` Ace; 0.6.3 / `2df38a7` Cray/Marvin | Remaining N05 monitor acceptance and N06 fleet rollout/tag |
+| Delivered server | `ec5e252` Sol, `2828a7c` Hal/Buzz, wire 11, private KPipeWire `9d6b08c`; `ec5e252` Ace; `4b308bd` Cray/Marvin, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
 | Settings/auth | Scoped authentication, services, 17 preferences, 25 host/session controls and runtime inspection implemented; `44726890` removes legacy KCM adapters | Real installed password/cancel/save/restart, effective runtime policy and live stock coexistence |
 | Monitors/video | Quiet Sol private worker single/two-screen HEVC creation/resize/Fit/decoded restoration passes; client UI and protocol evidence exists | Final packaged Console RDP, broader topology lifecycle; earlier loaded CUDA OOM/fallback is unresolved |
 | Discover/locker | Font-cache cause demonstrated and repaired on Sol; Steve confirms Console Discover password entry and ordinary lock/unlock work | Virtual/failure/restart matrix and original lock/output-release race; agent's original failing trace still missing |
@@ -207,6 +207,15 @@ Archive exact per-host rollback; do not touch Hal's old build or dependencies.
 dependencies and Sol/Buzz simulations pass. Fix only packaging failures; no install.
 
 ### N04 — Install and prove server rollback on Sol (T08/T27)
+
+**Approved redesign implementation, 2026-10-02:** Steve accepted the overview and
+KCM subpage design and requested full implementation. New organization, separate
+certificate draft, TLS-preserving ordinary defaults, incomplete Custom values,
+conditional displays, scoped Revert and alias Undo are implemented. Focused native
+fixtures run on Buzz; package and Sol delivery are recorded in the implementation
+summary after completion. Real administrator-prompt and visual acceptance remain
+manual; this does not close all T08/N04 gates. See [review](../design/2026-10-02-settings-implementation-review.md)
+and `~/dev/rdp/evidence/2026-10-01-settings-implementation/`.
 
 **Tabbed design and refresh correction delivered, 2026-10-01:** Steve requested
 implementing the proposed Qt layout and stopping refresh jitter. `ec5e2524` uses

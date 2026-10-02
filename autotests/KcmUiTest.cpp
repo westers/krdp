@@ -237,14 +237,13 @@ private Q_SLOTS:
     {
         QFETCH(QSize, window);
         auto *page = showPage(m_module->mainUi(), window);
-        page->setProperty("currentTab", 0);
-        checkReachable(page, {u"consoleHostEnabled"_s, u"consoleHostStatus"_s, u"consoleServiceDetails"_s, u"unlockHostSettings"_s});
-        for (int tab = 0; tab < 4; ++tab) {
-            QVERIFY(page->setProperty("currentTab", tab));
-            QCoreApplication::processEvents();
-            auto *tabs = findItem(page,u"settingsTabs"_s); QVERIFY(tabs && tabs->isVisible());
-            QVERIFY(tabs->width() <= page->width());
-            const auto buttonName = tab < 2 ? u"saveHostSettings"_s : tab == 2 ? u"saveBrokerAuthentication"_s : u"saveBrokerPreferences"_s;
+        page->setProperty("currentPage", 0);
+        checkReachable(page, {u"consoleHostEnabled"_s, u"consoleHostStatus"_s, u"configureConsole"_s, u"configureVirtual"_s, u"configureAccess"_s, u"configurePreferences"_s});
+        for (int tab = 1; tab <= 4; ++tab) {
+            QVERIFY(page->setProperty("currentPage", tab));
+            QTest::qWait(100); // Qt Quick polishes persistent page layouts after a resize.
+            auto *back = findItem(page,u"settingsBack"_s); QVERIFY(back && back->isVisible());
+            const auto buttonName = tab <= 2 ? u"saveHostSettings"_s : tab == 3 ? u"saveBrokerAuthentication"_s : u"saveBrokerPreferences"_s;
             // Find the visible footer; another tab's editor remains alive.
             const auto visibleFind = [&](auto &&self, QQuickItem *parent) -> QQuickItem * {
                 if (parent->objectName() == buttonName && parent->isVisible()) return parent;
@@ -255,7 +254,7 @@ private Q_SLOTS:
             const auto bounds=save->mapRectToItem(page,QRectF(0,0,save->width(),save->height()));
             QVERIFY2(bounds.left()>=-0.5 && bounds.right()<=page->width()+0.5 && bounds.bottom()<=page->height()+0.5,qPrintable(u"tab %1 footer %2 bounds (%3,%4)..(%5,%6) page %7x%8"_s.arg(tab).arg(buttonName).arg(bounds.left()).arg(bounds.top()).arg(bounds.right()).arg(bounds.bottom()).arg(page->width()).arg(page->height())));
         }
-        page->setProperty("currentTab", 0);
+        page->setProperty("currentPage", 0);
         const auto warnings = takeMessages();
         QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
     }
@@ -266,14 +265,14 @@ private Q_SLOTS:
         QTest::addColumn<QString>("objectName");
         QTest::addColumn<QString>("title");
         QTest::addColumn<QStringList>("keyItems");
-        QTest::newRow("broker sign-in") << u"BrokerSignInPage.qml"_s << u"brokerSignInPage"_s << u"Console and Virtual Sign-In"_s
+        QTest::newRow("broker sign-in") << u"BrokerSignInPage.qml"_s << u"brokerSignInPage"_s << u"Who Can Connect"_s
                                        << QStringList{u"loadBrokerAuthentication"_s, u"saveBrokerAuthentication"_s};
         QTest::newRow("broker services") << u"BrokerServicesPage.qml"_s << u"brokerServicesPage"_s << u"Console and Virtual Services"_s
                                        << QStringList{u"refreshBrokerServices"_s};
-        QTest::newRow("broker preferences") << u"BrokerPreferencesPage.qml"_s << u"brokerPreferencesPage"_s << u"Your Console and Virtual Preferences"_s
+        QTest::newRow("broker preferences") << u"BrokerPreferencesPage.qml"_s << u"brokerPreferencesPage"_s << u"My Preferences"_s
                                           << QStringList{u"loadBrokerPreferences"_s,u"saveBrokerPreferences"_s,u"defaultBrokerPreferences"_s};
-        QTest::newRow("broker hosts") << u"BrokerHostsPage.qml"_s << u"brokerHostsPage"_s << u"Console and Virtual Host Settings"_s
-                                    << QStringList{u"hostScope"_s, u"loadHostSettings"_s, u"saveHostSettings"_s, u"defaultHostSettings"_s};
+        QTest::newRow("broker hosts") << u"BrokerHostsPage.qml"_s << u"brokerHostsPage"_s << u"Console Settings"_s
+                                    << QStringList{u"unlockHostSettings"_s, u"loadHostSettings"_s, u"saveHostSettings"_s, u"defaultHostSettings"_s};
 
     }
 
@@ -323,11 +322,11 @@ private Q_SLOTS:
     }
     void hostNavigationSelectsScope() {
         QFETCH(QString,route); QFETCH(int,index); auto *main=m_module->mainUi();
-        QVERIFY(main->setProperty("currentTab",index));
+        QVERIFY(main->setProperty("currentPage",index+1));
         auto *page=findItem(main,index==0?u"consoleSettingsPage"_s:u"virtualSettingsPage"_s); QVERIFY(page);
         QCOMPARE(page->property("fixedScope").toInt(),index);
         auto *host=page->property("host").value<QObject *>(); QVERIFY(host); QCOMPARE(host->property("scope").toString(),route);
-        QVERIFY(!host->property("loaded").toBool()); main->setProperty("currentTab",0);
+        QVERIFY(!host->property("loaded").toBool()); main->setProperty("currentPage",1);
         const auto warnings=takeMessages(); QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
     }
     void phoneEntryUsesTheSameScopedPage() {

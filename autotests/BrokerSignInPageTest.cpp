@@ -46,7 +46,7 @@ private Q_SLOTS:
         QVERIFY(item(u"brokerAliasOwner"_s)->setProperty("text", u"westers"_s));
         QVERIFY(item(u"brokerAliasPassword"_s)->setProperty("text", u"fixture-only-password"_s));
         QCOMPARE(item(u"brokerAliasPassword"_s)->property("echoMode").toInt(), 2); // TextInput.Password
-        QVERIFY(QMetaObject::invokeMethod(item(u"stageBrokerAlias"_s), "clicked"));
+        QVERIFY(QMetaObject::invokeMethod(item(u"stageBrokerAlias"_s), "triggered"));
         QTRY_VERIFY(!dialog->property("visible").toBool()); QTRY_COMPARE(item(u"brokerAliasPassword"_s)->property("text").toString(), QString());
         QVERIFY(administration.modified()); QVERIFY(!QJsonDocument::fromVariant(administration.policy()).toJson().contains("password"));
         QFile mode(directory.filePath(u"mode"_s)); QVERIFY(mode.open(QIODevice::WriteOnly)); mode.write("cancel"); mode.close();

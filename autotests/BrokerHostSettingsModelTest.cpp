@@ -46,8 +46,9 @@ private Q_SLOTS:
         QVERIFY(!session.setValue(u"Port"_s, u"3389"_s)); QVERIFY(!session.chooseTls(u"import"_s));
         QVERIFY(console.setValue(u"Quality"_s, u"101"_s)); QVERIFY(console.modified()); QVERIFY(!console.canSave()); QVERIFY(!console.save());
         console.discard(); QVERIFY(!console.modified()); QCOMPARE(console.values()[u"Quality"_s].toString(), u"99"_s);
-        console.defaults(); QVERIFY(console.values().isEmpty()); QCOMPARE(console.tlsMode(), u"standard"_s);
-        QVERIFY(console.save()); QTRY_VERIFY(!console.busy()); QVERIFY(console.values().isEmpty());
+        console.defaults(); QCOMPARE(console.values().size(), 2); QCOMPARE(console.tlsMode(), u"keep"_s);
+        QCOMPARE(console.values()[u"Certificate"_s].toString(), u"/etc/farside/custom.crt"_s);
+        QVERIFY(console.save()); QTRY_VERIFY(!console.busy()); QCOMPARE(console.values().size(), 2);
         QCOMPARE(virtualHost.values()[u"Quality"_s].toString(), u"99"_s); // independent drafts/files
         QVERIFY(session.setValue(u"RenderPci"_s, u""_s)); QVERIFY(session.save()); QTRY_VERIFY(!session.busy());
         QCOMPARE(session.values()[u"RenderPci"_s].toString(), QString());
@@ -102,6 +103,29 @@ private Q_SLOTS:
         QFile oversized(directory.filePath(u"large"_s)); QVERIFY(oversized.open(QIODevice::WriteOnly)); oversized.write(QByteArray(65537, 'x')); oversized.close();
         QVERIFY(!settings.importTls(QUrl::fromLocalFile(oversized.fileName()), QUrl::fromLocalFile(paths.key)));
         QVERIFY(settings.importMetadata().isEmpty());
+    }
+    void certificateDraftIsolationAndDefaultsPreserveImport() {
+        QTemporaryDir directory;
+        BrokerHostSettings host(Scope::Console, u"/usr/bin/python3"_s, arguments(directory), 3000);
+        QVERIFY(host.reload()); QTRY_VERIFY(!host.busy());
+        QVERIFY(host.setValue(u"Port"_s, u"3401"_s)); const auto before = host.values();
+        QVERIFY(host.beginCertificateEdit());
+        auto *draft = qobject_cast<BrokerHostSettings *>(host.certificateDraft()); QVERIFY(draft);
+        QVERIFY(draft->chooseTls(u"standard"_s)); QCOMPARE(host.values(), before); QCOMPARE(host.tlsMode(), u"keep"_s);
+        QVERIFY(!draft->save()); QVERIFY(!draft->reload()); QVERIFY(!draft->inspectRuntime());
+        host.cancelCertificateEdit(); QCOMPARE(host.values(), before); QCOMPARE(host.tlsMode(), u"keep"_s);
+        QVERIFY(host.beginCertificateEdit()); QVERIFY(draft->chooseTls(u"import"_s)); QVERIFY(!draft->canStageCertificate());
+        KRdp::ServerCertificate::Paths paths{directory.filePath(u"fixture.crt"_s), directory.filePath(u"fixture.key"_s)};
+        QString error; QVERIFY(KRdp::ServerCertificate::generate(paths, u"fixture"_s, QDateTime::currentDateTimeUtc(), 10, &error));
+        QVERIFY(draft->importTls(QUrl::fromLocalFile(paths.certificate), QUrl::fromLocalFile(paths.key)));
+        QVERIFY(host.stageCertificateEdit()); QCOMPARE(host.tlsMode(), u"import"_s); QCOMPARE(host.values(), before);
+        const auto imported = host.importMetadata(); QVERIFY(!imported.isEmpty());
+        QVERIFY(host.beginCertificateEdit()); QVERIFY(draft->chooseTls(u"standard"_s)); host.cancelCertificateEdit();
+        QCOMPARE(host.tlsMode(), u"import"_s); QCOMPARE(host.importMetadata(), imported);
+        host.defaults(); QVERIFY(!host.values().contains(u"Port"_s)); QCOMPARE(host.tlsMode(), u"import"_s); QCOMPARE(host.importMetadata(), imported);
+        QVERIFY(host.canSave()); QVERIFY(host.save()); QTRY_VERIFY(!host.busy());
+        QVERIFY2(host.error().isEmpty(), qPrintable(host.error())); QVERIFY(QFile::exists(directory.filePath(u"import-seen"_s)));
+        QVERIFY(host.importMetadata().isEmpty());
     }
     void stderrIsDrainedAndMissingProgramIsSafe() {
         QTemporaryDir directory; mode(directory, "stderr");

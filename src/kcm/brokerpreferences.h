@@ -30,6 +30,7 @@ public:
     Q_INVOKABLE bool setValue(const QString &key, const QString &value);
     Q_INVOKABLE bool inherit(const QString &key);
     Q_INVOKABLE void defaults();
+    Q_INVOKABLE void discard();
     Q_INVOKABLE bool save();
 Q_SIGNALS:
     void changed();

@@ -94,9 +94,29 @@ bool BrokerAuthenticationSettings::removeAlias(const QString &name, const QStrin
     if (!editableRoute(name)) return false;
     auto route = m_pending.value(name).toObject(); auto aliases = route.value(u"credentials"_s).toArray();
     bool removed = false;
-    for (int i = aliases.size() - 1; i >= 0; --i) if (aliases[i].toObject().value(u"alias"_s).toString() == alias) { aliases.removeAt(i); removed = true; }
+    for (int i = aliases.size() - 1; i >= 0; --i) if (aliases[i].toObject().value(u"alias"_s).toString() == alias) {
+        m_removedAlias = aliases[i].toObject(); m_removedRoute = name;
+        aliases.removeAt(i); removed = true;
+    }
     if (!removed) return false;
     route.insert(u"credentials"_s, aliases); m_pending.insert(name, route); m_error.clear(); Q_EMIT changed(); return true;
+}
+void BrokerAuthenticationSettings::discard()
+{
+    if (!loaded() || busy()) return;
+    m_pending = m_snapshot; m_removedAlias = {}; m_removedRoute.clear();
+    m_error.clear(); Q_EMIT changed();
+}
+bool BrokerAuthenticationSettings::undoRemoveAlias()
+{
+    if (m_removedAlias.isEmpty() || !editableRoute(m_removedRoute)) return false;
+    auto route = m_pending[m_removedRoute].toObject(); auto aliases = route[u"credentials"_s].toArray();
+    for (const auto &entry : aliases)
+        if (entry.toObject()[u"alias"_s] == m_removedAlias[u"alias"_s]) return false;
+    if (aliases.size() >= 128) return false;
+    aliases.append(m_removedAlias); route[u"credentials"_s] = aliases;
+    m_pending[m_removedRoute] = route; m_removedAlias = {}; m_removedRoute.clear();
+    m_error.clear(); Q_EMIT changed(); return true;
 }
 
 bool BrokerAuthenticationSettings::reload() { return start({{u"version"_s, 1}, {u"operation"_s, u"read"_s}}, false); }
@@ -137,7 +157,7 @@ bool BrokerAuthenticationSettings::start(const QJsonObject &request, bool saving
         }
         const auto snapshot = value.value(u"snapshot"_s).toObject();
         if (!validSnapshot(snapshot) || (saving && !value.value(u"saved"_s).toBool())) { reject(u"Invalid policy snapshot; reload the policy"_s); return; }
-        m_snapshot = m_pending = snapshot; m_error = value.value(u"warning"_s).toString().left(256); Q_EMIT changed();
+        m_snapshot = m_pending = snapshot; m_removedAlias = {}; m_removedRoute.clear(); m_error = value.value(u"warning"_s).toString().left(256); Q_EMIT changed();
     });
     Q_EMIT changed(); process->start(); return true;
 }

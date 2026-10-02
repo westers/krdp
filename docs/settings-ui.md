@@ -1,64 +1,48 @@
 # Farside settings: KDE layout conventions
 
-## Fresh design proposal (2026-10-01)
+## Approved redesign implementation (2026-10-02)
 
-Steve requested reassessing all settings, options and dialogs from their user
-tasks. The [complete assessment and proposed organization](design/2026-10-01-farside-settings-ux.md)
-recommends an overview with native KCM subpages, rather than retaining the four
-tabs. It includes the full option map, host/account/access save scopes, local
-certificate editing, conditional displays, dialog behavior, and two visual
-sketches. [The source/QML review](design/2026-10-01-settings-qml-review.md)
-records the confirmed functional findings separately from scanner diagnostics.
+Steve approved the [complete design](design/2026-10-01-farside-settings-ux.md)
+and requested its implementation with the Qt/KDE skills. The native overview
+and persistent KCM subpages replace the earlier four tabs. The two SVG sketches
+are design references; the new populated native renders are implementation evidence.
 
-This is **not implemented or visually accepted**. The sections below document
-the current presentation and earlier brief. For the proposed redesign, the new
-document replaces their four-tab, shared certificate-dialog and tri-state
-checkbox recommendations. Retain the stable-refresh, persistent-draft, native
-KDE, scoped authorization and Hal guardrails. Do not implement or deploy another
-layout before Steve reviews the concrete proposal.
+## Layout and actions
 
-Steve requested restoring Claude's earlier KDE presentation on October 1, 2026.
-Use `e0ba4b77` as the visual precedent, retaining the current Console/Virtual
-models and administrator/account boundaries. Do not restore the obsolete
-per-user service controls or legacy configuration adapters.
+- Overview presents Console and Virtual service status, immediate connection and
+  boot switches, configuration and service details. Access and personal
+  preferences have separate routes. Saved wildcard bindings are described as
+  all interfaces and a port, never offered as a connectable address.
+- Console and Virtual configuration group Connection, Video, Sound and devices,
+  then Advanced. Virtual hardware grants have their own page and save scope.
+  Console display selection links to personal preferences.
+- Certificate changes use a dedicated local C++ draft. Cancel and Back discard
+  only that editor. Use Certificate Changes stages only TLS fields into the host
+  draft; saving and restarting remain explicit host actions. Ordinary Restore
+  Defaults preserves TLS paths, the TLS operation and any staged PEM import.
+- My Preferences keeps account inheritance explicit. Choosing Custom stages an
+  incomplete value until the user chooses a number; it does not fabricate zero
+  or a minimum. Fallback dimensions must both be supplied. Display-specific
+  fields appear only for the corresponding mode and retain hidden values.
+- Access separates Console and Virtual system accounts and remote logins.
+  Native dialogs stage alias edits; password fields clear when dismissed.
+  Removing a login is staged, with Undo. Save applies the access policy and
+  offers separate, confirmed service restarts.
+- Use native QQC2/Kirigami controls, theme fonts/colors, units, contextual
+  i18nc strings and bounded content columns. Multiple forms align through
+  persistent twinFormLayouts. Do not constrain a form's Layout.maximumWidth
+  to its own parent layout's current width: this creates a size negotiation
+  cycle and collapses sections. Sections use one shared desktop/narrow threshold.
+- Scoped saves and local Revert/Defaults remain in fixed footers. Reloading a
+  modified draft requires an explicit Discard and Reload action. Global KCM
+  Apply/Defaults do not authorize or repurpose system/account operations.
+- Camera prerequisites remain visible and distinguish saved setup from runtime
+  readiness. Device grants describe desktop namespace access, not GPU encoder
+  selection. Unsupported Virtual camera sharing is clearly explained.
 
-## Layout
-
-- Persistent Console, Virtual, Access and My Preferences tabs, using native
-  `QQC2.TabBar`/`StackLayout` inside `KCM.AbstractKCM`. Each content page uses
-  `KCM.SimpleKCM` and keeps its own scroll position and draft alive.
-- Console and Virtual show enable/status and known saved/inspected addresses;
-  they never present a staged endpoint as the address currently in use. Service
-  details offer startup, explicit restart/stop and manual status refresh without
-  loading administrator settings. Stopping/restarting confirms disconnection.
-- Common host video/device settings come first. Connection/encoding tuning is
-  under Advanced. Virtual has separate Connection settings and New desktop
-  defaults sections, with independent saves. Console display sharing belongs to
-  the account's My Preferences; Console links there explicitly.
-- Access contains remote-login permissions and certificate details dialogs.
-  Certificates use the existing per-host draft. Dialog saves are labelled Save
-  Console/Virtual Settings and explain that other pending host settings are
-  included. Certificate Standard Paths/Reset affect only TLS fields, preserving
-  other pending settings. Reload confirms discarding the entire host draft.
-- One `Kirigami.FormLayout` aligns each editor's labels. Section headings,
-  theme colors/fonts and Kirigami spacing are native. Long fingerprints/help
-  are bounded; small windows scroll the form while the footer remains visible.
-- Quality uses a slider and bounded editable `SpinBox`; ports, monitor indices
-  and AVC444 intervals also use bounded spin boxes, with units for intervals.
-  Commit numeric input on Enter/focus loss. Model resets/scope changes must update
-  the controls; opening/refreshing must never snap or change stored values.
-- Boolean fields use tri-state `CheckBox` controls: partial means inherited,
-  checked/unchecked means explicit On/Off. Host inheritance shows the unit
-  default; unknown inherited account numbers show a dash and Use host setting.
-  Other choices use `ComboBox`. Locked account fields remain disabled/preserved.
-- Scoped Save/Reset/Defaults actions sit in fixed footers. Save never restarts a
-  service. A pending restart notice offers the explicit, confirmed restart.
-  Administrator reads/saves remain explicit; opening tabs never invokes a helper
-  or silently reads account configuration. Existing global Apply is not repurposed.
-- Common fields have short labels. Contextual help is reserved for unfamiliar
-  options and locked settings. Per-field reset controls retain space while hidden
-  so changes cannot shift neighbouring inputs. Camera prerequisites/unavailability
-  stay visible; bridge configuration is not presented as a camera-sharing toggle.
+The implementation preserves the stable refresh behavior and explicit
+administrator authorization. Native administrator-prompt and user visual
+acceptance remain separate checks; fixture success does not claim those.
 
 ## Refresh and object lifetime
 
