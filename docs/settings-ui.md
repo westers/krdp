@@ -1,5 +1,22 @@
 # Farside settings: KDE layout conventions
 
+## Fresh design proposal (2026-10-01)
+
+Steve requested reassessing all settings, options and dialogs from their user
+tasks. The [complete assessment and proposed organization](design/2026-10-01-farside-settings-ux.md)
+recommends an overview with native KCM subpages, rather than retaining the four
+tabs. It includes the full option map, host/account/access save scopes, local
+certificate editing, conditional displays, dialog behavior, and two visual
+sketches. [The source/QML review](design/2026-10-01-settings-qml-review.md)
+records the confirmed functional findings separately from scanner diagnostics.
+
+This is **not implemented or visually accepted**. The sections below document
+the current presentation and earlier brief. For the proposed redesign, the new
+document replaces their four-tab, shared certificate-dialog and tri-state
+checkbox recommendations. Retain the stable-refresh, persistent-draft, native
+KDE, scoped authorization and Hal guardrails. Do not implement or deploy another
+layout before Steve reviews the concrete proposal.
+
 Steve requested restoring Claude's earlier KDE presentation on October 1, 2026.
 Use `e0ba4b77` as the visual precedent, retaining the current Console/Virtual
 models and administrator/account boundaries. Do not restore the obsolete

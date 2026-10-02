@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1680" height="1010" viewBox="0 0 1680 1010" role="img" aria-labelledby="title desc">
+<title id="title">Farside server settings layout proposal</title><desc id="desc">Three illustrative pages: an overview with Console and Virtual service controls, Console settings with a scoped save, and account preferences with conditional display options. These are wireframes, not native Qt screenshots. All values are examples.</desc>
+<style>text{font-family:"Noto Sans",sans-serif;fill:#232629;font-size:15px}.title{font-size:22px;font-weight:600}.section{font-size:17px;font-weight:600}.hint{font-size:13px;fill:#535a60}.small{font-size:12px;fill:#535a60}</style>
+<rect width="1680" height="1010" fill="#e6e9eb"/>
+<text x="28" y="39" class="title" text-anchor="start">Farside server settings — proposed organization</text>
+<text x="28" y="66" class="hint" text-anchor="start">Layout sketches only • example values • implementation uses native KDE / Kirigami controls</text>
+<text x="28" y="94" class="hint" text-anchor="start">Overview for connection tasks; separate editors with explicit authority, save scope and activation rules.</text>
+<rect x="25" y="118" width="510" height="824" rx="3" fill="#eff0f1" stroke="#bbc1c5"/>
+<text x="47" y="155" class="title" text-anchor="start">Farside Remote Desktop</text>
+<path d="M26 175h508" stroke="#d7dbde"/>
+<path d="M26 874h508" stroke="#d7dbde"/>
+<text x="49" y="215" class="hint" text-anchor="start">Choose which desktop to make available.</text>
+<text x="49" y="260" class="section" text-anchor="start">Console</text>
+<text x="49" y="285" class="hint" text-anchor="start">Share this computer’s desktop.</text>
+<text x="49" y="324" class="" text-anchor="start">Allow connections</text>
+<rect x="401" y="307" width="42" height="22" rx="11" fill="#3daee9" stroke="#2999d5"/>
+<circle cx="431" cy="318" r="8" fill="white"/>
+<text x="451" y="323" class="hint" text-anchor="start">On</text>
+<text x="49" y="362" class="" text-anchor="start">Status</text>
+<text x="219" y="362" class="" text-anchor="start">Running</text>
+<text x="49" y="400" class="" text-anchor="start">Saved address</text>
+<text x="219" y="400" class="" text-anchor="start">sol.example:3391</text>
+<rect x="423" y="378" width="86" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="466.0" y="400" class="" text-anchor="middle">Copy</text>
+<text x="49" y="441" class="" text-anchor="start">Start when computer boots</text>
+<rect x="401" y="424" width="42" height="22" rx="11" fill="#3daee9" stroke="#2999d5"/>
+<circle cx="431" cy="435" r="8" fill="white"/>
+<text x="451" y="440" class="hint" text-anchor="start">On</text>
+<rect x="49" y="463" width="192" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="145.0" y="485" class="" text-anchor="middle">Configure Console…</text>
+<rect x="259" y="463" width="161" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="339.5" y="485" class="" text-anchor="middle">Service Details…</text>
+<path d="M49 522h462" stroke="#d7dbde"/>
+<text x="49" y="560" class="section" text-anchor="start">Virtual</text>
+<text x="49" y="585" class="hint" text-anchor="start">Separate desktops for remote users.</text>
+<text x="49" y="624" class="" text-anchor="start">Allow connections</text>
+<rect x="401" y="607" width="42" height="22" rx="11" fill="#3daee9" stroke="#2999d5"/>
+<circle cx="431" cy="618" r="8" fill="white"/>
+<text x="451" y="623" class="hint" text-anchor="start">On</text>
+<text x="49" y="662" class="" text-anchor="start">Status</text>
+<text x="219" y="662" class="" text-anchor="start">Running</text>
+<text x="49" y="700" class="" text-anchor="start">Saved address</text>
+<text x="219" y="700" class="" text-anchor="start">sol.example:3395</text>
+<rect x="423" y="678" width="86" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="466.0" y="700" class="" text-anchor="middle">Copy</text>
+<text x="49" y="741" class="" text-anchor="start">Start when computer boots</text>
+<rect x="401" y="724" width="42" height="22" rx="11" fill="#3daee9" stroke="#2999d5"/>
+<circle cx="431" cy="735" r="8" fill="white"/>
+<text x="451" y="740" class="hint" text-anchor="start">On</text>
+<rect x="49" y="763" width="192" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="145.0" y="785" class="" text-anchor="middle">Configure Virtual…</text>
+<rect x="259" y="763" width="161" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="339.5" y="785" class="" text-anchor="middle">Service Details…</text>
+<rect x="49" y="896" width="220" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="159.0" y="918" class="" text-anchor="middle">Who Can Connect…</text>
+<rect x="290" y="896" width="221" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="400.5" y="918" class="" text-anchor="middle">My Preferences…</text>
+<rect x="585" y="118" width="510" height="824" rx="3" fill="#eff0f1" stroke="#bbc1c5"/>
+<text x="607" y="155" class="title" text-anchor="start">‹  Console Settings</text>
+<path d="M586 175h508" stroke="#d7dbde"/>
+<path d="M586 874h508" stroke="#d7dbde"/>
+<text x="609" y="211" class="hint" text-anchor="start">Defaults for everyone connecting to Console.</text>
+<text x="609" y="232" class="hint" text-anchor="start">Save changes, then explicitly restart the service.</text>
+<text x="609" y="273" class="section" text-anchor="start">Connection</text>
+<text x="767" y="314" class="" text-anchor="end">Listen on:</text>
+<rect x="779" y="292" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="789" y="314" class="" text-anchor="start">All IPv4 interfaces</text>
+<path d="M1026.0,308.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<text x="767" y="358" class="" text-anchor="end">Port:</text>
+<rect x="779" y="336" width="98" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="792" y="358" class="" text-anchor="start">3391</text>
+<path d="M857.0,346.0 l3,-3 l3,3 M857.0,353.0 l3,3 l3,-3" fill="none" stroke="#535a60"/>
+<text x="767" y="402" class="" text-anchor="end">Certificate:</text>
+<text x="779" y="402" class="" text-anchor="start">Valid · no changes</text>
+<rect x="931" y="380" width="113" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="987.5" y="402" class="" text-anchor="middle">Change…</text>
+<text x="609" y="453" class="section" text-anchor="start">Video</text>
+<text x="767" y="495" class="" text-anchor="end">Image quality:</text>
+<path d="M790 490h165" stroke="#aeb4b8" stroke-width="4"/>
+<path d="M790 490h130" stroke="#3daee9" stroke-width="4"/>
+<circle cx="920" cy="490" r="7" fill="#3daee9"/>
+<rect x="970" y="473" width="74" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="985" y="495" class="" text-anchor="start">80</text>
+<text x="767" y="539" class="" text-anchor="end">Adjust to connection:</text>
+<rect x="779" y="517" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="789" y="539" class="" text-anchor="start">Default (Off)</text>
+<path d="M1026.0,533.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<text x="609" y="592" class="section" text-anchor="start">Sound and devices</text>
+<text x="767" y="634" class="" text-anchor="end">When network is busy:</text>
+<rect x="779" y="612" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="789" y="634" class="" text-anchor="start">Default (Keep video sharp)</text>
+<path d="M1026.0,628.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<text x="767" y="678" class="" text-anchor="end">Other RDP app media:</text>
+<rect x="779" y="656" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="789" y="678" class="" text-anchor="start">Default (Allow)</text>
+<path d="M1026.0,672.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<rect x="609" y="707" width="462" height="68" rx="3" fill="#fff4d6" stroke="#d8b663"/>
+<text x="623" y="730" class="" text-anchor="start">Camera: Setup required</text>
+<text x="623" y="751" class="hint" text-anchor="start">Configure a supported camera bridge in Advanced.</text>
+<rect x="609" y="793" width="210" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="714.0" y="815" class="" text-anchor="middle">›  Advanced options</text>
+<rect x="847" y="793" width="224" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="959.0" y="815" class="" text-anchor="middle">My Display Preferences…</text>
+<text x="609" y="854" class="hint" text-anchor="start">Unsaved changes · Console only</text>
+<rect x="601" y="896" width="144" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="673.0" y="918" class="" text-anchor="middle">Restore Defaults</text>
+<rect x="755" y="896" width="138" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="824.0" y="918" class="" text-anchor="middle">Revert Changes</text>
+<rect x="904" y="896" width="175" height="34" rx="3" fill="#d9efff" stroke="#3daee9"/>
+<text x="991.5" y="918" class="" text-anchor="middle">Save Console Settings</text>
+<rect x="1145" y="118" width="510" height="824" rx="3" fill="#eff0f1" stroke="#bbc1c5"/>
+<text x="1167" y="155" class="title" text-anchor="start">‹  My Preferences</text>
+<path d="M1146 175h508" stroke="#d7dbde"/>
+<path d="M1146 874h508" stroke="#d7dbde"/>
+<text x="1169" y="211" class="hint" text-anchor="start">For your account. Save, then reconnect.</text>
+<text x="1169" y="232" class="hint" text-anchor="start">Video and sound: both services. Displays: Console.</text>
+<text x="1169" y="274" class="section" text-anchor="start">Video</text>
+<text x="1327" y="316" class="" text-anchor="end">Image quality:</text>
+<rect x="1339" y="294" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1349" y="316" class="" text-anchor="start">Use host setting</text>
+<path d="M1586.0,310.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<text x="1327" y="360" class="" text-anchor="end">Adjust to connection:</text>
+<rect x="1339" y="338" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1349" y="360" class="" text-anchor="start">Use host setting</text>
+<path d="M1586.0,354.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<text x="1327" y="404" class="" text-anchor="end">Color detail:</text>
+<rect x="1339" y="382" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1349" y="404" class="" text-anchor="start">Automatic</text>
+<path d="M1586.0,398.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<text x="1169" y="456" class="section" text-anchor="start">Console displays</text>
+<text x="1327" y="498" class="" text-anchor="end">Share:</text>
+<rect x="1339" y="476" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1349" y="498" class="" text-anchor="start">Client-created displays</text>
+<path d="M1586.0,492.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<text x="1327" y="542" class="" text-anchor="end">Physical displays:</text>
+<rect x="1339" y="520" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1349" y="542" class="" text-anchor="start">Keep on</text>
+<path d="M1586.0,536.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<text x="1327" y="586" class="" text-anchor="end">Layout:</text>
+<rect x="1339" y="564" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1349" y="586" class="" text-anchor="start">Client monitors</text>
+<path d="M1586.0,580.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<text x="1327" y="630" class="" text-anchor="end">Fallback size:</text>
+<rect x="1339" y="609" width="104" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1353" y="631" class="" text-anchor="start">1920</text>
+<text x="1458" y="631" class="" text-anchor="start">×</text>
+<rect x="1478" y="609" width="126" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1492" y="631" class="" text-anchor="start">1080</text>
+<text x="1339" y="666" class="small" text-anchor="start">Used when client monitor data is unavailable.</text>
+<text x="1169" y="707" class="section" text-anchor="start">Sound and session</text>
+<text x="1327" y="749" class="" text-anchor="end">When network is busy:</text>
+<rect x="1339" y="727" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1349" y="749" class="" text-anchor="start">Use host setting</text>
+<path d="M1586.0,743.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<text x="1327" y="793" text-anchor="end">Other RDP app media:</text><rect x="1339" y="771" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/><text x="1349" y="793">Use host setting</text><path d="M1586.0,787.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/>
+<text x="1327" y="837" text-anchor="end">Keep displays awake:</text><rect x="1339" y="815" width="265" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/><text x="1349" y="837">Use host setting</text><path d="M1586.0,831.0 l4,4 l4,-4" fill="none" stroke="#535a60" stroke-width="1.5"/><text x="1169" y="868" class="small">Advanced / compatibility follows below (scroll).</text><rect x="1641" y="200" width="5" height="655" rx="2" fill="#dde1e3"/><rect x="1641" y="202" width="5" height="380" rx="2" fill="#969ea4"/>
+<rect x="1161" y="896" width="147" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="1234.5" y="918" class="" text-anchor="middle">Use Host Settings</text>
+<rect x="1318" y="896" width="138" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="1387.0" y="918" class="" text-anchor="middle">Revert Changes</text>
+<rect x="1467" y="896" width="172" height="34" rx="3" fill="#d9efff" stroke="#3daee9"/>
+<text x="1553.0" y="918" class="" text-anchor="middle">Save Preferences</text>
+<text x="28" y="981" class="hint" text-anchor="start">Full option inventory, access policy, certificate workflow and dialog rules are specified in the companion design document.</text>
+</svg>

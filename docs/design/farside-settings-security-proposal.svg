@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1680" height="1010" viewBox="0 0 1680 1010" role="img" aria-labelledby="title desc">
+<title id="title">Farside access, certificate and dialog layout proposal</title><desc id="desc">Illustrative access-policy and host certificate pages, plus separate examples of a remote-login editor and restart confirmation. Dialog examples represent different flows and are never shown together. No real secrets or host state are depicted.</desc>
+<style>text{font-family:"Noto Sans",sans-serif;fill:#232629;font-size:15px}.title{font-size:22px;font-weight:600}.section{font-size:17px;font-weight:600}.hint{font-size:13px;fill:#535a60}</style>
+<rect width="1680" height="1010" fill="#e6e9eb"/>
+<text x="28" y="39" class="title" text-anchor="start">Farside access, certificates and dialogs — proposed organization</text>
+<text x="28" y="66" class="hint" text-anchor="start">Layout sketches only • example accounts / paths • no saved password or private key contents</text>
+<text x="28" y="94" class="hint" text-anchor="start">Short dialogs stage local edits or confirm disruption; certificate editing is a full page.</text>
+<rect x="25" y="118" width="510" height="824" rx="3" fill="#eff0f1" stroke="#bbc1c5"/>
+<text x="47" y="155" class="title" text-anchor="start">‹  Who Can Connect</text>
+<path d="M26 175h508" stroke="#d7dbde"/>
+<path d="M26 874h508" stroke="#d7dbde"/>
+<text x="49" y="215" class="hint" text-anchor="start">Permissions for both services. Administrator access.</text>
+<text x="49" y="237" class="hint" text-anchor="start">Save policy changes, then restart each affected service.</text>
+<text x="49" y="278" class="section" text-anchor="start">Console</text>
+<text x="49" y="303" class="hint" text-anchor="start">Connect to the appropriate logged-in desktop owner.</text>
+<text x="49" y="343" class="" text-anchor="start">System accounts:</text>
+<rect x="209" y="321" width="300" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="219" y="343" class="" text-anchor="start">Selected accounts</text>
+<path d="M490,335 l4,4 l4,-4" fill="none" stroke="#535a60"/>
+<rect x="209" y="365" width="300" height="36" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="221" y="389" class="" text-anchor="start">westers</text>
+<rect x="49" y="367" width="145" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="121.5" y="389" class="" text-anchor="middle">Edit Accounts…</text>
+<text x="49" y="437" class="section" text-anchor="start">Remote logins</text>
+<rect x="49" y="452" width="460" height="68" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="63" y="477" class="" text-anchor="start">deskguest / westers</text>
+<rect x="315" y="467" width="74" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="352.0" y="489" class="" text-anchor="middle">Edit…</text>
+<rect x="400" y="467" width="94" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="447.0" y="489" class="" text-anchor="middle">Remove</text>
+<text x="63" y="503" class="hint" text-anchor="start">Uses the desktop account shown here.</text>
+<rect x="49" y="534" width="185" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="141.5" y="556" class="" text-anchor="middle">Add Remote Login…</text>
+<path d="M49 593h460" stroke="#d7dbde"/>
+<text x="49" y="628" class="section" text-anchor="start">Virtual</text>
+<text x="49" y="653" class="hint" text-anchor="start">Own separate desktops for authenticated accounts.</text>
+<text x="49" y="693" class="" text-anchor="start">System accounts:</text>
+<rect x="209" y="671" width="300" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="219" y="693" class="" text-anchor="start">All eligible accounts</text>
+<path d="M490,685 l4,4 l4,-4" fill="none" stroke="#535a60"/>
+<text x="49" y="742" class="section" text-anchor="start">Remote logins</text>
+<text x="49" y="769" class="hint" text-anchor="start">No remote logins added.</text>
+<rect x="49" y="791" width="185" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="141.5" y="813" class="" text-anchor="middle">Add Remote Login…</text>
+<text x="49" y="854" class="hint" text-anchor="start">Unsaved changes · access policy only</text>
+<rect x="49" y="896" width="144" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="121.0" y="918" class="" text-anchor="middle">Revert Changes</text>
+<rect x="291" y="896" width="220" height="34" rx="3" fill="#d9efff" stroke="#3daee9"/>
+<text x="401.0" y="918" class="" text-anchor="middle">Save Access Policy</text>
+<rect x="585" y="118" width="510" height="824" rx="3" fill="#eff0f1" stroke="#bbc1c5"/>
+<text x="607" y="155" class="title" text-anchor="start">‹  Console Certificate</text>
+<path d="M586 175h508" stroke="#d7dbde"/>
+<path d="M586 874h508" stroke="#d7dbde"/>
+<text x="609" y="215" class="hint" text-anchor="start">Changes are staged into Console Settings.</text>
+<text x="609" y="237" class="hint" text-anchor="start">Save them there; a restart is a separate action.</text>
+<text x="609" y="278" class="section" text-anchor="start">Saved certificate</text>
+<text x="609" y="313" class="" text-anchor="start">Status: Valid</text>
+<text x="609" y="342" class="hint" text-anchor="start">Certificate: /etc/farside/console.crt</text>
+<text x="609" y="368" class="hint" text-anchor="start">Private key: /etc/farside/console.key</text>
+<text x="609" y="398" class="hint" text-anchor="start">Fingerprint: selectable certificate metadata</text>
+<path d="M609 431h460" stroke="#d7dbde"/>
+<text x="609" y="468" class="section" text-anchor="start">Certificate source</text>
+<circle cx="617" cy="497" r="7" fill="#fcfcfc" stroke="#7d858b"/>
+<circle cx="617" cy="497" r="3.5" fill="#fcfcfc"/>
+<text x="634" y="502" class="" text-anchor="start">Keep the current certificate</text>
+<circle cx="617" cy="537" r="7" fill="#fcfcfc" stroke="#7d858b"/>
+<circle cx="617" cy="537" r="3.5" fill="#fcfcfc"/>
+<text x="634" y="542" class="" text-anchor="start">Use existing system paths</text>
+<circle cx="617" cy="577" r="7" fill="#fcfcfc" stroke="#7d858b"/>
+<circle cx="617" cy="577" r="3.5" fill="#fcfcfc"/>
+<text x="634" y="582" class="" text-anchor="start">Use standard Farside paths</text>
+<circle cx="617" cy="617" r="7" fill="#fcfcfc" stroke="#7d858b"/>
+<circle cx="617" cy="617" r="3.5" fill="#3daee9"/>
+<text x="634" y="622" class="" text-anchor="start">Import a certificate and private key</text>
+<text x="609" y="666" class="" text-anchor="start">Certificate file:</text>
+<rect x="759" y="645" width="213" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="769" y="667" class="" text-anchor="start">certificate.pem</text>
+<rect x="982" y="645" width="89" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="1026.5" y="667" class="" text-anchor="middle">Browse…</text>
+<text x="609" y="710" class="" text-anchor="start">Private key file:</text>
+<rect x="759" y="689" width="213" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="769" y="711" class="" text-anchor="start">private-key.pem</text>
+<rect x="982" y="689" width="89" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="1026.5" y="711" class="" text-anchor="middle">Browse…</text>
+<rect x="609" y="742" width="462" height="60" rx="3" fill="#e1f0fa" stroke="#90bad6"/>
+<text x="623" y="766" class="" text-anchor="start">Matching pair · ready to stage.</text>
+<text x="623" y="787" class="hint" text-anchor="start">Key contents are never shown.</text>
+<text x="609" y="840" class="hint" text-anchor="start">Cancel preserves other Console changes.</text>
+<rect x="609" y="896" width="104" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="661.0" y="918" class="" text-anchor="middle">Cancel</text>
+<rect x="845" y="896" width="226" height="34" rx="3" fill="#d9efff" stroke="#3daee9"/>
+<text x="958.0" y="918" class="" text-anchor="middle">Use Certificate Changes</text>
+<text x="1169" y="157" class="title" text-anchor="start">Dialog examples</text>
+<text x="1169" y="184" class="hint" text-anchor="start">Separate flows — never displayed together.</text>
+<rect x="1145" y="215" width="510" height="401" rx="3" fill="#eff0f1" stroke="#bbc1c5"/>
+<text x="1169" y="253" class="section" text-anchor="start">Add Console Remote Login</text>
+<text x="1169" y="283" class="hint" text-anchor="start">This adds an unsaved entry to the access policy.</text>
+<path d="M1145 300h510" stroke="#d7dbde"/>
+<text x="1319" y="346" class="" text-anchor="end">Remote login:</text>
+<rect x="1332" y="324" width="297" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1342" y="346" class="" text-anchor="start">deskguest</text>
+<text x="1319" y="396" class="" text-anchor="end">Desktop account:</text>
+<rect x="1332" y="374" width="297" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1342" y="396" class="" text-anchor="start">westers</text>
+<text x="1319" y="446" class="" text-anchor="end">New password:</text>
+<rect x="1332" y="424" width="297" height="34" rx="3" fill="#fcfcfc" stroke="#b9bfc3"/>
+<text x="1342" y="446" class="" text-anchor="start"></text>
+<text x="1332" y="487" class="hint" text-anchor="start">Enter a new password to continue.</text>
+<text x="1169" y="524" class="hint" text-anchor="start">Stored passwords are never displayed.</text>
+<path d="M1145 551h510" stroke="#d7dbde"/>
+<rect x="1376" y="571" width="97" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="1424.5" y="593" class="" text-anchor="middle">Cancel</text>
+<rect x="1485" y="571" width="144" height="34" rx="3" fill="#e1e4e6" stroke="#b9bfc3" aria-disabled="true"/>
+<text x="1557.0" y="593" class="" text-anchor="middle">Add to Policy</text>
+<rect x="1145" y="672" width="510" height="230" rx="3" fill="#eff0f1" stroke="#bbc1c5"/>
+<text x="1169" y="712" class="section" text-anchor="start">Restart Console?</text>
+<text x="1169" y="749" class="" text-anchor="start">Remote clients using Console will disconnect.</text>
+<text x="1169" y="776" class="hint" text-anchor="start">Virtual is unaffected.</text>
+<path d="M1145 810h510" stroke="#d7dbde"/>
+<rect x="1392" y="844" width="97" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="1440.5" y="866" class="" text-anchor="middle">Cancel</text>
+<rect x="1501" y="844" width="128" height="34" rx="3" fill="#f4f5f6" stroke="#b9bfc3"/>
+<text x="1565.0" y="866" class="" text-anchor="middle">Restart Console</text>
+<text x="28" y="981" class="hint" text-anchor="start">The native implementation keeps model authority, validation and revisions; the redesign changes organization and draft behavior.</text>
+</svg>
