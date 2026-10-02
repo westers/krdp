@@ -79,3 +79,75 @@ and retain visible footers.
 Use the existing scoped widget/KCM fixtures and visually inspect their rendered
 pages on Buzz. Actual administrator-dialog acceptance remains the separate N04
 manual check; UI fixture success does not substitute for it. No Hal live testing.
+
+## Qt skills and design review (2026-10-01)
+
+Steve requested installing and using The Qt Company's skills after rejecting
+the current presentation. Installed for Codex under `~/.codex/skills/`:
+
+- `qt-ui-design` 1.1: screen organization and visual/interaction audits.
+- `qt-qml` 1.2: native QML implementation conventions.
+- `qt-qml-review` 1.0: scoped, read-only implementation review, with its
+  checklist and linter included.
+
+Upstream: <https://github.com/TheQtCompanyRnD/agent-skills>. Read the applicable
+installed SKILL.md before use. These are separate from Superpowers; do not
+resume the old Goal or replace the selected-task workflow. Skill installation
+does not switch the running model. Automatic discovery is available next turn;
+the design and coding instructions were read and applied manually this turn.
+
+KDE HIG, Kirigami, KCM conventions and Steve's instructions take precedence over
+generic skill defaults. In particular:
+
+- Keep KDE's selected font, theme, icon set and Kirigami units. Do not introduce
+  the design skill's custom typography scale, assumed Linux font or fixed
+  16-pixel minimum into the KCM.
+- Keep KDE's `i18n`/`i18nc` translation conventions rather than replacing them
+  with `qsTr`. Keep native controls styled by `org.kde.desktop`.
+- Persistent draft editors must survive service events and tab changes. Generic
+  advice to unload optional content must not reintroduce destroyed editors,
+  refresh jitter, lost focus or unsaved text.
+- Scope implementation review to the changed components and concrete risks;
+  follow the standing no-delegation and focused-verification instructions.
+
+### Initial audit and proposed next presentation
+
+Reviewed the populated `2026-10-01-settings-tabs/tabs-{0,3}.png` fixtures and
+current host/preferences/field/service code, alongside Claude's `e0ba4b77`
+main and VideoAudioPage source. These are fixture images, not live Sol captures.
+No fresh rendering, product edits or deployment occurred for this audit.
+
+Warnings:
+
+1. The leading title/description, centered forms/headings and leading Service
+   details control create disconnected visual groups. Use one bounded content
+   column with consistent heading, form and disclosure alignment.
+2. Video, Displays and Audio headings have large surrounding gaps. Use
+   `smallSpacing` within groups and `largeSpacing` between groups; remove the
+   one-button Displays section and place its preference link with the scope
+   explanation or related display settings.
+3. Basic booleans expose three-state inheritance with changing checkbox text
+   (`Use unit default (Off)` / `Enabled`). Show a stable feature label and a
+   clearly named default/on/off choice where inheritance is editable. Preserve
+   the distinction between an absent override and explicit false.
+4. My Preferences presents disabled numeric controls and repeated inheritance
+   controls before explaining the shared default behavior. Explain the scope
+   once, distinguish inherited and customized values consistently, and leave
+   unknown inherited values unknown.
+5. Labels such as `Prefer audio quality` and `Allow standard client media`
+   describe configuration fields. Restore the earlier outcome-oriented choices:
+   busy-network video/sound preference and media sharing with other RDP apps.
+
+Proposed Console order: compact enable/status/address group; video quality and
+automatic adjustment; audio/media sharing with a camera availability message;
+an Advanced disclosure for listener/encoder/bridge configuration; consistent
+service actions and the existing scoped save footer. Keep the four persistent
+tabs and separate Console/Virtual/account authority. Camera device paths and
+runtime inspection remain available under the appropriate advanced/details
+section.
+
+Before the next product edit, review a concrete visual proposal using KDE
+settings references and this brief. Acceptance requires Steve's visual review
+and a populated native-style render, in addition to only the affected draft,
+inheritance and stable-refresh checks. Functional fixture success alone does
+not establish that the design is acceptable.
