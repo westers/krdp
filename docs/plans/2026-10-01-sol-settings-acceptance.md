@@ -1,21 +1,21 @@
 # Sol: remaining installed settings acceptance (N04)
 
-Server `ec5e252`, package `6.6.80+git202610020306.ec5e252-1`.
-October 1 read-only baseline: stored and running quality **80**, Console camera
+Server `a087e159`, package `6.6.80+git202610020518.a087e15-1`.
+October 2 installed readback: stored and running quality **80**, Console camera
 **/dev/video10**, port **3391**, runtime **verified**. Existing package rollback
 and helper checks are already accepted; do not repeat them.
 
 ## Manual check
 
-This package uses persistent Console/Virtual/Access/My Preferences tabs and
-removes the former five-second service refresh. Existing accepted camera and
+This package uses an overview with persistent scoped subpages and retains the
+event-driven service refresh. Existing accepted camera and
 rollback checks need not be repeated.
 
 Use Sol's System Settings → **Security & Privacy** → **Farside Remote Desktop**
-→ **Console** tab → **Load Administrator Settings…**, using normal KDE administrator
-authentication. No password needs to be shared in chat. The camera bridge and
-quality controls are in the main form. **Service details** reveals explicit restart
-and **Inspect Running Host…**. Saving uses the fixed footer's
+→ **Configure Console…** → **Load Administrator Settings…**, using normal KDE administrator
+authentication. No password needs to be shared in chat. Image quality is in **Video**; camera bridge is in **Advanced Options**.
+Go **Back** to the overview and open Console **Service Details…** for explicit
+restart and **Inspect Running Host…**. Returning to configuration preserves drafts. Saving uses the fixed footer's
 **Save Console Settings…** button.
 
 1. Stage the camera loopback field as `none`. Click **Save Console Settings…** and cancel
@@ -23,11 +23,11 @@ and **Inspect Running Host…**. Saving uses the fixed footer's
    Host…** should still report `/dev/video10`. Saved settings must remain unchanged.
    If authorization is cached and no dialog appears, this does not test cancellation;
    wait for the normal authorization to expire before this step.
-2. Restore the camera draft to `/dev/video10`. Change **Video quality** from **80**
+2. Restore the camera draft to `/dev/video10`. Change **Image quality** from **80**
    to **79**, then **Save Console Settings…** and authorize. Reload stored settings: quality
    should be **79**. **Inspect Running Host…** should still show **80**; saving
    alone must not restart Console.
-3. Open **Service details** on the Console tab, explicitly **Restart…** when
+3. Go **Back** to the overview and open Console **Service Details…**, explicitly **Restart…** when
    ready for the connection to disconnect. Reconnect to Sol, reload Console settings,
    and **Inspect Running Host…**: startup quality should now be **79** and agree
    with stored settings. Leave Virtual running.
