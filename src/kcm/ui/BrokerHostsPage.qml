@@ -132,7 +132,7 @@ KCM.SimpleKCM {
             settings: root.host; definition: modelData
             visible: !(key === "CameraLoopbackDevice" && root.fixedScope === 1) && !(key === "RenderPci" && (root.host.metadata.renderDevices || []).length > 0 && !root.showPciEditor)
             editable: !root.host.busy
-            showHelp: root.showAdvanced || root.session || key === "Address"
+            showHelp: root.session || ["Address", "SoftwareEncoding", "Av1Tiles", "VaapiDriver", "RenderPci", "CameraLoopbackDevice"].includes(key)
         }
     }
     }
@@ -143,7 +143,7 @@ KCM.SimpleKCM {
             QQC2.ToolButton { objectName: "loadHostSettings"; icon.name: "view-refresh"; text: i18nc("@action:button", "Reload Saved Settings…"); display: QQC2.AbstractButton.IconOnly; enabled: !root.host.busy; QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered; onClicked: root.reloadSettings() }
             Item { Layout.fillWidth: true }
             QQC2.BusyIndicator { running: root.host.busy; Layout.preferredWidth: Kirigami.Units.gridUnit; Layout.preferredHeight: Kirigami.Units.gridUnit; visible: running }
-            QQC2.Button { objectName: "saveHostSettings"; text: root.session ? i18nc("@action:button", "Save Desktop Defaults…") : root.fixedScope === 0 ? i18nc("@action:button", "Save Console Settings…") : i18nc("@action:button", "Save Virtual Settings…"); enabled: root.host.canSave; onClicked: root.host.save() }
+            QQC2.Button { objectName: "saveHostSettings"; highlighted: true; text: root.session ? i18nc("@action:button", "Save Desktop Defaults…") : root.fixedScope === 0 ? i18nc("@action:button", "Save Console Settings…") : i18nc("@action:button", "Save Virtual Settings…"); enabled: root.host.canSave; onClicked: root.host.save() }
         }
     }
     Kirigami.PromptDialog {

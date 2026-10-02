@@ -3,6 +3,7 @@
 #include "brokerauthenticationsettings.h"
 #include "brokerpreferences.h"
 #include "brokerservices.h"
+#include "ServerCertificate.h"
 #include <KLocalizedQmlContext>
 #include <QFile>
 #include <QQmlComponent>
@@ -10,6 +11,8 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QPluginLoader>
+#include <QJSValue>
 #include <QTemporaryDir>
 #include <QTest>
 using namespace Qt::StringLiterals;
@@ -45,9 +48,12 @@ private Q_SLOTS:
         BrokerHostSettings console(Scope::Console,u"/usr/bin/python3"_s,protocol,3000), virtualHost(Scope::Virtual,u"/usr/bin/python3"_s,protocol,3000), session(Scope::VirtualSession,u"/usr/bin/python3"_s,protocol,3000);
         BrokerAuthenticationSettings auth(u"/usr/bin/python3"_s,{qEnvironmentVariable("FARSIDE_AUTH_TEST_FIXTURE",QString::fromUtf8(MAIN_AUTH_PROTOCOL_FIXTURE)),dir.path()},nullptr);
         BrokerPreferences preferences(dir.path()); MainTransport transport; MainNavigation navigation; BrokerServices services(&transport);
+        QPluginLoader packagedPlugin(qEnvironmentVariable("FARSIDE_MAIN_PACKAGED_PLUGIN"));
+        const bool packaged = !packagedPlugin.fileName().isEmpty();
+        if (packaged) QVERIFY2(packagedPlugin.load(), qPrintable(packagedPlugin.errorString()));
         QQmlEngine engine; auto *localized=new KLocalizedQmlContext(&engine); localized->setTranslationDomain(u"kcm_farside"_s); engine.rootContext()->setContextObject(localized);
         QStringList warnings; connect(&engine,&QQmlEngine::warnings,this,[&](const auto &errors){for(const auto &e:errors)warnings.append(e.toString());});
-        QQmlComponent component(&engine,QUrl::fromLocalFile(qEnvironmentVariable("FARSIDE_MAIN_TEST_PAGE",QString::fromUtf8(MAIN_PAGE))));
+        QQmlComponent component(&engine,packaged ? QUrl(u"qrc:/kcm/kcm_farside/BrokerMainPage.qml"_s) : QUrl::fromLocalFile(qEnvironmentVariable("FARSIDE_MAIN_TEST_PAGE",QString::fromUtf8(MAIN_PAGE))));
         QVERIFY2(component.isReady(),qPrintable(component.errorString()));
         QScopedPointer<QObject> object(component.createWithInitialProperties({{u"navigation"_s,QVariant::fromValue(&navigation)},{u"administration"_s,QVariant::fromValue(&services)},
             {u"consoleHost"_s,QVariant::fromValue(&console)},{u"virtualHost"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)},
@@ -105,11 +111,44 @@ private Q_SLOTS:
         transport.state.activeState = u"active"_s; transport.state.mainPid = 42; Q_EMIT transport.changed();
         const auto screenshots=qEnvironmentVariable("FARSIDE_MAIN_SCREENSHOTS");
         QVERIFY(preferences.setValue(u"MonitorMode"_s,u"virtual"_s));
-        const auto screenshot=[&](const QString &name){QTest::qWait(180); if(!screenshots.isEmpty()) QVERIFY(window.grabWindow().save(screenshots+u"/"_s+name+u".png"_s));};
+        QVERIFY(auth.setAlias(u"console"_s,u"fixture-remote"_s,u"westers"_s,u"fixture-only-password"_s));
+        QVERIFY(console.inspectRuntime()); QTRY_VERIFY(!console.busy());
+        QVERIFY(virtualHost.inspectRuntime()); QTRY_VERIFY(!virtualHost.busy());
+        KRdp::ServerCertificate::Paths capturePair{dir.filePath(u"capture-certificate.crt"_s),dir.filePath(u"capture-private.key"_s)}; QString captureError;
+        QVERIFY(KRdp::ServerCertificate::generate(capturePair,u"capture-fixture"_s,QDateTime::currentDateTimeUtc(),10,&captureError));
+        const auto screenshot=[&](const QString &name){QTest::qWait(350); if(!screenshots.isEmpty()) QVERIFY(window.grabWindow().save(screenshots+u"/"_s+name+u".png"_s));};
         for(int index=0;index<10;++index) {
             if(index==5) QVERIFY(console.beginCertificateEdit());
             if(index==6) QVERIFY(virtualHost.beginCertificateEdit());
             QVERIFY(page->setProperty("currentPage",index)); screenshot(u"page-"_s+QString::number(index));
+            if (index == 5 || index == 6) {
+                auto *host = index == 5 ? &console : &virtualHost;
+                auto *certificatePage = page->property("pages").value<QJSValue>().property(uint(index)).toQObject();
+                QVERIFY(certificatePage);
+                auto *draft=qobject_cast<BrokerHostSettings *>(host->certificateDraft()); QVERIFY(draft);
+                QVERIFY(draft->chooseTls(u"import"_s));
+                certificatePage->setProperty("certificateFile",QUrl::fromLocalFile(capturePair.certificate));
+                certificatePage->setProperty("privateKeyFile",QUrl::fromLocalFile(capturePair.key));
+                QVERIFY(draft->importTls(QUrl::fromLocalFile(capturePair.certificate),QUrl::fromLocalFile(capturePair.key)));
+                auto *flickable=certificatePage->property("flickable").value<QQuickItem *>(); QVERIFY(flickable); QTest::qWait(100);
+                screenshot(u"certificate-import-"_s+QString::number(index));
+                flickable->setProperty("contentY",qMax<qreal>(0,flickable->property("contentHeight").toReal()-flickable->height()));
+                screenshot(u"certificate-import-bottom-"_s+QString::number(index));
+                host->cancelCertificateEdit();
+            }
+            if (index == 1 || index == 2 || index == 4) {
+                auto *current = index == 1 ? consolePage : index == 2 ? qobject_cast<QQuickItem *>(item(u"virtualSettingsPage"_s)) : qobject_cast<QQuickItem *>(item(u"brokerPreferencesPage"_s));
+                QVERIFY(current->setProperty("showAdvanced",true));
+                auto *flickable = current->property("flickable").value<QQuickItem *>(); QVERIFY(flickable);
+                QTest::qWait(100);
+                const qreal end = qMax<qreal>(0,flickable->property("contentHeight").toReal()-flickable->height());
+                int part=0;
+                for(qreal offset=0;;offset=qMin(end,offset+flickable->height()*0.8)) {
+                    flickable->setProperty("contentY",offset); screenshot(u"advanced-"_s+QString::number(index)+u"-"_s+QString::number(part++));
+                    if(offset>=end)break;
+                }
+                QVERIFY(current->setProperty("showAdvanced",false)); flickable->setProperty("contentY",0);
+            }
         }
         QVERIFY(page->setProperty("currentPage",3)); QVERIFY(QMetaObject::invokeMethod(item(u"consoleAddAlias"_s),"clicked")); screenshot(u"alias-dialog"_s); QVERIFY(QMetaObject::invokeMethod(aliasDialog,"close"));
         QVERIFY(page->setProperty("currentPage",0));

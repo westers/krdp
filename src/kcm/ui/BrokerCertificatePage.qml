@@ -85,6 +85,7 @@ KCM.SimpleKCM {
             }
             QQC2.Button { objectName: "inspectHostImport"; text: i18nc("@action:button", "Check Selected Pair"); enabled: root.certificateFile.toString() !== "" && root.privateKeyFile.toString() !== ""; onClicked: root.draft.importTls(root.certificateFile, root.privateKeyFile) }
             QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Choose a current matching certificate and unencrypted private key. Key contents are never shown. Imported material is administrator-managed; you are responsible for renewal.") }
+            Kirigami.InlineMessage { visible: (root.draft.importMetadata.fingerprint || "") !== "" && root.draft.canStageCertificate; Layout.fillWidth: true; type: Kirigami.MessageType.Positive; text: i18nc("@info", "Matching certificate and key. Ready to stage.") }
             Kirigami.SelectableLabel { objectName: "hostImportPreview"; visible: (root.draft.importMetadata.fingerprint || "") !== ""; Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 28; wrapMode: Text.WrapAnywhere; text: i18nc("@info", "Selected certificate SHA-256: %1. Valid until %2.", root.draft.importMetadata.fingerprint || "", root.draft.importMetadata.notAfter || "") }
         }
         Kirigami.InlineMessage { Layout.fillWidth: true; visible: root.draft.error !== ""; type: Kirigami.MessageType.Error; text: root.draft.error }
@@ -94,7 +95,7 @@ KCM.SimpleKCM {
         contentItem: RowLayout {
             QQC2.Button { objectName: "cancelCertificateEdit"; text: i18nc("@action:button", "Cancel"); onClicked: root.navigation.goBack() }
             Item { Layout.fillWidth: true }
-            QQC2.Button { objectName: "stageCertificateEdit"; text: i18nc("@action:button", "Use Certificate Changes"); enabled: root.draft.canStageCertificate && !root.host.busy && !root.host.outcomeUnknown; onClicked: { if (root.host.stageCertificateEdit()) root.navigation.goBack(); } }
+            QQC2.Button { objectName: "stageCertificateEdit"; highlighted: true; text: i18nc("@action:button", "Use Certificate Changes"); enabled: root.draft.canStageCertificate && !root.host.busy && !root.host.outcomeUnknown; onClicked: { if (root.host.stageCertificateEdit()) root.navigation.goBack(); } }
         }
     }
     Dialogs.FileDialog {

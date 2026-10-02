@@ -1,6 +1,9 @@
 # Farside server settings: assessment and proposed design
 
-**Status:** proposal for Steve's review; no product changes or deployment.
+**Status:** approved by Steve; implemented and delivered to Sol as `a087e159`.
+Follow-up [native capture comparison](2026-10-02-settings-capture-comparison.md)
+records the differences found and their corrections. The assessment below
+retains its original pre-implementation findings.
 **Reviewed:** server source `ec5e2524` (documentation HEAD `505e41b7`), all ten
 `src/kcm/ui/*.qml` files, their C++ models, and the four populated settings-tab
 fixtures. Earlier Claude source `e0ba4b77` provides a visual precedent.

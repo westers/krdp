@@ -88,6 +88,8 @@ KCM.SimpleKCM {
                         ? i18nc("@info", "Console control is limited to the signed-in desktop owner.")
                         : i18nc("@info", "Virtual desktops belong to the account used to sign in.")
                 }
+                Kirigami.Heading { level: 4; text: i18nc("@title:group", "Remote logins") }
+                QQC2.Label { visible: (section.route.credentials || []).length === 0; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "No remote logins added."); color: Kirigami.Theme.disabledTextColor }
                 ListView {
                     Layout.fillWidth: true
                     implicitHeight: contentHeight
@@ -128,7 +130,7 @@ KCM.SimpleKCM {
             QQC2.ToolButton { objectName: "loadBrokerAuthentication"; icon.name: "view-refresh"; text: i18nc("@action:button", "Reload Policy…"); display: QQC2.AbstractButton.IconOnly; QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered; enabled: !root.administration.busy; onClicked: { if (root.administration.modified) reloadConfirmation.open(); else root.administration.reload(); } }
             Item { Layout.fillWidth: true }
             QQC2.BusyIndicator { running: root.administration.busy; visible: running; Layout.preferredWidth: Kirigami.Units.gridUnit; Layout.preferredHeight: Kirigami.Units.gridUnit }
-            QQC2.Button { objectName: "saveBrokerAuthentication"; text: i18nc("@action:button", "Save Access Policy…"); enabled: root.administration.loaded && root.administration.modified && !root.administration.busy; onClicked: root.administration.save() }
+            QQC2.Button { objectName: "saveBrokerAuthentication"; highlighted: true; text: i18nc("@action:button", "Save Access Policy…"); enabled: root.administration.loaded && root.administration.modified && !root.administration.busy; onClicked: root.administration.save() }
         }
     }
     Kirigami.PromptDialog {
@@ -154,20 +156,21 @@ KCM.SimpleKCM {
         property bool existing: false
         property string originalOwner: ""
         readonly property bool passwordRequired: !existing || ownerName.text !== originalOwner
-        title: existing ? i18nc("@title:window", "Edit Remote Login") : i18nc("@title:window", "Add Remote Login")
+        title: existing ? (route === "console" ? i18nc("@title:window", "Edit Console Remote Login") : i18nc("@title:window", "Edit Virtual Remote Login")) : (route === "console" ? i18nc("@title:window", "Add Console Remote Login") : i18nc("@title:window", "Add Virtual Remote Login"))
         preferredWidth: Kirigami.Units.gridUnit * 28
+        padding: Kirigami.Units.largeSpacing
         standardButtons: Kirigami.Dialog.Cancel
         onClosed: aliasPassword.text = ""
         Kirigami.FormLayout {
-            wideMode: width >= Kirigami.Units.gridUnit * 32;
+            wideMode: width >= Kirigami.Units.gridUnit * 24;
             Layout.alignment: Qt.AlignLeft
-            QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Stage this login in the access policy. Save that policy separately to apply it.") }
+            QQC2.Label { Kirigami.FormData.isSection: true; Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 26; wrapMode: Text.Wrap; text: i18nc("@info", "Stage this login in the access policy. Save that policy separately to apply it.") }
             QQC2.TextField { id: aliasName; objectName: "brokerAliasName"; Kirigami.FormData.label: i18nc("@label", "Remote login:"); readOnly: aliasDialog.existing; maximumLength: 256; Layout.fillWidth: true }
             QQC2.TextField { id: ownerName; objectName: "brokerAliasOwner"; Kirigami.FormData.label: i18nc("@label", "Desktop account:"); maximumLength: 256; Layout.fillWidth: true }
-            QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Enter an existing system login name. The server verifies account eligibility when saving."); color: Kirigami.Theme.disabledTextColor }
+            QQC2.Label { Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 18; wrapMode: Text.Wrap; text: i18nc("@info", "Enter an existing system login name. The server verifies account eligibility when saving."); color: Kirigami.Theme.disabledTextColor }
             Kirigami.PasswordField { id: aliasPassword; objectName: "brokerAliasPassword"; Kirigami.FormData.label: i18nc("@label", "New password:"); maximumLength: 4096; Layout.fillWidth: true }
-            QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: aliasDialog.passwordRequired ? i18nc("@info", "A new password is required for a new login or changed desktop account.") : i18nc("@info", "Leave blank to keep the password. Stored passwords are never displayed.") }
-            QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; visible: root.administration.error !== ""; text: root.administration.error }
+            QQC2.Label { Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 18; wrapMode: Text.Wrap; text: aliasDialog.passwordRequired ? i18nc("@info", "A new password is required for a new login or changed desktop account.") : i18nc("@info", "Leave blank to keep the password. Stored passwords are never displayed.") }
+            QQC2.Label { Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 18; wrapMode: Text.Wrap; visible: root.administration.error !== ""; text: root.administration.error }
         }
         customFooterActions: Kirigami.Action {
             objectName: "stageBrokerAlias"

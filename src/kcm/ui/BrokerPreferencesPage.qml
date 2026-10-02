@@ -66,7 +66,7 @@ KCM.SimpleKCM {
             settings: root.preferences; definition: modelData; prefix: "preference_"; accountPreference: true
             visible: key === "MonitorIndex" ? root.monitorMode === "specific" : ["VirtualMonitorPolicy", "VirtualMonitorLayout", "VirtualMonitorFallbackSize"].includes(key) ? root.monitorMode === "virtual" : true
             editable: !root.preferences.lockedKeys.includes(key)
-            showHelp: root.showAdvanced
+            showHelp: ["SoftwareEncoding", "Av1Tiles", "Avc444MotionGapMs", "Avc444RestMs", "Avc444MaxGapMs", "VirtualStockClientPolicy"].includes(key) || !field.editable
             QQC2.Label { visible: !field.editable; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Locked by the administrator"); color: Kirigami.Theme.disabledTextColor }
         }
     }
@@ -77,7 +77,7 @@ KCM.SimpleKCM {
             QQC2.Button { objectName: "discardBrokerPreferences"; text: i18nc("@action:button", "Revert Changes"); enabled: root.preferences.modified; onClicked: root.preferences.discard() }
             QQC2.ToolButton { objectName: "loadBrokerPreferences"; icon.name: "view-refresh"; text: i18nc("@action:button", "Reload Preferences…"); display: QQC2.AbstractButton.IconOnly; QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered; onClicked: { if (root.preferences.modified) reloadConfirmation.open(); else root.preferences.reload(); } }
             Item { Layout.fillWidth: true }
-            QQC2.Button { objectName: "saveBrokerPreferences"; text: i18nc("@action:button", "Save Preferences"); enabled: root.preferences.canSave; onClicked: root.preferences.save() }
+            QQC2.Button { objectName: "saveBrokerPreferences"; highlighted: true; text: i18nc("@action:button", "Save Preferences"); enabled: root.preferences.canSave; onClicked: root.preferences.save() }
         }
     }
     Kirigami.PromptDialog {

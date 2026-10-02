@@ -22,15 +22,18 @@ ColumnLayout {
         if (address.includes(":")) address = "[" + address + "]";
         return address && values.Port ? address + ":" + values.Port : "";
     }
+    function bindingDescription(values) {
+        return endpoint(values) || i18nc("@info", "All interfaces · port %1", values.Port || "");
+    }
     function request(operation) {
         if (operation === "start") administration.perform(route, operation);
         else { confirmation.operation = operation; confirmation.open(); }
     }
     spacing: Kirigami.Units.smallSpacing
     Kirigami.FormLayout {
-            wideMode: width >= Kirigami.Units.gridUnit * 32;
-            Layout.alignment: Qt.AlignLeft
-        Layout.fillWidth: true
+        wideMode: root.width >= Kirigami.Units.gridUnit * 32
+        Layout.alignment: Qt.AlignLeft
+        Layout.fillWidth: false
         QQC2.Switch {
             objectName: root.route + "HostEnabled"
             Kirigami.FormData.label: i18nc("@label", "Allow connections:")
@@ -57,7 +60,7 @@ ColumnLayout {
                 Layout.fillWidth: true
                 Layout.maximumWidth: Kirigami.Units.gridUnit * 24
                 wrapMode: Text.Wrap
-                text: root.host ? root.endpoint(root.host.metadata.effective || {}) || i18nc("@info", "All interfaces · port %1", (root.host.metadata.effective || {}).Port || "") : ""
+                text: root.host ? root.bindingDescription(root.host.metadata.effective || {}) : ""
             }
             QQC2.ToolButton {
                 objectName: root.route + "CopyStoredEndpoint"
@@ -75,7 +78,7 @@ ColumnLayout {
             Layout.maximumWidth: Kirigami.Units.gridUnit * 24
             wrapMode: Text.Wrap
             visible: root.host && root.host.runtimeCheckedAt !== "" && !root.host.runtimeStale && root.host.runtime.runningVerified === true
-            text: root.host ? root.endpoint(root.host.runtime.running || {}) : ""
+            text: root.host ? root.bindingDescription(root.host.runtime.running || {}) : ""
         }
         QQC2.Switch {
             objectName: root.route + "ServiceAutostart"
@@ -111,8 +114,8 @@ ColumnLayout {
         onClicked: root.detailsVisible = !root.detailsVisible
     }
     Kirigami.FormLayout {
-            wideMode: width >= Kirigami.Units.gridUnit * 32;
-            Layout.alignment: Qt.AlignLeft
+        wideMode: root.width >= Kirigami.Units.gridUnit * 32
+        Layout.alignment: Qt.AlignLeft
         visible: root.showBoot || root.detailsVisible
         Layout.fillWidth: true
         QQC2.Label {

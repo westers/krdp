@@ -85,13 +85,14 @@ KCM.AbstractKCM {
                     QQC2.Button { objectName: "configureVirtual"; text: root.virtualHost.modified || root.sessionSettings.modified ? i18nc("@action:button", "Configure Virtual… (unsaved)") : i18nc("@action:button", "Configure Virtual…"); onClicked: root.openPage(2) }
                     QQC2.Button { objectName: "virtualServiceDetails"; text: i18nc("@action:button", "Service Details…"); onClicked: root.openPage(9) }
                 }
-                Kirigami.Separator { Layout.fillWidth: true }
-                Flow {
-                    Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
+              }
+            }
+            footer: QQC2.ToolBar {
+                contentItem: RowLayout {
                     QQC2.Button { objectName: "configureAccess"; text: root.authentication.modified ? i18nc("@action:button", "Who Can Connect… (unsaved)") : i18nc("@action:button", "Who Can Connect…"); onClicked: root.openPage(3) }
                     QQC2.Button { objectName: "configurePreferences"; text: root.preferences.modified ? i18nc("@action:button", "My Preferences… (unsaved)") : i18nc("@action:button", "My Preferences…"); onClicked: root.openPage(4) }
+                    Item { Layout.fillWidth: true }
                 }
-              }
             }
         }
         BrokerHostsPage { id: consolePage; objectName: "consoleSettingsPage"; Layout.minimumWidth: 0; Layout.minimumHeight: 0; fixedScope: 0; consoleSettings: root.consoleHost; virtualSettings: root.virtualHost; sessionSettings: root.sessionSettings; administration: root.administration; navigation: root }
