@@ -56,6 +56,7 @@ public:
     bool requestTopology();
     void sendInput(const ConsoleWorkerWire::Input &input);
     void setMedia(const ConsoleWorkerWire::Media &media);
+    void reclaimConsole(quint64 generation);
     void setControlState(const ConsoleWorkerWire::ControlState &state);
     /** Authenticated demand, including before Ready when DPMS can block capture.
      * Latest desired state is sent when Hello authenticates. No input grant. */

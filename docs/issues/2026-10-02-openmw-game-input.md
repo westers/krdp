@@ -1,6 +1,47 @@
 # OpenMW mouse capture over Farside RDP (OPT-054)
 
-## Report and observed state
+## Implementation progress (2026-10-02)
+
+**IN PROGRESS — paired mouse and keyboard delivery; no separate partial rollout.**
+
+- A native Buzz → installed Sol baseline shows gameplay and actual movement after
+  bounded 300 ms A and S holds through Qt's keyboard path. Scan codes/down/up are
+  correct. This does not reproduce the earlier intermittent failure.
+- Console logs show automatic control revocation at 00:59:38 and 01:02:31 after
+  OpenMW started at 00:59:05. The paired worker inferred physical input from
+  screencast cursor positions; app recentering can trigger that same heuristic.
+  Once ownership is revoked, keyboard and pointer events are correctly rejected.
+- Replace that heuristic with a root-broker read-only evdev activity watcher:
+  seat0 physical keyboard/pointer devices, no grabs/injection/key logging,
+  software input devices excluded, hotplug supported. Reclaim requests and
+  acknowledgements carry the current control generation. The legacy user-server
+  replace detector is outside this paired Console/Virtual route.
+- Standard negotiated RDP relative motion is distinct through InputHandler,
+  worker wire12, Console/Virtual mapping and KWin/portal injection. Relative
+  buttons/wheel and cleanup do not inject absolute warps. Cursor-settle nudges
+  stop on entry; ordinary desktop absolute motion restores the usual behavior.
+- Client has explicit View → Capture Mouse for Games, native compositor-confirmed
+  pointer lock/relative motion, host-key release, focus/hide/surface/disconnect/
+  ownership cleanup, fractional deltas and shortcut inhibition while captured.
+  Native capture and packaged acceptance are still pending.
+- Automatic capture was investigated separately after Steve's proposed behavior.
+  KWin6.6.6 distinguishes surface `lockedPointer()` from `confinedPointer()`.
+  Ordinary scripting/D-Bus does not expose it. The native plugin API explicitly
+  requires recompilation with every KWin release. This release uses manual
+  capture; do not guess from fullscreen/hidden cursors. A future supported
+  observer must drive unlock/focus/disconnect release and suppress immediate
+  recapture after a manual release, until deliberate click/re-entry.
+- Focused pure gate passes: RDP W down/up and signed deltas; relative wire bounds,
+  no geometry scaling/clamping/position-before-dispatch, held cleanup and real
+  device activity classification. Existing input/wire suites pass. Controller
+  gate verifies stale reclaim cannot revoke a newer owner and held W is released.
+  No full suite, daemon/media test on Hal, wallet operation or game restart.
+
+Evidence: `~/dev/rdp/evidence/2026-10-02-openmw-input/`.
+KWin hook source: https://github.com/KDE/kwin/blob/v6.6.6/src/plugin.h,
+https://github.com/KDE/kwin/blob/v6.6.6/src/wayland/surface.h.
+
+## Original report and observed state
 
 Steve reports Morrowind through OpenMW on Sol Console: he should be able to
 move and look around, but cannot. He disconnected and deliberately left the

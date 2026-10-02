@@ -1555,6 +1555,7 @@ void RdpConnection::initialize()
     freerdp_settings_set_bool(settings, FreeRDP_GfxThinClient, false);
 
     freerdp_settings_set_bool(settings, FreeRDP_HasExtendedMouseEvent, true);
+    freerdp_settings_set_bool(settings, FreeRDP_HasRelativeMouseEvent, true);
     freerdp_settings_set_bool(settings, FreeRDP_HasHorizontalWheel, true);
     freerdp_settings_set_bool(settings, FreeRDP_UnicodeInput, true);
 

@@ -57,7 +57,8 @@ namespace KRdp::ConsoleWorkerWire
 // 9 (T05): complete per-output AVC444 costs, bound to the control generation.
 // 10 (T06): Console monitor capture selection in current-owner EncoderConfig.
 // 11 (T06): generation-bound Console temporary-output policy and client display tuple.
-constexpr quint16 ProtocolVersion = 11;
+// 12 (OPT-054): relative pointer input and physical-device reclaim requests.
+constexpr quint16 ProtocolVersion = 12;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -116,8 +117,9 @@ enum class Kind : quint8 {
     CameraDemand,
     DisplayPolicy,
     ChromaTiming,
+    ReclaimConsole,
 };
-constexpr Kind LastKind = Kind::ChromaTiming;
+constexpr Kind LastKind = Kind::ReclaimConsole;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;
@@ -1388,6 +1390,7 @@ struct Input {
         Mouse,
         Wheel,
         Key,
+        RelativePointer,
     };
 
     Type type = Type::Mouse;
@@ -1782,10 +1785,15 @@ inline std::optional<Input> input(const Record &record)
     quint32 buttons = 0;
     Input result;
     stream >> type >> eventType >> result.position >> button >> buttons >> result.angleDelta >> result.nativeScanCode >> result.nativeVirtualKey >> result.text;
-    if (stream.status() != QDataStream::Ok || !stream.atEnd() || type > quint8(Input::Type::Key)
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || type > quint8(Input::Type::RelativePointer)
         || eventType < int(QEvent::None) || eventType > int(QEvent::User)) {
         return std::nullopt;
     }
+    if (Input::Type(type) == Input::Type::RelativePointer
+        && ((!std::isfinite(result.position.x()) || !std::isfinite(result.position.y())
+             || std::abs(result.position.x()) > 32768 || std::abs(result.position.y()) > 32768)
+            || (eventType != QEvent::MouseMove && eventType != QEvent::MouseButtonPress
+                && eventType != QEvent::MouseButtonRelease && eventType != QEvent::Wheel))) return std::nullopt;
     result.type = Input::Type(type);
     result.eventType = QEvent::Type(eventType);
     result.button = Qt::MouseButton(button);

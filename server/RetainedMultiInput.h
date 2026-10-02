@@ -26,7 +26,7 @@ inline std::optional<ConsoleWorkerWire::Input> toCompositor(ConsoleWorkerWire::I
     const QVector<VideoMonitor> &wire, const QVector<RemoteMonitorGeometry::Output> &logical,
     const QPoint &workspaceOrigin)
 {
-    if (input.type == ConsoleWorkerWire::Input::Type::Key) return input;
+    if (input.type == ConsoleWorkerWire::Input::Type::Key || input.type == ConsoleWorkerWire::Input::Type::RelativePointer) return input;
     if (wire.isEmpty() || wire.size() != logical.size()
         || !std::isfinite(input.position.x()) || !std::isfinite(input.position.y())) return {};
     for (qsizetype i = 0; i < wire.size(); ++i) {

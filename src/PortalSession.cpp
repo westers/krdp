@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
+#include "RelativePointerEvent.h"
 #include "PortalSession.h"
 
 #include <QGuiApplication>
@@ -215,6 +216,15 @@ void PortalSession::sendEvent(const std::shared_ptr<QEvent> &event)
 {
     auto encodedStream = stream();
     if (!encodedStream || !encodedStream->isActive()) {
+        return;
+    }
+
+    if (event->type() == RelativePointerEvent::EventType) {
+        const auto relative = std::static_pointer_cast<RelativePointerEvent>(event);
+        if (relative->action == QEvent::MouseMove)
+            d->remoteInterface->NotifyPointerMotion(d->sessionPath, QVariantMap{}, relative->delta.x(), relative->delta.y());
+        else
+            sendEvent(relative->nonMotionEvent());
         return;
     }
 

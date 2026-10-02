@@ -68,6 +68,7 @@ public:
     explicit ConsoleHostController(Server *server, WorkerLauncher launchWorker, QString runtimeDirectory, QObject *parent = nullptr);
     ~ConsoleHostController() override;
     void start();
+    void physicalInputActivity();
     void setAudioPriorityDefault(bool enabled);
     void setUserSettingsReader(BrokerUserSettings::Reader reader) { m_userSettingsReader = std::move(reader); }
     void setVideoQualityPolicy(quint8 cap, bool adaptive) { m_qualityCap = cap; m_adaptiveQuality = adaptive; }

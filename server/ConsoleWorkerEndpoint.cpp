@@ -154,6 +154,12 @@ void ConsoleWorkerEndpoint::setMedia(const ConsoleWorkerWire::Media &media)
     }
 }
 
+void ConsoleWorkerEndpoint::reclaimConsole(quint64 generation)
+{
+    if (m_ready && m_worker)
+        m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ControlState{generation, true}, ConsoleWorkerWire::Kind::ReclaimConsole));
+}
+
 void ConsoleWorkerEndpoint::setControlState(const ConsoleWorkerWire::ControlState &state)
 {
     if (m_ready && m_worker) {

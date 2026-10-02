@@ -553,7 +553,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(11));
+    QCOMPARE(ProtocolVersion, quint16(12));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -751,7 +751,7 @@ void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
     QCOMPARE(encoderStats(*deframer.next()), std::optional(measured));
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 0);
-    QCOMPARE(LastKind, Kind::ChromaTiming);
+    QCOMPARE(LastKind, Kind::ReclaimConsole);
 
     const auto rejected = [](const EncoderStats &stats) {
         Deframer d;

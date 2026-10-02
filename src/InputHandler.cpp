@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "InputHandler.h"
+#include "RelativePointerEvent.h"
 
 #include <QKeyEvent>
 #include <QMetaObject>
@@ -37,6 +38,12 @@ BOOL inputMouseEvent(rdpInput *input, uint16_t flags, uint16_t x, uint16_t y)
     }
 
     return FALSE;
+}
+
+BOOL inputRelativeMouseEvent(rdpInput *input, uint16_t flags, int16_t x, int16_t y)
+{
+    auto context = reinterpret_cast<PeerContext *>(input->context);
+    return context->inputHandler->relativeMouseEvent(x, y, flags) ? TRUE : FALSE;
 }
 
 BOOL inputExtendedMouseEvent(rdpInput *input, uint16_t flags, uint16_t x, uint16_t y)
@@ -95,6 +102,7 @@ void InputHandler::initialize(rdpInput *input)
     d->input = input;
     input->SynchronizeEvent = inputSynchronizeEvent;
     input->MouseEvent = inputMouseEvent;
+    input->RelMouseEvent = inputRelativeMouseEvent;
     input->ExtendedMouseEvent = inputExtendedMouseEvent;
     input->KeyboardEvent = inputKeyboardEvent;
     input->UnicodeKeyboardEvent = inputUnicodeKeyboardEvent;
@@ -162,6 +170,30 @@ bool InputHandler::mouseEvent(uint16_t x, uint16_t y, uint16_t flags)
     }
     Q_EMIT inputEvent(event);
 
+    return true;
+}
+
+bool InputHandler::relativeMouseEvent(int16_t x, int16_t y, uint16_t flags)
+{
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this, x, y, flags] { relativeMouseEvent(x, y, flags); }, Qt::QueuedConnection);
+        return true;
+    }
+    if (flags & PTR_FLAGS_MOVE)
+        Q_EMIT inputEvent(std::make_shared<RelativePointerEvent>(QEvent::MouseMove, QPointF(x, y)));
+    if (flags & (PTR_FLAGS_WHEEL | PTR_FLAGS_HWHEEL)) {
+        auto axis = flags & WheelRotationMask;
+        if (axis & PTR_FLAGS_WHEEL_NEGATIVE) axis = (~axis & WheelRotationMask) + 1;
+        axis *= flags & PTR_FLAGS_WHEEL_NEGATIVE ? 1 : -1;
+        Q_EMIT inputEvent(std::make_shared<RelativePointerEvent>(QEvent::Wheel, QPointF{}, Qt::NoButton,
+            flags & PTR_FLAGS_HWHEEL ? QPoint(-axis, 0) : QPoint(0, axis)));
+    } else {
+        const auto button = flags & PTR_FLAGS_BUTTON1 ? Qt::LeftButton
+            : flags & PTR_FLAGS_BUTTON2 ? Qt::RightButton : flags & PTR_FLAGS_BUTTON3 ? Qt::MiddleButton : Qt::NoButton;
+        if (button != Qt::NoButton)
+            Q_EMIT inputEvent(std::make_shared<RelativePointerEvent>(flags & PTR_FLAGS_DOWN ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease,
+                QPointF{}, button));
+    }
     return true;
 }
 

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
+#include "RelativePointerEvent.h"
 #include "PlasmaScreencastV1Session.h"
 
 #include "EncoderWatchdog.h"
@@ -874,6 +875,18 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
         return;
     }
 
+    if (event->type() == RelativePointerEvent::EventType) {
+        const auto relative = std::static_pointer_cast<RelativePointerEvent>(event);
+        // Cursor-shape refresh nudges are absolute warps: they break games' pointer locks.
+        d->cursorSettleTimer.stop();
+        d->lastPointer.reset();
+        if (relative->action == QEvent::MouseMove)
+            d->remoteInterface->pointer_motion(wl_fixed_from_double(relative->delta.x()), wl_fixed_from_double(relative->delta.y()));
+        else
+            injectNonMotionEvent(relative->nonMotionEvent());
+        return;
+    }
+
     if (event->type() == QEvent::MouseMove) {
         // The position is relative to this session's own captured output, in
         // capture pixels; mapToGlobal() normalises it and maps it onto the
@@ -912,6 +925,18 @@ void PlasmaScreencastV1Session::sendGlobalEvent(const std::shared_ptr<QEvent> &e
         return;
     }
     d->loggedInactiveGlobalEvents = false;
+
+    if (event->type() == RelativePointerEvent::EventType) {
+        const auto relative = std::static_pointer_cast<RelativePointerEvent>(event);
+        // Cursor-shape refresh nudges are absolute warps: they break games' pointer locks.
+        d->cursorSettleTimer.stop();
+        d->lastPointer.reset();
+        if (relative->action == QEvent::MouseMove)
+            d->remoteInterface->pointer_motion(wl_fixed_from_double(relative->delta.x()), wl_fixed_from_double(relative->delta.y()));
+        else
+            injectNonMotionEvent(relative->nonMotionEvent());
+        return;
+    }
 
     if (event->type() == QEvent::MouseMove) {
         // The position is already in KWin-global logical coordinates, so it

@@ -1,3 +1,4 @@
+#include "RelativePointerEvent.h"
 #include "FarsideEnv.h"
 // SPDX-FileCopyrightText: 2026 Steve Westers
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
@@ -41,7 +42,6 @@
 #include "H264KeyframeSize.h"
 #include "EncoderSupport.h"
 #include "RdpConnection.h"
-#include "TakeoverDetector.h"
 #include "PipeWireAudioPlayback.h"
 #include "ConsoleMicrophoneSession.h"
 #include "ConsoleCameraSession.h"
@@ -77,6 +77,8 @@ namespace
 std::shared_ptr<QEvent> eventFor(const ConsoleWorkerWire::Input &input)
 {
     switch (input.type) {
+    case ConsoleWorkerWire::Input::Type::RelativePointer:
+        return std::make_shared<RelativePointerEvent>(input.eventType, input.position, input.button, input.angleDelta);
     case ConsoleWorkerWire::Input::Type::Mouse:
         if (input.eventType != QEvent::MouseMove && input.eventType != QEvent::MouseButtonPress && input.eventType != QEvent::MouseButtonRelease) {
             return {};
@@ -138,7 +140,6 @@ public:
         connect(&m_resize, &ConsoleResizeSession::mutationStarting, this, [this]() {
             releaseInput();
             m_lastPhysicalKeyframe.reset();
-            m_takeover.outputMoved(m_clock.elapsed());
             if (m_multiMode) {
                 m_multiReady = false;
                 m_multiCapture.invalidate();
@@ -218,10 +219,7 @@ public:
         connect(&m_encoderStatsTimer, &QTimer::timeout, this, &Worker::sendEncoderStats);
         connect(&m_session, &AbstractSession::cursorUpdate, this, [this](const PipeWireCursor &cursor) {
             reportCursor(WorkspaceCursorSource, cursor);
-            if (cursor.visible && m_mode.physicalActions() && m_control.active && !m_resize.changing() && m_session.outputGeometryResolved()
-                && m_takeover.observed(m_session.mapToGlobal(cursor.position).toPoint(), m_clock.elapsed())) {
-                reclaimConsole();
-            }
+
         });
         // FIX-CURSOR: a capture that stopped no longer says where the cursor is.
         connect(&m_session, &AbstractSession::streamActiveChanged, this, [this](bool active) {
@@ -229,9 +227,6 @@ public:
         });
         m_cursorTimer.setSingleShot(true);
         connect(&m_cursorTimer, &QTimer::timeout, this, &Worker::flushCursor);
-        connect(&m_session, &AbstractSession::outputGeometryChanged, this, [this](const QRect &) {
-            m_takeover.outputMoved(m_clock.elapsed());
-        });
         connect(&m_socket, &QLocalSocket::connected, this, [this]() {
             m_connectTimeout.stop();
             // AUD-FIX8: Hello, EncoderCaps, Ready, then the rest (ConsoleWorkerOutbox).
@@ -621,7 +616,6 @@ private:
                       << QStringLiteral("output.%1.priority.%2").arg(output.name).arg(priority++);
             for (auto &entry : m_consoleVirtualPlan->outputs) if (entry.name == output.name) entry.position = entry.parkPosition = position;
         }
-        m_takeover.outputMoved(m_clock.elapsed());
         if (!arguments.isEmpty() && !runKScreenCommand(arguments)) return false;
         const auto after = readKScreenJson();
         if (!after) return false;
@@ -791,8 +785,6 @@ private:
                 failConsoleVirtual(QStringLiteral("Console extend layout could not be verified")); return;
             }
         }
-        m_takeover.outputMoved(m_clock.elapsed());
-        m_takeover.armed(m_clock.elapsed());
         m_consoleVirtualApplied = true;
         m_consoleVirtualPoll.stop();
         m_multiSettle.start(400); // Qt screens must catch up with KScreen before capture opens.
@@ -1409,18 +1401,6 @@ private:
             connect(session.get(), &QObject::destroyed, this, [this, cursorSource] {
                 forgetCursorSource(cursorSource);
             });
-            if (!m_mode.virtualSession) {
-                auto *producer = session.get();
-                connect(producer, &AbstractSession::cursorUpdate, this, [this, producer](const PipeWireCursor &cursor) {
-                    if (cursor.visible && m_mode.physicalActions() && m_control.active && !m_resize.changing()
-                        && producer->outputGeometryResolved()
-                        && m_takeover.observed(producer->mapToGlobal(cursor.position).toPoint(), m_clock.elapsed()))
-                        reclaimConsole();
-                });
-                connect(producer, &AbstractSession::outputGeometryChanged, this, [this](const QRect &) {
-                    m_takeover.outputMoved(m_clock.elapsed());
-                });
-            }
             m_multiSessions.push_back(std::move(session));
         }
         for (const auto &session : m_multiSessions) session->setStreamingEnabled(true);
@@ -2981,7 +2961,6 @@ private:
             }
             m_consoleVirtualReplaced = false;
             m_consoleVirtualPlan->replace = false;
-            m_takeover.latch();
             m_multiSettle.start(400);
             qInfo() << "Local Console monitors restored; remote temporary monitors continue as extend";
             return;
@@ -2999,7 +2978,6 @@ private:
         m_session.setVideoQuality(80);
         m_resize.setControl(m_control);
         m_reclaimAction.setEnabled(false);
-        m_takeover.latch();
     }
 
     void readBroker()
@@ -3072,11 +3050,11 @@ private:
                     if (m_mode.virtualSession) m_virtualResize.setControl(*control);
                     else m_resize.setControl(*control);
                     m_reclaimAction.setEnabled(m_mode.physicalActions() && control->active);
-                    m_takeover = {};
-                    if (control->active) {
-                        m_takeover.armed(m_clock.elapsed());
-                    }
                 }
+                continue;
+            }
+            if (const auto request = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::ReclaimConsole)) {
+                if (request->active && request->generation == m_control.generation) reclaimConsole();
                 continue;
             }
             if (record->kind == ConsoleWorkerWire::Kind::Stop && record->payload.isEmpty()) {
@@ -3231,23 +3209,15 @@ private:
                     if (m_multiMode) {
                         auto *session = multiInputSession();
                         if (!session) continue;
-                        if (!m_mode.virtualSession && mapped->type == ConsoleWorkerWire::Input::Type::Mouse
-                            && mapped->eventType == QEvent::MouseMove)
-                            m_takeover.injected(mapped->position.toPoint(), m_clock.elapsed());
                         if (RetainedMultiInput::positionBeforeDispatch(*mapped)) {
                             auto motion = *mapped;
                             motion.type = ConsoleWorkerWire::Input::Type::Mouse;
                             motion.eventType = QEvent::MouseMove;
                             motion.button = Qt::NoButton;
-                            if (!m_mode.virtualSession)
-                                m_takeover.injected(motion.position.toPoint(), m_clock.elapsed());
                             session->sendGlobalEvent(eventFor(motion));
                         }
                         session->sendGlobalEvent(event);
                     } else {
-                        if (input->type == ConsoleWorkerWire::Input::Type::Mouse && input->eventType == QEvent::MouseMove) {
-                            m_takeover.injected(m_session.mapToGlobal(input->position).toPoint(), m_clock.elapsed());
-                        }
                         m_session.sendEvent(event);
                     }
                     m_inputState.record(*mapped);
@@ -3397,7 +3367,6 @@ private:
     std::optional<VideoFrame> m_lastPhysicalKeyframe;
     ConsoleInputState m_inputState;
     QElapsedTimer m_clock;
-    Takeover::Detector m_takeover;
     QAction m_reclaimAction;
     ConsoleWorkerWire::ControlState m_control;
     ConsoleResizeSession m_resize;

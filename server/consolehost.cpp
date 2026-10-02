@@ -1,3 +1,4 @@
+#include "PhysicalInputWatcher.h"
 #include "FarsideEnv.h"
 // SPDX-FileCopyrightText: 2026 Steve Westers
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
@@ -116,6 +117,9 @@ int main(int argc, char **argv)
     QObject::connect(&launcher, &KRdp::ConsoleWorkerLauncher::workerExited,
                      &host, &KRdp::ConsoleHostController::workerExited, Qt::QueuedConnection);
     QObject::connect(&seat, &KRdp::ConsoleSeatWatcher::sessionsChanged, &host, &KRdp::ConsoleHostController::setSeatSessions);
+    KRdp::PhysicalInputWatcher physicalInput;
+    QObject::connect(&physicalInput, &KRdp::PhysicalInputWatcher::activity, &host, &KRdp::ConsoleHostController::physicalInputActivity);
+    physicalInput.start();
     host.setAudioPriorityDefault(audioPriorityValue == QLatin1String("true"));
     host.setUserSettingsReader(KRdp::BrokerUserSettings::readUser);
     host.setVideoQualityPolicy(quint8(quality), adaptiveValue == QLatin1String("true"));

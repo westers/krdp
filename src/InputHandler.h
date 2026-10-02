@@ -48,6 +48,7 @@ private:
     // FreeRDP callbacks that need to call the event handler functions in the
     // handler.
     friend BOOL inputSynchronizeEvent(rdpInput *, uint32_t);
+    friend BOOL inputRelativeMouseEvent(rdpInput *, uint16_t, int16_t, int16_t);
     friend BOOL inputMouseEvent(rdpInput *, uint16_t, uint16_t, uint16_t);
     friend BOOL inputExtendedMouseEvent(rdpInput *, uint16_t, uint16_t, uint16_t);
     friend BOOL inputKeyboardEvent(rdpInput *, uint16_t, uint8_t);
@@ -67,6 +68,7 @@ private:
      * \param flags Mouse button state and other flags.
      */
     bool mouseEvent(uint16_t x, uint16_t y, uint16_t flags);
+    bool relativeMouseEvent(int16_t x, int16_t y, uint16_t flags);
     bool extendedMouseEvent(uint16_t x, uint16_t y, uint16_t flags);
     bool keyboardEvent(uint16_t code, uint16_t flags);
     bool unicodeKeyboardEvent(uint16_t code, uint16_t flags);

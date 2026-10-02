@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Steve Westers
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
+#include "RelativePointerEvent.h"
 #include "ConsoleWorkerSession.h"
 
 #include <QKeyEvent>
@@ -15,6 +16,15 @@ std::optional<ConsoleWorkerWire::Input> inputFor(const std::shared_ptr<QEvent> &
 {
     ConsoleWorkerWire::Input result;
     result.eventType = event->type();
+    if (event->type() == RelativePointerEvent::EventType) {
+        const auto relative = std::static_pointer_cast<RelativePointerEvent>(event);
+        result.type = ConsoleWorkerWire::Input::Type::RelativePointer;
+        result.eventType = relative->action;
+        result.position = relative->delta;
+        result.button = relative->button;
+        result.angleDelta = relative->angleDelta;
+        return result;
+    }
     switch (event->type()) {
     case QEvent::MouseMove:
     case QEvent::MouseButtonPress:

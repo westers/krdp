@@ -467,7 +467,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::localTakeover, this, [this](quint64 generation) {
         if (!m_control.owner() || generation != m_controlGeneration) {
-            return; // A late cursor report must not revoke a newer controller.
+            return; // A late reclaim request must not revoke a newer controller.
         }
         qInfo() << "Local console takeover: releasing remote control";
         releaseInput();
@@ -1856,6 +1856,12 @@ void ConsoleHostController::releaseInput()
     for (const auto &input : releases) {
         m_endpoint.sendInput(input);
     }
+}
+
+void ConsoleHostController::physicalInputActivity()
+{
+    // Fake-input and application cursor warps do not originate at evdev devices.
+    if (m_control.owner()) m_endpoint.reclaimConsole(m_controlGeneration);
 }
 
 void ConsoleHostController::syncControlState()

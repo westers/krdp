@@ -26,8 +26,9 @@ public:
             }
             return;
         }
-        m_position = input.position;
-        if (input.type == Input::Type::Mouse && input.button != Qt::NoButton) {
+        m_relative = input.type == Input::Type::RelativePointer;
+        if (!m_relative) m_position = input.position;
+        if ((input.type == Input::Type::Mouse || m_relative) && input.button != Qt::NoButton) {
             if (input.eventType == QEvent::MouseButtonPress) {
                 m_buttons |= input.button;
             } else if (input.eventType == QEvent::MouseButtonRelease) {
@@ -52,9 +53,9 @@ public:
             }
             m_buttons &= ~Qt::MouseButtons(button);
             Input input;
-            input.type = Input::Type::Mouse;
+            input.type = m_relative ? Input::Type::RelativePointer : Input::Type::Mouse;
             input.eventType = QEvent::MouseButtonRelease;
-            input.position = m_position;
+            input.position = m_relative ? QPointF{} : m_position;
             input.button = button;
             input.buttons = m_buttons;
             releases.append(input);
@@ -66,5 +67,6 @@ private:
     QMap<quint64, Input> m_keys;
     Qt::MouseButtons m_buttons;
     QPointF m_position;
+    bool m_relative = false;
 };
 }

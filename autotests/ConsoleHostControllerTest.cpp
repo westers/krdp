@@ -19,6 +19,44 @@ class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void physicalActivityReclaimIsGenerationBoundAndReleasesHeldKeys()
+    {
+        QTemporaryDir runtime; QVERIFY(runtime.isValid());
+        Server server; RdpConnection connection(&server, -1), next(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
+        const QByteArray token(32, 't');
+        QVERIFY(host.m_endpoint.listen(runtime.filePath(QStringLiteral("worker.sock")),
+            {ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000}, token));
+        host.addClient(&connection); host.addClient(&next);
+        const auto first = host.m_clients.front()->id, second = host.m_clients.back()->id;
+        host.m_control.admit(first); host.m_control.admit(second); host.syncControlState();
+        QLocalSocket worker; worker.connectToServer(host.m_endpoint.socketName()); QVERIFY(worker.waitForConnected(1000));
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), 1000, token})
+            + ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready)); QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_VERIFY(host.m_endpoint.ready());
+        const auto oldGeneration = host.m_controlGeneration;
+        host.physicalInputActivity();
+        ConsoleWorkerWire::Deframer records;
+        bool received = false;
+        QTRY_VERIFY_WITH_TIMEOUT(([&] {
+            records.feed(worker.readAll());
+            while (auto record = records.next())
+                if (auto request = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::ReclaimConsole))
+                    received = request->active && request->generation == oldGeneration;
+            return received;
+        })(), 1000);
+        QVERIFY(host.m_control.release(first));
+        QVERIFY(host.m_control.acquire(second)); host.syncControlState();
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ControlState{oldGeneration, true}, ConsoleWorkerWire::Kind::LocalTakeover));
+        worker.flush(); QTest::qWait(20);
+        QVERIFY(host.m_control.ownsControl(second)); // An old device notification cannot revoke a newer owner.
+        ConsoleWorkerWire::Input key; key.type = decltype(key.type)::Key; key.eventType = QEvent::KeyPress; key.nativeScanCode = 17;
+        host.m_inputState.record(key);
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ControlState{host.m_controlGeneration, true}, ConsoleWorkerWire::Kind::LocalTakeover));
+        worker.flush(); QTRY_COMPARE(host.m_control.owner(), quint64(0));
+        QVERIFY(host.m_inputState.releaseAll().isEmpty());
+    }
     void configuredOwnedResizeFitTransactions_data()
     {
         QTest::addColumn<int>("count"); QTest::addColumn<bool>("fit");

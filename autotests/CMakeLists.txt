@@ -985,3 +985,9 @@ foreach(target VirtualSessionTransportTest VirtualStockClientTest VirtualSession
         target_link_libraries(${target} PRIVATE KRdpBrokerUserSettings)
     endif()
 endforeach()
+
+# OPT-054: pure RDP input/wire/held-key/physical-activity gate; no host devices or daemons.
+add_executable(GameInputTest GameInputTest.cpp)
+target_include_directories(GameInputTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(GameInputTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
+add_test(NAME GameInputTest COMMAND GameInputTest)
