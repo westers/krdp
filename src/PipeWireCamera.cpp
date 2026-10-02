@@ -91,7 +91,11 @@ bool PipeWireCamera::start(const QString &id, uint32_t width, uint32_t height, u
     format.format = SPA_VIDEO_FORMAT_RGBA;
     format.size.width = width;
     format.size.height = height;
-    format.framerate.num = fps ? fps : 30;
+    // Publish a conferencing rate, independently of the physical camera's
+    // selected capture mode. Devices such as the BRIO advertise 120 fps first;
+    // publishing that fixed rate makes apps with a 30 fps limit ignore the
+    // camera entirely. Keep the latest input frame for each output callback.
+    format.framerate.num = qMin(fps ? fps : 30u, 30u);
     format.framerate.denom = 1;
     const spa_pod *params[] = {spa_format_video_raw_build(&builder, SPA_PARAM_EnumFormat, &format)};
     const auto flags = static_cast<pw_stream_flags>(PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS);
