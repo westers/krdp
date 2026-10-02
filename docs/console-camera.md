@@ -12,7 +12,9 @@ and suppresses initial camera requests when the host reports this condition.
 Actual producer permissions/format/initial-frame failures are still checked in
 the desktop worker and return an error instead of a successful mapping. Virtual
 camera sharing is explicitly unavailable until its device namespace includes a
-bridge. These source changes require the updated server and client packages.
+bridge. The update is installed on Hal, Buzz and Sol (server `2828a7c`, client0.6.5).
+The installer does not automatically install or configure the loopback packages;
+it disables camera sharing and explains the missing setup.
 
 ## Configure the server
 
@@ -61,10 +63,17 @@ by copying the Console path into Virtual settings.
 
 ## Sol deployment, 2026-10-01
 
-Sol runs server `df517e8`, with `v4l2loopback` 0.15.3 on kernel
+Sol runs server `2828a7c`, with `v4l2loopback` 0.15.3 on kernel
 `7.0.0-34-generic`. Dedicated `farside-camera.conf` files in both module config
 directories create `/dev/video10` with `exclusive_caps=1`; the desktop user has a
 normal `uaccess` read/write ACL. Only Console's loopback setting changed. The
 installed settings helper saved it with TLS kept; an explicit service restart
 and runtime readback verified `/dev/video10`. Real Hal-camera application
 acceptance is tracked separately in the task plan and deployment evidence.
+
+Installed Buzz → Sol Console testing delivered10 frames through `/dev/video10`;
+PipeWire camera enumeration and desktop portal presence also pass. Hal → Sol
+Camera/Meet preview remains unverified: Sol was locked during the native Camera
+check, so its window suspended the stream. Reconnect, unlock and enable sharing
+before reopening Camera or refreshing the browser. This is an acceptance limit,
+not a demonstrated cause of the earlier application failure.

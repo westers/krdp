@@ -13,8 +13,8 @@ resume a Goal, execute the whole queue, or start the next task automatically.
 The existing Goal remains paused. Superpowers workflows and automatic delegation
 are not required. Existing plans, tests, code and evidence remain useful inputs.
 
-**Requested three-host update complete:** Hal, Buzz and Sol have client 0.6.4
-and server `df517e8`; other hosts remain unchanged. Next tasks to select are the
+**Requested three-host update complete:** Hal, Buzz and Sol have client 0.6.5
+and server `2828a7c` (camera readiness follow-up); other hosts remain unchanged. Next tasks to select are the
 remaining installed N04/N05 checks. This installation request does not close
 their broader acceptance criteria or authorize further tasks.
 
@@ -27,8 +27,8 @@ parent T-task being complete. New test quantity alone does not count as delivery
 
 | Area | Already done | Still missing |
 |---|---|---|
-| Delivered client | 0.6.4 / `afed6fb` Hal/Buzz/Sol, debug actions OFF; 0.6.3 / `2df38a7` Ace/Cray/Marvin | Remaining N05 monitor acceptance and N06 fleet rollout/tag |
-| Delivered server | `df517e8` Hal/Buzz/Sol, wire 11, private KPipeWire `9d6b08c`; `4b308bd` other hosts, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
+| Delivered client | 0.6.5 / `82fe55e` Hal/Buzz/Sol, debug actions OFF; 0.6.3 / `2df38a7` Ace/Cray/Marvin | Remaining N05 monitor acceptance and N06 fleet rollout/tag |
+| Delivered server | `2828a7c` Hal/Buzz/Sol, wire 11, private KPipeWire `9d6b08c`; `4b308bd` other hosts, wire 6 | Installed settings/authorization and broader native parity; remaining fleet/consolidation delivery |
 | Settings/auth | Scoped authentication, services, 17 preferences, 25 host/session controls and runtime inspection implemented; `44726890` removes legacy KCM adapters | Real installed password/cancel/save/restart, effective runtime policy and live stock coexistence |
 | Monitors/video | Quiet Sol private worker single/two-screen HEVC creation/resize/Fit/decoded restoration passes; client UI and protocol evidence exists | Final packaged Console RDP, broader topology lifecycle; earlier loaded CUDA OOM/fallback is unresolved |
 | Discover/locker | Font-cache cause demonstrated and repaired on Sol; Steve confirms Console Discover password entry and ordinary lock/unlock work | Virtual/failure/restart matrix and original lock/output-release race; agent's original failing trace still missing |
@@ -336,6 +336,20 @@ and neither mode unlocks a locked Console. Installed settings apply as documente
 
 ### N12 — Finish camera and redirected media (T11)
 
+**PARTIAL, 2026-10-01 readiness fix delivered:** server `2828a7c` and client0.6.5
+`82fe55e` installed on Sol/Buzz/Hal. A missing or invalid Console bridge disables
+sharing with setup instructions; worker producer failures are errors. Virtual
+sharing is disabled with its namespace explanation. Installer does not automatically
+install/configure loopback packages. Focused source/model/menu checks and installed
+Buzz → Sol 10-frame V4L2/PipeWire provider/portal-presence checks pass. Native
+Camera/Meet preview remains open: Sol session1286 was locked; GNOME Camera launched
+behind the lock suspended its stream. Preserve the lock; Steve reconnects/unlocks,
+enables camera and reopens Camera/refreshes Meet, leaving connection open if it
+fails. Record no-device/blank/error and trace that active connection. This is not
+proof the lock caused his earlier failure. Source fixes and transport acceptance
+are delivered; no full call/Virtual camera/LED acceptance. Evidence:
+`~/dev/rdp/evidence/2026-10-01-camera-readiness/SUMMARY.md`.
+
 **PARTIAL, 2026-10-01 user-reported Console camera fix:** Sol had no V4L2 devices
 or loopback module despite the Hal client reporting mapping. Installed the five
 new loopback/DKMS/tool packages without upgrades/removals, configured persistent
@@ -345,7 +359,7 @@ Runtime path, device identity, preserved Virtual/TLS settings and apt holds pass
 Hal must reconnect, enable mapping and reopen Camera/refresh Meet to check device
 visibility and live video. No real Hal-camera frames or call accepted yet; camera
 off means this exclusive device advertises output rather than capture. See
-[Console camera setup](../console-camera.md). No product binary/version change.
+[Console camera setup](../console-camera.md). That setup-only checkpoint preceded the readiness release above.
 
 **Do:** Select the missing Console or Virtual case: namespace/device grants,
 on/off/reselect, second camera, LED or external bidirectional call. Reuse existing
@@ -471,7 +485,7 @@ do not duplicate its long history here or close a task by renaming it.
 | T24 Sessions page | Planned | N28 |
 | T25 UX | Planned | N29 |
 | T26 Performance/visual | Partial; functional/load snapshots only | N30 |
-| T27 Releases | Partial; N02/N03 artifacts complete; client0.6.4/serverdf517e8 Hal/Buzz/Sol installed, other hosts unchanged | Remaining N04/N05 integration, N06 fleet/tag and N18 consolidation; later deliveries |
+| T27 Releases | Partial; N02/N03 artifacts complete; client0.6.5/server2828a7c Hal/Buzz/Sol installed, other hosts unchanged | Remaining N04/N05 integration, N06 fleet/tag and N18 consolidation; later deliveries |
 | T28 Documentation | Ongoing | This plan + short affected-row/handoff updates per task |
 
 ### Prompt for a fresh task
