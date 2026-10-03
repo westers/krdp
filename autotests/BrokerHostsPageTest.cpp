@@ -113,19 +113,23 @@ private Q_SLOTS:
             QQmlEngine engine; localize(engine); QStringList warnings;
             connect(&engine,&QQmlEngine::warnings,this,[&](const auto &errors){for(const auto &error:errors)warnings.append(error.toString());});
             QQmlComponent component(&engine,pageUrl());
-            QScopedPointer<QObject> object(component.createWithInitialProperties({{u"fixedScope"_s,scope++},{u"showAdvanced"_s,true},{u"showPciEditor"_s,true},
+            QScopedPointer<QObject> object(component.createWithInitialProperties({{u"fixedScope"_s,qMin(scope++,1)},{u"showAdvanced"_s,true},
                 {u"consoleSettings"_s,QVariant::fromValue(&console)},{u"virtualSettings"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)}}));
             QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
             QQuickWindow window; window.resize(900,850); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
             const auto item=[&](const QString &name){return find(page,name);};
             const auto click=[&](const QString &name){auto *button=item(name);return button && QMetaObject::invokeMethod(button,"clicked");};
-            QVERIFY(!model->loaded()); QVERIFY(click(u"unlockHostSettings"_s)); QTRY_VERIFY(!model->busy()); QVERIFY(model->loaded());
+            const bool hw=model==&session;   // the session model is edited through the Virtual page's hardware section
+            const auto name=[&](const QString &host,const QString &hardware){return hw?hardware:host;};
+            const QString prefix=hw?u"desktop_"_s:u"host_"_s;
+            if(hw){auto *section=item(u"desktopHardwareSection"_s);QVERIFY(section);QVERIFY(section->setProperty("showPciEditor",true));}
+            QVERIFY(!model->loaded()); QVERIFY(click(name(u"unlockHostSettings"_s,u"unlockDesktopHardware"_s))); QTRY_VERIFY(!model->busy()); QVERIFY(model->loaded());
             for(const auto &definition:model->definitions()) {
                 const auto row=definition.toMap();const auto key=row[u"key"_s].toString();
                 if(key.startsWith(u"Certificate") || (model==&virtualHost && key==u"CameraLoopbackDevice")) continue;
-                auto *control=item(u"host_"_s+key); QVERIFY2(control,qPrintable(key));
+                auto *control=item(prefix+key); QVERIFY2(control,qPrintable(key));
                 if (key==u"Address") {
-                    auto *mode=item(u"host_AddressMode"_s); QVERIFY(mode); QVERIFY(mode->setProperty("currentIndex",3));
+                    auto *mode=item(prefix+u"AddressMode"_s); QVERIFY(mode); QVERIFY(mode->setProperty("currentIndex",3));
                     QVERIFY(QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,3)));
                 }
                 const auto choices=row[u"choices"_s].toList();
@@ -139,13 +143,13 @@ private Q_SLOTS:
                 }
                 QCOMPARE(model->values()[key],desired[key]);
             }
-            QVERIFY(model->canSave()); QVERIFY(click(u"saveHostSettings"_s)); QTRY_VERIFY(!model->busy()); QVERIFY2(model->error().isEmpty(),qPrintable(model->error()));
+            QVERIFY(model->canSave()); QVERIFY(click(name(u"saveHostSettings"_s,u"saveDesktopHardware"_s))); QTRY_VERIFY(!model->busy()); QVERIFY2(model->error().isEmpty(),qPrintable(model->error()));
             QVERIFY(!model->modified()); QVERIFY(model->applicationRequired());
             window.resize(640,700);page->setSize(window.size());QTest::qWait(100);
             auto *flickable=page->property("flickable").value<QQuickItem *>();QVERIFY(flickable);
             auto *content=flickable->property("contentItem").value<QQuickItem *>();QVERIFY(content);
             for(const auto &definition:model->definitions()) {
-                const auto key=definition.toMap()[u"key"_s].toString();auto *control=qobject_cast<QQuickItem *>(item(u"host_"_s+key));
+                const auto key=definition.toMap()[u"key"_s].toString();auto *control=qobject_cast<QQuickItem *>(item(prefix+key));
                 if(!control || !control->isVisible())continue;
                 const auto rect=control->mapRectToItem(content,QRectF(0,0,control->width(),control->height()));
                 QVERIFY2(rect.left()>=-0.5 && rect.right()<=flickable->width()+0.5,qPrintable(key));
@@ -156,13 +160,13 @@ private Q_SLOTS:
                 QVERIFY(model->setValue(u"Port"_s,u"70000"_s));QVERIFY(!item(u"saveHostSettings"_s)->property("enabled").toBool());
                 QVERIFY(port->setProperty("value",3401));QVERIFY(QMetaObject::invokeMethod(port,"valueModified"));
             }
-            QVERIFY(click(u"defaultHostSettings"_s));QVERIFY(model->values().isEmpty());
+            QVERIFY(click(name(u"defaultHostSettings"_s,u"defaultDesktopHardware"_s)));QVERIFY(model->values().isEmpty());
             for(const auto &failure:{QByteArray("cancel"),QByteArray("denied"),QByteArray("stale")}) {
-                writeMode(dir,failure);QVERIFY(click(u"saveHostSettings"_s));QTRY_VERIFY(!model->busy());QVERIFY(model->modified());QVERIFY(!model->error().isEmpty());
+                writeMode(dir,failure);QVERIFY(click(name(u"saveHostSettings"_s,u"saveDesktopHardware"_s)));QTRY_VERIFY(!model->busy());QVERIFY(model->modified());QVERIFY(!model->error().isEmpty());
             }
-            writeMode(dir,"success");QVERIFY(click(u"loadHostSettings"_s));auto *dialog=item(u"reloadHostConfirmation"_s);QVERIFY(dialog);
+            writeMode(dir,"success");QVERIFY(click(name(u"loadHostSettings"_s,u"loadDesktopHardware"_s)));auto *dialog=item(name(u"reloadHostConfirmation"_s,u"reloadDesktopHardwareConfirmation"_s));QVERIFY(dialog);
             QTRY_VERIFY(dialog->property("visible").toBool());QVERIFY(QMetaObject::invokeMethod(dialog,"reject"));QVERIFY(model->modified());
-            QVERIFY(click(u"loadHostSettings"_s));QVERIFY(QMetaObject::invokeMethod(item(u"reloadHostAccept"_s),"triggered"));QTRY_VERIFY(!model->busy());QVERIFY(!model->modified());
+            QVERIFY(click(name(u"loadHostSettings"_s,u"loadDesktopHardware"_s)));QVERIFY(QMetaObject::invokeMethod(item(name(u"reloadHostAccept"_s,u"reloadDesktopHardwareAccept"_s)),"triggered"));QTRY_VERIFY(!model->busy());QVERIFY(!model->modified());
             QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s)));page->setParentItem(nullptr);
         }
     }

@@ -145,6 +145,31 @@ private Q_SLOTS:
         QVERIFY(find(consolePage,u"editHostCertificate"_s)->property("visible").toBool());
         QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"defaultHostSettings"_s),"clicked")); QCOMPARE(console.tlsMode(),u"standard"_s); console.discard();
         QVERIFY(virtualHost.reload()); QTRY_VERIFY(!virtualHost.busy()); QVERIFY(session.reload()); QTRY_VERIFY(!session.busy()); QVERIFY(auth.reload()); QTRY_VERIFY(!auth.busy()); QVERIFY(preferences.reload());
+        {   // Review focus 3: the Virtual page has two independent save scopes.
+            auto *virtualPage=qobject_cast<QQuickItem *>(item(u"virtualSettingsPage"_s)); QVERIFY(virtualPage);
+            QVERIFY(page->setProperty("currentPage",2)); QTest::qWait(60);
+            QObject *saveHost = find(virtualPage, u"saveHostSettings"_s);
+            QObject *saveHw = find(virtualPage, u"saveDesktopHardware"_s);
+            QVERIFY(saveHost && saveHw);
+            QVERIFY(!saveHost->property("enabled").toBool());
+            QVERIFY(!saveHw->property("enabled").toBool());
+            session.setValue(u"VaapiDriver"_s, u"off"_s);                 // hardware edit
+            QVERIFY(saveHw->property("enabled").toBool());
+            QVERIFY(!saveHost->property("enabled").toBool());
+            QVERIFY(QMetaObject::invokeMethod(find(virtualPage, u"discardDesktopHardware"_s), "clicked"));
+            QVERIFY(!session.modified());
+            QVERIFY(virtualHost.setValue(u"Port"_s, u"3402"_s));          // host edit
+            QVERIFY(saveHost->property("enabled").toBool());
+            QVERIFY(!saveHw->property("enabled").toBool());
+            session.setValue(u"VaapiDriver"_s, u"off"_s);
+            QVERIFY(QMetaObject::invokeMethod(find(virtualPage, u"defaultHostSettings"_s), "clicked"));   // host Restore Defaults is host scope only
+            QVERIFY(session.modified());
+            QVERIFY(QMetaObject::invokeMethod(find(virtualPage, u"discardHostSettings"_s), "clicked")); // host Revert is host scope only
+            QVERIFY(!virtualHost.modified()); QVERIFY(session.modified());
+            QVERIFY(QMetaObject::invokeMethod(find(virtualPage, u"defaultDesktopHardware"_s), "clicked"));
+            QVERIFY(QMetaObject::invokeMethod(find(virtualPage, u"discardDesktopHardware"_s), "clicked"));
+            QVERIFY(!session.modified()); QVERIFY(!virtualHost.modified());
+        }
         QVERIFY(page->setProperty("currentPage",4));
         auto *prefsPage=qobject_cast<QQuickItem *>(item(u"brokerPreferencesPage"_s)); QVERIFY(prefsPage);
         auto *mode=find(prefsPage,u"inherit_Quality"_s); QVERIFY(mode);
@@ -172,7 +197,7 @@ private Q_SLOTS:
         KRdp::ServerCertificate::Paths capturePair{dir.filePath(u"capture-certificate.crt"_s),dir.filePath(u"capture-private.key"_s)}; QString captureError;
         QVERIFY(KRdp::ServerCertificate::generate(capturePair,u"capture-fixture"_s,QDateTime::currentDateTimeUtc(),10,&captureError));
         const auto screenshot=[&](const QString &name){QTest::qWait(350); if(!screenshots.isEmpty()) QVERIFY(window.grabWindow().save(screenshots+u"/"_s+name+u".png"_s));};
-        for(int index=0;index<6;++index) {
+        for(int index=0;index<5;++index) {
             QVERIFY(page->setProperty("currentPage",index)); screenshot(u"page-"_s+QString::number(index));
             if (index == 1 || index == 2 || index == 4) {
                 auto *current = index == 1 ? consolePage : index == 2 ? qobject_cast<QQuickItem *>(item(u"virtualSettingsPage"_s)) : qobject_cast<QQuickItem *>(item(u"brokerPreferencesPage"_s));
@@ -203,10 +228,10 @@ private Q_SLOTS:
         auto *enabled=find(details,u"consoleHostEnabled"_s); QVERIFY(enabled); QVERIFY(enabled->setProperty("checked",false)); QVERIFY(QMetaObject::invokeMethod(enabled,"clicked"));
         auto *confirm=find(details,u"consoleConfirmServiceOperation"_s); QVERIFY(confirm); QTRY_VERIFY(confirm->property("visible").toBool()); QCOMPARE(transport.mutations,0); screenshot(u"stop-dialog"_s); QVERIFY(QMetaObject::invokeMethod(confirm,"close")); QCOMPARE(transport.mutations,0);
         window.resize(640,360); page->setSize(window.size());
-        for(int index=1;index<6;++index) {
+        for(int index=1;index<5;++index) {
             QVERIFY(page->setProperty("currentPage",index)); QTest::qWait(60);
             const auto visibleSave=[&](auto &&self,QQuickItem *parent)->QQuickItem * {
-                if(parent->isVisible() && parent->objectName().startsWith(u"save")) return parent;
+                if(parent->isVisible() && parent->objectName().startsWith(u"save") && parent->objectName()!=u"saveDesktopHardware"_s) return parent;   // the hardware save is inline content, not a fixed footer
                 for (auto *child : parent->childItems()) { if (auto *result = self(self, child)) return result; }
                 return nullptr;
             };

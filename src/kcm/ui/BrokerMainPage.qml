@@ -18,7 +18,7 @@ KCM.AbstractKCM {
     property string hostName: kcm.hostName
     property int currentPage: 0
     property var history: []
-    readonly property var pages: [overview, consolePage, virtualPage, accessPage, preferencesPage, hardwarePage]
+    readonly property var pages: [overview, consolePage, virtualPage, accessPage, preferencesPage]
     readonly property var flickable: pages[currentPage].flickable
     title: pages[currentPage].title
     framedView: false
@@ -103,6 +103,5 @@ KCM.AbstractKCM {
         BrokerHostsPage { id: virtualPage; objectName: "virtualSettingsPage"; Layout.minimumWidth: 0; Layout.minimumHeight: 0; fixedScope: 1; consoleSettings: root.consoleHost; virtualSettings: root.virtualHost; sessionSettings: root.sessionSettings; administration: root.administration; navigation: root }
         BrokerSignInPage { id: accessPage; Layout.minimumWidth: 0; Layout.minimumHeight: 0; administration: root.authentication; serviceAdministration: root.administration }
         BrokerPreferencesPage { id: preferencesPage; Layout.minimumWidth: 0; Layout.minimumHeight: 0; preferences: root.preferences }
-        BrokerHostsPage { id: hardwarePage; objectName: "virtualHardwarePage"; Layout.minimumWidth: 0; Layout.minimumHeight: 0; fixedScope: 2; consoleSettings: root.consoleHost; virtualSettings: root.virtualHost; sessionSettings: root.sessionSettings; administration: root.administration; navigation: root }
     }
 }

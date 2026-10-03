@@ -15,13 +15,10 @@ KCM.SimpleKCM {
     property bool showAdvanced: false
     property var administration: null
     property var navigation
-    readonly property var host: fixedScope === 0 ? consoleSettings : fixedScope === 1 ? virtualSettings : sessionSettings
-    readonly property bool session: fixedScope === 2
+    readonly property var host: fixedScope === 0 ? consoleSettings : virtualSettings
     readonly property string serviceRoute: fixedScope === 0 ? "console" : "virtual"
-    readonly property var selectedDevices: (host.values.RenderPci || "").split(",").map(value => value.trim()).filter(value => value !== "")
-    property bool showPciEditor: false
     readonly property var camera: host.metadata.cameraLoopback || ({})
-    title: session ? i18nc("@title:window", "New Desktop Hardware") : fixedScope === 0 ? i18nc("@title:window", "Console Settings") : i18nc("@title:window", "Virtual Settings")
+    title: fixedScope === 0 ? i18nc("@title:window", "Console Settings") : i18nc("@title:window", "Virtual Settings")
     function fields(keys) { return host.definitions.filter(row => keys.includes(row.key)); }
     // Leaving the page drops an open certificate draft; staged TLS and other drafts stay.
     function leave() { if (certificateSection.open) certificateSection.cancel(); }
@@ -34,17 +31,17 @@ KCM.SimpleKCM {
         spacing: Kirigami.Units.largeSpacing
         QQC2.Label {
             Layout.fillWidth: true; wrapMode: Text.Wrap
-            text: root.session ? i18nc("@info", "Hardware access for newly created Virtual desktops. Existing desktops keep their current grants.") : i18nc("@info", "Defaults for everyone connecting to this service. Save changes, then explicitly restart the service.")
+            text: i18nc("@info", "Defaults for everyone connecting to this service. Save changes, then explicitly restart the service.")
         }
         QQC2.Button { objectName: "unlockHostSettings"; visible: !root.host.loaded; text: i18nc("@action:button", "Load Administrator Settings…"); icon.name: "document-edit"; enabled: !root.host.busy; onClicked: root.reloadSettings() }
         Kirigami.InlineMessage { objectName: "hostError"; Layout.fillWidth: true; type: Kirigami.MessageType.Error; visible: root.host.error !== ""; text: root.host.error }
         Kirigami.InlineMessage {
             objectName: "hostSavedNotice"; Layout.fillWidth: true; visible: root.host.applicationRequired; type: Kirigami.MessageType.Information
-            text: root.session ? i18nc("@info", "Saved. New desktops will use these defaults.") : i18nc("@info", "Saved. Restart this service to apply the changes.")
-            actions: Kirigami.Action { text: i18nc("@action", "Restart…"); visible: !root.session; enabled: !root.session && root.administration && root.administration.services[root.fixedScope].canRestart; onTriggered: restartConfirmation.open() }
+            text: i18nc("@info", "Saved. Restart this service to apply the changes.")
+            actions: Kirigami.Action { text: i18nc("@action", "Restart…"); enabled: root.administration && root.administration.services[root.fixedScope].canRestart; onTriggered: restartConfirmation.open() }
         }
         ColumnLayout {
-            Layout.fillWidth: true; visible: root.host.loaded && !root.session; spacing: Kirigami.Units.smallSpacing
+            Layout.fillWidth: true; visible: root.host.loaded; spacing: Kirigami.Units.smallSpacing
             Kirigami.Heading { level: 3; text: i18nc("@title:group", "Connection") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32;
@@ -59,16 +56,16 @@ KCM.SimpleKCM {
                     QQC2.Button { objectName: "editHostCertificate"; visible: !certificateSection.open; text: i18nc("@action:button", "Change…"); enabled: !root.host.busy && !root.host.outcomeUnknown; onClicked: certificateSection.begin() }
                 }
             }
-            BrokerCertificateSection { id: certificateSection; Layout.fillWidth: true; host: root.session ? root.consoleSettings : root.host; twins: [connectionForm, videoForm, mediaForm, advancedForm] }
+            BrokerCertificateSection { id: certificateSection; Layout.fillWidth: true; host: root.host; twins: [connectionForm, videoForm, mediaForm, advancedForm] }
         }
         ColumnLayout {
-            Layout.fillWidth: true; visible: root.host.loaded && !root.session; spacing: Kirigami.Units.smallSpacing
+            Layout.fillWidth: true; visible: root.host.loaded; spacing: Kirigami.Units.smallSpacing
             Kirigami.Heading { level: 3; text: i18nc("@title:group", "Video") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32; id: videoForm; twinFormLayouts: [connectionForm, mediaForm, advancedForm]; Layout.fillWidth: true; Layout.alignment: Qt.AlignLeft; Repeater { model: root.fields(["Quality", "AdaptiveQuality"]); delegate: hostField } }
         }
         ColumnLayout {
-            Layout.fillWidth: true; visible: root.host.loaded && !root.session; spacing: Kirigami.Units.smallSpacing
+            Layout.fillWidth: true; visible: root.host.loaded; spacing: Kirigami.Units.smallSpacing
             Kirigami.Heading { level: 3; text: i18nc("@title:group", "Sound and devices") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32; id: mediaForm; twinFormLayouts: [connectionForm, videoForm, advancedForm]; Layout.fillWidth: true; Layout.alignment: Qt.AlignLeft; Repeater { model: root.fields(["PreferAudioQuality", "StandardClientMedia"]); delegate: hostField } }
@@ -80,38 +77,13 @@ KCM.SimpleKCM {
             }
         }
         Flow {
-            Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing; visible: root.host.loaded && !root.session
+            Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing; visible: root.host.loaded
             QQC2.Button { objectName: "hostAdvancedButton"; text: i18nc("@action:button", "Advanced Options"); icon.name: root.showAdvanced ? "arrow-down" : "arrow-right"; onClicked: root.showAdvanced = !root.showAdvanced }
             QQC2.Button { objectName: "consoleDisplayPreferences"; visible: root.fixedScope === 0; text: i18nc("@action:button", "My Display Preferences…"); onClicked: root.navigation.showPreferences() }
-            QQC2.Button { objectName: "virtualHardwareDefaults"; visible: root.fixedScope === 1; text: root.sessionSettings.modified ? i18nc("@action:button", "New Desktop Hardware… (unsaved)") : i18nc("@action:button", "New Desktop Hardware…"); onClicked: root.navigation.openPage(5) }
         }
         ColumnLayout {
-            Layout.fillWidth: true; visible: root.host.loaded && (root.showAdvanced || root.session); spacing: Kirigami.Units.smallSpacing
-            Kirigami.Heading { level: 3; text: root.session ? i18nc("@title:group", "Graphics access") : i18nc("@title:group", "Encoding and camera bridge") }
-            ColumnLayout {
-                visible: root.session && (root.host.metadata.renderDevices || []).length > 0
-                Layout.fillWidth: true
-                QQC2.CheckBox {
-                    text: i18nc("@option:check", "Grant no GPU access")
-                    checked: root.selectedDevices.length === 0; enabled: !root.host.busy
-                    onClicked: { if (checked) root.host.setValue("RenderPci", ""); checked = Qt.binding(() => root.selectedDevices.length === 0); }
-                }
-                Repeater {
-                    model: root.host.metadata.renderDevices || []
-                    delegate: QQC2.CheckBox {
-                        required property var modelData
-                        text: i18nc("@option:check", "%1 (%2)", modelData.pci, modelData.driver)
-                        checked: root.selectedDevices.includes(modelData.pci); enabled: !root.host.busy
-                        onClicked: {
-                            const values = root.selectedDevices.filter(value => value !== modelData.pci);
-                            if (checked) values.push(modelData.pci);
-                            root.host.setValue("RenderPci", values.join(","));
-                            checked = Qt.binding(() => root.selectedDevices.includes(modelData.pci));
-                        }
-                    }
-                }
-                QQC2.Button { text: i18nc("@action:button", "Edit PCI Identities…"); onClicked: root.showPciEditor = !root.showPciEditor }
-            }
+            Layout.fillWidth: true; visible: root.host.loaded && root.showAdvanced; spacing: Kirigami.Units.smallSpacing
+            Kirigami.Heading { level: 3; text: i18nc("@title:group", "Encoding and camera bridge") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32;
             Layout.alignment: Qt.AlignLeft
@@ -120,12 +92,8 @@ KCM.SimpleKCM {
                 twinFormLayouts: [connectionForm, videoForm, mediaForm]
                 Repeater { model: root.fields(["SoftwareEncoding", "Av1Tiles", "VaapiDriver", "RenderPci", "CameraLoopbackDevice"]); delegate: hostField }
             }
-            QQC2.Label { visible: root.session; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "GPU grants control desktop device access, not which GPU encodes each stream. An empty PCI list grants no GPU.") }
-            Repeater {
-                model: root.session ? root.host.metadata.renderDevices || [] : []
-                delegate: QQC2.Label { required property var modelData; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Available device: %1 (%2), %3.", modelData.pci, modelData.driver, modelData.render) }
-            }
         }
+        BrokerHardwareSection { objectName: "desktopHardwareSection"; Layout.fillWidth: true; visible: root.fixedScope === 1; settings: root.sessionSettings; navigation: root.navigation }
         QQC2.Label { objectName: "hostPendingSummary"; visible: root.host.modified; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.host.tlsMode !== "keep" ? i18nc("@info", "Unsaved changes for this service, including its certificate choice.") : i18nc("@info", "Unsaved changes for this page only."); color: Kirigami.Theme.disabledTextColor }
     }
     Component {
@@ -133,9 +101,9 @@ KCM.SimpleKCM {
         BrokerSettingField {
             required property var modelData
             settings: root.host; definition: modelData
-            visible: !(key === "CameraLoopbackDevice" && root.fixedScope === 1) && !(key === "RenderPci" && (root.host.metadata.renderDevices || []).length > 0 && !root.showPciEditor)
+            visible: !(key === "CameraLoopbackDevice" && root.fixedScope === 1)
             editable: !root.host.busy
-            showHelp: root.session || ["Address", "SoftwareEncoding", "Av1Tiles", "VaapiDriver", "RenderPci", "CameraLoopbackDevice"].includes(key)
+            showHelp: ["Address", "SoftwareEncoding", "Av1Tiles", "VaapiDriver", "RenderPci", "CameraLoopbackDevice"].includes(key)
         }
     }
     }
@@ -146,7 +114,7 @@ KCM.SimpleKCM {
             QQC2.ToolButton { objectName: "loadHostSettings"; icon.name: "view-refresh"; text: i18nc("@action:button", "Reload Saved Settings…"); display: QQC2.AbstractButton.IconOnly; enabled: !root.host.busy; QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered; onClicked: root.reloadSettings() }
             Item { Layout.fillWidth: true }
             QQC2.BusyIndicator { running: root.host.busy; Layout.preferredWidth: Kirigami.Units.gridUnit; Layout.preferredHeight: Kirigami.Units.gridUnit; visible: running }
-            QQC2.Button { objectName: "saveHostSettings"; highlighted: true; text: root.session ? i18nc("@action:button", "Save Desktop Defaults…") : root.fixedScope === 0 ? i18nc("@action:button", "Save Console Settings…") : i18nc("@action:button", "Save Virtual Settings…"); enabled: root.host.canSave; onClicked: root.host.save() }
+            QQC2.Button { objectName: "saveHostSettings"; highlighted: true; text: root.fixedScope === 0 ? i18nc("@action:button", "Save Console Settings…") : i18nc("@action:button", "Save Virtual Settings…"); enabled: root.host.canSave; onClicked: root.host.save() }
         }
     }
     Kirigami.PromptDialog {
