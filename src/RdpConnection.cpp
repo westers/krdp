@@ -901,7 +901,7 @@ RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
     d->videoStream = std::make_unique<VideoStream>(this);
     connect(d->videoStream.get(), &VideoStream::closed, this, [this]() {
         if (d->state == State::Running || d->state == State::Streaming) {
-            qCDebug(KRDP) << "Video stream closed, closing session";
+            qCInfo(KRDP) << "Video stream closed, closing session";
             d->peer->Close(d->peer);
         }
     });
@@ -1592,7 +1592,7 @@ void RdpConnection::initialize()
     }
 
     fail.dismiss();
-    qCDebug(KRDP) << "Session setup completed, start processing...";
+    qCInfo(KRDP) << "Session setup completed, start processing...";
 
     // AUD-S2: a client that has not authenticated within the handshake
     // timeout is dropped. A timer rather than a check in run(): a stalled TLS
@@ -1646,7 +1646,7 @@ void RdpConnection::run(std::stop_token stopToken)
         // read; only the channel manager's own queue is still serviced.
         if (!d->authenticated.load()) {
             if (WaitForSingleObject(channelEvent, 0) == WAIT_OBJECT_0 && WTSVirtualChannelManagerCheckFileDescriptor(context->virtualChannelManager) != TRUE) {
-                qCDebug(KRDP) << "Unable to check Virtual Channel Manager file descriptor, closing connection";
+                qCWarning(KRDP) << "Unable to check Virtual Channel Manager file descriptor, closing connection";
                 break;
             }
             continue;
@@ -1671,7 +1671,7 @@ void RdpConnection::run(std::stop_token stopToken)
         }
 
         if (WaitForSingleObject(channelEvent, 0) == WAIT_OBJECT_0 && WTSVirtualChannelManagerCheckFileDescriptor(context->virtualChannelManager) != TRUE) {
-            qCDebug(KRDP) << "Unable to check Virtual Channel Manager file descriptor, closing connection";
+            qCWarning(KRDP) << "Unable to check Virtual Channel Manager file descriptor, closing connection";
             break;
         }
 
@@ -1719,7 +1719,7 @@ void RdpConnection::run(std::stop_token stopToken)
         d->networkDetection->update();
     }
 
-    qCDebug(KRDP) << "Closing session";
+    qCInfo(KRDP) << "Closing session";
     onClose();
 }
 
@@ -1828,7 +1828,7 @@ bool RdpConnection::onPostConnect()
             pamUid = pamAuthenticate(username, password);
             if (pamUid && (d->server->allowAnyPAMUser() || *pamUid == KUser().userId().nativeId())
                 && d->server->acceptsPamIdentity(*pamUid)) {
-                qCDebug(KRDP) << "PAM authentication succeeded for user" << username;
+                qCInfo(KRDP) << "PAM authentication succeeded for user" << username;
                 authenticated = true;
                 ownerUid = pamUid;
             } else {
@@ -1846,13 +1846,13 @@ bool RdpConnection::onPostConnect()
             QString::fromUtf8(freerdp_settings_get_string(settings, FreeRDP_Username)),
             QString::fromUtf8(freerdp_settings_get_string(settings, FreeRDP_Password)));
         if (ownerUid) {
-            qCDebug(KRDP) << "Custom credential authenticated for an explicitly configured desktop owner";
+            qCInfo(KRDP) << "Custom credential authenticated for an explicitly configured desktop owner";
             authenticated = true;
         }
     }
 
     if (!authenticated && d->server->matchesConfiguredUser(username, password)) {
-        qCDebug(KRDP) << "User" << username << "authenticated successfully";
+        qCInfo(KRDP) << "User" << username << "authenticated successfully";
         authenticated = true;
     }
 

@@ -722,7 +722,7 @@ bool VideoStream::initialize()
         }
     });
 
-    qCDebug(KRDP) << "Video stream initialized";
+    qCInfo(KRDP) << "Video stream initialized";
 
     d->streamingSince = clk::steady_clock::now();
     d->linkBusyAt = d->streamingSince; // clear only after LinkClearHold of evidence
@@ -924,7 +924,7 @@ void VideoStream::setMonitorLayout(const QVector<VideoMonitor> &layout)
     }
 
     d->configuredLayout = layout;
-    qCDebug(KRDP) << "Monitor layout configured:" << (layout.isEmpty() ? QStringLiteral("(derived from frames)") : monitorLayoutSummary(layout));
+    qCInfo(KRDP) << "Monitor layout configured:" << (layout.isEmpty() ? QStringLiteral("(derived from frames)") : monitorLayoutSummary(layout));
     // The surfaces are rebuilt from the new layout on the next frame.
     d->pendingReset = true;
 
@@ -1379,7 +1379,7 @@ void VideoStream::stepCodecPolicy(bool congested)
     const bool wasSlow = d->codecPolicy.slowLink;
     const auto decision = steering ? CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now()) : CodecPolicy::stepLink(d->codecPolicy, in, clk::steady_clock::now());
     if (!decision.changed && !decision.reason.isEmpty()) {
-        qCDebug(KRDP).noquote() << "Codec policy:" << decision.reason;
+        qCInfo(KRDP).noquote() << "Codec policy:" << decision.reason;
     }
     if (d->codecPolicy.slowLink != wasSlow) {
         // AUD-FIX12: at info level (the rollout's slow-link check found no journal line).
@@ -1769,7 +1769,7 @@ uint32_t VideoStream::onCapsAdvertise(const RDPGFX_CAPS_ADVERTISE_PDU *capsAdver
         return first.version < second.version;
     });
 
-    qCDebug(KRDP) << "Selected caps:" << capVersionToString(selectedCaps->version);
+    qCInfo(KRDP) << "Selected caps:" << capVersionToString(selectedCaps->version);
 
     // Not reset to -1 on a re-advertisement (see the capsConfirmed branch above):
     // the previous codec stays the best guess until the caps parsed just above
@@ -1816,7 +1816,7 @@ uint32_t VideoStream::onFrameAcknowledge(const RDPGFX_FRAME_ACKNOWLEDGE_PDU *fra
     d->windowAckLatencyUs = d->pendingFrames.ackLatency(ackedAt).count();
     if ((ack == FrameQueuePolicy::FrameAckTracker::Ack::Acknowledged || ack == FrameQueuePolicy::FrameAckTracker::Ack::Suspended)
         && !d->graphicsDelivered.exchange(true)) {
-        qCDebug(KRDP) << "The client acknowledged its first frame";
+        qCInfo(KRDP) << "The client acknowledged its first frame";
         Q_EMIT graphicsDelivered();
     }
     d->statInFlight = d->pendingFrames.inFlightFrames();

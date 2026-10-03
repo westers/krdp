@@ -71,7 +71,7 @@ void setPreferredH264Encoder(Stream *stream)
         }
     }
     stream->setEncoder(encoder);
-    qCDebug(KRDP) << "Using PipeWire H264 encoder profile:" << (encoder == PipeWireEncodedStream::H264Main ? "Main" : "Baseline");
+    qCInfo(KRDP) << "Using PipeWire H264 encoder profile:" << (encoder == PipeWireEncodedStream::H264Main ? "Main" : "Baseline");
 }
 }
 
@@ -198,12 +198,12 @@ PortalSession::~PortalSession()
     auto closeMessage = QDBusMessage::createMethodCall(dbusService, d->sessionPath.path(), dbusSessionInterface, QStringLiteral("Close"));
     QDBusConnection::sessionBus().asyncCall(closeMessage);
 
-    qCDebug(KRDP) << "Closing Freedesktop Portal Session";
+    qCInfo(KRDP) << "Closing Freedesktop Portal Session";
 }
 
 void PortalSession::start()
 {
-    qCDebug(KRDP) << "Initializing Freedesktop Portal Session";
+    qCInfo(KRDP) << "Initializing Freedesktop Portal Session";
 
     auto parameters = QVariantMap{
         {QStringLiteral("handle_token"), createHandleToken()},
@@ -394,7 +394,7 @@ void KRdp::PortalSession::onSessionStarted(uint code, const QVariantMap &result)
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, streams](QDBusPendingCallWatcher *watcher) {
         auto reply = QDBusReply<QDBusUnixFileDescriptor>(*watcher);
         if (reply.isValid()) {
-            qCDebug(KRDP) << "Started Freedesktop Portal session";
+            qCInfo(KRDP) << "Started Freedesktop Portal session";
 
             if (activeStream() >= streams.size()) {
                 qCWarning(KRDP) << "Requested monitor index out of range, using first monitor";

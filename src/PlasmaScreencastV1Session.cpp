@@ -522,7 +522,7 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
 
 PlasmaScreencastV1Session::~PlasmaScreencastV1Session()
 {
-    qCDebug(KRDP) << "Closing Plasma Remote Session";
+    qCInfo(KRDP) << "Closing Plasma Remote Session";
     // AUD-P2: a client that drops, or a rebuild that replaces this session,
     // must not leave a key or button held down in the compositor.
     if (!d->pressedInput.empty()) {
@@ -683,7 +683,7 @@ bool PlasmaScreencastV1Session::setupScreencastRequest(bool recovery, bool allow
     if (target == Private::StreamTarget::Virtual) {
         auto vm = virtualMonitor();
         d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata);
-        qCDebug(KRDP) << "Using virtual monitor stream" << vm->name << "logical rect" << d->logicalRect;
+        qCInfo(KRDP) << "Using virtual monitor stream" << vm->name << "logical rect" << d->logicalRect;
         watchForVirtualScreen();
     } else if (target == Private::StreamTarget::Output) {
         d->request = d->m_screencasting.createOutputStream(outputScreen, Screencasting::Metadata);
@@ -708,13 +708,13 @@ bool PlasmaScreencastV1Session::setupScreencastRequest(bool recovery, bool allow
                 setLogicalSize(d->logicalRect.size());
             }
         } else {
-            qCDebug(KRDP) << "Using output stream index" << activeStream() << "screen" << outputScreen->name() << "logical rect" << d->logicalRect;
+            qCInfo(KRDP) << "Using output stream index" << activeStream() << "screen" << outputScreen->name() << "logical rect" << d->logicalRect;
         }
     }
 
     if (!d->request && target == Private::StreamTarget::Workspace) {
         d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
-        qCDebug(KRDP) << "Using workspace stream logical rect" << d->logicalRect;
+        qCInfo(KRDP) << "Using workspace stream logical rect" << d->logicalRect;
     }
 
     if (!d->request) {
@@ -809,7 +809,7 @@ void PlasmaScreencastV1Session::restartStreamForCodecChange()
         return;
     }
     encoderReconfigured();
-    qCDebug(KRDP) << "Restarting encoded stream on node" << nodeId << "for the codec change";
+    qCInfo(KRDP) << "Restarting encoded stream on node" << nodeId << "for the codec change";
     restartEncodedStream(nodeId); // setChromaMode() is applied at the next start(); the new stream opens with an IDR
 }
 
@@ -826,7 +826,7 @@ void PlasmaScreencastV1Session::attachEncodedStream(uint nodeId, bool streamWasA
     // limited for HEVC/AV1 (see EncoderSelection::colorRangeFor()).
     const auto hardware = encoderHardware();
     const bool encoderMatches = EncoderSelection::apply(encodedStream, videoCodec(), hardware);
-    qCDebug(KRDP) << "Using PipeWire encoder for" << VideoCodecSupport::codecName(videoCodec()) << ':' << int(encodedStream->encoder()) << "backend"
+    qCInfo(KRDP) << "Using PipeWire encoder for" << VideoCodecSupport::codecName(videoCodec()) << ':' << int(encodedStream->encoder()) << "backend"
                   << (hardware ? (*hardware ? "hardware" : "software") : "default");
     if (!encoderMatches) {
         // Never label one codec's bytes with another's id: have the connection move off it now,
@@ -850,11 +850,11 @@ void PlasmaScreencastV1Session::attachEncodedStream(uint nodeId, bool streamWasA
     }
 
     if (!d->startedSignalEmitted) {
-        qCDebug(KRDP) << "Started Plasma session";
+        qCInfo(KRDP) << "Started Plasma session";
         d->startedSignalEmitted = true;
         setStarted(true);
     } else {
-        qCDebug(KRDP) << "Re-attached Plasma screencast stream on node" << nodeId;
+        qCInfo(KRDP) << "Re-attached Plasma screencast stream on node" << nodeId;
     }
 }
 

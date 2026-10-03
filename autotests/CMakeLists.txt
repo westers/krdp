@@ -834,6 +834,11 @@ add_executable(CodecPolicyTest CodecPolicyTest.cpp)
 target_include_directories(CodecPolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(CodecPolicyTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME CodecPolicyTest COMMAND CodecPolicyTest)
+# OPT-055 K5: LogThrottle/LogEdge and the Info default of the farside.server category.
+add_executable(LogThrottleTest LogThrottleTest.cpp ${CMAKE_BINARY_DIR}/src/krdp_logging.cpp)
+target_include_directories(LogThrottleTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(LogThrottleTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME LogThrottleTest COMMAND LogThrottleTest)
 # AUD-FIX13: a slow link or a slow client, by the socket's evidence.
 add_executable(LinkEvidenceTest LinkEvidenceTest.cpp)
 target_include_directories(LinkEvidenceTest PRIVATE ${CMAKE_SOURCE_DIR}/src)

@@ -70,7 +70,7 @@ ecm_qt_declare_logging_category(KRdp
     CATEGORY_NAME farside.server
     DESCRIPTION "Farside Server"
     EXPORT KRdp
-    DEFAULT_SEVERITY Debug
+    DEFAULT_SEVERITY Info
 )
 
 ecm_generate_export_header(KRdp
