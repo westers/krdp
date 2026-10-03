@@ -4,6 +4,11 @@
 Follow-up [native capture comparison](2026-10-02-settings-capture-comparison.md)
 records the differences found and their corrections. The assessment below
 retains its original pre-implementation findings.
+**Update 2026-10-02:** the ten pages were consolidated to five (Certificate, New
+Desktop Hardware and Service Details moved inline); see the
+[consolidation spec](../superpowers/specs/2026-10-02-settings-consolidation-design.md)
+and [plan](../superpowers/plans/2026-10-02-settings-consolidation.md). Page-count
+statements below describe the original ten-page proposal.
 **Reviewed:** server source `ec5e2524` (documentation HEAD `505e41b7`), all ten
 `src/kcm/ui/*.qml` files, their C++ models, and the four populated settings-tab
 fixtures. Earlier Claude source `e0ba4b77` provides a visual precedent.

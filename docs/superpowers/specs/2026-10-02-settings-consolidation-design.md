@@ -1,6 +1,6 @@
 # Farside settings consolidation (step B) — design
 
-**Status:** approved in conversation by Steve on 2026-10-02; written spec awaiting review.
+**Status:** approved in conversation by Steve on 2026-10-02; implemented in source 2026-10-02 (commits `3f45ebdb`..`50afd926`, evidence `~/dev/rdp/evidence/2026-10-02-settings-consolidation/`); awaiting Steve's visual review, not packaged or deployed.
 **Scope:** presentation and navigation of the Farside KCM (`src/kcm/ui/Broker*.qml`) only.
 Step C (per-row inheritance cleanup in My Preferences) is a separate later spec.
 

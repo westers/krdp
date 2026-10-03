@@ -9,17 +9,35 @@ are design references; the new populated native renders are implementation evide
 
 ## Layout and actions
 
-- Overview presents Console and Virtual service status, immediate connection and
-  boot switches, configuration and service details. Access and personal
-  preferences have separate routes. Saved wildcard bindings are described as
-  all interfaces and a port, never offered as a connectable address.
-- Console and Virtual configuration group Connection, Video, Sound and devices,
-  then Advanced. Virtual hardware grants have their own page and save scope.
+Updated 2026-10-02 for the ten-to-five page consolidation (evidence
+`~/dev/rdp/evidence/2026-10-02-settings-consolidation/`).
+
+- The module has five persistent pages: Overview, Console, Virtual, Who Can
+  Connect and My Preferences ([consolidation spec](superpowers/specs/2026-10-02-settings-consolidation-design.md),
+  `BrokerMainPage.qml` `pages`). Certificate, New Desktop Hardware and Service
+  Details are no longer pages; they are embeddable sections hosted by the page
+  that owns their state.
+- Overview presents Console and Virtual as plain full-width groups: status,
+  immediate connection and boot switches, saved (and verified running) address,
+  Configure…, Restart…, Stop… and a Details expander holding the read-only host
+  inspection (`BrokerServiceDetails`). Access and personal preferences are the
+  fixed footer links. Saved wildcard bindings are described as all interfaces
+  and a port, never offered as a connectable address.
+- Console and Virtual configuration group Connection (with the inline
+  `BrokerCertificateSection`), Video, Sound and devices, then Advanced. The
+  Virtual page ends with the inline `BrokerHardwareSection` (GPU grants and
+  VA-API policy for newly created desktops) that has its own Restore Defaults,
+  Revert Changes and Save Desktop Defaults; the fixed footer saves only the
+  Virtual host settings. A status line above the footer names the dirty scope.
   Console display selection links to personal preferences.
-- Certificate changes use a dedicated local C++ draft. Cancel and Back discard
-  only that editor. Use Certificate Changes stages only TLS fields into the host
-  draft; saving and restarting remain explicit host actions. Ordinary Restore
-  Defaults preserves TLS paths, the TLS operation and any staged PEM import.
+- Certificate changes use the dedicated local C++ draft. Cancel and leaving the
+  page (Back) discard only that editor. Use Certificate Changes stages only TLS
+  fields into the host draft; saving and restarting remain explicit host
+  actions. Ordinary Restore Defaults preserves TLS paths, the TLS operation and
+  any staged PEM import. Only one native file dialog is ever open because the
+  editor expands in place instead of opening a modal.
+- Inline expanders (Details, Certificate, Advanced) only toggle `visible`; never
+  put a draft editor behind a `Loader` or `active: false`.
 - My Preferences keeps account inheritance explicit. Choosing Custom stages an
   incomplete value until the user chooses a number; it does not fabricate zero
   or a minimum. Fallback dimensions must both be supplied. Display-specific

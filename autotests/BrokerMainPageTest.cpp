@@ -227,6 +227,13 @@ private Q_SLOTS:
         auto *details=qobject_cast<QQuickItem *>(item(u"settingsOverview"_s)); QVERIFY(details);
         auto *enabled=find(details,u"consoleHostEnabled"_s); QVERIFY(enabled); QVERIFY(enabled->setProperty("checked",false)); QVERIFY(QMetaObject::invokeMethod(enabled,"clicked"));
         auto *confirm=find(details,u"consoleConfirmServiceOperation"_s); QVERIFY(confirm); QTRY_VERIFY(confirm->property("visible").toBool()); QCOMPARE(transport.mutations,0); screenshot(u"stop-dialog"_s); QVERIFY(QMetaObject::invokeMethod(confirm,"close")); QCOMPARE(transport.mutations,0);
+        {   // Overview with the Console Details box expanded (collapsed state is page-0).
+            QVERIFY(page->setProperty("currentPage",0)); QObject *toggle=item(u"consoleDetailsToggle"_s); QVERIFY(toggle);
+            QVERIFY(QMetaObject::invokeMethod(toggle,"clicked")); screenshot(u"overview-details"_s);
+            auto *overviewFlick=qobject_cast<QQuickItem *>(item(u"settingsOverview"_s))->property("flickable").value<QQuickItem *>(); QVERIFY(overviewFlick);
+            overviewFlick->setProperty("contentY",qMax<qreal>(0,overviewFlick->property("contentHeight").toReal()-overviewFlick->height())); screenshot(u"overview-details-bottom"_s);
+            overviewFlick->setProperty("contentY",0); QVERIFY(QMetaObject::invokeMethod(toggle,"clicked"));
+        }
         window.resize(640,360); page->setSize(window.size());
         for(int index=1;index<5;++index) {
             QVERIFY(page->setProperty("currentPage",index)); QTest::qWait(60);
@@ -240,7 +247,8 @@ private Q_SLOTS:
                 QVERIFY2(bounds.left()>=0 && bounds.right()<=page->width()+1 && bounds.bottom()<=page->height()+1,qPrintable(QStringLiteral("Footer %1 exceeds %2x%3: %4,%5").arg(save->objectName()).arg(page->width()).arg(page->height()).arg(bounds.right()).arg(bounds.bottom())));
             }
         }
-        screenshot(u"narrow-hardware"_s);
+        window.resize(640,800); page->setSize(window.size());
+        for(int index=0;index<3;++index) { QVERIFY(page->setProperty("currentPage",index)); screenshot(u"narrow-"_s+QString::number(index)); }
         QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
     }
 
