@@ -996,3 +996,11 @@ add_executable(GameInputTest GameInputTest.cpp)
 target_include_directories(GameInputTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(GameInputTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
 add_test(NAME GameInputTest COMMAND GameInputTest)
+
+# OPT-055 K3 / T-R5: accept-error (EMFILE) recovery and bounded Server teardown.
+add_executable(ServerAcceptRecoveryTest ServerAcceptRecoveryTest.cpp)
+target_include_directories(ServerAcceptRecoveryTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(ServerAcceptRecoveryTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(ServerAcceptRecoveryTest PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
+add_test(NAME ServerAcceptRecoveryTest COMMAND ServerAcceptRecoveryTest)
+set_tests_properties(ServerAcceptRecoveryTest PROPERTIES TIMEOUT 60)

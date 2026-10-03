@@ -5,10 +5,14 @@
 #include "Server.h"
 
 #include <atomic>
+#include <chrono>
+#include <dirent.h>
+#include <sys/resource.h>
 
 #include <vector>
 
 #include <QCoreApplication>
+#include <QTimer>
 
 #include <freerdp/channels/channels.h>
 #include <freerdp/crypto/certificate.h>
@@ -43,7 +47,61 @@ public:
     QString cameraLoopbackDevice;
     std::atomic<bool> standardClientMedia = true;
     std::chrono::milliseconds handshakeTimeout = std::chrono::seconds(15);
+
+    // OPT-055 K3.1: accept-error recovery. Qt pauses accepting after an error
+    // such as EMFILE and never resumes by itself.
+    using Clock = std::chrono::steady_clock;
+    QTimer acceptRetry;
+    std::chrono::milliseconds acceptBackoff = std::chrono::seconds(1);
+    bool acceptEpisode = false; // an error episode is being reported
+    bool acceptResumed = false; // resumeAccepting() ran, no connection since
+    int acceptErrors = 0;
+    int acceptedSinceError = 0;
+    bool leaveScheduled = false;
+    DIR *fdDir = nullptr; // kept open: /proc/self/fd cannot be opened at EMFILE
+
+    void endAcceptEpisode()
+    {
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - acceptEpisodeStart).count();
+        qCWarning(KRDP) << "Accepting connections again after" << acceptErrors << "errors in" << seconds << "s";
+        acceptEpisode = false;
+        acceptResumed = false;
+        acceptedSinceError = 0;
+    }
+    Clock::time_point acceptEpisodeStart;
+    Clock::time_point lastAcceptError;
+    bool haveAcceptError = false;
+    // K3.2
+    Clock::time_point lastPressureWarning;
+    bool pressureWarned = false;
 };
+
+namespace
+{
+constexpr std::chrono::milliseconds kAcceptBackoffStart = std::chrono::seconds(1);
+constexpr std::chrono::milliseconds kAcceptBackoffMax = std::chrono::seconds(10);
+constexpr std::chrono::seconds kAcceptBackoffReset = std::chrono::seconds(60);
+constexpr std::chrono::minutes kPressureWarningInterval = std::chrono::minutes(10);
+
+int openFileDescriptorCount(DIR *dir)
+{
+    if (!dir) {
+        return -1;
+    }
+    ::rewinddir(dir);
+    int count = 0;
+    while (::readdir(dir)) {
+        ++count;
+    }
+    return count - 3; // ".", ".." and the directory stream itself
+}
+
+rlim_t softFileLimit()
+{
+    rlimit limit{};
+    return ::getrlimit(RLIMIT_NOFILE, &limit) == 0 ? limit.rlim_cur : RLIM_INFINITY;
+}
+}
 
 Server::Server(QObject *parent)
     : QTcpServer(parent)
@@ -51,15 +109,104 @@ Server::Server(QObject *parent)
 {
     winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT);
     WTSRegisterWtsApiFunctionTable(FreeRDP_InitWtsApi());
+
+    d->fdDir = ::opendir("/proc/self/fd");
+    d->acceptRetry.setSingleShot(true);
+    connect(&d->acceptRetry, &QTimer::timeout, this, [this]() {
+        d->acceptResumed = true;
+        if (isListening()) {
+            resumeAccepting();
+        }
+    });
+    // K3.1/K3.2 bookkeeping runs on newConnection (emitted after every
+    // incomingConnection, including overrides).
+    connect(this, &QTcpServer::newConnection, this, [this]() {
+        const auto now = Private::Clock::now();
+        ++d->acceptedSinceError;
+        if (d->acceptEpisode && d->acceptResumed) {
+            if (!d->leaveScheduled) {
+                // Confirmed one event-loop turn later: an error right after this
+                // connection means the episode is not over.
+                d->leaveScheduled = true;
+                QTimer::singleShot(0, this, [this]() {
+                    d->leaveScheduled = false;
+                    if (d->acceptEpisode && d->acceptResumed) {
+                        d->endAcceptEpisode();
+                    }
+                });
+            }
+        }
+        // K3.2: warn once per interval when descriptors run short.
+        const rlim_t limit = softFileLimit();
+        if (limit != RLIM_INFINITY && limit > 0) {
+            const int open = openFileDescriptorCount(d->fdDir);
+            if (open >= 0 && qulonglong(open) * 10 >= qulonglong(limit) * 8 && (!d->pressureWarned || now - d->lastPressureWarning >= kPressureWarningInterval)) {
+                d->pressureWarned = true;
+                d->lastPressureWarning = now;
+                qCWarning(KRDP) << "File descriptor pressure:" << open << "of" << qulonglong(limit) << "in use";
+            }
+        }
+    });
+    connect(this, &QTcpServer::acceptError, this, [this](QAbstractSocket::SocketError error) {
+        const auto now = Private::Clock::now();
+        // With descriptors to spare and connections accepted since the last
+        // error this is not EMFILE: Qt 6 reports a stale error after draining
+        // the backlog that followed an earlier one, and pauses again. Resume
+        // soon and silently; an open episode is over.
+        const int openFds = openFileDescriptorCount(d->fdDir);
+        const rlim_t limit = softFileLimit();
+        const bool headroom = openFds >= 0 && limit != RLIM_INFINITY && qulonglong(openFds) + 4 <= qulonglong(limit);
+        if (d->acceptedSinceError > 0 && headroom) {
+            d->acceptedSinceError = 0;
+            if (d->acceptEpisode) {
+                d->endAcceptEpisode();
+            }
+            d->haveAcceptError = true;
+            d->lastAcceptError = now;
+            d->acceptBackoff = kAcceptBackoffStart;
+            if (!d->acceptRetry.isActive()) {
+                d->acceptRetry.start(d->acceptBackoff);
+            }
+            return;
+        }
+        d->acceptedSinceError = 0;
+        if (!d->acceptEpisode) {
+            if (!d->haveAcceptError || now - d->lastAcceptError > kAcceptBackoffReset) {
+                d->acceptBackoff = kAcceptBackoffStart;
+            }
+            d->acceptEpisode = true;
+            d->acceptErrors = 0;
+            d->acceptEpisodeStart = now;
+            qCWarning(KRDP) << "Accepting connections failed:" << errorString() << "(" << error << "), open file descriptors" << openFds
+                            << "of soft limit" << qulonglong(softFileLimit()) << "; will retry with back-off";
+        }
+        ++d->acceptErrors;
+        d->haveAcceptError = true;
+        d->lastAcceptError = now;
+        d->acceptResumed = false;
+        if (!d->acceptRetry.isActive()) {
+            d->acceptRetry.start(d->acceptBackoff);
+            d->acceptBackoff = std::min(d->acceptBackoff * 2, kAcceptBackoffMax);
+        }
+    });
 }
 
 Server::~Server()
 {
     stop();
+    d->acceptRetry.stop();
+    if (d->fdDir) {
+        ::closedir(d->fdDir);
+        d->fdDir = nullptr;
+    }
     // Join every session first: each one hands its playback endpoint to the
     // background stop queue on close (AUD-D1). Then let those jobs restore
     // the host's default sink before the process can exit.
+    // Moved out first: a closing session may still emit stateChanged and the
+    // handler must not walk a vector that is being destroyed (E24).
+    auto sessions = std::move(d->sessions);
     d->sessions.clear();
+    sessions.clear();
     if (!PipeWireAudioPlayback::waitForPendingStops(10000)) {
         qCWarning(KRDP) << "PipeWire audio endpoints were still stopping at shutdown";
     }
@@ -289,8 +436,14 @@ void Server::incomingConnection(qintptr handle)
             auto itr = std::find_if(d->sessions.begin(), d->sessions.end(), [sessionPtr](auto &session) {
                 return session.get() == sessionPtr;
             });
-            (*itr)->close();
+            if (itr == d->sessions.end()) {
+                return; // already removed (re-entrant Closed)
+            }
+            // Out of the vector first: close() may re-enter this handler.
+            auto dying = std::move(*itr);
             d->sessions.erase(itr);
+            dying->close();
+            dying.reset();
         }
     });
     d->sessions.push_back(std::move(session));
