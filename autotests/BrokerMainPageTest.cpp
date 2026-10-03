@@ -63,6 +63,17 @@ private Q_SLOTS:
         const auto item=[&](const QString &name){return find(page,name);};
         QVERIFY(!console.loaded()); QVERIFY(!virtualHost.loaded()); QVERIFY(!session.loaded()); QVERIFY(!auth.loaded()); QVERIFY(!preferences.loaded());
         QCOMPARE(page->property("currentPage").toInt(),0);
+        // Details live in the overview card and are hidden until expanded.
+        QObject *detailsButton = item(u"consoleDetailsToggle"_s);
+        QVERIFY(detailsButton);
+        QObject *inspect = item(u"inspectHostRuntime"_s);   // first match = console card
+        QVERIFY(inspect);
+        QVERIFY(!inspect->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(detailsButton, "clicked"));
+        QVERIFY(inspect->property("visible").toBool());
+        QCOMPARE(page->property("currentPage").toInt(),0);   // no page change
+        QVERIFY(QMetaObject::invokeMethod(detailsButton, "clicked"));
+        QVERIFY(!inspect->property("visible").toBool());
         QVERIFY(QMetaObject::invokeMethod(item(u"configureConsole"_s),"clicked")); QCOMPARE(page->property("currentPage").toInt(),1);
         QVERIFY(console.reload()); QTRY_VERIFY(!console.busy()); QVERIFY(console.loaded());
         auto *consolePage=qobject_cast<QQuickItem *>(item(u"consoleSettingsPage"_s)); QVERIFY(consolePage);
@@ -81,6 +92,30 @@ private Q_SLOTS:
         const auto reads=transport.reads; QTest::qWait(5200); QCOMPARE(transport.reads,reads);
         QTest::keyClick(&window,Qt::Key_Return); QTRY_COMPARE(console.values()[u"Quality"_s].toString(),u"7"_s);
         QVERIFY(console.setValue(u"Port"_s,u"3401"_s)); const auto before=console.values();
+        {   // Review focus 2/4: Details expanders keep drafts, and service events keep their editors and geometry.
+            auto *portEditor=find(consolePage,u"host_Port"_s); QVERIFY(portEditor);
+            const auto portValue=portEditor->property("value");
+            QVERIFY(page->setProperty("currentPage",0)); QTest::qWait(60);
+            QVERIFY(QMetaObject::invokeMethod(detailsButton,"clicked")); QVERIFY(inspect->property("visible").toBool()); QTest::qWait(150);
+            auto *overviewPage=qobject_cast<QQuickItem *>(item(u"settingsOverview"_s)); QVERIFY(overviewPage);
+            auto *overviewFlick=overviewPage->property("flickable").value<QQuickItem *>(); QVERIFY(overviewFlick);
+            const qreal scrollY=overviewFlick->property("contentY").toReal();
+            auto *inspectItem=qobject_cast<QQuickItem *>(inspect); QVERIFY(inspectItem);
+            const auto inspectGeometry=inspectItem->mapRectToItem(page,QRectF(0,0,inspectItem->width(),inspectItem->height()));
+            for(int update=0;update<4;++update) {
+                transport.state.activeState=update%2?u"active"_s:u"inactive"_s; Q_EMIT transport.changed(); QTest::qWait(30);
+                QCOMPARE(item(u"inspectHostRuntime"_s),inspect); QVERIFY(inspect->property("visible").toBool());
+                QCOMPARE(overviewFlick->property("contentY").toReal(),scrollY);
+                QCOMPARE(inspectItem->mapRectToItem(page,QRectF(0,0,inspectItem->width(),inspectItem->height())),inspectGeometry);
+            }
+            transport.state.activeState=u"active"_s; Q_EMIT transport.changed();
+            QVERIFY(QMetaObject::invokeMethod(detailsButton,"clicked")); QVERIFY(!inspect->property("visible").toBool());
+            QVERIFY(QMetaObject::invokeMethod(detailsButton,"clicked")); QVERIFY(inspect->property("visible").toBool());
+            QVERIFY(QMetaObject::invokeMethod(detailsButton,"clicked"));
+            QCOMPARE(find(consolePage,u"host_Port"_s),portEditor); QCOMPARE(portEditor->property("value"),portValue);
+            QCOMPARE(console.values(),before); QVERIFY(console.modified());
+            QVERIFY(page->setProperty("currentPage",1)); QTest::qWait(60);
+        }
         QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"editHostCertificate"_s),"clicked")); QCOMPARE(page->property("currentPage").toInt(),5);
         auto *draft=qobject_cast<BrokerHostSettings *>(console.certificateDraft()); QVERIFY(draft && draft->loaded());
         QVERIFY(QMetaObject::invokeMethod(item(u"certificateStandard"_s),"clicked")); QCOMPARE(draft->tlsMode(),u"standard"_s); QCOMPARE(console.tlsMode(),u"keep"_s);
@@ -117,7 +152,7 @@ private Q_SLOTS:
         KRdp::ServerCertificate::Paths capturePair{dir.filePath(u"capture-certificate.crt"_s),dir.filePath(u"capture-private.key"_s)}; QString captureError;
         QVERIFY(KRdp::ServerCertificate::generate(capturePair,u"capture-fixture"_s,QDateTime::currentDateTimeUtc(),10,&captureError));
         const auto screenshot=[&](const QString &name){QTest::qWait(350); if(!screenshots.isEmpty()) QVERIFY(window.grabWindow().save(screenshots+u"/"_s+name+u".png"_s));};
-        for(int index=0;index<10;++index) {
+        for(int index=0;index<8;++index) {
             if(index==5) QVERIFY(console.beginCertificateEdit());
             if(index==6) QVERIFY(virtualHost.beginCertificateEdit());
             QVERIFY(page->setProperty("currentPage",index)); screenshot(u"page-"_s+QString::number(index));

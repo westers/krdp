@@ -18,7 +18,7 @@ KCM.AbstractKCM {
     property string hostName: kcm.hostName
     property int currentPage: 0
     property var history: []
-    readonly property var pages: [overview, consolePage, virtualPage, accessPage, preferencesPage, consoleCertificate, virtualCertificate, hardwarePage, consoleDetails, virtualDetails]
+    readonly property var pages: [overview, consolePage, virtualPage, accessPage, preferencesPage, consoleCertificate, virtualCertificate, hardwarePage]
     readonly property var flickable: pages[currentPage].flickable
     title: pages[currentPage].title
     framedView: false
@@ -70,21 +70,27 @@ KCM.AbstractKCM {
                 QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Choose which desktop to make available. Service switches apply immediately.") }
                 Kirigami.Heading { level: 3; text: i18nc("@title:group", "Console") }
                 QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Share this computer's desktop.") }
-                BrokerServiceControls { Layout.fillWidth: true; administration: root.administration; route: "console"; host: root.consoleHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
+                BrokerServiceControls { id: consoleControls; Layout.fillWidth: true; administration: root.administration; route: "console"; host: root.consoleHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
                 Flow {
                     Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
                     QQC2.Button { objectName: "configureConsole"; text: root.consoleHost.modified ? i18nc("@action:button", "Configure Console… (unsaved)") : i18nc("@action:button", "Configure Console…"); onClicked: root.openPage(1) }
-                    QQC2.Button { objectName: "consoleServiceDetails"; text: i18nc("@action:button", "Service Details…"); onClicked: root.openPage(8) }
+                    QQC2.Button { objectName: "consoleRestart"; text: i18nc("@action:button", "Restart…"); enabled: root.administration.services[0].canRestart; onClicked: consoleControls.request("restart") }
+                    QQC2.Button { objectName: "consoleStop"; text: i18nc("@action:button", "Stop…"); enabled: root.administration.services[0].canStop; onClicked: consoleControls.request("stop") }
+                    QQC2.Button { objectName: "consoleDetailsToggle"; flat: true; icon.name: consoleDetailsBox.visible ? "arrow-down" : "arrow-right"; text: i18nc("@action:button", "Details"); onClicked: consoleDetailsBox.visible = !consoleDetailsBox.visible }
                 }
+                BrokerServiceDetails { id: consoleDetailsBox; visible: false; Layout.fillWidth: true; host: root.consoleHost; administration: root.administration; route: "console"; navigation: root; hostName: root.hostName }
                 Kirigami.Separator { Layout.fillWidth: true }
                 Kirigami.Heading { level: 3; text: i18nc("@title:group", "Virtual") }
                 QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Separate desktops for remote users.") }
-                BrokerServiceControls { Layout.fillWidth: true; administration: root.administration; route: "virtual"; host: root.virtualHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
+                BrokerServiceControls { id: virtualControls; Layout.fillWidth: true; administration: root.administration; route: "virtual"; host: root.virtualHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
                 Flow {
                     Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
                     QQC2.Button { objectName: "configureVirtual"; text: root.virtualHost.modified || root.sessionSettings.modified ? i18nc("@action:button", "Configure Virtual… (unsaved)") : i18nc("@action:button", "Configure Virtual…"); onClicked: root.openPage(2) }
-                    QQC2.Button { objectName: "virtualServiceDetails"; text: i18nc("@action:button", "Service Details…"); onClicked: root.openPage(9) }
+                    QQC2.Button { objectName: "virtualRestart"; text: i18nc("@action:button", "Restart…"); enabled: root.administration.services[1].canRestart; onClicked: virtualControls.request("restart") }
+                    QQC2.Button { objectName: "virtualStop"; text: i18nc("@action:button", "Stop…"); enabled: root.administration.services[1].canStop; onClicked: virtualControls.request("stop") }
+                    QQC2.Button { objectName: "virtualDetailsToggle"; flat: true; icon.name: virtualDetailsBox.visible ? "arrow-down" : "arrow-right"; text: i18nc("@action:button", "Details"); onClicked: virtualDetailsBox.visible = !virtualDetailsBox.visible }
                 }
+                BrokerServiceDetails { id: virtualDetailsBox; visible: false; Layout.fillWidth: true; host: root.virtualHost; administration: root.administration; route: "virtual"; navigation: root; hostName: root.hostName }
               }
             }
             footer: QQC2.ToolBar {
@@ -102,7 +108,5 @@ KCM.AbstractKCM {
         BrokerCertificatePage { id: consoleCertificate; Layout.minimumWidth: 0; Layout.minimumHeight: 0; host: root.consoleHost; navigation: root }
         BrokerCertificatePage { id: virtualCertificate; Layout.minimumWidth: 0; Layout.minimumHeight: 0; host: root.virtualHost; navigation: root }
         BrokerHostsPage { id: hardwarePage; objectName: "virtualHardwarePage"; Layout.minimumWidth: 0; Layout.minimumHeight: 0; fixedScope: 2; consoleSettings: root.consoleHost; virtualSettings: root.virtualHost; sessionSettings: root.sessionSettings; administration: root.administration; navigation: root }
-        BrokerServiceDetailsPage { id: consoleDetails; Layout.minimumWidth: 0; Layout.minimumHeight: 0; host: root.consoleHost; administration: root.administration; route: "console"; navigation: root; hostName: root.hostName }
-        BrokerServiceDetailsPage { id: virtualDetails; Layout.minimumWidth: 0; Layout.minimumHeight: 0; host: root.virtualHost; administration: root.administration; route: "virtual"; navigation: root; hostName: root.hostName }
     }
 }

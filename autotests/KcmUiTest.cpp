@@ -333,7 +333,7 @@ private Q_SLOTS:
         QQmlComponent component(m_engine.get(),QUrl(u"qrc:/kcm/kcm_farside/main_phone.qml"_s));QVERIFY2(component.isReady(),qPrintable(component.errorString()));
         QScopedPointer<QObject> object(component.create(QQmlEngine::contextForObject(m_module->mainUi())));QVERIFY2(object,qPrintable(component.errorString()));
         auto *page=qobject_cast<QQuickItem *>(object.data());QVERIFY(page);QCOMPARE(page->objectName(),u"mainPage"_s);
-        showPage(page,{640,800});checkReachable(page,{u"consoleHostStatus"_s,u"consoleHostEnabled"_s,u"consoleServiceDetails"_s});
+        showPage(page,{640,800});checkReachable(page,{u"consoleHostStatus"_s,u"consoleHostEnabled"_s,u"consoleDetailsToggle"_s});
         QVERIFY(!page->findChild<QObject *>(u"serverSwitch"_s));page->setParentItem(nullptr);
         const auto warnings=takeMessages();QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
     }

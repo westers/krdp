@@ -54,7 +54,7 @@ private Q_SLOTS:
             session(Scope::VirtualSession,u"/usr/bin/python3"_s,arguments(dir),3000);
         QQmlEngine engine;localize(engine);QStringList warnings;
         connect(&engine,&QQmlEngine::warnings,this,[&](const auto &errors){for(const auto &error:errors)warnings.append(error.toString());});
-        QQmlComponent component(&engine,pageUrl().resolved(QUrl(u"BrokerServiceDetailsPage.qml"_s)));QVERIFY2(component.isReady(),qPrintable(component.errorString()));
+        QQmlComponent component(&engine,pageUrl().resolved(QUrl(u"BrokerServiceDetails.qml"_s)));QVERIFY2(component.isReady(),qPrintable(component.errorString()));
         QScopedPointer<QObject> object(component.createWithInitialProperties({{u"host"_s,QVariant::fromValue(&console)},
             {u"administration"_s,QVariant::fromValue<QObject *>(nullptr)},{u"route"_s,u"console"_s}}));
         QVERIFY2(object,qPrintable(component.errorString()));auto *page=qobject_cast<QQuickItem *>(object.data());QVERIFY(page);
@@ -84,12 +84,11 @@ private Q_SLOTS:
         QCOMPARE(item(u"hostRuntimeMissing"_s)->property("visible").toBool(),modeName=="runtime-partial");
         QCOMPARE(item(u"hostRuntimeDifferences"_s)->property("visible").toBool(),modeName=="runtime-different");
         QVERIFY(item(u"showHostRuntimeValues"_s)->setProperty("checked",true));QTRY_VERIFY(item(u"runtime_Port"_s));
-        auto *flickable=page->property("flickable").value<QQuickItem *>();QVERIFY(flickable);QTest::qWait(100);
-        auto *content=flickable->property("contentItem").value<QQuickItem *>();QVERIFY(content);
+        QTest::qWait(100);
         for(const auto &row:console.definitions()) {
             const auto key=row.toMap()[u"key"_s].toString();auto *label=qobject_cast<QQuickItem *>(item(u"runtime_"_s+key));QVERIFY(label);
-            const auto rect=label->mapRectToItem(content,QRectF(0,0,label->width(),label->height()));
-            QVERIFY2(rect.left()>=-0.5&&rect.right()<=flickable->width()+0.5,qPrintable(key));
+            const auto rect=label->mapRectToItem(page,QRectF(0,0,label->width(),label->height()));
+            QVERIFY2(rect.left()>=-0.5&&rect.right()<=page->width()+0.5,qPrintable(key));
         }
         if(modeName=="runtime-partial")QVERIFY(item(u"runtime_Quality"_s)->property("text").toString().contains(u"not observed"));
         if(modeName=="runtime-different")QVERIFY(item(u"runtime_Quality"_s)->property("text").toString().contains(u"55"));
