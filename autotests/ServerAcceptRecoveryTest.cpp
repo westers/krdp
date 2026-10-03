@@ -282,6 +282,44 @@ private Q_SLOTS:
                  qPrintable(QStringLiteral("%1 accept log lines in one episode").arg(s_acceptLines.load())));
     }
 
+    // N1: plain accepts after the first one, and a stable descriptor count over
+    // many accept cycles. Registered twice (default dispatcher and QT_NO_GLIB=1):
+    // with Qt's own UNIX dispatcher a second notifier on the listening socket
+    // itself stopped all further accepts.
+    void acceptsContinueAfterFirst()
+    {
+        Cleanup cleanup;
+        QCOMPARE(::getrlimit(RLIMIT_NOFILE, &cleanup.original), 0);
+        CountingServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = server.serverPort();
+
+        const int first = rawConnect(port);
+        QVERIFY(first >= 0);
+        cleanup.fds.push_back(first);
+        QTRY_COMPARE_WITH_TIMEOUT(server.accepted.load(), 1, 3000);
+        server.releaseHeld();
+        const int baseline = openFdCount();
+
+        for (int i = 2; i <= 6; ++i) {
+            const int c = rawConnect(port);
+            QVERIFY(c >= 0);
+            cleanup.fds.push_back(c);
+            QTRY_COMPARE_WITH_TIMEOUT(server.accepted.load(), i, 3000);
+            server.releaseHeld();
+        }
+        // Five accepted handles were released again: no descriptor was leaked
+        // (the notifier's duplicate exists once, created at the first accept).
+        QTRY_COMPARE_WITH_TIMEOUT(openFdCount(), baseline + 5 /* new client ends */, 1000);
+
+        server.stop();
+        for (int fd : cleanup.fds) {
+            ::close(fd);
+        }
+        cleanup.fds.clear();
+        QCOMPARE(openFdCount(), baseline + 5 - 6 - 2 /* five new clients, six closed, listener and watch duplicate gone */);
+    }
+
     // Destroying a Server that owns live sessions returns within a bounded time.
     void destructionWithSessionsIsBounded()
     {

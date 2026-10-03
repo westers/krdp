@@ -8,7 +8,9 @@
 #include <atomic>
 #include <chrono>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/resource.h>
+#include <unistd.h>
 
 #include <vector>
 
@@ -62,10 +64,22 @@ public:
     bool leaveScheduled = false;
     // I1: Qt 6.10 latches TemporaryError after the first accept, so an EMFILE
     // then neither pauses the listener nor emits acceptError and the listener's
-    // read notifier spins. This second notifier on the same descriptor notices
-    // the shortage and pauses accepting ourselves.
+    // read notifier spins. This second notifier notices the shortage and pauses
+    // accepting ourselves. It watches a dup() of the listening socket: Qt's own
+    // UNIX dispatcher (QT_NO_GLIB=1) supports only one notifier per descriptor
+    // number and would otherwise stop the listener's accepts (N1).
     std::unique_ptr<QSocketNotifier> acceptWatch;
-    qintptr watchedDescriptor = -1;
+    qintptr watchedDescriptor = -1; // the listener's descriptor the duplicate was made from
+    int watchDuplicate = -1;
+
+    void dropAcceptWatch()
+    {
+        acceptWatch.reset(); // unregisters before the descriptor is closed
+        if (watchDuplicate >= 0) {
+            ::close(watchDuplicate);
+            watchDuplicate = -1;
+        }
+    }
     DIR *fdDir = nullptr; // kept open: /proc/self/fd cannot be opened at EMFILE
 
     void endAcceptEpisode()
@@ -196,12 +210,21 @@ void Server::ensureAcceptWatch()
     if (descriptor == d->watchedDescriptor && (d->acceptWatch || descriptor < 0)) {
         return;
     }
-    d->acceptWatch.reset();
+    d->dropAcceptWatch();
     d->watchedDescriptor = descriptor;
     if (descriptor < 0) {
         return;
     }
-    d->acceptWatch = std::make_unique<QSocketNotifier>(descriptor, QSocketNotifier::Read);
+    // The duplicate is a real descriptor and is counted by openFileDescriptorCount
+    // like any other, so the headroom checks below stay exact. It exists before
+    // any shortage (created right after the first accept); if even this fails
+    // the watch is skipped and the next newConnection retries.
+    d->watchDuplicate = ::fcntl(int(descriptor), F_DUPFD_CLOEXEC, 3);
+    if (d->watchDuplicate < 0) {
+        d->watchedDescriptor = -1;
+        return;
+    }
+    d->acceptWatch = std::make_unique<QSocketNotifier>(d->watchDuplicate, QSocketNotifier::Read);
     connect(d->acceptWatch.get(), &QSocketNotifier::activated, this, [this]() {
         // Cheap when descriptors are available. A failing accept needs one
         // free descriptor for the connection (Qt's reserved spare is not ours
@@ -315,7 +338,7 @@ bool Server::start()
 
 void Server::stop()
 {
-    d->acceptWatch.reset(); // before close(): the descriptor number may be reused
+    d->dropAcceptWatch(); // before close(): the descriptor number may be reused
     d->watchedDescriptor = -1;
     close();
 

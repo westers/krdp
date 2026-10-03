@@ -1021,6 +1021,9 @@ target_include_directories(ServerAcceptRecoveryTest SYSTEM PRIVATE ${FreeRDP_INC
 target_link_libraries(ServerAcceptRecoveryTest PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
 add_test(NAME ServerAcceptRecoveryTest COMMAND ServerAcceptRecoveryTest)
 set_tests_properties(ServerAcceptRecoveryTest PROPERTIES TIMEOUT 60)
+# N1: the same cases with Qt's own UNIX event dispatcher instead of glib.
+add_test(NAME ServerAcceptRecoveryTestNoGlib COMMAND ServerAcceptRecoveryTest)
+set_tests_properties(ServerAcceptRecoveryTestNoGlib PROPERTIES TIMEOUT 60 ENVIRONMENT "QT_NO_GLIB=1")
 
 # --- OPT-055 K6: krdp safety net ---
 set(_krdp_k6_src ${CMAKE_SOURCE_DIR}/src)
