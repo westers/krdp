@@ -18,19 +18,17 @@ KCM.AbstractKCM {
     property string hostName: kcm.hostName
     property int currentPage: 0
     property var history: []
-    readonly property var pages: [overview, consolePage, virtualPage, accessPage, preferencesPage, consoleCertificate, virtualCertificate, hardwarePage]
+    readonly property var pages: [overview, consolePage, virtualPage, accessPage, preferencesPage, hardwarePage]
     readonly property var flickable: pages[currentPage].flickable
     title: pages[currentPage].title
     framedView: false
     function openPage(index) {
         if (index === currentPage) return;
-        if (index === 5 && !consoleHost.beginCertificateEdit()) return;
-        if (index === 6 && !virtualHost.beginCertificateEdit()) return;
         history = history.concat([currentPage]); currentPage = index;
     }
     function goBack() {
-        if (currentPage === 5) consoleHost.cancelCertificateEdit();
-        if (currentPage === 6) virtualHost.cancelCertificateEdit();
+        if (currentPage === 1) consolePage.leave();
+        if (currentPage === 2) virtualPage.leave();
         const previous = history.length ? history[history.length - 1] : 0;
         history = history.slice(0, -1); currentPage = previous;
     }
@@ -105,8 +103,6 @@ KCM.AbstractKCM {
         BrokerHostsPage { id: virtualPage; objectName: "virtualSettingsPage"; Layout.minimumWidth: 0; Layout.minimumHeight: 0; fixedScope: 1; consoleSettings: root.consoleHost; virtualSettings: root.virtualHost; sessionSettings: root.sessionSettings; administration: root.administration; navigation: root }
         BrokerSignInPage { id: accessPage; Layout.minimumWidth: 0; Layout.minimumHeight: 0; administration: root.authentication; serviceAdministration: root.administration }
         BrokerPreferencesPage { id: preferencesPage; Layout.minimumWidth: 0; Layout.minimumHeight: 0; preferences: root.preferences }
-        BrokerCertificatePage { id: consoleCertificate; Layout.minimumWidth: 0; Layout.minimumHeight: 0; host: root.consoleHost; navigation: root }
-        BrokerCertificatePage { id: virtualCertificate; Layout.minimumWidth: 0; Layout.minimumHeight: 0; host: root.virtualHost; navigation: root }
         BrokerHostsPage { id: hardwarePage; objectName: "virtualHardwarePage"; Layout.minimumWidth: 0; Layout.minimumHeight: 0; fixedScope: 2; consoleSettings: root.consoleHost; virtualSettings: root.virtualHost; sessionSettings: root.sessionSettings; administration: root.administration; navigation: root }
     }
 }

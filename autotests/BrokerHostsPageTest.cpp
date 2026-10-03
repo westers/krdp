@@ -170,11 +170,12 @@ private Q_SLOTS:
         QTemporaryDir dir;
         BrokerHostSettings console(Scope::Console, u"/usr/bin/python3"_s, arguments(dir), 3000),
             virtualHost(Scope::Virtual, u"/usr/bin/python3"_s, arguments(dir), 3000), session(Scope::VirtualSession, u"/usr/bin/python3"_s, arguments(dir), 3000);
-        HostPageNavigation navigation; QQmlEngine engine; localize(engine); QQmlComponent component(&engine, pageUrl().resolved(QUrl(u"BrokerCertificatePage.qml"_s)));
-        QVERIFY(console.reload()); QTRY_VERIFY(!console.busy()); QVERIFY(console.beginCertificateEdit());
+        QQmlEngine engine; localize(engine); QQmlComponent component(&engine, pageUrl().resolved(QUrl(u"BrokerCertificateSection.qml"_s)));
+        QVERIFY(console.reload()); QTRY_VERIFY(!console.busy());
         auto *draft=qobject_cast<BrokerHostSettings *>(console.certificateDraft()); QVERIFY(draft);
-        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"host"_s,QVariant::fromValue(&console)},{u"navigation"_s,QVariant::fromValue(&navigation)}}));
+        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"host"_s,QVariant::fromValue(&console)}}));
         QVERIFY2(object, qPrintable(component.errorString())); auto *page = qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
+        QVERIFY(!page->property("open").toBool()); QVERIFY(QMetaObject::invokeMethod(page,"begin")); QVERIFY(page->property("open").toBool());
         QQuickWindow window; window.resize(1000, 900); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
         const auto item = [&](const QString &name) { return find(page, name); };
         QVERIFY(console.reload()); QTRY_VERIFY(!console.busy());

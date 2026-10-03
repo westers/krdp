@@ -23,6 +23,8 @@ KCM.SimpleKCM {
     readonly property var camera: host.metadata.cameraLoopback || ({})
     title: session ? i18nc("@title:window", "New Desktop Hardware") : fixedScope === 0 ? i18nc("@title:window", "Console Settings") : i18nc("@title:window", "Virtual Settings")
     function fields(keys) { return host.definitions.filter(row => keys.includes(row.key)); }
+    // Leaving the page drops an open certificate draft; staged TLS and other drafts stay.
+    function leave() { if (certificateSection.open) certificateSection.cancel(); }
     function reloadSettings() { if (host.modified) reloadConfirmation.open(); else host.reload(); }
     ColumnLayout {
       ColumnLayout {
@@ -54,9 +56,10 @@ KCM.SimpleKCM {
                 RowLayout {
                     Kirigami.FormData.label: i18nc("@label", "Certificate:")
                     QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.host.tlsMode !== "keep" ? i18nc("@info", "Certificate change staged") : (root.host.metadata.tls || {}).state === "valid" ? i18nc("@info", "Current · no changes") : i18nc("@info", "View certificate details") }
-                    QQC2.Button { objectName: "editHostCertificate"; text: i18nc("@action:button", "Change…"); enabled: !root.host.busy && !root.host.outcomeUnknown; onClicked: root.navigation.openPage(root.fixedScope === 0 ? 5 : 6) }
+                    QQC2.Button { objectName: "editHostCertificate"; visible: !certificateSection.open; text: i18nc("@action:button", "Change…"); enabled: !root.host.busy && !root.host.outcomeUnknown; onClicked: certificateSection.begin() }
                 }
             }
+            BrokerCertificateSection { id: certificateSection; Layout.fillWidth: true; host: root.session ? root.consoleSettings : root.host; twins: [connectionForm, videoForm, mediaForm, advancedForm] }
         }
         ColumnLayout {
             Layout.fillWidth: true; visible: root.host.loaded && !root.session; spacing: Kirigami.Units.smallSpacing
@@ -80,7 +83,7 @@ KCM.SimpleKCM {
             Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing; visible: root.host.loaded && !root.session
             QQC2.Button { objectName: "hostAdvancedButton"; text: i18nc("@action:button", "Advanced Options"); icon.name: root.showAdvanced ? "arrow-down" : "arrow-right"; onClicked: root.showAdvanced = !root.showAdvanced }
             QQC2.Button { objectName: "consoleDisplayPreferences"; visible: root.fixedScope === 0; text: i18nc("@action:button", "My Display Preferences…"); onClicked: root.navigation.showPreferences() }
-            QQC2.Button { objectName: "virtualHardwareDefaults"; visible: root.fixedScope === 1; text: root.sessionSettings.modified ? i18nc("@action:button", "New Desktop Hardware… (unsaved)") : i18nc("@action:button", "New Desktop Hardware…"); onClicked: root.navigation.openPage(7) }
+            QQC2.Button { objectName: "virtualHardwareDefaults"; visible: root.fixedScope === 1; text: root.sessionSettings.modified ? i18nc("@action:button", "New Desktop Hardware… (unsaved)") : i18nc("@action:button", "New Desktop Hardware…"); onClicked: root.navigation.openPage(5) }
         }
         ColumnLayout {
             Layout.fillWidth: true; visible: root.host.loaded && (root.showAdvanced || root.session); spacing: Kirigami.Units.smallSpacing

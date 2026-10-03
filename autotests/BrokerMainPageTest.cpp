@@ -116,13 +116,33 @@ private Q_SLOTS:
             QCOMPARE(console.values(),before); QVERIFY(console.modified());
             QVERIFY(page->setProperty("currentPage",1)); QTest::qWait(60);
         }
-        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"editHostCertificate"_s),"clicked")); QCOMPARE(page->property("currentPage").toInt(),5);
+        // Inline certificate section: opens in place, cancel preserves other host edits.
+        auto *certificateButton=find(consolePage,u"editHostCertificate"_s); QVERIFY(certificateButton);
+        QVERIFY(!find(consolePage,u"certificateStandard"_s)->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(certificateButton,"clicked")); QCOMPARE(page->property("currentPage").toInt(),1);   // stays on the host page
         auto *draft=qobject_cast<BrokerHostSettings *>(console.certificateDraft()); QVERIFY(draft && draft->loaded());
-        QVERIFY(QMetaObject::invokeMethod(item(u"certificateStandard"_s),"clicked")); QCOMPARE(draft->tlsMode(),u"standard"_s); QCOMPARE(console.tlsMode(),u"keep"_s);
-        QVERIFY(QMetaObject::invokeMethod(item(u"cancelCertificateEdit"_s),"clicked")); QCOMPARE(page->property("currentPage").toInt(),1); QCOMPARE(console.values(),before); QCOMPARE(console.tlsMode(),u"keep"_s);
-        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"editHostCertificate"_s),"clicked"));
-        QVERIFY(QMetaObject::invokeMethod(item(u"certificateStandard"_s),"clicked")); QVERIFY(QMetaObject::invokeMethod(item(u"stageCertificateEdit"_s),"clicked"));
+        QTRY_VERIFY(find(consolePage,u"certificateStandard"_s)->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"certificateStandard"_s),"clicked")); QCOMPARE(draft->tlsMode(),u"standard"_s); QCOMPARE(console.tlsMode(),u"keep"_s);
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"cancelCertificateEdit"_s),"clicked")); QCOMPARE(page->property("currentPage").toInt(),1);
+        QCOMPARE(console.values(),before); QCOMPARE(console.tlsMode(),u"keep"_s);                  // Port edit kept, TLS untouched
+        QVERIFY(!find(consolePage,u"certificateStandard"_s)->property("visible").toBool());
+        // Re-opening starts from the saved choice again (Review focus 2).
+        QVERIFY(QMetaObject::invokeMethod(certificateButton,"clicked"));
+        QVERIFY(find(consolePage,u"certificateKeep"_s)->property("checked").toBool());
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"certificateStandard"_s),"clicked")); QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"stageCertificateEdit"_s),"clicked"));
         QCOMPARE(page->property("currentPage").toInt(),1); QCOMPARE(console.tlsMode(),u"standard"_s); QCOMPARE(console.values()[u"Port"_s].toString(),u"3401"_s);
+        // Advanced open/close never changes the draft state.
+        { const auto modified=console.modified(); QVERIFY(consolePage->setProperty("showAdvanced",true)); QTest::qWait(50); QVERIFY(consolePage->setProperty("showAdvanced",false)); QCOMPARE(console.modified(),modified); QCOMPARE(console.tlsMode(),u"standard"_s); }
+        // Leaving the page cancels an open, unstaged certificate draft only.
+        QVERIFY(QMetaObject::invokeMethod(certificateButton,"clicked"));
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"certificateKeep"_s),"clicked"));
+        QVERIFY(QMetaObject::invokeMethod(item(u"settingsBack"_s),"clicked"));
+        QCOMPARE(page->property("currentPage").toInt(),0);
+        QCOMPARE(console.tlsMode(),u"standard"_s);                                          // earlier staged choice kept
+        QCOMPARE(console.values()[u"Port"_s].toString(),u"3401"_s);
+        QVERIFY(!find(consolePage,u"certificateStandard"_s)->property("visible").toBool());
+        QVERIFY(page->setProperty("currentPage",1)); QTest::qWait(60);
+        QVERIFY(find(consolePage,u"editHostCertificate"_s)->property("visible").toBool());
         QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"defaultHostSettings"_s),"clicked")); QCOMPARE(console.tlsMode(),u"standard"_s); console.discard();
         QVERIFY(virtualHost.reload()); QTRY_VERIFY(!virtualHost.busy()); QVERIFY(session.reload()); QTRY_VERIFY(!session.busy()); QVERIFY(auth.reload()); QTRY_VERIFY(!auth.busy()); QVERIFY(preferences.reload());
         QVERIFY(page->setProperty("currentPage",4));
@@ -152,28 +172,20 @@ private Q_SLOTS:
         KRdp::ServerCertificate::Paths capturePair{dir.filePath(u"capture-certificate.crt"_s),dir.filePath(u"capture-private.key"_s)}; QString captureError;
         QVERIFY(KRdp::ServerCertificate::generate(capturePair,u"capture-fixture"_s,QDateTime::currentDateTimeUtc(),10,&captureError));
         const auto screenshot=[&](const QString &name){QTest::qWait(350); if(!screenshots.isEmpty()) QVERIFY(window.grabWindow().save(screenshots+u"/"_s+name+u".png"_s));};
-        for(int index=0;index<8;++index) {
-            if(index==5) QVERIFY(console.beginCertificateEdit());
-            if(index==6) QVERIFY(virtualHost.beginCertificateEdit());
+        for(int index=0;index<6;++index) {
             QVERIFY(page->setProperty("currentPage",index)); screenshot(u"page-"_s+QString::number(index));
-            if (index == 5 || index == 6) {
-                auto *host = index == 5 ? &console : &virtualHost;
-                auto *certificatePage = page->property("pages").value<QJSValue>().property(uint(index)).toQObject();
-                QVERIFY(certificatePage);
-                auto *draft=qobject_cast<BrokerHostSettings *>(host->certificateDraft()); QVERIFY(draft);
-                QVERIFY(draft->chooseTls(u"import"_s));
-                certificatePage->setProperty("certificateFile",QUrl::fromLocalFile(capturePair.certificate));
-                certificatePage->setProperty("privateKeyFile",QUrl::fromLocalFile(capturePair.key));
-                QVERIFY(draft->importTls(QUrl::fromLocalFile(capturePair.certificate),QUrl::fromLocalFile(capturePair.key)));
-                auto *flickable=certificatePage->property("flickable").value<QQuickItem *>(); QVERIFY(flickable); QTest::qWait(100);
-                screenshot(u"certificate-import-"_s+QString::number(index));
-                flickable->setProperty("contentY",qMax<qreal>(0,flickable->property("contentHeight").toReal()-flickable->height()));
-                screenshot(u"certificate-import-bottom-"_s+QString::number(index));
-                host->cancelCertificateEdit();
-            }
             if (index == 1 || index == 2 || index == 4) {
                 auto *current = index == 1 ? consolePage : index == 2 ? qobject_cast<QQuickItem *>(item(u"virtualSettingsPage"_s)) : qobject_cast<QQuickItem *>(item(u"brokerPreferencesPage"_s));
                 QVERIFY(current->setProperty("showAdvanced",true));
+                BrokerHostSettings *captureHost = index == 1 ? &console : index == 2 ? &virtualHost : nullptr; QObject *captureSection = nullptr;
+                if (captureHost) {   // expand the inline certificate section in its import state for the capture
+                    captureSection = find(current,u"certificateSection"_s); QVERIFY(captureSection); QVERIFY(QMetaObject::invokeMethod(captureSection,"begin"));
+                    auto *draft=qobject_cast<BrokerHostSettings *>(captureHost->certificateDraft()); QVERIFY(draft);
+                    QVERIFY(draft->chooseTls(u"import"_s));
+                    captureSection->setProperty("certificateFile",QUrl::fromLocalFile(capturePair.certificate));
+                    captureSection->setProperty("privateKeyFile",QUrl::fromLocalFile(capturePair.key));
+                    QVERIFY(draft->importTls(QUrl::fromLocalFile(capturePair.certificate),QUrl::fromLocalFile(capturePair.key)));
+                }
                 auto *flickable = current->property("flickable").value<QQuickItem *>(); QVERIFY(flickable);
                 QTest::qWait(100);
                 const qreal end = qMax<qreal>(0,flickable->property("contentHeight").toReal()-flickable->height());
@@ -182,7 +194,7 @@ private Q_SLOTS:
                     flickable->setProperty("contentY",offset); screenshot(u"advanced-"_s+QString::number(index)+u"-"_s+QString::number(part++));
                     if(offset>=end)break;
                 }
-                QVERIFY(current->setProperty("showAdvanced",false)); flickable->setProperty("contentY",0);
+                QVERIFY(current->setProperty("showAdvanced",false)); flickable->setProperty("contentY",0); if (captureSection) QVERIFY(QMetaObject::invokeMethod(captureSection,"cancel"));
             }
         }
         QVERIFY(page->setProperty("currentPage",3)); QVERIFY(QMetaObject::invokeMethod(item(u"consoleAddAlias"_s),"clicked")); screenshot(u"alias-dialog"_s); QVERIFY(QMetaObject::invokeMethod(aliasDialog,"close"));
@@ -191,7 +203,7 @@ private Q_SLOTS:
         auto *enabled=find(details,u"consoleHostEnabled"_s); QVERIFY(enabled); QVERIFY(enabled->setProperty("checked",false)); QVERIFY(QMetaObject::invokeMethod(enabled,"clicked"));
         auto *confirm=find(details,u"consoleConfirmServiceOperation"_s); QVERIFY(confirm); QTRY_VERIFY(confirm->property("visible").toBool()); QCOMPARE(transport.mutations,0); screenshot(u"stop-dialog"_s); QVERIFY(QMetaObject::invokeMethod(confirm,"close")); QCOMPARE(transport.mutations,0);
         window.resize(640,360); page->setSize(window.size());
-        for(int index=1;index<8;++index) {
+        for(int index=1;index<6;++index) {
             QVERIFY(page->setProperty("currentPage",index)); QTest::qWait(60);
             const auto visibleSave=[&](auto &&self,QQuickItem *parent)->QQuickItem * {
                 if(parent->isVisible() && parent->objectName().startsWith(u"save")) return parent;
