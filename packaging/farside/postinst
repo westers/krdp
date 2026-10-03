@@ -73,6 +73,68 @@ for pair in 'krdp-console-host.service farside-console-host.service' \
     done
 done
 
+# BEGIN farside-greeter-setting
+# Console at the SDDM greeter needs the greeter KWin to authorize
+# farside-console-worker for zkde_screencast_unstable_v1. KWin looks the worker up
+# in the sddm user's ksycoca cache, which indexes no applications unless the
+# greeter runs with XDG_MENU_PREFIX=plasma-. SDDM drop-ins replace a key's value, so
+# the generated file carries the merged value: the effective GreeterEnvironment of
+# the existing configuration plus any missing item. Only GreeterEnvironment is set.
+# Nothing is written unless /etc/sddm.conf.d exists (SDDM installed); no foreign
+# file is edited; a same-named file without our marker is left alone. sddm is never
+# restarted: the setting applies at the next greeter start.
+farside_greeter_setting() {
+    root=$1
+    dir=$root/etc/sddm.conf.d
+    target=$dir/30-farside-greeter.conf
+    marker='# Managed by farside-server (removed on purge); override with a later-sorting drop-in'
+    [ -d "$dir" ] || return 0
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        { [ ! -L "$target" ] && grep -qxF "$marker" "$target"; } || return 0
+    fi
+    current=
+    if [ -f "$root/etc/sddm.conf" ]; then
+        value=$(sed -n 's/^GreeterEnvironment=//p' "$root/etc/sddm.conf" | tail -n 1)
+        [ -z "$value" ] || current=$value
+    fi
+    for file in "$dir"/*.conf; do
+        [ -f "$file" ] && [ "$file" != "$target" ] || continue
+        value=$(sed -n 's/^GreeterEnvironment=//p' "$file" | tail -n 1)
+        [ -z "$value" ] || current=$value
+    done
+    merged=$current
+    for item in QT_WAYLAND_SHELL_INTEGRATION=layer-shell XDG_MENU_PREFIX=plasma-; do
+        case ",$merged," in
+        *",${item%%=*}="*) ;;
+        *) merged=${merged:+$merged,}$item ;;
+        esac
+    done
+    tmp=$(mktemp "$dir/.farside-greeter.XXXXXX") || return 0
+    printf '%s\n[General]\nGreeterEnvironment=%s\n' "$marker" "$merged" >"$tmp"
+    chmod 0644 "$tmp"
+    if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
+        rm -f "$tmp"
+    else
+        mv -f "$tmp" "$target"
+        echo "farside-server: set the SDDM greeter environment ($target)." >&2
+        echo "farside-server: it applies at the next greeter start (reboot, or 'systemctl restart sddm' when nobody is logged in)." >&2
+    fi
+    return 0
+}
+farside_greeter_cache() {
+    command -v kbuildsycoca6 >/dev/null && command -v runuser >/dev/null || return 0
+    sddm_home=$(getent passwd sddm | cut -d: -f6) || return 0
+    [ -n "$sddm_home" ] && [ -d "$sddm_home" ] || return 0
+    runuser -u sddm -- env HOME="$sddm_home" LANG=C.UTF-8 XDG_MENU_PREFIX=plasma- \
+        XDG_DATA_DIRS=/usr/local/share:/usr/share XDG_CONFIG_DIRS=/etc/xdg \
+        QT_QPA_PLATFORM=offscreen kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
+}
+# END farside-greeter-setting
+farside_greeter_setting "${DPKG_ROOT:-}" || true
+if [ -z "${DPKG_ROOT:-}" ] && [ -f /etc/sddm.conf.d/30-farside-greeter.conf ]; then
+    farside_greeter_cache || true
+fi
+
 if command -v deb-systemd-helper >/dev/null; then
     for pair in 'krdp-console-host.service farside-console-host.service' \
                 'krdp-virtual-host.service farside-virtual-host.service'; do

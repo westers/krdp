@@ -226,4 +226,10 @@ if grep -qxF './usr/share/icons/hicolor/scalable/apps/io.github.westers.farside.
     echo 'the server icon path overlaps farside-client' >&2
     exit 1
 fi
+# The SDDM greeter setting is handled by the maintainer scripts packaged in this deb.
+"$root/scripts/check-farside-greeter-setting.sh"
+for script in postinst postrm; do
+    dpkg-deb -I "$deb" "$script" | grep -q 30-farside-greeter.conf \
+        || { echo "packaged $script does not handle the SDDM greeter drop-in" >&2; exit 1; }
+done
 echo "farside-server system deb: $deb"

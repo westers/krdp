@@ -5,6 +5,12 @@ if [ "$1" = purge ] && [ -z "${DPKG_ROOT:-}" ] && command -v deb-systemd-helper 
     deb-systemd-helper purge farside-console-host.service farside-virtual-host.service >/dev/null || true
     deb-systemd-helper --user purge app-io.github.westers.farside.server.service >/dev/null || true
 fi
+if [ "$1" = purge ]; then
+    greeter_file="${DPKG_ROOT:-}/etc/sddm.conf.d/30-farside-greeter.conf"
+    if [ -f "$greeter_file" ] && [ ! -L "$greeter_file" ] && grep -q '^# Managed by farside-server' "$greeter_file"; then
+        rm -f "$greeter_file"
+    fi
+fi
 if [ "$1" = remove ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
     systemctl --system daemon-reload >/dev/null || true
 fi
