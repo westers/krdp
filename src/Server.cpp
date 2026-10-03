@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <QCoreApplication>
+#include <QSocketNotifier>
 #include <QTimer>
 
 #include <freerdp/channels/channels.h>
@@ -59,6 +60,12 @@ public:
     int acceptErrors = 0;
     int acceptedSinceError = 0;
     bool leaveScheduled = false;
+    // I1: Qt 6.10 latches TemporaryError after the first accept, so an EMFILE
+    // then neither pauses the listener nor emits acceptError and the listener's
+    // read notifier spins. This second notifier on the same descriptor notices
+    // the shortage and pauses accepting ourselves.
+    std::unique_ptr<QSocketNotifier> acceptWatch;
+    qintptr watchedDescriptor = -1;
     DIR *fdDir = nullptr; // kept open: /proc/self/fd cannot be opened at EMFILE
 
     void endAcceptEpisode()
@@ -115,6 +122,9 @@ Server::Server(QObject *parent)
     d->acceptRetry.setSingleShot(true);
     connect(&d->acceptRetry, &QTimer::timeout, this, [this]() {
         d->acceptResumed = true;
+        if (d->acceptWatch) {
+            d->acceptWatch->setEnabled(true);
+        }
         if (isListening()) {
             resumeAccepting();
         }
@@ -123,6 +133,7 @@ Server::Server(QObject *parent)
     // incomingConnection, including overrides).
     connect(this, &QTcpServer::newConnection, this, [this]() {
         const auto now = Private::Clock::now();
+        ensureAcceptWatch();
         ++d->acceptedSinceError;
         if (d->acceptEpisode && d->acceptResumed) {
             if (!d->leaveScheduled) {
@@ -150,6 +161,11 @@ Server::Server(QObject *parent)
     });
     connect(this, &QTcpServer::acceptError, this, [this](QAbstractSocket::SocketError error) {
         const auto now = Private::Clock::now();
+        // Qt paused the listener: our watch must not spin on its readable
+        // backlog meanwhile. The retry timer re-enables it.
+        if (d->acceptWatch) {
+            d->acceptWatch->setEnabled(false);
+        }
         // With descriptors to spare and connections accepted since the last
         // error this is not EMFILE: Qt 6 reports a stale error after draining
         // the backlog that followed an earlier one, and pauses again. Resume
@@ -170,26 +186,62 @@ Server::Server(QObject *parent)
             }
             return;
         }
-        d->acceptedSinceError = 0;
-        if (!d->acceptEpisode) {
-            if (!d->haveAcceptError || now - d->lastAcceptError > kAcceptBackoffReset) {
-                d->acceptBackoff = kAcceptBackoffStart;
-            }
-            d->acceptEpisode = true;
-            d->acceptErrors = 0;
-            d->acceptEpisodeStart = now;
-            qCWarning(KRDP) << "Accepting connections failed:" << errorString() << "(" << error << "), open file descriptors" << openFds
-                            << "of soft limit" << qulonglong(softFileLimit()) << "; will retry with back-off";
-        }
-        ++d->acceptErrors;
-        d->haveAcceptError = true;
-        d->lastAcceptError = now;
-        d->acceptResumed = false;
-        if (!d->acceptRetry.isActive()) {
-            d->acceptRetry.start(d->acceptBackoff);
-            d->acceptBackoff = std::min(d->acceptBackoff * 2, kAcceptBackoffMax);
-        }
+        reportAcceptFailure(errorString(), int(error), openFds);
     });
+}
+
+void Server::ensureAcceptWatch()
+{
+    const qintptr descriptor = isListening() ? socketDescriptor() : -1;
+    if (descriptor == d->watchedDescriptor && (d->acceptWatch || descriptor < 0)) {
+        return;
+    }
+    d->acceptWatch.reset();
+    d->watchedDescriptor = descriptor;
+    if (descriptor < 0) {
+        return;
+    }
+    d->acceptWatch = std::make_unique<QSocketNotifier>(descriptor, QSocketNotifier::Read);
+    connect(d->acceptWatch.get(), &QSocketNotifier::activated, this, [this]() {
+        // Cheap when descriptors are available. A failing accept needs one
+        // free descriptor for the connection (Qt's reserved spare is not ours
+        // to count on).
+        const int openFds = openFileDescriptorCount(d->fdDir);
+        const rlim_t limit = softFileLimit();
+        if (openFds < 0 || limit == RLIM_INFINITY || qulonglong(openFds) + 2 <= qulonglong(limit)) {
+            return;
+        }
+        pauseAccepting();
+        d->acceptWatch->setEnabled(false);
+        reportAcceptFailure(QStringLiteral("too many open files"), int(QAbstractSocket::SocketResourceError), openFds);
+    });
+}
+
+void Server::reportAcceptFailure(const QString &what, int error, int openFds)
+{
+    const auto now = Private::Clock::now();
+    if (d->acceptWatch) {
+        d->acceptWatch->setEnabled(false); // re-enabled by the retry timer
+    }
+    d->acceptedSinceError = 0;
+    if (!d->acceptEpisode) {
+        if (!d->haveAcceptError || now - d->lastAcceptError > kAcceptBackoffReset) {
+            d->acceptBackoff = kAcceptBackoffStart;
+        }
+        d->acceptEpisode = true;
+        d->acceptErrors = 0;
+        d->acceptEpisodeStart = now;
+        qCWarning(KRDP) << "Accepting connections failed:" << what << "(" << error << "), open file descriptors" << openFds
+                        << "of soft limit" << qulonglong(softFileLimit()) << "; will retry with back-off";
+    }
+    ++d->acceptErrors;
+    d->haveAcceptError = true;
+    d->lastAcceptError = now;
+    d->acceptResumed = false;
+    if (!d->acceptRetry.isActive()) {
+        d->acceptRetry.start(d->acceptBackoff);
+        d->acceptBackoff = std::min(d->acceptBackoff * 2, kAcceptBackoffMax);
+    }
 }
 
 Server::~Server()
@@ -263,6 +315,8 @@ bool Server::start()
 
 void Server::stop()
 {
+    d->acceptWatch.reset(); // before close(): the descriptor number may be reused
+    d->watchedDescriptor = -1;
     close();
 
     if (d->settings) {

@@ -169,6 +169,8 @@ protected:
 private:
     friend class RdpConnection;
     rdp_settings *rdpSettings() const;
+    void ensureAcceptWatch();
+    void reportAcceptFailure(const QString &what, int error, int openFds);
 
     class Private;
     const std::unique_ptr<Private> d;
