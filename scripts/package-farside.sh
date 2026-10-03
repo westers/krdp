@@ -33,9 +33,11 @@ kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # bitrate/CRF changes in place (AUD-SWENC, 02d475d) + a hidden cursor reported from the
 # screencast metadata (FIX-CURSOR, fe44b96; PipeWireCursor::visible) + AV1's own quantiser scale and AV1
 # tiles (AV1-Q, fdfa037; setAv1Tiles(), quantizerForQuality()) + Sol HEVC NVENC fallback
-# (OPT-046, 9d6b08c). Those libraries come in through
+# (OPT-046, 9d6b08c) + OPT-055 robustness: never block on an abandoned producer's thread
+# (517df57), setters handed to the producer thread (I2, 326cb51), a producer that cannot start
+# is reported instead of staying silent (I3, 5857ba5). Those libraries come in through
 # libavcodec's own Depends (dpkg-shlibdeps: libavcodec62).
-kpw_ref=${KPIPEWIRE_REF:-9d6b08c}
+kpw_ref=${KPIPEWIRE_REF:-5857ba5}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 
