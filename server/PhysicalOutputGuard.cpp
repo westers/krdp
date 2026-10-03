@@ -23,6 +23,7 @@
 
 using namespace KRdp::OutputSnapshot;
 using namespace Qt::StringLiterals;
+using KRdp::StallPhase;
 
 namespace
 {
