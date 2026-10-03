@@ -21,7 +21,7 @@ KCM.SimpleKCM {
     ColumnLayout {
       ColumnLayout {
         Layout.fillWidth: true
-        Layout.maximumWidth: Kirigami.Units.gridUnit * 38
+        Layout.maximumWidth: Kirigami.Units.gridUnit * 48
         Layout.alignment: Qt.AlignLeft
         spacing: Kirigami.Units.largeSpacing
         QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Permissions for both services. Loading and saving require administrator authorization. Save policy changes, then restart both services.") }
@@ -47,7 +47,7 @@ KCM.SimpleKCM {
                 visible: root.administration.loaded
                 enabled: root.administration.loaded && !root.administration.busy
                 Kirigami.Heading {
-                    level: 3
+                    level: 2
                     text: section.modelData === "console" ? i18nc("@title:group", "Console") : i18nc("@title:group", "Virtual")
                 }
                 Kirigami.FormLayout {
@@ -121,7 +121,7 @@ KCM.SimpleKCM {
                 Kirigami.Separator { Layout.fillWidth: true }
             }
         }
-        QQC2.Label { visible: root.administration.modified; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Unsaved changes · access policy only."); color: Kirigami.Theme.disabledTextColor }
+        QQC2.Label { visible: root.administration.modified; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Unsaved changes · access policy only"); color: Kirigami.Theme.disabledTextColor }
     }
     }
     footer: QQC2.ToolBar {

@@ -93,7 +93,7 @@ ColumnLayout {
             objectName: root.key === "Quality" ? root.prefix + "QualitySlider" : ""
             visible: root.key === "Quality"
             enabled: root.editable
-            Layout.fillWidth: true; Layout.minimumWidth: Kirigami.Units.gridUnit * 4; Layout.maximumWidth: Kirigami.Units.gridUnit * 12
+            Layout.fillWidth: true; Layout.minimumWidth: Kirigami.Units.gridUnit * 4
             from: 0; to: 100; stepSize: 1; value: root.numericValue
             Accessible.name: root.label
             onMoved: { root.setNumber(Math.round(value)); value = Qt.binding(() => root.numericValue); }

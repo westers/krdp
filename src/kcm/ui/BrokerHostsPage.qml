@@ -21,12 +21,18 @@ KCM.SimpleKCM {
     title: fixedScope === 0 ? i18nc("@title:window", "Console Settings") : i18nc("@title:window", "Virtual Settings")
     function fields(keys) { return host.definitions.filter(row => keys.includes(row.key)); }
     // Leaving the page drops an open certificate draft; staged TLS and other drafts stay.
+    readonly property string pendingSummary: {
+        const scope = fixedScope === 0 ? i18nc("@info", "Console only") : i18nc("@info", "Virtual only");
+        const tls = host.tlsMode !== "keep" ? i18nc("@info", " (certificate change staged)") : "";
+        if (fixedScope === 1 && sessionSettings.modified) return host.modified ? i18nc("@info", "Unsaved changes · Virtual only%1 · New desktop defaults", tls) : i18nc("@info", "Unsaved changes · New desktop defaults");
+        return i18nc("@info", "Unsaved changes · %1%2", scope, tls);
+    }
     function leave() { if (certificateSection.open) certificateSection.cancel(); }
     function reloadSettings() { if (host.modified) reloadConfirmation.open(); else host.reload(); }
     ColumnLayout {
       ColumnLayout {
         Layout.fillWidth: true
-        Layout.maximumWidth: Kirigami.Units.gridUnit * 38
+        Layout.maximumWidth: Kirigami.Units.gridUnit * 48
         Layout.alignment: Qt.AlignLeft
         spacing: Kirigami.Units.largeSpacing
         QQC2.Label {
@@ -42,7 +48,7 @@ KCM.SimpleKCM {
         }
         ColumnLayout {
             Layout.fillWidth: true; visible: root.host.loaded; spacing: Kirigami.Units.smallSpacing
-            Kirigami.Heading { level: 3; text: i18nc("@title:group", "Connection") }
+            Kirigami.Heading { level: 2; text: i18nc("@title:group", "Connection") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32;
             Layout.alignment: Qt.AlignLeft
@@ -60,20 +66,21 @@ KCM.SimpleKCM {
         }
         ColumnLayout {
             Layout.fillWidth: true; visible: root.host.loaded; spacing: Kirigami.Units.smallSpacing
-            Kirigami.Heading { level: 3; text: i18nc("@title:group", "Video") }
+            Kirigami.Heading { level: 2; text: i18nc("@title:group", "Video") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32; id: videoForm; twinFormLayouts: [connectionForm, mediaForm, advancedForm]; Layout.fillWidth: true; Layout.alignment: Qt.AlignLeft; Repeater { model: root.fields(["Quality", "AdaptiveQuality"]); delegate: hostField } }
         }
         ColumnLayout {
             Layout.fillWidth: true; visible: root.host.loaded; spacing: Kirigami.Units.smallSpacing
-            Kirigami.Heading { level: 3; text: i18nc("@title:group", "Sound and devices") }
+            Kirigami.Heading { level: 2; text: i18nc("@title:group", "Sound and devices") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32; id: mediaForm; twinFormLayouts: [connectionForm, videoForm, advancedForm]; Layout.fillWidth: true; Layout.alignment: Qt.AlignLeft; Repeater { model: root.fields(["PreferAudioQuality", "StandardClientMedia"]); delegate: hostField } }
             QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Host media permission does not grant microphone or camera access; client consent is still required."); color: Kirigami.Theme.disabledTextColor }
             Kirigami.InlineMessage {
                 objectName: "cameraReadiness"; Layout.fillWidth: true; visible: true
-                type: root.camera.state === "available" ? Kirigami.MessageType.Positive : Kirigami.MessageType.Information
-                text: root.fixedScope === 0 && root.host.loaded && (root.host.values.CameraLoopbackDevice || root.host.unitDefaults.CameraLoopbackDevice) !== (root.host.metadata.effective || {}).CameraLoopbackDevice ? i18nc("@info", "Camera bridge change staged. Save, then reload settings to check the new device prerequisites.") : root.fixedScope === 1 ? i18nc("@info", "Camera sharing is unavailable in the current Virtual device namespace.") : root.camera.state === "available" ? i18nc("@info", "Saved camera bridge device is available. Application access and client sharing still need to be enabled.") : root.camera.state === "disabled" ? i18nc("@info", "Camera: setup required. Configure a supported V4L2 loopback device in Advanced. Install v4l2loopback-dkms and grant the desktop account access if needed.") : root.camera.state ? i18nc("@info", "Camera bridge unavailable (%1). Check the configured V4L2 device and desktop account permissions in Advanced.", root.camera.state) : i18nc("@info", "Camera bridge: not checked. Reload saved settings to check its device prerequisites.")
+                readonly property bool staged: root.fixedScope === 0 && root.host.loaded && (root.host.values.CameraLoopbackDevice || root.host.unitDefaults.CameraLoopbackDevice) !== (root.host.metadata.effective || {}).CameraLoopbackDevice
+                type: staged || root.fixedScope === 1 ? Kirigami.MessageType.Information : root.camera.state === "available" ? Kirigami.MessageType.Positive : root.camera.state ? Kirigami.MessageType.Warning : Kirigami.MessageType.Information
+                text: staged ? i18nc("@info", "Camera: bridge change staged — save, then reload settings to check the new device.") : root.fixedScope === 1 ? i18nc("@info", "Camera: sharing is unavailable in the current Virtual device namespace.") : root.camera.state === "available" ? i18nc("@info", "Camera: bridge device available — apps and clients still need access.") : root.camera.state === "disabled" ? i18nc("@info", "Camera: setup required — configure a V4L2 loopback device in Advanced.") : root.camera.state ? i18nc("@info", "Camera: bridge unavailable (%1) — check the V4L2 device and account permissions in Advanced.", root.camera.state) : i18nc("@info", "Camera: not checked — reload saved settings to check the bridge device.")
             }
         }
         Flow {
@@ -83,7 +90,7 @@ KCM.SimpleKCM {
         }
         ColumnLayout {
             Layout.fillWidth: true; visible: root.host.loaded && root.showAdvanced; spacing: Kirigami.Units.smallSpacing
-            Kirigami.Heading { level: 3; text: i18nc("@title:group", "Encoding and camera bridge") }
+            Kirigami.Heading { level: 2; text: i18nc("@title:group", "Advanced: encoding and camera bridge") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32;
             Layout.alignment: Qt.AlignLeft
@@ -94,7 +101,7 @@ KCM.SimpleKCM {
             }
         }
         BrokerHardwareSection { objectName: "desktopHardwareSection"; Layout.fillWidth: true; visible: root.fixedScope === 1; settings: root.sessionSettings; navigation: root.navigation }
-        QQC2.Label { objectName: "hostPendingSummary"; visible: root.host.modified; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.host.tlsMode !== "keep" ? i18nc("@info", "Unsaved changes for this service, including its certificate choice.") : i18nc("@info", "Unsaved changes for this page only."); color: Kirigami.Theme.disabledTextColor }
+        QQC2.Label { objectName: "hostPendingSummary"; visible: root.host.modified; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.pendingSummary; color: Kirigami.Theme.disabledTextColor }
     }
     Component {
         id: hostField

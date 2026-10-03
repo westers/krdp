@@ -62,11 +62,11 @@ KCM.AbstractKCM {
             ColumnLayout {
               ColumnLayout {
                 Layout.fillWidth: true
-                Layout.maximumWidth: Kirigami.Units.gridUnit * 38
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 48
                 Layout.alignment: Qt.AlignLeft
                 spacing: Kirigami.Units.largeSpacing
                 QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Choose which desktop to make available. Service switches apply immediately.") }
-                Kirigami.Heading { level: 3; text: i18nc("@title:group", "Console") }
+                Kirigami.Heading { level: 2; text: i18nc("@title:group", "Console") }
                 QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Share this computer's desktop.") }
                 BrokerServiceControls { id: consoleControls; Layout.fillWidth: true; administration: root.administration; route: "console"; host: root.consoleHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
                 Flow {
@@ -78,7 +78,7 @@ KCM.AbstractKCM {
                 }
                 BrokerServiceDetails { id: consoleDetailsBox; visible: false; Layout.fillWidth: true; host: root.consoleHost; administration: root.administration; route: "console"; navigation: root; hostName: root.hostName }
                 Kirigami.Separator { Layout.fillWidth: true }
-                Kirigami.Heading { level: 3; text: i18nc("@title:group", "Virtual") }
+                Kirigami.Heading { level: 2; text: i18nc("@title:group", "Virtual") }
                 QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Separate desktops for remote users.") }
                 BrokerServiceControls { id: virtualControls; Layout.fillWidth: true; administration: root.administration; route: "virtual"; host: root.virtualHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
                 Flow {

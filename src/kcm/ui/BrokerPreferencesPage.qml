@@ -18,7 +18,7 @@ KCM.SimpleKCM {
     ColumnLayout {
       ColumnLayout {
         Layout.fillWidth: true
-        Layout.maximumWidth: Kirigami.Units.gridUnit * 38
+        Layout.maximumWidth: Kirigami.Units.gridUnit * 48
         Layout.alignment: Qt.AlignLeft
         spacing: Kirigami.Units.largeSpacing
         QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "For your account. Video and sound apply to Console and Virtual; display selection applies to Console. Save, then reconnect.") }
@@ -28,14 +28,14 @@ KCM.SimpleKCM {
         QQC2.Button { objectName: "unlockBrokerPreferences"; visible: !root.preferences.loaded; text: i18nc("@action:button", "Load My Preferences"); onClicked: root.preferences.reload() }
         ColumnLayout {
             visible: root.preferences.loaded; Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
-            Kirigami.Heading { level: 3; text: i18nc("@title:group", "Video") }
+            Kirigami.Heading { level: 2; text: i18nc("@title:group", "Video") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32; id: videoForm; twinFormLayouts: [displayForm, mediaForm, advancedForm]; Layout.fillWidth: true; Layout.alignment: Qt.AlignLeft; Repeater { model: root.fields(["Quality", "AdaptiveQuality", "Codec"]); delegate: preferenceField } }
         }
         ColumnLayout {
             id: displaySection
             visible: root.preferences.loaded; Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
-            Kirigami.Heading { level: 3; text: i18nc("@title:group", "Console displays") }
+            Kirigami.Heading { level: 2; text: i18nc("@title:group", "Console displays") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32; id: displayForm; twinFormLayouts: [videoForm, mediaForm, advancedForm]; Layout.fillWidth: true; Layout.alignment: Qt.AlignLeft; Repeater { model: root.fields(["MonitorMode", "MonitorIndex", "VirtualMonitorPolicy", "VirtualMonitorLayout", "VirtualMonitorFallbackSize"]); delegate: preferenceField } }
             QQC2.Label { visible: root.monitorMode === ""; Layout.fillWidth: true; wrapMode: Text.Wrap; color: Kirigami.Theme.disabledTextColor; text: i18nc("@info", "Display mode uses the host setting. Choose a sharing mode to customize its options; inactive values are preserved.") }
@@ -43,7 +43,7 @@ KCM.SimpleKCM {
         }
         ColumnLayout {
             visible: root.preferences.loaded; Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
-            Kirigami.Heading { level: 3; text: i18nc("@title:group", "Sound and session") }
+            Kirigami.Heading { level: 2; text: i18nc("@title:group", "Sound and session") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32; id: mediaForm; twinFormLayouts: [videoForm, displayForm, advancedForm]; Layout.fillWidth: true; Layout.alignment: Qt.AlignLeft; Repeater { model: root.fields(["PreferAudioQuality", "StandardClientMedia", "WakeDisplayOnConnect"]); delegate: preferenceField } }
             QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; color: Kirigami.Theme.disabledTextColor; text: i18nc("@info", "Media still requires host permission and client consent. Keeping displays awake never unlocks the screen.") }
@@ -51,12 +51,12 @@ KCM.SimpleKCM {
         QQC2.Button { objectName: "preferenceAdvancedButton"; visible: root.preferences.loaded; text: i18nc("@action:button", "Advanced / Compatibility"); icon.name: root.showAdvanced ? "arrow-down" : "arrow-right"; onClicked: root.showAdvanced = !root.showAdvanced }
         ColumnLayout {
             visible: root.preferences.loaded && root.showAdvanced; Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
-            Kirigami.Heading { level: 3; text: i18nc("@title:group", "Encoding and compatibility") }
+            Kirigami.Heading { level: 2; text: i18nc("@title:group", "Encoding and compatibility") }
             Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32; id: advancedForm; twinFormLayouts: [videoForm, displayForm, mediaForm]; Layout.fillWidth: true; Layout.alignment: Qt.AlignLeft; Repeater { model: root.fields(["SoftwareEncoding", "Av1Tiles", "Avc444MotionGapMs", "Avc444RestMs", "Avc444MaxGapMs", "VirtualStockClientPolicy"]); delegate: preferenceField } }
             QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "AVC444 timing must satisfy motion ≤ rest ≤ maximum. If any timing override is set, unset timing fields use built-in values."); color: Kirigami.Theme.disabledTextColor }
         }
-        QQC2.Label { visible: root.preferences.modified; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Unsaved changes for your account only."); color: Kirigami.Theme.disabledTextColor }
+        QQC2.Label { visible: root.preferences.modified; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Unsaved changes · your account only."); color: Kirigami.Theme.disabledTextColor }
     }
     Component {
         id: preferenceField
