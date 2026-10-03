@@ -48,4 +48,17 @@ cmp -s "$scratch/c.first" "$scratch/c/etc/sddm.conf.d/30-farside-greeter.conf" |
 # 4. an administrator's own file without our marker is never overwritten
 mkdir -p "$scratch/d/etc/sddm.conf.d"; printf '[General]\nGreeterEnvironment=X=1\n' >"$scratch/d/etc/sddm.conf.d/30-farside-greeter.conf"
 run "$scratch/d"; [ "$(value "$scratch/d/etc/sddm.conf.d/30-farside-greeter.conf")" = X=1 ] || fail "overwrote an unmanaged file"
+# 5. the sddm cache rebuild must not leak sudo's variables (kbuildsycoca6 would chown to SUDO_UID and write nothing)
+mkdir -p "$scratch/stub" "$scratch/sddmhome"
+printf '#!/bin/sh\nshift 3\nexec "$@"\n' >"$scratch/stub/runuser"
+printf '#!/bin/sh\necho "sddm:x:1:1::%s:/bin/false"\n' "$scratch/sddmhome" >"$scratch/stub/getent"
+printf '#!/bin/sh\nenv >"%s"\n' "$scratch/kb.env" >"$scratch/stub/kbuildsycoca6"
+chmod +x "$scratch/stub/runuser" "$scratch/stub/getent" "$scratch/stub/kbuildsycoca6"
+PATH="$scratch/stub:$PATH" SUDO_UID=1000 SUDO_GID=1000 SUDO_USER=westers SUDO_COMMAND=/usr/bin/apt \
+    sh -c '. "$1"; farside_greeter_cache' _ "$scratch/fn.sh" || fail "cache rebuild returned non-zero"
+[ -s "$scratch/kb.env" ] || fail "kbuildsycoca6 stub was not invoked"
+if grep -q '^SUDO_' "$scratch/kb.env"; then fail "kbuildsycoca6 sees $(grep '^SUDO_' "$scratch/kb.env" | cut -d= -f1 | tr '\n' ' ')"; fi
+for v in XDG_MENU_PREFIX=plasma- QT_QPA_PLATFORM=offscreen "HOME=$scratch/sddmhome" LANG=C.UTF-8 XDG_DATA_DIRS= XDG_CONFIG_DIRS=; do
+    grep -q "^$v" "$scratch/kb.env" || fail "kbuildsycoca6 env lacks $v"
+done
 echo "greeter setting contract OK"

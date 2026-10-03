@@ -125,7 +125,9 @@ farside_greeter_cache() {
     command -v kbuildsycoca6 >/dev/null && command -v runuser >/dev/null || return 0
     sddm_home=$(getent passwd sddm | cut -d: -f6) || return 0
     [ -n "$sddm_home" ] && [ -d "$sddm_home" ] || return 0
-    runuser -u sddm -- env HOME="$sddm_home" LANG=C.UTF-8 XDG_MENU_PREFIX=plasma- \
+    # -u SUDO_*: under 'sudo apt' dpkg passes them on and kbuildsycoca6 then chowns the
+    # cache to SUDO_UID and writes nothing.
+    runuser -u sddm -- env -u SUDO_UID -u SUDO_GID -u SUDO_USER -u SUDO_COMMAND HOME="$sddm_home" LANG=C.UTF-8 XDG_MENU_PREFIX=plasma- \
         XDG_DATA_DIRS=/usr/local/share:/usr/share XDG_CONFIG_DIRS=/etc/xdg \
         QT_QPA_PLATFORM=offscreen kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
 }

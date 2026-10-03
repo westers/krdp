@@ -26,6 +26,9 @@ What `farside-server` does (`packaging/farside/postinst`, function `farside_gree
   `runuser -u sddm -- env HOME=<sddm home> LANG=C.UTF-8 XDG_MENU_PREFIX=plasma-
   XDG_DATA_DIRS=/usr/local/share:/usr/share XDG_CONFIG_DIRS=/etc/xdg
   QT_QPA_PLATFORM=offscreen kbuildsycoca6 --noincremental`.
+  The `env` call also unsets `SUDO_UID`, `SUDO_GID`, `SUDO_USER` and `SUDO_COMMAND`: under
+  `sudo apt` dpkg scripts inherit them, and `kbuildsycoca6` then chowns the cache to
+  `SUDO_UID` and writes nothing (seen on Buzz 2026-10-03).
 - It never restarts sddm. The setting applies at the next greeter start: reboot, or
   `systemctl restart sddm` when nobody is logged in (this ends all sessions).
 
