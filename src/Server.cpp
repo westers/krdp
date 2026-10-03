@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "Server.h"
+#include "StallPhase.h"
 
 #include <atomic>
 #include <chrono>
@@ -193,6 +194,7 @@ Server::Server(QObject *parent)
 
 Server::~Server()
 {
+    StallPhase stallPhase("~Server");
     stop();
     d->acceptRetry.stop();
     if (d->fdDir) {

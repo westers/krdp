@@ -8,6 +8,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoStream.h"
+#include "SafeThread.h"
 #include "AvcCodecSelection.h"
 
 #include <algorithm>
@@ -651,7 +652,9 @@ bool VideoStream::initialize()
         return false;
     }
 
-    d->frameSubmissionThread = std::jthread([this](std::stop_token token) {
+    // OPT-055 K6.5: a failed thread start returns false (the caller closes the connection)
+    // instead of throwing into a -fno-exceptions tree.
+    if (!startJThread(d->frameSubmissionThread, [this](std::stop_token token) {
         while (!token.stop_requested()) {
             // Don't dequeue frames until the GFX channel is ready. This keeps the
             // initial keyframe in the queue until CapsAdvertise has completed and
@@ -720,7 +723,12 @@ bool VideoStream::initialize()
                 d->frameQueue.prepend(nextFrame);
             }
         }
-    });
+    })) {
+        qCWarning(KRDP) << "Could not start the frame submission thread";
+        d->gfxContext->Close(d->gfxContext.get());
+        d->gfxContext.reset();
+        return false;
+    }
 
     qCInfo(KRDP) << "Video stream initialized";
 

@@ -52,7 +52,7 @@ private Q_SLOTS:
     void restartsOnFailureWithALimit_data()
     {
         QTest::addColumn<QString>("unit");
-        QTest::newRow("user krdpserver") << unitPath("app-org.kde.krdpserver.service");
+        QTest::newRow("user krdpserver") << unitPath("app-io.github.westers.farside.server.service");
         QTest::newRow("console host") << unitPath("krdp-console-host.service");
         QTest::newRow("virtual host") << unitPath("krdp-virtual-host.service");
     }
@@ -82,6 +82,36 @@ private Q_SLOTS:
         QVERIFY2(burst * restartSec < interval, "restart loop never hits the start limit");
         QVERIFY(!keys.contains(QStringLiteral("Service/StartLimitIntervalSec")));
         QVERIFY(!keys.contains(QStringLiteral("Service/StartLimitBurst")));
+    }
+
+    // OPT-055 K6.1: the user server and the console host are watched; the virtual host is not yet
+    // (its unit runs under `env -i`, which strips NOTIFY_SOCKET; wave 2 X4).
+    void watchdogOnUserServerAndConsoleHostOnly_data()
+    {
+        QTest::addColumn<QString>("unit");
+        QTest::addColumn<bool>("watched");
+        QTest::newRow("user farside-server") << unitPath("app-io.github.westers.farside.server.service") << true;
+        QTest::newRow("console host") << unitPath("krdp-console-host.service") << true;
+        QTest::newRow("virtual host") << unitPath("krdp-virtual-host.service") << false;
+    }
+
+    void watchdogOnUserServerAndConsoleHostOnly()
+    {
+        QFETCH(QString, unit);
+        QFETCH(bool, watched);
+        const auto keys = parseUnit(unit);
+        QVERIFY2(!keys.isEmpty(), qPrintable(unit));
+        QCOMPARE(keys.contains(QStringLiteral("Service/WatchdogSec")), watched);
+        if (!watched) {
+            QVERIFY(!keys.contains(QStringLiteral("Service/NotifyAccess")));
+            QVERIFY(!keys.contains(QStringLiteral("Service/TimeoutAbortSec")));
+            return;
+        }
+        QCOMPARE(keys.values(QStringLiteral("Service/WatchdogSec")), QStringList{QStringLiteral("90s")});
+        QCOMPARE(keys.values(QStringLiteral("Service/NotifyAccess")), QStringList{QStringLiteral("main")});
+        QCOMPARE(keys.values(QStringLiteral("Service/TimeoutAbortSec")), QStringList{QStringLiteral("30s")});
+        // The ping is sent by the daemon's own main thread, so the unit must be Type=exec (no READY=1).
+        QCOMPARE(keys.value(QStringLiteral("Service/Type")), QStringLiteral("exec"));
     }
 
     // A retained desktop is adopted by its broker, never restarted by systemd.

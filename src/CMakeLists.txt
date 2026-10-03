@@ -62,7 +62,24 @@ target_sources(KRdp PRIVATE
     EncoderSelection.h
     CodecPolicy.h
     LinkEvidence.h
+    SystemdNotify.cpp
+    SystemdNotify.h
+    StallDetector.cpp
+    StallDetector.h
+    StallPhase.h
+    TerminateHandler.cpp
+    TerminateHandler.h
+    SafeThread.cpp
+    SafeThread.h
 )
+
+# OPT-055 K6: the tree is -fno-exceptions. These two translation units catch or read exceptions
+# (a failed pthread_create, an exception that reached std::terminate), so they keep them.
+set_source_files_properties(TerminateHandler.cpp SafeThread.cpp PROPERTIES COMPILE_OPTIONS -fexceptions)
+if(Systemd_FOUND)
+    target_link_libraries(KRdp PRIVATE Systemd::systemd)
+    set_source_files_properties(SystemdNotify.cpp PROPERTIES COMPILE_DEFINITIONS KRDP_HAVE_SYSTEMD)
+endif()
 
 ecm_qt_declare_logging_category(KRdp
     HEADER krdp_logging.h

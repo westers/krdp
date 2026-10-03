@@ -3,7 +3,10 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
+#include <cerrno>
 #include <csignal>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <filesystem>
 
 #include <QApplication>
@@ -15,6 +18,7 @@
 #include <QHostInfo>
 #include <QSaveFile>
 #include <QRegularExpression>
+#include <QSocketNotifier>
 #include <QScreen>
 #include <QStandardPaths>
 #include <QTimer>
@@ -36,6 +40,9 @@
 #include "ServerCertificate.h"
 #include "ServerSettingsPolicy.h"
 #include "SessionController.h"
+#include "StallDetector.h"
+#include "SystemdNotify.h"
+#include "TerminateHandler.h"
 #include "EncoderSupport.h"
 #include "VideoCodecSupport.h"
 #include "krdp_version.h"
@@ -247,7 +254,19 @@ void writeLoadedState(const QString &configFilePath, const ServerConfig *config,
 
 int main(int argc, char **argv)
 {
+    // OPT-055 K6.1/K6.4: name an escaped exception and abort (keeps the core), and tell systemd the
+    // main thread is alive before anything slow runs.
+    KRdp::installTerminateHandler("farside-server");
+    KRdp::SystemdNotify::ping();
     QApplication application{argc, argv};
+    // K6.1: from here a main-thread timer keeps pinging once the event loop runs (explicit pings
+    // below cover the startup before it does). K6.2: the stall detector logs what the main thread
+    // is blocked in; "startup" is replaced by "event loop" right before exec().
+    KRdp::StallDetector::setPhase("startup");
+    KRdp::SystemdNotify watchdog(&application);
+    watchdog.start();
+    KRdp::StallDetector stallDetector(&application);
+    stallDetector.start();
     Farside::warnLegacyEnvironment();
     application.setApplicationName(u"farside-server"_s);
     application.setApplicationDisplayName(u"Farside Server"_s);
@@ -295,13 +314,26 @@ int main(int argc, char **argv)
         return PhysicalOutputGuard::restoreFromStateFile() ? 0 : 1;
     }
 
-    signal(SIGINT, [](int) {
-        QCoreApplication::exit(0);
-    });
-
-    signal(SIGTERM, [](int) {
-        QCoreApplication::exit(0);
-    });
+    // OPT-055 K6.6: self-pipe, as in the console host. QCoreApplication::exit() is not
+    // async-signal-safe, so the handler only writes a byte and the event loop does the exit.
+    static int signalPipe[2] = {-1, -1};
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, signalPipe) == 0) {
+        struct sigaction action{};
+        action.sa_handler = [](int) {
+            const int saved = errno;
+            const char byte = 1;
+            [[maybe_unused]] const auto written = ::write(signalPipe[1], &byte, 1);
+            errno = saved;
+        };
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = SA_RESTART;
+        ::sigaction(SIGINT, &action, nullptr);
+        ::sigaction(SIGTERM, &action, nullptr);
+        auto *notifier = new QSocketNotifier(signalPipe[0], QSocketNotifier::Read, &application);
+        QObject::connect(notifier, &QSocketNotifier::activated, &application, [] {
+            QCoreApplication::exit(0);
+        });
+    }
 
     auto config = ServerConfig::self();
     const auto vaapiDriverMode = normalizedVaapiDriverMode(config->vaapiDriverMode());
@@ -503,6 +535,7 @@ int main(int argc, char **argv)
     controller.setAv1Tiles(av1TilesFrom(config->av1Tiles()));
     // Which codecs this host can really encode, and how (AUD-FIX2 F1): after the VAAPI
     // driver choice above, once; the result goes into every `capabilities` and codec choice.
+    KRdp::SystemdNotify::ping(); // K6.1: the encoder probe opens real devices and can be slow
     controller.setVideoEncoders(KRdp::EncoderSupport::probe());
     controller.setChromaPolicyDefaults(chromaPolicyFrom(config));
     controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());
@@ -689,5 +722,7 @@ int main(int argc, char **argv)
         certificateRenewTimer.start();
     }
 
+    KRdp::SystemdNotify::ping(); // K6.1: immediately before the event loop takes over
+    KRdp::StallDetector::setPhase("event loop");
     return application.exec();
 }

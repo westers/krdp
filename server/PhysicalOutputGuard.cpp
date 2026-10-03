@@ -3,6 +3,7 @@
 
 #include "PhysicalOutputGuard.h"
 #include "OutputRestoreJournal.h"
+#include "StallPhase.h"
 
 #include <algorithm>
 
@@ -129,6 +130,7 @@ bool PhysicalOutputGuard::available() const
 
 bool PhysicalOutputGuard::run(const QStringList &args, QByteArray *output)
 {
+    StallPhase stallPhase("PhysicalOutputGuard::run (kscreen-doctor)");
     QProcess process;
     process.setProgram(KscreenDoctor);
     process.setArguments(args);
@@ -249,6 +251,7 @@ QVector<Output> PhysicalOutputGuard::physicalOutputs() const
 
 bool PhysicalOutputGuard::applyReplace(const QVector<Placement> &virtualOutputs, const QString &primaryVirtualName)
 {
+    StallPhase stallPhase("PhysicalOutputGuard::applyReplace");
     if (!hasSnapshot()) {
         qWarning() << "applyReplace without a snapshot; refusing to touch the physical outputs";
         return false;
@@ -677,6 +680,7 @@ bool PhysicalOutputGuard::reconcileExtend()
 
 bool PhysicalOutputGuard::waitForPhysical(const QVector<Output> &physical, SettleGoal goal)
 {
+    StallPhase stallPhase("PhysicalOutputGuard::waitForPhysical");
     // Blocking on purpose: the callers (the replace, teardown, takeover, the
     // retry, the start-up restore) must not run the event loop here, or
     // cursor samples, input and a connection's destruction would re-enter
@@ -763,6 +767,7 @@ PhysicalOutputGuard::RestoreOutcome PhysicalOutputGuard::restoreSnapshot(const Q
 
 bool PhysicalOutputGuard::restore()
 {
+    StallPhase stallPhase("PhysicalOutputGuard::restore");
     if (m_held && !hasSnapshot()) {
         // Should be unreachable (snapshot() refuses while held), but the
         // consequence of getting here would be monitors that stay off while

@@ -1004,3 +1004,46 @@ target_include_directories(ServerAcceptRecoveryTest SYSTEM PRIVATE ${FreeRDP_INC
 target_link_libraries(ServerAcceptRecoveryTest PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
 add_test(NAME ServerAcceptRecoveryTest COMMAND ServerAcceptRecoveryTest)
 set_tests_properties(ServerAcceptRecoveryTest PROPERTIES TIMEOUT 60)
+
+# --- OPT-055 K6: krdp safety net ---
+set(_krdp_k6_src ${CMAKE_SOURCE_DIR}/src)
+add_executable(SystemdNotifyTest SystemdNotifyTest.cpp ${_krdp_k6_src}/SystemdNotify.cpp)
+target_include_directories(SystemdNotifyTest PRIVATE ${_krdp_k6_src} ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(SystemdNotifyTest PRIVATE Qt6::Test Qt6::Core)
+if(Systemd_FOUND)
+    target_link_libraries(SystemdNotifyTest PRIVATE Systemd::systemd)
+    target_compile_definitions(SystemdNotifyTest PRIVATE KRDP_HAVE_SYSTEMD)
+endif()
+add_test(NAME SystemdNotifyTest COMMAND SystemdNotifyTest)
+set_tests_properties(SystemdNotifyTest PROPERTIES TIMEOUT 60)
+
+add_executable(StallDetectorTest StallDetectorTest.cpp ${_krdp_k6_src}/StallDetector.cpp)
+target_include_directories(StallDetectorTest PRIVATE ${_krdp_k6_src} ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(StallDetectorTest PRIVATE Qt6::Test Qt6::Core)
+target_link_options(StallDetectorTest PRIVATE -rdynamic) # backtrace_symbols_fd names the test function
+add_test(NAME StallDetectorTest COMMAND StallDetectorTest)
+set_tests_properties(StallDetectorTest PROPERTIES TIMEOUT 60)
+
+# The tests that throw, and the helpers that catch, are built with exceptions; the tree is not.
+add_executable(TerminateHandlerTest TerminateHandlerTest.cpp ${_krdp_k6_src}/TerminateHandler.cpp)
+target_include_directories(TerminateHandlerTest PRIVATE ${_krdp_k6_src} ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(TerminateHandlerTest PRIVATE Qt6::Test Qt6::Core)
+target_compile_options(TerminateHandlerTest PRIVATE -fexceptions)
+set_source_files_properties(${_krdp_k6_src}/TerminateHandler.cpp PROPERTIES COMPILE_OPTIONS -fexceptions)
+add_test(NAME TerminateHandlerTest COMMAND TerminateHandlerTest)
+
+add_executable(SafeThreadTest SafeThreadTest.cpp ${_krdp_k6_src}/SafeThread.cpp)
+target_include_directories(SafeThreadTest PRIVATE ${_krdp_k6_src} ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(SafeThreadTest PRIVATE Qt6::Test Qt6::Core)
+set_source_files_properties(${_krdp_k6_src}/SafeThread.cpp PROPERTIES COMPILE_OPTIONS -fexceptions)
+add_test(NAME SafeThreadTest COMMAND SafeThreadTest)
+# T-K6e helper (run only in a transient unit on Sol): the daemon wiring plus an optional forced stall.
+add_executable(SystemdWatchdogProbe SystemdWatchdogProbe.cpp ${_krdp_k6_src}/SystemdNotify.cpp
+    ${_krdp_k6_src}/StallDetector.cpp ${_krdp_k6_src}/TerminateHandler.cpp)
+target_include_directories(SystemdWatchdogProbe PRIVATE ${_krdp_k6_src} ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(SystemdWatchdogProbe PRIVATE Qt6::Core)
+if(Systemd_FOUND)
+    target_link_libraries(SystemdWatchdogProbe PRIVATE Systemd::systemd)
+    target_compile_definitions(SystemdWatchdogProbe PRIVATE KRDP_HAVE_SYSTEMD)
+endif()
+# --- end OPT-055 K6 ---

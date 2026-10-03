@@ -71,6 +71,8 @@
 
 #include <KUser>
 #include <QScopeGuard>
+#include "SafeThread.h"
+#include "StallPhase.h"
 
 #include "RenderNodes.h"
 #include "krdp_logging.h"
@@ -916,6 +918,7 @@ RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
 
 RdpConnection::~RdpConnection()
 {
+    StallPhase stallPhase("~RdpConnection");
     if (d->state == State::Streaming) {
         d->peer->Close(d->peer);
     }
@@ -1591,7 +1594,6 @@ void RdpConnection::initialize()
         return;
     }
 
-    fail.dismiss();
     qCInfo(KRDP) << "Session setup completed, start processing...";
 
     // AUD-S2: a client that has not authenticated within the handshake
@@ -1611,7 +1613,13 @@ void RdpConnection::initialize()
     });
 
     // Perform actual communication on a separate thread.
-    d->thread = std::jthread(std::bind(&RdpConnection::run, this, std::placeholders::_1));
+    // OPT-055 K6.5: thread creation can fail (EAGAIN); the scope guard above then closes the peer
+    // and moves the connection to Closed, so only this session ends, not the daemon.
+    if (!startJThread(d->thread, std::bind(&RdpConnection::run, this, std::placeholders::_1))) {
+        qCWarning(KRDP) << "Could not start the session thread; closing the connection";
+        return;
+    }
+    fail.dismiss();
     pthread_setname_np(d->thread.native_handle(), "krdp_session");
 }
 

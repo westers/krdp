@@ -16,10 +16,12 @@
 #include <filesystem>
 #include <csignal>
 #include <sys/signalfd.h>
+#include "TerminateHandler.h"
 #include <unistd.h>
 
 int main(int argc, char **argv)
 {
+    KRdp::installTerminateHandler("farside-virtual-host"); // OPT-055 K6.4 (no watchdog here: env -i strips NOTIFY_SOCKET)
     // Block termination before Qt/FreeRDP start threads; consume it on the event
     // loop rather than invoking Qt inside an async POSIX signal handler.
     sigset_t terminationMask;

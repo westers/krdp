@@ -26,11 +26,25 @@
 #include "BrokerAuthentication.h"
 #include "VaapiDriverMode.h"
 #include "HostCertificate.h"
+#include "StallDetector.h"
+#include "SystemdNotify.h"
+#include "TerminateHandler.h"
 #include "VideoCodecHost.h"
 
 int main(int argc, char **argv)
 {
+    // OPT-055 K6.1/K6.4: name an escaped exception and abort (keeps the core), and tell systemd the
+    // main thread is alive before anything slow runs.
+    KRdp::installTerminateHandler("farside-console-host");
+    KRdp::SystemdNotify::ping();
     QCoreApplication application(argc, argv);
+    // K6.1/K6.2: a main-thread timer keeps pinging once the event loop runs (explicit pings cover
+    // the startup before it does); the stall detector logs what the main thread is blocked in.
+    KRdp::StallDetector::setPhase("startup");
+    KRdp::SystemdNotify watchdog(&application);
+    watchdog.start();
+    KRdp::StallDetector stallDetector(&application);
+    stallDetector.start();
     Farside::warnLegacyEnvironment();
     application.setApplicationName(QStringLiteral("farside-console-host"));
     QCommandLineParser parser;
@@ -125,6 +139,7 @@ int main(int argc, char **argv)
     host.setVideoQualityPolicy(quint8(quality), adaptiveValue == QLatin1String("true"));
     // AUD-FIX7: what `capabilities.video` offers and the controlling connection's codec policy
     // starts from; the worker probes its own encoders and replaces this once it reports.
+    KRdp::SystemdNotify::ping(); // K6.1: the encoder probe opens real devices and can be slow
     KRdp::EncoderSupport::applyProcessOverrides();
     const KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding,
                                          KRdp::parseHostAv1Tiles(parser.value(av1TilesOption), "farside-console-host")};
@@ -163,5 +178,7 @@ int main(int argc, char **argv)
             QCoreApplication::quit();
         });
     }
+    KRdp::SystemdNotify::ping(); // K6.1: immediately before the event loop takes over
+    KRdp::StallDetector::setPhase("event loop");
     return application.exec();
 }

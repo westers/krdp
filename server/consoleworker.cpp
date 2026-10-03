@@ -1,3 +1,4 @@
+#include "TerminateHandler.h"
 #include "RelativePointerEvent.h"
 #include "FarsideEnv.h"
 // SPDX-FileCopyrightText: 2026 Steve Westers
@@ -3412,6 +3413,7 @@ std::optional<QByteArray> runKScreen(const QStringList &arguments)
 
 int main(int argc, char **argv)
 {
+    KRdp::installTerminateHandler("farside-console-worker"); // OPT-055 K6.4
     QGuiApplication application(argc, argv);
     Farside::warnLegacyEnvironment();
     application.setDesktopFileName(QStringLiteral("io.github.westers.farside.consoleworker"));

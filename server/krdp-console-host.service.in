@@ -36,6 +36,11 @@ RuntimeDirectory=farside-console
 RuntimeDirectoryMode=0711
 Restart=on-failure
 RestartSec=3
+# OPT-055 K6.1: the main thread pings every 10 s; 90 s without a ping means the daemon is deaf.
+# systemd then sends SIGABRT (core per host policy) and SIGKILL after TimeoutAbortSec.
+WatchdogSec=90s
+NotifyAccess=main
+TimeoutAbortSec=30s
 
 [Install]
 WantedBy=multi-user.target

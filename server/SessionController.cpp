@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "SessionController.h"
+#include "StallPhase.h"
 #include "ChromaMerge.h"
 
 #include <QScopeGuard>
@@ -158,6 +159,7 @@ public:
 
     ~SessionWrapper() override
     {
+        StallPhase stallPhase("~SessionWrapper");
         // Release BEFORE the sessions (and with them the virtual outputs) go
         // away, so KWin never has zero enabled outputs and windows migrate
         // back onto the physical monitors. The guard restores only if
