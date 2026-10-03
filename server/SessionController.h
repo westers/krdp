@@ -454,6 +454,11 @@ private:
     QPointer<SessionWrapper> m_applying;
     int m_connectionCounter = 0;
 
+    // OPT-055 K4.4: armed when the last connection closed while an abandoned KPipeWire producer
+    // thread (it keeps its encoder and GPU device) is still alive; the process restarts itself if
+    // nobody has connected by the time it fires.
+    QTimer m_idleRestartTimer;
+
     std::vector<std::unique_ptr<SessionWrapper>> m_wrappers;
 
     KStatusNotifierItem *m_sni;

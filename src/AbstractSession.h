@@ -101,6 +101,21 @@ public:
      * activeEncoderBackendChanged, emitted at each encoder start (not for "none").
      */
     Q_SIGNAL void encoderBackendReported(KRdp::VideoCodec codec, bool hardware);
+    /**
+     * KPipeWire's encoderFailed: the running encoder failed for good (OPT-055 K4.2). Never emitted by a
+     * KPipeWire without that signal. A session that can restart its stream acts on it.
+     */
+    Q_SIGNAL void encoderFailureReported(const QString &reason);
+    /**
+     * Emitted just before error() when the session gives up because its encoder keeps failing, so the
+     * owner can tell the client why (a KRDPCTL `session-end` record, reason `encoder-failed`).
+     */
+    Q_SIGNAL void encoderGaveUp(const QString &reason);
+    /**
+     * KPipeWire producer threads abandoned in this process that have not ended (each still holds its
+     * encoder and a GPU device until the process restarts); 0 with a KPipeWire that cannot abandon.
+     */
+    static int abandonedProducerCount();
 
     /**
      * Re-create the capture stream after the display topology changed.
@@ -285,6 +300,8 @@ protected:
     void setSize(QSize size);
     void setLogicalSize(QSize size);
     PipeWireEncodedStream *stream();
+    /// Gives up the stream's producer without waiting for its thread (K4.3); false without that API.
+    bool abandonStreamProducer();
 
     /**
      * Restart the encoded stream so a codec change (setVideoCodec()) takes effect on a stream that

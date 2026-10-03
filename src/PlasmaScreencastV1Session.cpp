@@ -5,6 +5,7 @@
 #include "RelativePointerEvent.h"
 #include "PlasmaScreencastV1Session.h"
 
+#include "EncoderFailurePolicy.h"
 #include "EncoderWatchdog.h"
 
 #include <QGuiApplication>
@@ -376,6 +377,8 @@ public:
     QString lastClientText;
     // AUD-FIX12: requests the encoder never answers restart it (EncoderWatchdog.h).
     EncoderWatchdog::Watchdog watchdog;
+    // OPT-055 K4: what to do when KPipeWire reports the encoder dead (restart twice a minute, then close).
+    EncoderFailurePolicy failurePolicy;
     QTimer watchdogTimer;
     int watchdogRestarts = 0;
     // A watchdog restart: the old producer is wedged and never finishes draining its queue on
@@ -494,7 +497,13 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
                 Q_EMIT captureRestartFailed(epoch);
                 return;
             }
-            qCWarning(KRDP) << "Encoded stream did not shut down within" << StreamRestartTimeout.count() << "ms, attaching new node anyway";
+            // OPT-055 K4.3: the old producer's thread is stuck (a driver call that never returns).
+            // KPipeWire hands it to its process-wide list and returns the stream to Idle, so the new
+            // attach starts a fresh producer instead of silently doing nothing or inheriting the
+            // old thread's finished handler. A KPipeWire without the API keeps the old behaviour.
+            const bool abandoned = abandonStreamProducer();
+            qCWarning(KRDP) << "Encoded stream did not shut down within" << StreamRestartTimeout.count() << "ms,"
+                            << (abandoned ? "abandoning its producer and" : "") << "attaching new node anyway";
         }
         if (d->resizeRestartEpoch) {
             const auto epoch = std::exchange(d->resizeRestartEpoch, quint64(0));
@@ -510,6 +519,7 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
         attachEncodedStream(d->pendingNodeId, true);
     });
 
+    connect(this, &AbstractSession::encoderFailureReported, this, &PlasmaScreencastV1Session::onEncoderFailed);
     d->watchdogTimer.setInterval(EncoderWatchdog::Watchdog::TickInterval);
     connect(&d->watchdogTimer, &QTimer::timeout, this, &PlasmaScreencastV1Session::pollEncoderWatchdog);
 
@@ -1231,6 +1241,33 @@ void PlasmaScreencastV1Session::startEncoderWatchdog()
 {
     if (!d->watchdogTimer.isActive()) {
         d->watchdogTimer.start();
+    }
+}
+
+void PlasmaScreencastV1Session::onEncoderFailed(const QString &reason)
+{
+    // The latched encoder is dead; whatever the keyframe watchdog was waiting for is moot (E44).
+    d->watchdog.reset();
+    switch (d->failurePolicy.onFailure(std::chrono::steady_clock::now(), d->streamRestartTimer.isActive(), streamingRequested())) {
+    case EncoderFailurePolicy::Action::Ignore:
+        qCDebug(KRDP) << "Monitor" << monitorIndex() << ": ignoring encoder failure while restarting or not streaming:" << reason;
+        return;
+    case EncoderFailurePolicy::Action::Restart: {
+        const uint nodeId = stream()->nodeId();
+        qCWarning(KRDP) << "Monitor" << monitorIndex() << ": the encoder failed (" << reason << "); restarting it";
+        if (nodeId == 0) {
+            return;
+        }
+        d->forceTeardown = true;
+        d->forcedSecondStop = false;
+        restartEncodedStream(nodeId);
+        return;
+    }
+    case EncoderFailurePolicy::Action::Close:
+        qCWarning(KRDP) << "Monitor" << monitorIndex() << ": the encoder failed again (" << reason << "); closing the session";
+        Q_EMIT encoderGaveUp(reason);
+        Q_EMIT error();
+        return;
     }
 }
 

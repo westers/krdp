@@ -243,6 +243,13 @@ target_link_libraries(FrameQueuePolicyTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME FrameQueuePolicyTest COMMAND FrameQueuePolicyTest)
 
 # AUD-FIX12: the encoder watchdog and the silent-surface rule (no surface silent > 2 s).
+# OPT-055 K4.1: what a session does on encoderFailed, and the idle self-restart decision.
+add_executable(EncoderFailurePolicyTest EncoderFailurePolicyTest.cpp)
+target_include_directories(EncoderFailurePolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(EncoderFailurePolicyTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME EncoderFailurePolicyTest COMMAND EncoderFailurePolicyTest)
+set_tests_properties(EncoderFailurePolicyTest PROPERTIES TIMEOUT 60)
+
 add_executable(EncoderWatchdogTest EncoderWatchdogTest.cpp)
 target_include_directories(EncoderWatchdogTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(EncoderWatchdogTest PRIVATE Qt6::Test Qt6::Core)
@@ -424,6 +431,9 @@ if(TARGET krdp-console-worker)
     # FIX-CURSOR: a Wayland window that changes its cursor shape on request.
     add_executable(krdp-e2e-cursor-client CursorShapeClient.cpp)
     target_link_libraries(krdp-e2e-cursor-client PRIVATE Qt6::Gui)
+    # OPT-055 T-K4b: test-only LD_PRELOAD shim that makes av_buffersink_get_frame fail (never installed).
+    add_library(farside-failfilter MODULE FailFilterShim.cpp)
+    target_link_libraries(farside-failfilter PRIVATE ${CMAKE_DL_LIBS})
     add_executable(WorkerEndToEndTest WorkerEndToEndTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
         ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp ${CMAKE_SOURCE_DIR}/server/OutputRestoreJournal.cpp
         ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp)
@@ -432,8 +442,15 @@ if(TARGET krdp-console-worker)
     target_compile_definitions(WorkerEndToEndTest PRIVATE
         KRDP_CONSOLE_WORKER="$<TARGET_FILE:krdp-console-worker>"
         KRDP_SERVER_DIR="${CMAKE_SOURCE_DIR}/server"
-        KRDP_E2E_CURSOR_CLIENT="$<TARGET_FILE:krdp-e2e-cursor-client>")
-    add_dependencies(WorkerEndToEndTest krdp-console-worker krdp-e2e-cursor-client)
+        KRDP_E2E_CURSOR_CLIENT="$<TARGET_FILE:krdp-e2e-cursor-client>"
+        KRDP_E2E_FAILFILTER="$<TARGET_FILE:farside-failfilter>"
+        KRDP_E2E_SERVER="$<TARGET_FILE:krdpserver>")
+    add_dependencies(WorkerEndToEndTest krdp-console-worker krdp-e2e-cursor-client farside-failfilter krdpserver)
+    # OPT-055 K4 user-server cases need the FreeRDP client probe; without it they skip.
+    if(TARGET krdpctl-probe)
+        target_compile_definitions(WorkerEndToEndTest PRIVATE KRDP_E2E_PROBE="$<TARGET_FILE:krdpctl-probe>")
+        add_dependencies(WorkerEndToEndTest krdpctl-probe)
+    endif()
     add_test(NAME WorkerEndToEndTest COMMAND WorkerEndToEndTest)
     set_tests_properties(WorkerEndToEndTest PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
 endif()

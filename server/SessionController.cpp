@@ -4,6 +4,7 @@
 #include "SessionController.h"
 #include "StallPhase.h"
 #include "ChromaMerge.h"
+#include "EncoderFailurePolicy.h"
 
 #include <QScopeGuard>
 #include "AudioPriority.h"
@@ -27,6 +28,8 @@
 #include <QScreen>
 #include <QSet>
 #include <QStandardPaths>
+
+#include <freerdp/error.h>
 
 #include <KGlobalAccel>
 #include <KLocalizedString>
@@ -54,6 +57,7 @@
 #include "StatsRequest.h"
 
 using namespace Qt::StringLiterals;
+using KRdp::StallPhase;
 
 namespace
 {
@@ -466,6 +470,9 @@ public:
             // local to the output that session captures (see onCursorUpdate()).
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::cursorUpdate, this, [this, session](const PipeWireCursor &cursor) {
                 onCursorUpdate(session, cursor);
+            }));
+            m_sessionConnections.append(connect(session, &KRdp::AbstractSession::encoderGaveUp, this, [this](const QString &reason) {
+                encoderEndReason = reason;
             }));
             if (multi) {
                 // One monitor going away must not take the whole connection
@@ -1046,6 +1053,8 @@ public:
         Q_EMIT connectionDestroyed(this);
     }
 
+    /** Set when a capture session gave up because its encoder kept failing (OPT-055 K4.2); read by the close. */
+    QString encoderEndReason;
     Q_SIGNAL void sessionError();
     Q_SIGNAL void connectionDestroyed(SessionWrapper *wrapper);
     /** Local pointer motion seen while this wrapper's replace policy holds the physical outputs (Task 6c). */
@@ -1202,6 +1211,16 @@ SessionController::SessionController(KRdp::Server *server, SessionType sessionTy
                 w->layoutApplyInFlight = true;
             }
         }
+    });
+    m_idleRestartTimer.setSingleShot(true);
+    m_idleRestartTimer.setInterval(int(std::chrono::milliseconds(KRdp::IdleRestartPolicy::Delay).count()));
+    connect(&m_idleRestartTimer, &QTimer::timeout, this, [this]() {
+        const int abandoned = KRdp::AbstractSession::abandonedProducerCount();
+        if (!KRdp::IdleRestartPolicy::shouldExit(m_wrappers.size(), abandoned)) {
+            return;
+        }
+        qWarning().noquote() << QStringLiteral("%1 wedged encoder thread(s) leaked; restarting while idle").arg(abandoned);
+        QCoreApplication::exit(KRdp::IdleRestartPolicy::ExitCode);
     });
     m_heartbeatTimer.setInterval(HeartbeatIntervalMs);
     connect(&m_heartbeatTimer, &QTimer::timeout, this, &SessionController::onHeartbeatTick);
@@ -2361,6 +2380,9 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
             onLayoutClientGone(id, u"disconnect"_s);
         }
         updateRestoreAction();
+        if (KRdp::IdleRestartPolicy::shouldArm(m_wrappers.size(), KRdp::AbstractSession::abandonedProducerCount())) {
+            m_idleRestartTimer.start();
+        }
     });
     connect(wrapper.get(), &SessionWrapper::physicalLayoutOwnershipChanged, this, &SessionController::updateRestoreAction);
     // Queued: the detector fires from a cursor-update slot, and the release
@@ -2373,7 +2395,19 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     // Every sessionError is a capture that failed to start or could not be
     // recovered (AUD-P4): close with ERRINFO_GRAPHICS_SUBSYSTEM_FAILED so the
     // client says why instead of reporting a plain disconnect.
-    connect(wrapper.get(), &SessionWrapper::sessionError, this, [newConnection] {
+    connect(wrapper.get(), &SessionWrapper::sessionError, this, [newConnection, wrapperPtr = wrapper.get()] {
+        if (!wrapperPtr->encoderEndReason.isEmpty() && newConnection->hasControlChannel()) {
+            // OPT-055 K4.2: tell a KRDPCTL client why. The record is only queued with the channel
+            // manager (the session thread sends it), so the close waits one flush interval, as the
+            // Virtual broker does for its `opened-elsewhere` record.
+            newConnection->sendControlRecord(KRdp::LayoutControl::sessionEndRecord(u"encoder-failed"_s,
+                                                                                    ERRINFO_GRAPHICS_SUBSYSTEM_FAILED,
+                                                                                    u"The video encoder failed and could not be restarted."_s));
+            QTimer::singleShot(250, newConnection, [newConnection] {
+                newConnection->close(KRdp::RdpConnection::CloseReason::VideoInitFailed);
+            });
+            return;
+        }
         newConnection->close(KRdp::RdpConnection::CloseReason::VideoInitFailed);
     });
 

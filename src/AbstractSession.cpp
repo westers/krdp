@@ -86,6 +86,34 @@ void connectActiveBackendIfSupported(Stream *stream, Session *session)
         });
     }
 }
+template<typename Stream, typename Session>
+void connectEncoderFailedIfSupported(Stream *stream, Session *session)
+{
+    if constexpr (requires(Stream *s) { s->encoderFailed(QString()); }) {
+        QObject::connect(stream, &Stream::encoderFailed, session, [session](const QString &reason) {
+            Q_EMIT session->encoderFailureReported(reason);
+        });
+    }
+}
+template<typename Stream>
+bool abandonProducerIfSupported(Stream *stream)
+{
+    if constexpr (requires(Stream *s) { s->abandonProducer(); }) {
+        stream->abandonProducer();
+        return true;
+    } else {
+        return false;
+    }
+}
+template<typename Stream>
+int abandonedProducerCountIfSupported()
+{
+    if constexpr (requires { Stream::abandonedProducerCount(); }) {
+        return Stream::abandonedProducerCount();
+    } else {
+        return 0;
+    }
+}
 template<typename Stream>
 const char *activeChromaName(Stream *stream)
 {
@@ -452,11 +480,22 @@ PipeWireEncodedStream *AbstractSession::stream()
         connectChromaTimingIfSupported(d->encodedStream.get(), this);
         connectActiveChromaModeIfSupported(d->encodedStream.get(), this);
         connectActiveBackendIfSupported(d->encodedStream.get(), this);
+        connectEncoderFailedIfSupported(d->encodedStream.get(), this);
         connect(this, &AbstractSession::encoderBackendReported, this, [this](VideoCodec, bool hardware) {
             d->runningHardware = hardware;
         });
     }
     return d->encodedStream.get();
+}
+
+bool AbstractSession::abandonStreamProducer()
+{
+    return d->encodedStream && abandonProducerIfSupported(d->encodedStream.get());
+}
+
+int AbstractSession::abandonedProducerCount()
+{
+    return abandonedProducerCountIfSupported<PipeWireEncodedStream>();
 }
 
 void AbstractSession::onStreamActiveChanged(bool active)

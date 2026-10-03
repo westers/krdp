@@ -76,6 +76,7 @@ private:
     void onPacketReceived(const PipeWireEncodedStream::Packet &data);
     void startEncoderWatchdog();
     void pollEncoderWatchdog();
+    void onEncoderFailed(const QString &reason);
     void watchForVirtualScreen();
     bool adoptVirtualScreen(QScreen *screen);
     void updateVirtualGeometry(const QRect &geometry, bool adopted = false);
