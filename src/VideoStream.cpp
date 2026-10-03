@@ -382,6 +382,8 @@ public:
     QList<CodecPolicy::Family> clientFamilies;
     bool codecPolicyAdaptive = true;
     CodecPolicy::State codecPolicy;
+    // OPT-055: the "waiting for the switch interval" reason last logged; the line repeats every ~1.5 s otherwise.
+    QString lastWaitReason;
     CodecPolicy::LoadWindow encodeLoad;
     // What the sessions' encoders were last told (encoderSettingsChanged); main thread only.
     std::optional<CodecPolicy::EncoderSettings> encoderSettings;
@@ -1387,7 +1389,13 @@ void VideoStream::stepCodecPolicy(bool congested)
     const bool wasSlow = d->codecPolicy.slowLink;
     const auto decision = steering ? CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now()) : CodecPolicy::stepLink(d->codecPolicy, in, clk::steady_clock::now());
     if (!decision.changed && !decision.reason.isEmpty()) {
-        qCInfo(KRDP).noquote() << "Codec policy:" << decision.reason;
+        // Log only when the reason changes, not on every steering tick of the same wait.
+        if (decision.reason != d->lastWaitReason) {
+            d->lastWaitReason = decision.reason;
+            qCInfo(KRDP).noquote() << "Codec policy:" << decision.reason;
+        }
+    } else if (decision.changed || decision.reason.isEmpty()) {
+        d->lastWaitReason.clear();
     }
     if (d->codecPolicy.slowLink != wasSlow) {
         // AUD-FIX12: at info level (the rollout's slow-link check found no journal line).
@@ -1873,7 +1881,7 @@ bool VideoStream::performReset(const QSize &desktopSize, const QVector<VideoMoni
     }
     resetGraphicsPdu.monitorDefArray = monitorDefs.get();
 
-    qCDebug(KRDP) << "Reset graphics desktop" << desktopSize << "with" << monitors.size() << "monitor(s):" << monitorLayoutSummary(monitors);
+    qCInfo(KRDP) << "Reset graphics desktop" << desktopSize << "with" << monitors.size() << "monitor(s):" << monitorLayoutSummary(monitors);
     d->gfxContext->ResetGraphics(d->gfxContext.get(), &resetGraphicsPdu);
 
     d->surfaces.clear();

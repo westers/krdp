@@ -1634,7 +1634,7 @@ void RdpConnection::run(std::stop_token stopToken)
         std::array<HANDLE, 32> events{channelEvent};
         auto handleCount = d->peer->GetEventHandles(d->peer, events.data() + 1, 31);
         if (handleCount <= 0) {
-            qCDebug(KRDP) << "Unable to get transport event handles";
+            qCInfo(KRDP) << "Unable to get transport event handles; closing session";
             break;
         }
         // Bounded, not INFINITE: NetworkDetection::update() (RTT probe every
@@ -1645,7 +1645,7 @@ void RdpConnection::run(std::stop_token stopToken)
 
         // Read data from the socket and have FreeRDP process it.
         if (d->peer->CheckFileDescriptor(d->peer) != TRUE) {
-            qCDebug(KRDP) << "Unable to check file descriptor";
+            qCInfo(KRDP) << "Client connection ended (transport read failed); closing session";
             break;
         }
 

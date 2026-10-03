@@ -502,7 +502,7 @@ a warning for every client that cannot do it. AVC444 carries full 4:4:4 chroma a
 pictures per frame (main + auxiliary chroma, one stream, MS-RDPEGFX 3.3.8.3), encoded by the
 private KPipeWire on the 780M after a CPU split (AVX-512 on hal9000; `KPIPEWIRE_AVC444_SPLIT=
 scalar|freerdp|avx2|avx512` forces a variant). Under congestion the chroma stream is the first
-thing shed and the last restored (`Adaptive quality -> … chroma=on|off` in the journal); QP steps
+thing shed and the last restored (`Adaptive quality -> … chroma=on|off`, a debug line: set `QT_LOGGING_RULES=farside.server.debug=true` to see it); QP steps
 follow. The startup summary shows `codec=<config>`, the per-connection line `GFX caps confirmed: …
 codec=avc444v2|avc444|avc420` what was negotiated. Cost lines: `kpipewire_record_logging.debug=true`
 prints `avc444 timing: …` once a second; `krdpplasmastreamer --codec avc444v2` writes
@@ -521,11 +521,11 @@ defaults are used. The startup summary shows `chroma=motion/rest/max`. The own c
 these per connection over `KRDPCTL` (see the `chroma` record above); channel-less clients always get
 the server default.
 
-Useful debug markers:
+Useful log markers (`GFX channel reset` needs `QT_LOGGING_RULES=farside.server.debug=true`):
 
 ```bash
 journalctl --user -f -o cat -u app-org.kde.krdpserver | \
-  rg -i 'Reset graphics monitor layout|GFX channel reset|Selected caps|VAAPI driver'
+  rg -i 'Reset graphics desktop|GFX channel reset|Selected caps|VAAPI driver'
 ```
 
 ## SDDM Autologin
