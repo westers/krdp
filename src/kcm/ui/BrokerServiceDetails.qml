@@ -50,7 +50,19 @@ ColumnLayout {
     }
     QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Startup inspection is a snapshot, not a network reachability check."); color: Kirigami.Theme.disabledTextColor }
     Kirigami.InlineMessage { Layout.fillWidth: true; type: Kirigami.MessageType.Error; visible: root.host.error !== ""; text: root.host.error }
-    QQC2.Button { objectName: "inspectHostRuntime"; text: root.host.loaded ? i18nc("@action:button", "Inspect Running Host…") : i18nc("@action:button", "Load Saved Settings…"); enabled: !root.host.busy; onClicked: root.host.loaded ? root.host.inspectRuntime() : root.host.reload() }
+    RowLayout {
+        Layout.fillWidth: true
+        QQC2.Button { objectName: "inspectHostRuntime"; text: root.host.loaded ? i18nc("@action:button", "Inspect Running Host…") : i18nc("@action:button", "Load Saved Settings…"); enabled: !root.host.busy; onClicked: root.host.loaded ? root.host.inspectRuntime() : root.host.reload() }
+        QQC2.ToolButton {
+            objectName: root.route + "RefreshStatus"
+            icon.name: "view-refresh"; text: i18nc("@action:button", "Refresh status")
+            enabled: root.administration && !root.administration.busy
+            display: QQC2.AbstractButton.IconOnly
+            QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered
+            onClicked: root.administration.refresh()
+        }
+        Item { Layout.fillWidth: true }
+    }
     ColumnLayout {
         Layout.fillWidth: true
         visible: root.host.runtimeCheckedAt !== ""

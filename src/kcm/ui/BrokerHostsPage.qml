@@ -24,11 +24,12 @@ KCM.SimpleKCM {
     readonly property string pendingSummary: {
         const scope = fixedScope === 0 ? i18nc("@info", "Console only") : i18nc("@info", "Virtual only");
         const tls = host.tlsMode !== "keep" ? i18nc("@info", " (certificate change staged)") : "";
-        if (fixedScope === 1 && sessionSettings.modified) return host.modified ? i18nc("@info", "Unsaved changes · Virtual only%1 · New desktop defaults", tls) : i18nc("@info", "Unsaved changes · New desktop defaults");
+        if (fixedScope === 1 && sessionSettings.modified) return host.modified ? i18nc("@info", "Unsaved changes · Virtual only%1 · New desktop defaults — use Save Desktop Defaults below", tls) : i18nc("@info", "Unsaved changes · New desktop defaults — use Save Desktop Defaults below");
         return i18nc("@info", "Unsaved changes · %1%2", scope, tls);
     }
     function leave() { if (certificateSection.open) certificateSection.cancel(); }
-    function reloadSettings() { if (host.modified) reloadConfirmation.open(); else host.reload(); }
+    function closeCertificate() { if (certificateSection.open) certificateSection.cancel(); }
+    function reloadSettings() { if (host.modified) reloadConfirmation.open(); else { closeCertificate(); host.reload(); } }
     ColumnLayout {
       ColumnLayout {
         Layout.fillWidth: true
@@ -101,7 +102,7 @@ KCM.SimpleKCM {
             }
         }
         BrokerHardwareSection { objectName: "desktopHardwareSection"; Layout.fillWidth: true; visible: root.fixedScope === 1; settings: root.sessionSettings; navigation: root.navigation }
-        QQC2.Label { objectName: "hostPendingSummary"; visible: root.host.modified; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.pendingSummary; color: Kirigami.Theme.disabledTextColor }
+        QQC2.Label { objectName: "hostPendingSummary"; visible: root.host.modified || (root.fixedScope === 1 && root.sessionSettings.modified); Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.pendingSummary; color: Kirigami.Theme.disabledTextColor }
     }
     Component {
         id: hostField
@@ -116,8 +117,8 @@ KCM.SimpleKCM {
     }
     footer: QQC2.ToolBar {
         contentItem: RowLayout {
-            QQC2.Button { objectName: "defaultHostSettings"; text: i18nc("@action:button", "Restore Defaults"); enabled: root.host.loaded && !root.host.busy; onClicked: root.host.defaults(); QQC2.ToolTip.text: i18nc("@info:tooltip", "Stage ordinary defaults. Certificates are preserved."); QQC2.ToolTip.visible: hovered }
-            QQC2.Button { objectName: "discardHostSettings"; text: i18nc("@action:button", "Revert Changes"); enabled: root.host.modified && !root.host.busy; onClicked: root.host.discard() }
+            QQC2.Button { objectName: "defaultHostSettings"; text: i18nc("@action:button", "Restore Defaults"); enabled: root.host.loaded && !root.host.busy; onClicked: { root.closeCertificate(); root.host.defaults(); } QQC2.ToolTip.text: i18nc("@info:tooltip", "Stage ordinary defaults. Certificates are preserved."); QQC2.ToolTip.visible: hovered }
+            QQC2.Button { objectName: "discardHostSettings"; text: i18nc("@action:button", "Revert Changes"); enabled: root.host.modified && !root.host.busy; onClicked: { root.closeCertificate(); root.host.discard(); } }
             QQC2.ToolButton { objectName: "loadHostSettings"; icon.name: "view-refresh"; text: i18nc("@action:button", "Reload Saved Settings…"); display: QQC2.AbstractButton.IconOnly; enabled: !root.host.busy; QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered; onClicked: root.reloadSettings() }
             Item { Layout.fillWidth: true }
             QQC2.BusyIndicator { running: root.host.busy; Layout.preferredWidth: Kirigami.Units.gridUnit; Layout.preferredHeight: Kirigami.Units.gridUnit; visible: running }
@@ -131,7 +132,7 @@ KCM.SimpleKCM {
         title: i18nc("@title:window", "Reload Saved Settings?")
         subtitle: i18nc("@info", "Discard unsaved changes for this page, including any staged certificate choice, and load saved settings?")
         standardButtons: Kirigami.Dialog.Cancel
-        customFooterActions: Kirigami.Action { objectName: "reloadHostAccept"; text: i18nc("@action:button", "Discard and Reload"); onTriggered: { reloadConfirmation.close(); root.host.reload(); } }
+        customFooterActions: Kirigami.Action { objectName: "reloadHostAccept"; text: i18nc("@action:button", "Discard and Reload"); onTriggered: { reloadConfirmation.close(); root.closeCertificate(); root.host.reload(); } }
     }
     Kirigami.PromptDialog {
         parent: root.QQC2.Overlay.overlay

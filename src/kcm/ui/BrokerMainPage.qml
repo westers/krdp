@@ -24,6 +24,8 @@ KCM.AbstractKCM {
     framedView: false
     function openPage(index) {
         if (index === currentPage) return;
+        if (currentPage === 1) consolePage.leave();
+        if (currentPage === 2) virtualPage.leave();
         history = history.concat([currentPage]); currentPage = index;
     }
     function goBack() {

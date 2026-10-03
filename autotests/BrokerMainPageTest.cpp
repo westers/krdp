@@ -41,7 +41,116 @@ class BrokerMainPageTest : public QObject {
         for(auto *child:parent->childItems())if(auto *value=find(child,name))return value;
         return nullptr;
     }
+    static QObject *findVisible(QQuickItem *parent,const QString &name) {
+        if(parent->objectName()==name && parent->isVisible())return parent;
+        for(auto *child:parent->childItems())if(auto *value=findVisible(child,name))return value;
+        return nullptr;
+    }
+    struct Fixture {
+        QTemporaryDir dir; QStringList protocol;
+        BrokerHostSettings console, virtualHost, session; BrokerAuthenticationSettings auth; BrokerPreferences preferences;
+        MainTransport transport; MainNavigation navigation; BrokerServices services;
+        QQmlEngine engine; QScopedPointer<QObject> object; QQuickItem *page=nullptr; QQuickWindow window;
+        Fixture() : protocol{qEnvironmentVariable("FARSIDE_HOST_TEST_FIXTURE",QString::fromUtf8(MAIN_PROTOCOL_FIXTURE)),dir.path()},
+            console(Scope::Console,u"/usr/bin/python3"_s,protocol,3000), virtualHost(Scope::Virtual,u"/usr/bin/python3"_s,protocol,3000), session(Scope::VirtualSession,u"/usr/bin/python3"_s,protocol,3000),
+            auth(u"/usr/bin/python3"_s,{qEnvironmentVariable("FARSIDE_AUTH_TEST_FIXTURE",QString::fromUtf8(MAIN_AUTH_PROTOCOL_FIXTURE)),dir.path()},nullptr),
+            preferences(dir.path()), services(&transport) {}
+        bool init() {
+            auto *localized=new KLocalizedQmlContext(&engine); localized->setTranslationDomain(u"kcm_farside"_s); engine.rootContext()->setContextObject(localized);
+            QQmlComponent component(&engine,QUrl::fromLocalFile(qEnvironmentVariable("FARSIDE_MAIN_TEST_PAGE",QString::fromUtf8(MAIN_PAGE))));
+            if(!component.isReady()) { qWarning() << component.errorString(); return false; }
+            object.reset(component.createWithInitialProperties({{u"navigation"_s,QVariant::fromValue(&navigation)},{u"administration"_s,QVariant::fromValue(&services)},
+                {u"consoleHost"_s,QVariant::fromValue(&console)},{u"virtualHost"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)},
+                {u"authentication"_s,QVariant::fromValue(&auth)},{u"preferences"_s,QVariant::fromValue(&preferences)},{u"hostName"_s,u"test-host"_s}}));
+            page=qobject_cast<QQuickItem *>(object.data()); if(!page) return false;
+            window.resize(900,850); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
+            return true;
+        }
+    };
 private Q_SLOTS:
+    void refreshStatusReachableInDetails() {
+        Fixture f; QVERIFY(f.init());
+        QObject *toggle=find(f.page,u"consoleDetailsToggle"_s); QVERIFY(toggle);
+        QVERIFY(!findVisible(f.page,u"consoleRefreshStatus"_s));          // not in the always-visible row
+        QVERIFY(QMetaObject::invokeMethod(toggle,"clicked")); QTest::qWait(60);
+        QObject *refresh=findVisible(f.page,u"consoleRefreshStatus"_s); QVERIFY(refresh);
+        QTRY_VERIFY(refresh->property("enabled").toBool());
+        const int reads=f.transport.reads;
+        QVERIFY(QMetaObject::invokeMethod(refresh,"clicked")); QTRY_VERIFY(f.transport.reads>reads);
+    }
+    void leavingHostPageAnyWayCancelsCertificateDraft() {
+        Fixture f; QVERIFY(f.init());
+        QVERIFY(f.console.reload()); QTRY_VERIFY(!f.console.busy()); QVERIFY(f.console.loaded());
+        QVERIFY(QMetaObject::invokeMethod(find(f.page,u"configureConsole"_s),"clicked")); QCOMPARE(f.page->property("currentPage").toInt(),1);
+        auto *consolePage=qobject_cast<QQuickItem *>(find(f.page,u"consoleSettingsPage"_s)); QVERIFY(consolePage);
+        QVERIFY(f.console.setValue(u"Port"_s,u"3401"_s));
+        QObject *section=find(consolePage,u"certificateSection"_s); QVERIFY(section);
+        QTRY_VERIFY(find(consolePage,u"editHostCertificate"_s)->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"editHostCertificate"_s),"clicked")); QVERIFY(section->property("open").toBool());
+        QTRY_VERIFY(find(consolePage,u"certificateImport"_s)->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"certificateImport"_s),"clicked"));
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"consoleDisplayPreferences"_s),"clicked")); QCOMPARE(f.page->property("currentPage").toInt(),4);
+        QVERIFY(!section->property("open").toBool());
+        QCOMPARE(f.console.tlsMode(),u"keep"_s); QCOMPARE(f.console.values()[u"Port"_s].toString(),u"3401"_s);
+        QVERIFY(QMetaObject::invokeMethod(find(f.page,u"settingsBack"_s),"clicked")); QVERIFY(QMetaObject::invokeMethod(find(f.page,u"settingsBack"_s),"clicked"));
+        QCOMPARE(f.page->property("currentPage").toInt(),0);
+        QVERIFY(!section->property("open").toBool()); QCOMPARE(f.console.tlsMode(),u"keep"_s); QCOMPARE(f.console.values()[u"Port"_s].toString(),u"3401"_s);
+    }
+    void virtualFooterNamesPendingScope() {
+        Fixture f; QVERIFY(f.init());
+        QVERIFY(f.virtualHost.reload()); QTRY_VERIFY(!f.virtualHost.busy()); QVERIFY(f.session.reload()); QTRY_VERIFY(!f.session.busy());
+        QVERIFY(f.page->setProperty("currentPage",2)); QTest::qWait(60);
+        auto *virtualPage=qobject_cast<QQuickItem *>(find(f.page,u"virtualSettingsPage"_s)); QVERIFY(virtualPage);
+        auto *summary=qobject_cast<QQuickItem *>(find(virtualPage,u"hostPendingSummary"_s)); QVERIFY(summary);
+        QObject *saveHost=find(virtualPage,u"saveHostSettings"_s); QVERIFY(saveHost);
+        QVERIFY(!summary->isVisible());
+        f.session.setValue(u"VaapiDriver"_s,u"off"_s);                       // hardware (desktop defaults) edit only
+        QTRY_VERIFY(summary->isVisible()); QVERIFY(!saveHost->property("enabled").toBool());
+        QVERIFY(summary->property("text").toString().contains(u"New desktop defaults"_s));
+        QVERIFY(summary->property("text").toString().contains(u"Save Desktop Defaults"_s));
+        QVERIFY(f.virtualHost.setValue(u"Port"_s,u"3402"_s));                // both dirty
+        const auto both=summary->property("text").toString();
+        QVERIFY(both.contains(u"Virtual only"_s)); QVERIFY(both.contains(u"New desktop defaults"_s));
+        f.session.discard(); QTRY_VERIFY(summary->isVisible());              // host only
+        const auto hostOnly=summary->property("text").toString();
+        QVERIFY(hostOnly.contains(u"Virtual only"_s)); QVERIFY(!hostOnly.contains(u"desktop defaults"_s,Qt::CaseInsensitive));
+    }
+    void hostDiscardReloadDefaultsCloseCertificateSection() {
+        Fixture f; QVERIFY(f.init());
+        QVERIFY(f.console.reload()); QTRY_VERIFY(!f.console.busy()); QVERIFY(f.console.loaded());
+        QVERIFY(QMetaObject::invokeMethod(find(f.page,u"configureConsole"_s),"clicked"));
+        auto *consolePage=qobject_cast<QQuickItem *>(find(f.page,u"consoleSettingsPage"_s)); QVERIFY(consolePage);
+        QObject *section=find(consolePage,u"certificateSection"_s); QVERIFY(section);
+        const auto openStandard=[&]{
+            QTRY_VERIFY(find(consolePage,u"editHostCertificate"_s)->property("enabled").toBool());
+            QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"editHostCertificate"_s),"clicked")); QVERIFY(section->property("open").toBool());
+            QTRY_VERIFY(find(consolePage,u"certificateStandard"_s)->property("visible").toBool());
+            QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"certificateStandard"_s),"clicked"));
+            QObject *stage=find(consolePage,u"stageCertificateEdit"_s); QVERIFY(stage); QVERIFY(stage->property("enabled").toBool());
+        };
+        const auto closedAndCancelled=[&]{
+            QVERIFY(!section->property("open").toBool());
+            auto *draft=qobject_cast<BrokerHostSettings *>(f.console.certificateDraft());
+            QVERIFY(!draft || !draft->loaded() || draft->tlsMode()==u"keep"_s);
+        };
+        // Revert Changes: needs a pending edit to be enabled.
+        QVERIFY(f.console.setValue(u"Port"_s,u"3401"_s)); openStandard();
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"discardHostSettings"_s),"clicked")); closedAndCancelled();
+        QCOMPARE(f.console.tlsMode(),u"keep"_s); QVERIFY(!f.console.modified());
+        // Restore Defaults.
+        openStandard();
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"defaultHostSettings"_s),"clicked")); closedAndCancelled();
+        QCOMPARE(f.console.tlsMode(),u"keep"_s); f.console.discard();
+        // Reload Saved Settings: confirm only when modified, so make an edit and accept the dialog.
+        QVERIFY(f.console.setValue(u"Port"_s,u"3401"_s)); openStandard();
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"loadHostSettings"_s),"clicked"));
+        QObject *accept=find(consolePage,u"reloadHostAccept"_s); QVERIFY(accept);
+        QVERIFY(QMetaObject::invokeMethod(accept,"triggered")); QTRY_VERIFY(!f.console.busy()); closedAndCancelled();
+        QCOMPARE(f.console.tlsMode(),u"keep"_s);
+        // Without a pending edit, Reload applies directly and must also close an open section.
+        openStandard();
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"loadHostSettings"_s),"clicked")); QTRY_VERIFY(!f.console.busy()); closedAndCancelled();
+    }
     void navigationDraftsAndNativePresentation() {
         QTemporaryDir dir;
         const QStringList protocol{qEnvironmentVariable("FARSIDE_HOST_TEST_FIXTURE",QString::fromUtf8(MAIN_PROTOCOL_FIXTURE)),dir.path()};
