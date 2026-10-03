@@ -1064,3 +1064,10 @@ if(Systemd_FOUND)
     target_compile_definitions(SystemdWatchdogProbe PRIVATE KRDP_HAVE_SYSTEMD)
 endif()
 # --- end OPT-055 K6 ---
+
+# OPT-055 wave 1: a missing Plasma Wayland interface grant closes the session with a reason, never the process.
+add_executable(PlasmaScreencastUnavailableTest PlasmaScreencastUnavailableTest.cpp)
+target_include_directories(PlasmaScreencastUnavailableTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(PlasmaScreencastUnavailableTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
+add_test(NAME PlasmaScreencastUnavailableTest COMMAND PlasmaScreencastUnavailableTest -platform offscreen)
+set_tests_properties(PlasmaScreencastUnavailableTest PROPERTIES TIMEOUT 60)

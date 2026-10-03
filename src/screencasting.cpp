@@ -173,6 +173,11 @@ ScreencastingStream *Screencasting::createVirtualMonitorStream(const QString &na
     return stream;
 }
 
+bool Screencasting::isAvailable() const
+{
+    return d && d->isActive();
+}
+
 void Screencasting::destroy()
 {
     d.reset(nullptr);

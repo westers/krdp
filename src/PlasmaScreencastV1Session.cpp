@@ -69,7 +69,6 @@ public:
                                 << "which predates keyboard_key; keyboard input is disabled";
             }
         }
-        Q_ASSERT(isActive());
     }
 
     ~FakeInput() override
@@ -320,6 +319,12 @@ public:
     ScreencastingStream *request = nullptr;
     // Declared before pressedInput: its destructor releases through this.
     std::unique_ptr<FakeInput> remoteInterface;
+    // The bound fake-input object, or null when the compositor withheld it (no grant): every request goes through this.
+    FakeInput *fake() const
+    {
+        return remoteInterface && remoteInterface->isActive() ? remoteInterface.get() : nullptr;
+    }
+    bool reportedUnavailable = false;
     PressedInputTracker pressedInput{[this](PressedInputTracker::Kind kind, uint32_t code) {
         if (!remoteInterface || !remoteInterface->isActive()) {
             return;
@@ -405,6 +410,10 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
     , d(std::make_unique<Private>())
 {
     d->remoteInterface = std::make_unique<FakeInput>();
+    if (!d->fake()) {
+        // Not fatal: the session cannot inject input, and start() reports the missing screencast too.
+        qCWarning(KRDP) << "The compositor did not grant org_kde_kwin_fake_input; check X-KDE-Wayland-Interfaces in the .desktop file. Remote input is disabled for this session";
+    }
 
     connect(KSystemClipboard::instance(), &KSystemClipboard::changed, this, [this](auto mode) {
         // The clipboard is workspace-wide, but MonitorMode=multi runs one
@@ -621,6 +630,18 @@ void PlasmaScreencastV1Session::attemptStreamRecovery(int attempt)
 
 bool PlasmaScreencastV1Session::setupScreencastRequest(bool recovery, bool allowWorkspaceFallback)
 {
+    if (!d->m_screencasting.isAvailable()) {
+        // The compositor withheld zkde_screencast_unstable_v1: nothing here can ever succeed, so end the
+        // session (never the process) once, with the remedy.
+        if (!std::exchange(d->reportedUnavailable, true)) {
+            const QString reason = QStringLiteral("the compositor did not grant zkde_screencast_unstable_v1; check X-KDE-Wayland-Interfaces in the .desktop file of %1")
+                                       .arg(qGuiApp && !qGuiApp->desktopFileName().isEmpty() ? qGuiApp->desktopFileName() : QCoreApplication::applicationName());
+            qCWarning(KRDP) << "Screencast unavailable:" << reason;
+            Q_EMIT captureUnavailable(reason);
+        }
+        d->recoveryTimer.stop();
+        return false;
+    }
     Private::StreamTarget target = Private::StreamTarget::Workspace;
     QPointer<QScreen> outputScreen = nullptr;
     QRect targetLogicalRect;
@@ -870,6 +891,9 @@ void PlasmaScreencastV1Session::attachEncodedStream(uint nodeId, bool streamWasA
 
 void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
 {
+    if (!d->fake()) {
+        return; // no fake-input grant: warned once at construction
+    }
     auto encodedStream = stream();
     if (!encodedStream || !encodedStream->isActive()) {
         return;
@@ -920,6 +944,9 @@ void PlasmaScreencastV1Session::sendEvent(const std::shared_ptr<QEvent> &event)
 
 void PlasmaScreencastV1Session::sendGlobalEvent(const std::shared_ptr<QEvent> &event)
 {
+    if (!d->fake()) {
+        return; // no fake-input grant: warned once at construction
+    }
     auto encodedStream = stream();
     if (!encodedStream || !encodedStream->isActive()) {
         // Fake input would work here - it addresses the whole workspace, not
@@ -1003,6 +1030,9 @@ void PlasmaScreencastV1Session::settleCursor()
 // output-local and the workspace-global entry points.
 void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEvent> &event)
 {
+    if (!d->fake()) {
+        return; // no fake-input grant: warned once at construction
+    }
     switch (event->type()) {
     case QEvent::MouseButtonPress:
     case QEvent::MouseButtonRelease: {

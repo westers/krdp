@@ -474,6 +474,10 @@ public:
             m_sessionConnections.append(connect(session, &KRdp::AbstractSession::encoderGaveUp, this, [this](const QString &reason) {
                 encoderEndReason = reason;
             }));
+            // Wave 1: the compositor withheld the Plasma screencast grant; end this session, not the process.
+            m_sessionConnections.append(connect(session, &KRdp::AbstractSession::captureUnavailable, this, [this](const QString &reason) {
+                screencastUnavailableReason = reason;
+            }));
             if (multi) {
                 // One monitor going away must not take the whole connection
                 // with it; see dropSession().
@@ -1055,6 +1059,7 @@ public:
 
     /** Set when a capture session gave up because its encoder kept failing (OPT-055 K4.2); read by the close. */
     QString encoderEndReason;
+    QString screencastUnavailableReason; // set when the compositor withheld zkde_screencast_unstable_v1
     Q_SIGNAL void sessionError();
     Q_SIGNAL void connectionDestroyed(SessionWrapper *wrapper);
     /** Local pointer motion seen while this wrapper's replace policy holds the physical outputs (Task 6c). */
@@ -2403,6 +2408,15 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
             newConnection->sendControlRecord(KRdp::LayoutControl::sessionEndRecord(u"encoder-failed"_s,
                                                                                     ERRINFO_GRAPHICS_SUBSYSTEM_FAILED,
                                                                                     u"The video encoder failed and could not be restarted."_s));
+            QTimer::singleShot(250, newConnection, [newConnection] {
+                newConnection->close(KRdp::RdpConnection::CloseReason::VideoInitFailed);
+            });
+            return;
+        }
+        if (!wrapperPtr->screencastUnavailableReason.isEmpty() && newConnection->hasControlChannel()) {
+            newConnection->sendControlRecord(KRdp::LayoutControl::sessionEndRecord(u"screencast-unavailable"_s,
+                                                                                    ERRINFO_GRAPHICS_SUBSYSTEM_FAILED,
+                                                                                    u"The desktop is not allowed to share its screen (the compositor did not grant screen capture)."_s));
             QTimer::singleShot(250, newConnection, [newConnection] {
                 newConnection->close(KRdp::RdpConnection::CloseReason::VideoInitFailed);
             });

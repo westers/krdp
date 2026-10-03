@@ -50,6 +50,9 @@ public:
     ScreencastingStream *createRegionStream(QRect g, qreal scale, CursorMode mode);
     ScreencastingStream *createVirtualMonitorStream(const QString &name, const QSize &resolution, qreal dpr, CursorMode mode);
 
+    /// False when the compositor withheld zkde_screencast_unstable_v1 (every create*Stream returns nullptr).
+    bool isAvailable() const;
+
     void destroy();
 
 Q_SIGNALS:

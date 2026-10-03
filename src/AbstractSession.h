@@ -112,6 +112,13 @@ public:
      */
     Q_SIGNAL void encoderGaveUp(const QString &reason);
     /**
+     * Emitted just before error() when the compositor withheld an interface the session needs
+     * (zkde_screencast_unstable_v1 / org_kde_kwin_fake_input: no X-KDE-Wayland-Interfaces grant, a
+     * login greeter). \a reason carries the remedy hint. The owner closes this session with a
+     * KRDPCTL `session-end` reason `screencast-unavailable`; the process and listener stay up.
+     */
+    Q_SIGNAL void captureUnavailable(const QString &reason);
+    /**
      * KPipeWire producer threads abandoned in this process that have not ended (each still holds its
      * encoder and a GPU device until the process restarts); 0 with a KPipeWire that cannot abandon.
      */
