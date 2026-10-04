@@ -63,12 +63,12 @@ bool BrokerPreferences::setValue(const QString &key, const QString &value)
 {
     if (!loaded() || !BrokerUserSettings::preferenceKeys().contains(key) || m_locked.contains(key)
         || value.size() > 256 || value.contains(QChar::Null) || value.contains(u'\n') || value.contains(u'\r'))
-        return reject(u"Invalid or locked preference"_s);
+        return reject(i18nc("@info", "That preference cannot be changed."));
     m_pending.insert(key, value); m_error.clear(); Q_EMIT changed(); return true;
 }
 bool BrokerPreferences::inherit(const QString &key)
 {
-    if (!loaded() || !BrokerUserSettings::preferenceKeys().contains(key) || m_locked.contains(key)) return reject(u"Invalid or locked preference"_s);
+    if (!loaded() || !BrokerUserSettings::preferenceKeys().contains(key) || m_locked.contains(key)) return reject(i18nc("@info", "That preference cannot be changed."));
     m_pending.remove(key); m_error.clear(); Q_EMIT changed(); return true;
 }
 void BrokerPreferences::defaults()
@@ -102,46 +102,46 @@ bool BrokerPreferences::save()
     // Resolve the account's actual config directory, including an existing
     // safe user-owned .config symlink supported by the production reader.
     if (!QDir(m_directory).exists() && ::mkdir(QFile::encodeName(m_directory).constData(), 0700) && errno != EEXIST)
-        return reject(u"User preference directory cannot be created"_s);
+        return reject(i18nc("@info", "Your preferences folder could not be created."));
     const int directory = ::open(QFile::encodeName(m_directory).constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (directory < 0) return reject(u"User preference directory is unavailable"_s);
+    if (directory < 0) return reject(i18nc("@info", "Your preferences folder is not available."));
     const auto closeDirectory = qScopeGuard([directory] { ::close(directory); });
     struct stat parent{};
-    if (::fstat(directory, &parent) || parent.st_uid != getuid() || (parent.st_mode & 0022)) return reject(u"User preference directory is unsafe"_s);
+    if (::fstat(directory, &parent) || parent.st_uid != getuid() || (parent.st_mode & 0022)) return reject(i18nc("@info", "Your preferences folder has unsafe permissions."));
     const int lock = ::openat(directory, ".farsideserverrc.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0600);
-    if (lock < 0) return reject(u"User preference lock is unavailable"_s);
+    if (lock < 0) return reject(i18nc("@info", "Your preferences are locked and cannot be saved right now."));
     const auto closeLock = qScopeGuard([lock] { ::close(lock); });
     struct stat lockState{};
     if (::fstat(lock, &lockState) || !S_ISREG(lockState.st_mode) || lockState.st_uid != getuid() || lockState.st_nlink != 1
-        || (lockState.st_mode & 0077) || ::flock(lock, LOCK_EX | LOCK_NB)) return reject(u"User preferences are busy or their lock is unsafe"_s);
+        || (lockState.st_mode & 0077) || ::flock(lock, LOCK_EX | LOCK_NB)) return reject(i18nc("@info", "Your preferences are in use by another program or their lock file is unsafe."));
     const auto current = read();
     if (!current.error.isEmpty()) return reject(current.error);
-    if (current.absent != m_absent || current.document != m_document) return reject(u"User preferences changed; reload before saving"_s);
+    if (current.absent != m_absent || current.document != m_document) return reject(i18nc("@info", "Your preferences changed elsewhere. Reset the page, then try again."));
     struct stat actualParent{};
     if (::stat(QFile::encodeName(m_directory).constData(), &actualParent) || actualParent.st_dev != parent.st_dev || actualParent.st_ino != parent.st_ino)
-        return reject(u"User preference directory changed; reload before saving"_s);
+        return reject(i18nc("@info", "Your preferences folder changed. Reset the page, then try again."));
     // Anchor the atomic write to the inspected directory, rather than following
     // a changing parent symlink a second time.
     QSaveFile file(u"/proc/self/fd/"_s + QString::number(directory) + u"/"_s + filename);
     file.setDirectWriteFallback(false);
     if (!file.open(QIODevice::WriteOnly) || !file.setPermissions(QFile::ReadOwner | QFile::WriteOwner)
         || file.write(candidate.document) != candidate.document.size() || !file.flush() || ::fsync(file.handle()) || !file.commit())
-        return reject(u"User preferences could not be saved atomically"_s);
+        return reject(i18nc("@info", "Your preferences could not be saved."));
     m_reconnect = true;
     const bool durable = ::fsync(directory) == 0;
     const auto saved = read();
-    if (!saved.error.isEmpty() || saved.document != candidate.document) return reject(u"Preferences saved but readback changed or failed; reload before reconnecting"_s);
+    if (!saved.error.isEmpty() || saved.document != candidate.document) return reject(i18nc("@info", "Your preferences were saved, but reading them back failed. Reset the page before reconnecting."));
     adopt(saved);
-    if (!durable) return reject(u"Preferences saved but directory synchronization failed"_s);
+    if (!durable) return reject(i18nc("@info", "Your preferences were saved, but the folder could not be flushed to disk."));
     return true;
 }
 
 QString BrokerPreferences::sectionTitle(const QString &section) const
 {
     if (section == u"video") return i18nc("@title:group", "Video");
-    if (section == u"displays") return i18nc("@title:group", "Console displays");
-    if (section == u"sound") return i18nc("@title:group", "Sound and session");
-    if (section == u"advanced") return i18nc("@title:group", "Encoding and compatibility");
+    if (section == u"displays") return i18nc("@title:group", "Console Displays");
+    if (section == u"sound") return i18nc("@title:group", "Sound and Session");
+    if (section == u"advanced") return i18nc("@title:group", "Encoding and Compatibility");
     return {};
 }
 
@@ -164,50 +164,50 @@ QVariantList BrokerPreferences::definitions() const
     const auto virtualDesktop = i18nc("@title:group", "Virtual Compatibility");
     const auto when = [](Spec spec, const QString &mode) { spec.showWhenKey = u"MonitorMode"_s; spec.showWhenValue = mode; return spec; };
     const auto interval = [](const QString &formLabel) { return Spec{.control = u"spin"_s, .section = u"video"_s, .advanced = true, .formLabel = formLabel, .min = 16, .max = 5000, .unit = i18nc("@label", "ms")}; };
-    add(u"Quality"_s, video, i18nc("@label", "Video quality"), i18nc("@info", "0–100. Higher values use more bandwidth."), {},
+    add(u"Quality"_s, video, i18nc("@label", "Video quality"), i18nc("@info", "From 0 to 100. Higher values look sharper and use more bandwidth."), {},
         {.control = u"slider"_s, .section = u"video"_s, .formLabel = i18nc("@label", "Image quality"), .min = 0, .max = 100});
-    add(u"AdaptiveQuality"_s, video, i18nc("@label", "Adapt quality to the connection"), i18nc("@info", "Allow quality to adjust to measured link capacity."), boolean,
+    add(u"AdaptiveQuality"_s, video, i18nc("@label", "Adapt quality to the connection"), i18nc("@info", "Lower the quality automatically when the connection cannot keep up."), boolean,
         {.section = u"video"_s, .formLabel = i18nc("@label", "Adjust to connection")});
-    add(u"Codec"_s, video, i18nc("@label", "Video codec preference"), i18nc("@info", "Available encoders and client support determine the actual codec. Shared Console viewers use AVC420."),
+    add(u"Codec"_s, video, i18nc("@label", "Video codec preference"), i18nc("@info", "Chooses how colors are sent. Automatic uses full color (AVC444) when the client and the connection allow it. The available encoders and the client still decide; shared Console viewers always get standard color (AVC420)."),
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"avc420"_s, i18nc("@item:inlistbox", "AVC420")), choice(u"avc444"_s, i18nc("@item:inlistbox", "AVC444 full color"))},
         {.section = u"video"_s, .formLabel = i18nc("@label", "Color detail"),
-         .optionText = {{u"avc420"_s, i18nc("@item:inlistbox", "Standard color (AVC420)")}, {u"avc444"_s, i18nc("@item:inlistbox", "Full color (AVC444)")}}});
-    add(u"SoftwareEncoding"_s, video, i18nc("@label", "Software encoding"), i18nc("@info", "Automatic considers link capacity and CPU cost. Hardware preference can still use software AVC as a last resort."),
+         .optionText = {{u"avc420"_s, i18nc("@item:inlistbox", "Standard color")}, {u"avc444"_s, i18nc("@item:inlistbox", "Full color")}}});
+    add(u"SoftwareEncoding"_s, video, i18nc("@label", "Software encoding"), i18nc("@info", "Automatic weighs the connection speed against the processor load. “Prefer hardware” falls back to software only as a last resort."),
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"never"_s, i18nc("@item:inlistbox", "Prefer hardware")), choice(u"prefer"_s, i18nc("@item:inlistbox", "Allow the best codec in software"))},
         {.section = u"video"_s, .advanced = true, .formLabel = i18nc("@label", "Encoding policy")});
-    add(u"Av1Tiles"_s, video, i18nc("@label", "AV1 tiles"), i18nc("@info", "Automatic uses client decode capability. More tiles can help software decoding."),
+    add(u"Av1Tiles"_s, video, i18nc("@label", "AV1 tiles"), i18nc("@info", "Automatic uses what the client can decode. More tiles can help clients that decode in software."),
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"1"_s, u"1"_s), choice(u"2"_s, u"2"_s), choice(u"4"_s, u"4"_s), choice(u"8"_s, u"8"_s), choice(u"16"_s, u"16"_s)},
         {.section = u"video"_s, .advanced = true});
-    add(u"Avc444MotionGapMs"_s, video, i18nc("@label", "AVC444 color update interval during motion"), i18nc("@info", "16–5000 ms; must not exceed the rest interval."), {},
+    add(u"Avc444MotionGapMs"_s, video, i18nc("@label", "AVC444 color update interval during motion"), i18nc("@info", "From 16 to 5000 ms. Must not be longer than the rest interval."), {},
         interval(i18nc("@label", "AVC444 motion interval")));
-    add(u"Avc444RestMs"_s, video, i18nc("@label", "AVC444 rest interval"), i18nc("@info", "16–5000 ms; must be at least the motion interval."), {},
+    add(u"Avc444RestMs"_s, video, i18nc("@label", "AVC444 rest interval"), i18nc("@info", "From 16 to 5000 ms. Must not be shorter than the motion interval."), {},
         interval(i18nc("@label", "AVC444 rest interval")));
-    add(u"Avc444MaxGapMs"_s, video, i18nc("@label", "AVC444 maximum color update gap"), i18nc("@info", "16–5000 ms; must be at least the rest interval."), {},
+    add(u"Avc444MaxGapMs"_s, video, i18nc("@label", "AVC444 maximum color update gap"), i18nc("@info", "From 16 to 5000 ms. Must not be shorter than the rest interval."), {},
         interval(i18nc("@label", "AVC444 maximum interval")));
-    add(u"PreferAudioQuality"_s, media, i18nc("@label", "Prefer audio quality"), i18nc("@info", "Prioritize audio quality when media is enabled."), boolean,
+    add(u"PreferAudioQuality"_s, media, i18nc("@label", "Prefer audio quality"), i18nc("@info", "When the network is busy, favor sound over video."), boolean,
         {.section = u"sound"_s, .formLabel = i18nc("@label", "When network is busy"),
          .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Keep sound smooth")}, {u"false"_s, i18nc("@item:inlistbox", "Keep video sharp")}}});
-    add(u"StandardClientMedia"_s, media, i18nc("@label", "Standard client media"), i18nc("@info", "Requires host permission and channel consent. This does not grant microphone or camera access."), boolean,
-        {.section = u"sound"_s, .formLabel = i18nc("@label", "Other RDP app media"),
+    add(u"StandardClientMedia"_s, media, i18nc("@label", "Media for other RDP apps"), i18nc("@info", "Lets other remote desktop apps send sound and devices. The host must allow it and each app must still ask. This does not give anyone access to your microphone or camera."), boolean,
+        {.section = u"sound"_s, .formLabel = i18nc("@label", "Media for other RDP apps"),
          .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Allow")}, {u"false"_s, i18nc("@item:inlistbox", "Block")}}});
-    add(u"MonitorMode"_s, displays, i18nc("@label", "Share"), i18nc("@info", "Console capture selection. Client-created displays follow the separate layout and physical-display policy."),
+    add(u"MonitorMode"_s, displays, i18nc("@label", "Console screens"), i18nc("@info", "Which of the Console computer’s screens you see. Client-created displays follow their own layout and physical-display settings."),
         {choice(u"workspace"_s, i18nc("@item:inlistbox", "Whole workspace")), choice(u"primary"_s, i18nc("@item:inlistbox", "Primary display")), choice(u"specific"_s, i18nc("@item:inlistbox", "One display")),
          choice(u"multi"_s, i18nc("@item:inlistbox", "Displays as separate streams")), choice(u"virtual"_s, i18nc("@item:inlistbox", "Client-created displays"))},
-        {.section = u"displays"_s});
-    add(u"MonitorIndex"_s, displays, i18nc("@label", "Display index"), i18nc("@info", "0–65535, starting at zero. Used when sharing one display; it must exist in the current Console desktop."), {},
+        {.section = u"displays"_s, .formLabel = i18nc("@label", "Screens to share")});
+    add(u"MonitorIndex"_s, displays, i18nc("@label", "Display index"), i18nc("@info", "A number from 0 to 65535, counting from zero. Used when sharing one display; that display must exist on the Console desktop."), {},
         when({.control = u"spin"_s, .section = u"displays"_s, .min = 0, .max = 65535}, u"specific"_s));
-    add(u"VirtualMonitorPolicy"_s, displays, i18nc("@label", "Physical displays with client-created displays"), i18nc("@info", "Replace turns off physical displays during the connection; local reclaim restores them."),
+    add(u"VirtualMonitorPolicy"_s, displays, i18nc("@label", "Physical displays with client-created displays"), i18nc("@info", "“Turn off during connection” switches the computer’s own screens off while you are connected. They come back when someone uses the computer locally."),
         {choice(u"replace"_s, i18nc("@item:inlistbox", "Replace physical displays")), choice(u"extend"_s, i18nc("@item:inlistbox", "Keep physical displays"))},
         when({.section = u"displays"_s, .formLabel = i18nc("@label", "Physical displays"),
               .optionText = {{u"extend"_s, i18nc("@item:inlistbox", "Keep on")}, {u"replace"_s, i18nc("@item:inlistbox", "Turn off during connection")}}}, u"virtual"_s));
-    add(u"VirtualMonitorLayout"_s, displays, i18nc("@label", "Client-created display layout"), i18nc("@info", "Client layout needs the client's explicit monitor request. Physical layout mirrors native display pixels and scale."),
+    add(u"VirtualMonitorLayout"_s, displays, i18nc("@label", "Client-created display layout"), i18nc("@info", "“Client monitors” needs the client to ask for its monitors. “Physical display layout” copies the computer’s own screens, including their resolution and scale."),
         {choice(u"client"_s, i18nc("@item:inlistbox", "Client monitors")), choice(u"single"_s, i18nc("@item:inlistbox", "One display")), choice(u"physical"_s, i18nc("@item:inlistbox", "Physical display layout"))},
         when({.section = u"displays"_s, .formLabel = i18nc("@label", "Layout")}, u"virtual"_s));
-    add(u"VirtualMonitorFallbackSize"_s, displays, i18nc("@label", "Fallback display size"), i18nc("@info", "Even WIDTHxHEIGHT, from 320x200 through 8192x8192. Used when client monitor data is unavailable."), {},
+    add(u"VirtualMonitorFallbackSize"_s, displays, i18nc("@label", "Fallback display size"), i18nc("@info", "Width and height in pixels, both even numbers, from 320x200 to 8192x8192. Used when the client does not report its monitors."), {},
         when({.control = u"size"_s, .section = u"displays"_s, .formLabel = i18nc("@label", "Fallback size"), .min = 320, .max = 8192, .heightMin = 200}, u"virtual"_s));
-    add(u"WakeDisplayOnConnect"_s, i18nc("@title:group", "Session"), i18nc("@label", "Wake and keep displays awake"), i18nc("@info", "Applies to the streaming desktop in Console and Virtual, and releases when the final viewer leaves. It never unlocks the screen."), boolean,
+    add(u"WakeDisplayOnConnect"_s, i18nc("@title:group", "Session"), i18nc("@label", "Wake and keep displays awake"), i18nc("@info", "Wakes the screens and keeps them awake while you are connected, in Console and Virtual. This stops when the last viewer leaves. It never unlocks the screen."), boolean,
         {.section = u"sound"_s, .formLabel = i18nc("@label", "Keep displays awake")});
-    add(u"VirtualStockClientPolicy"_s, virtualDesktop, i18nc("@label", "Standard clients in Virtual"), i18nc("@info", "Controls clients without Farside session selection. Desktop ownership always follows the authenticated account."),
+    add(u"VirtualStockClientPolicy"_s, virtualDesktop, i18nc("@label", "Standard clients in Virtual"), i18nc("@info", "How apps that cannot choose a Farside session connect. The desktop always belongs to the account that signs in."),
         {choice(u"attach-or-create"_s, i18nc("@item:inlistbox", "Attach to or create a desktop")), choice(u"refuse"_s, i18nc("@item:inlistbox", "Require session selection"))},
         {.section = u"video"_s, .advanced = true, .formLabel = i18nc("@label", "Other RDP apps in Virtual")});
     return result;

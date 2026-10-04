@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "brokerservices.h"
+#include <KLocalizedString>
 #include <QDBusMessage>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
@@ -53,7 +54,7 @@ SystemBrokerServiceTransport::SystemBrokerServiceTransport(const QDBusConnection
     : BrokerServiceTransport(parent), m_bus(bus)
 {
     m_deadline.setSingleShot(true);
-    connect(&m_deadline, &QTimer::timeout, this, [this] { finish(u"Service operation timed out; refresh to check its actual state"_s); });
+    connect(&m_deadline, &QTimer::timeout, this, [this] { finish(i18nc("@info", "The operation took too long. Refresh to see the service’s actual state.")); });
     m_bus.connect(service, managerPath, manager, u"JobRemoved"_s, this, SLOT(jobRemoved(uint,QDBusObjectPath,QString,QString)));
     m_bus.connect(service, managerPath, manager, u"UnitFilesChanged"_s, this, SLOT(unitFilesChanged()));
     auto *owner = new QDBusServiceWatcher(service, m_bus, QDBusServiceWatcher::WatchForOwnerChange, this);
@@ -76,13 +77,13 @@ void SystemBrokerServiceTransport::subscribe()
 void SystemBrokerServiceTransport::query(int route, QueryDone done)
 {
     const auto name = unit(route);
-    if (name.isEmpty()) { done({}, u"Invalid host service"_s); return; }
+    if (name.isEmpty()) { done({}, i18nc("@info", "That service is not known.")); return; }
     subscribe();
     const auto epoch = m_managerGeneration;
     const auto originalDone = std::move(done);
     done = [this, epoch, originalDone](BrokerServiceState state, const QString &error) {
         originalDone(epoch == m_managerGeneration ? state : BrokerServiceState{},
-            epoch == m_managerGeneration ? error : u"System service manager changed; refresh its state"_s);
+            epoch == m_managerGeneration ? error : i18nc("@info", "The system service manager restarted. Refresh to see the current state."));
     };
     request<QDBusPendingReply<QDBusObjectPath>>(m_bus, call(u"LoadUnit"_s, {name}), this, [this, route, name, done](const auto &loaded) {
         if (loaded.isError()) { done({}, loaded.error().message()); return; }
@@ -103,7 +104,7 @@ void SystemBrokerServiceTransport::query(int route, QueryDone done)
             BrokerServiceState state;
             for (const auto &key : {u"LoadState"_s, u"ActiveState"_s, u"SubState"_s}) {
                 if (values.value(key).metaType() != QMetaType::fromType<QString>() || values.value(key).toString().isEmpty()) {
-                    done({}, u"Incomplete host service state"_s); return;
+                    done({}, i18nc("@info", "The service’s state could not be read completely.")); return;
                 }
             }
             state.known = true;
@@ -118,7 +119,7 @@ void SystemBrokerServiceTransport::query(int route, QueryDone done)
                 pid.setArguments({u"org.freedesktop.systemd1.Service"_s, u"MainPID"_s});
                 request<QDBusPendingReply<QDBusVariant>>(m_bus, pid, this, [state, done](const auto &reply) mutable {
                     if (reply.isError() || reply.value().variant().metaType() != QMetaType::fromType<quint32>()) {
-                        done({}, u"Cannot read the host service process"_s); return;
+                        done({}, i18nc("@info", "The service’s process could not be read.")); return;
                     }
                     state.mainPid = reply.value().variant().toUInt(); done(state, {});
                 });
@@ -130,8 +131,8 @@ void SystemBrokerServiceTransport::query(int route, QueryDone done)
 void SystemBrokerServiceTransport::operate(int route, Operation operation, Done done)
 {
     const auto name = unit(route);
-    if (name.isEmpty() || operation < Start || operation > Disable) { done(u"Invalid host service operation"_s); return; }
-    if (m_done) { done(u"Another host service operation is pending"_s); return; }
+    if (name.isEmpty() || operation < Start || operation > Disable) { done(i18nc("@info", "That operation is not supported.")); return; }
+    if (m_done) { done(i18nc("@info", "Another service operation is still running.")); return; }
     m_done = std::move(done); m_unit = name; m_job.clear(); m_earlyJobs.clear();
     const auto generation = ++m_generation;
     m_deadline.start(180000);
@@ -144,7 +145,7 @@ void SystemBrokerServiceTransport::operate(int route, Operation operation, Done 
             if (reply.isError()) { finish(reply.error().message()); return; }
             request<QDBusPendingReply<>>(m_bus, call(u"Reload"_s, {}, true), this, [this, generation](const auto &reload) {
                 if (!m_done || generation != m_generation) return;
-                finish(reload.isError() ? u"Startup setting changed, but manager reload failed: "_s + reload.error().message() : QString());
+                finish(reload.isError() ? i18nc("@info %1 reason", "The startup setting changed, but the system service manager could not reload: %1", reload.error().message()) : QString());
             });
         });
         return;
@@ -157,7 +158,7 @@ void SystemBrokerServiceTransport::operate(int route, Operation operation, Done 
             if (!m_done || generation != m_generation) return;
             if (job.isError()) { finish(job.error().message()); return; }
             m_job = job.value().path();
-            if (!m_job.startsWith(u"/org/freedesktop/systemd1/job/"_s)) { finish(u"Invalid service job reply; refresh its state"_s); return; }
+            if (!m_job.startsWith(u"/org/freedesktop/systemd1/job/"_s)) { finish(i18nc("@info", "The system service manager gave an unexpected reply. Refresh to see the current state.")); return; }
             if (m_earlyJobs.contains(m_job)) {
                 const auto result = m_earlyJobs.value(m_job);
                 finish(result == u"done"_s ? QString() : u"Service job did not complete: "_s + result);
@@ -194,7 +195,7 @@ void SystemBrokerServiceTransport::unitPropertiesChanged(const QString &interfac
 void SystemBrokerServiceTransport::managerOwnerChanged(const QString &, const QString &, const QString &)
 {
     ++m_managerGeneration; m_subscribed = m_subscriptionPending = false;
-    if (m_done) finish(u"System service manager changed during the operation; refresh its state"_s);
+    if (m_done) finish(i18nc("@info", "The system service manager restarted during the operation. Refresh to see the current state."));
     Q_EMIT changed();
 }
 void SystemBrokerServiceTransport::finish(const QString &error)

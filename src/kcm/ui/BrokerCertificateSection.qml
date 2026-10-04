@@ -19,16 +19,25 @@ ColumnLayout {
     property url certificateFile
     property url privateKeyFile
     property int selectionGeneration: 0
-    // One line for the page: the state, and the expiry date when the material is usable.
-    readonly property string summary: certificate.state === "valid" && certificate.notAfter ? i18nc("@info %1 date", "Valid until %1", String(certificate.notAfter).slice(0, 10)) : certificateState(certificate.state)
+    // Whether the saved certificate's own details (paths, full fingerprint, validity) are shown in the editor.
+    property bool detailsOpen: false
+    readonly property string fingerprint: certificate.fingerprint || ""
+    // The first three and last two bytes of the SHA-256 fingerprint: enough to recognize it, short enough for one line.
+    readonly property string shortFingerprint: {
+        const parts = fingerprint.split(":");
+        return parts.length > 8 ? parts.slice(0, 3).join(":") + "…" + parts.slice(-2).join(":") : fingerprint;
+    }
+    readonly property string validity: certificate.state === "valid" && certificate.notAfter ? i18nc("@info %1 date", "Valid until %1", String(certificate.notAfter).slice(0, 10)) : certificateState(certificate.state)
+    // Two short lines for the page (they stay readable beside the buttons at any width): the state with the expiry date when usable, and the short fingerprint.
+    readonly property string summary: shortFingerprint !== "" ? validity + "\n" + i18nc("@info %1 fingerprint", "SHA-256 %1", shortFingerprint) : validity
     spacing: Kirigami.Units.smallSpacing
     function begin() {
         if (!host.beginCertificateEdit()) return;
-        ++selectionGeneration; certificateFile = ""; privateKeyFile = ""; open = true;
+        ++selectionGeneration; certificateFile = ""; privateKeyFile = ""; detailsOpen = false; open = true;
     }
     function cancel() {
         host.cancelCertificateEdit();
-        ++selectionGeneration; certificateFile = ""; privateKeyFile = ""; open = false; cancelled();
+        ++selectionGeneration; certificateFile = ""; privateKeyFile = ""; detailsOpen = false; open = false; cancelled();
     }
     function certificateState(state) {
         switch (state) {
@@ -37,8 +46,8 @@ ColumnLayout {
         case "expired": return i18nc("@info", "Expired");
         case "not-yet-valid": return i18nc("@info", "Not yet valid");
         case "missing": return i18nc("@info", "Not found");
-        case "unsafe": return i18nc("@info", "Unsafe file or directory permissions");
-        case "invalid": return i18nc("@info", "Unreadable or mismatched material");
+        case "unsafe": return i18nc("@info", "Unsafe file or folder permissions");
+        case "invalid": return i18nc("@info", "Unreadable, or the certificate and key do not match");
         default: return i18nc("@info", "Not checked");
         }
     }
@@ -47,23 +56,33 @@ ColumnLayout {
         Layout.fillWidth: true
         visible: root.open
         spacing: Kirigami.Units.smallSpacing
+        QQC2.Button {
+            objectName: "certificateDetailsToggle"
+            flat: true
+            text: root.detailsOpen ? i18nc("@action:button", "Hide Current Certificate Details") : i18nc("@action:button", "Show Current Certificate Details")
+            icon.name: root.detailsOpen ? "arrow-down" : "arrow-right"
+            onClicked: root.detailsOpen = !root.detailsOpen
+        }
+        // Hidden, never unloaded: it is cheap, and the page keeps one set of rows for the whole editing session.
         Kirigami.FormLayout {
             id: savedForm
+            objectName: "certificateDetails"
             Layout.fillWidth: true
+            visible: root.detailsOpen
             QQC2.Label { Kirigami.FormData.label: i18nc("@label", "Status:"); text: root.certificateState(root.certificate.state) }
             Kirigami.SelectableLabel { visible: text !== ""; Kirigami.FormData.label: i18nc("@label", "Certificate:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: (root.host.metadata.effective || {}).Certificate || "" }
             Kirigami.SelectableLabel { visible: text !== ""; Kirigami.FormData.label: i18nc("@label", "Private key:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: (root.host.metadata.effective || {}).CertificateKey || "" }
             Kirigami.SelectableLabel { Kirigami.FormData.label: i18nc("@label", "Fingerprint:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: root.certificate.fingerprint || i18nc("@info", "Not available") }
             QQC2.Label { Kirigami.FormData.label: i18nc("@label", "Validity:"); Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.certificate.notBefore ? i18nc("@info", "%1 to %2", root.certificate.notBefore, root.certificate.notAfter) : i18nc("@info", "Not available") }
         }
-        Kirigami.Heading { level: 4; text: i18nc("@title:group", "Certificate source") }
+        Kirigami.Heading { level: 4; text: i18nc("@title:group", "Certificate Source") }
         ColumnLayout {
             visible: root.draft.loaded
             Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
             QQC2.ButtonGroup { id: sourceGroup }
             QQC2.RadioButton { objectName: "certificateKeep"; text: i18nc("@option:radio", "Keep the current certificate"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "keep"; onClicked: root.draft.chooseTls("keep") }
-            QQC2.RadioButton { objectName: "certificateExisting"; text: i18nc("@option:radio", "Use existing system paths"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "existing"; onClicked: root.draft.chooseTls("existing") }
-            QQC2.RadioButton { objectName: "certificateStandard"; text: i18nc("@option:radio", "Use standard Farside paths"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "standard"; onClicked: root.draft.chooseTls("standard") }
+            QQC2.RadioButton { objectName: "certificateExisting"; text: i18nc("@option:radio", "Use existing certificate files"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "existing"; onClicked: root.draft.chooseTls("existing") }
+            QQC2.RadioButton { objectName: "certificateStandard"; text: i18nc("@option:radio", "Use the standard Farside certificate"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "standard"; onClicked: root.draft.chooseTls("standard") }
             QQC2.RadioButton { objectName: "certificateImport"; text: i18nc("@option:radio", "Import a certificate and private key"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "import"; onClicked: root.draft.chooseTls("import") }
         }
         Kirigami.FormLayout {
@@ -72,7 +91,7 @@ ColumnLayout {
             Layout.fillWidth: true; visible: root.draft.loaded && root.draft.tlsMode === "existing"
             BrokerFieldRepeater { settings: root.draft; section: "certificate"; prefix: "certificate_" }
         }
-        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; visible: root.draft.tlsMode === "standard"; text: i18nc("@info", "Remove both path overrides. Existing certificate files and previous imports are preserved. After restart, clients may need to verify the standard certificate fingerprint.") }
+        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; visible: root.draft.tlsMode === "standard"; text: i18nc("@info", "Goes back to the standard Farside certificate. Your existing certificate files and earlier imports are kept. After the service restarts, clients may ask you to confirm the fingerprint again.") }
         ColumnLayout {
             Layout.fillWidth: true; visible: root.draft.loaded && root.draft.tlsMode === "import"
             Kirigami.FormLayout {
@@ -90,9 +109,9 @@ ColumnLayout {
                     QQC2.Button { objectName: "selectHostPrivateKey"; text: i18nc("@action:button", "Browse…"); onClicked: { keyDialog.generation = root.selectionGeneration; keyDialog.open(); } }
                 }
             }
-            QQC2.Button { objectName: "inspectHostImport"; text: i18nc("@action:button", "Check Selected Pair"); enabled: root.certificateFile.toString() !== "" && root.privateKeyFile.toString() !== ""; onClicked: root.draft.importTls(root.certificateFile, root.privateKeyFile) }
-            QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Choose a current matching certificate and unencrypted private key. Key contents are never shown. Imported material is administrator-managed; you are responsible for renewal.") }
-            Kirigami.InlineMessage { visible: (root.draft.importMetadata.fingerprint || "") !== "" && root.draft.canStageCertificate; Layout.fillWidth: true; type: Kirigami.MessageType.Positive; text: i18nc("@info", "Matching certificate and key. Ready to stage.") }
+            QQC2.Button { objectName: "inspectHostImport"; text: i18nc("@action:button", "Check These Files"); enabled: root.certificateFile.toString() !== "" && root.privateKeyFile.toString() !== ""; onClicked: root.draft.importTls(root.certificateFile, root.privateKeyFile) }
+            QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Choose a current certificate and its matching unencrypted private key. The key is never shown. Imported files are managed by the administrator, and you renew them yourself.") }
+            Kirigami.InlineMessage { visible: (root.draft.importMetadata.fingerprint || "") !== "" && root.draft.canStageCertificate; Layout.fillWidth: true; type: Kirigami.MessageType.Positive; text: i18nc("@info", "The certificate and key match. Ready to use.") }
             Kirigami.SelectableLabel { objectName: "hostImportPreview"; visible: (root.draft.importMetadata.fingerprint || "") !== ""; Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 28; wrapMode: Text.WrapAnywhere; text: i18nc("@info", "Selected certificate SHA-256: %1. Valid until %2.", root.draft.importMetadata.fingerprint || "", root.draft.importMetadata.notAfter || "") }
         }
         Kirigami.InlineMessage { Layout.fillWidth: true; visible: root.draft.error !== ""; type: Kirigami.MessageType.Error; text: root.draft.error }
@@ -100,7 +119,7 @@ ColumnLayout {
             Layout.fillWidth: true
             QQC2.Button { objectName: "cancelCertificateEdit"; text: i18nc("@action:button", "Cancel"); onClicked: root.cancel() }
             Item { Layout.fillWidth: true }
-            QQC2.Button { objectName: "stageCertificateEdit"; highlighted: true; text: i18nc("@action:button", "Use Certificate Changes"); enabled: root.draft.canStageCertificate && !root.host.busy && !root.host.outcomeUnknown; onClicked: { if (root.host.stageCertificateEdit()) { root.open = false; root.staged(); } } }
+            QQC2.Button { objectName: "stageCertificateEdit"; highlighted: true; text: i18nc("@action:button", "Use This Certificate"); enabled: root.draft.canStageCertificate && !root.host.busy && !root.host.outcomeUnknown; onClicked: { if (root.host.stageCertificateEdit()) { root.open = false; root.staged(); } } }
         }
     }
     Dialogs.FileDialog {

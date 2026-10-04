@@ -139,7 +139,7 @@ class BrokerMainPageTest : public QObject {
             if(!component.isReady()) { qWarning() << component.errorString(); return false; }
             object.reset(component.createWithInitialProperties({{u"navigation"_s,QVariant::fromValue(&navigation)},{u"administration"_s,QVariant::fromValue(&services)},
                 {u"consoleHost"_s,QVariant::fromValue(&console)},{u"virtualHost"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)},
-                {u"authentication"_s,QVariant::fromValue(&auth)},{u"preferences"_s,QVariant::fromValue(&preferences)},{u"hostName"_s,u"test-host"_s}}));
+                {u"authentication"_s,QVariant::fromValue(&auth)},{u"preferences"_s,QVariant::fromValue(&preferences)}}));
             page=qobject_cast<QQuickItem *>(object.data()); if(!page) return false;
             navigation.root=page;
             window.resize(900,850); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
@@ -173,7 +173,8 @@ private Q_SLOTS:
     void routeRowsShowStateAddressAndTrailingSwitch() {
         Fixture f; f.transport.split=true; f.transport.virtualState.mainPid=0; QVERIFY(f.init()); loadAll(f);
         const auto subtitle=[&](const char *key) { auto *o=find(f.page,QString::fromLatin1(key)+u"Subtitle"_s); return o?o->property("subtitle").toString():QString(u"<missing>"_s); };
-        QTRY_VERIFY(subtitle("console").startsWith(u"Running"_s)); QVERIFY2(subtitle("console").contains(u"test-host:"_s)||subtitle("console").contains(QRegularExpression(uR"(:\d+$)"_s)),qPrintable(subtitle("console")));
+        QTRY_VERIFY(subtitle("console").startsWith(u"Running"_s)); QVERIFY2(subtitle("console").contains(QRegularExpression(uR"((:|port )\d+$)"_s)),qPrintable(subtitle("console")));
+        QVERIFY2(!subtitle("console").contains(u"test-host"_s),"a wildcard listener must not be given an invented host name");   // the configured address only
         QTRY_VERIFY(subtitle("virtual").startsWith(u"Stopped"_s));
         QVERIFY(find(f.page,u"consoleHostEnabled"_s)->property("checked").toBool()); QVERIFY(!find(f.page,u"virtualHostEnabled"_s)->property("checked").toBool());
         QVERIFY(find(f.page,u"consoleHostEnabled"_s)->property("visible").toBool());
@@ -225,7 +226,7 @@ private Q_SLOTS:
             for(const auto &definition:scope.model->definitions()) {
                 const auto key=definition.toMap()[u"key"_s].toString(); ++hostEntries;
                 if(key==u"CameraLoopbackDevice" && scope.row==1) {   // Virtual shows the camera as unavailable instead of editable
-                    auto *notice=qobject_cast<QQuickItem *>(find(shown,u"cameraReadiness"_s)); QVERIFY(notice); QVERIFY(notice->isVisible()); QVERIFY(notice->property("text").toString().contains(u"Not available"_s));
+                    auto *notice=qobject_cast<QQuickItem *>(find(shown,u"cameraReadiness"_s)); QVERIFY(notice); QVERIFY(notice->isVisible()); QVERIFY(notice->property("text").toString().contains(u"not available"_s));
                     unavailable.insert(key); continue;
                 }
                 if(key.startsWith(u"Certificate")) {   // inside the certificate editor, in its existing-paths mode
@@ -282,6 +283,10 @@ private Q_SLOTS:
         QPointer<QObject> section=find(consolePage,u"certificateSection"_s); QVERIFY(section);
         QTRY_VERIFY(find(consolePage,u"editHostCertificate"_s)->property("enabled").toBool());
         QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"editHostCertificate"_s),"clicked")); QVERIFY(section->property("open").toBool());
+        // The saved certificate's own details (paths, full fingerprint) start collapsed and open on request; cancelling closes them again.
+        auto *details=qobject_cast<QQuickItem *>(find(consolePage,u"certificateDetails"_s)); QVERIFY(details); QVERIFY(!details->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"certificateDetailsToggle"_s),"clicked")); QTRY_VERIFY(details->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"certificateDetailsToggle"_s),"clicked")); QTRY_VERIFY(!details->isVisible());
         QTRY_VERIFY(find(consolePage,u"certificateImport"_s)->property("visible").toBool());
         QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"certificateImport"_s),"clicked"));
         // "Change…" next to the shared screens switches the detail pane to My Preferences, scrolled to the displays.
@@ -392,7 +397,7 @@ private Q_SLOTS:
         QVERIFY2(component.isReady(),qPrintable(component.errorString()));
         QScopedPointer<QObject> object(component.createWithInitialProperties({{u"navigation"_s,QVariant::fromValue(&navigation)},{u"administration"_s,QVariant::fromValue(&services)},
             {u"consoleHost"_s,QVariant::fromValue(&console)},{u"virtualHost"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)},
-            {u"authentication"_s,QVariant::fromValue(&auth)},{u"preferences"_s,QVariant::fromValue(&preferences)},{u"hostName"_s,u"test-host"_s}}));
+            {u"authentication"_s,QVariant::fromValue(&auth)},{u"preferences"_s,QVariant::fromValue(&preferences)}}));
         QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
         navigation.root=page; window.resize(900,850); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show(); navigation.layout(); QTest::qWait(100);
         const auto cleanup=qScopeGuard([&]{navigation.clear();});

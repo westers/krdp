@@ -20,7 +20,6 @@ KCM.ScrollViewKCM {
     property var sessionSettings: kcm.virtualSessionSettings
     property var authentication: kcm.brokerAuthentication
     property var preferences: kcm.brokerPreferences
-    property string hostName: kcm.hostName
     readonly property real sidebarWidth: Kirigami.Units.gridUnit * 14
     // Index of the row whose page is open (-1: none, e.g. after Back in single-column mode).
     property int selected: -1
@@ -28,10 +27,10 @@ KCM.ScrollViewKCM {
     // One page at a time (narrow): the list is only a menu, so it shows no selection.
     readonly property bool singleColumn: !!Kirigami.ColumnView.view && Kirigami.ColumnView.view.columnResizeMode === Kirigami.ColumnView.SingleColumn
     readonly property var rows: [
-        {key: "console", title: i18nc("@title", "Console"), icon: "preferences-desktop-display", route: "console"},
-        {key: "virtual", title: i18nc("@title", "Virtual"), icon: "preferences-desktop-virtual", route: "virtual"},
-        {key: "access", title: i18nc("@title", "Who Can Connect"), icon: "preferences-desktop-user-password", route: ""},
-        {key: "preferences", title: i18nc("@title", "My Preferences"), icon: "preferences-desktop-user", route: ""}
+        {key: "console", title: i18nc("@title", "Console"), icon: "monitor-symbolic", route: "console"},
+        {key: "virtual", title: i18nc("@title", "Virtual"), icon: "virtual-desktops-symbolic", route: "virtual"},
+        {key: "access", title: i18nc("@title", "Who Can Connect"), icon: "system-users-symbolic", route: ""},
+        {key: "preferences", title: i18nc("@title", "My Preferences"), icon: "user-identity-symbolic", route: ""}
     ]
     title: i18nc("@title:window", "Farside Remote Desktop")
     // The framework's sidebar mode: beside the detail page when the view is at least 36 grid units wide,
@@ -76,8 +75,8 @@ KCM.ScrollViewKCM {
         if (navigation.depth <= 1) select(0);
         if (!administration.busy && administration.services.some(service => !service.known)) administration.refresh(false);
     }
-    BrokerRouteSummary { id: consoleSummary; service: root.administration.services[0]; host: root.consoleHost; hostName: root.hostName }
-    BrokerRouteSummary { id: virtualSummary; service: root.administration.services[1]; host: root.virtualHost; hostName: root.hostName }
+    BrokerRouteSummary { id: consoleSummary; service: root.administration.services[0]; host: root.consoleHost }
+    BrokerRouteSummary { id: virtualSummary; service: root.administration.services[1]; host: root.virtualHost }
     BrokerServiceDialog { id: consoleDialog; administration: root.administration; route: "console" }
     BrokerServiceDialog { id: virtualDialog; administration: root.administration; route: "virtual" }
     view: ListView {
@@ -112,7 +111,7 @@ KCM.ScrollViewKCM {
                     icon.name: row.modelData.icon
                     title: row.modelData.title
                     objectName: row.modelData.key + "Subtitle"
-                    subtitle: row.summary ? row.summary.subtitle : row.modelData.key === "access" ? i18nc("@info", "Accounts and remote logins") : i18nc("@info", "Your display and quality choices")
+                    subtitle: row.summary ? row.summary.subtitle : row.modelData.key === "access" ? i18nc("@info", "Accounts and remote logins") : i18nc("@info", "Your own display and quality choices")
                     selected: row.highlighted || row.down
                     elide: Text.ElideRight
                 }
@@ -120,6 +119,7 @@ KCM.ScrollViewKCM {
                     objectName: row.modelData.key + "Modified"
                     visible: row.pending
                     source: "document-edit"
+                    selected: row.highlighted
                     implicitWidth: Kirigami.Units.iconSizes.small; implicitHeight: Kirigami.Units.iconSizes.small
                     QQC2.ToolTip.text: i18nc("@info:tooltip", "Unsaved changes")
                     QQC2.ToolTip.visible: false
@@ -127,6 +127,9 @@ KCM.ScrollViewKCM {
                 QQC2.Switch {
                     objectName: row.modelData.route + "HostEnabled"
                     visible: row.summary !== null
+                    // On the highlighted row the switch takes the palette meant for selected items, as Kirigami's own list items do.
+                    Kirigami.Theme.inherit: !row.highlighted
+                    Kirigami.Theme.colorSet: Kirigami.Theme.Selection
                     Accessible.name: i18nc("@option:check %1 service", "Allow connections to %1", row.modelData.title)
                     readonly property var service: row.summary ? row.summary.service : null
                     checked: row.summary ? row.summary.running : false

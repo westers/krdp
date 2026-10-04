@@ -40,6 +40,8 @@ private Q_SLOTS:
         quality->forceActiveFocus(); QTest::keyClick(&window,Qt::Key_A,Qt::ControlModifier); QTest::keyClick(&window,Qt::Key_9); QTest::keyClick(&window,Qt::Key_5); QTest::keyClick(&window,Qt::Key_Return);
         QTRY_COMPARE(preferences.values()[u"Quality"_s].toString(),u"95"_s);
         QVERIFY(!item(u"preference_Av1Tiles"_s)->property("enabled").toBool());
+        // With the mode inherited the display section holds only that one choice, so the page says when more appear.
+        QVERIFY(qobject_cast<QQuickItem *>(item(u"displayModeHint"_s))->isVisible());
         const QVariantMap desired{{u"Quality"_s,u"91"_s},{u"AdaptiveQuality"_s,u"true"_s},{u"PreferAudioQuality"_s,u"true"_s},{u"Codec"_s,u"avc444"_s},
             {u"SoftwareEncoding"_s,u"prefer"_s},{u"Av1Tiles"_s,u"8"_s},{u"Avc444MotionGapMs"_s,u"50"_s},{u"Avc444RestMs"_s,u"75"_s},{u"Avc444MaxGapMs"_s,u"1000"_s},
             {u"MonitorMode"_s,u"specific"_s},{u"MonitorIndex"_s,u"2"_s},{u"VirtualMonitorPolicy"_s,u"extend"_s},{u"VirtualMonitorLayout"_s,u"physical"_s},
@@ -68,6 +70,7 @@ private Q_SLOTS:
             QCOMPARE(preferences.values()[key],desired[key]);
         }
         QCOMPARE(preferences.values(),desired);
+        QTRY_VERIFY(!qobject_cast<QQuickItem *>(item(u"displayModeHint"_s))->isVisible());   // "One display" is chosen: its own options are showing
         QCOMPARE(quality->property("to").toInt(),100); QVERIFY(preferences.setValue(u"Quality"_s,u"101"_s)); QVERIFY(!preferences.canSave());
         QVERIFY(preferences.error().contains(u"Quality"_s)); QVERIFY(quality->setProperty("value",91)); QVERIFY(QMetaObject::invokeMethod(quality,"valueModified"));
         QVERIFY(preferences.save()); QVERIFY(!preferences.modified()); QVERIFY(preferences.reconnectRequired());

@@ -20,7 +20,6 @@ class KRDPServerConfig : public KQuickConfigModule {
     Q_PROPERTY(BrokerHostSettings *virtualHostSettings READ virtualHostSettings CONSTANT)
     Q_PROPERTY(BrokerHostSettings *virtualSessionSettings READ virtualSessionSettings CONSTANT)
     Q_PROPERTY(BrokerSettingsApply *settingsApply READ settingsApply CONSTANT)
-    Q_PROPERTY(QString hostName READ hostName CONSTANT)
 public:
     explicit KRDPServerConfig(QObject *parent, const KPluginMetaData &data);
     BrokerAuthenticationSettings *brokerAuthentication() const { return m_authentication; }
@@ -30,7 +29,6 @@ public:
     BrokerHostSettings *virtualHostSettings() const { return m_virtual; }
     BrokerHostSettings *virtualSessionSettings() const { return m_session; }
     BrokerSettingsApply *settingsApply() const { return m_apply; }
-    QString hostName() const;
     Q_INVOKABLE void copyAddressToClipboard(const QString &address);
 public Q_SLOTS:
     void load() override;

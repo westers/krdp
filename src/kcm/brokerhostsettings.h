@@ -82,6 +82,7 @@ Q_SIGNALS:
     void changed();
 private:
     QString validationError() const;
+    QString fieldLabel(const QString &key) const;
     bool reject(const QString &error);
     bool start(QJsonObject request, bool saving);
     QJsonObject saveRequest() const;

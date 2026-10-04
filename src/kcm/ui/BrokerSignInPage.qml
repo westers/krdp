@@ -74,17 +74,17 @@ KCM.SimpleKCM {
         Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 24;
             Layout.alignment: Qt.AlignLeft
-            QQC2.Label { Kirigami.FormData.isSection: true; Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 26; wrapMode: Text.Wrap; text: i18nc("@info", "Stage this login in the access policy. Apply saves it with your other changes.") }
+            QQC2.Label { Kirigami.FormData.isSection: true; Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 26; wrapMode: Text.Wrap; text: i18nc("@info", "This login is saved when you click Apply.") }
             QQC2.TextField { id: aliasName; objectName: "brokerAliasName"; Kirigami.FormData.label: i18nc("@label", "Remote login:"); readOnly: aliasDialog.existing; maximumLength: 256; Layout.fillWidth: true }
             QQC2.TextField { id: ownerName; objectName: "brokerAliasOwner"; Kirigami.FormData.label: i18nc("@label", "Desktop account:"); maximumLength: 256; Layout.fillWidth: true }
-            QQC2.Label { Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 18; wrapMode: Text.Wrap; text: i18nc("@info", "Enter an existing system login name. The server verifies account eligibility when saving."); color: Kirigami.Theme.disabledTextColor }
+            QQC2.Label { Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 18; wrapMode: Text.Wrap; font: Kirigami.Theme.smallFont; text: i18nc("@info", "Enter an existing login name of this computer. It is checked when you apply.") }
             Kirigami.PasswordField { id: aliasPassword; objectName: "brokerAliasPassword"; Kirigami.FormData.label: i18nc("@label", "New password:"); maximumLength: 4096; Layout.fillWidth: true }
-            QQC2.Label { Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 18; wrapMode: Text.Wrap; text: aliasDialog.passwordRequired ? i18nc("@info", "A new password is required for a new login or changed desktop account.") : i18nc("@info", "Leave blank to keep the password. Stored passwords are never displayed.") }
+            QQC2.Label { Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 18; wrapMode: Text.Wrap; text: aliasDialog.passwordRequired ? i18nc("@info", "A new password is required for a new login or a changed desktop account.") : i18nc("@info", "Leave blank to keep the current password. Saved passwords are never shown.") }
             QQC2.Label { Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 18; wrapMode: Text.Wrap; visible: root.administration.error !== ""; text: root.administration.error }
         }
         customFooterActions: Kirigami.Action {
             objectName: "stageBrokerAlias"
-            text: aliasDialog.existing ? i18nc("@action", "Update Policy") : i18nc("@action", "Add to Policy")
+            text: aliasDialog.existing ? i18nc("@action", "Update Login") : i18nc("@action", "Add Login")
             enabled: aliasName.text.trim() !== "" && ownerName.text.trim() !== "" && (!aliasDialog.passwordRequired || aliasPassword.text !== "") && !root.administration.busy
             onTriggered: if (root.administration.setAlias(aliasDialog.route, aliasName.text.trim(), ownerName.text.trim(), aliasPassword.text)) aliasDialog.close()
         }

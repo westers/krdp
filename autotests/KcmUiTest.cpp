@@ -27,6 +27,7 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 #include <functional>
@@ -450,6 +451,17 @@ private Q_SLOTS:
         QVERIFY(m_module->representsDefaults());
         m_module->load(); QVERIFY(!m_module->needsSave());
         QVERIFY(m_module->findChildren<QProcess *>().isEmpty());   // neither Reset nor Defaults runs a helper
+    }
+    void cleanLoadAnnouncesDefaultsToTheShell() {
+        // System Settings keeps Defaults enabled until it hears a change, and setting an unchanged value emits nothing. A clean
+        // module already represents defaults, so loading must still announce it or Defaults stays enabled with nothing to reset.
+        QSignalSpy spy(m_module,&KAbstractConfigModule::representsDefaultsChanged);
+        m_module->load(); QVERIFY(m_module->representsDefaults()); QVERIFY(spy.count()>=1);
+        QVERIFY(m_module->representsDefaults());                // the final announced state is the true one
+        auto *console=m_module->property("consoleHostSettings").value<QObject *>(); bool ok=false;
+        QMetaObject::invokeMethod(console,"setValue",Q_RETURN_ARG(bool,ok),Q_ARG(QString,u"Port"_s),Q_ARG(QString,u"3402"_s)); QVERIFY(ok);
+        QVERIFY(!m_module->representsDefaults());
+        m_module->load(); QVERIFY(m_module->representsDefaults());
     }
     void hostNavigationSelectsScope_data() {
         QTest::addColumn<QString>("route");QTest::addColumn<int>("index");

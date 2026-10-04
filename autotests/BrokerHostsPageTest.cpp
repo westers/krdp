@@ -73,6 +73,18 @@ private Q_SLOTS:
                 auto *control=find(page,u"host_"_s+key); QVERIFY2(control,qPrintable(key));
                 QVERIFY2(qobject_cast<QQuickItem *>(control)->isVisible(),qPrintable(key));
             }
+            // The certificate is one line: validity and a short fingerprint, a copy button, details collapsed.
+            const auto fingerprint=model->metadata()[u"tls"_s].toMap()[u"fingerprint"_s].toString();
+            auto *summary=find(page,u"certificateSummary"_s); QVERIFY(summary);
+            if(!fingerprint.isEmpty()) {
+                const auto parts=fingerprint.split(u':'); const auto text=summary->property("text").toString();
+                // Long SHA-256 fingerprints are shortened to the first three and last two bytes; a short one is shown whole.
+                const auto shown=parts.size()>8 ? parts.mid(0,3).join(u':')+u"…"_s+parts.mid(parts.size()-2).join(u':') : fingerprint;
+                QVERIFY2(text.contains(u"SHA-256 "_s+shown),qPrintable(text));
+                if(parts.size()>8) QVERIFY2(!text.contains(fingerprint),"the page shows the short form only");
+                QVERIFY(qobject_cast<QQuickItem *>(find(page,u"copyCertificateFingerprint"_s))->isVisible());
+            }
+            QVERIFY(!qobject_cast<QQuickItem *>(find(page,u"certificateEditor"_s))->isVisible());
             QVERIFY(!model->modified()); QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s))); page->setParentItem(nullptr);
         }
         // No snapshot: an honest message, never a prompt.
@@ -101,15 +113,15 @@ private Q_SLOTS:
     }
     void runtimeInspectionStatesAndWidth_data() {
         QTest::addColumn<QByteArray>("modeName");QTest::addColumn<QString>("summary");
-        QTest::newRow("matching")<<QByteArray("success")<<u"agree with stored settings"_s;
-        QTest::newRow("custom")<<QByteArray("runtime-custom")<<u"Custom unit"_s;
-        QTest::newRow("different")<<QByteArray("runtime-different")<<u"differ from stored"_s;
-        QTest::newRow("partial")<<QByteArray("runtime-partial")<<u"incomplete"_s;
-        QTest::newRow("reload")<<QByteArray("runtime-reload")<<u"incomplete"_s;
-        QTest::newRow("unavailable")<<QByteArray("runtime-unavailable")<<u"unavailable"_s;
-        QTest::newRow("stale")<<QByteArray("runtime-stale")<<u"changed during inspection"_s;
-        QTest::newRow("denied")<<QByteArray("runtime-denied")<<u"not authorized"_s;
-        QTest::newRow("revision")<<QByteArray("runtime-revision")<<u"agree with stored settings"_s;
+        QTest::newRow("matching")<<QByteArray("success")<<u"Running with the saved settings"_s;
+        QTest::newRow("custom")<<QByteArray("runtime-custom")<<u"custom setup was found"_s;
+        QTest::newRow("different")<<QByteArray("runtime-different")<<u"does not match the saved settings"_s;
+        QTest::newRow("partial")<<QByteArray("runtime-partial")<<u"could not confirm everything"_s;
+        QTest::newRow("reload")<<QByteArray("runtime-reload")<<u"could not confirm everything"_s;
+        QTest::newRow("unavailable")<<QByteArray("runtime-unavailable")<<u"could not be checked"_s;
+        QTest::newRow("stale")<<QByteArray("runtime-stale")<<u"Something changed during the check"_s;
+        QTest::newRow("denied")<<QByteArray("runtime-denied")<<u"was not allowed"_s;
+        QTest::newRow("revision")<<QByteArray("runtime-revision")<<u"Running with the saved settings"_s;
     }
     void runtimeInspectionStatesAndWidth() {
         QFETCH(QByteArray,modeName);QFETCH(QString,summary);QTemporaryDir dir;
@@ -145,6 +157,9 @@ private Q_SLOTS:
             };
             QTRY_VERIFY(readable(message)); // catch a blank animated warning under a hidden ancestor
         }
+        // The result line comes first; the rest sits behind "Show details".
+        QVERIFY(!qobject_cast<QQuickItem *>(item(u"hostRuntimeDetails"_s))->isVisible());
+        QVERIFY(item(u"showHostRuntimeDetails"_s)->setProperty("checked",true));QTRY_VERIFY(qobject_cast<QQuickItem *>(item(u"hostRuntimeDetails"_s))->isVisible());
         QCOMPARE(item(u"hostRuntimeMissing"_s)->property("visible").toBool(),modeName=="runtime-partial");
         QCOMPARE(item(u"hostRuntimeDifferences"_s)->property("visible").toBool(),modeName=="runtime-different");
         QVERIFY(item(u"showHostRuntimeValues"_s)->setProperty("checked",true));QTRY_VERIFY(item(u"runtime_Port"_s));

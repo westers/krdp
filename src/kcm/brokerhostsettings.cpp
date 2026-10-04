@@ -133,27 +133,35 @@ bool BrokerHostSettings::modified() const { return loaded() && (m_pending != m_s
 bool BrokerHostSettings::runtimeStale() const { return m_runtime.isEmpty() || !loaded()
     || m_runtime[u"state"_s].toString() == u"stale" || m_runtime[u"storedRevision"_s] != m_snapshot[u"revision"_s]; }
 bool BrokerHostSettings::reject(const QString &error) { m_error = error; Q_EMIT changed(); return false; }
+QString BrokerHostSettings::fieldLabel(const QString &key) const
+{
+    for (const auto &definition : definitions()) {
+        const auto row = definition.toMap();
+        if (row.value(u"key"_s).toString() == key) return row.value(u"formLabel"_s).toString();
+    }
+    return key;
+}
 QString BrokerHostSettings::validationError() const
 {
     if (!loaded()) return {};
     for (auto it = m_pending.begin(); it != m_pending.end(); ++it)
         if (it.value().metaType().id() != QMetaType::QString || !Host::normalize(m_scope, it.key(), it.value().toString()))
-            return i18nc("@info", "Invalid value for %1.", it.key());
+            return i18nc("@info %1 setting name", "“%1” has an invalid value.", fieldLabel(it.key()));
     if (m_scope == Scope::VirtualSession) return {};
     auto effective = unitDefaults(); for (auto it = m_pending.begin(); it != m_pending.end(); ++it) effective[it.key()] = it.value();
-    if (effective[u"Certificate"_s] == effective[u"CertificateKey"_s]) return i18nc("@info", "Certificate and private key paths must be different.");
+    if (effective[u"Certificate"_s] == effective[u"CertificateKey"_s]) return i18nc("@info", "The certificate and private key must be different files.");
     if (m_tlsMode == u"keep") {
         // Compare with the saved overrides, not the effective paths: the public
         // snapshot does not carry them, so a kept path is simply absent here.
         const auto saved = m_snapshot[u"values"_s].toObject();
         for (const auto &key : {u"Certificate"_s, u"CertificateKey"_s})
             if (m_pending.contains(key) != saved.contains(key) || (m_pending.contains(key) && m_pending[key].toString() != saved[key].toString()))
-                return i18nc("@info", "Choose an explicit certificate operation before changing TLS paths.");
+                return i18nc("@info", "Choose how to change the certificate before editing its file paths.");
     }
     if (m_tlsMode == u"existing" && (!m_pending.contains(u"Certificate"_s) || !m_pending.contains(u"CertificateKey"_s)))
-        return i18nc("@info", "Both existing TLS paths are required.");
+        return i18nc("@info", "Both a certificate file and a private key file are required.");
     if (m_tlsMode == u"import") {
-        if (m_certificate.isEmpty() || m_key.isEmpty()) return i18nc("@info", "Select a matching certificate and unencrypted private key to import.");
+        if (m_certificate.isEmpty() || m_key.isEmpty()) return i18nc("@info", "Choose a matching certificate and unencrypted private key to import.");
         const auto until = QDateTime::fromString(m_importMetadata[u"notAfter"_s].toString(), Qt::ISODate);
         if (until <= QDateTime::currentDateTimeUtc()) return i18nc("@info", "The selected certificate has expired.");
     }
@@ -195,7 +203,7 @@ bool BrokerHostSettings::stageCertificateEdit()
     auto *draft = m_certificateDraft;
     if (busy() || m_outcomeUnknown || !draft || !draft->canStageCertificate()) return false;
     if (draft->m_snapshot[u"revision"_s] != m_snapshot[u"revision"_s])
-        return draft->reject(i18nc("@info", "Host settings changed. Cancel and reopen the certificate editor before staging these changes."));
+        return draft->reject(i18nc("@info", "The host settings changed. Cancel, then reopen the certificate editor."));
     for (const auto &key : {u"Certificate"_s, u"CertificateKey"_s}) {
         m_pending.remove(key);
         if (draft->m_pending.contains(key)) m_pending[key] = draft->m_pending[key];
@@ -219,10 +227,10 @@ void BrokerHostSettings::cancelCertificateEdit()
 bool BrokerHostSettings::setValue(const QString &key, const QString &value)
 {
     if (!loaded() || busy() || !Host::keys(m_scope).contains(key) || value.size() > Host::MaximumValue || value.contains(QChar::Null)
-        || value.contains(u'\n') || value.contains(u'\r')) return reject(i18nc("@info", "Invalid host field."));
+        || value.contains(u'\n') || value.contains(u'\r')) return reject(i18nc("@info", "That setting cannot be changed here."));
     if ((key == u"Certificate" || key == u"CertificateKey") && m_tlsMode != u"existing") return false;
     if (key == u"CameraLoopbackDevice" && m_scope == Scope::Virtual && value != u"none")
-        return reject(i18nc("@info", "Virtual camera loopback is unavailable in the current device namespace."));
+        return reject(i18nc("@info", "Camera sharing is not available for Virtual desktops yet."));
     m_pending[key] = value; m_error.clear(); Q_EMIT changed(); return true;
 }
 bool BrokerHostSettings::inherit(const QString &key)
@@ -254,7 +262,7 @@ bool BrokerHostSettings::importTls(const QUrl &certificate, const QUrl &key)
     const auto now = QDateTime::currentDateTimeUtc();
     if (!info.usable() || !info.notBefore.isValid() || !info.notAfter.isValid() || info.notBefore > now || info.notAfter <= now) {
         wipe(cert); wipe(privateKey); clearImport();
-        return reject(i18nc("@info", "Import requires readable, bounded PEM files containing a current matching certificate and unencrypted private key."));
+        return reject(i18nc("@info", "The files could not be used. Choose readable PEM files with a current, matching certificate and an unencrypted private key."));
     }
     clearImport(); m_certificate = std::move(cert); m_key = std::move(privateKey); m_importMetadata = publicCertificate(info);
     m_error.clear(); Q_EMIT changed(); return true;
@@ -293,7 +301,7 @@ bool BrokerHostSettings::refresh()
     const auto read = KRdp::BrokerHostPublicSnapshot::read(override.isEmpty() ? KRdp::BrokerHostPublicSnapshot::defaultDirectory() : override,
         m_scope, !override.isEmpty());
     if (!read.error.isEmpty()) return reject(read.error);
-    if (!validSnapshot(m_scope, read.value)) return reject(i18nc("@info", "The published host settings snapshot is invalid. Restart the service to publish it again."));
+    if (!validSnapshot(m_scope, read.value)) return reject(i18nc("@info", "The published settings are not valid. Restart the service to publish them again."));
     adoptSnapshot(read.value, false);
     return true;
 }
@@ -360,7 +368,7 @@ int BrokerHostSettings::saveTogether(const QList<BrokerHostSettings *> &requeste
         *failed = true; process->kill();
         settle([](BrokerHostSettings *model, int) {
             model->m_outcomeUnknown = true;
-            model->reject(i18nc("@info", "Administration did not finish reliably. Reload before saving again; a submitted save may already have changed stored settings."));
+            model->reject(i18nc("@info", "Administration did not finish reliably. Reset the page before saving again; a save that was already sent may have changed the stored settings."));
         });
     };
     connect(timer, &QTimer::timeout, process, uncertain);
@@ -416,7 +424,7 @@ bool BrokerHostSettings::start(QJsonObject request, bool saving)
     const auto uncertain = [this, process, saving, failed] {
         if (m_process != process) return;
         *failed = true; if (saving) m_outcomeUnknown = true;
-        process->kill(); reject(i18nc("@info", "Administration did not finish reliably. Reload before saving again; a submitted save may already have changed stored settings."));
+        process->kill(); reject(i18nc("@info", "Administration did not finish reliably. Reset the page before saving again; a save that was already sent may have changed the stored settings."));
     };
     connect(timer, &QTimer::timeout, this, uncertain);
     connect(process, &QProcess::started, this, [process, input] {
@@ -446,17 +454,17 @@ bool BrokerHostSettings::start(QJsonObject request, bool saving)
 void BrokerHostSettings::finish(int code, QProcess::ExitStatus status, QByteArray &output, bool saving, bool inspecting)
 {
     if (status != QProcess::NormalExit) { if (saving) m_outcomeUnknown = true; wipe(output);
-        reject(i18nc("@info", "Administration stopped unexpectedly. Reload to determine whether stored settings changed.")); return; }
+        reject(i18nc("@info", "Administration stopped unexpectedly. Reset the page to see whether the stored settings changed.")); return; }
     if ((code == 126 || code == 127) && output.isEmpty()) {
-        reject(code == 126 ? i18nc("@info", "Administrator authentication was cancelled. Pending edits are preserved.")
-            : i18nc("@info", "Administrator authentication was not granted. Pending edits are preserved.")); return;
+        reject(code == 126 ? i18nc("@info", "Administrator authentication was cancelled. Your pending edits are kept.")
+            : i18nc("@info", "Administrator authentication was not granted. Your pending edits are kept.")); return;
     }
     QJsonParseError parse;
     const auto document = output.size() <= Admin::MaximumRequestBytes ? QJsonDocument::fromJson(output, &parse) : QJsonDocument();
     wipe(output);
     if (parse.error != QJsonParseError::NoError || !document.isObject()) {
         if (saving) m_outcomeUnknown = true;
-        reject(i18nc("@info", "Invalid administration reply. Reload to determine whether stored settings changed.")); return;
+        reject(i18nc("@info", "Administration gave an unexpected reply. Reset the page to see whether the stored settings changed.")); return;
     }
     const auto reply = document.object();
     const QStringList allowed = reply.contains(u"error"_s) ? QStringList{u"error"_s, u"saved"_s}
@@ -468,20 +476,20 @@ void BrokerHostSettings::finish(int code, QProcess::ExitStatus status, QByteArra
         || (reply.contains(u"saved"_s) && (!reply[u"saved"_s].isBool() || !reply[u"saved"_s].toBool())))) structure = false;
     if (!structure) {
         if (saving) m_outcomeUnknown = true;
-        reject(i18nc("@info", "Invalid administration reply. Reload to determine whether stored settings changed.")); return;
+        reject(i18nc("@info", "Administration gave an unexpected reply. Reset the page to see whether the stored settings changed.")); return;
     }
     if (reply[u"saved"_s].isBool() && reply[u"saved"_s].toBool()) m_applicationRequired = true;
     if (code != 0 || reply.contains(u"error"_s)) {
         if (m_applicationRequired && saving && reply[u"saved"_s].toBool()) m_outcomeUnknown = true;
         // Structural categorization only: never echo arbitrary reply text.
         const auto reason = reply[u"error"_s].toString();
-        reject(reason.contains(u"changed") ? i18nc("@info", "Stored settings changed. Reload before saving; pending edits are preserved.")
-            : reply[u"saved"_s].toBool() ? i18nc("@info", "Settings were saved but verification failed. Reload before applying them.")
-            : i18nc("@info", "Host administration refused the request. Check fields, TLS material and device availability. Pending edits are preserved.")); return;
+        reject(reason.contains(u"changed") ? i18nc("@info", "The stored settings changed. Reset the page before saving again. Your pending edits are kept.")
+            : reply[u"saved"_s].toBool() ? i18nc("@info", "The settings were saved, but checking them afterwards failed. Reset the page before you use them.")
+            : i18nc("@info", "Host administration refused the request. Check the fields, certificate files and devices. Your pending edits are kept.")); return;
     }
     if (inspecting) {
         if (!reply[u"runtime"_s].isObject() || !KRdp::BrokerHostRuntime::validPublic(m_scope, reply[u"runtime"_s].toObject())) {
-            reject(i18nc("@info", "Invalid running-host inspection reply. Pending edits are preserved.")); return;
+            reject(i18nc("@info", "The service check gave an unexpected reply. Your pending edits are kept.")); return;
         }
         m_runtime = reply[u"runtime"_s].toObject(); m_runtimeCheckedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
         Q_EMIT changed(); return;
@@ -491,7 +499,7 @@ void BrokerHostSettings::finish(int code, QProcess::ExitStatus status, QByteArra
         || !reply[u"restartRequired"_s].isBool() || reply[u"restartRequired"_s].toBool() != (m_scope != Scope::VirtualSession)
         || !reply[u"newDesktopRequired"_s].isBool() || reply[u"newDesktopRequired"_s].toBool() != (m_scope == Scope::VirtualSession)))) {
         if (saving) m_outcomeUnknown = true;
-        reject(i18nc("@info", "Invalid host snapshot. Reload before applying or saving settings.")); return;
+        reject(i18nc("@info", "The host settings could not be read back. Reset the page before applying or saving settings.")); return;
     }
     adoptSnapshot(snapshot, saving);
 }
@@ -499,7 +507,7 @@ void BrokerHostSettings::finish(int code, QProcess::ExitStatus status, QByteArra
 QString BrokerHostSettings::sectionTitle(const QString &section) const
 {
     if (section == u"connection") return i18nc("@title:group", "Connection");
-    if (section == u"picture") return i18nc("@title:group", "Picture and sound");
+    if (section == u"picture") return i18nc("@title:group", "Picture and Sound");
     return {};
 }
 
@@ -511,45 +519,45 @@ QVariantList BrokerHostSettings::definitions() const
     QVariantList result;
     const auto add = [&](const QString &key, const QString &group, const QString &label, const QString &help, QVariantList options, const Spec &spec) {
         if (!Host::keys(m_scope).contains(key)) return;
-        if (!options.isEmpty()) options.prepend(choice({}, i18nc("@item:inlistbox", "Use unit default")));
+        if (!options.isEmpty()) options.prepend(choice({}, i18nc("@item:inlistbox", "Use default")));
         auto withScope = spec;
-        withScope.inheritText = i18nc("@item:inlistbox", "Use unit default");
+        withScope.inheritText = i18nc("@item:inlistbox", "Use default");
         result.append(makeFieldDefinition(key, group, label, help, options, withScope));
     };
     const auto listener = i18nc("@title:group", "Connection"), video = i18nc("@title:group", "Host Video Defaults"), media = i18nc("@title:group", "Audio and Devices");
-    add(u"Address"_s, listener, i18nc("@label", "Listen address"), i18nc("@info", "Numeric IPv4 or IPv6 address. 0.0.0.0 listens on all IPv4 interfaces."), {},
+    add(u"Address"_s, listener, i18nc("@label", "Listen address"), i18nc("@info", "The network address to accept connections on. Enter a numeric IPv4 or IPv6 address; 0.0.0.0 accepts connections on all IPv4 interfaces."), {},
         {.control = u"address"_s, .section = u"connection"_s, .formLabel = i18nc("@label", "Listen on"), .keepEmpty = true,
-         .modes = {choice({}, i18nc("@item:inlistbox", "Use unit default (all IPv4 interfaces)")), choice(u"0.0.0.0"_s, i18nc("@item:inlistbox", "All IPv4 interfaces")),
-                   choice(u"::"_s, i18nc("@item:inlistbox", "All IPv6 interfaces")), choice(AddressCustom, i18nc("@item:inlistbox", "Custom address"))}});
-    add(u"Port"_s, listener, i18nc("@label", "Listen port"), i18nc("@info", "1–65535. Changing the port requires clients to use the new port after a broker restart."), {},
+         .modes = {choice({}, i18nc("@item:inlistbox", "Default (all IPv4 interfaces)")), choice(u"0.0.0.0"_s, i18nc("@item:inlistbox", "All IPv4 interfaces")),
+                   choice(u"::"_s, i18nc("@item:inlistbox", "All IPv6 interfaces")), choice(AddressCustom, i18nc("@item:inlistbox", "A specific address"))}});
+    add(u"Port"_s, listener, i18nc("@label", "Listen port"), i18nc("@info", "A number from 1 to 65535. After the service restarts, clients must connect to the new port."), {},
         {.control = u"spin"_s, .section = u"connection"_s, .formLabel = i18nc("@label", "Port"), .min = 1, .max = 65535});
-    add(u"Certificate"_s, listener, i18nc("@label", "Existing certificate path"), i18nc("@info", "An existing absolute path managed by root. Select Use existing paths to edit both TLS paths."), {},
+    add(u"Certificate"_s, listener, i18nc("@label", "Certificate file"), i18nc("@info", "The full path of an existing certificate file that the administrator manages. Choose “Use existing system paths” to edit both file paths."), {},
         {.control = u"path"_s, .section = u"certificate"_s, .keepEmpty = true});
-    add(u"CertificateKey"_s, listener, i18nc("@label", "Existing private key path"), i18nc("@info", "An existing absolute path to a matching, unencrypted, private root key. Key material is never displayed."), {},
+    add(u"CertificateKey"_s, listener, i18nc("@label", "Private key file"), i18nc("@info", "The full path of the matching unencrypted private key, readable only by the administrator. The key itself is never shown."), {},
         {.control = u"path"_s, .section = u"certificate"_s, .keepEmpty = true});
-    add(u"Quality"_s, video, i18nc("@label", "Video quality"), i18nc("@info", "0–100. Users can override this default; higher values use more bandwidth."), {},
+    add(u"Quality"_s, video, i18nc("@label", "Video quality"), i18nc("@info", "From 0 to 100. Higher values look sharper and use more bandwidth. People can choose their own value in My Preferences."), {},
         {.control = u"slider"_s, .section = u"picture"_s, .formLabel = i18nc("@label", "Image quality"), .min = 0, .max = 100});
-    add(u"AdaptiveQuality"_s, video, i18nc("@label", "Adapt quality to the connection"), i18nc("@info", "Adjust quality to measured link capacity."), boolean,
+    add(u"AdaptiveQuality"_s, video, i18nc("@label", "Adapt quality to the connection"), i18nc("@info", "Lower the quality automatically when the connection cannot keep up."), boolean,
         {.section = u"picture"_s, .formLabel = i18nc("@label", "Adjust to connection")});
-    add(u"SoftwareEncoding"_s, video, i18nc("@label", "Software encoding"), i18nc("@info", "Hardware and client capabilities still determine the codec. Hardware preference allows software AVC as a last resort."),
+    add(u"SoftwareEncoding"_s, video, i18nc("@label", "Software encoding"), i18nc("@info", "The graphics hardware and the client still decide which codec is used. “Prefer hardware” falls back to software only as a last resort."),
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"never"_s, i18nc("@item:inlistbox", "Prefer hardware")), choice(u"prefer"_s, i18nc("@item:inlistbox", "Allow the best codec in software"))},
         {.section = u"encoding"_s, .advanced = true, .formLabel = i18nc("@label", "Encoding policy")});
-    add(u"Av1Tiles"_s, video, i18nc("@label", "AV1 tiles"), i18nc("@info", "Automatic considers client decode support. Available encoders may limit tile choice."),
+    add(u"Av1Tiles"_s, video, i18nc("@label", "AV1 tiles"), i18nc("@info", "Automatic uses what the client can decode. The available encoders may limit the choice."),
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"1"_s, u"1"_s), choice(u"2"_s, u"2"_s), choice(u"4"_s, u"4"_s), choice(u"8"_s, u"8"_s), choice(u"16"_s, u"16"_s)},
         {.section = u"encoding"_s, .advanced = true});
-    add(u"PreferAudioQuality"_s, media, i18nc("@label", "Prefer audio quality"), i18nc("@info", "Prioritize audio quality when media is enabled."), boolean,
+    add(u"PreferAudioQuality"_s, media, i18nc("@label", "Prefer audio quality"), i18nc("@info", "When the network is busy, favor sound over video."), boolean,
         {.section = u"picture"_s, .formLabel = i18nc("@label", "When network is busy"),
          .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Keep sound smooth")}, {u"false"_s, i18nc("@item:inlistbox", "Keep video sharp")}}});
-    add(u"StandardClientMedia"_s, media, i18nc("@label", "Allow standard client media"), i18nc("@info", "Host permission for standard media channels; channel consent is still required."), boolean,
-        {.section = u"picture"_s, .formLabel = i18nc("@label", "Other RDP app media"),
+    add(u"StandardClientMedia"_s, media, i18nc("@label", "Media for other RDP apps"), i18nc("@info", "Lets other remote desktop apps send sound and devices. Each app must still ask for it."), boolean,
+        {.section = u"picture"_s, .formLabel = i18nc("@label", "Media for other RDP apps"),
          .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Allow")}, {u"false"_s, i18nc("@item:inlistbox", "Block")}}});
-    add(u"CameraLoopbackDevice"_s, media, i18nc("@label", "Camera loopback device"), i18nc("@info", "none or an existing V4L2 loopback /dev/videoN. Console workers also need OS permission. Virtual loopback is currently unavailable; normal PipeWire camera delivery is separate."), {},
-        {.section = u"devices"_s, .advanced = true, .formLabel = i18nc("@label", "Camera bridge device"),
-         .unavailable = m_scope == Scope::Virtual ? i18nc("@info", "Not available for Virtual desktops yet") : QString()});
-    add(u"RenderPci"_s, i18nc("@title:group", "New Virtual Desktops"), i18nc("@label", "Granted GPU PCI identities"), i18nc("@info", "Comma-separated identities such as 0000:01:00.0. Empty grants no GPU. This is a namespace allowlist, not an encoder selector. Existing desktops keep their current grants."), {},
-        {.section = u"devices"_s, .advanced = true, .formLabel = i18nc("@label", "GPU PCI identities"), .keepEmpty = true});
+    add(u"CameraLoopbackDevice"_s, media, i18nc("@label", "Camera device"), i18nc("@info", "The virtual camera that carries your camera into Console, for example /dev/video10 (a V4L2 loopback device). Enter “none” to turn camera sharing off. Console also needs permission to use the device. Virtual desktops cannot use it yet; camera delivery through PipeWire is separate."), {},
+        {.section = u"devices"_s, .advanced = true, .formLabel = i18nc("@label", "Camera device"),
+         .unavailable = m_scope == Scope::Virtual ? i18nc("@info", "Camera sharing is not available for Virtual desktops yet.") : QString()});
+    add(u"RenderPci"_s, i18nc("@title:group", "New Virtual Desktops"), i18nc("@label", "Graphics devices for new desktops"), i18nc("@info", "The PCI addresses of the graphics devices new desktops may use, separated by commas, for example 0000:01:00.0. Leave empty to allow none. This only grants access; it does not choose the encoder. Existing desktops keep their current setting."), {},
+        {.section = u"devices"_s, .advanced = true, .formLabel = i18nc("@label", "Graphics device IDs"), .keepEmpty = true});
     add(u"VaapiDriver"_s, m_scope == Scope::VirtualSession ? i18nc("@title:group", "New Virtual Desktops") : video,
-        i18nc("@label", "VA-API driver policy"), i18nc("@info", "Controls VA-API probing, not NVIDIA encoding or per-stream GPU selection. Virtual changes apply only to newly created desktops."),
+        i18nc("@label", "Video acceleration driver"), i18nc("@info", "Chooses which VA-API driver is tried for hardware video encoding. It does not select NVIDIA encoding or a graphics device. For Virtual, changes apply to newly created desktops only."),
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"off"_s, i18nc("@item:inlistbox", "Disabled")),
          choice(u"radeonsi"_s, u"radeonsi"_s), choice(u"iHD"_s, u"iHD"_s), choice(u"i965"_s, u"i965"_s)},
         {.section = u"encoding"_s, .advanced = true});

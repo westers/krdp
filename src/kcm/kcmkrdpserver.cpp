@@ -4,7 +4,6 @@
 #include <KPluginFactory>
 #include <QClipboard>
 #include <QGuiApplication>
-#include <QHostInfo>
 #include <QQmlEngine>
 
 K_PLUGIN_CLASS_WITH_JSON(KRDPServerConfig, "kcm_farside.json")
@@ -38,6 +37,11 @@ void KRDPServerConfig::load()
     // names and aliases (administrator protected) load once, when "Who can
     // sign in" is expanded, and Reset only discards their edits.
     m_apply->reset();
+    // System Settings enables Defaults until it is told otherwise and only reacts to a change signal, so a clean
+    // module (which already represents defaults, setting the same value emits nothing) must announce it once.
+    const bool atDefaults = m_apply->representsDefaults();
+    setRepresentsDefaults(!atDefaults);
+    setRepresentsDefaults(atDefaults);
 }
 void KRDPServerConfig::save()
 {
@@ -49,7 +53,6 @@ void KRDPServerConfig::defaults()
     KQuickConfigModule::defaults();
     m_apply->useDefaults();
 }
-QString KRDPServerConfig::hostName() const { return QHostInfo::localHostName(); }
 void KRDPServerConfig::copyAddressToClipboard(const QString &address)
 {
     QGuiApplication::clipboard()->setText(address.trimmed());

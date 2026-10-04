@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "brokerauthenticationsettings.h"
+#include <KLocalizedString>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -64,7 +65,7 @@ bool BrokerAuthenticationSettings::editableRoute(const QString &route) const
 bool BrokerAuthenticationSettings::setPam(const QString &name, const QString &mode, const QStringList &accounts)
 {
     if (!editableRoute(name) || !QStringList{u"any"_s, u"allow-list"_s, u"disabled"_s}.contains(mode)
-        || accounts.size() > 128 || (mode != u"allow-list"_s && !accounts.isEmpty())) return reject(u"invalid sign-in scope"_s);
+        || accounts.size() > 128 || (mode != u"allow-list"_s && !accounts.isEmpty())) return reject(i18nc("@info", "The sign-in rule is not valid."));
     auto route = m_pending.value(name).toObject();
     route.insert(u"pam"_s, QJsonObject{{u"mode"_s, mode}, {u"accounts"_s, QJsonArray::fromStringList(accounts)}});
     m_pending.insert(name, route); m_error.clear(); Q_EMIT changed(); return true;
@@ -73,17 +74,17 @@ bool BrokerAuthenticationSettings::setPam(const QString &name, const QString &mo
 bool BrokerAuthenticationSettings::setAlias(const QString &name, const QString &alias, const QString &owner, const QString &password)
 {
     if (!editableRoute(name) || alias.isEmpty() || owner.isEmpty() || alias.size() > 256 || owner.size() > 256
-        || password.size() > 4096 || password.contains(QChar::Null)) return reject(u"invalid remote sign-in account"_s);
+        || password.size() > 4096 || password.contains(QChar::Null)) return reject(i18nc("@info", "The remote login is not valid."));
     auto route = m_pending.value(name).toObject(); auto aliases = route.value(u"credentials"_s).toArray();
     int found = -1;
     for (int i = 0; i < aliases.size(); ++i) if (aliases[i].toObject().value(u"alias"_s).toString() == alias) found = i;
     if (password.isEmpty() && (found < 0 || aliases[found].toObject().value(u"owner"_s).toString() != owner))
-        return reject(u"a new password is required for a new account or changed owner"_s);
+        return reject(i18nc("@info", "A new password is required for a new remote login or a changed desktop account."));
     auto entry = found < 0 ? QJsonObject{{u"alias"_s, alias}, {u"owner"_s, owner}} : aliases[found].toObject();
     entry.insert(u"owner"_s, owner);
     if (!password.isEmpty()) entry.insert(u"password"_s, password);
     if (found < 0) {
-        if (aliases.size() >= 128) return reject(u"too many remote sign-in accounts"_s);
+        if (aliases.size() >= 128) return reject(i18nc("@info", "There are too many remote logins."));
         aliases.append(entry);
     } else aliases[found] = entry;
     route.insert(u"credentials"_s, aliases); m_pending.insert(name, route); m_error.clear(); Q_EMIT changed(); return true;
@@ -130,25 +131,25 @@ bool BrokerAuthenticationSettings::start(const QJsonObject &request, bool saving
 {
     if (busy()) return false;
     const auto input = QJsonDocument(request).toJson(QJsonDocument::Compact);
-    if (input.size() > MaximumBytes) return reject(u"sign-in policy update is too large"_s);
+    if (input.size() > MaximumBytes) return reject(i18nc("@info", "The sign-in settings are too large to save."));
     auto *process = new QProcess(this); m_process = process; m_error.clear();
     process->setProgram(m_program); process->setArguments(m_arguments);
     connect(process, &QProcess::started, this, [process, input] { process->write(input); process->closeWriteChannel(); });
     connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
         if (error != QProcess::FailedToStart || m_process != process) return;
-        m_process = nullptr; process->deleteLater(); reject(u"Farside administration helper could not start"_s);
+        m_process = nullptr; process->deleteLater(); reject(i18nc("@info", "Farside administration could not start."));
     });
     connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, process, saving](int code, QProcess::ExitStatus status) {
         if (m_process != process) return;
         m_process = nullptr;
         const auto output = process->readAllStandardOutput();
         process->deleteLater();
-        if (status != QProcess::NormalExit) { reject(u"Farside administration helper stopped unexpectedly; reload the policy"_s); return; }
-        if (code == 126) { reject(u"Administrator authentication was cancelled; policy is unchanged"_s); return; }
-        if (code == 127) { reject(u"Administrator authentication was not granted; policy is unchanged"_s); return; }
+        if (status != QProcess::NormalExit) { reject(i18nc("@info", "Farside administration stopped unexpectedly. Unlock the page again to see the current rules.")); return; }
+        if (code == 126) { reject(i18nc("@info", "Administrator authentication was cancelled. The sign-in rules are unchanged.")); return; }
+        if (code == 127) { reject(i18nc("@info", "Administrator authentication was not granted. The sign-in rules are unchanged.")); return; }
         QJsonParseError error;
         const auto response = output.size() <= MaximumBytes ? QJsonDocument::fromJson(output, &error) : QJsonDocument{};
-        if (error.error != QJsonParseError::NoError || !response.isObject()) { reject(u"Invalid administration reply; reload the policy"_s); return; }
+        if (error.error != QJsonParseError::NoError || !response.isObject()) { reject(i18nc("@info", "Farside administration gave an unexpected reply. Unlock the page again to see the current rules.")); return; }
         const auto value = response.object();
         if (value.value(u"saved"_s).toBool()) m_lastSaveRequiresRestart = true;
         if (code != 0 || value.contains(u"error"_s)) {
@@ -156,7 +157,7 @@ bool BrokerAuthenticationSettings::start(const QJsonObject &request, bool saving
             reject(value.value(u"error"_s).isString() ? value.value(u"error"_s).toString().left(256) : u"Sign-in policy could not be saved"_s); return;
         }
         const auto snapshot = value.value(u"snapshot"_s).toObject();
-        if (!validSnapshot(snapshot) || (saving && !value.value(u"saved"_s).toBool())) { reject(u"Invalid policy snapshot; reload the policy"_s); return; }
+        if (!validSnapshot(snapshot) || (saving && !value.value(u"saved"_s).toBool())) { reject(i18nc("@info", "The sign-in rules could not be read back. Unlock the page again to see the current rules.")); return; }
         m_snapshot = m_pending = snapshot; m_removedAlias = {}; m_removedRoute.clear(); m_error = value.value(u"warning"_s).toString().left(256); Q_EMIT changed();
     });
     Q_EMIT changed(); process->start(); return true;

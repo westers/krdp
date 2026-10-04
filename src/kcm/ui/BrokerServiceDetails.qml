@@ -12,7 +12,6 @@ ColumnLayout {
     required property var administration
     required property string route
     property var navigation
-    property string hostName: ""
     readonly property var runtime: host.runtime
     spacing: Kirigami.Units.smallSpacing
     function fieldNames(keys) {
@@ -20,16 +19,16 @@ ColumnLayout {
     }
     function runtimeState(state) {
         switch (state) {
-        case "verified": return i18nc("@info", "Startup values agree with stored settings");
-        case "different": return i18nc("@info", "Inspected values differ from stored settings");
-        case "custom": return i18nc("@info", "Custom unit; recognized startup values agree");
-        case "partial": return i18nc("@info", "Verification incomplete");
-        case "missing": return i18nc("@info", "Host service not found");
-        case "inactive": return i18nc("@info", "Host is not running");
-        case "stale": return i18nc("@info", "Host changed during inspection; inspect again");
-        case "denied": return i18nc("@info", "Inspection was not authorized");
-        case "malformed": return i18nc("@info", "Host information could not be validated");
-        default: return i18nc("@info", "Running host information unavailable");
+        case "verified": return i18nc("@info", "Running with the saved settings");
+        case "different": return i18nc("@info", "The running service does not match the saved settings");
+        case "custom": return i18nc("@info", "A custom setup was found; the settings this page knows about match");
+        case "partial": return i18nc("@info", "The check could not confirm everything");
+        case "missing": return i18nc("@info", "The service was not found");
+        case "inactive": return i18nc("@info", "The service is not running");
+        case "stale": return i18nc("@info", "Something changed during the check. Check again");
+        case "denied": return i18nc("@info", "The check was not allowed");
+        case "malformed": return i18nc("@info", "The service information could not be validated");
+        default: return i18nc("@info", "The running service could not be checked");
         }
     }
     function runtimeReason(reason) {
@@ -37,11 +36,11 @@ ColumnLayout {
         case "unsupported-command": case "custom-unit": return i18nc("@info", "The unit's command or service context is not fully supported for inspection.");
         case "unknown-option": case "duplicate-option": case "invalid-field": return i18nc("@info", "Unrecognized, repeated or invalid startup arguments prevent complete verification.");
         case "missing-field": return i18nc("@info", "Some startup values were omitted. Their defaults are not inferred from this version.");
-        case "custom-worker": case "custom-authentication": case "custom-runtime": case "incomplete-context": return i18nc("@info", "The broker's worker, authentication or runtime context cannot be fully verified.");
+        case "custom-worker": case "custom-authentication": case "custom-runtime": case "incomplete-context": return i18nc("@info", "The service's worker, authentication or runtime context cannot be fully verified.");
         case "unsafe-file": case "missing-file": case "invalid-environment": return i18nc("@info", "An environment file is missing, unsafe or invalid.");
         case "unknown-expansion": case "inherited-environment": return i18nc("@info", "Environment inheritance or command expansion prevents complete verification.");
         case "manager-reload": return i18nc("@info", "systemd has not reloaded changed unit files. Loaded unit settings may differ from disk.");
-        case "process-identity": return i18nc("@info", "The running process could not be matched safely to the installed broker and service.");
+        case "process-identity": return i18nc("@info", "The running process could not be matched safely to the installed service.");
         case "stale": return i18nc("@info", "Settings, unit or process identity changed during inspection.");
         case "denied": return i18nc("@info", "The system manager refused inspection.");
         case "bounds": case "malformed": return i18nc("@info", "Host information exceeds limits or is invalid.");
@@ -66,81 +65,93 @@ ColumnLayout {
     ColumnLayout {
         Layout.fillWidth: true
         visible: root.host.runtimeCheckedAt !== ""
-        Kirigami.Heading { level: 3; text: i18nc("@title:group", "Host Inspection") }
+        Kirigami.Heading { level: 3; text: i18nc("@title:group", "Running Service Check") }
         QQC2.Label {
             objectName: "hostRuntimeSummary"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             text: root.runtimeState(root.runtime.state)
         }
-        QQC2.Label {
-            objectName: "hostRuntimeCheckedAt"
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            visible: root.host.runtimeCheckedAt !== ""
-            text: root.host.runtimeCheckedAt === "" ? "" : i18nc("@info", "Checked at %1. This is a snapshot; inspect again after changing settings or restarting the host.", root.host.runtimeCheckedAt)
-        }
         Kirigami.InlineMessage {
             objectName: "hostRuntimeStale"
             Layout.fillWidth: true
             visible: root.host.runtimeCheckedAt !== "" && root.host.runtimeStale
             type: Kirigami.MessageType.Warning
-            text: i18nc("@info", "This inspection does not match the loaded settings revision or changed during reading. Reload stored settings and inspect again. Pending edits are separate.")
-        }
-        QQC2.Label {
-            objectName: "hostRuntimeVerification"
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: i18nc("@info", "Loaded unit and current environment files: %1. Running broker startup arguments: %2.",
-                root.runtime.configuredVerified ? i18nc("@info", "verified") : i18nc("@info", "unverified"),
-                root.runtime.runningVerified ? i18nc("@info", "verified") : i18nc("@info", "unverified"))
-        }
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            visible: root.runtime.custom === true
-            text: i18nc("@info", "Custom unit commands, drop-ins or environment files are present. They can override saved settings.")
-        }
-        Repeater {
-            model: root.runtime.reasons || []
-            delegate: QQC2.Label {
-                required property string modelData
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                text: root.runtimeReason(modelData)
-            }
-        }
-        QQC2.Label {
-            objectName: "hostRuntimeMissing"
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            visible: (root.runtime.missing || []).length > 0
-            text: i18nc("@info", "Startup values not observed: %1.", root.fieldNames(root.runtime.missing))
-        }
-        QQC2.Label {
-            objectName: "hostRuntimeDifferences"
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            visible: (root.runtime.configuredDifferences || []).length + (root.runtime.runningDifferences || []).length > 0
-            text: i18nc("@info", "Loaded unit differs for: %1. Startup arguments differ for: %2.",
-                root.fieldNames(root.runtime.configuredDifferences) || i18nc("@info", "none"),
-                root.fieldNames(root.runtime.runningDifferences) || i18nc("@info", "none"))
+            text: i18nc("@info", "This check is out of date: the saved settings changed, or something changed while it ran. Check again. Your pending edits are not part of it.")
         }
         QQC2.CheckBox {
-            id: runtimeValues
-            objectName: "showHostRuntimeValues"
-            text: i18nc("@option:check", "Show inspected values")
+            id: runtimeDetails
+            objectName: "showHostRuntimeDetails"
+            text: i18nc("@option:check", "Show details")
         }
-        Repeater {
-            model: runtimeValues.checked ? root.host.definitions : []
-            delegate: QQC2.Label {
-                required property var modelData
-                objectName: "runtime_" + modelData.key
+        // Hidden, never unloaded: the same rows stay in place while the check is repeated.
+        ColumnLayout {
+            objectName: "hostRuntimeDetails"
+            Layout.fillWidth: true
+            visible: runtimeDetails.checked
+            spacing: Kirigami.Units.smallSpacing
+            QQC2.Label {
+                objectName: "hostRuntimeCheckedAt"
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                text: i18nc("@info", "%1 — Loaded unit: %2; startup argument: %3.", modelData.label,
-                    Object.prototype.hasOwnProperty.call(root.runtime.configured || {}, modelData.key) ? root.runtime.configured[modelData.key] : i18nc("@info", "unverified"),
-                    Object.prototype.hasOwnProperty.call(root.runtime.running || {}, modelData.key) ? root.runtime.running[modelData.key] : i18nc("@info", "not observed"))
+                visible: root.host.runtimeCheckedAt !== ""
+                text: root.host.runtimeCheckedAt === "" ? "" : i18nc("@info", "Checked at %1. This is a snapshot; check again after changing settings or restarting the service.", root.host.runtimeCheckedAt)
+            }
+            QQC2.Label {
+                objectName: "hostRuntimeVerification"
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: i18nc("@info", "Service configuration files: %1. How the running service was started: %2.",
+                    root.runtime.configuredVerified ? i18nc("@info", "verified") : i18nc("@info", "unverified"),
+                    root.runtime.runningVerified ? i18nc("@info", "verified") : i18nc("@info", "unverified"))
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                visible: root.runtime.custom === true
+                text: i18nc("@info", "The service has custom startup commands, overrides or environment files. They can override the saved settings.")
+            }
+            Repeater {
+                model: root.runtime.reasons || []
+                delegate: QQC2.Label {
+                    required property string modelData
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    text: root.runtimeReason(modelData)
+                }
+            }
+            QQC2.Label {
+                objectName: "hostRuntimeMissing"
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                visible: (root.runtime.missing || []).length > 0
+                text: i18nc("@info", "Settings that could not be observed: %1.", root.fieldNames(root.runtime.missing))
+            }
+            QQC2.Label {
+                objectName: "hostRuntimeDifferences"
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                visible: (root.runtime.configuredDifferences || []).length + (root.runtime.runningDifferences || []).length > 0
+                text: i18nc("@info", "Configuration files differ for: %1. The running service differs for: %2.",
+                    root.fieldNames(root.runtime.configuredDifferences) || i18nc("@info", "none"),
+                    root.fieldNames(root.runtime.runningDifferences) || i18nc("@info", "none"))
+            }
+            QQC2.CheckBox {
+                id: runtimeValues
+                objectName: "showHostRuntimeValues"
+                text: i18nc("@option:check", "Show the values found")
+            }
+            Repeater {
+                model: runtimeValues.checked ? root.host.definitions : []
+                delegate: QQC2.Label {
+                    required property var modelData
+                    objectName: "runtime_" + modelData.key
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    text: i18nc("@info", "%1 — configuration: %2; running service: %3.", modelData.label,
+                        Object.prototype.hasOwnProperty.call(root.runtime.configured || {}, modelData.key) ? root.runtime.configured[modelData.key] : i18nc("@info", "unverified"),
+                        Object.prototype.hasOwnProperty.call(root.runtime.running || {}, modelData.key) ? root.runtime.running[modelData.key] : i18nc("@info", "not observed"))
+                }
             }
         }
     }

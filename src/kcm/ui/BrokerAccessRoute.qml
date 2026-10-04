@@ -29,17 +29,17 @@ Kirigami.FormLayout {
             textRole: "text"
             valueRole: "value"
             model: [
-                {text: i18nc("@item:inlistbox", "All eligible accounts"), value: "any"},
+                {text: i18nc("@item:inlistbox", "Everyone with an account"), value: "any"},
                 {text: i18nc("@item:inlistbox", "Selected accounts"), value: "allow-list"},
-                {text: i18nc("@item:inlistbox", "Disabled"), value: "disabled"}
+                {text: i18nc("@item:inlistbox", "Nobody"), value: "disabled"}
             ]
             currentIndex: root.pam.mode === "any" ? 0 : root.pam.mode === "allow-list" ? 1 : 2
             onActivated: root.admin.setPam(root.route, currentValue, currentValue === "allow-list" ? root.pam.accounts : [])
         }
         Kirigami.ContextualHelpButton {
             toolTipText: root.route === "console"
-                ? i18nc("@info:tooltip", "System-account passwords are checked with the computer's normal sign-in. Console control is limited to the signed-in desktop owner.")
-                : i18nc("@info:tooltip", "System-account passwords are checked with the computer's normal sign-in. Each Virtual desktop belongs to the account used to sign in.")
+                ? i18nc("@info:tooltip", "Passwords are checked the same way as when you sign in at this computer. In Console, only the person signed in at the computer can control it.")
+                : i18nc("@info:tooltip", "Passwords are checked the same way as when you sign in at this computer. Each Virtual desktop belongs to the account that signed in.")
         }
     }
     QQC2.TextField {
@@ -48,14 +48,15 @@ Kirigami.FormLayout {
         Layout.preferredWidth: Kirigami.Units.gridUnit * 14
         visible: root.pam.mode === "allow-list"
         text: root.pam.accounts.join(", ")
-        placeholderText: i18nc("@info:placeholder", "System login names, separated by commas")
+        placeholderText: i18nc("@info:placeholder", "Login names, separated by commas")
         onEditingFinished: root.admin.setPam(root.route, "allow-list", text.split(",").map(value => value.trim()).filter(value => value !== ""))
     }
     ColumnLayout {
         Kirigami.FormData.label: i18nc("@label", "Remote logins:")
         Kirigami.FormData.labelAlignment: Qt.AlignTop
         spacing: Kirigami.Units.smallSpacing
-        QQC2.Label { visible: root.credentials.length === 0; text: i18nc("@info", "None added"); opacity: 0.7 }
+        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; font: Kirigami.Theme.smallFont; text: i18nc("@info", "Extra sign-in names with their own password.") }
+        QQC2.Label { visible: root.credentials.length === 0; text: i18nc("@info", "None added") }
         Repeater {
             model: root.credentials
             delegate: RowLayout {
@@ -86,7 +87,7 @@ Kirigami.FormLayout {
                 onClicked: root.page.editAlias(root.route, "", "")
             }
             Kirigami.ContextualHelpButton {
-                toolTipText: i18nc("@info:tooltip", "A remote login is an extra sign-in name with its own password. It signs in as the system account you choose; the name itself never selects the desktop owner.")
+                toolTipText: i18nc("@info:tooltip", "A remote login is an extra sign-in name with its own password. It signs in as the account you choose. The name itself never decides whose desktop opens.")
             }
         }
     }

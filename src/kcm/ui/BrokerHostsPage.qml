@@ -30,7 +30,6 @@ KCM.SimpleKCM {
     readonly property var summary: BrokerRouteSummary {
         service: root.administration ? root.administration.services[root.fixedScope] : null
         host: root.host
-        hostName: root.navigation && root.navigation.hostName ? root.navigation.hostName : ""
     }
     title: fixedScope === 0 ? i18nc("@title:window", "Console") : i18nc("@title:window", "Virtual")
     function displayModeText() {
@@ -82,12 +81,13 @@ KCM.SimpleKCM {
             }
             RowLayout {
                 objectName: root.serviceRoute + "StoredEndpointRow"
-                Kirigami.FormData.label: i18nc("@label", "Address:")
-                Kirigami.SelectableLabel {
+                Kirigami.FormData.label: i18nc("@label", "Listening on:")
+                // A plain label (not a selectable text edit, which stays left-aligned in a right-to-left layout); the button copies a concrete address.
+                QQC2.Label {
                     objectName: root.serviceRoute + "StoredEndpoint"
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
-                    text: root.summary.address !== "" ? root.summary.address : i18nc("@info", "Available after the service has started once")
+                    text: root.summary.listenText !== "" ? root.summary.listenText : i18nc("@info", "Available after the service has started once")
                 }
                 QQC2.ToolButton {
                     objectName: root.serviceRoute + "CopyStoredEndpoint"
@@ -130,26 +130,48 @@ KCM.SimpleKCM {
 
             Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.host.sectionTitle("connection") }
             BrokerFieldRepeater { settings: root.host; section: "connection"; busy: root.host.busy }
+            // One line: validity and a short fingerprint, a copy button for the full fingerprint, and the inline editor behind Change.
             RowLayout {
+                objectName: "certificateSummaryRow"
                 Kirigami.FormData.label: i18nc("@label", "Certificate:")
-                QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.host.tlsMode !== "keep" ? i18nc("@info", "Will change when you apply") : certificateSection.summary }
+                QQC2.Label { objectName: "certificateSummary"; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.host.tlsMode !== "keep" ? i18nc("@info", "Will change when you apply") : certificateSection.summary }
+                QQC2.ToolButton {
+                    objectName: "copyCertificateFingerprint"
+                    visible: root.host.tlsMode === "keep" && certificateSection.fingerprint !== ""
+                    icon.name: "edit-copy"; text: i18nc("@action:button", "Copy fingerprint")
+                    display: QQC2.AbstractButton.IconOnly
+                    QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered
+                    onClicked: root.navigation.copyAddressToClipboard(certificateSection.fingerprint)
+                }
                 QQC2.Button { objectName: "editHostCertificate"; visible: !certificateSection.open; text: i18nc("@action:button", "Change…"); enabled: !root.host.busy && !root.host.outcomeUnknown; onClicked: certificateSection.begin() }
             }
             BrokerCertificateSection { id: certificateSection; Layout.fillWidth: true; host: root.host }
 
             Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.host.sectionTitle("picture") }
             BrokerFieldRepeater { settings: root.host; section: "picture"; busy: root.host.busy }
-            QQC2.Label {
-                objectName: "cameraReadiness"
+            RowLayout {
                 Kirigami.FormData.label: i18nc("@label", "Camera sharing:")
-                Layout.fillWidth: true; wrapMode: Text.Wrap
-                readonly property bool staged: root.fixedScope === 0 && root.host.loaded && (root.host.values.CameraLoopbackDevice || root.host.unitDefaults.CameraLoopbackDevice) !== (root.host.metadata.effective || {}).CameraLoopbackDevice
-                text: root.unavailableReason !== "" ? root.unavailableReason
-                    : staged ? i18nc("@info", "Bridge device changed. Apply, then check again.")
-                    : root.camera.state === "available" ? i18nc("@info", "Ready")
-                    : root.camera.state === "disabled" ? i18nc("@info", "Not set up. Choose a camera bridge device under Advanced.")
-                    : root.camera.state ? i18nc("@info", "Unavailable (%1). Check the device under Advanced.", root.camera.state)
-                    : i18nc("@info", "Not checked yet")
+                QQC2.Label {
+                    id: cameraReadiness
+                    objectName: "cameraReadiness"
+                    Layout.fillWidth: true; wrapMode: Text.Wrap
+                    readonly property bool staged: root.fixedScope === 0 && root.host.loaded && (root.host.values.CameraLoopbackDevice || root.host.unitDefaults.CameraLoopbackDevice) !== (root.host.metadata.effective || {}).CameraLoopbackDevice
+                    // Whether the camera device (under Advanced) is what the user has to fix.
+                    readonly property bool needsSetup: root.unavailableReason === "" && !staged && !!root.camera.state && root.camera.state !== "available"
+                    text: root.unavailableReason !== "" ? root.unavailableReason
+                        : staged ? i18nc("@info", "The camera device changed. Apply, then check again.")
+                        : root.camera.state === "available" ? i18nc("@info", "Ready")
+                        : root.camera.state === "disabled" ? i18nc("@info", "Not set up")
+                        : root.camera.state ? i18nc("@info", "Not working (%1)", root.camera.state)
+                        : i18nc("@info", "Not checked yet")
+                }
+                QQC2.Button {
+                    objectName: "cameraSetup"
+                    visible: cameraReadiness.needsSetup
+                    text: i18nc("@action:button", "Set Up…")
+                    // The device field is under Advanced; opening that group is the way to set it up.
+                    onClicked: root.showAdvanced = true
+                }
             }
 
             Kirigami.Separator { visible: root.fixedScope === 0; Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Displays") }
@@ -166,7 +188,7 @@ KCM.SimpleKCM {
                 }
             }
 
-            Kirigami.Separator { visible: root.fixedScope === 1; Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "New desktops") }
+            Kirigami.Separator { visible: root.fixedScope === 1; Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "New Desktops") }
             ColumnLayout {
                 id: hardware
                 objectName: "desktopHardwareSection"
@@ -177,7 +199,7 @@ KCM.SimpleKCM {
                 QQC2.CheckBox {
                     id: noGpu
                     objectName: "desktopNoGpu"
-                    text: i18nc("@option:check", "No GPU access")
+                    text: i18nc("@option:check", "No graphics acceleration")
                     checked: root.selectedDevices.length === 0; enabled: !root.sessionSettings.busy
                     onClicked: { if (checked) root.sessionSettings.setValue("RenderPci", ""); checked = Qt.binding(() => root.selectedDevices.length === 0); }
                 }
@@ -186,7 +208,7 @@ KCM.SimpleKCM {
                     delegate: QQC2.CheckBox {
                         required property var modelData
                         objectName: "desktopGpu_" + modelData.pci
-                        text: i18nc("@option:check", "%1 (%2)", modelData.pci, modelData.driver)
+                        text: i18nc("@option:check %1 PCI address %2 driver name", "%2 graphics at %1", modelData.pci, modelData.driver)
                         checked: root.selectedDevices.includes(modelData.pci); enabled: !root.sessionSettings.busy
                         onClicked: {
                             const values = root.selectedDevices.filter(value => value !== modelData.pci);

@@ -20,7 +20,7 @@ KCM.SimpleKCM {
         spacing: Kirigami.Units.largeSpacing
         BrokerApplyFailures { }
         Kirigami.InlineMessage { objectName: "brokerPreferenceError"; Layout.fillWidth: true; visible: root.preferences.error !== ""; type: Kirigami.MessageType.Error; text: root.preferences.error }
-        Kirigami.InlineMessage { objectName: "brokerPreferenceReconnect"; Layout.fillWidth: true; visible: root.preferences.reconnectRequired; type: Kirigami.MessageType.Information; text: i18nc("@info", "Saved. Reconnect to use your preferences; current connections are unchanged.") }
+        Kirigami.InlineMessage { objectName: "brokerPreferenceReconnect"; Layout.fillWidth: true; visible: root.preferences.reconnectRequired; type: Kirigami.MessageType.Information; text: i18nc("@info", "Saved. Reconnect to use your preferences. Connections that are already open keep their current settings.") }
         Kirigami.FormLayout {
             id: form
             Layout.fillWidth: true
@@ -29,6 +29,15 @@ KCM.SimpleKCM {
             BrokerFieldRepeater { settings: root.preferences; section: "video"; prefix: "preference_"; accountPreference: true; lockedKeys: root.preferences.lockedKeys }
             Kirigami.Separator { id: displaySection; Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.preferences.sectionTitle("displays") }
             BrokerFieldRepeater { settings: root.preferences; section: "displays"; prefix: "preference_"; accountPreference: true; lockedKeys: root.preferences.lockedKeys }
+            // The display choices that follow the mode appear only for two of the five modes; say so instead of leaving one lone control.
+            QQC2.Label {
+                objectName: "displayModeHint"
+                visible: ["specific", "virtual"].indexOf(root.preferences.values.MonitorMode || "") < 0
+                Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+                wrapMode: Text.Wrap
+                font: Kirigami.Theme.smallFont
+                text: i18nc("@info", "More options appear here when you choose “One display” or “Client-created displays”.")
+            }
             Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.preferences.sectionTitle("sound") }
             BrokerFieldRepeater { settings: root.preferences; section: "sound"; prefix: "preference_"; accountPreference: true; lockedKeys: root.preferences.lockedKeys }
             QQC2.Button {

@@ -35,7 +35,7 @@ struct Spec {
     QString unavailable;
     // Address controls only: the list entries (inherit, wildcards, custom) as {value, text}; the first inherits, the last is custom.
     QVariantList modes;
-    // The empty choice / "Custom" selector wording for the scope this model belongs to ("Use host setting", "Use unit default").
+    // The empty choice / "Custom" selector wording for the scope this model belongs to ("Use host setting", "Use default").
     QString inheritText;
     // Wording of individual options on the form, by value, where it differs from the summary wording.
     QVariantMap optionText;

@@ -6,7 +6,6 @@ QtObject {
     id: root
     property var service
     property var host
-    property string hostName: ""
     readonly property bool running: !!service && (service.activeState === "active" || service.activeState === "reloading")
     readonly property string stateText: {
         const s = service;
@@ -30,10 +29,14 @@ QtObject {
         if (address.includes(":")) address = "[" + address + "]";
         return address && values.Port ? address + ":" + values.Port : "";
     }
-    // The text clients type: the bound address, or this computer's name for a wildcard listener.
-    readonly property string address: {
+    // The address as configured: only a concrete address can be typed by a client. A wildcard listener
+    // has no single name, and none is invented for it.
+    readonly property string address: effective.Port ? endpoint(effective) : ""
+    // What the page says about where the service listens, whether or not it is a concrete address.
+    readonly property string listenText: {
         if (!effective.Port) return "";
-        return endpoint(effective) || (hostName ? hostName + ":" + effective.Port : "");
+        return address !== "" ? address : i18nc("@info %1 port number", "All network interfaces, port %1", effective.Port);
     }
-    readonly property string subtitle: address !== "" ? i18nc("@info:status %1 state %2 address", "%1 · %2", stateText, address) : stateText
+    readonly property string subtitle: address !== "" ? i18nc("@info:status %1 state %2 address", "%1 · %2", stateText, address)
+        : effective.Port ? i18nc("@info:status %1 state %2 port number", "%1 · port %2", stateText, effective.Port) : stateText
 }

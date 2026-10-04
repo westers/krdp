@@ -34,11 +34,20 @@ Updated 2026-10-02 for the ten-to-five page consolidation (evidence
 - Who Can Connect asks for administrator access once, when the row is opened, and
   offers Unlock… if that was cancelled.
 - Certificate changes use the dedicated local C++ draft. Cancel and leaving the
-  page (Back) discard only that editor. Use Certificate Changes stages only TLS
+  page (Back) discard only that editor. Use This Certificate stages only TLS
   fields into the host draft; Apply saves it and restarting remains an explicit
   action. The standard Defaults button preserves TLS paths, the TLS operation and
   any staged PEM import. Only one native file dialog is ever open because the
   editor expands in place instead of opening a modal.
+- Wording (S6): plain outcome labels; the default is shown as a value ("Default (all IPv4 interfaces)"), never "unit default";
+  jargon (V4L2, PCI, VA-API, AVC codec names, TLS) lives only in tooltips and the collapsed Advanced group; labels, options and
+  tooltips use sentence case, headings and buttons title case; every user-visible string goes through `i18n`/`i18nc` with a
+  context, including model error messages. The certificate is one line on the page (validity, short SHA-256, copy, Change…);
+  its paths, full fingerprint and validity sit behind "Show Current Certificate Details", and the service check shows a
+  result line with the rest behind "Show details". A wildcard listener is shown as "All network interfaces, port N"; no host
+  name is invented. Sidebar icons are one monochrome Breeze family (monitor, virtual-desktops, system-users, user-identity).
+- System Settings enables Defaults until a representsDefaults change arrives and ignores an unchanged value, so `load()` announces
+  it once (toggle and restore); without that a clean module shows an enabled Defaults button.
 - Inline expanders (Details, Certificate, Advanced) only toggle `visible`; never
   put a draft editor behind a `Loader` or `active: false`.
 - My Preferences keeps account inheritance explicit. Choosing Custom stages an
