@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "brokerhostsettings.h"
+#include "settingfielddefinition.h"
 #include "ServerCertificate.h"
 #include <QFile>
 #include <QJsonDocument>
@@ -15,6 +16,34 @@ class BrokerHostSettingsModelTest : public QObject {
     }
     static QStringList arguments(const QTemporaryDir &directory) { return {QString::fromUtf8(HOST_PROTOCOL_FIXTURE), directory.path()}; }
 private Q_SLOTS:
+    void definitionsDriveTheForm() {
+        QTemporaryDir directory;
+        BrokerHostSettings console(Scope::Console, u"/usr/bin/python3"_s, arguments(directory), 3000), virtualHost(Scope::Virtual, u"/usr/bin/python3"_s, arguments(directory), 3000),
+            session(Scope::VirtualSession, u"/usr/bin/python3"_s, arguments(directory), 3000);
+        int total = 0;
+        for (auto *model : {&console, &virtualHost, &session}) {
+            QVERIFY(model->reload()); QTRY_VERIFY(!model->busy()); QVERIFY(model->loaded());
+            QSet<QString> keys; QVariantList bounds;
+            for (const auto &row : model->definitions()) {
+                const auto definition = row.toMap(); const auto key = definition[u"key"_s].toString(); ++total;
+                QVERIFY2(KRdp::SettingFields::definitionProblem(definition).isEmpty(), qPrintable(key + u": "_s + KRdp::SettingFields::definitionProblem(definition)));
+                QVERIFY(!keys.contains(key)); keys.insert(key);
+                const auto control = definition[u"control"_s].toString();
+                if (control == u"spin" || control == u"slider") bounds.append(definition);
+            }
+            // The advertised bounds are values the model accepts and can save, all numeric fields at once.
+            for (const auto &edge : bounds.isEmpty() ? QStringList{} : QStringList{u"min"_s, u"max"_s}) {
+                for (const auto &row : bounds) QVERIFY(model->setValue(row.toMap()[u"key"_s].toString(), QString::number(row.toMap()[edge].toInt())));
+                QVERIFY2(model->canSave(), qPrintable(edge)); model->discard();
+            }
+            // Only the Virtual camera bridge carries a reason; the page shows it instead of the control.
+            for (const auto &row : model->definitions()) {
+                const auto definition = row.toMap();
+                QCOMPARE(!definition[u"unavailable"_s].toString().isEmpty(), model == &virtualHost && definition[u"key"_s].toString() == u"CameraLoopbackDevice");
+            }
+        }
+        QCOMPARE(total, 25);
+    }
     void allFieldsScopesDefaultsAndDiscard() {
         QTemporaryDir directory;
         BrokerHostSettings console(Scope::Console, u"/usr/bin/python3"_s, arguments(directory), 3000),

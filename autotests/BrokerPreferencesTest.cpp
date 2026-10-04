@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "brokerpreferences.h"
+#include "settingfielddefinition.h"
 #include "UserConfiguration.h"
 #include <QFile>
 #include <QJsonDocument>
@@ -22,6 +23,24 @@ class BrokerPreferencesTest : public QObject {
             {u"VirtualMonitorFallbackSize"_s,u"2560x1440"_s},{u"WakeDisplayOnConnect"_s,u"false"_s},{u"StandardClientMedia"_s,u"false"_s},{u"VirtualStockClientPolicy"_s,u"refuse"_s}};
     }
 private Q_SLOTS:
+    void definitionsDriveTheForm() {
+        QTemporaryDir dir; BrokerPreferences model(dir.path()); QVERIFY(model.reload());
+        QSet<QString> keys; int numeric=0; QVariantList bounds;
+        for(const auto &row:model.definitions()) {
+            const auto definition=row.toMap(); const auto key=definition[u"key"_s].toString();
+            QVERIFY2(KRdp::SettingFields::definitionProblem(definition).isEmpty(),qPrintable(key+u": "_s+KRdp::SettingFields::definitionProblem(definition)));
+            QVERIFY(!keys.contains(key)); keys.insert(key);
+            const auto control=definition[u"control"_s].toString();
+            if(control==u"spin"||control==u"slider") { ++numeric; bounds.append(definition); }
+            const auto when=definition[u"showWhenKey"_s].toString(); if(!when.isEmpty()) QVERIFY2(keys.contains(when)||when==u"MonitorMode",qPrintable(key));
+        }
+        // The advertised bounds are values the model accepts and can save, all numeric fields at once (they constrain each other).
+        for(const auto &edge:{u"min"_s,u"max"_s}) {
+            for(const auto &row:bounds) QVERIFY(model.setValue(row.toMap()[u"key"_s].toString(),QString::number(row.toMap()[edge].toInt())));
+            QVERIFY2(model.canSave(),qPrintable(edge)); model.discard();
+        }
+        QCOMPARE(keys.size(),17); QVERIFY(numeric>=5);
+    }
     void completeWhitelistedRoundtripAndInheritance() {
         QTemporaryDir dir; const auto path=dir.filePath(u"farsideserverrc"_s);
         const QByteArray preserved("# preserved comment\n[General]\nListenPort=4321\nCertificate=/root/fixture.pem\nPassword=fixture-secret-only\nUsers=old-owner\nUnknown=unchanged\n[Other]\nQuality=5\n");

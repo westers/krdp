@@ -13,9 +13,7 @@ KCM.SimpleKCM {
     property var preferences: kcm.brokerPreferences
     property bool showAdvanced: false
     property bool scrollToDisplays: false
-    readonly property string monitorMode: preferences.values.MonitorMode || ""
     title: i18nc("@title:window", "My Preferences")
-    function fields(keys) { return preferences.definitions.filter(row => keys.includes(row.key)); }
     Component.onCompleted: if (scrollToDisplays) showDisplays()
     function showDisplays() { Qt.callLater(() => { if (preferences.loaded) flickable.contentY = Math.min(displaySection.mapToItem(flickable.contentItem, 0, 0).y, Math.max(0, flickable.contentHeight - flickable.height)); }); }
     ColumnLayout {
@@ -27,12 +25,12 @@ KCM.SimpleKCM {
             id: form
             Layout.fillWidth: true
             visible: root.preferences.loaded
-            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Video") }
-            Repeater { model: root.fields(["Quality", "AdaptiveQuality", "Codec"]); delegate: preferenceField }
-            Kirigami.Separator { id: displaySection; Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Console displays") }
-            Repeater { model: root.fields(["MonitorMode", "MonitorIndex", "VirtualMonitorPolicy", "VirtualMonitorLayout", "VirtualMonitorFallbackSize"]); delegate: preferenceField }
-            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Sound and session") }
-            Repeater { model: root.fields(["PreferAudioQuality", "StandardClientMedia", "WakeDisplayOnConnect"]); delegate: preferenceField }
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.preferences.sectionTitle("video") }
+            BrokerFieldRepeater { settings: root.preferences; section: "video"; prefix: "preference_"; accountPreference: true; lockedKeys: root.preferences.lockedKeys }
+            Kirigami.Separator { id: displaySection; Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.preferences.sectionTitle("displays") }
+            BrokerFieldRepeater { settings: root.preferences; section: "displays"; prefix: "preference_"; accountPreference: true; lockedKeys: root.preferences.lockedKeys }
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.preferences.sectionTitle("sound") }
+            BrokerFieldRepeater { settings: root.preferences; section: "sound"; prefix: "preference_"; accountPreference: true; lockedKeys: root.preferences.lockedKeys }
             QQC2.Button {
                 objectName: "preferenceAdvancedButton"
                 flat: true
@@ -40,30 +38,8 @@ KCM.SimpleKCM {
                 icon.name: root.showAdvanced ? "arrow-down" : "arrow-right"
                 onClicked: root.showAdvanced = !root.showAdvanced
             }
-            Kirigami.Separator { visible: root.showAdvanced; Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Encoding and compatibility") }
-            Repeater { model: root.fields(["SoftwareEncoding", "Av1Tiles", "Avc444MotionGapMs", "Avc444RestMs", "Avc444MaxGapMs", "VirtualStockClientPolicy"]); delegate: advancedPreferenceField }
-        }
-    }
-    Component {
-        id: advancedPreferenceField
-        BrokerSettingField {
-            id: advancedField
-            required property var modelData
-            settings: root.preferences; definition: modelData; prefix: "preference_"; accountPreference: true
-            visible: root.showAdvanced
-            editable: !root.preferences.lockedKeys.includes(key)
-            QQC2.Label { visible: !advancedField.editable; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Locked by the administrator"); font: Kirigami.Theme.smallFont }
-        }
-    }
-    Component {
-        id: preferenceField
-        BrokerSettingField {
-            id: field
-            required property var modelData
-            settings: root.preferences; definition: modelData; prefix: "preference_"; accountPreference: true
-            visible: key === "MonitorIndex" ? root.monitorMode === "specific" : ["VirtualMonitorPolicy", "VirtualMonitorLayout", "VirtualMonitorFallbackSize"].includes(key) ? root.monitorMode === "virtual" : true
-            editable: !root.preferences.lockedKeys.includes(key)
-            QQC2.Label { visible: !field.editable; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Locked by the administrator"); font: Kirigami.Theme.smallFont }
+            Kirigami.Separator { visible: root.showAdvanced; Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.preferences.sectionTitle("advanced") }
+            BrokerFieldRepeater { settings: root.preferences; advanced: true; shown: root.showAdvanced; prefix: "preference_"; accountPreference: true; lockedKeys: root.preferences.lockedKeys }
         }
     }
 }

@@ -40,6 +40,8 @@ public:
     QVariantMap values() const { return m_pending; }
     QVariantMap unitDefaults() const;
     QVariantList definitions() const;
+    // Heading of a page section named by the definitions' `section` ("advanced" for the advanced group).
+    Q_INVOKABLE QString sectionTitle(const QString &section) const;
     QVariantMap metadata() const;
     QVariantMap importMetadata() const { return m_importMetadata; }
     QVariantMap runtime() const { return m_runtime.toVariantMap(); }

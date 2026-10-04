@@ -22,6 +22,8 @@ KCM.SimpleKCM {
     readonly property var host: fixedScope === 0 ? consoleSettings : virtualSettings
     readonly property string serviceRoute: fixedScope === 0 ? "console" : "virtual"
     readonly property var camera: host.metadata.cameraLoopback || ({})
+    // A definition that carries a reason is not offered as a control (today: the camera bridge for Virtual).
+    readonly property string unavailableReason: { const row = host.definitions.find(definition => definition.unavailable !== ""); return row ? row.unavailable : ""; }
     readonly property var preferences: navigation && navigation.preferences ? navigation.preferences : null
     readonly property var devices: sessionSettings.loaded ? (sessionSettings.metadata.renderDevices || []) : []
     readonly property var selectedDevices: (sessionSettings.values.RenderPci || "").split(",").map(value => value.trim()).filter(value => value !== "")
@@ -31,8 +33,6 @@ KCM.SimpleKCM {
         hostName: root.navigation && root.navigation.hostName ? root.navigation.hostName : ""
     }
     title: fixedScope === 0 ? i18nc("@title:window", "Console") : i18nc("@title:window", "Virtual")
-    function fields(keys) { return host.definitions.filter(row => keys.includes(row.key)); }
-    function sessionFields(keys) { return sessionSettings.definitions.filter(row => keys.includes(row.key)); }
     function displayModeText() {
         const mode = preferences ? (preferences.values.MonitorMode || "") : "";
         if (mode === "") return i18nc("@info", "Follows the host setting");
@@ -128,8 +128,8 @@ KCM.SimpleKCM {
                 text: root.summary.service ? root.summary.service.error : ""
             }
 
-            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Connection") }
-            Repeater { model: root.fields(["Address", "Port"]); delegate: hostField }
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.host.sectionTitle("connection") }
+            BrokerFieldRepeater { settings: root.host; section: "connection"; busy: root.host.busy }
             RowLayout {
                 Kirigami.FormData.label: i18nc("@label", "Certificate:")
                 QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.host.tlsMode !== "keep" ? i18nc("@info", "Will change when you apply") : certificateSection.summary }
@@ -137,14 +137,14 @@ KCM.SimpleKCM {
             }
             BrokerCertificateSection { id: certificateSection; Layout.fillWidth: true; host: root.host }
 
-            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Picture and sound") }
-            Repeater { model: root.fields(["Quality", "AdaptiveQuality", "PreferAudioQuality", "StandardClientMedia"]); delegate: hostField }
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.host.sectionTitle("picture") }
+            BrokerFieldRepeater { settings: root.host; section: "picture"; busy: root.host.busy }
             QQC2.Label {
                 objectName: "cameraReadiness"
                 Kirigami.FormData.label: i18nc("@label", "Camera sharing:")
                 Layout.fillWidth: true; wrapMode: Text.Wrap
                 readonly property bool staged: root.fixedScope === 0 && root.host.loaded && (root.host.values.CameraLoopbackDevice || root.host.unitDefaults.CameraLoopbackDevice) !== (root.host.metadata.effective || {}).CameraLoopbackDevice
-                text: root.fixedScope === 1 ? i18nc("@info", "Not available for Virtual desktops yet")
+                text: root.unavailableReason !== "" ? root.unavailableReason
                     : staged ? i18nc("@info", "Bridge device changed. Apply, then check again.")
                     : root.camera.state === "available" ? i18nc("@info", "Ready")
                     : root.camera.state === "disabled" ? i18nc("@info", "Not set up. Choose a camera bridge device under Advanced.")
@@ -207,8 +207,8 @@ KCM.SimpleKCM {
                 onClicked: root.showAdvanced = !root.showAdvanced
             }
             Kirigami.Separator { visible: root.showAdvanced; Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Advanced") }
-            Repeater { model: root.fields(["SoftwareEncoding", "Av1Tiles", "VaapiDriver", "CameraLoopbackDevice"]); delegate: advancedHostField }
-            Repeater { model: root.fixedScope === 1 ? root.sessionFields(["VaapiDriver", "RenderPci"]) : []; delegate: advancedDesktopField }
+            BrokerFieldRepeater { settings: root.host; advanced: true; shown: root.showAdvanced; busy: root.host.busy }
+            BrokerFieldRepeater { settings: root.sessionSettings; advanced: true; included: root.fixedScope === 1; shown: root.showAdvanced; busy: root.sessionSettings.busy; prefix: "desktop_" }
             BrokerServiceDetails {
                 id: troubleshooting
                 visible: root.showAdvanced && root.administration !== null
@@ -216,34 +216,6 @@ KCM.SimpleKCM {
                 Layout.fillWidth: true
                 host: root.host; administration: root.administration; route: root.serviceRoute; navigation: root.navigation
             }
-        }
-    }
-    Component {
-        id: hostField
-        BrokerSettingField {
-            required property var modelData
-            settings: root.host; definition: modelData
-            visible: !(key === "CameraLoopbackDevice" && root.fixedScope === 1)
-            editable: !root.host.busy
-        }
-    }
-    // Advanced rows are always created and only hidden: Kirigami's FormLayout warns when a row is destroyed while the form lives.
-    Component {
-        id: advancedHostField
-        BrokerSettingField {
-            required property var modelData
-            settings: root.host; definition: modelData
-            visible: root.showAdvanced && !(key === "CameraLoopbackDevice" && root.fixedScope === 1)
-            editable: !root.host.busy
-        }
-    }
-    Component {
-        id: advancedDesktopField
-        BrokerSettingField {
-            required property var modelData
-            settings: root.sessionSettings; definition: modelData; prefix: "desktop_"
-            visible: root.showAdvanced
-            editable: !root.sessionSettings.busy
         }
     }
 }

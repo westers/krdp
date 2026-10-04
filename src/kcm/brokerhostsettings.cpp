@@ -5,6 +5,7 @@
 #include "BrokerHostPublicSnapshot.h"
 #include "BrokerHostRuntime.h"
 #include "ServerCertificate.h"
+#include "settingfielddefinition.h"
 #include <KLocalizedString>
 #include <QFile>
 #include <QPointer>
@@ -495,34 +496,62 @@ void BrokerHostSettings::finish(int code, QProcess::ExitStatus status, QByteArra
     adoptSnapshot(snapshot, saving);
 }
 
+QString BrokerHostSettings::sectionTitle(const QString &section) const
+{
+    if (section == u"connection") return i18nc("@title:group", "Connection");
+    if (section == u"picture") return i18nc("@title:group", "Picture and sound");
+    return {};
+}
+
 QVariantList BrokerHostSettings::definitions() const
 {
+    using namespace KRdp::SettingFields;
     const auto choice = [](const QString &value, const QString &text) { return QVariantMap{{u"value"_s, value}, {u"text"_s, text}}; };
     const QVariantList boolean{choice(u"true"_s, i18nc("@item:inlistbox", "On")), choice(u"false"_s, i18nc("@item:inlistbox", "Off"))};
     QVariantList result;
-    const auto add = [&](const QString &key, const QString &group, const QString &label, const QString &help, QVariantList options = {}) {
+    const auto add = [&](const QString &key, const QString &group, const QString &label, const QString &help, QVariantList options, const Spec &spec) {
         if (!Host::keys(m_scope).contains(key)) return;
         if (!options.isEmpty()) options.prepend(choice({}, i18nc("@item:inlistbox", "Use unit default")));
-        result.append(QVariantMap{{u"key"_s, key}, {u"group"_s, group}, {u"label"_s, label}, {u"help"_s, help}, {u"choices"_s, options}});
+        auto withScope = spec;
+        withScope.inheritText = i18nc("@item:inlistbox", "Use unit default");
+        result.append(makeFieldDefinition(key, group, label, help, options, withScope));
     };
     const auto listener = i18nc("@title:group", "Connection"), video = i18nc("@title:group", "Host Video Defaults"), media = i18nc("@title:group", "Audio and Devices");
-    add(u"Address"_s, listener, i18nc("@label", "Listen address"), i18nc("@info", "Numeric IPv4 or IPv6 address. 0.0.0.0 listens on all IPv4 interfaces."));
-    add(u"Port"_s, listener, i18nc("@label", "Listen port"), i18nc("@info", "1–65535. Changing the port requires clients to use the new port after a broker restart."));
-    add(u"Certificate"_s, listener, i18nc("@label", "Existing certificate path"), i18nc("@info", "An existing absolute path managed by root. Select Use existing paths to edit both TLS paths."));
-    add(u"CertificateKey"_s, listener, i18nc("@label", "Existing private key path"), i18nc("@info", "An existing absolute path to a matching, unencrypted, private root key. Key material is never displayed."));
-    add(u"Quality"_s, video, i18nc("@label", "Video quality"), i18nc("@info", "0–100. Users can override this default; higher values use more bandwidth."));
-    add(u"AdaptiveQuality"_s, video, i18nc("@label", "Adapt quality to the connection"), i18nc("@info", "Adjust quality to measured link capacity."), boolean);
+    add(u"Address"_s, listener, i18nc("@label", "Listen address"), i18nc("@info", "Numeric IPv4 or IPv6 address. 0.0.0.0 listens on all IPv4 interfaces."), {},
+        {.control = u"address"_s, .section = u"connection"_s, .formLabel = i18nc("@label", "Listen on"), .keepEmpty = true,
+         .modes = {choice({}, i18nc("@item:inlistbox", "Use unit default (all IPv4 interfaces)")), choice(u"0.0.0.0"_s, i18nc("@item:inlistbox", "All IPv4 interfaces")),
+                   choice(u"::"_s, i18nc("@item:inlistbox", "All IPv6 interfaces")), choice(AddressCustom, i18nc("@item:inlistbox", "Custom address"))}});
+    add(u"Port"_s, listener, i18nc("@label", "Listen port"), i18nc("@info", "1–65535. Changing the port requires clients to use the new port after a broker restart."), {},
+        {.control = u"spin"_s, .section = u"connection"_s, .formLabel = i18nc("@label", "Port"), .min = 1, .max = 65535});
+    add(u"Certificate"_s, listener, i18nc("@label", "Existing certificate path"), i18nc("@info", "An existing absolute path managed by root. Select Use existing paths to edit both TLS paths."), {},
+        {.control = u"path"_s, .section = u"certificate"_s, .keepEmpty = true});
+    add(u"CertificateKey"_s, listener, i18nc("@label", "Existing private key path"), i18nc("@info", "An existing absolute path to a matching, unencrypted, private root key. Key material is never displayed."), {},
+        {.control = u"path"_s, .section = u"certificate"_s, .keepEmpty = true});
+    add(u"Quality"_s, video, i18nc("@label", "Video quality"), i18nc("@info", "0–100. Users can override this default; higher values use more bandwidth."), {},
+        {.control = u"slider"_s, .section = u"picture"_s, .formLabel = i18nc("@label", "Image quality"), .min = 0, .max = 100});
+    add(u"AdaptiveQuality"_s, video, i18nc("@label", "Adapt quality to the connection"), i18nc("@info", "Adjust quality to measured link capacity."), boolean,
+        {.section = u"picture"_s, .formLabel = i18nc("@label", "Adjust to connection")});
     add(u"SoftwareEncoding"_s, video, i18nc("@label", "Software encoding"), i18nc("@info", "Hardware and client capabilities still determine the codec. Hardware preference allows software AVC as a last resort."),
-        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"never"_s, i18nc("@item:inlistbox", "Prefer hardware")), choice(u"prefer"_s, i18nc("@item:inlistbox", "Allow the best codec in software"))});
+        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"never"_s, i18nc("@item:inlistbox", "Prefer hardware")), choice(u"prefer"_s, i18nc("@item:inlistbox", "Allow the best codec in software"))},
+        {.section = u"encoding"_s, .advanced = true, .formLabel = i18nc("@label", "Encoding policy")});
     add(u"Av1Tiles"_s, video, i18nc("@label", "AV1 tiles"), i18nc("@info", "Automatic considers client decode support. Available encoders may limit tile choice."),
-        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"1"_s, u"1"_s), choice(u"2"_s, u"2"_s), choice(u"4"_s, u"4"_s), choice(u"8"_s, u"8"_s), choice(u"16"_s, u"16"_s)});
-    add(u"PreferAudioQuality"_s, media, i18nc("@label", "Prefer audio quality"), i18nc("@info", "Prioritize audio quality when media is enabled."), boolean);
-    add(u"StandardClientMedia"_s, media, i18nc("@label", "Allow standard client media"), i18nc("@info", "Host permission for standard media channels; channel consent is still required."), boolean);
-    add(u"CameraLoopbackDevice"_s, media, i18nc("@label", "Camera loopback device"), i18nc("@info", "none or an existing V4L2 loopback /dev/videoN. Console workers also need OS permission. Virtual loopback is currently unavailable; normal PipeWire camera delivery is separate."));
-    add(u"RenderPci"_s, i18nc("@title:group", "New Virtual Desktops"), i18nc("@label", "Granted GPU PCI identities"), i18nc("@info", "Comma-separated identities such as 0000:01:00.0. Empty grants no GPU. This is a namespace allowlist, not an encoder selector. Existing desktops keep their current grants."));
+        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"1"_s, u"1"_s), choice(u"2"_s, u"2"_s), choice(u"4"_s, u"4"_s), choice(u"8"_s, u"8"_s), choice(u"16"_s, u"16"_s)},
+        {.section = u"encoding"_s, .advanced = true});
+    add(u"PreferAudioQuality"_s, media, i18nc("@label", "Prefer audio quality"), i18nc("@info", "Prioritize audio quality when media is enabled."), boolean,
+        {.section = u"picture"_s, .formLabel = i18nc("@label", "When network is busy"),
+         .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Keep sound smooth")}, {u"false"_s, i18nc("@item:inlistbox", "Keep video sharp")}}});
+    add(u"StandardClientMedia"_s, media, i18nc("@label", "Allow standard client media"), i18nc("@info", "Host permission for standard media channels; channel consent is still required."), boolean,
+        {.section = u"picture"_s, .formLabel = i18nc("@label", "Other RDP app media"),
+         .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Allow")}, {u"false"_s, i18nc("@item:inlistbox", "Block")}}});
+    add(u"CameraLoopbackDevice"_s, media, i18nc("@label", "Camera loopback device"), i18nc("@info", "none or an existing V4L2 loopback /dev/videoN. Console workers also need OS permission. Virtual loopback is currently unavailable; normal PipeWire camera delivery is separate."), {},
+        {.section = u"devices"_s, .advanced = true, .formLabel = i18nc("@label", "Camera bridge device"),
+         .unavailable = m_scope == Scope::Virtual ? i18nc("@info", "Not available for Virtual desktops yet") : QString()});
+    add(u"RenderPci"_s, i18nc("@title:group", "New Virtual Desktops"), i18nc("@label", "Granted GPU PCI identities"), i18nc("@info", "Comma-separated identities such as 0000:01:00.0. Empty grants no GPU. This is a namespace allowlist, not an encoder selector. Existing desktops keep their current grants."), {},
+        {.section = u"devices"_s, .advanced = true, .formLabel = i18nc("@label", "GPU PCI identities"), .keepEmpty = true});
     add(u"VaapiDriver"_s, m_scope == Scope::VirtualSession ? i18nc("@title:group", "New Virtual Desktops") : video,
         i18nc("@label", "VA-API driver policy"), i18nc("@info", "Controls VA-API probing, not NVIDIA encoding or per-stream GPU selection. Virtual changes apply only to newly created desktops."),
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"off"_s, i18nc("@item:inlistbox", "Disabled")),
-         choice(u"radeonsi"_s, u"radeonsi"_s), choice(u"iHD"_s, u"iHD"_s), choice(u"i965"_s, u"i965"_s)});
+         choice(u"radeonsi"_s, u"radeonsi"_s), choice(u"iHD"_s, u"iHD"_s), choice(u"i965"_s, u"i965"_s)},
+        {.section = u"encoding"_s, .advanced = true});
     return result;
 }

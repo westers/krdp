@@ -21,6 +21,8 @@ public:
     QVariantMap values() const { return m_pending; }
     QStringList lockedKeys() const { return m_locked; }
     QVariantList definitions() const;
+    // Heading of a page section named by the definitions' `section` ("advanced" for the advanced group).
+    Q_INVOKABLE QString sectionTitle(const QString &section) const;
     bool loaded() const { return m_loaded; }
     bool modified() const { return m_loaded && m_pending != m_snapshot; }
     bool canSave() const;

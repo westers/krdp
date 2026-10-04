@@ -70,7 +70,7 @@ ColumnLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32;
             Layout.alignment: Qt.AlignLeft
             Layout.fillWidth: true; visible: root.draft.loaded && root.draft.tlsMode === "existing"
-            Repeater { model: root.draft.definitions.filter(row => row.key.startsWith("Certificate")); delegate: BrokerSettingField { required property var modelData; settings: root.draft; definition: modelData; prefix: "certificate_"; showHelp: true } }
+            BrokerFieldRepeater { settings: root.draft; section: "certificate"; prefix: "certificate_" }
         }
         QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; visible: root.draft.tlsMode === "standard"; text: i18nc("@info", "Remove both path overrides. Existing certificate files and previous imports are preserved. After restart, clients may need to verify the standard certificate fingerprint.") }
         ColumnLayout {

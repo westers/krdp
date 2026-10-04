@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "brokerpreferences.h"
+#include "settingfielddefinition.h"
 #include "UserConfiguration.h"
 #include <KLocalizedString>
 #include <QDir>
@@ -135,44 +136,79 @@ bool BrokerPreferences::save()
     return true;
 }
 
+QString BrokerPreferences::sectionTitle(const QString &section) const
+{
+    if (section == u"video") return i18nc("@title:group", "Video");
+    if (section == u"displays") return i18nc("@title:group", "Console displays");
+    if (section == u"sound") return i18nc("@title:group", "Sound and session");
+    if (section == u"advanced") return i18nc("@title:group", "Encoding and compatibility");
+    return {};
+}
+
 QVariantList BrokerPreferences::definitions() const
 {
+    using namespace KRdp::SettingFields;
     QVariantList result;
     const auto choice = [](const QString &value, const QString &text) { return QVariantMap{{u"value"_s, value}, {u"text"_s, text}}; };
-    const auto add = [&](const QString &key, const QString &group, const QString &label, const QString &help, const QVariantList &options = {}) {
+    const auto add = [&](const QString &key, const QString &group, const QString &label, const QString &help, const QVariantList &options, const Spec &spec) {
         auto choices = options;
         if (!choices.isEmpty()) choices.prepend(choice({}, i18nc("@item:inlistbox", "Use host setting")));
-        result.append(QVariantMap{{u"key"_s, key}, {u"group"_s, group}, {u"label"_s, label}, {u"help"_s, help}, {u"choices"_s, choices}});
+        auto withScope = spec;
+        withScope.inheritText = i18nc("@item:inlistbox", "Use host setting");
+        result.append(makeFieldDefinition(key, group, label, help, choices, withScope));
     };
     const QVariantList boolean{choice(u"true"_s, i18nc("@item:inlistbox", "On")), choice(u"false"_s, i18nc("@item:inlistbox", "Off"))};
     const auto video = i18nc("@title:group", "Video");
     const auto displays = i18nc("@title:group", "Console Displays");
     const auto media = i18nc("@title:group", "Audio and Devices");
     const auto virtualDesktop = i18nc("@title:group", "Virtual Compatibility");
-    add(u"Quality"_s, video, i18nc("@label", "Video quality"), i18nc("@info", "0–100. Higher values use more bandwidth."));
-    add(u"AdaptiveQuality"_s, video, i18nc("@label", "Adapt quality to the connection"), i18nc("@info", "Allow quality to adjust to measured link capacity."), boolean);
+    const auto when = [](Spec spec, const QString &mode) { spec.showWhenKey = u"MonitorMode"_s; spec.showWhenValue = mode; return spec; };
+    const auto interval = [](const QString &formLabel) { return Spec{.control = u"spin"_s, .section = u"video"_s, .advanced = true, .formLabel = formLabel, .min = 16, .max = 5000, .unit = i18nc("@label", "ms")}; };
+    add(u"Quality"_s, video, i18nc("@label", "Video quality"), i18nc("@info", "0–100. Higher values use more bandwidth."), {},
+        {.control = u"slider"_s, .section = u"video"_s, .formLabel = i18nc("@label", "Image quality"), .min = 0, .max = 100});
+    add(u"AdaptiveQuality"_s, video, i18nc("@label", "Adapt quality to the connection"), i18nc("@info", "Allow quality to adjust to measured link capacity."), boolean,
+        {.section = u"video"_s, .formLabel = i18nc("@label", "Adjust to connection")});
     add(u"Codec"_s, video, i18nc("@label", "Video codec preference"), i18nc("@info", "Available encoders and client support determine the actual codec. Shared Console viewers use AVC420."),
-        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"avc420"_s, i18nc("@item:inlistbox", "AVC420")), choice(u"avc444"_s, i18nc("@item:inlistbox", "AVC444 full color"))});
+        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"avc420"_s, i18nc("@item:inlistbox", "AVC420")), choice(u"avc444"_s, i18nc("@item:inlistbox", "AVC444 full color"))},
+        {.section = u"video"_s, .formLabel = i18nc("@label", "Color detail"),
+         .optionText = {{u"avc420"_s, i18nc("@item:inlistbox", "Standard color (AVC420)")}, {u"avc444"_s, i18nc("@item:inlistbox", "Full color (AVC444)")}}});
     add(u"SoftwareEncoding"_s, video, i18nc("@label", "Software encoding"), i18nc("@info", "Automatic considers link capacity and CPU cost. Hardware preference can still use software AVC as a last resort."),
-        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"never"_s, i18nc("@item:inlistbox", "Prefer hardware")), choice(u"prefer"_s, i18nc("@item:inlistbox", "Allow the best codec in software"))});
+        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"never"_s, i18nc("@item:inlistbox", "Prefer hardware")), choice(u"prefer"_s, i18nc("@item:inlistbox", "Allow the best codec in software"))},
+        {.section = u"video"_s, .advanced = true, .formLabel = i18nc("@label", "Encoding policy")});
     add(u"Av1Tiles"_s, video, i18nc("@label", "AV1 tiles"), i18nc("@info", "Automatic uses client decode capability. More tiles can help software decoding."),
-        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"1"_s, u"1"_s), choice(u"2"_s, u"2"_s), choice(u"4"_s, u"4"_s), choice(u"8"_s, u"8"_s), choice(u"16"_s, u"16"_s)});
-    add(u"Avc444MotionGapMs"_s, video, i18nc("@label", "AVC444 color update interval during motion"), i18nc("@info", "16–5000 ms; must not exceed the rest interval."));
-    add(u"Avc444RestMs"_s, video, i18nc("@label", "AVC444 rest interval"), i18nc("@info", "16–5000 ms; must be at least the motion interval."));
-    add(u"Avc444MaxGapMs"_s, video, i18nc("@label", "AVC444 maximum color update gap"), i18nc("@info", "16–5000 ms; must be at least the rest interval."));
-    add(u"PreferAudioQuality"_s, media, i18nc("@label", "Prefer audio quality"), i18nc("@info", "Prioritize audio quality when media is enabled."), boolean);
-    add(u"StandardClientMedia"_s, media, i18nc("@label", "Standard client media"), i18nc("@info", "Requires host permission and channel consent. This does not grant microphone or camera access."), boolean);
+        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"1"_s, u"1"_s), choice(u"2"_s, u"2"_s), choice(u"4"_s, u"4"_s), choice(u"8"_s, u"8"_s), choice(u"16"_s, u"16"_s)},
+        {.section = u"video"_s, .advanced = true});
+    add(u"Avc444MotionGapMs"_s, video, i18nc("@label", "AVC444 color update interval during motion"), i18nc("@info", "16–5000 ms; must not exceed the rest interval."), {},
+        interval(i18nc("@label", "AVC444 motion interval")));
+    add(u"Avc444RestMs"_s, video, i18nc("@label", "AVC444 rest interval"), i18nc("@info", "16–5000 ms; must be at least the motion interval."), {},
+        interval(i18nc("@label", "AVC444 rest interval")));
+    add(u"Avc444MaxGapMs"_s, video, i18nc("@label", "AVC444 maximum color update gap"), i18nc("@info", "16–5000 ms; must be at least the rest interval."), {},
+        interval(i18nc("@label", "AVC444 maximum interval")));
+    add(u"PreferAudioQuality"_s, media, i18nc("@label", "Prefer audio quality"), i18nc("@info", "Prioritize audio quality when media is enabled."), boolean,
+        {.section = u"sound"_s, .formLabel = i18nc("@label", "When network is busy"),
+         .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Keep sound smooth")}, {u"false"_s, i18nc("@item:inlistbox", "Keep video sharp")}}});
+    add(u"StandardClientMedia"_s, media, i18nc("@label", "Standard client media"), i18nc("@info", "Requires host permission and channel consent. This does not grant microphone or camera access."), boolean,
+        {.section = u"sound"_s, .formLabel = i18nc("@label", "Other RDP app media"),
+         .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Allow")}, {u"false"_s, i18nc("@item:inlistbox", "Block")}}});
     add(u"MonitorMode"_s, displays, i18nc("@label", "Share"), i18nc("@info", "Console capture selection. Client-created displays follow the separate layout and physical-display policy."),
         {choice(u"workspace"_s, i18nc("@item:inlistbox", "Whole workspace")), choice(u"primary"_s, i18nc("@item:inlistbox", "Primary display")), choice(u"specific"_s, i18nc("@item:inlistbox", "One display")),
-         choice(u"multi"_s, i18nc("@item:inlistbox", "Displays as separate streams")), choice(u"virtual"_s, i18nc("@item:inlistbox", "Client-created displays"))});
-    add(u"MonitorIndex"_s, displays, i18nc("@label", "Display index"), i18nc("@info", "0–65535, starting at zero. Used when sharing one display; it must exist in the current Console desktop."));
+         choice(u"multi"_s, i18nc("@item:inlistbox", "Displays as separate streams")), choice(u"virtual"_s, i18nc("@item:inlistbox", "Client-created displays"))},
+        {.section = u"displays"_s});
+    add(u"MonitorIndex"_s, displays, i18nc("@label", "Display index"), i18nc("@info", "0–65535, starting at zero. Used when sharing one display; it must exist in the current Console desktop."), {},
+        when({.control = u"spin"_s, .section = u"displays"_s, .min = 0, .max = 65535}, u"specific"_s));
     add(u"VirtualMonitorPolicy"_s, displays, i18nc("@label", "Physical displays with client-created displays"), i18nc("@info", "Replace turns off physical displays during the connection; local reclaim restores them."),
-        {choice(u"replace"_s, i18nc("@item:inlistbox", "Replace physical displays")), choice(u"extend"_s, i18nc("@item:inlistbox", "Keep physical displays"))});
+        {choice(u"replace"_s, i18nc("@item:inlistbox", "Replace physical displays")), choice(u"extend"_s, i18nc("@item:inlistbox", "Keep physical displays"))},
+        when({.section = u"displays"_s, .formLabel = i18nc("@label", "Physical displays"),
+              .optionText = {{u"extend"_s, i18nc("@item:inlistbox", "Keep on")}, {u"replace"_s, i18nc("@item:inlistbox", "Turn off during connection")}}}, u"virtual"_s));
     add(u"VirtualMonitorLayout"_s, displays, i18nc("@label", "Client-created display layout"), i18nc("@info", "Client layout needs the client's explicit monitor request. Physical layout mirrors native display pixels and scale."),
-        {choice(u"client"_s, i18nc("@item:inlistbox", "Client monitors")), choice(u"single"_s, i18nc("@item:inlistbox", "One display")), choice(u"physical"_s, i18nc("@item:inlistbox", "Physical display layout"))});
-    add(u"VirtualMonitorFallbackSize"_s, displays, i18nc("@label", "Fallback display size"), i18nc("@info", "Even WIDTHxHEIGHT, from 320x200 through 8192x8192. Used when client monitor data is unavailable."));
-    add(u"WakeDisplayOnConnect"_s, i18nc("@title:group", "Session"), i18nc("@label", "Wake and keep displays awake"), i18nc("@info", "Applies to the streaming desktop in Console and Virtual, and releases when the final viewer leaves. It never unlocks the screen."), boolean);
+        {choice(u"client"_s, i18nc("@item:inlistbox", "Client monitors")), choice(u"single"_s, i18nc("@item:inlistbox", "One display")), choice(u"physical"_s, i18nc("@item:inlistbox", "Physical display layout"))},
+        when({.section = u"displays"_s, .formLabel = i18nc("@label", "Layout")}, u"virtual"_s));
+    add(u"VirtualMonitorFallbackSize"_s, displays, i18nc("@label", "Fallback display size"), i18nc("@info", "Even WIDTHxHEIGHT, from 320x200 through 8192x8192. Used when client monitor data is unavailable."), {},
+        when({.control = u"size"_s, .section = u"displays"_s, .formLabel = i18nc("@label", "Fallback size"), .min = 320, .max = 8192, .heightMin = 200}, u"virtual"_s));
+    add(u"WakeDisplayOnConnect"_s, i18nc("@title:group", "Session"), i18nc("@label", "Wake and keep displays awake"), i18nc("@info", "Applies to the streaming desktop in Console and Virtual, and releases when the final viewer leaves. It never unlocks the screen."), boolean,
+        {.section = u"sound"_s, .formLabel = i18nc("@label", "Keep displays awake")});
     add(u"VirtualStockClientPolicy"_s, virtualDesktop, i18nc("@label", "Standard clients in Virtual"), i18nc("@info", "Controls clients without Farside session selection. Desktop ownership always follows the authenticated account."),
-        {choice(u"attach-or-create"_s, i18nc("@item:inlistbox", "Attach to or create a desktop")), choice(u"refuse"_s, i18nc("@item:inlistbox", "Require session selection"))});
+        {choice(u"attach-or-create"_s, i18nc("@item:inlistbox", "Attach to or create a desktop")), choice(u"refuse"_s, i18nc("@item:inlistbox", "Require session selection"))},
+        {.section = u"video"_s, .advanced = true, .formLabel = i18nc("@label", "Other RDP apps in Virtual")});
     return result;
 }
