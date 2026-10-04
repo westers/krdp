@@ -17,18 +17,22 @@ Updated 2026-10-02 for the ten-to-five page consolidation (evidence
   `BrokerMainPage.qml` `pages`). Certificate, New Desktop Hardware and Service
   Details are no longer pages; they are embeddable sections hosted by the page
   that owns their state.
-- Overview presents Console and Virtual as plain full-width groups: status,
-  immediate connection and boot switches, saved (and verified running) address,
-  Configure…, Restart…, Stop… and a Details expander holding the read-only host
-  inspection (`BrokerServiceDetails`). Access and personal preferences are the
-  footer links. Saved wildcard bindings are described as all interfaces
-  and a port, never offered as a connectable address.
-- Console and Virtual configuration group Connection (with the inline
-  `BrokerCertificateSection`), Video, Sound and devices, then Advanced. The
-  Virtual page ends with the inline `BrokerHardwareSection` (GPU grants and
-  VA-API policy for newly created desktops); it is a separate draft but is saved
-  by the same Apply as the Virtual host settings. A status line names the dirty
-  scope. Console display selection links to personal preferences.
+- The module is master-detail (`BrokerMainPage.qml` is the sidebar, `sidebarMode: true`,
+  `kcm.columnWidth` set): four rows (Console, Virtual, Who Can Connect, My Preferences).
+  The route rows carry a status and address subtitle (`BrokerRouteSummary`) and a trailing
+  enable switch whose stop/restart asks first (`BrokerServiceDialog`). Choosing a row
+  replaces the page pushed beside the sidebar; the framework collapses to one page with
+  Back below 36 grid units. Console opens by itself, and the page must be pushed while
+  the page row is still being created, or the shell stays in one-column mode.
+- Console and Virtual are one `Kirigami.FormLayout` with section headings: Service
+  (status, address, start at boot, Restart), Connection (with the inline
+  `BrokerCertificateSection`), Picture and sound, camera state, Displays (Console) or
+  New desktops (Virtual: GPU grants, saved by the same Apply as the host settings),
+  then a collapsed Advanced group that also holds Troubleshooting. Never destroy a
+  row of a live FormLayout (Kirigami warns): hide Advanced rows, do not drop them
+  from a Repeater model. Field help is a (?) button, not a grey paragraph.
+- Who Can Connect asks for administrator access once, when the row is opened, and
+  offers Unlock… if that was cancelled.
 - Certificate changes use the dedicated local C++ draft. Cancel and leaving the
   page (Back) discard only that editor. Use Certificate Changes stages only TLS
   fields into the host draft; Apply saves it and restarting remains an explicit

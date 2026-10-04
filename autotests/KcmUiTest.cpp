@@ -79,16 +79,18 @@ QStringList takeMessages()
     return std::exchange(messages, {});
 }
 
-QQuickItem *flickableOf(QQuickItem *page)
-{
-    return page->property("flickable").value<QQuickItem *>();
-}
 QQuickItem *findItem(QQuickItem *parent, const QString &name)
 {
     if (parent->objectName() == name) return parent;
     if (auto *item = parent->findChild<QQuickItem *>(name)) return item;
     for (auto *child : parent->childItems()) if (auto *item = findItem(child, name)) return item;
     return nullptr;
+}
+// The scrolling area of a page: a scrollable page's flickable, or the sidebar's list view.
+QQuickItem *flickableOf(QQuickItem *page)
+{
+    if (auto *flickable = page->property("flickable").value<QQuickItem *>()) return flickable;
+    return findItem(page, u"sidebarList"_s);
 }
 }
 
@@ -109,6 +111,17 @@ class KcmUiTest : public QObject
     {
         const qreal chrome = 3 * 2 * 18.0 + 12; // generous: ~2 grid units each, plus separators
         return QSizeF(window.width(), window.height() - chrome);
+    }
+
+    // Back to the sidebar alone: the page row the sidebar opened beside itself is closed.
+    void popToSidebar()
+    {
+        while (m_module->depth() > 1) {
+            auto *top = m_module->subPage(m_module->depth() - 2);
+            m_module->pop();
+            if (top) top->setParentItem(nullptr);
+        }
+        QCoreApplication::processEvents();
     }
 
     QQuickItem *showPage(QQuickItem *page, const QSize &window)
@@ -140,7 +153,7 @@ class KcmUiTest : public QObject
         const QRectF viewInPage = flickable->mapRectToItem(page, QRectF(0, 0, flickable->width(), viewHeight));
         QVERIFY2(viewInPage.bottom() <= page->height() + 0.5, "the scrolling area runs past the page");
 
-        QList<std::pair<QString, QRectF>> rects;
+        QList<std::tuple<QString, QRectF, QQuickItem *>> rects;
         for (const auto &name : names) {
             auto *item = findItem(page, name);
             QVERIFY2(item, qPrintable(u"missing item "_s + name));
@@ -165,15 +178,18 @@ class KcmUiTest : public QObject
             const QRectF inView = item->mapRectToItem(flickable, QRectF(0, 0, item->width(), std::min<qreal>(item->height(), viewHeight)));
             QVERIFY2(inView.top() >= -0.5 && inView.bottom() <= viewHeight + 0.5,
                      qPrintable(u"%1 cannot be scrolled into view (%2..%3 of %4)"_s.arg(name).arg(inView.top()).arg(inView.bottom()).arg(viewHeight)));
-            rects.append({name, r});
+            rects.append({name, r, item});
         }
         flickable->setProperty("contentY", 0);
 
         for (qsizetype i = 0; i < rects.size(); ++i) {
             for (qsizetype j = i + 1; j < rects.size(); ++j) {
-                const QRectF overlap = rects.at(i).second.intersected(rects.at(j).second);
+                const auto &[nameA, rectA, itemA] = rects.at(i);
+                const auto &[nameB, rectB, itemB] = rects.at(j);
+                if (itemA->isAncestorOf(itemB) || itemB->isAncestorOf(itemA)) continue; // a switch inside its row
+                const QRectF overlap = rectA.intersected(rectB);
                 QVERIFY2(overlap.width() < 1 || overlap.height() < 1,
-                         qPrintable(u"%1 overlaps %2"_s.arg(rects.at(i).first, rects.at(j).first)));
+                         qPrintable(u"%1 overlaps %2"_s.arg(nameA, nameB)));
             }
         }
     }
@@ -260,6 +276,25 @@ private Q_SLOTS:
         QCOMPARE(page->objectName(), u"mainPage"_s);
         QCOMPARE(page->property("title").toString(), u"Farside Remote Desktop"_s);
         showPage(page, {1280, 800});
+        QTest::qWait(100);
+        const auto warnings = takeMessages();
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
+        popToSidebar();
+    }
+
+    void sidebarAsksTheShellForAColumnAndOpensConsole()
+    {
+        popToSidebar();
+        auto *page = m_module->mainUi();
+        // A positive column width makes the shell show the sidebar beside the page that is pushed.
+        QCOMPARE(m_module->columnWidth(), int(page->property("sidebarWidth").toReal()));
+        QVERIFY(m_module->columnWidth() > 0);
+        QVERIFY(QMetaObject::invokeMethod(page, "openConsole"));
+        QCOMPARE(m_module->depth(), 2);
+        QCOMPARE(m_module->subPage(0)->objectName(), u"consoleSettingsPage"_s);
+        QCOMPARE(page->property("currentIndex").toInt(), 0);
+        popToSidebar();
+        QCOMPARE(page->property("currentIndex").toInt(), -1); // Back leaves nothing selected
         const auto warnings = takeMessages();
         QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
     }
@@ -272,19 +307,22 @@ private Q_SLOTS:
         QTest::newRow("small window 640x360") << QSize(640, 360);
     }
 
-    // Root list page, then each destination pushed through the real KCM page
-    // stack (kcm.push) and left through kcm.pop, as System Settings does.
+    // The sidebar, then each destination pushed through the real KCM page stack
+    // (kcm.push) and left through kcm.pop, as System Settings does. Who Can Connect
+    // asks for authorization when opened, so it is pushed directly here.
     void mainPageItemsReachable()
     {
         QFETCH(QSize, window);
+        popToSidebar();
         auto *page = showPage(m_module->mainUi(), window);
+        QTest::qWait(100);
+        popToSidebar();
         QVERIFY(!page->property("currentPage").isValid()); // no custom page switch left
         QVERIFY(!findItem(page, u"settingsBack"_s));       // no custom Back: the shell supplies it
-        checkReachable(page, {u"consoleHostEnabled"_s, u"consoleHostStatus"_s, u"configureConsole"_s, u"configureVirtual"_s, u"configureAccess"_s, u"configurePreferences"_s});
+        checkReachable(page, {u"sidebar_console"_s, u"sidebar_virtual"_s, u"sidebar_access"_s, u"sidebar_preferences"_s, u"consoleHostEnabled"_s, u"virtualHostEnabled"_s});
         const int depth = m_module->depth();
         const struct { const char *opener; const char *objectName; } destinations[] = {
-            {"openConsole", "consoleSettingsPage"}, {"openVirtual", "virtualSettingsPage"},
-            {"openAccess", "brokerSignInPage"}, {"openPreferences", "brokerPreferencesPage"}};
+            {"openConsole", "consoleSettingsPage"}, {"openVirtual", "virtualSettingsPage"}, {"openPreferences", "brokerPreferencesPage"}};
         for (const auto &destination : destinations) {
             QVERIFY2(QMetaObject::invokeMethod(page, destination.opener), destination.opener);
             QCOMPARE(m_module->depth(), depth + 1);
@@ -298,37 +336,39 @@ private Q_SLOTS:
                                     u"loadHostSettings"_s, u"loadBrokerPreferences"_s, u"loadBrokerAuthentication"_s, u"defaultHostSettings"_s, u"defaultBrokerPreferences"_s})
                 QVERIFY2(!findItem(sub, old), qPrintable(u"%1 still has %2"_s.arg(QString::fromLatin1(destination.opener), old)));
             QVERIFY2(sub->property("footer").value<QQuickItem *>() == nullptr, destination.opener);
-            m_module->pop(); // Back
-            sub->setParentItem(nullptr); // the test window is not the shell's page row
+            popToSidebar(); // Back
             QCOMPARE(m_module->depth(), depth);
         }
+        m_module->push(u"BrokerSignInPage.qml"_s);
+        auto *access = m_module->subPage(m_module->depth() - 2);
+        QVERIFY(access);
+        QCOMPARE(access->objectName(), u"brokerSignInPage"_s);
+        showPage(access, window);
+        QTest::qWait(100);
+        QVERIFY(findItem(access, u"accessLocked"_s)); // locked until the user opens it from the sidebar
+        popToSidebar();
         const auto warnings = takeMessages();
         QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
     }
 
-    void displayPreferencesLinkPushesPreferencesOnTopOfHostPage()
+    void displayPreferencesLinkSwitchesTheDetailPaneToPreferences()
     {
+        popToSidebar();
         auto *page = m_module->mainUi();
-        const int depth = m_module->depth();
         takeMessages();
         QVERIFY(QMetaObject::invokeMethod(page, "openConsole"));
-        auto *hostPage = m_module->subPage(m_module->depth() - 2);
+        QCOMPARE(m_module->depth(), 2);
+        auto *hostPage = m_module->subPage(0);
         QVERIFY(hostPage);
         showPage(hostPage, {1280, 800});
         auto *link = findItem(hostPage, u"consoleDisplayPreferences"_s);
         QVERIFY(link);
         QVERIFY(QMetaObject::invokeMethod(link, "clicked"));
-        QCOMPARE(m_module->depth(), depth + 2);
-        QCOMPARE(m_module->subPage(m_module->depth() - 2)->objectName(), u"brokerPreferencesPage"_s);
-        QCOMPARE(m_module->subPage(m_module->depth() - 2)->property("scrollToDisplays").toBool(), true);
-        auto *preferencesPage = m_module->subPage(m_module->depth() - 2);
-        showPage(preferencesPage, {1280, 800}); // let delayed layout work finish before it is popped
-        m_module->pop();
-        preferencesPage->setParentItem(nullptr);
-        QCOMPARE(m_module->subPage(m_module->depth() - 2)->objectName(), u"consoleSettingsPage"_s); // Back returns to the host page
-        m_module->pop();
-        hostPage->setParentItem(nullptr);
-        QCOMPARE(m_module->depth(), depth);
+        QTRY_COMPARE(m_module->subPage(0)->objectName(), u"brokerPreferencesPage"_s); // replaced, not stacked
+        QCOMPARE(m_module->depth(), 2);
+        QCOMPARE(m_module->subPage(0)->property("scrollToDisplays").toBool(), true);
+        showPage(m_module->subPage(0), {1280, 800}); // let delayed layout work finish before it is popped
+        popToSidebar();
         const auto warnings = takeMessages();
         QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
     }
@@ -340,11 +380,11 @@ private Q_SLOTS:
         QTest::addColumn<QString>("title");
         QTest::addColumn<QStringList>("keyItems");
         QTest::newRow("broker sign-in") << u"BrokerSignInPage.qml"_s << u"brokerSignInPage"_s << u"Who Can Connect"_s
-                                       << QStringList{u"expandWhoCanSignIn"_s};
+                                       << QStringList{u"accessLocked"_s};
         QTest::newRow("broker preferences") << u"BrokerPreferencesPage.qml"_s << u"brokerPreferencesPage"_s << u"My Preferences"_s
-                                          << QStringList{u"preference_Quality"_s};
-        QTest::newRow("broker hosts") << u"BrokerHostsPage.qml"_s << u"brokerHostsPage"_s << u"Console Settings"_s
-                                    << QStringList{u"host_Port"_s};
+                                          << QStringList{u"inherit_Quality"_s};
+        QTest::newRow("broker hosts") << u"BrokerHostsPage.qml"_s << u"brokerHostsPage"_s << u"Console"_s
+                                    << QStringList{u"host_Port"_s, u"consoleServiceRestart"_s};
 
     }
 
@@ -355,6 +395,7 @@ private Q_SLOTS:
         QFETCH(QString, title);
         QFETCH(QStringList, keyItems);
 
+        popToSidebar();
         takeMessages();
         const int depth = m_module->depth();
         m_module->push(file);
@@ -415,7 +456,7 @@ private Q_SLOTS:
         QTest::newRow("Console")<<u"console"_s<<0;QTest::newRow("Virtual")<<u"virtual"_s<<1;
     }
     void hostNavigationSelectsScope() {
-        QFETCH(QString,route); QFETCH(int,index); auto *main=m_module->mainUi(); const int depth=m_module->depth();
+        QFETCH(QString,route); QFETCH(int,index); popToSidebar(); auto *main=m_module->mainUi(); const int depth=m_module->depth();
         QVERIFY(QMetaObject::invokeMethod(main,index==0?"openConsole":"openVirtual"));
         auto *page=m_module->subPage(m_module->depth()-2); QVERIFY(page);
         QCOMPARE(page->objectName(),index==0?u"consoleSettingsPage"_s:u"virtualSettingsPage"_s);

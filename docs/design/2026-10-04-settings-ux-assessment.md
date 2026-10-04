@@ -461,3 +461,10 @@ nothing uploaded).
 ### 2026-10-04: layout (Steve)
 
 Layout **B** (master-detail sidebar) chosen by Steve. Design A (dashboard root), its wireframe and section 6 are superseded. Sidebar rows: Console, Virtual, Who Can Connect, My Preferences; route rows carry a status subtitle and a trailing enable switch; `kcm.columnWidth` master-detail, drill-down at narrow width; no page may be a single control. Slice S4 rewritten accordingly. S5 onward are unchanged except where they refer to the dashboard root.
+
+### S4 result (2026-10-04)
+
+Layout B landed in source (`OPT-057 S4 Add the master-detail settings sidebar`). Sidebar, populated pages,
+inventory test and captures: `~/dev/rdp/evidence/2026-10-04-settings-s4/REVIEW.md`. The framework's
+`sidebarMode` supplies the narrow drill-down (below 36 grid units); the page row must receive the first detail page
+while it is being created. Not exercised: real polkit prompts, a window larger than the shell's default size.

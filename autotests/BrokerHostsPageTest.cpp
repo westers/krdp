@@ -188,7 +188,7 @@ private Q_SLOTS:
             const auto item=[&](const QString &name){return find(page,name);};
             const bool hw=model==&session;   // the session model is edited through the Virtual page's hardware section
             const QString prefix=hw?u"desktop_"_s:u"host_"_s;
-            if(hw){auto *section=item(u"desktopHardwareSection"_s);QVERIFY(section);QVERIFY(section->setProperty("showPciEditor",true));}
+            if(hw) QVERIFY(item(u"desktopHardwareSection"_s));   // GPU grants live on the Virtual page; the raw PCI list is under Advanced
             QVERIFY(!model->loaded()); QVERIFY(!item(u"unlockHostSettings"_s)); QVERIFY(!item(u"unlockDesktopHardware"_s)); QVERIFY(model->reload()); QTRY_VERIFY(!model->busy()); QVERIFY(model->loaded());
             for(const auto &definition:model->definitions()) {
                 const auto row=definition.toMap();const auto key=row[u"key"_s].toString();

@@ -4,8 +4,13 @@ import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
+import org.kde.kirigami.delegates as KirigamiDelegates
 import org.kde.kcmutils as KCM
-KCM.SimpleKCM {
+// The sidebar of a master-detail module: four rows (Console, Virtual, Who Can
+// Connect, My Preferences). The selected row's page is pushed beside it through
+// the KCM page stack. Below one detail-pane's worth of room the shell shows one
+// page at a time instead, and Back returns to this list.
+KCM.ScrollViewKCM {
     id: root
     objectName: "mainPage"
     property var navigation: kcm
@@ -16,72 +21,122 @@ KCM.SimpleKCM {
     property var authentication: kcm.brokerAuthentication
     property var preferences: kcm.brokerPreferences
     property string hostName: kcm.hostName
+    readonly property real sidebarWidth: Kirigami.Units.gridUnit * 14
+    // Index of the row whose page is open (-1: none, e.g. after Back in single-column mode).
+    property int selected: -1
+    readonly property int currentIndex: navigation.depth > 1 ? selected : -1
+    // One page at a time (narrow): the list is only a menu, so it shows no selection.
+    readonly property bool singleColumn: !!Kirigami.ColumnView.view && Kirigami.ColumnView.view.columnResizeMode === Kirigami.ColumnView.SingleColumn
+    readonly property var rows: [
+        {key: "console", title: i18nc("@title", "Console"), icon: "preferences-desktop-display", route: "console"},
+        {key: "virtual", title: i18nc("@title", "Virtual"), icon: "preferences-desktop-virtual", route: "virtual"},
+        {key: "access", title: i18nc("@title", "Who Can Connect"), icon: "preferences-desktop-user-password", route: ""},
+        {key: "preferences", title: i18nc("@title", "My Preferences"), icon: "preferences-desktop-user", route: ""}
+    ]
     title: i18nc("@title:window", "Farside Remote Desktop")
-    // Native KCM navigation: each destination is pushed on the KCM page stack and
-    // the shell supplies the header, title and Back. Unsaved edits live in the
-    // scoped models, so a popped page loses only transient view state.
+    // The framework's sidebar mode: beside the detail page when the view is at least 36 grid units wide,
+    // otherwise one page at a time with Back (the standard drill-down).
+    sidebarMode: true
     function hostProperties(scope) {
         return {objectName: scope === 0 ? "consoleSettingsPage" : "virtualSettingsPage", fixedScope: scope, consoleSettings: consoleHost, virtualSettings: virtualHost, sessionSettings: sessionSettings, administration: administration, navigation: root};
     }
-    function openConsole() { navigation.push("BrokerHostsPage.qml", hostProperties(0)); }
-    function openVirtual() { navigation.push("BrokerHostsPage.qml", hostProperties(1)); }
-    function openAccess() { navigation.push("BrokerSignInPage.qml", {administration: authentication, serviceAdministration: administration}); }
-    function pushPreferences(scrollToDisplays) { navigation.push("BrokerPreferencesPage.qml", {preferences: preferences, scrollToDisplays: scrollToDisplays}); }
-    function openPreferences() { pushPreferences(false); }
-    function showPreferences() { pushPreferences(true); }
-    function copyAddressToClipboard(address) { navigation.copyAddressToClipboard(address); }
-    Component.onCompleted: if (!administration.busy && administration.services.some(service => !service.known)) administration.refresh(false)
-    ColumnLayout {
-      ColumnLayout {
-        Layout.fillWidth: true
-        Layout.maximumWidth: Kirigami.Units.gridUnit * 48
-        Layout.alignment: Qt.AlignLeft
-        spacing: Kirigami.Units.largeSpacing
-        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Choose which desktop to make available. Service switches apply immediately; other changes are saved with Apply.") }
-        BrokerApplyFailures { }
-        // Saved changes only take effect when the service restarts, and a restart drops connected clients,
-        // so it is never done silently: each action asks for confirmation first.
-        Kirigami.InlineMessage {
-            id: restartNotice; objectName: "restartRequired"; Layout.fillWidth: true; type: Kirigami.MessageType.Information
-            readonly property bool restartConsole: root.consoleHost.applicationRequired || root.authentication.lastSaveRequiresRestart
-            readonly property bool restartVirtual: root.virtualHost.applicationRequired || root.authentication.lastSaveRequiresRestart
-            visible: restartConsole || restartVirtual
-            text: restartConsole && restartVirtual ? i18nc("@info", "Saved. Restart Console and Virtual to apply the changes.") : restartConsole ? i18nc("@info", "Saved. Restart Console to apply the changes.") : i18nc("@info", "Saved. Restart Virtual to apply the changes.")
-            actions: [
-                Kirigami.Action { objectName: "restartNoticeConsole"; visible: restartNotice.restartConsole; text: i18nc("@action", "Restart Console…"); enabled: root.administration.services[0].canRestart; onTriggered: consoleControls.request("restart") },
-                Kirigami.Action { objectName: "restartNoticeVirtual"; visible: restartNotice.restartVirtual; text: i18nc("@action", "Restart Virtual…"); enabled: root.administration.services[1].canRestart; onTriggered: virtualControls.request("restart") }
-            ]
+    // Replace whatever detail page is open with the one for this row.
+    function select(index, properties) {
+        if (index === selected && navigation.depth > 1 && !properties) {
+            // Already open: in one-column mode the page is behind the list, so bring it forward.
+            if (navigation.currentIndex !== undefined) navigation.currentIndex = navigation.depth - 1;
+            return;
         }
-        Kirigami.Heading { level: 2; text: i18nc("@title:group", "Console") }
-        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Share this computer's desktop.") }
-        BrokerServiceControls { id: consoleControls; Layout.fillWidth: true; administration: root.administration; route: "console"; host: root.consoleHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
-        Flow {
-            Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
-            QQC2.Button { objectName: "configureConsole"; text: root.consoleHost.modified ? i18nc("@action:button", "Configure Console… (unsaved)") : i18nc("@action:button", "Configure Console…"); onClicked: root.openConsole() }
-            QQC2.Button { objectName: "consoleRestart"; text: i18nc("@action:button", "Restart…"); enabled: root.administration.services[0].canRestart; onClicked: consoleControls.request("restart") }
-            QQC2.Button { objectName: "consoleStop"; text: i18nc("@action:button", "Stop…"); enabled: root.administration.services[0].canStop; onClicked: consoleControls.request("stop") }
-            QQC2.Button { objectName: "consoleDetailsToggle"; flat: true; icon.name: consoleDetailsBox.visible ? "arrow-down" : "arrow-right"; text: i18nc("@action:button", "Details"); onClicked: consoleDetailsBox.visible = !consoleDetailsBox.visible }
+        while (navigation.depth > 1) navigation.pop();
+        selected = index;
+        switch (index) {
+        case 0: navigation.push("BrokerHostsPage.qml", hostProperties(0)); break;
+        case 1: navigation.push("BrokerHostsPage.qml", hostProperties(1)); break;
+        case 2:
+            // The access policy is administrator protected: asked for once, when the user opens it.
+            if (!authentication.loaded && !authentication.busy) authentication.reload();
+            navigation.push("BrokerSignInPage.qml", {administration: authentication, serviceAdministration: administration});
+            break;
+        default: navigation.push("BrokerPreferencesPage.qml", Object.assign({preferences: preferences}, properties || {}));
         }
-        BrokerServiceDetails { id: consoleDetailsBox; visible: false; Layout.fillWidth: true; host: root.consoleHost; administration: root.administration; route: "console"; navigation: root; hostName: root.hostName }
-        Kirigami.Separator { Layout.fillWidth: true }
-        Kirigami.Heading { level: 2; text: i18nc("@title:group", "Virtual") }
-        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Separate desktops for remote users.") }
-        BrokerServiceControls { id: virtualControls; Layout.fillWidth: true; administration: root.administration; route: "virtual"; host: root.virtualHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
-        Flow {
-            Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
-            QQC2.Button { objectName: "configureVirtual"; text: root.virtualHost.modified || root.sessionSettings.modified ? i18nc("@action:button", "Configure Virtual… (unsaved)") : i18nc("@action:button", "Configure Virtual…"); onClicked: root.openVirtual() }
-            QQC2.Button { objectName: "virtualRestart"; text: i18nc("@action:button", "Restart…"); enabled: root.administration.services[1].canRestart; onClicked: virtualControls.request("restart") }
-            QQC2.Button { objectName: "virtualStop"; text: i18nc("@action:button", "Stop…"); enabled: root.administration.services[1].canStop; onClicked: virtualControls.request("stop") }
-            QQC2.Button { objectName: "virtualDetailsToggle"; flat: true; icon.name: virtualDetailsBox.visible ? "arrow-down" : "arrow-right"; text: i18nc("@action:button", "Details"); onClicked: virtualDetailsBox.visible = !virtualDetailsBox.visible }
-        }
-        BrokerServiceDetails { id: virtualDetailsBox; visible: false; Layout.fillWidth: true; host: root.virtualHost; administration: root.administration; route: "virtual"; navigation: root; hostName: root.hostName }
-      }
     }
-    footer: QQC2.ToolBar {
-        contentItem: RowLayout {
-            QQC2.Button { objectName: "configureAccess"; text: root.authentication.modified ? i18nc("@action:button", "Who Can Connect… (unsaved)") : i18nc("@action:button", "Who Can Connect…"); onClicked: root.openAccess() }
-            QQC2.Button { objectName: "configurePreferences"; text: root.preferences.modified ? i18nc("@action:button", "My Preferences… (unsaved)") : i18nc("@action:button", "My Preferences…"); onClicked: root.openPreferences() }
-            Item { Layout.fillWidth: true }
+    function openConsole() { select(0); }
+    function openVirtual() { select(1); }
+    function openAccess() { select(2); }
+    function openPreferences() { select(3); }
+    function showPreferences() { select(3, {scrollToDisplays: true}); }
+    function copyAddressToClipboard(address) { navigation.copyAddressToClipboard(address); }
+    // The confirmed stop/restart used by the sidebar switches and by the route pages.
+    function requestOperation(route, operation) { (route === "console" ? consoleDialog : virtualDialog).request(operation); }
+    function summaryFor(route) { return route === "console" ? consoleSummary : virtualSummary; }
+    Component.onCompleted: {
+        if (navigation.columnWidth !== undefined) navigation.columnWidth = sidebarWidth;
+        // Beside the sidebar an empty detail pane would be a blank page, so Console opens at once.
+        // It has to happen now, while the page row is still deciding between one and two columns.
+        if (navigation.depth <= 1) select(0);
+        if (!administration.busy && administration.services.some(service => !service.known)) administration.refresh(false);
+    }
+    BrokerRouteSummary { id: consoleSummary; service: root.administration.services[0]; host: root.consoleHost; hostName: root.hostName }
+    BrokerRouteSummary { id: virtualSummary; service: root.administration.services[1]; host: root.virtualHost; hostName: root.hostName }
+    BrokerServiceDialog { id: consoleDialog; administration: root.administration; route: "console" }
+    BrokerServiceDialog { id: virtualDialog; administration: root.administration; route: "virtual" }
+    view: ListView {
+        id: list
+        objectName: "sidebarList"
+        model: root.rows
+        currentIndex: root.currentIndex
+        keyNavigationEnabled: true
+        activeFocusOnTab: true
+        delegate: QQC2.ItemDelegate {
+            id: row
+            required property int index
+            required property var modelData
+            readonly property var summary: modelData.route === "" ? null : root.summaryFor(modelData.route)
+            readonly property var host: modelData.key === "console" ? root.consoleHost : modelData.key === "virtual" ? root.virtualHost : null
+            readonly property bool pending: modelData.key === "console" ? root.consoleHost.modified : modelData.key === "virtual" ? root.virtualHost.modified || root.sessionSettings.modified : modelData.key === "access" ? root.authentication.modified : root.preferences.modified
+            objectName: "sidebar_" + modelData.key
+            width: ListView.view.width
+            highlighted: root.currentIndex === index && !root.singleColumn
+            text: modelData.title
+            // A single-choice list of pages: announced as one, with its selection, and operable by assistive technology.
+            Accessible.name: modelData.title
+            Accessible.role: Accessible.RadioButton
+            Accessible.checkable: true
+            Accessible.checked: highlighted
+            Accessible.onPressAction: clicked()
+            onClicked: root.select(index)
+            contentItem: RowLayout {
+                spacing: Kirigami.Units.smallSpacing
+                KirigamiDelegates.IconTitleSubtitle {
+                    Layout.fillWidth: true
+                    icon.name: row.modelData.icon
+                    title: row.modelData.title
+                    objectName: row.modelData.key + "Subtitle"
+                    subtitle: row.summary ? row.summary.subtitle : row.modelData.key === "access" ? i18nc("@info", "Accounts and remote logins") : i18nc("@info", "Your display and quality choices")
+                    selected: row.highlighted || row.down
+                    elide: Text.ElideRight
+                }
+                Kirigami.Icon {
+                    objectName: row.modelData.key + "Modified"
+                    visible: row.pending
+                    source: "document-edit"
+                    implicitWidth: Kirigami.Units.iconSizes.small; implicitHeight: Kirigami.Units.iconSizes.small
+                    QQC2.ToolTip.text: i18nc("@info:tooltip", "Unsaved changes")
+                    QQC2.ToolTip.visible: false
+                }
+                QQC2.Switch {
+                    objectName: row.modelData.route + "HostEnabled"
+                    visible: row.summary !== null
+                    Accessible.name: i18nc("@option:check %1 service", "Allow connections to %1", row.modelData.title)
+                    readonly property var service: row.summary ? row.summary.service : null
+                    checked: row.summary ? row.summary.running : false
+                    enabled: !!service && (service.canStart || service.canStop)
+                    onClicked: {
+                        root.requestOperation(row.modelData.route, checked ? "start" : "stop");
+                        checked = Qt.binding(() => row.summary ? row.summary.running : false);
+                    }
+                }
+            }
         }
     }
 }

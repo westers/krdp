@@ -11,7 +11,6 @@ ColumnLayout {
     id: root
     objectName: "certificateSection"
     required property var host
-    property var twins: []
     property bool open: false
     signal staged()
     signal cancelled()
@@ -20,6 +19,8 @@ ColumnLayout {
     property url certificateFile
     property url privateKeyFile
     property int selectionGeneration: 0
+    // One line for the page: the state, and the expiry date when the material is usable.
+    readonly property string summary: certificate.state === "valid" && certificate.notAfter ? i18nc("@info %1 date", "Valid until %1", String(certificate.notAfter).slice(0, 10)) : certificateState(certificate.state)
     spacing: Kirigami.Units.smallSpacing
     function begin() {
         if (!host.beginCertificateEdit()) return;
@@ -41,25 +42,20 @@ ColumnLayout {
         default: return i18nc("@info", "Not checked");
         }
     }
-    Kirigami.FormLayout {
-        id: savedForm
-        twinFormLayouts: root.twins
-        wideMode: width >= Kirigami.Units.gridUnit * 32;
-        Layout.alignment: Qt.AlignLeft
-        Layout.fillWidth: true
-        QQC2.Label { Kirigami.FormData.label: i18nc("@label", "Status:"); text: root.certificateState(root.certificate.state) }
-        Kirigami.SelectableLabel { visible: text !== ""; Kirigami.FormData.label: i18nc("@label", "Certificate:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: (root.host.metadata.effective || {}).Certificate || "" }
-        Kirigami.SelectableLabel { visible: text !== ""; Kirigami.FormData.label: i18nc("@label", "Private key:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: (root.host.metadata.effective || {}).CertificateKey || "" }
-        Kirigami.SelectableLabel { Kirigami.FormData.label: i18nc("@label", "Fingerprint:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: root.certificate.fingerprint || i18nc("@info", "Not available") }
-        QQC2.Label { Kirigami.FormData.label: i18nc("@label", "Validity:"); Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.certificate.notBefore ? i18nc("@info", "%1 to %2", root.certificate.notBefore, root.certificate.notAfter) : i18nc("@info", "Not available") }
-    }
-    QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "These details describe saved material. They do not prove which certificate a running service has loaded."); color: Kirigami.Theme.disabledTextColor }
     ColumnLayout {
         objectName: "certificateEditor"
         Layout.fillWidth: true
         visible: root.open
         spacing: Kirigami.Units.smallSpacing
-        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Stage certificate changes into this service's settings, then save them with Apply. Cancel preserves other changes. A restart is a separate action.") }
+        Kirigami.FormLayout {
+            id: savedForm
+            Layout.fillWidth: true
+            QQC2.Label { Kirigami.FormData.label: i18nc("@label", "Status:"); text: root.certificateState(root.certificate.state) }
+            Kirigami.SelectableLabel { visible: text !== ""; Kirigami.FormData.label: i18nc("@label", "Certificate:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: (root.host.metadata.effective || {}).Certificate || "" }
+            Kirigami.SelectableLabel { visible: text !== ""; Kirigami.FormData.label: i18nc("@label", "Private key:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: (root.host.metadata.effective || {}).CertificateKey || "" }
+            Kirigami.SelectableLabel { Kirigami.FormData.label: i18nc("@label", "Fingerprint:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: root.certificate.fingerprint || i18nc("@info", "Not available") }
+            QQC2.Label { Kirigami.FormData.label: i18nc("@label", "Validity:"); Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.certificate.notBefore ? i18nc("@info", "%1 to %2", root.certificate.notBefore, root.certificate.notAfter) : i18nc("@info", "Not available") }
+        }
         Kirigami.Heading { level: 4; text: i18nc("@title:group", "Certificate source") }
         ColumnLayout {
             visible: root.draft.loaded

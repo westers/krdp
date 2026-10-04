@@ -12,7 +12,6 @@ KCM.SimpleKCM {
     property var administration: kcm.brokerAuthentication
     property var serviceAdministration: null
     property bool removedPending: false
-    property bool expanded: false
     title: i18nc("@title:window", "Who Can Connect")
     function editAlias(route, alias, owner) {
         aliasDialog.route = route; aliasDialog.existing = alias !== ""; aliasDialog.originalOwner = owner;
@@ -20,118 +19,37 @@ KCM.SimpleKCM {
     }
     Connections { target: root.administration; function onChanged() { if (!root.administration.modified) root.removedPending = false; } }
     ColumnLayout {
-      ColumnLayout {
-        Layout.fillWidth: true
-        Layout.maximumWidth: Kirigami.Units.gridUnit * 48
-        Layout.alignment: Qt.AlignLeft
         spacing: Kirigami.Units.largeSpacing
         BrokerApplyFailures { }
-        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Permissions for both services. Expanding “Who can sign in” asks for administrator authorization to read the policy. Applying changes asks once for everything you changed, then restart the services.") }
         Kirigami.InlineMessage { objectName: "brokerAuthenticationError"; Layout.fillWidth: true; visible: root.administration.error !== ""; type: Kirigami.MessageType.Error; text: root.administration.error }
         Kirigami.InlineMessage {
             objectName: "brokerAuthenticationRestart"; Layout.fillWidth: true; visible: root.administration.lastSaveRequiresRestart; type: Kirigami.MessageType.Information
-            text: i18nc("@info", "Access policy saved. Restart Console and Virtual to load it. Saving does not change existing connections.")
+            text: i18nc("@info", "Saved. Restart Console and Virtual to use the new rules.")
             actions: [
                 Kirigami.Action { text: i18nc("@action", "Restart Console…"); enabled: root.serviceAdministration && root.serviceAdministration.services[0].canRestart; onTriggered: { restartConfirmation.route = "console"; restartConfirmation.open(); } },
                 Kirigami.Action { text: i18nc("@action", "Restart Virtual…"); enabled: root.serviceAdministration && root.serviceAdministration.services[1].canRestart; onTriggered: { restartConfirmation.route = "virtual"; restartConfirmation.open(); } }
             ]
         }
-        QQC2.Button {
-            objectName: "expandWhoCanSignIn"
-            text: i18nc("@action:button", "Who can sign in")
-            icon.name: root.expanded ? "arrow-down" : "arrow-right"
+        Kirigami.InlineMessage { visible: root.removedPending; Layout.fillWidth: true; text: i18nc("@info", "Remote login removed. Apply to save the change."); actions: Kirigami.Action { text: i18nc("@action", "Undo Remove"); onTriggered: { root.administration.undoRemoveAlias(); root.removedPending = false; } } }
+        // Account names and aliases are administrator protected. Opening this page asks once;
+        // if that was cancelled, this is the way to ask again.
+        Kirigami.PlaceholderMessage {
+            objectName: "accessLocked"
+            Layout.fillWidth: true; Layout.topMargin: Kirigami.Units.gridUnit * 2
+            visible: !root.administration.loaded
+            icon.name: "lock"
+            text: root.administration.busy ? i18nc("@info", "Waiting for authorization…") : i18nc("@info", "Administrator access needed")
+            explanation: root.administration.busy ? "" : i18nc("@info", "Sign-in rules and remote logins are protected. Unlock them to view or change them.")
+            helpfulAction: Kirigami.Action { objectName: "unlockAccessPolicy"; icon.name: "unlock"; text: i18nc("@action:button", "Unlock…"); enabled: !root.administration.busy; onTriggered: root.administration.reload() }
+        }
+        ColumnLayout {
+            Layout.fillWidth: true
+            visible: root.administration.loaded
             enabled: !root.administration.busy
-            // Account names and aliases are administrator-protected: asked for once, on first expansion.
-            onClicked: { root.expanded = !root.expanded; if (root.expanded && !root.administration.loaded) root.administration.reload(); }
+            spacing: Kirigami.Units.largeSpacing
+            BrokerAccessRoute { id: consoleRoute; Layout.fillWidth: true; page: root; route: "console"; twinFormLayouts: [virtualRoute] }
+            BrokerAccessRoute { id: virtualRoute; Layout.fillWidth: true; page: root; route: "virtual"; twinFormLayouts: [consoleRoute] }
         }
-        Kirigami.InlineMessage { visible: root.removedPending; Layout.fillWidth: true; text: i18nc("@info", "Remote login removed from this draft. Apply to save it."); actions: Kirigami.Action { text: i18nc("@action", "Undo Remove"); onTriggered: { root.administration.undoRemoveAlias(); root.removedPending = false; } } }
-        Repeater {
-            model: ["console", "virtual"]
-            delegate: ColumnLayout {
-                id: section
-                required property string modelData
-                readonly property var route: root.administration.policy[modelData] || {}
-                readonly property var pam: route.pam || {mode: "disabled", accounts: []}
-                Layout.fillWidth: true
-                visible: root.expanded && root.administration.loaded
-                enabled: root.administration.loaded && !root.administration.busy
-                Kirigami.Heading {
-                    level: 2
-                    text: section.modelData === "console" ? i18nc("@title:group", "Console") : i18nc("@title:group", "Virtual")
-                }
-                Kirigami.FormLayout {
-            wideMode: width >= Kirigami.Units.gridUnit * 32;
-            Layout.alignment: Qt.AlignLeft
-                    Layout.fillWidth: true
-                    QQC2.ComboBox {
-                        objectName: section.modelData + "PamMode"
-                        Kirigami.FormData.label: i18nc("@label", "System accounts:")
-                        implicitContentWidthPolicy: QQC2.ComboBox.WidestText
-                        Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24
-                        textRole: "text"
-                        valueRole: "value"
-                        model: [
-                            {text: i18nc("@item:inlistbox", "All eligible accounts"), value: "any"},
-                            {text: i18nc("@item:inlistbox", "Selected accounts"), value: "allow-list"},
-                            {text: i18nc("@item:inlistbox", "Disabled"), value: "disabled"}
-                        ]
-                        currentIndex: section.pam.mode === "any" ? 0 : section.pam.mode === "allow-list" ? 1 : 2
-                        onActivated: root.administration.setPam(section.modelData, currentValue,
-                            currentValue === "allow-list" ? section.pam.accounts : [])
-                    }
-                    QQC2.TextField {
-                        Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24
-                        objectName: section.modelData + "PamAccounts"
-                        Kirigami.FormData.label: i18nc("@label", "Allowed accounts:")
-                        visible: section.pam.mode === "allow-list"
-                        text: section.pam.accounts.join(", ")
-                        placeholderText: i18nc("@info:placeholder", "System login names, separated by commas")
-                        onEditingFinished: root.administration.setPam(section.modelData, "allow-list",
-                            text.split(",").map(value => value.trim()).filter(value => value !== ""))
-                    }
-                }
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    text: section.modelData === "console"
-                        ? i18nc("@info", "Console control is limited to the signed-in desktop owner.")
-                        : i18nc("@info", "Virtual desktops belong to the account used to sign in.")
-                }
-                Kirigami.Heading { level: 4; text: i18nc("@title:group", "Remote logins") }
-                QQC2.Label { visible: (section.route.credentials || []).length === 0; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "No remote logins added."); color: Kirigami.Theme.disabledTextColor }
-                ListView {
-                    Layout.fillWidth: true
-                    implicitHeight: contentHeight
-                    interactive: false
-                    clip: true
-                    model: section.route.credentials || []
-                    delegate: QQC2.ItemDelegate {
-                        id: account
-                        required property var modelData
-                        width: ListView.view.width
-                        contentItem: RowLayout {
-                            QQC2.Label { Layout.fillWidth: true; text: i18nc("@info %1 remote login %2 desktop owner", "%1 → %2", account.modelData.alias, account.modelData.owner); elide: Text.ElideRight }
-                            QQC2.ToolButton { text: i18nc("@action:button", "Edit…"); onClicked: root.editAlias(section.modelData, account.modelData.alias, account.modelData.owner) }
-                            QQC2.ToolButton { text: i18nc("@action:button", "Remove"); onClicked: { if (root.administration.removeAlias(section.modelData, account.modelData.alias)) root.removedPending = true; } }
-                        }
-                    }
-                }
-                RowLayout {
-                    QQC2.Button {
-                        objectName: section.modelData + "AddAlias"
-                        text: i18nc("@action:button", "Add Remote Login…")
-                        icon.name: "list-add"
-                        onClicked: root.editAlias(section.modelData, "", "")
-                    }
-                    Kirigami.ContextualHelpButton {
-                        toolTipText: i18nc("@info:tooltip", "System-account passwords are checked using the computer's normal authentication. Remote logins use a separate password and the system account selected here; the remote login name never chooses the desktop owner.")
-                    }
-                }
-                Kirigami.Separator { Layout.fillWidth: true }
-            }
-        }
-        QQC2.Label { visible: root.administration.modified; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Unsaved changes · access policy only"); color: Kirigami.Theme.disabledTextColor }
-    }
     }
     Kirigami.PromptDialog {
         parent: root.QQC2.Overlay.overlay

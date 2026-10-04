@@ -5,15 +5,18 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
-ColumnLayout {
+RowLayout {
     id: root
     required property var settings
     property var definition: null
     property string prefix: "host_"
     property bool accountPreference: false
     property bool editable: true
-    property bool showHelp: false
+    // The definition's help text sits behind a (?) button next to the control, never as a grey paragraph.
+    property bool showHelp: true
+    default property alias content: column.data
     readonly property string key: definition ? definition.key : ""
+    readonly property string helpText: definition ? definition.help : ""
     readonly property var choices: definition ? definition.choices : []
     readonly property bool overridden: Object.prototype.hasOwnProperty.call(settings.values, key)
     readonly property string savedValue: overridden ? settings.values[key] : ""
@@ -65,9 +68,17 @@ ColumnLayout {
     function setNumber(value) { settings.setValue(key, String(value)); }
     objectName: prefix + "field_" + key
     Kirigami.FormData.label: label + ":"
-    Kirigami.FormData.buddyFor: accountPreference && (numericField || sizeField) ? numericMode : numericField ? numericInputs : choices.length ? choice : key === "Address" ? addressMode : textValue
+    // The label's buddy must be a direct child, so it is the inner column; focus goes on to the field's main control.
+    readonly property Item primary: accountPreference && (numericField || sizeField) ? numericMode : numericField ? numberValue : choices.length ? choice : key === "Address" ? addressMode : textValue
+    Kirigami.FormData.buddyFor: column
     Layout.preferredWidth: Kirigami.Units.gridUnit * 24
     Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+    spacing: Kirigami.Units.smallSpacing
+
+    ColumnLayout {
+    id: column
+    Layout.fillWidth: true
+    onActiveFocusChanged: if (activeFocus && root.primary) root.primary.forceActiveFocus()
     spacing: Kirigami.Units.smallSpacing
 
     QQC2.ComboBox {
@@ -86,7 +97,6 @@ ColumnLayout {
     }
     RowLayout {
         id: numericInputs
-        onActiveFocusChanged: if (activeFocus) numberValue.forceActiveFocus()
         visible: root.numericField && (!root.accountPreference || root.overridden)
         Layout.fillWidth: true
         QQC2.Slider {
@@ -166,5 +176,11 @@ ColumnLayout {
             else root.settings.setValue(root.key, text);
         }
     }
-    QQC2.Label { visible: root.showHelp; Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.Wrap; text: root.definition ? root.definition.help : ""; color: Kirigami.Theme.disabledTextColor }
+    }
+    Kirigami.ContextualHelpButton {
+        objectName: root.prefix + "help_" + root.key
+        Layout.alignment: Qt.AlignTop
+        visible: root.showHelp && root.helpText !== ""
+        toolTipText: root.helpText
+    }
 }

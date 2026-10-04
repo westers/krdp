@@ -39,9 +39,11 @@ private Q_SLOTS:
         const auto item = [&](const QString &name) { return visualItem(visualItem, page, name); };
         for(const auto &old:{u"unlockBrokerAuthentication"_s,u"saveBrokerAuthentication"_s,u"discardBrokerAuthentication"_s,u"loadBrokerAuthentication"_s}) QVERIFY2(!item(old),qPrintable(old)); // S3: the standard bar does this
          QVERIFY(!administration.loaded());
-        auto *expand = item(u"expandWhoCanSignIn"_s); QVERIFY(expand); QVERIFY(QMetaObject::invokeMethod(expand, "clicked"));
+        // Locked until the user unlocks it (the sidebar does that once when the row is opened).
+        QVERIFY(item(u"accessLocked"_s)->property("visible").toBool()); QVERIFY(!item(u"consolePamMode"_s)->property("visible").toBool());
+        auto *unlock = item(u"unlockAccessPolicy"_s); QVERIFY(unlock); QVERIFY(QMetaObject::invokeMethod(unlock, "trigger"));
         QTRY_VERIFY(administration.loaded() && !administration.busy());
-        QTRY_VERIFY(item(u"consolePamMode"_s)); QTRY_VERIFY(item(u"virtualPamMode"_s));
+        QTRY_VERIFY(item(u"consolePamMode"_s)->property("visible").toBool()); QTRY_VERIFY(item(u"virtualPamMode"_s)->property("visible").toBool()); QVERIFY(!item(u"accessLocked"_s)->property("visible").toBool());
         auto *add = item(u"consoleAddAlias"_s); QVERIFY(add); QVERIFY(QMetaObject::invokeMethod(add, "clicked"));
         auto *dialog = item(u"brokerAliasDialog"_s); QVERIFY(dialog); QTRY_VERIFY(dialog->property("visible").toBool());
         QVERIFY(item(u"brokerAliasName"_s)->setProperty("text", u"guest"_s));

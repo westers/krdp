@@ -48,11 +48,10 @@ ColumnLayout {
         default: return i18nc("@info", "The system manager or running process is unavailable.");
         }
     }
-    QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Startup inspection is a snapshot, not a network reachability check."); color: Kirigami.Theme.disabledTextColor }
     Kirigami.InlineMessage { Layout.fillWidth: true; type: Kirigami.MessageType.Error; visible: root.host.error !== ""; text: root.host.error }
     RowLayout {
         Layout.fillWidth: true
-        QQC2.Button { objectName: "inspectHostRuntime"; text: i18nc("@action:button", "Inspect Running Host…"); enabled: !root.host.busy; onClicked: root.host.loaded ? root.host.inspectRuntime() : root.host.refresh() }
+        QQC2.Button { objectName: "inspectHostRuntime"; text: i18nc("@action:button", "Check Running Service…"); enabled: !root.host.busy; onClicked: root.host.loaded ? root.host.inspectRuntime() : root.host.refresh() }
         QQC2.ToolButton {
             objectName: root.route + "RefreshStatus"
             icon.name: "view-refresh"; text: i18nc("@action:button", "Refresh status")
@@ -61,6 +60,7 @@ ColumnLayout {
             QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered
             onClicked: root.administration.refresh()
         }
+        Kirigami.ContextualHelpButton { toolTipText: i18nc("@info:tooltip", "Compares the saved settings with how the service was started. It is a snapshot, not a network check: it does not prove the service is reachable or which certificate it has loaded.") }
         Item { Layout.fillWidth: true }
     }
     ColumnLayout {
@@ -125,11 +125,6 @@ ColumnLayout {
             text: i18nc("@info", "Loaded unit differs for: %1. Startup arguments differ for: %2.",
                 root.fieldNames(root.runtime.configuredDifferences) || i18nc("@info", "none"),
                 root.fieldNames(root.runtime.runningDifferences) || i18nc("@info", "none"))
-        }
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: i18nc("@info", "Startup values do not verify listening sockets, live client preferences or the TLS certificate already loaded into memory. The certificate section describes stored material.")
         }
         QQC2.CheckBox {
             id: runtimeValues
