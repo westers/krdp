@@ -11,9 +11,11 @@ KCM.SimpleKCM {
     objectName: "brokerPreferencesPage"
     property var preferences: kcm.brokerPreferences
     property bool showAdvanced: false
+    property bool scrollToDisplays: false
     readonly property string monitorMode: preferences.values.MonitorMode || ""
     title: i18nc("@title:window", "My Preferences")
     function fields(keys) { return preferences.definitions.filter(row => keys.includes(row.key)); }
+    Component.onCompleted: if (scrollToDisplays) showDisplays()
     function showDisplays() { Qt.callLater(() => { if (preferences.loaded) flickable.contentY = Math.min(displaySection.y, Math.max(0, flickable.contentHeight - flickable.height)); }); }
     ColumnLayout {
       ColumnLayout {

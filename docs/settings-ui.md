@@ -71,16 +71,27 @@ unit-file and manager-owner events; user actions still read back actual state.
 Manual Refresh remains available. Unrelated unit properties are ignored.
 
 Never bind a widget-creating Repeater to the changing `services` list. The
-remaining direct Services page uses fixed indices; the main page has static
-Console/Virtual editors. Service updates must preserve editor identity, focus,
+root page has static Console/Virtual service rows. Service updates must preserve editor identity, focus,
 unfinished text, geometry, scroll position and drafts.
 
 Host field objects stay alive during scope switches. Identify fields by both key
 and group: VA-API policy occurs in different groups across host/session schemas.
 Avoid transient repeated forms linked as twins; Kirigami's deferred twin/label
-updates can otherwise run after those objects have been destroyed. StackLayout
-pages need explicit zero minimum dimensions so small windows can shrink them
-and retain visible footers.
+updates can otherwise run after those objects have been destroyed. Do not pop a
+twinned page in the same event-loop turn it was created (a Kirigami `callLater`
+then touches the destroyed twin); tests let a pushed page settle first.
+
+## Navigation (OPT-057 S2)
+
+The root (`BrokerMainPage.qml`) is a list page. Console, Virtual, Who Can
+Connect and My Preferences are opened with `kcm.push(file, properties)` and left
+with the shell's own Back (`kcm.pop()`); there is no custom header, Back button,
+history or StackLayout, and no phone duplicate. Pushed pages receive their models
+as initial properties (so tests can inject fakes). Unsaved edits live in the
+scoped models, so popping loses only view state (scroll, focus). An open
+certificate draft is cancelled when the host page is popped, hidden, or
+pushes another page. "My Display Preferences" pushes My Preferences on top of
+the Console page, so Back returns there.
 
 ## KDE references reviewed
 

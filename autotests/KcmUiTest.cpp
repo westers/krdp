@@ -272,28 +272,63 @@ private Q_SLOTS:
         QTest::newRow("small window 640x360") << QSize(640, 360);
     }
 
+    // Root list page, then each destination pushed through the real KCM page
+    // stack (kcm.push) and left through kcm.pop, as System Settings does.
     void mainPageItemsReachable()
     {
         QFETCH(QSize, window);
         auto *page = showPage(m_module->mainUi(), window);
-        page->setProperty("currentPage", 0);
+        QVERIFY(!page->property("currentPage").isValid()); // no custom page switch left
+        QVERIFY(!findItem(page, u"settingsBack"_s));       // no custom Back: the shell supplies it
         checkReachable(page, {u"consoleHostEnabled"_s, u"consoleHostStatus"_s, u"configureConsole"_s, u"configureVirtual"_s, u"configureAccess"_s, u"configurePreferences"_s});
-        for (int tab = 1; tab <= 4; ++tab) {
-            QVERIFY(page->setProperty("currentPage", tab));
-            QTest::qWait(100); // Qt Quick polishes persistent page layouts after a resize.
-            auto *back = findItem(page,u"settingsBack"_s); QVERIFY(back && back->isVisible());
-            const auto buttonName = tab <= 2 ? u"saveHostSettings"_s : tab == 3 ? u"saveBrokerAuthentication"_s : u"saveBrokerPreferences"_s;
-            // Find the visible footer; another tab's editor remains alive.
-            const auto visibleFind = [&](auto &&self, QQuickItem *parent) -> QQuickItem * {
-                if (parent->objectName() == buttonName && parent->isVisible()) return parent;
-                for (auto *child : parent->childItems()) if (auto *item = self(self, child)) return item;
-                return nullptr;
-            };
-            auto *save = visibleFind(visibleFind,page); QVERIFY(save && save->width()>0 && save->height()>0);
-            const auto bounds=save->mapRectToItem(page,QRectF(0,0,save->width(),save->height()));
-            QVERIFY2(bounds.left()>=-0.5 && bounds.right()<=page->width()+0.5 && bounds.bottom()<=page->height()+0.5,qPrintable(u"tab %1 footer %2 bounds (%3,%4)..(%5,%6) page %7x%8"_s.arg(tab).arg(buttonName).arg(bounds.left()).arg(bounds.top()).arg(bounds.right()).arg(bounds.bottom()).arg(page->width()).arg(page->height())));
+        const int depth = m_module->depth();
+        const struct { const char *opener; const char *objectName; QString save; } destinations[] = {
+            {"openConsole", "consoleSettingsPage", u"saveHostSettings"_s}, {"openVirtual", "virtualSettingsPage", u"saveHostSettings"_s},
+            {"openAccess", "brokerSignInPage", u"saveBrokerAuthentication"_s}, {"openPreferences", "brokerPreferencesPage", u"saveBrokerPreferences"_s}};
+        for (const auto &destination : destinations) {
+            QVERIFY2(QMetaObject::invokeMethod(page, destination.opener), destination.opener);
+            QCOMPARE(m_module->depth(), depth + 1);
+            auto *sub = m_module->subPage(m_module->depth() - 2);
+            QVERIFY2(sub, destination.opener);
+            QCOMPARE(sub->objectName(), QString::fromLatin1(destination.objectName));
+            showPage(sub, window);
+            QTest::qWait(100); // Qt Quick polishes the new page's layout.
+            auto *save = findItem(sub, destination.save);
+            QVERIFY2(save && save->isVisible() && save->width() > 0 && save->height() > 0, destination.opener);
+            const auto bounds = save->mapRectToItem(sub, QRectF(0, 0, save->width(), save->height()));
+            QVERIFY2(bounds.left() >= -0.5 && bounds.right() <= sub->width() + 0.5 && bounds.bottom() <= sub->height() + 0.5,
+                     qPrintable(u"%1 footer %2 bounds (%3,%4)..(%5,%6) page %7x%8"_s.arg(QString::fromLatin1(destination.opener), destination.save).arg(bounds.left()).arg(bounds.top()).arg(bounds.right()).arg(bounds.bottom()).arg(sub->width()).arg(sub->height())));
+            m_module->pop(); // Back
+            sub->setParentItem(nullptr); // the test window is not the shell's page row
+            QCOMPARE(m_module->depth(), depth);
         }
-        page->setProperty("currentPage", 0);
+        const auto warnings = takeMessages();
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
+    }
+
+    void displayPreferencesLinkPushesPreferencesOnTopOfHostPage()
+    {
+        auto *page = m_module->mainUi();
+        const int depth = m_module->depth();
+        takeMessages();
+        QVERIFY(QMetaObject::invokeMethod(page, "openConsole"));
+        auto *hostPage = m_module->subPage(m_module->depth() - 2);
+        QVERIFY(hostPage);
+        showPage(hostPage, {1280, 800});
+        auto *link = findItem(hostPage, u"consoleDisplayPreferences"_s);
+        QVERIFY(link);
+        QVERIFY(QMetaObject::invokeMethod(link, "clicked"));
+        QCOMPARE(m_module->depth(), depth + 2);
+        QCOMPARE(m_module->subPage(m_module->depth() - 2)->objectName(), u"brokerPreferencesPage"_s);
+        QCOMPARE(m_module->subPage(m_module->depth() - 2)->property("scrollToDisplays").toBool(), true);
+        auto *preferencesPage = m_module->subPage(m_module->depth() - 2);
+        showPage(preferencesPage, {1280, 800}); // let delayed layout work finish before it is popped
+        m_module->pop();
+        preferencesPage->setParentItem(nullptr);
+        QCOMPARE(m_module->subPage(m_module->depth() - 2)->objectName(), u"consoleSettingsPage"_s); // Back returns to the host page
+        m_module->pop();
+        hostPage->setParentItem(nullptr);
+        QCOMPARE(m_module->depth(), depth);
         const auto warnings = takeMessages();
         QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(u'\n')));
     }
@@ -306,8 +341,6 @@ private Q_SLOTS:
         QTest::addColumn<QStringList>("keyItems");
         QTest::newRow("broker sign-in") << u"BrokerSignInPage.qml"_s << u"brokerSignInPage"_s << u"Who Can Connect"_s
                                        << QStringList{u"expandWhoCanSignIn"_s, u"loadBrokerAuthentication"_s, u"saveBrokerAuthentication"_s};
-        QTest::newRow("broker services") << u"BrokerServicesPage.qml"_s << u"brokerServicesPage"_s << u"Console and Virtual Services"_s
-                                       << QStringList{u"refreshBrokerServices"_s};
         QTest::newRow("broker preferences") << u"BrokerPreferencesPage.qml"_s << u"brokerPreferencesPage"_s << u"My Preferences"_s
                                           << QStringList{u"loadBrokerPreferences"_s,u"saveBrokerPreferences"_s,u"defaultBrokerPreferences"_s};
         QTest::newRow("broker hosts") << u"BrokerHostsPage.qml"_s << u"brokerHostsPage"_s << u"Console Settings"_s
@@ -363,21 +396,19 @@ private Q_SLOTS:
         QTest::newRow("Console")<<u"console"_s<<0;QTest::newRow("Virtual")<<u"virtual"_s<<1;
     }
     void hostNavigationSelectsScope() {
-        QFETCH(QString,route); QFETCH(int,index); auto *main=m_module->mainUi();
-        QVERIFY(main->setProperty("currentPage",index+1));
-        auto *page=findItem(main,index==0?u"consoleSettingsPage"_s:u"virtualSettingsPage"_s); QVERIFY(page);
+        QFETCH(QString,route); QFETCH(int,index); auto *main=m_module->mainUi(); const int depth=m_module->depth();
+        QVERIFY(QMetaObject::invokeMethod(main,index==0?"openConsole":"openVirtual"));
+        auto *page=m_module->subPage(m_module->depth()-2); QVERIFY(page);
+        QCOMPARE(page->objectName(),index==0?u"consoleSettingsPage"_s:u"virtualSettingsPage"_s);
         QCOMPARE(page->property("fixedScope").toInt(),index);
         auto *host=page->property("host").value<QObject *>(); QVERIFY(host); QCOMPARE(host->property("scope").toString(),route);
-        QVERIFY(host->property("loaded").toBool()); main->setProperty("currentPage",1); // populated on open, no click
+        QVERIFY(host->property("loaded").toBool()); // populated on open, no click
+        m_module->pop(); page->setParentItem(nullptr); QCOMPARE(m_module->depth(),depth);
         const auto warnings=takeMessages(); QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
     }
-    void phoneEntryUsesTheSameScopedPage() {
-        QQmlComponent component(m_engine.get(),QUrl(u"qrc:/kcm/kcm_farside/main_phone.qml"_s));QVERIFY2(component.isReady(),qPrintable(component.errorString()));
-        QScopedPointer<QObject> object(component.create(QQmlEngine::contextForObject(m_module->mainUi())));QVERIFY2(object,qPrintable(component.errorString()));
-        auto *page=qobject_cast<QQuickItem *>(object.data());QVERIFY(page);QCOMPARE(page->objectName(),u"mainPage"_s);
-        showPage(page,{640,800});checkReachable(page,{u"consoleHostStatus"_s,u"consoleHostEnabled"_s,u"consoleDetailsToggle"_s});
-        QVERIFY(!page->findChild<QObject *>(u"serverSwitch"_s));page->setParentItem(nullptr);
-        const auto warnings=takeMessages();QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
+    void oldNavigationPiecesAreGone() {
+        QVERIFY(!QFile::exists(u":/kcm/kcm_farside/main_phone.qml"_s));
+        QVERIFY(!QFile::exists(u":/kcm/kcm_farside/BrokerServicesPage.qml"_s));
     }
 
 };

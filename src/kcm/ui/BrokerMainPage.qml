@@ -5,7 +5,7 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import org.kde.kcmutils as KCM
-KCM.AbstractKCM {
+KCM.SimpleKCM {
     id: root
     objectName: "mainPage"
     property var navigation: kcm
@@ -16,94 +16,58 @@ KCM.AbstractKCM {
     property var authentication: kcm.brokerAuthentication
     property var preferences: kcm.brokerPreferences
     property string hostName: kcm.hostName
-    property int currentPage: 0
-    property var history: []
-    readonly property var pages: [overview, consolePage, virtualPage, accessPage, preferencesPage]
-    readonly property var flickable: pages[currentPage].flickable
-    title: pages[currentPage].title
-    framedView: false
-    function openPage(index) {
-        if (index === currentPage) return;
-        if (currentPage === 1) consolePage.leave();
-        if (currentPage === 2) virtualPage.leave();
-        history = history.concat([currentPage]); currentPage = index;
+    title: i18nc("@title:window", "Farside Remote Desktop")
+    // Native KCM navigation: each destination is pushed on the KCM page stack and
+    // the shell supplies the header, title and Back. Unsaved edits live in the
+    // scoped models, so a popped page loses only transient view state.
+    function hostProperties(scope) {
+        return {objectName: scope === 0 ? "consoleSettingsPage" : "virtualSettingsPage", fixedScope: scope, consoleSettings: consoleHost, virtualSettings: virtualHost, sessionSettings: sessionSettings, administration: administration, navigation: root};
     }
-    function goBack() {
-        if (currentPage === 1) consolePage.leave();
-        if (currentPage === 2) virtualPage.leave();
-        const previous = history.length ? history[history.length - 1] : 0;
-        history = history.slice(0, -1); currentPage = previous;
-    }
-    function showPreferences() { openPage(4); preferencesPage.showDisplays(); }
+    function openConsole() { navigation.push("BrokerHostsPage.qml", hostProperties(0)); }
+    function openVirtual() { navigation.push("BrokerHostsPage.qml", hostProperties(1)); }
+    function openAccess() { navigation.push("BrokerSignInPage.qml", {administration: authentication, serviceAdministration: administration}); }
+    function pushPreferences(scrollToDisplays) { navigation.push("BrokerPreferencesPage.qml", {preferences: preferences, scrollToDisplays: scrollToDisplays}); }
+    function openPreferences() { pushPreferences(false); }
+    function showPreferences() { pushPreferences(true); }
     function copyAddressToClipboard(address) { navigation.copyAddressToClipboard(address); }
     Component.onCompleted: if (!administration.busy && administration.services.some(service => !service.known)) administration.refresh(false)
-    header: QQC2.ToolBar {
-        contentItem: RowLayout {
-            QQC2.ToolButton {
-                objectName: "settingsBack"
-                visible: root.currentPage !== 0
-                icon.name: "go-previous"
-                text: i18nc("@action:button", "Back")
-                display: QQC2.AbstractButton.IconOnly
-                QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered
-                onClicked: root.goBack()
-            }
-            Kirigami.Heading { Layout.fillWidth: true; level: 2; text: root.title; elide: Text.ElideRight }
+    ColumnLayout {
+      ColumnLayout {
+        Layout.fillWidth: true
+        Layout.maximumWidth: Kirigami.Units.gridUnit * 48
+        Layout.alignment: Qt.AlignLeft
+        spacing: Kirigami.Units.largeSpacing
+        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Choose which desktop to make available. Service switches apply immediately.") }
+        Kirigami.Heading { level: 2; text: i18nc("@title:group", "Console") }
+        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Share this computer's desktop.") }
+        BrokerServiceControls { id: consoleControls; Layout.fillWidth: true; administration: root.administration; route: "console"; host: root.consoleHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
+        Flow {
+            Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
+            QQC2.Button { objectName: "configureConsole"; text: root.consoleHost.modified ? i18nc("@action:button", "Configure Console… (unsaved)") : i18nc("@action:button", "Configure Console…"); onClicked: root.openConsole() }
+            QQC2.Button { objectName: "consoleRestart"; text: i18nc("@action:button", "Restart…"); enabled: root.administration.services[0].canRestart; onClicked: consoleControls.request("restart") }
+            QQC2.Button { objectName: "consoleStop"; text: i18nc("@action:button", "Stop…"); enabled: root.administration.services[0].canStop; onClicked: consoleControls.request("stop") }
+            QQC2.Button { objectName: "consoleDetailsToggle"; flat: true; icon.name: consoleDetailsBox.visible ? "arrow-down" : "arrow-right"; text: i18nc("@action:button", "Details"); onClicked: consoleDetailsBox.visible = !consoleDetailsBox.visible }
         }
+        BrokerServiceDetails { id: consoleDetailsBox; visible: false; Layout.fillWidth: true; host: root.consoleHost; administration: root.administration; route: "console"; navigation: root; hostName: root.hostName }
+        Kirigami.Separator { Layout.fillWidth: true }
+        Kirigami.Heading { level: 2; text: i18nc("@title:group", "Virtual") }
+        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Separate desktops for remote users.") }
+        BrokerServiceControls { id: virtualControls; Layout.fillWidth: true; administration: root.administration; route: "virtual"; host: root.virtualHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
+        Flow {
+            Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
+            QQC2.Button { objectName: "configureVirtual"; text: root.virtualHost.modified || root.sessionSettings.modified ? i18nc("@action:button", "Configure Virtual… (unsaved)") : i18nc("@action:button", "Configure Virtual…"); onClicked: root.openVirtual() }
+            QQC2.Button { objectName: "virtualRestart"; text: i18nc("@action:button", "Restart…"); enabled: root.administration.services[1].canRestart; onClicked: virtualControls.request("restart") }
+            QQC2.Button { objectName: "virtualStop"; text: i18nc("@action:button", "Stop…"); enabled: root.administration.services[1].canStop; onClicked: virtualControls.request("stop") }
+            QQC2.Button { objectName: "virtualDetailsToggle"; flat: true; icon.name: virtualDetailsBox.visible ? "arrow-down" : "arrow-right"; text: i18nc("@action:button", "Details"); onClicked: virtualDetailsBox.visible = !virtualDetailsBox.visible }
+        }
+        BrokerServiceDetails { id: virtualDetailsBox; visible: false; Layout.fillWidth: true; host: root.virtualHost; administration: root.administration; route: "virtual"; navigation: root; hostName: root.hostName }
+      }
     }
-    StackLayout {
-        anchors.fill: parent
-        currentIndex: root.currentPage
-        // Persistent pages preserve focus, unfinished text, scroll and drafts.
-        // Service event updates never replace the editor tree.
-        KCM.SimpleKCM {
-            id: overview
-            objectName: "settingsOverview"
-            Layout.minimumWidth: 0; Layout.minimumHeight: 0
-            title: i18nc("@title:window", "Farside Remote Desktop")
-            ColumnLayout {
-              ColumnLayout {
-                Layout.fillWidth: true
-                Layout.maximumWidth: Kirigami.Units.gridUnit * 48
-                Layout.alignment: Qt.AlignLeft
-                spacing: Kirigami.Units.largeSpacing
-                QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Choose which desktop to make available. Service switches apply immediately.") }
-                Kirigami.Heading { level: 2; text: i18nc("@title:group", "Console") }
-                QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Share this computer's desktop.") }
-                BrokerServiceControls { id: consoleControls; Layout.fillWidth: true; administration: root.administration; route: "console"; host: root.consoleHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
-                Flow {
-                    Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
-                    QQC2.Button { objectName: "configureConsole"; text: root.consoleHost.modified ? i18nc("@action:button", "Configure Console… (unsaved)") : i18nc("@action:button", "Configure Console…"); onClicked: root.openPage(1) }
-                    QQC2.Button { objectName: "consoleRestart"; text: i18nc("@action:button", "Restart…"); enabled: root.administration.services[0].canRestart; onClicked: consoleControls.request("restart") }
-                    QQC2.Button { objectName: "consoleStop"; text: i18nc("@action:button", "Stop…"); enabled: root.administration.services[0].canStop; onClicked: consoleControls.request("stop") }
-                    QQC2.Button { objectName: "consoleDetailsToggle"; flat: true; icon.name: consoleDetailsBox.visible ? "arrow-down" : "arrow-right"; text: i18nc("@action:button", "Details"); onClicked: consoleDetailsBox.visible = !consoleDetailsBox.visible }
-                }
-                BrokerServiceDetails { id: consoleDetailsBox; visible: false; Layout.fillWidth: true; host: root.consoleHost; administration: root.administration; route: "console"; navigation: root; hostName: root.hostName }
-                Kirigami.Separator { Layout.fillWidth: true }
-                Kirigami.Heading { level: 2; text: i18nc("@title:group", "Virtual") }
-                QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Separate desktops for remote users.") }
-                BrokerServiceControls { id: virtualControls; Layout.fillWidth: true; administration: root.administration; route: "virtual"; host: root.virtualHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }
-                Flow {
-                    Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
-                    QQC2.Button { objectName: "configureVirtual"; text: root.virtualHost.modified || root.sessionSettings.modified ? i18nc("@action:button", "Configure Virtual… (unsaved)") : i18nc("@action:button", "Configure Virtual…"); onClicked: root.openPage(2) }
-                    QQC2.Button { objectName: "virtualRestart"; text: i18nc("@action:button", "Restart…"); enabled: root.administration.services[1].canRestart; onClicked: virtualControls.request("restart") }
-                    QQC2.Button { objectName: "virtualStop"; text: i18nc("@action:button", "Stop…"); enabled: root.administration.services[1].canStop; onClicked: virtualControls.request("stop") }
-                    QQC2.Button { objectName: "virtualDetailsToggle"; flat: true; icon.name: virtualDetailsBox.visible ? "arrow-down" : "arrow-right"; text: i18nc("@action:button", "Details"); onClicked: virtualDetailsBox.visible = !virtualDetailsBox.visible }
-                }
-                BrokerServiceDetails { id: virtualDetailsBox; visible: false; Layout.fillWidth: true; host: root.virtualHost; administration: root.administration; route: "virtual"; navigation: root; hostName: root.hostName }
-              }
-            }
-            footer: QQC2.ToolBar {
-                contentItem: RowLayout {
-                    QQC2.Button { objectName: "configureAccess"; text: root.authentication.modified ? i18nc("@action:button", "Who Can Connect… (unsaved)") : i18nc("@action:button", "Who Can Connect…"); onClicked: root.openPage(3) }
-                    QQC2.Button { objectName: "configurePreferences"; text: root.preferences.modified ? i18nc("@action:button", "My Preferences… (unsaved)") : i18nc("@action:button", "My Preferences…"); onClicked: root.openPage(4) }
-                    Item { Layout.fillWidth: true }
-                }
-            }
+    footer: QQC2.ToolBar {
+        contentItem: RowLayout {
+            QQC2.Button { objectName: "configureAccess"; text: root.authentication.modified ? i18nc("@action:button", "Who Can Connect… (unsaved)") : i18nc("@action:button", "Who Can Connect…"); onClicked: root.openAccess() }
+            QQC2.Button { objectName: "configurePreferences"; text: root.preferences.modified ? i18nc("@action:button", "My Preferences… (unsaved)") : i18nc("@action:button", "My Preferences…"); onClicked: root.openPreferences() }
+            Item { Layout.fillWidth: true }
         }
-        BrokerHostsPage { id: consolePage; objectName: "consoleSettingsPage"; Layout.minimumWidth: 0; Layout.minimumHeight: 0; fixedScope: 0; consoleSettings: root.consoleHost; virtualSettings: root.virtualHost; sessionSettings: root.sessionSettings; administration: root.administration; navigation: root }
-        BrokerHostsPage { id: virtualPage; objectName: "virtualSettingsPage"; Layout.minimumWidth: 0; Layout.minimumHeight: 0; fixedScope: 1; consoleSettings: root.consoleHost; virtualSettings: root.virtualHost; sessionSettings: root.sessionSettings; administration: root.administration; navigation: root }
-        BrokerSignInPage { id: accessPage; Layout.minimumWidth: 0; Layout.minimumHeight: 0; administration: root.authentication; serviceAdministration: root.administration }
-        BrokerPreferencesPage { id: preferencesPage; Layout.minimumWidth: 0; Layout.minimumHeight: 0; preferences: root.preferences }
     }
 }

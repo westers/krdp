@@ -27,7 +27,11 @@ KCM.SimpleKCM {
         if (fixedScope === 1 && sessionSettings.modified) return host.modified ? i18nc("@info", "Unsaved changes · Virtual only%1 · New desktop defaults — use Save Desktop Defaults below", tls) : i18nc("@info", "Unsaved changes · New desktop defaults — use Save Desktop Defaults below");
         return i18nc("@info", "Unsaved changes · %1%2", scope, tls);
     }
+    // Native navigation: popping (destroyed) or covering (hidden) the page, or
+    // pushing another page from it, all drop an open certificate draft.
     function leave() { if (certificateSection.open) certificateSection.cancel(); }
+    Component.onDestruction: if (host) host.cancelCertificateEdit()
+    onVisibleChanged: if (!visible) leave()
     function closeCertificate() { if (certificateSection.open) certificateSection.cancel(); }
     function reloadSettings() { if (host.modified) reloadConfirmation.open(); else { closeCertificate(); host.refresh(); } }
     ColumnLayout {
@@ -86,7 +90,7 @@ KCM.SimpleKCM {
         Flow {
             Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing; visible: root.host.loaded
             QQC2.Button { objectName: "hostAdvancedButton"; text: i18nc("@action:button", "Advanced Options"); icon.name: root.showAdvanced ? "arrow-down" : "arrow-right"; onClicked: root.showAdvanced = !root.showAdvanced }
-            QQC2.Button { objectName: "consoleDisplayPreferences"; visible: root.fixedScope === 0; text: i18nc("@action:button", "My Display Preferences…"); onClicked: root.navigation.showPreferences() }
+            QQC2.Button { objectName: "consoleDisplayPreferences"; visible: root.fixedScope === 0; text: i18nc("@action:button", "My Display Preferences…"); onClicked: { root.leave(); root.navigation.showPreferences(); } }
         }
         ColumnLayout {
             Layout.fillWidth: true; visible: root.host.loaded && root.showAdvanced; spacing: Kirigami.Units.smallSpacing
