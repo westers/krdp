@@ -37,7 +37,8 @@ private Q_SLOTS:
             return nullptr;
         };
         const auto item = [&](const QString &name) { return visualItem(visualItem, page, name); };
-        auto *load = item(u"loadBrokerAuthentication"_s); QVERIFY(load); QVERIFY(QMetaObject::invokeMethod(load, "clicked"));
+        QVERIFY(!item(u"unlockBrokerAuthentication"_s)); QVERIFY(!administration.loaded());
+        auto *expand = item(u"expandWhoCanSignIn"_s); QVERIFY(expand); QVERIFY(QMetaObject::invokeMethod(expand, "clicked"));
         QTRY_VERIFY(administration.loaded() && !administration.busy());
         QTRY_VERIFY(item(u"consolePamMode"_s)); QTRY_VERIFY(item(u"virtualPamMode"_s));
         auto *add = item(u"consoleAddAlias"_s); QVERIFY(add); QVERIFY(QMetaObject::invokeMethod(add, "clicked"));

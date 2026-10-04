@@ -26,6 +26,13 @@ void KRDPServerConfig::load()
 {
     KQuickConfigModule::load();
     m_services->refresh(false);
+    // Opening the panel never prompts: host settings come from the published
+    // public snapshot and the user's own preferences from their own file.
+    // Drafts are never replaced. Account names and aliases (administrator
+    // protected) load once, when "Who can sign in" is expanded.
+    for (BrokerHostSettings *host : {m_console, m_virtual, m_session})
+        if (!host->modified()) host->refresh();
+    if (!m_preferences->modified()) m_preferences->reload();
 }
 QString KRDPServerConfig::hostName() const { return QHostInfo::localHostName(); }
 void KRDPServerConfig::copyAddressToClipboard(const QString &address)

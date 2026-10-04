@@ -48,8 +48,8 @@ ColumnLayout {
         Layout.alignment: Qt.AlignLeft
         Layout.fillWidth: true
         QQC2.Label { Kirigami.FormData.label: i18nc("@label", "Status:"); text: root.certificateState(root.certificate.state) }
-        Kirigami.SelectableLabel { Kirigami.FormData.label: i18nc("@label", "Certificate:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: (root.host.metadata.effective || {}).Certificate || "" }
-        Kirigami.SelectableLabel { Kirigami.FormData.label: i18nc("@label", "Private key:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: (root.host.metadata.effective || {}).CertificateKey || "" }
+        Kirigami.SelectableLabel { visible: text !== ""; Kirigami.FormData.label: i18nc("@label", "Certificate:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: (root.host.metadata.effective || {}).Certificate || "" }
+        Kirigami.SelectableLabel { visible: text !== ""; Kirigami.FormData.label: i18nc("@label", "Private key:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: (root.host.metadata.effective || {}).CertificateKey || "" }
         Kirigami.SelectableLabel { Kirigami.FormData.label: i18nc("@label", "Fingerprint:"); Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24; wrapMode: Text.WrapAnywhere; text: root.certificate.fingerprint || i18nc("@info", "Not available") }
         QQC2.Label { Kirigami.FormData.label: i18nc("@label", "Validity:"); Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.certificate.notBefore ? i18nc("@info", "%1 to %2", root.certificate.notBefore, root.certificate.notAfter) : i18nc("@info", "Not available") }
     }

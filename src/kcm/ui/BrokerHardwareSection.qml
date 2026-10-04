@@ -14,14 +14,13 @@ ColumnLayout {
     property bool showPciEditor: false
     readonly property var selectedDevices: (settings.values.RenderPci || "").split(",").map(value => value.trim()).filter(value => value !== "")
     function fields(keys) { return settings.definitions.filter(row => keys.includes(row.key)); }
-    function reloadSettings() { if (settings.modified) reloadConfirmation.open(); else settings.reload(); }
+    function reloadSettings() { if (settings.modified) reloadConfirmation.open(); else settings.refresh(); }
     spacing: Kirigami.Units.smallSpacing
     Kirigami.Heading { level: 2; text: i18nc("@title:group", "New desktop hardware") }
     QQC2.Label {
         Layout.fillWidth: true; wrapMode: Text.Wrap
         text: i18nc("@info", "Applies to newly created desktops only. Existing desktops keep their current hardware grants. Saved separately from the Virtual settings above.")
     }
-    QQC2.Button { objectName: "unlockDesktopHardware"; visible: !root.settings.loaded; text: i18nc("@action:button", "Load Administrator Settings…"); icon.name: "document-edit"; enabled: !root.settings.busy; onClicked: root.reloadSettings() }
     Kirigami.InlineMessage { objectName: "desktopHardwareError"; Layout.fillWidth: true; type: Kirigami.MessageType.Error; visible: root.settings.error !== ""; text: root.settings.error }
     Kirigami.InlineMessage { objectName: "desktopHardwareSavedNotice"; Layout.fillWidth: true; visible: root.settings.applicationRequired; type: Kirigami.MessageType.Information; text: i18nc("@info", "Saved. New desktops will use these defaults.") }
     ColumnLayout {
@@ -85,6 +84,6 @@ ColumnLayout {
         title: i18nc("@title:window", "Reload Saved Settings?")
         subtitle: i18nc("@info", "Discard unsaved new-desktop hardware changes and load saved settings?")
         standardButtons: Kirigami.Dialog.Cancel
-        customFooterActions: Kirigami.Action { objectName: "reloadDesktopHardwareAccept"; text: i18nc("@action:button", "Discard and Reload"); onTriggered: { reloadConfirmation.close(); root.settings.reload(); } }
+        customFooterActions: Kirigami.Action { objectName: "reloadDesktopHardwareAccept"; text: i18nc("@action:button", "Discard and Reload"); onTriggered: { reloadConfirmation.close(); root.settings.refresh(); } }
     }
 }

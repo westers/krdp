@@ -11,6 +11,8 @@
 //
 // Runs offscreen with a throwaway config and no session bus (see CMakeLists).
 
+#include "HostSnapshotFixture.h"
+
 #include <KPluginMetaData>
 #include <KQuickConfigModule>
 #include <KQuickConfigModuleLoader>
@@ -27,6 +29,7 @@
 #include <QQuickWindow>
 #include <QTemporaryDir>
 #include <QTest>
+#include <functional>
 
 using namespace Qt::StringLiterals;
 
@@ -93,7 +96,7 @@ class KcmUiTest : public QObject
 {
     Q_OBJECT
 
-    QTemporaryDir m_home;
+    QTemporaryDir m_home, m_snapshots;
     std::shared_ptr<QQmlEngine> m_engine;
     KQuickConfigModule *m_module = nullptr;
     QQuickWindow *m_window = nullptr;
@@ -191,6 +194,12 @@ private Q_SLOTS:
             QCOMPARE(file.write(bytes),bytes.size());file.close();m_preserved[path]=QCryptographicHash::hash(bytes,QCryptographicHash::Sha256);
         }
 
+        // S1: the root-written public-metadata snapshots the module reads on open.
+        // The published TLS paths stay out of them, as in production.
+        QVERIFY(m_snapshots.isValid());
+        QVERIFY(HostSnapshotFixture::publishAll(m_snapshots.path()));
+        qputenv("FARSIDE_PUBLIC_SETTINGS_DIR", m_snapshots.path().toUtf8());
+
         m_engine = std::make_shared<QQmlEngine>();
         const KPluginMetaData metaData(qEnvironmentVariable("FARSIDE_KCM_TEST_PLUGIN_PATH", QStringLiteral(KCM_PLUGIN_PATH)), KPluginMetaData::AllowEmptyMetaData);
         QVERIFY2(metaData.isValid(), KCM_PLUGIN_PATH);
@@ -212,6 +221,36 @@ private Q_SLOTS:
             QCOMPARE(QCryptographicHash::hash(readFixture(it.key()),QCryptographicHash::Sha256),it.value());
         delete m_window;
         qInstallMessageHandler(previousHandler);
+    }
+
+    void hostPagesAreLoadedOnOpenWithoutAnyClick()
+    {
+        // Opening the module (load() in initTestCase) populated every host model
+        // from the public snapshot: no helper, no prompt, no Load/unlock button.
+        for (const auto &name : {"consoleHostSettings", "virtualHostSettings", "virtualSessionSettings", "brokerPreferences"}) {
+            auto *model = m_module->property(name).value<QObject *>();
+            QVERIFY2(model, name);
+            QVERIFY2(model->property("loaded").toBool(), name);
+            QVERIFY2(!model->property("busy").toBool(), name);
+            QVERIFY2(model->property("error").toString().isEmpty(), qPrintable(QString::fromLatin1(name) + u": "_s + model->property("error").toString()));
+        }
+        // Administrator-protected accounts and aliases wait for "Who can sign in".
+        QVERIFY(!m_module->property("brokerAuthentication").value<QObject *>()->property("loaded").toBool());
+        std::function<bool(QQuickItem *)> hasUnlock = [&](QQuickItem *item) {
+            if (item->objectName().startsWith(u"unlock")) return true;
+            for (auto *child : item->childItems()) if (hasUnlock(child)) return true;
+            return false;
+        };
+        takeMessages();
+        for (const auto &file : {u"BrokerHostsPage.qml"_s, u"BrokerPreferencesPage.qml"_s}) {
+            m_module->push(file);
+            auto *page = m_module->subPage(m_module->depth() - 2);
+            QVERIFY2(page, qPrintable(file));
+            showPage(page, {1280, 800});
+            QVERIFY2(!hasUnlock(page), qPrintable(file + u" still has an unlock/Load button"_s));
+            m_module->pop();
+        }
+        QVERIFY(takeMessages().isEmpty());
     }
 
     void mainPageLoadsWithoutWarnings()
@@ -266,13 +305,13 @@ private Q_SLOTS:
         QTest::addColumn<QString>("title");
         QTest::addColumn<QStringList>("keyItems");
         QTest::newRow("broker sign-in") << u"BrokerSignInPage.qml"_s << u"brokerSignInPage"_s << u"Who Can Connect"_s
-                                       << QStringList{u"loadBrokerAuthentication"_s, u"saveBrokerAuthentication"_s};
+                                       << QStringList{u"expandWhoCanSignIn"_s, u"loadBrokerAuthentication"_s, u"saveBrokerAuthentication"_s};
         QTest::newRow("broker services") << u"BrokerServicesPage.qml"_s << u"brokerServicesPage"_s << u"Console and Virtual Services"_s
                                        << QStringList{u"refreshBrokerServices"_s};
         QTest::newRow("broker preferences") << u"BrokerPreferencesPage.qml"_s << u"brokerPreferencesPage"_s << u"My Preferences"_s
                                           << QStringList{u"loadBrokerPreferences"_s,u"saveBrokerPreferences"_s,u"defaultBrokerPreferences"_s};
         QTest::newRow("broker hosts") << u"BrokerHostsPage.qml"_s << u"brokerHostsPage"_s << u"Console Settings"_s
-                                    << QStringList{u"unlockHostSettings"_s, u"loadHostSettings"_s, u"saveHostSettings"_s, u"defaultHostSettings"_s};
+                                    << QStringList{u"loadHostSettings"_s, u"saveHostSettings"_s, u"defaultHostSettings"_s};
 
     }
 
@@ -303,14 +342,17 @@ private Q_SLOTS:
             QVERIFY(m_module->metaObject()->indexOfMethod(name)<0);
         QVERIFY(m_module->metaObject()->indexOfProperty("coexistence")<0);
         QCOMPARE(int(m_module->buttons()),int(KAbstractConfigModule::Help));
-        for(const auto &name:{"consoleHostSettings","virtualHostSettings","virtualSessionSettings","brokerAuthentication","brokerPreferences"}) {
-            auto *model=m_module->property(name).value<QObject *>();QVERIFY(model);QVERIFY(!model->property("loaded").toBool());
+        // Host settings and preferences are populated on open without any prompt;
+        // only the administrator-protected sign-in policy stays lazy.
+        for(const auto &name:{"consoleHostSettings","virtualHostSettings","virtualSessionSettings","brokerPreferences"}) {
+            auto *model=m_module->property(name).value<QObject *>();QVERIFY(model);QVERIFY(model->property("loaded").toBool());
         }
+        QVERIFY(!m_module->property("brokerAuthentication").value<QObject *>()->property("loaded").toBool());
         m_module->defaults();m_module->save();m_module->load();
         QVERIFY(m_module->findChildren<QProcess *>().isEmpty());
-        for(const auto &name:{"consoleHostSettings","virtualHostSettings","virtualSessionSettings","brokerAuthentication","brokerPreferences"}) {
-            auto *model=m_module->property(name).value<QObject *>();QVERIFY(model);QVERIFY(!model->property("loaded").toBool());
-        }
+        for(const auto &name:{"consoleHostSettings","virtualHostSettings","virtualSessionSettings","brokerPreferences"})
+            QVERIFY(m_module->property(name).value<QObject *>()->property("loaded").toBool());
+        QVERIFY(!m_module->property("brokerAuthentication").value<QObject *>()->property("loaded").toBool());
         for(auto it=m_preserved.begin();it!=m_preserved.end();++it)
             QCOMPARE(QCryptographicHash::hash(readFixture(it.key()),QCryptographicHash::Sha256),it.value());
         for(const auto &file:{u"UsersPage.qml"_s,u"ScreensPage.qml"_s,u"VideoAudioPage.qml"_s,u"AdvancedPage.qml"_s,u"EditUserModal.qml"_s})
@@ -326,7 +368,7 @@ private Q_SLOTS:
         auto *page=findItem(main,index==0?u"consoleSettingsPage"_s:u"virtualSettingsPage"_s); QVERIFY(page);
         QCOMPARE(page->property("fixedScope").toInt(),index);
         auto *host=page->property("host").value<QObject *>(); QVERIFY(host); QCOMPARE(host->property("scope").toString(),route);
-        QVERIFY(!host->property("loaded").toBool()); main->setProperty("currentPage",1);
+        QVERIFY(host->property("loaded").toBool()); main->setProperty("currentPage",1); // populated on open, no click
         const auto warnings=takeMessages(); QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
     }
     void phoneEntryUsesTheSameScopedPage() {

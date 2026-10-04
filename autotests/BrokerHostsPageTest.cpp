@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "brokerhostsettings.h"
 #include "ServerCertificate.h"
+#include "HostSnapshotFixture.h"
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QScopeGuard>
 #include <KLocalizedQmlContext>
 #include <QFile>
 #include <QQmlComponent>
@@ -34,7 +38,67 @@ class BrokerHostsPageTest : public QObject {
     static void localize(QQmlEngine &engine) {
         auto *context = new KLocalizedQmlContext(&engine); context->setTranslationDomain(u"kcm_farside"_s); engine.rootContext()->setContextObject(context);
     }
+    static bool hasUnlockObject(QObject *object) {
+        if (object->objectName().startsWith(u"unlock")) return true;
+        for (auto *child : object->children()) if (hasUnlockObject(child)) return true;
+        if (auto *item = qobject_cast<QQuickItem *>(object)) for (auto *child : item->childItems()) if (hasUnlockObject(child)) return true;
+        return false;
+    }
 private Q_SLOTS:
+    void populatedOnOpenWithoutClicks() {
+        // S1: the public-metadata snapshot alone populates every host page, with
+        // no helper, no click and no Load/unlock button.
+        QTemporaryDir snapshots, helper;
+        qputenv("FARSIDE_PUBLIC_SETTINGS_DIR", snapshots.path().toUtf8());
+        const auto restore = qScopeGuard([] { qunsetenv("FARSIDE_PUBLIC_SETTINGS_DIR"); });
+        QVERIFY(HostSnapshotFixture::publishAll(snapshots.path(), "FARSIDE_CONSOLE_PORT=4321\nFARSIDE_VIRTUAL_PORT=4322\nFARSIDE_CONSOLE_QUALITY=71\n"));
+        // A helper that cannot run proves nothing was spawned.
+        const QStringList unusable{u"/nonexistent"_s};
+        BrokerHostSettings console(Scope::Console,u"/nonexistent/helper"_s,unusable,3000),
+            virtualHost(Scope::Virtual,u"/nonexistent/helper"_s,unusable,3000),
+            session(Scope::VirtualSession,u"/nonexistent/helper"_s,unusable,3000);
+        for (auto *model : {&console,&virtualHost,&session}) { QVERIFY(model->refresh()); QVERIFY(model->loaded()); QVERIFY(!model->busy()); QVERIFY(model->error().isEmpty()); }
+        QCOMPARE(console.values()[u"Port"_s].toString(), u"4321"_s);
+        int scope=0;
+        for (auto *model : {&console,&virtualHost}) {
+            QQmlEngine engine; localize(engine); QStringList warnings;
+            connect(&engine,&QQmlEngine::warnings,this,[&](const auto &errors){for(const auto &error:errors)warnings.append(error.toString());});
+            QQmlComponent component(&engine,pageUrl());
+            QScopedPointer<QObject> object(component.createWithInitialProperties({{u"fixedScope"_s,scope++},{u"showAdvanced"_s,true},
+                {u"consoleSettings"_s,QVariant::fromValue(&console)},{u"virtualSettings"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)}}));
+            QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
+            QQuickWindow window; window.resize(900,850); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
+            QVERIFY(!hasUnlockObject(page));
+            for (const auto &key : {u"Port"_s,u"Quality"_s,u"AdaptiveQuality"_s}) {
+                auto *control=find(page,u"host_"_s+key); QVERIFY2(control,qPrintable(key));
+                QVERIFY2(qobject_cast<QQuickItem *>(control)->isVisible(),qPrintable(key));
+            }
+            QVERIFY(!model->modified()); QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s))); page->setParentItem(nullptr);
+        }
+        // No snapshot: an honest message, never a prompt.
+        QTemporaryDir empty; qputenv("FARSIDE_PUBLIC_SETTINGS_DIR", empty.path().toUtf8());
+        BrokerHostSettings missing(Scope::Console,u"/nonexistent/helper"_s,unusable,3000);
+        QVERIFY(!missing.refresh()); QVERIFY(!missing.loaded()); QVERIFY(missing.error().contains(u"snapshot"));
+    }
+    void checkedAtLabelIsBlankBeforeInspection() {
+        QTemporaryDir dir;
+        BrokerHostSettings console(Scope::Console,u"/usr/bin/python3"_s,arguments(dir),3000);
+        QQmlEngine engine; localize(engine);
+        QQmlComponent component(&engine,pageUrl().resolved(QUrl(u"BrokerServiceDetails.qml"_s))); QVERIFY2(component.isReady(),qPrintable(component.errorString()));
+        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"host"_s,QVariant::fromValue(&console)},
+            {u"administration"_s,QVariant::fromValue<QObject *>(nullptr)},{u"route"_s,u"console"_s}}));
+        QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
+        QQuickWindow window; window.resize(640,800); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
+        auto *label=find(page,u"hostRuntimeCheckedAt"_s); QVERIFY(label);
+        QCOMPARE(label->property("text").toString(), QString());   // was "Checked at ." (empty timestamp)
+        QVERIFY(!label->property("visible").toBool());
+        QVERIFY(console.reload()); QTRY_VERIFY(!console.busy());
+        QVERIFY(QMetaObject::invokeMethod(find(page,u"inspectHostRuntime"_s),"clicked")); QTRY_VERIFY(!console.busy());
+        QVERIFY(!console.runtimeCheckedAt().isEmpty());
+        QVERIFY(label->property("text").toString().contains(console.runtimeCheckedAt()));
+        QVERIFY(!label->property("text").toString().contains(u"Checked at ."));
+        page->setParentItem(nullptr);
+    }
     void runtimeInspectionStatesAndWidth_data() {
         QTest::addColumn<QByteArray>("modeName");QTest::addColumn<QString>("summary");
         QTest::newRow("matching")<<QByteArray("success")<<u"agree with stored settings"_s;
@@ -101,6 +165,10 @@ private Q_SLOTS:
     }
     void actualFieldsScopeDraftsDefaultsCancelDiscardAndWidth() {
         QTemporaryDir dir;
+        // Reload Saved Settings reads the published public snapshot (no helper, no prompt).
+        QTemporaryDir snapshots; qputenv("FARSIDE_PUBLIC_SETTINGS_DIR", snapshots.path().toUtf8());
+        const auto restoreEnvironment = qScopeGuard([] { qunsetenv("FARSIDE_PUBLIC_SETTINGS_DIR"); });
+        QVERIFY(HostSnapshotFixture::publishAll(snapshots.path()));
         BrokerHostSettings console(Scope::Console,u"/usr/bin/python3"_s,arguments(dir),3000),
             virtualHost(Scope::Virtual,u"/usr/bin/python3"_s,arguments(dir),3000),
             session(Scope::VirtualSession,u"/usr/bin/python3"_s,arguments(dir),3000);
@@ -123,7 +191,7 @@ private Q_SLOTS:
             const auto name=[&](const QString &host,const QString &hardware){return hw?hardware:host;};
             const QString prefix=hw?u"desktop_"_s:u"host_"_s;
             if(hw){auto *section=item(u"desktopHardwareSection"_s);QVERIFY(section);QVERIFY(section->setProperty("showPciEditor",true));}
-            QVERIFY(!model->loaded()); QVERIFY(click(name(u"unlockHostSettings"_s,u"unlockDesktopHardware"_s))); QTRY_VERIFY(!model->busy()); QVERIFY(model->loaded());
+            QVERIFY(!model->loaded()); QVERIFY(!item(u"unlockHostSettings"_s)); QVERIFY(!item(u"unlockDesktopHardware"_s)); QVERIFY(model->reload()); QTRY_VERIFY(!model->busy()); QVERIFY(model->loaded());
             for(const auto &definition:model->definitions()) {
                 const auto row=definition.toMap();const auto key=row[u"key"_s].toString();
                 if(key.startsWith(u"Certificate") || (model==&virtualHost && key==u"CameraLoopbackDevice")) continue;

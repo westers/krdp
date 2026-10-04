@@ -60,6 +60,7 @@ target_link_libraries(kcm_krdpserver_core PUBLIC
     KRdpLegacyMigration
     KRdpBrokerUserSettings
     KRdpBrokerHostAdmin
+    KRdpBrokerHostPublicSnapshot
     KRdpBrokerHostRuntime
     PRIVATE
     qt6keychain

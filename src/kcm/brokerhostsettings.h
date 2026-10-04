@@ -58,6 +58,9 @@ public:
     Q_INVOKABLE bool beginCertificateEdit();
     Q_INVOKABLE bool stageCertificateEdit();
     Q_INVOKABLE void cancelCertificateEdit();
+    // Unprivileged read of the published public-metadata snapshot (no prompt).
+    Q_INVOKABLE bool refresh();
+    // Authoritative read through the privileged helper (tests and explicit use).
     Q_INVOKABLE bool reload();
     Q_INVOKABLE bool inspectRuntime();
     Q_INVOKABLE bool save();
@@ -74,6 +77,7 @@ private:
     QString validationError() const;
     bool reject(const QString &error);
     bool start(QJsonObject request, bool saving);
+    void adoptSnapshot(const QJsonObject &snapshot, bool saving);
     void clearImport();
     Scope m_scope;
     QString m_program;

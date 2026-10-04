@@ -82,6 +82,11 @@ Update prepare(Scope scope, bool exists, const QByteArray &current, const QJsonO
     }
     if (result.tls == TlsMode::Existing && (!desired.contains(u"Certificate"_s) || !desired.contains(u"CertificateKey"_s)))
         return refuse(u"both existing TLS paths are required"_s);
+    // The public snapshot hides the TLS path values, so a caller that keeps TLS
+    // cannot echo them back: preserve the saved overrides instead of dropping them.
+    if (scope != Scope::VirtualSession && result.tls == TlsMode::Keep)
+        for (const auto &key : {u"Certificate"_s, u"CertificateKey"_s})
+            if (!desired.contains(key) && before.overrides.contains(key)) desired.insert(key, before.overrides[key]);
     const auto edited = BrokerHostSettings::edit(scope, current, desired);
     if (!edited.error.isEmpty()) return refuse(edited.error);
     result.document = edited.contents;

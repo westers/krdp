@@ -12,6 +12,7 @@ KCM.SimpleKCM {
     property var administration: kcm.brokerAuthentication
     property var serviceAdministration: null
     property bool removedPending: false
+    property bool expanded: false
     title: i18nc("@title:window", "Who Can Connect")
     function editAlias(route, alias, owner) {
         aliasDialog.route = route; aliasDialog.existing = alias !== ""; aliasDialog.originalOwner = owner;
@@ -24,7 +25,7 @@ KCM.SimpleKCM {
         Layout.maximumWidth: Kirigami.Units.gridUnit * 48
         Layout.alignment: Qt.AlignLeft
         spacing: Kirigami.Units.largeSpacing
-        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Permissions for both services. Loading and saving require administrator authorization. Save policy changes, then restart both services.") }
+        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Permissions for both services. Expanding “Who can sign in” asks for administrator authorization once; saving changes asks again. Save policy changes, then restart both services.") }
         Kirigami.InlineMessage { objectName: "brokerAuthenticationError"; Layout.fillWidth: true; visible: root.administration.error !== ""; type: Kirigami.MessageType.Error; text: root.administration.error }
         Kirigami.InlineMessage {
             objectName: "brokerAuthenticationRestart"; Layout.fillWidth: true; visible: root.administration.lastSaveRequiresRestart; type: Kirigami.MessageType.Information
@@ -34,7 +35,14 @@ KCM.SimpleKCM {
                 Kirigami.Action { text: i18nc("@action", "Restart Virtual…"); enabled: root.serviceAdministration && root.serviceAdministration.services[1].canRestart; onTriggered: { restartConfirmation.route = "virtual"; restartConfirmation.open(); } }
             ]
         }
-        QQC2.Button { objectName: "unlockBrokerAuthentication"; visible: !root.administration.loaded; text: i18nc("@action:button", "Load Administrator Settings…"); icon.name: "document-edit"; enabled: !root.administration.busy; onClicked: root.administration.reload() }
+        QQC2.Button {
+            objectName: "expandWhoCanSignIn"
+            text: i18nc("@action:button", "Who can sign in")
+            icon.name: root.expanded ? "arrow-down" : "arrow-right"
+            enabled: !root.administration.busy
+            // Account names and aliases are administrator-protected: asked for once, on first expansion.
+            onClicked: { root.expanded = !root.expanded; if (root.expanded && !root.administration.loaded) root.administration.reload(); }
+        }
         Kirigami.InlineMessage { visible: root.removedPending; Layout.fillWidth: true; text: i18nc("@info", "Remote login removed from this draft. Save the access policy to apply it."); actions: Kirigami.Action { text: i18nc("@action", "Undo Remove"); onTriggered: { root.administration.undoRemoveAlias(); root.removedPending = false; } } }
         Repeater {
             model: ["console", "virtual"]
@@ -44,7 +52,7 @@ KCM.SimpleKCM {
                 readonly property var route: root.administration.policy[modelData] || {}
                 readonly property var pam: route.pam || {mode: "disabled", accounts: []}
                 Layout.fillWidth: true
-                visible: root.administration.loaded
+                visible: root.expanded && root.administration.loaded
                 enabled: root.administration.loaded && !root.administration.busy
                 Kirigami.Heading {
                     level: 2

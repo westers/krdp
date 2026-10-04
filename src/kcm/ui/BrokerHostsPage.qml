@@ -29,7 +29,7 @@ KCM.SimpleKCM {
     }
     function leave() { if (certificateSection.open) certificateSection.cancel(); }
     function closeCertificate() { if (certificateSection.open) certificateSection.cancel(); }
-    function reloadSettings() { if (host.modified) reloadConfirmation.open(); else { closeCertificate(); host.reload(); } }
+    function reloadSettings() { if (host.modified) reloadConfirmation.open(); else { closeCertificate(); host.refresh(); } }
     ColumnLayout {
       ColumnLayout {
         Layout.fillWidth: true
@@ -40,7 +40,6 @@ KCM.SimpleKCM {
             Layout.fillWidth: true; wrapMode: Text.Wrap
             text: i18nc("@info", "Defaults for everyone connecting to this service. Save changes, then explicitly restart the service.")
         }
-        QQC2.Button { objectName: "unlockHostSettings"; visible: !root.host.loaded; text: i18nc("@action:button", "Load Administrator Settings…"); icon.name: "document-edit"; enabled: !root.host.busy; onClicked: root.reloadSettings() }
         Kirigami.InlineMessage { objectName: "hostError"; Layout.fillWidth: true; type: Kirigami.MessageType.Error; visible: root.host.error !== ""; text: root.host.error }
         Kirigami.InlineMessage {
             objectName: "hostSavedNotice"; Layout.fillWidth: true; visible: root.host.applicationRequired; type: Kirigami.MessageType.Information
@@ -132,7 +131,7 @@ KCM.SimpleKCM {
         title: i18nc("@title:window", "Reload Saved Settings?")
         subtitle: i18nc("@info", "Discard unsaved changes for this page, including any staged certificate choice, and load saved settings?")
         standardButtons: Kirigami.Dialog.Cancel
-        customFooterActions: Kirigami.Action { objectName: "reloadHostAccept"; text: i18nc("@action:button", "Discard and Reload"); onTriggered: { reloadConfirmation.close(); root.closeCertificate(); root.host.reload(); } }
+        customFooterActions: Kirigami.Action { objectName: "reloadHostAccept"; text: i18nc("@action:button", "Discard and Reload"); onTriggered: { reloadConfirmation.close(); root.closeCertificate(); root.host.refresh(); } }
     }
     Kirigami.PromptDialog {
         parent: root.QQC2.Overlay.overlay

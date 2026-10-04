@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "brokerhostsettings.h"
+#include "HostSnapshotFixture.h"
 #include "brokerauthenticationsettings.h"
 #include "brokerpreferences.h"
 #include "brokerservices.h"
@@ -12,6 +13,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QPluginLoader>
+#include <QScopeGuard>
 #include <QJSValue>
 #include <QTemporaryDir>
 #include <QTest>
@@ -116,6 +118,9 @@ private Q_SLOTS:
         QVERIFY(hostOnly.contains(u"Virtual only"_s)); QVERIFY(!hostOnly.contains(u"desktop defaults"_s,Qt::CaseInsensitive));
     }
     void hostDiscardReloadDefaultsCloseCertificateSection() {
+        QTemporaryDir snapshots; QVERIFY(HostSnapshotFixture::publishAll(snapshots.path()));
+        qputenv("FARSIDE_PUBLIC_SETTINGS_DIR", snapshots.path().toUtf8()); // Reload reads the public snapshot
+        const auto restoreEnvironment=qScopeGuard([]{qunsetenv("FARSIDE_PUBLIC_SETTINGS_DIR");});
         Fixture f; QVERIFY(f.init());
         QVERIFY(f.console.reload()); QTRY_VERIFY(!f.console.busy()); QVERIFY(f.console.loaded());
         QVERIFY(QMetaObject::invokeMethod(find(f.page,u"configureConsole"_s),"clicked"));

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "brokerhostsettings.h"
 #include "BrokerHostAdmin.h"
+#include "BrokerHostPublicSnapshot.h"
 #include "BrokerHostRuntime.h"
 #include "ServerCertificate.h"
 #include <KLocalizedString>
@@ -49,6 +50,13 @@ QByteArray readPem(const QUrl &url)
         || before.st_ctim.tv_sec != after.st_ctim.tv_sec || before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) wipe(bytes);
     return bytes;
 }
+// The unprivileged public snapshot omits the TLS path values (never published);
+// the helper's full reply still carries them. Compare both forms path-agnostically.
+QVariantMap withoutHiddenPaths(QVariantMap map)
+{
+    map.remove(u"Certificate"_s); map.remove(u"CertificateKey"_s);
+    return map;
+}
 bool validSnapshot(Host::Scope scope, const QJsonObject &value)
 {
     const QStringList base{u"version"_s, u"scope"_s, u"revision"_s, u"values"_s, u"defaults"_s, u"effective"_s,
@@ -72,13 +80,14 @@ bool validSnapshot(Host::Scope scope, const QJsonObject &value)
         }
     }
     const auto defaults = Host::defaults(scope);
-    if (value[u"defaults"_s].toObject().toVariantMap() != defaults) return false;
+    if (withoutHiddenPaths(value[u"defaults"_s].toObject().toVariantMap()) != withoutHiddenPaths(defaults)) return false;
     auto effective = defaults;
     const auto overrides = value[u"values"_s].toObject();
     for (auto it = overrides.begin(); it != overrides.end(); ++it) effective[it.key()] = it.value().toString();
-    if (value[u"effective"_s].toObject().toVariantMap() != effective) return false;
+    if (withoutHiddenPaths(value[u"effective"_s].toObject().toVariantMap()) != withoutHiddenPaths(effective)) return false;
+    const auto reported = value[u"effective"_s].toObject();
     if (scope != Host::Scope::VirtualSession) {
-        if (effective[u"Certificate"_s] == effective[u"CertificateKey"_s] || !value[u"tls"_s].isObject() || !value[u"cameraLoopback"_s].isObject()) return false;
+        if ((reported.contains(u"Certificate"_s) && reported[u"Certificate"_s] == reported[u"CertificateKey"_s]) || !value[u"tls"_s].isObject() || !value[u"cameraLoopback"_s].isObject()) return false;
         const auto tls = value[u"tls"_s].toObject(), camera = value[u"cameraLoopback"_s].toObject();
         const QStringList tlsKeys{u"state"_s, u"administratorManaged"_s, u"fingerprint"_s, u"algorithm"_s, u"notBefore"_s, u"notAfter"_s};
         if (tls.size() != tlsKeys.size() || !tls[u"administratorManaged"_s].isBool()) return false;
@@ -129,9 +138,14 @@ QString BrokerHostSettings::validationError() const
     if (m_scope == Scope::VirtualSession) return {};
     auto effective = unitDefaults(); for (auto it = m_pending.begin(); it != m_pending.end(); ++it) effective[it.key()] = it.value();
     if (effective[u"Certificate"_s] == effective[u"CertificateKey"_s]) return i18nc("@info", "Certificate and private key paths must be different.");
-    if (m_tlsMode == u"keep" && (effective[u"Certificate"_s] != m_snapshot[u"effective"_s].toObject()[u"Certificate"_s].toString()
-        || effective[u"CertificateKey"_s] != m_snapshot[u"effective"_s].toObject()[u"CertificateKey"_s].toString()))
-        return i18nc("@info", "Choose an explicit certificate operation before changing TLS paths.");
+    if (m_tlsMode == u"keep") {
+        // Compare with the saved overrides, not the effective paths: the public
+        // snapshot does not carry them, so a kept path is simply absent here.
+        const auto saved = m_snapshot[u"values"_s].toObject();
+        for (const auto &key : {u"Certificate"_s, u"CertificateKey"_s})
+            if (m_pending.contains(key) != saved.contains(key) || (m_pending.contains(key) && m_pending[key].toString() != saved[key].toString()))
+                return i18nc("@info", "Choose an explicit certificate operation before changing TLS paths.");
+    }
     if (m_tlsMode == u"existing" && (!m_pending.contains(u"Certificate"_s) || !m_pending.contains(u"CertificateKey"_s)))
         return i18nc("@info", "Both existing TLS paths are required.");
     if (m_tlsMode == u"import") {
@@ -261,6 +275,27 @@ void BrokerHostSettings::discard()
     clearImport(); m_error.clear(); Q_EMIT changed();
 }
 bool BrokerHostSettings::reload() { return start({{u"version"_s, 1}, {u"operation"_s, u"read"_s}, {u"scope"_s, scope()}}, false); }
+bool BrokerHostSettings::refresh()
+{
+    // Unprivileged: the root-written public-metadata snapshot, never a helper.
+    if (busy() || m_draftOnly) return false;
+    const auto override = qEnvironmentVariable("FARSIDE_PUBLIC_SETTINGS_DIR");
+    const auto read = KRdp::BrokerHostPublicSnapshot::read(override.isEmpty() ? KRdp::BrokerHostPublicSnapshot::defaultDirectory() : override,
+        m_scope, !override.isEmpty());
+    if (!read.error.isEmpty()) return reject(read.error);
+    if (!validSnapshot(m_scope, read.value)) return reject(i18nc("@info", "The published host settings snapshot is invalid. Restart the service to publish it again."));
+    adoptSnapshot(read.value, false);
+    return true;
+}
+void BrokerHostSettings::adoptSnapshot(const QJsonObject &snapshot, bool saving)
+{
+    // A crash can occur after publication but before any reply. If the
+    // subsequent explicit reload finds a new revision, retain the need to
+    // apply it rather than clearing the unknown outcome without a notice.
+    if (!saving && m_outcomeUnknown && loaded() && m_snapshot[u"revision"_s] != snapshot[u"revision"_s]) m_applicationRequired = true;
+    m_snapshot = snapshot; m_pending = snapshot[u"values"_s].toObject().toVariantMap();
+    clearImport(); m_tlsMode = u"keep"_s; m_outcomeUnknown = false; m_error.clear(); Q_EMIT changed();
+}
 bool BrokerHostSettings::inspectRuntime()
 {
     if (!loaded() || busy() || m_scope == Scope::VirtualSession) return false;
@@ -366,12 +401,7 @@ bool BrokerHostSettings::start(QJsonObject request, bool saving)
             if (saving) m_outcomeUnknown = true;
             reject(i18nc("@info", "Invalid host snapshot. Reload before applying or saving settings.")); return;
         }
-        // A crash can occur after publication but before any reply. If the
-        // subsequent explicit reload finds a new revision, retain the need to
-        // apply it rather than clearing the unknown outcome without a notice.
-        if (!saving && m_outcomeUnknown && loaded() && m_snapshot[u"revision"_s] != snapshot[u"revision"_s]) m_applicationRequired = true;
-        m_snapshot = snapshot; m_pending = snapshot[u"values"_s].toObject().toVariantMap();
-        clearImport(); m_tlsMode = u"keep"_s; m_outcomeUnknown = false; m_error.clear(); Q_EMIT changed();
+        adoptSnapshot(snapshot, saving);
     });
     Q_EMIT changed(); timer->start(m_timeoutMs); process->start(); return true;
 }

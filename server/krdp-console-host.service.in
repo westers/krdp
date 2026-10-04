@@ -31,6 +31,8 @@ Environment=FARSIDE_CONSOLE_CAMERA_LOOPBACK_DEVICE=none
 Environment=FARSIDE_CONSOLE_AV1_TILES=auto
 Environment=FARSIDE_CONSOLE_VAAPI_DRIVER=auto
 EnvironmentFile=-/etc/farside/console-host.conf
+# Publish the world-readable public-metadata snapshot the settings panel reads without a password.
+ExecStartPre=-@KDE_INSTALL_FULL_LIBEXECDIR@/farside-host-settings-helper --publish console
 ExecStart=@CMAKE_INSTALL_PREFIX@/bin/farside-console-host --worker ${FARSIDE_CONSOLE_WORKER} --certificate ${FARSIDE_CONSOLE_CERTIFICATE} --certificate-key ${FARSIDE_CONSOLE_CERTIFICATE_KEY} --address ${FARSIDE_CONSOLE_ADDRESS} --port ${FARSIDE_CONSOLE_PORT} --runtime-directory /run/farside-console --quality ${FARSIDE_CONSOLE_QUALITY} --adaptive-quality ${FARSIDE_CONSOLE_ADAPTIVE_QUALITY} --prefer-audio-quality ${FARSIDE_CONSOLE_PREFER_AUDIO_QUALITY} --standard-client-media ${FARSIDE_CONSOLE_STANDARD_CLIENT_MEDIA} --camera-loopback-device ${FARSIDE_CONSOLE_CAMERA_LOOPBACK_DEVICE} --software-encoding ${FARSIDE_CONSOLE_SOFTWARE_ENCODING} --av1-tiles ${FARSIDE_CONSOLE_AV1_TILES} --vaapi-driver ${FARSIDE_CONSOLE_VAAPI_DRIVER}
 RuntimeDirectory=farside-console
 RuntimeDirectoryMode=0711

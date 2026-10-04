@@ -97,7 +97,7 @@ ColumnLayout {
     QQC2.Label {
         Layout.fillWidth: true; wrapMode: Text.Wrap
         visible: !root.host || !root.host.loaded
-        text: i18nc("@info", "Saved address: not checked. Open configuration to load it."); color: Kirigami.Theme.disabledTextColor
+        text: i18nc("@info", "Saved address: not available. Start the service once so it publishes its settings."); color: Kirigami.Theme.disabledTextColor
     }
     Kirigami.InlineMessage {
         Layout.fillWidth: true

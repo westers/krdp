@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 // Fixed-purpose privileged stdin protocol. No caller-supplied write path/argv.
 #include "BrokerHostAdmin.h"
+#include "BrokerHostPublicSnapshot.h"
 #include "BrokerHostRuntimeReader.h"
 #include "ServerCertificate.h"
 #include "VirtualGpuDevices.h"
@@ -272,7 +273,9 @@ int fail(const QString &error) { return reply({{u"error"_s, error}}, 1); }
 int main(int argc, char **argv)
 {
     if (::getuid() || ::geteuid()) return fail(u"administrator authorization is required"_s);
-    if (argc != 1) return fail(u"invalid helper invocation"_s);
+    // `--publish <scope>` is the root-only unit start hook (ExecStartPre): it takes no stdin.
+    const bool publishOnly = argc == 3 && QByteArray(argv[1]) == "--publish";
+    if (argc != 1 && !publishOnly) return fail(u"invalid helper invocation"_s);
     rlimit limit{0, 0};
     if (::setrlimit(RLIMIT_CORE, &limit) || ::prctl(PR_SET_DUMPABLE, 0)) return fail(u"private execution context unavailable"_s);
     ::umask(0077);
@@ -280,7 +283,9 @@ int main(int argc, char **argv)
     QByteArray input;
     const auto clear = qScopeGuard([&] { if (!input.isEmpty()) OPENSSL_cleanse(input.data(), size_t(input.size())); });
     QElapsedTimer deadline; deadline.start();
-    while (true) {
+    if (publishOnly)
+        input = QJsonDocument(QJsonObject{{u"version"_s, 1}, {u"operation"_s, u"publish"_s}, {u"scope"_s, QString::fromUtf8(argv[2])}}).toJson(QJsonDocument::Compact);
+    while (!publishOnly) {
         pollfd descriptor{STDIN_FILENO, POLLIN, 0};
         const auto remaining = 10000 - deadline.elapsed();
         if (remaining <= 0) return fail(u"host settings request timed out"_s);
@@ -301,7 +306,7 @@ int main(int argc, char **argv)
     const auto scope = BrokerHostAdmin::scope(request[u"scope"_s].toString());
     const auto operation = request[u"operation"_s].toString();
     if (!scope || !request[u"scope"_s].isString() || !request[u"version"_s].isDouble() || request[u"version"_s].toDouble() != 1
-        || (operation != u"read" && operation != u"save" && operation != u"inspect-runtime")
+        || (operation != u"read" && operation != u"save" && operation != u"inspect-runtime" && operation != u"publish")
         || (operation != u"save" && request.size() != 3)
         || (operation == u"inspect-runtime" && *scope == Scope::VirtualSession)) return fail(u"invalid host settings request"_s);
     const Fd directory(policyDirectory());
@@ -334,6 +339,12 @@ int main(int argc, char **argv)
     const auto initial = BrokerHostAdmin::view(*scope, current.exists, current.bytes);
     if (!initial.error.isEmpty()) return fail(initial.error);
     if (operation == u"read") return reply({{u"snapshot"_s, publicView(*scope, current)}}, 0);
+    if (operation == u"publish") {
+        // Broker start: refresh the world-readable public-metadata snapshot.
+        QString problem;
+        return BrokerHostPublicSnapshot::write(BrokerHostPublicSnapshot::defaultDirectory(), *scope, publicView(*scope, current), &problem)
+            ? reply({{u"published"_s, true}}, 0) : fail(problem);
+    }
     auto update = BrokerHostAdmin::prepare(*scope, current.exists, current.bytes, request);
     const auto clearKey = qScopeGuard([&] { if (!update.privateKeyPem.isEmpty()) OPENSSL_cleanse(update.privateKeyPem.data(), size_t(update.privateKeyPem.size())); });
     if (!update.error.isEmpty()) return fail(update.error);
@@ -396,6 +407,10 @@ int main(int argc, char **argv)
             || verifiedTls.administratorManaged != selectedTls.administratorManaged)
             return reply({{u"saved"_s, true}, {u"error"_s, u"host settings saved but TLS verification failed; reload before restarting"_s}}, 1);
     }
+    const auto savedView = publicView(*scope, saved);
+    // Best effort: the save itself is verified above. A failed publication only
+    // leaves the unprivileged copy stale until the next save or broker start.
+    BrokerHostPublicSnapshot::write(BrokerHostPublicSnapshot::defaultDirectory(), *scope, savedView);
     return reply({{u"saved"_s, true}, {u"restartRequired"_s, *scope != Scope::VirtualSession},
-        {u"newDesktopRequired"_s, *scope == Scope::VirtualSession}, {u"snapshot"_s, publicView(*scope, saved)}}, 0);
+        {u"newDesktopRequired"_s, *scope == Scope::VirtualSession}, {u"snapshot"_s, savedView}}, 0);
 }

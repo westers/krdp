@@ -25,7 +25,6 @@ KCM.SimpleKCM {
         QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; color: Kirigami.Theme.disabledTextColor; text: i18nc("@info", "Unset preferences use host settings. Console and Virtual may have different defaults. Host permissions and administrator locks take precedence.") }
         Kirigami.InlineMessage { objectName: "brokerPreferenceError"; Layout.fillWidth: true; visible: root.preferences.error !== ""; type: Kirigami.MessageType.Error; text: root.preferences.error }
         Kirigami.InlineMessage { objectName: "brokerPreferenceReconnect"; Layout.fillWidth: true; visible: root.preferences.reconnectRequired; type: Kirigami.MessageType.Information; text: i18nc("@info", "Preferences saved. Reconnect to use them; current connections are unchanged.") }
-        QQC2.Button { objectName: "unlockBrokerPreferences"; visible: !root.preferences.loaded; text: i18nc("@action:button", "Load My Preferences"); onClicked: root.preferences.reload() }
         ColumnLayout {
             visible: root.preferences.loaded; Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
             Kirigami.Heading { level: 2; text: i18nc("@title:group", "Video") }

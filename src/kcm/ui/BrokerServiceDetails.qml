@@ -52,7 +52,7 @@ ColumnLayout {
     Kirigami.InlineMessage { Layout.fillWidth: true; type: Kirigami.MessageType.Error; visible: root.host.error !== ""; text: root.host.error }
     RowLayout {
         Layout.fillWidth: true
-        QQC2.Button { objectName: "inspectHostRuntime"; text: root.host.loaded ? i18nc("@action:button", "Inspect Running Host…") : i18nc("@action:button", "Load Saved Settings…"); enabled: !root.host.busy; onClicked: root.host.loaded ? root.host.inspectRuntime() : root.host.reload() }
+        QQC2.Button { objectName: "inspectHostRuntime"; text: i18nc("@action:button", "Inspect Running Host…"); enabled: !root.host.busy; onClicked: root.host.loaded ? root.host.inspectRuntime() : root.host.refresh() }
         QQC2.ToolButton {
             objectName: root.route + "RefreshStatus"
             icon.name: "view-refresh"; text: i18nc("@action:button", "Refresh status")
@@ -74,9 +74,11 @@ ColumnLayout {
             text: root.runtimeState(root.runtime.state)
         }
         QQC2.Label {
+            objectName: "hostRuntimeCheckedAt"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
-            text: i18nc("@info", "Checked at %1. This is a snapshot; inspect again after changing settings or restarting the host.", root.host.runtimeCheckedAt)
+            visible: root.host.runtimeCheckedAt !== ""
+            text: root.host.runtimeCheckedAt === "" ? "" : i18nc("@info", "Checked at %1. This is a snapshot; inspect again after changing settings or restarting the host.", root.host.runtimeCheckedAt)
         }
         Kirigami.InlineMessage {
             objectName: "hostRuntimeStale"

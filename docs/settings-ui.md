@@ -178,3 +178,18 @@ settings references and this brief. Acceptance requires Steve's visual review
 and a populated native-style render, in addition to only the affected draft,
 inheritance and stable-refresh checks. Functional fixture success alone does
 not establish that the design is acceptable.
+
+## Reading settings without a password (OPT-057 S1)
+
+- Opening the panel never prompts. Host settings (Console, Virtual host, new-desktop hardware) are read from a
+  root-written, world-readable public-metadata snapshot, `/var/lib/farside-public/<scope>.json` (mode 0644, directory
+  0755): revision, non-path values/defaults/effective keys, TLS state/fingerprint/validity, camera bridge state and GPU
+  render device ids. It never holds account names or aliases, verifiers, certificate or key paths or key material, and is
+  never derived from anything the reader can influence. `farside-host-settings-helper` writes it after each successful
+  save and, via `ExecStartPre=-... --publish <scope>`, at every broker start. `BrokerHostSettings::refresh()` is the
+  unprivileged reader; `reload()` remains the authoritative helper read.
+- Because the TLS paths are hidden, a save that keeps TLS preserves the saved path overrides in the helper.
+- My Preferences loads from the user's own file on open. Account names and aliases (administrator protected) load once,
+  through the helper, when "Who can sign in" is expanded. Both polkit actions use `auth_admin_keep` for `allow_active`.
+- A hand edit of `/etc/farside/*.conf` shows in the panel only after the broker restarts or the next save (the helper
+  refuses a save whose revision is stale).
