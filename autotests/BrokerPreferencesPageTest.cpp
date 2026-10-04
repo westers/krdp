@@ -34,7 +34,8 @@ private Q_SLOTS:
         QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
         QQuickWindow window; window.resize(1000,900); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
         const auto item=[&](const QString &name) { return find(page,name); };
-        QVERIFY(!preferences.loaded()); QVERIFY(QMetaObject::invokeMethod(item(u"loadBrokerPreferences"_s),"clicked")); QVERIFY(preferences.loaded());
+        QVERIFY(!preferences.loaded()); QVERIFY(preferences.reload()); QVERIFY(preferences.loaded());
+        for(const auto &old:{u"saveBrokerPreferences"_s,u"discardBrokerPreferences"_s,u"defaultBrokerPreferences"_s,u"loadBrokerPreferences"_s}) QVERIFY2(!item(old),qPrintable(old)); // S3: the standard bar does this
         QTRY_VERIFY(item(u"preference_Quality"_s)); auto *quality=qobject_cast<QQuickItem *>(item(u"preference_Quality"_s)); QVERIFY(quality);
         quality->forceActiveFocus(); QTest::keyClick(&window,Qt::Key_A,Qt::ControlModifier); QTest::keyClick(&window,Qt::Key_9); QTest::keyClick(&window,Qt::Key_5); QTest::keyClick(&window,Qt::Key_Return);
         QTRY_COMPARE(preferences.values()[u"Quality"_s].toString(),u"95"_s);
@@ -67,9 +68,9 @@ private Q_SLOTS:
             QCOMPARE(preferences.values()[key],desired[key]);
         }
         QCOMPARE(preferences.values(),desired);
-        QCOMPARE(quality->property("to").toInt(),100); QVERIFY(preferences.setValue(u"Quality"_s,u"101"_s)); QVERIFY(!item(u"saveBrokerPreferences"_s)->property("enabled").toBool());
+        QCOMPARE(quality->property("to").toInt(),100); QVERIFY(preferences.setValue(u"Quality"_s,u"101"_s)); QVERIFY(!preferences.canSave());
         QVERIFY(preferences.error().contains(u"Quality"_s)); QVERIFY(quality->setProperty("value",91)); QVERIFY(QMetaObject::invokeMethod(quality,"valueModified"));
-        QVERIFY(QMetaObject::invokeMethod(item(u"saveBrokerPreferences"_s),"clicked")); QVERIFY(!preferences.modified()); QVERIFY(preferences.reconnectRequired());
+        QVERIFY(preferences.save()); QVERIFY(!preferences.modified()); QVERIFY(preferences.reconnectRequired());
         QCOMPARE(BrokerUserSettings::parse(read(path)).preferences.quality,std::optional<quint8>(91)); QVERIFY(read(path).contains("Password=fixture-secret-only\n"));
         auto *flickable=page->property("flickable").value<QQuickItem *>(); QVERIFY(flickable); QTest::qWait(400);
         const auto screenshots=qEnvironmentVariable("FARSIDE_PREFERENCES_SCREENSHOTS");
@@ -89,8 +90,8 @@ private Q_SLOTS:
             const auto bounds=control->mapRectToItem(content,QRectF(0,0,control->width(),control->height()));
             QVERIFY2(bounds.left()>=-0.5 && bounds.right()<=flickable->width()+0.5,qPrintable(key+u" needs horizontal scrolling at width640"_s));
         }
-        QVERIFY(QMetaObject::invokeMethod(item(u"defaultBrokerPreferences"_s),"clicked")); QCOMPARE(preferences.values(),QVariantMap({{u"Av1Tiles"_s,u"8"_s}}));
-        QTRY_VERIFY(item(u"inherit_Quality"_s)->property("currentIndex").toInt()==0); QVERIFY(QMetaObject::invokeMethod(item(u"saveBrokerPreferences"_s),"clicked"));
+        preferences.defaults(); QCOMPARE(preferences.values(),QVariantMap({{u"Av1Tiles"_s,u"8"_s}}));
+        QTRY_VERIFY(item(u"inherit_Quality"_s)->property("currentIndex").toInt()==0); QVERIFY(preferences.save());
         QVERIFY(!BrokerUserSettings::parse(read(path)).preferences.quality); QVERIFY(read(path).contains("Certificate=/root/fixture.pem\n"));
         QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s))); page->setParentItem(nullptr);
     }
@@ -103,13 +104,11 @@ private Q_SLOTS:
         QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QQuickWindow window;
         window.resize(1000,900); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
         const auto item=[&](const QString &name) { return find(page,name); };
-        QVERIFY(QMetaObject::invokeMethod(item(u"loadBrokerPreferences"_s),"clicked")); QTRY_VERIFY(item(u"preference_Quality"_s));
+        QVERIFY(preferences.reload()); QTRY_VERIFY(item(u"preference_Quality"_s));
         QVERIFY(preferences.setValue(u"Quality"_s,u"88"_s)); const QByteArray changed("[General]\nQuality=51\n# external\n"); write(path,changed);
-        QVERIFY(QMetaObject::invokeMethod(item(u"saveBrokerPreferences"_s),"clicked")); QCOMPARE(read(path),changed); QVERIFY(preferences.error().contains(u"changed"_s));
-        QVERIFY(QMetaObject::invokeMethod(item(u"loadBrokerPreferences"_s),"clicked")); auto *dialog=item(u"reloadBrokerPreferences"_s); QVERIFY(dialog);
-        QTRY_VERIFY(dialog->property("visible").toBool()); QVERIFY(QMetaObject::invokeMethod(dialog,"reject")); QCOMPARE(preferences.values()[u"Quality"_s].toString(),u"88"_s);
-        QTest::qWait(300); // Wait for the native modal exit before reopening it.
-        QVERIFY(QMetaObject::invokeMethod(item(u"loadBrokerPreferences"_s),"clicked")); QVERIFY(QMetaObject::invokeMethod(item(u"reloadPreferenceAccept"_s),"triggered"));
+        QVERIFY(!preferences.save()); QCOMPARE(read(path),changed); QVERIFY(preferences.error().contains(u"changed"_s));
+        // Reset (the standard bar) discards the pending edit and re-reads the file the other writer changed.
+        preferences.discard(); QVERIFY(preferences.reload());
         QCOMPARE(preferences.values()[u"Quality"_s].toString(),u"51"_s); QVERIFY(!preferences.modified()); page->setParentItem(nullptr);
     }
 };

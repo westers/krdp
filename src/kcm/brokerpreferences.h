@@ -26,6 +26,7 @@ public:
     bool canSave() const;
     bool reconnectRequired() const { return m_reconnect; }
     QString error() const;
+    bool representsDefaults() const;
     Q_INVOKABLE bool reload();
     Q_INVOKABLE bool setValue(const QString &key, const QString &value);
     Q_INVOKABLE bool inherit(const QString &key);

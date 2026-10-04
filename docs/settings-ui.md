@@ -21,19 +21,18 @@ Updated 2026-10-02 for the ten-to-five page consolidation (evidence
   immediate connection and boot switches, saved (and verified running) address,
   Configure…, Restart…, Stop… and a Details expander holding the read-only host
   inspection (`BrokerServiceDetails`). Access and personal preferences are the
-  fixed footer links. Saved wildcard bindings are described as all interfaces
+  footer links. Saved wildcard bindings are described as all interfaces
   and a port, never offered as a connectable address.
 - Console and Virtual configuration group Connection (with the inline
   `BrokerCertificateSection`), Video, Sound and devices, then Advanced. The
   Virtual page ends with the inline `BrokerHardwareSection` (GPU grants and
-  VA-API policy for newly created desktops) that has its own Restore Defaults,
-  Revert Changes and Save Desktop Defaults; the fixed footer saves only the
-  Virtual host settings. A status line above the footer names the dirty scope.
-  Console display selection links to personal preferences.
+  VA-API policy for newly created desktops); it is a separate draft but is saved
+  by the same Apply as the Virtual host settings. A status line names the dirty
+  scope. Console display selection links to personal preferences.
 - Certificate changes use the dedicated local C++ draft. Cancel and leaving the
   page (Back) discard only that editor. Use Certificate Changes stages only TLS
-  fields into the host draft; saving and restarting remain explicit host
-  actions. Ordinary Restore Defaults preserves TLS paths, the TLS operation and
+  fields into the host draft; Apply saves it and restarting remains an explicit
+  action. The standard Defaults button preserves TLS paths, the TLS operation and
   any staged PEM import. Only one native file dialog is ever open because the
   editor expands in place instead of opening a modal.
 - Inline expanders (Details, Certificate, Advanced) only toggle `visible`; never
@@ -44,16 +43,33 @@ Updated 2026-10-02 for the ten-to-five page consolidation (evidence
   fields appear only for the corresponding mode and retain hidden values.
 - Access separates Console and Virtual system accounts and remote logins.
   Native dialogs stage alias edits; password fields clear when dismissed.
-  Removing a login is staged, with Undo. Save applies the access policy and
-  offers separate, confirmed service restarts.
+  Removing a login is staged, with Undo. Apply saves the access policy and the
+  overview offers separate, confirmed service restarts.
 - Use native QQC2/Kirigami controls, theme fonts/colors, units, contextual
   i18nc strings and bounded content columns. Multiple forms align through
   persistent twinFormLayouts. Do not constrain a form's Layout.maximumWidth
   to its own parent layout's current width: this creates a size negotiation
   cycle and collapses sections. Sections use one shared desktop/narrow threshold.
-- Scoped saves and local Revert/Defaults remain in fixed footers. Reloading a
-  modified draft requires an explicit Discard and Reload action. Global KCM
-  Apply/Defaults do not authorize or repurpose system/account operations.
+- Pages have no footers and no Save/Revert/Reload/Restore buttons. The module
+  uses the shell's standard Help/Defaults/Reset/Apply bar (`setButtons(Help |
+  Apply | Default)`); `BrokerSettingsApply` aggregates the five scoped drafts
+  (Console, Virtual, new-desktop hardware, access policy, my preferences):
+  - `needsSave` is true when any draft is dirty; `representsDefaults` covers the
+    host and preference drafts.
+  - Apply saves every dirty scope and never stops at a failed one. Order: my
+    preferences (no authorization), then all dirty host scopes through ONE helper
+    process (`save-batch`: Console, Virtual and hardware share one authorization),
+    then the access policy through its own helper. That is at most two
+    administrator helper processes, and the second runs only after the first has
+    finished, so there is never a second dialog on top of the first;
+    `auth_admin_keep` makes the second authorization silent inside its window.
+    One dirty host scope uses the plain single-scope request.
+  - A refused scope keeps its draft; `BrokerApplyFailures` names it on every page.
+  - Reset (`load()`) drops every draft and re-reads the unprivileged sources;
+    Defaults resets host and preference drafts, keeps certificates and a staged
+    TLS choice, and leaves the access policy alone (it has no default).
+  - Saved settings that need a restart show an InlineMessage with an explicit,
+    confirmed Restart action on the overview and the page.
 - Camera prerequisites remain visible and distinguish saved setup from runtime
   readiness. Device grants describe desktop namespace access, not GPU encoder
   selection. Unsupported Virtual camera sharing is clearly explained.

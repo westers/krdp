@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "BrokerHostAdmin.h"
+#include "BrokerHostBatch.h"
 #include "ServerCertificate.h"
 #include <QFile>
 #include <QJsonDocument>
@@ -122,6 +123,34 @@ private Q_SLOTS:
         const auto view = BrokerHostAdmin::view(Scope::Console, true, update.document);
         const auto publicBytes = QJsonDocument(view.value).toJson();
         QVERIFY(!publicBytes.contains("PRIVATE KEY")); QVERIFY(!publicBytes.contains(key));
+    }
+    void batchEnvelopeCarriesOnlyDistinctSingleScopeSaves()
+    {
+        const auto one = [](const QString &scope) { return QJsonObject{{u"version"_s, 1}, {u"operation"_s, u"save"_s}, {u"scope"_s, scope}}; };
+        const auto good = BrokerHostBatch::request({one(u"console"_s), one(u"virtual"_s), one(u"session"_s)});
+        const auto parsed = BrokerHostBatch::parseRequest(good);
+        QVERIFY(parsed); QCOMPARE(parsed->size(), 3);
+        QVERIFY(BrokerHostBatch::parseRequest(BrokerHostBatch::request({one(u"console"_s)})));
+        QVERIFY(!BrokerHostBatch::parseRequest(BrokerHostBatch::request({})));
+        QVERIFY(!BrokerHostBatch::parseRequest(BrokerHostBatch::request({one(u"console"_s), one(u"console"_s)})));
+        QVERIFY(!BrokerHostBatch::parseRequest(BrokerHostBatch::request({one(u"console"_s), one(u"nonsense"_s)})));
+        auto read = one(u"console"_s); read[u"operation"_s] = u"read"_s;
+        QVERIFY(!BrokerHostBatch::parseRequest(BrokerHostBatch::request({read})));
+        auto nested = BrokerHostBatch::request({one(u"console"_s)}); nested.insert(u"extra"_s, 1);
+        QVERIFY(!BrokerHostBatch::parseRequest(nested));
+        QJsonObject large = one(u"console"_s); large[u"padding"_s] = QString(BrokerHostAdmin::MaximumRequestBytes, u'x');
+        QVERIFY(!BrokerHostBatch::parseRequest(BrokerHostBatch::request({large})));
+    }
+    void batchReplyMustMatchTheRequestedScopesInOrder()
+    {
+        const auto entry = [](const QString &scope, int status) { return QJsonObject{{u"scope"_s, scope}, {u"status"_s, status}, {u"reply"_s, QJsonObject{}}}; };
+        const QStringList scopes{u"console"_s, u"virtual"_s};
+        const auto ok = QJsonObject{{u"results"_s, QJsonArray{entry(u"console"_s, 0), entry(u"virtual"_s, 1)}}};
+        const auto parsed = BrokerHostBatch::parseReply(ok, scopes);
+        QVERIFY(parsed); QCOMPARE(parsed->at(1).status, 1);
+        QVERIFY(!BrokerHostBatch::parseReply(QJsonObject{{u"results"_s, QJsonArray{entry(u"virtual"_s, 0), entry(u"console"_s, 0)}}}, scopes));
+        QVERIFY(!BrokerHostBatch::parseReply(QJsonObject{{u"results"_s, QJsonArray{entry(u"console"_s, 0)}}}, scopes));
+        QVERIFY(!BrokerHostBatch::parseReply(QJsonObject{{u"error"_s, u"x"_s}}, scopes));
     }
 };
 QTEST_GUILESS_MAIN(BrokerHostAdminTest)

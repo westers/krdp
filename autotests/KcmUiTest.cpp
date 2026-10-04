@@ -282,9 +282,9 @@ private Q_SLOTS:
         QVERIFY(!findItem(page, u"settingsBack"_s));       // no custom Back: the shell supplies it
         checkReachable(page, {u"consoleHostEnabled"_s, u"consoleHostStatus"_s, u"configureConsole"_s, u"configureVirtual"_s, u"configureAccess"_s, u"configurePreferences"_s});
         const int depth = m_module->depth();
-        const struct { const char *opener; const char *objectName; QString save; } destinations[] = {
-            {"openConsole", "consoleSettingsPage", u"saveHostSettings"_s}, {"openVirtual", "virtualSettingsPage", u"saveHostSettings"_s},
-            {"openAccess", "brokerSignInPage", u"saveBrokerAuthentication"_s}, {"openPreferences", "brokerPreferencesPage", u"saveBrokerPreferences"_s}};
+        const struct { const char *opener; const char *objectName; } destinations[] = {
+            {"openConsole", "consoleSettingsPage"}, {"openVirtual", "virtualSettingsPage"},
+            {"openAccess", "brokerSignInPage"}, {"openPreferences", "brokerPreferencesPage"}};
         for (const auto &destination : destinations) {
             QVERIFY2(QMetaObject::invokeMethod(page, destination.opener), destination.opener);
             QCOMPARE(m_module->depth(), depth + 1);
@@ -293,11 +293,11 @@ private Q_SLOTS:
             QCOMPARE(sub->objectName(), QString::fromLatin1(destination.objectName));
             showPage(sub, window);
             QTest::qWait(100); // Qt Quick polishes the new page's layout.
-            auto *save = findItem(sub, destination.save);
-            QVERIFY2(save && save->isVisible() && save->width() > 0 && save->height() > 0, destination.opener);
-            const auto bounds = save->mapRectToItem(sub, QRectF(0, 0, save->width(), save->height()));
-            QVERIFY2(bounds.left() >= -0.5 && bounds.right() <= sub->width() + 0.5 && bounds.bottom() <= sub->height() + 0.5,
-                     qPrintable(u"%1 footer %2 bounds (%3,%4)..(%5,%6) page %7x%8"_s.arg(QString::fromLatin1(destination.opener), destination.save).arg(bounds.left()).arg(bounds.top()).arg(bounds.right()).arg(bounds.bottom()).arg(sub->width()).arg(sub->height())));
+            // S3: no page footer and no per-page Save/Revert/Reload; the shell's Apply/Reset/Defaults bar replaces them.
+            for (const auto &old : {u"saveHostSettings"_s, u"saveBrokerAuthentication"_s, u"saveBrokerPreferences"_s, u"saveDesktopHardware"_s, u"discardHostSettings"_s,
+                                    u"loadHostSettings"_s, u"loadBrokerPreferences"_s, u"loadBrokerAuthentication"_s, u"defaultHostSettings"_s, u"defaultBrokerPreferences"_s})
+                QVERIFY2(!findItem(sub, old), qPrintable(u"%1 still has %2"_s.arg(QString::fromLatin1(destination.opener), old)));
+            QVERIFY2(sub->property("footer").value<QQuickItem *>() == nullptr, destination.opener);
             m_module->pop(); // Back
             sub->setParentItem(nullptr); // the test window is not the shell's page row
             QCOMPARE(m_module->depth(), depth);
@@ -340,11 +340,11 @@ private Q_SLOTS:
         QTest::addColumn<QString>("title");
         QTest::addColumn<QStringList>("keyItems");
         QTest::newRow("broker sign-in") << u"BrokerSignInPage.qml"_s << u"brokerSignInPage"_s << u"Who Can Connect"_s
-                                       << QStringList{u"expandWhoCanSignIn"_s, u"loadBrokerAuthentication"_s, u"saveBrokerAuthentication"_s};
+                                       << QStringList{u"expandWhoCanSignIn"_s};
         QTest::newRow("broker preferences") << u"BrokerPreferencesPage.qml"_s << u"brokerPreferencesPage"_s << u"My Preferences"_s
-                                          << QStringList{u"loadBrokerPreferences"_s,u"saveBrokerPreferences"_s,u"defaultBrokerPreferences"_s};
+                                          << QStringList{u"preference_Quality"_s};
         QTest::newRow("broker hosts") << u"BrokerHostsPage.qml"_s << u"brokerHostsPage"_s << u"Console Settings"_s
-                                    << QStringList{u"loadHostSettings"_s, u"saveHostSettings"_s, u"defaultHostSettings"_s};
+                                    << QStringList{u"host_Port"_s};
 
     }
 
@@ -374,7 +374,7 @@ private Q_SLOTS:
         for(const auto &name:{"settings()","toggleServer(bool)","restartServer()","applyListenPort(int)","addUser(QString,QString)","readPasswordFromWallet(QString)"})
             QVERIFY(m_module->metaObject()->indexOfMethod(name)<0);
         QVERIFY(m_module->metaObject()->indexOfProperty("coexistence")<0);
-        QCOMPARE(int(m_module->buttons()),int(KAbstractConfigModule::Help));
+        QCOMPARE(int(m_module->buttons()),int(KAbstractConfigModule::Help|KAbstractConfigModule::Apply|KAbstractConfigModule::Default));   // the standard bar
         // Host settings and preferences are populated on open without any prompt;
         // only the administrator-protected sign-in policy stays lazy.
         for(const auto &name:{"consoleHostSettings","virtualHostSettings","virtualSessionSettings","brokerPreferences"}) {
@@ -390,6 +390,25 @@ private Q_SLOTS:
             QCOMPARE(QCryptographicHash::hash(readFixture(it.key()),QCryptographicHash::Sha256),it.value());
         for(const auto &file:{u"UsersPage.qml"_s,u"ScreensPage.qml"_s,u"VideoAudioPage.qml"_s,u"AdvancedPage.qml"_s,u"EditUserModal.qml"_s})
             QVERIFY(!QFile::exists(u":/kcm/kcm_farside/"_s+file));
+    }
+    void standardBarStateFollowsEveryDraft() {
+        // needsSave / representsDefaults aggregate the five scoped drafts; Reset (load) and Defaults act on all of them.
+        const auto model=[&](const char *name){ auto *o=m_module->property(name).value<QObject *>(); Q_ASSERT(o); return o; };
+        const auto set=[&](const char *name,const QString &key,const QString &value) { bool ok=false; QMetaObject::invokeMethod(model(name),"setValue",Q_RETURN_ARG(bool,ok),Q_ARG(QString,key),Q_ARG(QString,value)); return ok; };
+        m_module->load(); QVERIFY(!m_module->needsSave()); QVERIFY(m_module->representsDefaults());
+        const struct { const char *name; QString key, value; } edits[]={{"consoleHostSettings",u"Port"_s,u"3401"_s},{"virtualHostSettings",u"Quality"_s,u"50"_s},
+            {"virtualSessionSettings",u"VaapiDriver"_s,u"off"_s},{"brokerPreferences",u"Quality"_s,u"60"_s}};
+        for (const auto &edit : edits) {
+            QVERIFY2(set(edit.name,edit.key,edit.value),edit.name);
+            QVERIFY2(m_module->needsSave(),edit.name); QVERIFY2(!m_module->representsDefaults(),edit.name);
+            m_module->load();                                   // Reset
+            QVERIFY2(!m_module->needsSave(),edit.name); QVERIFY2(!model(edit.name)->property("modified").toBool(),edit.name);
+        }
+        for (const auto &edit : edits) QVERIFY(set(edit.name,edit.key,edit.value));
+        m_module->defaults();                                   // Defaults: every host/preference draft back to ordinary defaults
+        QVERIFY(m_module->representsDefaults());
+        m_module->load(); QVERIFY(!m_module->needsSave());
+        QVERIFY(m_module->findChildren<QProcess *>().isEmpty());   // neither Reset nor Defaults runs a helper
     }
     void hostNavigationSelectsScope_data() {
         QTest::addColumn<QString>("route");QTest::addColumn<int>("index");

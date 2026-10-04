@@ -37,7 +37,8 @@ private Q_SLOTS:
             return nullptr;
         };
         const auto item = [&](const QString &name) { return visualItem(visualItem, page, name); };
-        QVERIFY(!item(u"unlockBrokerAuthentication"_s)); QVERIFY(!administration.loaded());
+        for(const auto &old:{u"unlockBrokerAuthentication"_s,u"saveBrokerAuthentication"_s,u"discardBrokerAuthentication"_s,u"loadBrokerAuthentication"_s}) QVERIFY2(!item(old),qPrintable(old)); // S3: the standard bar does this
+         QVERIFY(!administration.loaded());
         auto *expand = item(u"expandWhoCanSignIn"_s); QVERIFY(expand); QVERIFY(QMetaObject::invokeMethod(expand, "clicked"));
         QTRY_VERIFY(administration.loaded() && !administration.busy());
         QTRY_VERIFY(item(u"consolePamMode"_s)); QTRY_VERIFY(item(u"virtualPamMode"_s));
@@ -51,10 +52,10 @@ private Q_SLOTS:
         QTRY_VERIFY(!dialog->property("visible").toBool()); QTRY_COMPARE(item(u"brokerAliasPassword"_s)->property("text").toString(), QString());
         QVERIFY(administration.modified()); QVERIFY(!QJsonDocument::fromVariant(administration.policy()).toJson().contains("password"));
         QFile mode(directory.filePath(u"mode"_s)); QVERIFY(mode.open(QIODevice::WriteOnly)); mode.write("cancel"); mode.close();
-        QVERIFY(QMetaObject::invokeMethod(item(u"saveBrokerAuthentication"_s), "clicked"));
+        QVERIFY(administration.save());
         QTRY_VERIFY(!administration.busy()); QVERIFY(administration.modified()); QVERIFY(administration.error().contains(u"unchanged"_s));
         QVERIFY(mode.open(QIODevice::WriteOnly | QIODevice::Truncate)); mode.write("success"); mode.close();
-        QVERIFY(QMetaObject::invokeMethod(item(u"saveBrokerAuthentication"_s), "clicked"));
+        QVERIFY(administration.save());
         QTRY_VERIFY(!administration.busy()); QVERIFY2(administration.error().isEmpty(), qPrintable(administration.error()));
         QVERIFY(!administration.modified()); QVERIFY(administration.lastSaveRequiresRestart());
         QTest::qWait(400);

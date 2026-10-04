@@ -4,6 +4,7 @@
 #include "brokerauthenticationsettings.h"
 #include "brokerpreferences.h"
 #include "brokerservices.h"
+#include "brokersettingsapply.h"
 #include "ServerCertificate.h"
 #include <KLocalizedQmlContext>
 #include <QFile>
@@ -50,14 +51,27 @@ public:
     void resizeAll(const QSizeF &size) { root->setSize(size); for(const auto &item:stack) if(item) item->setSize(size); }
     void clear() { goHome(); }
 };
+// The context object real pages find as `kcm` (only what the shared banners need).
+class FakeKcm : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(BrokerSettingsApply *settingsApply READ settingsApply CONSTANT)
+public:
+    explicit FakeKcm(BrokerSettingsApply *apply) : m_apply(apply) {}
+    BrokerSettingsApply *settingsApply() const { return m_apply; }
+private:
+    BrokerSettingsApply *m_apply;
+};
 class MainTransport : public BrokerServiceTransport {
     Q_OBJECT
 public:
     BrokerServiceState state{true,u"loaded"_s,u"active"_s,u"running"_s,u"enabled"_s,42};
+    BrokerServiceState virtualState{true,u"loaded"_s,u"inactive"_s,u"dead"_s,u"disabled"_s,0};
+    bool split=false, defer=false;       // split: Virtual has its own state; defer: complete operations on finish()
     int mutations=0, lastRoute=-1, reads=0;
-    Operation lastOperation=Start;
-    void query(int,QueryDone done) override { ++reads; done(state,{}); }
-    void operate(int route,Operation operation,Done done) override { ++mutations;lastRoute=route;lastOperation=operation;done({}); }
+    Operation lastOperation=Start; Done pending;
+    void query(int route,QueryDone done) override { ++reads; done(split&&route==1?virtualState:state,{}); }
+    void operate(int route,Operation operation,Done done) override { ++mutations;lastRoute=route;lastOperation=operation; if(defer) pending=std::move(done); else done({}); }
+    void finish(const QString &error={}) { auto done=std::move(pending); done(error); }
 };
 class BrokerMainPageTest : public QObject {
     Q_OBJECT
@@ -76,12 +90,12 @@ class BrokerMainPageTest : public QObject {
     struct Fixture {
         QTemporaryDir dir; QStringList protocol;
         BrokerHostSettings console, virtualHost, session; BrokerAuthenticationSettings auth; BrokerPreferences preferences;
-        MainTransport transport; MainNavigation navigation; BrokerServices services;
+        MainTransport transport; MainNavigation navigation; BrokerServices services; BrokerSettingsApply apply; FakeKcm kcmObject;
         QQmlEngine engine; QScopedPointer<QObject> object; QQuickItem *page=nullptr; QQuickWindow window;
         Fixture() : protocol{qEnvironmentVariable("FARSIDE_HOST_TEST_FIXTURE",QString::fromUtf8(MAIN_PROTOCOL_FIXTURE)),dir.path()},
             console(Scope::Console,u"/usr/bin/python3"_s,protocol,3000), virtualHost(Scope::Virtual,u"/usr/bin/python3"_s,protocol,3000), session(Scope::VirtualSession,u"/usr/bin/python3"_s,protocol,3000),
             auth(u"/usr/bin/python3"_s,{qEnvironmentVariable("FARSIDE_AUTH_TEST_FIXTURE",QString::fromUtf8(MAIN_AUTH_PROTOCOL_FIXTURE)),dir.path()},nullptr),
-            preferences(dir.path()), services(&transport) {}
+            preferences(dir.path()), services(&transport), apply(&auth,&console,&virtualHost,&session,&preferences), kcmObject(&apply) {}
         ~Fixture() { navigation.clear(); }
         // Items of the visible page first, then the overview underneath.
         QObject *item(const QString &name) {
@@ -96,6 +110,7 @@ class BrokerMainPageTest : public QObject {
         }
         bool init() {
             auto *localized=new KLocalizedQmlContext(&engine); localized->setTranslationDomain(u"kcm_farside"_s); engine.rootContext()->setContextObject(localized);
+            engine.rootContext()->setContextProperty(u"kcm"_s,&kcmObject);
             QQmlComponent component(&engine,QUrl::fromLocalFile(qEnvironmentVariable("FARSIDE_MAIN_TEST_PAGE",QString::fromUtf8(MAIN_PAGE))));
             if(!component.isReady()) { qWarning() << component.errorString(); return false; }
             object.reset(component.createWithInitialProperties({{u"navigation"_s,QVariant::fromValue(&navigation)},{u"administration"_s,QVariant::fromValue(&services)},
@@ -169,12 +184,11 @@ private Q_SLOTS:
         QVERIFY(f.virtualHost.reload()); QTRY_VERIFY(!f.virtualHost.busy()); QVERIFY(f.session.reload()); QTRY_VERIFY(!f.session.busy());
         QQuickItem *virtualPage=f.goTo(2); QVERIFY(virtualPage); QTest::qWait(60);
         auto *summary=qobject_cast<QQuickItem *>(find(virtualPage,u"hostPendingSummary"_s)); QVERIFY(summary);
-        QObject *saveHost=find(virtualPage,u"saveHostSettings"_s); QVERIFY(saveHost);
         QVERIFY(!summary->isVisible());
         f.session.setValue(u"VaapiDriver"_s,u"off"_s);                       // hardware (desktop defaults) edit only
-        QTRY_VERIFY(summary->isVisible()); QVERIFY(!saveHost->property("enabled").toBool());
+        QTRY_VERIFY(summary->isVisible());
         QVERIFY(summary->property("text").toString().contains(u"New desktop defaults"_s));
-        QVERIFY(summary->property("text").toString().contains(u"Save Desktop Defaults"_s));
+        QVERIFY(summary->property("text").toString().contains(u"Apply"_s));
         QVERIFY(f.virtualHost.setValue(u"Port"_s,u"3402"_s));                // both dirty
         const auto both=summary->property("text").toString();
         QVERIFY(both.contains(u"Virtual only"_s)); QVERIFY(both.contains(u"New desktop defaults"_s));
@@ -182,7 +196,7 @@ private Q_SLOTS:
         const auto hostOnly=summary->property("text").toString();
         QVERIFY(hostOnly.contains(u"Virtual only"_s)); QVERIFY(!hostOnly.contains(u"desktop defaults"_s,Qt::CaseInsensitive));
     }
-    void hostDiscardReloadDefaultsCloseCertificateSection() {
+    void resetAndDefaultsCloseCertificateSection() {
         QTemporaryDir snapshots; QVERIFY(HostSnapshotFixture::publishAll(snapshots.path()));
         qputenv("FARSIDE_PUBLIC_SETTINGS_DIR", snapshots.path().toUtf8()); // Reload reads the public snapshot
         const auto restoreEnvironment=qScopeGuard([]{qunsetenv("FARSIDE_PUBLIC_SETTINGS_DIR");});
@@ -202,23 +216,16 @@ private Q_SLOTS:
             auto *draft=qobject_cast<BrokerHostSettings *>(f.console.certificateDraft());
             QVERIFY(!draft || !draft->loaded() || draft->tlsMode()==u"keep"_s);
         };
-        // Revert Changes: needs a pending edit to be enabled.
+        // Reset (standard bar): drops the draft, re-reads, and closes the open editor.
         QVERIFY(f.console.setValue(u"Port"_s,u"3401"_s)); openStandard();
-        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"discardHostSettings"_s),"clicked")); closedAndCancelled();
+        f.apply.reset(); closedAndCancelled();
         QCOMPARE(f.console.tlsMode(),u"keep"_s); QVERIFY(!f.console.modified());
-        // Restore Defaults.
+        // Defaults (standard bar) closes it too and never stages a certificate choice.
         openStandard();
-        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"defaultHostSettings"_s),"clicked")); closedAndCancelled();
+        f.apply.useDefaults(); closedAndCancelled();
         QCOMPARE(f.console.tlsMode(),u"keep"_s); f.console.discard();
-        // Reload Saved Settings: confirm only when modified, so make an edit and accept the dialog.
-        QVERIFY(f.console.setValue(u"Port"_s,u"3401"_s)); openStandard();
-        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"loadHostSettings"_s),"clicked"));
-        QObject *accept=find(consolePage,u"reloadHostAccept"_s); QVERIFY(accept);
-        QVERIFY(QMetaObject::invokeMethod(accept,"triggered")); QTRY_VERIFY(!f.console.busy()); closedAndCancelled();
-        QCOMPARE(f.console.tlsMode(),u"keep"_s);
-        // Without a pending edit, Reload applies directly and must also close an open section.
-        openStandard();
-        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"loadHostSettings"_s),"clicked")); QTRY_VERIFY(!f.console.busy()); closedAndCancelled();
+        // There is no per-page Revert/Defaults/Reload any more.
+        for(const auto &old:{u"saveHostSettings"_s,u"discardHostSettings"_s,u"defaultHostSettings"_s,u"loadHostSettings"_s,u"reloadHostAccept"_s}) QVERIFY2(!find(consolePage,old),qPrintable(old));
     }
     void navigationDraftsAndNativePresentation() {
         QTemporaryDir dir;
@@ -334,31 +341,19 @@ private Q_SLOTS:
         consolePage=goTo(1); QVERIFY(consolePage); QTest::qWait(60);
         QVERIFY(!find(consolePage,u"certificateStandard"_s)->property("visible").toBool());   // the draft editor is closed again
         QVERIFY(find(consolePage,u"editHostCertificate"_s)->property("visible").toBool());
-        QVERIFY(QMetaObject::invokeMethod(find(consolePage,u"defaultHostSettings"_s),"clicked")); QCOMPARE(console.tlsMode(),u"standard"_s); console.discard();
+        console.defaults(); QCOMPARE(console.tlsMode(),u"standard"_s); console.discard();   // Defaults keep the staged certificate choice
         QVERIFY(virtualHost.reload()); QTRY_VERIFY(!virtualHost.busy()); QVERIFY(session.reload()); QTRY_VERIFY(!session.busy()); QVERIFY(auth.reload()); QTRY_VERIFY(!auth.busy()); QVERIFY(preferences.reload());
-        {   // Review focus 3: the Virtual page has two independent save scopes.
+        {   // The Virtual page edits two independent drafts (host, new-desktop hardware); the standard Apply saves both.
             QQuickItem *virtualPage=goTo(2); QVERIFY(virtualPage); QTest::qWait(60);
-            QObject *saveHost = find(virtualPage, u"saveHostSettings"_s);
-            QObject *saveHw = find(virtualPage, u"saveDesktopHardware"_s);
-            QVERIFY(saveHost && saveHw);
-            QVERIFY(!saveHost->property("enabled").toBool());
-            QVERIFY(!saveHw->property("enabled").toBool());
-            session.setValue(u"VaapiDriver"_s, u"off"_s);                 // hardware edit
-            QVERIFY(saveHw->property("enabled").toBool());
-            QVERIFY(!saveHost->property("enabled").toBool());
-            QVERIFY(QMetaObject::invokeMethod(find(virtualPage, u"discardDesktopHardware"_s), "clicked"));
-            QVERIFY(!session.modified());
-            QVERIFY(virtualHost.setValue(u"Port"_s, u"3402"_s));          // host edit
-            QVERIFY(saveHost->property("enabled").toBool());
-            QVERIFY(!saveHw->property("enabled").toBool());
-            session.setValue(u"VaapiDriver"_s, u"off"_s);
-            QVERIFY(QMetaObject::invokeMethod(find(virtualPage, u"defaultHostSettings"_s), "clicked"));   // host Restore Defaults is host scope only
-            QVERIFY(session.modified());
-            QVERIFY(QMetaObject::invokeMethod(find(virtualPage, u"discardHostSettings"_s), "clicked")); // host Revert is host scope only
-            QVERIFY(!virtualHost.modified()); QVERIFY(session.modified());
-            QVERIFY(QMetaObject::invokeMethod(find(virtualPage, u"defaultDesktopHardware"_s), "clicked"));
-            QVERIFY(QMetaObject::invokeMethod(find(virtualPage, u"discardDesktopHardware"_s), "clicked"));
+            for(const auto &old:{u"saveHostSettings"_s,u"saveDesktopHardware"_s,u"discardHostSettings"_s,u"discardDesktopHardware"_s,u"defaultHostSettings"_s,u"defaultDesktopHardware"_s,u"loadHostSettings"_s,u"loadDesktopHardware"_s})
+                QVERIFY2(!find(virtualPage,old),qPrintable(old));
             QVERIFY(!session.modified()); QVERIFY(!virtualHost.modified());
+            session.setValue(u"VaapiDriver"_s, u"off"_s);                 // hardware edit
+            QVERIFY(session.modified()); QVERIFY(!virtualHost.modified());
+            QVERIFY(virtualHost.setValue(u"Port"_s, u"3402"_s));          // host edit
+            QVERIFY(session.modified()); QVERIFY(virtualHost.modified());
+            session.discard(); QVERIFY(!session.modified()); QVERIFY(virtualHost.modified());
+            virtualHost.discard(); QVERIFY(!virtualHost.modified());
         }
         QQuickItem *prefsPage=goTo(4); QVERIFY(prefsPage); QCOMPARE(prefsPage->objectName(),u"brokerPreferencesPage"_s);
         auto *mode=find(prefsPage,u"inherit_Quality"_s); QVERIFY(mode);
@@ -426,21 +421,83 @@ private Q_SLOTS:
         window.resize(640,360); navigation.resizeAll(window.size());
         for(int index=1;index<5;++index) {
             QQuickItem *shown=goTo(index); QVERIFY(shown); QTest::qWait(60);
-            const auto visibleSave=[&](auto &&self,QQuickItem *parent)->QQuickItem * {
-                if(parent->isVisible() && parent->objectName().startsWith(u"save") && parent->objectName()!=u"saveDesktopHardware"_s) return parent;   // the hardware save is inline content, not a fixed footer
-                for (auto *child : parent->childItems()) { if (auto *result = self(self, child)) return result; }
-                return nullptr;
-            };
-            if(auto *save=visibleSave(visibleSave,shown)) {
-                const auto bounds=save->mapRectToItem(page,QRectF(0,0,save->width(),save->height()));
-                QVERIFY2(bounds.left()>=0 && bounds.right()<=page->width()+1 && bounds.bottom()<=page->height()+1,qPrintable(QStringLiteral("Footer %1 exceeds %2x%3: %4,%5").arg(save->objectName()).arg(page->width()).arg(page->height()).arg(bounds.right()).arg(bounds.bottom())));
-            }
+            // S3: pages have no footer and no Save row, so nothing can overflow at a narrow width.
+            for(const auto &old:{u"saveHostSettings"_s,u"saveBrokerPreferences"_s,u"saveBrokerAuthentication"_s,u"saveDesktopHardware"_s}) QVERIFY2(!find(shown,old),qPrintable(old));
         }
         window.resize(640,800); navigation.resizeAll(window.size());
         for(int index=0;index<3;++index) { QVERIFY(goTo(index)); screenshot(u"narrow-"_s+QString::number(index)); }
         QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u'\n')));
     }
 
+    void loadAll(Fixture &f) {
+        QVERIFY(f.console.reload()); QTRY_VERIFY(!f.console.busy()); QVERIFY(f.virtualHost.reload()); QTRY_VERIFY(!f.virtualHost.busy());
+        QVERIFY(f.session.reload()); QTRY_VERIFY(!f.session.busy()); QVERIFY(f.auth.reload()); QTRY_VERIFY(!f.auth.busy()); QVERIFY(f.preferences.reload());
+    }
+    static void writeMode(const QTemporaryDir &dir,const QString &name,const QByteArray &value) {
+        QFile file(dir.filePath(name)); QVERIFY(file.open(QIODevice::WriteOnly|QIODevice::Truncate)); file.write(value);
+    }
+    void applyNamesFailedScopesOnEveryPage() {
+        Fixture f; QVERIFY(f.init()); loadAll(f);
+        QVERIFY(f.console.setValue(u"Port"_s,u"3401"_s)); QVERIFY(f.virtualHost.setValue(u"Port"_s,u"3405"_s)); QVERIFY(f.preferences.setValue(u"Quality"_s,u"70"_s));
+        writeMode(f.dir,u"mode-virtual"_s,"stale");
+        QVERIFY(!findVisible(f.page,u"applyFailures"_s));
+        f.apply.apply(); QTRY_VERIFY(!f.apply.applying());
+        QVERIFY(!f.console.modified()); QVERIFY(f.virtualHost.modified()); QVERIFY(!f.preferences.modified());
+        for(int index=0;index<5;++index) {           // overview, Console, Virtual, Who Can Connect, My Preferences
+            QQuickItem *shown=f.goTo(index); QVERIFY(shown); QTest::qWait(30);
+            auto *banner=findVisible(shown,u"applyFailures"_s); QVERIFY2(banner,qPrintable(QString::number(index)));
+            const auto text=banner->property("text").toString();
+            QVERIFY2(text.contains(u"Virtual:"_s),qPrintable(text)); QVERIFY(!text.contains(u"Console:"_s)); QVERIFY(!text.contains(u"My preferences"_s));
+        }
+        // A later successful Apply clears it.
+        writeMode(f.dir,u"mode-virtual"_s,"success"); QVERIFY(f.virtualHost.reload()); QTRY_VERIFY(!f.virtualHost.busy()); QVERIFY(f.virtualHost.setValue(u"Port"_s,u"3406"_s));
+        f.apply.apply(); QTRY_VERIFY(!f.apply.applying()); QVERIFY(f.apply.failures().isEmpty()); QVERIFY(!findVisible(f.goTo(0),u"applyFailures"_s));
+    }
+    void savedSettingsOfferAnExplicitConfirmedRestart() {
+        Fixture f; f.transport.split=true; f.transport.state.activeState=u"active"_s; f.transport.virtualState.activeState=u"active"_s; f.transport.virtualState.unitFileState=u"enabled"_s;
+        QVERIFY(f.init()); loadAll(f);
+        auto *notice=qobject_cast<QQuickItem *>(find(f.page,u"restartRequired"_s)); QVERIFY(notice); QVERIFY(!notice->isVisible());
+        QVERIFY(f.console.setValue(u"Port"_s,u"3401"_s)); QVERIFY(f.virtualHost.setValue(u"Port"_s,u"3405"_s));
+        f.apply.apply(); QTRY_VERIFY(!f.apply.applying()); QVERIFY(f.apply.failures().isEmpty());
+        QTRY_VERIFY(notice->isVisible());
+        QVERIFY(notice->property("text").toString().contains(u"Console and Virtual"_s));
+        QCOMPARE(f.transport.mutations,0);                                   // saving never restarts anything
+        auto *restartConsole=find(f.page,u"restartNoticeConsole"_s); QVERIFY(restartConsole); QTRY_VERIFY(restartConsole->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(restartConsole,"trigger"));
+        auto *dialog=find(f.page,u"consoleConfirmServiceOperation"_s); QVERIFY(dialog); QTRY_VERIFY(dialog->property("visible").toBool());
+        QCOMPARE(f.transport.mutations,0);                                   // asks first
+        QVERIFY(QMetaObject::invokeMethod(dialog,"reject")); QCOMPARE(f.transport.mutations,0);
+        QVERIFY(QMetaObject::invokeMethod(restartConsole,"trigger")); QTRY_VERIFY(dialog->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(find(f.page,u"consoleConfirmServiceAction"_s),"trigger"));
+        QCOMPARE(f.transport.mutations,1); QCOMPARE(f.transport.lastRoute,0); QCOMPARE(f.transport.lastOperation,BrokerServiceTransport::Restart);
+    }
+    void serviceControlsConfirmAndFollowActualState() {
+        // The stop / restart / start-at-boot flows now live on the overview (they were covered by the retired services page test).
+        Fixture f; f.transport.split=true; f.transport.defer=true; f.transport.virtualState.mainPid=0;
+        QVERIFY(f.init());
+        const auto text=[&](const QString &name) { auto *o=find(f.page,name); return o?o->property("text").toString():QString(u"<missing>"_s); };
+        QTRY_COMPARE(text(u"consoleHostStatus"_s),u"Running"_s); QTRY_COMPARE(text(u"virtualHostStatus"_s),u"Stopped"_s);
+        QVERIFY(find(f.page,u"consoleServiceAutostart"_s)->property("checked").toBool()); QVERIFY(!find(f.page,u"virtualServiceAutostart"_s)->property("checked").toBool());
+        QCOMPARE(f.transport.mutations,0);
+        QVERIFY(QMetaObject::invokeMethod(find(f.page,u"consoleStop"_s),"clicked"));
+        auto *dialog=find(f.page,u"consoleConfirmServiceOperation"_s); QVERIFY(dialog); QTRY_VERIFY(dialog->property("visible").toBool());
+        QCOMPARE(f.transport.mutations,0); QVERIFY(QMetaObject::invokeMethod(dialog,"reject")); QCOMPARE(f.transport.mutations,0);
+        QVERIFY(QMetaObject::invokeMethod(find(f.page,u"consoleRestart"_s),"clicked")); QTRY_VERIFY(dialog->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(find(f.page,u"consoleConfirmServiceAction"_s),"trigger"));
+        QCOMPARE(f.transport.lastRoute,0); QCOMPARE(f.transport.lastOperation,BrokerServiceTransport::Restart); QVERIFY(f.services.busy());
+        QVERIFY(!find(f.page,u"virtualHostEnabled"_s)->property("enabled").toBool());      // no second operation while one runs
+        f.transport.finish(u"Administrator authorization cancelled"_s);
+        QCOMPARE(text(u"consoleHostStatus"_s),u"Running"_s);                                // follows the actual state, not the request
+        QVERIFY(f.services.services()[0].toMap()[u"error"_s].toString().contains(u"cancelled"_s));
+        // Starting Virtual needs no confirmation.
+        QVERIFY(find(f.page,u"virtualHostEnabled"_s)->setProperty("checked",true)); QVERIFY(QMetaObject::invokeMethod(find(f.page,u"virtualHostEnabled"_s),"clicked")); QCOMPARE(f.transport.lastRoute,1); QCOMPARE(f.transport.lastOperation,BrokerServiceTransport::Start);
+        f.transport.virtualState.activeState=u"active"_s; f.transport.virtualState.mainPid=123; f.transport.finish();
+        QTRY_COMPARE(text(u"virtualHostStatus"_s),u"Running"_s);
+        // Start at boot: a refused change leaves the switch at the real state.
+        QVERIFY(QMetaObject::invokeMethod(find(f.page,u"virtualServiceAutostart"_s),"clicked")); QCOMPARE(f.transport.lastOperation,BrokerServiceTransport::Enable);
+        f.transport.finish(u"Administrator authorization cancelled"_s);
+        QVERIFY(!find(f.page,u"virtualServiceAutostart"_s)->property("checked").toBool());
+    }
 };
 QTEST_MAIN(BrokerMainPageTest)
 #include "BrokerMainPageTest.moc"

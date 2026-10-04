@@ -37,7 +37,21 @@ KCM.SimpleKCM {
         Layout.maximumWidth: Kirigami.Units.gridUnit * 48
         Layout.alignment: Qt.AlignLeft
         spacing: Kirigami.Units.largeSpacing
-        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Choose which desktop to make available. Service switches apply immediately.") }
+        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Choose which desktop to make available. Service switches apply immediately; other changes are saved with Apply.") }
+        BrokerApplyFailures { }
+        // Saved changes only take effect when the service restarts, and a restart drops connected clients,
+        // so it is never done silently: each action asks for confirmation first.
+        Kirigami.InlineMessage {
+            id: restartNotice; objectName: "restartRequired"; Layout.fillWidth: true; type: Kirigami.MessageType.Information
+            readonly property bool restartConsole: root.consoleHost.applicationRequired || root.authentication.lastSaveRequiresRestart
+            readonly property bool restartVirtual: root.virtualHost.applicationRequired || root.authentication.lastSaveRequiresRestart
+            visible: restartConsole || restartVirtual
+            text: restartConsole && restartVirtual ? i18nc("@info", "Saved. Restart Console and Virtual to apply the changes.") : restartConsole ? i18nc("@info", "Saved. Restart Console to apply the changes.") : i18nc("@info", "Saved. Restart Virtual to apply the changes.")
+            actions: [
+                Kirigami.Action { objectName: "restartNoticeConsole"; visible: restartNotice.restartConsole; text: i18nc("@action", "Restart Console…"); enabled: root.administration.services[0].canRestart; onTriggered: consoleControls.request("restart") },
+                Kirigami.Action { objectName: "restartNoticeVirtual"; visible: restartNotice.restartVirtual; text: i18nc("@action", "Restart Virtual…"); enabled: root.administration.services[1].canRestart; onTriggered: virtualControls.request("restart") }
+            ]
+        }
         Kirigami.Heading { level: 2; text: i18nc("@title:group", "Console") }
         QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Share this computer's desktop.") }
         BrokerServiceControls { id: consoleControls; Layout.fillWidth: true; administration: root.administration; route: "console"; host: root.consoleHost; navigation: root; hostName: root.hostName; showDetailsToggle: false; showBoot: true }

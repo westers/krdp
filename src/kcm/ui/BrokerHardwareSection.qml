@@ -14,12 +14,11 @@ ColumnLayout {
     property bool showPciEditor: false
     readonly property var selectedDevices: (settings.values.RenderPci || "").split(",").map(value => value.trim()).filter(value => value !== "")
     function fields(keys) { return settings.definitions.filter(row => keys.includes(row.key)); }
-    function reloadSettings() { if (settings.modified) reloadConfirmation.open(); else settings.refresh(); }
     spacing: Kirigami.Units.smallSpacing
     Kirigami.Heading { level: 2; text: i18nc("@title:group", "New desktop hardware") }
     QQC2.Label {
         Layout.fillWidth: true; wrapMode: Text.Wrap
-        text: i18nc("@info", "Applies to newly created desktops only. Existing desktops keep their current hardware grants. Saved separately from the Virtual settings above.")
+        text: i18nc("@info", "Applies to newly created desktops only. Existing desktops keep their current hardware grants. It is saved together with the settings above when you apply.")
     }
     Kirigami.InlineMessage { objectName: "desktopHardwareError"; Layout.fillWidth: true; type: Kirigami.MessageType.Error; visible: root.settings.error !== ""; text: root.settings.error }
     Kirigami.InlineMessage { objectName: "desktopHardwareSavedNotice"; Layout.fillWidth: true; visible: root.settings.applicationRequired; type: Kirigami.MessageType.Information; text: i18nc("@info", "Saved. New desktops will use these defaults.") }
@@ -68,22 +67,5 @@ ColumnLayout {
     Repeater {
         model: root.settings.loaded ? root.settings.metadata.renderDevices || [] : []
         delegate: QQC2.Label { required property var modelData; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Available device: %1 (%2), %3.", modelData.pci, modelData.driver, modelData.render) }
-    }
-    Flow {
-        Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
-        QQC2.Button { objectName: "defaultDesktopHardware"; text: i18nc("@action:button", "Restore Defaults"); enabled: root.settings.loaded && !root.settings.busy; onClicked: root.settings.defaults() }
-        QQC2.Button { objectName: "discardDesktopHardware"; text: i18nc("@action:button", "Revert Changes"); enabled: root.settings.modified && !root.settings.busy; onClicked: root.settings.discard() }
-        QQC2.ToolButton { objectName: "loadDesktopHardware"; icon.name: "view-refresh"; text: i18nc("@action:button", "Reload Saved Settings…"); display: QQC2.AbstractButton.IconOnly; enabled: !root.settings.busy; QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered; onClicked: root.reloadSettings() }
-        QQC2.BusyIndicator { running: root.settings.busy; visible: running; implicitWidth: Kirigami.Units.gridUnit; implicitHeight: Kirigami.Units.gridUnit }
-        QQC2.Button { objectName: "saveDesktopHardware"; highlighted: true; text: i18nc("@action:button", "Save Desktop Defaults…"); enabled: root.settings.canSave; onClicked: root.settings.save() }
-    }
-    Kirigami.PromptDialog {
-        parent: root.QQC2.Overlay.overlay
-        popupType: QQC2.Popup.Item
-        id: reloadConfirmation; objectName: "reloadDesktopHardwareConfirmation"
-        title: i18nc("@title:window", "Reload Saved Settings?")
-        subtitle: i18nc("@info", "Discard unsaved new-desktop hardware changes and load saved settings?")
-        standardButtons: Kirigami.Dialog.Cancel
-        customFooterActions: Kirigami.Action { objectName: "reloadDesktopHardwareAccept"; text: i18nc("@action:button", "Discard and Reload"); onTriggered: { reloadConfirmation.close(); root.settings.refresh(); } }
     }
 }

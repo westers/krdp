@@ -23,7 +23,8 @@ KCM.SimpleKCM {
         Layout.maximumWidth: Kirigami.Units.gridUnit * 48
         Layout.alignment: Qt.AlignLeft
         spacing: Kirigami.Units.largeSpacing
-        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "For your account. Video and sound apply to Console and Virtual; display selection applies to Console. Save, then reconnect.") }
+        BrokerApplyFailures { }
+        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "For your account. Video and sound apply to Console and Virtual; display selection applies to Console. Apply, then reconnect.") }
         QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; color: Kirigami.Theme.disabledTextColor; text: i18nc("@info", "Unset preferences use host settings. Console and Virtual may have different defaults. Host permissions and administrator locks take precedence.") }
         Kirigami.InlineMessage { objectName: "brokerPreferenceError"; Layout.fillWidth: true; visible: root.preferences.error !== ""; type: Kirigami.MessageType.Error; text: root.preferences.error }
         Kirigami.InlineMessage { objectName: "brokerPreferenceReconnect"; Layout.fillWidth: true; visible: root.preferences.reconnectRequired; type: Kirigami.MessageType.Information; text: i18nc("@info", "Preferences saved. Reconnect to use them; current connections are unchanged.") }
@@ -71,24 +72,5 @@ KCM.SimpleKCM {
             QQC2.Label { visible: !field.editable; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Locked by the administrator"); color: Kirigami.Theme.disabledTextColor }
         }
     }
-    }
-    footer: QQC2.ToolBar {
-        contentItem: RowLayout {
-            QQC2.Button { objectName: "defaultBrokerPreferences"; text: i18nc("@action:button", "Use Host Settings"); enabled: root.preferences.loaded; onClicked: root.preferences.defaults(); QQC2.ToolTip.text: i18nc("@info:tooltip", "Stage removal of editable overrides; administrator locks are preserved."); QQC2.ToolTip.visible: hovered }
-            QQC2.Button { objectName: "discardBrokerPreferences"; text: i18nc("@action:button", "Revert Changes"); enabled: root.preferences.modified; onClicked: root.preferences.discard() }
-            QQC2.ToolButton { objectName: "loadBrokerPreferences"; icon.name: "view-refresh"; text: i18nc("@action:button", "Reload Preferences…"); display: QQC2.AbstractButton.IconOnly; QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered; onClicked: { if (root.preferences.modified) reloadConfirmation.open(); else root.preferences.reload(); } }
-            Item { Layout.fillWidth: true }
-            QQC2.Button { objectName: "saveBrokerPreferences"; highlighted: true; text: i18nc("@action:button", "Save Preferences"); enabled: root.preferences.canSave; onClicked: root.preferences.save() }
-        }
-    }
-    Kirigami.PromptDialog {
-        parent: root.QQC2.Overlay.overlay
-        popupType: QQC2.Popup.Item
-        y: parent ? Math.round((parent.height - implicitHeight) / 2) : 0
-        id: reloadConfirmation; objectName: "reloadBrokerPreferences"
-        title: i18nc("@title:window", "Reload Preferences?")
-        subtitle: i18nc("@info", "Discard your unsaved preference changes and reload saved values?")
-        standardButtons: Kirigami.Dialog.Cancel
-        customFooterActions: Kirigami.Action { objectName: "reloadPreferenceAccept"; text: i18nc("@action:button", "Discard and Reload"); onTriggered: { reloadConfirmation.close(); root.preferences.reload(); } }
     }
 }

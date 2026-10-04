@@ -140,6 +140,7 @@ ColumnLayout {
     Kirigami.PromptDialog {
         parent: root.QQC2.Overlay.overlay
         popupType: QQC2.Popup.Item
+        y: parent ? Math.round((parent.height - implicitHeight) / 2) : 0
         id: confirmation
         objectName: root.route + "ConfirmServiceOperation"
         property string operation
@@ -147,6 +148,7 @@ ColumnLayout {
         subtitle: i18nc("@info", "Remote clients using this service will disconnect. The other service is unaffected.")
         standardButtons: Kirigami.Dialog.Cancel
         customFooterActions: Kirigami.Action {
+            objectName: root.route + "ConfirmServiceAction"
             text: confirmation.operation === "stop" ? i18nc("@action:button", "Stop") : i18nc("@action:button", "Restart")
             onTriggered: { confirmation.close(); root.administration.perform(root.route, confirmation.operation); }
         }

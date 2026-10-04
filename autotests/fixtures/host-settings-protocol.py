@@ -6,11 +6,38 @@ import pathlib
 import sys
 import time
 
+import subprocess
+
 base = pathlib.Path(sys.argv[1])
-mode = (base / 'mode').read_text().strip() if (base / 'mode').exists() else 'success'
+sub = os.environ.get('FIXTURE_SUB') == '1'
 request = json.load(sys.stdin)
 assert all('PRIVATE KEY' not in value for value in sys.argv)
-scope = request['scope']
+if not sub:
+    # One line per helper process: tests count authorizations/invocations.
+    with open(base / 'invocations', 'a') as log:
+        log.write(request['operation'] + '\n')
+scope = request.get('scope')
+# A batch entry reads its own per-scope mode; everything else uses the global one.
+mode_file = base / ('mode-' + scope if sub else 'mode')
+mode = mode_file.read_text().strip() if mode_file.exists() else 'success'
+if request['operation'] == 'save-batch':
+    assert set(request) == {'version', 'operation', 'requests'}
+    if mode in ('cancel', 'denied'):
+        sys.exit(126 if mode == 'cancel' else 127)
+    if mode == 'malformed':
+        print('fixture-private-diagnostic')
+        sys.exit(0)
+    if mode == 'crash':
+        os.kill(os.getpid(), 9)
+    if mode == 'timeout':
+        time.sleep(3)
+    results = []
+    for entry in request['requests']:
+        done = subprocess.run([sys.executable, __file__, str(base)], input=json.dumps(entry), capture_output=True,
+                              text=True, env=dict(os.environ, FIXTURE_SUB='1'))
+        results.append({'scope': entry['scope'], 'status': done.returncode, 'reply': json.loads(done.stdout)})
+    print(json.dumps({'results': results}))
+    sys.exit(0)
 assert scope in ('console', 'virtual', 'session')
 defaults = {'RenderPci': '', 'VaapiDriver': 'auto'} if scope == 'session' else {
     'Address': '0.0.0.0', 'Port': '3391' if scope == 'console' else '3395',

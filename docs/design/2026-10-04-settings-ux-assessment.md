@@ -315,6 +315,36 @@ plumbing.
 | S6 Content and certificate summary | Wording table above; one-line certificate summary; troubleshooting collapsed. | Buzz gallery reviewed by Steve; the strings are in the i18n catalog. |
 | S7 Package and accept | Build the server deb; install on Sol only (zero connections); real polkit Apply / cancel / restart. | Real prompt count per Apply = 1; settings read back; the restart InlineMessage works; Steve's visual acceptance. Hal untouched until Steve's go. |
 
+### S3 result and S7 manual checklist (2026-10-04)
+
+S3 landed in source (commit `OPT-057 S3 Use standard Apply, Reset and Defaults`). Behaviour to verify for real on Sol in S7:
+
+- Administrator helper processes per Apply: 1 when only host scopes are dirty (the Console, Virtual and new-desktop
+  hardware drafts travel in one `save-batch` request), 1 when only the access policy is dirty, 2 when both are dirty
+  (the host helper and the authentication helper are different programs with different polkit actions; the second
+  starts only after the first has finished). A single dirty host scope uses the plain request.
+- Expected prompts: 1 per Apply. The second helper (access policy) must be silent through `auth_admin_keep`.
+
+S7 checklist (Sol, zero connections, server package from the S3 commit or later; nothing on Hal):
+
+1. Open the panel: no password prompt. Defaults, Reset, Apply visible; Apply and Reset disabled. (Real-shell capture
+   shows Defaults enabled even when clean; check it is harmless.)
+2. Change one Console field only, Apply: exactly ONE prompt; change read back; the overview shows "Saved. Restart Console".
+3. Change a Console field, a Virtual field and a new-desktop hardware field, Apply: exactly ONE prompt for all
+   three (journal shows one `farside-host-settings-helper` start); all three read back.
+4. Change a Console field AND the access policy, Apply: exactly ONE prompt; the access policy save is silent (second
+   helper start in the journal, no second dialog); both read back.
+5. Within the keep window (about 5 minutes) change something again and Apply: ZERO prompts. After the window expires,
+   the next Apply prompts once.
+6. Cancel the dialog: nothing saved, every draft still pending, Apply still enabled, the error names the scope(s);
+   a following Apply works.
+7. Make one scope refused (edit `/etc/farside/virtual-host.conf` by hand after loading, so the revision is stale):
+   the other scopes save, the refused one stays pending and is named in the red message on every page.
+8. Reset after a pending change drops all drafts; Defaults on Console/Virtual/preferences keeps the certificate.
+9. The restart message offers Restart Console / Restart Virtual; each asks for confirmation; nothing restarts silently.
+10. If any step shows more than one prompt for a single Apply, stop and report: the fallback is a single combined
+    helper (one more protocol change), not weaker validation.
+
 ## 8. Evidence and limits
 
 - **Fresh captures** (`~/dev/rdp/evidence/2026-10-04-settings-ux-assessment/captures/`):

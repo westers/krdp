@@ -47,7 +47,7 @@ public:
     QString runtimeCheckedAt() const { return m_runtimeCheckedAt; }
     QString tlsMode() const { return m_tlsMode; }
     bool loaded() const { return !m_snapshot.isEmpty(); }
-    bool busy() const { return m_process != nullptr; }
+    bool busy() const { return m_process != nullptr || m_batch; }
     bool modified() const;
     bool canSave() const;
     bool applicationRequired() const { return m_applicationRequired; }
@@ -64,6 +64,11 @@ public:
     Q_INVOKABLE bool reload();
     Q_INVOKABLE bool inspectRuntime();
     Q_INVOKABLE bool save();
+    // Saves every given model that has a valid pending change with ONE helper
+    // process (one authorization). Returns how many scopes were submitted.
+    static int saveTogether(const QList<BrokerHostSettings *> &models);
+    // True when the draft equals the ordinary defaults (certificates are not part of it).
+    bool representsDefaults() const;
     Q_INVOKABLE bool setValue(const QString &key, const QString &value);
     Q_INVOKABLE bool inherit(const QString &key);
     Q_INVOKABLE bool chooseTls(const QString &mode);
@@ -77,6 +82,8 @@ private:
     QString validationError() const;
     bool reject(const QString &error);
     bool start(QJsonObject request, bool saving);
+    QJsonObject saveRequest() const;
+    void finish(int code, QProcess::ExitStatus status, QByteArray &output, bool saving, bool inspecting);
     void adoptSnapshot(const QJsonObject &snapshot, bool saving);
     void clearImport();
     Scope m_scope;
@@ -93,4 +100,5 @@ private:
     bool m_applicationRequired = false, m_outcomeUnknown = false;
     BrokerHostSettings *m_certificateDraft = nullptr;
     bool m_draftOnly = false;
+    bool m_batch = false;
 };

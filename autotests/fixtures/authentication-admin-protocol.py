@@ -2,6 +2,8 @@
 import json, pathlib, sys
 
 base = pathlib.Path(sys.argv[1])
+with open(base / 'invocations', 'a') as log:
+    log.write('helper\n')
 mode = (base / 'mode').read_text().strip() if (base / 'mode').exists() else 'success'
 if mode == 'cancel':
     sys.exit(126)

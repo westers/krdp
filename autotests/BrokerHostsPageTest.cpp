@@ -186,9 +186,7 @@ private Q_SLOTS:
             QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
             QQuickWindow window; window.resize(900,850); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
             const auto item=[&](const QString &name){return find(page,name);};
-            const auto click=[&](const QString &name){auto *button=item(name);return button && QMetaObject::invokeMethod(button,"clicked");};
             const bool hw=model==&session;   // the session model is edited through the Virtual page's hardware section
-            const auto name=[&](const QString &host,const QString &hardware){return hw?hardware:host;};
             const QString prefix=hw?u"desktop_"_s:u"host_"_s;
             if(hw){auto *section=item(u"desktopHardwareSection"_s);QVERIFY(section);QVERIFY(section->setProperty("showPciEditor",true));}
             QVERIFY(!model->loaded()); QVERIFY(!item(u"unlockHostSettings"_s)); QVERIFY(!item(u"unlockDesktopHardware"_s)); QVERIFY(model->reload()); QTRY_VERIFY(!model->busy()); QVERIFY(model->loaded());
@@ -211,7 +209,7 @@ private Q_SLOTS:
                 }
                 QCOMPARE(model->values()[key],desired[key]);
             }
-            QVERIFY(model->canSave()); QVERIFY(click(name(u"saveHostSettings"_s,u"saveDesktopHardware"_s))); QTRY_VERIFY(!model->busy()); QVERIFY2(model->error().isEmpty(),qPrintable(model->error()));
+            QVERIFY(model->canSave()); QVERIFY(model->save()); QTRY_VERIFY(!model->busy()); QVERIFY2(model->error().isEmpty(),qPrintable(model->error()));
             QVERIFY(!model->modified()); QVERIFY(model->applicationRequired());
             window.resize(640,700);page->setSize(window.size());QTest::qWait(100);
             auto *flickable=page->property("flickable").value<QQuickItem *>();QVERIFY(flickable);
@@ -225,16 +223,17 @@ private Q_SLOTS:
             QVERIFY(model->setValue(u"Quality"_s,u"88"_s) || model==&session);
             if(model!=&session) {
                 auto *port=item(u"host_Port"_s);QVERIFY(port);QCOMPARE(port->property("to").toInt(),65535);
-                QVERIFY(model->setValue(u"Port"_s,u"70000"_s));QVERIFY(!item(u"saveHostSettings"_s)->property("enabled").toBool());
+                QVERIFY(model->setValue(u"Port"_s,u"70000"_s));QVERIFY(!model->canSave());
                 QVERIFY(port->setProperty("value",3401));QVERIFY(QMetaObject::invokeMethod(port,"valueModified"));
             }
-            QVERIFY(click(name(u"defaultHostSettings"_s,u"defaultDesktopHardware"_s)));QVERIFY(model->values().isEmpty());
+            model->defaults();QVERIFY(model->values().isEmpty());
             for(const auto &failure:{QByteArray("cancel"),QByteArray("denied"),QByteArray("stale")}) {
-                writeMode(dir,failure);QVERIFY(click(name(u"saveHostSettings"_s,u"saveDesktopHardware"_s)));QTRY_VERIFY(!model->busy());QVERIFY(model->modified());QVERIFY(!model->error().isEmpty());
+                writeMode(dir,failure);QVERIFY(model->save());QTRY_VERIFY(!model->busy());QVERIFY(model->modified());QVERIFY(!model->error().isEmpty());
             }
-            writeMode(dir,"success");QVERIFY(click(name(u"loadHostSettings"_s,u"loadDesktopHardware"_s)));auto *dialog=item(name(u"reloadHostConfirmation"_s,u"reloadDesktopHardwareConfirmation"_s));QVERIFY(dialog);
-            QTRY_VERIFY(dialog->property("visible").toBool());QVERIFY(QMetaObject::invokeMethod(dialog,"reject"));QVERIFY(model->modified());
-            QVERIFY(click(name(u"loadHostSettings"_s,u"loadDesktopHardware"_s)));QVERIFY(QMetaObject::invokeMethod(item(name(u"reloadHostAccept"_s,u"reloadDesktopHardwareAccept"_s)),"triggered"));QTRY_VERIFY(!model->busy());QVERIFY(!model->modified());
+            writeMode(dir,"success");model->discard();QVERIFY(!model->modified());
+            // S3: the page carries no footer and no Save/Revert/Reload/Restore buttons; the standard bar does that.
+            for(const auto &old:{u"saveHostSettings"_s,u"discardHostSettings"_s,u"defaultHostSettings"_s,u"loadHostSettings"_s,u"saveDesktopHardware"_s,u"discardDesktopHardware"_s,u"defaultDesktopHardware"_s,u"loadDesktopHardware"_s})
+                QVERIFY2(!item(old),qPrintable(old));
             QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s)));page->setParentItem(nullptr);
         }
     }

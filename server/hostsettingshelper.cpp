@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 // Fixed-purpose privileged stdin protocol. No caller-supplied write path/argv.
 #include "BrokerHostAdmin.h"
+#include "BrokerHostBatch.h"
 #include "BrokerHostPublicSnapshot.h"
 #include "BrokerHostRuntimeReader.h"
 #include "PrivateExecutionContext.h"
@@ -270,7 +271,126 @@ int reply(const QJsonObject &value, int status)
     return output.open(stdout, QIODevice::WriteOnly) && output.write(bytes) == bytes.size() && output.flush() ? status : 1;
 }
 int fail(const QString &error) { return reply({{u"error"_s, error}}, 1); }
+struct Outcome { QJsonObject value; int status = 1; };
+Outcome outcome(const QJsonObject &value, int status) { return {value, status}; }
+Outcome failure(const QString &error) { return {{{u"error"_s, error}}, 1}; }
+// One scope-bound request. Batch mode calls this once per entry; every entry
+// takes its own scope lock and runs the identical validation as a single request.
+Outcome handle(const QJsonObject &request)
+{
+    const auto scope = BrokerHostAdmin::scope(request[u"scope"_s].toString());
+    const auto operation = request[u"operation"_s].toString();
+    if (!scope || !request[u"scope"_s].isString() || !request[u"version"_s].isDouble() || request[u"version"_s].toDouble() != 1
+        || (operation != u"read" && operation != u"save" && operation != u"inspect-runtime" && operation != u"publish")
+        || (operation != u"save" && request.size() != 3)
+        || (operation == u"inspect-runtime" && *scope == Scope::VirtualSession)) return failure(u"invalid host settings request"_s);
+    const Fd directory(policyDirectory());
+    if (directory.value < 0) return failure(u"Farside settings directory is unavailable or unsafe"_s);
+    if (operation == u"inspect-runtime") {
+        // Read-only inspection must not create a policy lock or touch TLS. The
+        // complete stored file/directory is rechecked around the independent
+        // fixed-unit/process reader instead.
+        const auto current = readSettings(directory.value, *scope);
+        if (!current.error.isEmpty()) return failure(current.error);
+        const auto parsed = BrokerHostSettings::parse(*scope, current.bytes);
+        if (!parsed.error.isEmpty()) return failure(parsed.error);
+        const auto revision = BrokerHostAdmin::revision(*scope, current.exists, current.bytes);
+        auto runtime = BrokerHostRuntime::inspect(*scope, parsed.effective, revision, QDBusConnection::systemBus());
+        const auto after = readSettings(directory.value, *scope);
+        if (!directoryStillCurrent(directory.value) || !after.error.isEmpty() || current.exists != after.exists || current.bytes != after.bytes)
+            runtime = BrokerHostRuntime::summarize(*scope, {}, {}, {}, parsed.effective, revision,
+                BrokerHostRuntime::installedContract(*scope), u"stale"_s);
+        return outcome({{u"runtime"_s, runtime}}, 0);
+    }
+    const QByteArray lockName = ".host-settings-" + BrokerHostAdmin::scopeName(*scope).toUtf8() + ".lock";
+    // flock does not need a writable descriptor on the local policy filesystem.
+    // This also allows a read on an existing safe lock during a read-only boot.
+    const Fd lock(::openat(directory.value, lockName.constData(), O_RDONLY | O_CREAT | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0600));
+    struct stat lockInfo{};
+    if (lock.value < 0 || ::fstat(lock.value, &lockInfo) || !S_ISREG(lockInfo.st_mode) || lockInfo.st_uid || lockInfo.st_nlink != 1
+        || (lockInfo.st_mode & 0077) || ::flock(lock.value, LOCK_EX | LOCK_NB)) return failure(u"host settings are busy or the lock is unsafe"_s);
+    const auto current = readSettings(directory.value, *scope);
+    if (!current.error.isEmpty()) return failure(current.error);
+    const auto initial = BrokerHostAdmin::view(*scope, current.exists, current.bytes);
+    if (!initial.error.isEmpty()) return failure(initial.error);
+    if (operation == u"read") return outcome({{u"snapshot"_s, publicView(*scope, current)}}, 0);
+    if (operation == u"publish") {
+        // Broker start: refresh the world-readable public-metadata snapshot.
+        QString problem;
+        return BrokerHostPublicSnapshot::write(BrokerHostPublicSnapshot::defaultDirectory(), *scope, publicView(*scope, current), &problem)
+            ? outcome({{u"published"_s, true}}, 0) : failure(problem);
+    }
+    auto update = BrokerHostAdmin::prepare(*scope, current.exists, current.bytes, request);
+    const auto clearKey = qScopeGuard([&] { if (!update.privateKeyPem.isEmpty()) OPENSSL_cleanse(update.privateKeyPem.data(), size_t(update.privateKeyPem.size())); });
+    if (!update.error.isEmpty()) return failure(update.error);
+    const auto before = BrokerHostSettings::parse(*scope, current.bytes).effective;
+    if (*scope == Scope::VirtualSession && update.effective[u"RenderPci"_s] != before[u"RenderPci"_s]) {
+        const auto grants = update.effective[u"RenderPci"_s].toString();
+        if (!grants.isEmpty()) for (const auto &pci : grants.split(u',')) if (!VirtualGpuDevices::resolve(pci))
+            return failure(u"a selected PCI device has no complete supported GPU device set"_s);
+    }
+    if (*scope != Scope::VirtualSession && update.effective[u"CameraLoopbackDevice"_s] != before[u"CameraLoopbackDevice"_s]) {
+        const auto camera = update.effective[u"CameraLoopbackDevice"_s].toString();
+        if (camera != u"none" && (*scope == Scope::Virtual || !cameraLoopback(camera)))
+            return failure(u"camera loopback is unavailable in this scope or is not a V4L2 loopback device"_s);
+    }
+    std::unique_ptr<Generation> generation;
+    if (update.tls == BrokerHostAdmin::TlsMode::Import) {
+        generation = std::make_unique<Generation>(directory.value, *scope);
+        if (!generation->write(update.certificatePem, update.privateKeyPem)) return failure(u"TLS import could not be staged privately"_s);
+        auto values = BrokerHostSettings::parse(*scope, update.document).overrides;
+        values[u"Certificate"_s] = QString(generation->prefix + u"/certificate.crt"_s);
+        values[u"CertificateKey"_s] = QString(generation->prefix + u"/private.key"_s);
+        const auto edited = BrokerHostSettings::edit(*scope, update.document, values);
+        if (!edited.error.isEmpty()) return failure(edited.error);
+        update.document = edited.contents;
+        update.effective = BrokerHostSettings::parse(*scope, update.document).effective;
+    }
+    Tls selectedTls;
+    if (update.tls != BrokerHostAdmin::TlsMode::Keep) {
+        selectedTls = inspectTls(update.effective);
+        const bool standardMissing = update.tls == BrokerHostAdmin::TlsMode::Standard && selectedTls.state == u"missing";
+        const bool standardRenewable = update.tls == BrokerHostAdmin::TlsMode::Standard && !selectedTls.administratorManaged
+            && (selectedTls.state == u"invalid" || selectedTls.state == u"expired");
+        if (!standardMissing && !standardRenewable && selectedTls.state != u"valid" && selectedTls.state != u"expiring")
+            return failure(u"TLS paths require safe current matching certificate and key files"_s);
+    }
+    const auto fresh = readSettings(directory.value, *scope);
+    if (!fresh.error.isEmpty() || fresh.exists != current.exists || fresh.bytes != current.bytes || !directoryStillCurrent(directory.value))
+        return failure(u"host settings changed; reload before saving"_s);
+    if (update.tls != BrokerHostAdmin::TlsMode::Keep) {
+        const auto freshTls = inspectTls(update.effective);
+        if (freshTls.state != selectedTls.state || freshTls.digest != selectedTls.digest || freshTls.administratorManaged != selectedTls.administratorManaged)
+            return failure(u"TLS files changed; reload before saving"_s);
+    }
+    {
+        QSaveFile file(u"/proc/self/fd/%1/%2"_s.arg(directory.value).arg(BrokerHostSettings::fileName(*scope)));
+        file.setDirectWriteFallback(false);
+        if (!file.open(QIODevice::WriteOnly) || !file.setPermissions(QFile::ReadOwner | QFile::WriteOwner)
+            || file.write(update.document) != update.document.size() || !file.flush() || ::fsync(file.handle()) || !file.commit())
+            return failure(u"host settings could not be saved atomically"_s);
+    }
+    if (generation) generation->committed = true;
+    const bool durable = !::fsync(directory.value);
+    const auto saved = readSettings(directory.value, *scope);
+    const auto verified = BrokerHostAdmin::view(*scope, saved.exists, saved.bytes);
+    if (!durable || !saved.exists || !saved.error.isEmpty() || !verified.error.isEmpty() || saved.bytes != update.document || !directoryStillCurrent(directory.value))
+        return outcome({{u"saved"_s, true}, {u"error"_s, u"host settings saved but verification failed; reload before restarting"_s}}, 1);
+    if (update.tls != BrokerHostAdmin::TlsMode::Keep) {
+        const auto verifiedTls = inspectTls(update.effective);
+        if (verifiedTls.state != selectedTls.state || verifiedTls.digest != selectedTls.digest
+            || verifiedTls.administratorManaged != selectedTls.administratorManaged)
+            return outcome({{u"saved"_s, true}, {u"error"_s, u"host settings saved but TLS verification failed; reload before restarting"_s}}, 1);
+    }
+    const auto savedView = publicView(*scope, saved);
+    // Best effort: the save itself is verified above. A failed publication only
+    // leaves the unprivileged copy stale until the next save or broker start.
+    BrokerHostPublicSnapshot::write(BrokerHostPublicSnapshot::defaultDirectory(), *scope, savedView);
+    return outcome({{u"saved"_s, true}, {u"restartRequired"_s, *scope != Scope::VirtualSession},
+        {u"newDesktopRequired"_s, *scope == Scope::VirtualSession}, {u"snapshot"_s, savedView}}, 0);
 }
+}
+
 int main(int argc, char **argv)
 {
     if (::getuid() || ::geteuid()) return fail(u"administrator authorization is required"_s);
@@ -297,120 +417,24 @@ int main(int argc, char **argv)
         if (count < 0) return fail(u"host settings request cannot be read"_s);
         if (!count) break;
         input.append(chunk, qsizetype(count)); OPENSSL_cleanse(chunk, sizeof(chunk));
-        if (input.size() > BrokerHostAdmin::MaximumRequestBytes) return fail(u"host settings request is oversized"_s);
+        // A batch carries up to MaximumRequests single requests; each is bounded again by parseRequest.
+        if (input.size() > BrokerHostBatch::MaximumInputBytes) return fail(u"host settings request is oversized"_s);
     }
     QJsonParseError error;
     const auto document = QJsonDocument::fromJson(input, &error);
     if (error.error != QJsonParseError::NoError || !document.isObject()) return fail(u"invalid host settings request"_s);
     const auto request = document.object();
-    const auto scope = BrokerHostAdmin::scope(request[u"scope"_s].toString());
-    const auto operation = request[u"operation"_s].toString();
-    if (!scope || !request[u"scope"_s].isString() || !request[u"version"_s].isDouble() || request[u"version"_s].toDouble() != 1
-        || (operation != u"read" && operation != u"save" && operation != u"inspect-runtime" && operation != u"publish")
-        || (operation != u"save" && request.size() != 3)
-        || (operation == u"inspect-runtime" && *scope == Scope::VirtualSession)) return fail(u"invalid host settings request"_s);
-    const Fd directory(policyDirectory());
-    if (directory.value < 0) return fail(u"Farside settings directory is unavailable or unsafe"_s);
-    if (operation == u"inspect-runtime") {
-        // Read-only inspection must not create a policy lock or touch TLS. The
-        // complete stored file/directory is rechecked around the independent
-        // fixed-unit/process reader instead.
-        const auto current = readSettings(directory.value, *scope);
-        if (!current.error.isEmpty()) return fail(current.error);
-        const auto parsed = BrokerHostSettings::parse(*scope, current.bytes);
-        if (!parsed.error.isEmpty()) return fail(parsed.error);
-        const auto revision = BrokerHostAdmin::revision(*scope, current.exists, current.bytes);
-        auto runtime = BrokerHostRuntime::inspect(*scope, parsed.effective, revision, QDBusConnection::systemBus());
-        const auto after = readSettings(directory.value, *scope);
-        if (!directoryStillCurrent(directory.value) || !after.error.isEmpty() || current.exists != after.exists || current.bytes != after.bytes)
-            runtime = BrokerHostRuntime::summarize(*scope, {}, {}, {}, parsed.effective, revision,
-                BrokerHostRuntime::installedContract(*scope), u"stale"_s);
-        return reply({{u"runtime"_s, runtime}}, 0);
+    if (request[u"operation"_s].toString() == u"save-batch") {
+        const auto requests = BrokerHostBatch::parseRequest(request);
+        if (!requests) return fail(u"invalid host settings request"_s);
+        QJsonArray results;
+        for (const auto &entry : *requests) {
+            const auto done = handle(entry);
+            results.append(QJsonObject{{u"scope"_s, entry[u"scope"_s]}, {u"status"_s, done.status}, {u"reply"_s, done.value}});
+        }
+        return reply(QJsonObject{{u"results"_s, results}}, 0);
     }
-    const QByteArray lockName = ".host-settings-" + BrokerHostAdmin::scopeName(*scope).toUtf8() + ".lock";
-    // flock does not need a writable descriptor on the local policy filesystem.
-    // This also allows a read on an existing safe lock during a read-only boot.
-    const Fd lock(::openat(directory.value, lockName.constData(), O_RDONLY | O_CREAT | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0600));
-    struct stat lockInfo{};
-    if (lock.value < 0 || ::fstat(lock.value, &lockInfo) || !S_ISREG(lockInfo.st_mode) || lockInfo.st_uid || lockInfo.st_nlink != 1
-        || (lockInfo.st_mode & 0077) || ::flock(lock.value, LOCK_EX | LOCK_NB)) return fail(u"host settings are busy or the lock is unsafe"_s);
-    const auto current = readSettings(directory.value, *scope);
-    if (!current.error.isEmpty()) return fail(current.error);
-    const auto initial = BrokerHostAdmin::view(*scope, current.exists, current.bytes);
-    if (!initial.error.isEmpty()) return fail(initial.error);
-    if (operation == u"read") return reply({{u"snapshot"_s, publicView(*scope, current)}}, 0);
-    if (operation == u"publish") {
-        // Broker start: refresh the world-readable public-metadata snapshot.
-        QString problem;
-        return BrokerHostPublicSnapshot::write(BrokerHostPublicSnapshot::defaultDirectory(), *scope, publicView(*scope, current), &problem)
-            ? reply({{u"published"_s, true}}, 0) : fail(problem);
-    }
-    auto update = BrokerHostAdmin::prepare(*scope, current.exists, current.bytes, request);
-    const auto clearKey = qScopeGuard([&] { if (!update.privateKeyPem.isEmpty()) OPENSSL_cleanse(update.privateKeyPem.data(), size_t(update.privateKeyPem.size())); });
-    if (!update.error.isEmpty()) return fail(update.error);
-    const auto before = BrokerHostSettings::parse(*scope, current.bytes).effective;
-    if (*scope == Scope::VirtualSession && update.effective[u"RenderPci"_s] != before[u"RenderPci"_s]) {
-        const auto grants = update.effective[u"RenderPci"_s].toString();
-        if (!grants.isEmpty()) for (const auto &pci : grants.split(u',')) if (!VirtualGpuDevices::resolve(pci))
-            return fail(u"a selected PCI device has no complete supported GPU device set"_s);
-    }
-    if (*scope != Scope::VirtualSession && update.effective[u"CameraLoopbackDevice"_s] != before[u"CameraLoopbackDevice"_s]) {
-        const auto camera = update.effective[u"CameraLoopbackDevice"_s].toString();
-        if (camera != u"none" && (*scope == Scope::Virtual || !cameraLoopback(camera)))
-            return fail(u"camera loopback is unavailable in this scope or is not a V4L2 loopback device"_s);
-    }
-    std::unique_ptr<Generation> generation;
-    if (update.tls == BrokerHostAdmin::TlsMode::Import) {
-        generation = std::make_unique<Generation>(directory.value, *scope);
-        if (!generation->write(update.certificatePem, update.privateKeyPem)) return fail(u"TLS import could not be staged privately"_s);
-        auto values = BrokerHostSettings::parse(*scope, update.document).overrides;
-        values[u"Certificate"_s] = QString(generation->prefix + u"/certificate.crt"_s);
-        values[u"CertificateKey"_s] = QString(generation->prefix + u"/private.key"_s);
-        const auto edited = BrokerHostSettings::edit(*scope, update.document, values);
-        if (!edited.error.isEmpty()) return fail(edited.error);
-        update.document = edited.contents;
-        update.effective = BrokerHostSettings::parse(*scope, update.document).effective;
-    }
-    Tls selectedTls;
-    if (update.tls != BrokerHostAdmin::TlsMode::Keep) {
-        selectedTls = inspectTls(update.effective);
-        const bool standardMissing = update.tls == BrokerHostAdmin::TlsMode::Standard && selectedTls.state == u"missing";
-        const bool standardRenewable = update.tls == BrokerHostAdmin::TlsMode::Standard && !selectedTls.administratorManaged
-            && (selectedTls.state == u"invalid" || selectedTls.state == u"expired");
-        if (!standardMissing && !standardRenewable && selectedTls.state != u"valid" && selectedTls.state != u"expiring")
-            return fail(u"TLS paths require safe current matching certificate and key files"_s);
-    }
-    const auto fresh = readSettings(directory.value, *scope);
-    if (!fresh.error.isEmpty() || fresh.exists != current.exists || fresh.bytes != current.bytes || !directoryStillCurrent(directory.value))
-        return fail(u"host settings changed; reload before saving"_s);
-    if (update.tls != BrokerHostAdmin::TlsMode::Keep) {
-        const auto freshTls = inspectTls(update.effective);
-        if (freshTls.state != selectedTls.state || freshTls.digest != selectedTls.digest || freshTls.administratorManaged != selectedTls.administratorManaged)
-            return fail(u"TLS files changed; reload before saving"_s);
-    }
-    {
-        QSaveFile file(u"/proc/self/fd/%1/%2"_s.arg(directory.value).arg(BrokerHostSettings::fileName(*scope)));
-        file.setDirectWriteFallback(false);
-        if (!file.open(QIODevice::WriteOnly) || !file.setPermissions(QFile::ReadOwner | QFile::WriteOwner)
-            || file.write(update.document) != update.document.size() || !file.flush() || ::fsync(file.handle()) || !file.commit())
-            return fail(u"host settings could not be saved atomically"_s);
-    }
-    if (generation) generation->committed = true;
-    const bool durable = !::fsync(directory.value);
-    const auto saved = readSettings(directory.value, *scope);
-    const auto verified = BrokerHostAdmin::view(*scope, saved.exists, saved.bytes);
-    if (!durable || !saved.exists || !saved.error.isEmpty() || !verified.error.isEmpty() || saved.bytes != update.document || !directoryStillCurrent(directory.value))
-        return reply({{u"saved"_s, true}, {u"error"_s, u"host settings saved but verification failed; reload before restarting"_s}}, 1);
-    if (update.tls != BrokerHostAdmin::TlsMode::Keep) {
-        const auto verifiedTls = inspectTls(update.effective);
-        if (verifiedTls.state != selectedTls.state || verifiedTls.digest != selectedTls.digest
-            || verifiedTls.administratorManaged != selectedTls.administratorManaged)
-            return reply({{u"saved"_s, true}, {u"error"_s, u"host settings saved but TLS verification failed; reload before restarting"_s}}, 1);
-    }
-    const auto savedView = publicView(*scope, saved);
-    // Best effort: the save itself is verified above. A failed publication only
-    // leaves the unprivileged copy stale until the next save or broker start.
-    BrokerHostPublicSnapshot::write(BrokerHostPublicSnapshot::defaultDirectory(), *scope, savedView);
-    return reply({{u"saved"_s, true}, {u"restartRequired"_s, *scope != Scope::VirtualSession},
-        {u"newDesktopRequired"_s, *scope == Scope::VirtualSession}, {u"snapshot"_s, savedView}}, 0);
+    if (input.size() > BrokerHostAdmin::MaximumRequestBytes) return fail(u"host settings request is oversized"_s);
+    const auto done = handle(request);
+    return reply(done.value, done.status);
 }

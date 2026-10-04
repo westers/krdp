@@ -18,7 +18,13 @@ KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
     , m_virtual(new BrokerHostSettings(BrokerHostSettings::Scope::Virtual, this))
     , m_session(new BrokerHostSettings(BrokerHostSettings::Scope::VirtualSession, this))
 {
-    setButtons(Help);
+    setButtons(Help | Apply | Default);
+    m_apply = new BrokerSettingsApply(m_authentication, m_console, m_virtual, m_session, m_preferences, this);
+    QQmlEngine::setObjectOwnership(m_apply, QQmlEngine::CppOwnership);
+    // The module's own state follows the aggregated drafts.
+    const auto sync = [this] { setNeedsSave(m_apply->needsSave()); setRepresentsDefaults(m_apply->representsDefaults()); };
+    connect(m_apply, &BrokerSettingsApply::stateChanged, this, sync);
+    sync();
     const QList<QObject *> models{m_authentication, m_services, m_preferences, m_console, m_virtual, m_session};
     for (QObject *model : models) QQmlEngine::setObjectOwnership(model, QQmlEngine::CppOwnership);
 }
@@ -28,11 +34,20 @@ void KRDPServerConfig::load()
     m_services->refresh(false);
     // Opening the panel never prompts: host settings come from the published
     // public snapshot and the user's own preferences from their own file.
-    // Drafts are never replaced. Account names and aliases (administrator
-    // protected) load once, when "Who can sign in" is expanded.
-    for (BrokerHostSettings *host : {m_console, m_virtual, m_session})
-        if (!host->modified()) host->refresh();
-    if (!m_preferences->modified()) m_preferences->reload();
+    // This is also Reset: every pending draft is dropped and re-read. Account
+    // names and aliases (administrator protected) load once, when "Who can
+    // sign in" is expanded, and Reset only discards their edits.
+    m_apply->reset();
+}
+void KRDPServerConfig::save()
+{
+    KQuickConfigModule::save();
+    m_apply->apply();
+}
+void KRDPServerConfig::defaults()
+{
+    KQuickConfigModule::defaults();
+    m_apply->useDefaults();
 }
 QString KRDPServerConfig::hostName() const { return QHostInfo::localHostName(); }
 void KRDPServerConfig::copyAddressToClipboard(const QString &address)

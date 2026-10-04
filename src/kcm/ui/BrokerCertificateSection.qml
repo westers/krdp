@@ -59,7 +59,7 @@ ColumnLayout {
         Layout.fillWidth: true
         visible: root.open
         spacing: Kirigami.Units.smallSpacing
-        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Stage certificate changes into this service's settings, then save them with the page's Save button. Cancel preserves other changes. A restart is a separate action.") }
+        QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Stage certificate changes into this service's settings, then save them with Apply. Cancel preserves other changes. A restart is a separate action.") }
         Kirigami.Heading { level: 4; text: i18nc("@title:group", "Certificate source") }
         ColumnLayout {
             visible: root.draft.loaded

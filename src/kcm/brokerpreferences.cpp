@@ -76,6 +76,11 @@ void BrokerPreferences::defaults()
     for (const auto &key : BrokerUserSettings::preferenceKeys()) if (!m_locked.contains(key)) m_pending.remove(key);
     m_error.clear(); Q_EMIT changed();
 }
+bool BrokerPreferences::representsDefaults() const
+{
+    for (auto it = m_pending.begin(); it != m_pending.end(); ++it) if (!m_locked.contains(it.key())) return false;
+    return true;
+}
 void BrokerPreferences::discard()
 {
     if (!loaded()) return;
