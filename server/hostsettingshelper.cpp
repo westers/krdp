@@ -3,6 +3,7 @@
 #include "BrokerHostAdmin.h"
 #include "BrokerHostPublicSnapshot.h"
 #include "BrokerHostRuntimeReader.h"
+#include "PrivateExecutionContext.h"
 #include "ServerCertificate.h"
 #include "VirtualGpuDevices.h"
 #include "VirtualSessionLaunchPlan.h"
@@ -276,8 +277,7 @@ int main(int argc, char **argv)
     // `--publish <scope>` is the root-only unit start hook (ExecStartPre): it takes no stdin.
     const bool publishOnly = argc == 3 && QByteArray(argv[1]) == "--publish";
     if (argc != 1 && !publishOnly) return fail(u"invalid helper invocation"_s);
-    rlimit limit{0, 0};
-    if (::setrlimit(RLIMIT_CORE, &limit) || ::prctl(PR_SET_DUMPABLE, 0)) return fail(u"private execution context unavailable"_s);
+    if (!enterPrivateExecutionContext()) return fail(u"private execution context unavailable"_s);
     ::umask(0077);
     QCoreApplication app(argc, argv);
     QByteArray input;

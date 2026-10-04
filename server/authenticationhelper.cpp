@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 // Fixed-purpose privileged stdin/stdout protocol. Never accept caller paths.
 #include "BrokerAuthenticationAdmin.h"
+#include "PrivateExecutionContext.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
@@ -29,6 +30,7 @@ int fail(const QString &error) { return reply({{u"error"_s, error}}, 1); }
 
 int main(int argc, char **argv)
 {
+    if (!enterPrivateExecutionContext()) return fail(u"private execution context unavailable"_s);
     if (geteuid()) return fail(u"administrator authorization is required"_s);
     if (argc != 1) return fail(u"invalid helper invocation"_s);
     QCoreApplication app(argc, argv);
