@@ -137,7 +137,7 @@ private Q_SLOTS:
         Fixture f; QVERIFY(f.load()); f.editAll(); f.writeMode(u"mode"_s, "malformed");
         f.apply.apply(); QVERIFY(f.settle());
         QVERIFY(f.console.outcomeUnknown() && f.virtualHost.outcomeUnknown() && f.session.outcomeUnknown());
-        QVERIFY(f.console.error().contains(u"Invalid"_s));
+        QVERIFY(f.console.error().contains(u"unexpected reply"_s)); // wording changed in S6; the test was stale
     }
     void invalidScopeIsReportedAndTheValidOnesSaveWithoutIt() {
         Fixture f; QVERIFY(f.load());
