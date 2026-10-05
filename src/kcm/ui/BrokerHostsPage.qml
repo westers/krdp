@@ -81,6 +81,10 @@ KCM.SimpleKCM {
         Kirigami.FormLayout {
             id: form
             objectName: "hostForm"
+            // The form decides side by side or stacked itself (the rows' small hints below no longer drive it), and takes the
+            // pane width up to 44 grid units; rows then fill what is left of it, up to 24 grid units.
+            wideMode: width < 1 || width >= Kirigami.Units.gridUnit * 20
+            implicitWidth: Math.min(parent ? parent.width : 0, Kirigami.Units.gridUnit * 44)
             Layout.fillWidth: true
             visible: root.host.loaded
             Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Service") }

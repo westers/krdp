@@ -23,6 +23,10 @@ KCM.SimpleKCM {
         Kirigami.InlineMessage { objectName: "brokerPreferenceReconnect"; Layout.fillWidth: true; visible: root.preferences.reconnectRequired; type: Kirigami.MessageType.Information; text: i18nc("@info", "Saved. Reconnect to use your preferences. Connections that are already open keep their current settings.") }
         Kirigami.FormLayout {
             id: form
+            // The form decides side by side or stacked itself (the rows' small hints below no longer drive it), and takes the
+            // pane width up to 44 grid units; rows then fill what is left of it, up to 24 grid units.
+            wideMode: width < 1 || width >= Kirigami.Units.gridUnit * 20
+            implicitWidth: Math.min(parent ? parent.width : 0, Kirigami.Units.gridUnit * 44)
             Layout.fillWidth: true
             visible: root.preferences.loaded
             Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.preferences.sectionTitle("video") }

@@ -8,6 +8,8 @@ import org.kde.kirigami as Kirigami
 // draft owned by the Who Can Connect page, which also hosts the add/edit dialog.
 Kirigami.FormLayout {
     id: root
+    wideMode: width < 1 || width >= Kirigami.Units.gridUnit * 20
+    implicitWidth: Math.min(parent ? parent.width : 0, Kirigami.Units.gridUnit * 44)
     required property var page
     required property string route
     readonly property var admin: page.administration

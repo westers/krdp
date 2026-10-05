@@ -105,6 +105,17 @@ private Q_SLOTS:
             QTRY_VERIFY2(form->property("wideMode").toBool(),qPrintable(QString::number(form->property("width").toReal())+u" of "_s+QString::number(form->property("implicitWidth").toReal())));
             QVERIFY2(summary->property("lineCount").toInt()<=2,"the certificate summary stays within two lines");
             QVERIFY(!summary->property("truncated").toBool() || summary->property("elide").toInt()==Qt::ElideMiddle);
+            // Layout (Q9): controls use the room the pane gives them: the quality slider is clearly usable and the choice
+            // boxes show their default labels instead of a cut-off stub, while staying below the 24 grid unit limit.
+            if (auto *slider=qobject_cast<QQuickItem *>(find(page,u"host_QualitySlider"_s)); slider && slider->isVisible()) {
+                QTRY_VERIFY2(slider->width()>=150,qPrintable(u"slider width "_s+QString::number(slider->width())));
+                QVERIFY2(slider->width()<=25*page->property("width").toReal(),"bounded");
+            }
+            if (auto *combo=qobject_cast<QQuickItem *>(find(page,u"host_AddressMode"_s)); combo && combo->isVisible())
+                QTRY_VERIFY2(combo->width()>=200,qPrintable(u"address box width "_s+QString::number(combo->width())));
+            page->setSize(QSizeF(1000,850));
+            if (auto *slider=qobject_cast<QQuickItem *>(find(page,u"host_QualitySlider"_s)); slider && slider->isVisible())
+                QTRY_VERIFY2(slider->width()>=150 && slider->width()<=520,qPrintable(u"wide slider width "_s+QString::number(slider->width())));
             page->setSize(window.size());
             QVERIFY(!qobject_cast<QQuickItem *>(find(page,u"certificateEditor"_s))->isVisible());
             QVERIFY(!model->modified()); QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s))); page->setParentItem(nullptr);
