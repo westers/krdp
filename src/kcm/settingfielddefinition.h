@@ -26,6 +26,8 @@ struct Spec {
     int max = 0;
     int heightMin = 0;
     QString unit;
+    // Account preferences with a "Use host setting" / "Custom" selector: the valid value the draft starts with when Custom is chosen.
+    QString customSeed;
     // An empty text value is a real value ("no GPU", "all interfaces") and must not mean "inherit".
     bool keepEmpty = false;
     // Show the field only while another key of the same model has this value.
@@ -67,6 +69,7 @@ inline QVariantMap makeFieldDefinition(const QString &key, const QString &group,
                        {QStringLiteral("max"), spec.max},
                        {QStringLiteral("heightMin"), spec.heightMin},
                        {QStringLiteral("unit"), spec.unit},
+                       {QStringLiteral("customSeed"), spec.customSeed},
                        {QStringLiteral("keepEmpty"), spec.keepEmpty},
                        {QStringLiteral("showWhenKey"), spec.showWhenKey},
                        {QStringLiteral("showWhenValue"), spec.showWhenValue},

@@ -21,8 +21,8 @@ RowLayout {
         objectName: root.field.prefix + "FallbackWidth"
         editable: true; from: root.widthMin; to: root.sizeMax; stepSize: 2; enabled: root.field.editable
         value: Number(root.widthText) || root.widthMin
-        textFromValue: (value, locale) => root.widthText === "" ? "" : Number(value).toLocaleString(locale, "f", 0)
-        valueFromText: (text, locale) => Number.fromLocaleString(locale, text)
+        textFromValue: (value, locale) => root.widthText === "" ? "" : String(Math.round(value))
+        valueFromText: (text, locale) => text.replace(/[^0-9]/g, "") === "" ? from : parseInt(text.replace(/[^0-9]/g, ""), 10)
         Accessible.name: i18nc("@label", "Fallback width")
         onValueModified: { root.field.settings.setValue(root.field.key, String(value) + "x" + root.heightText); value = Qt.binding(() => Number(root.widthText) || root.widthMin); }
     }
@@ -31,8 +31,8 @@ RowLayout {
         objectName: root.field.prefix + "FallbackHeight"
         editable: true; from: root.heightMin; to: root.sizeMax; stepSize: 2; enabled: root.field.editable
         value: Number(root.heightText) || root.heightMin
-        textFromValue: (value, locale) => root.heightText === "" ? "" : Number(value).toLocaleString(locale, "f", 0)
-        valueFromText: (text, locale) => Number.fromLocaleString(locale, text)
+        textFromValue: (value, locale) => root.heightText === "" ? "" : String(Math.round(value))
+        valueFromText: (text, locale) => text.replace(/[^0-9]/g, "") === "" ? from : parseInt(text.replace(/[^0-9]/g, ""), 10)
         Accessible.name: i18nc("@label", "Fallback height")
         onValueModified: { root.field.settings.setValue(root.field.key, root.widthText + "x" + String(value)); value = Qt.binding(() => Number(root.heightText) || root.heightMin); }
     }

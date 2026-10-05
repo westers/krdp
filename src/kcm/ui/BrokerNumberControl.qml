@@ -33,8 +33,9 @@ ColumnLayout {
             objectName: root.field.prefix + root.field.key
             editable: true; enabled: root.field.editable
             from: root.minimum; to: root.maximum; value: root.numericValue
-            textFromValue: (value, locale) => root.incomplete ? "" : Number(value).toLocaleString(locale, "f", 0)
-            valueFromText: (text, locale) => Number.fromLocaleString(locale, text)
+            // Plain digits: a port or an index is an identifier, never "3,391".
+            textFromValue: (value, locale) => root.incomplete ? "" : String(Math.round(value))
+            valueFromText: (text, locale) => text.replace(/[^0-9]/g, "") === "" ? from : parseInt(text.replace(/[^0-9]/g, ""), 10)
             Accessible.name: root.field.label
             onValueModified: { root.setNumber(value); value = Qt.binding(() => root.numericValue); }
         }

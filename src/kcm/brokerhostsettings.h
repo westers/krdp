@@ -9,6 +9,7 @@
 
 // One immutable route per model. Switching pages never discards another route's
 // drafts. Only public metadata is readable; imported key bytes remain in C++.
+class BrokerServices;
 class BrokerHostSettings : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString scope READ scope CONSTANT)
@@ -26,6 +27,7 @@ class BrokerHostSettings : public QObject {
     Q_PROPERTY(bool modified READ modified NOTIFY changed)
     Q_PROPERTY(bool canSave READ canSave NOTIFY changed)
     Q_PROPERTY(bool applicationRequired READ applicationRequired NOTIFY changed)
+    Q_PROPERTY(bool restarted READ restarted NOTIFY changed)
     Q_PROPERTY(bool outcomeUnknown READ outcomeUnknown NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
     Q_PROPERTY(QObject *certificateDraft READ certificateDraft CONSTANT)
@@ -53,6 +55,8 @@ public:
     bool modified() const;
     bool canSave() const;
     bool applicationRequired() const { return m_applicationRequired; }
+    // True from the moment a restart is seen to have applied the saved settings until dismissRestarted().
+    bool restarted() const { return m_restarted; }
     bool outcomeUnknown() const { return m_outcomeUnknown; }
     QString error() const;
     QObject *certificateDraft();
@@ -61,6 +65,12 @@ public:
     Q_INVOKABLE bool stageCertificateEdit();
     Q_INVOKABLE void cancelCertificateEdit();
     // Unprivileged read of the published public-metadata snapshot (no prompt).
+    // Clears the "restart to use these settings" state once the service has become active after the settings were
+    // saved (startedAtUs is systemd's ActiveEnterTimestamp). Returns true when it cleared.
+    Q_INVOKABLE bool noteServiceStart(quint64 startedAtUs, bool active);
+    Q_INVOKABLE void dismissRestarted();
+    // Calls noteServiceStart() whenever the given service (0 Console, 1 Virtual) reports a new state.
+    void followService(BrokerServices *services, int route);
     Q_INVOKABLE bool refresh();
     // Authoritative read through the privileged helper (tests and explicit use).
     Q_INVOKABLE bool reload();
@@ -87,6 +97,7 @@ private:
     bool start(QJsonObject request, bool saving);
     QJsonObject saveRequest() const;
     void finish(int code, QProcess::ExitStatus status, QByteArray &output, bool saving, bool inspecting);
+    void markApplicationRequired();
     void adoptSnapshot(const QJsonObject &snapshot, bool saving);
     void clearImport();
     Scope m_scope;
@@ -100,7 +111,8 @@ private:
     QVariantMap m_pending, m_importMetadata;
     QByteArray m_certificate, m_key;
     QString m_tlsMode = QStringLiteral("keep"), m_error;
-    bool m_applicationRequired = false, m_outcomeUnknown = false;
+    bool m_applicationRequired = false, m_outcomeUnknown = false, m_restarted = false;
+    qint64 m_savedAtMs = 0;
     BrokerHostSettings *m_certificateDraft = nullptr;
     bool m_draftOnly = false;
     bool m_batch = false;

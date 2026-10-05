@@ -92,6 +92,27 @@ private Q_SLOTS:
         QVERIFY(second.setValue(u"Quality"_s,u"90"_s)); write(path,accepted+"# external host change\n"); const auto changed=read(path);
         QVERIFY(!second.save()); QCOMPARE(read(path),changed); QVERIFY(second.modified());
     }
+    void choosingCustomStartsValidForEveryInheritField() {
+        QTemporaryDir dir; BrokerPreferences model(dir.path()); QVERIFY(model.reload());
+        int numeric = 0;
+        for (const auto &row : model.definitions()) {
+            const auto definition = row.toMap(); const auto control = definition[u"control"_s].toString(); const auto key = definition[u"key"_s].toString();
+            if (control != u"spin" && control != u"slider" && control != u"size") continue; // choices inherit through the empty option
+            ++numeric; const auto seed = definition[u"customSeed"_s].toString();
+            QVERIFY2(!seed.isEmpty(), qPrintable(key));
+            model.discard(); QVERIFY(model.setValue(key, seed));
+            QVERIFY2(model.error().isEmpty(), qPrintable(key + u": "_s + model.error())); QVERIFY2(model.canSave(), qPrintable(key));
+            if (control == u"size") { const auto parts = seed.split(u'x'); QVERIFY(parts[0].toInt() >= definition[u"min"_s].toInt() && parts[1].toInt() >= definition[u"heightMin"_s].toInt()); QVERIFY(parts[1].toInt() <= definition[u"max"_s].toInt()); }
+            else { QVERIFY(seed.toInt() >= definition[u"min"_s].toInt()); QVERIFY(seed.toInt() <= definition[u"max"_s].toInt()); }
+        }
+        QCOMPARE(numeric, 6);
+        // Every one at once, as when a person visits each row in turn.
+        model.discard();
+        for (const auto &row : model.definitions()) { const auto definition = row.toMap(); if (!definition[u"customSeed"_s].toString().isEmpty()) QVERIFY(model.setValue(definition[u"key"_s].toString(), definition[u"customSeed"_s].toString())); }
+        QVERIFY2(model.error().isEmpty(), qPrintable(model.error())); QVERIFY(model.canSave());
+        // Only an entered bad value shows the error.
+        QVERIFY(model.setValue(u"Quality"_s, u""_s)); QVERIFY(!model.error().isEmpty());
+    }
     void missingConfigAndSafeParentSymlink() {
         QTemporaryDir dir; const auto directory=dir.filePath(u"new-config"_s); BrokerPreferences model(directory); QVERIFY(model.reload()); QVERIFY(model.values().isEmpty());
         QVERIFY(!QFileInfo::exists(directory)); QVERIFY(model.setValue(u"Quality"_s,u"80"_s)); QVERIFY2(model.save(),qPrintable(model.error()));

@@ -16,6 +16,6 @@ QQC2.ComboBox {
     Accessible.name: field.label
     onActivated: index => {
         if (index === 0) field.settings.inherit(field.key);
-        else if (!field.overridden) field.settings.setValue(field.key, ""); // incomplete, not a fabricated default
+        else if (!field.overridden) field.settings.setValue(field.key, field.definition.customSeed); // starts valid; the user edits from there
     }
 }

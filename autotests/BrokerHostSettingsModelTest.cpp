@@ -1,13 +1,29 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "brokerhostsettings.h"
+#include "brokerservices.h"
 #include "settingfielddefinition.h"
 #include "ServerCertificate.h"
+#include <QDateTime>
 #include <QFile>
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <QTest>
 #include <sys/stat.h>
 using namespace Qt::StringLiterals;
+namespace {
+class RestartTransport : public BrokerServiceTransport {
+public:
+    using BrokerServiceTransport::BrokerServiceTransport;
+    std::array<BrokerServiceState, 2> states{{{true, u"loaded"_s, u"active"_s, u"running"_s, u"enabled"_s, 42, 1000},
+                                              {true, u"loaded"_s, u"active"_s, u"running"_s, u"enabled"_s, 43, 1000}}};
+    QString failure;
+    void query(int route, QueryDone done) override { done(states[route], {}); }
+    void operate(int route, Operation, Done done) override {
+        if (failure.isEmpty()) { states[route].mainPid += 100; states[route].activeSinceUs = quint64(QDateTime::currentMSecsSinceEpoch()) * 1000 + 5000; }
+        done(failure);
+    }
+};
+}
 class BrokerHostSettingsModelTest : public QObject {
     Q_OBJECT
     using Scope = BrokerHostSettings::Scope;
@@ -185,6 +201,39 @@ private Q_SLOTS:
         QVERIFY(settings.setValue(u"Port"_s,u"3502"_s)); mode(dir,"crash-after-save"); QVERIFY(settings.save()); QTRY_VERIFY(!settings.busy());
         QVERIFY(settings.outcomeUnknown()); mode(dir,"success"); QVERIFY(settings.inspectRuntime()); QTRY_VERIFY(!settings.busy());
         QVERIFY(settings.outcomeUnknown()); QVERIFY(!settings.canSave()); QVERIFY(settings.modified()); QVERIFY(settings.runtimeStale());
+    }
+    void restartNoticeClearsOnlyAfterTheServiceRestarts() {
+        QTemporaryDir directory;
+        BrokerHostSettings console(Scope::Console, u"/usr/bin/python3"_s, arguments(directory), 3000);
+        BrokerHostSettings session(Scope::VirtualSession, u"/usr/bin/python3"_s, arguments(directory), 3000);
+        RestartTransport transport; BrokerServices services(&transport); services.refresh();
+        console.followService(&services, 0);
+        mode(directory, "success");
+        QVERIFY(console.reload()); QTRY_VERIFY(!console.busy()); QVERIFY(!console.applicationRequired());
+        QVERIFY(console.setValue(u"Port"_s, u"3501"_s)); QVERIFY(console.save()); QTRY_VERIFY(!console.busy());
+        QVERIFY(console.applicationRequired()); QVERIFY(!console.restarted());
+        // The unit has been active since before the save: still waiting.
+        services.refresh(); QVERIFY(console.applicationRequired());
+        QVERIFY(!console.noteServiceStart(1000, true));
+        // A restart that fails keeps the notice and its error.
+        transport.failure = u"Service job did not complete: failed"_s; QVERIFY(services.perform(u"console"_s, u"restart"_s));
+        QVERIFY(console.applicationRequired()); QVERIFY(!console.restarted());
+        QCOMPARE(services.services()[0].toMap()[u"error"_s].toString(), transport.failure);
+        // A restart that succeeds clears it, and a later start does not bring it back.
+        transport.failure.clear(); QVERIFY(services.perform(u"console"_s, u"restart"_s));
+        QVERIFY(!console.applicationRequired()); QVERIFY(console.restarted());
+        console.dismissRestarted(); QVERIFY(!console.restarted());
+        // A second save needs another restart.
+        QVERIFY(console.setValue(u"Port"_s, u"3502"_s)); QVERIFY(console.save()); QTRY_VERIFY(!console.busy());
+        QVERIFY(console.applicationRequired()); QVERIFY(!console.restarted());
+        // A restart that happens elsewhere counts too (the unit's start time moves past the save).
+        transport.states[0].activeSinceUs = quint64(QDateTime::currentMSecsSinceEpoch()) * 1000 + 60000; services.refresh();
+        QVERIFY(!console.applicationRequired()); QVERIFY(console.restarted());
+        // Not while the unit is not active, never for the per-desktop defaults, never from an unknown start time.
+        QVERIFY(console.setValue(u"Port"_s, u"3503"_s)); QVERIFY(console.save()); QTRY_VERIFY(!console.busy());
+        QVERIFY(!console.noteServiceStart(quint64(-1) / 4, false)); QVERIFY(!console.noteServiceStart(0, true)); QVERIFY(console.applicationRequired());
+        QVERIFY(session.reload()); QTRY_VERIFY(!session.busy()); QVERIFY(session.setValue(u"VaapiDriver"_s, u"iHD"_s)); QVERIFY(session.save()); QTRY_VERIFY(!session.busy());
+        QVERIFY(session.applicationRequired()); QVERIFY(!session.noteServiceStart(quint64(-1) / 4, true)); QVERIFY(session.applicationRequired());
     }
     void runtimeFailuresAndPartialReplies_data() {
         QTest::addColumn<QByteArray>("modeName");QTest::addColumn<bool>("accepted");QTest::addColumn<bool>("stale");

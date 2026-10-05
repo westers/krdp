@@ -163,9 +163,9 @@ QVariantList BrokerPreferences::definitions() const
     const auto media = i18nc("@title:group", "Audio and Devices");
     const auto virtualDesktop = i18nc("@title:group", "Virtual Compatibility");
     const auto when = [](Spec spec, const QString &mode) { spec.showWhenKey = u"MonitorMode"_s; spec.showWhenValue = mode; return spec; };
-    const auto interval = [](const QString &formLabel) { return Spec{.control = u"spin"_s, .section = u"video"_s, .advanced = true, .formLabel = formLabel, .min = 16, .max = 5000, .unit = i18nc("@label", "ms")}; };
+    const auto interval = [](const QString &formLabel, const QString &seed) { return Spec{.control = u"spin"_s, .section = u"video"_s, .advanced = true, .formLabel = formLabel, .min = 16, .max = 5000, .unit = i18nc("@label", "ms"), .customSeed = seed}; };
     add(u"Quality"_s, video, i18nc("@label", "Video quality"), i18nc("@info", "From 0 to 100. Higher values look sharper and use more bandwidth."), {},
-        {.control = u"slider"_s, .section = u"video"_s, .formLabel = i18nc("@label", "Image quality"), .min = 0, .max = 100});
+        {.control = u"slider"_s, .section = u"video"_s, .formLabel = i18nc("@label", "Image quality"), .min = 0, .max = 100, .customSeed = u"80"_s});
     add(u"AdaptiveQuality"_s, video, i18nc("@label", "Adapt quality to the connection"), i18nc("@info", "Lower the quality automatically when the connection cannot keep up."), boolean,
         {.section = u"video"_s, .formLabel = i18nc("@label", "Adjust to connection")});
     add(u"Codec"_s, video, i18nc("@label", "Video codec preference"), i18nc("@info", "Chooses how colors are sent. Automatic uses full color (AVC444) when the client and the connection allow it. The available encoders and the client still decide; shared Console viewers always get standard color (AVC420)."),
@@ -179,11 +179,11 @@ QVariantList BrokerPreferences::definitions() const
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"1"_s, u"1"_s), choice(u"2"_s, u"2"_s), choice(u"4"_s, u"4"_s), choice(u"8"_s, u"8"_s), choice(u"16"_s, u"16"_s)},
         {.section = u"video"_s, .advanced = true});
     add(u"Avc444MotionGapMs"_s, video, i18nc("@label", "AVC444 color update interval during motion"), i18nc("@info", "From 16 to 5000 ms. Must not be longer than the rest interval."), {},
-        interval(i18nc("@label", "AVC444 motion interval")));
+        interval(i18nc("@label", "AVC444 motion interval"), u"100"_s));
     add(u"Avc444RestMs"_s, video, i18nc("@label", "AVC444 rest interval"), i18nc("@info", "From 16 to 5000 ms. Must not be shorter than the motion interval."), {},
-        interval(i18nc("@label", "AVC444 rest interval")));
+        interval(i18nc("@label", "AVC444 rest interval"), u"150"_s));
     add(u"Avc444MaxGapMs"_s, video, i18nc("@label", "AVC444 maximum color update gap"), i18nc("@info", "From 16 to 5000 ms. Must not be shorter than the rest interval."), {},
-        interval(i18nc("@label", "AVC444 maximum interval")));
+        interval(i18nc("@label", "AVC444 maximum interval"), u"1500"_s));
     add(u"PreferAudioQuality"_s, media, i18nc("@label", "Prefer audio quality"), i18nc("@info", "When the network is busy, favor sound over video."), boolean,
         {.section = u"sound"_s, .formLabel = i18nc("@label", "When network is busy"),
          .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Keep sound smooth")}, {u"false"_s, i18nc("@item:inlistbox", "Keep video sharp")}}});
@@ -195,7 +195,7 @@ QVariantList BrokerPreferences::definitions() const
          choice(u"multi"_s, i18nc("@item:inlistbox", "Displays as separate streams")), choice(u"virtual"_s, i18nc("@item:inlistbox", "Client-created displays"))},
         {.section = u"displays"_s, .formLabel = i18nc("@label", "Screens to share")});
     add(u"MonitorIndex"_s, displays, i18nc("@label", "Display index"), i18nc("@info", "A number from 0 to 65535, counting from zero. Used when sharing one display; that display must exist on the Console desktop."), {},
-        when({.control = u"spin"_s, .section = u"displays"_s, .min = 0, .max = 65535}, u"specific"_s));
+        when({.control = u"spin"_s, .section = u"displays"_s, .min = 0, .max = 65535, .customSeed = u"0"_s}, u"specific"_s));
     add(u"VirtualMonitorPolicy"_s, displays, i18nc("@label", "Physical displays with client-created displays"), i18nc("@info", "“Turn off during connection” switches the computer’s own screens off while you are connected. They come back when someone uses the computer locally."),
         {choice(u"replace"_s, i18nc("@item:inlistbox", "Replace physical displays")), choice(u"extend"_s, i18nc("@item:inlistbox", "Keep physical displays"))},
         when({.section = u"displays"_s, .formLabel = i18nc("@label", "Physical displays"),
@@ -204,7 +204,7 @@ QVariantList BrokerPreferences::definitions() const
         {choice(u"client"_s, i18nc("@item:inlistbox", "Client monitors")), choice(u"single"_s, i18nc("@item:inlistbox", "One display")), choice(u"physical"_s, i18nc("@item:inlistbox", "Physical display layout"))},
         when({.section = u"displays"_s, .formLabel = i18nc("@label", "Layout")}, u"virtual"_s));
     add(u"VirtualMonitorFallbackSize"_s, displays, i18nc("@label", "Fallback display size"), i18nc("@info", "Width and height in pixels, both even numbers, from 320x200 to 8192x8192. Used when the client does not report its monitors."), {},
-        when({.control = u"size"_s, .section = u"displays"_s, .formLabel = i18nc("@label", "Fallback size"), .min = 320, .max = 8192, .heightMin = 200}, u"virtual"_s));
+        when({.control = u"size"_s, .section = u"displays"_s, .formLabel = i18nc("@label", "Fallback size"), .min = 320, .max = 8192, .heightMin = 200, .customSeed = u"1920x1080"_s}, u"virtual"_s));
     add(u"WakeDisplayOnConnect"_s, i18nc("@title:group", "Session"), i18nc("@label", "Wake and keep displays awake"), i18nc("@info", "Wakes the screens and keeps them awake while you are connected, in Console and Virtual. This stops when the last viewer leaves. It never unlocks the screen."), boolean,
         {.section = u"sound"_s, .formLabel = i18nc("@label", "Keep displays awake")});
     add(u"VirtualStockClientPolicy"_s, virtualDesktop, i18nc("@label", "Standard clients in Virtual"), i18nc("@info", "How apps that cannot choose a Farside session connect. The desktop always belongs to the account that signs in."),

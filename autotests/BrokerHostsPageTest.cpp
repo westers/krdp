@@ -14,8 +14,22 @@
 #include <QQuickWindow>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QDateTime>
+#include <QLocale>
 #include <functional>
+#include "brokerservices.h"
 using namespace Qt::StringLiterals;
+class PageRestartTransport : public BrokerServiceTransport {
+public:
+    using BrokerServiceTransport::BrokerServiceTransport;
+    BrokerServiceState state{true, u"loaded"_s, u"active"_s, u"running"_s, u"enabled"_s, 42, 1000};
+    QString failure;
+    void query(int, QueryDone done) override { done(state, {}); }
+    void operate(int, Operation, Done done) override {
+        if (failure.isEmpty()) { state.mainPid += 1; state.activeSinceUs = quint64(QDateTime::currentMSecsSinceEpoch()) * 1000 + 5000; }
+        done(failure);
+    }
+};
 class HostPageNavigation : public QObject {
     Q_OBJECT
 public:
@@ -91,6 +105,55 @@ private Q_SLOTS:
         QTemporaryDir empty; qputenv("FARSIDE_PUBLIC_SETTINGS_DIR", empty.path().toUtf8());
         BrokerHostSettings missing(Scope::Console,u"/nonexistent/helper"_s,unusable,3000);
         QVERIFY(!missing.refresh()); QVERIFY(!missing.loaded()); QVERIFY(missing.error().contains(u"snapshot"));
+    }
+    void portShowsPlainDigitsUnderAGroupingLocale() {
+        const auto previous = QLocale();
+        QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
+        const auto restoreLocale = qScopeGuard([previous] { QLocale::setDefault(previous); });
+        QTemporaryDir snapshots, helper; qputenv("FARSIDE_PUBLIC_SETTINGS_DIR", snapshots.path().toUtf8());
+        const auto restore = qScopeGuard([] { qunsetenv("FARSIDE_PUBLIC_SETTINGS_DIR"); });
+        QVERIFY(HostSnapshotFixture::publishAll(snapshots.path(), "FARSIDE_CONSOLE_PORT=3391\nFARSIDE_VIRTUAL_PORT=3395\n"));
+        BrokerHostSettings console(Scope::Console,u"/usr/bin/python3"_s,arguments(helper),3000), virtualHost(Scope::Virtual,u"/usr/bin/python3"_s,arguments(helper),3000),
+            session(Scope::VirtualSession,u"/usr/bin/python3"_s,arguments(helper),3000);
+        QVERIFY(console.refresh()); QVERIFY(virtualHost.refresh()); QVERIFY(session.refresh());
+        QCOMPARE(QLocale().toString(3391), u"3,391"_s); // the fixture really groups
+        QQmlEngine engine; localize(engine);
+        QQmlComponent component(&engine,pageUrl());
+        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"fixedScope"_s,0},{u"showAdvanced"_s,true},
+            {u"consoleSettings"_s,QVariant::fromValue(&console)},{u"virtualSettings"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)}}));
+        QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data());
+        QQuickWindow window; window.resize(900,850); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
+        auto *port=qobject_cast<QQuickItem *>(find(page,u"host_Port"_s)); QVERIFY(port);
+        const auto text=[&] { return port->property("contentItem").value<QQuickItem *>()->property("text").toString(); };
+        QTRY_COMPARE(text(), u"3391"_s);
+        port->forceActiveFocus(); QTest::keyClick(&window,Qt::Key_A,Qt::ControlModifier);
+        for (const auto key : {Qt::Key_3,Qt::Key_3,Qt::Key_9,Qt::Key_5}) QTest::keyClick(&window,key);
+        QTest::keyClick(&window,Qt::Key_Return);
+        QTRY_COMPARE(console.values()[u"Port"_s].toString(), u"3395"_s); QCOMPARE(text(), u"3395"_s);
+        page->setParentItem(nullptr);
+    }
+    void restartNoticeFollowsTheService() {
+        QTemporaryDir helper;
+        BrokerHostSettings console(Scope::Console,u"/usr/bin/python3"_s,arguments(helper),3000), virtualHost(Scope::Virtual,u"/usr/bin/python3"_s,arguments(helper),3000),
+            session(Scope::VirtualSession,u"/usr/bin/python3"_s,arguments(helper),3000);
+        PageRestartTransport transport; BrokerServices services(&transport); services.refresh(); console.followService(&services,0);
+        QVERIFY(console.reload()); QTRY_VERIFY(!console.busy()); QVERIFY(virtualHost.reload()); QTRY_VERIFY(!virtualHost.busy()); QVERIFY(session.reload()); QTRY_VERIFY(!session.busy());
+        QQmlEngine engine; localize(engine);
+        QQmlComponent component(&engine,pageUrl());
+        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"fixedScope"_s,0},{u"administration"_s,QVariant::fromValue(&services)},
+            {u"consoleSettings"_s,QVariant::fromValue(&console)},{u"virtualSettings"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)}}));
+        QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data());
+        QQuickWindow window; window.resize(900,850); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
+        auto *saved=qobject_cast<QQuickItem *>(find(page,u"hostSavedNotice"_s)); auto *restarted=qobject_cast<QQuickItem *>(find(page,u"hostRestartedNotice"_s)); QVERIFY(saved && restarted);
+        QVERIFY(!saved->isVisible()); QVERIFY(!restarted->isVisible());
+        QVERIFY(console.setValue(u"Port"_s,u"3501"_s)); QVERIFY(console.save()); QTRY_VERIFY(!console.busy());
+        QTRY_VERIFY(saved->isVisible()); QVERIFY(saved->property("text").toString().contains(u"Restart to use"_s)); QVERIFY(!restarted->isVisible());
+        transport.failure=u"Service job did not complete: failed"_s; QVERIFY(services.perform(u"console"_s,u"restart"_s));
+        QVERIFY(saved->isVisible()); QVERIFY(!restarted->isVisible());
+        transport.failure.clear(); QVERIFY(services.perform(u"console"_s,u"restart"_s));
+        QTRY_VERIFY(!saved->isVisible()); QTRY_VERIFY(restarted->isVisible());
+        console.dismissRestarted(); QTRY_VERIFY(!restarted->isVisible());
+        page->setParentItem(nullptr);
     }
     void checkedAtLabelIsBlankBeforeInspection() {
         QTemporaryDir dir;

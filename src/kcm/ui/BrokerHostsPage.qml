@@ -51,14 +51,21 @@ KCM.SimpleKCM {
         Kirigami.InlineMessage { objectName: "hostError"; Layout.fillWidth: true; type: Kirigami.MessageType.Error; visible: root.host.error !== ""; text: root.host.error }
         Kirigami.InlineMessage { objectName: "desktopHardwareError"; Layout.fillWidth: true; type: Kirigami.MessageType.Error; visible: root.fixedScope === 1 && root.sessionSettings.error !== ""; text: root.sessionSettings.error }
         Kirigami.InlineMessage {
-            objectName: "hostSavedNotice"; Layout.fillWidth: true; visible: root.host.applicationRequired; type: Kirigami.MessageType.Information
-            text: i18nc("@info", "Saved. Restart to use the new settings.")
+            id: savedNotice; objectName: "hostSavedNotice"; Layout.fillWidth: true; visible: root.host.applicationRequired; type: Kirigami.MessageType.Information
+            readonly property bool restarting: !!root.administration && root.administration.services[root.fixedScope].operating
+            text: restarting ? i18nc("@info", "Restarting…") : i18nc("@info", "Saved. Restart to use the new settings.")
             actions: Kirigami.Action {
                 objectName: "hostSavedRestart"
                 text: i18nc("@action", "Restart…")
                 enabled: !!root.administration && root.administration.services[root.fixedScope].canRestart
+                visible: !savedNotice.restarting
                 onTriggered: root.navigation.requestOperation(root.serviceRoute, "restart")
             }
+        }
+        Kirigami.InlineMessage {
+            objectName: "hostRestartedNotice"; Layout.fillWidth: true; visible: root.host.restarted; type: Kirigami.MessageType.Positive
+            text: i18nc("@info", "Restarted. The new settings are active.")
+            Timer { running: root.host.restarted; interval: 6000; onTriggered: root.host.dismissRestarted() }
         }
         Kirigami.InlineMessage { objectName: "desktopHardwareSavedNotice"; Layout.fillWidth: true; visible: root.fixedScope === 1 && root.sessionSettings.applicationRequired; type: Kirigami.MessageType.Information; text: i18nc("@info", "Saved. New desktops will use these defaults.") }
         Kirigami.PlaceholderMessage {

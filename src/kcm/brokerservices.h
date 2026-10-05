@@ -12,6 +12,8 @@ struct BrokerServiceState {
     bool known = false;
     QString loadState, activeState, subState, unitFileState;
     quint32 mainPid = 0;
+    // systemd ActiveEnterTimestamp (microseconds since the epoch): when the unit last became active. 0 when unknown.
+    quint64 activeSinceUs = 0;
 };
 
 // The transport accepts only the two fixed host services. Neither QML nor

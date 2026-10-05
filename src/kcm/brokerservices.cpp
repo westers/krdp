@@ -111,6 +111,7 @@ void SystemBrokerServiceTransport::query(int route, QueryDone done)
             state.loadState = values.value(u"LoadState"_s).toString();
             state.activeState = values.value(u"ActiveState"_s).toString();
             state.subState = values.value(u"SubState"_s).toString();
+            state.activeSinceUs = values.value(u"ActiveEnterTimestamp"_s).toULongLong();
             if (state.loadState == u"not-found"_s) { done(state, {}); return; }
             request<QDBusPendingReply<QString>>(m_bus, call(u"GetUnitFileState"_s, {name}), this, [this, path, state, done](const auto &file) mutable {
                 if (file.isError()) { done({}, file.error().message()); return; }
@@ -224,7 +225,7 @@ QVariantList BrokerServices::services() const
         const bool idle = !busy();
         list.append(QVariantMap{{u"route"_s, i == 0 ? u"console"_s : u"virtual"_s}, {u"unit"_s, BrokerServiceTransport::unit(i)},
             {u"known"_s, s.known}, {u"loadState"_s, s.loadState}, {u"activeState"_s, s.activeState}, {u"subState"_s, s.subState},
-            {u"unitFileState"_s, s.unitFileState}, {u"mainPid"_s, s.mainPid}, {u"busy"_s, e.pending || e.querying}, {u"error"_s, e.error},
+            {u"unitFileState"_s, s.unitFileState}, {u"mainPid"_s, s.mainPid}, {u"activeSinceUs"_s, qulonglong(s.activeSinceUs)}, {u"operating"_s, e.pending}, {u"busy"_s, e.pending || e.querying}, {u"error"_s, e.error},
             {u"autostart"_s, s.unitFileState == u"enabled"_s}, {u"canAutostart"_s, idle && canAutostart(s)},
             {u"canStart"_s, idle && canRun(s) && (s.activeState == u"inactive"_s || s.activeState == u"failed"_s)},
             {u"canStop"_s, idle && s.known && QStringList{u"active"_s, u"activating"_s, u"reloading"_s}.contains(s.activeState)},

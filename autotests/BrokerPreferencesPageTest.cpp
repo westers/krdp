@@ -98,6 +98,35 @@ private Q_SLOTS:
         QVERIFY(!BrokerUserSettings::parse(read(path)).preferences.quality); QVERIFY(read(path).contains("Certificate=/root/fixture.pem\n"));
         QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s))); page->setParentItem(nullptr);
     }
+    void choosingCustomShowsNoErrorForAnyInheritField() {
+        QTemporaryDir dir; write(dir.filePath(u"farsideserverrc"_s),"[General]\nHost=original\n");
+        BrokerPreferences preferences(dir.path()); QQmlEngine engine;
+        auto *localized=new KLocalizedQmlContext(&engine); localized->setTranslationDomain(u"kcm_farside"_s); engine.rootContext()->setContextObject(localized);
+        QQmlComponent component(&engine,QUrl::fromLocalFile(qEnvironmentVariable("FARSIDE_PREFERENCES_TEST_PAGE",QString::fromUtf8(PREFERENCES_PAGE))));
+        QVERIFY2(component.isReady(),qPrintable(component.errorString()));
+        QScopedPointer<QObject> object(component.createWithInitialProperties({{u"showAdvanced"_s,true},{u"preferences"_s,QVariant::fromValue(&preferences)}}));
+        QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data());
+        QQuickWindow window; window.resize(1000,900); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
+        const auto item=[&](const QString &name) { return find(page,name); };
+        QVERIFY(preferences.reload()); QTRY_VERIFY(item(u"inherit_Quality"_s));
+        // MonitorIndex only shows for the "One display" mode.
+        QVERIFY(preferences.setValue(u"MonitorMode"_s,u"specific"_s)); preferences.discard(); QVERIFY(preferences.setValue(u"MonitorMode"_s,u"specific"_s));
+        int visited=0;
+        for(const auto &definition:preferences.definitions()) {
+            const auto row=definition.toMap(); const auto key=row[u"key"_s].toString(); const auto control=row[u"control"_s].toString();
+            if(control!=u"spin" && control!=u"slider" && control!=u"size") continue;
+            QTRY_VERIFY2(item(u"inherit_"_s+key),qPrintable(key)); ++visited;
+            auto *mode=item(u"inherit_"_s+key); QVERIFY(mode->setProperty("currentIndex",1)); QVERIFY(QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,1)));
+            QCOMPARE(preferences.values()[key].toString(),row[u"customSeed"_s].toString());
+            QVERIFY2(preferences.error().isEmpty(),qPrintable(key+u": "_s+preferences.error()));
+            auto *error=qobject_cast<QQuickItem *>(item(u"brokerPreferenceError"_s)); QVERIFY(error); QVERIFY2(!error->isVisible(),qPrintable(key));
+            if(control!=u"size") { auto *spin=item(u"preference_"_s+key); QVERIFY(spin); QTRY_VERIFY2(!spin->property("contentItem").value<QQuickItem *>()->property("text").toString().isEmpty(),qPrintable(key)); }
+        }
+        QCOMPARE(visited,6); QVERIFY(preferences.canSave());
+        // Back to the host setting removes the value again.
+        QVERIFY(QMetaObject::invokeMethod(item(u"inherit_Quality"_s),"activated",Q_ARG(int,0))); QVERIFY(!preferences.values().contains(u"Quality"_s));
+        page->setParentItem(nullptr);
+    }
     void staleSaveAndDiscardCancellationKeepPendingValues() {
         QTemporaryDir dir; const auto path=dir.filePath(u"farsideserverrc"_s); write(path,"[General]\nQuality=42\n");
         BrokerPreferences preferences(dir.path()); QQmlEngine engine;

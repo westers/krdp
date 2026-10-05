@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "brokerhostsettings.h"
+#include "brokerservices.h"
 #include "BrokerHostAdmin.h"
 #include "BrokerHostBatch.h"
 #include "BrokerHostPublicSnapshot.h"
@@ -7,6 +8,7 @@
 #include "ServerCertificate.h"
 #include "settingfielddefinition.h"
 #include <KLocalizedString>
+#include <QDateTime>
 #include <QFile>
 #include <QPointer>
 #include <QJsonArray>
@@ -305,12 +307,40 @@ bool BrokerHostSettings::refresh()
     adoptSnapshot(read.value, false);
     return true;
 }
+void BrokerHostSettings::markApplicationRequired()
+{
+    m_applicationRequired = true; m_restarted = false;
+    m_savedAtMs = QDateTime::currentMSecsSinceEpoch();
+}
+bool BrokerHostSettings::noteServiceStart(quint64 startedAtUs, bool active)
+{
+    // Only a host service restarts to apply settings; new desktops need no restart.
+    if (!m_applicationRequired || !active || m_scope == Scope::VirtualSession || startedAtUs == 0 || qint64(startedAtUs / 1000) < m_savedAtMs) return false;
+    m_applicationRequired = false; m_restarted = true;
+    Q_EMIT changed();
+    return true;
+}
+void BrokerHostSettings::followService(BrokerServices *services, int route)
+{
+    if (!services || (route != 0 && route != 1)) return;
+    const auto check = [this, services, route] {
+        const auto row = services->services().value(route).toMap();
+        if (!row.value(u"operating"_s).toBool() && !row.value(u"busy"_s).toBool())
+            noteServiceStart(row.value(u"activeSinceUs"_s).toULongLong(), row.value(u"activeState"_s).toString() == u"active"_s);
+    };
+    connect(services, &BrokerServices::changed, this, check);
+}
+void BrokerHostSettings::dismissRestarted()
+{
+    if (!m_restarted) return;
+    m_restarted = false; Q_EMIT changed();
+}
 void BrokerHostSettings::adoptSnapshot(const QJsonObject &snapshot, bool saving)
 {
     // A crash can occur after publication but before any reply. If the
     // subsequent explicit reload finds a new revision, retain the need to
     // apply it rather than clearing the unknown outcome without a notice.
-    if (!saving && m_outcomeUnknown && loaded() && m_snapshot[u"revision"_s] != snapshot[u"revision"_s]) m_applicationRequired = true;
+    if (!saving && m_outcomeUnknown && loaded() && m_snapshot[u"revision"_s] != snapshot[u"revision"_s]) markApplicationRequired();
     m_snapshot = snapshot; m_pending = snapshot[u"values"_s].toObject().toVariantMap();
     clearImport(); m_tlsMode = u"keep"_s; m_outcomeUnknown = false; m_error.clear(); Q_EMIT changed();
 }
@@ -478,7 +508,7 @@ void BrokerHostSettings::finish(int code, QProcess::ExitStatus status, QByteArra
         if (saving) m_outcomeUnknown = true;
         reject(i18nc("@info", "Administration gave an unexpected reply. Reset the page to see whether the stored settings changed.")); return;
     }
-    if (reply[u"saved"_s].isBool() && reply[u"saved"_s].toBool()) m_applicationRequired = true;
+    if (reply[u"saved"_s].isBool() && reply[u"saved"_s].toBool()) markApplicationRequired();
     if (code != 0 || reply.contains(u"error"_s)) {
         if (m_applicationRequired && saving && reply[u"saved"_s].toBool()) m_outcomeUnknown = true;
         // Structural categorization only: never echo arbitrary reply text.

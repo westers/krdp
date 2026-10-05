@@ -24,6 +24,9 @@ KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
     const auto sync = [this] { setNeedsSave(m_apply->needsSave()); setRepresentsDefaults(m_apply->representsDefaults()); };
     connect(m_apply, &BrokerSettingsApply::stateChanged, this, sync);
     sync();
+    // A saved host setting stays "restart to use" until its service has actually become active again.
+    m_console->followService(m_services, 0);
+    m_virtual->followService(m_services, 1);
     const QList<QObject *> models{m_authentication, m_services, m_preferences, m_console, m_virtual, m_session};
     for (QObject *model : models) QQmlEngine::setObjectOwnership(model, QQmlEngine::CppOwnership);
 }
