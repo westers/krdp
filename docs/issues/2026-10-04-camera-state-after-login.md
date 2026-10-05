@@ -276,3 +276,20 @@ Candidates: server `farside-server` from the OPT-058 commit and client 0.6.8 (pa
 7. After each run: no leftover `v4l2` consumer or process after disconnect (`fuser /dev/video10`, `pgrep -af krdp-console-worker`).
 
 Fail criteria for the whole check: any red X while waiting, any camera started without the wish, any leftover v4l2 consumer or process after disconnect.
+
+## Delivery status and remaining live checks (2026-10-05)
+
+Decision (Steve, 2026-10-05): logging out with a running camera ends it (`revoked`, consent must be renewed) and does NOT resume automatically after the next login. Only the greeter / not-yet-signed-in case waits and auto-starts. So step 4 of the live check above is the intended behaviour, not a gap.
+
+Installed 2026-10-05: server `6.6.80+git202610051353.2bbd793-1` and client 0.6.8 on Sol, Buzz and Hal (see the HANDOFF Log 2026-10-05).
+
+Bounded check by the agent, Sol server + Buzz client: NOT exercised. Reason: when it was due, Sol had a signed-in, locked `westers` session on seat0 (so the Console worker is ready for a user, not the greeter, and `needs-session` is not the expected answer), and reaching the Console KRDPCTL channel needs a PAM or alias login. No real user password was entered and no scratch broker was started on Sol against the live session. Server and client behaviour is covered only by the daemon-free tests listed above plus the installed package contract checks.
+
+Steve to run (post-login half, needs a password entry; Sol must be at the SDDM greeter, nobody logged in, for step 1):
+
+1. Make Sol show the greeter (log the local user out; do not restart sddm). From Buzz open Farside, connect to Sol Console (:3391) with Camera and Microphone start mode "On".
+2. At the greeter: Devices menu shows Camera and Microphone as "Waiting for a signed-in desktop" with a clock icon, no red X, no error banner.
+3. Sign in through the remote greeter with your own account. Within about 10 s the camera and microphone start by themselves with no click (menu shows On). A red X, or a need to click, is a FAIL.
+4. With the camera on, log out at the remote desktop. Expected: the camera ends with the existing "turn it on again" notice and does not resume after the next login (decision above).
+5. Reconnect to the greeter, turn the camera entry off while it waits, sign in: no camera request after login, microphone still starts.
+6. Afterwards: `fuser /dev/video10` on Sol shows no consumer, and `pgrep -af farside-console-worker` shows only the live worker. Tell me the result so tag `v0.6.8` can be decided.
