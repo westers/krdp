@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="900" viewBox="0 0 1280 900" font-family="Noto Sans, sans-serif" font-size="13">
+  <title>Farside settings target wireframe (2026-10-04 assessment, design A)</title>
+  <style>
+    .frame{fill:#fcfcfc;stroke:#888;stroke-width:1.5}
+    .bar{fill:#e8e8e8;stroke:#bbb}
+    .sec{font-weight:bold;font-size:14px;text-anchor:end}
+    .lab{text-anchor:end;fill:#333}
+    .ctl{fill:#fff;stroke:#999}
+    .on{fill:#3daee9}
+    .btn{fill:#f2f2f2;stroke:#999}
+    .note{fill:#777;font-size:12px}
+    .apply{fill:#3daee9;stroke:#2980b9}
+    .msg{fill:#d6ecf8;stroke:#3daee9}
+    .arrow{stroke:#c0392b;stroke-width:2;fill:none;marker-end:url(#a)}
+  </style>
+  <defs><marker id="a" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 z" fill="#c0392b"/></marker></defs>
+
+  <!-- Root page -->
+  <rect class="frame" x="20" y="20" width="600" height="860"/>
+  <rect class="bar" x="20" y="20" width="600" height="36"/>
+  <text x="34" y="43" font-size="15">Farside Remote Desktop</text>
+  <text x="440" y="43" class="note">(System Settings title)</text>
+  <rect class="msg" x="36" y="68" width="568" height="34" rx="3"/>
+  <text x="48" y="90">Console settings changed. Restart Console to use them.</text>
+  <rect class="btn" x="486" y="74" width="108" height="22" rx="3"/><text x="496" y="90">Restart Console</text>
+  <text x="300" y="132" class="note" text-anchor="middle">(page-header InlineMessage only when a restart is pending)</text>
+
+  <text x="250" y="168" class="sec">Console</text>
+  <text x="262" y="168" class="note">share this computer's screen</text>
+  <text x="250" y="200" class="lab">Remote connections:</text>
+  <rect class="on" x="262" y="188" width="36" height="18" rx="9"/><circle cx="289" cy="197" r="7" fill="#fff"/>
+  <text x="306" y="201">Running · hal9000.lan:3391</text><rect class="btn" x="476" y="188" width="22" height="18" rx="3"/><text x="481" y="201" font-size="10">⧉</text>
+  <text x="250" y="234" class="lab">Who can sign in:</text>
+  <rect class="ctl" x="262" y="221" width="230" height="22" rx="3"/><text x="270" y="237">Everyone with an account ▾</text>
+  <text x="250" y="268" class="lab">Image quality:</text>
+  <line x1="262" y1="263" x2="430" y2="263" stroke="#3daee9" stroke-width="4"/><circle cx="400" cy="263" r="7" fill="#fff" stroke="#999"/>
+  <rect class="ctl" x="442" y="253" width="50" height="22" rx="3"/><text x="450" y="269">80</text>
+  <rect class="btn" x="262" y="288" width="160" height="24" rx="3"/><text x="272" y="305">Configure Console…  ›</text>
+
+  <text x="250" y="358" class="sec">Virtual</text>
+  <text x="262" y="358" class="note">a separate desktop for each user</text>
+  <text x="250" y="390" class="lab">Remote connections:</text>
+  <rect class="on" x="262" y="378" width="36" height="18" rx="9"/><circle cx="289" cy="387" r="7" fill="#fff"/>
+  <text x="306" y="391">Running · hal9000.lan:3395</text>
+  <text x="250" y="424" class="lab">Who can sign in:</text>
+  <rect class="ctl" x="262" y="411" width="230" height="22" rx="3"/><text x="270" y="427">Selected accounts ▾</text>
+  <text x="250" y="458" class="lab">Accounts:</text>
+  <rect class="ctl" x="262" y="445" width="230" height="22" rx="3"/><text x="270" y="461">westers, guest</text>
+  <text x="250" y="492" class="lab">Image quality:</text>
+  <line x1="262" y1="487" x2="430" y2="487" stroke="#3daee9" stroke-width="4"/><circle cx="400" cy="487" r="7" fill="#fff" stroke="#999"/>
+  <rect class="ctl" x="442" y="477" width="50" height="22" rx="3"/><text x="450" y="493">80</text>
+  <rect class="btn" x="262" y="512" width="160" height="24" rx="3"/><text x="272" y="529">Configure Virtual…  ›</text>
+
+  <text x="250" y="582" class="sec">My account</text>
+  <text x="262" y="582" class="note">only affects you · reconnect to apply</text>
+  <text x="250" y="614" class="lab">Console display:</text>
+  <rect class="ctl" x="262" y="601" width="230" height="22" rx="3"/><text x="270" y="617">Host setting (whole workspace) ▾</text>
+  <text x="250" y="648" class="lab">Image quality:</text>
+  <rect class="ctl" x="262" y="635" width="230" height="22" rx="3"/><text x="270" y="651">Host setting (80) ▾</text>
+  <rect class="btn" x="262" y="670" width="160" height="24" rx="3"/><text x="272" y="687">More Preferences…  ›</text>
+
+  <rect class="bar" x="20" y="836" width="600" height="44"/>
+  <rect class="btn" x="34" y="846" width="60" height="24" rx="3"/><text x="46" y="863">Help</text>
+  <rect class="btn" x="102" y="846" width="76" height="24" rx="3"/><text x="112" y="863">Defaults</text>
+  <rect class="btn" x="440" y="846" width="70" height="24" rx="3"/><text x="456" y="863">Reset</text>
+  <rect class="apply" x="520" y="846" width="86" height="24" rx="3"/><text x="544" y="863" fill="#fff">Apply</text>
+  <text x="320" y="828" class="note" text-anchor="middle">standard KCM footer (one Apply, one polkit prompt for admin scopes)</text>
+
+  <path class="arrow" d="M424,300 C520,300 560,120 660,110"/>
+
+  <!-- Console pushed page -->
+  <rect class="frame" x="660" y="20" width="600" height="860"/>
+  <rect class="bar" x="660" y="20" width="600" height="36"/>
+  <text x="674" y="43" font-size="15">‹ Farside Remote Desktop  ›  Console</text>
+  <text x="890" y="88" class="sec">Connection</text>
+  <text x="890" y="116" class="lab">Listen on:</text><rect class="ctl" x="902" y="103" width="230" height="22" rx="3"/><text x="910" y="119">All network interfaces ▾</text>
+  <text x="890" y="146" class="lab">Port:</text><rect class="ctl" x="902" y="133" width="80" height="22" rx="3"/><text x="910" y="149">3391</text>
+  <text x="890" y="176" class="lab">Certificate:</text><text x="902" y="176">Valid until 2030-09-01 · AA:AA:…:AA ⧉</text>
+  <rect class="btn" x="902" y="186" width="150" height="22" rx="3"/><text x="912" y="202">Change Certificate…</text>
+
+  <text x="890" y="246" class="sec">Remote logins</text>
+  <text x="902" y="246" class="note">extra names with their own password</text>
+  <rect class="ctl" x="902" y="256" width="330" height="52"/>
+  <text x="912" y="276">fixture-remote → westers</text><text x="1120" y="276">✎  🗑</text>
+  <text x="912" y="300" class="note">＋ Add Remote Login… (InlineViewHeader action)</text>
+
+  <text x="890" y="346" class="sec">Picture and sound</text>
+  <text x="890" y="374" class="lab">Adjust to connection:</text><rect class="ctl" x="902" y="361" width="230" height="22" rx="3"/><text x="910" y="377">On (default) ▾</text>
+  <text x="890" y="404" class="lab">When network is busy:</text><rect class="ctl" x="902" y="391" width="230" height="22" rx="3"/><text x="910" y="407">Keep video sharp (default) ▾</text>
+  <text x="890" y="434" class="lab">Media from other apps:</text><rect class="ctl" x="902" y="421" width="230" height="22" rx="3"/><text x="910" y="437">Allow (default) ▾</text>
+  <text x="890" y="464" class="lab">Camera:</text><text x="902" y="464">Not set up</text><text x="980" y="464" fill="#2980b9">Set up…</text>
+
+  <text x="890" y="506" class="sec">Service</text>
+  <text x="890" y="534" class="lab">Start at boot:</text><rect class="on" x="902" y="522" width="36" height="18" rx="9"/><circle cx="929" cy="531" r="7" fill="#fff"/>
+  <rect class="btn" x="902" y="548" width="120" height="22" rx="3"/><text x="912" y="564">Restart Console…</text>
+
+  <text x="890" y="610" class="sec">▸ Advanced</text>
+  <text x="902" y="610" class="note">collapsed: encoding policy, AV1 tiles, VA-API driver,</text>
+  <text x="902" y="626" class="note">camera bridge device, troubleshooting (check running service)</text>
+
+  <text x="960" y="700" class="note" text-anchor="middle">No page footer: Apply/Reset/Defaults come from the KCM shell.</text>
+  <text x="960" y="718" class="note" text-anchor="middle">Virtual page = same + "New desktops" section (GPU access, VA-API).</text>
+  <text x="960" y="736" class="note" text-anchor="middle">Section headings are FormData.isSection rows, aligned with the form.</text>
+  <rect class="bar" x="660" y="836" width="600" height="44"/>
+  <rect class="btn" x="674" y="846" width="60" height="24" rx="3"/><text x="686" y="863">Help</text>
+  <rect class="btn" x="742" y="846" width="76" height="24" rx="3"/><text x="752" y="863">Defaults</text>
+  <rect class="btn" x="1080" y="846" width="70" height="24" rx="3"/><text x="1096" y="863">Reset</text>
+  <rect class="apply" x="1160" y="846" width="86" height="24" rx="3"/><text x="1184" y="863" fill="#fff">Apply</text>
+</svg>
