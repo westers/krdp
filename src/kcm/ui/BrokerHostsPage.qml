@@ -21,6 +21,8 @@ KCM.SimpleKCM {
     readonly property var apply: (typeof kcm !== "undefined" && kcm) ? kcm.settingsApply : null
     readonly property var host: fixedScope === 0 ? consoleSettings : virtualSettings
     readonly property string serviceRoute: fixedScope === 0 ? "console" : "virtual"
+    // What a row asks the form for: small enough that a label can sit beside it in the ~370 px pane next to both sidebars.
+    readonly property real fieldWidth: Kirigami.Units.gridUnit * (form.width < 1 || form.width >= Kirigami.Units.gridUnit * 20 ? 11 : 24)
     readonly property var camera: host.metadata.cameraLoopback || ({})
     // A definition that carries a reason is not offered as a control (today: the camera bridge for Virtual).
     readonly property string unavailableReason: { const row = host.definitions.find(definition => definition.unavailable !== ""); return row ? row.unavailable : ""; }
@@ -78,55 +80,71 @@ KCM.SimpleKCM {
         }
         Kirigami.FormLayout {
             id: form
+            objectName: "hostForm"
             Layout.fillWidth: true
             visible: root.host.loaded
             Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Service") }
-            QQC2.Label {
-                objectName: root.serviceRoute + "HostStatus"
-                Kirigami.FormData.label: i18nc("@label", "Status:")
-                text: root.summary.stateText
-            }
-            RowLayout {
+            // The state, and under it where the service listens (the sidebar row only has the state and port).
+            ColumnLayout {
                 objectName: root.serviceRoute + "StoredEndpointRow"
-                Kirigami.FormData.label: i18nc("@label", "Listening on:")
-                // A plain label (not a selectable text edit, which stays left-aligned in a right-to-left layout); the button copies a concrete address.
+                Kirigami.FormData.label: i18nc("@label", "Status:")
+                Kirigami.FormData.labelAlignment: Qt.AlignTop
+                Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: root.fieldWidth
+                spacing: 0
                 QQC2.Label {
-                    objectName: root.serviceRoute + "StoredEndpoint"
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    text: root.summary.listenText !== "" ? root.summary.listenText : i18nc("@info", "Available after the service has started once")
+                    objectName: root.serviceRoute + "HostStatus"
+                    text: root.summary.stateText
                 }
-                QQC2.ToolButton {
-                    objectName: root.serviceRoute + "CopyStoredEndpoint"
-                    visible: root.summary.address !== ""
-                    icon.name: "edit-copy"; text: i18nc("@action:button", "Copy address")
-                    display: QQC2.AbstractButton.IconOnly
-                    QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered
-                    onClicked: root.navigation.copyAddressToClipboard(root.summary.address)
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Kirigami.Units.smallSpacing
+                    // A plain label (not a selectable text edit, which stays left-aligned in a right-to-left layout); the button copies a concrete address.
+                    QQC2.Label {
+                        objectName: root.serviceRoute + "StoredEndpoint"
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        font: Kirigami.Theme.smallFont
+                        text: root.summary.listenText !== "" ? root.summary.listenText : i18nc("@info", "Available after the service has started once")
+                    }
+                    QQC2.ToolButton {
+                        objectName: root.serviceRoute + "CopyStoredEndpoint"
+                        visible: root.summary.address !== ""
+                        icon.name: "edit-copy"; text: i18nc("@action:button", "Copy address")
+                        display: QQC2.AbstractButton.IconOnly
+                        QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered
+                        onClicked: root.navigation.copyAddressToClipboard(root.summary.address)
+                    }
                 }
             }
-            QQC2.Switch {
-                objectName: root.serviceRoute + "ServiceAutostart"
-                Kirigami.FormData.label: i18nc("@label", "Start when computer boots:")
-                Accessible.name: i18nc("@option:check", "Start when this computer boots")
-                readonly property var service: root.summary.service
-                enabled: !!service && service.canAutostart
-                checked: !!service && service.autostart
-                onClicked: {
-                    root.administration.perform(root.serviceRoute, service.autostart ? "disable" : "enable");
-                    checked = Qt.binding(() => !!service && service.autostart);
+            // The boot switch and Restart share a row.
+            RowLayout {
+                Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: root.fieldWidth
+                Kirigami.FormData.label: i18nc("@label", "Start at boot:")
+                Kirigami.FormData.buddyFor: autostartSwitch
+                QQC2.Switch {
+                    id: autostartSwitch
+                    objectName: root.serviceRoute + "ServiceAutostart"
+                    Accessible.name: i18nc("@option:check", "Start when this computer boots")
+                    readonly property var service: root.summary.service
+                    enabled: !!service && service.canAutostart
+                    checked: !!service && service.autostart
+                    onClicked: {
+                        root.administration.perform(root.serviceRoute, service.autostart ? "disable" : "enable");
+                        checked = Qt.binding(() => !!service && service.autostart);
+                    }
+                }
+                Item { Layout.fillWidth: true }
+                QQC2.Button {
+                    objectName: root.serviceRoute + "ServiceRestart"
+                    text: i18nc("@action:button", "Restart…")
+                    icon.name: "view-refresh"
+                    enabled: !!root.summary.service && root.summary.service.canRestart
+                    onClicked: root.navigation.requestOperation(root.serviceRoute, "restart")
                 }
             }
             QQC2.Label {
                 visible: !!root.summary.service && root.summary.service.unitFileState === "enabled-runtime"
                 text: i18nc("@info", "Enabled for this boot only.")
-            }
-            QQC2.Button {
-                objectName: root.serviceRoute + "ServiceRestart"
-                text: i18nc("@action:button", "Restart…")
-                icon.name: "view-refresh"
-                enabled: !!root.summary.service && root.summary.service.canRestart
-                onClicked: root.navigation.requestOperation(root.serviceRoute, "restart")
             }
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
@@ -137,26 +155,46 @@ KCM.SimpleKCM {
 
             Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.host.sectionTitle("connection") }
             BrokerFieldRepeater { settings: root.host; section: "connection"; busy: root.host.busy }
-            // One line: validity and a short fingerprint, a copy button for the full fingerprint, and the inline editor behind Change.
-            RowLayout {
+            // Validity and a short fingerprint on one line when the column is wide enough (two short lines otherwise,
+            // never a wrapped third); the full fingerprint is in the tooltip and behind the copy button.
+            ColumnLayout {
+                Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: root.fieldWidth
                 objectName: "certificateSummaryRow"
                 Kirigami.FormData.label: i18nc("@label", "Certificate:")
-                QQC2.Label { objectName: "certificateSummary"; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.host.tlsMode !== "keep" ? i18nc("@info", "Will change when you apply") : certificateSection.summary }
-                QQC2.ToolButton {
-                    objectName: "copyCertificateFingerprint"
-                    visible: root.host.tlsMode === "keep" && certificateSection.fingerprint !== ""
-                    icon.name: "edit-copy"; text: i18nc("@action:button", "Copy fingerprint")
-                    display: QQC2.AbstractButton.IconOnly
-                    QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered
-                    onClicked: root.navigation.copyAddressToClipboard(certificateSection.fingerprint)
+                Kirigami.FormData.labelAlignment: Qt.AlignTop
+                spacing: Kirigami.Units.smallSpacing
+                QQC2.Label {
+                    id: certificateText
+                    objectName: "certificateSummary"
+                    Layout.fillWidth: true; Layout.minimumWidth: 0
+                    wrapMode: Text.NoWrap; elide: Text.ElideMiddle
+                    readonly property string summaryText: root.host.tlsMode !== "keep" ? i18nc("@info", "Will change when you apply") : certificateSection.summary
+                    readonly property string oneLine: summaryText.replace("\n", " · ")
+                    text: certificateMetrics.advanceWidth(oneLine) <= width ? oneLine : summaryText
+                    FontMetrics { id: certificateMetrics; font: certificateText.font }
+                    HoverHandler { id: certificateHover }
+                    QQC2.ToolTip.visible: certificateHover.hovered && root.host.tlsMode === "keep" && certificateSection.fingerprint !== ""
+                    QQC2.ToolTip.text: certificateSection.fingerprint
                 }
-                QQC2.Button { objectName: "editHostCertificate"; visible: !certificateSection.open; text: i18nc("@action:button", "Change…"); enabled: !root.host.busy && !root.host.outcomeUnknown; onClicked: certificateSection.begin() }
+                RowLayout {
+                    spacing: Kirigami.Units.smallSpacing
+                    QQC2.Button { objectName: "editHostCertificate"; visible: !certificateSection.open; text: i18nc("@action:button", "Change…"); enabled: !root.host.busy && !root.host.outcomeUnknown; onClicked: certificateSection.begin() }
+                    QQC2.ToolButton {
+                        objectName: "copyCertificateFingerprint"
+                        visible: root.host.tlsMode === "keep" && certificateSection.fingerprint !== ""
+                        icon.name: "edit-copy"; text: i18nc("@action:button", "Copy fingerprint")
+                        display: QQC2.AbstractButton.IconOnly
+                        QQC2.ToolTip.text: text; QQC2.ToolTip.visible: hovered
+                        onClicked: root.navigation.copyAddressToClipboard(certificateSection.fingerprint)
+                    }
+                }
             }
-            BrokerCertificateSection { id: certificateSection; Layout.fillWidth: true; host: root.host }
+            BrokerCertificateSection { id: certificateSection; Layout.fillWidth: true; Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: root.fieldWidth; host: root.host }
 
             Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.host.sectionTitle("picture") }
             BrokerFieldRepeater { settings: root.host; section: "picture"; busy: root.host.busy }
             RowLayout {
+                Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: root.fieldWidth
                 Kirigami.FormData.label: i18nc("@label", "Camera sharing:")
                 QQC2.Label {
                     id: cameraReadiness
@@ -183,6 +221,7 @@ KCM.SimpleKCM {
 
             Kirigami.Separator { visible: root.fixedScope === 0; Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Displays") }
             RowLayout {
+                Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: root.fieldWidth
                 visible: root.fixedScope === 0
                 Kirigami.FormData.label: i18nc("@label", "Shared screens:")
                 QQC2.Label { objectName: "consoleDisplaySummary"; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.displayModeText() }
@@ -197,6 +236,7 @@ KCM.SimpleKCM {
 
             Kirigami.Separator { visible: root.fixedScope === 1; Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "New Desktops") }
             ColumnLayout {
+                Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: root.fieldWidth
                 id: hardware
                 objectName: "desktopHardwareSection"
                 visible: root.fixedScope === 1
@@ -205,6 +245,8 @@ KCM.SimpleKCM {
                 spacing: Kirigami.Units.smallSpacing
                 QQC2.CheckBox {
                     id: noGpu
+                    Layout.fillWidth: true
+                    contentItem: QQC2.Label { text: parent.text; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter; leftPadding: parent.indicator.width + parent.spacing }
                     objectName: "desktopNoGpu"
                     text: i18nc("@option:check", "No graphics acceleration")
                     checked: root.selectedDevices.length === 0; enabled: !root.sessionSettings.busy
@@ -214,6 +256,8 @@ KCM.SimpleKCM {
                     model: root.devices
                     delegate: QQC2.CheckBox {
                         required property var modelData
+                        Layout.fillWidth: true
+                        contentItem: QQC2.Label { text: parent.text; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter; leftPadding: parent.indicator.width + parent.spacing }
                         objectName: "desktopGpu_" + modelData.pci
                         text: i18nc("@option:check %1 PCI address %2 driver name", "%2 graphics at %1", modelData.pci, modelData.driver)
                         checked: root.selectedDevices.includes(modelData.pci); enabled: !root.sessionSettings.busy
@@ -242,7 +286,7 @@ KCM.SimpleKCM {
                 id: troubleshooting
                 visible: root.showAdvanced && root.administration !== null
                 Kirigami.FormData.label: i18nc("@label", "Troubleshooting:")
-                Layout.fillWidth: true
+                Layout.fillWidth: true; Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: root.fieldWidth
                 host: root.host; administration: root.administration; route: root.serviceRoute; navigation: root.navigation
             }
         }

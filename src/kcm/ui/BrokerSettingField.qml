@@ -40,7 +40,14 @@ RowLayout {
     visible: shown && available
     Kirigami.FormData.label: fieldState.label + ":"
     Kirigami.FormData.buddyFor: column
-    Layout.preferredWidth: Kirigami.Units.gridUnit * 24
+    Layout.fillWidth: true
+    // Size hints. Where the form has room for a label and a control side by side (about the detail pane beside both
+    // sidebars, or wider) the hint is small (also before the first layout pass: FormLayout remembers the implicit width of that pass), because Kirigami's FormLayout only goes wide when label plus the widest
+    // hint fit. In a narrower pane the labels stack above full-width controls instead.
+    readonly property Item form: { let item = parent; while (item && item.wideMode === undefined) item = item.parent; return item; }
+    readonly property bool sideBySide: !form || form.width < 1 || form.width >= Kirigami.Units.gridUnit * 20
+    Layout.minimumWidth: Kirigami.Units.gridUnit * 7
+    Layout.preferredWidth: Kirigami.Units.gridUnit * (sideBySide ? 11 : 24)
     Layout.maximumWidth: Kirigami.Units.gridUnit * 24
     spacing: Kirigami.Units.smallSpacing
 

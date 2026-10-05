@@ -80,10 +80,18 @@ ColumnLayout {
             visible: root.draft.loaded
             Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
             QQC2.ButtonGroup { id: sourceGroup }
-            QQC2.RadioButton { objectName: "certificateKeep"; text: i18nc("@option:radio", "Keep the current certificate"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "keep"; onClicked: root.draft.chooseTls("keep") }
-            QQC2.RadioButton { objectName: "certificateExisting"; text: i18nc("@option:radio", "Use existing certificate files"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "existing"; onClicked: root.draft.chooseTls("existing") }
-            QQC2.RadioButton { objectName: "certificateStandard"; text: i18nc("@option:radio", "Use the standard Farside certificate"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "standard"; onClicked: root.draft.chooseTls("standard") }
-            QQC2.RadioButton { objectName: "certificateImport"; text: i18nc("@option:radio", "Import a certificate and private key"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "import"; onClicked: root.draft.chooseTls("import") }
+            QQC2.RadioButton { Layout.fillWidth: true; objectName: "certificateKeep"; text: i18nc("@option:radio", "Keep the current certificate"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "keep"; onClicked: root.draft.chooseTls("keep")
+                contentItem: QQC2.Label { text: parent.text; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter; leftPadding: parent.indicator.width + parent.spacing }
+            }
+            QQC2.RadioButton { Layout.fillWidth: true; objectName: "certificateExisting"; text: i18nc("@option:radio", "Use existing certificate files"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "existing"; onClicked: root.draft.chooseTls("existing")
+                contentItem: QQC2.Label { text: parent.text; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter; leftPadding: parent.indicator.width + parent.spacing }
+            }
+            QQC2.RadioButton { Layout.fillWidth: true; objectName: "certificateStandard"; text: i18nc("@option:radio", "Use the standard Farside certificate"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "standard"; onClicked: root.draft.chooseTls("standard")
+                contentItem: QQC2.Label { text: parent.text; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter; leftPadding: parent.indicator.width + parent.spacing }
+            }
+            QQC2.RadioButton { Layout.fillWidth: true; objectName: "certificateImport"; text: i18nc("@option:radio", "Import a certificate and private key"); QQC2.ButtonGroup.group: sourceGroup; checked: root.draft.tlsMode === "import"; onClicked: root.draft.chooseTls("import")
+                contentItem: QQC2.Label { text: parent.text; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter; leftPadding: parent.indicator.width + parent.spacing }
+            }
         }
         Kirigami.FormLayout {
             wideMode: width >= Kirigami.Units.gridUnit * 32;
@@ -115,10 +123,9 @@ ColumnLayout {
             Kirigami.SelectableLabel { objectName: "hostImportPreview"; visible: (root.draft.importMetadata.fingerprint || "") !== ""; Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 28; wrapMode: Text.WrapAnywhere; text: i18nc("@info", "Selected certificate SHA-256: %1. Valid until %2.", root.draft.importMetadata.fingerprint || "", root.draft.importMetadata.notAfter || "") }
         }
         Kirigami.InlineMessage { Layout.fillWidth: true; visible: root.draft.error !== ""; type: Kirigami.MessageType.Error; text: root.draft.error }
-        RowLayout {
-            Layout.fillWidth: true
+        Flow {
+            Layout.fillWidth: true; spacing: Kirigami.Units.smallSpacing
             QQC2.Button { objectName: "cancelCertificateEdit"; text: i18nc("@action:button", "Cancel"); onClicked: root.cancel() }
-            Item { Layout.fillWidth: true }
             QQC2.Button { objectName: "stageCertificateEdit"; highlighted: true; text: i18nc("@action:button", "Use This Certificate"); enabled: root.draft.canStageCertificate && !root.host.busy && !root.host.outcomeUnknown; onClicked: { if (root.host.stageCertificateEdit()) { root.open = false; root.staged(); } } }
         }
     }

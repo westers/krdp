@@ -18,6 +18,10 @@ QQC2.ComboBox {
     }))
     objectName: field.prefix + field.key
     enabled: field.editable
+    // In a narrow pane the choice text can be cut off; hovering shows it whole.
+    FontMetrics { id: metrics; font: root.font }
+    QQC2.ToolTip.text: currentText
+    QQC2.ToolTip.visible: hovered && !popup.visible && metrics.advanceWidth(currentText) > root.availableWidth - root.indicator.width - root.spacing
     implicitContentWidthPolicy: QQC2.ComboBox.WidestText
     model: displayChoices; textRole: "text"; valueRole: "value"
     Accessible.name: field.label

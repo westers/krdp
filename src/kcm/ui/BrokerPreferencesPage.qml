@@ -34,6 +34,7 @@ KCM.SimpleKCM {
                 objectName: "displayModeHint"
                 visible: ["specific", "virtual"].indexOf(root.preferences.values.MonitorMode || "") < 0
                 Layout.fillWidth: true; Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+                Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: Kirigami.Units.gridUnit * 11
                 wrapMode: Text.Wrap
                 font: Kirigami.Theme.smallFont
                 text: i18nc("@info", "More options appear here when you choose “One display” or “Client-created displays”.")

@@ -25,7 +25,7 @@ Kirigami.FormLayout {
             id: mode
             objectName: root.route + "PamMode"
             implicitContentWidthPolicy: QQC2.ComboBox.WidestText
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 14
+            Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: Kirigami.Units.gridUnit * 11
             textRole: "text"
             valueRole: "value"
             model: [
@@ -45,7 +45,7 @@ Kirigami.FormLayout {
     QQC2.TextField {
         objectName: root.route + "PamAccounts"
         Kirigami.FormData.label: i18nc("@label", "Allowed accounts:")
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 14
+        Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: Kirigami.Units.gridUnit * 11
         visible: root.pam.mode === "allow-list"
         text: root.pam.accounts.join(", ")
         placeholderText: i18nc("@info:placeholder", "Login names, separated by commas")

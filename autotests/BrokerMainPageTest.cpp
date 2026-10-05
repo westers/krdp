@@ -176,6 +176,7 @@ private Q_SLOTS:
         QTRY_VERIFY(subtitle("console").startsWith(u"Running"_s)); QVERIFY2(subtitle("console").contains(QRegularExpression(uR"((:|port )\d+$)"_s)),qPrintable(subtitle("console")));
         QVERIFY2(!subtitle("console").contains(u"test-host"_s),"a wildcard listener must not be given an invented host name");   // the configured address only
         QTRY_VERIFY(subtitle("virtual").startsWith(u"Stopped"_s));
+        QVERIFY2(!subtitle("console").contains(QRegularExpression(uR"(\d+\.\d+\.\d+\.\d+)"_s)),"the sidebar row names the port, never the full address (it would be cut off)");
         QVERIFY(find(f.page,u"consoleHostEnabled"_s)->property("checked").toBool()); QVERIFY(!find(f.page,u"virtualHostEnabled"_s)->property("checked").toBool());
         QVERIFY(find(f.page,u"consoleHostEnabled"_s)->property("visible").toBool());
         QVERIFY(!find(f.page,u"accessHostEnabled"_s)); QVERIFY(!find(f.page,u"preferencesHostEnabled"_s));   // only the two routes have a switch

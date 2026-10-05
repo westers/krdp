@@ -37,6 +37,6 @@ QtObject {
         if (!effective.Port) return "";
         return address !== "" ? address : i18nc("@info %1 port number", "All network interfaces, port %1", effective.Port);
     }
-    readonly property string subtitle: address !== "" ? i18nc("@info:status %1 state %2 address", "%1 · %2", stateText, address)
-        : effective.Port ? i18nc("@info:status %1 state %2 port number", "%1 · port %2", stateText, effective.Port) : stateText
+    // The sidebar row: state and port only (the page itself names the full address).
+    readonly property string subtitle: effective.Port ? i18nc("@info:status %1 state %2 port number", "%1 · port %2", stateText, effective.Port) : stateText
 }

@@ -28,7 +28,7 @@ KCM.ScrollViewKCM {
     readonly property bool singleColumn: !!Kirigami.ColumnView.view && Kirigami.ColumnView.view.columnResizeMode === Kirigami.ColumnView.SingleColumn
     readonly property var rows: [
         {key: "console", title: i18nc("@title", "Console"), icon: "monitor-symbolic", route: "console"},
-        {key: "virtual", title: i18nc("@title", "Virtual"), icon: "virtual-desktops-symbolic", route: "virtual"},
+        {key: "virtual", title: i18nc("@title", "Virtual"), icon: "window-duplicate-symbolic", route: "virtual"},
         {key: "access", title: i18nc("@title", "Who Can Connect"), icon: "system-users-symbolic", route: ""},
         {key: "preferences", title: i18nc("@title", "My Preferences"), icon: "user-identity-symbolic", route: ""}
     ]

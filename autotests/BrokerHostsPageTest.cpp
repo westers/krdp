@@ -98,6 +98,14 @@ private Q_SLOTS:
                 if(parts.size()>8) QVERIFY2(!text.contains(fingerprint),"the page shows the short form only");
                 QVERIFY(qobject_cast<QQuickItem *>(find(page,u"copyCertificateFingerprint"_s))->isVisible());
             }
+            // Layout (Q5): in a pane about as wide as the detail pane beside both sidebars, labels still sit beside their
+            // controls, and the certificate fingerprint never wraps to a third line.
+            page->setSize(QSizeF(420,850));
+            auto *form=find(page,u"hostForm"_s); QVERIFY(form);
+            QTRY_VERIFY2(form->property("wideMode").toBool(),qPrintable(QString::number(form->property("width").toReal())+u" of "_s+QString::number(form->property("implicitWidth").toReal())));
+            QVERIFY2(summary->property("lineCount").toInt()<=2,"the certificate summary stays within two lines");
+            QVERIFY(!summary->property("truncated").toBool() || summary->property("elide").toInt()==Qt::ElideMiddle);
+            page->setSize(window.size());
             QVERIFY(!qobject_cast<QQuickItem *>(find(page,u"certificateEditor"_s))->isVisible());
             QVERIFY(!model->modified()); QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s))); page->setParentItem(nullptr);
         }
