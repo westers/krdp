@@ -29,6 +29,7 @@
 #include "VideoCodecHost.h"
 #include "WorkerCodecBridge.h"
 #include "BrokerUserSettings.h"
+#include "LogThrottle.h"
 
 namespace KRdp
 {
@@ -309,6 +310,8 @@ private:
     std::optional<PendingResize> m_pendingResize;
     quint64 m_nextResizeId = 0;
     QTimer m_resizeDeadline;
+    LogThrottle m_resizeRefusalLog{std::chrono::seconds(10), 3};
+    void logResizeRefusal(const QString &reason);
     ConsoleControl::Id m_microphoneClient = 0;
     ConsoleWorkerWire::MicrophonePolicy m_microphonePolicy;
     quint64 m_nextMicrophoneId = 0;

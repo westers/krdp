@@ -13,6 +13,13 @@
 
 namespace KRdp::ConsoleResize
 {
+// Console captures every physical output with its own encoder and sends one RDPGFX desktop, so the
+// limits are per output (hardware H.264 encoders stop at 4096; HEVC/AV1 accept more, but a 4096 output
+// pads to at most 4096 in all codecs) and for the whole desktop atlas. Same values as
+// ClientDisplayInfo MaxDimension/MaxDesktopDimension and ConsoleTopologyPlan's limits.
+constexpr int MaxOutputDimension = 4096;
+constexpr int MaxDesktopDimension = 8192;
+
 // Planning only: kscreen-doctor must run inside the selected worker's session,
 // never in the privileged broker. Native pixels and desktop scale are separate.
 struct Plan {
@@ -128,8 +135,12 @@ inline Plan plan(const QByteArray &snapshot, const QString &name, QSize pixels, 
 {
     Plan result;
     const auto fail = [&result](const QString &error) { result.error = error; return result; };
+    if (safeToken(name) && !name.startsWith(QStringLiteral("Virtual-")) && (pixels.width() > MaxOutputDimension || pixels.height() > MaxOutputDimension)) {
+        return fail(QStringLiteral("Output %1 would be %2x%3, which is over the %4-pixel limit of the video encoder for this connection")
+                        .arg(name).arg(pixels.width()).arg(pixels.height()).arg(MaxOutputDimension));
+    }
     if (!safeToken(name) || name.startsWith(QStringLiteral("Virtual-")) || pixels.width() < 320 || pixels.height() < 200
-        || pixels.width() > 4096 || pixels.height() > 4096 || !std::isfinite(scale) || scale < 1 || scale > 4) {
+        || !std::isfinite(scale) || scale < 1 || scale > 4) {
         return fail(QStringLiteral("invalid physical output, pixel size or scale"));
     }
     const auto document = QJsonDocument::fromJson(snapshot);
@@ -192,8 +203,8 @@ inline Plan plan(const QByteArray &snapshot, const QString &name, QSize pixels, 
     if (result.mode.isEmpty()) {
         return fail(QStringLiteral("requested resolution is not an advertised physical mode"));
     }
-    // The physical worker currently encodes one workspace. Preserve every
-    // output's position, but reject overlap or a workspace beyond its limits.
+    // Each output has its own encoder (the target was checked against MaxOutputDimension above), so
+    // only the whole desktop is bounded here. Preserve every output's position and reject overlap.
     QList<QRectF> rectangles;
     QRectF workspace;
     double maximumScale = scale;
@@ -223,8 +234,12 @@ inline Plan plan(const QByteArray &snapshot, const QString &name, QSize pixels, 
         workspace = workspace.united(rectangle);
         maximumScale = std::max(maximumScale, ratio);
     }
-    if (workspace.width() * maximumScale > 4096 || workspace.height() * maximumScale > 4096) {
-        return fail(QStringLiteral("resized physical workspace exceeds capture limits"));
+    const int desktopWidth = int(std::ceil(workspace.width() * maximumScale));
+    const int desktopHeight = int(std::ceil(workspace.height() * maximumScale));
+    if (desktopWidth > MaxDesktopDimension || desktopHeight > MaxDesktopDimension) {
+        return fail(QStringLiteral("The desktop would be %1x%2 after resizing %3, which is over the %4-pixel limit of the remote desktop; "
+                                   "resize or move another output first")
+                        .arg(desktopWidth).arg(desktopHeight).arg(name).arg(MaxDesktopDimension));
     }
     const QString prefix = QStringLiteral("output.%1.").arg(name);
     result.apply = {prefix + QStringLiteral("mode.") + result.mode, prefix + QStringLiteral("scale.") + QString::number(scale, 'g', 12)};

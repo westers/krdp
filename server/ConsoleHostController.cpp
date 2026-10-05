@@ -1433,6 +1433,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
     if (type == u"console-resize"_s) {
         const QString requestId = record.value(u"id"_s).toString();
         const auto refuse = [this, connection, &requestId](const QString &error) {
+            logResizeRefusal(error);
             replyTo(connection, QJsonObject{{u"type"_s, u"console-resize"_s}, {u"v"_s, 1}, {u"id"_s, requestId.left(64)},
                                                        {u"ok"_s, false}, {u"message"_s, error}});
         };
@@ -1440,6 +1441,13 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         const double height = record.value(u"height"_s).toDouble(0);
         const double scale = record.value(u"scale"_s).toDouble(0);
         const QString output = record.value(u"output"_s).toString();
+        if (record.value(u"v"_s).toInt() == 1 && ConsoleResize::safeToken(output) && !output.startsWith(u"Virtual-"_s)
+            && std::isfinite(width) && std::isfinite(height)
+            && (width > ConsoleResize::MaxOutputDimension || height > ConsoleResize::MaxOutputDimension)) {
+            refuse(u"Output %1 would be %2x%3, which is over the %4-pixel limit of the video encoder for this connection"_s
+                       .arg(output).arg(QString::number(width, 'f', 0)).arg(QString::number(height, 'f', 0)).arg(ConsoleResize::MaxOutputDimension));
+            return;
+        }
         if (record.value(u"v"_s).toInt() != 1 || !ConsoleResize::safeToken(requestId) || requestId.size() > 64
             || !ConsoleResize::safeToken(output) || output.startsWith(u"Virtual-"_s)
             || !std::isfinite(width) || !std::isfinite(height) || width < 320 || width > 4096 || height < 200 || height > 4096
@@ -2042,8 +2050,21 @@ void ConsoleHostController::setAudioPriorityDefault(bool enabled)
     }
 }
 
+void ConsoleHostController::logResizeRefusal(const QString &reason)
+{
+    // Warning so a refused Fit shows in the journal without debug rules; at most 3 lines per 10 s.
+    quint64 suppressed = 0;
+    if (m_resizeRefusalLog.allow(&suppressed)) {
+        qWarning().noquote() << "Console resize refused:" << reason
+                             << (suppressed ? QStringLiteral("(%1 similar refusals suppressed)").arg(suppressed) : QString());
+    }
+}
+
 void ConsoleHostController::finishResize(const QString &error)
 {
+    if (!error.isEmpty()) {
+        logResizeRefusal(error);
+    }
     m_resizeDeadline.stop();
     const auto pending = std::exchange(m_pendingResize, std::nullopt);
     if (!pending) {
@@ -2063,6 +2084,7 @@ void ConsoleHostController::finishPhysicalTopology(const QString &code, const QS
     m_physicalDeadline.stop();
     const auto pending = std::exchange(m_pendingPhysical, std::nullopt);
     if (!pending) return;
+    if (pending->resizeReply && !code.isEmpty()) logResizeRefusal(detail.isEmpty() ? code : detail);
     if (!code.isEmpty()) {
         // The worker may still be inside a blocked KScreen call. Keep this
         // broker closed to stale frames/input until that worker actually dies.
