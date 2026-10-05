@@ -105,6 +105,22 @@ private Q_SLOTS:
         QVERIFY(frame(record).size() < 1024);
     }
 
+    // OPT-058 (T4): `devices.availability` carries the admission-time state and advertises the push.
+    void capabilitiesDeviceAvailability()
+    {
+        ChannelCapabilities caps;
+        caps.host = QStringLiteral("console");
+        caps.devices = DeviceCapabilities{};
+        const auto plain = capabilitiesRecord(caps).value(QStringLiteral("devices")).toObject();
+        QVERIFY(!plain.contains(QStringLiteral("availability")));
+        caps.devices->availabilityPush = true;
+        caps.devices->cameraSessionAvailable = false;
+        caps.devices->microphoneSessionAvailable = false;
+        const auto devices = capabilitiesRecord(caps).value(QStringLiteral("devices")).toObject();
+        QCOMPARE(devices.value(QStringLiteral("availability")).toObject(),
+                 (QJsonObject{{QStringLiteral("push"), true}, {QStringLiteral("camera"), false}, {QStringLiteral("microphone"), false}}));
+    }
+
     void audioPriorityRequestValidation()
     {
         QJsonObject record{{QStringLiteral("type"), QStringLiteral("audio-priority")},

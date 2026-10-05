@@ -189,6 +189,10 @@ struct DeviceCapabilities {
     bool cameraReselect = false;
     /** Why camera sharing cannot be enabled; empty when available. */
     QString cameraUnavailableReason = {};
+    /** OPT-058: the host pushes `device-availability` records; the three flags below are the state at admission. */
+    bool availabilityPush = false;
+    bool cameraSessionAvailable = true;
+    bool microphoneSessionAvailable = true;
     bool operator==(const DeviceCapabilities &) const = default;
 };
 

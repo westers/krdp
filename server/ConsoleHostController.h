@@ -213,6 +213,12 @@ private:
     bool m_deferredStart = false;
     std::vector<std::unique_ptr<Client>> m_clients;
     bool m_inputEnabled = false;
+    /** OPT-058: whether camera/microphone can start (a ready logged-in desktop); the last state pushed. */
+    bool deviceSessionAvailable() const;
+    void publishDeviceAvailability();
+    bool m_deviceAvailabilitySent = false;
+    /** Test seam: replaces the endpoint-derived availability. */
+    std::optional<bool> m_deviceSessionForTest;
     bool m_audioPriorityDefault = false;
     BrokerUserSettings::Reader m_userSettingsReader;
     std::optional<VideoCodecHost> m_videoHost;

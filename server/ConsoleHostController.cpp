@@ -282,6 +282,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         stopMicrophone(DeviceControl::Unavailable, u"console microphone worker stopped"_s);
         stopCamera(DeviceControl::Unavailable, u"console camera worker stopped"_s);
         finishResize(u"console capture worker stopped during resize"_s);
+        publishDeviceAvailability();
         // A closed socket is not a reaped process: the worker may still be
         // restoring outputs. The handoff advances only on workerExited().
         stopCurrentWorker();
@@ -785,6 +786,25 @@ void ConsoleHostController::setWorkerActive(bool active)
             startStandardMicrophone(*client);
             startStandardCamera(*client);
         }
+    }
+    publishDeviceAvailability();
+}
+
+bool ConsoleHostController::deviceSessionAvailable() const
+{
+    if (m_deviceSessionForTest) return *m_deviceSessionForTest;
+    return m_inputEnabled && m_endpoint.ready() && m_endpoint.target().adapter == ConsoleSeat::Adapter::PhysicalUser;
+}
+
+void ConsoleHostController::publishDeviceAvailability()
+{
+    // OPT-058: one push per availability edge, to every KRDPCTL client (those that were sent capabilities).
+    const bool available = deviceSessionAvailable();
+    if (available == m_deviceAvailabilitySent) return;
+    m_deviceAvailabilitySent = available;
+    for (const auto &client : m_clients) {
+        if (!client->capabilitiesSent || !client->connection) continue;
+        sendRecord(client->connection, DeviceControl::availabilityRecord(available, available));
     }
 }
 
@@ -1642,8 +1662,12 @@ void ConsoleHostController::onControlDevice(RdpConnection *connection, ConsoleCo
             replyTo(connection, LayoutControl::errorRecord({u"not-owner"_s, u"only the client controlling this console can share a camera"_s}));
             return;
         }
-        if (!client.externalCamera || !m_inputEnabled || !m_endpoint.ready()
-            || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
+        if (!deviceSessionAvailable()) {
+            replyTo(connection, DeviceControl::stateRecord(MediaDevice::Camera,
+                {State::Error, false, DeviceControl::NeedsSession, u"camera needs a signed-in desktop on the remote computer"_s}));
+            return;
+        }
+        if (!client.externalCamera) {
             replyTo(connection, DeviceControl::stateRecord(MediaDevice::Camera,
                 {State::Error, false, DeviceControl::Unavailable, u"camera requires a ready logged-in desktop"_s}));
             return;
@@ -1673,8 +1697,12 @@ void ConsoleHostController::onControlDevice(RdpConnection *connection, ConsoleCo
         replyTo(connection, LayoutControl::errorRecord({u"not-owner"_s, u"only the client controlling this console can share a microphone"_s}));
         return;
     }
-    if (!client.externalMicrophone || !m_inputEnabled || !m_endpoint.ready()
-        || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) {
+    if (!deviceSessionAvailable()) {
+        replyTo(connection, DeviceControl::stateRecord(MediaDevice::Microphone,
+            {State::Error, false, DeviceControl::NeedsSession, u"microphone needs a signed-in desktop on the remote computer"_s}));
+        return;
+    }
+    if (!client.externalMicrophone) {
         replyTo(connection, DeviceControl::stateRecord(MediaDevice::Microphone,
             {State::Error, false, DeviceControl::Unavailable, u"microphone requires a ready logged-in desktop"_s}));
         return;
@@ -1836,6 +1864,11 @@ void ConsoleHostController::sendCapabilities(Client &client)
     capabilities.topologyApply = capabilities.topologyPreview;
     capabilities.devices = CameraAvailability::capabilities(ConsoleDeviceCapabilities,
         CameraAvailability::reason(m_server->cameraLoopbackDevice()));
+    if (capabilities.devices) {
+        const bool available = deviceSessionAvailable();
+        capabilities.devices->availabilityPush = true;
+        capabilities.devices->cameraSessionAvailable = capabilities.devices->microphoneSessionAvailable = available;
+    }
     if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, client.preferences.softwareEncoding.value_or(m_videoHost->mode));
     capabilities.stats = LayoutControl::StatsCapabilities{};
     client.connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
@@ -2036,6 +2069,7 @@ void ConsoleHostController::finishPhysicalTopology(const QString &code, const QS
         releaseInput();
         m_inputEnabled = false;
         for (const auto &client : m_clients) client->session->setWorkerActive(false);
+        publishDeviceAvailability();
         stopCurrentWorker();
     }
     for (const auto &client : m_clients) {
@@ -2099,6 +2133,7 @@ void ConsoleHostController::finishVirtualTopology(const QString &code, const QSt
         releaseInput();
         m_inputEnabled = false;
         for (const auto &client : m_clients) client->session->setWorkerActive(false);
+        publishDeviceAvailability();
         stopCurrentWorker();
     }
     for (const auto &client : m_clients) {

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+#include "CameraAvailability.h"
 #include "ConsoleHostController.h"
 #include "ConsoleFrameLayout.h"
 #include "ConsoleWorkerSession.h"
@@ -1205,6 +1206,7 @@ private Q_SLOTS:
     void deviceRecordsOwnerViewerBusyAndUnsupported()
     {
         Server server;
+        server.setCameraLoopbackDevice(QStringLiteral("/dev/video10")); // only counts where a loopback bridge exists
         RdpConnection owner(&server, -1);
         RdpConnection viewer(&server, -1);
         ConsoleHostController host(&server, {}, {});
@@ -1230,7 +1232,8 @@ private Q_SLOTS:
         // A logged-in, ready worker is required before a camera can start.
         host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("c1"), QStringLiteral("camera"), QStringLiteral("on")));
         QCOMPARE(last(&owner).value(QStringLiteral("type")).toString(), QStringLiteral("device"));
-        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("unavailable"));
+        QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("error"));
+        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("needs-session"));
         QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("c1"));
         host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("c2"), QStringLiteral("camera"), QStringLiteral("query")));
         QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("off"));
@@ -1257,7 +1260,7 @@ private Q_SLOTS:
         // The controller without a ready desktop: a state error, not a refusal.
         host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("m2"), QStringLiteral("microphone"), QStringLiteral("on")));
         QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("error"));
-        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("unavailable"));
+        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("needs-session"));
         QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("m2"));
         QCOMPARE(host.m_microphoneClient, quint64(0));
 
@@ -1383,6 +1386,111 @@ private Q_SLOTS:
         QCOMPARE(sent.size(), 2);
         QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("off"));
         QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("revoked"));
+    }
+
+    // --- OPT-058: device availability follows the Console session ---
+    void greeterRefusesCameraAndMicrophoneWithNeedsSession()
+    {
+        Server server;
+        const auto bridge = QStringLiteral("/dev/video10");
+        const bool haveBridge = CameraAvailability::reason(bridge).isEmpty(); // the camera pre-check needs a real loopback
+        server.setCameraLoopbackDevice(bridge);
+        RdpConnection owner(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        QList<QJsonObject> sent;
+        host.m_recordSent = [&sent](RdpConnection *, const QJsonObject &record) { sent.append(record); };
+        host.addClient(&owner);
+        const auto id = host.m_clients.front()->id;
+        host.m_control.admit(id);
+        host.syncControlState();
+        host.m_deviceSessionForTest = false; // greeter: no PhysicalUser worker
+        host.m_clients.front()->externalMicrophone = true;
+        host.onControlRecord(&owner, id, deviceRecord(QStringLiteral("m1"), QStringLiteral("microphone"), QStringLiteral("on")));
+        QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("error"));
+        QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("needs-session"));
+        QCOMPARE(sent.last().value(QStringLiteral("requestId")).toString(), QStringLiteral("m1"));
+        QCOMPARE(host.m_microphoneClient, quint64(0));
+        host.m_deviceSessionForTest = true;
+        host.m_clients.front()->externalMicrophone = false; // a client with no audio input channel: genuine `unavailable`
+        host.onControlRecord(&owner, id, deviceRecord(QStringLiteral("m2"), QStringLiteral("microphone"), QStringLiteral("on")));
+        QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("unavailable"));
+        if (!haveBridge) QSKIP("no V4L2 loopback bridge on this host; the camera half needs /dev/video10");
+        host.m_deviceSessionForTest = false;
+        host.onControlRecord(&owner, id, deviceRecord(QStringLiteral("c1"), QStringLiteral("camera"), QStringLiteral("on")));
+        QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("error"));
+        QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("needs-session"));
+        host.onControlRecord(&owner, id, deviceRecord(QStringLiteral("c2"), QStringLiteral("camera"), QStringLiteral("query")));
+        QCOMPARE(sent.last().value(QStringLiteral("state")).toString(), QStringLiteral("off"));
+        QCOMPARE(host.m_cameraClient, quint64(0));
+        host.m_deviceSessionForTest = true;
+        host.onControlRecord(&owner, id, deviceRecord(QStringLiteral("c3"), QStringLiteral("camera"), QStringLiteral("on")));
+        QCOMPARE(sent.last().value(QStringLiteral("code")).toString(), QStringLiteral("unavailable"));
+    }
+
+    void availabilityIsPushedOncePerEdgeToKrdpctlClientsOnly()
+    {
+        Server server;
+        RdpConnection krdpctl(&server, -1);
+        RdpConnection stock(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        QList<std::pair<RdpConnection *, QJsonObject>> sent;
+        host.m_recordSent = [&sent](RdpConnection *connection, const QJsonObject &record) { sent.append({connection, record}); };
+        host.addClient(&krdpctl);
+        host.addClient(&stock);
+        host.m_clients.at(0)->capabilitiesSent = true; // received `capabilities`
+        const auto count = [&sent](RdpConnection *connection) {
+            int n = 0;
+            for (const auto &entry : sent) n += entry.first == connection && entry.second.value(QStringLiteral("type")).toString() == u"device-availability";
+            return n;
+        };
+        host.m_deviceSessionForTest = false;
+        host.publishDeviceAvailability(); // still the greeter: no edge
+        QCOMPARE(count(&krdpctl), 0);
+        // T2: the PhysicalUser worker becomes ready.
+        host.m_deviceSessionForTest = true;
+        host.publishDeviceAvailability();
+        host.publishDeviceAvailability(); // idempotent
+        QCOMPARE(count(&krdpctl), 1);
+        QCOMPARE(count(&stock), 0);
+        const auto up = sent.last().second;
+        QCOMPARE(up.value(QStringLiteral("v")).toInt(), 1);
+        QVERIFY(up.value(QStringLiteral("camera")).toObject().value(QStringLiteral("available")).toBool());
+        QVERIFY(up.value(QStringLiteral("microphone")).toObject().value(QStringLiteral("available")).toBool());
+        QVERIFY(!up.contains(QStringLiteral("requestId")));
+        // T3: the worker goes away.
+        host.m_deviceSessionForTest = false;
+        host.publishDeviceAvailability();
+        QCOMPARE(count(&krdpctl), 2);
+        const auto down = sent.last().second.value(QStringLiteral("camera")).toObject();
+        QVERIFY(!down.value(QStringLiteral("available")).toBool());
+        QCOMPARE(down.value(QStringLiteral("reason")).toString(), QStringLiteral("needs-session"));
+    }
+
+    void workerStopSendsCameraErrorBeforeUnavailable()
+    {
+        Server server;
+        RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        QList<QJsonObject> sent;
+        host.m_recordSent = [&sent](RdpConnection *, const QJsonObject &record) { sent.append(record); };
+        host.addClient(&connection);
+        const auto id = host.m_clients.front()->id;
+        host.m_clients.front()->capabilitiesSent = true;
+        host.m_control.admit(id);
+        host.syncControlState();
+        host.m_inputEnabled = true;
+        host.m_deviceSessionForTest = true;
+        host.publishDeviceAvailability();
+        sent.clear();
+        host.m_cameraClient = id;
+        host.m_cameraReady = true;
+        host.m_cameraPolicy = {host.m_controlGeneration, ++host.m_nextCameraId, true, {}};
+        host.m_deviceSessionForTest = false;
+        host.setWorkerActive(false);
+        QCOMPARE(sent.size(), 2);
+        QCOMPARE(sent.at(0).value(QStringLiteral("type")).toString(), QStringLiteral("device"));
+        QCOMPARE(sent.at(0).value(QStringLiteral("device")).toString(), QStringLiteral("camera"));
+        QCOMPARE(sent.at(1).value(QStringLiteral("type")).toString(), QStringLiteral("device-availability"));
     }
 
     // --- AUD-D3: StandardClientMedia on the console broker ---

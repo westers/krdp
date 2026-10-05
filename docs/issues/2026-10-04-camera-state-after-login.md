@@ -1,6 +1,6 @@
 # Camera menu stays in Error after login at the Console greeter
 
-Status: diagnosed 2026-10-04 (read-only; no source, host or service changed).
+Status: diagnosed 2026-10-04; implemented 2026-10-05 as OPT-058 (see "Implemented wire design" at the end). Candidates built, NOT installed; live check pending Steve.
 Server `farside-server` on Sol (Console :3391), client `farside-client` 0.6.x on Hal.
 Client paths below are relative to `~/dev/krdp-client`, server paths to `~/dev/krdp`.
 
@@ -240,3 +240,39 @@ the wish, or any leftover `v4l2` consumer or process after disconnect.
 - Whether Steve's red X appeared exactly via this path in his client build; the client
   journal at 22:49:02 matches it exactly, but the screenshot was not seen.
 - Behaviour of non-KRDPCTL clients and of the logout path (code-read only).
+
+## Implemented wire design (OPT-058, 2026-10-05)
+
+Messages and fields (KRDPCTL v2 style: capabilities first, unsolicited records carry no `requestId`):
+
+| Name | Direction | Advertised by | Content |
+|---|---|---|---|
+| `device` state record, `code:"needs-session"` | server to client, reply to a camera/microphone `on` | n/a (new code of an existing record) | `state:"error"`, `code:"needs-session"`, message "camera|microphone needs a signed-in desktop on the remote computer". Replaces `unavailable` only when no ready PhysicalUser worker exists. `unavailable` stays for real failures (for example a client with no camera channel). |
+| `device-availability` | server to client, unsolicited | `capabilities.devices.availability.push == true` | `{"type":"device-availability","v":1,"camera":{"available":bool,"reason":"needs-session"?},"microphone":{...}}`; one record per availability edge, sent to every client that received `capabilities`. |
+| `capabilities.devices.availability` | server to client | n/a | `{"push":true,"camera":bool,"microphone":bool}`: the state at admission, so a client at the greeter waits without asking. Camera/microphone `toggle` flags are unchanged (they describe the bridge, not the session). |
+
+Availability is `m_inputEnabled && endpoint ready && adapter == PhysicalUser`, the same condition as the old refusal. It is re-evaluated (edge only) from `setWorkerActive()` (worker ready/revoke, which covers workerReady, handoff, physical-lease and failed-topology paths) and `workerStopped`. The Virtual broker is unchanged (no push, no capability). The broker/worker wire is NOT changed, so no wire version bump.
+
+Client (0.6.8): `DeviceState::Status::Waiting` (variant state `"waiting"`, menu icon `chronometer`, text suffix "Waiting for a signed-in desktop", info notice without a retry action). A `needs-session` reply, or admission-time availability false, leaves the wish set and the local gate closed. A `device-availability` available edge asks `on` once for each waiting, wanted device (camera, microphone). Repeats of the same state are ignored. Clicking a waiting entry: if the host last said available (race) it retries at once; if the host said unavailable it withdraws the wish (otherwise a waiting device could never be cancelled; deviation from "click retries").
+
+Deviations and limits (decisions for Steve):
+- Logout with a camera running: the server still ends it with `revoked` ("consent must be renewed"), which is a real consent reset, so the client shows the existing Error/turn-on notice and does NOT resume after the next login. Only the greeter/not-yet-signed-in case waits and auto-starts. Making logout resume as well needs the revoke code changed to `needs-session` in `setWorkerActive(false)`; not done (consent semantics).
+- Old server with new client: the refusal is `unavailable`, behaviour as before. New server with old client: unknown code and unknown record type fall into the generic branches (red X as before), no crash. The "retry on the worker-change hint" fallback (C2) for old servers was not added.
+- Standard (non-KRDPCTL) RDP clients get nothing new; their camera/mic auto-start path (`startStandardCamera`) is called from `setWorkerActive(true)` and already retries at login.
+- Lock screen: availability does not depend on the lock state (`m_inputEnabled` stays true while locked); unchanged.
+
+Tests (all daemon-free): server `ConsoleHostControllerTest` (greeterRefusesCameraAndMicrophoneWithNeedsSession = T1, availabilityIsPushedOncePerEdgeToKrdpctlClientsOnly = T2/T3, workerStopSendsCameraErrorBeforeUnavailable = T3 order), `LayoutControlTest::capabilitiesDeviceAvailability` (T4), `DeviceControlTest::availabilityRecordShape`; client `DeviceStateTest` (T5, T7), `SessionModelTest` (transcript, T6 x2, genuine unavailable), `ControlCapabilitiesTest`, `DevicesMenuTest::waitingForASignedInDesktopIsNotAnError` (T8, scene `tests/ux/scenes/devices-menu-waiting.qml`). The camera half of the server tests needs a loopback at /dev/video10 (skipped otherwise; the older `deviceRecordsOwnerViewerBusyAndUnsupported` now sets it the same way and passes on a host that has one).
+
+### Live check for Steve (Sol server, Buzz client; never Hal; install the two candidates first)
+
+Candidates: server `farside-server` from the OPT-058 commit and client 0.6.8 (paths in HANDOFF Log 2026-10-05). Preconditions: Sol at the SDDM greeter (nobody logged in), no connections, Buzz client with camera and microphone start mode "On" and a working webcam/mic. Collect `journalctl -u farside-console-host --since` on Sol and the user journal of the Buzz client.
+
+1. Connect Buzz to Sol :3391 at the greeter. PASS: Devices menu shows Camera and Microphone as "Waiting for a signed-in desktop" with a clock icon; no red X; no error banner (only an info line); client log has no `camera on asked` (the admission capabilities already said unavailable); Sol log has no camera start. FAIL: any red X or error banner.
+2. Log in through the remote greeter. PASS: within 10 s of `Console worker ready` on Sol, with no click, client logs `host desktop available: true` then `camera on asked` and `microphone on asked`; Sol logs `RDPECAM device channel ready` and `Device "camera" is "on"`; menu shows both On. FAIL: needs a click, or red X at any point.
+3. Log out, reconnect to the greeter, turn the camera entry off while it waits, log in. PASS: no `camera on asked` after login; microphone still starts.
+4. Camera running, log out at the remote desktop. EXPECTED (see deviations): camera ends with the existing "console changed users, turn it on again" notice; it does not resume by itself. PASS if that is what happens and nothing crashes or hangs. (This step documents current behaviour, not a new feature.)
+5. Regression: connect with the user already logged in. PASS: camera `on` within 2 s as before (22:53:12 run), no waiting state shown.
+6. Old client (0.6.7) against the new server and new client against the old server (`a8c7d6f`/`1859f57`): no crash; camera works after a manual click once logged in.
+7. After each run: no leftover `v4l2` consumer or process after disconnect (`fuser /dev/video10`, `pgrep -af krdp-console-worker`).
+
+Fail criteria for the whole check: any red X while waiting, any camera started without the wish, any leftover v4l2 consumer or process after disconnect.

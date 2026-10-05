@@ -20,6 +20,19 @@ LayoutControl::Error unsupported(const QString &message)
 }
 }
 
+QJsonObject availabilityRecord(bool camera, bool microphone)
+{
+    const auto entry = [](bool available) {
+        QJsonObject object{{QStringLiteral("available"), available}};
+        if (!available) object.insert(QStringLiteral("reason"), NeedsSession);
+        return object;
+    };
+    return {{QStringLiteral("type"), QStringLiteral("device-availability")},
+            {QStringLiteral("v"), 1},
+            {QStringLiteral("camera"), entry(camera)},
+            {QStringLiteral("microphone"), entry(microphone)}};
+}
+
 QString deviceName(MediaDevice device)
 {
     switch (device) {

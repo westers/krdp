@@ -433,13 +433,18 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
         QJsonObject camera{{QStringLiteral("toggle"), devices->cameraToggle}, {QStringLiteral("reselect"), devices->cameraReselect}};
         if (!devices->cameraUnavailableReason.isEmpty())
             camera.insert(QStringLiteral("unavailableReason"), devices->cameraUnavailableReason.left(1024));
-        record.insert(QStringLiteral("devices"),
-                      QJsonObject{
+        QJsonObject group{
                           {QStringLiteral("playback"),
                            QJsonObject{{QStringLiteral("toggle"), devices->playbackToggle}, {QStringLiteral("silenceHost"), devices->playbackSilenceHost}}},
                           {QStringLiteral("microphone"), QJsonObject{{QStringLiteral("toggle"), devices->microphoneToggle}}},
                           {QStringLiteral("camera"), camera},
-                      });
+                      };
+        if (devices->availabilityPush)
+            group.insert(QStringLiteral("availability"),
+                         QJsonObject{{QStringLiteral("push"), true},
+                                     {QStringLiteral("camera"), devices->cameraSessionAvailable},
+                                     {QStringLiteral("microphone"), devices->microphoneSessionAvailable}});
+        record.insert(QStringLiteral("devices"), group);
     }
     if (const auto &video = capabilities.video) {
         QJsonArray codecs;

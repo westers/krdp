@@ -81,6 +81,13 @@ KRDP_EXPORT std::optional<LayoutControl::Error> checkSupported(const Request &re
 /** The `device` state record (without `requestId`; add it with LayoutControl::withRequestId()). */
 KRDP_EXPORT QJsonObject stateRecord(MediaDevice device, const DeviceStatus &status);
 
+/**
+ * OPT-058 `device-availability` push (unsolicited, no requestId): whether the camera and the
+ * microphone can start now. A false entry carries `reason` "needs-session" (no logged-in desktop
+ * is ready, for example the Console greeter). Advertised by `devices.availability.push`.
+ */
+KRDP_EXPORT QJsonObject availabilityRecord(bool camera, bool microphone);
+
 KRDP_EXPORT QString deviceName(MediaDevice device);
 KRDP_EXPORT std::optional<MediaDevice> deviceFromName(const QString &name);
 KRDP_EXPORT QString stateName(DeviceStatus::State state);
@@ -88,6 +95,8 @@ KRDP_EXPORT QString stateName(DeviceStatus::State state);
 /** `code` values of a `device` state record. */
 inline const QString Declined = QStringLiteral("declined");
 inline const QString Unavailable = QStringLiteral("unavailable");
+/// OPT-058: no logged-in desktop is ready yet (Console greeter); transient, a `device-availability` push ends it.
+inline const QString NeedsSession = QStringLiteral("needs-session");
 inline const QString Revoked = QStringLiteral("revoked"); ///< console: the console user or controller changed
 /// Virtual broker (AUD-FIX2): this connection no longer holds the virtual desktop (detached,
 /// ended, or opened from another device); "revoked" wording about the console does not apply.

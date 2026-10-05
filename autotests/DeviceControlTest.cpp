@@ -37,6 +37,19 @@ class DeviceControlTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    // OPT-058: the unsolicited `device-availability` record and its `needs-session` reason.
+    void availabilityRecordShape()
+    {
+        const auto record = DeviceControl::availabilityRecord(false, true);
+        QCOMPARE(record.value(QStringLiteral("type")).toString(), QStringLiteral("device-availability"));
+        QCOMPARE(record.value(QStringLiteral("v")).toInt(), 1);
+        QVERIFY(!record.contains(QStringLiteral("requestId")));
+        QCOMPARE(record.value(QStringLiteral("camera")).toObject(),
+                 (QJsonObject{{QStringLiteral("available"), false}, {QStringLiteral("reason"), QStringLiteral("needs-session")}}));
+        QCOMPARE(record.value(QStringLiteral("microphone")).toObject(), (QJsonObject{{QStringLiteral("available"), true}}));
+        QCOMPARE(DeviceControl::NeedsSession, QStringLiteral("needs-session"));
+    }
+
     void parsesEveryDeviceAndAction()
     {
         using Action = DeviceControl::Action;
