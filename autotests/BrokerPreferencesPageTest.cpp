@@ -120,6 +120,7 @@ private Q_SLOTS:
             QCOMPARE(preferences.values()[key].toString(),row[u"customSeed"_s].toString());
             QVERIFY2(preferences.error().isEmpty(),qPrintable(key+u": "_s+preferences.error()));
             auto *error=qobject_cast<QQuickItem *>(item(u"brokerPreferenceError"_s)); QVERIFY(error); QVERIFY2(!error->isVisible(),qPrintable(key));
+            if(key==u"Quality" && !qEnvironmentVariableIsEmpty("FARSIDE_PREFERENCES_SCREENSHOTS")) { QTest::qWait(300); QVERIFY(window.grabWindow().save(qEnvironmentVariable("FARSIDE_PREFERENCES_SCREENSHOTS")+u"/custom-quality.png"_s)); }
             if(control!=u"size") { auto *spin=item(u"preference_"_s+key); QVERIFY(spin); QTRY_VERIFY2(!spin->property("contentItem").value<QQuickItem *>()->property("text").toString().isEmpty(),qPrintable(key)); }
         }
         QCOMPARE(visited,6); QVERIFY(preferences.canSave());
