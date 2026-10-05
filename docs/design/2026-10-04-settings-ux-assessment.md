@@ -345,6 +345,17 @@ S7 checklist (Sol, zero connections, server package from the S3 commit or later;
 10. If any step shows more than one prompt for a single Apply, stop and report: the fallback is a single combined
     helper (one more protocol change), not weaker validation.
 
+### S7 result (2026-10-04)
+
+Package `dfa9ae0` (`6.6.80+git202610042300.dfa9ae0-1`, SHA-256 `4a404e25...34745d`) installed on Sol only at 18:25, brokers NRestarts 0, snapshots
+`/var/lib/farside-public/*.json` 0644 with no account, alias, verifier or path fields, both polkit actions `auth_admin_keep`.
+
+- Measured on Sol (installed plugin, logging-only polkit agent that cancels, polkitd journal as cross-check): opening the panel and visiting Console,
+  Virtual and My Preferences = 0 prompts; Who Can Connect = 1 prompt (`org.farside.authentication`) on landing, with an Unlock... button for a retry.
+- Not exercised (needs a human at the dialog): real Apply (one prompt per Apply), the keep window, cancel/restart flows. Steve's steps:
+  `~/dev/rdp/evidence/2026-10-04-settings-s7/STEVE-CHECKLIST.md`. Captures and `REVIEW.md` are in the same directory (taken on Buzz with Sol's installed plugin
+  and snapshots, because Sol cannot screenshot). Hal untouched.
+
 ## 8. Evidence and limits
 
 - **Fresh captures** (`~/dev/rdp/evidence/2026-10-04-settings-ux-assessment/captures/`):
