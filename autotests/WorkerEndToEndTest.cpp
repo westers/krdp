@@ -636,12 +636,17 @@ void WorkerEndToEndTest::consoleReplaceRelock_data()
 {
     QTest::addColumn<int>("offsetMs");
     QTest::addColumn<bool>("alwaysKill");
+    QTest::addColumn<bool>("realScan"); // OPT-060 D1: the worker scans a /proc-shaped tree whose comm is the kernel's 15 characters
     // The user's lock, relative to the start of the release (negative: before it, positive: after it).
     for (const int offset : {-2500, -2000, -1500, -1000, -500, 0, 500, 1000, 1500, 2000})
-        QTest::newRow(qPrintable(QStringLiteral("lock %1 ms %2 the release").arg(qAbs(offset)).arg(offset < 0 ? QStringLiteral("before") : QStringLiteral("after")))) << offset << false;
+        QTest::newRow(qPrintable(QStringLiteral("lock %1 ms %2 the release").arg(qAbs(offset)).arg(offset < 0 ? QStringLiteral("before") : QStringLiteral("after")))) << offset << false << false;
     // Even with the release held, the greeter dies when the layout changes: only the re-lock can save the session.
-    QTest::newRow("lock 500 ms before the release, greeter dies anyway") << -500 << true;
-    QTest::newRow("lock 0 ms after the release, greeter dies anyway") << 0 << true;
+    QTest::newRow("lock 500 ms before the release, greeter dies anyway") << -500 << true << false;
+    QTest::newRow("lock 0 ms after the release, greeter dies anyway") << 0 << true << false;
+    // D1: the same, but the greeter is found by the worker's real /proc scan (comm `kscreenlocker_g`, cmdline the real name).
+    for (const int offset : {-2500, -1000, 500, 2000})
+        QTest::newRow(qPrintable(QStringLiteral("real scan: lock %1 ms %2 the release").arg(qAbs(offset)).arg(offset < 0 ? QStringLiteral("before") : QStringLiteral("after")))) << offset << false << true;
+    QTest::newRow("real scan: lock 500 ms before the release, greeter dies anyway") << -500 << true << true;
 }
 
 // OPT-060 S3 (OPT-049): lock around a Replace release, 10 interleavings. The lock screen is the fake above:
@@ -649,7 +654,7 @@ void WorkerEndToEndTest::consoleReplaceRelock_data()
 // locked with a live greeter at the end, the physical layout is restored and the worker exits 0.
 void WorkerEndToEndTest::consoleReplaceRelock()
 {
-    QFETCH(int, offsetMs); QFETCH(bool, alwaysKill);
+    QFETCH(int, offsetMs); QFETCH(bool, alwaysKill); QFETCH(bool, realScan);
     if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
     auto *s = session(2); QVERIFY(s);
     if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
@@ -703,7 +708,21 @@ void WorkerEndToEndTest::consoleReplaceRelock()
         qPrintable(QStringLiteral("locker state active=%1 greeter=%2 kills=%3").arg(locker.active()).arg(locker.greeterAlive()).arg(locker.kills())), 5000);
     QFile::remove(greeterFile);
     const qint64 logStart = QFileInfo(s->home->path() + QStringLiteral("/worker.log")).size(); // worker.log accumulates across rows
-    m_nextWorkerEnv = {QStringLiteral("KRDP_CONSOLE_LOCK_GREETER_FILE=") + greeterFile};
+    if (realScan) {
+        // A /proc-shaped tree: pid 4242's comm is a symlink to the greeter marker (present = alive; the fake locker writes
+        // the kernel's truncated name into it) and its cmdline carries the real program name. The worker scans it like /proc.
+        const QString procRoot = s->home->path() + QStringLiteral("/fakeproc");
+        QVERIFY(QDir().mkpath(procRoot + QStringLiteral("/4242")));
+        QFile::remove(procRoot + QStringLiteral("/4242/comm"));
+        QVERIFY(QFile::link(greeterFile, procRoot + QStringLiteral("/4242/comm")));
+        QFile cmdline(procRoot + QStringLiteral("/4242/cmdline"));
+        QVERIFY(cmdline.open(QIODevice::WriteOnly));
+        cmdline.write(QByteArray("/usr/lib/x86_64-linux-gnu/libexec/kscreenlocker_greet\0--graceTime\0" "5000\0", 71));
+        cmdline.close();
+        m_nextWorkerEnv = {QStringLiteral("KRDP_CONSOLE_LOCK_PROC_ROOT=") + procRoot};
+    } else {
+        m_nextWorkerEnv = {QStringLiteral("KRDP_CONSOLE_LOCK_GREETER_FILE=") + greeterFile};
+    }
     QVERIFY(startWorker(*s, false, endpoint, run));
     const auto reap = qScopeGuard([&] {
         if (!QFileInfo::exists(exitFile)) { endpoint.stopWorker(); (void)QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 30000); }
@@ -799,6 +818,7 @@ sys.exit(result.returncode)
         QTest::qWait(60);
     }
     QVERIFY2(QFileInfo::exists(exitFile), "the worker exited");
+    const qint64 exitAt = sinceT0.elapsed(); // the worker's whole release, including the lock check after the restore (D1)
     if (!userLockDone) locker.lockNow(); // the lock came after the worker was gone
     QVERIFY(restoreSeen);
     QFile code(exitFile); QVERIFY(code.open(QIODevice::ReadOnly)); QCOMPARE(code.readAll().trimmed(), QByteArray("0"));
@@ -810,7 +830,7 @@ sys.exit(result.returncode)
     const qint64 logSize = QFileInfo(s->home->path() + QStringLiteral("/worker.log")).size();
     const QString log = s->log(QStringLiteral("worker.log"), int(logSize - logStart));
     if (qEnvironmentVariableIsSet("KRDP_E2E_SHOW_WORKER_LOG")) qInfo().noquote() << log.right(3500);
-    qInfo().noquote() << "OPT-049 row: lock" << offsetMs << "ms vs release, restore at" << restoreAt << "ms, greeter kills" << locker.kills()
+    qInfo().noquote() << "OPT-049 row: lock" << offsetMs << "ms vs release, restore at" << restoreAt << "ms, worker exit at" << exitAt << "ms, greeter kills" << locker.kills()
                       << "re-lock calls" << locker.relockCalls() << "worker re-lock lines" << log.count(QStringLiteral("Console release: re-locking"))
                       << "held" << log.contains(QStringLiteral("holding the release"));
 }

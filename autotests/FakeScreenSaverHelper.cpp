@@ -59,7 +59,8 @@ private:
     }
     void setLocked(bool locked)
     {
-        if (locked) { QFile marker(m_greeter); if (marker.open(QIODevice::WriteOnly)) marker.write("1"); }
+        // The marker holds the kernel's 15-character comm (OPT-060 D1); the other rows only test that it exists.
+        if (locked) { QFile marker(m_greeter); if (marker.open(QIODevice::WriteOnly)) marker.write("kscreenlocker_g\n"); }
         if (m_active != locked) { m_active = locked; Q_EMIT ActiveChanged(locked); }
         writeState();
     }

@@ -10,8 +10,16 @@
 
 #include <QtGlobal>
 
+#include <sys/stat.h>
+#include <sys/types.h>
+
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <optional>
+#include <string>
+#include <string_view>
 
 namespace KRdp::ConsoleReleaseLock
 {
@@ -26,6 +34,45 @@ constexpr qint64 FirstCheckDelayMs = 500;
 constexpr qint64 RelockWaitMs = 1500;
 /// Whole post-restore verification, from the end of the restore; then give up with a warning.
 constexpr qint64 TotalBoundMs = 9000;
+
+/// The lock screen's process. /proc/PID/comm is the kernel's TASK_COMM_LEN - 1 = 15 characters, so the
+/// real name (19) never appears there in full: `kscreenlocker_g` (OPT-060 D1; comparing the full name
+/// made every release conclude "greeter gone" and re-lock three times for nothing).
+constexpr std::string_view GreeterName = "kscreenlocker_greet";
+constexpr std::size_t KernelCommLength = 15;
+
+/// @p comm is /proc/PID/comm without its newline: the full name or the kernel's 15-character truncation of it.
+inline bool greeterCommMatches(std::string_view comm)
+{
+    return comm == GreeterName || (comm.size() == KernelCommLength && GreeterName.substr(0, KernelCommLength) == comm);
+}
+
+/// @p cmdline is /proc/PID/cmdline (NUL separated): its program name, the confirmation after a comm match.
+inline bool greeterCmdlineMatches(std::string_view cmdline)
+{
+    const auto argv0 = cmdline.substr(0, cmdline.find('\0'));
+    return argv0.substr(argv0.rfind('/') == std::string_view::npos ? 0 : argv0.rfind('/') + 1) == GreeterName;
+}
+
+/// Whether a kscreenlocker_greet owned by @p uid runs under @p procRoot (/proc; tests pass a fake tree). The
+/// comm file prefilters (15 characters, see above) and the cmdline confirms the real name.
+inline bool greeterRunning(const std::filesystem::path &procRoot, uid_t uid)
+{
+    std::error_code error;
+    for (std::filesystem::directory_iterator it(procRoot, std::filesystem::directory_options::skip_permission_denied, error), end; !error && it != end; it.increment(error)) {
+        const auto name = it->path().filename().string();
+        if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; })) continue;
+        std::ifstream comm(it->path() / "comm");
+        std::string commName;
+        if (!comm || !std::getline(comm, commName) || !greeterCommMatches(commName)) continue;
+        std::ifstream cmdline(it->path() / "cmdline", std::ios::binary);
+        const std::string argv(std::istreambuf_iterator<char>(cmdline), {});
+        if (!greeterCmdlineMatches(argv.substr(0, 512))) continue;
+        struct stat st {};
+        if (::stat(it->path().c_str(), &st) == 0 && st.st_uid == uid) return true;
+    }
+    return false;
+}
 
 struct Observation {
     std::optional<bool> locked; ///< Session lock state; nullopt when no source answered.

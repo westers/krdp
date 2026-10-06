@@ -769,16 +769,9 @@ private:
     {
         const QString standIn = qEnvironmentVariable("KRDP_CONSOLE_LOCK_GREETER_FILE");
         if (!standIn.isEmpty()) return QFile::exists(standIn);
-        const auto entries = QDir(QStringLiteral("/proc")).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-        for (const auto &entry : entries) {
-            bool numeric = false; entry.toInt(&numeric);
-            if (!numeric) continue;
-            QFile comm(QStringLiteral("/proc/%1/comm").arg(entry));
-            if (!comm.open(QIODevice::ReadOnly) || comm.readLine(64).trimmed() != "kscreenlocker_greet") continue;
-            struct stat st {};
-            if (::stat(QFile::encodeName(QStringLiteral("/proc/") + entry).constData(), &st) == 0 && st.st_uid == getuid()) return true;
-        }
-        return false;
+        // KRDP_CONSOLE_LOCK_PROC_ROOT: test-only fake /proc (the native fixture's real scan against a truncated comm).
+        const QByteArray root = qEnvironmentVariableIsSet("KRDP_CONSOLE_LOCK_PROC_ROOT") ? qgetenv("KRDP_CONSOLE_LOCK_PROC_ROOT") : QByteArray("/proc");
+        return ConsoleReleaseLock::greeterRunning(std::filesystem::path(root.constData()), getuid());
     }
 
     /// logind LockedHint of this session, used only when the screensaver does not answer.
