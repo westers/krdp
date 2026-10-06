@@ -32,7 +32,7 @@ KCM.SimpleKCM {
             Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.preferences.sectionTitle("video") }
             BrokerFieldRepeater { settings: root.preferences; section: "video"; prefix: "preference_"; accountPreference: true; lockedKeys: root.preferences.lockedKeys }
             Kirigami.Separator { id: displaySection; Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.preferences.sectionTitle("displays") }
-            BrokerFieldRepeater { settings: root.preferences; section: "displays"; prefix: "preference_"; accountPreference: true; lockedKeys: root.preferences.lockedKeys }
+            BrokerFieldRepeater { settings: root.preferences; section: "displays"; advancedChoices: root.showAdvanced; prefix: "preference_"; accountPreference: true; lockedKeys: root.preferences.lockedKeys }
             // The display choices that follow the mode appear only for two of the five modes; say so instead of leaving one lone control.
             QQC2.Label {
                 objectName: "displayModeHint"

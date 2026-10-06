@@ -13,6 +13,7 @@ Repeater {
     // False for a group that does not exist on this page at all (no rows are created).
     property bool included: true
     property bool busy: false
+    property bool advancedChoices: false
     property string prefix: "host_"
     property bool accountPreference: false
     property var lockedKeys: []
@@ -25,6 +26,7 @@ Repeater {
         accountPreference: root.accountPreference
         shown: root.shown
         busy: root.busy
+        advancedChoices: root.advancedChoices
         lockedKeys: root.lockedKeys
     }
 }

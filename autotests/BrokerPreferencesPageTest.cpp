@@ -98,6 +98,26 @@ private Q_SLOTS:
         QVERIFY(!BrokerUserSettings::parse(read(path)).preferences.quality); QVERIFY(read(path).contains("Certificate=/root/fixture.pem\n"));
         QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s))); page->setParentItem(nullptr);
     }
+    // OPT-060 S5: the screens permission shows without MonitorMode=virtual; "extend" is offered only under Advanced (or while it is the value).
+    void screensPermissionIsAlwaysShownAndExtendIsAdvanced() {
+        for(const bool advanced:{false,true}) for(const bool extendSaved:{false,true}) {
+            QTemporaryDir dir; write(dir.filePath(u"farsideserverrc"_s),extendSaved ? "[General]\nVirtualMonitorPolicy=extend\n" : "[General]\nQuality=42\n");
+            BrokerPreferences preferences(dir.path()); QQmlEngine engine;
+            auto *localized=new KLocalizedQmlContext(&engine); localized->setTranslationDomain(u"kcm_farside"_s); engine.rootContext()->setContextObject(localized);
+            QQmlComponent component(&engine,QUrl::fromLocalFile(qEnvironmentVariable("FARSIDE_PREFERENCES_TEST_PAGE",QString::fromUtf8(PREFERENCES_PAGE))));
+            QScopedPointer<QObject> object(component.createWithInitialProperties({{u"showAdvanced"_s,advanced},{u"preferences"_s,QVariant::fromValue(&preferences)}}));
+            QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QQuickWindow window;
+            window.resize(1000,900); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
+            QVERIFY(preferences.reload()); QTRY_VERIFY(find(page,u"preference_VirtualMonitorPolicy"_s));
+            auto *field=qobject_cast<QQuickItem *>(find(page,u"preference_field_VirtualMonitorPolicy"_s)); QVERIFY(field); QVERIFY(field->isVisible()); // no display mode chosen
+            auto *combo=find(page,u"preference_VirtualMonitorPolicy"_s); const auto rows=combo->property("model").toList();
+            QCOMPARE(rows.size(),(advanced||extendSaved) ? 4 : 3);
+            QStringList texts; for(const auto &r:rows) texts.append(r.toMap()[u"text"_s].toString());
+            QCOMPARE(texts.contains(u"Off"_s),true); QCOMPARE(texts.contains(u"When the connection asks"_s),true);
+            QCOMPARE(combo->property("currentIndex").toInt(),extendSaved ? 3 : 0);
+            page->setParentItem(nullptr);
+        }
+    }
     void choosingCustomShowsNoErrorForAnyInheritField() {
         QTemporaryDir dir; write(dir.filePath(u"farsideserverrc"_s),"[General]\nHost=original\n");
         BrokerPreferences preferences(dir.path()); QQmlEngine engine;

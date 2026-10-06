@@ -41,6 +41,24 @@ private Q_SLOTS:
         }
         QCOMPARE(keys.size(),17); QVERIFY(numeric>=5);
     }
+    // OPT-060 S5: one screens permission on the existing VirtualMonitorPolicy key, always shown, extend only as an advanced value.
+    void screensPermissionDefinitionAndValues() {
+        QTemporaryDir dir; const auto path=dir.filePath(u"farsideserverrc"_s); BrokerPreferences model(dir.path()); QVERIFY(model.reload());
+        QVariantMap definition; for(const auto &row:model.definitions()) if(row.toMap()[u"key"_s].toString()==u"VirtualMonitorPolicy") definition=row.toMap();
+        QVERIFY(!definition.isEmpty()); QVERIFY(definition[u"showWhenKey"_s].toString().isEmpty()); QCOMPARE(definition[u"section"_s].toString(),QString(u"displays"_s));
+        QCOMPARE(definition[u"advancedChoices"_s].toStringList(),QStringList{u"extend"_s});
+        QStringList values,forms; for(const auto &c:definition[u"choices"_s].toList()) { values.append(c.toMap()[u"value"_s].toString()); forms.append(c.toMap()[u"formText"_s].toString()); }
+        QCOMPARE(values,(QStringList{QString(),u"off"_s,u"replace"_s,u"extend"_s}));
+        QVERIFY(forms.contains(u"When the connection asks"_s)); QVERIFY(forms.contains(u"Off"_s));
+        // Unset inherits (the server default is "When the connection asks"); each value saves and round-trips; an invalid one is refused.
+        QVERIFY(model.values().isEmpty());
+        for(const auto &value:{u"off"_s,u"replace"_s,u"extend"_s}) {
+            QVERIFY(model.setValue(u"VirtualMonitorPolicy"_s,value)); QVERIFY2(model.canSave(),qPrintable(value)); QVERIFY(model.save());
+            BrokerPreferences again(dir.path()); QVERIFY(again.reload()); QCOMPARE(again.values()[u"VirtualMonitorPolicy"_s].toString(),value);
+            QCOMPARE(BrokerUserSettings::parse(read(path)).preferences.virtualMonitorPolicy,std::optional<QString>(value));
+        }
+        QVERIFY(model.setValue(u"VirtualMonitorPolicy"_s,u"always"_s)); QVERIFY(!model.canSave());
+    }
     void completeWhitelistedRoundtripAndInheritance() {
         QTemporaryDir dir; const auto path=dir.filePath(u"farsideserverrc"_s);
         const QByteArray preserved("# preserved comment\n[General]\nListenPort=4321\nCertificate=/root/fixture.pem\nPassword=fixture-secret-only\nUsers=old-owner\nUnknown=unchanged\n[Other]\nQuality=5\n");

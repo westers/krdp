@@ -190,17 +190,21 @@ QVariantList BrokerPreferences::definitions() const
     add(u"StandardClientMedia"_s, media, i18nc("@label", "Media for other RDP apps"), i18nc("@info", "Lets other remote desktop apps send sound and devices. The host must allow it and each app must still ask. This does not give anyone access to your microphone or camera."), boolean,
         {.section = u"sound"_s, .formLabel = i18nc("@label", "Media for other RDP apps"),
          .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Allow")}, {u"false"_s, i18nc("@item:inlistbox", "Block")}}});
-    add(u"MonitorMode"_s, displays, i18nc("@label", "Console screens"), i18nc("@info", "Which of the Console computer’s screens you see. Client-created displays follow their own layout and physical-display settings."),
+    add(u"MonitorMode"_s, displays, i18nc("@label", "Console screens"), i18nc("@info", "Which of the Console computer’s screens you see. Client-created displays follow their own layout setting."),
         {choice(u"workspace"_s, i18nc("@item:inlistbox", "Whole workspace")), choice(u"primary"_s, i18nc("@item:inlistbox", "Primary display")), choice(u"specific"_s, i18nc("@item:inlistbox", "One display")),
          choice(u"multi"_s, i18nc("@item:inlistbox", "Displays as separate streams")), choice(u"virtual"_s, i18nc("@item:inlistbox", "Client-created displays"))},
         {.section = u"displays"_s, .formLabel = i18nc("@label", "Screens to share")});
     add(u"MonitorIndex"_s, displays, i18nc("@label", "Display index"), i18nc("@info", "A number from 0 to 65535, counting from zero. Used when sharing one display; that display must exist on the Console desktop."), {},
         when({.control = u"spin"_s, .section = u"displays"_s, .min = 0, .max = 65535, .customSeed = u"0"_s}, u"specific"_s));
-    add(u"VirtualMonitorPolicy"_s, displays, i18nc("@label", "Physical displays with client-created displays"), i18nc("@info", "“Turn off during connection” switches the computer’s own screens off while you are connected. They come back when someone uses the computer locally."),
-        {choice(u"replace"_s, i18nc("@item:inlistbox", "Replace physical displays")), choice(u"extend"_s, i18nc("@item:inlistbox", "Keep physical displays")),
-         choice(u"off"_s, i18nc("@item:inlistbox", "Never turn the computer’s screens off"))},
-        when({.section = u"displays"_s, .formLabel = i18nc("@label", "Physical displays"),
-              .optionText = {{u"extend"_s, i18nc("@item:inlistbox", "Keep on")}, {u"replace"_s, i18nc("@item:inlistbox", "Turn off during connection")}}}, u"virtual"_s));
+    // OPT-060: one permission, always shown. `replace` (the default) means "when the connection asks"; `extend` is the legacy keep-on value.
+    add(u"VirtualMonitorPolicy"_s, displays, i18nc("@label", "Let connections turn off this computer’s screens"),
+        i18nc("@info", "When a connection asks to use its own monitors, this computer’s screens switch off while you are connected and come back when you disconnect or when someone uses this computer’s keyboard or mouse."),
+        {choice(u"off"_s, i18nc("@item:inlistbox", "Never turn the computer’s screens off")), choice(u"replace"_s, i18nc("@item:inlistbox", "Turn the computer’s screens off when the connection asks")),
+         choice(u"extend"_s, i18nc("@item:inlistbox", "Keep the computer’s screens on"))},
+        {.section = u"displays"_s, .formLabel = i18nc("@label", "Let my Farside connections turn off this computer’s screens"),
+         .optionText = {{u"off"_s, i18nc("@item:inlistbox", "Off")}, {u"replace"_s, i18nc("@item:inlistbox", "When the connection asks")},
+                        {u"extend"_s, i18nc("@item:inlistbox", "Add monitors without turning the host’s screens off (advanced)")}},
+         .advancedChoices = {u"extend"_s}});
     add(u"VirtualMonitorLayout"_s, displays, i18nc("@label", "Client-created display layout"), i18nc("@info", "“Client monitors” needs the client to ask for its monitors. “Physical display layout” copies the computer’s own screens, including their resolution and scale."),
         {choice(u"client"_s, i18nc("@item:inlistbox", "Client monitors")), choice(u"single"_s, i18nc("@item:inlistbox", "One display")), choice(u"physical"_s, i18nc("@item:inlistbox", "Physical display layout"))},
         when({.section = u"displays"_s, .formLabel = i18nc("@label", "Layout")}, u"virtual"_s));

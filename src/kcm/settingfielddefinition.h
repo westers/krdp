@@ -41,6 +41,8 @@ struct Spec {
     QString inheritText;
     // Wording of individual options on the form, by value, where it differs from the summary wording.
     QVariantMap optionText;
+    // Choice values offered only while the page's Advanced options are open (or while one of them is the current value).
+    QStringList advancedChoices;
 };
 
 inline QString controlFor(const Spec &spec, const QVariantList &choices)
@@ -75,7 +77,8 @@ inline QVariantMap makeFieldDefinition(const QString &key, const QString &group,
                        {QStringLiteral("showWhenValue"), spec.showWhenValue},
                        {QStringLiteral("unavailable"), spec.unavailable},
                        {QStringLiteral("inheritText"), spec.inheritText},
-                       {QStringLiteral("modes"), spec.modes}};
+                       {QStringLiteral("modes"), spec.modes},
+                       {QStringLiteral("advancedChoices"), spec.advancedChoices}};
 }
 
 // Empty when the definition is complete and consistent, otherwise the first problem found.

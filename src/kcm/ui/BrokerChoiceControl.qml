@@ -12,7 +12,10 @@ QQC2.ComboBox {
         const option = choices.find(row => row.value === value);
         return option ? option.formText : value;
     }
-    readonly property var displayChoices: choices.map(option => ({
+    // Advanced choices are listed only while Advanced options are open or when one is already the value.
+    readonly property var shownChoices: choices.filter(option => !(field.definition.advancedChoices || []).includes(option.value)
+        || field.advancedChoices || option.value === field.savedValue)
+    readonly property var displayChoices: shownChoices.map(option => ({
         value: option.value,
         text: option.value !== "" ? option.formText : field.accountPreference ? field.inheritanceText : i18nc("@item:inlistbox", "Default (%1)", choiceText(field.defaultValue))
     }))
@@ -25,6 +28,6 @@ QQC2.ComboBox {
     implicitContentWidthPolicy: QQC2.ComboBox.WidestText
     model: displayChoices; textRole: "text"; valueRole: "value"
     Accessible.name: field.label
-    currentIndex: { const index = choices.findIndex(row => row.value === field.savedValue); return index < 0 ? 0 : index; }
+    currentIndex: { const index = shownChoices.findIndex(row => row.value === field.savedValue); return index < 0 ? 0 : index; }
     onActivated: { if (currentValue === "") field.settings.inherit(field.key); else field.settings.setValue(field.key, currentValue); }
 }

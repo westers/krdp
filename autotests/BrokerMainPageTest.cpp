@@ -245,7 +245,7 @@ private Q_SLOTS:
         // Account preferences: every one of the 17 keys has a visible, enabled control (an inherit/custom selector until overridden).
         QQuickItem *prefs=f.goTo(3); QVERIFY(prefs); QVERIFY(prefs->setProperty("showAdvanced",true));
         const auto definitions=f.preferences.definitions(); QCOMPARE(definitions.size(),17);
-        const QStringList modeKeys{u"MonitorIndex"_s,u"VirtualMonitorPolicy"_s,u"VirtualMonitorLayout"_s,u"VirtualMonitorFallbackSize"_s};
+        const QStringList modeKeys{u"MonitorIndex"_s,u"VirtualMonitorLayout"_s,u"VirtualMonitorFallbackSize"_s};
         for(const auto &mode:{u"specific"_s,u"virtual"_s}) {
             QVERIFY(f.preferences.setValue(u"MonitorMode"_s,mode)); QTest::qWait(60);
             for(const auto &definition:definitions) {
@@ -510,7 +510,8 @@ private Q_SLOTS:
         auto *monitorField=qobject_cast<QQuickItem *>(find(prefsPage,u"preference_field_MonitorIndex"_s)); QVERIFY(monitorField); QTRY_VERIFY(monitorField->isVisible());
         QVERIFY(preferences.setValue(u"MonitorMode"_s,u"virtual"_s)); QTRY_VERIFY(!monitorField->isVisible()); QCOMPARE(preferences.values()[u"MonitorIndex"_s].toString(),u"2"_s);
         auto *policyField=qobject_cast<QQuickItem *>(find(prefsPage,u"preference_field_VirtualMonitorPolicy"_s)); QVERIFY(policyField); QTRY_VERIFY(policyField->isVisible());
-        QVERIFY(preferences.setValue(u"MonitorMode"_s,u"workspace"_s)); QTRY_VERIFY(!policyField->isVisible()); preferences.discard(); QVERIFY(!preferences.modified());
+        // OPT-060 S5: the screens permission is always shown, whatever the mode.
+        QVERIFY(preferences.setValue(u"MonitorMode"_s,u"workspace"_s)); QTest::qWait(60); QVERIFY(policyField->isVisible()); preferences.discard(); QVERIFY(!preferences.modified());
         QVERIFY(goTo(2)); QVERIFY(QMetaObject::invokeMethod(item(u"consoleAddAlias"_s),"clicked"));
         auto *aliasDialog=item(u"brokerAliasDialog"_s); QVERIFY(aliasDialog); QTRY_VERIFY(aliasDialog->property("visible").toBool());
         auto *stageAlias=item(u"stageBrokerAlias"_s); QVERIFY(stageAlias);

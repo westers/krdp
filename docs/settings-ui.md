@@ -50,6 +50,12 @@ Updated 2026-10-02 for the ten-to-five page consolidation (evidence
   it once (toggle and restore); without that a clean module shows an enabled Defaults button.
 - Inline expanders (Details, Certificate, Advanced) only toggle `visible`; never
   put a draft editor behind a `Loader` or `active: false`.
+- My Preferences > Console Displays has ONE screens permission, "Let my Farside connections turn off this
+  computer's screens", always shown (not tied to the display mode). It maps to the existing
+  `VirtualMonitorPolicy` key: Off = `off`, When the connection asks = `replace` (the server default), and
+  `extend` ("Add monitors without turning the host's screens off (advanced)") is offered only while Advanced
+  options are open or when it is already the stored value (definition field `advancedChoices`). No key was added;
+  old files keep working because the server reads the same key. Wording note: evidence `2026-10-05-replace-screens-s5`.
 - My Preferences keeps account inheritance explicit. Choosing Custom stages an
   incomplete value until the user chooses a number; it does not fabricate zero
   or a minimum. Fallback dimensions must both be supplied. Display-specific

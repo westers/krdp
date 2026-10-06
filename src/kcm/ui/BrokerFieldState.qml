@@ -12,6 +12,8 @@ QtObject {
     // Reported back by the control that is showing: its main item (for label focus) and whether it has anything to show.
     property Item primary: null
     property bool controlShown: true
+    // The page's Advanced options are open: choices the definition lists as advanced are offered too.
+    property bool advancedChoices: false
     readonly property string key: definition.key
     readonly property string label: definition.formLabel
     readonly property bool overridden: Object.prototype.hasOwnProperty.call(settings.values, key)

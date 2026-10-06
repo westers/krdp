@@ -16,6 +16,7 @@ RowLayout {
     // The page's own switch (for example Advanced collapsed); the definition's rules apply on top.
     property bool shown: true
     property bool busy: false
+    property bool advancedChoices: false
     property var lockedKeys: []
     // The definition's help text sits behind a (?) button next to the control, never as a grey paragraph.
     property bool showHelp: true
@@ -58,6 +59,7 @@ RowLayout {
         prefix: root.prefix
         accountPreference: root.accountPreference
         editable: root.editable
+        advancedChoices: root.advancedChoices
     }
     Component { id: numberControl; BrokerNumberControl { field: fieldState } }
     Component { id: sizeControl; BrokerSizeControl { field: fieldState } }
