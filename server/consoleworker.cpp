@@ -82,6 +82,7 @@
 #include "ConsoleVirtualOutputRestore.h"
 #include "ConsoleLockWatch.h"
 #include "ConsoleReleaseLockGuard.h"
+#include "ConsoleReclaimEpisode.h"
 #include "LogThrottle.h"
 #include "ConsoleVirtualOutputMutation.h"
 #include "PhysicalOutputGuard.h"
@@ -722,6 +723,7 @@ private:
         ++m_consoleVirtualEpoch;
         m_consoleVirtualApplied = false;
         m_consoleVirtualReplaced = false;
+        if (const quint64 repeats = m_reclaimEpisode.reset()) qInfo() << "Local Console reclaim: ignored" << repeats << "further desk-input event(s) in the last episode";
         m_consoleVirtualIndex = 0;
         m_consoleVirtualAge.start();
         m_consoleVirtualSettle.invalidate();
@@ -3182,6 +3184,9 @@ private:
             return;
         }
         if (m_consoleVirtualPlan && m_consoleVirtualApplied) {
+            // The desk reports every input event: the screens are given back once per applied layout; the
+            // events that follow only count (no capture reset, no output work, no log line each).
+            if (!m_reclaimEpisode.needed()) return;
             invalidateConsoleCapture();
             if (!m_consoleOutputGuard.release() || (m_consoleVirtualReplaced
                 && !restoreConsoleVirtualSnapshot(*m_consoleVirtualRestore)) || !parkConsoleVirtualOutputs()) {
@@ -3190,6 +3195,7 @@ private:
             m_consoleVirtualReplaced = false;
             m_consoleVirtualPlan->replace = false;
             m_multiSettle.start(400);
+            m_reclaimEpisode.done();
             qInfo() << "Local Console monitors restored; remote temporary monitors continue as extend";
             return;
         }
@@ -3570,6 +3576,7 @@ private:
     std::optional<bool> m_lockActive;
     ConsoleReleaseLock::Context m_lockContext;
     LogThrottle m_lockLog{std::chrono::seconds(5), 3};
+    KRdp::ConsoleReclaimEpisode m_reclaimEpisode; // OPT-060: one reclaim per applied Console layout
     int m_relockAttempts = 0;
     bool m_lockEdgeValid = false;
     bool m_lockWindowOpen = false;

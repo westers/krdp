@@ -864,6 +864,12 @@ add_executable(LogThrottleTest LogThrottleTest.cpp ${CMAKE_BINARY_DIR}/src/krdp_
 target_include_directories(LogThrottleTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
 target_link_libraries(LogThrottleTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME LogThrottleTest COMMAND LogThrottleTest)
+
+# OPT-060: the desk-input reclaim runs once per episode.
+add_executable(ConsoleReclaimEpisodeTest ConsoleReclaimEpisodeTest.cpp)
+target_include_directories(ConsoleReclaimEpisodeTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleReclaimEpisodeTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME ConsoleReclaimEpisodeTest COMMAND ConsoleReclaimEpisodeTest)
 # AUD-FIX13: a slow link or a slow client, by the socket's evidence.
 add_executable(LinkEvidenceTest LinkEvidenceTest.cpp)
 target_include_directories(LinkEvidenceTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
