@@ -196,6 +196,190 @@ private Q_SLOTS:
         QVERIFY(!parseConsoleScreensRequest(record));
     }
 
+    // OPT-060 M-3: capabilities.console.screens {mapped, maxScreens, view} and the v2 request.
+    void capabilitiesConsoleScreensMapped()
+    {
+        ChannelCapabilities caps;
+        caps.host = QStringLiteral("console");
+        caps.consoleScreens = ConsoleScreensCapabilities{true, true, true, true, 4, true};
+        const auto screens = capabilitiesRecord(caps).value(QStringLiteral("console")).toObject().value(QStringLiteral("screens")).toObject();
+        QCOMPARE(screens, (QJsonObject{{QStringLiteral("replace"), true}, {QStringLiteral("restore"), true}, {QStringLiteral("request"), true},
+                                       {QStringLiteral("mapped"), true}, {QStringLiteral("maxScreens"), 4}, {QStringLiteral("view"), true}}));
+        // Not offered = the keys are absent, which a client reads as false / 0.
+        caps.consoleScreens = ConsoleScreensCapabilities{true, true, true};
+        const auto plain = capabilitiesRecord(caps).value(QStringLiteral("console")).toObject().value(QStringLiteral("screens")).toObject();
+        for (const char *key : {"mapped", "maxScreens", "view"}) QVERIFY(!plain.contains(QLatin1String(key)));
+        caps.consoleScreens = ConsoleScreensCapabilities{true, true, true, true, 4, true};
+        QVERIFY(frame(capabilitiesRecord(caps)).size() < 1024);
+    }
+
+    void consoleScreensMappedRequestWire()
+    {
+        ConsoleScreensMappedRequest request;
+        request.monitors = {{QStringLiteral("eDP-1"), QRect(0, 0, 1920, 1080), 125, true}};
+        auto record = consoleScreensMappedRequestRecord(request);
+        QCOMPARE(record.value(QStringLiteral("v")).toInt(), 2);
+        QCOMPARE(record.value(QStringLiteral("layout")).toString(), QStringLiteral("mapped"));
+        QVERIFY(!record.contains(QStringLiteral("mapping"))); // optional: missing = the default mapping
+        QString refusal;
+        QCOMPARE(parseConsoleScreensMappedRequest(record, &refusal), std::optional(request));
+        // Two monitors, a partial mapping, fractional scale 1.25 survives exactly.
+        request.monitors.append({QStringLiteral("HDMI-1"), QRect(1920, 0, 2560, 1440), 100, false});
+        request.mapping = {{QStringLiteral("DP-1"), QStringLiteral("HDMI-1")}};
+        record = consoleScreensMappedRequestRecord(request);
+        QCOMPARE(parseConsoleScreensMappedRequest(record), std::optional(request));
+        // The wire spelling is host/monitor; hostOutput/clientMonitor is accepted as an alias; mixing them is not.
+        QCOMPARE(record.value(QStringLiteral("mapping")).toArray().at(0).toObject(), (QJsonObject{{QStringLiteral("host"), QStringLiteral("DP-1")}, {QStringLiteral("monitor"), QStringLiteral("HDMI-1")}}));
+        auto spec = record;
+        spec.insert(QStringLiteral("mapping"), QJsonArray{QJsonObject{{QStringLiteral("hostOutput"), QStringLiteral("DP-1")}, {QStringLiteral("clientMonitor"), QStringLiteral("HDMI-1")}}});
+        QCOMPARE(parseConsoleScreensMappedRequest(spec), std::optional(request));
+        spec.insert(QStringLiteral("mapping"), QJsonArray{QJsonObject{{QStringLiteral("host"), QStringLiteral("DP-1")}, {QStringLiteral("hostOutput"), QStringLiteral("DP-1")},
+                                                                        {QStringLiteral("monitor"), QStringLiteral("HDMI-1")}}});
+        QVERIFY(!parseConsoleScreensMappedRequest(spec));
+        // A lone monitor is the primary whether or not it says so; an unknown HOST name is accepted (the broker reports it).
+        ConsoleScreensMappedRequest lone;
+        lone.monitors = {{QStringLiteral("only"), QRect(0, 0, 1366, 768), 100, false}};
+        lone.mapping = {{QStringLiteral("not-a-connector"), QStringLiteral("only")}};
+        const auto parsed = parseConsoleScreensMappedRequest(consoleScreensMappedRequestRecord(lone));
+        QVERIFY(parsed); QVERIFY(parsed->monitors.first().primary); QCOMPARE(parsed->mapping, lone.mapping);
+        // The v1 parser refuses a v2 record and the v2 parser a v1 record (strict keys and version).
+        QVERIFY(!parseConsoleScreensRequest(record));
+        QVERIFY(!parseConsoleScreensMappedRequest(consoleScreensRequestRecord({{QRect(0, 0, 1920, 1080), true}})));
+        // A monitor larger than 4096 is allowed here (the planner scales its stand-in down).
+        ConsoleScreensMappedRequest big;
+        big.monitors = {{QStringLiteral("8k"), QRect(0, 0, 7680, 4320), 200, true}};
+        QVERIFY(parseConsoleScreensMappedRequest(consoleScreensMappedRequestRecord(big)));
+    }
+
+    void consoleScreensMappedRequestRefusesMalformed_data()
+    {
+        QTest::addColumn<QJsonObject>("record");
+        QTest::addColumn<QString>("code");
+        ConsoleScreensMappedRequest base;
+        base.monitors = {{QStringLiteral("a"), QRect(0, 0, 1920, 1080), 100, true}, {QStringLiteral("b"), QRect(1920, 0, 1920, 1080), 100, false}};
+        base.mapping = {{QStringLiteral("DP-1"), QStringLiteral("b")}};
+        const auto good = consoleScreensMappedRequestRecord(base);
+        const auto edit = [&good](const char *key, const QJsonValue &value) { auto r = good; r.insert(QLatin1String(key), value); return r; };
+        const auto monitor = [](const QJsonObject &fields) {
+            QJsonObject m{{QStringLiteral("id"), QStringLiteral("m")}, {QStringLiteral("x"), 0}, {QStringLiteral("y"), 0}, {QStringLiteral("width"), 1920}, {QStringLiteral("height"), 1080}, {QStringLiteral("primary"), true}};
+            for (auto it = fields.begin(); it != fields.end(); ++it) m.insert(it.key(), it.value());
+            return m;
+        };
+        const auto withMonitors = [&edit](const QJsonArray &monitors) { return edit("monitors", monitors); };
+        const auto withMapping = [&edit](const QJsonArray &mapping) { return edit("mapping", mapping); };
+        const auto entry = [](const QString &host, const QString &mon) { return QJsonObject{{QStringLiteral("hostOutput"), host}, {QStringLiteral("clientMonitor"), mon}}; };
+        const QString invalid = QStringLiteral("invalid");
+        QTest::newRow("wrong type") << edit("type", QStringLiteral("console-screens")) << invalid;
+        QTest::newRow("v1") << edit("v", 1) << invalid;
+        QTest::newRow("v3") << edit("v", 3) << invalid;
+        QTest::newRow("replace false") << edit("replace", false) << invalid;
+        QTest::newRow("layout missing") << [&good] { auto r = good; r.remove(QStringLiteral("layout")); return r; }() << invalid;
+        QTest::newRow("layout other") << edit("layout", QStringLiteral("client")) << invalid;
+        QTest::newRow("unknown field") << edit("extra", 1) << invalid;
+        QTest::newRow("requestId left in") << edit("requestId", QStringLiteral("x")) << invalid;
+        QTest::newRow("monitors not array") << edit("monitors", QStringLiteral("x")) << invalid;
+        QTest::newRow("no monitors") << withMonitors({}) << invalid;
+        QTest::newRow("17 monitors") << [&] { QJsonArray a; for (int i = 0; i < 17; ++i) a.append(monitor({{QStringLiteral("id"), QString::number(i)}, {QStringLiteral("x"), i * 700}, {QStringLiteral("width"), 640}, {QStringLiteral("height"), 640}, {QStringLiteral("primary"), i == 0}})); return withMonitors(a); }() << invalid;
+        QTest::newRow("monitor not object") << withMonitors({1}) << invalid;
+        QTest::newRow("unknown monitor field") << withMonitors({monitor({{QStringLiteral("rotation"), 90}})}) << invalid;
+        QTest::newRow("id missing") << withMonitors({[&] { auto m = monitor({}); m.remove(QStringLiteral("id")); return m; }()}) << invalid;
+        QTest::newRow("id empty") << withMonitors({monitor({{QStringLiteral("id"), QString()}})}) << invalid;
+        QTest::newRow("id 65 characters") << withMonitors({monitor({{QStringLiteral("id"), QString(65, QLatin1Char('x'))}})}) << invalid;
+        QTest::newRow("id with a control character") << withMonitors({monitor({{QStringLiteral("id"), QStringLiteral("a\nb")}})}) << invalid;
+        QTest::newRow("id not a string") << withMonitors({monitor({{QStringLiteral("id"), 7}})}) << invalid;
+        QTest::newRow("duplicate id") << withMonitors({monitor({}), monitor({{QStringLiteral("x"), 1920}, {QStringLiteral("primary"), false}})}) << invalid;
+        QTest::newRow("fractional width") << withMonitors({monitor({{QStringLiteral("width"), 1920.5}})}) << invalid;
+        QTest::newRow("too small") << withMonitors({monitor({{QStringLiteral("height"), 639}})}) << invalid;
+        QTest::newRow("too large") << withMonitors({monitor({{QStringLiteral("width"), 16385}})}) << invalid;
+        QTest::newRow("coordinate out of range") << withMonitors({monitor({{QStringLiteral("x"), 40000}})}) << invalid;
+        QTest::newRow("scale below 1") << withMonitors({monitor({{QStringLiteral("scale"), 0.75}})}) << invalid;
+        QTest::newRow("scale above 4") << withMonitors({monitor({{QStringLiteral("scale"), 4.05}})}) << invalid;
+        QTest::newRow("scale not in 0.05 steps") << withMonitors({monitor({{QStringLiteral("scale"), 1.33}})}) << invalid;
+        QTest::newRow("scale not a number") << withMonitors({monitor({{QStringLiteral("scale"), QStringLiteral("1.25")}})}) << invalid;
+        QTest::newRow("primary not bool") << withMonitors({monitor({{QStringLiteral("primary"), 1}})}) << invalid;
+        QTest::newRow("two without primary") << withMonitors({monitor({{QStringLiteral("primary"), false}}), monitor({{QStringLiteral("id"), QStringLiteral("n")}, {QStringLiteral("x"), 1920}, {QStringLiteral("primary"), false}})}) << invalid;
+        QTest::newRow("two primaries") << withMonitors({monitor({}), monitor({{QStringLiteral("id"), QStringLiteral("n")}, {QStringLiteral("x"), 1920}})}) << invalid;
+        QTest::newRow("overlap") << withMonitors({monitor({}), monitor({{QStringLiteral("id"), QStringLiteral("n")}, {QStringLiteral("x"), 1000}, {QStringLiteral("primary"), false}})}) << invalid;
+        QTest::newRow("mapping not array") << edit("mapping", QStringLiteral("x")) << invalid;
+        QTest::newRow("17 mapping entries") << [&] { QJsonArray a; for (int i = 0; i < 17; ++i) a.append(entry(QStringLiteral("H%1").arg(i), QStringLiteral("a"))); return withMapping(a); }() << invalid;
+        QTest::newRow("mapping entry not object") << withMapping({1}) << invalid;
+        QTest::newRow("mapping unknown key") << withMapping({QJsonObject{{QStringLiteral("hostOutput"), QStringLiteral("DP-1")}, {QStringLiteral("clientMonitor"), QStringLiteral("a")}, {QStringLiteral("x"), 1}}}) << invalid;
+        QTest::newRow("mapping host empty") << withMapping({entry(QString(), QStringLiteral("a"))}) << invalid;
+        QTest::newRow("mapping host 129 characters") << withMapping({entry(QString(129, QLatin1Char('H')), QStringLiteral("a"))}) << invalid;
+        QTest::newRow("mapping host not a string") << withMapping({QJsonObject{{QStringLiteral("hostOutput"), 3}, {QStringLiteral("clientMonitor"), QStringLiteral("a")}}}) << invalid;
+        QTest::newRow("mapping duplicate host") << withMapping({entry(QStringLiteral("DP-1"), QStringLiteral("a")), entry(QStringLiteral("DP-1"), QStringLiteral("b"))}) << invalid;
+        QTest::newRow("mapping client monitor not listed") << withMapping({entry(QStringLiteral("DP-1"), QStringLiteral("nope"))}) << QStringLiteral("unknownMonitor");
+    }
+    void consoleScreensMappedRequestRefusesMalformed()
+    {
+        QFETCH(QJsonObject, record);
+        QFETCH(QString, code);
+        QString refusal;
+        QVERIFY(!parseConsoleScreensMappedRequest(record, &refusal));
+        QCOMPARE(refusal, code);
+    }
+
+    void consoleScreensRecordCarriesTheMappedScreens()
+    {
+        ConsoleScreensDetail detail;
+        detail.layout = QStringLiteral("mapped");
+        detail.screens = {{QStringLiteral("DP-1"), QStringLiteral("Virtual-krdp-h0-1920x1080"), QStringLiteral("eDP-1"), 0, 1920, 1080, 1.25, true, true, false},
+                          {QStringLiteral("HDMI-A-1"), QStringLiteral("Virtual-krdp-h1-1920x1080"), QStringLiteral("eDP-1"), 1, 1920, 1080, 1.25, false, true, false}};
+        detail.unmappedMonitors = {QStringLiteral("DP-2")};
+        detail.unknownHosts = {QStringLiteral("DP-9")};
+        const auto record = consoleScreensRecord(true, true, QStringLiteral("connect"), detail);
+        QCOMPARE(record.value(QStringLiteral("layout")).toString(), QStringLiteral("mapped"));
+        const auto screens = record.value(QStringLiteral("screens")).toArray();
+        QCOMPARE(screens.size(), 2);
+        const auto first = screens.at(0).toObject();
+        QCOMPARE(first.value(QStringLiteral("host")).toString(), QStringLiteral("DP-1"));
+        QCOMPARE(first.value(QStringLiteral("output")).toString(), QStringLiteral("Virtual-krdp-h0-1920x1080"));
+        QCOMPARE(first.value(QStringLiteral("monitor")).toString(), QStringLiteral("eDP-1"));
+        QVERIFY(!first.contains(QStringLiteral("hostOutput"))); QVERIFY(!first.contains(QStringLiteral("clientMonitor")));
+        QCOMPARE(first.value(QStringLiteral("surface")).toInt(), 0);
+        QCOMPARE(first.value(QStringLiteral("width")).toInt(), 1920);
+        QCOMPARE(first.value(QStringLiteral("scale")).toDouble(), 1.25);
+        QVERIFY(first.value(QStringLiteral("primary")).toBool()); QVERIFY(first.value(QStringLiteral("default")).toBool());
+        QCOMPARE(record.value(QStringLiteral("unmappedMonitors")).toArray(), QJsonArray{QStringLiteral("DP-2")});
+        QCOMPARE(record.value(QStringLiteral("unknownHosts")).toArray(), QJsonArray{QStringLiteral("DP-9")});
+        // Without detail the record is the v1 record, byte for byte.
+        QCOMPARE(consoleScreensRecord(true, true, QStringLiteral("connect"), {}), consoleScreensRecord(true, true, QStringLiteral("connect")));
+        QVERIFY(!consoleScreensRecord(true, true).contains(QStringLiteral("layout")));
+        // M-8: a host screen was plugged or unplugged; the message is bounded.
+        ConsoleScreensDetail change;
+        change.message = QString(500, QLatin1Char('x'));
+        const auto changed = consoleScreensRecord(false, false, QStringLiteral("hostScreensChanged"), change);
+        QCOMPARE(changed.value(QStringLiteral("reason")).toString(), QStringLiteral("hostScreensChanged"));
+        QCOMPARE(changed.value(QStringLiteral("message")).toString().size(), 300);
+        QVERIFY(frame(record).size() < 4096);
+    }
+
+    // OPT-060 M-4: `console-screens-view`.
+    void consoleScreensViewWire()
+    {
+        const auto record = consoleScreensViewRecord({QStringLiteral("Virtual-krdp-h0-1920x1080"), QStringLiteral("DP-1")});
+        const auto parsed = parseConsoleScreensView(record);
+        QVERIFY(parsed);
+        QCOMPARE(parsed->names, (QStringList{QStringLiteral("Virtual-krdp-h0-1920x1080"), QStringLiteral("DP-1")}));
+        QVERIFY(parsed->indices.isEmpty());
+        // Integers are surface indices; an empty list is valid (this client shows nothing now).
+        QJsonObject mixed = record;
+        mixed.insert(QStringLiteral("visible"), QJsonArray{0, QStringLiteral("DP-2"), 3});
+        const auto both = parseConsoleScreensView(mixed);
+        QVERIFY(both); QCOMPARE(both->indices, (QVector<int>{0, 3})); QCOMPARE(both->names, QStringList{QStringLiteral("DP-2")});
+        QVERIFY(parseConsoleScreensView(consoleScreensViewRecord({})));
+        for (const auto &bad : {QJsonValue(1.5), QJsonValue(-1), QJsonValue(16), QJsonValue(true), QJsonValue(QString()), QJsonValue(QJsonObject{})}) {
+            auto r = record; r.insert(QStringLiteral("visible"), QJsonArray{bad});
+            QVERIFY2(!parseConsoleScreensView(r), qPrintable(QString::fromUtf8(QJsonDocument(QJsonArray{bad}).toJson(QJsonDocument::Compact))));
+        }
+        auto tooMany = record; QJsonArray a; for (int i = 0; i < 17; ++i) a.append(QString::number(i)); tooMany.insert(QStringLiteral("visible"), a);
+        QVERIFY(!parseConsoleScreensView(tooMany));
+        auto wrong = record; wrong.insert(QStringLiteral("v"), 2); QVERIFY(!parseConsoleScreensView(wrong));
+        wrong = record; wrong.insert(QStringLiteral("extra"), 1); QVERIFY(!parseConsoleScreensView(wrong));
+        wrong = record; wrong.remove(QStringLiteral("visible")); QVERIFY(!parseConsoleScreensView(wrong));
+        wrong = record; wrong.insert(QStringLiteral("type"), QStringLiteral("console-screens")); QVERIFY(!parseConsoleScreensView(wrong));
+    }
+
     void consoleScreensRecordShape()
     {
         const auto active = consoleScreensRecord(true, true);
@@ -205,7 +389,7 @@ private Q_SLOTS:
         // The optional reason is carried only when it is one of the known values.
         QVERIFY(!consoleScreensRecord(false, false).contains(QStringLiteral("reason")));
         QVERIFY(!consoleScreensRecord(false, false, QStringLiteral("nonsense")).contains(QStringLiteral("reason")));
-        for (const char *reason : {"connect", "deskInput", "restoreRequest", "workerExit", "disconnect", "failed", "lockRestore"}) {
+        for (const char *reason : {"connect", "deskInput", "restoreRequest", "workerExit", "disconnect", "failed", "lockRestore", "tooManyScreens", "hostScreensChanged"}) {
             QCOMPARE(consoleScreensRecord(false, false, QString::fromLatin1(reason)).value(QStringLiteral("reason")).toString(), QString::fromLatin1(reason));
         }
         // The record survives the frame/deframe round trip an old client's parser performs; it is simply

@@ -11,7 +11,10 @@
 #include <QList>
 #include <QPoint>
 #include <QSize>
+#include <QRect>
 #include <QString>
+#include <QStringList>
+#include <QVector>
 
 #include "ClientDisplayInfo.h"
 #include "krdp_export.h"
@@ -236,6 +239,9 @@ struct ConsoleScreensCapabilities {
     bool replace = false;
     bool restore = false;
     bool request = false; ///< `console-screens-request` is honoured: the gap channel for a client with ONE monitor (no standard block)
+    bool mapped = false; ///< OPT-060 M-3: `console-screens-request` v2 (layout "mapped", N host screens onto M client monitors)
+    int maxScreens = 0; ///< 1..16 with `mapped`: the most host screens one connection replaces; 0 = not advertised
+    bool view = false; ///< OPT-060 M-4: `console-screens-view` is honoured (the host forwards only the screens the client shows)
     bool operator==(const ConsoleScreensCapabilities &) const = default;
 };
 
@@ -273,9 +279,32 @@ KRDP_EXPORT QJsonObject codecRecord(const QString &selected, std::optional<bool>
  * connection (Console Replace), \a canRestore = this connection may ask `console-screens-restore`.
  * Only sent to a client that saw `capabilities.console.screens`. \a reason (optional, omitted when empty or not one
  * of the known values) says why the edge happened: "connect" with active, and with inactive "deskInput" (local
- * keyboard/mouse), "restoreRequest" (the client asked), "workerExit", "disconnect", "failed", "lockRestore".
+ * keyboard/mouse), "restoreRequest" (the client asked), "workerExit", "disconnect", "failed", "lockRestore", "tooManyScreens" (more host screens than the cap; nothing was turned off) and "hostScreensChanged" (M-8: a host screen was plugged or unplugged during Replace).
  */
-KRDP_EXPORT QJsonObject consoleScreensRecord(bool active, bool canRestore, const QString &reason = {});
+/** One replaced host screen of a `layout:"mapped"` Replace, as `console-screens.screens[]` reports it (OPT-060 M-3). */
+struct ConsoleScreenEntry {
+    QString hostOutput; ///< wire key `host`: the host screen's own connector name ("DP-1"); empty when the broker does not know it
+    QString output; ///< KWin name of the stand-in output, "Virtual-" prefix included
+    QString clientMonitor; ///< wire key `monitor`: the client monitor id it is shown on
+    int surface = -1; ///< its RDPGFX surface index (position in the layout record / `visible` integers); -1 = not known
+    int width = 0; ///< physical pixels of the stand-in
+    int height = 0;
+    double scale = 1;
+    bool primary = false;
+    bool isDefault = true; ///< mapped by the default rule rather than by an entry of the request
+    bool clamped = false; ///< scaled down to the per-output limit (show it Scaled)
+    bool operator==(const ConsoleScreenEntry &) const = default;
+};
+/** The optional extras of a `console-screens` record (OPT-060 M-3/M-8). All absent = the v1 record. */
+struct ConsoleScreensDetail {
+    QString layout; ///< "mapped" or empty
+    QVector<ConsoleScreenEntry> screens; ///< host order (primary first, then left to right, top to bottom)
+    QStringList unmappedMonitors; ///< client monitors that show no host screen
+    QStringList unknownHosts; ///< request mapping entries that named no enabled host screen (ignored)
+    QString message; ///< English sentence for a human (failed / hostChange)
+    bool operator==(const ConsoleScreensDetail &) const = default;
+};
+KRDP_EXPORT QJsonObject consoleScreensRecord(bool active, bool canRestore, const QString &reason = {}, const ConsoleScreensDetail &detail = {});
 
 /**
  * `console-screens-request` (OPT-060 D0): the client's explicit request that the host replace its screens
@@ -288,6 +317,53 @@ KRDP_EXPORT QJsonObject consoleScreensRecord(bool active, bool canRestore, const
 KRDP_EXPORT std::optional<QVector<VideoMonitor>> parseConsoleScreensRequest(const QJsonObject &record);
 /** The request a client sends (the requestId is added when it is sent). Used by tests. */
 KRDP_EXPORT QJsonObject consoleScreensRequestRecord(const QVector<VideoMonitor> &monitors);
+
+/** A client monitor of a v2 request. `geometry` is in physical pixels; `scalePercent` is 100..400 in steps of 5. */
+struct MappedClientMonitor {
+    QString id;
+    QRect geometry;
+    int scalePercent = 100;
+    bool primary = false;
+    bool operator==(const MappedClientMonitor &) const = default;
+};
+struct MappedHostEntry {
+    QString hostOutput;
+    QString clientMonitor;
+    bool operator==(const MappedHostEntry &) const = default;
+};
+struct ConsoleScreensMappedRequest {
+    QVector<MappedClientMonitor> monitors;
+    QVector<MappedHostEntry> mapping; ///< optional; missing or partial = the default mapping for the host screens it does not name
+    bool operator==(const ConsoleScreensMappedRequest &) const = default;
+};
+/**
+ * `console-screens-request` v2 (OPT-060 M-3, contract (h)): `{"type","v":2,"replace":true,"layout":"mapped",
+ * "monitors":[{"id","x","y","width","height","scale"?,"primary"?}],"mapping"?:[{"host","monitor"}]}`.
+ * Strict: exactly those keys (mapping keys are `host`/`monitor`; `hostOutput`/`clientMonitor` are accepted as aliases, never mixed),
+ * 1..16 monitors with unique ids of 1..64 printable characters, integer x/y within +-32767, width/height 640..16384,
+ * `scale` a number 1..4 in steps of 0.05 (missing = 1), exactly one primary among 2+ (a lone monitor is the primary),
+ * no overlap; `mapping` 0..16 entries with unique `hostOutput` of 1..128 printable characters whose `clientMonitor`
+ * is one of the listed ids. std::nullopt otherwise, with \a refusal "invalid" or "unknownMonitor" (a mapping entry
+ * names a client monitor the request does not list). An unknown HOST name is not an error here: the broker ignores and
+ * reports it.
+ */
+KRDP_EXPORT std::optional<ConsoleScreensMappedRequest> parseConsoleScreensMappedRequest(const QJsonObject &record, QString *refusal = nullptr);
+/** The v2 request a client sends (requestId added when sent). Used by tests and as the contract's reference shape. */
+KRDP_EXPORT QJsonObject consoleScreensMappedRequestRecord(const ConsoleScreensMappedRequest &request);
+
+/**
+ * `console-screens-view` (OPT-060 M-4): `{"type","v":1,"visible":[...]}`. Each entry is a string (a stand-in output
+ * name with or without its "Virtual-" prefix, or a host connector name from `console-screens.screens[]`) or an
+ * integer (the RDPGFX surface index = position in `screens[]`/the layout record). 0..16 entries; `visible` is required.
+ * std::nullopt when malformed.
+ */
+struct ConsoleScreensView {
+    QStringList names;
+    QVector<int> indices;
+    bool operator==(const ConsoleScreensView &) const = default;
+};
+KRDP_EXPORT std::optional<ConsoleScreensView> parseConsoleScreensView(const QJsonObject &record);
+KRDP_EXPORT QJsonObject consoleScreensViewRecord(const QStringList &names);
 
 /**
  * `session-end` (AUD-FIX2 F4), unsolicited, sent to a KRDPCTL client just before the server

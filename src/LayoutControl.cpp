@@ -463,11 +463,18 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
                                    QJsonObject{{QStringLiteral("replace"), screens->replace},
                                                 {QStringLiteral("restore"), screens->restore},
                                                 {QStringLiteral("request"), screens->request}}}});
+        auto group = record.value(QStringLiteral("console")).toObject();
+        auto inner = group.value(QStringLiteral("screens")).toObject();
+        if (screens->mapped) inner.insert(QStringLiteral("mapped"), true);
+        if (screens->maxScreens > 0) inner.insert(QStringLiteral("maxScreens"), screens->maxScreens);
+        if (screens->view) inner.insert(QStringLiteral("view"), true);
+        group.insert(QStringLiteral("screens"), inner);
+        record.insert(QStringLiteral("console"), group);
     }
     return record;
 }
 
-QJsonObject consoleScreensRecord(bool active, bool canRestore, const QString &reason)
+QJsonObject consoleScreensRecord(bool active, bool canRestore, const QString &reason, const ConsoleScreensDetail &detail)
 {
     QJsonObject record{
         {QStringLiteral("type"), QStringLiteral("console-screens")},
@@ -476,9 +483,42 @@ QJsonObject consoleScreensRecord(bool active, bool canRestore, const QString &re
         {QStringLiteral("canRestore"), canRestore},
     };
     static const QStringList known{QStringLiteral("connect"),    QStringLiteral("deskInput"), QStringLiteral("restoreRequest"), QStringLiteral("workerExit"),
-                                   QStringLiteral("disconnect"), QStringLiteral("failed"),    QStringLiteral("lockRestore")};
+                                   QStringLiteral("disconnect"), QStringLiteral("failed"),    QStringLiteral("lockRestore"),     QStringLiteral("tooManyScreens"), QStringLiteral("hostScreensChanged")};
     if (known.contains(reason)) {
         record.insert(QStringLiteral("reason"), reason);
+    }
+    if (!detail.layout.isEmpty()) {
+        record.insert(QStringLiteral("layout"), detail.layout);
+    }
+    if (!detail.screens.isEmpty()) {
+        QJsonArray screens;
+        for (const auto &screen : detail.screens) {
+            QJsonObject entry{{QStringLiteral("output"), screen.output},
+                              {QStringLiteral("monitor"), screen.clientMonitor},
+                              {QStringLiteral("width"), screen.width},
+                              {QStringLiteral("height"), screen.height},
+                              {QStringLiteral("scale"), screen.scale},
+                              {QStringLiteral("primary"), screen.primary},
+                              {QStringLiteral("default"), screen.isDefault},
+                              {QStringLiteral("clamped"), screen.clamped}};
+            if (screen.surface >= 0) {
+                entry.insert(QStringLiteral("surface"), screen.surface);
+            }
+            if (!screen.hostOutput.isEmpty()) {
+                entry.insert(QStringLiteral("host"), screen.hostOutput);
+            }
+            screens.append(entry);
+        }
+        record.insert(QStringLiteral("screens"), screens);
+    }
+    if (!detail.unmappedMonitors.isEmpty()) {
+        record.insert(QStringLiteral("unmappedMonitors"), QJsonArray::fromStringList(detail.unmappedMonitors));
+    }
+    if (!detail.unknownHosts.isEmpty()) {
+        record.insert(QStringLiteral("unknownHosts"), QJsonArray::fromStringList(detail.unknownHosts));
+    }
+    if (!detail.message.isEmpty()) {
+        record.insert(QStringLiteral("message"), detail.message.left(300));
     }
     return record;
 }
@@ -544,6 +584,162 @@ QJsonObject consoleScreensRequestRecord(const QVector<VideoMonitor> &monitors)
     }
     return {{QStringLiteral("type"), QStringLiteral("console-screens-request")}, {QStringLiteral("v"), ProtocolVersion},
             {QStringLiteral("replace"), true}, {QStringLiteral("monitors"), array}};
+}
+
+namespace
+{
+bool printableName(const QString &name, int maximum)
+{
+    return !name.isEmpty() && name.size() <= maximum
+        && std::none_of(name.cbegin(), name.cend(), [](const QChar c) { return c.unicode() < 0x20 || c.unicode() == 0x7f; });
+}
+bool wholeNumber(const QJsonValue &value, int minimum, int maximum, int *out)
+{
+    if (!value.isDouble()) return false;
+    const double number = value.toDouble();
+    if (number != std::floor(number) || number < minimum || number > maximum) return false;
+    *out = int(number);
+    return true;
+}
+}
+
+std::optional<ConsoleScreensMappedRequest> parseConsoleScreensMappedRequest(const QJsonObject &record, QString *refusal)
+{
+    const auto fail = [refusal](const char *code) -> std::optional<ConsoleScreensMappedRequest> {
+        if (refusal) *refusal = QLatin1String(code);
+        return std::nullopt;
+    };
+    static const QSet<QString> keys{QStringLiteral("type"), QStringLiteral("v"), QStringLiteral("replace"), QStringLiteral("layout"),
+                                    QStringLiteral("monitors"), QStringLiteral("mapping")};
+    static const QSet<QString> monitorKeys{QStringLiteral("id"), QStringLiteral("x"), QStringLiteral("y"), QStringLiteral("width"),
+                                           QStringLiteral("height"), QStringLiteral("scale"), QStringLiteral("primary")};
+    static const QSet<QString> entryKeys{QStringLiteral("hostOutput"), QStringLiteral("clientMonitor"), QStringLiteral("host"), QStringLiteral("monitor")};
+    for (auto it = record.begin(); it != record.end(); ++it) {
+        if (!keys.contains(it.key())) return fail("invalid");
+    }
+    if (record.value(QStringLiteral("type")) != QJsonValue(QStringLiteral("console-screens-request")) || record.value(QStringLiteral("v")) != QJsonValue(2)
+        || record.value(QStringLiteral("replace")) != QJsonValue(true) || record.value(QStringLiteral("layout")) != QJsonValue(QStringLiteral("mapped"))
+        || !record.value(QStringLiteral("monitors")).isArray()) {
+        return fail("invalid");
+    }
+    const auto monitorArray = record.value(QStringLiteral("monitors")).toArray();
+    if (monitorArray.isEmpty() || monitorArray.size() > ClientDisplay::MaxMonitors) return fail("invalid");
+    ConsoleScreensMappedRequest request;
+    QSet<QString> ids;
+    qsizetype primaries = 0;
+    for (const auto &entry : monitorArray) {
+        if (!entry.isObject()) return fail("invalid");
+        const auto object = entry.toObject();
+        for (auto it = object.begin(); it != object.end(); ++it) {
+            if (!monitorKeys.contains(it.key())) return fail("invalid");
+        }
+        MappedClientMonitor monitor;
+        const auto id = object.value(QStringLiteral("id"));
+        int x = 0, y = 0, width = 0, height = 0;
+        if (!id.isString() || !printableName(id.toString(), 64) || ids.contains(id.toString())
+            || !wholeNumber(object.value(QStringLiteral("x")), -ClientDisplay::MaxCoordinate, ClientDisplay::MaxCoordinate, &x)
+            || !wholeNumber(object.value(QStringLiteral("y")), -ClientDisplay::MaxCoordinate, ClientDisplay::MaxCoordinate, &y)
+            || !wholeNumber(object.value(QStringLiteral("width")), ClientDisplay::MinDimension, 16384, &width)
+            || !wholeNumber(object.value(QStringLiteral("height")), ClientDisplay::MinDimension, 16384, &height)) {
+            return fail("invalid");
+        }
+        const auto scale = object.value(QStringLiteral("scale"));
+        if (!scale.isUndefined()) {
+            if (!scale.isDouble()) return fail("invalid");
+            const double hundredths = scale.toDouble() * 100.0;
+            const double rounded = std::round(hundredths);
+            if (!std::isfinite(hundredths) || rounded < 100 || rounded > 400 || std::abs(hundredths - rounded) > 1e-6 || (int(rounded) % 5)) return fail("invalid");
+            monitor.scalePercent = int(rounded);
+        }
+        const auto primary = object.value(QStringLiteral("primary"));
+        if (!primary.isUndefined() && !primary.isBool()) return fail("invalid");
+        monitor.id = id.toString();
+        monitor.geometry = QRect(x, y, width, height);
+        monitor.primary = primary.toBool(false);
+        ids.insert(monitor.id);
+        primaries += monitor.primary ? 1 : 0;
+        request.monitors.append(monitor);
+    }
+    if (request.monitors.size() == 1) {
+        request.monitors[0].primary = true;
+    } else {
+        QVector<VideoMonitor> rectangles;
+        for (const auto &monitor : std::as_const(request.monitors)) rectangles.append({monitor.geometry, monitor.primary});
+        if (primaries != 1 || !ClientDisplay::disjoint(rectangles)) return fail("invalid");
+    }
+    const auto mapping = record.value(QStringLiteral("mapping"));
+    if (!mapping.isUndefined()) {
+        if (!mapping.isArray() || mapping.toArray().size() > ClientDisplay::MaxMonitors) return fail("invalid");
+        QSet<QString> hosts;
+        for (const auto &entry : mapping.toArray()) {
+            if (!entry.isObject()) return fail("invalid");
+            const auto object = entry.toObject();
+            for (auto it = object.begin(); it != object.end(); ++it) {
+                if (!entryKeys.contains(it.key())) return fail("invalid");
+            }
+            // The canonical spelling is host/monitor (spec 3.2, what the client sends); hostOutput/clientMonitor is accepted too, never both.
+            if ((object.contains(QStringLiteral("hostOutput")) && object.contains(QStringLiteral("host")))
+                || (object.contains(QStringLiteral("clientMonitor")) && object.contains(QStringLiteral("monitor")))) return fail("invalid");
+            const auto host = object.contains(QStringLiteral("hostOutput")) ? object.value(QStringLiteral("hostOutput")) : object.value(QStringLiteral("host"));
+            const auto monitor = object.contains(QStringLiteral("clientMonitor")) ? object.value(QStringLiteral("clientMonitor")) : object.value(QStringLiteral("monitor"));
+            if (!host.isString() || !monitor.isString() || !printableName(host.toString(), 128) || hosts.contains(host.toString())) return fail("invalid");
+            if (!ids.contains(monitor.toString())) return fail("unknownMonitor");
+            hosts.insert(host.toString());
+            request.mapping.append({host.toString(), monitor.toString()});
+        }
+    }
+    return request;
+}
+
+QJsonObject consoleScreensMappedRequestRecord(const ConsoleScreensMappedRequest &request)
+{
+    QJsonArray monitors;
+    for (const auto &monitor : request.monitors) {
+        monitors.append(QJsonObject{{QStringLiteral("id"), monitor.id}, {QStringLiteral("x"), monitor.geometry.x()}, {QStringLiteral("y"), monitor.geometry.y()},
+                                    {QStringLiteral("width"), monitor.geometry.width()}, {QStringLiteral("height"), monitor.geometry.height()},
+                                    {QStringLiteral("scale"), monitor.scalePercent / 100.0}, {QStringLiteral("primary"), monitor.primary}});
+    }
+    QJsonObject record{{QStringLiteral("type"), QStringLiteral("console-screens-request")}, {QStringLiteral("v"), 2}, {QStringLiteral("replace"), true},
+                       {QStringLiteral("layout"), QStringLiteral("mapped")}, {QStringLiteral("monitors"), monitors}};
+    if (!request.mapping.isEmpty()) {
+        QJsonArray mapping;
+        for (const auto &entry : request.mapping)
+            mapping.append(QJsonObject{{QStringLiteral("host"), entry.hostOutput}, {QStringLiteral("monitor"), entry.clientMonitor}});
+        record.insert(QStringLiteral("mapping"), mapping);
+    }
+    return record;
+}
+
+std::optional<ConsoleScreensView> parseConsoleScreensView(const QJsonObject &record)
+{
+    static const QSet<QString> keys{QStringLiteral("type"), QStringLiteral("v"), QStringLiteral("visible")};
+    for (auto it = record.begin(); it != record.end(); ++it) {
+        if (!keys.contains(it.key())) return std::nullopt;
+    }
+    if (record.value(QStringLiteral("type")) != QJsonValue(QStringLiteral("console-screens-view")) || record.value(QStringLiteral("v")) != QJsonValue(1)
+        || !record.value(QStringLiteral("visible")).isArray()) {
+        return std::nullopt;
+    }
+    const auto array = record.value(QStringLiteral("visible")).toArray();
+    if (array.size() > ClientDisplay::MaxMonitors) return std::nullopt;
+    ConsoleScreensView view;
+    for (const auto &entry : array) {
+        int index = 0;
+        if (entry.isString() && printableName(entry.toString(), 128)) {
+            view.names.append(entry.toString());
+        } else if (wholeNumber(entry, 0, ClientDisplay::MaxMonitors - 1, &index)) {
+            view.indices.append(index);
+        } else {
+            return std::nullopt;
+        }
+    }
+    return view;
+}
+
+QJsonObject consoleScreensViewRecord(const QStringList &names)
+{
+    return {{QStringLiteral("type"), QStringLiteral("console-screens-view")}, {QStringLiteral("v"), 1},
+            {QStringLiteral("visible"), QJsonArray::fromStringList(names)}};
 }
 
 QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, const QString &reason)
