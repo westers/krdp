@@ -188,8 +188,8 @@ private Q_SLOTS:
         }
         qputenv("PATH", (bin + QStringLiteral(":") + qEnvironmentVariable("PATH")).toUtf8());
         qputenv("FAKE_KSCREEN_STATE", state.toUtf8());
-        const QString journalPath = directory.filePath(QStringLiteral("state/krdp/output-restore.json"));
-        qputenv("KRDP_OUTPUT_RESTORE_JOURNAL", journalPath.toUtf8());
+        const QString journalPath = directory.filePath(QStringLiteral("state/farside/output-restore.json"));
+        qputenv("FARSIDE_OUTPUT_RESTORE_JOURNAL", journalPath.toUtf8());
         QCOMPARE(PhysicalOutputGuard::stateFilePath(), journalPath);
 
         Journal journal;
@@ -218,7 +218,7 @@ private Q_SLOTS:
         QVERIFY(outputs[1].toObject().value(QStringLiteral("enabled")).toBool());
         QCOMPARE(outputs[0].toObject().value(QStringLiteral("priority")).toInt(), 1);
         QCOMPARE(outputs[0].toObject().value(QStringLiteral("currentModeId")).toString(), QStringLiteral("1")); // Console entry replayed too.
-        qunsetenv("KRDP_OUTPUT_RESTORE_JOURNAL");
+        qunsetenv("FARSIDE_OUTPUT_RESTORE_JOURNAL");
     }
 };
 

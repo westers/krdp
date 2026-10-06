@@ -23,9 +23,9 @@ namespace KRdp
  * console worker before it reports Ready (so broker start and worker exit
  * both lead to a replay), and krdpserver at start or `--restore-outputs`.
  *
- * File: `$XDG_STATE_HOME/krdp/output-restore.json` of the desktop user
- * (`~/.local/state/krdp/output-restore.json`), overridable with
- * `KRDP_OUTPUT_RESTORE_JOURNAL`. Format (version 1):
+ * File: `$XDG_STATE_HOME/farside/output-restore.json` of the desktop user
+ * (`~/.local/state/farside/output-restore.json`), overridable with
+ * `FARSIDE_OUTPUT_RESTORE_JOURNAL`. Format (version 1):
  *
  *     {"format": "krdp-output-restore", "version": 1, "entries": [
  *       {"owner": "console-resize", "pid": 4242, "session": "3",
