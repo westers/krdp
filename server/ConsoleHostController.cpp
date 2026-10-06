@@ -338,7 +338,13 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         const auto capture = capturePolicy();
         const bool selected = capture.mode == MonitorCapturePolicy::Mode::Primary
             || capture.mode == MonitorCapturePolicy::Mode::Specific || m_configuredConsoleOutputs;
-        const bool independentTransition = ((changed && (outputs.monitors.size() > 1 || wasMulti)) || selected)
+        // A client that still holds the indexed surfaces of an earlier multi-output capture (an ended Replace, whose worker
+        // was replaced) needs the same verified return to one output as a 2->1 change, or its single keyframe is held
+        // back until some other topology query happens (OPT-060 D2: ~15 s without a picture on an idle screen).
+        const bool clientHoldsSurfaces = outputs.monitors.size() == 1 && std::any_of(m_clients.cbegin(), m_clients.cend(), [](const auto &client) {
+            return !client->wireLayout.isEmpty();
+        });
+        const bool independentTransition = ((changed && (outputs.monitors.size() > 1 || wasMulti || clientHoldsSurfaces)) || selected)
             && !m_pendingPhysical && !m_pendingVirtual;
         if (changed) {
             m_topologyAvailable = false;

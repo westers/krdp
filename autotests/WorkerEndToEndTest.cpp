@@ -248,6 +248,8 @@ private Q_SLOTS:
     void consoleConfiguredOutputs();
     void consoleReplaceRelock_data();
     void consoleReplaceRelock();
+    void consoleFreshWorkerFirstFrame_data();
+    void consoleFreshWorkerFirstFrame();
     void consoleReplaceFailsOpen_data();
     void consoleReplaceFailsOpen();
     void codecSwitchAtAttach_data();
@@ -833,6 +835,52 @@ sys.exit(result.returncode)
     qInfo().noquote() << "OPT-049 row: lock" << offsetMs << "ms vs release, restore at" << restoreAt << "ms, worker exit at" << exitAt << "ms, greeter kills" << locker.kills()
                       << "re-lock calls" << locker.relockCalls() << "worker re-lock lines" << log.count(QStringLiteral("Console release: re-locking"))
                       << "held" << log.contains(QStringLiteral("holding the release"));
+}
+
+// OPT-060 D2 probe: how long a FRESH worker (as after a mid-connection replacement) takes to deliver its first
+// frame on a static screen, with and without the codec switch the broker sends right after Ready (avc420 starts,
+// then hevc replaces it on the same node). The private compositor never repaints by itself, like an idle lock screen.
+void WorkerEndToEndTest::consoleFreshWorkerFirstFrame_data()
+{
+    QTest::addColumn<bool>("switchToHevc");
+    QTest::newRow("avc420 only") << false;
+    QTest::newRow("avc420 first, then hevc (the broker's order)") << true;
+}
+
+void WorkerEndToEndTest::consoleFreshWorkerFirstFrame()
+{
+    QFETCH(bool, switchToHevc);
+    if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
+    auto *s = session(2); QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    QStringList timings;
+    for (int trial = 0; trial < 3; ++trial) {
+        ConsoleWorkerEndpoint endpoint; WorkerRun run;
+        ConsoleWorkerWire::Outputs outputs;
+        connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&](const auto &value) { outputs = value; });
+        QVERIFY(startWorker(*s, false, endpoint, run));
+        const auto reap = qScopeGuard([&] {
+            if (!QFileInfo::exists(exitFile)) { endpoint.stopWorker(); (void)QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 30000); }
+        });
+        QTRY_VERIFY_WITH_TIMEOUT((endpoint.ready() && outputs.monitors.size() == 2) || !run.errors.isEmpty(), 45000);
+        QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+        run.frames.clear();
+        QElapsedTimer sinceBind; sinceBind.start();
+        endpoint.setControlState({1, true});
+        ConsoleWorkerWire::EncoderConfig config{.generation = 1, .codec = VideoCodec::Avc420, .settings = CodecPolicy::EncoderSettings{.hardware = false}};
+        QVERIFY(endpoint.setEncoderConfig(config));
+        if (switchToHevc) {
+            config.codec = VideoCodec::Hevc; config.settings = CodecPolicy::EncoderSettings{.hardware = true};
+            QVERIFY(endpoint.setEncoderConfig(config));
+        }
+        endpoint.requestKeyFrame();
+        const bool got = QTest::qWaitFor([&] { return !run.frames.isEmpty() || !run.errors.isEmpty(); }, 40000);
+        timings << (got && run.errors.isEmpty() ? QStringLiteral("%1 ms").arg(sinceBind.elapsed()) : QStringLiteral("none in 40 s"));
+        stopWorker(*s, endpoint);
+    }
+    qInfo().noquote() << "D2 probe: first frame after bind" << (switchToHevc ? "(avc420 then hevc)" : "(avc420)") << timings.join(QStringLiteral(", "));
 }
 
 void WorkerEndToEndTest::consoleReplaceFailsOpen_data()

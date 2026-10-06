@@ -516,6 +516,68 @@ private Q_SLOTS:
         }
     }
 
+    // OPT-060 D2: after a mid-connection worker replacement (Replace over, plain capture again) the client still holds the
+    // two RDPGFX surfaces of the ended Replace. The new worker's single keyframe was held back for as long as no topology
+    // existed, so the client saw no picture until something asked the worker for one (about 15 s on Sol).
+    void workerReplacementAfterReplaceResetsTheClientSurfacesPromptly()
+    {
+        RequestHarness h("[General]\n", false);
+        auto &host = h.host; auto &client = *h.client;
+        host.m_inputEnabled = true; client.session->setWorkerActive(true);
+        const QVector<VideoMonitor> pair{{QRect(0, 0, 1920, 1080), true}, {QRect(1920, 0, 1920, 1080), false}};
+        client.wireLayout = pair; // installed during the Replace
+        // The replaced worker is gone: the broker forgets its outputs and topology (startWorker / setWorkerActive(false)).
+        host.setWorkerActive(false);
+        host.m_outputs = {};
+        host.setWorkerActive(true); host.m_inputEnabled = true; client.session->setWorkerActive(true);
+        // The replacement captures the host's one restored screen as plain workspace capture.
+        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("DP-3"), QRect(0, 0, 1920, 1080), 1, true}}});
+        // Its topology is read back like any multi-to-single return, instead of waiting for someone else's query.
+        QVERIFY(host.m_layoutAwaitingReadback);
+        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("DP-3"), QSize(1920, 1080), QRect(0, 0, 1920, 1080), 1, true, 1, true}}});
+        QVERIFY(host.m_topologyAvailable); QVERIFY(!host.m_layoutAwaitingReadback);
+        VideoFrame frame; frame.size = QSize(1920, 1080); frame.isKeyFrame = true; frame.monitors = {{QRect(0, 0, 1920, 1080), true}};
+        Q_EMIT host.m_endpoint.frameReceived(frame);
+        QVERIFY(client.wireLayout.isEmpty()); // one surface again, the picture is not held back
+    }
+
+    // OPT-060 D3: the Console worker exits after a configured release and the next connection finds a fresh one.
+    // A connection that arrives while there is no worker is admitted, waits, and gets a fresh Replace attempt when the
+    // new worker is ready; nothing of the previous connection's spent attempt carries over.
+    void reconnectWhileTheWorkerIsBeingReplacedGetsItsOwnReplaceAttempt()
+    {
+        QTemporaryDir runtime; QVERIFY(runtime.isValid());
+        Server server; RdpConnection first(&server, -1), second(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
+        host.setUserSettingsReader([](quint32) { return BrokerUserSettings::parse("[General]\n"); });
+        host.setDisplayInfoProvider([](RdpConnection *) { return monitorBlock(true); });
+        QVERIFY(host.m_endpoint.listen(runtime.filePath(QStringLiteral("worker-1.sock")),
+            {ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000}, QByteArray(32, 'x')));
+        host.addClient(&first);
+        auto *a = host.m_clients.front().get();
+        a->uid = 1000; host.loadUserSettings(*a); host.m_control.admit(a->id); host.syncControlState();
+        QVERIFY(a->replaceAttempted);
+        // The connection ends and the worker exits after releasing the outputs (D3: by design, a replacement proves capture).
+        host.clearPhysicalLease("worker exited");
+        QVERIFY(a->replaceSpent);
+        host.removeClient(&first); // the first connection is gone
+        host.m_endpoint.close();
+        // A new connection arrives with no worker listening yet (the window is about 3 s after the fix of D1, 10 s before it).
+        host.addClient(&second);
+        auto *b = host.m_clients.back().get();
+        b->uid = 1000; host.loadUserSettings(*b);
+        QVERIFY(b->codec->consoleVirtualPolicy().enabled); QVERIFY(!b->replaceAttempted);
+        host.m_control.admit(b->id); host.syncControlState();
+        QVERIFY(!host.m_configuredConsoleOutputs); // no worker: nothing to arm yet, and nothing breaks
+        // The replacement worker becomes ready: the same arming a first connection gets.
+        QVERIFY(host.m_endpoint.listen(runtime.filePath(QStringLiteral("worker-2.sock")),
+            {ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000}, QByteArray(32, 'y')));
+        host.armConfiguredConsoleOutputs();
+        QVERIFY(host.m_configuredConsoleOutputs); QVERIFY(b->replaceAttempted); QVERIFY(!b->replaceSpent);
+        QVERIFY(host.m_clients.size() == 1); // only the new connection exists; it never inherited the old attempt
+    }
+
     // OPT-060: `console-screens` carries why it ended (contract (h)).
     void consoleScreensEndReason_data()
     {
