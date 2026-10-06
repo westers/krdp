@@ -108,6 +108,9 @@ if [ -n "${KRDP_E2E_CURSOR_CLIENT:-}" ]; then
     env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland "$KRDP_E2E_CURSOR_CLIENT" "$R/cursor-shape" >"$HOME/cursor-client.log" 2>&1 & children="$children $!"
     sleep 1
 fi
+# OPT-060 S3: stand-in ScreenSaver service (inside the sandbox: the bus refuses outside clients); idle until told.
+mkdir -p "$R/locker"
+"$KRDP_E2E_FAKE_LOCKER" "$R/locker" "$HOME/greeter-alive" >"$HOME/fake-locker.log" 2>&1 & children="$children $!"
 : >"$R/session-ready"
 set +e
 # One worker per broker socket, like the desktop loop; worker-args says which kind (console or virtual).
@@ -243,6 +246,8 @@ private Q_SLOTS:
     void consoleCaptureSelection();
     void consoleConfiguredOutputs_data();
     void consoleConfiguredOutputs();
+    void consoleReplaceRelock_data();
+    void consoleReplaceRelock();
     void consoleReplaceFailsOpen_data();
     void consoleReplaceFailsOpen();
     void codecSwitchAtAttach_data();
@@ -350,6 +355,7 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
     bus.write(QStringLiteral("<!DOCTYPE busconfig PUBLIC \"-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN\"\n"
                              " \"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd\">\n"
                              "<busconfig><type>session</type><listen>unix:path=%1/bus</listen><auth>EXTERNAL</auth>\n"
+                             "<apparmor mode=\"disabled\"/>\n" // inside the sandbox the bus cannot query AppArmor (read-only /sys); S3 needs to own a name
                              "<policy context=\"default\"><allow send_destination=\"*\"/><allow receive_sender=\"*\"/><allow own=\"*\"/></policy>\n"
                              "</busconfig>\n")
                   .arg(runtime)
@@ -412,6 +418,7 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
     // AUD-FIX11: motion as on cray (testsrc2 at 30 fps); KRDP_E2E_MOTION=0 turns it off.
     if (motion && qEnvironmentVariable("KRDP_E2E_MOTION") != QLatin1String("0") && !QStandardPaths::findExecutable(QStringLiteral("ffplay")).isEmpty())
         set("KRDP_E2E_MOTION", QStringLiteral("1"));
+    set("KRDP_E2E_FAKE_LOCKER", QStringLiteral(KRDP_E2E_FAKE_LOCKER));
     if (cursorClient) set("KRDP_E2E_CURSOR_CLIENT", QStringLiteral(KRDP_E2E_CURSOR_CLIENT));
     if (qEnvironmentVariableIsSet("KRDP_E2E_LOGGING_RULES")) set("QT_LOGGING_RULES", qEnvironmentVariable("KRDP_E2E_LOGGING_RULES"));
     if (qEnvironmentVariableIsSet("KRDP_E2E_MESSAGE_PATTERN")) set("QT_MESSAGE_PATTERN", qEnvironmentVariable("KRDP_E2E_MESSAGE_PATTERN"));
@@ -625,6 +632,189 @@ void WorkerEndToEndTest::consoleCaptureSelection()
 
 // OPT-060 S2: a Replace attempt that cannot happen must restore, leave the host's outputs alone and
 // still end in a normal Console picture; an unverified journal never means a black Console.
+void WorkerEndToEndTest::consoleReplaceRelock_data()
+{
+    QTest::addColumn<int>("offsetMs");
+    QTest::addColumn<bool>("alwaysKill");
+    // The user's lock, relative to the start of the release (negative: before it, positive: after it).
+    for (const int offset : {-2500, -2000, -1500, -1000, -500, 0, 500, 1000, 1500, 2000})
+        QTest::newRow(qPrintable(QStringLiteral("lock %1 ms %2 the release").arg(qAbs(offset)).arg(offset < 0 ? QStringLiteral("before") : QStringLiteral("after")))) << offset << false;
+    // Even with the release held, the greeter dies when the layout changes: only the re-lock can save the session.
+    QTest::newRow("lock 500 ms before the release, greeter dies anyway") << -500 << true;
+    QTest::newRow("lock 0 ms after the release, greeter dies anyway") << 0 << true;
+}
+
+// OPT-060 S3 (OPT-049): lock around a Replace release, 10 interleavings. The lock screen is the fake above:
+// the greeter dies if a lock lands within 2 s before the physical outputs come back. Pass = the session is
+// locked with a live greeter at the end, the physical layout is restored and the worker exits 0.
+void WorkerEndToEndTest::consoleReplaceRelock()
+{
+    QFETCH(int, offsetMs); QFETCH(bool, alwaysKill);
+    if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
+    auto *s = session(2); QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+    const QString runtime = s->runtime->path();
+    const QString greeterFile = s->home->path() + QStringLiteral("/greeter-alive");
+    // The stand-in ScreenSaver runs inside the fixture (see FakeScreenSaverHelper.cpp); commands go through files.
+    struct Locker {
+        QString dir; QString greeter;
+        void send(const QString &command) const
+        {
+            // One command file at a time: wait until the helper has consumed the previous one.
+            for (int i = 0; i < 200 && QFile::exists(dir + QStringLiteral("/cmd")); ++i) QTest::qWait(10);
+            QFile tmp(dir + QStringLiteral("/cmd.tmp")); if (!tmp.open(QIODevice::WriteOnly)) return;
+            tmp.write(command.toUtf8() + '\n'); tmp.close();
+            QFile::rename(tmp.fileName(), dir + QStringLiteral("/cmd"));
+        }
+        QMap<QString, int> state() const
+        {
+            QMap<QString, int> values; QFile file(dir + QStringLiteral("/state"));
+            if (!file.open(QIODevice::ReadOnly)) return values;
+            for (const auto &part : QString::fromUtf8(file.readAll()).split(QLatin1Char(' '), Qt::SkipEmptyParts)) {
+                const auto pair = part.trimmed().split(QLatin1Char('='));
+                if (pair.size() == 2) values.insert(pair[0], pair[1].toInt());
+            }
+            return values;
+        }
+        bool active() const { return state().value(QStringLiteral("active")) == 1; }
+        bool greeterAlive() const { return state().value(QStringLiteral("greeter")) == 1; }
+        int kills() const { return state().value(QStringLiteral("kills")); }
+        int relockCalls() const { return state().value(QStringLiteral("relocks")); }
+        // The user's own lock. Returns the monotonic time it was requested.
+        void lockNow() { send(QStringLiteral("lock")); lockTimer.start(); }
+        void killGreeter() { send(QStringLiteral("kill")); }
+        qint64 lastLockMs() const { return lockTimer.isValid() ? lockTimer.elapsed() : -1; }
+        QElapsedTimer lockTimer;
+    } locker{runtime + QStringLiteral("/locker"), greeterFile};
+    const QString exitFile = runtime + QStringLiteral("/worker-exit");
+    const QString marker = runtime + QStringLiteral("/physical-baseline");
+    ConsoleWorkerEndpoint endpoint; WorkerRun run;
+    ConsoleWorkerWire::Outputs outputs;
+    connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&](const auto &value) { outputs = value; });
+    const auto logs = qScopeGuard([&] {
+        if (QTest::currentTestFailed()) qWarning().noquote() << "worker.log:" << s->log(QStringLiteral("worker.log"), 12000)
+            << "fake-locker.log:" << s->log(QStringLiteral("fake-locker.log")) << "session.log:" << s->log(QStringLiteral("session.log"), 1500);
+    });
+    locker.send(QStringLiteral("enable"));
+    QTRY_COMPARE_WITH_TIMEOUT(locker.state().value(QStringLiteral("enabled")), 1, 5000);
+    locker.send(QStringLiteral("reset")); // every row starts unlocked with zero counters
+    QTRY_VERIFY2_WITH_TIMEOUT(!locker.active() && !locker.greeterAlive() && locker.kills() == 0,
+        qPrintable(QStringLiteral("locker state active=%1 greeter=%2 kills=%3").arg(locker.active()).arg(locker.greeterAlive()).arg(locker.kills())), 5000);
+    QFile::remove(greeterFile);
+    const qint64 logStart = QFileInfo(s->home->path() + QStringLiteral("/worker.log")).size(); // worker.log accumulates across rows
+    m_nextWorkerEnv = {QStringLiteral("KRDP_CONSOLE_LOCK_GREETER_FILE=") + greeterFile};
+    QVERIFY(startWorker(*s, false, endpoint, run));
+    const auto reap = qScopeGuard([&] {
+        if (!QFileInfo::exists(exitFile)) { endpoint.stopWorker(); (void)QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 30000); }
+        QFile::remove(marker);
+    });
+    QTRY_VERIFY_WITH_TIMEOUT((endpoint.ready() && outputs.monitors.size() == 2) || !run.errors.isEmpty(), 45000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    const auto initial = outputs;
+    // The fixture's KWin names its genuine outputs Virtual-*; alias the two baseline names so the real
+    // PhysicalOutputGuard disables and restores them (as consoleConfiguredOutputs does).
+    const QString tools = s->home->path() + QStringLiteral("/tools");
+    QVERIFY(QDir().mkpath(tools));
+    QFile wrapper(tools + QStringLiteral("/kscreen-doctor"));
+    QVERIFY(wrapper.open(QIODevice::WriteOnly));
+    wrapper.write(R"PY(#!/usr/bin/python3
+import json, os, pathlib, subprocess, sys
+marker = pathlib.Path(os.environ['XDG_RUNTIME_DIR']) / 'physical-baseline'
+aliases = json.loads(marker.read_text()) if marker.exists() else {}
+args = []
+for arg in sys.argv[1:]:
+    for real, alias in aliases.items():
+        prefix = 'output.' + alias + '.'
+        if arg.startswith(prefix):
+            arg = 'output.' + real + '.' + arg[len(prefix):]
+            break
+    args.append(arg)
+result = subprocess.run(['/usr/bin/kscreen-doctor', *args], capture_output=True)
+data = result.stdout
+if '-j' in args and result.returncode == 0 and aliases:
+    value = json.loads(data)
+    for output in value.get('outputs', []):
+        output['name'] = aliases.get(output.get('name'), output.get('name'))
+    data = json.dumps(value).encode()
+sys.stdout.buffer.write(data)
+sys.stderr.buffer.write(result.stderr)
+sys.exit(result.returncode)
+)PY");
+    wrapper.close(); QVERIFY(wrapper.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    QJsonObject aliases;
+    for (int i = 0; i < initial.monitors.size(); ++i) aliases.insert(initial.monitors[i].name, QStringLiteral("DP-test-%1").arg(i));
+    QFile aliasFile(marker); QVERIFY(aliasFile.open(QIODevice::WriteOnly)); aliasFile.write(QJsonDocument(aliases).toJson()); aliasFile.close();
+    const auto query = [&]() -> std::optional<QByteArray> {
+        QProcess command;
+        auto environment = s->process->processEnvironment();
+        environment.insert(QStringLiteral("WAYLAND_DISPLAY"), QStringLiteral("wayland-0"));
+        environment.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("wayland"));
+        command.setProcessEnvironment(environment);
+        command.start(tools + QStringLiteral("/kscreen-doctor"), {QStringLiteral("-j")});
+        if (!command.waitForStarted(1000) || !command.waitForFinished(5000)) { command.kill(); command.waitForFinished(1000); return {}; }
+        if (command.exitStatus() != QProcess::NormalExit || command.exitCode() != 0) return {};
+        return command.readAllStandardOutput();
+    };
+    const auto baselineJson = query(); QVERIFY(baselineJson);
+    const auto baseline = ConsoleVirtualOutputRestore::snapshot(*baselineJson, QStringLiteral("fixture")); QVERIFY(baseline);
+    // Number of baseline (physical alias) outputs currently enabled.
+    const auto physicalEnabled = [&]() -> int {
+        const auto json = query(); if (!json) return -1;
+        bool parsed = false;
+        const auto current = OutputRestoreJournal::parseCurrent(*json, &parsed);
+        if (!parsed) return -1;
+        int enabled = 0;
+        for (const auto &original : baseline->outputs)
+            for (const auto &output : current) if (output.name == original.name && output.enabled) ++enabled;
+        return enabled;
+    };
+    run.frames.clear(); endpoint.setControlState({1, true});
+    ConsoleWorkerWire::EncoderConfig config; config.generation = 1;
+    config.settings = CodecPolicy::EncoderSettings{.hardware = false};
+    const ClientDisplay::Info client{QSize(1600, 900), {}};
+    config.consoleVirtual = *ConsoleVirtualOutputPolicy::parse(true, QStringLiteral("replace"), QStringLiteral("client"), QSize(1600, 900), client);
+    QVERIFY(endpoint.setEncoderConfig(config)); endpoint.requestKeyFrame();
+    QTRY_VERIFY_WITH_TIMEOUT((outputs.monitors.size() == 1 && outputs.monitors.first().name.startsWith(QStringLiteral("Virtual-krdp-m")) && !run.frames.isEmpty())
+        || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 60000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    QCOMPARE(physicalEnabled(), 0); // replaced: the physical outputs are off
+    QTest::qWait(1500); // the worker has settled and sampled the (unlocked) screensaver
+
+    // Timeline. T0 = the release starts (the control is withdrawn).
+    QElapsedTimer sinceT0;
+    if (offsetMs < 0) { locker.lockNow(); QTest::qWait(-offsetMs); }
+    sinceT0.start();
+    endpoint.setControlState({2, false});
+    bool userLockDone = offsetMs < 0, restoreSeen = false;
+    qint64 restoreAt = -1;
+    QElapsedTimer total; total.start();
+    while (!QFileInfo::exists(exitFile) && total.elapsed() < 90000) {
+        if (!userLockDone && sinceT0.elapsed() >= offsetMs) { locker.lockNow(); userLockDone = true; }
+        if (!restoreSeen && physicalEnabled() == baseline->outputs.size()) {
+            restoreSeen = true; restoreAt = sinceT0.elapsed();
+            // OPT-049: a lock younger than 2 s when the layout changes kills the greeter and nothing re-arms it.
+            if (locker.active() && (alwaysKill || (locker.lastLockMs() >= 0 && locker.lastLockMs() < 2000))) locker.killGreeter();
+        }
+        QTest::qWait(60);
+    }
+    QVERIFY2(QFileInfo::exists(exitFile), "the worker exited");
+    if (!userLockDone) locker.lockNow(); // the lock came after the worker was gone
+    QVERIFY(restoreSeen);
+    QFile code(exitFile); QVERIFY(code.open(QIODevice::ReadOnly)); QCOMPARE(code.readAll().trimmed(), QByteArray("0"));
+    const auto restoredJson = query(); QVERIFY(restoredJson);
+    QVERIFY(ConsoleVirtualOutputRestore::matches(*baseline, *restoredJson));
+    QTRY_VERIFY2_WITH_TIMEOUT(locker.active(), qPrintable(QStringLiteral("the session is locked after the release; state active=%1 greeter=%2 kills=%3 relocks=%4")
+        .arg(locker.active()).arg(locker.greeterAlive()).arg(locker.kills()).arg(locker.relockCalls())), 3000);
+    QVERIFY2(locker.greeterAlive(), "the greeter is alive after the release");
+    const qint64 logSize = QFileInfo(s->home->path() + QStringLiteral("/worker.log")).size();
+    const QString log = s->log(QStringLiteral("worker.log"), int(logSize - logStart));
+    if (qEnvironmentVariableIsSet("KRDP_E2E_SHOW_WORKER_LOG")) qInfo().noquote() << log.right(3500);
+    qInfo().noquote() << "OPT-049 row: lock" << offsetMs << "ms vs release, restore at" << restoreAt << "ms, greeter kills" << locker.kills()
+                      << "re-lock calls" << locker.relockCalls() << "worker re-lock lines" << log.count(QStringLiteral("Console release: re-locking"))
+                      << "held" << log.contains(QStringLiteral("holding the release"));
+}
+
 void WorkerEndToEndTest::consoleReplaceFailsOpen_data()
 {
     QTest::addColumn<bool>("unverifiedJournal");

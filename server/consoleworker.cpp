@@ -14,9 +14,19 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <sys/stat.h>
+
+#include <functional>
+
 #include <QAction>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
+#include <QDBusMessage>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
+#include <QDBusReply>
+#include <QDBusObjectPath>
+#include <QDir>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QFile>
@@ -70,6 +80,9 @@
 #include "VirtualInitialBootstrap.h"
 #include "ConsoleVirtualOutputReadback.h"
 #include "ConsoleVirtualOutputRestore.h"
+#include "ConsoleLockWatch.h"
+#include "ConsoleReleaseLockGuard.h"
+#include "LogThrottle.h"
 #include "ConsoleVirtualOutputMutation.h"
 #include "PhysicalOutputGuard.h"
 
@@ -191,7 +204,7 @@ public:
             m_session.setStreamingEnabled(false);
             for (const auto &session : m_multiSessions) session->setStreamingEnabled(false);
             m_outputStopDone = true;
-            if (!m_creatorReleaseActive) QCoreApplication::exit(m_exitCode);
+            if (!m_creatorReleaseActive && !m_lockGuardActive) QCoreApplication::exit(m_exitCode);
         };
         connect(&m_resize, &ConsoleResizeSession::stopped, this, resizedStopped);
         connect(&m_virtualResize, &VirtualResizeSession::stopped, this, resizedStopped);
@@ -327,6 +340,9 @@ public:
         });
         m_creatorReleasePoll.setInterval(200);
         connect(&m_creatorReleasePoll, &QTimer::timeout, this, &Worker::pollConsoleCreatorRelease);
+        connect(&m_lockSignals, &ConsoleLockWatch::activeChanged, this, [this](bool active) { noteLock(active); });
+        m_lockWatch.setInterval(250);
+        connect(&m_lockWatch, &QTimer::timeout, this, &Worker::sampleLock);
         connect(&m_session, &AbstractSession::streamActiveChanged, this, [this](bool active) {
             if (m_mode.virtualSession) m_virtualResize.captureStateChanged(m_virtualCaptureEpoch, active);
             if (active && !m_captureReady) {
@@ -700,7 +716,179 @@ private:
         m_consoleVirtualAge.start();
         m_consoleVirtualSettle.invalidate();
         m_consoleVirtualPoll.start();
+        startLockWatch();
         pollConsoleVirtual();
+    }
+
+    // ---- OPT-060 S3 / OPT-049: keep the lock screen across a release of the replaced outputs ----------
+    // Decisions live in ConsoleReleaseLockGuard.h. Here: observe (ScreenSaver GetActive, logind LockedHint
+    // as fallback, the greeter process), hold the release briefly after a lock edge, re-lock afterwards.
+    // The outputs are always restored first and every wait is bounded, so a disconnect never waits on it.
+
+    static QDBusMessage screenSaverCall(const QString &method)
+    {
+        return QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.ScreenSaver"), QStringLiteral("/ScreenSaver"),
+            QStringLiteral("org.freedesktop.ScreenSaver"), method);
+    }
+
+    void startLockWatch()
+    {
+        if (m_lockWatch.isActive()) return;
+        m_lockWatch.start();
+        sampleLock();
+    }
+
+    void noteLock(std::optional<bool> active)
+    {
+        if (!active) { m_lockActive.reset(); return; }
+        if (m_lockActive && *m_lockActive != *active) {
+            m_lockEdge.restart();
+            m_lockEdgeValid = true;
+            if (m_lockWindowOpen && *active) m_lockContext.lockSeenDuringWindow = true;
+        } else if (!m_lockActive && *active && m_lockWindowOpen) {
+            m_lockContext.lockSeenDuringWindow = true;
+        }
+        m_lockActive = *active;
+    }
+
+    void sampleLock()
+    {
+        if (m_lockSamplePending) return;
+        m_lockSamplePending = true;
+        auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(screenSaverCall(QStringLiteral("GetActive")), 500), this);
+        connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher] {
+            m_lockSamplePending = false;
+            QDBusPendingReply<bool> reply = *watcher;
+            watcher->deleteLater();
+            noteLock(reply.isError() ? std::optional<bool>() : std::optional<bool>(reply.value()));
+        });
+    }
+
+    /// kscreenlocker_greet of this user (KRDP_CONSOLE_LOCK_GREETER_FILE: test-only stand-in, its existence = alive).
+    std::optional<bool> greeterAlive() const
+    {
+        const QString standIn = qEnvironmentVariable("KRDP_CONSOLE_LOCK_GREETER_FILE");
+        if (!standIn.isEmpty()) return QFile::exists(standIn);
+        const auto entries = QDir(QStringLiteral("/proc")).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const auto &entry : entries) {
+            bool numeric = false; entry.toInt(&numeric);
+            if (!numeric) continue;
+            QFile comm(QStringLiteral("/proc/%1/comm").arg(entry));
+            if (!comm.open(QIODevice::ReadOnly) || comm.readLine(64).trimmed() != "kscreenlocker_greet") continue;
+            struct stat st {};
+            if (::stat(QFile::encodeName(QStringLiteral("/proc/") + entry).constData(), &st) == 0 && st.st_uid == getuid()) return true;
+        }
+        return false;
+    }
+
+    /// logind LockedHint of this session, used only when the screensaver does not answer.
+    std::optional<bool> logindLockedHint() const
+    {
+        auto bus = QDBusConnection::systemBus();
+        if (!bus.isConnected()) return {};
+        auto get = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.login1"), QStringLiteral("/org/freedesktop/login1"),
+            QStringLiteral("org.freedesktop.login1.Manager"), QStringLiteral("GetSession"));
+        get << m_sessionId;
+        const QDBusReply<QDBusObjectPath> path = bus.call(get, QDBus::Block, 500);
+        if (!path.isValid()) return {};
+        auto property = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.login1"), path.value().path(),
+            QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+        property << QStringLiteral("org.freedesktop.login1.Session") << QStringLiteral("LockedHint");
+        const QDBusReply<QVariant> hint = bus.call(property, QDBus::Block, 500);
+        if (!hint.isValid() || hint.value().typeId() != QMetaType::Bool) return {};
+        return hint.value().toBool();
+    }
+
+    void observeLock(std::function<void(ConsoleReleaseLock::Observation)> done)
+    {
+        auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(screenSaverCall(QStringLiteral("GetActive")), 800), this);
+        connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, done = std::move(done)] {
+            QDBusPendingReply<bool> reply = *watcher;
+            watcher->deleteLater();
+            ConsoleReleaseLock::Observation observation;
+            observation.locked = reply.isError() ? logindLockedHint() : std::optional<bool>(reply.value());
+            noteLock(observation.locked);
+            observation.greeterAlive = greeterAlive();
+            done(observation);
+        });
+    }
+
+    void requestRelock()
+    {
+        auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(screenSaverCall(QStringLiteral("Lock")), 800), this);
+        connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher] {
+            const QDBusPendingReply<> reply = *watcher;
+            watcher->deleteLater();
+            if (!reply.isError()) return;
+            // Fall back to logind's Lock on this session (the project's usual session lock).
+            auto bus = QDBusConnection::systemBus();
+            auto get = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.login1"), QStringLiteral("/org/freedesktop/login1"),
+                QStringLiteral("org.freedesktop.login1.Manager"), QStringLiteral("LockSession"));
+            get << m_sessionId;
+            if (bus.isConnected()) bus.asyncCall(get, 800);
+        });
+    }
+
+    /// Hold the release while a lock edge is younger than the settle time (never longer than the cap).
+    void holdThenRelease(qint64 heldMs)
+    {
+        const std::optional<qint64> since = m_lockEdgeValid ? std::optional<qint64>(m_lockEdge.elapsed()) : std::nullopt;
+        const qint64 wait = ConsoleReleaseLock::holdBeforeRelease(since, heldMs);
+        if (wait <= 0) {
+            if (heldMs > 0) qInfo() << "Console release: lock transition settled after" << heldMs << "ms, releasing outputs";
+            startConsoleVirtualRelease();
+            return;
+        }
+        if (m_lockLog.allow()) qInfo() << "Console release: lock changed" << (since ? *since : -1) << "ms ago, holding the release up to" << wait << "ms";
+        QTimer::singleShot(wait, this, [this, heldMs, wait] { holdThenRelease(heldMs + wait); });
+    }
+
+    void startConsoleVirtualRelease()
+    {
+        m_creatorReleaseAge.start(); // the release bound counts from the real start, not from the hold
+        prepareConsoleVirtualRelease();
+        m_creatorReleasePoll.start();
+        QTimer::singleShot(0, this, &Worker::pollConsoleCreatorRelease);
+    }
+
+    /// After a verified restore: if the session was (or became) locked, verify lock and greeter, re-lock if needed.
+    void verifyLockThen(std::function<void()> finish)
+    {
+        m_lockWindowOpen = false;
+        if (!m_lockContext.expectLocked()) {
+            m_lockWatch.stop();
+            qInfo() << "Console release: session was not locked, nothing to re-arm";
+            finish();
+            return;
+        }
+        m_lockGuardActive = true;
+        m_relockAttempts = 0;
+        m_relockAge.start();
+        QTimer::singleShot(ConsoleReleaseLock::FirstCheckDelayMs, this, [this, finish = std::move(finish)]() mutable { verifyLockStep(std::move(finish)); });
+    }
+
+    void verifyLockStep(std::function<void()> finish)
+    {
+        observeLock([this, finish = std::move(finish)](ConsoleReleaseLock::Observation observation) mutable {
+            const auto verdict = ConsoleReleaseLock::afterRestore(m_lockContext, observation, m_relockAttempts, m_relockAge.elapsed());
+            const auto text = [](std::optional<bool> v) { return v ? (*v ? "yes" : "no") : "unknown"; };
+            if (verdict.step == ConsoleReleaseLock::Step::Relock) {
+                ++m_relockAttempts;
+                qInfo() << "Console release: re-locking (attempt" << m_relockAttempts << ") -" << verdict.reason
+                        << "locked" << text(observation.locked) << "greeter" << text(observation.greeterAlive);
+                requestRelock();
+                QTimer::singleShot(ConsoleReleaseLock::RelockWaitMs, this, [this, finish = std::move(finish)]() mutable { verifyLockStep(std::move(finish)); });
+                return;
+            }
+            if (verdict.step == ConsoleReleaseLock::Step::GiveUp)
+                qWarning() << "Console release: the lock could not be re-armed after" << m_relockAttempts << "attempts, leaving the session as it is -"
+                           << verdict.reason << "locked" << text(observation.locked) << "greeter" << text(observation.greeterAlive);
+            else
+                qInfo() << "Console release: lock verified after" << m_relockAttempts << "re-lock request(s) -" << verdict.reason;
+            m_lockGuardActive = false;
+            m_lockWatch.stop();
+            finish();
+        });
     }
 
     bool restoreConsoleCreatorMode(const QByteArray &json, const ConsoleVirtualOutputPlan::Output &output, qsizetype count)
@@ -844,9 +1032,9 @@ private:
             m_consoleVirtualPoll.stop();
             m_creatorReleaseGeneration = m_control.generation;
             m_creatorReleaseAge.start();
-            prepareConsoleVirtualRelease();
-            m_creatorReleasePoll.start();
-            QTimer::singleShot(0, this, &Worker::pollConsoleCreatorRelease);
+            m_lockContext = {m_lockActive.value_or(false), false};
+            m_lockWindowOpen = true;
+            holdThenRelease(0);
             return true;
         }
         QSet<QString> owned;
@@ -929,16 +1117,21 @@ private:
             m_socket.waitForBytesWritten(1000);
         }
         m_creatorReleaseGeneration = 0;
-        if (m_stopping) {
-            if (!verified) m_exitCode = 1;
-            if (m_outputStopDone) QCoreApplication::exit(m_exitCode);
-        } else if (configured) {
-            shutdown(verified ? 0 : 1); // Replacement proves restored capture before the next grant.
-        } else if (m_socket.state() == QLocalSocket::ConnectedState) {
-            m_socket.disconnectFromServer(); // A replacement worker must prove fresh capture.
-        } else {
-            shutdown(verified ? 0 : 1);
-        }
+        const auto tail = [this, verified, configured]() {
+            if (m_stopping) {
+                if (!verified) m_exitCode = 1;
+                if (m_outputStopDone) QCoreApplication::exit(m_exitCode);
+            } else if (configured) {
+                shutdown(verified ? 0 : 1); // Replacement proves restored capture before the next grant.
+            } else if (m_socket.state() == QLocalSocket::ConnectedState) {
+                m_socket.disconnectFromServer(); // A replacement worker must prove fresh capture.
+            } else {
+                shutdown(verified ? 0 : 1);
+            }
+        };
+        // The outputs are restored (or the bound hit) at this point; only now look after the lock.
+        if (configured) verifyLockThen(tail);
+        else tail();
     }
 
     PlasmaScreencastV1Session *multiInputSession() const
@@ -3350,6 +3543,18 @@ private:
     bool m_bootstrapComplete = false;
     bool m_initialReadySent = false;
     QTimer m_creatorReleasePoll;
+    QTimer m_lockWatch;
+    ConsoleLockWatch m_lockSignals;
+    QElapsedTimer m_lockEdge;
+    QElapsedTimer m_relockAge;
+    std::optional<bool> m_lockActive;
+    ConsoleReleaseLock::Context m_lockContext;
+    LogThrottle m_lockLog{std::chrono::seconds(5), 3};
+    int m_relockAttempts = 0;
+    bool m_lockEdgeValid = false;
+    bool m_lockWindowOpen = false;
+    bool m_lockSamplePending = false;
+    bool m_lockGuardActive = false;
     QElapsedTimer m_creatorReleaseAge;
     std::optional<ConsoleCreatorLease::State> m_creatorReleasePlan;
     quint64 m_creatorReleaseGeneration = 0;

@@ -405,6 +405,11 @@ target_include_directories(ConsoleVirtualOutputPlanTest PRIVATE ${CMAKE_SOURCE_D
 target_link_libraries(ConsoleVirtualOutputPlanTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME ConsoleVirtualOutputPlanTest COMMAND ConsoleVirtualOutputPlanTest)
 
+add_executable(ConsoleReleaseLockGuardTest ConsoleReleaseLockGuardTest.cpp)
+target_include_directories(ConsoleReleaseLockGuardTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleReleaseLockGuardTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME ConsoleReleaseLockGuardTest COMMAND ConsoleReleaseLockGuardTest)
+
 add_executable(ConsoleWorkerEndpointTest ConsoleWorkerEndpointTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
 target_include_directories(ConsoleWorkerEndpointTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ConsoleWorkerEndpointTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
@@ -434,6 +439,8 @@ if(TARGET krdp-console-worker)
     # OPT-055 T-K4b: test-only LD_PRELOAD shim that makes av_buffersink_get_frame fail (never installed).
     add_library(farside-failfilter MODULE FailFilterShim.cpp)
     target_link_libraries(farside-failfilter PRIVATE ${CMAKE_DL_LIBS})
+    add_executable(krdp-e2e-fake-locker FakeScreenSaverHelper.cpp)
+    target_link_libraries(krdp-e2e-fake-locker PRIVATE Qt6::Core Qt6::DBus)
     add_executable(WorkerEndToEndTest WorkerEndToEndTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp
         ${CMAKE_SOURCE_DIR}/server/H264KeyframeSize.cpp ${CMAKE_SOURCE_DIR}/server/OutputRestoreJournal.cpp
         ${CMAKE_SOURCE_DIR}/server/VirtualResize.cpp)
@@ -443,9 +450,10 @@ if(TARGET krdp-console-worker)
         KRDP_CONSOLE_WORKER="$<TARGET_FILE:krdp-console-worker>"
         KRDP_SERVER_DIR="${CMAKE_SOURCE_DIR}/server"
         KRDP_E2E_CURSOR_CLIENT="$<TARGET_FILE:krdp-e2e-cursor-client>"
+        KRDP_E2E_FAKE_LOCKER="$<TARGET_FILE:krdp-e2e-fake-locker>"
         KRDP_E2E_FAILFILTER="$<TARGET_FILE:farside-failfilter>"
         KRDP_E2E_SERVER="$<TARGET_FILE:krdpserver>")
-    add_dependencies(WorkerEndToEndTest krdp-console-worker krdp-e2e-cursor-client farside-failfilter krdpserver)
+    add_dependencies(WorkerEndToEndTest krdp-console-worker krdp-e2e-cursor-client krdp-e2e-fake-locker farside-failfilter krdpserver)
     # OPT-055 K4 user-server cases need the FreeRDP client probe; without it they skip.
     if(TARGET krdpctl-probe)
         target_compile_definitions(WorkerEndToEndTest PRIVATE KRDP_E2E_PROBE="$<TARGET_FILE:krdpctl-probe>")
