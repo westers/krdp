@@ -228,6 +228,16 @@ struct StatsCapabilities {
     bool operator==(const StatsCapabilities &) const = default;
 };
 
+/**
+ * Console only (OPT-060): the host can turn its own screens off for a connection that asks with its
+ * monitor block (`replace`) and give them back on request (`restore`). Absent: neither.
+ */
+struct ConsoleScreensCapabilities {
+    bool replace = false;
+    bool restore = false;
+    bool operator==(const ConsoleScreensCapabilities &) const = default;
+};
+
 /** What a KRDPCTL endpoint offers, as the `capabilities` record says it. */
 struct ChannelCapabilities {
     bool pointerCaptureSync = false;
@@ -243,6 +253,7 @@ struct ChannelCapabilities {
     std::optional<DeviceCapabilities> devices; ///< absent: no `devices` group, no runtime device control
     std::optional<VideoCapabilities> video; ///< absent: no `video` group, AVC only, no `codec` record
     std::optional<StatsCapabilities> stats; ///< absent: no `stats` group, no `stats` record
+    std::optional<ConsoleScreensCapabilities> consoleScreens; ///< absent: no `console` group, no `console-screens*` records
     bool operator==(const ChannelCapabilities &) const = default;
 };
 KRDP_EXPORT QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities);
@@ -255,6 +266,13 @@ KRDP_EXPORT QJsonObject capabilitiesRecord(const ChannelCapabilities &capabiliti
  * \a hardware (the virtual broker) the record has no `backend`.
  */
 KRDP_EXPORT QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, const QString &reason = {});
+
+/**
+ * `console-screens` (OPT-060), unsolicited on each edge: \a active = the host's own screens are off for this
+ * connection (Console Replace), \a canRestore = this connection may ask `console-screens-restore`.
+ * Only sent to a client that saw `capabilities.console.screens`.
+ */
+KRDP_EXPORT QJsonObject consoleScreensRecord(bool active, bool canRestore);
 
 /**
  * `session-end` (AUD-FIX2 F4), unsolicited, sent to a KRDPCTL client just before the server

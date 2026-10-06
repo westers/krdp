@@ -121,6 +121,41 @@ private Q_SLOTS:
                  (QJsonObject{{QStringLiteral("push"), true}, {QStringLiteral("camera"), false}, {QStringLiteral("microphone"), false}}));
     }
 
+    // OPT-060 S6: `capabilities.console.screens`, the `console-screens` record and old-client compatibility.
+    void capabilitiesConsoleScreens()
+    {
+        ChannelCapabilities caps;
+        caps.host = QStringLiteral("console");
+        QVERIFY(!capabilitiesRecord(caps).contains(QStringLiteral("console"))); // absent unless advertised
+        caps.consoleScreens = ConsoleScreensCapabilities{true, true};
+        const auto record = capabilitiesRecord(caps);
+        QCOMPARE(record.value(QStringLiteral("console")).toObject().value(QStringLiteral("screens")).toObject(),
+                 (QJsonObject{{QStringLiteral("replace"), true}, {QStringLiteral("restore"), true}}));
+        QCOMPARE(record.value(QStringLiteral("protocol")).toInt(), ChannelProtocol); // no protocol bump: a gap group
+        // An old client that knows none of it still finds every group it used.
+        for (const char *key : {"layout", "virtualSessions", "topology"}) QVERIFY(record.contains(QLatin1String(key)));
+        caps.consoleScreens = ConsoleScreensCapabilities{true, false};
+        QVERIFY(!capabilitiesRecord(caps).value(QStringLiteral("console")).toObject().value(QStringLiteral("screens")).toObject().value(QStringLiteral("restore")).toBool());
+        QVERIFY(frame(record).size() < 1024);
+    }
+
+    void consoleScreensRecordShape()
+    {
+        const auto active = consoleScreensRecord(true, true);
+        QCOMPARE(active, (QJsonObject{{QStringLiteral("type"), QStringLiteral("console-screens")}, {QStringLiteral("v"), ProtocolVersion},
+                                      {QStringLiteral("active"), true}, {QStringLiteral("canRestore"), true}}));
+        QCOMPARE(withRequestId(consoleScreensRecord(false, false), QStringLiteral("q")).value(QStringLiteral("requestId")).toString(), QStringLiteral("q"));
+        // The record survives the frame/deframe round trip an old client's parser performs; it is simply
+        // an unknown `type` to it.
+        Deframer deframer;
+        deframer.feed(frame(active));
+        const auto parsed = deframer.next();
+        QVERIFY(parsed);
+        QCOMPARE(parsed->value(QStringLiteral("type")).toString(), QStringLiteral("console-screens"));
+        QVERIFY(!deframer.next());
+        QVERIFY(!deframer.overflowed());
+    }
+
     void audioPriorityRequestValidation()
     {
         QJsonObject record{{QStringLiteral("type"), QStringLiteral("audio-priority")},

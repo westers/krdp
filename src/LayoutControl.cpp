@@ -457,7 +457,22 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
         record.insert(QStringLiteral("stats"),
                       QJsonObject{{QStringLiteral("maxRateHz"), stats->maxRateHz}, {QStringLiteral("events"), stats->events}, {QStringLiteral("tcp"), stats->tcp}});
     }
+    if (const auto &screens = capabilities.consoleScreens) {
+        record.insert(QStringLiteral("console"),
+                      QJsonObject{{QStringLiteral("screens"),
+                                   QJsonObject{{QStringLiteral("replace"), screens->replace}, {QStringLiteral("restore"), screens->restore}}}});
+    }
     return record;
+}
+
+QJsonObject consoleScreensRecord(bool active, bool canRestore)
+{
+    return QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("console-screens")},
+        {QStringLiteral("v"), ProtocolVersion},
+        {QStringLiteral("active"), active},
+        {QStringLiteral("canRestore"), canRestore},
+    };
 }
 
 QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, const QString &reason)
