@@ -501,6 +501,7 @@ public:
         connect(&m_consoleVirtualPoll, &QTimer::timeout, this, &Worker::pollConsoleVirtual);
         connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, [this] { m_multiSettle.start(); });
         connect(qGuiApp, &QGuiApplication::screenAdded, this, [this](QScreen *screen) {
+            hostScreenAdded(screen);
             watchScreen(screen);
             m_multiSettle.start();
         });
@@ -589,12 +590,21 @@ private:
         return names;
     }
 
-    bool restoreConsoleVirtualSnapshot(const OutputRestoreJournal::Entry &entry)
+    bool restoreConsoleVirtualSnapshot(const OutputRestoreJournal::Entry &fullEntry)
     {
         const auto json = readKScreenJson();
         bool ok = false;
         const auto current = json ? OutputRestoreJournal::parseCurrent(*json, &ok) : QVector<OutputRestoreJournal::Current>{};
         if (!ok) return false;
+        // OPT-060 M-8: a connector that is gone (unplugged while replaced) is restored-unavailable: dropped from what
+        // has to come back, logged, never a reason to keep the whole restore unverified.
+        auto entry = fullEntry;
+        const auto missing = OutputRestoreJournal::plan(fullEntry, current).missing;
+        if (!missing.isEmpty()) {
+            qWarning().noquote() << "Console restore: host output(s)" << missing.join(QStringLiteral(", ")) << "are not connected any more; restored-unavailable";
+            entry = OutputRestoreJournal::withoutOutputs(fullEntry, missing);
+            if (entry.outputs.isEmpty()) return false;
+        }
         const auto plan = OutputRestoreJournal::plan(entry, current);
         if (!plan.missing.isEmpty() || (!plan.arguments.isEmpty() && !runKScreenCommand(plan.arguments))) return false;
         const auto after = readKScreenJson();
@@ -974,6 +984,7 @@ private:
         }
         if (m_consoleVirtualPlan->replace) {
             m_consoleVirtualReplaced = m_consoleOutputGuard.applyReplace(placements, primary);
+            if (m_consoleVirtualReplaced) m_replaceAppliedAt.start();
             if (!m_consoleVirtualReplaced) qWarning() << "Console replace could not be verified; restoring and continuing as extend";
         }
         if (!m_consoleVirtualReplaced) {
@@ -3150,6 +3161,21 @@ private:
         });
     }
 
+    // OPT-060 M-8 (spec Q7): a host monitor plugged in while the host's screens are replaced. The new screen is lit on
+    // top of the layout we hold, so give the host's screens back and continue as extend for this connection, and tell the
+    // broker why. Events in the first seconds after the apply are KWin settling our own change, not a plug.
+    void hostScreenAdded(QScreen *screen)
+    {
+        if (!screen || screen->name().startsWith(QLatin1String("Virtual-"))) return;
+        if (!m_consoleVirtualPlan || !m_consoleVirtualApplied || !m_consoleVirtualReplaced || m_stopping || m_creatorReleaseActive
+            || m_creatorReleaseFinished || !m_replaceAppliedAt.isValid() || m_replaceAppliedAt.elapsed() < 3000) return;
+        qInfo() << "Host screen" << screen->name() << "was added while the host's screens are replaced; restoring them and continuing as extend";
+        reclaimConsole();
+        // Replace is over either way (restored, or failed and released); one record, and it cannot fire again.
+        if (m_consoleVirtualPlan && !m_consoleVirtualReplaced && !m_stopping && m_socket.state() == QLocalSocket::ConnectedState)
+            m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::HostScreensChanged));
+    }
+
     void reclaimConsole()
     {
         if (!m_mode.physicalActions() || !m_control.active) {
@@ -3517,6 +3543,7 @@ private:
     std::unique_ptr<PlasmaScreencastV1Session> m_consoleVirtualCreator;
     QTimer m_consoleVirtualPoll;
     QElapsedTimer m_consoleVirtualAge;
+    QElapsedTimer m_replaceAppliedAt; // M-8: when the host's screens were turned off
     QElapsedTimer m_consoleVirtualSettle;
     qsizetype m_consoleVirtualIndex = 0;
     quint64 m_consoleVirtualEpoch = 0;

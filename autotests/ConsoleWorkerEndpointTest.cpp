@@ -328,6 +328,12 @@ void ConsoleWorkerEndpointTest::authenticatesThenForwardsFrames()
     worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ControlState{42, true}, ConsoleWorkerWire::Kind::LocalTakeover));
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(takeoverGeneration, quint64(42));
+    quint64 hostChangeGeneration = 0;
+    QObject::connect(&endpoint, &ConsoleWorkerEndpoint::hostScreensChanged, &endpoint, [&](quint64 generation) { hostChangeGeneration = generation; });
+    worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ControlState{43, true}, ConsoleWorkerWire::Kind::HostScreensChanged));
+    QVERIFY(worker.waitForBytesWritten(1000));
+    QTRY_COMPARE(hostChangeGeneration, quint64(43)); // M-8: reaches the broker, distinct from a local takeover
+    QCOMPARE(takeoverGeneration, quint64(42));
 
     VideoFrame sent;
     sent.size = QSize(1280, 720);

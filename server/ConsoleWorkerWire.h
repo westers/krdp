@@ -61,7 +61,7 @@ namespace KRdp::ConsoleWorkerWire
 // 13 (OPT-054): native pointer capture policy and observed state.
 // 14 (OPT-060 M-2): EncoderConfig's Console temporary-output policy carries Layout::Mapped, the client monitors
 // (id, physical pixels, scale percent, primary) and the host-screen -> monitor mapping.
-constexpr quint16 ProtocolVersion = 14;
+constexpr quint16 ProtocolVersion = 15;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -123,8 +123,11 @@ enum class Kind : quint8 {
     ReclaimConsole,
     PointerCapture,
     PointerState,
+    // Wire 15 (OPT-060 M-8): worker -> broker, payload ControlState. A host screen was plugged in while Replace was
+    // live; the worker already restored the host's screens and continues as extend. Never loops: Replace is over.
+    HostScreensChanged,
 };
-constexpr Kind LastKind = Kind::PointerState;
+constexpr Kind LastKind = Kind::HostScreensChanged;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;

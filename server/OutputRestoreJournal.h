@@ -122,6 +122,18 @@ public:
 
     static QVector<Current> parseCurrent(const QByteArray &kscreenJson, bool *ok = nullptr);
     static Plan plan(const Entry &entry, const QVector<Current> &current);
+    /**
+     * OPT-060 M-8: \a entry without the outputs named in \a unavailable (connectors that are not connected any more,
+     * for example a monitor unplugged while its screen was replaced). Such a connector counts as restored-unavailable:
+     * there is nothing to give back, and it must not leave the live restore "unverified" forever.
+     */
+    static Entry withoutOutputs(Entry entry, const QStringList &unavailable)
+    {
+        entry.outputs.erase(std::remove_if(entry.outputs.begin(), entry.outputs.end(), [&unavailable](const Output &output) {
+                                return unavailable.contains(output.name);
+                            }), entry.outputs.end());
+        return entry;
+    }
     /** Every field `plan()` chose to restore now reads back as original. */
     static bool verified(const Entry &entry, const QVector<Current> &before, const QVector<Current> &after);
     /** A live process other than this one, named krdp* when /proc can tell (pid reuse). */

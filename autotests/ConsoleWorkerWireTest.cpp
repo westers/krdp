@@ -554,7 +554,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(14));
+    QCOMPARE(ProtocolVersion, quint16(15));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -814,7 +814,7 @@ void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
     QCOMPARE(encoderStats(*deframer.next()), std::optional(measured));
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 0);
-    QCOMPARE(LastKind, Kind::PointerState);
+    QCOMPARE(LastKind, Kind::HostScreensChanged);
 
     const auto rejected = [](const EncoderStats &stats) {
         Deframer d;
@@ -934,6 +934,12 @@ void ConsoleWorkerWireTest::roundTripsControlGeneration()
     Record truncated = *takeover;
     truncated.payload.chop(1);
     QVERIFY(!controlState(truncated, Kind::LocalTakeover));
+    // Wire 15 (OPT-060 M-8): the worker's "a host screen was added, the host's screens are back" record.
+    deframer.feed(frame(sent, Kind::HostScreensChanged));
+    const auto changed = deframer.next();
+    QVERIFY(changed);
+    QCOMPARE(controlState(*changed, Kind::HostScreensChanged), std::optional<ControlState>(sent));
+    QVERIFY(!controlState(*changed, Kind::LocalTakeover)); // never mistaken for a takeover
 }
 
 QTEST_GUILESS_MAIN(ConsoleWorkerWireTest)

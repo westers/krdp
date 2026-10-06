@@ -201,6 +201,38 @@ private Q_SLOTS:
         QVERIFY(QFile::exists(journal.path() + QStringLiteral(".stale")));
     }
 
+    // OPT-060 M-8: a host monitor unplugged while its screen was replaced is restored-unavailable, not a stuck restore.
+    void unpluggedConnectorIsRestoredUnavailable()
+    {
+        auto screen = twoMonitors();
+        Journal::Fields dp, hdmi;
+        dp.enabled = true; dp.position = QPoint(0, 0); dp.priority = 1;
+        hdmi.enabled = true; hdmi.position = QPoint(1707, 0); hdmi.priority = 2;
+        const Journal::Entry entry{QString::fromLatin1(Journal::OutputGuardOwner), 77, {}, {{QStringLiteral("DP-1"), dp, {}}, {QStringLiteral("HDMI-A-1"), hdmi, {}}}};
+        screen.outputs[QStringLiteral("DP-1")].enabled = false; // replaced
+        screen.outputs[QStringLiteral("HDMI-A-1")].enabled = false;
+        screen.outputs.remove(QStringLiteral("HDMI-A-1")); // ... and then unplugged while replaced
+        bool ok = false;
+        const auto current = Journal::parseCurrent(screen.reader()().value(), &ok);
+        QVERIFY(ok);
+        const auto full = Journal::plan(entry, current);
+        QCOMPARE(full.missing, QStringList{QStringLiteral("HDMI-A-1")}); // the old rule: never verifiable
+        const auto reduced = Journal::withoutOutputs(entry, full.missing);
+        QCOMPARE(reduced.outputs.size(), 1); QCOMPARE(reduced.outputs.first().name, QStringLiteral("DP-1"));
+        QCOMPARE(reduced.owner, entry.owner); QCOMPARE(reduced.pid, entry.pid);
+        const auto plan = Journal::plan(reduced, current);
+        QVERIFY(plan.missing.isEmpty()); QVERIFY(!plan.arguments.isEmpty()); // DP-1 still has to come back
+        QVERIFY(plan.arguments.join(u' ').contains(QStringLiteral("output.DP-1.enable")));
+        // Once DP-1 is back the reduced entry verifies with nothing left to do.
+        screen.outputs[QStringLiteral("DP-1")].enabled = true;
+        const auto after = Journal::parseCurrent(screen.reader()().value(), &ok);
+        QVERIFY(Journal::plan(reduced, after).arguments.isEmpty());
+        QVERIFY(Journal::verified(reduced, current, after));
+        // Nothing unavailable: the entry is unchanged; everything unavailable: nothing left (the caller refuses).
+        QCOMPARE(Journal::withoutOutputs(entry, {}), entry);
+        QVERIFY(Journal::withoutOutputs(entry, {QStringLiteral("DP-1"), QStringLiteral("HDMI-A-1")}).outputs.isEmpty());
+    }
+
     void prioritiesAreRestoredAsOneOrdering()
     {
         QTemporaryDir directory;

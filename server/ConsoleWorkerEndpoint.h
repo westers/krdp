@@ -108,6 +108,8 @@ Q_SIGNALS:
     void outputsReceived(const KRdp::ConsoleWorkerWire::Outputs &outputs);
     void topologyReceived(const KRdp::ConsoleWorkerWire::Topology &topology);
     void localTakeover(quint64 generation);
+    /** M-8: the worker restored the host's screens because a host screen was added (wire 15). */
+    void hostScreensChanged(quint64 generation);
     void resizeFinished(const KRdp::ConsoleWorkerWire::ResizeResult &result);
     void positionFinished(const KRdp::ConsoleWorkerWire::PositionResult &result);
     void positionBatchFinished(const KRdp::ConsoleWorkerWire::PositionBatchResult &result);

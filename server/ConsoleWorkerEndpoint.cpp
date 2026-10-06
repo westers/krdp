@@ -451,6 +451,8 @@ bool ConsoleWorkerEndpoint::processRecords()
             Q_EMIT topologyReceived(*topology);
         } else if (const auto state = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::LocalTakeover); state && state->active) {
             Q_EMIT localTakeover(state->generation);
+        } else if (const auto state = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::HostScreensChanged); state && state->active) {
+            Q_EMIT hostScreensChanged(state->generation);
         } else if (const auto result = ConsoleWorkerWire::resizeResult(*record)) {
             Q_EMIT resizeFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::positionResult(*record)) {
