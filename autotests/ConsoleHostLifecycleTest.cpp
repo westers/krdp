@@ -76,12 +76,12 @@ struct FakeLauncher {
     }
 };
 
-QByteArray foreignVersionHello()
+QByteArray foreignVersionHello(int delta = 11)
 {
     QByteArray body;
     QDataStream stream(&body, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
-    stream << quint16(ConsoleWorkerWire::ProtocolVersion + 11) << quint8(ConsoleWorkerWire::Kind::Hello) << QByteArray("old");
+    stream << quint16(ConsoleWorkerWire::ProtocolVersion + delta) << quint8(ConsoleWorkerWire::Kind::Hello) << QByteArray("old");
     QByteArray result;
     QDataStream header(&result, QIODevice::WriteOnly);
     header.setByteOrder(QDataStream::BigEndian);
@@ -184,6 +184,30 @@ private Q_SLOTS:
         const auto stop = fromBroker.next();
         QVERIFY(stop);
         QCOMPARE(stop->kind, ConsoleWorkerWire::Kind::Stop);
+    }
+
+    // OPT-060 M-2: broker and worker ship together. A worker still speaking the previous wire (13, no mapped
+    // policy) is dropped and backed off like any other foreign version, never half-served.
+    void previousWireVersionIsRefused()
+    {
+        QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(14));
+        QTemporaryDir runtime;
+        Server server;
+        FakeLauncher launcher;
+        ConsoleHostController host(&server, launcher.functions(), runtime.path());
+        host.setSeatSessions({user(QStringLiteral("3"), Me)});
+        QCOMPARE(launcher.launches.size(), 1);
+        const auto launch = launcher.launches.last();
+        QLocalSocket worker;
+        worker.connectToServer(launch.socket);
+        QVERIFY(worker.waitForConnected(1000));
+        worker.write(foreignVersionHello(-1));
+        QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_COMPARE(worker.state(), QLocalSocket::UnconnectedState);
+        QVERIFY(!host.m_inputEnabled);
+        host.workerExited(launch.socket);
+        QVERIFY(host.m_retryTimer.isActive());
+        QCOMPARE(host.m_retryTimer.interval(), 1000);
     }
 
     void versionMismatchBacksOff()

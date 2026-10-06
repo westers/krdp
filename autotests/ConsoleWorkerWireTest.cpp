@@ -40,6 +40,7 @@ private Q_SLOTS:
     void chromaCostsRoundTripAndAreBounded();
     void captureSelectionAndWireBounds();
     void consoleVirtualPolicyTupleIsBounded();
+    void consoleVirtualMappedPolicyRoundTripsAndIsStrict();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
 };
@@ -553,7 +554,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(12));
+    QCOMPARE(ProtocolVersion, quint16(14));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -664,12 +665,15 @@ void ConsoleWorkerWireTest::consoleVirtualPolicyTupleIsBounded()
     const auto rejected = [](const Record &record) { return !encoderConfig(record); };
     auto bad = *record; bad.payload.chop(1); QVERIFY(rejected(bad));
     bad = *record; bad.payload.append('x'); QVERIFY(rejected(bad));
-    bad = *record; bad.payload[bad.payload.size() - 1] = char(2); QVERIFY(rejected(bad)); // Strict primary Boolean.
-    const auto policyOffset = record->payload.size() - (3 + 8 + 8 + 4 + 17 * 2);
+    const auto mappedTail = 4 + 4; // Wire 14: two empty counts (monitors, mapping) end every non-mapped policy.
+    bad = *record; bad.payload[bad.payload.size() - mappedTail - 1] = char(2); QVERIFY(rejected(bad)); // Strict primary Boolean.
+    const auto policyOffset = record->payload.size() - (3 + 8 + 8 + 4 + 17 * 2 + mappedTail);
     for (int offset = 0; offset < 3; ++offset) {
         bad = *record; bad.payload[policyOffset + offset] = char(255); QVERIFY(rejected(bad));
     }
     bad = *record; bad.payload[policyOffset + 3 + 8 + 8 + 3] = char(17); QVERIFY(rejected(bad)); // Bounded before allocation.
+    bad = *record; bad.payload[bad.payload.size() - 5] = char(17); QVERIFY(rejected(bad)); // Mapped monitor count.
+    bad = *record; bad.payload[bad.payload.size() - 1] = char(17); QVERIFY(rejected(bad)); // Mapping entry count.
     for (int field = 0; field < 7; ++field) {
         auto invalid = config;
         switch (field) {
@@ -685,6 +689,65 @@ void ConsoleWorkerWireTest::consoleVirtualPolicyTupleIsBounded()
     }
     config.consoleVirtual.enabled = false;
     d.feed(frame(config)); QCOMPARE(encoderConfig(*d.next()), std::optional(config));
+}
+
+// OPT-060 M-2: wire 14 carries Layout::Mapped, the client monitors and the host-screen -> monitor mapping.
+void ConsoleWorkerWireTest::consoleVirtualMappedPolicyRoundTripsAndIsStrict()
+{
+    using P = ConsoleVirtualOutputPolicy;
+    EncoderConfig config; config.generation = 43;
+    auto policy = *P::parse(true, QStringLiteral("replace"), QStringLiteral("client"), QSize(1920, 1080), {});
+    policy.layout = P::Layout::Mapped;
+    policy.mappedMonitors = {{QStringLiteral("eDP-1"), QRect(0, 0, 1920, 1080), 125, true},
+                             {QStringLiteral("DP-3 \u00e9"), QRect(1536, -20, 1536, 864), 100, false}};
+    policy.mapping = {{QStringLiteral("DP-1"), QStringLiteral("DP-3 \u00e9")}, {QStringLiteral("HDMI-A-1"), QStringLiteral("eDP-1")}};
+    QVERIFY(policy.isValid());
+    config.consoleVirtual = policy;
+    Deframer d; d.feed(frame(config));
+    const auto record = d.next(); QVERIFY(record);
+    const auto decoded = encoderConfig(*record);
+    QCOMPARE(decoded, std::optional(config));
+    QCOMPARE(decoded->consoleVirtual.layout, P::Layout::Mapped);
+    QCOMPARE(decoded->consoleVirtual.mappedMonitors[0].scalePercent, 125);
+    QCOMPARE(decoded->consoleVirtual.mapping[1].host, QStringLiteral("HDMI-A-1"));
+    // An empty mapping (the default rule) and a single monitor round-trip too.
+    auto lone = config;
+    lone.consoleVirtual.mappedMonitors.resize(1);
+    lone.consoleVirtual.mapping.clear();
+    d.feed(frame(lone)); QCOMPARE(encoderConfig(*d.next()), std::optional(lone));
+    // Rejected: truncated, trailing byte, and semantically invalid tuples (the decoder revalidates the whole policy).
+    const auto rejected = [](const Record &r) { return !encoderConfig(r); };
+    auto bad = *record; bad.payload.chop(1); QVERIFY(rejected(bad));
+    bad = *record; bad.payload.append('x'); QVERIFY(rejected(bad));
+    for (int field = 0; field < 9; ++field) {
+        auto invalid = config;
+        auto &v = invalid.consoleVirtual;
+        switch (field) {
+        case 0: v.mappedMonitors[1].primary = true; break;
+        case 1: v.mappedMonitors[0].scalePercent = 112; break;
+        case 2: v.mappedMonitors[0].scalePercent = 500; break;
+        case 3: v.mapping[0].monitor = QStringLiteral("unknown"); break;
+        case 4: v.mapping[1].host = v.mapping[0].host; break;
+        case 5: v.mappedMonitors.clear(); v.mapping.clear(); break; // Mapped needs at least one monitor.
+        case 6: v.layout = P::Layout::Client; break;               // Mapped data on another layout.
+        case 7: v.mappedMonitors[1].geometry.setWidth(639); break;
+        case 8: v.mappedMonitors[1].id.clear(); break;
+        }
+        d.feed(frame(invalid)); const auto invalidRecord = d.next(); QVERIFY(invalidRecord); QVERIFY(rejected(*invalidRecord));
+    }
+    // A layout value past Mapped is not a layout.
+    auto unknownLayout = config; unknownLayout.consoleVirtual.layout = P::Layout(4);
+    d.feed(frame(unknownLayout)); QVERIFY(rejected(*d.next()));
+    // Version mismatch: a wire-13 frame (and a future one) is refused as a whole, never partly decoded.
+    for (const int delta : {-1, 1}) {
+        QByteArray stale = frame(config);
+        // Frame = u32 length, u16 version, u8 kind, payload (see frame()); rewrite the version in place.
+        stale[4] = char(((ProtocolVersion + delta) >> 8) & 0xff);
+        stale[5] = char((ProtocolVersion + delta) & 0xff);
+        Deframer old; old.feed(stale);
+        QVERIFY(!old.next());
+        QCOMPARE(old.takeInvalidCount(), 1);
+    }
 }
 
 void ConsoleWorkerWireTest::chromaCostsRoundTripAndAreBounded()
@@ -751,7 +814,7 @@ void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
     QCOMPARE(encoderStats(*deframer.next()), std::optional(measured));
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 0);
-    QCOMPARE(LastKind, Kind::ReclaimConsole);
+    QCOMPARE(LastKind, Kind::PointerState);
 
     const auto rejected = [](const EncoderStats &stats) {
         Deframer d;

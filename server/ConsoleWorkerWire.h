@@ -59,7 +59,9 @@ namespace KRdp::ConsoleWorkerWire
 // 11 (T06): generation-bound Console temporary-output policy and client display tuple.
 // 12 (OPT-054): relative pointer input and physical-device reclaim requests.
 // 13 (OPT-054): native pointer capture policy and observed state.
-constexpr quint16 ProtocolVersion = 13;
+// 14 (OPT-060 M-2): EncoderConfig's Console temporary-output policy carries Layout::Mapped, the client monitors
+// (id, physical pixels, scale percent, primary) and the host-screen -> monitor mapping.
+constexpr quint16 ProtocolVersion = 14;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -1478,6 +1480,14 @@ inline QByteArray frame(const EncoderConfig &config)
     for (const auto &monitor : config.consoleVirtual.client.monitors)
         stream << qint32(monitor.geometry.x()) << qint32(monitor.geometry.y())
                << qint32(monitor.geometry.width()) << qint32(monitor.geometry.height()) << quint8(monitor.primary);
+    // Wire 14: Layout::Mapped monitors and mapping (both empty for every other layout).
+    stream << quint32(config.consoleVirtual.mappedMonitors.size());
+    for (const auto &monitor : config.consoleVirtual.mappedMonitors)
+        stream << monitor.id << qint32(monitor.geometry.x()) << qint32(monitor.geometry.y())
+               << qint32(monitor.geometry.width()) << qint32(monitor.geometry.height()) << quint16(monitor.scalePercent)
+               << quint8(monitor.primary);
+    stream << quint32(config.consoleVirtual.mapping.size());
+    for (const auto &entry : config.consoleVirtual.mapping) stream << entry.host << entry.monitor;
     return frame(Kind::EncoderConfig, payload);
 }
 
@@ -1507,7 +1517,7 @@ inline std::optional<EncoderConfig> encoderConfig(const Record &record)
         >> config.consoleVirtual.client.desktopSize >> monitorCount;
     if (stream.status() != QDataStream::Ok || virtualEnabled > 1
         || virtualPolicy > quint8(ConsoleVirtualOutputPolicy::Policy::Extend)
-        || virtualLayout > quint8(ConsoleVirtualOutputPolicy::Layout::Physical)
+        || virtualLayout > quint8(ConsoleVirtualOutputPolicy::Layout::Mapped)
         || monitorCount > ClientDisplay::MaxMonitors) return {};
     config.consoleVirtual.enabled = virtualEnabled;
     config.consoleVirtual.policy = ConsoleVirtualOutputPolicy::Policy(virtualPolicy);
@@ -1520,6 +1530,30 @@ inline std::optional<EncoderConfig> encoderConfig(const Record &record)
             || y < -ClientDisplay::MaxCoordinate || y > ClientDisplay::MaxCoordinate || primary > 1
             || !ClientDisplay::usable(QSize(width, height))) return {};
         config.consoleVirtual.client.monitors.append({QRect(x, y, width, height), bool(primary)});
+    }
+    quint32 mappedCount = 0;
+    stream >> mappedCount;
+    if (stream.status() != QDataStream::Ok || mappedCount > ConsoleVirtualOutputPolicy::MaxMappedMonitors) return {};
+    for (quint32 i = 0; i < mappedCount; ++i) {
+        ConsoleVirtualOutputPolicy::MappedMonitor monitor;
+        qint32 x = 0, y = 0, width = 0, height = 0;
+        quint16 scalePercent = 0;
+        quint8 primary = 0;
+        stream >> monitor.id >> x >> y >> width >> height >> scalePercent >> primary;
+        if (stream.status() != QDataStream::Ok || primary > 1 || monitor.id.size() > 64) return {};
+        monitor.geometry = QRect(x, y, width, height);
+        monitor.scalePercent = scalePercent;
+        monitor.primary = primary;
+        config.consoleVirtual.mappedMonitors.append(monitor);
+    }
+    quint32 entryCount = 0;
+    stream >> entryCount;
+    if (stream.status() != QDataStream::Ok || entryCount > ConsoleVirtualOutputPolicy::MaxMappedMonitors) return {};
+    for (quint32 i = 0; i < entryCount; ++i) {
+        ConsoleVirtualOutputPolicy::MapEntry entry;
+        stream >> entry.host >> entry.monitor;
+        if (stream.status() != QDataStream::Ok || entry.host.size() > ConsoleVirtualOutputPolicy::MaxMappedName || entry.monitor.size() > 64) return {};
+        config.consoleVirtual.mapping.append(entry);
     }
     const auto decoded = codecFromWire(codec);
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !config.generation || !decoded || preset > quint8(CodecPolicy::Preset::Fastest)
