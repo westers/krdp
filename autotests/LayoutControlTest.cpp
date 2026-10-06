@@ -145,6 +145,12 @@ private Q_SLOTS:
         QCOMPARE(active, (QJsonObject{{QStringLiteral("type"), QStringLiteral("console-screens")}, {QStringLiteral("v"), ProtocolVersion},
                                       {QStringLiteral("active"), true}, {QStringLiteral("canRestore"), true}}));
         QCOMPARE(withRequestId(consoleScreensRecord(false, false), QStringLiteral("q")).value(QStringLiteral("requestId")).toString(), QStringLiteral("q"));
+        // The optional reason is carried only when it is one of the known values.
+        QVERIFY(!consoleScreensRecord(false, false).contains(QStringLiteral("reason")));
+        QVERIFY(!consoleScreensRecord(false, false, QStringLiteral("nonsense")).contains(QStringLiteral("reason")));
+        for (const char *reason : {"connect", "deskInput", "restoreRequest", "workerExit", "disconnect", "failed", "lockRestore"}) {
+            QCOMPARE(consoleScreensRecord(false, false, QString::fromLatin1(reason)).value(QStringLiteral("reason")).toString(), QString::fromLatin1(reason));
+        }
         // The record survives the frame/deframe round trip an old client's parser performs; it is simply
         // an unknown `type` to it.
         Deframer deframer;

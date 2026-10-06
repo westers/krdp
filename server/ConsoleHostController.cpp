@@ -1826,6 +1826,11 @@ void ConsoleHostController::removeClient(RdpConnection *connection, ConsoleContr
         return;
     }
     for (const auto &client : removed) {
+        // Best effort: a client that leaves while Replace is active hears that the host's screens are back
+        // ("disconnect": it needs no notice). The connection may already be closing; sendRecord ignores a null one.
+        if (client->screensActiveSent.value_or(false) && client->connection) {
+            sendRecord(client->connection, LayoutControl::consoleScreensRecord(false, false, u"disconnect"_s));
+        }
         for (const auto &handle : std::as_const(client->connections)) {
             disconnect(handle);
         }
@@ -1967,6 +1972,7 @@ void ConsoleHostController::physicalInputActivity()
         if (!replaceActiveFor(*client)) continue;
         m_screensReclaimed = true;
         client->replaceSpent = true;
+        client->screensEndReason = u"deskInput"_s;
         updateClientDisplayPolicy(*client);
     }
     syncScreensRecords();
@@ -2037,10 +2043,11 @@ void ConsoleHostController::armConfiguredConsoleOutputs()
     }
 }
 
-void ConsoleHostController::endReplaceAttempts(const char *why)
+void ConsoleHostController::endReplaceAttempts(const char *why, const QString &reason)
 {
     for (const auto &client : m_clients) {
         if (!client->replaceAttempted) continue;
+        if (client->screensEndReason.isEmpty()) client->screensEndReason = reason;
         if (!client->replaceSpent) qInfo() << "Console Replace attempt over:" << why << "- normal capture for the rest of this connection";
         client->replaceSpent = true;
         updateClientDisplayPolicy(*client); // The configured outputs are gone now, so the next worker's policy turns off.
@@ -2065,7 +2072,8 @@ void ConsoleHostController::syncScreensRecords()
         // asked never hears of it; afterwards each edge is pushed once.
         if (client->screensActiveSent.value_or(false) == active) continue;
         client->screensActiveSent = active;
-        sendRecord(client->connection, LayoutControl::consoleScreensRecord(active, active && m_control.ownsControl(client->id)));
+        const QString reason = active ? u"connect"_s : std::exchange(client->screensEndReason, {});
+        sendRecord(client->connection, LayoutControl::consoleScreensRecord(active, active && m_control.ownsControl(client->id), reason));
     }
 }
 
@@ -2077,6 +2085,7 @@ bool ConsoleHostController::restoreHostScreens(Client &client)
     m_endpoint.reclaimConsole(m_controlGeneration);
     m_screensReclaimed = true;
     client.replaceSpent = true;
+    client.screensEndReason = u"restoreRequest"_s;
     updateClientDisplayPolicy(client);
     syncScreensRecords();
     return true;

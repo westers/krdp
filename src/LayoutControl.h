@@ -270,9 +270,11 @@ KRDP_EXPORT QJsonObject codecRecord(const QString &selected, std::optional<bool>
 /**
  * `console-screens` (OPT-060), unsolicited on each edge: \a active = the host's own screens are off for this
  * connection (Console Replace), \a canRestore = this connection may ask `console-screens-restore`.
- * Only sent to a client that saw `capabilities.console.screens`.
+ * Only sent to a client that saw `capabilities.console.screens`. \a reason (optional, omitted when empty or not one
+ * of the known values) says why the edge happened: "connect" with active, and with inactive "deskInput" (local
+ * keyboard/mouse), "restoreRequest" (the client asked), "workerExit", "disconnect", "failed", "lockRestore".
  */
-KRDP_EXPORT QJsonObject consoleScreensRecord(bool active, bool canRestore);
+KRDP_EXPORT QJsonObject consoleScreensRecord(bool active, bool canRestore, const QString &reason = {});
 
 /**
  * `session-end` (AUD-FIX2 F4), unsolicited, sent to a KRDPCTL client just before the server

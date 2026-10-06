@@ -134,6 +134,9 @@ private:
         bool replaceSpent = false;
         // The last `console-screens` state pushed (nullopt: nothing pushed yet).
         std::optional<bool> screensActiveSent;
+        // Why Replace ended for this client, set by the path that ended it (first wins); pushed with the
+        // `console-screens` active:false edge. Empty = not known, so the record carries no reason.
+        QString screensEndReason;
         bool screensAdvertised = false; // `capabilities.console.screens` was sent to it
     };
 
@@ -154,7 +157,7 @@ private:
     void updateClientDisplayPolicy(Client &client);
     void armConfiguredConsoleOutputs();
     /** The attempt of every client that armed one is over; the next worker captures normally. */
-    void endReplaceAttempts(const char *why);
+    void endReplaceAttempts(const char *why, const QString &reason = QStringLiteral("workerExit"));
     /** Replace is live for \a client: its configured outputs are up and the host's screens are off. */
     bool replaceActiveFor(const Client &client) const;
     /** Push `console-screens` to each KRDPCTL client whose state changed. */

@@ -391,6 +391,63 @@ private Q_SLOTS:
         QVERIFY(!sent.last().value(u"ok"_s).toBool());
     }
 
+    // OPT-060: `console-screens` carries why it ended (contract (h)).
+    void consoleScreensEndReason_data()
+    {
+        QTest::addColumn<QString>("how");
+        QTest::addColumn<QString>("reason");
+        QTest::newRow("restore request") << u"restore"_s << u"restoreRequest"_s;
+        QTest::newRow("desk input") << u"desk"_s << u"deskInput"_s;
+        QTest::newRow("worker exit") << u"worker"_s << u"workerExit"_s;
+        QTest::newRow("disconnect") << u"disconnect"_s << u"disconnect"_s;
+    }
+    void consoleScreensEndReason()
+    {
+        QFETCH(QString, how);
+        QFETCH(QString, reason);
+        QTemporaryDir runtime; QVERIFY(runtime.isValid());
+        Server server; RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        QList<QJsonObject> sent;
+        host.m_recordSent = [&](RdpConnection *, const QJsonObject &record) { sent.append(record); };
+        host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
+        host.setUserSettingsReader([](quint32) { return BrokerUserSettings::parse("[General]\n"); });
+        host.setDisplayInfoProvider([](RdpConnection *) { return monitorBlock(true); });
+        QVERIFY(host.m_endpoint.listen(runtime.filePath(QStringLiteral("worker.sock")),
+            {ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000}, QByteArray(32, 'x')));
+        host.addClient(&connection);
+        auto &client = *host.m_clients.front();
+        const auto clientId = client.id;
+        client.uid = 1000;
+        host.loadUserSettings(client);
+        client.capabilitiesSent = client.screensAdvertised = true;
+        const auto screens = [&] {
+            QList<QJsonObject> result;
+            for (const auto &record : sent) if (record.value(u"type"_s).toString() == u"console-screens"_s) result.append(record);
+            return result;
+        };
+        host.m_control.admit(client.id); host.syncControlState();
+        host.m_inputEnabled = true; client.session->setWorkerActive(true);
+        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("Virtual-owned-0"), QRect(0, 0, 1280, 720), 1, true}}, QPoint(2560, 0)});
+        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(2560, 0, 1280, 720), 1, true, 1, false}}, false});
+        host.syncScreensRecords();
+        QCOMPARE(screens().size(), 1);
+        QVERIFY(screens().last().value(u"active"_s).toBool());
+        QCOMPARE(screens().last().value(u"reason"_s).toString(), u"connect"_s);
+        if (how == u"restore"_s) {
+            host.onControlRecord(&connection, clientId, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r"_s}});
+        } else if (how == u"desk"_s) {
+            host.physicalInputActivity();
+        } else if (how == u"worker"_s) {
+            host.clearPhysicalLease("test worker exit");
+        } else {
+            host.removeClient(&connection);
+        }
+        QCOMPARE(screens().size(), 2);
+        QVERIFY(!screens().last().value(u"active"_s).toBool());
+        QCOMPARE(screens().last().value(u"reason"_s).toString(), reason);
+    }
+
     void consoleVirtualPolicyIsIdentityAndControllerScoped()
     {
         Server server;

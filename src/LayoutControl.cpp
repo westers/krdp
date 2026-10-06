@@ -465,14 +465,20 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
     return record;
 }
 
-QJsonObject consoleScreensRecord(bool active, bool canRestore)
+QJsonObject consoleScreensRecord(bool active, bool canRestore, const QString &reason)
 {
-    return QJsonObject{
+    QJsonObject record{
         {QStringLiteral("type"), QStringLiteral("console-screens")},
         {QStringLiteral("v"), ProtocolVersion},
         {QStringLiteral("active"), active},
         {QStringLiteral("canRestore"), canRestore},
     };
+    static const QStringList known{QStringLiteral("connect"),    QStringLiteral("deskInput"), QStringLiteral("restoreRequest"), QStringLiteral("workerExit"),
+                                   QStringLiteral("disconnect"), QStringLiteral("failed"),    QStringLiteral("lockRestore")};
+    if (known.contains(reason)) {
+        record.insert(QStringLiteral("reason"), reason);
+    }
+    return record;
 }
 
 QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, const QString &reason)
