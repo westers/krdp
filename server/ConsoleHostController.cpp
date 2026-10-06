@@ -38,8 +38,13 @@
 #include "ConsoleFrameLayout.h"
 #include "RemoteTopologyProtocol.h"
 #include "CameraAvailability.h"
+#include "ConsoleVirtualOutputPlan.h"
+#include <QLoggingCategory>
 
 using namespace Qt::StringLiterals;
+
+// Same name as the library category so QT_LOGGING_RULES=farside.server.debug=true enables these counters.
+Q_LOGGING_CATEGORY(CONSOLE_SCREENS, "farside.server", QtInfoMsg)
 
 namespace
 {
@@ -276,6 +281,19 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             m_endpoint.setMedia(m_media);
         }
     });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::hostScreensChanged, this, [this](quint64 generation) {
+        // OPT-060 M-8: the worker already gave the host's screens back (extend); end Replace for this connection.
+        if (generation != m_controlGeneration) return;
+        for (const auto &client : m_clients) {
+            if (!replaceActiveFor(*client)) continue;
+            m_screensReclaimed = true;
+            client->replaceSpent = true;
+            client->screensEndReason = u"hostScreensChanged"_s;
+            client->screensHostChangeMessage = u"A screen was added to or removed from the host. Its screens are back on; the session continues."_s;
+            updateClientDisplayPolicy(*client);
+        }
+        syncScreensRecords();
+    });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerStopped, this, [this]() {
         setWorkerActive(false);
         finishPhysicalTopology(u"capture-failed"_s);
@@ -310,6 +328,9 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
                 client->connection->videoStream()->setMonitorLayout(desired);
                 client->wireLayout = desired;
             }
+            // OPT-060 M-4: a client that told us which host screens it shows gets only those (a key frame first
+            // for one it just started showing). Workspace capture is one aggregate surface, never filtered.
+            if (!workspace && !forwardsFrameTo(*client, frame)) continue;
             client->session->submitFrame(frame);
         }
     });
@@ -354,6 +375,28 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             finishTopologyQueries(u"capture-failed"_s);
         }
         m_outputs = outputs;
+        if (changed) {
+            // OPT-060 M-3: the host's own screens as last captured plainly (what a mapped request is planned against).
+            const bool plain = !m_configuredConsoleOutputs && !outputs.monitors.isEmpty()
+                && std::none_of(outputs.monitors.cbegin(), outputs.monitors.cend(), [](const auto &output) {
+                       return OutputSnapshot::isVirtual(output.name);
+                   });
+            if (plain) {
+                m_hostScreens.clear();
+                int priority = 2;
+                for (const auto &output : outputs.monitors) {
+                    OutputSnapshot::Output screen;
+                    screen.name = output.name;
+                    screen.enabled = true;
+                    screen.position = output.geometry.topLeft();
+                    screen.priority = output.primary ? 1 : priority++;
+                    screen.size = QSize(qRound(output.geometry.width() * output.scale), qRound(output.geometry.height() * output.scale));
+                    screen.scale = output.scale;
+                    m_hostScreens.append(screen);
+                }
+            }
+            for (const auto &client : m_clients) resolveVisibleSurfaces(*client); // M-4: surface indices moved
+        }
         // Do not publish an in-flight layout from an Outputs record alone.
         // First require the worker's independently captured KScreen topology.
         if (independentTransition) {
@@ -1015,15 +1058,66 @@ void ConsoleHostController::updateClientDisplayPolicy(Client &client)
     const auto permission = ConsoleVirtualOutputPolicy::permissionOf(layoutPolicy);
     // The connection's standard monitor block, or its explicit `console-screens-request` (a one-monitor
     // client has no block: FreeRDP writes it only for 2+ monitors; OPT-060 D0).
-    const auto info = ConsoleVirtualOutputPolicy::effectiveRequest(
-        m_displayInfoOf ? m_displayInfoOf(client.connection) : client.connection->clientDisplayInfo(), client.screensRequest);
+    const auto block = m_displayInfoOf ? m_displayInfoOf(client.connection) : client.connection->clientDisplayInfo();
+    const auto info = ConsoleVirtualOutputPolicy::effectiveRequest(block, client.screensRequest);
     const bool spent = client.replaceSpent && !m_configuredConsoleOutputs;
-    const bool enabled = ConsoleVirtualOutputPolicy::gate(permission, ConsoleVirtualOutputPolicy::monitorBlockSent(info),
+    // OPT-060 M-3: a connection that was offered `mapped` and sent a standard block waits (grace) for its v2 request
+    // before the block arms the one-output-per-client-monitor layout; a refused mapped request never falls back to it.
+    const bool held = permission == ConsoleVirtualOutputPolicy::Permission::Ask && mappedGraceHeld(client, block);
+    const bool enabled = !held && client.mappedRefusal.isEmpty()
+        && ConsoleVirtualOutputPolicy::gate(permission, ConsoleVirtualOutputPolicy::monitorBlockSent(info),
                              true, spent) == ConsoleVirtualOutputPolicy::Gate::Replace;
-    const auto policy = ConsoleVirtualOutputPolicy::parse(enabled,
+    auto policy = ConsoleVirtualOutputPolicy::parse(enabled,
         ConsoleVirtualOutputPolicy::planPolicy(layoutPolicy), p.virtualMonitorLayout.value_or(u"client"_s),
         p.virtualMonitorFallbackSize.value_or(QSize(1920, 1080)), info);
+    if (policy && client.mappedRequest) {
+        policy->layout = ConsoleVirtualOutputPolicy::Layout::Mapped;
+        for (const auto &monitor : client.mappedRequest->monitors)
+            policy->mappedMonitors.append({monitor.id, monitor.geometry, monitor.scalePercent, monitor.primary});
+        for (const auto &entry : client.mappedRequest->mapping) policy->mapping.append({entry.hostOutput, entry.clientMonitor});
+        if (!policy->isValid()) {
+            // Fail open: a policy the worker would refuse never leaves the broker; plain capture instead.
+            qWarning() << "Console mapped screens request is not a valid policy; capturing the host's screens as they are";
+            policy->layout = ConsoleVirtualOutputPolicy::Layout::Client;
+            policy->mappedMonitors.clear();
+            policy->mapping.clear();
+            policy->enabled = false;
+        }
+    }
     if (policy) client.codec->setConsoleVirtualPolicy(*policy);
+}
+
+bool ConsoleHostController::hasControlChannel(RdpConnection *connection) const
+{
+    return connection && (m_controlChannelOf ? m_controlChannelOf(connection) : connection->hasControlChannel());
+}
+
+bool ConsoleHostController::mappedGraceHeld(Client &client, const ClientDisplay::Info &block)
+{
+    // Only a KRDPCTL connection that was (or will be, within this very slot) offered `mapped` waits. A stock client
+    // never does, and neither does a client that already sent its v2 request or whose grace has run out.
+    if (m_screensGraceMs <= 0 || client.graceExpired || client.mappedRequest || !ConsoleVirtualOutputPolicy::monitorBlockSent(block)
+        || !hasControlChannel(client.connection))
+        return false;
+    if (!client.graceStarted) {
+        client.graceStarted = true;
+        client.graceClock.start();
+        const auto id = client.id;
+        QTimer::singleShot(m_screensGraceMs, this, [this, id] { expireMappedGrace(id); });
+    }
+    return true;
+}
+
+void ConsoleHostController::expireMappedGrace(ConsoleControl::Id id)
+{
+    for (const auto &client : m_clients) {
+        if (client->id != id || client->graceExpired) continue;
+        client->graceExpired = true;
+        if (!client->mappedRequest) qInfo() << "Console screens: no mapped request within the grace; the standard monitor block applies";
+        updateClientDisplayPolicy(*client); // the block now arms exactly as it did before the grace existed
+        armConfiguredConsoleOutputs();
+        return;
+    }
 }
 
 bool ConsoleHostController::configuredOutputTopology() const
@@ -1127,7 +1221,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         // StandardClientMedia is for clients that do not speak KRDPCTL: a
         // `device` record, or any other record this host knows (not
         // audio-priority, which never closes krdpserver's gate either).
-        static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s, u"console-screens-restore"_s, u"console-screens-request"_s,
+        static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s, u"console-screens-restore"_s, u"console-screens-request"_s, u"console-screens-view"_s,
                                          u"pointer-capture"_s, u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s, u"stats"_s, u"chroma"_s};
         for (const auto &client : m_clients) {
             if (client->id != id) continue;
@@ -1452,6 +1546,14 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         }
         return;
     }
+    if (type == u"console-screens-request"_s && record.value(u"v"_s).toInt() == 2) {
+        handleMappedScreensRequest(connection, id, record); // OPT-060 M-3
+        return;
+    }
+    if (type == u"console-screens-view"_s) {
+        handleScreensView(connection, id, record); // OPT-060 M-4
+        return;
+    }
     if (type == u"console-screens-request"_s) {
         // OPT-060 D0: a client with ONE monitor sends no standard monitor block (FreeRDP writes it only for 2+),
         // so it asks here. Accepted, it is exactly a standard block: same permission gate, same one attempt per
@@ -1474,8 +1576,10 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             refuse(u"The screens request came too late: Replace was already used on this connection."_s);
         } else {
             auto &client = **found;
-            const bool changed = client.screensRequest != monitors;
+            const bool changed = client.screensRequest != monitors || client.mappedRequest;
             client.screensRequest = monitors;
+            client.mappedRequest.reset(); // a one-output-per-monitor request replaces an earlier mapped one
+            client.mappedRefusal.clear();
             if (changed) {
                 updateClientDisplayPolicy(client); // sends the policy to a bound worker
                 armConfiguredConsoleOutputs(); // owner + physical user worker: the same arming a block gets at Ready
@@ -1867,6 +1971,7 @@ void ConsoleHostController::removeClient(RdpConnection *connection, ConsoleContr
         return;
     }
     for (const auto &client : removed) {
+        logViewCounters(*client, "client left");
         // Best effort: a client that leaves while Replace is active hears that the host's screens are back
         // ("disconnect": it needs no notice). The connection may already be closing; sendRecord ignores a null one.
         if (client->screensActiveSent.value_or(false) && client->connection) {
@@ -1926,7 +2031,8 @@ void ConsoleHostController::replyTo(RdpConnection *connection, const QJsonObject
 
 void ConsoleHostController::sendCapabilities(Client &client)
 {
-    if (client.capabilitiesSent || !client.connection || !client.connection->isAuthenticated() || !client.connection->hasControlChannel()) return;
+    if (client.capabilitiesSent || !client.connection || !(m_authenticatedOf ? m_authenticatedOf(client.connection) : client.connection->isAuthenticated())
+        || !hasControlChannel(client.connection)) return;
     loadUserSettings(client);
     client.capabilitiesSent = true;
     LayoutControl::ChannelCapabilities capabilities;
@@ -1951,10 +2057,10 @@ void ConsoleHostController::sendCapabilities(Client &client)
     // with its monitor block. Old clients ignore the group and the `console-screens` records.
     const auto permission = ConsoleVirtualOutputPolicy::permissionOf(client.preferences.virtualMonitorPolicy.value_or(u"replace"_s));
     if (permission == ConsoleVirtualOutputPolicy::Permission::Ask) {
-        capabilities.consoleScreens = LayoutControl::ConsoleScreensCapabilities{true, true, true};
+        capabilities.consoleScreens = LayoutControl::ConsoleScreensCapabilities{true, true, true, true, ConsoleVirtualOutputPolicy::MaxMappedScreens, true};
         client.screensAdvertised = true;
     }
-    client.connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
+    sendRecord(client.connection, LayoutControl::capabilitiesRecord(capabilities));
 }
 
 void ConsoleHostController::sendLayouts()
@@ -2110,12 +2216,287 @@ void ConsoleHostController::syncScreensRecords()
         if (!client->capabilitiesSent || !client->screensAdvertised || !client->connection) continue;
         const bool active = replaceActiveFor(*client);
         // Nothing is pushed until Replace has been active at least once, so a client that never
-        // asked never hears of it; afterwards each edge is pushed once.
-        if (client->screensActiveSent.value_or(false) == active) continue;
+        // asked never hears of it; afterwards each edge is pushed once. A client that asked for a MAPPED layout
+        // is told once when its attempt ended without ever being active (the plan refused or the worker failed),
+        // so it does not wait for a banner that will not come.
+        const bool mappedFailed = !active && !client->screensActiveSent && client->mappedRequest && client->replaceSpent;
+        if (!mappedFailed && client->screensActiveSent.value_or(false) == active) continue;
         client->screensActiveSent = active;
-        const QString reason = active ? u"connect"_s : std::exchange(client->screensEndReason, {});
-        sendRecord(client->connection, LayoutControl::consoleScreensRecord(active, active && m_control.ownsControl(client->id), reason));
+        const QString reason = active ? u"connect"_s : (mappedFailed && client->screensEndReason.isEmpty() ? u"failed"_s : std::exchange(client->screensEndReason, {}));
+        LayoutControl::ConsoleScreensDetail detail;
+        if (client->mappedRequest && active) detail = screensDetail(*client);
+        else if (mappedFailed) detail.message = u"The host could not replace its screens; they are shown as they are."_s;
+        else if (!active && !client->screensHostChangeMessage.isEmpty()) detail.message = std::exchange(client->screensHostChangeMessage, {});
+        sendRecord(client->connection, LayoutControl::consoleScreensRecord(active, active && m_control.ownsControl(client->id), reason, detail));
     }
+}
+
+ConsoleHostController::MappedPrediction ConsoleHostController::predictMapped(const LayoutControl::ConsoleScreensMappedRequest &request) const
+{
+    MappedPrediction prediction;
+    if (m_hostScreens.isEmpty()) return prediction;
+    ConsoleVirtualOutputPolicy policy;
+    policy.enabled = true;
+    policy.policy = ConsoleVirtualOutputPolicy::Policy::Replace;
+    policy.layout = ConsoleVirtualOutputPolicy::Layout::Mapped;
+    for (const auto &monitor : request.monitors) policy.mappedMonitors.append({monitor.id, monitor.geometry, monitor.scalePercent, monitor.primary});
+    for (const auto &entry : request.mapping) policy.mapping.append({entry.hostOutput, entry.clientMonitor});
+    prediction.planned = true;
+    // The same pure planner the worker runs (with the worker's creation bound of 16 outputs).
+    ConsoleVirtualOutputPlan::build(policy, m_hostScreens, m_hostScreens, false, ClientDisplay::MaxMonitors, &prediction.report);
+    return prediction;
+}
+
+LayoutControl::ConsoleScreensDetail ConsoleHostController::screensDetail(const Client &client) const
+{
+    LayoutControl::ConsoleScreensDetail detail;
+    if (!client.mappedRequest) return detail;
+    detail.layout = u"mapped"_s;
+    const auto prediction = predictMapped(*client.mappedRequest);
+    if (!prediction.planned || prediction.report.refusal != ConsoleVirtualOutputPlan::Refusal::None) {
+        qInfo() << "Console screens: the host's screens were not known when the mapped layout came up; no screens[] in the record";
+        return detail;
+    }
+    // Trust the prediction only if the worker really created these outputs (it plans from its own KScreen snapshot).
+    bool consistent = prediction.report.screens.size() == m_outputs.monitors.size();
+    for (qsizetype i = 0; consistent && i < prediction.report.screens.size(); ++i)
+        consistent = m_outputs.monitors[i].name == prediction.report.screens[i].output
+            || m_outputs.monitors[i].name.endsWith(prediction.report.screens[i].output.mid(OutputSnapshot::VirtualPrefix.size()));
+    if (!consistent) {
+        qWarning() << "Console screens: the worker's outputs differ from the broker's plan; no screens[] in the record";
+        return detail;
+    }
+    int surface = 0;
+    for (const auto &screen : prediction.report.screens) {
+        LayoutControl::ConsoleScreenEntry entry;
+        entry.hostOutput = screen.host;
+        entry.output = screen.output;
+        entry.clientMonitor = screen.monitor;
+        entry.surface = surface++;
+        entry.width = screen.pixels.width();
+        entry.height = screen.pixels.height();
+        entry.scale = screen.scale;
+        entry.primary = screen.primary;
+        entry.isDefault = screen.isDefault;
+        entry.clamped = screen.clamped;
+        detail.screens.append(entry);
+    }
+    detail.unmappedMonitors = prediction.report.unmappedMonitors;
+    detail.unknownHosts = prediction.report.unknownHosts;
+    return detail;
+}
+
+static QString mappedRefusalMessage(ConsoleVirtualOutputPlan::Refusal refusal, int hostScreens)
+{
+    using R = ConsoleVirtualOutputPlan::Refusal;
+    switch (refusal) {
+    case R::TooManyScreens:
+        return u"The host has %1 screens; replacing works for up to %2. Showing them as they are."_s.arg(hostScreens).arg(ConsoleVirtualOutputPolicy::MaxMappedScreens);
+    case R::DesktopTooLarge:
+        return u"The host's screens do not fit in one desktop of 8192 pixels on a side at these monitor sizes. Showing them as they are."_s;
+    case R::BadMonitorSize:
+        return u"A monitor of the request cannot be used at this size. Showing the host's screens as they are."_s;
+    case R::NoHostScreens:
+        return u"The host reports no enabled screen to replace."_s;
+    case R::TooManyOutputs:
+        return u"The host already has too many outputs to create the replacements. Showing its screens as they are."_s;
+    default:
+        return u"The request cannot be applied. Showing the host's screens as they are."_s;
+    }
+}
+
+static QString mappedRefusalCode(ConsoleVirtualOutputPlan::Refusal refusal)
+{
+    using R = ConsoleVirtualOutputPlan::Refusal;
+    switch (refusal) {
+    case R::TooManyScreens: return u"tooManyScreens"_s;
+    case R::DesktopTooLarge: return u"desktopTooLarge"_s;
+    case R::BadMonitorSize: return u"badMonitorSize"_s;
+    case R::NoHostScreens: return u"noHostScreens"_s;
+    case R::TooManyOutputs: return u"tooManyOutputs"_s;
+    default: return u"invalid"_s;
+    }
+}
+
+void ConsoleHostController::handleMappedScreensRequest(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record)
+{
+    // OPT-060 M-3, contract (h): `console-screens-request` v2. Same permission gate, one attempt per connection and
+    // fail-open as the standard block and the v1 request; the reply says only whether the request was TAKEN.
+    const auto refuse = [this, connection](const QString &code, const QString &message, const QJsonObject &extra = {}) {
+        QJsonObject reply{{u"type"_s, u"console-screens-request"_s}, {u"v"_s, 2}, {u"ok"_s, false}, {u"refusal"_s, code}, {u"message"_s, message}};
+        for (auto it = extra.begin(); it != extra.end(); ++it) reply.insert(it.key(), it.value());
+        replyTo(connection, reply);
+    };
+    const auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &entry) { return entry->id == id; });
+    QString code;
+    const auto request = LayoutControl::parseConsoleScreensMappedRequest(record, &code);
+    if (found == m_clients.end() || !request) {
+        refuse(code.isEmpty() ? u"invalid"_s : code, code == u"unknownMonitor"_s ? u"The mapping names a monitor that the request does not list."_s : u"invalid console-screens-request"_s);
+        return;
+    }
+    auto &client = **found;
+    if (!client.screensAdvertised) {
+        refuse(u"permissionOff"_s, u"This host does not let connections replace its screens."_s);
+        return;
+    }
+    // A standard monitor block is the connection's request already. The v2 request may add the layout and the mapping
+    // only for the same set of monitors; anything else leaves the block alone (it applies as it always did).
+    const auto block = m_displayInfoOf ? m_displayInfoOf(connection) : connection->clientDisplayInfo();
+    if (ConsoleVirtualOutputPolicy::monitorBlockSent(block)) {
+        const auto normalized = [](QVector<QRect> rectangles, QVector<bool> primaries) {
+            QRect bounds;
+            for (const auto &r : rectangles) bounds |= r;
+            QList<std::tuple<int, int, int, int, bool>> keys;
+            for (qsizetype i = 0; i < rectangles.size(); ++i) {
+                const auto r = rectangles[i].translated(-bounds.topLeft());
+                keys.append({r.x(), r.y(), r.width(), r.height(), primaries[i]});
+            }
+            std::sort(keys.begin(), keys.end());
+            return keys;
+        };
+        QVector<QRect> a, b;
+        QVector<bool> pa, pb;
+        for (const auto &monitor : block.monitors) { a.append(monitor.geometry); pa.append(monitor.primary); }
+        for (const auto &monitor : request->monitors) { b.append(monitor.geometry); pb.append(monitor.primary); }
+        if (a.size() != b.size() || normalized(a, pa) != normalized(b, pb)) {
+            refuse(u"blockMismatch"_s, u"The monitors differ from the connection's standard monitor block; the block applies."_s);
+            return;
+        }
+    }
+    if (client.replaceAttempted && client.mappedRequest != request) {
+        refuse(u"alreadyAttempted"_s, u"The screens request came too late: Replace was already used on this connection."_s);
+        return;
+    }
+    const auto prediction = predictMapped(*request);
+    if (prediction.planned && prediction.report.refusal != ConsoleVirtualOutputPlan::Refusal::None) {
+        // The broker's own plan check (the worker would refuse it as well): no Replace on this connection at all.
+        // The request was understood; Replace just cannot be done. The client expects the same as for the worker's own
+        // refusal: ok:true (taken), then one `console-screens active:false` with the reason (`tooManyScreens` for the
+        // cap, `failed` otherwise) and a sentence; the reply also names the refusal code.
+        client.mappedRefusal = mappedRefusalCode(prediction.report.refusal);
+        const QString text = mappedRefusalMessage(prediction.report.refusal, m_hostScreens.size());
+        updateClientDisplayPolicy(client);
+        replyTo(connection, QJsonObject{{u"type"_s, u"console-screens-request"_s}, {u"v"_s, 2}, {u"ok"_s, true},
+                                        {u"refusal"_s, client.mappedRefusal}, {u"message"_s, text}});
+        LayoutControl::ConsoleScreensDetail detail;
+        detail.message = text;
+        client.screensActiveSent = false;
+        sendRecord(connection, LayoutControl::consoleScreensRecord(false, false,
+            prediction.report.refusal == ConsoleVirtualOutputPlan::Refusal::TooManyScreens ? u"tooManyScreens"_s : u"failed"_s, detail));
+        return;
+    }
+    QJsonObject extra;
+    QString message;
+    if (prediction.planned && !prediction.report.unknownHosts.isEmpty()) {
+        extra.insert(u"unknownHosts"_s, QJsonArray::fromStringList(prediction.report.unknownHosts));
+        message = u"Ignored mapping entries for host screens that are not there: %1."_s.arg(prediction.report.unknownHosts.join(u", "_s));
+    }
+    if (client.graceClock.isValid())
+        qCDebug(CONSOLE_SCREENS) << "Console screens: v2 request" << client.graceClock.elapsed() << "ms after the grace started";
+    QVector<VideoMonitor> monitors;
+    for (const auto &monitor : request->monitors) monitors.append({monitor.geometry, monitor.primary});
+    const bool changed = client.mappedRequest != request || client.screensRequest != std::optional(monitors);
+    client.mappedRequest = request;
+    client.mappedRefusal.clear();
+    client.screensRequest = monitors;
+    if (changed) {
+        updateClientDisplayPolicy(client); // sends the policy to a bound worker; also ends the grace hold
+        armConfiguredConsoleOutputs(); // owner + physical user worker: the same arming a block gets at Ready
+    }
+    QJsonObject reply{{u"type"_s, u"console-screens-request"_s}, {u"v"_s, 2}, {u"ok"_s, true}};
+    if (!message.isEmpty()) reply.insert(u"message"_s, message);
+    for (auto it = extra.begin(); it != extra.end(); ++it) reply.insert(it.key(), it.value());
+    replyTo(connection, reply);
+}
+
+void ConsoleHostController::resolveVisibleSurfaces(Client &client)
+{
+    client.awaitingKeyFrame.clear();
+    if (!client.view) { client.visibleSurfaces.reset(); return; }
+    QSet<int> surfaces;
+    for (const int index : client.view->indices)
+        if (index >= 0 && index < m_outputs.monitors.size()) surfaces.insert(index);
+    // A name is a stand-in output (with or without its Virtual- prefix) or the host connector it replaces.
+    const auto planned = client.mappedRequest ? predictMapped(*client.mappedRequest) : MappedPrediction{};
+    for (qsizetype i = 0; i < m_outputs.monitors.size(); ++i) {
+        const QString &name = m_outputs.monitors[i].name;
+        const QString bare = name.startsWith(OutputSnapshot::VirtualPrefix) ? name.mid(OutputSnapshot::VirtualPrefix.size()) : name;
+        bool match = client.view->names.contains(name) || client.view->names.contains(bare);
+        if (!match && planned.planned) {
+            for (const auto &screen : planned.report.screens)
+                if (screen.output == name && client.view->names.contains(screen.host)) match = true;
+        }
+        if (match) surfaces.insert(int(i));
+    }
+    // Fail open: names that match no output of this capture (stale after a worker change) must never blank the picture.
+    const bool listed = !client.view->names.isEmpty() || !client.view->indices.isEmpty();
+    if (listed && surfaces.isEmpty()) client.visibleSurfaces.reset();
+    else client.visibleSurfaces = surfaces;
+}
+
+bool ConsoleHostController::forwardsFrameTo(Client &client, const VideoFrame &frame)
+{
+    if (!client.visibleSurfaces || frame.monitors.size() <= 1) return true;
+    const int surface = frame.monitorIndex;
+    if (!client.visibleSurfaces->contains(surface)) {
+        ++client.framesDropped[surface];
+        return false;
+    }
+    if (client.awaitingKeyFrame.contains(surface)) {
+        if (!frame.isKeyFrame) {
+            ++client.framesDropped[surface];
+            return false;
+        }
+        client.awaitingKeyFrame.remove(surface);
+    }
+    ++client.framesForwarded[surface];
+    return true;
+}
+
+void ConsoleHostController::logViewCounters(const Client &client, const char *why) const
+{
+    if (client.framesForwarded.isEmpty() && client.framesDropped.isEmpty()) return;
+    QStringList parts;
+    for (int surface = 0; surface < ClientDisplay::MaxMonitors; ++surface) {
+        if (!client.framesForwarded.contains(surface) && !client.framesDropped.contains(surface)) continue;
+        parts.append(u"%1:%2/%3"_s.arg(surface).arg(client.framesForwarded.value(surface)).arg(client.framesDropped.value(surface)));
+    }
+    qCDebug(CONSOLE_SCREENS) << "Console screens view counters (surface:forwarded/dropped)," << why << ":" << parts.join(u' ');
+}
+
+void ConsoleHostController::handleScreensView(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record)
+{
+    // OPT-060 M-4, contract (h): the surfaces THIS client shows. Any admitted client (viewers too) filters only its own stream.
+    const auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &entry) { return entry->id == id; });
+    const auto view = LayoutControl::parseConsoleScreensView(record);
+    if (found == m_clients.end() || !view || !m_control.admitted(id)) {
+        replyTo(connection, QJsonObject{{u"type"_s, u"console-screens-view"_s}, {u"v"_s, 1}, {u"ok"_s, false},
+            {u"message"_s, view ? u"This connection is not admitted to the console."_s : u"invalid console-screens-view"_s}});
+        return;
+    }
+    auto &client = **found;
+    logViewCounters(client, "view changed");
+    const auto before = client.visibleSurfaces;
+    client.view = view;
+    resolveVisibleSurfaces(client);
+    // A surface that was not being forwarded and now is has missed frames: hold it until its next key frame and ask
+    // for one (the existing all-outputs request; no wire change). With no earlier record every surface was forwarded.
+    bool shown = false;
+    if (client.visibleSurfaces && before) {
+        for (const int surface : std::as_const(*client.visibleSurfaces)) {
+            if (!before->contains(surface)) { client.awaitingKeyFrame.insert(surface); shown = true; }
+        }
+    }
+    if (shown) m_endpoint.requestKeyFrame();
+    QJsonArray surfaces;
+    if (client.visibleSurfaces) {
+        QList<int> sorted = client.visibleSurfaces->values();
+        std::sort(sorted.begin(), sorted.end());
+        for (const int surface : sorted) surfaces.append(surface);
+    } else {
+        for (qsizetype i = 0; i < m_outputs.monitors.size(); ++i) surfaces.append(int(i)); // everything is forwarded
+    }
+    replyTo(connection, QJsonObject{{u"type"_s, u"console-screens-view"_s}, {u"v"_s, 1}, {u"ok"_s, true}, {u"surfaces"_s, surfaces}});
 }
 
 bool ConsoleHostController::restoreHostScreens(Client &client)

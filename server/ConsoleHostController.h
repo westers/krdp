@@ -30,6 +30,10 @@
 #include "WorkerCodecBridge.h"
 #include "BrokerUserSettings.h"
 #include "LogThrottle.h"
+#include "ConsoleVirtualOutputPlan.h"
+#include "OutputSnapshot.h"
+
+#include <QSet>
 
 namespace KRdp
 {
@@ -140,7 +144,43 @@ private:
         bool screensAdvertised = false; // `capabilities.console.screens` was sent to it
         // OPT-060 D0: the monitors of its `console-screens-request` (a one-monitor client has no standard block).
         std::optional<QVector<VideoMonitor>> screensRequest;
+        // OPT-060 M-3: the v2 (`layout:"mapped"`) request, taken (its monitors are also in screensRequest).
+        std::optional<LayoutControl::ConsoleScreensMappedRequest> mappedRequest;
+        // A v2 request the broker's own plan check refused (cap, union limit...): no Replace on this connection,
+        // not even the standard block's one-output-per-client-monitor layout (the client asked for something else).
+        QString mappedRefusal;
+        // The 2 s grace for a block-armed Replace on a KRDPCTL connection that was offered `mapped` (spec 3.3).
+        bool graceStarted = false;
+        bool graceExpired = false;
+        QElapsedTimer graceClock;
+        // OPT-060 M-4: the surfaces this client shows (`console-screens-view`); nullopt = every surface is forwarded.
+        std::optional<LayoutControl::ConsoleScreensView> view;
+        std::optional<QSet<int>> visibleSurfaces; // `view` resolved against the current outputs; nullopt = forward all
+        QSet<int> awaitingKeyFrame;               // newly visible surfaces: nothing forwarded until their next key frame
+        QHash<int, quint64> framesForwarded;      // per surface, debug counters for the M-3m/M-4m measurements
+        QHash<int, quint64> framesDropped;
+        // M-8: a one-shot human sentence for the next `console-screens active:false` (host screens changed).
+        QString screensHostChangeMessage;
     };
+
+    /** M-3: the broker's own run of the mapped planner over the last known host screens (no wire, no worker). */
+    struct MappedPrediction {
+        bool planned = false; // false: no host screens known yet, nothing can be said
+        ConsoleVirtualOutputPlan::MappedReport report;
+    };
+    MappedPrediction predictMapped(const LayoutControl::ConsoleScreensMappedRequest &request) const;
+    void handleMappedScreensRequest(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
+    void handleScreensView(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
+    LayoutControl::ConsoleScreensDetail screensDetail(const Client &client) const;
+    bool mappedGraceHeld(Client &client, const ClientDisplay::Info &block);
+    void expireMappedGrace(ConsoleControl::Id id);
+    bool hasControlChannel(RdpConnection *connection) const;
+    /** M-4: resolve \a client's view against the current outputs (and clear stale gating). */
+    void resolveVisibleSurfaces(Client &client);
+    bool forwardsFrameTo(Client &client, const VideoFrame &frame);
+    void logViewCounters(const Client &client, const char *why) const;
+    /** The host's physical screens as last captured plainly (not ours, not Virtual-*): the mapped plan's input. */
+    QVector<OutputSnapshot::Output> m_hostScreens;
 
     void apply(const ConsoleHandoff::Actions &actions);
     void startWorker(const ConsoleHandoff::Target &target);
@@ -211,6 +251,12 @@ private:
     void startStandardMicrophone(Client &client);
     /// KRDPCTL's first-record gate (as krdpserver's): a channel client that said nothing known by then is a stock client.
     int m_standardGateMs = 3000;
+    /** M-3: how long a block-armed Replace waits for the client's v2 request (spec 3.3; a test seam). */
+    int m_screensGraceMs = 2000;
+    /** Test seam: RdpConnection::hasControlChannel() (a detached test connection opened none). */
+    std::function<bool(RdpConnection *)> m_controlChannelOf;
+    /** Test seam: RdpConnection::isAuthenticated(). */
+    std::function<bool(RdpConnection *)> m_authenticatedOf;
     /** Test seam: RdpConnection::standardMediaChannels() (a detached test connection joined nothing). */
     std::function<std::optional<RdpConnection::StandardMediaChannels>(RdpConnection *)> m_standardChannels;
     QString m_replyRequestId; // the request onControlRecord() is handling

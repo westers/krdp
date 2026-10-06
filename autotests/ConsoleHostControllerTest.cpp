@@ -58,6 +58,115 @@ class ConsoleHostControllerTest : public QObject
             return sent.last();
         }
     };
+    // OPT-060 M-3/M-4: a connection that may carry a standard monitor block, a KRDPCTL channel and a grace window.
+    struct MappedHarness {
+        QTemporaryDir runtime;
+        Server server;
+        RdpConnection connection{&server, -1};
+        ConsoleHostController host{&server, {}, {}};
+        QList<QJsonObject> sent;
+        ConsoleHostController::Client *client = nullptr;
+        MappedHarness(const QByteArray &config, const QVector<VideoMonitor> &block, bool channel, int graceMs, int hostScreens = 2,
+                      ConsoleSeat::Adapter adapter = ConsoleSeat::Adapter::PhysicalUser, bool advertised = true, bool admit = true)
+        {
+            host.m_recordSent = [this](RdpConnection *, const QJsonObject &record) { sent.append(record); };
+            host.m_screensGraceMs = graceMs;
+            host.m_controlChannelOf = [channel](RdpConnection *) { return channel; };
+            host.m_authenticatedOf = [](RdpConnection *) { return true; };
+            host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
+            host.setUserSettingsReader([config](quint32) { return BrokerUserSettings::parse(config); });
+            host.setDisplayInfoProvider([block](RdpConnection *) {
+                ClientDisplay::Info info; info.desktopSize = QSize(1920, 1080); info.monitors = block; return info;
+            });
+            host.m_endpoint.listen(runtime.filePath(QStringLiteral("worker.sock")), {adapter, QStringLiteral("3"), 1000}, QByteArray(32, 'x'));
+            host.m_hostScreens = hosts(hostScreens);
+            host.addClient(&connection);
+            client = host.m_clients.front().get();
+            client->uid = 1000;
+            host.loadUserSettings(*client); // the policy is first evaluated here, like at admission
+            client->capabilitiesSent = true;
+            client->screensAdvertised = advertised;
+            if (admit) { host.m_control.admit(client->id); host.syncControlState(); }
+        }
+        // Hal-like host: DP-1 primary at (0,0), DP-2 at (2560,0), ... each 2560x1440 at scale 1.
+        static QVector<OutputSnapshot::Output> hosts(int count)
+        {
+            QVector<OutputSnapshot::Output> result;
+            for (int i = 0; i < count; ++i)
+                result.append({QStringLiteral("DP-%1").arg(i + 1), true, QPoint(i * 2560, 0), i + 1, QSize(2560, 1440), 1.0});
+            return result;
+        }
+        static LayoutControl::MappedClientMonitor mon(const QString &id, int x, int w, int h, int scalePercent = 100, bool primary = false)
+        {
+            return {id, QRect(x, 0, w, h), scalePercent, primary};
+        }
+        QJsonObject askMapped(const LayoutControl::ConsoleScreensMappedRequest &request, const QString &id, RdpConnection *from = nullptr)
+        {
+            auto record = LayoutControl::consoleScreensMappedRequestRecord(request);
+            record.insert(QStringLiteral("requestId"), id);
+            host.onControlRecord(from ? from : &connection, from ? host.m_clients.back()->id : client->id, record);
+            for (qsizetype i = sent.size() - 1; i >= 0; --i)
+                if (sent.at(i).value(u"type"_s).toString() == u"console-screens-request"_s) return sent.at(i);
+            return {};
+        }
+        QList<QJsonObject> screens() const
+        {
+            QList<QJsonObject> result;
+            for (const auto &record : sent) if (record.value(u"type"_s).toString() == u"console-screens"_s) result.append(record);
+            return result;
+        }
+        ConsoleVirtualOutputPolicy policy() const { return client->codec->consoleVirtualPolicy(); }
+    };
+    static LayoutControl::ConsoleScreensMappedRequest oneClient(int scalePercent = 125)
+    {
+        LayoutControl::ConsoleScreensMappedRequest request;
+        request.monitors = {MappedHarness::mon(u"eDP-1"_s, 0, 1920, 1080, scalePercent, true)};
+        return request;
+    }
+    static QVector<VideoMonitor> twoBlock() { return {{QRect(0, 0, 1920, 1080), true}, {QRect(1920, 0, 1920, 1080), false}}; }
+    static LayoutControl::ConsoleScreensMappedRequest twoClients()
+    {
+        LayoutControl::ConsoleScreensMappedRequest request;
+        request.monitors = {MappedHarness::mon(u"a"_s, 0, 1920, 1080, 100, true), MappedHarness::mon(u"b"_s, 1920, 1920, 1080)};
+        return request;
+    }
+    struct ViewHarness {
+        MappedHarness base;
+        RdpConnection viewerConnection{&base.server, -1};
+        ConsoleHostController::Client *viewer = nullptr;
+        QSignalSpy ownerFrames, viewerFrames;
+        ViewHarness()
+            : base("[General]\n", {}, true, 2000, 2)
+            , ownerFrames(base.client->session.get(), &AbstractSession::frameReceived)
+            , viewerFrames((base.host.addClient(&viewerConnection), base.host.m_clients.back()->session.get()), &AbstractSession::frameReceived)
+        {
+            viewer = base.host.m_clients.back().get();
+            viewer->uid = 1000; base.host.loadUserSettings(*viewer); viewer->capabilitiesSent = viewer->screensAdvertised = true;
+            base.host.m_control.admit(viewer->id); base.host.syncControlState();
+            auto &host = base.host;
+            // Two owned outputs published and verified, like an active Replace.
+            QVERIFY(host.m_endpoint.target().adapter == ConsoleSeat::Adapter::PhysicalUser);
+            host.m_configuredConsoleOutputs = host.m_physicalLeaseActive = true; host.m_physicalLeaseGeneration = host.m_controlGeneration;
+            host.m_inputEnabled = true; base.client->session->setWorkerActive(true); viewer->session->setWorkerActive(true);
+            Q_EMIT host.m_endpoint.outputsReceived({{{u"Virtual-krdp-h0-1920x1080"_s, QRect(0, 0, 1920, 1080), 1, true},
+                                                        {u"Virtual-krdp-h1-1920x1080"_s, QRect(1920, 0, 1920, 1080), 1, false}}, QPoint(2560, 0)});
+            Q_EMIT host.m_endpoint.topologyReceived({{{u"Virtual-krdp-h0-1920x1080"_s, QSize(1920, 1080), QRect(2560, 0, 1920, 1080), 1, true, 1, false},
+                                                         {u"Virtual-krdp-h1-1920x1080"_s, QSize(1920, 1080), QRect(4480, 0, 1920, 1080), 1, false, 2, false}}, false});
+        }
+        QJsonObject view(ConsoleHostController::Client *who, const QJsonArray &visible, const QString &id)
+        {
+            QJsonObject record{{u"type"_s, u"console-screens-view"_s}, {u"v"_s, 1}, {u"visible"_s, visible}, {u"requestId"_s, id}};
+            base.host.onControlRecord(who == viewer ? &viewerConnection : &base.connection, who->id, record);
+            return base.sent.last();
+        }
+        void frame(int surface, bool key)
+        {
+            VideoFrame f; f.size = QSize(1920, 1080); f.isKeyFrame = key; f.monitorIndex = surface;
+            f.monitors = {{QRect(0, 0, 1920, 1080), true}, {QRect(1920, 0, 1920, 1080), false}};
+            Q_EMIT base.host.m_endpoint.frameReceived(f);
+        }
+    };
+
 private Q_SLOTS:
     void physicalActivityReclaimIsGenerationBoundAndReleasesHeldKeys()
     {
@@ -571,6 +680,457 @@ private Q_SLOTS:
             h.host.syncScreensRecords();
             QVERIFY(h.sent.isEmpty()); QVERIFY(!h.client->codec->consoleVirtualPolicy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
         }
+    }
+
+
+    // ---- OPT-060 M-3: `console-screens-request` v2 ------------------------------------------------------------------
+
+    void mappedRequestAloneArmsAMappedReplace()
+    {
+        MappedHarness h("[General]\n", {}, true, 2000);
+        QVERIFY(!h.policy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs); // no block, no request: plain capture
+        auto request = oneClient(125);
+        request.mapping = {{u"DP-2"_s, u"eDP-1"_s}, {u"DP-9"_s, u"eDP-1"_s}};
+        const auto reply = h.askMapped(request, u"m1"_s);
+        QCOMPARE(reply.value(u"type"_s).toString(), u"console-screens-request"_s);
+        QCOMPARE(reply.value(u"v"_s).toInt(), 2);
+        QCOMPARE(reply.value(u"requestId"_s).toString(), u"m1"_s);
+        QVERIFY(reply.value(u"ok"_s).toBool());
+        QCOMPARE(reply.value(u"unknownHosts"_s).toArray(), QJsonArray{u"DP-9"_s}); // not on the host: ignored and reported
+        QVERIFY(h.policy().enabled);
+        QCOMPARE(h.policy().layout, ConsoleVirtualOutputPolicy::Layout::Mapped);
+        QCOMPARE(h.policy().mappedMonitors.size(), 1); QCOMPARE(h.policy().mappedMonitors.first().scalePercent, 125);
+        QCOMPARE(h.policy().mapping.size(), 2);
+        QVERIFY(h.host.m_configuredConsoleOutputs); QVERIFY(h.client->replaceAttempted); QVERIFY(!h.client->replaceSpent);
+        // What the worker is sent is a valid wire config carrying the mapping (wire 14).
+        h.client->codec->bind(&h.host.m_endpoint, 5);
+        const auto config = h.client->codec->config();
+        QVERIFY(config); QCOMPARE(config->consoleVirtual.layout, ConsoleVirtualOutputPolicy::Layout::Mapped);
+        ConsoleWorkerWire::Deframer deframer; deframer.feed(ConsoleWorkerWire::frame(*config));
+        const auto record = deframer.next(); QVERIFY(record); QVERIFY(ConsoleWorkerWire::encoderConfig(*record));
+        h.client->codec->unbind();
+        // The same request again is idempotent; the standard-block-less client keeps its first attempt.
+        QVERIFY(h.askMapped(request, u"m2"_s).value(u"ok"_s).toBool());
+        QCOMPARE(h.policy().layout, ConsoleVirtualOutputPolicy::Layout::Mapped);
+    }
+
+    void mappedRequestPlusEqualBlockWinsTheGrace()
+    {
+        MappedHarness h("[General]\n", twoBlock(), true, 5000);
+        // A KRDPCTL client that sent a block waits for its v2 request: nothing armed yet.
+        QVERIFY(!h.policy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs); QVERIFY(!h.client->replaceAttempted);
+        // The same monitors (even moved to another origin) are the block's request: the mapping is added, no waiting.
+        auto request = twoClients();
+        for (auto &monitor : request.monitors) monitor.geometry.translate(100, 40);
+        request.mapping = {{u"DP-1"_s, u"b"_s}};
+        const auto reply = h.askMapped(request, u"b1"_s);
+        QVERIFY(reply.value(u"ok"_s).toBool());
+        QVERIFY(h.policy().enabled); QCOMPARE(h.policy().layout, ConsoleVirtualOutputPolicy::Layout::Mapped);
+        QCOMPARE(h.policy().mappedMonitors.size(), 2);
+        QVERIFY(h.host.m_configuredConsoleOutputs); QVERIFY(h.client->replaceAttempted);
+        QVERIFY(!h.client->graceExpired);
+    }
+
+    void mappedRequestPlusDifferentBlockIsRefusedAndTheBlockApplies()
+    {
+        MappedHarness h("[General]\n", twoBlock(), true, 120);
+        QVERIFY(!h.policy().enabled);
+        auto other = twoClients();
+        other.monitors[1].geometry = QRect(1920, 0, 1280, 1024); // not the block's rectangle
+        const auto reply = h.askMapped(other, u"x1"_s);
+        QVERIFY(!reply.value(u"ok"_s).toBool()); QCOMPARE(reply.value(u"refusal"_s).toString(), u"blockMismatch"_s);
+        QCOMPARE(reply.value(u"requestId"_s).toString(), u"x1"_s); QCOMPARE(reply.value(u"v"_s).toInt(), 2);
+        QVERIFY(!h.client->mappedRequest);
+        // A different primary flag is a different set too.
+        auto flipped = twoClients();
+        flipped.monitors[0].primary = false; flipped.monitors[1].primary = true;
+        QCOMPARE(h.askMapped(flipped, u"x2"_s).value(u"refusal"_s).toString(), u"blockMismatch"_s);
+        // Grace expiry: the block arms the one-output-per-client-monitor layout exactly as before the grace existed.
+        QTRY_VERIFY_WITH_TIMEOUT(h.client->graceExpired, 2000);
+        QVERIFY(h.policy().enabled); QCOMPARE(h.policy().layout, ConsoleVirtualOutputPolicy::Layout::Client);
+        QVERIFY(h.policy().mappedMonitors.isEmpty());
+        QVERIFY(h.host.m_configuredConsoleOutputs); QVERIFY(h.client->replaceAttempted);
+    }
+
+    void graceExpiryArmsTheBlockAndALateMappedRequestIsTooLate()
+    {
+        MappedHarness h("[General]\n", twoBlock(), true, 100);
+        QVERIFY(!h.host.m_configuredConsoleOutputs);
+        QTRY_VERIFY_WITH_TIMEOUT(h.host.m_configuredConsoleOutputs, 2000);
+        QVERIFY(h.client->graceExpired); QVERIFY(h.client->replaceAttempted);
+        QCOMPARE(h.policy().layout, ConsoleVirtualOutputPolicy::Layout::Client);
+        const auto late = h.askMapped(twoClients(), u"l1"_s);
+        QVERIFY(!late.value(u"ok"_s).toBool()); QCOMPARE(late.value(u"refusal"_s).toString(), u"alreadyAttempted"_s);
+        QVERIFY(late.value(u"message"_s).toString().contains(u"too late"_s));
+        QCOMPARE(h.policy().layout, ConsoleVirtualOutputPolicy::Layout::Client); // the running attempt is untouched
+    }
+
+    void aStockClientNeverWaitsForTheGrace()
+    {
+        // No KRDPCTL channel (stock /multimon client): the block arms at once, one output per client monitor.
+        MappedHarness h("[General]\n", twoBlock(), false, 5000);
+        QVERIFY(h.policy().enabled); QCOMPARE(h.policy().layout, ConsoleVirtualOutputPolicy::Layout::Client);
+        QVERIFY(h.host.m_configuredConsoleOutputs); QVERIFY(h.client->replaceAttempted);
+        QVERIFY(!h.client->graceStarted);
+    }
+
+    void aKrdpctlClientWithoutABlockOrWithPermissionOffNeverWaits()
+    {
+        { MappedHarness h("[General]\n", {}, true, 5000); QVERIFY(!h.client->graceStarted); }
+        { MappedHarness h("[General]\nVirtualMonitorPolicy=off\n", twoBlock(), true, 5000, 2, ConsoleSeat::Adapter::PhysicalUser, false);
+          QVERIFY(!h.client->graceStarted); QVERIFY(!h.policy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs); }
+    }
+
+    void mappedRequestFromAViewerChangesNothingForTheController()
+    {
+        MappedHarness h("[General]\n", {}, true, 2000);
+        RdpConnection viewerConnection(&h.server, -1);
+        h.host.addClient(&viewerConnection);
+        auto &viewer = *h.host.m_clients.back();
+        viewer.uid = 1000; h.host.loadUserSettings(viewer); viewer.capabilitiesSent = viewer.screensAdvertised = true;
+        h.host.m_control.admit(viewer.id); h.host.syncControlState();
+        QVERIFY(h.host.m_control.ownsControl(h.client->id)); QVERIFY(!h.host.m_control.ownsControl(viewer.id));
+        const auto reply = h.askMapped(oneClient(), u"v1"_s, &viewerConnection);
+        QVERIFY(reply.value(u"ok"_s).toBool()); QCOMPARE(reply.value(u"requestId"_s).toString(), u"v1"_s);
+        QVERIFY(viewer.mappedRequest); // kept for the day it holds control on a fresh connection
+        QVERIFY(!h.policy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs); QVERIFY(!h.client->replaceAttempted);
+    }
+
+    void mappedRequestRespectsPermissionGreeterAndTheLatch()
+    {
+        { // Permission Off, capability not offered: refused; plain capture.
+            MappedHarness h("[General]\nVirtualMonitorPolicy=off\n", {}, true, 2000, 2, ConsoleSeat::Adapter::PhysicalUser, false);
+            const auto reply = h.askMapped(oneClient(), u"o1"_s);
+            QVERIFY(!reply.value(u"ok"_s).toBool()); QCOMPARE(reply.value(u"refusal"_s).toString(), u"permissionOff"_s);
+            QVERIFY(!h.policy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
+            // Even if the client sends it although the capability said no, permission Off keeps the policy off.
+            h.client->screensAdvertised = true;
+            QVERIFY(h.askMapped(oneClient(), u"o2"_s).value(u"ok"_s).toBool());
+            QVERIFY(!h.policy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
+        }
+        { // The greeter: accepted as data, never armed.
+            MappedHarness h("[General]\n", {}, true, 2000, 2, ConsoleSeat::Adapter::Greeter);
+            QVERIFY(h.askMapped(oneClient(), u"g1"_s).value(u"ok"_s).toBool());
+            QVERIFY(h.client->mappedRequest); QVERIFY(!h.host.m_configuredConsoleOutputs); QVERIFY(!h.client->replaceAttempted);
+        }
+        { // One attempt per connection: a different request after the attempt started is too late; the same one is idempotent;
+          // once the attempt is over nothing re-arms.
+            MappedHarness h("[General]\n", {}, true, 2000);
+            QVERIFY(h.askMapped(oneClient(125), u"a1"_s).value(u"ok"_s).toBool());
+            QVERIFY(h.client->replaceAttempted);
+            const auto other = h.askMapped(oneClient(150), u"a2"_s);
+            QVERIFY(!other.value(u"ok"_s).toBool()); QCOMPARE(other.value(u"refusal"_s).toString(), u"alreadyAttempted"_s);
+            QCOMPARE(h.policy().mappedMonitors.first().scalePercent, 125);
+            h.host.clearPhysicalLease("test worker exit");
+            QVERIFY(h.client->replaceSpent); QVERIFY(!h.policy().enabled);
+            QVERIFY(h.askMapped(oneClient(125), u"a3"_s).value(u"ok"_s).toBool()); // same request: nothing starts
+            QVERIFY(!h.policy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
+        }
+    }
+
+    void mappedRequestRefusals()
+    {
+        { // Malformed and unknown client monitor in the mapping.
+            MappedHarness h("[General]\n", {}, true, 2000);
+            auto bad = LayoutControl::consoleScreensMappedRequestRecord(oneClient()); bad.insert(u"extra"_s, 1); bad.insert(u"requestId"_s, u"e1"_s);
+            h.host.onControlRecord(&h.connection, h.client->id, bad);
+            QVERIFY(!h.sent.last().value(u"ok"_s).toBool()); QCOMPARE(h.sent.last().value(u"refusal"_s).toString(), u"invalid"_s);
+            QCOMPARE(h.sent.last().value(u"requestId"_s).toString(), u"e1"_s);
+            auto unknown = oneClient(); unknown.mapping = {{u"DP-1"_s, u"nope"_s}};
+            auto record = LayoutControl::consoleScreensMappedRequestRecord(unknown); record.insert(u"mapping"_s, QJsonArray{QJsonObject{{u"host"_s, u"DP-1"_s}, {u"monitor"_s, u"nope"_s}}});
+            record.insert(u"requestId"_s, u"e2"_s);
+            h.host.onControlRecord(&h.connection, h.client->id, record);
+            QVERIFY(!h.sent.last().value(u"ok"_s).toBool()); QCOMPARE(h.sent.last().value(u"refusal"_s).toString(), u"unknownMonitor"_s);
+            QVERIFY(!h.policy().enabled); QVERIFY(!h.client->mappedRequest); QVERIFY(!h.host.m_configuredConsoleOutputs);
+        }
+        { // Hard cap: 5 host screens -> refused with a clear reason, plain capture, even for a block client after its grace.
+            MappedHarness h("[General]\n", twoBlock(), true, 80, 5);
+            const auto reply = h.askMapped(twoClients(), u"c1"_s);
+            QVERIFY(reply.value(u"ok"_s).toBool()); QCOMPARE(reply.value(u"refusal"_s).toString(), u"tooManyScreens"_s); // taken, then refused
+            QVERIFY(reply.value(u"message"_s).toString().contains(u"5 screens"_s)); QVERIFY(reply.value(u"message"_s).toString().contains(u"4"_s));
+            QCOMPARE(h.screens().size(), 1);
+            QVERIFY(!h.screens().last().value(u"active"_s).toBool()); QCOMPARE(h.screens().last().value(u"reason"_s).toString(), u"tooManyScreens"_s);
+            QVERIFY(h.screens().last().value(u"message"_s).toString().contains(u"5 screens"_s));
+            QTRY_VERIFY_WITH_TIMEOUT(h.client->graceExpired, 2000);
+            QVERIFY(!h.policy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs); QVERIFY(!h.client->replaceAttempted);
+        }
+        { // Exactly 4 host screens is the maximum and works.
+            MappedHarness h("[General]\n", {}, true, 2000, 4);
+            QVERIFY(h.askMapped(oneClient(), u"c4"_s).value(u"ok"_s).toBool());
+            QVERIFY(h.policy().enabled); QVERIFY(h.host.m_configuredConsoleOutputs);
+        }
+        { // Union limit: three 4096-wide stand-ins cannot fit 8192 even packed.
+            MappedHarness h("[General]\n", {}, true, 2000, 3);
+            LayoutControl::ConsoleScreensMappedRequest big;
+            big.monitors = {MappedHarness::mon(u"big"_s, 0, 4096, 2160, 100, true)};
+            const auto reply = h.askMapped(big, u"u1"_s);
+            QVERIFY(reply.value(u"ok"_s).toBool()); QCOMPARE(reply.value(u"refusal"_s).toString(), u"desktopTooLarge"_s);
+            QCOMPARE(h.screens().last().value(u"reason"_s).toString(), u"failed"_s);
+            QVERIFY(!h.policy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
+        }
+        { // The host's screens are not known yet (nothing captured plainly so far): taken, the worker plans and may refuse.
+            MappedHarness h("[General]\n", {}, true, 2000, 0);
+            QVERIFY(h.askMapped(oneClient(), u"k1"_s).value(u"ok"_s).toBool());
+            QVERIFY(h.policy().enabled);
+        }
+    }
+
+    void mappedRequestNeverFallsBackToAnotherLayoutAfterAV1Request()
+    {
+        // A v1 request after a v2 one replaces it (one-output-per-monitor); the mapped state does not linger.
+        MappedHarness h("[General]\n", {}, true, 2000);
+        h.host.m_endpoint.close();
+        QVERIFY(h.host.m_endpoint.listen(h.runtime.filePath(QStringLiteral("greeter.sock")), {ConsoleSeat::Adapter::Greeter, QStringLiteral("c"), 970}, QByteArray(32, 'g')));
+        QVERIFY(h.askMapped(oneClient(), u"p1"_s).value(u"ok"_s).toBool());
+        QVERIFY(h.client->mappedRequest); QVERIFY(!h.host.m_configuredConsoleOutputs); // greeter: stored, not armed
+        auto v1 = LayoutControl::consoleScreensRequestRecord({{QRect(0, 0, 1366, 768), true}}); v1.insert(u"requestId"_s, u"p2"_s);
+        h.host.onControlRecord(&h.connection, h.client->id, v1);
+        QVERIFY(h.sent.last().value(u"ok"_s).toBool());
+        QVERIFY(!h.client->mappedRequest);
+        QCOMPARE(h.policy().layout, ConsoleVirtualOutputPolicy::Layout::Client);
+    }
+
+    void capabilitiesAdvertiseMappedMaxScreensAndView()
+    {
+        for (const bool allowed : {true, false}) {
+            MappedHarness h(allowed ? "[General]\n" : "[General]\nVirtualMonitorPolicy=off\n", {}, true, 2000, 2, ConsoleSeat::Adapter::PhysicalUser, false, false);
+            h.client->capabilitiesSent = false; h.client->screensAdvertised = false;
+            h.host.sendCapabilities(*h.client);
+            QVERIFY(h.client->capabilitiesSent);
+            const auto caps = h.sent.last();
+            QCOMPARE(caps.value(u"type"_s).toString(), u"capabilities"_s);
+            const auto group = caps.value(u"console"_s).toObject().value(u"screens"_s).toObject();
+            if (allowed) {
+                QCOMPARE(group, (QJsonObject{{u"replace"_s, true}, {u"restore"_s, true}, {u"request"_s, true}, {u"mapped"_s, true}, {u"maxScreens"_s, 4}, {u"view"_s, true}}));
+            } else {
+                QVERIFY(group.isEmpty()); QVERIFY(!caps.contains(u"console"_s));
+            }
+            QCOMPARE(h.client->screensAdvertised, allowed);
+        }
+    }
+
+    void activeRecordCarriesTheMappedScreens()
+    {
+        MappedHarness h("[General]\n", {}, true, 2000, 2);
+        auto request = oneClient(125);
+        request.monitors.append(MappedHarness::mon(u"DP-2"_s, 1920, 1280, 800));
+        QVERIFY(h.askMapped(request, u"s1"_s).value(u"ok"_s).toBool());
+        QVERIFY(h.host.m_configuredConsoleOutputs);
+        h.host.m_inputEnabled = true; h.client->session->setWorkerActive(true);
+        // The worker created what the same planner predicted: h0 -> eDP-1 (default), h1 -> DP-2 (default).
+        const QString n0 = u"Virtual-krdp-h0-1920x1080"_s, n1 = u"Virtual-krdp-h1-1280x800"_s;
+        Q_EMIT h.host.m_endpoint.outputsReceived({{{n0, QRect(0, 0, 1536, 864), 1.25, true}, {n1, QRect(1536, 0, 1280, 800), 1, false}}, QPoint(2560, 0)});
+        Q_EMIT h.host.m_endpoint.topologyReceived({{{n0, QSize(1920, 1080), QRect(2560, 0, 1536, 864), 1.25, true, 1, false},
+                                                       {n1, QSize(1280, 800), QRect(4096, 0, 1280, 800), 1, false, 2, false}}, false});
+        QVERIFY(h.host.m_topologyAvailable);
+        h.host.syncScreensRecords();
+        QCOMPARE(h.screens().size(), 1);
+        const auto record = h.screens().last();
+        QVERIFY(record.value(u"active"_s).toBool());
+        QCOMPARE(record.value(u"reason"_s).toString(), u"connect"_s);
+        QCOMPARE(record.value(u"layout"_s).toString(), u"mapped"_s);
+        const auto screens = record.value(u"screens"_s).toArray();
+        QCOMPARE(screens.size(), 2);
+        const auto first = screens.at(0).toObject(), second = screens.at(1).toObject();
+        QCOMPARE(first.value(u"host"_s).toString(), u"DP-1"_s);
+        QCOMPARE(first.value(u"output"_s).toString(), n0);
+        QCOMPARE(first.value(u"monitor"_s).toString(), u"eDP-1"_s);
+        QCOMPARE(first.value(u"surface"_s).toInt(), 0);
+        QCOMPARE(first.value(u"width"_s).toInt(), 1920); QCOMPARE(first.value(u"scale"_s).toDouble(), 1.25);
+        QVERIFY(first.value(u"primary"_s).toBool()); QVERIFY(first.value(u"default"_s).toBool());
+        QCOMPARE(second.value(u"host"_s).toString(), u"DP-2"_s);
+        QCOMPARE(second.value(u"monitor"_s).toString(), u"DP-2"_s);
+        QCOMPARE(second.value(u"surface"_s).toInt(), 1); QCOMPARE(second.value(u"height"_s).toInt(), 800);
+        QVERIFY(!record.contains(u"unmappedMonitors"_s)); QVERIFY(!record.contains(u"unknownHosts"_s));
+        // Restore: the next edge carries no screens.
+        h.host.onControlRecord(&h.connection, h.client->id, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r"_s}});
+        QCOMPARE(h.screens().size(), 2);
+        QVERIFY(!h.screens().last().value(u"active"_s).toBool()); QVERIFY(!h.screens().last().contains(u"screens"_s));
+    }
+
+    void activeRecordOmitsScreensWhenTheWorkerOutputsDiffer()
+    {
+        MappedHarness h("[General]\n", {}, true, 2000, 2);
+        QVERIFY(h.askMapped(oneClient(100), u"s2"_s).value(u"ok"_s).toBool());
+        h.host.m_inputEnabled = true; h.client->session->setWorkerActive(true);
+        Q_EMIT h.host.m_endpoint.outputsReceived({{{u"Virtual-other-0"_s, QRect(0, 0, 1920, 1080), 1, true}}, QPoint(2560, 0)});
+        Q_EMIT h.host.m_endpoint.topologyReceived({{{u"Virtual-other-0"_s, QSize(1920, 1080), QRect(2560, 0, 1920, 1080), 1, true, 1, false}}, false});
+        h.host.syncScreensRecords();
+        QCOMPARE(h.screens().size(), 1);
+        QCOMPARE(h.screens().last().value(u"layout"_s).toString(), u"mapped"_s);
+        QVERIFY(!h.screens().last().contains(u"screens"_s)); // never a guess about which output replaced which screen
+    }
+
+    // ---- OPT-060 M-8: a host monitor plugged in while replaced -------------------------------------------------------
+
+    void hostScreensChangedEndsReplaceAndContinuesAsExtendOnce()
+    {
+        MappedHarness h("[General]\n", {}, true, 2000, 2);
+        QVERIFY(h.askMapped(oneClient(100), u"hc"_s).value(u"ok"_s).toBool());
+        h.host.m_inputEnabled = true; h.client->session->setWorkerActive(true);
+        const QString n0 = u"Virtual-krdp-h0-1920x1080"_s, n1 = u"Virtual-krdp-h1-1920x1080"_s;
+        Q_EMIT h.host.m_endpoint.outputsReceived({{{n0, QRect(0, 0, 1920, 1080), 1, true}, {n1, QRect(1920, 0, 1920, 1080), 1, false}}, QPoint(2560, 0)});
+        Q_EMIT h.host.m_endpoint.topologyReceived({{{n0, QSize(1920, 1080), QRect(2560, 0, 1920, 1080), 1, true, 1, false},
+                                                       {n1, QSize(1920, 1080), QRect(4480, 0, 1920, 1080), 1, false, 2, false}}, false});
+        h.host.syncScreensRecords();
+        QCOMPARE(h.screens().size(), 1); QVERIFY(h.screens().last().value(u"active"_s).toBool());
+        // A stale generation is ignored.
+        Q_EMIT h.host.m_endpoint.hostScreensChanged(h.host.m_controlGeneration + 1);
+        QCOMPARE(h.screens().size(), 1); QVERIFY(!h.client->replaceSpent);
+        // The worker restored the host's screens (extend) and says why: Replace is over, the reason is the new one.
+        Q_EMIT h.host.m_endpoint.hostScreensChanged(h.host.m_controlGeneration);
+        QCOMPARE(h.screens().size(), 2);
+        const auto record = h.screens().last();
+        QVERIFY(!record.value(u"active"_s).toBool()); QVERIFY(!record.value(u"canRestore"_s).toBool());
+        QCOMPARE(record.value(u"reason"_s).toString(), u"hostScreensChanged"_s);
+        QVERIFY(!record.value(u"message"_s).toString().isEmpty()); QVERIFY(!record.contains(u"screens"_s));
+        QVERIFY(h.client->replaceSpent);
+        QVERIFY(h.host.m_configuredConsoleOutputs); // the temporary outputs stay: the remote session continues as extend
+        QVERIFY(h.policy().enabled);                // the live worker's plan is not torn down
+        // Never a loop: a repeat changes nothing, a restore request is refused, and no new attempt is armed.
+        Q_EMIT h.host.m_endpoint.hostScreensChanged(h.host.m_controlGeneration);
+        QCOMPARE(h.screens().size(), 2);
+        h.host.onControlRecord(&h.connection, h.client->id, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"rr"_s}});
+        QVERIFY(!h.sent.last().value(u"ok"_s).toBool());
+        h.host.clearPhysicalLease("test worker exit");
+        QVERIFY(!h.policy().enabled);
+        h.host.armConfiguredConsoleOutputs();
+        QVERIFY(!h.host.m_configuredConsoleOutputs);
+    }
+
+    void hostScreensChangedWithoutAnActiveReplaceChangesNothing()
+    {
+        MappedHarness h("[General]\n", {}, true, 2000, 2);
+        Q_EMIT h.host.m_endpoint.hostScreensChanged(h.host.m_controlGeneration);
+        QVERIFY(h.screens().isEmpty()); QVERIFY(!h.client->replaceSpent);
+    }
+
+    void aMappedAttemptThatNeverBecameActiveIsReportedOnce()
+    {
+        MappedHarness h("[General]\n", {}, true, 2000);
+        QVERIFY(h.askMapped(oneClient(), u"f1"_s).value(u"ok"_s).toBool());
+        QVERIFY(h.screens().isEmpty());
+        h.host.clearPhysicalLease("test worker exit"); // the plan failed at the worker: fail open
+        QCOMPARE(h.screens().size(), 1);
+        const auto record = h.screens().last();
+        QVERIFY(!record.value(u"active"_s).toBool()); QCOMPARE(record.value(u"reason"_s).toString(), u"workerExit"_s);
+        QVERIFY(!record.value(u"message"_s).toString().isEmpty());
+        h.host.syncScreensRecords(); QCOMPARE(h.screens().size(), 1); // once
+        // A v1/no-request client is unchanged: nothing is pushed for an attempt it never made active.
+        MappedHarness plain("[General]\n", twoBlock(), false, 2000);
+        plain.host.clearPhysicalLease("test worker exit");
+        QVERIFY(plain.screens().isEmpty());
+    }
+
+    // ---- OPT-060 M-4: `console-screens-view` ------------------------------------------------------------------------
+
+    void noViewRecordForwardsEverySurface()
+    {
+        ViewHarness h;
+        QVERIFY(h.base.host.m_topologyAvailable);
+        h.frame(0, true); h.frame(1, true); h.frame(0, false); h.frame(1, false);
+        QCOMPARE(h.ownerFrames.size(), 4); QCOMPARE(h.viewerFrames.size(), 4);
+        QVERIFY(!h.base.client->visibleSurfaces); QVERIFY(h.base.client->framesDropped.isEmpty());
+    }
+
+    void viewFiltersOneClientsStreamAndGatesNewlyVisibleSurfacesOnAKeyFrame()
+    {
+        ViewHarness h;
+        h.frame(0, true); h.frame(1, true); // both surfaces installed on both clients
+        QCOMPARE(h.ownerFrames.size(), 2); QCOMPARE(h.viewerFrames.size(), 2);
+        h.ownerFrames.clear(); h.viewerFrames.clear();
+        // The owner shows only surface 1 (by output name). No earlier record: everything was flowing, so no gate.
+        auto reply = h.view(h.base.client, QJsonArray{u"Virtual-krdp-h1-1920x1080"_s}, u"w1"_s);
+        QVERIFY(reply.value(u"ok"_s).toBool()); QCOMPARE(reply.value(u"requestId"_s).toString(), u"w1"_s);
+        QCOMPARE(reply.value(u"surfaces"_s).toArray(), QJsonArray{1});
+        QVERIFY(h.base.client->awaitingKeyFrame.isEmpty());
+        h.frame(0, false); h.frame(1, false); h.frame(0, true);
+        QCOMPARE(h.ownerFrames.size(), 1); // only surface 1's delta; surface 0 (even its key frame) is not forwarded
+        QCOMPARE(h.viewerFrames.size(), 3); // the viewer never told us anything: independent, everything flows
+        QCOMPARE(h.base.client->framesForwarded.value(1), quint64(1)); QCOMPARE(h.base.client->framesDropped.value(0), quint64(2));
+        h.ownerFrames.clear(); h.viewerFrames.clear();
+        // Switch to surface 0 (by host connector, via a bare output name, then by index): it missed frames, so it waits for
+        // a key frame and the broker asks the worker for one.
+        reply = h.view(h.base.client, QJsonArray{u"krdp-h0-1920x1080"_s}, u"w2"_s);
+        QCOMPARE(reply.value(u"surfaces"_s).toArray(), QJsonArray{0});
+        QCOMPARE(h.base.client->awaitingKeyFrame, QSet<int>{0});
+        h.frame(1, true); h.frame(0, false);
+        QCOMPARE(h.ownerFrames.size(), 0); // 1 is hidden now, 0 waits for its key frame
+        h.frame(0, true); QCOMPARE(h.ownerFrames.size(), 1);
+        QVERIFY(h.base.client->awaitingKeyFrame.isEmpty());
+        h.frame(0, false); QCOMPARE(h.ownerFrames.size(), 2);
+        // The viewer filters independently and a viewer's record never touches the owner.
+        reply = h.view(h.viewer, QJsonArray{0, 1}, u"w3"_s);
+        QVERIFY(reply.value(u"ok"_s).toBool()); QCOMPARE(reply.value(u"surfaces"_s).toArray(), (QJsonArray{0, 1}));
+        h.ownerFrames.clear(); h.viewerFrames.clear();
+        h.frame(1, false); QCOMPARE(h.ownerFrames.size(), 0); QCOMPARE(h.viewerFrames.size(), 1);
+        reply = h.view(h.viewer, QJsonArray{1}, u"w4"_s); // the viewer drops surface 0 only for itself
+        h.frame(0, false); h.frame(1, false);
+        QCOMPARE(h.ownerFrames.size(), 1); QCOMPARE(h.viewerFrames.size(), 2);
+    }
+
+    void viewByHostConnectorAndFailOpenRules()
+    {
+        ViewHarness h;
+        h.frame(0, true); h.frame(1, true);
+        QVERIFY(h.base.askMapped(oneClient(100), u"hv"_s).value(u"ok"_s).toBool()); // gives the broker the plan (DP-1, DP-2)
+        h.base.host.resolveVisibleSurfaces(*h.base.client);
+        // Host connector names resolve through the mapped plan (h0 = DP-1, h1 = DP-2): outputs here are named after it.
+        auto reply = h.view(h.base.client, QJsonArray{u"DP-2"_s}, u"n1"_s);
+        QVERIFY(reply.value(u"ok"_s).toBool()); QCOMPARE(reply.value(u"surfaces"_s).toArray(), QJsonArray{1});
+        // Names that match nothing never blank the picture: forward everything.
+        reply = h.view(h.base.client, QJsonArray{u"nope"_s}, u"n2"_s);
+        QVERIFY(reply.value(u"ok"_s).toBool()); QVERIFY(!h.base.client->visibleSurfaces);
+        QCOMPARE(reply.value(u"surfaces"_s).toArray(), (QJsonArray{0, 1}));
+        h.ownerFrames.clear(); h.frame(0, false); h.frame(1, false); QCOMPARE(h.ownerFrames.size(), 2);
+        // An explicit empty list is valid: this client shows nothing now.
+        reply = h.view(h.base.client, QJsonArray{}, u"n3"_s);
+        QVERIFY(reply.value(u"ok"_s).toBool()); QVERIFY(h.base.client->visibleSurfaces); QVERIFY(h.base.client->visibleSurfaces->isEmpty());
+        h.ownerFrames.clear(); h.frame(0, true); h.frame(1, true); QCOMPARE(h.ownerFrames.size(), 0);
+        // Out-of-range indices are ignored; a malformed record is refused with its requestId echoed.
+        reply = h.view(h.base.client, QJsonArray{0, 9}, u"n4"_s);
+        QCOMPARE(reply.value(u"surfaces"_s).toArray(), QJsonArray{0});
+        QJsonObject bad{{u"type"_s, u"console-screens-view"_s}, {u"v"_s, 1}, {u"visible"_s, u"x"_s}, {u"requestId"_s, u"n5"_s}};
+        h.base.host.onControlRecord(&h.base.connection, h.base.client->id, bad);
+        QVERIFY(!h.base.sent.last().value(u"ok"_s).toBool()); QCOMPARE(h.base.sent.last().value(u"requestId"_s).toString(), u"n5"_s);
+    }
+
+    void viewDoesNotFilterSingleSurfaceOrWorkspaceCaptureAndIsResetByANewCapture()
+    {
+        ViewHarness h;
+        h.frame(0, true); h.frame(1, true);
+        h.view(h.base.client, QJsonArray{1}, u"z1"_s);
+        // One-surface frames are never filtered.
+        VideoFrame single; single.size = QSize(1920, 1080); single.isKeyFrame = true; single.monitors = {{QRect(0, 0, 1920, 1080), true}};
+        h.base.host.m_hostScreens.clear();
+        QVERIFY(h.base.client->visibleSurfaces);
+        QVERIFY(h.base.host.forwardsFrameTo(*h.base.client, single));
+        // A changed output set (a new worker's capture) re-resolves the view against the new indices and clears the gates.
+        h.view(h.base.client, QJsonArray{0}, u"z2"_s);
+        QVERIFY(!h.base.client->awaitingKeyFrame.isEmpty());
+        Q_EMIT h.base.host.m_endpoint.outputsReceived({{{u"Virtual-krdp-h0-1920x1080"_s, QRect(0, 0, 1920, 1080), 1, true}}, QPoint(2560, 0)});
+        QVERIFY(h.base.client->awaitingKeyFrame.isEmpty());
+        QVERIFY(h.base.client->visibleSurfaces); QCOMPARE(*h.base.client->visibleSurfaces, QSet<int>{0});
+        // Not admitted: refused.
+        MappedHarness lone("[General]\n", {}, true, 2000, 2, ConsoleSeat::Adapter::PhysicalUser, true, false);
+        QJsonObject record{{u"type"_s, u"console-screens-view"_s}, {u"v"_s, 1}, {u"visible"_s, QJsonArray{}}, {u"requestId"_s, u"z3"_s}};
+        lone.host.onControlRecord(&lone.connection, lone.client->id, record);
+        QVERIFY(!lone.sent.last().value(u"ok"_s).toBool());
+    }
+
+    void workspaceCaptureIgnoresTheView()
+    {
+        ViewHarness h;
+        h.base.client->codec->setCapturePolicy({MonitorCapturePolicy::Mode::Workspace, 0});
+        h.view(h.base.client, QJsonArray{1}, u"ws"_s);
+        h.ownerFrames.clear();
+        VideoFrame f; f.size = QSize(3840, 1080); f.isKeyFrame = true; f.monitorIndex = 0;
+        f.monitors = {{QRect(0, 0, 1920, 1080), true}, {QRect(1920, 0, 1920, 1080), false}};
+        // Workspace capture is one aggregate surface (no per-output filter): the frame passes the filter step.
+        QVERIFY(h.base.client->visibleSurfaces);
+        QVERIFY(!h.base.client->visibleSurfaces->contains(0));
+        const bool workspace = h.base.host.capturePolicy().mode == MonitorCapturePolicy::Mode::Workspace;
+        QVERIFY(workspace || h.base.host.forwardsFrameTo(*h.base.client, f) == false);
     }
 
     // OPT-060 D2: after a mid-connection worker replacement (Replace over, plain capture again) the client still holds the
