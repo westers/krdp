@@ -57,6 +57,38 @@ private Q_SLOTS:
         QVERIFY(ConsoleVirtualOutputPolicy::monitorBlockSent({QSize(1920, 1080), {{QRect(0, 0, 1920, 1080), true}}}));
     }
 
+    // OPT-060 D0: a one-monitor client sends no standard block; its explicit request is the other source.
+    void effectiveRequestCombinesBlockAndExplicitRequest()
+    {
+        using P = ConsoleVirtualOutputPolicy;
+        const ClientDisplay::Info plain{QSize(1920, 1080), {}};
+        const QVector<VideoMonitor> lone{{QRect(0, 0, 1366, 768), true}};
+        const QVector<VideoMonitor> pair{{QRect(0, 0, 1920, 1080), true}, {QRect(1920, 0, 1280, 1024), false}};
+        // No block and no request: nothing is asked.
+        QVERIFY(!P::monitorBlockSent(P::effectiveRequest(plain, std::nullopt)));
+        QVERIFY(!P::monitorBlockSent(P::effectiveRequest(plain, QVector<VideoMonitor>{})));
+        QCOMPARE(P::effectiveRequest(plain, std::nullopt), plain);
+        // A one-monitor request opens the gate, sized by that monitor, and plans one output of that size.
+        const auto one = P::effectiveRequest(plain, lone);
+        QVERIFY(P::monitorBlockSent(one));
+        QCOMPARE(one.desktopSize, QSize(1366, 768));
+        QCOMPARE(int(P::gate(P::Permission::Ask, P::monitorBlockSent(one), true, false)), int(P::Gate::Replace));
+        const auto policy = P::parse(true, QStringLiteral("replace"), QStringLiteral("client"), QSize(1920, 1080), one);
+        QVERIFY(policy);
+        QCOMPARE(ClientDisplay::singleSize(policy->client, QSize(1920, 1080)), QSize(1366, 768));
+        // Two monitors keep both.
+        const auto two = P::effectiveRequest(plain, pair);
+        QCOMPARE(two.desktopSize, QSize(3200, 1080));
+        QCOMPARE(P::parse(true, QStringLiteral("replace"), QStringLiteral("client"), QSize(1920, 1080), two)->client.monitors.size(), 2);
+        // The standard block wins over an explicit request.
+        const ClientDisplay::Info block{QSize(3200, 1080), pair};
+        QCOMPARE(P::effectiveRequest(block, lone), block);
+        // The gate itself is unchanged: permission off, greeter and a spent attempt still capture normally.
+        QCOMPARE(int(P::gate(P::Permission::Off, true, true, false)), int(P::Gate::PermissionOff));
+        QCOMPARE(int(P::gate(P::Permission::Ask, true, false, false)), int(P::Gate::NotPhysicalUser));
+        QCOMPARE(int(P::gate(P::Permission::Ask, true, true, true)), int(P::Gate::AlreadyAttempted));
+    }
+
     void replaceExtendAndParkPreserveClientLayout()
     {
         auto policy = request();

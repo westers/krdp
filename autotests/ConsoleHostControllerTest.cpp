@@ -18,9 +18,46 @@ using namespace Qt::StringLiterals;
 
 namespace KRdp
 {
+static QVector<VideoMonitor> oneMonitor() { return {{QRect(0, 0, 1366, 768), true}}; }
+
+
 class ConsoleHostControllerTest : public QObject
 {
     Q_OBJECT
+    // OPT-060 D0: a one-monitor client sends no standard monitor block, so it asks with `console-screens-request`.
+    struct RequestHarness {
+        QTemporaryDir runtime;
+        Server server;
+        RdpConnection connection{&server, -1};
+        ConsoleHostController host{&server, {}, {}};
+        QList<QJsonObject> sent;
+        ConsoleHostController::Client *client = nullptr;
+        RequestHarness(const QByteArray &config, bool block, ConsoleSeat::Adapter adapter = ConsoleSeat::Adapter::PhysicalUser, bool advertised = true, bool admit = true)
+        {
+            host.m_recordSent = [this](RdpConnection *, const QJsonObject &record) { sent.append(record); };
+            host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
+            host.setUserSettingsReader([config](quint32) { return BrokerUserSettings::parse(config); });
+            host.setDisplayInfoProvider([block](RdpConnection *) { return [block] { ClientDisplay::Info info; info.desktopSize = QSize(1920, 1080); if (block) info.monitors = {{QRect(0, 0, 1920, 1080), true}}; return info; }(); });
+            host.m_endpoint.listen(runtime.filePath(QStringLiteral("worker.sock")), {adapter, QStringLiteral("3"), 1000}, QByteArray(32, 'x'));
+            host.addClient(&connection);
+            client = host.m_clients.front().get();
+            client->uid = 1000;
+            host.loadUserSettings(*client);
+            client->capabilitiesSent = true;
+            client->screensAdvertised = advertised;
+            if (admit) {
+                host.m_control.admit(client->id);
+                host.syncControlState(); // admitted and in control with normal capture, as after a plain connect
+            }
+        }
+        QJsonObject ask(const QVector<VideoMonitor> &monitors, const QString &id)
+        {
+            auto record = LayoutControl::consoleScreensRequestRecord(monitors);
+            record.insert(QStringLiteral("requestId"), id);
+            host.onControlRecord(&connection, client->id, record);
+            return sent.last();
+        }
+    };
 private Q_SLOTS:
     void physicalActivityReclaimIsGenerationBoundAndReleasesHeldKeys()
     {
@@ -389,6 +426,94 @@ private Q_SLOTS:
         // A second restore request is refused.
         host.onControlRecord(&connection, client.id, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r3"_s}});
         QVERIFY(!sent.last().value(u"ok"_s).toBool());
+    }
+
+
+    void screensRequestOpensTheGateForAOneMonitorClient()
+    {
+        RequestHarness h("[General]\n", false);
+        auto &client = *h.client;
+        // Before the request: plain capture, nothing armed.
+        QVERIFY(!client.codec->consoleVirtualPolicy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs); QVERIFY(!client.replaceAttempted);
+        const auto reply = h.ask(oneMonitor(), u"q1"_s);
+        QCOMPARE(reply.value(u"type"_s).toString(), u"console-screens-request"_s);
+        QCOMPARE(reply.value(u"requestId"_s).toString(), u"q1"_s);
+        QVERIFY(reply.value(u"ok"_s).toBool());
+        // The late request (the worker already captures normally) behaves exactly like a standard block at Ready.
+        QVERIFY(client.codec->consoleVirtualPolicy().enabled);
+        QCOMPARE(client.codec->consoleVirtualPolicy().client.desktopSize, QSize(1366, 768));
+        QVERIFY(h.host.m_configuredConsoleOutputs); QVERIFY(client.replaceAttempted); QVERIFY(!client.replaceSpent);
+        // A duplicate (same monitors) is answered ok and changes nothing.
+        const bool configured = h.host.m_configuredConsoleOutputs;
+        const auto again = h.ask(oneMonitor(), u"q2"_s);
+        QVERIFY(again.value(u"ok"_s).toBool()); QCOMPARE(again.value(u"requestId"_s).toString(), u"q2"_s);
+        QCOMPARE(h.host.m_configuredConsoleOutputs, configured); QVERIFY(client.codec->consoleVirtualPolicy().enabled);
+        // Different monitors after the attempt started: too late, refused, the running attempt is untouched.
+        const auto late = h.ask({{QRect(0, 0, 1920, 1080), true}}, u"q3"_s);
+        QVERIFY(!late.value(u"ok"_s).toBool()); QCOMPARE(late.value(u"requestId"_s).toString(), u"q3"_s);
+        QCOMPARE(client.codec->consoleVirtualPolicy().client.desktopSize, QSize(1366, 768));
+        // Once the attempt is over (worker gone) the next worker captures normally and a repeat does not re-arm it.
+        h.host.clearPhysicalLease("test worker exit");
+        QVERIFY(client.replaceSpent); QVERIFY(!client.codec->consoleVirtualPolicy().enabled);
+        QVERIFY(h.ask(oneMonitor(), u"q4"_s).value(u"ok"_s).toBool()); // same request: idempotent, but nothing starts
+        QVERIFY(!client.codec->consoleVirtualPolicy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
+        QVERIFY(!h.ask({{QRect(0, 0, 1920, 1080), true}}, u"q5"_s).value(u"ok"_s).toBool());
+        QVERIFY(!client.codec->consoleVirtualPolicy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
+    }
+
+    void screensRequestBeforeControlArmsAtAdmission()
+    {
+        // The request can beat the admission/worker Ready (capabilities are sent first, control follows): the same
+        // path as a monitor block then arms it when control is granted.
+        RequestHarness h("[General]\n", false, ConsoleSeat::Adapter::PhysicalUser, true, false);
+        auto &client = *h.client;
+        QVERIFY(h.ask(oneMonitor(), u"e1"_s).value(u"ok"_s).toBool());
+        QVERIFY(client.codec->consoleVirtualPolicy().enabled);
+        QVERIFY(!h.host.m_configuredConsoleOutputs); // not in control yet: nothing armed
+        h.host.m_control.admit(client.id); h.host.syncControlState();
+        QVERIFY(h.host.m_configuredConsoleOutputs); QVERIFY(client.replaceAttempted);
+    }
+
+    void screensRequestRefusals()
+    {
+        { // The capability was not offered (the user's permission is Off): refused, plain capture, and nothing is armed.
+            RequestHarness h("[General]\nVirtualMonitorPolicy=off\n", false, ConsoleSeat::Adapter::PhysicalUser, false);
+            const auto reply = h.ask(oneMonitor(), u"o1"_s);
+            QVERIFY(!reply.value(u"ok"_s).toBool()); QCOMPARE(reply.value(u"requestId"_s).toString(), u"o1"_s);
+            QVERIFY(!h.client->codec->consoleVirtualPolicy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
+            // Even if a client sends it although the capability said no: with permission Off the policy stays off.
+            h.client->screensAdvertised = true;
+            QVERIFY(h.ask(oneMonitor(), u"o2"_s).value(u"ok"_s).toBool());
+            QVERIFY(!h.client->codec->consoleVirtualPolicy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
+        }
+        { // Malformed: refused, requestId echoed, nothing changes.
+            RequestHarness h("[General]\n", false);
+            for (const QString &bad : {u"bad1"_s, u"bad2"_s}) {
+                QJsonObject record{{u"type"_s, u"console-screens-request"_s}, {u"v"_s, 1}, {u"requestId"_s, bad}, {u"replace"_s, true},
+                    {u"monitors"_s, bad == u"bad1"_s ? QJsonArray{} : QJsonArray{QJsonObject{{u"x"_s, 0}, {u"y"_s, 0}, {u"width"_s, 100}, {u"height"_s, 100}}}}};
+                h.host.onControlRecord(&h.connection, h.client->id, record);
+                QVERIFY(!h.sent.last().value(u"ok"_s).toBool()); QCOMPARE(h.sent.last().value(u"requestId"_s).toString(), bad);
+            }
+            QVERIFY(!h.client->codec->consoleVirtualPolicy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs); QVERIFY(!h.client->screensRequest);
+        }
+        { // The greeter (or any non-user target): accepted as data, never armed, so capture stays normal.
+            RequestHarness h("[General]\n", false, ConsoleSeat::Adapter::Greeter);
+            QVERIFY(h.ask(oneMonitor(), u"g1"_s).value(u"ok"_s).toBool());
+            QVERIFY(!h.host.m_configuredConsoleOutputs); QVERIFY(!h.client->replaceAttempted);
+        }
+        { // A standard monitor block is the request already: it wins and the explicit request changes nothing.
+            RequestHarness h("[General]\n", true);
+            QVERIFY(h.client->codec->consoleVirtualPolicy().enabled);
+            QCOMPARE(h.client->codec->consoleVirtualPolicy().client.desktopSize, QSize(1920, 1080));
+            QVERIFY(h.ask({{QRect(0, 0, 1366, 768), true}}, u"b1"_s).value(u"ok"_s).toBool());
+            QVERIFY(!h.client->screensRequest);
+            QCOMPARE(h.client->codec->consoleVirtualPolicy().client.desktopSize, QSize(1920, 1080));
+        }
+        { // An old client that never sends the record, and no block: plain capture, no record pushed.
+            RequestHarness h("[General]\n", false);
+            h.host.syncScreensRecords();
+            QVERIFY(h.sent.isEmpty()); QVERIFY(!h.client->codec->consoleVirtualPolicy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
+        }
     }
 
     // OPT-060: `console-screens` carries why it ended (contract (h)).

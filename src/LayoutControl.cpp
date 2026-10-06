@@ -460,7 +460,9 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
     if (const auto &screens = capabilities.consoleScreens) {
         record.insert(QStringLiteral("console"),
                       QJsonObject{{QStringLiteral("screens"),
-                                   QJsonObject{{QStringLiteral("replace"), screens->replace}, {QStringLiteral("restore"), screens->restore}}}});
+                                   QJsonObject{{QStringLiteral("replace"), screens->replace},
+                                                {QStringLiteral("restore"), screens->restore},
+                                                {QStringLiteral("request"), screens->request}}}});
     }
     return record;
 }
@@ -479,6 +481,69 @@ QJsonObject consoleScreensRecord(bool active, bool canRestore, const QString &re
         record.insert(QStringLiteral("reason"), reason);
     }
     return record;
+}
+
+std::optional<QVector<VideoMonitor>> parseConsoleScreensRequest(const QJsonObject &record)
+{
+    static const QSet<QString> keys{QStringLiteral("type"), QStringLiteral("v"), QStringLiteral("replace"), QStringLiteral("monitors")};
+    static const QSet<QString> monitorKeys{QStringLiteral("x"), QStringLiteral("y"), QStringLiteral("width"), QStringLiteral("height"), QStringLiteral("primary")};
+    for (auto it = record.begin(); it != record.end(); ++it) {
+        if (!keys.contains(it.key())) return std::nullopt;
+    }
+    if (record.value(QStringLiteral("type")) != QJsonValue(QStringLiteral("console-screens-request")) || record.value(QStringLiteral("v")) != QJsonValue(1)
+        || record.value(QStringLiteral("replace")) != QJsonValue(true) || !record.value(QStringLiteral("monitors")).isArray()) {
+        return std::nullopt;
+    }
+    const auto array = record.value(QStringLiteral("monitors")).toArray();
+    if (array.isEmpty() || array.size() > ClientDisplay::MaxMonitors) return std::nullopt;
+    const auto integer = [](const QJsonValue &value, int minimum, int maximum, int *out) {
+        if (!value.isDouble()) return false;
+        const double number = value.toDouble();
+        if (number != std::floor(number) || number < minimum || number > maximum) return false;
+        *out = int(number);
+        return true;
+    };
+    QVector<VideoMonitor> monitors;
+    qsizetype primaries = 0;
+    for (const auto &entry : array) {
+        if (!entry.isObject()) return std::nullopt;
+        const auto object = entry.toObject();
+        for (auto it = object.begin(); it != object.end(); ++it) {
+            if (!monitorKeys.contains(it.key())) return std::nullopt;
+        }
+        int x = 0, y = 0, width = 0, height = 0;
+        if (!integer(object.value(QStringLiteral("x")), -ClientDisplay::MaxCoordinate, ClientDisplay::MaxCoordinate, &x)
+            || !integer(object.value(QStringLiteral("y")), -ClientDisplay::MaxCoordinate, ClientDisplay::MaxCoordinate, &y)
+            || !integer(object.value(QStringLiteral("width")), ClientDisplay::MinDimension, ClientDisplay::MaxDimension, &width)
+            || !integer(object.value(QStringLiteral("height")), ClientDisplay::MinDimension, ClientDisplay::MaxDimension, &height)) {
+            return std::nullopt;
+        }
+        const auto primary = object.value(QStringLiteral("primary"));
+        if (!primary.isUndefined() && !primary.isBool()) return std::nullopt;
+        monitors.append(VideoMonitor{QRect(x, y, width, height), primary.toBool(false)});
+        primaries += monitors.last().primary ? 1 : 0;
+    }
+    // One monitor is the primary by definition; several need exactly one, no overlap and a union RDP can carry.
+    if (monitors.size() == 1) {
+        monitors[0].primary = true;
+        return monitors;
+    }
+    QRect unionRect;
+    for (const auto &monitor : std::as_const(monitors)) unionRect |= monitor.geometry;
+    if (primaries != 1 || !ClientDisplay::disjoint(monitors) || !ClientDisplay::usableDesktop(unionRect.size())) return std::nullopt;
+    return monitors;
+}
+
+QJsonObject consoleScreensRequestRecord(const QVector<VideoMonitor> &monitors)
+{
+    QJsonArray array;
+    for (const auto &monitor : monitors) {
+        array.append(QJsonObject{{QStringLiteral("x"), monitor.geometry.x()}, {QStringLiteral("y"), monitor.geometry.y()},
+                                 {QStringLiteral("width"), monitor.geometry.width()}, {QStringLiteral("height"), monitor.geometry.height()},
+                                 {QStringLiteral("primary"), monitor.primary}});
+    }
+    return {{QStringLiteral("type"), QStringLiteral("console-screens-request")}, {QStringLiteral("v"), ProtocolVersion},
+            {QStringLiteral("replace"), true}, {QStringLiteral("monitors"), array}};
 }
 
 QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, const QString &reason)

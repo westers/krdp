@@ -138,6 +138,8 @@ private:
         // `console-screens` active:false edge. Empty = not known, so the record carries no reason.
         QString screensEndReason;
         bool screensAdvertised = false; // `capabilities.console.screens` was sent to it
+        // OPT-060 D0: the monitors of its `console-screens-request` (a one-monitor client has no standard block).
+        std::optional<QVector<VideoMonitor>> screensRequest;
     };
 
     void apply(const ConsoleHandoff::Actions &actions);

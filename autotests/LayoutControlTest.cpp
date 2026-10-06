@@ -127,16 +127,73 @@ private Q_SLOTS:
         ChannelCapabilities caps;
         caps.host = QStringLiteral("console");
         QVERIFY(!capabilitiesRecord(caps).contains(QStringLiteral("console"))); // absent unless advertised
-        caps.consoleScreens = ConsoleScreensCapabilities{true, true};
+        caps.consoleScreens = ConsoleScreensCapabilities{true, true, true};
         const auto record = capabilitiesRecord(caps);
         QCOMPARE(record.value(QStringLiteral("console")).toObject().value(QStringLiteral("screens")).toObject(),
-                 (QJsonObject{{QStringLiteral("replace"), true}, {QStringLiteral("restore"), true}}));
+                 (QJsonObject{{QStringLiteral("replace"), true}, {QStringLiteral("restore"), true}, {QStringLiteral("request"), true}}));
         QCOMPARE(record.value(QStringLiteral("protocol")).toInt(), ChannelProtocol); // no protocol bump: a gap group
         // An old client that knows none of it still finds every group it used.
         for (const char *key : {"layout", "virtualSessions", "topology"}) QVERIFY(record.contains(QLatin1String(key)));
         caps.consoleScreens = ConsoleScreensCapabilities{true, false};
         QVERIFY(!capabilitiesRecord(caps).value(QStringLiteral("console")).toObject().value(QStringLiteral("screens")).toObject().value(QStringLiteral("restore")).toBool());
         QVERIFY(frame(record).size() < 1024);
+    }
+
+    // OPT-060 D0: `console-screens-request`, the gap channel for a client with one monitor.
+    void consoleScreensRequestWire()
+    {
+        const auto oneMonitor = QVector<VideoMonitor>{{QRect(0, 0, 1920, 1080), true}};
+        const auto request = consoleScreensRequestRecord(oneMonitor);
+        QCOMPARE(request.value(QStringLiteral("type")).toString(), QStringLiteral("console-screens-request"));
+        QCOMPARE(parseConsoleScreensRequest(request), std::optional(oneMonitor));
+        // A lone monitor is the primary whether or not it says so.
+        auto unmarked = request;
+        auto monitors = unmarked.value(QStringLiteral("monitors")).toArray();
+        auto first = monitors.at(0).toObject();
+        first.remove(QStringLiteral("primary"));
+        monitors.replace(0, first);
+        unmarked.insert(QStringLiteral("monitors"), monitors);
+        QCOMPARE(parseConsoleScreensRequest(unmarked), std::optional(oneMonitor));
+        const QVector<VideoMonitor> two{{QRect(0, 0, 1920, 1080), true}, {QRect(1920, 0, 1280, 1024), false}};
+        QCOMPARE(parseConsoleScreensRequest(consoleScreensRequestRecord(two)), std::optional(two));
+        // The requestId is taken off by the caller; the strict parser then sees exactly the documented keys.
+        auto withId = request;
+        withId.insert(QStringLiteral("requestId"), QStringLiteral("r1"));
+        QVERIFY(!parseConsoleScreensRequest(withId));
+    }
+
+    void consoleScreensRequestRefusesMalformed_data()
+    {
+        QTest::addColumn<QJsonObject>("record");
+        const auto good = consoleScreensRequestRecord({{QRect(0, 0, 1920, 1080), true}});
+        const auto edit = [&good](const char *key, const QJsonValue &value) { auto r = good; r.insert(QLatin1String(key), value); return r; };
+        const auto monitor = [](const QJsonObject &fields) { auto m = QJsonObject{{QStringLiteral("x"), 0}, {QStringLiteral("y"), 0}, {QStringLiteral("width"), 1920}, {QStringLiteral("height"), 1080}}; for (auto it = fields.begin(); it != fields.end(); ++it) m.insert(it.key(), it.value()); return m; };
+        const auto withMonitors = [&good](const QJsonArray &monitors) { auto r = good; r.insert(QStringLiteral("monitors"), monitors); return r; };
+        QTest::newRow("wrong type") << edit("type", QStringLiteral("console-screens"));
+        QTest::newRow("wrong version") << edit("v", 2);
+        QTest::newRow("replace false") << edit("replace", false);
+        QTest::newRow("replace missing") << [&good] { auto r = good; r.remove(QStringLiteral("replace")); return r; }();
+        QTest::newRow("unknown field") << edit("extra", 1);
+        QTest::newRow("monitors not array") << edit("monitors", QStringLiteral("x"));
+        QTest::newRow("no monitors") << withMonitors({});
+        QTest::newRow("17 monitors") << [&] { QJsonArray a; for (int i = 0; i < 17; ++i) a.append(monitor({{QStringLiteral("x"), i * 700}, {QStringLiteral("width"), 640}, {QStringLiteral("height"), 640}, {QStringLiteral("primary"), i == 0}})); return withMonitors(a); }();
+        QTest::newRow("monitor not object") << withMonitors({1});
+        QTest::newRow("unknown monitor field") << withMonitors({monitor({{QStringLiteral("scale"), 1.5}})});
+        QTest::newRow("fractional width") << withMonitors({monitor({{QStringLiteral("width"), 1920.5}})});
+        QTest::newRow("string width") << withMonitors({monitor({{QStringLiteral("width"), QStringLiteral("1920")}})});
+        QTest::newRow("too small") << withMonitors({monitor({{QStringLiteral("width"), 639}})});
+        QTest::newRow("too large") << withMonitors({monitor({{QStringLiteral("height"), 4097}})});
+        QTest::newRow("coordinate out of range") << withMonitors({monitor({{QStringLiteral("x"), 40000}})});
+        QTest::newRow("primary not bool") << withMonitors({monitor({{QStringLiteral("primary"), 1}})});
+        QTest::newRow("two without primary") << withMonitors({monitor({}), monitor({{QStringLiteral("x"), 1920}})});
+        QTest::newRow("two primaries") << withMonitors({monitor({{QStringLiteral("primary"), true}}), monitor({{QStringLiteral("x"), 1920}, {QStringLiteral("primary"), true}})});
+        QTest::newRow("overlap") << withMonitors({monitor({{QStringLiteral("primary"), true}}), monitor({{QStringLiteral("x"), 1000}})});
+        QTest::newRow("union over the RDP limit") << withMonitors({monitor({{QStringLiteral("primary"), true}}), monitor({{QStringLiteral("x"), 9000}})});
+    }
+    void consoleScreensRequestRefusesMalformed()
+    {
+        QFETCH(QJsonObject, record);
+        QVERIFY(!parseConsoleScreensRequest(record));
     }
 
     void consoleScreensRecordShape()

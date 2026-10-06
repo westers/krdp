@@ -1007,7 +1007,10 @@ void ConsoleHostController::updateClientDisplayPolicy(Client &client)
     // must keep its outputs).
     const QString layoutPolicy = p.virtualMonitorPolicy.value_or(u"replace"_s);
     const auto permission = ConsoleVirtualOutputPolicy::permissionOf(layoutPolicy);
-    const auto info = m_displayInfoOf ? m_displayInfoOf(client.connection) : client.connection->clientDisplayInfo();
+    // The connection's standard monitor block, or its explicit `console-screens-request` (a one-monitor
+    // client has no block: FreeRDP writes it only for 2+ monitors; OPT-060 D0).
+    const auto info = ConsoleVirtualOutputPolicy::effectiveRequest(
+        m_displayInfoOf ? m_displayInfoOf(client.connection) : client.connection->clientDisplayInfo(), client.screensRequest);
     const bool spent = client.replaceSpent && !m_configuredConsoleOutputs;
     const bool enabled = ConsoleVirtualOutputPolicy::gate(permission, ConsoleVirtualOutputPolicy::monitorBlockSent(info),
                              true, spent) == ConsoleVirtualOutputPolicy::Gate::Replace;
@@ -1118,7 +1121,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         // StandardClientMedia is for clients that do not speak KRDPCTL: a
         // `device` record, or any other record this host knows (not
         // audio-priority, which never closes krdpserver's gate either).
-        static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s, u"console-screens-restore"_s,
+        static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s, u"console-screens-restore"_s, u"console-screens-request"_s,
                                          u"pointer-capture"_s, u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s, u"stats"_s, u"chroma"_s};
         for (const auto &client : m_clients) {
             if (client->id != id) continue;
@@ -1440,6 +1443,38 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         } else {
             connection->setAudioPriority(request->enabled);
             replyTo(connection, AudioPriority::reply(record, connection->audioPriorityActive()));
+        }
+        return;
+    }
+    if (type == u"console-screens-request"_s) {
+        // OPT-060 D0: a client with ONE monitor sends no standard monitor block (FreeRDP writes it only for 2+),
+        // so it asks here. Accepted, it is exactly a standard block: same permission gate, same one attempt per
+        // connection, same fail-open. The answer says only whether the request was taken; `console-screens`
+        // reports what happened. Never arrives "too early" (capabilities come first) and a late one (the worker is
+        // already capturing normally) takes the policy-change path: the worker starts Replace now.
+        const auto refuse = [this, connection](const QString &message) {
+            replyTo(connection, QJsonObject{{u"type"_s, u"console-screens-request"_s}, {u"v"_s, 1}, {u"ok"_s, false}, {u"message"_s, message}});
+        };
+        const auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &entry) { return entry->id == id; });
+        const auto monitors = LayoutControl::parseConsoleScreensRequest(record);
+        if (found == m_clients.end() || !monitors) {
+            refuse(u"invalid console-screens-request"_s);
+        } else if (!(*found)->screensAdvertised) {
+            refuse(u"This host does not let connections replace its screens."_s);
+        } else if (ConsoleVirtualOutputPolicy::monitorBlockSent(m_displayInfoOf ? m_displayInfoOf(connection) : connection->clientDisplayInfo())) {
+            // The standard block already is the request; it wins and nothing more is needed.
+            replyTo(connection, QJsonObject{{u"type"_s, u"console-screens-request"_s}, {u"v"_s, 1}, {u"ok"_s, true}});
+        } else if ((*found)->replaceAttempted && (*found)->screensRequest != monitors) {
+            refuse(u"The screens request came too late: Replace was already used on this connection."_s);
+        } else {
+            auto &client = **found;
+            const bool changed = client.screensRequest != monitors;
+            client.screensRequest = monitors;
+            if (changed) {
+                updateClientDisplayPolicy(client); // sends the policy to a bound worker
+                armConfiguredConsoleOutputs(); // owner + physical user worker: the same arming a block gets at Ready
+            }
+            replyTo(connection, QJsonObject{{u"type"_s, u"console-screens-request"_s}, {u"v"_s, 1}, {u"ok"_s, true}});
         }
         return;
     }
@@ -1910,7 +1945,7 @@ void ConsoleHostController::sendCapabilities(Client &client)
     // with its monitor block. Old clients ignore the group and the `console-screens` records.
     const auto permission = ConsoleVirtualOutputPolicy::permissionOf(client.preferences.virtualMonitorPolicy.value_or(u"replace"_s));
     if (permission == ConsoleVirtualOutputPolicy::Permission::Ask) {
-        capabilities.consoleScreens = LayoutControl::ConsoleScreensCapabilities{true, true};
+        capabilities.consoleScreens = LayoutControl::ConsoleScreensCapabilities{true, true, true};
         client.screensAdvertised = true;
     }
     client.connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));

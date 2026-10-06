@@ -68,9 +68,25 @@ struct ConsoleVirtualOutputPolicy {
         return virtualMonitorPolicy == QStringLiteral("off") ? QStringLiteral("replace") : virtualMonitorPolicy;
     }
 
-    // The standard monitor block (TS_UD_CS_MONITOR) is the per-connection
-    // request. It is read before sanitising: a one-monitor block is still a block.
+    // The per-connection request is one of two equal sources (OPT-060 D0):
+    // 1. the standard monitor block (TS_UD_CS_MONITOR), read before sanitising. FreeRDP's client writes it
+    //    only when it has MORE THAN ONE monitor, so a one-monitor client sends no block at all (an earlier
+    //    version of this comment claimed "a one-monitor block is still a block"; no stock client sends one);
+    // 2. the own client's explicit `console-screens-request` (KRDPCTL, contract (h)), which exists for exactly
+    //    that gap. The gate treats both alike.
     static bool monitorBlockSent(const ClientDisplay::Info &rawInfo) { return !rawInfo.monitors.isEmpty(); }
+
+    // What the connection asked for: the standard block when it sent one (standard RDP wins), else the
+    // explicit request, else the plain connect info (no request: normal capture).
+    static ClientDisplay::Info effectiveRequest(ClientDisplay::Info block, const std::optional<QVector<VideoMonitor>> &request)
+    {
+        if (monitorBlockSent(block) || !request || request->isEmpty()) return block;
+        QRect unionRect;
+        for (const auto &monitor : *request) unionRect |= monitor.geometry;
+        block.monitors = *request;
+        block.desktopSize = unionRect.size();
+        return block;
+    }
 
     // Every refusal ends in normal Console capture; only `Replace` creates outputs.
     static Gate gate(Permission permission, bool monitorBlock, bool physicalUser, bool alreadyAttempted)

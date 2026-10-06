@@ -235,6 +235,7 @@ struct StatsCapabilities {
 struct ConsoleScreensCapabilities {
     bool replace = false;
     bool restore = false;
+    bool request = false; ///< `console-screens-request` is honoured: the gap channel for a client with ONE monitor (no standard block)
     bool operator==(const ConsoleScreensCapabilities &) const = default;
 };
 
@@ -275,6 +276,18 @@ KRDP_EXPORT QJsonObject codecRecord(const QString &selected, std::optional<bool>
  * keyboard/mouse), "restoreRequest" (the client asked), "workerExit", "disconnect", "failed", "lockRestore".
  */
 KRDP_EXPORT QJsonObject consoleScreensRecord(bool active, bool canRestore, const QString &reason = {});
+
+/**
+ * `console-screens-request` (OPT-060 D0): the client's explicit request that the host replace its screens
+ * with outputs of these monitors' sizes. FreeRDP writes the standard monitor block only for 2+ monitors, so a
+ * one-monitor client cannot ask any other way. Strict: `type`, `v`:1, `replace`:true and 1..16 monitors with
+ * integer `x`,`y`,`width`,`height` (the physical pixels, client coordinates) and optional boolean `primary`;
+ * anything else, a usable-size violation, overlap or not exactly one primary among 2+ is std::nullopt.
+ * The request is the client's description of its desktop, so the result is the same as a standard monitor block.
+ */
+KRDP_EXPORT std::optional<QVector<VideoMonitor>> parseConsoleScreensRequest(const QJsonObject &record);
+/** The request a client sends (the requestId is added when it is sent). Used by tests. */
+KRDP_EXPORT QJsonObject consoleScreensRequestRecord(const QVector<VideoMonitor> &monitors);
 
 /**
  * `session-end` (AUD-FIX2 F4), unsolicited, sent to a KRDPCTL client just before the server
