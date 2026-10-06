@@ -173,6 +173,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         m_consoleCreatorsActive = false;
         m_configuredConsoleOutputs = false;
         m_physicalLeaseGeneration = 0;
+        endReplaceAttempts("lease released");
     });
     const auto virtualFinished = [this](quint64 requestId, quint64 generation, const QString &error, bool add) {
         if (!m_pendingVirtual || m_pendingVirtual->serial != requestId
@@ -617,6 +618,7 @@ void ConsoleHostController::clearPhysicalLease(const char *why)
     m_consoleCreatorsActive = false;
     m_configuredConsoleOutputs = false;
     m_physicalLeaseGeneration = 0;
+    endReplaceAttempts(why);
 }
 
 bool ConsoleHostController::admissible(const Client &client) const
@@ -998,9 +1000,20 @@ void ConsoleHostController::updateClientDisplayPolicy(Client &client)
     const auto uid = m_uidOf(client.connection);
     if (!uid || !*uid || (client.uid && client.uid != uid)) return;
     const auto &p = client.preferences;
-    const auto policy = ConsoleVirtualOutputPolicy::parse(p.monitorMode == std::optional(u"virtual"_s),
-        p.virtualMonitorPolicy.value_or(u"replace"_s), p.virtualMonitorLayout.value_or(u"client"_s),
-        p.virtualMonitorFallbackSize.value_or(QSize(1920, 1080)), client.connection->clientDisplayInfo());
+    // OPT-060: Replace needs the user's permission (default "When the connection asks") AND the
+    // connection's own standard RDP monitor block. A spent attempt stays off for the rest of the
+    // connection, but only once the running worker's outputs are gone: changing the policy under a
+    // live plan makes the worker release and restart (the desk-reclaim "continue as extend" path
+    // must keep its outputs).
+    const QString layoutPolicy = p.virtualMonitorPolicy.value_or(u"replace"_s);
+    const auto permission = ConsoleVirtualOutputPolicy::permissionOf(layoutPolicy);
+    const auto info = m_displayInfoOf ? m_displayInfoOf(client.connection) : client.connection->clientDisplayInfo();
+    const bool spent = client.replaceSpent && !m_configuredConsoleOutputs;
+    const bool enabled = ConsoleVirtualOutputPolicy::gate(permission, ConsoleVirtualOutputPolicy::monitorBlockSent(info),
+                             true, spent) == ConsoleVirtualOutputPolicy::Gate::Replace;
+    const auto policy = ConsoleVirtualOutputPolicy::parse(enabled,
+        ConsoleVirtualOutputPolicy::planPolicy(layoutPolicy), p.virtualMonitorLayout.value_or(u"client"_s),
+        p.virtualMonitorFallbackSize.value_or(QSize(1920, 1080)), info);
     if (policy) client.codec->setConsoleVirtualPolicy(*policy);
 }
 
@@ -1105,7 +1118,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         // StandardClientMedia is for clients that do not speak KRDPCTL: a
         // `device` record, or any other record this host knows (not
         // audio-priority, which never closes krdpserver's gate either).
-        static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s,
+        static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s, u"console-screens-restore"_s,
                                          u"pointer-capture"_s, u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s, u"stats"_s, u"chroma"_s};
         for (const auto &client : m_clients) {
             if (client->id != id) continue;
@@ -1428,6 +1441,15 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             connection->setAudioPriority(request->enabled);
             replyTo(connection, AudioPriority::reply(record, connection->audioPriorityActive()));
         }
+        return;
+    }
+    if (type == u"console-screens-restore"_s) {
+        // OPT-060: turn the host's screens back on. Only the admitted controller whose
+        // connection has Replace active may ask; the worker restores, verifies and keeps capture going.
+        const auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &entry) { return entry->id == id; });
+        const bool ok = found != m_clients.end() && m_control.admitted(id) && m_control.ownsControl(id) && restoreHostScreens(**found);
+        replyTo(connection, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"ok"_s, ok},
+            {u"message"_s, ok ? QString() : u"The host's screens are not turned off for this connection."_s}});
         return;
     }
     if (type == u"console-resize"_s) {
@@ -1879,6 +1901,13 @@ void ConsoleHostController::sendCapabilities(Client &client)
     }
     if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, client.preferences.softwareEncoding.value_or(m_videoHost->mode));
     capabilities.stats = LayoutControl::StatsCapabilities{};
+    // OPT-060: advertised only when this connection's user allows Replace; the client still has to ask
+    // with its monitor block. Old clients ignore the group and the `console-screens` records.
+    const auto permission = ConsoleVirtualOutputPolicy::permissionOf(client.preferences.virtualMonitorPolicy.value_or(u"replace"_s));
+    if (permission == ConsoleVirtualOutputPolicy::Permission::Ask) {
+        capabilities.consoleScreens = LayoutControl::ConsoleScreensCapabilities{true, true};
+        client.screensAdvertised = true;
+    }
     client.connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
 
@@ -1913,6 +1942,7 @@ void ConsoleHostController::sendLayouts()
             }
         }
     }
+    syncScreensRecords();
 }
 
 void ConsoleHostController::releaseInput()
@@ -1929,7 +1959,17 @@ void ConsoleHostController::releaseInput()
 void ConsoleHostController::physicalInputActivity()
 {
     // Fake-input and application cursor warps do not originate at evdev devices.
-    if (m_control.owner()) m_endpoint.reclaimConsole(m_controlGeneration);
+    if (!m_control.owner()) return;
+    m_endpoint.reclaimConsole(m_controlGeneration);
+    // Someone is at the desk: the worker gives the host's screens back and the remote session
+    // continues as extend (D4). Replace is over for this connection.
+    for (const auto &client : m_clients) {
+        if (!replaceActiveFor(*client)) continue;
+        m_screensReclaimed = true;
+        client->replaceSpent = true;
+        updateClientDisplayPolicy(*client);
+    }
+    syncScreensRecords();
 }
 
 void ConsoleHostController::syncControlState()
@@ -1968,6 +2008,7 @@ void ConsoleHostController::syncControlState()
     }
     syncCodecPolicy();
     syncDisplayPolicy();
+    syncScreensRecords();
 }
 
 void ConsoleHostController::armConfiguredConsoleOutputs()
@@ -1975,6 +2016,14 @@ void ConsoleHostController::armConfiguredConsoleOutputs()
     if (m_configuredConsoleOutputs || m_endpoint.target().adapter != ConsoleSeat::Adapter::PhysicalUser) return;
     for (const auto &client : m_clients) {
         if (!m_control.ownsControl(client->id) || !client->codec || !client->codec->consoleVirtualPolicy().enabled) continue;
+        // One Replace attempt per connection: a failed or ended attempt is never re-armed by the
+        // next worker's Ready, which would loop physical output churn (OPT-060 S2).
+        if (client->replaceAttempted) {
+            qInfo() << "Console Replace already attempted on this connection; capturing the host's screens as they are";
+            continue;
+        }
+        client->replaceAttempted = true;
+        m_screensReclaimed = false;
         m_configuredConsoleOutputs = true;
         m_consoleCreatorsActive = true;
         m_physicalLeaseActive = true;
@@ -1986,6 +2035,51 @@ void ConsoleHostController::armConfiguredConsoleOutputs()
         m_topologyCatalog.resetGeneration();
         return;
     }
+}
+
+void ConsoleHostController::endReplaceAttempts(const char *why)
+{
+    for (const auto &client : m_clients) {
+        if (!client->replaceAttempted) continue;
+        if (!client->replaceSpent) qInfo() << "Console Replace attempt over:" << why << "- normal capture for the rest of this connection";
+        client->replaceSpent = true;
+        updateClientDisplayPolicy(*client); // The configured outputs are gone now, so the next worker's policy turns off.
+    }
+    syncScreensRecords();
+}
+
+bool ConsoleHostController::replaceActiveFor(const Client &client) const
+{
+    return client.codec && m_control.ownsControl(client.id) && !m_screensReclaimed && client.replaceAttempted && !client.replaceSpent
+        && client.codec->consoleVirtualPolicy().enabled
+        && client.codec->consoleVirtualPolicy().policy == ConsoleVirtualOutputPolicy::Policy::Replace
+        && configuredOutputTopology();
+}
+
+void ConsoleHostController::syncScreensRecords()
+{
+    for (const auto &client : m_clients) {
+        if (!client->capabilitiesSent || !client->screensAdvertised || !client->connection) continue;
+        const bool active = replaceActiveFor(*client);
+        // Nothing is pushed until Replace has been active at least once, so a client that never
+        // asked never hears of it; afterwards each edge is pushed once.
+        if (client->screensActiveSent.value_or(false) == active) continue;
+        client->screensActiveSent = active;
+        sendRecord(client->connection, LayoutControl::consoleScreensRecord(active, active && m_control.ownsControl(client->id)));
+    }
+}
+
+bool ConsoleHostController::restoreHostScreens(Client &client)
+{
+    if (!replaceActiveFor(client)) return false;
+    // The worker's reclaim: restore the host's screens, verify, and keep the temporary
+    // outputs as extend so capture continues. Replace is over for this connection.
+    m_endpoint.reclaimConsole(m_controlGeneration);
+    m_screensReclaimed = true;
+    client.replaceSpent = true;
+    updateClientDisplayPolicy(client);
+    syncScreensRecords();
+    return true;
 }
 
 ConsoleWorkerWire::DisplayPolicy ConsoleHostController::displayPolicy() const

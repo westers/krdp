@@ -25,6 +25,38 @@ class ConsoleVirtualOutputPlanTest : public QObject
     static QVector<OutputSnapshot::Output> names() { return physical(); }
 
 private Q_SLOTS:
+    // OPT-060 S2: the pure per-connection gate. Every refusal means normal Console capture.
+    void replaceGateCases_data()
+    {
+        using P = ConsoleVirtualOutputPolicy;
+        QTest::addColumn<int>("permission");
+        QTest::addColumn<bool>("block");
+        QTest::addColumn<bool>("physicalUser");
+        QTest::addColumn<bool>("attempted");
+        QTest::addColumn<int>("expected");
+        QTest::newRow("no monitor block: capture") << int(P::Permission::Ask) << false << true << false << int(P::Gate::NoMonitorBlock);
+        QTest::newRow("block and permission off: capture") << int(P::Permission::Off) << true << true << false << int(P::Gate::PermissionOff);
+        QTest::newRow("block and asks: Replace") << int(P::Permission::Ask) << true << true << false << int(P::Gate::Replace);
+        QTest::newRow("one attempt only: capture") << int(P::Permission::Ask) << true << true << true << int(P::Gate::AlreadyAttempted);
+        QTest::newRow("greeter or lock-less non-user: capture") << int(P::Permission::Ask) << true << false << false << int(P::Gate::NotPhysicalUser);
+        QTest::newRow("greeter beats everything") << int(P::Permission::Off) << false << false << true << int(P::Gate::NotPhysicalUser);
+    }
+    void replaceGateCases()
+    {
+        QFETCH(int, permission); QFETCH(bool, block); QFETCH(bool, physicalUser); QFETCH(bool, attempted); QFETCH(int, expected);
+        QCOMPARE(int(ConsoleVirtualOutputPolicy::gate(ConsoleVirtualOutputPolicy::Permission(permission), block, physicalUser, attempted)), expected);
+    }
+    void permissionAndMonitorBlockParsing()
+    {
+        QCOMPARE(ConsoleVirtualOutputPolicy::permissionOf(QStringLiteral("off")), ConsoleVirtualOutputPolicy::Permission::Off);
+        QCOMPARE(ConsoleVirtualOutputPolicy::permissionOf(QStringLiteral("replace")), ConsoleVirtualOutputPolicy::Permission::Ask);
+        QCOMPARE(ConsoleVirtualOutputPolicy::permissionOf(QStringLiteral("extend")), ConsoleVirtualOutputPolicy::Permission::Ask);
+        QCOMPARE(ConsoleVirtualOutputPolicy::planPolicy(QStringLiteral("off")), QStringLiteral("replace"));
+        QCOMPARE(ConsoleVirtualOutputPolicy::planPolicy(QStringLiteral("extend")), QStringLiteral("extend"));
+        QVERIFY(!ConsoleVirtualOutputPolicy::monitorBlockSent({QSize(1920, 1080), {}}));
+        QVERIFY(ConsoleVirtualOutputPolicy::monitorBlockSent({QSize(1920, 1080), {{QRect(0, 0, 1920, 1080), true}}}));
+    }
+
     void replaceExtendAndParkPreserveClientLayout()
     {
         auto policy = request();

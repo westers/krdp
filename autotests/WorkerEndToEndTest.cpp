@@ -243,6 +243,8 @@ private Q_SLOTS:
     void consoleCaptureSelection();
     void consoleConfiguredOutputs_data();
     void consoleConfiguredOutputs();
+    void consoleReplaceFailsOpen_data();
+    void consoleReplaceFailsOpen();
     void codecSwitchAtAttach_data();
     void codecSwitchAtAttach();
     void coalesceKeepsEveryOutputAlive_data();
@@ -619,6 +621,141 @@ void WorkerEndToEndTest::consoleCaptureSelection()
     QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
     QCOMPARE(outputs.monitors.size(), 2);
     stopWorker(*s, endpoint);
+}
+
+// OPT-060 S2: a Replace attempt that cannot happen must restore, leave the host's outputs alone and
+// still end in a normal Console picture; an unverified journal never means a black Console.
+void WorkerEndToEndTest::consoleReplaceFailsOpen_data()
+{
+    QTest::addColumn<bool>("unverifiedJournal");
+    QTest::newRow("creation cannot be planned: error, nothing mutated, then normal capture") << false;
+    QTest::newRow("journal unverified: no outputs created, then the lit outputs are captured, journal kept") << true;
+}
+
+void WorkerEndToEndTest::consoleReplaceFailsOpen()
+{
+    QFETCH(bool, unverifiedJournal);
+    if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
+    auto *s = session(2); QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    const QString journalDirectory = s->home->path() + QStringLiteral("/replace-fail-open");
+    const QString journalPath = journalDirectory + QStringLiteral("/output-restore.json");
+    QByteArray journalBytes;
+    if (unverifiedJournal) {
+        // A dead predecessor's conditional entry for an output that is not connected: it can be
+        // neither restored nor discarded, so the replay keeps it ("kept").
+        QVERIFY(QDir().mkpath(journalDirectory));
+        OutputRestoreJournal::Entry entry;
+        entry.owner = QString::fromLatin1(OutputRestoreJournal::ConsoleLeaseOwner);
+        entry.pid = 2147483000; entry.session = QStringLiteral("3");
+        OutputRestoreJournal::Output output;
+        output.name = QStringLiteral("DP-not-connected");
+        output.original.enabled = true; output.applied.mode = QStringLiteral("7");
+        entry.outputs = {output};
+        journalBytes = OutputRestoreJournal::serialize({entry});
+        QFile journal(journalPath); QVERIFY(journal.open(QIODevice::WriteOnly)); journal.write(journalBytes); journal.close();
+    }
+    const auto query = [&]() -> std::optional<QByteArray> {
+        QProcess command;
+        auto environment = s->process->processEnvironment();
+        environment.insert(QStringLiteral("WAYLAND_DISPLAY"), QStringLiteral("wayland-0"));
+        environment.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("wayland"));
+        command.setProcessEnvironment(environment);
+        command.start(QStringLiteral("/usr/bin/kscreen-doctor"), {QStringLiteral("-j")});
+        if (!command.waitForStarted(1000) || !command.waitForFinished(5000)) { command.kill(); command.waitForFinished(1000); return {}; }
+        if (command.exitStatus() != QProcess::NormalExit || command.exitCode() != 0) return {};
+        return command.readAllStandardOutput();
+    };
+    const auto logs = qScopeGuard([&] {
+        if (QTest::currentTestFailed()) qWarning().noquote() << "worker.log:" << s->log(QStringLiteral("worker.log"), 18000)
+            << "kwin.log:" << s->log(QStringLiteral("kwin.log"), 5000);
+    });
+    const auto before = query(); QVERIFY(before);
+    const auto beforeOutputs = OutputSnapshot::parse(*before);
+    QCOMPARE(beforeOutputs.size(), 2);
+    const auto environment = [&] {
+        return unverifiedJournal ? QStringList{QStringLiteral("FARSIDE_OUTPUT_RESTORE_JOURNAL=") + journalPath} : QStringList{};
+    };
+
+    // Phase 1: a worker asked for Replace. It must fail before mutating anything.
+    {
+        ConsoleWorkerEndpoint endpoint; WorkerRun run;
+        ConsoleWorkerWire::Outputs outputs;
+        connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&](const auto &value) { outputs = value; });
+        m_nextWorkerEnv = environment();
+        QVERIFY(startWorker(*s, false, endpoint, run));
+        const auto reap = qScopeGuard([&] {
+            if (!QFileInfo::exists(exitFile)) { endpoint.stopWorker(); (void)QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 30000); }
+        });
+        QTRY_VERIFY_WITH_TIMEOUT((endpoint.ready() && outputs.monitors.size() == 2) || !run.errors.isEmpty(), 45000);
+        QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); // Ready: never exit 1 on an unverified journal.
+        run.errors.clear();
+        endpoint.setControlState({1, true});
+        ConsoleWorkerWire::EncoderConfig config; config.generation = 1;
+        config.settings = CodecPolicy::EncoderSettings{.hardware = false};
+        // Sixteen client monitors plus the two present outputs exceed the sixteen-output limit, so the
+        // plan is unavailable before any output is created. The unverified journal refuses even a valid plan.
+        ClientDisplay::Info client{QSize(1600, 900), {}};
+        if (!unverifiedJournal) {
+            QVector<VideoMonitor> monitors;
+            for (int i = 0; i < 16; ++i) monitors.append({QRect((i % 4) * 1280, (i / 4) * 720, 1280, 720), i == 0});
+            client = {QSize(5120, 2880), monitors};
+        }
+        const auto policy = ConsoleVirtualOutputPolicy::parse(true, QStringLiteral("replace"), QStringLiteral("client"), QSize(1600, 900), client);
+        QVERIFY(policy);
+        config.consoleVirtual = *policy;
+        QVERIFY(endpoint.setEncoderConfig(config)); endpoint.requestKeyFrame();
+        // The worker gives up before mutating anything and exits non-zero (the broker's latch then
+        // starts a replacement with the policy off). Its reason is in the log; the Error frame is
+        // best effort because the socket closes right behind it.
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(exitFile), 60000);
+        QFile exitCode(exitFile); QVERIFY(exitCode.open(QIODevice::ReadOnly));
+        QVERIFY2(exitCode.readAll().trimmed() != QByteArray("0"), "a failed Replace attempt is not a clean exit");
+        const QString log = s->log(QStringLiteral("worker.log"), 60000);
+        QVERIFY2(unverifiedJournal ? log.contains(QStringLiteral("output recovery is unverified"))
+                                   : log.contains(QStringLiteral("requested Console output layout is unavailable")), qPrintable(log.right(3000)));
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(exitFile), 30000);
+    }
+    const auto after = query(); QVERIFY(after);
+    QCOMPARE(OutputSnapshot::parse(*after), beforeOutputs); // restored: nothing was created, enabled or moved
+
+    // Phase 2: the replacement worker (the broker's latch turns the policy off) captures normally.
+    {
+        ConsoleWorkerEndpoint endpoint; WorkerRun run;
+        ConsoleWorkerWire::Outputs outputs;
+        connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&](const auto &value) { outputs = value; });
+        m_nextWorkerEnv = environment();
+        QVERIFY(startWorker(*s, false, endpoint, run));
+        const auto reap = qScopeGuard([&] {
+            if (!QFileInfo::exists(exitFile)) { endpoint.stopWorker(); (void)QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 30000); }
+        });
+        QTRY_VERIFY_WITH_TIMEOUT((endpoint.ready() && outputs.monitors.size() == 2) || !run.errors.isEmpty(), 45000);
+        QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+        run.frames.clear();
+        endpoint.setControlState({1, true});
+        ConsoleWorkerWire::EncoderConfig config; config.generation = 1;
+        config.settings = CodecPolicy::EncoderSettings{.hardware = false};
+        QVERIFY(endpoint.setEncoderConfig(config)); endpoint.requestKeyFrame();
+        const auto picture = [&](const VideoFrame &frame) {
+            return frame.isKeyFrame && frame.monitors.size() == 2 && frame.size == QSize(1280, 720)
+                && h264KeyframeSize(frame.data) == std::optional(frame.size);
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(std::any_of(run.frames.cbegin(), run.frames.cend(), picture) || !run.errors.isEmpty(), 45000);
+        QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+        const auto frame = *std::find_if(run.frames.cbegin(), run.frames.cend(), picture);
+        ClientStyle::Decoder decoder;
+        QVERIFY2(decoder.feed(1, VideoCodec::Avc420, frame.data), qPrintable(decoder.error()));
+        QCOMPARE(decoder.surfaces().value(1).lastPicture, frame.size);
+        stopWorker(*s, endpoint);
+    }
+    if (unverifiedJournal) {
+        QFile journal(journalPath); QVERIFY(journal.open(QIODevice::ReadOnly));
+        QCOMPARE(journal.readAll(), journalBytes); // kept untouched for the next attempt
+        const QString log = s->log(QStringLiteral("worker.log"), 40000);
+        QVERIFY2(log.contains(QStringLiteral("Output recovery remains unverified")), "the unverified journal was reported");
+    }
 }
 
 void WorkerEndToEndTest::consoleConfiguredOutputs_data()

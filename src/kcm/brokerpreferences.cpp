@@ -197,7 +197,8 @@ QVariantList BrokerPreferences::definitions() const
     add(u"MonitorIndex"_s, displays, i18nc("@label", "Display index"), i18nc("@info", "A number from 0 to 65535, counting from zero. Used when sharing one display; that display must exist on the Console desktop."), {},
         when({.control = u"spin"_s, .section = u"displays"_s, .min = 0, .max = 65535, .customSeed = u"0"_s}, u"specific"_s));
     add(u"VirtualMonitorPolicy"_s, displays, i18nc("@label", "Physical displays with client-created displays"), i18nc("@info", "“Turn off during connection” switches the computer’s own screens off while you are connected. They come back when someone uses the computer locally."),
-        {choice(u"replace"_s, i18nc("@item:inlistbox", "Replace physical displays")), choice(u"extend"_s, i18nc("@item:inlistbox", "Keep physical displays"))},
+        {choice(u"replace"_s, i18nc("@item:inlistbox", "Replace physical displays")), choice(u"extend"_s, i18nc("@item:inlistbox", "Keep physical displays")),
+         choice(u"off"_s, i18nc("@item:inlistbox", "Never turn the computer’s screens off"))},
         when({.section = u"displays"_s, .formLabel = i18nc("@label", "Physical displays"),
               .optionText = {{u"extend"_s, i18nc("@item:inlistbox", "Keep on")}, {u"replace"_s, i18nc("@item:inlistbox", "Turn off during connection")}}}, u"virtual"_s));
     add(u"VirtualMonitorLayout"_s, displays, i18nc("@label", "Client-created display layout"), i18nc("@info", "“Client monitors” needs the client to ask for its monitors. “Physical display layout” copies the computer’s own screens, including their resolution and scale."),

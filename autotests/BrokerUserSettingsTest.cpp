@@ -35,14 +35,23 @@ private Q_SLOTS:
         QCOMPARE(p.standardClientMedia, std::optional(false));
     }
 
+    void virtualMonitorPolicyOffIsTheConsoleScreensPermission()
+    {
+        for (const char *value : {"replace", "extend", "off"})
+            QCOMPARE(BrokerUserSettings::parse(QByteArray("[General]\nVirtualMonitorPolicy=") + value + "\n").preferences.virtualMonitorPolicy,
+                     std::optional(QString::fromLatin1(value)));
+        QVERIFY(!BrokerUserSettings::parse("[General]\nVirtualMonitorPolicy=always\n").error.isEmpty());
+        QVERIFY(BrokerUserSettings::parse("[General]\nMonitorMode=virtual\n").preferences.virtualMonitorPolicy == std::nullopt);
+    }
+
     void invalidTransaction_data()
     {
         QTest::addColumn<QByteArray>("field");
         for (const auto *value : {"Quality=-1", "Quality=101", "Quality=9999999999999999999", "Quality=+20", "AdaptiveQuality=maybe",
                 "SoftwareEncoding=nvidia", "Av1Tiles=3", "Codec=hevc", "MonitorMode=bogus", "MonitorIndex=-1",
-                "VirtualMonitorPolicy=off", "VirtualMonitorLayout=bogus", "VirtualMonitorFallbackSize=0x0",
+                "VirtualMonitorLayout=bogus", "VirtualMonitorFallbackSize=0x0",
                 "VirtualMonitorFallbackSize=1921x1080", "WakeDisplayOnConnect=maybe", "StandardClientMedia=2",
-                "VirtualStockClientPolicy=any-user", "Avc444MotionGapMs=1000\nAvc444RestMs=50", "Avc444RestMs=5001"})
+                "VirtualStockClientPolicy=any-user", "VirtualMonitorPolicy=always", "Avc444MotionGapMs=1000\nAvc444RestMs=50", "Avc444RestMs=5001"})
             QTest::newRow(value) << QByteArray(value);
     }
     void invalidTransaction()

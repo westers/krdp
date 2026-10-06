@@ -84,6 +84,9 @@ public:
     /** A launched worker process exited (reaped). The only event that ends a drain. */
     void workerExited(const QString &socketName);
     void setUidResolver(UidResolver resolver);
+    /** The monitor block of a connection (default: RdpConnection::clientDisplayInfo()); a test seam. */
+    using DisplayInfoProvider = std::function<ClientDisplay::Info(RdpConnection *)>;
+    void setDisplayInfoProvider(DisplayInfoProvider provider) { m_displayInfoOf = std::move(provider); }
     void setRefuse(Refuse refuse);
 
 private:
@@ -123,6 +126,15 @@ private:
         // Its standard AUDIN negotiation is its microphone consent (until it refuses).
         bool standardMicrophone = false;
         bool standardCamera = false;
+        // OPT-060: Console "Replace" is attempted at most once per connection.
+        // Armed once; spent when that attempt is over (worker exit, verified release,
+        // desk reclaim or the client's restore request). A spent client captures
+        // normally for the rest of its connection.
+        bool replaceAttempted = false;
+        bool replaceSpent = false;
+        // The last `console-screens` state pushed (nullopt: nothing pushed yet).
+        std::optional<bool> screensActiveSent;
+        bool screensAdvertised = false; // `capabilities.console.screens` was sent to it
     };
 
     void apply(const ConsoleHandoff::Actions &actions);
@@ -141,6 +153,14 @@ private:
     void loadUserSettings(Client &client);
     void updateClientDisplayPolicy(Client &client);
     void armConfiguredConsoleOutputs();
+    /** The attempt of every client that armed one is over; the next worker captures normally. */
+    void endReplaceAttempts(const char *why);
+    /** Replace is live for \a client: its configured outputs are up and the host's screens are off. */
+    bool replaceActiveFor(const Client &client) const;
+    /** Push `console-screens` to each KRDPCTL client whose state changed. */
+    void syncScreensRecords();
+    /** `console-screens-restore`: turn the host's screens back on, same path as a local reclaim. */
+    bool restoreHostScreens(Client &client);
     void updateMedia();
     void onControlRecord(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &incoming);
     /** KRDPCTL v2: a reply echoing the request being handled, or the `id` it answers. */
@@ -201,6 +221,8 @@ private:
     ConsoleWorkerEndpoint m_endpoint;
     QList<ConsoleSeat::Session> m_sessions;
     UidResolver m_uidOf;
+    DisplayInfoProvider m_displayInfoOf;
+    bool m_screensReclaimed = false; // the host's screens were given back; Replace stays over until the next attempt
     Refuse m_refuse;
     // One launched process at a time; a replacement waits for its reaping.
     QString m_workerSocket;

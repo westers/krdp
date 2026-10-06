@@ -14,6 +14,8 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+using namespace Qt::StringLiterals;
+
 namespace KRdp
 {
 class ConsoleHostControllerTest : public QObject
@@ -256,6 +258,139 @@ private Q_SLOTS:
         QVERIFY(!host.m_physicalLeaseActive); QVERIFY(!host.m_configuredConsoleOutputs); QVERIFY(!host.m_inputEnabled);
     }
 
+    static ClientDisplay::Info monitorBlock(bool sent)
+    {
+        ClientDisplay::Info info;
+        info.desktopSize = QSize(1920, 1080);
+        if (sent) info.monitors = {{QRect(0, 0, 1920, 1080), true}};
+        return info;
+    }
+
+    // OPT-060 S2a: Replace needs the user's permission AND the connection's monitor block.
+    void replaceNeedsPermissionAndMonitorBlock_data()
+    {
+        QTest::addColumn<QByteArray>("config");
+        QTest::addColumn<bool>("block");
+        QTest::addColumn<bool>("enabled");
+        QTest::newRow("no block: normal capture") << QByteArray("[General]\n") << false << false;
+        QTest::newRow("block, VirtualMonitorPolicy=off: normal capture") << QByteArray("[General]\nVirtualMonitorPolicy=off\n") << true << false;
+        QTest::newRow("block, default asks: Replace") << QByteArray("[General]\n") << true << true;
+        QTest::newRow("block, explicit replace: Replace") << QByteArray("[General]\nVirtualMonitorPolicy=replace\n") << true << true;
+        QTest::newRow("legacy MonitorMode=virtual alone: still needs the block") << QByteArray("[General]\nMonitorMode=virtual\n") << false << false;
+        QTest::newRow("legacy MonitorMode=virtual with block maps to ask") << QByteArray("[General]\nMonitorMode=virtual\n") << true << true;
+        QTest::newRow("legacy extend with block: asks, keeps screens on") << QByteArray("[General]\nVirtualMonitorPolicy=extend\n") << true << true;
+        QTest::newRow("off beats the legacy MonitorMode opt-in") << QByteArray("[General]\nVirtualMonitorPolicy=off\nMonitorMode=virtual\n") << true << false;
+    }
+
+    void replaceNeedsPermissionAndMonitorBlock()
+    {
+        QFETCH(QByteArray, config); QFETCH(bool, block); QFETCH(bool, enabled);
+        Server server; RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
+        host.setUserSettingsReader([&](quint32) { return BrokerUserSettings::parse(config); });
+        host.setDisplayInfoProvider([block](RdpConnection *) { return monitorBlock(block); });
+        host.addClient(&connection);
+        auto &client = *host.m_clients.front();
+        client.uid = 1000;
+        host.loadUserSettings(client);
+        QCOMPARE(client.codec->consoleVirtualPolicy().enabled, enabled);
+    }
+
+    // OPT-060 S2b/d: one attempt per connection, never on the greeter.
+    void replaceIsOneAttemptPerConnectionAndNeverOnTheGreeter()
+    {
+        QTemporaryDir runtime; QVERIFY(runtime.isValid());
+        Server server; RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
+        host.setUserSettingsReader([](quint32) { return BrokerUserSettings::parse("[General]\n"); });
+        host.setDisplayInfoProvider([](RdpConnection *) { return monitorBlock(true); });
+        host.addClient(&connection);
+        auto &client = *host.m_clients.front();
+        client.uid = 1000;
+        host.loadUserSettings(client);
+        QVERIFY(client.codec->consoleVirtualPolicy().enabled);
+        host.m_control.admit(client.id);
+        // Greeter and any non-user target: plain capture, the attempt is not spent.
+        QVERIFY(host.m_endpoint.listen(runtime.filePath(QStringLiteral("greeter.sock")),
+            {ConsoleSeat::Adapter::Greeter, QStringLiteral("c1"), 970}, QByteArray(32, 'x')));
+        host.syncControlState();
+        QVERIFY(!host.m_configuredConsoleOutputs); QVERIFY(!client.replaceAttempted);
+        host.m_endpoint.close();
+        QVERIFY(host.m_endpoint.listen(runtime.filePath(QStringLiteral("user.sock")),
+            {ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000}, QByteArray(32, 'y')));
+        host.armConfiguredConsoleOutputs();
+        QVERIFY(host.m_configuredConsoleOutputs); QVERIFY(client.replaceAttempted); QVERIFY(!client.replaceSpent);
+        // The attempt fails and the worker dies: the next Ready must not re-arm, and the next
+        // worker's policy is off, so it captures the host's screens as they are.
+        host.clearPhysicalLease("test worker exit");
+        QVERIFY(client.replaceSpent); QVERIFY(!host.m_configuredConsoleOutputs);
+        QVERIFY(!client.codec->consoleVirtualPolicy().enabled);
+        host.armConfiguredConsoleOutputs();
+        QVERIFY(!host.m_configuredConsoleOutputs);
+        host.updateClientDisplayPolicy(client);
+        QVERIFY(!client.codec->consoleVirtualPolicy().enabled);
+    }
+
+    // OPT-060 S6: `console-screens` edges and `console-screens-restore`.
+    void consoleScreensRecordAndRestoreRequest()
+    {
+        QTemporaryDir runtime; QVERIFY(runtime.isValid());
+        Server server; RdpConnection connection(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        QList<QJsonObject> sent;
+        host.m_recordSent = [&](RdpConnection *, const QJsonObject &record) { sent.append(record); };
+        host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
+        host.setUserSettingsReader([](quint32) { return BrokerUserSettings::parse("[General]\n"); });
+        host.setDisplayInfoProvider([](RdpConnection *) { return monitorBlock(true); });
+        QVERIFY(host.m_endpoint.listen(runtime.filePath(QStringLiteral("worker.sock")),
+            {ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000}, QByteArray(32, 'x')));
+        host.addClient(&connection);
+        auto &client = *host.m_clients.front();
+        client.uid = 1000;
+        host.loadUserSettings(client);
+        client.capabilitiesSent = client.screensAdvertised = true; // it received `capabilities.console.screens`
+        const auto screens = [&] {
+            QList<QJsonObject> result;
+            for (const auto &record : sent) if (record.value(u"type"_s).toString() == u"console-screens"_s) result.append(record);
+            return result;
+        };
+        host.m_control.admit(client.id); host.syncControlState();
+        // Before Replace is up nothing is pushed and a restore request is refused with its requestId echoed.
+        QVERIFY(host.m_configuredConsoleOutputs); QVERIFY(screens().isEmpty());
+        host.onControlRecord(&connection, client.id, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r1"_s}});
+        QCOMPARE(sent.last().value(u"type"_s).toString(), u"console-screens-restore"_s);
+        QCOMPARE(sent.last().value(u"requestId"_s).toString(), u"r1"_s);
+        QVERIFY(!sent.last().value(u"ok"_s).toBool());
+        // The owned outputs are published and readback-verified: Replace is active.
+        host.m_inputEnabled = true; client.session->setWorkerActive(true);
+        const ConsoleWorkerWire::Outputs outputs{{
+            {QStringLiteral("Virtual-owned-0"), QRect(0, 0, 1280, 720), 1, true}}, QPoint(2560, 0)};
+        Q_EMIT host.m_endpoint.outputsReceived(outputs);
+        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(2560, 0, 1280, 720), 1, true, 1, false}}, false});
+        QVERIFY(host.m_topologyAvailable);
+        host.syncScreensRecords();
+        QCOMPARE(screens().size(), 1);
+        QVERIFY(screens().last().value(u"active"_s).toBool()); QVERIFY(screens().last().value(u"canRestore"_s).toBool());
+        host.syncScreensRecords(); QCOMPARE(screens().size(), 1); // one push per edge
+        // Restore: the worker is asked to reclaim, Replace is over for this connection, the edge is pushed.
+        host.onControlRecord(&connection, client.id, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r2"_s}});
+        QCOMPARE(sent.last().value(u"requestId"_s).toString(), u"r2"_s);
+        QVERIFY(sent.last().value(u"ok"_s).toBool());
+        QCOMPARE(screens().size(), 2);
+        QVERIFY(!screens().last().value(u"active"_s).toBool()); QVERIFY(!screens().last().value(u"canRestore"_s).toBool());
+        QVERIFY(client.replaceSpent);
+        QVERIFY(host.m_configuredConsoleOutputs); // the temporary outputs stay (extend) so capture continues
+        QVERIFY(client.codec->consoleVirtualPolicy().enabled); // the live worker's plan is not torn down
+        // Once that worker is gone the next one captures normally.
+        host.clearPhysicalLease("test worker exit");
+        QVERIFY(!client.codec->consoleVirtualPolicy().enabled);
+        // A second restore request is refused.
+        host.onControlRecord(&connection, client.id, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r3"_s}});
+        QVERIFY(!sent.last().value(u"ok"_s).toBool());
+    }
+
     void consoleVirtualPolicyIsIdentityAndControllerScoped()
     {
         Server server;
@@ -271,6 +406,10 @@ private Q_SLOTS:
             return BrokerUserSettings::parse(uid == 1000
                 ? "[General]\nMonitorMode=virtual\nVirtualMonitorPolicy=extend\nVirtualMonitorLayout=physical\nVirtualMonitorFallbackSize=1600x900\n"
                 : "[General]\nMonitorMode=virtual\nVirtualMonitorPolicy=replace\nVirtualMonitorLayout=single\nVirtualMonitorFallbackSize=1280x720\n");
+        });
+        // OPT-060: the standard monitor block (one entry is enough) is the per-connection request.
+        host.setDisplayInfoProvider([](RdpConnection *) {
+            ClientDisplay::Info info; info.monitors = {{QRect(0, 0, 1920, 1080), true}}; return info;
         });
         host.addClient(&first); host.addClient(&second);
         auto &a = *host.m_clients[0]; auto &b = *host.m_clients[1];

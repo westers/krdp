@@ -507,6 +507,11 @@ public:
     }
 
     /** SIGTERM/SIGINT/SIGHUP: restore what this worker changed, then exit (AUD-C-3). */
+    // OPT-060 S2c: the journal replay at start could not verify the restore of a predecessor's
+    // output changes. The worker still captures whatever outputs are lit and keeps the journal for
+    // the next attempt, but it never creates or replaces outputs on top of a layout it cannot trust.
+    void setOutputRecoveryUnverified() { m_outputRecoveryUnverified = true; }
+
     void terminate()
     {
         qInfo() << "Console worker terminating on signal; restoring outputs first";
@@ -651,6 +656,10 @@ private:
     {
         if (m_mode.virtualSession || !m_authenticatedDesktop || m_stopping || !m_control.active
             || !m_encoderConfig.consoleVirtual.enabled || m_consoleVirtualPlan) return;
+        if (m_outputRecoveryUnverified) {
+            failConsoleVirtual(QStringLiteral("output recovery is unverified; capturing the lit outputs without creating Console monitors"));
+            return;
+        }
         invalidateConsoleCapture();
         const auto json = readKScreenJson();
         const auto initial = json ? ConsoleVirtualOutputRestore::snapshot(*json, m_sessionId) : std::nullopt;
@@ -3330,6 +3339,7 @@ private:
     bool m_consoleVirtualCreatorsDropped = false;
     bool m_consoleVirtualFallback = false;
     bool m_consoleVirtualForceSingle = false;
+    bool m_outputRecoveryUnverified = false;
     QVector<VirtualSessionJournal::Record::InitialOutput> m_initialOutputs;
     QTimer m_bootstrapPoll;
     QElapsedTimer m_bootstrapAge;
@@ -3512,8 +3522,10 @@ int main(int argc, char **argv)
                               << "live" << result.skippedLive << result.errors.join(QStringLiteral("; "));
         }
         if (result.kept || !result.errors.isEmpty()) {
-            qCritical() << "Console capture refused while output recovery remains unverified";
-            return 1;
+            // Never a black Console: capture whatever is lit, keep the journal for the next
+            // attempt and do not create Console monitors on a layout we could not restore.
+            qWarning() << "Output recovery remains unverified; the journal is kept for the next attempt and Console capture continues with the lit outputs";
+            worker.setOutputRecoveryUnverified();
         }
     }
     worker.connectToBroker();

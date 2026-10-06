@@ -51,6 +51,37 @@ struct ConsoleVirtualOutputPolicy {
         return ClientDisplay::sanitize(std::move(info), fallback);
     }
 
+    // Per-user permission for Console "Replace" (OPT-060), carried by VirtualMonitorPolicy:
+    // `off` never lets a connection turn the host's screens off; `replace` (the default, "When the
+    // connection asks") lets a connection that sends its own RDP monitor block do so; `extend`
+    // keeps the screens on (advanced). The old MonitorMode=virtual opt-in no longer matters.
+    enum class Permission : quint8 { Off, Ask };
+    enum class Gate : quint8 { Replace, NoMonitorBlock, PermissionOff, NotPhysicalUser, AlreadyAttempted };
+
+    static Permission permissionOf(const QString &virtualMonitorPolicy)
+    {
+        return virtualMonitorPolicy == QStringLiteral("off") ? Permission::Off : Permission::Ask;
+    }
+    // The layout policy the plan uses; `off` never reaches a plan, so it reads as the default.
+    static QString planPolicy(const QString &virtualMonitorPolicy)
+    {
+        return virtualMonitorPolicy == QStringLiteral("off") ? QStringLiteral("replace") : virtualMonitorPolicy;
+    }
+
+    // The standard monitor block (TS_UD_CS_MONITOR) is the per-connection
+    // request. It is read before sanitising: a one-monitor block is still a block.
+    static bool monitorBlockSent(const ClientDisplay::Info &rawInfo) { return !rawInfo.monitors.isEmpty(); }
+
+    // Every refusal ends in normal Console capture; only `Replace` creates outputs.
+    static Gate gate(Permission permission, bool monitorBlock, bool physicalUser, bool alreadyAttempted)
+    {
+        if (!physicalUser) return Gate::NotPhysicalUser;
+        if (permission == Permission::Off) return Gate::PermissionOff;
+        if (!monitorBlock) return Gate::NoMonitorBlock;
+        if (alreadyAttempted) return Gate::AlreadyAttempted;
+        return Gate::Replace;
+    }
+
     static std::optional<ConsoleVirtualOutputPolicy> parse(bool enabled, const QString &policy,
         const QString &layout, const QSize &fallback, const ClientDisplay::Info &client)
     {

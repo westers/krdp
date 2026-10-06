@@ -75,7 +75,9 @@ Result parse(const QByteArray &contents)
     boolean(QStringLiteral("WakeDisplayOnConnect"), p.wakeDisplayOnConnect);
     boolean(QStringLiteral("StandardClientMedia"), p.standardClientMedia);
     choice(QStringLiteral("MonitorMode"), {u"workspace"_s, u"primary"_s, u"specific"_s, u"multi"_s, u"virtual"_s}, p.monitorMode);
-    choice(QStringLiteral("VirtualMonitorPolicy"), {u"replace"_s, u"extend"_s}, p.virtualMonitorPolicy);
+    // OPT-060: `off` = never let this user's connections turn the screens off; `replace` = when the
+    // connection asks (default); `extend` = keep them on.
+    choice(QStringLiteral("VirtualMonitorPolicy"), {u"replace"_s, u"extend"_s, u"off"_s}, p.virtualMonitorPolicy);
     choice(QStringLiteral("VirtualMonitorLayout"), {u"client"_s, u"single"_s, u"physical"_s}, p.virtualMonitorLayout);
     choice(QStringLiteral("VirtualStockClientPolicy"), {u"attach-or-create"_s, u"refuse"_s}, p.virtualStockClientPolicy);
     if (fields.contains(QStringLiteral("Codec"))) {
