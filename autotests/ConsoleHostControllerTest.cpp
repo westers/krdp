@@ -461,6 +461,63 @@ private Q_SLOTS:
         QVERIFY(!client.codec->consoleVirtualPolicy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
     }
 
+    // OPT-060 D4: the user's MonitorMode must not stop Replace, in either order of block/request vs. saved preferences.
+    void replaceIgnoresTheUsersMonitorMode_data()
+    {
+        QTest::addColumn<QByteArray>("config");
+        QTest::addColumn<bool>("block");
+        QTest::addColumn<int>("userMode");
+        const struct { const char *name; const char *line; int mode; } modes[] = {
+            {"specific", "MonitorMode=specific\nMonitorIndex=1\n", int(MonitorCapturePolicy::Mode::Specific)},
+            {"primary", "MonitorMode=primary\n", int(MonitorCapturePolicy::Mode::Primary)},
+            {"workspace", "MonitorMode=workspace\n", int(MonitorCapturePolicy::Mode::Workspace)},
+            {"multi", "MonitorMode=multi\n", int(MonitorCapturePolicy::Mode::Multi)}};
+        for (const auto &m : modes) {
+            for (const bool block : {true, false}) {
+                QTest::addRow("%s, %s", m.name, block ? "monitor block (policy after Replace)" : "request (policy before Replace)")
+                    << QByteArray("[General]\n") + m.line << block << m.mode;
+            }
+        }
+    }
+
+    void replaceIgnoresTheUsersMonitorMode()
+    {
+        QFETCH(QByteArray, config); QFETCH(bool, block); QFETCH(int, userMode);
+        RequestHarness h(config, block);
+        auto &client = *h.client;
+        if (!block) {
+            QVERIFY(!client.codec->consoleVirtualPolicy().enabled);
+            QVERIFY(h.ask({{QRect(0, 0, 1366, 768), true}}, u"d4"_s).value(u"ok"_s).toBool());
+        }
+        QVERIFY(client.codec->consoleVirtualPolicy().enabled);
+        QCOMPARE(client.codec->capturePolicy(), MonitorCapturePolicy{}); // the worker captures its configured outputs
+        // What the worker is sent is a valid config on the wire (the decoder refuses Replace with a non-default capture).
+        client.codec->bind(&h.host.m_endpoint, 5);
+        const auto sent = client.codec->config();
+        QVERIFY(sent); QVERIFY(sent->consoleVirtual.enabled); QCOMPARE(sent->capture, MonitorCapturePolicy{});
+        ConsoleWorkerWire::Deframer deframer; deframer.feed(ConsoleWorkerWire::frame(*sent));
+        const auto record = deframer.next(); QVERIFY(record); QVERIFY(ConsoleWorkerWire::encoderConfig(*record));
+        client.codec->unbind();
+        QVERIFY(h.host.m_configuredConsoleOutputs); QVERIFY(client.replaceAttempted);
+        // Fail-open: the attempt ends with the worker; the next one captures the way the user chose.
+        h.host.clearPhysicalLease("test worker exit");
+        QVERIFY(client.replaceSpent); QVERIFY(!client.codec->consoleVirtualPolicy().enabled);
+        QCOMPARE(int(client.codec->capturePolicy().mode), userMode);
+        QCOMPARE(client.codec->capturePolicy().index, userMode == int(MonitorCapturePolicy::Mode::Specific) ? 1 : 0);
+        // The latch holds: a repeat does not re-arm it.
+        h.ask({{QRect(0, 0, 1366, 768), true}}, u"d4b"_s);
+        QVERIFY(!client.codec->consoleVirtualPolicy().enabled);
+        QCOMPARE(int(client.codec->capturePolicy().mode), userMode);
+    }
+
+    void replaceIgnoresMonitorModeButPermissionOffStillBlocks()
+    {
+        RequestHarness h("[General]\nMonitorMode=specific\nVirtualMonitorPolicy=off\n", false);
+        QVERIFY(!h.ask({{QRect(0, 0, 1366, 768), true}}, u"d4o"_s).value(u"ok"_s).toBool() || !h.client->codec->consoleVirtualPolicy().enabled);
+        QVERIFY(!h.client->codec->consoleVirtualPolicy().enabled); QVERIFY(!h.host.m_configuredConsoleOutputs);
+        QCOMPARE(h.client->codec->capturePolicy().mode, MonitorCapturePolicy::Mode::Specific);
+    }
+
     void screensRequestBeforeControlArmsAtAdmission()
     {
         // The request can beat the admission/worker Ready (capabilities are sent first, control follows): the same

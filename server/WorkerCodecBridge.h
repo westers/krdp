@@ -57,7 +57,10 @@ public:
     bool setChromaPolicy(const ChromaPolicy &policy);
     ChromaPolicy chromaPolicy() const { return m_chromaPolicy; }
     bool setCapturePolicy(const MonitorCapturePolicy &policy);
-    MonitorCapturePolicy capturePolicy() const { return m_capturePolicy; }
+    // OPT-060: while Replace is enabled the host's physical screens are off and the worker captures its own
+    // configured outputs, so the user's MonitorMode (a choice among physical outputs) is moot for this
+    // connection. The stored preference is kept and takes effect again when Replace ends or fails open.
+    MonitorCapturePolicy capturePolicy() const { return m_consoleVirtualPolicy.enabled ? MonitorCapturePolicy{} : m_capturePolicy; }
     bool setConsoleVirtualPolicy(const ConsoleVirtualOutputPolicy &policy);
     ConsoleVirtualOutputPolicy consoleVirtualPolicy() const { return m_consoleVirtualPolicy; }
 
