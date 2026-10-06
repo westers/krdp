@@ -4,6 +4,8 @@
 
 #include "ClientDisplayInfo.h"
 
+#include <QRect>
+#include <QSet>
 #include <optional>
 
 namespace KRdp
@@ -12,7 +14,32 @@ namespace KRdp
 // select a retained Virtual desktop or confer permission to mutate a seat.
 struct ConsoleVirtualOutputPolicy {
     enum class Policy : quint8 { Replace, Extend };
-    enum class Layout : quint8 { Client, Single, Physical };
+    // Mapped (OPT-060 M-1): one output per HOST screen, sized and scaled like the client monitor it is
+    // mapped to. Selected only by the own client's explicit request; stock clients keep Client.
+    enum class Layout : quint8 { Client, Single, Physical, Mapped };
+
+    // Hard cap of replaced host screens (Steve, 2026-10-06; default AND maximum). Above it nothing is replaced.
+    static constexpr int MaxMappedScreens = 4;
+    static constexpr int MaxMappedMonitors = ClientDisplay::MaxMonitors;
+    static constexpr int MaxMappedName = 128;
+
+    // A client monitor of a Mapped request. `geometry` is in PHYSICAL pixels; only its size and (for ordering)
+    // its position matter. Scale is a percentage (100..400, steps of 5) so the wire has no floating point.
+    struct MappedMonitor {
+        QString id;
+        QRect geometry;
+        int scalePercent = 100;
+        bool primary = false;
+        bool operator==(const MappedMonitor &) const = default;
+    };
+    // Host screen (KWin connector name) -> client monitor id.
+    struct MapEntry {
+        QString host;
+        QString monitor;
+        bool operator==(const MapEntry &) const = default;
+    };
+    QVector<MappedMonitor> mappedMonitors; // Layout::Mapped only; empty otherwise.
+    QVector<MapEntry> mapping;             // Layout::Mapped only; may be partial or empty (default mapping).
     bool enabled = false;
     Policy policy = Policy::Replace;
     Layout layout = Layout::Client;
@@ -31,9 +58,41 @@ struct ConsoleVirtualOutputPolicy {
             && qint64(monitor.geometry.y()) <= ClientDisplay::MaxCoordinate;
     }
 
+    static bool plainName(const QString &name, int maximum)
+    {
+        return !name.isEmpty() && name.size() <= maximum
+            && std::none_of(name.cbegin(), name.cend(), [](const QChar c) { return c.unicode() < 0x20 || c.unicode() == 0x7f; });
+    }
+
+    bool validMapped() const
+    {
+        if (layout != Layout::Mapped) return mappedMonitors.isEmpty() && mapping.isEmpty();
+        if (mappedMonitors.isEmpty() || mappedMonitors.size() > MaxMappedMonitors || mapping.size() > MaxMappedMonitors) return false;
+        QSet<QString> ids;
+        int primaries = 0;
+        for (const auto &monitor : mappedMonitors) {
+            const auto &g = monitor.geometry;
+            if (!plainName(monitor.id, 64) || ids.contains(monitor.id)
+                || g.width() < ClientDisplay::MinDimension || g.height() < ClientDisplay::MinDimension
+                || g.width() > 16384 || g.height() > 16384
+                || qint64(g.x()) < -ClientDisplay::MaxCoordinate || qint64(g.x()) > ClientDisplay::MaxCoordinate
+                || qint64(g.y()) < -ClientDisplay::MaxCoordinate || qint64(g.y()) > ClientDisplay::MaxCoordinate
+                || monitor.scalePercent < 100 || monitor.scalePercent > 400 || monitor.scalePercent % 5) return false;
+            ids.insert(monitor.id);
+            primaries += monitor.primary;
+        }
+        if (primaries != 1) return false;
+        QSet<QString> hosts;
+        for (const auto &entry : mapping) {
+            if (!plainName(entry.host, MaxMappedName) || hosts.contains(entry.host) || !ids.contains(entry.monitor)) return false;
+            hosts.insert(entry.host);
+        }
+        return true;
+    }
+
     bool isValid() const
     {
-        return quint8(policy) <= quint8(Policy::Extend) && quint8(layout) <= quint8(Layout::Physical)
+        return quint8(policy) <= quint8(Policy::Extend) && quint8(layout) <= quint8(Layout::Mapped) && validMapped()
             && ClientDisplay::usable(fallback) && !(fallback.width() % 2) && !(fallback.height() % 2)
             && client.monitors.size() <= ClientDisplay::MaxMonitors
             && std::all_of(client.monitors.cbegin(), client.monitors.cend(), boundedMonitor)

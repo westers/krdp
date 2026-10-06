@@ -82,6 +82,16 @@ inline QString virtualMonitorName(int index, const QSize &size)
     return QStringLiteral("krdp-m%1-%2x%3").arg(index).arg(size.width()).arg(size.height());
 }
 
+/**
+ * Name for the output that stands in for HOST screen \a hostIndex (OPT-060 M-1, Layout::Mapped). A different
+ * prefix from virtualMonitorName() on purpose: KWin's per-output-set store is keyed by name, so a mapped
+ * output never inherits a position remembered for a Layout::Client output.
+ */
+inline QString mappedMonitorName(int hostIndex, const QSize &size)
+{
+    return QStringLiteral("krdp-h%1-%2x%3").arg(hostIndex).arg(size.width()).arg(size.height());
+}
+
 /** Whether every pair of \a monitors is disjoint (touching edges are fine). */
 inline bool disjoint(const QVector<VideoMonitor> &monitors)
 {
