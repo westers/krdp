@@ -133,6 +133,7 @@ void ConsoleWorkerEndpoint::stopWorker()
 
 void ConsoleWorkerEndpoint::requestKeyFrame()
 {
+    ++m_keyFrameRequests;
     send(ConsoleWorkerWire::Kind::RequestKeyFrame);
 }
 

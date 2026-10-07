@@ -91,6 +91,8 @@ public:
     /** The monitor block of a connection (default: RdpConnection::clientDisplayInfo()); a test seam. */
     using DisplayInfoProvider = std::function<ClientDisplay::Info(RdpConnection *)>;
     void setDisplayInfoProvider(DisplayInfoProvider provider) { m_displayInfoOf = std::move(provider); }
+    // How long a changed Outputs record may wait for its topology reply before the frame gate opens by itself.
+    void setLayoutReadbackDeadline(int milliseconds) { m_layoutReadbackDeadline.setInterval(milliseconds); }
     void setRefuse(Refuse refuse);
 
 private:
@@ -310,6 +312,10 @@ private:
     bool m_topologyAvailable = false;
     bool m_topologyComplete = false;
     bool m_layoutAwaitingReadback = false;
+    QTimer m_layoutReadbackDeadline;
+    bool m_layoutFailedOpen = false; // the gate was opened without a confirmed topology: forward frames until the outputs change
+    void openLayoutGate(const char *why);
+    void closeLayoutGate(); // normal end of the wait
     QMap<QString, int> m_topologyPriorities; // Exact same-worker KScreen order, never inferred from primary flags.
     QHash<ConsoleControl::Id, QString> m_pendingTopology;
     struct PhysicalPreview {

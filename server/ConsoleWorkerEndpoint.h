@@ -54,6 +54,7 @@ public:
 
     void stopWorker();
     void requestKeyFrame();
+    quint64 keyFrameRequests() const { return m_keyFrameRequests; } // asked for, whether or not a worker was there to hear it
     bool requestTopology();
     void sendInput(const ConsoleWorkerWire::Input &input);
     void setMedia(const ConsoleWorkerWire::Media &media);
@@ -156,6 +157,7 @@ private:
     bool m_authenticated = false;
     bool m_ready = false;
     bool m_stopRequested = false;
+    quint64 m_keyFrameRequests = 0;
     QTimer m_authenticationDeadline;
     std::optional<ConsoleWorkerWire::EncoderCaps> m_encoderCaps;
     QVector<ConsoleWorkerWire::EncoderReport> m_earlyReports;

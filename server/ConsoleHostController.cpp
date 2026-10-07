@@ -11,6 +11,8 @@
 #include "CursorTracker.h"
 
 #include <algorithm>
+#include <numeric>
+#include <vector>
 #include <csignal>
 #include <utility>
 
@@ -194,6 +196,9 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     connect(&m_endpoint, &ConsoleWorkerEndpoint::removeVirtualFinished, this, [virtualFinished](const auto &result) {
         virtualFinished(result.requestId, result.generation, result.error, false);
     });
+    m_layoutReadbackDeadline.setSingleShot(true);
+    m_layoutReadbackDeadline.setInterval(3000);
+    connect(&m_layoutReadbackDeadline, &QTimer::timeout, this, [this] { openLayoutGate("no topology reply in time"); });
     m_microphoneDeadline.setSingleShot(true);
     m_microphoneDeadline.setInterval(4000);
     connect(&m_microphoneDeadline, &QTimer::timeout, this, [this] {
@@ -315,7 +320,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             const bool confirmed = workspace
                 ? ConsoleFrameLayout::workspaceConfirmed(frame, m_outputs, m_topologyCatalog.snapshot())
                 : ConsoleFrameLayout::confirmed(frame, m_outputs, m_topologyCatalog.snapshot());
-            if (!m_topologyAvailable || !confirmed) return;
+            if ((!m_topologyAvailable && !m_layoutFailedOpen) || (m_topologyAvailable && !confirmed)) return;
         } else if (frame.monitors.size() > 1) return;
         for (const auto &client : m_clients) {
             // AUD-C-1: the session thread can mark a stream enabled before the
@@ -324,7 +329,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             if (!client->connection || !m_control.admitted(client->id)) continue;
             const QVector<VideoMonitor> desired = !workspace && frame.monitors.size() > 1 ? frame.monitors : QVector<VideoMonitor>{};
             if (client->wireLayout != desired) {
-                if (!frame.isKeyFrame || (desired.isEmpty() && !m_topologyAvailable && !client->wireLayout.isEmpty())) continue;
+                if (!frame.isKeyFrame || (desired.isEmpty() && !m_topologyAvailable && !m_layoutFailedOpen && !client->wireLayout.isEmpty())) continue;
                 client->connection->videoStream()->setMonitorLayout(desired);
                 client->wireLayout = desired;
             }
@@ -368,6 +373,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         const bool independentTransition = ((changed && (outputs.monitors.size() > 1 || wasMulti || clientHoldsSurfaces)) || selected)
             && !m_pendingPhysical && !m_pendingVirtual;
         if (changed) {
+            m_layoutFailedOpen = false;
             m_topologyAvailable = false;
             m_topologyPriorities.clear();
             m_physicalPreview.reset();
@@ -402,11 +408,36 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         if (independentTransition) {
             releaseInput(); // Held keys/buttons must not carry across coordinate systems.
             m_layoutAwaitingReadback = true;
+            m_layoutReadbackDeadline.start(); // never wait for the reply forever (reclaim freeze)
         }
         if (!m_pendingPhysical && !m_pendingVirtual && !m_layoutAwaitingReadback) sendLayouts();
         if (independentTransition) m_endpoint.requestTopology();
     });
-    connect(&m_endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [this](const ConsoleWorkerWire::Topology &topology) {
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [this](const ConsoleWorkerWire::Topology &received) {
+        auto topology = received;
+        if (m_configuredConsoleOutputs && m_screensReclaimed) {
+            // The desk reclaim gave the host's screens back; the capture continues on the remaining temporary
+            // outputs as extend, so KScreen now also lists physical outputs that are not part of it. Judge only
+            // the captured ones (the owned-only rule still applies to them).
+            topology.outputs.removeIf([this](const auto &output) {
+                return std::none_of(m_outputs.monitors.cbegin(), m_outputs.monitors.cend(), [&output](const auto &monitor) {
+                    return monitor.name == output.name;
+                });
+            });
+            // The panel is usually the host's primary and priority 1 now; within the capture the worker's own
+            // Outputs record decides which screen is primary, and priorities are ranked among the captured ones.
+            for (auto &output : topology.outputs) {
+                const auto monitor = std::find_if(m_outputs.monitors.cbegin(), m_outputs.monitors.cend(), [&output](const auto &candidate) {
+                    return candidate.name == output.name;
+                });
+                if (monitor != m_outputs.monitors.cend()) output.primary = monitor->primary;
+            }
+            std::vector<int> order(topology.outputs.size());
+            std::iota(order.begin(), order.end(), 0);
+            std::sort(order.begin(), order.end(), [&topology](int a, int b) { return topology.outputs[a].priority < topology.outputs[b].priority; });
+            for (size_t rank = 0; rank < order.size(); ++rank) topology.outputs[order[rank]].priority = int(rank) + 1;
+            topology.complete = false;
+        }
         const auto capture = capturePolicy();
         const bool selected = capture.mode == MonitorCapturePolicy::Mode::Primary
             || capture.mode == MonitorCapturePolicy::Mode::Specific;
@@ -422,6 +453,8 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             finishTopologyQueries(u"capture-failed"_s);
             if (m_pendingPhysical && m_pendingPhysical->waitingReadback) finishPhysicalTopology(u"capture-failed"_s);
             if (m_pendingVirtual && m_pendingVirtual->waitingReadback) finishVirtualTopology(u"capture-failed"_s);
+            // A refused topology only withholds the topology write capabilities; after a reclaim it must not blank the picture.
+            if (m_screensReclaimed && m_configuredConsoleOutputs) openLayoutGate("topology refused after a desk reclaim");
             return;
         }
         QVector<RemoteTopologyCatalog::Output> inventory;
@@ -441,6 +474,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
                 finishTopologyQueries(u"capture-failed"_s);
                 if (m_pendingPhysical && m_pendingPhysical->waitingReadback) finishPhysicalTopology(u"capture-failed"_s);
                 if (m_pendingVirtual && m_pendingVirtual->waitingReadback) finishVirtualTopology(u"capture-failed"_s);
+                if (m_screensReclaimed && m_configuredConsoleOutputs) openLayoutGate("topology refused after a desk reclaim");
                 return;
             }
             priorities.insert(output.name, output.priority);
@@ -459,8 +493,9 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         finishTopologyQueries(m_topologyAvailable ? QString() : u"capture-failed"_s);
         const bool republishedLayout = m_topologyAvailable && m_layoutAwaitingReadback
             && !m_pendingPhysical && !m_pendingVirtual;
+        if (m_topologyAvailable) m_layoutFailedOpen = false;
         if (republishedLayout) {
-            m_layoutAwaitingReadback = false;
+            closeLayoutGate();
             sendLayouts();
         }
         if (m_topologyAvailable && !m_pendingPhysical && !m_pendingVirtual
@@ -765,7 +800,8 @@ void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
     finishPhysicalTopology(u"capture-failed"_s);
     finishVirtualTopology(u"capture-failed"_s);
     m_topologyAvailable = false;
-    m_layoutAwaitingReadback = false;
+    closeLayoutGate();
+    m_layoutFailedOpen = false;
     m_topologyPriorities.clear();
     m_topologyCatalog.resetGeneration();
     finishTopologyQueries(u"capture-failed"_s);
@@ -819,7 +855,8 @@ void ConsoleHostController::setWorkerActive(bool active)
         finishPhysicalTopology(u"capture-failed"_s);
         finishVirtualTopology(u"capture-failed"_s);
         m_topologyAvailable = false;
-        m_layoutAwaitingReadback = false;
+        closeLayoutGate();
+        m_layoutFailedOpen = false;
         m_topologyPriorities.clear();
         m_topologyCatalog.resetGeneration();
         finishTopologyQueries(u"capture-failed"_s);
@@ -2097,6 +2134,24 @@ void ConsoleHostController::sendLayouts()
     syncScreensRecords();
 }
 
+void ConsoleHostController::closeLayoutGate()
+{
+    m_layoutAwaitingReadback = false;
+    m_layoutReadbackDeadline.stop();
+}
+
+void ConsoleHostController::openLayoutGate(const char *why)
+{
+    // Fail open: a gate that waits for a topology reply that never validates freezes the client's picture
+    // (OPT-060 reclaim freeze). Publish what is captured and ask for a key frame, once per wait.
+    if (!m_layoutAwaitingReadback) return;
+    qWarning() << "Console layout readback gate opened without a confirmed topology:" << why;
+    closeLayoutGate();
+    m_layoutFailedOpen = !m_topologyAvailable;
+    sendLayouts();
+    m_endpoint.requestKeyFrame();
+}
+
 void ConsoleHostController::releaseInput()
 {
     const auto releases = m_inputState.releaseAll();
@@ -2182,6 +2237,7 @@ void ConsoleHostController::armConfiguredConsoleOutputs()
         m_physicalLeaseActive = true;
         m_physicalLeaseGeneration = m_controlGeneration;
         m_layoutAwaitingReadback = true;
+        m_layoutFailedOpen = false;
         m_topologyAvailable = false;
         m_topologyComplete = false;
         m_topologyPriorities.clear();

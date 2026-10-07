@@ -250,6 +250,8 @@ private Q_SLOTS:
     void consoleReplaceRelock();
     void consoleFreshWorkerFirstFrame_data();
     void consoleFreshWorkerFirstFrame();
+    void consoleDeskReclaimKeepsFrames_data();
+    void consoleDeskReclaimKeepsFrames();
     void consoleReplaceFailsOpen_data();
     void consoleReplaceFailsOpen();
     void codecSwitchAtAttach_data();
@@ -881,6 +883,171 @@ void WorkerEndToEndTest::consoleFreshWorkerFirstFrame()
         stopWorker(*s, endpoint);
     }
     qInfo().noquote() << "D2 probe: first frame after bind" << (switchToHevc ? "(avc420 then hevc)" : "(avc420)") << timings.join(QStringLiteral(", "));
+}
+
+void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames_data()
+{
+    QTest::addColumn<int>("count");
+    QTest::addColumn<bool>("race");
+    QTest::newRow("single replace, reclaim after the picture is flowing") << 1 << false;
+    QTest::newRow("two replace, reclaim after the picture is flowing") << 2 << false;
+    QTest::newRow("single replace, reclaim right after the Outputs record (race)") << 1 << true;
+}
+
+// OPT-060 reclaim freeze: the worker side of a desk-input reclaim in Replace. The worker restores the host's
+// screens, keeps its temporary outputs as extend, republishes Outputs and must keep delivering decodable frames
+// (for at least ten seconds, with a key frame every 2.5 s as a broker would ask), then restore exactly at the end.
+// The recorded post-reclaim Outputs/Topology records are logged: they are the real input of the broker's topology filter.
+void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames()
+{
+    QFETCH(int, count); QFETCH(bool, race);
+    if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
+    auto *s = session(2); QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+    ConsoleWorkerEndpoint endpoint; WorkerRun run;
+    ConsoleWorkerWire::Outputs outputs;
+    QVector<ConsoleWorkerWire::Outputs> outputRecords;
+    std::optional<ConsoleWorkerWire::Topology> topology;
+    std::optional<ConsoleWorkerWire::PhysicalLeaseReleased> released;
+    connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&](const auto &value) { outputs = value; outputRecords.append(value); });
+    connect(&endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [&](const auto &value) { topology = value; });
+    connect(&endpoint, &ConsoleWorkerEndpoint::physicalLeaseReleased, this, [&](const auto &value) { released = value; });
+    const auto logs = qScopeGuard([&] {
+        if (QTest::currentTestFailed()) qWarning().noquote() << "worker.log:" << s->log(QStringLiteral("worker.log"), 18000)
+            << "kwin.log:" << s->log(QStringLiteral("kwin.log"), 5000);
+    });
+    QVERIFY(startWorker(*s, false, endpoint, run));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    const QString marker = s->runtime->path() + QStringLiteral("/physical-baseline");
+    const auto reap = qScopeGuard([&] {
+        if (!QFileInfo::exists(exitFile)) { endpoint.stopWorker(); (void)QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 30000); }
+        QFile::remove(marker);
+    });
+    QTRY_VERIFY_WITH_TIMEOUT((endpoint.ready() && outputs.monitors.size() == 2) || !run.errors.isEmpty(), 45000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    const auto initial = outputs;
+    // The fixture's two baseline outputs are aliased to physical connector names so the real PhysicalOutputGuard may
+    // disable/restore them (the same wrapper as consoleConfiguredOutputs; compositor lifecycle evidence, not hardware).
+    const QString tools = s->home->path() + QStringLiteral("/tools");
+    QVERIFY(QDir().mkpath(tools));
+    QFile wrapper(tools + QStringLiteral("/kscreen-doctor"));
+    QVERIFY(wrapper.open(QIODevice::WriteOnly));
+    wrapper.write(R"PY(#!/usr/bin/python3
+import json, os, pathlib, subprocess, sys
+marker = pathlib.Path(os.environ['XDG_RUNTIME_DIR']) / 'physical-baseline'
+aliases = json.loads(marker.read_text()) if marker.exists() else {}
+args = []
+for arg in sys.argv[1:]:
+    for real, alias in aliases.items():
+        prefix = 'output.' + alias + '.'
+        if arg.startswith(prefix):
+            arg = 'output.' + real + '.' + arg[len(prefix):]
+            break
+    args.append(arg)
+result = subprocess.run(['/usr/bin/kscreen-doctor', *args], capture_output=True)
+data = result.stdout
+if '-j' in args and result.returncode == 0 and aliases:
+    value = json.loads(data)
+    for output in value.get('outputs', []):
+        output['name'] = aliases.get(output.get('name'), output.get('name'))
+    data = json.dumps(value).encode()
+sys.stdout.buffer.write(data)
+sys.stderr.buffer.write(result.stderr)
+sys.exit(result.returncode)
+)PY");
+    wrapper.close(); QVERIFY(wrapper.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    QJsonObject aliases;
+    for (int i = 0; i < initial.monitors.size(); ++i) aliases.insert(initial.monitors[i].name, QStringLiteral("DP-test-%1").arg(i));
+    QFile file(marker); QVERIFY(file.open(QIODevice::WriteOnly)); file.write(QJsonDocument(aliases).toJson()); file.close();
+    const auto query = [&]() -> std::optional<QByteArray> {
+        QProcess command;
+        auto environment = s->process->processEnvironment();
+        environment.insert(QStringLiteral("WAYLAND_DISPLAY"), QStringLiteral("wayland-0"));
+        environment.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("wayland"));
+        command.setProcessEnvironment(environment);
+        command.start(tools + QStringLiteral("/kscreen-doctor"), {QStringLiteral("-j")});
+        if (!command.waitForStarted(1000) || !command.waitForFinished(5000)) { command.kill(); command.waitForFinished(1000); return {}; }
+        if (command.exitStatus() != QProcess::NormalExit || command.exitCode() != 0) return {};
+        return command.readAllStandardOutput();
+    };
+    const auto baselineJson = query(); QVERIFY(baselineJson);
+    const auto baseline = ConsoleVirtualOutputRestore::snapshot(*baselineJson, QStringLiteral("fixture")); QVERIFY(baseline);
+    run.frames.clear(); endpoint.setControlState({1, true});
+    ConsoleWorkerWire::EncoderConfig config; config.generation = 1;
+    config.settings = CodecPolicy::EncoderSettings{.hardware = false};
+    ClientDisplay::Info client{QSize(1600, 900), {}};
+    if (count == 2) client = {QSize(2560, 720), {{QRect(0, 0, 1280, 720), true}, {QRect(1280, 0, 1280, 720), false}}};
+    config.consoleVirtual = *ConsoleVirtualOutputPolicy::parse(true, QStringLiteral("replace"), QStringLiteral("client"), QSize(1600, 900), client);
+    QVERIFY(endpoint.setEncoderConfig(config)); endpoint.requestKeyFrame();
+    const auto replaced = [&] {
+        return outputs.monitors.size() == count && std::all_of(outputs.monitors.cbegin(), outputs.monitors.cend(), [](const auto &output) {
+            return output.name.startsWith(QStringLiteral("Virtual-krdp-m"));
+        });
+    };
+    QTRY_VERIFY_WITH_TIMEOUT((replaced() && (race || !run.frames.isEmpty())) || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 60000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(replaced());
+    if (!race) QTest::qWait(1500); // let the picture settle and the first topology be asked for, as a broker does
+    const auto describe = [](const ConsoleWorkerWire::Outputs &value) {
+        QStringList parts;
+        for (const auto &output : value.monitors)
+            parts << QStringLiteral("%1 %2,%3 %4x%5 scale %6 primary %7").arg(output.name).arg(output.geometry.x()).arg(output.geometry.y())
+                .arg(output.geometry.width()).arg(output.geometry.height()).arg(output.scale).arg(output.primary);
+        return parts.join(QStringLiteral(" | "));
+    };
+    qInfo().noquote() << "RECLAIM before:" << describe(outputs);
+
+    // The desk reclaim (the broker's physicalInputActivity forwards exactly this record to the worker).
+    const auto recordsBefore = outputRecords.size();
+    run.frames.clear(); topology.reset();
+    endpoint.reclaimConsole(1);
+    QTRY_VERIFY_WITH_TIMEOUT(outputRecords.size() > recordsBefore || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 30000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(!QFileInfo::exists(exitFile));
+    // The restored physical outputs are lit again; the temporary outputs continue as extend.
+    const auto restoredJson = query(); QVERIFY(restoredJson);
+    bool parsed = false;
+    const auto lit = OutputRestoreJournal::parseCurrent(*restoredJson, &parsed); QVERIFY(parsed);
+    for (const auto &original : baseline->outputs) {
+        const auto actual = std::find_if(lit.cbegin(), lit.cend(), [&](const auto &output) { return output.name == original.name; });
+        QVERIFY(actual != lit.cend()); QVERIFY2(actual->enabled, qPrintable(original.name + QStringLiteral(" must be lit again after the reclaim")));
+    }
+    QVERIFY(endpoint.requestTopology());
+    QTRY_VERIFY_WITH_TIMEOUT(topology.has_value() || !run.errors.isEmpty(), 15000);
+    QVERIFY(topology);
+    QStringList kinds;
+    for (const auto &output : topology->outputs)
+        kinds << QStringLiteral("%1 physical %2 primary %3 priority %4 logical %5,%6 %7x%8").arg(output.name).arg(output.physical).arg(output.primary)
+            .arg(output.priority).arg(output.logical.x()).arg(output.logical.y()).arg(output.logical.width()).arg(output.logical.height());
+    qInfo().noquote() << "RECLAIM after Outputs:" << describe(outputs) << "records" << (outputRecords.size() - recordsBefore);
+    qInfo().noquote() << "RECLAIM topology complete" << topology->complete << ":" << kinds.join(QStringLiteral(" | "));
+
+    // At least ten seconds of frames after the reclaim: every 2.5 s ask for a key frame and decode what arrives.
+    ClientStyle::Decoder decoder;
+    int decodedRounds = 0;
+    for (int round = 0; round < 5; ++round) {
+        run.frames.clear(); endpoint.requestKeyFrame();
+        QTRY_VERIFY_WITH_TIMEOUT(std::any_of(run.frames.cbegin(), run.frames.cend(), [](const auto &frame) { return frame.isKeyFrame; })
+            || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 8000);
+        QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(!QFileInfo::exists(exitFile));
+        const auto key = std::find_if(run.frames.cbegin(), run.frames.cend(), [](const auto &frame) { return frame.isKeyFrame; });
+        QVERIFY2(decoder.feed(int(key->monitorIndex) + 1, key->codec.value_or(VideoCodec::Avc420), key->data), qPrintable(decoder.error()));
+        QCOMPARE(decoder.surfaces().value(int(key->monitorIndex) + 1).lastPicture, key->size);
+        ++decodedRounds;
+        QTest::qWait(2500);
+    }
+    QCOMPARE(decodedRounds, 5);
+    // A second Outputs record after the topology reply (the log shows the proof twice) changes nothing for the worker.
+    endpoint.requestKeyFrame();
+    QTest::qWait(1000);
+    QVERIFY(!QFileInfo::exists(exitFile));
+
+    endpoint.stopWorker();
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(exitFile), 30000);
+    const auto finalJson = query(); QVERIFY(finalJson);
+    QVERIFY(ConsoleVirtualOutputRestore::matches(*baseline, *finalJson)); // exact restore
+    QVERIFY(released); QVERIFY(released->verified);
+    QFile code(exitFile); QVERIFY(code.open(QIODevice::ReadOnly)); QCOMPARE(code.readAll().trimmed(), QByteArray("0"));
+    qInfo() << "Desk reclaim kept frames:" << count << "race" << race << "rounds" << decodedRounds;
 }
 
 void WorkerEndToEndTest::consoleReplaceFailsOpen_data()

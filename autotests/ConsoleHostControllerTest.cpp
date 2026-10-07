@@ -1252,6 +1252,176 @@ private Q_SLOTS:
         QCOMPARE(screens().last().value(u"reason"_s).toString(), reason);
     }
 
+    // OPT-060 reclaim freeze: a Replace connection whose picture is flowing, then the desk reclaim.
+private:
+    struct ReclaimRig {
+        QTemporaryDir runtime;
+        Server server;
+        RdpConnection connection{&server, -1};
+        ConsoleHostController host{&server, {}, {}};
+        ConsoleHostController::Client *client = nullptr;
+        int frames = 0;
+        bool ok = false;
+        ReclaimRig()
+        {
+            if (!runtime.isValid()) return;
+            host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
+            host.setUserSettingsReader([](quint32) { return BrokerUserSettings::parse("[General]\n"); });
+            host.setDisplayInfoProvider([](RdpConnection *) { return monitorBlock(true); });
+            if (!host.m_endpoint.listen(runtime.filePath(QStringLiteral("worker.sock")),
+                    {ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), 1000}, QByteArray(32, 'x'))) return;
+            host.addClient(&connection);
+            client = host.m_clients.front().get();
+            client->uid = 1000;
+            host.loadUserSettings(*client);
+            client->capabilitiesSent = client->screensAdvertised = true;
+            host.m_control.admit(client->id); host.syncControlState();
+            host.m_inputEnabled = true; client->session->setWorkerActive(true);
+            QObject::connect(client->session.get(), &AbstractSession::frameReceived, client->session.get(), [this](const VideoFrame &) { ++frames; });
+            ok = true;
+        }
+        // The connect-time Replace: one owned virtual output, owned-only topology, a picture.
+        void connectInReplace()
+        {
+            Q_EMIT host.m_endpoint.outputsReceived(replaced());
+            Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(2560, 0, 1280, 720), 1, true, 1, false}}, false});
+        }
+        static ConsoleWorkerWire::Outputs replaced()
+        {
+            return {{{QStringLiteral("Virtual-owned-0"), QRect(0, 0, 1280, 720), 1, true}}, QPoint(2560, 0)};
+        }
+        // After the reclaim the virtual output sits to the right of the restored panel.
+        static ConsoleWorkerWire::Outputs extended()
+        {
+            return {{{QStringLiteral("Virtual-owned-0"), QRect(0, 0, 1280, 720), 1, true}}, QPoint(1920, 0)};
+        }
+        // KScreen after the reclaim: the physical panel is back too, so the owned-only validator refuses it.
+        static ConsoleWorkerWire::Topology extendedTopology()
+        {
+            return {{{QStringLiteral("DP-3"), QSize(1920, 1080), QRect(0, 0, 1920, 1080), 1, true, 1, true},
+                     {QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(1920, 0, 1280, 720), 1, false, 2, false}}, true};
+        }
+        void frame(bool key)
+        {
+            VideoFrame f; f.size = QSize(1280, 720); f.isKeyFrame = key; f.monitors = {{QRect(0, 0, 1280, 720), true}};
+            Q_EMIT host.m_endpoint.frameReceived(f);
+        }
+    };
+
+private Q_SLOTS:
+    void deskReclaimKeepsTheVideoFlowing_data()
+    {
+        QTest::addColumn<int>("outputsRecords");
+        QTest::newRow("one Outputs record") << 1;
+        QTest::newRow("two Outputs records (the doubled proof in the Sol log)") << 2;
+    }
+    void deskReclaimKeepsTheVideoFlowing()
+    {
+        QFETCH(int, outputsRecords);
+        ReclaimRig rig; QVERIFY(rig.ok);
+        auto &host = rig.host;
+        rig.connectInReplace();
+        QVERIFY(host.m_configuredConsoleOutputs); QVERIFY(!host.m_layoutAwaitingReadback);
+        rig.frame(true);
+        QCOMPARE(rig.frames, 1);
+        host.physicalInputActivity();
+        const auto keyFramesBefore = host.m_endpoint.keyFrameRequests();
+        for (int i = 0; i < outputsRecords; ++i) {
+            Q_EMIT host.m_endpoint.outputsReceived(ReclaimRig::extended());
+            Q_EMIT host.m_endpoint.topologyReceived(ReclaimRig::extendedTopology()); // refused: it lists the physical panel
+        }
+        QVERIFY2(!host.m_layoutAwaitingReadback, "the frame gate must not outlive a refused topology");
+        QVERIFY2(host.m_endpoint.keyFrameRequests() > keyFramesBefore, "a key frame must be requested when the gate opens");
+        rig.frame(true); rig.frame(false);
+        QCOMPARE(rig.frames, 3); // the picture keeps reaching the client
+    }
+
+    // The records the real worker produced after a desk reclaim on the Sol fixture (WorkerEndToEndTest
+    // consoleDeskReclaimKeepsFrames): the same Outputs once more, an owned-only topology. Two Outputs records can arrive
+    // before the reply; the reply republishes the layout and asks for a key frame.
+    void deskReclaimWithTheWorkersOwnedOnlyTopologyRepublishes()
+    {
+        ReclaimRig rig; QVERIFY(rig.ok);
+        auto &host = rig.host;
+        rig.connectInReplace();
+        rig.frame(true);
+        host.physicalInputActivity();
+        const auto before = host.m_endpoint.keyFrameRequests();
+        Q_EMIT host.m_endpoint.outputsReceived(ReclaimRig::replaced());
+        Q_EMIT host.m_endpoint.outputsReceived(ReclaimRig::replaced());
+        QVERIFY(host.m_layoutAwaitingReadback); // held until the worker's independent readback
+        rig.frame(true);
+        QCOMPARE(rig.frames, 1);
+        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(2560, 0, 1280, 720), 1, true, 1, false}}, false});
+        QVERIFY(!host.m_layoutAwaitingReadback); QVERIFY(host.m_topologyAvailable);
+        QVERIFY(host.m_endpoint.keyFrameRequests() > before);
+        rig.frame(true); rig.frame(false);
+        QCOMPARE(rig.frames, 3);
+    }
+
+    // The backstop: even a topology that stays unusable after the reclaim (here: it lists none of the captured
+    // outputs) opens the gate with a key frame, also for a multi-surface capture, and a later good one restores checking.
+    void deskReclaimWithAnUnusableTopologyFailsOpen()
+    {
+        ReclaimRig rig; QVERIFY(rig.ok);
+        auto &host = rig.host;
+        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("Virtual-owned-0"), QRect(0, 0, 1280, 720), 1, true},
+                                                  {QStringLiteral("Virtual-owned-1"), QRect(1280, 0, 1280, 720), 1, false}}, QPoint(2560, 0)});
+        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(2560, 0, 1280, 720), 1, true, 1, false},
+                                                   {QStringLiteral("Virtual-owned-1"), QSize(1280, 720), QRect(3840, 0, 1280, 720), 1, false, 2, false}}, false});
+        QVERIFY(!host.m_layoutAwaitingReadback);
+        VideoFrame multi; multi.size = QSize(1280, 720); multi.isKeyFrame = true;
+        multi.monitors = {{QRect(0, 0, 1280, 720), true}, {QRect(1280, 0, 1280, 720), false}};
+        Q_EMIT host.m_endpoint.frameReceived(multi);
+        QCOMPARE(rig.frames, 1);
+        host.physicalInputActivity();
+        const auto before = host.m_endpoint.keyFrameRequests();
+        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("Virtual-owned-0"), QRect(0, 0, 1280, 720), 1, true},
+                                                  {QStringLiteral("Virtual-owned-1"), QRect(1280, 0, 1280, 720), 1, false}}, QPoint(1920, 0)});
+        QVERIFY(host.m_layoutAwaitingReadback);
+        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("DP-3"), QSize(1920, 1080), QRect(0, 0, 1920, 1080), 1, true, 1, true}}, true});
+        QVERIFY(!host.m_layoutAwaitingReadback);
+        QVERIFY(host.m_endpoint.keyFrameRequests() > before);
+        Q_EMIT host.m_endpoint.frameReceived(multi);
+        QCOMPARE(rig.frames, 2);
+    }
+
+    // Whatever path leaves the gate set, it opens by itself, once, with a key frame (defensive deadline).
+    void layoutReadbackGateOpensByDeadline()
+    {
+        ReclaimRig rig; QVERIFY(rig.ok);
+        auto &host = rig.host;
+        host.setLayoutReadbackDeadline(50);
+        rig.connectInReplace();
+        rig.frame(true);
+        QCOMPARE(rig.frames, 1);
+        // A changed Outputs record with no topology reply at all (worker busy or reply lost).
+        Q_EMIT host.m_endpoint.outputsReceived(ReclaimRig::extended());
+        QVERIFY(host.m_layoutAwaitingReadback);
+        rig.frame(true);
+        QCOMPARE(rig.frames, 1); // held while waiting
+        const auto before = host.m_endpoint.keyFrameRequests();
+        QTRY_VERIFY_WITH_TIMEOUT(!host.m_layoutAwaitingReadback, 1000);
+        QCOMPARE(host.m_endpoint.keyFrameRequests(), before + 1);
+        rig.frame(true);
+        QCOMPARE(rig.frames, 2);
+    }
+
+    // A topology that does arrive in time still wins: the deadline never fires over a confirmed layout.
+    void layoutReadbackDeadlineDoesNotPreemptAConfirmedTopology()
+    {
+        ReclaimRig rig; QVERIFY(rig.ok);
+        auto &host = rig.host;
+        host.setLayoutReadbackDeadline(50);
+        rig.connectInReplace();
+        Q_EMIT host.m_endpoint.outputsReceived(ReclaimRig::replaced());
+        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(2560, 0, 1280, 720), 1, true, 1, false}}, false});
+        QVERIFY(!host.m_layoutAwaitingReadback);
+        const auto before = host.m_endpoint.keyFrameRequests();
+        QTest::qWait(150);
+        QCOMPARE(host.m_endpoint.keyFrameRequests(), before);
+    }
+
     void consoleVirtualPolicyIsIdentityAndControllerScoped()
     {
         Server server;
