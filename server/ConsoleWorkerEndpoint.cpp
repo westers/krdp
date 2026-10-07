@@ -159,6 +159,7 @@ void ConsoleWorkerEndpoint::setMedia(const ConsoleWorkerWire::Media &media)
 
 void ConsoleWorkerEndpoint::reclaimConsole(quint64 generation)
 {
+    ++m_reclaimRequests;
     if (m_ready && m_worker)
         m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ControlState{generation, true}, ConsoleWorkerWire::Kind::ReclaimConsole));
 }

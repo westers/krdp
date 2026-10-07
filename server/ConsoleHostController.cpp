@@ -180,6 +180,9 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         m_consoleCreatorsActive = false;
         m_configuredConsoleOutputs = false;
         m_physicalLeaseGeneration = 0;
+        // A release the broker asked for (end Replace) is followed by the worker's own exit; start the replacement
+        // at once, with Replace off for this connection, instead of treating the exit as a crash.
+        m_expectedWorkerExit = std::any_of(m_clients.cbegin(), m_clients.cend(), [](const auto &client) { return client->replaceEnding; });
         endReplaceAttempts("lease released");
     });
     const auto virtualFinished = [this](quint64 requestId, quint64 generation, const QString &error, bool add) {
@@ -287,17 +290,16 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::hostScreensChanged, this, [this](quint64 generation) {
-        // OPT-060 M-8: the worker already gave the host's screens back (extend); end Replace for this connection.
+        // OPT-060 M-8: a host screen changed while replaced. The worker is releasing the temporary outputs (end Replace:
+        // the remote then shows the host's real screens); remember why. Replace is over for the connection once the
+        // verified release arrives (physicalLeaseReleased) or the worker is gone.
         if (generation != m_controlGeneration) return;
         for (const auto &client : m_clients) {
-            if (!replaceActiveFor(*client)) continue;
-            m_screensReclaimed = true;
-            client->replaceSpent = true;
+            if (!replaceAttemptLive(*client) || client->replaceEnding) continue;
+            client->replaceEnding = true;
             client->screensEndReason = u"hostScreensChanged"_s;
-            client->screensHostChangeMessage = u"A screen was added to or removed from the host. Its screens are back on; the session continues."_s;
-            updateClientDisplayPolicy(*client);
+            client->screensHostChangeMessage = u"A screen was added to or removed from the host. The host's screens are shown as they are now."_s;
         }
-        syncScreensRecords();
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerStopped, this, [this]() {
         setWorkerActive(false);
@@ -415,29 +417,6 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::topologyReceived, this, [this](const ConsoleWorkerWire::Topology &received) {
         auto topology = received;
-        if (m_configuredConsoleOutputs && m_screensReclaimed) {
-            // The desk reclaim gave the host's screens back; the capture continues on the remaining temporary
-            // outputs as extend, so KScreen now also lists physical outputs that are not part of it. Judge only
-            // the captured ones (the owned-only rule still applies to them).
-            topology.outputs.removeIf([this](const auto &output) {
-                return std::none_of(m_outputs.monitors.cbegin(), m_outputs.monitors.cend(), [&output](const auto &monitor) {
-                    return monitor.name == output.name;
-                });
-            });
-            // The panel is usually the host's primary and priority 1 now; within the capture the worker's own
-            // Outputs record decides which screen is primary, and priorities are ranked among the captured ones.
-            for (auto &output : topology.outputs) {
-                const auto monitor = std::find_if(m_outputs.monitors.cbegin(), m_outputs.monitors.cend(), [&output](const auto &candidate) {
-                    return candidate.name == output.name;
-                });
-                if (monitor != m_outputs.monitors.cend()) output.primary = monitor->primary;
-            }
-            std::vector<int> order(topology.outputs.size());
-            std::iota(order.begin(), order.end(), 0);
-            std::sort(order.begin(), order.end(), [&topology](int a, int b) { return topology.outputs[a].priority < topology.outputs[b].priority; });
-            for (size_t rank = 0; rank < order.size(); ++rank) topology.outputs[order[rank]].priority = int(rank) + 1;
-            topology.complete = false;
-        }
         const auto capture = capturePolicy();
         const bool selected = capture.mode == MonitorCapturePolicy::Mode::Primary
             || capture.mode == MonitorCapturePolicy::Mode::Specific;
@@ -453,8 +432,6 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             finishTopologyQueries(u"capture-failed"_s);
             if (m_pendingPhysical && m_pendingPhysical->waitingReadback) finishPhysicalTopology(u"capture-failed"_s);
             if (m_pendingVirtual && m_pendingVirtual->waitingReadback) finishVirtualTopology(u"capture-failed"_s);
-            // A refused topology only withholds the topology write capabilities; after a reclaim it must not blank the picture.
-            if (m_screensReclaimed && m_configuredConsoleOutputs) openLayoutGate("topology refused after a desk reclaim");
             return;
         }
         QVector<RemoteTopologyCatalog::Output> inventory;
@@ -474,7 +451,6 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
                 finishTopologyQueries(u"capture-failed"_s);
                 if (m_pendingPhysical && m_pendingPhysical->waitingReadback) finishPhysicalTopology(u"capture-failed"_s);
                 if (m_pendingVirtual && m_pendingVirtual->waitingReadback) finishVirtualTopology(u"capture-failed"_s);
-                if (m_screensReclaimed && m_configuredConsoleOutputs) openLayoutGate("topology refused after a desk reclaim");
                 return;
             }
             priorities.insert(output.name, output.priority);
@@ -628,7 +604,8 @@ void ConsoleHostController::workerFailed()
     // The current launch is gone: reaped, or never started. Only now may a
     // replacement start, so two workers never drive the same seat (AUD-C-7).
     const auto target = m_handoff.startingTarget().valid() ? m_handoff.startingTarget() : m_handoff.activeTarget();
-    const bool intentional = m_handoff.draining();
+    const bool expectedEnd = std::exchange(m_expectedWorkerExit, false);
+    const bool intentional = m_handoff.draining() || expectedEnd;
     m_workerAlive = false;
     m_workerSocket.clear();
     m_drainDeadline.stop();
@@ -638,7 +615,10 @@ void ConsoleHostController::workerFailed()
     removeWorkerDirectory();
     clearPhysicalLease("console worker exited");
     apply(m_handoff.workerStopped());
-    if (!intentional && !m_workerAlive) {
+    if (expectedEnd && !m_workerAlive && !m_handoff.draining()) {
+        qInfo() << "Console Replace ended: starting the replacement worker for the host's real screens";
+        apply(m_handoff.reconcile(m_sessions)); // no backoff: this exit was asked for and verified
+    } else if (!intentional && !m_workerAlive) {
         // Crash, failed launch or wire-version mismatch: never relaunch the
         // same target in a tight loop (AUD-C-6).
         m_failedTarget = target;
@@ -1089,8 +1069,7 @@ void ConsoleHostController::updateClientDisplayPolicy(Client &client)
     // OPT-060: Replace needs the user's permission (default "When the connection asks") AND the
     // connection's own standard RDP monitor block. A spent attempt stays off for the rest of the
     // connection, but only once the running worker's outputs are gone: changing the policy under a
-    // live plan makes the worker release and restart (the desk-reclaim "continue as extend" path
-    // must keep its outputs).
+    // live plan makes the worker release and restart before the attempt has ended.
     const QString layoutPolicy = p.virtualMonitorPolicy.value_or(u"replace"_s);
     const auto permission = ConsoleVirtualOutputPolicy::permissionOf(layoutPolicy);
     // The connection's standard monitor block, or its explicit `console-screens-request` (a one-monitor
@@ -2167,17 +2146,19 @@ void ConsoleHostController::physicalInputActivity()
 {
     // Fake-input and application cursor warps do not originate at evdev devices.
     if (!m_control.owner()) return;
-    m_endpoint.reclaimConsole(m_controlGeneration);
-    // Someone is at the desk: the worker gives the host's screens back and the remote session
-    // continues as extend (D4). Replace is over for this connection.
+    // Someone is at the desk. While Replace holds the host's screens the remote must keep showing what the host
+    // shows, so Replace ends: the worker releases the temporary outputs (verified, lock guard) and the connection
+    // continues with normal capture of the real screens. The desk reports every event; ask once.
+    bool ending = false, first = false;
     for (const auto &client : m_clients) {
-        if (!replaceActiveFor(*client)) continue;
-        m_screensReclaimed = true;
-        client->replaceSpent = true;
+        if (!replaceAttemptLive(*client)) continue;
+        ending = true;
+        if (std::exchange(client->replaceEnding, true)) continue;
+        first = true;
         client->screensEndReason = u"deskInput"_s;
-        updateClientDisplayPolicy(*client);
     }
-    syncScreensRecords();
+    if (ending && !first) return;
+    m_endpoint.reclaimConsole(m_controlGeneration);
 }
 
 void ConsoleHostController::syncControlState()
@@ -2231,7 +2212,6 @@ void ConsoleHostController::armConfiguredConsoleOutputs()
             continue;
         }
         client->replaceAttempted = true;
-        m_screensReclaimed = false;
         m_configuredConsoleOutputs = true;
         m_consoleCreatorsActive = true;
         m_physicalLeaseActive = true;
@@ -2258,9 +2238,16 @@ void ConsoleHostController::endReplaceAttempts(const char *why, const QString &r
     syncScreensRecords();
 }
 
+bool ConsoleHostController::replaceAttemptLive(const Client &client) const
+{
+    return client.codec && m_control.ownsControl(client.id) && client.replaceAttempted && !client.replaceSpent && m_configuredConsoleOutputs
+        && client.codec->consoleVirtualPolicy().enabled
+        && client.codec->consoleVirtualPolicy().policy == ConsoleVirtualOutputPolicy::Policy::Replace;
+}
+
 bool ConsoleHostController::replaceActiveFor(const Client &client) const
 {
-    return client.codec && m_control.ownsControl(client.id) && !m_screensReclaimed && client.replaceAttempted && !client.replaceSpent
+    return client.codec && m_control.ownsControl(client.id) && client.replaceAttempted && !client.replaceSpent
         && client.codec->consoleVirtualPolicy().enabled
         && client.codec->consoleVirtualPolicy().policy == ConsoleVirtualOutputPolicy::Policy::Replace
         && configuredOutputTopology();
@@ -2557,15 +2544,12 @@ void ConsoleHostController::handleScreensView(RdpConnection *connection, Console
 
 bool ConsoleHostController::restoreHostScreens(Client &client)
 {
-    if (!replaceActiveFor(client)) return false;
-    // The worker's reclaim: restore the host's screens, verify, and keep the temporary
-    // outputs as extend so capture continues. Replace is over for this connection.
-    m_endpoint.reclaimConsole(m_controlGeneration);
-    m_screensReclaimed = true;
-    client.replaceSpent = true;
+    if (!replaceActiveFor(client) || client.replaceEnding) return false;
+    // The worker ends Replace: it releases the temporary outputs (restoring the host's screens first) and the
+    // connection continues with normal capture of the real screens. `console-screens` follows the verified release.
+    client.replaceEnding = true;
     client.screensEndReason = u"restoreRequest"_s;
-    updateClientDisplayPolicy(client);
-    syncScreensRecords();
+    m_endpoint.reclaimConsole(m_controlGeneration);
     return true;
 }
 

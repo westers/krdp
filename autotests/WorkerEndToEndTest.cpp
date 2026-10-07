@@ -889,18 +889,21 @@ void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames_data()
 {
     QTest::addColumn<int>("count");
     QTest::addColumn<bool>("race");
-    QTest::newRow("single replace, reclaim after the picture is flowing") << 1 << false;
-    QTest::newRow("two replace, reclaim after the picture is flowing") << 2 << false;
-    QTest::newRow("single replace, reclaim right after the Outputs record (race)") << 1 << true;
+    QTest::addColumn<bool>("locked");
+    QTest::newRow("single replace, reclaim after the picture is flowing") << 1 << false << false;
+    QTest::newRow("two replace, reclaim after the picture is flowing") << 2 << false << false;
+    QTest::newRow("single replace, reclaim right after the Outputs record (race)") << 1 << true << false;
+    QTest::newRow("single replace, session locked when the desk is touched") << 1 << false << true;
 }
 
-// OPT-060 reclaim freeze: the worker side of a desk-input reclaim in Replace. The worker restores the host's
-// screens, keeps its temporary outputs as extend, republishes Outputs and must keep delivering decodable frames
-// (for at least ten seconds, with a key frame every 2.5 s as a broker would ask), then restore exactly at the end.
-// The recorded post-reclaim Outputs/Topology records are logged: they are the real input of the broker's topology filter.
+// OPT-060 end Replace (2026-10-07): the worker side of a desk-input reclaim in Replace. The worker no longer continues as
+// extend: it releases the temporary outputs like a disconnect (physical outputs back first, journal dropped, lock guard) and
+// exits 0. A fresh worker, started as the broker starts it (Replace off), then delivers decodable frames of the PHYSICAL
+// output (a name that is not Virtual-krdp-*, the baseline's size). Recorded: reclaim to worker exit, and reclaim to the first
+// key frame of the replacement (the worker-only part of the gap; the broker adds its launcher time).
 void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames()
 {
-    QFETCH(int, count); QFETCH(bool, race);
+    QFETCH(int, count); QFETCH(bool, race); QFETCH(bool, locked);
     if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
     auto *s = session(2); QVERIFY(s);
     if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
@@ -917,6 +920,31 @@ void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames()
         if (QTest::currentTestFailed()) qWarning().noquote() << "worker.log:" << s->log(QStringLiteral("worker.log"), 18000)
             << "kwin.log:" << s->log(QStringLiteral("kwin.log"), 5000);
     });
+    const QString lockerDir = s->runtime->path() + QStringLiteral("/locker");
+    const QString greeterFile = s->home->path() + QStringLiteral("/greeter-alive");
+    const auto lockerSend = [&](const QString &command) {
+        for (int i = 0; i < 200 && QFile::exists(lockerDir + QStringLiteral("/cmd")); ++i) QTest::qWait(10);
+        QFile tmp(lockerDir + QStringLiteral("/cmd.tmp")); if (!tmp.open(QIODevice::WriteOnly)) return;
+        tmp.write(command.toUtf8() + '\n'); tmp.close();
+        QFile::rename(tmp.fileName(), lockerDir + QStringLiteral("/cmd"));
+    };
+    const auto lockerState = [&]() {
+        QMap<QString, int> values; QFile file(lockerDir + QStringLiteral("/state"));
+        if (!file.open(QIODevice::ReadOnly)) return values;
+        for (const auto &part : QString::fromUtf8(file.readAll()).split(QLatin1Char(' '), Qt::SkipEmptyParts)) {
+            const auto pair = part.trimmed().split(QLatin1Char('='));
+            if (pair.size() == 2) values.insert(pair[0], pair[1].toInt());
+        }
+        return values;
+    };
+    if (locked) {
+        lockerSend(QStringLiteral("enable"));
+        QTRY_COMPARE_WITH_TIMEOUT(lockerState().value(QStringLiteral("enabled")), 1, 5000);
+        lockerSend(QStringLiteral("reset"));
+        QTRY_VERIFY_WITH_TIMEOUT(lockerState().value(QStringLiteral("active")) == 0, 5000);
+        QFile::remove(greeterFile);
+        m_nextWorkerEnv = {QStringLiteral("KRDP_CONSOLE_LOCK_GREETER_FILE=") + greeterFile};
+    }
     QVERIFY(startWorker(*s, false, endpoint, run));
     const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
     const QString marker = s->runtime->path() + QStringLiteral("/physical-baseline");
@@ -997,57 +1025,80 @@ sys.exit(result.returncode)
     };
     qInfo().noquote() << "RECLAIM before:" << describe(outputs);
 
+    if (locked) { // the user's lock, 3 s before the desk is touched (outside the 2 s settle window)
+        lockerSend(QStringLiteral("lock"));
+        QTRY_VERIFY_WITH_TIMEOUT(lockerState().value(QStringLiteral("active")) == 1, 5000);
+        QTest::qWait(3000);
+    }
+
     // The desk reclaim (the broker's physicalInputActivity forwards exactly this record to the worker).
-    const auto recordsBefore = outputRecords.size();
-    run.frames.clear(); topology.reset();
+    QElapsedTimer sinceReclaim; sinceReclaim.start();
+    run.frames.clear();
     endpoint.reclaimConsole(1);
-    QTRY_VERIFY_WITH_TIMEOUT(outputRecords.size() > recordsBefore || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 30000);
-    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(!QFileInfo::exists(exitFile));
-    // The restored physical outputs are lit again; the temporary outputs continue as extend.
-    const auto restoredJson = query(); QVERIFY(restoredJson);
-    bool parsed = false;
-    const auto lit = OutputRestoreJournal::parseCurrent(*restoredJson, &parsed); QVERIFY(parsed);
-    for (const auto &original : baseline->outputs) {
-        const auto actual = std::find_if(lit.cbegin(), lit.cend(), [&](const auto &output) { return output.name == original.name; });
-        QVERIFY(actual != lit.cend()); QVERIFY2(actual->enabled, qPrintable(original.name + QStringLiteral(" must be lit again after the reclaim")));
-    }
-    QVERIFY(endpoint.requestTopology());
-    QTRY_VERIFY_WITH_TIMEOUT(topology.has_value() || !run.errors.isEmpty(), 15000);
-    QVERIFY(topology);
-    QStringList kinds;
-    for (const auto &output : topology->outputs)
-        kinds << QStringLiteral("%1 physical %2 primary %3 priority %4 logical %5,%6 %7x%8").arg(output.name).arg(output.physical).arg(output.primary)
-            .arg(output.priority).arg(output.logical.x()).arg(output.logical.y()).arg(output.logical.width()).arg(output.logical.height());
-    qInfo().noquote() << "RECLAIM after Outputs:" << describe(outputs) << "records" << (outputRecords.size() - recordsBefore);
-    qInfo().noquote() << "RECLAIM topology complete" << topology->complete << ":" << kinds.join(QStringLiteral(" | "));
-
-    // At least ten seconds of frames after the reclaim: every 2.5 s ask for a key frame and decode what arrives.
-    ClientStyle::Decoder decoder;
-    int decodedRounds = 0;
-    for (int round = 0; round < 5; ++round) {
-        run.frames.clear(); endpoint.requestKeyFrame();
-        QTRY_VERIFY_WITH_TIMEOUT(std::any_of(run.frames.cbegin(), run.frames.cend(), [](const auto &frame) { return frame.isKeyFrame; })
-            || !run.errors.isEmpty() || QFileInfo::exists(exitFile), 8000);
-        QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n')))); QVERIFY(!QFileInfo::exists(exitFile));
-        const auto key = std::find_if(run.frames.cbegin(), run.frames.cend(), [](const auto &frame) { return frame.isKeyFrame; });
-        QVERIFY2(decoder.feed(int(key->monitorIndex) + 1, key->codec.value_or(VideoCodec::Avc420), key->data), qPrintable(decoder.error()));
-        QCOMPARE(decoder.surfaces().value(int(key->monitorIndex) + 1).lastPicture, key->size);
-        ++decodedRounds;
-        QTest::qWait(2500);
-    }
-    QCOMPARE(decodedRounds, 5);
-    // A second Outputs record after the topology reply (the log shows the proof twice) changes nothing for the worker.
-    endpoint.requestKeyFrame();
-    QTest::qWait(1000);
-    QVERIFY(!QFileInfo::exists(exitFile));
-
-    endpoint.stopWorker();
-    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(exitFile), 30000);
-    const auto finalJson = query(); QVERIFY(finalJson);
-    QVERIFY(ConsoleVirtualOutputRestore::matches(*baseline, *finalJson)); // exact restore
-    QVERIFY(released); QVERIFY(released->verified);
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(exitFile) || !run.errors.isEmpty(), 60000);
+    const qint64 exitMs = sinceReclaim.elapsed();
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
     QFile code(exitFile); QVERIFY(code.open(QIODevice::ReadOnly)); QCOMPARE(code.readAll().trimmed(), QByteArray("0"));
-    qInfo() << "Desk reclaim kept frames:" << count << "race" << race << "rounds" << decodedRounds;
+    code.close();
+    // Released and verified: the broker hears it before the worker exits.
+    QVERIFY(released); QVERIFY(released->verified);
+    // No extend: the temporary outputs are gone, the physical ones are exactly as at the start, the journal is empty.
+    const auto restoredJson = query(); QVERIFY(restoredJson);
+    QVERIFY(ConsoleVirtualOutputRestore::matches(*baseline, *restoredJson)); // exact restore
+    QVERIFY2(!restoredJson->contains("Virtual-krdp-"), "a temporary output is still present after the release");
+    QFile journal(s->home->path() + QStringLiteral("/state/farside/output-restore.json"));
+    if (journal.exists()) {
+        QVERIFY(journal.open(QIODevice::ReadOnly));
+        const auto entries = OutputRestoreJournal::parse(journal.readAll()); QVERIFY(entries); QVERIFY(entries->isEmpty());
+    }
+    if (locked) {
+        QTRY_VERIFY2_WITH_TIMEOUT(lockerState().value(QStringLiteral("active")) == 1, "the session is still locked after the release", 3000);
+        QVERIFY2(lockerState().value(QStringLiteral("greeter")) == 1, "the greeter is alive after the release");
+    }
+    qInfo() << "End Replace: reclaim to worker exit" << exitMs << "ms, count" << count << "race" << race << "locked" << locked;
+
+    // The replacement worker, as the broker starts it: no Replace. Its capture is the host's real (here: baseline) outputs.
+    ConsoleWorkerEndpoint plain; WorkerRun plainRun;
+    ConsoleWorkerWire::Outputs plainOutputs;
+    connect(&plain, &ConsoleWorkerEndpoint::outputsReceived, this, [&](const auto &value) { plainOutputs = value; });
+    if (locked) m_nextWorkerEnv = {QStringLiteral("KRDP_CONSOLE_LOCK_GREETER_FILE=") + greeterFile};
+    // The fixture's connector aliases exist only for the guard's kscreen-doctor calls; a worker that does no Replace
+    // reads KScreen and Qt screens that must agree, so take the aliases away for it (it restores nothing).
+    QVERIFY(QFile::rename(marker, marker + QStringLiteral(".off")));
+    const auto aliasesBack = qScopeGuard([&] { QFile::remove(marker); QFile::rename(marker + QStringLiteral(".off"), marker); });
+    QVERIFY(startWorker(*s, false, plain, plainRun));
+    const auto reapPlain = qScopeGuard([&] {
+        if (!QFileInfo::exists(exitFile)) { plain.stopWorker(); (void)QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 30000); }
+    });
+    QTRY_VERIFY_WITH_TIMEOUT((plain.ready() && plainOutputs.monitors.size() == baseline->outputs.size()) || !plainRun.errors.isEmpty(), 45000);
+    QVERIFY2(plainRun.errors.isEmpty(), qPrintable(plainRun.errors.join(QLatin1Char('\n'))));
+    plainRun.frames.clear();
+    plain.setControlState({1, true});
+    ConsoleWorkerWire::EncoderConfig plainConfig{.generation = 1, .codec = VideoCodec::Avc420, .settings = CodecPolicy::EncoderSettings{.hardware = false}};
+    QVERIFY(plain.setEncoderConfig(plainConfig));
+    plain.requestKeyFrame();
+    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(plainRun.frames.cbegin(), plainRun.frames.cend(), [](const auto &frame) { return frame.isKeyFrame; })
+        || !plainRun.errors.isEmpty(), 40000);
+    const qint64 firstFrameMs = sinceReclaim.elapsed();
+    QVERIFY2(plainRun.errors.isEmpty(), qPrintable(plainRun.errors.join(QLatin1Char('\n'))));
+    // The picture is of the host's physical outputs: their names and sizes, never a temporary output.
+    QStringList names;
+    for (const auto &output : plainOutputs.monitors) {
+        names << output.name;
+        QVERIFY2(!output.name.startsWith(QStringLiteral("Virtual-krdp-")), qPrintable(output.name));
+    }
+    QCOMPARE(plainOutputs.monitors.size(), int(baseline->outputs.size()));
+    const auto key = std::find_if(plainRun.frames.cbegin(), plainRun.frames.cend(), [](const auto &frame) { return frame.isKeyFrame; });
+    ClientStyle::Decoder decoder;
+    QVERIFY2(decoder.feed(int(key->monitorIndex) + 1, key->codec.value_or(VideoCodec::Avc420), key->data), qPrintable(decoder.error()));
+    QCOMPARE(decoder.surfaces().value(int(key->monitorIndex) + 1).lastPicture, key->size);
+    qInfo().noquote() << "End Replace: reclaim to first decoded key frame of the replacement worker" << firstFrameMs << "ms; outputs" << names.join(QLatin1Char(','))
+                      << "frame" << key->size.width() << "x" << key->size.height();
+    plain.stopWorker();
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(exitFile), 30000);
+    QFile::rename(marker + QStringLiteral(".off"), marker);
+    const auto finalJson = query(); QVERIFY(finalJson);
+    QVERIFY(ConsoleVirtualOutputRestore::matches(*baseline, *finalJson));
 }
 
 void WorkerEndToEndTest::consoleReplaceFailsOpen_data()

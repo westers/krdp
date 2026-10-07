@@ -3171,11 +3171,23 @@ private:
         if (!screen || screen->name().startsWith(QLatin1String("Virtual-"))) return;
         if (!m_consoleVirtualPlan || !m_consoleVirtualApplied || !m_consoleVirtualReplaced || m_stopping || m_creatorReleaseActive
             || m_creatorReleaseFinished || !m_replaceAppliedAt.isValid() || m_replaceAppliedAt.elapsed() < 3000) return;
-        qInfo() << "Host screen" << screen->name() << "was added while the host's screens are replaced; restoring them and continuing as extend";
-        reclaimConsole();
-        // Replace is over either way (restored, or failed and released); one record, and it cannot fire again.
-        if (m_consoleVirtualPlan && !m_consoleVirtualReplaced && !m_stopping && m_socket.state() == QLocalSocket::ConnectedState)
+        qInfo() << "Host screen" << screen->name() << "was added while the host's screens are replaced; ending Replace (releasing the temporary monitors, showing the host's real screens)";
+        // Tell the broker why first; the verified release that follows is the same one a disconnect makes.
+        if (m_socket.state() == QLocalSocket::ConnectedState)
             m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::HostScreensChanged));
+        endReplaceByRelease();
+    }
+
+    // OPT-060 (end Replace, 2026-10-07): someone is at the desk, the client asked for the real screens, or a host screen
+    // changed. The remote must keep showing what the host shows, so Replace does not continue as extend: this is the verified
+    // creator release of a disconnect (physical outputs restored before the temporary ones go, journal dropped, lock guard
+    // applied) and the worker then exits; the broker starts the replacement with Replace off for this connection, which
+    // captures the host's real outputs exactly like a plain connection.
+    void endReplaceByRelease()
+    {
+        if (m_creatorReleaseActive || m_creatorReleaseFinished || m_stopping) return;
+        qInfo() << "Console Replace ends: releasing the temporary monitors and restoring the host's screens";
+        if (!beginConsoleCreatorRelease()) shutdown(1);
     }
 
     void reclaimConsole()
@@ -3183,8 +3195,13 @@ private:
         if (!m_mode.physicalActions() || !m_control.active) {
             return;
         }
+        if (m_creatorReleaseActive || m_creatorReleaseFinished) return; // already ending: the desk reports every input event
+        if (m_consoleVirtualPlan && m_consoleVirtualPlan->replace && (!m_consoleVirtualApplied || m_consoleVirtualReplaced)) {
+            endReplaceByRelease();
+            return;
+        }
         if (m_consoleVirtualPlan && m_consoleVirtualApplied) {
-            // The desk reports every input event: the screens are given back once per applied layout; the
+            // Extend (the host's screens were never replaced): the desk reports every input event: the screens are given back once per applied layout; the
             // events that follow only count (no capture reset, no output work, no log line each).
             if (!m_reclaimEpisode.needed()) return;
             invalidateConsoleCapture();

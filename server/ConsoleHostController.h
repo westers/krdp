@@ -138,6 +138,7 @@ private:
         // normally for the rest of its connection.
         bool replaceAttempted = false;
         bool replaceSpent = false;
+        bool replaceEnding = false; // the worker was told to end Replace (release + plain capture); asked once per attempt
         // The last `console-screens` state pushed (nullopt: nothing pushed yet).
         std::optional<bool> screensActiveSent;
         // Why Replace ended for this client, set by the path that ended it (first wins); pushed with the
@@ -203,6 +204,7 @@ private:
     /** The attempt of every client that armed one is over; the next worker captures normally. */
     void endReplaceAttempts(const char *why, const QString &reason = QStringLiteral("workerExit"));
     /** Replace is live for \a client: its configured outputs are up and the host's screens are off. */
+    bool replaceAttemptLive(const Client &client) const;
     bool replaceActiveFor(const Client &client) const;
     /** Push `console-screens` to each KRDPCTL client whose state changed. */
     void syncScreensRecords();
@@ -275,7 +277,7 @@ private:
     QList<ConsoleSeat::Session> m_sessions;
     UidResolver m_uidOf;
     DisplayInfoProvider m_displayInfoOf;
-    bool m_screensReclaimed = false; // the host's screens were given back; Replace stays over until the next attempt
+    bool m_expectedWorkerExit = false; // a verified Replace release was reported: the exit that follows is not a failure
     Refuse m_refuse;
     // One launched process at a time; a replacement waits for its reaping.
     QString m_workerSocket;

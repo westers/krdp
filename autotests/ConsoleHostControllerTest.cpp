@@ -520,21 +520,32 @@ private Q_SLOTS:
         QCOMPARE(screens().size(), 1);
         QVERIFY(screens().last().value(u"active"_s).toBool()); QVERIFY(screens().last().value(u"canRestore"_s).toBool());
         host.syncScreensRecords(); QCOMPARE(screens().size(), 1); // one push per edge
-        // Restore: the worker is asked to reclaim, Replace is over for this connection, the edge is pushed.
+        // Restore (2026-10-07, end Replace): the worker is asked once to release the temporary outputs and show the host's
+        // real screens; the edge is pushed when that release is verified, never as "extend".
+        const auto reclaimsBefore = host.m_endpoint.reclaimRequests();
         host.onControlRecord(&connection, client.id, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r2"_s}});
         QCOMPARE(sent.last().value(u"requestId"_s).toString(), u"r2"_s);
         QVERIFY(sent.last().value(u"ok"_s).toBool());
+        QCOMPARE(host.m_endpoint.reclaimRequests(), reclaimsBefore + 1);
+        QCOMPARE(screens().size(), 1); // still waiting for the verified release
+        // A second request while ending is refused and asks the worker for nothing.
+        host.onControlRecord(&connection, client.id, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r2b"_s}});
+        QVERIFY(!sent.last().value(u"ok"_s).toBool());
+        QCOMPARE(host.m_endpoint.reclaimRequests(), reclaimsBefore + 1);
+        // The worker reports the verified release: the outputs are gone from the plan, the attempt is spent, the policy is off.
+        Q_EMIT host.m_endpoint.physicalLeaseReleased({host.m_controlGeneration, true});
         QCOMPARE(screens().size(), 2);
         QVERIFY(!screens().last().value(u"active"_s).toBool()); QVERIFY(!screens().last().value(u"canRestore"_s).toBool());
+        QCOMPARE(screens().last().value(u"reason"_s).toString(), u"restoreRequest"_s);
         QVERIFY(client.replaceSpent);
-        QVERIFY(host.m_configuredConsoleOutputs); // the temporary outputs stay (extend) so capture continues
-        QVERIFY(client.codec->consoleVirtualPolicy().enabled); // the live worker's plan is not torn down
-        // Once that worker is gone the next one captures normally.
-        host.clearPhysicalLease("test worker exit");
-        QVERIFY(!client.codec->consoleVirtualPolicy().enabled);
-        // A second restore request is refused.
+        QVERIFY(!host.m_configuredConsoleOutputs);
+        QVERIFY(!client.codec->consoleVirtualPolicy().enabled); // the next worker captures the real screens
+        QVERIFY(host.m_expectedWorkerExit);
+        // A further restore request is refused, and no new attempt is armed.
         host.onControlRecord(&connection, client.id, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r3"_s}});
         QVERIFY(!sent.last().value(u"ok"_s).toBool());
+        host.armConfiguredConsoleOutputs();
+        QVERIFY(!host.m_configuredConsoleOutputs);
     }
 
 
@@ -944,6 +955,8 @@ private Q_SLOTS:
         QVERIFY(!record.contains(u"unmappedMonitors"_s)); QVERIFY(!record.contains(u"unknownHosts"_s));
         // Restore: the next edge carries no screens.
         h.host.onControlRecord(&h.connection, h.client->id, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r"_s}});
+        QCOMPARE(h.screens().size(), 1); // after the worker's verified release
+        Q_EMIT h.host.m_endpoint.physicalLeaseReleased({h.host.m_controlGeneration, true});
         QCOMPARE(h.screens().size(), 2);
         QVERIFY(!h.screens().last().value(u"active"_s).toBool()); QVERIFY(!h.screens().last().contains(u"screens"_s));
     }
@@ -963,7 +976,7 @@ private Q_SLOTS:
 
     // ---- OPT-060 M-8: a host monitor plugged in while replaced -------------------------------------------------------
 
-    void hostScreensChangedEndsReplaceAndContinuesAsExtendOnce()
+    void hostScreensChangedEndsReplaceByReleaseOnce()
     {
         MappedHarness h("[General]\n", {}, true, 2000, 2);
         QVERIFY(h.askMapped(oneClient(100), u"hc"_s).value(u"ok"_s).toBool());
@@ -976,24 +989,26 @@ private Q_SLOTS:
         QCOMPARE(h.screens().size(), 1); QVERIFY(h.screens().last().value(u"active"_s).toBool());
         // A stale generation is ignored.
         Q_EMIT h.host.m_endpoint.hostScreensChanged(h.host.m_controlGeneration + 1);
-        QCOMPARE(h.screens().size(), 1); QVERIFY(!h.client->replaceSpent);
-        // The worker restored the host's screens (extend) and says why: Replace is over, the reason is the new one.
+        QCOMPARE(h.screens().size(), 1); QVERIFY(!h.client->replaceEnding);
+        // The worker is releasing the temporary outputs and says why. Nothing continues "as extend": the attempt is
+        // over only when the verified release arrives.
         Q_EMIT h.host.m_endpoint.hostScreensChanged(h.host.m_controlGeneration);
+        QVERIFY(h.client->replaceEnding); QVERIFY(!h.client->replaceSpent);
+        QCOMPARE(h.screens().size(), 1);
+        Q_EMIT h.host.m_endpoint.physicalLeaseReleased({h.host.m_controlGeneration, true});
         QCOMPARE(h.screens().size(), 2);
         const auto record = h.screens().last();
         QVERIFY(!record.value(u"active"_s).toBool()); QVERIFY(!record.value(u"canRestore"_s).toBool());
         QCOMPARE(record.value(u"reason"_s).toString(), u"hostScreensChanged"_s);
         QVERIFY(!record.value(u"message"_s).toString().isEmpty()); QVERIFY(!record.contains(u"screens"_s));
         QVERIFY(h.client->replaceSpent);
-        QVERIFY(h.host.m_configuredConsoleOutputs); // the temporary outputs stay: the remote session continues as extend
-        QVERIFY(h.policy().enabled);                // the live worker's plan is not torn down
+        QVERIFY(!h.host.m_configuredConsoleOutputs); // the temporary outputs are released, not kept as extend
+        QVERIFY(!h.policy().enabled);                // the next worker captures the real screens
         // Never a loop: a repeat changes nothing, a restore request is refused, and no new attempt is armed.
         Q_EMIT h.host.m_endpoint.hostScreensChanged(h.host.m_controlGeneration);
         QCOMPARE(h.screens().size(), 2);
         h.host.onControlRecord(&h.connection, h.client->id, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"rr"_s}});
         QVERIFY(!h.sent.last().value(u"ok"_s).toBool());
-        h.host.clearPhysicalLease("test worker exit");
-        QVERIFY(!h.policy().enabled);
         h.host.armConfiguredConsoleOutputs();
         QVERIFY(!h.host.m_configuredConsoleOutputs);
     }
@@ -1247,6 +1262,10 @@ private Q_SLOTS:
         } else {
             host.removeClient(&connection);
         }
+        if (how == u"restore"_s || how == u"desk"_s) {
+            QCOMPARE(screens().size(), 1); // told when the worker has released the temporary outputs
+            Q_EMIT host.m_endpoint.physicalLeaseReleased({host.m_controlGeneration, true});
+        }
         QCOMPARE(screens().size(), 2);
         QVERIFY(!screens().last().value(u"active"_s).toBool());
         QCOMPARE(screens().last().value(u"reason"_s).toString(), reason);
@@ -1265,6 +1284,7 @@ private:
         ReclaimRig()
         {
             if (!runtime.isValid()) return;
+            host.m_recordSent = [this](RdpConnection *, const QJsonObject &record) { sentRecords.append(record); };
             host.setUidResolver([](RdpConnection *) { return std::optional<quint32>(1000); });
             host.setUserSettingsReader([](quint32) { return BrokerUserSettings::parse("[General]\n"); });
             host.setDisplayInfoProvider([](RdpConnection *) { return monitorBlock(true); });
@@ -1281,10 +1301,18 @@ private:
             ok = true;
         }
         // The connect-time Replace: one owned virtual output, owned-only topology, a picture.
+        QList<QJsonObject> sentRecords;
+        QList<QJsonObject> screens() const
+        {
+            QList<QJsonObject> result;
+            for (const auto &record : sentRecords) if (record.value(u"type"_s).toString() == u"console-screens"_s) result.append(record);
+            return result;
+        }
         void connectInReplace()
         {
             Q_EMIT host.m_endpoint.outputsReceived(replaced());
             Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(2560, 0, 1280, 720), 1, true, 1, false}}, false});
+            host.syncScreensRecords(); // the connect edge
         }
         static ConsoleWorkerWire::Outputs replaced()
         {
@@ -1295,12 +1323,6 @@ private:
         {
             return {{{QStringLiteral("Virtual-owned-0"), QRect(0, 0, 1280, 720), 1, true}}, QPoint(1920, 0)};
         }
-        // KScreen after the reclaim: the physical panel is back too, so the owned-only validator refuses it.
-        static ConsoleWorkerWire::Topology extendedTopology()
-        {
-            return {{{QStringLiteral("DP-3"), QSize(1920, 1080), QRect(0, 0, 1920, 1080), 1, true, 1, true},
-                     {QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(1920, 0, 1280, 720), 1, false, 2, false}}, true};
-        }
         void frame(bool key)
         {
             VideoFrame f; f.size = QSize(1280, 720); f.isKeyFrame = key; f.monitors = {{QRect(0, 0, 1280, 720), true}};
@@ -1309,81 +1331,106 @@ private:
     };
 
 private Q_SLOTS:
-    void deskReclaimKeepsTheVideoFlowing_data()
-    {
-        QTest::addColumn<int>("outputsRecords");
-        QTest::newRow("one Outputs record") << 1;
-        QTest::newRow("two Outputs records (the doubled proof in the Sol log)") << 2;
-    }
-    void deskReclaimKeepsTheVideoFlowing()
-    {
-        QFETCH(int, outputsRecords);
-        ReclaimRig rig; QVERIFY(rig.ok);
-        auto &host = rig.host;
-        rig.connectInReplace();
-        QVERIFY(host.m_configuredConsoleOutputs); QVERIFY(!host.m_layoutAwaitingReadback);
-        rig.frame(true);
-        QCOMPARE(rig.frames, 1);
-        host.physicalInputActivity();
-        const auto keyFramesBefore = host.m_endpoint.keyFrameRequests();
-        for (int i = 0; i < outputsRecords; ++i) {
-            Q_EMIT host.m_endpoint.outputsReceived(ReclaimRig::extended());
-            Q_EMIT host.m_endpoint.topologyReceived(ReclaimRig::extendedTopology()); // refused: it lists the physical panel
-        }
-        QVERIFY2(!host.m_layoutAwaitingReadback, "the frame gate must not outlive a refused topology");
-        QVERIFY2(host.m_endpoint.keyFrameRequests() > keyFramesBefore, "a key frame must be requested when the gate opens");
-        rig.frame(true); rig.frame(false);
-        QCOMPARE(rig.frames, 3); // the picture keeps reaching the client
-    }
-
-    // The records the real worker produced after a desk reclaim on the Sol fixture (WorkerEndToEndTest
-    // consoleDeskReclaimKeepsFrames): the same Outputs once more, an owned-only topology. Two Outputs records can arrive
-    // before the reply; the reply republishes the layout and asks for a key frame.
-    void deskReclaimWithTheWorkersOwnedOnlyTopologyRepublishes()
+    // OPT-060 end Replace (2026-10-07): someone at the desk. The remote must keep showing what the host shows, so this is a
+    // release + plain capture, never "continue as extend": the worker is asked once, the connection hears
+    // console-screens {active:false, reason:deskInput} when the release is verified, the attempt is spent (no second Replace,
+    // the user's own capture policy applies) and the replacement worker's physical outputs are published like a plain
+    // connection's, with a key frame.
+    void deskInputEndsReplaceWithReleaseAndPlainCapture()
     {
         ReclaimRig rig; QVERIFY(rig.ok);
         auto &host = rig.host;
         rig.connectInReplace();
-        rig.frame(true);
-        host.physicalInputActivity();
-        const auto before = host.m_endpoint.keyFrameRequests();
-        Q_EMIT host.m_endpoint.outputsReceived(ReclaimRig::replaced());
-        Q_EMIT host.m_endpoint.outputsReceived(ReclaimRig::replaced());
-        QVERIFY(host.m_layoutAwaitingReadback); // held until the worker's independent readback
+        QVERIFY(host.m_configuredConsoleOutputs);
         rig.frame(true);
         QCOMPARE(rig.frames, 1);
-        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(2560, 0, 1280, 720), 1, true, 1, false}}, false});
-        QVERIFY(!host.m_layoutAwaitingReadback); QVERIFY(host.m_topologyAvailable);
-        QVERIFY(host.m_endpoint.keyFrameRequests() > before);
-        rig.frame(true); rig.frame(false);
-        QCOMPARE(rig.frames, 3);
-    }
-
-    // The backstop: even a topology that stays unusable after the reclaim (here: it lists none of the captured
-    // outputs) opens the gate with a key frame, also for a multi-surface capture, and a later good one restores checking.
-    void deskReclaimWithAnUnusableTopologyFailsOpen()
-    {
-        ReclaimRig rig; QVERIFY(rig.ok);
-        auto &host = rig.host;
-        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("Virtual-owned-0"), QRect(0, 0, 1280, 720), 1, true},
-                                                  {QStringLiteral("Virtual-owned-1"), QRect(1280, 0, 1280, 720), 1, false}}, QPoint(2560, 0)});
-        Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(2560, 0, 1280, 720), 1, true, 1, false},
-                                                   {QStringLiteral("Virtual-owned-1"), QSize(1280, 720), QRect(3840, 0, 1280, 720), 1, false, 2, false}}, false});
-        QVERIFY(!host.m_layoutAwaitingReadback);
-        VideoFrame multi; multi.size = QSize(1280, 720); multi.isKeyFrame = true;
-        multi.monitors = {{QRect(0, 0, 1280, 720), true}, {QRect(1280, 0, 1280, 720), false}};
-        Q_EMIT host.m_endpoint.frameReceived(multi);
-        QCOMPARE(rig.frames, 1);
-        host.physicalInputActivity();
-        const auto before = host.m_endpoint.keyFrameRequests();
-        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("Virtual-owned-0"), QRect(0, 0, 1280, 720), 1, true},
-                                                  {QStringLiteral("Virtual-owned-1"), QRect(1280, 0, 1280, 720), 1, false}}, QPoint(1920, 0)});
-        QVERIFY(host.m_layoutAwaitingReadback);
+        const auto reclaims = host.m_endpoint.reclaimRequests();
+        for (int i = 0; i < 4; ++i) host.physicalInputActivity(); // the desk reports every event
+        QCOMPARE(host.m_endpoint.reclaimRequests(), reclaims + 1);
+        QVERIFY(rig.client->replaceEnding); QVERIFY(!rig.client->replaceSpent);
+        QVERIFY2(host.m_configuredConsoleOutputs, "the outputs are still held until the worker verifies their release");
+        QVERIFY(rig.screens().size() == 1); // only the connect edge so far
+        // The worker's verified release.
+        Q_EMIT host.m_endpoint.physicalLeaseReleased({host.m_controlGeneration, true});
+        QVERIFY(!host.m_configuredConsoleOutputs);
+        QVERIFY(rig.client->replaceSpent); QVERIFY(host.m_expectedWorkerExit);
+        QVERIFY(!rig.client->codec->consoleVirtualPolicy().enabled);
+        QCOMPARE(rig.screens().size(), 2);
+        QVERIFY(!rig.screens().last().value(u"active"_s).toBool());
+        QCOMPARE(rig.screens().last().value(u"reason"_s).toString(), u"deskInput"_s);
+        // The worker exits as asked: no crash backoff, and the replacement arms no second Replace.
+        host.m_workerAlive = true; host.workerFailed();
+        QVERIFY2(!host.m_retryTimer.isActive(), "an exit that was asked for is not a failure");
+        QVERIFY(!host.m_expectedWorkerExit);
+        host.armConfiguredConsoleOutputs();
+        QVERIFY(!host.m_configuredConsoleOutputs); QVERIFY(rig.client->replaceSpent);
+        // The replacement captures the host's real screen like a plain connection: layout published, picture flows.
+        const auto keyFrames = host.m_endpoint.keyFrameRequests();
+        rig.frames = 0;
+        host.m_inputEnabled = true; rig.client->session->setWorkerActive(true);
+        Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("DP-3"), QRect(0, 0, 1920, 1080), 1, true}}, QPoint(0, 0)});
         Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("DP-3"), QSize(1920, 1080), QRect(0, 0, 1920, 1080), 1, true, 1, true}}, true});
-        QVERIFY(!host.m_layoutAwaitingReadback);
-        QVERIFY(host.m_endpoint.keyFrameRequests() > before);
-        Q_EMIT host.m_endpoint.frameReceived(multi);
-        QCOMPARE(rig.frames, 2);
+        QVERIFY(!host.m_layoutAwaitingReadback); QVERIFY(host.m_topologyAvailable);
+        QVERIFY(host.m_endpoint.keyFrameRequests() >= keyFrames);
+        VideoFrame f; f.size = QSize(1920, 1080); f.isKeyFrame = true; f.monitors = {{QRect(0, 0, 1920, 1080), true}};
+        Q_EMIT host.m_endpoint.frameReceived(f);
+        QCOMPARE(rig.frames, 1);
+    }
+
+    // The race: the desk is touched before the first topology confirmed Replace. The attempt is still live, so the worker is
+    // asked once and the release ends it; a client that never saw Replace active hears nothing.
+    void deskInputBeforeReplaceWasConfirmedEndsItToo()
+    {
+        ReclaimRig rig; QVERIFY(rig.ok);
+        auto &host = rig.host;
+        Q_EMIT host.m_endpoint.outputsReceived(ReclaimRig::replaced()); // no topology yet
+        QVERIFY(host.m_configuredConsoleOutputs); QVERIFY(rig.screens().isEmpty());
+        const auto reclaims = host.m_endpoint.reclaimRequests();
+        host.physicalInputActivity(); host.physicalInputActivity();
+        QCOMPARE(host.m_endpoint.reclaimRequests(), reclaims + 1);
+        Q_EMIT host.m_endpoint.physicalLeaseReleased({host.m_controlGeneration, true});
+        QVERIFY(!host.m_configuredConsoleOutputs); QVERIFY(rig.client->replaceSpent); QVERIFY(host.m_expectedWorkerExit);
+        QVERIFY(!rig.client->codec->consoleVirtualPolicy().enabled);
+        QVERIFY(rig.screens().isEmpty());
+    }
+
+    // The release belongs to the generation that asked for it: a stale report changes nothing.
+    void aStaleReleaseReportDoesNotEndTheAttempt()
+    {
+        ReclaimRig rig; QVERIFY(rig.ok);
+        auto &host = rig.host;
+        rig.connectInReplace();
+        host.physicalInputActivity();
+        Q_EMIT host.m_endpoint.physicalLeaseReleased({host.m_controlGeneration + 1, true});
+        QVERIFY(host.m_configuredConsoleOutputs); QVERIFY(!rig.client->replaceSpent); QVERIFY(!host.m_expectedWorkerExit);
+        QCOMPARE(rig.screens().size(), 1);
+    }
+
+    // A crash is still a crash: the backoff applies when the worker exits without having reported a verified release.
+    void aWorkerExitWithoutAVerifiedReleaseStillBacksOff()
+    {
+        ReclaimRig rig; QVERIFY(rig.ok);
+        auto &host = rig.host;
+        rig.connectInReplace();
+        host.physicalInputActivity();
+        Q_EMIT host.m_endpoint.physicalLeaseReleased({host.m_controlGeneration, false}); // unverified: nothing changes
+        QVERIFY(host.m_configuredConsoleOutputs); QVERIFY(!host.m_expectedWorkerExit);
+        host.m_workerAlive = true; host.workerFailed();
+        QVERIFY(host.m_retryTimer.isActive());
+        QVERIFY(rig.client->replaceSpent); // the dead worker's attempt is over either way
+        QCOMPARE(rig.screens().last().value(u"reason"_s).toString(), u"deskInput"_s);
+    }
+
+    // Desk input without Replace (plain capture, or extend): unchanged, every event is still passed on for the takeover.
+    void deskInputWithoutReplaceStillReclaims()
+    {
+        ReclaimRig rig; QVERIFY(rig.ok);
+        auto &host = rig.host;
+        const auto reclaims = host.m_endpoint.reclaimRequests();
+        rig.client->replaceSpent = true; rig.client->replaceAttempted = true;
+        host.physicalInputActivity(); host.physicalInputActivity();
+        QCOMPARE(host.m_endpoint.reclaimRequests(), reclaims + 2);
+        QVERIFY(!rig.client->replaceEnding);
     }
 
     // Whatever path leaves the gate set, it opens by itself, once, with a key frame (defensive deadline).

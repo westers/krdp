@@ -64,9 +64,10 @@ screen or a retry loop.
 | Reboot / power loss | Virtual outputs vanish; KWin's per-set store relights the real set; the journal replays at the next worker. |
 | Creation or replace fails | Restore, verify, then normal capture for the rest of the connection. **One Replace attempt per connection** (latch in the broker, S2b): no re-arm on the next worker Ready. |
 | Lock near disconnect (OPT-049) | Out of scope here (S3). |
-| Someone at the desk | Restore the screens, remote continues as extend, client is notified (D4). |
+| Someone at the desk | **End Replace (2026-10-07, replaces D4's "continue as extend").** Steve's requirement: while someone uses the host, the remote must keep showing the same desktop the host shows (a remote picture of only the extra virtual outputs' wallpaper is "out of sync"). Same verified creator release as a disconnect (physical outputs restored first, temporary outputs removed, journal dropped, lock guard S3), the worker exits, the broker starts the replacement at once (no crash backoff) with Replace off for this connection, which captures the real screens like a plain connection (the user's own `MonitorMode`). The connection stays up; `console-screens {active:false, reason:"deskInput"}` is sent when the release is verified. |
+| Host monitor plugged in while replaced (M-8) | Same as someone at the desk, reason `hostScreensChanged`. |
 | Greeter / SDDM | Never Replace. |
-| Client asks "turn screens back on" (S6) | Same path as local reclaim: restore, Replace ends for this connection, normal capture continues. |
+| Client asks "turn screens back on" (S6) | Same path as desk input (end Replace: release, then plain capture of the real screens), reason `restoreRequest`. |
 
 ## 5. KRDPCTL addition (S6, optional gap record)
 

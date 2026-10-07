@@ -59,6 +59,7 @@ public:
     void sendInput(const ConsoleWorkerWire::Input &input);
     void setMedia(const ConsoleWorkerWire::Media &media);
     void reclaimConsole(quint64 generation);
+    quint64 reclaimRequests() const { return m_reclaimRequests; } // asked for, whether or not a worker was there to hear it
     void setControlState(const ConsoleWorkerWire::ControlState &state);
     bool setPointerCapture(const QJsonObject &request);
     QJsonObject pointerState() const { return m_pointerState; }
@@ -158,6 +159,7 @@ private:
     bool m_ready = false;
     bool m_stopRequested = false;
     quint64 m_keyFrameRequests = 0;
+    quint64 m_reclaimRequests = 0;
     QTimer m_authenticationDeadline;
     std::optional<ConsoleWorkerWire::EncoderCaps> m_encoderCaps;
     QVector<ConsoleWorkerWire::EncoderReport> m_earlyReports;
