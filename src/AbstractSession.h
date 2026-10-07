@@ -318,6 +318,14 @@ protected:
     virtual void restartStreamForCodecChange();
 
     /**
+     * setStreamingEnabled(true) on a session that already started: get the stopped encoded stream
+     * running again. The default calls start() and reports error() when the stream has no node, since
+     * start() would only log and the picture would freeze with the connection up.
+     * PlasmaScreencastV1Session re-attaches its screencast node through the deferred restart.
+     */
+    virtual void resumeStreaming();
+
+    /**
      * AUD-FIX12: the running encoded stream was reconfigured (frame rate, quality). The default
      * does nothing; PlasmaScreencastV1Session arms its EncoderWatchdog.
      */

@@ -60,6 +60,7 @@ public:
 
 protected:
     void restartStreamForCodecChange() override;
+    void resumeStreaming() override;
     void encoderReconfigured() override;
 
 private:

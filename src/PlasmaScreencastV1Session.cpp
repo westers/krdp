@@ -40,6 +40,7 @@
 #include "PressedInputTracker.h"
 #include "ScreencastTarget.h"
 #include "StreamRecoveryPolicy.h"
+#include "StreamResumePolicy.h"
 #include "VideoStream.h"
 #include "WaylandRequestVersion.h"
 #include "WorkspaceFrameGeometry.h"
@@ -365,6 +366,8 @@ public:
     QTimer virtualScreenTimer;
     bool loggedGatedInput = false;
     uint pendingNodeId = 0;
+    // The node of the live screencast request: it outlives the consumer, which KPipeWire resets to node 0 on stop().
+    uint screencastNodeId = 0;
     std::chrono::steady_clock::time_point streamRestartWaitStarted;
     // Latch so a session whose stream is down logs one line for the whole
     // inactive period instead of one per dropped event; cleared as soon as the
@@ -709,6 +712,7 @@ bool PlasmaScreencastV1Session::setupScreencastRequest(bool recovery, bool allow
         disconnect(d->request, nullptr, this, nullptr);
         d->request->deleteLater();
         d->request = nullptr;
+        d->screencastNodeId = 0;
     }
 
     if (target == Private::StreamTarget::Virtual) {
@@ -758,6 +762,7 @@ bool PlasmaScreencastV1Session::setupScreencastRequest(bool recovery, bool allow
     connect(d->request, &ScreencastingStream::closed, this, [this]() {
         qCWarning(KRDP) << "Screencast stream closed, deferring recovery to let compositor settle";
         d->request = nullptr;
+        d->screencastNodeId = 0;
         scheduleStreamRecovery(0, RecoverySettleMs);
     });
     connect(d->request, &ScreencastingStream::created, this, &PlasmaScreencastV1Session::onScreencastCreated);
@@ -778,6 +783,7 @@ void PlasmaScreencastV1Session::onScreencastCreated(uint nodeId)
     qCDebug(KRDP) << "Plasma stream sizes: request" << (d->request ? d->request->size() : QSize()) << "logical" << logicalSize();
 
     auto encodedStream = stream();
+    d->screencastNodeId = nodeId;
 
     // A previous node is still being torn down (see StreamRestartPollMs): attach
     // once it is gone, otherwise start() silently does nothing and the node ID is
@@ -842,6 +848,39 @@ void PlasmaScreencastV1Session::restartStreamForCodecChange()
     encoderReconfigured();
     qCInfo(KRDP) << "Restarting encoded stream on node" << nodeId << "for the codec change";
     restartEncodedStream(nodeId); // setChromaMode() is applied at the next start(); the new stream opens with an IDR
+}
+
+void PlasmaScreencastV1Session::resumeStreaming()
+{
+    auto encodedStream = stream();
+    const auto state = [&] {
+        switch (encodedStream->state()) {
+        case PipeWireBaseEncodedStream::Recording:
+            return StreamResumePolicy::State::Recording;
+        case PipeWireBaseEncodedStream::Rendering:
+            return StreamResumePolicy::State::Rendering;
+        default:
+            return StreamResumePolicy::State::Idle;
+        }
+    }();
+    const auto decision = StreamResumePolicy::decide(encodedStream->nodeId(), state, d->streamRestartTimer.isActive(), d->screencastNodeId, d->request != nullptr);
+    switch (decision.action) {
+    case StreamResumePolicy::Action::None:
+        return;
+    case StreamResumePolicy::Action::Start:
+        encodedStream->start();
+        return;
+    case StreamResumePolicy::Action::Reattach:
+        // start() on a stopped stream is a silent no-op (no node, or the old producer is still exiting):
+        // the deferred restart waits for the producer to end, then sets the node and starts.
+        qCInfo(KRDP) << "Resuming the stopped encoded stream on node" << decision.node;
+        restartEncodedStream(decision.node);
+        return;
+    case StreamResumePolicy::Action::Recreate:
+        qCWarning(KRDP) << "Resuming a stopped stream whose screencast is gone: creating a new one";
+        start(); // reports error() when it cannot
+        return;
+    }
 }
 
 void PlasmaScreencastV1Session::attachEncodedStream(uint nodeId, bool streamWasActive)

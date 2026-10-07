@@ -250,6 +250,12 @@ target_link_libraries(EncoderFailurePolicyTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME EncoderFailurePolicyTest COMMAND EncoderFailurePolicyTest)
 set_tests_properties(EncoderFailurePolicyTest PROPERTIES TIMEOUT 60)
 
+add_executable(StreamResumePolicyTest StreamResumePolicyTest.cpp)
+target_include_directories(StreamResumePolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(StreamResumePolicyTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME StreamResumePolicyTest COMMAND StreamResumePolicyTest)
+set_tests_properties(StreamResumePolicyTest PROPERTIES TIMEOUT 60)
+
 add_executable(EncoderWatchdogTest EncoderWatchdogTest.cpp)
 target_include_directories(EncoderWatchdogTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(EncoderWatchdogTest PRIVATE Qt6::Test Qt6::Core)

@@ -250,6 +250,8 @@ private Q_SLOTS:
     void consoleReplaceRelock();
     void consoleFreshWorkerFirstFrame_data();
     void consoleFreshWorkerFirstFrame();
+    void consoleTakeoverKeepsFrames_data();
+    void consoleTakeoverKeepsFrames();
     void consoleDeskReclaimKeepsFrames_data();
     void consoleDeskReclaimKeepsFrames();
     void consoleReplaceFailsOpen_data();
@@ -885,15 +887,119 @@ void WorkerEndToEndTest::consoleFreshWorkerFirstFrame()
     qInfo().noquote() << "D2 probe: first frame after bind" << (switchToHevc ? "(avc420 then hevc)" : "(avc420)") << timings.join(QStringLiteral(", "));
 }
 
+void WorkerEndToEndTest::consoleTakeoverKeepsFrames_data()
+{
+    QTest::addColumn<int>("captureMode");
+    QTest::addColumn<int>("scenario");
+    using Mode = MonitorCapturePolicy::Mode;
+    // 0: local takeover after the capture has settled; 1: the controller withdraws, a viewer stays;
+    // 2: takeover right after the first frame (the 18:43 race); 3: takeover, then control comes back.
+    QTest::newRow("specific, takeover after 2 s") << int(Mode::Specific) << 0;
+    QTest::newRow("primary, takeover after 2 s") << int(Mode::Primary) << 0;
+    QTest::newRow("specific, controller withdraws") << int(Mode::Specific) << 1;
+    QTest::newRow("specific, takeover right after the first frame") << int(Mode::Specific) << 2;
+    QTest::newRow("specific, takeover then control returns") << int(Mode::Specific) << 3;
+}
+
+// 2026-10-07 Sol freeze: on a ONE-screen host with a single-output capture policy the worker captures through m_session,
+// stops it once the per-output capture is proven (KPipeWire then clears the consumer's node id) and resumes it when the
+// policy is withdrawn (a local takeover makes the remote a viewer). A bare start() on a stream without a node did nothing,
+// so the picture froze with the connection up. Pass = decoded key frames keep coming within 10 s of the takeover.
+void WorkerEndToEndTest::consoleTakeoverKeepsFrames()
+{
+    QFETCH(int, captureMode);
+    QFETCH(int, scenario);
+    if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
+    auto *s = session(1);
+    QVERIFY(s);
+    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
+    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
+    ConsoleWorkerEndpoint endpoint;
+    WorkerRun run;
+    ConsoleWorkerWire::Outputs outputs;
+    connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&](const auto &value) { outputs = value; });
+    const auto logs = qScopeGuard([&] {
+        if (QTest::currentTestFailed()) qWarning().noquote() << "worker.log:" << s->log(QStringLiteral("worker.log"), 12000)
+            << "kwin.log:" << s->log(QStringLiteral("kwin.log"), 5000);
+    });
+    const auto noNode = [&] { return s->log(QStringLiteral("worker.log"), 4000000).count(QStringLiteral("without a node ID")); };
+    const auto noNodeBefore = noNode();
+    QVERIFY(startWorker(*s, false, endpoint, run));
+    const QString exitFile = s->runtime->path() + QStringLiteral("/worker-exit");
+    const auto reap = qScopeGuard([&] {
+        if (!QFileInfo::exists(exitFile)) { endpoint.stopWorker(); (void)QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 15000); }
+    });
+    QTRY_VERIFY_WITH_TIMEOUT((endpoint.ready() && outputs.monitors.size() == 1) || !run.errors.isEmpty(), 45000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    const auto mode = MonitorCapturePolicy::Mode(captureMode);
+    const auto keyframe = [&](const VideoFrame &frame) {
+        return frame.isKeyFrame && frame.monitors.size() == 1 && frame.size == QSize(1280, 720)
+            && h264KeyframeSize(frame.data) == std::optional(frame.size);
+    };
+    const auto decoded = [&](const QString &what, int timeoutMs) {
+        QElapsedTimer waited;
+        waited.start();
+        const bool got = QTest::qWaitFor([&] { return std::any_of(run.frames.cbegin(), run.frames.cend(), keyframe) || !run.errors.isEmpty(); }, timeoutMs);
+        if (!got || !run.errors.isEmpty()) {
+            qWarning().noquote() << what << ": no decoded key frame in" << timeoutMs << "ms" << run.errors;
+            return qint64(-1);
+        }
+        const auto proof = *std::find_if(run.frames.cbegin(), run.frames.cend(), keyframe);
+        ClientStyle::Decoder decoder;
+        if (!decoder.feed(1, VideoCodec::Avc420, proof.data) || decoder.surfaces().value(1).lastPicture != proof.size) {
+            qWarning().noquote() << what << ": the key frame does not decode" << decoder.error();
+            return qint64(-1);
+        }
+        return waited.elapsed();
+    };
+    run.frames.clear();
+    endpoint.setControlState({1, true});
+    ConsoleWorkerWire::EncoderConfig config;
+    config.generation = 1;
+    config.settings = CodecPolicy::EncoderSettings{.hardware = false};
+    config.capture = {mode, 0};
+    QVERIFY(endpoint.setEncoderConfig(config));
+    endpoint.requestKeyFrame();
+    QVERIFY2(decoded(QStringLiteral("capture start"), 45000) >= 0, "no decoded key frame at the start");
+    if (scenario != 2) QTest::qWait(2500); // m_session's producer is gone by now (node id 0)
+
+    run.frames.clear();
+    QElapsedTimer sinceTakeover;
+    sinceTakeover.start();
+    if (scenario != 1) endpoint.reclaimConsole(1);
+    endpoint.setControlState({2, false}); // what the broker sends once it has released the controller
+    endpoint.requestKeyFrame();
+    const qint64 first = decoded(QStringLiteral("after the takeover"), 10000);
+    QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
+    QVERIFY2(first >= 0, "the picture froze: no decoded key frame within 10 s of the takeover");
+    qInfo().noquote() << "Takeover scenario" << scenario << "mode" << captureMode << ": first decoded key frame" << sinceTakeover.elapsed() << "ms after the takeover";
+    QCOMPARE(noNode(), noNodeBefore);
+
+    if (scenario == 3) { // control returns with the same single-output policy: frames resume as per-output capture
+        run.frames.clear();
+        endpoint.setControlState({3, true});
+        config.generation = 2;
+        QVERIFY(endpoint.setEncoderConfig(config));
+        endpoint.requestKeyFrame();
+        QVERIFY2(decoded(QStringLiteral("control returns"), 15000) >= 0, "no decoded key frame after control returned");
+        QCOMPARE(noNode(), noNodeBefore);
+    }
+    stopWorker(*s, endpoint);
+}
+
 void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames_data()
 {
     QTest::addColumn<int>("count");
     QTest::addColumn<bool>("race");
     QTest::addColumn<bool>("locked");
-    QTest::newRow("single replace, reclaim after the picture is flowing") << 1 << false << false;
-    QTest::newRow("two replace, reclaim after the picture is flowing") << 2 << false << false;
-    QTest::newRow("single replace, reclaim right after the Outputs record (race)") << 1 << true << false;
-    QTest::newRow("single replace, session locked when the desk is touched") << 1 << false << true;
+    QTest::addColumn<int>("fixtureOutputs"); // host screens of the private session
+    QTest::addColumn<bool>("takeover"); // after the replacement's picture: 15 s, then a plain desk takeover (policy Specific)
+    QTest::newRow("single replace, reclaim after the picture is flowing") << 1 << false << false << 2 << false;
+    QTest::newRow("two replace, reclaim after the picture is flowing") << 2 << false << false << 2 << false;
+    QTest::newRow("single replace, reclaim right after the Outputs record (race)") << 1 << true << false << 2 << false;
+    QTest::newRow("single replace, session locked when the desk is touched") << 1 << false << true << 2 << false;
+    // 2026-10-07 Sol freeze (one host screen, single-output policy): a second desk event 15 s after the Replace ended is a takeover.
+    QTest::newRow("one host screen, replace ends, takeover 15 s later (specific)") << 1 << false << false << 1 << true;
 }
 
 // OPT-060 end Replace (2026-10-07): the worker side of a desk-input reclaim in Replace. The worker no longer continues as
@@ -903,9 +1009,9 @@ void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames_data()
 // key frame of the replacement (the worker-only part of the gap; the broker adds its launcher time).
 void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames()
 {
-    QFETCH(int, count); QFETCH(bool, race); QFETCH(bool, locked);
+    QFETCH(int, count); QFETCH(bool, race); QFETCH(bool, locked); QFETCH(int, fixtureOutputs); QFETCH(bool, takeover);
     if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
-    auto *s = session(2); QVERIFY(s);
+    auto *s = session(fixtureOutputs); QVERIFY(s);
     if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
     if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
     ConsoleWorkerEndpoint endpoint; WorkerRun run;
@@ -952,7 +1058,7 @@ void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames()
         if (!QFileInfo::exists(exitFile)) { endpoint.stopWorker(); (void)QTest::qWaitFor([&] { return QFileInfo::exists(exitFile); }, 30000); }
         QFile::remove(marker);
     });
-    QTRY_VERIFY_WITH_TIMEOUT((endpoint.ready() && outputs.monitors.size() == 2) || !run.errors.isEmpty(), 45000);
+    QTRY_VERIFY_WITH_TIMEOUT((endpoint.ready() && outputs.monitors.size() == fixtureOutputs) || !run.errors.isEmpty(), 45000);
     QVERIFY2(run.errors.isEmpty(), qPrintable(run.errors.join(QLatin1Char('\n'))));
     const auto initial = outputs;
     // The fixture's two baseline outputs are aliased to physical connector names so the real PhysicalOutputGuard may
@@ -1075,6 +1181,7 @@ sys.exit(result.returncode)
     plainRun.frames.clear();
     plain.setControlState({1, true});
     ConsoleWorkerWire::EncoderConfig plainConfig{.generation = 1, .codec = VideoCodec::Avc420, .settings = CodecPolicy::EncoderSettings{.hardware = false}};
+    if (takeover) plainConfig.capture = {MonitorCapturePolicy::Mode::Specific, 0};
     QVERIFY(plain.setEncoderConfig(plainConfig));
     plain.requestKeyFrame();
     QTRY_VERIFY_WITH_TIMEOUT(std::any_of(plainRun.frames.cbegin(), plainRun.frames.cend(), [](const auto &frame) { return frame.isKeyFrame; })
@@ -1094,6 +1201,20 @@ sys.exit(result.returncode)
     QCOMPARE(decoder.surfaces().value(int(key->monitorIndex) + 1).lastPicture, key->size);
     qInfo().noquote() << "End Replace: reclaim to first decoded key frame of the replacement worker" << firstFrameMs << "ms; outputs" << names.join(QLatin1Char(','))
                       << "frame" << key->size.width() << "x" << key->size.height();
+    if (takeover) {
+        // The user touches the desk again 15 s later: the broker (Replace is over) reclaims, the worker sends LocalTakeover, the
+        // remote becomes a viewer and the capture policy is withdrawn. The picture must keep coming.
+        QTest::qWait(15000);
+        plainRun.frames.clear();
+        QElapsedTimer sinceTakeover; sinceTakeover.start();
+        plain.reclaimConsole(1);
+        plain.setControlState({2, false});
+        plain.requestKeyFrame();
+        QTRY_VERIFY2_WITH_TIMEOUT(std::any_of(plainRun.frames.cbegin(), plainRun.frames.cend(), [](const auto &frame) { return frame.isKeyFrame; })
+            || !plainRun.errors.isEmpty(), "the picture froze after the takeover", 10000);
+        QVERIFY2(plainRun.errors.isEmpty(), qPrintable(plainRun.errors.join(QLatin1Char('\n'))));
+        qInfo() << "Takeover 15 s after the Replace reclaim: first key frame" << sinceTakeover.elapsed() << "ms after the takeover";
+    }
     plain.stopWorker();
     QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(exitFile), 30000);
     QFile::rename(marker + QStringLiteral(".off"), marker);

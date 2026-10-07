@@ -202,6 +202,7 @@ public:
                 qWarning().noquote() << "Worker output recovery:" << error;
                 m_exitCode = 1;
             }
+            m_resumeProbe.stop();
             m_session.setStreamingEnabled(false);
             for (const auto &session : m_multiSessions) session->setStreamingEnabled(false);
             m_outputStopDone = true;
@@ -493,6 +494,9 @@ public:
             m_socket.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Error, QByteArrayLiteral("screencast failed")));
             m_socket.disconnectFromServer();
         });
+        m_resumeProbe.setSingleShot(true);
+        m_resumeProbe.setInterval(4000);
+        connect(&m_resumeProbe, &QTimer::timeout, this, &Worker::checkResumedCapture);
         m_multiSettle.setSingleShot(true);
         m_multiSettle.setInterval(400);
         connect(&m_multiSettle, &QTimer::timeout, this, &Worker::syncCaptureMode);
@@ -579,6 +583,7 @@ private:
         m_multiPublishedFrames.clear();
         m_lastPhysicalKeyframe.reset();
         m_multiResizeNeedsRestart = true;
+        m_resumeProbe.stop();
         m_session.setStreamingEnabled(false);
         m_multiSessions.clear();
     }
@@ -1493,6 +1498,7 @@ private:
                 m_outputs = {};
                 m_lastPhysicalKeyframe.reset();
                 m_session.setStreamingEnabled(true);
+                armResumeProbe();
             } else if (m_captureSelectionPending) {
                 m_session.requestKeyFrame();
             }
@@ -1619,6 +1625,25 @@ private:
             m_multiSessions.push_back(std::move(session));
         }
         for (const auto &session : m_multiSessions) session->setStreamingEnabled(true);
+    }
+
+    void armResumeProbe()
+    {
+        m_resumeProbeRetried = false;
+        m_resumeProbe.start();
+    }
+
+    void checkResumedCapture()
+    {
+        if (m_multiMode || m_session.streamActive()) return;
+        if (m_resumeProbeRetried) {
+            qWarning() << "Console capture: the resumed workspace capture is still not running";
+            return;
+        }
+        m_resumeProbeRetried = true;
+        if (m_resumeLog.allow()) qWarning() << "Console capture: the resumed workspace capture is not running after 4 s; resuming it once more";
+        m_session.setStreamingEnabled(true);
+        m_resumeProbe.start();
     }
 
     // FIX-CURSOR: shape and visibility only; the client moves its own pointer.
@@ -3513,6 +3538,10 @@ private:
     QPoint m_workspaceOrigin;
     QSet<QScreen *> m_watchedScreens;
     QTimer m_multiSettle;
+    // Safety net behind AbstractSession::resumeStreaming(): a resumed workspace capture that is not running
+    // after a few seconds is resumed once more (never a loop) and said so, instead of freezing the picture.
+    QTimer m_resumeProbe;
+    bool m_resumeProbeRetried = false;
     QTimer m_physicalDeadline;
     std::optional<ConsoleWorkerWire::PhysicalLayout> m_physicalPending;
     std::optional<ConsoleTopologyPlan::Plan> m_physicalPlan;
@@ -3593,6 +3622,7 @@ private:
     std::optional<bool> m_lockActive;
     ConsoleReleaseLock::Context m_lockContext;
     LogThrottle m_lockLog{std::chrono::seconds(5), 3};
+    LogThrottle m_resumeLog{std::chrono::seconds(30), 2};
     KRdp::ConsoleReclaimEpisode m_reclaimEpisode; // OPT-060: one reclaim per applied Console layout
     int m_relockAttempts = 0;
     bool m_lockEdgeValid = false;

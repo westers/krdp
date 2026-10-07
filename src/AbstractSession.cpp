@@ -418,11 +418,22 @@ void AbstractSession::setStreamingEnabled(bool enable)
 
     if (d->encodedStream) {
         if (enable && d->started) {
-            d->encodedStream->start();
+            resumeStreaming();
         } else {
             d->encodedStream->stop();
         }
     }
+}
+
+void AbstractSession::resumeStreaming()
+{
+    if (d->encodedStream->nodeId() == 0 && !d->encodedStream->isActive()) {
+        // KPipeWire cleared the node when the stopped producer ended; start() would only log.
+        qCWarning(KRDP) << "Cannot resume streaming: the stopped stream has no node to attach";
+        Q_EMIT error();
+        return;
+    }
+    d->encodedStream->start();
 }
 
 void AbstractSession::setVideoFrameRate(quint32 framerate)
