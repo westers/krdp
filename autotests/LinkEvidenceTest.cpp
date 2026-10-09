@@ -128,6 +128,62 @@ private Q_SLOTS:
 
     // A client-paced stream filling a throttled path only in bursts: 1.4x the sent rate is link-bound
     // only with the RTT inflated and retransmits alongside (they corroborate, never decide).
+    // OPT-061: a low capacity window needs corroboration. At a normal sending rate (5.2-6.5 Mbit/s
+    // against a 33 Mbit/s threshold) the estimate must have stayed low for the last PersistIntervals
+    // intervals: a window that is mostly low but whose last intervals recovered is not declared.
+    void recoveredWindowIsNotDeclared()
+    {
+        State state;
+        for (int i = 0; i < 12; ++i) judge(state, slowClient(lan()));
+        bool declared = false;
+        for (int i = 0; i < 10; ++i) {
+            // 7 low intervals, then the last PersistIntervals recovered: the 65th percentile stays low.
+            const bool recovered = i >= 10 - PersistIntervals;
+            auto in = slowClient(lan(), recovered ? 40000u : quint32(5700 + 600 * jitter(i)));
+            in.sentKbps = quint32(5200 + 1300 * jitter(i + 1));
+            const auto v = judge(state, in);
+            if (recovered) {
+                declared = declared || v.slow;
+            }
+        }
+        QVERIFY(!declared);
+    }
+
+    // OPT-061 (Buzz 2026-10-07 18:58): 704 kbit/s sent against a 26.7 Mbit/s threshold is under
+    // LowVolumeShare: a capacity of 744 kbit/s there is what was sent, not the path. Persisting
+    // proves nothing, quiet TCP numbers neither; a backed-up growing send queue does.
+    void lowVolumeNeedsAQueue()
+    {
+        const auto run = [](bool queueGrows, bool loss) {
+            State state;
+            bool slow = false;
+            quint64 retransmits = 0;
+            for (int i = 0; i < 20; ++i) {
+                Signals in;
+                in.slowBelowKbps = 26667;
+                in.sentKbps = 704;
+                in.capacityKbps = 744;
+                Socket s = lan();
+                if (queueGrows) {
+                    s.queuedBytes = 96 * 1024 + 32 * 1024 * i;
+                    s.appLimited = false;
+                }
+                if (loss) {
+                    s.rttUs = 120000; // queueing delay 118 ms
+                    retransmits += 3; // 3 of 190 segments a second: over 1 %
+                }
+                s.totalRetransmits = retransmits;
+                in.socket = s;
+                const auto v = judge(state, in);
+                slow = slow || v.slow;
+            }
+            return slow;
+        };
+        QVERIFY(!run(false, false)); // no network verdict either
+        QVERIFY(run(true, false));
+        QVERIFY(run(false, true)); // delay together with a loss ratio
+    }
+
     void corroborationTipsABorderlineWindow()
     {
         for (const bool corroborated : {false, true}) {

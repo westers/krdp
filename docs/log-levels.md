@@ -22,3 +22,11 @@ in production monitoring; use the Info lines (`Codec policy: ...`, `Reset graphi
   `X-KDE-Wayland-Interfaces` grant for the executable, or a login greeter). One Warning line names the
   remedy; the session closes, the process and listener stay up. A missing `org_kde_kwin_fake_input`
   alone only disables remote input (one Warning line).
+
+## Slow-link line (OPT-061)
+
+`Video: the link is slow: slow link (TCP capacity at most N kbit/s in 65 % of 10 s (threshold T, S kbit/s sent); corroborated by ...)`
+now ends with what corroborated it: "low for the last 3 intervals", "queueing delay N ms", "N retransmits in about M
+segments" or "send queue growing in N of M intervals". A low capacity estimate without any of those (a nearly idle sender
+measures about what it sends) declares nothing and logs nothing. Journal parsers that match the line's prefix are
+unaffected.

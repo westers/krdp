@@ -42,7 +42,17 @@
  *   SendQueueBackedUp over the window, the sender not application-limited in QueueShare of them,
  *   and the stream congested in CongestedShare of them. SIOCOUTQ counts what is in flight too, so a
  *   Wi-Fi round trip alone fills it; hence the net growth.
- * - slow (Verdict::slow): link-bound. The codec policy enters a slow link on it.
+ * - corroboration (OPT-061, Buzz 2026-10-07 18:58 "capacity at most 744 kbit/s, 704 kbit/s sent", 187
+ *   Mbit/s 15 s later; four false slow links and codec flips in 30 min): TCP's delivery rate of a sender
+ *   that sends almost nothing is about what it sends, whatever the path can carry. A low capacity
+ *   estimate alone therefore no longer declares a link-bound window. It needs at least one of:
+ *   the estimate under the threshold in each of the last PersistIntervals intervals (not a dip),
+ *   TCP's round trip QueueingDelay over its minimum (median of the window), retransmits at
+ *   LossRatio of the segments sent, or a send queue backed up and growing in QueueShare of the
+ *   window. A stream sending under LowVolumeShare of the threshold proves little about the path
+ *   (that is exactly the false case): there only a backed-up growing send queue, or queueing delay
+ *   together with that loss ratio, counts. The persistence rule does not.
+ * - slow (Verdict::slow): link-bound and corroborated. The codec policy enters a slow link on it.
  * - fast (Verdict::fast): over the last RecoverWindow (full), capacity samples in at least
  *   RecoverKnownShare of the intervals and their median at or above the recovery threshold: the
  *   slow-link threshold, or RecoverGrowth times the most the path carried while it was link-bound
@@ -97,6 +107,12 @@ constexpr double CorroboratedRetransmitShare = 0.34;
 constexpr double RecoverGrowth = 2.0;
 constexpr auto BoundMemory = std::chrono::seconds(120);
 constexpr int MinCapacitySamples = 4;
+constexpr int PersistIntervals = 3; ///< corroboration: the capacity estimate stayed low this many intervals in a row (4.5 s)
+constexpr double LowVolumeShare = 0.05; ///< of the slow-link threshold: a stream this small hardly exercises the path
+constexpr auto QueueingDelay = std::chrono::milliseconds(30); ///< corroboration: median TCP RTT over its minimum
+constexpr double LossRatio = 0.01; ///< corroboration: retransmits per segment sent
+constexpr quint64 LossMinRetransmits = 5; ///< ... and at least this many in the window
+constexpr int TcpSegmentBits = 1448 * 8;
 constexpr double QueueShare = 0.5;
 constexpr double CongestedShare = 0.6;
 constexpr auto RecoverWindow = std::chrono::seconds(15);
@@ -128,7 +144,8 @@ enum class Cause { None, Link, Client };
 
 struct Verdict {
     std::optional<bool> network; ///< link-bound over the window; nullopt = no socket figures
-    bool slow = false; ///< enter a slow link (network, sustained over the window)
+    bool slow = false; ///< enter a slow link (network, sustained over the window, corroborated)
+    bool uncorroborated = false; ///< a low capacity window that was left undeclared for want of corroboration
     bool fast = false; ///< the capacity proves the link fast again (RecoverWindow)
     std::optional<quint32> capacityKbps; ///< median capacity over SlowWindow (none: no sample)
     double recoverKbps = 0; ///< the recovery threshold (see fast)
@@ -155,6 +172,7 @@ struct Sample {
     bool rttInflated = false;
     quint64 retransmits = 0;
     qint64 rttUs = 0;
+    qint64 minRttUs = 0; ///< tcpi_min_rtt, 0 = unknown
 };
 
 struct State {
@@ -186,6 +204,12 @@ inline quint32 percentile(QList<quint32> values, double p)
     return values.at(rank - 1);
 }
 
+/// What corroborates a low capacity estimate (see the file comment); \a accepted when enough does.
+struct Corroboration {
+    bool accepted = false;
+    QString why;
+};
+
 namespace detail
 {
 /// The corroborating signals over \a samples: RTT inflation and retransmits.
@@ -203,6 +227,54 @@ inline QString corroboration(const QList<Sample> &samples)
     if (inflated > 0) parts << QStringLiteral("TCP round trip inflated in %1 of %2 intervals (up to %3 ms)").arg(inflated).arg(samples.size()).arg(maxRtt / 1000);
     if (retransmits > 0) parts << QStringLiteral("%1 retransmits").arg(retransmits);
     return parts.join(QStringLiteral(", "));
+}
+
+
+/**
+ * Whether the low capacity over \a window is corroborated. \a history is every kept sample (the
+ * last PersistIntervals are the persistence test), \a queuedSamples the window's samples with a
+ * growing send queue.
+ */
+inline Corroboration corroborate(const QList<Sample> &history, const QList<Sample> &window, double slowBelowKbps, quint32 medianSentKbps, int queuedSamples)
+{
+    Corroboration out;
+    if (window.isEmpty()) return out;
+    const bool lowVolume = double(medianSentKbps) < LowVolumeShare * slowBelowKbps;
+
+    bool persisted = history.size() >= PersistIntervals;
+    for (qsizetype i = history.size() - 1; persisted && i >= history.size() - PersistIntervals; --i) {
+        const auto &c = history.at(i).capacityKbps;
+        persisted = c && double(*c) < slowBelowKbps;
+    }
+
+    QList<qint64> delays;
+    quint64 retransmits = 0;
+    double segments = 0;
+    const double intervalSeconds = std::chrono::duration<double>(Interval).count();
+    for (const auto &s : window) {
+        if (s.rttUs > 0 && s.minRttUs > 0) delays << std::max<qint64>(0, s.rttUs - s.minRttUs);
+        retransmits += s.retransmits;
+        segments += double(s.sentKbps.value_or(0)) * 1000.0 * intervalSeconds / TcpSegmentBits;
+    }
+    std::sort(delays.begin(), delays.end());
+    const qint64 delayUs = delays.isEmpty() ? 0 : delays.at(delays.size() / 2);
+    const bool queueing = delayUs >= std::chrono::duration_cast<std::chrono::microseconds>(QueueingDelay).count();
+    const bool loss = retransmits >= LossMinRetransmits && segments > 0 && double(retransmits) >= LossRatio * segments;
+    const bool queue = queuedSamples >= QueueShare * window.size();
+
+    QStringList parts;
+    if (lowVolume) {
+        if (queue) parts << QStringLiteral("send queue growing in %1 of %2 intervals").arg(queuedSamples).arg(window.size());
+        if (queueing && loss) parts << QStringLiteral("queueing delay %1 ms and %2 retransmits").arg(delayUs / 1000).arg(retransmits);
+    } else {
+        if (persisted) parts << QStringLiteral("low for the last %1 intervals").arg(PersistIntervals);
+        if (queue) parts << QStringLiteral("send queue growing in %1 of %2 intervals").arg(queuedSamples).arg(window.size());
+        if (queueing) parts << QStringLiteral("queueing delay %1 ms").arg(delayUs / 1000);
+        if (loss) parts << QStringLiteral("%1 retransmits in about %2 segments").arg(retransmits).arg(qRound(segments));
+    }
+    out.accepted = !parts.isEmpty();
+    out.why = parts.isEmpty() ? QStringLiteral("not corroborated") : QStringLiteral("corroborated by ") + parts.join(QStringLiteral(" and "));
+    return out;
 }
 }
 
@@ -235,6 +307,7 @@ inline Verdict judge(State &state, const Signals &in)
         sample.congested = in.congested;
         sample.sentKbps = in.sentKbps;
         sample.rttUs = socketNow.rttUs;
+        sample.minRttUs = socketNow.minRttUs;
         sample.retransmits = before && socketNow.totalRetransmits >= before->totalRetransmits ? socketNow.totalRetransmits - before->totalRetransmits : 0;
         sample.rttInflated = rttInflated(socketNow);
         const bool backedUp = socketNow.queuedBytes >= SendQueueBackedUp;
@@ -304,14 +377,20 @@ inline Verdict judge(State &state, const Signals &in)
             const quint32 high = percentile(capacities, SlowPercentile);
             const double factor = corroboratedNow ? CorroboratedBoundFactor : LinkBoundFactor;
             if (double(high) < in.slowBelowKbps && double(high) < factor * double(*medianSent)) {
-                linkBound = true;
-                state.bound.append({now, *capacityMedian});
-                v.linkWhy = withCorroboration(QStringLiteral("TCP capacity at most %1 kbit/s in %2 % of %3 s (threshold %4, %5 kbit/s sent)")
-                                                  .arg(high)
-                                                  .arg(qRound(SlowPercentile * 100))
-                                                  .arg(seconds(SlowWindow))
-                                                  .arg(qRound(in.slowBelowKbps))
-                                                  .arg(*medianSent));
+                const Corroboration proof = detail::corroborate(state.samples, window, in.slowBelowKbps, *medianSent, queued);
+                if (proof.accepted) {
+                    linkBound = true;
+                    state.bound.append({now, *capacityMedian});
+                    v.linkWhy = withCorroboration(QStringLiteral("TCP capacity at most %1 kbit/s in %2 % of %3 s (threshold %4, %5 kbit/s sent); %6")
+                                                      .arg(high)
+                                                      .arg(qRound(SlowPercentile * 100))
+                                                      .arg(seconds(SlowWindow))
+                                                      .arg(qRound(in.slowBelowKbps))
+                                                      .arg(*medianSent)
+                                                      .arg(proof.why));
+                } else {
+                    v.uncorroborated = true;
+                }
             }
         } else if (full && capacities.isEmpty() && queued >= QueueShare * window.size() && busy >= QueueShare * window.size()
                    && queueGrowth >= SendQueueBackedUp && congested >= CongestedShare * window.size()) {

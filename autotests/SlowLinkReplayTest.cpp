@@ -187,6 +187,88 @@ Outcome replay(const Trace &trace, double capacityJitter = 0.0, double rttJitter
     return out;
 }
 
+
+/// OPT-061: Buzz 2026-10-07 (evidence/2026-10-07-quality-meter/buzz-journal-excerpt): TCP capacity
+/// "at most 744 kbit/s" while 704 kbit/s were sent, 187 Mbit/s 15 s later: a nearly idle sender
+/// measures about what it sends. \a dip describes a stretch of intervals with that estimate.
+struct Dip {
+    quint32 sentKbps;
+    quint32 capacityKbps;
+    qint64 rttUs; ///< TCP round trip during the dip (minimum 2 ms)
+    int retransmits; ///< in all, one per interval from the start of the dip
+    int intervals;
+    bool queueGrows = false;
+};
+
+struct DipOutcome {
+    bool everSlow = false;
+    bool codecChanged = false;
+    QString log;
+};
+
+/// A healthy session (1245 kbit/s sent, 60 Mbit/s capacity, 6 ms), then \a dip, then healthy again.
+DipOutcome replayDip(const Dip &dip, quint32 healthySentKbps = 1245)
+{
+    DipOutcome out;
+    LinkEvidence::State evidence;
+    CodecPolicy::State policy;
+    CodecPolicy::Input in;
+    in.mode = CodecPolicy::SoftwareEncoding::Auto;
+    in.encoders.avc = {true, true};
+    in.encoders.hevc = {true, true};
+    in.encoders.av1 = {false, true}; // Buzz: AV1 in software only
+    in.client = {CodecPolicy::Family::Hevc, CodecPolicy::Family::Av1}; // Buzz: HEVC in hardware, AV1 only in software
+    in.pixels = 1920LL * 1080;
+    in.qualityCap = 80;
+    in.quality = 80;
+    CodecPolicy::step(policy, in, T0);
+    const auto first = *policy.current;
+    const double slowBelow = CodecPolicy::slowBelowKbps(in.pixels);
+    quint64 retransmits = 0;
+    qint64 queued = 0;
+    const int healthy = 12;
+    for (int i = 0; i < healthy + dip.intervals + 16; ++i) {
+        const bool inDip = i >= healthy && i < healthy + dip.intervals;
+        LinkEvidence::Signals sig;
+        sig.at = T0 + std::chrono::milliseconds(1500 * (i + 1));
+        sig.slowBelowKbps = slowBelow;
+        sig.throttled = false;
+        sig.congested = inDip && dip.queueGrows;
+        sig.sentKbps = inDip ? dip.sentKbps : healthySentKbps;
+        sig.capacityKbps = inDip ? dip.capacityKbps : 60000;
+        LinkEvidence::Socket socket;
+        socket.minRttUs = 2000;
+        socket.rttUs = inDip ? dip.rttUs : 6000;
+        if (inDip && i - healthy < dip.retransmits) retransmits += 1;
+        socket.totalRetransmits = retransmits;
+        if (inDip && dip.queueGrows) {
+            queued = std::max<qint64>(queued, 96 * 1024) + 32 * 1024;
+        } else {
+            queued = 0;
+        }
+        socket.queuedBytes = queued;
+        socket.appLimited = !(inDip && dip.queueGrows);
+        sig.socket = socket;
+        const auto verdict = LinkEvidence::judge(evidence, sig);
+        in.bandwidthKbps = *sig.sentKbps;
+        in.congested = sig.congested;
+        in.networkLimited = verdict.network;
+        in.throttledByLink = verdict.throttledByLink;
+        in.clientLimited = verdict.clientLimited;
+        in.capacityKbps = sig.capacityKbps;
+        in.linkSlow = verdict.slow;
+        in.linkFast = verdict.fast;
+        in.linkWhy = verdict.linkWhy;
+        in.capacityNow = verdict.capacityNow;
+        in.linkIdle = verdict.idle;
+        const auto decision = CodecPolicy::step(policy, in, sig.at);
+        if (policy.slowLink) out.log += QStringLiteral("%1: %2\n").arg(i).arg(decision.linkReason);
+        out.everSlow = out.everSlow || policy.slowLink;
+        out.codecChanged = out.codecChanged || *policy.current != first;
+    }
+    return out;
+}
+
 Trace a312776()
 {
     return {A312776GPanel, A312776GSent, A312776GTbfOnMs, A312776GTbfOffMs, CodecPolicy::Family::Hevc};
@@ -258,6 +340,51 @@ private Q_SLOTS:
         const auto out = replay(trace, 0.3, 0.8);
         QVERIFY2(!out.slowAtMs, qPrintable(out.log.join(u"\n"_qs)));
         QVERIFY(out.clientLimitedBeforeTbf >= out.intervalsBeforeTbf / 2);
+    }
+
+
+    // OPT-061: the four false slow links of Buzz 2026-10-07 (18:58, 19:08, 19:17, 19:26): a sender
+    // of 0.3-0.7 Mbit/s on a 187 Mbit/s path. None may declare a slow link or move the codec off
+    // HEVC hardware, however long the estimate stays low (12 intervals = 18 s, longer than the
+    // 10 s window) and whatever Wi-Fi noise rode along.
+    void buzzFalseSlowLinksAreNotDeclared_data()
+    {
+        QTest::addColumn<quint32>("sent");
+        QTest::addColumn<quint32>("capacity");
+        QTest::addColumn<qint64>("rttUs");
+        QTest::addColumn<int>("retransmits");
+        QTest::newRow("18:58 744 kbit/s, 704 sent, quiet") << 704u << 744u << qint64(6600) << 0;
+        QTest::newRow("19:08 324 kbit/s, 337 sent, rtt up to 117 ms, 2 retransmits") << 337u << 324u << qint64(117000) << 2;
+        QTest::newRow("19:17 531 kbit/s, 473 sent, rtt 31 ms") << 473u << 531u << qint64(31000) << 0;
+        QTest::newRow("19:26 50 kbit/s, 576 sent, rtt 48 ms, 1 retransmit") << 576u << 50u << qint64(48000) << 1;
+    }
+    void buzzFalseSlowLinksAreNotDeclared()
+    {
+        QFETCH(quint32, sent);
+        QFETCH(quint32, capacity);
+        QFETCH(qint64, rttUs);
+        QFETCH(int, retransmits);
+        const auto out = replayDip({sent, capacity, rttUs, retransmits, 12});
+        QVERIFY2(!out.everSlow, qPrintable(out.log));
+        QVERIFY(!out.codecChanged);
+    }
+
+    // OPT-061: one low interval (or a few) in a busy session is a dip, not a slow link.
+    void singleUncorroboratedDipDoesNotFlipTheCodec()
+    {
+        for (const int intervals : {1, 2, 3}) {
+            const auto out = replayDip({6000, 2500, 8000, 0, intervals}, 6000);
+            QVERIFY2(!out.everSlow, qPrintable(QStringLiteral("%1 intervals: %2").arg(intervals).arg(out.log)));
+            QVERIFY(!out.codecChanged);
+        }
+    }
+
+    // ... and a path that really is that slow, with the send queue backing up behind it, still is.
+    void realVerySlowLinkStillDeclares()
+    {
+        const auto out = replayDip({704, 744, 300000, 12, 12, true});
+        QVERIFY2(out.everSlow, "a queue growing behind 744 kbit/s is a slow link");
+        QVERIFY(out.codecChanged);
     }
 
     // 573fa31's runs on cray (AV1 in hardware; the policy of the time declared slow 9-46 s in and
