@@ -36,9 +36,12 @@ kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # (OPT-046, 9d6b08c) + OPT-055 robustness: never block on an abandoned producer's thread
 # (517df57), setters handed to the producer thread (I2, 326cb51), a producer that cannot start
 # is reported instead of staying silent (I3, 5857ba5) + a stream links itself to its target when
-# no session manager does (OPT-056, 5398fb7). Those libraries come in through
+# no session manager does (OPT-056, 5398fb7) + frame guards: a frame whose size, DRM format or
+# modifier differs from the filter graph's is refused and latches the encoder, dma-buf descriptors
+# are duplicated into queued frames, a renegotiated stream size restarts the encoder, and the
+# filter graph is entered by one thread at a time (OPT-055, cc2417e). Those libraries come in through
 # libavcodec's own Depends (dpkg-shlibdeps: libavcodec62).
-kpw_ref=${KPIPEWIRE_REF:-5398fb7}
+kpw_ref=${KPIPEWIRE_REF:-cc2417e}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 
