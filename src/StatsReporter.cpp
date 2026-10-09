@@ -164,6 +164,12 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
     if (current.rttVarMs) {
         link.insert(QStringLiteral("rttVarMs"), oneDecimal(*current.rttVarMs));
     }
+    if (current.tcpRttMs) {
+        link.insert(QStringLiteral("tcpRttMs"), oneDecimal(*current.tcpRttMs));
+    }
+    if (current.tcpRttMinMs) {
+        link.insert(QStringLiteral("tcpRttMinMs"), oneDecimal(*current.tcpRttMinMs));
+    }
     if (current.sentKbps) {
         link.insert(QStringLiteral("sentKbps"), qint64(*current.sentKbps));
     }

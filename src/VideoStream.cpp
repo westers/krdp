@@ -2553,6 +2553,7 @@ Stats::Snapshot VideoStream::statsSnapshot() const
             s.rttMs = double(tcp->rttUs) / 1000.0;
         }
         s.rttVarMs = double(tcp->rttVarUs) / 1000.0;
+        Stats::applyTcpRtt(s, tcp->rttUs, tcp->minRttUs);
         s.retransmits = tcp->totalRetransmits;
         if (tcp->deliveryRateBytesPerSecond > 0) {
             s.appLimited = tcp->deliveryRateAppLimited;

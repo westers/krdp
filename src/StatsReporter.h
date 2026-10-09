@@ -36,6 +36,10 @@ enum class EventKind { Codec, Settings, KeyFrame, Coalesce, SlowLink, CpuGuard, 
 constexpr int EventKindCount = 9;
 KRDP_EXPORT const char *eventKindName(EventKind kind);
 
+/// Sets \a snapshot's tcpRttMs / tcpRttMinMs from TCP_INFO's tcpi_rtt / tcpi_min_rtt in microseconds
+/// (<= 0 = unknown, left unset; an implausible minute-long round trip is dropped like rttMs).
+inline void applyTcpRtt(struct Snapshot &snapshot, qint64 rttUs, qint64 minRttUs);
+
 /// One RDPGFX surface's running totals (index = VideoFrame::monitorIndex).
 struct SurfaceCounters {
     quint64 framesSent = 0;
@@ -86,6 +90,10 @@ struct Snapshot {
     std::optional<double> rttMs;
     std::optional<double> rttMinMs;
     std::optional<double> rttVarMs;
+    /// The kernel's TCP round trip (smoothed) and its minimum (tcpi_rtt, tcpi_min_rtt), unlike
+    /// rttMs which is RDP's round trip and includes a busy client's delay. Absent when unknown.
+    std::optional<double> tcpRttMs;
+    std::optional<double> tcpRttMinMs;
     /// AUD-FIX12: NetworkDetection's bandwidth measurement: what the server sent, as the client
     /// received it (demand-limited: never more than the session had to send). Was goodputKbps.
     std::optional<quint32> sentKbps;
@@ -113,6 +121,17 @@ struct Snapshot {
     std::optional<int> retryInS; ///< until the first held-back codec may be tried again
     QVector<SurfaceCounters> surfaces;
 };
+
+/// Sets \a snapshot's tcpRttMs / tcpRttMinMs from TCP_INFO's tcpi_rtt / tcpi_min_rtt in
+/// microseconds. <= 0 is unknown and an implausible minute-long round trip is dropped (as rttMs).
+inline void applyTcpRtt(Snapshot &snapshot, qint64 rttUs, qint64 minRttUs)
+{
+    const auto ms = [](qint64 us) -> std::optional<double> {
+        return us > 0 && us < 60'000'000 ? std::optional<double>(double(us) / 1000.0) : std::nullopt;
+    };
+    snapshot.tcpRttMs = ms(rttUs);
+    snapshot.tcpRttMinMs = ms(minRttUs);
+}
 
 /**
  * AUD-FIX12: the path capacity TCP itself measured. The kernel keeps a delivery-rate sample per

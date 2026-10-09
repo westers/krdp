@@ -74,6 +74,7 @@ Stats::Snapshot busy(quint64 scale)
     s.rttMs = 1234.56;
     s.rttMinMs = 1234.56;
     s.rttVarMs = 1234.56;
+    Stats::applyTcpRtt(s, 1234560, 1234560);
     s.sentKbps = 9999999;
     s.sentSamples = 99999;
     s.capacityKbps = 9999999;
@@ -215,7 +216,7 @@ private Q_SLOTS:
         QCOMPARE(flow.value(u"clientDecodeMs"_s).toDouble(), 10.0);
         const auto link = record.value(u"link"_s).toObject();
         QCOMPARE(keys(link),
-                 (QSet<QString>{u"rttMs"_s, u"rttMinMs"_s, u"rttVarMs"_s, u"sentKbps"_s, u"sentSamples"_s, u"capacityKbps"_s,
+                 (QSet<QString>{u"rttMs"_s, u"rttMinMs"_s, u"rttVarMs"_s, u"tcpRttMs"_s, u"tcpRttMinMs"_s, u"sentKbps"_s, u"sentSamples"_s, u"capacityKbps"_s,
                                 u"capacitySource"_s, u"appLimited"_s, u"retransmits"_s, u"sendQueueKiB"_s, u"congested"_s, u"slow"_s}));
         QCOMPARE(link.value(u"capacitySource"_s).toString(), u"probe"_s);
         QCOMPARE(link.value(u"retransmits"_s).toInteger(), 99999);
@@ -235,6 +236,35 @@ private Q_SLOTS:
         QVERIFY(LayoutControl::frame(record).size() < 2048 + 16);
     }
 
+    // The kernel TCP round trip from a fake TCP_INFO reading (microseconds): optional, one decimal,
+    // one-decimal ms, and left out when the kernel has no figure (0) or an implausible one.
+    void tcpRttFields()
+    {
+        Stats::Snapshot before, now;
+        before.mode = now.mode = u"auto"_s;
+        now.rttMs = 48.0; // RDP's round trip, inflated by a busy client
+        Stats::applyTcpRtt(now, 3640, 2900);
+        auto link = Stats::sampleRecord(now, before, 500, 0).value(u"link"_s).toObject();
+        QCOMPARE(link.value(u"rttMs"_s).toDouble(), 48.0);
+        QCOMPARE(link.value(u"tcpRttMs"_s).toDouble(), 3.6);
+        QCOMPARE(link.value(u"tcpRttMinMs"_s).toDouble(), 2.9);
+
+        Stats::applyTcpRtt(now, 5100, 0); // no kernel minimum
+        link = Stats::sampleRecord(now, before, 500, 0).value(u"link"_s).toObject();
+        QCOMPARE(link.value(u"tcpRttMs"_s).toDouble(), 5.1);
+        QVERIFY(!link.contains(u"tcpRttMinMs"_s));
+
+        Stats::applyTcpRtt(now, 0, 0); // no TCP_INFO at all
+        link = Stats::sampleRecord(now, before, 500, 0).value(u"link"_s).toObject();
+        QVERIFY(!link.contains(u"tcpRttMs"_s));
+        QVERIFY(!link.contains(u"tcpRttMinMs"_s));
+        QCOMPARE(link.value(u"rttMs"_s).toDouble(), 48.0);
+
+        Stats::applyTcpRtt(now, 90'000'000, 1000); // a minute-plus round trip is not plausible
+        QVERIFY(!now.tcpRttMs);
+        QVERIFY(now.tcpRttMinMs);
+    }
+
     void unknownFieldsAreLeftOut()
     {
         // A fresh stream: no codec yet, no backend, no RTT, no policy - those keys are absent.
@@ -249,7 +279,7 @@ private Q_SLOTS:
         QCOMPARE(video.value(u"sentKbps"_s).toInt(-1), 0);
         const auto link = record.value(u"link"_s).toObject();
         // AUD-FIX12: no capacity without evidence (and never the send rate standing in for it).
-        for (const auto &key : {u"rttMs"_s, u"rttMinMs"_s, u"rttVarMs"_s, u"sentKbps"_s, u"capacityKbps"_s, u"capacitySource"_s, u"appLimited"_s,
+        for (const auto &key : {u"rttMs"_s, u"rttMinMs"_s, u"rttVarMs"_s, u"tcpRttMs"_s, u"tcpRttMinMs"_s, u"sentKbps"_s, u"capacityKbps"_s, u"capacitySource"_s, u"appLimited"_s,
                                 u"retransmits"_s, u"sendQueueKiB"_s, u"goodputKbps"_s}) {
             QVERIFY2(!link.contains(key), qPrintable(key));
         }
