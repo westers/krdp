@@ -47,8 +47,9 @@ kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # probed path on Ada or newer GPUs, proven on Hal's RTX 4090 (no opt-in flag). Those libraries come in through
 # libavcodec's own Depends (dpkg-shlibdeps: libavcodec62) + OPT-063 (d5a10ef + 8bda4f9 + 6ba4011, merged from
 # branch s1-guard-fix by 90a2d9b, test follow-up 1ff87d4): software AVC420 and h264_nvenc are converted BT.709 full range and tagged, the way
-# FreeRDP decodes it (red was (255,36,10)), and SVT-AV1/libaom quality reopens are coalesced.
-kpw_ref=${KPIPEWIRE_REF:-8678c6f}
+# FreeRDP decodes it (red was (255,36,10)), and SVT-AV1/libaom quality reopens are coalesced + OPT-065
+# (0d3d2c1 + a8ceb5c): software AV1 refreshes the picture once after motion settles (stale blocks).
+kpw_ref=${KPIPEWIRE_REF:-a8ceb5c}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 
