@@ -1,6 +1,6 @@
 # NVIDIA video backends: Sol first
 
-Status: Sol priorities and the one-device-per-stream policy approved by Steve, 2026-09-29. First Sol HEVC NVENC and client NVDEC slice deployed 22:54 CDT: synthetic GPU test and live console first-frame tests passed; motion/performance, virtual worker and per-device selection remain open. Steve's separate Vulkan AV1 shader encoder may become an additional backend later.
+Status (2026-10-10): AV1 NVENC is proven on Hal's RTX 4090 (OPT-064: standard OBU stream, no padding, BT.601 tag, CBR/CQP, 12-session cap, 200-cycle stress; the KPIPEWIRE_ENABLE_AV1_NVENC opt-in guard is gone). Client AV1 NVDEC decodes on the 4090, but the client's probe does not claim it yet (see evidence SUMMARY). Earlier: Sol priorities and the one-device-per-stream policy approved by Steve, 2026-09-29. First Sol HEVC NVENC and client NVDEC slice deployed 22:54 CDT: synthetic GPU test and live console first-frame tests passed; motion/performance, virtual worker and per-device selection remain open. Steve's separate Vulkan AV1 shader encoder may become an additional backend later.
 
 ## Decision
 

@@ -462,6 +462,18 @@ per stream, AMD gfx busy rises ≤ 5 points -> NVENC on Hal is an eligible load-
 as preferred device). Above **8 ms p95 or 30 % of a core** -> NVENC on Hal only as an overflow before software, never
 preferred by default. In between: eligible for overflow only.
 
+**Results on Hal, 2026-10-10 (OPT-064; `~/dev/rdp/evidence/2026-10-10-av1-4090/SUMMARY.md`).** Measured with
+`nvencnativetest` (`m1ProductionPathFromSystemMemory`), `nvencbench` and a standalone EGL read-back of a linear dma-buf,
+all offscreen, RTX 4090 and 780M on a loaded desktop (load average 11-16 from other jobs, so treat as qualified).
+KPipeWire's NVENC path always receives RGBA pictures in system memory: `DmaBufHandler::downloadFrame` reads the capture
+buffer back (EGL on the capture GPU) before the filter graph converts it, so "cross-GPU" costs no extra copy over the
+same-GPU case; the cost is the CPU read-back plus the CPU colour conversion plus the upload. At 2560x1440 the production
+path is p50/p95 8.7/10.5 ms (HEVC), 8.2/10.3 ms (AV1), 12.8/15.5 ms (H.264) and 23-45 ms of CPU per picture (swscale uses
+several threads), against 2.5/5.0 ms p50/p95 and 0.3 ms CPU per picture for VA-API on the 780M with pictures already on
+it. That is above both overflow thresholds (8 ms p95, 30 % of a core at 60 fps), so **NVENC on Hal is an overflow target
+before software, never preferred by default.** The thresholds would only be met by moving the RGB -> NV12 conversion off
+the CPU (not built; read-back of NV12 halves the bytes as well).
+
 ### 7.6 NVIDIA backend scope (Steve's expansion)
 
 Ada (RTX 4090) per NVIDIA's support matrix, to be confirmed on Hal once NVML works (C7): NVENC H.264 4:2:0 and

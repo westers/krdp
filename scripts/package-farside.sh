@@ -43,12 +43,12 @@ kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # entered by one thread at a time (OPT-055, cc2417e + ada7779) + NVIDIA NVENC (OPT-062 N1/N2/N4,
 # 326e4d8 + bdd1e14 + 7c6f755): an NVIDIA inventory (PCI id, CUDA ordinal from the bus id, trial-opened
 # codecs, NVML capacity signals; unavailable on a driver mismatch), h264_nvenc for hosts without a
-# VA-API H.264 encoder, and a per-GPU back-off after an NVENC failure. av1_nvenc is written but off
-# unless KPIPEWIRE_ENABLE_AV1_NVENC=1. Those libraries come in through
+# VA-API H.264 encoder, and a per-GPU back-off after an NVENC failure. av1_nvenc (OPT-064, a1a3cc8 + 8678c6f) is a normal
+# probed path on Ada or newer GPUs, proven on Hal's RTX 4090 (no opt-in flag). Those libraries come in through
 # libavcodec's own Depends (dpkg-shlibdeps: libavcodec62) + OPT-063 (d5a10ef + 8bda4f9 + 6ba4011, merged from
 # branch s1-guard-fix by 90a2d9b, test follow-up 1ff87d4): software AVC420 and h264_nvenc are converted BT.709 full range and tagged, the way
 # FreeRDP decodes it (red was (255,36,10)), and SVT-AV1/libaom quality reopens are coalesced.
-kpw_ref=${KPIPEWIRE_REF:-1ff87d4}
+kpw_ref=${KPIPEWIRE_REF:-8678c6f}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 

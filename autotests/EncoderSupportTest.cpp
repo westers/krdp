@@ -122,6 +122,27 @@ private Q_SLOTS:
         QCOMPARE(CodecPolicy::step(state, input, CodecPolicy::Clock::now()).choice, (CodecPolicy::Choice{Family::Avc, true}));
     }
 
+    void fakeAdaGpuSuppliesHardwareAv1WhereVaapiHasNone()
+    {
+        // A host whose compositor GPU cannot encode (no VA-API) and an Ada or newer NVIDIA GPU (proven on Hal's RTX 4090):
+        // all three codecs are NVENC hardware, AV1 included, and the label carries the device.
+        Inputs in;
+        in.vaapi = {};
+        const QString pci = u"0000:04:00.0"_s;
+        const QString name = u"NVIDIA GeForce RTX 4090"_s;
+        in.nvidia = {nvenc(pci, name, 0, Family::Avc, true), nvenc(pci, name, 0, Family::Hevc, true), nvenc(pci, name, 0, Family::Av1, true)};
+        in.liveBitrate = {true, true, false};
+        const auto probe = EncoderSupport::assemble(in);
+        QVERIFY(sameBackends(probe.encoders.av1, true, true));
+        QCOMPARE(probe.av1HardwareVia, u"nvenc"_s);
+        QCOMPARE(probe.labels.hardware[2].device, pci);
+        QVERIFY(!probe.avc444Hardware); // AVC444 stays on VA-API (N5 is not built)
+        QCOMPARE(EncoderSupport::describe(probe), u"avc hw(nvenc)+sw, hevc hw(nvenc)+sw, av1 hw(nvenc)+sw, avc444 none on NVENC NVIDIA GeForce RTX 4090 0000:04:00.0"_s);
+        // The same NVIDIA GPU found unusable for AV1 (driver says unsupported) keeps AV1 in software, like Turing.
+        in.nvidia.last() = nvenc(pci, name, 0, Family::Av1, false, u"unsupported"_s);
+        QVERIFY(sameBackends(EncoderSupport::assemble(in).encoders.av1, false, true));
+    }
+
     void fakeNvidiaDriverBrokenMeansSoftwareOnly()
     {
         // Hal before its reboot: kernel 595.91.07, libraries 595.99.02. The probe is "unavailable", never a failure.
