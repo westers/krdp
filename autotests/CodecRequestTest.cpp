@@ -104,6 +104,19 @@ class CodecRequestTest : public QObject
 private Q_SLOTS:
     // ---- parser ----
 
+    // The literal the client (krdp-client CodecSelectionTest::decodersJsonIsThePerCodecPathMap) builds for a Hal-like
+    // machine: VAAPI + NVDEC are two hardware decoders but ONE "hw" on the wire (contract: at most two DISTINCT paths).
+    void halClientDecodersSampleIsAccepted()
+    {
+        QString error;
+        const auto r = CodecRequest::parse(QJsonDocument::fromJson(R"({"type":"codec","v":1,"requestId":"r1","codecs":["hevc","av1"],"adaptive":true,
+            "decode":{"avc":"sw","hevc":"hw","av1":"hw"},"order":["av1","hevc","avc"],"encode":"any","decodeMode":"any",
+            "decoders":{"avc":["sw"],"hevc":["hw","sw"],"av1":["hw","sw"]}})").object(), &error);
+        QVERIFY2(r, qPrintable(error));
+        QCOMPARE(r->selection->decodersOf(Family::Av1), (CodecPolicy::DecoderPaths{true, true}));
+        QCOMPARE(r->selection->order.first(), Family::Av1);
+    }
+
     void validRecordCarriesTheClientsSelection()
     {
         const auto r = CodecRequest::parse(json(R"({"type":"codec","v":1,"requestId":"r1","codecs":["hevc","av1"],"adaptive":false,
