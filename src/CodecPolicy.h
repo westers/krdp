@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "CodecSelection.h"
+
 #include <QList>
 #include <QMetaType>
 #include <QString>
@@ -32,6 +34,12 @@ enum class SoftwareEncoding {
     Never, ///< hardware codecs only; H.264 in software only as the last resort
     Prefer, ///< always the best-compressing codec, software included (CPU guard permitting)
 };
+
+/// The host's per-codec software allowance the existing setting stands for (S3 adds per-codec keys).
+inline SoftwareAllowance allowanceFor(SoftwareEncoding mode)
+{
+    return allowanceFromSoftwareNever(mode == SoftwareEncoding::Never);
+}
 
 inline std::optional<SoftwareEncoding> parseSoftwareEncoding(QStringView value)
 {
@@ -73,24 +81,6 @@ inline QString av1TilesName(int tiles)
     return tiles == Av1TilesAutomatic ? QStringLiteral("auto") : QString::number(tiles);
 }
 
-/// AV1-Q: how the client decodes a codec (KRDPCTL `codec` request `decode`; Unknown = not said).
-enum class DecodePath { Unknown, Hardware, Software };
-inline const char *decodePathName(DecodePath path)
-{
-    switch (path) {
-    case DecodePath::Hardware: return "hw";
-    case DecodePath::Software: return "sw";
-    case DecodePath::Unknown: break;
-    }
-    return "unknown";
-}
-struct ClientDecode {
-    DecodePath avc = DecodePath::Unknown;
-    DecodePath hevc = DecodePath::Unknown;
-    DecodePath av1 = DecodePath::Unknown;
-    bool operator==(const ClientDecode &) const = default;
-};
-
 /**
  * The tile count an AV1 encoder is told (EncoderSettings::av1Tiles): a manual \a setting always;
  * Automatic gives 1 tile to a client that decodes AV1 in hardware (tiles only cost it size) and
@@ -103,41 +93,6 @@ inline int resolveAv1Tiles(int setting, DecodePath av1)
     if (setting != Av1TilesAutomatic) return setting;
     return av1 == DecodePath::Hardware ? 1 : 0;
 }
-
-/// Codec families, in ascending order of compression. Avc = the RDPGFX AVC codec (420/444/444v2)
-/// the client's caps select; Hevc/Av1 = the private codecs (0x8001/0x8002).
-enum class Family { Avc = 0, Hevc = 1, Av1 = 2 };
-constexpr std::array<Family, 3> BestCompressionFirst{Family::Av1, Family::Hevc, Family::Avc};
-inline const char *familyName(Family f)
-{
-    switch (f) {
-    case Family::Avc: return "avc";
-    case Family::Hevc: return "hevc";
-    case Family::Av1: return "av1";
-    }
-    return "?";
-}
-
-struct Backends {
-    bool hardware = false;
-    bool software = false;
-    /// The software encoder applies a new target bitrate in place, without a reopen (KPipeWire
-    /// softwareBitrateChangeIsLive(): libx264, libx265). False: every change reopens (SVT-AV1).
-    bool liveBitrate = false;
-    bool any() const { return hardware || software; }
-    bool operator==(const Backends &) const = default;
-};
-
-/// What this host can encode. A software backend the linked KPipeWire does not have
-/// (HEVC/AV1 before WS-E, or a stock KPipeWire) is simply false and skipped.
-struct Encoders {
-    Backends avc;
-    Backends hevc;
-    Backends av1;
-    const Backends &of(Family f) const { return f == Family::Hevc ? hevc : f == Family::Av1 ? av1 : avc; }
-    Backends &of(Family f) { return f == Family::Hevc ? hevc : f == Family::Av1 ? av1 : avc; }
-    bool operator==(const Encoders &) const = default;
-};
 
 struct Choice {
     Family family = Family::Avc;
@@ -430,6 +385,13 @@ struct Input {
     SoftwareEncoding mode = SoftwareEncoding::Auto;
     Encoders encoders;
     QList<Family> client; ///< the private families the client decodes; Avc is always allowed
+    /**
+     * OPT-062: the connection's ordered request. Set: select() walks it (selectDetailed()) and honours
+     * its order, modes and the host limits below; `client` is then only informative. nullopt: the
+     * old unordered selection (BestCompressionFirst), which stock-style callers and the old tests use.
+     */
+    std::optional<Request> request;
+    HostLimits host; ///< the host's software allowance ceiling, CPU-guard holds and size limits
     bool adaptive = true; ///< false: the link never counts as slow (the client pinned its choice)
     std::optional<quint32> bandwidthKbps; ///< measured goodput (NetworkDetection), none yet = unknown
     bool congested = false; ///< RTT inflated or the client backlogged (AdaptiveQuality's signals)
@@ -557,6 +519,9 @@ struct Decision {
     QString linkReason;
     /// AUD-FIX14: request a keyframe on every surface: a burst TCP can measure the path with.
     bool capacityProbe = false;
+    /// OPT-062: the codecs the request skipped and whether the baseline was used (set on every step).
+    QList<Skip> skipped;
+    bool baseline = false;
 };
 
 /// A Decision with only its choice, change flag and reason set (the rest default).
@@ -594,28 +559,72 @@ inline bool clientDecodes(const Input &in, Family f)
     return f == Family::Avc || in.client.contains(f);
 }
 
-/// The codec \a in and \a state call for now, ignoring the switch interval.
-inline Choice select(const Input &in, const State &state, Clock::time_point now)
+/// What select() decided and why (OPT-062): the choice, the codecs skipped on the way and whether it is the baseline.
+struct Selection {
+    Choice choice;
+    QList<Skip> skipped;
+    bool baseline = false; ///< a request existed but nothing in it was satisfiable: standard AVC
+};
+
+/// The codec \a in and \a state call for now, ignoring the switch interval, with the reasons.
+inline Selection selectDetailed(const Input &in, const State &state, Clock::time_point now)
 {
     const auto softwareAllowed = [&](Family f) {
-        return now >= state.softwareBlockedUntil[size_t(f)];
+        return now >= state.softwareBlockedUntil[size_t(f)] && in.host.allowance.allows(f);
     };
+    Selection out;
+    if (in.request) {
+        Request r = *in.request;
+        HostLimits host = in.host;
+        for (const Family f : {Family::Hevc, Family::Av1}) {
+            host.softwareHeld[size_t(f)] = host.softwareHeld[size_t(f)] || now < state.softwareBlockedUntil[size_t(f)];
+        }
+        bool compress = r.adaptive && in.adaptive && state.slowLink;
+        if (r.legacy) {
+            // An old client said no modes: the host's SoftwareEncoding decides, as before. Hardware
+            // only on a normal link, software too under `prefer` or on a slow link (and the best
+            // compression first then); `never` removes software through the allowance.
+            const bool softwareWanted = in.mode == SoftwareEncoding::Prefer || (in.mode == SoftwareEncoding::Auto && compress);
+            r.encode = softwareWanted ? Mode::Any : Mode::Hardware;
+            compress = softwareWanted;
+            if (in.mode == SoftwareEncoding::Never) host.allowance = allowanceFromSoftwareNever(true);
+        }
+        if (compress) {
+            // Only the order changes: the best-compressing codec of the list, never one outside it.
+            QList<Family> sorted;
+            for (const Family f : BestCompressionFirst) {
+                if (r.order.contains(f)) sorted.append(f);
+            }
+            r.order = sorted;
+        }
+        const Plan plan = CodecPolicy::plan(r, in.encoders, host);
+        const Candidate c = plan.choice();
+        out.choice = {c.family, c.hardware};
+        out.skipped = plan.skipped;
+        out.baseline = plan.useBaseline();
+        return out;
+    }
     const bool compress = in.mode == SoftwareEncoding::Prefer || (in.mode == SoftwareEncoding::Auto && in.adaptive && state.slowLink);
     if (compress) {
         for (const Family f : BestCompressionFirst) {
             if (!clientDecodes(in, f)) continue;
             const Backends &b = in.encoders.of(f);
-            if (b.hardware) return {f, true};
-            if (b.software && softwareAllowed(f)) return {f, false};
+            if (b.hardware) return {{f, true}, {}, false};
+            if (b.software && softwareAllowed(f)) return {{f, false}, {}, false};
         }
     } else {
         for (const Family f : BestCompressionFirst) {
-            if (clientDecodes(in, f) && in.encoders.of(f).hardware) return {f, true};
+            if (clientDecodes(in, f) && in.encoders.of(f).hardware) return {{f, true}, {}, false};
         }
     }
     // Nothing better: AVC, in hardware if there is one. Software H.264 is the last resort in
     // every mode, so there is always a picture (KPipeWire falls back to it by itself).
-    return {Family::Avc, in.encoders.avc.hardware};
+    return {{Family::Avc, in.encoders.avc.hardware}, {}, false};
+}
+
+inline Choice select(const Input &in, const State &state, Clock::time_point now)
+{
+    return selectDetailed(in, state, now).choice;
 }
 
 /**
@@ -1148,10 +1157,13 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
         state.lowLoadSince = now;
     }
 
-    const Choice want = select(in, state, now);
+    const Selection selection = selectDetailed(in, state, now);
+    const Choice want = selection.choice;
     const auto finish = [&](Decision d) {
         d.linkReason = linkReason;
         d.capacityProbe = capacityProbe;
+        d.skipped = selection.skipped;
+        d.baseline = selection.baseline;
         // Target bitrate (software HEVC/AV1): adaptive quality's bitrate, capped by a slow link.
         // Where the change is live (libx265) it applies at once. Where it reopens the encoder
         // (SVT-AV1) it waits RestartBitrateInterval after the last reconfiguration, needs a

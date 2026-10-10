@@ -61,6 +61,8 @@ target_sources(KRdp PRIVATE
     EncoderSupport.h
     EncoderSelection.h
     CodecPolicy.h
+    CodecSelection.h
+    CodecTypes.h
     LinkEvidence.h
     SystemdNotify.cpp
     SystemdNotify.h

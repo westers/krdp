@@ -45,6 +45,7 @@
 #include "StatsReporter.h"
 #include "SurfaceChain.h"
 
+#include "LogThrottle.h"
 #include "krdp_logging.h"
 
 namespace KRdp
@@ -382,6 +383,16 @@ public:
     QList<CodecPolicy::Family> clientFamilies;
     bool codecPolicyAdaptive = true;
     CodecPolicy::State codecPolicy;
+    // OPT-062 S1: the ordered request an old client's record stands for, and the host's software
+    // allowance, for every CodecPolicy::Input of this connection. S2 replaces the request by the
+    // client's own order/encode/decode modes (explicitRequest).
+    std::optional<CodecPolicy::Request> explicitRequest;
+    LogThrottle codecChoiceLog{std::chrono::seconds(30), 3};
+    void fillSelection(CodecPolicy::Input &in) const
+    {
+        in.request = explicitRequest ? *explicitRequest : CodecPolicy::legacyRequest(clientFamilies, clientDecode, codecPolicyAdaptive);
+        in.host.allowance = CodecPolicy::allowanceFor(softwareEncoding);
+    }
     // OPT-055: the "waiting for the switch interval" reason last logged; the line repeats every ~1.5 s otherwise.
     QString lastWaitReason;
     CodecPolicy::LoadWindow encodeLoad;
@@ -1075,6 +1086,30 @@ CodecPolicy::SoftwareEncoding VideoStream::softwareEncoding() const
     return d->softwareEncoding;
 }
 
+namespace
+{
+/// OPT-062: one line per decision: the request, what was skipped and why, what was selected.
+QString codecDecisionText(const CodecPolicy::Decision &decision, const CodecPolicy::Input &in, bool adaptive)
+{
+    const auto &request = *in.request;
+    QString text = QStringLiteral("Codec policy (%1): order [%2]%3, decode %4")
+                       .arg(QLatin1String(CodecPolicy::softwareEncodingName(in.mode)),
+                            CodecPolicy::orderText(CodecPolicy::normalizedOrder(request.order)),
+                            request.legacy ? QStringLiteral(" (client record without modes: the host decides the encoding)")
+                                           : QStringLiteral(", encode %1").arg(QLatin1String(CodecPolicy::modeName(request.encode))),
+                            QLatin1String(CodecPolicy::modeName(request.decode)));
+    if (!decision.skipped.isEmpty()) {
+        text += QStringLiteral("; skipped %1").arg(CodecPolicy::skippedText(decision.skipped));
+    }
+    text += QStringLiteral("; selected %1 (%2)%3%4")
+                .arg(QLatin1String(CodecPolicy::familyName(decision.choice.family)),
+                     decision.choice.hardware ? QStringLiteral("hardware") : QStringLiteral("software"),
+                     decision.baseline ? QStringLiteral(", baseline: nothing in the list can be used") : QString(),
+                     adaptive ? QString() : QStringLiteral(", fixed"));
+    return text;
+}
+}
+
 CodecPolicy::Decision VideoStream::setPrivateCodecPolicy(const QVector<VideoCodec> &codecs, bool adaptive)
 {
     d->clientFamilies.clear();
@@ -1094,6 +1129,7 @@ CodecPolicy::Decision VideoStream::setPrivateCodecPolicy(const QVector<VideoCode
     in.mode = d->softwareEncoding;
     in.encoders = d->encoders;
     in.client = d->clientFamilies;
+    d->fillSelection(in);
     in.adaptive = false; // the first choice never waits for a link measurement
     in.quality = d->quality.load(); // software HEVC/AV1 start at this quality's bitrate
     if (d->surfacePixels.load() > 0) {
@@ -1107,10 +1143,7 @@ CodecPolicy::Decision VideoStream::setPrivateCodecPolicy(const QVector<VideoCode
     d->stats->event(Stats::EventKind::Codec, [this, &decision] {
         return statsDetail(decision.reason.isEmpty() ? QStringLiteral("the client's codec request") : decision.reason);
     });
-    qCInfo(KRDP).nospace() << "Codec policy (" << CodecPolicy::softwareEncodingName(d->softwareEncoding) << "): "
-                           << CodecPolicy::familyName(decision.choice.family) << (decision.choice.hardware ? " in hardware" : " in software")
-                           << " for a client decoding avc" << (d->clientFamilies.contains(CodecPolicy::Family::Hevc) ? "+hevc" : "")
-                           << (d->clientFamilies.contains(CodecPolicy::Family::Av1) ? "+av1" : "") << (adaptive ? "" : ", fixed");
+    qCInfo(KRDP).noquote() << codecDecisionText(decision, in, adaptive);
     return decision;
 }
 
@@ -1130,6 +1163,7 @@ void VideoStream::restepCodecPolicyNow(const QString &reason)
     in.mode = d->softwareEncoding;
     in.encoders = d->encoders;
     in.client = d->clientFamilies;
+    d->fillSelection(in);
     in.adaptive = d->codecPolicyAdaptive;
     in.quality = d->quality.load();
     if (d->surfacePixels.load() > 0) {
@@ -1217,10 +1251,14 @@ void VideoStream::applyCodecDecision(const CodecPolicy::Decision &decision)
     d->cpuNsAtLastSample = -1;
     d->reportedHardware.reset();
     setPrivateCodec(privateCodecOf(decision.choice.family));
-    qCInfo(KRDP).noquote() << QStringLiteral("Codec policy: switching to %1 in %2: %3")
-                                  .arg(QLatin1String(CodecPolicy::familyName(decision.choice.family)),
-                                       decision.choice.hardware ? QStringLiteral("hardware") : QStringLiteral("software"),
-                                       decision.reason);
+    if (quint64 suppressed = 0; d->codecChoiceLog.allow(&suppressed)) {
+        qCInfo(KRDP).noquote() << QStringLiteral("Codec policy: switching to %1 in %2: %3%4%5")
+                                      .arg(QLatin1String(CodecPolicy::familyName(decision.choice.family)),
+                                           decision.choice.hardware ? QStringLiteral("hardware") : QStringLiteral("software"),
+                                           decision.reason,
+                                           decision.skipped.isEmpty() ? QString() : QStringLiteral("; skipped %1").arg(CodecPolicy::skippedText(decision.skipped)),
+                                           suppressed ? QStringLiteral(" (%1 similar lines suppressed)").arg(suppressed) : QString());
+    }
     updateStatsBackend();
     d->stats->event(Stats::EventKind::Codec, [this, &decision] {
         return statsDetail(decision.reason);
@@ -1356,6 +1394,7 @@ void VideoStream::stepCodecPolicy(bool congested)
     in.mode = d->softwareEncoding;
     in.encoders = d->encoders;
     in.client = d->clientFamilies;
+    d->fillSelection(in);
     in.adaptive = d->codecPolicyAdaptive;
     if (network && network->validBandwidthSamples() >= 2) {
         in.bandwidthKbps = network->bandwidth();
