@@ -45,8 +45,10 @@ kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # codecs, NVML capacity signals; unavailable on a driver mismatch), h264_nvenc for hosts without a
 # VA-API H.264 encoder, and a per-GPU back-off after an NVENC failure. av1_nvenc is written but off
 # unless KPIPEWIRE_ENABLE_AV1_NVENC=1. Those libraries come in through
-# libavcodec's own Depends (dpkg-shlibdeps: libavcodec62).
-kpw_ref=${KPIPEWIRE_REF:-7c6f755}
+# libavcodec's own Depends (dpkg-shlibdeps: libavcodec62) + OPT-063 (d5a10ef + 8bda4f9, on branch
+# s1-guard-fix above 7c6f755): software AVC420 is converted BT.709 full range and tagged, the way
+# FreeRDP decodes it (red was (255,36,10)), and SVT-AV1/libaom quality reopens are coalesced.
+kpw_ref=${KPIPEWIRE_REF:-8bda4f9}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 
