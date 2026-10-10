@@ -234,6 +234,19 @@ struct WorkerRun {
     bool payloadMatches = false;
 };
 
+namespace
+{
+/// Whether this host encodes AVC in hardware (VA-API, or NVENC on an NVIDIA-only host such as Sol). The rows that follow
+/// a Console takeover configure the encoder the worker really starts with, so a host with hardware AVC does not start an
+/// NVENC encoder and flip it to software before the first picture (a hardware -> software restart followed by a takeover
+/// leaves the idle stream without a picture; see the OPT-062 N2 notes).
+bool hostEncodesAvcInHardware()
+{
+    static const bool hardware = EncoderSupport::probeUncached().encoders.avc.hardware;
+    return hardware;
+}
+}
+
 class WorkerEndToEndTest : public QObject
 {
     Q_OBJECT
@@ -956,7 +969,7 @@ void WorkerEndToEndTest::consoleTakeoverKeepsFrames()
     endpoint.setControlState({1, true});
     ConsoleWorkerWire::EncoderConfig config;
     config.generation = 1;
-    config.settings = CodecPolicy::EncoderSettings{.hardware = false};
+    config.settings = CodecPolicy::EncoderSettings{.hardware = hostEncodesAvcInHardware()};
     config.capture = {mode, 0};
     QVERIFY(endpoint.setEncoderConfig(config));
     endpoint.requestKeyFrame();
@@ -1180,7 +1193,7 @@ sys.exit(result.returncode)
     QVERIFY2(plainRun.errors.isEmpty(), qPrintable(plainRun.errors.join(QLatin1Char('\n'))));
     plainRun.frames.clear();
     plain.setControlState({1, true});
-    ConsoleWorkerWire::EncoderConfig plainConfig{.generation = 1, .codec = VideoCodec::Avc420, .settings = CodecPolicy::EncoderSettings{.hardware = false}};
+    ConsoleWorkerWire::EncoderConfig plainConfig{.generation = 1, .codec = VideoCodec::Avc420, .settings = CodecPolicy::EncoderSettings{.hardware = hostEncodesAvcInHardware()}};
     if (takeover) plainConfig.capture = {MonitorCapturePolicy::Mode::Specific, 0};
     QVERIFY(plain.setEncoderConfig(plainConfig));
     plain.requestKeyFrame();
@@ -1682,10 +1695,14 @@ void WorkerEndToEndTest::workerReachesReadyAndDeliversFrames()
     QCOMPARE(run.order.count(QStringLiteral("caps")), 1);
     QCOMPARE(run.order.count(QStringLiteral("ready")), 1);
     QVERIFY(run.caps);
-    if (EncoderSupport::probeUncached().encoders.avc.hardware) {
+    if (const auto host = EncoderSupport::probeUncached(); host.encoders.avc.hardware) {
         // B3: the worker's own probe, inside the sandbox, sees the host's hardware encoder.
         QVERIFY2(run.caps->encoders.avc.hardware, "the sandboxed worker's probe found no hardware encoder");
-        QCOMPARE(run.caps->renderNode, m_renderNode);
+        if (host.avcHardwareVia == QLatin1String("nvenc")) {
+            QVERIFY2(run.caps->renderNode.startsWith(QLatin1String("NVENC ")), qPrintable(run.caps->renderNode)); // an NVIDIA-only host: no VA-API node to compare
+        } else {
+            QCOMPARE(run.caps->renderNode, m_renderNode);
+        }
     }
     // AUD-FIX10: a client's Refresh Rect reaches the worker as this keyframe request (the brokers
     // forward VideoStream::keyFrameRequested). On an idle desktop - no frame for 1 s - it must
