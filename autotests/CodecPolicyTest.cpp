@@ -1970,6 +1970,19 @@ private Q_SLOTS:
         QCOMPARE(rates, (QList<int>{30, 15}));
     }
 
+    void loadSettleSkipsTheThrottleEpisodes()
+    {
+        LoadSettle settle;
+        QVERIFY(settle.sampleAllowed(false));
+        settle.rateChanged(); // "restoring the frame rate to 30 fps"
+        for (int i = 0; i < LoadSettle::SettleIntervals; ++i) QVERIFY(!settle.sampleAllowed(false));
+        QVERIFY(settle.sampleAllowed(false));
+        // Held down by the throttle: no sample for as long as it holds, and SettleIntervals after.
+        for (int i = 0; i < 10; ++i) QVERIFY(!settle.sampleAllowed(true));
+        for (int i = 0; i < LoadSettle::SettleIntervals; ++i) QVERIFY(!settle.sampleAllowed(false));
+        QVERIFY(settle.sampleAllowed(false));
+    }
+
     void loadWindowP95()
     {
         LoadWindow w;

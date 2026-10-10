@@ -396,6 +396,7 @@ public:
     // OPT-055: the "waiting for the switch interval" reason last logged; the line repeats every ~1.5 s otherwise.
     QString lastWaitReason;
     CodecPolicy::LoadWindow encodeLoad;
+    CodecPolicy::LoadSettle loadSettle; // OPT-063: no load sample while the throttle moves the frame rate
     // What the sessions' encoders were last told (encoderSettingsChanged); main thread only.
     std::optional<CodecPolicy::EncoderSettings> encoderSettings;
     // The backend an encoder of the current codec reported, and whether the client heard it.
@@ -1296,6 +1297,7 @@ void VideoStream::refreshFrameRate()
     // holds the source back (AUD-FIX7 F2).
     const int rate = d->deliveryThrottle.rate(d->policyFrameRate);
     if (d->requestedFrameRate.exchange(rate) != rate) {
+        d->loadSettle.rateChanged();
         qCInfo(KRDP) << "Video frame rate:" << rate << "fps" << (d->deliveryThrottle.active() ? "(throttled to what the client takes)" : "");
         d->stats->event(Stats::EventKind::Throttle, [this, rate] {
             return statsDetail(d->deliveryThrottle.active() ? QStringLiteral("frame rate %1 fps: throttled to what the client takes").arg(rate)
@@ -1379,7 +1381,8 @@ void VideoStream::stepCodecPolicy(bool congested)
         const int forced = qEnvironmentVariableIntValue("KPIPEWIRE_SW_ENCODER_THREADS", &forcedOk);
         const int threads = CodecPolicy::softwareEncoderThreads(family, QThread::idealThreadCount(), forcedOk ? std::optional<int>(forced) : std::nullopt);
         const double seconds = clk::duration<double>(sampledAt - d->loadSampledAt).count();
-        const auto sample = CodecPolicy::encodeLoadSample(double(cpuNs - d->cpuNsAtLastSample) / 1e6,
+        const bool sampleAllowed = d->loadSettle.sampleAllowed(d->deliveryThrottle.active());
+        const auto sample = !sampleAllowed ? std::nullopt : CodecPolicy::encodeLoadSample(double(cpuNs - d->cpuNsAtLastSample) / 1e6,
                                                           frames - d->framesAtLastSample,
                                                           seconds,
                                                           std::max(1, d->requestedFrameRate.load()),

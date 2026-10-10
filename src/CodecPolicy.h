@@ -1435,6 +1435,36 @@ inline QString avcChoiceReason(const Encoders &encoders, SoftwareEncoding mode, 
     return parts.join(QStringLiteral("; "));
 }
 
+/**
+ * OPT-063: intervals in which the frame rate asked of the source was changing (the delivery throttle
+ * lowered, raised or restored it) or is held down are not a load sample. The source then delivers fewer
+ * frames because it was told to (Sol 2026-10-09: "throttling the frame rate to 23 fps", "restoring to 30
+ * (the source made 14.7 fps)", the guard tripping 4 s later at 82 %), and the shortfall rule would blame
+ * the encoder, which is 45 % busy. SettleIntervals more follow a change while the capture ramps back up.
+ */
+class LoadSettle
+{
+public:
+    static constexpr int SettleIntervals = 3;
+    void rateChanged() { m_remaining = SettleIntervals; }
+    /// True when this interval may be sampled. \a throttled: the delivery throttle holds the rate down now.
+    bool sampleAllowed(bool throttled)
+    {
+        if (throttled) {
+            m_remaining = SettleIntervals;
+            return false;
+        }
+        if (m_remaining > 0) {
+            --m_remaining;
+            return false;
+        }
+        return true;
+    }
+
+private:
+    int m_remaining = 0;
+};
+
 /// p95 over a sliding window of per-interval encode-load samples (see Input::encodeLoadP95).
 class LoadWindow
 {
