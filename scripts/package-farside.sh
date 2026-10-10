@@ -49,8 +49,10 @@ kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # branch s1-guard-fix by 90a2d9b, test follow-up 1ff87d4): software AVC420 and h264_nvenc are converted BT.709 full range and tagged, the way
 # FreeRDP decodes it (red was (255,36,10)), and SVT-AV1/libaom quality reopens are coalesced + OPT-065
 # (0d3d2c1 + a8ceb5c + 7ab499b + 42e36a6): software AV1 refreshes the picture once after motion settles (stale blocks),
-# v2 triggered by damage fraction (large short bursts count, tiny frames ignored, a held-back refresh is served).
-kpw_ref=${KPIPEWIRE_REF:-42e36a6}
+# v2 triggered by damage fraction (large short bursts count, tiny frames ignored, a held-back refresh is served)
+# + 05aa164, b25ff53, 43d09a5: debug logging only (one Info line per burst with damage and decision, the effective
+# encoder settings on every open, quality-change decisions, KPIPEWIRE_SETTLE_TRACE=1 per frame; test/diagnostic env knobs).
+kpw_ref=${KPIPEWIRE_REF:-43d09a5}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 
