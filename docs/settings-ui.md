@@ -31,6 +31,13 @@ Updated 2026-10-02 for the ten-to-five page consolidation (evidence
   then a collapsed Advanced group that also holds Troubleshooting. Never destroy a
   row of a live FormLayout (Kirigami warns): hide Advanced rows, do not drop them
   from a Repeater model. Field help is a (?) button, not a grey paragraph.
+- Software encoding (OPT-062 S3): Console and Virtual show three rows in Picture and Sound (not Advanced), "Software H.264" (Automatic /
+  Allowed / Only as a last resort), "Software HEVC" and "Software AV1" (Automatic / Allowed / Never), each with "Use default". They are
+  host keys (`SoftwareAvc`, `SoftwareHevc`, `SoftwareAv1`; env `FARSIDE_{CONSOLE,VIRTUAL}_SOFTWARE_*`, `--software-avc|hevc|av1`), not
+  kcfg keys, so `krdpserversettings.kcfg` and the legacy-migration pin are unchanged. The old Advanced "Software encoding" is relabelled
+  "Codec choice for older Farside apps". A row notes "No software encoder for this codec was found on this computer" when the broker's
+  published encoder probe (the snapshot's `videoEncoders`, written by the broker at start through `BrokerHostPublicSnapshot::updateVideoEncoders`
+  and carried over by the helper's publish and save) has none; the row's definition names its codec in `softwareCodec`.
 - Who Can Connect asks for administrator access once, when the row is opened, and
   offers Unlock… if that was cancelled.
 - Certificate changes use the dedicated local C++ draft. Cancel and leaving the

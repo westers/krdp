@@ -58,6 +58,62 @@ inline SoftwareAllowance allowanceFromSoftwareNever(bool never)
     return never ? SoftwareAllowance{false, false, false} : SoftwareAllowance{};
 }
 
+/// A family may be encoded in software only where both ceilings say so (the host setting, then a user's
+/// own SoftwareEncoding preference: it can only tighten the host, never exceed it, spec C5).
+inline SoftwareAllowance intersect(const SoftwareAllowance &a, const SoftwareAllowance &b)
+{
+    return {a.avc && b.avc, a.hevc && b.hevc, a.av1 && b.av1};
+}
+/// Wire/setting name of one family's ceiling: "allowed", and for a forbidden one "lastResort" (AVC) or "never".
+inline const char *allowanceName(Family f, bool allowed)
+{
+    return allowed ? "allowed" : f == Family::Avc ? "lastResort" : "never";
+}
+
+/// The concrete encoder behind a choice, for the `codec` reply and Stats: the backend ("vaapi", "nvenc", "libx264",
+/// "libopenh264", "libx265", "libsvtav1", "libaom-av1") and, for hardware when known, the device's PCI id and name.
+struct EncoderLabel {
+    QString backend;
+    QString device;
+    QString deviceName;
+    bool operator==(const EncoderLabel &) const = default;
+};
+struct EncoderLabels {
+    std::array<EncoderLabel, 3> hardware; ///< indexed by Family
+    std::array<EncoderLabel, 3> software;
+    const EncoderLabel &of(Family f, bool hardwareBackend) const { return (hardwareBackend ? hardware : software)[size_t(f)]; }
+    bool operator==(const EncoderLabels &) const = default;
+};
+
+/**
+ * OPT-062 S3: the host setting of one family's software ceiling (`SoftwareAvc` / `SoftwareHevc` / `SoftwareAv1`).
+ * Auto derives from the old `SoftwareEncoding` (never -> restricted, else allowed), so an old file keeps its meaning.
+ * Restricted is "never" for HEVC/AV1 and "last-resort" for AVC (software H.264 stays the baseline).
+ */
+enum class CeilingSetting { Auto, Allowed, Restricted };
+inline std::optional<CeilingSetting> parseCeilingSetting(QStringView value, Family f)
+{
+    const QString v = value.trimmed().toString().toLower();
+    if (v.isEmpty() || v == QLatin1String("auto")) return CeilingSetting::Auto;
+    if (v == QLatin1String("allowed")) return CeilingSetting::Allowed;
+    if (v == (f == Family::Avc ? QLatin1String("last-resort") : QLatin1String("never"))) return CeilingSetting::Restricted;
+    return std::nullopt;
+}
+inline const char *ceilingSettingName(CeilingSetting c, Family f)
+{
+    switch (c) {
+    case CeilingSetting::Auto: return "auto";
+    case CeilingSetting::Allowed: return "allowed";
+    case CeilingSetting::Restricted: return f == Family::Avc ? "last-resort" : "never";
+    }
+    return "?";
+}
+/// The ceiling \a setting stands for; Auto follows \a softwareNever (the old SoftwareEncoding = never).
+inline bool ceilingAllows(CeilingSetting setting, bool softwareNever)
+{
+    return setting == CeilingSetting::Allowed || (setting == CeilingSetting::Auto && !softwareNever);
+}
+
 /// What a client can decode a codec with (not what it will use).
 struct DecoderPaths {
     bool hardware = false;

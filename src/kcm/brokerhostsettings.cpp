@@ -69,6 +69,9 @@ bool validSnapshot(Host::Scope scope, const QJsonObject &value)
         u"runtimeVerified"_s, u"application"_s};
     auto allowed = base;
     allowed += scope == Host::Scope::VirtualSession ? QStringList{u"renderDevices"_s} : QStringList{u"tls"_s, u"cameraLoopback"_s};
+    // OPT-062 S3: the broker's encoder probe, optional (absent until the broker has started once).
+    const bool encoders = scope != Host::Scope::VirtualSession && value.contains(u"videoEncoders"_s);
+    if (encoders) allowed += u"videoEncoders"_s;
     if (value.size() != allowed.size()) return false;
     for (auto it = value.begin(); it != value.end(); ++it) if (!allowed.contains(it.key())) return false;
     if (!value[u"version"_s].isDouble() || value[u"version"_s].toDouble() != 1
@@ -83,6 +86,18 @@ bool validSnapshot(Host::Scope scope, const QJsonObject &value)
             if (!it.value().isString()) return false;
             const auto normalized = Host::normalize(scope, it.key(), it.value().toString());
             if (!normalized || *normalized != it.value().toString()) return false;
+        }
+    }
+    if (encoders) {
+        const auto list = value[u"videoEncoders"_s];
+        if (!list.isArray() || list.toArray().size() > KRdp::BrokerHostPublicSnapshot::MaximumEncoders) return false;
+        for (const auto &item : list.toArray()) {
+            const auto entry = item.toObject();
+            if (!item.isObject() || entry.size() < 3 || entry.size() > 5 || !QStringList{u"avc"_s, u"hevc"_s, u"av1"_s}.contains(entry[u"codec"_s].toString())
+                || entry[u"backend"_s].toString().isEmpty() || entry[u"backend"_s].toString().size() > 24 || !entry[u"hw"_s].isBool()) return false;
+            for (auto it = entry.begin(); it != entry.end(); ++it)
+                if (!QStringList{u"codec"_s, u"backend"_s, u"hw"_s, u"device"_s, u"name"_s}.contains(it.key())
+                    || (it.key() != u"hw" && (!it.value().isString() || it.value().toString().size() > 48))) return false;
         }
     }
     const auto defaults = Host::defaults(scope);
@@ -569,9 +584,22 @@ QVariantList BrokerHostSettings::definitions() const
         {.control = u"slider"_s, .section = u"picture"_s, .formLabel = i18nc("@label", "Image quality"), .min = 0, .max = 100});
     add(u"AdaptiveQuality"_s, video, i18nc("@label", "Adapt quality to the connection"), i18nc("@info", "Lower the quality automatically when the connection cannot keep up."), boolean,
         {.section = u"picture"_s, .formLabel = i18nc("@label", "Adjust to connection")});
-    add(u"SoftwareEncoding"_s, video, i18nc("@label", "Software encoding"), i18nc("@info", "The graphics hardware and the client still decide which codec is used. “Prefer hardware” falls back to software only as a last resort."),
+    // OPT-062 S3: what software may encode, per codec. Hardware encoders are always allowed; the choice of the people who connect
+    // (their codec order, Encoding on the host) can only narrow this, never widen it.
+    const auto softwareHelp = i18nc("@info", "Hardware encoders are always used when available. Connections that ask for software encoding get it only for the codecs allowed here. Automatic allows software unless the codec choice for older Farside apps is set to prefer hardware.");
+    const auto softwareGroup = i18nc("@title:group", "Software Encoding");
+    add(u"SoftwareAvc"_s, softwareGroup, i18nc("@label", "Software H.264 encoding"), softwareHelp + u" "_s + i18nc("@info", "Software H.264 is also what Remote Desktop apps without Farside get when nothing else works, so it can only be limited to a last resort."),
+        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"allowed"_s, i18nc("@item:inlistbox", "Allowed")), choice(u"last-resort"_s, i18nc("@item:inlistbox", "Only as a last resort"))},
+        {.section = u"picture"_s, .formLabel = i18nc("@label", "Software H.264"), .softwareCodec = u"avc"_s});
+    add(u"SoftwareHevc"_s, softwareGroup, i18nc("@label", "Software HEVC encoding"), softwareHelp,
+        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"allowed"_s, i18nc("@item:inlistbox", "Allowed")), choice(u"never"_s, i18nc("@item:inlistbox", "Never"))},
+        {.section = u"picture"_s, .formLabel = i18nc("@label", "Software HEVC"), .softwareCodec = u"hevc"_s});
+    add(u"SoftwareAv1"_s, softwareGroup, i18nc("@label", "Software AV1 encoding"), softwareHelp,
+        {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"allowed"_s, i18nc("@item:inlistbox", "Allowed")), choice(u"never"_s, i18nc("@item:inlistbox", "Never"))},
+        {.section = u"picture"_s, .formLabel = i18nc("@label", "Software AV1"), .softwareCodec = u"av1"_s});
+    add(u"SoftwareEncoding"_s, video, i18nc("@label", "Codec choice for older Farside apps"), i18nc("@info", "Only for Farside apps that do not choose their own codecs and encoding. The graphics hardware and the client still decide which codec is used. “Prefer hardware” falls back to software only as a last resort. The software limits above apply to every app."),
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"never"_s, i18nc("@item:inlistbox", "Prefer hardware")), choice(u"prefer"_s, i18nc("@item:inlistbox", "Allow the best codec in software"))},
-        {.section = u"encoding"_s, .advanced = true, .formLabel = i18nc("@label", "Encoding policy")});
+        {.section = u"encoding"_s, .advanced = true, .formLabel = i18nc("@label", "Older apps")});
     add(u"Av1Tiles"_s, video, i18nc("@label", "AV1 tiles"), i18nc("@info", "Automatic uses what the client can decode. The available encoders may limit the choice."),
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"1"_s, u"1"_s), choice(u"2"_s, u"2"_s), choice(u"4"_s, u"4"_s), choice(u"8"_s, u"8"_s), choice(u"16"_s, u"16"_s)},
         {.section = u"encoding"_s, .advanced = true});

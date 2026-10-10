@@ -199,6 +199,10 @@ QJsonObject publicView(Scope scope, const Read &current)
         result.insert(u"cameraLoopback"_s, QJsonObject{{u"supported"_s, scope == Scope::Console},
             {u"state"_s, path == u"none" ? u"disabled"_s : scope == Scope::Virtual ? u"namespace-unavailable"_s
                 : cameraLoopback(path) ? u"available"_s : u"unavailable"_s}});
+        // OPT-062 S3: the broker records what its encoder probe found; a save or a start must not drop it.
+        const auto published = BrokerHostPublicSnapshot::read(BrokerHostPublicSnapshot::defaultDirectory(), scope, false);
+        if (published.error.isEmpty() && published.value[u"videoEncoders"_s].isArray())
+            result.insert(u"videoEncoders"_s, BrokerHostPublicSnapshot::sanitizeVideoEncoders(published.value[u"videoEncoders"_s].toArray()));
     } else {
         QJsonArray devices;
         const QDir directory(u"/dev/dri/by-path"_s);

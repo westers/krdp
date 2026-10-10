@@ -25,6 +25,12 @@ RowLayout {
     readonly property bool editable: !busy && !locked
     readonly property bool available: definition.unavailable === ""
         && (definition.showWhenKey === "" || (settings.values[definition.showWhenKey] || "") === definition.showWhenValue)
+    // OPT-062 S3: a software-encoding row says so when the host's encoder probe found no software encoder for its codec.
+    readonly property string softwareNote: {
+        const probe = settings.metadata ? settings.metadata.videoEncoders : undefined;
+        if (!definition.softwareCodec || !probe || probe.length === 0) return "";
+        return probe.some(e => e.codec === definition.softwareCodec && !e.hw) ? "" : i18nc("@info", "No software encoder for this codec was found on this computer, so this setting has no effect.");
+    }
     readonly property bool numeric: definition.control === "spin" || definition.control === "slider" || definition.control === "size"
     readonly property Component control: {
         switch (definition.control) {
@@ -80,6 +86,7 @@ RowLayout {
             Layout.fillWidth: true
             Layout.maximumWidth: Kirigami.Units.gridUnit * 24
         }
+        QQC2.Label { objectName: root.prefix + "note_" + root.key; visible: root.softwareNote !== ""; Layout.fillWidth: true; wrapMode: Text.Wrap; text: root.softwareNote; font: Kirigami.Theme.smallFont }
         QQC2.Label { visible: root.locked; Layout.fillWidth: true; wrapMode: Text.Wrap; text: i18nc("@info", "Locked by the administrator"); font: Kirigami.Theme.smallFont }
     }
     Kirigami.ContextualHelpButton {

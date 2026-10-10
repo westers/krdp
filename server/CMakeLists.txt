@@ -79,7 +79,7 @@ configure_file(krdp-virtual-session@.service.in ${CMAKE_CURRENT_BINARY_DIR}/krdp
 add_executable(krdp-virtual-host virtualhost.cpp VirtualHostTls.cpp VirtualSessionHostController.cpp VirtualSessionTransport.cpp VirtualStockClient.cpp
     VirtualSessionControl.cpp VirtualSessionSupervisor.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp WorkerCodecBridge.cpp VirtualResize.cpp)
 target_link_libraries(krdp-virtual-host PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus OpenSSL::Crypto KRdp KRdpGuardianClient KRdpServerCertificate)
-target_link_libraries(krdp-virtual-host PRIVATE KRdpBrokerAuthentication)
+target_link_libraries(krdp-virtual-host PRIVATE KRdpBrokerAuthentication KRdpBrokerHostPublicSnapshot)
 configure_file(krdp-virtual-host.service.in ${CMAKE_CURRENT_BINARY_DIR}/krdp-virtual-host.service @ONLY)
 add_executable(krdp-virtual-device-entry virtualdeviceentry.cpp)
 target_link_libraries(krdp-virtual-device-entry PRIVATE Qt6::Core KRdpVirtualGpuDevices)
@@ -96,7 +96,7 @@ file(COPY ${CMAKE_SOURCE_DIR}/scripts/virtual-probe-config/ DESTINATION ${CMAKE_
 file(COPY ${CMAKE_SOURCE_DIR}/scripts/virtual-session-locked-config/ DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/virtual-session-support/locked-config)
 pkg_check_modules(Udev REQUIRED IMPORTED_TARGET libudev)
 add_executable(krdp-console-host PhysicalInputWatcher.cpp consolehost.cpp ConsoleSeat.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp WorkerCodecBridge.cpp ConsoleHostController.cpp ConsoleWorkerLauncher.cpp)
-target_link_libraries(krdp-console-host PRIVATE KRdpBrokerAuthentication PkgConfig::Udev)
+target_link_libraries(krdp-console-host PRIVATE KRdpBrokerAuthentication KRdpBrokerHostPublicSnapshot PkgConfig::Udev)
 add_executable(krdp-console-probe consoleprobe.cpp ConsoleSeat.cpp)
 add_executable(krdp-greeter-probe greeterprobe.cpp)
 add_executable(krdp-audio-route-probe audioprobe.cpp ../src/PipeWireAudioPlayback.cpp)

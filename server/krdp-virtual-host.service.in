@@ -19,6 +19,11 @@ Environment=FARSIDE_VIRTUAL_CERTIFICATE=/etc/farside/virtual-host.crt
 Environment=FARSIDE_VIRTUAL_CERTIFICATE_KEY=/etc/farside/virtual-host.key
 # Private codecs in software (HEVC/AV1): auto, never or prefer (KRDPCTL-V2-CONTRACT.md (e)).
 Environment=FARSIDE_VIRTUAL_SOFTWARE_ENCODING=auto
+# Software encoders per codec (OPT-062): auto (follows SoftwareEncoding), allowed, or never (H.264: last-resort).
+# Hardware encoders are always allowed; a connection that asks for software gets it only where allowed here.
+Environment=FARSIDE_VIRTUAL_SOFTWARE_AVC=auto
+Environment=FARSIDE_VIRTUAL_SOFTWARE_HEVC=auto
+Environment=FARSIDE_VIRTUAL_SOFTWARE_AV1=auto
 Environment=FARSIDE_VIRTUAL_QUALITY=80
 Environment=FARSIDE_VIRTUAL_ADAPTIVE_QUALITY=false
 Environment=FARSIDE_VIRTUAL_PREFER_AUDIO_QUALITY=false
@@ -30,7 +35,7 @@ EnvironmentFile=-/etc/farside/virtual-host.conf
 # Publish the world-readable public-metadata snapshot the settings panel reads without a password.
 ExecStartPre=-@KDE_INSTALL_FULL_LIBEXECDIR@/farside-host-settings-helper --publish virtual
 ExecStartPre=-@KDE_INSTALL_FULL_LIBEXECDIR@/farside-host-settings-helper --publish session
-ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/farside/virtual-host @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-host --certificate ${FARSIDE_VIRTUAL_CERTIFICATE} --certificate-key ${FARSIDE_VIRTUAL_CERTIFICATE_KEY} --address ${FARSIDE_VIRTUAL_ADDRESS} --port ${FARSIDE_VIRTUAL_PORT} --quality ${FARSIDE_VIRTUAL_QUALITY} --adaptive-quality ${FARSIDE_VIRTUAL_ADAPTIVE_QUALITY} --prefer-audio-quality ${FARSIDE_VIRTUAL_PREFER_AUDIO_QUALITY} --standard-client-media ${FARSIDE_VIRTUAL_STANDARD_CLIENT_MEDIA} --camera-loopback-device ${FARSIDE_VIRTUAL_CAMERA_LOOPBACK_DEVICE} --software-encoding ${FARSIDE_VIRTUAL_SOFTWARE_ENCODING} --av1-tiles ${FARSIDE_VIRTUAL_AV1_TILES}
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/farside/virtual-host @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-host --certificate ${FARSIDE_VIRTUAL_CERTIFICATE} --certificate-key ${FARSIDE_VIRTUAL_CERTIFICATE_KEY} --address ${FARSIDE_VIRTUAL_ADDRESS} --port ${FARSIDE_VIRTUAL_PORT} --quality ${FARSIDE_VIRTUAL_QUALITY} --adaptive-quality ${FARSIDE_VIRTUAL_ADAPTIVE_QUALITY} --prefer-audio-quality ${FARSIDE_VIRTUAL_PREFER_AUDIO_QUALITY} --standard-client-media ${FARSIDE_VIRTUAL_STANDARD_CLIENT_MEDIA} --camera-loopback-device ${FARSIDE_VIRTUAL_CAMERA_LOOPBACK_DEVICE} --software-encoding ${FARSIDE_VIRTUAL_SOFTWARE_ENCODING} --software-avc ${FARSIDE_VIRTUAL_SOFTWARE_AVC} --software-hevc ${FARSIDE_VIRTUAL_SOFTWARE_HEVC} --software-av1 ${FARSIDE_VIRTUAL_SOFTWARE_AV1} --av1-tiles ${FARSIDE_VIRTUAL_AV1_TILES}
 StateDirectory=farside/virtual-sessions farside/virtual-host
 StateDirectoryMode=0700
 UMask=0077

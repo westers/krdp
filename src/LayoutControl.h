@@ -211,10 +211,33 @@ struct VideoCodecOffer {
     bool operator==(const VideoCodecOffer &) const = default;
 };
 
-/** The optional `video` group of `capabilities`: only `krdpserver` sends it. */
+/**
+ * OPT-062 S2: one concrete encoder of the optional `video.encoders` list: the host's probe, per codec
+ * ("avc" | "hevc" | "av1"). \a backend is "vaapi" | "nvenc" for hardware, "libx264" | "libopenh264" |
+ * "libx265" | "libsvtav1" | "libaom-av1" for software. \a device (a PCI id) and \a name only when the
+ * host knows them (NVENC; VA-API devices follow with the device inventory).
+ */
+struct VideoEncoderOffer {
+    QString codec;
+    QString backend;
+    bool hardware = false;
+    QString device;
+    QString name;
+    bool operator==(const VideoEncoderOffer &) const = default;
+};
+
+/** The optional `video` group of `capabilities`: `krdpserver` and both brokers send it. */
 struct VideoCapabilities {
     QList<VideoCodecOffer> codecs;
     QString softwareEncoding; ///< the host's SoftwareEncoding: "auto" | "never" | "prefer"
+    /// OPT-062 S2: 1 = the host honours the `codec` request's `order` / `encode` / `decoders`. 0: not advertised (older host).
+    int preferences = 0;
+    /// OPT-062 S2: the host's software ceiling per codec ("allowed" | "lastResort" for AVC | "never"); empty = not advertised.
+    QString softwareAvc;
+    QString softwareHevc;
+    QString softwareAv1;
+    static constexpr int MaxEncoders = 12;
+    QList<VideoEncoderOffer> encoders; ///< empty: not advertised; at most MaxEncoders are sent
     bool operator==(const VideoCapabilities &) const = default;
 };
 
@@ -273,6 +296,30 @@ KRDP_EXPORT QJsonObject capabilitiesRecord(const ChannelCapabilities &capabiliti
  * \a hardware (the virtual broker) the record has no `backend`.
  */
 KRDP_EXPORT QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, const QString &reason = {});
+
+/**
+ * OPT-062 S2: what a `codec` reply or push says beyond selected/backend/reason (all additive; an older client
+ * reads only those three). \a encoder is the concrete backend (VideoEncoderOffer::backend), \a device / \a deviceName
+ * the hardware device when known, \a decodePath ("hw" | "sw") the path the server assumed the client decodes
+ * the selected codec with (empty: not said), \a baseline = nothing in the client's list could be used so standard
+ * AVC is sent, \a skipped = every codec before the selected one in the client's order with all reason codes
+ * (CodecPolicy::skipReasonName(): stable identifiers the client localizes). Strings are bounded on the wire.
+ */
+struct CodecDetail {
+    struct Skipped {
+        QString codec;
+        QStringList why;
+        bool operator==(const Skipped &) const = default;
+    };
+    QString encoder;
+    QString device;
+    QString deviceName;
+    QString decodePath;
+    bool baseline = false;
+    QList<Skipped> skipped;
+    bool operator==(const CodecDetail &) const = default;
+};
+KRDP_EXPORT QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, const QString &reason, const CodecDetail &detail);
 
 /**
  * `console-screens` (OPT-060), unsolicited on each edge: \a active = the host's own screens are off for this

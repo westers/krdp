@@ -45,7 +45,69 @@ class BrokerHostPublicSnapshotTest : public QObject {
         return view;
     }
     static QByteArray slurp(const QString &path) { QFile f(path); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); }
+    static QJsonArray hostileEncoders()
+    {
+        QJsonArray list{QJsonObject{{u"codec"_s, u"hevc"_s}, {u"backend"_s, u"nvenc"_s}, {u"hw"_s, true}, {u"device"_s, u"0000:09:00.0"_s},
+                                    {u"name"_s, QString(200, u'N')}, {u"renderNode"_s, u"/dev/dri/renderD128"_s}, {u"password"_s, u"leak-password"_s}},
+                        QJsonObject{{u"codec"_s, u"vp9"_s}, {u"backend"_s, u"x"_s}, {u"hw"_s, false}}, // unknown codec: dropped
+                        QJsonObject{{u"codec"_s, u"avc"_s}, {u"backend"_s, u"libx264"_s}, {u"hw"_s, u"yes"_s}}, // mistyped: dropped
+                        QJsonObject{{u"codec"_s, u"avc"_s}, {u"backend"_s, QString(100, u'b')}, {u"hw"_s, false}}, // oversized backend: dropped
+                        QJsonObject{{u"codec"_s, u"avc"_s}, {u"backend"_s, u"libx264"_s}, {u"hw"_s, false}, {u"device"_s, QString(300, u'd')}}};
+        for (int i = 0; i < 30; ++i) list.append(QJsonObject{{u"codec"_s, u"av1"_s}, {u"backend"_s, u"libsvtav1"_s}, {u"hw"_s, false}});
+        return list;
+    }
 private Q_SLOTS:
+    // OPT-062 S3: the encoder probe is published with an allow-list and bounds, never a render node, path or extra field.
+    void videoEncodersAreAllowListedAndBounded()
+    {
+        const auto clean = Snapshot::sanitizeVideoEncoders(hostileEncoders());
+        QCOMPARE(clean.size(), Snapshot::MaximumEncoders);
+        const auto first = clean.at(0).toObject();
+        QCOMPARE(first.keys(), (QStringList{u"backend"_s, u"codec"_s, u"device"_s, u"hw"_s, u"name"_s}));
+        QCOMPARE(first[u"name"_s].toString().size(), 48);
+        QCOMPARE(clean.at(1).toObject().keys(), (QStringList{u"backend"_s, u"codec"_s, u"hw"_s})); // the 300-char device is dropped, the entry kept
+        const auto text = QJsonDocument(clean).toJson();
+        for (const auto &needle : {"/dev/dri", "renderNode", "leak-password", "password", "vp9"}) QVERIFY2(!text.contains(needle), needle);
+        for (const auto &entry : clean) QVERIFY(QStringList({u"avc"_s, u"hevc"_s, u"av1"_s}).contains(entry.toObject()[u"codec"_s].toString()));
+    }
+    void videoEncodersTravelThroughTheSnapshotForHostScopesOnly()
+    {
+        for (const auto scope : {Scope::Console, Scope::Virtual}) {
+            auto full = hostileFullView(scope);
+            full.insert(u"videoEncoders"_s, hostileEncoders());
+            const auto clean = Snapshot::sanitize(scope, full);
+            QCOMPARE(clean[u"videoEncoders"_s].toArray().size(), Snapshot::MaximumEncoders);
+            QVERIFY(!QJsonDocument(clean).toJson().contains("leak-password"));
+        }
+        auto session = hostileFullView(Scope::VirtualSession);
+        session.insert(u"videoEncoders"_s, hostileEncoders());
+        QVERIFY(!Snapshot::sanitize(Scope::VirtualSession, session).contains(u"videoEncoders"_s));
+        // A snapshot without the key stays without it.
+        QVERIFY(!Snapshot::sanitize(Scope::Console, hostileFullView(Scope::Console)).contains(u"videoEncoders"_s));
+    }
+    void theBrokerRecordsItsProbeInTheExistingSnapshot()
+    {
+        QTemporaryDir directory;
+        const QString dir = directory.path() + u"/public"_s;
+        // No snapshot yet: nothing is written and the reason says so (the next start tries again).
+        QString problem;
+        QVERIFY(!Snapshot::updateVideoEncoders(dir, Scope::Console, hostileEncoders(), true, &problem));
+        QVERIFY(!problem.isEmpty());
+        QVERIFY(Snapshot::write(dir, Scope::Console, hostileFullView(Scope::Console)));
+        QVERIFY(Snapshot::updateVideoEncoders(dir, Scope::Console, hostileEncoders(), true, &problem));
+        const auto read = Snapshot::read(dir, Scope::Console, true);
+        QVERIFY2(read.error.isEmpty(), qPrintable(read.error));
+        QCOMPARE(read.value[u"videoEncoders"_s].toArray().size(), Snapshot::MaximumEncoders);
+        QCOMPARE(read.value[u"values"_s].toObject()[u"Port"_s].toString(), u"4321"_s); // the rest is untouched
+        struct stat info{};
+        QVERIFY(!::stat(qPrintable(dir + u"/console.json"_s), &info));
+        QCOMPARE(info.st_mode & 07777, mode_t(0644));
+        QVERIFY(!QJsonDocument(read.value).toJson().contains("leak-password"));
+        // A later write from the helper that does not know the probe replaces the file (the helper carries the key over itself).
+        QVERIFY(Snapshot::write(dir, Scope::Console, hostileFullView(Scope::Console)));
+        QVERIFY(!Snapshot::read(dir, Scope::Console, true).value.contains(u"videoEncoders"_s));
+        QVERIFY(!Snapshot::updateVideoEncoders(dir, Scope::VirtualSession, hostileEncoders(), true, &problem)); // desktops have none
+    }
     void sanitizedSnapshotHasNoSecretsAccountsOrPaths_data()
     {
         QTest::addColumn<int>("scope");

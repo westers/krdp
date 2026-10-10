@@ -42,6 +42,26 @@ QString defaultDirectory() { return u"/var/lib/farside-public"_s; }
 QString snapshotFileName(Scope scope) { return BrokerHostAdmin::scopeName(scope) + u".json"_s; }
 bool isHiddenKey(const QString &key) { return key == u"Certificate" || key == u"CertificateKey"; }
 
+QJsonArray sanitizeVideoEncoders(const QJsonArray &encoders)
+{
+    static const QStringList codecs{u"avc"_s, u"hevc"_s, u"av1"_s};
+    QJsonArray result;
+    for (const auto &value : encoders) {
+        if (result.size() >= MaximumEncoders) break;
+        const auto entry = value.toObject();
+        const auto codec = entry[u"codec"_s].toString();
+        const auto backend = entry[u"backend"_s].toString();
+        if (!codecs.contains(codec) || backend.isEmpty() || backend.size() > 24 || !entry[u"hw"_s].isBool()) continue;
+        QJsonObject clean{{u"codec"_s, codec}, {u"backend"_s, backend}, {u"hw"_s, entry[u"hw"_s].toBool()}};
+        const auto device = entry[u"device"_s].toString();
+        if (!device.isEmpty() && device.size() <= 16) clean.insert(u"device"_s, device);
+        const auto name = entry[u"name"_s].toString();
+        if (!name.isEmpty()) clean.insert(u"name"_s, name.left(48));
+        result.append(clean);
+    }
+    return result;
+}
+
 QJsonObject sanitize(Scope scope, const QJsonObject &full)
 {
     QJsonObject result = pick(full, {u"version"_s, u"scope"_s, u"revision"_s, u"runtimeVerified"_s, u"application"_s});
@@ -55,6 +75,7 @@ QJsonObject sanitize(Scope scope, const QJsonObject &full)
         result.insert(u"tls"_s, pick(full[u"tls"_s].toObject(),
             {u"state"_s, u"administratorManaged"_s, u"fingerprint"_s, u"algorithm"_s, u"notBefore"_s, u"notAfter"_s}));
         result.insert(u"cameraLoopback"_s, pick(full[u"cameraLoopback"_s].toObject(), {u"supported"_s, u"state"_s}));
+        if (full[u"videoEncoders"_s].isArray()) result.insert(u"videoEncoders"_s, sanitizeVideoEncoders(full[u"videoEncoders"_s].toArray()));
     }
     return result;
 }
@@ -93,6 +114,16 @@ bool write(const QString &directory, Scope scope, const QJsonObject &full, QStri
     }
     ::fsync(directoryFd.value);
     return true;
+}
+
+
+bool updateVideoEncoders(const QString &directory, Scope scope, const QJsonArray &encoders, bool allowCurrentUser, QString *error)
+{
+    if (scope == Scope::VirtualSession) { if (error) *error = u"no encoders in this scope"_s; return false; }
+    auto current = read(directory, scope, allowCurrentUser);
+    if (!current.error.isEmpty()) { if (error) *error = current.error; return false; }
+    current.value.insert(u"videoEncoders"_s, sanitizeVideoEncoders(encoders));
+    return write(directory, scope, current.value, error);
 }
 
 ReadResult read(const QString &directory, Scope scope, bool allowCurrentUser)

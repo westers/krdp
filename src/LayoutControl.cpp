@@ -451,7 +451,25 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
         for (const auto &offer : video->codecs) {
             codecs.append(QJsonObject{{QStringLiteral("name"), offer.name}, {QStringLiteral("hw"), offer.hardware}, {QStringLiteral("sw"), offer.software}});
         }
-        record.insert(QStringLiteral("video"), QJsonObject{{QStringLiteral("codecs"), codecs}, {QStringLiteral("softwareEncoding"), video->softwareEncoding}});
+        QJsonObject group{{QStringLiteral("codecs"), codecs}, {QStringLiteral("softwareEncoding"), video->softwareEncoding}};
+        if (video->preferences > 0) {
+            group.insert(QStringLiteral("preferences"), video->preferences);
+        }
+        if (!video->softwareAvc.isEmpty() || !video->softwareHevc.isEmpty() || !video->softwareAv1.isEmpty()) {
+            group.insert(QStringLiteral("software"),
+                         QJsonObject{{QStringLiteral("avc"), video->softwareAvc}, {QStringLiteral("hevc"), video->softwareHevc}, {QStringLiteral("av1"), video->softwareAv1}});
+        }
+        if (!video->encoders.isEmpty()) {
+            QJsonArray encoders;
+            for (const auto &encoder : video->encoders.first(std::min<qsizetype>(video->encoders.size(), VideoCapabilities::MaxEncoders))) {
+                QJsonObject entry{{QStringLiteral("codec"), encoder.codec}, {QStringLiteral("backend"), encoder.backend}, {QStringLiteral("hw"), encoder.hardware}};
+                if (!encoder.device.isEmpty()) entry.insert(QStringLiteral("device"), encoder.device.left(16));
+                if (!encoder.name.isEmpty()) entry.insert(QStringLiteral("name"), encoder.name.left(48));
+                encoders.append(entry);
+            }
+            group.insert(QStringLiteral("encoders"), encoders);
+        }
+        record.insert(QStringLiteral("video"), group);
     }
     if (const auto &stats = capabilities.stats) {
         record.insert(QStringLiteral("stats"),
@@ -755,6 +773,29 @@ QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, c
     }
     if (!reason.isEmpty()) {
         record.insert(QStringLiteral("reason"), reason);
+    }
+    return record;
+}
+
+QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, const QString &reason, const CodecDetail &detail)
+{
+    QJsonObject record = codecRecord(selected, hardware, reason);
+    if (!detail.encoder.isEmpty()) {
+        QJsonObject encoder{{QStringLiteral("backend"), detail.encoder.left(24)}};
+        if (!detail.device.isEmpty()) encoder.insert(QStringLiteral("device"), detail.device.left(16));
+        if (!detail.deviceName.isEmpty()) encoder.insert(QStringLiteral("name"), detail.deviceName.left(48));
+        record.insert(QStringLiteral("encoder"), encoder);
+    }
+    if (!detail.decodePath.isEmpty()) {
+        record.insert(QStringLiteral("decodePath"), detail.decodePath);
+    }
+    record.insert(QStringLiteral("baseline"), detail.baseline);
+    if (!detail.skipped.isEmpty()) {
+        QJsonArray skipped;
+        for (const auto &entry : detail.skipped.first(std::min<qsizetype>(detail.skipped.size(), 3))) {
+            skipped.append(QJsonObject{{QStringLiteral("codec"), entry.codec}, {QStringLiteral("why"), QJsonArray::fromStringList(entry.why.mid(0, 6))}});
+        }
+        record.insert(QStringLiteral("skipped"), skipped);
     }
     return record;
 }

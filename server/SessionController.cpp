@@ -2356,6 +2356,7 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     }, Qt::QueuedConnection);
     newConnection->videoStream()->setCodecPreference(m_codecPreference);
     newConnection->videoStream()->setEncoderPolicy(encodersForBackend().encoders, m_softwareEncoding);
+    newConnection->videoStream()->setEncoderLabels(encodersForBackend().labels);
     newConnection->videoStream()->setAv1TilesSetting(m_av1Tiles);
     // Seeded from the controller's configured default; a client's own `chroma` (onControlChroma())
     // overrides it for this connection only, before any session is created (setSessions() applies
@@ -2460,7 +2461,7 @@ void SessionController::onClientDisplayInfo(SessionWrapper *wrapper)
     capabilities.layoutApply = true;
     capabilities.devices = KRdp::CameraAvailability::capabilities(KRdp::PhysicalDeviceControl::Capabilities,
         KRdp::CameraAvailability::reason(m_server->cameraLoopbackDevice()));
-    capabilities.video = KRdp::EncoderSupport::videoCapabilities(encodersForBackend(), m_softwareEncoding);
+    capabilities.video = KRdp::EncoderSupport::videoCapabilities(encodersForBackend(), m_softwareEncoding, KRdp::CodecPolicy::allowanceFor(m_softwareEncoding));
     capabilities.stats = KRdp::LayoutControl::StatsCapabilities{};
     wrapper->connection->sendControlRecord(KRdp::LayoutControl::capabilitiesRecord(capabilities));
     wrapper->controlTimer.start();
@@ -2616,9 +2617,10 @@ void SessionController::onControlCodec(SessionWrapper *wrapper, const QJsonObjec
 {
     // `codecs` lists the private codecs the client decodes (an empty list: AVC only); the
     // shared handler (CodecRequest, also used by the console and virtual brokers) applies it.
-    const auto request = KRdp::CodecRequest::parse(record);
+    QString problem;
+    const auto request = KRdp::CodecRequest::parse(record, &problem);
     if (!request) {
-        replyTo(wrapper, KRdp::CodecRequest::invalidRecord());
+        replyTo(wrapper, KRdp::CodecRequest::invalidRecord(problem));
         return;
     }
     QString log;

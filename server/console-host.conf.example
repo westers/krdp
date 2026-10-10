@@ -13,6 +13,9 @@ FARSIDE_CONSOLE_CERTIFICATE_KEY=/etc/farside/console.key
 
 # Private codecs (HEVC/AV1) in software: auto (default), never or prefer.
 #FARSIDE_CONSOLE_SOFTWARE_ENCODING=auto
+#FARSIDE_CONSOLE_SOFTWARE_AVC=auto
+#FARSIDE_CONSOLE_SOFTWARE_HEVC=auto
+#FARSIDE_CONSOLE_SOFTWARE_AV1=auto
 
 # AV1 tiles for the Farside client: auto (default: tile rows by picture height when the client
 # decodes AV1 in software or does not say, one tile when it decodes in hardware), 1, 2, 4, 8 or 16.

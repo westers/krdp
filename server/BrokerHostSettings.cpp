@@ -24,7 +24,9 @@ QList<Field> fields(Scope scope)
         {u"PreferAudioQuality"_s, "PREFER_AUDIO_QUALITY", "false"},
         {u"StandardClientMedia"_s, "STANDARD_CLIENT_MEDIA", "true"},
         {u"CameraLoopbackDevice"_s, "CAMERA_LOOPBACK_DEVICE", "none"},
-        {u"SoftwareEncoding"_s, "SOFTWARE_ENCODING", "auto"}, {u"Av1Tiles"_s, "AV1_TILES", "auto"}};
+        {u"SoftwareEncoding"_s, "SOFTWARE_ENCODING", "auto"},
+        {u"SoftwareAvc"_s, "SOFTWARE_AVC", "auto"}, {u"SoftwareHevc"_s, "SOFTWARE_HEVC", "auto"}, {u"SoftwareAv1"_s, "SOFTWARE_AV1", "auto"},
+        {u"Av1Tiles"_s, "AV1_TILES", "auto"}};
     if (scope == Scope::Console) result.append({u"VaapiDriver"_s, "VAAPI_DRIVER", "auto"});
     return result;
 }
@@ -183,6 +185,10 @@ std::optional<QString> normalize(Scope scope, const QString &key, const QString 
     } else if (key == u"SoftwareEncoding") {
         if (value.trimmed().isEmpty()) return u"auto"_s;
         if (const auto mode = CodecPolicy::parseSoftwareEncoding(value)) return QString::fromLatin1(CodecPolicy::softwareEncodingName(*mode));
+    } else if (key == u"SoftwareAvc" || key == u"SoftwareHevc" || key == u"SoftwareAv1") {
+        // OPT-062 S3: the host's software ceiling per codec. auto follows SoftwareEncoding (never -> restricted).
+        const auto family = key == u"SoftwareAvc" ? CodecPolicy::Family::Avc : key == u"SoftwareHevc" ? CodecPolicy::Family::Hevc : CodecPolicy::Family::Av1;
+        if (const auto ceiling = CodecPolicy::parseCeilingSetting(value, family)) return QString::fromLatin1(CodecPolicy::ceilingSettingName(*ceiling, family));
     } else if (key == u"Av1Tiles") {
         if (const auto tiles = CodecPolicy::parseAv1Tiles(value)) return *tiles ? QString::number(*tiles) : u"auto"_s;
     } else if (key == u"VaapiDriver") {

@@ -228,7 +228,7 @@ void VirtualSessionTransport::setVideoCodecHost(const VideoCodecHost &host)
 {
     m_videoHost = host;
     if (m_connection) {
-        m_connection->videoStream()->setEncoderPolicy(host.probe.encoders, host.mode);
+        host.apply(*m_connection->videoStream());
         m_connection->videoStream()->setAv1TilesSetting(host.av1Tiles);
     }
 }
@@ -261,8 +261,7 @@ void VirtualSessionTransport::loadUserSettings(std::optional<quint32> uid)
     m_wakeDisplayOnConnect = p.wakeDisplayOnConnect.value_or(m_wakeDisplayOnConnect);
     m_userStandardMedia = p.standardClientMedia.value_or(true);
     if (m_videoHost) {
-        auto host = *m_videoHost;
-        host.mode = p.softwareEncoding.value_or(host.mode);
+        auto host = m_videoHost->withUser(p.softwareEncoding); // the user's mode can only tighten the host's software ceiling
         host.av1Tiles = p.av1Tiles.value_or(host.av1Tiles);
         setVideoCodecHost(host);
     }
@@ -1051,7 +1050,7 @@ void VirtualSessionTransport::sendCapabilities()
     capabilities.topologyPreview = true;
     capabilities.topologyApply = true;
     capabilities.devices = VirtualDeviceCapabilities;
-    if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, m_videoHost->mode);
+    if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, m_videoHost->mode, m_videoHost->allowance());
     capabilities.stats = LayoutControl::StatsCapabilities{};
     m_connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
@@ -1953,9 +1952,10 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         // connection's preference, so it may come before any desktop is attached; the worker
         // gets the choice when one is (WorkerCodecBridge). A broker without a VideoCodecHost
         // (no `video` group) still answers AVC only, without `backend` (AUD-FIX2 F2).
-        if (!record.value(u"codecs"_s).isArray()) return CodecRequest::invalidRecord();
-        const auto parsed = CodecRequest::parse(record);
-        if (!parsed) return CodecRequest::invalidRecord();
+        if (record.contains(u"codecs"_s) && !record.value(u"codecs"_s).isArray()) return CodecRequest::invalidRecord();
+        QString problem;
+        const auto parsed = CodecRequest::parse(record, &problem);
+        if (!parsed) return CodecRequest::invalidRecord(problem);
         if (!m_videoHost || !m_connection) return LayoutControl::codecRecord(u"avc"_s, std::nullopt, u"virtual desktops stream AVC only"_s);
         QString log;
         const auto reply = CodecRequest::apply(*m_connection->videoStream(), *parsed, &log);

@@ -30,6 +30,7 @@
 #include "SystemdNotify.h"
 #include "TerminateHandler.h"
 #include "VideoCodecHost.h"
+#include "BrokerHostPublicSnapshot.h"
 
 int main(int argc, char **argv)
 {
@@ -63,9 +64,12 @@ int main(int argc, char **argv)
     const QCommandLineOption standardMediaOption(QStringLiteral("standard-client-media"), QStringLiteral("Enable standard RDP audio and camera consent: true or false."), QStringLiteral("enabled"), QStringLiteral("true"));
     const QCommandLineOption cameraLoopbackOption(QStringLiteral("camera-loopback-device"), QStringLiteral("V4L2 loopback path in the desktop worker, or none."), QStringLiteral("path"), QStringLiteral("none"));
     const QCommandLineOption softwareEncodingOption(QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto"));
+    const QCommandLineOption softwareAvcOption(QStringLiteral("software-avc"), QStringLiteral("Software H.264 encoding: auto, allowed or last-resort (OPT-062)."), QStringLiteral("ceiling"), QStringLiteral("auto"));
+    const QCommandLineOption softwareHevcOption(QStringLiteral("software-hevc"), QStringLiteral("Software HEVC encoding: auto, allowed or never (OPT-062)."), QStringLiteral("ceiling"), QStringLiteral("auto"));
+    const QCommandLineOption softwareAv1Option(QStringLiteral("software-av1"), QStringLiteral("Software AV1 encoding: auto, allowed or never (OPT-062)."), QStringLiteral("ceiling"), QStringLiteral("auto"));
     const QCommandLineOption av1TilesOption(QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto"));
     const QCommandLineOption vaapiDriverOption(QStringLiteral("vaapi-driver"), QStringLiteral("VaapiDriverMode for the capture workers: auto, off, radeonsi, iHD or i965."), QStringLiteral("mode"), QStringLiteral("auto"));
-    parser.addOptions({workerOption, authenticationOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, qualityOption, adaptiveQualityOption, standardMediaOption, cameraLoopbackOption, softwareEncodingOption, av1TilesOption, vaapiDriverOption});
+    parser.addOptions({workerOption, authenticationOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, qualityOption, adaptiveQualityOption, standardMediaOption, cameraLoopbackOption, softwareEncodingOption, softwareAvcOption, softwareHevcOption, softwareAv1Option, av1TilesOption, vaapiDriverOption});
     parser.process(application);
 
     if (geteuid() != 0) {
@@ -87,6 +91,9 @@ int main(int argc, char **argv)
     const auto standardMediaValue = parser.value(standardMediaOption);
     const auto cameraLoopback = parser.value(cameraLoopbackOption);
     const auto softwareEncoding = KRdp::parseHostSoftwareEncoding(parser.value(softwareEncodingOption));
+    const auto ceilingAvc = KRdp::parseHostCeiling(parser.value(softwareAvcOption), KRdp::CodecPolicy::Family::Avc);
+    const auto ceilingHevc = KRdp::parseHostCeiling(parser.value(softwareHevcOption), KRdp::CodecPolicy::Family::Hevc);
+    const auto ceilingAv1 = KRdp::parseHostCeiling(parser.value(softwareAv1Option), KRdp::CodecPolicy::Family::Av1);
     const auto vaapiDriver = KRdp::VaapiDriverMode::normalize(parser.value(vaapiDriverOption));
     if (!portOk || port == 0 || parser.value(workerOption).isEmpty() || parser.value(certificateOption).isEmpty() || parser.value(keyOption).isEmpty()
         || !qualityOk || quality < 0 || quality > 100
@@ -94,7 +101,7 @@ int main(int argc, char **argv)
         || (audioPriorityValue != QLatin1String("true") && audioPriorityValue != QLatin1String("false"))
         || (standardMediaValue != QLatin1String("true") && standardMediaValue != QLatin1String("false"))
         || (cameraLoopback != QLatin1String("none") && !cameraLoopback.startsWith(QLatin1String("/dev/")))
-        || !softwareEncoding || !vaapiDriver) {
+        || !softwareEncoding || !ceilingAvc || !ceilingHevc || !ceilingAv1 || !vaapiDriver) {
         parser.showHelp(1);
     }
     // AUD-FIX7: the host keeps its own certificate valid (created when missing, renewed when
@@ -141,11 +148,22 @@ int main(int argc, char **argv)
     // starts from; the worker probes its own encoders and replaces this once it reports.
     KRdp::SystemdNotify::ping(); // K6.1: the encoder probe opens real devices and can be slow
     KRdp::EncoderSupport::applyProcessOverrides();
-    const KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding,
-                                         KRdp::parseHostAv1Tiles(parser.value(av1TilesOption), "farside-console-host")};
+    KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding,
+                                   KRdp::parseHostAv1Tiles(parser.value(av1TilesOption), "farside-console-host")};
+    videoHost.ceiling = KRdp::resolveHostCeiling(*softwareEncoding, *ceilingAvc, *ceilingHevc, *ceilingAv1);
     qInfo().noquote() << "Console host video encoders:" << KRdp::EncoderSupport::describe(videoHost.probe) << "- SoftwareEncoding"
-                      << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode) << "- AV1 tiles" << KRdp::CodecPolicy::av1TilesName(videoHost.av1Tiles);
+                      << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode) << "- software ceilings avc"
+                      << KRdp::CodecPolicy::allowanceName(KRdp::CodecPolicy::Family::Avc, videoHost.ceiling->avc) << "hevc"
+                      << KRdp::CodecPolicy::allowanceName(KRdp::CodecPolicy::Family::Hevc, videoHost.ceiling->hevc) << "av1"
+                      << KRdp::CodecPolicy::allowanceName(KRdp::CodecPolicy::Family::Av1, videoHost.ceiling->av1) << "- AV1 tiles"
+                      << KRdp::CodecPolicy::av1TilesName(videoHost.av1Tiles);
     host.setVideoCodecHost(videoHost);
+    {
+        // OPT-062 S3: let the settings page see what this host can encode (best effort; the next start tries again).
+        QString problem;
+        if (!KRdp::BrokerHostPublicSnapshot::updateVideoEncoders(KRdp::BrokerHostPublicSnapshot::defaultDirectory(), KRdp::BrokerHostSettings::Scope::Console, KRdp::publicVideoEncoders(videoHost.probe), false, &problem))
+            qInfo().noquote() << "Host settings snapshot not updated with the encoders:" << problem;
+    }
     if (!server.start()) {
         return 1;
     }

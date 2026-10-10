@@ -56,6 +56,8 @@ struct Probe {
     QString av1HardwareVia;
     QList<NvidiaEncoder> nvidia; ///< every NVENC encoder the probe listed (empty: none, or never asked because VA-API covers all codecs)
     QString nvidiaNote; ///< why the NVIDIA stack was unavailable ("driver/library version mismatch ...", "no NVIDIA device")
+    /// OPT-062 S2: the concrete encoder behind each codec's hardware and software backend (the `codec` reply's `encoder`, Stats).
+    CodecPolicy::EncoderLabels labels;
 
     const QString &hardwareVia(CodecPolicy::Family family) const
     {
@@ -81,6 +83,8 @@ struct Inputs {
     std::array<bool, 3> kpipewireHardware{true, true, true};
     std::array<bool, 3> software{true, true, true};
     std::array<bool, 3> liveBitrate{false, false, false};
+    /// Indexed avc, hevc, av1: the software encoder KPipeWire opens (libx264 or libopenh264; libx265; libsvtav1 or libaom-av1).
+    std::array<QString, 3> softwareBackend{QStringLiteral("libx264"), QStringLiteral("libx265"), QStringLiteral("libsvtav1")};
     bool chroma444 = true; ///< KPipeWire has 4:4:4 chroma
     bool forcedSoftware = false;
     QString overrideSpec; ///< a FARSIDE_ENCODERS value
@@ -110,6 +114,12 @@ KRDP_EXPORT bool applyOverride(CodecPolicy::Encoders &encoders, const QString &s
  * `hevc`/`av1` when the policy could pick them (under `never` only with hardware).
  */
 KRDP_EXPORT LayoutControl::VideoCapabilities videoCapabilities(const Probe &probe, CodecPolicy::SoftwareEncoding mode);
+/**
+ * OPT-062 S2: the same under the host's per-codec software ceiling \a allowance (a codec whose ceiling is Never
+ * lists no software backend; AVC always keeps its software encoder, as the last resort), plus `preferences`,
+ * `software` and the encoder list `encoders` (the probe's, without a forbidden software backend).
+ */
+KRDP_EXPORT LayoutControl::VideoCapabilities videoCapabilities(const Probe &probe, CodecPolicy::SoftwareEncoding mode, const CodecPolicy::SoftwareAllowance &allowance);
 
 /// "avc hw+sw, hevc hw, av1 none" - for the startup log.
 KRDP_EXPORT QString describe(const Probe &probe);
