@@ -48,8 +48,9 @@ kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # libavcodec's own Depends (dpkg-shlibdeps: libavcodec62) + OPT-063 (d5a10ef + 8bda4f9 + 6ba4011, merged from
 # branch s1-guard-fix by 90a2d9b, test follow-up 1ff87d4): software AVC420 and h264_nvenc are converted BT.709 full range and tagged, the way
 # FreeRDP decodes it (red was (255,36,10)), and SVT-AV1/libaom quality reopens are coalesced + OPT-065
-# (0d3d2c1 + a8ceb5c): software AV1 refreshes the picture once after motion settles (stale blocks).
-kpw_ref=${KPIPEWIRE_REF:-a8ceb5c}
+# (0d3d2c1 + a8ceb5c + 7ab499b + 42e36a6): software AV1 refreshes the picture once after motion settles (stale blocks),
+# v2 triggered by damage fraction (large short bursts count, tiny frames ignored, a held-back refresh is served).
+kpw_ref=${KPIPEWIRE_REF:-42e36a6}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 
