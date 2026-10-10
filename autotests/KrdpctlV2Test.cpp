@@ -108,6 +108,67 @@ private Q_SLOTS:
         QCOMPARE(codecs.at(1).toObject(), (QJsonObject{{u"name"_s, u"hevc"_s}, {u"hw"_s, true}, {u"sw"_s, false}}));
     }
 
+    // OPT-062 S2: the optional preferences, software-ceiling and encoder groups (exact shape; an older group stays as it was).
+    void capabilitiesVideoPreferencesShape()
+    {
+        LayoutControl::ChannelCapabilities caps;
+        caps.host = u"console"_s;
+        LayoutControl::VideoCapabilities video{{{u"avc420"_s, true, true}}, u"auto"_s};
+        video.preferences = 1;
+        video.softwareAvc = u"lastResort"_s;
+        video.softwareHevc = u"allowed"_s;
+        video.softwareAv1 = u"never"_s;
+        video.encoders = {{u"hevc"_s, u"nvenc"_s, true, u"0000:09:00.0"_s, u"NVIDIA GeForce RTX 2070"_s}, {u"hevc"_s, u"libx265"_s, false, {}, {}}};
+        caps.video = video;
+        const auto record = LayoutControl::capabilitiesRecord(caps).value(u"video"_s).toObject();
+        QCOMPARE(record.value(u"preferences"_s).toInt(), 1);
+        QCOMPARE(record.value(u"software"_s).toObject(), (QJsonObject{{u"avc"_s, u"lastResort"_s}, {u"hevc"_s, u"allowed"_s}, {u"av1"_s, u"never"_s}}));
+        const auto encoders = record.value(u"encoders"_s).toArray();
+        QCOMPARE(encoders.size(), 2);
+        QCOMPARE(encoders.at(0).toObject(), (QJsonObject{{u"codec"_s, u"hevc"_s}, {u"backend"_s, u"nvenc"_s}, {u"hw"_s, true},
+                                                         {u"device"_s, u"0000:09:00.0"_s}, {u"name"_s, u"NVIDIA GeForce RTX 2070"_s}}));
+        QCOMPARE(encoders.at(1).toObject(), (QJsonObject{{u"codec"_s, u"hevc"_s}, {u"backend"_s, u"libx265"_s}, {u"hw"_s, false}})); // no empty device/name
+        QCOMPARE(record.value(u"codecs"_s).toArray().size(), 1); // the older group is untouched
+        // Bounded: at most 12 encoders, a name at most 48 characters.
+        LayoutControl::VideoCapabilities many{{}, u"auto"_s};
+        many.preferences = 1;
+        for (int i = 0; i < 40; ++i) many.encoders.append({u"av1"_s, u"libsvtav1"_s, false, {}, QString(300, u'n')});
+        caps.video = many;
+        const auto bounded = LayoutControl::capabilitiesRecord(caps).value(u"video"_s).toObject().value(u"encoders"_s).toArray();
+        QCOMPARE(bounded.size(), LayoutControl::VideoCapabilities::MaxEncoders);
+        QCOMPARE(bounded.at(0).toObject().value(u"name"_s).toString().size(), 48);
+        // Without preferences nothing of it is sent, even if the lists are filled.
+        many.preferences = 0;
+        many.encoders.clear();
+        caps.video = many;
+        const auto old = LayoutControl::capabilitiesRecord(caps).value(u"video"_s).toObject();
+        QVERIFY(!old.contains(u"preferences"_s) && !old.contains(u"software"_s) && !old.contains(u"encoders"_s));
+    }
+
+    void codecRecordCarriesTheChoiceDetail()
+    {
+        LayoutControl::CodecDetail detail;
+        detail.encoder = u"nvenc"_s;
+        detail.device = u"0000:09:00.0"_s;
+        detail.deviceName = u"NVIDIA GeForce RTX 2070"_s;
+        detail.decodePath = u"sw"_s;
+        detail.baseline = false;
+        detail.skipped = {{u"av1"_s, {u"noHardwareEncoder"_s, u"softwareNotAllowed"_s}}};
+        const auto reply = LayoutControl::withRequestId(LayoutControl::codecRecord(u"hevc"_s, true, u"initial choice"_s, detail), u"r2"_s);
+        QCOMPARE(reply.value(u"selected"_s).toString(), u"hevc"_s);
+        QCOMPARE(reply.value(u"backend"_s).toString(), u"hardware"_s);
+        QCOMPARE(reply.value(u"requestId"_s).toString(), u"r2"_s);
+        QCOMPARE(reply.value(u"encoder"_s).toObject(), (QJsonObject{{u"backend"_s, u"nvenc"_s}, {u"device"_s, u"0000:09:00.0"_s}, {u"name"_s, u"NVIDIA GeForce RTX 2070"_s}}));
+        QCOMPARE(reply.value(u"decodePath"_s).toString(), u"sw"_s);
+        QCOMPARE(reply.value(u"baseline"_s).toBool(true), false);
+        QCOMPARE(reply.value(u"skipped"_s).toArray().first().toObject(),
+                 (QJsonObject{{u"codec"_s, u"av1"_s}, {u"why"_s, QJsonArray{u"noHardwareEncoder"_s, u"softwareNotAllowed"_s}}}));
+        // The three old fields are where they were, and a detail with nothing in it adds only `baseline`.
+        const auto bare = LayoutControl::codecRecord(u"avc"_s, false, {}, LayoutControl::CodecDetail{});
+        QCOMPARE(bare.keys(), (QStringList{u"backend"_s, u"baseline"_s, u"ok"_s, u"selected"_s, u"type"_s, u"v"_s}));
+        QCOMPARE(LayoutControl::codecRecord(u"av1"_s, true).keys(), (QStringList{u"backend"_s, u"ok"_s, u"selected"_s, u"type"_s, u"v"_s}));
+    }
+
     void codecRecordShape()
     {
         const auto reply = LayoutControl::withRequestId(LayoutControl::codecRecord(u"avc"_s, false, u"no usable encoder for hevc on this host"_s), u"r1"_s);
