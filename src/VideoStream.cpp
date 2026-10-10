@@ -390,7 +390,7 @@ public:
     LogThrottle codecChoiceLog{std::chrono::seconds(30), 3};
     void fillSelection(CodecPolicy::Input &in) const
     {
-        in.request = explicitRequest ? *explicitRequest : CodecPolicy::legacyRequest(clientFamilies, clientDecode, codecPolicyAdaptive);
+        in.request = explicitRequest ? *explicitRequest : CodecPolicy::requestFromRecord(clientFamilies, clientDecode, codecPolicyAdaptive);
         in.host.allowance = CodecPolicy::allowanceFor(softwareEncoding);
     }
     // OPT-055: the "waiting for the switch interval" reason last logged; the line repeats every ~1.5 s otherwise.
@@ -1092,11 +1092,10 @@ namespace
 QString codecDecisionText(const CodecPolicy::Decision &decision, const CodecPolicy::Input &in, bool adaptive)
 {
     const auto &request = *in.request;
-    QString text = QStringLiteral("Codec policy (%1): order [%2]%3, decode %4")
+    QString text = QStringLiteral("Codec policy (%1): order [%2], encode %3, decode %4")
                        .arg(QLatin1String(CodecPolicy::softwareEncodingName(in.mode)),
                             CodecPolicy::orderText(CodecPolicy::normalizedOrder(request.order)),
-                            request.legacy ? QStringLiteral(" (client record without modes: the host decides the encoding)")
-                                           : QStringLiteral(", encode %1").arg(QLatin1String(CodecPolicy::modeName(request.encode))),
+                            QLatin1String(CodecPolicy::modeName(request.encode)),
                             QLatin1String(CodecPolicy::modeName(request.decode)));
     if (!decision.skipped.isEmpty()) {
         text += QStringLiteral("; skipped %1").arg(CodecPolicy::skippedText(decision.skipped));
@@ -1366,6 +1365,12 @@ void VideoStream::stepCodecPolicy(bool congested)
     const qint64 cpuNs = d->cpuTimeSource ? d->cpuTimeSource() : processCpuNs();
     const int frames = d->framesEncoded.load();
     const auto sampledAt = clk::steady_clock::now();
+    if (cpuNs < 0 || (d->cpuNsAtLastSample >= 0 && cpuNs < d->cpuNsAtLastSample)) {
+        // OPT-063: the worker's figure is gone or restarted (a new process counts from zero): the
+        // intervals before it say nothing about the new encoder, whose start-up is not load either.
+        d->encodeLoad.clear();
+        d->cpuNsAtLastSample = -1;
+    }
     if (steering && !d->codecPolicy.current->hardware && cpuNs >= 0 && d->cpuNsAtLastSample >= 0) {
         // AUD-FIX4 D3: the estimated encode time per frame against the frame budget, over the
         // encoder's own threads (not every core), plus delivered frames falling short of the cap.

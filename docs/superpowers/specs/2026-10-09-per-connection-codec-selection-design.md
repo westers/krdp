@@ -311,7 +311,7 @@ Size stays within the < 2 KiB budget (contract line 540): device ids are 12 byte
 |---|---|---|
 | new | new (`preferences`) | full model |
 | new | old (no `preferences`) | client sends today's record built from its per-connection order/decode mode (private codecs only, hw-only filter = decode mode); server picks by compression; client compares `selected` with its own first choice and shows the notice; encode mode cannot be enforced and the notice says "this PC's Farside version cannot follow the encoding choice" |
-| old | new | request without `order`/`encode`: legacy selection (`SoftwareEncoding` + `BestCompressionFirst`), but the per-codec allowance ceiling applies |
+| old | new | request without `order`/`encode`: **the client's order is honoured** (Steve, 2026-10-09: "honor clients order, we don't need to keep old selections"). The old `codecs` list becomes the order (AVC is not appended: the client did not list it), encode and decode mode `Any`, decoders from the reported paths (`requestFromRecord()`); `SoftwareEncoding` only limits software through the allowance (`never` = no software HEVC/AV1) and no longer picks hardware-only or best-compression-first. There is no `Request::legacy` and no second selection path (OPT-063). |
 | stock RDP | any | no KRDPCTL `codec`; RDPGFX caps pick AVC420/AVC444 as today (`src/CodecPolicy.h:19-23`) |
 
 KRDPCTL `ProtocolVersion` stays 1 (`src/LayoutControl.h:33`): the change is additive and capability-gated.
@@ -355,7 +355,7 @@ A new pure layer in `src/CodecPolicy.h` (no channel, no encoder):
 |---|---|
 | Slow link (adaptive) | to a better-compressing **candidate**; Encode = Hardware only between hardware candidates |
 | Link recovered | back to the first candidate |
-| CPU guard (software only) | preset, next candidate in order, frame rate; never to a skipped codec |
+| CPU guard (software only) | preset, next candidate in order, frame rate; never to a skipped codec. **Only to a codec the client listed** (OPT-063): AVC appended as the baseline is not a step, so a client that fixed its codec (order `[av1]`) stays on it and the guard lowers the frame rate (`mayLeave()`). A step to another software codec carries the frame-rate cap over, and no cap rises again for 60 s after a step (doubled after a flap) |
 | Encoder failure / unavailable (OPT-055 ladder, `src/EncoderFailurePolicy.h`) | next device for the same codec (7.4), then next candidate, then baseline |
 | `adaptive:false` | only CPU guard and failures (contract line 268-269) |
 | Console another viewer admitted | AVC for everyone (C4), back to the request when alone again |

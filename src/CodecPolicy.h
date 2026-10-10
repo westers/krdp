@@ -235,6 +235,15 @@ constexpr int SoftwarePrivateMaxFrameRate = 30;
 constexpr int DefaultFrameRate = 60;
 /// The CPU guard's last step halves the frame rate, never below this.
 constexpr int MinFrameRate = 15;
+/**
+ * Frame-rate hysteresis (OPT-063): after the guard lowers the frame rate, or moves a stream to another
+ * codec and carries the cap over, the cap does not rise again for FrameRateHold. A cap raised and
+ * lowered again within FrameRateFlapWindow doubles the next hold (up to 8x). Sol 2026-10-09: AVC at
+ * 30 -> 15 -> 30 -> 15 fps every ~11 s, each raise tripping the guard at once.
+ */
+constexpr auto FrameRateHold = std::chrono::seconds(60);
+constexpr auto FrameRateFlapWindow = std::chrono::seconds(120);
+constexpr int FrameRateFlapMaxDoublings = 3;
 /// The guard steps a software preset back up (slower, better compression) once the p95 load has
 /// stayed under this share of the frame budget for PresetRecoverHold. Hysteresis against
 /// CpuGuardLimit: a slower preset costs up to ~1.6x (PERF.md: x265 superfast -> veryfast), so
@@ -466,6 +475,9 @@ struct State {
     Clock::time_point guardCalmSince{}; ///< software encoder under PresetRecoverBelow since (GuardForgiveAfter)
     Preset preset = Preset::Efficient; ///< of the current software HEVC/AV1 encoder
     std::optional<int> guardFrameRate; ///< the CPU guard's frame-rate cap (its last step)
+    Clock::time_point frameRateHoldUntil{}; ///< no cap increase before this (FrameRateHold)
+    Clock::time_point frameRateRaisedAt{}; ///< the last cap increase (flap detection)
+    int frameRateFlaps = 0; ///< raises that had to be undone within FrameRateFlapWindow
     quint32 targetKbps = 0; ///< target bitrate of a software HEVC/AV1 encoder (quality, capped by the link)
     quint32 linkKbps = 0; ///< the slow-link cap on it (0 = none)
     Clock::time_point linkChangedAt{};
@@ -579,16 +591,7 @@ inline Selection selectDetailed(const Input &in, const State &state, Clock::time
         for (const Family f : {Family::Hevc, Family::Av1}) {
             host.softwareHeld[size_t(f)] = host.softwareHeld[size_t(f)] || now < state.softwareBlockedUntil[size_t(f)];
         }
-        bool compress = r.adaptive && in.adaptive && state.slowLink;
-        if (r.legacy) {
-            // An old client said no modes: the host's SoftwareEncoding decides, as before. Hardware
-            // only on a normal link, software too under `prefer` or on a slow link (and the best
-            // compression first then); `never` removes software through the allowance.
-            const bool softwareWanted = in.mode == SoftwareEncoding::Prefer || (in.mode == SoftwareEncoding::Auto && compress);
-            r.encode = softwareWanted ? Mode::Any : Mode::Hardware;
-            compress = softwareWanted;
-            if (in.mode == SoftwareEncoding::Never) host.allowance = allowanceFromSoftwareNever(true);
-        }
+        const bool compress = r.adaptive && in.adaptive && state.slowLink;
         if (compress) {
             // Only the order changes: the best-compressing codec of the list, never one outside it.
             QList<Family> sorted;
@@ -710,6 +713,13 @@ inline void updateLinkCap(State &state, const Input &in, Clock::time_point now)
 inline quint32 wantedTarget(const State &state, const Input &in)
 {
     if (!state.current || !softwarePrivate(*state.current)) {
+        return 0;
+    }
+    if (!state.linkKbps && !in.encoders.of(state.current->family).liveBitrate) {
+        // OPT-063: an encoder that reopens for every rate change (SVT-AV1) runs in quality mode, the
+        // client's Quality (constant QP = qindex / 4, OPT-052) and not a bitrate that was never asked for:
+        // CBR at 6220 kbit/s stepped to 3110 and 1849 on Sol, a restart each. Only a slow link, where the
+        // cap must hold, uses a target.
         return 0;
     }
     quint32 target = qualityKbps(in.quality.value_or(DefaultQuality), in.pixels);
@@ -1114,7 +1124,15 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
     }
     // Second step: step away from this software codec, blocked for CpuBlockFor with the AUD-FIX5
     // D5 back-off (guardBlockFor()).
-    if (overBudget && !presetStepPending && reconfigureAllowed) {
+    // OPT-063: only to a codec the client listed. A client that fixed its codec (order [av1]) stays on it:
+    // the baseline AVC is not a step the guard may take for it, the frame rate (third step) is.
+    const bool mayStepAway = [&] {
+        if (!overBudget || !in.request) return true;
+        State trial = state;
+        trial.softwareBlockedUntil[size_t(state.current->family)] = now + CpuBlockFor;
+        return mayLeave(*in.request, selectDetailed(in, trial, now).choice.family);
+    }();
+    if (overBudget && !presetStepPending && reconfigureAllowed && mayStepAway) {
         const Family family = state.current->family;
         auto &blocked = state.softwareBlockedUntil[size_t(family)];
         if (now >= blocked) {
@@ -1222,15 +1240,23 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
             if (to < from) {
                 state.guardFrameRate = to;
                 state.lastReconfigure = now;
+                if (state.frameRateRaisedAt != Clock::time_point{} && now - state.frameRateRaisedAt < FrameRateFlapWindow) {
+                    // The cap raised shortly before could not hold: the next raise waits longer.
+                    state.frameRateFlaps = std::min(state.frameRateFlaps + 1, FrameRateFlapMaxDoublings);
+                }
+                state.frameRateRaisedAt = {};
+                state.frameRateHoldUntil = now + FrameRateHold * (1 << state.frameRateFlaps);
                 settingsReason = loadText() + QStringLiteral("; frame rate %1").arg(to);
             }
-        } else if (state.guardFrameRate && !state.current->hardware && in.encodeLoadP95 && reconfigureAllowed) {
-            // Back up one step when the load at the higher rate would stay well under the limit.
+        } else if (state.guardFrameRate && !state.current->hardware && in.encodeLoadP95 && reconfigureAllowed && now >= state.frameRateHoldUntil) {
+            // Back up one step when the load at the higher rate would stay well under the limit, and
+            // the cap has been held for FrameRateHold since the last step.
             const int from = *state.guardFrameRate;
             const int to = std::min(DefaultFrameRate, from * 2);
             if (*in.encodeLoadP95 * to / from < CpuGuardLimit * 0.8) {
                 state.guardFrameRate = to >= DefaultFrameRate ? std::nullopt : std::optional<int>(to);
                 state.lastReconfigure = now;
+                state.frameRateRaisedAt = now;
                 settingsReason = QStringLiteral("CPU guard: load recovered; frame rate %1").arg(to);
             }
         } else if (!state.guardFrameRate && lowLoad && reconfigureAllowed && now - state.lowLoadSince >= PresetRecoverHold && now >= state.presetRaiseBlockedUntil) {
@@ -1275,10 +1301,20 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
     if (softwarePrivate(want)) {
         state.guardBlockedAt[wantIndex] = {}; // this retry is used up
     }
+    // OPT-063: a switch the guard made keeps the frame-rate cap the stream ran at (an AV1 stream
+    // capped at 30 fps does not become 60 fps AVC, which tripped the guard again at once).
+    const int previousCap = settingsOf(state).maxFrameRate;
     state.current = want;
     state.lastSwitch = now;
     state.lastReconfigure = now;
     state.guardFrameRate.reset();
+    state.frameRateRaisedAt = {};
+    state.frameRateFlaps = 0;
+    state.frameRateHoldUntil = {};
+    if (fromGuard && previousCap > 0 && !want.hardware) {
+        state.guardFrameRate = previousCap;
+        state.frameRateHoldUntil = now + FrameRateHold;
+    }
     state.targetKbps = 0;
     state.linkKbps = 0;
     state.fillSince = {};
@@ -1312,6 +1348,8 @@ constexpr double AvcSoftwareParallelShare = 0.45;
 constexpr double ShortfallShare = 0.75;
 constexpr double ShortfallFloorShare = 0.30;
 constexpr double ShortfallMinLoad = 0.35;
+/// An encoder using less than this share of its threads has headroom whatever the delivered frame rate (OPT-063).
+constexpr double EncoderBusyMin = 0.30;
 /// The CPU guard needs at least this many frames in an interval to take a sample.
 constexpr int MinFramesPerLoadSample = 5;
 
@@ -1344,6 +1382,15 @@ inline std::optional<double> encodeLoadSample(double cpuMs, int frames, double s
     const double budgetMs = 1000.0 / frameRate;
     double load = estimatedEncodeMs(cpuMs, frames, family, threads) / budgetMs;
     const double delivered = frames / seconds / std::max(1, surfaces);
+    // OPT-063: the per-frame figure is the encoder's busy share times cap / delivered, so a source that
+    // delivers few frames (content stopped, the delivery throttle, a stalled capture) inflates it
+    // although the encoder idles: 0.55 busy cores over 5 frames in 1.5 s read as 140 % of the budget on Sol
+    // (the process also pays for capture, which is not per frame). An encoder using less than
+    // EncoderBusyMin of its threads has headroom whatever the frame count: the sample is that share.
+    const double utilisation = cpuMs / (seconds * 1000.0) / softwareEncoderParallelism(family, threads);
+    if (utilisation < EncoderBusyMin) {
+        return std::min(load, utilisation);
+    }
     if (load >= ShortfallMinLoad && delivered < frameRate * ShortfallShare && delivered >= frameRate * ShortfallFloorShare) {
         load = std::max(load, load * frameRate / delivered);
     }
@@ -1394,12 +1441,26 @@ class LoadWindow
 public:
     static constexpr int Size = 10; ///< 15 s at the 1.5 s adaptive-quality interval
     static constexpr int MinimumSamples = 4;
+    /**
+     * OPT-063: the first intervals after clear() (a new encoder, a restart, a new worker) carry its
+     * start-up: the library's thread pools and the first keyframe, 120-170 % of the budget on Sol while the
+     * steady state was ~50 %. They are not counted.
+     */
+    static constexpr int WarmupSamples = 2;
     void add(double sample)
     {
+        if (m_skip > 0) {
+            --m_skip;
+            return;
+        }
         m_samples.append(sample);
         if (m_samples.size() > Size) m_samples.removeFirst();
     }
-    void clear() { m_samples.clear(); }
+    void clear()
+    {
+        m_samples.clear();
+        m_skip = WarmupSamples;
+    }
     std::optional<double> p95() const
     {
         if (m_samples.size() < MinimumSamples) return std::nullopt;
@@ -1412,6 +1473,7 @@ public:
 
 private:
     QList<double> m_samples;
+    int m_skip = 0;
 };
 }
 

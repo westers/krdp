@@ -403,44 +403,50 @@ private Q_SLOTS:
         // The brokers call setPrivateCodecPolicy({}) for shared viewers: an empty private list is AVC only.
         Input in;
         in.encoders = hal();
-        in.request = legacyRequest({}, {}, true);
+        in.request = requestFromRecord({}, {}, true);
         QCOMPARE(selectDetailed(in, State{}, T0).choice, (Choice{Family::Avc, true}));
     }
 
-    // ---- old clients (legacy request): order honoured, SoftwareEncoding semantics kept -------------------
-    void legacyDefaultOrderGivesHevcOnHalAndCray()
+    // ---- old clients' records: the order is always honoured (OPT-063), SoftwareEncoding only limits software ----
+    void recordDefaultOrderGivesHevcOnHalAndCray()
     {
-        // Today (C1) Hal and cray answered AV1 to a client that listed [hevc, av1]; the order now wins.
+        // Today (C1) Hal and cray answered AV1 to a client that listed [hevc, av1]; the order wins.
         for (const auto &make : {hal, cray}) {
             Input in;
             in.encoders = make();
-            in.request = legacyRequest({Family::Hevc, Family::Av1}, {}, true);
+            in.request = requestFromRecord({Family::Hevc, Family::Av1}, {}, true);
             QCOMPARE(selectDetailed(in, State{}, T0).choice, (Choice{Family::Hevc, true}));
         }
     }
-    void legacyPreferAndSlowLinkKeepBestCompression()
+    void recordOrderIsHonouredWhateverTheHostModeSays()
     {
-        Input in;
-        in.encoders = sol();
-        in.mode = SoftwareEncoding::Prefer;
-        in.request = legacyRequest({Family::Hevc, Family::Av1}, {}, true);
-        QCOMPARE(selectDetailed(in, State{}, T0).choice, (Choice{Family::Av1, false})); // prefer = best compression, as before
+        // Prefer used to mean "best compression first" and Auto "hardware only on a good link": neither
+        // decides any more. Sol has hardware HEVC and software AV1: [av1, hevc] gives AV1 in software in
+        // every mode that allows software, [hevc, av1] gives hardware HEVC.
+        for (const SoftwareEncoding mode : {SoftwareEncoding::Auto, SoftwareEncoding::Prefer}) {
+            Input in;
+            in.encoders = sol();
+            in.mode = mode;
+            in.host.allowance = allowanceFor(mode);
+            in.request = requestFromRecord({Family::Av1, Family::Hevc}, {}, true);
+            QCOMPARE(selectDetailed(in, State{}, T0).choice, (Choice{Family::Av1, false}));
+            in.request = requestFromRecord({Family::Hevc, Family::Av1}, {}, true);
+            QCOMPARE(selectDetailed(in, State{}, T0).choice, (Choice{Family::Hevc, true}));
+        }
     }
-    void legacySoftwareNeverStaysHardwareOnly()
+    void recordSoftwareNeverStaysHardwareOnly()
     {
         Input in;
         in.encoders = sol();
         in.mode = SoftwareEncoding::Never;
         in.host.allowance = allowanceFor(SoftwareEncoding::Never);
-        in.request = legacyRequest({Family::Av1}, {}, true);
+        in.request = requestFromRecord({Family::Av1}, {}, true);
         State st;
         st.slowLink = true;
         in.adaptive = true;
         QCOMPARE(selectDetailed(in, st, T0).choice, (Choice{Family::Avc, false}));
     }
-
-    // The request-based path must equal the old select() when the order is BestCompressionFirst.
-    void legacyRequestMatchesTheOldSelectionEverywhere()
+    void recordRequestsNeverLeaveTheirListExceptForTheBaseline()
     {
         int cases = 0;
         for (int bits = 0; bits < (1 << 9); ++bits) {
@@ -453,17 +459,22 @@ private Q_SLOTS:
                 for (const bool slow : {false, true}) {
                     for (const bool blocked : {false, true}) {
                         for (const auto &client : clients) {
-                            Input old;
-                            old.mode = mode;
-                            old.encoders = e;
-                            old.client = client;
+                            Input in;
+                            in.mode = mode;
+                            in.encoders = e;
                             State st;
                             st.slowLink = slow;
                             if (blocked) st.softwareBlockedUntil[size_t(Family::Av1)] = T0 + 5min;
-                            Input requested = old;
-                            requested.request = legacyRequest(client, {}, true);
-                            requested.host.allowance = allowanceFor(mode);
-                            QCOMPARE(selectDetailed(requested, st, T0).choice, select(old, st, T0));
+                            in.request = requestFromRecord(client, {}, true);
+                            in.host.allowance = allowanceFor(mode);
+                            const Selection sel = selectDetailed(in, st, T0);
+                            QVERIFY(sel.choice.family == Family::Avc || client.contains(sel.choice.family));
+                            if (sel.choice.family != Family::Avc) {
+                                // the first listed codec the host can encode (hardware, or software when allowed and not held)
+                                const Backends &b = e.of(sel.choice.family);
+                                QVERIFY(sel.choice.hardware ? b.hardware : b.software);
+                                QVERIFY(!sel.baseline);
+                            }
                             ++cases;
                         }
                     }
@@ -471,6 +482,13 @@ private Q_SLOTS:
             }
         }
         QVERIFY(cases > 10000);
+    }
+    void aFixedCodecIsNotAGuardStepForTheBaseline()
+    {
+        // OPT-063: the CPU guard may only move to a codec the client listed. [av1] alone has none.
+        QVERIFY(!mayLeave(requestFromRecord({Family::Av1}, {}, false), Family::Avc));
+        QVERIFY(mayLeave(requestFromRecord({Family::Av1, Family::Hevc}, {}, false), Family::Hevc));
+        QVERIFY(mayLeave(requestFromRecord({Family::Av1, Family::Avc}, {}, false), Family::Avc)); // the client listed AVC itself
     }
 };
 

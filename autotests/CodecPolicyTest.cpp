@@ -1007,7 +1007,7 @@ private Q_SLOTS:
         // The load drops well under the limit: back up, one step per interval.
         in.encodeLoadP95 = 0.2;
         rates.clear();
-        for (int i = 0; i < 20; ++i) {
+        for (int i = 0; i < 60; ++i) {
             now += 1500ms;
             const auto d = step(state, in, now);
             if (d.settingsChanged) rates.append(d.settings.maxFrameRate);
@@ -1309,16 +1309,14 @@ private Q_SLOTS:
     }
 
     // AUD-FIX4 D4 (Sol pass 3): adaptive quality swinging every ~6 s (549 <-> 5231 kbit/s) reopened
-    // SVT-AV1 26 times in 4.5 min. Non-live restarts are now >= 10 s apart (rises >= 20 s), need a
-    // 30 % change, and the changes that come while one waits merge into one.
+    // SVT-AV1 26 times in 4.5 min. OPT-063: an encoder without a live bitrate change runs in quality mode,
+    // so the swing is no policy restart at all (KPipeWire coalesces the CRF reopens).
     void av1RestartsAreSpacedOnASwingingQuality()
     {
         auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Av1});
         State state;
         auto now = T0;
         step(state, in, now);
-        QList<Clock::time_point> restarts;
-        QList<std::pair<quint32, quint32>> changes;
         int qualitySwings = 0;
         quint8 last = 0;
         for (auto t = 0s; t < 300s;) {
@@ -1328,27 +1326,11 @@ private Q_SLOTS:
             if (quality != last) ++qualitySwings;
             last = quality;
             in.quality = quality;
-            const quint32 before = state.applied.targetKbps;
-            const int count = state.encoderRestarts;
             const auto d = step(state, in, now);
-            if (state.encoderRestarts != count) {
-                restarts.append(now);
-                changes.append({before, d.settings.targetKbps});
-            }
+            QVERIFY(!d.settingsChanged);
         }
-        qInfo() << restarts.size() << "AV1 restarts for" << qualitySwings << "quality swings in 300 s";
         QVERIFY(qualitySwings >= 45);
-        QVERIFY(!restarts.isEmpty());
-        QVERIFY(restarts.size() <= 300 / 10);
-        for (qsizetype i = 1; i < restarts.size(); ++i) {
-            QVERIFY(restarts[i] - restarts[i - 1] >= MinReconfigureInterval);
-            if (changes[i].second > changes[i].first) {
-                QVERIFY(restarts[i] - restarts[i - 1] >= RestartBitrateRaiseInterval);
-            }
-        }
-        for (const auto &[from, to] : changes) {
-            QVERIFY(std::abs(double(to) - from) / from >= RestartBitrateMinChange);
-        }
+        QCOMPARE(state.encoderRestarts, 0);
     }
 
     // AUD-FIX4 D5: the reply says why AVC, accurately.
@@ -1462,8 +1444,9 @@ private Q_SLOTS:
         QCOMPARE(*state.current, (Choice{Family::Hevc, false})); // never left the codec
     }
 
-    // Without a live bitrate change (SVT-AV1 reopens), the same run restarts the encoder only
-    // rarely: at least RestartBitrateInterval apart and only for a >= 30 % step.
+    // SVT-AV1 (no live bitrate change) runs in quality mode: adaptive quality is not a policy restart. HEVC on a
+    // KPipeWire without the live path restarts only rarely, at least RestartBitrateInterval apart and only for
+    // a >= 30 % step.
     void adaptiveQualityRestartsAv1RateLimited()
     {
         auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Av1});
@@ -1474,15 +1457,11 @@ private Q_SLOTS:
         const auto run = runAdaptiveQuality(state, in, now, 300s, {6s, 20s, 3s, 12s});
         qInfo() << "av1:" << run.qualityChanges << "quality changes," << state.encoderRestarts << "restarts";
         QVERIFY(run.qualityChanges >= 30);
-        QVERIFY(state.encoderRestarts > 0); // it still follows the quality
-        QVERIFY(state.encoderRestarts <= 300 / 5);
-        QVERIFY(state.encoderRestarts * 2 < run.qualityChanges);
-        for (qsizetype i = 1; i < run.restartTimes.size(); ++i) {
-            QVERIFY(run.restartTimes[i] - run.restartTimes[i - 1] >= RestartBitrateInterval);
-        }
-        for (const auto &[from, to] : run.bitrateChanges) {
-            QVERIFY(std::abs(double(to) - from) / from >= RestartBitrateMinChange);
-        }
+        // OPT-063: SVT-AV1 runs in quality mode: no target, so the policy never restarts it for adaptive
+        // quality (KPipeWire coalesces the CRF reopens: softwarecodecencodertest).
+        QCOMPARE(state.encoderRestarts, 0);
+        QVERIFY(run.bitrateChanges.isEmpty());
+        QCOMPARE(state.applied.targetKbps, quint32(0));
         // (Before AUD-SWENC each of these quality changes was a CRF change: a reopen each.)
         // A KPipeWire without the live libx265 path: HEVC is rate-limited the same way.
         auto old = softwareEverything();
@@ -1494,6 +1473,42 @@ private Q_SLOTS:
         const auto oldRun = runAdaptiveQuality(hevc, hevcIn, t, 300s, {6s, 20s, 3s, 12s});
         QVERIFY(hevc.encoderRestarts <= 300 / 5);
         QVERIFY(hevc.encoderRestarts * 2 < oldRun.qualityChanges);
+    }
+
+    // OPT-063 defect 4: software AV1 honours the Quality setting; the CBR target exists only while a slow link caps it.
+    void av1IsInQualityModeUnlessTheLinkIsSlow()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Av1});
+        in.quality = 80;
+        State state;
+        auto now = T0;
+        auto d = step(state, in, now);
+        QCOMPARE(d.choice, (Choice{Family::Av1, false}));
+        QCOMPARE(d.settings.targetKbps, quint32(0));
+        run(state, in, now, 60s);
+        QCOMPARE(state.applied.targetKbps, quint32(0));
+        QCOMPARE(state.encoderRestarts, 0);
+        // The quality moves, the policy does not: the encoder follows it through setQuality().
+        for (const quint8 quality : {70, 60, 50, 40, 80}) {
+            in.quality = quality;
+            run(state, in, now, 15s);
+        }
+        QCOMPARE(state.encoderRestarts, 0);
+        QCOMPARE(state.applied.targetKbps, quint32(0));
+        // HEVC with a live bitrate keeps its target (libx265 changes it in place).
+        auto hevcIn = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Hevc});
+        State hevc;
+        auto t = T0;
+        QVERIFY(step(hevc, hevcIn, t).settings.targetKbps > 0);
+        // A slow link caps AV1 with a target; clearing it returns to quality mode.
+        state.slowLink = true;
+        state.linkKbps = 3000;
+        in.congested = false;
+        run(state, in, now, 30s);
+        QCOMPARE(state.applied.targetKbps, quint32(3000));
+        state.slowLink = false;
+        run(state, in, now, 60s);
+        QCOMPARE(state.applied.targetKbps, quint32(0));
     }
 
     // The CPU guard steps a preset back up after a sustained low load, one real level at a time.
@@ -1808,6 +1823,151 @@ private Q_SLOTS:
         QCOMPARE(state.guardRejections[size_t(Family::Av1)], 1);
         const auto blockedFor = state.softwareBlockedUntil[size_t(Family::Av1)] - state.guardBlockedAt[size_t(Family::Av1)];
         QVERIFY(blockedFor == Clock::duration(CpuBlockFor));
+    }
+
+    // ---- OPT-063: the CPU guard on the Sol 2026-10-09 software AV1 pattern ---------------------------------------
+    // Steady state: the worker used ~1.5 cores for 27 fps of 1080p video (evidence a2-fixed-r1-sol.csv); SVT-AV1 gets
+    // clamp(16 / 2, 2, 8) = 8 threads, 3.2 effective.
+    void loadSampleOfTheSteadyStateIsHalfTheBudget()
+    {
+        const auto s = encodeLoadSample(1.5 * 1500.0, 41, 1.5, 30, Family::Av1, 8);
+        QVERIFY(s);
+        QVERIFY2(*s > 0.4 && *s < 0.65, qPrintable(QString::number(*s)));
+    }
+    void loadSampleIgnoresASourceThatStoppedDelivering()
+    {
+        // 22:31:07-22:31:12: the throttle halved the rate and the content stopped: 0.55 cores, 5 frames in 1.5 s.
+        // The per-frame figure read 140 %; the encoder was 17 % busy.
+        const auto s = encodeLoadSample(0.55 * 1500.0, 5, 1.5, 30, Family::Av1, 8);
+        QVERIFY(s);
+        QVERIFY2(*s < CpuGuardLimit, qPrintable(QString::number(*s)));
+        // The same on the delivered-rate shortfall path (11 fps of 30).
+        const auto t = encodeLoadSample(0.6 * 1500.0, 16, 1.5, 30, Family::Av1, 8);
+        QVERIFY(t);
+        QVERIFY2(*t < CpuGuardLimit, qPrintable(QString::number(*t)));
+    }
+    void loadSampleStillSeesARealOverload()
+    {
+        // SVT-AV1 at 180 % CPU delivering 13 of 30 fps (AUD-FIX4 D3's case) on a 4-thread host.
+        const auto s = encodeLoadSample(1.8 * 1500.0, 20, 1.5, 30, Family::Av1, 4);
+        QVERIFY(s);
+        QVERIFY2(*s > CpuGuardLimit, qPrintable(QString::number(*s)));
+        // Every core busy, frames short: far over.
+        const auto t = encodeLoadSample(3.1 * 1500.0, 20, 1.5, 30, Family::Av1, 8);
+        QVERIFY(t);
+        QVERIFY(*t > 1.0);
+    }
+    void loadWindowSkipsTheStartUpAfterAClear()
+    {
+        LoadWindow w;
+        w.clear();
+        for (int i = 0; i < LoadWindow::WarmupSamples; ++i) w.add(2.0); // thread pools, the first keyframe
+        for (int i = 0; i < LoadWindow::MinimumSamples; ++i) w.add(0.5);
+        QVERIFY(w.p95());
+        QCOMPARE(*w.p95(), 0.5);
+    }
+    // The observed trips replayed through the real sampling and window: connect, a throttle episode, content stop.
+    void transitionsDoNotTripTheGuard()
+    {
+        LoadWindow w;
+        w.clear();
+        struct Interval {
+            double cores;
+            int frames;
+        };
+        // 1.5 s intervals: start-up (SVT init + IDR) ~3 cores for 2 frames, steady 1.5 cores / 41 frames, the
+        // throttle episode and the content stop (0.55 cores, 4-16 frames).
+        const Interval pattern[] = {{3.0, 2}, {2.4, 20}, {1.6, 41}, {1.5, 41}, {1.5, 40}, {1.6, 36}, {0.6, 16}, {0.55, 6}, {0.55, 5}, {0.5, 5},
+                                    {0.55, 8}, {1.4, 40}, {1.5, 41}, {1.5, 41}, {1.4, 40}, {0.55, 5}, {0.6, 6}, {0.55, 5}};
+        for (const auto &i : pattern) {
+            if (const auto s = encodeLoadSample(i.cores * 1500.0, i.frames, 1.5, 30, Family::Av1, 8)) {
+                w.add(*s);
+                if (const auto p = w.p95()) {
+                    QVERIFY2(*p <= CpuGuardLimit, qPrintable(QStringLiteral("p95 %1 over the limit").arg(*p)));
+                }
+            }
+        }
+        QVERIFY(w.p95());
+    }
+
+    // The client fixed AV1 (order [av1]): the guard lowers the frame rate, it never moves to AVC.
+    void guardKeepsAFixedCodec()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Av1});
+        in.request = requestFromRecord({Family::Av1}, {}, false);
+        in.host.allowance = allowanceFor(SoftwareEncoding::Prefer);
+        in.adaptive = false;
+        State state;
+        auto now = T0;
+        auto d = step(state, in, now);
+        QCOMPARE(d.choice, (Choice{Family::Av1, false}));
+        in.encodeLoadP95 = 1.2;
+        QList<int> rates;
+        for (int i = 0; i < 120; ++i) {
+            now += 1500ms;
+            d = step(state, in, now);
+            QVERIFY2(!d.changed, qPrintable(d.reason));
+            QCOMPARE(*state.current, (Choice{Family::Av1, false}));
+            if (d.settingsChanged && d.settingsReason.contains(u"frame rate")) rates.append(d.settings.maxFrameRate);
+        }
+        QCOMPARE(rates, (QList<int>{15})); // the cap is 30 already; one halving to the floor
+        QCOMPARE(state.softwareBlockedUntil[size_t(Family::Av1)], Clock::time_point{}); // no block either
+    }
+    // A client that listed AVC itself (order [av1, avc]) may be moved there, and AVC keeps the 30 fps cap.
+    void guardFlipKeepsTheFrameRateCap()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything(), {Family::Av1});
+        in.request = requestFromRecord({Family::Av1, Family::Avc}, {}, true);
+        in.host.allowance = allowanceFor(SoftwareEncoding::Prefer);
+        State state;
+        auto now = T0;
+        auto d = step(state, in, now);
+        QCOMPARE(d.choice, (Choice{Family::Av1, false}));
+        in.encodeLoadP95 = 1.2;
+        Decision flip;
+        for (int i = 0; i < 40 && !flip.changed; ++i) {
+            now += 1500ms;
+            d = step(state, in, now);
+            if (d.changed) flip = d;
+        }
+        QVERIFY(flip.changed);
+        QCOMPARE(flip.choice.family, Family::Avc);
+        QCOMPARE(flip.settings.maxFrameRate, SoftwarePrivateMaxFrameRate); // not 60
+        // The load on AVC is fine: no raise inside the hold, then one step to 60.
+        in.encodeLoadP95 = 0.2;
+        const auto flippedAt = now;
+        QList<std::pair<int, std::chrono::seconds>> raises;
+        for (int i = 0; i < 80; ++i) {
+            now += 1500ms;
+            d = step(state, in, now);
+            if (d.settingsChanged) raises.append({d.settings.maxFrameRate, std::chrono::duration_cast<std::chrono::seconds>(now - flippedAt)});
+        }
+        QCOMPARE(raises.size(), 1);
+        QCOMPARE(raises[0].first, 0);
+        QVERIFY(raises[0].second >= FrameRateHold);
+    }
+    // 30 -> 15 -> 30 -> 15 every ~11 s (Sol AVC, 22:39): the second step down doubles the hold.
+    void frameRateDoesNotFlap()
+    {
+        auto in = input(SoftwareEncoding::Auto, sol());
+        State state;
+        auto now = T0;
+        step(state, in, now);
+        QList<int> rates;
+        QList<Clock::time_point> at;
+        for (int i = 0; i < 400; ++i) {
+            now += 1500ms;
+            // The load follows the cap: 0.9 at 60 fps would be 0.45 at 30 (the content costs per frame).
+            const int cap = state.guardFrameRate.value_or(DefaultFrameRate);
+            in.encodeLoadP95 = 0.9 * cap / DefaultFrameRate * 1.6; // 1.44 at 60, 0.72 at 30 (over), 0.36 at 15
+            const auto d = step(state, in, now);
+            if (d.settingsChanged) {
+                rates.append(d.settings.maxFrameRate);
+                at.append(now);
+            }
+        }
+        // 60 -> 30 -> 15, then back up to 30 only once 0.36 * 2 < 0.56 holds (0.72: no), so it settles at 15.
+        QCOMPARE(rates, (QList<int>{30, 15}));
     }
 
     void loadWindowP95()

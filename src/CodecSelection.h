@@ -65,17 +65,17 @@ struct DecoderPaths {
     bool operator==(const DecoderPaths &) const = default;
 };
 
-/// The connection's request: today it is built from the old `codecs`/`decode`/`adaptive` fields
-/// (legacyRequest()), in S2 from the new `order`/`encode`/`decodeMode`/`decoders` fields.
+/// The connection's request: built from the old `codecs`/`decode`/`adaptive` fields
+/// (requestFromRecord()), in S2 from the new `order`/`encode`/`decodeMode`/`decoders` fields.
+/// Always honoured as sent: there is no second, host-decided selection for old clients.
 struct Request {
-    QList<Family> order; ///< distinct families, most wanted first; Avc is appended last when missing
+    /// distinct families, most wanted first. Avc is appended last when missing, as the baseline; it
+    /// counts as a codec the client listed only when it is in here (see mayLeave()).
+    QList<Family> order;
     Mode encode = Mode::Any; ///< Encoding on the host
     Mode decode = Mode::Any; ///< Decoding on this computer
     std::array<DecoderPaths, 3> decoders{}; ///< indexed by Family
     bool adaptive = true;
-    /// Built from an old client's record: no encode/decode mode was said, so the host's SoftwareEncoding
-    /// decides the encode mode (hardware only, software on a slow link or under `prefer`) as before.
-    bool legacy = false;
     const DecoderPaths &decodersOf(Family f) const { return decoders[size_t(f)]; }
     bool operator==(const Request &) const = default;
 };
@@ -232,17 +232,16 @@ inline QString orderText(const QList<Family> &order)
 
 /**
  * The request an old client's `codecs`/`decode`/`adaptive` record stands for: its codecs in the order
- * it sent them, then AVC; encode and decode mode Any (the host's SoftwareEncoding still decides
- * software use, see Request::legacy); decoders from the paths it reported (Unknown = either), AVC
- * software only (our client decodes AVC in software, spec C2).
+ * it sent them (AVC is not appended: the client did not list it, so it stays the baseline and the CPU
+ * guard never moves a stream to it); encode and decode mode Any; decoders from the paths it reported
+ * (Unknown = either), AVC software only (our client decodes AVC in software, spec C2). The host's
+ * SoftwareEncoding only limits what software may encode (allowanceFor()), it does not choose.
  */
-inline Request legacyRequest(const QList<Family> &privateOrder, const ClientDecode &decode, bool adaptive)
+inline Request requestFromRecord(const QList<Family> &privateOrder, const ClientDecode &decode, bool adaptive)
 {
     Request r;
-    r.legacy = true;
     r.adaptive = adaptive;
     r.order = privateOrder;
-    r.order.append(Family::Avc);
     const auto paths = [](DecodePath p) {
         return DecoderPaths{p != DecodePath::Software, p != DecodePath::Hardware};
     };
@@ -250,5 +249,16 @@ inline Request legacyRequest(const QList<Family> &privateOrder, const ClientDeco
     r.decoders[size_t(Family::Hevc)] = paths(decode.hevc);
     r.decoders[size_t(Family::Av1)] = paths(decode.av1);
     return r;
+}
+
+/**
+ * Whether the CPU guard may move a stream to \a choice, what the plan picks once the current codec is
+ * blocked: only to a codec the client listed. AVC that the plan appends as the baseline is not one of
+ * those unless the client listed AVC itself, so a client that fixed its codec (order [av1]) stays on it
+ * and the guard lowers the frame rate instead.
+ */
+inline bool mayLeave(const Request &request, Family choice)
+{
+    return choice != Family::Avc || request.order.contains(Family::Avc);
 }
 }
