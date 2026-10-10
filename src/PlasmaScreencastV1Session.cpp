@@ -528,7 +528,11 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
             if (!alive || d->resizeRestartEpoch || d->streamRestartTimer.isActive()
                 || d->pendingNodeId != nodeId || !streamingRequested() || stream()->nodeId() != 0) return;
         }
-        attachEncodedStream(d->pendingNodeId, true);
+        // The restart goes on only if streaming is still wanted now. setStreamingEnabled(false) can arrive while the
+        // old producer drains (the worker stops the workspace encoder once the per-output captures are proven):
+        // starting here anyway left a stopped session running, and the later resume found it "recording" and did
+        // nothing, so no keyframe ever came from it (the hardware -> software "flip", OPT-062).
+        attachEncodedStream(d->pendingNodeId, streamingRequested());
     });
 
     connect(this, &AbstractSession::encoderFailureReported, this, &PlasmaScreencastV1Session::onEncoderFailed);
@@ -868,6 +872,12 @@ void PlasmaScreencastV1Session::resumeStreaming()
     case StreamResumePolicy::Action::None:
         return;
     case StreamResumePolicy::Action::Start:
+        // The stream kept its node while stopped (an attach that was not started, see the restart timer), and the codec
+        // or backend may have changed since: a start() runs the encoder chosen at the last attach.
+        if (!EncoderSelection::apply(encodedStream, videoCodec(), encoderHardware())) {
+            qCCritical(KRDP) << "Codec mismatch on resume: the encoder cannot produce" << VideoCodecSupport::codecName(videoCodec()) << "; falling back";
+            Q_EMIT encoderUnavailable(videoCodec());
+        }
         encodedStream->start();
         return;
     case StreamResumePolicy::Action::Reattach:

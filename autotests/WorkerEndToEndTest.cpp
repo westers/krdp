@@ -904,14 +904,20 @@ void WorkerEndToEndTest::consoleTakeoverKeepsFrames_data()
 {
     QTest::addColumn<int>("captureMode");
     QTest::addColumn<int>("scenario");
+    QTest::addColumn<bool>("encodeSoftware"); // the client asked for Encode = Software (CodecSelection), whatever the host has
     using Mode = MonitorCapturePolicy::Mode;
     // 0: local takeover after the capture has settled; 1: the controller withdraws, a viewer stays;
     // 2: takeover right after the first frame (the 18:43 race); 3: takeover, then control comes back.
-    QTest::newRow("specific, takeover after 2 s") << int(Mode::Specific) << 0;
-    QTest::newRow("primary, takeover after 2 s") << int(Mode::Primary) << 0;
-    QTest::newRow("specific, controller withdraws") << int(Mode::Specific) << 1;
-    QTest::newRow("specific, takeover right after the first frame") << int(Mode::Specific) << 2;
-    QTest::newRow("specific, takeover then control returns") << int(Mode::Specific) << 3;
+    QTest::newRow("specific, takeover after 2 s") << int(Mode::Specific) << 0 << false;
+    QTest::newRow("primary, takeover after 2 s") << int(Mode::Primary) << 0 << false;
+    QTest::newRow("specific, controller withdraws") << int(Mode::Specific) << 1 << false;
+    QTest::newRow("specific, takeover right after the first frame") << int(Mode::Specific) << 2 << false;
+    QTest::newRow("specific, takeover then control returns") << int(Mode::Specific) << 3 << false;
+    // The worker starts its hardware AVC encoder (NVENC, or VA-API) before the first config; a software config restarts that
+    // running stream. The takeover that follows must still end in a picture (the flip: OPT-062 N2 finding).
+    QTest::newRow("software encode, specific, takeover after 2 s") << int(Mode::Specific) << 0 << true;
+    QTest::newRow("software encode, specific, takeover right after the first frame") << int(Mode::Specific) << 2 << true;
+    QTest::newRow("software encode, specific, takeover then control returns") << int(Mode::Specific) << 3 << true;
 }
 
 // 2026-10-07 Sol freeze: on a ONE-screen host with a single-output capture policy the worker captures through m_session,
@@ -922,6 +928,7 @@ void WorkerEndToEndTest::consoleTakeoverKeepsFrames()
 {
     QFETCH(int, captureMode);
     QFETCH(int, scenario);
+    QFETCH(bool, encodeSoftware);
     if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
     auto *s = session(1);
     QVERIFY(s);
@@ -932,7 +939,7 @@ void WorkerEndToEndTest::consoleTakeoverKeepsFrames()
     ConsoleWorkerWire::Outputs outputs;
     connect(&endpoint, &ConsoleWorkerEndpoint::outputsReceived, this, [&](const auto &value) { outputs = value; });
     const auto logs = qScopeGuard([&] {
-        if (QTest::currentTestFailed()) qWarning().noquote() << "worker.log:" << s->log(QStringLiteral("worker.log"), 12000)
+        if (QTest::currentTestFailed() || qEnvironmentVariableIsSet("KRDP_E2E_SHOW_WORKER_LOG")) qWarning().noquote() << "worker.log:" << s->log(QStringLiteral("worker.log"), 40000)
             << "kwin.log:" << s->log(QStringLiteral("kwin.log"), 5000);
     });
     const auto noNode = [&] { return s->log(QStringLiteral("worker.log"), 4000000).count(QStringLiteral("without a node ID")); };
@@ -969,7 +976,7 @@ void WorkerEndToEndTest::consoleTakeoverKeepsFrames()
     endpoint.setControlState({1, true});
     ConsoleWorkerWire::EncoderConfig config;
     config.generation = 1;
-    config.settings = CodecPolicy::EncoderSettings{.hardware = hostEncodesAvcInHardware()};
+    config.settings = CodecPolicy::EncoderSettings{.hardware = !encodeSoftware && hostEncodesAvcInHardware()};
     config.capture = {mode, 0};
     QVERIFY(endpoint.setEncoderConfig(config));
     endpoint.requestKeyFrame();
@@ -1007,12 +1014,14 @@ void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames_data()
     QTest::addColumn<bool>("locked");
     QTest::addColumn<int>("fixtureOutputs"); // host screens of the private session
     QTest::addColumn<bool>("takeover"); // after the replacement's picture: 15 s, then a plain desk takeover (policy Specific)
-    QTest::newRow("single replace, reclaim after the picture is flowing") << 1 << false << false << 2 << false;
-    QTest::newRow("two replace, reclaim after the picture is flowing") << 2 << false << false << 2 << false;
-    QTest::newRow("single replace, reclaim right after the Outputs record (race)") << 1 << true << false << 2 << false;
-    QTest::newRow("single replace, session locked when the desk is touched") << 1 << false << true << 2 << false;
+    QTest::addColumn<bool>("encodeSoftware"); // the plain takeover's config asks for Encode = Software, whatever the host has
+    QTest::newRow("single replace, reclaim after the picture is flowing") << 1 << false << false << 2 << false << false;
+    QTest::newRow("two replace, reclaim after the picture is flowing") << 2 << false << false << 2 << false << false;
+    QTest::newRow("single replace, reclaim right after the Outputs record (race)") << 1 << true << false << 2 << false << false;
+    QTest::newRow("single replace, session locked when the desk is touched") << 1 << false << true << 2 << false << false;
     // 2026-10-07 Sol freeze (one host screen, single-output policy): a second desk event 15 s after the Replace ended is a takeover.
-    QTest::newRow("one host screen, replace ends, takeover 15 s later (specific)") << 1 << false << false << 1 << true;
+    QTest::newRow("one host screen, replace ends, takeover 15 s later (specific)") << 1 << false << false << 1 << true << false;
+    QTest::newRow("one host screen, replace ends, takeover 15 s later (specific), software encode") << 1 << false << false << 1 << true << true;
 }
 
 // OPT-060 end Replace (2026-10-07): the worker side of a desk-input reclaim in Replace. The worker no longer continues as
@@ -1022,7 +1031,7 @@ void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames_data()
 // key frame of the replacement (the worker-only part of the gap; the broker adds its launcher time).
 void WorkerEndToEndTest::consoleDeskReclaimKeepsFrames()
 {
-    QFETCH(int, count); QFETCH(bool, race); QFETCH(bool, locked); QFETCH(int, fixtureOutputs); QFETCH(bool, takeover);
+    QFETCH(int, count); QFETCH(bool, race); QFETCH(bool, locked); QFETCH(int, fixtureOutputs); QFETCH(bool, takeover); QFETCH(bool, encodeSoftware);
     if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
     auto *s = session(fixtureOutputs); QVERIFY(s);
     if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
@@ -1193,7 +1202,7 @@ sys.exit(result.returncode)
     QVERIFY2(plainRun.errors.isEmpty(), qPrintable(plainRun.errors.join(QLatin1Char('\n'))));
     plainRun.frames.clear();
     plain.setControlState({1, true});
-    ConsoleWorkerWire::EncoderConfig plainConfig{.generation = 1, .codec = VideoCodec::Avc420, .settings = CodecPolicy::EncoderSettings{.hardware = hostEncodesAvcInHardware()}};
+    ConsoleWorkerWire::EncoderConfig plainConfig{.generation = 1, .codec = VideoCodec::Avc420, .settings = CodecPolicy::EncoderSettings{.hardware = !encodeSoftware && hostEncodesAvcInHardware()}};
     if (takeover) plainConfig.capture = {MonitorCapturePolicy::Mode::Specific, 0};
     QVERIFY(plain.setEncoderConfig(plainConfig));
     plain.requestKeyFrame();
