@@ -22,6 +22,7 @@
 
 #include "SurfaceLayout.h"
 #include "CodecPolicy.h"
+#include "LayoutControl.h"
 #include "VideoCodecSupport.h"
 #include "VideoFrame.h"
 #include "krdp_export.h"
@@ -204,6 +205,25 @@ public:
      */
     CodecPolicy::Decision setPrivateCodecPolicy(const QVector<VideoCodec> &codecs, bool adaptive);
     /**
+     * OPT-062 S2: the client's own request (`order`, `encode`, decode paths, adaptive): honoured as sent. Chooses at
+     * once and returns the decision (with its skipped list), like setPrivateCodecPolicy(). Main thread only.
+     */
+    CodecPolicy::Decision setCodecRequest(const CodecPolicy::Request &request);
+    /// The request the codec policy runs on (nullopt before one, or when the client decodes AVC only). Main thread only.
+    std::optional<CodecPolicy::Request> codecRequest() const;
+    /**
+     * OPT-062 S2: the host's per-codec software ceiling. Unset: derived from the SoftwareEncoding mode. A user's
+     * own preference may only tighten it. Set before the client's `codec` request. Main thread only.
+     */
+    void setSoftwareAllowance(const CodecPolicy::SoftwareAllowance &allowance);
+    CodecPolicy::SoftwareAllowance softwareAllowance() const;
+    /// OPT-062 S2: the concrete encoder per codec and backend (from the host's probe), named in the `codec` reply and Stats.
+    void setEncoderLabels(const CodecPolicy::EncoderLabels &labels);
+    /// The codecs the client ranked above the one in use that could not be used, with every reason (codecDetail()'s `skipped`).
+    QList<CodecPolicy::Skip> skippedBeforeChoice() const;
+    /// What the `codec` reply and pushes say beyond selected/backend/reason now: encoder, decode path, skipped, baseline.
+    LayoutControl::CodecDetail codecDetail() const;
+    /**
      * The running encoder could not produce \a codec (KPipeWire fell back to another encoder):
      * never choose it again on this connection, switch away at once and tell the client.
      */
@@ -363,6 +383,7 @@ private:
     void applyCodecDecision(const CodecPolicy::Decision &decision);
     /// A policy step outside the interval (the switch interval does not apply), with \a reason.
     void restepCodecPolicyNow(const QString &reason);
+    CodecPolicy::Decision startCodecPolicy(bool adaptive);
     /// AUD-FIX7 F2: the frame rate asked of the source: the policy's, or the delivery throttle's.
     void refreshFrameRate();
     /// AUD-FIX7 F2: one delivery-throttle step per adaptive interval; also the backlog threshold.

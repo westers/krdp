@@ -314,6 +314,21 @@ Probe assemble(const Inputs &in)
             (family == Family::Avc ? result.avcHardwareVia : family == Family::Hevc ? result.hevcHardwareVia : result.av1HardwareVia) = vaapi ? QStringLiteral("vaapi") : QStringLiteral("nvenc");
         }
     }
+    for (std::size_t i = 0; i < families.size(); ++i) {
+        const Family family = families[i];
+        result.labels.software[i] = {in.softwareBackend[i], {}, {}};
+        const QString via = result.hardwareVia(family);
+        if (via.isEmpty()) continue;
+        CodecPolicy::EncoderLabel label{via, {}, {}};
+        if (via == QLatin1String("nvenc")) {
+            const auto found = std::find_if(in.nvidia.begin(), in.nvidia.end(), [family](const NvidiaEncoder &e) { return e.family == family && e.usable; });
+            if (found != in.nvidia.end()) {
+                label.device = found->pciId;
+                label.deviceName = found->name;
+            }
+        }
+        result.labels.hardware[i] = label;
+    }
     result.avc444Hardware = in.chroma444 && result.encoders.avc.hardware && result.avcHardwareVia == QLatin1String("vaapi");
     result.renderNode = in.forcedSoftware ? QString() : in.vaapi.node;
     if (result.renderNode.isEmpty() && !in.forcedSoftware) {
@@ -369,6 +384,8 @@ Probe probeUncached()
         in.software[i] = (family == Family::Avc ? avcOffered : true) && softwareBackend<PipeWireEncodedStream>(family);
         in.liveBitrate[i] = liveBitrateChange<PipeWireEncodedStream>(family);
     }
+    in.softwareBackend[0] = hasEncoder("libx264") ? QStringLiteral("libx264") : QStringLiteral("libopenh264");
+    in.softwareBackend[2] = hasEncoder("libsvtav1") ? QStringLiteral("libsvtav1") : QStringLiteral("libaom-av1");
     in.chroma444 = kpipewireHasChroma444<PipeWireEncodedStream>();
     in.overrideSpec = qEnvironmentVariable("FARSIDE_ENCODERS");
     Probe result = assemble(in);
@@ -406,6 +423,41 @@ LayoutControl::VideoCapabilities videoCapabilities(const Probe &probe, CodecPoli
     };
     offer("hevc", e.hevc);
     offer("av1", e.av1);
+    return video;
+}
+
+LayoutControl::VideoCapabilities videoCapabilities(const Probe &probe, CodecPolicy::SoftwareEncoding mode, const CodecPolicy::SoftwareAllowance &allowance)
+{
+    LayoutControl::VideoCapabilities video;
+    video.softwareEncoding = QString::fromLatin1(CodecPolicy::softwareEncodingName(mode));
+    video.preferences = 1;
+    video.softwareAvc = QString::fromLatin1(CodecPolicy::allowanceName(Family::Avc, allowance.avc));
+    video.softwareHevc = QString::fromLatin1(CodecPolicy::allowanceName(Family::Hevc, allowance.hevc));
+    video.softwareAv1 = QString::fromLatin1(CodecPolicy::allowanceName(Family::Av1, allowance.av1));
+    const auto &e = probe.encoders;
+    // AVC420 is always offered: software H.264 is the last resort even when the ceiling says so.
+    video.codecs.append({QStringLiteral("avc420"), e.avc.hardware, e.avc.software});
+    if (probe.avc444Hardware) {
+        video.codecs.append({QStringLiteral("avc444"), true, false});
+    }
+    const auto offer = [&](const char *name, const Backends &b, bool softwareUsable) {
+        if (b.hardware || (softwareUsable && b.software)) {
+            video.codecs.append({QString::fromLatin1(name), b.hardware, softwareUsable && b.software});
+        }
+    };
+    offer("hevc", e.hevc, allowance.hevc);
+    offer("av1", e.av1, allowance.av1);
+    for (const Family family : {Family::Avc, Family::Hevc, Family::Av1}) {
+        const Backends &b = e.of(family);
+        const QString codec = QString::fromLatin1(CodecPolicy::familyName(family));
+        if (b.hardware) {
+            const auto &label = probe.labels.of(family, true);
+            video.encoders.append({codec, label.backend, true, label.device, label.deviceName});
+        }
+        if (b.software && (family == Family::Avc || allowance.allows(family))) {
+            video.encoders.append({codec, probe.labels.of(family, false).backend, false, {}, {}});
+        }
+    }
     return video;
 }
 

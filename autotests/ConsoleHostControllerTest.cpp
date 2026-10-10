@@ -2420,6 +2420,86 @@ private Q_SLOTS:
         QCOMPARE(owner.videoStream()->codecForSessions(), VideoCodec::Hevc);
     }
 
+    // OPT-062 S2/S3: the controller's own order and encode mode are honoured within the host's software ceiling,
+    // the reply names what was skipped, and a viewer that joins makes every private codec "consoleShared".
+    void codecRequestHonoursTheOrderTheCeilingAndTheSharedConsole()
+    {
+        Server server;
+        RdpConnection owner(&server, -1);
+        RdpConnection viewer(&server, -1);
+        ConsoleHostController host(&server, {}, {});
+        VideoCodecHost video;
+        video.probe.encoders.avc = {true, true, true};
+        video.probe.encoders.hevc = {true, true, false};
+        video.probe.encoders.av1 = {false, true, false};
+        video.ceiling = CodecPolicy::SoftwareAllowance{true, true, false}; // AV1 software: never
+        host.setVideoCodecHost(video);
+        QList<std::pair<RdpConnection *, QJsonObject>> sent;
+        host.m_recordSent = [&sent](RdpConnection *connection, const QJsonObject &record) {
+            sent.append({connection, record});
+        };
+        const auto last = [&sent](RdpConnection *connection) {
+            for (auto it = sent.crbegin(); it != sent.crend(); ++it) {
+                if (it->first == connection) return it->second;
+            }
+            return QJsonObject{};
+        };
+        const auto skippedCodes = [](const QJsonObject &record, const QString &codec) {
+            QStringList why;
+            for (const auto &entry : record.value(QStringLiteral("skipped")).toArray()) {
+                if (entry.toObject().value(QStringLiteral("codec")).toString() != codec) continue;
+                for (const auto &reason : entry.toObject().value(QStringLiteral("why")).toArray()) why << reason.toString();
+            }
+            return why;
+        };
+        const auto request = [](const QString &requestId) {
+            return QJsonObject{{QStringLiteral("type"), QStringLiteral("codec")}, {QStringLiteral("v"), 1}, {QStringLiteral("requestId"), requestId},
+                               {QStringLiteral("codecs"), QJsonArray{QStringLiteral("hevc"), QStringLiteral("av1")}},
+                               {QStringLiteral("order"), QJsonArray{QStringLiteral("av1"), QStringLiteral("hevc"), QStringLiteral("avc")}},
+                               {QStringLiteral("encode"), QStringLiteral("any")}, {QStringLiteral("decodeMode"), QStringLiteral("any")},
+                               {QStringLiteral("decoders"), QJsonObject{{QStringLiteral("avc"), QJsonArray{QStringLiteral("sw")}},
+                                                                         {QStringLiteral("hevc"), QJsonArray{QStringLiteral("hw")}},
+                                                                         {QStringLiteral("av1"), QJsonArray{QStringLiteral("sw")}}}}};
+        };
+        host.addClient(&owner);
+        const auto ownerId = host.m_clients.at(0)->id;
+        host.m_control.admit(ownerId);
+        host.syncControlState();
+        host.syncCodecPolicy();
+        host.onControlRecord(&owner, ownerId, request(QStringLiteral("o1")));
+        auto reply = last(&owner);
+        QCOMPARE(reply.value(QStringLiteral("requestId")).toString(), QStringLiteral("o1"));
+        QCOMPARE(reply.value(QStringLiteral("selected")).toString(), QStringLiteral("hevc"));
+        QCOMPARE(reply.value(QStringLiteral("backend")).toString(), QStringLiteral("hardware"));
+        QCOMPARE(skippedCodes(reply, QStringLiteral("av1")), (QStringList{QStringLiteral("noHardwareEncoder"), QStringLiteral("softwareNotAllowed")}));
+        QCOMPARE(reply.value(QStringLiteral("decodePath")).toString(), QStringLiteral("hw"));
+        QVERIFY(!reply.value(QStringLiteral("baseline")).toBool(true));
+        QCOMPARE(owner.videoStream()->codecForSessions(), VideoCodec::Hevc);
+
+        // A viewer joins: AVC for everyone, every private codec of the order reported as consoleShared.
+        host.addClient(&viewer);
+        const auto viewerId = host.m_clients.at(1)->id;
+        host.m_control.admit(viewerId);
+        host.syncControlState();
+        host.syncCodecPolicy();
+        reply = last(&owner);
+        QCOMPARE(reply.value(QStringLiteral("selected")).toString(), QStringLiteral("avc"));
+        QVERIFY(!reply.contains(QStringLiteral("requestId")));
+        QCOMPARE(skippedCodes(reply, QStringLiteral("av1")), (QStringList{QStringLiteral("consoleShared")}));
+        QCOMPARE(skippedCodes(reply, QStringLiteral("hevc")), (QStringList{QStringLiteral("consoleShared")}));
+        // The viewer asks: it does not control the console.
+        host.onControlRecord(&viewer, viewerId, request(QStringLiteral("v1")));
+        reply = last(&viewer);
+        QCOMPARE(reply.value(QStringLiteral("selected")).toString(), QStringLiteral("avc"));
+        QCOMPARE(skippedCodes(reply, QStringLiteral("hevc")), (QStringList{QStringLiteral("consoleShared")}));
+        // An invalid request is refused with a reason naming the field.
+        auto bad = request(QStringLiteral("v2"));
+        bad.insert(QStringLiteral("encode"), QStringLiteral("gpu"));
+        host.onControlRecord(&owner, ownerId, bad);
+        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("invalid"));
+        QVERIFY(last(&owner).value(QStringLiteral("message")).toString().contains(QStringLiteral("encode")));
+    }
+
     void deviceRecordsOwnerViewerBusyAndUnsupported()
     {
         Server server;

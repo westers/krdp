@@ -2494,9 +2494,9 @@ private Q_SLOTS:
         });
     }
 
-    // AUD-FIX7: forced software selection: only software HEVC, SoftwareEncoding=prefer. The
-    // worker gets the software backend and the 30 fps cap of software HEVC/AV1; under `auto`
-    // on a normal link the same host answers AVC and says why.
+    // AUD-FIX7 / OPT-062: forced software selection: only software HEVC. The client's order is honoured, so a client that
+    // lists HEVC gets software HEVC under `auto` (software allowed); the host's ceiling (`never`) is what keeps it out, and
+    // then the reply says why. The worker gets the software backend and the 30 fps cap of software HEVC/AV1.
     void codecPolicyForcedSoftwareSelection()
     {
         microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
@@ -2504,15 +2504,27 @@ private Q_SLOTS:
             host.probe.encoders.avc = {false, true, true};
             host.probe.encoders.hevc = {false, true, true};
             host.mode = CodecPolicy::SoftwareEncoding::Auto;
+            host.ceiling = CodecPolicy::SoftwareAllowance{true, false, true}; // software HEVC: never
             t.setVideoCodecHost(host);
             auto reply = t.request(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, 1}, {u"codecs"_s, QJsonArray{u"hevc"_s}}}, 1000);
             QCOMPARE(reply.value(u"selected"_s).toString(), u"avc"_s);
             QCOMPARE(reply.value(u"backend"_s).toString(), u"software"_s);
-            QVERIFY2(reply.value(u"reason"_s).toString().contains(u"software not selected"_s), qPrintable(reply.value(u"reason"_s).toString()));
+            QVERIFY2(reply.value(u"reason"_s).toString().contains(u"softwareNotAllowed"_s), qPrintable(reply.value(u"reason"_s).toString()));
+            QVERIFY(!reply.value(u"baseline"_s).toBool(true)); // software H.264 is a normal way to send AVC here, not a last resort
+            // The new fields: the same ceiling, reported per codec.
+            reply = t.request(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, 1}, {u"codecs"_s, QJsonArray{u"hevc"_s}},
+                                          {u"order"_s, QJsonArray{u"hevc"_s, u"avc"_s}}, {u"encode"_s, u"any"_s}}, 1000);
+            QCOMPARE(reply.value(u"selected"_s).toString(), u"avc"_s);
+            QCOMPARE(reply.value(u"skipped"_s).toArray().first().toObject().value(u"codec"_s).toString(), u"hevc"_s);
 
-            host.mode = CodecPolicy::SoftwareEncoding::Prefer;
+            host.ceiling.reset(); // derived from SoftwareEncoding=auto: allowed
             t.setVideoCodecHost(host);
-            workerRecords(worker);
+            reply = t.request(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, 1}, {u"codecs"_s, QJsonArray{u"hevc"_s}}}, 1000);
+            QCOMPARE(reply.value(u"selected"_s).toString(), u"hevc"_s);
+            QCOMPARE(reply.value(u"backend"_s).toString(), u"software"_s);
+
+            host.mode = CodecPolicy::SoftwareEncoding::Prefer; // the old mode no longer picks anything; the answer stays the client's
+            t.setVideoCodecHost(host);
             reply = t.request(QJsonObject{{u"type"_s, u"codec"_s}, {u"v"_s, 1}, {u"codecs"_s, QJsonArray{u"hevc"_s}}, {u"adaptive"_s, false}}, 1000);
             QCOMPARE(reply.value(u"selected"_s).toString(), u"hevc"_s);
             QCOMPARE(reply.value(u"backend"_s).toString(), u"software"_s);

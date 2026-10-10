@@ -31,12 +31,22 @@ struct Request {
     /// AV1-Q: `decode`, the client's decode path per codec ("hw"/"sw"; anything else, or no
     /// `decode`, is Unknown: optional and never an error, so older clients are unaffected).
     CodecPolicy::ClientDecode decode;
+    /// OPT-062 S2: the request the selection runs on, built from `order` / `encode` / `decodeMode` / `decoders`
+    /// (and the old fields for what they leave out). Set only when the record has at least one of the new fields;
+    /// otherwise from `codecs` / `decode` / `adaptive` by CodecPolicy::requestFromRecord() when applied.
+    std::optional<CodecPolicy::Request> selection;
+    QString orderText; ///< the new fields as the client sent them, for the log ("order [av1,hevc,avc] encode any decode software")
     bool operator==(const Request &) const = default;
 };
 
-/// nullopt: `codecs` is not an array of "hevc"/"av1" strings (answer invalidRecord()).
-KRDP_EXPORT std::optional<Request> parse(const QJsonObject &record);
-KRDP_EXPORT QJsonObject invalidRecord();
+/**
+ * nullopt: the record is invalid (answer invalidRecord(\a error)): `codecs` is not an array of "hevc"/"av1" strings,
+ * or one of the S2 fields is malformed: `order` (distinct "avc"/"hevc"/"av1", at most 3; empty = standard AVC only),
+ * `encode` / `decodeMode` ("hardware" | "software" | "any"), `decoders` (an object with only the keys avc/hevc/av1,
+ * each an array of at most two distinct "hw"/"sw" strings, [] = cannot decode). \a error gets a short reason.
+ */
+KRDP_EXPORT std::optional<Request> parse(const QJsonObject &record, QString *error = nullptr);
+KRDP_EXPORT QJsonObject invalidRecord(const QString &message = {});
 
 /**
  * Hands \a request to \a stream's codec policy (VideoStream::setPrivateCodecPolicy(): the choice

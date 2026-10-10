@@ -31,6 +31,10 @@ struct ClientDecode {
 /// Codec families, in ascending order of compression. Avc = the RDPGFX AVC codec (420/444/444v2)
 /// the client's caps select; Hevc/Av1 = the private codecs (0x8001/0x8002).
 enum class Family { Avc = 0, Hevc = 1, Av1 = 2 };
+inline DecodePath decodePathOf(const ClientDecode &decode, Family f)
+{
+    return f == Family::Hevc ? decode.hevc : f == Family::Av1 ? decode.av1 : decode.avc;
+}
 constexpr std::array<Family, 3> BestCompressionFirst{Family::Av1, Family::Hevc, Family::Avc};
 inline const char *familyName(Family f)
 {

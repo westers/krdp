@@ -876,6 +876,28 @@ void ConsoleHostController::publishDeviceAvailability()
     }
 }
 
+namespace
+{
+/// OPT-062 S2: the detail of an AVC answer given because the console is shared or the client does not control it:
+/// every private codec the client listed is reported skipped with \a why.
+LayoutControl::CodecDetail avcOnlyDetail(VideoStream &stream, const CodecRequest::Request &request, CodecPolicy::SkipReason why)
+{
+    auto detail = stream.codecDetail();
+    QList<CodecPolicy::Family> families;
+    if (request.selection) {
+        families = request.selection->order;
+    } else {
+        for (const auto codec : request.codecs) families.append(codec == VideoCodec::Hevc ? CodecPolicy::Family::Hevc : CodecPolicy::Family::Av1);
+    }
+    detail.skipped.clear();
+    for (const auto family : families) {
+        if (family == CodecPolicy::Family::Avc) continue;
+        detail.skipped.append({QString::fromLatin1(CodecPolicy::familyName(family)), {QString::fromLatin1(CodecPolicy::skipReasonName(why))}});
+    }
+    return detail;
+}
+}
+
 void ConsoleHostController::addClient(RdpConnection *connection)
 {
     // Shared viewers use AVC420. A sole admitted controller may use its saved
@@ -883,7 +905,7 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     connection->videoStream()->setCodecPreference(CodecPreference::Avc420);
     connection->videoStream()->setAvc444Available(false);
     if (m_videoHost) {
-        connection->videoStream()->setEncoderPolicy(m_videoHost->probe.encoders, m_videoHost->mode);
+        m_videoHost->apply(*connection->videoStream());
         connection->videoStream()->setAv1TilesSetting(m_videoHost->av1Tiles);
     }
     connection->videoStream()->setQualityCap(m_qualityCap);
@@ -1052,7 +1074,7 @@ void ConsoleHostController::loadUserSettings(Client &client)
     stream->setQualityCap(client.videoQuality);
     stream->setAdaptiveQuality(client.preferences.adaptiveQuality.value_or(m_adaptiveQuality));
     if (m_videoHost) {
-        stream->setEncoderPolicy(m_videoHost->probe.encoders, client.preferences.softwareEncoding.value_or(m_videoHost->mode));
+        m_videoHost->apply(*stream, client.preferences.softwareEncoding);
         stream->setAv1TilesSetting(client.preferences.av1Tiles.value_or(m_videoHost->av1Tiles));
     }
 }
@@ -1279,9 +1301,10 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         // AUD-FIX7: the connection's codec preference (CodecRequest, as krdpserver). It runs
         // while this client controls the console alone (syncCodecPolicy()); otherwise the answer
         // is AVC and a `codec` push follows when that changes.
-        const auto parsed = CodecRequest::parse(record);
+        QString problem;
+        const auto parsed = CodecRequest::parse(record, &problem);
         if (!parsed) {
-            replyTo(connection, CodecRequest::invalidRecord());
+            replyTo(connection, CodecRequest::invalidRecord(problem));
             return;
         }
         auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &entry) { return entry->id == id; });
@@ -1309,7 +1332,8 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         stream->setPrivateCodecPolicy({}, parsed->adaptive);
         replyTo(connection, LayoutControl::codecRecord(u"avc"_s, stream->encoderPolicy().avc.hardware,
             m_control.admitted(id) ? u"another client is watching this console: AVC for everyone"_s
-                                   : u"the console codec is chosen once this client controls it alone"_s));
+                                   : u"the console codec is chosen once this client controls it alone"_s,
+            avcOnlyDetail(*stream, *parsed, m_control.admitted(id) ? CodecPolicy::SkipReason::ConsoleShared : CodecPolicy::SkipReason::NotController)));
         return;
     }
     if (type == u"stats"_s) {
@@ -2067,7 +2091,10 @@ void ConsoleHostController::sendCapabilities(Client &client)
         capabilities.devices->availabilityPush = true;
         capabilities.devices->cameraSessionAvailable = capabilities.devices->microphoneSessionAvailable = available;
     }
-    if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, client.preferences.softwareEncoding.value_or(m_videoHost->mode));
+    if (m_videoHost) {
+        capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, client.preferences.softwareEncoding.value_or(m_videoHost->mode),
+                                                               m_videoHost->allowance(client.preferences.softwareEncoding));
+    }
     capabilities.stats = LayoutControl::StatsCapabilities{};
     // OPT-060: advertised only when this connection's user allows Replace; the client still has to ask
     // with its monitor block. Old clients ignore the group and the `console-screens` records.
@@ -2602,7 +2629,8 @@ void ConsoleHostController::syncCodecPolicy()
             const QString reason = owner ? u"another client is watching this console: AVC for everyone"_s
                                          : u"only the controlling client chooses the console's codec"_s;
             qInfo().noquote() << "Console client" << client->id << "back to AVC:" << reason;
-            sendRecord(client->connection, LayoutControl::codecRecord(u"avc"_s, stream->encoderPolicy().avc.hardware, reason));
+            sendRecord(client->connection, LayoutControl::codecRecord(u"avc"_s, stream->encoderPolicy().avc.hardware, reason,
+                avcOnlyDetail(*stream, *client->codecRequest, owner ? CodecPolicy::SkipReason::ConsoleShared : CodecPolicy::SkipReason::NotController)));
         }
     }
 }

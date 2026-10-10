@@ -92,6 +92,11 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
     if (current.hardware) {
         video.insert(QStringLiteral("backend"), *current.hardware ? QStringLiteral("hardware") : QStringLiteral("software"));
     }
+    if (!current.encoder.isEmpty()) {
+        video.insert(QStringLiteral("encoder"), current.encoder.left(24));
+        if (!current.device.isEmpty()) video.insert(QStringLiteral("device"), current.device.left(16));
+        if (!current.deviceName.isEmpty()) video.insert(QStringLiteral("deviceName"), current.deviceName.left(48));
+    }
     if (!current.preset.isEmpty()) {
         video.insert(QStringLiteral("preset"), current.preset);
     }
@@ -213,6 +218,17 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
     }
     if (current.adaptive) {
         policy.insert(QStringLiteral("adaptive"), *current.adaptive);
+    }
+    if (!current.order.isEmpty()) {
+        policy.insert(QStringLiteral("order"), QJsonArray::fromStringList(current.order));
+        policy.insert(QStringLiteral("encode"), current.encodeMode);
+        policy.insert(QStringLiteral("decodeMode"), current.decodeMode);
+    }
+    if (current.allowance) {
+        policy.insert(QStringLiteral("allowance"),
+                      QJsonObject{{QStringLiteral("avc"), QLatin1String(CodecPolicy::allowanceName(CodecPolicy::Family::Avc, current.allowance->avc))},
+                                  {QStringLiteral("hevc"), QLatin1String(CodecPolicy::allowanceName(CodecPolicy::Family::Hevc, current.allowance->hevc))},
+                                  {QStringLiteral("av1"), QLatin1String(CodecPolicy::allowanceName(CodecPolicy::Family::Av1, current.allowance->av1))}});
     }
 
     QJsonArray surfaces;

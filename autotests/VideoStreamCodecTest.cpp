@@ -87,7 +87,7 @@ private Q_SLOTS:
     {
         Fixture f;
         f.stream()->setEncoderPolicy(sol(), CodecPolicy::SoftwareEncoding::Auto);
-        const auto d = f.stream()->setPrivateCodecPolicy({VideoCodec::Hevc, VideoCodec::Av1}, true);
+        const auto d = f.stream()->setPrivateCodecPolicy({VideoCodec::Av1, VideoCodec::Hevc}, true);
         QCOMPARE(d.choice.family, Family::Avc);
         QVERIFY(!d.choice.hardware);
         QVERIFY(!f.stream()->negotiatedCodec()); // caps decide the AVC flavour
@@ -113,7 +113,7 @@ private Q_SLOTS:
     {
         Fixture f;
         f.stream()->setEncoderPolicy(hal(), CodecPolicy::SoftwareEncoding::Auto);
-        QCOMPARE(f.stream()->setPrivateCodecPolicy({VideoCodec::Hevc, VideoCodec::Av1}, true).choice.family, Family::Av1);
+        QCOMPARE(f.stream()->setPrivateCodecPolicy({VideoCodec::Av1, VideoCodec::Hevc}, true).choice.family, Family::Av1);
         QSignalSpy changed(f.stream(), &VideoStream::negotiatedCodecChanged);
         f.stream()->privateCodecUnavailable(VideoCodec::Av1); // no switch interval for this
         QCOMPARE(f.stream()->negotiatedCodec(), VideoCodec::Hevc);
@@ -156,13 +156,12 @@ private Q_SLOTS:
         f.stream()->setEncoderPolicy(softwareOnly(), CodecPolicy::SoftwareEncoding::Prefer);
         f.stream()->setQualityCap(70);
         QCOMPARE(f.stream()->requestedFrameRate(), 60u);
-        const auto d = f.stream()->setPrivateCodecPolicy({VideoCodec::Hevc, VideoCodec::Av1}, true);
+        const auto d = f.stream()->setPrivateCodecPolicy({VideoCodec::Av1, VideoCodec::Hevc}, true);
         QCOMPARE(d.choice, (CodecPolicy::Choice{Family::Av1, false}));
         QCOMPARE(order, (QStringList{QStringLiteral("settings"), QStringLiteral("codec")}));
-        // Software AV1 opens in bitrate mode at the quality's bitrate (1080p until surfaces exist),
-        // so adaptive quality later moves the bitrate instead of reopening for a CRF change.
-        const quint32 kbps = CodecPolicy::qualityKbps(70, CodecPolicy::ReferencePixels);
-        QCOMPARE(f.stream()->encoderSettings(), (CodecPolicy::EncoderSettings{false, CodecPolicy::Preset::Efficient, kbps, 30}));
+        // OPT-063: SVT-AV1 reopens for every rate change, so it opens in quality mode (the client's Quality as a constant QP,
+        // no target bitrate); only a slow link gives it a bitrate to hold.
+        QCOMPARE(f.stream()->encoderSettings(), (CodecPolicy::EncoderSettings{false, CodecPolicy::Preset::Efficient, 0, 30}));
         QCOMPARE(f.stream()->requestedFrameRate(), 30u);
         QCOMPARE(rate.size(), 1);
         // Back to AVC only: full rate again.
@@ -209,7 +208,7 @@ private Q_SLOTS:
         QVERIFY(!f.stream()->statsSubscribed());
         QVERIFY(!f.stream()->statsReporter()->timerActive());
         f.stream()->setEncoderPolicy(softwareOnly(), CodecPolicy::SoftwareEncoding::Prefer);
-        f.stream()->setPrivateCodecPolicy({VideoCodec::Hevc, VideoCodec::Av1}, true); // codec, settings, frame rate
+        f.stream()->setPrivateCodecPolicy({VideoCodec::Av1, VideoCodec::Hevc}, true); // codec, settings, frame rate
         f.stream()->privateCodecUnavailable(VideoCodec::Av1);
         QTest::qWait(300);
         QVERIFY(sent.isEmpty());
@@ -257,7 +256,7 @@ private Q_SLOTS:
 
         // The client's `codec` request: software AV1 (prefer) at 30 fps.
         f.stream()->setEncoderPolicy(softwareOnly(), CodecPolicy::SoftwareEncoding::Prefer);
-        f.stream()->setPrivateCodecPolicy({VideoCodec::Hevc, VideoCodec::Av1}, true);
+        f.stream()->setPrivateCodecPolicy({VideoCodec::Av1, VideoCodec::Hevc}, true);
         QCOMPARE(events(QStringLiteral("codec")).size(), 1);
         QCOMPARE(events(QStringLiteral("codec")).last().value(QLatin1String("codec")).toString(), QStringLiteral("av1"));
         QCOMPARE(events(QStringLiteral("codec")).last().value(QLatin1String("backend")).toString(), QStringLiteral("software"));
@@ -367,7 +366,7 @@ private Q_SLOTS:
         f.stream()->setEncoderPolicy(hal(), CodecPolicy::SoftwareEncoding::Auto);
         f.stream()->setAv1TilesSetting(*CodecPolicy::parseAv1Tiles(setting));
         QSignalSpy settings(f.stream(), &VideoStream::encoderSettingsChanged);
-        QJsonObject record{{QStringLiteral("codecs"), QJsonArray{QStringLiteral("hevc"), QStringLiteral("av1")}}};
+        QJsonObject record{{QStringLiteral("codecs"), QJsonArray{QStringLiteral("av1"), QStringLiteral("hevc")}}}; // the client's order is honoured (OPT-063)
         if (!decode.isEmpty()) {
             record.insert(QStringLiteral("decode"), QJsonObject{{QStringLiteral("avc"), QStringLiteral("hw")}, {QStringLiteral("av1"), decode}});
         }

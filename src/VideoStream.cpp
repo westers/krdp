@@ -387,11 +387,21 @@ public:
     // allowance, for every CodecPolicy::Input of this connection. S2 replaces the request by the
     // client's own order/encode/decode modes (explicitRequest).
     std::optional<CodecPolicy::Request> explicitRequest;
+    // OPT-062 S2: the host's per-codec software ceiling (unset: derived from softwareEncoding), the concrete encoder
+    // names for the `codec` reply and Stats, and what the last decision skipped (main thread only).
+    std::optional<CodecPolicy::SoftwareAllowance> allowance;
+    CodecPolicy::EncoderLabels labels;
+    QList<CodecPolicy::Skip> lastSkipped;
+    bool lastBaseline = false;
     LogThrottle codecChoiceLog{std::chrono::seconds(30), 3};
+    CodecPolicy::SoftwareAllowance effectiveAllowance() const
+    {
+        return allowance ? *allowance : CodecPolicy::allowanceFor(softwareEncoding);
+    }
     void fillSelection(CodecPolicy::Input &in) const
     {
         in.request = explicitRequest ? *explicitRequest : CodecPolicy::requestFromRecord(clientFamilies, clientDecode, codecPolicyAdaptive);
-        in.host.allowance = CodecPolicy::allowanceFor(softwareEncoding);
+        in.host.allowance = effectiveAllowance();
     }
     // OPT-055: the "waiting for the switch interval" reason last logged; the line repeats every ~1.5 s otherwise.
     QString lastWaitReason;
@@ -1051,6 +1061,76 @@ CodecPolicy::Encoders VideoStream::encoderPolicy() const
     return d->encoders;
 }
 
+void VideoStream::setSoftwareAllowance(const CodecPolicy::SoftwareAllowance &allowance)
+{
+    d->allowance = allowance;
+}
+
+CodecPolicy::SoftwareAllowance VideoStream::softwareAllowance() const
+{
+    return d->effectiveAllowance();
+}
+
+void VideoStream::setEncoderLabels(const CodecPolicy::EncoderLabels &labels)
+{
+    d->labels = labels;
+}
+
+std::optional<CodecPolicy::Request> VideoStream::codecRequest() const
+{
+    if (!d->codecPolicyActive) {
+        return std::nullopt;
+    }
+    return d->explicitRequest ? *d->explicitRequest : CodecPolicy::requestFromRecord(d->clientFamilies, d->clientDecode, d->codecPolicyAdaptive);
+}
+
+QList<CodecPolicy::Skip> VideoStream::skippedBeforeChoice() const
+{
+    // Only the codecs the client ranked above the one that is used: a codec after it was never in the way.
+    QList<CodecPolicy::Skip> out;
+    if (!d->codecPolicy.current) {
+        return out;
+    }
+    const auto request = codecRequest();
+    const auto order = request ? CodecPolicy::normalizedOrder(request->order) : QList<CodecPolicy::Family>{};
+    const auto chosen = order.indexOf(d->codecPolicy.current->family);
+    for (const auto &skip : d->lastSkipped) {
+        const auto index = order.indexOf(skip.family);
+        if (chosen < 0 || (index >= 0 && index < chosen)) {
+            out.append(skip);
+        }
+    }
+    return out;
+}
+
+LayoutControl::CodecDetail VideoStream::codecDetail() const
+{
+    LayoutControl::CodecDetail detail;
+    if (!d->codecPolicy.current) {
+        return detail;
+    }
+    const auto &current = *d->codecPolicy.current;
+    const auto &label = d->labels.of(current.family, current.hardware);
+    detail.encoder = label.backend;
+    if (current.hardware) {
+        detail.device = label.device;
+        detail.deviceName = label.deviceName;
+    }
+    const auto path = CodecPolicy::decodePathOf(d->clientDecode, current.family);
+    if (path != CodecPolicy::DecodePath::Unknown) {
+        detail.decodePath = QString::fromLatin1(CodecPolicy::decodePathName(path));
+    }
+    detail.baseline = d->lastBaseline;
+    for (const auto &skip : skippedBeforeChoice()) {
+        QStringList why;
+        for (const auto reason : skip.reasons) {
+            why << QString::fromLatin1(CodecPolicy::skipReasonName(reason));
+        }
+        detail.skipped.append({QString::fromLatin1(CodecPolicy::familyName(skip.family)), why});
+    }
+    return detail;
+}
+
 void VideoStream::setAv1TilesSetting(int tiles)
 {
     d->av1TilesSetting = tiles;
@@ -1119,6 +1199,25 @@ CodecPolicy::Decision VideoStream::setPrivateCodecPolicy(const QVector<VideoCode
             d->clientFamilies.append(family);
         }
     }
+    d->explicitRequest.reset();
+    return startCodecPolicy(adaptive);
+}
+
+CodecPolicy::Decision VideoStream::setCodecRequest(const CodecPolicy::Request &request)
+{
+    // OPT-062 S2: the client's own order, encode mode and decoders; the order is always honoured.
+    d->clientFamilies.clear();
+    for (const auto family : request.order) {
+        if (family != CodecPolicy::Family::Avc && !d->clientFamilies.contains(family)) {
+            d->clientFamilies.append(family);
+        }
+    }
+    d->explicitRequest = request;
+    return startCodecPolicy(request.adaptive);
+}
+
+CodecPolicy::Decision VideoStream::startCodecPolicy(bool adaptive)
+{
     d->codecPolicyAdaptive = adaptive;
     d->codecPolicyActive = !d->clientFamilies.isEmpty();
     d->codecPolicy = {};
@@ -1136,6 +1235,8 @@ CodecPolicy::Decision VideoStream::setPrivateCodecPolicy(const QVector<VideoCode
         in.pixels = d->surfacePixels.load(); // else 1080p until the surfaces exist
     }
     const auto decision = CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now());
+    d->lastSkipped = decision.skipped;
+    d->lastBaseline = decision.baseline;
     applyEncoderSettings(decision.settings);
     setPrivateCodec(privateCodecOf(decision.choice.family));
     d->stats->setSlowLink(d->codecPolicy.slowLink);
@@ -1210,6 +1311,8 @@ void VideoStream::setEncoderCpuTimeSource(std::function<qint64()> source)
 
 void VideoStream::applyCodecDecision(const CodecPolicy::Decision &decision)
 {
+    d->lastSkipped = decision.skipped;
+    d->lastBaseline = decision.baseline;
     if (decision.settingsChanged && !decision.changed && decision.bitrateOnly && !decision.restartsEncoder) {
         // A live bitrate change (adaptive quality on libx265) keeps the encoder and its budget:
         // the load window stays, and it is logged at debug level (it can happen every interval).
@@ -1271,7 +1374,8 @@ void VideoStream::applyCodecDecision(const CodecPolicy::Decision &decision)
     // Unsolicited: no requestId. Only our own client ever gets here (it sent `codec`).
     d->session->sendControlRecord(LayoutControl::codecRecord(QString::fromLatin1(CodecPolicy::familyName(decision.choice.family)),
                                                              decision.choice.hardware,
-                                                             decision.reason));
+                                                             decision.reason,
+                                                             codecDetail()));
 }
 
 void VideoStream::applyEncoderSettings(const CodecPolicy::EncoderSettings &policySettings)
@@ -1352,7 +1456,8 @@ void VideoStream::encoderBackendReported(VideoCodec codec, bool hardware)
     d->cpuNsAtLastSample = -1;
     d->session->sendControlRecord(LayoutControl::codecRecord(QString::fromLatin1(CodecPolicy::familyName(d->codecPolicy.current->family)),
                                                              hardware,
-                                                             QStringLiteral("encoder backend: %1").arg(hardware ? QStringLiteral("hardware") : QStringLiteral("software"))));
+                                                             QStringLiteral("encoder backend: %1").arg(hardware ? QStringLiteral("hardware") : QStringLiteral("software")),
+                                                             codecDetail()));
 }
 
 void VideoStream::stepCodecPolicy(bool congested)
@@ -2632,6 +2737,23 @@ Stats::Snapshot VideoStream::statsSnapshot() const
 
     s.mode = QString::fromLatin1(CodecPolicy::softwareEncodingName(d->softwareEncoding));
     s.decode = d->clientDecode;
+    s.allowance = d->effectiveAllowance();
+    if (d->codecPolicy.current) {
+        // OPT-062 S2: the concrete encoder that runs (the policy follows a backend fallback).
+        const auto &label = d->labels.of(d->codecPolicy.current->family, d->codecPolicy.current->hardware);
+        s.encoder = label.backend;
+        if (d->codecPolicy.current->hardware) {
+            s.device = label.device;
+            s.deviceName = label.deviceName;
+        }
+    }
+    if (const auto request = codecRequest()) {
+        for (const auto family : CodecPolicy::normalizedOrder(request->order)) {
+            s.order << QString::fromLatin1(CodecPolicy::familyName(family));
+        }
+        s.encodeMode = QString::fromLatin1(CodecPolicy::modeName(request->encode));
+        s.decodeMode = QString::fromLatin1(CodecPolicy::modeName(request->decode));
+    }
     if (s.codec == QLatin1String("av1") && d->encoderSettings) {
         s.av1Tiles = d->encoderSettings->av1Tiles;
     }

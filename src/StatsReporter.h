@@ -57,6 +57,10 @@ struct Snapshot {
     // video
     QString codec; ///< "avc" | "hevc" | "av1"; empty before the caps are known
     std::optional<bool> hardware; ///< the backend of the encoder that runs
+    /// OPT-062 S2: the concrete encoder behind `hardware` ("vaapi", "nvenc", "libx264", ...), the hardware device's PCI id and name when known
+    QString encoder;
+    QString device;
+    QString deviceName;
     QString preset; ///< the software encoder's preset ("veryfast", "M10", ...); empty for hardware
     QString chroma; ///< "420" | "444"
     QSize size; ///< the RDP desktop (all surfaces)
@@ -112,6 +116,11 @@ struct Snapshot {
     QString mode; ///< SoftwareEncoding: "auto" | "never" | "prefer"
     std::optional<bool> adaptive; ///< the client's `codec` `adaptive`; absent without a `codec` request
     CodecPolicy::ClientDecode decode; ///< AV1-Q: the client's `codec` `decode` (Unknown = not said)
+    /// OPT-062 S2: the codec request the policy runs on (empty without a private codec request) and the host's software ceiling
+    QStringList order;
+    QString encodeMode; ///< "hardware" | "software" | "any"
+    QString decodeMode;
+    std::optional<CodecPolicy::SoftwareAllowance> allowance;
     /// AV1-Q: the AV1 tile count the encoder was told (0 = KPipeWire's per-resolution rule); AV1 only
     std::optional<int> av1Tiles;
     QString guardState = QStringLiteral("ok"); ///< "ok" | "stepped" | "holding"
