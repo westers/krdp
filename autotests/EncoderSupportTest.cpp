@@ -51,10 +51,140 @@ bool sameBackends(const Backends &b, bool hardware, bool software)
 }
 }
 
+namespace
+{
+using EncoderSupport::Inputs;
+using EncoderSupport::NvidiaEncoder;
+using CodecPolicy::Family;
+
+NvidiaEncoder nvenc(const QString &pci, const QString &name, int ordinal, Family family, bool usable, const QString &failure = {})
+{
+    return {pci, name, ordinal, family, usable, usable ? QSize(8192, 8192) : QSize(), failure};
+}
+
+Inputs halToday() // AMD VCN answers every codec; the 4090 is not asked
+{
+    Inputs in;
+    in.vaapi = {true, true, true, u"/dev/dri/renderD128"_s};
+    in.liveBitrate = {true, true, false};
+    return in;
+}
+
+Inputs solTuring() // no VA-API encoder; an RTX 2070: H.264 and HEVC NVENC, no AV1
+{
+    Inputs in;
+    in.vaapi = {};
+    const QString pci = u"0000:09:00.0"_s;
+    const QString name = u"NVIDIA GeForce RTX 2070"_s;
+    in.nvidia = {nvenc(pci, name, 0, Family::Avc, true), nvenc(pci, name, 0, Family::Hevc, true), nvenc(pci, name, 0, Family::Av1, false, u"unsupported"_s)};
+    in.liveBitrate = {true, true, false};
+    return in;
+}
+}
+
 class EncoderSupportTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    // --- Fake hosts: no probe of the machine at all (safe anywhere, including a host with a broken NVIDIA stack) ---
+
+    void fakeHalKeepsAmdAndNeverUsesTheNvidiaGpu()
+    {
+        auto in = halToday();
+        // Even if the NVIDIA inventory were consulted and full, VA-API covers every codec, so NVENC adds nothing.
+        in.nvidia = {nvenc(u"0000:04:00.0"_s, u"NVIDIA GeForce RTX 4090"_s, 0, Family::Avc, true), nvenc(u"0000:04:00.0"_s, u"NVIDIA GeForce RTX 4090"_s, 0, Family::Hevc, true)};
+        const auto probe = EncoderSupport::assemble(in);
+        QCOMPARE(probe.avcHardwareVia, u"vaapi"_s);
+        QCOMPARE(probe.hevcHardwareVia, u"vaapi"_s);
+        QCOMPARE(probe.av1HardwareVia, u"vaapi"_s);
+        QVERIFY(probe.avc444Hardware);
+        QCOMPARE(EncoderSupport::describe(probe), u"avc hw+sw, hevc hw+sw, av1 hw+sw, avc444 hw on /dev/dri/renderD128"_s);
+    }
+
+    void fakeSolReportsNvencAvcAndHevcAndSoftwareAv1()
+    {
+        const auto probe = EncoderSupport::assemble(solTuring());
+        QVERIFY(sameBackends(probe.encoders.avc, true, true));
+        QVERIFY(sameBackends(probe.encoders.hevc, true, true));
+        QVERIFY(sameBackends(probe.encoders.av1, false, true)); // Turing: no AV1 NVENC, and it is never advertised
+        QCOMPARE(probe.avcHardwareVia, u"nvenc"_s);
+        QCOMPARE(probe.hevcHardwareVia, u"nvenc"_s);
+        QVERIFY(probe.av1HardwareVia.isEmpty());
+        QVERIFY(!probe.avc444Hardware); // AVC444 stays on VA-API
+        QCOMPARE(EncoderSupport::describe(probe), u"avc hw(nvenc)+sw, hevc hw(nvenc)+sw, av1 sw, avc444 none on NVENC NVIDIA GeForce RTX 2070 0000:09:00.0"_s);
+        const auto video = EncoderSupport::videoCapabilities(probe, CodecPolicy::SoftwareEncoding::Auto);
+        QCOMPARE(video.codecs.first(), (LayoutControl::VideoCodecOffer{u"avc420"_s, true, true}));
+        QCOMPARE(video.codecs.size(), 3); // avc420, hevc, av1 (software)
+        // The policy now picks hardware AVC where it used to have only libx264.
+        CodecPolicy::Input input;
+        input.encoders = probe.encoders;
+        CodecPolicy::State state;
+        QCOMPARE(CodecPolicy::step(state, input, CodecPolicy::Clock::now()).choice, (CodecPolicy::Choice{Family::Avc, true}));
+    }
+
+    void fakeNvidiaDriverBrokenMeansSoftwareOnly()
+    {
+        // Hal before its reboot: kernel 595.91.07, libraries 595.99.02. The probe is "unavailable", never a failure.
+        Inputs in;
+        in.nvidiaNote = u"NVIDIA driver/library version mismatch (kernel module 595.91.07, libcuda 595.99.02)"_s;
+        const auto probe = EncoderSupport::assemble(in);
+        QVERIFY(sameBackends(probe.encoders.avc, false, true));
+        QVERIFY(sameBackends(probe.encoders.hevc, false, true));
+        QVERIFY(sameBackends(probe.encoders.av1, false, true));
+        QVERIFY(probe.nvidia.isEmpty());
+        QVERIFY(probe.nvidiaNote.contains(u"mismatch"_s));
+        QVERIFY(probe.renderNode.isEmpty());
+        QCOMPARE(EncoderSupport::describe(probe), u"avc sw, hevc sw, av1 sw, avc444 none"_s);
+        // Alongside a working VA-API the broken NVIDIA stack changes nothing at all.
+        auto hal = halToday();
+        hal.nvidiaNote = in.nvidiaNote;
+        QCOMPARE(EncoderSupport::describe(EncoderSupport::assemble(hal)), EncoderSupport::describe(EncoderSupport::assemble(halToday())));
+    }
+
+    void fakeNvidiaOnlyHostWithSessionLimitedGpu()
+    {
+        Inputs in = solTuring();
+        in.nvidia = {nvenc(u"0000:09:00.0"_s, u"NVIDIA GeForce RTX 2070"_s, 0, Family::Avc, false, u"session-limit"_s),
+                     nvenc(u"0000:09:00.0"_s, u"NVIDIA GeForce RTX 2070"_s, 0, Family::Hevc, true)};
+        const auto probe = EncoderSupport::assemble(in);
+        QVERIFY(sameBackends(probe.encoders.avc, false, true)); // a codec that did not open is not advertised
+        QVERIFY(sameBackends(probe.encoders.hevc, true, true));
+    }
+
+    void fakeOlderKpipewireWithoutNvencHardwareBit()
+    {
+        auto in = solTuring();
+        in.kpipewireHardware = {false, false, false}; // KPipeWire cannot be asked for hardware: nothing is claimed
+        const auto probe = EncoderSupport::assemble(in);
+        QVERIFY(sameBackends(probe.encoders.avc, false, true));
+        QVERIFY(sameBackends(probe.encoders.hevc, false, true));
+    }
+
+    void fakeForcedSoftwareIgnoresNvidia()
+    {
+        auto in = solTuring();
+        in.forcedSoftware = true;
+        const auto probe = EncoderSupport::assemble(in);
+        QVERIFY(sameBackends(probe.encoders.avc, false, true));
+        QVERIFY(sameBackends(probe.encoders.hevc, false, true));
+        QVERIFY(probe.avcHardwareVia.isEmpty());
+    }
+
+    void fakeOverrideKeepsItsMeaningOnNvenc()
+    {
+        auto in = solTuring();
+        in.overrideSpec = u"avc=sw,hevc=none,av1=hw"_s;
+        const auto probe = EncoderSupport::assemble(in);
+        QVERIFY(sameBackends(probe.encoders.avc, false, true));
+        QVERIFY(sameBackends(probe.encoders.hevc, false, false));
+        QVERIFY(sameBackends(probe.encoders.av1, true, false));
+        QVERIFY(EncoderSupport::describe(probe).startsWith(u"avc sw, hevc none, av1 hw, avc444 none"_s));
+        in.overrideSpec = u"avc=bogus"_s; // invalid: ignored, the probe stands
+        QVERIFY(sameBackends(EncoderSupport::assemble(in).encoders.avc, true, true));
+    }
+
+    // --- Probes of this machine (open VA-API / NVIDIA devices): test hosts only ---
+
     void overrideParses()
     {
         CodecPolicy::Encoders e;
@@ -78,9 +208,9 @@ private Q_SLOTS:
 
     void hardwareForcedOff()
     {
-        qputenv("KRDP_FORCE_SOFTWARE_ENCODING", "1");
+        qputenv("FARSIDE_FORCE_SOFTWARE_ENCODING", "1");
         qunsetenv("KPIPEWIRE_FORCE_ENCODER");
-        qunsetenv("KRDP_ENCODERS");
+        qunsetenv("FARSIDE_ENCODERS");
         const auto probe = EncoderSupport::probeUncached();
         QCOMPARE(probe.encoders.avc.hardware, false);
         // Software HEVC/AV1 are still offered: hardware off is what they are for.
@@ -95,7 +225,7 @@ private Q_SLOTS:
         QVERIFY(probe.renderNode.isEmpty());
         const bool softwareH264 = avcodec_find_encoder_by_name("libx264") || avcodec_find_encoder_by_name("libopenh264");
         QCOMPARE(probe.encoders.avc.software, softwareH264);
-        QVERIFY(EncoderSupport::describe(probe).contains(u"KRDP_FORCE_SOFTWARE_ENCODING"_s));
+        QVERIFY(EncoderSupport::describe(probe).contains(u"FARSIDE_FORCE_SOFTWARE_ENCODING"_s));
 
         EncoderSupport::applyProcessOverrides();
         const QByteArray forced = qgetenv("KPIPEWIRE_FORCE_ENCODER");
@@ -121,7 +251,7 @@ private Q_SLOTS:
         QVERIFY(!choice.hardware);
         const auto best = probe.encoders.av1.software ? CodecPolicy::Family::Av1 : probe.encoders.hevc.software ? CodecPolicy::Family::Hevc : CodecPolicy::Family::Avc;
         QCOMPARE(choice.family, best);
-        qunsetenv("KRDP_FORCE_SOFTWARE_ENCODING");
+        qunsetenv("FARSIDE_FORCE_SOFTWARE_ENCODING");
         qunsetenv("KPIPEWIRE_FORCE_ENCODER");
     }
 
@@ -152,13 +282,13 @@ private Q_SLOTS:
 
     void environmentOverrideWins()
     {
-        qputenv("KRDP_FORCE_SOFTWARE_ENCODING", "1"); // keep the host's GPU out of it
-        qputenv("KRDP_ENCODERS", "avc=sw,hevc=hw");
+        qputenv("FARSIDE_FORCE_SOFTWARE_ENCODING", "1"); // keep the host's GPU out of it
+        qputenv("FARSIDE_ENCODERS", "avc=sw,hevc=hw");
         const auto probe = EncoderSupport::probeUncached();
         QVERIFY(sameBackends(probe.encoders.avc, false, true));
         QVERIFY(sameBackends(probe.encoders.hevc, true, false));
-        qunsetenv("KRDP_ENCODERS");
-        qunsetenv("KRDP_FORCE_SOFTWARE_ENCODING");
+        qunsetenv("FARSIDE_ENCODERS");
+        qunsetenv("FARSIDE_FORCE_SOFTWARE_ENCODING");
     }
 
     // On this host, whatever it has: never more than KPipeWire can be asked for.

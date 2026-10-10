@@ -40,9 +40,13 @@ kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # modifier differs from the filter graph's is refused and latches the encoder, dma-buf descriptors
 # are duplicated into queued frames, a renegotiated stream size holds frames back and reports the
 # encoder failed only if the owner has not replaced the stream within 8 s, and the filter graph is
-# entered by one thread at a time (OPT-055, cc2417e + ada7779). Those libraries come in through
+# entered by one thread at a time (OPT-055, cc2417e + ada7779) + NVIDIA NVENC (OPT-062 N1/N2/N4,
+# 326e4d8 + bdd1e14 + 7c6f755): an NVIDIA inventory (PCI id, CUDA ordinal from the bus id, trial-opened
+# codecs, NVML capacity signals; unavailable on a driver mismatch), h264_nvenc for hosts without a
+# VA-API H.264 encoder, and a per-GPU back-off after an NVENC failure. av1_nvenc is written but off
+# unless KPIPEWIRE_ENABLE_AV1_NVENC=1. Those libraries come in through
 # libavcodec's own Depends (dpkg-shlibdeps: libavcodec62).
-kpw_ref=${KPIPEWIRE_REF:-ada7779}
+kpw_ref=${KPIPEWIRE_REF:-7c6f755}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 

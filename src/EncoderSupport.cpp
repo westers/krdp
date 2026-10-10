@@ -12,6 +12,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 
+#include <algorithm>
 #include <mutex>
 #include <optional>
 
@@ -66,35 +67,6 @@ bool trialOpen(AVBufferRef *device, const char *encoder)
         }
     }
     av_buffer_unref(&frames);
-    return ok;
-}
-
-/// KPipeWire's first NVENC slice accepts system-memory YUV420P and uploads to CUDA internally.
-/// A codec name in FFmpeg is not enough: the worker must be able to open its CUDA device.
-bool trialNvencHevc()
-{
-    const AVCodec *codec = avcodec_find_encoder_by_name("hevc_nvenc");
-    if (!codec) return false;
-    AVBufferRef *device = nullptr;
-    if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_CUDA, "0", nullptr, 0) < 0) return false;
-    AVCodecContext *context = avcodec_alloc_context3(codec);
-    if (!context) {
-        av_buffer_unref(&device);
-        return false;
-    }
-    context->width = context->height = 256;
-    context->time_base = {1, 60};
-    context->framerate = {60, 1};
-    context->pix_fmt = AV_PIX_FMT_YUV420P;
-    context->max_b_frames = 0;
-    context->hw_device_ctx = av_buffer_ref(device);
-    AVDictionary *options = nullptr;
-    av_dict_set(&options, "preset", "p3", 0);
-    av_dict_set(&options, "tune", "ull", 0);
-    const bool ok = avcodec_open2(context, codec, &options) >= 0;
-    av_dict_free(&options);
-    avcodec_free_context(&context);
-    av_buffer_unref(&device);
     return ok;
 }
 
@@ -195,6 +167,37 @@ bool kpipewireOffersHardware(const QList<typename Stream::Encoder> &suggested, F
 }
 
 template<typename Stream>
+constexpr bool kpipewireHasNvidia()
+{
+    return requires { Stream::nvidiaEncoders(); Stream::nvidiaUnavailableReason(); };
+}
+
+template<typename Stream>
+QList<NvidiaEncoder> nvidiaEncodersOf(QString *note)
+{
+    QList<NvidiaEncoder> result;
+    if constexpr (kpipewireHasNvidia<Stream>()) {
+        for (const auto &info : Stream::nvidiaEncoders()) {
+            NvidiaEncoder out;
+            out.pciId = info.pciId;
+            out.name = info.name;
+            out.cudaOrdinal = info.cudaOrdinal;
+            out.family = info.encoder == Stream::HEVCMain ? Family::Hevc : info.encoder == Stream::AV1Main ? Family::Av1 : Family::Avc;
+            out.usable = info.usable;
+            out.maxSize = info.maxSize;
+            out.failure = info.failure;
+            result.append(out);
+        }
+        if (result.isEmpty()) {
+            *note = Stream::nvidiaUnavailableReason();
+        }
+    } else {
+        *note = QStringLiteral("this KPipeWire has no NVIDIA probe");
+    }
+    return result;
+}
+
+template<typename Stream>
 constexpr bool kpipewireHasChroma444()
 {
     return requires { typename Stream::ChromaMode; };
@@ -281,11 +284,61 @@ bool applyOverride(Encoders &encoders, const QString &spec)
     return true;
 }
 
+namespace
+{
+bool nvidiaHas(const QList<NvidiaEncoder> &list, Family family)
+{
+    return std::any_of(list.begin(), list.end(), [family](const NvidiaEncoder &e) {
+        return e.family == family && e.usable;
+    });
+}
+}
+
+Probe assemble(const Inputs &in)
+{
+    Probe result;
+    result.nvidia = in.nvidia;
+    result.nvidiaNote = in.nvidiaNote;
+    const std::array<Family, 3> families{Family::Avc, Family::Hevc, Family::Av1};
+    for (std::size_t i = 0; i < families.size(); ++i) {
+        const Family family = families[i];
+        const bool vaapi = !in.forcedSoftware && (family == Family::Avc ? in.vaapi.avc : family == Family::Hevc ? in.vaapi.hevc : in.vaapi.av1);
+        // NVENC only supplies a codec VA-API cannot: the capture GPU stays the encoder where it can (Hal's AMD),
+        // and the NVIDIA GPU is not touched for it (device policy and load balancing are a later slice).
+        const bool nvenc = !in.forcedSoftware && !vaapi && nvidiaHas(in.nvidia, family);
+        Backends &b = result.encoders.of(family);
+        b.hardware = (vaapi || nvenc) && in.kpipewireHardware[i];
+        b.software = in.software[i];
+        b.liveBitrate = b.software && in.liveBitrate[i];
+        if (b.hardware) {
+            (family == Family::Avc ? result.avcHardwareVia : family == Family::Hevc ? result.hevcHardwareVia : result.av1HardwareVia) = vaapi ? QStringLiteral("vaapi") : QStringLiteral("nvenc");
+        }
+    }
+    result.avc444Hardware = in.chroma444 && result.encoders.avc.hardware && result.avcHardwareVia == QLatin1String("vaapi");
+    result.renderNode = in.forcedSoftware ? QString() : in.vaapi.node;
+    if (result.renderNode.isEmpty() && !in.forcedSoftware) {
+        for (const auto &e : in.nvidia) {
+            if (e.usable && result.hardwareVia(e.family) == QLatin1String("nvenc")) {
+                result.renderNode = QStringLiteral("NVENC %1 %2").arg(e.name, e.pciId);
+                break;
+            }
+        }
+    }
+    if (!in.overrideSpec.isEmpty()) {
+        if (applyOverride(result.encoders, in.overrideSpec)) {
+            result.avc444Hardware = result.avc444Hardware && result.encoders.avc.hardware;
+            qCInfo(KRDP) << "FARSIDE_ENCODERS override:" << in.overrideSpec;
+        } else {
+            qCWarning(KRDP) << "Ignoring an invalid FARSIDE_ENCODERS value:" << in.overrideSpec;
+        }
+    }
+    return result;
+}
+
 Probe probeUncached()
 {
     QElapsedTimer timer;
     timer.start();
-    Probe result;
     // AUD-TESTFIX: probe with the VAAPI driver the encoders will use. Without
     // LIBVA_DRIVER_NAME on a mixed AMD + NVIDIA host (Hal), libva loads the decode-only
     // nvidia driver for the NVIDIA node, which answers vaGetConfigAttributes(EncSlice)
@@ -296,38 +349,33 @@ Probe probeUncached()
     // Also when software is forced: KPipeWire's VaapiUtils is a per-process singleton that
     // this probe creates (suggestedEncoders()), and later encoders and probes reuse it.
     selectVaapiDriver();
-    const bool forced = softwareForced();
-    Hardware hw = forced ? Hardware{} : probeHardware();
-    // Prefer VA-API when it already handles HEVC (Hal's AMD capture GPU). Sol's NVIDIA
-    // worker has no VA-API encoder and gains HEVC through NVENC if CUDA really opens.
-    if (!forced && !hw.hevc && trialNvencHevc()) {
-        hw.hevc = true;
-        if (hw.node.isEmpty()) hw.node = QStringLiteral("CUDA device 0 (HEVC NVENC)");
+    Inputs in;
+    in.forcedSoftware = softwareForced();
+    const Hardware hw = in.forcedSoftware ? Hardware{} : probeHardware();
+    in.vaapi = {hw.avc, hw.hevc, hw.av1, hw.node};
+    // NVENC supplies the codecs VA-API lacks (Sol's NVIDIA worker has no VA-API encoder at all). When VA-API
+    // covers every codec (Hal) the NVIDIA stack is not touched.
+    if (!in.forcedSoftware && !(hw.avc && hw.hevc && hw.av1)) {
+        in.nvidia = nvidiaEncodersOf<PipeWireEncodedStream>(&in.nvidiaNote);
     }
 
     PipeWireEncodedStream stream;
     const auto suggested = stream.suggestedEncoders();
     const bool avcOffered = suggested.contains(PipeWireEncodedStream::H264Main) || suggested.contains(PipeWireEncodedStream::H264Baseline);
-    for (const Family family : CodecPolicy::BestCompressionFirst) {
-        const bool trialOpened = family == Family::Avc ? hw.avc : family == Family::Hevc ? hw.hevc : hw.av1;
-        Backends &b = result.encoders.of(family);
-        b.hardware = trialOpened && kpipewireOffersHardware<PipeWireEncodedStream>(suggested, family);
-        b.software = (family == Family::Avc ? avcOffered : true) && softwareBackend<PipeWireEncodedStream>(family);
-        b.liveBitrate = b.software && liveBitrateChange<PipeWireEncodedStream>(family);
+    const std::array<Family, 3> families{Family::Avc, Family::Hevc, Family::Av1};
+    for (std::size_t i = 0; i < families.size(); ++i) {
+        const Family family = families[i];
+        in.kpipewireHardware[i] = kpipewireOffersHardware<PipeWireEncodedStream>(suggested, family);
+        in.software[i] = (family == Family::Avc ? avcOffered : true) && softwareBackend<PipeWireEncodedStream>(family);
+        in.liveBitrate[i] = liveBitrateChange<PipeWireEncodedStream>(family);
     }
-    result.avc444Hardware = kpipewireHasChroma444<PipeWireEncodedStream>() && result.encoders.avc.hardware;
-    result.renderNode = hw.node;
-
-    const QString spec = qEnvironmentVariable("FARSIDE_ENCODERS");
-    if (!spec.isEmpty()) {
-        if (applyOverride(result.encoders, spec)) {
-            result.avc444Hardware = result.avc444Hardware && result.encoders.avc.hardware;
-            qCInfo(KRDP) << "FARSIDE_ENCODERS override:" << spec;
-        } else {
-            qCWarning(KRDP) << "Ignoring an invalid FARSIDE_ENCODERS value:" << spec;
-        }
-    }
+    in.chroma444 = kpipewireHasChroma444<PipeWireEncodedStream>();
+    in.overrideSpec = qEnvironmentVariable("FARSIDE_ENCODERS");
+    Probe result = assemble(in);
     qCInfo(KRDP).noquote() << QStringLiteral("Video encoders: %1 (probed in %2 ms)").arg(describe(result)).arg(timer.elapsed());
+    if (!result.nvidiaNote.isEmpty() && result.nvidia.isEmpty()) {
+        qCInfo(KRDP).noquote() << QStringLiteral("NVIDIA encoders unavailable: %1").arg(result.nvidiaNote);
+    }
     return result;
 }
 
@@ -363,14 +411,15 @@ LayoutControl::VideoCapabilities videoCapabilities(const Probe &probe, CodecPoli
 
 QString describe(const Probe &probe)
 {
-    const auto one = [](const char *name, const Backends &b) {
-        const QString backends = b.hardware && b.software ? QStringLiteral("hw+sw")
-            : b.hardware                                  ? QStringLiteral("hw")
+    const auto one = [](const char *name, const Backends &b, const QString &via) {
+        const QString hw = via == QLatin1String("nvenc") ? QStringLiteral("hw(nvenc)") : QStringLiteral("hw");
+        const QString backends = b.hardware && b.software ? hw + QStringLiteral("+sw")
+            : b.hardware                                  ? hw
             : b.software                                  ? QStringLiteral("sw")
                                                           : QStringLiteral("none");
         return QStringLiteral("%1 %2").arg(QLatin1String(name), backends);
     };
-    QString text = QStringList{one("avc", probe.encoders.avc), one("hevc", probe.encoders.hevc), one("av1", probe.encoders.av1)}.join(QStringLiteral(", "));
+    QString text = QStringList{one("avc", probe.encoders.avc, probe.avcHardwareVia), one("hevc", probe.encoders.hevc, probe.hevcHardwareVia), one("av1", probe.encoders.av1, probe.av1HardwareVia)}.join(QStringLiteral(", "));
     text += probe.avc444Hardware ? QStringLiteral(", avc444 hw") : QStringLiteral(", avc444 none");
     if (!probe.renderNode.isEmpty()) {
         text += QStringLiteral(" on %1").arg(probe.renderNode);
