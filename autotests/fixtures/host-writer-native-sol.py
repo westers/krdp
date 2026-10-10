@@ -126,7 +126,7 @@ try:
               'PreferAudioQuality': 'true', 'SoftwareEncoding': 'never', 'Av1Tiles': '8', 'VaapiDriver': 'off'}
     saved = save(original, values)
     assert saved['saved'] and saved['restartRequired'] and not saved['newDesktopRequired']
-    assert saved['snapshot']['values'] == values and len(values) == 12
+    assert saved['snapshot']['values'] == values and len(values) == 15
     assert b'CUSTOM_EXECUTION="fixture-secret-only"\n' in console.read_bytes()
     assert console.stat().st_uid == 0 and stat.S_IMODE(console.stat().st_mode) == 0o600
     assert digest(virtual) == virtual_before and digest(session) == session_before
@@ -317,7 +317,7 @@ try:
     current = read('virtual')
     values = {**current['defaults'], 'Port': '5678', 'Quality': '92', 'StandardClientMedia': 'false'}
     saved = save(current, values)['snapshot']
-    assert saved['values'] == values and len(values) == 11
+    assert saved['values'] == values and len(values) == 14
     assert saved['cameraLoopback']['supported'] is False
     before = digest(virtual)
     save(saved, dict(values, CameraLoopbackDevice='/dev/video0'), success=False)

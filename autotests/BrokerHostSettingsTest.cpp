@@ -10,8 +10,9 @@ class BrokerHostSettingsTest : public QObject {
 private Q_SLOTS:
     void completeFieldsAndScopedDefaults()
     {
-        QCOMPARE(keys(Scope::Console).size(), 12);
-        QCOMPARE(keys(Scope::Virtual).size(), 11);
+        // OPT-062 S3 added SoftwareAvc, SoftwareHevc and SoftwareAv1 to Console and Virtual (a deliberate update of this pin).
+        QCOMPARE(keys(Scope::Console).size(), 15);
+        QCOMPARE(keys(Scope::Virtual).size(), 14);
         QCOMPARE(keys(Scope::VirtualSession).size(), 2);
         for (const auto scope : {Scope::Console, Scope::Virtual, Scope::VirtualSession}) {
             const auto values = defaults(scope);
@@ -97,6 +98,8 @@ private Q_SLOTS:
                 {{u"Certificate"_s, u"relative.pem"_s}}, {{u"CertificateKey"_s, u"/root/../etc/file"_s}},
                 {{u"Address"_s, u"example.com"_s}}, {{u"Address"_s, u" ::1"_s}},
                 {{u"SoftwareEncoding"_s, u"invented"_s}}, {{u"Av1Tiles"_s, u"3"_s}},
+                {{u"SoftwareHevc"_s, u"last-resort"_s}}, {{u"SoftwareAvc"_s, u"never"_s}}, {{u"SoftwareAv1"_s, u"sometimes"_s}},
+                {{u"SoftwareAv1"_s, u"never\nINJECTION=1"_s}},
                 {{u"CameraLoopbackDevice"_s, u"/etc/file"_s}}, {{u"Certificate"_s, u"/etc/farside/console.key"_s}},
                 {{u"Certificate"_s, QString(u"/"_s + QString(MaximumValue, u'x'))}}, {{u"AdaptiveQuality"_s, u"1"_s}}}) {
             const auto result = edit(Scope::Console, original, desired);
@@ -105,6 +108,41 @@ private Q_SLOTS:
             QVERIFY(!result.error.contains(u"fixture-secret"_s));
             QCOMPARE(original, QByteArray("# keep\nFARSIDE_CONSOLE_PORT=4321\n"));
         }
+    }
+    // OPT-062 S3: the host's software ceiling per codec.
+    void softwareCeilingsPerCodec()
+    {
+        for (const auto scope : {Scope::Console, Scope::Virtual}) {
+            for (const auto &key : {u"SoftwareAvc"_s, u"SoftwareHevc"_s, u"SoftwareAv1"_s}) {
+                QVERIFY(keys(scope).contains(key));
+                QCOMPARE(defaults(scope)[key].toString(), u"auto"_s);
+                QCOMPARE(normalize(scope, key, u""_s), std::optional<QString>(u"auto"_s));
+                QCOMPARE(normalize(scope, key, u" AUTO "_s), std::optional<QString>(u"auto"_s));
+                QCOMPARE(normalize(scope, key, u"Allowed"_s), std::optional<QString>(u"allowed"_s));
+            }
+            QCOMPARE(normalize(scope, u"SoftwareAvc"_s, u"last-resort"_s), std::optional<QString>(u"last-resort"_s));
+            QCOMPARE(normalize(scope, u"SoftwareHevc"_s, u"NEVER"_s), std::optional<QString>(u"never"_s));
+            QCOMPARE(normalize(scope, u"SoftwareAv1"_s, u"never"_s), std::optional<QString>(u"never"_s));
+            // H.264 can only be a last resort, never "never"; HEVC and AV1 have no last resort.
+            QVERIFY(!normalize(scope, u"SoftwareAvc"_s, u"never"_s));
+            QVERIFY(!normalize(scope, u"SoftwareHevc"_s, u"last-resort"_s));
+            QVERIFY(!normalize(scope, u"SoftwareAv1"_s, u"prefer"_s));
+        }
+        QVERIFY(!keys(Scope::VirtualSession).contains(u"SoftwareAv1"_s)); // a host setting, not a desktop's
+        QCOMPARE(environmentName(Scope::Console, u"SoftwareHevc"_s), u"FARSIDE_CONSOLE_SOFTWARE_HEVC"_s);
+        QCOMPARE(environmentName(Scope::Virtual, u"SoftwareAv1"_s), u"FARSIDE_VIRTUAL_SOFTWARE_AV1"_s);
+        QCOMPARE(environmentName(Scope::Virtual, u"SoftwareAvc"_s), u"FARSIDE_VIRTUAL_SOFTWARE_AVC"_s);
+        // Edit and parse round trip, other lines untouched; an old file (no such lines) means auto.
+        const auto edited = edit(Scope::Console, "# keep\nFARSIDE_CONSOLE_PORT=4321\n", {{u"SoftwareAv1"_s, u"never"_s}, {u"SoftwareAvc"_s, u"last-resort"_s}});
+        QVERIFY2(edited.error.isEmpty(), qPrintable(edited.error));
+        QVERIFY(edited.contents.contains("FARSIDE_CONSOLE_SOFTWARE_AV1=\"never\"") || edited.contents.contains("FARSIDE_CONSOLE_SOFTWARE_AV1=never"));
+        const auto snapshot = parse(Scope::Console, edited.contents);
+        QCOMPARE(snapshot.effective[u"SoftwareAv1"_s].toString(), u"never"_s);
+        QCOMPARE(snapshot.effective[u"SoftwareAvc"_s].toString(), u"last-resort"_s);
+        QCOMPARE(snapshot.effective[u"SoftwareHevc"_s].toString(), u"auto"_s);
+        QVERIFY(edited.contents.startsWith("# keep\n"));
+        QVERIFY(!parse(Scope::Console, "FARSIDE_CONSOLE_SOFTWARE_HEVC=last-resort\n").error.isEmpty());
+        QCOMPARE(parse(Scope::Console, "# nothing here\n").effective[u"SoftwareHevc"_s].toString(), u"auto"_s);
     }
     void typedPoliciesAndPciGrants()
     {

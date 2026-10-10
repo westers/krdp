@@ -43,6 +43,9 @@ struct Spec {
     QVariantMap optionText;
     // Choice values offered only while the page's Advanced options are open (or while one of them is the current value).
     QStringList advancedChoices;
+    // The row limits the software encoder of this codec ("avc" | "hevc" | "av1"); the page adds a note when the host's
+    // encoder probe (the snapshot's videoEncoders) found no software encoder for it. Host settings only.
+    QString softwareCodec;
 };
 
 inline QString controlFor(const Spec &spec, const QVariantList &choices)
@@ -78,7 +81,8 @@ inline QVariantMap makeFieldDefinition(const QString &key, const QString &group,
                        {QStringLiteral("unavailable"), spec.unavailable},
                        {QStringLiteral("inheritText"), spec.inheritText},
                        {QStringLiteral("modes"), spec.modes},
-                       {QStringLiteral("advancedChoices"), spec.advancedChoices}};
+                       {QStringLiteral("advancedChoices"), spec.advancedChoices},
+                       {QStringLiteral("softwareCodec"), spec.softwareCodec}};
 }
 
 // Empty when the definition is complete and consistent, otherwise the first problem found.

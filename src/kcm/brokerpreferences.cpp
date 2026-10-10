@@ -172,7 +172,7 @@ QVariantList BrokerPreferences::definitions() const
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"avc420"_s, i18nc("@item:inlistbox", "AVC420")), choice(u"avc444"_s, i18nc("@item:inlistbox", "AVC444 full color"))},
         {.section = u"video"_s, .formLabel = i18nc("@label", "Color detail"),
          .optionText = {{u"avc420"_s, i18nc("@item:inlistbox", "Standard color")}, {u"avc444"_s, i18nc("@item:inlistbox", "Full color")}}});
-    add(u"SoftwareEncoding"_s, video, i18nc("@label", "Software encoding"), i18nc("@info", "Automatic weighs the connection speed against the processor load. “Prefer hardware” falls back to software only as a last resort."),
+    add(u"SoftwareEncoding"_s, video, i18nc("@label", "Software encoding"), i18nc("@info", "Automatic weighs the connection speed against the processor load. “Prefer hardware” falls back to software only as a last resort. Limited by what the host allows: this can narrow the host's software encoding, never widen it."),
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"never"_s, i18nc("@item:inlistbox", "Prefer hardware")), choice(u"prefer"_s, i18nc("@item:inlistbox", "Allow the best codec in software"))},
         {.section = u"video"_s, .advanced = true, .formLabel = i18nc("@label", "Encoding policy")});
     add(u"Av1Tiles"_s, video, i18nc("@label", "AV1 tiles"), i18nc("@info", "Automatic uses what the client can decode. More tiles can help clients that decode in software."),

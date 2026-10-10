@@ -44,7 +44,7 @@ defaults = {'RenderPci': '', 'VaapiDriver': 'auto'} if scope == 'session' else {
     'Certificate': '/etc/farside/console.crt' if scope == 'console' else '/etc/farside/virtual-host.crt',
     'CertificateKey': '/etc/farside/console.key' if scope == 'console' else '/etc/farside/virtual-host.key',
     'Quality': '80', 'AdaptiveQuality': 'false', 'PreferAudioQuality': 'false',
-    'StandardClientMedia': 'true', 'CameraLoopbackDevice': 'none', 'SoftwareEncoding': 'auto', 'Av1Tiles': 'auto'}
+    'StandardClientMedia': 'true', 'CameraLoopbackDevice': 'none', 'SoftwareEncoding': 'auto', 'SoftwareAvc': 'auto', 'SoftwareHevc': 'auto', 'SoftwareAv1': 'auto', 'Av1Tiles': 'auto'}
 if scope == 'console':
     defaults['VaapiDriver'] = 'auto'
 state_file = base / (scope + '.json')
@@ -126,6 +126,13 @@ else:
     snapshot['tls'] = {'state': 'valid', 'administratorManaged': False, 'fingerprint': ':'.join(['AA'] * 32),
                        'algorithm': 'ECDSA P-256', 'notBefore': '2026-09-01T00:00:00Z', 'notAfter': '2030-09-01T00:00:00Z'}
     snapshot['cameraLoopback'] = {'supported': scope == 'console', 'state': 'disabled'}
+if scope != 'session' and mode in ('encoders', 'encoders-bad'):
+    snapshot['videoEncoders'] = [
+        {'codec': 'avc', 'backend': 'libx264', 'hw': False},
+        {'codec': 'hevc', 'backend': 'nvenc', 'hw': True, 'device': '0000:09:00.0', 'name': 'NVIDIA GeForce RTX 2070'},
+        {'codec': 'hevc', 'backend': 'libx265', 'hw': False}]
+    if mode == 'encoders-bad':
+        snapshot['videoEncoders'].append({'codec': 'vp9', 'backend': 'x', 'hw': False})
 if mode == 'wrong-scope':
     snapshot['scope'] = 'session' if scope != 'session' else 'console'
 if mode == 'private-field':

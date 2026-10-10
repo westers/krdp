@@ -6,6 +6,7 @@
 #include "VirtualHostTls.h"
 #include "HostCertificate.h"
 #include "VideoCodecHost.h"
+#include "BrokerHostPublicSnapshot.h"
 #include <QCoreApplication>
 #include <QTimer>
 #include <chrono>
@@ -44,6 +45,9 @@ int main(int argc, char **argv)
     parser.addOption({QStringLiteral("standard-client-media"), QStringLiteral("Enable standard RDP audio and camera consent: true or false."), QStringLiteral("enabled"), QStringLiteral("true")});
     parser.addOption({QStringLiteral("camera-loopback-device"), QStringLiteral("V4L2 loopback path in the desktop worker, or none."), QStringLiteral("path"), QStringLiteral("none")});
     parser.addOption({QStringLiteral("software-encoding"), QStringLiteral("SoftwareEncoding for private codecs: auto, never or prefer."), QStringLiteral("mode"), QStringLiteral("auto")});
+    parser.addOption({QStringLiteral("software-avc"), QStringLiteral("Software H.264 encoding: auto, allowed or last-resort (OPT-062)."), QStringLiteral("ceiling"), QStringLiteral("auto")});
+    parser.addOption({QStringLiteral("software-hevc"), QStringLiteral("Software HEVC encoding: auto, allowed or never (OPT-062)."), QStringLiteral("ceiling"), QStringLiteral("auto")});
+    parser.addOption({QStringLiteral("software-av1"), QStringLiteral("Software AV1 encoding: auto, allowed or never (OPT-062)."), QStringLiteral("ceiling"), QStringLiteral("auto")});
     parser.addOption({QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto")});
     parser.process(application);
     if (getuid() || geteuid()) { qCritical("Virtual host requires an explicit root service invocation"); return 1; }
@@ -63,8 +67,11 @@ int main(int argc, char **argv)
         return KRdp::VirtualSessionLaunchPlan::absoluteCleanPath(path) && QFileInfo(path).isFile() && QFileInfo(path).isReadable();
     };
     const auto softwareEncoding = KRdp::parseHostSoftwareEncoding(parser.value(QStringLiteral("software-encoding")));
+    const auto ceilingAvc = KRdp::parseHostCeiling(parser.value(QStringLiteral("software-avc")), KRdp::CodecPolicy::Family::Avc);
+    const auto ceilingHevc = KRdp::parseHostCeiling(parser.value(QStringLiteral("software-hevc")), KRdp::CodecPolicy::Family::Hevc);
+    const auto ceilingAv1 = KRdp::parseHostCeiling(parser.value(QStringLiteral("software-av1")), KRdp::CodecPolicy::Family::Av1);
     if (!parser.positionalArguments().isEmpty() || !validPort || !port || !validQuality || quality < 0 || quality > 100
-        || (adaptiveValue != QLatin1String("true") && adaptiveValue != QLatin1String("false")) || address.isNull() || !softwareEncoding
+        || (adaptiveValue != QLatin1String("true") && adaptiveValue != QLatin1String("false")) || address.isNull() || !softwareEncoding || !ceilingAvc || !ceilingHevc || !ceilingAv1
         || (audioPriorityValue != QLatin1String("true") && audioPriorityValue != QLatin1String("false"))
         || (standardMediaValue != QLatin1String("true") && standardMediaValue != QLatin1String("false"))
         || (cameraLoopback != QLatin1String("none") && !cameraLoopback.startsWith(QLatin1String("/dev/")))
@@ -111,11 +118,22 @@ int main(int argc, char **argv)
     // AUD-FIX7: what `capabilities.video` offers and each connection's codec policy starts from;
     // a desktop's worker probes its own encoders and replaces this estimate once it reports.
     KRdp::EncoderSupport::applyProcessOverrides();
-    const KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding,
-                                         KRdp::parseHostAv1Tiles(parser.value(QStringLiteral("av1-tiles")), "farside-virtual-host")};
+    KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding,
+                                   KRdp::parseHostAv1Tiles(parser.value(QStringLiteral("av1-tiles")), "farside-virtual-host")};
+    videoHost.ceiling = KRdp::resolveHostCeiling(*softwareEncoding, *ceilingAvc, *ceilingHevc, *ceilingAv1);
     qInfo().noquote() << "Virtual host video encoders:" << KRdp::EncoderSupport::describe(videoHost.probe) << "- SoftwareEncoding"
-                      << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode) << "- AV1 tiles" << KRdp::CodecPolicy::av1TilesName(videoHost.av1Tiles);
+                      << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode) << "- software ceilings avc"
+                      << KRdp::CodecPolicy::allowanceName(KRdp::CodecPolicy::Family::Avc, videoHost.ceiling->avc) << "hevc"
+                      << KRdp::CodecPolicy::allowanceName(KRdp::CodecPolicy::Family::Hevc, videoHost.ceiling->hevc) << "av1"
+                      << KRdp::CodecPolicy::allowanceName(KRdp::CodecPolicy::Family::Av1, videoHost.ceiling->av1) << "- AV1 tiles"
+                      << KRdp::CodecPolicy::av1TilesName(videoHost.av1Tiles);
     host.setVideoCodecHost(videoHost);
+    {
+        // OPT-062 S3: let the settings page see what this host can encode (best effort; the next start tries again).
+        QString problem;
+        if (!KRdp::BrokerHostPublicSnapshot::updateVideoEncoders(KRdp::BrokerHostPublicSnapshot::defaultDirectory(), KRdp::BrokerHostSettings::Scope::Virtual, KRdp::publicVideoEncoders(videoHost.probe), false, &problem))
+            qInfo().noquote() << "Host settings snapshot not updated with the encoders:" << problem;
+    }
     if (!host.recover(*journal, &error) || !host.enableIndependentCreates(*journal)) {
         qCritical().noquote() << "Virtual host recovery refused:" << error; return 1;
     }

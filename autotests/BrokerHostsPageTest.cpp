@@ -125,6 +125,49 @@ private Q_SLOTS:
         BrokerHostSettings missing(Scope::Console,u"/nonexistent/helper"_s,unusable,3000);
         QVERIFY(!missing.refresh()); QVERIFY(!missing.loaded()); QVERIFY(missing.error().contains(u"snapshot"));
     }
+    // OPT-062 S3: the three software-encoding rows sit in Picture and Sound (visible without Advanced), and a codec the
+    // host's published encoder probe has no software encoder for says so beside its row.
+    void softwareRowsNoteACodecTheHostCannotEncodeInSoftware() {
+        QTemporaryDir snapshots;
+        qputenv("FARSIDE_PUBLIC_SETTINGS_DIR", snapshots.path().toUtf8());
+        const auto restore = qScopeGuard([] { qunsetenv("FARSIDE_PUBLIC_SETTINGS_DIR"); });
+        QVERIFY(HostSnapshotFixture::publishAll(snapshots.path(), "FARSIDE_CONSOLE_SOFTWARE_AV1=never\n"));
+        const QStringList unusable{u"/nonexistent"_s};
+        for (int withProbe = 0; withProbe < 2; ++withProbe) {
+            if (withProbe) {
+                // The broker records its probe: H.264 and HEVC have software encoders (HEVC also NVENC), AV1 has none.
+                const QJsonArray probe{QJsonObject{{u"codec"_s, u"avc"_s}, {u"backend"_s, u"libx264"_s}, {u"hw"_s, false}},
+                                       QJsonObject{{u"codec"_s, u"hevc"_s}, {u"backend"_s, u"nvenc"_s}, {u"hw"_s, true}, {u"device"_s, u"0000:09:00.0"_s}, {u"name"_s, u"NVIDIA GeForce RTX 2070"_s}},
+                                       QJsonObject{{u"codec"_s, u"hevc"_s}, {u"backend"_s, u"libx265"_s}, {u"hw"_s, false}}};
+                for (auto scope : {Scope::Console, Scope::Virtual})
+                    QVERIFY(KRdp::BrokerHostPublicSnapshot::updateVideoEncoders(snapshots.path(), scope, probe, true));
+            }
+            BrokerHostSettings console(Scope::Console,u"/nonexistent/helper"_s,unusable,3000),
+                virtualHost(Scope::Virtual,u"/nonexistent/helper"_s,unusable,3000),
+                session(Scope::VirtualSession,u"/nonexistent/helper"_s,unusable,3000);
+            for (auto *model : {&console,&virtualHost,&session}) { QVERIFY(model->refresh()); QVERIFY2(model->loaded(), qPrintable(model->error())); }
+            QCOMPARE(console.values()[u"SoftwareAv1"_s].toString(), u"never"_s);
+            QQmlEngine engine; localize(engine); QStringList warnings;
+            connect(&engine,&QQmlEngine::warnings,this,[&](const auto &errors){for(const auto &error:errors)warnings.append(error.toString());});
+            QQmlComponent component(&engine,pageUrl());
+            QScopedPointer<QObject> object(component.createWithInitialProperties({{u"fixedScope"_s,0},{u"showAdvanced"_s,false},
+                {u"consoleSettings"_s,QVariant::fromValue(&console)},{u"virtualSettings"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)}}));
+            QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
+            QQuickWindow window; window.resize(900,850); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
+            for (const auto &key : {u"SoftwareAvc"_s,u"SoftwareHevc"_s,u"SoftwareAv1"_s}) {
+                auto *row=qobject_cast<QQuickItem *>(find(page,u"host_field_"_s+key)); QVERIFY2(row,qPrintable(key));
+                QTRY_VERIFY2(row->isVisible(),qPrintable(key + u" is visible with Advanced closed"_s)); // Picture and Sound, not Advanced
+                auto *note=qobject_cast<QQuickItem *>(find(page,u"host_note_"_s+key));
+                QVERIFY2(note,qPrintable(key));
+                const bool noEncoder = withProbe && key == u"SoftwareAv1";
+                QTRY_COMPARE_WITH_TIMEOUT(note->isVisible(), noEncoder, 2000);
+                if (noEncoder) QVERIFY(note->property("text").toString().contains(u"No software encoder"_s));
+            }
+            const auto screenshots=qEnvironmentVariable("FARSIDE_HOST_SCREENSHOTS");
+            if(!screenshots.isEmpty()) { QTest::qWait(300); QVERIFY(window.grabWindow().save(screenshots+u"/software-rows-"_s+(withProbe ? u"probe"_s : u"noprobe"_s)+u".png"_s)); }
+            QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s))); page->setParentItem(nullptr);
+        }
+    }
     void portShowsPlainDigitsUnderAGroupingLocale() {
         const auto previous = QLocale();
         QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
@@ -271,7 +314,7 @@ private Q_SLOTS:
             session(Scope::VirtualSession,u"/usr/bin/python3"_s,arguments(dir),3000);
         const QVariantMap desired{{u"Address"_s,u"127.0.0.1"_s},{u"Port"_s,u"3401"_s},{u"Quality"_s,u"93"_s},
             {u"AdaptiveQuality"_s,u"true"_s},{u"PreferAudioQuality"_s,u"true"_s},{u"StandardClientMedia"_s,u"false"_s},
-            {u"CameraLoopbackDevice"_s,u"/dev/video10"_s},{u"SoftwareEncoding"_s,u"prefer"_s},{u"Av1Tiles"_s,u"8"_s},
+            {u"CameraLoopbackDevice"_s,u"/dev/video10"_s},{u"SoftwareEncoding"_s,u"prefer"_s},{u"SoftwareAvc"_s,u"last-resort"_s},{u"SoftwareHevc"_s,u"never"_s},{u"SoftwareAv1"_s,u"allowed"_s},{u"Av1Tiles"_s,u"8"_s},
             {u"VaapiDriver"_s,u"off"_s},{u"RenderPci"_s,u"0000:01:00.0"_s}};
         int scope=0;
         for (auto *model : {&console,&virtualHost,&session}) {

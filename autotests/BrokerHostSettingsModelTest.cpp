@@ -58,7 +58,59 @@ private Q_SLOTS:
                 QCOMPARE(!definition[u"unavailable"_s].toString().isEmpty(), model == &virtualHost && definition[u"key"_s].toString() == u"CameraLoopbackDevice");
             }
         }
-        QCOMPARE(total, 25);
+        QCOMPARE(total, 31); // OPT-062 S3: three software ceilings in each of Console and Virtual (was 25)
+    }
+    // OPT-062 S3: three software-ceiling rows on the Console and Virtual pages (Picture and Sound, not Advanced), a published
+    // encoder probe, and a note source for codecs the host cannot encode in software.
+    void softwareCeilingRowsAndThePublishedEncoderProbe() {
+        QTemporaryDir directory;
+        for (const auto scope : {Scope::Console, Scope::Virtual}) {
+            BrokerHostSettings host(scope, u"/usr/bin/python3"_s, arguments(directory), 3000);
+            QVERIFY(host.reload()); QTRY_VERIFY(!host.busy()); QVERIFY2(host.loaded(), qPrintable(host.error()));
+            QVERIFY(!host.metadata().contains(u"videoEncoders"_s)); // not published yet
+            QMap<QString, QVariantMap> rows;
+            for (const auto &row : host.definitions()) rows.insert(row.toMap()[u"key"_s].toString(), row.toMap());
+            const struct { const char *key; const char *codec; const char *restricted; } expected[]{
+                {"SoftwareAvc", "avc", "last-resort"}, {"SoftwareHevc", "hevc", "never"}, {"SoftwareAv1", "av1", "never"}};
+            for (const auto &want : expected) {
+                const auto row = rows.value(QString::fromLatin1(want.key));
+                QVERIFY2(!row.isEmpty(), want.key);
+                QCOMPARE(row[u"section"_s].toString(), u"picture"_s);
+                QVERIFY(!row[u"advanced"_s].toBool());
+                QCOMPARE(row[u"control"_s].toString(), u"choice"_s);
+                QCOMPARE(row[u"softwareCodec"_s].toString(), QString::fromLatin1(want.codec));
+                QVERIFY(row[u"unavailable"_s].toString().isEmpty());
+                QStringList values;
+                for (const auto &choice : row[u"choices"_s].toList()) values << choice.toMap()[u"value"_s].toString();
+                QCOMPARE(values, (QStringList{QString(), u"auto"_s, u"allowed"_s, QString::fromLatin1(want.restricted)})); // "Use default" first
+                QVERIFY(row[u"help"_s].toString().contains(u"Hardware encoders are always used"_s));
+                QVERIFY(host.setValue(row[u"key"_s].toString(), QString::fromLatin1(want.restricted)));
+                QVERIFY(host.modified()); host.discard();
+            }
+            // The old policy is relabelled and stays an advanced row: it only governs older Farside apps now.
+            QVERIFY(rows.value(u"SoftwareEncoding"_s)[u"advanced"_s].toBool());
+            QVERIFY(rows.value(u"SoftwareEncoding"_s)[u"label"_s].toString().contains(u"older Farside apps"_s));
+            // A word of the wrong codec is staged but can never be saved.
+            QVERIFY(host.setValue(u"SoftwareHevc"_s, u"last-resort"_s)); QVERIFY(!host.canSave()); host.discard();
+            QVERIFY(host.setValue(u"SoftwareAvc"_s, u"never"_s)); QVERIFY(!host.canSave()); host.discard();
+            QVERIFY(host.setValue(u"SoftwareAv1"_s, u"never"_s)); QVERIFY(host.canSave()); host.discard();
+
+            mode(directory, "encoders");
+            QVERIFY(host.reload()); QTRY_VERIFY(!host.busy()); QVERIFY2(host.loaded(), qPrintable(host.error()));
+            const auto encoders = host.metadata()[u"videoEncoders"_s].toList();
+            QCOMPARE(encoders.size(), 3);
+            QCOMPARE(encoders.at(1).toMap()[u"backend"_s].toString(), u"nvenc"_s);
+            QCOMPARE(encoders.at(1).toMap()[u"device"_s].toString(), u"0000:09:00.0"_s);
+
+            // A probe entry the page cannot trust makes the whole snapshot unusable, like any other bad field.
+            BrokerHostSettings bad(scope, u"/usr/bin/python3"_s, arguments(directory), 3000);
+            mode(directory, "encoders-bad");
+            QVERIFY(bad.reload()); QTRY_VERIFY(!bad.busy()); QVERIFY(!bad.loaded());
+            mode(directory, "ok");
+        }
+        BrokerHostSettings session(Scope::VirtualSession, u"/usr/bin/python3"_s, arguments(directory), 3000); // a desktop has no software ceilings
+        QVERIFY(session.reload()); QTRY_VERIFY(!session.busy()); QVERIFY(session.loaded());
+        for (const auto &row : session.definitions()) QVERIFY(row.toMap()[u"softwareCodec"_s].toString().isEmpty());
     }
     void allFieldsScopesDefaultsAndDiscard() {
         QTemporaryDir directory;
@@ -71,7 +123,7 @@ private Q_SLOTS:
         QVERIFY(session.reload()); QTRY_VERIFY(!session.busy()); QVERIFY(session.loaded());
         const QVariantMap values{{u"Address"_s, u"::1"_s}, {u"Port"_s, u"3401"_s}, {u"Quality"_s, u"99"_s},
             {u"AdaptiveQuality"_s, u"true"_s}, {u"PreferAudioQuality"_s, u"true"_s}, {u"StandardClientMedia"_s, u"false"_s},
-            {u"CameraLoopbackDevice"_s, u"/dev/video10"_s}, {u"SoftwareEncoding"_s, u"prefer"_s}, {u"Av1Tiles"_s, u"8"_s},
+            {u"CameraLoopbackDevice"_s, u"/dev/video10"_s}, {u"SoftwareEncoding"_s, u"prefer"_s}, {u"SoftwareAvc"_s, u"last-resort"_s}, {u"SoftwareHevc"_s, u"never"_s}, {u"SoftwareAv1"_s, u"allowed"_s}, {u"Av1Tiles"_s, u"8"_s},
             {u"Certificate"_s, u"/etc/farside/custom.crt"_s}, {u"CertificateKey"_s, u"/etc/farside/custom.key"_s},
             {u"VaapiDriver"_s, u"iHD"_s}, {u"RenderPci"_s, u"0000:01:00.0"_s}};
         int total = 0;
@@ -86,7 +138,7 @@ private Q_SLOTS:
             QTRY_VERIFY(!model->busy()); QVERIFY2(model->error().isEmpty(), qPrintable(model->error()));
             QVERIFY(!model->modified()); QVERIFY(model->applicationRequired());
         }
-        QCOMPARE(total, 25); QCOMPARE(console.values()[u"Port"_s].toString(), u"3401"_s);
+        QCOMPARE(total, 31); QCOMPARE(console.values()[u"Port"_s].toString(), u"3401"_s);
         QVERIFY(!virtualHost.setValue(u"CameraLoopbackDevice"_s, u"/dev/video1"_s));
         QVERIFY(!session.setValue(u"Port"_s, u"3389"_s)); QVERIFY(!session.chooseTls(u"import"_s));
         QVERIFY(console.setValue(u"Quality"_s, u"101"_s)); QVERIFY(console.modified()); QVERIFY(!console.canSave()); QVERIFY(!console.save());
