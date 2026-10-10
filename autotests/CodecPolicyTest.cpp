@@ -1983,6 +1983,24 @@ private Q_SLOTS:
         QVERIFY(settle.sampleAllowed(false));
     }
 
+    void sustainedLoadIgnoresOutliers()
+    {
+        LoadWindow w;
+        for (const double v : {0.5, 0.5, 1.4, 0.5, 0.5, 0.5}) w.add(v);
+        QCOMPARE(*w.p95(), 1.4);
+        QVERIFY(*w.sustained() <= CpuGuardLimit); // one outlier interval trips nothing
+        w.add(1.2);
+        QVERIFY(*w.sustained() <= CpuGuardLimit); // two do not either
+        w.add(1.1);
+        QCOMPARE(*w.sustained(), 1.1); // three intervals over: the guard acts
+        LoadWindow all;
+        for (int i = 0; i < 6; ++i) all.add(0.9);
+        QCOMPARE(*all.sustained(), 0.9);
+        LoadWindow few;
+        few.add(1.0);
+        QVERIFY(!few.sustained());
+    }
+
     void loadWindowP95()
     {
         LoadWindow w;

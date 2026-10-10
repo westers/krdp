@@ -1389,6 +1389,13 @@ void VideoStream::stepCodecPolicy(bool congested)
                                                           family,
                                                           threads,
                                                           d->surfaceCount.load());
+        qCDebug(KRDP).noquote() << QStringLiteral("CPU guard sample: %1 ms CPU, %2 frames in %3 s at a %4 fps cap, %5 surface(s): %6")
+                                       .arg(double(cpuNs - d->cpuNsAtLastSample) / 1e6, 0, 'f', 0)
+                                       .arg(frames - d->framesAtLastSample)
+                                       .arg(seconds, 0, 'f', 2)
+                                       .arg(d->requestedFrameRate.load())
+                                       .arg(d->surfaceCount.load())
+                                       .arg(sample ? QString::number(*sample, 'f', 2) : (sampleAllowed ? QStringLiteral("too few frames") : QStringLiteral("skipped (frame rate settling)")));
         if (sample) {
             d->encodeLoad.add(*sample);
         }
@@ -1431,7 +1438,7 @@ void VideoStream::stepCodecPolicy(bool congested)
         in.linkIdle = d->linkVerdict.idle;
     }
     if (!d->codecPolicy.current->hardware) {
-        in.encodeLoadP95 = d->encodeLoad.p95();
+        in.encodeLoadP95 = d->encodeLoad.sustained(); // OPT-063: three intervals over, not one
     }
     const bool wasSlow = d->codecPolicy.slowLink;
     const auto decision = steering ? CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now()) : CodecPolicy::stepLink(d->codecPolicy, in, clk::steady_clock::now());
@@ -1584,7 +1591,7 @@ void VideoStream::judgeLink(bool congested)
     d->linkVerdict = LinkEvidence::judge(d->linkEvidence, in);
 
     const auto &current = d->codecPolicy.current;
-    const auto p95 = d->codecPolicyActive && current && !current->hardware ? d->encodeLoad.p95() : std::nullopt;
+    const auto p95 = d->codecPolicyActive && current && !current->hardware ? d->encodeLoad.sustained() : std::nullopt;
     const bool encoderOverBudget = p95 && *p95 > CodecPolicy::CpuGuardLimit;
     d->limit = LinkEvidence::classify(d->codecPolicy.slowLink, d->linkVerdict, encoderOverBudget);
 

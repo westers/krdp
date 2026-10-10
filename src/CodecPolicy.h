@@ -1501,6 +1501,20 @@ public:
         return sorted.at(std::clamp<qsizetype>(rank - 1, 0, sorted.size() - 1));
     }
 
+    /**
+     * OPT-063: the load the CPU guard acts on: the SustainedSamples-th highest sample, so that one or two
+     * outlier intervals (a throttle episode, a stall, a keyframe burst) cannot trip it, while a load that
+     * really is over the limit (every interval of it) is the same as p95(). nullopt like p95().
+     */
+    static constexpr int SustainedSamples = 3;
+    std::optional<double> sustained() const
+    {
+        if (m_samples.size() < MinimumSamples) return std::nullopt;
+        QList<double> sorted = m_samples;
+        std::sort(sorted.begin(), sorted.end(), std::greater<>());
+        return sorted.at(std::min<qsizetype>(SustainedSamples, sorted.size()) - 1);
+    }
+
 private:
     QList<double> m_samples;
     int m_skip = 0;
