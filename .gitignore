@@ -12,3 +12,4 @@ compile_commands.json
 monitor-logs/
 .deps/
 .superpowers/
+/.moved-aside/
