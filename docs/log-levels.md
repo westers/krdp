@@ -54,7 +54,7 @@ about real problems.
 
 ## Client quality lines (OPT-066)
 
-One Info line per real state change, none per frame. Grep the journal of the console worker/host service (Sol: `journalctl -u krdp-console-host -u krdp-console-worker@*` or `-t krdp-console-worker`):
+One Info line per real state change, none per frame. `Client quality applied` and the `Console client` lines come from the broker (`krdp-console-host`); `Quality decision` comes from the encoder, which runs in the console worker (its lines reach the journal through the host's unit; grep the whole journal, e.g. `journalctl --since -10min | grep -E 'Quality decision|Client quality applied|quality host default'`):
 
 | Pattern | Meaning |
 |---|---|
