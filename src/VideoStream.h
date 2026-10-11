@@ -10,6 +10,7 @@
 #include <optional>
 
 #include <QImage>
+#include <QJsonObject>
 #include <QObject>
 #include <QVector>
 #include <QPoint>
@@ -187,6 +188,11 @@ public:
      * setting changed. May be emitted from a thread other than the session's.
      */
     Q_SIGNAL void requestedQualityChanged(quint8 quality);
+    /**
+     * OPT-066: the settle timer applied a re-sent client quality. \a record is the unsolicited `codec` record pushed to the
+     * client (`qualityEffect` now applied, or ignoredBitrateMode), so a pending request turns into its result.
+     */
+    Q_SIGNAL void clientQualityApplied(const QJsonObject &record);
 
     /**
      * Set the standard AVC preference (main thread). Applies within the formats
@@ -403,7 +409,7 @@ private:
     // in close()); this slot therefore runs on VideoStream's own (main) thread.
     void fillQualityDetail(LayoutControl::CodecDetail &detail) const;
     ClientQualityStatus clientQualityStatusFor(const ClientQuality::Plan &plan) const;
-    void applyQualityPlan(bool hostChange);
+    void applyQualityPlan(bool hostChange, bool fromTimer = false);
     Q_SLOT void updateAdaptiveQuality();
     /// One CodecPolicy step (link, CPU guard, switch interval); from updateAdaptiveQuality().
     void stepCodecPolicy(bool congested);

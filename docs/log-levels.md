@@ -51,3 +51,17 @@ it, or pass the Qt rules in `QT_LOGGING_RULES` (semicolon separated, several all
 Always kept at Info or above: codec switches, CPU guard and codec-policy decisions, `Opened ...` summary,
 `Encoder running`, settle refreshes that act, filter-queue drops, renegotiation, encoder failures and all warnings
 about real problems.
+
+## Client quality lines (OPT-066)
+
+One Info line per real state change, none per frame. Grep the journal of the console worker/host service (Sol: `journalctl -u krdp-console-host -u krdp-console-worker@*` or `-t krdp-console-worker`):
+
+| Pattern | Meaning |
+|---|---|
+| `Console client N KRDPCTL: codec asked ... quality asked 65, pending 75` | the request and its first answer (`applied` for the first request of a connection, `pending` for a re-send, which settles 500 ms and is spaced 2 s) |
+| `... quality host default (75)` | a codec re-send without `quality`: the host default applies (it is not "keep the last one") |
+| `Client quality applied: requested 65, cap 65, live 65 (controller, applied)` | the settle timer applied the pending request: requested value, the cap the connection runs under, the live (adaptive) value, and the `qualityEffect` the client now sees (`applied` or `ignoredBitrateMode`). The client gets the same result as an unsolicited `codec` record. |
+| `Quality decision: hevc_nvenc quality 65 qp 22 (running 18): <reason>` | the encoder's decision (KPipeWire, one per decision): `reopened the encoder`, `applied in place`, `deferred: encoder younger than 10000 ms`, `not applied: moved less than 2`, `ignored: running at a target bitrate` |
+
+The KPipeWire `kpipewire_record_logging` category now defaults to Info (it was Warning, which hid its Info lines such as the
+quality decisions, `Opened ...` and the queue-drain lines). Debug stays opt-in (`kpipewire_record_logging.debug=true`).

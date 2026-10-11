@@ -642,7 +642,7 @@ VideoStream::VideoStream(RdpConnection *session)
     d->clientQualityTimer.setSingleShot(true);
     d->clientQualityTimer.setTimerType(Qt::PreciseTimer);
     connect(&d->clientQualityTimer, &QTimer::timeout, this, [this] {
-        applyQualityPlan(false);
+        applyQualityPlan(false, true);
     });
 
     d->stats = std::make_unique<StatsReporter>(
@@ -1016,7 +1016,7 @@ VideoStream::ClientQualityStatus VideoStream::clientQualityStatusFor(const Clien
     return status;
 }
 
-void VideoStream::applyQualityPlan(bool hostChange)
+void VideoStream::applyQualityPlan(bool hostChange, bool fromTimer)
 {
     const auto plan = ClientQuality::plan(d->hostQuality, d->clientQualityMax, d->clientQualityRequested);
     d->qualityCap = quint8(plan.cap);
@@ -1037,6 +1037,27 @@ void VideoStream::applyQualityPlan(bool hostChange)
     // The session/KPipeWire chain already no-ops on an unchanged value, so
     // this costs nothing when it really is a no-op.
     Q_EMIT requestedQualityChanged(next);
+    if (fromTimer) {
+        // OPT-066: a re-sent request was answered "pending"; say when it became real, once per applied change.
+        LayoutControl::CodecDetail detail;
+        fillQualityDetail(detail);
+        qCInfo(KRDP).noquote() << QStringLiteral("Client quality applied: requested %1, cap %2, live %3 (controller, %4)")
+                                      .arg(d->clientQualityRequested ? QString::number(*d->clientQualityRequested) : QStringLiteral("host default"))
+                                      .arg(plan.cap)
+                                      .arg(next)
+                                      .arg(detail.qualityEffect.isEmpty() ? QStringLiteral("none") : detail.qualityEffect);
+        QJsonObject record;
+        if (d->codecPolicy.current) {
+            record = LayoutControl::codecRecord(QString::fromLatin1(CodecPolicy::familyName(d->codecPolicy.current->family)),
+                                                d->codecPolicy.current->hardware,
+                                                QStringLiteral("client quality applied"),
+                                                codecDetail());
+        } else {
+            record = LayoutControl::codecRecord(QStringLiteral("avc"), encoderPolicy().avc.hardware, QStringLiteral("client quality applied"), codecDetail());
+        }
+        Q_EMIT clientQualityApplied(record);
+        d->session->sendControlRecord(record);
+    }
 }
 
 void VideoStream::setMonitorLayout(const QVector<VideoMonitor> &layout)

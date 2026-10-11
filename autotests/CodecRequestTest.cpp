@@ -501,6 +501,73 @@ private Q_SLOTS:
         QCOMPARE(int(spy.last().at(0).value<quint8>()), 60);
     }
 
+    // OPT-066 observability: the settle timer pushes the result, so "pending" turns into "applied" on the client.
+    void theSettleTimerPushesTheAppliedResult()
+    {
+        Fixture f;
+        f.stream()->setAdaptiveQuality(false);
+        f.stream()->setQualityCap(100);
+        QSignalSpy pushed(f.stream(), &VideoStream::clientQualityApplied);
+        QCOMPARE(f.stream()->requestClientQuality(50).effect, ClientQuality::Effect::Applied);
+        QCOMPARE(pushed.count(), 0); // the first request is answered by the reply itself
+        QCOMPARE(f.stream()->requestClientQuality(70).effect, ClientQuality::Effect::Pending);
+        QCOMPARE(pushed.count(), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(pushed.count(), 1, 4000);
+        const auto record = pushed.last().at(0).toJsonObject();
+        QCOMPARE(record.value(QLatin1String("type")).toString(), QStringLiteral("codec"));
+        QVERIFY(!record.contains(QLatin1String("requestId"))); // unsolicited
+        QCOMPARE(record.value(QLatin1String("quality")).toInt(), 70);
+        QCOMPARE(record.value(QLatin1String("qualityRequested")).toInt(), 70);
+        QCOMPARE(record.value(QLatin1String("qualityEffect")).toString(), QStringLiteral("applied"));
+        QCOMPARE(record.value(QLatin1String("reason")).toString(), QStringLiteral("client quality applied"));
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 70);
+    }
+
+    void aPushedResultForAClampedRequestCarriesTheHostCap()
+    {
+        Fixture f;
+        f.stream()->setAdaptiveQuality(false);
+        f.stream()->setQualityCap(75);
+        QSignalSpy pushed(f.stream(), &VideoStream::clientQualityApplied);
+        f.stream()->requestClientQuality(40);
+        f.stream()->requestClientQuality(95); // above the ceiling (75)
+        QTRY_COMPARE_WITH_TIMEOUT(pushed.count(), 1, 4000);
+        const auto record = pushed.last().at(0).toJsonObject();
+        QCOMPARE(record.value(QLatin1String("quality")).toInt(), 75);
+        QCOMPARE(record.value(QLatin1String("qualityRequested")).toInt(), 95);
+    }
+
+    void aReSendWithoutQualityIsTheHostDefaultAndPushesWithoutARequest()
+    {
+        Fixture f;
+        f.stream()->setAdaptiveQuality(false);
+        f.stream()->setQualityCap(75);
+        f.ask(R"({"order":["avc"],"quality":40})", hal());
+        QVERIFY(!f.lastLog.contains(QStringLiteral("host default")));
+        QVERIFY(f.lastLog.contains(QStringLiteral("quality asked 40, applied 40")));
+        QSignalSpy pushed(f.stream(), &VideoStream::clientQualityApplied);
+        const auto reply = f.ask(R"({"order":["avc"]})", hal()); // re-sent without quality
+        QVERIFY2(f.lastLog.contains(QStringLiteral("quality host default (75)")), qPrintable(f.lastLog));
+        QVERIFY(!reply.contains(QLatin1String("qualityRequested")));
+        QTRY_COMPARE_WITH_TIMEOUT(pushed.count(), 1, 4000);
+        const auto record = pushed.last().at(0).toJsonObject();
+        QCOMPARE(record.value(QLatin1String("quality")).toInt(), 75);
+        QVERIFY(!record.contains(QLatin1String("qualityRequested")));
+        QVERIFY(!record.contains(QLatin1String("qualityEffect")));
+    }
+
+    void aViewerNeverPushesAnAppliedQuality()
+    {
+        Fixture f;
+        f.stream()->setQualityCap(80);
+        QSignalSpy pushed(f.stream(), &VideoStream::clientQualityApplied);
+        f.stream()->requestClientQuality(40, false);
+        f.stream()->requestClientQuality(30, false);
+        QTest::qWait(2800);
+        QCOMPARE(pushed.count(), 0);
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 80);
+    }
+
     // ---- capabilities ----
 
     void capabilitiesAdvertisePreferencesCeilingsAndEncoders()

@@ -168,6 +168,30 @@ class ConsoleHostControllerTest : public QObject
     };
 
 private Q_SLOTS:
+    // OPT-066 observability: the controller's settled quality reaches the client record the endpoint is fed from
+    // (the cap after the timer), and the pushed result is announced once; a viewer's request does neither.
+    void aSettledClientQualityIsCarriedAndAnnouncedForTheController()
+    {
+        RequestHarness h("[General]\n", true);
+        auto *stream = h.connection.videoStream();
+        stream->setAdaptiveQuality(false);
+        stream->setQualityCap(100);
+        QVERIFY(h.host.m_control.ownsControl(h.client->id));
+        QSignalSpy pushed(stream, &VideoStream::clientQualityApplied);
+        stream->requestClientQuality(50);
+        QCOMPARE(int(h.client->videoQuality), 50);
+        stream->requestClientQuality(65); // re-sent: pending, then applied by the timer
+        QCOMPARE(int(h.client->videoQuality), 50);
+        QTRY_COMPARE_WITH_TIMEOUT(pushed.count(), 1, 4000);
+        QCOMPARE(int(h.client->videoQuality), 65);
+        QCOMPARE(pushed.last().at(0).toJsonObject().value(u"qualityEffect"_s).toString(), u"applied"_s);
+        // The same connection as a viewer: its request is echoed and ignored (it drops back to the host default), nothing is announced.
+        stream->requestClientQuality(30, false);
+        QTest::qWait(2800);
+        QCOMPARE(pushed.count(), 1);
+        QCOMPARE(int(h.client->videoQuality), 100);
+    }
+
     void physicalActivityReclaimIsGenerationBoundAndReleasesHeldKeys()
     {
         QTemporaryDir runtime; QVERIFY(runtime.isValid());

@@ -203,6 +203,9 @@ QJsonObject apply(VideoStream &stream, const Request &request, QString *log, boo
                         .arg(QLatin1String(ClientQuality::effectName(quality.effect)))
                         .arg(quality.effective)
                         .arg(quality.clamped ? QStringLiteral(" (clamped to the host maximum)") : QString());
+        } else {
+            // OPT-066: a re-send without `quality` is the host default, not "keep the last one"; say so.
+            *log += QStringLiteral("; quality host default (%1)").arg(quality.effective);
         }
         if (decision.choice.family == CodecPolicy::Family::Av1) {
             *log += QStringLiteral("; AV1 tiles %1 (setting %2)")
