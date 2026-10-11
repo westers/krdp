@@ -3,9 +3,11 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "AbstractSession.h"
+
 #include "StallPhase.h"
 
 #include <algorithm>
+#include <memory>
 
 #include <PipeWireEncodedStream>
 #include <PipeWireSourceStream>
@@ -146,9 +148,16 @@ void connectActiveChromaModeIfSupported(Stream *stream, Session *session)
     if constexpr (requires(Stream *s) { s->activeChromaMode(); }) {
         // Once at start and on the encoder's mid-session fallback to 4:2:0 (SPS mismatch): the
         // "Encoder running" line from onStreamActiveChanged() would otherwise stay wrong all session.
-        QObject::connect(stream, &Stream::activeChromaModeChanged, session, [session, stream](typename Stream::ChromaMode mode) {
-            qCInfo(KRDP) << "Encoder chroma mode:" << activeChromaName(stream)
-                         << (mode == Stream::ChromaMode::Yuv420 && session->videoCodec() != VideoCodec::Avc420 ? "(fell back to 4:2:0)" : "");
+        auto wasChroma = std::make_shared<bool>(false);
+        QObject::connect(stream, &Stream::activeChromaModeChanged, session, [session, stream, wasChroma](typename Stream::ChromaMode mode) {
+            // Info only for a real downgrade (4:4:4 -> 4:2:0); the start-up report is in the "Encoder running" line.
+            const bool downgrade = *wasChroma && mode == Stream::ChromaMode::Yuv420;
+            *wasChroma = mode != Stream::ChromaMode::Yuv420;
+            if (downgrade) {
+                qCInfo(KRDP) << "Encoder chroma mode:" << activeChromaName(stream) << "(fell back to 4:2:0)";
+            } else {
+                qCDebug(KRDP) << "Encoder chroma mode:" << activeChromaName(stream);
+            }
             Q_EMIT session->chromaCapabilityChanged(mode != Stream::ChromaMode::Yuv420);
         });
     }

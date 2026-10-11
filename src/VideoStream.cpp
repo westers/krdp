@@ -1418,10 +1418,11 @@ std::optional<CodecPolicy::EncoderSettings> VideoStream::encoderSettings() const
 
 void VideoStream::encoderBackendReported(VideoCodec codec, bool hardware)
 {
-    qCInfo(KRDP).noquote() << QStringLiteral("Encoder backend: %1 in %2").arg(QLatin1String(VideoCodecSupport::codecName(codec)), hardware ? QStringLiteral("hardware") : QStringLiteral("software"));
     // Stats (every client, a stock codec choice included): the backend that really encodes.
     const std::pair<int, bool> reported{int(familyOf(codec)), hardware};
     if (d->reportedBackend != reported) {
+        // Once per change; a repeat report for the same backend (every encoder restart) adds nothing.
+        qCInfo(KRDP).noquote() << QStringLiteral("Encoder backend: %1 in %2").arg(QLatin1String(VideoCodecSupport::codecName(codec)), hardware ? QStringLiteral("hardware") : QStringLiteral("software"));
         d->reportedBackend = reported;
         updateStatsBackend();
         d->stats->event(Stats::EventKind::Codec, [this, hardware] {
