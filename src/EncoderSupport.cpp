@@ -431,6 +431,7 @@ LayoutControl::VideoCapabilities videoCapabilities(const Probe &probe, CodecPoli
     LayoutControl::VideoCapabilities video;
     video.softwareEncoding = QString::fromLatin1(CodecPolicy::softwareEncodingName(mode));
     video.preferences = 1;
+    video.clientQuality = 1; // OPT-066
     video.softwareAvc = QString::fromLatin1(CodecPolicy::allowanceName(Family::Avc, allowance.avc));
     video.softwareHevc = QString::fromLatin1(CodecPolicy::allowanceName(Family::Hevc, allowance.hevc));
     video.softwareAv1 = QString::fromLatin1(CodecPolicy::allowanceName(Family::Av1, allowance.av1));

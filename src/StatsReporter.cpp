@@ -111,6 +111,9 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
     video.insert(QStringLiteral("frameRateCap"), current.frameRateCap);
     video.insert(QStringLiteral("quality"), current.quality);
     video.insert(QStringLiteral("qualityCap"), current.qualityCap);
+    if (current.qualityRequested) {
+        video.insert(QStringLiteral("qualityRequested"), *current.qualityRequested);
+    }
     if (current.targetKbps) {
         video.insert(QStringLiteral("targetKbps"), qint64(*current.targetKbps));
     }

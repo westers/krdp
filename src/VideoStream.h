@@ -21,6 +21,7 @@
 #include <freerdp/server/rdpgfx.h>
 
 #include "SurfaceLayout.h"
+#include "ClientQuality.h"
 #include "CodecPolicy.h"
 #include "LayoutControl.h"
 #include "VideoCodecSupport.h"
@@ -150,6 +151,30 @@ public:
      * steers towards; with it disabled this is the quality used outright.
      */
     void setQualityCap(quint8 cap);
+
+    /**
+     * OPT-066: what a client's requested quality came to. \a effective is the cap this connection runs under
+     * (or, while \a effect is Pending, will run under), \a requested the client's own number (echoed even when ignored).
+     */
+    struct ClientQualityStatus {
+        std::optional<int> requested;
+        int effective = 0;
+        bool clamped = false;
+        ClientQuality::Effect effect = ClientQuality::Effect::None;
+    };
+    /// The host's `ClientQualityMax` (0 = the same as Quality): the ceiling for a client's request. Applies at once.
+    void setClientQualityMax(int clientQualityMax);
+    int clientQualityMax() const;
+    /**
+     * The client's `quality` from its `codec` request (nullopt = the host default; main thread). The first request of a
+     * connection applies at once; a re-sent one settles first (ClientQuality::SettleTime, MinApplyInterval) so a slider does
+     * not reopen the encoder on every tick. \a controlling false (a Console viewer) applies nothing and drops an earlier
+     * request. AdaptiveQuality steps below the resulting cap, never above it.
+     */
+    ClientQualityStatus requestClientQuality(std::optional<int> requested, bool controlling = true);
+    ClientQualityStatus clientQualityStatus() const;
+    /// The cap this connection runs under (setQualityCap() and the client's request combined).
+    quint8 effectiveQualityCap() const;
     /**
      * Enable or disable steering quality from measured goodput and RTT.
      *
@@ -376,6 +401,9 @@ private:
     // Driven by the main-thread adaptive timer, which fires every
     // QualityUpdateInterval while streaming (started in initialize(), stopped
     // in close()); this slot therefore runs on VideoStream's own (main) thread.
+    void fillQualityDetail(LayoutControl::CodecDetail &detail) const;
+    ClientQualityStatus clientQualityStatusFor(const ClientQuality::Plan &plan) const;
+    void applyQualityPlan(bool hostChange);
     Q_SLOT void updateAdaptiveQuality();
     /// One CodecPolicy step (link, CPU guard, switch interval); from updateAdaptiveQuality().
     void stepCodecPolicy(bool congested);

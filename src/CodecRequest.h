@@ -35,6 +35,8 @@ struct Request {
     /// (and the old fields for what they leave out). Set only when the record has at least one of the new fields;
     /// otherwise from `codecs` / `decode` / `adaptive` by CodecPolicy::requestFromRecord() when applied.
     std::optional<CodecPolicy::Request> selection;
+    /// OPT-066: the quality the client wants for this connection (10..100); absent = the host default. The host clamps it to its ceiling.
+    std::optional<int> quality;
     QString orderText; ///< the new fields as the client sent them, for the log ("order [av1,hevc,avc] encode any decode software")
     bool operator==(const Request &) const = default;
 };
@@ -43,16 +45,18 @@ struct Request {
  * nullopt: the record is invalid (answer invalidRecord(\a error)): `codecs` is not an array of "hevc"/"av1" strings,
  * or one of the S2 fields is malformed: `order` (distinct "avc"/"hevc"/"av1", at most 3; empty = standard AVC only),
  * `encode` / `decodeMode` ("hardware" | "software" | "any"), `decoders` (an object with only the keys avc/hevc/av1,
- * each an array of at most two distinct "hw"/"sw" strings, [] = cannot decode). \a error gets a short reason.
+ * each an array of at most two distinct "hw"/"sw" strings, [] = cannot decode), or `quality` (OPT-066: an integer from 10 to 100). \a error gets a short reason.
  */
 KRDP_EXPORT std::optional<Request> parse(const QJsonObject &record, QString *error = nullptr);
 KRDP_EXPORT QJsonObject invalidRecord(const QString &message = {});
 
 /**
  * Hands \a request to \a stream's codec policy (VideoStream::setPrivateCodecPolicy(): the choice
- * takes effect at once) and returns the `codec` reply, without requestId. \a log gets the line
+ * takes effect at once; a re-sent request keeps the CPU guard's memory, OPT-066) and its `quality` to
+ * VideoStream::requestClientQuality(), and returns the `codec` reply, without requestId. \a controlling is
+ * false for a Console viewer: its quality is echoed and ignored. \a log gets the line
  * the host logs.
  */
-KRDP_EXPORT QJsonObject apply(VideoStream &stream, const Request &request, QString *log = nullptr);
+KRDP_EXPORT QJsonObject apply(VideoStream &stream, const Request &request, QString *log = nullptr, bool controlling = true);
 }
 }

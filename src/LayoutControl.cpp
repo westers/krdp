@@ -455,6 +455,9 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
         if (video->preferences > 0) {
             group.insert(QStringLiteral("preferences"), video->preferences);
         }
+        if (video->clientQuality > 0) {
+            group.insert(QStringLiteral("clientQuality"), video->clientQuality);
+        }
         if (!video->softwareAvc.isEmpty() || !video->softwareHevc.isEmpty() || !video->softwareAv1.isEmpty()) {
             group.insert(QStringLiteral("software"),
                          QJsonObject{{QStringLiteral("avc"), video->softwareAvc}, {QStringLiteral("hevc"), video->softwareHevc}, {QStringLiteral("av1"), video->softwareAv1}});
@@ -790,6 +793,15 @@ QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, c
         record.insert(QStringLiteral("decodePath"), detail.decodePath);
     }
     record.insert(QStringLiteral("baseline"), detail.baseline);
+    if (detail.quality) {
+        record.insert(QStringLiteral("quality"), *detail.quality);
+    }
+    if (detail.qualityRequested) {
+        record.insert(QStringLiteral("qualityRequested"), *detail.qualityRequested);
+        if (!detail.qualityEffect.isEmpty()) {
+            record.insert(QStringLiteral("qualityEffect"), detail.qualityEffect);
+        }
+    }
     if (!detail.skipped.isEmpty()) {
         QJsonArray skipped;
         for (const auto &entry : detail.skipped.first(std::min<qsizetype>(detail.skipped.size(), 3))) {

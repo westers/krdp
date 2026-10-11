@@ -3,10 +3,13 @@
 
 #include "CodecRequest.h"
 
+#include "ClientQuality.h"
 #include "LayoutControl.h"
 #include "VideoStream.h"
 
 #include <QJsonArray>
+
+#include <cmath>
 
 namespace KRdp::CodecRequest
 {
@@ -68,6 +71,16 @@ std::optional<Request> parse(const QJsonObject &record, QString *error)
             }
             request.names.append(name);
         }
+    }
+
+    // OPT-066: the connection's quality. Optional; a number that is not an integer from 10 to 100 is `invalid`.
+    if (const QJsonValue quality = record.value(QLatin1String("quality")); !quality.isUndefined()) {
+        const double value = quality.toDouble(-1);
+        if (!quality.isDouble() || value != std::floor(value) || !ClientQuality::validRequest(static_cast<long long>(value))) {
+            invalid(error, QStringLiteral("codec quality must be an integer from 10 to 100"));
+            return std::nullopt;
+        }
+        request.quality = int(value);
     }
 
     // OPT-062 S2: the per-connection fields. All optional; any of them makes the request an explicit one.
@@ -156,13 +169,15 @@ QJsonObject invalidRecord(const QString &message)
     return LayoutControl::errorRecord({QStringLiteral("invalid"), message.isEmpty() ? QStringLiteral("codec codecs must be an array of hevc and/or av1") : message});
 }
 
-QJsonObject apply(VideoStream &stream, const Request &request, QString *log)
+QJsonObject apply(VideoStream &stream, const Request &request, QString *log, bool controlling)
 {
     // The client's order is always honoured (OPT-062): its `order` when it sent the S2 fields, else its `codecs` in
     // the order it sent them. The host's software ceiling and the encoders this host really has decide what is
     // possible; the reply says what was skipped and why. `adaptive: false` pins the first choice.
     // AV1-Q: the decode paths first, so the first encoder settings already carry the AV1 tiles.
     stream.setClientDecode(request.decode);
+    // OPT-066: the quality first, so the first encoder settings already carry it.
+    const auto quality = stream.requestClientQuality(request.quality, controlling);
     const auto decision = request.selection ? stream.setCodecRequest(*request.selection) : stream.setPrivateCodecPolicy(request.codecs, request.adaptive);
     const QString selected = QString::fromLatin1(CodecPolicy::familyName(decision.choice.family));
     QString reason = decision.reason.isEmpty() ? QStringLiteral("initial choice") : decision.reason;
@@ -182,6 +197,13 @@ QJsonObject apply(VideoStream &stream, const Request &request, QString *log)
                         QLatin1String(CodecPolicy::decodePathName(request.decode.avc)),
                         QLatin1String(CodecPolicy::decodePathName(request.decode.hevc)),
                         QLatin1String(CodecPolicy::decodePathName(request.decode.av1)));
+        if (request.quality) {
+            *log += QStringLiteral("; quality asked %1, %2 %3%4")
+                        .arg(*request.quality)
+                        .arg(QLatin1String(ClientQuality::effectName(quality.effect)))
+                        .arg(quality.effective)
+                        .arg(quality.clamped ? QStringLiteral(" (clamped to the host maximum)") : QString());
+        }
         if (decision.choice.family == CodecPolicy::Family::Av1) {
             *log += QStringLiteral("; AV1 tiles %1 (setting %2)")
                         .arg(stream.av1Tiles() ? QString::number(stream.av1Tiles()) : QStringLiteral("per resolution"),

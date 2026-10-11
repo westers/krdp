@@ -17,6 +17,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSignalSpy>
 #include <QTest>
 
 using namespace KRdp;
@@ -211,6 +212,16 @@ private Q_SLOTS:
         QTest::newRow("decoders duplicate path") << QByteArray(R"({"decoders":{"av1":["hw","hw"]}})");
         QTest::newRow("decoders three paths") << QByteArray(R"({"decoders":{"av1":["hw","sw","hw"]}})");
         QTest::newRow("decoders oversized") << QByteArray(R"({"decoders":{"av1":)" + QJsonDocument(QJsonArray::fromStringList(QStringList(5000, QStringLiteral("sw")))).toJson(QJsonDocument::Compact) + "}}");
+        QTest::newRow("quality below 10") << QByteArray(R"({"quality":9})");
+        QTest::newRow("quality zero") << QByteArray(R"({"quality":0})");
+        QTest::newRow("quality above 100") << QByteArray(R"({"quality":101})");
+        QTest::newRow("quality negative") << QByteArray(R"({"quality":-5})");
+        QTest::newRow("quality fractional") << QByteArray(R"({"quality":55.5})");
+        QTest::newRow("quality a string") << QByteArray(R"({"quality":"80"})");
+        QTest::newRow("quality null") << QByteArray(R"({"quality":null})");
+        QTest::newRow("quality bool") << QByteArray(R"({"quality":true})");
+        QTest::newRow("quality array") << QByteArray(R"({"quality":[80]})");
+        QTest::newRow("quality huge") << QByteArray(R"({"quality":1e300})");
         QTest::newRow("old codecs field still validated") << QByteArray(R"({"codecs":["vp9"],"order":["av1"]})");
     }
 
@@ -225,6 +236,21 @@ private Q_SLOTS:
         QCOMPARE(reply.value(QLatin1String("type")).toString(), QStringLiteral("error"));
         QCOMPARE(reply.value(QLatin1String("code")).toString(), QStringLiteral("invalid"));
         QCOMPARE(reply.value(QLatin1String("message")).toString(), error);
+    }
+
+    // OPT-066: `quality`, an integer from 10 to 100, optional, independent of the other fields.
+    void qualityIsParsedAndOptional()
+    {
+        QCOMPARE(CodecRequest::parse(json(R"({"quality":10})"))->quality, std::optional<int>(10));
+        QCOMPARE(CodecRequest::parse(json(R"({"quality":100})"))->quality, std::optional<int>(100));
+        QCOMPARE(CodecRequest::parse(json(R"({"quality":72.0})"))->quality, std::optional<int>(72)); // a whole number written as a float
+        QCOMPARE(CodecRequest::parse(json(R"({"codecs":["hevc"],"quality":55})"))->quality, std::optional<int>(55));
+        const auto withOrder = CodecRequest::parse(json(R"({"order":["av1","avc"],"encode":"any","quality":40})"));
+        QVERIFY(withOrder && withOrder->selection);
+        QCOMPARE(withOrder->quality, std::optional<int>(40));
+        QVERIFY(!CodecRequest::parse(json(R"({"codecs":["hevc"]})"))->quality); // absent = the host default
+        // A quality alone is not an explicit selection.
+        QVERIFY(!CodecRequest::parse(json(R"({"quality":40})"))->selection);
     }
 
     // ---- selection through a real stream ----
@@ -349,6 +375,132 @@ private Q_SLOTS:
         QVERIFY(QJsonDocument(record).toJson(QJsonDocument::Compact).size() < 1024);
     }
 
+    // ---- client quality (OPT-066) ----
+
+    void theReplyAnswersTheEffectiveQualityAndEchoesTheRequest()
+    {
+        Fixture f;
+        f.stream()->setQualityCap(75);
+        auto reply = f.ask(R"({"order":["avc"],"quality":60})", hal());
+        QCOMPARE(reply.value(QLatin1String("quality")).toInt(), 60);
+        QCOMPARE(reply.value(QLatin1String("qualityRequested")).toInt(), 60);
+        QCOMPARE(reply.value(QLatin1String("qualityEffect")).toString(), QStringLiteral("applied"));
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 60);
+        QCOMPARE(f.stream()->statsSnapshot().qualityCap, 60);
+        QCOMPARE(f.stream()->statsSnapshot().qualityRequested, std::optional<int>(60));
+    }
+
+    void aClientNeverExceedsTheHostsMaximum()
+    {
+        Fixture f;
+        f.stream()->setQualityCap(75);
+        auto reply = f.ask(R"({"order":["avc"],"quality":95})", hal());
+        QCOMPARE(reply.value(QLatin1String("quality")).toInt(), 75); // ClientQualityMax 0 = the same as Quality
+        QCOMPARE(reply.value(QLatin1String("qualityRequested")).toInt(), 95); // the echo is the request, not the result
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 75);
+        QCOMPARE(f.stream()->statsSnapshot().qualityRequested, std::optional<int>(95));
+        QVERIFY(f.stream()->clientQualityStatus().effective == 75);
+    }
+
+    void clientQualityMaxRaisesTheCeilingButNotTheDefault()
+    {
+        Fixture f;
+        f.stream()->setQualityCap(60);
+        f.stream()->setClientQualityMax(90);
+        auto reply = f.ask(R"({"order":["avc"],"quality":85})", hal());
+        QCOMPARE(reply.value(QLatin1String("quality")).toInt(), 85);
+        reply = f.ask(R"({"order":["avc"],"quality":99})", hal()); // re-sent: settles first, the answer says what it will become
+        QCOMPARE(reply.value(QLatin1String("quality")).toInt(), 90);
+        QCOMPARE(reply.value(QLatin1String("qualityEffect")).toString(), QStringLiteral("pending"));
+        Fixture g;
+        g.stream()->setQualityCap(60);
+        g.stream()->setClientQualityMax(90);
+        QCOMPARE(g.ask(R"({"order":["avc"]})", hal()).value(QLatin1String("quality")).toInt(), 60); // no request: the host default
+    }
+
+    void aRequestBelowTheFloorIsRefusedNotClamped()
+    {
+        QString error;
+        QVERIFY(!CodecRequest::parse(json(R"({"quality":5})"), &error));
+        QCOMPARE(error, QStringLiteral("codec quality must be an integer from 10 to 100"));
+    }
+
+    void aReplyWithoutARequestHasNoRequestedField()
+    {
+        Fixture f;
+        f.stream()->setQualityCap(70);
+        const auto reply = f.ask(R"({"order":["avc"]})", hal());
+        QCOMPARE(reply.value(QLatin1String("quality")).toInt(), 70);
+        QVERIFY(!reply.contains(QLatin1String("qualityRequested")));
+        QVERIFY(!reply.contains(QLatin1String("qualityEffect")));
+        QVERIFY(!Stats::sampleRecord(f.stream()->statsSnapshot(), Stats::Snapshot{}, 1000, 1).value(QLatin1String("video")).toObject().contains(QLatin1String("qualityRequested")));
+    }
+
+    void aConsoleViewersRequestIsEchoedAndIgnored()
+    {
+        Fixture f;
+        f.stream()->setQualityCap(80);
+        f.stream()->setEncoderPolicy(hal(), CodecPolicy::SoftwareEncoding::Auto);
+        const auto parsed = CodecRequest::parse(json(R"({"order":["avc"],"quality":30})"));
+        QVERIFY(parsed);
+        const auto reply = CodecRequest::apply(*f.stream(), *parsed, nullptr, /*controlling*/ false);
+        QCOMPARE(reply.value(QLatin1String("quality")).toInt(), 80); // the value in use
+        QCOMPARE(reply.value(QLatin1String("qualityRequested")).toInt(), 30);
+        QCOMPARE(reply.value(QLatin1String("qualityEffect")).toString(), QStringLiteral("notController"));
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 80);
+        // A connection that controlled and lost control drops its request.
+        f.stream()->requestClientQuality(40);
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 40);
+        f.stream()->requestClientQuality(40, false);
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 80);
+    }
+
+    void adaptiveQualityStepsBelowTheEffectiveCapNeverAbove()
+    {
+        Fixture f;
+        f.stream()->setAdaptiveQuality(true);
+        f.stream()->setQualityCap(80);
+        f.stream()->requestClientQuality(50);
+        QCOMPARE(int(f.stream()->statsSnapshot().quality), 50);
+        QCOMPARE(int(f.stream()->statsSnapshot().qualityCap), 50);
+        f.stream()->setQualityCap(70); // a host change applies at once and keeps the request
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 50);
+        QVERIFY(f.stream()->statsSnapshot().quality <= 50);
+    }
+
+    void aHostChangeAppliesAtOnceAndCancelsASettlingRequest()
+    {
+        Fixture f;
+        f.stream()->setQualityCap(80);
+        f.stream()->requestClientQuality(70); // first: at once
+        const auto pending = f.stream()->requestClientQuality(40); // re-sent: settles
+        QCOMPARE(pending.effect, ClientQuality::Effect::Pending);
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 70);
+        f.stream()->setClientQualityMax(0); // host change: recomputed now with the stored request (40)
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 40);
+    }
+
+    // A slider: the first value applies at once, later ones wait for the value to settle and for MinApplyInterval.
+    void aReSentQualityIsAppliedOnceItSettles()
+    {
+        Fixture f;
+        f.stream()->setAdaptiveQuality(false); // fixed quality: the cap is applied outright (adaptive climbs towards it)
+        f.stream()->setQualityCap(100);
+        QSignalSpy spy(f.stream(), &VideoStream::requestedQualityChanged);
+        QCOMPARE(f.stream()->requestClientQuality(50).effect, ClientQuality::Effect::Applied);
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 50);
+        spy.clear();
+        for (int q = 52; q <= 60; q += 2) {
+            QCOMPARE(f.stream()->requestClientQuality(q).effect, ClientQuality::Effect::Pending); // slider ticks
+            QTest::qWait(50);
+        }
+        QCOMPARE(int(f.stream()->effectiveQualityCap()), 50); // nothing applied yet
+        QCOMPARE(spy.count(), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(int(f.stream()->effectiveQualityCap()), 60, 4000);
+        QCOMPARE(spy.count(), 1); // one reopen for the whole drag, with the latest value
+        QCOMPARE(int(spy.last().at(0).value<quint8>()), 60);
+    }
+
     // ---- capabilities ----
 
     void capabilitiesAdvertisePreferencesCeilingsAndEncoders()
@@ -363,6 +515,7 @@ private Q_SLOTS:
         caps.video = video;
         const auto record = LayoutControl::capabilitiesRecord(caps).value(QLatin1String("video")).toObject();
         QCOMPARE(record.value(QLatin1String("preferences")).toInt(), 1);
+        QCOMPARE(record.value(QLatin1String("clientQuality")).toInt(), 1); // OPT-066
         const auto software = record.value(QLatin1String("software")).toObject();
         QCOMPARE(software.value(QLatin1String("avc")).toString(), QStringLiteral("allowed"));
         QCOMPARE(software.value(QLatin1String("hevc")).toString(), QStringLiteral("allowed"));
@@ -468,6 +621,9 @@ private Q_SLOTS:
         s.size = QSize(5120, 1440);
         s.heldBack = {QStringLiteral("hevc"), QStringLiteral("av1")};
         s.retryInS = 99;
+        s.quality = 100;
+        s.qualityCap = 100;
+        s.qualityRequested = 100;
         for (int i = 0; i < 16; ++i) s.surfaces.append({quint64(i) * 1000, 3, 1});
         const auto bytes = QJsonDocument(Stats::sampleRecord(s, Stats::Snapshot{}, 1000, 123456)).toJson(QJsonDocument::Compact);
         QVERIFY2(bytes.size() < 2048, qPrintable(QString::number(bytes.size())));

@@ -232,6 +232,8 @@ struct VideoCapabilities {
     QString softwareEncoding; ///< the host's SoftwareEncoding: "auto" | "never" | "prefer"
     /// OPT-062 S2: 1 = the host honours the `codec` request's `order` / `encode` / `decoders`. 0: not advertised (older host).
     int preferences = 0;
+    /// OPT-066: 1 = the host honours the `codec` request's `quality` (clamped to its ceiling). 0: not advertised (older host).
+    int clientQuality = 0;
     /// OPT-062 S2: the host's software ceiling per codec ("allowed" | "lastResort" for AVC | "never"); empty = not advertised.
     QString softwareAvc;
     QString softwareHevc;
@@ -317,6 +319,11 @@ struct CodecDetail {
     QString decodePath;
     bool baseline = false;
     QList<Skipped> skipped;
+    /// OPT-066: the quality cap this connection runs under (`quality`), what the client asked for (`qualityRequested`,
+    /// absent when it sent none) and what became of the request (`qualityEffect`, see ClientQuality::Effect).
+    std::optional<int> quality;
+    std::optional<int> qualityRequested;
+    QString qualityEffect;
     bool operator==(const CodecDetail &) const = default;
 };
 KRDP_EXPORT QJsonObject codecRecord(const QString &selected, std::optional<bool> hardware, const QString &reason, const CodecDetail &detail);

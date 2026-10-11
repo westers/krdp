@@ -35,6 +35,7 @@
 #include <freerdp/peer.h>
 
 #include "AdaptiveQuality.h"
+#include "ClientQuality.h"
 #include "FrameQueuePolicy.h"
 #include "GfxSurfaceCommand.h"
 #include "LayoutControl.h"
@@ -368,7 +369,17 @@ public:
     // thread. These stay atomic as belt-and-braces in case that ever changes,
     // not because it's true today.
     std::atomic<quint8> quality = 100; // current adaptive value
-    std::atomic<quint8> qualityCap = 100; // configured Quality
+    std::atomic<quint8> qualityCap = 100; // the cap this connection runs under (OPT-066: the host's Quality, or the client's request clamped)
+    // OPT-066 client quality (main thread only): the host's Quality as setQualityCap() got it, the optional
+    // ClientQualityMax ceiling, the client's `codec` request and the state of its debounced live apply.
+    quint8 hostQuality = 100;
+    int clientQualityMax = 0;
+    std::optional<int> clientQualityRequested;
+    ClientQuality::Effect clientQualityEffect = ClientQuality::Effect::None;
+    std::optional<ClientQuality::Clock::time_point> clientQualityApplied; // the last live apply (MinApplyInterval)
+    ClientQuality::Clock::time_point clientQualityChanged{}; // the last time the request changed value (SettleTime)
+    std::optional<int> echoedQualityRequest; // a Console viewer's ignored request, for the answer
+    QTimer clientQualityTimer;
     std::atomic<bool> graphicsDelivered = false; // see VideoStream::graphicsDelivered()
     std::atomic<bool> adaptiveQuality = true;
     AvcCodecSelection codecSelection;
@@ -628,6 +639,11 @@ VideoStream::VideoStream(RdpConnection *session)
     d->adaptiveTimer.setInterval(QualityUpdateInterval);
     d->adaptiveTimer.setTimerType(Qt::CoarseTimer);
     connect(&d->adaptiveTimer, &QTimer::timeout, this, &VideoStream::updateAdaptiveQuality);
+    d->clientQualityTimer.setSingleShot(true);
+    d->clientQualityTimer.setTimerType(Qt::PreciseTimer);
+    connect(&d->clientQualityTimer, &QTimer::timeout, this, [this] {
+        applyQualityPlan(false);
+    });
 
     d->stats = std::make_unique<StatsReporter>(
         [this] {
@@ -911,7 +927,104 @@ uint32_t VideoStream::requestedFrameRate() const
 
 void VideoStream::setQualityCap(quint8 cap)
 {
-    d->qualityCap = cap;
+    // The host's Quality (or the user's own): the default and, without ClientQualityMax, the ceiling. A host change
+    // applies at once and cancels a client change that was still settling (OPT-066).
+    d->hostQuality = cap;
+    d->clientQualityTimer.stop();
+    applyQualityPlan(true);
+}
+
+void VideoStream::setClientQualityMax(int clientQualityMax)
+{
+    d->clientQualityMax = std::clamp(clientQualityMax, 0, 100);
+    d->clientQualityTimer.stop();
+    applyQualityPlan(true);
+}
+
+int VideoStream::clientQualityMax() const
+{
+    return d->clientQualityMax;
+}
+
+quint8 VideoStream::effectiveQualityCap() const
+{
+    return d->qualityCap.load();
+}
+
+VideoStream::ClientQualityStatus VideoStream::clientQualityStatus() const
+{
+    ClientQualityStatus status;
+    status.requested = d->clientQualityRequested;
+    status.effective = d->qualityCap.load();
+    status.effect = d->clientQualityEffect;
+    return status;
+}
+
+VideoStream::ClientQualityStatus VideoStream::requestClientQuality(std::optional<int> requested, bool controlling)
+{
+    if (!controlling) {
+        // A Console viewer: only the controlling connection's request applies. Echo it, apply nothing, and
+        // forget a request applied while this connection did control.
+        d->clientQualityTimer.stop();
+        const bool had = d->clientQualityRequested.has_value();
+        d->clientQualityRequested.reset();
+        if (had) {
+            applyQualityPlan(true);
+        }
+        ClientQualityStatus status = clientQualityStatus();
+        status.requested = requested;
+        status.effect = requested ? ClientQuality::Effect::NotController : ClientQuality::Effect::None;
+        d->clientQualityEffect = status.effect;
+        d->echoedQualityRequest = requested;
+        return status;
+    }
+    d->echoedQualityRequest.reset();
+    const auto now = ClientQuality::Clock::now();
+    if (requested != d->clientQualityRequested) {
+        d->clientQualityChanged = now;
+    }
+    d->clientQualityRequested = requested;
+    const auto plan = ClientQuality::plan(d->hostQuality, d->clientQualityMax, requested);
+    if (plan.cap == int(d->qualityCap.load())) {
+        d->clientQualityTimer.stop();
+        d->clientQualityEffect = requested ? ClientQuality::Effect::Applied : ClientQuality::Effect::None;
+        return clientQualityStatusFor(plan);
+    }
+    const auto delay = ClientQuality::applyDelay(now, d->clientQualityChanged, d->clientQualityApplied);
+    if (delay <= ClientQuality::Clock::duration::zero()) {
+        d->clientQualityTimer.stop();
+        applyQualityPlan(false);
+    } else {
+        d->clientQualityEffect = ClientQuality::Effect::Pending;
+        d->clientQualityTimer.start(int(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count()) + 1);
+    }
+    return clientQualityStatusFor(plan);
+}
+
+VideoStream::ClientQualityStatus VideoStream::clientQualityStatusFor(const ClientQuality::Plan &plan) const
+{
+    ClientQualityStatus status;
+    status.requested = d->clientQualityRequested;
+    status.effective = plan.cap;
+    status.clamped = plan.clamped;
+    status.effect = d->clientQualityEffect;
+    // Software HEVC/AV1 on a slow link run at a target bitrate: the quality does not reach the encoder until it leaves that mode.
+    if (status.requested && status.effect == ClientQuality::Effect::Applied && d->encoderSettings && d->encoderSettings->targetKbps > 0) {
+        status.effect = ClientQuality::Effect::IgnoredBitrateMode;
+        d->clientQualityEffect = status.effect;
+    }
+    return status;
+}
+
+void VideoStream::applyQualityPlan(bool hostChange)
+{
+    const auto plan = ClientQuality::plan(d->hostQuality, d->clientQualityMax, d->clientQualityRequested);
+    d->qualityCap = quint8(plan.cap);
+    if (!hostChange) {
+        d->clientQualityApplied = ClientQuality::Clock::now();
+    }
+    d->clientQualityEffect = d->clientQualityRequested ? ClientQuality::Effect::Applied : ClientQuality::Effect::None;
+    const quint8 cap = quint8(plan.cap);
     const quint8 current = d->quality.load();
     const quint8 next = (d->adaptiveQuality.load() || d->session->audioPriorityActive()) ? std::min(current, cap) : cap;
     d->quality = next;
@@ -1103,10 +1216,27 @@ QList<CodecPolicy::Skip> VideoStream::skippedBeforeChoice() const
     return out;
 }
 
+void VideoStream::fillQualityDetail(LayoutControl::CodecDetail &detail) const
+{
+    // OPT-066: `quality` is the cap this connection runs under (Stats `quality` is the live, adaptive value below it).
+    // The plan's cap: the value in use, or while a re-sent request settles (Pending) the one it will become.
+    detail.quality = ClientQuality::plan(d->hostQuality, d->clientQualityMax, d->clientQualityRequested).cap;
+    const auto requested = d->clientQualityRequested ? d->clientQualityRequested : d->echoedQualityRequest;
+    if (requested) {
+        detail.qualityRequested = *requested;
+        auto effect = d->clientQualityEffect;
+        if (effect == ClientQuality::Effect::Applied && d->encoderSettings && d->encoderSettings->targetKbps > 0) {
+            effect = ClientQuality::Effect::IgnoredBitrateMode; // see clientQualityStatusFor()
+        }
+        detail.qualityEffect = QString::fromLatin1(ClientQuality::effectName(effect));
+    }
+}
+
 LayoutControl::CodecDetail VideoStream::codecDetail() const
 {
     LayoutControl::CodecDetail detail;
     if (!d->codecPolicy.current) {
+        fillQualityDetail(detail);
         return detail;
     }
     const auto &current = *d->codecPolicy.current;
@@ -1121,6 +1251,7 @@ LayoutControl::CodecDetail VideoStream::codecDetail() const
         detail.decodePath = QString::fromLatin1(CodecPolicy::decodePathName(path));
     }
     detail.baseline = d->lastBaseline;
+    fillQualityDetail(detail);
     for (const auto &skip : skippedBeforeChoice()) {
         QStringList why;
         for (const auto reason : skip.reasons) {
@@ -1218,6 +1349,10 @@ CodecPolicy::Decision VideoStream::setCodecRequest(const CodecPolicy::Request &r
 
 CodecPolicy::Decision VideoStream::startCodecPolicy(bool adaptive)
 {
+    // OPT-066: a request re-sent while a private-codec policy runs is a live change in the same stream, not a new
+    // stream: the CPU guard's memory (what it held back, the doubling back-off) and the switch time survive.
+    const bool resent = d->codecPolicyActive && d->codecPolicy.current.has_value();
+    const auto previousPolicy = d->codecPolicy;
     d->codecPolicyAdaptive = adaptive;
     d->codecPolicyActive = !d->clientFamilies.isEmpty();
     d->codecPolicy = {};
@@ -1234,7 +1369,22 @@ CodecPolicy::Decision VideoStream::startCodecPolicy(bool adaptive)
     if (d->surfacePixels.load() > 0) {
         in.pixels = d->surfacePixels.load(); // else 1080p until the surfaces exist
     }
-    const auto decision = CodecPolicy::step(d->codecPolicy, in, clk::steady_clock::now());
+    const auto now = clk::steady_clock::now();
+    CodecPolicy::Decision decision;
+    if (resent) {
+        auto stepped = CodecPolicy::stepResent(previousPolicy, in, now);
+        d->codecPolicy = std::move(stepped.state);
+        decision = std::move(stepped.decision);
+        if (stepped.held) {
+            qCInfo(KRDP).noquote() << "Codec request re-sent: the new choice waits for the switch interval; keeping the running codec";
+            // The periodic step applies the request once the interval passed (it resolves the same client families).
+        }
+        if (!decision.changed && decision.reason.isEmpty()) {
+            decision.reason = stepped.held ? QStringLiteral("request re-sent; waiting for the switch interval") : QStringLiteral("request re-sent; codec unchanged");
+        }
+    } else {
+        decision = CodecPolicy::step(d->codecPolicy, in, now);
+    }
     d->lastSkipped = decision.skipped;
     d->lastBaseline = decision.baseline;
     applyEncoderSettings(decision.settings);
@@ -2658,6 +2808,7 @@ Stats::Snapshot VideoStream::statsSnapshot() const
     s.frameRateCap = d->policyFrameRate;
     s.quality = d->quality.load();
     s.qualityCap = d->qualityCap.load();
+    s.qualityRequested = d->clientQualityRequested ? d->clientQualityRequested : d->echoedQualityRequest;
     if (d->encoderSettings && d->encoderSettings->targetKbps > 0) {
         s.targetKbps = d->encoderSettings->targetKbps;
     }

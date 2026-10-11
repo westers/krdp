@@ -68,6 +68,7 @@ struct Snapshot {
     int frameRateCap = 0; ///< the codec policy's cap
     int quality = 0;
     int qualityCap = 0;
+    std::optional<int> qualityRequested; ///< OPT-066: the quality the client asked for (absent: none); `qualityCap` is what the host allowed
     std::optional<quint32> targetKbps; ///< software bitrate mode only
     quint64 bytesSent = 0; ///< RDPGFX payload bytes handed to the channel
     quint64 framesSent = 0;
