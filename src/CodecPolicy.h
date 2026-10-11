@@ -1329,6 +1329,64 @@ inline Decision step(State &state, const Input &in, Clock::time_point now)
 }
 
 /**
+ * OPT-066 (live codec switch): the state a re-sent `codec` request starts from. It is a fresh State (the
+ * request replaces the choice, the link evidence and the encoder settings) that keeps the CPU guard's memory:
+ * which families it held back and until when (softwareBlockedUntil), how often (guardRejections, the doubling
+ * back-off), when it last stepped away (guardBlockedAt), the calm streak, and the time of the last switch.
+ */
+inline State resentState(const State &previous)
+{
+    State state;
+    state.softwareBlockedUntil = previous.softwareBlockedUntil;
+    state.guardRejections = previous.guardRejections;
+    state.guardBlockedAt = previous.guardBlockedAt;
+    state.guardCalmSince = previous.guardCalmSince;
+    state.lastSwitch = previous.lastSwitch;
+    state.encoderRestarts = previous.encoderRestarts;
+    return state;
+}
+
+/**
+ * OPT-066: a re-sent request that would move a running stream to a different private-codec choice
+ * within MinSwitchInterval of the last switch waits (the anti-flap rule). A move to standard AVC is
+ * never held (the client's own decoder-failure fallback, the baseline), nor is the first choice.
+ */
+inline bool resendWouldFlap(const State &previous, const Choice &chosen, Clock::time_point now)
+{
+    return previous.current && previous.current->family != Family::Avc && !(chosen == *previous.current) && chosen.family != Family::Avc
+        && now - previous.lastSwitch < MinSwitchInterval;
+}
+
+struct ResentStep {
+    State state;
+    Decision decision;
+    bool held = false; ///< the new choice waits for the switch interval; the running one stays and step() applies the request later
+};
+
+/**
+ * OPT-066: one step for a request re-sent in the same stream (\a previous is the stream's State, with a
+ * current choice). The request is resolved on resentState(); when it lands on the choice already running,
+ * or would flap, \a previous itself is stepped (nothing the stream learned is lost: preset, frame-rate cap,
+ * link state), otherwise the new choice starts from the carried guard memory. \a in.adaptive is false for the
+ * resolution (the first choice never waits for a link measurement) and \a in is used as given for a held step.
+ */
+inline ResentStep stepResent(const State &previous, const Input &in, Clock::time_point now)
+{
+    ResentStep result;
+    State trial = resentState(previous);
+    const Decision resolved = step(trial, in, now);
+    if (previous.current && (resolved.choice == *previous.current || resendWouldFlap(previous, resolved.choice, now))) {
+        result.held = !(resolved.choice == *previous.current);
+        result.state = previous;
+        result.decision = step(result.state, in, now);
+        return result;
+    }
+    result.state = trial;
+    result.decision = resolved;
+    return result;
+}
+
+/**
  * AUD-FIX4 D3: the CPU guard's per-interval sample. It used to divide the process CPU time per
  * frame by every hardware thread (16 on Sol), so 0.70 of the budget meant ~11 busy cores and the
  * guard never fired, even with SVT-AV1 at 180 % CPU delivering 13-23 of 30 fps. KRdp cannot see

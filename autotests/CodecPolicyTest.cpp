@@ -1790,6 +1790,115 @@ private Q_SLOTS:
         QVERIFY(switches.size() <= 2 + 2 * retries.size() + 1);
     }
 
+    // ---- OPT-066: a request re-sent in the same stream (the live codec switch) -----------------------------------
+
+    // Drives Prefer/software-everything under heavy load until the guard has left AV1 and HEVC for AVC.
+    static void driveGuardToAvc(State &state, Input &in, Clock::time_point &now)
+    {
+        step(state, in, now);
+        const auto end = now + 5min;
+        while (now < end && !(state.current && state.current->family == Family::Avc)) {
+            now += 1500ms;
+            in.encodeLoadP95 = softwarePrivate(*state.current) ? 1.3 : 0.55;
+            step(state, in, now);
+        }
+    }
+
+    void aResentRequestKeepsWhatTheGuardHeldBack()
+    {
+        auto in = input(SoftwareEncoding::Prefer, softwareEverything());
+        State state;
+        auto now = T0;
+        driveGuardToAvc(state, in, now);
+        QCOMPARE(*state.current, (Choice{Family::Avc, false}));
+        const auto blockedUntil = state.softwareBlockedUntil;
+        const auto rejections = state.guardRejections;
+        QVERIFY(blockedUntil[size_t(Family::Av1)] > now);
+
+        // The client re-sends the same list a minute later (a chroma change, a UI edit): AV1 stays held back.
+        now += 60s;
+        in.adaptive = false;
+        in.encodeLoadP95.reset();
+        const auto resent = stepResent(state, in, now);
+        QCOMPARE(resent.decision.choice, (Choice{Family::Avc, false}));
+        QCOMPARE(resent.state.softwareBlockedUntil, blockedUntil);
+        QCOMPARE(resent.state.guardRejections, rejections);
+        QVERIFY(!resent.held);
+
+        // Without the carried memory (a fresh stream) the same request goes straight back to software AV1.
+        State fresh;
+        QCOMPARE(step(fresh, in, now).choice, (Choice{Family::Av1, false}));
+    }
+
+    void aResentRequestForTheRunningChoiceChangesNothing()
+    {
+        auto in = input(SoftwareEncoding::Auto, hal());
+        State state;
+        auto now = T0;
+        QCOMPARE(step(state, in, now).choice, (Choice{Family::Av1, true}));
+        state.guardFrameRate = 24; // the guard's frame-rate cap on the running encoder survives too
+        const auto before = state;
+        now += 3s;
+        in.adaptive = false;
+        const auto resent = stepResent(state, in, now);
+        QCOMPARE(resent.decision.choice, (Choice{Family::Av1, true}));
+        QVERIFY(!resent.decision.changed);
+        QVERIFY(!resent.held);
+        QCOMPARE(resent.state.guardFrameRate, before.guardFrameRate);
+        QCOMPARE(resent.state.lastSwitch, before.lastSwitch);
+    }
+
+    void aResentRequestThatSwitchesWaitsForTheAntiFlapInterval()
+    {
+        auto in = input(SoftwareEncoding::Auto, hal(), {Family::Hevc, Family::Av1});
+        State state;
+        auto now = T0;
+        QCOMPARE(step(state, in, now).choice, (Choice{Family::Av1, true}));
+        // 4 s later the client drops AV1 from its list: the first choice was 4 s ago, so the switch waits.
+        now += 4s;
+        auto next = input(SoftwareEncoding::Auto, hal(), {Family::Hevc});
+        next.adaptive = false;
+        const auto held = stepResent(state, next, now);
+        QVERIFY(held.held);
+        QCOMPARE(held.decision.choice, (Choice{Family::Av1, true}));
+        QVERIFY(!held.decision.changed);
+        QVERIFY(held.decision.reason.contains(u"waiting for the switch interval"));
+        QCOMPARE(*held.state.current, (Choice{Family::Av1, true})); // the running state is kept; the periodic step switches later
+        // Once the interval has passed the same request switches.
+        now = T0 + MinSwitchInterval + 1s;
+        const auto done = stepResent(state, next, now);
+        QVERIFY(!done.held);
+        QCOMPARE(done.decision.choice, (Choice{Family::Hevc, true}));
+        QCOMPARE(done.state.lastSwitch, now);
+        // ...and the periodic step on the held state reaches it by itself (no second request needed).
+        State kept = held.state;
+        QCOMPARE(step(kept, next, T0 + MinSwitchInterval + 1s).choice, (Choice{Family::Hevc, true}));
+    }
+
+    void aResentRequestForStandardAvcIsNeverHeld()
+    {
+        // The client's own decoder-failure fallback (`codec []`) must not wait.
+        auto in = input(SoftwareEncoding::Auto, hal());
+        State state;
+        auto now = T0;
+        step(state, in, now);
+        now += 2s;
+        auto avc = input(SoftwareEncoding::Auto, hal(), {});
+        avc.adaptive = false;
+        const auto resent = stepResent(state, avc, now);
+        QVERIFY(!resent.held);
+        QCOMPARE(resent.decision.choice.family, Family::Avc);
+        QVERIFY(resendWouldFlap(state, Choice{Family::Hevc, true}, now));
+        QVERIFY(!resendWouldFlap(state, Choice{Family::Avc, true}, now));
+        QVERIFY(!resendWouldFlap(state, Choice{Family::Av1, true}, now)); // the running choice
+        QVERIFY(!resendWouldFlap(State{}, Choice{Family::Hevc, true}, now)); // the first choice is never held
+        QVERIFY(!resendWouldFlap(state, Choice{Family::Hevc, true}, now + MinSwitchInterval + 1s)); // the interval has passed
+        State onAvc;
+        onAvc.current = Choice{Family::Avc, true};
+        onAvc.lastSwitch = now;
+        QVERIFY(!resendWouldFlap(onAvc, Choice{Family::Hevc, true}, now)); // starting a private codec from AVC is not a flap
+    }
+
     // D5: the back-off starts over once the content gets lighter: the running encoder stays under
     // PresetRecoverBelow for GuardForgiveAfter.
     void guardBackOffStartsOverWhenTheLoadDrops()
