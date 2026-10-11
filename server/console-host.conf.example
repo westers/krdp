@@ -6,6 +6,8 @@ FARSIDE_CONSOLE_CERTIFICATE_KEY=/etc/farside/console.key
 
 # Video quality cap and congestion adaptation. Adaptation defaults to false.
 #FARSIDE_CONSOLE_QUALITY=80
+# The highest quality a client may request for its own connection (0 = the same as QUALITY; a client never exceeds it).
+#FARSIDE_CONSOLE_CLIENT_QUALITY_MAX=0
 #FARSIDE_CONSOLE_ADAPTIVE_QUALITY=false
 #FARSIDE_CONSOLE_PREFER_AUDIO_QUALITY=false
 #FARSIDE_CONSOLE_STANDARD_CLIENT_MEDIA=true

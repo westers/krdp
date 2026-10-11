@@ -1640,6 +1640,20 @@ KRdp::CodecPolicy::SoftwareEncoding SessionController::softwareEncoding() const
     return m_softwareEncoding;
 }
 
+void SessionController::setClientQualityMax(int clientQualityMax)
+{
+    clientQualityMax = std::clamp(clientQualityMax, 0, 100);
+    if (m_clientQualityMax == clientQualityMax) {
+        return;
+    }
+    m_clientQualityMax = clientQualityMax;
+    for (const auto &wrapper : m_wrappers) {
+        if (wrapper && wrapper->connection) {
+            wrapper->connection->videoStream()->setClientQualityMax(m_clientQualityMax);
+        }
+    }
+}
+
 void SessionController::setAv1Tiles(int tiles)
 {
     if (m_av1Tiles == tiles) {
@@ -2358,6 +2372,7 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
     newConnection->videoStream()->setEncoderPolicy(encodersForBackend().encoders, m_softwareEncoding);
     newConnection->videoStream()->setEncoderLabels(encodersForBackend().labels);
     newConnection->videoStream()->setAv1TilesSetting(m_av1Tiles);
+    newConnection->videoStream()->setClientQualityMax(m_clientQualityMax);
     // Seeded from the controller's configured default; a client's own `chroma` (onControlChroma())
     // overrides it for this connection only, before any session is created (setSessions() applies
     // whatever wrapper->m_chromaPolicy holds at that point).

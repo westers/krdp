@@ -582,6 +582,10 @@ QVariantList BrokerHostSettings::definitions() const
         {.control = u"path"_s, .section = u"certificate"_s, .keepEmpty = true});
     add(u"Quality"_s, video, i18nc("@label", "Video quality"), i18nc("@info", "From 0 to 100. Higher values look sharper and use more bandwidth. People can choose their own value in My Preferences."), {},
         {.control = u"slider"_s, .section = u"picture"_s, .formLabel = i18nc("@label", "Image quality"), .min = 0, .max = 100});
+    // OPT-066: a Farside app can ask for its own picture quality for one connection; it never gets more than this.
+    add(u"ClientQualityMax"_s, video, i18nc("@label", "Highest quality an app may ask for"),
+        i18nc("@info", "From 0 to 100. A Farside app can choose its own picture quality for a connection; it never gets more than this value. 0 means the same as the video quality above. Raise it to let apps ask for a sharper picture than the default; apps that choose nothing keep the default."), {},
+        {.control = u"slider"_s, .section = u"picture"_s, .advanced = true, .formLabel = i18nc("@label", "Highest app quality"), .min = 0, .max = 100});
     add(u"AdaptiveQuality"_s, video, i18nc("@label", "Adapt quality to the connection"), i18nc("@info", "Lower the quality automatically when the connection cannot keep up."), boolean,
         {.section = u"picture"_s, .formLabel = i18nc("@label", "Adjust to connection")});
     // OPT-062 S3: what software may encode, per codec. Hardware encoders are always allowed; the choice of the people who connect

@@ -6,6 +6,8 @@ FARSIDE_VIRTUAL_CERTIFICATE=/etc/farside/virtual-host.crt
 FARSIDE_VIRTUAL_CERTIFICATE_KEY=/etc/farside/virtual-host.key
 
 #FARSIDE_VIRTUAL_QUALITY=80
+# The highest quality a client may request for its own connection (0 = the same as QUALITY; a client never exceeds it).
+#FARSIDE_VIRTUAL_CLIENT_QUALITY_MAX=0
 #FARSIDE_VIRTUAL_ADAPTIVE_QUALITY=false
 #FARSIDE_VIRTUAL_PREFER_AUDIO_QUALITY=false
 #FARSIDE_VIRTUAL_STANDARD_CLIENT_MEDIA=true

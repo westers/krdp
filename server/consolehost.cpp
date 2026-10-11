@@ -60,6 +60,7 @@ int main(int argc, char **argv)
     const QCommandLineOption runtimeOption(QStringLiteral("runtime-directory"), QStringLiteral("Host-owned worker socket directory."), QStringLiteral("path"), QStringLiteral("/run/farside-console"));
     const QCommandLineOption audioPriorityOption(QStringLiteral("prefer-audio-quality"), QStringLiteral("Default to audio-first congestion steering for the controlling client: true or false (live client overrides allowed)."), QStringLiteral("enabled"), QStringLiteral("false"));
     const QCommandLineOption qualityOption(QStringLiteral("quality"), QStringLiteral("Maximum video quality, 0 to 100."), QStringLiteral("quality"), QStringLiteral("80"));
+    const QCommandLineOption clientQualityMaxOption(QStringLiteral("client-quality-max"), QStringLiteral("Highest video quality a client may request, 0 to 100 (0 = same as --quality)."), QStringLiteral("quality"), QStringLiteral("0"));
     const QCommandLineOption adaptiveQualityOption(QStringLiteral("adaptive-quality"), QStringLiteral("Steer video quality under link congestion: true or false."), QStringLiteral("enabled"), QStringLiteral("false"));
     const QCommandLineOption standardMediaOption(QStringLiteral("standard-client-media"), QStringLiteral("Enable standard RDP audio and camera consent: true or false."), QStringLiteral("enabled"), QStringLiteral("true"));
     const QCommandLineOption cameraLoopbackOption(QStringLiteral("camera-loopback-device"), QStringLiteral("V4L2 loopback path in the desktop worker, or none."), QStringLiteral("path"), QStringLiteral("none"));
@@ -69,7 +70,7 @@ int main(int argc, char **argv)
     const QCommandLineOption softwareAv1Option(QStringLiteral("software-av1"), QStringLiteral("Software AV1 encoding: auto, allowed or never (OPT-062)."), QStringLiteral("ceiling"), QStringLiteral("auto"));
     const QCommandLineOption av1TilesOption(QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto"));
     const QCommandLineOption vaapiDriverOption(QStringLiteral("vaapi-driver"), QStringLiteral("VaapiDriverMode for the capture workers: auto, off, radeonsi, iHD or i965."), QStringLiteral("mode"), QStringLiteral("auto"));
-    parser.addOptions({workerOption, authenticationOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, qualityOption, adaptiveQualityOption, standardMediaOption, cameraLoopbackOption, softwareEncodingOption, softwareAvcOption, softwareHevcOption, softwareAv1Option, av1TilesOption, vaapiDriverOption});
+    parser.addOptions({workerOption, authenticationOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, qualityOption, clientQualityMaxOption, adaptiveQualityOption, standardMediaOption, cameraLoopbackOption, softwareEncodingOption, softwareAvcOption, softwareHevcOption, softwareAv1Option, av1TilesOption, vaapiDriverOption});
     parser.process(application);
 
     if (geteuid() != 0) {
@@ -86,6 +87,8 @@ int main(int argc, char **argv)
     const quint16 port = parser.value(portOption).toUShort(&portOk);
     bool qualityOk = false;
     const int quality = parser.value(qualityOption).toInt(&qualityOk);
+    bool clientQualityMaxOk = false;
+    const int clientQualityMax = parser.value(clientQualityMaxOption).toInt(&clientQualityMaxOk);
     const auto adaptiveValue = parser.value(adaptiveQualityOption);
     const auto audioPriorityValue = parser.value(audioPriorityOption);
     const auto standardMediaValue = parser.value(standardMediaOption);
@@ -96,7 +99,7 @@ int main(int argc, char **argv)
     const auto ceilingAv1 = KRdp::parseHostCeiling(parser.value(softwareAv1Option), KRdp::CodecPolicy::Family::Av1);
     const auto vaapiDriver = KRdp::VaapiDriverMode::normalize(parser.value(vaapiDriverOption));
     if (!portOk || port == 0 || parser.value(workerOption).isEmpty() || parser.value(certificateOption).isEmpty() || parser.value(keyOption).isEmpty()
-        || !qualityOk || quality < 0 || quality > 100
+        || !qualityOk || quality < 0 || quality > 100 || !clientQualityMaxOk || clientQualityMax < 0 || clientQualityMax > 100
         || (adaptiveValue != QLatin1String("true") && adaptiveValue != QLatin1String("false"))
         || (audioPriorityValue != QLatin1String("true") && audioPriorityValue != QLatin1String("false"))
         || (standardMediaValue != QLatin1String("true") && standardMediaValue != QLatin1String("false"))
@@ -151,6 +154,7 @@ int main(int argc, char **argv)
     KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding,
                                    KRdp::parseHostAv1Tiles(parser.value(av1TilesOption), "farside-console-host")};
     videoHost.ceiling = KRdp::resolveHostCeiling(*softwareEncoding, *ceilingAvc, *ceilingHevc, *ceilingAv1);
+    videoHost.clientQualityMax = clientQualityMax;
     qInfo().noquote() << "Console host video encoders:" << KRdp::EncoderSupport::describe(videoHost.probe) << "- SoftwareEncoding"
                       << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode) << "- software ceilings avc"
                       << KRdp::CodecPolicy::allowanceName(KRdp::CodecPolicy::Family::Avc, videoHost.ceiling->avc) << "hevc"

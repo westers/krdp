@@ -20,7 +20,7 @@ QList<Field> fields(Scope scope)
         {u"Port"_s, "PORT", scope == Scope::Console ? "3391" : "3395"},
         {u"Certificate"_s, "CERTIFICATE", scope == Scope::Console ? "/etc/farside/console.crt" : "/etc/farside/virtual-host.crt"},
         {u"CertificateKey"_s, "CERTIFICATE_KEY", scope == Scope::Console ? "/etc/farside/console.key" : "/etc/farside/virtual-host.key"},
-        {u"Quality"_s, "QUALITY", "80"}, {u"AdaptiveQuality"_s, "ADAPTIVE_QUALITY", "false"},
+        {u"Quality"_s, "QUALITY", "80"}, {u"ClientQualityMax"_s, "CLIENT_QUALITY_MAX", "0"}, {u"AdaptiveQuality"_s, "ADAPTIVE_QUALITY", "false"},
         {u"PreferAudioQuality"_s, "PREFER_AUDIO_QUALITY", "false"},
         {u"StandardClientMedia"_s, "STANDARD_CLIENT_MEDIA", "true"},
         {u"CameraLoopbackDevice"_s, "CAMERA_LOOPBACK_DEVICE", "none"},
@@ -170,11 +170,11 @@ std::optional<QString> normalize(Scope scope, const QString &key, const QString 
     if (key == u"Address") {
         QHostAddress address;
         if (value.trimmed() == value && address.setAddress(value) && !address.isNull()) return address.toString();
-    } else if (key == u"Port" || key == u"Quality") {
+    } else if (key == u"Port" || key == u"Quality" || key == u"ClientQualityMax") {
         static const QRegularExpression digits(u"^[0-9]{1,5}$"_s);
         if (!digits.match(value).hasMatch()) return {};
         const int number = value.toInt();
-        if ((key == u"Port" && number >= 1 && number <= 65535) || (key == u"Quality" && number <= 100)) return QString::number(number);
+        if ((key == u"Port" && number >= 1 && number <= 65535) || ((key == u"Quality" || key == u"ClientQualityMax") && number <= 100)) return QString::number(number);
     } else if (key == u"Certificate" || key == u"CertificateKey") {
         if (VirtualSessionLaunchPlan::absoluteCleanPath(value)) return value;
     } else if (key == u"CameraLoopbackDevice") {

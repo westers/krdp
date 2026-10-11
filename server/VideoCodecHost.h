@@ -29,6 +29,8 @@ struct VideoCodecHost {
     int av1Tiles = CodecPolicy::Av1TilesAutomatic;
     /// OPT-062 S3: the per-codec software ceiling (`--software-avc|hevc|av1`). Unset: derived from \a mode.
     std::optional<CodecPolicy::SoftwareAllowance> ceiling;
+    /// OPT-066: `--client-quality-max` / FARSIDE_*_CLIENT_QUALITY_MAX: the highest quality a client may request (0 = the same as Quality).
+    int clientQualityMax = 0;
 
     /// The software ceiling for one connection: the host's, tightened (never loosened) by the user's own SoftwareEncoding (spec C5).
     CodecPolicy::SoftwareAllowance allowance(std::optional<CodecPolicy::SoftwareEncoding> user = {}) const
@@ -50,6 +52,7 @@ struct VideoCodecHost {
         stream.setEncoderPolicy(probe.encoders, user.value_or(mode));
         stream.setEncoderLabels(probe.labels);
         stream.setSoftwareAllowance(allowance(user));
+        stream.setClientQualityMax(clientQualityMax);
     }
 };
 

@@ -1321,7 +1321,9 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             if (entry->connection && m_control.admitted(entry->id)) ++admitted;
         }
         auto *stream = connection->videoStream();
-        if (m_control.ownsControl(id) && admitted == 1 && m_control.admitted(id)) {
+        // OPT-066: the quality of the controlling connection applies, alone or not; a viewer's is echoed and ignored.
+        const bool controlling = m_control.ownsControl(id) && m_control.admitted(id);
+        if (controlling && admitted == 1) {
             QString log;
             replyTo(connection, CodecRequest::apply(*stream, *parsed, &log));
             client.codecApplied = true;
@@ -1329,6 +1331,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             return;
         }
         // Not (yet) alone in control: AVC now; the policy starts when it is (a push).
+        stream->requestClientQuality(parsed->quality, controlling);
         stream->setPrivateCodecPolicy({}, parsed->adaptive);
         replyTo(connection, LayoutControl::codecRecord(u"avc"_s, stream->encoderPolicy().avc.hardware,
             m_control.admitted(id) ? u"another client is watching this console: AVC for everyone"_s
@@ -2623,7 +2626,11 @@ void ConsoleHostController::syncCodecPolicy()
             client->codecApplied = true;
             qInfo().noquote() << "Console client" << client->id << log;
             sendRecord(client->connection, record); // unsolicited: it is alone and in control now
-        } else if (!eligible && client->codecApplied) {
+        } else if (client->codecRequest && !eligible) {
+            // OPT-066: not alone in control (or a viewer): AVC for everyone, but the controller's quality still applies.
+            stream->requestClientQuality(client->codecRequest->quality, owner && m_control.admitted(client->id));
+        }
+        if (!eligible && client->codecApplied) {
             client->codecApplied = false;
             stream->setPrivateCodecPolicy({}, client->codecRequest ? client->codecRequest->adaptive : true);
             const QString reason = owner ? u"another client is watching this console: AVC for everyone"_s

@@ -32,6 +32,12 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>The quality of the video stream</label>
       <default>75</default>
     </entry>
+    <entry name="ClientQualityMax" type="Int">
+      <label>The highest video quality a Farside client may ask for in its own connection (0 = the same as Quality). A client never gets more than this</label>
+      <default>0</default>
+      <min>0</min>
+      <max>100</max>
+    </entry>
     <entry name="AdaptiveQuality" type="Bool">
       <label>Steer the video quality from measured goodput and RTT, up to Quality as a cap</label>
       <default>true</default>

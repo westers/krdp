@@ -11,7 +11,7 @@ QString optionKey(const QString &name)
 {
     static const QMap<QString, QString> names{{u"address"_s, u"Address"_s}, {u"port"_s, u"Port"_s},
         {u"certificate"_s, u"Certificate"_s}, {u"certificate-key"_s, u"CertificateKey"_s},
-        {u"quality"_s, u"Quality"_s}, {u"adaptive-quality"_s, u"AdaptiveQuality"_s},
+        {u"quality"_s, u"Quality"_s}, {u"client-quality-max"_s, u"ClientQualityMax"_s}, {u"adaptive-quality"_s, u"AdaptiveQuality"_s},
         {u"prefer-audio-quality"_s, u"PreferAudioQuality"_s}, {u"standard-client-media"_s, u"StandardClientMedia"_s},
         {u"camera-loopback-device"_s, u"CameraLoopbackDevice"_s}, {u"software-encoding"_s, u"SoftwareEncoding"_s},
         {u"software-avc"_s, u"SoftwareAvc"_s}, {u"software-hevc"_s, u"SoftwareHevc"_s}, {u"software-av1"_s, u"SoftwareAv1"_s},

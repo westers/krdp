@@ -11,8 +11,9 @@ private Q_SLOTS:
     void completeFieldsAndScopedDefaults()
     {
         // OPT-062 S3 added SoftwareAvc, SoftwareHevc and SoftwareAv1 to Console and Virtual (a deliberate update of this pin).
-        QCOMPARE(keys(Scope::Console).size(), 15);
-        QCOMPARE(keys(Scope::Virtual).size(), 14);
+        // OPT-066 added ClientQualityMax to Console and Virtual (the highest quality a client may request).
+        QCOMPARE(keys(Scope::Console).size(), 16);
+        QCOMPARE(keys(Scope::Virtual).size(), 15);
         QCOMPARE(keys(Scope::VirtualSession).size(), 2);
         for (const auto scope : {Scope::Console, Scope::Virtual, Scope::VirtualSession}) {
             const auto values = defaults(scope);
@@ -151,6 +152,16 @@ private Q_SLOTS:
         QCOMPARE(parse(Scope::Console, "FARSIDE_CONSOLE_SOFTWARE_ENCODING=\n").overrides[u"SoftwareEncoding"_s].toString(), u"auto"_s);
         QCOMPARE(normalize(Scope::Console, u"AdaptiveQuality"_s, u"TRUE"_s), std::optional<QString>(u"true"_s));
         QCOMPARE(normalize(Scope::Console, u"Av1Tiles"_s, u"8"_s), std::optional<QString>(u"8"_s));
+        // OPT-066: 0 = same as Quality, up to 100; anything else is refused.
+        QCOMPARE(normalize(Scope::Console, u"ClientQualityMax"_s, u"0"_s), std::optional<QString>(u"0"_s));
+        QCOMPARE(normalize(Scope::Virtual, u"ClientQualityMax"_s, u"100"_s), std::optional<QString>(u"100"_s));
+        QVERIFY(!normalize(Scope::Console, u"ClientQualityMax"_s, u"101"_s));
+        QVERIFY(!normalize(Scope::Console, u"ClientQualityMax"_s, u"-1"_s));
+        QVERIFY(!normalize(Scope::Console, u"ClientQualityMax"_s, u"9x"_s));
+        QCOMPARE(defaults(Scope::Console)[u"ClientQualityMax"_s].toString(), u"0"_s);
+        QVERIFY(!keys(Scope::VirtualSession).contains(u"ClientQualityMax"_s));
+        QCOMPARE(environmentName(Scope::Console, u"ClientQualityMax"_s), u"FARSIDE_CONSOLE_CLIENT_QUALITY_MAX"_s);
+        QCOMPARE(environmentName(Scope::Virtual, u"ClientQualityMax"_s), u"FARSIDE_VIRTUAL_CLIENT_QUALITY_MAX"_s);
         QCOMPARE(normalize(Scope::Console, u"CameraLoopbackDevice"_s, u"/dev/v4l/by-id/loopback"_s), std::optional<QString>(u"/dev/v4l/by-id/loopback"_s));
         QCOMPARE(normalize(Scope::VirtualSession, u"RenderPci"_s, u"0000:01:00.0,0000:c5:00.0"_s), std::optional<QString>(u"0000:01:00.0,0000:c5:00.0"_s));
         for (const auto &value : {u"renderD128"_s, u"0000:20:20.0"_s, u"0000:01:00.8"_s,

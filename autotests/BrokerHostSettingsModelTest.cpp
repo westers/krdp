@@ -58,7 +58,7 @@ private Q_SLOTS:
                 QCOMPARE(!definition[u"unavailable"_s].toString().isEmpty(), model == &virtualHost && definition[u"key"_s].toString() == u"CameraLoopbackDevice");
             }
         }
-        QCOMPARE(total, 31); // OPT-062 S3: three software ceilings in each of Console and Virtual (was 25)
+        QCOMPARE(total, 33); // OPT-062 S3: three software ceilings in each of Console and Virtual (was 25); OPT-066: ClientQualityMax in each (was 31)
     }
     // OPT-062 S3: three software-ceiling rows on the Console and Virtual pages (Picture and Sound, not Advanced), a published
     // encoder probe, and a note source for codecs the host cannot encode in software.
@@ -123,7 +123,7 @@ private Q_SLOTS:
         QVERIFY(session.reload()); QTRY_VERIFY(!session.busy()); QVERIFY(session.loaded());
         const QVariantMap values{{u"Address"_s, u"::1"_s}, {u"Port"_s, u"3401"_s}, {u"Quality"_s, u"99"_s},
             {u"AdaptiveQuality"_s, u"true"_s}, {u"PreferAudioQuality"_s, u"true"_s}, {u"StandardClientMedia"_s, u"false"_s},
-            {u"CameraLoopbackDevice"_s, u"/dev/video10"_s}, {u"SoftwareEncoding"_s, u"prefer"_s}, {u"SoftwareAvc"_s, u"last-resort"_s}, {u"SoftwareHevc"_s, u"never"_s}, {u"SoftwareAv1"_s, u"allowed"_s}, {u"Av1Tiles"_s, u"8"_s},
+            {u"CameraLoopbackDevice"_s, u"/dev/video10"_s}, {u"SoftwareEncoding"_s, u"prefer"_s}, {u"SoftwareAvc"_s, u"last-resort"_s}, {u"SoftwareHevc"_s, u"never"_s}, {u"SoftwareAv1"_s, u"allowed"_s}, {u"Av1Tiles"_s, u"8"_s}, {u"ClientQualityMax"_s, u"95"_s},
             {u"Certificate"_s, u"/etc/farside/custom.crt"_s}, {u"CertificateKey"_s, u"/etc/farside/custom.key"_s},
             {u"VaapiDriver"_s, u"iHD"_s}, {u"RenderPci"_s, u"0000:01:00.0"_s}};
         int total = 0;
@@ -138,7 +138,7 @@ private Q_SLOTS:
             QTRY_VERIFY(!model->busy()); QVERIFY2(model->error().isEmpty(), qPrintable(model->error()));
             QVERIFY(!model->modified()); QVERIFY(model->applicationRequired());
         }
-        QCOMPARE(total, 31); QCOMPARE(console.values()[u"Port"_s].toString(), u"3401"_s);
+        QCOMPARE(total, 33); QCOMPARE(console.values()[u"Port"_s].toString(), u"3401"_s);
         QVERIFY(!virtualHost.setValue(u"CameraLoopbackDevice"_s, u"/dev/video1"_s));
         QVERIFY(!session.setValue(u"Port"_s, u"3389"_s)); QVERIFY(!session.chooseTls(u"import"_s));
         QVERIFY(console.setValue(u"Quality"_s, u"101"_s)); QVERIFY(console.modified()); QVERIFY(!console.canSave()); QVERIFY(!console.save());

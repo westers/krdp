@@ -533,6 +533,7 @@ int main(int argc, char **argv)
     controller.setCodecPreference(codecPreferenceFrom(config->codec()));
     controller.setSoftwareEncoding(softwareEncodingFrom(config->softwareEncoding()));
     controller.setAv1Tiles(av1TilesFrom(config->av1Tiles()));
+    controller.setClientQualityMax(config->clientQualityMax());
     // Which codecs this host can really encode, and how (AUD-FIX2 F1): after the VAAPI
     // driver choice above, once; the result goes into every `capabilities` and codec choice.
     KRdp::SystemdNotify::ping(); // K6.1: the encoder probe opens real devices and can be slow
@@ -583,6 +584,7 @@ int main(int argc, char **argv)
         controller.setCodecPreference(codecPreferenceFrom(config->codec()));
         controller.setSoftwareEncoding(softwareEncodingFrom(config->softwareEncoding()));
         controller.setAv1Tiles(av1TilesFrom(config->av1Tiles()));
+        controller.setClientQualityMax(config->clientQualityMax());
         const auto chromaPolicy = chromaPolicyFrom(config);
         controller.setChromaPolicyDefaults(chromaPolicy);
         controller.setWakeDisplayOnConnect(config->wakeDisplayOnConnect());

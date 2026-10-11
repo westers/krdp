@@ -107,6 +107,7 @@ private:
     bool attachmentMatches(const VirtualSessionRegistry::Handle &handle) const;
     bool authorized() const;
     bool authorized(std::optional<quint32> uid) const;
+    quint8 effectiveQualityCap() const;
     bool forwardVideoQuality(quint64 generation, quint8 quality, std::optional<quint32> uid);
     bool syncDisplayPolicy(quint64 generation, std::optional<quint32> uid);
     void restoreFixedVideoQuality(std::optional<quint32> uid);

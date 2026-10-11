@@ -40,6 +40,7 @@ int main(int argc, char **argv)
     parser.addOption({QStringLiteral("address"), QStringLiteral("Numeric listen address."), QStringLiteral("address"), QStringLiteral("0.0.0.0")});
     parser.addOption({QStringLiteral("port"), QStringLiteral("Listen port, independent of the physical-console listener."), QStringLiteral("port"), QStringLiteral("3395")});
     parser.addOption({QStringLiteral("quality"), QStringLiteral("Maximum video quality, 0 to 100."), QStringLiteral("quality"), QStringLiteral("80")});
+    parser.addOption({QStringLiteral("client-quality-max"), QStringLiteral("Highest video quality a client may request, 0 to 100 (0 = same as --quality)."), QStringLiteral("quality"), QStringLiteral("0")});
     parser.addOption({QStringLiteral("adaptive-quality"), QStringLiteral("Steer video quality under link congestion: true or false."), QStringLiteral("enabled"), QStringLiteral("false")});
     parser.addOption({QStringLiteral("prefer-audio-quality"), QStringLiteral("Default to audio-first congestion steering for the attached client: true or false (live client overrides allowed)."), QStringLiteral("enabled"), QStringLiteral("false")});
     parser.addOption({QStringLiteral("standard-client-media"), QStringLiteral("Enable standard RDP audio and camera consent: true or false."), QStringLiteral("enabled"), QStringLiteral("true")});
@@ -57,6 +58,8 @@ int main(int argc, char **argv)
     const auto port = parser.value(QStringLiteral("port")).toUShort(&validPort);
     bool validQuality = false;
     const int quality = parser.value(QStringLiteral("quality")).toInt(&validQuality);
+    bool validClientQualityMax = false;
+    const int clientQualityMax = parser.value(QStringLiteral("client-quality-max")).toInt(&validClientQualityMax);
     const auto adaptiveValue = parser.value(QStringLiteral("adaptive-quality"));
     const auto audioPriorityValue = parser.value(QStringLiteral("prefer-audio-quality"));
     const auto standardMediaValue = parser.value(QStringLiteral("standard-client-media"));
@@ -70,7 +73,7 @@ int main(int argc, char **argv)
     const auto ceilingAvc = KRdp::parseHostCeiling(parser.value(QStringLiteral("software-avc")), KRdp::CodecPolicy::Family::Avc);
     const auto ceilingHevc = KRdp::parseHostCeiling(parser.value(QStringLiteral("software-hevc")), KRdp::CodecPolicy::Family::Hevc);
     const auto ceilingAv1 = KRdp::parseHostCeiling(parser.value(QStringLiteral("software-av1")), KRdp::CodecPolicy::Family::Av1);
-    if (!parser.positionalArguments().isEmpty() || !validPort || !port || !validQuality || quality < 0 || quality > 100
+    if (!parser.positionalArguments().isEmpty() || !validPort || !port || !validQuality || quality < 0 || quality > 100 || !validClientQualityMax || clientQualityMax < 0 || clientQualityMax > 100
         || (adaptiveValue != QLatin1String("true") && adaptiveValue != QLatin1String("false")) || address.isNull() || !softwareEncoding || !ceilingAvc || !ceilingHevc || !ceilingAv1
         || (audioPriorityValue != QLatin1String("true") && audioPriorityValue != QLatin1String("false"))
         || (standardMediaValue != QLatin1String("true") && standardMediaValue != QLatin1String("false"))
@@ -121,6 +124,7 @@ int main(int argc, char **argv)
     KRdp::VideoCodecHost videoHost{KRdp::EncoderSupport::probe(), *softwareEncoding,
                                    KRdp::parseHostAv1Tiles(parser.value(QStringLiteral("av1-tiles")), "farside-virtual-host")};
     videoHost.ceiling = KRdp::resolveHostCeiling(*softwareEncoding, *ceilingAvc, *ceilingHevc, *ceilingAv1);
+    videoHost.clientQualityMax = clientQualityMax;
     qInfo().noquote() << "Virtual host video encoders:" << KRdp::EncoderSupport::describe(videoHost.probe) << "- SoftwareEncoding"
                       << KRdp::CodecPolicy::softwareEncodingName(videoHost.mode) << "- software ceilings avc"
                       << KRdp::CodecPolicy::allowanceName(KRdp::CodecPolicy::Family::Avc, videoHost.ceiling->avc) << "hevc"

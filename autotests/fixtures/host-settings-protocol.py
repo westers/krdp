@@ -43,7 +43,7 @@ defaults = {'RenderPci': '', 'VaapiDriver': 'auto'} if scope == 'session' else {
     'Address': '0.0.0.0', 'Port': '3391' if scope == 'console' else '3395',
     'Certificate': '/etc/farside/console.crt' if scope == 'console' else '/etc/farside/virtual-host.crt',
     'CertificateKey': '/etc/farside/console.key' if scope == 'console' else '/etc/farside/virtual-host.key',
-    'Quality': '80', 'AdaptiveQuality': 'false', 'PreferAudioQuality': 'false',
+    'Quality': '80', 'ClientQualityMax': '0', 'AdaptiveQuality': 'false', 'PreferAudioQuality': 'false',
     'StandardClientMedia': 'true', 'CameraLoopbackDevice': 'none', 'SoftwareEncoding': 'auto', 'SoftwareAvc': 'auto', 'SoftwareHevc': 'auto', 'SoftwareAv1': 'auto', 'Av1Tiles': 'auto'}
 if scope == 'console':
     defaults['VaapiDriver'] = 'auto'
