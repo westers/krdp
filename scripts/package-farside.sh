@@ -52,8 +52,10 @@ kpw_src=${KPIPEWIRE_SRC:-$HOME/dev/kpipewire}
 # v2 triggered by damage fraction (large short bursts count, tiny frames ignored, a held-back refresh is served)
 # + 05aa164, b25ff53, 43d09a5: debug logging only (one Info line per burst with damage and decision, the effective
 # encoder settings on every open, quality-change decisions, KPIPEWIRE_SETTLE_TRACE=1 per frame; test/diagnostic env knobs)
-# + 4cbae4c, 64433fa, 8bd5553: quieter logs (SVT-AV1 banner off unless KPIPEWIRE_SVT_VERBOSE=1, settle/probe detail at debug).
-kpw_ref=${KPIPEWIRE_REF:-8bd5553}
+# + 4cbae4c, 64433fa, 8bd5553: quieter logs (SVT-AV1 banner off unless KPIPEWIRE_SVT_VERBOSE=1, settle/probe detail at debug)
+# + fe08389: software re-feed (settle refresh, keyframe request, repeat timer) encodes the encoder's own downloaded picture,
+# not the PipeWire buffer that was returned to KWin.
+kpw_ref=${KPIPEWIRE_REF:-fe08389}
 jobs=${JOBS:-$(( $(nproc) / 3 ))}
 (( jobs >= 1 )) || jobs=1
 
