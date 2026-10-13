@@ -43,6 +43,9 @@ private Q_SLOTS:
     void consoleVirtualMappedPolicyRoundTripsAndIsStrict();
     void removeVirtualRecordsRequireOwnedName();
     void readOnlyTopologyRecordIsBounded();
+    void clipboardRecordsRoundTripAndAreBounded();
+    void clipboardGatesAreStrict();
+    void wireFifteenIsRefused();
 };
 
 void ConsoleWorkerWireTest::managedFitRecordsAreBoundedAndCorrelated()
@@ -554,7 +557,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(15));
+    QCOMPARE(ProtocolVersion, quint16(16));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -814,7 +817,7 @@ void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
     QCOMPARE(encoderStats(*deframer.next()), std::optional(measured));
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 0);
-    QCOMPARE(LastKind, Kind::HostScreensChanged);
+    QCOMPARE(LastKind, Kind::ClipboardSetResult);
 
     const auto rejected = [](const EncoderStats &stats) {
         Deframer d;
@@ -940,6 +943,191 @@ void ConsoleWorkerWireTest::roundTripsControlGeneration()
     QVERIFY(changed);
     QCOMPARE(controlState(*changed, Kind::HostScreensChanged), std::optional<ControlState>(sent));
     QVERIFY(!controlState(*changed, Kind::LocalTakeover)); // never mistaken for a takeover
+}
+
+
+// OPT-067 (wire 16): the six clipboard records.
+void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
+{
+    QCOMPARE(ProtocolVersion, quint16(16));
+    QCOMPARE(int(LastKind), int(Kind::ClipboardSetResult));
+    const ClipboardPolicy policy{7, 42, true, false, true, false};
+    const ClipboardOffer offer{3, 1};
+    const ClipboardRequest request{11, 4096};
+    const ClipboardData data{11, 3, ClipboardStatus::Ok, QStringLiteral("héllo\nwörld \U0001F600")};
+    const ClipboardSet set{12, 42, QStringLiteral("from the client\nline two")};
+    const ClipboardSetResult result{12, ClipboardSetStatus::Written};
+
+    Deframer deframer;
+    deframer.feed(frame(policy) + frame(offer) + frame(request) + frame(data) + frame(set) + frame(result));
+    const auto policyRecord = deframer.next();
+    const auto offerRecord = deframer.next();
+    const auto requestRecord = deframer.next();
+    const auto dataRecord = deframer.next();
+    const auto setRecord = deframer.next();
+    const auto resultRecord = deframer.next();
+    QVERIFY(policyRecord && offerRecord && requestRecord && dataRecord && setRecord && resultRecord);
+    QVERIFY(!deframer.next());
+    QCOMPARE(deframer.takeInvalidCount(), 0);
+    QCOMPARE(policyRecord->kind, Kind::ClipboardPolicy);
+    QCOMPARE(clipboardPolicy(*policyRecord), std::optional(policy));
+    QCOMPARE(clipboardOffer(*offerRecord), std::optional(offer));
+    QCOMPARE(clipboardRequest(*requestRecord), std::optional(request));
+    QCOMPARE(clipboardData(*dataRecord), std::optional(data));
+    QCOMPARE(clipboardSet(*setRecord), std::optional(set));
+    QCOMPARE(clipboardSetResult(*resultRecord), std::optional(result));
+    // A record is only ever read as its own kind.
+    QVERIFY(!clipboardOffer(*policyRecord) && !clipboardPolicy(*offerRecord) && !clipboardData(*setRecord) && !clipboardSet(*dataRecord));
+
+    // Truncation and trailing bytes.
+    for (const auto *record : {&*policyRecord, &*offerRecord, &*requestRecord, &*resultRecord}) {
+        auto shorter = *record;
+        shorter.payload.chop(1);
+        auto longer = *record;
+        longer.payload.append('x');
+        switch (record->kind) {
+        case Kind::ClipboardPolicy: QVERIFY(!clipboardPolicy(shorter) && !clipboardPolicy(longer)); break;
+        case Kind::ClipboardOffer: QVERIFY(!clipboardOffer(shorter) && !clipboardOffer(longer)); break;
+        case Kind::ClipboardRequest: QVERIFY(!clipboardRequest(shorter) && !clipboardRequest(longer)); break;
+        default: QVERIFY(!clipboardSetResult(shorter) && !clipboardSetResult(longer)); break;
+        }
+    }
+    auto shortData = *dataRecord;
+    shortData.payload.truncate(10);
+    QVERIFY(!clipboardData(shortData));
+    auto shortSet = *setRecord;
+    shortSet.payload.truncate(15);
+    QVERIFY(!clipboardSet(shortSet));
+
+    // Policy: revision 0, flag out of range, a greeter that offers its clipboard.
+    for (const auto &bad : {ClipboardPolicy{0, 1, true, true, false, false}, ClipboardPolicy{1, 1, true, false, false, true}}) {
+        Deframer d;
+        d.feed(frame(bad));
+        QVERIFY(!clipboardPolicy(*d.next()));
+    }
+    {
+        auto raw = *policyRecord;
+        raw.payload[16] = char(2);
+        QVERIFY(!clipboardPolicy(raw));
+    }
+    // A greeter's policy: client to host only is fine.
+    {
+        Deframer d;
+        d.feed(frame(ClipboardPolicy{1, 1, false, true, false, true}));
+        QVERIFY(clipboardPolicy(*d.next()));
+    }
+    // Offer: seq 0 and flags other than text are refused. Request: id 0, 0 bytes, more than the cap.
+    for (const auto &bad : {ClipboardOffer{0, 1}, ClipboardOffer{1, 0}, ClipboardOffer{1, 3}}) {
+        Deframer d;
+        d.feed(frame(bad));
+        QVERIFY(!clipboardOffer(*d.next()));
+    }
+    for (const auto &bad : {ClipboardRequest{0, 10}, ClipboardRequest{1, 0}, ClipboardRequest{1, MaxClipboardBytes + 1}}) {
+        Deframer d;
+        d.feed(frame(bad));
+        QVERIFY(!clipboardRequest(*d.next()));
+    }
+    // Data: id 0, a status out of range, text that is too large, text on a non-Ok status.
+    {
+        Deframer d;
+        d.feed(frame(ClipboardData{0, 1, ClipboardStatus::Empty, {}}));
+        QVERIFY(!clipboardData(*d.next()));
+        auto raw = *dataRecord;
+        raw.payload[16] = char(LastClipboardStatus + 1);
+        QVERIFY(!clipboardData(raw));
+        auto huge = *dataRecord;
+        huge.payload = huge.payload.left(17) + QByteArray(MaxClipboardBytes + 1, 'a');
+        QVERIFY(!clipboardData(huge));
+        auto limit = *dataRecord;
+        limit.payload = limit.payload.left(17) + QByteArray(MaxClipboardBytes, 'a');
+        QVERIFY(clipboardData(limit));
+        auto empty = frame(ClipboardData{5, 1, ClipboardStatus::Gone, QStringLiteral("must not travel")});
+        Deframer e;
+        e.feed(empty);
+        const auto goneRecord = e.next();
+        QVERIFY(goneRecord);
+        const auto gone = clipboardData(*goneRecord);
+        QVERIFY(gone);
+        QVERIFY(gone->text.isEmpty()); // frame() sends no text unless Ok
+        auto smuggled = *goneRecord;
+        smuggled.payload.append("secret");
+        QVERIFY(!clipboardData(smuggled));
+    }
+    // Set: id 0, generation 0, too large; an empty text is a valid "clear".
+    for (const auto &bad : {ClipboardSet{0, 1, {}}, ClipboardSet{1, 0, {}}}) {
+        Deframer d;
+        d.feed(frame(bad));
+        QVERIFY(!clipboardSet(*d.next()));
+    }
+    {
+        auto huge = *setRecord;
+        huge.payload = huge.payload.left(16) + QByteArray(MaxClipboardBytes + 1, 'a');
+        QVERIFY(!clipboardSet(huge));
+        Deframer d;
+        d.feed(frame(ClipboardSet{2, 1, {}}));
+        QVERIFY(clipboardSet(*d.next()));
+    }
+    // Result: id 0 and a status out of range.
+    {
+        auto raw = *resultRecord;
+        raw.payload[8] = char(3);
+        QVERIFY(!clipboardSetResult(raw));
+        Deframer d;
+        d.feed(frame(ClipboardSetResult{0, ClipboardSetStatus::Written}));
+        QVERIFY(!clipboardSetResult(*d.next()));
+    }
+    // The text on the wire is UTF-8, not UTF-16.
+    QVERIFY(frame(set).contains(QByteArray("from the client\nline two")));
+}
+
+void ConsoleWorkerWireTest::clipboardGatesAreStrict()
+{
+    const ControlState control{42, true};
+    const ClipboardPolicy both{5, 42, true, true, false, false};
+    const ClipboardSet set{9, 42, QStringLiteral("text")};
+    // A desktop worker writes with a policy that allows it, under the current generation, once per id.
+    QVERIFY(mayApplyClipboardSet(set, control, both, 8, true));
+    QVERIFY(!mayApplyClipboardSet(set, control, both, 9, true)); // repeated id
+    QVERIFY(!mayApplyClipboardSet(set, control, both, 10, true)); // older id
+    QVERIFY(!mayApplyClipboardSet({9, 41, set.text}, control, both, 8, true)); // stale generation
+    QVERIFY(!mayApplyClipboardSet(set, {42, false}, both, 8, true)); // control inactive
+    QVERIFY(!mayApplyClipboardSet(set, {0, true}, both, 8, true));
+    QVERIFY(!mayApplyClipboardSet(set, control, {5, 41, true, true, false, false}, 8, true)); // policy from another generation
+    QVERIFY(!mayApplyClipboardSet(set, control, {5, 42, true, false, false, false}, 8, true)); // client to host denied
+    QVERIFY(!mayApplyClipboardSet({9, 42, QString(MaxClipboardBytes + 1, QLatin1Char('a'))}, control, both, 8, true)); // too large
+    QVERIFY(mayApplyClipboardSet({9, 42, QString(MaxClipboardBytes, QLatin1Char('a'))}, control, both, 8, true));
+    // A greeter worker (not a desktop) needs a greeter policy; a desktop worker refuses one.
+    const ClipboardPolicy greeter{6, 42, false, true, false, true};
+    QVERIFY(mayApplyClipboardSet(set, control, greeter, 8, false));
+    QVERIFY(!mayApplyClipboardSet(set, control, greeter, 8, true));
+    QVERIFY(!mayApplyClipboardSet(set, control, both, 8, false));
+
+    const ClipboardRequest request{20, 1000};
+    QVERIFY(mayAnswerClipboardRequest(request, control, both, 19, true));
+    QVERIFY(!mayAnswerClipboardRequest(request, control, both, 20, true));
+    QVERIFY(!mayAnswerClipboardRequest(request, {42, false}, both, 19, true));
+    QVERIFY(!mayAnswerClipboardRequest(request, {43, true}, both, 19, true));
+    QVERIFY(!mayAnswerClipboardRequest(request, control, {5, 42, false, true, false, false}, 19, true));
+    QVERIFY(!mayAnswerClipboardRequest(request, control, greeter, 19, false)); // a greeter never answers
+    QVERIFY(!mayAnswerClipboardRequest(request, control, both, 19, false));
+
+    QVERIFY(mayOfferClipboard(both, true));
+    QVERIFY(!mayOfferClipboard({5, 42, false, true, false, false}, true));
+    QVERIFY(!mayOfferClipboard(both, false)); // not a desktop
+    QVERIFY(!mayOfferClipboard({5, 42, true, false, false, true}, false));
+}
+
+void ConsoleWorkerWireTest::wireFifteenIsRefused()
+{
+    // A worker (or broker) still on wire 15 meets a 16 peer: the whole record is refused and the peer is reported.
+    QByteArray old = frame(ClipboardOffer{1, 1});
+    old[4] = char(0);
+    old[5] = char(15);
+    Deframer deframer;
+    deframer.feed(old);
+    QVERIFY(!deframer.next());
+    QCOMPARE(deframer.takeInvalidCount(), 1);
+    QCOMPARE(deframer.mismatchedVersion(), std::optional<quint16>(15));
 }
 
 QTEST_GUILESS_MAIN(ConsoleWorkerWireTest)

@@ -61,7 +61,12 @@ namespace KRdp::ConsoleWorkerWire
 // 13 (OPT-054): native pointer capture policy and observed state.
 // 14 (OPT-060 M-2): EncoderConfig's Console temporary-output policy carries Layout::Mapped, the client monitors
 // (id, physical pixels, scale percent, primary) and the host-screen -> monitor mapping.
-constexpr quint16 ProtocolVersion = 15;
+// 16 (OPT-067): the text clipboard bridge. ClipboardPolicy (broker -> worker, the planner's decision),
+// ClipboardOffer (worker -> broker, a host copy happened, no contents), ClipboardRequest (broker -> worker, the
+// client pasted), ClipboardData (worker -> broker, the answer), ClipboardSet (broker -> worker, the client copied)
+// and ClipboardSetResult (worker -> broker). Offer/Data/SetResult are valid only after Ready. Contents are UTF-8
+// with LF line endings, at most MaxClipboardBytes, and are never logged.
+constexpr quint16 ProtocolVersion = 16;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -126,8 +131,15 @@ enum class Kind : quint8 {
     // Wire 15 (OPT-060 M-8): worker -> broker, payload ControlState. A host screen was plugged in while Replace was
     // live; the worker already restored the host's screens and continues as extend. Never loops: Replace is over.
     HostScreensChanged,
+    // Wire 16 (OPT-067): text clipboard bridge, see the version comment above.
+    ClipboardPolicy,
+    ClipboardOffer,
+    ClipboardRequest,
+    ClipboardData,
+    ClipboardSet,
+    ClipboardSetResult,
 };
-constexpr Kind LastKind = Kind::HostScreensChanged;
+constexpr Kind LastKind = Kind::ClipboardSetResult;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;
@@ -1185,6 +1197,241 @@ inline std::optional<ControlState> controlState(const Record &record, Kind kind 
     ControlState state;
     stream >> state.generation >> state.active;
     return stream.status() == QDataStream::Ok && stream.atEnd() ? std::optional<ControlState>(state) : std::nullopt;
+}
+
+
+// ---- OPT-067 text clipboard bridge (wire 16) ----
+/// Largest text (UTF-8 bytes) either direction carries on the worker wire.
+constexpr quint32 MaxClipboardBytes = 1024 * 1024;
+
+/** Broker -> worker: the planner's decision. Revision is endpoint-local and strictly increases. */
+struct ClipboardPolicy {
+    quint64 revision = 0;
+    quint64 controlGeneration = 0;
+    bool hostToClient = false;
+    bool clientToHost = false;
+    bool locked = false;
+    bool greeter = false;
+    bool operator==(const ClipboardPolicy &) const = default;
+};
+
+inline QByteArray frame(const ClipboardPolicy &policy)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << policy.revision << policy.controlGeneration << quint8(policy.hostToClient) << quint8(policy.clientToHost)
+           << quint8(policy.locked) << quint8(policy.greeter);
+    return frame(Kind::ClipboardPolicy, payload);
+}
+
+inline std::optional<ClipboardPolicy> clipboardPolicy(const Record &record)
+{
+    if (record.kind != Kind::ClipboardPolicy || record.payload.size() != 20) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    ClipboardPolicy policy;
+    quint8 flags[4] = {};
+    stream >> policy.revision >> policy.controlGeneration >> flags[0] >> flags[1] >> flags[2] >> flags[3];
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !policy.revision) return std::nullopt;
+    for (const auto flag : flags) if (flag > 1) return std::nullopt;
+    // A greeter never offers its clipboard to a client; a policy that says otherwise is malformed, not trusted.
+    if (flags[3] && flags[0]) return std::nullopt;
+    policy.hostToClient = flags[0];
+    policy.clientToHost = flags[1];
+    policy.locked = flags[2];
+    policy.greeter = flags[3];
+    return policy;
+}
+
+/** Worker -> broker: the host's clipboard changed. No contents, no length. */
+struct ClipboardOffer {
+    quint64 seq = 0;
+    quint8 flags = 1; // bit 0: text available
+    bool operator==(const ClipboardOffer &) const = default;
+};
+
+inline QByteArray frame(const ClipboardOffer &offer)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << offer.seq << offer.flags;
+    return frame(Kind::ClipboardOffer, payload);
+}
+
+inline std::optional<ClipboardOffer> clipboardOffer(const Record &record)
+{
+    if (record.kind != Kind::ClipboardOffer || record.payload.size() != 9) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    ClipboardOffer offer;
+    stream >> offer.seq >> offer.flags;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !offer.seq || offer.flags != 1) return std::nullopt;
+    return offer;
+}
+
+/** Broker -> worker: the client pasted; send the host's text as it is now. */
+struct ClipboardRequest {
+    quint64 requestId = 0;
+    quint32 maxBytes = MaxClipboardBytes;
+    bool operator==(const ClipboardRequest &) const = default;
+};
+
+inline QByteArray frame(const ClipboardRequest &request)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << request.requestId << request.maxBytes;
+    return frame(Kind::ClipboardRequest, payload);
+}
+
+inline std::optional<ClipboardRequest> clipboardRequest(const Record &record)
+{
+    if (record.kind != Kind::ClipboardRequest || record.payload.size() != 12) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    ClipboardRequest request;
+    stream >> request.requestId >> request.maxBytes;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !request.requestId
+        || !request.maxBytes || request.maxBytes > MaxClipboardBytes) return std::nullopt;
+    return request;
+}
+
+enum class ClipboardStatus : quint8 { Ok, Empty, Gone, TooLarge, Denied };
+constexpr quint8 LastClipboardStatus = quint8(ClipboardStatus::Denied);
+
+/** Worker -> broker: the answer to a ClipboardRequest. Only an Ok answer carries text. */
+struct ClipboardData {
+    quint64 requestId = 0;
+    quint64 seq = 0;
+    ClipboardStatus status = ClipboardStatus::Gone;
+    QString text; // LF line endings
+    bool operator==(const ClipboardData &) const = default;
+};
+
+namespace detail
+{
+constexpr qsizetype ClipboardTextHeader = 8 + 8 + 1;
+}
+
+inline QByteArray frame(const ClipboardData &data)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << data.requestId << data.seq << quint8(data.status);
+    if (data.status == ClipboardStatus::Ok) payload.append(data.text.toUtf8());
+    return frame(Kind::ClipboardData, payload);
+}
+
+inline std::optional<ClipboardData> clipboardData(const Record &record)
+{
+    using detail::ClipboardTextHeader;
+    if (record.kind != Kind::ClipboardData || record.payload.size() < ClipboardTextHeader
+        || record.payload.size() > ClipboardTextHeader + qsizetype(MaxClipboardBytes)) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    ClipboardData data;
+    quint8 status = 0;
+    stream >> data.requestId >> data.seq >> status;
+    if (stream.status() != QDataStream::Ok || !data.requestId || status > LastClipboardStatus) return std::nullopt;
+    data.status = ClipboardStatus(status);
+    const auto body = record.payload.mid(ClipboardTextHeader);
+    if (data.status != ClipboardStatus::Ok) return body.isEmpty() ? std::optional<ClipboardData>(data) : std::nullopt;
+    data.text = QString::fromUtf8(body);
+    return data;
+}
+
+/** Broker -> worker: the client copied this text. */
+struct ClipboardSet {
+    quint64 setId = 0;
+    quint64 controlGeneration = 0;
+    QString text; // LF line endings; empty clears the host clipboard
+    bool operator==(const ClipboardSet &) const = default;
+};
+
+inline QByteArray frame(const ClipboardSet &set)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << set.setId << set.controlGeneration;
+    payload.append(set.text.toUtf8());
+    return frame(Kind::ClipboardSet, payload);
+}
+
+inline std::optional<ClipboardSet> clipboardSet(const Record &record)
+{
+    constexpr qsizetype header = 16;
+    if (record.kind != Kind::ClipboardSet || record.payload.size() < header
+        || record.payload.size() > header + qsizetype(MaxClipboardBytes)) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    ClipboardSet set;
+    stream >> set.setId >> set.controlGeneration;
+    if (stream.status() != QDataStream::Ok || !set.setId || !set.controlGeneration) return std::nullopt;
+    set.text = QString::fromUtf8(record.payload.mid(header));
+    return set;
+}
+
+enum class ClipboardSetStatus : quint8 { Written, Denied, Failed };
+
+/** Worker -> broker: what became of a ClipboardSet. Counted and logged by the broker; never retried. */
+struct ClipboardSetResult {
+    quint64 setId = 0;
+    ClipboardSetStatus status = ClipboardSetStatus::Failed;
+    bool operator==(const ClipboardSetResult &) const = default;
+};
+
+inline QByteArray frame(const ClipboardSetResult &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.setId << quint8(result.status);
+    return frame(Kind::ClipboardSetResult, payload);
+}
+
+inline std::optional<ClipboardSetResult> clipboardSetResult(const Record &record)
+{
+    if (record.kind != Kind::ClipboardSetResult || record.payload.size() != 9) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    ClipboardSetResult result;
+    quint8 status = 0;
+    stream >> result.setId >> status;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !result.setId
+        || status > quint8(ClipboardSetStatus::Failed)) return std::nullopt;
+    result.status = ClipboardSetStatus(status);
+    return result;
+}
+
+/**
+ * The gates the worker applies before it touches the host clipboard, as pure functions (the style of
+ * mayApplyQuality). \a desktop is the worker's own knowledge: a greeter worker (not an authenticated desktop)
+ * additionally needs policy.greeter, a desktop worker needs it false, so a broker mistake cannot make a
+ * desktop write look like a greeter write or the reverse.
+ */
+inline bool mayApplyClipboardSet(const ClipboardSet &set, const ControlState &control, const ClipboardPolicy &policy,
+                                 quint64 lastSetId, bool desktop)
+{
+    return control.active && control.generation != 0 && set.controlGeneration == control.generation
+        && policy.controlGeneration == control.generation && policy.clientToHost && policy.greeter == !desktop
+        && quint64(set.text.toUtf8().size()) <= MaxClipboardBytes && set.setId > lastSetId;
+}
+
+inline bool mayAnswerClipboardRequest(const ClipboardRequest &request, const ControlState &control, const ClipboardPolicy &policy,
+                                      quint64 lastRequestId, bool desktop)
+{
+    return control.active && policy.controlGeneration == control.generation && policy.hostToClient && !policy.greeter && desktop
+        && request.requestId > lastRequestId;
+}
+
+inline bool mayOfferClipboard(const ClipboardPolicy &policy, bool desktop)
+{
+    return policy.hostToClient && !policy.greeter && desktop;
 }
 
 struct Output {

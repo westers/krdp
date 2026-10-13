@@ -99,6 +99,12 @@ public:
         }
     }
 
+    /** OPT-067: a clipboard record (offer, data, set result). Valid only after Ready; dropped before it, never held. */
+    void clipboard(const QByteArray &record)
+    {
+        if (m_readySent) m_writer(record);
+    }
+
     void pointerState(const QByteArray &record)
     {
         if (!m_helloSent) return;

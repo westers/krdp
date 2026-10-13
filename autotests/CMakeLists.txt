@@ -410,6 +410,18 @@ target_include_directories(ConsoleWorkerWireTest PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_link_libraries(ConsoleWorkerWireTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME ConsoleWorkerWireTest COMMAND ConsoleWorkerWireTest)
 
+# OPT-067: the clipboard planner and the worker's host-clipboard logic (a fake host, no compositor).
+add_executable(ConsoleClipboardPolicyTest ConsoleClipboardPolicyTest.cpp)
+target_include_directories(ConsoleClipboardPolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleClipboardPolicyTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME ConsoleClipboardPolicyTest COMMAND ConsoleClipboardPolicyTest)
+
+add_executable(HostClipboardTest HostClipboardTest.cpp)
+target_include_directories(HostClipboardTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(HostClipboardTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
+add_test(NAME HostClipboardTest COMMAND HostClipboardTest)
+set_tests_properties(HostClipboardTest PROPERTIES TIMEOUT 60)
+
 add_executable(ConsoleVirtualOutputPlanTest ConsoleVirtualOutputPlanTest.cpp)
 target_include_directories(ConsoleVirtualOutputPlanTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
 target_link_libraries(ConsoleVirtualOutputPlanTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
