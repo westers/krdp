@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2023 Arjen Hiemstra <ahiemstra@heimr.nl>
 # SPDX-License-Identifier: BSD-2-Clause
 
-set(PROJECT_VERSION "6.6.80")
+# Farside server release version. The deb version is "1:" + this + "-1" (scripts/package-farside.sh);
+# the git revision is build information (KRDP_BUILD_REVISION), not part of the version.
+set(PROJECT_VERSION "0.10.0")
 
 cmake_minimum_required(VERSION 3.16)
 
@@ -37,6 +39,10 @@ option(BUILD_PLASMA_SESSION "Build support for Plasma Screencasting extensions" 
 option(INSTALL_DIAGNOSTIC_PROBES "Install the krdp-*-probe diagnostic tools (they are always built)" OFF)
 option(KRDP_BUILD_CONSOLE_TEST_PACKAGE "Stage the paired isolated Console test deb" OFF)
 option(KRDP_BUILD_VIRTUAL_TEST_PACKAGE "Stage the paired isolated virtual-session test deb" OFF)
+set(KRDP_BUILD_REVISION "" CACHE STRING "Git short revision shown next to the version (set by scripts/package-farside.sh)")
+if(KRDP_BUILD_REVISION)
+    add_compile_definitions(KRDP_BUILD_REVISION="${KRDP_BUILD_REVISION}")
+endif()
 option(KRDP_BUILD_SYSTEM_PACKAGE "Install layout of the krdp system deb (set only by scripts/package-krdp.sh)" OFF)
 
 find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED Core Quick Gui Network DBus WaylandClient Qml)

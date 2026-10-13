@@ -273,7 +273,12 @@ int main(int argc, char **argv)
     // Ensure Wayland privilege checks resolve to the installed desktop file.
     application.setDesktopFileName(u"io.github.westers.farside.server"_s);
 
-    KAboutData about(u"farside-server"_s, u"Farside Server"_s, QStringLiteral(KRdp_VERSION_STRING));
+#ifdef KRDP_BUILD_REVISION
+    const QString versionString = QStringLiteral(KRdp_VERSION_STRING " (git " KRDP_BUILD_REVISION ")");
+#else
+    const QString versionString = QStringLiteral(KRdp_VERSION_STRING);
+#endif
+    KAboutData about(u"farside-server"_s, u"Farside Server"_s, versionString);
     about.setOrganizationDomain("westers.github.io");
     about.setDesktopFileName(u"io.github.westers.farside.server"_s);
     KAboutData::setApplicationData(about);

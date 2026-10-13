@@ -78,8 +78,9 @@ kpw_commit=$(git -C "$kpw_src" rev-parse --verify "$kpw_ref^{commit}")
 # Reproducible: timestamps and the version come from the commit, not the clock.
 export SOURCE_DATE_EPOCH=$(git -C "$root" log -1 --format=%ct "$commit")
 project_version=$(sed -n 's/^set(PROJECT_VERSION "\([0-9.]*\)")/\1/p' "$root/CMakeLists.txt")
-stamp=$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y%m%d%H%M)
-version="$project_version+git$stamp.$revision-1"
+# Real versions (OPT-068): epoch 1 sorts above the old "6.6.80+git<stamp>.<sha>-1" versions. The
+# git revision is build information (changelog, KRDP_BUILD_REVISION, candidate folder), not the version.
+version="1:$project_version-1"
 export TZ=UTC LC_ALL=C.UTF-8
 
 # Distro hardening/reproducibility flags (-ffile-prefix-map, relro, ...).
@@ -115,7 +116,7 @@ cmake -S "$build/src" -B "$build/farside-build" -G Ninja \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DKDE_INSTALL_USE_QT_SYS_PATHS=ON \
     -DKDE_SKIP_RPATH_SETTINGS=TRUE -DCMAKE_INSTALL_RPATH="$privdir" \
-    -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF \
+    -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF -DKRDP_BUILD_REVISION="$revision" \
     -DINSTALL_DIAGNOSTIC_PROBES=OFF \
     -DKRDP_BUILD_SYSTEM_PACKAGE=ON \
     -DKPipeWire_DIR="$kpw_libdir/cmake/KPipeWire" \
@@ -205,7 +206,7 @@ chmod 0644 "$pkgroot/DEBIAN/md5sums"
 # Normalise modes and timestamps, then build.
 find "$pkgroot" -type d -exec chmod 0755 {} +
 find "$pkgroot" -newermt "@$SOURCE_DATE_EPOCH" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
-deb="$build/farside-server_${version}_$(dpkg --print-architecture).deb"
+deb="$build/farside-server_${version#*:}_$(dpkg --print-architecture).deb"
 rm -f "${build:?}"/farside-server_*.deb
 dpkg-deb --root-owner-group -Zxz --build "$pkgroot" "$deb"
 

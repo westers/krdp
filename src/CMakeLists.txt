@@ -132,7 +132,7 @@ target_link_libraries(KRdp PRIVATE PkgConfig::AVCodec)
 
 set_target_properties(KRdp PROPERTIES
     VERSION ${PROJECT_VERSION}
-    SOVERSION ${PROJECT_VERSION_MAJOR}
+    SOVERSION 1
 )
 
 if(KRDP_BUILD_SYSTEM_PACKAGE)
