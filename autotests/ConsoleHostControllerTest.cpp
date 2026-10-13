@@ -1243,6 +1243,7 @@ private Q_SLOTS:
         QTest::addColumn<QString>("reason");
         QTest::newRow("restore request") << u"restore"_s << u"restoreRequest"_s;
         QTest::newRow("desk input") << u"desk"_s << u"deskInput"_s;
+        QTest::newRow("shortcut reclaim") << u"shortcut"_s << u"deskInput"_s; // wire 17: not the workerExit default
         QTest::newRow("worker exit") << u"worker"_s << u"workerExit"_s;
         QTest::newRow("disconnect") << u"disconnect"_s << u"disconnect"_s;
     }
@@ -1283,12 +1284,17 @@ private Q_SLOTS:
             host.onControlRecord(&connection, clientId, QJsonObject{{u"type"_s, u"console-screens-restore"_s}, {u"v"_s, 1}, {u"requestId"_s, u"r"_s}});
         } else if (how == u"desk"_s) {
             host.physicalInputActivity();
+        } else if (how == u"shortcut"_s) {
+            Q_EMIT host.m_endpoint.localReclaim(host.m_controlGeneration + 1); // a stale generation changes nothing
+            QVERIFY(!client.replaceEnding);
+            Q_EMIT host.m_endpoint.localReclaim(host.m_controlGeneration);
+            QVERIFY(client.replaceEnding);
         } else if (how == u"worker"_s) {
             host.clearPhysicalLease("test worker exit");
         } else {
             host.removeClient(&connection);
         }
-        if (how == u"restore"_s || how == u"desk"_s) {
+        if (how == u"restore"_s || how == u"desk"_s || how == u"shortcut"_s) {
             QCOMPARE(screens().size(), 1); // told when the worker has released the temporary outputs
             Q_EMIT host.m_endpoint.physicalLeaseReleased({host.m_controlGeneration, true});
         }

@@ -437,6 +437,12 @@ target_include_directories(ConsoleWorkerEndpointTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(ConsoleWorkerEndpointTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
 add_test(NAME ConsoleWorkerEndpointTest COMMAND ConsoleWorkerEndpointTest)
 
+# OPT-055 wave 2: the Console worker heartbeat watchdog (pure verdict + endpoint over a local socket).
+add_executable(ConsoleWorkerWatchdogTest ConsoleWorkerWatchdogTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
+target_include_directories(ConsoleWorkerWatchdogTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(ConsoleWorkerWatchdogTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
+add_test(NAME ConsoleWorkerWatchdogTest COMMAND ConsoleWorkerWatchdogTest)
+
 # FIX-CURSOR: the cursor shape tracker, the worker wire's Cursor record, the outbox and the endpoint.
 add_executable(CursorShapeTest CursorShapeTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
 target_include_directories(CursorShapeTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)

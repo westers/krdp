@@ -186,11 +186,10 @@ private Q_SLOTS:
         QCOMPARE(stop->kind, ConsoleWorkerWire::Kind::Stop);
     }
 
-    // OPT-060 M-2/M-8: broker and worker ship together. A worker still speaking the previous wire (15, no clipboard records
-    // policy) is dropped and backed off like any other foreign version, never half-served.
+    // OPT-060 M-2/M-8: broker and worker ship together. A worker still speaking the previous wire (16, no heartbeat or LocalReclaim records) is dropped and backed off like any other foreign version, never half-served.
     void previousWireVersionIsRefused()
     {
-        QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(16));
+        QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(17));
         QTemporaryDir runtime;
         Server server;
         FakeLauncher launcher;
@@ -208,6 +207,52 @@ private Q_SLOTS:
         host.workerExited(launch.socket);
         QVERIFY(host.m_retryTimer.isActive());
         QCOMPARE(host.m_retryTimer.interval(), 1000);
+    }
+
+    // OPT-055 wave 2: a worker that authenticated and then went silent (hung, not exited) is stopped, killed through
+    // the existing drain/kill deadlines, and replaced after the usual backoff. No false verdict before the threshold.
+    void hungWorkerIsStoppedKilledAndReplaced()
+    {
+        QTemporaryDir runtime;
+        Server server;
+        FakeLauncher launcher;
+        ConsoleHostController host(&server, launcher.functions(), runtime.path());
+        host.m_drainDeadline.setInterval(40);
+        host.m_killDeadline.setInterval(40);
+        qint64 now = 1000;
+        host.m_endpoint.setWatchdogClock([&] { return now; });
+        host.m_endpoint.setWatchdogInterval(3600 * 1000); // driven by hand below
+        host.setSeatSessions({user(QStringLiteral("3"), Me)});
+        QCOMPARE(launcher.launches.size(), 1);
+        const auto launch = launcher.launches.last();
+        QLocalSocket worker;
+        worker.connectToServer(launch.socket);
+        QVERIFY(worker.waitForConnected(1000));
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), Me, launch.token}));
+        QVERIFY(worker.waitForBytesWritten(1000));
+        QTRY_VERIFY(host.m_endpoint.authenticated());
+
+        const int ticks = ConsoleWorkerWire::HeartbeatHungAfterMs / ConsoleWorkerWire::HeartbeatIntervalMs;
+        for (int i = 1; i < ticks; ++i) {
+            now += ConsoleWorkerWire::HeartbeatIntervalMs;
+            host.m_endpoint.watchdogTick();
+        }
+        QVERIFY(host.m_endpoint.authenticated()); // still trusted one beat before the threshold
+        QVERIFY(launcher.signals_.isEmpty());
+        QVERIFY(!host.m_retryTimer.isActive());
+
+        now += ConsoleWorkerWire::HeartbeatIntervalMs;
+        host.m_endpoint.watchdogTick(); // the verdict
+        QTRY_COMPARE(worker.state(), QLocalSocket::UnconnectedState);
+        QTRY_COMPARE(launcher.signals_, (QList<int>{SIGTERM, SIGKILL})); // the hung process ignores Stop: the deadlines kill it
+        host.workerExited(launch.socket); // reaped
+        QVERIFY(!host.m_workerAlive);
+        QVERIFY(host.m_retryTimer.isActive()); // crash semantics: backed off, not relaunched in a loop
+        QCOMPARE(host.m_retryTimer.interval(), 1000);
+        host.m_retryTimer.stop();
+        host.retryWorker(); // fire the (injected) retry clock
+        QCOMPARE(launcher.launches.size(), 2);
+        QVERIFY(launcher.launches.last().socket != launch.socket); // a fresh per-launch socket
     }
 
     void versionMismatchBacksOff()

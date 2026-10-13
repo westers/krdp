@@ -13,6 +13,8 @@
 #include <QTimer>
 
 #include "ConsoleHandoff.h"
+#include "ConsoleWorkerWatchdog.h"
+#include <functional>
 #include <QJsonObject>
 #include "ConsoleWorkerWire.h"
 
@@ -106,6 +108,19 @@ public:
      */
     bool setClipboardPolicy(quint64 controlGeneration, bool hostToClient, bool clientToHost, bool locked, bool greeter);
     std::optional<ConsoleWorkerWire::ClipboardPolicy> clipboardPolicy() const { return m_clipboardPolicy; }
+
+    /**
+     * OPT-055 wave 2: the watchdog check the endpoint's timer runs every HeartbeatIntervalMs once the worker has
+     * authenticated. Public so tests can drive it with setWatchdogClock(); on a Hung verdict it logs, emits
+     * workerUnresponsive() and drops the socket.
+     */
+    void watchdogTick();
+    /// Off by default: only the Console broker enforces it (the Virtual broker's watchdog is a separate item). The
+    /// worker sends heartbeats either way, and every endpoint accepts them.
+    void setWatchdogEnabled(bool enabled) { m_watchdogEnabled = enabled; }
+    /// Tests only: the monotonic clock (ms) the watchdog reads, and the timer period (0 = leave the timer off).
+    void setWatchdogClock(std::function<qint64()> clock) { m_watchdogClock = std::move(clock); }
+    void setWatchdogInterval(int milliseconds) { m_watchdogTimer.setInterval(milliseconds); }
     /** The client pasted: ask the worker for the host's text. Returns the request id, 0 = not sent (refused or backlogged). */
     quint64 requestClipboard(quint32 maxBytes = ConsoleWorkerWire::MaxClipboardBytes);
     /** The client copied \a text. Returns the set id, 0 = not sent. Ids are endpoint-wide and never reused. */
@@ -121,6 +136,10 @@ Q_SIGNALS:
     void outputsReceived(const KRdp::ConsoleWorkerWire::Outputs &outputs);
     void topologyReceived(const KRdp::ConsoleWorkerWire::Topology &topology);
     void localTakeover(quint64 generation);
+    /** OPT-055 wave 2: the authenticated worker was silent for \a silentMs (no record at all); its socket is already being dropped. */
+    void workerUnresponsive(qint64 silentMs);
+    /** Wire 17: the user's reclaim shortcut ended Replace at the worker (the broker reports deskInput). */
+    void localReclaim(quint64 generation);
     /** M-8: the worker restored the host's screens because a host screen was added (wire 15). */
     void hostScreensChanged(quint64 generation);
     void resizeFinished(const KRdp::ConsoleWorkerWire::ResizeResult &result);
@@ -177,6 +196,11 @@ private:
     quint64 m_keyFrameRequests = 0;
     quint64 m_reclaimRequests = 0;
     QTimer m_authenticationDeadline;
+    ConsoleWorkerWatchdog m_watchdog;
+    bool m_watchdogEnabled = false;
+    QTimer m_watchdogTimer;
+    std::function<qint64()> m_watchdogClock;
+    qint64 watchdogNow() const;
     std::optional<ConsoleWorkerWire::EncoderCaps> m_encoderCaps;
     QVector<ConsoleWorkerWire::EncoderReport> m_earlyReports;
     qint64 m_workerCpuNs = -1;

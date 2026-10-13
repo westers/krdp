@@ -119,6 +119,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     , m_runtimeDirectory(std::move(runtimeDirectory))
 {
     Q_ASSERT(m_server);
+    m_endpoint.setWatchdogEnabled(true); // OPT-055 wave 2: a hung Console worker is replaced
     m_uidOf = [](RdpConnection *connection) -> std::optional<quint32> {
         return connection ? connection->authenticatedUserUid() : std::nullopt;
     };
@@ -570,6 +571,23 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     connect(&m_endpoint, &ConsoleWorkerEndpoint::versionMismatch, this, [](quint16 version) {
         qWarning().noquote() << "Console worker speaks wire version" << version << "but this broker speaks"
                              << ConsoleWorkerWire::ProtocolVersion << "- install the paired broker and worker together";
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::workerUnresponsive, this, [this](qint64 silentMs) {
+        // OPT-055 wave 2: a hung worker never answers Stop. Same recovery as a failed one: stop (Stop, then the drain
+        // and kill deadlines SIGKILL it), close the endpoint, and let workerExited() start a replacement after backoff.
+        qInfo() << "Console worker unresponsive for" << silentMs << "ms: stopping it so a fresh worker can start";
+        setWorkerActive(false);
+        stopCurrentWorker();
+        m_endpoint.close();
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::localReclaim, this, [this](quint64 generation) {
+        // Wire 17: the user's reclaim shortcut ended Replace at the worker, who is at the desk. Same as desk input.
+        if (generation != m_controlGeneration) return;
+        for (const auto &client : m_clients) {
+            if (!replaceAttemptLive(*client) || client->replaceEnding) continue;
+            client->replaceEnding = true;
+            client->screensEndReason = u"deskInput"_s;
+        }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::protocolError, this, [this](const QString &message) {
         qWarning().noquote() << "Console worker protocol error:" << message;

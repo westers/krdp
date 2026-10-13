@@ -252,7 +252,7 @@ public:
             m_reclaimAction.setProperty("componentName", QStringLiteral("farside-console-worker"));
             m_reclaimAction.setProperty("componentDisplayName", QStringLiteral("KRDP Physical Console"));
             m_reclaimAction.setEnabled(false);
-            connect(&m_reclaimAction, &QAction::triggered, this, &Worker::reclaimConsole);
+            connect(&m_reclaimAction, &QAction::triggered, this, [this] { reclaimConsole(true); });
             const QKeySequence shortcut(Qt::META | Qt::CTRL | Qt::ALT | Qt::Key_T);
             KGlobalAccel::self()->setDefaultShortcut(&m_reclaimAction, {shortcut});
             KGlobalAccel::self()->setShortcut(&m_reclaimAction, {shortcut});
@@ -267,6 +267,13 @@ public:
             }
         });
         m_encoderLoadTimer.start();
+        // OPT-055 wave 2: this event loop is what writes the socket, so a heartbeat from it says the loop turns. The
+        // broker treats a worker silent for HeartbeatHungAfterMs as hung and replaces it.
+        m_heartbeatTimer.setInterval(ConsoleWorkerWire::HeartbeatIntervalMs);
+        connect(&m_heartbeatTimer, &QTimer::timeout, this, [this] {
+            if (m_socket.state() == QLocalSocket::ConnectedState) m_outbox.heartbeat();
+        });
+        m_heartbeatTimer.start();
         // STATS-S6: EncoderStats once a second while the controlling connection's client is
         // subscribed to stats (EncoderConfig::statsWanted); the outbox never sends one before Ready.
         m_encoderStatsTimer.setInterval(ConsoleWorkerWire::EncoderStatsIntervalMs);
@@ -3248,13 +3255,17 @@ private:
         if (!beginConsoleCreatorRelease()) shutdown(1);
     }
 
-    void reclaimConsole()
+    // \a byShortcut: the user's reclaim shortcut (the broker's own ReclaimConsole request is the other caller).
+    void reclaimConsole(bool byShortcut = false)
     {
         if (!m_mode.physicalActions() || !m_control.active) {
             return;
         }
         if (m_creatorReleaseActive || m_creatorReleaseFinished) return; // already ending: the desk reports every input event
         if (m_consoleVirtualPlan && m_consoleVirtualPlan->replace && (!m_consoleVirtualApplied || m_consoleVirtualReplaced)) {
+            // Wire 17: say why Replace ends, so the broker reports deskInput and not the workerExit it defaults to.
+            if (byShortcut && m_socket.state() == QLocalSocket::ConnectedState)
+                m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalReclaim));
             endReplaceByRelease();
             return;
         }
@@ -3726,6 +3737,7 @@ private:
     KWinPointerCapture m_pointerCapture;
     ConsoleInputState m_inputState;
     QElapsedTimer m_clock;
+    QTimer m_heartbeatTimer;
     QAction m_reclaimAction;
     ConsoleWorkerWire::ControlState m_control;
     ConsoleResizeSession m_resize;
