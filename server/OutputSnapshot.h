@@ -279,7 +279,8 @@ inline QStringList replaceArgs(const QVector<Output> &physical, const QVector<Pl
  * callbacks for good when the physical output was disabled in the same
  * configuration that moved the virtual output onto its place (3 of 3 runs;
  * the old form is still the fallback). With the physical output parked first
- * and disabled 100 ms later the page kept its frame rate (6 of 6 runs).
+ * and disabled 100 ms later the page kept its frame rate (6 of 6 shim runs, then
+ * 5 of 5 on the real build, one of them 190 s).
  * The park position is far enough right that nothing overlaps the virtual
  * outputs, whatever their width (each is at most ClientDisplay::MaxDimension).
  */
