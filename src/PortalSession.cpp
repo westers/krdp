@@ -20,6 +20,7 @@
 #include <KSharedConfig>
 #include <KSystemClipboard>
 
+#include "InputMapping.h"
 #include "PortalSession_p.h"
 #include "VideoFrame.h"
 #include "krdp_logging.h"
@@ -232,14 +233,8 @@ void PortalSession::sendEvent(const std::shared_ptr<QEvent> &event)
     case QEvent::MouseButtonPress:
     case QEvent::MouseButtonRelease: {
         auto me = std::static_pointer_cast<QMouseEvent>(event);
-        int button = 0;
-        if (me->button() == Qt::LeftButton) {
-            button = BTN_LEFT;
-        } else if (me->button() == Qt::MiddleButton) {
-            button = BTN_MIDDLE;
-        } else if (me->button() == Qt::RightButton) {
-            button = BTN_RIGHT;
-        } else {
+        const int button = evdevButtonFromQt(me->button());
+        if (!button) {
             qCWarning(KRDP) << "Unsupported mouse button" << me->button();
             return;
         }
