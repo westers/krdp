@@ -20,6 +20,7 @@ target_sources(KRdp PRIVATE
     AbstractSession.cpp
     Clipboard.cpp
     Clipboard.h
+    ClipboardLimits.h
     ClipboardText.h
     RdpConnection.cpp
     Server.cpp

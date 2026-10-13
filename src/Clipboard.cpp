@@ -16,6 +16,7 @@
 #include <atomic>
 #include <mutex>
 
+#include "ClipboardLimits.h"
 #include "ClipboardText.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
@@ -48,6 +49,9 @@ public:
     struct FormatDataResponse {
         uint16_t msgFlags = 0;
         QByteArray data;
+        // OPT-067: the client declared more than ClipboardLimits::MaxWireBytes; the bytes were not copied.
+        bool oversize = false;
+        uint32_t declaredLength = 0;
     };
 
     void onClientFormatList(const FormatList &formatList);
@@ -66,6 +70,26 @@ public:
     std::atomic<bool> closing = false;
 
     const QMimeData *serverData = nullptr;
+
+    // OPT-067 (Console and Virtual bridge). Main-thread state.
+    bool ownsContext = true;
+    bool hostToClientAllowed = true;
+    bool clientToHostAllowed = true;
+    bool hostAnnounced = false; // delayed rendering: the host has text; none of it is held here
+    bool announcedToClient = false; // a format list for it is out on the wire
+    quint64 nextHostRequestId = 0;
+    quint64 pendingHostRequest = 0; // the client's data request waiting for the worker
+    bool discardClientResponse = false; // a request was reset away; its answer is dropped
+    QTimer hostRequestTimer; // HostTextTimeoutMs
+    QTimer announceTimer; // HostAnnounceIntervalMs coalescing
+    QElapsedTimer lastAnnounce;
+    QElapsedTimer clock;
+    ClipboardLimits::RateLimit rate;
+    bool rateEpisodeLogged = false;
+    Counters counters;
+    void sendFailResponse();
+    void respondWithText(const QString &hostText);
+    void refused(const char *reason, const char *direction, quint64 bytes);
     std::unique_ptr<QMimeData> clientData;
     // The format id of the one data request sent for the client's last format
     // list, so the response can be decoded as what was asked for: UTF-16 for
@@ -154,7 +178,11 @@ public:
         FormatDataResponse packet;
         if (formatDataResponse) {
             packet.msgFlags = formatDataResponse->common.msgFlags;
-            if (formatDataResponse->requestedFormatData && formatDataResponse->common.dataLen > 0) {
+            packet.declaredLength = formatDataResponse->common.dataLen;
+            if (formatDataResponse->common.dataLen > ClipboardLimits::MaxWireBytes) {
+                // OPT-067: never copy what the client declared beyond the cap.
+                packet.oversize = true;
+            } else if (formatDataResponse->requestedFormatData && formatDataResponse->common.dataLen > 0) {
                 packet.data = QByteArray(reinterpret_cast<const char *>(formatDataResponse->requestedFormatData), qsizetype(formatDataResponse->common.dataLen));
             }
         }
@@ -167,6 +195,23 @@ Clipboard::Clipboard(RdpConnection *session)
     , d(std::make_unique<Private>(this))
 {
     d->session = session;
+    d->clock.start();
+
+    d->hostRequestTimer.setSingleShot(true);
+    d->hostRequestTimer.setInterval(HostTextTimeoutMs);
+    connect(&d->hostRequestTimer, &QTimer::timeout, this, [this]() {
+        if (!d->pendingHostRequest) {
+            return;
+        }
+        d->pendingHostRequest = 0;
+        ++d->counters.refusedTimeout;
+        d->refused("timeout", "host-to-client", 0);
+        d->sendFailResponse();
+    });
+    d->announceTimer.setSingleShot(true);
+    connect(&d->announceTimer, &QTimer::timeout, this, [this]() {
+        sendServerData();
+    });
 
     d->settleTimer.setSingleShot(true);
     d->settleTimer.setInterval(FormatListSettleMs);
@@ -192,11 +237,21 @@ Clipboard::Clipboard(RdpConnection *session)
 
 Clipboard::~Clipboard()
 {
+    const auto &c = d->counters;
+    if (c.announces || c.served || c.clientCopies || c.refusedPolicy || c.refusedOversize || c.refusedRate || c.refusedTimeout || c.refusedBusy) {
+        // Counts only, never contents (OPT-067).
+        qCInfo(KRDP).nospace() << "Clipboard: closed announces=" << c.announces << " served=" << c.served << " clientCopies=" << c.clientCopies
+                               << " refused(policy=" << c.refusedPolicy << " oversize=" << c.refusedOversize << " rate=" << c.refusedRate
+                               << " timeout=" << c.refusedTimeout << " busy=" << c.refusedBusy << ") bytes(host=" << c.hostBytes
+                               << " client=" << c.clientBytes << ")";
+    }
     // setServerData() took ownership of the last announcement; every earlier
     // one was freed by its successor.
     delete d->serverData;
     if (auto *context = d->clipContext.exchange(nullptr)) {
-        cliprdr_server_context_free(context);
+        if (d->ownsContext) {
+            cliprdr_server_context_free(context);
+        }
     }
 }
 
@@ -295,12 +350,19 @@ void Clipboard::setGraphicsDelivered()
 
 void Clipboard::sendServerData()
 {
-    if (!d->serverData) {
+    if (!d->serverData && !d->hostAnnounced) {
         return;
     }
     if (!d->graphicsDelivered) {
         // AUD-FIX5: announced once the client has its picture (setGraphicsDelivered()).
         d->pendingServerAnnounce = true;
+        return;
+    }
+    if (!d->serverData && d->lastAnnounce.isValid() && d->lastAnnounce.elapsed() < HostAnnounceIntervalMs) {
+        // OPT-067: at most one format list per HostAnnounceIntervalMs; the newest copy goes out then.
+        if (!d->announceTimer.isActive()) {
+            d->announceTimer.start(HostAnnounceIntervalMs - int(d->lastAnnounce.elapsed()));
+        }
         return;
     }
     d->pendingServerAnnounce = false;
@@ -316,8 +378,13 @@ void Clipboard::sendServerData()
     formatList.formats = &format;
     std::lock_guard lock(d->sendMutex);
     if (auto *context = d->clipContext.load(); context && d->enabled) {
-        d->lastServerText = ClipboardText::toHost(d->serverData->text());
+        if (d->serverData) {
+            d->lastServerText = ClipboardText::toHost(d->serverData->text());
+        }
         d->serverClipboardActivity.start();
+        d->lastAnnounce.start();
+        d->announcedToClient = true;
+        ++d->counters.announces;
         context->ServerFormatList(context, &formatList);
     }
 }
@@ -362,6 +429,12 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
         context->ServerFormatListResponse(context, &response);
     }
 
+    if (!clientToHostAllowed) {
+        // OPT-067: the planner denies the client's copies in this state (acknowledged, never requested).
+        qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats; the client to host direction is not allowed now";
+        pendingFormat = 0;
+        return;
+    }
     if (wanted == 0) {
         qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats, none of them text; not requesting data";
         pendingFormat = 0; // what an earlier list offered is gone
@@ -444,25 +517,47 @@ void Clipboard::Private::requestPending()
     responseTimer.start();
 }
 
-void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &formatDataRequest)
+void Clipboard::Private::sendFailResponse()
 {
     std::lock_guard lock(sendMutex);
     auto *context = clipContext.load();
     if (!context || !enabled) {
         return;
     }
-    if (!serverData || formatDataRequest.requestedFormatId != CF_UNICODETEXT) {
-        CLIPRDR_FORMAT_DATA_RESPONSE response = {};
-        response.common.msgType = CB_FORMAT_DATA_RESPONSE;
-        response.common.msgFlags = CB_RESPONSE_FAIL;
-        response.common.dataLen = 0;
-        response.requestedFormatData = nullptr;
-        context->ServerFormatDataResponse(context, &response);
+    CLIPRDR_FORMAT_DATA_RESPONSE response = {};
+    response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+    response.common.msgFlags = CB_RESPONSE_FAIL;
+    response.common.dataLen = 0;
+    response.requestedFormatData = nullptr;
+    context->ServerFormatDataResponse(context, &response);
+}
+
+void Clipboard::Private::refused(const char *reason, const char *direction, quint64 bytes)
+{
+    // One Info line per refusal, counts only (OPT-067).
+    qCInfo(KRDP).nospace() << "Clipboard: refused (" << reason << ") direction=" << direction << " bytes=" << bytes;
+}
+
+// Called with sendMutex NOT held; the context is checked under it.
+void Clipboard::Private::respondWithText(const QString &hostText)
+{
+    std::lock_guard lock(sendMutex);
+    auto *context = clipContext.load();
+    if (!context || !enabled) {
         return;
     }
-
     // CF_UNICODETEXT is CRLF on the wire and requires null-terminated UTF-16LE.
-    const auto text = ClipboardText::toWire(serverData->text());
+    const auto text = ClipboardText::toWire(hostText);
+    if (qint64(text.length() + 1) * 2 > ClipboardLimits::MaxWireBytes) {
+        // OPT-067: the CRLF form of a text near the cap can pass the wire cap; refuse it, like an oversize text.
+        ++counters.refusedOversize;
+        refused("oversize", "host-to-client", quint64((text.length() + 1) * 2));
+        CLIPRDR_FORMAT_DATA_RESPONSE refusal = {};
+        refusal.common.msgType = CB_FORMAT_DATA_RESPONSE;
+        refusal.common.msgFlags = CB_RESPONSE_FAIL;
+        context->ServerFormatDataResponse(context, &refusal);
+        return;
+    }
     QByteArray utf16Data(reinterpret_cast<const char *>(text.utf16()), (text.length() + 1) * 2);
 
     CLIPRDR_FORMAT_DATA_RESPONSE response = {};
@@ -472,9 +567,38 @@ void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &form
     response.requestedFormatData = reinterpret_cast<const BYTE *>(utf16Data.constData());
 
     qCDebug(KRDP) << "Serving host clipboard text to the client:" << text.length() << "characters";
-    lastServerText = ClipboardText::toHost(serverData->text());
+    lastServerText = ClipboardText::toHost(hostText);
     serverClipboardActivity.start();
+    ++counters.served;
+    counters.hostBytes += quint64(hostText.toUtf8().size());
     context->ServerFormatDataResponse(context, &response);
+}
+
+void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &formatDataRequest)
+{
+    if (hostAnnounced) {
+        // OPT-067: delayed rendering. The text is fetched from the worker now, not read from a copy.
+        if (formatDataRequest.requestedFormatId != CF_UNICODETEXT || !hostToClientAllowed) {
+            ++counters.refusedPolicy;
+            sendFailResponse();
+            return;
+        }
+        if (pendingHostRequest) {
+            ++counters.refusedBusy;
+            refused("busy", "host-to-client", 0);
+            sendFailResponse();
+            return;
+        }
+        pendingHostRequest = ++nextHostRequestId;
+        hostRequestTimer.start();
+        Q_EMIT q->hostTextRequested(pendingHostRequest);
+        return;
+    }
+    if (!serverData || formatDataRequest.requestedFormatId != CF_UNICODETEXT) {
+        sendFailResponse();
+        return;
+    }
+    respondWithText(serverData->text());
 }
 
 void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &formatDataResponse)
@@ -489,6 +613,21 @@ void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &fo
     const auto next = qScopeGuard([this]() {
         requestPending();
     });
+
+    if (discardClientResponse) {
+        // OPT-067: the request was reset away (denial, handover); its answer is not wanted.
+        discardClientResponse = false;
+        return;
+    }
+    if (!clientToHostAllowed) {
+        ++counters.refusedPolicy;
+        return;
+    }
+    if (formatDataResponse.oversize) {
+        ++counters.refusedOversize;
+        refused("oversize", "client-to-host", formatDataResponse.declaredLength);
+        return;
+    }
 
     if (!(formatDataResponse.msgFlags & CB_RESPONSE_OK)) {
         qCDebug(KRDP) << "Client refused the clipboard data request for format" << requestedClientFormat;
@@ -517,9 +656,26 @@ void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &fo
         }
     }
 
+    const quint64 utf8Bytes = quint64(text.toUtf8().size());
+    if (utf8Bytes > quint64(ClipboardLimits::MaxTextBytes)) {
+        ++counters.refusedOversize;
+        refused("oversize", "client-to-host", utf8Bytes);
+        return;
+    }
+    if (!rate.accept(clock.elapsed(), qint64(utf8Bytes))) {
+        ++counters.refusedRate;
+        if (!rateEpisodeLogged) {
+            rateEpisodeLogged = true;
+            refused("rate", "client-to-host", utf8Bytes);
+        }
+        return;
+    }
+    rateEpisodeLogged = false;
+
     if (text.isEmpty()) {
         qCDebug(KRDP) << "Client clipboard text is empty";
         clientData.reset();
+        ++counters.clientCopies;
         Q_EMIT q->clientDataChanged();
         return;
     }
@@ -534,6 +690,113 @@ void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &fo
     clientData.reset(new QMimeData());
     clientData->setText(ClipboardText::toHost(text));
     qCDebug(KRDP) << "Client clipboard text received:" << clientData->text().length() << "characters";
+    ++counters.clientCopies;
+    counters.clientBytes += utf8Bytes;
     Q_EMIT q->clientDataChanged();
+}
+
+void Clipboard::setDirections(bool hostToClient, bool clientToHost)
+{
+    const bool hostWas = d->hostToClientAllowed;
+    const bool clientWas = d->clientToHostAllowed;
+    d->hostToClientAllowed = hostToClient;
+    d->clientToHostAllowed = clientToHost;
+    if (hostWas && !hostToClient) {
+        resetHostSide();
+    }
+    if (clientWas && !clientToHost) {
+        resetClientSide();
+    }
+}
+
+bool Clipboard::hostToClientAllowed() const
+{
+    return d->hostToClientAllowed;
+}
+
+bool Clipboard::clientToHostAllowed() const
+{
+    return d->clientToHostAllowed;
+}
+
+void Clipboard::announceHostText()
+{
+    if (d->closing || !d->hostToClientAllowed) {
+        return;
+    }
+    d->hostAnnounced = true;
+    // The text the client may have of the previous copy is no longer the host's.
+    d->lastServerText = QString();
+    sendServerData();
+}
+
+void Clipboard::provideHostText(quint64 requestId, const QString &text, bool ok)
+{
+    if (d->closing || !requestId || requestId != d->pendingHostRequest) {
+        return; // a late answer for a request that timed out or was reset
+    }
+    d->pendingHostRequest = 0;
+    d->hostRequestTimer.stop();
+    if (!ok || !d->hostToClientAllowed) {
+        ++d->counters.refusedPolicy;
+        d->sendFailResponse();
+        return;
+    }
+    d->respondWithText(text);
+}
+
+void Clipboard::resetHostSide()
+{
+    d->announceTimer.stop();
+    delete d->serverData;
+    d->serverData = nullptr;
+    const bool announced = d->announcedToClient;
+    d->hostAnnounced = false;
+    d->announcedToClient = false;
+    d->pendingServerAnnounce = false;
+    d->lastServerText = QString();
+    d->serverClipboardActivity = QElapsedTimer();
+    d->lastAnnounce = QElapsedTimer();
+    if (d->pendingHostRequest) {
+        d->pendingHostRequest = 0;
+        d->hostRequestTimer.stop();
+        d->sendFailResponse();
+    }
+    if (announced && !d->closing) {
+        // An empty format list withdraws the offer (MS-RDPECLIP 2.2.3.1).
+        CLIPRDR_FORMAT_LIST formatList = {};
+        formatList.common.msgType = CB_FORMAT_LIST;
+        formatList.common.msgFlags = 0;
+        formatList.numFormats = 0;
+        formatList.formats = nullptr;
+        std::lock_guard lock(d->sendMutex);
+        if (auto *context = d->clipContext.load(); context && d->enabled) {
+            context->ServerFormatList(context, &formatList);
+        }
+    }
+}
+
+void Clipboard::resetClientSide()
+{
+    d->clientData.reset();
+    d->pendingFormat = 0;
+    d->settleTimer.stop();
+    if (d->outstandingFormat != 0) {
+        d->outstandingFormat = 0;
+        d->responseTimer.stop();
+        d->discardClientResponse = true;
+    }
+}
+
+Clipboard::Counters Clipboard::counters() const
+{
+    return d->counters;
+}
+
+void Clipboard::attachContextForTest(CliprdrServerContext *context)
+{
+    d->ownsContext = false;
+    d->clipContext = context;
+    d->enabled = true;
 }
 }

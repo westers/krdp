@@ -34,6 +34,46 @@ public:
 
     void setServerData(const QMimeData *data);
 
+    // ---- OPT-067: the Console and Virtual bridge (delayed rendering) ----
+    // The host's clipboard lives in a worker process, not here. The host side announces that text
+    // exists (announceHostText), the client's paste raises hostTextRequested, and the text is
+    // handed back with provideHostText; nothing of the host's clipboard is held in between. All
+    // of this runs on the main thread. The in-process route above (setServerData) is unchanged.
+
+    /** Which directions the planner allows now. Going from allowed to denied resets that side. */
+    void setDirections(bool hostToClient, bool clientToHost);
+    bool hostToClientAllowed() const;
+    bool clientToHostAllowed() const;
+    /** The host copied text: tell the client (coalesced, at most one format list per HostAnnounceIntervalMs). */
+    void announceHostText();
+    /** The answer to hostTextRequested(\a requestId): \a text (host LF) when \a ok, a refusal otherwise. */
+    void provideHostText(quint64 requestId, const QString &text, bool ok);
+    /** Forget the host side: withdraw an announcement, fail a pending request. Handover, control change, denial. */
+    void resetHostSide();
+    /** Forget a half-received client copy and any request on the wire. */
+    void resetClientSide();
+    /** The client pasted: the host's text is wanted for \a requestId (answer with provideHostText()). */
+    Q_SIGNAL void hostTextRequested(quint64 requestId);
+
+    struct Counters {
+        quint64 announces = 0; ///< format lists sent for a host copy
+        quint64 served = 0; ///< host texts delivered to the client
+        quint64 refusedPolicy = 0;
+        quint64 refusedOversize = 0;
+        quint64 refusedRate = 0;
+        quint64 refusedTimeout = 0;
+        quint64 refusedBusy = 0;
+        quint64 clientCopies = 0; ///< client texts passed on
+        quint64 hostBytes = 0; ///< UTF-8 bytes of host text served
+        quint64 clientBytes = 0; ///< UTF-8 bytes of client text passed on
+    };
+    Counters counters() const;
+
+    /**
+     * Test seam: send through \a context (not owned, not freed) instead of a FreeRDP channel.
+     */
+    void attachContextForTest(CliprdrServerContext *context);
+
     Q_SIGNAL void clientDataChanged();
     std::unique_ptr<QMimeData> getClipboard() const;
 
@@ -66,6 +106,10 @@ public:
      * own text is taken for that text coming back, and not requested.
      */
     static constexpr int EchoWindowMs = 2000;
+    /// OPT-067: at most one format list for a host copy per this long.
+    static constexpr int HostAnnounceIntervalMs = 250;
+    /// OPT-067: how long the worker has to answer a paste.
+    static constexpr int HostTextTimeoutMs = 3000;
 
 private:
     void sendServerData();

@@ -658,6 +658,14 @@ target_link_libraries(RdpConnectionInitTest PRIVATE Qt6::Test Qt6::Core Qt6::Net
 add_test(NAME RdpConnectionInitTest COMMAND RdpConnectionInitTest)
 set_tests_properties(RdpConnectionInitTest PROPERTIES TIMEOUT 60)
 
+# OPT-067: the clipboard bridge's cliprdr side against a fake channel (delayed rendering, directions, caps, resets).
+add_executable(ClipboardBridgeTest ClipboardBridgeTest.cpp)
+target_include_directories(ClipboardBridgeTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(ClipboardBridgeTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(ClipboardBridgeTest PRIVATE Qt6::Test Qt6::Core KRdp)
+add_test(NAME ClipboardBridgeTest COMMAND ClipboardBridgeTest)
+set_tests_properties(ClipboardBridgeTest PROPERTIES TIMEOUT 90)
+
 # Links libKRdp: drives Clipboard's cliprdr callbacks from another thread.
 add_executable(ClipboardHandoffTest ClipboardHandoffTest.cpp)
 target_include_directories(ClipboardHandoffTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
