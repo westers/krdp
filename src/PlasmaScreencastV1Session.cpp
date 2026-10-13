@@ -37,6 +37,7 @@
 #include "screencasting_p.h"
 
 #include "EncoderSelection.h"
+#include "InputMapping.h"
 #include "PressedInputTracker.h"
 #include "ScreencastTarget.h"
 #include "StreamRecoveryPolicy.h"
@@ -1103,14 +1104,8 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
     case QEvent::MouseButtonPress:
     case QEvent::MouseButtonRelease: {
         auto me = std::static_pointer_cast<QMouseEvent>(event);
-        int button = 0;
-        if (me->button() == Qt::LeftButton) {
-            button = BTN_LEFT;
-        } else if (me->button() == Qt::MiddleButton) {
-            button = BTN_MIDDLE;
-        } else if (me->button() == Qt::RightButton) {
-            button = BTN_RIGHT;
-        } else {
+        const int button = evdevButtonFromQt(me->button());
+        if (!button) {
             qCWarning(KRDP) << "Unsupported mouse button" << me->button();
             return;
         }

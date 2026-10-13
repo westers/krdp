@@ -193,6 +193,10 @@ bool InputHandler::relativeMouseEvent(int16_t x, int16_t y, uint16_t flags)
         if (button != Qt::NoButton)
             Q_EMIT inputEvent(std::make_shared<RelativePointerEvent>(flags & PTR_FLAGS_DOWN ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease,
                 QPointF{}, button));
+        // TS_RELPOINTER_EVENT carries XBUTTON1/XBUTTON2 in the low bits (back/forward).
+        else if (flags & (PTR_XFLAGS_BUTTON1 | PTR_XFLAGS_BUTTON2))
+            Q_EMIT inputEvent(std::make_shared<RelativePointerEvent>(flags & PTR_FLAGS_DOWN ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease,
+                QPointF{}, flags & PTR_XFLAGS_BUTTON1 ? Qt::BackButton : Qt::ForwardButton));
     }
     return true;
 }

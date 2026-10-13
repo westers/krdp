@@ -1138,3 +1138,9 @@ target_include_directories(PlasmaScreencastUnavailableTest PRIVATE ${CMAKE_SOURC
 target_link_libraries(PlasmaScreencastUnavailableTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
 add_test(NAME PlasmaScreencastUnavailableTest COMMAND PlasmaScreencastUnavailableTest -platform offscreen)
 set_tests_properties(PlasmaScreencastUnavailableTest PROPERTIES TIMEOUT 60)
+
+# --- OPT-069 input parity (pure headers) ---
+add_executable(InputMappingTest InputMappingTest.cpp)
+target_include_directories(InputMappingTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(InputMappingTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME InputMappingTest COMMAND InputMappingTest)
