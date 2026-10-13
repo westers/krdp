@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "InputHandler.h"
+#include "LockKeySync.h"
 #include "RelativePointerEvent.h"
 
 #include <QKeyEvent>
@@ -84,6 +85,8 @@ class KRDP_NO_EXPORT InputHandler::Private
 public:
     RdpConnection *session;
     rdpInput *input;
+    // Caps/Num/Scroll lock state as the client reports it (OPT-069).
+    LockKeySync lockKeys;
 };
 
 InputHandler::InputHandler(KRdp::RdpConnection *session)
@@ -117,7 +120,13 @@ bool InputHandler::synchronizeEvent(uint32_t flags)
         return true;
     }
 
-    // TODO: This syncs caps/num/scroll lock keys, do we actually want to?
+    // Tap any lock key whose state differs from what the client reports (a lock
+    // toggled while its window had no focus) so Caps/Num/Scroll stay in step.
+    for (const auto keycode : d->lockKeys.synchronize(flags)) {
+        qCDebug(KRDP) << "Keyboard synchronize: toggling lock key" << keycode;
+        Q_EMIT inputEvent(std::make_shared<QKeyEvent>(QEvent::KeyPress, 0, Qt::KeyboardModifiers{}, keycode, 0, 0));
+        Q_EMIT inputEvent(std::make_shared<QKeyEvent>(QEvent::KeyRelease, 0, Qt::KeyboardModifiers{}, keycode, 0, 0));
+    }
     return true;
 }
 
@@ -251,6 +260,7 @@ bool InputHandler::keyboardEvent(uint16_t code, uint16_t flags)
 
     auto type = flags & KBD_FLAGS_RELEASE ? QEvent::KeyRelease : QEvent::KeyPress;
 
+    d->lockKeys.key(keycode, type == QEvent::KeyPress);
     auto event = std::make_shared<QKeyEvent>(type, 0, Qt::KeyboardModifiers{}, keycode, 0, 0);
     Q_EMIT inputEvent(event);
 

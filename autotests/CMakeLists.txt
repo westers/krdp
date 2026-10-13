@@ -1144,3 +1144,8 @@ add_executable(InputMappingTest InputMappingTest.cpp)
 target_include_directories(InputMappingTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(InputMappingTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME InputMappingTest COMMAND InputMappingTest)
+
+add_executable(LockKeySyncTest LockKeySyncTest.cpp)
+target_include_directories(LockKeySyncTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(LockKeySyncTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME LockKeySyncTest COMMAND LockKeySyncTest)
