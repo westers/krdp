@@ -223,6 +223,9 @@ KCM.SimpleKCM {
                 }
             }
 
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.host.sectionTitle("sharing") }
+            BrokerFieldRepeater { settings: root.host; section: "sharing"; busy: root.host.busy }
+
             Kirigami.Separator { visible: root.fixedScope === 0; Kirigami.FormData.isSection: true; Kirigami.FormData.label: i18nc("@title:group", "Displays") }
             RowLayout {
                 Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: root.fieldWidth

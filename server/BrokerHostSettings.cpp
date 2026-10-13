@@ -26,7 +26,8 @@ QList<Field> fields(Scope scope)
         {u"CameraLoopbackDevice"_s, "CAMERA_LOOPBACK_DEVICE", "none"},
         {u"SoftwareEncoding"_s, "SOFTWARE_ENCODING", "auto"},
         {u"SoftwareAvc"_s, "SOFTWARE_AVC", "auto"}, {u"SoftwareHevc"_s, "SOFTWARE_HEVC", "auto"}, {u"SoftwareAv1"_s, "SOFTWARE_AV1", "auto"},
-        {u"Av1Tiles"_s, "AV1_TILES", "auto"}};
+        {u"Av1Tiles"_s, "AV1_TILES", "auto"},
+        {u"ClipboardDirection"_s, "CLIPBOARD_DIRECTION", "both"}};
     if (scope == Scope::Console) result.append({u"VaapiDriver"_s, "VAAPI_DRIVER", "auto"});
     return result;
 }
@@ -191,6 +192,9 @@ std::optional<QString> normalize(Scope scope, const QString &key, const QString 
         if (const auto ceiling = CodecPolicy::parseCeilingSetting(value, family)) return QString::fromLatin1(CodecPolicy::ceilingSettingName(*ceiling, family));
     } else if (key == u"Av1Tiles") {
         if (const auto tiles = CodecPolicy::parseAv1Tiles(value)) return *tiles ? QString::number(*tiles) : u"auto"_s;
+    } else if (key == u"ClipboardDirection") {
+        // OPT-067: text clipboard bridge direction. Exactly the four spellings, no case folding.
+        if (value == u"both" || value == u"host-to-client" || value == u"client-to-host" || value == u"off") return value;
     } else if (key == u"VaapiDriver") {
         return VaapiDriverMode::normalize(value);
     } else if (key == u"RenderPci") {

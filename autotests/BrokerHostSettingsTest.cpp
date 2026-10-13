@@ -12,8 +12,9 @@ private Q_SLOTS:
     {
         // OPT-062 S3 added SoftwareAvc, SoftwareHevc and SoftwareAv1 to Console and Virtual (a deliberate update of this pin).
         // OPT-066 added ClientQualityMax to Console and Virtual (the highest quality a client may request).
-        QCOMPARE(keys(Scope::Console).size(), 16);
-        QCOMPARE(keys(Scope::Virtual).size(), 15);
+        // OPT-067 added ClipboardDirection to Console and Virtual (the text clipboard bridge's direction).
+        QCOMPARE(keys(Scope::Console).size(), 17);
+        QCOMPARE(keys(Scope::Virtual).size(), 16);
         QCOMPARE(keys(Scope::VirtualSession).size(), 2);
         for (const auto scope : {Scope::Console, Scope::Virtual, Scope::VirtualSession}) {
             const auto values = defaults(scope);
@@ -99,6 +100,7 @@ private Q_SLOTS:
                 {{u"Certificate"_s, u"relative.pem"_s}}, {{u"CertificateKey"_s, u"/root/../etc/file"_s}},
                 {{u"Address"_s, u"example.com"_s}}, {{u"Address"_s, u" ::1"_s}},
                 {{u"SoftwareEncoding"_s, u"invented"_s}}, {{u"Av1Tiles"_s, u"3"_s}},
+                {{u"ClipboardDirection"_s, u"sideways"_s}}, {{u"ClipboardDirection"_s, u"BOTH"_s}}, {{u"ClipboardDirection"_s, u"on"_s}},
                 {{u"SoftwareHevc"_s, u"last-resort"_s}}, {{u"SoftwareAvc"_s, u"never"_s}}, {{u"SoftwareAv1"_s, u"sometimes"_s}},
                 {{u"SoftwareAv1"_s, u"never\nINJECTION=1"_s}},
                 {{u"CameraLoopbackDevice"_s, u"/etc/file"_s}}, {{u"Certificate"_s, u"/etc/farside/console.key"_s}},
@@ -152,6 +154,20 @@ private Q_SLOTS:
         QCOMPARE(parse(Scope::Console, "FARSIDE_CONSOLE_SOFTWARE_ENCODING=\n").overrides[u"SoftwareEncoding"_s].toString(), u"auto"_s);
         QCOMPARE(normalize(Scope::Console, u"AdaptiveQuality"_s, u"TRUE"_s), std::optional<QString>(u"true"_s));
         QCOMPARE(normalize(Scope::Console, u"Av1Tiles"_s, u"8"_s), std::optional<QString>(u"8"_s));
+        // OPT-067: the clipboard bridge direction, exactly four spellings, on both routes only.
+        for (const auto &direction : {u"both"_s, u"host-to-client"_s, u"client-to-host"_s, u"off"_s}) {
+            QCOMPARE(normalize(Scope::Console, u"ClipboardDirection"_s, direction), std::optional<QString>(direction));
+            QCOMPARE(normalize(Scope::Virtual, u"ClipboardDirection"_s, direction), std::optional<QString>(direction));
+        }
+        for (const auto &bad : {u""_s, u"Both"_s, u"BOTH"_s, u"host_to_client"_s, u"on"_s, u"true"_s, u" both"_s, u"both "_s, u"both\nX=1"_s})
+            QVERIFY(!normalize(Scope::Console, u"ClipboardDirection"_s, bad));
+        QCOMPARE(defaults(Scope::Console)[u"ClipboardDirection"_s].toString(), u"both"_s);
+        QCOMPARE(defaults(Scope::Virtual)[u"ClipboardDirection"_s].toString(), u"both"_s);
+        QVERIFY(!keys(Scope::VirtualSession).contains(u"ClipboardDirection"_s));
+        QCOMPARE(environmentName(Scope::Console, u"ClipboardDirection"_s), u"FARSIDE_CONSOLE_CLIPBOARD_DIRECTION"_s);
+        QCOMPARE(environmentName(Scope::Virtual, u"ClipboardDirection"_s), u"FARSIDE_VIRTUAL_CLIPBOARD_DIRECTION"_s);
+        QCOMPARE(parse(Scope::Console, "FARSIDE_CONSOLE_CLIPBOARD_DIRECTION=client-to-host\n").effective[u"ClipboardDirection"_s].toString(), u"client-to-host"_s);
+        QVERIFY(!parse(Scope::Console, "FARSIDE_CONSOLE_CLIPBOARD_DIRECTION=sideways\n").error.isEmpty());
         // OPT-066: 0 = same as Quality, up to 100; anything else is refused.
         QCOMPARE(normalize(Scope::Console, u"ClientQualityMax"_s, u"0"_s), std::optional<QString>(u"0"_s));
         QCOMPARE(normalize(Scope::Virtual, u"ClientQualityMax"_s, u"100"_s), std::optional<QString>(u"100"_s));

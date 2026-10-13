@@ -553,6 +553,7 @@ QString BrokerHostSettings::sectionTitle(const QString &section) const
 {
     if (section == u"connection") return i18nc("@title:group", "Connection");
     if (section == u"picture") return i18nc("@title:group", "Picture and Sound");
+    if (section == u"sharing") return i18nc("@title:group", "Sharing");
     return {};
 }
 
@@ -613,6 +614,12 @@ QVariantList BrokerHostSettings::definitions() const
     add(u"StandardClientMedia"_s, media, i18nc("@label", "Media for other RDP apps"), i18nc("@info", "Lets other remote desktop apps send sound and devices. Each app must still ask for it."), boolean,
         {.section = u"picture"_s, .formLabel = i18nc("@label", "Media for other RDP apps"),
          .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Allow")}, {u"false"_s, i18nc("@item:inlistbox", "Block")}}});
+    // OPT-067: the text clipboard bridge. Console and Virtual only; the planner narrows it further by state.
+    add(u"ClipboardDirection"_s, i18nc("@title:group", "Sharing"), i18nc("@label", "Clipboard"),
+        i18nc("@info", "Copies plain text between your computer and the host. Nothing is shared on the login screen except pasting into it, and nothing is shared with another account's locked screen. Takes effect when the service restarts."),
+        {choice(u"both"_s, i18nc("@item:inlistbox", "Both ways")), choice(u"host-to-client"_s, i18nc("@item:inlistbox", "Host to client only")),
+         choice(u"client-to-host"_s, i18nc("@item:inlistbox", "Client to host only")), choice(u"off"_s, i18nc("@item:inlistbox", "Off"))},
+        {.section = u"sharing"_s, .formLabel = i18nc("@label", "Clipboard")});
     add(u"CameraLoopbackDevice"_s, media, i18nc("@label", "Camera device"), i18nc("@info", "The virtual camera that carries your camera into Console, for example /dev/video10 (a V4L2 loopback device). Enter “none” to turn camera sharing off. Console also needs permission to use the device. Virtual desktops cannot use it yet; camera delivery through PipeWire is separate."), {},
         {.section = u"devices"_s, .advanced = true, .formLabel = i18nc("@label", "Camera device"),
          .unavailable = m_scope == Scope::Virtual ? i18nc("@info", "Camera sharing is not available for Virtual desktops yet.") : QString()});

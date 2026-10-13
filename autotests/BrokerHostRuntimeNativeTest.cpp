@@ -36,7 +36,7 @@ QString option(const QString &key) {
         {u"CertificateKey"_s,u"certificate-key"_s},{u"Quality"_s,u"quality"_s},{u"ClientQualityMax"_s,u"client-quality-max"_s},{u"AdaptiveQuality"_s,u"adaptive-quality"_s},
         {u"PreferAudioQuality"_s,u"prefer-audio-quality"_s},{u"StandardClientMedia"_s,u"standard-client-media"_s},
         {u"CameraLoopbackDevice"_s,u"camera-loopback-device"_s},{u"SoftwareEncoding"_s,u"software-encoding"_s},{u"SoftwareAvc"_s,u"software-avc"_s},{u"SoftwareHevc"_s,u"software-hevc"_s},{u"SoftwareAv1"_s,u"software-av1"_s},
-        {u"Av1Tiles"_s,u"av1-tiles"_s},{u"VaapiDriver"_s,u"vaapi-driver"_s}};return names.value(key);
+        {u"Av1Tiles"_s,u"av1-tiles"_s},{u"VaapiDriver"_s,u"vaapi-driver"_s},{u"ClipboardDirection"_s,u"clipboard-direction"_s}};return names.value(key);
 }
 class RuntimeManager : public QDBusVirtualObject {
 public:

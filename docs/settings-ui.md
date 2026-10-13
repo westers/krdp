@@ -246,3 +246,15 @@ not establish that the design is acceptable.
   through the helper, when "Who can sign in" is expanded. Both polkit actions use `auth_admin_keep` for `allow_active`.
 - A hand edit of `/etc/farside/*.conf` shows in the panel only after the broker restarts or the next save (the helper
   refuses a save whose revision is stale).
+
+## Clipboard direction (OPT-067)
+
+- `ClipboardDirection` is a host key on the Console and Virtual pages (not in the account preferences, whose key set is
+  pinned): `both` (default) | `host-to-client` | `client-to-host` | `off`. Environment `FARSIDE_{CONSOLE,VIRTUAL}_CLIPBOARD_DIRECTION`,
+  option `--clipboard-direction`, shown in the "Sharing" section as "Clipboard" (Use default / Both ways / Host to client
+  only / Client to host only / Off).
+- The setting only narrows. The state decides what is possible (login screen: paste into it only; another account's lock
+  screen, a viewer connection and a missing seat: nothing), and the effective policy is state AND setting
+  (`server/ConsoleClipboardPolicy.h`).
+- It is read when the service starts, like the other host keys. A client that advertises `clipboard` in its KRDPCTL
+  `capabilities` record sees the setting's directions, not the state narrowing.
