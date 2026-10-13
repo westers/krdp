@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
+#include "WheelScale.h"
 #include "RelativePointerEvent.h"
 #include "PlasmaScreencastV1Session.h"
 
@@ -1119,10 +1120,10 @@ void PlasmaScreencastV1Session::injectNonMotionEvent(const std::shared_ptr<QEven
         auto we = std::static_pointer_cast<QWheelEvent>(event);
         auto delta = we->angleDelta();
         if (delta.y() != 0) {
-            d->remoteInterface->axis(WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(delta.y() / 120.0));
+            d->remoteInterface->axis(WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(KRdp::fakeInputAxisValue(delta.y())));
         }
         if (delta.x() != 0) {
-            d->remoteInterface->axis(WL_POINTER_AXIS_HORIZONTAL_SCROLL, wl_fixed_from_double(delta.x() / 120.0));
+            d->remoteInterface->axis(WL_POINTER_AXIS_HORIZONTAL_SCROLL, wl_fixed_from_double(KRdp::fakeInputAxisValue(delta.x())));
         }
         armCursorSettle(); // scrolling moves content, and another cursor, under the pointer
         break;

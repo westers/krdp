@@ -1149,3 +1149,9 @@ add_executable(LockKeySyncTest LockKeySyncTest.cpp)
 target_include_directories(LockKeySyncTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(LockKeySyncTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME LockKeySyncTest COMMAND LockKeySyncTest)
+
+# OPT-070: wheel angle delta -> fake_input axis scale (pure, daemon-free).
+add_executable(WheelScaleTest WheelScaleTest.cpp)
+target_include_directories(WheelScaleTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(WheelScaleTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME WheelScaleTest COMMAND WheelScaleTest)
