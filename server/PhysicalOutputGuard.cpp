@@ -45,6 +45,8 @@ constexpr int SettleStableMs = 1000;
 // The re-add lands at +3.15 s / +3.45 s after the removal (same table), so
 // 3 s would miss it by the poll grid when the churn starts at the disable.
 constexpr int ReplaceSettleMs = 4000;
+/** Between parking the physical outputs and disabling them (replaceParkArgs()). */
+constexpr int ParkSettleMs = 100;
 const QString KscreenDoctor = u"kscreen-doctor"_s;
 // Steve's layout, for the messages that have no snapshot to derive it from.
 const QString FallbackRecovery =
@@ -291,7 +293,16 @@ bool PhysicalOutputGuard::applyReplace(const QVector<Placement> &virtualOutputs,
 
     // kscreen-doctor exits 0 whether or not it applied anything, so the
     // read-back is what tells a refused change from an applied one.
-    if (!run(replaceArgs(m_physical, virtualOutputs, primaryVirtualName))) {
+    // The physical outputs are parked beside the virtual ones first and
+    // disabled in a second call (replaceParkArgs(): a single call that moves
+    // the virtual output and disables the physical one stalls an open
+    // Chrome's frame callbacks).
+    bool parked = run(replaceParkArgs(m_physical, virtualOutputs, primaryVirtualName));
+    if (parked) {
+        QThread::msleep(ParkSettleMs);
+        parked = run(replaceArgs(m_physical, {}, QString()));
+    }
+    if (!parked) {
         qInfo() << "Combined replace did not run; applying in two steps";
         if (!applyReplaceInTwoSteps(virtualOutputs, primaryVirtualName)) {
             return false;

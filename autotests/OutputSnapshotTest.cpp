@@ -133,6 +133,45 @@ private Q_SLOTS:
         QCOMPARE(args, expected);
     }
 
+    void replaceParkArgsParksEnabledPhysicalsRightOfTheVirtualOutputs()
+    {
+        const auto physical = physicalOnly(parse(kscreenJson));
+        const auto args = replaceParkArgs(physical,
+                                          {{QStringLiteral("Virtual-krdp-m0-1920x1080"), QPoint(0, 0)}, {QStringLiteral("Virtual-krdp-m1-1920x1280"), QPoint(1920, 0)}},
+                                          QStringLiteral("Virtual-krdp-m1-1920x1280"));
+        // Virtual outputs placed exactly as replaceArgs() places them, no disable at all, and
+        // each enabled physical output parked MaxDimension right of the rightmost virtual origin,
+        // side by side so no two of them overlap either.
+        const int park = 1920 + KRdp::ClientDisplay::MaxDimension;
+        const QStringList expected{
+            QStringLiteral("output.Virtual-krdp-m1-1920x1280.priority.1"),
+            QStringLiteral("output.Virtual-krdp-m1-1920x1280.position.1920,0"),
+            QStringLiteral("output.Virtual-krdp-m0-1920x1080.priority.2"),
+            QStringLiteral("output.Virtual-krdp-m0-1920x1080.position.0,0"),
+            QStringLiteral("output.DP-1.position.%1,0").arg(park),
+            QStringLiteral("output.HDMI-A-1.position.%1,0").arg(park + physical[0].size.width()),
+        };
+        QCOMPARE(args, expected);
+        QVERIFY(std::none_of(args.cbegin(), args.cend(), [](const QString &arg) {
+            return arg.endsWith(QLatin1String(".disable"));
+        }));
+    }
+
+    void replaceParkArgsSkipsDisabledPhysicals()
+    {
+        auto physical = physicalOnly(parse(kscreenJson));
+        physical[1].enabled = false;
+        const auto args = replaceParkArgs(physical, {{QStringLiteral("Virtual-krdp-m0-1920x1080"), QPoint(0, 0)}}, QStringLiteral("Virtual-krdp-m0-1920x1080"));
+        QVERIFY(args.contains(QStringLiteral("output.DP-1.position.%1,0").arg(KRdp::ClientDisplay::MaxDimension)));
+        QVERIFY(!args.join(QLatin1Char(' ')).contains(QLatin1String("HDMI-A-1")));
+    }
+
+    void replaceDisableStepAloneDisablesEnabledPhysicals()
+    {
+        const auto physical = physicalOnly(parse(kscreenJson));
+        QCOMPARE(replaceArgs(physical, {}, QString()), (QStringList{QStringLiteral("output.DP-1.disable"), QStringLiteral("output.HDMI-A-1.disable")}));
+    }
+
     void replaceArgsSkipAlreadyDisabledPhysicals()
     {
         auto physical = physicalOnly(parse(kscreenJson));

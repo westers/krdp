@@ -268,6 +268,39 @@ inline QStringList replaceArgs(const QVector<Output> &physical, const QVector<Pl
 }
 
 /**
+ * First step of the replace (OPT-060 stall fix): the virtual outputs take
+ * the top priorities and their positions, and every physical output that is
+ * currently enabled is parked to the right of them, still enabled, so no
+ * window sits on an output that is about to vanish. The disables follow in a
+ * second invocation (replaceArgs() with no virtual outputs).
+ *
+ * Why not one invocation (replaceArgs()): on Sol (KWin 6.6.6, 2026-10-13) an
+ * already-open native-Wayland Chrome playing video stopped getting frame
+ * callbacks for good when the physical output was disabled in the same
+ * configuration that moved the virtual output onto its place (3 of 3 runs;
+ * the old form is still the fallback). With the physical output parked first
+ * and disabled 100 ms later the page kept its frame rate (6 of 6 runs).
+ * The park position is far enough right that nothing overlaps the virtual
+ * outputs, whatever their width (each is at most ClientDisplay::MaxDimension).
+ */
+inline QStringList replaceParkArgs(const QVector<Output> &physical, const QVector<Placement> &virtualOutputs, const QString &primaryVirtualName)
+{
+    QStringList args = positionArgs(virtualOutputs, primaryVirtualName, 1);
+    int x = 0;
+    for (const auto &placement : virtualOutputs) {
+        x = std::max(x, placement.position.x());
+    }
+    x += ClientDisplay::MaxDimension;
+    for (const auto &output : physical) {
+        if (output.enabled) {
+            args << QStringLiteral("output.%1.position.%2,0").arg(output.name).arg(x);
+            x += std::max(1, output.size.width());
+        }
+    }
+    return args;
+}
+
+/**
  * One output of the arrangement the layout executor asks KWin for in a single
  * kscreen-doctor invocation (OPT-044): a physical output enabled at its place
  * or disabled, a virtual output at its place. Enabled entries take priorities
