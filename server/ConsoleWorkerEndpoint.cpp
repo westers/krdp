@@ -12,6 +12,7 @@
 
 #include <sys/socket.h>
 
+#include <chrono>
 #include <utility>
 
 namespace KRdp
@@ -26,6 +27,26 @@ ConsoleWorkerEndpoint::ConsoleWorkerEndpoint(QObject *parent)
     connect(&m_authenticationDeadline, &QTimer::timeout, this, [this] {
         if (m_worker && !m_authenticated) fail(QStringLiteral("worker did not authenticate in time"));
     });
+    m_watchdogTimer.setInterval(ConsoleWorkerWire::HeartbeatIntervalMs);
+    connect(&m_watchdogTimer, &QTimer::timeout, this, &ConsoleWorkerEndpoint::watchdogTick);
+}
+
+qint64 ConsoleWorkerEndpoint::watchdogNow() const
+{
+    if (m_watchdogClock) return m_watchdogClock();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void ConsoleWorkerEndpoint::watchdogTick()
+{
+    if (!m_worker || !m_authenticated) return;
+    // Unread bytes mean the worker spoke and this process has not got to them yet (the broker is the slow one).
+    if (m_watchdog.tick(watchdogNow(), m_worker->bytesAvailable() > 0) != ConsoleWorkerWatchdog::Verdict::Hung) return;
+    const qint64 silent = m_watchdog.silentMs();
+    qInfo().noquote() << "Console worker sent nothing for" << silent << "ms (" << (m_ready ? "after" : "before") << "Ready); treating it as hung";
+    m_watchdogTimer.stop();
+    Q_EMIT workerUnresponsive(silent);
+    if (m_worker) m_worker->disconnectFromServer();
 }
 
 void ConsoleWorkerEndpoint::setAuthenticationTimeout(int milliseconds)
@@ -81,6 +102,8 @@ void ConsoleWorkerEndpoint::dropWorker()
 
 void ConsoleWorkerEndpoint::close()
 {
+    m_watchdog.disarm();
+    m_watchdogTimer.stop();
     dropWorker();
     if (m_server->isListening()) {
         const QString name = m_server->fullServerName();
@@ -423,6 +446,10 @@ bool ConsoleWorkerEndpoint::processRecords()
             }
             m_authenticated = true;
             m_authenticationDeadline.stop();
+            if (m_watchdogEnabled) {
+                m_watchdog.arm(watchdogNow());
+                m_watchdogTimer.start();
+            }
             if (m_stopRequested) {
                 send(ConsoleWorkerWire::Kind::Stop);
             } else {
@@ -431,6 +458,14 @@ bool ConsoleWorkerEndpoint::processRecords()
             }
             if (!m_worker) return false;
             continue;
+        }
+        m_watchdog.alive(watchdogNow()); // any well-formed record from the authenticated worker is proof of life
+        if (record->kind == ConsoleWorkerWire::Kind::Heartbeat) {
+            if (!ConsoleWorkerWire::heartbeat(*record)) {
+                fail(QStringLiteral("malformed worker heartbeat"));
+                return false;
+            }
+            continue; // valid before Ready as well: a worker stuck in startup is still hung
         }
         // AUD-FIX7: the worker's encoder probe comes right after Hello, before Ready.
         if (const auto caps = ConsoleWorkerWire::encoderCaps(*record)) {
@@ -504,6 +539,8 @@ bool ConsoleWorkerEndpoint::processRecords()
             Q_EMIT topologyReceived(*topology);
         } else if (const auto state = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::LocalTakeover); state && state->active) {
             Q_EMIT localTakeover(state->generation);
+        } else if (const auto state = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::LocalReclaim); state && state->active) {
+            Q_EMIT localReclaim(state->generation);
         } else if (const auto state = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::HostScreensChanged); state && state->active) {
             Q_EMIT hostScreensChanged(state->generation);
         } else if (const auto offer = ConsoleWorkerWire::clipboardOffer(*record)) {
@@ -577,6 +614,8 @@ bool ConsoleWorkerEndpoint::processRecords()
 void ConsoleWorkerEndpoint::workerDisconnected()
 {
     m_pointerState = {}; m_pointerControl = {};
+    m_watchdog.disarm();
+    m_watchdogTimer.stop();
     const bool wasReady = m_ready;
     m_authenticationDeadline.stop();
     if (m_worker) {

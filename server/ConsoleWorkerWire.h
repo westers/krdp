@@ -66,7 +66,10 @@ namespace KRdp::ConsoleWorkerWire
 // client pasted), ClipboardData (worker -> broker, the answer), ClipboardSet (broker -> worker, the client copied)
 // and ClipboardSetResult (worker -> broker). Offer/Data/SetResult are valid only after Ready. Contents are UTF-8
 // with LF line endings, at most MaxClipboardBytes, and are never logged.
-constexpr quint16 ProtocolVersion = 16;
+// 17 (OPT-055 wave 2): Heartbeat (worker -> broker, every HeartbeatIntervalMs from Hello on; the broker's watchdog
+// treats any record as proof of life) and LocalReclaim (worker -> broker, payload ControlState: the user's reclaim
+// shortcut ended Replace, so the broker reports deskInput rather than workerExit).
+constexpr quint16 ProtocolVersion = 17;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -138,8 +141,11 @@ enum class Kind : quint8 {
     ClipboardData,
     ClipboardSet,
     ClipboardSetResult,
+    // Wire 17 (OPT-055 wave 2): see the version comment above.
+    Heartbeat,
+    LocalReclaim,
 };
-constexpr Kind LastKind = Kind::ClipboardSetResult;
+constexpr Kind LastKind = Kind::LocalReclaim;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;
@@ -1102,6 +1108,16 @@ inline std::optional<ResizeResult> resizeResult(const Record &record)
     return result;
 }
 
+/** Wire 17, worker -> broker: how often the worker's event loop says it is alive (the broker's check runs at the same rate). */
+constexpr int HeartbeatIntervalMs = 3000;
+/** Wire 17: the worker is called hung after this much silence (any record counts as life); 15 missed beats. */
+constexpr int HeartbeatHungAfterMs = 45000;
+
+struct Heartbeat {
+    quint64 sequence = 0;
+    bool operator==(const Heartbeat &) const = default;
+};
+
 struct ControlState {
     quint64 generation = 0;
     bool active = false;
@@ -1197,6 +1213,25 @@ inline std::optional<ControlState> controlState(const Record &record, Kind kind 
     ControlState state;
     stream >> state.generation >> state.active;
     return stream.status() == QDataStream::Ok && stream.atEnd() ? std::optional<ControlState>(state) : std::nullopt;
+}
+
+inline QByteArray frame(const Heartbeat &beat)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << beat.sequence;
+    return frame(Kind::Heartbeat, payload);
+}
+
+inline std::optional<Heartbeat> heartbeat(const Record &record)
+{
+    if (record.kind != Kind::Heartbeat || record.payload.size() != 8) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    Heartbeat beat;
+    stream >> beat.sequence;
+    return stream.status() == QDataStream::Ok && stream.atEnd() ? std::optional<Heartbeat>(beat) : std::nullopt;
 }
 
 

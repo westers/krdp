@@ -49,6 +49,7 @@ public:
     {
         m_helloSent = false;
         m_readySent = false;
+        m_heartbeatSequence = 0;
         m_held.clear();
         m_heldCursor.reset();
         m_heldPointer.clear();
@@ -152,6 +153,12 @@ public:
         if (m_readySent) m_writer(ConsoleWorkerWire::frame(timing));
     }
 
+    /** Wire 17: proof of life, from Hello on (also before Ready); the sequence only helps a reader of a capture. */
+    void heartbeat()
+    {
+        if (m_helloSent) m_writer(ConsoleWorkerWire::frame(ConsoleWorkerWire::Heartbeat{++m_heartbeatSequence}));
+    }
+
     bool helloSent() const
     {
         return m_helloSent;
@@ -170,6 +177,7 @@ private:
     QByteArray m_heldPointer;
     bool m_helloSent = false;
     bool m_readySent = false;
+    quint64 m_heartbeatSequence = 0;
     QVector<ConsoleWorkerWire::EncoderReport> m_held;
     std::optional<ConsoleWorkerWire::CursorShape> m_heldCursor;
 };

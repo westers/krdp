@@ -45,7 +45,8 @@ private Q_SLOTS:
     void readOnlyTopologyRecordIsBounded();
     void clipboardRecordsRoundTripAndAreBounded();
     void clipboardGatesAreStrict();
-    void wireFifteenIsRefused();
+    void heartbeatAndLocalReclaimRecordsAreStrict();
+    void wireSixteenIsRefused();
 };
 
 void ConsoleWorkerWireTest::managedFitRecordsAreBoundedAndCorrelated()
@@ -557,7 +558,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(16));
+    QCOMPARE(ProtocolVersion, quint16(17));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -817,7 +818,7 @@ void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
     QCOMPARE(encoderStats(*deframer.next()), std::optional(measured));
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 0);
-    QCOMPARE(LastKind, Kind::ClipboardSetResult);
+    QCOMPARE(LastKind, Kind::LocalReclaim);
 
     const auto rejected = [](const EncoderStats &stats) {
         Deframer d;
@@ -949,8 +950,8 @@ void ConsoleWorkerWireTest::roundTripsControlGeneration()
 // OPT-067 (wire 16): the six clipboard records.
 void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(16));
-    QCOMPARE(int(LastKind), int(Kind::ClipboardSetResult));
+    QCOMPARE(ProtocolVersion, quint16(17));
+    QCOMPARE(int(LastKind), int(Kind::LocalReclaim));
     const ClipboardPolicy policy{7, 42, true, false, true, false};
     const ClipboardOffer offer{3, 1};
     const ClipboardRequest request{11, 4096};
@@ -1117,17 +1118,40 @@ void ConsoleWorkerWireTest::clipboardGatesAreStrict()
     QVERIFY(!mayOfferClipboard({5, 42, true, false, false, true}, false));
 }
 
-void ConsoleWorkerWireTest::wireFifteenIsRefused()
+// OPT-055 wave 2 (wire 17): Heartbeat carries exactly a sequence; LocalReclaim is a ControlState under its own kind.
+void ConsoleWorkerWireTest::heartbeatAndLocalReclaimRecordsAreStrict()
 {
-    // A worker (or broker) still on wire 15 meets a 16 peer: the whole record is refused and the peer is reported.
-    QByteArray old = frame(ClipboardOffer{1, 1});
+    Deframer deframer;
+    deframer.feed(frame(Heartbeat{7}) + frame(ControlState{9, true}, Kind::LocalReclaim));
+    const auto beat = deframer.next();
+    QVERIFY(beat);
+    QCOMPARE(beat->kind, Kind::Heartbeat);
+    QCOMPARE(heartbeat(*beat), std::optional<Heartbeat>(Heartbeat{7}));
+    QVERIFY(!controlState(*beat, Kind::LocalReclaim));
+    Record shorter = *beat, longer = *beat;
+    shorter.payload.chop(1);
+    longer.payload.append('x');
+    QVERIFY(!heartbeat(shorter) && !heartbeat(longer));
+    const auto reclaim = deframer.next();
+    QVERIFY(reclaim);
+    QCOMPARE(controlState(*reclaim, Kind::LocalReclaim), std::optional<ControlState>(ControlState{9, true}));
+    QVERIFY(!controlState(*reclaim, Kind::LocalTakeover)); // never mistaken for a takeover
+    QVERIFY(!controlState(*reclaim, Kind::HostScreensChanged));
+    QVERIFY(!heartbeat(*reclaim));
+    QVERIFY(HeartbeatHungAfterMs >= 10 * HeartbeatIntervalMs); // conservative: many missed beats before a verdict
+}
+
+void ConsoleWorkerWireTest::wireSixteenIsRefused()
+{
+    // A worker (or broker) still on wire 16 meets a 17 peer: the whole record is refused and the peer is reported.
+    QByteArray old = frame(Heartbeat{1});
     old[4] = char(0);
-    old[5] = char(15);
+    old[5] = char(16);
     Deframer deframer;
     deframer.feed(old);
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 1);
-    QCOMPARE(deframer.mismatchedVersion(), std::optional<quint16>(15));
+    QCOMPARE(deframer.mismatchedVersion(), std::optional<quint16>(16));
 }
 
 QTEST_GUILESS_MAIN(ConsoleWorkerWireTest)
