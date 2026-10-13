@@ -25,6 +25,7 @@
 #include <QStringList>
 #include <QUuid>
 
+#include <Clipboard.h>
 #include <RdpConnection.h>
 #include <Server.h>
 #include <VideoStream.h>
@@ -272,6 +273,24 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     connect(m_server, &Server::newConnectionCreated, this, &ConsoleHostController::addClient);
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerAuthenticated, this, [this](const auto &) {
         syncDisplayPolicy(); // Wake can be necessary before capture proves Ready.
+        // OPT-067: a new worker (the greeter handing over to the session, a restart) shares nothing with the old one.
+        resetClipboards();
+        syncClipboard();
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardOffered, this, [this](quint64) {
+        for (const auto &client : m_clients) {
+            if (client->connection && client->clipboardPlan && client->clipboardPlan->hostToClient && m_control.ownsControl(client->id)) {
+                client->connection->clipboard()->announceHostText();
+            }
+        }
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardDataReceived, this, [this](const ConsoleWorkerWire::ClipboardData &data) {
+        const auto request = m_clipboardRequests.take(data.requestId);
+        if (!request.clipboard) return;
+        request.clipboard->provideHostText(request.clipboardRequestId, data.text, data.status == ConsoleWorkerWire::ClipboardStatus::Ok);
+    });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardSetFinished, this, [](const ConsoleWorkerWire::ClipboardSetResult &result) {
+        qCDebug(CONSOLE_SCREENS) << "client text set" << result.setId << "status" << int(result.status);
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerReady, this, [this](const auto &target) {
         apply(m_handoff.workerReady(target));
@@ -279,6 +298,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         m_failedTarget = {};
         qInfo() << "Console worker ready:" << target.sessionId << "forwarding" << m_inputEnabled;
         m_endpoint.setControlState({m_controlGeneration, m_control.owner() != 0});
+        syncClipboard();
         armConfiguredConsoleOutputs();
         for (const auto &client : m_clients) {
             if (m_control.ownsControl(client->id)) {
@@ -302,6 +322,8 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerStopped, this, [this]() {
+        resetClipboards();
+        syncClipboard();
         setWorkerActive(false);
         finishPhysicalTopology(u"capture-failed"_s);
         finishVirtualTopology(u"capture-failed"_s);
@@ -586,6 +608,7 @@ void ConsoleHostController::setSeatSessions(const QList<ConsoleSeat::Session> &s
     enforceAdmission();
     apply(m_handoff.reconcile(m_sessions));
     syncDisplayPolicy();
+    syncClipboard(); // a lock edge or an account change narrows the directions at once
 }
 
 void ConsoleHostController::workerExited(const QString &socketName)
@@ -948,6 +971,20 @@ void ConsoleHostController::addClient(RdpConnection *connection)
     client->connections.append(connect(client->session.get(), &AbstractSession::frameReceived, connection->videoStream(), &VideoStream::queueFrame));
     client->connections.append(connect(client->session.get(), &ConsoleWorkerSession::keyFrameRequested, &m_endpoint, &ConsoleWorkerEndpoint::requestKeyFrame));
     client->connections.append(connect(connection->inputHandler(), &InputHandler::inputEvent, client->session.get(), &AbstractSession::sendEvent));
+    if (auto *clipboard = connection->clipboard()) {
+        // OPT-067: nothing is shared until the planner says so (syncClipboard()).
+        clipboard->setDirections(false, false);
+        ConsoleWorkerSession *session = client->session.get();
+        client->connections.append(connect(clipboard, &Clipboard::hostTextRequested, this, [this, id](quint64 requestId) {
+            clipboardRequested(id, requestId);
+        }));
+        client->connections.append(connect(clipboard, &Clipboard::clientDataChanged, session, [clipboard, session]() {
+            session->setClipboardData(clipboard->getClipboard());
+        }));
+        client->connections.append(connect(session, &ConsoleWorkerSession::clientClipboardText, this, [this, id](const QString &text) {
+            clientClipboardText(id, text);
+        }));
+    }
     // Queued: a record can still be in the event queue after Server deleted
     // the connection. Only a live connection that is still our client counts.
     const QPointer<RdpConnection> guarded(connection);
@@ -2098,6 +2135,15 @@ void ConsoleHostController::sendCapabilities(Client &client)
         capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, client.preferences.softwareEncoding.value_or(m_videoHost->mode),
                                                                m_videoHost->allowance(client.preferences.softwareEncoding));
     }
+    {
+        // OPT-067: the administrator's directions; the state narrowing (login screen, other accounts) is not announced.
+        using Direction = ConsoleClipboardPolicy::Direction;
+        const bool hostToClient = m_clipboardDirection == Direction::Both || m_clipboardDirection == Direction::HostToClient;
+        const bool clientToHost = m_clipboardDirection == Direction::Both || m_clipboardDirection == Direction::ClientToHost;
+        if (hostToClient || clientToHost) {
+            capabilities.clipboard = LayoutControl::ClipboardCapabilities{hostToClient, clientToHost, int(ConsoleWorkerWire::MaxClipboardBytes)};
+        }
+    }
     capabilities.stats = LayoutControl::StatsCapabilities{};
     // OPT-060: advertised only when this connection's user allows Replace; the client still has to ask
     // with its monitor block. Old clients ignore the group and the `console-screens` records.
@@ -2217,6 +2263,8 @@ void ConsoleHostController::syncControlState()
             client->connection->setAudioPriorityDefault(client->preferences.preferAudioQuality.value_or(m_audioPriorityDefault)
                 && m_control.ownsControl(client->id));
         }
+        // OPT-067: the old controller's clipboard state is not the new controller's.
+        resetClipboards();
         // AUD-FIX7: the new controller's codec bridge steers the worker under the new generation.
         for (const auto &client : m_clients) {
             if (!client->codec) continue;
@@ -2227,7 +2275,88 @@ void ConsoleHostController::syncControlState()
     }
     syncCodecPolicy();
     syncDisplayPolicy();
+    syncClipboard();
     syncScreensRecords();
+}
+
+void ConsoleHostController::syncClipboard()
+{
+    const auto target = m_endpoint.target();
+    const auto session = ConsoleSeat::find(m_sessions, target.sessionId);
+    const bool locked = session && session->locked;
+    const bool workerThere = m_endpoint.ready();
+    const bool greeter = workerThere && target.adapter == ConsoleSeat::Adapter::Greeter;
+    std::optional<ConsoleClipboardPolicy::Plan> controllerPlan;
+    for (const auto &client : m_clients) {
+        if (!client->connection || !client->connection->clipboard()) continue;
+        ConsoleClipboardPolicy::Input input;
+        input.route = ConsoleClipboardPolicy::Route::Console;
+        input.adapter = workerThere ? target.adapter : ConsoleSeat::Adapter::None;
+        input.locked = locked;
+        input.clientUid = client->uid;
+        input.sessionUid = target.uid;
+        input.ownsControl = m_control.ownsControl(client->id) && m_control.admitted(client->id) && admissible(*client);
+        input.setting = m_clipboardDirection;
+        const auto plan = ConsoleClipboardPolicy::plan(input);
+        if (input.ownsControl) controllerPlan = plan;
+        const auto before = client->clipboardPlan;
+        client->clipboardPlan = plan;
+        client->connection->clipboard()->setDirections(plan.hostToClient, plan.clientToHost);
+        // Info, once per edge, never data.
+        if (!before || before->hostToClient != plan.hostToClient || before->clientToHost != plan.clientToHost) {
+            if (plan.hostToClient || plan.clientToHost || before) {
+                qInfo().noquote() << "Clipboard: console client" << client->id << "host to client" << (plan.hostToClient ? "enabled" : "disabled")
+                                  << ", client to host" << (plan.clientToHost ? "enabled" : "disabled")
+                                  << "(reason=" << ConsoleClipboardPolicy::reasonName(plan.reason) << ")";
+            }
+        }
+    }
+    if (controllerPlan) {
+        m_endpoint.setClipboardPolicy(m_controlGeneration, controllerPlan->hostToClient, controllerPlan->clientToHost, controllerPlan->locked,
+                                      controllerPlan->greeter);
+    } else {
+        m_endpoint.setClipboardPolicy(m_controlGeneration, false, false, locked, greeter);
+    }
+}
+
+void ConsoleHostController::resetClipboards()
+{
+    m_clipboardRequests.clear();
+    for (const auto &client : m_clients) {
+        if (!client->connection || !client->connection->clipboard()) continue;
+        client->connection->clipboard()->resetHostSide();
+        client->connection->clipboard()->resetClientSide();
+    }
+}
+
+void ConsoleHostController::clipboardRequested(ConsoleControl::Id id, quint64 requestId)
+{
+    for (const auto &client : m_clients) {
+        if (client->id != id || !client->connection) continue;
+        auto *clipboard = client->connection->clipboard();
+        if (!m_control.ownsControl(id) || !client->clipboardPlan || !client->clipboardPlan->hostToClient) {
+            clipboard->provideHostText(requestId, {}, false);
+            return;
+        }
+        const auto endpointId = m_endpoint.requestClipboard();
+        if (!endpointId) {
+            clipboard->provideHostText(requestId, {}, false);
+            return;
+        }
+        if (m_clipboardRequests.size() >= 16) m_clipboardRequests.clear(); // answers to abandoned requests are dropped
+        m_clipboardRequests.insert(endpointId, {id, clipboard, requestId});
+        return;
+    }
+}
+
+void ConsoleHostController::clientClipboardText(ConsoleControl::Id id, const QString &text)
+{
+    for (const auto &client : m_clients) {
+        if (client->id != id) continue;
+        if (!m_control.ownsControl(id) || !client->clipboardPlan || !client->clipboardPlan->clientToHost) return;
+        m_endpoint.setClipboard(m_controlGeneration, text);
+        return;
+    }
 }
 
 void ConsoleHostController::armConfiguredConsoleOutputs()

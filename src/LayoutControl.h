@@ -270,6 +270,19 @@ struct ConsoleScreensCapabilities {
     bool operator==(const ConsoleScreensCapabilities &) const = default;
 };
 
+/**
+ * The optional `clipboard` group (OPT-067): the host bridges plain text over the standard clipboard channel.
+ * The directions are the administrator's ClipboardDirection; the host narrows them further by state (login
+ * screen, another account's lock screen, a viewer connection) and says nothing when it does. Absent: no
+ * bridge on this route.
+ */
+struct ClipboardCapabilities {
+    bool hostToClient = false;
+    bool clientToHost = false;
+    int maxBytes = 1024 * 1024; ///< the most UTF-8 text either direction carries
+    bool operator==(const ClipboardCapabilities &) const = default;
+};
+
 /** What a KRDPCTL endpoint offers, as the `capabilities` record says it. */
 struct ChannelCapabilities {
     bool pointerCaptureSync = false;
@@ -286,6 +299,7 @@ struct ChannelCapabilities {
     std::optional<VideoCapabilities> video; ///< absent: no `video` group, AVC only, no `codec` record
     std::optional<StatsCapabilities> stats; ///< absent: no `stats` group, no `stats` record
     std::optional<ConsoleScreensCapabilities> consoleScreens; ///< absent: no `console` group, no `console-screens*` records
+    std::optional<ClipboardCapabilities> clipboard; ///< absent: no `clipboard` group (OPT-067)
     bool operator==(const ChannelCapabilities &) const = default;
 };
 KRDP_EXPORT QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities);

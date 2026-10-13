@@ -54,6 +54,14 @@ public:
     void sendEvent(const std::shared_ptr<QEvent> &event) override;
     void sendGlobalEvent(const std::shared_ptr<QEvent> &event) override;
     void setClipboardData(std::unique_ptr<QMimeData> data) override;
+    /**
+     * OPT-067: whether this session watches the host clipboard and announces changes through
+     * clipboardDataChanged() (default true; the retired in-process route and the plasmastreamer
+     * harness rely on it). The Console/Virtual worker owns one HostClipboard instead and turns
+     * the default off before it creates any session.
+     */
+    void setClipboardBridgeEnabled(bool enabled);
+    static void setClipboardBridgeDefault(bool enabled);
 
     QRect outputGeometry() const override;
     bool outputGeometryResolved() const override;

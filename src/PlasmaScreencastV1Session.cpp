@@ -383,6 +383,7 @@ public:
     // asynchronous changed that still carries the bytes we just wrote.
     bool writingClientClipboard = false;
     QString lastClientText;
+    bool clipboardBridgeEnabled = true;
     // AUD-FIX12: requests the encoder never answers restart it (EncoderWatchdog.h).
     EncoderWatchdog::Watchdog watchdog;
     // OPT-055 K4: what to do when KPipeWire reports the encoder dead (restart twice a minute, then close).
@@ -408,10 +409,26 @@ public:
     std::optional<QPointF> lastPointer; // KWin-global logical, as fake input got it
 };
 
+namespace
+{
+bool s_clipboardBridgeDefault = true;
+}
+
+void PlasmaScreencastV1Session::setClipboardBridgeDefault(bool enabled)
+{
+    s_clipboardBridgeDefault = enabled;
+}
+
+void PlasmaScreencastV1Session::setClipboardBridgeEnabled(bool enabled)
+{
+    d->clipboardBridgeEnabled = enabled;
+}
+
 PlasmaScreencastV1Session::PlasmaScreencastV1Session()
     : AbstractSession()
     , d(std::make_unique<Private>())
 {
+    d->clipboardBridgeEnabled = s_clipboardBridgeDefault;
     d->remoteInterface = std::make_unique<FakeInput>();
     if (!d->fake()) {
         // Not fatal: the session cannot inject input, and start() reports the missing screencast too.
@@ -423,7 +440,7 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
         // session per RDPGFX surface and SessionWrapper connects every
         // session's clipboardDataChanged to the connection's cliprdr. Only
         // the surface-0 session announces, so one copy is one format list.
-        if (monitorIndex() != 0) {
+        if (!d->clipboardBridgeEnabled || monitorIndex() != 0) {
             return;
         }
 

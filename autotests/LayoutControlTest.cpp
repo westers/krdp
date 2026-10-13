@@ -105,6 +105,23 @@ private Q_SLOTS:
         QVERIFY(frame(record).size() < 1024);
     }
 
+    // OPT-067: the optional `clipboard` group; absent unless set, old clients ignore it.
+    void capabilitiesClipboardGroup()
+    {
+        ChannelCapabilities caps;
+        caps.host = QStringLiteral("console");
+        QVERIFY(!capabilitiesRecord(caps).contains(QStringLiteral("clipboard")));
+        caps.clipboard = ClipboardCapabilities{true, false, 1024 * 1024};
+        QCOMPARE(capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject(),
+                 (QJsonObject{{QStringLiteral("hostToClient"), true}, {QStringLiteral("clientToHost"), false}, {QStringLiteral("maxBytes"), 1024 * 1024}}));
+        // Every other group is unchanged by it.
+        ChannelCapabilities plain;
+        plain.host = QStringLiteral("console");
+        auto without = capabilitiesRecord(caps);
+        without.remove(QStringLiteral("clipboard"));
+        QCOMPARE(without, capabilitiesRecord(plain));
+    }
+
     // OPT-058 (T4): `devices.availability` carries the admission-time state and advertises the push.
     void capabilitiesDeviceAvailability()
     {

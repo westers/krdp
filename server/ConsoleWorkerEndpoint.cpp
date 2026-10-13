@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "ConsoleWorkerEndpoint.h"
+
+#include <limits>
 #include "PointerCaptureProtocol.h"
 
 #include <QDebug>
@@ -195,6 +197,50 @@ bool ConsoleWorkerEndpoint::setDisplayPolicy(bool active, bool wakeEnabled)
     m_displayPolicy = ConsoleWorkerWire::DisplayPolicy{revision, active, wakeEnabled};
     if (!m_authenticated || !m_worker) return true; // Desired state only, no pre-auth bytes.
     return m_worker->write(ConsoleWorkerWire::frame(*m_displayPolicy)) >= 0;
+}
+
+bool ConsoleWorkerEndpoint::setClipboardPolicy(quint64 controlGeneration, bool hostToClient, bool clientToHost, bool locked, bool greeter)
+{
+    if (m_stopRequested) return false;
+    ConsoleWorkerWire::ClipboardPolicy policy{0, controlGeneration, hostToClient && !greeter, clientToHost, locked, greeter};
+    if (m_clipboardPolicy) {
+        policy.revision = m_clipboardPolicy->revision;
+        if (policy == *m_clipboardPolicy) return true;
+    }
+    if (m_clipboardRevision == std::numeric_limits<quint64>::max()) {
+        stopWorker(); // Never wrap and replay a stale grant.
+        return false;
+    }
+    policy.revision = ++m_clipboardRevision;
+    m_clipboardPolicy = policy;
+    if (!m_ready || !m_worker) return true; // Sent when the worker is Ready.
+    m_clipboardPolicySent = policy.revision;
+    return m_worker->write(ConsoleWorkerWire::frame(policy)) >= 0;
+}
+
+quint64 ConsoleWorkerEndpoint::requestClipboard(quint32 maxBytes)
+{
+    // The text is fetched when the client pastes; a backlogged socket refuses instead of queueing stale pastes.
+    if (!m_ready || !m_worker || !m_clipboardPolicy || !m_clipboardPolicy->hostToClient || !maxBytes
+        || maxBytes > ConsoleWorkerWire::MaxClipboardBytes || m_worker->bytesToWrite() > 2 * qint64(ConsoleWorkerWire::MaxClipboardBytes)
+        || m_clipboardRequests.size() >= 8 || m_nextClipboardId == std::numeric_limits<quint64>::max()) return 0;
+    const quint64 id = ++m_nextClipboardId;
+    if (m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardRequest{id, maxBytes})) < 0) return 0;
+    m_clipboardRequests.insert(id);
+    return id;
+}
+
+quint64 ConsoleWorkerEndpoint::setClipboard(quint64 controlGeneration, const QString &text)
+{
+    if (!m_ready || !m_worker || !m_clipboardPolicy || !m_clipboardPolicy->clientToHost || !controlGeneration
+        || controlGeneration != m_clipboardPolicy->controlGeneration
+        || quint64(text.toUtf8().size()) > ConsoleWorkerWire::MaxClipboardBytes
+        || m_worker->bytesToWrite() > 2 * qint64(ConsoleWorkerWire::MaxClipboardBytes)
+        || m_clipboardSets.size() >= 8 || m_nextClipboardId == std::numeric_limits<quint64>::max()) return 0;
+    const quint64 id = ++m_nextClipboardId;
+    if (m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardSet{id, controlGeneration, text})) < 0) return 0;
+    m_clipboardSets.insert(id);
+    return id;
 }
 
 bool ConsoleWorkerEndpoint::resize(const ConsoleWorkerWire::Resize &request)
@@ -425,6 +471,11 @@ bool ConsoleWorkerEndpoint::processRecords()
             }
             m_ready = true;
             Q_EMIT workerReady(m_target);
+            if (m_worker && m_clipboardPolicy && m_clipboardPolicySent != m_clipboardPolicy->revision) {
+                m_clipboardPolicySent = m_clipboardPolicy->revision;
+                m_worker->write(ConsoleWorkerWire::frame(*m_clipboardPolicy));
+            }
+            if (!m_worker) return false;
             // Listeners may have closed or replaced the worker; apply the held reports only to
             // the worker that confirmed capture.
             const auto early = std::exchange(m_earlyReports, {});
@@ -455,6 +506,16 @@ bool ConsoleWorkerEndpoint::processRecords()
             Q_EMIT localTakeover(state->generation);
         } else if (const auto state = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::HostScreensChanged); state && state->active) {
             Q_EMIT hostScreensChanged(state->generation);
+        } else if (const auto offer = ConsoleWorkerWire::clipboardOffer(*record)) {
+            // Newest only; one the policy no longer allows is dropped here, never forwarded.
+            if (offer->seq > m_clipboardOfferSeq) {
+                m_clipboardOfferSeq = offer->seq;
+                if (m_clipboardPolicy && m_clipboardPolicy->hostToClient) Q_EMIT clipboardOffered(offer->seq);
+            }
+        } else if (const auto data = ConsoleWorkerWire::clipboardData(*record)) {
+            if (m_clipboardRequests.remove(data->requestId)) Q_EMIT clipboardDataReceived(*data);
+        } else if (const auto result = ConsoleWorkerWire::clipboardSetResult(*record)) {
+            if (m_clipboardSets.remove(result->setId)) Q_EMIT clipboardSetFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::resizeResult(*record)) {
             Q_EMIT resizeFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::positionResult(*record)) {
@@ -531,6 +592,12 @@ void ConsoleWorkerEndpoint::workerDisconnected()
     m_workerCpuNs = -1;
     m_cursorShape.reset();
     m_displayPolicy.reset();
+    // OPT-067: a new worker starts from nothing; ids already issued are forgotten, so a late answer is discarded.
+    m_clipboardPolicy.reset();
+    m_clipboardPolicySent = 0;
+    m_clipboardOfferSeq = 0;
+    m_clipboardRequests.clear();
+    m_clipboardSets.clear();
     if (wasReady) {
         Q_EMIT workerStopped();
     }

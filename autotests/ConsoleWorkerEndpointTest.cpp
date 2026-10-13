@@ -24,6 +24,9 @@ private Q_SLOTS:
     void displayDemandRequiresHelloButNotFirstCapture();
     void reportsWorkerFailures_data();
     void reportsWorkerFailures();
+    void clipboardCrossesOnlyAfterReadyAndOnlyWhenAllowed();
+    void clipboardIdsAreEndpointWideAndForgottenWithTheWorker();
+    void clipboardRecordBeforeReadyFailsTheWorker();
 };
 
 void ConsoleWorkerEndpointTest::reportsWorkerFailures_data()
@@ -409,6 +412,169 @@ void ConsoleWorkerEndpointTest::rejectsWrongWorkerToken()
     QVERIFY(worker.waitForBytesWritten(1000));
     QTRY_COMPARE(errors, 1);
     QVERIFY(!endpoint.ready());
+}
+
+
+namespace
+{
+// A worker that said Hello (and Ready when asked) on a fresh endpoint.
+struct ClipboardWorker {
+    QTemporaryDir directory;
+    ConsoleWorkerEndpoint endpoint;
+    ConsoleHandoff::Target target{ConsoleSeat::Adapter::PhysicalUser, QStringLiteral("3"), quint32(getuid())};
+    QByteArray token = QByteArray(24, 'c');
+    QLocalSocket worker;
+    ConsoleWorkerWire::Deframer reader;
+
+    bool ok = false;
+    void start(bool ready)
+    {
+        ok = false;
+        if (!endpoint.listen(directory.filePath(QStringLiteral("clip.sock")), target, token)) return;
+        worker.connectToServer(endpoint.socketName());
+        if (!worker.waitForConnected(1000)) return;
+        worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{target.sessionId, target.uid, token}));
+        worker.flush();
+        QTRY_VERIFY_WITH_TIMEOUT(endpoint.authenticated(), 3000);
+        if (ready) {
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+            worker.flush();
+            QTRY_VERIFY_WITH_TIMEOUT(endpoint.ready(), 3000);
+        }
+        ok = true;
+    }
+    QList<ConsoleWorkerWire::Record> drain()
+    {
+        QTest::qWait(30);
+        reader.feed(worker.readAll());
+        QList<ConsoleWorkerWire::Record> records;
+        while (const auto record = reader.next()) records.append(*record);
+        return records;
+    }
+};
+}
+
+void ConsoleWorkerEndpointTest::clipboardCrossesOnlyAfterReadyAndOnlyWhenAllowed()
+{
+    ClipboardWorker w;
+    w.start(false);
+    QVERIFY(w.ok);
+    QSignalSpy offered(&w.endpoint, &ConsoleWorkerEndpoint::clipboardOffered);
+    QList<ConsoleWorkerWire::ClipboardData> data;
+    QList<ConsoleWorkerWire::ClipboardSetResult> results;
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::clipboardDataReceived, this, [&data](const auto &answer) { data.append(answer); });
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::clipboardSetFinished, this, [&results](const auto &result) { results.append(result); });
+    // Before Ready nothing crosses: the policy is kept and sent once the worker is Ready, and nothing is requested.
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false));
+    QCOMPARE(w.endpoint.requestClipboard(), quint64(0));
+    QCOMPARE(w.endpoint.setClipboard(1, QStringLiteral("x")), quint64(0));
+    QVERIFY(w.drain().isEmpty());
+    w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+    w.worker.flush();
+    QTRY_VERIFY(w.endpoint.ready());
+    auto records = w.drain();
+    QCOMPARE(records.size(), 1);
+    const auto policy = ConsoleWorkerWire::clipboardPolicy(records.first());
+    QVERIFY(policy && policy->hostToClient && policy->clientToHost && policy->controlGeneration == 1 && policy->revision >= 1);
+
+    // An identical policy is not resent; a change bumps the revision.
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false));
+    QVERIFY(w.drain().isEmpty());
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, false, true, false));
+    records = w.drain();
+    QCOMPARE(records.size(), 1);
+    const auto changed = ConsoleWorkerWire::clipboardPolicy(records.first());
+    QVERIFY(changed && changed->revision > policy->revision && !changed->clientToHost && changed->locked);
+
+    // A set is refused while client to host is off, and under another control generation.
+    QCOMPARE(w.endpoint.setClipboard(1, QStringLiteral("x")), quint64(0));
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false));
+    w.drain();
+    QCOMPARE(w.endpoint.setClipboard(2, QStringLiteral("x")), quint64(0));
+    QCOMPARE(w.endpoint.setClipboard(1, QString(ConsoleWorkerWire::MaxClipboardBytes + 1, QLatin1Char('a'))), quint64(0));
+    const auto setId = w.endpoint.setClipboard(1, QStringLiteral("from the client"));
+    QVERIFY(setId);
+    const auto requestId = w.endpoint.requestClipboard(1000);
+    QVERIFY(requestId && requestId != setId); // one counter for both
+    records = w.drain();
+    QCOMPARE(records.size(), 2);
+    const auto sent = ConsoleWorkerWire::clipboardSet(records.at(0));
+    QVERIFY(sent && sent->setId == setId && sent->text == QStringLiteral("from the client"));
+    const auto asked = ConsoleWorkerWire::clipboardRequest(records.at(1));
+    QVERIFY(asked && asked->requestId == requestId && asked->maxBytes == 1000);
+
+    // The worker's answers reach the broker; an answer for an id never issued is dropped without failing the worker.
+    w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{requestId + 100, 1, ConsoleWorkerWire::ClipboardStatus::Ok, QStringLiteral("nobody asked")}));
+    w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{requestId, 1, ConsoleWorkerWire::ClipboardStatus::Ok, QStringLiteral("host text")}));
+    w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardSetResult{setId, ConsoleWorkerWire::ClipboardSetStatus::Written}));
+    w.worker.flush();
+    QTRY_COMPARE(data.size(), 1);
+    QCOMPARE(data.first().text, QStringLiteral("host text"));
+    QTRY_COMPARE(results.size(), 1);
+    QVERIFY(w.endpoint.ready());
+
+    // Offers: newest only, and only while the policy allows host to client.
+    w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{5, 1}));
+    w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{4, 1})); // older: dropped
+    w.worker.flush();
+    QTRY_COMPARE(offered.size(), 1);
+    QCOMPARE(offered.first().first().toULongLong(), quint64(5));
+    QVERIFY(w.endpoint.setClipboardPolicy(1, false, true, false, false));
+    w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{6, 1}));
+    w.worker.flush();
+    QTest::qWait(60);
+    QCOMPARE(offered.size(), 1); // denied: never forwarded
+    QCOMPARE(w.endpoint.requestClipboard(), quint64(0)); // and nothing is requested
+    QVERIFY(w.endpoint.ready());
+}
+
+void ConsoleWorkerEndpointTest::clipboardIdsAreEndpointWideAndForgottenWithTheWorker()
+{
+    ClipboardWorker w;
+    w.start(true);
+    QVERIFY(w.ok);
+    int data = 0;
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::clipboardDataReceived, this, [&data](const auto &) { ++data; });
+    QVERIFY(w.endpoint.setClipboardPolicy(3, true, true, false, false));
+    w.drain();
+    const auto first = w.endpoint.requestClipboard();
+    QVERIFY(first);
+    // At most eight requests wait for the worker; a ninth is refused instead of queued.
+    for (int i = 0; i < 7; ++i) QVERIFY(w.endpoint.requestClipboard());
+    QCOMPARE(w.endpoint.requestClipboard(), quint64(0));
+    // The worker goes away: everything it was asked is forgotten, policy included.
+    w.worker.disconnectFromServer();
+    QTRY_VERIFY(!w.endpoint.ready());
+    QVERIFY(!w.endpoint.clipboardPolicy());
+    QCOMPARE(w.endpoint.requestClipboard(), quint64(0));
+    // A new worker cannot answer an id from before it, and ids keep increasing.
+    QLocalSocket again;
+    again.connectToServer(w.endpoint.socketName());
+    QVERIFY(again.waitForConnected(1000));
+    again.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{w.target.sessionId, w.target.uid, w.token}));
+    again.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+    again.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{first, 1, ConsoleWorkerWire::ClipboardStatus::Ok, QStringLiteral("late")}));
+    again.flush();
+    QTRY_VERIFY(w.endpoint.ready());
+    QTest::qWait(60);
+    QCOMPARE(data, 0);
+    QVERIFY(w.endpoint.setClipboardPolicy(3, true, true, false, false));
+    QTest::qWait(30);
+    const auto next = w.endpoint.requestClipboard();
+    QVERIFY(next > first + 7);
+}
+
+void ConsoleWorkerEndpointTest::clipboardRecordBeforeReadyFailsTheWorker()
+{
+    ClipboardWorker w;
+    w.start(false);
+    QVERIFY(w.ok);
+    int errors = 0;
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::protocolError, this, [&errors](const QString &) { ++errors; });
+    w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, 1}));
+    w.worker.flush();
+    QTRY_COMPARE(errors, 1);
+    QVERIFY(!w.endpoint.ready());
 }
 
 QTEST_GUILESS_MAIN(ConsoleWorkerEndpointTest)

@@ -21,6 +21,7 @@
 #include "ConsoleHandoff.h"
 #include "ConsoleWorkerBackoff.h"
 #include "ConsoleControl.h"
+#include "ConsoleClipboardPolicy.h"
 #include "ConsoleInputState.h"
 #include "ConsoleWorkerEndpoint.h"
 #include "ConsoleTopologyPlan.h"
@@ -94,6 +95,9 @@ public:
     // How long a changed Outputs record may wait for its topology reply before the frame gate opens by itself.
     void setLayoutReadbackDeadline(int milliseconds) { m_layoutReadbackDeadline.setInterval(milliseconds); }
     void setRefuse(Refuse refuse);
+    /** OPT-067: the administrator's ClipboardDirection (the planner narrows it by state). Set before clients connect. */
+    void setClipboardDirection(ConsoleClipboardPolicy::Direction direction) { m_clipboardDirection = direction; }
+    ConsoleClipboardPolicy::Direction clipboardDirection() const { return m_clipboardDirection; }
 
 private:
     friend class ConsoleHostControllerTest;
@@ -164,7 +168,24 @@ private:
         QHash<int, quint64> framesDropped;
         // M-8: a one-shot human sentence for the next `console-screens active:false` (host screens changed).
         QString screensHostChangeMessage;
+        // OPT-067: the clipboard directions last planned for this connection (nullopt: none planned yet).
+        std::optional<ConsoleClipboardPolicy::Plan> clipboardPlan;
     };
+
+    // --- OPT-067 text clipboard bridge ---
+    struct PendingClipboardRequest {
+        ConsoleControl::Id client = 0;
+        QPointer<Clipboard> clipboard;
+        quint64 clipboardRequestId = 0;
+    };
+    /** Plan every connection's directions from the worker's target, the lock state and who controls; push the controller's to the worker. */
+    void syncClipboard();
+    /** Forget both sides of every connection's clipboard and every request in flight (handover, worker gone, control change). */
+    void resetClipboards();
+    void clipboardRequested(ConsoleControl::Id id, quint64 requestId);
+    void clientClipboardText(ConsoleControl::Id id, const QString &text);
+    ConsoleClipboardPolicy::Direction m_clipboardDirection = ConsoleClipboardPolicy::Direction::Both;
+    QHash<quint64, PendingClipboardRequest> m_clipboardRequests;
 
     /** M-3: the broker's own run of the mapped planner over the last known host screens (no wire, no worker). */
     struct MappedPrediction {

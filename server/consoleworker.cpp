@@ -40,12 +40,17 @@
 #include <QSocketNotifier>
 #include <QTimer>
 #include <QWheelEvent>
+#include <QClipboard>
+#include <QMimeData>
+
+#include <KSystemClipboard>
 
 #include <PlasmaScreencastV1Session.h>
 #include <KGlobalAccel>
 
 #include "ConsoleWorkerWire.h"
 #include "ConsoleWorkerOutbox.h"
+#include "HostClipboard.h"
 #include "KWinPointerCapture.h"
 #include "PointerCaptureProtocol.h"
 #include "CursorTracker.h"
@@ -134,9 +139,37 @@ public:
         , m_mode(mode)
         , m_authenticatedDesktop(desktop)
         , m_initialOutputs(std::move(initialOutputs))
+        , m_hostClipboard(HostClipboard::Backend{
+              [] {
+                  const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
+                  return data && data->hasText();
+              },
+              [] {
+                  const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
+                  return data ? data->text() : QString();
+              },
+              [](const QString &text, bool secret) {
+                  auto *clipboard = KSystemClipboard::instance();
+                  if (text.isEmpty()) {
+                      clipboard->clear(QClipboard::Clipboard);
+                      return true;
+                  }
+                  // KSystemClipboard takes ownership. A write made on the login screen or a locked session asks
+                  // Klipper to keep it out of its history.
+                  auto *mime = new QMimeData();
+                  mime->setText(text);
+                  if (secret) mime->setData(QStringLiteral("x-kde-passwordManagerHint"), QByteArrayLiteral("secret"));
+                  clipboard->setMimeData(mime, QClipboard::Clipboard);
+                  return true;
+              }},
+              [this](const QByteArray &record) { m_outbox.clipboard(record); }, desktop)
         , m_microphone(desktop)
         , m_camera(desktop)
     {
+        // OPT-067: the one place the host clipboard is watched. The capture sessions' own bridge is off.
+        connect(KSystemClipboard::instance(), &KSystemClipboard::changed, this, [this](QClipboard::Mode mode) {
+            if (mode == QClipboard::Clipboard) m_hostClipboard.hostChanged();
+        });
         connect(&m_pointerCapture, &KWinPointerCapture::stateChanged, this, [this](const QJsonObject &state) {
             m_outbox.pointerState(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::PointerState, QJsonDocument(state).toJson(QJsonDocument::Compact)));
         });
@@ -3244,6 +3277,7 @@ private:
         releaseInput();
         m_socket.write(ConsoleWorkerWire::frame(m_control, ConsoleWorkerWire::Kind::LocalTakeover));
         m_control.active = false; // Gate immediately, before the host's acknowledgement.
+        m_hostClipboard.setControl(m_control);
         m_pointerCapture.setControl(m_control);
         if (beginConsoleCreatorRelease()) return;
         if (m_physicalLease) {
@@ -3275,6 +3309,24 @@ private:
                         else m_displayWake.release();
                     }
                 }
+                continue;
+            }
+            if (record->kind == ConsoleWorkerWire::Kind::ClipboardPolicy) {
+                const auto policy = ConsoleWorkerWire::clipboardPolicy(*record);
+                if (!policy) { shutdown(1); return; }
+                m_hostClipboard.setPolicy(*policy);
+                continue;
+            }
+            if (record->kind == ConsoleWorkerWire::Kind::ClipboardRequest) {
+                const auto request = ConsoleWorkerWire::clipboardRequest(*record);
+                if (!request) { shutdown(1); return; }
+                m_hostClipboard.request(*request);
+                continue;
+            }
+            if (record->kind == ConsoleWorkerWire::Kind::ClipboardSet) {
+                const auto set = ConsoleWorkerWire::clipboardSet(*record);
+                if (!set) { shutdown(1); return; }
+                m_hostClipboard.set(*set);
                 continue;
             }
             if (const auto control = ConsoleWorkerWire::controlState(*record)) {
@@ -3322,6 +3374,7 @@ private:
                     }
                     resetEncoderConfig(); // AUD-FIX7: a new grant starts from AVC; its connection says more
                     m_control = *control;
+                    m_hostClipboard.setControl(*control);
                     m_pointerCapture.setControl(*control);
                     m_microphone.setControl(*control);
                     m_camera.setControl(*control);
@@ -3525,6 +3578,7 @@ private:
     bool m_authenticatedDesktop = false;
     QLocalSocket m_socket;
     ConsoleWorkerOutbox m_outbox{[this](const QByteArray &record) { m_socket.write(record); }};
+    HostClipboard m_hostClipboard; // OPT-067
     // FIX-CURSOR: the desktop's cursor shape, merged over the captures, rate-limited to the broker.
     static constexpr quint64 WorkspaceCursorSource = 0; // m_session; per-output captures are 1 + index
     CursorTracker m_cursor;
@@ -3760,6 +3814,8 @@ int main(int argc, char **argv)
         parser.showHelp(1);
     }
 
+    // OPT-067: the worker has one HostClipboard; none of its capture sessions watches the clipboard.
+    PlasmaScreencastV1Session::setClipboardBridgeDefault(false);
     Worker worker(socketName, *mode, uid, token, parser.isSet(desktopOption), *initialOutputs);
 
     // SIGTERM (the broker's drain deadline, or systemd) must restore the

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "VirtualSessionTransport.h"
+
+#include <Clipboard.h>
 #include "PointerCaptureProtocol.h"
 #include "CursorTracker.h"
 #include "LayoutControl.h"
@@ -130,6 +132,28 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
             m_endpoint->sendCameraFrame({m_cameraPolicy.generation, m_cameraPolicy.requestId, jpeg});
         m_connection->acknowledgeExternalCameraFrame(epoch);
     }, Qt::QueuedConnection);
+    if (auto *clipboard = connection->clipboard()) {
+        // OPT-067: nothing is shared until a binding is authorized (syncClipboard()).
+        clipboard->setDirections(false, false);
+        connect(clipboard, &Clipboard::hostTextRequested, this, [this](quint64 requestId) {
+            auto *board = m_connection ? m_connection->clipboard() : nullptr;
+            if (!board) return;
+            const auto endpointId = m_endpoint && m_clipboardPlan && m_clipboardPlan->hostToClient && authorized(m_clipboardUid)
+                ? m_endpoint->requestClipboard() : quint64(0);
+            if (!endpointId) {
+                board->provideHostText(requestId, {}, false);
+                return;
+            }
+            if (m_clipboardRequests.size() >= 16) m_clipboardRequests.clear();
+            m_clipboardRequests.insert(endpointId, requestId);
+        });
+        connect(clipboard, &Clipboard::clientDataChanged, &m_session, [clipboard, this]() {
+            m_session.setClipboardData(clipboard->getClipboard());
+        });
+        connect(&m_session, &ConsoleWorkerSession::clientClipboardText, this, [this](const QString &text) {
+            if (m_endpoint && m_clipboardPlan && m_clipboardPlan->clientToHost && authorized(m_clipboardUid)) m_endpoint->setClipboard(m_controlGeneration, text);
+        });
+    }
     m_resizeDeadline.setSingleShot(true);
     m_resizeDeadline.setInterval(60000);
     connect(&m_resizeDeadline, &QTimer::timeout, this, [this] {
@@ -230,6 +254,53 @@ void VirtualSessionTransport::setVideoCodecHost(const VideoCodecHost &host)
     if (m_connection) {
         host.apply(*m_connection->videoStream());
         m_connection->videoStream()->setAv1TilesSetting(host.av1Tiles);
+    }
+}
+
+void VirtualSessionTransport::setClipboardDirection(ConsoleClipboardPolicy::Direction direction)
+{
+    m_clipboardDirection = direction;
+}
+
+void VirtualSessionTransport::syncClipboard(std::optional<quint32> uid)
+{
+    auto *clipboard = m_connection ? m_connection->clipboard() : nullptr;
+    if (!clipboard) return;
+    ConsoleClipboardPolicy::Input input;
+    input.route = ConsoleClipboardPolicy::Route::Virtual;
+    input.clientUid = uid;
+    input.setting = m_clipboardDirection;
+    m_clipboardUid = uid;
+    const bool owner = authorized(uid);
+    if (owner) {
+        const auto target = m_endpoint->target();
+        input.adapter = target.adapter;
+        input.sessionUid = target.uid;
+        input.ownsControl = true;
+    }
+    const auto plan = ConsoleClipboardPolicy::plan(input);
+    const auto before = m_clipboardPlan;
+    m_clipboardPlan = plan;
+    clipboard->setDirections(plan.hostToClient, plan.clientToHost);
+    if (m_endpoint && m_controlGeneration) {
+        m_endpoint->setClipboardPolicy(m_controlGeneration, plan.hostToClient, plan.clientToHost, false, false);
+    }
+    if ((!before || before->hostToClient != plan.hostToClient || before->clientToHost != plan.clientToHost) && (plan.hostToClient || plan.clientToHost || before)) {
+        qInfo().noquote() << "Clipboard: virtual client" << m_client << "host to client" << (plan.hostToClient ? "enabled" : "disabled")
+                          << ", client to host" << (plan.clientToHost ? "enabled" : "disabled")
+                          << "(reason=" << ConsoleClipboardPolicy::reasonName(plan.reason) << ")";
+    }
+}
+
+void VirtualSessionTransport::resetClipboard()
+{
+    m_clipboardRequests.clear();
+    m_clipboardPlan.reset();
+    m_clipboardUid.reset();
+    if (auto *clipboard = m_connection ? m_connection->clipboard() : nullptr) {
+        clipboard->setDirections(false, false);
+        clipboard->resetHostSide();
+        clipboard->resetClientSide();
     }
 }
 
@@ -371,6 +442,15 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         const auto reply = topologyFrame(frame, m_connection->authenticatedUserUid());
         if (alive && m_connection && !reply.isEmpty()) sendReply(reply);
     }));
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::clipboardOffered, this, [this](quint64) {
+        if (m_connection && m_connection->clipboard() && m_clipboardPlan && m_clipboardPlan->hostToClient && authorized(m_clipboardUid))
+            m_connection->clipboard()->announceHostText();
+    }));
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::clipboardDataReceived, this, [this](const ConsoleWorkerWire::ClipboardData &data) {
+        const auto requestId = m_clipboardRequests.take(data.requestId);
+        if (!requestId || !m_connection || !m_connection->clipboard()) return;
+        m_connection->clipboard()->provideHostText(requestId, data.text, data.status == ConsoleWorkerWire::ClipboardStatus::Ok);
+    }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::audioReceived, this, [this](const auto &audio) {
         if (m_playback && authorized()) m_connection->submitExternalAudio(audio.pcm);
     }));
@@ -465,6 +545,8 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         }, Qt::QueuedConnection));
     endpoint->setControlState({m_controlGeneration, true});
     if (!bindingCurrent()) return false;
+    syncClipboard(uid);
+    if (!bindingCurrent()) return false;
     endpoint->setVideoQuality({generation, effectiveQualityCap()});
     if (!bindingCurrent()) return false;
     m_codec->bind(endpoint, generation); // the worker's own encoders, then this connection's config
@@ -531,6 +613,7 @@ void VirtualSessionTransport::revoke()
     clearRemove();
     clearTopologyResize();
     m_preview.reset();
+    resetClipboard();
     // Clear preference before any teardown signal can destroy this transport.
     if (m_connection) {
         m_connection->setAudioPriorityDefault(false);
@@ -574,6 +657,8 @@ void VirtualSessionTransport::revoke()
         if (generation) endpoint->setVideoQuality({generation, effectiveQualityCap()});
         if (!alive) return;
         if (endpoint) endpoint->setDisplayPolicy(false, false);
+        if (!alive) return;
+        if (endpoint) endpoint->setClipboardPolicy(sequence, false, false, false, false);
         if (!alive) return;
         if (endpoint) endpoint->setControlState({sequence, false});
         if (!alive) return;
@@ -1058,6 +1143,14 @@ void VirtualSessionTransport::sendCapabilities()
     capabilities.devices = VirtualDeviceCapabilities;
     if (m_videoHost) capabilities.video = EncoderSupport::videoCapabilities(m_videoHost->probe, m_videoHost->mode, m_videoHost->allowance());
     capabilities.stats = LayoutControl::StatsCapabilities{};
+    {
+        // OPT-067: the administrator's directions; a desktop's owner always has both unless the setting narrows them.
+        using Direction = ConsoleClipboardPolicy::Direction;
+        const bool hostToClient = m_clipboardDirection == Direction::Both || m_clipboardDirection == Direction::HostToClient;
+        const bool clientToHost = m_clipboardDirection == Direction::Both || m_clipboardDirection == Direction::ClientToHost;
+        if (hostToClient || clientToHost)
+            capabilities.clipboard = LayoutControl::ClipboardCapabilities{hostToClient, clientToHost, int(ConsoleWorkerWire::MaxClipboardBytes)};
+    }
     m_connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
 

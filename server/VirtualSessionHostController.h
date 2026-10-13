@@ -43,6 +43,8 @@ public:
     void setAudioPriorityDefault(bool enabled) { m_audioPriorityDefault = enabled; }
     void setUserSettingsReader(BrokerUserSettings::Reader reader) { m_userSettingsReader = std::move(reader); }
     void setCameraLoopbackDevice(const QString &device) { m_cameraLoopbackDevice = device; }
+    /** OPT-067: the administrator's ClipboardDirection for every client this host accepts. */
+    void setClipboardDirection(ConsoleClipboardPolicy::Direction direction) { m_clipboardDirection = direction; }
     /**
      * AUD-FIX8: whether a desktop's session unit (krdp-virtual-session@<id>.service) is still
      * running: true, false, or nullopt when that cannot be told (treated as running). A recovered
@@ -98,6 +100,7 @@ private:
     bool m_adaptiveQuality = false;
     bool m_audioPriorityDefault = false;
     QString m_cameraLoopbackDevice;
+    ConsoleClipboardPolicy::Direction m_clipboardDirection = ConsoleClipboardPolicy::Direction::Both;
     std::map<QString, std::unique_ptr<Worker>> m_workers;
     quint64 m_sequence = 0;
     quint64 m_nextClient = 0;

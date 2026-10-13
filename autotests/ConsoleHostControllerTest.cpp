@@ -4,6 +4,8 @@
 #include "ConsoleFrameLayout.h"
 #include "ConsoleWorkerSession.h"
 #include "ConsoleWorkerOutbox.h"
+#include "ConsoleClipboardPolicy.h"
+#include <Clipboard.h>
 #include <QSignalSpy>
 #include "RdpConnection.h"
 #include "Server.h"
@@ -1351,6 +1353,143 @@ private:
         {
             VideoFrame f; f.size = QSize(1280, 720); f.isKeyFrame = key; f.monitors = {{QRect(0, 0, 1280, 720), true}};
             Q_EMIT host.m_endpoint.frameReceived(f);
+        }
+    };
+
+    // OPT-067 clipboard bridge: a controller with a real (fake) worker on the endpoint and a fake cliprdr channel.
+    struct ClipboardRig {
+        struct Sent {
+            QList<QList<uint32_t>> formatLists;
+            QList<uint32_t> dataRequests;
+            struct Response { uint16_t flags; QByteArray data; };
+            QList<Response> dataResponses;
+        };
+        static inline Sent *sent_ = nullptr;
+        static UINT onFormatList(CliprdrServerContext *, const CLIPRDR_FORMAT_LIST *list)
+        {
+            QList<uint32_t> ids;
+            for (uint32_t i = 0; i < list->numFormats; ++i) ids.append(list->formats[i].formatId);
+            sent_->formatLists.append(ids);
+            return CHANNEL_RC_OK;
+        }
+        static UINT onFormatListResponse(CliprdrServerContext *, const CLIPRDR_FORMAT_LIST_RESPONSE *) { return CHANNEL_RC_OK; }
+        static UINT onDataRequest(CliprdrServerContext *, const CLIPRDR_FORMAT_DATA_REQUEST *request)
+        {
+            sent_->dataRequests.append(request->requestedFormatId);
+            return CHANNEL_RC_OK;
+        }
+        static UINT onDataResponse(CliprdrServerContext *, const CLIPRDR_FORMAT_DATA_RESPONSE *response)
+        {
+            sent_->dataResponses.append({response->common.msgFlags,
+                response->requestedFormatData ? QByteArray(reinterpret_cast<const char *>(response->requestedFormatData), response->common.dataLen) : QByteArray()});
+            return CHANNEL_RC_OK;
+        }
+
+        QTemporaryDir runtime;
+        Server server;
+        RdpConnection connection{&server, -1};
+        ConsoleHostController host{&server, {}, {}};
+        ConsoleHostController::Client *client = nullptr;
+        Sent sent;
+        CliprdrServerContext context{};
+        QLocalSocket worker;
+        ConsoleWorkerWire::Deframer reader;
+        QList<ConsoleWorkerWire::Record> received;
+        ConsoleHandoff::Target target;
+        QByteArray token = QByteArray(32, 'k');
+        bool ok = false;
+
+        static ConsoleSeat::Session session(const QString &id, quint32 uid, bool locked, bool isGreeter)
+        {
+            ConsoleSeat::Session result;
+            result.id = id; result.uid = uid; result.seat = u"seat0"_s; result.type = u"wayland"_s;
+            result.sessionClass = isGreeter ? u"greeter"_s : u"user"_s; result.state = u"active"_s; result.active = true; result.locked = locked;
+            return result;
+        }
+        // adapter/sessionUid: the worker's session; clientUid: the connection's PAM uid; locked: LockedHint.
+        ClipboardRig(ConsoleSeat::Adapter adapter, quint32 clientUid, bool locked = false, bool admitted = true, quint32 sessionUid = quint32(getuid()))
+        {
+            if (!runtime.isValid()) return;
+            sent_ = &sent;
+            target = {adapter, QStringLiteral("3"), sessionUid ? sessionUid : quint32(getuid())};
+            host.m_sessions = {session(u"3"_s, target.uid, locked, adapter == ConsoleSeat::Adapter::Greeter)};
+            host.setUidResolver([clientUid](RdpConnection *) { return std::optional<quint32>(clientUid); });
+            host.setUserSettingsReader([](quint32) { return BrokerUserSettings::parse("[General]\n"); });
+            host.setDisplayInfoProvider([](RdpConnection *) { return ClientDisplay::Info{}; });
+            context.ServerFormatList = onFormatList;
+            context.ServerFormatListResponse = onFormatListResponse;
+            context.ServerFormatDataRequest = onDataRequest;
+            context.ServerFormatDataResponse = onDataResponse;
+            if (!host.m_endpoint.listen(runtime.filePath(QStringLiteral("worker.sock")), target, token)) return;
+            host.addClient(&connection);
+            client = host.m_clients.front().get();
+            client->uid = clientUid;
+            Clipboard::installClientCallbacks(&context, connection.clipboard());
+            connection.clipboard()->attachContextForTest(&context);
+            connection.clipboard()->setGraphicsDelivered();
+            if (admitted) { host.m_control.admit(client->id); host.syncControlState(); }
+            worker.connectToServer(host.m_endpoint.socketName());
+            if (!worker.waitForConnected(1000)) return;
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{target.sessionId, target.uid, token}));
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+            worker.flush();
+            QTRY_VERIFY_WITH_TIMEOUT(host.m_endpoint.ready(), 3000);
+            host.syncClipboard();
+            ok = true;
+        }
+        ~ClipboardRig() { sent_ = nullptr; }
+        void pump()
+        {
+            QTest::qWait(30);
+            reader.feed(worker.readAll());
+            while (const auto record = reader.next()) received.append(*record);
+        }
+        std::optional<ConsoleWorkerWire::ClipboardPolicy> lastPolicy()
+        {
+            pump();
+            std::optional<ConsoleWorkerWire::ClipboardPolicy> result;
+            for (const auto &record : std::as_const(received)) if (const auto p = ConsoleWorkerWire::clipboardPolicy(record)) result = p;
+            return result;
+        }
+        QList<ConsoleWorkerWire::ClipboardRequest> requests()
+        {
+            pump();
+            QList<ConsoleWorkerWire::ClipboardRequest> out;
+            for (const auto &record : std::as_const(received)) if (const auto r = ConsoleWorkerWire::clipboardRequest(record)) out.append(*r);
+            return out;
+        }
+        QList<ConsoleWorkerWire::ClipboardSet> sets()
+        {
+            pump();
+            QList<ConsoleWorkerWire::ClipboardSet> out;
+            for (const auto &record : std::as_const(received)) if (const auto r = ConsoleWorkerWire::clipboardSet(record)) out.append(*r);
+            return out;
+        }
+        void workerSends(const QByteArray &record) { worker.write(record); worker.flush(); }
+        UINT clientCopies(const QByteArray & = {})
+        {
+            CLIPRDR_FORMAT format{};
+            format.formatId = CF_TEXT;
+            CLIPRDR_FORMAT_LIST list{};
+            list.common.msgType = CB_FORMAT_LIST;
+            list.numFormats = 1;
+            list.formats = &format;
+            return context.ClientFormatList(&context, &list);
+        }
+        UINT clientAnswers(const QByteArray &ansi)
+        {
+            CLIPRDR_FORMAT_DATA_RESPONSE response{};
+            response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+            response.common.msgFlags = CB_RESPONSE_OK;
+            response.common.dataLen = uint32_t(ansi.size());
+            response.requestedFormatData = reinterpret_cast<const BYTE *>(ansi.constData());
+            return context.ClientFormatDataResponse(&context, &response);
+        }
+        UINT clientPastes()
+        {
+            CLIPRDR_FORMAT_DATA_REQUEST request{};
+            request.requestedFormatId = CF_UNICODETEXT;
+            return context.ClientFormatDataRequest(&context, &request);
         }
     };
 
@@ -2990,6 +3129,186 @@ private Q_SLOTS:
         QCOMPARE(backend.first().at(0).value<VideoCodec>(), VideoCodec::Avc420);
         QVERIFY(backend.first().at(1).toBool());
         QCOMPARE(host.m_endpoint.encoderCaps(), std::optional(caps));
+    }
+
+    // ---- OPT-067 clipboard bridge ----
+    void clipboardPolicyPerState_data()
+    {
+        QTest::addColumn<int>("adapter");
+        QTest::addColumn<quint32>("clientUid");
+        QTest::addColumn<bool>("locked");
+        QTest::addColumn<bool>("admitted");
+        QTest::addColumn<bool>("hostToClient");
+        QTest::addColumn<bool>("clientToHost");
+        QTest::addColumn<bool>("greeter");
+        const quint32 me = quint32(getuid());
+        const int user = int(ConsoleSeat::Adapter::PhysicalUser), greeter = int(ConsoleSeat::Adapter::Greeter);
+        QTest::newRow("unlocked own desktop") << user << me << false << true << true << true << false;
+        QTest::newRow("locked own desktop") << user << me << true << true << true << true << false;
+        QTest::newRow("locked, another account") << user << me + 1 << true << true << false << false << false;
+        QTest::newRow("greeter") << greeter << me + 1 << false << true << false << true << true;
+        QTest::newRow("viewer (no control)") << user << me << false << false << false << false << false;
+    }
+    void clipboardPolicyPerState()
+    {
+        QFETCH(int, adapter);
+        QFETCH(quint32, clientUid);
+        QFETCH(bool, locked);
+        QFETCH(bool, admitted);
+        QFETCH(bool, hostToClient);
+        QFETCH(bool, clientToHost);
+        QFETCH(bool, greeter);
+        ClipboardRig rig(ConsoleSeat::Adapter(adapter), clientUid, locked, admitted);
+        QVERIFY(rig.ok);
+        QCOMPARE(rig.connection.clipboard()->hostToClientAllowed(), hostToClient);
+        QCOMPARE(rig.connection.clipboard()->clientToHostAllowed(), clientToHost);
+        QCOMPARE(rig.client->clipboardPlan->hostToClient, hostToClient);
+        const auto policy = rig.lastPolicy();
+        QVERIFY(policy);
+        QCOMPARE(policy->hostToClient, hostToClient);
+        QCOMPARE(policy->clientToHost, clientToHost);
+        QCOMPARE(policy->greeter, greeter);
+        QCOMPARE(policy->locked, locked);
+        QCOMPARE(policy->controlGeneration, rig.host.m_controlGeneration);
+    }
+
+    void clipboardSettingNarrowsEveryState()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        rig.host.setClipboardDirection(ConsoleClipboardPolicy::Direction::ClientToHost);
+        rig.host.syncClipboard();
+        QVERIFY(!rig.connection.clipboard()->hostToClientAllowed() && rig.connection.clipboard()->clientToHostAllowed());
+        auto policy = rig.lastPolicy();
+        QVERIFY(policy && !policy->hostToClient && policy->clientToHost);
+        rig.host.setClipboardDirection(ConsoleClipboardPolicy::Direction::Off);
+        rig.host.syncClipboard();
+        QVERIFY(!rig.connection.clipboard()->hostToClientAllowed() && !rig.connection.clipboard()->clientToHostAllowed());
+        policy = rig.lastPolicy();
+        QVERIFY(policy && !policy->hostToClient && !policy->clientToHost);
+    }
+
+    void clipboardHostCopyPasteFlowsThroughTheWorkerOnDemand()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, 1}));
+        QTRY_COMPARE(rig.sent.formatLists.size(), 1); // announced, nothing fetched yet
+        QCOMPARE(rig.sent.formatLists.first(), QList<uint32_t>{CF_UNICODETEXT});
+        QVERIFY(rig.requests().isEmpty());
+        rig.clientPastes();
+        QTRY_VERIFY(!rig.requests().isEmpty());
+        const auto request = rig.requests().first();
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{request.requestId, 1, ConsoleWorkerWire::ClipboardStatus::Ok, QStringLiteral("a\nb")}));
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.first().flags, uint16_t(CB_RESPONSE_OK));
+        QCOMPARE(QString::fromUtf16(reinterpret_cast<const char16_t *>(rig.sent.dataResponses.first().data.constData()), rig.sent.dataResponses.first().data.size() / 2 - 1),
+                 QStringLiteral("a\r\nb"));
+        // The worker declines (nothing to give): the client's paste fails, it does not hang.
+        rig.clientPastes();
+        QTRY_COMPARE(rig.requests().size(), 2);
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{rig.requests().last().requestId, 1, ConsoleWorkerWire::ClipboardStatus::Gone, {}}));
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 2);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+    }
+
+    void clipboardClientCopyReachesTheWorkerAsLfText()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.clientCopies({});
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 3000);
+        rig.clientAnswers(QByteArray("typed on the client\r\nline two") + '\0');
+        QTRY_VERIFY(!rig.sets().isEmpty());
+        const auto set = rig.sets().first();
+        QCOMPARE(set.text, QStringLiteral("typed on the client\nline two"));
+        QCOMPARE(set.controlGeneration, rig.host.m_controlGeneration);
+    }
+
+    void clipboardNothingCrossesWhereThePolicyDenies()
+    {
+        // Another account's locked screen: neither direction, and the worker is never asked.
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()) + 1, true);
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, 1}));
+        rig.pump();
+        QTest::qWait(60);
+        QVERIFY(rig.sent.formatLists.isEmpty());
+        rig.clientPastes();
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.first().flags, uint16_t(CB_RESPONSE_FAIL));
+        QVERIFY(rig.requests().isEmpty());
+        rig.clientCopies({});
+        QTest::qWait(Clipboard::FormatListSettleMs * 2);
+        QVERIFY(rig.sent.dataRequests.isEmpty()); // acknowledged, never requested
+        QVERIFY(rig.sets().isEmpty());
+        // The greeter: the client may paste into it, nothing is read back.
+        ClipboardRig greeter(ConsoleSeat::Adapter::Greeter, quint32(getuid()) + 1);
+        QVERIFY(greeter.ok);
+        greeter.lastPolicy();
+        greeter.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, 1}));
+        QTest::qWait(60);
+        QVERIFY(greeter.sent.formatLists.isEmpty());
+        greeter.clientCopies({});
+        QTRY_COMPARE_WITH_TIMEOUT(greeter.sent.dataRequests.size(), 1, 3000);
+        greeter.clientAnswers(QByteArray("a username") + '\0');
+        QTRY_VERIFY(!greeter.sets().isEmpty());
+        QCOMPARE(greeter.sets().first().text, QStringLiteral("a username"));
+    }
+
+    void clipboardStateIsResetWhenControlMovesOrTheWorkerGoes()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, 1}));
+        QTRY_COMPARE(rig.sent.formatLists.size(), 1);
+        // Control leaves this connection: its announcement is withdrawn and the worker is told nothing is allowed.
+        rig.host.m_control.release(rig.client->id);
+        rig.host.syncControlState();
+        QCOMPARE(rig.sent.formatLists.size(), 2);
+        QVERIFY(rig.sent.formatLists.last().isEmpty());
+        QVERIFY(!rig.connection.clipboard()->hostToClientAllowed());
+        const auto policy = rig.lastPolicy();
+        QVERIFY(policy && !policy->hostToClient && !policy->clientToHost);
+        // Control returns: nothing of the earlier announcement comes back until the next host copy.
+        QVERIFY(rig.host.m_control.acquire(rig.client->id));
+        rig.host.syncControlState();
+        QVERIFY(rig.connection.clipboard()->hostToClientAllowed());
+        QCOMPARE(rig.sent.formatLists.size(), 2);
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{2, 1}));
+        QTRY_COMPARE(rig.sent.formatLists.size(), 3);
+        // The worker goes away (handover): withdrawn again, nothing allowed until the next worker is Ready.
+        rig.worker.disconnectFromServer();
+        QTRY_VERIFY(!rig.host.m_endpoint.ready());
+        QCOMPARE(rig.sent.formatLists.size(), 4);
+        QVERIFY(rig.sent.formatLists.last().isEmpty());
+        QVERIFY(!rig.connection.clipboard()->hostToClientAllowed() && !rig.connection.clipboard()->clientToHostAllowed());
+    }
+
+    void clipboardCapabilityFollowsTheSetting()
+    {
+        for (const auto direction : {ConsoleClipboardPolicy::Direction::Both, ConsoleClipboardPolicy::Direction::HostToClient,
+                                     ConsoleClipboardPolicy::Direction::ClientToHost, ConsoleClipboardPolicy::Direction::Off}) {
+            MappedHarness h("[General]\n", {}, true, 2000, 2, ConsoleSeat::Adapter::PhysicalUser, false, false);
+            h.host.setClipboardDirection(direction);
+            h.client->capabilitiesSent = false;
+            h.host.sendCapabilities(*h.client);
+            const auto caps = h.sent.last();
+            QCOMPARE(caps.value(u"type"_s).toString(), u"capabilities"_s);
+            if (direction == ConsoleClipboardPolicy::Direction::Off) {
+                QVERIFY(!caps.contains(u"clipboard"_s));
+                continue;
+            }
+            const bool both = direction == ConsoleClipboardPolicy::Direction::Both;
+            QCOMPARE(caps.value(u"clipboard"_s).toObject(),
+                     (QJsonObject{{u"hostToClient"_s, both || direction == ConsoleClipboardPolicy::Direction::HostToClient},
+                                  {u"clientToHost"_s, both || direction == ConsoleClipboardPolicy::Direction::ClientToHost},
+                                  {u"maxBytes"_s, 1024 * 1024}}));
+        }
     }
 };
 }

@@ -40,6 +40,8 @@ public:
 
 Q_SIGNALS:
     void keyFrameRequested();
+    /** OPT-067: the client copied this text (host LF line endings; empty = it cleared its clipboard). Never logged. */
+    void clientClipboardText(const QString &text);
 
 private:
     std::function<void(const ConsoleWorkerWire::Input &)> m_sendInput;

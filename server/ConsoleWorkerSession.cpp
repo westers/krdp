@@ -4,6 +4,8 @@
 #include "RelativePointerEvent.h"
 #include "ConsoleWorkerSession.h"
 
+#include <QMimeData>
+
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QWheelEvent>
@@ -85,9 +87,10 @@ void ConsoleWorkerSession::sendEvent(const std::shared_ptr<QEvent> &event)
 
 void ConsoleWorkerSession::setClipboardData(std::unique_ptr<QMimeData> data)
 {
-    Q_UNUSED(data)
-    // Clipboard worker IPC is deliberately a later record type; do not give a
-    // system broker direct access to the greeter clipboard in the meantime.
+    // OPT-067: the broker never touches a host clipboard. The client's text goes to the worker as a
+    // ClipboardSet record (the host controller gates it by policy and control); an empty or
+    // non-text copy is an empty text, which clears the host clipboard.
+    Q_EMIT clientClipboardText(data && data->hasText() ? data->text() : QString());
 }
 
 void ConsoleWorkerSession::requestKeyFrame()

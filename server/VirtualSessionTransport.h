@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #pragma once
 #include "VirtualSessionControl.h"
+#include "ConsoleClipboardPolicy.h"
 #include "ConsoleWorkerEndpoint.h"
 #include "ConsoleWorkerSession.h"
 #include "RemoteTopologyProtocol.h"
@@ -10,6 +11,7 @@
 #include "BrokerUserSettings.h"
 #include <RdpConnection.h>
 #include <memory>
+#include <QHash>
 #include <QPointer>
 #include <QTimer>
 #include <QElapsedTimer>
@@ -50,6 +52,8 @@ public:
     void setAudioPriorityDefault(bool enabled) { m_audioPriorityDefault = enabled; }
     void setUserSettingsReader(BrokerUserSettings::Reader reader) { m_userSettingsReader = std::move(reader); }
     void setCameraLoopbackDevice(const QString &device) { m_cameraLoopbackDevice = device; }
+    /** OPT-067: the administrator's ClipboardDirection; the planner narrows it by state. Call before the client authenticates. */
+    void setClipboardDirection(ConsoleClipboardPolicy::Direction direction);
 
 private:
     friend class VirtualSessionTransportTest;
@@ -104,6 +108,14 @@ private:
     std::optional<QSize> m_displaySize;
     bool m_resizeFromDisplay = false;
     quint64 m_displayResizes = 0;
+    // --- OPT-067 text clipboard bridge (the desktop's owner only; there is no greeter and no foreign viewer) ---
+    /** Plan the clipboard directions from the binding and push them to the connection and the worker. */
+    void syncClipboard(std::optional<quint32> uid);
+    void resetClipboard();
+    std::optional<quint32> m_clipboardUid; // the identity the current plan was made for
+    ConsoleClipboardPolicy::Direction m_clipboardDirection = ConsoleClipboardPolicy::Direction::Both;
+    std::optional<ConsoleClipboardPolicy::Plan> m_clipboardPlan;
+    QHash<quint64, quint64> m_clipboardRequests; // endpoint request id -> the connection's Clipboard request id
     bool attachmentMatches(const VirtualSessionRegistry::Handle &handle) const;
     bool authorized() const;
     bool authorized(std::optional<quint32> uid) const;

@@ -633,6 +633,7 @@ void VirtualSessionHostController::addClient(RdpConnection *connection)
     transport->setAudioPriorityDefault(m_audioPriorityDefault);
     transport->setUserSettingsReader(m_userSettingsReader);
     transport->setCameraLoopbackDevice(m_cameraLoopbackDevice);
+    transport->setClipboardDirection(m_clipboardDirection);
     m_clients.emplace(id, std::move(transport));
     connect(connection, &RdpConnection::stateChanged, this, [this, id](RdpConnection::State state) {
         if (state == RdpConnection::State::Closed) removeClient(id);
