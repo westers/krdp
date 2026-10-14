@@ -46,6 +46,8 @@ private Q_SLOTS:
     void clipboardRecordsRoundTripAndAreBounded();
     void clipboardGatesAreStrict();
     void heartbeatAndLocalReclaimRecordsAreStrict();
+    void hostPointerRecordIsStrictAndCarriesNoInputData();
+    void wireSeventeenIsRefused();
     void wireSixteenIsRefused();
 };
 
@@ -558,7 +560,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(17));
+    QCOMPARE(ProtocolVersion, quint16(18));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -818,7 +820,7 @@ void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
     QCOMPARE(encoderStats(*deframer.next()), std::optional(measured));
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 0);
-    QCOMPARE(LastKind, Kind::LocalReclaim);
+    QCOMPARE(LastKind, Kind::HostPointer);
 
     const auto rejected = [](const EncoderStats &stats) {
         Deframer d;
@@ -950,8 +952,8 @@ void ConsoleWorkerWireTest::roundTripsControlGeneration()
 // OPT-067 (wire 16): the six clipboard records.
 void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(17));
-    QCOMPARE(int(LastKind), int(Kind::LocalReclaim));
+    QCOMPARE(ProtocolVersion, quint16(18));
+    QCOMPARE(int(LastKind), int(Kind::HostPointer));
     const ClipboardPolicy policy{7, 42, true, false, true, false};
     const ClipboardOffer offer{3, 1};
     const ClipboardRequest request{11, 4096};
@@ -1152,6 +1154,50 @@ void ConsoleWorkerWireTest::wireSixteenIsRefused()
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 1);
     QCOMPARE(deframer.mismatchedVersion(), std::optional<quint16>(16));
+}
+
+// OPT-071 (wire 18): HostPointer is exactly x, y and visible; nothing about keys or buttons can ride on it.
+void ConsoleWorkerWireTest::hostPointerRecordIsStrictAndCarriesNoInputData()
+{
+    Deframer deframer;
+    deframer.feed(frame(HostPointer{1930, 17, true}) + frame(HostPointer{0, 0, false}));
+    const auto first = deframer.next();
+    QVERIFY(first);
+    QCOMPARE(first->kind, Kind::HostPointer);
+    QCOMPARE(first->payload.size(), qsizetype(9)); // int32 x, int32 y, uint8 visible: no room for anything else
+    QCOMPARE(hostPointer(*first), std::optional<HostPointer>(HostPointer{1930, 17, true}));
+    QCOMPARE(hostPointer(*deframer.next()), std::optional<HostPointer>(HostPointer{0, 0, false}));
+    QVERIFY(!deframer.next());
+    QVERIFY(!heartbeat(*first) && !cursorShape(*first) && !controlState(*first, Kind::LocalReclaim));
+
+    Record shorter = *first, longer = *first, flag = *first, wrongKind = *first;
+    shorter.payload.chop(1);
+    longer.payload.append('x');
+    flag.payload[8] = char(2); // visible is 0 or 1
+    wrongKind.kind = Kind::Heartbeat;
+    QVERIFY(!hostPointer(shorter) && !hostPointer(longer) && !hostPointer(flag) && !hostPointer(wrongKind));
+    // Out-of-range coordinates are not a pointer.
+    for (const HostPointer bad : {HostPointer{-1, 0, true}, HostPointer{0, -1, true}, HostPointer{HostPointer::MaxCoordinate + 1, 0, true},
+                                  HostPointer{0, HostPointer::MaxCoordinate + 1, true}}) {
+        Deframer d;
+        d.feed(frame(bad));
+        const auto record = d.next();
+        QVERIFY(record);
+        QVERIFY(!hostPointer(*record));
+    }
+}
+
+void ConsoleWorkerWireTest::wireSeventeenIsRefused()
+{
+    // A worker still on wire 17 (no HostPointer) meets a 18 peer: refused as a whole, and the peer's version is reported.
+    QByteArray old = frame(Heartbeat{1});
+    old[4] = char(0);
+    old[5] = char(17);
+    Deframer deframer;
+    deframer.feed(old);
+    QVERIFY(!deframer.next());
+    QCOMPARE(deframer.takeInvalidCount(), 1);
+    QCOMPARE(deframer.mismatchedVersion(), std::optional<quint16>(17));
 }
 
 QTEST_GUILESS_MAIN(ConsoleWorkerWireTest)

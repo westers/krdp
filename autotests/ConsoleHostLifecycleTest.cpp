@@ -186,10 +186,10 @@ private Q_SLOTS:
         QCOMPARE(stop->kind, ConsoleWorkerWire::Kind::Stop);
     }
 
-    // OPT-060 M-2/M-8: broker and worker ship together. A worker still speaking the previous wire (16, no heartbeat or LocalReclaim records) is dropped and backed off like any other foreign version, never half-served.
+    // OPT-060 M-2/M-8: broker and worker ship together. A worker still speaking the previous wire (17, no HostPointer record) is dropped and backed off like any other foreign version, never half-served.
     void previousWireVersionIsRefused()
     {
-        QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(17));
+        QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(18));
         QTemporaryDir runtime;
         Server server;
         FakeLauncher launcher;

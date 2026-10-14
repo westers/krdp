@@ -27,6 +27,8 @@ private Q_SLOTS:
     void clipboardCrossesOnlyAfterReadyAndOnlyWhenAllowed();
     void clipboardIdsAreEndpointWideAndForgottenWithTheWorker();
     void clipboardRecordBeforeReadyFailsTheWorker();
+    void hostPointerIsRelayedAfterReadyAndForgottenWithTheWorker();
+    void hostPointerBeforeReadyOrMalformedFailsTheWorker();
 };
 
 void ConsoleWorkerEndpointTest::reportsWorkerFailures_data()
@@ -575,6 +577,53 @@ void ConsoleWorkerEndpointTest::clipboardRecordBeforeReadyFailsTheWorker()
     w.worker.flush();
     QTRY_COMPARE(errors, 1);
     QVERIFY(!w.endpoint.ready());
+}
+
+// OPT-071 (wire 18).
+void ConsoleWorkerEndpointTest::hostPointerIsRelayedAfterReadyAndForgottenWithTheWorker()
+{
+    ClipboardWorker w;
+    w.start(true);
+    QVERIFY(w.ok);
+    QList<ConsoleWorkerWire::HostPointer> seen;
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::hostPointerReceived, this, [&seen](const ConsoleWorkerWire::HostPointer &pointer) { seen.append(pointer); });
+    QVERIFY(!w.endpoint.hostPointer());
+    w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::HostPointer{100, 200, true}) + ConsoleWorkerWire::frame(ConsoleWorkerWire::HostPointer{101, 201, false}));
+    w.worker.flush();
+    QTRY_COMPARE(seen.size(), 2);
+    QCOMPARE(seen.first(), (ConsoleWorkerWire::HostPointer{100, 200, true}));
+    QCOMPARE(w.endpoint.hostPointer(), std::optional(ConsoleWorkerWire::HostPointer{101, 201, false}));
+    QVERIFY(w.endpoint.ready()); // an ordinary record does not disturb the worker
+    w.worker.disconnectFromServer();
+    QTRY_VERIFY(!w.endpoint.ready());
+    QVERIFY(!w.endpoint.hostPointer());
+}
+
+void ConsoleWorkerEndpointTest::hostPointerBeforeReadyOrMalformedFailsTheWorker()
+{
+    {
+        ClipboardWorker w;
+        w.start(false);
+        QVERIFY(w.ok);
+        int errors = 0;
+        connect(&w.endpoint, &ConsoleWorkerEndpoint::protocolError, this, [&errors](const QString &) { ++errors; });
+        w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::HostPointer{1, 2, true}));
+        w.worker.flush();
+        QTRY_COMPARE(errors, 1);
+        QVERIFY(!w.endpoint.ready());
+    }
+    {
+        ClipboardWorker w;
+        w.start(true);
+        QVERIFY(w.ok);
+        int errors = 0;
+        QString why;
+        connect(&w.endpoint, &ConsoleWorkerEndpoint::protocolError, this, [&](const QString &reason) { ++errors; why = reason; });
+        w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::HostPointer, QByteArray(5, 'x')));
+        w.worker.flush();
+        QTRY_COMPARE(errors, 1);
+        QVERIFY(why.contains(QStringLiteral("host pointer")));
+    }
 }
 
 QTEST_GUILESS_MAIN(ConsoleWorkerEndpointTest)

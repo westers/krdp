@@ -88,6 +88,7 @@
 #include "ConsoleLockWatch.h"
 #include "ConsoleReleaseLockGuard.h"
 #include "ConsoleReclaimEpisode.h"
+#include "DeskActivity.h"
 #include "LogThrottle.h"
 #include "ConsoleVirtualOutputMutation.h"
 #include "PhysicalOutputGuard.h"
@@ -288,12 +289,15 @@ public:
         });
         m_cursorTimer.setSingleShot(true);
         connect(&m_cursorTimer, &QTimer::timeout, this, &Worker::flushCursor);
+        m_hostPointerTimer.setSingleShot(true);
+        connect(&m_hostPointerTimer, &QTimer::timeout, this, &Worker::flushHostPointer);
         connect(&m_socket, &QLocalSocket::connected, this, [this]() {
             m_connectTimeout.stop();
             // AUD-FIX8: Hello, EncoderCaps, Ready, then the rest (ConsoleWorkerOutbox).
             m_outbox.hello(ConsoleWorkerWire::Hello{m_sessionId, m_uid, m_token});
             m_cursor.resend(); // FIX-CURSOR: held by the outbox until Ready
             flushCursor();
+            m_hostPointer.resend(); // OPT-071: the outbox drops positions made before Ready; the next one follows
             // AUD-FIX7: the encoders this worker really has (its user, its render node): the
             // broker's codec policy chooses among these.
             const auto &probe = EncoderSupport::probe();
@@ -1691,12 +1695,34 @@ private:
     {
         m_cursor.report(source, cursor, m_clock.elapsed());
         flushCursor();
+        // OPT-071: the position goes to the broker (Console only; a Virtual desktop has no desk) in the client's desktop coordinates.
+        if (m_mode.physicalActions()) {
+            const auto desktop = DeskActivity::toDesktop(m_multiMode, m_wireAtlas, source, cursor.position);
+            m_hostPointer.report(source, cursor.visible && desktop.has_value(), desktop.value_or(QPoint()), m_clock.elapsed());
+            flushHostPointer();
+        }
     }
 
     void forgetCursorSource(quint64 source)
     {
         m_cursor.forget(source, m_clock.elapsed());
         flushCursor();
+        if (m_mode.physicalActions()) {
+            m_hostPointer.forget(source, m_clock.elapsed());
+            flushHostPointer();
+        }
+    }
+
+    /** OPT-071: sends the host pointer if one is due (change only, at most DeskActivity::MaxPointerRateHz). */
+    void flushHostPointer()
+    {
+        if (!m_outbox.readySent()) return; // resent from Hello on; the outbox drops positions before Ready
+        const qint64 now = m_clock.elapsed();
+        if (const auto pointer = m_hostPointer.take(now)) {
+            m_outbox.hostPointer(ConsoleWorkerWire::HostPointer{pointer->position.x(), pointer->position.y(), pointer->visible});
+        }
+        const qint64 due = m_hostPointer.dueIn(now);
+        if (due >= 0) m_hostPointerTimer.start(int(std::max<qint64>(std::min<qint64>(due, 1000), 1)));
     }
 
     /** Sends the cursor shape if one is due, else waits until it is (rate limit, hide delay). */
@@ -3594,6 +3620,8 @@ private:
     static constexpr quint64 WorkspaceCursorSource = 0; // m_session; per-output captures are 1 + index
     CursorTracker m_cursor;
     QTimer m_cursorTimer;
+    DeskActivity::HostPointerTracker m_hostPointer; // OPT-071
+    QTimer m_hostPointerTimer;
     ConsoleWorkerWire::Deframer m_deframer;
     PlasmaScreencastV1Session m_session;
     RetainedMultiCapture m_multiCapture;
