@@ -41,7 +41,7 @@ The watcher fires on every event batch (hundreds per second for a mouse), so the
 - No key code, key name, device name, device kind, button or coordinate. Exactly these keys, nothing else
   (a test pins the key set).
 - `active:true` is sent at most `MaxRateHz = 4` times per second (leading edge at once, then one trailing record per
-  250 ms window while activity continues). `active:false` goes once, `IdleMs = 5000` after the last event.
+  250 ms window while activity continues). `active:false` goes once, `IdleMs = 10000` after the last event.
 - `seq` counts records per connection (diagnostics only). `context` = `session` | `greeter` | `locked`, taken from
   the seat sessions the broker already watches (session class greeter, logind LockedHint). The client words these
   neutrally (see 6). `unknown` is never sent; no seat session means `session`.
@@ -67,13 +67,13 @@ exactly 9 bytes, |x|,|y| <= 65535; a malformed one fails the worker like a malfo
 never sends it (`physicalActions()` is false). The Virtual broker's endpoint accepts and ignores it.
 
 The broker relays `host-pointer` only to clients that subscribed with `pointer:true`, and only while desk activity is
-live (last event within `ActiveHoldMs = 10000`): outside that window the host pointer is wherever the remote user
+live (last event within `IdleMs`, 10 s): outside that window the host pointer is wherever the remote user
 put it and carries nothing. The latest pointer is kept so the first `active:true` can be followed by one right away.
 It is rate-limited again at the broker (50 ms) because the relay must not depend on the worker's limiter.
 
 ### 4. Capability and subscription
 
-`capabilities.deskActivity = {"pointer":true,"maxRateHz":4,"idleMs":5000}` on Console only. Absent on Virtual and on
+`capabilities.deskActivity = {"pointer":true,"maxRateHz":4,"idleMs":10000}` on Console only. Absent on Virtual and on
 older servers. Old clients ignore the group, and are never sent the records: they must opt in with
 
 ```
@@ -103,7 +103,7 @@ live; the controller shows it only where it differs from where its own pointer w
 - `ControlCapabilities` parses `deskActivity` (all of it or none, like `clipboard`) and exposes `deskActivityAdvertised`,
   `deskActivityPointer`.
 - Pure `DeskActivityModel` (src/core, fake clock): `onRecord`, `onPointer`, `active(now)`, `secondsSince(now)`,
-  `ghost(now, lastSentPointer, isController)`; activity expires on its own `ActiveHoldMs` (10 s) if no `active:false`
+  `ghost(now, lastSentPointer, isController)`; activity expires on its own `IdleMs` plus a 2 s grace if no `active:false`
   arrives (lost record, host restart), so the badge can never stay stuck.
 - `SessionModel` subscribes after `capabilities` when the setting is on, feeds records, exposes `deskActive`,
   `deskSecondsSince`, `deskContext`, `hostPointer` (desktop coordinates), `ghostVisible`.

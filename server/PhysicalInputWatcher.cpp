@@ -30,18 +30,17 @@ struct PhysicalInputWatcher::Private {
     void add(udev_device *device) {
         const char *node = udev_device_get_devnode(device);
         const char *sys = udev_device_get_syspath(device);
-        if (!node || !sys || !QString::fromLocal8Bit(node).startsWith(u"/dev/input/event")) return;
-        // KWin fake-input never enters evdev. Exclude software-created uinput devices too.
-        if (strstr(sys, "/devices/virtual/input/")) return;
-        const char *seat = udev_device_get_property_value(device, "ID_SEAT");
-        if (seat && strcmp(seat, "seat0")) return;
-        bool pointerOrKeyboard = false;
-        for (const char *property : {"ID_INPUT_KEYBOARD", "ID_INPUT_MOUSE", "ID_INPUT_TOUCHPAD", "ID_INPUT_TOUCHSCREEN"}) {
+        if (!node || !sys) return;
+        const auto flag = [device](const char *property) {
             const char *value = udev_device_get_property_value(device, property);
-            if (value && !strcmp(value, "1")) pointerOrKeyboard = true;
-        }
+            return value && !strcmp(value, "1");
+        };
+        const char *seat = udev_device_get_property_value(device, "ID_SEAT");
         const QString path = QString::fromLocal8Bit(node);
-        if (!pointerOrKeyboard || devices.contains(path)) return;
+        // KWin fake-input never enters evdev, and software-created uinput devices are excluded too (isDeskDevice).
+        if (devices.contains(path)
+            || !PhysicalInputWatcher::isDeskDevice(path, QString::fromLocal8Bit(sys), seat ? QString::fromLocal8Bit(seat) : QString(), flag("ID_INPUT_KEYBOARD"),
+                                                   flag("ID_INPUT_MOUSE"), flag("ID_INPUT_TOUCHPAD"), flag("ID_INPUT_TOUCHSCREEN"))) return;
         const int fd = open(node, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0) { qWarning() << "Cannot observe physical Console activity on" << path; return; }
         auto notifier = new QSocketNotifier(fd, QSocketNotifier::Read, q);
