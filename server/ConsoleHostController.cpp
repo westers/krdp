@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 #include "ConsoleHostController.h"
+
+#include <chrono>
 #include "PointerCaptureProtocol.h"
 #include "DisplayWakePolicy.h"
 #include "ChromaMerge.h"
@@ -376,6 +378,14 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             if (client->connection && m_control.admitted(client->id)) CursorTracker::apply(*client->connection->cursor(), shape);
         }
     });
+    // OPT-071: the host pointer, relayed (paced, and only while the desk is in use) to clients that subscribed to it.
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::hostPointerReceived, this, [this](const ConsoleWorkerWire::HostPointer &pointer) {
+        if (!anyDeskSubscriber()) return;
+        m_hostPointer.report(0, pointer.visible, QPoint(pointer.x, pointer.y), deskNow());
+        flushDeskActivity();
+    });
+    m_deskTimer.setSingleShot(true);
+    connect(&m_deskTimer, &QTimer::timeout, this, &ConsoleHostController::flushDeskActivity);
     connect(&m_endpoint, &ConsoleWorkerEndpoint::audioReceived, this, [this](const ConsoleWorkerWire::Audio &audio) {
         for (const auto &client : m_clients) {
             // Desktop audio is console content too (AUD-C-1).
@@ -1315,13 +1325,24 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         // `device` record, or any other record this host knows (not
         // audio-priority, which never closes krdpserver's gate either).
         static const QSet<QString> known{u"topology-preview"_s, u"topology-commit"_s, u"topology-query"_s, u"console-resize"_s, u"console-screens-restore"_s, u"console-screens-request"_s, u"console-screens-view"_s,
-                                         u"pointer-capture"_s, u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s, u"stats"_s, u"chroma"_s};
+                                         u"pointer-capture"_s, u"console-control"_s, u"query"_s, u"attach"_s, u"apply"_s, u"codec"_s, u"stats"_s, u"chroma"_s, u"desk-activity-subscribe"_s};
         for (const auto &client : m_clients) {
             if (client->id != id) continue;
             if (type == u"device"_s) client->deviceRecordSeen = true;
             if (known.contains(type)) client->spokeKrdpctl = true;
             break;
         }
+    }
+    if (type == u"desk-activity-subscribe"_s) {
+        // OPT-071: opt-in, per connection. A malformed request is ignored (nothing is sent without a valid one).
+        const auto parsed = DeskActivity::parseSubscribe(record);
+        const auto found = std::find_if(m_clients.begin(), m_clients.end(), [id](const auto &entry) { return entry->id == id; });
+        if (!parsed || found == m_clients.end()) return;
+        auto &client = **found;
+        client.deskSubscribed = parsed->enabled;
+        client.deskPointer = parsed->pointer;
+        if (client.deskSubscribed) sendDeskState(client);
+        return;
     }
     if (type == u"pointer-capture-query"_s) {
         if (m_control.admitted(id) && m_control.ownsControl(id) && !m_endpoint.pointerState().isEmpty()) {
@@ -2163,6 +2184,8 @@ void ConsoleHostController::sendCapabilities(Client &client)
         }
     }
     capabilities.stats = LayoutControl::StatsCapabilities{};
+    // OPT-071: the physical desk exists on this route only. Old clients ignore the group and never subscribe.
+    capabilities.deskActivity = LayoutControl::DeskActivityCapabilities{true, DeskActivity::MaxRateHz, int(DeskActivity::IdleMs)};
     // OPT-060: advertised only when this connection's user allows Replace; the client still has to ask
     // with its monitor block. Old clients ignore the group and the `console-screens` records.
     const auto permission = ConsoleVirtualOutputPolicy::permissionOf(client.preferences.virtualMonitorPolicy.value_or(u"replace"_s));
@@ -2236,8 +2259,81 @@ void ConsoleHostController::releaseInput()
     }
 }
 
+qint64 ConsoleHostController::deskNow() const
+{
+    if (m_deskClock) return m_deskClock();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool ConsoleHostController::anyDeskSubscriber() const
+{
+    return std::any_of(m_clients.cbegin(), m_clients.cend(), [](const auto &client) { return client->deskSubscribed; });
+}
+
+DeskActivity::Context ConsoleHostController::deskContext() const
+{
+    const auto target = m_endpoint.target();
+    if (target.adapter == ConsoleSeat::Adapter::Greeter) return DeskActivity::Context::Greeter;
+    const auto session = ConsoleSeat::find(m_sessions, target.sessionId);
+    return session && session->locked ? DeskActivity::Context::Locked : DeskActivity::Context::Session;
+}
+
+void ConsoleHostController::sendDeskState(Client &client)
+{
+    if (!client.deskSubscribed || !client.connection || !m_control.admitted(client.id)) return;
+    // A new subscriber hears about a desk that is in use right now, and gets the pointer to go with it.
+    if (!m_deskTracker.live(deskNow())) return;
+    sendRecord(client.connection, DeskActivity::record(true, ++m_deskSequence, deskContext()));
+    if (client.deskPointer) {
+        if (const auto pointer = m_endpoint.hostPointer()) sendRecord(client.connection, DeskActivity::pointerRecord({pointer->x, pointer->y}, pointer->visible));
+    }
+}
+
+void ConsoleHostController::flushDeskActivity()
+{
+    const qint64 now = deskNow();
+    if (!anyDeskSubscriber()) {
+        // Nobody to tell: forget pacing state so a later subscriber starts clean.
+        m_deskTracker.reset();
+        m_hostPointer.reset(now);
+        m_deskAnnounced = false;
+        m_deskTimer.stop();
+        return;
+    }
+    while (const auto active = m_deskTracker.take(now)) {
+        // A desk that just became live gets the current pointer at once.
+        if (*active && !std::exchange(m_deskAnnounced, true)) m_hostPointer.resend();
+        if (!*active) m_deskAnnounced = false;
+        const auto context = deskContext();
+        ++m_deskSequence;
+        for (const auto &client : m_clients) {
+            if (client->deskSubscribed && client->connection && m_control.admitted(client->id))
+                sendRecord(client->connection, DeskActivity::record(*active, m_deskSequence, context));
+        }
+    }
+    qint64 due = m_deskTracker.dueIn(now);
+    // The pointer is relayed only while the desk is in use: outside it the host pointer is where the remote user put it.
+    if (m_deskTracker.live(now)) {
+        if (const auto pointer = m_hostPointer.take(now)) {
+            for (const auto &client : m_clients) {
+                if (client->deskSubscribed && client->deskPointer && client->connection && m_control.admitted(client->id))
+                    sendRecord(client->connection, DeskActivity::pointerRecord(pointer->position, pointer->visible));
+            }
+        }
+        const qint64 pointerDue = m_hostPointer.dueIn(now);
+        if (pointerDue >= 0 && (due < 0 || pointerDue < due)) due = pointerDue;
+    }
+    if (due >= 0) m_deskTimer.start(int(std::max<qint64>(due, 1)));
+    else m_deskTimer.stop();
+}
+
 void ConsoleHostController::physicalInputActivity()
 {
+    // OPT-071: the desk is in use. The watcher reports every event batch; the tracker paces what clients hear.
+    if (anyDeskSubscriber()) {
+        m_deskTracker.note(deskNow());
+        flushDeskActivity();
+    }
     // Fake-input and application cursor warps do not originate at evdev devices.
     if (!m_control.owner()) return;
     // Someone is at the desk. While Replace holds the host's screens the remote must keep showing what the host

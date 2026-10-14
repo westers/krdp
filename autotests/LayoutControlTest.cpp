@@ -122,6 +122,22 @@ private Q_SLOTS:
         QCOMPARE(without, capabilitiesRecord(plain));
     }
 
+    // OPT-071: the optional `deskActivity` group; absent unless set (the Virtual route never sets it), old clients ignore it.
+    void capabilitiesDeskActivityGroup()
+    {
+        ChannelCapabilities caps;
+        caps.host = QStringLiteral("console");
+        QVERIFY(!capabilitiesRecord(caps).contains(QStringLiteral("deskActivity")));
+        caps.deskActivity = DeskActivityCapabilities{};
+        QCOMPARE(capabilitiesRecord(caps).value(QStringLiteral("deskActivity")).toObject(),
+                 (QJsonObject{{QStringLiteral("pointer"), true}, {QStringLiteral("maxRateHz"), 4}, {QStringLiteral("idleMs"), 10000}}));
+        ChannelCapabilities plain;
+        plain.host = QStringLiteral("console");
+        auto without = capabilitiesRecord(caps);
+        without.remove(QStringLiteral("deskActivity"));
+        QCOMPARE(without, capabilitiesRecord(plain));
+    }
+
     // OPT-058 (T4): `devices.availability` carries the admission-time state and advertises the push.
     void capabilitiesDeviceAvailability()
     {

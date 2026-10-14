@@ -283,6 +283,18 @@ struct ClipboardCapabilities {
     bool operator==(const ClipboardCapabilities &) const = default;
 };
 
+/**
+ * The optional `deskActivity` group (OPT-071): the Console host tells a subscribed client when someone uses the
+ * physical desk (`desk-activity`, no key data) and, with \a pointer, where the host's pointer is (`host-pointer`).
+ * Console only; a client must send `desk-activity-subscribe` before it hears anything.
+ */
+struct DeskActivityCapabilities {
+    bool pointer = true;
+    int maxRateHz = 4; ///< the most `desk-activity` active records per second
+    int idleMs = 10000; ///< quiet for this long: one `active:false`
+    bool operator==(const DeskActivityCapabilities &) const = default;
+};
+
 /** What a KRDPCTL endpoint offers, as the `capabilities` record says it. */
 struct ChannelCapabilities {
     bool pointerCaptureSync = false;
@@ -300,6 +312,7 @@ struct ChannelCapabilities {
     std::optional<StatsCapabilities> stats; ///< absent: no `stats` group, no `stats` record
     std::optional<ConsoleScreensCapabilities> consoleScreens; ///< absent: no `console` group, no `console-screens*` records
     std::optional<ClipboardCapabilities> clipboard; ///< absent: no `clipboard` group (OPT-067)
+    std::optional<DeskActivityCapabilities> deskActivity; ///< absent: no `deskActivity` group, no desk records (OPT-071)
     bool operator==(const ChannelCapabilities &) const = default;
 };
 KRDP_EXPORT QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities);

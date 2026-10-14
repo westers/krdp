@@ -484,6 +484,12 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
                                   {QStringLiteral("clientToHost"), clipboard->clientToHost},
                                   {QStringLiteral("maxBytes"), clipboard->maxBytes}});
     }
+    if (const auto &desk = capabilities.deskActivity) {
+        record.insert(QStringLiteral("deskActivity"),
+                      QJsonObject{{QStringLiteral("pointer"), desk->pointer},
+                                  {QStringLiteral("maxRateHz"), desk->maxRateHz},
+                                  {QStringLiteral("idleMs"), desk->idleMs}});
+    }
     if (const auto &screens = capabilities.consoleScreens) {
         record.insert(QStringLiteral("console"),
                       QJsonObject{{QStringLiteral("screens"),

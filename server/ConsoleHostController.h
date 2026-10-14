@@ -19,6 +19,7 @@
 #include <RdpConnection.h>
 
 #include "ConsoleHandoff.h"
+#include "DeskActivity.h"
 #include "ConsoleWorkerBackoff.h"
 #include "ConsoleControl.h"
 #include "ConsoleClipboardPolicy.h"
@@ -75,6 +76,8 @@ public:
     ~ConsoleHostController() override;
     void start();
     void physicalInputActivity();
+    /// Tests only: the monotonic clock (ms) the desk-activity pacing reads; default is the steady clock.
+    void setDeskClock(std::function<qint64()> clock) { m_deskClock = std::move(clock); }
     void setAudioPriorityDefault(bool enabled);
     void setUserSettingsReader(BrokerUserSettings::Reader reader) { m_userSettingsReader = std::move(reader); }
     void setVideoQualityPolicy(quint8 cap, bool adaptive) { m_qualityCap = cap; m_adaptiveQuality = adaptive; }
@@ -129,6 +132,9 @@ private:
         QString microphoneRequestId;
         QString cameraRequestId;
         bool capabilitiesSent = false;
+        // OPT-071: it asked for `desk-activity` records (and the host pointer). Per connection; never persisted.
+        bool deskSubscribed = false;
+        bool deskPointer = false;
         // StandardClientMedia (DEVICES-DESIGN.md §1): either flag set means this
         // client speaks KRDPCTL and asks for each device itself.
         bool deviceRecordSeen = false;
@@ -236,6 +242,12 @@ private:
     /** KRDPCTL v2: a reply echoing the request being handled, or the `id` it answers. */
     void replyTo(RdpConnection *connection, const QJsonObject &record);
     void sendCapabilities(Client &client);
+    /** OPT-071: pace and relay desk-activity / host-pointer records to subscribed clients; re-arms m_deskTimer. */
+    void flushDeskActivity();
+    void sendDeskState(Client &client);
+    DeskActivity::Context deskContext() const;
+    bool anyDeskSubscriber() const;
+    qint64 deskNow() const;
     void sendLayouts();
     void finishTopologyQueries(const QString &error = {});
     void releaseInput();
@@ -420,6 +432,13 @@ private:
     bool m_microphoneReady = false;
     QTimer m_microphoneDeadline;
     QTimer m_microphonePump;
+    // OPT-071
+    DeskActivity::Tracker m_deskTracker;
+    DeskActivity::HostPointerTracker m_hostPointer;
+    QTimer m_deskTimer;
+    std::function<qint64()> m_deskClock;
+    quint32 m_deskSequence = 0;
+    bool m_deskAnnounced = false; // the last desk-activity record sent was active:true
     ConsoleControl::Id m_cameraClient = 0;
     ConsoleWorkerWire::CameraPolicy m_cameraPolicy;
     quint64 m_nextCameraId = 0;
