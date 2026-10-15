@@ -592,6 +592,14 @@ bool ConsoleWorkerEndpoint::processRecords()
         } else if (const auto cursor = ConsoleWorkerWire::cursorShape(*record)) {
             m_cursorShape = *cursor;
             Q_EMIT cursorShapeReceived(*cursor);
+        } else if (record->kind == ConsoleWorkerWire::Kind::HostPointer) {
+            const auto pointer = ConsoleWorkerWire::hostPointer(*record);
+            if (!pointer) {
+                fail(QStringLiteral("malformed worker host pointer"));
+                return false;
+            }
+            m_hostPointer = *pointer;
+            Q_EMIT hostPointerReceived(*pointer);
         } else {
             qWarning() << "Rejected worker record kind" << static_cast<quint8>(record->kind)
                        << "payload bytes" << record->payload.size();
@@ -630,6 +638,7 @@ void ConsoleWorkerEndpoint::workerDisconnected()
     m_earlyReports.clear();
     m_workerCpuNs = -1;
     m_cursorShape.reset();
+    m_hostPointer.reset();
     m_displayPolicy.reset();
     // OPT-067: a new worker starts from nothing; ids already issued are forgotten, so a late answer is discarded.
     m_clipboardPolicy.reset();

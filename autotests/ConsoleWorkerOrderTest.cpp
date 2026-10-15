@@ -132,6 +132,7 @@ private Q_SLOTS:
     void encoderStatsNeverPrecedeReady();
     void chromaCostsRequireReadyAndStayBounded();
     void encoderStatsBeforeReadyFailTheWorker();
+    void hostPointerNeverPrecedesReady();
 };
 
 void ConsoleWorkerOrderTest::outboxHoldsEncoderReportsUntilReady()
@@ -332,6 +333,30 @@ void ConsoleWorkerOrderTest::drainedWorkerDropsEarlyReports()
     QVERIFY(h.errors.isEmpty());
     QVERIFY(!h.endpoint.ready());
     QVERIFY(h.events.isEmpty());
+}
+
+void ConsoleWorkerOrderTest::hostPointerNeverPrecedesReady()
+{
+    // OPT-071: a host pointer made before Ready is dropped, not held (the next position follows); none before Hello.
+    QByteArray sent;
+    ConsoleWorkerOutbox outbox([&sent](const QByteArray &record) {
+        sent += record;
+    });
+    const ConsoleWorkerWire::HostPointer pointer{10, 20, true};
+    outbox.hostPointer(pointer); // before Hello
+    outbox.hello({QStringLiteral("3"), 1000, QByteArray(24, 't')});
+    outbox.hostPointer(pointer); // before Ready
+    QCOMPARE(records(sent).size(), 1);
+    outbox.ready();
+    QCOMPARE(records(sent).size(), 2); // Hello, Ready: nothing held for it
+    outbox.hostPointer(pointer);
+    const auto all = records(sent);
+    QCOMPARE(all.size(), 3);
+    QCOMPARE(ConsoleWorkerWire::hostPointer(all[2]), std::optional(pointer));
+    sent.clear();
+    outbox.hello({QStringLiteral("3"), 1000, QByteArray(24, 't')}); // a new connection starts over
+    outbox.hostPointer(pointer);
+    QCOMPARE(records(sent).size(), 1);
 }
 
 void ConsoleWorkerOrderTest::encoderStatsNeverPrecedeReady()

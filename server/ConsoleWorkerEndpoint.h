@@ -82,6 +82,8 @@ public:
     {
         return m_workerCpuNs;
     }
+    /** Wire 18: the worker's latest host pointer; nullopt until one arrives. */
+    std::optional<ConsoleWorkerWire::HostPointer> hostPointer() const { return m_hostPointer; }
     /** FIX-CURSOR: the worker's current cursor shape (latest Cursor record); nullopt until one arrives. */
     std::optional<ConsoleWorkerWire::CursorShape> cursorShape() const
     {
@@ -161,6 +163,8 @@ Q_SIGNALS:
     /** STATS-S6: the worker's EncoderStats (only after Ready; one before Ready fails the worker). */
     void encoderStatsReceived(const KRdp::ConsoleWorkerWire::EncoderStats &stats);
     void chromaTimingReceived(const KRdp::ConsoleWorkerWire::ChromaTiming &timing);
+    /** Wire 18 (OPT-071): where the host's pointer is now (also in hostPointer()). Console workers only; Virtual brokers ignore it. */
+    void hostPointerReceived(const KRdp::ConsoleWorkerWire::HostPointer &pointer);
     /** FIX-CURSOR: the desktop's cursor shape changed (also in cursorShape()). */
     void pointerStateReceived(const QJsonObject &state);
     void cursorShapeReceived(const KRdp::ConsoleWorkerWire::CursorShape &shape);
@@ -205,6 +209,7 @@ private:
     QVector<ConsoleWorkerWire::EncoderReport> m_earlyReports;
     qint64 m_workerCpuNs = -1;
     std::optional<ConsoleWorkerWire::CursorShape> m_cursorShape;
+    std::optional<ConsoleWorkerWire::HostPointer> m_hostPointer;
     std::optional<ConsoleWorkerWire::DisplayPolicy> m_displayPolicy;
     // OPT-067. Ids are endpoint-wide so a late answer for an earlier client's request can never match a later one.
     std::optional<ConsoleWorkerWire::ClipboardPolicy> m_clipboardPolicy;

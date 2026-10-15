@@ -159,6 +159,12 @@ public:
         if (m_helloSent) m_writer(ConsoleWorkerWire::frame(ConsoleWorkerWire::Heartbeat{++m_heartbeatSequence}));
     }
 
+    /** Wire 18 (OPT-071): the host pointer; after Ready only, a position made before it is dropped (the next one follows). */
+    void hostPointer(const ConsoleWorkerWire::HostPointer &pointer)
+    {
+        if (m_readySent) m_writer(ConsoleWorkerWire::frame(pointer));
+    }
+
     bool helloSent() const
     {
         return m_helloSent;

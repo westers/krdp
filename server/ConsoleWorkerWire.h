@@ -69,7 +69,9 @@ namespace KRdp::ConsoleWorkerWire
 // 17 (OPT-055 wave 2): Heartbeat (worker -> broker, every HeartbeatIntervalMs from Hello on; the broker's watchdog
 // treats any record as proof of life) and LocalReclaim (worker -> broker, payload ControlState: the user's reclaim
 // shortcut ended Replace, so the broker reports deskInput rather than workerExit).
-constexpr quint16 ProtocolVersion = 17;
+// 18 (OPT-071): HostPointer (worker -> broker, after Ready, Console only): where the host's pointer is, in the client's
+// desktop coordinates, so the broker can show a desk user's pointer to the remote client. No key or button data.
+constexpr quint16 ProtocolVersion = 18;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -144,8 +146,10 @@ enum class Kind : quint8 {
     // Wire 17 (OPT-055 wave 2): see the version comment above.
     Heartbeat,
     LocalReclaim,
+    // Wire 18 (OPT-071): see the version comment above.
+    HostPointer,
 };
-constexpr Kind LastKind = Kind::LocalReclaim;
+constexpr Kind LastKind = Kind::HostPointer;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;
@@ -1234,6 +1238,37 @@ inline std::optional<Heartbeat> heartbeat(const Record &record)
     return stream.status() == QDataStream::Ok && stream.atEnd() ? std::optional<Heartbeat>(beat) : std::nullopt;
 }
 
+/** Wire 18, worker -> broker, after Ready: the host pointer in the client's RDP desktop coordinates (OPT-071). */
+struct HostPointer {
+    static constexpr qint32 MaxCoordinate = 65535;
+    qint32 x = 0;
+    qint32 y = 0;
+    bool visible = false;
+    bool operator==(const HostPointer &) const = default;
+};
+
+inline QByteArray frame(const HostPointer &pointer)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << pointer.x << pointer.y << quint8(pointer.visible ? 1 : 0);
+    return frame(Kind::HostPointer, payload);
+}
+
+inline std::optional<HostPointer> hostPointer(const Record &record)
+{
+    if (record.kind != Kind::HostPointer || record.payload.size() != 9) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    HostPointer pointer;
+    quint8 visible = 0;
+    stream >> pointer.x >> pointer.y >> visible;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || visible > 1 || pointer.x < 0 || pointer.y < 0
+        || pointer.x > HostPointer::MaxCoordinate || pointer.y > HostPointer::MaxCoordinate) return std::nullopt;
+    pointer.visible = visible == 1;
+    return pointer;
+}
 
 // ---- OPT-067 text clipboard bridge (wire 16) ----
 /// Largest text (UTF-8 bytes) either direction carries on the worker wire.

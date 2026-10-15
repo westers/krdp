@@ -169,6 +169,39 @@ class ConsoleHostControllerTest : public QObject
         }
     };
 
+    struct DeskHarness {
+        MappedHarness base;
+        RdpConnection viewerConnection{&base.server, -1};
+        ConsoleHostController::Client *viewer = nullptr;
+        QList<QPair<RdpConnection *, QJsonObject>> records;
+        qint64 now = 1000;
+        explicit DeskHarness(ConsoleSeat::Adapter adapter = ConsoleSeat::Adapter::PhysicalUser)
+            : base("[General]\n", {}, true, 2000, 2, adapter)
+        {
+            auto &host = base.host;
+            host.addClient(&viewerConnection);
+            viewer = host.m_clients.back().get();
+            viewer->uid = 1000; host.loadUserSettings(*viewer); viewer->capabilitiesSent = true;
+            host.m_control.admit(viewer->id); host.syncControlState();
+            host.m_recordSent = [this](RdpConnection *connection, const QJsonObject &record) { records.append({connection, record}); };
+            host.setDeskClock([this] { return now; });
+        }
+        ~DeskHarness() { base.host.m_deskTimer.stop(); }
+        void subscribe(RdpConnection *connection, ConsoleHostController::Client *who, bool enabled = true, bool pointer = true)
+        {
+            QJsonObject request{{u"type"_s, u"desk-activity-subscribe"_s}, {u"v"_s, 1}, {u"enabled"_s, enabled}, {u"pointer"_s, pointer}};
+            base.host.onControlRecord(connection, who->id, request);
+        }
+        QList<QJsonObject> of(RdpConnection *connection, const QString &type) const
+        {
+            QList<QJsonObject> result;
+            for (const auto &entry : records)
+                if (entry.first == connection && entry.second.value(u"type"_s).toString() == type) result.append(entry.second);
+            return result;
+        }
+        void desk() { base.host.physicalInputActivity(); }
+    };
+
 private Q_SLOTS:
     // OPT-066 observability: the controller's settled quality reaches the client record the endpoint is fed from
     // (the cap after the timer), and the pushed result is announced once; a viewer's request does neither.
@@ -192,6 +225,155 @@ private Q_SLOTS:
         QTest::qWait(2800);
         QCOMPARE(pushed.count(), 1);
         QCOMPARE(int(h.client->videoQuality), 100);
+    }
+
+    // ---- OPT-071: desk activity. A controller, a viewer and a fake clock; the records are read at the send seam. ----
+    void capabilityIsAdvertisedOnTheConsole()
+    {
+        DeskHarness h;
+        h.base.client->capabilitiesSent = false;
+        h.base.host.sendCapabilities(*h.base.client);
+        const auto caps = h.of(&h.base.connection, u"capabilities"_s);
+        QCOMPARE(caps.size(), 1);
+        QCOMPARE(caps.first().value(u"deskActivity"_s).toObject(),
+                 (QJsonObject{{u"pointer"_s, true}, {u"maxRateHz"_s, DeskActivity::MaxRateHz}, {u"idleMs"_s, int(DeskActivity::IdleMs)}}));
+    }
+
+    void nobodySubscribedMeansNothingIsSentAndNothingKeepsRunning()
+    {
+        DeskHarness h;
+        h.desk();
+        h.now += 100; h.desk();
+        QVERIFY(h.of(&h.base.connection, u"desk-activity"_s).isEmpty());
+        QVERIFY(h.of(&h.viewerConnection, u"desk-activity"_s).isEmpty());
+        QVERIFY(!h.base.host.m_deskTimer.isActive());
+        // A malformed subscribe does not subscribe.
+        h.base.host.onControlRecord(&h.base.connection, h.base.client->id,
+                                    QJsonObject{{u"type"_s, u"desk-activity-subscribe"_s}, {u"v"_s, 1}, {u"enabled"_s, true}, {u"keys"_s, true}});
+        QVERIFY(!h.base.client->deskSubscribed);
+        h.desk();
+        QVERIFY(h.of(&h.base.connection, u"desk-activity"_s).isEmpty());
+    }
+
+    void controllerAndViewerBothHearTheDeskWithNoKeyData()
+    {
+        DeskHarness h;
+        h.subscribe(&h.base.connection, h.base.client);
+        h.subscribe(&h.viewerConnection, h.viewer, true, false);
+        h.desk();
+        for (auto *connection : {&h.base.connection, &h.viewerConnection}) {
+            const auto active = h.of(connection, u"desk-activity"_s);
+            QCOMPARE(active.size(), 1);
+            QCOMPARE(active.first().value(u"active"_s).toBool(), true);
+            QCOMPARE(active.first().value(u"context"_s).toString(), u"session"_s);
+            const auto keys = active.first().keys();
+            QCOMPARE(QSet<QString>(keys.begin(), keys.end()), (QSet<QString>{u"type"_s, u"v"_s, u"active"_s, u"seq"_s, u"context"_s}));
+        }
+        // Activity during the 250 ms window is held, then one trailing record; quiet for IdleMs gives one idle record.
+        h.now += 10; h.desk();
+        QCOMPARE(h.of(&h.base.connection, u"desk-activity"_s).size(), 1);
+        h.now += DeskActivity::MinIntervalMs; h.base.host.flushDeskActivity();
+        QCOMPARE(h.of(&h.base.connection, u"desk-activity"_s).size(), 2);
+        h.now += DeskActivity::IdleMs; h.base.host.flushDeskActivity();
+        const auto all = h.of(&h.base.connection, u"desk-activity"_s);
+        QCOMPARE(all.size(), 3);
+        QCOMPARE(all.last().value(u"active"_s).toBool(), false);
+        h.now += DeskActivity::IdleMs; h.base.host.flushDeskActivity();
+        QCOMPARE(h.of(&h.base.connection, u"desk-activity"_s).size(), 3); // once
+    }
+
+    void aMouseReportingEveryMillisecondIsRateLimitedAtTheBroker()
+    {
+        DeskHarness h;
+        h.subscribe(&h.base.connection, h.base.client);
+        for (int i = 0; i < 3000; ++i) { h.now += 1; h.desk(); }
+        const auto active = h.of(&h.base.connection, u"desk-activity"_s);
+        QVERIFY2(active.size() <= 13 && active.size() >= 10, qPrintable(QString::number(active.size())));
+    }
+
+    void unsubscribingAndNonAdmittedClientsHearNothing()
+    {
+        DeskHarness h;
+        h.subscribe(&h.base.connection, h.base.client);
+        h.subscribe(&h.viewerConnection, h.viewer);
+        h.subscribe(&h.viewerConnection, h.viewer, false); // off again
+        h.desk();
+        QCOMPARE(h.of(&h.base.connection, u"desk-activity"_s).size(), 1);
+        QVERIFY(h.of(&h.viewerConnection, u"desk-activity"_s).isEmpty());
+        // A subscriber that is not admitted to the console is not told about its desk.
+        h.base.host.m_control.remove(h.viewer->id);
+        h.subscribe(&h.viewerConnection, h.viewer);
+        h.now += 1000; h.desk();
+        QVERIFY(h.of(&h.viewerConnection, u"desk-activity"_s).isEmpty());
+    }
+
+    void aLateSubscriberIsToldAboutADeskThatIsInUse()
+    {
+        DeskHarness h;
+        h.subscribe(&h.base.connection, h.base.client);
+        h.desk();
+        h.now += 500;
+        h.subscribe(&h.viewerConnection, h.viewer);
+        QCOMPARE(h.of(&h.viewerConnection, u"desk-activity"_s).size(), 1);
+        h.now += DeskActivity::IdleMs + 1; // the desk went quiet: a later subscriber hears nothing
+        h.base.host.flushDeskActivity();
+        h.records.clear();
+        h.subscribe(&h.viewerConnection, h.viewer, false);
+        h.subscribe(&h.viewerConnection, h.viewer);
+        QVERIFY(h.of(&h.viewerConnection, u"desk-activity"_s).isEmpty());
+    }
+
+    void contextNamesTheGreeter()
+    {
+        DeskHarness h(ConsoleSeat::Adapter::Greeter);
+        h.subscribe(&h.base.connection, h.base.client);
+        h.desk();
+        const auto active = h.of(&h.base.connection, u"desk-activity"_s);
+        QCOMPARE(active.size(), 1);
+        QCOMPARE(active.first().value(u"context"_s).toString(), u"greeter"_s);
+    }
+
+    void hostPointerIsRelayedOnlyWhileTheDeskIsInUseAndOnlyToPointerSubscribers()
+    {
+        DeskHarness h;
+        h.subscribe(&h.base.connection, h.base.client, true, true);
+        h.subscribe(&h.viewerConnection, h.viewer, true, false);
+        // The remote user moved the pointer, nobody is at the desk: nothing is relayed.
+        Q_EMIT h.base.host.m_endpoint.hostPointerReceived({400, 300, true});
+        QVERIFY(h.of(&h.base.connection, u"host-pointer"_s).isEmpty());
+        // The desk moves: the pointer follows at once, to the pointer subscriber only.
+        h.desk();
+        auto pointers = h.of(&h.base.connection, u"host-pointer"_s);
+        QCOMPARE(pointers.size(), 1);
+        QCOMPARE(pointers.first().value(u"x"_s).toInt(), 400);
+        QCOMPARE(pointers.first().value(u"y"_s).toInt(), 300);
+        QCOMPARE(pointers.first().value(u"visible"_s).toBool(), true);
+        const auto keys = pointers.first().keys();
+        QCOMPARE(QSet<QString>(keys.begin(), keys.end()), (QSet<QString>{u"type"_s, u"v"_s, u"x"_s, u"y"_s, u"visible"_s}));
+        QVERIFY(h.of(&h.viewerConnection, u"host-pointer"_s).isEmpty());
+        QCOMPARE(h.of(&h.viewerConnection, u"desk-activity"_s).size(), 1);
+        // Moves are paced: many reports inside a window give the latest one after it.
+        h.now += 5;
+        for (int i = 0; i < 50; ++i) Q_EMIT h.base.host.m_endpoint.hostPointerReceived({500 + i, 300, true});
+        QCOMPARE(h.of(&h.base.connection, u"host-pointer"_s).size(), 1);
+        h.now += DeskActivity::MinPointerIntervalMs; h.base.host.flushDeskActivity();
+        pointers = h.of(&h.base.connection, u"host-pointer"_s);
+        QCOMPARE(pointers.size(), 2);
+        QCOMPARE(pointers.last().value(u"x"_s).toInt(), 549);
+        // Quiet: the desk is no longer in use, the pointer is not relayed any more.
+        h.now += DeskActivity::IdleMs + 1; h.base.host.flushDeskActivity();
+        Q_EMIT h.base.host.m_endpoint.hostPointerReceived({10, 10, true});
+        QCOMPARE(h.of(&h.base.connection, u"host-pointer"_s).size(), 2);
+    }
+
+    void deskInputStillReclaimsTheConsoleForTheWorker()
+    {
+        // The signal is added to, not instead of, the OPT-060 desk-input reaction (the worker is asked to reclaim).
+        DeskHarness h;
+        h.subscribe(&h.base.connection, h.base.client);
+        const auto before = h.base.host.m_endpoint.reclaimRequests();
+        h.desk();
+        QCOMPARE(h.base.host.m_endpoint.reclaimRequests(), before + 1);
     }
 
     void physicalActivityReclaimIsGenerationBoundAndReleasesHeldKeys()

@@ -1161,3 +1161,9 @@ add_executable(WheelScaleTest WheelScaleTest.cpp)
 target_include_directories(WheelScaleTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(WheelScaleTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME WheelScaleTest COMMAND WheelScaleTest)
+
+# OPT-071: desk-activity pacing, host-pointer tracker, record shapes and the desk-device filter; pure, fake clock.
+add_executable(DeskActivityTest DeskActivityTest.cpp)
+target_include_directories(DeskActivityTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(DeskActivityTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
+add_test(NAME DeskActivityTest COMMAND DeskActivityTest)
