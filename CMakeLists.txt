@@ -3,7 +3,7 @@
 
 # Farside server release version. The deb version is "1:" + this + "-1" (scripts/package-farside.sh);
 # the git revision is build information (KRDP_BUILD_REVISION), not part of the version.
-set(PROJECT_VERSION "0.11.0")
+set(PROJECT_VERSION "0.12.0")
 
 cmake_minimum_required(VERSION 3.16)
 
