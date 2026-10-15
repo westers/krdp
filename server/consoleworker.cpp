@@ -89,11 +89,14 @@
 #include "ConsoleReleaseLockGuard.h"
 #include "ConsoleReclaimEpisode.h"
 #include "DeskActivity.h"
+#include <QLoggingCategory>
 #include "LogThrottle.h"
 #include "ConsoleVirtualOutputMutation.h"
 #include "PhysicalOutputGuard.h"
 
 using namespace KRdp;
+
+Q_LOGGING_CATEGORY(DESK_WORKER, "farside.server", QtInfoMsg) // OPT-071 hop logs; enable with farside.server.debug=true
 
 namespace
 {
@@ -1698,6 +1701,8 @@ private:
         // OPT-071: the position goes to the broker (Console only; a Virtual desktop has no desk) in the client's desktop coordinates.
         if (m_mode.physicalActions()) {
             const auto desktop = DeskActivity::toDesktop(m_multiMode, m_wireAtlas, source, cursor.position);
+            qCDebug(DESK_WORKER) << "Desk: cursor source" << source << "stream position" << cursor.position << "visible" << cursor.visible
+                                 << "-> desktop" << (desktop ? *desktop : QPoint(-1, -1)) << (desktop ? "" : "(no atlas entry yet)");
             m_hostPointer.report(source, cursor.visible && desktop.has_value(), desktop.value_or(QPoint()), m_clock.elapsed());
             flushHostPointer();
         }
@@ -1716,9 +1721,14 @@ private:
     /** OPT-071: sends the host pointer if one is due (change only, at most DeskActivity::MaxPointerRateHz). */
     void flushHostPointer()
     {
-        if (!m_outbox.readySent()) return; // resent from Hello on; the outbox drops positions before Ready
+        if (!m_outbox.readySent()) {
+            // The outbox drops positions before Ready and nothing else triggers a send after it: poll while one is wanted.
+            if (m_hostPointer.dueIn(m_clock.elapsed()) >= 0) m_hostPointerTimer.start(250);
+            return;
+        }
         const qint64 now = m_clock.elapsed();
         if (const auto pointer = m_hostPointer.take(now)) {
+            qCDebug(DESK_WORKER) << "Desk: host pointer to the broker" << pointer->position << "visible" << pointer->visible;
             m_outbox.hostPointer(ConsoleWorkerWire::HostPointer{pointer->position.x(), pointer->position.y(), pointer->visible});
         }
         const qint64 due = m_hostPointer.dueIn(now);

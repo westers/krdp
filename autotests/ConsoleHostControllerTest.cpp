@@ -366,6 +366,38 @@ private Q_SLOTS:
         QCOMPARE(h.of(&h.base.connection, u"host-pointer"_s).size(), 2);
     }
 
+    void aPointerReportedBeforeAnySubscriberIsRelayedWhenTheDeskGoesLive()
+    {
+        // The ghost bug (OPT-071): the worker reports a place only when the pointer moves, and the broker used to forget
+        // it while nobody was subscribed, so a client that subscribed afterwards saw no ghost until the next movement.
+        DeskHarness h;
+        Q_EMIT h.base.host.m_endpoint.hostPointerReceived({640, 480, true}); // nobody subscribed yet
+        h.subscribe(&h.base.connection, h.base.client, true, true);
+        QVERIFY(h.of(&h.base.connection, u"host-pointer"_s).isEmpty()); // the desk is idle
+        h.desk(); // someone sits down; the pointer has not moved since the report
+        const auto pointers = h.of(&h.base.connection, u"host-pointer"_s);
+        QCOMPARE(pointers.size(), 1);
+        QCOMPARE(pointers.first().value(u"x"_s).toInt(), 640);
+        QCOMPARE(pointers.first().value(u"y"_s).toInt(), 480);
+        QCOMPARE(pointers.first().value(u"visible"_s).toBool(), true);
+    }
+
+    void aWorkerThatStoppedTakesItsPointerWithIt()
+    {
+        DeskHarness h;
+        h.subscribe(&h.base.connection, h.base.client, true, true);
+        Q_EMIT h.base.host.m_endpoint.hostPointerReceived({640, 480, true});
+        Q_EMIT h.base.host.m_endpoint.workerStopped();
+        h.desk();
+        QVERIFY(h.of(&h.base.connection, u"host-pointer"_s).isEmpty()); // no stale place from the dead worker
+        Q_EMIT h.base.host.m_endpoint.hostPointerReceived({10, 20, true}); // the next worker's report is relayed
+        h.now += DeskActivity::MinPointerIntervalMs;
+        h.base.host.flushDeskActivity();
+        const auto pointers = h.of(&h.base.connection, u"host-pointer"_s);
+        QCOMPARE(pointers.size(), 1);
+        QCOMPARE(pointers.first().value(u"x"_s).toInt(), 10);
+    }
+
     void deskInputStillReclaimsTheConsoleForTheWorker()
     {
         // The signal is added to, not instead of, the OPT-060 desk-input reaction (the worker is asked to reclaim).

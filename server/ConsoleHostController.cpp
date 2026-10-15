@@ -325,6 +325,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerStopped, this, [this]() {
+        m_hostPointer.reset(deskNow()); // OPT-071: a worker that went away takes its pointer with it; never relay a stale place
         resetClipboards();
         syncClipboard();
         setWorkerActive(false);
@@ -380,7 +381,9 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     });
     // OPT-071: the host pointer, relayed (paced, and only while the desk is in use) to clients that subscribed to it.
     connect(&m_endpoint, &ConsoleWorkerEndpoint::hostPointerReceived, this, [this](const ConsoleWorkerWire::HostPointer &pointer) {
-        if (!anyDeskSubscriber()) return;
+        // Kept even with nobody subscribed: a client that subscribes later (or a desk that becomes live) hears the place
+        // at once instead of waiting for the next movement. flushDeskActivity() decides whether anything is sent.
+        qCDebug(CONSOLE_SCREENS) << "Desk: host pointer from the worker" << pointer.x << pointer.y << "visible" << pointer.visible;
         m_hostPointer.report(0, pointer.visible, QPoint(pointer.x, pointer.y), deskNow());
         flushDeskActivity();
     });
@@ -1341,6 +1344,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         auto &client = **found;
         client.deskSubscribed = parsed->enabled;
         client.deskPointer = parsed->pointer;
+        qCDebug(CONSOLE_SCREENS) << "Desk: client" << id << "subscribe enabled" << parsed->enabled << "pointer" << parsed->pointer;
         if (client.deskSubscribed) sendDeskState(client);
         return;
     }
@@ -2282,7 +2286,10 @@ void ConsoleHostController::sendDeskState(Client &client)
 {
     if (!client.deskSubscribed || !client.connection || !m_control.admitted(client.id)) return;
     // A new subscriber hears about a desk that is in use right now, and gets the pointer to go with it.
-    if (!m_deskTracker.live(deskNow())) return;
+    if (!m_deskTracker.live(deskNow())) {
+        qCDebug(CONSOLE_SCREENS) << "Desk: client" << client.id << "subscribed while the desk is idle; nothing to announce";
+        return;
+    }
     sendRecord(client.connection, DeskActivity::record(true, ++m_deskSequence, deskContext()));
     if (client.deskPointer) {
         if (const auto pointer = m_endpoint.hostPointer()) sendRecord(client.connection, DeskActivity::pointerRecord({pointer->x, pointer->y}, pointer->visible));
@@ -2293,9 +2300,10 @@ void ConsoleHostController::flushDeskActivity()
 {
     const qint64 now = deskNow();
     if (!anyDeskSubscriber()) {
-        // Nobody to tell: forget pacing state so a later subscriber starts clean.
+        // Nobody to tell: forget pacing state so a later subscriber starts clean. The pointer's place is kept
+        // (resend only marks it unsent): the first subscriber of a live desk gets it without waiting for a movement.
         m_deskTracker.reset();
-        m_hostPointer.reset(now);
+        m_hostPointer.resend();
         m_deskAnnounced = false;
         m_deskTimer.stop();
         return;
@@ -2315,10 +2323,14 @@ void ConsoleHostController::flushDeskActivity()
     // The pointer is relayed only while the desk is in use: outside it the host pointer is where the remote user put it.
     if (m_deskTracker.live(now)) {
         if (const auto pointer = m_hostPointer.take(now)) {
+            int sent = 0;
             for (const auto &client : m_clients) {
-                if (client->deskSubscribed && client->deskPointer && client->connection && m_control.admitted(client->id))
+                if (client->deskSubscribed && client->deskPointer && client->connection && m_control.admitted(client->id)) {
                     sendRecord(client->connection, DeskActivity::pointerRecord(pointer->position, pointer->visible));
+                    ++sent;
+                }
             }
+            qCDebug(CONSOLE_SCREENS) << "Desk: host-pointer" << pointer->position << "visible" << pointer->visible << "sent to" << sent << "client(s)";
         }
         const qint64 pointerDue = m_hostPointer.dueIn(now);
         if (pointerDue >= 0 && (due < 0 || pointerDue < due)) due = pointerDue;
