@@ -210,6 +210,32 @@ private Q_SLOTS:
         QCOMPARE(tracker.dueIn(2 * MinPointerIntervalMs), qint64(-1));
     }
 
+    void pointerFollowsAFastMouseAtTheCapAcrossWorkerAndBroker()
+    {
+        // OPT-071 cadence: the worker tracker and the broker tracker in series, driven by a fake clock the way the two
+        // timers drive them (take at every due time). 100 position changes over one second must come out as about the
+        // cap (20 per second) at the end, never a few per second, never above the cap, and the last place always arrives.
+        HostPointerTracker worker;
+        HostPointerTracker broker;
+        QList<QPoint> relayed;
+        qint64 now = 0;
+        auto pump = [&] {
+            if (const auto sent = worker.take(now)) broker.report(0, sent->visible, sent->position, now);
+            if (const auto out = broker.take(now)) relayed.append(out->position);
+        };
+        for (int i = 1; i <= 100; ++i) {
+            now = i * 10; // the mouse changes place every 10 ms
+            worker.report(1, true, QPoint(i, 2 * i), now);
+            pump();
+        }
+        for (; now < 1300; ++now) pump(); // let the timers drain
+        QVERIFY2(relayed.size() >= 15, qPrintable(QString::number(relayed.size())));
+        QVERIFY2(relayed.size() <= 24, qPrintable(QString::number(relayed.size())));
+        QCOMPARE(relayed.last(), QPoint(100, 200));
+        // Each relayed place is later on the path than the one before: it follows the mouse, it never goes back.
+        for (qsizetype i = 1; i < relayed.size(); ++i) QVERIFY(relayed[i].x() > relayed[i - 1].x());
+    }
+
     void pointerHideWaitsAndCrossingOutputsDoesNotBlink()
     {
         HostPointerTracker tracker;
