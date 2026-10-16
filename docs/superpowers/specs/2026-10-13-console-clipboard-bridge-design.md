@@ -362,6 +362,27 @@ sets it false on every session it creates. Dedupe of the legacy path onto `HostC
   in the live matrix with a deliberately stuck source.
 - Primary selection is ignored (`:430`).
 
+### 5.2a Measured on a private KWin 6.6.6 on Sol, 2026-10-15 (OPT-072; evidence `~/dev/rdp/evidence/2026-10-15-image-wayland-verify/`)
+
+- S1. KWin 6.6.6 advertises `ext_data_control_manager_v1` (v1) only, no `zwlr_data_control_manager_v1`, and does not restrict
+  it (no desktop-file grant needed). KSystemClipboard therefore picks its `WaylandClipboard` (ext) class. The SDDM greeter's KWin
+  could not be inspected (not running while a session is logged in); the worker now logs `Clipboard: host backend <class>` once.
+- A plain `QMimeData::setData("image/png", bytes)` handed to `KSystemClipboard::setMimeData` is read as an EMPTY picture by
+  every other process (KF6 6.24: the data-control source writes `imageData()` for image/png when `hasImage()`); only the
+  writing process sees the bytes. `server/PngMimeData.h` offers image/png plus a lazily decoded application/x-qt-image and fixes
+  it. Because the picture is then re-encoded by Qt on its way out, the echo check compares pixels (`ClipboardImage::samePixels`).
+- Klipper (inside plasmashell; `IgnoreImages` defaults to true): a picture is not stored in history, the writer keeps the
+  selection while it runs, and when the selection ends Klipper restores the last text. With `IgnoreImages=false` a picture
+  is stored in `history3.sqlite` unless it carries `x-kde-passwordManagerHint` (then nothing is stored; same for text).
+  Observed, cause not isolated: a Qt app (wl_data_device source) that copied an image/png-only selection while Klipper held
+  history had it replaced by the last history text within the same millisecond; a data-control source (the worker) with
+  the same content, with or without `application/x-qt-image`, was left alone.
+- Chrome 155 (Wayland) "Copy image" offers `text/html` (an `<img src>` tag), `image/png`, `chromium/x-internal-source-rfh-token`,
+  `chromium/x-source-url`. Firefox 157 offers `text/html`, `text/_moz_htmlinfo`, `text/_moz_htmlcontext`, `image/png` and
+  about twenty more image formats (avif, bmp, x-bmp, x-MS-bmp, ico variants, jpeg, tiff, webp), `SAVE_TARGETS`.
+- The worker reads a pasted picture with `SelectionReader` (own ext_data_control connection, 16 MiB cap for PNG, 64 MiB for
+  other formats, abandons the source beyond that) because KSystemClipboard reads an offer to its end whatever its size.
+
 ## 6. Client side
 
 ### 6.1 Changes

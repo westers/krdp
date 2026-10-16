@@ -422,6 +422,18 @@ target_link_libraries(HostClipboardTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME HostClipboardTest COMMAND HostClipboardTest)
 set_tests_properties(HostClipboardTest PROPERTIES TIMEOUT 60)
 
+# OPT-072: the capped pipe reader and the PNG clipboard offer (both daemon-free).
+add_executable(SelectionReaderTest SelectionReaderTest.cpp)
+target_include_directories(SelectionReaderTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(SelectionReaderTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
+add_test(NAME SelectionReaderTest COMMAND SelectionReaderTest)
+set_tests_properties(SelectionReaderTest PROPERTIES TIMEOUT 60)
+add_executable(PngMimeDataTest PngMimeDataTest.cpp)
+target_include_directories(PngMimeDataTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(PngMimeDataTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
+add_test(NAME PngMimeDataTest COMMAND PngMimeDataTest)
+set_tests_properties(PngMimeDataTest PROPERTIES TIMEOUT 60)
+
 add_executable(ConsoleVirtualOutputPlanTest ConsoleVirtualOutputPlanTest.cpp)
 target_include_directories(ConsoleVirtualOutputPlanTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
 target_link_libraries(ConsoleVirtualOutputPlanTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
