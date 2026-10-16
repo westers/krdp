@@ -39,6 +39,14 @@ namespace KRdp
 class HostClipboard
 {
 public:
+    /// A bounded read of the host's image: \a data is empty for none; \a tooLarge when the source sent more than the cap (\a bytes is
+    /// then what had arrived when the read was abandoned, a lower bound).
+    struct ImageRead {
+        QByteArray data;
+        bool tooLarge = false;
+        qint64 bytes = 0;
+    };
+
     struct Backend {
         std::function<bool()> hasText; ///< the host clipboard offers a text format (no data is read)
         std::function<QString()> readText; ///< its text as it is now (read on paste, and to spot an echo)
@@ -47,6 +55,9 @@ public:
         std::function<bool()> hasImage; ///< the host clipboard offers an image format (no data is read)
         std::function<QByteArray()> readImage; ///< the image as the host holds it (any format; PNG preferred); empty = none
         std::function<bool(const QByteArray &png, bool secret)> writeImage; ///< false = failed
+        /// OPT-072 (Wayland): the image read with a byte cap, so a huge source is abandoned rather than read whole. Preferred over
+        /// readImage when set.
+        std::function<ImageRead()> readImageBounded;
     };
     using Sender = std::function<void(const QByteArray &record)>;
 
@@ -167,8 +178,8 @@ private:
             && ClipboardText::toHost(m_backend.readText()) == *m_lastWritten) {
             flags &= ~ConsoleWorkerWire::ClipboardOfferText;
         }
-        if (recent && m_lastWrittenImage && (flags & ConsoleWorkerWire::ClipboardOfferImage) && m_backend.readImage
-            && m_backend.readImage() == *m_lastWrittenImage) {
+        if (recent && m_lastWrittenImage && (flags & ConsoleWorkerWire::ClipboardOfferImage) && (m_backend.readImage || m_backend.readImageBounded)
+            && isEchoOfLastWrite(readHostImageForEcho())) {
             flags &= ~ConsoleWorkerWire::ClipboardOfferImage;
         }
         if (!flags) {
@@ -177,11 +188,28 @@ private:
         m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{++m_offerSeq, flags}));
     }
 
+    /// The host copy is our own write coming back when it holds the same pixels. The bytes can differ: KSystemClipboard
+    /// answers other processes with its own PNG encoding of the picture (see PngMimeData), so a byte compare would miss.
+    bool isEchoOfLastWrite(const QByteArray &hostImage) const
+    {
+        if (hostImage.isEmpty() || !m_lastWrittenImage) return false;
+        if (hostImage == *m_lastWrittenImage) return true;
+        const auto converted = ClipboardImage::toPng(hostImage); // validates the structure and the dimensions before any decode
+        return converted.ok() && ClipboardImage::samePixels(converted.data, *m_lastWrittenImage);
+    }
+
+    QByteArray readHostImageForEcho() const
+    {
+        // Bounded when the backend can: the echo check must not read an unlimited foreign image either.
+        return m_backend.readImageBounded ? m_backend.readImageBounded().data : m_backend.readImage();
+    }
+
     static void logRefusal(const char *direction, const ClipboardImage::Result &result, qint64 bytes)
     {
         // A reason and sizes, never contents (OPT-072).
-        qInfo().nospace() << "Clipboard: refused (" << ClipboardImage::errorName(result.error) << ") direction=" << direction << " kind=image bytes=" << bytes
-                          << " size=" << result.size.width() << "x" << result.size.height();
+        QDebug out = qInfo().nospace();
+        out << "Clipboard: refused (" << ClipboardImage::errorName(result.error) << ") direction=" << direction << " kind=image bytes=" << bytes;
+        if (result.size.isValid()) out << " size=" << result.size.width() << "x" << result.size.height();
     }
 
     void answerImage(const ConsoleWorkerWire::ClipboardRequest &request, ConsoleWorkerWire::ClipboardData &answer)
@@ -191,7 +219,18 @@ private:
             answer.status = ConsoleWorkerWire::ClipboardStatus::Gone;
             return;
         }
-        const QByteArray raw = m_backend.readImage();
+        QByteArray raw;
+        if (m_backend.readImageBounded) {
+            const ImageRead read = m_backend.readImageBounded();
+            if (read.tooLarge) {
+                logRefusal("host-to-client", ClipboardImage::Result{{}, ClipboardImage::Error::TooLarge, {}}, read.bytes);
+                answer.status = ConsoleWorkerWire::ClipboardStatus::TooLarge;
+                return;
+            }
+            raw = read.data;
+        } else {
+            raw = m_backend.readImage();
+        }
         const auto converted = ClipboardImage::toPng(raw);
         const quint64 limit = std::min<quint64>(request.maxBytes, ConsoleWorkerWire::MaxClipboardImageBytes);
         if (converted.error == ClipboardImage::Error::Empty) {

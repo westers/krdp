@@ -52,6 +52,7 @@
 #include "ConsoleWorkerOutbox.h"
 #include "ClipboardImage.h"
 #include "HostClipboard.h"
+#include "KSystemClipboardBackend.h"
 #include "KWinPointerCapture.h"
 #include "PointerCaptureProtocol.h"
 #include "CursorTracker.h"
@@ -144,47 +145,7 @@ public:
         , m_mode(mode)
         , m_authenticatedDesktop(desktop)
         , m_initialOutputs(std::move(initialOutputs))
-        , m_hostClipboard(HostClipboard::Backend{
-              [] {
-                  const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
-                  return data && data->hasText();
-              },
-              [] {
-                  const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
-                  return data ? data->text() : QString();
-              },
-              [](const QString &text, bool secret) {
-                  auto *clipboard = KSystemClipboard::instance();
-                  if (text.isEmpty()) {
-                      clipboard->clear(QClipboard::Clipboard);
-                      return true;
-                  }
-                  // KSystemClipboard takes ownership. A write made on the login screen or a locked session asks
-                  // Klipper to keep it out of its history.
-                  auto *mime = new QMimeData();
-                  mime->setText(text);
-                  if (secret) mime->setData(QStringLiteral("x-kde-passwordManagerHint"), QByteArrayLiteral("secret"));
-                  clipboard->setMimeData(mime, QClipboard::Clipboard);
-                  return true;
-              },
-              // OPT-072: pictures. Offered when any image format is listed (nothing is read); read on paste only.
-              [] {
-                  const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
-                  return data && !ClipboardImage::preferredMime(data->formats()).isEmpty();
-              },
-              [] {
-                  const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
-                  if (!data) return QByteArray();
-                  const QString mimeType = ClipboardImage::preferredMime(data->formats());
-                  return mimeType.isEmpty() ? QByteArray() : data->data(mimeType);
-              },
-              [](const QByteArray &png, bool secret) {
-                  auto *mime = new QMimeData(); // KSystemClipboard takes ownership
-                  mime->setData(QStringLiteral("image/png"), png);
-                  if (secret) mime->setData(QStringLiteral("x-kde-passwordManagerHint"), QByteArrayLiteral("secret"));
-                  KSystemClipboard::instance()->setMimeData(mime, QClipboard::Clipboard);
-                  return true;
-              }},
+        , m_hostClipboard(ksystemClipboardBackend(),
               [this](const QByteArray &record) { m_outbox.clipboard(record); }, desktop)
         , m_microphone(desktop)
         , m_camera(desktop)
@@ -193,6 +154,9 @@ public:
         connect(KSystemClipboard::instance(), &KSystemClipboard::changed, this, [this](QClipboard::Mode mode) {
             if (mode == QClipboard::Clipboard) m_hostClipboard.hostChanged();
         });
+        // OPT-072 (spike S1): which clipboard path this compositor gave the worker, once, so the greeter case is readable from
+        // the journal: WaylandClipboard = ext_data_control (also what the capped picture read needs), anything else = fallback.
+        qInfo().noquote() << "Clipboard: host backend" << KSystemClipboard::instance()->metaObject()->className();
         connect(&m_pointerCapture, &KWinPointerCapture::stateChanged, this, [this](const QJsonObject &state) {
             m_outbox.pointerState(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::PointerState, QJsonDocument(state).toJson(QJsonDocument::Compact)));
         });

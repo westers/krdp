@@ -8,6 +8,9 @@
 #include <QLoggingCategory>
 #include <QTest>
 
+#include <optional>
+
+#include "ClipboardLimits.h"
 #include "HostClipboard.h"
 
 using namespace KRdp;
@@ -25,6 +28,8 @@ struct FakeHost {
     QList<QPair<QString, bool>> writes; // (text, secret)
     QByteArray image; // OPT-072: what the host holds as an image, in whatever format
     int imageReads = 0;
+    std::optional<HostClipboard::ImageRead> bounded; // OPT-072: what the capped read returns; unset = the image as it is
+    int boundedReads = 0;
     QList<QPair<QByteArray, bool>> imageWrites; // (png, secret)
     HostClipboard::Backend backend()
     {
@@ -41,6 +46,10 @@ struct FakeHost {
                     imageWrites.append({png, secret});
                     if (writeOk) image = png;
                     return writeOk;
+                },
+                [this] {
+                    ++boundedReads;
+                    return bounded ? *bounded : HostClipboard::ImageRead{image, false, qint64(image.size())};
                 }};
     }
 };
@@ -503,6 +512,94 @@ private Q_SLOTS:
         QCOMPARE(clipboardData(sent.last())->status, ClipboardStatus::Gone);
         board.set({1, 5, {}, ClipboardKind::Image, encode(picture(), "PNG")});
         QCOMPARE(clipboardSetResult(sent.last())->status, ClipboardSetStatus::Failed);
+    }
+
+    void aCappedReadThatWasAbandonedAnswersTooLargeAndLogsOversize()
+    {
+        g_messages.clear();
+        const auto previous = qInstallMessageHandler(capture);
+        {
+            Harness h;
+            h.allow(true, true);
+            h.host.image = encode(picture(), "PNG"); // offered as an image; the capped read says it was over the cap
+            h.host.bounded = HostClipboard::ImageRead{{}, true, ClipboardLimits::MaxImageBytes + 4096};
+            h.board->request({1, MaxClipboardImageBytes, ClipboardKind::Image});
+            QCOMPARE(h.data().last().status, ClipboardStatus::TooLarge);
+            QVERIFY(h.data().last().image.isEmpty());
+            QCOMPARE(h.host.imageReads, 0); // the uncapped read is not used when the backend has a capped one
+            QCOMPARE(h.host.boundedReads, 1);
+        }
+        qInstallMessageHandler(previous);
+        bool logged = false;
+        for (const auto &message : std::as_const(g_messages)) {
+            if (!message.contains(QStringLiteral("refused (oversize)"))) continue;
+            logged = true;
+            QVERIFY2(message.contains(QStringLiteral("direction=host-to-client kind=image bytes=%1").arg(ClipboardLimits::MaxImageBytes + 4096)), qPrintable(message));
+            QVERIFY2(!message.contains(QStringLiteral("size=")), "no size is known for an abandoned read");
+        }
+        QVERIFY(logged);
+    }
+
+    void aCappedReadReturningAPictureAnswersLikeTheUncappedOne()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.host.image = encode(picture(), "PNG");
+        h.board->request({1, MaxClipboardImageBytes, ClipboardKind::Image});
+        QCOMPARE(h.data().last().status, ClipboardStatus::Ok);
+        QCOMPARE(h.data().last().image, h.host.image);
+        QCOMPARE(h.host.boundedReads, 1);
+    }
+
+    void aBackendWithOnlyTheUncappedReadStillWorks()
+    {
+        QList<Record> sent;
+        Deframer deframer;
+        QByteArray image = encode(picture(), "PNG");
+        HostClipboard::Backend backend;
+        backend.hasText = [] { return false; };
+        backend.readText = [] { return QString(); };
+        backend.writeText = [](const QString &, bool) { return true; };
+        backend.hasImage = [] { return true; };
+        backend.readImage = [&] { return image; };
+        HostClipboard board(backend, [&](const QByteArray &record) {
+            deframer.feed(record);
+            while (const auto next = deframer.next()) sent.append(*next);
+        }, true);
+        board.setControl({5, true});
+        board.setPolicy({1, 5, true, true, false, false});
+        board.request({1, MaxClipboardImageBytes, ClipboardKind::Image});
+        QCOMPARE(clipboardData(sent.last())->status, ClipboardStatus::Ok);
+        QCOMPARE(clipboardData(sent.last())->image, image);
+    }
+
+    void ourOwnPictureComingBackReEncodedIsStillAnEcho()
+    {
+        // KSystemClipboard answers other processes with its own PNG encoding of a picture, so the host copy that follows a
+        // write of ours can be the same pixels in different bytes. That must not be offered to the client as a new copy.
+        Harness h;
+        h.allow(true, true);
+        h.host.hasText = false;
+        QImage image(16, 16, QImage::Format_ARGB32);
+        for (int y = 0; y < 16; ++y)
+            for (int x = 0; x < 16; ++x) image.setPixelColor(x, y, QColor(x * 16, y * 16, 80, 255));
+        const QByteArray written = encode(image, "PNG");
+        h.board->set({1, 5, {}, ClipboardKind::Image, written});
+        QByteArray reEncoded;
+        {
+            QBuffer buffer(&reEncoded);
+            buffer.open(QIODevice::WriteOnly);
+            image.save(&buffer, "PNG", 0); // a different compression level: other bytes, same pixels
+        }
+        QVERIFY(reEncoded != written);
+        h.host.image = reEncoded;
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 2);
+        QVERIFY(h.offers().isEmpty());
+        image.setPixelColor(0, 0, Qt::white); // one pixel different: a real copy
+        h.host.image = encode(image, "PNG");
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
     }
 
     void imageRefusalsLogASizeNeverContents()

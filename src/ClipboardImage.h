@@ -9,6 +9,7 @@
 #include <QByteArray>
 #include <QByteArrayView>
 #include <QImage>
+#include <QHashFunctions>
 #include <QImageReader>
 #include <QPainter>
 #include <QSize>
@@ -44,14 +45,20 @@ inline bool isPngFormatName(const QString &name)
     return name.compare(QLatin1String("PNG"), Qt::CaseInsensitive) == 0 || name.compare(QLatin1String("image/png"), Qt::CaseInsensitive) == 0;
 }
 
-/// The host clipboard format to read a picture from, among \a mimeTypes: PNG first, then the formats Qt can decode
-/// for us; empty when the clipboard offers no picture. Text-only and file copies are never pictures.
-inline QString preferredMime(const QStringList &mimeTypes)
+/// The host clipboard formats a picture is read from, best first: PNG, then the formats Qt can decode for us.
+inline const QStringList &mimeOrder()
 {
     static const QStringList order = {QStringLiteral("image/png"), QStringLiteral("image/jpeg"), QStringLiteral("image/bmp"),
                                       QStringLiteral("image/x-bmp"), QStringLiteral("image/x-ms-bmp"), QStringLiteral("image/webp"),
                                       QStringLiteral("image/tiff"), QStringLiteral("image/gif")};
-    for (const QString &candidate : order) {
+    return order;
+}
+
+/// The host clipboard format to read a picture from, among \a mimeTypes: PNG first, then the formats Qt can decode
+/// for us; empty when the clipboard offers no picture. Text-only and file copies are never pictures.
+inline QString preferredMime(const QStringList &mimeTypes)
+{
+    for (const QString &candidate : mimeOrder()) {
         if (mimeTypes.contains(candidate)) return candidate;
     }
     return {};
@@ -213,6 +220,28 @@ inline qint64 dibStride(qint64 width, qint64 bits)
 inline Result pngPassThrough(QByteArrayView png)
 {
     return validatePng(png);
+}
+
+/// True when both are decodable pictures with the same size and pixels, whatever their encoding (a PNG can be re-encoded
+/// without changing a pixel). Callers validate the dimensions first (validatePng / toPng); this decodes both.
+inline bool samePixels(QByteArrayView a, QByteArrayView b)
+{
+    const QImage x = QImage::fromData(a.toByteArray(), "PNG");
+    const QImage y = QImage::fromData(b.toByteArray(), "PNG");
+    if (x.isNull() || y.isNull() || x.size() != y.size()) return false;
+    return x.convertToFormat(QImage::Format_ARGB32) == y.convertToFormat(QImage::Format_ARGB32);
+}
+
+/// A hash of a picture's size and pixels, not of its bytes: the same picture in another PNG encoding hashes the same
+/// (KSystemClipboard serves other processes its own re-encoding, so byte hashes of the "same" copy differ between the
+/// writer and a reader). 0 when \a png does not decode. The caller has validated the dimensions already.
+inline quint64 pixelHash(QByteArrayView png)
+{
+    const QImage image = QImage::fromData(png.toByteArray(), "PNG");
+    if (image.isNull()) return 0;
+    const QImage argb = image.convertToFormat(QImage::Format_ARGB32);
+    const quint64 h = qHashBits(argb.constBits(), size_t(argb.sizeInBytes()), qHash(argb.size().width() * 100003 + argb.size().height()));
+    return h ? h : 1;
 }
 
 /**
