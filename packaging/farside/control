@@ -21,7 +21,8 @@ Depends: ${shlibs:Depends},
          pkexec,
          plasma-workspace,
          wireplumber
-Recommends: systemsettings
+Recommends: systemsettings,
+            xdg-dbus-proxy
 Conflicts: kde-config-krdp, krdp-console-test, krdp-virtual-test
 Breaks: krdp (>= 6.6.80~)
 Replaces: krdp (>= 6.6.80~), kde-config-krdp, krdp-console-test, krdp-virtual-test

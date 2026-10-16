@@ -229,6 +229,7 @@ for path in "./usr/lib/$multiarch/qt6/plugins/kwin/plugins/farside-pointer-captu
     ./usr/lib/systemd/system-preset/00-farside-system.preset ./usr/lib/systemd/user-preset/00-farside.preset \
     ./etc/pam.d/farside-virtual-session \
     ./usr/share/farside/virtual-session/launch-virtual-session.sh \
+    ./usr/share/farside/virtual-session.conf.example \
     ./usr/share/applications/io.github.westers.farside.server.desktop \
     ./usr/share/applications/io.github.westers.farside.consoleworker.desktop \
     ./usr/share/applications/kcm_farside.desktop \
@@ -248,6 +249,10 @@ if grep -qxF './usr/share/icons/hicolor/scalable/apps/io.github.westers.farside.
     echo 'the server icon path overlaps farside-client' >&2
     exit 1
 fi
+# OPT-075: xdg-dbus-proxy is a Recommends (never a Depends): without it a Virtual desktop's filtered system bus
+# degrades to none. Packaging must not make the server uninstallable on a host without it.
+dpkg-deb -f "$deb" Recommends | grep -qw xdg-dbus-proxy || { echo 'farside-server must Recommend xdg-dbus-proxy' >&2; exit 1; }
+! dpkg-deb -f "$deb" Depends | grep -qw xdg-dbus-proxy || { echo 'xdg-dbus-proxy must not be a hard Depends' >&2; exit 1; }
 # The SDDM greeter setting is handled by the maintainer scripts packaged in this deb.
 "$root/scripts/check-farside-greeter-setting.sh"
 for script in postinst postrm; do

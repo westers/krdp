@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 // Independent root service entry, never setuid or invoked with RDP-supplied argv.
+#include "BrokerHostSettings.h"
 #include "VaapiDriverMode.h"
 #include "VirtualSessionServicePlan.h"
 #include "VirtualSessionServiceScope.h"
 #include "VirtualSessionServiceOwner.h"
 #include "VirtualSessionLogin.h"
+#include "VirtualSystemBus.h"
 #include <QCoreApplication>
 #include <QCommandLineParser>
 #include <QFile>
@@ -58,6 +60,13 @@ int main(int argc, char **argv)
     parser.addHelpOption();
     for (const auto &name : {"session", "device-entry", "guardian", "pam-keeper", "launcher", "worker", "support", "render-pci", "vaapi-driver"})
         parser.addOption({QString::fromLatin1(name), QStringLiteral("Trusted service launch parameter"), QStringLiteral("value")});
+    // OPT-075: system-bus access for new desktops, from FARSIDE_VIRTUAL_SYSTEM_BUS* via the unit's ExecStart.
+    const QList<QPair<QString, QString>> systemBusOptions{{QStringLiteral("system-bus"), QStringLiteral("VirtualSystemBus")}, {QStringLiteral("system-bus-network"), QStringLiteral("SystemBusNetwork")},
+        {QStringLiteral("system-bus-power"), QStringLiteral("SystemBusPower")}, {QStringLiteral("system-bus-packages"), QStringLiteral("SystemBusPackages")},
+        {QStringLiteral("system-bus-polkit"), QStringLiteral("SystemBusPolkit")}, {QStringLiteral("system-bus-bluetooth"), QStringLiteral("SystemBusBluetooth")},
+        {QStringLiteral("system-bus-printing"), QStringLiteral("SystemBusPrinting")}, {QStringLiteral("system-bus-extra"), QStringLiteral("SystemBusExtra")}};
+    for (const auto &option : systemBusOptions)
+        parser.addOption({option.first, QStringLiteral("Trusted service launch parameter"), QStringLiteral("value")});
     parser.process(app);
     if (getuid() || geteuid()) return refused("explicit root service required");
     if (!parser.positionalArguments().isEmpty()) return refused("unexpected arguments");
@@ -81,12 +90,35 @@ int main(int argc, char **argv)
     const auto device = parser.value(QStringLiteral("device-entry"));
     const auto guardian = parser.value(QStringLiteral("guardian"));
     const auto keeper = parser.value(QStringLiteral("pam-keeper"));
-    const KRdp::VirtualSessionLaunchPlan::Configuration config{parser.value(QStringLiteral("launcher")),
+    KRdp::VirtualSessionLaunchPlan::Configuration config{parser.value(QStringLiteral("launcher")),
         parser.value(QStringLiteral("worker")), parser.value(QStringLiteral("support")),
         parser.value(QStringLiteral("render-pci")).split(QLatin1Char(','), Qt::KeepEmptyParts), {1280, 720},
         KRdp::VaapiDriverMode::normalize(parser.value(QStringLiteral("vaapi-driver"))).value_or(QString())};
     // AUD-FIX8 B3: KRDP_VIRTUAL_VAAPI_DRIVER (auto, off, radeonsi, iHD, i965) for the desktop's worker.
     if (config.vaapiDriver.isEmpty()) return refused("VaapiDriverMode (FARSIDE_VIRTUAL_VAAPI_DRIVER)");
+    // OPT-075: global values (unit defaults and /etc/farside/virtual-session.conf), then this account's root-owned drop-in.
+    QMap<QString, QString> globalValues;
+    for (const auto &option : systemBusOptions)
+        if (parser.isSet(option.first)) globalValues.insert(option.second, parser.value(option.first));
+    QString busError;
+    const auto globalBus = KRdp::VirtualSystemBus::apply(KRdp::VirtualSystemBus::defaults(), globalValues, &busError);
+    if (!globalBus) return refused("system-bus settings (FARSIDE_VIRTUAL_SYSTEM_BUS*)");
+    const QString login = QString::fromLocal8Bit(account.pw_name);
+    const auto userBus = KRdp::VirtualSystemBus::resolveUser(*globalBus, login,
+        KRdp::VirtualSystemBus::readTrustedFile(QStringLiteral("/etc/farside/virtual-session.d"), login + QStringLiteral(".conf")),
+        [](const QByteArray &bytes, QString *error) {
+            const auto parsed = KRdp::BrokerHostSettings::privateEnvironment(bytes);
+            *error = parsed.error;
+            return parsed.assignments;
+        });
+    if (userBus.state == KRdp::VirtualSystemBus::UserOverride::State::Invalid)
+        qWarning().noquote() << "Virtual system bus: the override for" << login << "is invalid (" << userBus.error << "); this desktop gets no system bus";
+    struct stat busSocket{};
+    config.systemBus = KRdp::VirtualSystemBus::plan(userBus.settings, executable(KRdp::VirtualSystemBus::ProxyProgram),
+        !lstat(QFile::encodeName(KRdp::VirtualSystemBus::SystemSocket).constData(), &busSocket) && S_ISSOCK(busSocket.st_mode));
+    if (!config.systemBus.note.isEmpty()) qInfo().noquote() << "Virtual system bus:" << config.systemBus.note;
+    qInfo().noquote() << "Virtual system bus for" << login << ":" << KRdp::VirtualSystemBus::modeName(config.systemBus.mode)
+                      << (userBus.state == KRdp::VirtualSystemBus::UserOverride::State::Applied ? "(per-user override)" : "");
     const auto plan = KRdp::VirtualSessionServicePlan::build(*record, boot,
         {record->uid, QString::fromLocal8Bit(account.pw_name), QString::fromLocal8Bit(account.pw_dir)}, config, device, guardian);
     if (!plan) return refused("boot or trusted launch policy");

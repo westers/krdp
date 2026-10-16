@@ -3,15 +3,21 @@
 set -euo pipefail
 umask 077
 [[ ( $# == 5 || $# == 6 ) && $(id -u) != 0 && $XDG_RUNTIME_DIR == /run/user/"$(id -u)"/farside-virtual/* ]]
-[[ ! -S /run/dbus/system_bus_socket && ! -S /run/user/"$(id -u)"/bus ]]
+[[ ! -S /run/user/"$(id -u)"/bus ]]
+# OPT-075: the system bus exists only when the launcher bound one (filtered proxy or full); none keeps the old guarantee.
+case ${FARSIDE_SYSTEM_BUS:-none} in
+    none) [[ ! -S /run/dbus/system_bus_socket ]];;
+    filtered|full) [[ -S /run/dbus/system_bus_socket ]];;
+    *) exit 1;;
+esac
 session=$1 worker=$2 support=$3 width=$4 height=$5
 layout_args=()
 if (( $# == 6 )); then
     layout_args=(--initial-layout "$6")
 fi
-wrapper_pid= graph_pid= policy_pid= plasma_pid= worker_pid=
+wrapper_pid= graph_pid= policy_pid= plasma_pid= worker_pid= polkit_pid=
 cleanup() {
-    for child in "$worker_pid" "$plasma_pid" "$wrapper_pid" "$policy_pid" "$graph_pid"; do
+    for child in "$polkit_pid" "$worker_pid" "$plasma_pid" "$wrapper_pid" "$policy_pid" "$graph_pid"; do
         if [[ -n $child ]]; then kill "$child" 2>/dev/null || true; fi
     done
 }
@@ -72,6 +78,17 @@ for attempt in {1..200}; do
     sleep 0.1
 done
 [[ $ready == true ]]
+# OPT-075 (experimental): the KDE polkit agent, only when the administrator switched polkit on and a system bus exists.
+# Prompts can still fail inside the one-uid namespace; a missing agent binary is not an error.
+if [[ ${FARSIDE_POLKIT_AGENT:-0} == 1 && ${FARSIDE_SYSTEM_BUS:-none} != none ]]; then
+    for agent in /usr/lib/*/libexec/polkit-kde-authentication-agent-1 /usr/libexec/polkit-kde-authentication-agent-1; do
+        [[ -x $agent ]] || continue
+        env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland "$agent" >"$XDG_RUNTIME_DIR/polkit-agent.log" 2>&1 &
+        polkit_pid=$!
+        break
+    done
+    [[ -n $polkit_pid ]] || echo 'polkit agent requested, but polkit-kde-authentication-agent-1 is not installed' >&2
+fi
 env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland timeout 10 kscreen-doctor -j >"$XDG_RUNTIME_DIR/outputs.json"
 jq -e --argjson w "$width" --argjson h "$height" '.outputs | length == 1 and .[0].enabled and .[0].size.width == $w and .[0].size.height == $h' "$XDG_RUNTIME_DIR/outputs.json"
 timeout 5 pw-dump >"$XDG_RUNTIME_DIR/graph.json"
