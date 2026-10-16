@@ -280,17 +280,19 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         resetClipboards();
         syncClipboard();
     });
-    connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardOffered, this, [this](quint64) {
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardOffered, this, [this](quint64, quint8 flags) {
         for (const auto &client : m_clients) {
             if (client->connection && client->clipboardPlan && client->clipboardPlan->hostToClient && m_control.ownsControl(client->id)) {
-                client->connection->clipboard()->announceHostText();
+                client->connection->clipboard()->announceHost(flags & ConsoleWorkerWire::ClipboardOfferText, flags & ConsoleWorkerWire::ClipboardOfferImage);
             }
         }
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardDataReceived, this, [this](const ConsoleWorkerWire::ClipboardData &data) {
         const auto request = m_clipboardRequests.take(data.requestId);
         if (!request.clipboard) return;
-        request.clipboard->provideHostText(request.clipboardRequestId, data.text, data.status == ConsoleWorkerWire::ClipboardStatus::Ok);
+        const bool ok = data.status == ConsoleWorkerWire::ClipboardStatus::Ok;
+        if (data.kind == ConsoleWorkerWire::ClipboardKind::Image) request.clipboard->provideHostImage(request.clipboardRequestId, data.image, ok);
+        else request.clipboard->provideHostText(request.clipboardRequestId, data.text, ok);
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardSetFinished, this, [](const ConsoleWorkerWire::ClipboardSetResult &result) {
         qCDebug(CONSOLE_SCREENS) << "client text set" << result.setId << "status" << int(result.status);
@@ -1007,13 +1009,19 @@ void ConsoleHostController::addClient(RdpConnection *connection)
         clipboard->setDirections(false, false);
         ConsoleWorkerSession *session = client->session.get();
         client->connections.append(connect(clipboard, &Clipboard::hostTextRequested, this, [this, id](quint64 requestId) {
-            clipboardRequested(id, requestId);
+            clipboardRequested(id, requestId, false);
+        }));
+        client->connections.append(connect(clipboard, &Clipboard::hostImageRequested, this, [this, id](quint64 requestId) {
+            clipboardRequested(id, requestId, true);
         }));
         client->connections.append(connect(clipboard, &Clipboard::clientDataChanged, session, [clipboard, session]() {
             session->setClipboardData(clipboard->getClipboard());
         }));
         client->connections.append(connect(session, &ConsoleWorkerSession::clientClipboardText, this, [this, id](const QString &text) {
             clientClipboardText(id, text);
+        }));
+        client->connections.append(connect(session, &ConsoleWorkerSession::clientClipboardImage, this, [this, id](const QByteArray &png) {
+            clientClipboardImage(id, png);
         }));
     }
     // Queued: a record can still be in the event queue after Server deleted
@@ -2184,7 +2192,8 @@ void ConsoleHostController::sendCapabilities(Client &client)
         const bool hostToClient = m_clipboardDirection == Direction::Both || m_clipboardDirection == Direction::HostToClient;
         const bool clientToHost = m_clipboardDirection == Direction::Both || m_clipboardDirection == Direction::ClientToHost;
         if (hostToClient || clientToHost) {
-            capabilities.clipboard = LayoutControl::ClipboardCapabilities{hostToClient, clientToHost, int(ConsoleWorkerWire::MaxClipboardBytes)};
+            capabilities.clipboard = LayoutControl::ClipboardCapabilities{hostToClient, clientToHost, int(ConsoleWorkerWire::MaxClipboardBytes), true,
+                                                                          int(ConsoleWorkerWire::MaxClipboardImageBytes)};
         }
     }
     capabilities.stats = LayoutControl::StatsCapabilities{};
@@ -2455,22 +2464,36 @@ void ConsoleHostController::resetClipboards()
     }
 }
 
-void ConsoleHostController::clipboardRequested(ConsoleControl::Id id, quint64 requestId)
+void ConsoleHostController::clipboardRequested(ConsoleControl::Id id, quint64 requestId, bool image)
 {
     for (const auto &client : m_clients) {
         if (client->id != id || !client->connection) continue;
         auto *clipboard = client->connection->clipboard();
+        const auto refuse = [&] {
+            if (image) clipboard->provideHostImage(requestId, {}, false);
+            else clipboard->provideHostText(requestId, {}, false);
+        };
         if (!m_control.ownsControl(id) || !client->clipboardPlan || !client->clipboardPlan->hostToClient) {
-            clipboard->provideHostText(requestId, {}, false);
+            refuse();
             return;
         }
-        const auto endpointId = m_endpoint.requestClipboard();
+        const auto endpointId = image ? m_endpoint.requestClipboardImage() : m_endpoint.requestClipboard();
         if (!endpointId) {
-            clipboard->provideHostText(requestId, {}, false);
+            refuse();
             return;
         }
         if (m_clipboardRequests.size() >= 16) m_clipboardRequests.clear(); // answers to abandoned requests are dropped
         m_clipboardRequests.insert(endpointId, {id, clipboard, requestId});
+        return;
+    }
+}
+
+void ConsoleHostController::clientClipboardImage(ConsoleControl::Id id, const QByteArray &png)
+{
+    for (const auto &client : m_clients) {
+        if (client->id != id) continue;
+        if (!m_control.ownsControl(id) || !client->clipboardPlan || !client->clipboardPlan->clientToHost) return;
+        m_endpoint.setClipboardImage(m_controlGeneration, png);
         return;
     }
 }

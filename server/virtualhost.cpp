@@ -50,7 +50,7 @@ int main(int argc, char **argv)
     parser.addOption({QStringLiteral("software-hevc"), QStringLiteral("Software HEVC encoding: auto, allowed or never (OPT-062)."), QStringLiteral("ceiling"), QStringLiteral("auto")});
     parser.addOption({QStringLiteral("software-av1"), QStringLiteral("Software AV1 encoding: auto, allowed or never (OPT-062)."), QStringLiteral("ceiling"), QStringLiteral("auto")});
     parser.addOption({QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto")});
-    parser.addOption({QStringLiteral("clipboard-direction"), QStringLiteral("Text clipboard bridge: both, host-to-client, client-to-host or off (OPT-067)."), QStringLiteral("direction"), QStringLiteral("both")});
+    parser.addOption({QStringLiteral("clipboard-direction"), QStringLiteral("Clipboard bridge (text and images): both, host-to-client, client-to-host or off (OPT-067, OPT-072)."), QStringLiteral("direction"), QStringLiteral("both")});
     parser.process(application);
     if (getuid() || geteuid()) { qCritical("Virtual host requires an explicit root service invocation"); return 1; }
     const auto authentication = KRdp::BrokerAuthentication::readFile(parser.value(QStringLiteral("authentication-policy")), parser.isSet(QStringLiteral("authentication-policy")));

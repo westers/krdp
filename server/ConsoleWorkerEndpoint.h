@@ -7,6 +7,7 @@
 
 #include <memory>
 
+#include <QHash>
 #include <QObject>
 #include <QPointer>
 #include <QSet>
@@ -125,8 +126,12 @@ public:
     void setWatchdogInterval(int milliseconds) { m_watchdogTimer.setInterval(milliseconds); }
     /** The client pasted: ask the worker for the host's text. Returns the request id, 0 = not sent (refused or backlogged). */
     quint64 requestClipboard(quint32 maxBytes = ConsoleWorkerWire::MaxClipboardBytes);
+    /** OPT-072: the same for the host's image (PNG, at most \a maxBytes up to MaxClipboardImageBytes). */
+    quint64 requestClipboardImage(quint32 maxBytes = ConsoleWorkerWire::MaxClipboardImageBytes);
     /** The client copied \a text. Returns the set id, 0 = not sent. Ids are endpoint-wide and never reused. */
     quint64 setClipboard(quint64 controlGeneration, const QString &text);
+    /** OPT-072: the client copied this PNG (already checked by the broker; the worker checks it again). */
+    quint64 setClipboardImage(quint64 controlGeneration, const QByteArray &png);
 
 Q_SIGNALS:
     void workerAuthenticated(const KRdp::ConsoleHandoff::Target &target);
@@ -168,8 +173,8 @@ Q_SIGNALS:
     /** FIX-CURSOR: the desktop's cursor shape changed (also in cursorShape()). */
     void pointerStateReceived(const QJsonObject &state);
     void cursorShapeReceived(const KRdp::ConsoleWorkerWire::CursorShape &shape);
-    /** OPT-067: the host copied text (no contents). Only while the policy allows host to client, newest seq only. */
-    void clipboardOffered(quint64 seq);
+    /** OPT-067: the host copied text, OPT-072 and/or an image (\a flags: ClipboardOfferText / ClipboardOfferImage; no contents). Only while the policy allows host to client, newest seq only. */
+    void clipboardOffered(quint64 seq, quint8 flags);
     /** OPT-067: the answer to a requestClipboard() id this endpoint issued and has not forgotten. */
     void clipboardDataReceived(const KRdp::ConsoleWorkerWire::ClipboardData &data);
     void clipboardSetFinished(const KRdp::ConsoleWorkerWire::ClipboardSetResult &result);
@@ -179,6 +184,7 @@ Q_SIGNALS:
 
 private:
     friend class ::ConsoleWorkerEndpointHardeningTest;
+    quint64 requestClipboardKind(quint32 maxBytes, ConsoleWorkerWire::ClipboardKind kind);
     void acceptConnection();
     void readWorker();
     bool processRecords();
@@ -217,7 +223,7 @@ private:
     quint64 m_clipboardPolicySent = 0;
     quint64 m_clipboardOfferSeq = 0;
     quint64 m_nextClipboardId = 0;
-    QSet<quint64> m_clipboardRequests;
+    QHash<quint64, ConsoleWorkerWire::ClipboardKind> m_clipboardRequests; // request id -> the kind that was asked for
     QSet<quint64> m_clipboardSets;
 };
 }

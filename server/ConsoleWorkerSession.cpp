@@ -90,6 +90,12 @@ void ConsoleWorkerSession::setClipboardData(std::unique_ptr<QMimeData> data)
     // OPT-067: the broker never touches a host clipboard. The client's text goes to the worker as a
     // ClipboardSet record (the host controller gates it by policy and control); an empty or
     // non-text copy is an empty text, which clears the host clipboard.
+    // OPT-072: a copy with text is the text (Clipboard requests an image only when there is none); one with only a
+    // picture goes on as a ClipboardSet of kind Image.
+    if (data && !data->hasText() && data->hasFormat(QStringLiteral("image/png"))) {
+        Q_EMIT clientClipboardImage(data->data(QStringLiteral("image/png")));
+        return;
+    }
     Q_EMIT clientClipboardText(data && data->hasText() ? data->text() : QString());
 }
 

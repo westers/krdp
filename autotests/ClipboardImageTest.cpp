@@ -272,6 +272,15 @@ private Q_SLOTS:
         QCOMPARE(toPng(QByteArray("this is not a picture")).error, Error::Malformed);
     }
 
+    void hostMimePreferencePrefersPngAndIgnoresNonImages()
+    {
+        QCOMPARE(preferredMime({QStringLiteral("text/plain"), QStringLiteral("image/bmp"), QStringLiteral("image/png")}), QStringLiteral("image/png"));
+        QCOMPARE(preferredMime({QStringLiteral("image/jpeg"), QStringLiteral("image/bmp")}), QStringLiteral("image/jpeg"));
+        QCOMPARE(preferredMime({QStringLiteral("text/uri-list"), QStringLiteral("text/plain;charset=utf-8")}), QString());
+        QCOMPARE(preferredMime({QStringLiteral("image/svg+xml")}), QString()); // a vector format is not decoded
+        QCOMPARE(preferredMime({}), QString());
+    }
+
     void formatNames()
     {
         QVERIFY(isPngFormatName(QStringLiteral("PNG")));

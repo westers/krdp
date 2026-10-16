@@ -27,6 +27,7 @@ private Q_SLOTS:
     void clipboardCrossesOnlyAfterReadyAndOnlyWhenAllowed();
     void clipboardIdsAreEndpointWideAndForgottenWithTheWorker();
     void clipboardRecordBeforeReadyFailsTheWorker();
+    void clipboardImagesCrossWithTheirKindAndLimits();
     void hostPointerIsRelayedAfterReadyAndForgottenWithTheWorker();
     void hostPointerBeforeReadyOrMalformedFailsTheWorker();
 };
@@ -577,6 +578,75 @@ void ConsoleWorkerEndpointTest::clipboardRecordBeforeReadyFailsTheWorker()
     w.worker.flush();
     QTRY_COMPARE(errors, 1);
     QVERIFY(!w.endpoint.ready());
+}
+
+// OPT-072 (wire 19).
+void ConsoleWorkerEndpointTest::clipboardImagesCrossWithTheirKindAndLimits()
+{
+    using namespace ConsoleWorkerWire;
+    ClipboardWorker w;
+    w.start(true);
+    QVERIFY(w.ok);
+    QSignalSpy offered(&w.endpoint, &ConsoleWorkerEndpoint::clipboardOffered);
+    QList<ClipboardData> data;
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::clipboardDataReceived, this, [&data](const auto &answer) { data.append(answer); });
+    const QByteArray png(2000, 'p');
+    // Nothing without a policy; client to host off refuses a set, host to client off refuses a request.
+    QCOMPARE(w.endpoint.requestClipboardImage(), quint64(0));
+    QCOMPARE(w.endpoint.setClipboardImage(1, png), quint64(0));
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, false, false, false));
+    w.drain();
+    QCOMPARE(w.endpoint.setClipboardImage(1, png), quint64(0));
+    QVERIFY(w.endpoint.setClipboardPolicy(1, false, true, false, false));
+    w.drain();
+    QCOMPARE(w.endpoint.requestClipboardImage(), quint64(0));
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false));
+    w.drain();
+    // Bounds: empty, over 16 MiB, another generation; and a request over the image limit.
+    QCOMPARE(w.endpoint.setClipboardImage(1, {}), quint64(0));
+    QCOMPARE(w.endpoint.setClipboardImage(1, QByteArray(MaxClipboardImageBytes + 1, 'p')), quint64(0));
+    QCOMPARE(w.endpoint.setClipboardImage(2, png), quint64(0));
+    QCOMPARE(w.endpoint.requestClipboardImage(0), quint64(0));
+    QCOMPARE(w.endpoint.requestClipboardImage(MaxClipboardImageBytes + 1), quint64(0));
+    QCOMPARE(w.endpoint.requestClipboard(MaxClipboardBytes + 1), quint64(0)); // text keeps its own limit
+
+    const auto setId = w.endpoint.setClipboardImage(1, png);
+    const auto requestId = w.endpoint.requestClipboardImage();
+    QVERIFY(setId && requestId && setId != requestId);
+    auto records = w.drain();
+    QCOMPARE(records.size(), 2);
+    const auto sent = clipboardSet(records.at(0));
+    QVERIFY(sent && sent->kind == ClipboardKind::Image && sent->image == png && sent->setId == setId);
+    const auto asked = clipboardRequest(records.at(1));
+    QVERIFY(asked && asked->kind == ClipboardKind::Image && asked->requestId == requestId && asked->maxBytes == MaxClipboardImageBytes);
+
+    // The answer must be of the kind that was asked: a text answer to an image request is dropped (and forgets the id).
+    w.worker.write(frame(ClipboardData{requestId, 1, ClipboardStatus::Ok, QStringLiteral("text"), ClipboardKind::Text, {}}));
+    w.worker.write(frame(ClipboardData{requestId, 1, ClipboardStatus::Ok, {}, ClipboardKind::Image, png}));
+    w.worker.flush();
+    QTest::qWait(80);
+    QCOMPARE(data.size(), 0);
+    QVERIFY(w.endpoint.ready());
+    // A right answer reaches the broker with its picture.
+    const auto second = w.endpoint.requestClipboardImage(1000);
+    QVERIFY(second);
+    w.drain();
+    w.worker.write(frame(ClipboardData{second, 1, ClipboardStatus::Ok, {}, ClipboardKind::Image, png}));
+    w.worker.flush();
+    QTRY_COMPARE(data.size(), 1);
+    QCOMPARE(data.first().kind, ClipboardKind::Image);
+    QCOMPARE(data.first().image, png);
+    // An offer says what it covers.
+    w.worker.write(frame(ClipboardOffer{9, ClipboardOfferImage}));
+    w.worker.write(frame(ClipboardOffer{10, ClipboardOfferText | ClipboardOfferImage}));
+    w.worker.flush();
+    QTRY_COMPARE(offered.size(), 2);
+    QCOMPARE(offered.at(0).at(1).value<quint8>(), ClipboardOfferImage);
+    QCOMPARE(offered.at(1).at(1).value<quint8>(), quint8(ClipboardOfferText | ClipboardOfferImage));
+    // Eight requests at most wait for the worker, images included.
+    for (int i = 0; i < 8; ++i) QVERIFY(w.endpoint.requestClipboardImage());
+    QCOMPARE(w.endpoint.requestClipboardImage(), quint64(0));
+    QVERIFY(w.endpoint.ready());
 }
 
 // OPT-071 (wire 18).

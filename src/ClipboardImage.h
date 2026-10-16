@@ -12,6 +12,7 @@
 #include <QImageReader>
 #include <QPainter>
 #include <QSize>
+#include <QStringList>
 #include <QtEndian>
 
 namespace KRdp::ClipboardImage
@@ -41,6 +42,19 @@ constexpr quint32 PngFormatId = 0xC001; ///< the id this side gives "PNG" in its
 inline bool isPngFormatName(const QString &name)
 {
     return name.compare(QLatin1String("PNG"), Qt::CaseInsensitive) == 0 || name.compare(QLatin1String("image/png"), Qt::CaseInsensitive) == 0;
+}
+
+/// The host clipboard format to read a picture from, among \a mimeTypes: PNG first, then the formats Qt can decode
+/// for us; empty when the clipboard offers no picture. Text-only and file copies are never pictures.
+inline QString preferredMime(const QStringList &mimeTypes)
+{
+    static const QStringList order = {QStringLiteral("image/png"), QStringLiteral("image/jpeg"), QStringLiteral("image/bmp"),
+                                      QStringLiteral("image/x-bmp"), QStringLiteral("image/x-ms-bmp"), QStringLiteral("image/webp"),
+                                      QStringLiteral("image/tiff"), QStringLiteral("image/gif")};
+    for (const QString &candidate : order) {
+        if (mimeTypes.contains(candidate)) return candidate;
+    }
+    return {};
 }
 
 enum class Error : quint8 {

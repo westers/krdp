@@ -188,8 +188,9 @@ private:
     void syncClipboard();
     /** Forget both sides of every connection's clipboard and every request in flight (handover, worker gone, control change). */
     void resetClipboards();
-    void clipboardRequested(ConsoleControl::Id id, quint64 requestId);
+    void clipboardRequested(ConsoleControl::Id id, quint64 requestId, bool image);
     void clientClipboardText(ConsoleControl::Id id, const QString &text);
+    void clientClipboardImage(ConsoleControl::Id id, const QByteArray &png);
     ConsoleClipboardPolicy::Direction m_clipboardDirection = ConsoleClipboardPolicy::Direction::Both;
     QHash<quint64, PendingClipboardRequest> m_clipboardRequests;
 

@@ -243,13 +243,24 @@ bool ConsoleWorkerEndpoint::setClipboardPolicy(quint64 controlGeneration, bool h
 
 quint64 ConsoleWorkerEndpoint::requestClipboard(quint32 maxBytes)
 {
-    // The text is fetched when the client pastes; a backlogged socket refuses instead of queueing stale pastes.
+    return requestClipboardKind(maxBytes, ConsoleWorkerWire::ClipboardKind::Text);
+}
+
+quint64 ConsoleWorkerEndpoint::requestClipboardImage(quint32 maxBytes)
+{
+    return requestClipboardKind(maxBytes, ConsoleWorkerWire::ClipboardKind::Image);
+}
+
+quint64 ConsoleWorkerEndpoint::requestClipboardKind(quint32 maxBytes, ConsoleWorkerWire::ClipboardKind kind)
+{
+    // The content is fetched when the client pastes; a backlogged socket refuses instead of queueing stale pastes.
+    const quint32 limit = ConsoleWorkerWire::maxClipboardBytes(kind);
     if (!m_ready || !m_worker || !m_clipboardPolicy || !m_clipboardPolicy->hostToClient || !maxBytes
-        || maxBytes > ConsoleWorkerWire::MaxClipboardBytes || m_worker->bytesToWrite() > 2 * qint64(ConsoleWorkerWire::MaxClipboardBytes)
+        || maxBytes > limit || m_worker->bytesToWrite() > 2 * qint64(limit)
         || m_clipboardRequests.size() >= 8 || m_nextClipboardId == std::numeric_limits<quint64>::max()) return 0;
     const quint64 id = ++m_nextClipboardId;
-    if (m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardRequest{id, maxBytes})) < 0) return 0;
-    m_clipboardRequests.insert(id);
+    if (m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardRequest{id, maxBytes, kind})) < 0) return 0;
+    m_clipboardRequests.insert(id, kind);
     return id;
 }
 
@@ -262,6 +273,20 @@ quint64 ConsoleWorkerEndpoint::setClipboard(quint64 controlGeneration, const QSt
         || m_clipboardSets.size() >= 8 || m_nextClipboardId == std::numeric_limits<quint64>::max()) return 0;
     const quint64 id = ++m_nextClipboardId;
     if (m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardSet{id, controlGeneration, text})) < 0) return 0;
+    m_clipboardSets.insert(id);
+    return id;
+}
+
+quint64 ConsoleWorkerEndpoint::setClipboardImage(quint64 controlGeneration, const QByteArray &png)
+{
+    if (!m_ready || !m_worker || !m_clipboardPolicy || !m_clipboardPolicy->clientToHost || !controlGeneration
+        || controlGeneration != m_clipboardPolicy->controlGeneration
+        || png.isEmpty() || quint64(png.size()) > ConsoleWorkerWire::MaxClipboardImageBytes
+        || m_worker->bytesToWrite() > 2 * qint64(ConsoleWorkerWire::MaxClipboardImageBytes)
+        || m_clipboardSets.size() >= 8 || m_nextClipboardId == std::numeric_limits<quint64>::max()) return 0;
+    const quint64 id = ++m_nextClipboardId;
+    ConsoleWorkerWire::ClipboardSet set{id, controlGeneration, {}, ConsoleWorkerWire::ClipboardKind::Image, png};
+    if (m_worker->write(ConsoleWorkerWire::frame(set)) < 0) return 0;
     m_clipboardSets.insert(id);
     return id;
 }
@@ -547,10 +572,16 @@ bool ConsoleWorkerEndpoint::processRecords()
             // Newest only; one the policy no longer allows is dropped here, never forwarded.
             if (offer->seq > m_clipboardOfferSeq) {
                 m_clipboardOfferSeq = offer->seq;
-                if (m_clipboardPolicy && m_clipboardPolicy->hostToClient) Q_EMIT clipboardOffered(offer->seq);
+                if (m_clipboardPolicy && m_clipboardPolicy->hostToClient) Q_EMIT clipboardOffered(offer->seq, offer->flags);
             }
         } else if (const auto data = ConsoleWorkerWire::clipboardData(*record)) {
-            if (m_clipboardRequests.remove(data->requestId)) Q_EMIT clipboardDataReceived(*data);
+            // The answer must be of the kind that was asked for; anything else is dropped like an unknown id.
+            const auto asked = m_clipboardRequests.constFind(data->requestId);
+            if (asked != m_clipboardRequests.cend()) {
+                const bool sameKind = asked.value() == data->kind;
+                m_clipboardRequests.erase(asked);
+                if (sameKind) Q_EMIT clipboardDataReceived(*data);
+            }
         } else if (const auto result = ConsoleWorkerWire::clipboardSetResult(*record)) {
             if (m_clipboardSets.remove(result->setId)) Q_EMIT clipboardSetFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::resizeResult(*record)) {

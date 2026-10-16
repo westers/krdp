@@ -50,6 +50,7 @@
 
 #include "ConsoleWorkerWire.h"
 #include "ConsoleWorkerOutbox.h"
+#include "ClipboardImage.h"
 #include "HostClipboard.h"
 #include "KWinPointerCapture.h"
 #include "PointerCaptureProtocol.h"
@@ -164,6 +165,24 @@ public:
                   mime->setText(text);
                   if (secret) mime->setData(QStringLiteral("x-kde-passwordManagerHint"), QByteArrayLiteral("secret"));
                   clipboard->setMimeData(mime, QClipboard::Clipboard);
+                  return true;
+              },
+              // OPT-072: pictures. Offered when any image format is listed (nothing is read); read on paste only.
+              [] {
+                  const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
+                  return data && !ClipboardImage::preferredMime(data->formats()).isEmpty();
+              },
+              [] {
+                  const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
+                  if (!data) return QByteArray();
+                  const QString mimeType = ClipboardImage::preferredMime(data->formats());
+                  return mimeType.isEmpty() ? QByteArray() : data->data(mimeType);
+              },
+              [](const QByteArray &png, bool secret) {
+                  auto *mime = new QMimeData(); // KSystemClipboard takes ownership
+                  mime->setData(QStringLiteral("image/png"), png);
+                  if (secret) mime->setData(QStringLiteral("x-kde-passwordManagerHint"), QByteArrayLiteral("secret"));
+                  KSystemClipboard::instance()->setMimeData(mime, QClipboard::Clipboard);
                   return true;
               }},
               [this](const QByteArray &record) { m_outbox.clipboard(record); }, desktop)

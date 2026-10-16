@@ -258,3 +258,6 @@ not establish that the design is acceptable.
   (`server/ConsoleClipboardPolicy.h`).
 - It is read when the service starts, like the other host keys. A client that advertises `clipboard` in its KRDPCTL
   `capabilities` record sees the setting's directions, not the state narrowing.
+- OPT-072: the same setting, states and rate limit cover pictures (PNG, CF_DIB/CF_DIBV5; at most 16 MiB encoded and
+  8192x8192 pixels; a copy with text and a picture is bridged as text). The `clipboard` capability then also carries
+  `images: true` and `maxImageBytes`. There is no separate switch for pictures.

@@ -479,10 +479,14 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
                       QJsonObject{{QStringLiteral("maxRateHz"), stats->maxRateHz}, {QStringLiteral("events"), stats->events}, {QStringLiteral("tcp"), stats->tcp}});
     }
     if (const auto &clipboard = capabilities.clipboard) {
-        record.insert(QStringLiteral("clipboard"),
-                      QJsonObject{{QStringLiteral("hostToClient"), clipboard->hostToClient},
-                                  {QStringLiteral("clientToHost"), clipboard->clientToHost},
-                                  {QStringLiteral("maxBytes"), clipboard->maxBytes}});
+        QJsonObject group{{QStringLiteral("hostToClient"), clipboard->hostToClient},
+                          {QStringLiteral("clientToHost"), clipboard->clientToHost},
+                          {QStringLiteral("maxBytes"), clipboard->maxBytes}};
+        if (clipboard->images) {
+            group.insert(QStringLiteral("images"), true);
+            group.insert(QStringLiteral("maxImageBytes"), clipboard->maxImageBytes);
+        }
+        record.insert(QStringLiteral("clipboard"), group);
     }
     if (const auto &desk = capabilities.deskActivity) {
         record.insert(QStringLiteral("deskActivity"),
