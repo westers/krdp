@@ -4,6 +4,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
+#include <sys/types.h>
 
 // World-readable public-metadata snapshot of a host settings scope, written by
 // a root process (the settings helper, at broker start and after each save) so
@@ -23,11 +24,16 @@ QJsonObject sanitize(BrokerHostSettings::Scope scope, const QJsonObject &full);
 // Atomic (temp file + rename), mode 0644, owned by the writing user (root in
 // production). Creates the directory 0755 when missing.
 bool write(const QString &directory, BrokerHostSettings::Scope scope, const QJsonObject &full, QString *error = nullptr);
+// The uid that stands for root in this process's user namespace: 0 normally, or the kernel overflow uid when the
+// namespace's uid map (the text of /proc/self/uid_map) leaves root unmapped, as in a Farside virtual desktop
+// (OPT-074). Empty or unparsable maps give 0 (strict). The directory above the snapshot is root-only, so
+// the stand-in cannot be forged by another user.
+uid_t unmappedRootStandIn(const QByteArray &uidMap, uid_t overflowUid);
 struct ReadResult {
     QJsonObject value;
     QString error;
 };
-// Unprivileged read. Requires a regular, single-link file owned by root (or by
+// Unprivileged read. Requires a regular, single-link file owned by root (or its stand-in, see above; or by
 // the caller when allowCurrentUser, for tests and a private override) that no
 // other user can write, inside a directory with the same ownership rules.
 ReadResult read(const QString &directory, BrokerHostSettings::Scope scope, bool allowCurrentUser = false);
