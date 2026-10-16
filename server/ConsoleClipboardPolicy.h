@@ -13,7 +13,7 @@
 namespace KRdp::ConsoleClipboardPolicy
 {
 /**
- * OPT-067: which directions of the text clipboard bridge a connection may use, decided per state.
+ * OPT-067 / OPT-072: which directions of the clipboard bridge (text and images alike) a connection may use, decided per state.
  * Pure (no Qt GUI, no I/O), shared by the Console and Virtual hosts. The effective policy is the
  * state's rule AND the administrator's ClipboardDirection; the setting never widens a state's rule.
  *

@@ -16,6 +16,7 @@
 #include <atomic>
 #include <mutex>
 
+#include "ClipboardImage.h"
 #include "ClipboardLimits.h"
 #include "ClipboardText.h"
 #include "PeerContext_p.h"
@@ -42,6 +43,7 @@ public:
     // thread so they can be handled later on the main thread.
     struct FormatList {
         QList<uint32_t> formatIds;
+        QStringList formatNames; // parallel to formatIds; empty for a standard format (OPT-072: "PNG" is a name)
     };
     struct FormatDataRequest {
         uint32_t requestedFormatId = 0;
@@ -75,7 +77,10 @@ public:
     bool ownsContext = true;
     bool hostToClientAllowed = true;
     bool clientToHostAllowed = true;
-    bool hostAnnounced = false; // delayed rendering: the host has text; none of it is held here
+    bool hostAnnounced = false; // delayed rendering: the host has text and/or an image; none of it is held here
+    bool hostText = false; // OPT-072: what the announcement covers
+    bool hostImage = false;
+    uint32_t pendingHostFormat = 0; // the format the client asked for in the request waiting for the worker
     bool announcedToClient = false; // a format list for it is out on the wire
     quint64 nextHostRequestId = 0;
     quint64 pendingHostRequest = 0; // the client's data request waiting for the worker
@@ -95,6 +100,17 @@ public:
     // list, so the response can be decoded as what was asked for: UTF-16 for
     // CF_UNICODETEXT, 8-bit for CF_TEXT/CF_OEMTEXT.
     uint32_t requestedClientFormat = 0;
+    // OPT-072: the id the client gave "PNG" in its latest format list (0 = it has none), and the most the response
+    // to the request on the wire may declare (the cliprdr thread reads it, the main thread sets it before the request).
+    uint32_t clientPngFormatId = 0;
+    bool requestedClientImage = false; // what the request on the wire (or the last one) asked for
+    bool requestedClientPng = false;
+    std::atomic<qint64> responseLimit = ClipboardLimits::MaxWireBytes;
+    bool isImageFormat(uint32_t formatId) const
+    {
+        return formatId == ClipboardImage::CfDib || formatId == ClipboardImage::CfDibV5 || (clientPngFormatId && formatId == clientPngFormatId);
+    }
+    void onClientImage(bool png, const QByteArray &data);
 
     // AUD-FIX5: requests to the client wait for its first picture, and there is
     // at most one on the wire. A stock wlfreerdp3 announces its clipboard once per
@@ -158,6 +174,8 @@ public:
         FormatList packet;
         for (uint32_t i = 0; formatList && i < formatList->numFormats; ++i) {
             packet.formatIds.append(formatList->formats[i].formatId);
+            const char *name = formatList->formats[i].formatName;
+            packet.formatNames.append(name ? QString::fromUtf8(name, qstrnlen(name, 64)) : QString());
         }
         return postToMainThread<FormatList, &Private::onClientFormatList>(static_cast<Clipboard *>(context->custom), std::move(packet));
     }
@@ -176,17 +194,18 @@ public:
     static UINT clientFormatDataResponse(CliprdrServerContext *context, const CLIPRDR_FORMAT_DATA_RESPONSE *formatDataResponse)
     {
         FormatDataResponse packet;
-        if (formatDataResponse) {
+        auto *clipboard = static_cast<Clipboard *>(context->custom);
+        if (clipboard && formatDataResponse) {
             packet.msgFlags = formatDataResponse->common.msgFlags;
             packet.declaredLength = formatDataResponse->common.dataLen;
-            if (formatDataResponse->common.dataLen > ClipboardLimits::MaxWireBytes) {
-                // OPT-067: never copy what the client declared beyond the cap.
+            if (qint64(formatDataResponse->common.dataLen) > clipboard->d->responseLimit.load()) {
+                // OPT-067: never copy what the client declared beyond the cap (OPT-072: the cap of what was asked for).
                 packet.oversize = true;
             } else if (formatDataResponse->requestedFormatData && formatDataResponse->common.dataLen > 0) {
                 packet.data = QByteArray(reinterpret_cast<const char *>(formatDataResponse->requestedFormatData), qsizetype(formatDataResponse->common.dataLen));
             }
         }
-        return postToMainThread<FormatDataResponse, &Private::onClientFormatDataResponse>(static_cast<Clipboard *>(context->custom), std::move(packet));
+        return postToMainThread<FormatDataResponse, &Private::onClientFormatDataResponse>(clipboard, std::move(packet));
     }
 };
 
@@ -238,11 +257,13 @@ Clipboard::Clipboard(RdpConnection *session)
 Clipboard::~Clipboard()
 {
     const auto &c = d->counters;
-    if (c.announces || c.served || c.clientCopies || c.refusedPolicy || c.refusedOversize || c.refusedRate || c.refusedTimeout || c.refusedBusy) {
+    if (c.announces || c.served || c.clientCopies || c.refusedPolicy || c.refusedOversize || c.refusedRate || c.refusedTimeout || c.refusedBusy
+        || c.hostImages || c.clientImages || c.refusedMalformed) {
         // Counts only, never contents (OPT-067).
         qCInfo(KRDP).nospace() << "Clipboard: closed announces=" << c.announces << " served=" << c.served << " clientCopies=" << c.clientCopies
                                << " refused(policy=" << c.refusedPolicy << " oversize=" << c.refusedOversize << " rate=" << c.refusedRate
-                               << " timeout=" << c.refusedTimeout << " busy=" << c.refusedBusy << ") bytes(host=" << c.hostBytes
+                               << " timeout=" << c.refusedTimeout << " busy=" << c.refusedBusy << " malformed=" << c.refusedMalformed
+                               << ") images(host=" << c.hostImages << " client=" << c.clientImages << ") bytes(host=" << c.hostBytes
                                << " client=" << c.clientBytes << ")";
     }
     // setServerData() took ownership of the last announcement; every earlier
@@ -367,15 +388,25 @@ void Clipboard::sendServerData()
     }
     d->pendingServerAnnounce = false;
 
-    CLIPRDR_FORMAT format = {};
-    format.formatId = CF_UNICODETEXT;
-    format.formatName = nullptr;
+    // Text (the in-process route and a text copy on the host) and, OPT-072, an image: the registered "PNG"
+    // format and CF_DIB, so a client picks the one it can paste.
+    static char pngName[] = "PNG";
+    CLIPRDR_FORMAT formats[3] = {};
+    uint32_t count = 0;
+    if (d->serverData || d->hostText) {
+        formats[count++].formatId = CF_UNICODETEXT;
+    }
+    if (d->hostImage) {
+        formats[count].formatId = ClipboardImage::PngFormatId;
+        formats[count++].formatName = pngName;
+        formats[count++].formatId = ClipboardImage::CfDib;
+    }
 
     CLIPRDR_FORMAT_LIST formatList = {};
     formatList.common.msgType = CB_FORMAT_LIST;
     formatList.common.msgFlags = 0;
-    formatList.numFormats = 1;
-    formatList.formats = &format;
+    formatList.numFormats = count;
+    formatList.formats = formats;
     std::lock_guard lock(d->sendMutex);
     if (auto *context = d->clipContext.load(); context && d->enabled) {
         if (d->serverData) {
@@ -397,6 +428,21 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
     // on the host per copy (the x2 amplifier in the announce storm). Prefer
     // CF_UNICODETEXT, then CF_TEXT, then CF_OEMTEXT.
     uint32_t wanted = 0;
+    // OPT-072: images, only when there is no text: a copy with both is taken as text (a spreadsheet range or a
+    // web selection is text first). PNG over DIBV5 over DIB.
+    uint32_t pngId = 0;
+    bool hasDibV5 = false;
+    bool hasDib = false;
+    for (qsizetype i = 0; i < formatList.formatIds.size(); ++i) {
+        const auto formatId = formatList.formatIds.at(i);
+        if (formatId >= 0xC000 && i < formatList.formatNames.size() && ClipboardImage::isPngFormatName(formatList.formatNames.at(i))) {
+            pngId = formatId;
+        }
+        hasDibV5 = hasDibV5 || formatId == ClipboardImage::CfDibV5;
+        hasDib = hasDib || formatId == ClipboardImage::CfDib;
+    }
+    clientPngFormatId = pngId; // per list: a client may number its registered formats afresh
+    const uint32_t imageWanted = pngId ? pngId : hasDibV5 ? ClipboardImage::CfDibV5 : hasDib ? ClipboardImage::CfDib : 0;
     for (const auto formatId : formatList.formatIds) {
         switch (formatId) {
         case CF_UNICODETEXT:
@@ -436,7 +482,10 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
         return;
     }
     if (wanted == 0) {
-        qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats, none of them text; not requesting data";
+        wanted = imageWanted;
+    }
+    if (wanted == 0) {
+        qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats, none of them text or an image; not requesting data";
         pendingFormat = 0; // what an earlier list offered is gone
         return;
     }
@@ -459,14 +508,14 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
     requestedClientFormat = wanted;
     pendingFormat = wanted;
     if (!graphicsDelivered) {
-        qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats; text (format" << wanted
-                      << ") will be requested once the client has a picture";
+        qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats; format" << wanted
+                      << "will be requested once the client has a picture";
         if (!deliveredFallback.isActive()) {
             deliveredFallback.start();
         }
         return;
     }
-    qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats; text is format" << wanted;
+    qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats; the one wanted is format" << wanted;
     settleTimer.start();
 }
 
@@ -507,10 +556,13 @@ void Clipboard::Private::requestPending()
     if (!context || !enabled) {
         return;
     }
-    qCDebug(KRDP) << "Requesting the client's clipboard text as format" << pendingFormat;
+    qCDebug(KRDP) << "Requesting the client's clipboard as format" << pendingFormat;
     requestedClientFormat = pendingFormat;
     outstandingFormat = pendingFormat;
     pendingFormat = 0;
+    requestedClientImage = isImageFormat(requestedClientFormat);
+    requestedClientPng = requestedClientImage && clientPngFormatId && requestedClientFormat == clientPngFormatId;
+    responseLimit = requestedClientImage ? ClipboardLimits::MaxImageWireBytes : ClipboardLimits::MaxWireBytes;
     CLIPRDR_FORMAT_DATA_REQUEST formatDataRequest{.common = CLIPRDR_HEADER({.msgType = CB_FORMAT_DATA_REQUEST, .msgFlags = 0, .dataLen = 4}),
                                                   .requestedFormatId = requestedClientFormat};
     context->ServerFormatDataRequest(context, &formatDataRequest);
@@ -578,7 +630,11 @@ void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &form
 {
     if (hostAnnounced) {
         // OPT-067: delayed rendering. The text is fetched from the worker now, not read from a copy.
-        if (formatDataRequest.requestedFormatId != CF_UNICODETEXT || !hostToClientAllowed) {
+        // OPT-072: an image the same way, as "PNG" or CF_DIB, only when the announcement covered one.
+        const auto requested = formatDataRequest.requestedFormatId;
+        const bool wantText = requested == CF_UNICODETEXT && hostText;
+        const bool wantImage = (requested == ClipboardImage::PngFormatId || requested == ClipboardImage::CfDib) && hostImage;
+        if ((!wantText && !wantImage) || !hostToClientAllowed) {
             ++counters.refusedPolicy;
             sendFailResponse();
             return;
@@ -590,8 +646,13 @@ void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &form
             return;
         }
         pendingHostRequest = ++nextHostRequestId;
+        pendingHostFormat = requested;
         hostRequestTimer.start();
-        Q_EMIT q->hostTextRequested(pendingHostRequest);
+        if (wantImage) {
+            Q_EMIT q->hostImageRequested(pendingHostRequest);
+        } else {
+            Q_EMIT q->hostTextRequested(pendingHostRequest);
+        }
         return;
     }
     if (!serverData || formatDataRequest.requestedFormatId != CF_UNICODETEXT) {
@@ -637,6 +698,11 @@ void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &fo
         if (!session || !session->isOwnClient()) {
             disableClientRequests("refused");
         }
+        return;
+    }
+
+    if (requestedClientImage) {
+        onClientImage(requestedClientPng, formatDataResponse.data);
         return;
     }
 
@@ -721,10 +787,17 @@ bool Clipboard::clientToHostAllowed() const
 
 void Clipboard::announceHostText()
 {
-    if (d->closing || !d->hostToClientAllowed) {
+    announceHost(true, false);
+}
+
+void Clipboard::announceHost(bool text, bool image)
+{
+    if (d->closing || !d->hostToClientAllowed || (!text && !image)) {
         return;
     }
     d->hostAnnounced = true;
+    d->hostText = text;
+    d->hostImage = image;
     // The text the client may have of the previous copy is no longer the host's.
     d->lastServerText = QString();
     sendServerData();
@@ -745,6 +818,90 @@ void Clipboard::provideHostText(quint64 requestId, const QString &text, bool ok)
     d->respondWithText(text);
 }
 
+void Clipboard::provideHostImage(quint64 requestId, const QByteArray &png, bool ok)
+{
+    if (d->closing || !requestId || requestId != d->pendingHostRequest) {
+        return; // a late answer for a request that timed out or was reset
+    }
+    d->pendingHostRequest = 0;
+    d->hostRequestTimer.stop();
+    const auto format = d->pendingHostFormat;
+    if (!ok || !d->hostToClientAllowed || png.isEmpty()) {
+        ++d->counters.refusedPolicy;
+        d->sendFailResponse();
+        return;
+    }
+    // The worker has checked this PNG; check again what arrives from another process before it reaches a client.
+    QByteArray payload;
+    if (format == ClipboardImage::CfDib) {
+        const auto converted = ClipboardImage::pngToDib(png);
+        if (!converted.ok()) {
+            ++d->counters.refusedOversize;
+            d->refused(ClipboardImage::errorName(converted.error), "host-to-client", quint64(png.size()));
+            d->sendFailResponse();
+            return;
+        }
+        payload = converted.data;
+    } else {
+        const auto checked = ClipboardImage::validatePng(png);
+        if (!checked.ok()) {
+            ++d->counters.refusedOversize;
+            d->refused(ClipboardImage::errorName(checked.error), "host-to-client", quint64(png.size()));
+            d->sendFailResponse();
+            return;
+        }
+        payload = png;
+    }
+    std::lock_guard lock(d->sendMutex);
+    auto *context = d->clipContext.load();
+    if (!context || !d->enabled) {
+        return;
+    }
+    CLIPRDR_FORMAT_DATA_RESPONSE response = {};
+    response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+    response.common.msgFlags = CB_RESPONSE_OK;
+    response.common.dataLen = quint32(payload.size());
+    response.requestedFormatData = reinterpret_cast<const BYTE *>(payload.constData());
+    qCDebug(KRDP) << "Serving host clipboard image to the client:" << payload.size() << "bytes as format" << format;
+    d->lastServerText = QString();
+    d->serverClipboardActivity.start();
+    ++d->counters.hostImages;
+    d->counters.hostBytes += quint64(payload.size());
+    context->ServerFormatDataResponse(context, &response);
+}
+
+void Clipboard::Private::onClientImage(bool png, const QByteArray &data)
+{
+    // OPT-072: the client's picture. PNG is structure-checked and kept as it is; a DIB is parsed, bounded and
+    // converted. Nothing is decoded before the declared dimensions have been checked against the caps.
+    const auto converted = png ? ClipboardImage::validatePng(data) : ClipboardImage::dibToPng(data);
+    if (!converted.ok()) {
+        if (converted.error == ClipboardImage::Error::TooLarge || converted.error == ClipboardImage::Error::TooManyPixels) {
+            ++counters.refusedOversize;
+        } else {
+            ++counters.refusedMalformed;
+        }
+        qCInfo(KRDP).nospace() << "Clipboard: refused (" << ClipboardImage::errorName(converted.error) << ") direction=client-to-host kind=image bytes=" << data.size()
+                               << " size=" << converted.size.width() << "x" << converted.size.height();
+        return;
+    }
+    if (!rate.accept(clock.elapsed(), converted.data.size())) {
+        ++counters.refusedRate;
+        if (!rateEpisodeLogged) {
+            rateEpisodeLogged = true;
+            refused("rate", "client-to-host", quint64(converted.data.size()));
+        }
+        return;
+    }
+    rateEpisodeLogged = false;
+    clientData.reset(new QMimeData());
+    clientData->setData(u"image/png"_s, converted.data);
+    qCDebug(KRDP) << "Client clipboard image received:" << converted.size.width() << "x" << converted.size.height() << "," << converted.data.size() << "bytes";
+    ++counters.clientImages;
+    counters.clientBytes += quint64(converted.data.size());
+    Q_EMIT q->clientDataChanged();
+}
+
 void Clipboard::resetHostSide()
 {
     d->announceTimer.stop();
@@ -752,6 +909,9 @@ void Clipboard::resetHostSide()
     d->serverData = nullptr;
     const bool announced = d->announcedToClient;
     d->hostAnnounced = false;
+    d->hostText = false;
+    d->hostImage = false;
+    d->pendingHostFormat = 0;
     d->announcedToClient = false;
     d->pendingServerAnnounce = false;
     d->lastServerText = QString();
@@ -781,6 +941,7 @@ void Clipboard::resetClientSide()
     d->clientData.reset();
     d->pendingFormat = 0;
     d->settleTimer.stop();
+    d->responseLimit = ClipboardLimits::MaxWireBytes;
     if (d->outstandingFormat != 0) {
         d->outstandingFormat = 0;
         d->responseTimer.stop();

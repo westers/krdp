@@ -42,6 +42,8 @@ Q_SIGNALS:
     void keyFrameRequested();
     /** OPT-067: the client copied this text (host LF line endings; empty = it cleared its clipboard). Never logged. */
     void clientClipboardText(const QString &text);
+    /** OPT-072: the client copied this picture (PNG, already checked). Never logged. */
+    void clientClipboardImage(const QByteArray &png);
 
 private:
     std::function<void(const ConsoleWorkerWire::Input &)> m_sendInput;

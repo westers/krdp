@@ -3,6 +3,8 @@
 
 // OPT-067: the worker's side of the clipboard bridge against a fake host clipboard (no compositor, no daemon).
 
+#include <QBuffer>
+#include <QImage>
 #include <QLoggingCategory>
 #include <QTest>
 
@@ -21,6 +23,9 @@ struct FakeHost {
     bool writeOk = true;
     int reads = 0;
     QList<QPair<QString, bool>> writes; // (text, secret)
+    QByteArray image; // OPT-072: what the host holds as an image, in whatever format
+    int imageReads = 0;
+    QList<QPair<QByteArray, bool>> imageWrites; // (png, secret)
     HostClipboard::Backend backend()
     {
         return {[this] { return hasText; },
@@ -28,6 +33,13 @@ struct FakeHost {
                 [this](const QString &t, bool secret) {
                     writes.append({t, secret});
                     if (writeOk) text = t;
+                    return writeOk;
+                },
+                [this] { return !image.isEmpty(); },
+                [this] { ++imageReads; return image; },
+                [this](const QByteArray &png, bool secret) {
+                    imageWrites.append({png, secret});
+                    if (writeOk) image = png;
                     return writeOk;
                 }};
     }
@@ -63,6 +75,30 @@ struct Harness {
     QList<ClipboardData> data() { return take<ClipboardData>([](const Record &r) { return clipboardData(r); }); }
     QList<ClipboardSetResult> results() { return take<ClipboardSetResult>([](const Record &r) { return clipboardSetResult(r); }); }
 };
+
+QByteArray encode(const QImage &image, const char *format)
+{
+    QByteArray out;
+    QBuffer buffer(&out);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, format);
+    return out;
+}
+QImage picture()
+{
+    QImage image(5, 3, QImage::Format_RGB32);
+    image.fill(qRgb(10, 120, 200));
+    return image;
+}
+QByteArray bombPng(quint32 w, quint32 h)
+{
+    QByteArray data = encode(picture(), "PNG");
+    for (int i = 0; i < 4; ++i) {
+        data[16 + i] = char((w >> (8 * (3 - i))) & 0xff);
+        data[20 + i] = char((h >> (8 * (3 - i))) & 0xff);
+    }
+    return data;
+}
 
 QStringList g_messages;
 void capture(QtMsgType, const QMessageLogContext &, const QString &message)
@@ -280,6 +316,215 @@ private Q_SLOTS:
         locked.allow(true, true, false, true);
         locked.board->set({1, 5, QStringLiteral("a password")});
         QVERIFY(locked.host.writes.last().second);
+    }
+
+    // ---- OPT-072: images ----
+    void imageCopyIsOfferedWithItsFlagAndNoPixels()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.host.hasText = false;
+        h.host.image = encode(picture(), "PNG");
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferImage);
+        QCOMPARE(h.host.imageReads, 0); // announcing reads nothing
+        h.host.hasText = true; // a copy with both
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 2);
+        QCOMPARE(h.offers().last().flags, quint8(ClipboardOfferText | ClipboardOfferImage));
+        for (const auto &record : std::as_const(h.sent)) QVERIFY(!record.payload.contains(h.host.image));
+    }
+
+    void noImageOfferWhenDenied()
+    {
+        Harness h;
+        h.host.hasText = false;
+        h.host.image = encode(picture(), "PNG");
+        h.allow(false, true);
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 2);
+        QVERIFY(h.offers().isEmpty());
+        Harness greeter(false);
+        greeter.host.hasText = false;
+        greeter.host.image = h.host.image;
+        greeter.allow(false, true, true);
+        greeter.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 2);
+        QVERIFY(greeter.offers().isEmpty());
+    }
+
+    void imageRequestPassesAPngThroughAndConvertsOtherFormats()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.host.image = encode(picture(), "PNG");
+        h.board->request({1, MaxClipboardImageBytes, ClipboardKind::Image});
+        QCOMPARE(h.data().last().status, ClipboardStatus::Ok);
+        QCOMPARE(h.data().last().kind, ClipboardKind::Image);
+        QCOMPARE(h.data().last().image, h.host.image);
+        h.host.image = encode(picture(), "BMP"); // a host application that only offers BMP
+        h.board->request({2, MaxClipboardImageBytes, ClipboardKind::Image});
+        QCOMPARE(h.data().last().status, ClipboardStatus::Ok);
+        QVERIFY(ClipboardImage::validatePng(h.data().last().image).ok());
+        QImage back;
+        QVERIFY(back.loadFromData(h.data().last().image, "PNG"));
+        QCOMPARE(back.size(), QSize(5, 3));
+    }
+
+    void imageRequestStatuses()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.board->request({1, 1000, ClipboardKind::Image}); // nothing there
+        QCOMPARE(h.data().last().status, ClipboardStatus::Gone);
+        QCOMPARE(h.data().last().kind, ClipboardKind::Image);
+        h.host.image = encode(picture(), "PNG");
+        h.board->request({2, 20, ClipboardKind::Image}); // the requester's own limit
+        QCOMPARE(h.data().last().status, ClipboardStatus::TooLarge);
+        QVERIFY(h.data().last().image.isEmpty());
+        h.host.image = QByteArray("not a picture at all");
+        h.board->request({3, 1000, ClipboardKind::Image});
+        QCOMPARE(h.data().last().status, ClipboardStatus::Gone);
+        // A decompression bomb: 70 bytes declaring 60000 x 60000.
+        h.host.image = bombPng(60000, 60000);
+        h.board->request({4, MaxClipboardImageBytes, ClipboardKind::Image});
+        QCOMPARE(h.data().last().status, ClipboardStatus::TooLarge);
+        // Over the encoded cap.
+        h.host.image = encode(picture(), "PNG") + QByteArray(MaxClipboardImageBytes, 'x');
+        h.board->request({5, MaxClipboardImageBytes, ClipboardKind::Image});
+        QCOMPARE(h.data().last().status, ClipboardStatus::TooLarge);
+    }
+
+    void imageRequestsAreDeniedLikeText()
+    {
+        Harness h;
+        h.host.image = encode(picture(), "PNG");
+        h.board->request({1, 1000, ClipboardKind::Image}); // no policy, no control
+        QCOMPARE(h.data().last().status, ClipboardStatus::Denied);
+        h.allow(false, true);
+        h.board->request({2, MaxClipboardImageBytes, ClipboardKind::Image});
+        QCOMPARE(h.data().last().status, ClipboardStatus::Denied);
+        Harness greeter(false);
+        greeter.host.image = h.host.image;
+        greeter.allow(false, true, true);
+        greeter.board->request({1, MaxClipboardImageBytes, ClipboardKind::Image});
+        QCOMPARE(greeter.data().last().status, ClipboardStatus::Denied);
+        QCOMPARE(greeter.host.imageReads, 0);
+    }
+
+    void imageSetWritesAValidatedPngAndNeverEchoes()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.host.hasText = false; // the write replaced whatever text there was
+        const auto png = encode(picture(), "PNG");
+        h.board->set({1, 5, {}, ClipboardKind::Image, png});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Written);
+        QCOMPARE(h.host.imageWrites.size(), 1);
+        QCOMPARE(h.host.imageWrites.first().first, png);
+        QVERIFY(!h.host.imageWrites.first().second);
+        h.board->hostChanged(); // the compositor reporting our own write
+        QTest::qWait(HostClipboard::SettleMs * 2);
+        QVERIFY(h.offers().isEmpty());
+        h.host.image = encode(QImage(2, 2, QImage::Format_RGB32), "PNG"); // a real copy follows
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferImage);
+    }
+
+    void imageSetRefusesWhatIsNotAnAcceptablePng()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.board->set({1, 5, {}, ClipboardKind::Image, QByteArray("GIF89a not a png")});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Failed);
+        h.board->set({2, 5, {}, ClipboardKind::Image, bombPng(60000, 60000)});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Failed);
+        h.board->set({3, 5, {}, ClipboardKind::Image, {}}); // empty: not a legal image set
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Denied);
+        h.board->set({4, 5, {}, ClipboardKind::Image, QByteArray(MaxClipboardImageBytes + 1, 'p')});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Denied);
+        QVERIFY(h.host.imageWrites.isEmpty());
+    }
+
+    void imageSetGatesAndSecretHint()
+    {
+        const auto png = encode(picture(), "PNG");
+        Harness h;
+        h.board->set({1, 5, {}, ClipboardKind::Image, png}); // no policy, no control
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Denied);
+        h.allow(true, false); // client to host off
+        h.board->set({2, 5, {}, ClipboardKind::Image, png});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Denied);
+        h.allow(true, true, false, false, 2);
+        h.board->set({3, 4, {}, ClipboardKind::Image, png}); // another generation
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Denied);
+        h.board->set({4, 5, {}, ClipboardKind::Image, png});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Written);
+        h.board->set({4, 5, {}, ClipboardKind::Image, png}); // replayed id
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Denied);
+        h.host.writeOk = false;
+        h.board->set({5, 5, {}, ClipboardKind::Image, png});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Failed);
+        // The login screen and a locked session write images as secrets, like text.
+        Harness greeter(false);
+        greeter.allow(false, true, true);
+        greeter.board->set({1, 5, {}, ClipboardKind::Image, png});
+        QCOMPARE(greeter.results().last().status, ClipboardSetStatus::Written);
+        QVERIFY(greeter.host.imageWrites.last().second);
+        Harness locked(true);
+        locked.allow(true, true, false, true);
+        locked.board->set({1, 5, {}, ClipboardKind::Image, png});
+        QVERIFY(locked.host.imageWrites.last().second);
+        // A desktop worker with a greeter policy (and the reverse) refuses.
+        Harness mismatch(true);
+        mismatch.allow(false, true, true);
+        mismatch.board->set({1, 5, {}, ClipboardKind::Image, png});
+        QCOMPARE(mismatch.results().last().status, ClipboardSetStatus::Denied);
+    }
+
+    void aBackendWithoutImagesOffersNoneAndWritesNone()
+    {
+        Harness h;
+        auto backend = h.host.backend();
+        backend.hasImage = nullptr;
+        backend.readImage = nullptr;
+        backend.writeImage = nullptr;
+        QList<Record> sent;
+        Deframer deframer;
+        HostClipboard board(backend, [&](const QByteArray &record) {
+            deframer.feed(record);
+            while (const auto next = deframer.next()) sent.append(*next);
+        }, true);
+        board.setControl({5, true});
+        board.setPolicy({1, 5, true, true, false, false});
+        board.request({1, 1000, ClipboardKind::Image});
+        QCOMPARE(clipboardData(sent.last())->status, ClipboardStatus::Gone);
+        board.set({1, 5, {}, ClipboardKind::Image, encode(picture(), "PNG")});
+        QCOMPARE(clipboardSetResult(sent.last())->status, ClipboardSetStatus::Failed);
+    }
+
+    void imageRefusalsLogASizeNeverContents()
+    {
+        g_messages.clear();
+        const auto previous = qInstallMessageHandler(capture);
+        QLoggingCategory::setFilterRules(QStringLiteral("*.debug=true"));
+        {
+            Harness h;
+            h.allow(true, true);
+            h.host.image = bombPng(60000, 60000) + Canary.toUtf8();
+            h.board->request({1, MaxClipboardImageBytes, ClipboardKind::Image});
+            h.board->set({1, 5, {}, ClipboardKind::Image, bombPng(70000, 70000) + Canary.toUtf8()});
+        }
+        QLoggingCategory::setFilterRules(QString());
+        qInstallMessageHandler(previous);
+        bool logged = false;
+        for (const auto &message : std::as_const(g_messages)) {
+            QVERIFY2(!message.contains(QStringLiteral("CANARY")), qPrintable(message));
+            logged = logged || message.contains(QStringLiteral("refused (dimensions)"));
+        }
+        QVERIFY(logged);
     }
 
     void contentsNeverReachALog()

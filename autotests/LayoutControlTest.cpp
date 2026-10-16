@@ -122,6 +122,21 @@ private Q_SLOTS:
         QCOMPARE(without, capabilitiesRecord(plain));
     }
 
+    // OPT-072: pictures are advertised inside the group only when the host bridges them; an older client ignores the keys.
+    void capabilitiesClipboardImages()
+    {
+        ChannelCapabilities caps;
+        caps.host = QStringLiteral("virtual");
+        caps.clipboard = ClipboardCapabilities{true, true, 1024 * 1024, true, 16 * 1024 * 1024};
+        QCOMPARE(capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject(),
+                 (QJsonObject{{QStringLiteral("hostToClient"), true}, {QStringLiteral("clientToHost"), true}, {QStringLiteral("maxBytes"), 1024 * 1024},
+                              {QStringLiteral("images"), true}, {QStringLiteral("maxImageBytes"), 16 * 1024 * 1024}}));
+        // images=false (the default) adds no key: the text-only group is byte-for-byte what OPT-067 sent.
+        caps.clipboard = ClipboardCapabilities{true, true, 1024 * 1024, false, 16 * 1024 * 1024};
+        QVERIFY(!capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject().contains(QStringLiteral("images")));
+        QVERIFY(!capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject().contains(QStringLiteral("maxImageBytes")));
+    }
+
     // OPT-071: the optional `deskActivity` group; absent unless set (the Virtual route never sets it), old clients ignore it.
     void capabilitiesDeskActivityGroup()
     {

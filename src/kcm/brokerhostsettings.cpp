@@ -614,7 +614,7 @@ QVariantList BrokerHostSettings::definitions() const
     add(u"StandardClientMedia"_s, media, i18nc("@label", "Media for other RDP apps"), i18nc("@info", "Lets other remote desktop apps send sound and devices. Each app must still ask for it."), boolean,
         {.section = u"picture"_s, .formLabel = i18nc("@label", "Media for other RDP apps"),
          .optionText = {{u"true"_s, i18nc("@item:inlistbox", "Allow")}, {u"false"_s, i18nc("@item:inlistbox", "Block")}}});
-    // OPT-067: the text clipboard bridge. Console and Virtual only; the planner narrows it further by state.
+    // OPT-067 / OPT-072: the clipboard bridge (text and images). Console and Virtual only; the planner narrows it further by state.
     add(u"ClipboardDirection"_s, i18nc("@title:group", "Sharing"), i18nc("@label", "Clipboard"),
         i18nc("@info", "Copies plain text between your computer and the host. Nothing is shared on the login screen except pasting into it, and nothing is shared with another account's locked screen. Takes effect when the service restarts."),
         {choice(u"both"_s, i18nc("@item:inlistbox", "Both ways")), choice(u"host-to-client"_s, i18nc("@item:inlistbox", "Host to client only")),

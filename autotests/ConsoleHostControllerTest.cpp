@@ -1705,11 +1705,30 @@ private:
             response.requestedFormatData = reinterpret_cast<const BYTE *>(ansi.constData());
             return context.ClientFormatDataResponse(&context, &response);
         }
-        UINT clientPastes()
+        UINT clientPastes(uint32_t formatId = CF_UNICODETEXT)
         {
             CLIPRDR_FORMAT_DATA_REQUEST request{};
-            request.requestedFormatId = CF_UNICODETEXT;
+            request.requestedFormatId = formatId;
             return context.ClientFormatDataRequest(&context, &request);
+        }
+        // OPT-072: the client copies a picture: the registered "PNG" format (its own id) and CF_DIB.
+        static constexpr uint32_t ClientPngId = 0xC0DE;
+        UINT clientCopiesPicture()
+        {
+            static char pngName[] = "PNG";
+            CLIPRDR_FORMAT formats[2] = {};
+            formats[0].formatId = ClientPngId;
+            formats[0].formatName = pngName;
+            formats[1].formatId = 8;
+            CLIPRDR_FORMAT_LIST list{};
+            list.common.msgType = CB_FORMAT_LIST;
+            list.numFormats = 2;
+            list.formats = formats;
+            return context.ClientFormatList(&context, &list);
+        }
+        static QByteArray onePixelPng()
+        {
+            return QByteArray::fromBase64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==");
         }
     };
 
@@ -3447,6 +3466,87 @@ private Q_SLOTS:
         QCOMPARE(set.controlGeneration, rig.host.m_controlGeneration);
     }
 
+    // OPT-072: pictures take the same road as text, under the same policy.
+    void clipboardImageHostCopyPasteFlowsThroughTheWorkerOnDemand()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, ConsoleWorkerWire::ClipboardOfferImage}));
+        QTRY_COMPARE(rig.sent.formatLists.size(), 1);
+        QCOMPARE(rig.sent.formatLists.first(), (QList<uint32_t>{0xC001, 8})); // "PNG" and CF_DIB; no text, no pixels
+        QVERIFY(rig.requests().isEmpty());
+        rig.clientPastes(0xC001);
+        QTRY_VERIFY(!rig.requests().isEmpty());
+        const auto request = rig.requests().first();
+        QCOMPARE(request.kind, ConsoleWorkerWire::ClipboardKind::Image);
+        const auto png = ClipboardRig::onePixelPng();
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{request.requestId, 1, ConsoleWorkerWire::ClipboardStatus::Ok, {}, ConsoleWorkerWire::ClipboardKind::Image, png}));
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.first().flags, uint16_t(CB_RESPONSE_OK));
+        QCOMPARE(rig.sent.dataResponses.first().data, png);
+        // The worker refuses (too large, say): the paste fails, it does not hang.
+        rig.clientPastes(0xC001);
+        QTRY_COMPARE(rig.requests().size(), 2);
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{rig.requests().last().requestId, 1, ConsoleWorkerWire::ClipboardStatus::TooLarge, {}, ConsoleWorkerWire::ClipboardKind::Image, {}}));
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 2);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+    }
+
+    void clipboardImageClientCopyReachesTheWorkerAsPng()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.clientCopiesPicture();
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 3000);
+        QCOMPARE(rig.sent.dataRequests.first(), ClipboardRig::ClientPngId);
+        rig.clientAnswers(ClipboardRig::onePixelPng());
+        QTRY_VERIFY(!rig.sets().isEmpty());
+        const auto set = rig.sets().first();
+        QCOMPARE(set.kind, ConsoleWorkerWire::ClipboardKind::Image);
+        QCOMPARE(set.image, ClipboardRig::onePixelPng());
+        QVERIFY(set.text.isEmpty());
+        QCOMPARE(set.controlGeneration, rig.host.m_controlGeneration);
+        // What is not a picture never reaches the worker.
+        rig.clientCopiesPicture();
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 2, 3000);
+        rig.clientAnswers(QByteArray(300, 'x'));
+        QTest::qWait(80);
+        QCOMPARE(rig.sets().size(), 1);
+    }
+
+    void clipboardImageNothingCrossesWhereThePolicyDenies()
+    {
+        // Another account's locked screen: no offer is announced, a paste fails unasked, a copy is never requested.
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()) + 1, true);
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, ConsoleWorkerWire::ClipboardOfferImage}));
+        QTest::qWait(80);
+        QVERIFY(rig.sent.formatLists.isEmpty());
+        rig.clientPastes(0xC001);
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.first().flags, uint16_t(CB_RESPONSE_FAIL));
+        QVERIFY(rig.requests().isEmpty());
+        rig.clientCopiesPicture();
+        QTest::qWait(Clipboard::FormatListSettleMs * 2);
+        QVERIFY(rig.sent.dataRequests.isEmpty());
+        QVERIFY(rig.sets().isEmpty());
+        // The greeter: a picture can be pasted into it, nothing is read back.
+        ClipboardRig greeter(ConsoleSeat::Adapter::Greeter, quint32(getuid()) + 1);
+        QVERIFY(greeter.ok);
+        greeter.lastPolicy();
+        greeter.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, ConsoleWorkerWire::ClipboardOfferImage}));
+        QTest::qWait(80);
+        QVERIFY(greeter.sent.formatLists.isEmpty());
+        greeter.clientCopiesPicture();
+        QTRY_COMPARE_WITH_TIMEOUT(greeter.sent.dataRequests.size(), 1, 3000);
+        greeter.clientAnswers(ClipboardRig::onePixelPng());
+        QTRY_VERIFY(!greeter.sets().isEmpty());
+        QCOMPARE(greeter.sets().first().kind, ConsoleWorkerWire::ClipboardKind::Image);
+    }
+
     void clipboardNothingCrossesWhereThePolicyDenies()
     {
         // Another account's locked screen: neither direction, and the worker is never asked.
@@ -3527,7 +3627,9 @@ private Q_SLOTS:
             QCOMPARE(caps.value(u"clipboard"_s).toObject(),
                      (QJsonObject{{u"hostToClient"_s, both || direction == ConsoleClipboardPolicy::Direction::HostToClient},
                                   {u"clientToHost"_s, both || direction == ConsoleClipboardPolicy::Direction::ClientToHost},
-                                  {u"maxBytes"_s, 1024 * 1024}}));
+                                  {u"maxBytes"_s, 1024 * 1024},
+                                  {u"images"_s, true}, // OPT-072: pictures follow the same directions
+                                  {u"maxImageBytes"_s, 16 * 1024 * 1024}}));
         }
     }
 };
