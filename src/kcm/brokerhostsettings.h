@@ -32,6 +32,8 @@ class BrokerHostSettings : public QObject {
     Q_PROPERTY(QString error READ error NOTIFY changed)
     Q_PROPERTY(QObject *certificateDraft READ certificateDraft CONSTANT)
     Q_PROPERTY(bool canStageCertificate READ canStageCertificate NOTIFY changed)
+    // OPT-075: whether xdg-dbus-proxy is installed, so the page can say the filtered system bus is unavailable.
+    Q_PROPERTY(bool systemBusProxyInstalled READ systemBusProxyInstalled CONSTANT)
 public:
     using Scope = KRdp::BrokerHostSettings::Scope;
     explicit BrokerHostSettings(Scope scope, QObject *parent = nullptr);
@@ -39,6 +41,9 @@ public:
     BrokerHostSettings(Scope scope, const QString &program, const QStringList &arguments, int timeoutMs, QObject *parent = nullptr);
     ~BrokerHostSettings() override;
     QString scope() const;
+    static bool systemBusProxyInstalled();
+    // Tests only: the path checked for xdg-dbus-proxy (empty restores the installed path).
+    static void setSystemBusProxyForTest(const QString &path);
     QVariantMap values() const { return m_pending; }
     QVariantMap unitDefaults() const;
     QVariantList definitions() const;

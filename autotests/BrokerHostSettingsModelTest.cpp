@@ -5,6 +5,8 @@
 #include "ServerCertificate.h"
 #include <QDateTime>
 #include <QFile>
+#include <QFileInfo>
+#include <QScopeGuard>
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <QTest>
@@ -32,6 +34,7 @@ class BrokerHostSettingsModelTest : public QObject {
     }
     static QStringList arguments(const QTemporaryDir &directory) { return {QString::fromUtf8(HOST_PROTOCOL_FIXTURE), directory.path()}; }
 private Q_SLOTS:
+    void initTestCase() { BrokerHostSettings::setSystemBusProxyForTest(u"/usr/bin/env"_s); } // OPT-075: rows must not depend on this host having xdg-dbus-proxy
     void definitionsDriveTheForm() {
         QTemporaryDir directory;
         BrokerHostSettings console(Scope::Console, u"/usr/bin/python3"_s, arguments(directory), 3000), virtualHost(Scope::Virtual, u"/usr/bin/python3"_s, arguments(directory), 3000),
@@ -58,7 +61,57 @@ private Q_SLOTS:
                 QCOMPARE(!definition[u"unavailable"_s].toString().isEmpty(), model == &virtualHost && definition[u"key"_s].toString() == u"CameraLoopbackDevice");
             }
         }
-        QCOMPARE(total, 35); // OPT-062 S3: three software ceilings in each of Console and Virtual (was 25); OPT-066: ClientQualityMax in each (was 31); OPT-067: ClipboardDirection in each (was 33)
+        QCOMPARE(total, 43); // OPT-075: eight system-bus keys in the new-desktop scope (was 35). OPT-062 S3: three software ceilings in each of Console and Virtual (was 25); OPT-066: ClientQualityMax in each (was 31); OPT-067: ClipboardDirection in each (was 33)
+    }
+    // OPT-075: the system-bus rows of the new-desktop scope, their help, and the label for a missing xdg-dbus-proxy.
+    void systemBusRowsAndAMissingProxy() {
+        const auto restore = qScopeGuard([] { BrokerHostSettings::setSystemBusProxyForTest(u"/usr/bin/env"_s); });
+        const auto rows = [](BrokerHostSettings &model) { QMap<QString, QVariantMap> result; for (const auto &row : model.definitions()) result.insert(row.toMap()[u"key"_s].toString(), row.toMap()); return result; };
+        QTemporaryDir dir;
+        BrokerHostSettings session(Scope::VirtualSession, u"/usr/bin/python3"_s, arguments(dir), 3000);
+        BrokerHostSettings console(Scope::Console, u"/usr/bin/python3"_s, arguments(dir), 3000);
+        const auto consoleRows = rows(console);
+        QVERIFY(session.reload()); QTRY_VERIFY(!session.busy()); QVERIFY2(session.loaded(), qPrintable(session.error()));
+        auto present = rows(session);
+        for (const auto &key : {u"VirtualSystemBus"_s, u"SystemBusNetwork"_s, u"SystemBusPower"_s, u"SystemBusPackages"_s, u"SystemBusPolkit"_s, u"SystemBusBluetooth"_s, u"SystemBusPrinting"_s, u"SystemBusExtra"_s}) {
+            QVERIFY2(present.contains(key), qPrintable(key));
+            QVERIFY2(present[key][u"unavailable"_s].toString().isEmpty(), qPrintable(key));
+            QVERIFY2(!present[key][u"help"_s].toString().isEmpty(), qPrintable(key));   // every row has help text
+            QCOMPARE(present[key][u"section"_s].toString(), u"systembus"_s);
+            QVERIFY2(!consoleRows.contains(key), "the Console scope has no system-bus rows");
+        }
+        QVERIFY(present[u"VirtualSystemBus"_s][u"help"_s].toString().contains(u"created after you apply"_s));   // new desktops only
+        QCOMPARE(present[u"VirtualSystemBus"_s][u"choices"_s].toList().size(), 4);   // use default, none, filtered, full
+        QVERIFY(present[u"SystemBusPolkit"_s][u"help"_s].toString().contains(u"Experimental"_s) && present[u"SystemBusPrinting"_s][u"help"_s].toString().contains(u"Experimental"_s));
+        QVERIFY(present[u"SystemBusPolkit"_s][u"advanced"_s].toBool() && present[u"SystemBusExtra"_s][u"advanced"_s].toBool());
+        QVERIFY(!present[u"SystemBusNetwork"_s][u"advanced"_s].toBool());
+        QVERIFY(!KRdp::BrokerHostSettings::defaults(Scope::VirtualSession).values().contains(u"full"_s));   // full is never a default
+        QCOMPARE(session.unitDefaults()[u"VirtualSystemBus"_s].toString(), u"filtered"_s);
+        // Validation: a draft the grammar refuses cannot be saved (nothing reaches the helper), and a valid one can.
+        for (const auto &bad : {QPair<QString, QString>{u"VirtualSystemBus"_s, u"Full"_s}, {u"VirtualSystemBus"_s, u"on"_s}, {u"SystemBusNetwork"_s, u"TRUE"_s},
+                                {u"SystemBusExtra"_s, u"org.freedesktop.systemd1"_s}, {u"SystemBusExtra"_s, u"org.example.A\nVirtualSystemBus=full"_s},
+                                {u"SystemBusExtra"_s, u"org.example.A;ls"_s}}) {
+            const bool drafted = session.setValue(bad.first, bad.second);   // control characters are refused outright
+            QVERIFY2(!drafted || !session.canSave(), qPrintable(bad.first + u"="_s + bad.second));
+            session.discard();
+        }
+        QVERIFY(session.setValue(u"SystemBusExtra"_s, u"org.example.A,org.example.B.*"_s));
+        QVERIFY(session.canSave());
+        session.discard();
+        // Without the proxy: the filtered choice says so, and the switches are withheld with the reason.
+        BrokerHostSettings::setSystemBusProxyForTest(u"/nonexistent/xdg-dbus-proxy"_s);
+        QVERIFY(!BrokerHostSettings::systemBusProxyInstalled());
+        auto missing = rows(session);
+        const auto reason = u"xdg-dbus-proxy"_s;
+        bool filteredLabelled = false;
+        for (const auto &choice : missing[u"VirtualSystemBus"_s][u"choices"_s].toList())
+            if (choice.toMap()[u"value"_s].toString() == u"filtered") filteredLabelled = choice.toMap()[u"text"_s].toString() == u"Filtered (unavailable: xdg-dbus-proxy not installed)";
+        QVERIFY(filteredLabelled);
+        for (const auto &key : {u"SystemBusNetwork"_s, u"SystemBusPower"_s, u"SystemBusPackages"_s, u"SystemBusPolkit"_s, u"SystemBusBluetooth"_s, u"SystemBusPrinting"_s, u"SystemBusExtra"_s})
+            QVERIFY2(missing[key][u"unavailable"_s].toString().contains(reason), qPrintable(key));
+        QVERIFY(missing[u"VirtualSystemBus"_s][u"unavailable"_s].toString().isEmpty());   // none and full stay selectable
+        BrokerHostSettings::setSystemBusProxyForTest({});
+        QCOMPARE(BrokerHostSettings::systemBusProxyInstalled(), QFileInfo(u"/usr/bin/xdg-dbus-proxy"_s).isExecutable());
     }
     // OPT-062 S3: three software-ceiling rows on the Console and Virtual pages (Picture and Sound, not Advanced), a published
     // encoder probe, and a note source for codecs the host cannot encode in software.
@@ -125,7 +178,8 @@ private Q_SLOTS:
             {u"AdaptiveQuality"_s, u"true"_s}, {u"PreferAudioQuality"_s, u"true"_s}, {u"StandardClientMedia"_s, u"false"_s},
             {u"CameraLoopbackDevice"_s, u"/dev/video10"_s}, {u"SoftwareEncoding"_s, u"prefer"_s}, {u"SoftwareAvc"_s, u"last-resort"_s}, {u"SoftwareHevc"_s, u"never"_s}, {u"SoftwareAv1"_s, u"allowed"_s}, {u"Av1Tiles"_s, u"8"_s}, {u"ClipboardDirection"_s, u"client-to-host"_s}, {u"ClientQualityMax"_s, u"95"_s},
             {u"Certificate"_s, u"/etc/farside/custom.crt"_s}, {u"CertificateKey"_s, u"/etc/farside/custom.key"_s},
-            {u"VaapiDriver"_s, u"iHD"_s}, {u"RenderPci"_s, u"0000:01:00.0"_s}};
+            {u"VaapiDriver"_s, u"iHD"_s}, {u"RenderPci"_s, u"0000:01:00.0"_s},
+            {u"VirtualSystemBus"_s, u"full"_s}, {u"SystemBusNetwork"_s, u"false"_s}, {u"SystemBusPower"_s, u"false"_s}, {u"SystemBusPackages"_s, u"true"_s}, {u"SystemBusPolkit"_s, u"true"_s}, {u"SystemBusBluetooth"_s, u"true"_s}, {u"SystemBusPrinting"_s, u"true"_s}, {u"SystemBusExtra"_s, u"org.example.Service,org.example.Other.*"_s}};
         int total = 0;
         for (auto *model : {&console, &virtualHost, &session}) {
             if (model->scope() != u"session") QVERIFY(model->chooseTls(u"existing"_s));
@@ -138,7 +192,7 @@ private Q_SLOTS:
             QTRY_VERIFY(!model->busy()); QVERIFY2(model->error().isEmpty(), qPrintable(model->error()));
             QVERIFY(!model->modified()); QVERIFY(model->applicationRequired());
         }
-        QCOMPARE(total, 35); QCOMPARE(console.values()[u"Port"_s].toString(), u"3401"_s);
+        QCOMPARE(total, 43); QCOMPARE(console.values()[u"Port"_s].toString(), u"3401"_s);
         QVERIFY(!virtualHost.setValue(u"CameraLoopbackDevice"_s, u"/dev/video1"_s));
         QVERIFY(!session.setValue(u"Port"_s, u"3389"_s)); QVERIFY(!session.chooseTls(u"import"_s));
         QVERIFY(console.setValue(u"Quality"_s, u"101"_s)); QVERIFY(console.modified()); QVERIFY(!console.canSave()); QVERIFY(!console.save());

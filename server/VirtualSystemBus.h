@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
+#include <QLatin1StringView>
 #include <QFileInfo>
 #include <QMap>
 #include <QRegularExpression>
@@ -45,8 +46,9 @@ inline QString environmentName(const QString &key)
 constexpr int MaximumExtraNames = 16;
 constexpr int MaximumNameBytes = 255;
 constexpr int MaximumRules = 200;
-inline const QString SystemSocket = QStringLiteral("/run/dbus/system_bus_socket");
-inline const QString ProxyProgram = QStringLiteral("/usr/bin/xdg-dbus-proxy");
+// constexpr views, so other translation units may use them during static initialization.
+inline constexpr QLatin1StringView SystemSocket{"/run/dbus/system_bus_socket"};
+inline constexpr QLatin1StringView ProxyProgram{"/usr/bin/xdg-dbus-proxy"};
 
 inline QString modeName(Mode mode) { return mode == Mode::None ? QStringLiteral("none") : mode == Mode::Filtered ? QStringLiteral("filtered") : QStringLiteral("full"); }
 inline std::optional<Mode> parseMode(const QString &text)

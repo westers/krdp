@@ -39,7 +39,10 @@ if request['operation'] == 'save-batch':
     print(json.dumps({'results': results}))
     sys.exit(0)
 assert scope in ('console', 'virtual', 'session')
-defaults = {'RenderPci': '', 'VaapiDriver': 'auto'} if scope == 'session' else {
+session_defaults = {'RenderPci': '', 'VaapiDriver': 'auto', 'VirtualSystemBus': 'filtered', 'SystemBusNetwork': 'true',
+    'SystemBusPower': 'true', 'SystemBusPackages': 'false', 'SystemBusPolkit': 'false', 'SystemBusBluetooth': 'false',
+    'SystemBusPrinting': 'false', 'SystemBusExtra': ''}  # OPT-075 added the system-bus keys
+defaults = session_defaults if scope == 'session' else {
     'Address': '0.0.0.0', 'Port': '3391' if scope == 'console' else '3395',
     'Certificate': '/etc/farside/console.crt' if scope == 'console' else '/etc/farside/virtual-host.crt',
     'CertificateKey': '/etc/farside/console.key' if scope == 'console' else '/etc/farside/virtual-host.key',

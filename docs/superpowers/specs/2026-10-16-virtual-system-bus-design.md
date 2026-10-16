@@ -28,7 +28,9 @@ One new server-wide setting family, in the existing `virtual-session.conf` scope
 | `SystemBusExtra` | `SYSTEM_BUS_EXTRA` | empty | Advanced: extra names to `--talk` to, comma separated |
 
 `full` is never a default, in the code, the unit, the example conf or the KCM. The KCM shows a warning under it.
-The toggles only matter for `filtered`; under `none` they are ignored, under `full` the filter is gone.
+The service switches shape the `filtered` rules; under `none` they are ignored and under `full` there is no filter. The two
+switches that start or bind something besides the bus (`SystemBusPolkit`: the authentication agent, `SystemBusPrinting`: the
+CUPS socket) also apply under `full`.
 
 ## Architecture
 
@@ -112,8 +114,10 @@ root entry only. Rules:
 * The directory and file must be root-owned, regular, not a symlink, not group/other writable, at most 64 KiB, and
   parse with the host settings grammar. Any other key in the file, or any invalid value, **fails closed**: that user
   gets `none` for the new desktop and the entry logs a warning. A broken override never widens access.
-* The KCM does not edit it. It lists the users that have a drop-in (read-only summary with the file path and the mode)
-  on the Virtual page, with a note that the files are edited by an administrator.
+* The KCM does not edit it; the help text of the rows names the file and says it replaces the values for that account.
+  `/etc/farside` is mode 0700, so an unprivileged KCM cannot list the drop-ins today. Showing a read-only list needs the
+  settings helper to publish it in the public snapshot (an additive metadata key plus a validator change), which was left
+  out (open question 6).
 
 ## KCM
 
@@ -144,6 +148,36 @@ documented defaults; `virtual-session.d/` is created by the package (empty, 0755
    may not arrive.
 5. **snapd.** Discover's snap backend uses `/run/snapd.socket`, not D-Bus. Not covered. Recommend a later separate
    toggle if wanted.
-6. **Per-user override edited from the KCM?** Recommend no (read-only) until a privileged helper action for it exists.
+6. **Per-user override in the KCM?** Not edited, and not listed. Recommend a follow-up that publishes the list of overridden
+   logins (names only) in `session.json` so the KCM can show them read-only; it touches the snapshot validator, so it was
+   not folded into this change.
 7. **CheckConnectivity.** Left out of the read-only set because it triggers a network probe. If the tray shows a stale
    connectivity state, add it.
+
+## How Steve verifies (ace, a NEW Virtual session; nothing changes for running ones)
+
+Install the paired package, then `apt install xdg-dbus-proxy` on the host (Recommends may be off). The new desktop must be
+created after the install; an existing desktop never gets a bus.
+
+1. `systemctl show -p Environment farside-virtual-session@.service | tr ' ' '\n' | grep SYSTEM_BUS` lists the defaults
+   (`...SYSTEM_BUS=filtered`, `...NETWORK=true`, `...POWER=true`, the rest `false`/empty).
+2. Create a Virtual session, connect. The tray network widget shows the real connection (not "disconnected") and
+   System Settings > Network (or "Configure Network Connections") opens and lists connections.
+3. Inside the desktop (Konsole): `busctl --system list | head` shows only a few names (NetworkManager, UPower, login1, the
+   bus itself), not every system service. `busctl --system call org.freedesktop.systemd1 /org/freedesktop/systemd1
+   org.freedesktop.systemd1.Manager ListUnits` fails with a filter error, and so does
+   `nmcli connection down <name>` / `nmcli radio wifi off` (changing calls are refused; `nmcli general`, `nmcli device`
+   work).
+4. On the host, as root: `pgrep -a xdg-dbus-proxy` shows exactly one proxy for that desktop, run by the user, and it is
+   gone a few seconds after the desktop is stopped (`farside-virtual` stop). `~<user>/.farside-virtual/...` is untouched;
+   the proxy log is `/run/user/<uid>/farside-virtual/<launch>/system-bus-proxy.log`.
+5. Turn on Software and updates, create another new desktop: Discover starts and lists updates (installing still needs
+   authentication, which is Experimental via the polkit switch). Extra names: add `org.example.Whatever`, create a new
+   desktop, and `busctl --system list` shows it only if a service owns that name; `org.freedesktop.systemd1` is refused
+   in the settings page.
+6. `systemctl stop`/remove `xdg-dbus-proxy` (or `mv /usr/bin/xdg-dbus-proxy{,.off}`), create a new desktop: it is created
+   with no system bus, the journal has `Virtual system bus: filtered requested, but xdg-dbus-proxy is not installed`, and
+   the settings page shows "Filtered (unavailable: xdg-dbus-proxy not installed)". Put it back afterwards.
+7. Per-user: `printf 'FARSIDE_VIRTUAL_SYSTEM_BUS=none\n' | sudo tee /etc/farside/virtual-session.d/<login>.conf` (root-owned,
+   0644 or 0600): that user's next new desktop has no bus; remove the file to go back. A file with a typo (`=Full`) also
+   gives no bus and a journal warning, never more.

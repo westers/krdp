@@ -26,6 +26,8 @@ KCM.SimpleKCM {
     readonly property var camera: host.metadata.cameraLoopback || ({})
     // A definition that carries a reason is not offered as a control (today: the camera bridge for Virtual).
     readonly property string unavailableReason: { const row = host.definitions.find(definition => definition.unavailable !== ""); return row ? row.unavailable : ""; }
+    // The mode a new desktop would get from the saved or draft value, else the shipped default.
+    readonly property string systemBusMode: sessionSettings.loaded ? (sessionSettings.values.VirtualSystemBus || sessionSettings.unitDefaults.VirtualSystemBus || "") : ""
     readonly property var preferences: navigation && navigation.preferences ? navigation.preferences : null
     readonly property var devices: sessionSettings.loaded ? (sessionSettings.metadata.renderDevices || []) : []
     readonly property var selectedDevices: (sessionSettings.values.RenderPci || "").split(",").map(value => value.trim()).filter(value => value !== "")
@@ -278,6 +280,24 @@ KCM.SimpleKCM {
                 }
                 QQC2.Label { Layout.fillWidth: true; wrapMode: Text.Wrap; font: Kirigami.Theme.smallFont; text: i18nc("@info", "Applies to new desktops only.") }
             }
+
+            // OPT-075: system services in new Virtual desktops. The rows come from the session scope's definitions.
+            Kirigami.Separator { visible: root.fixedScope === 1; Kirigami.FormData.isSection: true; Kirigami.FormData.label: root.sessionSettings.sectionTitle("systembus") }
+            Kirigami.InlineMessage {
+                objectName: "systemBusFullWarning"
+                Layout.fillWidth: true; Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: root.fieldWidth
+                type: Kirigami.MessageType.Warning
+                visible: root.fixedScope === 1 && root.systemBusMode === "full"
+                text: i18nc("@info", "Full lets every program in a new Virtual desktop use every system service the account may use, including changing network settings and, with authentication, installing software. Use it only on a computer you fully trust.")
+            }
+            Kirigami.InlineMessage {
+                objectName: "systemBusProxyMissing"
+                Layout.fillWidth: true; Layout.minimumWidth: Kirigami.Units.gridUnit * 7; Layout.preferredWidth: root.fieldWidth
+                type: Kirigami.MessageType.Information
+                visible: root.fixedScope === 1 && root.systemBusMode === "filtered" && !root.sessionSettings.systemBusProxyInstalled
+                text: i18nc("@info", "Filtered is unavailable: xdg-dbus-proxy is not installed. New desktops are created without system services until it is installed.")
+            }
+            BrokerFieldRepeater { settings: root.sessionSettings; section: "systembus"; included: root.fixedScope === 1; busy: root.sessionSettings.busy; prefix: "desktop_" }
 
             QQC2.Button {
                 objectName: "hostAdvancedButton"
