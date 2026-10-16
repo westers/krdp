@@ -46,6 +46,11 @@ target_include_directories(VirtualSessionLaunchPlanTest PRIVATE ${CMAKE_SOURCE_D
 target_link_libraries(VirtualSessionLaunchPlanTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionLaunchPlanTest COMMAND VirtualSessionLaunchPlanTest)
 
+add_executable(VirtualSessionAccountEnvironmentTest VirtualSessionAccountEnvironmentTest.cpp)
+target_include_directories(VirtualSessionAccountEnvironmentTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(VirtualSessionAccountEnvironmentTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME VirtualSessionAccountEnvironmentTest COMMAND VirtualSessionAccountEnvironmentTest)
+
 add_executable(VirtualSessionLoginTest VirtualSessionLoginTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionLogin.cpp)
 add_executable(OwnerWatchProbe OwnerWatchProbe.cpp)
 target_include_directories(OwnerWatchProbe PRIVATE ${CMAKE_SOURCE_DIR}/server)
