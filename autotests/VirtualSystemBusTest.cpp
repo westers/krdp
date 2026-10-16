@@ -59,6 +59,20 @@ private Q_SLOTS:
         // Every environment name in the unit is one the table knows.
         for (const auto &entry : keyTable()) QVERIFY(text.contains(QStringLiteral("Environment=FARSIDE_VIRTUAL_") + QLatin1String(entry.suffix) + u"="_s));
     }
+    void unitAndEntryAgreeOnEveryKey()
+    {
+        // The unit passes each key to the entry as --system-bus[-name] ${FARSIDE_VIRTUAL_...}, and the entry declares that option.
+        QFile unit(QStringLiteral(SOURCE_DIR "/server/krdp-virtual-session@.service.in"));
+        QFile entry(QStringLiteral(SOURCE_DIR "/server/virtualsessionentry.cpp"));
+        QVERIFY(unit.open(QIODevice::ReadOnly) && entry.open(QIODevice::ReadOnly));
+        const auto unitText = QString::fromUtf8(unit.readAll()), entryText = QString::fromUtf8(entry.readAll());
+        for (const auto &item : keyTable()) {
+            QString option = QString::fromLatin1(item.suffix).toLower();
+            option.replace(u'_', u'-');
+            QVERIFY2(unitText.contains(QStringLiteral("--%1 ${FARSIDE_VIRTUAL_%2}").arg(option, QLatin1String(item.suffix))), qPrintable(option));
+            QVERIFY2(entryText.contains(QStringLiteral("{QStringLiteral(\"%1\"), QStringLiteral(\"%2\")}").arg(option, QLatin1String(item.key))), qPrintable(option));
+        }
+    }
     void modes()
     {
         QCOMPARE(parseMode(u"none"_s), std::optional<Mode>(Mode::None));
