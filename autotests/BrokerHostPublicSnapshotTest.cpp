@@ -179,6 +179,28 @@ private Q_SLOTS:
         QCOMPARE(::stat(QFile::encodeName(root.filePath(u"public"_s)).constData(), &info), 0);
         QCOMPARE(info.st_mode & 07777, mode_t(0755));
     }
+    // OPT-074: a virtual desktop runs in a user namespace that maps only the caller, so root-owned files show the
+    // overflow uid. That uid stands in for root only when root is unmapped.
+    void rootStandInOnlyWhenRootIsUnmapped_data()
+    {
+        QTest::addColumn<QByteArray>("map");
+        QTest::addColumn<uint>("expected");
+        QTest::newRow("initial namespace") << QByteArray("         0          0 4294967295\n") << 0u;
+        QTest::newRow("only the caller mapped") << QByteArray("      1000       1000          1\n") << 65534u;
+        QTest::newRow("caller mapped to root") << QByteArray("         0       1000          1\n") << 0u;
+        QTest::newRow("root inside a larger range") << QByteArray("         0          0         10\n") << 0u;
+        QTest::newRow("range not starting at root") << QByteArray("         1          0       1000\n") << 65534u;
+        QTest::newRow("empty") << QByteArray() << 0u;
+        QTest::newRow("garbage") << QByteArray("not a map\n1 2\n") << 0u;
+        QTest::newRow("zero count") << QByteArray("0 0 0\n1000 1000 1\n") << 65534u;
+    }
+    void rootStandInOnlyWhenRootIsUnmapped()
+    {
+        QFETCH(QByteArray, map);
+        QFETCH(uint, expected);
+        QCOMPARE(uint(Snapshot::unmappedRootStandIn(map, 65534)), expected);
+        QCOMPARE(uint(Snapshot::unmappedRootStandIn(map, 4242)), expected == 0u ? 0u : 4242u);
+    }
     void readerRefusesUnsafeFiles()
     {
         QTemporaryDir root;

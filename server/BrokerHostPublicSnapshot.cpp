@@ -32,10 +32,44 @@ QJsonObject pick(const QJsonObject &source, const QStringList &keys)
     for (const auto &key : keys) if (source.contains(key)) result.insert(key, source[key]);
     return result;
 }
+// Inside an unprivileged user namespace that maps only the caller (a Farside virtual desktop runs in
+// one), root's files carry the kernel overflow uid, not 0.
+uid_t rootStandIn()
+{
+    static const uid_t value = [] {
+        QFile map(u"/proc/self/uid_map"_s);
+        if (!map.open(QIODevice::ReadOnly)) return uid_t(0);
+        QFile overflow(u"/proc/sys/kernel/overflowuid"_s);
+        const auto text = overflow.open(QIODevice::ReadOnly) ? overflow.readAll().trimmed() : QByteArray();
+        bool ok = false;
+        const auto number = text.toUInt(&ok);
+        return unmappedRootStandIn(map.readAll(), ok ? number : 65534u);
+    }();
+    return value;
+}
 bool trusted(const struct stat &info, bool allowCurrentUser)
 {
-    return (!info.st_uid || (allowCurrentUser && info.st_uid == ::geteuid())) && !(info.st_mode & 0022);
+    const bool owner = info.st_uid == 0 || (rootStandIn() != 0 && info.st_uid == rootStandIn());
+    return (owner || (allowCurrentUser && info.st_uid == ::geteuid())) && !(info.st_mode & 0022);
 }
+}
+
+uid_t unmappedRootStandIn(const QByteArray &uidMap, uid_t overflowUid)
+{
+    // Lines are "<inside first> <outside first> <count>". Root is mapped when inside 0 is in a range.
+    const auto lines = uidMap.split('\n');
+    bool any = false;
+    for (const auto &line : lines) {
+        const auto fields = line.simplified().split(' ');
+        if (fields.size() != 3) continue;
+        bool a = false, c = false;
+        const auto first = fields[0].toULongLong(&a);
+        const auto count = fields[2].toULongLong(&c);
+        if (!a || !c) continue;
+        any = true;
+        if (first == 0 && count > 0) return 0;
+    }
+    return any ? overflowUid : 0;
 }
 
 QString defaultDirectory() { return u"/var/lib/farside-public"_s; }
