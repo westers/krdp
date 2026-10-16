@@ -536,6 +536,13 @@ target_include_directories(ClipboardTextTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(ClipboardTextTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME ClipboardTextTest COMMAND ClipboardTextTest)
 
+# OPT-072: image conversion and validation for the clipboard bridge (PNG, DIB/DIBV5; malformed, oversize and bomb inputs).
+add_executable(ClipboardImageTest ClipboardImageTest.cpp)
+target_include_directories(ClipboardImageTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ClipboardImageTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
+add_test(NAME ClipboardImageTest COMMAND ClipboardImageTest)
+set_tests_properties(ClipboardImageTest PROPERTIES TIMEOUT 120)
+
 # LayoutControl has an out-of-line .cpp (codec + planner), unlike its
 # header-only neighbours above, so it is compiled straight into the test
 # binary rather than linked through the KRdp library (which would drag in
