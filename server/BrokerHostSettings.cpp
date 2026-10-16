@@ -3,6 +3,7 @@
 #include "CodecPolicy.h"
 #include "VaapiDriverMode.h"
 #include "VirtualSessionLaunchPlan.h"
+#include "VirtualSystemBus.h"
 #include <QHostAddress>
 #include <QRegularExpression>
 #include <QStringDecoder>
@@ -13,8 +14,12 @@ namespace {
 struct Field { QString key; const char *suffix; const char *value; };
 QList<Field> fields(Scope scope)
 {
-    if (scope == Scope::VirtualSession)
-        return {{u"RenderPci"_s, "RENDER_PCI", ""}, {u"VaapiDriver"_s, "VAAPI_DRIVER", "auto"}};
+    if (scope == Scope::VirtualSession) {
+        QList<Field> session{{u"RenderPci"_s, "RENDER_PCI", ""}, {u"VaapiDriver"_s, "VAAPI_DRIVER", "auto"}};
+        // OPT-075: system-bus access for new Virtual desktops (VirtualSystemBus.h owns names, grammar and defaults).
+        for (const auto &entry : VirtualSystemBus::keyTable()) session.append({QString::fromLatin1(entry.key), entry.suffix, entry.fallback});
+        return session;
+    }
     if (scope != Scope::Console && scope != Scope::Virtual) return {};
     QList<Field> result{{u"Address"_s, "ADDRESS", "0.0.0.0"},
         {u"Port"_s, "PORT", scope == Scope::Console ? "3391" : "3395"},
@@ -195,6 +200,8 @@ std::optional<QString> normalize(Scope scope, const QString &key, const QString 
     } else if (key == u"ClipboardDirection") {
         // OPT-067: text clipboard bridge direction. Exactly the four spellings, no case folding.
         if (value == u"both" || value == u"host-to-client" || value == u"client-to-host" || value == u"off") return value;
+    } else if (scope == Scope::VirtualSession && !VirtualSystemBus::environmentName(key).isEmpty()) {
+        return VirtualSystemBus::normalizeValue(key, value);
     } else if (key == u"VaapiDriver") {
         return VaapiDriverMode::normalize(value);
     } else if (key == u"RenderPci") {

@@ -8,6 +8,8 @@ set -eu
 old=/etc/krdp
 new=/etc/farside
 install -d -m 0700 "$new"
+# Per-user system-bus overrides for Virtual desktops (OPT-075); empty until an administrator adds a file.
+install -d -m 0700 "$new/virtual-session.d"
 # Sol's console certificate predates /etc/krdp. Copy it into Farside's
 # configuration directory so the new unit has no dependency on a legacy path.
 for kind in crt key; do

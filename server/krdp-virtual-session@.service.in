@@ -11,8 +11,18 @@ Slice=system.slice
 Delegate=no
 Environment=FARSIDE_VIRTUAL_RENDER_PCI=
 Environment=FARSIDE_VIRTUAL_VAAPI_DRIVER=auto
+# System-bus access for NEW desktops (OPT-075): none, filtered (xdg-dbus-proxy; falls back to none when it is missing) or full.
+# The per-service switches apply to filtered. A per-user override can live in /etc/farside/virtual-session.d/<login>.conf.
+Environment=FARSIDE_VIRTUAL_SYSTEM_BUS=filtered
+Environment=FARSIDE_VIRTUAL_SYSTEM_BUS_NETWORK=true
+Environment=FARSIDE_VIRTUAL_SYSTEM_BUS_POWER=true
+Environment=FARSIDE_VIRTUAL_SYSTEM_BUS_PACKAGES=false
+Environment=FARSIDE_VIRTUAL_SYSTEM_BUS_POLKIT=false
+Environment=FARSIDE_VIRTUAL_SYSTEM_BUS_BLUETOOTH=false
+Environment=FARSIDE_VIRTUAL_SYSTEM_BUS_PRINTING=false
+Environment=FARSIDE_VIRTUAL_SYSTEM_BUS_EXTRA=
 EnvironmentFile=-/etc/farside/virtual-session.conf
-ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-session-entry --session %i --device-entry @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-device-entry --guardian @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-guardian --pam-keeper @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-pam-keeper --launcher @CMAKE_INSTALL_PREFIX@/share/farside/virtual-session/launch-virtual-session.sh --worker @CMAKE_INSTALL_PREFIX@/bin/farside-console-worker --support @CMAKE_INSTALL_PREFIX@/share/farside/virtual-session/support --render-pci ${FARSIDE_VIRTUAL_RENDER_PCI} --vaapi-driver ${FARSIDE_VIRTUAL_VAAPI_DRIVER}
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-session-entry --session %i --device-entry @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-device-entry --guardian @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-guardian --pam-keeper @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-pam-keeper --launcher @CMAKE_INSTALL_PREFIX@/share/farside/virtual-session/launch-virtual-session.sh --worker @CMAKE_INSTALL_PREFIX@/bin/farside-console-worker --support @CMAKE_INSTALL_PREFIX@/share/farside/virtual-session/support --render-pci ${FARSIDE_VIRTUAL_RENDER_PCI} --vaapi-driver ${FARSIDE_VIRTUAL_VAAPI_DRIVER} --system-bus ${FARSIDE_VIRTUAL_SYSTEM_BUS} --system-bus-network ${FARSIDE_VIRTUAL_SYSTEM_BUS_NETWORK} --system-bus-power ${FARSIDE_VIRTUAL_SYSTEM_BUS_POWER} --system-bus-packages ${FARSIDE_VIRTUAL_SYSTEM_BUS_PACKAGES} --system-bus-polkit ${FARSIDE_VIRTUAL_SYSTEM_BUS_POLKIT} --system-bus-bluetooth ${FARSIDE_VIRTUAL_SYSTEM_BUS_BLUETOOTH} --system-bus-printing ${FARSIDE_VIRTUAL_SYSTEM_BUS_PRINTING} --system-bus-extra ${FARSIDE_VIRTUAL_SYSTEM_BUS_EXTRA}
 UMask=0077
 ExecStopPost=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-session-cleanup --session %i
 StandardInput=null

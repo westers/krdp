@@ -261,3 +261,18 @@ not establish that the design is acceptable.
 - OPT-072: the same setting, states and rate limit cover pictures (PNG, CF_DIB/CF_DIBV5; at most 16 MiB encoded and
   8192x8192 pixels; a copy with text and a picture is bridged as text). The `clipboard` capability then also carries
   `images: true` and `maxImageBytes`. There is no separate switch for pictures.
+
+## System services in new Virtual desktops (OPT-075)
+
+- Keys live in the New Virtual Desktops scope (`/etc/farside/virtual-session.conf`, read by `farside-virtual-session@.service`):
+  `VirtualSystemBus` (`none` | `filtered` default | `full`), `SystemBusNetwork` and `SystemBusPower` (default `true`),
+  `SystemBusPackages`, `SystemBusPolkit`, `SystemBusBluetooth`, `SystemBusPrinting` (default `false`) and `SystemBusExtra` (comma
+  separated bus names, default empty). Environment `FARSIDE_VIRTUAL_SYSTEM_BUS`, `..._NETWORK`, `..._POWER`, `..._PACKAGES`, `..._POLKIT`,
+  `..._BLUETOOTH`, `..._PRINTING`, `..._EXTRA`; the unit passes them to the entry as `--system-bus*`. Example: `server/virtual-session.conf.example`.
+- The Virtual page shows a "System Services in New Desktops" section (mode and the plain switches; Authentication prompts, Printers
+  and Additional services are under Advanced). `Full` shows a warning. Applies to desktops created afterwards only.
+- Without `/usr/bin/xdg-dbus-proxy` the "Filtered" choice reads "Filtered (unavailable: xdg-dbus-proxy not installed)", the
+  switches are hidden, the page says so, and new desktops get no system bus (an Info line in the journal).
+- Per-user override: `/etc/farside/virtual-session.d/<login>.conf`, root-owned, same keys, any subset; invalid content gives that
+  account no bus. Not editable or listed in the page (see the spec, open question 6).
+- Design, rules and verification checklist: `docs/superpowers/specs/2026-10-16-virtual-system-bus-design.md`.

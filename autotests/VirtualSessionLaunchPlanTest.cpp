@@ -56,6 +56,69 @@ private Q_SLOTS:
         changed = config; changed.supportDirectory = u"/usr/share/../krdp"_s;
         QVERIFY(!VirtualSessionLaunchPlan::build(1000, account, id, changed));
     }
+    // OPT-075: golden launcher arguments for the system bus, and refusal of anything outside the grammar.
+    void noSystemBusEmitsNoArguments()
+    {
+        const auto plan = VirtualSessionLaunchPlan::build(1000, account, id, config);
+        QVERIFY(plan);
+        for (const auto &argument : plan->arguments) QVERIFY2(!argument.contains(u"system-bus"_s) && !argument.contains(u"polkit"_s) && !argument.contains(u"cups"_s), qPrintable(argument));
+        // The pre-OPT-075 golden is unchanged: five fixed pairs, two GPUs, nothing else.
+        QCOMPARE(plan->arguments.size(), 16 + 4);
+    }
+    void filteredSystemBusArgumentsGolden()
+    {
+        auto changed = config;
+        changed.systemBus = VirtualSystemBus::plan(VirtualSystemBus::defaults(), true, true);
+        QCOMPARE(changed.systemBus.mode, VirtualSystemBus::Mode::Filtered);
+        const auto launch = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const auto plan = VirtualSessionLaunchPlan::build(1000, account, id, changed, nullptr, launch);
+        QVERIFY(plan);
+        const auto base = VirtualSessionLaunchPlan::build(1000, account, id, config, nullptr, launch);
+        QCOMPARE(plan->arguments.mid(0, base->arguments.size()), base->arguments); // appended, nothing reordered
+        const auto added = plan->arguments.mid(base->arguments.size());
+        QCOMPARE(added.mid(0, 2), QStringList({u"--system-bus"_s, u"filtered"_s}));
+        QCOMPARE(added.size(), 2 + 2 * changed.systemBus.proxyRules.size());
+        for (int i = 0; i < changed.systemBus.proxyRules.size(); ++i) {
+            QCOMPARE(added[2 + 2 * i], u"--system-bus-rule"_s);
+            QCOMPARE(added[3 + 2 * i], changed.systemBus.proxyRules[i]);
+        }
+        QVERIFY(plan->environment.keys().size() == 5); // the bus never travels in the environment
+        QVERIFY(!plan->environment.contains(u"DBUS_SYSTEM_BUS_ADDRESS"_s));
+        // polkit and CUPS flags are pairs too, because the launcher reads options two at a time.
+        changed.systemBus.polkitAgent = changed.systemBus.cupsSocket = true;
+        const auto flags = VirtualSessionLaunchPlan::build(1000, account, id, changed)->arguments;
+        QVERIFY(flags.contains(u"--polkit-agent"_s) && flags[flags.indexOf(u"--polkit-agent"_s) + 1] == u"1"_s);
+        QVERIFY(flags.contains(u"--cups-socket"_s) && flags[flags.indexOf(u"--cups-socket"_s) + 1] == u"1"_s);
+    }
+    void fullSystemBusHasNoRules()
+    {
+        auto changed = config;
+        VirtualSystemBus::Settings settings;
+        settings.mode = VirtualSystemBus::Mode::Full;
+        changed.systemBus = VirtualSystemBus::plan(settings, true, true);
+        const auto plan = VirtualSessionLaunchPlan::build(1000, account, id, changed);
+        QVERIFY(plan);
+        QVERIFY(plan->arguments.contains(u"--system-bus"_s));
+        QVERIFY(!plan->arguments.contains(u"--system-bus-rule"_s));
+        changed.systemBus.proxyRules = {u"--talk=org.bluez"_s};
+        QVERIFY(!VirtualSessionLaunchPlan::build(1000, account, id, changed)); // rules belong to filtered only
+    }
+    void systemBusRefusesAnythingOutsideTheGrammar()
+    {
+        auto changed = config;
+        changed.systemBus = VirtualSystemBus::plan(VirtualSystemBus::defaults(), true, true);
+        for (const auto &bad : {u"--filter"_s, u"--own=org.example.X"_s, u"--talk=org.x y"_s, u"--talk=org.x\n--own=y"_s, u"--fd=3"_s, u"--call=org.x.Y="_s}) {
+            auto attempt = changed;
+            attempt.systemBus.proxyRules.append(bad);
+            QVERIFY2(!VirtualSessionLaunchPlan::build(1000, account, id, attempt), qPrintable(bad));
+        }
+        auto many = changed;
+        while (many.systemBus.proxyRules.size() <= VirtualSystemBus::MaximumRules) many.systemBus.proxyRules.append(u"--talk=org.example.X"_s);
+        QVERIFY(!VirtualSessionLaunchPlan::build(1000, account, id, many));
+        auto agent = config;
+        agent.systemBus.polkitAgent = true; // a polkit agent without a bus is a contradiction
+        QVERIFY(!VirtualSessionLaunchPlan::build(1000, account, id, agent));
+    }
     void gpuAccessMustBeExplicitAndStable()
     {
         auto changed = config;

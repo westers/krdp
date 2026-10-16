@@ -59,6 +59,7 @@ class BrokerHostsPageTest : public QObject {
         return false;
     }
 private Q_SLOTS:
+    void initTestCase() { BrokerHostSettings::setSystemBusProxyForTest(u"/usr/bin/env"_s); } // OPT-075: rows must not depend on this host having xdg-dbus-proxy
     void populatedOnOpenWithoutClicks() {
         // S1: the public-metadata snapshot alone populates every host page, with
         // no helper, no click and no Load/unlock button.
@@ -303,6 +304,48 @@ private Q_SLOTS:
         QVERIFY(!console.modified() || console.values()[u"Quality"_s] == u"92"_s);
         QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s)));page->setParentItem(nullptr);
     }
+    // OPT-075: the Virtual page shows the system-bus section, warns under Full, and says so when xdg-dbus-proxy is missing.
+    void systemBusSectionWarnsAboutFullAndAMissingProxy() {
+        const auto restoreProxy = qScopeGuard([] { BrokerHostSettings::setSystemBusProxyForTest(u"/usr/bin/env"_s); });
+        QTemporaryDir snapshots; qputenv("FARSIDE_PUBLIC_SETTINGS_DIR", snapshots.path().toUtf8());
+        const auto restoreEnvironment = qScopeGuard([] { qunsetenv("FARSIDE_PUBLIC_SETTINGS_DIR"); });
+        QVERIFY(HostSnapshotFixture::publishAll(snapshots.path()));
+        const QStringList unusable{u"/nonexistent"_s};
+        BrokerHostSettings console(Scope::Console,u"/nonexistent/helper"_s,unusable,3000), virtualHost(Scope::Virtual,u"/nonexistent/helper"_s,unusable,3000),
+            session(Scope::VirtualSession,u"/nonexistent/helper"_s,unusable,3000);
+        for (auto *model : {&console,&virtualHost,&session}) QVERIFY(model->refresh());
+        for (const bool proxy : {true,false}) {
+            BrokerHostSettings::setSystemBusProxyForTest(proxy ? u"/usr/bin/env"_s : u"/nonexistent/xdg-dbus-proxy"_s);
+            QQmlEngine engine; localize(engine); QStringList warnings;
+            connect(&engine,&QQmlEngine::warnings,this,[&](const auto &errors){for(const auto &error:errors)warnings.append(error.toString());});
+            QQmlComponent component(&engine,pageUrl());
+            QScopedPointer<QObject> object(component.createWithInitialProperties({{u"fixedScope"_s,1},{u"showAdvanced"_s,true},
+                {u"consoleSettings"_s,QVariant::fromValue(&console)},{u"virtualSettings"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)}}));
+            QVERIFY2(object,qPrintable(component.errorString())); auto *page=qobject_cast<QQuickItem *>(object.data()); QVERIFY(page);
+            QQuickWindow window; window.resize(900,1200); page->setParentItem(window.contentItem()); page->setSize(window.size()); window.show();
+            const auto visible=[&](const QString &name){auto *item=qobject_cast<QQuickItem *>(find(page,name)); return item && item->isVisible();};
+            QVERIFY(session.setValue(u"VirtualSystemBus"_s,u"filtered"_s));
+            QVERIFY(!visible(u"systemBusFullWarning"_s));
+            QCOMPARE(visible(u"systemBusProxyMissing"_s), !proxy);
+            QVERIFY(visible(u"desktop_VirtualSystemBus"_s));                       // the mode is always selectable
+            QCOMPARE(visible(u"desktop_SystemBusNetwork"_s), proxy);               // the switches are withheld without the proxy
+            QCOMPARE(visible(u"desktop_SystemBusPower"_s), proxy);
+            QCOMPARE(visible(u"desktop_SystemBusExtra"_s), proxy);
+            QVERIFY(session.setValue(u"VirtualSystemBus"_s,u"full"_s));
+            QTRY_VERIFY(visible(u"systemBusFullWarning"_s));
+            QVERIFY(!visible(u"systemBusProxyMissing"_s));
+            QVERIFY(session.setValue(u"VirtualSystemBus"_s,u"none"_s));
+            QVERIFY(!visible(u"systemBusFullWarning"_s)); QVERIFY(!visible(u"systemBusProxyMissing"_s));
+            session.discard();
+            // The Console page has none of it.
+            QScopedPointer<QObject> consolePage(component.createWithInitialProperties({{u"fixedScope"_s,0},{u"showAdvanced"_s,true},
+                {u"consoleSettings"_s,QVariant::fromValue(&console)},{u"virtualSettings"_s,QVariant::fromValue(&virtualHost)},{u"sessionSettings"_s,QVariant::fromValue(&session)}}));
+            auto *consoleItem=qobject_cast<QQuickItem *>(consolePage.data()); QVERIFY(consoleItem);
+            QQuickWindow consoleWindow; consoleItem->setParentItem(consoleWindow.contentItem()); consoleItem->setSize({900,1200}); consoleWindow.show();
+            QVERIFY(!qobject_cast<QQuickItem *>(find(consoleItem,u"desktop_VirtualSystemBus"_s)) || !qobject_cast<QQuickItem *>(find(consoleItem,u"desktop_VirtualSystemBus"_s))->isVisible());
+            QVERIFY2(warnings.isEmpty(),qPrintable(warnings.join(u"\n"_s)));
+        }
+    }
     void actualFieldsScopeDraftsDefaultsCancelDiscardAndWidth() {
         QTemporaryDir dir;
         // Reload Saved Settings reads the published public snapshot (no helper, no prompt).
@@ -315,7 +358,8 @@ private Q_SLOTS:
         const QVariantMap desired{{u"Address"_s,u"127.0.0.1"_s},{u"Port"_s,u"3401"_s},{u"Quality"_s,u"93"_s},
             {u"AdaptiveQuality"_s,u"true"_s},{u"PreferAudioQuality"_s,u"true"_s},{u"StandardClientMedia"_s,u"false"_s},
             {u"CameraLoopbackDevice"_s,u"/dev/video10"_s},{u"SoftwareEncoding"_s,u"prefer"_s},{u"SoftwareAvc"_s,u"last-resort"_s},{u"SoftwareHevc"_s,u"never"_s},{u"SoftwareAv1"_s,u"allowed"_s},{u"Av1Tiles"_s,u"8"_s},{u"ClipboardDirection"_s,u"client-to-host"_s},{u"ClientQualityMax"_s,u"95"_s},
-            {u"VaapiDriver"_s,u"off"_s},{u"RenderPci"_s,u"0000:01:00.0"_s}};
+            {u"VaapiDriver"_s,u"off"_s},{u"RenderPci"_s,u"0000:01:00.0"_s},
+            {u"VirtualSystemBus"_s,u"full"_s}, {u"SystemBusNetwork"_s,u"false"_s}, {u"SystemBusPower"_s,u"false"_s}, {u"SystemBusPackages"_s,u"true"_s}, {u"SystemBusPolkit"_s,u"true"_s}, {u"SystemBusBluetooth"_s,u"true"_s}, {u"SystemBusPrinting"_s,u"true"_s}, {u"SystemBusExtra"_s,u"org.example.Service,org.example.Other.*"_s}};
         int scope=0;
         for (auto *model : {&console,&virtualHost,&session}) {
             QQmlEngine engine; localize(engine); QStringList warnings;

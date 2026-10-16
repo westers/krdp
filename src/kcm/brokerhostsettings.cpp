@@ -6,10 +6,12 @@
 #include "BrokerHostPublicSnapshot.h"
 #include "BrokerHostRuntime.h"
 #include "ServerCertificate.h"
+#include "VirtualSystemBus.h"
 #include "settingfielddefinition.h"
 #include <KLocalizedString>
 #include <QDateTime>
 #include <QFile>
+#include <QFileInfo>
 #include <QPointer>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -549,11 +551,30 @@ void BrokerHostSettings::finish(int code, QProcess::ExitStatus status, QByteArra
     adoptSnapshot(snapshot, saving);
 }
 
+namespace
+{
+QString &proxyProgram()
+{
+    static QString path = KRdp::VirtualSystemBus::ProxyProgram;
+    return path;
+}
+}
+bool BrokerHostSettings::systemBusProxyInstalled()
+{
+    const QFileInfo info(proxyProgram());
+    return info.isFile() && info.isExecutable();
+}
+void BrokerHostSettings::setSystemBusProxyForTest(const QString &path)
+{
+    proxyProgram() = path.isEmpty() ? KRdp::VirtualSystemBus::ProxyProgram : path;
+}
+
 QString BrokerHostSettings::sectionTitle(const QString &section) const
 {
     if (section == u"connection") return i18nc("@title:group", "Connection");
     if (section == u"picture") return i18nc("@title:group", "Picture and Sound");
     if (section == u"sharing") return i18nc("@title:group", "Sharing");
+    if (section == u"systembus") return i18nc("@title:group", "System Services in New Desktops");
     return {};
 }
 
@@ -630,5 +651,31 @@ QVariantList BrokerHostSettings::definitions() const
         {choice(u"auto"_s, i18nc("@item:inlistbox", "Automatic")), choice(u"off"_s, i18nc("@item:inlistbox", "Disabled")),
          choice(u"radeonsi"_s, u"radeonsi"_s), choice(u"iHD"_s, u"iHD"_s), choice(u"i965"_s, u"i965"_s)},
         {.section = u"encoding"_s, .advanced = true});
+    // OPT-075: system-bus access for NEW Virtual desktops (scope "session" only). The page shows the section on the Virtual page.
+    const bool proxy = systemBusProxyInstalled();
+    const auto proxyMissing = proxy ? QString() : i18nc("@info", "Unavailable: xdg-dbus-proxy is not installed.");
+    const auto busGroup = i18nc("@title:group", "System Services in New Desktops");
+    const auto newOnly = i18nc("@info", "Applies to desktops created after you apply this. Desktops that are already running keep what they have until they are recreated.");
+    add(u"VirtualSystemBus"_s, busGroup, i18nc("@label", "System services"),
+        i18nc("@info", "Virtual desktops run in a sandbox without the computer's system services, so the network widget shows “disconnected”, Network settings does not open, and Discover, Bluetooth, power and printer widgets do not work. Filtered shares only the services switched on below, read-only where noted, through xdg-dbus-proxy (a separate package). None shares nothing. Full shares everything the account may use on the system bus and is not recommended.")
+            + u" "_s + newOnly,
+        {choice(u"none"_s, i18nc("@item:inlistbox", "None (no system services)")),
+         choice(u"filtered"_s, proxy ? i18nc("@item:inlistbox", "Filtered (recommended)") : i18nc("@item:inlistbox", "Filtered (unavailable: xdg-dbus-proxy not installed)")),
+         choice(u"full"_s, i18nc("@item:inlistbox", "Full (not recommended)"))},
+        {.section = u"systembus"_s, .formLabel = i18nc("@label", "System services")});
+    const auto toggle = [&](const QString &key, const QString &label, const QString &help, bool experimental = false) {
+        add(key, busGroup, label, help + (experimental ? u" "_s + i18nc("@info", "Experimental: it may not work inside the desktop's sandbox.") : QString()), boolean,
+            {.section = u"systembus"_s, .advanced = experimental, .formLabel = label, .unavailable = proxyMissing});
+    };
+    toggle(u"SystemBusNetwork"_s, i18nc("@label", "Network status"), i18nc("@info", "Lets the network widget and Network settings read NetworkManager. They can show connections and networks but cannot connect, disconnect or change them. Used with Filtered."));
+    toggle(u"SystemBusPower"_s, i18nc("@label", "Power and sessions"), i18nc("@info", "Lets power and session widgets read battery and session information (UPower and login queries). They cannot suspend, restart or shut down the computer. Used with Filtered."));
+    toggle(u"SystemBusPackages"_s, i18nc("@label", "Software and updates"), i18nc("@info", "Lets Discover use PackageKit and firmware updates. Installing still needs the account's permission. Used with Filtered."));
+    toggle(u"SystemBusBluetooth"_s, i18nc("@label", "Bluetooth"), i18nc("@info", "Lets the Bluetooth widget talk to BlueZ. Used with Filtered."));
+    toggle(u"SystemBusPolkit"_s, i18nc("@label", "Authentication prompts"), i18nc("@info", "Lets programs in the desktop ask for administrator authentication and starts the KDE authentication agent in the desktop. Used with Filtered or Full."), true);
+    toggle(u"SystemBusPrinting"_s, i18nc("@label", "Printers"), i18nc("@info", "Lets printer widgets use the printing service and shares its socket with the desktop. Used with Filtered or Full."), true);
+    add(u"SystemBusExtra"_s, busGroup, i18nc("@label", "Additional services"),
+        i18nc("@info", "More system bus names to allow with Filtered, separated by commas, for example org.example.Service or org.example.Other.* . Each name needs at least two parts. The bus itself, org.freedesktop.systemd1 and org.freedesktop.machine1 are refused. An allowed name can be fully controlled by the desktop's programs. An administrator can also set values for one account in /etc/farside/virtual-session.d/<account>.conf; those replace these values for that account.")
+            + u" "_s + newOnly,
+        {}, {.section = u"systembus"_s, .advanced = true, .formLabel = i18nc("@label", "Additional services"), .keepEmpty = true, .unavailable = proxyMissing});
     return result;
 }

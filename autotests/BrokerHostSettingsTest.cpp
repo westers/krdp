@@ -15,7 +15,8 @@ private Q_SLOTS:
         // OPT-067 added ClipboardDirection to Console and Virtual (the text clipboard bridge's direction).
         QCOMPARE(keys(Scope::Console).size(), 17);
         QCOMPARE(keys(Scope::Virtual).size(), 16);
-        QCOMPARE(keys(Scope::VirtualSession).size(), 2);
+        // OPT-075 added the eight system-bus keys to the New Virtual Desktops scope (RenderPci and VaapiDriver plus eight).
+        QCOMPARE(keys(Scope::VirtualSession).size(), 10);
         for (const auto scope : {Scope::Console, Scope::Virtual, Scope::VirtualSession}) {
             const auto values = defaults(scope);
             const auto result = edit(scope, "# keep\nUNKNOWN=fixture-only-secret\n", values);

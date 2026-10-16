@@ -6,6 +6,7 @@
 #include <QSize>
 #include <QStringList>
 #include <QUuid>
+#include "VirtualSystemBus.h"
 #include <optional>
 
 namespace KRdp
@@ -31,6 +32,8 @@ struct VirtualSessionLaunchPlan {
         QSize initialSize{1280, 720};
         /// AUD-FIX8 B3: VaapiDriverMode for the desktop's worker (VaapiDriverMode::normalize()).
         QString vaapiDriver = QStringLiteral("auto");
+        /// OPT-075: the resolved system-bus plan (VirtualSystemBus::plan()). Default none emits no arguments.
+        VirtualSystemBus::Plan systemBus = {};
     };
     QString program;
     QStringList arguments;
@@ -93,6 +96,14 @@ struct VirtualSessionLaunchPlan {
         if (!vaapiDrivers.contains(config.vaapiDriver)) {
             return refuse(QStringLiteral("VaapiDriverMode must be auto, off, radeonsi, iHD or i965"));
         }
+        const auto &bus = config.systemBus;
+        if (bus.mode != VirtualSystemBus::Mode::Filtered ? !bus.proxyRules.isEmpty() : bus.proxyRules.size() > VirtualSystemBus::MaximumRules)
+            return refuse(QStringLiteral("System-bus proxy rules belong to the filtered mode and are bounded"));
+        for (const auto &rule : bus.proxyRules) {
+            if (!VirtualSystemBus::validProxyArgument(rule)) return refuse(QStringLiteral("System-bus proxy rule is not in the permitted grammar"));
+        }
+        if (bus.mode == VirtualSystemBus::Mode::None && (bus.polkitAgent || bus.cupsSocket))
+            return refuse(QStringLiteral("A polkit agent or CUPS socket needs a system bus"));
         VirtualSessionLaunchPlan plan;
         // Production receives the fresh identity already persisted by the broker;
         // diagnostics allocate it here. This does not authorize runtime reuse:
@@ -111,6 +122,12 @@ struct VirtualSessionLaunchPlan {
         for (const auto &device : unique) plan.arguments.append({QStringLiteral("--allow-render-pci"), device});
         if (config.vaapiDriver != QLatin1String("auto"))
             plan.arguments.append({QStringLiteral("--vaapi-driver"), config.vaapiDriver});
+        if (bus.mode != VirtualSystemBus::Mode::None) {
+            plan.arguments.append({QStringLiteral("--system-bus"), VirtualSystemBus::modeName(bus.mode)});
+            for (const auto &rule : bus.proxyRules) plan.arguments.append({QStringLiteral("--system-bus-rule"), rule});
+            if (bus.polkitAgent) plan.arguments.append({QStringLiteral("--polkit-agent"), QStringLiteral("1")});
+            if (bus.cupsSocket) plan.arguments.append({QStringLiteral("--cups-socket"), QStringLiteral("1")});
+        }
         // No inherited display, bus, systemd-manager, Qt plugin, loader, or
         // physical-session audio environment. The namespace supplies its own.
         plan.environment.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin:/bin"));

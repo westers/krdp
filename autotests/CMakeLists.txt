@@ -51,6 +51,12 @@ target_include_directories(VirtualSessionAccountEnvironmentTest PRIVATE ${CMAKE_
 target_link_libraries(VirtualSessionAccountEnvironmentTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME VirtualSessionAccountEnvironmentTest COMMAND VirtualSessionAccountEnvironmentTest)
 
+add_executable(VirtualSystemBusTest VirtualSystemBusTest.cpp)
+target_include_directories(VirtualSystemBusTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_compile_definitions(VirtualSystemBusTest PRIVATE SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(VirtualSystemBusTest PRIVATE Qt6::Test Qt6::Core KRdpBrokerHostSettings)
+add_test(NAME VirtualSystemBusTest COMMAND VirtualSystemBusTest)
+
 add_executable(VirtualSessionLoginTest VirtualSessionLoginTest.cpp ${CMAKE_SOURCE_DIR}/server/VirtualSessionLogin.cpp)
 add_executable(OwnerWatchProbe OwnerWatchProbe.cpp)
 target_include_directories(OwnerWatchProbe PRIVATE ${CMAKE_SOURCE_DIR}/server)
@@ -184,6 +190,14 @@ if(KREADCONFIG6_EXECUTABLE AND BASH_EXECUTABLE)
     add_test(NAME VirtualSessionLockConfigTest COMMAND ${BASH_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSessionLockConfigTest.sh ${KREADCONFIG6_EXECUTABLE}
         ${CMAKE_SOURCE_DIR}/scripts/virtual-session-locked-config ${CMAKE_SOURCE_DIR}/scripts/launch-virtual-session.sh)
+endif()
+
+find_program(PYTHON3_EXECUTABLE python3)
+if(PYTHON3_EXECUTABLE AND BASH_EXECUTABLE)
+    # OPT-075: the launcher's system-bus setup with a fake proxy (no real bus, proxy or device).
+    add_test(NAME VirtualSystemBusLauncherTest COMMAND ${BASH_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSystemBusLauncherTest.sh ${CMAKE_SOURCE_DIR}/scripts/launch-virtual-session.sh ${PYTHON3_EXECUTABLE})
+    set_tests_properties(VirtualSystemBusLauncherTest PROPERTIES TIMEOUT 60)
 endif()
 
 find_program(PIPEWIRE_EXECUTABLE pipewire)

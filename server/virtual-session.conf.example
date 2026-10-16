@@ -1,0 +1,29 @@
+# /etc/farside/virtual-session.conf: settings for NEW retained Virtual desktops. Running desktops keep what
+# they were created with. Edit with the Farside settings page (Virtual) or by hand.
+
+# Graphics devices a new desktop may use (PCI addresses, comma separated; empty = none) and the VA-API driver.
+#FARSIDE_VIRTUAL_RENDER_PCI=
+#FARSIDE_VIRTUAL_VAAPI_DRIVER=auto
+
+# System-bus access for new desktops (OPT-075). The desktop runs in a sandbox without a system D-Bus, so the
+# network tray widget, Network settings, Discover, polkit, UPower and Bluetooth do not work without it.
+#   none      today's behavior: no system bus.
+#   filtered  (default) xdg-dbus-proxy exposes only the services switched on below. Needs the xdg-dbus-proxy
+#             package; without it the desktop is created with no system bus and a log line says so.
+#   full      the real system bus socket, unfiltered. Any program of the desktop's user can then talk to every
+#             system service the user may. Never the default; use it only on a host you trust completely.
+#FARSIDE_VIRTUAL_SYSTEM_BUS=filtered
+# Switches for filtered mode.
+#FARSIDE_VIRTUAL_SYSTEM_BUS_NETWORK=true      # NetworkManager, read-only (tray status, Network settings opens)
+#FARSIDE_VIRTUAL_SYSTEM_BUS_POWER=true        # UPower and logind queries, read-only
+#FARSIDE_VIRTUAL_SYSTEM_BUS_PACKAGES=false    # PackageKit and fwupd (Discover)
+#FARSIDE_VIRTUAL_SYSTEM_BUS_POLKIT=false      # polkit plus an authentication agent in the desktop. Experimental
+#FARSIDE_VIRTUAL_SYSTEM_BUS_BLUETOOTH=false   # BlueZ
+#FARSIDE_VIRTUAL_SYSTEM_BUS_PRINTING=false    # CUPS helper and socket. Experimental
+# Advanced: more bus names to allow, comma separated, for example org.example.Service,org.example.Other.*
+# The bus itself, org.freedesktop.systemd1 and org.freedesktop.machine1 are refused.
+#FARSIDE_VIRTUAL_SYSTEM_BUS_EXTRA=
+
+# Per-user override: /etc/farside/virtual-session.d/<login>.conf (root-owned, not writable by others) may set any of
+# the FARSIDE_VIRTUAL_SYSTEM_BUS* keys above for one account; keys it leaves out use the values in this file.
+# A file with any other key or an invalid value gives that user no system bus.
