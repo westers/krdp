@@ -46,6 +46,17 @@ public:
     bool clientToHostAllowed() const;
     /** The host copied text: tell the client (coalesced, at most one format list per HostAnnounceIntervalMs). */
     void announceHostText();
+    /**
+     * OPT-072: the host copied \a text and/or an \a image (a copy can have both). The format list names
+     * CF_UNICODETEXT for text and the registered "PNG" plus CF_DIB for an image; nothing of either is held here.
+     */
+    void announceHost(bool text, bool image);
+    /**
+     * The answer to hostImageRequested(\a requestId): the host's image as \a png (PNG, validated by the caller's
+     * worker, at most ClipboardLimits::MaxImageBytes) when \a ok, a refusal otherwise. Sent as "PNG" or, for a
+     * client that asked for CF_DIB, converted to a 24-bit DIB (refused over ClipboardLimits::MaxImageWireBytes).
+     */
+    void provideHostImage(quint64 requestId, const QByteArray &png, bool ok);
     /** The answer to hostTextRequested(\a requestId): \a text (host LF) when \a ok, a refusal otherwise. */
     void provideHostText(quint64 requestId, const QString &text, bool ok);
     /** Forget the host side: withdraw an announcement, fail a pending request. Handover, control change, denial. */
@@ -54,6 +65,8 @@ public:
     void resetClientSide();
     /** The client pasted: the host's text is wanted for \a requestId (answer with provideHostText()). */
     Q_SIGNAL void hostTextRequested(quint64 requestId);
+    /** OPT-072: the client pasted an image: the host's image is wanted for \a requestId (answer with provideHostImage()). */
+    Q_SIGNAL void hostImageRequested(quint64 requestId);
 
     struct Counters {
         quint64 announces = 0; ///< format lists sent for a host copy
@@ -65,7 +78,10 @@ public:
         quint64 refusedBusy = 0;
         quint64 clientCopies = 0; ///< client texts passed on
         quint64 hostBytes = 0; ///< UTF-8 bytes of host text served
-        quint64 clientBytes = 0; ///< UTF-8 bytes of client text passed on
+        quint64 clientBytes = 0; ///< UTF-8 bytes of client text passed on (OPT-072: encoded bytes of an image)
+        quint64 hostImages = 0; ///< OPT-072: host images delivered to the client
+        quint64 clientImages = 0; ///< OPT-072: client images passed on
+        quint64 refusedMalformed = 0; ///< OPT-072: a client picture that was not one
     };
     Counters counters() const;
 
