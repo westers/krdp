@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+#include "VirtualSessionAccountEnvironment.h"
 #include "VirtualSessionGuardian.h"
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -84,9 +85,8 @@ int main(int argc, char **argv)
         auto storage = KRdp::VirtualSessionStorage::prepare(getuid(), QString::fromLocal8Bit(account.pw_dir),
             parser.value(QStringLiteral("session")), parser.value(QStringLiteral("launch-id")), token, &error);
         if (!storage) { qCritical().noquote() << error; return 1; }
-        environment.insert(QStringLiteral("HOME"), QString::fromLocal8Bit(account.pw_dir));
-        environment.insert(QStringLiteral("USER"), QString::fromLocal8Bit(account.pw_name));
-        environment.insert(QStringLiteral("LOGNAME"), QString::fromLocal8Bit(account.pw_name));
+        KRdp::VirtualSessionAccountEnvironment::apply(environment, QString::fromLocal8Bit(account.pw_name),
+            QString::fromLocal8Bit(account.pw_dir), account.pw_shell ? QString::fromLocal8Bit(account.pw_shell) : QString());
         environment.insert(QStringLiteral("FARSIDE_VIRTUAL_RUNTIME"), storage->runtimeDirectory());
         environment.insert(QStringLiteral("FARSIDE_VIRTUAL_PROFILE"), storage->profileDirectory());
         started = guardian.startPrepared(getuid(), parser.value(QStringLiteral("session")), token, std::move(storage),

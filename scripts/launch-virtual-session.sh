@@ -111,14 +111,18 @@ if [[ -e /sys/kernel/security/apparmor/.access ]]; then
     apparmor_query=(--bind /sys/kernel/security/apparmor/.access /sys/kernel/security/apparmor/.access)
 fi
 printf 'Selected isolated render GPU %s (%s, VaapiDriverMode %s); desktop %s\n' "$selected" "$render_node" "$vaapi_driver" "$session"
-exec env -i PATH=/usr/bin:/bin HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" LANG=C.UTF-8 \
+# OPT-073: env -i drops SHELL, so Konsole could not find its profile command. The guardian
+# passes the passwd shell in SHELL; accept only an absolute single-line path, else /bin/bash.
+login_shell=${SHELL:-}
+if [[ $login_shell != /* || $login_shell == *[[:cntrl:]]* ]]; then login_shell=/bin/bash; fi
+exec env -i PATH=/usr/bin:/bin HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" SHELL="$login_shell" LANG=C.UTF-8 \
     XDG_RUNTIME_DIR="$runtime" XDG_CONFIG_HOME="$profile/config" XDG_CACHE_HOME="$profile/cache" \
     XDG_STATE_HOME="$profile/state" XDG_DATA_HOME="$profile/data" XDG_CONFIG_DIRS="$runtime/config-defaults" \
     XDG_DATA_DIRS=/usr/local/share:/usr/share XDG_CURRENT_DESKTOP=KDE XDG_MENU_PREFIX=plasma- XDG_SESSION_TYPE=wayland \
     PIPEWIRE_RUNTIME_DIR="$runtime" PIPEWIRE_REMOTE=pipewire-0 PULSE_RUNTIME_PATH="$runtime/pulse" PULSE_SERVER="unix:$runtime/pulse/native" \
     "${render_environment[@]}" \
     bwrap --unshare-pid --unshare-ipc --die-with-parent --new-session --ro-bind / / \
-    "${apparmor_query[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run \
+    "${apparmor_query[@]}" --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run --chdir "$HOME" \
     "${render_bindings[@]}" --perms 01777 --dir /tmp/.X11-unix \
     --bind "$HOME" "$HOME" --bind "$runtime" "$runtime" \
     dbus-run-session --config-file="$support/virtual-session-bus.conf" \
