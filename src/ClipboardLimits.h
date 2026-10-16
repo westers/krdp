@@ -14,11 +14,16 @@ namespace KRdp::ClipboardLimits
 constexpr qint64 MaxTextBytes = 1024 * 1024;
 /// The same text as CF_UNICODETEXT on the cliprdr wire (UTF-16LE with its terminator, CRLF).
 constexpr qint64 MaxWireBytes = 2 * MaxTextBytes + 2;
+/// OPT-072: an image carried between the broker and the worker, and as the "PNG" cliprdr format: encoded bytes.
+constexpr qint64 MaxImageBytes = 16 * 1024 * 1024;
+/// The most a raw CF_DIB / CF_DIBV5 response is on the cliprdr wire (either direction).
+constexpr qint64 MaxImageWireBytes = 64 * 1024 * 1024;
 /// Client copies accepted per window, and the window.
 constexpr int MaxSets = 20;
 constexpr qint64 SetWindowMs = 10000;
-/// Bytes of client copies accepted per minute.
-constexpr qint64 MaxBytesPerMinute = 8 * 1024 * 1024;
+/// Bytes of client copies accepted per minute, text and images together (an image counts its encoded bytes; OPT-072
+/// raised this from 8 MiB so one 16 MiB image can pass; the copies-per-window limit is unchanged).
+constexpr qint64 MaxBytesPerMinute = 64 * 1024 * 1024;
 constexpr qint64 ByteWindowMs = 60000;
 
 /**

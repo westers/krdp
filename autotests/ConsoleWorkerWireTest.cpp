@@ -45,6 +45,8 @@ private Q_SLOTS:
     void readOnlyTopologyRecordIsBounded();
     void clipboardRecordsRoundTripAndAreBounded();
     void clipboardGatesAreStrict();
+    void clipboardImageRecordsRoundTripAndAreBounded();
+    void clipboardImageGatesAreStrict();
     void heartbeatAndLocalReclaimRecordsAreStrict();
     void hostPointerRecordIsStrictAndCarriesNoInputData();
     void wireSeventeenIsRefused();
@@ -560,7 +562,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(18));
+    QCOMPARE(ProtocolVersion, quint16(19));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -952,7 +954,7 @@ void ConsoleWorkerWireTest::roundTripsControlGeneration()
 // OPT-067 (wire 16): the six clipboard records.
 void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(18));
+    QCOMPARE(ProtocolVersion, quint16(19));
     QCOMPARE(int(LastKind), int(Kind::HostPointer));
     const ClipboardPolicy policy{7, 42, true, false, true, false};
     const ClipboardOffer offer{3, 1};
@@ -999,7 +1001,7 @@ void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
     shortData.payload.truncate(10);
     QVERIFY(!clipboardData(shortData));
     auto shortSet = *setRecord;
-    shortSet.payload.truncate(15);
+    shortSet.payload.truncate(16);
     QVERIFY(!clipboardSet(shortSet));
 
     // Policy: revision 0, flag out of range, a greeter that offers its clipboard.
@@ -1020,7 +1022,7 @@ void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
         QVERIFY(clipboardPolicy(*d.next()));
     }
     // Offer: seq 0 and flags other than text are refused. Request: id 0, 0 bytes, more than the cap.
-    for (const auto &bad : {ClipboardOffer{0, 1}, ClipboardOffer{1, 0}, ClipboardOffer{1, 3}}) {
+    for (const auto &bad : {ClipboardOffer{0, 1}, ClipboardOffer{1, 0}, ClipboardOffer{1, 4}}) {
         Deframer d;
         d.feed(frame(bad));
         QVERIFY(!clipboardOffer(*d.next()));
@@ -1039,10 +1041,10 @@ void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
         raw.payload[16] = char(LastClipboardStatus + 1);
         QVERIFY(!clipboardData(raw));
         auto huge = *dataRecord;
-        huge.payload = huge.payload.left(17) + QByteArray(MaxClipboardBytes + 1, 'a');
+        huge.payload = huge.payload.left(18) + QByteArray(MaxClipboardBytes + 1, 'a');
         QVERIFY(!clipboardData(huge));
         auto limit = *dataRecord;
-        limit.payload = limit.payload.left(17) + QByteArray(MaxClipboardBytes, 'a');
+        limit.payload = limit.payload.left(18) + QByteArray(MaxClipboardBytes, 'a');
         QVERIFY(clipboardData(limit));
         auto empty = frame(ClipboardData{5, 1, ClipboardStatus::Gone, QStringLiteral("must not travel")});
         Deframer e;
@@ -1064,7 +1066,7 @@ void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
     }
     {
         auto huge = *setRecord;
-        huge.payload = huge.payload.left(16) + QByteArray(MaxClipboardBytes + 1, 'a');
+        huge.payload = huge.payload.left(17) + QByteArray(MaxClipboardBytes + 1, 'a');
         QVERIFY(!clipboardSet(huge));
         Deframer d;
         d.feed(frame(ClipboardSet{2, 1, {}}));
@@ -1118,6 +1120,126 @@ void ConsoleWorkerWireTest::clipboardGatesAreStrict()
     QVERIFY(!mayOfferClipboard({5, 42, false, true, false, false}, true));
     QVERIFY(!mayOfferClipboard(both, false)); // not a desktop
     QVERIFY(!mayOfferClipboard({5, 42, true, false, false, true}, false));
+}
+
+// OPT-072 (wire 19): the clipboard records carry a kind; an image is PNG bytes, bounded separately from text.
+void ConsoleWorkerWireTest::clipboardImageRecordsRoundTripAndAreBounded()
+{
+    const QByteArray png("\x89PNG\r\n\x1a\n-pretend-image-bytes", 30);
+    const ClipboardOffer offer{4, ClipboardOfferImage};
+    const ClipboardOffer both{5, ClipboardOfferText | ClipboardOfferImage};
+    const ClipboardRequest request{21, MaxClipboardImageBytes, ClipboardKind::Image};
+    const ClipboardData data{21, 4, ClipboardStatus::Ok, {}, ClipboardKind::Image, png};
+    const ClipboardData refused{22, 4, ClipboardStatus::TooLarge, {}, ClipboardKind::Image, {}};
+    const ClipboardSet set{23, 42, {}, ClipboardKind::Image, png};
+
+    Deframer deframer;
+    deframer.feed(frame(offer) + frame(both) + frame(request) + frame(data) + frame(refused) + frame(set));
+    const auto offerRecord = deframer.next();
+    const auto bothRecord = deframer.next();
+    const auto requestRecord = deframer.next();
+    const auto dataRecord = deframer.next();
+    const auto refusedRecord = deframer.next();
+    const auto setRecord = deframer.next();
+    QVERIFY(offerRecord && bothRecord && requestRecord && dataRecord && refusedRecord && setRecord);
+    QCOMPARE(deframer.takeInvalidCount(), 0);
+    QCOMPARE(clipboardOffer(*offerRecord), std::optional(offer));
+    QCOMPARE(clipboardOffer(*bothRecord), std::optional(both));
+    QCOMPARE(clipboardRequest(*requestRecord), std::optional(request));
+    QCOMPARE(clipboardData(*dataRecord), std::optional(data));
+    QCOMPARE(clipboardData(*refusedRecord), std::optional(refused));
+    QCOMPARE(clipboardSet(*setRecord), std::optional(set));
+    QVERIFY(clipboardData(*dataRecord)->text.isEmpty());
+
+    // A request's limit follows its kind: text stays 1 MiB, an image may ask for 16 MiB, never more.
+    for (const auto &bad : {ClipboardRequest{1, MaxClipboardBytes + 1, ClipboardKind::Text}, ClipboardRequest{1, MaxClipboardImageBytes + 1, ClipboardKind::Image},
+                            ClipboardRequest{1, 0, ClipboardKind::Image}}) {
+        Deframer d;
+        d.feed(frame(bad));
+        QVERIFY(!clipboardRequest(*d.next()));
+    }
+    {
+        auto raw = *requestRecord;
+        raw.payload[12] = char(2); // unknown kind
+        QVERIFY(!clipboardRequest(raw));
+        auto shorter = *requestRecord;
+        shorter.payload.chop(1);
+        QVERIFY(!clipboardRequest(shorter)); // a wire 18 request (12 bytes) is not read
+    }
+    // Data: unknown kind, an Ok image without bytes, an image over 16 MiB, at 16 MiB, bytes on a non-Ok status,
+    // and a text-kind body that is over the text cap even though an image could be that big.
+    {
+        auto raw = *dataRecord;
+        raw.payload[17] = char(2);
+        QVERIFY(!clipboardData(raw));
+        auto empty = *dataRecord;
+        empty.payload = empty.payload.left(18);
+        QVERIFY(!clipboardData(empty));
+        auto huge = *dataRecord;
+        huge.payload = huge.payload.left(18) + QByteArray(MaxClipboardImageBytes + 1, 'a');
+        QVERIFY(!clipboardData(huge));
+        auto limit = *dataRecord;
+        limit.payload = limit.payload.left(18) + QByteArray(MaxClipboardImageBytes, 'a');
+        const auto parsed = clipboardData(limit);
+        QVERIFY(parsed);
+        QCOMPARE(parsed->image.size(), qsizetype(MaxClipboardImageBytes));
+        auto smuggled = *refusedRecord;
+        smuggled.payload.append("pixels");
+        QVERIFY(!clipboardData(smuggled));
+        auto textHuge = *dataRecord;
+        textHuge.payload[17] = char(0); // kind Text
+        textHuge.payload = textHuge.payload.left(18) + QByteArray(MaxClipboardBytes + 1, 'a');
+        QVERIFY(!clipboardData(textHuge));
+    }
+    // Set: an image set has bytes (clearing is a text set), is bounded at 16 MiB, and the kind byte is checked.
+    {
+        auto raw = *setRecord;
+        raw.payload[16] = char(2);
+        QVERIFY(!clipboardSet(raw));
+        auto empty = *setRecord;
+        empty.payload = empty.payload.left(17);
+        QVERIFY(!clipboardSet(empty));
+        auto huge = *setRecord;
+        huge.payload = huge.payload.left(17) + QByteArray(MaxClipboardImageBytes + 1, 'a');
+        QVERIFY(!clipboardSet(huge));
+        auto limit = *setRecord;
+        limit.payload = limit.payload.left(17) + QByteArray(MaxClipboardImageBytes, 'a');
+        QVERIFY(clipboardSet(limit));
+        auto textHuge = *setRecord;
+        textHuge.payload[16] = char(0);
+        textHuge.payload = textHuge.payload.left(17) + QByteArray(MaxClipboardBytes + 1, 'a');
+        QVERIFY(!clipboardSet(textHuge));
+    }
+    // The picture is on the wire as raw bytes, not re-encoded.
+    QVERIFY(frame(set).contains(png));
+}
+
+void ConsoleWorkerWireTest::clipboardImageGatesAreStrict()
+{
+    const ControlState control{42, true};
+    const ClipboardPolicy both{5, 42, true, true, false, false};
+    const QByteArray png(1000, 'p');
+    const ClipboardSet set{9, 42, {}, ClipboardKind::Image, png};
+    // The same gates as text: control, generation, policy direction, greeter/desktop, increasing id.
+    QVERIFY(mayApplyClipboardSet(set, control, both, 8, true));
+    QVERIFY(!mayApplyClipboardSet(set, control, both, 9, true));
+    QVERIFY(!mayApplyClipboardSet({9, 41, {}, ClipboardKind::Image, png}, control, both, 8, true));
+    QVERIFY(!mayApplyClipboardSet(set, {42, false}, both, 8, true));
+    QVERIFY(!mayApplyClipboardSet(set, control, {5, 42, true, false, false, false}, 8, true)); // client to host denied
+    QVERIFY(!mayApplyClipboardSet(set, control, {6, 42, false, true, false, true}, 8, true)); // greeter policy, desktop worker
+    QVERIFY(mayApplyClipboardSet(set, control, {6, 42, false, true, false, true}, 8, false)); // a greeter takes client images
+    // Size: empty and over 16 MiB refused, 16 MiB accepted.
+    QVERIFY(!mayApplyClipboardSet({9, 42, {}, ClipboardKind::Image, {}}, control, both, 8, true));
+    QVERIFY(!mayApplyClipboardSet({9, 42, {}, ClipboardKind::Image, QByteArray(MaxClipboardImageBytes + 1, 'a')}, control, both, 8, true));
+    QVERIFY(mayApplyClipboardSet({9, 42, {}, ClipboardKind::Image, QByteArray(MaxClipboardImageBytes, 'a')}, control, both, 8, true));
+    // Text is still capped at its own limit.
+    QVERIFY(!mayApplyClipboardSet({9, 42, QString(MaxClipboardBytes + 1, QLatin1Char('a')), ClipboardKind::Text, {}}, control, both, 8, true));
+
+    // A greeter never answers an image request either, and a request needs the host-to-client direction.
+    const ClipboardRequest request{20, 1000, ClipboardKind::Image};
+    QVERIFY(mayAnswerClipboardRequest(request, control, both, 19, true));
+    QVERIFY(!mayAnswerClipboardRequest(request, control, {5, 42, false, true, false, false}, 19, true));
+    QVERIFY(!mayAnswerClipboardRequest(request, control, {6, 42, false, true, false, true}, 19, false));
 }
 
 // OPT-055 wave 2 (wire 17): Heartbeat carries exactly a sequence; LocalReclaim is a ControlState under its own kind.

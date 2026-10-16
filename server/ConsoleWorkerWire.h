@@ -71,7 +71,10 @@ namespace KRdp::ConsoleWorkerWire
 // shortcut ended Replace, so the broker reports deskInput rather than workerExit).
 // 18 (OPT-071): HostPointer (worker -> broker, after Ready, Console only): where the host's pointer is, in the client's
 // desktop coordinates, so the broker can show a desk user's pointer to the remote client. No key or button data.
-constexpr quint16 ProtocolVersion = 18;
+// 19 (OPT-072): the clipboard bridge carries images. ClipboardOffer flags bit 1 = an image is available; ClipboardRequest,
+// ClipboardData and ClipboardSet carry a ClipboardKind (text or image). An image is PNG, at most MaxClipboardImageBytes,
+// and is never logged. Policy, gates and the one-request-at-a-time rule are the text bridge's.
+constexpr quint16 ProtocolVersion = 19;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -1273,6 +1276,19 @@ inline std::optional<HostPointer> hostPointer(const Record &record)
 // ---- OPT-067 text clipboard bridge (wire 16) ----
 /// Largest text (UTF-8 bytes) either direction carries on the worker wire.
 constexpr quint32 MaxClipboardBytes = 1024 * 1024;
+/// OPT-072 (wire 19): largest image (encoded PNG bytes) either direction carries on the worker wire.
+constexpr quint32 MaxClipboardImageBytes = 16 * 1024 * 1024;
+
+/// What a clipboard record carries (wire 19).
+enum class ClipboardKind : quint8 { Text, Image };
+constexpr quint8 LastClipboardKind = quint8(ClipboardKind::Image);
+constexpr quint32 maxClipboardBytes(ClipboardKind kind)
+{
+    return kind == ClipboardKind::Image ? MaxClipboardImageBytes : MaxClipboardBytes;
+}
+/// ClipboardOffer flag bits.
+constexpr quint8 ClipboardOfferText = 1;
+constexpr quint8 ClipboardOfferImage = 2;
 
 /** Broker -> worker: the planner's decision. Revision is endpoint-local and strictly increases. */
 struct ClipboardPolicy {
@@ -1317,7 +1333,7 @@ inline std::optional<ClipboardPolicy> clipboardPolicy(const Record &record)
 /** Worker -> broker: the host's clipboard changed. No contents, no length. */
 struct ClipboardOffer {
     quint64 seq = 0;
-    quint8 flags = 1; // bit 0: text available
+    quint8 flags = ClipboardOfferText; // bit 0: text available, bit 1 (wire 19): an image is available
     bool operator==(const ClipboardOffer &) const = default;
 };
 
@@ -1337,7 +1353,8 @@ inline std::optional<ClipboardOffer> clipboardOffer(const Record &record)
     stream.setByteOrder(QDataStream::BigEndian);
     ClipboardOffer offer;
     stream >> offer.seq >> offer.flags;
-    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !offer.seq || offer.flags != 1) return std::nullopt;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !offer.seq || !offer.flags
+        || offer.flags > (ClipboardOfferText | ClipboardOfferImage)) return std::nullopt;
     return offer;
 }
 
@@ -1345,6 +1362,7 @@ inline std::optional<ClipboardOffer> clipboardOffer(const Record &record)
 struct ClipboardRequest {
     quint64 requestId = 0;
     quint32 maxBytes = MaxClipboardBytes;
+    ClipboardKind kind = ClipboardKind::Text;
     bool operator==(const ClipboardRequest &) const = default;
 };
 
@@ -1353,19 +1371,21 @@ inline QByteArray frame(const ClipboardRequest &request)
     QByteArray payload;
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
-    stream << request.requestId << request.maxBytes;
+    stream << request.requestId << request.maxBytes << quint8(request.kind);
     return frame(Kind::ClipboardRequest, payload);
 }
 
 inline std::optional<ClipboardRequest> clipboardRequest(const Record &record)
 {
-    if (record.kind != Kind::ClipboardRequest || record.payload.size() != 12) return std::nullopt;
+    if (record.kind != Kind::ClipboardRequest || record.payload.size() != 13) return std::nullopt;
     QDataStream stream(record.payload);
     stream.setByteOrder(QDataStream::BigEndian);
     ClipboardRequest request;
-    stream >> request.requestId >> request.maxBytes;
-    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !request.requestId
-        || !request.maxBytes || request.maxBytes > MaxClipboardBytes) return std::nullopt;
+    quint8 kind = 0;
+    stream >> request.requestId >> request.maxBytes >> kind;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !request.requestId || kind > LastClipboardKind) return std::nullopt;
+    request.kind = ClipboardKind(kind);
+    if (!request.maxBytes || request.maxBytes > maxClipboardBytes(request.kind)) return std::nullopt;
     return request;
 }
 
@@ -1377,13 +1397,15 @@ struct ClipboardData {
     quint64 requestId = 0;
     quint64 seq = 0;
     ClipboardStatus status = ClipboardStatus::Gone;
-    QString text; // LF line endings
+    QString text; // LF line endings (kind Text)
+    ClipboardKind kind = ClipboardKind::Text;
+    QByteArray image; // PNG (kind Image); only with status Ok
     bool operator==(const ClipboardData &) const = default;
 };
 
 namespace detail
 {
-constexpr qsizetype ClipboardTextHeader = 8 + 8 + 1;
+constexpr qsizetype ClipboardTextHeader = 8 + 8 + 1 + 1;
 }
 
 inline QByteArray frame(const ClipboardData &data)
@@ -1391,8 +1413,8 @@ inline QByteArray frame(const ClipboardData &data)
     QByteArray payload;
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
-    stream << data.requestId << data.seq << quint8(data.status);
-    if (data.status == ClipboardStatus::Ok) payload.append(data.text.toUtf8());
+    stream << data.requestId << data.seq << quint8(data.status) << quint8(data.kind);
+    if (data.status == ClipboardStatus::Ok) payload.append(data.kind == ClipboardKind::Image ? data.image : data.text.toUtf8());
     return frame(Kind::ClipboardData, payload);
 }
 
@@ -1400,17 +1422,25 @@ inline std::optional<ClipboardData> clipboardData(const Record &record)
 {
     using detail::ClipboardTextHeader;
     if (record.kind != Kind::ClipboardData || record.payload.size() < ClipboardTextHeader
-        || record.payload.size() > ClipboardTextHeader + qsizetype(MaxClipboardBytes)) return std::nullopt;
+        || record.payload.size() > ClipboardTextHeader + qsizetype(MaxClipboardImageBytes)) return std::nullopt;
     QDataStream stream(record.payload);
     stream.setByteOrder(QDataStream::BigEndian);
     ClipboardData data;
     quint8 status = 0;
-    stream >> data.requestId >> data.seq >> status;
-    if (stream.status() != QDataStream::Ok || !data.requestId || status > LastClipboardStatus) return std::nullopt;
+    quint8 kind = 0;
+    stream >> data.requestId >> data.seq >> status >> kind;
+    if (stream.status() != QDataStream::Ok || !data.requestId || status > LastClipboardStatus || kind > LastClipboardKind) return std::nullopt;
     data.status = ClipboardStatus(status);
+    data.kind = ClipboardKind(kind);
     const auto body = record.payload.mid(ClipboardTextHeader);
+    if (qint64(body.size()) > qint64(maxClipboardBytes(data.kind))) return std::nullopt;
     if (data.status != ClipboardStatus::Ok) return body.isEmpty() ? std::optional<ClipboardData>(data) : std::nullopt;
-    data.text = QString::fromUtf8(body);
+    if (data.kind == ClipboardKind::Image) {
+        if (body.isEmpty()) return std::nullopt; // an Ok image has bytes
+        data.image = body;
+    } else {
+        data.text = QString::fromUtf8(body);
+    }
     return data;
 }
 
@@ -1418,7 +1448,9 @@ inline std::optional<ClipboardData> clipboardData(const Record &record)
 struct ClipboardSet {
     quint64 setId = 0;
     quint64 controlGeneration = 0;
-    QString text; // LF line endings; empty clears the host clipboard
+    QString text; // LF line endings; empty clears the host clipboard (kind Text)
+    ClipboardKind kind = ClipboardKind::Text;
+    QByteArray image; // PNG (kind Image); never empty
     bool operator==(const ClipboardSet &) const = default;
 };
 
@@ -1427,22 +1459,31 @@ inline QByteArray frame(const ClipboardSet &set)
     QByteArray payload;
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
-    stream << set.setId << set.controlGeneration;
-    payload.append(set.text.toUtf8());
+    stream << set.setId << set.controlGeneration << quint8(set.kind);
+    payload.append(set.kind == ClipboardKind::Image ? set.image : set.text.toUtf8());
     return frame(Kind::ClipboardSet, payload);
 }
 
 inline std::optional<ClipboardSet> clipboardSet(const Record &record)
 {
-    constexpr qsizetype header = 16;
+    constexpr qsizetype header = 17;
     if (record.kind != Kind::ClipboardSet || record.payload.size() < header
-        || record.payload.size() > header + qsizetype(MaxClipboardBytes)) return std::nullopt;
+        || record.payload.size() > header + qsizetype(MaxClipboardImageBytes)) return std::nullopt;
     QDataStream stream(record.payload);
     stream.setByteOrder(QDataStream::BigEndian);
     ClipboardSet set;
-    stream >> set.setId >> set.controlGeneration;
-    if (stream.status() != QDataStream::Ok || !set.setId || !set.controlGeneration) return std::nullopt;
-    set.text = QString::fromUtf8(record.payload.mid(header));
+    quint8 kind = 0;
+    stream >> set.setId >> set.controlGeneration >> kind;
+    if (stream.status() != QDataStream::Ok || !set.setId || !set.controlGeneration || kind > LastClipboardKind) return std::nullopt;
+    set.kind = ClipboardKind(kind);
+    const auto body = record.payload.mid(header);
+    if (qint64(body.size()) > qint64(maxClipboardBytes(set.kind))) return std::nullopt;
+    if (set.kind == ClipboardKind::Image) {
+        if (body.isEmpty()) return std::nullopt; // an image copy has bytes; clearing is a text set
+        set.image = body;
+    } else {
+        set.text = QString::fromUtf8(body);
+    }
     return set;
 }
 
@@ -1489,7 +1530,9 @@ inline bool mayApplyClipboardSet(const ClipboardSet &set, const ControlState &co
 {
     return control.active && control.generation != 0 && set.controlGeneration == control.generation
         && policy.controlGeneration == control.generation && policy.clientToHost && policy.greeter == !desktop
-        && quint64(set.text.toUtf8().size()) <= MaxClipboardBytes && set.setId > lastSetId;
+        && (set.kind == ClipboardKind::Image ? !set.image.isEmpty() && quint64(set.image.size()) <= MaxClipboardImageBytes
+                                             : quint64(set.text.toUtf8().size()) <= MaxClipboardBytes)
+        && set.setId > lastSetId;
 }
 
 inline bool mayAnswerClipboardRequest(const ClipboardRequest &request, const ControlState &control, const ClipboardPolicy &policy,

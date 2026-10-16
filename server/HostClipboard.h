@@ -6,18 +6,21 @@
 #include <functional>
 #include <optional>
 
+#include <QByteArray>
+#include <QDebug>
 #include <QElapsedTimer>
 #include <QObject>
 #include <QString>
 #include <QTimer>
 
+#include "ClipboardImage.h"
 #include "ClipboardText.h"
 #include "ConsoleWorkerWire.h"
 
 namespace KRdp
 {
 /**
- * OPT-067: the worker's side of the text clipboard bridge. The worker owns the host clipboard; this class
+ * OPT-067 / OPT-072: the worker's side of the text and image clipboard bridge. The worker owns the host clipboard; this class
  * is the only code that touches it, through a small Backend so the logic is tested without a compositor.
  *
  *  - A host copy is coalesced (SettleMs) into one ClipboardOffer{seq}: no contents, none when the policy
@@ -27,7 +30,11 @@ namespace KRdp
  *  - A ClipboardSet is written only when mayApplyClipboardSet() holds. Writes made on the login screen or
  *    a locked session carry the password-manager hint so Klipper keeps them out of its history.
  *  - Its own write is never offered back (a flag across the write, and the written text for EchoWindowMs).
- * Contents are never logged here or anywhere else on the bridge.
+ *  - OPT-072: an image is offered the same way (flag bit 1 of the offer, no pixels), read only when the client
+ *    pastes, turned into PNG (a PNG is checked and passed through, any other format decoded after its size
+ *    is checked) and refused over 16 MiB or 8192x8192; a client's PNG is checked again before it is written.
+ *    Text wins no precedence here: a copy with both is offered as both and the broker/client choose.
+ * Contents are never logged here or anywhere else on the bridge; a refusal logs a size and a reason only.
  */
 class HostClipboard
 {
@@ -36,6 +43,10 @@ public:
         std::function<bool()> hasText; ///< the host clipboard offers a text format (no data is read)
         std::function<QString()> readText; ///< its text as it is now (read on paste, and to spot an echo)
         std::function<bool(const QString &text, bool secret)> writeText; ///< empty text clears; false = failed
+        // OPT-072. Optional: a backend without them offers no images.
+        std::function<bool()> hasImage; ///< the host clipboard offers an image format (no data is read)
+        std::function<QByteArray()> readImage; ///< the image as the host holds it (any format; PNG preferred); empty = none
+        std::function<bool(const QByteArray &png, bool secret)> writeImage; ///< false = failed
     };
     using Sender = std::function<void(const QByteArray &record)>;
 
@@ -88,6 +99,11 @@ public:
             return;
         }
         m_lastRequestId = request.requestId;
+        if (request.kind == ConsoleWorkerWire::ClipboardKind::Image) {
+            answerImage(request, answer);
+            m_send(ConsoleWorkerWire::frame(answer));
+            return;
+        }
         if (!m_backend.hasText()) {
             answer.status = ConsoleWorkerWire::ClipboardStatus::Gone;
         } else {
@@ -109,7 +125,11 @@ public:
     void set(const ConsoleWorkerWire::ClipboardSet &set)
     {
         ConsoleWorkerWire::ClipboardSetResult result{set.setId, ConsoleWorkerWire::ClipboardSetStatus::Denied};
-        if (ConsoleWorkerWire::mayApplyClipboardSet(set, m_control, m_policy, m_lastSetId, m_desktop)) {
+        if (ConsoleWorkerWire::mayApplyClipboardSet(set, m_control, m_policy, m_lastSetId, m_desktop)
+            && set.kind == ConsoleWorkerWire::ClipboardKind::Image) {
+            m_lastSetId = set.setId;
+            result.status = writeImage(set);
+        } else if (ConsoleWorkerWire::mayApplyClipboardSet(set, m_control, m_policy, m_lastSetId, m_desktop)) {
             m_lastSetId = set.setId;
             QString text = set.text;
             text.remove(QChar(0));
@@ -120,6 +140,7 @@ public:
             if (ok) {
                 m_settle.stop(); // an offer about the previous host text is stale
                 m_lastWritten = text;
+                m_lastWrittenImage.reset();
                 m_written.start();
             }
         }
@@ -131,15 +152,83 @@ public:
 private:
     void offer()
     {
-        if (!ConsoleWorkerWire::mayOfferClipboard(m_policy, m_desktop) || !m_backend.hasText()) {
+        if (!ConsoleWorkerWire::mayOfferClipboard(m_policy, m_desktop)) {
             return;
         }
-        // Only just after a write of ours is the text read, to tell an asynchronous echo from a new copy.
-        if (m_lastWritten && m_written.isValid() && m_written.elapsed() < EchoWindowMs
+        quint8 flags = 0;
+        if (m_backend.hasText()) flags |= ConsoleWorkerWire::ClipboardOfferText;
+        if (m_backend.hasImage && m_backend.hasImage()) flags |= ConsoleWorkerWire::ClipboardOfferImage;
+        if (!flags) {
+            return;
+        }
+        // Only just after a write of ours is the content read, to tell an asynchronous echo from a new copy.
+        const bool recent = m_written.isValid() && m_written.elapsed() < EchoWindowMs;
+        if (recent && m_lastWritten && (flags & ConsoleWorkerWire::ClipboardOfferText)
             && ClipboardText::toHost(m_backend.readText()) == *m_lastWritten) {
+            flags &= ~ConsoleWorkerWire::ClipboardOfferText;
+        }
+        if (recent && m_lastWrittenImage && (flags & ConsoleWorkerWire::ClipboardOfferImage) && m_backend.readImage
+            && m_backend.readImage() == *m_lastWrittenImage) {
+            flags &= ~ConsoleWorkerWire::ClipboardOfferImage;
+        }
+        if (!flags) {
             return;
         }
-        m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{++m_offerSeq, 1}));
+        m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{++m_offerSeq, flags}));
+    }
+
+    static void logRefusal(const char *direction, const ClipboardImage::Result &result, qint64 bytes)
+    {
+        // A reason and sizes, never contents (OPT-072).
+        qInfo().nospace() << "Clipboard: refused (" << ClipboardImage::errorName(result.error) << ") direction=" << direction << " kind=image bytes=" << bytes
+                          << " size=" << result.size.width() << "x" << result.size.height();
+    }
+
+    void answerImage(const ConsoleWorkerWire::ClipboardRequest &request, ConsoleWorkerWire::ClipboardData &answer)
+    {
+        answer.kind = ConsoleWorkerWire::ClipboardKind::Image;
+        if (!m_backend.hasImage || !m_backend.readImage || !m_backend.hasImage()) {
+            answer.status = ConsoleWorkerWire::ClipboardStatus::Gone;
+            return;
+        }
+        const QByteArray raw = m_backend.readImage();
+        const auto converted = ClipboardImage::toPng(raw);
+        const quint64 limit = std::min<quint64>(request.maxBytes, ConsoleWorkerWire::MaxClipboardImageBytes);
+        if (converted.error == ClipboardImage::Error::Empty) {
+            answer.status = ConsoleWorkerWire::ClipboardStatus::Gone;
+        } else if (converted.error == ClipboardImage::Error::TooLarge || converted.error == ClipboardImage::Error::TooManyPixels) {
+            logRefusal("host-to-client", converted, raw.size());
+            answer.status = ConsoleWorkerWire::ClipboardStatus::TooLarge;
+        } else if (!converted.ok()) {
+            logRefusal("host-to-client", converted, raw.size());
+            answer.status = ConsoleWorkerWire::ClipboardStatus::Gone;
+        } else if (quint64(converted.data.size()) > limit) {
+            logRefusal("host-to-client", ClipboardImage::Result{{}, ClipboardImage::Error::TooLarge, converted.size}, converted.data.size());
+            answer.status = ConsoleWorkerWire::ClipboardStatus::TooLarge;
+        } else {
+            answer.status = ConsoleWorkerWire::ClipboardStatus::Ok;
+            answer.image = converted.data;
+        }
+    }
+
+    ConsoleWorkerWire::ClipboardSetStatus writeImage(const ConsoleWorkerWire::ClipboardSet &set)
+    {
+        // The broker has checked this PNG; the worker is the last gate before a host application sees it.
+        const auto checked = ClipboardImage::validatePng(set.image);
+        if (!checked.ok() || !m_backend.writeImage) {
+            if (!checked.ok()) logRefusal("client-to-host", checked, set.image.size());
+            return ConsoleWorkerWire::ClipboardSetStatus::Failed;
+        }
+        m_writing = true;
+        const bool ok = m_backend.writeImage(set.image, m_policy.locked || m_policy.greeter);
+        m_writing = false;
+        if (ok) {
+            m_settle.stop();
+            m_lastWrittenImage = set.image;
+            m_lastWritten.reset();
+            m_written.start();
+        }
+        return ok ? ConsoleWorkerWire::ClipboardSetStatus::Written : ConsoleWorkerWire::ClipboardSetStatus::Failed;
     }
 
     Backend m_backend;
@@ -153,6 +242,7 @@ private:
     quint64 m_lastSetId = 0;
     bool m_writing = false;
     std::optional<QString> m_lastWritten;
+    std::optional<QByteArray> m_lastWrittenImage;
     QElapsedTimer m_written;
 };
 }
