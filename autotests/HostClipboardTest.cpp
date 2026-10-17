@@ -4,6 +4,9 @@
 // OPT-067: the worker's side of the clipboard bridge against a fake host clipboard (no compositor, no daemon).
 
 #include <QBuffer>
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 #include <QImage>
 #include <QLoggingCategory>
 #include <QTest>
@@ -42,6 +45,9 @@ struct FakeHost {
         bool secret;
     };
     QList<RichWrite> richWrites;
+    // OPT-078
+    QByteArray uriList; // what the host holds as text/uri-list
+    int uriReads = 0;
     HostClipboard::Backend backend()
     {
         return {[this] { return hasText; },
@@ -74,7 +80,9 @@ struct FakeHost {
                         html = h;
                     }
                     return writeOk;
-                }};
+                },
+                [this] { return !uriList.isEmpty(); },
+                [this] { ++uriReads; return uriList; }};
     }
 };
 
@@ -90,10 +98,13 @@ struct Harness {
           }, desktop))
     {
     }
-    void allow(bool hostToClient, bool clientToHost, bool greeter = false, bool locked = false, quint64 revision = 1, quint64 generation = 5)
+    void allow(bool hostToClient, bool clientToHost, bool greeter = false, bool locked = false, quint64 revision = 1, quint64 generation = 5,
+               bool filesHostToClient = false)
     {
         board->setControl({generation, true});
-        board->setPolicy({revision, generation, hostToClient, clientToHost, locked, greeter});
+        ClipboardPolicy policy{revision, generation, hostToClient, clientToHost, locked, greeter};
+        policy.filesHostToClient = filesHostToClient;
+        board->setPolicy(policy);
     }
     template<typename T, typename F>
     QList<T> take(F decode)
@@ -107,6 +118,8 @@ struct Harness {
     QList<ClipboardOffer> offers() { return take<ClipboardOffer>([](const Record &r) { return clipboardOffer(r); }); }
     QList<ClipboardData> data() { return take<ClipboardData>([](const Record &r) { return clipboardData(r); }); }
     QList<ClipboardSetResult> results() { return take<ClipboardSetResult>([](const Record &r) { return clipboardSetResult(r); }); }
+    QList<FileReadResult> reads() { return take<FileReadResult>([](const Record &r) { return fileReadResult(r); }); }
+    QList<FileProgress> progress() { return take<FileProgress>([](const Record &r) { return fileProgress(r); }); }
 };
 
 QByteArray encode(const QImage &image, const char *format)
@@ -864,6 +877,214 @@ private Q_SLOTS:
             sawRefusal |= message.contains(QStringLiteral("kind=html"));
         }
         QVERIFY(sawRefusal);
+    }
+
+    // ---- OPT-078 (wire 21): host-to-client file copy ----
+    static QByteArray uriFor(const QString &path)
+    {
+        return QUrl::fromLocalFile(path).toEncoded() + "\r\n";
+    }
+
+    void aFileCopyIsOfferedAloneAndOnlyWhenTheFilePolicyAllows()
+    {
+        QTemporaryDir dir;
+        QFile file(dir.filePath(QStringLiteral("report.txt")));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("contents");
+        file.close();
+        Harness h;
+        h.host.text = QStringLiteral("report.txt"); // a file manager adds the names as text too
+        h.host.uriList = uriFor(file.fileName());
+        h.allow(true, true); // text direction only: no files flag
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferText);
+        QCOMPARE(h.host.uriReads, 0); // without the policy flag the list is not even read
+        h.allow(true, true, false, false, 2, 5, true);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 2);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferFiles); // files, alone
+        QCOMPARE(h.offers().last().seq, quint64(2));
+        QCOMPARE(h.host.uriReads, 1);
+        // a list with no local file in it is not a file copy
+        h.host.uriList = "smb://server/share/x\r\n";
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 3);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferText);
+        // the login screen shares no files
+        Harness greeter(false);
+        greeter.host.uriList = uriFor(file.fileName());
+        greeter.allow(false, true, true);
+        greeter.board->hostChanged();
+        QTest::qWait(300);
+        QVERIFY(greeter.offers().isEmpty());
+        // a locked desktop does offer them (host to client stays allowed there)
+        Harness locked;
+        locked.host.uriList = uriFor(file.fileName());
+        locked.allow(true, true, false, true, 1, 5, true);
+        locked.board->hostChanged();
+        QTRY_COMPARE(locked.offers().size(), 1);
+        QCOMPARE(locked.offers().last().flags, ClipboardOfferFiles);
+    }
+
+    void aFileListRequestWalksOffTheEventLoopAndAnswersWithTheDescriptor()
+    {
+        QTemporaryDir dir;
+        QDir().mkpath(dir.filePath(QStringLiteral("album/sub")));
+        QFile one(dir.filePath(QStringLiteral("album/CANARY-name.jpg")));
+        QVERIFY(one.open(QIODevice::WriteOnly));
+        one.write(QByteArray(5000, 'j'));
+        one.close();
+        QFile two(dir.filePath(QStringLiteral("album/sub/b.txt")));
+        QVERIFY(two.open(QIODevice::WriteOnly));
+        two.write("bb");
+        two.close();
+        QVERIFY(QFile::link(one.fileName(), dir.filePath(QStringLiteral("album/link"))));
+        Harness h;
+        h.host.uriList = uriFor(dir.filePath(QStringLiteral("album")));
+        h.allow(true, true, false, false, 1, 5, true);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        h.board->request({7, MaxClipboardFileListBytes, ClipboardKind::Files, true});
+        QTRY_COMPARE(h.data().size(), 1);
+        const auto answer = h.data().first();
+        QCOMPARE(answer.requestId, quint64(7));
+        QCOMPARE(answer.status, ClipboardStatus::Ok);
+        QCOMPARE(answer.kind, ClipboardKind::Files);
+        QCOMPARE(answer.seq, quint64(1));
+        QCOMPARE(answer.skipped, 1u); // the symlink
+        const auto decoded = ClipboardFileDescriptor::decode(answer.files);
+        QVERIFY(decoded.ok());
+        QCOMPARE(decoded.items.size(), 4);
+        QCOMPARE(decoded.items.at(1).name, QStringLiteral("album\\CANARY-name.jpg"));
+        QCOMPARE(h.board->files().counters().listsServed, quint64(1));
+        // A second ask for the same offer is answered from the walked snapshot.
+        h.board->request({8, MaxClipboardFileListBytes, ClipboardKind::Files, true});
+        QTRY_COMPARE(h.data().size(), 2);
+        QCOMPARE(h.data().last().files, answer.files);
+        // Ranges: lock, read, progress, unlock.
+        h.board->files().lock({1, 99});
+        h.board->files().read({1, 1, 1, 100, 4900});
+        QTRY_COMPARE(h.reads().size(), 1);
+        QCOMPARE(h.reads().first().status, FileReadStatus::Ok);
+        QCOMPARE(h.reads().first().data, QByteArray(4900, 'j'));
+        QTRY_VERIFY(!h.progress().isEmpty());
+        h.board->files().read({2, 1, 3, 0, 2});
+        QTRY_COMPARE(h.reads().size(), 2);
+        QCOMPARE(h.reads().last().data, QByteArray("bb"));
+        QTRY_VERIFY(h.progress().last().state == FileProgressState::Reading || h.progress().last().state == FileProgressState::Done);
+        // A new copy replaces the current offer; the locked one stays readable until unlock.
+        h.host.text = QStringLiteral("hello");
+        h.host.uriList.clear();
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 2);
+        QVERIFY(h.board->files().hasSnapshot(1));
+        h.board->files().read({3, 1, 1, 0, 10});
+        QTRY_COMPARE(h.reads().size(), 3);
+        QCOMPARE(h.reads().last().status, FileReadStatus::Ok);
+        h.board->files().unlock({99});
+        QVERIFY(!h.board->files().hasSnapshot(1));
+        h.board->files().read({4, 1, 1, 0, 10});
+        QTRY_COMPARE(h.reads().size(), 4);
+        QCOMPARE(h.reads().last().status, FileReadStatus::NoSuchOffer);
+    }
+
+    void fileRequestsAreRefusedWithoutThePolicyOrControl()
+    {
+        QTemporaryDir dir;
+        QFile file(dir.filePath(QStringLiteral("f")));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("x");
+        file.close();
+        Harness h;
+        h.host.uriList = uriFor(file.fileName());
+        h.allow(true, true, false, false, 1, 5, true);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        h.board->request({1, MaxClipboardFileListBytes, ClipboardKind::Files, false});
+        QTRY_COMPARE(h.data().size(), 1);
+        QCOMPARE(h.data().first().status, ClipboardStatus::Ok);
+        // The policy stops allowing files: the next list request is denied, reads are denied, the snapshot is gone.
+        h.allow(true, true, false, false, 2, 5, false);
+        QVERIFY(!h.board->files().hasSnapshot(1));
+        h.board->request({2, MaxClipboardFileListBytes, ClipboardKind::Files, false});
+        QCOMPARE(h.data().size(), 2);
+        QCOMPARE(h.data().last().status, ClipboardStatus::Denied);
+        h.board->files().read({1, 1, 0, 0, 1});
+        QCOMPARE(h.reads().size(), 1);
+        QCOMPARE(h.reads().last().status, FileReadStatus::Denied);
+        // Control moves to another generation: nothing is served either.
+        h.allow(true, true, false, false, 3, 5, true);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 2);
+        h.board->setControl({6, true});
+        h.board->files().read({2, 2, 0, 0, 1});
+        QCOMPARE(h.reads().last().status, FileReadStatus::Denied);
+    }
+
+    void aWalkThatIsAbandonedAnswersGoneAndAHugeFileIsSkippedWithoutSupport()
+    {
+        QTemporaryDir dir;
+        QFile file(dir.filePath(QStringLiteral("f")));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("x");
+        file.close();
+        Harness h;
+        h.host.uriList = uriFor(file.fileName()) + uriFor(dir.filePath(QStringLiteral("nothere")));
+        h.allow(true, true, false, false, 1, 5, true);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        h.board->request({1, MaxClipboardFileListBytes, ClipboardKind::Files, false});
+        h.allow(true, true, false, false, 2, 5, false); // turned off before the walk's result is delivered
+        QTRY_COMPARE(h.data().size(), 1);
+        QVERIFY(h.data().first().status == ClipboardStatus::Gone || h.data().first().status == ClipboardStatus::Ok);
+        // nothing offerable at all
+        Harness empty;
+        empty.host.uriList = uriFor(dir.filePath(QStringLiteral("nothere")));
+        empty.allow(true, true, false, false, 1, 5, true);
+        empty.board->hostChanged();
+        QTRY_COMPARE(empty.offers().size(), 1);
+        empty.board->request({1, MaxClipboardFileListBytes, ClipboardKind::Files, false});
+        QTRY_COMPARE(empty.data().size(), 1);
+        QCOMPARE(empty.data().first().status, ClipboardStatus::Empty);
+    }
+
+    void fileNamesAndContentsNeverReachALog()
+    {
+        g_messages.clear();
+        const auto previous = qInstallMessageHandler(capture);
+        QLoggingCategory::setFilterRules(QStringLiteral("*.debug=true"));
+        {
+            QTemporaryDir dir;
+            QDir().mkpath(dir.filePath(QStringLiteral("CANARY-dir")));
+            QFile file(dir.filePath(QStringLiteral("CANARY-dir/CANARY-file.txt")));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("CANARY-contents");
+            file.close();
+            QVERIFY(QFile::link(file.fileName(), dir.filePath(QStringLiteral("CANARY-dir/CANARY-link"))));
+            QFile mid(dir.filePath(QStringLiteral("CANARY-dir/CANARY-vanish")));
+            QVERIFY(mid.open(QIODevice::WriteOnly));
+            mid.write("v");
+            mid.close();
+            Harness h;
+            h.host.uriList = uriFor(dir.filePath(QStringLiteral("CANARY-dir")));
+            h.allow(true, true, false, false, 1, 5, true);
+            h.board->hostChanged();
+            QTRY_COMPARE(h.offers().size(), 1);
+            h.board->request({1, MaxClipboardFileListBytes, ClipboardKind::Files, true});
+            QTRY_COMPARE(h.data().size(), 1);
+            h.board->files().read({1, 1, 2, 0, 15});
+            QTRY_COMPARE(h.reads().size(), 1);
+            QVERIFY(QFile::remove(mid.fileName()));
+            h.board->files().read({2, 1, 3, 0, 1});
+            QTRY_COMPARE(h.reads().size(), 2);
+            QVERIFY(h.reads().last().status != FileReadStatus::Ok);
+        }
+        QLoggingCategory::setFilterRules(QString());
+        qInstallMessageHandler(previous);
+        for (const auto &message : std::as_const(g_messages)) {
+            QVERIFY2(!message.contains(QStringLiteral("CANARY")), qPrintable(message));
+        }
     }
 
     void contentsNeverReachALog()

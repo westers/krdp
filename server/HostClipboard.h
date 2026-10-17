@@ -18,6 +18,8 @@
 #include "ClipboardLimits.h"
 #include "ClipboardText.h"
 #include "ConsoleWorkerWire.h"
+#include "HostFileServer.h"
+#include "HostFiles.h"
 
 namespace KRdp
 {
@@ -67,6 +69,9 @@ public:
         std::function<bool()> hasHtml; ///< the host clipboard offers text/html (no data is read)
         std::function<ImageRead()> readHtml; ///< its bytes with a byte cap (any encoding; normalised here); tooLarge when the source sent more
         std::function<bool(const QString &text, const QByteArray &html, bool secret)> writeRich; ///< text/plain and text/html in one offer; false = failed
+        // OPT-078 (wire 21). Optional: a backend without them offers no files.
+        std::function<bool()> hasUriList; ///< the host clipboard offers text/uri-list (no data is read)
+        std::function<QByteArray()> readUriList; ///< its bytes (bounded by the backend); read once per copy, when the copy is announced
     };
     using Sender = std::function<void(const QByteArray &record)>;
 
@@ -75,8 +80,9 @@ public:
 
     HostClipboard(Backend backend, Sender send, bool desktop)
         : m_backend(std::move(backend))
-        , m_send(std::move(send))
+        , m_send(send)
         , m_desktop(desktop)
+        , m_files(send, desktop)
     {
         m_settle.setSingleShot(true);
         m_settle.setInterval(SettleMs);
@@ -92,12 +98,16 @@ public:
         m_settle.start(); // restarts: only the newest change is offered
     }
 
+    /** OPT-078: the file service (descriptors, ranges, locks) behind a Files offer. */
+    HostFileServer &files() { return m_files; }
+
     void setPolicy(const ConsoleWorkerWire::ClipboardPolicy &policy)
     {
         if (policy.revision <= m_policy.revision) {
             return; // stale
         }
         m_policy = policy;
+        m_files.setPolicy(policy);
         if (!ConsoleWorkerWire::mayOfferClipboard(m_policy, m_desktop)) {
             m_settle.stop();
         }
@@ -106,6 +116,7 @@ public:
     void setControl(const ConsoleWorkerWire::ControlState &control)
     {
         m_control = control;
+        m_files.setControl(control);
     }
 
     void request(const ConsoleWorkerWire::ClipboardRequest &request)
@@ -113,12 +124,17 @@ public:
         ConsoleWorkerWire::ClipboardData answer;
         answer.requestId = request.requestId;
         answer.seq = m_offerSeq;
+        answer.kind = request.kind; // a refusal is routed by its kind
         if (!ConsoleWorkerWire::mayAnswerClipboardRequest(request, m_control, m_policy, m_lastRequestId, m_desktop)) {
             answer.status = ConsoleWorkerWire::ClipboardStatus::Denied;
             m_send(ConsoleWorkerWire::frame(answer));
             return;
         }
         m_lastRequestId = request.requestId;
+        if (request.kind == ConsoleWorkerWire::ClipboardKind::Files) {
+            m_files.list(request); // answered from the background thread
+            return;
+        }
         if (request.kind == ConsoleWorkerWire::ClipboardKind::Image) {
             answerImage(request, answer);
             m_send(ConsoleWorkerWire::frame(answer));
@@ -185,6 +201,19 @@ private:
         if (!ConsoleWorkerWire::mayOfferClipboard(m_policy, m_desktop)) {
             return;
         }
+        // OPT-078: a copy of files is announced as files, alone (a file manager adds the paths as text; a client gets the files).
+        // Nothing is read from the files here: only the list of paths, which the offer's snapshot is taken from when the client pastes.
+        if (m_policy.filesHostToClient && m_backend.hasUriList && m_backend.readUriList && m_backend.hasUriList()) {
+            const auto parsed = HostFiles::parseUriList(m_backend.readUriList());
+            if (!parsed.paths.isEmpty()) {
+                ++m_offerSeq;
+                m_files.registerOffer(m_offerSeq, parsed.paths);
+                // Counts only (OPT-078): never a path.
+                qInfo().nospace() << "Clipboard: host copied files items=" << parsed.paths.size() << " refused=" << parsed.refused;
+                m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{m_offerSeq, ConsoleWorkerWire::ClipboardOfferFiles}));
+                return;
+            }
+        }
         const bool hasText = m_backend.hasText();
         const bool hasImage = m_backend.hasImage && m_backend.hasImage();
         const bool hasHtml = m_backend.hasHtml && m_backend.readHtml && m_backend.hasHtml();
@@ -219,7 +248,8 @@ private:
         if (!flags) {
             return;
         }
-        m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{++m_offerSeq, flags}));
+        m_files.registerOffer(++m_offerSeq, {}); // the files of an earlier copy are no longer the current offer (a lock may keep them)
+        m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{m_offerSeq, flags}));
     }
 
     /// The host copy is our own write coming back when it holds the same pixels. The bytes can differ: KSystemClipboard
@@ -363,6 +393,7 @@ private:
     Backend m_backend;
     Sender m_send;
     bool m_desktop;
+    HostFileServer m_files;
     ConsoleWorkerWire::ClipboardPolicy m_policy;
     ConsoleWorkerWire::ControlState m_control;
     QTimer m_settle;

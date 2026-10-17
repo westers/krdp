@@ -125,6 +125,26 @@ inline HostClipboard::Backend ksystemClipboardBackend()
             ownRich = mime;
             KSystemClipboard::instance()->setMimeData(mime, QClipboard::Clipboard);
             return true;
+        },
+        // OPT-078: a file copy (text/uri-list). Offered when listed (nothing is read); the list itself is read once per copy, with the
+        // byte cap of the other readers (a list of 100 000 paths is a few MB), only when the policy allows files.
+        [] {
+            const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
+            return data && data->hasFormat(QStringLiteral("text/uri-list"));
+        },
+        [] {
+            const QString mime = QStringLiteral("text/uri-list");
+            const auto read = SelectionReader::readSelection({mime}, [](const QString &) { return ClipboardLimits::MaxUriListBytes; });
+            switch (read.status) {
+            case SelectionReader::Status::Ok:
+                return read.data;
+            case SelectionReader::Status::Unavailable: {
+                const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
+                return data && data->hasFormat(mime) ? data->data(mime) : QByteArray();
+            }
+            default:
+                return QByteArray(); // too large, nothing there, a stalled source: no files
+            }
         }};
 }
 }

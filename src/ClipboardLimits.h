@@ -22,6 +22,8 @@ constexpr qint64 MaxImageWireBytes = 64 * 1024 * 1024;
 constexpr qint64 MaxHtmlBytes = 8 * 1024 * 1024;
 /// The most "HTML Format" can be on the cliprdr wire: the document plus its header and terminator.
 constexpr qint64 MaxHtmlWireBytes = MaxHtmlBytes + 4096;
+/// OPT-078: the most the worker reads of a `text/uri-list` (a copy of 100 000 files is a few MB of paths).
+constexpr qint64 MaxUriListBytes = 16 * 1024 * 1024;
 /// Client copies accepted per window, and the window.
 constexpr int MaxSets = 20;
 constexpr qint64 SetWindowMs = 10000;

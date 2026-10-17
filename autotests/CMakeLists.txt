@@ -1013,6 +1013,13 @@ foreach(name ClipboardFileNames ClipboardFileDescriptor ClipboardFileRequest Cli
     add_test(NAME ${name}Test COMMAND ${name}Test)
     set_tests_properties(${name}Test PROPERTIES TIMEOUT 120)
 endforeach()
+# OPT-078 phase 2: the worker's file source (URI list, bounded walk, snapshot reads) against real temporary directories.
+add_executable(HostFilesTest HostFilesTest.cpp)
+target_include_directories(HostFilesTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(HostFilesTest PRIVATE Qt6::Test Qt6::Core)
+target_link_options(HostFilesTest PRIVATE -Wl,--wrap=pread)
+add_test(NAME HostFilesTest COMMAND HostFilesTest)
+set_tests_properties(HostFilesTest PROPERTIES TIMEOUT 300)
 # ...and the parts that read the stats snapshot, plus the phase 0 measurement counters (these link libKRdp for StatsReporter).
 foreach(name ClipboardFileQos DeliveryStats)
     add_executable(${name}Test ${name}Test.cpp)
