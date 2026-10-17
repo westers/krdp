@@ -717,6 +717,20 @@ target_link_libraries(ClipboardBridgeTest PRIVATE Qt6::Test Qt6::Core KRdp)
 add_test(NAME ClipboardBridgeTest COMMAND ClipboardBridgeTest)
 set_tests_properties(ClipboardBridgeTest PROPERTIES TIMEOUT 90)
 
+# OPT-078 phase 2: host-to-client file copy end to end: a real Server, Clipboard and the worker's file source against krdpctl-probe --clipboard files.
+if(TARGET krdpctl-probe)
+    foreach(name ClipboardFileLoopback ClipboardFileLargeLoopback)
+        add_executable(${name}Test ${name}Test.cpp)
+        target_include_directories(${name}Test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+        target_include_directories(${name}Test SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+        target_link_libraries(${name}Test PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
+        target_compile_definitions(${name}Test PRIVATE KRDPCTL_PROBE="$<TARGET_FILE:krdpctl-probe>")
+        add_dependencies(${name}Test krdpctl-probe)
+        add_test(NAME ${name}Test COMMAND ${name}Test)
+        set_tests_properties(${name}Test PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77)
+    endforeach()
+endif()
+
 # OPT-078 phase 2: host-to-client file copy at the broker's cliprdr context (fake context, no peer).
 add_executable(ClipboardFilesBridgeTest ClipboardFilesBridgeTest.cpp)
 target_include_directories(ClipboardFilesBridgeTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
