@@ -18,6 +18,10 @@ constexpr qint64 MaxWireBytes = 2 * MaxTextBytes + 2;
 constexpr qint64 MaxImageBytes = 16 * 1024 * 1024;
 /// The most a raw CF_DIB / CF_DIBV5 response is on the cliprdr wire (either direction).
 constexpr qint64 MaxImageWireBytes = 64 * 1024 * 1024;
+/// OPT-077: HTML carried between the broker and the worker, and as the "HTML Format" cliprdr format (the document, UTF-8).
+constexpr qint64 MaxHtmlBytes = 8 * 1024 * 1024;
+/// The most "HTML Format" can be on the cliprdr wire: the document plus its header and terminator.
+constexpr qint64 MaxHtmlWireBytes = MaxHtmlBytes + 4096;
 /// Client copies accepted per window, and the window.
 constexpr int MaxSets = 20;
 constexpr qint64 SetWindowMs = 10000;
