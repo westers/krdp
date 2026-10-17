@@ -30,8 +30,8 @@ Live: same matrix reversed; disk-full case on a small loop mount on Sol; crash c
 `Clipboard transfer priority` UI (global + per-connection), Unlimited warning, host-limit display, notifications, docs (`docs/settings-ui.md`, user doc), packaging scripts.
 Live: mode comparison table (Auto/Balanced/Fixed/Unlimited) with the 6.4 counters.
 
-## Phase 5 (optional): lazy FUSE or drag and drop
-Only if Steve wants it after phase 4 numbers. Separate spec.
+## Phase 5 (follow-up, agreed): lazy FUSE, then drag and drop
+Decided by Steve 2026-10-17: FUSE comes after everything else is validated. Separate spec. Spec section 12 records the decisions (locked state applies to new transfers only; defaults; floor).
 
 ## Release gate
 All phases: units green on the test list of the build tree, QoS acceptance numbers recorded in HANDOFF Log, paired broker/worker wire v21 (never one half), Sol-first rollout.

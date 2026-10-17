@@ -1,6 +1,6 @@
 # Clipboard file transfer for Console (:3391) and Virtual (:3395) (design, 2026-10-17, OPT-078)
 
-Status: DESIGN ONLY. No code. Builds on `2026-10-13-console-clipboard-bridge-design.md` (text, OPT-067; images, OPT-072).
+Status: DESIGN; decisions amended 2026-10-17 (section 12); phases 0 and 1 (pure core) implemented on `file-clipboard-core`. Builds on `2026-10-13-console-clipboard-bridge-design.md` (text, OPT-067; images, OPT-072).
 Wire numbers: master is worker wire v19; the HTML-format change (branch `html-clipboard`) takes v20; file transfer uses **v21**.
 
 ## 1. Verdict and goals
@@ -189,7 +189,7 @@ does not negotiate locking gets the simple model: replacing the clipboard aborts
 | State | host to client files | client to host files |
 |---|---|---|
 | Greeter | deny | deny (a file dropped on a login screen is never wanted; text/images still allowed) |
-| Locked, same account | allow | **deny** (recommend: a file on a locked desktop would land under the user's session without the user present; the owner already authenticated, but staged data on a locked box is not worth it) |
+| Locked, same account | allow | **deny for NEW transfers** (see section 12.1; recommend: a file on a locked desktop would land under the user's session without the user present; the owner already authenticated, but staged data on a locked box is not worth it) |
 | Locked, other account | deny | deny |
 | Unlocked, same account | allow | allow |
 | Viewer (not controller) | deny | deny |
@@ -386,3 +386,15 @@ and the file transfer's own rate/window counters in `StatsReporter`.
 - No audio underrun counter exists today: acceptance cannot be measured until phase 0.
 - Wire v20/v21 sequencing with the `html-clipboard` branch: bump at merge time.
 - FreeRDP behaviours of the `cliprdr` server (huge file flag, lock) have not been exercised in this repo; spike S1 below.
+
+## 12. Amendment: Steve's decisions (2026-10-17)
+
+1. **Locked state applies to new transfers only.** The "deny while locked" rows in 4.5 apply to a request/transfer that has not started when the
+   screen is locked. A transfer already in progress when the screen locks continues to completion (cancel, replacement and connection loss
+   still end it). The policy planner therefore takes "transfer already started" as an input (per direction). The locked-state table
+   itself stands: client to host denied for new transfers while locked; host to client as in 4.5 (allowed for the same account).
+   Greeter, other-account, viewer and no-seat rows are unchanged and also apply to in-progress transfers only in the sense that a
+   transfer cannot be in progress there; an owner change or viewer demotion still ends a transfer.
+2. **FUSE is a follow-up (phase 5)** after everything else is validated, not part of phases 0-4. Staged background copy (3.2) is the design until then.
+3. **Defaults agreed:** `ClipboardFiles = both`; client `Clipboard transfer priority = Auto`.
+4. **Bandwidth floor 256 kbit/s agreed** (window cap 16 requests of 256 KiB unchanged). The free-space guard default `max(2 GiB, 5% of the filesystem)` is agreed.
