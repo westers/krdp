@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #pragma once
 #include "VirtualSessionControl.h"
+#include "ClipboardFilePacing.h"
 #include "ConsoleClipboardPolicy.h"
+#include "HostFileRelay.h"
 #include "ConsoleWorkerEndpoint.h"
 #include "ConsoleWorkerSession.h"
 #include "RemoteTopologyProtocol.h"
@@ -54,6 +56,8 @@ public:
     void setCameraLoopbackDevice(const QString &device) { m_cameraLoopbackDevice = device; }
     /** OPT-067: the administrator's ClipboardDirection; the planner narrows it by state. Call before the client authenticates. */
     void setClipboardDirection(ConsoleClipboardPolicy::Direction direction);
+    /** OPT-078: the host owner's ClipboardFiles and ClipboardFileMaxRate. Call before the client authenticates (the capability flags are exchanged once). */
+    void setClipboardFiles(ConsoleClipboardPolicy::Direction direction, const ClipboardFilePacing::Ceiling &ceiling);
 
 private:
     friend class VirtualSessionTransportTest;
@@ -114,6 +118,9 @@ private:
     void resetClipboard();
     std::optional<quint32> m_clipboardUid; // the identity the current plan was made for
     ConsoleClipboardPolicy::Direction m_clipboardDirection = ConsoleClipboardPolicy::Direction::Both;
+    ConsoleClipboardPolicy::Direction m_clipboardFiles = ConsoleClipboardPolicy::Direction::Both; // OPT-078
+    ClipboardFilePacing::Ceiling m_clipboardFileCeiling;
+    HostFileRelay m_fileRelay;
     std::optional<ConsoleClipboardPolicy::Plan> m_clipboardPlan;
     QHash<quint64, quint64> m_clipboardRequests; // endpoint request id -> the connection's Clipboard request id
     bool attachmentMatches(const VirtualSessionRegistry::Handle &handle) const;

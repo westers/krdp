@@ -47,7 +47,7 @@ defaults = session_defaults if scope == 'session' else {
     'Certificate': '/etc/farside/console.crt' if scope == 'console' else '/etc/farside/virtual-host.crt',
     'CertificateKey': '/etc/farside/console.key' if scope == 'console' else '/etc/farside/virtual-host.key',
     'Quality': '80', 'ClientQualityMax': '0', 'AdaptiveQuality': 'false', 'PreferAudioQuality': 'false',
-    'StandardClientMedia': 'true', 'CameraLoopbackDevice': 'none', 'SoftwareEncoding': 'auto', 'SoftwareAvc': 'auto', 'SoftwareHevc': 'auto', 'SoftwareAv1': 'auto', 'Av1Tiles': 'auto', 'ClipboardDirection': 'both'}
+    'StandardClientMedia': 'true', 'CameraLoopbackDevice': 'none', 'SoftwareEncoding': 'auto', 'SoftwareAvc': 'auto', 'SoftwareHevc': 'auto', 'SoftwareAv1': 'auto', 'Av1Tiles': 'auto', 'ClipboardDirection': 'both', 'ClipboardFiles': 'both', 'ClipboardFileMaxRate': 'auto'}
 if scope == 'console':
     defaults['VaapiDriver'] = 'auto'
 state_file = base / (scope + '.json')

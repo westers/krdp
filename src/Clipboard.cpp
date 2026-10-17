@@ -130,6 +130,7 @@ public:
     QTimer filePump; // FilePumpMs while requests wait
     Clipboard::FileRate fileRequest;
     ClipboardFilePacing::Ceiling fileCeiling;
+    std::optional<bool> stockOverride; // tests
     std::optional<Stats::Snapshot> fileStatsPrevious;
     ClipboardFilePacing::Clock::time_point lastFileTick{};
     bool fileTickValid = false;
@@ -1278,7 +1279,7 @@ bool Clipboard::Private::negotiated(bool *locking, bool *huge)
 ClipboardFilePacing::Policy Clipboard::Private::filePolicy() const
 {
     // A client without KRDPCTL (a stock client) cannot ask for a mode: Auto, and a window of at most four.
-    const bool stock = session && !session->isOwnClient();
+    const bool stock = stockOverride ? *stockOverride : session && !session->isOwnClient();
     return ClipboardFilePacing::effectivePolicy(fileRequest.mode, fileRequest.capBytesPerSecond, fileCeiling, stock);
 }
 
@@ -1500,6 +1501,14 @@ void Clipboard::setFileTransferRequest(const FileRate &request)
 void Clipboard::setFileCeiling(const ClipboardFilePacing::Ceiling &ceiling)
 {
     d->fileCeiling = ceiling;
+    if (d->serve) {
+        d->serve->setPolicy(d->filePolicy());
+    }
+}
+
+void Clipboard::setStockClientForTest(bool stock)
+{
+    d->stockOverride = stock;
     if (d->serve) {
         d->serve->setPolicy(d->filePolicy());
     }

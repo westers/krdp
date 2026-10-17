@@ -106,6 +106,8 @@ public:
     void setFileTransferRequest(const FileRate &request);
     void setFileCeiling(const ClipboardFilePacing::Ceiling &ceiling);
     ClipboardFilePacing::Policy effectiveFilePolicy() const;
+    /** Test seam: treat the client as a stock one (no KRDPCTL: Auto, window of at most four) or as our own, whatever the connection says. */
+    void setStockClientForTest(bool stock);
     /** The host's file service ended a transfer before the client was done (a changed or vanished file, a violation, a reset). */
     Q_SIGNAL void hostFileTransferEnded(quint64 seq, int reason, int cause);
     /** The answer to hostTextRequested(\a requestId): \a text (host LF) when \a ok, a refusal otherwise. */

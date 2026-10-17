@@ -39,11 +39,15 @@ Environment=FARSIDE_CONSOLE_AV1_TILES=auto
 # Clipboard bridge for text, formatted text and images (OPT-067, OPT-072, OPT-077): both, host-to-client, client-to-host or off. The host narrows it further by state
 # (nothing is read back from the login screen, nothing is shared with another account's lock screen).
 Environment=FARSIDE_CONSOLE_CLIPBOARD_DIRECTION=both
+# File copy (OPT-078): both, host-to-client, client-to-host or off. Only host-to-client is implemented; the clipboard direction above also applies.
+Environment=FARSIDE_CONSOLE_CLIPBOARD_FILES=both
+# The most a file transfer may take of the link: auto (no ceiling), balanced, or MB/s from 0.1 to 1000. Transfers yield to video and audio either way.
+Environment=FARSIDE_CONSOLE_CLIPBOARD_FILE_MAX_RATE=auto
 Environment=FARSIDE_CONSOLE_VAAPI_DRIVER=auto
 EnvironmentFile=-/etc/farside/console-host.conf
 # Publish the world-readable public-metadata snapshot the settings panel reads without a password.
 ExecStartPre=-@KDE_INSTALL_FULL_LIBEXECDIR@/farside-host-settings-helper --publish console
-ExecStart=@CMAKE_INSTALL_PREFIX@/bin/farside-console-host --worker ${FARSIDE_CONSOLE_WORKER} --certificate ${FARSIDE_CONSOLE_CERTIFICATE} --certificate-key ${FARSIDE_CONSOLE_CERTIFICATE_KEY} --address ${FARSIDE_CONSOLE_ADDRESS} --port ${FARSIDE_CONSOLE_PORT} --runtime-directory /run/farside-console --quality ${FARSIDE_CONSOLE_QUALITY} --client-quality-max ${FARSIDE_CONSOLE_CLIENT_QUALITY_MAX} --adaptive-quality ${FARSIDE_CONSOLE_ADAPTIVE_QUALITY} --prefer-audio-quality ${FARSIDE_CONSOLE_PREFER_AUDIO_QUALITY} --standard-client-media ${FARSIDE_CONSOLE_STANDARD_CLIENT_MEDIA} --camera-loopback-device ${FARSIDE_CONSOLE_CAMERA_LOOPBACK_DEVICE} --software-encoding ${FARSIDE_CONSOLE_SOFTWARE_ENCODING} --software-avc ${FARSIDE_CONSOLE_SOFTWARE_AVC} --software-hevc ${FARSIDE_CONSOLE_SOFTWARE_HEVC} --software-av1 ${FARSIDE_CONSOLE_SOFTWARE_AV1} --av1-tiles ${FARSIDE_CONSOLE_AV1_TILES} --clipboard-direction ${FARSIDE_CONSOLE_CLIPBOARD_DIRECTION} --vaapi-driver ${FARSIDE_CONSOLE_VAAPI_DRIVER}
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/farside-console-host --worker ${FARSIDE_CONSOLE_WORKER} --certificate ${FARSIDE_CONSOLE_CERTIFICATE} --certificate-key ${FARSIDE_CONSOLE_CERTIFICATE_KEY} --address ${FARSIDE_CONSOLE_ADDRESS} --port ${FARSIDE_CONSOLE_PORT} --runtime-directory /run/farside-console --quality ${FARSIDE_CONSOLE_QUALITY} --client-quality-max ${FARSIDE_CONSOLE_CLIENT_QUALITY_MAX} --adaptive-quality ${FARSIDE_CONSOLE_ADAPTIVE_QUALITY} --prefer-audio-quality ${FARSIDE_CONSOLE_PREFER_AUDIO_QUALITY} --standard-client-media ${FARSIDE_CONSOLE_STANDARD_CLIENT_MEDIA} --camera-loopback-device ${FARSIDE_CONSOLE_CAMERA_LOOPBACK_DEVICE} --software-encoding ${FARSIDE_CONSOLE_SOFTWARE_ENCODING} --software-avc ${FARSIDE_CONSOLE_SOFTWARE_AVC} --software-hevc ${FARSIDE_CONSOLE_SOFTWARE_HEVC} --software-av1 ${FARSIDE_CONSOLE_SOFTWARE_AV1} --av1-tiles ${FARSIDE_CONSOLE_AV1_TILES} --clipboard-direction ${FARSIDE_CONSOLE_CLIPBOARD_DIRECTION} --clipboard-files ${FARSIDE_CONSOLE_CLIPBOARD_FILES} --clipboard-file-max-rate ${FARSIDE_CONSOLE_CLIPBOARD_FILE_MAX_RATE} --vaapi-driver ${FARSIDE_CONSOLE_VAAPI_DRIVER}
 RuntimeDirectory=farside-console
 RuntimeDirectoryMode=0711
 Restart=on-failure

@@ -28,6 +28,15 @@ FARSIDE_CONSOLE_CERTIFICATE_KEY=/etc/farside/console.key
 # read back (pasting into it works), and another account's locked screen shares nothing.
 #FARSIDE_CONSOLE_CLIPBOARD_DIRECTION=both
 
+# File copy (Dolphin copy on one side, paste on the other; no size limit, folders included): both (default), host-to-client,
+# client-to-host or off. Only host to client exists today; the clipboard direction above also applies. A locked desktop still
+# lets a copy that is already running finish; the login screen shares no files.
+#FARSIDE_CONSOLE_CLIPBOARD_FILES=both
+
+# The most a file transfer may take of the link: auto (default: no ceiling, the transfer still yields to video and audio),
+# balanced (half of what the link can carry), or a rate in MB/s from 0.1 to 1000 (for example 5 or 2.5).
+#FARSIDE_CONSOLE_CLIPBOARD_FILE_MAX_RATE=auto
+
 # VA-API driver for the capture workers, like krdpserver's VaapiDriverMode: auto (default; a
 # LIBVA_DRIVER_NAME set in the desktop session is respected), off, radeonsi, iHD or i965.
 #FARSIDE_CONSOLE_VAAPI_DRIVER=auto

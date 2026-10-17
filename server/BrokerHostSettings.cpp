@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "BrokerHostSettings.h"
+#include "ClipboardTransfer.h"
 #include "CodecPolicy.h"
 #include "VaapiDriverMode.h"
 #include "VirtualSessionLaunchPlan.h"
@@ -32,7 +33,8 @@ QList<Field> fields(Scope scope)
         {u"SoftwareEncoding"_s, "SOFTWARE_ENCODING", "auto"},
         {u"SoftwareAvc"_s, "SOFTWARE_AVC", "auto"}, {u"SoftwareHevc"_s, "SOFTWARE_HEVC", "auto"}, {u"SoftwareAv1"_s, "SOFTWARE_AV1", "auto"},
         {u"Av1Tiles"_s, "AV1_TILES", "auto"},
-        {u"ClipboardDirection"_s, "CLIPBOARD_DIRECTION", "both"}};
+        {u"ClipboardDirection"_s, "CLIPBOARD_DIRECTION", "both"},
+        {u"ClipboardFiles"_s, "CLIPBOARD_FILES", "both"}, {u"ClipboardFileMaxRate"_s, "CLIPBOARD_FILE_MAX_RATE", "auto"}};
     if (scope == Scope::Console) result.append({u"VaapiDriver"_s, "VAAPI_DRIVER", "auto"});
     return result;
 }
@@ -197,9 +199,12 @@ std::optional<QString> normalize(Scope scope, const QString &key, const QString 
         if (const auto ceiling = CodecPolicy::parseCeilingSetting(value, family)) return QString::fromLatin1(CodecPolicy::ceilingSettingName(*ceiling, family));
     } else if (key == u"Av1Tiles") {
         if (const auto tiles = CodecPolicy::parseAv1Tiles(value)) return *tiles ? QString::number(*tiles) : u"auto"_s;
-    } else if (key == u"ClipboardDirection") {
-        // OPT-067: text clipboard bridge direction. Exactly the four spellings, no case folding.
+    } else if (key == u"ClipboardDirection" || key == u"ClipboardFiles") {
+        // OPT-067: clipboard bridge direction; OPT-078: file copy, the same four spellings. Exactly those, no case folding.
         if (value == u"both" || value == u"host-to-client" || value == u"client-to-host" || value == u"off") return value;
+    } else if (key == u"ClipboardFileMaxRate") {
+        // OPT-078: the most a file transfer may take of the link: auto, balanced, or MB/s from 0.1 to 1000.
+        return KRdp::ClipboardTransfer::normalizeCeiling(value);
     } else if (scope == Scope::VirtualSession && !VirtualSystemBus::environmentName(key).isEmpty()) {
         return VirtualSystemBus::normalizeValue(key, value);
     } else if (key == u"VaapiDriver") {

@@ -35,11 +35,15 @@ Environment=FARSIDE_VIRTUAL_CAMERA_LOOPBACK_DEVICE=none
 Environment=FARSIDE_VIRTUAL_AV1_TILES=auto
 # Clipboard bridge for text, formatted text and images (OPT-067, OPT-072, OPT-077): both, host-to-client, client-to-host or off.
 Environment=FARSIDE_VIRTUAL_CLIPBOARD_DIRECTION=both
+# File copy (OPT-078): both, host-to-client, client-to-host or off. Only host-to-client is implemented; the clipboard direction above also applies.
+Environment=FARSIDE_VIRTUAL_CLIPBOARD_FILES=both
+# The most a file transfer may take of the link: auto (no ceiling), balanced, or MB/s from 0.1 to 1000. Transfers yield to video and audio either way.
+Environment=FARSIDE_VIRTUAL_CLIPBOARD_FILE_MAX_RATE=auto
 EnvironmentFile=-/etc/farside/virtual-host.conf
 # Publish the world-readable public-metadata snapshot the settings panel reads without a password.
 ExecStartPre=-@KDE_INSTALL_FULL_LIBEXECDIR@/farside-host-settings-helper --publish virtual
 ExecStartPre=-@KDE_INSTALL_FULL_LIBEXECDIR@/farside-host-settings-helper --publish session
-ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/farside/virtual-host @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-host --certificate ${FARSIDE_VIRTUAL_CERTIFICATE} --certificate-key ${FARSIDE_VIRTUAL_CERTIFICATE_KEY} --address ${FARSIDE_VIRTUAL_ADDRESS} --port ${FARSIDE_VIRTUAL_PORT} --quality ${FARSIDE_VIRTUAL_QUALITY} --client-quality-max ${FARSIDE_VIRTUAL_CLIENT_QUALITY_MAX} --adaptive-quality ${FARSIDE_VIRTUAL_ADAPTIVE_QUALITY} --prefer-audio-quality ${FARSIDE_VIRTUAL_PREFER_AUDIO_QUALITY} --standard-client-media ${FARSIDE_VIRTUAL_STANDARD_CLIENT_MEDIA} --camera-loopback-device ${FARSIDE_VIRTUAL_CAMERA_LOOPBACK_DEVICE} --software-encoding ${FARSIDE_VIRTUAL_SOFTWARE_ENCODING} --software-avc ${FARSIDE_VIRTUAL_SOFTWARE_AVC} --software-hevc ${FARSIDE_VIRTUAL_SOFTWARE_HEVC} --software-av1 ${FARSIDE_VIRTUAL_SOFTWARE_AV1} --av1-tiles ${FARSIDE_VIRTUAL_AV1_TILES} --clipboard-direction ${FARSIDE_VIRTUAL_CLIPBOARD_DIRECTION}
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME=/var/lib/farside/virtual-host @CMAKE_INSTALL_PREFIX@/bin/farside-virtual-host --certificate ${FARSIDE_VIRTUAL_CERTIFICATE} --certificate-key ${FARSIDE_VIRTUAL_CERTIFICATE_KEY} --address ${FARSIDE_VIRTUAL_ADDRESS} --port ${FARSIDE_VIRTUAL_PORT} --quality ${FARSIDE_VIRTUAL_QUALITY} --client-quality-max ${FARSIDE_VIRTUAL_CLIENT_QUALITY_MAX} --adaptive-quality ${FARSIDE_VIRTUAL_ADAPTIVE_QUALITY} --prefer-audio-quality ${FARSIDE_VIRTUAL_PREFER_AUDIO_QUALITY} --standard-client-media ${FARSIDE_VIRTUAL_STANDARD_CLIENT_MEDIA} --camera-loopback-device ${FARSIDE_VIRTUAL_CAMERA_LOOPBACK_DEVICE} --software-encoding ${FARSIDE_VIRTUAL_SOFTWARE_ENCODING} --software-avc ${FARSIDE_VIRTUAL_SOFTWARE_AVC} --software-hevc ${FARSIDE_VIRTUAL_SOFTWARE_HEVC} --software-av1 ${FARSIDE_VIRTUAL_SOFTWARE_AV1} --av1-tiles ${FARSIDE_VIRTUAL_AV1_TILES} --clipboard-direction ${FARSIDE_VIRTUAL_CLIPBOARD_DIRECTION} --clipboard-files ${FARSIDE_VIRTUAL_CLIPBOARD_FILES} --clipboard-file-max-rate ${FARSIDE_VIRTUAL_CLIPBOARD_FILE_MAX_RATE}
 StateDirectory=farside/virtual-sessions farside/virtual-host
 StateDirectoryMode=0700
 UMask=0077
