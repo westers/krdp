@@ -50,7 +50,13 @@ public:
      * OPT-072: the host copied \a text and/or an \a image (a copy can have both). The format list names
      * CF_UNICODETEXT for text and the registered "PNG" plus CF_DIB for an image; nothing of either is held here.
      */
-    void announceHost(bool text, bool image);
+    void announceHost(bool text, bool image, bool html = false);
+    /**
+     * OPT-077: the answer to hostHtmlRequested(\a requestId): the host's HTML document as \a html (UTF-8, at most
+     * ClipboardLimits::MaxHtmlBytes) when \a ok, a refusal otherwise. Sent as the registered "HTML Format" (a header with exact
+     * byte offsets around the document, NUL terminated). The plain text beside it is a separate CF_UNICODETEXT request.
+     */
+    void provideHostHtml(quint64 requestId, const QByteArray &html, bool ok);
     /**
      * The answer to hostImageRequested(\a requestId): the host's image as \a png (PNG, validated by the caller's
      * worker, at most ClipboardLimits::MaxImageBytes) when \a ok, a refusal otherwise. Sent as "PNG" or, for a
@@ -67,6 +73,8 @@ public:
     Q_SIGNAL void hostTextRequested(quint64 requestId);
     /** OPT-072: the client pasted an image: the host's image is wanted for \a requestId (answer with provideHostImage()). */
     Q_SIGNAL void hostImageRequested(quint64 requestId);
+    /** OPT-077: the client pasted formatted text: the host's HTML is wanted for \a requestId (answer with provideHostHtml()). */
+    Q_SIGNAL void hostHtmlRequested(quint64 requestId);
 
     struct Counters {
         quint64 announces = 0; ///< format lists sent for a host copy
@@ -81,7 +89,9 @@ public:
         quint64 clientBytes = 0; ///< UTF-8 bytes of client text passed on (OPT-072: encoded bytes of an image)
         quint64 hostImages = 0; ///< OPT-072: host images delivered to the client
         quint64 clientImages = 0; ///< OPT-072: client images passed on
-        quint64 refusedMalformed = 0; ///< OPT-072: a client picture that was not one
+        quint64 refusedMalformed = 0; ///< OPT-072: a client picture that was not one (OPT-077: or HTML that was not valid)
+        quint64 hostHtml = 0; ///< OPT-077: host HTML documents delivered to the client
+        quint64 clientHtml = 0; ///< OPT-077: client HTML documents passed on
     };
     Counters counters() const;
 

@@ -18,6 +18,6 @@ FARSIDE_VIRTUAL_CERTIFICATE_KEY=/etc/farside/virtual-host.key
 #FARSIDE_VIRTUAL_SOFTWARE_AV1=auto
 #FARSIDE_VIRTUAL_AV1_TILES=auto
 
-# Clipboard bridge (text and images) between the client and the desktop: both (default), host-to-client,
+# Clipboard bridge (text, formatted text and images) between the client and the desktop: both (default), host-to-client,
 # client-to-host or off.
 #FARSIDE_VIRTUAL_CLIPBOARD_DIRECTION=both

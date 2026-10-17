@@ -15,6 +15,7 @@
 
 using namespace KRdp;
 using namespace KRdp::ConsoleWorkerWire;
+using namespace Qt::StringLiterals;
 
 namespace
 {
@@ -31,6 +32,16 @@ struct FakeHost {
     std::optional<HostClipboard::ImageRead> bounded; // OPT-072: what the capped read returns; unset = the image as it is
     int boundedReads = 0;
     QList<QPair<QByteArray, bool>> imageWrites; // (png, secret)
+    // OPT-077
+    QByteArray html; // what the host holds as text/html, in whatever encoding
+    std::optional<HostClipboard::ImageRead> htmlRead; // what the capped read returns; unset = the html as it is
+    int htmlReads = 0;
+    struct RichWrite {
+        QString text;
+        QByteArray html;
+        bool secret;
+    };
+    QList<RichWrite> richWrites;
     HostClipboard::Backend backend()
     {
         return {[this] { return hasText; },
@@ -50,6 +61,19 @@ struct FakeHost {
                 [this] {
                     ++boundedReads;
                     return bounded ? *bounded : HostClipboard::ImageRead{image, false, qint64(image.size())};
+                },
+                [this] { return !html.isEmpty(); },
+                [this] {
+                    ++htmlReads;
+                    return htmlRead ? *htmlRead : HostClipboard::ImageRead{html, false, qint64(html.size())};
+                },
+                [this](const QString &t, const QByteArray &h, bool secret) {
+                    richWrites.append({t, h, secret});
+                    if (writeOk) {
+                        text = t;
+                        html = h;
+                    }
+                    return writeOk;
                 }};
     }
 };
@@ -622,6 +646,224 @@ private Q_SLOTS:
             logged = logged || message.contains(QStringLiteral("refused (dimensions)"));
         }
         QVERIFY(logged);
+    }
+
+    // ---- OPT-077: formatted text ----
+    void htmlCopyIsOfferedWithItsFlagAndNoContents()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.host.text = QStringLiteral("plain");
+        h.host.html = Canary.toUtf8();
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        QCOMPARE(h.offers().first().flags, quint8(ClipboardOfferText | ClipboardOfferHtml));
+        QCOMPARE(h.host.htmlReads, 0); // announcing reads nothing
+        for (const auto &record : std::as_const(h.sent)) QVERIFY(!record.payload.contains(Canary.toUtf8()));
+        // HTML with no text is offered alone.
+        h.host.hasText = false;
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 2);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferHtml);
+    }
+
+    void theOfferFollowsTheCombinationRule()
+    {
+        // Chrome "Copy image": html (an <img>) and a picture, no text: only the picture is offered.
+        Harness h;
+        h.allow(true, true);
+        h.host.hasText = false;
+        h.host.html = "<img src=x>";
+        h.host.image = encode(picture(), "PNG");
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        QCOMPARE(h.offers().first().flags, ClipboardOfferImage);
+        // A spreadsheet range: text, html and a picture: text and html, no picture.
+        h.host.hasText = true;
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 2);
+        QCOMPARE(h.offers().last().flags, quint8(ClipboardOfferText | ClipboardOfferHtml));
+        // Text and a picture, no html: both, as before.
+        h.host.html.clear();
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 3);
+        QCOMPARE(h.offers().last().flags, quint8(ClipboardOfferText | ClipboardOfferImage));
+    }
+
+    void htmlRequestReadsAndNormalisesToUtf8()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.host.html = "<p>caf\xC3\xA9</p>";
+        h.board->request({1, 1000000, ClipboardKind::Html});
+        QCOMPARE(h.data().last().kind, ClipboardKind::Html);
+        QCOMPARE(h.data().last().status, ClipboardStatus::Ok);
+        QCOMPARE(h.data().last().html, QByteArray("<p>caf\xC3\xA9</p>"));
+        // UTF-16 with a byte order mark (some sources) becomes UTF-8.
+        const QString text = QStringLiteral("<p>café €</p>");
+        QByteArray utf16("\xFF\xFE", 2);
+        utf16.append(reinterpret_cast<const char *>(text.utf16()), text.size() * 2);
+        h.host.html = utf16;
+        h.board->request({2, 1000000, ClipboardKind::Html});
+        QCOMPARE(h.data().last().html, text.toUtf8());
+        // Invalid bytes never leave as invalid UTF-8.
+        h.host.html = "<p>\xFF</p>";
+        h.board->request({3, 1000000, ClipboardKind::Html});
+        QVERIFY(QByteArrayView(h.data().last().html).isValidUtf8());
+    }
+
+    void htmlRequestStatuses()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.board->request({1, 1000000, ClipboardKind::Html}); // nothing there
+        QCOMPARE(h.data().last().status, ClipboardStatus::Gone);
+        h.host.html = "<p>x</p>";
+        h.board->request({2, 3, ClipboardKind::Html}); // the client's limit is smaller than the document
+        QCOMPARE(h.data().last().status, ClipboardStatus::TooLarge);
+        QVERIFY(h.data().last().html.isEmpty());
+        h.host.htmlRead = HostClipboard::ImageRead{{}, true, ClipboardLimits::MaxHtmlBytes * 2 + 1}; // the capped read was abandoned
+        h.board->request({3, 1000000, ClipboardKind::Html});
+        QCOMPARE(h.data().last().status, ClipboardStatus::TooLarge);
+        h.host.htmlRead = HostClipboard::ImageRead{QByteArray(ClipboardLimits::MaxHtmlBytes + 1, 'a'), false, ClipboardLimits::MaxHtmlBytes + 1};
+        h.board->request({4, ClipboardLimits::MaxHtmlBytes, ClipboardKind::Html});
+        QCOMPARE(h.data().last().status, ClipboardStatus::TooLarge);
+        h.host.htmlRead = HostClipboard::ImageRead{QByteArray("\0\0 ", 3), false, 3}; // nothing but NULs: gone
+        h.board->request({5, 1000000, ClipboardKind::Html});
+        QCOMPARE(h.data().last().status, ClipboardStatus::Gone);
+        for (const auto &answer : h.data()) QCOMPARE(answer.kind, ClipboardKind::Html);
+    }
+
+    void htmlRequestsAreDeniedLikeText()
+    {
+        Harness h;
+        h.host.html = "<p>x</p>";
+        h.board->request({1, 1000000, ClipboardKind::Html}); // no policy, no control
+        QCOMPARE(h.data().last().status, ClipboardStatus::Denied);
+        h.allow(false, true);
+        h.board->request({2, 1000000, ClipboardKind::Html}); // host to client off
+        QCOMPARE(h.data().last().status, ClipboardStatus::Denied);
+        h.allow(true, true, false, false, 2);
+        h.board->request({3, 1000000, ClipboardKind::Html});
+        QCOMPARE(h.data().last().status, ClipboardStatus::Ok);
+        h.board->request({3, 1000000, ClipboardKind::Html}); // the id must increase
+        QCOMPARE(h.data().last().status, ClipboardStatus::Denied);
+        Harness greeter(false);
+        greeter.host.html = "<p>x</p>";
+        greeter.allow(false, true, true);
+        greeter.board->request({1, 1000000, ClipboardKind::Html});
+        QCOMPARE(greeter.data().last().status, ClipboardStatus::Denied);
+        QCOMPARE(greeter.host.htmlReads, 0);
+    }
+
+    void htmlSetWritesTextAndHtmlTogetherAndNeverEchoes()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.board->set({1, 5, QStringLiteral("rich text"), ClipboardKind::Html, {}, "<b>rich</b> text"});
+        QCOMPARE(h.host.richWrites.size(), 1);
+        QCOMPARE(h.host.richWrites.first().text, QStringLiteral("rich text"));
+        QCOMPARE(h.host.richWrites.first().html, QByteArray("<b>rich</b> text"));
+        QVERIFY(!h.host.richWrites.first().secret);
+        QVERIFY(h.host.writes.isEmpty()); // one offer, not a text write and a second write
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Written);
+        // The change that write causes (asynchronous) is not offered back, text or html.
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 2);
+        QVERIFY(h.offers().isEmpty());
+        // A new HTML copy on the host is.
+        h.host.html = "<i>other</i>";
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        QCOMPARE(h.offers().first().flags, quint8(ClipboardOfferText | ClipboardOfferHtml));
+    }
+
+    void htmlSetWithoutTextWritesHtmlAlone()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.board->set({1, 5, {}, ClipboardKind::Html, {}, "<b>x</b>"});
+        QCOMPARE(h.host.richWrites.size(), 1);
+        QVERIFY(h.host.richWrites.first().text.isEmpty());
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Written);
+    }
+
+    void htmlSetGatesSecretHintAndFailures()
+    {
+        Harness h;
+        h.allow(true, false); // client to host off
+        h.board->set({1, 5, {}, ClipboardKind::Html, {}, "<b>x</b>"});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Denied);
+        QVERIFY(h.host.richWrites.isEmpty());
+        h.allow(true, true, false, true, 2); // locked session: written with the password manager hint
+        h.board->set({2, 5, {}, ClipboardKind::Html, {}, "<b>x</b>"});
+        QCOMPARE(h.host.richWrites.size(), 1);
+        QVERIFY(h.host.richWrites.first().secret);
+        h.board->set({2, 5, {}, ClipboardKind::Html, {}, "<b>y</b>"}); // id must increase
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Denied);
+        h.host.writeOk = false;
+        h.board->set({3, 5, {}, ClipboardKind::Html, {}, "<b>z</b>"});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Failed);
+        h.host.writeOk = true;
+        h.board->set({4, 5, {}, ClipboardKind::Html, {}, QByteArray(ClipboardLimits::MaxHtmlBytes + 1, 'a')});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Denied); // over the cap: the gate refuses it
+        h.board->set({5, 5, {}, ClipboardKind::Html, {}, "\0\0"_ba});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Failed); // nothing left after NULs
+        Harness greeter(false);
+        greeter.allow(false, true, true);
+        greeter.board->set({1, 5, {}, ClipboardKind::Html, {}, "<b>x</b>"});
+        QCOMPARE(greeter.host.richWrites.size(), 1);
+        QVERIFY(greeter.host.richWrites.first().secret);
+    }
+
+    void aBackendWithoutHtmlOffersNoneAndWritesNone()
+    {
+        HostClipboard::Backend backend;
+        backend.hasText = [] { return true; };
+        backend.readText = [] { return QStringLiteral("t"); };
+        backend.writeText = [](const QString &, bool) { return true; };
+        QList<Record> sent;
+        Deframer deframer;
+        HostClipboard board(backend, [&](const QByteArray &record) {
+            deframer.feed(record);
+            while (const auto next = deframer.next()) sent.append(*next);
+        }, true);
+        board.setControl({5, true});
+        board.setPolicy({1, 5, true, true, false, false});
+        board.request({1, 1000, ClipboardKind::Html});
+        QCOMPARE(clipboardData(sent.last())->status, ClipboardStatus::Gone);
+        board.set({1, 5, {}, ClipboardKind::Html, {}, "<b>x</b>"});
+        QCOMPARE(clipboardSetResult(sent.last())->status, ClipboardSetStatus::Failed);
+        board.hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 2);
+        for (const auto &record : std::as_const(sent)) {
+            if (const auto offer = clipboardOffer(record)) QCOMPARE(offer->flags, ClipboardOfferText);
+        }
+    }
+
+    void htmlRefusalsLogASizeNeverContents()
+    {
+        g_messages.clear();
+        const auto previous = qInstallMessageHandler(capture);
+        QLoggingCategory::setFilterRules(QStringLiteral("*.debug=true"));
+        {
+            Harness h;
+            h.allow(true, true);
+            h.host.html = (u"<p>"_s + Canary + u"</p>"_s).toUtf8();
+            h.board->request({1, 5, ClipboardKind::Html}); // over the client's limit
+            h.host.htmlRead = HostClipboard::ImageRead{{}, true, ClipboardLimits::MaxHtmlBytes * 3};
+            h.board->request({2, 1000000, ClipboardKind::Html});
+            h.host.htmlRead.reset();
+            h.board->set({1, 5, Canary, ClipboardKind::Html, {}, (u"<p>"_s + Canary + u"</p>"_s).toUtf8()});
+        }
+        QLoggingCategory::setFilterRules(QString());
+        qInstallMessageHandler(previous);
+        bool sawRefusal = false;
+        for (const auto &message : std::as_const(g_messages)) {
+            QVERIFY2(!message.contains(QStringLiteral("CANARY")), qPrintable(message));
+            sawRefusal |= message.contains(QStringLiteral("kind=html"));
+        }
+        QVERIFY(sawRefusal);
     }
 
     void contentsNeverReachALog()

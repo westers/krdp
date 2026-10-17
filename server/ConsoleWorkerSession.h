@@ -44,6 +44,8 @@ Q_SIGNALS:
     void clientClipboardText(const QString &text);
     /** OPT-072: the client copied this picture (PNG, already checked). Never logged. */
     void clientClipboardImage(const QByteArray &png);
+    /** OPT-077: the client copied formatted text: its HTML document (UTF-8, already unwrapped and checked) and the plain text beside it. Never logged. */
+    void clientClipboardRich(const QString &text, const QByteArray &html);
 
 private:
     std::function<void(const ConsoleWorkerWire::Input &)> m_sendInput;

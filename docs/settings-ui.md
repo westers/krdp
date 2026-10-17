@@ -261,6 +261,8 @@ not establish that the design is acceptable.
 - OPT-072: the same setting, states and rate limit cover pictures (PNG, CF_DIB/CF_DIBV5; at most 16 MiB encoded and
   8192x8192 pixels; a copy with text and a picture is bridged as text). The `clipboard` capability then also carries
   `images: true` and `maxImageBytes`. There is no separate switch for pictures.
+- OPT-077: formatted text is covered too ("HTML Format" <-> `text/html`, always together with the plain text of the same
+  copy, at most 8 MiB of HTML). The capability then carries `html: true` and `maxHtmlBytes`. No separate switch either.
 
 ## System services in new Virtual desktops (OPT-075)
 

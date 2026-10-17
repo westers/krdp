@@ -5,6 +5,7 @@
 
 #include <QClipboard>
 #include <QMimeData>
+#include <QPointer>
 
 #include <KSystemClipboard>
 
@@ -22,6 +23,10 @@ namespace KRdp
  */
 inline HostClipboard::Backend ksystemClipboardBackend()
 {
+    // OPT-077: the text+html offer this process last wrote. Reading our own selection through SelectionReader would ask this very
+    // thread (blocked in the read) to serve the data and stall until the reader's idle timeout, so the echo check reads the
+    // QMimeData we hold instead. A QPointer: KSystemClipboard owns it and deletes it when another copy replaces it.
+    static QPointer<QMimeData> ownRich;
     return HostClipboard::Backend{
         [] {
             const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
@@ -83,6 +88,43 @@ inline HostClipboard::Backend ksystemClipboardBackend()
             default:
                 return HostClipboard::ImageRead{}; // nothing there, no readable format, a stalled source: as "gone"
             }
+        },
+        // OPT-077: formatted text. Offered when text/html is listed (nothing is read); read on paste only, with the same
+        // byte cap as the picture reader (twice the document cap: some sources offer UTF-16, which is turned into UTF-8 later).
+        [] {
+            const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
+            return data && data->hasFormat(QStringLiteral("text/html"));
+        },
+        [] {
+            const QString mime = QStringLiteral("text/html");
+            if (const auto *own = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard); own && own == ownRich.data()) {
+                const QByteArray bytes = own->data(mime); // our own write: in-process, never a stall
+                return HostClipboard::ImageRead{bytes, false, qint64(bytes.size())};
+            }
+            const auto read = SelectionReader::readSelection({mime}, [](const QString &) { return ClipboardLimits::MaxHtmlBytes * 2; });
+            switch (read.status) {
+            case SelectionReader::Status::Ok:
+                return HostClipboard::ImageRead{read.data, false, read.bytes};
+            case SelectionReader::Status::TooLarge:
+                return HostClipboard::ImageRead{{}, true, read.bytes};
+            case SelectionReader::Status::Unavailable: {
+                const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
+                if (!data || !data->hasFormat(mime)) return HostClipboard::ImageRead{};
+                return HostClipboard::ImageRead{data->data(mime), false, 0};
+            }
+            default:
+                return HostClipboard::ImageRead{};
+            }
+        },
+        [](const QString &text, const QByteArray &html, bool secret) {
+            // KSystemClipboard takes ownership: plain text and HTML in one offer, so a reader takes the richest it understands.
+            auto *mime = new QMimeData();
+            if (!text.isEmpty()) mime->setText(text);
+            mime->setData(QStringLiteral("text/html"), html);
+            if (secret) mime->setData(QStringLiteral("x-kde-passwordManagerHint"), QByteArrayLiteral("secret"));
+            ownRich = mime;
+            KSystemClipboard::instance()->setMimeData(mime, QClipboard::Clipboard);
+            return true;
         }};
 }
 }

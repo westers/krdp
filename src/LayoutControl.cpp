@@ -486,6 +486,10 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
             group.insert(QStringLiteral("images"), true);
             group.insert(QStringLiteral("maxImageBytes"), clipboard->maxImageBytes);
         }
+        if (clipboard->html) {
+            group.insert(QStringLiteral("html"), true);
+            group.insert(QStringLiteral("maxHtmlBytes"), clipboard->maxHtmlBytes);
+        }
         record.insert(QStringLiteral("clipboard"), group);
     }
     if (const auto &desk = capabilities.deskActivity) {

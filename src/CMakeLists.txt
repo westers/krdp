@@ -22,6 +22,7 @@ target_sources(KRdp PRIVATE
     Clipboard.h
     ClipboardLimits.h
     ClipboardText.h
+    ClipboardHtml.h
     RdpConnection.cpp
     Server.cpp
     Server.h

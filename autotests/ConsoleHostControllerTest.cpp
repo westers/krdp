@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+#include "ClipboardHtml.h"
 #include "CameraAvailability.h"
 #include "ConsoleHostController.h"
 #include "ConsoleFrameLayout.h"
@@ -1725,6 +1726,26 @@ private:
             list.numFormats = 2;
             list.formats = formats;
             return context.ClientFormatList(&context, &list);
+        }
+        // OPT-077: the client copies formatted text: CF_UNICODETEXT and the registered "HTML Format" (its own id).
+        static constexpr uint32_t ClientHtmlId = 0xC0F1;
+        UINT clientCopiesRich(bool withText = true)
+        {
+            static char htmlName[] = "HTML Format";
+            CLIPRDR_FORMAT formats[2] = {};
+            uint32_t count = 0;
+            if (withText) formats[count++].formatId = CF_UNICODETEXT;
+            formats[count].formatId = ClientHtmlId;
+            formats[count++].formatName = htmlName;
+            CLIPRDR_FORMAT_LIST list{};
+            list.common.msgType = CB_FORMAT_LIST;
+            list.numFormats = count;
+            list.formats = formats;
+            return context.ClientFormatList(&context, &list);
+        }
+        static QByteArray utf16z(const QString &text)
+        {
+            return QByteArray(reinterpret_cast<const char *>(text.utf16()), (text.size() + 1) * 2);
         }
         static QByteArray onePixelPng()
         {
@@ -3493,6 +3514,110 @@ private Q_SLOTS:
         QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
     }
 
+    // OPT-077: formatted text takes the same road, under the same policy, as text and pictures.
+    void clipboardHtmlHostCopyPasteFlowsThroughTheWorkerOnDemand()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, ConsoleWorkerWire::ClipboardOfferText | ConsoleWorkerWire::ClipboardOfferHtml}));
+        QTRY_COMPARE(rig.sent.formatLists.size(), 1);
+        QCOMPARE(rig.sent.formatLists.first(), (QList<uint32_t>{0xC002, CF_UNICODETEXT})); // text and "HTML Format"; no contents
+        QVERIFY(rig.requests().isEmpty());
+        rig.clientPastes(0xC002);
+        QTRY_VERIFY(!rig.requests().isEmpty());
+        const auto request = rig.requests().first();
+        QCOMPARE(request.kind, ConsoleWorkerWire::ClipboardKind::Html);
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{request.requestId, 1, ConsoleWorkerWire::ClipboardStatus::Ok, {},
+                                                                                   ConsoleWorkerWire::ClipboardKind::Html, {}, "<p><b>bold</b></p>"}));
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.first().flags, uint16_t(CB_RESPONSE_OK));
+        QVERIFY(rig.sent.dataResponses.first().data.startsWith("Version:0.9\r\nStartHTML:0000000105"));
+        QVERIFY(rig.sent.dataResponses.first().data.contains("<!--StartFragment--><p><b>bold</b></p><!--EndFragment-->"));
+        // The worker refuses (too large, say): the paste fails at once, it does not hang.
+        rig.clientPastes(0xC002);
+        QTRY_COMPARE(rig.requests().size(), 2);
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{rig.requests().last().requestId, 1, ConsoleWorkerWire::ClipboardStatus::TooLarge, {},
+                                                                                   ConsoleWorkerWire::ClipboardKind::Html, {}, {}}));
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 2);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+        // A worker answering a different kind than was asked is a prompt refusal too (not a 3 s wait).
+        rig.clientPastes(0xC002);
+        QTRY_COMPARE(rig.requests().size(), 3);
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{rig.requests().last().requestId, 1, ConsoleWorkerWire::ClipboardStatus::Ok,
+                                                                                   QStringLiteral("text")}));
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataResponses.size(), 3, 1500);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+    }
+
+    void clipboardHtmlClientCopyReachesTheWorkerWithItsText()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.clientCopiesRich();
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 3000);
+        QCOMPARE(rig.sent.dataRequests.first(), uint32_t(CF_UNICODETEXT));
+        rig.clientAnswers(ClipboardRig::utf16z(QStringLiteral("bold words")));
+        QTRY_COMPARE(rig.sent.dataRequests.size(), 2);
+        QCOMPARE(rig.sent.dataRequests.last(), ClipboardRig::ClientHtmlId);
+        QVERIFY(rig.sets().isEmpty()); // nothing is written until both are in
+        rig.clientAnswers(ClipboardHtml::wrapForWire("<b>bold</b> words").data);
+        QTRY_VERIFY(!rig.sets().isEmpty());
+        const auto set = rig.sets().first();
+        QCOMPARE(set.kind, ConsoleWorkerWire::ClipboardKind::Html);
+        QCOMPARE(set.text, QStringLiteral("bold words"));
+        QVERIFY(set.html.contains("<b>bold</b> words"));
+        QVERIFY(QByteArrayView(set.html).isValidUtf8());
+        QCOMPARE(set.controlGeneration, rig.host.m_controlGeneration);
+        QCOMPARE(rig.sets().size(), 1);
+    }
+
+    void clipboardHtmlMalformedClientDocumentFallsBackToText()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.clientCopiesRich();
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 3000);
+        rig.clientAnswers(ClipboardRig::utf16z(QStringLiteral("only text survives")));
+        QTRY_COMPARE(rig.sent.dataRequests.size(), 2);
+        rig.clientAnswers(QByteArray("Version:0.9\r\nStartHTML:garbage\r\n<b>x</b>"));
+        QTRY_VERIFY(!rig.sets().isEmpty());
+        QCOMPARE(rig.sets().first().kind, ConsoleWorkerWire::ClipboardKind::Text);
+        QCOMPARE(rig.sets().first().text, QStringLiteral("only text survives"));
+    }
+
+    void clipboardHtmlNothingCrossesWhereThePolicyDenies()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()) + 1, true);
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, ConsoleWorkerWire::ClipboardOfferText | ConsoleWorkerWire::ClipboardOfferHtml}));
+        QTest::qWait(80);
+        QVERIFY(rig.sent.formatLists.isEmpty());
+        rig.clientPastes(0xC002);
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.first().flags, uint16_t(CB_RESPONSE_FAIL));
+        QVERIFY(rig.requests().isEmpty());
+        rig.clientCopiesRich();
+        QTest::qWait(Clipboard::FormatListSettleMs * 2);
+        QVERIFY(rig.sent.dataRequests.isEmpty());
+        QVERIFY(rig.sets().isEmpty());
+        // The greeter takes formatted text from the client (written with the secret hint by the worker) and offers nothing back.
+        ClipboardRig greeter(ConsoleSeat::Adapter::Greeter, quint32(getuid()) + 1);
+        QVERIFY(greeter.ok);
+        greeter.lastPolicy();
+        greeter.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, ConsoleWorkerWire::ClipboardOfferHtml}));
+        QTest::qWait(80);
+        QVERIFY(greeter.sent.formatLists.isEmpty());
+        greeter.clientCopiesRich(false);
+        QTRY_COMPARE_WITH_TIMEOUT(greeter.sent.dataRequests.size(), 1, 3000);
+        greeter.clientAnswers(ClipboardHtml::wrapForWire("<b>x</b>").data);
+        QTRY_VERIFY(!greeter.sets().isEmpty());
+        QCOMPARE(greeter.sets().first().kind, ConsoleWorkerWire::ClipboardKind::Html);
+    }
+
     void clipboardImageClientCopyReachesTheWorkerAsPng()
     {
         ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
@@ -3629,7 +3754,9 @@ private Q_SLOTS:
                                   {u"clientToHost"_s, both || direction == ConsoleClipboardPolicy::Direction::ClientToHost},
                                   {u"maxBytes"_s, 1024 * 1024},
                                   {u"images"_s, true}, // OPT-072: pictures follow the same directions
-                                  {u"maxImageBytes"_s, 16 * 1024 * 1024}}));
+                                  {u"maxImageBytes"_s, 16 * 1024 * 1024},
+                                  {u"html"_s, true}, // OPT-077: formatted text too
+                                  {u"maxHtmlBytes"_s, 8 * 1024 * 1024}}));
         }
     }
 };

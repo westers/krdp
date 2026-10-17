@@ -137,6 +137,23 @@ private Q_SLOTS:
         QVERIFY(!capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject().contains(QStringLiteral("maxImageBytes")));
     }
 
+    // OPT-077: formatted text is advertised inside the group only when the host bridges it; an older client ignores the keys.
+    void capabilitiesClipboardHtml()
+    {
+        ChannelCapabilities caps;
+        caps.host = QStringLiteral("console");
+        caps.clipboard = ClipboardCapabilities{true, true, 1024 * 1024, true, 16 * 1024 * 1024, true, 8 * 1024 * 1024};
+        QCOMPARE(capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject(),
+                 (QJsonObject{{QStringLiteral("hostToClient"), true}, {QStringLiteral("clientToHost"), true}, {QStringLiteral("maxBytes"), 1024 * 1024},
+                              {QStringLiteral("images"), true}, {QStringLiteral("maxImageBytes"), 16 * 1024 * 1024},
+                              {QStringLiteral("html"), true}, {QStringLiteral("maxHtmlBytes"), 8 * 1024 * 1024}}));
+        // html=false (the default) adds no key: the group is byte-for-byte what OPT-072 sent.
+        caps.clipboard = ClipboardCapabilities{true, true, 1024 * 1024, true, 16 * 1024 * 1024};
+        const auto group = capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject();
+        QVERIFY(!group.contains(QStringLiteral("html")));
+        QVERIFY(!group.contains(QStringLiteral("maxHtmlBytes")));
+    }
+
     // OPT-071: the optional `deskActivity` group; absent unless set (the Virtual route never sets it), old clients ignore it.
     void capabilitiesDeskActivityGroup()
     {
