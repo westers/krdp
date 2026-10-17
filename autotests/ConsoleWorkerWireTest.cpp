@@ -48,6 +48,8 @@ private Q_SLOTS:
     void clipboardImageRecordsRoundTripAndAreBounded();
     void clipboardImageGatesAreStrict();
     void clipboardHtmlRecordsRoundTripAndAreBounded();
+    void clipboardRichSetKeepsTheTextExact_data();
+    void clipboardRichSetKeepsTheTextExact();
     void clipboardHtmlGatesAreStrict();
     void protocolVersionIsTwenty();
     void heartbeatAndLocalReclaimRecordsAreStrict();
@@ -1246,6 +1248,45 @@ void ConsoleWorkerWireTest::clipboardImageGatesAreStrict()
 }
 
 // OPT-077 (wire 20): HTML records. A Data is the HTML document; a Set is the plain text beside it plus the HTML.
+// OPT-077 fix: the Html Set is [u32 text length][text][html]. The text is exactly the sender's (no extra leading character, no
+// part of the HTML, no terminator), whatever it starts with, including text and HTML that begin with the same letter.
+void ConsoleWorkerWireTest::clipboardRichSetKeepsTheTextExact_data()
+{
+    QTest::addColumn<QString>("text");
+    QTest::addColumn<QByteArray>("html");
+    const QByteArray html = "<html><body><!--StartFragment--><p>D</p><!--EndFragment--></body></html>";
+    QTest::newRow("three D lines") << QStringLiteral("Dsfsd sdfsd sdfsdf\nDsfsd sdfsd sdfsdf\nDsfsd sdfsd sdfsdf") << html;
+    QTest::newRow("one D line, html starts with D") << QStringLiteral("Dsfsd sdfsd sdfsdf") << QByteArray("Dsfsd html that is not a document but is valid UTF-8");
+    QTest::newRow("just D") << QStringLiteral("D") << QByteArray("D");
+    QTest::newRow("non-ascii") << QStringLiteral("D\u00e4rf \u00fcber \u20ac\n\u65e5\u672c\u8a9e\nD\U0001F600x") << html;
+    QTest::newRow("no text") << QString() << html;
+    QTest::newRow("trailing newline") << QStringLiteral("Dsfsd\n") << html;
+}
+
+void ConsoleWorkerWireTest::clipboardRichSetKeepsTheTextExact()
+{
+    QFETCH(QString, text);
+    QFETCH(QByteArray, html);
+    const ClipboardSet set{77, 42, text, ClipboardKind::Html, {}, html};
+    const QByteArray bytes = frame(set);
+    Deframer deframer;
+    deframer.feed(bytes);
+    const auto record = deframer.next();
+    QVERIFY(record);
+    // payload: setId(8) generation(8) kind(1) length(4) text html
+    const QByteArray utf8 = text.toUtf8();
+    const QByteArray body = record->payload.mid(17);
+    QCOMPARE(body.size(), qsizetype(4 + utf8.size() + html.size()));
+    QCOMPARE(quint8(body.at(0)), quint8((utf8.size() >> 24) & 0xff));
+    QCOMPARE(quint8(body.at(3)), quint8(utf8.size() & 0xff));
+    QCOMPARE(body.mid(4, utf8.size()), utf8);
+    QCOMPARE(body.mid(4 + utf8.size()), html);
+    const auto decoded = clipboardSet(*record);
+    QVERIFY(decoded);
+    QCOMPARE(decoded->text, text);
+    QCOMPARE(decoded->html, html);
+}
+
 void ConsoleWorkerWireTest::clipboardHtmlRecordsRoundTripAndAreBounded()
 {
     const QByteArray html("<p>caf\xC3\xA9 <b>bold</b></p>");

@@ -40,6 +40,33 @@ QByteArray windows(const QByteArray &doc, const QByteArray &eol = "\r\n", const 
 const QByteArray Doc = "<html><body>\r\n<!--StartFragment--><b>bold</b> text<!--EndFragment-->\r\n</body></html>";
 }
 
+
+namespace
+{
+// OPT-077 fix fixtures. LibreOffice Writer 26.2 text/html for a 3-line selection (captured on Sol, 2026-10-17): no fragment markers.
+const QByteArray WriterHtml = QByteArrayLiteral(
+    "<!DOCTYPE html>\n<html>\n<head>\n\t<meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\"/>\n\t<title></title>\n"
+    "\t<meta name=\"generator\" content=\"LibreOffice 26.2.6.3 (Linux)\"/>\n\t<style type=\"text/css\">\n"
+    "\t\t@page { size: 8.27in 11.69in; margin: 0.79in }\n\t\tp { margin-bottom: 0.1in; line-height: 115%; background: transparent }\n\t</style>\n</head>\n"
+    "<body lang=\"en-US\" link=\"#000080\" vlink=\"#800000\" dir=\"ltr\"><p style=\"line-height: 100%; margin-bottom: 0in\">\n<b>Dsfsd sdfsd sdfsdf</b></p>\n"
+    "<p style=\"line-height: 100%; margin-bottom: 0in\"><i>Dsfsd sdfsd sdfsdf</i></p>\n<p style=\"line-height: 100%; margin-bottom: 0in\">Dsfsd sdfsd sdfsdf</p>\n</body>\n</html>");
+// Chrome: markers are there, a bare span fragment inside <body>.
+const QByteArray ChromeHtml = QByteArrayLiteral(
+    "<html><body>\n<!--StartFragment--><span style=\"color: rgb(0, 0, 0);\">D\xC3\xA4rf \xE2\x82\xAC sdfsd</span><br><span>Dsfsd sdfsd sdfsdf</span><!--EndFragment-->\n</body></html>");
+
+qint64 headerValue(const QByteArray &wire, const char *key)
+{
+    const qsizetype at = wire.indexOf(QByteArray(QByteArray(key) + ":"));
+    return at < 0 ? -1 : wire.mid(at + qstrlen(key) + 1, 10).toLongLong();
+}
+int count(const QByteArray &haystack, const QByteArray &needle)
+{
+    int n = 0;
+    for (qsizetype i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + needle.size())) ++n;
+    return n;
+}
+}
+
 class HtmlClipboardTest : public QObject
 {
     Q_OBJECT
@@ -291,6 +318,59 @@ private Q_SLOTS:
         const auto atCap = wrapForWire(QByteArray(MaxHtmlBytes, 'a'));
         QVERIFY(atCap.ok());
         QVERIFY(atCap.data.size() <= MaxWireBytes);
+    }
+
+    // ---- OPT-077 fix: LibreOffice Writer and Chrome fixtures through the wrapper, exact offsets, no duplicated content ----
+    void realWorldFixturesWrapWithExactOffsets_data()
+    {
+        QTest::addColumn<QByteArray>("html");
+        QTest::newRow("writer") << WriterHtml;
+        QTest::newRow("chrome") << ChromeHtml;
+    }
+    void realWorldFixturesWrapWithExactOffsets()
+    {
+        QFETCH(QByteArray, html);
+        const auto wrapped = wrapForWire(html);
+        QVERIFY(wrapped.ok());
+        const QByteArray &wire = wrapped.data;
+        QVERIFY(wire.endsWith('\0'));
+        QCOMPARE(headerValue(wire, "StartHTML"), qint64(105));
+        const qint64 startHtml = headerValue(wire, "StartHTML");
+        const qint64 endHtml = headerValue(wire, "EndHTML");
+        const qint64 startFragment = headerValue(wire, "StartFragment");
+        const qint64 endFragment = headerValue(wire, "EndFragment");
+        QCOMPARE(endHtml, qint64(wire.size() - 1)); // up to, not including, the NUL
+        QCOMPARE(wire.at(startHtml), '<');
+        QVERIFY(wire.mid(startFragment - 20, 20) == "<!--StartFragment-->");
+        QVERIFY(wire.mid(endFragment, 18) == "<!--EndFragment-->");
+        // exactly one pair of markers, and the content once
+        QCOMPARE(count(wire, "<!--StartFragment-->"), 1);
+        QCOMPARE(count(wire, "<!--EndFragment-->"), 1);
+        QCOMPARE(count(wire, "Dsfsd sdfsd sdfsdf"), count(html, "Dsfsd sdfsd sdfsdf"));
+        // the fragment is what is between the markers, nothing of the head
+        const QByteArray fragment = wire.mid(startFragment, endFragment - startFragment);
+        QVERIFY(!fragment.contains("<head"));
+        QVERIFY(!fragment.contains("<style"));
+    }
+    void realWorldFixturesUnwrapToTheSameDocumentOnceOver_data()
+    {
+        QTest::addColumn<QByteArray>("html");
+        QTest::newRow("writer") << WriterHtml;
+        QTest::newRow("chrome") << ChromeHtml;
+    }
+    void realWorldFixturesUnwrapToTheSameDocumentOnceOver()
+    {
+        QFETCH(QByteArray, html);
+        const auto once = unwrapMsHtml(wrapForWire(html).data);
+        QVERIFY(once.ok());
+        // the content appears exactly as often as in the source (no StartHTML..EndHTML plus fragment doubling)
+        QCOMPARE(count(once.data, "Dsfsd sdfsd sdfsdf"), count(html, "Dsfsd sdfsd sdfsdf"));
+        QCOMPARE(count(once.data, "<!--StartFragment-->"), 1);
+        // a second trip (client -> host -> client -> host) changes nothing
+        const auto wire = wrapForWire(normaliseHostHtml(once.data));
+        const auto twice = unwrapMsHtml(wire.data);
+        QCOMPARE(twice.data, once.data);
+        QCOMPARE(wrapForWire(normaliseHostHtml(twice.data)).data, wire.data);
     }
 
     void wrapOutputIsValidUtf8WithoutNul()

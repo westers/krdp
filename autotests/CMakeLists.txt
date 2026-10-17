@@ -579,6 +579,13 @@ add_executable(HtmlClipboardTest HtmlClipboardTest.cpp)
 target_include_directories(HtmlClipboardTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(HtmlClipboardTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME HtmlClipboardTest COMMAND HtmlClipboardTest)
+
+# OPT-077 fix: the QMimeData of a client's rich copy on the host.
+add_executable(ClipboardMimeTest ClipboardMimeTest.cpp)
+target_include_directories(ClipboardMimeTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ClipboardMimeTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
+add_test(NAME ClipboardMimeTest COMMAND ClipboardMimeTest)
+set_tests_properties(ClipboardMimeTest PROPERTIES TIMEOUT 60)
 set_tests_properties(HtmlClipboardTest PROPERTIES TIMEOUT 60)
 
 # LayoutControl has an out-of-line .cpp (codec + planner), unlike its
