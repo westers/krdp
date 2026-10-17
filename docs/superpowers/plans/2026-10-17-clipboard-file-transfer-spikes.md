@@ -127,3 +127,57 @@ audio late + overflow + producer gaps <= baseline + 2 and no gap > 100 ms. It wa
 subscription once with a 5 s dry run before the long ones (the `reply:` prefix and the `stats` record shape come from `krdpctl-probe`'s source and StatsRequest.h,
 not from a live run). Repeat once under `tc tbf rate 20mbit burst 32kbit latency 400ms` on Sol's NIC (`sudo`; remove the qdisc afterwards; never on a production route while a user is connected).
 Acceptance for the pacer's constants (floor, +5% step, 50% share) is these runs; the unit tests only prove the control loop's shape.
+
+## 5. Phase 2 (host to client): what the unit and loopback tests settled, and what only Sol/Buzz can (2026-10-17)
+
+Settled without a desktop (all in the sandbox, no daemon): wire v21 records; the worker's walk and reads against real directories; the broker's FILECONTENTS
+state machine with a fake clock; the Console/Virtual glue with a fake worker; and a **real libfreerdp client** (`krdpctl-probe --clipboard files`) against a
+real `KRdp::Server` + `Clipboard` + the worker's file source in one process (`ClipboardFileLoopbackTest`, `ClipboardFileLargeLoopbackTest`). Results:
+
+| Question | Result (loopback, Debug build, Hal, bwrap) |
+|---|---|
+| A directory tree (empty file, 1 byte, 300 KiB, 1 MiB + 17, an empty folder) through libfreerdp | byte-identical; lock taken once, released at the end |
+| A SPARSE 5 GiB + 12 345 B file, ranges at offset 0, across 4 GiB (4 294 836 224) and the tail | SHA-256 of each equals the same range read from the file; `huge=1` negotiated |
+| The same file moved COMPLETELY (20 481 ranges, 5 368 721 465 B) | 52.7 s, `failed=0`, ~100 MB/s, nothing written to disk on the client side (hash only) |
+| A client that does not offer the huge flag | the worker skips the 5 GiB file and counts it (`skipped=1`), the small one arrives; nothing truncated |
+| Cancel after 2 MiB | reads stop within the window; the lock is released |
+| A file that grows / vanishes while the client is paused | that stream fails, the transfer ends (`FileCancel`, notice), the connection and the other channels stay up |
+| Hostile requests libfreerdp lets through (index out of range, range on a folder, range past the end / past 4 GiB, unknown lock, zero length) | all answered FAIL, none reaches the worker, the third ends the transfer, a good request afterwards fails too |
+| Finding | libfreerdp's server library itself rejects a SIZE request that is not 8 bytes, and a request with both flags, before any callback, and ends the clipboard channel (not the session). Our validator covers the rest. |
+| Files off (`ClipboardFiles=off`) | all four capability flags off, a client sees no file support, nothing is announced |
+| Client without STREAM / without LOCK | no files / files without locks |
+| Locked screen mid-transfer / login screen (planner) | the transfer completes; nothing is announced on the greeter |
+
+NOT settled (needs Sol server + Buzz client; never Hal), in order:
+
+1. **S2 on Sol (still open from phase 0):** the worker reading `text/uri-list` from the real Wayland selection after a Dolphin Ctrl+C (`SelectionReader`, KWin ext-data-control, how long the
+   read takes with 100 000 paths), `application/x-kde-cutselection` for a cut, and a copy of a *symlink* in Dolphin (expected: skipped and counted).
+2. **The client's paste in Dolphin on Buzz:** `text/uri-list` of staged files set through `KSystemClipboard` (ext-data-control) is accepted by Dolphin; the staged path is read at paste time;
+   a partial large selection (`AfterFirstFile`) behaves as the doc says (only finished top-level items are listed, a refresh at the end); cut semantics stay copy.
+3. **Real clients' request pattern** (S1b/S1c): `xfreerdp3`, `wlfreerdp3` 3.22, `farside-client` and, if possible, `mstsc`: does the client send SIZE first, which chunk size, how many in flight, does it send
+   a lock BEFORE asking for the descriptor, does the tail overrun (`offset + length > size`, which we answer FAIL), does it ever send `FILECONTENTS_RANGE` > 1 MiB.
+4. **QoS acceptance (spec 6.4), the whole point of the pacer.** Section 4's procedure with a **2 GiB file host -> client** while the video scene and audio play, on the LAN and under
+   `tc tbf rate 20mbit`. Record: `framesSent` rate within 10% of baseline, p99 `sendQueueAtSend` <= 256 KiB, p99 frame delay <= baseline + 40 ms, audio late+overflow+gaps <= baseline + 2, transfer progress never
+   stalls > 30 s, and at 20 Mbit/s the file rate near the 256 kbit/s floor while video is active and the leftover when the display is idle. Also: **Unlimited** is expected to fail the first two (documented, warning
+   comes with the settings page in phase 4). Server log lines to read: `Clipboard: closed ... files(lists= ranges= bytes= failed= ended=)`, `Clipboard: file transfer ended reason= cause=`.
+5. **Head-of-line with a stock client that asks for 256 KiB-1 MiB ranges.** A response is one cliprdr PDU and cannot be sliced, so the 64 KiB slice rule bounds only the *send queue before* the PDU, not the PDU;
+   our own client asks for 16-64 KiB at low rates. Measure `sendQueueAtSend` p99 and frame delay with `xfreerdp3` pasting a 2 GiB file; if it exceeds the bound, the answer is a smaller maximum range the server
+   advertises (not possible in cliprdr) or refusing ranges above `RangeBytes` for stock clients (they would fail): decide on data.
+6. **Floors and constants:** the 256 kbit/s floor, +5% per tick, 50% share, 100 ms window, 10 ms pump, MaxResponsesPerPass = 4 are unit-tested for shape only.
+7. **Worker walk budget:** a Dolphin copy of a big tree (100 000 files, a home directory) - time to descriptor, memory of the worker; `WalkBudgetMs` = 5 s (`TooLarge` is the answer when exceeded).
+8. **Hal:** first supervised check by Steve (Console, unlocked, small file and a folder), only after Sol/Buzz pass. No daemon test runs on Hal.
+
+### How Steve verifies (Sol server, Buzz client; candidate packages built from branch `file-clipboard-p2`, both repos, installed by the usual gated procedure)
+
+1. Sol Console, unlocked, Dolphin: copy `report.txt` (1 KB), a folder with sub folders (20 files, one empty), and a 700 MB file. On Buzz (`farside-client`, connect to :3391): Ctrl+V into Dolphin each time.
+   Expected: the banner "Copying files from the host: n of m (...)" with Cancel while it runs, "N files from the host are ready to paste", the files pasted byte-identical (`sha256sum`).
+   Staging is `~/.cache/farside-client/clip/c-<id>/<n>/` (mode 0700) and is removed at disconnect and at the next start.
+2. Lock the Sol screen with `loginctl lock-session` (Sol only) while the 700 MB file copies: it finishes. Copy a NEW file on the locked desktop: it is offered (host to client is allowed locked).
+   At the SDDM greeter: no file is offered (Console works in any state for text/images as before).
+3. Edit the 700 MB file on Sol while Buzz is copying it: Buzz shows "A file changed or disappeared on the host while it was being copied" and keeps the session; the staging is gone.
+4. Cancel in the middle on Buzz: the banner goes, `~/.cache/farside-client/clip/` has no `.part` files, Sol's journal shows `Clipboard: closed ... ended=0`.
+5. Fill Buzz's home to under the reserve (loop mount on Buzz, `max(2 GiB, 5%)` free) and copy 1 GB: "Not enough space ... needed ... free", nothing written.
+6. Settings on Sol (`/etc/farside/console-host.conf`, restart the service when nobody is connected): `FARSIDE_CONSOLE_CLIPBOARD_FILES=off` -> Buzz's client shows no file support (journal `clipboard files: off`, no offer);
+   `FARSIDE_CONSOLE_CLIPBOARD_FILE_MAX_RATE=1` -> a 700 MB copy runs at about 1 MB/s whatever the link; KCM page: Sharing -> File copy / File copy speed limit (Advanced).
+7. Buzz hidden setting: `kwriteconfig6 --file farside-clientrc --group Chroma --key clipboardTransferPriority cap:2` (Buzz only, not on Hal; no `--notify`): the next connection copies at ~2 MB/s, `unlimited` ignores the pacer (fails the QoS criteria by design).
+8. Stock client smoke from Buzz: `xfreerdp3 /v:sol:3391 +clipboard` copy a file on Sol, paste on Buzz. Record what works (see item 3 above); a failure of a stock client does not block the release (own client first).
