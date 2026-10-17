@@ -135,26 +135,33 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     if (auto *clipboard = connection->clipboard()) {
         // OPT-067: nothing is shared until a binding is authorized (syncClipboard()).
         clipboard->setDirections(false, false);
-        const auto hostRequested = [this](quint64 requestId, bool image) {
+        enum class Kind { Text, Image, Html };
+        const auto hostRequested = [this](quint64 requestId, Kind kind) {
             auto *board = m_connection ? m_connection->clipboard() : nullptr;
             if (!board) return;
             const bool allowed = m_endpoint && m_clipboardPlan && m_clipboardPlan->hostToClient && authorized(m_clipboardUid);
-            const auto endpointId = !allowed ? quint64(0) : image ? m_endpoint->requestClipboardImage() : m_endpoint->requestClipboard();
+            const auto endpointId = !allowed ? quint64(0) : kind == Kind::Image ? m_endpoint->requestClipboardImage()
+                : kind == Kind::Html ? m_endpoint->requestClipboardHtml() : m_endpoint->requestClipboard();
             if (!endpointId) {
-                if (image) board->provideHostImage(requestId, {}, false);
+                if (kind == Kind::Image) board->provideHostImage(requestId, {}, false);
+                else if (kind == Kind::Html) board->provideHostHtml(requestId, {}, false);
                 else board->provideHostText(requestId, {}, false);
                 return;
             }
             if (m_clipboardRequests.size() >= 16) m_clipboardRequests.clear();
             m_clipboardRequests.insert(endpointId, requestId);
         };
-        connect(clipboard, &Clipboard::hostTextRequested, this, [hostRequested](quint64 requestId) { hostRequested(requestId, false); });
-        connect(clipboard, &Clipboard::hostImageRequested, this, [hostRequested](quint64 requestId) { hostRequested(requestId, true); });
+        connect(clipboard, &Clipboard::hostTextRequested, this, [hostRequested](quint64 requestId) { hostRequested(requestId, Kind::Text); });
+        connect(clipboard, &Clipboard::hostImageRequested, this, [hostRequested](quint64 requestId) { hostRequested(requestId, Kind::Image); });
+        connect(clipboard, &Clipboard::hostHtmlRequested, this, [hostRequested](quint64 requestId) { hostRequested(requestId, Kind::Html); });
         connect(clipboard, &Clipboard::clientDataChanged, &m_session, [clipboard, this]() {
             m_session.setClipboardData(clipboard->getClipboard());
         });
         connect(&m_session, &ConsoleWorkerSession::clientClipboardText, this, [this](const QString &text) {
             if (m_endpoint && m_clipboardPlan && m_clipboardPlan->clientToHost && authorized(m_clipboardUid)) m_endpoint->setClipboard(m_controlGeneration, text);
+        });
+        connect(&m_session, &ConsoleWorkerSession::clientClipboardRich, this, [this](const QString &text, const QByteArray &html) {
+            if (m_endpoint && m_clipboardPlan && m_clipboardPlan->clientToHost && authorized(m_clipboardUid)) m_endpoint->setClipboardRich(m_controlGeneration, text, html);
         });
         connect(&m_session, &ConsoleWorkerSession::clientClipboardImage, this, [this](const QByteArray &png) {
             if (m_endpoint && m_clipboardPlan && m_clipboardPlan->clientToHost && authorized(m_clipboardUid)) m_endpoint->setClipboardImage(m_controlGeneration, png);
@@ -450,13 +457,15 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::clipboardOffered, this, [this](quint64, quint8 flags) {
         if (m_connection && m_connection->clipboard() && m_clipboardPlan && m_clipboardPlan->hostToClient && authorized(m_clipboardUid))
-            m_connection->clipboard()->announceHost(flags & ConsoleWorkerWire::ClipboardOfferText, flags & ConsoleWorkerWire::ClipboardOfferImage);
+            m_connection->clipboard()->announceHost(flags & ConsoleWorkerWire::ClipboardOfferText, flags & ConsoleWorkerWire::ClipboardOfferImage,
+                                                       flags & ConsoleWorkerWire::ClipboardOfferHtml);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::clipboardDataReceived, this, [this](const ConsoleWorkerWire::ClipboardData &data) {
         const auto requestId = m_clipboardRequests.take(data.requestId);
         if (!requestId || !m_connection || !m_connection->clipboard()) return;
         const bool ok = data.status == ConsoleWorkerWire::ClipboardStatus::Ok;
         if (data.kind == ConsoleWorkerWire::ClipboardKind::Image) m_connection->clipboard()->provideHostImage(requestId, data.image, ok);
+        else if (data.kind == ConsoleWorkerWire::ClipboardKind::Html) m_connection->clipboard()->provideHostHtml(requestId, data.html, ok);
         else m_connection->clipboard()->provideHostText(requestId, data.text, ok);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::audioReceived, this, [this](const auto &audio) {
@@ -1158,7 +1167,8 @@ void VirtualSessionTransport::sendCapabilities()
         const bool clientToHost = m_clipboardDirection == Direction::Both || m_clipboardDirection == Direction::ClientToHost;
         if (hostToClient || clientToHost)
             capabilities.clipboard = LayoutControl::ClipboardCapabilities{hostToClient, clientToHost, int(ConsoleWorkerWire::MaxClipboardBytes), true,
-                                                                          int(ConsoleWorkerWire::MaxClipboardImageBytes)};
+                                                                          int(ConsoleWorkerWire::MaxClipboardImageBytes), true,
+                                                                          int(ConsoleWorkerWire::MaxClipboardHtmlBytes)};
     }
     m_connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }

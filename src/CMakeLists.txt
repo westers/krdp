@@ -30,6 +30,7 @@ target_sources(KRdp PRIVATE
     ClipboardFileRequest.h
     ClipboardFileStaging.h
     DeliveryStats.h
+    ClipboardHtml.h
     RdpConnection.cpp
     Server.cpp
     Server.h

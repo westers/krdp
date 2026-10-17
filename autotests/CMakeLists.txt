@@ -574,6 +574,13 @@ target_link_libraries(ClipboardImageTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME ClipboardImageTest COMMAND ClipboardImageTest)
 set_tests_properties(ClipboardImageTest PROPERTIES TIMEOUT 120)
 
+# OPT-077: HTML Format wrapper/unwrapper and the text+html+image combination rule (pure functions).
+add_executable(HtmlClipboardTest HtmlClipboardTest.cpp)
+target_include_directories(HtmlClipboardTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(HtmlClipboardTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME HtmlClipboardTest COMMAND HtmlClipboardTest)
+set_tests_properties(HtmlClipboardTest PROPERTIES TIMEOUT 60)
+
 # LayoutControl has an out-of-line .cpp (codec + planner), unlike its
 # header-only neighbours above, so it is compiled straight into the test
 # binary rather than linked through the KRdp library (which would drag in

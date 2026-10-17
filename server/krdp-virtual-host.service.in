@@ -33,7 +33,7 @@ Environment=FARSIDE_VIRTUAL_STANDARD_CLIENT_MEDIA=true
 Environment=FARSIDE_VIRTUAL_CAMERA_LOOPBACK_DEVICE=none
 # AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16 (KRDPCTL-V2-CONTRACT.md (e)).
 Environment=FARSIDE_VIRTUAL_AV1_TILES=auto
-# Clipboard bridge for text and images (OPT-067, OPT-072): both, host-to-client, client-to-host or off.
+# Clipboard bridge for text, formatted text and images (OPT-067, OPT-072, OPT-077): both, host-to-client, client-to-host or off.
 Environment=FARSIDE_VIRTUAL_CLIPBOARD_DIRECTION=both
 EnvironmentFile=-/etc/farside/virtual-host.conf
 # Publish the world-readable public-metadata snapshot the settings panel reads without a password.

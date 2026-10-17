@@ -13,7 +13,9 @@
 #include <QString>
 #include <QTimer>
 
+#include "ClipboardHtml.h"
 #include "ClipboardImage.h"
+#include "ClipboardLimits.h"
 #include "ClipboardText.h"
 #include "ConsoleWorkerWire.h"
 
@@ -34,6 +36,9 @@ namespace KRdp
  *    pastes, turned into PNG (a PNG is checked and passed through, any other format decoded after its size
  *    is checked) and refused over 16 MiB or 8192x8192; a client's PNG is checked again before it is written.
  *    Text wins no precedence here: a copy with both is offered as both and the broker/client choose.
+ *  - OPT-077: formatted text the same way. HTML is a third offer flag; it is read only on a paste (bounded at 8 MiB, any
+ *    UTF-16 turned into UTF-8), and a client's text and HTML are written together in one offer so the receiving application
+ *    picks the richest format it understands. Which of text / HTML / picture are offered follows ClipboardHtml::announce().
  * Contents are never logged here or anywhere else on the bridge; a refusal logs a size and a reason only.
  */
 class HostClipboard
@@ -58,6 +63,10 @@ public:
         /// OPT-072 (Wayland): the image read with a byte cap, so a huge source is abandoned rather than read whole. Preferred over
         /// readImage when set.
         std::function<ImageRead()> readImageBounded;
+        // OPT-077. Optional: a backend without them offers no HTML.
+        std::function<bool()> hasHtml; ///< the host clipboard offers text/html (no data is read)
+        std::function<ImageRead()> readHtml; ///< its bytes with a byte cap (any encoding; normalised here); tooLarge when the source sent more
+        std::function<bool(const QString &text, const QByteArray &html, bool secret)> writeRich; ///< text/plain and text/html in one offer; false = failed
     };
     using Sender = std::function<void(const QByteArray &record)>;
 
@@ -115,6 +124,11 @@ public:
             m_send(ConsoleWorkerWire::frame(answer));
             return;
         }
+        if (request.kind == ConsoleWorkerWire::ClipboardKind::Html) {
+            answerHtml(request, answer);
+            m_send(ConsoleWorkerWire::frame(answer));
+            return;
+        }
         if (!m_backend.hasText()) {
             answer.status = ConsoleWorkerWire::ClipboardStatus::Gone;
         } else {
@@ -140,6 +154,10 @@ public:
             && set.kind == ConsoleWorkerWire::ClipboardKind::Image) {
             m_lastSetId = set.setId;
             result.status = writeImage(set);
+        } else if (ConsoleWorkerWire::mayApplyClipboardSet(set, m_control, m_policy, m_lastSetId, m_desktop)
+                   && set.kind == ConsoleWorkerWire::ClipboardKind::Html) {
+            m_lastSetId = set.setId;
+            result.status = writeRich(set);
         } else if (ConsoleWorkerWire::mayApplyClipboardSet(set, m_control, m_policy, m_lastSetId, m_desktop)) {
             m_lastSetId = set.setId;
             QString text = set.text;
@@ -152,6 +170,7 @@ public:
                 m_settle.stop(); // an offer about the previous host text is stale
                 m_lastWritten = text;
                 m_lastWrittenImage.reset();
+                m_lastWrittenHtml.reset();
                 m_written.start();
             }
         }
@@ -166,14 +185,29 @@ private:
         if (!ConsoleWorkerWire::mayOfferClipboard(m_policy, m_desktop)) {
             return;
         }
+        const bool hasText = m_backend.hasText();
+        const bool hasImage = m_backend.hasImage && m_backend.hasImage();
+        const bool hasHtml = m_backend.hasHtml && m_backend.readHtml && m_backend.hasHtml();
+        if (!hasText && !hasImage && !hasHtml) {
+            return;
+        }
+        // OPT-077: formats from which formats exist (never their contents): rich HTML goes with its text and drops a picture;
+        // HTML beside a picture and no text is the picture ("Copy image" in a browser).
+        const auto choice = ClipboardHtml::announce(hasText, hasHtml, hasImage);
         quint8 flags = 0;
-        if (m_backend.hasText()) flags |= ConsoleWorkerWire::ClipboardOfferText;
-        if (m_backend.hasImage && m_backend.hasImage()) flags |= ConsoleWorkerWire::ClipboardOfferImage;
+        if (choice.text) flags |= ConsoleWorkerWire::ClipboardOfferText;
+        if (choice.image) flags |= ConsoleWorkerWire::ClipboardOfferImage;
+        if (choice.html) flags |= ConsoleWorkerWire::ClipboardOfferHtml;
         if (!flags) {
             return;
         }
         // Only just after a write of ours is the content read, to tell an asynchronous echo from a new copy.
         const bool recent = m_written.isValid() && m_written.elapsed() < EchoWindowMs;
+        if (recent && m_lastWrittenHtml && (flags & ConsoleWorkerWire::ClipboardOfferHtml)
+            && ClipboardHtml::normaliseHostHtml(m_backend.readHtml().data) == *m_lastWrittenHtml) {
+            // Our own text+html write coming back: nothing of it is a host copy (the text beside the HTML was written with it).
+            flags &= ~(ConsoleWorkerWire::ClipboardOfferHtml | ConsoleWorkerWire::ClipboardOfferText);
+        }
         if (recent && m_lastWritten && (flags & ConsoleWorkerWire::ClipboardOfferText)
             && ClipboardText::toHost(m_backend.readText()) == *m_lastWritten) {
             flags &= ~ConsoleWorkerWire::ClipboardOfferText;
@@ -250,6 +284,61 @@ private:
         }
     }
 
+    void answerHtml(const ConsoleWorkerWire::ClipboardRequest &request, ConsoleWorkerWire::ClipboardData &answer)
+    {
+        answer.kind = ConsoleWorkerWire::ClipboardKind::Html;
+        if (!m_backend.hasHtml || !m_backend.readHtml || !m_backend.hasHtml()) {
+            answer.status = ConsoleWorkerWire::ClipboardStatus::Gone;
+            return;
+        }
+        const ImageRead read = m_backend.readHtml();
+        const quint64 limit = std::min<quint64>(request.maxBytes, ConsoleWorkerWire::MaxClipboardHtmlBytes);
+        if (read.tooLarge || quint64(read.data.size()) > ClipboardLimits::MaxHtmlBytes * 2) {
+            logHtmlRefusal("oversize", read.tooLarge ? read.bytes : read.data.size());
+            answer.status = ConsoleWorkerWire::ClipboardStatus::TooLarge;
+            return;
+        }
+        const QByteArray html = ClipboardHtml::normaliseHostHtml(read.data);
+        if (html.trimmed().isEmpty()) {
+            answer.status = ConsoleWorkerWire::ClipboardStatus::Gone;
+        } else if (quint64(html.size()) > limit) {
+            logHtmlRefusal("oversize", html.size());
+            answer.status = ConsoleWorkerWire::ClipboardStatus::TooLarge;
+        } else {
+            answer.status = ConsoleWorkerWire::ClipboardStatus::Ok;
+            answer.html = html;
+        }
+    }
+
+    static void logHtmlRefusal(const char *reason, qint64 bytes)
+    {
+        // A reason and a size, never contents (OPT-077).
+        qInfo().nospace() << "Clipboard: refused (" << reason << ") direction=host-to-client kind=html bytes=" << bytes;
+    }
+
+    ConsoleWorkerWire::ClipboardSetStatus writeRich(const ConsoleWorkerWire::ClipboardSet &set)
+    {
+        // The broker has unwrapped and checked this HTML; the worker bounds it once more before a host application sees it.
+        QString text = set.text;
+        text.remove(QChar(0));
+        const QByteArray html = ClipboardHtml::normaliseHostHtml(set.html);
+        if (html.trimmed().isEmpty() || html.size() > ClipboardLimits::MaxHtmlBytes || !m_backend.writeRich) {
+            if (m_backend.writeRich) logHtmlRefusal(html.size() > ClipboardLimits::MaxHtmlBytes ? "oversize" : "empty", html.size());
+            return ConsoleWorkerWire::ClipboardSetStatus::Failed;
+        }
+        m_writing = true;
+        const bool ok = m_backend.writeRich(ClipboardText::toHost(text), html, m_policy.locked || m_policy.greeter);
+        m_writing = false;
+        if (ok) {
+            m_settle.stop();
+            m_lastWrittenHtml = html;
+            m_lastWritten.reset();
+            m_lastWrittenImage.reset();
+            m_written.start();
+        }
+        return ok ? ConsoleWorkerWire::ClipboardSetStatus::Written : ConsoleWorkerWire::ClipboardSetStatus::Failed;
+    }
+
     ConsoleWorkerWire::ClipboardSetStatus writeImage(const ConsoleWorkerWire::ClipboardSet &set)
     {
         // The broker has checked this PNG; the worker is the last gate before a host application sees it.
@@ -265,6 +354,7 @@ private:
             m_settle.stop();
             m_lastWrittenImage = set.image;
             m_lastWritten.reset();
+            m_lastWrittenHtml.reset();
             m_written.start();
         }
         return ok ? ConsoleWorkerWire::ClipboardSetStatus::Written : ConsoleWorkerWire::ClipboardSetStatus::Failed;
@@ -282,6 +372,7 @@ private:
     bool m_writing = false;
     std::optional<QString> m_lastWritten;
     std::optional<QByteArray> m_lastWrittenImage;
+    std::optional<QByteArray> m_lastWrittenHtml; // OPT-077: normalised UTF-8 of our last text+html write
     QElapsedTimer m_written;
 };
 }

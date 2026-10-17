@@ -282,6 +282,8 @@ struct ClipboardCapabilities {
     int maxBytes = 1024 * 1024; ///< the most UTF-8 text either direction carries
     bool images = false; ///< OPT-072: pictures too (PNG, CF_DIB; the same directions and states as text)
     int maxImageBytes = 16 * 1024 * 1024; ///< the most an encoded picture is; also 8192x8192 pixels at most
+    bool html = false; ///< OPT-077: formatted text too ("HTML Format" <-> text/html, always bridged with the plain text; same directions and states)
+    int maxHtmlBytes = 8 * 1024 * 1024; ///< the most an HTML document (UTF-8) is
     bool operator==(const ClipboardCapabilities &) const = default;
 };
 

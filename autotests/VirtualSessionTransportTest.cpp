@@ -10,6 +10,7 @@
 #include <freerdp/error.h>
 #include <QEvent>
 #include <limits>
+#include "ClipboardHtml.h"
 #include "VirtualSessionTransport.h"
 #include "RemoteMonitorGeometry.h"
 #include "VirtualResizeProtocol.h"
@@ -76,6 +77,29 @@ struct ClipChannel {
         response.common.msgFlags = CB_RESPONSE_OK;
         response.common.dataLen = uint32_t(png.size());
         response.requestedFormatData = reinterpret_cast<const BYTE *>(png.constData());
+        context.ClientFormatDataResponse(&context, &response);
+    }
+    // OPT-077: the client copies formatted text: CF_UNICODETEXT and the registered "HTML Format".
+    void copyRich()
+    {
+        static char htmlName[] = "HTML Format";
+        CLIPRDR_FORMAT formats[2] = {};
+        formats[0].formatId = CF_UNICODETEXT;
+        formats[1].formatId = 0xC0F1;
+        formats[1].formatName = htmlName;
+        CLIPRDR_FORMAT_LIST list{};
+        list.common.msgType = CB_FORMAT_LIST;
+        list.numFormats = 2;
+        list.formats = formats;
+        context.ClientFormatList(&context, &list);
+    }
+    void answer(const QByteArray &bytes)
+    {
+        CLIPRDR_FORMAT_DATA_RESPONSE response{};
+        response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+        response.common.msgFlags = CB_RESPONSE_OK;
+        response.common.dataLen = uint32_t(bytes.size());
+        response.requestedFormatData = reinterpret_cast<const BYTE *>(bytes.constData());
         context.ClientFormatDataResponse(&context, &response);
     }
     void copy(const QByteArray &ansi)
@@ -2687,6 +2711,59 @@ private Q_SLOTS:
             std::optional<ConsoleWorkerWire::ClipboardPolicy> after;
             for (const auto &record : workerRecords(worker)) if (const auto p = ConsoleWorkerWire::clipboardPolicy(record)) after = p;
             QVERIFY(after && !after->hostToClient && !after->clientToHost);
+        });
+    }
+
+    // OPT-077: formatted text follows the same binding and owner rules as text, both ways.
+    void clipboardHtmlFollowsTheBindingAndTheOwner() {
+        microphoneFixture([&](auto &t, auto &, auto &endpoint, auto &worker) {
+            Q_UNUSED(endpoint);
+            ClipChannel channel;
+            channel.attach(t.m_connection->clipboard());
+            workerRecords(worker);
+            t.syncClipboard(1000);
+            workerRecords(worker);
+            // Host text + HTML -> announced -> paste -> the worker is asked for HTML -> it reaches the client wrapped.
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, ConsoleWorkerWire::ClipboardOfferText | ConsoleWorkerWire::ClipboardOfferHtml})); worker.flush();
+            QTRY_COMPARE(channel.formatLists.size(), 1);
+            QCOMPARE(channel.formatLists.first(), (QList<uint32_t>{0xC002, CF_UNICODETEXT}));
+            channel.paste(0xC002);
+            std::optional<ConsoleWorkerWire::ClipboardRequest> request;
+            QTRY_VERIFY(([&] { for (const auto &r : workerRecords(worker)) if (const auto q = ConsoleWorkerWire::clipboardRequest(r)) request = q; return bool(request); })());
+            QCOMPARE(request->kind, ConsoleWorkerWire::ClipboardKind::Html);
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{request->requestId, 1, ConsoleWorkerWire::ClipboardStatus::Ok, {}, ConsoleWorkerWire::ClipboardKind::Html, {}, "<b>hi</b>"})); worker.flush();
+            QTRY_COMPARE(channel.responseFlags.size(), 1);
+            QCOMPARE(channel.responseFlags.first(), uint16_t(CB_RESPONSE_OK));
+            QVERIFY(channel.responseData.first().contains("<!--StartFragment--><b>hi</b><!--EndFragment-->"));
+            // The worker refuses: the paste fails now.
+            channel.paste(0xC002);
+            request.reset();
+            QTRY_VERIFY(([&] { for (const auto &r : workerRecords(worker)) if (const auto q = ConsoleWorkerWire::clipboardRequest(r)) request = q; return bool(request); })());
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardData{request->requestId, 1, ConsoleWorkerWire::ClipboardStatus::TooLarge, {}, ConsoleWorkerWire::ClipboardKind::Html, {}, {}})); worker.flush();
+            QTRY_COMPARE(channel.responseFlags.size(), 2);
+            QCOMPARE(channel.responseFlags.last(), uint16_t(CB_RESPONSE_FAIL));
+            // Client rich copy -> text first, then HTML -> one Html set under the binding's generation.
+            QTest::qWait(Clipboard::EchoWindowMs + 100);
+            channel.copyRich();
+            QTest::qWait(Clipboard::FormatListSettleMs + 100);
+            const QString text = QStringLiteral("hi");
+            channel.answer(QByteArray(reinterpret_cast<const char *>(text.utf16()), (text.size() + 1) * 2));
+            QTest::qWait(60);
+            channel.answer(ClipboardHtml::wrapForWire("<b>hi</b>").data);
+            std::optional<ConsoleWorkerWire::ClipboardSet> set;
+            QTRY_VERIFY(([&] { for (const auto &r : workerRecords(worker)) if (const auto q = ConsoleWorkerWire::clipboardSet(r)) set = q; return bool(set); })());
+            QCOMPARE(set->kind, ConsoleWorkerWire::ClipboardKind::Html);
+            QCOMPARE(set->text, text);
+            QVERIFY(set->html.contains("<b>hi</b>"));
+            QCOMPARE(set->controlGeneration, t.m_controlGeneration);
+            // Not the owner: a paste fails and nothing is asked.
+            t.syncClipboard(1001);
+            workerRecords(worker);
+            channel.paste(0xC002);
+            QTest::qWait(60);
+            bool asked = false;
+            for (const auto &r : workerRecords(worker)) asked = asked || ConsoleWorkerWire::clipboardRequest(r);
+            QVERIFY(!asked);
         });
     }
 

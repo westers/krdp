@@ -11,6 +11,7 @@
 #include <QTest>
 
 #include "Clipboard.h"
+#include "ClipboardHtml.h"
 #include "ClipboardImage.h"
 #include "ClipboardLimits.h"
 
@@ -99,6 +100,7 @@ QByteArray le32(quint32 v)
     for (int i = 0; i < 4; ++i) out.append(char((v >> (8 * i)) & 0xff));
     return out;
 }
+constexpr uint32_t ClientHtmlId = 0xC0F1; // whatever number a client gives its registered "HTML Format"
 constexpr uint32_t ClientPngId = 0xC0DE; // whatever number a client gives its registered "PNG"
 
 QStringList g_messages;
@@ -615,7 +617,7 @@ private Q_SLOTS:
         QSignalSpy changed(&rig.clipboard, &Clipboard::clientDataChanged); // something takes the client's clipboard
         rig.clipboard.setGraphicsDelivered();
         // A registered format with another name is not an image; nothing is requested.
-        rig.clientFormatListNamed({{0xC010, "HTML Format"}, {0xC011, "image/x-unknown"}});
+        rig.clientFormatListNamed({{0xC010, "Rich Text Format"}, {0xC011, "image/x-unknown"}});
         QTest::qWait(Clipboard::FormatListSettleMs * 2);
         QVERIFY(rig.sent.dataRequests.isEmpty());
         // Some clients call it by its MIME type.
@@ -739,6 +741,396 @@ private Q_SLOTS:
             logged = logged || message.contains(QStringLiteral("refused (malformed)"));
         }
         QVERIFY(logged);
+    }
+
+    // ---- OPT-077: formatted text ----
+    void htmlIsAnnouncedBesideTextAndFetchedAtPasteTime()
+    {
+        Rig rig;
+        QSignalSpy textRequested(&rig.clipboard, &Clipboard::hostTextRequested);
+        QSignalSpy htmlRequested(&rig.clipboard, &Clipboard::hostHtmlRequested);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clipboard.announceHost(true, false, true);
+        QCOMPARE(rig.sent.formatLists.size(), 1);
+        QCOMPARE(rig.sent.formatLists.first(), (QList<uint32_t>{ClipboardHtml::HtmlFormatId, CF_UNICODETEXT}));
+        QCOMPARE(rig.sent.formatNames.first(), (QStringList{QStringLiteral("HTML Format"), QString()}));
+        QCOMPARE(htmlRequested.size(), 0); // announcing asks the worker for nothing
+
+        rig.clientDataRequest(ClipboardHtml::HtmlFormatId);
+        QTRY_COMPARE(htmlRequested.size(), 1);
+        QCOMPARE(textRequested.size(), 0);
+        const QByteArray html("<p>caf\xC3\xA9 <b>bold</b></p>");
+        rig.clipboard.provideHostHtml(htmlRequested.first().first().toULongLong(), html, true);
+        QCOMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_OK));
+        const QByteArray wire = rig.sent.dataResponses.last().data;
+        QVERIFY(wire.startsWith("Version:0.9\r\nStartHTML:0000000105\r\n"));
+        QVERIFY(wire.endsWith('\0'));
+        QCOMPARE(rig.clipboard.counters().hostHtml, quint64(1));
+        // What a client reads back is the document, valid UTF-8, with the text intact.
+        const auto back = ClipboardHtml::unwrapMsHtml(wire);
+        QVERIFY(back.ok());
+        QVERIFY(back.data.contains("<b>bold</b>"));
+        QVERIFY(back.data.contains("caf\xC3\xA9"));
+        // The text of the same copy is its own request, answered separately.
+        rig.clientDataRequest(CF_UNICODETEXT);
+        QTRY_COMPARE(textRequested.size(), 1);
+        rig.clipboard.provideHostText(textRequested.first().first().toULongLong(), QStringLiteral("café bold"), true);
+        QCOMPARE(rig.sent.dataResponses.size(), 2);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_OK));
+    }
+
+    void theAnnouncementFollowsTheCombinationRule()
+    {
+        const auto announced = [](bool text, bool image, bool html) {
+            Rig rig;
+            rig.clipboard.setGraphicsDelivered();
+            rig.clipboard.announceHost(text, image, html);
+            return rig.sent.formatLists.isEmpty() ? QList<uint32_t>() : rig.sent.formatLists.first();
+        };
+        QCOMPARE(announced(false, false, true), (QList<uint32_t>{ClipboardHtml::HtmlFormatId}));
+        QCOMPARE(announced(true, false, true), (QList<uint32_t>{ClipboardHtml::HtmlFormatId, CF_UNICODETEXT}));
+        // A browser's "Copy image": <img> HTML and a picture, no text. The picture wins.
+        QCOMPARE(announced(false, true, true), (QList<uint32_t>{ClipboardImage::PngFormatId, ClipboardImage::CfDib}));
+        // A spreadsheet range: text, HTML and a picture. Text and HTML; the picture is dropped.
+        QCOMPARE(announced(true, true, true), (QList<uint32_t>{ClipboardHtml::HtmlFormatId, CF_UNICODETEXT}));
+        // Without HTML, the earlier rule: text and picture both announced.
+        QCOMPARE(announced(true, true, false), (QList<uint32_t>{CF_UNICODETEXT, ClipboardImage::PngFormatId, ClipboardImage::CfDib}));
+    }
+
+    void anHtmlRequestFailsPromptlyWhenItCannotBeServed()
+    {
+        Rig rig;
+        QSignalSpy htmlRequested(&rig.clipboard, &Clipboard::hostHtmlRequested);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clientDataRequest(ClipboardHtml::HtmlFormatId); // nothing announced
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+        rig.clipboard.announceHost(true, false, false);
+        rig.clientDataRequest(ClipboardHtml::HtmlFormatId); // announced text only
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 2);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+        QCOMPARE(htmlRequested.size(), 0);
+        rig.clipboard.announceHost(true, false, true);
+        QTest::qWait(Clipboard::HostAnnounceIntervalMs + 50);
+        // The worker says no / empty / not valid: each is a failure response now.
+        for (const QByteArray &answer : {QByteArray(), QByteArray("   \n "), QByteArray("<p>ok</p>")}) {
+            const int before = rig.sent.dataResponses.size();
+            rig.clientDataRequest(ClipboardHtml::HtmlFormatId);
+            QTRY_COMPARE(htmlRequested.size(), before - 1);
+            const bool good = answer == "<p>ok</p>";
+            rig.clipboard.provideHostHtml(htmlRequested.last().first().toULongLong(), answer, !answer.isEmpty() && good);
+            QCOMPARE(rig.sent.dataResponses.size(), before + 1);
+            QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(good ? CB_RESPONSE_OK : CB_RESPONSE_FAIL));
+        }
+        // An answer the wrapper refuses (whitespace only, claimed ok) fails too.
+        rig.clientDataRequest(ClipboardHtml::HtmlFormatId);
+        QTRY_COMPARE(htmlRequested.size(), 4);
+        rig.clipboard.provideHostHtml(htmlRequested.last().first().toULongLong(), QByteArray("   \n "), true);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+        QCOMPARE(rig.clipboard.counters().refusedMalformed, quint64(1));
+        // Over the cap: refused, with the oversize counter.
+        rig.clientDataRequest(ClipboardHtml::HtmlFormatId);
+        QTRY_COMPARE(htmlRequested.size(), 5);
+        rig.clipboard.provideHostHtml(htmlRequested.last().first().toULongLong(), QByteArray(ClipboardLimits::MaxHtmlBytes + 1, 'a'), true);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+        QCOMPARE(rig.clipboard.counters().refusedOversize, quint64(1));
+    }
+
+    void anUnansweredHtmlPasteFailsAfterTheTimeoutAndDenialFailsAPendingOne()
+    {
+        Rig rig;
+        QSignalSpy htmlRequested(&rig.clipboard, &Clipboard::hostHtmlRequested);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clipboard.announceHost(true, false, true);
+        rig.clientDataRequest(ClipboardHtml::HtmlFormatId);
+        QTRY_COMPARE(htmlRequested.size(), 1);
+        QVERIFY(rig.sent.dataResponses.isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataResponses.size(), 1, Clipboard::HostTextTimeoutMs + 2000);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+        QCOMPARE(rig.clipboard.counters().refusedTimeout, quint64(1));
+        // A late answer is ignored (no second response).
+        rig.clipboard.provideHostHtml(htmlRequested.first().first().toULongLong(), QByteArray("<p>late</p>"), true);
+        QCOMPARE(rig.sent.dataResponses.size(), 1);
+        // Denying host to client while a paste is pending answers it with a failure at once.
+        rig.clientDataRequest(ClipboardHtml::HtmlFormatId);
+        QTRY_COMPARE(htmlRequested.size(), 2);
+        rig.clipboard.setDirections(false, true);
+        QCOMPARE(rig.sent.dataResponses.size(), 2);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+    }
+
+    void aSecondHtmlPasteWhileOneIsPendingIsRefused()
+    {
+        Rig rig;
+        QSignalSpy htmlRequested(&rig.clipboard, &Clipboard::hostHtmlRequested);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clipboard.announceHost(true, false, true);
+        rig.clientDataRequest(ClipboardHtml::HtmlFormatId);
+        rig.clientDataRequest(ClipboardHtml::HtmlFormatId);
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+        QCOMPARE(htmlRequested.size(), 1);
+        QCOMPARE(rig.clipboard.counters().refusedBusy, quint64(1));
+    }
+
+    void aRichClientCopyIsRequestedTextThenHtmlAndWrittenTogether()
+    {
+        Rig rig;
+        QSignalSpy changed(&rig.clipboard, &Clipboard::clientDataChanged);
+        rig.clipboard.setGraphicsDelivered();
+        const QByteArray html("<p>caf\xC3\xA9 <i>italic</i></p>");
+        rig.clientFormatListNamed({{ClientHtmlId, "HTML Format"}, {CF_UNICODETEXT, {}}, {CF_TEXT, {}}});
+        QTRY_COMPARE(rig.sent.formatListResponses, 1);
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 2000);
+        QCOMPARE(rig.sent.dataRequests.first(), uint32_t(CF_UNICODETEXT)); // text first
+        rig.clientDataResponse(utf16z(QStringLiteral("café italic")));
+        QTRY_COMPARE(rig.sent.dataRequests.size(), 2);
+        QCOMPARE(rig.sent.dataRequests.last(), ClientHtmlId); // then the HTML, with no wait for a settle timer
+        QCOMPARE(changed.size(), 0); // nothing is written until both are in
+        rig.clientDataResponse(ClipboardHtml::wrapForWire(html).data);
+        QTRY_COMPARE(changed.size(), 1);
+        const auto data = rig.clipboard.getClipboard();
+        QVERIFY(data);
+        QCOMPARE(data->text(), QStringLiteral("café italic"));
+        const QByteArray stored = data->data(QStringLiteral("text/html"));
+        QVERIFY(QByteArrayView(stored).isValidUtf8());
+        QVERIFY(stored.contains("<i>italic</i>"));
+        QVERIFY(stored.contains("charset"));
+        QCOMPARE(rig.clipboard.counters().clientHtml, quint64(1));
+    }
+
+    void anHtmlOnlyClientCopyIsRequestedAndPassedOn()
+    {
+        Rig rig;
+        QSignalSpy changed(&rig.clipboard, &Clipboard::clientDataChanged);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clientFormatListNamed({{ClientHtmlId, "html format"}});
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 2000);
+        QCOMPARE(rig.sent.dataRequests.first(), ClientHtmlId);
+        rig.clientDataResponse(ClipboardHtml::wrapForWire("<b>only</b>").data);
+        QTRY_COMPARE(changed.size(), 1);
+        const auto data = rig.clipboard.getClipboard();
+        QVERIFY(data && !data->hasText());
+        QVERIFY(data->data(QStringLiteral("text/html")).contains("<b>only</b>"));
+    }
+
+    void aClientCopyImageWithHtmlButNoTextIsThePicture()
+    {
+        Rig rig;
+        QSignalSpy changed(&rig.clipboard, &Clipboard::clientDataChanged);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clientFormatListNamed({{ClientHtmlId, "HTML Format"}, {ClientPngId, "PNG"}, {ClipboardImage::CfDib, {}}});
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 2000);
+        QCOMPARE(rig.sent.dataRequests.first(), ClientPngId);
+        rig.clientDataResponse(encodeImage(picture()));
+        QTRY_COMPARE(changed.size(), 1);
+        const auto data = rig.clipboard.getClipboard();
+        QVERIFY(data && data->hasFormat(QStringLiteral("image/png")));
+        QVERIFY(!data->hasFormat(QStringLiteral("text/html")));
+        QCOMPARE(rig.sent.dataRequests.size(), 1); // the HTML was never asked for
+    }
+
+    void aSpreadsheetStyleClientCopyIsRichNotAPicture()
+    {
+        Rig rig;
+        QSignalSpy changed(&rig.clipboard, &Clipboard::clientDataChanged);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clientFormatListNamed({{CF_UNICODETEXT, {}}, {ClientHtmlId, "HTML Format"}, {ClientPngId, "PNG"}});
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 2000);
+        QCOMPARE(rig.sent.dataRequests.first(), uint32_t(CF_UNICODETEXT));
+        rig.clientDataResponse(utf16z(QStringLiteral("a\tb")));
+        QTRY_COMPARE(rig.sent.dataRequests.size(), 2);
+        QCOMPARE(rig.sent.dataRequests.last(), ClientHtmlId);
+        rig.clientDataResponse(ClipboardHtml::wrapForWire("<table><tr><td>a</td><td>b</td></tr></table>").data);
+        QTRY_COMPARE(changed.size(), 1);
+        QVERIFY(!rig.clipboard.getClipboard()->hasFormat(QStringLiteral("image/png")));
+    }
+
+    void whenTheHtmlIsRefusedTheTextAloneLands()
+    {
+        // Each way the second request can fail: the client says no, the document is malformed, it declares too much.
+        for (int how = 0; how < 3; ++how) {
+            Rig rig;
+            QSignalSpy changed(&rig.clipboard, &Clipboard::clientDataChanged);
+            rig.clipboard.setGraphicsDelivered();
+            rig.clientFormatListNamed({{CF_UNICODETEXT, {}}, {ClientHtmlId, "HTML Format"}});
+            QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 2000);
+            rig.clientDataResponse(utf16z(QStringLiteral("still the text")));
+            QTRY_COMPARE(rig.sent.dataRequests.size(), 2);
+            if (how == 0) {
+                rig.clientDataResponse({}, CB_RESPONSE_FAIL);
+            } else if (how == 1) {
+                rig.clientDataResponse(QByteArray("Version:0.9\r\nStartHTML:oops\r\n<p>x</p>"));
+            } else {
+                rig.clientDataResponse({}, CB_RESPONSE_OK, uint32_t(ClipboardLimits::MaxHtmlWireBytes + 1));
+            }
+            QTRY_COMPARE(changed.size(), 1);
+            const auto data = rig.clipboard.getClipboard();
+            QCOMPARE(data->text(), QStringLiteral("still the text"));
+            QVERIFY(!data->hasFormat(QStringLiteral("text/html")));
+            QCOMPARE(rig.clipboard.counters().clientHtml, quint64(0));
+            QCOMPARE(rig.clipboard.counters().clientCopies, quint64(1));
+            // A refused HTML does not stop later copies being requested.
+            rig.clientFormatListNamed({{CF_UNICODETEXT, {}}});
+            QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 3, 2000);
+        }
+    }
+
+    void aRefusedTextRequestDropsTheHtmlRequest()
+    {
+        Rig rig;
+        QSignalSpy changed(&rig.clipboard, &Clipboard::clientDataChanged);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clientFormatListNamed({{CF_UNICODETEXT, {}}, {ClientHtmlId, "HTML Format"}});
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 2000);
+        rig.clientDataResponse({}, CB_RESPONSE_FAIL);
+        QTest::qWait(150);
+        QCOMPARE(rig.sent.dataRequests.size(), 1); // no HTML request after a refused text request
+        QCOMPARE(changed.size(), 0);
+    }
+
+    void aNewFormatListForgetsAHalfFetchedRichCopy()
+    {
+        Rig rig;
+        QSignalSpy changed(&rig.clipboard, &Clipboard::clientDataChanged);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clientFormatListNamed({{CF_UNICODETEXT, {}}, {ClientHtmlId, "HTML Format"}});
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 2000);
+        rig.clientDataResponse(utf16z(QStringLiteral("old text")));
+        QTRY_COMPARE(rig.sent.dataRequests.size(), 2); // the HTML request is on the wire
+        // The client copies again before answering: its new list is for a text-only copy.
+        rig.clientFormatListNamed({{CF_UNICODETEXT, {}}});
+        QTest::qWait(30);
+        rig.clientDataResponse(ClipboardHtml::wrapForWire("<p>old html</p>").data); // the answer to the old request: dropped
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 3, 2000);
+        QCOMPARE(rig.sent.dataRequests.last(), uint32_t(CF_UNICODETEXT));
+        QCOMPARE(changed.size(), 0);
+        rig.clientDataResponse(utf16z(QStringLiteral("new text")));
+        QTRY_COMPARE(changed.size(), 1);
+        const auto data = rig.clipboard.getClipboard();
+        QVERIFY(data);
+        QCOMPARE(data->text(), QStringLiteral("new text"));
+        QVERIFY(!data->hasFormat(QStringLiteral("text/html"))); // never mixed with the old copy's HTML
+    }
+
+    void denyingClientToHostDropsAHalfReceivedRichCopy()
+    {
+        Rig rig;
+        QSignalSpy changed(&rig.clipboard, &Clipboard::clientDataChanged);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clientFormatListNamed({{CF_UNICODETEXT, {}}, {ClientHtmlId, "HTML Format"}});
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 2000);
+        rig.clientDataResponse(utf16z(QStringLiteral("text")));
+        QTRY_COMPARE(rig.sent.dataRequests.size(), 2);
+        rig.clipboard.setDirections(true, false);
+        rig.clientDataResponse(ClipboardHtml::wrapForWire("<p>x</p>").data);
+        QTest::qWait(100);
+        QCOMPARE(changed.size(), 0);
+        QVERIFY(!rig.clipboard.getClipboard());
+    }
+
+    void htmlResponsesHaveTheirOwnCapAndTextKeepsItsOwn()
+    {
+        Rig rig;
+        QSignalSpy changed(&rig.clipboard, &Clipboard::clientDataChanged);
+        rig.clipboard.setGraphicsDelivered();
+        // A text request: 3 MiB declared is over the text wire cap.
+        rig.clientFormatList({CF_UNICODETEXT});
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 2000);
+        rig.clientDataResponse({}, CB_RESPONSE_OK, uint32_t(3 * 1024 * 1024));
+        QTRY_COMPARE(rig.clipboard.counters().refusedOversize, quint64(1));
+        // An HTML request may carry the document cap.
+        rig.clientFormatListNamed({{ClientHtmlId, "HTML Format"}});
+        QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 2, 2000);
+        const QByteArray big = ClipboardHtml::wrapForWire("<p>" + QByteArray(5 * 1024 * 1024, 'a') + "</p>").data;
+        rig.clientDataResponse(big);
+        QTRY_COMPARE(changed.size(), 1);
+        QCOMPARE(rig.clipboard.counters().clientHtml, quint64(1));
+    }
+
+    void htmlCopiesShareTheRateLimit()
+    {
+        const QByteArray wire = ClipboardHtml::wrapForWire("<p>x</p>").data;
+        Rig limited;
+        QSignalSpy limitedChanged(&limited.clipboard, &Clipboard::clientDataChanged);
+        limited.clipboard.setGraphicsDelivered();
+        for (int i = 0; i < 25; ++i) {
+            limited.clientFormatListNamed({{ClientHtmlId, "HTML Format"}});
+            QTRY_COMPARE_WITH_TIMEOUT(limited.sent.dataRequests.size(), i + 1, 2000);
+            limited.clientDataResponse(wire);
+            QTest::qWait(10);
+        }
+        QTRY_COMPARE(limitedChanged.size(), ClipboardLimits::MaxSets);
+        QVERIFY(limited.clipboard.counters().refusedRate >= 1);
+    }
+
+    void htmlContentsNeverReachALog()
+    {
+        g_messages.clear();
+        const auto previous = qInstallMessageHandler(capture);
+        QLoggingCategory::setFilterRules(QStringLiteral("*.debug=true"));
+        {
+            Rig rig;
+            QSignalSpy htmlRequested(&rig.clipboard, &Clipboard::hostHtmlRequested);
+            QSignalSpy changed(&rig.clipboard, &Clipboard::clientDataChanged);
+            rig.clipboard.setGraphicsDelivered();
+            rig.clipboard.announceHost(true, false, true);
+            rig.clientDataRequest(ClipboardHtml::HtmlFormatId);
+            QTRY_COMPARE(htmlRequested.size(), 1);
+            rig.clipboard.provideHostHtml(htmlRequested.first().first().toULongLong(), (Canary + QStringLiteral(" host")).toUtf8(), true);
+            QTest::qWait(Clipboard::EchoWindowMs + 100);
+            rig.clientFormatListNamed({{CF_UNICODETEXT, {}}, {ClientHtmlId, "HTML Format"}});
+            QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 1, 2000);
+            rig.clientDataResponse(utf16z(Canary + QStringLiteral(" text")));
+            QTRY_COMPARE(rig.sent.dataRequests.size(), 2);
+            rig.clientDataResponse(QByteArray("Version:0.9\r\nStartHTML:oops\r\n") + Canary.toUtf8()); // malformed: an Info line
+            QTRY_COMPARE(changed.size(), 1);
+            rig.clientFormatListNamed({{ClientHtmlId, "HTML Format"}});
+            QTRY_COMPARE_WITH_TIMEOUT(rig.sent.dataRequests.size(), 3, 2000);
+            rig.clientDataResponse(ClipboardHtml::wrapForWire((Canary + QStringLiteral(" client")).toUtf8()).data);
+            QTRY_COMPARE(changed.size(), 2);
+        }
+        QLoggingCategory::setFilterRules(QString());
+        qInstallMessageHandler(previous);
+        bool logged = false;
+        for (const auto &message : std::as_const(g_messages)) {
+            QVERIFY2(!message.contains(QStringLiteral("CANARY")), qPrintable(message));
+            logged = logged || message.contains(QStringLiteral("kind=html"));
+        }
+        QVERIFY(logged);
+    }
+
+    // ---- OPT-077: failure responses (capability / failure review) ----
+    void everyRefusalOfAHostPasteIsACompleteFailureResponse()
+    {
+        Rig rig;
+        QSignalSpy textRequested(&rig.clipboard, &Clipboard::hostTextRequested);
+        QSignalSpy imageRequested(&rig.clipboard, &Clipboard::hostImageRequested);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clipboard.announceHost(true, true, false);
+        // Image: worker refuses, then an oversize PNG, then a malformed one: each a prompt CB_RESPONSE_FAIL with no data.
+        const auto fails = [&](int count) {
+            QCOMPARE(rig.sent.dataResponses.size(), count);
+            QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+            QVERIFY(rig.sent.dataResponses.last().data.isEmpty());
+        };
+        rig.clientDataRequest(ClipboardImage::PngFormatId);
+        QTRY_COMPARE(imageRequested.size(), 1);
+        rig.clipboard.provideHostImage(imageRequested.last().first().toULongLong(), {}, false);
+        fails(1);
+        rig.clientDataRequest(ClipboardImage::PngFormatId);
+        QTRY_COMPARE(imageRequested.size(), 2);
+        rig.clipboard.provideHostImage(imageRequested.last().first().toULongLong(), QByteArray("not a png"), true);
+        fails(2);
+        rig.clientDataRequest(CF_UNICODETEXT);
+        QTRY_COMPARE(textRequested.size(), 1);
+        rig.clipboard.provideHostText(textRequested.last().first().toULongLong(), {}, false);
+        fails(3);
+        // A format that was never announced.
+        rig.clientDataRequest(ClipboardHtml::HtmlFormatId);
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 4);
+        fails(4);
     }
 
     void rateLimitCountsSetsAndBytesOverTime()

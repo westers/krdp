@@ -74,7 +74,11 @@ namespace KRdp::ConsoleWorkerWire
 // 19 (OPT-072): the clipboard bridge carries images. ClipboardOffer flags bit 1 = an image is available; ClipboardRequest,
 // ClipboardData and ClipboardSet carry a ClipboardKind (text or image). An image is PNG, at most MaxClipboardImageBytes,
 // and is never logged. Policy, gates and the one-request-at-a-time rule are the text bridge's.
-constexpr quint16 ProtocolVersion = 19;
+// 20 (OPT-077): the clipboard bridge carries formatted text. ClipboardOffer flags bit 2 = HTML is available; ClipboardKind gains
+// Html. A Html ClipboardData carries the HTML document (UTF-8, at most MaxClipboardHtmlBytes, never the cliprdr wrapper); a
+// Html ClipboardSet carries the plain text beside it (may be empty) and the HTML (never empty), so the host application gets
+// both in one offer. Policy, gates and the one-request-at-a-time rule are the text bridge's. Contents are never logged.
+constexpr quint16 ProtocolVersion = 20;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -1279,16 +1283,22 @@ constexpr quint32 MaxClipboardBytes = 1024 * 1024;
 /// OPT-072 (wire 19): largest image (encoded PNG bytes) either direction carries on the worker wire.
 constexpr quint32 MaxClipboardImageBytes = 16 * 1024 * 1024;
 
-/// What a clipboard record carries (wire 19).
-enum class ClipboardKind : quint8 { Text, Image };
-constexpr quint8 LastClipboardKind = quint8(ClipboardKind::Image);
+/// OPT-077 (wire 20): largest HTML document (UTF-8 bytes) either direction carries on the worker wire.
+constexpr quint32 MaxClipboardHtmlBytes = 8 * 1024 * 1024;
+/// A Html ClipboardSet is its text length (4 bytes), the text and the HTML.
+constexpr quint32 MaxClipboardRichSetBytes = 4 + MaxClipboardBytes + MaxClipboardHtmlBytes;
+
+/// What a clipboard record carries (wire 19; Html since wire 20).
+enum class ClipboardKind : quint8 { Text, Image, Html };
+constexpr quint8 LastClipboardKind = quint8(ClipboardKind::Html);
 constexpr quint32 maxClipboardBytes(ClipboardKind kind)
 {
-    return kind == ClipboardKind::Image ? MaxClipboardImageBytes : MaxClipboardBytes;
+    return kind == ClipboardKind::Image ? MaxClipboardImageBytes : kind == ClipboardKind::Html ? MaxClipboardHtmlBytes : MaxClipboardBytes;
 }
 /// ClipboardOffer flag bits.
 constexpr quint8 ClipboardOfferText = 1;
 constexpr quint8 ClipboardOfferImage = 2;
+constexpr quint8 ClipboardOfferHtml = 4;
 
 /** Broker -> worker: the planner's decision. Revision is endpoint-local and strictly increases. */
 struct ClipboardPolicy {
@@ -1333,7 +1343,7 @@ inline std::optional<ClipboardPolicy> clipboardPolicy(const Record &record)
 /** Worker -> broker: the host's clipboard changed. No contents, no length. */
 struct ClipboardOffer {
     quint64 seq = 0;
-    quint8 flags = ClipboardOfferText; // bit 0: text available, bit 1 (wire 19): an image is available
+    quint8 flags = ClipboardOfferText; // bit 0: text available, bit 1 (wire 19): an image, bit 2 (wire 20): HTML
     bool operator==(const ClipboardOffer &) const = default;
 };
 
@@ -1354,7 +1364,7 @@ inline std::optional<ClipboardOffer> clipboardOffer(const Record &record)
     ClipboardOffer offer;
     stream >> offer.seq >> offer.flags;
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !offer.seq || !offer.flags
-        || offer.flags > (ClipboardOfferText | ClipboardOfferImage)) return std::nullopt;
+        || offer.flags > (ClipboardOfferText | ClipboardOfferImage | ClipboardOfferHtml)) return std::nullopt;
     return offer;
 }
 
@@ -1400,6 +1410,7 @@ struct ClipboardData {
     QString text; // LF line endings (kind Text)
     ClipboardKind kind = ClipboardKind::Text;
     QByteArray image; // PNG (kind Image); only with status Ok
+    QByteArray html; // the HTML document, UTF-8 (kind Html); only with status Ok, never empty
     bool operator==(const ClipboardData &) const = default;
 };
 
@@ -1414,7 +1425,9 @@ inline QByteArray frame(const ClipboardData &data)
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
     stream << data.requestId << data.seq << quint8(data.status) << quint8(data.kind);
-    if (data.status == ClipboardStatus::Ok) payload.append(data.kind == ClipboardKind::Image ? data.image : data.text.toUtf8());
+    if (data.status == ClipboardStatus::Ok) {
+        payload.append(data.kind == ClipboardKind::Image ? data.image : data.kind == ClipboardKind::Html ? data.html : data.text.toUtf8());
+    }
     return frame(Kind::ClipboardData, payload);
 }
 
@@ -1438,6 +1451,9 @@ inline std::optional<ClipboardData> clipboardData(const Record &record)
     if (data.kind == ClipboardKind::Image) {
         if (body.isEmpty()) return std::nullopt; // an Ok image has bytes
         data.image = body;
+    } else if (data.kind == ClipboardKind::Html) {
+        if (body.isEmpty() || !QByteArrayView(body).isValidUtf8()) return std::nullopt; // an Ok html has a document
+        data.html = body;
     } else {
         data.text = QString::fromUtf8(body);
     }
@@ -1451,6 +1467,7 @@ struct ClipboardSet {
     QString text; // LF line endings; empty clears the host clipboard (kind Text)
     ClipboardKind kind = ClipboardKind::Text;
     QByteArray image; // PNG (kind Image); never empty
+    QByteArray html; // the HTML document, UTF-8 (kind Html); never empty. `text` is then the plain text beside it (may be empty)
     bool operator==(const ClipboardSet &) const = default;
 };
 
@@ -1460,7 +1477,14 @@ inline QByteArray frame(const ClipboardSet &set)
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
     stream << set.setId << set.controlGeneration << quint8(set.kind);
-    payload.append(set.kind == ClipboardKind::Image ? set.image : set.text.toUtf8());
+    if (set.kind == ClipboardKind::Html) {
+        const QByteArray text = set.text.toUtf8();
+        stream << quint32(text.size());
+        payload.append(text);
+        payload.append(set.html);
+    } else {
+        payload.append(set.kind == ClipboardKind::Image ? set.image : set.text.toUtf8());
+    }
     return frame(Kind::ClipboardSet, payload);
 }
 
@@ -1477,6 +1501,20 @@ inline std::optional<ClipboardSet> clipboardSet(const Record &record)
     if (stream.status() != QDataStream::Ok || !set.setId || !set.controlGeneration || kind > LastClipboardKind) return std::nullopt;
     set.kind = ClipboardKind(kind);
     const auto body = record.payload.mid(header);
+    if (set.kind == ClipboardKind::Html) {
+        if (body.size() < 4 || qint64(body.size()) > qint64(MaxClipboardRichSetBytes)) return std::nullopt;
+        QDataStream lengthStream(body.left(4));
+        lengthStream.setByteOrder(QDataStream::BigEndian);
+        quint32 textLength = 0;
+        lengthStream >> textLength;
+        if (textLength > MaxClipboardBytes || qint64(textLength) > qint64(body.size()) - 4) return std::nullopt;
+        const auto text = body.mid(4, textLength);
+        set.html = body.mid(4 + textLength);
+        if (set.html.isEmpty() || set.html.size() > qsizetype(MaxClipboardHtmlBytes) || !QByteArrayView(set.html).isValidUtf8()
+            || !QByteArrayView(text).isValidUtf8()) return std::nullopt;
+        set.text = QString::fromUtf8(text);
+        return set;
+    }
     if (qint64(body.size()) > qint64(maxClipboardBytes(set.kind))) return std::nullopt;
     if (set.kind == ClipboardKind::Image) {
         if (body.isEmpty()) return std::nullopt; // an image copy has bytes; clearing is a text set
@@ -1531,7 +1569,9 @@ inline bool mayApplyClipboardSet(const ClipboardSet &set, const ControlState &co
     return control.active && control.generation != 0 && set.controlGeneration == control.generation
         && policy.controlGeneration == control.generation && policy.clientToHost && policy.greeter == !desktop
         && (set.kind == ClipboardKind::Image ? !set.image.isEmpty() && quint64(set.image.size()) <= MaxClipboardImageBytes
-                                             : quint64(set.text.toUtf8().size()) <= MaxClipboardBytes)
+            : set.kind == ClipboardKind::Html ? !set.html.isEmpty() && quint64(set.html.size()) <= MaxClipboardHtmlBytes
+                    && quint64(set.text.toUtf8().size()) <= MaxClipboardBytes
+                                              : quint64(set.text.toUtf8().size()) <= MaxClipboardBytes)
         && set.setId > lastSetId;
 }
 
