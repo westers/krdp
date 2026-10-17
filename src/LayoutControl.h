@@ -284,6 +284,20 @@ struct ClipboardCapabilities {
     int maxImageBytes = 16 * 1024 * 1024; ///< the most an encoded picture is; also 8192x8192 pixels at most
     bool html = false; ///< OPT-077: formatted text too ("HTML Format" <-> text/html, always bridged with the plain text; same directions and states)
     int maxHtmlBytes = 8 * 1024 * 1024; ///< the most an HTML document (UTF-8) is
+
+    /**
+     * OPT-078: the `files` subgroup. File copy over the standard clipboard channel (FileGroupDescriptorW + FILECONTENTS, no size limit,
+     * 64-bit offsets, locks) with the host's directions for it (ClipboardFiles; the state narrows them further and says nothing), the
+     * host owner's ceiling for the transfer rate and the `clipboard-transfer` record that lets a client choose a mode below it.
+     */
+    struct Files {
+        bool hostToClient = false;
+        bool clientToHost = false;
+        QString maxMode = QStringLiteral("auto"); ///< "auto" (no ceiling), "balanced" or "cap"
+        qint64 maxRateBytesPerSecond = 0; ///< with maxMode "cap"
+        bool operator==(const Files &) const = default;
+    };
+    std::optional<Files> files; ///< absent: no file copy on this route
     bool operator==(const ClipboardCapabilities &) const = default;
 };
 

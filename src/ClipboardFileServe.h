@@ -71,8 +71,9 @@ enum class EndReason { Failed, Aborted, Reset };
 
 struct Callbacks {
     std::function<bool(const ReadIssue &)> issueRead; ///< false: the read could not be sent (counts as a failed read)
-    std::function<void(quint32 streamId, bool ok, const QByteArray &data)> respond; ///< one FILECONTENTS_RESPONSE
+    std::function<void(quint32 streamId, bool ok, const QByteArray &data, bool range)> respond; ///< one FILECONTENTS_RESPONSE (\a range: bytes of a RANGE, not a SIZE)
     std::function<void(quint64 seq)> cancelOffer; ///< the worker should drop the reads of \a seq
+    std::function<void(quint32 clipDataId, quint64 seq)> lockBound; ///< a lock now pins offer \a seq (the worker keeps its snapshot)
     std::function<void(quint32 clipDataId)> unlockEvicted; ///< a lock dropped to make room (the worker releases it too)
     std::function<void(quint64 seq, EndReason reason, ReadStatus cause)> ended; ///< a transfer ended before the client was done
 };
@@ -207,7 +208,7 @@ public:
             for (int i = 0; i < 8; ++i) size[i] = char((decision.fileSize >> (8 * i)) & 0xff);
             m_validator.complete(request.streamId);
             ++m_counters.sizes;
-            m_callbacks.respond(request.streamId, true, size);
+            m_callbacks.respond(request.streamId, true, size, false);
             return;
         }
         Item item;
@@ -266,7 +267,7 @@ public:
                 const quint32 stream = it->request.streamId;
                 it = m_items.erase(it);
                 ++m_counters.failedResponses;
-                m_callbacks.respond(stream, false, {});
+                m_callbacks.respond(stream, false, {}, false);
             } else {
                 ++it;
             }
@@ -293,7 +294,7 @@ public:
             m_recent.append({now, length});
             if (queued) *queued += length; // what this pass handed over is queued ahead of the next one
             ++passed;
-            m_callbacks.respond(stream, true, data);
+            m_callbacks.respond(stream, true, data, true);
         }
         if (passed && !issueReads(now, sendQueueBytes)) return;
         m_pumping = false;
@@ -366,7 +367,7 @@ private:
     void fail(quint32 streamId)
     {
         ++m_counters.failedResponses;
-        m_callbacks.respond(streamId, false, {});
+        m_callbacks.respond(streamId, false, {}, false);
     }
     void fail(Item &item, ReadStatus)
     {
@@ -408,6 +409,7 @@ private:
         const auto result = m_validator.lock(clipDataId, m_snapshot);
         if (!result.ok) return false;
         m_lockSeq.insert(clipDataId, m_currentSeq);
+        if (m_callbacks.lockBound) m_callbacks.lockBound(clipDataId, m_currentSeq);
         if (result.evicted) {
             m_lockSeq.remove(*result.evicted);
             if (m_callbacks.unlockEvicted) m_callbacks.unlockEvicted(*result.evicted);

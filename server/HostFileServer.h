@@ -224,7 +224,13 @@ public:
     void cancel(const ConsoleWorkerWire::FileCancel &cancel)
     {
         if (cancel.seq == 0) {
-            for (auto &[seq, offer] : m_offers) ++offer.epoch;
+            // Forget everything: queued reads are dropped and the locks go (the broker lost its client); the current offer stays.
+            for (auto &[seq, offer] : m_offers) {
+                ++offer.epoch;
+                offer.locks = 0;
+            }
+            m_locks.clear();
+            trim();
             return;
         }
         if (const auto it = m_offers.find(cancel.seq); it != m_offers.end()) ++it->second.epoch;

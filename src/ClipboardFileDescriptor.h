@@ -28,6 +28,17 @@ namespace KRdp::ClipboardFileDescriptor
  * only the ceiling of the internal worker wire). The decoder returns the name raw (unsanitized,
  * `\` separators, unpaired surrogates kept) for ClipboardFileNames::sanitize().
  */
+/// The registered clipboard format the list travels as (MS-RDPECLIP 1.3.1.1.3), and the id this side gives it in its own lists.
+inline const char *formatName()
+{
+    return "FileGroupDescriptorW";
+}
+constexpr quint32 FormatId = 0xC003;
+inline bool isFormatName(const QString &name)
+{
+    return name.compare(QLatin1String("FileGroupDescriptorW"), Qt::CaseInsensitive) == 0;
+}
+
 constexpr int DescriptorBytes = 592;
 constexpr int NameUnits = 260;
 constexpr int MaxNameUnits = NameUnits - 1;

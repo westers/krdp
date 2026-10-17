@@ -62,7 +62,7 @@ struct Rig {
             reads.append(issue);
             return true;
         };
-        callbacks.respond = [this](quint32 stream, bool ok, const QByteArray &data) { responses.append({stream, ok, data}); };
+        callbacks.respond = [this](quint32 stream, bool ok, const QByteArray &data, bool) { responses.append({stream, ok, data}); };
         callbacks.cancelOffer = [this](quint64 seq) { cancelled.append(seq); };
         callbacks.unlockEvicted = [this](quint32 id) { evicted.append(id); };
         callbacks.ended = [this](quint64 seq, EndReason reason, ReadStatus cause) { ended.append({seq, reason, cause}); };

@@ -717,6 +717,14 @@ target_link_libraries(ClipboardBridgeTest PRIVATE Qt6::Test Qt6::Core KRdp)
 add_test(NAME ClipboardBridgeTest COMMAND ClipboardBridgeTest)
 set_tests_properties(ClipboardBridgeTest PROPERTIES TIMEOUT 90)
 
+# OPT-078 phase 2: host-to-client file copy at the broker's cliprdr context (fake context, no peer).
+add_executable(ClipboardFilesBridgeTest ClipboardFilesBridgeTest.cpp)
+target_include_directories(ClipboardFilesBridgeTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(ClipboardFilesBridgeTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(ClipboardFilesBridgeTest PRIVATE Qt6::Test Qt6::Core KRdp)
+add_test(NAME ClipboardFilesBridgeTest COMMAND ClipboardFilesBridgeTest)
+set_tests_properties(ClipboardFilesBridgeTest PROPERTIES TIMEOUT 120)
+
 # Links libKRdp: drives Clipboard's cliprdr callbacks from another thread.
 add_executable(ClipboardHandoffTest ClipboardHandoffTest.cpp)
 target_include_directories(ClipboardHandoffTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -1006,7 +1014,7 @@ add_test(NAME StatsRequestTest COMMAND StatsRequestTest)
 # --- end STATS ---
 
 # OPT-078 phase 1: the pure core of clipboard file transfer (sanitizer, descriptor codec, request validator, limits and free-space guard, pacer, QoS table).
-foreach(name ClipboardFileNames ClipboardFileDescriptor ClipboardFileRequest ClipboardFileLimits ClipboardFilePacing ClipboardFileStaging ClipboardFileServe)
+foreach(name ClipboardFileNames ClipboardFileDescriptor ClipboardFileRequest ClipboardFileLimits ClipboardFilePacing ClipboardFileStaging ClipboardFileServe ClipboardTransfer)
     add_executable(${name}Test ${name}Test.cpp)
     target_include_directories(${name}Test PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(${name}Test PRIVATE Qt6::Test Qt6::Core)
