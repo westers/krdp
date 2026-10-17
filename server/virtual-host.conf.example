@@ -21,3 +21,11 @@ FARSIDE_VIRTUAL_CERTIFICATE_KEY=/etc/farside/virtual-host.key
 # Clipboard bridge (text, formatted text and images) between the client and the desktop: both (default), host-to-client,
 # client-to-host or off.
 #FARSIDE_VIRTUAL_CLIPBOARD_DIRECTION=both
+
+# File copy (no size limit, folders included): both (default), host-to-client, client-to-host or off. Only host to client exists
+# today; the clipboard direction above also applies.
+#FARSIDE_VIRTUAL_CLIPBOARD_FILES=both
+
+# The most a file transfer may take of the link: auto (default: no ceiling, the transfer still yields to video and audio),
+# balanced (half of what the link can carry), or a rate in MB/s from 0.1 to 1000 (for example 5 or 2.5).
+#FARSIDE_VIRTUAL_CLIPBOARD_FILE_MAX_RATE=auto

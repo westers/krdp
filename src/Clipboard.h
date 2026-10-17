@@ -10,8 +10,11 @@
 #include <freerdp/freerdp.h>
 #include <freerdp/server/cliprdr.h>
 
+#include <functional>
 #include <mutex>
+#include <optional>
 
+#include "ClipboardFilePacing.h"
 #include "krdp_export.h"
 
 namespace KRdp
@@ -50,7 +53,7 @@ public:
      * OPT-072: the host copied \a text and/or an \a image (a copy can have both). The format list names
      * CF_UNICODETEXT for text and the registered "PNG" plus CF_DIB for an image; nothing of either is held here.
      */
-    void announceHost(bool text, bool image, bool html = false);
+    void announceHost(bool text, bool image, bool html = false, bool files = false);
     /**
      * OPT-077: the answer to hostHtmlRequested(\a requestId): the host's HTML document as \a html (UTF-8, at most
      * ClipboardLimits::MaxHtmlBytes) when \a ok, a refusal otherwise. Sent as the registered "HTML Format" (a header with exact
@@ -63,6 +66,50 @@ public:
      * client that asked for CF_DIB, converted to a 24-bit DIB (refused over ClipboardLimits::MaxImageWireBytes).
      */
     void provideHostImage(quint64 requestId, const QByteArray &png, bool ok);
+    /**
+     * OPT-078 (host-to-client file copy). The host copied files: announceHost(.., files = true) tells the client (alone, as
+     * "FileGroupDescriptorW"); the client's paste raises hostFilesRequested(), answered with provideHostFiles() (the worker's
+     * FileGroupDescriptorW); the client then asks for sizes and ranges (FILECONTENTS), which the HostFileBackend serves from the
+     * worker, paced. Nothing of the files is held here. File traffic needs setFilesEnabled(true) BEFORE the channel starts (the
+     * capability flags are exchanged once), the planner's setFileDirections(), and the client to have negotiated streaming.
+     */
+    void setFilesEnabled(bool enabled);
+    bool filesEnabled() const;
+    /** The planner's decision for file copy (new transfers). Going from allowed to denied ends the transfer and withdraws the offer. */
+    void setFileDirections(bool hostToClient, bool clientToHost);
+    bool hostFilesAllowed() const;
+    /** A host-to-client file transfer is running (requests are pending): the planner treats it as started. */
+    bool hostFileTransferActive() const;
+    /** The client pasted files: the host's FileGroupDescriptorW is wanted for \a requestId (answer with provideHostFiles()). */
+    Q_SIGNAL void hostFilesRequested(quint64 requestId, bool hugeFiles);
+    /**
+     * The answer to hostFilesRequested(): the worker's \a descriptor (FileGroupDescriptorW) of offer \a seq with \a skipped entries left
+     * out, when \a ok; a refusal otherwise. The descriptor is decoded and checked again before the client sees it.
+     */
+    void provideHostFiles(quint64 requestId, quint64 seq, const QByteArray &descriptor, quint32 skipped, bool ok);
+    enum class ReadResult { Ok, Changed, Gone, Denied, IoError, NoSuchOffer };
+    /** The worker's answer to one range read the backend issued for \a streamId. */
+    void provideHostFileRead(quint32 streamId, ReadResult result, const QByteArray &data);
+    /** What reaches the worker for host-to-client files; set by the host controller / transport that owns the worker. */
+    struct HostFileBackend {
+        std::function<bool(quint64 seq, quint32 index, quint64 offset, quint32 length, quint32 streamId)> read; ///< false: not sent
+        std::function<void(quint64 seq, quint32 clipDataId)> lock;
+        std::function<void(quint32 clipDataId)> unlock;
+        std::function<void(quint64 seq)> cancel; ///< 0 = every offer
+    };
+    void setHostFileBackend(HostFileBackend backend);
+    /** The client's `clipboard-transfer` request (KRDPCTL) and the host owner's ceiling; the result is the effective policy. */
+    struct FileRate {
+        ClipboardFilePacing::RequestedMode mode = ClipboardFilePacing::RequestedMode::Auto;
+        std::optional<quint64> capBytesPerSecond;
+    };
+    void setFileTransferRequest(const FileRate &request);
+    void setFileCeiling(const ClipboardFilePacing::Ceiling &ceiling);
+    ClipboardFilePacing::Policy effectiveFilePolicy() const;
+    /** Test seam: treat the client as a stock one (no KRDPCTL: Auto, window of at most four) or as our own, whatever the connection says. */
+    void setStockClientForTest(bool stock);
+    /** The host's file service ended a transfer before the client was done (a changed or vanished file, a violation, a reset). */
+    Q_SIGNAL void hostFileTransferEnded(quint64 seq, int reason, int cause);
     /** The answer to hostTextRequested(\a requestId): \a text (host LF) when \a ok, a refusal otherwise. */
     void provideHostText(quint64 requestId, const QString &text, bool ok);
     /** Forget the host side: withdraw an announcement, fail a pending request. Handover, control change, denial. */
@@ -92,6 +139,11 @@ public:
         quint64 refusedMalformed = 0; ///< OPT-072: a client picture that was not one (OPT-077: or HTML that was not valid)
         quint64 hostHtml = 0; ///< OPT-077: host HTML documents delivered to the client
         quint64 clientHtml = 0; ///< OPT-077: client HTML documents passed on
+        quint64 hostFileLists = 0; ///< OPT-078: file lists delivered to the client
+        quint64 hostFileRanges = 0; ///< OPT-078: ranges delivered
+        quint64 hostFileBytes = 0; ///< OPT-078: file bytes delivered
+        quint64 hostFileFailed = 0; ///< OPT-078: failed FILECONTENTS responses (hostile requests, changed files, resets)
+        quint64 hostFileEnded = 0; ///< OPT-078: transfers ended early
     };
     Counters counters() const;
 
@@ -110,6 +162,12 @@ public:
      * without a peer.
      */
     static void installClientCallbacks(CliprdrServerContext *context, Clipboard *clipboard);
+    /**
+     * OPT-078: the capability fields the server offers its client. File transfer (CB_STREAM_FILECLIP_ENABLED, CB_CAN_LOCK_CLIPDATA,
+     * CB_HUGE_FILE_SUPPORT_ENABLED, CB_FILECLIP_NO_FILE_PATHS) only when \a filesEnabled (the host owner's ClipboardFiles is not off),
+     * otherwise all four stay off. Public so a test can check what a channel would advertise.
+     */
+    static void applyFileCapabilities(CliprdrServerContext *context, bool filesEnabled);
 
     /**
      * AUD-FIX5: the client has a picture (VideoStream::graphicsDelivered()). Until then the
@@ -136,6 +194,10 @@ public:
     static constexpr int HostAnnounceIntervalMs = 250;
     /// OPT-067: how long the worker has to answer a paste.
     static constexpr int HostTextTimeoutMs = 3000;
+    /// OPT-078: how long the worker has to walk a selection and answer a file paste (its own walk budget is 5 s).
+    static constexpr int HostFilesTimeoutMs = 12000;
+    /// OPT-078: the pump that issues file reads and paces the responses.
+    static constexpr int FilePumpMs = 10;
 
 private:
     void sendServerData();

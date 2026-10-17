@@ -24,6 +24,20 @@ namespace KRdp::ConsoleClipboardPolicy
  *   not the controller (viewer)  both deny
  *   virtual desktop              both allow (always the authenticated owner)
  *   no seat adapter / no uid     both deny
+ *
+ * OPT-078 adds `files` (file copy, spec 4.5 and the 2026-10-17 amendment 12.1). Per state, for a NEW transfer:
+ *
+ *   greeter                      both deny
+ *   locked, same account         host->client allow, client->host DENY (LockedNewTransfer)
+ *   locked, other account        both deny
+ *   unlocked, same account       both allow
+ *   not the controller (viewer)  both deny
+ *   virtual desktop              both allow
+ *   no seat adapter / no uid     both deny
+ *
+ * A transfer that already started when the screen locked CONTINUES (Input::*Started): locking only denies new
+ * ones. Control moving away, another account, the greeter, or the settings turning it off still end it.
+ * The effective decision is the state's rule AND ClipboardFiles (Input::filesSetting) AND ClipboardDirection.
  */
 enum class Route { Console, Virtual };
 enum class Direction { Both, HostToClient, ClientToHost, Off };
@@ -36,6 +50,7 @@ enum class Reason {
     NoSeat, ///< no session on the seat or a route with no desktop
     UnknownUser, ///< the connection has no authenticated uid
     Setting, ///< the state would allow more than ClipboardDirection does
+    LockedNewTransfer, ///< OPT-078: a NEW client->host file transfer on a locked desktop (an started one continues)
 };
 
 inline std::optional<Direction> parseDirection(const QString &value)
@@ -69,6 +84,7 @@ inline const char *reasonName(Reason reason)
     case Reason::NoSeat: return "no-seat";
     case Reason::UnknownUser: return "unknown-user";
     case Reason::Setting: return "setting";
+    case Reason::LockedNewTransfer: return "locked-new-transfer";
     }
     return "unknown";
 }
@@ -81,10 +97,24 @@ struct Input {
     quint32 sessionUid = 0; ///< the uid of the session the worker is attached to
     bool ownsControl = false;
     Direction setting = Direction::Both;
+    /// OPT-078: ClipboardFiles (same shape as ClipboardDirection).
+    Direction filesSetting = Direction::Both;
+    /// OPT-078: a file transfer in that direction is already running (it was allowed when it started).
+    bool hostToClientFileStarted = false;
+    bool clientToHostFileStarted = false;
     bool operator==(const Input &) const = default;
 };
 
+/// OPT-078: what file copy may do in this state (for the Input's "started" flags: a started transfer is asked "may it continue").
+struct FilesPlan {
+    bool hostToClient = false;
+    bool clientToHost = false;
+    Reason reason = Reason::NoSeat;
+    bool operator==(const FilesPlan &) const = default;
+};
+
 struct Plan {
+    FilesPlan files;
     bool hostToClient = false;
     bool clientToHost = false;
     Reason reason = Reason::NoSeat;
@@ -130,6 +160,30 @@ inline Plan plan(const Input &input)
             reason = Reason::NoSeat;
             break;
         }
+    }
+    // Files: the state rule, separately for a new transfer and for one that continues.
+    bool filesNewHost = false, filesNewClient = false, filesKeepHost = false, filesKeepClient = false;
+    Reason filesReason = reason;
+    if (reason == Reason::Allowed || reason == Reason::Greeter) {
+        if (hostToClient && clientToHost) { // same account, controlling (physical user or virtual owner)
+            filesNewHost = filesKeepHost = filesKeepClient = true;
+            filesNewClient = !(input.route == Route::Console && input.locked);
+            if (!filesNewClient && !input.clientToHostFileStarted) filesReason = Reason::LockedNewTransfer;
+        } else if (reason == Reason::Greeter) {
+            filesReason = Reason::Greeter; // a file on a login screen is never wanted
+        }
+    }
+    const bool filesWantHost = (input.filesSetting == Direction::Both || input.filesSetting == Direction::HostToClient)
+        && (input.setting == Direction::Both || input.setting == Direction::HostToClient);
+    const bool filesWantClient = (input.filesSetting == Direction::Both || input.filesSetting == Direction::ClientToHost)
+        && (input.setting == Direction::Both || input.setting == Direction::ClientToHost);
+    const bool stateHost = input.hostToClientFileStarted ? filesKeepHost : filesNewHost;
+    const bool stateClient = input.clientToHostFileStarted ? filesKeepClient : filesNewClient;
+    result.files.hostToClient = stateHost && filesWantHost;
+    result.files.clientToHost = stateClient && filesWantClient;
+    result.files.reason = filesReason;
+    if (filesReason == Reason::Allowed && ((stateHost && !filesWantHost) || (stateClient && !filesWantClient))) {
+        result.files.reason = Reason::Setting;
     }
     const bool wantHost = input.setting == Direction::Both || input.setting == Direction::HostToClient;
     const bool wantClient = input.setting == Direction::Both || input.setting == Direction::ClientToHost;

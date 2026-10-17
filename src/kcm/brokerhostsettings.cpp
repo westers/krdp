@@ -641,6 +641,15 @@ QVariantList BrokerHostSettings::definitions() const
         {choice(u"both"_s, i18nc("@item:inlistbox", "Both ways")), choice(u"host-to-client"_s, i18nc("@item:inlistbox", "Host to client only")),
          choice(u"client-to-host"_s, i18nc("@item:inlistbox", "Client to host only")), choice(u"off"_s, i18nc("@item:inlistbox", "Off"))},
         {.section = u"sharing"_s, .formLabel = i18nc("@label", "Clipboard")});
+    // OPT-078: file copy. Today the host-to-client half exists; the client-to-host choices are labelled instead of hidden.
+    add(u"ClipboardFiles"_s, i18nc("@title:group", "Sharing"), i18nc("@label", "File copy"),
+        i18nc("@info", "Copies files and folders with Copy and Paste in the file manager, with no size limit. Today files go from the host to your computer; copying from your computer to the host is not available yet. Nothing is shared on the login screen or with another account's locked screen, and the clipboard setting above must allow it too. Transfers slow down by themselves while video or sound need the connection. Takes effect when the service restarts."),
+        {choice(u"both"_s, i18nc("@item:inlistbox", "Both ways")), choice(u"host-to-client"_s, i18nc("@item:inlistbox", "Host to client only")),
+         choice(u"client-to-host"_s, i18nc("@item:inlistbox", "Client to host only (not available yet)")), choice(u"off"_s, i18nc("@item:inlistbox", "Off"))},
+        {.section = u"sharing"_s, .formLabel = i18nc("@label", "File copy")});
+    add(u"ClipboardFileMaxRate"_s, i18nc("@title:group", "Sharing"), i18nc("@label", "File copy speed limit"),
+        i18nc("@info", "The most a file copy may take of the connection. Enter auto for no limit (a copy still gives way to video and sound), balanced for about half of what the connection can carry, or a speed in megabytes per second from 0.1 to 1000, for example 5 or 2.5. Takes effect when the service restarts."), {},
+        {.control = u"text"_s, .section = u"sharing"_s, .advanced = true, .formLabel = i18nc("@label", "File copy speed limit")});
     add(u"CameraLoopbackDevice"_s, media, i18nc("@label", "Camera device"), i18nc("@info", "The virtual camera that carries your camera into Console, for example /dev/video10 (a V4L2 loopback device). Enter “none” to turn camera sharing off. Console also needs permission to use the device. Virtual desktops cannot use it yet; camera delivery through PipeWire is separate."), {},
         {.section = u"devices"_s, .advanced = true, .formLabel = i18nc("@label", "Camera device"),
          .unavailable = m_scope == Scope::Virtual ? i18nc("@info", "Camera sharing is not available for Virtual desktops yet.") : QString()});

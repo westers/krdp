@@ -724,6 +724,28 @@ target_link_libraries(ClipboardBridgeTest PRIVATE Qt6::Test Qt6::Core KRdp)
 add_test(NAME ClipboardBridgeTest COMMAND ClipboardBridgeTest)
 set_tests_properties(ClipboardBridgeTest PROPERTIES TIMEOUT 90)
 
+# OPT-078 phase 2: host-to-client file copy end to end: a real Server, Clipboard and the worker's file source against krdpctl-probe --clipboard files.
+if(TARGET krdpctl-probe)
+    foreach(name ClipboardFileLoopback ClipboardFileLargeLoopback)
+        add_executable(${name}Test ${name}Test.cpp)
+        target_include_directories(${name}Test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+        target_include_directories(${name}Test SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+        target_link_libraries(${name}Test PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
+        target_compile_definitions(${name}Test PRIVATE KRDPCTL_PROBE="$<TARGET_FILE:krdpctl-probe>")
+        add_dependencies(${name}Test krdpctl-probe)
+        add_test(NAME ${name}Test COMMAND ${name}Test)
+        set_tests_properties(${name}Test PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77)
+    endforeach()
+endif()
+
+# OPT-078 phase 2: host-to-client file copy at the broker's cliprdr context (fake context, no peer).
+add_executable(ClipboardFilesBridgeTest ClipboardFilesBridgeTest.cpp)
+target_include_directories(ClipboardFilesBridgeTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(ClipboardFilesBridgeTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(ClipboardFilesBridgeTest PRIVATE Qt6::Test Qt6::Core KRdp)
+add_test(NAME ClipboardFilesBridgeTest COMMAND ClipboardFilesBridgeTest)
+set_tests_properties(ClipboardFilesBridgeTest PROPERTIES TIMEOUT 120)
+
 # Links libKRdp: drives Clipboard's cliprdr callbacks from another thread.
 add_executable(ClipboardHandoffTest ClipboardHandoffTest.cpp)
 target_include_directories(ClipboardHandoffTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -1011,6 +1033,30 @@ target_include_directories(StatsRequestTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(StatsRequestTest PRIVATE Qt6::Test Qt6::Core KRdp)
 add_test(NAME StatsRequestTest COMMAND StatsRequestTest)
 # --- end STATS ---
+
+# OPT-078 phase 1: the pure core of clipboard file transfer (sanitizer, descriptor codec, request validator, limits and free-space guard, pacer, QoS table).
+foreach(name ClipboardFileNames ClipboardFileDescriptor ClipboardFileRequest ClipboardFileLimits ClipboardFilePacing ClipboardFileStaging ClipboardFileServe ClipboardTransfer)
+    add_executable(${name}Test ${name}Test.cpp)
+    target_include_directories(${name}Test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(${name}Test PRIVATE Qt6::Test Qt6::Core)
+    add_test(NAME ${name}Test COMMAND ${name}Test)
+    set_tests_properties(${name}Test PROPERTIES TIMEOUT 120)
+endforeach()
+# OPT-078 phase 2: the worker's file source (URI list, bounded walk, snapshot reads) against real temporary directories.
+add_executable(HostFilesTest HostFilesTest.cpp)
+target_include_directories(HostFilesTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(HostFilesTest PRIVATE Qt6::Test Qt6::Core)
+target_link_options(HostFilesTest PRIVATE -Wl,--wrap=pread)
+add_test(NAME HostFilesTest COMMAND HostFilesTest)
+set_tests_properties(HostFilesTest PROPERTIES TIMEOUT 300)
+# ...and the parts that read the stats snapshot, plus the phase 0 measurement counters (these link libKRdp for StatsReporter).
+foreach(name ClipboardFileQos DeliveryStats)
+    add_executable(${name}Test ${name}Test.cpp)
+    target_include_directories(${name}Test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(${name}Test PRIVATE Qt6::Test Qt6::Core KRdp)
+    add_test(NAME ${name}Test COMMAND ${name}Test)
+    set_tests_properties(${name}Test PROPERTIES TIMEOUT 120)
+endforeach()
 
 add_executable(FarsideMigrationTest FarsideMigrationTest.cpp)
 target_include_directories(FarsideMigrationTest PRIVATE ${CMAKE_SOURCE_DIR}/server)

@@ -515,6 +515,9 @@ public:
     std::atomic<int> statWindowFrames = FrameQueuePolicy::MinInFlightFrames;
     std::atomic<qint64> statWindowBytes = FrameQueuePolicy::MinInFlightBytes;
     std::atomic<quint64> statSent = 0;
+    // OPT-078 phase 0: per-frame wait before the send, and the socket's send queue as each frame is handed over.
+    Stats::FrameDelay statFrameDelay;
+    Stats::SendQueue statSendQueueAtSend;
     std::atomic<quint64> statAcknowledged = 0;
     std::atomic<quint64> statDropped = 0;
     std::atomic<quint64> statKeyFrameRequests = 0;
@@ -867,6 +870,7 @@ void VideoStream::queueFrame(const KRdp::VideoFrame &frame)
             FrameQueuePolicy::dropSupersededFrames(d->frameQueue, frame.monitorIndex);
         }
         d->frameQueue.append(frame);
+        d->frameQueue.back().enqueuedAt = now; // OPT-078: the frame-delay statistic
     }
     d->frameQueueCondition.notify_one();
 }
@@ -2680,6 +2684,12 @@ bool VideoStream::sendFrame(const VideoFrame &frame)
         }
     }
     d->statSent.fetch_add(1, std::memory_order_relaxed);
+    if (frame.enqueuedAt != clk::steady_clock::time_point{}) {
+        d->statFrameDelay.record(Stats::ceilMilliseconds(clk::steady_clock::now() - frame.enqueuedAt));
+    }
+    if (const qint64 queued = d->session->socketQueuedBytes(); queued >= 0) {
+        d->statSendQueueAtSend.record(quint64(queued));
+    }
     d->statBytesSent.fetch_add(quint64(frame.data.size() + frame.aux.size()), std::memory_order_relaxed);
     const bool keyFrame = frame.isKeyFrame && !frame.data.isEmpty();
     if (keyFrame) {
@@ -2835,6 +2845,11 @@ Stats::Snapshot VideoStream::statsSnapshot() const
     }
     s.bytesSent = d->statBytesSent.load();
     s.framesSent = d->statSent.load();
+    s.frameDelay = d->statFrameDelay.counts();
+    s.sendQueueAtSend = d->statSendQueueAtSend.counts();
+    if (const auto flow = d->session->audioFlow(); flow != Stats::AudioFlow{}) {
+        s.audio = flow; // absent until an audio path has done anything
+    }
     s.framesAcked = d->statAcknowledged.load();
     s.coalesced = d->statDropped.load();
     s.keyframes = d->statKeyFramesSent.load();

@@ -140,6 +140,14 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
     if (current.av1Tiles) {
         video.insert(QStringLiteral("av1Tiles"), *current.av1Tiles); // 0 = the encoder's per-resolution rule
     }
+    // OPT-078: the frame's wait before the send, over this interval (bucket upper bounds, ms; max = since the start)
+    if (const auto wait = current.frameDelay.since(previous.frameDelay); wait.count > 0) {
+        video.insert(QStringLiteral("sendDelayMs"),
+                     QJsonObject{{QStringLiteral("n"), qint64(wait.count)},
+                                 {QStringLiteral("p50"), qint64(wait.quantile(0.5))},
+                                 {QStringLiteral("p99"), qint64(wait.quantile(0.99))},
+                                 {QStringLiteral("max"), qint64(current.frameDelay.max)}});
+    }
 
     QJsonObject flow{
         {QStringLiteral("inFlight"), current.inFlight},
@@ -195,6 +203,14 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
     if (current.sendQueueBytes) {
         link.insert(QStringLiteral("sendQueueKiB"), kib(*current.sendQueueBytes));
     }
+    // OPT-078: the send queue as each frame was handed over, over this interval (KiB; max = since the start)
+    if (const auto queue = current.sendQueueAtSend.since(previous.sendQueueAtSend); queue.count > 0) {
+        link.insert(QStringLiteral("sendQueueAtSendKiB"),
+                    QJsonObject{{QStringLiteral("n"), qint64(queue.count)},
+                                {QStringLiteral("p50"), kib(qint64(queue.quantile(0.5)))},
+                                {QStringLiteral("p99"), kib(qint64(queue.quantile(0.99)))},
+                                {QStringLiteral("max"), kib(qint64(current.sendQueueAtSend.max))}});
+    }
 
     QJsonObject guard{{QStringLiteral("state"), current.guardState}};
     if (!current.heldBack.isEmpty()) {
@@ -246,7 +262,21 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
         });
     }
 
-    return QJsonObject{
+    QJsonObject audio;
+    if (current.audio) {
+        const AudioFlow before = previous.audio.value_or(AudioFlow{});
+        audio = QJsonObject{
+            {QStringLiteral("packets"), qint64(delta(current.audio->packets, before.packets))},
+            {QStringLiteral("late"), qint64(delta(current.audio->late, before.late))},
+            {QStringLiteral("overflows"), qint64(delta(current.audio->overflowEvents, before.overflowEvents))},
+            {QStringLiteral("overflowKiB"), kib(qint64(delta(current.audio->overflowBytes, before.overflowBytes)))},
+            {QStringLiteral("producerGaps"), qint64(delta(current.audio->producerGaps, before.producerGaps))},
+            {QStringLiteral("maxGapMs"), qint64(current.audio->maxGapMs)},
+            {QStringLiteral("maxBacklogMs"), qint64(current.audio->maxBacklogMs)},
+        };
+    }
+
+    QJsonObject record{
         {QStringLiteral("type"), QStringLiteral("stats-sample")},
         {QStringLiteral("v"), LayoutControl::ProtocolVersion},
         {QStringLiteral("seq"), qint64(seq)},
@@ -257,6 +287,10 @@ QJsonObject sampleRecord(const Snapshot &current, const Snapshot &previous, qint
         {QStringLiteral("policy"), policy},
         {QStringLiteral("surfaces"), surfaces},
     };
+    if (!audio.isEmpty()) {
+        record.insert(QStringLiteral("audio"), audio);
+    }
+    return record;
 }
 
 void CapacityEstimate::sample(Clock::time_point now, quint64 bytesPerSecond, bool appLimited)

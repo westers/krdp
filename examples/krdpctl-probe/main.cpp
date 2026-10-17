@@ -85,6 +85,13 @@
  *                               logged as `clipboard: server text "..."`, and then announced
  *                               back (`clipboard: echoed`), the way Klipper re-owns what the
  *                               client just pasted from the server.
+ *                               `files` (OPT-078): a file-copy client. It offers the file capability flags
+ *                               (--files-flags HEX overrides CB_USE_LONG_FORMAT_NAMES|STREAM|NO_PATHS|LOCK|HUGE), takes the
+ *                               server's FileGroupDescriptorW, locks it, and downloads the files in --files-chunk ranges with
+ *                               --files-window in flight (files over --files-sample-over bytes are only sampled: first chunk,
+ *                               the chunk across 4 GiB, last chunk, each with a SHA-256). Results are stderr lines `FILES ...`.
+ *                               --files-cancel-after / --files-pause-after stop or pause it after that many bytes;
+ *                               --files-hostile sends requests a broken client would.
  *            --log-pointer      log every RDP pointer update the server sends, as it arrives:
  *                               `pointer: new WxH hot X,Y bpp B cache I` (PointerNew; `large`
  *                               for PointerLarge, `color` for PointerColor), `pointer: cached I`,
@@ -126,11 +133,13 @@
 #include <vector>
 
 #include <QByteArray>
+#include <QCryptographicHash>
 #include <QDataStream>
 #include <QDateTime>
 #include <QDeadlineTimer>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QList>
@@ -154,6 +163,7 @@
 #include <winpr/wlog.h>
 #include <winpr/wtsapi.h>
 
+#include "ClipboardFileDescriptor.h"
 #include "LayoutControl.h"
 
 namespace
@@ -219,6 +229,17 @@ struct Probe {
     std::atomic<qint64> lastGfxFrameAt = 0;
     /** --clipboard MODE (empty: no cliprdr). */
     QByteArray clipboardMode;
+    // --clipboard files (OPT-078): a file-copy client. See the file comment.
+    QString filesOut;
+    int filesWindow = 4;
+    quint32 filesChunk = 256 * 1024;
+    quint64 filesSampleOver = 64ULL * 1024 * 1024;
+    quint64 filesCancelAfter = 0;
+    quint64 filesPauseAfter = 0;
+    int filesPauseMs = 0;
+    bool filesHostile = false;
+    bool filesNoLock = false;
+    quint32 filesFlags = CB_USE_LONG_FORMAT_NAMES | CB_STREAM_FILECLIP_ENABLED | CB_FILECLIP_NO_FILE_PATHS | CB_CAN_LOCK_CLIPDATA | CB_HUGE_FILE_SUPPORT_ENABLED;
     /** --clipboard stall: a data request arrived; the main loop stops reading. */
     std::atomic<bool> clipboardStalled = false;
     /** --clipboard refuse-then-stall: data requests seen so far. */
@@ -791,6 +812,383 @@ UINT probeClipboardServerFormatDataRequest(CliprdrClientContext *cliprdr, const 
     return cliprdr->ClientFormatDataResponse(cliprdr, &response);
 }
 
+
+// ---- --clipboard files: a client that copies the server's files (OPT-078) ----
+//
+// The server offers a FileGroupDescriptorW; this client asks for it, locks it (when both sides negotiated locking), and downloads
+// every file in `--files-chunk` ranges with `--files-window` of them in flight, 64-bit offsets. Files up to `--files-sample-over`
+// bytes are written under `--files-out` (by their descriptor path); bigger ones are only sampled: the first chunk, the chunk
+// crossing 4 GiB and the last chunk, each logged with a SHA-256. Everything the test checks is a stderr line starting `FILES`:
+//   FILES caps server=0x.. offered=0x.. stream=1 lock=1 huge=1
+//   FILES descriptor items=N files=F bytes=B
+//   FILES sample index=I offset=O length=L sha256=H
+//   FILES file index=I bytes=N sha256=H            (a small file complete)
+//   FILES paused / FILES cancelled / FILES fail stream=S index=I flags=F
+//   FILES hostile name=N result=failed|ok
+//   FILES done files=F bytes=B failed=X
+struct FilesProbe {
+    std::mutex mutex;
+    UINT32 serverFlags = 0;
+    bool lockNegotiated = false;
+    bool hugeNegotiated = false;
+    UINT32 formatId = 0;
+    std::vector<KRdp::ClipboardFileDescriptor::Descriptor> items;
+    struct Job {
+        int index;
+        quint64 offset;
+        quint32 length;
+        bool sample;
+    };
+    std::deque<Job> jobs;
+    struct Pending {
+        Job job;
+    };
+    std::map<UINT32, Pending> outstanding;
+    std::map<int, QFile *> open; // small files being written
+    std::map<int, QCryptographicHash *> hashes;
+    std::map<int, quint64> written;
+    UINT32 nextStream = 100;
+    quint64 bytes = 0;
+    int failed = 0;
+    bool started = false;
+    bool finished = false;
+    bool paused = false;
+    bool cancelled = false;
+    bool pauseDone = false;
+    UINT32 lockId = 42;
+    // hostile mode
+    struct Hostile {
+        const char *name;
+        UINT32 stream;
+        UINT32 index;
+        UINT32 flags;
+        quint64 offset;
+        UINT32 length;
+        bool useLock;
+        UINT32 lockId;
+    };
+    std::vector<Hostile> hostile;
+    size_t hostileNext = 0;
+};
+FilesProbe g_files;
+
+QString filesSafeName(const QString &name)
+{
+    QString out = name;
+    out.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    return out;
+}
+
+void filesIssue(CliprdrClientContext *cliprdr, const FilesProbe::Job &job, UINT32 stream)
+{
+    CLIPRDR_FILE_CONTENTS_REQUEST request{};
+    request.common.msgType = CB_FILECONTENTS_REQUEST;
+    request.streamId = stream;
+    request.listIndex = UINT32(job.index);
+    request.dwFlags = FILECONTENTS_RANGE;
+    request.nPositionLow = UINT32(job.offset & 0xffffffffu);
+    request.nPositionHigh = UINT32(job.offset >> 32);
+    request.cbRequested = job.length;
+    request.haveClipDataId = g_files.lockNegotiated;
+    request.clipDataId = g_files.lockNegotiated ? g_files.lockId : 0;
+    cliprdr->ClientFileContentsRequest(cliprdr, &request);
+}
+
+void filesFinish(CliprdrClientContext *cliprdr)
+{
+    if (g_files.finished) return;
+    g_files.finished = true;
+    int files = 0;
+    for (const auto &item : g_files.items) files += !item.isDirectory();
+    if (g_files.lockNegotiated) {
+        CLIPRDR_UNLOCK_CLIPBOARD_DATA unlock{};
+        unlock.common.msgType = CB_UNLOCK_CLIPDATA;
+        unlock.clipDataId = g_files.lockId;
+        cliprdr->ClientUnlockClipboardData(cliprdr, &unlock);
+    }
+    logf("FILES done files=%d bytes=%llu failed=%d", files, (unsigned long long)g_files.bytes, g_files.failed);
+}
+
+// Fills the window. The caller holds g_files.mutex.
+void filesPump(CliprdrClientContext *cliprdr)
+{
+    auto *probe = g_clipboardProbe;
+    if (!probe || g_files.finished || g_files.paused || g_files.cancelled) return;
+    while (int(g_files.outstanding.size()) < probe->filesWindow && !g_files.jobs.empty()) {
+        const auto job = g_files.jobs.front();
+        g_files.jobs.pop_front();
+        const UINT32 stream = ++g_files.nextStream;
+        g_files.outstanding[stream] = {job};
+        filesIssue(cliprdr, job, stream);
+    }
+    if (g_files.outstanding.empty() && g_files.jobs.empty()) filesFinish(cliprdr);
+}
+
+void filesStartHostile(CliprdrClientContext *cliprdr)
+{
+    // Requests a hostile or broken client could send; each must come back FAILED and none may kill the connection.
+    UINT32 lock = g_files.lockNegotiated ? g_files.lockId : 0;
+    // (A SIZE request that does not ask for 8 bytes, or both flags at once, never gets this far: libfreerdp's own cliprdr server rejects it
+    // before any callback and ends the clipboard channel. What reaches the callbacks is what the validator must catch.)
+    int directory = 0;
+    for (int i = 0; i < int(g_files.items.size()); ++i) {
+        if (g_files.items[i].isDirectory()) directory = i;
+    }
+    g_files.hostile = {
+        {"index-out-of-range", 9001, 99999, FILECONTENTS_RANGE, 0, 10, true, lock},
+        {"range-on-directory", 9002, UINT32(directory), FILECONTENTS_RANGE, 0, 10, true, lock},
+        {"past-end", 9003, 0, FILECONTENTS_RANGE, (1ULL << 32) + 5, 10, true, lock}, // the third violation ends the transfer
+        {"unknown-lock", 9004, 0, FILECONTENTS_RANGE, 0, 10, true, 0xdeadbeef},
+        {"zero-length", 9005, 0, FILECONTENTS_RANGE, 0, 0, true, lock},
+    };
+    g_files.hostileNext = 0;
+    const auto &h = g_files.hostile[0];
+    CLIPRDR_FILE_CONTENTS_REQUEST request{};
+    request.common.msgType = CB_FILECONTENTS_REQUEST;
+    request.streamId = h.stream;
+    request.listIndex = h.index;
+    request.dwFlags = h.flags;
+    request.nPositionLow = UINT32(h.offset & 0xffffffffu);
+    request.nPositionHigh = UINT32(h.offset >> 32);
+    request.cbRequested = h.length;
+    request.haveClipDataId = h.useLock;
+    request.clipDataId = h.lockId;
+    cliprdr->ClientFileContentsRequest(cliprdr, &request);
+}
+
+UINT filesServerFormatList(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_LIST *list)
+{
+    CLIPRDR_FORMAT_LIST_RESPONSE response{};
+    response.common.msgType = CB_FORMAT_LIST_RESPONSE;
+    response.common.msgFlags = CB_RESPONSE_OK;
+    UINT rc = cliprdr->ClientFormatListResponse(cliprdr, &response);
+    for (UINT32 i = 0; list && i < list->numFormats; ++i) {
+        logf("FILES format %u '%s'", list->formats[i].formatId, list->formats[i].formatName ? list->formats[i].formatName : "");
+        if (list->formats[i].formatName && std::strcmp(list->formats[i].formatName, "FileGroupDescriptorW") == 0) {
+            std::lock_guard lock(g_files.mutex);
+            g_files.formatId = list->formats[i].formatId;
+            CLIPRDR_FORMAT_DATA_REQUEST request{};
+            request.common.msgType = CB_FORMAT_DATA_REQUEST;
+            request.common.dataLen = 4;
+            request.requestedFormatId = g_files.formatId;
+            rc |= cliprdr->ClientFormatDataRequest(cliprdr, &request);
+        }
+    }
+    if (!list || list->numFormats == 0) logf("FILES withdrawn");
+    return rc;
+}
+
+UINT filesServerFormatDataResponse(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_DATA_RESPONSE *response)
+{
+    auto *probe = g_clipboardProbe;
+    std::lock_guard lock(g_files.mutex);
+    if (!probe || g_files.started) return CHANNEL_RC_OK;
+    if (!response || !(response->common.msgFlags & CB_RESPONSE_OK) || !response->requestedFormatData) {
+        logf("FILES descriptor refused");
+        return CHANNEL_RC_OK;
+    }
+    const auto decoded = KRdp::ClipboardFileDescriptor::decode(QByteArrayView(reinterpret_cast<const char *>(response->requestedFormatData), qsizetype(response->common.dataLen)));
+    if (!decoded.ok()) {
+        logf("FILES descriptor does not decode (%s)", KRdp::ClipboardFileDescriptor::errorName(*decoded.error));
+        return CHANNEL_RC_OK;
+    }
+    g_files.started = true;
+    g_files.items.assign(decoded.items.begin(), decoded.items.end());
+    quint64 total = 0;
+    int files = 0;
+    for (const auto &item : g_files.items) {
+        if (!item.isDirectory()) {
+            total += item.size.value_or(0);
+            ++files;
+        }
+    }
+    logf("FILES descriptor items=%d files=%d bytes=%llu", int(g_files.items.size()), files, (unsigned long long)total);
+    if (g_files.lockNegotiated) {
+        CLIPRDR_LOCK_CLIPBOARD_DATA lockPdu{};
+        lockPdu.common.msgType = CB_LOCK_CLIPDATA;
+        lockPdu.clipDataId = g_files.lockId;
+        cliprdr->ClientLockClipboardData(cliprdr, &lockPdu);
+        logf("FILES lock id=%u", g_files.lockId);
+    }
+    if (probe->filesHostile) {
+        filesStartHostile(cliprdr);
+        return CHANNEL_RC_OK;
+    }
+    for (int i = 0; i < int(g_files.items.size()); ++i) {
+        const auto &item = g_files.items[i];
+        if (item.isDirectory()) {
+            if (!probe->filesOut.isEmpty()) QDir().mkpath(probe->filesOut + QLatin1Char('/') + filesSafeName(item.name));
+            continue;
+        }
+        const quint64 size = item.size.value_or(0);
+        if (size > probe->filesSampleOver) {
+            const quint32 chunk = probe->filesChunk;
+            const quint64 crossing = (1ULL << 32) - chunk / 2;
+            g_files.jobs.push_back({i, 0, chunk, true});
+            if (size > (1ULL << 32) + chunk) g_files.jobs.push_back({i, crossing, chunk, true});
+            g_files.jobs.push_back({i, size - chunk, chunk, true});
+            continue;
+        }
+        if (!probe->filesOut.isEmpty()) {
+            const QString path = probe->filesOut + QLatin1Char('/') + filesSafeName(item.name);
+            QDir().mkpath(QFileInfo(path).absolutePath());
+            auto *file = new QFile(path);
+            file->open(QIODevice::WriteOnly | QIODevice::Truncate);
+            g_files.open[i] = file;
+        }
+        g_files.hashes[i] = new QCryptographicHash(QCryptographicHash::Sha256);
+        g_files.written[i] = 0;
+        if (size == 0) {
+            logf("FILES file index=%d bytes=0 sha256=%s", i, g_files.hashes[i]->result().toHex().constData());
+            if (g_files.open.count(i)) g_files.open[i]->close();
+            continue;
+        }
+        for (quint64 offset = 0; offset < size; offset += probe->filesChunk) {
+            g_files.jobs.push_back({i, offset, quint32(std::min<quint64>(probe->filesChunk, size - offset)), false});
+        }
+    }
+    filesPump(cliprdr);
+    return CHANNEL_RC_OK;
+}
+
+UINT filesServerFileContentsResponse(CliprdrClientContext *cliprdr, const CLIPRDR_FILE_CONTENTS_RESPONSE *response)
+{
+    auto *probe = g_clipboardProbe;
+    std::lock_guard lock(g_files.mutex);
+    if (!probe) return CHANNEL_RC_OK;
+    const bool ok = (response->common.msgFlags & CB_RESPONSE_OK) && !(response->common.msgFlags & CB_RESPONSE_FAIL);
+    if (probe->filesHostile) {
+        for (const auto &h : g_files.hostile) {
+            if (h.stream != response->streamId) continue;
+            logf("FILES hostile name=%s result=%s", h.name, ok ? "ok" : "failed");
+        }
+        ++g_files.hostileNext;
+        if (g_files.hostileNext < g_files.hostile.size()) {
+            const auto &h = g_files.hostile[g_files.hostileNext];
+            CLIPRDR_FILE_CONTENTS_REQUEST request{};
+            request.common.msgType = CB_FILECONTENTS_REQUEST;
+            request.streamId = h.stream;
+            request.listIndex = h.index;
+            request.dwFlags = h.flags;
+            request.nPositionLow = UINT32(h.offset & 0xffffffffu);
+            request.nPositionHigh = UINT32(h.offset >> 32);
+            request.cbRequested = h.length;
+            request.haveClipDataId = h.useLock;
+            request.clipDataId = h.lockId;
+            cliprdr->ClientFileContentsRequest(cliprdr, &request);
+        } else {
+            logf("FILES hostile-done");
+            // a good request afterwards: the transfer was aborted (three violations), so it must fail too
+            FilesProbe::Job job{0, 0, 10, false};
+            const UINT32 stream = ++g_files.nextStream;
+            g_files.hostile.push_back({"after-abort", stream, 0, FILECONTENTS_RANGE, 0, 10, g_files.lockNegotiated, g_files.lockId});
+            filesIssue(cliprdr, job, stream);
+        }
+        return CHANNEL_RC_OK;
+    }
+    for (size_t i = g_files.hostile.size(); i-- > 0;) { // the post-abort request
+        if (g_files.hostile[i].stream == response->streamId) logf("FILES hostile name=%s result=%s", g_files.hostile[i].name, ok ? "ok" : "failed");
+    }
+    const auto found = g_files.outstanding.find(response->streamId);
+    if (found == g_files.outstanding.end()) return CHANNEL_RC_OK;
+    const auto job = found->second.job;
+    g_files.outstanding.erase(found);
+    if (!ok) {
+        ++g_files.failed;
+        logf("FILES fail stream=%u index=%d flags=0x%x", response->streamId, job.index, response->common.msgFlags);
+        // A failed range ends the file; the others still in flight come back (failed or not) and the job list is dropped.
+        g_files.jobs.clear();
+        if (g_files.outstanding.empty()) filesFinish(cliprdr);
+        return CHANNEL_RC_OK;
+    }
+    if (response->cbRequested != job.length) {
+        ++g_files.failed;
+        logf("FILES short stream=%u index=%d got=%u want=%u", response->streamId, job.index, response->cbRequested, job.length);
+        g_files.jobs.clear();
+        if (g_files.outstanding.empty()) filesFinish(cliprdr);
+        return CHANNEL_RC_OK;
+    }
+    g_files.bytes += job.length;
+    const QByteArray data(reinterpret_cast<const char *>(response->requestedData), qsizetype(response->cbRequested));
+    if (job.sample) {
+        logf("FILES sample index=%d offset=%llu length=%u sha256=%s", job.index, (unsigned long long)job.offset, job.length,
+             QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex().constData());
+    } else {
+        // ranges of one file may come back in any order; the hash is over the file's bytes in order, so keep it by offset
+        if (g_files.open.count(job.index)) {
+            g_files.open[job.index]->seek(qint64(job.offset));
+            g_files.open[job.index]->write(data);
+        }
+        g_files.hashes[job.index]->addData(data); // in order: the server answers FIFO and the window preserves it per file
+        g_files.written[job.index] += job.length;
+        const quint64 size = g_files.items[job.index].size.value_or(0);
+        if (g_files.written[job.index] >= size) {
+            logf("FILES file index=%d bytes=%llu sha256=%s", job.index, (unsigned long long)size, g_files.hashes[job.index]->result().toHex().constData());
+            if (g_files.open.count(job.index)) g_files.open[job.index]->close();
+        }
+    }
+    if (probe->filesCancelAfter && g_files.bytes >= probe->filesCancelAfter && !g_files.cancelled) {
+        g_files.cancelled = true;
+        g_files.jobs.clear();
+        logf("FILES cancelled bytes=%llu", (unsigned long long)g_files.bytes);
+        if (g_files.lockNegotiated) {
+            CLIPRDR_UNLOCK_CLIPBOARD_DATA unlock{};
+            unlock.common.msgType = CB_UNLOCK_CLIPDATA;
+            unlock.clipDataId = g_files.lockId;
+            cliprdr->ClientUnlockClipboardData(cliprdr, &unlock);
+        }
+        return CHANNEL_RC_OK;
+    }
+    if (probe->filesPauseAfter && g_files.bytes >= probe->filesPauseAfter && !g_files.pauseDone) {
+        g_files.pauseDone = true;
+        g_files.paused = true;
+        logf("FILES paused bytes=%llu", (unsigned long long)g_files.bytes);
+        std::thread([cliprdr, ms = probe->filesPauseMs] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            std::lock_guard lock(g_files.mutex);
+            g_files.paused = false;
+            logf("FILES resumed");
+            filesPump(cliprdr);
+        }).detach();
+        return CHANNEL_RC_OK;
+    }
+    filesPump(cliprdr);
+    return CHANNEL_RC_OK;
+}
+
+UINT filesMonitorReady(CliprdrClientContext *cliprdr, const CLIPRDR_MONITOR_READY *)
+{
+    auto *probe = g_clipboardProbe;
+    CLIPRDR_GENERAL_CAPABILITY_SET general{};
+    general.capabilitySetType = CB_CAPSTYPE_GENERAL;
+    general.capabilitySetLength = 12;
+    general.version = CB_CAPS_VERSION_2;
+    general.generalFlags = probe ? probe->filesFlags : CB_USE_LONG_FORMAT_NAMES;
+    CLIPRDR_CAPABILITIES caps{};
+    caps.cCapabilitiesSets = 1;
+    caps.capabilitySets = reinterpret_cast<CLIPRDR_CAPABILITY_SET *>(&general);
+    const UINT rc = cliprdr->ClientCapabilities(cliprdr, &caps);
+    std::lock_guard lock(g_files.mutex);
+    const UINT32 offered = general.generalFlags;
+    g_files.lockNegotiated = !(probe && probe->filesNoLock) && (offered & g_files.serverFlags & CB_CAN_LOCK_CLIPDATA);
+    g_files.hugeNegotiated = (offered & g_files.serverFlags & CB_HUGE_FILE_SUPPORT_ENABLED) != 0;
+    logf("FILES caps server=0x%x offered=0x%x stream=%d lock=%d huge=%d", g_files.serverFlags, offered, !!(offered & g_files.serverFlags & CB_STREAM_FILECLIP_ENABLED),
+         g_files.lockNegotiated, g_files.hugeNegotiated);
+    return rc; // announces nothing: the server's files are what this mode is for
+}
+
+UINT filesServerCapabilities(CliprdrClientContext *, const CLIPRDR_CAPABILITIES *caps)
+{
+    for (UINT32 i = 0; caps && i < caps->cCapabilitiesSets; ++i) {
+        const auto *set = reinterpret_cast<const CLIPRDR_GENERAL_CAPABILITY_SET *>(&caps->capabilitySets[i]);
+        if (set->capabilitySetType == CB_CAPSTYPE_GENERAL) {
+            std::lock_guard lock(g_files.mutex);
+            g_files.serverFlags = set->generalFlags;
+        }
+    }
+    return CHANNEL_RC_OK;
+}
+
 void onCliprdrConnected(void *context, const ChannelConnectedEventArgs *e)
 {
     if (std::strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) != 0) {
@@ -800,6 +1198,17 @@ void onCliprdrConnected(void *context, const ChannelConnectedEventArgs *e)
     g_clipboardProbe = probeOf(static_cast<rdpContext *>(context));
     if (g_clipboardProbe) {
         g_clipboardProbe->cliprdr = cliprdr;
+    }
+    if (g_clipboardProbe && g_clipboardProbe->clipboardMode == "files") {
+        cliprdr->MonitorReady = filesMonitorReady;
+        cliprdr->ServerCapabilities = filesServerCapabilities;
+        cliprdr->ServerFormatList = filesServerFormatList;
+        cliprdr->ServerFormatListResponse = probeClipboardServerFormatListResponse;
+        cliprdr->ServerFormatDataRequest = probeClipboardServerFormatDataRequest;
+        cliprdr->ServerFormatDataResponse = filesServerFormatDataResponse;
+        cliprdr->ServerFileContentsResponse = filesServerFileContentsResponse;
+        logf("clipboard channel connected (mode files)");
+        return;
     }
     cliprdr->MonitorReady = probeClipboardMonitorReady;
     cliprdr->ServerCapabilities = probeClipboardServerCapabilities;
@@ -1166,7 +1575,7 @@ int usage()
 {
     std::fprintf(stderr,
                  "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
-                 "[--gfx [--gfx-count] [--gfx-ack-delay MS] [--refresh-rect-idle MS [--refresh-rect-count N]]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall|refuse-then-stall] [--no-krdpctl] [--log-pointer] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
+                 "[--gfx [--gfx-count] [--gfx-ack-delay MS] [--refresh-rect-idle MS [--refresh-rect-count N]]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall|refuse-then-stall|files [--files-out DIR] [--files-window N] [--files-chunk BYTES] [--files-sample-over BYTES] [--files-cancel-after BYTES] [--files-pause-after BYTES --files-pause-ms MS] [--files-hostile] [--files-no-lock] [--files-flags HEX]] [--no-krdpctl] [--log-pointer] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
     return 2;
 }
 
@@ -1282,9 +1691,29 @@ int main(int argc, char **argv)
         } else if (arg == QLatin1String("--clipboard") && i + 1 < argc) {
             probe.clipboardMode = QByteArray(argv[++i]);
             if (probe.clipboardMode != "answer" && probe.clipboardMode != "slow" && probe.clipboardMode != "never" && probe.clipboardMode != "stall"
-                && probe.clipboardMode != "refuse-then-stall") {
+                && probe.clipboardMode != "refuse-then-stall" && probe.clipboardMode != "files") {
                 return usage();
             }
+        } else if (arg == QLatin1String("--files-out") && i + 1 < argc) {
+            probe.filesOut = QString::fromLocal8Bit(argv[++i]);
+        } else if (arg == QLatin1String("--files-window") && i + 1 < argc) {
+            probe.filesWindow = qBound(1, QString::fromLocal8Bit(argv[++i]).toInt(), 64);
+        } else if (arg == QLatin1String("--files-chunk") && i + 1 < argc) {
+            probe.filesChunk = quint32(qBound(1, QString::fromLocal8Bit(argv[++i]).toInt(), 1024 * 1024));
+        } else if (arg == QLatin1String("--files-sample-over") && i + 1 < argc) {
+            probe.filesSampleOver = QString::fromLocal8Bit(argv[++i]).toULongLong();
+        } else if (arg == QLatin1String("--files-cancel-after") && i + 1 < argc) {
+            probe.filesCancelAfter = QString::fromLocal8Bit(argv[++i]).toULongLong();
+        } else if (arg == QLatin1String("--files-pause-after") && i + 1 < argc) {
+            probe.filesPauseAfter = QString::fromLocal8Bit(argv[++i]).toULongLong();
+        } else if (arg == QLatin1String("--files-pause-ms") && i + 1 < argc) {
+            probe.filesPauseMs = QString::fromLocal8Bit(argv[++i]).toInt();
+        } else if (arg == QLatin1String("--files-hostile")) {
+            probe.filesHostile = true;
+        } else if (arg == QLatin1String("--files-no-lock")) {
+            probe.filesNoLock = true;
+        } else if (arg == QLatin1String("--files-flags") && i + 1 < argc) {
+            probe.filesFlags = QString::fromLocal8Bit(argv[++i]).toUInt(nullptr, 16);
         } else if (arg == QLatin1String("--no-krdpctl")) {
             probe.krdpctl = false;
         } else if (arg == QLatin1String("--no-pong")) {

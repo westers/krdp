@@ -154,6 +154,37 @@ private Q_SLOTS:
         QVERIFY(!group.contains(QStringLiteral("maxHtmlBytes")));
     }
 
+    // OPT-078: the `files` subgroup, only when the host offers file copy; an older client ignores it.
+    void capabilitiesClipboardFiles()
+    {
+        ChannelCapabilities caps;
+        caps.host = QStringLiteral("console");
+        caps.clipboard = ClipboardCapabilities{true, true, 1024 * 1024, true, 16 * 1024 * 1024, true, 8 * 1024 * 1024};
+        QVERIFY(!capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject().contains(QStringLiteral("files")));
+        ClipboardCapabilities::Files files;
+        files.hostToClient = true;
+        caps.clipboard->files = files;
+        auto group = capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject();
+        QCOMPARE(group.value(QStringLiteral("files")).toObject(),
+                 (QJsonObject{{QStringLiteral("hostToClient"), true}, {QStringLiteral("clientToHost"), false}, {QStringLiteral("maxMode"), QStringLiteral("auto")},
+                              {QStringLiteral("huge"), true}, {QStringLiteral("transfer"), true}}));
+        // the rest of the group is what OPT-077 sent
+        group.remove(QStringLiteral("files"));
+        caps.clipboard->files.reset();
+        QCOMPARE(group, capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject());
+        // a ceiling is told only as "cap" with its rate, "balanced" without one
+        caps.clipboard->files = files;
+        caps.clipboard->files->maxMode = QStringLiteral("cap");
+        caps.clipboard->files->maxRateBytesPerSecond = 2'500'000;
+        auto capped = capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject().value(QStringLiteral("files")).toObject();
+        QCOMPARE(capped.value(QStringLiteral("maxMode")).toString(), QStringLiteral("cap"));
+        QCOMPARE(capped.value(QStringLiteral("maxRateBytesPerSecond")).toInteger(), qint64(2'500'000));
+        caps.clipboard->files->maxMode = QStringLiteral("balanced");
+        capped = capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject().value(QStringLiteral("files")).toObject();
+        QVERIFY(!capped.contains(QStringLiteral("maxRateBytesPerSecond")));
+        QVERIFY(frame(capabilitiesRecord(caps)).size() < 2048);
+    }
+
     // OPT-071: the optional `deskActivity` group; absent unless set (the Virtual route never sets it), old clients ignore it.
     void capabilitiesDeskActivityGroup()
     {

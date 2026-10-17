@@ -357,7 +357,7 @@ private Q_SLOTS:
             session(Scope::VirtualSession,u"/usr/bin/python3"_s,arguments(dir),3000);
         const QVariantMap desired{{u"Address"_s,u"127.0.0.1"_s},{u"Port"_s,u"3401"_s},{u"Quality"_s,u"93"_s},
             {u"AdaptiveQuality"_s,u"true"_s},{u"PreferAudioQuality"_s,u"true"_s},{u"StandardClientMedia"_s,u"false"_s},
-            {u"CameraLoopbackDevice"_s,u"/dev/video10"_s},{u"SoftwareEncoding"_s,u"prefer"_s},{u"SoftwareAvc"_s,u"last-resort"_s},{u"SoftwareHevc"_s,u"never"_s},{u"SoftwareAv1"_s,u"allowed"_s},{u"Av1Tiles"_s,u"8"_s},{u"ClipboardDirection"_s,u"client-to-host"_s},{u"ClientQualityMax"_s,u"95"_s},
+            {u"CameraLoopbackDevice"_s,u"/dev/video10"_s},{u"SoftwareEncoding"_s,u"prefer"_s},{u"SoftwareAvc"_s,u"last-resort"_s},{u"SoftwareHevc"_s,u"never"_s},{u"SoftwareAv1"_s,u"allowed"_s},{u"Av1Tiles"_s,u"8"_s},{u"ClipboardDirection"_s,u"client-to-host"_s},{u"ClipboardFiles"_s,u"host-to-client"_s},{u"ClipboardFileMaxRate"_s,u"2.5"_s},{u"ClientQualityMax"_s,u"95"_s},
             {u"VaapiDriver"_s,u"off"_s},{u"RenderPci"_s,u"0000:01:00.0"_s},
             {u"VirtualSystemBus"_s,u"full"_s}, {u"SystemBusNetwork"_s,u"false"_s}, {u"SystemBusPower"_s,u"false"_s}, {u"SystemBusPackages"_s,u"true"_s}, {u"SystemBusPolkit"_s,u"true"_s}, {u"SystemBusBluetooth"_s,u"true"_s}, {u"SystemBusPrinting"_s,u"true"_s}, {u"SystemBusExtra"_s,u"org.example.Service,org.example.Other.*"_s}};
         int scope=0;

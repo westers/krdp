@@ -18,6 +18,7 @@
 #include <QVector>
 
 #include "CodecPolicy.h"
+#include "DeliveryStats.h"
 #include "krdp_export.h"
 
 class QTimer;
@@ -130,6 +131,10 @@ struct Snapshot {
     QString limit = QStringLiteral("none");
     std::optional<int> retryInS; ///< until the first held-back codec may be tried again
     QVector<SurfaceCounters> surfaces;
+    // OPT-078 phase 0 (measurements for the file-transfer acceptance; additive, absent = unknown)
+    FrameDelayCounts frameDelay; ///< ms from queueFrame() to the RDPGFX send, per frame
+    SendQueueCounts sendQueueAtSend; ///< socket send-queue bytes sampled as each frame is handed over
+    std::optional<AudioFlow> audio; ///< absent when no audio path runs
 };
 
 /// Sets \a snapshot's tcpRttMs / tcpRttMinMs from TCP_INFO's tcpi_rtt / tcpi_min_rtt in

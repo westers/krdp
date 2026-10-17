@@ -13,8 +13,9 @@ private Q_SLOTS:
         // OPT-062 S3 added SoftwareAvc, SoftwareHevc and SoftwareAv1 to Console and Virtual (a deliberate update of this pin).
         // OPT-066 added ClientQualityMax to Console and Virtual (the highest quality a client may request).
         // OPT-067 added ClipboardDirection to Console and Virtual (the text clipboard bridge's direction).
-        QCOMPARE(keys(Scope::Console).size(), 17);
-        QCOMPARE(keys(Scope::Virtual).size(), 16);
+        // OPT-078 added ClipboardFiles and ClipboardFileMaxRate to Console and Virtual (file copy and its rate ceiling).
+        QCOMPARE(keys(Scope::Console).size(), 19);
+        QCOMPARE(keys(Scope::Virtual).size(), 18);
         // OPT-075 added the eight system-bus keys to the New Virtual Desktops scope (RenderPci and VaapiDriver plus eight).
         QCOMPARE(keys(Scope::VirtualSession).size(), 10);
         for (const auto scope : {Scope::Console, Scope::Virtual, Scope::VirtualSession}) {
@@ -169,6 +170,26 @@ private Q_SLOTS:
         QCOMPARE(environmentName(Scope::Virtual, u"ClipboardDirection"_s), u"FARSIDE_VIRTUAL_CLIPBOARD_DIRECTION"_s);
         QCOMPARE(parse(Scope::Console, "FARSIDE_CONSOLE_CLIPBOARD_DIRECTION=client-to-host\n").effective[u"ClipboardDirection"_s].toString(), u"client-to-host"_s);
         QVERIFY(!parse(Scope::Console, "FARSIDE_CONSOLE_CLIPBOARD_DIRECTION=sideways\n").error.isEmpty());
+        // OPT-078: file copy takes the clipboard direction's four spellings; its rate ceiling is auto, balanced or MB/s from 0.1 to 1000.
+        for (const auto &direction : {u"both"_s, u"host-to-client"_s, u"client-to-host"_s, u"off"_s}) {
+            QCOMPARE(normalize(Scope::Console, u"ClipboardFiles"_s, direction), std::optional<QString>(direction));
+            QCOMPARE(normalize(Scope::Virtual, u"ClipboardFiles"_s, direction), std::optional<QString>(direction));
+        }
+        for (const auto &bad : {u""_s, u"Both"_s, u"on"_s, u"true"_s, u" both"_s, u"both\nX=1"_s}) QVERIFY(!normalize(Scope::Console, u"ClipboardFiles"_s, bad));
+        for (const auto &rate : {u"auto"_s, u"balanced"_s, u"0.1"_s, u"2.5"_s, u"10"_s, u"1000"_s}) {
+            QCOMPARE(normalize(Scope::Console, u"ClipboardFileMaxRate"_s, rate), std::optional<QString>(rate));
+            QCOMPARE(normalize(Scope::Virtual, u"ClipboardFileMaxRate"_s, rate), std::optional<QString>(rate));
+        }
+        for (const auto &bad : {u""_s, u"0"_s, u"0.09"_s, u"1001"_s, u"-5"_s, u"1e3"_s, u"Auto"_s, u"5MB"_s, u" 5"_s, u"5\nX=1"_s, u"fast"_s})
+            QVERIFY2(!normalize(Scope::Console, u"ClipboardFileMaxRate"_s, bad), qPrintable(bad));
+        QCOMPARE(defaults(Scope::Console)[u"ClipboardFiles"_s].toString(), u"both"_s);
+        QCOMPARE(defaults(Scope::Virtual)[u"ClipboardFileMaxRate"_s].toString(), u"auto"_s);
+        QVERIFY(!keys(Scope::VirtualSession).contains(u"ClipboardFiles"_s) && !keys(Scope::VirtualSession).contains(u"ClipboardFileMaxRate"_s));
+        QCOMPARE(environmentName(Scope::Console, u"ClipboardFiles"_s), u"FARSIDE_CONSOLE_CLIPBOARD_FILES"_s);
+        QCOMPARE(environmentName(Scope::Virtual, u"ClipboardFileMaxRate"_s), u"FARSIDE_VIRTUAL_CLIPBOARD_FILE_MAX_RATE"_s);
+        QCOMPARE(parse(Scope::Console, "FARSIDE_CONSOLE_CLIPBOARD_FILES=host-to-client\nFARSIDE_CONSOLE_CLIPBOARD_FILE_MAX_RATE=5\n").effective[u"ClipboardFileMaxRate"_s].toString(), u"5"_s);
+        QVERIFY(!parse(Scope::Console, "FARSIDE_CONSOLE_CLIPBOARD_FILE_MAX_RATE=fast\n").error.isEmpty());
+        QVERIFY(!parse(Scope::Virtual, "FARSIDE_VIRTUAL_CLIPBOARD_FILES=sideways\n").error.isEmpty());
         // OPT-066: 0 = same as Quality, up to 100; anything else is refused.
         QCOMPARE(normalize(Scope::Console, u"ClientQualityMax"_s, u"0"_s), std::optional<QString>(u"0"_s));
         QCOMPARE(normalize(Scope::Virtual, u"ClientQualityMax"_s, u"100"_s), std::optional<QString>(u"100"_s));

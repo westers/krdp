@@ -264,6 +264,22 @@ not establish that the design is acceptable.
 - OPT-077: formatted text is covered too ("HTML Format" <-> `text/html`, always together with the plain text of the same
   copy, at most 8 MiB of HTML). The capability then carries `html: true` and `maxHtmlBytes`. No separate switch either.
 
+## File copy (OPT-078)
+
+- `ClipboardFiles` and `ClipboardFileMaxRate` are host keys on the Console and Virtual pages ("Sharing" section, next to "Clipboard"), not
+  account preferences. Environment `FARSIDE_{CONSOLE,VIRTUAL}_CLIPBOARD_FILES` and `..._CLIPBOARD_FILE_MAX_RATE`, options `--clipboard-files` and
+  `--clipboard-file-max-rate`, examples in `server/{console,virtual}-host.conf.example`, defaults in both unit files. Read when the service starts.
+- `ClipboardFiles` has the four spellings of `ClipboardDirection` (`both` default, `host-to-client`, `client-to-host`, `off`) and is ANDed with it: a
+  narrowed clipboard direction narrows files too. Only host to client exists in this wire (21); "Client to host only" is labelled "not available yet".
+  `off` also turns the cliprdr file capability flags off for every connection, so a client sees no file support at all.
+- `ClipboardFileMaxRate` is the most one connection's file transfers may take of the link: `auto` (default, no ceiling beyond the pacer's own
+  yielding to video and audio), `balanced` (about half of what the link can carry) or a rate in MB/s from 0.1 to 1000 (`5`, `2.5`). A client may choose
+  a mode below the ceiling with the KRDPCTL `clipboard-transfer` record; `unlimited` is honoured only with `auto`. It is a text field (Advanced).
+- State rules (`server/ConsoleClipboardPolicy.h`): the login screen shares no files; a locked desktop still serves host-to-client files (a transfer
+  that is already running is never cut by the lock); another account's lock screen and a viewer connection share nothing; Virtual is always the owner.
+- `ClipboardFileMinFreeBytes` of the design is not a key yet: its only user is the client-to-host staging guard (next phase), and a key that does
+  nothing would be a setting that lies.
+
 ## System services in new Virtual desktops (OPT-075)
 
 - Keys live in the New Virtual Desktops scope (`/etc/farside/virtual-session.conf`, read by `farside-virtual-session@.service`):

@@ -1,0 +1,46 @@
+--- a/probe/clipprobe.cpp	2026-10-17 10:40:53.224017822 -0500
++++ b/probe/clipprobe.cpp	2026-10-17 10:40:53.238560757 -0500
+@@ -4,6 +4,8 @@
+ #include <QFile>
+ #include <QGuiApplication>
+ #include <QImage>
++#include <QMimeData>
++#include <QUrl>
+ #include <QTimer>
+ #include <KSystemClipboard>
+ #include <cstdio>
+@@ -27,6 +29,8 @@
+     quint64 setId = 0;
+     QString textToWrite, variant;
+     bool dumpAll = false;
++    QStringList uriList; // SPIKE S2: offer these paths as text/uri-list
++    bool cutFlag = false;
+     for (int i = 1; i < argc; ++i) {
+         const QString a = QString::fromLocal8Bit(argv[i]);
+         if (a == "--write") writeFile = QString::fromLocal8Bit(argv[++i]);
+@@ -36,6 +40,8 @@
+         else if (a == "--no-request") autoRequest = false;
+         else if (a == "--text") textToWrite = QString::fromLocal8Bit(argv[++i]);
+         else if (a == "--dump") dumpAll = true;
++        else if (a == "--uri-list") uriList.append(QString::fromLocal8Bit(argv[++i]));
++        else if (a == "--cut") cutFlag = true;
+         else if (a == "--variant") variant = QString::fromLocal8Bit(argv[++i]);
+         else if (a == "--tag") tag = QString::fromLocal8Bit(argv[++i]);
+     }
+@@ -103,6 +109,16 @@
+         say(QStringLiteral("WRITE image %1 bytes (greeter=%2 locked=%3)").arg(set.image.size()).arg(greeter).arg(locked));
+         board->set(set);
+     }
++    if (!uriList.isEmpty()) {
++        // SPIKE S2: what the worker would do for staged files: text/uri-list + application/x-kde-cutselection through the data-control backend.
++        auto *m = new QMimeData;
++        QList<QUrl> urls;
++        for (const QString &path : uriList) urls.append(QUrl::fromLocalFile(path));
++        m->setUrls(urls);
++        m->setData(QStringLiteral("application/x-kde-cutselection"), cutFlag ? "1" : "0");
++        cb->setMimeData(m, QClipboard::Clipboard);
++        say(QStringLiteral("OFFER uri-list formats=%1 first=%2").arg(m->formats().join(QLatin1Char(' ')), uriList.first()));
++    }
+     if (!textToWrite.isEmpty()) {
+         ClipboardSet set; set.setId = ++setId; set.controlGeneration = 5; set.kind = ClipboardKind::Text; set.text = textToWrite;
+         board->set(set);

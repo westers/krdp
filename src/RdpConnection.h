@@ -14,6 +14,7 @@
 #include <freerdp/freerdp.h>
 
 #include "ClientDisplayInfo.h"
+#include "DeliveryStats.h"
 #include "DeviceControl.h"
 #include "krdp_export.h"
 
@@ -119,6 +120,9 @@ public:
      * frame acknowledgements.
      */
     qint64 socketQueuedBytes() const;
+
+    /** OPT-078: the playback audio's running totals (PipeWire or console-worker PCM): late takes, overflow drops, capture gaps. Any thread. */
+    Stats::AudioFlow audioFlow() const;
 
     /** What the kernel's TCP_INFO says about this connection's socket (Linux). */
     struct TcpInfo {

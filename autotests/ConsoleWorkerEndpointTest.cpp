@@ -29,6 +29,7 @@ private Q_SLOTS:
     void clipboardRecordBeforeReadyFailsTheWorker();
     void clipboardImagesCrossWithTheirKindAndLimits();
     void clipboardHtmlCrossesWithItsKindAndLimits();
+    void fileRecordsCrossOnlyWhenTheFilePolicyAllowsAndAreBounded();
     void hostPointerIsRelayedAfterReadyAndForgottenWithTheWorker();
     void hostPointerBeforeReadyOrMalformedFailsTheWorker();
 };
@@ -657,6 +658,115 @@ void ConsoleWorkerEndpointTest::clipboardImagesCrossWithTheirKindAndLimits()
 }
 
 // OPT-077 (wire 20).
+// OPT-078 (wire 21): the broker side of host-to-client files.
+void ConsoleWorkerEndpointTest::fileRecordsCrossOnlyWhenTheFilePolicyAllowsAndAreBounded()
+{
+    using namespace ConsoleWorkerWire;
+    ClipboardWorker w;
+    w.start(true);
+    QVERIFY(w.ok);
+    QList<ClipboardData> data;
+    QList<FileReadResult> reads;
+    QList<FileProgress> progress;
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::clipboardDataReceived, this, [&data](const auto &answer) { data.append(answer); });
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::fileReadFinished, this, [&reads](const auto &result) { reads.append(result); });
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::fileProgressed, this, [&progress](const auto &p) { progress.append(p); });
+    // Without the file flag nothing is asked or locked, whatever the clipboard policy says.
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false));
+    w.drain();
+    QCOMPARE(w.endpoint.requestClipboardFiles(true), quint64(0));
+    QCOMPARE(w.endpoint.readFile(1, 0, 0, 100), quint64(0));
+    QVERIFY(!w.endpoint.lockFiles(1, 5));
+    // The login screen cannot be given the flag (the endpoint drops it).
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, true, true, true));
+    auto records = w.drain();
+    QCOMPARE(records.size(), 1);
+    QVERIFY(!clipboardPolicy(records.first())->filesHostToClient && !clipboardPolicy(records.first())->filesClientToHost);
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false, true, false));
+    records = w.drain();
+    QVERIFY(clipboardPolicy(records.first())->filesHostToClient && !clipboardPolicy(records.first())->filesClientToHost);
+
+    // The descriptor is asked for with its option; the answer must be of kind Files.
+    const auto listId = w.endpoint.requestClipboardFiles(true);
+    QVERIFY(listId);
+    records = w.drain();
+    QCOMPARE(records.size(), 1);
+    const auto asked = clipboardRequest(records.first());
+    QVERIFY(asked && asked->kind == ClipboardKind::Files && asked->hugeFiles && asked->requestId == listId && asked->maxBytes == MaxClipboardFileListBytes);
+    ClipboardData answer;
+    answer.requestId = listId;
+    answer.seq = 4;
+    answer.status = ClipboardStatus::Ok;
+    answer.kind = ClipboardKind::Files;
+    answer.files = ClipboardFileDescriptor::encode({{QStringLiteral("a.txt"), false, 10, std::nullopt}}).data;
+    answer.skipped = 2;
+    w.worker.write(frame(answer));
+    w.worker.write(frame(ClipboardOffer{4, ClipboardOfferFiles}));
+    w.worker.flush();
+    QTRY_COMPARE(data.size(), 1);
+    QCOMPARE(data.first().files, answer.files);
+    QCOMPARE(data.first().skipped, 2u);
+    QCOMPARE(data.first().seq, quint64(4));
+
+    // Locks, reads, cancels cross as records; reads are bounded and numbered.
+    QVERIFY(w.endpoint.lockFiles(4, 77));
+    QVERIFY(w.endpoint.unlockFiles(77));
+    QCOMPARE(w.endpoint.readFile(0, 0, 0, 10), quint64(0)); // no offer
+    QCOMPARE(w.endpoint.readFile(4, 0, 0, 0), quint64(0)); // no bytes
+    QCOMPARE(w.endpoint.readFile(4, 0, 0, MaxFileReadBytes + 1), quint64(0));
+    QCOMPARE(w.endpoint.readFile(4, 0, ~quint64(0) - 5, 10), quint64(0)); // would overflow
+    const auto first = w.endpoint.readFile(4, 0, 0x1'0000'0000ULL + 5, 256 * 1024);
+    const auto second = w.endpoint.readFile(4, 1, 0, 100);
+    QVERIFY(first && second && first != second);
+    QVERIFY(w.endpoint.cancelFiles(4));
+    records = w.drain();
+    QCOMPARE(records.size(), 5);
+    QCOMPARE(fileLock(records.at(0)), (std::optional<FileLock>(FileLock{4, 77})));
+    QCOMPARE(fileUnlock(records.at(1)), (std::optional<FileUnlock>(FileUnlock{77})));
+    QCOMPARE(fileRead(records.at(2))->offset, quint64(0x1'0000'0000ULL + 5)); // 64-bit offsets cross intact
+    QCOMPARE(fileRead(records.at(2))->length, quint32(256 * 1024));
+    QCOMPARE(fileRead(records.at(3))->index, quint32(1));
+    QCOMPARE(fileCancel(records.at(4)), (std::optional<FileCancel>(FileCancel{4})));
+
+    // An answer reaches the broker only for a read it issued and did not cancel; the cancel above dropped both.
+    w.worker.write(frame(FileReadResult{first, FileReadStatus::Ok, QByteArray(256 * 1024, 'x')}));
+    w.worker.write(frame(FileProgress{4, 100, 1000, FileProgressState::Reading}));
+    w.worker.flush();
+    QTRY_COMPARE(progress.size(), 1);
+    QCOMPARE(reads.size(), 0);
+    const auto third = w.endpoint.readFile(4, 0, 0, 100);
+    QVERIFY(third);
+    w.drain();
+    w.worker.write(frame(FileReadResult{third + 100, FileReadStatus::Ok, QByteArray(100, 'y')})); // nobody asked
+    w.worker.write(frame(FileReadResult{third, FileReadStatus::Changed, {}}));
+    w.worker.write(frame(FileReadResult{third, FileReadStatus::Ok, QByteArray(100, 'y')})); // a second answer to the same read
+    w.worker.flush();
+    QTRY_COMPARE(reads.size(), 1);
+    QTest::qWait(50);
+    QCOMPARE(reads.size(), 1);
+    QCOMPARE(reads.first().status, FileReadStatus::Changed);
+    // Too many reads in flight are refused; cancel(0) forgets them all.
+    for (int i = 0; i < ConsoleWorkerEndpoint::MaxFileReads; ++i) QVERIFY(w.endpoint.readFile(4, 0, quint64(i), 1));
+    QCOMPARE(w.endpoint.readFile(4, 0, 0, 1), quint64(0));
+    QVERIFY(w.endpoint.cancelFiles(0));
+    QVERIFY(w.endpoint.readFile(4, 0, 0, 1));
+    // The policy turning files off stops everything again, and progress is no longer passed on.
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false, false, false));
+    w.drain();
+    QCOMPARE(w.endpoint.readFile(4, 0, 0, 1), quint64(0));
+    QVERIFY(!w.endpoint.lockFiles(4, 78));
+    QCOMPARE(w.endpoint.requestClipboardFiles(false), quint64(0));
+    w.worker.write(frame(FileProgress{4, 1, 2, FileProgressState::Reading}));
+    w.worker.flush();
+    QTest::qWait(50);
+    QCOMPARE(progress.size(), 1);
+    // A malformed file record is a protocol error, not a shrug.
+    QSignalSpy errors(&w.endpoint, &ConsoleWorkerEndpoint::protocolError);
+    w.worker.write(frame(Kind::FileRead, QByteArray(5, 'x')));
+    w.worker.flush();
+    QTRY_VERIFY(!errors.isEmpty() || !w.endpoint.ready());
+}
+
 void ConsoleWorkerEndpointTest::clipboardHtmlCrossesWithItsKindAndLimits()
 {
     using namespace ConsoleWorkerWire;

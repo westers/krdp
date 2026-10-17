@@ -1,5 +1,6 @@
 #include "FarsideEnv.h"
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+#include "ClipboardTransfer.h"
 #include "VirtualSessionHostController.h"
 #include "VirtualSessionLaunchPlan.h"
 #include "BrokerAuthentication.h"
@@ -51,6 +52,8 @@ int main(int argc, char **argv)
     parser.addOption({QStringLiteral("software-av1"), QStringLiteral("Software AV1 encoding: auto, allowed or never (OPT-062)."), QStringLiteral("ceiling"), QStringLiteral("auto")});
     parser.addOption({QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto")});
     parser.addOption({QStringLiteral("clipboard-direction"), QStringLiteral("Clipboard bridge (text, formatted text and images): both, host-to-client, client-to-host or off (OPT-067, OPT-072)."), QStringLiteral("direction"), QStringLiteral("both")});
+    parser.addOption({QStringLiteral("clipboard-files"), QStringLiteral("File copy between the client and the host desktop: both, host-to-client, client-to-host or off (OPT-078; only host-to-client is implemented)."), QStringLiteral("direction"), QStringLiteral("both")});
+    parser.addOption({QStringLiteral("clipboard-file-max-rate"), QStringLiteral("The most a file transfer may take of the link: auto (no ceiling), balanced, or MB/s from 0.1 to 1000 (OPT-078)."), QStringLiteral("rate"), QStringLiteral("auto")});
     parser.process(application);
     if (getuid() || geteuid()) { qCritical("Virtual host requires an explicit root service invocation"); return 1; }
     const auto authentication = KRdp::BrokerAuthentication::readFile(parser.value(QStringLiteral("authentication-policy")), parser.isSet(QStringLiteral("authentication-policy")));
@@ -75,8 +78,10 @@ int main(int argc, char **argv)
     const auto ceilingHevc = KRdp::parseHostCeiling(parser.value(QStringLiteral("software-hevc")), KRdp::CodecPolicy::Family::Hevc);
     const auto ceilingAv1 = KRdp::parseHostCeiling(parser.value(QStringLiteral("software-av1")), KRdp::CodecPolicy::Family::Av1);
     const auto clipboardDirection = KRdp::ConsoleClipboardPolicy::parseDirection(parser.value(QStringLiteral("clipboard-direction")));
+    const auto clipboardFiles = KRdp::ConsoleClipboardPolicy::parseDirection(parser.value(QStringLiteral("clipboard-files")));
+    const auto clipboardFileCeiling = KRdp::ClipboardTransfer::parseCeiling(parser.value(QStringLiteral("clipboard-file-max-rate")));
     if (!parser.positionalArguments().isEmpty() || !validPort || !port || !validQuality || quality < 0 || quality > 100 || !validClientQualityMax || clientQualityMax < 0 || clientQualityMax > 100
-        || (adaptiveValue != QLatin1String("true") && adaptiveValue != QLatin1String("false")) || address.isNull() || !softwareEncoding || !ceilingAvc || !ceilingHevc || !ceilingAv1 || !clipboardDirection
+        || (adaptiveValue != QLatin1String("true") && adaptiveValue != QLatin1String("false")) || address.isNull() || !softwareEncoding || !ceilingAvc || !ceilingHevc || !ceilingAv1 || !clipboardDirection || !clipboardFiles || !clipboardFileCeiling
         || (audioPriorityValue != QLatin1String("true") && audioPriorityValue != QLatin1String("false"))
         || (standardMediaValue != QLatin1String("true") && standardMediaValue != QLatin1String("false"))
         || (cameraLoopback != QLatin1String("none") && !cameraLoopback.startsWith(QLatin1String("/dev/")))
@@ -117,6 +122,8 @@ int main(int argc, char **argv)
     host.setCameraLoopbackDevice(server.cameraLoopbackDevice());
     host.setClipboardDirection(*clipboardDirection);
     qInfo().noquote() << "Virtual host clipboard direction:" << KRdp::ConsoleClipboardPolicy::directionName(*clipboardDirection);
+    host.setClipboardFiles(*clipboardFiles, *clipboardFileCeiling);
+    qInfo().noquote() << "Virtual host clipboard files:" << KRdp::ConsoleClipboardPolicy::directionName(*clipboardFiles) << "max rate" << parser.value(QStringLiteral("clipboard-file-max-rate"));
     host.setVideoQualityPolicy(quint8(quality), adaptiveValue == QLatin1String("true"));
     host.setAudioPriorityDefault(audioPriorityValue == QLatin1String("true"));
     host.setUserSettingsReader(KRdp::BrokerUserSettings::readUser);

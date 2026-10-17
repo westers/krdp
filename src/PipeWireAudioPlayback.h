@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "DeliveryStats.h"
 #include "PipeWireRuntime.h"
 
 #include <QByteArray>
@@ -36,6 +37,10 @@ public:
     bool startIsolated(const QString &id);
     void stop();
     QByteArray take();
+    /// OPT-078: late takes, overflow drops and capture gaps (any thread). The connection shares its own counters so they
+    /// outlive an endpoint that stopAsync() destroys on another thread.
+    Stats::AudioFlow flow() const { return m_counters->flow(); }
+    void setCounters(std::shared_ptr<Stats::AudioFlowCounters> counters) { if (counters) m_counters = std::move(counters); }
 
     /**
      * Stop and destroy @p endpoint on a background thread.
@@ -68,6 +73,7 @@ private:
     void restoreMovedPlaybackStreams();
 
     QMutex m_mutex;
+    std::shared_ptr<Stats::AudioFlowCounters> m_counters = std::make_shared<Stats::AudioFlowCounters>();
     QByteArray m_pending;
     QString m_isolatedSinkName;
     QString m_previousDefaultSink;

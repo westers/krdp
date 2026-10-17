@@ -17,6 +17,11 @@
 #include <mutex>
 #include <optional>
 
+#include "ClipboardFileDescriptor.h"
+#include "ClipboardFileLimits.h"
+#include "ClipboardFilePacing.h"
+#include "ClipboardFileQos.h"
+#include "ClipboardFileServe.h"
 #include "ClipboardHtml.h"
 #include "ClipboardMime.h"
 #include "ClipboardImage.h"
@@ -24,6 +29,8 @@
 #include "ClipboardText.h"
 #include "PeerContext_p.h"
 #include "RdpConnection.h"
+#include "StatsReporter.h"
+#include "VideoStream.h"
 
 #include "krdp_logging.h"
 
@@ -59,9 +66,26 @@ public:
         uint32_t declaredLength = 0;
     };
 
+    // OPT-078: the client's FILECONTENTS request and lock PDUs, copied on the cliprdr thread.
+    struct FileContentsPdu {
+        uint32_t streamId = 0;
+        uint32_t listIndex = 0;
+        uint32_t flags = 0;
+        uint64_t offset = 0;
+        uint32_t length = 0;
+        bool haveClipDataId = false;
+        uint32_t clipDataId = 0;
+    };
+    struct LockPdu {
+        uint32_t clipDataId = 0;
+        bool lock = true;
+    };
+
     void onClientFormatList(const FormatList &formatList);
     void onClientFormatDataRequest(const FormatDataRequest &formatDataRequest);
     void onClientFormatDataResponse(const FormatDataResponse &formatDataResponse);
+    void onClientFileContents(const FileContentsPdu &pdu);
+    void onClientLock(const LockPdu &pdu);
 
     RdpConnection *session;
 
@@ -96,6 +120,29 @@ public:
     ClipboardLimits::RateLimit rate;
     bool rateEpisodeLogged = false;
     Counters counters;
+
+    // ---- OPT-078: host-to-client file copy (main-thread state unless noted) ----
+    std::atomic<bool> filesEnabled = false; // ClipboardFiles != off; read on the session thread when the channel starts
+    bool hostFilesAllowed = false; // the planner's decision for new transfers
+    bool clientFilesAllowed = false; // phase 3
+    bool hostFiles = false; // the announcement covers files
+    Clipboard::HostFileBackend fileBackend;
+    std::unique_ptr<ClipboardFileServe::Server> serve;
+    QTimer filePump; // FilePumpMs while requests wait
+    Clipboard::FileRate fileRequest;
+    ClipboardFilePacing::Ceiling fileCeiling;
+    std::optional<bool> stockOverride; // tests
+    std::optional<Stats::Snapshot> fileStatsPrevious;
+    ClipboardFilePacing::Clock::time_point lastFileTick{};
+    bool fileTickValid = false;
+    quint64 currentFileSeq = 0;
+    bool negotiated(bool *locking = nullptr, bool *huge = nullptr);
+    void ensureServe();
+    void pumpFiles();
+    void sendFileContentsResponse(quint32 streamId, bool ok, const QByteArray &data, bool range = false);
+    void endFiles(bool withdraw);
+    ClipboardFilePacing::Policy filePolicy() const;
+    void sendFilesNotice(const char *event, quint32 count, const char *reason);
     void sendFailResponse();
     void respondWithText(const QString &hostText);
     void refused(const char *reason, const char *direction, quint64 bytes);
@@ -211,6 +258,31 @@ public:
         return postToMainThread<FormatDataRequest, &Private::onClientFormatDataRequest>(static_cast<Clipboard *>(context->custom), packet);
     }
 
+    static UINT clientFileContentsRequest(CliprdrServerContext *context, const CLIPRDR_FILE_CONTENTS_REQUEST *request)
+    {
+        FileContentsPdu pdu;
+        if (request) {
+            pdu.streamId = request->streamId;
+            pdu.listIndex = request->listIndex;
+            pdu.flags = request->dwFlags;
+            pdu.offset = (uint64_t(request->nPositionHigh) << 32) | request->nPositionLow;
+            pdu.length = request->cbRequested;
+            pdu.haveClipDataId = request->haveClipDataId;
+            pdu.clipDataId = request->clipDataId;
+        }
+        return postToMainThread<FileContentsPdu, &Private::onClientFileContents>(static_cast<Clipboard *>(context->custom), pdu);
+    }
+
+    static UINT clientLockClipboardData(CliprdrServerContext *context, const CLIPRDR_LOCK_CLIPBOARD_DATA *lock)
+    {
+        return postToMainThread<LockPdu, &Private::onClientLock>(static_cast<Clipboard *>(context->custom), LockPdu{lock ? lock->clipDataId : 0, true});
+    }
+
+    static UINT clientUnlockClipboardData(CliprdrServerContext *context, const CLIPRDR_UNLOCK_CLIPBOARD_DATA *unlock)
+    {
+        return postToMainThread<LockPdu, &Private::onClientLock>(static_cast<Clipboard *>(context->custom), LockPdu{unlock ? unlock->clipDataId : 0, false});
+    }
+
     static UINT clientFormatDataResponse(CliprdrServerContext *context, const CLIPRDR_FORMAT_DATA_RESPONSE *formatDataResponse)
     {
         FormatDataResponse packet;
@@ -236,6 +308,10 @@ Clipboard::Clipboard(RdpConnection *session)
     d->session = session;
     d->clock.start();
 
+    d->filePump.setSingleShot(true);
+    connect(&d->filePump, &QTimer::timeout, this, [this]() {
+        d->pumpFiles();
+    });
     d->hostRequestTimer.setSingleShot(true);
     d->hostRequestTimer.setInterval(HostTextTimeoutMs);
     connect(&d->hostRequestTimer, &QTimer::timeout, this, [this]() {
@@ -278,14 +354,15 @@ Clipboard::~Clipboard()
 {
     const auto &c = d->counters;
     if (c.announces || c.served || c.clientCopies || c.refusedPolicy || c.refusedOversize || c.refusedRate || c.refusedTimeout || c.refusedBusy
-        || c.hostImages || c.clientImages || c.refusedMalformed || c.hostHtml || c.clientHtml) {
+        || c.hostImages || c.clientImages || c.refusedMalformed || c.hostHtml || c.clientHtml || c.hostFileLists || c.hostFileFailed) {
         // Counts only, never contents (OPT-067).
         qCInfo(KRDP).nospace() << "Clipboard: closed announces=" << c.announces << " served=" << c.served << " clientCopies=" << c.clientCopies
                                << " refused(policy=" << c.refusedPolicy << " oversize=" << c.refusedOversize << " rate=" << c.refusedRate
                                << " timeout=" << c.refusedTimeout << " busy=" << c.refusedBusy << " malformed=" << c.refusedMalformed
                                << ") images(host=" << c.hostImages << " client=" << c.clientImages << ") html(host=" << c.hostHtml << " client=" << c.clientHtml
                                << ") bytes(host=" << c.hostBytes
-                               << " client=" << c.clientBytes << ")";
+                               << " client=" << c.clientBytes << ") files(lists=" << c.hostFileLists << " ranges=" << c.hostFileRanges << " bytes=" << c.hostFileBytes
+                               << " failed=" << c.hostFileFailed << " ended=" << c.hostFileEnded << ")";
     }
     // setServerData() took ownership of the last announcement; every earlier
     // one was freed by its successor.
@@ -304,6 +381,19 @@ void Clipboard::installClientCallbacks(CliprdrServerContext *context, Clipboard 
     context->ClientFormatListResponse = Private::clientFormatListResponse;
     context->ClientFormatDataRequest = Private::clientFormatDataRequest;
     context->ClientFormatDataResponse = Private::clientFormatDataResponse;
+    // OPT-078. A peer that did not negotiate file transfer can still send these PDUs (the library routes them): they are answered
+    // FAIL / ignored on the main thread unless files are enabled, announced and allowed.
+    context->ClientFileContentsRequest = Private::clientFileContentsRequest;
+    context->ClientLockClipboardData = Private::clientLockClipboardData;
+    context->ClientUnlockClipboardData = Private::clientUnlockClipboardData;
+}
+
+void Clipboard::applyFileCapabilities(CliprdrServerContext *context, bool filesEnabled)
+{
+    context->streamFileClipEnabled = filesEnabled ? TRUE : FALSE;
+    context->fileClipNoFilePaths = filesEnabled ? TRUE : FALSE;
+    context->canLockClipData = filesEnabled ? TRUE : FALSE;
+    context->hasHugeFileSupport = filesEnabled ? TRUE : FALSE;
 }
 
 bool Clipboard::initialize()
@@ -321,10 +411,10 @@ bool Clipboard::initialize()
     }
 
     context->useLongFormatNames = TRUE;
-    context->streamFileClipEnabled = FALSE;
-    context->fileClipNoFilePaths = FALSE;
-    context->canLockClipData = FALSE;
-    context->hasHugeFileSupport = FALSE;
+    // OPT-078: file transfer is offered to the client only when the host owner allows files (ClipboardFiles != off). The context
+    // holds the INTERSECTION with the client's flags after the capability exchange (spike S1): negotiated() reads it back.
+    // NO_FILE_PATHS: a file is only ever transferred by contents, never by a path the receiver could open itself.
+    applyFileCapabilities(context, d->filesEnabled.load());
 
     context->rdpcontext = d->session->rdpPeer()->context;
     installClientCallbacks(context, this);
@@ -351,6 +441,7 @@ void Clipboard::close()
 {
     d->closing = true;
     d->enabled = false;
+    d->filePump.stop();
     auto *context = d->clipContext.load();
     if (!context) {
         return;
@@ -416,22 +507,29 @@ void Clipboard::sendServerData()
     // HTML next to a picture and no text is the picture.
     static char pngName[] = "PNG";
     static char htmlName[] = "HTML Format";
+    static char fileGroupName[] = "FileGroupDescriptorW";
     CLIPRDR_FORMAT formats[4] = {};
     uint32_t count = 0;
-    const bool hasText = d->serverData || d->hostText;
-    const auto choice = ClipboardHtml::announce(hasText, d->hostHtml, d->hostImage);
-    // Richest first (a format list is in the owner's order of preference): "HTML Format", then the plain text.
-    if (choice.html) {
-        formats[count].formatId = ClipboardHtml::HtmlFormatId;
-        formats[count++].formatName = htmlName;
-    }
-    if (choice.text) {
-        formats[count++].formatId = CF_UNICODETEXT;
-    }
-    if (choice.image) {
-        formats[count].formatId = ClipboardImage::PngFormatId;
-        formats[count++].formatName = pngName;
-        formats[count++].formatId = ClipboardImage::CfDib;
+    if (d->hostFiles) {
+        // OPT-078: a file copy is announced alone, as the registered "FileGroupDescriptorW" (the descriptor is fetched on the paste).
+        formats[count].formatId = ClipboardFileDescriptor::FormatId;
+        formats[count++].formatName = fileGroupName;
+    } else {
+        const bool hasText = d->serverData || d->hostText;
+        const auto choice = ClipboardHtml::announce(hasText, d->hostHtml, d->hostImage);
+        // Richest first (a format list is in the owner's order of preference): "HTML Format", then the plain text.
+        if (choice.html) {
+            formats[count].formatId = ClipboardHtml::HtmlFormatId;
+            formats[count++].formatName = htmlName;
+        }
+        if (choice.text) {
+            formats[count++].formatId = CF_UNICODETEXT;
+        }
+        if (choice.image) {
+            formats[count].formatId = ClipboardImage::PngFormatId;
+            formats[count++].formatName = pngName;
+            formats[count++].formatId = ClipboardImage::CfDib;
+        }
     }
 
     CLIPRDR_FORMAT_LIST formatList = {};
@@ -694,7 +792,8 @@ void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &form
         const bool wantText = requested == CF_UNICODETEXT && hostText;
         const bool wantImage = (requested == ClipboardImage::PngFormatId || requested == ClipboardImage::CfDib) && hostImage;
         const bool wantHtml = requested == ClipboardHtml::HtmlFormatId && hostHtml;
-        if ((!wantText && !wantImage && !wantHtml) || !hostToClientAllowed) {
+        const bool wantFiles = requested == ClipboardFileDescriptor::FormatId && hostFiles;
+        if ((!wantText && !wantImage && !wantHtml && !wantFiles) || !hostToClientAllowed || (wantFiles && (!hostFilesAllowed || !filesEnabled))) {
             ++counters.refusedPolicy;
             sendFailResponse();
             return;
@@ -707,8 +806,12 @@ void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &form
         }
         pendingHostRequest = ++nextHostRequestId;
         pendingHostFormat = requested;
-        hostRequestTimer.start();
-        if (wantImage) {
+        hostRequestTimer.start(wantFiles ? HostFilesTimeoutMs : HostTextTimeoutMs);
+        if (wantFiles) {
+            bool huge = false;
+            negotiated(nullptr, &huge);
+            Q_EMIT q->hostFilesRequested(pendingHostRequest, huge);
+        } else if (wantImage) {
             Q_EMIT q->hostImageRequested(pendingHostRequest);
         } else if (wantHtml) {
             Q_EMIT q->hostHtmlRequested(pendingHostRequest);
@@ -933,15 +1036,26 @@ void Clipboard::announceHostText()
     announceHost(true, false);
 }
 
-void Clipboard::announceHost(bool text, bool image, bool html)
+void Clipboard::announceHost(bool text, bool image, bool html, bool files)
 {
-    if (d->closing || !d->hostToClientAllowed || (!text && !image && !html)) {
+    if (d->closing || !d->hostToClientAllowed || (!text && !image && !html && !files)) {
         return;
     }
+    if (files && (!d->filesEnabled || !d->hostFilesAllowed || !d->negotiated())) {
+        // The host copied files but this client cannot have them (the host owner turned files off, the planner denies them,
+        // or the client did not negotiate file streaming): what it was offered before is stale, so withdraw it.
+        qCDebug(KRDP) << "Host copied files; not announcing them (not enabled, not allowed or not negotiated)";
+        resetHostSide();
+        return;
+    }
+    if (d->serve) {
+        d->serve->clearOffer(); // an earlier copy's descriptor is no longer the current one (a lock may still keep it)
+    }
+    d->hostFiles = files;
     d->hostAnnounced = true;
-    d->hostText = text;
-    d->hostImage = image;
-    d->hostHtml = html;
+    d->hostText = text && !files;
+    d->hostImage = image && !files;
+    d->hostHtml = html && !files;
     // The text the client may have of the previous copy is no longer the host's.
     d->lastServerText = QString();
     d->lastServerHtml = QByteArray();
@@ -1100,6 +1214,7 @@ void Clipboard::resetHostSide()
     d->hostText = false;
     d->hostImage = false;
     d->hostHtml = false;
+    d->endFiles(true);
     d->lastServerHtml = QByteArray();
     d->pendingHostFormat = 0;
     d->announcedToClient = false;
@@ -1138,6 +1253,365 @@ void Clipboard::resetClientSide()
         d->responseTimer.stop();
         d->discardClientResponse = true;
     }
+}
+
+// ---- OPT-078: host-to-client file copy ----
+
+bool Clipboard::Private::negotiated(bool *locking, bool *huge)
+{
+    // After the capability exchange the context holds the INTERSECTION of both sides' flags (spike S1).
+    auto *context = clipContext.load();
+    if (!context) {
+        return false;
+    }
+    if (locking) {
+        *locking = context->canLockClipData;
+    }
+    if (huge) {
+        *huge = context->hasHugeFileSupport;
+    }
+    return context->streamFileClipEnabled;
+}
+
+ClipboardFilePacing::Policy Clipboard::Private::filePolicy() const
+{
+    // A client without KRDPCTL (a stock client) cannot ask for a mode: Auto, and a window of at most four.
+    const bool stock = stockOverride ? *stockOverride : session && !session->isOwnClient();
+    return ClipboardFilePacing::effectivePolicy(fileRequest.mode, fileRequest.capBytesPerSecond, fileCeiling, stock);
+}
+
+void Clipboard::Private::ensureServe()
+{
+    if (serve) {
+        return;
+    }
+    bool locking = false;
+    bool huge = false;
+    negotiated(&locking, &huge);
+    ClipboardFileServe::Callbacks callbacks;
+    callbacks.issueRead = [this](const ClipboardFileServe::ReadIssue &issue) {
+        return fileBackend.read && fileBackend.read(issue.seq, issue.index, issue.offset, issue.length, issue.streamId);
+    };
+    callbacks.respond = [this](quint32 streamId, bool ok, const QByteArray &data, bool range) {
+        sendFileContentsResponse(streamId, ok, data, range);
+    };
+    callbacks.cancelOffer = [this](quint64 seq) {
+        if (fileBackend.cancel) {
+            fileBackend.cancel(seq);
+        }
+    };
+    callbacks.lockBound = [this](quint32 clipDataId, quint64 seq) {
+        if (fileBackend.lock) {
+            fileBackend.lock(seq, clipDataId);
+        }
+    };
+    callbacks.unlockEvicted = [this](quint32 clipDataId) {
+        if (fileBackend.unlock) {
+            fileBackend.unlock(clipDataId);
+        }
+    };
+    callbacks.ended = [this](quint64 seq, ClipboardFileServe::EndReason reason, ClipboardFileServe::ReadStatus cause) {
+        ++counters.hostFileEnded;
+        // A reason, never a name (OPT-078).
+        qCInfo(KRDP).nospace() << "Clipboard: file transfer ended reason=" << int(reason) << " cause=" << ClipboardFileServe::readStatusName(cause);
+        sendFilesNotice("ended", 0, ClipboardFileServe::readStatusName(cause));
+        Q_EMIT q->hostFileTransferEnded(seq, int(reason), int(cause));
+    };
+    serve = std::make_unique<ClipboardFileServe::Server>(callbacks, locking, huge, filePolicy());
+}
+
+void Clipboard::Private::sendFilesNotice(const char *event, quint32 count, const char *reason)
+{
+    // To our own client only (a stock client has no KRDPCTL channel): counts and fixed words, never a name.
+    if (session && session->hasControlChannel()) {
+        session->sendControlRecord(QJsonObject{{u"type"_s, u"clipboard-files"_s},
+                                               {u"v"_s, 1},
+                                               {u"event"_s, QString::fromLatin1(event)},
+                                               {u"count"_s, qint64(count)},
+                                               {u"reason"_s, QString::fromLatin1(reason)}});
+    }
+}
+
+void Clipboard::Private::sendFileContentsResponse(quint32 streamId, bool ok, const QByteArray &data, bool range)
+{
+    std::lock_guard lock(sendMutex);
+    auto *context = clipContext.load();
+    if (!context || !enabled || !context->ServerFileContentsResponse) {
+        return;
+    }
+    static const BYTE none = 0;
+    CLIPRDR_FILE_CONTENTS_RESPONSE response = {};
+    response.common.msgType = CB_FILECONTENTS_RESPONSE;
+    response.streamId = streamId;
+    if (ok) {
+        response.common.msgFlags = CB_RESPONSE_OK;
+        response.common.dataLen = quint32(data.size());
+        response.cbRequested = quint32(data.size());
+        response.requestedData = reinterpret_cast<const BYTE *>(data.constData());
+        if (range) {
+            ++counters.hostFileRanges;
+            counters.hostFileBytes += quint64(data.size());
+        }
+    } else {
+        response.common.msgFlags = CB_RESPONSE_FAIL;
+        response.requestedData = &none;
+        ++counters.hostFileFailed;
+    }
+    context->ServerFileContentsResponse(context, &response);
+}
+
+void Clipboard::Private::pumpFiles()
+{
+    if (!serve || closing) {
+        return;
+    }
+    using Clock = ClipboardFilePacing::Clock;
+    const auto now = Clock::now();
+    if (!fileTickValid || now - lastFileTick >= ClipboardFilePacing::Tick) {
+        fileTickValid = true;
+        lastFileTick = now;
+        serve->setPolicy(filePolicy()); // the mode, the ceiling and whether the client is our own may have changed
+        ClipboardFilePacing::Inputs inputs;
+        if (session && session->videoStream()) {
+            const Stats::Snapshot snapshot = session->videoStream()->statsSnapshot();
+            inputs = ClipboardFileQos::inputsFromStats(snapshot, fileStatsPrevious ? &*fileStatsPrevious : nullptr, serve->recentKbps(now), false);
+            fileStatsPrevious = snapshot;
+        }
+        serve->tick(now, inputs);
+    }
+    std::optional<qint64> queued;
+    if (session) {
+        if (const qint64 bytes = session->socketQueuedBytes(); bytes >= 0) {
+            queued = bytes;
+        }
+    }
+    serve->pump(now, queued);
+    if (serve->pending() > 0 && !closing) {
+        const auto wait = std::clamp<qint64>(serve->delayUntilNext(now).count(), FilePumpMs, 100);
+        filePump.start(int(wait));
+    } else {
+        filePump.stop();
+    }
+}
+
+void Clipboard::Private::endFiles(bool withdraw)
+{
+    if (serve) {
+        serve->reset();
+        serve.reset(); // locks and the pacer start afresh with the next offer
+    }
+    filePump.stop();
+    fileStatsPrevious.reset();
+    fileTickValid = false;
+    hostFiles = false;
+    currentFileSeq = 0;
+    if (withdraw && fileBackend.cancel) {
+        fileBackend.cancel(0); // the worker forgets this client's queued reads and locks
+    }
+}
+
+void Clipboard::Private::onClientFileContents(const FileContentsPdu &pdu)
+{
+    if (!filesEnabled || !hostFilesAllowed || !hostToClientAllowed || !hostFiles || !negotiated()) {
+        // Nothing is offered, the planner denies files now, or the client never negotiated streaming: FAIL, nothing read.
+        ++counters.refusedPolicy;
+        sendFileContentsResponse(pdu.streamId, false, {});
+        return;
+    }
+    ensureServe();
+    ClipboardFileRequest::Request request;
+    request.streamId = pdu.streamId;
+    request.listIndex = pdu.listIndex;
+    request.flags = pdu.flags;
+    request.offset = pdu.offset;
+    request.length = pdu.length;
+    if (pdu.haveClipDataId) {
+        request.clipDataId = pdu.clipDataId;
+    }
+    serve->onRequest(request, ClipboardFilePacing::Clock::now());
+    pumpFiles();
+}
+
+void Clipboard::Private::onClientLock(const LockPdu &pdu)
+{
+    bool locking = false;
+    if (!filesEnabled || !hostFilesAllowed || !hostFiles || !negotiated(&locking) || !locking) {
+        return;
+    }
+    ensureServe();
+    if (pdu.lock) {
+        serve->lock(pdu.clipDataId); // bound to the current offer now, or to the descriptor when it arrives
+    } else if (serve->unlock(pdu.clipDataId) && fileBackend.unlock) {
+        fileBackend.unlock(pdu.clipDataId);
+    }
+    pumpFiles();
+}
+
+void Clipboard::setFilesEnabled(bool enabled)
+{
+    d->filesEnabled = enabled;
+}
+
+bool Clipboard::filesEnabled() const
+{
+    return d->filesEnabled;
+}
+
+void Clipboard::setFileDirections(bool hostToClient, bool clientToHost)
+{
+    const bool hostWas = d->hostFilesAllowed;
+    d->hostFilesAllowed = hostToClient;
+    d->clientFilesAllowed = clientToHost;
+    if (hostWas && !hostToClient) {
+        // The transfer ends and the offer is withdrawn: control moved, the policy changed, the viewer was demoted.
+        const bool announcedFiles = d->hostFiles;
+        d->endFiles(true);
+        if (announcedFiles) {
+            resetHostSide();
+        }
+    }
+}
+
+bool Clipboard::hostFilesAllowed() const
+{
+    return d->hostFilesAllowed;
+}
+
+bool Clipboard::hostFileTransferActive() const
+{
+    return d->serve && (d->serve->pending() > 0 || d->serve->lockCount() > 0);
+}
+
+void Clipboard::setHostFileBackend(HostFileBackend backend)
+{
+    d->fileBackend = std::move(backend);
+}
+
+void Clipboard::setFileTransferRequest(const FileRate &request)
+{
+    d->fileRequest = request;
+    if (d->serve) {
+        d->serve->setPolicy(d->filePolicy());
+    }
+}
+
+void Clipboard::setFileCeiling(const ClipboardFilePacing::Ceiling &ceiling)
+{
+    d->fileCeiling = ceiling;
+    if (d->serve) {
+        d->serve->setPolicy(d->filePolicy());
+    }
+}
+
+void Clipboard::setStockClientForTest(bool stock)
+{
+    d->stockOverride = stock;
+    if (d->serve) {
+        d->serve->setPolicy(d->filePolicy());
+    }
+}
+
+ClipboardFilePacing::Policy Clipboard::effectiveFilePolicy() const
+{
+    return d->filePolicy();
+}
+
+void Clipboard::provideHostFileRead(quint32 streamId, ReadResult result, const QByteArray &data)
+{
+    if (d->closing || !d->serve) {
+        return; // a late answer for a transfer that was reset
+    }
+    using Status = ClipboardFileServe::ReadStatus;
+    Status status = Status::IoError;
+    switch (result) {
+    case ReadResult::Ok:
+        status = Status::Ok;
+        break;
+    case ReadResult::Changed:
+        status = Status::Changed;
+        break;
+    case ReadResult::Gone:
+        status = Status::Gone;
+        break;
+    case ReadResult::Denied:
+        status = Status::Denied;
+        break;
+    case ReadResult::IoError:
+        status = Status::IoError;
+        break;
+    case ReadResult::NoSuchOffer:
+        status = Status::NoSuchOffer;
+        break;
+    }
+    d->serve->readFinished(streamId, status, data, ClipboardFilePacing::Clock::now());
+    d->pumpFiles();
+}
+
+void Clipboard::provideHostFiles(quint64 requestId, quint64 seq, const QByteArray &descriptor, quint32 skipped, bool ok)
+{
+    if (d->closing || !requestId || requestId != d->pendingHostRequest) {
+        return; // a late answer for a request that timed out or was reset
+    }
+    d->pendingHostRequest = 0;
+    d->hostRequestTimer.stop();
+    if (!ok || !d->hostToClientAllowed || !d->hostFilesAllowed || !d->hostFiles || !d->filesEnabled) {
+        ++d->counters.refusedPolicy;
+        d->sendFailResponse();
+        return;
+    }
+    bool huge = false;
+    if (!d->negotiated(nullptr, &huge)) {
+        ++d->counters.refusedPolicy;
+        d->sendFailResponse();
+        return;
+    }
+    // The worker has built this list; an answer from another process is checked again before it reaches a client (and it fixes
+    // what the broker will let the client ask for).
+    const auto decoded = ClipboardFileDescriptor::decode(descriptor);
+    ClipboardFileRequest::Snapshot snapshot;
+    bool good = decoded.ok() && !decoded.items.isEmpty() && seq != 0;
+    for (qsizetype i = 0; good && i < decoded.items.size(); ++i) {
+        const auto &item = decoded.items.at(i);
+        const quint64 size = item.isDirectory() ? 0 : item.size.value_or(0);
+        if (!item.isDirectory() && !item.size) {
+            good = false; // the worker always states a size
+        } else if (!huge && !ClipboardFileLimits::fitsWithoutHugeSupport(size)) {
+            ++d->counters.refusedOversize;
+            d->refused("oversize", "host-to-client", size);
+            d->sendFailResponse();
+            return;
+        }
+        snapshot.items.append({size, item.isDirectory()});
+    }
+    if (!good) {
+        ++d->counters.refusedMalformed;
+        d->refused("malformed", "host-to-client", quint64(descriptor.size()));
+        d->sendFailResponse();
+        return;
+    }
+    d->ensureServe();
+    d->serve->setOffer(seq, snapshot, ClipboardFilePacing::Clock::now());
+    d->currentFileSeq = seq;
+    {
+        std::lock_guard lock(d->sendMutex);
+        auto *context = d->clipContext.load();
+        if (!context || !d->enabled) {
+            return;
+        }
+        CLIPRDR_FORMAT_DATA_RESPONSE response = {};
+        response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+        response.common.msgFlags = CB_RESPONSE_OK;
+        response.common.dataLen = quint32(descriptor.size());
+        response.requestedFormatData = reinterpret_cast<const BYTE *>(descriptor.constData());
+        ++d->counters.hostFileLists;
+        // Counts only (OPT-078).
+        qCDebug(KRDP) << "Serving host file list to the client:" << decoded.items.size() << "entries," << skipped << "skipped";
+        context->ServerFormatDataResponse(context, &response);
+    }
+    if (skipped) {
+        d->sendFilesNotice("skipped", skipped, "unsupported");
+    }
+    d->pumpFiles();
 }
 
 Clipboard::Counters Clipboard::counters() const

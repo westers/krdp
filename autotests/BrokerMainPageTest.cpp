@@ -242,7 +242,7 @@ private Q_SLOTS:
             }
             if(section->property("open").toBool()) QVERIFY(QMetaObject::invokeMethod(section,"cancel"));
         }
-        QCOMPARE(hostEntries,43); /* OPT-075: +8 system-bus rows in the new-desktop scope. OPT-062 S3: +3 software ceilings in Console and Virtual; OPT-066: +1 ClientQualityMax in each; OPT-067: +1 ClipboardDirection in each */ QVERIFY(unavailable.contains(u"CameraLoopbackDevice"_s));
+        QCOMPARE(hostEntries,47); /* OPT-078: +2 (ClipboardFiles, ClipboardFileMaxRate) in each of Console and Virtual. OPT-075: +8 system-bus rows in the new-desktop scope. OPT-062 S3: +3 software ceilings in Console and Virtual; OPT-066: +1 ClientQualityMax in each; OPT-067: +1 ClipboardDirection in each */ QVERIFY(unavailable.contains(u"CameraLoopbackDevice"_s));
         // Account preferences: every one of the 17 keys has a visible, enabled control (an inherit/custom selector until overridden).
         QQuickItem *prefs=f.goTo(3); QVERIFY(prefs); QVERIFY(prefs->setProperty("showAdvanced",true));
         const auto definitions=f.preferences.definitions(); QCOMPARE(definitions.size(),17);

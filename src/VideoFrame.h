@@ -71,6 +71,11 @@ struct VideoFrame {
      * When was this frame presented.
      */
     std::chrono::system_clock::time_point presentationTimeStamp;
+    /**
+     * OPT-078 phase 0: when VideoStream::queueFrame() accepted this frame (steady clock; default = not queued).
+     * Only the frame-delay statistic reads it.
+     */
+    std::chrono::steady_clock::time_point enqueuedAt{};
 };
 
 }

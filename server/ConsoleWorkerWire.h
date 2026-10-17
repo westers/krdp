@@ -20,6 +20,8 @@
 #include <QVector>
 #include <QSet>
 
+#include "ClipboardFileDescriptor.h"
+#include "ClipboardFileLimits.h"
 #include "CodecPolicy.h"
 #include "ChromaPolicy.h"
 #include "ChromaTimingReport.h"
@@ -78,7 +80,15 @@ namespace KRdp::ConsoleWorkerWire
 // Html. A Html ClipboardData carries the HTML document (UTF-8, at most MaxClipboardHtmlBytes, never the cliprdr wrapper); a
 // Html ClipboardSet carries the plain text beside it (may be empty) and the HTML (never empty), so the host application gets
 // both in one offer. Policy, gates and the one-request-at-a-time rule are the text bridge's. Contents are never logged.
-constexpr quint16 ProtocolVersion = 20;
+// 21 (OPT-078 phase 2): host-to-client file copy. ClipboardOffer flags bit 3 = files (text/uri-list of local files) are available;
+// ClipboardKind gains Files: a Files ClipboardRequest (options bit 0 = the peer negotiated huge files) makes the worker walk the
+// selection and answer with the FileGroupDescriptorW bytes (never file names on any log) and the count of entries it skipped. The
+// file bytes travel as FileRead (broker -> worker, 64-bit offset, at most FileRangeBytes) / FileReadResult (worker -> broker);
+// FileLock/FileUnlock pin an offer's snapshot while the client holds a clipboard lock, FileCancel drops an offer's queued reads,
+// FileProgress (worker -> broker, at most 4/s) says how much of an offer was read. ClipboardPolicy carries the two file flags
+// (the planner's per-direction decision for NEW transfers). Pacing needs no record: the broker holds the socket, issues a read
+// only inside the request window and writes the response when the pacer allows.
+constexpr quint16 ProtocolVersion = 21;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -155,8 +165,15 @@ enum class Kind : quint8 {
     LocalReclaim,
     // Wire 18 (OPT-071): see the version comment above.
     HostPointer,
+    // Wire 21 (OPT-078): host-to-client file copy, see the version comment above.
+    FileLock,
+    FileUnlock,
+    FileRead,
+    FileReadResult,
+    FileCancel,
+    FileProgress,
 };
-constexpr Kind LastKind = Kind::HostPointer;
+constexpr Kind LastKind = Kind::FileProgress;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;
@@ -1288,17 +1305,27 @@ constexpr quint32 MaxClipboardHtmlBytes = 8 * 1024 * 1024;
 /// A Html ClipboardSet is its text length (4 bytes), the text and the HTML.
 constexpr quint32 MaxClipboardRichSetBytes = 4 + MaxClipboardBytes + MaxClipboardHtmlBytes;
 
-/// What a clipboard record carries (wire 19; Html since wire 20).
-enum class ClipboardKind : quint8 { Text, Image, Html };
-constexpr quint8 LastClipboardKind = quint8(ClipboardKind::Html);
+/// OPT-078 (wire 21): the most a FileGroupDescriptorW is (4 + 100 000 entries x 592); a Files answer is this plus a 4-byte skipped count.
+constexpr quint32 MaxClipboardFileListBytes = 4 + ClipboardFileLimits::MaxEntries * 592;
+/// OPT-078 (wire 21): the most file bytes one FileRead carries (the validation ceiling; the pacer asks for ClipboardFileLimits::RangeBytes).
+constexpr quint32 MaxFileReadBytes = ClipboardFileLimits::MaxRangeBytes;
+
+/// What a clipboard record carries (wire 19; Html since wire 20; Files since wire 21).
+enum class ClipboardKind : quint8 { Text, Image, Html, Files };
+constexpr quint8 LastClipboardKind = quint8(ClipboardKind::Files);
 constexpr quint32 maxClipboardBytes(ClipboardKind kind)
 {
-    return kind == ClipboardKind::Image ? MaxClipboardImageBytes : kind == ClipboardKind::Html ? MaxClipboardHtmlBytes : MaxClipboardBytes;
+    return kind == ClipboardKind::Image ? MaxClipboardImageBytes
+        : kind == ClipboardKind::Html   ? MaxClipboardHtmlBytes
+        : kind == ClipboardKind::Files  ? MaxClipboardFileListBytes
+                                        : MaxClipboardBytes;
 }
 /// ClipboardOffer flag bits.
 constexpr quint8 ClipboardOfferText = 1;
 constexpr quint8 ClipboardOfferImage = 2;
 constexpr quint8 ClipboardOfferHtml = 4;
+/// OPT-078 (wire 21): the host copied files (text/uri-list). Exclusive: a file copy is announced as files only.
+constexpr quint8 ClipboardOfferFiles = 8;
 
 /** Broker -> worker: the planner's decision. Revision is endpoint-local and strictly increases. */
 struct ClipboardPolicy {
@@ -1308,6 +1335,9 @@ struct ClipboardPolicy {
     bool clientToHost = false;
     bool locked = false;
     bool greeter = false;
+    /// OPT-078 (wire 21): file copy for NEW transfers, per direction (a subset of hostToClient / clientToHost).
+    bool filesHostToClient = false;
+    bool filesClientToHost = false;
     bool operator==(const ClipboardPolicy &) const = default;
 };
 
@@ -1317,33 +1347,37 @@ inline QByteArray frame(const ClipboardPolicy &policy)
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
     stream << policy.revision << policy.controlGeneration << quint8(policy.hostToClient) << quint8(policy.clientToHost)
-           << quint8(policy.locked) << quint8(policy.greeter);
+           << quint8(policy.locked) << quint8(policy.greeter) << quint8(policy.filesHostToClient) << quint8(policy.filesClientToHost);
     return frame(Kind::ClipboardPolicy, payload);
 }
 
 inline std::optional<ClipboardPolicy> clipboardPolicy(const Record &record)
 {
-    if (record.kind != Kind::ClipboardPolicy || record.payload.size() != 20) return std::nullopt;
+    if (record.kind != Kind::ClipboardPolicy || record.payload.size() != 22) return std::nullopt;
     QDataStream stream(record.payload);
     stream.setByteOrder(QDataStream::BigEndian);
     ClipboardPolicy policy;
-    quint8 flags[4] = {};
-    stream >> policy.revision >> policy.controlGeneration >> flags[0] >> flags[1] >> flags[2] >> flags[3];
+    quint8 flags[6] = {};
+    stream >> policy.revision >> policy.controlGeneration >> flags[0] >> flags[1] >> flags[2] >> flags[3] >> flags[4] >> flags[5];
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !policy.revision) return std::nullopt;
     for (const auto flag : flags) if (flag > 1) return std::nullopt;
     // A greeter never offers its clipboard to a client; a policy that says otherwise is malformed, not trusted.
     if (flags[3] && flags[0]) return std::nullopt;
+    // A file direction is a subset of its clipboard direction, and the login screen shares no files at all.
+    if ((flags[4] && !flags[0]) || (flags[5] && !flags[1]) || (flags[3] && (flags[4] || flags[5]))) return std::nullopt;
     policy.hostToClient = flags[0];
     policy.clientToHost = flags[1];
     policy.locked = flags[2];
     policy.greeter = flags[3];
+    policy.filesHostToClient = flags[4];
+    policy.filesClientToHost = flags[5];
     return policy;
 }
 
 /** Worker -> broker: the host's clipboard changed. No contents, no length. */
 struct ClipboardOffer {
     quint64 seq = 0;
-    quint8 flags = ClipboardOfferText; // bit 0: text available, bit 1 (wire 19): an image, bit 2 (wire 20): HTML
+    quint8 flags = ClipboardOfferText; // bit 0: text available, bit 1 (wire 19): an image, bit 2 (wire 20): HTML, bit 3 (wire 21): files (alone)
     bool operator==(const ClipboardOffer &) const = default;
 };
 
@@ -1364,7 +1398,8 @@ inline std::optional<ClipboardOffer> clipboardOffer(const Record &record)
     ClipboardOffer offer;
     stream >> offer.seq >> offer.flags;
     if (stream.status() != QDataStream::Ok || !stream.atEnd() || !offer.seq || !offer.flags
-        || offer.flags > (ClipboardOfferText | ClipboardOfferImage | ClipboardOfferHtml)) return std::nullopt;
+        || offer.flags > (ClipboardOfferText | ClipboardOfferImage | ClipboardOfferHtml | ClipboardOfferFiles)) return std::nullopt;
+    if ((offer.flags & ClipboardOfferFiles) && offer.flags != ClipboardOfferFiles) return std::nullopt; // files are announced alone
     return offer;
 }
 
@@ -1373,6 +1408,9 @@ struct ClipboardRequest {
     quint64 requestId = 0;
     quint32 maxBytes = MaxClipboardBytes;
     ClipboardKind kind = ClipboardKind::Text;
+    /// OPT-078 (wire 21), kind Files only: the peer negotiated huge files (offsets and sizes over 4 GiB). Without it the worker skips
+    /// files that large and counts them. Zero for every other kind.
+    bool hugeFiles = false;
     bool operator==(const ClipboardRequest &) const = default;
 };
 
@@ -1381,20 +1419,23 @@ inline QByteArray frame(const ClipboardRequest &request)
     QByteArray payload;
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream.setByteOrder(QDataStream::BigEndian);
-    stream << request.requestId << request.maxBytes << quint8(request.kind);
+    stream << request.requestId << request.maxBytes << quint8(request.kind) << quint8(request.hugeFiles);
     return frame(Kind::ClipboardRequest, payload);
 }
 
 inline std::optional<ClipboardRequest> clipboardRequest(const Record &record)
 {
-    if (record.kind != Kind::ClipboardRequest || record.payload.size() != 13) return std::nullopt;
+    if (record.kind != Kind::ClipboardRequest || record.payload.size() != 14) return std::nullopt;
     QDataStream stream(record.payload);
     stream.setByteOrder(QDataStream::BigEndian);
     ClipboardRequest request;
     quint8 kind = 0;
-    stream >> request.requestId >> request.maxBytes >> kind;
-    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !request.requestId || kind > LastClipboardKind) return std::nullopt;
+    quint8 options = 0;
+    stream >> request.requestId >> request.maxBytes >> kind >> options;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !request.requestId || kind > LastClipboardKind || options > 1) return std::nullopt;
     request.kind = ClipboardKind(kind);
+    if (options && request.kind != ClipboardKind::Files) return std::nullopt;
+    request.hugeFiles = options == 1;
     if (!request.maxBytes || request.maxBytes > maxClipboardBytes(request.kind)) return std::nullopt;
     return request;
 }
@@ -1411,6 +1452,8 @@ struct ClipboardData {
     ClipboardKind kind = ClipboardKind::Text;
     QByteArray image; // PNG (kind Image); only with status Ok
     QByteArray html; // the HTML document, UTF-8 (kind Html); only with status Ok, never empty
+    QByteArray files; // OPT-078 (wire 21): the FileGroupDescriptorW bytes (kind Files); only with status Ok, at least one entry
+    quint32 skipped = 0; // OPT-078: entries left out of \a files (symlinks, special files, names too long, over 4 GiB without huge support)
     bool operator==(const ClipboardData &) const = default;
 };
 
@@ -1426,7 +1469,16 @@ inline QByteArray frame(const ClipboardData &data)
     stream.setByteOrder(QDataStream::BigEndian);
     stream << data.requestId << data.seq << quint8(data.status) << quint8(data.kind);
     if (data.status == ClipboardStatus::Ok) {
-        payload.append(data.kind == ClipboardKind::Image ? data.image : data.kind == ClipboardKind::Html ? data.html : data.text.toUtf8());
+        if (data.kind == ClipboardKind::Files) {
+            QByteArray skipped;
+            QDataStream skippedStream(&skipped, QIODevice::WriteOnly);
+            skippedStream.setByteOrder(QDataStream::BigEndian);
+            skippedStream << data.skipped;
+            payload.append(skipped);
+            payload.append(data.files);
+        } else {
+            payload.append(data.kind == ClipboardKind::Image ? data.image : data.kind == ClipboardKind::Html ? data.html : data.text.toUtf8());
+        }
     }
     return frame(Kind::ClipboardData, payload);
 }
@@ -1435,7 +1487,7 @@ inline std::optional<ClipboardData> clipboardData(const Record &record)
 {
     using detail::ClipboardTextHeader;
     if (record.kind != Kind::ClipboardData || record.payload.size() < ClipboardTextHeader
-        || record.payload.size() > ClipboardTextHeader + qsizetype(MaxClipboardImageBytes)) return std::nullopt;
+        || record.payload.size() > ClipboardTextHeader + 4 + qsizetype(MaxClipboardFileListBytes)) return std::nullopt;
     QDataStream stream(record.payload);
     stream.setByteOrder(QDataStream::BigEndian);
     ClipboardData data;
@@ -1445,7 +1497,19 @@ inline std::optional<ClipboardData> clipboardData(const Record &record)
     if (stream.status() != QDataStream::Ok || !data.requestId || status > LastClipboardStatus || kind > LastClipboardKind) return std::nullopt;
     data.status = ClipboardStatus(status);
     data.kind = ClipboardKind(kind);
-    const auto body = record.payload.mid(ClipboardTextHeader);
+    auto body = record.payload.mid(ClipboardTextHeader);
+    if (data.status == ClipboardStatus::Ok && data.kind == ClipboardKind::Files) {
+        // The skipped count, then the descriptor: at least one entry (4 + 592 bytes) and exactly 4 + n x 592.
+        if (body.size() < 4 + 4 + ClipboardFileDescriptor::DescriptorBytes) return std::nullopt;
+        QDataStream skippedStream(body.left(4));
+        skippedStream.setByteOrder(QDataStream::BigEndian);
+        skippedStream >> data.skipped;
+        body.remove(0, 4);
+        if (qint64(body.size()) > qint64(MaxClipboardFileListBytes)
+            || (body.size() - 4) % ClipboardFileDescriptor::DescriptorBytes != 0) return std::nullopt;
+        data.files = body;
+        return data;
+    }
     if (qint64(body.size()) > qint64(maxClipboardBytes(data.kind))) return std::nullopt;
     if (data.status != ClipboardStatus::Ok) return body.isEmpty() ? std::optional<ClipboardData>(data) : std::nullopt;
     if (data.kind == ClipboardKind::Image) {
@@ -1498,7 +1562,8 @@ inline std::optional<ClipboardSet> clipboardSet(const Record &record)
     ClipboardSet set;
     quint8 kind = 0;
     stream >> set.setId >> set.controlGeneration >> kind;
-    if (stream.status() != QDataStream::Ok || !set.setId || !set.controlGeneration || kind > LastClipboardKind) return std::nullopt;
+    if (stream.status() != QDataStream::Ok || !set.setId || !set.controlGeneration || kind > LastClipboardKind
+        || kind == quint8(ClipboardKind::Files)) return std::nullopt; // files travel client to host in a later wire, never as a set
     set.kind = ClipboardKind(kind);
     const auto body = record.payload.mid(header);
     if (set.kind == ClipboardKind::Html) {
@@ -1579,12 +1644,195 @@ inline bool mayAnswerClipboardRequest(const ClipboardRequest &request, const Con
                                       quint64 lastRequestId, bool desktop)
 {
     return control.active && policy.controlGeneration == control.generation && policy.hostToClient && !policy.greeter && desktop
-        && request.requestId > lastRequestId;
+        && request.requestId > lastRequestId && (request.kind != ClipboardKind::Files || policy.filesHostToClient);
 }
 
 inline bool mayOfferClipboard(const ClipboardPolicy &policy, bool desktop)
 {
     return policy.hostToClient && !policy.greeter && desktop;
+}
+
+// ---- OPT-078 host-to-client file copy (wire 21) ----
+// Worker side: the user's files stay where they are; nothing is copied. The broker (which holds the socket and the pacer) asks for
+// ranges inside the client's request window and writes each response when the pacer allows. File names never appear in these
+// records (the descriptor travels in a Files ClipboardData) and are never logged.
+
+/** Broker -> worker: the client locked the offer \a seq (CB_LOCK_CLIPDATA): keep its snapshot until the matching FileUnlock. */
+struct FileLock {
+    quint64 seq = 0;
+    quint32 clipDataId = 0;
+    bool operator==(const FileLock &) const = default;
+};
+/** Broker -> worker: the client unlocked \a clipDataId (or the broker dropped its lock). */
+struct FileUnlock {
+    quint32 clipDataId = 0;
+    bool operator==(const FileUnlock &) const = default;
+};
+/** Broker -> worker: read \a length bytes at \a offset of entry \a index of offer \a seq (the broker has validated the range). */
+struct FileRead {
+    quint64 readId = 0;
+    quint64 seq = 0;
+    quint32 index = 0;
+    quint64 offset = 0;
+    quint32 length = 0;
+    bool operator==(const FileRead &) const = default;
+};
+enum class FileReadStatus : quint8 { Ok, Changed, Gone, Denied, IoError, NoSuchOffer };
+constexpr quint8 LastFileReadStatus = quint8(FileReadStatus::NoSuchOffer);
+/** Worker -> broker: the answer to a FileRead. Only Ok carries bytes, exactly as many as asked. */
+struct FileReadResult {
+    quint64 readId = 0;
+    FileReadStatus status = FileReadStatus::Gone;
+    QByteArray data;
+    bool operator==(const FileReadResult &) const = default;
+};
+/** Broker -> worker: the offer \a seq is over for the client (cancel, a new copy, the client left); drop its queued reads. 0 = every offer. */
+struct FileCancel {
+    quint64 seq = 0;
+    bool operator==(const FileCancel &) const = default;
+};
+enum class FileProgressState : quint8 { Reading, Done, Failed };
+constexpr quint8 LastFileProgressState = quint8(FileProgressState::Failed);
+/** Worker -> broker, at most 4 a second while reading: bytes of the offer read from disk so far (counts only). */
+struct FileProgress {
+    quint64 seq = 0;
+    quint64 doneBytes = 0;
+    quint64 totalBytes = 0;
+    FileProgressState state = FileProgressState::Reading;
+    bool operator==(const FileProgress &) const = default;
+};
+constexpr int FileProgressMaxPerSecond = 4;
+
+inline QByteArray frame(const FileLock &lock)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << lock.seq << lock.clipDataId;
+    return frame(Kind::FileLock, payload);
+}
+inline std::optional<FileLock> fileLock(const Record &record)
+{
+    if (record.kind != Kind::FileLock || record.payload.size() != 12) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FileLock lock;
+    stream >> lock.seq >> lock.clipDataId;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !lock.seq) return std::nullopt;
+    return lock;
+}
+
+inline QByteArray frame(const FileUnlock &unlock)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << unlock.clipDataId;
+    return frame(Kind::FileUnlock, payload);
+}
+inline std::optional<FileUnlock> fileUnlock(const Record &record)
+{
+    if (record.kind != Kind::FileUnlock || record.payload.size() != 4) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FileUnlock unlock;
+    stream >> unlock.clipDataId;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd()) return std::nullopt;
+    return unlock;
+}
+
+inline QByteArray frame(const FileRead &read)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << read.readId << read.seq << read.index << read.offset << read.length;
+    return frame(Kind::FileRead, payload);
+}
+inline std::optional<FileRead> fileRead(const Record &record)
+{
+    if (record.kind != Kind::FileRead || record.payload.size() != 32) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FileRead read;
+    stream >> read.readId >> read.seq >> read.index >> read.offset >> read.length;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !read.readId || !read.seq || !read.length || read.length > MaxFileReadBytes
+        || read.offset > ~quint64(0) - read.length) return std::nullopt;
+    return read;
+}
+
+inline QByteArray frame(const FileReadResult &result)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << result.readId << quint8(result.status);
+    if (result.status == FileReadStatus::Ok) payload.append(result.data);
+    return frame(Kind::FileReadResult, payload);
+}
+inline std::optional<FileReadResult> fileReadResult(const Record &record)
+{
+    constexpr qsizetype Header = 8 + 1;
+    if (record.kind != Kind::FileReadResult || record.payload.size() < Header || record.payload.size() > Header + qsizetype(MaxFileReadBytes)) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FileReadResult result;
+    quint8 status = 0;
+    stream >> result.readId >> status;
+    if (stream.status() != QDataStream::Ok || !result.readId || status > LastFileReadStatus) return std::nullopt;
+    result.status = FileReadStatus(status);
+    const auto body = record.payload.mid(Header);
+    if (result.status != FileReadStatus::Ok) return body.isEmpty() ? std::optional<FileReadResult>(result) : std::nullopt;
+    if (body.isEmpty()) return std::nullopt; // an Ok read has bytes
+    result.data = body;
+    return result;
+}
+
+inline QByteArray frame(const FileCancel &cancel)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << cancel.seq;
+    return frame(Kind::FileCancel, payload);
+}
+inline std::optional<FileCancel> fileCancel(const Record &record)
+{
+    if (record.kind != Kind::FileCancel || record.payload.size() != 8) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FileCancel cancel;
+    stream >> cancel.seq;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd()) return std::nullopt;
+    return cancel;
+}
+
+inline QByteArray frame(const FileProgress &progress)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << progress.seq << progress.doneBytes << progress.totalBytes << quint8(progress.state);
+    return frame(Kind::FileProgress, payload);
+}
+inline std::optional<FileProgress> fileProgress(const Record &record)
+{
+    if (record.kind != Kind::FileProgress || record.payload.size() != 25) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FileProgress progress;
+    quint8 state = 0;
+    stream >> progress.seq >> progress.doneBytes >> progress.totalBytes >> state;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !progress.seq || state > LastFileProgressState || progress.doneBytes > progress.totalBytes) return std::nullopt;
+    progress.state = FileProgressState(state);
+    return progress;
+}
+
+/** The worker's gate for FileLock / FileRead: an active controller, a current policy that allows files host to client, a desktop worker. */
+inline bool mayServeFiles(const ControlState &control, const ClipboardPolicy &policy, bool desktop)
+{
+    return control.active && control.generation != 0 && policy.controlGeneration == control.generation && policy.hostToClient
+        && policy.filesHostToClient && !policy.greeter && desktop;
 }
 
 struct Output {

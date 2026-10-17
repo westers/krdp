@@ -22,7 +22,9 @@
 #include "DeskActivity.h"
 #include "ConsoleWorkerBackoff.h"
 #include "ConsoleControl.h"
+#include "ClipboardFilePacing.h"
 #include "ConsoleClipboardPolicy.h"
+#include "HostFileRelay.h"
 #include "ConsoleInputState.h"
 #include "ConsoleWorkerEndpoint.h"
 #include "ConsoleTopologyPlan.h"
@@ -101,6 +103,9 @@ public:
     /** OPT-067: the administrator's ClipboardDirection (the planner narrows it by state). Set before clients connect. */
     void setClipboardDirection(ConsoleClipboardPolicy::Direction direction) { m_clipboardDirection = direction; }
     ConsoleClipboardPolicy::Direction clipboardDirection() const { return m_clipboardDirection; }
+    /** OPT-078: the host owner's ClipboardFiles (file copy, same shape as ClipboardDirection) and ClipboardFileMaxRate (the rate ceiling). Set before clients connect. */
+    void setClipboardFiles(ConsoleClipboardPolicy::Direction direction) { m_clipboardFiles = direction; }
+    void setClipboardFileCeiling(const ClipboardFilePacing::Ceiling &ceiling) { m_clipboardFileCeiling = ceiling; }
 
 private:
     friend class ConsoleHostControllerTest;
@@ -188,12 +193,15 @@ private:
     void syncClipboard();
     /** Forget both sides of every connection's clipboard and every request in flight (handover, worker gone, control change). */
     void resetClipboards();
-    enum class ClipboardRequestKind { Text, Image, Html };
-    void clipboardRequested(ConsoleControl::Id id, quint64 requestId, ClipboardRequestKind kind);
+    enum class ClipboardRequestKind { Text, Image, Html, Files };
+    void clipboardRequested(ConsoleControl::Id id, quint64 requestId, ClipboardRequestKind kind, bool hugeFiles = false);
     void clientClipboardText(ConsoleControl::Id id, const QString &text);
     void clientClipboardImage(ConsoleControl::Id id, const QByteArray &png);
     void clientClipboardRich(ConsoleControl::Id id, const QString &text, const QByteArray &html);
     ConsoleClipboardPolicy::Direction m_clipboardDirection = ConsoleClipboardPolicy::Direction::Both;
+    ConsoleClipboardPolicy::Direction m_clipboardFiles = ConsoleClipboardPolicy::Direction::Both; // OPT-078
+    ClipboardFilePacing::Ceiling m_clipboardFileCeiling;
+    HostFileRelay m_fileRelay;
     QHash<quint64, PendingClipboardRequest> m_clipboardRequests;
 
     /** M-3: the broker's own run of the mapped planner over the last known host screens (no wire, no worker). */

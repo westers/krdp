@@ -845,6 +845,8 @@ public:
     MicrophonePcmQueue microphonePcm;
     std::unique_ptr<PipeWireAudioPlayback> audioPlaybackEndpoint;
     ExternalAudioQueue externalAudio;
+    /// OPT-078: the PipeWire playback endpoint's counters, owned here so a stats sample never touches the endpoint pointer.
+    std::shared_ptr<Stats::AudioFlowCounters> pipeWireAudioCounters = std::make_shared<Stats::AudioFlowCounters>();
     std::atomic<bool> externalAudioPlayback = false;
     std::atomic<int> audioPriorityOverride = -1;
     std::atomic<bool> audioPriorityDefault = false;
@@ -1046,6 +1048,13 @@ ClientDisplay::Info RdpConnection::clientDisplayInfo() const
 {
     std::lock_guard lock(d->clientDisplayMutex);
     return d->clientDisplay;
+}
+
+Stats::AudioFlow RdpConnection::audioFlow() const
+{
+    Stats::AudioFlow flow = d->pipeWireAudioCounters->flow();
+    flow += d->externalAudio.flow();
+    return flow;
 }
 
 qint64 RdpConnection::socketQueuedBytes() const
@@ -2027,6 +2036,7 @@ bool RdpConnection::reconcilePlayback()
             qCInfo(KRDP) << "RDPSND using PCM supplied by the console capture worker";
         } else {
             d->audioPlaybackEndpoint = std::make_unique<PipeWireAudioPlayback>();
+            d->audioPlaybackEndpoint->setCounters(d->pipeWireAudioCounters);
             const bool isolated = slot.silenceHost.load();
             // An isolated sink is the only safe way to silence the host: muting
             // the physical sink can mute its monitor too. The sink becomes the

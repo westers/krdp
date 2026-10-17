@@ -28,6 +28,7 @@
 #include <QUuid>
 
 #include <Clipboard.h>
+#include <ClipboardTransfer.h>
 #include <RdpConnection.h>
 #include <Server.h>
 #include <VideoStream.h>
@@ -283,8 +284,10 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardOffered, this, [this](quint64, quint8 flags) {
         for (const auto &client : m_clients) {
             if (client->connection && client->clipboardPlan && client->clipboardPlan->hostToClient && m_control.ownsControl(client->id)) {
+                const bool files = flags & ConsoleWorkerWire::ClipboardOfferFiles;
+                if (files && !client->clipboardPlan->files.hostToClient) continue; // the planner denies files here: the copy is not announced
                 client->connection->clipboard()->announceHost(flags & ConsoleWorkerWire::ClipboardOfferText, flags & ConsoleWorkerWire::ClipboardOfferImage,
-                                                                  flags & ConsoleWorkerWire::ClipboardOfferHtml);
+                                                                  flags & ConsoleWorkerWire::ClipboardOfferHtml, files);
             }
         }
     });
@@ -294,7 +297,12 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         const bool ok = data.status == ConsoleWorkerWire::ClipboardStatus::Ok;
         if (data.kind == ConsoleWorkerWire::ClipboardKind::Image) request.clipboard->provideHostImage(request.clipboardRequestId, data.image, ok);
         else if (data.kind == ConsoleWorkerWire::ClipboardKind::Html) request.clipboard->provideHostHtml(request.clipboardRequestId, data.html, ok);
+        else if (data.kind == ConsoleWorkerWire::ClipboardKind::Files) request.clipboard->provideHostFiles(request.clipboardRequestId, data.seq, data.files, data.skipped, ok);
         else request.clipboard->provideHostText(request.clipboardRequestId, data.text, ok);
+    });
+    // OPT-078: the worker's answers to file reads go back to the connection that asked.
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::fileReadFinished, this, [this](const ConsoleWorkerWire::FileReadResult &result) {
+        m_fileRelay.finished(result);
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardSetFinished, this, [](const ConsoleWorkerWire::ClipboardSetResult &result) {
         qCDebug(CONSOLE_SCREENS) << "client text set" << result.setId << "status" << int(result.status);
@@ -1019,6 +1027,18 @@ void ConsoleHostController::addClient(RdpConnection *connection)
         client->connections.append(connect(clipboard, &Clipboard::hostHtmlRequested, this, [this, id](quint64 requestId) {
             clipboardRequested(id, requestId, ClipboardRequestKind::Html);
         }));
+        // OPT-078: host-to-client files. The capability flags are exchanged once when the channel starts, so this is decided here.
+        clipboard->setFilesEnabled(m_clipboardFiles != ConsoleClipboardPolicy::Direction::Off && m_clipboardDirection != ConsoleClipboardPolicy::Direction::Off);
+        clipboard->setFileCeiling(m_clipboardFileCeiling);
+        client->connections.append(connect(clipboard, &Clipboard::hostFilesRequested, this, [this, id](quint64 requestId, bool hugeFiles) {
+            clipboardRequested(id, requestId, ClipboardRequestKind::Files, hugeFiles);
+        }));
+        clipboard->setHostFileBackend(m_fileRelay.backendFor(
+            clipboard, [this] { return &m_endpoint; },
+            [this, id] {
+                const auto found = std::find_if(m_clients.cbegin(), m_clients.cend(), [id](const auto &entry) { return entry->id == id; });
+                return found != m_clients.cend() && m_control.ownsControl(id) && (*found)->clipboardPlan && (*found)->clipboardPlan->files.hostToClient;
+            }));
         client->connections.append(connect(clipboard, &Clipboard::clientDataChanged, session, [clipboard, session]() {
             session->setClipboardData(clipboard->getClipboard());
         }));
@@ -1685,6 +1705,23 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         }
         return;
     }
+    if (type == u"clipboard-transfer"_s) {
+        // OPT-078: how much of the link file transfers may take. Any admitted connection may set its own mode; the host owner's
+        // ceiling (ClipboardFileMaxRate) is what the effective policy is under.
+        const auto request = ClipboardTransfer::parse(record);
+        auto *clipboard = connection->clipboard();
+        if (!request || !clipboard) {
+            replyTo(connection, ClipboardTransfer::reply(record, {}, m_clipboardFileCeiling, u"invalid clipboard-transfer request"_s));
+        } else if (!m_control.admitted(id)) {
+            replyTo(connection, ClipboardTransfer::reply(record, clipboard->effectiveFilePolicy(), m_clipboardFileCeiling, u"not admitted"_s));
+        } else if (!clipboard->filesEnabled()) {
+            replyTo(connection, ClipboardTransfer::reply(record, clipboard->effectiveFilePolicy(), m_clipboardFileCeiling, u"file copy is off on this host"_s));
+        } else {
+            clipboard->setFileTransferRequest({request->mode, request->capBytesPerSecond});
+            replyTo(connection, ClipboardTransfer::reply(record, clipboard->effectiveFilePolicy(), m_clipboardFileCeiling));
+        }
+        return;
+    }
     if (type == u"console-screens-request"_s && record.value(u"v"_s).toInt() == 2) {
         handleMappedScreensRequest(connection, id, record); // OPT-060 M-3
         return;
@@ -2203,6 +2240,16 @@ void ConsoleHostController::sendCapabilities(Client &client)
             capabilities.clipboard = LayoutControl::ClipboardCapabilities{hostToClient, clientToHost, int(ConsoleWorkerWire::MaxClipboardBytes), true,
                                                                           int(ConsoleWorkerWire::MaxClipboardImageBytes), true,
                                                                           int(ConsoleWorkerWire::MaxClipboardHtmlBytes)};
+            // OPT-078: file copy. Only host to client exists in this wire; the client-to-host half is announced when it does.
+            const bool filesHostToClient = hostToClient && (m_clipboardFiles == Direction::Both || m_clipboardFiles == Direction::HostToClient);
+            if (filesHostToClient) {
+                LayoutControl::ClipboardCapabilities::Files files;
+                files.hostToClient = true;
+                files.maxMode = m_clipboardFileCeiling.kind == ClipboardFilePacing::Ceiling::Kind::Rate ? u"cap"_s
+                    : m_clipboardFileCeiling.kind == ClipboardFilePacing::Ceiling::Kind::Balanced     ? u"balanced"_s : u"auto"_s;
+                files.maxRateBytesPerSecond = qint64(m_clipboardFileCeiling.bytesPerSecond);
+                capabilities.clipboard->files = files;
+            }
         }
     }
     capabilities.stats = LayoutControl::StatsCapabilities{};
@@ -2441,23 +2488,29 @@ void ConsoleHostController::syncClipboard()
         input.sessionUid = target.uid;
         input.ownsControl = m_control.ownsControl(client->id) && m_control.admitted(client->id) && admissible(*client);
         input.setting = m_clipboardDirection;
+        input.filesSetting = m_clipboardFiles;
+        // A file transfer that is already running when the screen locks goes on (the planner only denies NEW ones while locked).
+        input.hostToClientFileStarted = client->connection->clipboard()->hostFileTransferActive();
         const auto plan = ConsoleClipboardPolicy::plan(input);
         if (input.ownsControl) controllerPlan = plan;
         const auto before = client->clipboardPlan;
         client->clipboardPlan = plan;
         client->connection->clipboard()->setDirections(plan.hostToClient, plan.clientToHost);
+        client->connection->clipboard()->setFileDirections(plan.files.hostToClient, plan.files.clientToHost);
         // Info, once per edge, never data.
-        if (!before || before->hostToClient != plan.hostToClient || before->clientToHost != plan.clientToHost) {
+        if (!before || before->hostToClient != plan.hostToClient || before->clientToHost != plan.clientToHost || before->files != plan.files) {
             if (plan.hostToClient || plan.clientToHost || before) {
                 qInfo().noquote() << "Clipboard: console client" << client->id << "host to client" << (plan.hostToClient ? "enabled" : "disabled")
                                   << ", client to host" << (plan.clientToHost ? "enabled" : "disabled")
-                                  << "(reason=" << ConsoleClipboardPolicy::reasonName(plan.reason) << ")";
+                                  << "(reason=" << ConsoleClipboardPolicy::reasonName(plan.reason) << "), files host to client"
+                                  << (plan.files.hostToClient ? "enabled" : "disabled") << ", client to host" << (plan.files.clientToHost ? "enabled" : "disabled")
+                                  << "(reason=" << ConsoleClipboardPolicy::reasonName(plan.files.reason) << ")";
             }
         }
     }
     if (controllerPlan) {
         m_endpoint.setClipboardPolicy(m_controlGeneration, controllerPlan->hostToClient, controllerPlan->clientToHost, controllerPlan->locked,
-                                      controllerPlan->greeter);
+                                      controllerPlan->greeter, controllerPlan->files.hostToClient, controllerPlan->files.clientToHost);
     } else {
         m_endpoint.setClipboardPolicy(m_controlGeneration, false, false, locked, greeter);
     }
@@ -2466,6 +2519,7 @@ void ConsoleHostController::syncClipboard()
 void ConsoleHostController::resetClipboards()
 {
     m_clipboardRequests.clear();
+    m_fileRelay.clear();
     for (const auto &client : m_clients) {
         if (!client->connection || !client->connection->clipboard()) continue;
         client->connection->clipboard()->resetHostSide();
@@ -2473,7 +2527,7 @@ void ConsoleHostController::resetClipboards()
     }
 }
 
-void ConsoleHostController::clipboardRequested(ConsoleControl::Id id, quint64 requestId, ClipboardRequestKind kind)
+void ConsoleHostController::clipboardRequested(ConsoleControl::Id id, quint64 requestId, ClipboardRequestKind kind, bool hugeFiles)
 {
     for (const auto &client : m_clients) {
         if (client->id != id || !client->connection) continue;
@@ -2481,14 +2535,17 @@ void ConsoleHostController::clipboardRequested(ConsoleControl::Id id, quint64 re
         const auto refuse = [&] {
             if (kind == ClipboardRequestKind::Image) clipboard->provideHostImage(requestId, {}, false);
             else if (kind == ClipboardRequestKind::Html) clipboard->provideHostHtml(requestId, {}, false);
+            else if (kind == ClipboardRequestKind::Files) clipboard->provideHostFiles(requestId, 0, {}, 0, false);
             else clipboard->provideHostText(requestId, {}, false);
         };
-        if (!m_control.ownsControl(id) || !client->clipboardPlan || !client->clipboardPlan->hostToClient) {
+        if (!m_control.ownsControl(id) || !client->clipboardPlan || !client->clipboardPlan->hostToClient
+            || (kind == ClipboardRequestKind::Files && !client->clipboardPlan->files.hostToClient)) {
             refuse();
             return;
         }
         const auto endpointId = kind == ClipboardRequestKind::Image ? m_endpoint.requestClipboardImage()
-            : kind == ClipboardRequestKind::Html ? m_endpoint.requestClipboardHtml() : m_endpoint.requestClipboard();
+            : kind == ClipboardRequestKind::Html ? m_endpoint.requestClipboardHtml()
+            : kind == ClipboardRequestKind::Files ? m_endpoint.requestClipboardFiles(hugeFiles) : m_endpoint.requestClipboard();
         if (!endpointId) {
             refuse();
             return;

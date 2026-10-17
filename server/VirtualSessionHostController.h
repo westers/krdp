@@ -45,6 +45,12 @@ public:
     void setCameraLoopbackDevice(const QString &device) { m_cameraLoopbackDevice = device; }
     /** OPT-067: the administrator's ClipboardDirection for every client this host accepts. */
     void setClipboardDirection(ConsoleClipboardPolicy::Direction direction) { m_clipboardDirection = direction; }
+    /** OPT-078: the host owner's ClipboardFiles and ClipboardFileMaxRate for every client this host accepts. */
+    void setClipboardFiles(ConsoleClipboardPolicy::Direction direction, const ClipboardFilePacing::Ceiling &ceiling)
+    {
+        m_clipboardFiles = direction;
+        m_clipboardFileCeiling = ceiling;
+    }
     /**
      * AUD-FIX8: whether a desktop's session unit (krdp-virtual-session@<id>.service) is still
      * running: true, false, or nullopt when that cannot be told (treated as running). A recovered
@@ -101,6 +107,8 @@ private:
     bool m_audioPriorityDefault = false;
     QString m_cameraLoopbackDevice;
     ConsoleClipboardPolicy::Direction m_clipboardDirection = ConsoleClipboardPolicy::Direction::Both;
+    ConsoleClipboardPolicy::Direction m_clipboardFiles = ConsoleClipboardPolicy::Direction::Both; // OPT-078
+    ClipboardFilePacing::Ceiling m_clipboardFileCeiling;
     std::map<QString, std::unique_ptr<Worker>> m_workers;
     quint64 m_sequence = 0;
     quint64 m_nextClient = 0;

@@ -51,6 +51,10 @@ private Q_SLOTS:
     void clipboardRichSetKeepsTheTextExact_data();
     void clipboardRichSetKeepsTheTextExact();
     void clipboardHtmlGatesAreStrict();
+    void fileRecordsRoundTripAndAreBounded();
+    void wireTwentyIsRefused();
+    void fileGatesAreStrict();
+    void fileClipboardRecordsCarryFilesAndPolicy();
     void protocolVersionIsTwenty();
     void heartbeatAndLocalReclaimRecordsAreStrict();
     void hostPointerRecordIsStrictAndCarriesNoInputData();
@@ -567,7 +571,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(20));
+    QCOMPARE(ProtocolVersion, quint16(21));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -827,7 +831,7 @@ void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
     QCOMPARE(encoderStats(*deframer.next()), std::optional(measured));
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 0);
-    QCOMPARE(LastKind, Kind::HostPointer);
+    QCOMPARE(LastKind, Kind::FileProgress);
 
     const auto rejected = [](const EncoderStats &stats) {
         Deframer d;
@@ -959,8 +963,8 @@ void ConsoleWorkerWireTest::roundTripsControlGeneration()
 // OPT-067 (wire 16): the six clipboard records.
 void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(20));
-    QCOMPARE(int(LastKind), int(Kind::HostPointer));
+    QCOMPARE(ProtocolVersion, quint16(21));
+    QCOMPARE(int(LastKind), int(Kind::FileProgress));
     const ClipboardPolicy policy{7, 42, true, false, true, false};
     const ClipboardOffer offer{3, 1};
     const ClipboardRequest request{11, 4096};
@@ -1027,7 +1031,7 @@ void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
         QVERIFY(clipboardPolicy(*d.next()));
     }
     // Offer: seq 0 and flags other than text are refused. Request: id 0, 0 bytes, more than the cap.
-    for (const auto &bad : {ClipboardOffer{0, 1}, ClipboardOffer{1, 0}, ClipboardOffer{1, 8}}) {
+    for (const auto &bad : {ClipboardOffer{0, 1}, ClipboardOffer{1, 0}, ClipboardOffer{1, 16}, ClipboardOffer{1, 9}}) {
         Deframer d;
         d.feed(frame(bad));
         QVERIFY(!clipboardOffer(*d.next()));
@@ -1165,7 +1169,7 @@ void ConsoleWorkerWireTest::clipboardImageRecordsRoundTripAndAreBounded()
     }
     {
         auto raw = *requestRecord;
-        raw.payload[12] = char(3); // unknown kind
+        raw.payload[12] = char(LastClipboardKind + 1); // unknown kind
         QVERIFY(!clipboardRequest(raw));
         auto shorter = *requestRecord;
         shorter.payload.chop(1);
@@ -1317,8 +1321,8 @@ void ConsoleWorkerWireTest::clipboardHtmlRecordsRoundTripAndAreBounded()
     QCOMPARE(clipboardSet(*setRecord), std::optional(set));
     QCOMPARE(clipboardSet(*htmlOnlyRecord), std::optional(htmlOnly));
     QVERIFY(frame(data).contains(html)); // raw UTF-8 on the wire
-    // Flag bits above html are not read, and an offer still needs at least one.
-    for (const quint8 flags : {quint8(8), quint8(0)}) {
+    // Flag bits above files are not read, and an offer still needs at least one.
+    for (const quint8 flags : {quint8(16), quint8(0)}) {
         Deframer d;
         d.feed(frame(ClipboardOffer{9, flags}));
         QVERIFY(!clipboardOffer(*d.next()));
@@ -1397,9 +1401,9 @@ void ConsoleWorkerWireTest::clipboardHtmlGatesAreStrict()
 
 void ConsoleWorkerWireTest::protocolVersionIsTwenty()
 {
-    // The paired broker and worker must agree; a wire 19 record (no html kind) from an old peer is refused at the hello.
-    QCOMPARE(ProtocolVersion, quint16(20));
-    QCOMPARE(int(LastClipboardKind), int(ClipboardKind::Html));
+    // The paired broker and worker must agree; a wire 20 record (no files kind) from an old peer is refused at the hello.
+    QCOMPARE(ProtocolVersion, quint16(21));
+    QCOMPARE(int(LastClipboardKind), int(ClipboardKind::Files));
 }
 
 // OPT-055 wave 2 (wire 17): Heartbeat carries exactly a sequence; LocalReclaim is a ControlState under its own kind.
@@ -1480,6 +1484,232 @@ void ConsoleWorkerWireTest::wireSeventeenIsRefused()
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 1);
     QCOMPARE(deframer.mismatchedVersion(), std::optional<quint16>(17));
+}
+
+// OPT-078 (wire 21): a worker still on wire 20 (no file records) meets a 21 peer: refused as a whole.
+void ConsoleWorkerWireTest::wireTwentyIsRefused()
+{
+    QByteArray old = frame(Heartbeat{1});
+    old[4] = char(0);
+    old[5] = char(20);
+    Deframer deframer;
+    deframer.feed(old);
+    QVERIFY(!deframer.next());
+    QCOMPARE(deframer.takeInvalidCount(), 1);
+    QCOMPARE(deframer.mismatchedVersion(), std::optional<quint16>(20));
+}
+
+// OPT-078 (wire 21): the policy carries the two file flags, the offer a files bit, a request the huge-file option, a Files data record its
+// skipped count and a descriptor.
+void ConsoleWorkerWireTest::fileClipboardRecordsCarryFilesAndPolicy()
+{
+    ClipboardPolicy policy{7, 42, true, true, false, false};
+    policy.filesHostToClient = true;
+    policy.filesClientToHost = true;
+    ClipboardPolicy locked = policy;
+    locked.locked = true;
+    locked.filesClientToHost = false;
+    Deframer d;
+    d.feed(frame(policy) + frame(locked) + frame(ClipboardOffer{4, ClipboardOfferFiles}));
+    QCOMPARE(clipboardPolicy(*d.next()), std::optional(policy));
+    QCOMPARE(clipboardPolicy(*d.next()), std::optional(locked));
+    QCOMPARE(clipboardOffer(*d.next()), std::optional(ClipboardOffer{4, ClipboardOfferFiles}));
+    // A file direction needs its clipboard direction; the login screen shares no files.
+    for (auto bad : {ClipboardPolicy{1, 1, false, true, false, false, true, false}, ClipboardPolicy{1, 1, true, false, false, false, false, true},
+                     ClipboardPolicy{1, 1, false, true, false, true, false, true}}) {
+        Deframer e;
+        e.feed(frame(bad));
+        QVERIFY(!clipboardPolicy(*e.next()));
+    }
+    // Files are announced alone.
+    for (const quint8 flags : {quint8(ClipboardOfferFiles | ClipboardOfferText), quint8(ClipboardOfferFiles | ClipboardOfferHtml), quint8(ClipboardOfferFiles | ClipboardOfferImage)}) {
+        Deframer e;
+        e.feed(frame(ClipboardOffer{1, flags}));
+        QVERIFY(!clipboardOffer(*e.next()));
+    }
+    // A Files request: the option is only for Files, and the cap is the descriptor's.
+    {
+        ClipboardRequest request{3, MaxClipboardFileListBytes, ClipboardKind::Files, true};
+        Deframer e;
+        e.feed(frame(request));
+        QCOMPARE(clipboardRequest(*e.next()), std::optional(request));
+        Deframer f;
+        f.feed(frame(ClipboardRequest{3, 100, ClipboardKind::Text, true}));
+        QVERIFY(!clipboardRequest(*f.next()));
+        Deframer g;
+        g.feed(frame(ClipboardRequest{3, MaxClipboardFileListBytes + 1, ClipboardKind::Files, false}));
+        QVERIFY(!clipboardRequest(*g.next()));
+    }
+    // A Files answer: skipped count then a descriptor of exactly 4 + n x 592 bytes.
+    {
+        const auto encoded = ClipboardFileDescriptor::encode({{QStringLiteral("a.txt"), false, 5, std::nullopt}, {QStringLiteral("dir"), true, 0, std::nullopt}});
+        QVERIFY(encoded.ok());
+        ClipboardData data;
+        data.requestId = 9;
+        data.seq = 4;
+        data.status = ClipboardStatus::Ok;
+        data.kind = ClipboardKind::Files;
+        data.files = encoded.data;
+        data.skipped = 3;
+        Deframer e;
+        e.feed(frame(data));
+        const auto record = e.next();
+        QVERIFY(record);
+        QCOMPARE(clipboardData(*record), std::optional(data));
+        auto truncated = *record;
+        truncated.payload.chop(1);
+        QVERIFY(!clipboardData(truncated));
+        auto extra = *record;
+        extra.payload.append('x');
+        QVERIFY(!clipboardData(extra));
+        auto empty = data;
+        empty.files = QByteArray(4, '\0'); // zero entries is not an Ok answer
+        Deframer f;
+        f.feed(frame(empty));
+        QVERIFY(!clipboardData(*f.next()));
+        // A refusal carries nothing.
+        ClipboardData denied;
+        denied.requestId = 9;
+        denied.seq = 4;
+        denied.status = ClipboardStatus::TooLarge;
+        denied.kind = ClipboardKind::Files;
+        Deframer g;
+        g.feed(frame(denied));
+        QCOMPARE(clipboardData(*g.next()), std::optional(denied));
+        // The largest descriptor (100 000 entries) fits the record limit.
+        ClipboardData big = data;
+        big.files = QByteArray(MaxClipboardFileListBytes, '\0');
+        Deframer h;
+        h.feed(frame(big));
+        const auto bigRecord = h.next();
+        QVERIFY(bigRecord);
+        QVERIFY(clipboardData(*bigRecord));
+        auto tooBig = *bigRecord;
+        tooBig.payload.append(QByteArray(ClipboardFileDescriptor::DescriptorBytes, '\0'));
+        QVERIFY(!clipboardData(tooBig));
+    }
+}
+
+void ConsoleWorkerWireTest::fileRecordsRoundTripAndAreBounded()
+{
+    const FileLock lock{5, 0xdeadbeef};
+    const FileUnlock unlock{0xdeadbeef};
+    const FileRead read{9, 5, 3, 0x1'0000'0123ULL, 256 * 1024};
+    const FileReadResult ok{9, FileReadStatus::Ok, QByteArray(1000, 'x')};
+    const FileReadResult changed{9, FileReadStatus::Changed, {}};
+    const FileCancel cancel{5};
+    const FileProgress progress{5, 100, 5000, FileProgressState::Reading};
+    Deframer d;
+    d.feed(frame(lock) + frame(unlock) + frame(read) + frame(ok) + frame(changed) + frame(cancel) + frame(progress));
+    const auto lockRecord = d.next();
+    const auto unlockRecord = d.next();
+    const auto readRecord = d.next();
+    const auto okRecord = d.next();
+    const auto changedRecord = d.next();
+    const auto cancelRecord = d.next();
+    const auto progressRecord = d.next();
+    QVERIFY(lockRecord && unlockRecord && readRecord && okRecord && changedRecord && cancelRecord && progressRecord);
+    QCOMPARE(d.takeInvalidCount(), 0);
+    QCOMPARE(fileLock(*lockRecord), std::optional(lock));
+    QCOMPARE(fileUnlock(*unlockRecord), std::optional(unlock));
+    QCOMPARE(fileRead(*readRecord), std::optional(read));
+    QCOMPARE(fileReadResult(*okRecord), std::optional(ok));
+    QCOMPARE(fileReadResult(*changedRecord), std::optional(changed));
+    QCOMPARE(fileCancel(*cancelRecord), std::optional(cancel));
+    QCOMPARE(fileProgress(*progressRecord), std::optional(progress));
+    QCOMPARE(fileRead(*readRecord)->offset, quint64(0x1'0000'0123ULL)); // 64-bit offsets survive
+    // Each record reads only as its own kind, and truncation or a trailing byte refuses it.
+    QVERIFY(!fileUnlock(*lockRecord) && !fileLock(*readRecord) && !fileCancel(*progressRecord));
+    for (const auto *record : {&*lockRecord, &*unlockRecord, &*readRecord, &*cancelRecord, &*progressRecord}) {
+        auto shorter = *record;
+        shorter.payload.chop(1);
+        auto longer = *record;
+        longer.payload.append('x');
+        switch (record->kind) {
+        case Kind::FileLock: QVERIFY(!fileLock(shorter) && !fileLock(longer)); break;
+        case Kind::FileUnlock: QVERIFY(!fileUnlock(shorter) && !fileUnlock(longer)); break;
+        case Kind::FileRead: QVERIFY(!fileRead(shorter) && !fileRead(longer)); break;
+        case Kind::FileCancel: QVERIFY(!fileCancel(shorter) && !fileCancel(longer)); break;
+        default: QVERIFY(!fileProgress(shorter) && !fileProgress(longer)); break;
+        }
+    }
+    // Bounds: ids 0, no bytes, more than the ceiling, an offset that overflows 64 bits.
+    for (const auto &bad : {FileRead{0, 5, 0, 0, 10}, FileRead{1, 0, 0, 0, 10}, FileRead{1, 5, 0, 0, 0}, FileRead{1, 5, 0, 0, MaxFileReadBytes + 1},
+                            FileRead{1, 5, 0, ~quint64(0) - 9, 10}}) {
+        Deframer e;
+        e.feed(frame(bad));
+        QVERIFY(!fileRead(*e.next()));
+    }
+    QVERIFY(fileRead(*[]() { Deframer e; e.feed(frame(FileRead{1, 5, 0, ~quint64(0) - 10, 10})); return e.next(); }()));
+    QVERIFY(fileRead(*[]() { Deframer e; e.feed(frame(FileRead{1, 5, 0, 0, MaxFileReadBytes})); return e.next(); }()));
+    for (const auto &bad : {FileLock{0, 1}}) {
+        Deframer e;
+        e.feed(frame(bad));
+        QVERIFY(!fileLock(*e.next()));
+    }
+    // Results: id 0, an unknown status, an Ok without bytes, bytes on a failure, too many bytes.
+    {
+        Deframer e;
+        e.feed(frame(FileReadResult{0, FileReadStatus::Gone, {}}));
+        QVERIFY(!fileReadResult(*e.next()));
+        auto raw = *changedRecord;
+        raw.payload[8] = char(LastFileReadStatus + 1);
+        QVERIFY(!fileReadResult(raw));
+        Deframer f;
+        f.feed(frame(FileReadResult{1, FileReadStatus::Ok, {}}));
+        QVERIFY(!fileReadResult(*f.next()));
+        auto smuggled = *changedRecord;
+        smuggled.payload.append("secret");
+        QVERIFY(!fileReadResult(smuggled));
+        auto huge = *okRecord;
+        huge.payload = huge.payload.left(9) + QByteArray(MaxFileReadBytes + 1, 'a');
+        QVERIFY(!fileReadResult(huge));
+        auto limit = *okRecord;
+        limit.payload = limit.payload.left(9) + QByteArray(MaxFileReadBytes, 'a');
+        QVERIFY(fileReadResult(limit));
+        // frame() sends no bytes on a failure even if the struct holds some
+        Deframer g;
+        g.feed(frame(FileReadResult{2, FileReadStatus::Gone, QByteArray("leak")}));
+        QVERIFY(fileReadResult(*g.next())->data.isEmpty());
+    }
+    // Progress: seq 0, an unknown state, done beyond total.
+    for (const auto &bad : {FileProgress{0, 0, 10, FileProgressState::Reading}, FileProgress{1, 11, 10, FileProgressState::Reading}}) {
+        Deframer e;
+        e.feed(frame(bad));
+        QVERIFY(!fileProgress(*e.next()));
+    }
+    {
+        auto raw = *progressRecord;
+        raw.payload[24] = char(LastFileProgressState + 1);
+        QVERIFY(!fileProgress(raw));
+    }
+}
+
+void ConsoleWorkerWireTest::fileGatesAreStrict()
+{
+    const ControlState control{42, true};
+    ClipboardPolicy files{5, 42, true, true, false, false};
+    files.filesHostToClient = true;
+    QVERIFY(mayServeFiles(control, files, true));
+    QVERIFY(!mayServeFiles({42, false}, files, true)); // control inactive
+    QVERIFY(!mayServeFiles({43, true}, files, true)); // another generation
+    QVERIFY(!mayServeFiles({0, true}, files, true));
+    QVERIFY(!mayServeFiles(control, files, false)); // not a desktop worker
+    auto noFiles = files;
+    noFiles.filesHostToClient = false;
+    QVERIFY(!mayServeFiles(control, noFiles, true));
+    auto stale = files;
+    stale.controlGeneration = 41;
+    QVERIFY(!mayServeFiles(control, stale, true));
+    auto noHost = files;
+    noHost.hostToClient = false;
+    QVERIFY(!mayServeFiles(control, noHost, true));
+    // A Files list request needs the files flag; a text request does not.
+    const ClipboardRequest list{20, 1000, ClipboardKind::Files};
+    const ClipboardRequest text{20, 1000};
+    QVERIFY(mayAnswerClipboardRequest(list, control, files, 19, true));
+    QVERIFY(!mayAnswerClipboardRequest(list, control, noFiles, 19, true));
+    QVERIFY(mayAnswerClipboardRequest(text, control, noFiles, 19, true));
 }
 
 QTEST_GUILESS_MAIN(ConsoleWorkerWireTest)

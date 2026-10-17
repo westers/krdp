@@ -3359,6 +3359,31 @@ private:
                 m_hostClipboard.set(*set);
                 continue;
             }
+            // OPT-078 (wire 21): host-to-client file copy. Each record is checked here; the file service applies the policy gate.
+            if (record->kind == ConsoleWorkerWire::Kind::FileLock) {
+                const auto lock = ConsoleWorkerWire::fileLock(*record);
+                if (!lock) { shutdown(1); return; }
+                m_hostClipboard.files().lock(*lock);
+                continue;
+            }
+            if (record->kind == ConsoleWorkerWire::Kind::FileUnlock) {
+                const auto unlock = ConsoleWorkerWire::fileUnlock(*record);
+                if (!unlock) { shutdown(1); return; }
+                m_hostClipboard.files().unlock(*unlock);
+                continue;
+            }
+            if (record->kind == ConsoleWorkerWire::Kind::FileRead) {
+                const auto read = ConsoleWorkerWire::fileRead(*record);
+                if (!read) { shutdown(1); return; }
+                m_hostClipboard.files().read(*read);
+                continue;
+            }
+            if (record->kind == ConsoleWorkerWire::Kind::FileCancel) {
+                const auto cancel = ConsoleWorkerWire::fileCancel(*record);
+                if (!cancel) { shutdown(1); return; }
+                m_hostClipboard.files().cancel(*cancel);
+                continue;
+            }
             if (const auto control = ConsoleWorkerWire::controlState(*record)) {
                 if (*control != m_control) {
                     if (m_physicalPending) {

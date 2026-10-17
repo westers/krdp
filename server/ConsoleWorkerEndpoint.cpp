@@ -222,10 +222,14 @@ bool ConsoleWorkerEndpoint::setDisplayPolicy(bool active, bool wakeEnabled)
     return m_worker->write(ConsoleWorkerWire::frame(*m_displayPolicy)) >= 0;
 }
 
-bool ConsoleWorkerEndpoint::setClipboardPolicy(quint64 controlGeneration, bool hostToClient, bool clientToHost, bool locked, bool greeter)
+bool ConsoleWorkerEndpoint::setClipboardPolicy(quint64 controlGeneration, bool hostToClient, bool clientToHost, bool locked, bool greeter,
+                                               bool filesHostToClient, bool filesClientToHost)
 {
     if (m_stopRequested) return false;
     ConsoleWorkerWire::ClipboardPolicy policy{0, controlGeneration, hostToClient && !greeter, clientToHost, locked, greeter};
+    // A file direction is a subset of its clipboard direction, and the login screen shares no files (the worker refuses a policy that says otherwise).
+    policy.filesHostToClient = filesHostToClient && policy.hostToClient && !greeter;
+    policy.filesClientToHost = filesClientToHost && clientToHost && !greeter;
     if (m_clipboardPolicy) {
         policy.revision = m_clipboardPolicy->revision;
         if (policy == *m_clipboardPolicy) return true;
@@ -267,6 +271,54 @@ quint64 ConsoleWorkerEndpoint::requestClipboardKind(quint32 maxBytes, ConsoleWor
     if (m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardRequest{id, maxBytes, kind})) < 0) return 0;
     m_clipboardRequests.insert(id, kind);
     return id;
+}
+
+quint64 ConsoleWorkerEndpoint::requestClipboardFiles(bool hugeFiles)
+{
+    // A list is a few KB to 59 MB on the way back; the request itself is tiny. Only one at a time per pending paste (the broker's rule).
+    const auto kind = ConsoleWorkerWire::ClipboardKind::Files;
+    if (!m_ready || !m_worker || !m_clipboardPolicy || !m_clipboardPolicy->hostToClient || !m_clipboardPolicy->filesHostToClient
+        || m_worker->bytesToWrite() > 1024 * 1024 || m_clipboardRequests.size() >= 8 || m_nextClipboardId == std::numeric_limits<quint64>::max()) return 0;
+    const quint64 id = ++m_nextClipboardId;
+    ConsoleWorkerWire::ClipboardRequest request{id, ConsoleWorkerWire::maxClipboardBytes(kind), kind, hugeFiles};
+    if (m_worker->write(ConsoleWorkerWire::frame(request)) < 0) return 0;
+    m_clipboardRequests.insert(id, kind);
+    return id;
+}
+
+bool ConsoleWorkerEndpoint::lockFiles(quint64 seq, quint32 clipDataId)
+{
+    if (!m_ready || !m_worker || !m_clipboardPolicy || !m_clipboardPolicy->filesHostToClient || !seq) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::FileLock{seq, clipDataId})) >= 0;
+}
+
+bool ConsoleWorkerEndpoint::unlockFiles(quint32 clipDataId)
+{
+    if (!m_ready || !m_worker) return false; // releasing is allowed whatever the policy says
+    return m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::FileUnlock{clipDataId})) >= 0;
+}
+
+quint64 ConsoleWorkerEndpoint::readFile(quint64 seq, quint32 index, quint64 offset, quint32 length)
+{
+    if (!m_ready || !m_worker || !m_clipboardPolicy || !m_clipboardPolicy->filesHostToClient || !seq || !length || length > ConsoleWorkerWire::MaxFileReadBytes
+        || offset > ~quint64(0) - length || m_fileReads.size() >= MaxFileReads || m_worker->bytesToWrite() > 1024 * 1024
+        || m_nextFileReadId == std::numeric_limits<quint64>::max()) return 0;
+    const quint64 id = ++m_nextFileReadId;
+    if (m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::FileRead{id, seq, index, offset, length})) < 0) return 0;
+    m_fileReads.insert(id, seq);
+    return id;
+}
+
+bool ConsoleWorkerEndpoint::cancelFiles(quint64 seq)
+{
+    // Answers to cancelled reads never come (the worker drops them) and are not waited for.
+    if (seq == 0) {
+        m_fileReads.clear();
+    } else {
+        for (auto it = m_fileReads.begin(); it != m_fileReads.end();) it = it.value() == seq ? m_fileReads.erase(it) : std::next(it);
+    }
+    if (!m_ready || !m_worker) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::FileCancel{seq})) >= 0;
 }
 
 quint64 ConsoleWorkerEndpoint::setClipboard(quint64 controlGeneration, const QString &text)
@@ -614,6 +666,11 @@ bool ConsoleWorkerEndpoint::processRecords()
             }
         } else if (const auto result = ConsoleWorkerWire::clipboardSetResult(*record)) {
             if (m_clipboardSets.remove(result->setId)) Q_EMIT clipboardSetFinished(*result);
+        } else if (const auto result = ConsoleWorkerWire::fileReadResult(*record)) {
+            // Only an answer to a read this endpoint issued (and has not cancelled) is passed on.
+            if (m_fileReads.remove(result->readId)) Q_EMIT fileReadFinished(*result);
+        } else if (const auto progress = ConsoleWorkerWire::fileProgress(*record)) {
+            if (m_clipboardPolicy && m_clipboardPolicy->filesHostToClient) Q_EMIT fileProgressed(*progress);
         } else if (const auto result = ConsoleWorkerWire::resizeResult(*record)) {
             Q_EMIT resizeFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::positionResult(*record)) {
@@ -707,6 +764,7 @@ void ConsoleWorkerEndpoint::workerDisconnected()
     m_clipboardOfferSeq = 0;
     m_clipboardRequests.clear();
     m_clipboardSets.clear();
+    m_fileReads.clear();
     if (wasReady) {
         Q_EMIT workerStopped();
     }

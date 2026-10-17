@@ -490,6 +490,15 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
             group.insert(QStringLiteral("html"), true);
             group.insert(QStringLiteral("maxHtmlBytes"), clipboard->maxHtmlBytes);
         }
+        if (const auto &files = clipboard->files) {
+            QJsonObject filesGroup{{QStringLiteral("hostToClient"), files->hostToClient},
+                                   {QStringLiteral("clientToHost"), files->clientToHost},
+                                   {QStringLiteral("maxMode"), files->maxMode},
+                                   {QStringLiteral("huge"), true},
+                                   {QStringLiteral("transfer"), true}};
+            if (files->maxMode == QLatin1String("cap")) filesGroup.insert(QStringLiteral("maxRateBytesPerSecond"), files->maxRateBytesPerSecond);
+            group.insert(QStringLiteral("files"), filesGroup);
+        }
         record.insert(QStringLiteral("clipboard"), group);
     }
     if (const auto &desk = capabilities.deskActivity) {

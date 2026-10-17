@@ -2,6 +2,7 @@
 #include "VirtualSessionTransport.h"
 
 #include <Clipboard.h>
+#include <ClipboardTransfer.h>
 #include "PointerCaptureProtocol.h"
 #include "CursorTracker.h"
 #include "LayoutControl.h"
@@ -135,16 +136,19 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
     if (auto *clipboard = connection->clipboard()) {
         // OPT-067: nothing is shared until a binding is authorized (syncClipboard()).
         clipboard->setDirections(false, false);
-        enum class Kind { Text, Image, Html };
-        const auto hostRequested = [this](quint64 requestId, Kind kind) {
+        enum class Kind { Text, Image, Html, Files };
+        const auto hostRequested = [this](quint64 requestId, Kind kind, bool hugeFiles = false) {
             auto *board = m_connection ? m_connection->clipboard() : nullptr;
             if (!board) return;
-            const bool allowed = m_endpoint && m_clipboardPlan && m_clipboardPlan->hostToClient && authorized(m_clipboardUid);
+            const bool allowed = m_endpoint && m_clipboardPlan && m_clipboardPlan->hostToClient && authorized(m_clipboardUid)
+                && (kind != Kind::Files || m_clipboardPlan->files.hostToClient);
             const auto endpointId = !allowed ? quint64(0) : kind == Kind::Image ? m_endpoint->requestClipboardImage()
-                : kind == Kind::Html ? m_endpoint->requestClipboardHtml() : m_endpoint->requestClipboard();
+                : kind == Kind::Html ? m_endpoint->requestClipboardHtml()
+                : kind == Kind::Files ? m_endpoint->requestClipboardFiles(hugeFiles) : m_endpoint->requestClipboard();
             if (!endpointId) {
                 if (kind == Kind::Image) board->provideHostImage(requestId, {}, false);
                 else if (kind == Kind::Html) board->provideHostHtml(requestId, {}, false);
+                else if (kind == Kind::Files) board->provideHostFiles(requestId, 0, {}, 0, false);
                 else board->provideHostText(requestId, {}, false);
                 return;
             }
@@ -154,6 +158,13 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         connect(clipboard, &Clipboard::hostTextRequested, this, [hostRequested](quint64 requestId) { hostRequested(requestId, Kind::Text); });
         connect(clipboard, &Clipboard::hostImageRequested, this, [hostRequested](quint64 requestId) { hostRequested(requestId, Kind::Image); });
         connect(clipboard, &Clipboard::hostHtmlRequested, this, [hostRequested](quint64 requestId) { hostRequested(requestId, Kind::Html); });
+        // OPT-078: host-to-client files. The capability flags are exchanged once when the channel starts, so the setting is applied here.
+        clipboard->setFilesEnabled(m_clipboardFiles != ConsoleClipboardPolicy::Direction::Off && m_clipboardDirection != ConsoleClipboardPolicy::Direction::Off);
+        clipboard->setFileCeiling(m_clipboardFileCeiling);
+        connect(clipboard, &Clipboard::hostFilesRequested, this, [hostRequested](quint64 requestId, bool hugeFiles) { hostRequested(requestId, Kind::Files, hugeFiles); });
+        clipboard->setHostFileBackend(m_fileRelay.backendFor(
+            clipboard, [this] { return m_endpoint.data(); },
+            [this] { return m_endpoint && m_clipboardPlan && m_clipboardPlan->files.hostToClient && authorized(m_clipboardUid); }));
         connect(clipboard, &Clipboard::clientDataChanged, &m_session, [clipboard, this]() {
             m_session.setClipboardData(clipboard->getClipboard());
         });
@@ -275,6 +286,12 @@ void VirtualSessionTransport::setClipboardDirection(ConsoleClipboardPolicy::Dire
     m_clipboardDirection = direction;
 }
 
+void VirtualSessionTransport::setClipboardFiles(ConsoleClipboardPolicy::Direction direction, const ClipboardFilePacing::Ceiling &ceiling)
+{
+    m_clipboardFiles = direction;
+    m_clipboardFileCeiling = ceiling;
+}
+
 void VirtualSessionTransport::syncClipboard(std::optional<quint32> uid)
 {
     auto *clipboard = m_connection ? m_connection->clipboard() : nullptr;
@@ -283,6 +300,8 @@ void VirtualSessionTransport::syncClipboard(std::optional<quint32> uid)
     input.route = ConsoleClipboardPolicy::Route::Virtual;
     input.clientUid = uid;
     input.setting = m_clipboardDirection;
+    input.filesSetting = m_clipboardFiles;
+    input.hostToClientFileStarted = clipboard->hostFileTransferActive();
     m_clipboardUid = uid;
     const bool owner = authorized(uid);
     if (owner) {
@@ -295,19 +314,23 @@ void VirtualSessionTransport::syncClipboard(std::optional<quint32> uid)
     const auto before = m_clipboardPlan;
     m_clipboardPlan = plan;
     clipboard->setDirections(plan.hostToClient, plan.clientToHost);
+    clipboard->setFileDirections(plan.files.hostToClient, plan.files.clientToHost);
     if (m_endpoint && m_controlGeneration) {
-        m_endpoint->setClipboardPolicy(m_controlGeneration, plan.hostToClient, plan.clientToHost, false, false);
+        m_endpoint->setClipboardPolicy(m_controlGeneration, plan.hostToClient, plan.clientToHost, false, false, plan.files.hostToClient, plan.files.clientToHost);
     }
-    if ((!before || before->hostToClient != plan.hostToClient || before->clientToHost != plan.clientToHost) && (plan.hostToClient || plan.clientToHost || before)) {
+    if ((!before || before->hostToClient != plan.hostToClient || before->clientToHost != plan.clientToHost || before->files != plan.files)
+        && (plan.hostToClient || plan.clientToHost || before)) {
         qInfo().noquote() << "Clipboard: virtual client" << m_client << "host to client" << (plan.hostToClient ? "enabled" : "disabled")
                           << ", client to host" << (plan.clientToHost ? "enabled" : "disabled")
-                          << "(reason=" << ConsoleClipboardPolicy::reasonName(plan.reason) << ")";
+                          << "(reason=" << ConsoleClipboardPolicy::reasonName(plan.reason) << "), files host to client"
+                          << (plan.files.hostToClient ? "enabled" : "disabled") << ", client to host" << (plan.files.clientToHost ? "enabled" : "disabled");
     }
 }
 
 void VirtualSessionTransport::resetClipboard()
 {
     m_clipboardRequests.clear();
+    m_fileRelay.clear();
     m_clipboardPlan.reset();
     m_clipboardUid.reset();
     if (auto *clipboard = m_connection ? m_connection->clipboard() : nullptr) {
@@ -457,8 +480,15 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::clipboardOffered, this, [this](quint64, quint8 flags) {
         if (m_connection && m_connection->clipboard() && m_clipboardPlan && m_clipboardPlan->hostToClient && authorized(m_clipboardUid))
+        {
+            const bool files = flags & ConsoleWorkerWire::ClipboardOfferFiles;
+            if (files && !m_clipboardPlan->files.hostToClient) return; // the planner denies files: the copy is not announced
             m_connection->clipboard()->announceHost(flags & ConsoleWorkerWire::ClipboardOfferText, flags & ConsoleWorkerWire::ClipboardOfferImage,
-                                                       flags & ConsoleWorkerWire::ClipboardOfferHtml);
+                                                       flags & ConsoleWorkerWire::ClipboardOfferHtml, files);
+        }
+    }));
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::fileReadFinished, this, [this](const ConsoleWorkerWire::FileReadResult &result) {
+        m_fileRelay.finished(result);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::clipboardDataReceived, this, [this](const ConsoleWorkerWire::ClipboardData &data) {
         const auto requestId = m_clipboardRequests.take(data.requestId);
@@ -466,6 +496,7 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         const bool ok = data.status == ConsoleWorkerWire::ClipboardStatus::Ok;
         if (data.kind == ConsoleWorkerWire::ClipboardKind::Image) m_connection->clipboard()->provideHostImage(requestId, data.image, ok);
         else if (data.kind == ConsoleWorkerWire::ClipboardKind::Html) m_connection->clipboard()->provideHostHtml(requestId, data.html, ok);
+        else if (data.kind == ConsoleWorkerWire::ClipboardKind::Files) m_connection->clipboard()->provideHostFiles(requestId, data.seq, data.files, data.skipped, ok);
         else m_connection->clipboard()->provideHostText(requestId, data.text, ok);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::audioReceived, this, [this](const auto &audio) {
@@ -1165,10 +1196,20 @@ void VirtualSessionTransport::sendCapabilities()
         using Direction = ConsoleClipboardPolicy::Direction;
         const bool hostToClient = m_clipboardDirection == Direction::Both || m_clipboardDirection == Direction::HostToClient;
         const bool clientToHost = m_clipboardDirection == Direction::Both || m_clipboardDirection == Direction::ClientToHost;
-        if (hostToClient || clientToHost)
+        if (hostToClient || clientToHost) {
             capabilities.clipboard = LayoutControl::ClipboardCapabilities{hostToClient, clientToHost, int(ConsoleWorkerWire::MaxClipboardBytes), true,
                                                                           int(ConsoleWorkerWire::MaxClipboardImageBytes), true,
                                                                           int(ConsoleWorkerWire::MaxClipboardHtmlBytes)};
+            // OPT-078: file copy; only host to client exists in this wire, the client-to-host half is announced when it does.
+            if (hostToClient && (m_clipboardFiles == Direction::Both || m_clipboardFiles == Direction::HostToClient)) {
+                LayoutControl::ClipboardCapabilities::Files files;
+                files.hostToClient = true;
+                files.maxMode = m_clipboardFileCeiling.kind == ClipboardFilePacing::Ceiling::Kind::Rate ? u"cap"_s
+                    : m_clipboardFileCeiling.kind == ClipboardFilePacing::Ceiling::Kind::Balanced     ? u"balanced"_s : u"auto"_s;
+                files.maxRateBytesPerSecond = qint64(m_clipboardFileCeiling.bytesPerSecond);
+                capabilities.clipboard->files = files;
+            }
+        }
     }
     m_connection->sendControlRecord(LayoutControl::capabilitiesRecord(capabilities));
 }
@@ -2109,6 +2150,16 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         if (generation != m_controlGeneration || !authorized(uid))
             return AudioPriority::reply(record, false, u"virtual desktop authority changed"_s);
         return AudioPriority::reply(record, effective);
+    }
+    if (record.value(u"type"_s) == u"clipboard-transfer"_s) {
+        // OPT-078: how much of the link file transfers may take (like audio-priority: our client may send it before it has a desktop).
+        const auto parsed = ClipboardTransfer::parse(record);
+        auto *board = m_connection ? m_connection->clipboard() : nullptr;
+        if (!parsed || !board) return ClipboardTransfer::reply(record, {}, m_clipboardFileCeiling, u"invalid clipboard-transfer request"_s);
+        if (!board->filesEnabled())
+            return ClipboardTransfer::reply(record, board->effectiveFilePolicy(), m_clipboardFileCeiling, u"file copy is off on this host"_s);
+        board->setFileTransferRequest({parsed->mode, parsed->capBytesPerSecond});
+        return ClipboardTransfer::reply(record, board->effectiveFilePolicy(), m_clipboardFileCeiling);
     }
     if (record.value(u"type"_s) == u"virtual-session"_s) {
         const QPointer<VirtualSessionTransport> alive(this);
