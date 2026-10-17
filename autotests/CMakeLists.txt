@@ -998,6 +998,15 @@ target_link_libraries(StatsRequestTest PRIVATE Qt6::Test Qt6::Core KRdp)
 add_test(NAME StatsRequestTest COMMAND StatsRequestTest)
 # --- end STATS ---
 
+# OPT-078 phase 0: the measurement counters (this links libKRdp for StatsReporter).
+foreach(name DeliveryStats)
+    add_executable(${name}Test ${name}Test.cpp)
+    target_include_directories(${name}Test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(${name}Test PRIVATE Qt6::Test Qt6::Core KRdp)
+    add_test(NAME ${name}Test COMMAND ${name}Test)
+    set_tests_properties(${name}Test PROPERTIES TIMEOUT 120)
+endforeach()
+
 add_executable(FarsideMigrationTest FarsideMigrationTest.cpp)
 target_include_directories(FarsideMigrationTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(FarsideMigrationTest PRIVATE Qt6::Test KRdpLegacyMigration)

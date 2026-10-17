@@ -281,6 +281,9 @@ QByteArray PipeWireAudioPlayback::take()
     // letting a delayed session loop turn the bounded capture queue into a
     // single half-second burst.
     const int bytes = qMin(m_pending.size(), int(Rate * FrameBytes / 50));
+    if (bytes > 0) {
+        m_counters->noteDelivered(quint64(m_pending.size()));
+    }
     QByteArray result = m_pending.left(bytes);
     m_pending.remove(0, bytes);
     return result;
@@ -305,7 +308,9 @@ void PipeWireAudioPlayback::process()
     if (data.data && data.chunk && data.chunk->size) {
         const auto *input = static_cast<const char *>(data.data) + data.chunk->offset;
         m_pending.append(input, int(data.chunk->size));
+        m_counters->noteProduced(std::chrono::steady_clock::now());
         if (m_pending.size() > int(MaxQueued)) {
+            m_counters->noteOverflow(quint64(m_pending.size() - int(MaxQueued)));
             m_pending.remove(0, m_pending.size() - int(MaxQueued));
         }
     }
