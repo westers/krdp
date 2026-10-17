@@ -4,14 +4,14 @@ Spec: `docs/superpowers/specs/2026-10-17-clipboard-file-transfer-design.md`. Sta
 Rules: one branch per phase from master, no pushes without Steve, Sol/Buzz for anything live, Hal gets daemon-free unit tests only.
 **[Jev]** marks bounded judgments (classify a log line, check a claim against a quoted PDU table) that follow an evidence step.
 
-## Phase 0: measurement and spikes (branch `file-clip-p0`)
+## Phase 0: measurement and spikes (branch `file-clip-p0`; done on `file-clipboard-core` 2026-10-17: counters + S1 loopback; S1 real clients, S2 and the baseline wait for Sol, see the spikes doc)
 1. Add audio late/underrun counter and per-frame delivery delay histogram to `StatsReporter` (+ unit tests). Needed by acceptance.
 2. Spike S1 (Sol): FreeRDP `cliprdr` server with `streamFileClipEnabled`, `canLockClipData`, `hasHugeFileSupport` TRUE against our client and `xfreerdp`; log the negotiated flags, a 5 GiB sparse range read. Evidence file; **[Jev]** classify each flag negotiated / not.
 3. Spike S2 (Sol, private KWin): worker reads `text/uri-list` from the Wayland selection; a worker-offered `text/uri-list` to staged paths pastes in Dolphin (measure when Dolphin reads).
 4. Baseline video+audio run on Sol/Buzz without transfers (numbers for 6.4).
 Done: evidence under `~/dev/rdp/evidence/`, counters merged, S1/S2 verdicts.
 
-## Phase 1: pure core (branch `file-clip-core`)
+## Phase 1: pure core (branch `file-clip-core`; DONE on `file-clipboard-core` 2026-10-17 except the file-system janitor, which moves to phase 3 with its link-wrap tests)
 `ClipboardFileNames.h` (sanitizer), `ClipboardFileDescriptor.h` (codec), `ClipboardFileLimits.h`, `ClipboardFileRequest.h` (validator),
 `ClipboardFilePacing.h` (pacer), `ClipboardFileStaging.h` (staging planner/janitor, injectable fs), `ConsoleClipboardPolicy` `files` field.
 All unit tests of spec section 9 (pure). No behaviour change. Runs on Hal (daemon-free).

@@ -398,3 +398,23 @@ and the file transfer's own rate/window counters in `StatsReporter`.
 2. **FUSE is a follow-up (phase 5)** after everything else is validated, not part of phases 0-4. Staged background copy (3.2) is the design until then.
 3. **Defaults agreed:** `ClipboardFiles = both`; client `Clipboard transfer priority = Auto`.
 4. **Bandwidth floor 256 kbit/s agreed** (window cap 16 requests of 256 KiB unchanged). The free-space guard default `max(2 GiB, 5% of the filesystem)` is agreed.
+
+## 13. Findings from phases 0 and 1 (2026-10-17)
+
+Facts that change or sharpen the design above (evidence: `docs/superpowers/plans/2026-10-17-clipboard-file-transfer-spikes.md`):
+
+1. **`FILEDESCRIPTORW.cFileName` is a fixed 260 UTF-16 units**, so a relative path on the wire is at most 259 units. The 4096-byte limit of 4.1/4.3 is only
+   the ceiling of the internal worker wire. A host file whose Windows-form relative path exceeds 259 units is skipped with a notice (the encoder returns `NameTooLong`).
+2. **Capability negotiation (spike S1, loopback, stock libfreerdp client):** the server's `cliprdr` context holds the INTERSECTION of the four file flags
+   after the capability exchange; read negotiated state from it. Huge offsets (`nPositionHigh`) work across 4 GiB when both sides negotiate
+   `CB_HUGE_FILE_SUPPORT_ENABLED`. Without it the client library itself refuses to send an offset >= 4 GiB, and the server must not depend on that:
+   `RequestValidator` requires the negotiated flag at or beyond 2^32 - 1, and a file over 4 GiB is not offered to a peer without it.
+   File traffic must also be refused when `CB_STREAM_FILECLIP_ENABLED` was not negotiated (the library still routes it).
+3. **Lock/unlock** reach the server callbacks and later requests carry `haveClipDataId=1`; without lock negotiated they carry none. The validator follows this.
+4. **Measurement counters now exist** (`stats-sample`: `audio`, `video.sendDelayMs`, `link.sendQueueAtSendKiB`). The audio "underrun" is measured as late takes
+   (more than 60 ms of audio already waiting), overflow drops, and PipeWire capture gaps over 100 ms; there is no RDPSND-side underrun to read.
+5. **Ambiguity in 7:** a host ceiling `auto` cannot both mean "no ceiling" and forbid Unlimited. Implemented as: `auto` = no ceiling (Unlimited allowed with its confirm dialog),
+   `balanced` and a rate both disable Unlimited.
+6. **Pacer details fixed by the implementation:** floor 256 kbit/s = 32 000 B/s (the spec's "32 KiB/s" was rounded); unknown capacity probes at +5% of the current rate per tick
+   (otherwise it could never leave 4 x floor: an app-limited sender yields no capacity samples); a cap below the floor wins over the floor.
+7. **Open until Sol:** whether real clients overrun the tail of a file (`offset + length > size`); the validator refuses it (`RangePastEnd`) and can clamp instead.
