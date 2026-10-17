@@ -5,7 +5,7 @@
 // source). The file is SPARSE (ftruncate plus a few marker writes: no multi-GB file is ever written); a file system without sparse support
 // ends the test with exit code 77 (ctest SKIP_RETURN_CODE). The client samples the first chunk, the chunk across 4 GiB and the last chunk,
 // and the tests compare their SHA-256 with the same ranges read from the file. A second run proves the huge-file flag is what allows it.
-// The default run reads a few chunks; the whole file through the stack is `KRDP_LOOPBACK_FULL=1` (about 20 minutes in a Debug build).
+// Then the whole file goes through the stack (about a minute in a Debug build on loopback; KRDP_LOOPBACK_SKIP_FULL=1 leaves it out).
 
 #include "ClipboardFileLoopbackHarness.h"
 
@@ -91,12 +91,12 @@ private Q_SLOTS:
 
     void theWholeFileThroughTheStack()
     {
-        if (qEnvironmentVariableIntValue("KRDP_LOOPBACK_FULL") != 1) QSKIP("set KRDP_LOOPBACK_FULL=1 to move all 5 GiB through the stack (about 20 minutes in a Debug build)");
+        if (qEnvironmentVariableIntValue("KRDP_LOOPBACK_SKIP_FULL") == 1) QSKIP("KRDP_LOOPBACK_SKIP_FULL=1");
         Run run;
         run.selection = {QFile::encodeName(m_big)};
         QVERIFY(run.start(this, m_certificate, m_key, m_dir.path(), {QStringLiteral("--files-sample-over"), QString::number(Size + 1), QStringLiteral("--files-window"), QStringLiteral("8")}));
         QVERIFY(run.announceFiles());
-        QVERIFY2(run.waitFor(std::chrono::minutes(40), [&run] { return run.log.contains("FILES done"); }), run.log.right(2000).constData());
+        QVERIFY2(run.waitFor(std::chrono::minutes(8), [&run] { return run.log.contains("FILES done"); }), run.log.right(2000).constData());
         QVERIFY(run.line("FILES done").contains("failed=0"));
         QCOMPARE(run.bytesRead, Size);
     }
