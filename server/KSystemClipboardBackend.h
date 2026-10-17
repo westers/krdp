@@ -10,6 +10,7 @@
 #include <KSystemClipboard>
 
 #include "ClipboardImage.h"
+#include "ClipboardMime.h"
 #include "HostClipboard.h"
 #include "ClipboardLimits.h"
 #include "PngMimeData.h"
@@ -118,10 +119,8 @@ inline HostClipboard::Backend ksystemClipboardBackend()
         },
         [](const QString &text, const QByteArray &html, bool secret) {
             // KSystemClipboard takes ownership: plain text and HTML in one offer, so a reader takes the richest it understands.
-            auto *mime = new QMimeData();
-            if (!text.isEmpty()) mime->setText(text);
-            mime->setData(QStringLiteral("text/html"), html);
-            if (secret) mime->setData(QStringLiteral("x-kde-passwordManagerHint"), QByteArrayLiteral("secret"));
+            auto *mime = buildClipboardMime(text, html, secret);
+            qCDebug(hostClipboardLog) << "writing the host clipboard: text" << text.size() << "characters, html" << html.size() << "bytes, formats" << mime->formats();
             ownRich = mime;
             KSystemClipboard::instance()->setMimeData(mime, QClipboard::Clipboard);
             return true;

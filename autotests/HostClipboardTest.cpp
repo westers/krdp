@@ -756,6 +756,23 @@ private Q_SLOTS:
         QCOMPARE(greeter.host.htmlReads, 0);
     }
 
+    void richSetWritesTheSendersPlainTextAndTheHtmlUnchanged()
+    {
+        // OPT-077 fix: the host gets the sender's own three D lines as the plain text, not a re-derivation from the HTML,
+        // and the HTML once (no markers added twice, nothing of the text mixed in).
+        Harness h;
+        h.allow(true, true);
+        const QString text = QStringLiteral("Dsfsd sdfsd sdfsdf\nDsfsd sdfsd sdfsdf\nDsfsd sdfsd sdfsdf");
+        const QByteArray html = "<html><body><!--StartFragment--><p><b>Dsfsd sdfsd sdfsdf</b></p><!--EndFragment--></body></html>";
+        h.board->set({1, 5, text, ClipboardKind::Html, {}, html});
+        QCOMPARE(h.host.richWrites.size(), 1);
+        QCOMPARE(h.host.richWrites.first().text, text);
+        QVERIFY(!h.host.richWrites.first().text.contains(QLatin1Char('<')));
+        QVERIFY(!h.host.richWrites.first().text.contains(QLatin1Char('\r')));
+        QCOMPARE(h.host.richWrites.first().html.count("<!--StartFragment-->"), 1);
+        QCOMPARE(h.host.richWrites.first().html, html);
+    }
+
     void htmlSetWritesTextAndHtmlTogetherAndNeverEchoes()
     {
         Harness h;

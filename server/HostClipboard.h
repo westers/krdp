@@ -19,8 +19,18 @@
 #include "ClipboardText.h"
 #include "ConsoleWorkerWire.h"
 
+#include <QLoggingCategory>
+
 namespace KRdp
 {
+/// OPT-077 fix: debug lines of the worker's clipboard bridge (formats, lengths and reasons, never contents):
+/// QT_LOGGING_RULES=farside.server.clipboard.debug=true
+inline const QLoggingCategory &hostClipboardLog()
+{
+    static const QLoggingCategory category("farside.server.clipboard", QtInfoMsg);
+    return category;
+}
+
 /**
  * OPT-067 / OPT-072: the worker's side of the text and image clipboard bridge. The worker owns the host clipboard; this class
  * is the only code that touches it, through a small Backend so the logic is tested without a compositor.
@@ -144,11 +154,13 @@ public:
                 answer.text = text;
             }
         }
+        qCDebug(hostClipboardLog) << "answered a text request: status" << int(answer.status) << "," << answer.text.size() << "characters";
         m_send(ConsoleWorkerWire::frame(answer));
     }
 
     void set(const ConsoleWorkerWire::ClipboardSet &set)
     {
+        qCDebug(hostClipboardLog) << "client copy to write: kind" << int(set.kind) << "," << set.text.size() << "characters of text," << set.html.size() << "bytes of html," << set.image.size() << "bytes of picture";
         ConsoleWorkerWire::ClipboardSetResult result{set.setId, ConsoleWorkerWire::ClipboardSetStatus::Denied};
         if (ConsoleWorkerWire::mayApplyClipboardSet(set, m_control, m_policy, m_lastSetId, m_desktop)
             && set.kind == ConsoleWorkerWire::ClipboardKind::Image) {
@@ -217,8 +229,11 @@ private:
             flags &= ~ConsoleWorkerWire::ClipboardOfferImage;
         }
         if (!flags) {
+            qCDebug(hostClipboardLog) << "host clipboard changed: our own write coming back, not offered";
             return;
         }
+        qCDebug(hostClipboardLog) << "host clipboard changed: offering to the client, text" << bool(flags & ConsoleWorkerWire::ClipboardOfferText) << "html" << bool(flags & ConsoleWorkerWire::ClipboardOfferHtml)
+                                  << "image" << bool(flags & ConsoleWorkerWire::ClipboardOfferImage) << "offer" << (m_offerSeq + 1);
         m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{++m_offerSeq, flags}));
     }
 

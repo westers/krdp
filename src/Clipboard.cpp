@@ -18,6 +18,7 @@
 #include <optional>
 
 #include "ClipboardHtml.h"
+#include "ClipboardMime.h"
 #include "ClipboardImage.h"
 #include "ClipboardLimits.h"
 #include "ClipboardText.h"
@@ -778,11 +779,7 @@ void Clipboard::Private::deliverClientData(const QString &text, const QByteArray
             qCDebug(KRDP) << "Client clipboard HTML is the host's own; not writing it back";
             return;
         }
-        clientData.reset(new QMimeData());
-        if (!text.isEmpty()) {
-            clientData->setText(ClipboardText::toHost(text));
-        }
-        clientData->setData(u"text/html"_s, html);
+        clientData.reset(buildClipboardMime(text.isEmpty() ? QString() : ClipboardText::toHost(text), html, false));
         qCDebug(KRDP) << "Client clipboard formatted text received:" << html.size() << "bytes of HTML," << text.length() << "characters of text";
         ++counters.clientHtml;
         counters.clientBytes += totalBytes;
