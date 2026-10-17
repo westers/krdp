@@ -999,7 +999,7 @@ add_test(NAME StatsRequestTest COMMAND StatsRequestTest)
 # --- end STATS ---
 
 # OPT-078 phase 1: the pure core of clipboard file transfer (sanitizer, descriptor codec, request validator, limits and free-space guard, pacer, QoS table).
-foreach(name ClipboardFileNames ClipboardFileDescriptor ClipboardFileRequest ClipboardFileLimits ClipboardFileStaging)
+foreach(name ClipboardFileNames ClipboardFileDescriptor ClipboardFileRequest ClipboardFileLimits ClipboardFilePacing ClipboardFileStaging)
     add_executable(${name}Test ${name}Test.cpp)
     target_include_directories(${name}Test PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(${name}Test PRIVATE Qt6::Test Qt6::Core)
@@ -1007,7 +1007,7 @@ foreach(name ClipboardFileNames ClipboardFileDescriptor ClipboardFileRequest Cli
     set_tests_properties(${name}Test PROPERTIES TIMEOUT 120)
 endforeach()
 # ...and the parts that read the stats snapshot, plus the phase 0 measurement counters (these link libKRdp for StatsReporter).
-foreach(name DeliveryStats)
+foreach(name ClipboardFileQos DeliveryStats)
     add_executable(${name}Test ${name}Test.cpp)
     target_include_directories(${name}Test PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(${name}Test PRIVATE Qt6::Test Qt6::Core KRdp)

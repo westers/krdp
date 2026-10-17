@@ -25,6 +25,8 @@ target_sources(KRdp PRIVATE
     ClipboardFileDescriptor.h
     ClipboardFileLimits.h
     ClipboardFileNames.h
+    ClipboardFilePacing.h
+    ClipboardFileQos.h
     ClipboardFileRequest.h
     ClipboardFileStaging.h
     DeliveryStats.h
