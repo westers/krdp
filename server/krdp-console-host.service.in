@@ -36,7 +36,7 @@ Environment=FARSIDE_CONSOLE_STANDARD_CLIENT_MEDIA=true
 Environment=FARSIDE_CONSOLE_CAMERA_LOOPBACK_DEVICE=none
 # AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16 (KRDPCTL-V2-CONTRACT.md (e)).
 Environment=FARSIDE_CONSOLE_AV1_TILES=auto
-# Clipboard bridge for text and images (OPT-067, OPT-072): both, host-to-client, client-to-host or off. The host narrows it further by state
+# Clipboard bridge for text, formatted text and images (OPT-067, OPT-072, OPT-077): both, host-to-client, client-to-host or off. The host narrows it further by state
 # (nothing is read back from the login screen, nothing is shared with another account's lock screen).
 Environment=FARSIDE_CONSOLE_CLIPBOARD_DIRECTION=both
 Environment=FARSIDE_CONSOLE_VAAPI_DRIVER=auto

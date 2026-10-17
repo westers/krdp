@@ -15,7 +15,9 @@
 
 #include <atomic>
 #include <mutex>
+#include <optional>
 
+#include "ClipboardHtml.h"
 #include "ClipboardImage.h"
 #include "ClipboardLimits.h"
 #include "ClipboardText.h"
@@ -80,6 +82,7 @@ public:
     bool hostAnnounced = false; // delayed rendering: the host has text and/or an image; none of it is held here
     bool hostText = false; // OPT-072: what the announcement covers
     bool hostImage = false;
+    bool hostHtml = false; // OPT-077
     uint32_t pendingHostFormat = 0; // the format the client asked for in the request waiting for the worker
     bool announcedToClient = false; // a format list for it is out on the wire
     quint64 nextHostRequestId = 0;
@@ -105,6 +108,21 @@ public:
     uint32_t clientPngFormatId = 0;
     bool requestedClientImage = false; // what the request on the wire (or the last one) asked for
     bool requestedClientPng = false;
+    // OPT-077: the id the client gave "HTML Format" in its latest list (0 = none). A rich copy (HTML, usually with text) takes two
+    // requests, text first, then HTML; the text waits in stagedClientText and both are written to the host together. If the HTML
+    // fails or is refused the text alone is written, and a failed text request drops the HTML request.
+    uint32_t clientHtmlFormatId = 0;
+    bool requestedClientHtml = false;
+    uint32_t followupHtmlFormat = 0; // HTML request to send once the text answer is in (0 = none)
+    std::optional<QString> stagedClientText;
+    void clearRichState()
+    {
+        followupHtmlFormat = 0;
+        stagedClientText.reset();
+    }
+    void onClientHtml(const QByteArray &wire);
+    void deliverClientData(const QString &text, const QByteArray &html);
+    void finishRichWithoutHtml();
     std::atomic<qint64> responseLimit = ClipboardLimits::MaxWireBytes;
     bool isImageFormat(uint32_t formatId) const
     {
@@ -139,6 +157,7 @@ public:
     bool clientRequestsDisabled = false;
     QElapsedTimer serverClipboardActivity; // last announce or serve of the host's text
     QString lastServerText; // what that was, as host text (LF)
+    QByteArray lastServerHtml; // OPT-077: the HTML document last served (UTF-8), null when none
     bool isEcho() const
     {
         return serverClipboardActivity.isValid() && serverClipboardActivity.elapsed() < Clipboard::EchoWindowMs;
@@ -258,12 +277,13 @@ Clipboard::~Clipboard()
 {
     const auto &c = d->counters;
     if (c.announces || c.served || c.clientCopies || c.refusedPolicy || c.refusedOversize || c.refusedRate || c.refusedTimeout || c.refusedBusy
-        || c.hostImages || c.clientImages || c.refusedMalformed) {
+        || c.hostImages || c.clientImages || c.refusedMalformed || c.hostHtml || c.clientHtml) {
         // Counts only, never contents (OPT-067).
         qCInfo(KRDP).nospace() << "Clipboard: closed announces=" << c.announces << " served=" << c.served << " clientCopies=" << c.clientCopies
                                << " refused(policy=" << c.refusedPolicy << " oversize=" << c.refusedOversize << " rate=" << c.refusedRate
                                << " timeout=" << c.refusedTimeout << " busy=" << c.refusedBusy << " malformed=" << c.refusedMalformed
-                               << ") images(host=" << c.hostImages << " client=" << c.clientImages << ") bytes(host=" << c.hostBytes
+                               << ") images(host=" << c.hostImages << " client=" << c.clientImages << ") html(host=" << c.hostHtml << " client=" << c.clientHtml
+                               << ") bytes(host=" << c.hostBytes
                                << " client=" << c.clientBytes << ")";
     }
     // setServerData() took ownership of the last announcement; every earlier
@@ -390,13 +410,24 @@ void Clipboard::sendServerData()
 
     // Text (the in-process route and a text copy on the host) and, OPT-072, an image: the registered "PNG"
     // format and CF_DIB, so a client picks the one it can paste.
+    // OPT-077: formatted text, "HTML Format" beside the text (the receiving application picks the richest it understands).
+    // The same combination rule as the worker applies (ClipboardHtml::announce): HTML goes with its text and drops a picture,
+    // HTML next to a picture and no text is the picture.
     static char pngName[] = "PNG";
-    CLIPRDR_FORMAT formats[3] = {};
+    static char htmlName[] = "HTML Format";
+    CLIPRDR_FORMAT formats[4] = {};
     uint32_t count = 0;
-    if (d->serverData || d->hostText) {
+    const bool hasText = d->serverData || d->hostText;
+    const auto choice = ClipboardHtml::announce(hasText, d->hostHtml, d->hostImage);
+    // Richest first (a format list is in the owner's order of preference): "HTML Format", then the plain text.
+    if (choice.html) {
+        formats[count].formatId = ClipboardHtml::HtmlFormatId;
+        formats[count++].formatName = htmlName;
+    }
+    if (choice.text) {
         formats[count++].formatId = CF_UNICODETEXT;
     }
-    if (d->hostImage) {
+    if (choice.image) {
         formats[count].formatId = ClipboardImage::PngFormatId;
         formats[count++].formatName = pngName;
         formats[count++].formatId = ClipboardImage::CfDib;
@@ -433,15 +464,25 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
     uint32_t pngId = 0;
     bool hasDibV5 = false;
     bool hasDib = false;
+    uint32_t htmlId = 0;
     for (qsizetype i = 0; i < formatList.formatIds.size(); ++i) {
         const auto formatId = formatList.formatIds.at(i);
         if (formatId >= 0xC000 && i < formatList.formatNames.size() && ClipboardImage::isPngFormatName(formatList.formatNames.at(i))) {
             pngId = formatId;
         }
+        if (formatId >= 0xC000 && i < formatList.formatNames.size() && ClipboardHtml::isHtmlFormatName(formatList.formatNames.at(i))) {
+            htmlId = formatId;
+        }
         hasDibV5 = hasDibV5 || formatId == ClipboardImage::CfDibV5;
         hasDib = hasDib || formatId == ClipboardImage::CfDib;
     }
     clientPngFormatId = pngId; // per list: a client may number its registered formats afresh
+    clientHtmlFormatId = htmlId;
+    if (outstandingFormat != 0 && requestedClientHtml) {
+        // OPT-077: the HTML of an older copy is still on its way; it is not this list's, so its answer is dropped.
+        discardClientResponse = true;
+    }
+    clearRichState(); // an earlier list's half-fetched copy is stale
     const uint32_t imageWanted = pngId ? pngId : hasDibV5 ? ClipboardImage::CfDibV5 : hasDib ? ClipboardImage::CfDib : 0;
     for (const auto formatId : formatList.formatIds) {
         switch (formatId) {
@@ -479,13 +520,22 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
         // OPT-067: the planner denies the client's copies in this state (acknowledged, never requested).
         qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats; the client to host direction is not allowed now";
         pendingFormat = 0;
+        clearRichState();
         return;
     }
-    if (wanted == 0) {
+    // OPT-077: HTML with its text (or HTML alone); a picture beside HTML and no text is the picture; text beats a picture.
+    const auto choice = ClipboardHtml::request(wanted != 0, htmlId != 0, imageWanted != 0);
+    if (choice.html) {
+        // Text first (what an application without HTML support would paste), then the HTML; both land on the host together.
+        followupHtmlFormat = wanted ? htmlId : 0;
+        if (!wanted) {
+            wanted = htmlId;
+        }
+    } else if (wanted == 0) {
         wanted = imageWanted;
     }
     if (wanted == 0) {
-        qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats, none of them text or an image; not requesting data";
+        qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats, none of them text, HTML or an image; not requesting data";
         pendingFormat = 0; // what an earlier list offered is gone
         return;
     }
@@ -499,6 +549,7 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
         qCDebug(KRDP) << "Client announced" << formatList.formatIds.size() << "clipboard formats" << serverClipboardActivity.elapsed()
                       << "ms after the host's clipboard went to it; taking it for an echo and not requesting it";
         pendingFormat = 0;
+        clearRichState();
         return;
     }
 
@@ -522,6 +573,7 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
 void Clipboard::Private::disableClientRequests(const char *why)
 {
     pendingFormat = 0;
+    clearRichState();
     settleTimer.stop();
     if (clientRequestsDisabled) {
         return;
@@ -562,7 +614,8 @@ void Clipboard::Private::requestPending()
     pendingFormat = 0;
     requestedClientImage = isImageFormat(requestedClientFormat);
     requestedClientPng = requestedClientImage && clientPngFormatId && requestedClientFormat == clientPngFormatId;
-    responseLimit = requestedClientImage ? ClipboardLimits::MaxImageWireBytes : ClipboardLimits::MaxWireBytes;
+    requestedClientHtml = clientHtmlFormatId && requestedClientFormat == clientHtmlFormatId;
+    responseLimit = requestedClientImage ? ClipboardLimits::MaxImageWireBytes : requestedClientHtml ? ClipboardLimits::MaxHtmlWireBytes : ClipboardLimits::MaxWireBytes;
     CLIPRDR_FORMAT_DATA_REQUEST formatDataRequest{.common = CLIPRDR_HEADER({.msgType = CB_FORMAT_DATA_REQUEST, .msgFlags = 0, .dataLen = 4}),
                                                   .requestedFormatId = requestedClientFormat};
     context->ServerFormatDataRequest(context, &formatDataRequest);
@@ -580,7 +633,10 @@ void Clipboard::Private::sendFailResponse()
     response.common.msgType = CB_FORMAT_DATA_RESPONSE;
     response.common.msgFlags = CB_RESPONSE_FAIL;
     response.common.dataLen = 0;
-    response.requestedFormatData = nullptr;
+    // A failure carries no data; a valid pointer anyway, so a channel implementation that copies dataLen (0) bytes from it
+    // never sees a null source (FreeRDP's cliprdr server does exactly that).
+    static const BYTE none = 0;
+    response.requestedFormatData = &none;
     context->ServerFormatDataResponse(context, &response);
 }
 
@@ -607,6 +663,8 @@ void Clipboard::Private::respondWithText(const QString &hostText)
         CLIPRDR_FORMAT_DATA_RESPONSE refusal = {};
         refusal.common.msgType = CB_FORMAT_DATA_RESPONSE;
         refusal.common.msgFlags = CB_RESPONSE_FAIL;
+        static const BYTE none = 0;
+        refusal.requestedFormatData = &none;
         context->ServerFormatDataResponse(context, &refusal);
         return;
     }
@@ -634,7 +692,8 @@ void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &form
         const auto requested = formatDataRequest.requestedFormatId;
         const bool wantText = requested == CF_UNICODETEXT && hostText;
         const bool wantImage = (requested == ClipboardImage::PngFormatId || requested == ClipboardImage::CfDib) && hostImage;
-        if ((!wantText && !wantImage) || !hostToClientAllowed) {
+        const bool wantHtml = requested == ClipboardHtml::HtmlFormatId && hostHtml;
+        if ((!wantText && !wantImage && !wantHtml) || !hostToClientAllowed) {
             ++counters.refusedPolicy;
             sendFailResponse();
             return;
@@ -650,6 +709,8 @@ void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &form
         hostRequestTimer.start();
         if (wantImage) {
             Q_EMIT q->hostImageRequested(pendingHostRequest);
+        } else if (wantHtml) {
+            Q_EMIT q->hostHtmlRequested(pendingHostRequest);
         } else {
             Q_EMIT q->hostTextRequested(pendingHostRequest);
         }
@@ -660,6 +721,96 @@ void Clipboard::Private::onClientFormatDataRequest(const FormatDataRequest &form
         return;
     }
     respondWithText(serverData->text());
+}
+
+void Clipboard::Private::finishRichWithoutHtml()
+{
+    // The HTML of a rich copy was refused, oversize or not answered: the plain text that came with it still lands on the host.
+    const auto text = stagedClientText;
+    clearRichState();
+    if (text && !text->isEmpty()) {
+        deliverClientData(*text, {});
+    }
+}
+
+void Clipboard::Private::onClientHtml(const QByteArray &wire)
+{
+    const auto unwrapped = ClipboardHtml::unwrapMsHtml(wire);
+    if (!unwrapped.ok()) {
+        if (unwrapped.error == ClipboardHtml::Error::TooLarge) {
+            ++counters.refusedOversize;
+        } else {
+            ++counters.refusedMalformed;
+        }
+        // A reason and a size, never the document (OPT-077).
+        qCInfo(KRDP).nospace() << "Clipboard: refused (" << ClipboardHtml::errorName(unwrapped.error) << ") direction=client-to-host kind=html bytes=" << wire.size();
+        finishRichWithoutHtml();
+        return;
+    }
+    const QString text = stagedClientText.value_or(QString());
+    clearRichState();
+    deliverClientData(text, unwrapped.data);
+}
+
+void Clipboard::Private::deliverClientData(const QString &text, const QByteArray &html)
+{
+    const quint64 utf8Bytes = quint64(text.toUtf8().size());
+    if (utf8Bytes > quint64(ClipboardLimits::MaxTextBytes)) {
+        ++counters.refusedOversize;
+        refused("oversize", "client-to-host", utf8Bytes);
+        return;
+    }
+    const quint64 totalBytes = utf8Bytes + quint64(html.size());
+    if (!rate.accept(clock.elapsed(), qint64(totalBytes))) {
+        ++counters.refusedRate;
+        if (!rateEpisodeLogged) {
+            rateEpisodeLogged = true;
+            refused("rate", "client-to-host", totalBytes);
+        }
+        return;
+    }
+    rateEpisodeLogged = false;
+
+    if (!html.isEmpty()) {
+        // OPT-077: text and HTML in one offer. The host's own copy coming back (Klipper re-owning what we served) is judged by
+        // the format-list echo window; a body identical to what was just served is dropped here as well.
+        if (!lastServerHtml.isNull() && html == lastServerHtml && (text.isEmpty() || ClipboardText::toHost(text) == lastServerText)) {
+            qCDebug(KRDP) << "Client clipboard HTML is the host's own; not writing it back";
+            return;
+        }
+        clientData.reset(new QMimeData());
+        if (!text.isEmpty()) {
+            clientData->setText(ClipboardText::toHost(text));
+        }
+        clientData->setData(u"text/html"_s, html);
+        qCDebug(KRDP) << "Client clipboard formatted text received:" << html.size() << "bytes of HTML," << text.length() << "characters of text";
+        ++counters.clientHtml;
+        counters.clientBytes += totalBytes;
+        Q_EMIT q->clientDataChanged();
+        return;
+    }
+
+    if (text.isEmpty()) {
+        qCDebug(KRDP) << "Client clipboard text is empty";
+        clientData.reset();
+        ++counters.clientCopies;
+        Q_EMIT q->clientDataChanged();
+        return;
+    }
+
+    // AUD-FIX6 F1: the host's own text coming back; writing it would only announce it again.
+    if (!lastServerText.isNull() && ClipboardText::toHost(text) == lastServerText) {
+        qCDebug(KRDP) << "Client clipboard text is the host's own; not writing it back";
+        return;
+    }
+
+    // Stored LF on the host, whatever the wire carried.
+    clientData.reset(new QMimeData());
+    clientData->setText(ClipboardText::toHost(text));
+    qCDebug(KRDP) << "Client clipboard text received:" << clientData->text().length() << "characters";
+    ++counters.clientCopies;
+    counters.clientBytes += utf8Bytes;
+    Q_EMIT q->clientDataChanged();
 }
 
 void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &formatDataResponse)
@@ -678,15 +829,18 @@ void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &fo
     if (discardClientResponse) {
         // OPT-067: the request was reset away (denial, handover); its answer is not wanted.
         discardClientResponse = false;
+        clearRichState();
         return;
     }
     if (!clientToHostAllowed) {
         ++counters.refusedPolicy;
+        clearRichState();
         return;
     }
     if (formatDataResponse.oversize) {
         ++counters.refusedOversize;
         refused("oversize", "client-to-host", formatDataResponse.declaredLength);
+        finishRichWithoutHtml();
         return;
     }
 
@@ -695,9 +849,20 @@ void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &fo
         // AUD-FIX6 F1: a stock client that refuses is not asked again (wlfreerdp3 3.22
         // refuses the first request and hangs on a later one). Our own client may refuse one
         // (its clipboard changed under it) and is asked again next time.
+        if (requestedClientHtml) {
+            // The text of this copy is already here: it is still a copy. A refused HTML request does not disable requests.
+            finishRichWithoutHtml();
+            return;
+        }
+        clearRichState();
         if (!session || !session->isOwnClient()) {
             disableClientRequests("refused");
         }
+        return;
+    }
+
+    if (requestedClientHtml) {
+        onClientHtml(formatDataResponse.data);
         return;
     }
 
@@ -722,43 +887,24 @@ void Clipboard::Private::onClientFormatDataResponse(const FormatDataResponse &fo
         }
     }
 
-    const quint64 utf8Bytes = quint64(text.toUtf8().size());
-    if (utf8Bytes > quint64(ClipboardLimits::MaxTextBytes)) {
-        ++counters.refusedOversize;
-        refused("oversize", "client-to-host", utf8Bytes);
-        return;
-    }
-    if (!rate.accept(clock.elapsed(), qint64(utf8Bytes))) {
-        ++counters.refusedRate;
-        if (!rateEpisodeLogged) {
-            rateEpisodeLogged = true;
-            refused("rate", "client-to-host", utf8Bytes);
+    if (followupHtmlFormat) {
+        // OPT-077: the text of a rich copy. Held back; the HTML is requested next and both are written together.
+        if (quint64(text.toUtf8().size()) > quint64(ClipboardLimits::MaxTextBytes)) {
+            ++counters.refusedOversize;
+            refused("oversize", "client-to-host", quint64(text.toUtf8().size()));
+            // The HTML alone is still worth having.
+        } else if (!lastServerText.isNull() && !text.isEmpty() && ClipboardText::toHost(text) == lastServerText) {
+            qCDebug(KRDP) << "Client clipboard text is the host's own; not writing it back";
+            clearRichState();
+            return;
+        } else {
+            stagedClientText = text;
         }
-        return;
+        pendingFormat = std::exchange(followupHtmlFormat, 0);
+        return; // requestPending() (the scope guard) sends the HTML request
     }
-    rateEpisodeLogged = false;
-
-    if (text.isEmpty()) {
-        qCDebug(KRDP) << "Client clipboard text is empty";
-        clientData.reset();
-        ++counters.clientCopies;
-        Q_EMIT q->clientDataChanged();
-        return;
-    }
-
-    // AUD-FIX6 F1: the host's own text coming back; writing it would only announce it again.
-    if (!lastServerText.isNull() && ClipboardText::toHost(text) == lastServerText) {
-        qCDebug(KRDP) << "Client clipboard text is the host's own; not writing it back";
-        return;
-    }
-
-    // Stored LF on the host, whatever the wire carried.
-    clientData.reset(new QMimeData());
-    clientData->setText(ClipboardText::toHost(text));
-    qCDebug(KRDP) << "Client clipboard text received:" << clientData->text().length() << "characters";
-    ++counters.clientCopies;
-    counters.clientBytes += utf8Bytes;
-    Q_EMIT q->clientDataChanged();
+    clearRichState();
+    deliverClientData(text, {});
 }
 
 void Clipboard::setDirections(bool hostToClient, bool clientToHost)
@@ -790,16 +936,18 @@ void Clipboard::announceHostText()
     announceHost(true, false);
 }
 
-void Clipboard::announceHost(bool text, bool image)
+void Clipboard::announceHost(bool text, bool image, bool html)
 {
-    if (d->closing || !d->hostToClientAllowed || (!text && !image)) {
+    if (d->closing || !d->hostToClientAllowed || (!text && !image && !html)) {
         return;
     }
     d->hostAnnounced = true;
     d->hostText = text;
     d->hostImage = image;
+    d->hostHtml = html;
     // The text the client may have of the previous copy is no longer the host's.
     d->lastServerText = QString();
+    d->lastServerHtml = QByteArray();
     sendServerData();
 }
 
@@ -816,6 +964,49 @@ void Clipboard::provideHostText(quint64 requestId, const QString &text, bool ok)
         return;
     }
     d->respondWithText(text);
+}
+
+void Clipboard::provideHostHtml(quint64 requestId, const QByteArray &html, bool ok)
+{
+    if (d->closing || !requestId || requestId != d->pendingHostRequest) {
+        return; // a late answer for a request that timed out or was reset
+    }
+    d->pendingHostRequest = 0;
+    d->hostRequestTimer.stop();
+    if (!ok || !d->hostToClientAllowed || html.isEmpty()) {
+        ++d->counters.refusedPolicy;
+        d->sendFailResponse();
+        return;
+    }
+    // The worker has bounded this document; wrap it with exact offsets, and refuse what cannot be wrapped (an answer from another
+    // process is checked again before it reaches a client).
+    const auto wrapped = ClipboardHtml::wrapForWire(html);
+    if (!wrapped.ok()) {
+        if (wrapped.error == ClipboardHtml::Error::TooLarge) {
+            ++d->counters.refusedOversize;
+        } else {
+            ++d->counters.refusedMalformed;
+        }
+        d->refused(ClipboardHtml::errorName(wrapped.error), "host-to-client", quint64(html.size()));
+        d->sendFailResponse();
+        return;
+    }
+    std::lock_guard lock(d->sendMutex);
+    auto *context = d->clipContext.load();
+    if (!context || !d->enabled) {
+        return;
+    }
+    CLIPRDR_FORMAT_DATA_RESPONSE response = {};
+    response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+    response.common.msgFlags = CB_RESPONSE_OK;
+    response.common.dataLen = quint32(wrapped.data.size());
+    response.requestedFormatData = reinterpret_cast<const BYTE *>(wrapped.data.constData());
+    qCDebug(KRDP) << "Serving host clipboard HTML to the client:" << wrapped.data.size() << "bytes";
+    d->lastServerHtml = html;
+    d->serverClipboardActivity.start();
+    ++d->counters.hostHtml;
+    d->counters.hostBytes += quint64(wrapped.data.size());
+    context->ServerFormatDataResponse(context, &response);
 }
 
 void Clipboard::provideHostImage(quint64 requestId, const QByteArray &png, bool ok)
@@ -911,6 +1102,8 @@ void Clipboard::resetHostSide()
     d->hostAnnounced = false;
     d->hostText = false;
     d->hostImage = false;
+    d->hostHtml = false;
+    d->lastServerHtml = QByteArray();
     d->pendingHostFormat = 0;
     d->announcedToClient = false;
     d->pendingServerAnnounce = false;
@@ -940,6 +1133,7 @@ void Clipboard::resetClientSide()
 {
     d->clientData.reset();
     d->pendingFormat = 0;
+    d->clearRichState();
     d->settleTimer.stop();
     d->responseLimit = ClipboardLimits::MaxWireBytes;
     if (d->outstandingFormat != 0) {

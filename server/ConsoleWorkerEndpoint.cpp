@@ -251,6 +251,11 @@ quint64 ConsoleWorkerEndpoint::requestClipboardImage(quint32 maxBytes)
     return requestClipboardKind(maxBytes, ConsoleWorkerWire::ClipboardKind::Image);
 }
 
+quint64 ConsoleWorkerEndpoint::requestClipboardHtml(quint32 maxBytes)
+{
+    return requestClipboardKind(maxBytes, ConsoleWorkerWire::ClipboardKind::Html);
+}
+
 quint64 ConsoleWorkerEndpoint::requestClipboardKind(quint32 maxBytes, ConsoleWorkerWire::ClipboardKind kind)
 {
     // The content is fetched when the client pastes; a backlogged socket refuses instead of queueing stale pastes.
@@ -286,6 +291,21 @@ quint64 ConsoleWorkerEndpoint::setClipboardImage(quint64 controlGeneration, cons
         || m_clipboardSets.size() >= 8 || m_nextClipboardId == std::numeric_limits<quint64>::max()) return 0;
     const quint64 id = ++m_nextClipboardId;
     ConsoleWorkerWire::ClipboardSet set{id, controlGeneration, {}, ConsoleWorkerWire::ClipboardKind::Image, png};
+    if (m_worker->write(ConsoleWorkerWire::frame(set)) < 0) return 0;
+    m_clipboardSets.insert(id);
+    return id;
+}
+
+quint64 ConsoleWorkerEndpoint::setClipboardRich(quint64 controlGeneration, const QString &text, const QByteArray &html)
+{
+    if (!m_ready || !m_worker || !m_clipboardPolicy || !m_clipboardPolicy->clientToHost || !controlGeneration
+        || controlGeneration != m_clipboardPolicy->controlGeneration
+        || html.isEmpty() || quint64(html.size()) > ConsoleWorkerWire::MaxClipboardHtmlBytes
+        || quint64(text.toUtf8().size()) > ConsoleWorkerWire::MaxClipboardBytes
+        || m_worker->bytesToWrite() > 2 * qint64(ConsoleWorkerWire::MaxClipboardRichSetBytes)
+        || m_clipboardSets.size() >= 8 || m_nextClipboardId == std::numeric_limits<quint64>::max()) return 0;
+    const quint64 id = ++m_nextClipboardId;
+    ConsoleWorkerWire::ClipboardSet set{id, controlGeneration, text, ConsoleWorkerWire::ClipboardKind::Html, {}, html};
     if (m_worker->write(ConsoleWorkerWire::frame(set)) < 0) return 0;
     m_clipboardSets.insert(id);
     return id;
@@ -578,9 +598,19 @@ bool ConsoleWorkerEndpoint::processRecords()
             // The answer must be of the kind that was asked for; anything else is dropped like an unknown id.
             const auto asked = m_clipboardRequests.constFind(data->requestId);
             if (asked != m_clipboardRequests.cend()) {
-                const bool sameKind = asked.value() == data->kind;
+                const auto askedKind = asked.value();
                 m_clipboardRequests.erase(asked);
-                if (sameKind) Q_EMIT clipboardDataReceived(*data);
+                if (askedKind == data->kind) {
+                    Q_EMIT clipboardDataReceived(*data);
+                } else {
+                    // OPT-077: an answer of another kind is never passed on, but the client is waiting for its paste: answer
+                    // it as "gone" (a CB_RESPONSE_FAIL) at once instead of letting the broker's timeout expire.
+                    ConsoleWorkerWire::ClipboardData gone;
+                    gone.requestId = data->requestId;
+                    gone.kind = askedKind;
+                    gone.status = ConsoleWorkerWire::ClipboardStatus::Gone;
+                    Q_EMIT clipboardDataReceived(gone);
+                }
             }
         } else if (const auto result = ConsoleWorkerWire::clipboardSetResult(*record)) {
             if (m_clipboardSets.remove(result->setId)) Q_EMIT clipboardSetFinished(*result);

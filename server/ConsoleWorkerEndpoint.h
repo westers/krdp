@@ -128,10 +128,14 @@ public:
     quint64 requestClipboard(quint32 maxBytes = ConsoleWorkerWire::MaxClipboardBytes);
     /** OPT-072: the same for the host's image (PNG, at most \a maxBytes up to MaxClipboardImageBytes). */
     quint64 requestClipboardImage(quint32 maxBytes = ConsoleWorkerWire::MaxClipboardImageBytes);
+    /** OPT-077: the same for the host's HTML (a UTF-8 document, at most \a maxBytes up to MaxClipboardHtmlBytes). */
+    quint64 requestClipboardHtml(quint32 maxBytes = ConsoleWorkerWire::MaxClipboardHtmlBytes);
     /** The client copied \a text. Returns the set id, 0 = not sent. Ids are endpoint-wide and never reused. */
     quint64 setClipboard(quint64 controlGeneration, const QString &text);
     /** OPT-072: the client copied this PNG (already checked by the broker; the worker checks it again). */
     quint64 setClipboardImage(quint64 controlGeneration, const QByteArray &png);
+    /** OPT-077: the client copied formatted text: \a html (a UTF-8 document, unwrapped by the broker) with its plain \a text (may be empty). */
+    quint64 setClipboardRich(quint64 controlGeneration, const QString &text, const QByteArray &html);
 
 Q_SIGNALS:
     void workerAuthenticated(const KRdp::ConsoleHandoff::Target &target);

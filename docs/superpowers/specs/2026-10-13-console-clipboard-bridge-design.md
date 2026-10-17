@@ -596,3 +596,33 @@ KCM row, tests, `docs/settings-ui.md` entry, packaging scripts check.
 
 **Later phases (separate designs):** 1b capability push + client notice; images (CF_DIB/PNG) with a larger cap and lazy fetch
 on paste; HTML; files and drag and drop (needs `streamFileClipEnabled`, locking, and a path policy).
+
+## Addendum OPT-077 (2026-10-17): formatted text (HTML), capability and failure review
+
+Status: implemented on branch `html-clipboard`, not merged. Full design notes and the findings table are in
+`~/dev/krdp/.work/html-clipboard/PLAN.md`; this is the part that belongs with the bridge design.
+
+**Formats.** cliprdr "HTML Format" (registered name; our id 0xC002) <-> Wayland `text/html`. A rich copy is
+`CF_UNICODETEXT` + "HTML Format" in one format list and ONE host offer (`text/plain` + `text/html`). The wrapper is the MS
+"HTML Clipboard Format": `Version:0.9`, `StartHTML`, `EndHTML`, `StartFragment`, `EndFragment`, ten-digit offsets, CRLF,
+UTF-8, NUL terminated, 105-byte header (same as FreeRDP's `clipboard_synthesize_ms_html_format`). The unwrapper takes the
+StartHTML..EndHTML range and is more tolerant than FreeRDP's (see PLAN.md for the list) but refuses inconsistent offsets and
+over-length input. Pure code: `src/ClipboardHtml.h`, tested by `HtmlClipboardTest`.
+
+**Combination rule** (formats only, never contents): rich = HTML and (text or no picture). HTML + picture and no text (a
+browser's "Copy image") is the picture. Without HTML the OPT-072 rule stands.
+
+**Limits.** 8 MiB HTML (document), 8 MiB + 4 KiB on the cliprdr wire, text beside it 1 MiB, rate limit shared. **Wire** 19 ->
+20: `ClipboardKind::Html`, Offer flag 4, Set = `[u32 text length][text][html]`. **Capability** `clipboard.html` + `maxHtmlBytes`.
+
+**RTF is a deliberate non-goal.** LibreOffice offers `text/rtf` as well as `text/html`; the HTML carries bold/italic/colour/tables
+and one more converter would be one more parser of untrusted input. Revisit only if a real application needs it.
+
+**Stock clients.** mstsc asks for registered formats by the ids in our list and reads the 105-byte header; FreeRDP clients
+(wlfreerdp3 3.22) keep the AUD-FIX6 rules (a refused request disables later requests; a refused HTML request after a
+delivered text does not). Our server advertises only `CB_USE_LONG_FORMAT_NAMES` (files are not implemented), as does our client.
+Not exercised against real mstsc or FreeRDP in this slice.
+
+**Failure responses.** Every refusal of a host paste ends in `CB_RESPONSE_FAIL` at once (not announced, policy, busy, worker
+refusal, oversize, wrapper refusal, deny while pending) or after the 3 s timer (no worker answer). Fixed in OPT-077: a worker
+answer of the wrong kind now fails the paste immediately; a failure response no longer carries a NULL data pointer.

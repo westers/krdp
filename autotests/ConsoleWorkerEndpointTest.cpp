@@ -28,6 +28,7 @@ private Q_SLOTS:
     void clipboardIdsAreEndpointWideAndForgottenWithTheWorker();
     void clipboardRecordBeforeReadyFailsTheWorker();
     void clipboardImagesCrossWithTheirKindAndLimits();
+    void clipboardHtmlCrossesWithItsKindAndLimits();
     void hostPointerIsRelayedAfterReadyAndForgottenWithTheWorker();
     void hostPointerBeforeReadyOrMalformedFailsTheWorker();
 };
@@ -620,13 +621,19 @@ void ConsoleWorkerEndpointTest::clipboardImagesCrossWithTheirKindAndLimits()
     const auto asked = clipboardRequest(records.at(1));
     QVERIFY(asked && asked->kind == ClipboardKind::Image && asked->requestId == requestId && asked->maxBytes == MaxClipboardImageBytes);
 
-    // The answer must be of the kind that was asked: a text answer to an image request is dropped (and forgets the id).
+    // The answer must be of the kind that was asked: a text answer to an image request is not passed on; the client
+    // gets a prompt refusal instead (a "gone" of the asked kind), and the id is forgotten.
     w.worker.write(frame(ClipboardData{requestId, 1, ClipboardStatus::Ok, QStringLiteral("text"), ClipboardKind::Text, {}}));
     w.worker.write(frame(ClipboardData{requestId, 1, ClipboardStatus::Ok, {}, ClipboardKind::Image, png}));
     w.worker.flush();
+    QTRY_COMPARE(data.size(), 1);
     QTest::qWait(80);
-    QCOMPARE(data.size(), 0);
+    QCOMPARE(data.size(), 1); // the late right-kind answer for the forgotten id is dropped
+    QCOMPARE(data.first().kind, ClipboardKind::Image);
+    QCOMPARE(data.first().status, ClipboardStatus::Gone);
+    QVERIFY(data.first().image.isEmpty() && data.first().text.isEmpty());
     QVERIFY(w.endpoint.ready());
+    data.clear();
     // A right answer reaches the broker with its picture.
     const auto second = w.endpoint.requestClipboardImage(1000);
     QVERIFY(second);
@@ -647,6 +654,71 @@ void ConsoleWorkerEndpointTest::clipboardImagesCrossWithTheirKindAndLimits()
     for (int i = 0; i < 8; ++i) QVERIFY(w.endpoint.requestClipboardImage());
     QCOMPARE(w.endpoint.requestClipboardImage(), quint64(0));
     QVERIFY(w.endpoint.ready());
+}
+
+// OPT-077 (wire 20).
+void ConsoleWorkerEndpointTest::clipboardHtmlCrossesWithItsKindAndLimits()
+{
+    using namespace ConsoleWorkerWire;
+    ClipboardWorker w;
+    w.start(true);
+    QVERIFY(w.ok);
+    QSignalSpy offered(&w.endpoint, &ConsoleWorkerEndpoint::clipboardOffered);
+    QList<ClipboardData> data;
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::clipboardDataReceived, this, [&data](const auto &answer) { data.append(answer); });
+    const QByteArray html("<p>caf\xC3\xA9</p>");
+    QCOMPARE(w.endpoint.requestClipboardHtml(), quint64(0));
+    QCOMPARE(w.endpoint.setClipboardRich(1, QStringLiteral("t"), html), quint64(0));
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, false, false, false));
+    w.drain();
+    QCOMPARE(w.endpoint.setClipboardRich(1, QStringLiteral("t"), html), quint64(0)); // client to host off
+    QVERIFY(w.endpoint.setClipboardPolicy(1, false, true, false, false));
+    w.drain();
+    QCOMPARE(w.endpoint.requestClipboardHtml(), quint64(0)); // host to client off
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false));
+    w.drain();
+    // Bounds: empty html, over 8 MiB, over-long text, another generation; a request over the html limit.
+    QCOMPARE(w.endpoint.setClipboardRich(1, {}, {}), quint64(0));
+    QCOMPARE(w.endpoint.setClipboardRich(1, {}, QByteArray(MaxClipboardHtmlBytes + 1, 'h')), quint64(0));
+    QCOMPARE(w.endpoint.setClipboardRich(1, QString(MaxClipboardBytes + 1, QLatin1Char('a')), html), quint64(0));
+    QCOMPARE(w.endpoint.setClipboardRich(2, {}, html), quint64(0));
+    QCOMPARE(w.endpoint.requestClipboardHtml(0), quint64(0));
+    QCOMPARE(w.endpoint.requestClipboardHtml(MaxClipboardHtmlBytes + 1), quint64(0));
+
+    const auto setId = w.endpoint.setClipboardRich(1, QStringLiteral("caf\u00e9"), html);
+    const auto requestId = w.endpoint.requestClipboardHtml();
+    QVERIFY(setId && requestId && setId != requestId);
+    const auto records = w.drain();
+    QCOMPARE(records.size(), 2);
+    const auto sent = clipboardSet(records.at(0));
+    QVERIFY(sent && sent->kind == ClipboardKind::Html && sent->html == html && sent->text == QStringLiteral("caf\u00e9") && sent->setId == setId);
+    const auto asked = clipboardRequest(records.at(1));
+    QVERIFY(asked && asked->kind == ClipboardKind::Html && asked->requestId == requestId && asked->maxBytes == MaxClipboardHtmlBytes);
+
+    // A right-kind answer reaches the broker with its document; an offer says it covers HTML.
+    w.worker.write(frame(ClipboardData{requestId, 1, ClipboardStatus::Ok, {}, ClipboardKind::Html, {}, html}));
+    w.worker.write(frame(ClipboardOffer{9, ClipboardOfferText | ClipboardOfferHtml}));
+    w.worker.flush();
+    QTRY_COMPARE(data.size(), 1);
+    QCOMPARE(data.first().kind, ClipboardKind::Html);
+    QCOMPARE(data.first().html, html);
+    QTRY_COMPARE(offered.size(), 1);
+    QCOMPARE(offered.at(0).at(1).value<quint8>(), quint8(ClipboardOfferText | ClipboardOfferHtml));
+    // A text answer to an html request is a prompt "gone" of the asked kind, not a hang.
+    const auto second = w.endpoint.requestClipboardHtml(1000);
+    QVERIFY(second);
+    w.drain();
+    data.clear();
+    w.worker.write(frame(ClipboardData{second, 1, ClipboardStatus::Ok, QStringLiteral("text"), ClipboardKind::Text, {}, {}}));
+    w.worker.flush();
+    QTRY_COMPARE(data.size(), 1);
+    QCOMPARE(data.first().kind, ClipboardKind::Html);
+    QCOMPARE(data.first().status, ClipboardStatus::Gone);
+    QVERIFY(data.first().html.isEmpty());
+    QVERIFY(w.endpoint.ready());
+    // Eight requests at most wait for the worker.
+    for (int i = 0; i < 8; ++i) QVERIFY(w.endpoint.requestClipboardHtml());
+    QCOMPARE(w.endpoint.requestClipboardHtml(), quint64(0));
 }
 
 // OPT-071 (wire 18).

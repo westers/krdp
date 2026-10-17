@@ -92,6 +92,11 @@ void ConsoleWorkerSession::setClipboardData(std::unique_ptr<QMimeData> data)
     // non-text copy is an empty text, which clears the host clipboard.
     // OPT-072: a copy with text is the text (Clipboard requests an image only when there is none); one with only a
     // picture goes on as a ClipboardSet of kind Image.
+    // OPT-077: a copy with HTML is the HTML together with its text (the text may be empty).
+    if (data && data->hasFormat(QStringLiteral("text/html"))) {
+        Q_EMIT clientClipboardRich(data->hasText() ? data->text() : QString(), data->data(QStringLiteral("text/html")));
+        return;
+    }
     if (data && !data->hasText() && data->hasFormat(QStringLiteral("image/png"))) {
         Q_EMIT clientClipboardImage(data->data(QStringLiteral("image/png")));
         return;
