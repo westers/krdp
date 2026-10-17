@@ -109,7 +109,8 @@ public:
      * OPT-067 clipboard bridge. The latest policy is kept and sent once the worker is Ready (and again on every
      * change); an identical policy is not resent. Nothing about the clipboard crosses before Ready.
      */
-    bool setClipboardPolicy(quint64 controlGeneration, bool hostToClient, bool clientToHost, bool locked, bool greeter);
+    bool setClipboardPolicy(quint64 controlGeneration, bool hostToClient, bool clientToHost, bool locked, bool greeter, bool filesHostToClient = false,
+                            bool filesClientToHost = false);
     std::optional<ConsoleWorkerWire::ClipboardPolicy> clipboardPolicy() const { return m_clipboardPolicy; }
 
     /**
@@ -130,6 +131,20 @@ public:
     quint64 requestClipboardImage(quint32 maxBytes = ConsoleWorkerWire::MaxClipboardImageBytes);
     /** OPT-077: the same for the host's HTML (a UTF-8 document, at most \a maxBytes up to MaxClipboardHtmlBytes). */
     quint64 requestClipboardHtml(quint32 maxBytes = ConsoleWorkerWire::MaxClipboardHtmlBytes);
+    /**
+     * OPT-078 (wire 21): host-to-client files. requestClipboardFiles() asks the worker to walk the current file copy and send its
+     * FileGroupDescriptorW (\a hugeFiles: the client negotiated files over 4 GiB; the worker skips such files otherwise). The answer
+     * arrives as clipboardDataReceived() of kind Files. lockFiles/unlockFiles pin an offer while the client holds a clipboard lock,
+     * readFile() asks for one range (returns the read id, 0 = refused: not ready, the policy does not allow files, too many reads in
+     * flight, or a backlogged socket) and answers arrive as fileReadFinished(). cancelFiles(0) ends every offer's reads.
+     */
+    quint64 requestClipboardFiles(bool hugeFiles);
+    bool lockFiles(quint64 seq, quint32 clipDataId);
+    bool unlockFiles(quint32 clipDataId);
+    quint64 readFile(quint64 seq, quint32 index, quint64 offset, quint32 length);
+    bool cancelFiles(quint64 seq);
+    /** Reads in flight at most (the broker's own window is far smaller). */
+    static constexpr int MaxFileReads = 64;
     /** The client copied \a text. Returns the set id, 0 = not sent. Ids are endpoint-wide and never reused. */
     quint64 setClipboard(quint64 controlGeneration, const QString &text);
     /** OPT-072: the client copied this PNG (already checked by the broker; the worker checks it again). */
@@ -182,6 +197,10 @@ Q_SIGNALS:
     /** OPT-067: the answer to a requestClipboard() id this endpoint issued and has not forgotten. */
     void clipboardDataReceived(const KRdp::ConsoleWorkerWire::ClipboardData &data);
     void clipboardSetFinished(const KRdp::ConsoleWorkerWire::ClipboardSetResult &result);
+    /** OPT-078: the answer to a readFile() id this endpoint issued and has not forgotten. */
+    void fileReadFinished(const KRdp::ConsoleWorkerWire::FileReadResult &result);
+    /** OPT-078: how much of an offer the worker has read from disk (at most 4 a second; counts only). */
+    void fileProgressed(const KRdp::ConsoleWorkerWire::FileProgress &progress);
     void protocolError(const QString &message);
     /** The worker speaks another paired wire version; always followed by protocolError. */
     void versionMismatch(quint16 workerVersion);
@@ -229,5 +248,7 @@ private:
     quint64 m_nextClipboardId = 0;
     QHash<quint64, ConsoleWorkerWire::ClipboardKind> m_clipboardRequests; // request id -> the kind that was asked for
     QSet<quint64> m_clipboardSets;
+    QHash<quint64, quint64> m_fileReads; // OPT-078: read id -> offer seq, in flight
+    quint64 m_nextFileReadId = 0;
 };
 }

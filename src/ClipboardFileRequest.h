@@ -253,6 +253,12 @@ public:
     {
         return m_violations;
     }
+    /// A new transfer starts: the violations of the last one (and an abort) are forgotten. Locks and outstanding requests are kept.
+    void clearViolations()
+    {
+        m_violations = 0;
+        m_aborted = false;
+    }
     int refused() const
     {
         return m_refused;

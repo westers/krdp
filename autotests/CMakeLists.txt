@@ -1006,7 +1006,7 @@ add_test(NAME StatsRequestTest COMMAND StatsRequestTest)
 # --- end STATS ---
 
 # OPT-078 phase 1: the pure core of clipboard file transfer (sanitizer, descriptor codec, request validator, limits and free-space guard, pacer, QoS table).
-foreach(name ClipboardFileNames ClipboardFileDescriptor ClipboardFileRequest ClipboardFileLimits ClipboardFilePacing ClipboardFileStaging)
+foreach(name ClipboardFileNames ClipboardFileDescriptor ClipboardFileRequest ClipboardFileLimits ClipboardFilePacing ClipboardFileStaging ClipboardFileServe)
     add_executable(${name}Test ${name}Test.cpp)
     target_include_directories(${name}Test PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(${name}Test PRIVATE Qt6::Test Qt6::Core)
