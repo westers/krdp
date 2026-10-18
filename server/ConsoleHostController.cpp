@@ -148,6 +148,9 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         qWarning().noquote() << "Console worker" << m_workerSocket << "ignored SIGTERM for" << KillDeadlineMs << "ms; sending SIGKILL";
         if (m_launchWorker.signal) m_launchWorker.signal(m_workerSocket, SIGKILL);
     });
+    m_leaseRefusalTimer.setSingleShot(true);
+    m_leaseRefusalTimer.setInterval(10000);
+    connect(&m_leaseRefusalTimer, &QTimer::timeout, this, &ConsoleHostController::leaseRefusalElapsed);
     m_retryTimer.setSingleShot(true);
     connect(&m_retryTimer, &QTimer::timeout, this, &ConsoleHostController::retryWorker);
     m_experimentalPhysicalTopology = qEnvironmentVariableIntValue("FARSIDE_EXPERIMENTAL_CONSOLE_TOPOLOGY") == 1;
@@ -170,6 +173,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         // verifies conditional release; its socket disappearing is not proof.
         if (m_pendingPhysical->plan.changed) {
             m_physicalLeaseActive = true;
+            m_leaseConfirmed = true;
             m_physicalLeaseGeneration = result.controlGeneration;
         }
         m_pendingPhysical->waitingReadback = true;
@@ -182,13 +186,22 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
             return;
         }
         m_physicalLeaseActive = false;
+        m_leasePreArmed = false;
+        m_leaseConfirmed = false;
         m_consoleCreatorsActive = false;
         m_configuredConsoleOutputs = false;
         m_physicalLeaseGeneration = 0;
-        // A release the broker asked for (end Replace) is followed by the worker's own exit; start the replacement
-        // at once, with Replace off for this connection, instead of treating the exit as a crash.
-        m_expectedWorkerExit = std::any_of(m_clients.cbegin(), m_clients.cend(), [](const auto &client) { return client->replaceEnding; });
+        // OPT-080: a verified release is followed by the worker's own exit whether the broker asked for it (end Replace)
+        // or the last connection left (the worker releases its outputs and quits as its socket closes). Either way it is
+        // not a crash: start the replacement at once, with Replace off for the connections that ended it, instead of
+        // logging a failure and waiting out the 1000 ms backoff, which is the window a fast reconnect lands in.
+        m_expectedWorkerExit = true;
         endReplaceAttempts("lease released");
+        // A grant refused only because this lease was unverified is retried now that it is verified.
+        if (m_captureRefused && m_handoff.inputEnabled() && m_endpoint.ready()) {
+            qInfo() << "Console lease release verified: granting the capture that was refused";
+            setWorkerActive(true);
+        }
     });
     const auto virtualFinished = [this](quint64 requestId, quint64 generation, const QString &error, bool add) {
         if (!m_pendingVirtual || m_pendingVirtual->serial != requestId
@@ -308,7 +321,19 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         qCDebug(CONSOLE_SCREENS) << "client text set" << result.setId << "status" << int(result.status);
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::workerReady, this, [this](const auto &target) {
+        // OPT-080: a connection that arrived after the launch but before this Ready armed Replace without a worker to
+        // hold anything. That is a plan, not a held lease: capture is granted first, then the lease is taken (below),
+        // exactly as for a connection that arrives after Ready.
+        const bool armedBeforeReady = std::exchange(m_leasePreArmed, false) && m_physicalLeaseActive;
+        if (armedBeforeReady) {
+            m_physicalLeaseActive = false;
+            m_physicalLeaseGeneration = 0;
+        }
         apply(m_handoff.workerReady(target));
+        if (armedBeforeReady && m_configuredConsoleOutputs) {
+            m_physicalLeaseActive = true;
+            m_physicalLeaseGeneration = m_controlGeneration;
+        }
         m_backoff.reset();
         m_failedTarget = {};
         qInfo() << "Console worker ready:" << target.sessionId << "forwarding" << m_inputEnabled;
@@ -471,6 +496,7 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         const bool ownedProjection = m_configuredConsoleOutputs && std::all_of(topology.outputs.cbegin(), topology.outputs.cend(), [](const auto &output) {
             return !output.physical;
         });
+        if (ownedProjection && !topology.outputs.isEmpty()) m_leaseConfirmed = true; // the worker reports outputs it created
         if (topology.outputs.isEmpty() || topology.outputs.size() != m_outputs.monitors.size()
             || (m_configuredConsoleOutputs && (!ownedProjection || topology.complete))
             || (!topology.complete && !ownedProjection && (!selected || topology.outputs.size() != 1))) {
@@ -745,6 +771,8 @@ void ConsoleHostController::clearPhysicalLease(const char *why)
         qInfo() << "Clearing Console physical lease:" << why;
     }
     m_physicalLeaseActive = false;
+    m_leasePreArmed = false;
+    m_leaseConfirmed = false;
     m_consoleCreatorsActive = false;
     m_configuredConsoleOutputs = false;
     m_physicalLeaseGeneration = 0;
@@ -890,9 +918,12 @@ void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
 
 void ConsoleHostController::setWorkerActive(bool active)
 {
+    m_leaseRefusalTimer.stop();
+    m_captureRefused = false;
     if (active && m_physicalLeaseActive) {
         qWarning() << "Refusing Console capture while physical layout lease release is unverified";
         active = false;
+        m_captureRefused = true;
     }
     qInfo() << "Console capture forwarding:" << active;
     if (!active) {
@@ -922,6 +953,33 @@ void ConsoleHostController::setWorkerActive(bool active)
         }
     }
     publishDeviceAvailability();
+    // OPT-080: a refusal needs a later event to end it. The release message is that event; this bounded re-check covers
+    // a lease flag that no longer matches anything the worker holds.
+    if (m_captureRefused) m_leaseRefusalTimer.start();
+}
+
+void ConsoleHostController::leaseRefusalElapsed()
+{
+    if (!m_captureRefused || !m_physicalLeaseActive || m_inputEnabled || !m_handoff.inputEnabled() || m_handoff.draining() || !m_endpoint.ready()) return;
+    // The broker's own evidence of a held lease: the worker reported owned (non-physical) outputs or the broker dispatched a
+    // mutating transaction for it (m_leaseConfirmed), a transaction is in flight, or Replace still waits for readback. The
+    // topology catalog is not used: revoking capture resets it, which is exactly the state a refusal is in. There is no
+    // lease report on the wire; adding one is a wire change. A confirmed lease is only ever ended by the worker's verified
+    // release or its exit, never by this timer.
+    const bool held = m_leaseConfirmed || m_pendingPhysical || m_pendingVirtual || m_layoutAwaitingReadback;
+    if (held) {
+        qInfo() << "Console capture still refused: the worker holds a physical layout lease; waiting for its verified release or exit";
+        return;
+    }
+    qInfo() << "Console capture refused for" << m_leaseRefusalTimer.interval() << "ms by a lease flag that no transaction, readback or owned output backs: clearing it and re-evaluating";
+    m_physicalLeaseActive = false;
+    m_leasePreArmed = false;
+    m_leaseConfirmed = false;
+    m_physicalLeaseGeneration = 0;
+    m_consoleCreatorsActive = false;
+    m_configuredConsoleOutputs = false;
+    endReplaceAttempts("lease flag without evidence");
+    setWorkerActive(true);
 }
 
 bool ConsoleHostController::deviceSessionAvailable() const
@@ -1624,6 +1682,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             // An in-flight creator may survive a failed broker request. Treat
             // the worker as holding a lease until exact release is verified.
             m_physicalLeaseActive = true;
+            m_leaseConfirmed = true;
             m_physicalLeaseGeneration = m_controlGeneration;
             m_physicalDeadline.start();
             const bool sent = add
@@ -2601,6 +2660,8 @@ void ConsoleHostController::armConfiguredConsoleOutputs()
         m_configuredConsoleOutputs = true;
         m_consoleCreatorsActive = true;
         m_physicalLeaseActive = true;
+        m_leasePreArmed = !m_endpoint.ready(); // nothing is held until a worker is Ready (OPT-080)
+        m_leaseConfirmed = false;
         m_physicalLeaseGeneration = m_controlGeneration;
         m_layoutAwaitingReadback = true;
         m_layoutFailedOpen = false;

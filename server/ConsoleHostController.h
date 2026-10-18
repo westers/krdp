@@ -417,6 +417,11 @@ private:
     bool m_consoleCreatorsActive = false;
     bool m_configuredConsoleOutputs = false;
     quint64 m_physicalLeaseGeneration = 0;
+    bool m_leasePreArmed = false; // OPT-080: the lease flag was set before the launch's worker was Ready, so no worker holds it
+    bool m_leaseConfirmed = false; // OPT-080: the worker demonstrably holds the lease (owned outputs reported, or a broker transaction dispatched)
+    bool m_captureRefused = false; // a capture grant was refused for the lease flag and nothing has granted or revoked since
+    void leaseRefusalElapsed();
+    QTimer m_leaseRefusalTimer; // OPT-080: bounded re-evaluation of a capture grant refused for a lease nothing proves is held
     std::optional<PhysicalPreview> m_physicalPreview;
     std::optional<PendingPhysical> m_pendingPhysical;
     std::optional<VirtualPreview> m_virtualPreview;
