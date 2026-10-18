@@ -3968,6 +3968,223 @@ private Q_SLOTS:
         }
     }
 
+private:
+    // OPT-080: Console fast reconnect. A real handoff with a fake launcher and real worker-side sockets, so the order of
+    // launch, client connect, Ready, verified release and exit is the production order.
+    struct ReconnectRig {
+        struct Launch {
+            ConsoleHandoff::Target target;
+            QString socket;
+            QByteArray token;
+        };
+        QTemporaryDir runtime;
+        Server server;
+        QList<Launch> launches;
+        QList<int> signalsSent;
+        ConsoleHostController host{&server,
+            {[this](const ConsoleHandoff::Target &target, const QString &socket, const QByteArray &token, QString *) {
+                 launches.append({target, socket, token});
+                 return true;
+             },
+             [this](const QString &, int signal) { signalsSent.append(signal); }},
+            runtime.path()};
+        std::vector<std::unique_ptr<QLocalSocket>> workers;
+        std::vector<std::unique_ptr<RdpConnection>> connections;
+        const quint32 me = quint32(getuid());
+        QList<QJsonObject> sent;
+
+        ReconnectRig()
+        {
+            host.m_recordSent = [this](RdpConnection *, const QJsonObject &record) { sent.append(record); };
+            host.setUidResolver([this](RdpConnection *) { return std::optional<quint32>(me); });
+            host.setUserSettingsReader([](quint32) { return BrokerUserSettings::parse("[General]\n"); });
+            host.setDisplayInfoProvider([](RdpConnection *) { return monitorBlock(true); });
+            ConsoleSeat::Session session;
+            session.id = u"3"_s; session.uid = me; session.seat = u"seat0"_s; session.type = u"wayland"_s;
+            session.sessionClass = u"user"_s; session.state = u"active"_s; session.active = true;
+            host.setSeatSessions({session});
+        }
+        // The worker of launch `index` authenticates and reports Ready.
+        bool workerUp(int index)
+        {
+            if (launches.size() <= index) return false;
+            auto socket = std::make_unique<QLocalSocket>();
+            socket->connectToServer(launches[index].socket);
+            if (!socket->waitForConnected(1000)) return false;
+            socket->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{launches[index].target.sessionId, me, launches[index].token}));
+            socket->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+            socket->flush();
+            workers.push_back(std::move(socket));
+            return QTest::qWaitFor([this] { return host.m_endpoint.ready(); }, 3000);
+        }
+        ConsoleHostController::Client *connect()
+        {
+            connections.push_back(std::make_unique<RdpConnection>(&server, -1));
+            host.addClient(connections.back().get());
+            auto *client = host.m_clients.back().get();
+            client->uid = me;
+            host.loadUserSettings(*client);
+            client->capabilitiesSent = client->screensAdvertised = true;
+            host.m_control.admit(client->id); host.syncControlState();
+            return client;
+        }
+        void leave(ConsoleHostController::Client *client) { host.removeClient(client->connection.data(), client->id); }
+        // The worker's Replace is up: one owned virtual output and its readback.
+        void replaceUp()
+        {
+            Q_EMIT host.m_endpoint.outputsReceived({{{QStringLiteral("Virtual-owned-0"), QRect(0, 0, 1280, 720), 1, true}}, QPoint(2560, 0)});
+            Q_EMIT host.m_endpoint.topologyReceived({{{QStringLiteral("Virtual-owned-0"), QSize(1280, 720), QRect(2560, 0, 1280, 720), 1, true, 1, false}}, false});
+        }
+        // The worker of launch `index` is gone (its socket closed and the process reaped).
+        void workerExits(int index)
+        {
+            workers.at(size_t(index))->disconnectFromServer();
+            host.workerExited(launches[index].socket);
+        }
+        // A new launch exists: either at once (an exit that followed a verified release) or after the crash backoff.
+        bool launched(int count) { return QTest::qWaitFor([this, count] { return launches.size() >= count; }, 4000); }
+    };
+
+private Q_SLOTS:
+    // The connection that leaves while Replace holds the physical outputs, and one that arrives about a second later
+    // (after the new worker was launched but before it reports Ready), must end with capture forwarded.
+    void fastReconnectAfterReplaceForwardsCapture()
+    {
+        ReconnectRig rig; QCOMPARE(rig.launches.size(), 1);
+        QVERIFY(rig.workerUp(0));
+        auto *a = rig.connect();
+        QVERIFY2(rig.host.m_inputEnabled, "first connection forwards");
+        QVERIFY(a->replaceAttempted); QVERIFY(rig.host.m_physicalLeaseActive);
+        rig.replaceUp();
+        const auto lease = rig.host.m_physicalLeaseGeneration;
+        rig.leave(a);
+        Q_EMIT rig.host.m_endpoint.physicalLeaseReleased({lease, true});
+        QVERIFY(!rig.host.m_physicalLeaseActive);
+        rig.workerExits(0);
+        QVERIFY2(!rig.host.m_retryTimer.isActive(), "a worker that exited after its verified release is not a failure");
+        QVERIFY(rig.launched(2));
+        auto *b = rig.connect(); // the new worker is launched, not yet Ready
+        QVERIFY2(rig.host.m_leasePreArmed, "no worker is ready: the lease is armed, not held");
+        QVERIFY(rig.workerUp(1));
+        QVERIFY2(rig.host.m_inputEnabled, "capture must be forwarded after a fast reconnect");
+        QVERIFY(b->replaceAttempted); QVERIFY(!b->replaceSpent);
+        QVERIFY(rig.host.m_configuredConsoleOutputs); QVERIFY(rig.host.m_physicalLeaseActive);
+        QCOMPARE(rig.host.m_physicalLeaseGeneration, rig.host.m_controlGeneration);
+    }
+
+    // B arrives while the old worker still holds A's outputs; the verified release comes afterwards.
+    void reconnectBeforeTheOldWorkersReleaseArrives()
+    {
+        ReconnectRig rig;
+        QVERIFY(rig.workerUp(0));
+        auto *a = rig.connect(); rig.replaceUp();
+        const auto lease = rig.host.m_physicalLeaseGeneration;
+        rig.leave(a);
+        auto *b = rig.connect();
+        QVERIFY(rig.host.m_control.ownsControl(b->id));
+        QVERIFY(rig.host.m_controlGeneration != lease);
+        Q_EMIT rig.host.m_endpoint.physicalLeaseReleased({lease, true}); // older generation than the pending connection's
+        QVERIFY2(!rig.host.m_physicalLeaseActive, "a verified release clears the lease it names, whatever generation is current");
+        rig.workerExits(0);
+        QVERIFY(rig.launched(2));
+        QVERIFY(rig.workerUp(1));
+        QVERIFY(rig.host.m_inputEnabled);
+        QVERIFY(b->replaceAttempted);
+    }
+
+    // A release for another generation changes nothing; the right one does.
+    void staleReleaseGenerationIsIgnoredAndTheRightOneClears()
+    {
+        ReconnectRig rig;
+        QVERIFY(rig.workerUp(0));
+        auto *a = rig.connect(); rig.replaceUp();
+        const auto lease = rig.host.m_physicalLeaseGeneration;
+        rig.leave(a);
+        auto *b = rig.connect();
+        Q_EMIT rig.host.m_endpoint.physicalLeaseReleased({lease + 50, true});
+        QVERIFY(rig.host.m_physicalLeaseActive);
+        Q_EMIT rig.host.m_endpoint.physicalLeaseReleased({lease, true});
+        QVERIFY(!rig.host.m_physicalLeaseActive);
+        rig.workerExits(0);
+        QVERIFY(rig.launched(2)); QVERIFY(rig.workerUp(1));
+        QVERIFY(rig.host.m_inputEnabled);
+        Q_UNUSED(b);
+    }
+
+    // The worker dies without a verified release while the next connection is pending: crash backoff, then forwarding.
+    void workerExitWithPendingConnectionAndNoReleaseRecovers()
+    {
+        ReconnectRig rig;
+        QVERIFY(rig.workerUp(0));
+        auto *a = rig.connect(); rig.replaceUp();
+        rig.leave(a);
+        auto *b = rig.connect();
+        rig.workerExits(0);
+        QVERIFY2(rig.host.m_retryTimer.isActive(), "a crash still backs off");
+        QVERIFY(!rig.host.m_physicalLeaseActive);
+        QVERIFY(rig.launched(2)); QVERIFY(rig.workerUp(1));
+        QVERIFY(rig.host.m_inputEnabled);
+        QVERIFY(b->replaceAttempted);
+    }
+
+    // Ten connect/Replace/leave/reconnect cycles: each ends with forwarding and the lease belongs to the live connection only.
+    void flappingReconnectTenTimesEndsForwardedWithoutALeakedLease()
+    {
+        ReconnectRig rig;
+        QVERIFY(rig.workerUp(0));
+        auto *current = rig.connect(); rig.replaceUp();
+        for (int i = 0; i < 10; ++i) {
+            QVERIFY2(rig.host.m_inputEnabled, qPrintable(u"cycle %1 forwards"_s.arg(i)));
+            const auto lease = rig.host.m_physicalLeaseGeneration;
+            rig.leave(current);
+            Q_EMIT rig.host.m_endpoint.physicalLeaseReleased({lease, true});
+            rig.workerExits(i);
+            QVERIFY(rig.launched(i + 2));
+            current = rig.connect(); // before the new worker is Ready
+            QVERIFY(rig.workerUp(i + 1));
+            QVERIFY2(rig.host.m_inputEnabled, qPrintable(u"cycle %1 reconnect forwards"_s.arg(i)));
+            QVERIFY(rig.host.m_physicalLeaseActive);
+            QCOMPARE(rig.host.m_physicalLeaseGeneration, rig.host.m_controlGeneration);
+            rig.replaceUp();
+        }
+        const auto lease = rig.host.m_physicalLeaseGeneration;
+        rig.leave(current);
+        Q_EMIT rig.host.m_endpoint.physicalLeaseReleased({lease, true});
+        QVERIFY(!rig.host.m_physicalLeaseActive); QVERIFY(!rig.host.m_configuredConsoleOutputs);
+        QCOMPARE(rig.launches.size(), 11);
+    }
+
+    // A capture refusal for a lease nothing proves is held is re-evaluated after a bounded wait instead of lasting forever.
+    void refusedCaptureForAnUnheldLeaseIsReevaluated()
+    {
+        ReconnectRig rig;
+        QVERIFY(rig.workerUp(0));
+        QVERIFY(rig.host.m_inputEnabled);
+        rig.host.m_leaseRefusalTimer.setInterval(40);
+        // A lease flag no worker report, pending transaction or owned output backs.
+        rig.host.m_physicalLeaseActive = true; rig.host.m_physicalLeaseGeneration = 7;
+        rig.host.setWorkerActive(true);
+        QVERIFY(!rig.host.m_inputEnabled);
+        QTRY_VERIFY_WITH_TIMEOUT(rig.host.m_inputEnabled, 1500);
+        QVERIFY(!rig.host.m_physicalLeaseActive);
+    }
+
+    // The same refusal while the topology shows owned virtual outputs is a lease that really is held: it stays refused.
+    void refusedCaptureForAHeldLeaseStaysRefused()
+    {
+        ReconnectRig rig;
+        QVERIFY(rig.workerUp(0));
+        auto *a = rig.connect(); rig.replaceUp();
+        rig.host.m_leaseRefusalTimer.setInterval(40);
+        QVERIFY(rig.host.configuredOutputTopology()); // the worker's owned outputs are published and verified
+        rig.host.setWorkerActive(false);
+        rig.host.setWorkerActive(true);
+        QVERIFY(!rig.host.m_inputEnabled);
+        QTest::qWait(200);
+        QVERIFY(!rig.host.m_inputEnabled); QVERIFY(rig.host.m_physicalLeaseActive);
+        Q_UNUSED(a);
+    }
+
     void clipboardFilesCapabilityFollowsItsOwnSettingAndTheCeiling()
     {
         const auto files = [](ConsoleClipboardPolicy::Direction setting, ClipboardFilePacing::Ceiling ceiling) {
