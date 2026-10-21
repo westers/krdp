@@ -7,6 +7,7 @@
 #include "PointerCaptureProtocol.h"
 #include "DisplayWakePolicy.h"
 #include "ChromaMerge.h"
+#include "ConsoleReplaceSnapshotGate.h"
 
 #include <QScopeGuard>
 #include "AudioPriority.h"
@@ -2755,12 +2756,28 @@ void ConsoleHostController::syncScreensRecords()
         // so it does not wait for a banner that will not come.
         const bool mappedFailed = !active && !client->screensActiveSent && client->mappedRequest && client->replaceSpent;
         if (!mappedFailed && client->screensActiveSent.value_or(false) == active) continue;
+        const auto sentBefore = client->screensActiveSent;
         client->screensActiveSent = active;
         const QString reason = active ? u"connect"_s : (mappedFailed && client->screensEndReason.isEmpty() ? u"failed"_s : std::exchange(client->screensEndReason, {}));
         LayoutControl::ConsoleScreensDetail detail;
-        if (client->mappedRequest && active) detail = screensDetail(*client);
+        bool planMismatch = false;
+        if (client->mappedRequest && active) detail = screensDetail(*client, &planMismatch);
         else if (mappedFailed) detail.message = u"The host could not replace its screens; they are shown as they are."_s;
         else if (!active && !client->screensHostChangeMessage.isEmpty()) detail.message = std::exchange(client->screensHostChangeMessage, {});
+        if (planMismatch) {
+            // OPT-082: the worker planned from a partial snapshot of the host. Do not announce a Replace that maps fewer screens
+            // than the host has: the worker gives the host's screens back (the verified release of a disconnect) and the
+            // attempt is reported as failed when that release arrives. Asked once; nothing is sent meanwhile.
+            client->screensActiveSent = sentBefore;
+            if (!client->replaceEnding) {
+                qWarning() << "Console Replace aborted: the worker replaced fewer screens than the host has; releasing the temporary"
+                              " monitors and showing the host's real screens";
+                client->replaceEnding = true;
+                client->screensEndReason = u"failed"_s;
+                m_endpoint.reclaimConsole(m_controlGeneration);
+            }
+            continue;
+        }
         sendRecord(client->connection, LayoutControl::consoleScreensRecord(active, active && m_control.ownsControl(client->id), reason, detail));
     }
 }
@@ -2781,7 +2798,7 @@ ConsoleHostController::MappedPrediction ConsoleHostController::predictMapped(con
     return prediction;
 }
 
-LayoutControl::ConsoleScreensDetail ConsoleHostController::screensDetail(const Client &client) const
+LayoutControl::ConsoleScreensDetail ConsoleHostController::screensDetail(const Client &client, bool *planMismatch) const
 {
     LayoutControl::ConsoleScreensDetail detail;
     if (!client.mappedRequest) return detail;
@@ -2792,11 +2809,21 @@ LayoutControl::ConsoleScreensDetail ConsoleHostController::screensDetail(const C
         return detail;
     }
     // Trust the prediction only if the worker really created these outputs (it plans from its own KScreen snapshot).
-    bool consistent = prediction.report.screens.size() == m_outputs.monitors.size();
-    for (qsizetype i = 0; consistent && i < prediction.report.screens.size(); ++i)
-        consistent = m_outputs.monitors[i].name == prediction.report.screens[i].output
-            || m_outputs.monitors[i].name.endsWith(prediction.report.screens[i].output.mid(OutputSnapshot::VirtualPrefix.size()));
-    if (!consistent) {
+    QStringList predicted, created;
+    for (const auto &screen : prediction.report.screens) predicted.append(screen.output);
+    for (const auto &monitor : m_outputs.monitors) created.append(monitor.name);
+    switch (ConsoleReplaceSnapshotGate::agreement(predicted, created)) {
+    case ConsoleReplaceSnapshotGate::Agreement::Consistent:
+        break;
+    case ConsoleReplaceSnapshotGate::Agreement::CountDiffers:
+        // OPT-082: the worker mapped a different number of screens than the same planner predicts for the host's screens (it
+        // planned from a snapshot taken while KWin was still re-adding outputs). Say so, and let the caller end the Replace.
+        qWarning() << "Console screens: the worker's outputs differ from the broker's plan: it created" << created.size()
+                   << "output(s), the plan for the host's screens has" << predicted.size();
+        if (planMismatch) *planMismatch = true;
+        return detail;
+    case ConsoleReplaceSnapshotGate::Agreement::SingleFallback:
+    case ConsoleReplaceSnapshotGate::Agreement::NamesDiffer:
         qWarning() << "Console screens: the worker's outputs differ from the broker's plan; no screens[] in the record";
         return detail;
     }

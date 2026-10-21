@@ -1236,17 +1236,61 @@ private Q_SLOTS:
         QVERIFY(!h.screens().last().value(u"active"_s).toBool()); QVERIFY(!h.screens().last().contains(u"screens"_s));
     }
 
-    void activeRecordOmitsScreensWhenTheWorkerOutputsDiffer()
+    // OPT-082: the worker snapshotted a partial host (one screen of two) and planned one stand-in. The broker no longer
+    // announces an active mapped Replace without screens[]: it has the worker give the host's screens back (the verified
+    // release of a disconnect) and reports a failed attempt, so the user gets all the real screens, with a message.
+    void aWorkerThatMappedFewerScreensThanThePlanEndsTheReplace()
     {
         MappedHarness h("[General]\n", {}, true, 2000, 2);
         QVERIFY(h.askMapped(oneClient(100), u"s2"_s).value(u"ok"_s).toBool());
         h.host.m_inputEnabled = true; h.client->session->setWorkerActive(true);
+        Q_EMIT h.host.m_endpoint.outputsReceived({{{u"Virtual-krdp-h0-1920x1080"_s, QRect(0, 0, 1920, 1080), 1, true}}, QPoint(2560, 0)});
+        Q_EMIT h.host.m_endpoint.topologyReceived({{{u"Virtual-krdp-h0-1920x1080"_s, QSize(1920, 1080), QRect(2560, 0, 1920, 1080), 1, true, 1, false}}, false});
+        h.host.syncScreensRecords();
+        QVERIFY(h.screens().isEmpty()); // no "active" record, no guess about which output replaced which screen
+        QVERIFY(h.client->replaceEnding); QVERIFY(!h.client->replaceSpent); // the worker is releasing first
+        h.host.syncScreensRecords(); // asked once, not on every sync
+        QVERIFY(h.screens().isEmpty());
+        Q_EMIT h.host.m_endpoint.physicalLeaseReleased({h.host.m_controlGeneration, true});
+        QVERIFY(h.client->replaceSpent);
+        QCOMPARE(h.screens().size(), 1);
+        const auto record = h.screens().last();
+        QVERIFY(!record.value(u"active"_s).toBool()); QVERIFY(!record.contains(u"screens"_s));
+        QCOMPARE(record.value(u"reason"_s).toString(), u"failed"_s);
+        QVERIFY(!record.value(u"message"_s).toString().isEmpty());
+        QVERIFY(!h.host.m_configuredConsoleOutputs); // nothing held for this connection any more
+        QVERIFY(!h.policy().enabled);                // the next worker captures the real screens
+    }
+
+    // The worker's own bounded single fallback (one krdp-m* output for every host screen) is a working state: unchanged.
+    void activeRecordOmitsScreensForTheWorkersSingleFallback()
+    {
+        MappedHarness h("[General]\n", {}, true, 2000, 2);
+        QVERIFY(h.askMapped(oneClient(100), u"s2b"_s).value(u"ok"_s).toBool());
+        h.host.m_inputEnabled = true; h.client->session->setWorkerActive(true);
+        const QString single = u"Virtual-krdp-m0-1920x1080"_s;
+        Q_EMIT h.host.m_endpoint.outputsReceived({{{single, QRect(0, 0, 1920, 1080), 1, true}}, QPoint(2560, 0)});
+        Q_EMIT h.host.m_endpoint.topologyReceived({{{single, QSize(1920, 1080), QRect(2560, 0, 1920, 1080), 1, true, 1, false}}, false});
+        h.host.syncScreensRecords();
+        QVERIFY(!h.client->replaceEnding);
+        QCOMPARE(h.screens().size(), 1);
+        QVERIFY(h.screens().last().value(u"active"_s).toBool());
+        QVERIFY(!h.screens().last().contains(u"screens"_s));
+    }
+
+    // Same count, other names: nothing proves the plan wrong, so it is only reported (as before).
+    void activeRecordOmitsScreensWhenTheNamesDiffer()
+    {
+        MappedHarness h("[General]\n", {}, true, 2000, 1);
+        QVERIFY(h.askMapped(oneClient(100), u"s2c"_s).value(u"ok"_s).toBool());
+        h.host.m_inputEnabled = true; h.client->session->setWorkerActive(true);
         Q_EMIT h.host.m_endpoint.outputsReceived({{{u"Virtual-other-0"_s, QRect(0, 0, 1920, 1080), 1, true}}, QPoint(2560, 0)});
         Q_EMIT h.host.m_endpoint.topologyReceived({{{u"Virtual-other-0"_s, QSize(1920, 1080), QRect(2560, 0, 1920, 1080), 1, true, 1, false}}, false});
         h.host.syncScreensRecords();
+        QVERIFY(!h.client->replaceEnding);
         QCOMPARE(h.screens().size(), 1);
         QCOMPARE(h.screens().last().value(u"layout"_s).toString(), u"mapped"_s);
-        QVERIFY(!h.screens().last().contains(u"screens"_s)); // never a guess about which output replaced which screen
+        QVERIFY(!h.screens().last().contains(u"screens"_s));
     }
 
     // ---- OPT-060 M-8: a host monitor plugged in while replaced -------------------------------------------------------

@@ -85,6 +85,7 @@
 #include "RetainedMultiMixedCreatePlan.h"
 #include "VirtualSessionJournal.h"
 #include "VirtualInitialBootstrap.h"
+#include "ConsoleReplaceSnapshotGate.h"
 #include "ConsoleVirtualOutputReadback.h"
 #include "ConsoleVirtualOutputRestore.h"
 #include "ConsoleLockWatch.h"
@@ -534,6 +535,8 @@ public:
         connect(&m_bootstrapPoll, &QTimer::timeout, this, &Worker::pollBootstrap);
         m_consoleVirtualPoll.setInterval(200);
         connect(&m_consoleVirtualPoll, &QTimer::timeout, this, &Worker::pollConsoleVirtual);
+        m_consoleSnapshotPoll.setInterval(ConsoleReplaceSnapshotGate::PollMs);
+        connect(&m_consoleSnapshotPoll, &QTimer::timeout, this, &Worker::pollConsoleSnapshotWait);
         connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, [this] { m_multiSettle.start(); });
         connect(qGuiApp, &QGuiApplication::screenAdded, this, [this](QScreen *screen) {
             hostScreenAdded(screen);
@@ -584,6 +587,7 @@ private:
             return;
         }
         m_stopping = true;
+        cancelConsoleSnapshotWait();
         m_displayWake.setEnabled(false);
         if (m_displayPolicy.current().active) m_displayWake.release();
         m_exitCode = code;
@@ -714,6 +718,54 @@ private:
         if (!beginConsoleCreatorRelease()) shutdown(1);
     }
 
+    void cancelConsoleSnapshotWait()
+    {
+        m_consoleSnapshotPoll.stop();
+        m_consoleSnapshotWait.reset();
+    }
+
+    // OPT-082: one poll of the wait that startConsoleVirtual() begins. Timer driven (the event loop keeps running), bounded
+    // by ConsoleReplaceSnapshotGate::TimeoutMs. Nothing is held or changed here, so giving up has nothing to undo.
+    void pollConsoleSnapshotWait()
+    {
+        if (!m_consoleSnapshotWait) { m_consoleSnapshotPoll.stop(); return; }
+        if (m_stopping || m_mode.virtualSession || !m_authenticatedDesktop || !m_control.active || m_consoleVirtualPlan) {
+            cancelConsoleSnapshotWait(); // The connection ended (or a plan exists already); the next request starts its own wait.
+            return;
+        }
+        const auto json = readKScreenJson();
+        std::optional<QVector<OutputSnapshot::Output>> reading;
+        if (json) {
+            QString error;
+            auto parsed = OutputSnapshot::parse(*json, &error);
+            if (error.isEmpty()) reading = std::move(parsed);
+        }
+        const auto verdict = m_consoleSnapshotWait->observe(reading, m_consoleSnapshotAge.elapsed());
+        switch (verdict.state) {
+        case ConsoleReplaceSnapshotGate::State::Wait:
+            return;
+        case ConsoleReplaceSnapshotGate::State::Ready:
+            if (!verdict.unexpected.isEmpty())
+                qInfo().noquote() << "Console outputs: also enabled in kscreen but not captured:" << verdict.unexpected.join(QLatin1String(", "));
+            qInfo() << "Console outputs: the host's outputs are all listed by kscreen after" << m_consoleSnapshotAge.elapsed() << "ms";
+            m_consoleSnapshotExpected = m_consoleSnapshotWait->expected();
+            cancelConsoleSnapshotWait();
+            m_consoleSnapshotWaited = true;
+            startConsoleVirtual();
+            m_consoleSnapshotWaited = false;
+            m_consoleSnapshotExpected.clear();
+            return;
+        case ConsoleReplaceSnapshotGate::State::TimedOut: {
+            const QString reason = ConsoleReplaceSnapshotGate::timeoutReason(verdict, !reading);
+            cancelConsoleSnapshotWait();
+            // Fail open like every other early refusal: no hold, no creator, no display change has happened, so the
+            // broker's normal reaction (a replacement worker with Replace off) gives the user all the real screens.
+            failConsoleVirtual(QStringLiteral("%1; not replacing the host's screens").arg(reason));
+            return;
+        }
+        }
+    }
+
     void startConsoleVirtual()
     {
         if (m_mode.virtualSession || !m_authenticatedDesktop || m_stopping || !m_control.active
@@ -721,6 +773,24 @@ private:
         if (m_outputRecoveryUnverified) {
             failConsoleVirtual(QStringLiteral("output recovery is unverified; capturing the lit outputs without creating Console monitors"));
             return;
+        }
+        if (m_consoleSnapshotWait) return; // already waiting for the host's outputs; that wait ends in startConsoleVirtual()
+        if (!std::exchange(m_consoleSnapshotWaited, false)) {
+            // OPT-082: after a display wake KWin removes and re-adds the physical outputs for a few seconds. Do not snapshot
+            // (and then plan, hold and replace) a host that is only partly back: wait until every output this worker is
+            // capturing is connected and enabled in kscreen, or give up on Replace.
+            QStringList captured;
+            for (const auto *screen : qGuiApp->screens()) captured.append(screen->name());
+            ConsoleReplaceSnapshotGate::Waiter wait(captured);
+            if (!wait.expected().isEmpty()) {
+                qInfo().noquote() << "Console outputs: waiting for the host's output(s)" << wait.expected().join(QLatin1String(", "))
+                                  << "to be listed by kscreen before the snapshot";
+                m_consoleSnapshotWait = std::move(wait);
+                m_consoleSnapshotAge.start();
+                m_consoleSnapshotPoll.start();
+                pollConsoleSnapshotWait();
+                return;
+            }
         }
         invalidateConsoleCapture();
         const auto json = readKScreenJson();
@@ -736,6 +806,12 @@ private:
         const auto inventory = OutputSnapshot::parse(*json);
         const auto panels = OutputSnapshot::physicalOnly(inventory);
         const bool physical = std::any_of(panels.cbegin(), panels.cend(), [](const auto &o) { return o.enabled; });
+        if (const auto missing = ConsoleReplaceSnapshotGate::missingNames(m_consoleSnapshotExpected, panels); !missing.isEmpty()) {
+            // The wait saw them and the outputs went away again before this read: nothing is held yet, so nothing to undo.
+            failConsoleVirtual(QStringLiteral("host output(s) %1 vanished from kscreen before the snapshot; not replacing the host's screens")
+                .arg(missing.join(QLatin1String(", "))));
+            return;
+        }
         if (physical && !m_consoleOutputGuard.beginLayoutControl()) {
             failConsoleVirtual(QStringLiteral("cannot hold physical outputs before Console monitor creation")); return;
         }
@@ -3705,6 +3781,11 @@ private:
     std::optional<OutputRestoreJournal::Entry> m_consoleVirtualRelease;
     std::unique_ptr<PlasmaScreencastV1Session> m_consoleVirtualCreator;
     QTimer m_consoleVirtualPoll;
+    QTimer m_consoleSnapshotPoll; // OPT-082
+    QElapsedTimer m_consoleSnapshotAge;
+    std::optional<ConsoleReplaceSnapshotGate::Waiter> m_consoleSnapshotWait;
+    QStringList m_consoleSnapshotExpected; // the names the wait confirmed; the snapshot must contain them too
+    bool m_consoleSnapshotWaited = false;  // set only for the startConsoleVirtual() call that follows a finished wait
     QElapsedTimer m_consoleVirtualAge;
     QElapsedTimer m_replaceAppliedAt; // M-8: when the host's screens were turned off
     QElapsedTimer m_consoleVirtualSettle;

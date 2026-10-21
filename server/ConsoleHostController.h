@@ -212,7 +212,7 @@ private:
     MappedPrediction predictMapped(const LayoutControl::ConsoleScreensMappedRequest &request) const;
     void handleMappedScreensRequest(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
     void handleScreensView(RdpConnection *connection, ConsoleControl::Id id, const QJsonObject &record);
-    LayoutControl::ConsoleScreensDetail screensDetail(const Client &client) const;
+    LayoutControl::ConsoleScreensDetail screensDetail(const Client &client, bool *planMismatch = nullptr) const;
     bool mappedGraceHeld(Client &client, const ClientDisplay::Info &block);
     void expireMappedGrace(ConsoleControl::Id id);
     bool hasControlChannel(RdpConnection *connection) const;

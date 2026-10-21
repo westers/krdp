@@ -458,6 +458,11 @@ target_include_directories(ConsoleVirtualOutputPlanTest PRIVATE ${CMAKE_SOURCE_D
 target_link_libraries(ConsoleVirtualOutputPlanTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
 add_test(NAME ConsoleVirtualOutputPlanTest COMMAND ConsoleVirtualOutputPlanTest)
 
+add_executable(ConsoleReplaceSnapshotGateTest ConsoleReplaceSnapshotGateTest.cpp)
+target_include_directories(ConsoleReplaceSnapshotGateTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+target_link_libraries(ConsoleReplaceSnapshotGateTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
+add_test(NAME ConsoleReplaceSnapshotGateTest COMMAND ConsoleReplaceSnapshotGateTest)
+
 add_executable(ConsoleReleaseLockGuardTest ConsoleReleaseLockGuardTest.cpp)
 target_include_directories(ConsoleReleaseLockGuardTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(ConsoleReleaseLockGuardTest PRIVATE Qt6::Test Qt6::Core)
