@@ -172,6 +172,38 @@ class ConsoleHostControllerTest : public QObject
         }
     };
 
+    // OPT-081: a query-only KRDPCTL client ("Refresh from host") authenticates and opens the control channel but loads no
+    // DRDYNVC, so it never reaches Streaming and is never admitted. The worker is Ready and has published its outputs.
+    struct QueryRig {
+        MappedHarness base;
+        QLocalSocket worker;
+        QByteArray token = QByteArray(32, 'x');
+        bool authenticated = true;
+        explicit QueryRig(bool workerReady = true, bool admit = false)
+            : base("[General]\n", {}, true, 2000, 2, ConsoleSeat::Adapter::PhysicalUser, true, admit)
+        {
+            base.host.m_authenticatedOf = [this](RdpConnection *) { return authenticated; };
+            if (!workerReady) return;
+            worker.connectToServer(base.host.m_endpoint.socketName());
+            QVERIFY(worker.waitForConnected(1000));
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), 1000, token})
+                         + ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+            worker.flush();
+            QTRY_VERIFY_WITH_TIMEOUT(base.host.m_endpoint.ready(), 3000);
+            // One output: several would hold the layout back until the worker confirms the topology.
+            Q_EMIT base.host.m_endpoint.outputsReceived({{{u"DP-1"_s, QRect(0, 0, 2560, 1440), 1, true}}, QPoint(0, 0)});
+        }
+        // The record the request itself answers: the last one that carries its requestId (others may follow it).
+        QJsonObject send(const QString &type, const QString &requestId, int version = 1)
+        {
+            base.sent.clear();
+            base.host.onControlRecord(&base.connection, base.client->id, QJsonObject{{u"type"_s, type}, {u"v"_s, version}, {u"requestId"_s, requestId}});
+            for (qsizetype i = base.sent.size() - 1; i >= 0; --i)
+                if (base.sent.at(i).value(u"requestId"_s).toString() == requestId) return base.sent.at(i);
+            return {};
+        }
+    };
+
     struct DeskHarness {
         MappedHarness base;
         RdpConnection viewerConnection{&base.server, -1};
@@ -4183,6 +4215,134 @@ private Q_SLOTS:
         QTest::qWait(200);
         QVERIFY(!rig.host.m_inputEnabled); QVERIFY(rig.host.m_physicalLeaseActive);
         Q_UNUSED(a);
+    }
+
+    void unadmittedQueryGetsTheLayoutAsAViewer()
+    {
+        QueryRig h;
+        QVERIFY(!h.base.host.m_control.admitted(h.base.client->id));
+        const auto reply = h.send(u"query"_s, u"q1"_s);
+        QCOMPARE(reply.value(u"type"_s).toString(), u"layout"_s);
+        QCOMPARE(reply.value(u"requestId"_s).toString(), u"q1"_s);
+        QCOMPARE(reply.value(u"monitors"_s).toArray().size(), 1);
+        QCOMPARE(reply.value(u"you"_s).toString(), u"viewer"_s);
+        // Read-only: no role, ownership or admission change.
+        QVERIFY(!h.base.host.m_control.admitted(h.base.client->id));
+        QVERIFY(!h.base.host.m_control.ownsControl(h.base.client->id));
+        QCOMPARE(h.base.host.m_control.owner(), quint64(0));
+    }
+
+    void unadmittedQueryDoesNotDisturbTheController()
+    {
+        QueryRig h(true, true); // the first client is the admitted controller
+        QVERIFY(h.base.host.m_control.ownsControl(h.base.client->id));
+        const auto controller = h.base.client->id;
+        RdpConnection queryConnection(&h.base.server, -1);
+        h.base.host.addClient(&queryConnection);
+        auto *query = h.base.host.m_clients.back().get();
+        query->uid = 1000; h.base.host.loadUserSettings(*query); query->capabilitiesSent = true;
+        h.base.sent.clear();
+        h.base.host.onControlRecord(&queryConnection, query->id, QJsonObject{{u"type"_s, u"query"_s}, {u"v"_s, 1}, {u"requestId"_s, u"q2"_s}});
+        QVERIFY(!h.base.sent.isEmpty());
+        const auto reply = h.base.sent.last();
+        QCOMPARE(reply.value(u"type"_s).toString(), u"layout"_s);
+        QCOMPARE(reply.value(u"requestId"_s).toString(), u"q2"_s);
+        QCOMPARE(reply.value(u"you"_s).toString(), u"viewer"_s);
+        QCOMPARE(reply.value(u"owner"_s).toString(), QString::number(controller));
+        QVERIFY(h.base.host.m_control.ownsControl(controller));
+        QVERIFY(!h.base.host.m_control.admitted(query->id));
+        QCOMPARE(h.base.host.m_control.owner(), controller);
+    }
+
+    void unadmittedQueryGetsAnExplicitErrorWhenNoLayoutCanBeProduced()
+    {
+        const auto expectUnavailable = [](const QJsonObject &reply, const QString &id) {
+            QCOMPARE(reply.value(u"type"_s).toString(), u"error"_s);
+            QCOMPARE(reply.value(u"code"_s).toString(), u"unavailable"_s);
+            QCOMPARE(reply.value(u"requestId"_s).toString(), id);
+            QVERIFY(!reply.value(u"message"_s).toString().isEmpty());
+        };
+        { // No worker yet: nothing to describe.
+            QueryRig h(false);
+            expectUnavailable(h.send(u"query"_s, u"e1"_s), u"e1"_s);
+        }
+        { // A worker that is Ready but has not published monitors.
+            QueryRig h;
+            h.base.host.m_outputs = {};
+            expectUnavailable(h.send(u"query"_s, u"e2"_s), u"e2"_s);
+        }
+        { // A layout change is in flight.
+            QueryRig h;
+            h.base.host.m_pendingVirtual = ConsoleHostController::PendingVirtual{};
+            expectUnavailable(h.send(u"query"_s, u"e3"_s), u"e3"_s);
+        }
+        { // Waiting for the post-change readback.
+            QueryRig h;
+            h.base.host.m_layoutAwaitingReadback = true;
+            expectUnavailable(h.send(u"query"_s, u"e4"_s), u"e4"_s);
+        }
+    }
+
+    void unadmittedQueryStillNeedsAuthenticationAndAnAllowedAccount()
+    {
+        { // Not authenticated: today's silence, nothing about the console's monitors leaks.
+            QueryRig h;
+            h.authenticated = false;
+            QVERIFY(h.send(u"query"_s, u"a1"_s).isEmpty());
+        }
+        { // Authenticated but the seat shows another account's unlocked desktop: refused, not described.
+            QueryRig h;
+            ConsoleSeat::Session other;
+            other.id = u"3"_s; other.uid = 2000; other.seat = u"seat0"_s; other.type = u"wayland"_s;
+            other.sessionClass = u"user"_s; other.state = u"active"_s; other.active = true; other.locked = false;
+            h.base.host.m_sessions = {other};
+            const auto reply = h.send(u"query"_s, u"a2"_s);
+            QCOMPARE(reply.value(u"type"_s).toString(), u"error"_s);
+            QCOMPARE(reply.value(u"code"_s).toString(), u"not-owner"_s);
+            QVERIFY(!reply.contains(u"monitors"_s));
+        }
+        { // A v2 request with the wrong version keeps its invalid refusal.
+            QueryRig h;
+            QCOMPARE(h.send(u"query"_s, u"a3"_s, 2).value(u"code"_s).toString(), u"invalid"_s);
+        }
+    }
+
+    void unadmittedNonQueryRequestsKeepTheirBehaviour()
+    {
+        QueryRig h;
+        // `apply` from a client that is not admitted is still refused as unsupported and still arms the layout wish.
+        const auto apply = h.send(u"apply"_s, u"n1"_s);
+        QCOMPARE(apply.value(u"type"_s).toString(), u"error"_s);
+        QCOMPARE(apply.value(u"code"_s).toString(), u"unsupported"_s);
+        QVERIFY(h.base.client->wantsLayout);
+        QCOMPARE(h.base.client->layoutRequestId, u"n1"_s);
+        // `attach` (target physical) is not answered before admission: it waits for the layout at admission.
+        h.base.client->wantsLayout = false; h.base.client->layoutRequestId.clear();
+        h.base.sent.clear();
+        h.base.host.onControlRecord(&h.base.connection, h.base.client->id,
+                                    QJsonObject{{u"type"_s, u"attach"_s}, {u"v"_s, 1}, {u"target"_s, u"physical"_s}, {u"requestId"_s, u"n3"_s}});
+        QVERIFY(h.base.sent.isEmpty());
+        QVERIFY(h.base.client->wantsLayout);
+        QCOMPARE(h.base.client->layoutRequestId, u"n3"_s);
+        // console-control still needs a streaming connection.
+        const auto control = h.send(u"console-control"_s, u"n2"_s);
+        QCOMPARE(control.value(u"type"_s).toString(), u"error"_s);
+        QCOMPARE(control.value(u"code"_s).toString(), u"invalid"_s); // no `action`: the strict parser answers first
+        QVERIFY(!h.base.host.m_control.admitted(h.base.client->id));
+    }
+
+    void admittedQueryIsAnsweredAsBeforeWithItsRole()
+    {
+        QueryRig h(true, true);
+        const auto reply = h.send(u"query"_s, u"p1"_s);
+        QCOMPARE(reply.value(u"type"_s).toString(), u"layout"_s);
+        QCOMPARE(reply.value(u"requestId"_s).toString(), u"p1"_s);
+        QCOMPARE(reply.value(u"you"_s).toString(), u"owner"_s);
+        QCOMPARE(reply.value(u"monitors"_s).toArray().size(), 1);
+        // Not ready: an admitted client keeps waiting for the next layout, as before (no error record).
+        QueryRig waiting(false, true);
+        QVERIFY(waiting.send(u"query"_s, u"p2"_s).isEmpty());
+        QVERIFY(waiting.base.client->wantsLayout);
     }
 
     void clipboardFilesCapabilityFollowsItsOwnSettingAndTheCeiling()

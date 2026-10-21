@@ -1958,6 +1958,18 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             replyTo(connection, LayoutControl::errorRecord({u"invalid"_s, u"console attach requires v1 and target physical"_s}));
             return;
         }
+        if (type == u"query"_s && !m_control.admitted(id)) {
+            // OPT-081: a query-only client ("Refresh from host") never reaches Streaming, so it is never admitted.
+            // It gets its answer now; wantsLayout stays armed without the requestId, so a client that is merely
+            // early (admitted a moment later) still hears the layout with its real role at admission.
+            for (const auto &client : m_clients) {
+                if (client->id == id) {
+                    client->wantsLayout = true;
+                    answerUnadmittedQuery(*client);
+                }
+            }
+            return;
+        }
         for (const auto &client : m_clients) {
             if (client->id == id) {
                 client->wantsLayout = true;
@@ -2324,11 +2336,11 @@ void ConsoleHostController::sendCapabilities(Client &client)
     sendRecord(client.connection, LayoutControl::capabilitiesRecord(capabilities));
 }
 
-void ConsoleHostController::sendLayouts()
+std::optional<LayoutControl::Layout> ConsoleHostController::currentLayout() const
 {
     if (m_outputs.monitors.isEmpty() || !m_endpoint.ready() || m_layoutAwaitingReadback
         || m_pendingPhysical || m_pendingVirtual) {
-        return;
+        return std::nullopt;
     }
     LayoutControl::Layout layout;
     for (const auto &output : m_outputs.monitors) {
@@ -2342,6 +2354,38 @@ void ConsoleHostController::sendLayouts()
         layout.monitors.append(monitor);
     }
     layout.owner = m_control.owner() ? QString::number(m_control.owner()) : QString();
+    return layout;
+}
+
+void ConsoleHostController::answerUnadmittedQuery(Client &client)
+{
+    // Read-only: the caller is authenticated (capabilities are gated the same way) but holds no console role, so it
+    // describes the desktop as a viewer and changes nothing: no admission, control, topology or layout state.
+    if (!client.connection) return;
+    if (!(m_authenticatedOf ? m_authenticatedOf(client.connection) : client.connection->isAuthenticated())) return;
+    client.uid = m_uidOf(client.connection);
+    if (!admissible(client)) {
+        replyTo(client.connection, LayoutControl::errorRecord({u"not-owner"_s, u"this account may not use the physical console now"_s}));
+        return;
+    }
+    auto layout = currentLayout();
+    if (!layout) {
+        replyTo(client.connection, LayoutControl::errorRecord({u"unavailable"_s, u"the console layout is not available yet; try again shortly"_s}));
+        return;
+    }
+    layout->you = u"viewer"_s;
+    auto record = LayoutControl::layoutRecord(*layout);
+    record.insert(u"consoleResize"_s, !m_configuredConsoleOutputs); // as for admitted clients; resizing itself needs the owner role
+    replyTo(client.connection, record);
+}
+
+void ConsoleHostController::sendLayouts()
+{
+    auto described = currentLayout();
+    if (!described) {
+        return;
+    }
+    LayoutControl::Layout &layout = *described;
     // FIX-CURSOR: the worker forwards the console's cursor shape (Cursor records), so the
     // default caps.cursorMetadata = true is now true here too.
     for (const auto &client : m_clients) {
@@ -2349,7 +2393,7 @@ void ConsoleHostController::sendLayouts()
             layout.you = m_control.ownsControl(client->id) ? u"owner"_s : u"viewer"_s;
             auto record = LayoutControl::layoutRecord(layout);
             record.insert(u"consoleResize"_s, !m_configuredConsoleOutputs);
-            client->connection->sendControlRecord(LayoutControl::withRequestId(record, std::exchange(client->layoutRequestId, {})));
+            sendRecord(client->connection, LayoutControl::withRequestId(record, std::exchange(client->layoutRequestId, {})));
             if (m_control.ownsControl(client->id) && !m_endpoint.pointerState().isEmpty()) {
                 auto state = m_endpoint.pointerState(); state.remove(u"id"_s); replyTo(client->connection, state);
             }

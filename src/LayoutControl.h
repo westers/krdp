@@ -116,7 +116,9 @@ struct ApplyRequest {
 };
 
 /**
- * The `error` record body. `code` is one of "not-owner" | "invalid" | "unsupported" | "released".
+ * The `error` record body. `code` is one of "not-owner" | "invalid" | "unsupported" | "released" | "unavailable".
+ * "unavailable": transient, the host cannot describe its desktop yet (a Console `query` before the worker
+ * published its monitors, or while a layout change is in flight); ask again shortly.
  * "released": an apply the server abandoned because the desk took its screens back while it was
  * executing; a `takeover` record follows.
  */
