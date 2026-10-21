@@ -260,6 +260,10 @@ private:
     bool anyDeskSubscriber() const;
     qint64 deskNow() const;
     void sendLayouts();
+    /** The layout `query` describes, or nothing while no monitors are known, the worker is not Ready or a change is in flight. */
+    std::optional<LayoutControl::Layout> currentLayout() const;
+    /** OPT-081: read-only answer (a viewer's `layout` or an explicit `error`) for a `query` from a connection that is not admitted. */
+    void answerUnadmittedQuery(Client &client);
     void finishTopologyQueries(const QString &error = {});
     void releaseInput();
     void syncControlState();
