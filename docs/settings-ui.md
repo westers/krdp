@@ -270,15 +270,26 @@ not establish that the design is acceptable.
   account preferences. Environment `FARSIDE_{CONSOLE,VIRTUAL}_CLIPBOARD_FILES` and `..._CLIPBOARD_FILE_MAX_RATE`, options `--clipboard-files` and
   `--clipboard-file-max-rate`, examples in `server/{console,virtual}-host.conf.example`, defaults in both unit files. Read when the service starts.
 - `ClipboardFiles` has the four spellings of `ClipboardDirection` (`both` default, `host-to-client`, `client-to-host`, `off`) and is ANDed with it: a
-  narrowed clipboard direction narrows files too. Only host to client exists in this wire (21); "Client to host only" is labelled "not available yet".
+  narrowed clipboard direction narrows files too. Both directions exist since wire 22 (OPT-078 phase 3); the KRDPCTL capabilities
+  `clipboard.files` says which halves this host offers (`hostToClient`, `clientToHost`).
   `off` also turns the cliprdr file capability flags off for every connection, so a client sees no file support at all.
 - `ClipboardFileMaxRate` is the most one connection's file transfers may take of the link: `auto` (default, no ceiling beyond the pacer's own
   yielding to video and audio), `balanced` (about half of what the link can carry) or a rate in MB/s from 0.1 to 1000 (`5`, `2.5`). A client may choose
   a mode below the ceiling with the KRDPCTL `clipboard-transfer` record; `unlimited` is honoured only with `auto`. It is a text field (Advanced).
-- State rules (`server/ConsoleClipboardPolicy.h`): the login screen shares no files; a locked desktop still serves host-to-client files (a transfer
-  that is already running is never cut by the lock); another account's lock screen and a viewer connection share nothing; Virtual is always the owner.
-- `ClipboardFileMinFreeBytes` of the design is not a key yet: its only user is the client-to-host staging guard (next phase), and a key that does
-  nothing would be a setting that lies.
+- State rules (`server/ConsoleClipboardPolicy.h`): the login screen shares no files; a locked desktop still serves host-to-client files and refuses a
+  NEW client-to-host transfer (a transfer that is already running is never cut by the lock, and what it staged stays pasteable); another account's
+  lock screen and a viewer connection share nothing; Virtual is always the owner.
+- `ClipboardFileMinFreeBytes` (phase 3) is the free disk space that must remain on the host after files are copied TO it: a size in bytes or a whole
+  number with `K`, `M`, `G` or `T` (powers of 1024; `512M`, `5G`), up to 16 TiB, `0` (default) = the larger of 2 GiB and 5% of the filesystem. Environment
+  `FARSIDE_{CONSOLE,VIRTUAL}_CLIPBOARD_FILE_MIN_FREE`, option `--clipboard-file-min-free`, KCM "Free space to keep" (Advanced text field, "Sharing"
+  section). It travels with every offer to the worker, which checks it before the first byte (the declared total plus the reserve must fit, else the
+  copy is refused with the numbers) and every 64 MiB (a disk that fills mid-way aborts the copy and deletes the partial). The strict spelling is
+  `ClipboardTransfer::parseMinFree`.
+- Staging (client to host): `~/.cache/krdp-clip/c-<hex>/<seq>/` of the user the worker runs as (the home filesystem, never tmpfs, fixed, not a
+  setting), mode 0700, files 0600 without an execute bit, `name.part` renamed when complete. Removed when a newer copy replaces it, when the
+  connection ends or control moves, when the worker exits, by the next worker's start-up sweep after a crash (an instance's flock tells a live worker
+  from a dead one) and after 24 h. The user gets a desktop notification when staging starts and when it is refused or fails (sizes and a reason, never
+  file names).
 
 ## System services in new Virtual desktops (OPT-075)
 

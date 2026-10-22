@@ -34,7 +34,8 @@ QList<Field> fields(Scope scope)
         {u"SoftwareAvc"_s, "SOFTWARE_AVC", "auto"}, {u"SoftwareHevc"_s, "SOFTWARE_HEVC", "auto"}, {u"SoftwareAv1"_s, "SOFTWARE_AV1", "auto"},
         {u"Av1Tiles"_s, "AV1_TILES", "auto"},
         {u"ClipboardDirection"_s, "CLIPBOARD_DIRECTION", "both"},
-        {u"ClipboardFiles"_s, "CLIPBOARD_FILES", "both"}, {u"ClipboardFileMaxRate"_s, "CLIPBOARD_FILE_MAX_RATE", "auto"}};
+        {u"ClipboardFiles"_s, "CLIPBOARD_FILES", "both"}, {u"ClipboardFileMaxRate"_s, "CLIPBOARD_FILE_MAX_RATE", "auto"},
+        {u"ClipboardFileMinFreeBytes"_s, "CLIPBOARD_FILE_MIN_FREE", "0"}};
     if (scope == Scope::Console) result.append({u"VaapiDriver"_s, "VAAPI_DRIVER", "auto"});
     return result;
 }
@@ -205,6 +206,9 @@ std::optional<QString> normalize(Scope scope, const QString &key, const QString 
     } else if (key == u"ClipboardFileMaxRate") {
         // OPT-078: the most a file transfer may take of the link: auto, balanced, or MB/s from 0.1 to 1000.
         return KRdp::ClipboardTransfer::normalizeCeiling(value);
+    } else if (key == u"ClipboardFileMinFreeBytes") {
+        // OPT-078 phase 3: the free space that must remain on the host after a client-to-host copy: whole bytes or a number with K, M, G or T; 0 = the built-in rule.
+        return KRdp::ClipboardTransfer::normalizeMinFree(value);
     } else if (scope == Scope::VirtualSession && !VirtualSystemBus::environmentName(key).isEmpty()) {
         return VirtualSystemBus::normalizeValue(key, value);
     } else if (key == u"VaapiDriver") {

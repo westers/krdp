@@ -119,4 +119,29 @@ inline std::optional<ClipboardFilePacing::Ceiling> parseCeiling(const QString &v
     if (*normal == QLatin1String("balanced")) return ClipboardFilePacing::Ceiling::balanced();
     return ClipboardFilePacing::Ceiling::rate(quint64(std::llround(normal->toDouble() * 1'000'000.0)));
 }
+
+// ---- the free-space reserve (ClipboardFileMinFreeBytes, phase 3) ----
+
+/// ClipboardFileMinFreeBytes: the free space that must remain on the host after a client-to-host copy. Whole bytes, or a whole number with one unit
+/// suffix K, M, G or T (powers of 1024); `0` means the built-in rule max(2 GiB, 5% of the filesystem). Up to 16 TiB. No sign, no decimals, no
+/// leading zeros, no spaces, no case folding. nullopt for anything else.
+inline std::optional<quint64> parseMinFree(const QString &value)
+{
+    static const QRegularExpression pattern(QStringLiteral("^(0|[1-9][0-9]{0,13})([KMGT]?)$"));
+    const auto match = pattern.match(value);
+    if (!match.hasMatch()) return std::nullopt;
+    bool ok = false;
+    const quint64 number = match.captured(1).toULongLong(&ok);
+    if (!ok) return std::nullopt;
+    const QString unit = match.captured(2);
+    const int shift = unit.isEmpty() ? 0 : unit == QLatin1String("K") ? 10 : unit == QLatin1String("M") ? 20 : unit == QLatin1String("G") ? 30 : 40;
+    constexpr quint64 Max = 16ULL << 40;
+    if (number > (Max >> shift)) return std::nullopt;
+    return number << shift;
+}
+
+inline std::optional<QString> normalizeMinFree(const QString &value)
+{
+    return parseMinFree(value) ? std::optional<QString>(value) : std::nullopt;
+}
 }
