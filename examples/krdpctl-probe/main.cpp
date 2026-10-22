@@ -138,6 +138,9 @@
 #include <QDateTime>
 #include <QDeadlineTimer>
 #include <QDir>
+#include <QDirIterator>
+#include <fcntl.h>
+#include <unistd.h>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -239,6 +242,10 @@ struct Probe {
     int filesPauseMs = 0;
     bool filesHostile = false;
     bool filesNoLock = false;
+    // --clipboard push (OPT-078 phase 3): a client that COPIES the files under pushFrom to the server.
+    QString pushFrom;
+    bool pushHostileName = false; ///< also list an entry with a traversal name
+    bool pushFailRead = false; ///< answer the first range request with a failure (a file that changed under the client)
     quint32 filesFlags = CB_USE_LONG_FORMAT_NAMES | CB_STREAM_FILECLIP_ENABLED | CB_FILECLIP_NO_FILE_PATHS | CB_CAN_LOCK_CLIPDATA | CB_HUGE_FILE_SUPPORT_ENABLED;
     /** --clipboard stall: a data request arrived; the main loop stops reading. */
     std::atomic<bool> clipboardStalled = false;
@@ -813,6 +820,193 @@ UINT probeClipboardServerFormatDataRequest(CliprdrClientContext *cliprdr, const 
 }
 
 
+// ---- --clipboard push: a client that copies ITS files to the server (OPT-078 phase 3) ----
+//
+// Announces the files under `--push-from DIR` (FileGroupDescriptorW + FileContents), answers the descriptor request, the server's lock/unlock and
+// its FILECONTENTS (SIZE and RANGE, 64-bit offsets) requests from the local files. Every line a test checks starts with `PUSH`:
+//   PUSH caps server=0x.. offered=0x..
+//   PUSH announced items=N
+//   PUSH descriptor items=N bytes=B
+//   PUSH lock id=N / PUSH unlock id=N
+//   PUSH request stream=S index=I flags=F offset=O length=L lock=ID|none
+//   PUSH withdrawn
+// `--push-hostile-name` adds an entry named `..\evil`; `--push-fail-read` answers the first range with a failure.
+struct PushProbe {
+    std::mutex mutex;
+    UINT32 serverFlags = 0;
+    UINT32 formatId = 0xC0A1;
+    struct Source {
+        QString relative; ///< '\\' separators
+        QString absolute;
+        bool directory = false;
+        quint64 size = 0;
+    };
+    std::vector<Source> sources;
+    int failedReads = 0;
+};
+PushProbe g_push;
+
+void pushScan(const QString &root, bool hostile)
+{
+    g_push.sources.clear();
+    QDir base(root);
+    QDirIterator it(root, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden, QDirIterator::Subdirectories);
+    std::vector<PushProbe::Source> found;
+    while (it.hasNext()) {
+        it.next();
+        PushProbe::Source source;
+        source.relative = base.relativeFilePath(it.filePath());
+        source.relative.replace(QLatin1Char('/'), QLatin1Char('\\'));
+        source.absolute = it.filePath();
+        source.directory = it.fileInfo().isDir();
+        source.size = source.directory ? 0 : quint64(it.fileInfo().size());
+        found.push_back(source);
+    }
+    // a directory always before what is inside it
+    std::sort(found.begin(), found.end(), [](const auto &a, const auto &b) { return a.relative < b.relative; });
+    g_push.sources = std::move(found);
+    if (hostile) {
+        PushProbe::Source evil;
+        evil.relative = QStringLiteral("..\\evil");
+        evil.absolute = QString();
+        evil.size = 3;
+        g_push.sources.push_back(evil);
+    }
+}
+
+UINT pushAnnounce(CliprdrClientContext *cliprdr)
+{
+    static char fileGroup[] = "FileGroupDescriptorW";
+    static char fileContents[] = "FileContents";
+    CLIPRDR_FORMAT formats[2] = {};
+    formats[0].formatId = g_push.formatId;
+    formats[0].formatName = fileGroup;
+    formats[1].formatId = g_push.formatId + 1;
+    formats[1].formatName = fileContents;
+    CLIPRDR_FORMAT_LIST list{};
+    list.common.msgType = CB_FORMAT_LIST;
+    list.numFormats = 2;
+    list.formats = formats;
+    const UINT rc = cliprdr->ClientFormatList(cliprdr, &list);
+    logf("PUSH announced items=%zu", g_push.sources.size());
+    return rc;
+}
+
+UINT pushMonitorReady(CliprdrClientContext *cliprdr, const CLIPRDR_MONITOR_READY *)
+{
+    auto *probe = g_clipboardProbe;
+    CLIPRDR_GENERAL_CAPABILITY_SET general{};
+    general.capabilitySetType = CB_CAPSTYPE_GENERAL;
+    general.capabilitySetLength = 12;
+    general.version = CB_CAPS_VERSION_2;
+    general.generalFlags = probe ? probe->filesFlags : CB_USE_LONG_FORMAT_NAMES;
+    CLIPRDR_CAPABILITIES caps{};
+    caps.cCapabilitiesSets = 1;
+    caps.capabilitySets = reinterpret_cast<CLIPRDR_CAPABILITY_SET *>(&general);
+    UINT rc = cliprdr->ClientCapabilities(cliprdr, &caps);
+    {
+        std::lock_guard lock(g_push.mutex);
+        logf("PUSH caps server=0x%x offered=0x%x", g_push.serverFlags, general.generalFlags);
+        pushScan(probe ? probe->pushFrom : QString(), probe && probe->pushHostileName);
+    }
+    return rc | pushAnnounce(cliprdr);
+}
+
+UINT pushServerCapabilities(CliprdrClientContext *, const CLIPRDR_CAPABILITIES *caps)
+{
+    for (UINT32 i = 0; caps && i < caps->cCapabilitiesSets; ++i) {
+        const auto *set = reinterpret_cast<const CLIPRDR_GENERAL_CAPABILITY_SET *>(&caps->capabilitySets[i]);
+        if (set->capabilitySetType == CB_CAPSTYPE_GENERAL) {
+            std::lock_guard lock(g_push.mutex);
+            g_push.serverFlags = set->generalFlags;
+        }
+    }
+    return CHANNEL_RC_OK;
+}
+
+UINT pushServerFormatList(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_LIST *list)
+{
+    if (!list || list->numFormats == 0) logf("PUSH withdrawn");
+    CLIPRDR_FORMAT_LIST_RESPONSE response{};
+    response.common.msgType = CB_FORMAT_LIST_RESPONSE;
+    response.common.msgFlags = CB_RESPONSE_OK;
+    return cliprdr->ClientFormatListResponse(cliprdr, &response);
+}
+
+UINT pushServerFormatDataRequest(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_DATA_REQUEST *request)
+{
+    std::lock_guard lock(g_push.mutex);
+    CLIPRDR_FORMAT_DATA_RESPONSE response{};
+    response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+    static const BYTE none = 0;
+    if (!request || request->requestedFormatId != g_push.formatId) {
+        response.common.msgFlags = CB_RESPONSE_FAIL;
+        response.requestedFormatData = &none;
+        return cliprdr->ClientFormatDataResponse(cliprdr, &response);
+    }
+    QList<KRdp::ClipboardFileDescriptor::EncodeItem> items;
+    for (const auto &source : g_push.sources) items.append({source.relative, source.directory, source.size, std::nullopt});
+    const auto encoded = KRdp::ClipboardFileDescriptor::encode(items);
+    response.common.msgFlags = encoded.ok() ? CB_RESPONSE_OK : CB_RESPONSE_FAIL;
+    response.common.dataLen = quint32(encoded.data.size());
+    response.requestedFormatData = encoded.ok() ? reinterpret_cast<const BYTE *>(encoded.data.constData()) : &none;
+    logf("PUSH descriptor items=%zu bytes=%d", g_push.sources.size(), int(encoded.data.size()));
+    return cliprdr->ClientFormatDataResponse(cliprdr, &response);
+}
+
+UINT pushServerLock(CliprdrClientContext *, const CLIPRDR_LOCK_CLIPBOARD_DATA *lock)
+{
+    logf("PUSH lock id=%u", lock ? lock->clipDataId : 0u);
+    return CHANNEL_RC_OK;
+}
+
+UINT pushServerUnlock(CliprdrClientContext *, const CLIPRDR_UNLOCK_CLIPBOARD_DATA *unlock)
+{
+    logf("PUSH unlock id=%u", unlock ? unlock->clipDataId : 0u);
+    return CHANNEL_RC_OK;
+}
+
+UINT pushServerFileContentsRequest(CliprdrClientContext *cliprdr, const CLIPRDR_FILE_CONTENTS_REQUEST *request)
+{
+    auto *probe = g_clipboardProbe;
+    std::lock_guard lock(g_push.mutex);
+    CLIPRDR_FILE_CONTENTS_RESPONSE response{};
+    response.common.msgType = CB_FILECONTENTS_RESPONSE;
+    response.streamId = request->streamId;
+    static const BYTE none = 0;
+    response.requestedData = &none;
+    const quint64 offset = (quint64(request->nPositionHigh) << 32) | request->nPositionLow;
+    if (request->haveClipDataId) {
+        logf("PUSH request stream=%u index=%u flags=%u offset=%llu length=%u lock=%u", request->streamId, request->listIndex, request->dwFlags,
+             static_cast<unsigned long long>(offset), request->cbRequested, request->clipDataId);
+    } else {
+        logf("PUSH request stream=%u index=%u flags=%u offset=%llu length=%u lock=none", request->streamId, request->listIndex, request->dwFlags,
+             static_cast<unsigned long long>(offset), request->cbRequested);
+    }
+    const bool known = request->listIndex < g_push.sources.size() && !g_push.sources[request->listIndex].directory && !g_push.sources[request->listIndex].absolute.isEmpty();
+    if (!known || (probe && probe->pushFailRead && g_push.failedReads++ == 0)) {
+        response.common.msgFlags = CB_RESPONSE_FAIL;
+        return cliprdr->ClientFileContentsResponse(cliprdr, &response);
+    }
+    const auto &source = g_push.sources[request->listIndex];
+    QByteArray data;
+    if (request->dwFlags & FILECONTENTS_SIZE) {
+        data.resize(8);
+        for (int i = 0; i < 8; ++i) data[i] = char((source.size >> (8 * i)) & 0xff);
+    } else {
+        const int fd = ::open(QFile::encodeName(source.absolute).constData(), O_RDONLY | O_CLOEXEC);
+        data.resize(qsizetype(request->cbRequested));
+        const ssize_t n = fd >= 0 ? ::pread(fd, data.data(), request->cbRequested, off_t(offset)) : -1;
+        if (fd >= 0) ::close(fd);
+        data.resize(n < 0 ? 0 : qsizetype(n));
+    }
+    response.common.msgFlags = CB_RESPONSE_OK;
+    response.cbRequested = quint32(data.size());
+    response.common.dataLen = quint32(data.size()) + 4;
+    response.requestedData = reinterpret_cast<const BYTE *>(data.constData());
+    return cliprdr->ClientFileContentsResponse(cliprdr, &response);
+}
+
 // ---- --clipboard files: a client that copies the server's files (OPT-078) ----
 //
 // The server offers a FileGroupDescriptorW; this client asks for it, locks it (when both sides negotiated locking), and downloads
@@ -1199,6 +1393,18 @@ void onCliprdrConnected(void *context, const ChannelConnectedEventArgs *e)
     if (g_clipboardProbe) {
         g_clipboardProbe->cliprdr = cliprdr;
     }
+    if (g_clipboardProbe && g_clipboardProbe->clipboardMode == "push") {
+        cliprdr->MonitorReady = pushMonitorReady;
+        cliprdr->ServerCapabilities = pushServerCapabilities;
+        cliprdr->ServerFormatList = pushServerFormatList;
+        cliprdr->ServerFormatListResponse = probeClipboardServerFormatListResponse;
+        cliprdr->ServerFormatDataRequest = pushServerFormatDataRequest;
+        cliprdr->ServerLockClipboardData = pushServerLock;
+        cliprdr->ServerUnlockClipboardData = pushServerUnlock;
+        cliprdr->ServerFileContentsRequest = pushServerFileContentsRequest;
+        logf("clipboard channel connected (mode push)");
+        return;
+    }
     if (g_clipboardProbe && g_clipboardProbe->clipboardMode == "files") {
         cliprdr->MonitorReady = filesMonitorReady;
         cliprdr->ServerCapabilities = filesServerCapabilities;
@@ -1575,7 +1781,7 @@ int usage()
 {
     std::fprintf(stderr,
                  "usage: krdpctl-probe HOST PORT USER PASSWORD (--query | --apply FILE.json | --apply-seq A.json B.json ... | --silent) "
-                 "[--gfx [--gfx-count] [--gfx-ack-delay MS] [--refresh-rect-idle MS [--refresh-rect-count N]]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall|refuse-then-stall|files [--files-out DIR] [--files-window N] [--files-chunk BYTES] [--files-sample-over BYTES] [--files-cancel-after BYTES] [--files-pause-after BYTES --files-pause-ms MS] [--files-hostile] [--files-no-lock] [--files-flags HEX]] [--no-krdpctl] [--log-pointer] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
+                 "[--gfx [--gfx-count] [--gfx-ack-delay MS] [--refresh-rect-idle MS [--refresh-rect-count N]]] [--media [--microphone DEV]] [--disp WxH] [--clipboard answer|slow|never|stall|refuse-then-stall|files|push [--push-from DIR [--push-hostile-name] [--push-fail-read]] [--files-out DIR] [--files-window N] [--files-chunk BYTES] [--files-sample-over BYTES] [--files-cancel-after BYTES] [--files-pause-after BYTES --files-pause-ms MS] [--files-hostile] [--files-no-lock] [--files-flags HEX]] [--no-krdpctl] [--log-pointer] [--timeout SECONDS] [--no-pong] [--raw FILE.json]... [--raw-gap MS]\n");
     return 2;
 }
 
@@ -1691,9 +1897,15 @@ int main(int argc, char **argv)
         } else if (arg == QLatin1String("--clipboard") && i + 1 < argc) {
             probe.clipboardMode = QByteArray(argv[++i]);
             if (probe.clipboardMode != "answer" && probe.clipboardMode != "slow" && probe.clipboardMode != "never" && probe.clipboardMode != "stall"
-                && probe.clipboardMode != "refuse-then-stall" && probe.clipboardMode != "files") {
+                && probe.clipboardMode != "refuse-then-stall" && probe.clipboardMode != "files" && probe.clipboardMode != "push") {
                 return usage();
             }
+        } else if (arg == QLatin1String("--push-from") && i + 1 < argc) {
+            probe.pushFrom = QString::fromLocal8Bit(argv[++i]);
+        } else if (arg == QLatin1String("--push-hostile-name")) {
+            probe.pushHostileName = true;
+        } else if (arg == QLatin1String("--push-fail-read")) {
+            probe.pushFailRead = true;
         } else if (arg == QLatin1String("--files-out") && i + 1 < argc) {
             probe.filesOut = QString::fromLocal8Bit(argv[++i]);
         } else if (arg == QLatin1String("--files-window") && i + 1 < argc) {

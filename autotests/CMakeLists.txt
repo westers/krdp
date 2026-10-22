@@ -751,6 +751,18 @@ if(TARGET krdpctl-probe)
     endforeach()
 endif()
 
+# OPT-078 phase 3: client-to-host file copy end to end: a real Server and Clipboard, the real file stager and staging file system, krdpctl-probe --clipboard push.
+if(TARGET krdpctl-probe)
+    add_executable(ClipboardFilePushLoopbackTest ClipboardFilePushLoopbackTest.cpp)
+    target_include_directories(ClipboardFilePushLoopbackTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
+    target_include_directories(ClipboardFilePushLoopbackTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+    target_link_libraries(ClipboardFilePushLoopbackTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
+    target_compile_definitions(ClipboardFilePushLoopbackTest PRIVATE KRDPCTL_PROBE="$<TARGET_FILE:krdpctl-probe>")
+    add_dependencies(ClipboardFilePushLoopbackTest krdpctl-probe)
+    add_test(NAME ClipboardFilePushLoopbackTest COMMAND ClipboardFilePushLoopbackTest)
+    set_tests_properties(ClipboardFilePushLoopbackTest PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77)
+endif()
+
 # OPT-078 phase 2: host-to-client file copy at the broker's cliprdr context (fake context, no peer).
 add_executable(ClipboardFilesBridgeTest ClipboardFilesBridgeTest.cpp)
 target_include_directories(ClipboardFilesBridgeTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
