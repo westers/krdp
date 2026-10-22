@@ -255,6 +255,19 @@ private Q_SLOTS:
         QCOMPARE(h.ends[0].first, EndReason::PeerOversize);
         QVERIFY(h.chunks.isEmpty());
     }
+    void aResponseClaimingMoreThanARangeIsCutOffUnread()
+    {
+        Harness h;
+        h.start({{0, 1000}});
+        h.fetcher->onResponseTooLong(h.requests[0].streamId, h.now);
+        QCOMPARE(h.ends.size(), 1);
+        QCOMPARE(h.ends[0].first, EndReason::PeerOversize);
+        Harness stray;
+        stray.start({{0, 1000}});
+        stray.fetcher->onResponseTooLong(0xdead, stray.now); // for a stream nobody asked about: a violation, not an end
+        QVERIFY(stray.ends.isEmpty());
+        QCOMPARE(stray.fetcher->counters().violations, 1);
+    }
     void aFailedResponseEndsTheTransfer()
     {
         Harness h;

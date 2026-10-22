@@ -235,6 +235,23 @@ public:
         deliverReady();
     }
 
+    /// The client's answer to \a streamId declared more than a range can be, so it was not even copied: the same as an overlong answer.
+    void onResponseTooLong(quint32 streamId, Clock::time_point now)
+    {
+        m_now = now;
+        if (m_ended) {
+            ++m_counters.lateDropped;
+            return;
+        }
+        const bool outstanding = std::any_of(m_items.begin(), m_items.end(), [&](const Item &item) { return item.request.streamId == streamId && item.state == State::Requested; });
+        if (!outstanding) {
+            violation();
+            return;
+        }
+        ++m_counters.responses;
+        end(EndReason::PeerOversize, AckStatus::Ok);
+    }
+
     /// The worker's answer to the chunk at (\a index, \a offset).
     void onAck(quint32 index, quint64 offset, quint32 length, AckStatus status, Clock::time_point now)
     {

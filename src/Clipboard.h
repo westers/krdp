@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <QJsonObject>
 #include <QMimeData>
 #include <QObject>
 
@@ -108,6 +109,45 @@ public:
     ClipboardFilePacing::Policy effectiveFilePolicy() const;
     /** Test seam: treat the client as a stock one (no KRDPCTL: Auto, window of at most four) or as our own, whatever the connection says. */
     void setStockClientForTest(bool stock);
+    // ---- OPT-078 phase 3: client-to-host file copy ----
+    /**
+     * The client copied files (its format list names FileGroupDescriptorW). The broker locks the clipboard data (when negotiated), asks for the
+     * descriptor, checks it, hands it to the host's worker (ClientFileBackend::offer) and, once the worker accepted, asks the CLIENT for the bytes
+     * with windowed FILECONTENTS_RANGE requests (ClipboardFileFetch), passing each answer to the worker to write. Nothing of the files is held
+     * here. Needs setFilesEnabled(true) before the channel starts, the planner's setFileDirections(.., clientToHost), and streaming negotiated.
+     */
+    struct ClientFileBackend {
+        std::function<quint64(const QByteArray &descriptor, bool hugeFiles)> offer; ///< to the worker; returns the transfer's seq, 0 = refused
+        std::function<bool(quint64 seq, quint32 index, quint64 offset, const QByteArray &data)> data; ///< false: not sent
+        std::function<void(quint64 seq, int reason)> cancel; ///< ClientFilesCancel; seq 0 = every transfer of this connection
+    };
+    /// Why the broker ends a client-to-host transfer (the wire's FilePushCancelReason, same order).
+    enum class ClientFilesCancel { Replaced, ConnectionEnded, Policy, ClientCancelled, Failed };
+    void setClientFileBackend(ClientFileBackend backend);
+    bool clientFilesAllowed() const;
+    /** A client-to-host file transfer has started and is not over (the planner then lets it finish when the screen locks). */
+    bool clientFileTransferActive() const;
+    /** The worker's answer to ClientFileBackend::offer (FilePushReply). \a reason is the fixed word of a refusal. */
+    struct ClientFilesReply {
+        quint64 seq = 0;
+        bool accepted = false;
+        QString reason;
+        quint32 files = 0;
+        quint32 directories = 0;
+        quint32 skipped = 0;
+        quint64 totalBytes = 0;
+        quint64 freeBytes = 0;
+        quint64 neededBytes = 0;
+    };
+    void clientFilesReplied(const ClientFilesReply &reply);
+    /** The worker wrote (or refused: \a status is a ClipboardFileFetch::AckStatus) one range. */
+    void clientFilesAcked(quint64 seq, quint32 index, quint64 offset, quint32 length, int status);
+    enum class ClientFilesPhase { Staging, Offered, Done, Failed };
+    void clientFilesState(quint64 seq, ClientFilesPhase phase, const QString &reason, quint64 doneBytes, quint64 totalBytes);
+    /** Test seam: how long the worker has to answer the offer, and the client to answer the descriptor request. */
+    void setClientFileTimeoutsForTest(int workerReplyMs, int descriptorMs);
+    /** Test seam: where the `clipboard-files` notices for the client go instead of the KRDPCTL channel. */
+    void setNoticeSinkForTest(std::function<void(const QJsonObject &)> sink);
     /** The host's file service ended a transfer before the client was done (a changed or vanished file, a violation, a reset). */
     Q_SIGNAL void hostFileTransferEnded(quint64 seq, int reason, int cause);
     /** The answer to hostTextRequested(\a requestId): \a text (host LF) when \a ok, a refusal otherwise. */
@@ -144,6 +184,10 @@ public:
         quint64 hostFileBytes = 0; ///< OPT-078: file bytes delivered
         quint64 hostFileFailed = 0; ///< OPT-078: failed FILECONTENTS responses (hostile requests, changed files, resets)
         quint64 hostFileEnded = 0; ///< OPT-078: transfers ended early
+        quint64 clientFileLists = 0; ///< OPT-078 phase 3: client file lists accepted by the worker
+        quint64 clientFileBytes = 0; ///< bytes the worker acknowledged
+        quint64 clientFileRefused = 0; ///< lists refused (hostile, policy, worker, rate)
+        quint64 clientFileFailed = 0; ///< transfers that ended early
     };
     Counters counters() const;
 
@@ -198,6 +242,16 @@ public:
     static constexpr int HostFilesTimeoutMs = 12000;
     /// OPT-078: the pump that issues file reads and paces the responses.
     static constexpr int FilePumpMs = 10;
+    /// OPT-078 phase 3: the client has this long to deliver its FileGroupDescriptorW (up to 64 MiB), and the worker this long to plan and prepare it.
+    static constexpr int ClientFilesDescriptorTimeoutMs = 30000;
+    static constexpr int ClientFilesWorkerReplyMs = 20000;
+    /// OPT-078 phase 3: after the last byte is acknowledged the worker has this long to say the files are offered.
+    static constexpr int ClientFilesFinishMs = 10000;
+    /// At most this many client file copies are accepted per window (each costs the worker a plan and a staging tree).
+    static constexpr int ClientFilesMaxPerWindow = 6;
+    static constexpr int ClientFilesRateWindowMs = 10000;
+    /// A repeat of the descriptor just received (or just completed) within this long is the same copy announced again (stock clients announce per MIME type).
+    static constexpr int ClientFilesRepeatMs = 3000;
 
 private:
     void sendServerData();
