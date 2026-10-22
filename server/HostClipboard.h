@@ -19,6 +19,7 @@
 #include "ClipboardText.h"
 #include "ConsoleWorkerWire.h"
 #include "HostFileServer.h"
+#include "HostFileStager.h"
 #include "HostFiles.h"
 
 #include <QLoggingCategory>
@@ -82,6 +83,12 @@ public:
         // OPT-078 (wire 21). Optional: a backend without them offers no files.
         std::function<bool()> hasUriList; ///< the host clipboard offers text/uri-list (no data is read)
         std::function<QByteArray()> readUriList; ///< its bytes (bounded by the backend); read once per copy, when the copy is announced
+        // OPT-078 phase 3 (client to host). Optional: a backend without them cannot receive files.
+        std::function<bool(const QStringList &paths, bool secret)> writeUriList; ///< the staged files as text/uri-list (+ cut = "0"); false = failed
+        std::function<void()> clearUriList; ///< withdraws what writeUriList offered, if it is still the host's selection
+        std::function<bool()> ownsUriList; ///< the host's selection is the one writeUriList set (never read it back: that would ask this thread to serve itself)
+        std::function<void(const QString &summary, const QString &body)> notify; ///< a desktop notification in this session
+        std::function<QString()> cacheDir; ///< the user's cache directory (XDG_CACHE_HOME or ~/.cache); empty = no staging
     };
     using Sender = std::function<void(const QByteArray &record)>;
 
@@ -93,6 +100,7 @@ public:
         , m_send(send)
         , m_desktop(desktop)
         , m_files(send, desktop)
+        , m_stager(send, stagerBackend(), desktop, stagerConfig())
     {
         m_settle.setSingleShot(true);
         m_settle.setInterval(SettleMs);
@@ -110,6 +118,8 @@ public:
 
     /** OPT-078: the file service (descriptors, ranges, locks) behind a Files offer. */
     HostFileServer &files() { return m_files; }
+    /** OPT-078 phase 3: the client-to-host file service (staging and the text/uri-list offer). */
+    HostFileStager &staging() { return m_stager; }
 
     void setPolicy(const ConsoleWorkerWire::ClipboardPolicy &policy)
     {
@@ -118,6 +128,7 @@ public:
         }
         m_policy = policy;
         m_files.setPolicy(policy);
+        m_stager.setPolicy(policy);
         if (!ConsoleWorkerWire::mayOfferClipboard(m_policy, m_desktop)) {
             m_settle.stop();
         }
@@ -127,6 +138,7 @@ public:
     {
         m_control = control;
         m_files.setControl(control);
+        m_stager.setControl(control);
     }
 
     void request(const ConsoleWorkerWire::ClipboardRequest &request)
@@ -208,9 +220,46 @@ public:
     quint64 offerSeq() const { return m_offerSeq; }
 
 private:
+    HostFileStager::Backend stagerBackend()
+    {
+        HostFileStager::Backend backend;
+        backend.writeUriList = [this](const QStringList &paths, bool secret) {
+            if (!m_backend.writeUriList) return false;
+            m_writing = true;
+            m_settle.stop(); // an offer about the previous host copy is stale
+            const bool ok = m_backend.writeUriList(paths, secret);
+            m_writing = false;
+            return ok;
+        };
+        backend.clearUriList = [this] {
+            if (m_backend.clearUriList) {
+                m_writing = true;
+                m_backend.clearUriList();
+                m_writing = false;
+            }
+        };
+        backend.notify = [this](const QString &summary, const QString &body) {
+            if (m_backend.notify) m_backend.notify(summary, body);
+        };
+        return backend;
+    }
+
+    HostFileStaging::Config stagerConfig() const
+    {
+        HostFileStaging::Config config;
+        if (m_backend.cacheDir) config.cacheDir = m_backend.cacheDir();
+        return config;
+    }
+
     void offer()
     {
         if (!ConsoleWorkerWire::mayOfferClipboard(m_policy, m_desktop)) {
+            return;
+        }
+        // OPT-078 phase 3: files this worker staged for the client came back as a change of the host clipboard. They are not a host copy
+        // (and reading our own selection would ask this thread to serve itself): never offered back to the client.
+        if (m_backend.ownsUriList && m_backend.ownsUriList()) {
+            qCDebug(hostClipboardLog) << "host clipboard changed: our own staged files coming back, not offered";
             return;
         }
         // OPT-078: a copy of files is announced as files, alone (a file manager adds the paths as text; a client gets the files).
@@ -409,6 +458,7 @@ private:
     Sender m_send;
     bool m_desktop;
     HostFileServer m_files;
+    HostFileStager m_stager;
     ConsoleWorkerWire::ClipboardPolicy m_policy;
     ConsoleWorkerWire::ControlState m_control;
     QTimer m_settle;

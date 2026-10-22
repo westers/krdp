@@ -6,6 +6,7 @@
 #include <QClipboard>
 #include <QMimeData>
 #include <QPointer>
+#include <QUrl>
 
 #include <KSystemClipboard>
 
@@ -28,6 +29,8 @@ inline HostClipboard::Backend ksystemClipboardBackend()
     // thread (blocked in the read) to serve the data and stall until the reader's idle timeout, so the echo check reads the
     // QMimeData we hold instead. A QPointer: KSystemClipboard owns it and deletes it when another copy replaces it.
     static QPointer<QMimeData> ownRich;
+    // OPT-078 phase 3: the text/uri-list this process last wrote (the staged files of a client copy). KSystemClipboard owns it.
+    static QPointer<QMimeData> ownFiles;
     return HostClipboard::Backend{
         [] {
             const auto *data = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
@@ -144,6 +147,29 @@ inline HostClipboard::Backend ksystemClipboardBackend()
             default:
                 return QByteArray(); // too large, nothing there, a stalled source: no files
             }
+        },
+        // OPT-078 phase 3: the staged files of a client copy as text/uri-list (what Dolphin pastes) with application/x-kde-cutselection = 0
+        // (a copy, never a move). Paths only: no text/plain of them, so nothing but the list reaches Klipper. KSystemClipboard takes ownership.
+        [](const QStringList &paths, bool secret) {
+            QByteArray list;
+            for (const QString &path : paths) list += QUrl::fromLocalFile(path).toEncoded() + "\r\n";
+            if (list.isEmpty()) return false;
+            auto *mime = new QMimeData();
+            mime->setData(QStringLiteral("text/uri-list"), list);
+            mime->setData(QStringLiteral("application/x-kde-cutselection"), QByteArrayLiteral("0"));
+            if (secret) mime->setData(QStringLiteral("x-kde-passwordManagerHint"), QByteArrayLiteral("secret"));
+            ownFiles = mime;
+            KSystemClipboard::instance()->setMimeData(mime, QClipboard::Clipboard);
+            return true;
+        },
+        [] {
+            if (const auto *current = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard); current && current == ownFiles.data()) {
+                KSystemClipboard::instance()->clear(QClipboard::Clipboard);
+            }
+        },
+        [] {
+            const auto *current = KSystemClipboard::instance()->mimeData(QClipboard::Clipboard);
+            return current && current == ownFiles.data();
         }};
 }
 }

@@ -14,6 +14,7 @@
 #include <utility>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <pwd.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
 
@@ -100,6 +101,23 @@ inline ClipboardFileFetch::AckStatus ackFor(Status status)
     case Status::RootUnsafe: return Ack::IoError;
     }
     return Ack::IoError;
+}
+
+/**
+ * The user's cache directory for staging: XDG_CACHE_HOME when it is an absolute path, else $HOME/.cache, else the passwd entry's home
+ * (a worker started by a system service may have no HOME). Empty when none is usable. Never tmpfs, never configurable (spec 3.2).
+ */
+inline QString defaultCacheDir(const QByteArray &xdgCacheHome, const QByteArray &home)
+{
+    if (xdgCacheHome.startsWith('/')) return QString::fromLocal8Bit(xdgCacheHome);
+    if (home.startsWith('/')) return QString::fromLocal8Bit(home) + QStringLiteral("/.cache");
+    struct passwd pwd {};
+    struct passwd *result = nullptr;
+    char buffer[4096];
+    if (::getpwuid_r(::geteuid(), &pwd, buffer, sizeof buffer, &result) == 0 && result && result->pw_dir && result->pw_dir[0] == '/') {
+        return QString::fromLocal8Bit(result->pw_dir) + QStringLiteral("/.cache");
+    }
+    return {};
 }
 
 struct SpaceInfo {

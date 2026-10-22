@@ -127,6 +127,24 @@ std::shared_ptr<QEvent> eventFor(const ConsoleWorkerWire::Input &input)
     return {};
 }
 
+namespace
+{
+/// OPT-078 phase 3: the worker's host clipboard backend: KSystemClipboard plus the user's cache directory (for staging) and desktop notifications.
+HostClipboard::Backend workerClipboardBackend()
+{
+    auto backend = ksystemClipboardBackend();
+    backend.cacheDir = [] { return HostFileStaging::defaultCacheDir(qgetenv("XDG_CACHE_HOME"), qgetenv("HOME")); };
+    backend.notify = [](const QString &summary, const QString &body) {
+        // org.freedesktop.Notifications.Notify, asynchronously: a missing notification daemon is not worth a stall or a failure.
+        auto message = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.Notifications"), QStringLiteral("/org/freedesktop/Notifications"),
+                                                      QStringLiteral("org.freedesktop.Notifications"), QStringLiteral("Notify"));
+        message << QStringLiteral("Farside") << uint(0) << QStringLiteral("edit-copy") << summary << body << QStringList() << QVariantMap() << int(8000);
+        QDBusConnection::sessionBus().asyncCall(message, 1000);
+    };
+    return backend;
+}
+}
+
 class Worker : public QObject
 {
     struct PendingPosition {
@@ -146,7 +164,7 @@ public:
         , m_mode(mode)
         , m_authenticatedDesktop(desktop)
         , m_initialOutputs(std::move(initialOutputs))
-        , m_hostClipboard(ksystemClipboardBackend(),
+        , m_hostClipboard(workerClipboardBackend(),
               [this](const QByteArray &record) { m_outbox.clipboard(record); }, desktop)
         , m_microphone(desktop)
         , m_camera(desktop)
@@ -155,6 +173,8 @@ public:
         connect(KSystemClipboard::instance(), &KSystemClipboard::changed, this, [this](QClipboard::Mode mode) {
             if (mode == QClipboard::Clipboard) m_hostClipboard.hostChanged();
         });
+        // OPT-078 phase 3: a worker that starts cleans up after crashed ones (stale file staging of this user); it creates nothing itself.
+        if (desktop) m_hostClipboard.staging().sweepAtStart();
         // OPT-072 (spike S1): which clipboard path this compositor gave the worker, once, so the greeter case is readable from
         // the journal: WaylandClipboard = ext_data_control (also what the capped picture read needs), anything else = fallback.
         qInfo().noquote() << "Clipboard: host backend" << KSystemClipboard::instance()->metaObject()->className();
@@ -3433,6 +3453,25 @@ private:
                 const auto set = ConsoleWorkerWire::clipboardSet(*record);
                 if (!set) { shutdown(1); return; }
                 m_hostClipboard.set(*set);
+                continue;
+            }
+            // OPT-078 phase 3 (wire 22): client-to-host file copy. Each record is checked here; the stager applies the policy gate.
+            if (record->kind == ConsoleWorkerWire::Kind::FilePushOffer) {
+                const auto offer = ConsoleWorkerWire::filePushOffer(*record);
+                if (!offer) { shutdown(1); return; }
+                m_hostClipboard.staging().offer(*offer);
+                continue;
+            }
+            if (record->kind == ConsoleWorkerWire::Kind::FilePushData) {
+                const auto data = ConsoleWorkerWire::filePushData(*record);
+                if (!data) { shutdown(1); return; }
+                m_hostClipboard.staging().data(*data);
+                continue;
+            }
+            if (record->kind == ConsoleWorkerWire::Kind::FilePushCancel) {
+                const auto cancel = ConsoleWorkerWire::filePushCancel(*record);
+                if (!cancel) { shutdown(1); return; }
+                m_hostClipboard.staging().cancel(*cancel);
                 continue;
             }
             // OPT-078 (wire 21): host-to-client file copy. Each record is checked here; the file service applies the policy gate.
