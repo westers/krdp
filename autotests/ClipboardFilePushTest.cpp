@@ -253,7 +253,7 @@ private Q_SLOTS:
         qToLittleEndian<quint16>(0, empty.data() + 4 + ClipboardFileDescriptor::NameOffset);
         QCOMPARE(makePlan(empty, true).descriptorError, std::optional(ClipboardFileDescriptor::Error::EmptyName));
         // trailing garbage
-        QCOMPARE(makePlan(encoded({{u"a"_s, false, 1, std::nullopt}}) + "x", true).refusal, Refusal::Descriptor);
+        QCOMPARE(makePlan(QByteArray(encoded({{u"a"_s, false, 1, std::nullopt}}) + "x"), true).refusal, Refusal::Descriptor);
         // and a good one passes
         QVERIFY(makePlan(encoded({{u"a"_s, false, 1, std::nullopt}}), true).ok());
     }

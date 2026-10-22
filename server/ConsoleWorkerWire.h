@@ -21,6 +21,7 @@
 #include <QSet>
 
 #include "ClipboardFileDescriptor.h"
+#include "ClipboardFileFetch.h"
 #include "ClipboardFileLimits.h"
 #include "CodecPolicy.h"
 #include "ChromaPolicy.h"
@@ -88,7 +89,13 @@ namespace KRdp::ConsoleWorkerWire
 // FileProgress (worker -> broker, at most 4/s) says how much of an offer was read. ClipboardPolicy carries the two file flags
 // (the planner's per-direction decision for NEW transfers). Pacing needs no record: the broker holds the socket, issues a read
 // only inside the request window and writes the response when the pacer allows.
-constexpr quint16 ProtocolVersion = 21;
+// 22 (OPT-078 phase 3): client-to-host file copy. Broker -> worker: FilePushOffer (the client's FileGroupDescriptorW, the huge-file option and the
+// free-space reserve) makes the worker plan, check the policy and the disk, create its private staging tree and answer FilePushReply (accepted with
+// the totals, or refused with a reason and, for a full disk, the numbers); FilePushData carries one range (64-bit offset, at most FileRangeBytes,
+// strictly in order) and is answered by FilePushAck; FilePushCancel ends one transfer or all (seq 0). Worker -> broker: FilePushState (at most 4/s)
+// says Staging / Offered (the files are on the host clipboard) / Done / Failed with a reason. File names never appear in these records or any log.
+// Nothing here is back-compatible with 21 (paired broker and worker, installed together).
+constexpr quint16 ProtocolVersion = 22;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -172,8 +179,15 @@ enum class Kind : quint8 {
     FileReadResult,
     FileCancel,
     FileProgress,
+    // Wire 22 (OPT-078 phase 3): client-to-host file copy, see the version comment above.
+    FilePushOffer,
+    FilePushReply,
+    FilePushData,
+    FilePushAck,
+    FilePushCancel,
+    FilePushState,
 };
-constexpr Kind LastKind = Kind::FileProgress;
+constexpr Kind LastKind = Kind::FilePushState;
 
 /// VideoCodec on the wire: its value + 1, 0 = none/unknown. VideoCodec's last value is Av1 (4).
 constexpr quint8 MaxWireCodec = 5;
@@ -1833,6 +1847,275 @@ inline bool mayServeFiles(const ControlState &control, const ClipboardPolicy &po
 {
     return control.active && control.generation != 0 && policy.controlGeneration == control.generation && policy.hostToClient
         && policy.filesHostToClient && !policy.greeter && desktop;
+}
+
+// ---- OPT-078 phase 3 client-to-host file copy (wire 22) ----
+// The broker holds the RDP connection and asks the client for ranges inside its window (ClipboardFileFetch); the worker, running as the
+// desktop's user, writes them into a private staging tree and offers the finished files as text/uri-list. Names travel only inside the
+// client's FileGroupDescriptorW (FilePushOffer) and are never logged.
+
+/** Why a push was refused or failed. Fixed words in logs and notices, never a name. */
+enum class FilePushReason : quint8 {
+    None,
+    Policy, ///< the planner or the worker's gate does not allow files now
+    Descriptor, ///< the FileGroupDescriptorW is malformed or over the limits
+    Names, ///< a hostile name
+    NothingToCopy, ///< every entry skipped, or an empty list
+    NoSpace, ///< the declared total plus the reserve does not fit (or the disk filled up mid-way)
+    SpaceUnknown, ///< statvfs failed: the worker refuses rather than guesses
+    StagingFailed, ///< the staging root or tree could not be created safely
+    WriteFailed, ///< a write, rename or fsync failed
+    Superseded, ///< a newer copy replaced it
+    Cancelled, ///< cancelled by the broker (connection ended, user cancel)
+    Hostile, ///< the peer sent data the plan does not allow (out of order, past the end, a repeated range)
+};
+constexpr quint8 LastFilePushReason = quint8(FilePushReason::Hostile);
+
+inline const char *filePushReasonName(FilePushReason reason)
+{
+    switch (reason) {
+    case FilePushReason::None: return "none";
+    case FilePushReason::Policy: return "policy";
+    case FilePushReason::Descriptor: return "descriptor";
+    case FilePushReason::Names: return "names";
+    case FilePushReason::NothingToCopy: return "nothing-to-copy";
+    case FilePushReason::NoSpace: return "no-space";
+    case FilePushReason::SpaceUnknown: return "space-unknown";
+    case FilePushReason::StagingFailed: return "staging-failed";
+    case FilePushReason::WriteFailed: return "write-failed";
+    case FilePushReason::Superseded: return "superseded";
+    case FilePushReason::Cancelled: return "cancelled";
+    case FilePushReason::Hostile: return "hostile";
+    }
+    return "unknown";
+}
+
+/** Broker -> worker: the client copied files. \a descriptor is its FileGroupDescriptorW (4 + n x 592 bytes, n >= 1). */
+struct FilePushOffer {
+    quint64 seq = 0; ///< endpoint-wide, never reused
+    bool hugeFiles = false; ///< CB_HUGE_FILE_SUPPORT_ENABLED was negotiated
+    quint64 reserveBytes = 0; ///< ClipboardFileMinFreeBytes; 0 = the default rule max(2 GiB, 5% of the filesystem)
+    QByteArray descriptor;
+    bool operator==(const FilePushOffer &) const = default;
+};
+
+inline QByteArray frame(const FilePushOffer &offer)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << offer.seq << quint8(offer.hugeFiles) << offer.reserveBytes;
+    payload.append(offer.descriptor);
+    return frame(Kind::FilePushOffer, payload);
+}
+
+inline std::optional<FilePushOffer> filePushOffer(const Record &record)
+{
+    constexpr qsizetype header = 17;
+    if (record.kind != Kind::FilePushOffer || record.payload.size() < header + 4 + ClipboardFileDescriptor::DescriptorBytes
+        || record.payload.size() > header + qsizetype(MaxClipboardFileListBytes)) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FilePushOffer offer;
+    quint8 options = 0;
+    stream >> offer.seq >> options >> offer.reserveBytes;
+    if (stream.status() != QDataStream::Ok || !offer.seq || options > 1) return std::nullopt;
+    offer.hugeFiles = options == 1;
+    offer.descriptor = record.payload.mid(header);
+    if ((offer.descriptor.size() - 4) % ClipboardFileDescriptor::DescriptorBytes != 0) return std::nullopt;
+    return offer;
+}
+
+/** Worker -> broker: the answer to a FilePushOffer. */
+struct FilePushReply {
+    quint64 seq = 0;
+    bool accepted = false;
+    FilePushReason reason = FilePushReason::Policy; ///< None exactly when accepted
+    quint32 files = 0; ///< wanted files (including empty ones)
+    quint32 directories = 0;
+    quint32 skipped = 0; ///< entries left out (links, unknown sizes, files over 4 GiB without huge support)
+    quint64 totalBytes = 0; ///< bytes the broker has to fetch
+    quint64 freeBytes = 0; ///< NoSpace: what the staging filesystem has free
+    quint64 neededBytes = 0; ///< NoSpace: the declared total plus the reserve
+    bool operator==(const FilePushReply &) const = default;
+};
+
+inline QByteArray frame(const FilePushReply &reply)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << reply.seq << quint8(reply.accepted) << quint8(reply.reason) << reply.files << reply.directories << reply.skipped << reply.totalBytes
+           << reply.freeBytes << reply.neededBytes;
+    return frame(Kind::FilePushReply, payload);
+}
+
+inline std::optional<FilePushReply> filePushReply(const Record &record)
+{
+    if (record.kind != Kind::FilePushReply || record.payload.size() != 46) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FilePushReply reply;
+    quint8 accepted = 0;
+    quint8 reason = 0;
+    stream >> reply.seq >> accepted >> reason >> reply.files >> reply.directories >> reply.skipped >> reply.totalBytes >> reply.freeBytes >> reply.neededBytes;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !reply.seq || accepted > 1 || reason > LastFilePushReason) return std::nullopt;
+    reply.accepted = accepted == 1;
+    reply.reason = FilePushReason(reason);
+    if (reply.accepted != (reply.reason == FilePushReason::None)) return std::nullopt; // accepted and a reason (or neither) are contradictions
+    return reply;
+}
+
+/** Broker -> worker: bytes [offset, offset + data.size()) of file \a index of transfer \a seq. Strictly in order; each is acknowledged. */
+struct FilePushData {
+    quint64 seq = 0;
+    quint32 index = 0;
+    quint64 offset = 0;
+    QByteArray data;
+    bool operator==(const FilePushData &) const = default;
+};
+
+inline QByteArray frame(const FilePushData &data)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << data.seq << data.index << data.offset;
+    payload.append(data.data);
+    return frame(Kind::FilePushData, payload);
+}
+
+inline std::optional<FilePushData> filePushData(const Record &record)
+{
+    constexpr qsizetype header = 20;
+    if (record.kind != Kind::FilePushData || record.payload.size() <= header || record.payload.size() > header + qsizetype(MaxFileReadBytes)) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FilePushData data;
+    stream >> data.seq >> data.index >> data.offset;
+    if (stream.status() != QDataStream::Ok || !data.seq) return std::nullopt;
+    data.data = record.payload.mid(header);
+    if (data.offset > ~quint64(0) - quint64(data.data.size())) return std::nullopt;
+    return data;
+}
+
+/** Worker -> broker: what became of one FilePushData. Only Ok moves the window on. */
+struct FilePushAck {
+    quint64 seq = 0;
+    quint32 index = 0;
+    quint64 offset = 0;
+    quint32 length = 0;
+    ClipboardFileFetch::AckStatus status = ClipboardFileFetch::AckStatus::IoError;
+    bool operator==(const FilePushAck &) const = default;
+};
+
+inline QByteArray frame(const FilePushAck &ack)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << ack.seq << ack.index << ack.offset << ack.length << quint8(ack.status);
+    return frame(Kind::FilePushAck, payload);
+}
+
+inline std::optional<FilePushAck> filePushAck(const Record &record)
+{
+    if (record.kind != Kind::FilePushAck || record.payload.size() != 25) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FilePushAck ack;
+    quint8 status = 0;
+    stream >> ack.seq >> ack.index >> ack.offset >> ack.length >> status;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !ack.seq || !ack.length || ack.length > MaxFileReadBytes
+        || status > ClipboardFileFetch::LastAckStatus || ack.offset > ~quint64(0) - ack.length) return std::nullopt;
+    ack.status = ClipboardFileFetch::AckStatus(status);
+    return ack;
+}
+
+enum class FilePushCancelReason : quint8 { Replaced, ConnectionEnded, Policy, ClientCancelled, Failed };
+constexpr quint8 LastFilePushCancelReason = quint8(FilePushCancelReason::Failed);
+
+/** Broker -> worker: transfer \a seq is over for the broker (0: every transfer): stop, remove its staging. */
+struct FilePushCancel {
+    quint64 seq = 0;
+    FilePushCancelReason reason = FilePushCancelReason::Failed;
+    bool operator==(const FilePushCancel &) const = default;
+};
+
+inline QByteArray frame(const FilePushCancel &cancel)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << cancel.seq << quint8(cancel.reason);
+    return frame(Kind::FilePushCancel, payload);
+}
+
+inline std::optional<FilePushCancel> filePushCancel(const Record &record)
+{
+    if (record.kind != Kind::FilePushCancel || record.payload.size() != 9) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FilePushCancel cancel;
+    quint8 reason = 0;
+    stream >> cancel.seq >> reason;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || reason > LastFilePushCancelReason) return std::nullopt;
+    cancel.reason = FilePushCancelReason(reason);
+    return cancel;
+}
+
+enum class FilePushPhase : quint8 {
+    Staging, ///< bytes are being written
+    Offered, ///< the finished files are on the host clipboard as text/uri-list (a large selection: the first finished units)
+    Done, ///< every file is complete and offered
+    Failed, ///< the transfer ended without completing (see the reason); its staging is removed
+};
+constexpr quint8 LastFilePushPhase = quint8(FilePushPhase::Failed);
+
+/** Worker -> broker: how a transfer stands (at most FileProgressMaxPerSecond a second, and every phase change). */
+struct FilePushState {
+    quint64 seq = 0;
+    FilePushPhase phase = FilePushPhase::Staging;
+    FilePushReason reason = FilePushReason::None; ///< Failed: why (never None); otherwise None
+    quint64 doneBytes = 0;
+    quint64 totalBytes = 0;
+    bool operator==(const FilePushState &) const = default;
+};
+
+inline QByteArray frame(const FilePushState &state)
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << state.seq << quint8(state.phase) << quint8(state.reason) << state.doneBytes << state.totalBytes;
+    return frame(Kind::FilePushState, payload);
+}
+
+inline std::optional<FilePushState> filePushState(const Record &record)
+{
+    if (record.kind != Kind::FilePushState || record.payload.size() != 26) return std::nullopt;
+    QDataStream stream(record.payload);
+    stream.setByteOrder(QDataStream::BigEndian);
+    FilePushState state;
+    quint8 phase = 0;
+    quint8 reason = 0;
+    stream >> state.seq >> phase >> reason >> state.doneBytes >> state.totalBytes;
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !state.seq || phase > LastFilePushPhase || reason > LastFilePushReason
+        || state.doneBytes > state.totalBytes) return std::nullopt;
+    state.phase = FilePushPhase(phase);
+    state.reason = FilePushReason(reason);
+    if ((state.phase == FilePushPhase::Failed) != (state.reason != FilePushReason::None)) return std::nullopt;
+    return state;
+}
+
+/**
+ * The worker's gate for FilePushOffer / FilePushData: an active controller, a current policy that allows files client to host (a new
+ * transfer on a locked desktop is not allowed; a started one keeps the flag until it ends), a desktop worker.
+ */
+inline bool mayStageFiles(const ControlState &control, const ClipboardPolicy &policy, bool desktop)
+{
+    return control.active && control.generation != 0 && policy.controlGeneration == control.generation && policy.clientToHost
+        && policy.filesClientToHost && !policy.greeter && desktop;
 }
 
 struct Output {

@@ -145,6 +145,20 @@ public:
     bool cancelFiles(quint64 seq);
     /** Reads in flight at most (the broker's own window is far smaller). */
     static constexpr int MaxFileReads = 64;
+    /**
+     * OPT-078 phase 3 (wire 22): client-to-host files. offerPushFiles() hands the worker the client's FileGroupDescriptorW (\a hugeFiles: the
+     * client negotiated files over 4 GiB; \a reserveBytes: ClipboardFileMinFreeBytes, 0 = the default rule) and returns the transfer's seq
+     * (endpoint-wide, never reused; 0 = refused: not ready, the policy does not allow files client to host, a malformed descriptor, too many
+     * transfers waiting). The worker's answer arrives as filePushReplied(); only after an accepted reply may pushFileData() send ranges
+     * (in order, each answered by filePushAcked()). filePushStateChanged() carries progress and the end. cancelPushFiles(0) ends every transfer.
+     */
+    quint64 offerPushFiles(const QByteArray &descriptor, bool hugeFiles, quint64 reserveBytes);
+    bool pushFileData(quint64 seq, quint32 index, quint64 offset, const QByteArray &data);
+    bool cancelPushFiles(quint64 seq, ConsoleWorkerWire::FilePushCancelReason reason);
+    /** Transfers offered and not yet finished, at most. */
+    static constexpr int MaxPushOffers = 4;
+    /** The most data records waiting in the socket (the broker's window is far smaller). */
+    static constexpr qint64 MaxPushBacklogBytes = 16 * 1024 * 1024;
     /** The client copied \a text. Returns the set id, 0 = not sent. Ids are endpoint-wide and never reused. */
     quint64 setClipboard(quint64 controlGeneration, const QString &text);
     /** OPT-072: the client copied this PNG (already checked by the broker; the worker checks it again). */
@@ -201,6 +215,12 @@ Q_SIGNALS:
     void fileReadFinished(const KRdp::ConsoleWorkerWire::FileReadResult &result);
     /** OPT-078: how much of an offer the worker has read from disk (at most 4 a second; counts only). */
     void fileProgressed(const KRdp::ConsoleWorkerWire::FileProgress &progress);
+    /** OPT-078 phase 3: the worker's answer to an offerPushFiles() seq this endpoint issued and has not finished. */
+    void filePushReplied(const KRdp::ConsoleWorkerWire::FilePushReply &reply);
+    /** The worker wrote (or refused) one range of an accepted transfer. */
+    void filePushAcked(const KRdp::ConsoleWorkerWire::FilePushAck &ack);
+    /** Progress, the offer to the host clipboard, the end (Done or Failed) of a transfer this endpoint started. */
+    void filePushStateChanged(const KRdp::ConsoleWorkerWire::FilePushState &state);
     void protocolError(const QString &message);
     /** The worker speaks another paired wire version; always followed by protocolError. */
     void versionMismatch(quint16 workerVersion);
@@ -250,5 +270,7 @@ private:
     QSet<quint64> m_clipboardSets;
     QHash<quint64, quint64> m_fileReads; // OPT-078: read id -> offer seq, in flight
     quint64 m_nextFileReadId = 0;
+    QHash<quint64, bool> m_pushOffers; // OPT-078 phase 3: transfers started and not finished; the value: the worker accepted it
+    quint64 m_nextPushSeq = 0;
 };
 }

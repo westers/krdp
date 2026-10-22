@@ -53,6 +53,9 @@ private Q_SLOTS:
     void clipboardHtmlGatesAreStrict();
     void fileRecordsRoundTripAndAreBounded();
     void wireTwentyIsRefused();
+    void wireTwentyOneIsRefused();
+    void filePushRecordsRoundTripAndAreBounded();
+    void filePushGateIsStrict();
     void fileGatesAreStrict();
     void fileClipboardRecordsCarryFilesAndPolicy();
     void protocolVersionIsTwenty();
@@ -571,7 +574,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(21));
+    QCOMPARE(ProtocolVersion, quint16(22));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -831,7 +834,7 @@ void ConsoleWorkerWireTest::encoderStatsRoundTripAndAreBounded()
     QCOMPARE(encoderStats(*deframer.next()), std::optional(measured));
     QVERIFY(!deframer.next());
     QCOMPARE(deframer.takeInvalidCount(), 0);
-    QCOMPARE(LastKind, Kind::FileProgress);
+    QCOMPARE(LastKind, Kind::FilePushState);
 
     const auto rejected = [](const EncoderStats &stats) {
         Deframer d;
@@ -963,8 +966,8 @@ void ConsoleWorkerWireTest::roundTripsControlGeneration()
 // OPT-067 (wire 16): the six clipboard records.
 void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(21));
-    QCOMPARE(int(LastKind), int(Kind::FileProgress));
+    QCOMPARE(ProtocolVersion, quint16(22));
+    QCOMPARE(int(LastKind), int(Kind::FilePushState));
     const ClipboardPolicy policy{7, 42, true, false, true, false};
     const ClipboardOffer offer{3, 1};
     const ClipboardRequest request{11, 4096};
@@ -1402,7 +1405,7 @@ void ConsoleWorkerWireTest::clipboardHtmlGatesAreStrict()
 void ConsoleWorkerWireTest::protocolVersionIsTwenty()
 {
     // The paired broker and worker must agree; a wire 20 record (no files kind) from an old peer is refused at the hello.
-    QCOMPARE(ProtocolVersion, quint16(21));
+    QCOMPARE(ProtocolVersion, quint16(22));
     QCOMPARE(int(LastClipboardKind), int(ClipboardKind::Files));
 }
 
@@ -1710,6 +1713,175 @@ void ConsoleWorkerWireTest::fileGatesAreStrict()
     QVERIFY(mayAnswerClipboardRequest(list, control, files, 19, true));
     QVERIFY(!mayAnswerClipboardRequest(list, control, noFiles, 19, true));
     QVERIFY(mayAnswerClipboardRequest(text, control, noFiles, 19, true));
+}
+
+// OPT-078 phase 3 (wire 22): a worker still on wire 21 (host-to-client files only) meets a 22 peer: refused as a whole.
+void ConsoleWorkerWireTest::wireTwentyOneIsRefused()
+{
+    QByteArray old = frame(Heartbeat{1});
+    old[4] = char(0);
+    old[5] = char(21);
+    Deframer deframer;
+    deframer.feed(old);
+    QVERIFY(!deframer.next());
+    QCOMPARE(deframer.takeInvalidCount(), 1);
+    QCOMPARE(deframer.mismatchedVersion(), std::optional<quint16>(21));
+}
+
+// OPT-078 phase 3 (wire 22): the six client-to-host file records.
+void ConsoleWorkerWireTest::filePushRecordsRoundTripAndAreBounded()
+{
+    const auto descriptor = ClipboardFileDescriptor::encode({{QStringLiteral("a.txt"), false, 5, std::nullopt}, {QStringLiteral("dir"), true, 0, std::nullopt}}).data;
+    const FilePushOffer offer{9, true, 3ULL << 30, descriptor};
+    const FilePushReply accepted{9, true, FilePushReason::None, 1, 1, 2, 5, 0, 0};
+    const FilePushReply refused{9, false, FilePushReason::NoSpace, 0, 0, 0, 12ULL << 30, 3ULL << 30, 14ULL << 30};
+    const FilePushData data{9, 4, 0x1'0000'0123ULL, QByteArray(256 * 1024, 'x')};
+    const FilePushAck ack{9, 4, 0x1'0000'0123ULL, 256 * 1024, ClipboardFileFetch::AckStatus::Ok};
+    const FilePushCancel cancel{9, FilePushCancelReason::Replaced};
+    const FilePushState state{9, FilePushPhase::Staging, FilePushReason::None, 100, 5000};
+    const FilePushState failed{9, FilePushPhase::Failed, FilePushReason::NoSpace, 100, 5000};
+    Deframer d;
+    d.feed(frame(offer) + frame(accepted) + frame(refused) + frame(data) + frame(ack) + frame(cancel) + frame(state) + frame(failed));
+    const auto offerRecord = d.next();
+    const auto acceptedRecord = d.next();
+    const auto refusedRecord = d.next();
+    const auto dataRecord = d.next();
+    const auto ackRecord = d.next();
+    const auto cancelRecord = d.next();
+    const auto stateRecord = d.next();
+    const auto failedRecord = d.next();
+    QVERIFY(offerRecord && acceptedRecord && refusedRecord && dataRecord && ackRecord && cancelRecord && stateRecord && failedRecord);
+    QCOMPARE(d.takeInvalidCount(), 0);
+    QCOMPARE(filePushOffer(*offerRecord), std::optional(offer));
+    QCOMPARE(filePushReply(*acceptedRecord), std::optional(accepted));
+    QCOMPARE(filePushReply(*refusedRecord), std::optional(refused));
+    QCOMPARE(filePushData(*dataRecord), std::optional(data));
+    QCOMPARE(filePushAck(*ackRecord), std::optional(ack));
+    QCOMPARE(filePushCancel(*cancelRecord), std::optional(cancel));
+    QCOMPARE(filePushState(*stateRecord), std::optional(state));
+    QCOMPARE(filePushState(*failedRecord), std::optional(failed));
+    QCOMPARE(filePushData(*dataRecord)->offset, quint64(0x1'0000'0123ULL)); // 64-bit offsets survive
+    QCOMPARE(filePushOffer(*offerRecord)->reserveBytes, quint64(3ULL << 30));
+    // Each record reads only as its own kind; truncation and a trailing byte refuse it (a data record's body is its tail, so only a short header fails there).
+    QVERIFY(!filePushReply(*offerRecord) && !filePushAck(*dataRecord) && !filePushCancel(*stateRecord) && !filePushState(*cancelRecord));
+    for (const auto *record : {&*acceptedRecord, &*ackRecord, &*cancelRecord, &*stateRecord}) {
+        auto shorter = *record;
+        shorter.payload.chop(1);
+        auto longer = *record;
+        longer.payload.append('x');
+        switch (record->kind) {
+        case Kind::FilePushReply: QVERIFY(!filePushReply(shorter) && !filePushReply(longer)); break;
+        case Kind::FilePushAck: QVERIFY(!filePushAck(shorter) && !filePushAck(longer)); break;
+        case Kind::FilePushCancel: QVERIFY(!filePushCancel(shorter) && !filePushCancel(longer)); break;
+        default: QVERIFY(!filePushState(shorter) && !filePushState(longer)); break;
+        }
+    }
+    // Offer: seq 0, the descriptor not a whole number of entries, none, over the limit, an unknown option bit.
+    {
+        for (const auto &bad : {FilePushOffer{0, false, 0, descriptor}, FilePushOffer{1, false, 0, descriptor.left(descriptor.size() - 1)},
+                                FilePushOffer{1, false, 0, QByteArray(4, '\0')}, FilePushOffer{1, false, 0, QByteArray()},
+                                FilePushOffer{1, false, 0, QByteArray(4 + 592 * ClipboardFileLimits::MaxEntries + 592, '\0')}}) {
+            Deframer e;
+            e.feed(frame(bad));
+            QVERIFY(!filePushOffer(*e.next()));
+        }
+        auto raw = *offerRecord;
+        raw.payload[8] = char(2);
+        QVERIFY(!filePushOffer(raw));
+        Deframer big;
+        big.feed(frame(FilePushOffer{1, false, 0, QByteArray(MaxClipboardFileListBytes, '\0')}));
+        QVERIFY(filePushOffer(*big.next())); // the largest descriptor fits the record limit
+    }
+    // Reply: seq 0; accepted with a reason; refused without one; unknown reason.
+    for (const auto &bad : {FilePushReply{0, true, FilePushReason::None, 1, 0, 0, 1, 0, 0}, FilePushReply{1, true, FilePushReason::NoSpace, 1, 0, 0, 1, 0, 0},
+                            FilePushReply{1, false, FilePushReason::None, 0, 0, 0, 0, 0, 0}}) {
+        Deframer e;
+        e.feed(frame(bad));
+        QVERIFY(!filePushReply(*e.next()));
+    }
+    {
+        auto raw = *refusedRecord;
+        raw.payload[9] = char(LastFilePushReason + 1);
+        QVERIFY(!filePushReply(raw));
+    }
+    // Data: seq 0, no bytes, more than the range ceiling; exactly the ceiling is fine.
+    for (const auto &bad : {FilePushData{0, 0, 0, QByteArray(10, 'x')}, FilePushData{1, 0, 0, QByteArray()}, FilePushData{1, 0, 0, QByteArray(MaxFileReadBytes + 1, 'x')},
+                            FilePushData{1, 0, ~quint64(0) - 9, QByteArray(10, 'x')}}) {
+        Deframer e;
+        e.feed(frame(bad));
+        QVERIFY(!filePushData(*e.next()));
+    }
+    {
+        Deframer e;
+        e.feed(frame(FilePushData{1, 0, 0, QByteArray(MaxFileReadBytes, 'x')}));
+        QVERIFY(filePushData(*e.next()));
+        Deframer f;
+        f.feed(frame(FilePushData{1, 0, ~quint64(0) - 10, QByteArray(10, 'x')}));
+        QVERIFY(filePushData(*f.next()));
+    }
+    // Ack: seq 0, no length, a length over the ceiling, an unknown status, an overflowing range.
+    for (const auto &bad : {FilePushAck{0, 0, 0, 10, ClipboardFileFetch::AckStatus::Ok}, FilePushAck{1, 0, 0, 0, ClipboardFileFetch::AckStatus::Ok},
+                            FilePushAck{1, 0, 0, MaxFileReadBytes + 1, ClipboardFileFetch::AckStatus::Ok}, FilePushAck{1, 0, ~quint64(0) - 9, 10, ClipboardFileFetch::AckStatus::Ok}}) {
+        Deframer e;
+        e.feed(frame(bad));
+        QVERIFY(!filePushAck(*e.next()));
+    }
+    {
+        auto raw = *ackRecord;
+        raw.payload[24] = char(ClipboardFileFetch::LastAckStatus + 1);
+        QVERIFY(!filePushAck(raw));
+        auto rawCancel = *cancelRecord;
+        rawCancel.payload[8] = char(LastFilePushCancelReason + 1);
+        QVERIFY(!filePushCancel(rawCancel));
+    }
+    // Cancel seq 0 means every transfer.
+    {
+        Deframer e;
+        e.feed(frame(FilePushCancel{0, FilePushCancelReason::ConnectionEnded}));
+        QCOMPARE(filePushCancel(*e.next()), std::optional(FilePushCancel{0, FilePushCancelReason::ConnectionEnded}));
+    }
+    // State: seq 0, done beyond total, a failure with no reason, a reason on a non-failure, unknown phase.
+    for (const auto &bad : {FilePushState{0, FilePushPhase::Staging, FilePushReason::None, 0, 1}, FilePushState{1, FilePushPhase::Staging, FilePushReason::None, 2, 1},
+                            FilePushState{1, FilePushPhase::Failed, FilePushReason::None, 0, 1}, FilePushState{1, FilePushPhase::Done, FilePushReason::NoSpace, 1, 1}}) {
+        Deframer e;
+        e.feed(frame(bad));
+        QVERIFY(!filePushState(*e.next()));
+    }
+    {
+        auto raw = *stateRecord;
+        raw.payload[8] = char(LastFilePushPhase + 1);
+        QVERIFY(!filePushState(raw));
+    }
+}
+
+// OPT-078 phase 3 (spec 4.5): the worker stages only for the active controller, with the file flag, on a desktop worker.
+void ConsoleWorkerWireTest::filePushGateIsStrict()
+{
+    const ControlState control{42, true};
+    ClipboardPolicy files{5, 42, true, true, false, false};
+    files.filesClientToHost = true;
+    QVERIFY(mayStageFiles(control, files, true));
+    QVERIFY(!mayStageFiles({42, false}, files, true)); // control inactive
+    QVERIFY(!mayStageFiles({43, true}, files, true)); // another generation
+    QVERIFY(!mayStageFiles({0, true}, files, true));
+    QVERIFY(!mayStageFiles(control, files, false)); // not a desktop worker
+    auto noFiles = files;
+    noFiles.filesClientToHost = false;
+    QVERIFY(!mayStageFiles(control, noFiles, true)); // locked desktops lose the flag for new transfers
+    auto stale = files;
+    stale.controlGeneration = 41;
+    QVERIFY(!mayStageFiles(control, stale, true));
+    auto noClient = files;
+    noClient.clientToHost = false;
+    QVERIFY(!mayStageFiles(control, noClient, true));
+    auto greeter = files;
+    greeter.greeter = true;
+    QVERIFY(!mayStageFiles(control, greeter, true));
+    // host-to-client files do not stage
+    auto hostOnly = files;
+    hostOnly.filesClientToHost = false;
+    hostOnly.filesHostToClient = true;
+    QVERIFY(!mayStageFiles(control, hostOnly, true));
 }
 
 QTEST_GUILESS_MAIN(ConsoleWorkerWireTest)
