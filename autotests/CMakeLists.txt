@@ -1054,6 +1054,13 @@ target_link_libraries(HostFilesTest PRIVATE Qt6::Test Qt6::Core)
 target_link_options(HostFilesTest PRIVATE -Wl,--wrap=pread)
 add_test(NAME HostFilesTest COMMAND HostFilesTest)
 set_tests_properties(HostFilesTest PROPERTIES TIMEOUT 300)
+# OPT-078 phase 3: the worker's staging file system (private root, openat/O_EXCL/O_NOFOLLOW, disk guard, janitor) with failures injected through link wraps.
+add_executable(HostFileStagingTest HostFileStagingTest.cpp)
+target_include_directories(HostFileStagingTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(HostFileStagingTest PRIVATE Qt6::Test Qt6::Core)
+target_link_options(HostFileStagingTest PRIVATE -Wl,--wrap=pwrite -Wl,--wrap=fsync -Wl,--wrap=fstatvfs -Wl,--wrap=openat -Wl,--wrap=renameat2 -Wl,--wrap=fchmod -Wl,--wrap=unlinkat)
+add_test(NAME HostFileStagingTest COMMAND HostFileStagingTest)
+set_tests_properties(HostFileStagingTest PROPERTIES TIMEOUT 300)
 # ...and the parts that read the stats snapshot, plus the phase 0 measurement counters (these link libKRdp for StatsReporter).
 foreach(name ClipboardFileQos DeliveryStats)
     add_executable(${name}Test ${name}Test.cpp)
