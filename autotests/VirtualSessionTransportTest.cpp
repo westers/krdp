@@ -2714,6 +2714,51 @@ private Q_SLOTS:
         });
     }
 
+    // OPT-078 phase 3: client-to-host files in a Virtual desktop follow the owner and the host owner's ClipboardFiles AND the clipboard direction.
+    void clipboardClientFilesFollowTheOwnerAndTheSettings() {
+        microphoneFixture([&](auto &t, auto &, auto &endpoint, auto &worker) {
+            Q_UNUSED(endpoint);
+            ClipChannel channel;
+            channel.attach(t.m_connection->clipboard());
+            workerRecords(worker);
+            const auto lastPolicy = [&]() {
+                std::optional<ConsoleWorkerWire::ClipboardPolicy> policy;
+                for (const auto &record : workerRecords(worker)) if (const auto p = ConsoleWorkerWire::clipboardPolicy(record)) policy = p;
+                return policy;
+            };
+            t.syncClipboard(1001); // not the owner
+            QVERIFY(!t.m_connection->clipboard()->clientFilesAllowed());
+            t.syncClipboard(1000);
+            QVERIFY(t.m_connection->clipboard()->clientFilesAllowed());
+            auto policy = lastPolicy();
+            QVERIFY(policy && policy->filesClientToHost && policy->filesHostToClient);
+            // ClipboardFiles = host-to-client: the client-to-host half goes, the other stays
+            t.setClipboardFiles(ConsoleClipboardPolicy::Direction::HostToClient, {});
+            t.syncClipboard(1000);
+            QVERIFY(!t.m_connection->clipboard()->clientFilesAllowed());
+            policy = lastPolicy();
+            QVERIFY(policy && !policy->filesClientToHost && policy->filesHostToClient);
+            // ClipboardFiles = client-to-host with the clipboard direction narrowed to host-to-client: nothing client to host
+            t.setClipboardFiles(ConsoleClipboardPolicy::Direction::Both, {});
+            t.setClipboardDirection(ConsoleClipboardPolicy::Direction::HostToClient);
+            t.syncClipboard(1000);
+            QVERIFY(!t.m_connection->clipboard()->clientFilesAllowed());
+            // back to both, and off
+            t.setClipboardDirection(ConsoleClipboardPolicy::Direction::Both);
+            t.syncClipboard(1000);
+            QVERIFY(t.m_connection->clipboard()->clientFilesAllowed());
+            t.setClipboardFiles(ConsoleClipboardPolicy::Direction::Off, {});
+            t.syncClipboard(1000);
+            QVERIFY(!t.m_connection->clipboard()->clientFilesAllowed());
+            // detaching withdraws it
+            t.setClipboardFiles(ConsoleClipboardPolicy::Direction::Both, {});
+            t.syncClipboard(1000);
+            QVERIFY(t.m_connection->clipboard()->clientFilesAllowed());
+            t.revoke();
+            QVERIFY(!t.m_connection->clipboard()->clientFilesAllowed());
+        });
+    }
+
     // OPT-077: formatted text follows the same binding and owner rules as text, both ways.
     void clipboardHtmlFollowsTheBindingAndTheOwner() {
         microphoneFixture([&](auto &t, auto &, auto &endpoint, auto &worker) {

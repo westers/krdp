@@ -340,6 +340,7 @@ void VirtualSessionTransport::resetClipboard()
     m_clipboardUid.reset();
     if (auto *clipboard = m_connection ? m_connection->clipboard() : nullptr) {
         clipboard->setDirections(false, false);
+        clipboard->setFileDirections(false, false);
         clipboard->resetHostSide();
         clipboard->resetClientSide(); // (cancels client-to-host transfers at the worker through the relay)
     }
