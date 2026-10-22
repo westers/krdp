@@ -1002,6 +1002,47 @@ private Q_SLOTS:
         QCOMPARE(report.removedTrees, 1);
     }
 
+    // ---- a worker cleans up after crashed ones at start, before it stages anything ----
+    void sweepAtStartCreatesNothingAndNeverFollowsTheRoot()
+    {
+        Rig rig;
+        // no root yet: nothing happens, nothing is created
+        QCOMPARE(Area::sweepStale(rig.config, time(nullptr)), SweepReport{});
+        QVERIFY(!QFileInfo::exists(rig.root()));
+        // a stale instance is removed without creating an instance of our own
+        QDir().mkpath(rig.root() + u"/c-0000000000000dead/4"_s);
+        ageBy(rig.root() + u"/c-0000000000000dead"_s, 600);
+        QCOMPARE(::chmod(QFile::encodeName(rig.root()).constData(), 0700), 0);
+        const auto report = Area::sweepStale(rig.config, time(nullptr));
+        QCOMPARE(report.removedTrees, 1);
+        QCOMPARE(entriesOf(rig.root()), QStringList());
+        // a root that is a symlink, or not ours, is left strictly alone
+        QTemporaryDir victim;
+        QDir().mkpath(victim.path() + u"/c-0000000000000dead"_s);
+        ageBy(victim.path() + u"/c-0000000000000dead"_s, 600);
+        Rig linked;
+        QVERIFY(QFile::link(victim.path(), linked.root()));
+        QCOMPARE(Area::sweepStale(linked.config, time(nullptr)), SweepReport{});
+        QVERIFY(QFileInfo::exists(victim.path() + u"/c-0000000000000dead"_s));
+        Rig foreign;
+        QDir().mkpath(foreign.root() + u"/c-0000000000000dead"_s);
+        ageBy(foreign.root() + u"/c-0000000000000dead"_s, 600);
+        foreign.config.effectiveUid = [] { return ::geteuid() + 1; };
+        QCOMPARE(Area::sweepStale(foreign.config, time(nullptr)), SweepReport{});
+        QVERIFY(QFileInfo::exists(foreign.root() + u"/c-0000000000000dead"_s));
+    }
+    void aTransfersOwnReserveOverridesTheConfiguredOne()
+    {
+        Rig rig;
+        rig.config.reserveBytes = 1ULL << 40; // would refuse everything
+        rig.config.space = [](int) { return std::optional(SpaceInfo{10ULL << 30, 100ULL << 30}); };
+        QVERIFY(rig.open());
+        auto refused = rig.area->begin(1, planOf({file(u"a"_s, 1000)}));
+        QCOMPARE(refused->create(), Status::NoSpace);
+        auto allowed = rig.area->begin(2, planOf({file(u"a"_s, 1000)}), quint64(1ULL << 30));
+        QCOMPARE(allowed->create(), Status::Ok);
+    }
+
     // ---- no names in what this module says ----
     void statusNamesAreFixedWords()
     {

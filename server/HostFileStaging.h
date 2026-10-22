@@ -337,13 +337,20 @@ public:
     QString instancePath() const;
 
     /// Starts a transfer for \a plan under \a seq (an unused number). The staging tree is not created before Transfer::create().
-    std::unique_ptr<Transfer> begin(quint64 seq, const ClipboardFilePush::Plan &plan);
+    std::unique_ptr<Transfer> begin(quint64 seq, const ClipboardFilePush::Plan &plan, std::optional<quint64> reserveBytes = std::nullopt);
     /// Removes transfer \a seq's directory (a replaced copy), whether or not a Transfer object still exists. Returns false when something stayed.
     bool removeTransfer(quint64 seq);
     /// Removes every transfer of this instance (the connection ended, control moved).
     bool removeAll();
+    /// A clean exit: removes every transfer, the lock file and the instance directory itself (a crash leaves them to the next sweep).
+    bool removeInstance();
     /// The start-up sweep of the root (stale instances of crashed or ended workers).
     SweepReport sweep(qint64 nowSeconds);
+    /**
+     * The same sweep without creating anything: a worker that has not staged yet cleans up after crashed ones at start. Does nothing when the
+     * root does not exist, is a symlink, or is not ours.
+     */
+    static SweepReport sweepStale(const Config &config, qint64 nowSeconds);
     /// Transfers older than \a maxAgeSeconds in this instance are removed (spec 3.2 d, for a worker that outlives a day).
     int removeOlderThan(qint64 nowSeconds, qint64 maxAgeSeconds = ClipboardFileStaging::MaxAgeSeconds);
 
@@ -402,6 +409,7 @@ public:
     bool aborted() const { return m_aborted; }
     bool complete() const { return !m_aborted && m_nextFetch >= m_fetch.size(); }
     QSet<quint32> completeFiles() const { return m_complete; }
+    qsizetype completeCount() const { return m_complete.size(); }
 
     /**
      * The free-space guard, then the transfer directory, the plan's directories and its empty files. On any failure everything created
@@ -413,7 +421,7 @@ public:
         if (const Status safe = m_d->verifyRoot(); safe != Status::Ok) return safe;
         const auto info = m_d->config.space(m_d->root);
         const auto decision = ClipboardFileLimits::checkFreeSpace(info ? std::optional(info->freeBytes) : std::nullopt, info ? std::optional(info->totalBytes) : std::nullopt,
-                                                                  m_plan.totalBytes, m_d->config.reserveBytes);
+                                                                  m_plan.totalBytes, reserve());
         if (decision.verdict == ClipboardFileLimits::SpaceVerdict::Unknown) return Status::SpaceUnknown;
         if (decision.verdict == ClipboardFileLimits::SpaceVerdict::NotEnough) {
             if (failure) *failure = {decision.freeBytes, decision.neededBytes};
@@ -465,7 +473,7 @@ public:
             const auto info = m_d->config.space(m_d->root);
             const auto decision = ClipboardFileLimits::checkFreeSpace(info ? std::optional(info->freeBytes) : std::nullopt,
                                                                       info ? std::optional(info->totalBytes) : std::nullopt, m_plan.totalBytes - m_written,
-                                                                      m_d->config.reserveBytes);
+                                                                      reserve());
             if (decision.verdict == ClipboardFileLimits::SpaceVerdict::Unknown) return fail(Status::SpaceUnknown);
             if (decision.verdict == ClipboardFileLimits::SpaceVerdict::NotEnough) {
                 if (failure) *failure = {decision.freeBytes, decision.neededBytes};
@@ -529,13 +537,16 @@ public:
 
 private:
     friend class Area;
-    Transfer(std::shared_ptr<Detail::Shared> shared, quint64 seq, const ClipboardFilePush::Plan &plan, const QString &path)
+    Transfer(std::shared_ptr<Detail::Shared> shared, quint64 seq, const ClipboardFilePush::Plan &plan, const QString &path, std::optional<quint64> reserve)
         : m_d(std::move(shared))
         , m_seq(seq)
         , m_plan(plan)
         , m_path(path)
+        , m_reserve(reserve)
     {
     }
+
+    quint64 reserve() const { return m_reserve.value_or(m_d->config.reserveBytes); }
 
     Status fail(Status status)
     {
@@ -658,6 +669,7 @@ private:
     quint64 m_seq;
     ClipboardFilePush::Plan m_plan;
     QString m_path;
+    std::optional<quint64> m_reserve;
     QList<ClipboardFilePush::FetchFile> m_fetch;
     qsizetype m_nextFetch = 0;
     quint64 m_nextOffset = 0;
@@ -749,9 +761,9 @@ inline QString Area::instancePath() const
     return d->rootPath + QLatin1Char('/') + d->instanceName;
 }
 
-inline std::unique_ptr<Transfer> Area::begin(quint64 seq, const ClipboardFilePush::Plan &plan)
+inline std::unique_ptr<Transfer> Area::begin(quint64 seq, const ClipboardFilePush::Plan &plan, std::optional<quint64> reserveBytes)
 {
-    return std::unique_ptr<Transfer>(new Transfer(d, seq, plan, instancePath() + QLatin1Char('/') + QString::number(seq)));
+    return std::unique_ptr<Transfer>(new Transfer(d, seq, plan, instancePath() + QLatin1Char('/') + QString::number(seq), reserveBytes));
 }
 
 inline bool Area::removeTransfer(quint64 seq)
@@ -769,6 +781,14 @@ inline bool Area::removeAll()
     for (const QByteArray &name : std::as_const(*names)) {
         if (name != ".lock") ok = Detail::removeTreeAt(d->instance, name) && ok;
     }
+    return ok;
+}
+
+inline bool Area::removeInstance()
+{
+    bool ok = removeAll();
+    ok = (::unlinkat(d->instance, ".lock", 0) == 0 || errno == ENOENT) && ok;
+    ok = (::unlinkat(d->root, Detail::enc(d->instanceName).constData(), AT_REMOVEDIR) == 0 || errno == ENOENT) && ok;
     return ok;
 }
 
@@ -790,25 +810,28 @@ inline int Area::removeOlderThan(qint64 nowSeconds, qint64 maxAgeSeconds)
     return removed;
 }
 
-inline SweepReport Area::sweep(qint64 nowSeconds)
+namespace Detail
+{
+/// The real fs behind a sweep of the root held as \a rootFd; \a ownInstance (may be empty) is always live.
+inline SweepOps sweepOps(int rootFd, const QString &ownInstance)
 {
     SweepOps ops;
-    ops.list = [this]() {
+    ops.list = [rootFd]() {
         QList<ClipboardFileStaging::RootEntry> entries;
-        const auto listed = Detail::listDir(d->root);
+        const auto listed = listDir(rootFd);
         const QList<QByteArray> names = listed ? *listed : QList<QByteArray>();
         for (const QByteArray &name : names) {
             struct stat st {};
-            if (::fstatat(d->root, name.constData(), &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
+            if (::fstatat(rootFd, name.constData(), &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
             entries.append({QString::fromUtf8(name), qint64(st.st_mtime), S_ISDIR(st.st_mode), S_ISLNK(st.st_mode)});
         }
         return entries;
     };
-    ops.locked = [this](const QString &name) {
-        if (name == d->instanceName) return true;
-        Detail::Fd dir = Detail::openDirAt(d->root, Detail::enc(name));
+    ops.locked = [rootFd, ownInstance](const QString &name) {
+        if (!ownInstance.isEmpty() && name == ownInstance) return true;
+        Fd dir = openDirAt(rootFd, enc(name));
         if (!dir.valid()) return false;
-        Detail::Fd lock(::openat(dir, ".lock", O_RDWR | O_NOFOLLOW | O_CLOEXEC));
+        Fd lock(::openat(dir, ".lock", O_RDWR | O_NOFOLLOW | O_CLOEXEC));
         if (!lock.valid()) return false; // no lock file: nobody lives there
         if (::flock(lock, LOCK_EX | LOCK_NB) == 0) {
             ::flock(lock, LOCK_UN);
@@ -816,8 +839,26 @@ inline SweepReport Area::sweep(qint64 nowSeconds)
         }
         return errno == EWOULDBLOCK;
     };
-    ops.removeTree = [this](const QString &name) { return Detail::removeTreeAt(d->root, Detail::enc(name)); };
-    ops.unlinkOnly = [this](const QString &name) { return ::unlinkat(d->root, Detail::enc(name).constData(), 0) == 0 || errno == ENOENT; };
-    return runSweep(ops, nowSeconds);
+    ops.removeTree = [rootFd](const QString &name) { return removeTreeAt(rootFd, enc(name)); };
+    ops.unlinkOnly = [rootFd](const QString &name) { return ::unlinkat(rootFd, enc(name).constData(), 0) == 0 || errno == ENOENT; };
+    return ops;
+}
+}
+
+inline SweepReport Area::sweep(qint64 nowSeconds)
+{
+    return runSweep(Detail::sweepOps(d->root, d->instanceName), nowSeconds);
+}
+
+inline SweepReport Area::sweepStale(const Config &config, qint64 nowSeconds)
+{
+    const QByteArray cache = QFile::encodeName(config.cacheDir);
+    if (cache.isEmpty() || !cache.startsWith('/')) return {};
+    Detail::Fd cacheFd(::open(cache.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    if (!cacheFd.valid()) return {};
+    Detail::Fd root = Detail::openDirAt(cacheFd, "krdp-clip"); // never created here; a symlink fails (O_NOFOLLOW)
+    struct stat st {};
+    if (!root.valid() || ::fstat(root, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != config.effectiveUid()) return {};
+    return runSweep(Detail::sweepOps(root, QString()), nowSeconds);
 }
 }

@@ -1061,6 +1061,12 @@ target_link_libraries(HostFileStagingTest PRIVATE Qt6::Test Qt6::Core)
 target_link_options(HostFileStagingTest PRIVATE -Wl,--wrap=pwrite -Wl,--wrap=fsync -Wl,--wrap=fstatvfs -Wl,--wrap=openat -Wl,--wrap=renameat2 -Wl,--wrap=fchmod -Wl,--wrap=unlinkat)
 add_test(NAME HostFileStagingTest COMMAND HostFileStagingTest)
 set_tests_properties(HostFileStagingTest PROPERTIES TIMEOUT 300)
+# OPT-078 phase 3: the worker's client-to-host file service over a fake host and a real temporary cache directory.
+add_executable(HostFileStagerTest HostFileStagerTest.cpp)
+target_include_directories(HostFileStagerTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(HostFileStagerTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui)
+add_test(NAME HostFileStagerTest COMMAND HostFileStagerTest)
+set_tests_properties(HostFileStagerTest PROPERTIES TIMEOUT 120)
 # ...and the parts that read the stats snapshot, plus the phase 0 measurement counters (these link libKRdp for StatsReporter).
 foreach(name ClipboardFileQos DeliveryStats)
     add_executable(${name}Test ${name}Test.cpp)
