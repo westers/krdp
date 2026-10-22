@@ -635,6 +635,7 @@ void VirtualSessionHostController::addClient(RdpConnection *connection)
     transport->setCameraLoopbackDevice(m_cameraLoopbackDevice);
     transport->setClipboardDirection(m_clipboardDirection);
     transport->setClipboardFiles(m_clipboardFiles, m_clipboardFileCeiling);
+    transport->setClipboardFileMinFreeBytes(m_clipboardFileMinFree);
     m_clients.emplace(id, std::move(transport));
     connect(connection, &RdpConnection::stateChanged, this, [this, id](RdpConnection::State state) {
         if (state == RdpConnection::State::Closed) removeClient(id);

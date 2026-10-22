@@ -473,6 +473,14 @@ target_include_directories(ConsoleWorkerEndpointTest PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(ConsoleWorkerEndpointTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
 add_test(NAME ConsoleWorkerEndpointTest COMMAND ConsoleWorkerEndpointTest)
 
+# OPT-078 phase 3: the relay between a connection's Clipboard and the worker endpoint for client-to-host files.
+add_executable(ClientFileRelayTest ClientFileRelayTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
+target_include_directories(ClientFileRelayTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_include_directories(ClientFileRelayTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(ClientFileRelayTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
+add_test(NAME ClientFileRelayTest COMMAND ClientFileRelayTest)
+set_tests_properties(ClientFileRelayTest PROPERTIES TIMEOUT 60)
+
 # OPT-055 wave 2: the Console worker heartbeat watchdog (pure verdict + endpoint over a local socket).
 add_executable(ConsoleWorkerWatchdogTest ConsoleWorkerWatchdogTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
 target_include_directories(ConsoleWorkerWatchdogTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)

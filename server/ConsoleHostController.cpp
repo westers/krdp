@@ -318,6 +318,10 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     connect(&m_endpoint, &ConsoleWorkerEndpoint::fileReadFinished, this, [this](const ConsoleWorkerWire::FileReadResult &result) {
         m_fileRelay.finished(result);
     });
+    // OPT-078 phase 3: client-to-host files. The worker's replies, acknowledgements and states go back to the connection that copied.
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::filePushReplied, this, [this](const ConsoleWorkerWire::FilePushReply &reply) { m_clientFileRelay.replied(reply); });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::filePushAcked, this, [this](const ConsoleWorkerWire::FilePushAck &ack) { m_clientFileRelay.acked(ack); });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::filePushStateChanged, this, [this](const ConsoleWorkerWire::FilePushState &state) { m_clientFileRelay.stateChanged(state); });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardSetFinished, this, [](const ConsoleWorkerWire::ClipboardSetResult &result) {
         qCDebug(CONSOLE_SCREENS) << "client text set" << result.setId << "status" << int(result.status);
     });
@@ -1098,6 +1102,13 @@ void ConsoleHostController::addClient(RdpConnection *connection)
                 const auto found = std::find_if(m_clients.cbegin(), m_clients.cend(), [id](const auto &entry) { return entry->id == id; });
                 return found != m_clients.cend() && m_control.ownsControl(id) && (*found)->clipboardPlan && (*found)->clipboardPlan->files.hostToClient;
             }));
+        clipboard->setClientFileBackend(m_clientFileRelay.backendFor(
+            clipboard, [this] { return &m_endpoint; },
+            [this, id] {
+                const auto found = std::find_if(m_clients.cbegin(), m_clients.cend(), [id](const auto &entry) { return entry->id == id; });
+                return found != m_clients.cend() && m_control.ownsControl(id) && (*found)->clipboardPlan && (*found)->clipboardPlan->files.clientToHost;
+            },
+            [this] { return m_clipboardFileMinFree; }));
         client->connections.append(connect(clipboard, &Clipboard::clientDataChanged, session, [clipboard, session]() {
             session->setClipboardData(clipboard->getClipboard());
         }));
@@ -2312,11 +2323,13 @@ void ConsoleHostController::sendCapabilities(Client &client)
             capabilities.clipboard = LayoutControl::ClipboardCapabilities{hostToClient, clientToHost, int(ConsoleWorkerWire::MaxClipboardBytes), true,
                                                                           int(ConsoleWorkerWire::MaxClipboardImageBytes), true,
                                                                           int(ConsoleWorkerWire::MaxClipboardHtmlBytes)};
-            // OPT-078: file copy. Only host to client exists in this wire; the client-to-host half is announced when it does.
+            // OPT-078: file copy, per direction (phase 3 adds client to host): the host owner's ClipboardFiles AND the clipboard direction.
             const bool filesHostToClient = hostToClient && (m_clipboardFiles == Direction::Both || m_clipboardFiles == Direction::HostToClient);
-            if (filesHostToClient) {
+            const bool filesClientToHost = clientToHost && (m_clipboardFiles == Direction::Both || m_clipboardFiles == Direction::ClientToHost);
+            if (filesHostToClient || filesClientToHost) {
                 LayoutControl::ClipboardCapabilities::Files files;
-                files.hostToClient = true;
+                files.hostToClient = filesHostToClient;
+                files.clientToHost = filesClientToHost;
                 files.maxMode = m_clipboardFileCeiling.kind == ClipboardFilePacing::Ceiling::Kind::Rate ? u"cap"_s
                     : m_clipboardFileCeiling.kind == ClipboardFilePacing::Ceiling::Kind::Balanced     ? u"balanced"_s : u"auto"_s;
                 files.maxRateBytesPerSecond = qint64(m_clipboardFileCeiling.bytesPerSecond);
@@ -2595,6 +2608,7 @@ void ConsoleHostController::syncClipboard()
         input.filesSetting = m_clipboardFiles;
         // A file transfer that is already running when the screen locks goes on (the planner only denies NEW ones while locked).
         input.hostToClientFileStarted = client->connection->clipboard()->hostFileTransferActive();
+        input.clientToHostFileStarted = client->connection->clipboard()->clientFileTransferActive(); // a copy that started before the lock goes on
         const auto plan = ConsoleClipboardPolicy::plan(input);
         if (input.ownsControl) controllerPlan = plan;
         const auto before = client->clipboardPlan;
@@ -2627,8 +2641,9 @@ void ConsoleHostController::resetClipboards()
     for (const auto &client : m_clients) {
         if (!client->connection || !client->connection->clipboard()) continue;
         client->connection->clipboard()->resetHostSide();
-        client->connection->clipboard()->resetClientSide();
+        client->connection->clipboard()->resetClientSide(); // (cancels client-to-host transfers at the worker through the relay)
     }
+    m_clientFileRelay.clear();
 }
 
 void ConsoleHostController::clipboardRequested(ConsoleControl::Id id, quint64 requestId, ClipboardRequestKind kind, bool hugeFiles)

@@ -165,6 +165,10 @@ VirtualSessionTransport::VirtualSessionTransport(quint64 client, RdpConnection *
         clipboard->setHostFileBackend(m_fileRelay.backendFor(
             clipboard, [this] { return m_endpoint.data(); },
             [this] { return m_endpoint && m_clipboardPlan && m_clipboardPlan->files.hostToClient && authorized(m_clipboardUid); }));
+        clipboard->setClientFileBackend(m_clientFileRelay.backendFor(
+            clipboard, [this] { return m_endpoint.data(); },
+            [this] { return m_endpoint && m_clipboardPlan && m_clipboardPlan->files.clientToHost && authorized(m_clipboardUid); },
+            [this] { return m_clipboardFileMinFree; }));
         connect(clipboard, &Clipboard::clientDataChanged, &m_session, [clipboard, this]() {
             m_session.setClipboardData(clipboard->getClipboard());
         });
@@ -302,6 +306,7 @@ void VirtualSessionTransport::syncClipboard(std::optional<quint32> uid)
     input.setting = m_clipboardDirection;
     input.filesSetting = m_clipboardFiles;
     input.hostToClientFileStarted = clipboard->hostFileTransferActive();
+    input.clientToHostFileStarted = clipboard->clientFileTransferActive();
     m_clipboardUid = uid;
     const bool owner = authorized(uid);
     if (owner) {
@@ -336,8 +341,9 @@ void VirtualSessionTransport::resetClipboard()
     if (auto *clipboard = m_connection ? m_connection->clipboard() : nullptr) {
         clipboard->setDirections(false, false);
         clipboard->resetHostSide();
-        clipboard->resetClientSide();
+        clipboard->resetClientSide(); // (cancels client-to-host transfers at the worker through the relay)
     }
+    m_clientFileRelay.clear();
 }
 
 void VirtualSessionTransport::setVideoQualityPolicy(quint8 cap, bool adaptive)
@@ -490,6 +496,10 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::fileReadFinished, this, [this](const ConsoleWorkerWire::FileReadResult &result) {
         m_fileRelay.finished(result);
     }));
+    // OPT-078 phase 3: client-to-host files. The worker's replies, acknowledgements and states go back to the connection that copied.
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::filePushReplied, this, [this](const ConsoleWorkerWire::FilePushReply &reply) { m_clientFileRelay.replied(reply); }));
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::filePushAcked, this, [this](const ConsoleWorkerWire::FilePushAck &ack) { m_clientFileRelay.acked(ack); }));
+    m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::filePushStateChanged, this, [this](const ConsoleWorkerWire::FilePushState &state) { m_clientFileRelay.stateChanged(state); }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::clipboardDataReceived, this, [this](const ConsoleWorkerWire::ClipboardData &data) {
         const auto requestId = m_clipboardRequests.take(data.requestId);
         if (!requestId || !m_connection || !m_connection->clipboard()) return;
@@ -1200,10 +1210,13 @@ void VirtualSessionTransport::sendCapabilities()
             capabilities.clipboard = LayoutControl::ClipboardCapabilities{hostToClient, clientToHost, int(ConsoleWorkerWire::MaxClipboardBytes), true,
                                                                           int(ConsoleWorkerWire::MaxClipboardImageBytes), true,
                                                                           int(ConsoleWorkerWire::MaxClipboardHtmlBytes)};
-            // OPT-078: file copy; only host to client exists in this wire, the client-to-host half is announced when it does.
-            if (hostToClient && (m_clipboardFiles == Direction::Both || m_clipboardFiles == Direction::HostToClient)) {
+            // OPT-078: file copy, per direction (phase 3 adds client to host): the host owner's ClipboardFiles AND the clipboard direction.
+            const bool filesHostToClient = hostToClient && (m_clipboardFiles == Direction::Both || m_clipboardFiles == Direction::HostToClient);
+            const bool filesClientToHost = clientToHost && (m_clipboardFiles == Direction::Both || m_clipboardFiles == Direction::ClientToHost);
+            if (filesHostToClient || filesClientToHost) {
                 LayoutControl::ClipboardCapabilities::Files files;
-                files.hostToClient = true;
+                files.hostToClient = filesHostToClient;
+                files.clientToHost = filesClientToHost;
                 files.maxMode = m_clipboardFileCeiling.kind == ClipboardFilePacing::Ceiling::Kind::Rate ? u"cap"_s
                     : m_clipboardFileCeiling.kind == ClipboardFilePacing::Ceiling::Kind::Balanced     ? u"balanced"_s : u"auto"_s;
                 files.maxRateBytesPerSecond = qint64(m_clipboardFileCeiling.bytesPerSecond);

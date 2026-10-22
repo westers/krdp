@@ -1855,6 +1855,56 @@ private:
     {
         return ClipboardFileDescriptor::encode({{QStringLiteral("report.bin"), false, size, std::nullopt}}).data;
     }
+    // OPT-078 phase 3: what the broker sends the CLIENT while it receives files (lock, descriptor request, FILECONTENTS requests).
+    struct PushSent {
+        QList<uint32_t> locks;
+        QList<uint32_t> unlocks;
+        struct Request {
+            uint32_t streamId, index, flags, length;
+            uint64_t offset;
+            bool haveLock;
+            uint32_t lockId;
+        };
+        QList<Request> requests;
+    };
+    static inline PushSent *pushSent_ = nullptr;
+    static UINT onPushLock(CliprdrServerContext *, const CLIPRDR_LOCK_CLIPBOARD_DATA *lock)
+    {
+        if (pushSent_) pushSent_->locks.append(lock->clipDataId);
+        return CHANNEL_RC_OK;
+    }
+    static UINT onPushUnlock(CliprdrServerContext *, const CLIPRDR_UNLOCK_CLIPBOARD_DATA *unlock)
+    {
+        if (pushSent_) pushSent_->unlocks.append(unlock->clipDataId);
+        return CHANNEL_RC_OK;
+    }
+    static UINT onPushRequest(CliprdrServerContext *, const CLIPRDR_FILE_CONTENTS_REQUEST *request)
+    {
+        if (pushSent_)
+            pushSent_->requests.append({request->streamId, request->listIndex, request->dwFlags, request->cbRequested, (uint64_t(request->nPositionHigh) << 32) | request->nPositionLow,
+                                        bool(request->haveClipDataId), request->clipDataId});
+        return CHANNEL_RC_OK;
+    }
+    static void enablePush(ClipboardRig &rig, PushSent &sent)
+    {
+        pushSent_ = &sent;
+        rig.context.ServerLockClipboardData = onPushLock;
+        rig.context.ServerUnlockClipboardData = onPushUnlock;
+        rig.context.ServerFileContentsRequest = onPushRequest;
+    }
+    static constexpr uint32_t ClientFilesId = 0xC0A1;
+    static UINT clientCopiesFiles(ClipboardRig &rig)
+    {
+        static char name[] = "FileGroupDescriptorW";
+        CLIPRDR_FORMAT format{};
+        format.formatId = ClientFilesId;
+        format.formatName = name;
+        CLIPRDR_FORMAT_LIST list{};
+        list.common.msgType = CB_FORMAT_LIST;
+        list.numFormats = 1;
+        list.formats = &format;
+        return rig.context.ClientFormatList(&rig.context, &list);
+    }
     template<typename T, typename F>
     static QList<T> recordsOf(ClipboardRig &rig, F decode)
     {
@@ -3736,7 +3786,7 @@ private Q_SLOTS:
         QList<FileContents> contents;
         enableFiles(rig, contents);
         const auto policy = rig.lastPolicy();
-        QVERIFY(policy && policy->filesHostToClient && policy->filesClientToHost); // the planner's decision for a same-account desktop; only host to client is implemented
+        QVERIFY(policy && policy->filesHostToClient && policy->filesClientToHost); // the planner's decision for a same-account desktop
         QVERIFY(rig.connection.clipboard()->filesEnabled());
         rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, ConsoleWorkerWire::ClipboardOfferFiles}));
         QTRY_COMPARE(rig.sent.formatLists.size(), 1);
@@ -3804,6 +3854,173 @@ private Q_SLOTS:
         rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::FileReadResult{9999, ConsoleWorkerWire::FileReadStatus::Ok, QByteArray(10, 'x')}));
         QTest::qWait(60);
         QCOMPARE(contents.size(), 2);
+        fileContents_ = nullptr;
+    }
+
+    // ---- OPT-078 phase 3: client-to-host file copy through the controller, the relay, the endpoint and a fake worker ----
+    void clientFilesFlowToTheWorkerAndSurviveALockButNotANewTransferOnALockedDesktop()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        QList<FileContents> contents;
+        enableFiles(rig, contents);
+        PushSent pushed;
+        enablePush(rig, pushed);
+        rig.host.setClipboardFileMinFreeBytes(3ULL << 30);
+        rig.connection.clipboard()->setFileTransferRequest({ClipboardFilePacing::RequestedMode::Unlimited, std::nullopt});
+        rig.connection.clipboard()->setStockClientForTest(false);
+        const auto policy = rig.lastPolicy();
+        QVERIFY(policy && policy->filesClientToHost);
+        // the client copies two files: the clipboard is locked, then the descriptor requested
+        const auto descriptor = ClipboardFileDescriptor::encode({{QStringLiteral("a.bin"), false, 300 * 1024, std::nullopt}, {QStringLiteral("b.txt"), false, 10, std::nullopt}}).data;
+        clientCopiesFiles(rig);
+        QTRY_VERIFY_WITH_TIMEOUT(rig.sent.dataRequests.contains(ClientFilesId), 3000);
+        QCOMPARE(pushed.locks.size(), 1);
+        rig.clientAnswers(descriptor);
+        // the worker is offered the descriptor with the huge option and the host owner's reserve
+        QTRY_VERIFY(!recordsOf<ConsoleWorkerWire::FilePushOffer>(rig, [](const auto &r) { return ConsoleWorkerWire::filePushOffer(r); }).isEmpty());
+        const auto offer = recordsOf<ConsoleWorkerWire::FilePushOffer>(rig, [](const auto &r) { return ConsoleWorkerWire::filePushOffer(r); }).last();
+        QCOMPARE(offer.descriptor, descriptor);
+        QVERIFY(offer.hugeFiles);
+        QCOMPARE(offer.reserveBytes, quint64(3ULL << 30));
+        QVERIFY(pushed.requests.isEmpty()); // nothing is asked of the client before the worker accepted
+        const auto plan = ClipboardFilePush::makePlan(descriptor, true);
+        ConsoleWorkerWire::FilePushReply reply;
+        reply.seq = offer.seq;
+        reply.accepted = true;
+        reply.reason = ConsoleWorkerWire::FilePushReason::None;
+        reply.files = quint32(plan.files);
+        reply.directories = quint32(plan.directories);
+        reply.totalBytes = plan.totalBytes;
+        rig.workerSends(ConsoleWorkerWire::frame(reply));
+        QTRY_VERIFY(!pushed.requests.isEmpty());
+        QVERIFY(pushed.requests.first().haveLock);
+        QCOMPARE(pushed.requests.first().lockId, pushed.locks.first());
+        QVERIFY(rig.connection.clipboard()->clientFileTransferActive());
+        // the screen locks while the transfer runs: the planner keeps the flag for it (the policy record says so)
+        rig.host.m_sessions = {ClipboardRig::session(u"3"_s, quint32(getuid()), true, false)};
+        rig.host.syncClipboard();
+        QVERIFY(rig.connection.clipboard()->clientFilesAllowed());
+        QVERIFY(rig.lastPolicy()->filesClientToHost && rig.lastPolicy()->locked);
+        // the client answers every request; the worker receives the ranges in order and acknowledges each
+        int answered = 0;
+        quint64 total = 0;
+        for (int round = 0; round < 200 && total < plan.totalBytes; ++round) {
+            while (answered < pushed.requests.size()) {
+                const auto &request = pushed.requests.at(answered++);
+                CLIPRDR_FILE_CONTENTS_RESPONSE response{};
+                response.common.msgType = CB_FILECONTENTS_RESPONSE;
+                response.common.msgFlags = CB_RESPONSE_OK;
+                const QByteArray bytes(int(request.length), char('a' + request.index));
+                response.streamId = request.streamId;
+                response.cbRequested = request.length;
+                response.common.dataLen = request.length + 4;
+                response.requestedData = reinterpret_cast<const BYTE *>(bytes.constData());
+                rig.context.ClientFileContentsResponse(&rig.context, &response);
+                QTest::qWait(5);
+            }
+            const auto data = recordsOf<ConsoleWorkerWire::FilePushData>(rig, [](const auto &r) { return ConsoleWorkerWire::filePushData(r); });
+            quint64 seen = 0;
+            for (const auto &chunk : data) seen += quint64(chunk.data.size());
+            while (total < seen) { // acknowledge what the worker has now
+                static int acked = 0;
+                const auto &chunk = data.at(acked++);
+                total += quint64(chunk.data.size());
+                rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::FilePushAck{chunk.seq, chunk.index, chunk.offset, quint32(chunk.data.size()), ClipboardFileFetch::AckStatus::Ok}));
+            }
+            QTest::qWait(15);
+        }
+        QCOMPARE(total, plan.totalBytes);
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::FilePushState{offer.seq, ConsoleWorkerWire::FilePushPhase::Done, ConsoleWorkerWire::FilePushReason::None, total, total}));
+        QTRY_VERIFY(!rig.connection.clipboard()->clientFileTransferActive());
+        QCOMPARE(pushed.unlocks, pushed.locks);
+        // the desktop is locked and the copy is over: the flag drops for NEW transfers and a new copy is not even requested
+        rig.host.syncClipboard();
+        QTRY_VERIFY(!rig.lastPolicy()->filesClientToHost);
+        QVERIFY(!rig.connection.clipboard()->clientFilesAllowed());
+        const auto requestsBefore = rig.sent.dataRequests.size();
+        clientCopiesFiles(rig);
+        QTest::qWait(Clipboard::FormatListSettleMs * 3);
+        QCOMPARE(rig.sent.dataRequests.size(), requestsBefore);
+        pushSent_ = nullptr;
+        fileContents_ = nullptr;
+    }
+
+    void clientFilesAreDeniedOnTheLoginScreenForAViewerAndForTheOtherSettings()
+    {
+        QList<FileContents> contents;
+        PushSent pushed;
+        {
+            ClipboardRig greeter(ConsoleSeat::Adapter::Greeter, quint32(getuid()) + 1);
+            QVERIFY(greeter.ok);
+            enableFiles(greeter, contents);
+            enablePush(greeter, pushed);
+            const auto policy = greeter.lastPolicy();
+            QVERIFY(policy && !policy->filesClientToHost);
+            clientCopiesFiles(greeter);
+            QTest::qWait(Clipboard::FormatListSettleMs * 3);
+            QVERIFY(!greeter.sent.dataRequests.contains(ClientFilesId));
+        }
+        {
+            ClipboardRig viewer(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()), false, false);
+            QVERIFY(viewer.ok);
+            enableFiles(viewer, contents);
+            enablePush(viewer, pushed);
+            clientCopiesFiles(viewer);
+            QTest::qWait(Clipboard::FormatListSettleMs * 3);
+            QVERIFY(!viewer.sent.dataRequests.contains(ClientFilesId));
+        }
+        {
+            ClipboardRig foreign(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()) + 1, true);
+            QVERIFY(foreign.ok);
+            enableFiles(foreign, contents);
+            enablePush(foreign, pushed);
+            QVERIFY(!foreign.lastPolicy()->filesClientToHost);
+            clientCopiesFiles(foreign);
+            QTest::qWait(Clipboard::FormatListSettleMs * 3);
+            QVERIFY(!foreign.sent.dataRequests.contains(ClientFilesId));
+        }
+        {
+            // ClipboardFiles = host-to-client, or the clipboard direction host-to-client: the flag goes
+            ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+            QVERIFY(rig.ok);
+            enableFiles(rig, contents);
+            enablePush(rig, pushed);
+            QVERIFY(rig.lastPolicy()->filesClientToHost);
+            rig.host.setClipboardFiles(ConsoleClipboardPolicy::Direction::HostToClient);
+            rig.host.syncClipboard();
+            QTRY_VERIFY(!rig.lastPolicy()->filesClientToHost);
+            rig.host.setClipboardFiles(ConsoleClipboardPolicy::Direction::Both);
+            rig.host.setClipboardDirection(ConsoleClipboardPolicy::Direction::HostToClient);
+            rig.host.syncClipboard();
+            QTRY_VERIFY(!rig.lastPolicy()->filesClientToHost);
+            rig.host.setClipboardDirection(ConsoleClipboardPolicy::Direction::Both);
+            rig.host.setClipboardFiles(ConsoleClipboardPolicy::Direction::Off);
+            rig.host.syncClipboard();
+            QTRY_VERIFY(!rig.lastPolicy()->filesClientToHost);
+        }
+        pushSent_ = nullptr;
+        fileContents_ = nullptr;
+    }
+
+    void theWorkerGoingAwayEndsAClientFileTransfer()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        QList<FileContents> contents;
+        enableFiles(rig, contents);
+        PushSent pushed;
+        enablePush(rig, pushed);
+        const auto descriptor = ClipboardFileDescriptor::encode({{QStringLiteral("a.bin"), false, 300 * 1024, std::nullopt}}).data;
+        clientCopiesFiles(rig);
+        QTRY_VERIFY_WITH_TIMEOUT(rig.sent.dataRequests.contains(ClientFilesId), 3000);
+        rig.clientAnswers(descriptor);
+        QTRY_VERIFY(rig.connection.clipboard()->clientFileTransferActive());
+        rig.worker.disconnectFromServer();
+        QTRY_VERIFY(!rig.host.m_endpoint.ready());
+        QVERIFY(!rig.connection.clipboard()->clientFileTransferActive());
+        QCOMPARE(pushed.unlocks, pushed.locks); // the client's snapshot is released
+        pushSent_ = nullptr;
         fileContents_ = nullptr;
     }
 
@@ -4036,10 +4253,10 @@ private Q_SLOTS:
                                  {u"maxImageBytes"_s, 16 * 1024 * 1024},
                                  {u"html"_s, true}, // OPT-077: formatted text too
                                  {u"maxHtmlBytes"_s, 8 * 1024 * 1024}};
-            if (both || direction == ConsoleClipboardPolicy::Direction::HostToClient) {
-                // OPT-078: file copy (host to client only in this wire) follows ClipboardFiles (both by default) and the host direction
-                expected.insert(u"files"_s, QJsonObject{{u"hostToClient"_s, true}, {u"clientToHost"_s, false}, {u"maxMode"_s, u"auto"_s}, {u"huge"_s, true}, {u"transfer"_s, true}});
-            }
+            // OPT-078: file copy follows ClipboardFiles (both by default) per direction, and the clipboard direction narrows it too.
+            expected.insert(u"files"_s, QJsonObject{{u"hostToClient"_s, both || direction == ConsoleClipboardPolicy::Direction::HostToClient},
+                                                    {u"clientToHost"_s, both || direction == ConsoleClipboardPolicy::Direction::ClientToHost},
+                                                    {u"maxMode"_s, u"auto"_s}, {u"huge"_s, true}, {u"transfer"_s, true}});
             QCOMPARE(caps.value(u"clipboard"_s).toObject(), expected);
         }
     }
@@ -4401,7 +4618,11 @@ private Q_SLOTS:
         };
         using Direction = ConsoleClipboardPolicy::Direction;
         QVERIFY(files(Direction::Off, {}).isUndefined());
-        QVERIFY(files(Direction::ClientToHost, {}).isUndefined()); // nothing host to client to offer: the group is absent, not half there
+        // OPT-078 phase 3: client to host exists now; the group says which halves this host offers
+        QCOMPARE(files(Direction::ClientToHost, {}).toObject().value(u"clientToHost"_s).toBool(), true);
+        QCOMPARE(files(Direction::ClientToHost, {}).toObject().value(u"hostToClient"_s).toBool(), false);
+        QCOMPARE(files(Direction::HostToClient, {}).toObject().value(u"clientToHost"_s).toBool(), false);
+        QCOMPARE(files(Direction::Both, {}).toObject().value(u"clientToHost"_s).toBool(), true);
         QCOMPARE(files(Direction::HostToClient, ClipboardFilePacing::Ceiling::balanced()).toObject().value(u"maxMode"_s).toString(), u"balanced"_s);
         const auto capped = files(Direction::Both, ClipboardFilePacing::Ceiling::rate(2'500'000)).toObject();
         QCOMPARE(capped.value(u"maxMode"_s).toString(), u"cap"_s);

@@ -24,6 +24,7 @@
 #include "ConsoleControl.h"
 #include "ClipboardFilePacing.h"
 #include "ConsoleClipboardPolicy.h"
+#include "ClientFileRelay.h"
 #include "HostFileRelay.h"
 #include "ConsoleInputState.h"
 #include "ConsoleWorkerEndpoint.h"
@@ -106,6 +107,8 @@ public:
     /** OPT-078: the host owner's ClipboardFiles (file copy, same shape as ClipboardDirection) and ClipboardFileMaxRate (the rate ceiling). Set before clients connect. */
     void setClipboardFiles(ConsoleClipboardPolicy::Direction direction) { m_clipboardFiles = direction; }
     void setClipboardFileCeiling(const ClipboardFilePacing::Ceiling &ceiling) { m_clipboardFileCeiling = ceiling; }
+    /** OPT-078 phase 3: ClipboardFileMinFreeBytes, the free space that must remain on the host after a client-to-host copy (0 = max(2 GiB, 5% of the filesystem)). */
+    void setClipboardFileMinFreeBytes(quint64 bytes) { m_clipboardFileMinFree = bytes; }
 
 private:
     friend class ConsoleHostControllerTest;
@@ -202,6 +205,8 @@ private:
     ConsoleClipboardPolicy::Direction m_clipboardFiles = ConsoleClipboardPolicy::Direction::Both; // OPT-078
     ClipboardFilePacing::Ceiling m_clipboardFileCeiling;
     HostFileRelay m_fileRelay;
+    ClientFileRelay m_clientFileRelay; // OPT-078 phase 3
+    quint64 m_clipboardFileMinFree = 0;
     QHash<quint64, PendingClipboardRequest> m_clipboardRequests;
 
     /** M-3: the broker's own run of the mapped planner over the last known host screens (no wire, no worker). */
