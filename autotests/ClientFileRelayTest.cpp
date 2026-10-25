@@ -167,6 +167,27 @@ private Q_SLOTS:
         backend.cancel(5, 0);
         QCOMPARE(relay.owned(), 0);
     }
+
+    // A Clipboard cancels its transfers from its destructor, which can run after the broker that owns the relay: the backend must be harmless then.
+    void aRelayGoneBeforeTheConnectionLeavesTheBackendHarmless()
+    {
+        FakeWorker w;
+        QVERIFY(w.ok);
+        w.drain();
+        Clipboard owner(nullptr);
+        Clipboard::ClientFileBackend backend;
+        {
+            auto relay = std::make_unique<ClientFileRelay>();
+            backend = relay->backendFor(&owner, [&w] { return &w.endpoint; }, [] { return true; }, [] { return quint64(0); });
+            QVERIFY(backend.offer(descriptor(), true));
+            w.drain();
+        }
+        QCOMPARE(backend.offer(descriptor(), true), quint64(0));
+        QVERIFY(!backend.data(1, 0, 0, QByteArray(1, 'x')));
+        backend.cancel(0, 0);
+        backend.cancel(1, 0);
+        QVERIFY(w.drain().isEmpty()); // nothing is sent for a transfer whose relay has gone
+    }
 };
 
 QTEST_GUILESS_MAIN(ClientFileRelayTest)

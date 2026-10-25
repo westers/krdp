@@ -481,6 +481,13 @@ target_link_libraries(ClientFileRelayTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Q
 add_test(NAME ClientFileRelayTest COMMAND ClientFileRelayTest)
 set_tests_properties(ClientFileRelayTest PROPERTIES TIMEOUT 60)
 
+add_executable(HostFileRelayTest HostFileRelayTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
+target_include_directories(HostFileRelayTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_include_directories(HostFileRelayTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+target_link_libraries(HostFileRelayTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network KRdp)
+add_test(NAME HostFileRelayTest COMMAND HostFileRelayTest)
+set_tests_properties(HostFileRelayTest PROPERTIES TIMEOUT 60)
+
 # OPT-055 wave 2: the Console worker heartbeat watchdog (pure verdict + endpoint over a local socket).
 add_executable(ConsoleWorkerWatchdogTest ConsoleWorkerWatchdogTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
 target_include_directories(ConsoleWorkerWatchdogTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
