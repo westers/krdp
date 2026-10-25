@@ -119,11 +119,16 @@ private Q_SLOTS:
     }
     void totalPathBytesAreCapped()
     {
-        // 70 paths of ~1 MiB would need 100k entries; use long names x many entries within the entry cap
+        // What one FILEDESCRIPTORW can carry is 259 UTF-16 units; with 3-byte characters that is ~760 UTF-8 bytes per path, so the 32 MiB cap is
+        // reached after ~44k entries (well inside the 100k entry cap). Paths this long, not the 485-character ones an earlier version of this test
+        // built (impossible on the wire, 100 MB of input and 520 MB of peak RSS on Sol), keep the case realistic and small.
         QList<RawEntry> list;
-        const QString longName(240, QLatin1Char('n'));
-        for (int i = 0; i < 100000; ++i) list.append({QString::number(i) + longName.left(240 - QString::number(i).size()) + QStringLiteral("\\") + longName, false});
-        // 100000 * ~485 bytes = 48 MB > 32 MiB
+        const QString part(84, QChar(0x20ac)); // 252 UTF-8 bytes: one allowed component
+        for (int i = 0; i < 45000; ++i) {
+            const QString number = QString::number(i);
+            list.append({number + part.left(84 - number.size()) + QLatin1Char('\\') + part + QLatin1Char('\\') + part, false});
+        }
+        // 45000 * ~760 bytes = ~34 MB > 32 MiB
         const auto r = sanitize(list);
         QVERIFY(!r.ok());
         QCOMPARE(*r.reject, Reject::TotalPathBytes);
