@@ -46,6 +46,11 @@ QByteArray slurp(const QString &path)
     return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray("<unreadable>");
 }
 
+QStringList entriesOf(const QString &dirPath)
+{
+    return QDir(dirPath).entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::Name);
+}
+
 struct Rig {
     QTemporaryDir cache;
     Deframer deframer;
@@ -312,6 +317,48 @@ private Q_SLOTS:
         rig.offer(2, descriptorOf({{u"big.iso"_s, false, 2ULL << 30, std::nullopt}}), true, 500ULL << 20);
         QTRY_COMPARE(rig.replies().size(), 2);
         QVERIFY(rig.replies().last().accepted);
+    }
+    // The real space probe (never injected here) on a cache directory that does not exist yet, parents included: the first copy on a fresh account.
+    void theFirstCopyWorksOnAnAccountWithNoCacheDirectoryYet()
+    {
+        Rig rig(true, false);
+        rig.config.cacheDir = rig.cache.filePath(u"home/user/.cache"_s);
+        rig.start();
+        QVERIFY(!QFileInfo::exists(rig.cache.filePath(u"home"_s)));
+        rig.offer(1, descriptorOf({{u"a.txt"_s, false, 5, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 1);
+        QVERIFY2(rig.replies().first().accepted, qPrintable(QString::number(int(rig.replies().first().reason))));
+        QVERIFY(QFileInfo(rig.cache.filePath(u"home/user/.cache/krdp-clip"_s)).isDir());
+    }
+    // A staging folder that cannot be made is said as such (the notification names the folder's job, never a path or a file name), and no byte is asked for.
+    void aStagingFolderThatCannotBeMadeIsToldAsSuch_data()
+    {
+        QTest::addColumn<bool>("emptyCacheDir");
+        QTest::newRow("unwritable parent") << false;
+        QTest::newRow("no cache directory at all (no HOME, no passwd entry)") << true;
+    }
+    void aStagingFolderThatCannotBeMadeIsToldAsSuch()
+    {
+        QFETCH(bool, emptyCacheDir);
+        if (!emptyCacheDir && ::getuid() == 0) QSKIP("root can create anything");
+        Rig rig(true, false);
+        const QString locked = rig.cache.filePath(u"locked"_s);
+        QVERIFY(QDir().mkpath(locked));
+        rig.config.cacheDir = emptyCacheDir ? QString() : locked + u"/.cache"_s;
+        QCOMPARE(::chmod(QFile::encodeName(locked).constData(), 0500), 0);
+        rig.start();
+        rig.offer(1, descriptorOf({{u"secret-name.txt"_s, false, 5, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 1);
+        QVERIFY(rig.stager->waitForIdle(5000));
+        QCOMPARE(::chmod(QFile::encodeName(locked).constData(), 0700), 0);
+        QVERIFY(!rig.replies().first().accepted);
+        QCOMPARE(rig.replies().first().reason, FilePushReason::StagingFailed);
+        QCOMPARE(rig.notes.size(), 1);
+        const QString body = rig.notes.first().second;
+        QVERIFY2(body.contains(u"folder"_s) && body.contains(u"could not be prepared"_s), qPrintable(body));
+        QVERIFY(!body.contains(u"secret-name"_s) && !body.contains(rig.cache.path()));
+        QVERIFY(rig.acks().isEmpty());
+        QVERIFY(entriesOf(locked).isEmpty());
     }
     void aProbeThatFailsRefusesInsteadOfGuessing()
     {

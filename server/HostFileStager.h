@@ -158,6 +158,7 @@ public:
             CreateResult result;
             if (!ensureArea()) {
                 result.status = HostFileStaging::Status::RootUnsafe;
+                result.rootFailed = true;
             } else {
                 result.fs = std::shared_ptr<HostFileStaging::Transfer>(m_area->begin(seq, *plan, reserve));
                 result.status = result.fs->create(&result.failure);
@@ -233,6 +234,7 @@ private:
         HostFileStaging::SpaceFailure failure;
         std::shared_ptr<HostFileStaging::Transfer> fs;
         bool complete = false;
+        bool rootFailed = false; ///< the staging folder itself could not be opened or made (told apart in the notification)
         QStringList finished;
     };
     struct WriteResult {
@@ -261,7 +263,11 @@ private:
         if (m_area) return true;
         HostFileStaging::Status status = HostFileStaging::Status::Ok;
         m_area = HostFileStaging::Area::open(m_config, &status);
-        if (!m_area) return false;
+        if (!m_area) {
+            // (the status names the cause: io-error = the folder could not be created or entered, root-unsafe = a link, someone else's, or no cache directory)
+            qWarning().nospace() << "Clipboard: the file staging folder is not usable (" << HostFileStaging::statusName(status) << ") cacheDir=" << m_config.cacheDir;
+            return false;
+        }
         const qint64 now = m_tuning.nowSeconds();
         const auto report = m_area->sweep(now);
         const int old = m_area->removeOlderThan(now);
@@ -297,7 +303,7 @@ private:
             }
             reply.totalBytes = entry.plan->totalBytes;
             m_entries.erase(it);
-            refuse(seq, reason, reply);
+            refuse(seq, reason, reply, result.rootFailed ? QStringLiteral("The folder for received files could not be prepared on the host.") : QString());
             return;
         }
         entry.fs = result.fs;
@@ -445,7 +451,7 @@ private:
         }
     }
 
-    void refuse(quint64 seq, Reason reason, ConsoleWorkerWire::FilePushReply reply)
+    void refuse(quint64 seq, Reason reason, ConsoleWorkerWire::FilePushReply reply, const QString &notice = {})
     {
         reply.seq = seq;
         reply.accepted = false;
@@ -453,7 +459,11 @@ private:
         reply.files = reply.directories = 0;
         m_send(ConsoleWorkerWire::frame(reply));
         qInfo().nospace() << "Clipboard: refused (" << ConsoleWorkerWire::filePushReasonName(reason) << ") direction=client-to-host kind=files skipped=" << reply.skipped;
-        if (reason != Reason::Policy) notifyFailure(reason, reply.freeBytes, reply.neededBytes);
+        if (!notice.isEmpty()) {
+            notify(QStringLiteral("Could not receive files from the remote client"), notice);
+        } else if (reason != Reason::Policy) {
+            notifyFailure(reason, reply.freeBytes, reply.neededBytes);
+        }
     }
 
     void ack(const ConsoleWorkerWire::FilePushData &chunk, ClipboardFileFetch::AckStatus status)

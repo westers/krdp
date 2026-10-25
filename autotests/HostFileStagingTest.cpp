@@ -306,6 +306,55 @@ private Q_SLOTS:
         QVERIFY(rig.open());
         QVERIFY(QFileInfo::exists(real.filePath(u"krdp-clip"_s)));
     }
+    // OPT-078 phase 3 (client 0.13.2 found the same shape on the other side): the space guard must never measure a root nothing has made yet.
+    // Area::open makes `krdp-clip` first and the guard probes the open descriptor, so the order is right here. Every earlier guard test injected
+    // the probe; these use the real one on a root that did not exist before the open.
+    void theRealSpaceGuardWorksOnARootThatDidNotExistBeforeTheOpen()
+    {
+        Rig rig;
+        QVERIFY(!QFileInfo::exists(rig.root()));
+        QVERIFY(rig.open());
+        QVERIFY(QFileInfo(rig.root()).isDir());
+        auto transfer = rig.area->begin(1, planOf({file(u"a"_s, 5)}));
+        QCOMPARE(transfer->create(), Status::Ok); // not SpaceUnknown
+        QCOMPARE(transfer->write(0, 0, QByteArray("hello")), Status::Ok);
+    }
+    void aMissingCacheDirectoryAndMissingParentsAreMadePrivate()
+    {
+        Rig rig;
+        rig.config.cacheDir = rig.cache.filePath(u"home/user/.cache"_s);
+        QVERIFY(!QFileInfo::exists(rig.cache.filePath(u"home"_s)));
+        QVERIFY2(rig.open(), statusName(rig.status));
+        QCOMPARE(modeOf(rig.cache.filePath(u"home"_s)) & 07777, mode_t(0700));
+        QCOMPARE(modeOf(rig.cache.filePath(u"home/user/.cache"_s)) & 07777, mode_t(0700));
+        QCOMPARE(modeOf(rig.cache.filePath(u"home/user/.cache/krdp-clip"_s)) & 07777, mode_t(0700));
+        auto transfer = rig.area->begin(1, planOf({file(u"a"_s, 5)}));
+        QCOMPARE(transfer->create(), Status::Ok);
+    }
+    void anUnwritableCacheParentIsAnIoErrorAndCreatesNothing()
+    {
+        if (::getuid() == 0) QSKIP("root can create anything");
+        Rig rig;
+        const QString locked = rig.cache.filePath(u"locked"_s);
+        QVERIFY(QDir().mkpath(locked));
+        QCOMPARE(::chmod(QFile::encodeName(locked).constData(), 0500), 0);
+        rig.config.cacheDir = locked + u"/.cache"_s;
+        const bool opened = rig.open();
+        QCOMPARE(::chmod(QFile::encodeName(locked).constData(), 0700), 0); // so the temporary directory can go
+        QVERIFY(!opened);
+        QCOMPARE(rig.status, Status::IoError); // told apart from RootUnsafe (a link, someone else's)
+        QVERIFY(entriesOf(locked).isEmpty());
+    }
+    void theDefaultCacheDirectoryFollowsXdgThenHomeThenThePasswdEntry()
+    {
+        QCOMPARE(defaultCacheDir("/xdg/cache", "/home/u"), u"/xdg/cache"_s);
+        QCOMPARE(defaultCacheDir("", "/home/u"), u"/home/u/.cache"_s);
+        QCOMPARE(defaultCacheDir("relative/cache", "/home/u"), u"/home/u/.cache"_s); // a relative XDG_CACHE_HOME is ignored (XDG says so)
+        // a worker started by a system service may have no HOME at all: the passwd entry of this user is the last resort
+        const QString fromPasswd = defaultCacheDir("", "");
+        QVERIFY2(fromPasswd.isEmpty() || (fromPasswd.startsWith(u"/"_s) && fromPasswd.endsWith(u"/.cache"_s)), qPrintable(fromPasswd));
+        QCOMPARE(defaultCacheDir("", "relative/home"), fromPasswd);
+    }
     void aRelativeCacheDirectoryIsRefused()
     {
         Rig rig;

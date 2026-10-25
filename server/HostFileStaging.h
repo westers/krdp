@@ -724,7 +724,13 @@ inline std::unique_ptr<Area> Area::open(const Config &config, Status *status)
     // The cache directory itself may be a symlink (some users keep ~/.cache elsewhere); only what is created below it is held to O_NOFOLLOW.
     Detail::Fd cacheFd(::open(cache.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
     if (!cacheFd.valid() && errno == ENOENT) {
-        if (::mkdir(cache.constData(), 0700) != 0 && errno != EEXIST) return refuse(Status::IoError);
+        // mkdir -p, every level 0700 (an XDG_CACHE_HOME whose parents do not exist yet, a fresh account): existing levels are left as they are.
+        QByteArray built;
+        for (const QByteArray &part : cache.split('/')) {
+            if (part.isEmpty()) continue;
+            built += '/' + part;
+            if (::mkdir(built.constData(), 0700) != 0 && errno != EEXIST) return refuse(Status::IoError);
+        }
         cacheFd = Detail::Fd(::open(cache.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
     }
     if (!cacheFd.valid()) {
