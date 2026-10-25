@@ -4,6 +4,8 @@
 // OPT-078 phase 3: the broker's windowed FILECONTENTS requester for client-to-host copies, driven by a fake clock and fake callbacks.
 // Spec 4.3 (responses are checked against what was requested, 3 violations abort), 5 (64-bit offsets, huge files, cancel), 6.3 (window, pacing).
 
+#include <functional>
+
 #include <QTest>
 
 #include "ClipboardFileFetch.h"
@@ -22,6 +24,9 @@ struct Harness {
     QList<QPair<EndReason, AckStatus>> ends;
     bool failSend = false;
     bool failDeliver = false;
+    /// Runs inside deliver(), i.e. while the fetcher is walking its own queue: what a worker that acknowledges at once does (the loopback
+    /// harnesses answer synchronously), re-entering onAck() and so erasing items or ending the transfer under the loop.
+    std::function<void(const Chunk &)> onDeliver;
     std::unique_ptr<Fetcher> fetcher;
 
     explicit Harness(const ClipboardFilePacing::Policy &policy = unlimited(), std::optional<quint32> clipDataId = std::nullopt)
@@ -35,6 +40,7 @@ struct Harness {
         callbacks.deliver = [this](const Chunk &chunk) {
             if (failDeliver) return false;
             chunks.append(chunk);
+            if (onDeliver) onDeliver(chunk);
             return true;
         };
         callbacks.ended = [this](EndReason reason, AckStatus cause) { ends.append({reason, cause}); };
@@ -91,6 +97,41 @@ class ClipboardFileFetchTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    // The worker's ack comes back from inside deliver(): the queue the fetcher is walking changes under it. Every chunk is still delivered
+    // once, in order, acknowledged once, and the transfer ends exactly once.
+    void anImmediateAckInsideDeliverKeepsTheWalkOfTheQueueIntact()
+    {
+        Harness h;
+        h.onDeliver = [&h](const Chunk &chunk) { h.fetcher->onAck(chunk.index, chunk.offset, quint32(chunk.data.size()), AckStatus::Ok, h.now); };
+        h.start({{0, 1000}, {1, 1000}, {2, 1000}});
+        QCOMPARE(h.requests.size(), 3);
+        h.fetcher->onResponse(h.requests.at(2).streamId, true, Harness::payload(h.requests.at(2)), h.now); // later answers wait for the earlier ones
+        h.fetcher->onResponse(h.requests.at(1).streamId, true, Harness::payload(h.requests.at(1)), h.now);
+        QVERIFY(h.chunks.isEmpty());
+        h.answer(0); // delivers 0, 1, 2 in one walk, each acknowledged inside its own delivery
+        QCOMPARE(h.chunks.size(), 3);
+        for (int i = 0; i < 3; ++i) QCOMPARE(h.chunks.at(i).index, quint32(i));
+        QCOMPARE(h.fetcher->counters().bytesAcked, quint64(3000));
+        QCOMPARE(h.ends.size(), 1);
+        QCOMPARE(int(h.ends.first().first), int(EndReason::Done));
+        QCOMPARE(h.fetcher->inflight(), 0);
+    }
+    void aRefusalInsideDeliverEndsItOnceAndNothingMoreIsDelivered()
+    {
+        Harness h;
+        h.onDeliver = [&h](const Chunk &chunk) { h.fetcher->onAck(chunk.index, chunk.offset, quint32(chunk.data.size()), AckStatus::NoSpace, h.now); };
+        h.start({{0, 1000}, {1, 1000}, {2, 1000}});
+        QCOMPARE(h.requests.size(), 3);
+        h.fetcher->onResponse(h.requests.at(2).streamId, true, Harness::payload(h.requests.at(2)), h.now);
+        h.fetcher->onResponse(h.requests.at(1).streamId, true, Harness::payload(h.requests.at(1)), h.now);
+        h.answer(0);
+        QCOMPARE(h.chunks.size(), 1); // the first one was refused: the rest is not handed over
+        QCOMPARE(h.ends.size(), 1);
+        QCOMPARE(int(h.ends.first().first), int(EndReason::WorkerRefused));
+        QCOMPARE(int(h.ends.first().second), int(AckStatus::NoSpace));
+        QVERIFY(h.fetcher->ended());
+    }
+
     void oneSmallFile()
     {
         Harness h;

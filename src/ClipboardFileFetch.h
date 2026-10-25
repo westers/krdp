@@ -351,16 +351,19 @@ private:
 
     void deliverReady()
     {
-        for (auto &item : m_items) {
-            if (m_ended) return;
-            if (item.state == State::Delivered) continue;
-            if (item.state == State::Requested) return; // in order: an earlier request is still out
-            const Chunk chunk{item.request.index, item.request.offset, item.data};
-            item.data.clear();
-            item.state = State::Delivered;
-            item.at = m_now;
+        // deliver() can re-enter this object (a worker that acknowledges at once reaches onAck(), which erases items or ends the transfer),
+        // so no iterator or reference into m_items is kept across it: the next item to hand over is found again every time.
+        while (!m_ended) {
+            const auto it = std::find_if(m_items.begin(), m_items.end(), [](const Item &item) { return item.state != State::Delivered; });
+            if (it == m_items.end() || it->state == State::Requested) return; // nothing more, or in order: an earlier request is still out
+            const Chunk chunk{it->request.index, it->request.offset, it->data};
+            it->data.clear();
+            it->state = State::Delivered;
+            it->at = m_now;
             m_counters.bytesDelivered += quint64(chunk.data.size());
-            if (!m_callbacks.deliver || !m_callbacks.deliver(chunk)) {
+            const bool delivered = m_callbacks.deliver && m_callbacks.deliver(chunk);
+            if (m_ended) return; // it was ended meanwhile (and has said so)
+            if (!delivered) {
                 end(EndReason::WorkerUnreachable, AckStatus::Ok);
                 return;
             }
