@@ -4,6 +4,8 @@
 // OPT-078 phase 3: the worker's client-to-host file service (policy gate, plan, background staging, acks, progress, the offer to the host
 // clipboard, notifications, cleanup) against a fake host and a real temporary cache directory. No compositor, no daemon.
 
+#include <functional>
+
 #include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
@@ -53,6 +55,11 @@ struct Rig {
     int clears = 0;
     QList<QPair<QString, QString>> notes;
     bool writeOk = true;
+    /// Runs inside every record the stager sends, i.e. while the stager is in the middle of one of its own functions (what the broker does in
+    /// the loopback harness: it reacts to an ack or a state by ending the transfer, which re-enters the stager).
+    std::function<void(const Record &)> onRecord;
+    std::function<void()> onUriWrite; ///< same, inside the host clipboard write
+    std::function<void()> onNotify; ///< same, inside a notification
     ControlState control{42, true};
     ClipboardPolicy policy;
     std::unique_ptr<HostFileStager> stager;
@@ -79,11 +86,21 @@ struct Rig {
         backend.writeUriList = [this](const QStringList &paths, bool secret) {
             uriWrites.append(paths);
             secretWrites.append(secret);
+            if (onUriWrite) onUriWrite();
             return writeOk;
         };
         backend.clearUriList = [this] { ++clears; };
-        backend.notify = [this](const QString &summary, const QString &body) { notes.append({summary, body}); };
-        stager = std::make_unique<HostFileStager>([this](const QByteArray &record) { deframer.feed(record); while (const auto r = deframer.next()) records.append(*r); },
+        backend.notify = [this](const QString &summary, const QString &body) {
+            notes.append({summary, body});
+            if (onNotify) onNotify();
+        };
+        stager = std::make_unique<HostFileStager>([this](const QByteArray &record) {
+                                                      deframer.feed(record);
+                                                      while (const auto r = deframer.next()) {
+                                                          records.append(*r);
+                                                          if (onRecord) onRecord(*r);
+                                                      }
+                                                  },
                                                   backend, desktop, config, tuning);
         stager->setControl(control);
         stager->setPolicy(policy);
@@ -402,6 +419,136 @@ private Q_SLOTS:
         QCOMPARE(rig.lastState().reason, FilePushReason::WriteFailed);
         QVERIFY(rig.stager->waitForIdle(5000));
         QVERIFY(!QFileInfo::exists(rig.transferDir(1)));
+    }
+
+
+    // ---- the broker ends a transfer from inside the stager's own send (re-entrancy) ----
+    // In the loopback harness m_send reaches the broker synchronously and the broker answers an ack or a state by cancelling the transfer,
+    // which erases the entry the stager is still working on. Nothing may be touched through an iterator, pointer or reference taken before
+    // such a call. (Sol, a real full disk: written() -> fail(it) erased a map node that cancel() had already erased: double free.)
+    void aFullDiskAckThatEndsTheTransferInsideTheSendDoesNotTouchTheErasedEntry()
+    {
+        Rig rig(true, false);
+        quint64 freeNow = 100ULL << 30;
+        rig.config.space = [&freeNow](int) { return std::optional(HostFileStaging::SpaceInfo{freeNow, 200ULL << 30}); };
+        rig.config.spaceCheckIntervalBytes = 1000;
+        rig.config.reserveBytes = 1;
+        rig.start();
+        int cancels = 0;
+        rig.onRecord = [&](const Record &record) {
+            if (const auto ack = filePushAck(record); ack && ack->status == AckStatus::NoSpace) {
+                ++cancels;
+                rig.stager->cancel({1, FilePushCancelReason::Failed}); // what the broker does on a NoSpace ack
+            }
+        };
+        rig.offer(1, descriptorOf({{u"a.bin"_s, false, 10'000, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 1);
+        rig.data(1, 0, 0, pattern(600));
+        rig.data(1, 0, 600, pattern(600));
+        QTRY_COMPARE(rig.acks().size(), 2);
+        freeNow = 100;
+        rig.data(1, 0, 1200, pattern(600));
+        QTRY_COMPARE(rig.acks().size(), 3);
+        QCOMPARE(int(rig.acks().last().status), int(AckStatus::NoSpace));
+        QCOMPARE(cancels, 1);
+        QCOMPARE(rig.stager->transferCount(), 0);
+        // the broker ended it: the worker says nothing more about it (no second end, no failure notification of its own)
+        for (const auto &state : rig.states()) QVERIFY(state.phase != FilePushPhase::Failed);
+        QCOMPARE(rig.notes.size(), 1); // started only
+        QVERIFY(rig.stager->waitForIdle(5000));
+        QVERIFY(!QFileInfo::exists(rig.transferDir(1)));
+        // and the stager still works
+        freeNow = 100ULL << 30;
+        rig.offer(2, descriptorOf({{u"b.bin"_s, false, 4, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 2);
+        QVERIFY(rig.replies().last().accepted);
+        rig.data(2, 0, 0, pattern(4));
+        QTRY_COMPARE(rig.lastState().phase, FilePushPhase::Done);
+    }
+    void anAckThatEndsTheTransferInsideTheSendStopsTheStagerFromGoingOn()
+    {
+        for (const bool lastChunk : {false, true}) {
+            Rig rig; // each case on a fresh rig
+            rig.offer(1, descriptorOf({{u"a.bin"_s, false, 20, std::nullopt}}));
+            QTRY_COMPARE(rig.replies().size(), 1);
+            const int statesBefore = rig.states().size();
+            rig.onRecord = [&](const Record &record) {
+                if (filePushAck(record)) rig.stager->cancel({1, FilePushCancelReason::Failed});
+            };
+            rig.data(1, 0, 0, pattern(lastChunk ? 20 : 10));
+            QTRY_COMPARE(rig.acks().size(), 1);
+            QCOMPARE(rig.stager->transferCount(), 0);
+            QVERIFY(rig.stager->waitForIdle(5000));
+            QTest::qWait(20);
+            QCOMPARE(rig.states().size(), statesBefore); // no progress, no Done for a transfer that is gone
+            QVERIFY(rig.uriWrites.isEmpty()); // nothing is offered for it
+            QCOMPARE(rig.clears, 0);
+            QVERIFY(!QFileInfo::exists(rig.transferDir(1)));
+        }
+    }
+    void aLargeSelectionAckThatEndsTheTransferStopsTheOfferToTheHost()
+    {
+        Rig rig(true, false);
+        rig.tuning.offerWhenCompleteBytes = 100;
+        rig.start();
+        rig.offer(1, descriptorOf({{u"first.bin"_s, false, 200, std::nullopt}, {u"second.bin"_s, false, 200, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 1);
+        const int statesBefore = rig.states().size();
+        rig.onRecord = [&](const Record &record) {
+            if (filePushAck(record)) rig.stager->cancel({1, FilePushCancelReason::Failed});
+        };
+        rig.data(1, 0, 0, pattern(200)); // finishes the first unit: the stager would offer it now
+        QTRY_COMPARE(rig.acks().size(), 1);
+        QCOMPARE(rig.stager->transferCount(), 0);
+        QVERIFY(rig.stager->waitForIdle(5000));
+        QTest::qWait(20);
+        QVERIFY(rig.uriWrites.isEmpty());
+        QCOMPARE(rig.states().size(), statesBefore);
+    }
+    void aReplyThatEndsTheTransferInsideTheSendStopsTheStagerFromGoingOn()
+    {
+        Rig rig;
+        rig.onRecord = [&](const Record &record) {
+            if (const auto reply = filePushReply(record); reply && reply->accepted) rig.stager->cancel({1, FilePushCancelReason::Failed});
+        };
+        // only folders and empty files: nothing to wait for, so created() would finish the transfer right after sending the reply
+        rig.offer(1, descriptorOf({{u"folder"_s, true, 0, std::nullopt}, {u"empty.txt"_s, false, 0, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 1);
+        QCOMPARE(rig.stager->transferCount(), 0);
+        QVERIFY(rig.stager->waitForIdle(5000));
+        QTest::qWait(20);
+        QVERIFY(rig.uriWrites.isEmpty());
+        for (const auto &state : rig.states()) QVERIFY(state.phase != FilePushPhase::Done);
+    }
+    void aNotificationThatEndsTheTransferInsideTheCallStopsTheStagerFromGoingOn()
+    {
+        Rig rig;
+        rig.onNotify = [&] { rig.stager->cancel({1, FilePushCancelReason::Failed}); };
+        rig.offer(1, descriptorOf({{u"folder"_s, true, 0, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 1);
+        QCOMPARE(rig.stager->transferCount(), 0);
+        QVERIFY(rig.stager->waitForIdle(5000));
+        QTest::qWait(20);
+        QVERIFY(rig.uriWrites.isEmpty());
+        for (const auto &state : rig.states()) QVERIFY(state.phase != FilePushPhase::Done);
+    }
+    void aHostClipboardWriteThatEndsTheTransferInsideTheCallDoesNotTouchTheErasedEntry()
+    {
+        for (const bool accepted : {true, false}) {
+            Rig rig;
+            rig.writeOk = accepted;
+            rig.onUriWrite = [&] { rig.stager->cancel({1, FilePushCancelReason::Failed}); };
+            rig.offer(1, descriptorOf({{u"a.bin"_s, false, 4, std::nullopt}}));
+            QTRY_COMPARE(rig.replies().size(), 1);
+            rig.data(1, 0, 0, pattern(4));
+            QTRY_COMPARE(rig.uriWrites.size(), 1);
+            QCOMPARE(rig.stager->transferCount(), 0);
+            QVERIFY(rig.stager->waitForIdle(5000));
+            QTest::qWait(20);
+            for (const auto &state : rig.states()) QVERIFY(state.phase != FilePushPhase::Done && state.phase != FilePushPhase::Failed);
+            QVERIFY(!QFileInfo::exists(rig.transferDir(1)));
+            QCOMPARE(rig.clears, accepted ? 1 : 0); // a list written for a transfer that is gone must not stay on the host clipboard
+        }
     }
 
     // ---- replace, cancel, end ----

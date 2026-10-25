@@ -110,9 +110,7 @@ public:
         for (const auto &[seq, entry] : m_entries) {
             if (entry.state != EntryState::Done) running.push_back(seq);
         }
-        for (const quint64 seq : running) {
-            if (const auto it = m_entries.find(seq); it != m_entries.end()) fail(it, ConsoleWorkerWire::FilePushReason::Policy, {});
-        }
+        for (const quint64 seq : running) fail(seq, ConsoleWorkerWire::FilePushReason::Policy, {}); // (a no-op for one that went meanwhile)
     }
 
     /// A worker that starts cleans up after crashed ones (stale instances of this user), creating nothing.
@@ -173,12 +171,13 @@ public:
     void data(const ConsoleWorkerWire::FilePushData &chunk)
     {
         using HostFileStaging::Status;
-        const auto it = m_entries.find(chunk.seq);
         if (!allowed()) {
             ack(chunk, ClipboardFileFetch::AckStatus::Denied);
-            if (it != m_entries.end() && it->second.state != EntryState::Done) fail(it, ConsoleWorkerWire::FilePushReason::Policy, {});
+            // (the ack may have ended the transfer: look it up after it)
+            if (const Entry *entry = entryFor(chunk.seq); entry && entry->state != EntryState::Done) fail(chunk.seq, ConsoleWorkerWire::FilePushReason::Policy, {});
             return;
         }
+        const auto it = m_entries.find(chunk.seq);
         if (it == m_entries.end() || it->second.state != EntryState::Staging || !it->second.fs) {
             ack(chunk, ClipboardFileFetch::AckStatus::Gone);
             return;
@@ -303,7 +302,10 @@ private:
         }
         entry.fs = result.fs;
         entry.state = EntryState::Staging;
-        const auto &plan = *entry.plan;
+        // From the send on, the broker may end this transfer (cancel() erases the entry) before we return: keep what is needed in values
+        // and look the entry up again after every call that can re-enter (send, notify, the host clipboard).
+        const auto planPtr = entry.plan;
+        const auto &plan = *planPtr;
         ConsoleWorkerWire::FilePushReply reply;
         reply.seq = seq;
         reply.accepted = true;
@@ -315,20 +317,20 @@ private:
         m_send(ConsoleWorkerWire::frame(reply));
         qInfo().nospace() << "Clipboard: files from the client accepted entries=" << (plan.files + plan.directories) << " bytes=" << plan.totalBytes << " skipped=" << plan.skippedTotal()
                           << " renamed=" << plan.renamed;
+        if (!entryFor(seq)) return; // the broker ended it on the reply: nothing to announce or finish
         notify(QStringLiteral("Receiving files from the remote client"),
                QStringLiteral("%1 (%2)%3").arg(plural(plan.files, QStringLiteral("file")), QLocale().formattedDataSize(qint64(std::min<quint64>(plan.totalBytes, quint64(INT64_MAX)))),
                                                plan.skippedTotal() ? QStringLiteral("; %1 left out (links or files that cannot be copied)").arg(plan.skippedTotal()) : QString()));
         if (result.complete) { // nothing but folders and empty files: there is nothing to wait for
-            finish(it, result.finished);
+            finish(seq, result.finished); // (looks the entry up again: the notification may have ended it)
         }
     }
 
     void written(const ConsoleWorkerWire::FilePushData &chunk, WriteResult result)
     {
         using HostFileStaging::Status;
-        const auto it = m_entries.find(chunk.seq);
-        if (it == m_entries.end()) return; // cancelled while the write was queued: nobody is waiting
-        Entry &entry = it->second;
+        if (!entryFor(chunk.seq)) return; // cancelled while the write was queued: nobody is waiting
+        const quint64 seq = chunk.seq;
         if (result.status != Status::Ok) {
             ack(chunk, HostFileStaging::ackFor(result.status));
             Reason reason = Reason::WriteFailed;
@@ -344,53 +346,73 @@ private:
             ConsoleWorkerWire::FilePushReply numbers;
             numbers.freeBytes = result.failure.freeBytes;
             numbers.neededBytes = result.failure.neededBytes;
-            fail(it, reason, numbers);
+            fail(seq, reason, numbers); // by number: the ack went to the broker, which may have ended (erased) the transfer already
             return;
         }
         ack(chunk, ClipboardFileFetch::AckStatus::Ok);
-        entry.done += quint64(chunk.data.size());
+        Entry *entry = entryFor(seq); // the ack can re-enter: nothing taken before it is valid any more
+        if (!entry) return;
+        entry->done += quint64(chunk.data.size());
         if (result.complete) {
-            finish(it, result.finished);
+            finish(seq, result.finished);
             return;
         }
-        if (entry.timing == ClipboardFileStaging::OfferTiming::AfterFirstFile && !entry.offered && !result.finished.isEmpty()) {
-            if (!offerList(it, result.finished)) return;
-            sendState(entry, it->first, ConsoleWorkerWire::FilePushPhase::Offered, Reason::None, true);
+        if (entry->timing == ClipboardFileStaging::OfferTiming::AfterFirstFile && !entry->offered && !result.finished.isEmpty()) {
+            if (!offerList(seq, result.finished)) return;
+            if (!(entry = entryFor(seq))) return;
+            sendState(*entry, seq, ConsoleWorkerWire::FilePushPhase::Offered, Reason::None, true);
             return;
         }
-        sendState(entry, it->first, ConsoleWorkerWire::FilePushPhase::Staging, Reason::None, false);
+        sendState(*entry, seq, ConsoleWorkerWire::FilePushPhase::Staging, Reason::None, false);
     }
 
     /// Every byte is in: offer (or refresh) the list and end the transfer in Done.
-    void finish(std::map<quint64, Entry>::iterator it, const QStringList &finished)
+    void finish(quint64 seq, const QStringList &finished)
     {
-        if (!offerList(it, finished)) return;
-        Entry &entry = it->second;
-        entry.state = EntryState::Done;
-        entry.done = entry.plan->totalBytes;
-        qInfo().nospace() << "Clipboard: files from the client received bytes=" << entry.plan->totalBytes << " entries=" << (entry.plan->files + entry.plan->directories);
-        sendState(entry, it->first, ConsoleWorkerWire::FilePushPhase::Done, Reason::None, true);
+        if (!entryFor(seq)) return; // ended meanwhile: nothing to offer
+        if (!offerList(seq, finished)) return;
+        Entry *entry = entryFor(seq); // the host clipboard write can re-enter
+        if (!entry) return;
+        entry->state = EntryState::Done;
+        entry->done = entry->plan->totalBytes;
+        qInfo().nospace() << "Clipboard: files from the client received bytes=" << entry->plan->totalBytes << " entries=" << (entry->plan->files + entry->plan->directories);
+        sendState(*entry, seq, ConsoleWorkerWire::FilePushPhase::Done, Reason::None, true);
     }
 
-    /// Hands the finished top-level units to the host clipboard. False: it refused, the transfer was failed and removed.
-    bool offerList(std::map<quint64, Entry>::iterator it, const QStringList &paths)
+    /// Hands the finished top-level units to the host clipboard. False: it refused, the transfer was failed and removed, or the transfer ended meanwhile.
+    bool offerList(quint64 seq, const QStringList &paths)
     {
         if (paths.isEmpty()) return true;
         if (!m_backend.writeUriList || !m_backend.writeUriList(paths, m_policy.locked || m_policy.greeter)) {
-            fail(it, Reason::WriteFailed, {});
+            fail(seq, Reason::WriteFailed, {});
             return false;
         }
-        it->second.offered = true;
-        m_offeredSeq = it->first;
+        Entry *entry = entryFor(seq); // writing the host clipboard can re-enter (a selection change reaches the broker)
+        if (!entry) {
+            // The transfer was ended and its staging removed while the list was being written: the host would paste files that are gone.
+            if (m_backend.clearUriList) m_backend.clearUriList();
+            return false;
+        }
+        entry->offered = true;
+        m_offeredSeq = seq;
         return true;
     }
 
     // ---- ends ----
 
-    /// The transfer failed (or was stopped): tell the broker, the user, withdraw what was offered, remove the staging.
-    void fail(std::map<quint64, Entry>::iterator it, Reason reason, const ConsoleWorkerWire::FilePushReply &numbers)
+    /// The entry of \a seq, or null. Never keep the result across a call that can re-enter (send, notify, the host clipboard): ask again.
+    Entry *entryFor(quint64 seq)
     {
-        const quint64 seq = it->first;
+        const auto it = m_entries.find(seq);
+        return it == m_entries.end() ? nullptr : &it->second;
+    }
+
+    /// The transfer failed (or was stopped): tell the broker, the user, withdraw what was offered, remove the staging. Does nothing for a
+    /// transfer that is not (or no longer) there: the broker ended it, and it already has the answer.
+    void fail(quint64 seq, Reason reason, const ConsoleWorkerWire::FilePushReply &numbers)
+    {
+        const auto it = m_entries.find(seq);
+        if (it == m_entries.end()) return;
         Entry entry = std::move(it->second);
         m_entries.erase(it);
         if (entry.offered && m_offeredSeq == seq && m_backend.clearUriList) {
