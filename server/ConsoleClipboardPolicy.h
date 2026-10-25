@@ -110,8 +110,17 @@ struct FilesPlan {
     bool hostToClient = false;
     bool clientToHost = false;
     Reason reason = Reason::NoSeat;
+    /// A NEW client->host copy is denied and the locked desktop is the cause: everything else (account, seat, settings) would have allowed it.
+    bool clientDeniedByLock = false;
     bool operator==(const FilesPlan &) const = default;
 };
+
+/// The reason word a refused client->host copy gets on the clipboard-files notice to our own client: "locked" when the lock is the cause, else
+/// "policy" (additive: older clients print an unknown word as opaque text).
+inline const char *clientFilesRefusalWord(const FilesPlan &files)
+{
+    return files.clientDeniedByLock ? "locked" : "policy";
+}
 
 struct Plan {
     FilesPlan files;
@@ -182,6 +191,7 @@ inline Plan plan(const Input &input)
     result.files.hostToClient = stateHost && filesWantHost;
     result.files.clientToHost = stateClient && filesWantClient;
     result.files.reason = filesReason;
+    result.files.clientDeniedByLock = !result.files.clientToHost && filesReason == Reason::LockedNewTransfer && filesWantClient;
     if (filesReason == Reason::Allowed && ((stateHost && !filesWantHost) || (stateClient && !filesWantClient))) {
         result.files.reason = Reason::Setting;
     }

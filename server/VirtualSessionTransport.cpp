@@ -319,7 +319,7 @@ void VirtualSessionTransport::syncClipboard(std::optional<quint32> uid)
     const auto before = m_clipboardPlan;
     m_clipboardPlan = plan;
     clipboard->setDirections(plan.hostToClient, plan.clientToHost);
-    clipboard->setFileDirections(plan.files.hostToClient, plan.files.clientToHost);
+    clipboard->setFileDirections(plan.files.hostToClient, plan.files.clientToHost, plan.files.clientDeniedByLock);
     if (m_endpoint && m_controlGeneration) {
         m_endpoint->setClipboardPolicy(m_controlGeneration, plan.hostToClient, plan.clientToHost, false, false, plan.files.hostToClient, plan.files.clientToHost);
     }

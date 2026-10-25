@@ -449,8 +449,11 @@ its own records instead of reusing them.
    client (it asks the backend whether the selection is its own instead of reading it back).
 7. **Notices.** The user is told on the host (org.freedesktop.Notifications, sizes and a reason, never a name) when staging starts and when a copy
    is refused or fails; the connected Farside client gets the existing `clipboard-files` record with an additive `direction: "client-to-host"` and
-   events `receiving` / `refused` / `failed` / `done` plus a fixed reason word (`no-space`, `names`, `descriptor`, `policy`, `rate`, `timeout`,
-   `unavailable`, `plan-mismatch`, `peer-failed`, ...).
+   events `receiving` / `refused` / `failed` / `done` plus a fixed reason word (`no-space`, `names`, `descriptor`, `policy`, `locked`, `rate`, `timeout`,
+   `unavailable`, `plan-mismatch`, `peer-failed`, ...). `locked` (rc 0.16.1, additive, no wire version change) is the `refused` reason when the
+   planner denied a NEW client-to-host copy because the Console desktop is locked and nothing else (account, seat, settings) would have denied it
+   (`ConsoleClipboardPolicy::FilesPlan::clientDeniedByLock`); every other planner denial, and a worker-side refusal, stays `policy`. A client
+   that does not know `locked` shows it as an unknown reason word, as it already does for any other.
 8. **Setting `ClipboardFileMinFreeBytes`**: bytes or a number with K/M/G/T (powers of 1024), up to 16 TiB, `0` = max(2 GiB, 5% of the filesystem);
    env `FARSIDE_{CONSOLE,VIRTUAL}_CLIPBOARD_FILE_MIN_FREE`; it travels with each offer. KRDPCTL `capabilities.clipboard.files.clientToHost`
    follows `ClipboardFiles` AND the clipboard direction.

@@ -291,6 +291,21 @@ private Q_SLOTS:
             QCOMPARE(denied.noticeEvents(), QStringList({u"refused:policy"_s}));
         }
         {
+            Rig locked; // the planner says no because the desktop is locked: our own client is told so in one word
+            locked.clipboard.setFileDirections(true, false, true);
+            locked.announceFiles();
+            QTest::qWait(Clipboard::FormatListSettleMs * 3);
+            QVERIFY(locked.sent.dataRequests.isEmpty());
+            QCOMPARE(locked.noticeEvents(), QStringList({u"refused:locked"_s}));
+        }
+        {
+            Rig notLocked; // the lock flag only matters while the files are denied
+            notLocked.clipboard.setFileDirections(true, true, true);
+            notLocked.announceFiles();
+            QTRY_COMPARE_WITH_TIMEOUT(notLocked.sent.dataRequests.size(), 1, 2000);
+            QVERIFY(notLocked.noticeEvents().isEmpty());
+        }
+        {
             Rig off; // the host owner turned files off
             off.clipboard.setFilesEnabled(false);
             off.announceFiles();

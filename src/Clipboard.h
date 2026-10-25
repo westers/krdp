@@ -77,7 +77,7 @@ public:
     void setFilesEnabled(bool enabled);
     bool filesEnabled() const;
     /** The planner's decision for file copy (new transfers). Going from allowed to denied ends the transfer and withdraws the offer. */
-    void setFileDirections(bool hostToClient, bool clientToHost);
+    void setFileDirections(bool hostToClient, bool clientToHost, bool clientDeniedByLock = false);
     bool hostFilesAllowed() const;
     /** A host-to-client file transfer is running (requests are pending): the planner treats it as started. */
     bool hostFileTransferActive() const;

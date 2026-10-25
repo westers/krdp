@@ -135,6 +135,7 @@ public:
     std::atomic<bool> filesEnabled = false; // ClipboardFiles != off; read on the session thread when the channel starts
     bool hostFilesAllowed = false; // the planner's decision for new transfers
     bool clientFilesAllowed = false; // phase 3
+    bool clientFilesDeniedByLock = false; // ... and when it is denied, the locked desktop is the cause (the refusal notice says "locked")
     bool hostFiles = false; // the announcement covers files
     Clipboard::HostFileBackend fileBackend;
     std::unique_ptr<ClipboardFileServe::Server> serve;
@@ -722,7 +723,7 @@ void Clipboard::Private::onClientFormatList(const FormatList &formatList)
         // rest of the list is handled as before, and our own client is told why when the planner is the reason.
         if (filesEnabled && negotiated() && !clientFilesAllowed) {
             ++counters.clientFileRefused;
-            sendFilesNotice("refused", 0, "policy", "client-to-host");
+            sendFilesNotice("refused", 0, clientFilesDeniedByLock ? "locked" : "policy", "client-to-host");
         }
         filesId = 0;
         clientFilesFormatId = 0;
@@ -1615,12 +1616,13 @@ bool Clipboard::filesEnabled() const
     return d->filesEnabled;
 }
 
-void Clipboard::setFileDirections(bool hostToClient, bool clientToHost)
+void Clipboard::setFileDirections(bool hostToClient, bool clientToHost, bool clientDeniedByLock)
 {
     const bool hostWas = d->hostFilesAllowed;
     const bool clientWas = d->clientFilesAllowed;
     d->hostFilesAllowed = hostToClient;
     d->clientFilesAllowed = clientToHost;
+    d->clientFilesDeniedByLock = !clientToHost && clientDeniedByLock;
     if (clientWas && !clientToHost && d->clientFilesActive()) {
         // The planner keeps the flag for a transfer that started (a lock does not end it); it going anyway is a real stop. What an already
         // finished copy staged stays (that is the locked-desktop case); resetClientSide() removes it when control moves.

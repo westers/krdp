@@ -249,6 +249,68 @@ private Q_SLOTS:
         QVERIFY(!plan.files.clientToHost && !plan.files.hostToClient);
         QCOMPARE(plan.files.reason, Reason::Setting); // the setting narrowed an allowed state
     }
+    // OPT-078 phase 3: the word a refused client-to-host copy gets on the clipboard-files notice. "locked" only when the locked desktop is the
+    // cause (a new transfer, the account and the settings would otherwise allow it); every other denial stays "policy".
+    void refusedClientFilesNameTheLockOnlyWhenTheLockIsTheCause_data()
+    {
+        QTest::addColumn<int>("route");
+        QTest::addColumn<int>("adapter");
+        QTest::addColumn<bool>("locked");
+        QTest::addColumn<quint32>("clientUid");
+        QTest::addColumn<bool>("controls");
+        QTest::addColumn<int>("filesSetting");
+        QTest::addColumn<int>("setting");
+        QTest::addColumn<bool>("started");
+        QTest::addColumn<bool>("allowed");
+        QTest::addColumn<QByteArray>("word");
+        using A = ConsoleSeat::Adapter;
+        const int console = int(Route::Console), virt = int(Route::Virtual);
+        const int both = int(Direction::Both);
+        QTest::newRow("locked, new copy") << console << int(A::PhysicalUser) << true << Owner << true << both << both << false << false << QByteArray("locked");
+        QTest::newRow("locked, files host->client only") << console << int(A::PhysicalUser) << true << Owner << true << int(Direction::HostToClient) << both << false << false << QByteArray("policy");
+        QTest::newRow("locked, files off") << console << int(A::PhysicalUser) << true << Owner << true << int(Direction::Off) << both << false << false << QByteArray("policy");
+        QTest::newRow("locked, clipboard host->client only") << console << int(A::PhysicalUser) << true << Owner << true << both << int(Direction::HostToClient) << false << false << QByteArray("policy");
+        QTest::newRow("locked, files client->host") << console << int(A::PhysicalUser) << true << Owner << true << int(Direction::ClientToHost) << both << false << false << QByteArray("locked");
+        QTest::newRow("locked, a copy that started before") << console << int(A::PhysicalUser) << true << Owner << true << both << both << true << true << QByteArray("policy");
+        QTest::newRow("locked, other account") << console << int(A::PhysicalUser) << true << Other << true << both << both << false << false << QByteArray("policy");
+        QTest::newRow("locked, viewer") << console << int(A::PhysicalUser) << true << Owner << false << both << both << false << false << QByteArray("policy");
+        QTest::newRow("locked, no uid") << console << int(A::PhysicalUser) << true << 0u << true << both << both << false << false << QByteArray("policy");
+        QTest::newRow("unlocked, allowed") << console << int(A::PhysicalUser) << false << Owner << true << both << both << false << true << QByteArray("policy");
+        QTest::newRow("unlocked, files off") << console << int(A::PhysicalUser) << false << Owner << true << int(Direction::Off) << both << false << false << QByteArray("policy");
+        QTest::newRow("unlocked, other account") << console << int(A::PhysicalUser) << false << Other << true << both << both << false << false << QByteArray("policy");
+        QTest::newRow("greeter") << console << int(A::Greeter) << false << Owner << true << both << both << false << false << QByteArray("policy");
+        QTest::newRow("no seat") << console << int(A::None) << false << Owner << true << both << both << false << false << QByteArray("policy");
+        QTest::newRow("virtual (the lock never applies)") << virt << int(A::VirtualUser) << true << Owner << true << both << both << false << true << QByteArray("policy");
+        QTest::newRow("virtual, files off") << virt << int(A::VirtualUser) << false << Owner << true << int(Direction::Off) << both << false << false << QByteArray("policy");
+    }
+    void refusedClientFilesNameTheLockOnlyWhenTheLockIsTheCause()
+    {
+        QFETCH(int, route);
+        QFETCH(int, adapter);
+        QFETCH(bool, locked);
+        QFETCH(quint32, clientUid);
+        QFETCH(bool, controls);
+        QFETCH(int, filesSetting);
+        QFETCH(int, setting);
+        QFETCH(bool, started);
+        QFETCH(bool, allowed);
+        QFETCH(QByteArray, word);
+        Input input;
+        input.route = Route(route);
+        input.adapter = ConsoleSeat::Adapter(adapter);
+        input.locked = locked;
+        input.clientUid = clientUid;
+        input.sessionUid = Owner;
+        input.ownsControl = controls;
+        input.filesSetting = Direction(filesSetting);
+        input.setting = Direction(setting);
+        input.clientToHostFileStarted = started;
+        const auto plan = ConsoleClipboardPolicy::plan(input);
+        QCOMPARE(plan.files.clientToHost, allowed);
+        QCOMPARE(QByteArray(clientFilesRefusalWord(plan.files)), word);
+        QCOMPARE(plan.files.clientDeniedByLock, word == "locked");
+        QVERIFY(!(plan.files.clientDeniedByLock && plan.files.clientToHost)); // never both
+    }
     void virtualHasNoLockedState()
     {
         Input input;

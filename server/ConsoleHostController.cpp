@@ -2614,7 +2614,7 @@ void ConsoleHostController::syncClipboard()
         const auto before = client->clipboardPlan;
         client->clipboardPlan = plan;
         client->connection->clipboard()->setDirections(plan.hostToClient, plan.clientToHost);
-        client->connection->clipboard()->setFileDirections(plan.files.hostToClient, plan.files.clientToHost);
+        client->connection->clipboard()->setFileDirections(plan.files.hostToClient, plan.files.clientToHost, plan.files.clientDeniedByLock);
         // Info, once per edge, never data.
         if (!before || before->hostToClient != plan.hostToClient || before->clientToHost != plan.clientToHost || before->files != plan.files) {
             if (plan.hostToClient || plan.clientToHost || before) {
