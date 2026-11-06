@@ -8,17 +8,17 @@ Canonical project memory (hosts, live service, safety rules, gotchas, roadmap), 
 
 @~/dev/rdp/CLAUDE.md
 
-Also read `~/dev/rdp/HANDOFF-CODEX.md` §3 "Steve's rules" (override everything), §2 (keeping shared
-files in shape) and §7 "Log" (newest first = latest state). `AGENTS.md` just points to these.
+Also read `~/dev/rdp/HANDOFF-CODEX.md` §7 "Key rules" (current overrides to §3), §2 (keeping shared
+files in shape) and §8 "Log" (newest first = latest state). `AGENTS.md` just points to these.
 
 ## How this repo fits the workflow
 
+- Housekeeping rule (2026-10-18): after every rollout/test/investigation, clean up old versions (keep current + ONE prior), our own test cores, merged branches and their worktrees; git is the recovery path. Full text: `~/dev/rdp/CLAUDE.md` "Housekeeping" and HANDOFF §7.
 - This is Steve's fork of KDE KRdp. Remotes: `github` (Steve's GitHub, push here), `origin` (upstream
   invent.kde.org, fetch only). Work on `master`. No amend/rebase/stash on shared branches.
-- `research.md` is the `OPT-###` tracker. Each item has a status (`PLANNED | IN PROGRESS | DONE <date> |
-  OPEN | PARTIAL`), its design decisions, measured numbers, what was not exercised, and follow-ups.
-  Newer notes go above older ones and history is never deleted. The "Status Snapshot" list at the top
-  gets one dated line per slice.
+- `research.md` is the `OPT-###` tracker. Its current statuses are `DONE | FROZEN | OPEN | WIP |
+  ABANDONED`; detailed older history lives in `~/dev/rdp/archive/research-2026-09-27-full.md`.
+  Keep measured numbers, untested paths and follow-ups explicit.
 - Commits use an imperative subject tagged with the item, e.g. `OPT-044 Test three-screen selected
   virtual creation` (older ones put `(OPT-044)` at the end), and a body that says what changed and why.
 - When a slice lands, also add a dated line under "Fixed" in `~/dev/rdp/CLAUDE.md` and a newest-first
@@ -52,7 +52,9 @@ cmake --build ~/dev/krdp/build -j16          # main dev tree: Debug, BUILD_TESTI
 ## Tests
 
 The autotests are QtTest/ECM executables registered by name with `add_test` in
-`autotests/CMakeLists.txt`. There are no labels. Currently 69 tests; the first one is `appstreamtest`.
+`autotests/CMakeLists.txt`. There are no labels. The main `build/` is an older 69-test configuration;
+the 2026-09-29 release build ran 94 selected tests, while earlier full builds reached 120. Use the
+test list of the specific build tree under review.
 
 ```bash
 ctest --test-dir ~/dev/krdp/build --output-on-failure                  # all
@@ -71,8 +73,8 @@ ctest --test-dir ~/dev/krdp/build -R 'Console' -N                      # list by
 ## Smoke test, harnesses and probes
 
 - `./smoke-test.sh` runs `cmake --build build`, then **restarts `plasma-xdg-desktop-portal-kde` and
-  the live `app-org.kde.krdpserver`**, then follows the logs. Agents must pass `--no-restart`,
-  because restarting the live service is Steve's call. Other flags: `--no-build`, `--no-watch`,
+  the live `app-org.kde.krdpserver`**, then follows the logs. Use `--no-restart` for development
+  checks; an approved Hal deployment uses the gated release procedure. Other flags: `--no-build`, `--no-watch`,
   `--watch-seconds N`, `--assert-encoder vaapi|software`.
 - `examples/`: `plasmastreamer` (`krdpplasmastreamer`, the no-client pipeline harness described in the
   imported file), `streamer` (portal variant), `avc444probe` (`krdpavc444probe`, decodes AVC444 output
@@ -81,7 +83,7 @@ ctest --test-dir ~/dev/krdp/build -R 'Console' -N                      # list by
 - `server/` also builds `krdp-*-probe` tools; they and `scripts/probe-*.sh` are for explicitly
   authorized disposable runs on Sol only.
 
-## Packaging (non-activating test debs; never installs anything)
+## Packaging
 
 ```bash
 scripts/package-console-test.sh   # build-console-package/, Ninja, prefix /opt/krdp-console, paired krdp-console-host+worker
@@ -90,8 +92,12 @@ scripts/package-virtual-test.sh   # build-virtual-package/, prefix /opt/krdp-vir
 
 - Both bundle the private KPipeWire and stamp the git short revision into the version
   (`6.6.80-git.<sha>`). The units they ship are inactive drafts.
-- Installing is user-run: stop, install, start, typed into tmux for Steve without pressing Enter.
-  Never install only the broker or only the worker, because the internal worker wire version is paired.
+- The production `farside-server` deb is built with `scripts/package-farside.sh` from a committed
+  server tree. See `~/dev/rdp/HANDOFF-CODEX.md` §7 and
+  `~/dev/rdp/evidence/2026-09-29-farside-rollout/SUMMARY.md` for the current release and Hal
+  rollout rules. `scripts/package-krdp.sh` is the historical fork package (its `~/dev/krdp-pkg` worktree was removed 2026-10-18).
+  Packaging commands do not themselves install packages.
+- Never install only the broker or only the worker, because the internal worker wire version is paired.
 - `docs/virtual-session-test-staging.md` covers `DESTDIR` staging (choose the prefix before building;
   draft units embed `CMAKE_INSTALL_PREFIX`). `scripts/check-virtual-session-install.sh` is a
   read-only diagnostic.
@@ -104,10 +110,11 @@ scripts/package-virtual-test.sh   # build-virtual-package/, prefix /opt/krdp-vir
 - `AbstractSession` is the capture/input backend: `PortalSession` (xdg-desktop-portal) or
   `PlasmaScreencastV1Session` (`--plasma`: KWin `zkde_screencast_unstable_v1` + `fake_input`, granted
   only to the exact executable path in the `.desktop` file's `X-KDE-Wayland-Interfaces`).
-- KPipeWire does capture and H.264 encoding (VA-API `h264_vaapi` or libx264). `VideoStream` sends the
-  encoded frames over RDPGFX as AVC420, AVC444 or AVC444v2, handling caps negotiation, `ResetGraphics`
-  and surfaces. It uses `FrameQueuePolicy`, `AdaptiveQuality`/`NetworkDetection` for QP steering and
-  `VideoCodecSupport`. `SurfaceLayout` and `RemoteMonitorGeometry` handle multi-monitor.
+- KPipeWire does capture and AVC/HEVC/AV1 encoding in hardware or software where available.
+  `VideoStream` sends AVC420/AVC444 through standard RDPGFX and private HEVC/AV1 to the own client,
+  handling caps negotiation, `ResetGraphics` and surfaces. `CodecPolicy` chooses encoder and link
+  response; `LinkEvidence` classifies measured capacity; `StatsReporter` supplies the stats panel.
+  `SurfaceLayout` and `RemoteMonitorGeometry` handle multi-monitor.
 - `InputHandler`, `Cursor`, `Clipboard`, and PipeWire audio playback, microphone and camera round out
   the session. `LayoutControl` is the private `KRDPCTL` static virtual channel that the own client
   (`~/dev/krdp-client`) uses (OPT-044).
@@ -150,8 +157,9 @@ live KPipeWire patches are in `~/dev/rdp/kpipewire-vaapi-fix/patches-6.6.4/`. `p
 - README's CLI examples use `kwriteconfig6 ... --notify`. The standing rule is **never** `--notify`,
   because it makes every running krdpserver reload, including the live one. Never write
   `~/.config/krdpserverrc`. Test instances get their own port and `XDG_CONFIG_HOME`.
-- Hosts: Hal (hal9000, live :3389) is protected. Sol is the disposable test host (Console :3391,
-  virtual broker :3395). Buzz is the client laptop. OPT-044 topology work is source-only unless the
-  HANDOFF Log says otherwise.
+- Hosts: Hal (hal9000, live :3389) is Steve's work desktop. Sol is the disposable test host
+  (Console :3391, virtual broker :3395); Buzz is the client laptop. Steve authorized Hal package
+  deployments when no one is connected to Hal's RDP server, but live testing stays on Sol/Buzz.
+  Consult the current HANDOFF §7 and Log before any rollout.
 - The untracked `kpipewire_6.6.3*` tarballs in the repo root are not part of the tree. Leave them alone.
 - AMD VAAPI encoders pad coded sizes (AV1 with no display size: 1920x1080 -> 1920x1082); rules and table in `docs/amd-encoder-padding.md`.
