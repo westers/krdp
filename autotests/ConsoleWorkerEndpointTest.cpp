@@ -30,6 +30,7 @@ private Q_SLOTS:
     void clipboardImagesCrossWithTheirKindAndLimits();
     void clipboardHtmlCrossesWithItsKindAndLimits();
     void fileRecordsCrossOnlyWhenTheFilePolicyAllowsAndAreBounded();
+    void filePushRecordsCrossOnlyWhenThePolicyAllowsAndAreBounded();
     void hostPointerIsRelayedAfterReadyAndForgottenWithTheWorker();
     void hostPointerBeforeReadyOrMalformedFailsTheWorker();
 };
@@ -763,6 +764,140 @@ void ConsoleWorkerEndpointTest::fileRecordsCrossOnlyWhenTheFilePolicyAllowsAndAr
     // A malformed file record is a protocol error, not a shrug.
     QSignalSpy errors(&w.endpoint, &ConsoleWorkerEndpoint::protocolError);
     w.worker.write(frame(Kind::FileRead, QByteArray(5, 'x')));
+    w.worker.flush();
+    QTRY_VERIFY(!errors.isEmpty() || !w.endpoint.ready());
+}
+
+// OPT-078 phase 3 (wire 22): the broker side of client-to-host files.
+void ConsoleWorkerEndpointTest::filePushRecordsCrossOnlyWhenThePolicyAllowsAndAreBounded()
+{
+    using namespace ConsoleWorkerWire;
+    ClipboardWorker w;
+    w.start(true);
+    QVERIFY(w.ok);
+    QList<FilePushReply> replies;
+    QList<FilePushAck> acks;
+    QList<FilePushState> states;
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::filePushReplied, this, [&replies](const auto &r) { replies.append(r); });
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::filePushAcked, this, [&acks](const auto &r) { acks.append(r); });
+    connect(&w.endpoint, &ConsoleWorkerEndpoint::filePushStateChanged, this, [&states](const auto &r) { states.append(r); });
+    const auto descriptor = ClipboardFileDescriptor::encode({{QStringLiteral("a.txt"), false, 10, std::nullopt}, {QStringLiteral("dir"), true, 0, std::nullopt}}).data;
+
+    // Without the client-to-host file flag nothing is offered or sent, whatever else the clipboard policy says.
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false));
+    w.drain();
+    QCOMPARE(w.endpoint.offerPushFiles(descriptor, true, 0), quint64(0));
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false, true, false)); // host to client only
+    w.drain();
+    QCOMPARE(w.endpoint.offerPushFiles(descriptor, true, 0), quint64(0));
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, false, false, false, false, true)); // the file flag is a subset of its direction: the endpoint drops it
+    auto records = w.drain();
+    QVERIFY(!clipboardPolicy(records.first())->filesClientToHost);
+    QCOMPARE(w.endpoint.offerPushFiles(descriptor, true, 0), quint64(0));
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false, false, true));
+    w.drain();
+
+    // Bounds: no descriptor, no entries, a torn descriptor, one over the limit.
+    QCOMPARE(w.endpoint.offerPushFiles({}, true, 0), quint64(0));
+    QCOMPARE(w.endpoint.offerPushFiles(QByteArray(4, '\0'), true, 0), quint64(0));
+    QCOMPARE(w.endpoint.offerPushFiles(descriptor.left(descriptor.size() - 1), true, 0), quint64(0));
+    QCOMPARE(w.endpoint.offerPushFiles(QByteArray(4 + 592 * ClipboardFileLimits::MaxEntries + 592, '\0'), true, 0), quint64(0));
+
+    const auto seq = w.endpoint.offerPushFiles(descriptor, true, 5ULL << 30);
+    QVERIFY(seq);
+    records = w.drain();
+    QCOMPARE(records.size(), 1);
+    const auto offered = filePushOffer(records.first());
+    QVERIFY(offered);
+    QCOMPARE(offered->seq, seq);
+    QVERIFY(offered->hugeFiles);
+    QCOMPARE(offered->reserveBytes, quint64(5ULL << 30));
+    QCOMPARE(offered->descriptor, descriptor);
+    // Bytes cannot be sent before the worker accepted.
+    const QByteArray bytes(1000, 'x');
+    QVERIFY(!w.endpoint.pushFileData(seq, 0, 0, bytes));
+    // A reply for a transfer nobody offered is dropped; the real one is passed on.
+    w.worker.write(frame(FilePushReply{seq + 50, true, FilePushReason::None, 1, 1, 0, 10, 0, 0}));
+    w.worker.write(frame(FilePushReply{seq, true, FilePushReason::None, 1, 1, 0, 10, 0, 0}));
+    w.worker.write(frame(FilePushReply{seq, true, FilePushReason::None, 1, 1, 0, 10, 0, 0})); // a second answer to the same offer
+    w.worker.flush();
+    QTRY_COMPARE(replies.size(), 1);
+    QTest::qWait(50);
+    QCOMPARE(replies.size(), 1);
+    QCOMPARE(replies.first().seq, seq);
+
+    // Data: numbered by the broker's seq, 64-bit offsets, bounded.
+    QVERIFY(!w.endpoint.pushFileData(0, 0, 0, bytes));
+    QVERIFY(!w.endpoint.pushFileData(seq + 1, 0, 0, bytes)); // not ours
+    QVERIFY(!w.endpoint.pushFileData(seq, 0, 0, {}));
+    QVERIFY(!w.endpoint.pushFileData(seq, 0, 0, QByteArray(MaxFileReadBytes + 1, 'x')));
+    QVERIFY(!w.endpoint.pushFileData(seq, 0, ~quint64(0) - 5, bytes)); // would overflow
+    QVERIFY(w.endpoint.pushFileData(seq, 0, 0x1'0000'0000ULL + 5, bytes));
+    records = w.drain();
+    QCOMPARE(records.size(), 1);
+    QCOMPARE(filePushData(records.first())->offset, quint64(0x1'0000'0000ULL + 5));
+    QCOMPARE(filePushData(records.first())->data, bytes);
+
+    // Acks and states reach the broker only for a transfer it started.
+    w.worker.write(frame(FilePushAck{seq, 0, 0x1'0000'0005ULL, 1000, ClipboardFileFetch::AckStatus::Ok}));
+    w.worker.write(frame(FilePushAck{seq + 9, 0, 0, 10, ClipboardFileFetch::AckStatus::Ok}));
+    w.worker.write(frame(FilePushState{seq, FilePushPhase::Staging, FilePushReason::None, 100, 1000}));
+    w.worker.write(frame(FilePushState{seq + 9, FilePushPhase::Staging, FilePushReason::None, 100, 1000}));
+    w.worker.flush();
+    QTRY_COMPARE(acks.size(), 1);
+    QTRY_COMPARE(states.size(), 1);
+    QTest::qWait(50);
+    QCOMPARE(acks.size(), 1);
+    QCOMPARE(states.size(), 1);
+    // A terminal state ends the transfer: no more bytes for it.
+    w.worker.write(frame(FilePushState{seq, FilePushPhase::Failed, FilePushReason::NoSpace, 100, 1000}));
+    w.worker.flush();
+    QTRY_COMPARE(states.size(), 2);
+    QVERIFY(!w.endpoint.pushFileData(seq, 0, 0, bytes));
+
+    // A refusal also ends it, and its numbers (a full disk) arrive.
+    const auto second = w.endpoint.offerPushFiles(descriptor, false, 0);
+    QVERIFY(second && second != seq);
+    w.drain();
+    w.worker.write(frame(FilePushReply{second, false, FilePushReason::NoSpace, 0, 0, 0, 12ULL << 30, 3ULL << 30, 14ULL << 30}));
+    w.worker.flush();
+    QTRY_COMPARE(replies.size(), 2);
+    QCOMPARE(replies.last().neededBytes, quint64(14ULL << 30));
+    QVERIFY(!w.endpoint.pushFileData(second, 0, 0, bytes));
+
+    // A few transfers at most wait at once; cancel frees one, cancel(0) frees all, and says why.
+    QList<quint64> live;
+    for (int i = 0; i < ConsoleWorkerEndpoint::MaxPushOffers; ++i) {
+        live.append(w.endpoint.offerPushFiles(descriptor, true, 0));
+        QVERIFY(live.last());
+    }
+    QCOMPARE(w.endpoint.offerPushFiles(descriptor, true, 0), quint64(0));
+    w.drain();
+    QVERIFY(w.endpoint.cancelPushFiles(live.first(), FilePushCancelReason::Replaced));
+    QVERIFY(w.endpoint.offerPushFiles(descriptor, true, 0));
+    QVERIFY(w.endpoint.cancelPushFiles(0, FilePushCancelReason::ConnectionEnded));
+    records = w.drain();
+    QCOMPARE(filePushCancel(records.at(records.size() - 3)), (std::optional<FilePushCancel>(FilePushCancel{live.first(), FilePushCancelReason::Replaced})));
+    QCOMPARE(filePushCancel(records.last()), (std::optional<FilePushCancel>(FilePushCancel{0, FilePushCancelReason::ConnectionEnded})));
+    // After cancel(0) an answer to the old transfers is dropped.
+    w.worker.write(frame(FilePushReply{live.at(1), true, FilePushReason::None, 1, 1, 0, 10, 0, 0}));
+    w.worker.flush();
+    QTest::qWait(50);
+    QCOMPARE(replies.size(), 2);
+
+    // The policy losing the flag stops offers and bytes; a malformed record is a protocol error.
+    const auto third = w.endpoint.offerPushFiles(descriptor, true, 0);
+    QVERIFY(third);
+    w.drain();
+    w.worker.write(frame(FilePushReply{third, true, FilePushReason::None, 1, 1, 0, 10, 0, 0}));
+    w.worker.flush();
+    QTRY_COMPARE(replies.size(), 3);
+    QVERIFY(w.endpoint.setClipboardPolicy(1, true, true, false, false, false, false));
+    w.drain();
+    QVERIFY(!w.endpoint.pushFileData(third, 0, 0, bytes));
+    QCOMPARE(w.endpoint.offerPushFiles(descriptor, true, 0), quint64(0));
+    QSignalSpy errors(&w.endpoint, &ConsoleWorkerEndpoint::protocolError);
+    w.worker.write(frame(Kind::FilePushAck, QByteArray(5, 'x')));
     w.worker.flush();
     QTRY_VERIFY(!errors.isEmpty() || !w.endpoint.ready());
 }

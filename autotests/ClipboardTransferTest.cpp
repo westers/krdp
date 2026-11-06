@@ -112,6 +112,34 @@ private Q_SLOTS:
         QCOMPARE(parseCeiling(QStringLiteral("1000"))->bytesPerSecond, quint64(1'000'000'000));
         QVERIFY(!parseCeiling(QStringLiteral("fast")));
     }
+
+    // OPT-078 phase 3: ClipboardFileMinFreeBytes, the free space that must remain on the host after a client-to-host copy.
+    void theMinimumFreeSpaceSpellingIsStrict()
+    {
+        const std::pair<const char *, quint64> good[] = {{"0", 0},
+                                                         {"1", 1},
+                                                         {"2147483648", 2ULL << 30},
+                                                         {"512K", 512ULL << 10},
+                                                         {"512M", 512ULL << 20},
+                                                         {"2G", 2ULL << 30},
+                                                         {"10G", 10ULL << 30},
+                                                         {"1T", 1ULL << 40},
+                                                         {"16T", 16ULL << 40},
+                                                         {"17592186044416", 16ULL << 40}};
+        for (const auto &[text, bytes] : good) {
+            const auto parsed = parseMinFree(QString::fromLatin1(text));
+            QVERIFY2(parsed.has_value(), text);
+            QCOMPARE(*parsed, bytes);
+            QCOMPARE(normalizeMinFree(QString::fromLatin1(text)), std::optional<QString>(QString::fromLatin1(text)));
+        }
+        for (const char *bad : {"", " 1G", "1G ", "-1", "+1", "1.5G", "1g", "G", "1GB", "1GiB", "00", "01G", "1e9", "0x10", "17T", "16385G", "17592186044417", "99999999999999999999",
+                                "1 G", "NaN", "auto", "2,5G"}) {
+            QVERIFY2(!parseMinFree(QString::fromLatin1(bad)), bad);
+            QVERIFY2(!normalizeMinFree(QString::fromLatin1(bad)), bad);
+        }
+        // 0 means the built-in rule max(2 GiB, 5% of the filesystem)
+        QCOMPARE(*parseMinFree(QStringLiteral("0")), quint64(0));
+    }
 };
 
 QTEST_GUILESS_MAIN(ClipboardTransferTest)

@@ -48,6 +48,13 @@ struct FakeHost {
     // OPT-078
     QByteArray uriList; // what the host holds as text/uri-list
     int uriReads = 0;
+    // OPT-078 phase 3: client-to-host files
+    QTemporaryDir cache;
+    bool ownUri = false; ///< the host's selection is what writeUriList set
+    bool uriWriteOk = true;
+    QList<QPair<QStringList, bool>> uriWrites; // (paths, secret)
+    int uriClears = 0;
+    QList<QPair<QString, QString>> notes;
     HostClipboard::Backend backend()
     {
         return {[this] { return hasText; },
@@ -82,7 +89,19 @@ struct FakeHost {
                     return writeOk;
                 },
                 [this] { return !uriList.isEmpty(); },
-                [this] { ++uriReads; return uriList; }};
+                [this] { ++uriReads; return uriList; },
+                [this](const QStringList &paths, bool secret) {
+                    uriWrites.append({paths, secret});
+                    ownUri = uriWriteOk;
+                    return uriWriteOk;
+                },
+                [this] {
+                    ++uriClears;
+                    ownUri = false;
+                },
+                [this] { return ownUri; },
+                [this](const QString &summary, const QString &body) { notes.append({summary, body}); },
+                [this] { return cache.path(); }};
     }
 };
 
@@ -99,11 +118,12 @@ struct Harness {
     {
     }
     void allow(bool hostToClient, bool clientToHost, bool greeter = false, bool locked = false, quint64 revision = 1, quint64 generation = 5,
-               bool filesHostToClient = false)
+               bool filesHostToClient = false, bool filesClientToHost = false)
     {
         board->setControl({generation, true});
         ClipboardPolicy policy{revision, generation, hostToClient, clientToHost, locked, greeter};
         policy.filesHostToClient = filesHostToClient;
+        policy.filesClientToHost = filesClientToHost;
         board->setPolicy(policy);
     }
     template<typename T, typename F>
@@ -120,6 +140,9 @@ struct Harness {
     QList<ClipboardSetResult> results() { return take<ClipboardSetResult>([](const Record &r) { return clipboardSetResult(r); }); }
     QList<FileReadResult> reads() { return take<FileReadResult>([](const Record &r) { return fileReadResult(r); }); }
     QList<FileProgress> progress() { return take<FileProgress>([](const Record &r) { return fileProgress(r); }); }
+    QList<FilePushReply> pushReplies() { return take<FilePushReply>([](const Record &r) { return filePushReply(r); }); }
+    QList<FilePushAck> pushAcks() { return take<FilePushAck>([](const Record &r) { return filePushAck(r); }); }
+    QList<FilePushState> pushStates() { return take<FilePushState>([](const Record &r) { return filePushState(r); }); }
 };
 
 QByteArray encode(const QImage &image, const char *format)
@@ -900,6 +923,68 @@ private Q_SLOTS:
     static QByteArray uriFor(const QString &path)
     {
         return QUrl::fromLocalFile(path).toEncoded() + "\r\n";
+    }
+
+    // ---- OPT-078 phase 3 (wire 22): client-to-host file copy ----
+    // The staged files the worker put on the host clipboard come back as a host clipboard change: never a host copy to offer the client.
+    void stagedFilesComingBackAreNotOfferedToTheClient()
+    {
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, true, true);
+        const QString real = h.host.cache.filePath(QStringLiteral("a.txt"));
+        QFile f(real);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.close();
+        h.host.uriList = QUrl::fromLocalFile(real).toEncoded() + "\r\n";
+        h.host.ownUri = true;
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 3);
+        QVERIFY(h.offers().isEmpty());
+        QCOMPARE(h.host.uriReads, 0); // and its own selection is never read back (that would ask this very thread to serve it)
+        // the user then copies the same kind of list for real
+        h.host.ownUri = false;
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferFiles);
+    }
+
+    void clientFilesAreStagedOfferedAndTheStagingFollowsThePolicy()
+    {
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, false, true);
+        const auto descriptor = ClipboardFileDescriptor::encode({{QStringLiteral("hello.txt"), false, 5, std::nullopt}}).data;
+        h.board->staging().offer(FilePushOffer{1, true, 0, descriptor});
+        QTRY_COMPARE(h.pushReplies().size(), 1);
+        QVERIFY(h.pushReplies().first().accepted);
+        QCOMPARE(h.host.notes.size(), 1);
+        h.board->staging().data(FilePushData{1, 0, 0, QByteArrayLiteral("hello")});
+        QTRY_VERIFY(!h.pushStates().isEmpty() && h.pushStates().last().phase == FilePushPhase::Done);
+        QCOMPARE(h.host.uriWrites.size(), 1);
+        QVERIFY(h.host.uriWrites.first().first.first().endsWith(QStringLiteral("/hello.txt")));
+        QFile staged(h.host.uriWrites.first().first.first());
+        QVERIFY(staged.open(QIODevice::ReadOnly));
+        QCOMPARE(staged.readAll(), QByteArray("hello"));
+        // the host clipboard changing because of our own write offers nothing
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 3);
+        QVERIFY(h.offers().isEmpty());
+        // the controller moving away removes it and withdraws the list
+        h.board->setControl({6, true});
+        QTRY_COMPARE(h.host.uriClears, 1);
+        QTRY_VERIFY(!staged.exists());
+    }
+
+    void clientFilesAreRefusedWithoutTheFlag()
+    {
+        Harness h;
+        h.allow(true, true, false, true, 1, 5, true, false); // a locked desktop: no new client-to-host transfer
+        const auto descriptor = ClipboardFileDescriptor::encode({{QStringLiteral("hello.txt"), false, 5, std::nullopt}}).data;
+        h.board->staging().offer(FilePushOffer{1, true, 0, descriptor});
+        QTRY_COMPARE(h.pushReplies().size(), 1);
+        QVERIFY(!h.pushReplies().first().accepted);
+        QCOMPARE(h.pushReplies().first().reason, FilePushReason::Policy);
+        QVERIFY(h.host.notes.isEmpty());
+        QVERIFY(!QFileInfo::exists(h.host.cache.filePath(QStringLiteral("krdp-clip"))));
     }
 
     void aFileCopyIsOfferedAloneAndOnlyWhenTheFilePolicyAllows()

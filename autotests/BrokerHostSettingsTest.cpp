@@ -13,9 +13,9 @@ private Q_SLOTS:
         // OPT-062 S3 added SoftwareAvc, SoftwareHevc and SoftwareAv1 to Console and Virtual (a deliberate update of this pin).
         // OPT-066 added ClientQualityMax to Console and Virtual (the highest quality a client may request).
         // OPT-067 added ClipboardDirection to Console and Virtual (the text clipboard bridge's direction).
-        // OPT-078 added ClipboardFiles and ClipboardFileMaxRate to Console and Virtual (file copy and its rate ceiling).
-        QCOMPARE(keys(Scope::Console).size(), 19);
-        QCOMPARE(keys(Scope::Virtual).size(), 18);
+        // OPT-078 added ClipboardFiles and ClipboardFileMaxRate to Console and Virtual (file copy and its rate ceiling); phase 3 adds ClipboardFileMinFreeBytes.
+        QCOMPARE(keys(Scope::Console).size(), 20);
+        QCOMPARE(keys(Scope::Virtual).size(), 19);
         // OPT-075 added the eight system-bus keys to the New Virtual Desktops scope (RenderPci and VaapiDriver plus eight).
         QCOMPARE(keys(Scope::VirtualSession).size(), 10);
         for (const auto scope : {Scope::Console, Scope::Virtual, Scope::VirtualSession}) {
@@ -190,6 +190,20 @@ private Q_SLOTS:
         QCOMPARE(parse(Scope::Console, "FARSIDE_CONSOLE_CLIPBOARD_FILES=host-to-client\nFARSIDE_CONSOLE_CLIPBOARD_FILE_MAX_RATE=5\n").effective[u"ClipboardFileMaxRate"_s].toString(), u"5"_s);
         QVERIFY(!parse(Scope::Console, "FARSIDE_CONSOLE_CLIPBOARD_FILE_MAX_RATE=fast\n").error.isEmpty());
         QVERIFY(!parse(Scope::Virtual, "FARSIDE_VIRTUAL_CLIPBOARD_FILES=sideways\n").error.isEmpty());
+        // OPT-078 phase 3: ClipboardFileMinFreeBytes, the free space kept after a copy from the client (bytes, or a number with K, M, G or T; 0 = the built-in rule).
+        for (const auto &size : {u"0"_s, u"1"_s, u"512K"_s, u"512M"_s, u"2G"_s, u"5G"_s, u"1T"_s, u"16T"_s, u"2147483648"_s}) {
+            QCOMPARE(normalize(Scope::Console, u"ClipboardFileMinFreeBytes"_s, size), std::optional<QString>(size));
+            QCOMPARE(normalize(Scope::Virtual, u"ClipboardFileMinFreeBytes"_s, size), std::optional<QString>(size));
+        }
+        for (const auto &bad : {u""_s, u"-1"_s, u"1.5G"_s, u"1g"_s, u"1GB"_s, u"00"_s, u"17T"_s, u" 1G"_s, u"1G\nX=1"_s, u"auto"_s, u"1e9"_s})
+            QVERIFY2(!normalize(Scope::Console, u"ClipboardFileMinFreeBytes"_s, bad), qPrintable(bad));
+        QCOMPARE(defaults(Scope::Console)[u"ClipboardFileMinFreeBytes"_s].toString(), u"0"_s);
+        QCOMPARE(defaults(Scope::Virtual)[u"ClipboardFileMinFreeBytes"_s].toString(), u"0"_s);
+        QVERIFY(!keys(Scope::VirtualSession).contains(u"ClipboardFileMinFreeBytes"_s));
+        QCOMPARE(environmentName(Scope::Console, u"ClipboardFileMinFreeBytes"_s), u"FARSIDE_CONSOLE_CLIPBOARD_FILE_MIN_FREE"_s);
+        QCOMPARE(environmentName(Scope::Virtual, u"ClipboardFileMinFreeBytes"_s), u"FARSIDE_VIRTUAL_CLIPBOARD_FILE_MIN_FREE"_s);
+        QCOMPARE(parse(Scope::Console, "FARSIDE_CONSOLE_CLIPBOARD_FILE_MIN_FREE=5G\n").effective[u"ClipboardFileMinFreeBytes"_s].toString(), u"5G"_s);
+        QVERIFY(!parse(Scope::Console, "FARSIDE_CONSOLE_CLIPBOARD_FILE_MIN_FREE=lots\n").error.isEmpty());
         // OPT-066: 0 = same as Quality, up to 100; anything else is refused.
         QCOMPARE(normalize(Scope::Console, u"ClientQualityMax"_s, u"0"_s), std::optional<QString>(u"0"_s));
         QCOMPARE(normalize(Scope::Virtual, u"ClientQualityMax"_s, u"100"_s), std::optional<QString>(u"100"_s));

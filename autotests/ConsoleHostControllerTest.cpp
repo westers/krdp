@@ -172,6 +172,38 @@ class ConsoleHostControllerTest : public QObject
         }
     };
 
+    // OPT-081: a query-only KRDPCTL client ("Refresh from host") authenticates and opens the control channel but loads no
+    // DRDYNVC, so it never reaches Streaming and is never admitted. The worker is Ready and has published its outputs.
+    struct QueryRig {
+        MappedHarness base;
+        QLocalSocket worker;
+        QByteArray token = QByteArray(32, 'x');
+        bool authenticated = true;
+        explicit QueryRig(bool workerReady = true, bool admit = false)
+            : base("[General]\n", {}, true, 2000, 2, ConsoleSeat::Adapter::PhysicalUser, true, admit)
+        {
+            base.host.m_authenticatedOf = [this](RdpConnection *) { return authenticated; };
+            if (!workerReady) return;
+            worker.connectToServer(base.host.m_endpoint.socketName());
+            QVERIFY(worker.waitForConnected(1000));
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::Hello{QStringLiteral("3"), 1000, token})
+                         + ConsoleWorkerWire::frame(ConsoleWorkerWire::Kind::Ready));
+            worker.flush();
+            QTRY_VERIFY_WITH_TIMEOUT(base.host.m_endpoint.ready(), 3000);
+            // One output: several would hold the layout back until the worker confirms the topology.
+            Q_EMIT base.host.m_endpoint.outputsReceived({{{u"DP-1"_s, QRect(0, 0, 2560, 1440), 1, true}}, QPoint(0, 0)});
+        }
+        // The record the request itself answers: the last one that carries its requestId (others may follow it).
+        QJsonObject send(const QString &type, const QString &requestId, int version = 1)
+        {
+            base.sent.clear();
+            base.host.onControlRecord(&base.connection, base.client->id, QJsonObject{{u"type"_s, type}, {u"v"_s, version}, {u"requestId"_s, requestId}});
+            for (qsizetype i = base.sent.size() - 1; i >= 0; --i)
+                if (base.sent.at(i).value(u"requestId"_s).toString() == requestId) return base.sent.at(i);
+            return {};
+        }
+    };
+
     struct DeskHarness {
         MappedHarness base;
         RdpConnection viewerConnection{&base.server, -1};
@@ -1204,17 +1236,61 @@ private Q_SLOTS:
         QVERIFY(!h.screens().last().value(u"active"_s).toBool()); QVERIFY(!h.screens().last().contains(u"screens"_s));
     }
 
-    void activeRecordOmitsScreensWhenTheWorkerOutputsDiffer()
+    // OPT-082: the worker snapshotted a partial host (one screen of two) and planned one stand-in. The broker no longer
+    // announces an active mapped Replace without screens[]: it has the worker give the host's screens back (the verified
+    // release of a disconnect) and reports a failed attempt, so the user gets all the real screens, with a message.
+    void aWorkerThatMappedFewerScreensThanThePlanEndsTheReplace()
     {
         MappedHarness h("[General]\n", {}, true, 2000, 2);
         QVERIFY(h.askMapped(oneClient(100), u"s2"_s).value(u"ok"_s).toBool());
         h.host.m_inputEnabled = true; h.client->session->setWorkerActive(true);
+        Q_EMIT h.host.m_endpoint.outputsReceived({{{u"Virtual-krdp-h0-1920x1080"_s, QRect(0, 0, 1920, 1080), 1, true}}, QPoint(2560, 0)});
+        Q_EMIT h.host.m_endpoint.topologyReceived({{{u"Virtual-krdp-h0-1920x1080"_s, QSize(1920, 1080), QRect(2560, 0, 1920, 1080), 1, true, 1, false}}, false});
+        h.host.syncScreensRecords();
+        QVERIFY(h.screens().isEmpty()); // no "active" record, no guess about which output replaced which screen
+        QVERIFY(h.client->replaceEnding); QVERIFY(!h.client->replaceSpent); // the worker is releasing first
+        h.host.syncScreensRecords(); // asked once, not on every sync
+        QVERIFY(h.screens().isEmpty());
+        Q_EMIT h.host.m_endpoint.physicalLeaseReleased({h.host.m_controlGeneration, true});
+        QVERIFY(h.client->replaceSpent);
+        QCOMPARE(h.screens().size(), 1);
+        const auto record = h.screens().last();
+        QVERIFY(!record.value(u"active"_s).toBool()); QVERIFY(!record.contains(u"screens"_s));
+        QCOMPARE(record.value(u"reason"_s).toString(), u"failed"_s);
+        QVERIFY(!record.value(u"message"_s).toString().isEmpty());
+        QVERIFY(!h.host.m_configuredConsoleOutputs); // nothing held for this connection any more
+        QVERIFY(!h.policy().enabled);                // the next worker captures the real screens
+    }
+
+    // The worker's own bounded single fallback (one krdp-m* output for every host screen) is a working state: unchanged.
+    void activeRecordOmitsScreensForTheWorkersSingleFallback()
+    {
+        MappedHarness h("[General]\n", {}, true, 2000, 2);
+        QVERIFY(h.askMapped(oneClient(100), u"s2b"_s).value(u"ok"_s).toBool());
+        h.host.m_inputEnabled = true; h.client->session->setWorkerActive(true);
+        const QString single = u"Virtual-krdp-m0-1920x1080"_s;
+        Q_EMIT h.host.m_endpoint.outputsReceived({{{single, QRect(0, 0, 1920, 1080), 1, true}}, QPoint(2560, 0)});
+        Q_EMIT h.host.m_endpoint.topologyReceived({{{single, QSize(1920, 1080), QRect(2560, 0, 1920, 1080), 1, true, 1, false}}, false});
+        h.host.syncScreensRecords();
+        QVERIFY(!h.client->replaceEnding);
+        QCOMPARE(h.screens().size(), 1);
+        QVERIFY(h.screens().last().value(u"active"_s).toBool());
+        QVERIFY(!h.screens().last().contains(u"screens"_s));
+    }
+
+    // Same count, other names: nothing proves the plan wrong, so it is only reported (as before).
+    void activeRecordOmitsScreensWhenTheNamesDiffer()
+    {
+        MappedHarness h("[General]\n", {}, true, 2000, 1);
+        QVERIFY(h.askMapped(oneClient(100), u"s2c"_s).value(u"ok"_s).toBool());
+        h.host.m_inputEnabled = true; h.client->session->setWorkerActive(true);
         Q_EMIT h.host.m_endpoint.outputsReceived({{{u"Virtual-other-0"_s, QRect(0, 0, 1920, 1080), 1, true}}, QPoint(2560, 0)});
         Q_EMIT h.host.m_endpoint.topologyReceived({{{u"Virtual-other-0"_s, QSize(1920, 1080), QRect(2560, 0, 1920, 1080), 1, true, 1, false}}, false});
         h.host.syncScreensRecords();
+        QVERIFY(!h.client->replaceEnding);
         QCOMPARE(h.screens().size(), 1);
         QCOMPARE(h.screens().last().value(u"layout"_s).toString(), u"mapped"_s);
-        QVERIFY(!h.screens().last().contains(u"screens"_s)); // never a guess about which output replaced which screen
+        QVERIFY(!h.screens().last().contains(u"screens"_s));
     }
 
     // ---- OPT-060 M-8: a host monitor plugged in while replaced -------------------------------------------------------
@@ -1778,6 +1854,56 @@ private:
     static QByteArray oneFileDescriptor(quint64 size)
     {
         return ClipboardFileDescriptor::encode({{QStringLiteral("report.bin"), false, size, std::nullopt}}).data;
+    }
+    // OPT-078 phase 3: what the broker sends the CLIENT while it receives files (lock, descriptor request, FILECONTENTS requests).
+    struct PushSent {
+        QList<uint32_t> locks;
+        QList<uint32_t> unlocks;
+        struct Request {
+            uint32_t streamId, index, flags, length;
+            uint64_t offset;
+            bool haveLock;
+            uint32_t lockId;
+        };
+        QList<Request> requests;
+    };
+    static inline PushSent *pushSent_ = nullptr;
+    static UINT onPushLock(CliprdrServerContext *, const CLIPRDR_LOCK_CLIPBOARD_DATA *lock)
+    {
+        if (pushSent_) pushSent_->locks.append(lock->clipDataId);
+        return CHANNEL_RC_OK;
+    }
+    static UINT onPushUnlock(CliprdrServerContext *, const CLIPRDR_UNLOCK_CLIPBOARD_DATA *unlock)
+    {
+        if (pushSent_) pushSent_->unlocks.append(unlock->clipDataId);
+        return CHANNEL_RC_OK;
+    }
+    static UINT onPushRequest(CliprdrServerContext *, const CLIPRDR_FILE_CONTENTS_REQUEST *request)
+    {
+        if (pushSent_)
+            pushSent_->requests.append({request->streamId, request->listIndex, request->dwFlags, request->cbRequested, (uint64_t(request->nPositionHigh) << 32) | request->nPositionLow,
+                                        bool(request->haveClipDataId), request->clipDataId});
+        return CHANNEL_RC_OK;
+    }
+    static void enablePush(ClipboardRig &rig, PushSent &sent)
+    {
+        pushSent_ = &sent;
+        rig.context.ServerLockClipboardData = onPushLock;
+        rig.context.ServerUnlockClipboardData = onPushUnlock;
+        rig.context.ServerFileContentsRequest = onPushRequest;
+    }
+    static constexpr uint32_t ClientFilesId = 0xC0A1;
+    static UINT clientCopiesFiles(ClipboardRig &rig)
+    {
+        static char name[] = "FileGroupDescriptorW";
+        CLIPRDR_FORMAT format{};
+        format.formatId = ClientFilesId;
+        format.formatName = name;
+        CLIPRDR_FORMAT_LIST list{};
+        list.common.msgType = CB_FORMAT_LIST;
+        list.numFormats = 1;
+        list.formats = &format;
+        return rig.context.ClientFormatList(&rig.context, &list);
     }
     template<typename T, typename F>
     static QList<T> recordsOf(ClipboardRig &rig, F decode)
@@ -3660,7 +3786,7 @@ private Q_SLOTS:
         QList<FileContents> contents;
         enableFiles(rig, contents);
         const auto policy = rig.lastPolicy();
-        QVERIFY(policy && policy->filesHostToClient && policy->filesClientToHost); // the planner's decision for a same-account desktop; only host to client is implemented
+        QVERIFY(policy && policy->filesHostToClient && policy->filesClientToHost); // the planner's decision for a same-account desktop
         QVERIFY(rig.connection.clipboard()->filesEnabled());
         rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, ConsoleWorkerWire::ClipboardOfferFiles}));
         QTRY_COMPARE(rig.sent.formatLists.size(), 1);
@@ -3728,6 +3854,173 @@ private Q_SLOTS:
         rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::FileReadResult{9999, ConsoleWorkerWire::FileReadStatus::Ok, QByteArray(10, 'x')}));
         QTest::qWait(60);
         QCOMPARE(contents.size(), 2);
+        fileContents_ = nullptr;
+    }
+
+    // ---- OPT-078 phase 3: client-to-host file copy through the controller, the relay, the endpoint and a fake worker ----
+    void clientFilesFlowToTheWorkerAndSurviveALockButNotANewTransferOnALockedDesktop()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        QList<FileContents> contents;
+        enableFiles(rig, contents);
+        PushSent pushed;
+        enablePush(rig, pushed);
+        rig.host.setClipboardFileMinFreeBytes(3ULL << 30);
+        rig.connection.clipboard()->setFileTransferRequest({ClipboardFilePacing::RequestedMode::Unlimited, std::nullopt});
+        rig.connection.clipboard()->setStockClientForTest(false);
+        const auto policy = rig.lastPolicy();
+        QVERIFY(policy && policy->filesClientToHost);
+        // the client copies two files: the clipboard is locked, then the descriptor requested
+        const auto descriptor = ClipboardFileDescriptor::encode({{QStringLiteral("a.bin"), false, 300 * 1024, std::nullopt}, {QStringLiteral("b.txt"), false, 10, std::nullopt}}).data;
+        clientCopiesFiles(rig);
+        QTRY_VERIFY_WITH_TIMEOUT(rig.sent.dataRequests.contains(ClientFilesId), 3000);
+        QCOMPARE(pushed.locks.size(), 1);
+        rig.clientAnswers(descriptor);
+        // the worker is offered the descriptor with the huge option and the host owner's reserve
+        QTRY_VERIFY(!recordsOf<ConsoleWorkerWire::FilePushOffer>(rig, [](const auto &r) { return ConsoleWorkerWire::filePushOffer(r); }).isEmpty());
+        const auto offer = recordsOf<ConsoleWorkerWire::FilePushOffer>(rig, [](const auto &r) { return ConsoleWorkerWire::filePushOffer(r); }).last();
+        QCOMPARE(offer.descriptor, descriptor);
+        QVERIFY(offer.hugeFiles);
+        QCOMPARE(offer.reserveBytes, quint64(3ULL << 30));
+        QVERIFY(pushed.requests.isEmpty()); // nothing is asked of the client before the worker accepted
+        const auto plan = ClipboardFilePush::makePlan(descriptor, true);
+        ConsoleWorkerWire::FilePushReply reply;
+        reply.seq = offer.seq;
+        reply.accepted = true;
+        reply.reason = ConsoleWorkerWire::FilePushReason::None;
+        reply.files = quint32(plan.files);
+        reply.directories = quint32(plan.directories);
+        reply.totalBytes = plan.totalBytes;
+        rig.workerSends(ConsoleWorkerWire::frame(reply));
+        QTRY_VERIFY(!pushed.requests.isEmpty());
+        QVERIFY(pushed.requests.first().haveLock);
+        QCOMPARE(pushed.requests.first().lockId, pushed.locks.first());
+        QVERIFY(rig.connection.clipboard()->clientFileTransferActive());
+        // the screen locks while the transfer runs: the planner keeps the flag for it (the policy record says so)
+        rig.host.m_sessions = {ClipboardRig::session(u"3"_s, quint32(getuid()), true, false)};
+        rig.host.syncClipboard();
+        QVERIFY(rig.connection.clipboard()->clientFilesAllowed());
+        QVERIFY(rig.lastPolicy()->filesClientToHost && rig.lastPolicy()->locked);
+        // the client answers every request; the worker receives the ranges in order and acknowledges each
+        int answered = 0;
+        quint64 total = 0;
+        for (int round = 0; round < 200 && total < plan.totalBytes; ++round) {
+            while (answered < pushed.requests.size()) {
+                const auto &request = pushed.requests.at(answered++);
+                CLIPRDR_FILE_CONTENTS_RESPONSE response{};
+                response.common.msgType = CB_FILECONTENTS_RESPONSE;
+                response.common.msgFlags = CB_RESPONSE_OK;
+                const QByteArray bytes(int(request.length), char('a' + request.index));
+                response.streamId = request.streamId;
+                response.cbRequested = request.length;
+                response.common.dataLen = request.length + 4;
+                response.requestedData = reinterpret_cast<const BYTE *>(bytes.constData());
+                rig.context.ClientFileContentsResponse(&rig.context, &response);
+                QTest::qWait(5);
+            }
+            const auto data = recordsOf<ConsoleWorkerWire::FilePushData>(rig, [](const auto &r) { return ConsoleWorkerWire::filePushData(r); });
+            quint64 seen = 0;
+            for (const auto &chunk : data) seen += quint64(chunk.data.size());
+            while (total < seen) { // acknowledge what the worker has now
+                static int acked = 0;
+                const auto &chunk = data.at(acked++);
+                total += quint64(chunk.data.size());
+                rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::FilePushAck{chunk.seq, chunk.index, chunk.offset, quint32(chunk.data.size()), ClipboardFileFetch::AckStatus::Ok}));
+            }
+            QTest::qWait(15);
+        }
+        QCOMPARE(total, plan.totalBytes);
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::FilePushState{offer.seq, ConsoleWorkerWire::FilePushPhase::Done, ConsoleWorkerWire::FilePushReason::None, total, total}));
+        QTRY_VERIFY(!rig.connection.clipboard()->clientFileTransferActive());
+        QCOMPARE(pushed.unlocks, pushed.locks);
+        // the desktop is locked and the copy is over: the flag drops for NEW transfers and a new copy is not even requested
+        rig.host.syncClipboard();
+        QTRY_VERIFY(!rig.lastPolicy()->filesClientToHost);
+        QVERIFY(!rig.connection.clipboard()->clientFilesAllowed());
+        const auto requestsBefore = rig.sent.dataRequests.size();
+        clientCopiesFiles(rig);
+        QTest::qWait(Clipboard::FormatListSettleMs * 3);
+        QCOMPARE(rig.sent.dataRequests.size(), requestsBefore);
+        pushSent_ = nullptr;
+        fileContents_ = nullptr;
+    }
+
+    void clientFilesAreDeniedOnTheLoginScreenForAViewerAndForTheOtherSettings()
+    {
+        QList<FileContents> contents;
+        PushSent pushed;
+        {
+            ClipboardRig greeter(ConsoleSeat::Adapter::Greeter, quint32(getuid()) + 1);
+            QVERIFY(greeter.ok);
+            enableFiles(greeter, contents);
+            enablePush(greeter, pushed);
+            const auto policy = greeter.lastPolicy();
+            QVERIFY(policy && !policy->filesClientToHost);
+            clientCopiesFiles(greeter);
+            QTest::qWait(Clipboard::FormatListSettleMs * 3);
+            QVERIFY(!greeter.sent.dataRequests.contains(ClientFilesId));
+        }
+        {
+            ClipboardRig viewer(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()), false, false);
+            QVERIFY(viewer.ok);
+            enableFiles(viewer, contents);
+            enablePush(viewer, pushed);
+            clientCopiesFiles(viewer);
+            QTest::qWait(Clipboard::FormatListSettleMs * 3);
+            QVERIFY(!viewer.sent.dataRequests.contains(ClientFilesId));
+        }
+        {
+            ClipboardRig foreign(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()) + 1, true);
+            QVERIFY(foreign.ok);
+            enableFiles(foreign, contents);
+            enablePush(foreign, pushed);
+            QVERIFY(!foreign.lastPolicy()->filesClientToHost);
+            clientCopiesFiles(foreign);
+            QTest::qWait(Clipboard::FormatListSettleMs * 3);
+            QVERIFY(!foreign.sent.dataRequests.contains(ClientFilesId));
+        }
+        {
+            // ClipboardFiles = host-to-client, or the clipboard direction host-to-client: the flag goes
+            ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+            QVERIFY(rig.ok);
+            enableFiles(rig, contents);
+            enablePush(rig, pushed);
+            QVERIFY(rig.lastPolicy()->filesClientToHost);
+            rig.host.setClipboardFiles(ConsoleClipboardPolicy::Direction::HostToClient);
+            rig.host.syncClipboard();
+            QTRY_VERIFY(!rig.lastPolicy()->filesClientToHost);
+            rig.host.setClipboardFiles(ConsoleClipboardPolicy::Direction::Both);
+            rig.host.setClipboardDirection(ConsoleClipboardPolicy::Direction::HostToClient);
+            rig.host.syncClipboard();
+            QTRY_VERIFY(!rig.lastPolicy()->filesClientToHost);
+            rig.host.setClipboardDirection(ConsoleClipboardPolicy::Direction::Both);
+            rig.host.setClipboardFiles(ConsoleClipboardPolicy::Direction::Off);
+            rig.host.syncClipboard();
+            QTRY_VERIFY(!rig.lastPolicy()->filesClientToHost);
+        }
+        pushSent_ = nullptr;
+        fileContents_ = nullptr;
+    }
+
+    void theWorkerGoingAwayEndsAClientFileTransfer()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        QList<FileContents> contents;
+        enableFiles(rig, contents);
+        PushSent pushed;
+        enablePush(rig, pushed);
+        const auto descriptor = ClipboardFileDescriptor::encode({{QStringLiteral("a.bin"), false, 300 * 1024, std::nullopt}}).data;
+        clientCopiesFiles(rig);
+        QTRY_VERIFY_WITH_TIMEOUT(rig.sent.dataRequests.contains(ClientFilesId), 3000);
+        rig.clientAnswers(descriptor);
+        QTRY_VERIFY(rig.connection.clipboard()->clientFileTransferActive());
+        rig.worker.disconnectFromServer();
+        QTRY_VERIFY(!rig.host.m_endpoint.ready());
+        QVERIFY(!rig.connection.clipboard()->clientFileTransferActive());
+        QCOMPARE(pushed.unlocks, pushed.locks); // the client's snapshot is released
+        pushSent_ = nullptr;
         fileContents_ = nullptr;
     }
 
@@ -3960,10 +4253,10 @@ private Q_SLOTS:
                                  {u"maxImageBytes"_s, 16 * 1024 * 1024},
                                  {u"html"_s, true}, // OPT-077: formatted text too
                                  {u"maxHtmlBytes"_s, 8 * 1024 * 1024}};
-            if (both || direction == ConsoleClipboardPolicy::Direction::HostToClient) {
-                // OPT-078: file copy (host to client only in this wire) follows ClipboardFiles (both by default) and the host direction
-                expected.insert(u"files"_s, QJsonObject{{u"hostToClient"_s, true}, {u"clientToHost"_s, false}, {u"maxMode"_s, u"auto"_s}, {u"huge"_s, true}, {u"transfer"_s, true}});
-            }
+            // OPT-078: file copy follows ClipboardFiles (both by default) per direction, and the clipboard direction narrows it too.
+            expected.insert(u"files"_s, QJsonObject{{u"hostToClient"_s, both || direction == ConsoleClipboardPolicy::Direction::HostToClient},
+                                                    {u"clientToHost"_s, both || direction == ConsoleClipboardPolicy::Direction::ClientToHost},
+                                                    {u"maxMode"_s, u"auto"_s}, {u"huge"_s, true}, {u"transfer"_s, true}});
             QCOMPARE(caps.value(u"clipboard"_s).toObject(), expected);
         }
     }
@@ -4185,6 +4478,134 @@ private Q_SLOTS:
         Q_UNUSED(a);
     }
 
+    void unadmittedQueryGetsTheLayoutAsAViewer()
+    {
+        QueryRig h;
+        QVERIFY(!h.base.host.m_control.admitted(h.base.client->id));
+        const auto reply = h.send(u"query"_s, u"q1"_s);
+        QCOMPARE(reply.value(u"type"_s).toString(), u"layout"_s);
+        QCOMPARE(reply.value(u"requestId"_s).toString(), u"q1"_s);
+        QCOMPARE(reply.value(u"monitors"_s).toArray().size(), 1);
+        QCOMPARE(reply.value(u"you"_s).toString(), u"viewer"_s);
+        // Read-only: no role, ownership or admission change.
+        QVERIFY(!h.base.host.m_control.admitted(h.base.client->id));
+        QVERIFY(!h.base.host.m_control.ownsControl(h.base.client->id));
+        QCOMPARE(h.base.host.m_control.owner(), quint64(0));
+    }
+
+    void unadmittedQueryDoesNotDisturbTheController()
+    {
+        QueryRig h(true, true); // the first client is the admitted controller
+        QVERIFY(h.base.host.m_control.ownsControl(h.base.client->id));
+        const auto controller = h.base.client->id;
+        RdpConnection queryConnection(&h.base.server, -1);
+        h.base.host.addClient(&queryConnection);
+        auto *query = h.base.host.m_clients.back().get();
+        query->uid = 1000; h.base.host.loadUserSettings(*query); query->capabilitiesSent = true;
+        h.base.sent.clear();
+        h.base.host.onControlRecord(&queryConnection, query->id, QJsonObject{{u"type"_s, u"query"_s}, {u"v"_s, 1}, {u"requestId"_s, u"q2"_s}});
+        QVERIFY(!h.base.sent.isEmpty());
+        const auto reply = h.base.sent.last();
+        QCOMPARE(reply.value(u"type"_s).toString(), u"layout"_s);
+        QCOMPARE(reply.value(u"requestId"_s).toString(), u"q2"_s);
+        QCOMPARE(reply.value(u"you"_s).toString(), u"viewer"_s);
+        QCOMPARE(reply.value(u"owner"_s).toString(), QString::number(controller));
+        QVERIFY(h.base.host.m_control.ownsControl(controller));
+        QVERIFY(!h.base.host.m_control.admitted(query->id));
+        QCOMPARE(h.base.host.m_control.owner(), controller);
+    }
+
+    void unadmittedQueryGetsAnExplicitErrorWhenNoLayoutCanBeProduced()
+    {
+        const auto expectUnavailable = [](const QJsonObject &reply, const QString &id) {
+            QCOMPARE(reply.value(u"type"_s).toString(), u"error"_s);
+            QCOMPARE(reply.value(u"code"_s).toString(), u"unavailable"_s);
+            QCOMPARE(reply.value(u"requestId"_s).toString(), id);
+            QVERIFY(!reply.value(u"message"_s).toString().isEmpty());
+        };
+        { // No worker yet: nothing to describe.
+            QueryRig h(false);
+            expectUnavailable(h.send(u"query"_s, u"e1"_s), u"e1"_s);
+        }
+        { // A worker that is Ready but has not published monitors.
+            QueryRig h;
+            h.base.host.m_outputs = {};
+            expectUnavailable(h.send(u"query"_s, u"e2"_s), u"e2"_s);
+        }
+        { // A layout change is in flight.
+            QueryRig h;
+            h.base.host.m_pendingVirtual = ConsoleHostController::PendingVirtual{};
+            expectUnavailable(h.send(u"query"_s, u"e3"_s), u"e3"_s);
+        }
+        { // Waiting for the post-change readback.
+            QueryRig h;
+            h.base.host.m_layoutAwaitingReadback = true;
+            expectUnavailable(h.send(u"query"_s, u"e4"_s), u"e4"_s);
+        }
+    }
+
+    void unadmittedQueryStillNeedsAuthenticationAndAnAllowedAccount()
+    {
+        { // Not authenticated: today's silence, nothing about the console's monitors leaks.
+            QueryRig h;
+            h.authenticated = false;
+            QVERIFY(h.send(u"query"_s, u"a1"_s).isEmpty());
+        }
+        { // Authenticated but the seat shows another account's unlocked desktop: refused, not described.
+            QueryRig h;
+            ConsoleSeat::Session other;
+            other.id = u"3"_s; other.uid = 2000; other.seat = u"seat0"_s; other.type = u"wayland"_s;
+            other.sessionClass = u"user"_s; other.state = u"active"_s; other.active = true; other.locked = false;
+            h.base.host.m_sessions = {other};
+            const auto reply = h.send(u"query"_s, u"a2"_s);
+            QCOMPARE(reply.value(u"type"_s).toString(), u"error"_s);
+            QCOMPARE(reply.value(u"code"_s).toString(), u"not-owner"_s);
+            QVERIFY(!reply.contains(u"monitors"_s));
+        }
+        { // A v2 request with the wrong version keeps its invalid refusal.
+            QueryRig h;
+            QCOMPARE(h.send(u"query"_s, u"a3"_s, 2).value(u"code"_s).toString(), u"invalid"_s);
+        }
+    }
+
+    void unadmittedNonQueryRequestsKeepTheirBehaviour()
+    {
+        QueryRig h;
+        // `apply` from a client that is not admitted is still refused as unsupported and still arms the layout wish.
+        const auto apply = h.send(u"apply"_s, u"n1"_s);
+        QCOMPARE(apply.value(u"type"_s).toString(), u"error"_s);
+        QCOMPARE(apply.value(u"code"_s).toString(), u"unsupported"_s);
+        QVERIFY(h.base.client->wantsLayout);
+        QCOMPARE(h.base.client->layoutRequestId, u"n1"_s);
+        // `attach` (target physical) is not answered before admission: it waits for the layout at admission.
+        h.base.client->wantsLayout = false; h.base.client->layoutRequestId.clear();
+        h.base.sent.clear();
+        h.base.host.onControlRecord(&h.base.connection, h.base.client->id,
+                                    QJsonObject{{u"type"_s, u"attach"_s}, {u"v"_s, 1}, {u"target"_s, u"physical"_s}, {u"requestId"_s, u"n3"_s}});
+        QVERIFY(h.base.sent.isEmpty());
+        QVERIFY(h.base.client->wantsLayout);
+        QCOMPARE(h.base.client->layoutRequestId, u"n3"_s);
+        // console-control still needs a streaming connection.
+        const auto control = h.send(u"console-control"_s, u"n2"_s);
+        QCOMPARE(control.value(u"type"_s).toString(), u"error"_s);
+        QCOMPARE(control.value(u"code"_s).toString(), u"invalid"_s); // no `action`: the strict parser answers first
+        QVERIFY(!h.base.host.m_control.admitted(h.base.client->id));
+    }
+
+    void admittedQueryIsAnsweredAsBeforeWithItsRole()
+    {
+        QueryRig h(true, true);
+        const auto reply = h.send(u"query"_s, u"p1"_s);
+        QCOMPARE(reply.value(u"type"_s).toString(), u"layout"_s);
+        QCOMPARE(reply.value(u"requestId"_s).toString(), u"p1"_s);
+        QCOMPARE(reply.value(u"you"_s).toString(), u"owner"_s);
+        QCOMPARE(reply.value(u"monitors"_s).toArray().size(), 1);
+        // Not ready: an admitted client keeps waiting for the next layout, as before (no error record).
+        QueryRig waiting(false, true);
+        QVERIFY(waiting.send(u"query"_s, u"p2"_s).isEmpty());
+        QVERIFY(waiting.base.client->wantsLayout);
+    }
+
     void clipboardFilesCapabilityFollowsItsOwnSettingAndTheCeiling()
     {
         const auto files = [](ConsoleClipboardPolicy::Direction setting, ClipboardFilePacing::Ceiling ceiling) {
@@ -4197,7 +4618,11 @@ private Q_SLOTS:
         };
         using Direction = ConsoleClipboardPolicy::Direction;
         QVERIFY(files(Direction::Off, {}).isUndefined());
-        QVERIFY(files(Direction::ClientToHost, {}).isUndefined()); // nothing host to client to offer: the group is absent, not half there
+        // OPT-078 phase 3: client to host exists now; the group says which halves this host offers
+        QCOMPARE(files(Direction::ClientToHost, {}).toObject().value(u"clientToHost"_s).toBool(), true);
+        QCOMPARE(files(Direction::ClientToHost, {}).toObject().value(u"hostToClient"_s).toBool(), false);
+        QCOMPARE(files(Direction::HostToClient, {}).toObject().value(u"clientToHost"_s).toBool(), false);
+        QCOMPARE(files(Direction::Both, {}).toObject().value(u"clientToHost"_s).toBool(), true);
         QCOMPARE(files(Direction::HostToClient, ClipboardFilePacing::Ceiling::balanced()).toObject().value(u"maxMode"_s).toString(), u"balanced"_s);
         const auto capped = files(Direction::Both, ClipboardFilePacing::Ceiling::rate(2'500'000)).toObject();
         QCOMPARE(capped.value(u"maxMode"_s).toString(), u"cap"_s);

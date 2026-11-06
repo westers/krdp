@@ -321,6 +321,39 @@ bool ConsoleWorkerEndpoint::cancelFiles(quint64 seq)
     return m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::FileCancel{seq})) >= 0;
 }
 
+quint64 ConsoleWorkerEndpoint::offerPushFiles(const QByteArray &descriptor, bool hugeFiles, quint64 reserveBytes)
+{
+    constexpr int entry = ClipboardFileDescriptor::DescriptorBytes;
+    if (!m_ready || !m_worker || !m_clipboardPolicy || !m_clipboardPolicy->clientToHost || !m_clipboardPolicy->filesClientToHost
+        || descriptor.size() < 4 + entry || quint64(descriptor.size()) > ConsoleWorkerWire::MaxClipboardFileListBytes || (descriptor.size() - 4) % entry != 0
+        || m_pushOffers.size() >= MaxPushOffers || m_worker->bytesToWrite() > MaxPushBacklogBytes || m_nextPushSeq == std::numeric_limits<quint64>::max()) return 0;
+    const quint64 seq = ++m_nextPushSeq;
+    if (m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::FilePushOffer{seq, hugeFiles, reserveBytes, descriptor})) < 0) return 0;
+    m_pushOffers.insert(seq, false);
+    return seq;
+}
+
+bool ConsoleWorkerEndpoint::pushFileData(quint64 seq, quint32 index, quint64 offset, const QByteArray &data)
+{
+    const auto offer = m_pushOffers.constFind(seq);
+    if (!m_ready || !m_worker || !m_clipboardPolicy || !m_clipboardPolicy->clientToHost || !m_clipboardPolicy->filesClientToHost || offer == m_pushOffers.constEnd()
+        || !offer.value() || data.isEmpty() || quint64(data.size()) > ConsoleWorkerWire::MaxFileReadBytes || offset > ~quint64(0) - quint64(data.size())
+        || m_worker->bytesToWrite() > MaxPushBacklogBytes) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::FilePushData{seq, index, offset, data})) >= 0;
+}
+
+bool ConsoleWorkerEndpoint::cancelPushFiles(quint64 seq, ConsoleWorkerWire::FilePushCancelReason reason)
+{
+    // Answers to cancelled transfers are not waited for (the worker may still send a last state, which is dropped here).
+    if (seq == 0) {
+        m_pushOffers.clear();
+    } else {
+        m_pushOffers.remove(seq);
+    }
+    if (!m_ready || !m_worker) return false;
+    return m_worker->write(ConsoleWorkerWire::frame(ConsoleWorkerWire::FilePushCancel{seq, reason})) >= 0;
+}
+
 quint64 ConsoleWorkerEndpoint::setClipboard(quint64 controlGeneration, const QString &text)
 {
     if (!m_ready || !m_worker || !m_clipboardPolicy || !m_clipboardPolicy->clientToHost || !controlGeneration
@@ -671,6 +704,20 @@ bool ConsoleWorkerEndpoint::processRecords()
             if (m_fileReads.remove(result->readId)) Q_EMIT fileReadFinished(*result);
         } else if (const auto progress = ConsoleWorkerWire::fileProgress(*record)) {
             if (m_clipboardPolicy && m_clipboardPolicy->filesHostToClient) Q_EMIT fileProgressed(*progress);
+        } else if (const auto reply = ConsoleWorkerWire::filePushReply(*record)) {
+            // Only the first answer to a transfer this endpoint started; a refusal ends it.
+            if (const auto offer = m_pushOffers.find(reply->seq); offer != m_pushOffers.end() && !offer.value()) {
+                if (reply->accepted) offer.value() = true;
+                else m_pushOffers.erase(offer);
+                Q_EMIT filePushReplied(*reply);
+            }
+        } else if (const auto ack = ConsoleWorkerWire::filePushAck(*record)) {
+            if (m_pushOffers.value(ack->seq, false)) Q_EMIT filePushAcked(*ack);
+        } else if (const auto state = ConsoleWorkerWire::filePushState(*record)) {
+            if (m_pushOffers.contains(state->seq)) {
+                if (state->phase == ConsoleWorkerWire::FilePushPhase::Done || state->phase == ConsoleWorkerWire::FilePushPhase::Failed) m_pushOffers.remove(state->seq);
+                Q_EMIT filePushStateChanged(*state);
+            }
         } else if (const auto result = ConsoleWorkerWire::resizeResult(*record)) {
             Q_EMIT resizeFinished(*result);
         } else if (const auto result = ConsoleWorkerWire::positionResult(*record)) {
@@ -765,6 +812,7 @@ void ConsoleWorkerEndpoint::workerDisconnected()
     m_clipboardRequests.clear();
     m_clipboardSets.clear();
     m_fileReads.clear();
+    m_pushOffers.clear();
     if (wasReady) {
         Q_EMIT workerStopped();
     }

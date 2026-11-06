@@ -7,6 +7,7 @@
 #include "PointerCaptureProtocol.h"
 #include "DisplayWakePolicy.h"
 #include "ChromaMerge.h"
+#include "ConsoleReplaceSnapshotGate.h"
 
 #include <QScopeGuard>
 #include "AudioPriority.h"
@@ -317,6 +318,10 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
     connect(&m_endpoint, &ConsoleWorkerEndpoint::fileReadFinished, this, [this](const ConsoleWorkerWire::FileReadResult &result) {
         m_fileRelay.finished(result);
     });
+    // OPT-078 phase 3: client-to-host files. The worker's replies, acknowledgements and states go back to the connection that copied.
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::filePushReplied, this, [this](const ConsoleWorkerWire::FilePushReply &reply) { m_clientFileRelay.replied(reply); });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::filePushAcked, this, [this](const ConsoleWorkerWire::FilePushAck &ack) { m_clientFileRelay.acked(ack); });
+    connect(&m_endpoint, &ConsoleWorkerEndpoint::filePushStateChanged, this, [this](const ConsoleWorkerWire::FilePushState &state) { m_clientFileRelay.stateChanged(state); });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardSetFinished, this, [](const ConsoleWorkerWire::ClipboardSetResult &result) {
         qCDebug(CONSOLE_SCREENS) << "client text set" << result.setId << "status" << int(result.status);
     });
@@ -1097,6 +1102,13 @@ void ConsoleHostController::addClient(RdpConnection *connection)
                 const auto found = std::find_if(m_clients.cbegin(), m_clients.cend(), [id](const auto &entry) { return entry->id == id; });
                 return found != m_clients.cend() && m_control.ownsControl(id) && (*found)->clipboardPlan && (*found)->clipboardPlan->files.hostToClient;
             }));
+        clipboard->setClientFileBackend(m_clientFileRelay.backendFor(
+            clipboard, [this] { return &m_endpoint; },
+            [this, id] {
+                const auto found = std::find_if(m_clients.cbegin(), m_clients.cend(), [id](const auto &entry) { return entry->id == id; });
+                return found != m_clients.cend() && m_control.ownsControl(id) && (*found)->clipboardPlan && (*found)->clipboardPlan->files.clientToHost;
+            },
+            [this] { return m_clipboardFileMinFree; }));
         client->connections.append(connect(clipboard, &Clipboard::clientDataChanged, session, [clipboard, session]() {
             session->setClipboardData(clipboard->getClipboard());
         }));
@@ -1958,6 +1970,18 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
             replyTo(connection, LayoutControl::errorRecord({u"invalid"_s, u"console attach requires v1 and target physical"_s}));
             return;
         }
+        if (type == u"query"_s && !m_control.admitted(id)) {
+            // OPT-081: a query-only client ("Refresh from host") never reaches Streaming, so it is never admitted.
+            // It gets its answer now; wantsLayout stays armed without the requestId, so a client that is merely
+            // early (admitted a moment later) still hears the layout with its real role at admission.
+            for (const auto &client : m_clients) {
+                if (client->id == id) {
+                    client->wantsLayout = true;
+                    answerUnadmittedQuery(*client);
+                }
+            }
+            return;
+        }
         for (const auto &client : m_clients) {
             if (client->id == id) {
                 client->wantsLayout = true;
@@ -2299,11 +2323,13 @@ void ConsoleHostController::sendCapabilities(Client &client)
             capabilities.clipboard = LayoutControl::ClipboardCapabilities{hostToClient, clientToHost, int(ConsoleWorkerWire::MaxClipboardBytes), true,
                                                                           int(ConsoleWorkerWire::MaxClipboardImageBytes), true,
                                                                           int(ConsoleWorkerWire::MaxClipboardHtmlBytes)};
-            // OPT-078: file copy. Only host to client exists in this wire; the client-to-host half is announced when it does.
+            // OPT-078: file copy, per direction (phase 3 adds client to host): the host owner's ClipboardFiles AND the clipboard direction.
             const bool filesHostToClient = hostToClient && (m_clipboardFiles == Direction::Both || m_clipboardFiles == Direction::HostToClient);
-            if (filesHostToClient) {
+            const bool filesClientToHost = clientToHost && (m_clipboardFiles == Direction::Both || m_clipboardFiles == Direction::ClientToHost);
+            if (filesHostToClient || filesClientToHost) {
                 LayoutControl::ClipboardCapabilities::Files files;
-                files.hostToClient = true;
+                files.hostToClient = filesHostToClient;
+                files.clientToHost = filesClientToHost;
                 files.maxMode = m_clipboardFileCeiling.kind == ClipboardFilePacing::Ceiling::Kind::Rate ? u"cap"_s
                     : m_clipboardFileCeiling.kind == ClipboardFilePacing::Ceiling::Kind::Balanced     ? u"balanced"_s : u"auto"_s;
                 files.maxRateBytesPerSecond = qint64(m_clipboardFileCeiling.bytesPerSecond);
@@ -2324,11 +2350,11 @@ void ConsoleHostController::sendCapabilities(Client &client)
     sendRecord(client.connection, LayoutControl::capabilitiesRecord(capabilities));
 }
 
-void ConsoleHostController::sendLayouts()
+std::optional<LayoutControl::Layout> ConsoleHostController::currentLayout() const
 {
     if (m_outputs.monitors.isEmpty() || !m_endpoint.ready() || m_layoutAwaitingReadback
         || m_pendingPhysical || m_pendingVirtual) {
-        return;
+        return std::nullopt;
     }
     LayoutControl::Layout layout;
     for (const auto &output : m_outputs.monitors) {
@@ -2342,6 +2368,38 @@ void ConsoleHostController::sendLayouts()
         layout.monitors.append(monitor);
     }
     layout.owner = m_control.owner() ? QString::number(m_control.owner()) : QString();
+    return layout;
+}
+
+void ConsoleHostController::answerUnadmittedQuery(Client &client)
+{
+    // Read-only: the caller is authenticated (capabilities are gated the same way) but holds no console role, so it
+    // describes the desktop as a viewer and changes nothing: no admission, control, topology or layout state.
+    if (!client.connection) return;
+    if (!(m_authenticatedOf ? m_authenticatedOf(client.connection) : client.connection->isAuthenticated())) return;
+    client.uid = m_uidOf(client.connection);
+    if (!admissible(client)) {
+        replyTo(client.connection, LayoutControl::errorRecord({u"not-owner"_s, u"this account may not use the physical console now"_s}));
+        return;
+    }
+    auto layout = currentLayout();
+    if (!layout) {
+        replyTo(client.connection, LayoutControl::errorRecord({u"unavailable"_s, u"the console layout is not available yet; try again shortly"_s}));
+        return;
+    }
+    layout->you = u"viewer"_s;
+    auto record = LayoutControl::layoutRecord(*layout);
+    record.insert(u"consoleResize"_s, !m_configuredConsoleOutputs); // as for admitted clients; resizing itself needs the owner role
+    replyTo(client.connection, record);
+}
+
+void ConsoleHostController::sendLayouts()
+{
+    auto described = currentLayout();
+    if (!described) {
+        return;
+    }
+    LayoutControl::Layout &layout = *described;
     // FIX-CURSOR: the worker forwards the console's cursor shape (Cursor records), so the
     // default caps.cursorMetadata = true is now true here too.
     for (const auto &client : m_clients) {
@@ -2349,7 +2407,7 @@ void ConsoleHostController::sendLayouts()
             layout.you = m_control.ownsControl(client->id) ? u"owner"_s : u"viewer"_s;
             auto record = LayoutControl::layoutRecord(layout);
             record.insert(u"consoleResize"_s, !m_configuredConsoleOutputs);
-            client->connection->sendControlRecord(LayoutControl::withRequestId(record, std::exchange(client->layoutRequestId, {})));
+            sendRecord(client->connection, LayoutControl::withRequestId(record, std::exchange(client->layoutRequestId, {})));
             if (m_control.ownsControl(client->id) && !m_endpoint.pointerState().isEmpty()) {
                 auto state = m_endpoint.pointerState(); state.remove(u"id"_s); replyTo(client->connection, state);
             }
@@ -2550,12 +2608,13 @@ void ConsoleHostController::syncClipboard()
         input.filesSetting = m_clipboardFiles;
         // A file transfer that is already running when the screen locks goes on (the planner only denies NEW ones while locked).
         input.hostToClientFileStarted = client->connection->clipboard()->hostFileTransferActive();
+        input.clientToHostFileStarted = client->connection->clipboard()->clientFileTransferActive(); // a copy that started before the lock goes on
         const auto plan = ConsoleClipboardPolicy::plan(input);
         if (input.ownsControl) controllerPlan = plan;
         const auto before = client->clipboardPlan;
         client->clipboardPlan = plan;
         client->connection->clipboard()->setDirections(plan.hostToClient, plan.clientToHost);
-        client->connection->clipboard()->setFileDirections(plan.files.hostToClient, plan.files.clientToHost);
+        client->connection->clipboard()->setFileDirections(plan.files.hostToClient, plan.files.clientToHost, plan.files.clientDeniedByLock);
         // Info, once per edge, never data.
         if (!before || before->hostToClient != plan.hostToClient || before->clientToHost != plan.clientToHost || before->files != plan.files) {
             if (plan.hostToClient || plan.clientToHost || before) {
@@ -2582,8 +2641,9 @@ void ConsoleHostController::resetClipboards()
     for (const auto &client : m_clients) {
         if (!client->connection || !client->connection->clipboard()) continue;
         client->connection->clipboard()->resetHostSide();
-        client->connection->clipboard()->resetClientSide();
+        client->connection->clipboard()->resetClientSide(); // (cancels client-to-host transfers at the worker through the relay)
     }
+    m_clientFileRelay.clear();
 }
 
 void ConsoleHostController::clipboardRequested(ConsoleControl::Id id, quint64 requestId, ClipboardRequestKind kind, bool hugeFiles)
@@ -2711,12 +2771,28 @@ void ConsoleHostController::syncScreensRecords()
         // so it does not wait for a banner that will not come.
         const bool mappedFailed = !active && !client->screensActiveSent && client->mappedRequest && client->replaceSpent;
         if (!mappedFailed && client->screensActiveSent.value_or(false) == active) continue;
+        const auto sentBefore = client->screensActiveSent;
         client->screensActiveSent = active;
         const QString reason = active ? u"connect"_s : (mappedFailed && client->screensEndReason.isEmpty() ? u"failed"_s : std::exchange(client->screensEndReason, {}));
         LayoutControl::ConsoleScreensDetail detail;
-        if (client->mappedRequest && active) detail = screensDetail(*client);
+        bool planMismatch = false;
+        if (client->mappedRequest && active) detail = screensDetail(*client, &planMismatch);
         else if (mappedFailed) detail.message = u"The host could not replace its screens; they are shown as they are."_s;
         else if (!active && !client->screensHostChangeMessage.isEmpty()) detail.message = std::exchange(client->screensHostChangeMessage, {});
+        if (planMismatch) {
+            // OPT-082: the worker planned from a partial snapshot of the host. Do not announce a Replace that maps fewer screens
+            // than the host has: the worker gives the host's screens back (the verified release of a disconnect) and the
+            // attempt is reported as failed when that release arrives. Asked once; nothing is sent meanwhile.
+            client->screensActiveSent = sentBefore;
+            if (!client->replaceEnding) {
+                qWarning() << "Console Replace aborted: the worker replaced fewer screens than the host has; releasing the temporary"
+                              " monitors and showing the host's real screens";
+                client->replaceEnding = true;
+                client->screensEndReason = u"failed"_s;
+                m_endpoint.reclaimConsole(m_controlGeneration);
+            }
+            continue;
+        }
         sendRecord(client->connection, LayoutControl::consoleScreensRecord(active, active && m_control.ownsControl(client->id), reason, detail));
     }
 }
@@ -2737,7 +2813,7 @@ ConsoleHostController::MappedPrediction ConsoleHostController::predictMapped(con
     return prediction;
 }
 
-LayoutControl::ConsoleScreensDetail ConsoleHostController::screensDetail(const Client &client) const
+LayoutControl::ConsoleScreensDetail ConsoleHostController::screensDetail(const Client &client, bool *planMismatch) const
 {
     LayoutControl::ConsoleScreensDetail detail;
     if (!client.mappedRequest) return detail;
@@ -2748,11 +2824,21 @@ LayoutControl::ConsoleScreensDetail ConsoleHostController::screensDetail(const C
         return detail;
     }
     // Trust the prediction only if the worker really created these outputs (it plans from its own KScreen snapshot).
-    bool consistent = prediction.report.screens.size() == m_outputs.monitors.size();
-    for (qsizetype i = 0; consistent && i < prediction.report.screens.size(); ++i)
-        consistent = m_outputs.monitors[i].name == prediction.report.screens[i].output
-            || m_outputs.monitors[i].name.endsWith(prediction.report.screens[i].output.mid(OutputSnapshot::VirtualPrefix.size()));
-    if (!consistent) {
+    QStringList predicted, created;
+    for (const auto &screen : prediction.report.screens) predicted.append(screen.output);
+    for (const auto &monitor : m_outputs.monitors) created.append(monitor.name);
+    switch (ConsoleReplaceSnapshotGate::agreement(predicted, created)) {
+    case ConsoleReplaceSnapshotGate::Agreement::Consistent:
+        break;
+    case ConsoleReplaceSnapshotGate::Agreement::CountDiffers:
+        // OPT-082: the worker mapped a different number of screens than the same planner predicts for the host's screens (it
+        // planned from a snapshot taken while KWin was still re-adding outputs). Say so, and let the caller end the Replace.
+        qWarning() << "Console screens: the worker's outputs differ from the broker's plan: it created" << created.size()
+                   << "output(s), the plan for the host's screens has" << predicted.size();
+        if (planMismatch) *planMismatch = true;
+        return detail;
+    case ConsoleReplaceSnapshotGate::Agreement::SingleFallback:
+    case ConsoleReplaceSnapshotGate::Agreement::NamesDiffer:
         qWarning() << "Console screens: the worker's outputs differ from the broker's plan; no screens[] in the record";
         return detail;
     }

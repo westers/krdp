@@ -29,13 +29,17 @@ FARSIDE_CONSOLE_CERTIFICATE_KEY=/etc/farside/console.key
 #FARSIDE_CONSOLE_CLIPBOARD_DIRECTION=both
 
 # File copy (Dolphin copy on one side, paste on the other; no size limit, folders included): both (default), host-to-client,
-# client-to-host or off. Only host to client exists today; the clipboard direction above also applies. A locked desktop still
-# lets a copy that is already running finish; the login screen shares no files.
+# client-to-host or off; the clipboard direction above also applies. A locked desktop denies a NEW copy from the client but lets a copy
+# that is already running finish; the login screen shares no files. Files from the client are staged under ~/.cache/krdp-clip.
 #FARSIDE_CONSOLE_CLIPBOARD_FILES=both
 
 # The most a file transfer may take of the link: auto (default: no ceiling, the transfer still yields to video and audio),
 # balanced (half of what the link can carry), or a rate in MB/s from 0.1 to 1000 (for example 5 or 2.5).
 #FARSIDE_CONSOLE_CLIPBOARD_FILE_MAX_RATE=auto
+
+# Free space that must remain on the host after a file copy from the client: bytes, or a number with K, M, G or T (for example 512M or 5G).
+# 0 (default) means the larger of 2 GiB and 5% of the filesystem. A copy that would not leave that much is refused up front.
+#FARSIDE_CONSOLE_CLIPBOARD_FILE_MIN_FREE=0
 
 # VA-API driver for the capture workers, like krdpserver's VaapiDriverMode: auto (default; a
 # LIBVA_DRIVER_NAME set in the desktop session is respected), off, radeonsi, iHD or i965.

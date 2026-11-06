@@ -4,6 +4,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 
 #include <QHash>
 #include <QPointer>
@@ -19,10 +20,31 @@ namespace KRdp
  * reads the files), shared by the Console and the Virtual broker. One relay per endpoint: it hands the Clipboard a HostFileBackend
  * whose calls reach the endpoint only while \a allowed says this connection may transfer files now (it controls the worker and the
  * planner allows host-to-client files), and routes each read's answer back to the Clipboard that asked.
+ *
+ * The backend lambdas outlive the relay when a connection is destroyed after the broker that owns the relay (a Clipboard cancels its
+ * transfers from its destructor): they hold the state, not the relay, and a relay that is gone makes them no-ops before they touch anything.
  */
 class HostFileRelay
 {
+    struct Pending {
+        QPointer<Clipboard> clipboard;
+        quint32 streamId = 0;
+        quint64 seq = 0;
+    };
+    struct State {
+        bool alive = true;
+        QHash<quint64, Pending> pending;
+    };
+
 public:
+    HostFileRelay()
+        : m_state(std::make_shared<State>())
+    {
+    }
+    ~HostFileRelay() { m_state->alive = false; }
+    HostFileRelay(const HostFileRelay &) = delete;
+    HostFileRelay &operator=(const HostFileRelay &) = delete;
+
     using Allowed = std::function<bool()>;
     using Endpoint = std::function<ConsoleWorkerEndpoint *()>;
 
@@ -30,24 +52,31 @@ public:
     Clipboard::HostFileBackend backendFor(QPointer<Clipboard> clipboard, Endpoint endpoint, Allowed allowed)
     {
         Clipboard::HostFileBackend backend;
-        backend.read = [this, clipboard, endpoint, allowed](quint64 seq, quint32 index, quint64 offset, quint32 length, quint32 streamId) {
+        const auto state = m_state;
+        backend.read = [state, clipboard, endpoint, allowed](quint64 seq, quint32 index, quint64 offset, quint32 length, quint32 streamId) {
+            if (!state->alive) return false;
             auto *worker = endpoint();
             if (!clipboard || !worker || !allowed()) return false;
-            if (m_pending.size() >= 4 * ConsoleWorkerEndpoint::MaxFileReads) m_pending.clear(); // answers to abandoned reads are dropped
+            auto &pending = state->pending;
+            if (pending.size() >= 4 * ConsoleWorkerEndpoint::MaxFileReads) pending.clear(); // answers to abandoned reads are dropped
             const quint64 readId = worker->readFile(seq, index, offset, length);
             if (!readId) return false;
-            m_pending.insert(readId, {clipboard, streamId, seq});
+            pending.insert(readId, {clipboard, streamId, seq});
             return true;
         };
-        backend.lock = [endpoint, allowed](quint64 seq, quint32 clipDataId) {
+        backend.lock = [state, endpoint, allowed](quint64 seq, quint32 clipDataId) {
+            if (!state->alive) return;
             if (auto *worker = endpoint(); worker && allowed()) worker->lockFiles(seq, clipDataId);
         };
-        backend.unlock = [endpoint](quint32 clipDataId) {
+        backend.unlock = [state, endpoint](quint32 clipDataId) {
+            if (!state->alive) return;
             if (auto *worker = endpoint()) worker->unlockFiles(clipDataId); // releasing is always allowed
         };
-        backend.cancel = [this, clipboard, endpoint, allowed](quint64 seq) {
-            for (auto it = m_pending.begin(); it != m_pending.end();) {
-                it = it->clipboard == clipboard && (seq == 0 || it->seq == seq) ? m_pending.erase(it) : std::next(it);
+        backend.cancel = [state, clipboard, endpoint, allowed](quint64 seq) {
+            if (!state->alive) return; // the broker is gone with its worker: nothing to tell
+            auto &pending = state->pending;
+            for (auto it = pending.begin(); it != pending.end();) {
+                it = it->clipboard == clipboard && (seq == 0 || it->seq == seq) ? pending.erase(it) : std::next(it);
             }
             // Only the connection that is transferring may end the worker's reads; a viewer resetting its own state must not.
             if (auto *worker = endpoint(); worker && allowed()) worker->cancelFiles(seq);
@@ -58,7 +87,7 @@ public:
     /** The worker answered a read. */
     void finished(const ConsoleWorkerWire::FileReadResult &result)
     {
-        const auto pending = m_pending.take(result.readId);
+        const auto pending = m_state->pending.take(result.readId);
         if (!pending.clipboard) return;
         using Status = ConsoleWorkerWire::FileReadStatus;
         Clipboard::ReadResult status = Clipboard::ReadResult::IoError;
@@ -74,15 +103,10 @@ public:
     }
 
     /** The worker is gone or control moved: nothing in flight will be answered. */
-    void clear() { m_pending.clear(); }
-    int pending() const { return int(m_pending.size()); }
+    void clear() { m_state->pending.clear(); }
+    int pending() const { return int(m_state->pending.size()); }
 
 private:
-    struct Pending {
-        QPointer<Clipboard> clipboard;
-        quint32 streamId = 0;
-        quint64 seq = 0;
-    };
-    QHash<quint64, Pending> m_pending;
+    std::shared_ptr<State> m_state;
 };
 }

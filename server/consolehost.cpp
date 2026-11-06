@@ -71,10 +71,11 @@ int main(int argc, char **argv)
     const QCommandLineOption softwareAv1Option(QStringLiteral("software-av1"), QStringLiteral("Software AV1 encoding: auto, allowed or never (OPT-062)."), QStringLiteral("ceiling"), QStringLiteral("auto"));
     const QCommandLineOption av1TilesOption(QStringLiteral("av1-tiles"), QStringLiteral("AV1 tiles for the Farside client: auto, 1, 2, 4, 8 or 16."), QStringLiteral("tiles"), QStringLiteral("auto"));
     const QCommandLineOption clipboardDirectionOption(QStringLiteral("clipboard-direction"), QStringLiteral("Clipboard bridge (text, formatted text and images): both, host-to-client, client-to-host or off (OPT-067, OPT-072)."), QStringLiteral("direction"), QStringLiteral("both"));
-    const QCommandLineOption clipboardFilesOption(QStringLiteral("clipboard-files"), QStringLiteral("File copy between the client and the host desktop: both, host-to-client, client-to-host or off (OPT-078; only host-to-client is implemented)."), QStringLiteral("direction"), QStringLiteral("both"));
+    const QCommandLineOption clipboardFilesOption(QStringLiteral("clipboard-files"), QStringLiteral("File copy between the client and the host desktop: both, host-to-client, client-to-host or off (OPT-078)."), QStringLiteral("direction"), QStringLiteral("both"));
     const QCommandLineOption clipboardFileMaxRateOption(QStringLiteral("clipboard-file-max-rate"), QStringLiteral("The most a file transfer may take of the link: auto (no ceiling), balanced, or MB/s from 0.1 to 1000 (OPT-078)."), QStringLiteral("rate"), QStringLiteral("auto"));
+    const QCommandLineOption clipboardFileMinFreeOption(QStringLiteral("clipboard-file-min-free"), QStringLiteral("Free space that must remain on the host after a file copy from the client: bytes or a number with K, M, G or T; 0 = the larger of 2 GiB and 5% of the filesystem (OPT-078)."), QStringLiteral("size"), QStringLiteral("0"));
     const QCommandLineOption vaapiDriverOption(QStringLiteral("vaapi-driver"), QStringLiteral("VaapiDriverMode for the capture workers: auto, off, radeonsi, iHD or i965."), QStringLiteral("mode"), QStringLiteral("auto"));
-    parser.addOptions({workerOption, authenticationOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, qualityOption, clientQualityMaxOption, adaptiveQualityOption, standardMediaOption, cameraLoopbackOption, softwareEncodingOption, softwareAvcOption, softwareHevcOption, softwareAv1Option, av1TilesOption, clipboardDirectionOption, clipboardFilesOption, clipboardFileMaxRateOption, vaapiDriverOption});
+    parser.addOptions({workerOption, authenticationOption, certificateOption, keyOption, addressOption, portOption, runtimeOption, audioPriorityOption, qualityOption, clientQualityMaxOption, adaptiveQualityOption, standardMediaOption, cameraLoopbackOption, softwareEncodingOption, softwareAvcOption, softwareHevcOption, softwareAv1Option, av1TilesOption, clipboardDirectionOption, clipboardFilesOption, clipboardFileMaxRateOption, clipboardFileMinFreeOption, vaapiDriverOption});
     parser.process(application);
 
     if (geteuid() != 0) {
@@ -105,13 +106,14 @@ int main(int argc, char **argv)
     const auto clipboardDirection = KRdp::ConsoleClipboardPolicy::parseDirection(parser.value(clipboardDirectionOption));
     const auto clipboardFiles = KRdp::ConsoleClipboardPolicy::parseDirection(parser.value(clipboardFilesOption));
     const auto clipboardFileCeiling = KRdp::ClipboardTransfer::parseCeiling(parser.value(clipboardFileMaxRateOption));
+    const auto clipboardFileMinFree = KRdp::ClipboardTransfer::parseMinFree(parser.value(clipboardFileMinFreeOption));
     if (!portOk || port == 0 || parser.value(workerOption).isEmpty() || parser.value(certificateOption).isEmpty() || parser.value(keyOption).isEmpty()
         || !qualityOk || quality < 0 || quality > 100 || !clientQualityMaxOk || clientQualityMax < 0 || clientQualityMax > 100
         || (adaptiveValue != QLatin1String("true") && adaptiveValue != QLatin1String("false"))
         || (audioPriorityValue != QLatin1String("true") && audioPriorityValue != QLatin1String("false"))
         || (standardMediaValue != QLatin1String("true") && standardMediaValue != QLatin1String("false"))
         || (cameraLoopback != QLatin1String("none") && !cameraLoopback.startsWith(QLatin1String("/dev/")))
-        || !softwareEncoding || !ceilingAvc || !ceilingHevc || !ceilingAv1 || !vaapiDriver || !clipboardDirection || !clipboardFiles || !clipboardFileCeiling) {
+        || !softwareEncoding || !ceilingAvc || !ceilingHevc || !ceilingAv1 || !vaapiDriver || !clipboardDirection || !clipboardFiles || !clipboardFileCeiling || !clipboardFileMinFree) {
         parser.showHelp(1);
     }
     // AUD-FIX7: the host keeps its own certificate valid (created when missing, renewed when
@@ -155,7 +157,8 @@ int main(int argc, char **argv)
     qInfo().noquote() << "Console host clipboard direction:" << KRdp::ConsoleClipboardPolicy::directionName(*clipboardDirection);
     host.setClipboardFiles(*clipboardFiles);
     host.setClipboardFileCeiling(*clipboardFileCeiling);
-    qInfo().noquote() << "Console host clipboard files:" << KRdp::ConsoleClipboardPolicy::directionName(*clipboardFiles) << "max rate" << parser.value(clipboardFileMaxRateOption);
+    host.setClipboardFileMinFreeBytes(*clipboardFileMinFree);
+    qInfo().noquote() << "Console host clipboard files:" << KRdp::ConsoleClipboardPolicy::directionName(*clipboardFiles) << "max rate" << parser.value(clipboardFileMaxRateOption) << "reserve" << parser.value(clipboardFileMinFreeOption);
     host.setAudioPriorityDefault(audioPriorityValue == QLatin1String("true"));
     host.setUserSettingsReader(KRdp::BrokerUserSettings::readUser);
     host.setVideoQualityPolicy(quint8(quality), adaptiveValue == QLatin1String("true"));

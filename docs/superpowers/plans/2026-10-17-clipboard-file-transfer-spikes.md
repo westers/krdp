@@ -181,3 +181,13 @@ NOT settled (needs Sol server + Buzz client; never Hal), in order:
    `FARSIDE_CONSOLE_CLIPBOARD_FILE_MAX_RATE=1` -> a 700 MB copy runs at about 1 MB/s whatever the link; KCM page: Sharing -> File copy / File copy speed limit (Advanced).
 7. Buzz hidden setting: `kwriteconfig6 --file farside-clientrc --group Chroma --key clipboardTransferPriority cap:2` (Buzz only, not on Hal; no `--notify`): the next connection copies at ~2 MB/s, `unlimited` ignores the pacer (fails the QoS criteria by design).
 8. Stock client smoke from Buzz: `xfreerdp3 /v:sol:3391 +clipboard` copy a file on Sol, paste on Buzz. Record what works (see item 3 above); a failure of a stock client does not block the release (own client first).
+
+## 6. Phase 3 (client to host): what is unproven until Sol and Buzz (2026-10-21)
+
+Settled locally (daemon-free, bounded sizes): the whole broker/worker/staging pipeline against a real libfreerdp client (`ClipboardFilePushLoopbackTest`),
+the staging file system against real directories with injected failures, the planner and lock rules. Open, in order, on Sol (server) and Buzz (client), never Hal:
+the "Phase 3 live checklist" table in `2026-10-17-clipboard-file-transfer.md` (15 cases), plus: S2 for the write side (does Dolphin pasting a worker-written
+`text/uri-list` + `application/x-kde-cutselection=0` copy the staged files; does it open them at paste time or at offer time; what does it do with a list
+that points at a path that does not exist yet, which decides the AfterFirstFile offer), the first real request pattern of a stock client for the host's
+FILECONTENTS requests (does `xfreerdp3`/`mstsc` answer SIZE-free RANGE requests of 256 KiB with a lock id), the behaviour of Klipper with the uri-list string,
+and the cost of `fsync` per file on a spinning home filesystem.

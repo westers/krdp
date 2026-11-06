@@ -3,6 +3,7 @@
 #include "VirtualSessionControl.h"
 #include "ClipboardFilePacing.h"
 #include "ConsoleClipboardPolicy.h"
+#include "ClientFileRelay.h"
 #include "HostFileRelay.h"
 #include "ConsoleWorkerEndpoint.h"
 #include "ConsoleWorkerSession.h"
@@ -58,6 +59,8 @@ public:
     void setClipboardDirection(ConsoleClipboardPolicy::Direction direction);
     /** OPT-078: the host owner's ClipboardFiles and ClipboardFileMaxRate. Call before the client authenticates (the capability flags are exchanged once). */
     void setClipboardFiles(ConsoleClipboardPolicy::Direction direction, const ClipboardFilePacing::Ceiling &ceiling);
+    /** OPT-078 phase 3: ClipboardFileMinFreeBytes (0 = max(2 GiB, 5% of the filesystem)). */
+    void setClipboardFileMinFreeBytes(quint64 bytes) { m_clipboardFileMinFree = bytes; }
 
 private:
     friend class VirtualSessionTransportTest;
@@ -121,6 +124,8 @@ private:
     ConsoleClipboardPolicy::Direction m_clipboardFiles = ConsoleClipboardPolicy::Direction::Both; // OPT-078
     ClipboardFilePacing::Ceiling m_clipboardFileCeiling;
     HostFileRelay m_fileRelay;
+    ClientFileRelay m_clientFileRelay; // OPT-078 phase 3
+    quint64 m_clipboardFileMinFree = 0;
     std::optional<ConsoleClipboardPolicy::Plan> m_clipboardPlan;
     QHash<quint64, quint64> m_clipboardRequests; // endpoint request id -> the connection's Clipboard request id
     bool attachmentMatches(const VirtualSessionRegistry::Handle &handle) const;

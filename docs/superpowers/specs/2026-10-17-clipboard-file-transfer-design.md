@@ -418,3 +418,64 @@ Facts that change or sharpen the design above (evidence: `docs/superpowers/plans
 6. **Pacer details fixed by the implementation:** floor 256 kbit/s = 32 000 B/s (the spec's "32 KiB/s" was rounded); unknown capacity probes at +5% of the current rate per tick
    (otherwise it could never leave 4 x floor: an app-limited sender yields no capacity samples); a cap below the floor wins over the floor.
 7. **Open until Sol:** whether real clients overrun the tail of a file (`offset + length > size`); the validator refuses it (`RangePastEnd`) and can clamp instead.
+
+## 14. Phase 3 (client to host), server side: what was decided while building it (2026-10-21)
+
+Wire **v22** (paired broker and worker; v21 carried host-to-client only). New records: broker -> worker `FilePushOffer` (the client's
+FileGroupDescriptorW, the huge-file option, the free-space reserve), `FilePushData` (one in-order range, 64-bit offset), `FilePushCancel` (one
+transfer or all); worker -> broker `FilePushReply` (accepted with totals, or refused with a fixed reason and, for a full disk, the numbers),
+`FilePushAck` (per range; the broker's request window moves only on `Ok`), `FilePushState` (Staging / Offered / Done / Failed, at most 4/s). The
+spec's section 5 names (`fileOffer`, `fileRequest`...) were the generic design; the host-to-client half used FileRead/FileLock, so the other half got
+its own records instead of reusing them.
+
+1. **Who asks the client.** The broker (it owns the connection and the pacer) issues the FILECONTENTS_RANGE requests with `ClipboardFileFetch`:
+   in flight = requested + answered + unacknowledged <= the pacer's window (16; 4 for a stock client); request size from the same AIMD pacer
+   (16 KiB to 256 KiB). The worker only writes. Both plan the descriptor with the same function (`ClipboardFilePush::makePlan`) and the
+   worker's totals must equal the broker's or the transfer is cancelled.
+2. **Skips, not truncation.** Reparse points (and everything below a skipped directory), files whose size the descriptor does not state
+   (FD_FILESIZE unset: the free-space guard needs it up front) and files over 4 GiB - 1 without the negotiated huge flag are skipped and counted.
+3. **Staging root** is `$XDG_CACHE_HOME/krdp-clip` (else `~/.cache`), fixed, 0700; `c-<16 hex>` per worker process holds an flock on `.lock`
+   for its life, so the next worker's sweep tells a live instance from a crash leftover (no pid files, no clock); instances under 10 s old are
+   left to their creator; a held lock keeps an instance whatever its age (its owner expires its own transfers after 24 h).
+4. **Lock/unlock as the receiver.** The broker locks BEFORE the descriptor request, names the lock id in every range request, and unlocks as
+   soon as every byte is acknowledged (or on any refusal/failure/cancel). Stock clients that announce once per MIME type are deduplicated by the
+   descriptor bytes. A copy of something else, or an empty list, cancels the transfer and removes what a finished one staged.
+5. **Locked desktops.** The planner gets `clientToHostFileStarted` from `Clipboard::clientFileTransferActive()`: a transfer that started before
+   the lock keeps its flag and finishes; what it staged stays pasteable (the flag dropping later removes nothing); only control moving,
+   a viewer demotion, a denied clipboard direction or the connection ending removes a finished copy.
+6. **Offer rule.** At most 256 MiB total: offered when everything is staged. Larger: offered after the first finished top-level unit (a unit
+   is finished when every wanted file under its first path component is complete), refreshed when complete. The host clipboard gets
+   `text/uri-list` plus `application/x-kde-cutselection` = `0`, paths only (no text/plain); the worker never offers its own write back to the
+   client (it asks the backend whether the selection is its own instead of reading it back).
+7. **Notices.** The user is told on the host (org.freedesktop.Notifications, sizes and a reason, never a name) when staging starts and when a copy
+   is refused or fails; the connected Farside client gets the existing `clipboard-files` record with an additive `direction: "client-to-host"` and
+   events `receiving` / `refused` / `failed` / `done` plus a fixed reason word (`no-space`, `names`, `descriptor`, `policy`, `locked`, `rate`, `timeout`,
+   `unavailable`, `plan-mismatch`, `peer-failed`, ...). `locked` (rc 0.16.1, additive, no wire version change) is the `refused` reason when the
+   planner denied a NEW client-to-host copy because the Console desktop is locked and nothing else (account, seat, settings) would have denied it
+   (`ConsoleClipboardPolicy::FilesPlan::clientDeniedByLock`); every other planner denial, and a worker-side refusal, stays `policy`. A client
+   that does not know `locked` shows it as an unknown reason word, as it already does for any other.
+8. **Setting `ClipboardFileMinFreeBytes`**: bytes or a number with K/M/G/T (powers of 1024), up to 16 TiB, `0` = max(2 GiB, 5% of the filesystem);
+   env `FARSIDE_{CONSOLE,VIRTUAL}_CLIPBOARD_FILE_MIN_FREE`; it travels with each offer. KRDPCTL `capabilities.clipboard.files.clientToHost`
+   follows `ClipboardFiles` AND the clipboard direction.
+9. **Rate limit**: at most 6 accepted client file copies per 10 s per connection (each costs the worker a plan and a staging tree).
+
+### Requirement to test (section 4 and 9)
+
+| Requirement | Tests |
+|---|---|
+| 4.1 names: traversal, absolute, drive, UNC, streams, control, bidi, long, depth, device names, `~1`, collisions, NFC, Windows-origin round trip | `ClipboardFileNamesTest` (phase 1), `ClipboardFilePushTest::{hostileNameRefusesEverything,windowsOriginNamesRoundTrip,windowsHostileDirectoryNamesApplyToTheWholePath,collisionsAreRenamedNeverOverwritten}`, loopback `aHostileNameIsRefused...`, `aDirectoryTreeArrives...` (`CON.txt`, `what?.txt`) |
+| 4.2 root 0700, uid and mode verified on every use, symlink root refused | `HostFileStagingTest::{rootIsCreatedPrivate...,rootThatIsASymlinkIsRefused,rootOwnedBySomeoneElseIsRefused,rootModeIsRepairedAndVerifiedOnEveryUse,rootModeThatCannotBeFixedIsRefused,swappingTheRootForASymlinkAfterOpenRedirectsNothing,aSymlinkedCacheDirectoryIsFine}` |
+| 4.2 openat + O_EXCL + O_NOFOLLOW, never overwrite, `.part` then rename, no exec bit, no link following, hard/sym links | `HostFileStagingTest::{aPartFileThatAlreadyExists...,aSymlinkPlanted...,aHardLinkPlanted...,aFinalNameThatAppearedMeanwhile...,aDirectorySwappedForASymlink...,treeIsCreatedPrivateWithNoExecuteBit,aLooseUmask...,chunksArriveAsAPartFile...,removalNeverFollows...}` (mutation-checked) |
+| 4.2 link-wrap failures: pwrite ENOSPC/EDQUOT/EIO/EINTR/short, fsync, openat, renameat2, fstatvfs, fchmod, unlinkat | `HostFileStagingTest::{anFullDiskDuringAWrite...,quotaAndIoErrorsAreTold,shortWritesAreCompleted...,anInterruptedWriteIsRetried,aFailingFsync...,aFailingOpenOrRename...,aFailingProbe...,rootModeThatCannotBeFixed...,unlinkFailingDuringAbort...}` |
+| 4.3 counts, depth, total path bytes, descriptor sizes and lengths, 64-bit sizes | `ClipboardFilePushTest::{hostileDescriptorBytes,maximumEntriesPlan,totalPathBytesAreBounded,sizesAre64BitAndTotalsSaturate,hugeFilesNeedTheNegotiatedFlag}`, `ClipboardFileDescriptorTest` |
+| 4.3 response length, overlong cut off and file deleted, unrequested/duplicate answers, 3 violations, outstanding limit | `ClipboardFileFetchTest::{aShortResponse...,anOverlongResponse...,aResponseClaiming...,responsesNobodyAskedFor...,aStreamIsAnsweredOnce,windowIsRespected,aFiveGibFile...}`, `HostFileStagingTest::{aPeerThatSendsMoreThanTheDeclaredSize...,chunksOutOfOrder...,chunksForNothingAreHostile}`, `ClipboardClientFilesBridgeTest::{aShortAnswer...,anOversizedAnswer...,answersNobodyAskedForAbortAtTheThird,anOversizedDescriptor...}` |
+| 4.4 lock before the descriptor, named in requests, released on every exit; lock exhaustion (8, LRU) | `ClipboardClientFilesBridgeTest::{theClipboardIsLockedThenTheDescriptorRequested,withoutLockNegotiated...,hostileDescriptors...ReleaseTheLock,aRepeatOfTheSameList...,aDifferentList...}`, loopback lock tests, `ClipboardFileRequestTest`/`ClipboardFileServeTest` (8 locks, LRU) |
+| 4.5 policy per state, locked = deny NEW only, greeter/foreign/viewer deny, setting AND direction | `ConsoleClipboardPolicyTest` (table), `ConsoleWorkerWireTest::filePushGateIsStrict`, `HostFileStagerTest::{policyGate...,aTransferStartedBeforeTheLock...,theFlagGoingMidTransfer...,aControllerChange...}`, `ConsoleHostControllerTest::{clientFilesFlow...,clientFilesAreDenied...}`, `ClipboardClientFilesBridgeTest::{filesNeedStreaming...,theFlagGoingKeeps...}`, loopback `theLockedDesktopDenies...` |
+| 4.6 logs carry no names or contents (canary) | `HostFileStagerTest::namesAndContentsNeverReachALogOrANotification`, `ClipboardClientFilesBridgeTest::namesAndContentsNeverReachALog` |
+| 3.2 disk guard (before the first byte and every 64 MiB, injected statvfs, decision table, saturation) | `HostFileStagingTest::{theGuard*,aFailingProbe...}`, `HostFileStagerTest::{theDiskGuardRefuses...,aFullDiskMidWay...}`, loopback `aFullDiskIsRefusedUpFront...`, `ClipboardFileLimitsTest` |
+| 3.2 janitor: replaced, connection ends, worker start sweep, crash, 24 h | `HostFileStagingTest::{sweepDecisions...,startupSweep...,aLockDroppedByACrash...,sweepAtStart...,transfersOlderThanADay...,replacedAndEnded...,abortMidFile...}`, `HostFileStagerTest::{startingUpSweeps...,destroyingTheStager...,aNewerOffer...,cancelRemoves...}` |
+| 9 broker with a fake worker, whole flow | `ConsoleHostControllerTest::clientFilesFlowToTheWorker...`, `ClientFileRelayTest`, `ClipboardClientFilesBridgeTest` |
+| 9 loopback with a libfreerdp client sending files | `ClipboardFilePushLoopbackTest` (real Server, Clipboard, stager and staging fs; 8 cases) |
+
+Not covered locally (Sol/Buzz checklist in the plan): a multi-GiB file, a real Dolphin paste of a staged list, a real compositor selection, real
+notifications, `tc tbf` QoS numbers, a worker killed with SIGKILL mid-copy, a loop-mounted small filesystem filling up under the real worker.
