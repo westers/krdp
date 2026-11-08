@@ -511,11 +511,12 @@ private Q_SLOTS:
     }
 
     // ---- OPT-078 small files: the byte budget the pacer derives from its rate ----
-    void byteBudgetEqualsTheOldCountTimesRangeAtEveryRate()
+    void byteBudgetAdmitsExactlyTheOldNumberOfFullSizeRequestsAtEveryRate()
     {
-        // With 256 KiB requests the new budget admits exactly the old W requests (bytes = W x 256 KiB), whatever the count cap says.
-        struct Row { double mbit; qint64 bytes; };
-        for (const Row r : {Row{20, 250000}, Row{22, 2 * 262144}, Row{43, 3 * 262144}, Row{100, 5 * 262144}, Row{500, 16 * 262144}, Row{10000, 4 * 1024 * 1024}}) {
+        // The budget is about 100 ms of data; a requester sends while the bytes in flight are below it, so with 256 KiB requests the number in flight is
+        // ceil(budget / 256 KiB) = the old window, whatever the count cap says (and never more than the strict 4 MiB).
+        struct Row { double mbit; qint64 budget; };
+        for (const Row r : {Row{0.256, 16384}, Row{1, 16384}, Row{20, 250000}, Row{22, 275000}, Row{43, 537500}, Row{100, 1'250'000}, Row{500, 4 * 1024 * 1024}, Row{10000, 4 * 1024 * 1024}}) {
             Clock0 c;
             Policy policy;
             policy.capBytesPerSecond = quint64(r.mbit * Mbit);
@@ -523,17 +524,26 @@ private Q_SLOTS:
             p.reset(c.now);
             run(p, c, idleLan(100000), 5000);
             const auto w = p.window(Limits::NegotiatedWindow);
-            QCOMPARE(w.maxBytes, r.bytes);
+            QCOMPARE(w.maxBytes, r.budget);
             QCOMPARE(w.maxCount, 128);
-            // ... which is the old window in 256 KiB requests
-            QCOMPARE(std::clamp(int(w.maxBytes / (256 * 1024)), 1, 16), p.window());
-            // the legacy window has no byte rule of its own (16 requests of any length): only the rate's budget, which with 256 KiB requests
-            // the count of 16 caps at the same 4 MiB
-            const double wanted = p.rateBytesPerSecond() * WindowSeconds;
-            const qint64 raw = wanted <= 262144 ? qint64(std::max(wanted, double(MinSliceBytes))) : qint64(std::ceil(wanted / 262144)) * 262144;
-            QCOMPARE(p.window(Limits::LegacyWindow).maxBytes, std::min<qint64>(raw, Limits::LegacyWindow.maxBytes));
-            QCOMPARE(p.window(Limits::LegacyWindow).maxCount, 16);
+            int admitted = 0;
+            while (Limits::requesterAdmits(Limits::NegotiatedWindow, w, admitted, qint64(admitted) * 256 * 1024, 256 * 1024)) ++admitted;
+            QCOMPARE(admitted, p.window()); // the old count window
+            // the legacy limits (16 requests, no byte rule) admit the same
+            const auto legacy = p.window(Limits::LegacyWindow);
+            QCOMPARE(legacy.maxCount, 16);
+            int legacyAdmitted = 0;
+            while (Limits::requesterAdmits(Limits::LegacyWindow, legacy, legacyAdmitted, qint64(legacyAdmitted) * 256 * 1024, 256 * 1024)) ++legacyAdmitted;
+            QCOMPARE(legacyAdmitted, p.window());
         }
+    }
+    void aTinyRequestRampsLikeTheOldCountDid()
+    {
+        // The Auto ramp relies on the one-request overshoot: with 20 KB requests and a 48 KB budget three go out (ceil), not two (floor).
+        const Limits::Window budget{48 * 1024, 128};
+        int admitted = 0;
+        while (Limits::requesterAdmits(Limits::NegotiatedWindow, budget, admitted, qint64(admitted) * 20000, 20000)) ++admitted;
+        QCOMPARE(admitted, 3);
     }
     void aBiggerCountCannotRaiseTheBytesOfACapOrBalancedMode()
     {

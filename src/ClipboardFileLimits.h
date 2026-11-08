@@ -48,7 +48,9 @@ constexpr int MaxViolations = 3;
  *     (count in flight < maxCount)  AND  (bytes requested in flight + its length <= maxBytes)
  * and one request is always admitted when none is in flight (a range is at most MaxRangeBytes). The window only bounds CONCURRENCY and memory;
  * the pacer (ClipboardFilePacing: token bucket, floor, Cap/Balanced, the stock-client rule) still bounds the RATE, and it derives the
- * bytes it allows in flight from its rate (about 100 ms of data), so a bigger count cannot raise a rate.
+ * bytes it allows in flight from its rate (about 100 ms of data), so a bigger count cannot raise a rate. The VALIDATOR (windowAdmits) applies the rule
+ * above strictly; the REQUESTER (requesterAdmits) sends while the bytes in flight are still below the pacer's budget, so the last request may overshoot
+ * it (the old "ceil(rate x 100 ms / size)" behaviour that an Auto transfer's ramp depends on), and the strict limits remain the hard memory bound.
  *
  * Three windows:
  *   - LegacyWindow: what a peer that did not negotiate gets, today's rule: 16 requests of any valid length (16 x MaxRangeBytes = no byte rule beyond the
@@ -94,7 +96,15 @@ inline Window windowForRequesting(bool stockPeer, std::optional<Window> advertis
 {
     return stockPeer ? LegacyWindow : negotiatedWindow(advertised, own);
 }
-/// Whether one more request of \a length bytes may go out (or be accepted) with \a inflightCount requests and \a inflightBytes bytes already in flight.
+/// The REQUESTER's rule (OPT-078 small files): \a hard are the negotiated limits (count and the strict byte sum, a hard memory bound), \a effective is what the pacer
+/// derives from its rate (FileTransferPacer::window(hard): maxCount a cap, maxBytes the byte BUDGET). A request goes out while the bytes in flight are still BELOW the budget
+/// (so the last one may overshoot it, exactly as the old "ceil(rate x 100 ms / request size)" count did: that overshoot is what lets an Auto transfer ramp up, because the
+/// pacer measures what arrives and a window that held no more than the rate x RTT would never find a higher rate) and the strict limits still hold.
+constexpr bool requesterAdmits(const Window &hard, const Window &effective, int inflightCount, qint64 inflightBytes, quint32 length)
+{
+    return inflightCount <= 0 || (inflightCount < effective.maxCount && inflightBytes < effective.maxBytes && inflightBytes + qint64(length) <= hard.maxBytes);
+}
+/// The VALIDATOR's rule: whether one more request of \a length bytes may be accepted with \a inflightCount requests and \a inflightBytes bytes already in flight.
 constexpr bool windowAdmits(const Window &window, int inflightCount, qint64 inflightBytes, quint32 length)
 {
     return inflightCount <= 0 || (inflightCount < window.maxCount && inflightBytes + qint64(length) <= window.maxBytes);

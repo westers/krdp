@@ -329,7 +329,7 @@ private:
     };
 
     bool moreToRequest() const { return m_fileIndex < m_files.size(); }
-    bool admits(quint32 length) const { return ClipboardFileLimits::windowAdmits(m_pacer.window(m_options.window), inflight(), inflightBytes(), length); }
+    bool admits(quint32 length) const { return ClipboardFileLimits::requesterAdmits(m_options.window, m_pacer.window(m_options.window), inflight(), inflightBytes(), length); }
 
     quint32 nextLength() const
     {

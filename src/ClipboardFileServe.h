@@ -403,7 +403,7 @@ private:
         }
         for (auto &item : m_items) {
             if (item.state != State::Waiting) continue;
-            if (!ClipboardFileLimits::windowAdmits(window, inflight, inflightBytes, item.request.length)) break;
+            if (!ClipboardFileLimits::requesterAdmits(m_window, window, inflight, inflightBytes, item.request.length)) break;
             ReadIssue issue{item.request.streamId, item.seq, item.request.listIndex, item.request.offset, item.request.length};
             item.state = State::Reading;
             ++inflight;
