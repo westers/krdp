@@ -167,7 +167,9 @@ private Q_SLOTS:
         auto group = capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject();
         QCOMPARE(group.value(QStringLiteral("files")).toObject(),
                  (QJsonObject{{QStringLiteral("hostToClient"), true}, {QStringLiteral("clientToHost"), false}, {QStringLiteral("maxMode"), QStringLiteral("auto")},
-                              {QStringLiteral("huge"), true}, {QStringLiteral("transfer"), true}}));
+                              {QStringLiteral("huge"), true}, {QStringLiteral("transfer"), true},
+                              // OPT-078 small files: the in-flight window this host serves and requests under (additive)
+                              {QStringLiteral("window"), QJsonObject{{QStringLiteral("maxBytes"), 4194304}, {QStringLiteral("maxCount"), 128}}}}));
         // the rest of the group is what OPT-077 sent
         group.remove(QStringLiteral("files"));
         caps.clipboard->files.reset();

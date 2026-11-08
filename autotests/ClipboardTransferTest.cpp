@@ -140,6 +140,33 @@ private Q_SLOTS:
         // 0 means the built-in rule max(2 GiB, 5% of the filesystem)
         QCOMPARE(*parseMinFree(QStringLiteral("0")), quint64(0));
     }
+
+    // OPT-078 small files: the optional `window` member of the request (what the client's FileSender accepts and its requester uses).
+    void theWindowMemberIsOptionalAndStrict()
+    {
+        QVERIFY(!parse(record(QStringLiteral("auto")))->window); // absent (an older client): the old 16
+        auto with = [](const QJsonValue &window) {
+            auto r = record(QStringLiteral("balanced"));
+            r.insert(QStringLiteral("window"), window);
+            return r;
+        };
+        const auto ok = parse(with(QJsonObject{{QStringLiteral("maxBytes"), 4194304}, {QStringLiteral("maxCount"), 128}}));
+        QVERIFY(ok);
+        QCOMPARE(ok->mode, RequestedMode::Balanced);
+        QCOMPARE(*ok->window, ClipboardFileLimits::NegotiatedWindow);
+        QVERIFY(parse(with(QJsonObject{{QStringLiteral("maxBytes"), 262144}, {QStringLiteral("maxCount"), 1}}))); // the smallest valid
+        // anything malformed refuses the whole record
+        QVERIFY(!parse(with(QJsonObject{{QStringLiteral("maxBytes"), 262143}, {QStringLiteral("maxCount"), 128}})));
+        QVERIFY(!parse(with(QJsonObject{{QStringLiteral("maxBytes"), 4194304}, {QStringLiteral("maxCount"), 0}})));
+        QVERIFY(!parse(with(QJsonObject{{QStringLiteral("maxBytes"), 4194304}})));
+        QVERIFY(!parse(with(QJsonObject{{QStringLiteral("maxBytes"), 4194304}, {QStringLiteral("maxCount"), 128}, {QStringLiteral("extra"), 1}})));
+        QVERIFY(!parse(with(QJsonObject{{QStringLiteral("maxBytes"), QStringLiteral("big")}, {QStringLiteral("maxCount"), 128}})));
+        QVERIFY(!parse(with(QJsonObject{{QStringLiteral("maxBytes"), 4194304.5}, {QStringLiteral("maxCount"), 128}})));
+        QVERIFY(!parse(with(QJsonObject{{QStringLiteral("maxBytes"), 1e300}, {QStringLiteral("maxCount"), 128}})));
+        QVERIFY(!parse(with(QJsonObject{{QStringLiteral("maxBytes"), 4194304}, {QStringLiteral("maxCount"), 1e12}})));
+        QVERIFY(!parse(with(QStringLiteral("4194304"))));
+        QVERIFY(!parse(with(QJsonValue::Null)));
+    }
 };
 
 QTEST_GUILESS_MAIN(ClipboardTransferTest)

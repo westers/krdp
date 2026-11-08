@@ -103,6 +103,99 @@ private Q_SLOTS:
         QCOMPARE(WalkBudgetMs, 5000);
         QCOMPARE(OfferWhenCompleteBytes, quint64(256) * 1024 * 1024);
     }
+
+    // ---- OPT-078 small files: the byte-budget window ----
+    void windowConstants()
+    {
+        QCOMPARE(LegacyWindow.maxCount, 16);
+        QCOMPARE(LegacyWindow.maxBytes, qint64(16) * MaxRangeBytes); // no byte rule beyond the count: today's behaviour
+        QCOMPARE(NegotiatedWindow.maxCount, 128);
+        QCOMPARE(NegotiatedWindow.maxBytes, qint64(4) * 1024 * 1024); // = 16 x 256 KiB: large files behave as before
+        QCOMPARE(NegotiatedWindow.maxBytes, qint64(MaxWindow) * RangeBytes);
+    }
+    void admissionTable_data()
+    {
+        QTest::addColumn<int>("count");
+        QTest::addColumn<qint64>("bytes");
+        QTest::addColumn<quint32>("length");
+        QTest::addColumn<bool>("admitted");
+        const Window w = NegotiatedWindow; // 4 MiB, 128
+        const qint64 mib = 1024 * 1024;
+        QTest::newRow("idle, small") << 0 << qint64(0) << quint32(100) << true;
+        QTest::newRow("idle, even a request over the budget") << 0 << qint64(0) << quint32(MaxRangeBytes) << true;
+        QTest::newRow("127 small in flight, the 128th") << 127 << qint64(127 * 20000) << quint32(20000) << true;
+        QTest::newRow("128 small in flight, the 129th (one over the count)") << 128 << qint64(128 * 20000) << quint32(20000) << false;
+        QTest::newRow("15 x 256 KiB, the 16th (exactly at the bytes)") << 15 << qint64(15 * RangeBytes) << quint32(RangeBytes) << true;
+        QTest::newRow("16 x 256 KiB, the 17th (one request over the bytes)") << 16 << qint64(16 * RangeBytes) << quint32(RangeBytes) << false;
+        QTest::newRow("bytes one over by a single byte") << 3 << (w.maxBytes - 1) << quint32(2) << false;
+        QTest::newRow("bytes exactly at the limit by a single byte") << 3 << (w.maxBytes - 1) << quint32(1) << true;
+        QTest::newRow("mixed: 100 small + one big fits") << 100 << qint64(100 * 4096) << quint32(RangeBytes) << true;
+        QTest::newRow("mixed: 100 x 40 KiB (4 MiB) leaves no room") << 100 << qint64(100 * 40 * 1024 + 96 * 1024) << quint32(40 * 1024) << false;
+        QTest::newRow("count at the cap with no bytes in flight") << 128 << qint64(0) << quint32(1) << false;
+        QTest::newRow("a 1 MiB range with 3 MiB in flight fits") << 12 << (3 * mib) << quint32(mib) << true;
+        QTest::newRow("a 1 MiB range with 3 MiB + 1 in flight does not") << 12 << (3 * mib + 1) << quint32(mib) << false;
+    }
+    void admissionTable()
+    {
+        QFETCH(int, count);
+        QFETCH(qint64, bytes);
+        QFETCH(quint32, length);
+        QFETCH(bool, admitted);
+        QCOMPARE(windowAdmits(NegotiatedWindow, count, bytes, length), admitted);
+    }
+    void theLegacyWindowIsTheOldCountRule()
+    {
+        // 16 requests of any valid length (1 MiB each = 16 MiB), the 17th is refused: exactly what MaxOutstanding = 16 did.
+        for (int n = 0; n < 16; ++n) QVERIFY(windowAdmits(LegacyWindow, n, qint64(n) * MaxRangeBytes, MaxRangeBytes));
+        QVERIFY(!windowAdmits(LegacyWindow, 16, qint64(16) * MaxRangeBytes, 1));
+        QVERIFY(!windowAdmits(LegacyWindow, 16, 0, 1));
+    }
+    void negotiationTable_data()
+    {
+        QTest::addColumn<bool>("advertised");
+        QTest::addColumn<qint64>("bytes");
+        QTest::addColumn<int>("count");
+        QTest::addColumn<qint64>("expectBytes");
+        QTest::addColumn<int>("expectCount");
+        const qint64 mib = 1024 * 1024;
+        QTest::newRow("absent (old peer, stock peer)") << false << qint64(0) << 0 << LegacyWindow.maxBytes << 16;
+        QTest::newRow("same as ours") << true << (4 * mib) << 128 << (4 * mib) << 128;
+        QTest::newRow("a bigger peer is capped by us") << true << (64 * mib) << 1000 << (4 * mib) << 128;
+        QTest::newRow("a smaller peer wins") << true << (1 * mib) << 32 << (1 * mib) << 32;
+        QTest::newRow("peer count only smaller") << true << (4 * mib) << 16 << (4 * mib) << 16;
+        QTest::newRow("zero count is ignored") << true << (4 * mib) << 0 << LegacyWindow.maxBytes << 16;
+        QTest::newRow("negative bytes is ignored") << true << qint64(-1) << 128 << LegacyWindow.maxBytes << 16;
+        QTest::newRow("under one range is ignored") << true << qint64(RangeBytes - 1) << 128 << LegacyWindow.maxBytes << 16;
+        QTest::newRow("exactly one range is valid") << true << qint64(RangeBytes) << 1 << qint64(RangeBytes) << 1;
+    }
+    void negotiationTable()
+    {
+        QFETCH(bool, advertised);
+        QFETCH(qint64, bytes);
+        QFETCH(int, count);
+        QFETCH(qint64, expectBytes);
+        QFETCH(int, expectCount);
+        const std::optional<Window> peer = advertised ? std::optional<Window>(Window{bytes, count}) : std::nullopt;
+        const Window w = negotiatedWindow(peer);
+        QCOMPARE(w.maxBytes, expectBytes);
+        QCOMPARE(w.maxCount, expectCount);
+    }
+    // The four peers a host or a client can meet (the same table runs in the client's tests with the roles swapped):
+    //   stock client:           serve 16 / request 16 (4 for the stock pacer)
+    //   old own client (0.13.2): serve may give it 128 (it never uses more than 16), request 16 (it advertised nothing)
+    //   new own client:         serve 128 / 4 MiB, request min(own, advertised)
+    //   new client, old host:   the host advertised nothing: the client uses 16 both ways (client tests)
+    void theFourPeerCombinations()
+    {
+        const Window advertised = NegotiatedWindow;
+        QCOMPARE(windowForServing(true), LegacyWindow);
+        QCOMPARE(windowForRequesting(true, advertised), LegacyWindow); // a stock client cannot have advertised, but even a claim is ignored
+        QCOMPARE(windowForServing(false), NegotiatedWindow);           // old and new own clients
+        QCOMPARE(windowForRequesting(false, std::nullopt), LegacyWindow); // old own client: no `window` in its clipboard-transfer
+        QCOMPARE(windowForRequesting(false, advertised), NegotiatedWindow); // new own client
+        QCOMPARE(windowForRequesting(false, Window{1024 * 1024, 32}), (Window{1024 * 1024, 32})); // a more careful client wins
+        QCOMPARE(windowForRequesting(false, Window{4, 4}), LegacyWindow); // a nonsense advertisement is ignored
+    }
 };
 
 QTEST_GUILESS_MAIN(ClipboardFileLimitsTest)

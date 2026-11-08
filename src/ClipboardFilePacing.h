@@ -224,6 +224,38 @@ public:
         return std::clamp(int(wanted), 1, cap);
     }
 
+    /**
+     * OPT-078 small files: the in-flight window as a byte budget plus a count cap, inside \a limits (the negotiated Window).
+     *
+     * The bytes follow the rate exactly as the old count did: about WindowSeconds of data at the current rate, rounded up to whole
+     * RangeBytes when that is more than one request (what 16 requests of 256 KiB were), at least MinSliceBytes (one request is always
+     * admitted anyway, see ClipboardFileLimits::windowAdmits). The count is only limits.maxCount: a bigger count therefore changes
+     * how many SMALL requests share the budget, never how many bytes may be in flight, and the token bucket still bounds the rate
+     * (Cap, Balanced, the floor and the pressure rules are untouched). Unlimited: the limits themselves.
+     * A stock client (no KRDPCTL): exactly the old count window (at most StockClientWindow) with no byte rule beyond it.
+     */
+    ClipboardFileLimits::Window window(const ClipboardFileLimits::Window &limits) const
+    {
+        if (m_policy.stockClient) {
+            const int count = window();
+            return {qint64(count) * qint64(ClipboardFileLimits::MaxRangeBytes), count};
+        }
+        if (m_policy.unlimited) {
+            return limits;
+        }
+        return {std::min(limits.maxBytes, windowBytes()), limits.maxCount};
+    }
+    /// The bytes the current rate allows in flight (before the limits).
+    qint64 windowBytes() const
+    {
+        const double wanted = m_rate * WindowSeconds;
+        const double range = double(ClipboardFileLimits::RangeBytes);
+        if (wanted <= range) {
+            return qint64(std::max(wanted, double(MinSliceBytes)));
+        }
+        return qint64(std::ceil(wanted / range)) * qint64(ClipboardFileLimits::RangeBytes);
+    }
+
     /// The bytes of one write to the socket.
     quint32 sliceBytes() const
     {

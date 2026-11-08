@@ -250,6 +250,129 @@ private Q_SLOTS:
         QCOMPARE(Limits::MaxOutstanding, 16);
         QCOMPARE(Limits::MaxViolations, 3);
     }
+
+    // ---- OPT-078 small files: the byte-budget window of the validator ----
+    void aNegotiatedPeerMayHaveManySmallRequestsInFlight()
+    {
+        RequestValidator v(true, Limits::MaxOutstanding, true);
+        v.setWindow(Limits::NegotiatedWindow);
+        Snapshot s;
+        s.items = {{20000, false}};
+        v.setCurrent(s);
+        for (quint32 i = 1; i <= 128; ++i) QCOMPARE(v.validate(range(i, 0, 0, 20000)).verdict, Verdict::Accept);
+        QCOMPARE(v.outstanding(), 128);
+        QCOMPARE(v.outstandingBytes(), qint64(128) * 20000);
+        const auto over = v.validate(range(129, 0, 0, 20000)); // one over the count
+        QCOMPARE(over.verdict, Verdict::Refuse);
+        QCOMPARE(over.reason, Reason::TooManyOutstanding);
+        QCOMPARE(v.violations(), 0); // refused, not a violation
+        v.complete(1);
+        QCOMPARE(v.validate(range(130, 0, 0, 20000)).verdict, Verdict::Accept); // room again
+        QCOMPARE(v.outstandingBytes(), qint64(128) * 20000);
+    }
+    void theBytesBoundTheWindowToFourMiB()
+    {
+        RequestValidator v(true, Limits::MaxOutstanding, true);
+        v.setWindow(Limits::NegotiatedWindow);
+        Snapshot s;
+        s.items = {{quint64(64) * 1024 * 1024, false}};
+        v.setCurrent(s);
+        // 16 x 256 KiB = exactly 4 MiB is accepted (large files behave as before) ...
+        for (quint32 i = 1; i <= 16; ++i) QCOMPARE(v.validate(range(i, 0, (i - 1) * 256 * 1024, 256 * 1024)).verdict, Verdict::Accept);
+        QCOMPARE(v.outstandingBytes(), qint64(4) * 1024 * 1024);
+        // ... the 17th, one request over the bytes, is refused although the count (17 < 128) would allow it
+        QCOMPARE(v.validate(range(17, 0, 16 * 256 * 1024, 256 * 1024)).verdict, Verdict::Refuse);
+        QCOMPARE(v.validate(range(18, 0, 0, 1)).verdict, Verdict::Refuse); // even one byte: the budget is full
+        v.complete(1);
+        QCOMPARE(v.validate(range(19, 0, 0, 256 * 1024)).verdict, Verdict::Accept);
+        // mixed sizes: whatever the mix, the sum never passes the limit
+        v.cancelAll();
+        QCOMPARE(v.outstandingBytes(), qint64(0));
+        qint64 total = 0;
+        quint32 stream = 100;
+        for (const quint32 len : {1024u * 1024, 512u * 1024, 40000u, 40000u, 1024u * 1024, 1024u * 1024, 512u * 1024, 700u * 1024, 1u}) {
+            if (v.validate(range(stream++, 0, 0, len)).verdict == Verdict::Accept) total += len;
+        }
+        QCOMPARE(v.outstandingBytes(), total);
+        QVERIFY(v.outstandingBytes() <= Limits::NegotiatedWindow.maxBytes);
+    }
+    void aPeerThatDidNotNegotiateKeepsSixteen()
+    {
+        RequestValidator v(true, Limits::MaxOutstanding, true); // the default window: today's rule
+        QCOMPARE(v.window(), Limits::LegacyWindow);
+        Snapshot s;
+        s.items = {{20000, false}};
+        v.setCurrent(s);
+        for (quint32 i = 1; i <= 16; ++i) QCOMPARE(v.validate(range(i, 0, 0, 20000)).verdict, Verdict::Accept);
+        QCOMPARE(v.validate(range(17, 0, 0, 20000)).verdict, Verdict::Refuse);
+        // sixteen full-size ranges (16 MiB) were always fine for it and still are
+        RequestValidator big(true, Limits::MaxOutstanding, true);
+        Snapshot b;
+        b.items = {{quint64(100) * 1024 * 1024, false}};
+        big.setCurrent(b);
+        for (quint32 i = 1; i <= 16; ++i) QCOMPARE(big.validate(range(i, 0, 0, Limits::MaxRangeBytes)).verdict, Verdict::Accept);
+        QCOMPARE(big.validate(range(17, 0, 0, 1)).verdict, Verdict::Refuse);
+    }
+    void aFloodBeyondTheNewLimitsIsRefusedAndNeverGrowsTheState()
+    {
+        RequestValidator v(true, Limits::MaxOutstanding, true);
+        v.setWindow(Limits::NegotiatedWindow);
+        Snapshot s;
+        s.items = {{quint64(1) << 40, false}};
+        v.setCurrent(s);
+        int accepted = 0;
+        for (quint32 i = 1; i <= 100000; ++i) {
+            const auto d = v.validate(range(i, 0, quint64(i) * 4096, i % 3 ? 4096 : 200 * 1024));
+            if (d.verdict == Verdict::Accept) ++accepted;
+            else QCOMPARE(d.verdict, Verdict::Refuse);
+            QVERIFY(v.outstanding() <= 128);
+            QVERIFY(v.outstandingBytes() <= Limits::NegotiatedWindow.maxBytes);
+        }
+        QVERIFY(accepted <= 128);
+        QCOMPARE(v.violations(), 0);
+        QVERIFY(!v.aborted());
+        QCOMPARE(v.refused(), 100000 - accepted);
+    }
+    void invalidRequestsStillEndTheOfferAfterThreeViolationsUnderTheNewWindow()
+    {
+        RequestValidator v(true, Limits::MaxOutstanding, true);
+        v.setWindow(Limits::NegotiatedWindow);
+        Snapshot s;
+        s.items = {{100, false}};
+        v.setCurrent(s);
+        QCOMPARE(v.validate(range(1, 7, 0, 10)).verdict, Verdict::Fail);   // index out of range
+        QCOMPARE(v.validate(range(2, 0, 90, 20)).verdict, Verdict::Fail);  // past the end
+        QCOMPARE(v.validate(range(3, 0, 0, 0)).verdict, Verdict::Abort);   // the third
+        QVERIFY(v.aborted());
+        QCOMPARE(v.validate(range(4, 0, 0, 10)).verdict, Verdict::Abort);  // nothing more is served
+        QCOMPARE(v.outstanding(), 0);
+        QCOMPARE(v.outstandingBytes(), qint64(0));
+        v.clearViolations();
+        QCOMPARE(v.validate(range(5, 0, 0, 10)).verdict, Verdict::Accept);
+    }
+    void aDuplicateStreamNeverAddsToTheBytes()
+    {
+        RequestValidator v(true, Limits::MaxOutstanding, true);
+        v.setWindow(Limits::NegotiatedWindow);
+        Snapshot s;
+        s.items = {{1000, false}};
+        v.setCurrent(s);
+        QCOMPARE(v.validate(range(1, 0, 0, 500)).verdict, Verdict::Accept);
+        QCOMPARE(v.validate(range(1, 0, 0, 500)).reason, Reason::DuplicateStream);
+        QCOMPARE(v.outstandingBytes(), qint64(500));
+        v.complete(1);
+        v.complete(1); // twice is harmless
+        QCOMPARE(v.outstandingBytes(), qint64(0));
+    }
+    void windowIsNeverBelowOneRequest()
+    {
+        RequestValidator v(false, Limits::MaxOutstanding, true);
+        v.setWindow({0, 0});
+        QCOMPARE(v.window().maxCount, 1);
+        v.setCurrent(snapshot());
+        QCOMPARE(v.validate(range(1, 0, 0, 100)).verdict, Verdict::Accept);
+        QCOMPARE(v.validate(range(2, 0, 0, 1)).verdict, Verdict::Refuse);
+    }
 };
 
 QTEST_GUILESS_MAIN(ClipboardFileRequestTest)

@@ -40,6 +40,65 @@ constexpr int StockClientWindow = 4;
 constexpr int MaxOutstanding = MaxWindow;
 /// Protocol violations (invalid requests) that abort one transfer.
 constexpr int MaxViolations = 3;
+
+/**
+ * OPT-078 small files (decided 2026-11-08): the in-flight limit is a BYTE budget with a count cap, not "16 requests".
+ *
+ * A request for a small file is tiny, so many of them fit where 16 requests of 256 KiB did. A request is admitted while
+ *     (count in flight < maxCount)  AND  (bytes requested in flight + its length <= maxBytes)
+ * and one request is always admitted when none is in flight (a range is at most MaxRangeBytes). The window only bounds CONCURRENCY and memory;
+ * the pacer (ClipboardFilePacing: token bucket, floor, Cap/Balanced, the stock-client rule) still bounds the RATE, and it derives the
+ * bytes it allows in flight from its rate (about 100 ms of data), so a bigger count cannot raise a rate.
+ *
+ * Three windows:
+ *   - LegacyWindow: what a peer that did not negotiate gets, today's rule: 16 requests of any valid length (16 x MaxRangeBytes = no byte rule beyond the
+ *     count). A requester asking a peer that did not advertise a window uses it too (its requests are at most RangeBytes, so 4 MiB in flight).
+ *   - NegotiatedWindow: both sides are our own and the peer advertised its window (KRDPCTL capabilities.clipboard.files.window, or the same
+ *     `window` object in the client's `clipboard-transfer`): 4 MiB (= the old 16 x 256 KiB, so large files behave exactly as before) and
+ *     at most 128 requests. Memory held for requested ranges never exceeds maxBytes (a buffer is never sized from a claimed length: ranges are
+ *     validated against MaxRangeBytes and the file size first).
+ *   - a requester uses min(own, peer-advertised); an absent or invalid advertisement means LegacyWindow.
+ */
+struct Window {
+    qint64 maxBytes = 0;
+    int maxCount = 0;
+    bool operator==(const Window &) const = default;
+};
+constexpr Window LegacyWindow{qint64(MaxWindow) * qint64(MaxRangeBytes), MaxWindow};
+constexpr int NegotiatedMaxCount = 128;
+constexpr qint64 NegotiatedMaxBytes = qint64(MaxWindow) * qint64(RangeBytes); ///< 4 MiB
+constexpr Window NegotiatedWindow{NegotiatedMaxBytes, NegotiatedMaxCount};
+/// What a peer may advertise at all (an advertisement outside this is ignored: the window stays LegacyWindow).
+constexpr bool validAdvertisedWindow(qint64 maxBytes, qint64 maxCount)
+{
+    return maxBytes >= qint64(RangeBytes) && maxCount >= 1;
+}
+/// The window to use towards a peer that advertised \a peer (nullopt = it did not, or the advertisement was invalid): min(own, peer) or LegacyWindow.
+inline Window negotiatedWindow(std::optional<Window> peer, const Window &own = NegotiatedWindow)
+{
+    if (!peer || !validAdvertisedWindow(peer->maxBytes, peer->maxCount)) {
+        return LegacyWindow;
+    }
+    return {std::min(own.maxBytes, peer->maxBytes), std::min(own.maxCount, peer->maxCount)};
+}
+/// The window a host SERVES a peer under (its validator and its read window): our own client may keep NegotiatedWindow requests in flight (it only learns the
+/// size from the host's `capabilities`, which it can answer only when it is ours; a client from before this change never asks for more than 16 anyway), a
+/// stock client the old 16.
+inline Window windowForServing(bool stockClient)
+{
+    return stockClient ? LegacyWindow : NegotiatedWindow;
+}
+/// The window a program REQUESTS under from a peer that advertised \a advertised (nullopt: it said nothing, e.g. an older program): min(own, advertised), or
+/// LegacyWindow; a stock peer always LegacyWindow.
+inline Window windowForRequesting(bool stockPeer, std::optional<Window> advertised, const Window &own = NegotiatedWindow)
+{
+    return stockPeer ? LegacyWindow : negotiatedWindow(advertised, own);
+}
+/// Whether one more request of \a length bytes may go out (or be accepted) with \a inflightCount requests and \a inflightBytes bytes already in flight.
+constexpr bool windowAdmits(const Window &window, int inflightCount, qint64 inflightBytes, quint32 length)
+{
+    return inflightCount <= 0 || (inflightCount < window.maxCount && inflightBytes + qint64(length) <= window.maxBytes);
+}
 /// Simultaneous clipboard locks per connection.
 constexpr int MaxLocks = 8;
 

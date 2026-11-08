@@ -2172,7 +2172,7 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         if (!parsed || !board) return ClipboardTransfer::reply(record, {}, m_clipboardFileCeiling, u"invalid clipboard-transfer request"_s);
         if (!board->filesEnabled())
             return ClipboardTransfer::reply(record, board->effectiveFilePolicy(), m_clipboardFileCeiling, u"file copy is off on this host"_s);
-        board->setFileTransferRequest({parsed->mode, parsed->capBytesPerSecond});
+        board->setFileTransferRequest({parsed->mode, parsed->capBytesPerSecond, parsed->window});
         return ClipboardTransfer::reply(record, board->effectiveFilePolicy(), m_clipboardFileCeiling);
     }
     if (record.value(u"type"_s) == u"virtual-session"_s) {

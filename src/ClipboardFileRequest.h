@@ -28,8 +28,10 @@ namespace KRdp::ClipboardFileRequest
  * for (offset + length must stay within 2^32 - 1): spike S1 (2026-10-17) showed that a stock libfreerdp client
  * refuses to send such a request itself, but a server must not depend on that, and a file of that size is not
  * offered to such a peer at all. Invalid requests are answered with a failed response and counted; the third violation aborts the
- * transfer. At most MaxOutstanding requests are in flight: extra ones are refused (not queued, not a
- * violation).
+ * transfer. The requests in flight are bounded by a Window (ClipboardFileLimits, OPT-078 small files): at most maxCount of them and
+ * at most maxBytes requested bytes together (one is always admitted when none is in flight); extra ones are refused (not queued, not a
+ * violation). The default is the old rule (MaxOutstanding requests); the owner sets the negotiated window only for a peer that is our
+ * own client (setWindow).
  */
 constexpr quint32 FlagSize = 0x1;
 constexpr quint32 FlagRange = 0x2;
@@ -119,17 +121,26 @@ public:
     explicit RequestValidator(bool lockingNegotiated = false, int maxOutstanding = ClipboardFileLimits::MaxOutstanding, bool hugeNegotiated = false)
         : m_locking(lockingNegotiated)
         , m_huge(hugeNegotiated)
-        , m_maxOutstanding(maxOutstanding)
+        , m_window{qint64(maxOutstanding) * qint64(ClipboardFileLimits::MaxRangeBytes), maxOutstanding}
     {
     }
 
+    /// The in-flight limit for this peer (takes effect for the next request; requests already accepted stay). Never below one request.
+    void setWindow(const ClipboardFileLimits::Window &window)
+    {
+        m_window = {std::max<qint64>(window.maxBytes, 1), std::max(window.maxCount, 1)};
+    }
+    const ClipboardFileLimits::Window &window() const
+    {
+        return m_window;
+    }
     /// A new offer replaces the current one. Without locking this ends all outstanding requests (the simple model).
     void setCurrent(Snapshot snapshot)
     {
         m_current = std::move(snapshot);
         m_haveCurrent = true;
         if (!m_locking) {
-            m_outstanding.clear();
+            cancelAll();
         }
     }
     void clearCurrent()
@@ -137,7 +148,7 @@ public:
         m_haveCurrent = false;
         m_current = {};
         if (!m_locking) {
-            m_outstanding.clear();
+            cancelAll();
         }
     }
 
@@ -228,26 +239,37 @@ public:
         if (m_outstanding.contains(request.streamId)) {
             return violation(Reason::DuplicateStream);
         }
-        if (int(m_outstanding.size()) >= m_maxOutstanding) {
+        if (!ClipboardFileLimits::windowAdmits(m_window, int(m_outstanding.size()), m_outstandingBytes, request.length)) {
             ++m_refused;
             return {Verdict::Refuse, Reason::TooManyOutstanding, 0};
         }
-        m_outstanding.insert(request.streamId);
+        m_outstanding.insert(request.streamId, request.length);
+        m_outstandingBytes += qint64(request.length);
         return {Verdict::Accept, Reason::None, item.size};
     }
 
     /// The response for \a streamId was sent (or it was cancelled).
     void complete(quint32 streamId)
     {
-        m_outstanding.remove(streamId);
+        const auto it = m_outstanding.constFind(streamId);
+        if (it != m_outstanding.constEnd()) {
+            m_outstandingBytes -= qint64(it.value());
+            m_outstanding.erase(it);
+        }
     }
     void cancelAll()
     {
         m_outstanding.clear();
+        m_outstandingBytes = 0;
     }
     int outstanding() const
     {
         return int(m_outstanding.size());
+    }
+    /// The sum of the lengths of the requests in flight (the memory the answers can take: never above window().maxBytes, except for the one request always admitted).
+    qint64 outstandingBytes() const
+    {
+        return m_outstandingBytes;
     }
     int violations() const
     {
@@ -286,12 +308,13 @@ private:
 
     bool m_locking = false;
     bool m_huge = false;
-    int m_maxOutstanding = ClipboardFileLimits::MaxOutstanding;
+    ClipboardFileLimits::Window m_window = ClipboardFileLimits::LegacyWindow;
     Snapshot m_current;
     bool m_haveCurrent = false;
     QHash<quint32, Snapshot> m_locks;
     QList<quint32> m_order; ///< least recently used first
-    QSet<quint32> m_outstanding;
+    QHash<quint32, quint32> m_outstanding; ///< streamId -> requested length
+    qint64 m_outstandingBytes = 0;
     int m_violations = 0;
     int m_refused = 0;
     bool m_aborted = false;

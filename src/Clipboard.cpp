@@ -192,6 +192,12 @@ public:
     void sendFileContentsResponse(quint32 streamId, bool ok, const QByteArray &data, bool range = false);
     void endFiles(bool withdraw);
     ClipboardFilePacing::Policy filePolicy() const;
+    /// OPT-078 small files: the window the host SERVES this client under (the validator and the read window): our own client may keep up to
+    /// NegotiatedWindow requests in flight (it learned the size from our `capabilities`, which it can only have answered once it is ours), a stock client the old 16.
+    ClipboardFileLimits::Window serveWindow() const;
+    /// The window the host REQUESTS under for a client-to-host copy: min(ours, what the client advertised), or the old 16 for a client that said nothing.
+    ClipboardFileLimits::Window fetchWindow() const;
+    bool stockClient() const;
     void sendFilesNotice(const char *event, quint32 count, const char *reason, const char *direction = nullptr);
     void sendFailResponse();
     void respondWithText(const QString &hostText);
@@ -1426,11 +1432,25 @@ bool Clipboard::Private::negotiated(bool *locking, bool *huge)
     return context->streamFileClipEnabled;
 }
 
+bool Clipboard::Private::stockClient() const
+{
+    return stockOverride ? *stockOverride : session && !session->isOwnClient();
+}
+
 ClipboardFilePacing::Policy Clipboard::Private::filePolicy() const
 {
     // A client without KRDPCTL (a stock client) cannot ask for a mode: Auto, and a window of at most four.
-    const bool stock = stockOverride ? *stockOverride : session && !session->isOwnClient();
-    return ClipboardFilePacing::effectivePolicy(fileRequest.mode, fileRequest.capBytesPerSecond, fileCeiling, stock);
+    return ClipboardFilePacing::effectivePolicy(fileRequest.mode, fileRequest.capBytesPerSecond, fileCeiling, stockClient());
+}
+
+ClipboardFileLimits::Window Clipboard::Private::serveWindow() const
+{
+    return ClipboardFileLimits::windowForServing(stockClient());
+}
+
+ClipboardFileLimits::Window Clipboard::Private::fetchWindow() const
+{
+    return ClipboardFileLimits::windowForRequesting(stockClient(), fileRequest.window);
 }
 
 void Clipboard::Private::ensureServe()
@@ -1471,6 +1491,7 @@ void Clipboard::Private::ensureServe()
         Q_EMIT q->hostFileTransferEnded(seq, int(reason), int(cause));
     };
     serve = std::make_unique<ClipboardFileServe::Server>(callbacks, locking, huge, filePolicy());
+    serve->setWindow(serveWindow());
 }
 
 void Clipboard::Private::sendFilesNotice(const char *event, quint32 count, const char *reason, const char *direction)
@@ -1530,6 +1551,7 @@ void Clipboard::Private::pumpFiles()
         fileTickValid = true;
         lastFileTick = now;
         serve->setPolicy(filePolicy()); // the mode, the ceiling and whether the client is our own may have changed
+        serve->setWindow(serveWindow());
         ClipboardFilePacing::Inputs inputs;
         if (session && session->videoStream()) {
             const Stats::Snapshot snapshot = session->videoStream()->statsSnapshot();
@@ -1658,6 +1680,7 @@ void Clipboard::setFileTransferRequest(const FileRate &request)
     d->fileRequest = request;
     if (d->serve) {
         d->serve->setPolicy(d->filePolicy());
+        d->serve->setWindow(d->serveWindow());
     }
 }
 
@@ -1666,6 +1689,7 @@ void Clipboard::setFileCeiling(const ClipboardFilePacing::Ceiling &ceiling)
     d->fileCeiling = ceiling;
     if (d->serve) {
         d->serve->setPolicy(d->filePolicy());
+        d->serve->setWindow(d->serveWindow());
     }
 }
 
@@ -1674,7 +1698,18 @@ void Clipboard::setStockClientForTest(bool stock)
     d->stockOverride = stock;
     if (d->serve) {
         d->serve->setPolicy(d->filePolicy());
+        d->serve->setWindow(d->serveWindow());
     }
+}
+
+ClipboardFileLimits::Window Clipboard::effectiveServeWindow() const
+{
+    return d->serveWindow();
+}
+
+ClipboardFileLimits::Window Clipboard::effectiveFetchWindow() const
+{
+    return d->fetchWindow();
 }
 
 ClipboardFilePacing::Policy Clipboard::effectiveFilePolicy() const
@@ -1930,6 +1965,7 @@ void Clipboard::Private::startFetch(const Clipboard::ClientFilesReply &)
     callbacks.ended = [this, seq](EndReason reason, AckStatus cause) { onFetchEnded(seq, reason, cause); };
     Options options;
     options.clipDataId = cf.lockId;
+    options.window = fetchWindow();
     cf.fetcher = std::make_shared<Fetcher>(callbacks, options, filePolicy());
     fetchTickValid = false;
     fetchStatsPrevious.reset();
@@ -1972,6 +2008,7 @@ void Clipboard::Private::pumpFetch()
         fetchTickValid = true;
         lastFetchTick = now;
         fetcher->setPolicy(filePolicy()); // the mode, the ceiling and whether the client is our own may have changed
+        fetcher->setWindow(fetchWindow()); // and the client's `clipboard-transfer` (with its window) may have arrived since the copy began
         ClipboardFilePacing::Inputs inputs;
         if (session && session->videoStream()) {
             const Stats::Snapshot snapshot = session->videoStream()->statsSnapshot();

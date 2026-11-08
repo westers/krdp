@@ -509,6 +509,82 @@ private Q_SLOTS:
         run(p, c, activeVideo(100, 60), 100);
         QVERIFY(qAbs(p.rateBytesPerSecond() - 20 * Mbit) < 0.5 * Mbit);
     }
+
+    // ---- OPT-078 small files: the byte budget the pacer derives from its rate ----
+    void byteBudgetEqualsTheOldCountTimesRangeAtEveryRate()
+    {
+        // With 256 KiB requests the new budget admits exactly the old W requests (bytes = W x 256 KiB), whatever the count cap says.
+        struct Row { double mbit; qint64 bytes; };
+        for (const Row r : {Row{20, 250000}, Row{22, 2 * 262144}, Row{43, 3 * 262144}, Row{100, 5 * 262144}, Row{500, 16 * 262144}, Row{10000, 4 * 1024 * 1024}}) {
+            Clock0 c;
+            Policy policy;
+            policy.capBytesPerSecond = quint64(r.mbit * Mbit);
+            FileTransferPacer p(policy);
+            p.reset(c.now);
+            run(p, c, idleLan(100000), 5000);
+            const auto w = p.window(Limits::NegotiatedWindow);
+            QCOMPARE(w.maxBytes, r.bytes);
+            QCOMPARE(w.maxCount, 128);
+            // ... which is the old window in 256 KiB requests
+            QCOMPARE(std::clamp(int(w.maxBytes / (256 * 1024)), 1, 16), p.window());
+            // the legacy window has no byte rule of its own (16 requests of any length): only the rate's budget, which with 256 KiB requests
+            // the count of 16 caps at the same 4 MiB
+            const double wanted = p.rateBytesPerSecond() * WindowSeconds;
+            const qint64 raw = wanted <= 262144 ? qint64(std::max(wanted, double(MinSliceBytes))) : qint64(std::ceil(wanted / 262144)) * 262144;
+            QCOMPARE(p.window(Limits::LegacyWindow).maxBytes, std::min<qint64>(raw, Limits::LegacyWindow.maxBytes));
+            QCOMPARE(p.window(Limits::LegacyWindow).maxCount, 16);
+        }
+    }
+    void aBiggerCountCannotRaiseTheBytesOfACapOrBalancedMode()
+    {
+        // Fixed cap 1 MB/s: about 100 ms of data in flight (one 100 KB budget), the same with 16 or 128 requests allowed.
+        Clock0 c;
+        Policy cap;
+        cap.capBytesPerSecond = 1'000'000;
+        FileTransferPacer capped(cap);
+        capped.reset(c.now);
+        run(capped, c, idleLan(100000), 5000);
+        QCOMPARE(capped.window(Limits::LegacyWindow).maxBytes, capped.window(Limits::NegotiatedWindow).maxBytes);
+        QCOMPARE(capped.window(Limits::NegotiatedWindow).maxBytes, qint64(100'000));
+        // Balanced on a 100 Mbit link: 50% of the capacity = 6.25 MB/s -> 625 kB, 3 x 256 KiB
+        Policy balanced;
+        balanced.balanced = true;
+        FileTransferPacer half(balanced);
+        half.reset(c.now);
+        run(half, c, idleLan(100), 500);
+        QCOMPARE(half.window(Limits::NegotiatedWindow).maxBytes, half.window(Limits::LegacyWindow).maxBytes);
+        QVERIFY(half.window(Limits::NegotiatedWindow).maxBytes <= 4 * 256 * 1024);
+        // The floor: 16 KiB, one small request or a few tiny ones; never the 4 MiB
+        Policy floor;
+        floor.capBytesPerSecond = 1; // below the floor: the cap wins
+        FileTransferPacer slow(floor);
+        slow.reset(c.now);
+        QCOMPARE(slow.window(Limits::NegotiatedWindow).maxBytes, qint64(MinSliceBytes));
+        // Pressure drives any window to the floor rate: the budget follows
+        FileTransferPacer pressured;
+        pressured.reset(c.now);
+        run(pressured, c, idleLan(100), 100);
+        const auto before = pressured.window(Limits::NegotiatedWindow).maxBytes;
+        run(pressured, c, pressure(100), 100);
+        QVERIFY(pressured.window(Limits::NegotiatedWindow).maxBytes < before);
+        QCOMPARE(pressured.window(Limits::NegotiatedWindow).maxBytes, qint64(MinSliceBytes));
+    }
+    void unlimitedGetsTheLimitsAndAStockClientTheOldCount()
+    {
+        Clock0 c;
+        Policy unlimited;
+        unlimited.unlimited = true;
+        FileTransferPacer free(unlimited);
+        QCOMPARE(free.window(Limits::NegotiatedWindow), Limits::NegotiatedWindow);
+        QCOMPARE(free.window(Limits::LegacyWindow), Limits::LegacyWindow);
+        // A stock client: the old count (<= 4), with no byte rule beyond it, whatever window it is given
+        FileTransferPacer stock(effectivePolicy(RequestedMode::Unlimited, std::nullopt, Ceiling::none(), true));
+        stock.reset(c.now);
+        run(stock, c, idleLan(10000), 500);
+        QCOMPARE(stock.window(Limits::NegotiatedWindow).maxCount, Limits::StockClientWindow);
+        QCOMPARE(stock.window(Limits::LegacyWindow).maxCount, Limits::StockClientWindow);
+        QCOMPARE(stock.window(Limits::NegotiatedWindow).maxBytes, qint64(Limits::StockClientWindow) * Limits::MaxRangeBytes);
+    }
 };
 
 QTEST_GUILESS_MAIN(ClipboardFilePacingTest)

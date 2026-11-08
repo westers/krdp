@@ -11,6 +11,7 @@
 #include <QRegularExpression>
 #include <QString>
 
+#include "ClipboardFileLimits.h"
 #include "ClipboardFilePacing.h"
 
 namespace KRdp::ClipboardTransfer
@@ -19,8 +20,12 @@ namespace KRdp::ClipboardTransfer
  * OPT-078 (spec 7): the KRDPCTL `clipboard-transfer` record (v1), modelled on `audio-priority`: the client says how much of the link
  * its file transfers may take, the host answers with the effective policy (the client's request under the host owner's ceiling).
  *
- *   -> {type:"clipboard-transfer", v:1, id, mode:"auto"|"balanced"|"cap"|"unlimited", capBytesPerSecond?}
+ *   -> {type:"clipboard-transfer", v:1, id, mode:"auto"|"balanced"|"cap"|"unlimited", capBytesPerSecond?, window?:{maxBytes, maxCount}}
  *   <- {type, v:1, id, ok, effective:{mode, capBytesPerSecond?}, ceiling:{mode, capBytesPerSecond?}, message}
+ *
+ * `window` (OPT-078 small files, additive): the in-flight window this client accepts for the host's FILECONTENTS requests of a client-to-host copy
+ * and uses for its own (ClipboardFileLimits::Window). Strict when present: both integers, maxBytes >= RangeBytes (256 KiB), maxCount >= 1, no other
+ * member; a record with a bad `window` is invalid. Absent = the old 16 requests.
  *
  * Strict: the id is 1..64 characters; `capBytesPerSecond` is present exactly for "cap" and between 100 kB/s and 1 GB/s (the client's
  * 0.1 to 1000 MB/s). Unlimited is accepted but only honoured without a ceiling (the reply says what is in force).
@@ -34,7 +39,29 @@ struct Request {
     QString id;
     ClipboardFilePacing::RequestedMode mode = ClipboardFilePacing::RequestedMode::Auto;
     std::optional<quint64> capBytesPerSecond;
+    std::optional<ClipboardFileLimits::Window> window; ///< the client's advertised in-flight window
 };
+
+/// The `window` member of a record: nullopt with *ok true = absent; nullopt with *ok false = present but malformed.
+inline std::optional<ClipboardFileLimits::Window> parseWindow(const QJsonObject &record, bool *ok)
+{
+    *ok = true;
+    const auto value = record.value(QStringLiteral("window"));
+    if (value.isUndefined()) return std::nullopt;
+    *ok = false;
+    if (!value.isObject()) return std::nullopt;
+    const QJsonObject object = value.toObject();
+    const auto bytes = object.value(QStringLiteral("maxBytes"));
+    const auto count = object.value(QStringLiteral("maxCount"));
+    if (object.size() != 2 || !bytes.isDouble() || !count.isDouble()) return std::nullopt;
+    const double b = bytes.toDouble();
+    const double c = count.toDouble();
+    if (!std::isfinite(b) || !std::isfinite(c) || b != std::floor(b) || c != std::floor(c) || b > 1e15 || c > 1e9 || !ClipboardFileLimits::validAdvertisedWindow(qint64(b), qint64(c))) {
+        return std::nullopt;
+    }
+    *ok = true;
+    return ClipboardFileLimits::Window{qint64(b), int(c)};
+}
 
 inline std::optional<Request> parse(const QJsonObject &record)
 {
@@ -46,6 +73,9 @@ inline std::optional<Request> parse(const QJsonObject &record)
     }
     Request request;
     request.id = id.toString();
+    bool windowOk = true;
+    request.window = parseWindow(record, &windowOk);
+    if (!windowOk) return std::nullopt;
     const QString name = mode.toString();
     const auto cap = record.value(QStringLiteral("capBytesPerSecond"));
     if (name == QLatin1String("cap")) {

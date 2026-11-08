@@ -1788,7 +1788,7 @@ void ConsoleHostController::onControlRecord(RdpConnection *connection, ConsoleCo
         } else if (!clipboard->filesEnabled()) {
             replyTo(connection, ClipboardTransfer::reply(record, clipboard->effectiveFilePolicy(), m_clipboardFileCeiling, u"file copy is off on this host"_s));
         } else {
-            clipboard->setFileTransferRequest({request->mode, request->capBytesPerSecond});
+            clipboard->setFileTransferRequest({request->mode, request->capBytesPerSecond, request->window});
             replyTo(connection, ClipboardTransfer::reply(record, clipboard->effectiveFilePolicy(), m_clipboardFileCeiling));
         }
         return;

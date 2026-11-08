@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 
+#include "ClipboardFileLimits.h"
 #include "ClipboardFilePacing.h"
 #include "krdp_export.h"
 
@@ -103,10 +104,16 @@ public:
     struct FileRate {
         ClipboardFilePacing::RequestedMode mode = ClipboardFilePacing::RequestedMode::Auto;
         std::optional<quint64> capBytesPerSecond;
+        /// OPT-078 small files: the in-flight window the client advertised in its `clipboard-transfer` (what its own FileSender accepts). Absent: the old 16 requests.
+        std::optional<ClipboardFileLimits::Window> window;
     };
     void setFileTransferRequest(const FileRate &request);
     void setFileCeiling(const ClipboardFilePacing::Ceiling &ceiling);
     ClipboardFilePacing::Policy effectiveFilePolicy() const;
+    /** OPT-078 small files: the in-flight windows in force now. Serving a client (host to client): NegotiatedWindow for our own client, the old 16 for a stock one.
+     *  Requesting from it (client to host copy): min(ours, what its `clipboard-transfer` advertised), the old 16 when it said nothing. */
+    ClipboardFileLimits::Window effectiveServeWindow() const;
+    ClipboardFileLimits::Window effectiveFetchWindow() const;
     /** Test seam: treat the client as a stock one (no KRDPCTL: Auto, window of at most four) or as our own, whatever the connection says. */
     void setStockClientForTest(bool stock);
     // ---- OPT-078 phase 3: client-to-host file copy ----

@@ -4,6 +4,7 @@
 #include "LayoutControl.h"
 
 #include <QRegularExpression>
+#include "ClipboardFileLimits.h"
 #include "RemoteMonitorGeometry.h"
 
 #include <algorithm>
@@ -497,6 +498,10 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
                                    {QStringLiteral("huge"), true},
                                    {QStringLiteral("transfer"), true}};
             if (files->maxMode == QLatin1String("cap")) filesGroup.insert(QStringLiteral("maxRateBytesPerSecond"), files->maxRateBytesPerSecond);
+            // OPT-078 small files (additive): the in-flight window this host serves and requests under, towards a client that answered `capabilities`.
+            filesGroup.insert(QStringLiteral("window"),
+                              QJsonObject{{QStringLiteral("maxBytes"), qint64(ClipboardFileLimits::NegotiatedWindow.maxBytes)},
+                                          {QStringLiteral("maxCount"), ClipboardFileLimits::NegotiatedWindow.maxCount}});
             group.insert(QStringLiteral("files"), filesGroup);
         }
         record.insert(QStringLiteral("clipboard"), group);

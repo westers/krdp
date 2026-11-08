@@ -421,13 +421,14 @@ private Q_SLOTS:
         capped.capBytesPerSecond = 100'000;
         Rig rig(true, true, capped);
         for (quint32 i = 0; i < 3; ++i) rig.request(range(170 + i, 0, i * 1000, 1000));
-        // the window is one: 170 is read first
-        QCOMPARE(rig.reads.size(), 1);
+        // OPT-078 small files: the window is a byte budget (about 100 ms of data, at least 16 KiB), so three 1000-byte requests are all read at
+        // once; the pacer's token bucket still decides when a response goes out, and the oldest goes first
+        QCOMPARE(rig.reads.size(), 3);
         rig.answer(170);
         QCOMPARE(rig.responses.size(), 1);
         QCOMPARE(rig.responses.last().stream, quint32(170));
-        // the overdrawn bucket now holds 171 back: it is read (the window opened) but not written
-        QCOMPARE(rig.reads.size(), 2);
+        // the overdrawn bucket now holds 171 back: it is read but not written
+        QCOMPARE(rig.reads.size(), 3);
         rig.answer(171);
         QCOMPARE(rig.responses.size(), 1);
         QVERIFY(rig.server->delayUntilNext(rig.now) > 0ms);
@@ -462,6 +463,134 @@ private Q_SLOTS:
         }
         QCOMPARE(rig.server->pacer().window(), 1);
         QVERIFY(rig.server->pacer().rateBitsPerSecond() <= ClipboardFilePacing::FloorBitsPerSecond * 2);
+    }
+
+    // ---- OPT-078 small files: the byte-budget window of the host that serves a client ----
+    void anOwnClientMayHaveManySmallReadsInFlight()
+    {
+        Rig rig; // unlimited pacer
+        rig.server->setWindow(ClipboardFileLimits::NegotiatedWindow);
+        for (quint32 i = 0; i < 128; ++i) rig.request(range(100 + i, 0, 0, 20'000));
+        QCOMPARE(rig.reads.size(), 128);
+        QCOMPARE(rig.server->counters().peakReads, 128);
+        QCOMPARE(rig.server->counters().peakReadBytes, qint64(128) * 20'000);
+        rig.request(range(300, 0, 0, 20'000)); // the 129th: refused (not queued, not a violation)
+        QCOMPARE(rig.server->counters().refused, quint64(1));
+        QCOMPARE(rig.server->counters().violations, quint64(0));
+        QCOMPARE(rig.reads.size(), 128);
+        // every one is answered with its own bytes, in order
+        for (quint32 i = 0; i < 128; ++i) rig.answer(100 + i);
+        QCOMPARE(rig.respondedOk(), 128);
+        QCOMPARE(rig.server->pending(), 0);
+    }
+    void thePeerThatDidNotNegotiateKeepsSixteen()
+    {
+        Rig rig; // the default window
+        QCOMPARE(rig.server->window(), ClipboardFileLimits::LegacyWindow);
+        for (quint32 i = 0; i < 20; ++i) rig.request(range(100 + i, 0, 0, 20'000));
+        QCOMPARE(rig.reads.size(), 16);
+        QCOMPARE(rig.server->counters().refused, quint64(4));
+    }
+    void largeRangesAreBoundedByFourMiBAsBefore()
+    {
+        Rig rig;
+        rig.server->setWindow(ClipboardFileLimits::NegotiatedWindow);
+        for (quint32 i = 0; i < 17; ++i) rig.request(range(100 + i, 2, quint64(i) * Range, Range));
+        QCOMPARE(rig.reads.size(), 16); // 16 x 256 KiB = 4 MiB, exactly as the old count window
+        QCOMPARE(rig.server->counters().peakReadBytes, qint64(4) * 1024 * 1024);
+        QCOMPARE(rig.server->counters().refused, quint64(1)); // the 17th: over the bytes although 17 < 128
+        // the same request count as with the old window
+        Rig old;
+        for (quint32 i = 0; i < 17; ++i) old.request(range(100 + i, 2, quint64(i) * Range, Range));
+        QCOMPARE(old.reads.size(), 16);
+    }
+    void aFloodNeverGrowsTheServer()
+    {
+        Rig rig;
+        rig.server->setWindow(ClipboardFileLimits::NegotiatedWindow);
+        for (quint32 i = 0; i < 20000; ++i) {
+            rig.request(range(1000 + i, 2, quint64(i % 1000) * 4096, i % 4 ? 4096 : 256 * 1024));
+            QVERIFY(rig.server->pending() <= 128);
+        }
+        QVERIFY(rig.server->counters().peakReads <= 128);
+        QVERIFY(rig.server->counters().peakReadBytes <= ClipboardFileLimits::NegotiatedWindow.maxBytes);
+        QCOMPARE(rig.server->counters().violations, quint64(0));
+        QVERIFY(!rig.server->aborted());
+        QVERIFY(rig.reads.size() <= 128);
+    }
+    void invalidRequestsStillEndTheOfferAfterThreeUnderTheNewWindow()
+    {
+        Rig rig;
+        rig.server->setWindow(ClipboardFileLimits::NegotiatedWindow);
+        rig.request(range(1, 9, 0, 10)); // index out of range
+        rig.request(range(2, 0, 2 * 1024 * 1024, 10)); // past the end
+        QVERIFY(!rig.server->aborted());
+        rig.request(range(3, 0, 0, 0));
+        QVERIFY(rig.server->aborted());
+        QCOMPARE(rig.server->counters().violations, quint64(3));
+        QVERIFY(rig.reads.isEmpty()); // none of it reached the worker
+    }
+    void aStockClientKeepsFourReadsAndSixteenRequests()
+    {
+        auto stock = ClipboardFilePacing::effectivePolicy(ClipboardFilePacing::RequestedMode::Unlimited, std::nullopt, ClipboardFilePacing::Ceiling::none(), true);
+        Rig rig(true, true, stock);
+        ClipboardFilePacing::Inputs lan;
+        lan.capacityKbps = 1'000'000;
+        lan.sendQueueBytes = 0;
+        for (int i = 0; i < 80; ++i) {
+            rig.advance(100ms);
+            rig.server->tick(rig.now, lan);
+        }
+        // the owner gives a stock client the legacy window (Clipboard::serveWindow), and even a negotiated one cannot widen the old count
+        for (const auto &window : {ClipboardFileLimits::LegacyWindow, ClipboardFileLimits::NegotiatedWindow}) {
+            Rig r(true, true, stock);
+            for (int i = 0; i < 80; ++i) {
+                r.advance(100ms);
+                r.server->tick(r.now, lan);
+            }
+            r.server->setWindow(window);
+            for (quint32 i = 0; i < 20; ++i) r.request(range(100 + i, 0, 0, 20'000));
+            QCOMPARE(r.reads.size(), 4);
+        }
+        for (quint32 i = 0; i < 20; ++i) rig.request(range(100 + i, 0, 0, 20'000));
+        QCOMPARE(rig.reads.size(), 4);
+        QCOMPARE(rig.server->counters().refused, quint64(4)); // the validator still allows sixteen
+    }
+    void aCapStillBoundsTheRateWhateverTheCountIs()
+    {
+        // 1 MB/s cap, 2000 requests of 20 KB served as fast as the worker answers: the response rate is the cap, with 16 or 128 slots.
+        for (const auto &window : {ClipboardFileLimits::LegacyWindow, ClipboardFileLimits::NegotiatedWindow}) {
+            ClipboardFilePacing::Policy capped;
+            capped.capBytesPerSecond = 1'000'000;
+            Rig rig(true, true, capped);
+            rig.server->setWindow(window);
+            ClipboardFilePacing::Inputs lan;
+            lan.capacityKbps = 10'000'000;
+            lan.sendQueueBytes = 0;
+            const auto start = rig.now;
+            quint32 next = 0;
+            quint32 answered = 0;
+            int steps = 0;
+            while (rig.respondedOk() < 400 && rig.now - start < 30s) {
+                rig.advance(10ms);
+                if (++steps % 10 == 0) rig.server->tick(rig.now, lan);
+                while (next < 400 && rig.server->pending() < window.maxCount) { // the client keeps asking as fast as the validator lets it
+                    rig.server->onRequest(range(1000 + next, 0, 0, 20'000), rig.now);
+                    ++next;
+                }
+                rig.pump();
+                for (; answered < quint32(rig.reads.size()); ++answered) rig.finish(rig.reads.at(int(answered)).streamId);
+                rig.pump();
+            }
+            QVERIFY(rig.respondedOk() >= 400);
+            const qint64 responseBytes = rig.server->counters().bytes;
+            const double seconds = std::chrono::duration<double>(rig.now - start).count();
+            // 400 x 20 KB = 8 MB at 1 MB/s: 8 s; the rate never passes the cap by more than the burst
+            QVERIFY2(seconds > 7.5, qPrintable(QString::number(seconds)));
+            QVERIFY2(double(responseBytes) / seconds <= 1'000'000 * 1.03, qPrintable(QString::number(double(responseBytes) / seconds)));
+            // the reads in flight are bounded by the rate's budget (100 kB = 5 requests), not by 128
+            QVERIFY2(rig.server->counters().peakReadBytes <= 100'000 + 20'000, qPrintable(QString::number(rig.server->counters().peakReadBytes)));
+        }
     }
 };
 

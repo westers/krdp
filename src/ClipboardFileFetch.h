@@ -25,10 +25,13 @@ namespace KRdp::ClipboardFileFetch
  * files in a push plan with FILECONTENTS_RANGE requests, hands each answer to the host's worker to write, and counts a request as done
  * only when the worker has written it:
  *
- *   in flight = requested + answered-but-undelivered + delivered-but-unacknowledged  <=  the pacer's window (16; 4 for a stock client)
+ *   in flight = requested + answered-but-undelivered + delivered-but-unacknowledged  <=  the window
  *
- * so a slow disk or a slow link both stop new requests, and the bytes in flight on the link are bounded by the window times the
- * request size. Request size and the rate at which new requests are issued come from the same FileTransferPacer as the other
+ * so a slow disk or a slow link both stop new requests. The window is a byte budget with a count cap (OPT-078 small files, see
+ * ClipboardFileLimits::Window): requests are issued while fewer than maxCount are in flight and their requested bytes together stay within
+ * the pacer's budget (about 100 ms of data at the current rate, at most maxBytes). Towards a client that did not advertise a window that is
+ * the old 16 requests (4 for a stock client); towards our own new client 4 MiB and up to 128 requests, so a thousand small files do not
+ * cost a round trip per 16. The bytes in flight on the link are bounded by the budget. Request size and the rate at which new requests are issued come from the same FileTransferPacer as the other
  * direction (floor 256 kbit/s, AIMD), so a transfer yields to video and audio; the client additionally paces its own responses.
  *
  * Hostile peers (spec 4.3): a response must be exactly the bytes asked for (shorter: the file shrank under the client; longer: cut
@@ -117,6 +120,7 @@ struct Callbacks {
 
 struct Options {
     std::optional<quint32> clipDataId;
+    ClipboardFileLimits::Window window = ClipboardFileLimits::LegacyWindow; ///< min(own, the client's advertised window), or the old rule
 };
 
 struct Counters {
@@ -129,6 +133,7 @@ struct Counters {
     int strayAcks = 0;
     int lateDropped = 0;
     int peakInflight = 0;
+    qint64 peakInflightBytes = 0; ///< their requested bytes (OPT-078 small files)
 };
 
 class Fetcher
@@ -158,8 +163,12 @@ public:
     }
 
     void setPolicy(const ClipboardFilePacing::Policy &policy) { m_pacer.setPolicy(policy); }
+    /// The window towards the client (it may be learned after the transfer began: the next request uses it).
+    void setWindow(const ClipboardFileLimits::Window &window) { m_options.window = window; }
     const ClipboardFilePacing::FileTransferPacer &pacer() const { return m_pacer; }
+    /// The pacer's rate-derived request count (the old window; diagnostics). What admits a request is currentWindow().
     int window() const { return m_pacer.window(); }
+    ClipboardFileLimits::Window currentWindow() const { return m_pacer.window(m_options.window); }
     /// The size of the next request: what the window holds for about 100 ms at the current rate, between the slice floor and the range size.
     quint32 requestBytes() const
     {
@@ -182,8 +191,9 @@ public:
         if (!m_began || m_ended || m_pumping) return;
         m_pumping = true;
         deliverReady();
-        while (!m_ended && moreToRequest() && inflight() < m_pacer.window()) {
+        while (!m_ended && moreToRequest()) {
             const quint32 length = nextLength();
+            if (!admits(length)) break;
             if (!m_pacer.maySend(now, std::nullopt, length)) break;
             if (!issue(length, now)) break;
         }
@@ -194,7 +204,7 @@ public:
     /// How long until the bucket would let the next request go (0: now, or nothing waits).
     std::chrono::milliseconds delayUntilNext(Clock::time_point now)
     {
-        if (m_ended || !moreToRequest() || inflight() >= m_pacer.window()) return std::chrono::milliseconds(0);
+        if (m_ended || !moreToRequest() || !admits(nextLength())) return std::chrono::milliseconds(0);
         return m_pacer.delayUntilSend(now);
     }
 
@@ -297,6 +307,13 @@ public:
     }
 
     int inflight() const { return int(m_items.size()); }
+    /// The requested bytes of everything in flight.
+    qint64 inflightBytes() const
+    {
+        qint64 total = 0;
+        for (const auto &item : m_items) total += qint64(item.request.length);
+        return total;
+    }
     bool ended() const { return m_ended; }
     const Counters &counters() const { return m_counters; }
     /// Bytes the worker has acknowledged (for progress).
@@ -312,6 +329,7 @@ private:
     };
 
     bool moreToRequest() const { return m_fileIndex < m_files.size(); }
+    bool admits(quint32 length) const { return ClipboardFileLimits::windowAdmits(m_pacer.window(m_options.window), inflight(), inflightBytes(), length); }
 
     quint32 nextLength() const
     {
@@ -336,6 +354,7 @@ private:
         ++m_counters.requests;
         m_counters.bytesRequested += length;
         m_counters.peakInflight = std::max(m_counters.peakInflight, inflight());
+        m_counters.peakInflightBytes = std::max(m_counters.peakInflightBytes, inflightBytes());
         m_pacer.consume(now, length);
         m_offset += length;
         if (m_offset >= file.size) {

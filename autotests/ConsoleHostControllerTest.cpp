@@ -4113,6 +4113,19 @@ private Q_SLOTS:
         // garbage is refused with ok:false
         rig.host.onControlRecord(&rig.connection, rig.client->id, record(u"warp"_s));
         QVERIFY(!reply.value(u"ok"_s).toBool());
+        // OPT-078 small files: the record's optional `window` is what the host requests under; absent keeps the old 16, malformed refuses the record
+        QCOMPARE(rig.connection.clipboard()->effectiveFetchWindow(), ClipboardFileLimits::LegacyWindow);
+        auto windowed = record(u"auto"_s);
+        windowed.insert(u"window"_s, QJsonObject{{u"maxBytes"_s, 4194304}, {u"maxCount"_s, 128}});
+        rig.host.onControlRecord(&rig.connection, rig.client->id, windowed);
+        QVERIFY(reply.value(u"ok"_s).toBool());
+        QCOMPARE(rig.connection.clipboard()->effectiveFetchWindow(), ClipboardFileLimits::NegotiatedWindow);
+        windowed.insert(u"window"_s, QJsonObject{{u"maxBytes"_s, 4194304}, {u"maxCount"_s, 0}});
+        rig.host.onControlRecord(&rig.connection, rig.client->id, windowed);
+        QVERIFY(!reply.value(u"ok"_s).toBool());
+        QCOMPARE(rig.connection.clipboard()->effectiveFetchWindow(), ClipboardFileLimits::NegotiatedWindow); // the bad record changed nothing
+        rig.host.onControlRecord(&rig.connection, rig.client->id, record(u"auto"_s)); // a later record without one: back to the old 16
+        QCOMPARE(rig.connection.clipboard()->effectiveFetchWindow(), ClipboardFileLimits::LegacyWindow);
     }
 
     void clipboardImageClientCopyReachesTheWorkerAsPng()
@@ -4256,7 +4269,8 @@ private Q_SLOTS:
             // OPT-078: file copy follows ClipboardFiles (both by default) per direction, and the clipboard direction narrows it too.
             expected.insert(u"files"_s, QJsonObject{{u"hostToClient"_s, both || direction == ConsoleClipboardPolicy::Direction::HostToClient},
                                                     {u"clientToHost"_s, both || direction == ConsoleClipboardPolicy::Direction::ClientToHost},
-                                                    {u"maxMode"_s, u"auto"_s}, {u"huge"_s, true}, {u"transfer"_s, true}});
+                                                    {u"maxMode"_s, u"auto"_s}, {u"huge"_s, true}, {u"transfer"_s, true},
+                                                    {u"window"_s, QJsonObject{{u"maxBytes"_s, 4194304}, {u"maxCount"_s, 128}}}}); // OPT-078 small files
             QCOMPARE(caps.value(u"clipboard"_s).toObject(), expected);
         }
     }

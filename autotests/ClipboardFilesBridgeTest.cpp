@@ -440,7 +440,7 @@ private Q_SLOTS:
         Rig rig;
         rig.offerAndServe();
         for (quint32 i = 0; i < 3; ++i) rig.contentsRequest(60 + i, 0, FILECONTENTS_RANGE, quint64(i) * 1000, 1000);
-        QTRY_COMPARE(rig.reads.size(), 1);
+        QTRY_COMPARE(rig.reads.size(), 3); // OPT-078 small files: the window is a byte budget (16 KiB at the start rate), so three 1000-byte reads fit
         rig.cancels.clear();
         rig.clipboard.setFileDirections(false, false);
         QCOMPARE(rig.sent.contents.size(), 3); // every pending request is answered FAIL
@@ -515,6 +515,44 @@ private Q_SLOTS:
         QLoggingCategory::setFilterRules(QString());
         qInstallMessageHandler(previous);
         for (const auto &message : std::as_const(g_messages)) QVERIFY2(!message.contains(QStringLiteral("CANARY")), qPrintable(message));
+    }
+
+    // OPT-078 small files: the window a host serves a client under, end to end through the broker's cliprdr side.
+    void anOwnClientIsServedUnderTheByteWindowAndAStockClientUnderSixteen()
+    {
+        // an own client (no session in this rig: not stock) with an unlimited pacer: many small requests are read at once
+        Rig own;
+        own.offerAndServe();
+        QCOMPARE(own.clipboard.effectiveServeWindow(), ClipboardFileLimits::NegotiatedWindow);
+        Clipboard::FileRate fast;
+        fast.mode = ClipboardFilePacing::RequestedMode::Unlimited;
+        own.clipboard.setFileTransferRequest(fast);
+        for (quint32 i = 0; i < 40; ++i) own.contentsRequest(100 + i, 0, FILECONTENTS_RANGE, 0, 1000);
+        QTRY_COMPARE(own.reads.size(), 40);
+        // a stock client: the old rule, sixteen requests, four reads
+        Rig stock;
+        stock.clipboard.setStockClientForTest(true);
+        stock.offerAndServe();
+        QCOMPARE(stock.clipboard.effectiveServeWindow(), ClipboardFileLimits::LegacyWindow);
+        for (quint32 i = 0; i < 40; ++i) stock.contentsRequest(100 + i, 0, FILECONTENTS_RANGE, 0, 1000);
+        QTRY_VERIFY(stock.reads.size() >= 1);
+        QVERIFY(stock.reads.size() <= 4);
+        QTRY_COMPARE(stock.sent.contents.size(), 40 - 16); // the 17th and the rest are refused with a failed response
+        for (const auto &response : std::as_const(stock.sent.contents)) QCOMPARE(response.flags, uint16_t(CB_RESPONSE_FAIL));
+    }
+    void theClientsAdvertisedWindowDecidesWhatTheHostRequestsUnder()
+    {
+        Rig rig;
+        QCOMPARE(rig.clipboard.effectiveFetchWindow(), ClipboardFileLimits::LegacyWindow); // an older own client said nothing
+        Clipboard::FileRate request;
+        request.window = ClipboardFileLimits::NegotiatedWindow; // a new own client
+        rig.clipboard.setFileTransferRequest(request);
+        QCOMPARE(rig.clipboard.effectiveFetchWindow(), ClipboardFileLimits::NegotiatedWindow);
+        request.window = ClipboardFileLimits::Window{1024 * 1024, 32}; // a more careful one
+        rig.clipboard.setFileTransferRequest(request);
+        QCOMPARE(rig.clipboard.effectiveFetchWindow(), (ClipboardFileLimits::Window{1024 * 1024, 32}));
+        rig.clipboard.setStockClientForTest(true); // a stock client cannot advertise; a claim is ignored
+        QCOMPARE(rig.clipboard.effectiveFetchWindow(), ClipboardFileLimits::LegacyWindow);
     }
 };
 

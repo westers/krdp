@@ -30,7 +30,9 @@ namespace KRdp::ClipboardFileServe
  *                   answered with a failed response (the third one aborts the transfer); one over the outstanding limit is refused.
  *                   A RANGE waits in a FIFO. Events only change state: the owner calls pump() after each one (with the live send
  *                   queue) and from a timer while delayUntilNext() says something waits.
- *   pump()       -> reads are issued while (reads in flight + responses waiting for the pacer) < the pacer's window W; a ready response
+ *   pump()       -> reads are issued while the window admits them (reads in flight + responses waiting for the pacer: fewer than the
+ *                   count cap and no more bytes than the pacer's byte budget, see ClipboardFileLimits::Window, OPT-078 small files; a
+ *                   stock client keeps the old count window); a ready response
  *                   is written when the pacer allows (token bucket, and the socket's send queue below the head-of-line bound), at
  *                   most MaxResponsesPerPass per call so the session thread is never held. A failed read answers its stream FAIL.
  *   A changed or vanished file (or any read that cannot be served) fails THAT stream and ends the transfer: every other request of the
@@ -89,6 +91,8 @@ struct Counters {
     quint64 readsFailed = 0;
     quint64 aborts = 0;
     int peakWindow = 0;
+    int peakReads = 0; ///< most reads in flight or waiting for the pacer at once (OPT-078 small files)
+    qint64 peakReadBytes = 0; ///< their requested bytes
 };
 
 class Server
@@ -247,6 +251,14 @@ public:
 
     void setPolicy(const ClipboardFilePacing::Policy &policy) { m_pacer.setPolicy(policy); }
     const ClipboardFilePacing::FileTransferPacer &pacer() const { return m_pacer; }
+    /// The in-flight limit for this peer (OPT-078 small files): the validator accepts that many requests and the read window is bounded by it. LegacyWindow
+    /// (the default) is the old rule; the owner passes NegotiatedWindow only for a peer that is our own client.
+    void setWindow(const ClipboardFileLimits::Window &window)
+    {
+        m_window = window;
+        m_validator.setWindow(window);
+    }
+    const ClipboardFileLimits::Window &window() const { return m_window; }
     /// One pacer control tick (the owner calls it every ClipboardFilePacing::Tick with the connection's evidence).
     void tick(Clock::time_point now, const ClipboardFilePacing::Inputs &inputs)
     {
@@ -379,18 +391,25 @@ private:
     // ended and pump() was run again (the caller returns).
     bool issueReads(Clock::time_point now, std::optional<qint64> sendQueueBytes)
     {
-        const int window = m_pacer.window();
-        m_counters.peakWindow = std::max(m_counters.peakWindow, window);
+        const ClipboardFileLimits::Window window = m_pacer.window(m_window);
+        m_counters.peakWindow = std::max(m_counters.peakWindow, m_pacer.window());
         int inflight = 0;
+        qint64 inflightBytes = 0;
         for (const auto &item : m_items) {
-            if (item.state == State::Reading || item.state == State::Ready) ++inflight;
+            if (item.state == State::Reading || item.state == State::Ready) {
+                ++inflight;
+                inflightBytes += qint64(item.request.length);
+            }
         }
         for (auto &item : m_items) {
-            if (inflight >= window) break;
             if (item.state != State::Waiting) continue;
+            if (!ClipboardFileLimits::windowAdmits(window, inflight, inflightBytes, item.request.length)) break;
             ReadIssue issue{item.request.streamId, item.seq, item.request.listIndex, item.request.offset, item.request.length};
             item.state = State::Reading;
             ++inflight;
+            inflightBytes += qint64(item.request.length);
+            m_counters.peakReads = std::max(m_counters.peakReads, inflight);
+            m_counters.peakReadBytes = std::max(m_counters.peakReadBytes, inflightBytes);
             if (!m_callbacks.issueRead || !m_callbacks.issueRead(issue)) {
                 ++m_counters.readsFailed;
                 const quint64 seq = item.seq;
@@ -432,6 +451,7 @@ private:
     bool m_locking;
     bool m_huge;
     ClipboardFileRequest::RequestValidator m_validator;
+    ClipboardFileLimits::Window m_window = ClipboardFileLimits::LegacyWindow;
     ClipboardFilePacing::FileTransferPacer m_pacer;
     ClipboardFileRequest::Snapshot m_snapshot;
     quint64 m_currentSeq = 0;
