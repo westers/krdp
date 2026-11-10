@@ -941,11 +941,83 @@ private Q_SLOTS:
         QTest::qWait(HostClipboard::SettleMs * 3);
         QVERIFY(h.offers().isEmpty());
         QCOMPARE(h.host.uriReads, 0); // and its own selection is never read back (that would ask this very thread to serve it)
-        // the user then copies the same kind of list for real
+        // the user then copies the same kind of list for real (a file outside the staging folder; staged files re-owned by someone
+        // else are covered by reownedStagedFilesAreNotOfferedToTheClient below: the guard is the path, not the owner)
         h.host.ownUri = false;
         h.board->hostChanged();
         QTRY_COMPARE(h.offers().size(), 1);
         QCOMPARE(h.offers().last().flags, ClipboardOfferFiles);
+    }
+
+    // OPT-078 echo guard: a third party (a clipboard manager, KDE Connect) re-owns the staged list; the files are still the ones we staged
+    // for the client, found by path (not by who owns the selection) and never offered back.
+    void reownedStagedFilesAreNotOfferedToTheClient()
+    {
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, true, true);
+        const auto descriptor = ClipboardFileDescriptor::encode({{QStringLiteral("hello.txt"), false, 5, std::nullopt}}).data;
+        h.board->staging().offer(FilePushOffer{1, true, 0, descriptor});
+        QTRY_COMPARE(h.pushReplies().size(), 1);
+        h.board->staging().data(FilePushData{1, 0, 0, QByteArrayLiteral("hello")});
+        QTRY_VERIFY(!h.pushStates().isEmpty() && h.pushStates().last().phase == FilePushPhase::Done);
+        QCOMPARE(h.host.uriWrites.size(), 1);
+        const QString staged = h.host.uriWrites.first().first.first();
+        QVERIFY(QFileInfo(staged).isFile());
+        h.host.uriList = uriFor(staged);
+        h.host.ownUri = false; // somebody else owns the same list now
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 3);
+        QVERIFY(h.offers().isEmpty());
+        // a list of the staged folder itself is no different
+        h.host.uriList = uriFor(QFileInfo(staged).absolutePath());
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 3);
+        QVERIFY(h.offers().isEmpty());
+    }
+
+    // The path rule is a lexical prefix with a separator: files elsewhere, even beside the staging folder, are real host copies.
+    void aFileOutsideTheStagingRootIsStillOffered()
+    {
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, true, true);
+        const QString plain = h.host.cache.filePath(QStringLiteral("plain.txt"));
+        const QString sibling = h.host.cache.filePath(QStringLiteral("krdp-clip-other/sibling.txt"));
+        QVERIFY(QDir().mkpath(QFileInfo(sibling).absolutePath()));
+        for (const auto &path : {plain, sibling}) {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.close();
+        }
+        h.host.uriList = uriFor(sibling);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferFiles);
+        h.host.uriList = uriFor(plain);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 2);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferFiles);
+    }
+
+    // A mixed list offers only what is not staged.
+    void aMixedListOffersOnlyTheFilesThatAreNotStaged()
+    {
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, true, true);
+        const QString plain = h.host.cache.filePath(QStringLiteral("plain.txt"));
+        const QString staged = h.host.cache.filePath(QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt"));
+        QVERIFY(QDir().mkpath(QFileInfo(staged).absolutePath()));
+        for (const auto &path : {plain, staged}) {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.close();
+        }
+        g_messages.clear();
+        const auto previous = qInstallMessageHandler(capture);
+        h.host.uriList = uriFor(staged) + uriFor(plain);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        qInstallMessageHandler(previous);
+        QVERIFY(g_messages.filter(QStringLiteral("host copied files items=1")).size() == 1);
     }
 
     void clientFilesAreStagedOfferedAndTheStagingFollowsThePolicy()

@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 
 #include "ClipboardFilePushLoopbackHarness.h"
+#include "HostClipboard.h"
 
 using namespace PushLoopback;
 using namespace Qt::StringLiterals;
@@ -193,6 +194,66 @@ private Q_SLOTS:
         QVERIFY(run.waitFor(5s, [&run] { return run.count("PUSH unlock id=") >= 1; }));
         QCOMPARE(run.count("PUSH unlock id="), 1);
         QCOMPARE(run.probe.state(), QProcess::Running);
+    }
+
+    // OPT-078 echo guard: the files a real transfer staged come back as a host clipboard change that somebody else owns (a clipboard
+    // manager, KDE Connect). The worker's HostClipboard must not offer them to the client again: no offer, so no FileContents request.
+    void reownedStagedFilesAreNotOfferedBackAfterATransfer()
+    {
+        const QString src = fresh("src8");
+        writeFile(src + u"/album/a.txt"_s, "alpha");
+        writeFile(src + u"/album/sub/b.bin"_s, pattern(70 * 1024 + 3, 8));
+        PushRun run;
+        QVERIFY(begin(run, src));
+        QVERIFY(run.letTheClipboardGo());
+        QVERIFY2(run.waitFor(60s, [&run] { return !run.states.isEmpty() && run.states.last().phase == ConsoleWorkerWire::FilePushPhase::Done; }), run.log.right(3000).constData());
+        QVERIFY2(!noH264(run), "this probe build cannot connect");
+        QCOMPARE(run.uriWrites.size(), 1);
+        const QString stagedAlbum = run.staged(u"album"_s);
+        QVERIFY(QFileInfo(stagedAlbum).isDir());
+        const int requestsBefore = run.count("PUSH request");
+
+        // The worker's host-side clipboard, as the consoleworker builds it, over the same cache directory.
+        QByteArray list;
+        for (const QString &path : run.uriWrites.first()) list += QUrl::fromLocalFile(path).toEncoded() + "\r\n";
+        int frames = 0;
+        ConsoleWorkerWire::Deframer outgoing;
+        int offers = 0;
+        HostClipboard::Backend backend;
+        backend.hasText = [] { return false; };
+        backend.readText = [] { return QString(); };
+        backend.writeText = [](const QString &, bool) { return false; };
+        backend.hasUriList = [&list] { return !list.isEmpty(); };
+        backend.readUriList = [&list] { return list; };
+        backend.ownsUriList = [] { return false; }; // somebody else owns the list now
+        backend.cacheDir = [&run] { return run.cache.path(); };
+        HostClipboard hostBoard(backend, [&](const QByteArray &frame) {
+            ++frames;
+            outgoing.feed(frame);
+            while (const auto record = outgoing.next()) {
+                if (ConsoleWorkerWire::clipboardOffer(*record)) ++offers;
+            }
+        }, true);
+        hostBoard.setControl({1, true});
+        ConsoleWorkerWire::ClipboardPolicy policy;
+        policy.revision = 1;
+        policy.controlGeneration = 1;
+        policy.hostToClient = true;
+        policy.clientToHost = true;
+        policy.filesHostToClient = true;
+        policy.filesClientToHost = true;
+        hostBoard.setPolicy(policy);
+        hostBoard.hostChanged();
+        run.wait(std::chrono::milliseconds(HostClipboard::SettleMs * 4));
+        QCOMPARE(offers, 0);
+        QCOMPARE(frames, 0);
+        QCOMPARE(run.count("PUSH request"), requestsBefore); // and the client was asked for nothing more
+        // the same host clipboard with a file from outside the staging folder is a copy like any other
+        const QString outside = m_dir.filePath(u"outside.txt"_s);
+        writeFile(outside, "x");
+        list = QUrl::fromLocalFile(outside).toEncoded() + "\r\n";
+        hostBoard.hostChanged();
+        QVERIFY(run.waitFor(5s, [&offers] { return offers == 1; }));
     }
 
     void aLargerFileMovesThroughTheWindowByteForByte()

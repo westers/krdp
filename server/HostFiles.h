@@ -19,6 +19,9 @@
 #include <optional>
 
 #include <QByteArray>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QHash>
 #include <QList>
 #include <QSet>
@@ -272,6 +275,39 @@ enum class WalkStatus {
     Failed,
 };
 
+// ---- the staging folder (OPT-078 echo guard) ----
+
+/// `<cacheDir>/krdp-clip`, the folder HostFileStaging puts the client's files into (lexical clean path, as it builds it). Empty = no staging.
+inline QByteArray stagingRoot(const QString &cacheDir)
+{
+    if (cacheDir.isEmpty()) return {};
+    return QFile::encodeName(QDir::cleanPath(cacheDir)) + "/krdp-clip";
+}
+
+/// True when \a path is \a root or inside it. The comparison is by path components (a separator after the root), so
+/// `krdp-clip-other/` is not inside `krdp-clip`. An empty root contains nothing.
+inline bool isUnderRoot(const QByteArray &path, const QByteArray &root)
+{
+    if (root.isEmpty()) return false;
+    return path == root || path.startsWith(QByteArray(root + '/'));
+}
+
+/// The default refused roots plus the staging folder, also under its canonical name when the cache directory is reached through a
+/// symlink (the walk compares canonical parents).
+inline QList<QByteArray> refusedRootsFor(const QString &cacheDir)
+{
+    QList<QByteArray> roots = {"/proc", "/sys", "/dev"};
+    const QByteArray root = stagingRoot(cacheDir);
+    if (root.isEmpty()) return roots;
+    roots.append(root);
+    const QString canonical = QFileInfo(QDir::cleanPath(cacheDir)).canonicalFilePath();
+    if (!canonical.isEmpty()) {
+        const QByteArray canonicalRoot = stagingRoot(canonical);
+        if (canonicalRoot != root) roots.append(canonicalRoot);
+    }
+    return roots;
+}
+
 struct WalkOptions {
     bool hugeFiles = false; ///< the peer negotiated files over 4 GiB; without it they are skipped
     qint64 budgetMs = ClipboardFileLimits::WalkBudgetMs;
@@ -375,8 +411,10 @@ private:
         }
         const QByteArray canonical(real);
         std::free(real);
+        // The parent, and the item itself (the staging folder can be selected as a root too).
+        const QByteArray full = (canonical == "/" ? QByteArray() : canonical) + '/' + leaf;
         for (const auto &refused : m_options.refusedRoots) {
-            if (canonical == refused || canonical.startsWith(QByteArray(refused + '/'))) {
+            if (isUnderRoot(canonical, refused) || isUnderRoot(full, refused)) {
                 ++m_skipped;
                 return true;
             }

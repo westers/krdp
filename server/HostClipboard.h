@@ -266,11 +266,27 @@ private:
         // Nothing is read from the files here: only the list of paths, which the offer's snapshot is taken from when the client pastes.
         if (m_policy.filesHostToClient && m_backend.hasUriList && m_backend.readUriList && m_backend.hasUriList()) {
             const auto parsed = HostFiles::parseUriList(m_backend.readUriList());
-            if (!parsed.paths.isEmpty()) {
+            // OPT-078 echo guard: files in our own staging folder are the client's files, whoever owns the clipboard now (a clipboard
+            // manager or KDE Connect can re-own the list we wrote). Found by path, they are never offered back; a mixed list offers the rest.
+            const QString cacheDir = m_backend.cacheDir ? m_backend.cacheDir() : QString();
+            const QByteArray stagingRoot = HostFiles::stagingRoot(cacheDir);
+            QList<QByteArray> paths;
+            for (const auto &path : parsed.paths) {
+                if (!HostFiles::isUnderRoot(path, stagingRoot)) paths.append(path);
+            }
+            const int staged = int(parsed.paths.size() - paths.size());
+            if (staged > 0) {
+                qCDebug(hostClipboardLog) << "host clipboard changed: staged files in the list, not offered" << staged;
+                if (paths.isEmpty()) {
+                    return; // all ours: not even their names as text (a file manager or KDE Connect adds them) go to the client
+                }
+            }
+            if (!paths.isEmpty()) {
+                m_files.setRefusedRoots(HostFiles::refusedRootsFor(cacheDir)); // second line of defence: the walk refuses the folder too
                 ++m_offerSeq;
-                m_files.registerOffer(m_offerSeq, parsed.paths);
+                m_files.registerOffer(m_offerSeq, paths);
                 // Counts only (OPT-078): never a path.
-                qInfo().nospace() << "Clipboard: host copied files items=" << parsed.paths.size() << " refused=" << parsed.refused;
+                qInfo().nospace() << "Clipboard: host copied files items=" << paths.size() << " refused=" << parsed.refused;
                 m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{m_offerSeq, ConsoleWorkerWire::ClipboardOfferFiles}));
                 return;
             }

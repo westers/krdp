@@ -392,6 +392,48 @@ private Q_SLOTS:
         QCOMPARE(result.snapshot->read(0, 0, 100).status, ReadStatus::Ok); // re-opened
     }
 
+    // OPT-078 echo guard: the folder the worker stages the client's files into is never a root of a host-to-client walk.
+    void walkRefusesAFileInTheStagingRoot()
+    {
+        QTemporaryDir tmp;
+        const QDir cache(tmp.path());
+        write(cache.filePath(QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt")), "x");
+        write(cache.filePath(QStringLiteral("krdp-clip-other/kept.txt")), "y"); // a sibling whose name only starts the same
+        write(cache.filePath(QStringLiteral("plain.txt")), "z");
+        WalkOptions options;
+        options.refusedRoots = refusedRootsFor(cache.path());
+        auto result = walk({pathOf(cache, QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt"))}, options);
+        QCOMPARE(result.status, WalkStatus::Empty);
+        QCOMPARE(result.skipped, 1u);
+        // the staged folder itself, as a root, is refused too
+        result = walk({pathOf(cache, QStringLiteral("krdp-clip/c-0000000000000001"))}, options);
+        QCOMPARE(result.status, WalkStatus::Empty);
+        QCOMPARE(result.skipped, 1u);
+        result = walk({pathOf(cache, QStringLiteral("krdp-clip"))}, options);
+        QCOMPARE(result.status, WalkStatus::Empty);
+        QCOMPARE(result.skipped, 1u);
+        // files beside it are still walked
+        result = walk({pathOf(cache, QStringLiteral("krdp-clip-other/kept.txt")), pathOf(cache, QStringLiteral("plain.txt"))}, options);
+        QCOMPARE(result.status, WalkStatus::Ok);
+        QCOMPARE(names(result), (QStringList{u"kept.txt"_s, u"plain.txt"_s}));
+        // a cache directory reached through a symlink: the walk canonicalises the parent, the guard has to know that name too
+        QTemporaryDir other;
+        QVERIFY(QFile::link(tmp.path(), other.filePath(QStringLiteral("link"))));
+        options.refusedRoots = refusedRootsFor(other.filePath(QStringLiteral("link")));
+        result = walk({pathOf(cache, QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt"))}, options);
+        QCOMPARE(result.status, WalkStatus::Empty);
+        QCOMPARE(result.skipped, 1u);
+        // the helper itself: lexical, with a separator
+        const QByteArray root = stagingRoot(QStringLiteral("/home/u/.cache/"));
+        QCOMPARE(root, QByteArray("/home/u/.cache/krdp-clip"));
+        QVERIFY(isUnderRoot("/home/u/.cache/krdp-clip/c-1/1/a", root));
+        QVERIFY(isUnderRoot("/home/u/.cache/krdp-clip", root));
+        QVERIFY(!isUnderRoot("/home/u/.cache/krdp-clip-other/a", root));
+        QVERIFY(!isUnderRoot("/home/u/.cache/krdp-clipx", root));
+        QVERIFY(!isUnderRoot("/home/u/a", QByteArray()));
+        QVERIFY(stagingRoot(QString()).isEmpty());
+    }
+
     void aSelectionOfOnlyUnreadableThingsIsEmpty()
     {
         QTemporaryDir tmp;

@@ -81,6 +81,9 @@ public:
         trim();
     }
 
+    /// Directories no offered path may be inside (OPT-078 echo guard: the client-to-host staging folder), besides the pseudo file systems.
+    void setRefusedRoots(const QList<QByteArray> &roots) { m_refusedRoots = roots; }
+
     /// The answer to a Files ClipboardRequest for the current offer.
     void list(const ConsoleWorkerWire::ClipboardRequest &request)
     {
@@ -103,6 +106,7 @@ public:
         const auto paths = offer.paths;
         HostFiles::WalkOptions options;
         options.hugeFiles = request.hugeFiles;
+        if (!m_refusedRoots.isEmpty()) options.refusedRoots = m_refusedRoots;
         options.budgetMs = m_walkBudgetMs;
         options.nowMs = m_walkClock;
         const quint64 epoch = offer.epoch;
@@ -340,6 +344,7 @@ private:
     quint64 m_current = 0;
     std::function<qint64()> m_walkClock;
     qint64 m_walkBudgetMs = ClipboardFileLimits::WalkBudgetMs;
+    QList<QByteArray> m_refusedRoots; ///< empty = the walk's defaults
     Counters m_counters;
 };
 }
