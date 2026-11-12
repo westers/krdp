@@ -478,7 +478,7 @@ EOF
     env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
         LD_LIBRARY_PATH=/opt/krdp-console/lib/x86_64-linux-gnu \
         /opt/krdp-console/bin/krdpserver --plasma --monitor 0 --quality 80 \
-        --address 192.168.48.57 --port 3394 -u krdptest \
+        --address "${KRDP_PROBE_ADDRESS:-192.168.48.57}" --port 3394 -u krdptest \
         --certificate "$XDG_RUNTIME_DIR/rdp.crt" --certificate-key "$XDG_RUNTIME_DIR/rdp.key" \
         -p "$(<"$XDG_RUNTIME_DIR/rdp-password")" \
         >"$XDG_RUNTIME_DIR/rdp.log" 2>&1 &

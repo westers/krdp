@@ -2,12 +2,15 @@
 # Privileged envelope for an explicitly authorized disposable Sol GPU probe.
 # Never install this as a service or run it against a physical desktop.
 set -euo pipefail
+# Overridable; the defaults are the original Sol values. The ACL below is for uid 1000.
+probe_user=${KRDP_PROBE_USER:-westers}
+krdp_src=${KRDP_SRC:-/home/westers/dev/krdp}
 [[ $# == 0 || ( $# == 1 && ( $1 == --multi-worker || $1 == --multi-mixed || $1 == --multi-create || $1 == --multi-add || $1 == --multi-mixed-create || $1 == --multi-remove || $1 == --multi-resize || $1 == --multi-negative || $1 == --multi-window || $1 == --multi-input || $1 == --multi-drag || $1 == --multi-reposition || $1 == --multi-rdp || $1 == --multi-mixed-rdp || $1 == --multi-resize-rdp || $1 == --layout-campaign ) ) ]]
 [[ $EUID == 0 && "$(hostname -s)" == sol ]] || {
     echo 'Run explicitly as root on Sol.' >&2
     exit 1
 }
-[[ "$(id -u westers)" == 1000 ]]
+[[ "$(id -u "$probe_user")" == 1000 ]]
 exec 9>/run/lock/krdp-sol-render-probe.lock
 flock -n 9 || { echo 'Another render probe is active.' >&2; exit 1; }
 node=$(realpath /dev/dri/by-path/pci-0000:09:00.0-render)
@@ -77,12 +80,12 @@ if [[ ${1:-} == --multi-rdp || ${1:-} == --multi-mixed-rdp || ${1:-} == --multi-
     host_mode=--multi
     [[ ${1:-} != --multi-mixed-rdp ]] || host_mode=--multi-mixed
     host_environment=()
-    [[ ${1:-} != --multi-resize-rdp ]] || host_environment=(KRDP_EXPERIMENTAL_MULTI_RESIZE=1)
-    timeout --kill-after=5 210 runuser -u westers -- \
+    [[ ${1:-} != --multi-resize-rdp ]] || host_environment=(FARSIDE_EXPERIMENTAL_MULTI_RESIZE=1)
+    timeout --kill-after=5 210 runuser -u "$probe_user" -- \
         env "${host_environment[@]}" \
-        /home/westers/dev/krdp/build/bin/krdp-virtual-rdp-host-probe "$host_mode" \
-        /home/westers/dev/krdp/scripts/probe-virtual-compositor.sh
+        "$krdp_src/build/bin/krdp-virtual-rdp-host-probe" "$host_mode" \
+        "$krdp_src/scripts/probe-virtual-compositor.sh"
 else
-    timeout --kill-after=5 "$probe_limit" runuser -u westers -- \
-        bash /home/westers/dev/krdp/scripts/probe-virtual-compositor.sh "$probe_mode"
+    timeout --kill-after=5 "$probe_limit" runuser -u "$probe_user" -- \
+        bash "$krdp_src/scripts/probe-virtual-compositor.sh" "$probe_mode"
 fi
