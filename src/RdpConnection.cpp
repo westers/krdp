@@ -56,6 +56,7 @@
 #include <winpr/sysinfo.h>
 
 #include "Clipboard.h"
+#include "PasswordScrub.h"
 #include "SessionCloseGate.h"
 #include "Cursor.h"
 #include "InputHandler.h"
@@ -924,6 +925,10 @@ RdpConnection::~RdpConnection()
     }
 
     if (d->peer) {
+        // A connection that never reached PostConnect still holds the password
+        // FreeRDP parsed (an early disconnect, a failed handshake): overwrite it
+        // before the settings are freed.
+        scrubPeerPassword(d->peer->context ? d->peer->context->settings : nullptr);
         // The transport owns the socket once the peer is initialized
         // (freerdp_peer::sockfd is -1 from then on) and nothing else closes
         // it: without this every closed connection kept its descriptor, and a
@@ -1502,6 +1507,7 @@ void RdpConnection::initialize()
     // socket and the client waiting on it.
     auto fail = qScopeGuard([this]() {
         if (d->peer) {
+            scrubPeerPassword(d->peer->context ? d->peer->context->settings : nullptr);
             freerdp_peer_context_free(d->peer); // frees the transport, closing an attached socket
             freerdp_peer_free(d->peer); // closes a socket the transport never took
             d->peer = nullptr;
@@ -1922,13 +1928,11 @@ bool RdpConnection::onPostConnect()
     // FreeRDP's own copy of the password; the settings are not read again (nothing
     // after PostConnect uses FreeRDP_Password: no NLA, and the worker handoff and a
     // reconnect start from a new connection). What FreeRDP read off the wire into
-    // its own buffers cannot be reached from here.
+    // its own buffers cannot be reached from here (see PasswordScrub.h). A connection that
+    // never gets this far is scrubbed when it is destroyed.
     password.fill(QLatin1Char('\0'));
     password.clear();
-    if (auto *stored = const_cast<char *>(freerdp_settings_get_string(settings, FreeRDP_Password))) {
-        ::explicit_bzero(stored, ::strlen(stored));
-        freerdp_settings_set_string(settings, FreeRDP_Password, nullptr);
-    }
+    scrubPeerPassword(settings);
     d->server->recordLoginResult(this, authenticated);
 
     // Devices (RDPSND, AUDIN, RDPECAM) are created by the session loop's
