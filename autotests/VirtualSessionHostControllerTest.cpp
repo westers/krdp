@@ -239,12 +239,12 @@ private Q_SLOTS:
         QVERIFY(!response.value(QStringLiteral("ok")).toBool());
         host.reconcileCleanExits();
         // AUD-FIX F5: nothing here can be adopted, so recovery retired the
-        // intent (moved aside, not deleted) instead of listing it forever;
-        // only the completed one stays as history.
-        const bool completed = kind == QStringLiteral("ordered-with-malformed-dismissal");
+        // intent (moved aside, not deleted) instead of listing it forever. The
+        // completed one (proven ordered exit + reconciled) is retired too, by
+        // the reconciliation above (REVIEW-S4): no history stays in the journal.
         QVERIFY(host.m_supervisor.list(1000).isEmpty());
-        QCOMPARE(journal->records()->size(), completed ? 1 : 0);
-        QCOMPARE(QFile::exists(dir.filePath(QStringLiteral(".retired-") + r.session + QStringLiteral(".json"))), !completed);
+        QCOMPARE(journal->records()->size(), 0);
+        QVERIFY(QFile::exists(dir.filePath(QStringLiteral(".retired-") + r.session + QStringLiteral(".json"))));
         QVERIFY(!journal->claimRecord(r, nullptr));
     }
     // AUD-FIX F5, Sol 2026-09-27: four records left by the old test broker
@@ -326,17 +326,20 @@ private Q_SLOTS:
         QCOMPARE(host->m_control.request(1000, 1, request), reply);
         QCOMPARE(journal->orderedExit(r), std::optional<bool>(false));
         QTRY_COMPARE(host->m_supervisor.list(1000).size(), 4);
-        QCOMPARE(journal->records()->size(), 5);
+        // REVIEW-S4: the dismissed desktop is ended and reconciled: its intent is moved aside.
+        QCOMPARE(journal->records()->size(), 4);
+        QVERIFY(QFile::exists(dir.filePath(QStringLiteral(".retired-") + r.session + QStringLiteral(".json"))));
         QVERIFY(!journal->claimRecord(r, nullptr));
         host.reset();
         host = std::make_unique<VirtualSessionHostController>(&server, VirtualSessionHostController::Prepare{});
-        // The dismissed one is completed history; the other four have no
+        // The dismissed one is already retired; the other four have no
         // runtime to adopt here, so recovery retires them (AUD-FIX F5).
         QVERIFY(host->recover(*journal)); QVERIFY(host->m_supervisor.list(1000).isEmpty());
-        QCOMPARE(journal->records()->size(), 1); QCOMPARE(journal->records()->first().session, r.session);
+        QVERIFY(journal->records()->isEmpty());
         QVERIFY(host->enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        // A late retry of the acknowledgement finds nothing to dismiss any more (no record, no row).
         const auto retry = host->m_control.request(1000, 3, command(QStringLiteral("dismiss"), r.session));
-        QVERIFY(retry.value(QStringLiteral("ok")).toBool()); QCOMPARE(journal->records()->size(), 1);
+        QVERIFY(!retry.value(QStringLiteral("ok")).toBool());
         QVERIFY(!host->m_control.request(1001, 4, command(QStringLiteral("dismiss"), r.session)).value(QStringLiteral("ok")).toBool());
     }
     void dismissalRequiresFailedLiveState_data()
@@ -555,10 +558,135 @@ private Q_SLOTS:
         QVERIFY(host.recover(*journal)); QVERIFY(host.m_supervisor.list(1000).isEmpty());
         int started = 0;
         QVERIFY(host.enableIndependentCreates(*journal, [&](const auto &, const auto &) { ++started; return false; }));
+        // REVIEW-S4: completed history is retired by the reconciliation inside create, so even a
+        // full journal (256 completed records from an earlier run) admits a create.
         const auto created = host.createIndependent(1000);
-        QCOMPARE(bool(created), history < 256);
-        QCOMPARE(started, history < 256 ? 1 : 0);
-        QCOMPARE(journal->records()->size(), history + started); // Never publish an unreadable 257th intent.
+        QVERIFY(created);
+        QCOMPARE(started, 1);
+        QCOMPARE(journal->records()->size(), 1);
+    }
+    // REVIEW-S4: a finished desktop used to stay in the journal as history for the
+    // rest of the boot; 256 create/stop cycles filled the journal and every create
+    // was refused (Refusal::Limit) until a reboot.
+    static bool endDesktop(VirtualSessionJournal &journal, const VirtualSessionJournal::Record &r)
+    {
+        return journal.claimRecord(r, nullptr) && journal.writeOrderedExit(r, nullptr) && journal.writeReconciled(r, nullptr);
+    }
+    static std::optional<VirtualSessionJournal::Record> recordFor(VirtualSessionJournal &journal, const QString &session)
+    {
+        const auto records = journal.records();
+        if (records) for (const auto &candidate : *records) if (candidate.session == session) return candidate;
+        return {};
+    }
+    void ordinaryCreateStopCyclesNeverReachTheJournalLimit()
+    {
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal));
+        QVERIFY(host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        QStringList sessions;
+        for (int i = 0; i < 300; ++i) {
+            const auto handle = host.createIndependent(1000);
+            QVERIFY2(handle, qPrintable(QStringLiteral("create %1 refused").arg(i)));
+            const auto record = recordFor(*journal, handle->id); QVERIFY(record);
+            QVERIFY(endDesktop(*journal, *record));
+            sessions.append(record->session);
+            host.reconcileCleanExits();
+            QVERIFY(host.m_supervisor.list(1000).isEmpty());
+            QVERIFY(journal->records()->isEmpty());
+        }
+        // History is kept (moved aside, never deleted) with every marker.
+        for (const auto &session : sessions) {
+            QVERIFY(QFile::exists(directory.filePath(QStringLiteral(".retired-") + session + QStringLiteral(".json"))));
+            QVERIFY(QFile::exists(directory.filePath(QStringLiteral(".reconciled-") + session)));
+            QVERIFY(QFile::exists(directory.filePath(QStringLiteral(".ordered-") + session)));
+        }
+    }
+    void retirementOnlyTouchesDesktopsWithCompleteTerminalProof_data()
+    {
+        QTest::addColumn<QString>("kind");
+        for (const auto *kind : {"running", "claimed", "ordered-only", "reconciled-only"})
+            QTest::newRow(kind) << QString::fromLatin1(kind);
+    }
+    void retirementOnlyTouchesDesktopsWithCompleteTerminalProof()
+    {
+        QFETCH(QString, kind);
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal));
+        QVERIFY(host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return true; }));
+        const auto handle = host.createIndependent(1000); QVERIFY(handle);
+        const auto r = recordFor(*journal, handle->id); QVERIFY(r);
+        if (kind != QStringLiteral("running")) QVERIFY(journal->claimRecord(*r, nullptr));
+        if (kind == QStringLiteral("ordered-only")) QVERIFY(journal->writeOrderedExit(*r, nullptr));
+        if (kind == QStringLiteral("reconciled-only")) QVERIFY(journal->writeReconciled(*r, nullptr));
+        for (int i = 0; i < 3; ++i) host.reconcileCleanExits();
+        QCOMPARE(host.m_supervisor.list(1000).size(), 1);
+        QVERIFY(recordFor(*journal, r->session));
+        QVERIFY(!QFile::exists(directory.filePath(QStringLiteral(".retired-") + r->session + QStringLiteral(".json"))));
+    }
+    // Crash between "ended and reconciled" and "retired": the next broker lists the
+    // record as completed history, and its first reconciliation retires it.
+    void endedButNotYetRetiredRecordIsRetiredByTheNextBroker()
+    {
+        QTemporaryDir directory;
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr); QVERIFY(journal);
+        QStringList ended;
+        {
+            Server server; VirtualSessionHostController host(&server, {});
+            QVERIFY(host.recover(*journal));
+            QVERIFY(host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+            QList<VirtualSessionJournal::Record> created;
+            for (int i = 0; i < 3; ++i) {
+                const auto handle = host.createIndependent(1000); QVERIFY(handle);
+                const auto r = recordFor(*journal, handle->id); QVERIFY(r); created.append(*r);
+            }
+            for (const auto &r : created) { QVERIFY(endDesktop(*journal, r)); ended.append(r.session); }
+            // The broker dies here: no reconcileCleanExits() ran.
+        }
+        QCOMPARE(journal->records()->size(), 3);
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal)); QVERIFY(host.m_supervisor.list(1000).isEmpty());
+        QCOMPARE(journal->records()->size(), 3); // recovery itself changes nothing
+        QVERIFY(host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return false; }));
+        host.reconcileCleanExits();
+        QVERIFY(journal->records()->isEmpty());
+        for (const auto &session : ended) QVERIFY(QFile::exists(directory.filePath(QStringLiteral(".retired-") + session + QStringLiteral(".json"))));
+    }
+    // A failed fsync of the directory during retirement must neither lose nor
+    // resurrect anything, and must not stop the next create.
+    void retirementSyncFailureNeverLosesALiveDesktop()
+    {
+        QTemporaryDir directory;
+        const auto reset = qScopeGuard([] { dismissalFailSync = 0; });
+        auto journal = VirtualSessionJournal::openAt(directory.path(), getuid(), nullptr); QVERIFY(journal);
+        Server server; VirtualSessionHostController host(&server, {});
+        QVERIFY(host.recover(*journal));
+        QVERIFY(host.enableIndependentCreates(*journal, [](const auto &, const auto &) { return true; }));
+        const auto live = host.createIndependent(1000); QVERIFY(live);
+        const auto done = host.createIndependent(1000); QVERIFY(done);
+        const auto liveRecord = recordFor(*journal, live->id); QVERIFY(liveRecord);
+        const auto doneRecord = recordFor(*journal, done->id); QVERIFY(doneRecord);
+        QVERIFY(host.m_supervisor.m_registry.unavailable(*done));
+        QVERIFY(endDesktop(*journal, *doneRecord));
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("^Cannot retire virtual desktop record")));
+        dismissalFailSync = 1; // the first fsync is the retirement's directory sync
+        host.reconcileCleanExits();
+        QCOMPARE(dismissalFailSync, 0);
+        // Whatever the state of the finished record, the live one is untouched.
+        QVERIFY(recordFor(*journal, liveRecord->session));
+        QCOMPARE(host.m_supervisor.list(1000).size(), 1);
+        QVERIFY(!QFile::exists(directory.filePath(QStringLiteral(".retired-") + liveRecord->session + QStringLiteral(".json"))));
+        // The finished record is either still listed (retry on the next tick) or moved aside, never both.
+        const bool listed = recordFor(*journal, doneRecord->session).has_value();
+        const bool moved = QFile::exists(directory.filePath(QStringLiteral(".retired-") + doneRecord->session + QStringLiteral(".json")));
+        QVERIFY(listed != moved);
+        host.reconcileCleanExits();
+        QVERIFY(!recordFor(*journal, doneRecord->session));
+        QVERIFY(recordFor(*journal, liveRecord->session));
+        QVERIFY(host.createIndependent(1000));
     }
     void eachTerminalProofAloneAndOldBootRemainUnavailable_data()
     {
@@ -610,8 +738,9 @@ private Q_SLOTS:
             if (i == 7) QTRY_VERIFY_WITH_TIMEOUT(host.m_supervisor.list(1000).isEmpty(), 2000);
             else { host.reconcileCleanExits(); QVERIFY(host.m_supervisor.list(1000).isEmpty()); }
             QVERIFY(!journal->claimRecord(r, nullptr));
+            QVERIFY(QFile::exists(directory.filePath(QStringLiteral(".retired-") + r.session + QStringLiteral(".json"))));
         }
-        QCOMPARE(journal->records()->size(), 8);
+        QCOMPARE(journal->records()->size(), 0); // REVIEW-S4: proven clean history is moved aside, not kept
     }
     void uncertainPublicationBlocksFurtherCreationUntilRecovery()
     {

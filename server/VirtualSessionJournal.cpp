@@ -101,15 +101,10 @@ QByteArray VirtualSessionJournal::Record::initialLayoutJson() const {
     return initialOutputs.isEmpty() || !valid() ? QByteArray() : QJsonDocument(outputArray(initialOutputs)).toJson(QJsonDocument::Compact);
 }
 VirtualSessionGuardianClient::Identity VirtualSessionJournal::Record::identity() const {
-    const QString oldSocket = QStringLiteral("/run/user/%1/krdp-virtual/%2/guardian.sock").arg(uid).arg(launch);
-    const QString socket = QFileInfo::exists(oldSocket) ? oldSocket
-        : QStringLiteral("/run/user/%1/farside-virtual/%2/guardian.sock").arg(uid).arg(launch);
-    return {uid, session, incarnation, socket, token};
+    return {uid, session, incarnation, QStringLiteral("/run/user/%1/farside-virtual/%2/guardian.sock").arg(uid).arg(launch), token};
 }
 QString VirtualSessionJournal::Record::workerSocket() const {
-    const QString oldSocket = QStringLiteral("/run/user/%1/krdp-virtual/%2/worker.sock").arg(uid).arg(launch);
-    return QFileInfo::exists(oldSocket) ? oldSocket
-        : QStringLiteral("/run/user/%1/farside-virtual/%2/worker.sock").arg(uid).arg(launch);
+    return QStringLiteral("/run/user/%1/farside-virtual/%2/worker.sock").arg(uid).arg(launch);
 }
 VirtualSessionJournal::~VirtualSessionJournal() { close(m_directory); }
 std::unique_ptr<VirtualSessionJournal> VirtualSessionJournal::open(QString *error) {

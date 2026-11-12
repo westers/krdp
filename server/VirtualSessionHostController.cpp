@@ -262,15 +262,42 @@ void VirtualSessionHostController::reconcileCleanExits()
     const auto records = m_journal->records();
     if (!records) { m_creationBlocked = true; return; }
     for (const auto &record : *records) {
+        // Ended desktops only: same boot, cleanup reconciled, and an ordered exit or
+        // a durable owner dismissal (terminalProof). A running, unproven or
+        // uncertain desktop never reaches the code below.
         if (!terminalProof(*m_journal, record, m_recoveryBoot)) continue;
         const QPointer<VirtualSessionHostController> alive(this);
-        const bool retired = m_supervisor.forgetReconciled(record.identity());
+        const bool forgotten = m_supervisor.forgetReconciled(record.identity());
         if (!alive) return;
-        if (!retired) continue;
-        // The supervisor first revokes/disconnects affected transports. Remove
-        // endpoints only afterward; journal intents/claims stay immutable.
-        m_workers.erase(record.session);
-        m_newIntents.erase(record.session);
+        if (forgotten) {
+            // The supervisor first revokes/disconnects affected transports. Remove
+            // endpoints only afterward; journal intents/claims stay immutable.
+            m_workers.erase(record.session);
+            m_newIntents.erase(record.session);
+        } else {
+            // Not forgotten: either the supervisor still tracks it (retry on a later
+            // tick) or it never did (completed history found by recovery).
+            bool tracked = false;
+            for (const auto &summary : m_supervisor.list(record.uid)) tracked = tracked || summary.id == record.session;
+            if (tracked) continue;
+        }
+        // REVIEW-S4: the desktop is over and reconciled and nothing lists it any more.
+        // Move its intent aside so it stops counting against the journal's 256
+        // records (an ordinary create/stop cycle used to fill it for the rest of
+        // the boot). Markers and the retired copy stay; a failure or a crash before
+        // this point only leaves the record to be retired by the next pass.
+        QString error;
+        if (!m_journal->retire(record, &error)) {
+            if (!m_retireWarned.contains(record.session)) {
+                m_retireWarned.insert(record.session);
+                qWarning().noquote() << "Cannot retire virtual desktop record" << record.session << "(uid" << record.uid << "):" << error
+                                     << "- retrying every second; the record keeps counting against the journal limit until then";
+            }
+        } else {
+            m_retireWarned.remove(record.session);
+            qInfo().noquote() << "Retired ended virtual desktop record" << record.session << "(uid" << record.uid << "): moved aside as"
+                              << QStringLiteral(".retired-%1.json").arg(record.session);
+        }
     }
 }
 
