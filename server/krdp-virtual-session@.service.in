@@ -29,5 +29,9 @@ StandardInput=null
 StandardOutput=journal
 StandardError=journal
 KillMode=mixed
+# REVIEW-S2: the only resource limit, generous on purpose. A Plasma desktop with a browser and an IDE holds tens of thousands
+# of threads; this stops a fork bomb long before the pid space (the default is 15% of pid_max). No MemoryMax: a desktop
+# with a browser needs many GB and a cgroup OOM would kill the user's session (docs/unit-hardening.md has a recommended drop-in).
+TasksMax=100000
 TimeoutStopSec=60
 Restart=no

@@ -53,5 +53,26 @@ KillMode=control-group
 Restart=on-failure
 RestartSec=3
 
+# REVIEW-S2 hardening (docs/unit-hardening.md has the evidence, the Sol checklist and a one-line rollback per directive).
+# The broker starts no child process of its own (retained desktops are the separate farside-virtual-session@ units it starts
+# over D-Bus), so the mount-namespace directives are safe here. It writes only /etc/farside (certificate), StateDirectory and
+# /var/lib/farside-public. No device-policy, MemoryDenyWriteExecute or SystemCallFilter directives: it probes GPU encoders.
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_BOOT CAP_SYS_TIME CAP_SYS_PACCT CAP_SYS_TTY_CONFIG CAP_LINUX_IMMUTABLE CAP_MKNOD CAP_WAKE_ALARM CAP_BLOCK_SUSPEND CAP_SYSLOG CAP_BPF CAP_PERFMON CAP_MAC_ADMIN CAP_MAC_OVERRIDE
+ProtectSystem=full
+ReadWritePaths=-/etc/farside
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+LimitCORE=0
+
 [Install]
 WantedBy=multi-user.target
