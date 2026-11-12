@@ -39,7 +39,7 @@ src/ClipboardFileRequest.h|src/core/ClipboardFileRequest.h|${copy_note}
 src/ClipboardFileServe.h|src/core/ClipboardFileServe.h|${copy_note}
 src/ClipboardFileStaging.h|src/core/ClipboardFileStaging.h|${copy_note}
 src/ClipboardHtml.h|src/core/ClipboardHtml.h|${copy_note}
-src/ClipboardImage.h|src/core/ClipboardImage.h|${copy_note}
+src/ClipboardImage.h|src/core/ClipboardImage.h|${copy_note}|^ \* OPT-072: image conversion for the clipboard bridge, as pure functions|^ \* server's src/ClipboardImage\.h \(krdp repo\)
 server/PngMimeData.h|src/core/PngMimeData.h|${copy_note}|OPT-072: a clipboard offer that is one PNG
 server/SelectionReaderFd.h|src/core/SelectionReaderFd.h|${copy_note}
 server/SelectionReader.h|src/wayland/SelectionReader.h|${copy_note}
