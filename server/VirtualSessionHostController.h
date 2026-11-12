@@ -82,6 +82,7 @@ private:
     // AUD-FIX8: once per user, a warning naming `usermod -aG render <user>` when it lacks the group.
     void warnRenderAccess(quint32 uid);
     QSet<quint32> m_renderWarned;
+    QSet<QString> m_retireWarned; // sessions whose ended-record retirement failure was already logged (the timer retries every second)
     struct Worker {
         VirtualSessionRegistry::Handle handle;
         std::unique_ptr<VirtualSessionBrokerLease> lease; // destroyed after endpoint
