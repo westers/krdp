@@ -131,7 +131,6 @@ is fixed: delete the marker then.
 | Test | Defect | Where |
 |---|---|---|
 | `LegacySettingsMigrationTest`: 8 functions (`omittedDefaultsMatchActualGeneratedLegacySettings`, `completeSettingsAndHostFactsAgreeWithRealLegacyAndBrokerReaders`, `escapedListsAndAliasesNeverResolveAsTheirOwner`, `sameFileMaterializesPartialDefaultsAndPreservesPrivateBytes`, `duplicateAndEscapedValuesUseActualKConfigSemantics`, `locksArePreservedForSameFileAndSeparateDestinations`, `conflictingOrLockedDestinationFailsWholePlan`, `identityPresenceAndCompleteRevisionAreBound`) | OPT-066 added `ClientQualityMax` to the kcfg (2026-10-11) without classifying it in the migration; the coverage guard refuses every input ("Legacy schema coverage changed"). Nothing in production calls the migration yet, so the effect is latent. | `server/LegacySettingsMigration.cpp:121`, `server/BrokerUserSettings.cpp:126` |
-| `VirtualSessionTransportTest::finalAudioOffRestoresWithoutFrameOrPriorityRequest` | After the final audio-off the worker keeps the reduced quality 45; the local stream is reset to 80. `restoreFixedVideoQuality()` forwards `effectiveQualityCap()` before it resets the cap. | `server/VirtualSessionTransport.cpp:778-789` |
 
 ## Cases that skip, and why
 

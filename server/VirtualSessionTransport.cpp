@@ -786,11 +786,13 @@ void VirtualSessionTransport::restoreFixedVideoQuality(std::optional<quint32> ui
 {
     if (!m_connection || m_connection->audioPriorityActive()) return;
     const QPointer<VirtualSessionTransport> alive(this);
-    // Worker writes require current ownership. Local reset remains necessary
-    // after ownership/endpoint loss, but must never reset a replacement worker.
-    if (!m_adaptiveQuality) forwardVideoQuality(m_controlGeneration, effectiveQualityCap(), uid);
+    // Reset the local cap first and forward what the stream now reports: forwarding first sent the OLD effective
+    // cap (the reduced one) to the worker, which kept it. The reset may synchronously destroy/reenter this
+    // transport (requestedQualityChanged also forwards the new value). Worker writes require current ownership;
+    // the local reset stays necessary after ownership/endpoint loss, but must never reset a replacement worker.
+    m_connection->videoStream()->setQualityCap(m_qualityCap);
     if (!alive || !m_connection || m_connection->audioPriorityActive()) return;
-    m_connection->videoStream()->setQualityCap(m_qualityCap); // May synchronously destroy/reenter this transport.
+    if (!m_adaptiveQuality) forwardVideoQuality(m_controlGeneration, effectiveQualityCap(), uid);
 }
 
 QJsonObject VirtualSessionTransport::deviceReply(MediaDevice device, const DeviceStatus &status) const
@@ -2161,9 +2163,9 @@ QJsonObject VirtualSessionTransport::request(const QJsonObject &record, std::opt
         const bool effective = m_connection->audioPriorityActive();
         if (!effective) {
             // Immediate restore; do not wait for another desktop frame.
-            if (!m_adaptiveQuality) forwardVideoQuality(m_controlGeneration, effectiveQualityCap(), uid);
+            m_connection->videoStream()->setQualityCap(m_qualityCap); // reset first, then forward the reset value
             if (!alive || !m_connection) return {};
-            m_connection->videoStream()->setQualityCap(m_qualityCap);
+            if (!m_adaptiveQuality) forwardVideoQuality(m_controlGeneration, effectiveQualityCap(), uid);
             if (!alive || !m_connection) return {};
         }
         if (generation != m_controlGeneration || !authorized(uid))
