@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
 // OPT-078 phase 3: the worker's staging file system against real temporary directories (spec 3.2, 4.2): private root verified on every
-// use, openat/O_EXCL/O_NOFOLLOW, .part then rename, no overwrite, no execute bit, the disk guard with an injected statvfs, the janitor with
+// use, openat/O_EXCL/O_NOFOLLOW, a temporary file in `<seq>.parts/` then rename, no overwrite, no execute bit, the disk guard with an injected statvfs, the janitor with
 // an injected fs and a real one, and failures injected with -Wl,--wrap (pwrite, fsync, fstatvfs, openat, renameat2, fchmod, unlinkat).
 
 #include <QDir>
@@ -402,7 +402,7 @@ private Q_SLOTS:
         QVERIFY(S_ISDIR(modeOf(base + u"/tree/sub"_s)));
         QVERIFY(S_ISDIR(modeOf(base + u"/emptydir"_s)));
         QVERIFY(S_ISREG(modeOf(base + u"/empty.txt"_s))); // an empty file exists at once
-        QVERIFY(!QFileInfo::exists(base + u"/tree/sub/a.sh"_s) && !QFileInfo::exists(base + u"/tree/sub/a.sh.part"_s)); // data files appear with their first byte
+        QVERIFY(!QFileInfo::exists(base + u"/tree/sub/a.sh"_s) && !QFileInfo::exists(transfer->partPath(2))); // data files appear with their first byte
         QCOMPARE(transfer->completeFiles(), (QSet<quint32>{3}));
         bool ok = false;
         verifyPrivate(base, &ok);
@@ -428,7 +428,7 @@ private Q_SLOTS:
         QVERIFY(ok);
         QCOMPARE(modeOf(rig.area->instancePath() + u"/1/d/f"_s) & 07777, mode_t(0600));
     }
-    void chunksArriveAsAPartFileAndAreRenamedWhenComplete()
+    void chunksArriveInATemporaryFileAndAreRenamedWhenComplete()
     {
         Rig rig;
         QVERIFY(rig.open());
@@ -437,11 +437,12 @@ private Q_SLOTS:
         const QString base = rig.area->instancePath() + u"/3"_s;
         const QByteArray content = pattern(300'000);
         QCOMPARE(transfer->write(0, 0, content.left(100'000)), Status::Ok);
-        QVERIFY(QFileInfo::exists(base + u"/big.bin.part"_s) && !QFileInfo::exists(base + u"/big.bin"_s)); // a reader never sees a half file as final
+        QVERIFY(QFileInfo::exists(transfer->partPath(0)) && !QFileInfo::exists(base + u"/big.bin"_s)); // a reader never sees a half file as final
+        QVERIFY(entriesOf(base).filter(u"big.bin"_s).isEmpty()); // ...and the transfer's own directory holds nothing of it yet
         QVERIFY(transfer->finishedTopLevelPaths().isEmpty());
         QCOMPARE(transfer->write(0, 100'000, content.mid(100'000, 100'000)), Status::Ok);
         QCOMPARE(transfer->write(0, 200'000, content.mid(200'000)), Status::Ok);
-        QVERIFY(QFileInfo::exists(base + u"/big.bin"_s) && !QFileInfo::exists(base + u"/big.bin.part"_s));
+        QVERIFY(QFileInfo::exists(base + u"/big.bin"_s) && !QFileInfo::exists(transfer->partPath(0)));
         QCOMPARE(slurp(base + u"/big.bin"_s), content);
         QCOMPARE(transfer->finishedTopLevelPaths(), QStringList({base + u"/big.bin"_s}));
         QVERIFY(!transfer->complete());
@@ -450,6 +451,79 @@ private Q_SLOTS:
         QCOMPARE(transfer->finishedTopLevelPaths(), QStringList({base + u"/big.bin"_s, base + u"/other.txt"_s}));
         QCOMPARE(transfer->writtenBytes(), quint64(300'005));
         QVERIFY(entriesOf(base).filter(u".part"_s).isEmpty());
+        QVERIFY(entriesOf(rig.area->instancePath() + u"/3.parts"_s).isEmpty()); // every temporary file was renamed away
+        QVERIFY(entriesOf(rig.area->instancePath() + u"/3.parts"_s).isEmpty()); // every temporary file was renamed away
+    }
+    // REVIEW-S5: the sanitizer allows names up to 255 UTF-8 bytes (NAME_MAX); staging must not need a single extra byte for its temporary name.
+    void aNameOfTheLongestAllowedLengthIsStaged_data()
+    {
+        QTest::addColumn<QString>("name");
+        QTest::newRow("251 bytes") << QString(251, QLatin1Char('a'));
+        QTest::newRow("254 bytes") << QString(254, QLatin1Char('b'));
+        QTest::newRow("255 bytes") << QString(255, QLatin1Char('c'));
+        QTest::newRow("255 bytes of multi-byte characters") << (QString(127, QChar(0x00e9)) + QLatin1Char('x')); // 127 x 2 + 1 = 255 bytes
+        QTest::newRow("255 bytes ending in .part") << (QString(250, QLatin1Char('d')) + u".part"_s);
+    }
+    void aNameOfTheLongestAllowedLengthIsStaged()
+    {
+        QFETCH(QString, name);
+        Rig rig;
+        QVERIFY(rig.open());
+        const auto plan = planOf({dir(u"sub"_s), file(u"sub\\"_s + name, 6)});
+        QVERIFY2(plan.ok(), "the planner accepts the name");
+        QCOMPARE(plan.entries.last().components.last().toUtf8(), name.toUtf8()); // unchanged by the sanitizer
+        auto transfer = rig.area->begin(1, plan);
+        QCOMPARE(transfer->create(), Status::Ok);
+        QCOMPARE(transfer->write(1, 0, QByteArray("abcdef")), Status::Ok);
+        QVERIFY(transfer->complete());
+        QCOMPARE(slurp(rig.area->instancePath() + u"/1/sub/"_s + name), QByteArray("abcdef"));
+        QVERIFY(entriesOf(rig.area->instancePath() + u"/1.parts"_s).isEmpty()); // the temporary file was renamed away
+    }
+    // REVIEW-S5: `X` beside `X.part` (the old temporary name of X): both arrive, neither is mistaken for the other.
+    void aFileBesideItsOwnOldTemporaryNameIsStaged()
+    {
+        Rig rig;
+        QVERIFY(rig.open());
+        auto transfer = rig.area->begin(1, planOf({file(u"X"_s, 5), file(u"X.part"_s, 3), file(u"Y.part"_s, 2), file(u"Y"_s, 4)}));
+        QCOMPARE(transfer->create(), Status::Ok);
+        QCOMPARE(transfer->write(0, 0, QByteArray("12345")), Status::Ok);
+        QCOMPARE(transfer->write(1, 0, QByteArray("abc")), Status::Ok);
+        QCOMPARE(transfer->write(2, 0, QByteArray("yy")), Status::Ok);
+        QCOMPARE(transfer->write(3, 0, QByteArray("wxyz")), Status::Ok);
+        QVERIFY(transfer->complete());
+        const QString base = rig.area->instancePath() + u"/1/"_s;
+        QCOMPARE(slurp(base + u"X"_s), QByteArray("12345"));
+        QCOMPARE(slurp(base + u"X.part"_s), QByteArray("abc"));
+        QCOMPARE(slurp(base + u"Y.part"_s), QByteArray("yy"));
+        QCOMPARE(slurp(base + u"Y"_s), QByteArray("wxyz"));
+    }
+    // The same with an EMPTY `X.part`: it is created with the tree, before X's data arrives.
+    void anEmptyFileBesideItsOwnOldTemporaryNameIsStaged()
+    {
+        Rig rig;
+        QVERIFY(rig.open());
+        auto transfer = rig.area->begin(1, planOf({file(u"X.part"_s, 0), file(u"X"_s, 5)}));
+        QCOMPARE(transfer->create(), Status::Ok);
+        QCOMPARE(transfer->write(1, 0, QByteArray("12345")), Status::Ok);
+        QVERIFY(transfer->complete());
+        const QString base = rig.area->instancePath() + u"/1/"_s;
+        QCOMPARE(slurp(base + u"X"_s), QByteArray("12345"));
+        QVERIFY(QFileInfo(base + u"X.part"_s).isFile());
+        QCOMPARE(QFileInfo(base + u"X.part"_s).size(), qint64(0));
+    }
+    // REVIEW-S5: whatever the temporary names are, no name a client can send may equal one (nor may a client file stand in the way of one).
+    void aClientFileNamedLikeAnyTemporaryNameIsStaged()
+    {
+        Rig rig;
+        QVERIFY(rig.open());
+        const QStringList names = {u"0"_s, u"1"_s, u".krdp-part-0"_s, u".krdp-part-1"_s, u"1.parts"_s, u".parts"_s, u"a.part"_s};
+        QList<Descriptor> items;
+        for (const QString &name : names) items.append(file(name, 3));
+        auto transfer = rig.area->begin(1, planOf(items));
+        QCOMPARE(transfer->create(), Status::Ok);
+        for (quint32 i = 0; i < quint32(names.size()); ++i) QCOMPARE(transfer->write(i, 0, QByteArray("xyz")), Status::Ok);
+        QVERIFY(transfer->complete());
+        for (const QString &name : names) QCOMPARE(slurp(rig.area->instancePath() + u"/1/"_s + name), QByteArray("xyz"));
     }
     void theDescriptorsModifiedTimeIsApplied()
     {
@@ -482,8 +556,8 @@ private Q_SLOTS:
         QVERIFY(rig.open());
         auto transfer = rig.area->begin(1, planOf({file(u"a.txt"_s, 4)}));
         QCOMPARE(transfer->create(), Status::Ok);
-        const QString part = rig.area->instancePath() + u"/1/a.txt.part"_s;
-        touch(part, "precious");
+        const QString part = transfer->partPath(0);
+        touch(part, "precious"); // (this makes the temporary directory too)
         QFile held(part); // an open handle on the squatter: it stays readable after the abort removes the name
         QVERIFY(held.open(QIODevice::ReadOnly));
         QCOMPARE(transfer->write(0, 0, QByteArray("new!")), Status::Exists);
@@ -500,9 +574,23 @@ private Q_SLOTS:
         touch(victim, "original");
         auto transfer = rig.area->begin(1, planOf({file(u"a.txt"_s, 4)}));
         QCOMPARE(transfer->create(), Status::Ok);
-        QVERIFY(QFile::link(victim, rig.area->instancePath() + u"/1/a.txt.part"_s));
+        QVERIFY(QDir().mkpath(rig.area->instancePath() + u"/1.parts"_s));
+        QVERIFY(QFile::link(victim, transfer->partPath(0)));
         QVERIFY(transfer->write(0, 0, QByteArray("evil")) != Status::Ok);
         QCOMPARE(slurp(victim), QByteArray("original"));
+    }
+    // REVIEW-S5: the temporary directory is made by us below the instance; a link planted in its place is never followed.
+    void aSymlinkPlantedAsTheTemporaryDirectoryIsNotFollowed()
+    {
+        Rig rig;
+        QVERIFY(rig.open());
+        QTemporaryDir outside;
+        auto transfer = rig.area->begin(1, planOf({file(u"a.txt"_s, 4)}));
+        QCOMPARE(transfer->create(), Status::Ok);
+        QVERIFY(QFile::link(outside.path(), rig.area->instancePath() + u"/1.parts"_s));
+        QVERIFY(transfer->write(0, 0, QByteArray("evil")) != Status::Ok);
+        QVERIFY(QDir(outside.path()).isEmpty()); // nothing was written through the link
+        QVERIFY(!QFileInfo::exists(rig.area->instancePath() + u"/1"_s)); // the failed transfer took its tree away
     }
     void aHardLinkPlantedAsThePartFileIsNotWrittenThrough()
     {
@@ -513,7 +601,8 @@ private Q_SLOTS:
         touch(victim, "original");
         auto transfer = rig.area->begin(1, planOf({file(u"a.txt"_s, 4)}));
         QCOMPARE(transfer->create(), Status::Ok);
-        QCOMPARE(::link(QFile::encodeName(victim).constData(), QFile::encodeName(rig.area->instancePath() + u"/1/a.txt.part"_s).constData()), 0);
+        QVERIFY(QDir().mkpath(rig.area->instancePath() + u"/1.parts"_s));
+        QCOMPARE(::link(QFile::encodeName(victim).constData(), QFile::encodeName(transfer->partPath(0)).constData()), 0);
         QCOMPARE(transfer->write(0, 0, QByteArray("evil")), Status::Exists);
         QCOMPARE(slurp(victim), QByteArray("original"));
         // and removing the staging unlinks the extra name, not the file
@@ -630,8 +719,12 @@ private Q_SLOTS:
         QCOMPARE(a->create(), Status::Ok);
         QCOMPARE(b->create(), Status::Ok);
         QCOMPARE(a->write(1, 0, QByteArray("abc")), Status::Ok);
+        QCOMPARE(b->write(0, 0, QByteArray("x")), Status::Ok); // half a file: its temporary file exists
+        QVERIFY(QFileInfo::exists(b->partPath(0)));
+        QVERIFY(QFileInfo::exists(rig.area->instancePath() + u"/1.parts"_s));
         QVERIFY(rig.area->removeTransfer(1)); // a newer copy replaced the offer
         QVERIFY(!QFileInfo::exists(rig.area->instancePath() + u"/1"_s));
+        QVERIFY(!QFileInfo::exists(rig.area->instancePath() + u"/1.parts"_s));
         QVERIFY(QFileInfo::exists(rig.area->instancePath() + u"/2"_s));
         QVERIFY(rig.area->removeAll()); // the connection ended
         QCOMPARE(entriesOf(rig.area->instancePath()), QStringList({u".lock"_s}));
@@ -705,14 +798,23 @@ private Q_SLOTS:
     {
         Rig rig;
         QVERIFY(rig.open());
-        auto old = rig.area->begin(1, planOf({file(u"a"_s, 1)}));
+        auto old = rig.area->begin(1, planOf({file(u"a"_s, 2)}));
         auto young = rig.area->begin(2, planOf({file(u"a"_s, 1)}));
         QCOMPARE(old->create(), Status::Ok);
         QCOMPARE(young->create(), Status::Ok);
+        QCOMPARE(old->write(0, 0, QByteArray("x")), Status::Ok); // half a file: its temporary directory is younger than the transfer's
+        QCOMPARE(young->write(0, 0, QByteArray("y")), Status::Ok);
         ageBy(rig.area->instancePath() + u"/1"_s, ClipboardFileStaging::MaxAgeSeconds + 60);
-        QCOMPARE(rig.area->removeOlderThan(time(nullptr)), 1);
+        QCOMPARE(rig.area->removeOlderThan(time(nullptr)), 1); // a transfer is counted once, with its temporary directory
         QVERIFY(!QFileInfo::exists(rig.area->instancePath() + u"/1"_s));
+        QVERIFY(!QFileInfo::exists(rig.area->instancePath() + u"/1.parts"_s));
         QVERIFY(QFileInfo::exists(rig.area->instancePath() + u"/2"_s));
+        QVERIFY(QFileInfo::exists(rig.area->instancePath() + u"/2.parts"_s));
+        // a temporary directory whose transfer is long gone goes on its own age
+        QVERIFY(QDir().mkpath(rig.area->instancePath() + u"/7.parts"_s));
+        ageBy(rig.area->instancePath() + u"/7.parts"_s, ClipboardFileStaging::MaxAgeSeconds + 60);
+        QCOMPARE(rig.area->removeOlderThan(time(nullptr)), 0);
+        QVERIFY(!QFileInfo::exists(rig.area->instancePath() + u"/7.parts"_s));
     }
 
     // ---- the disk guard (spec 3.2) ----
@@ -920,7 +1022,7 @@ private Q_SLOTS:
         auto transfer = rig.area->begin(1, planOf({file(u"a.txt"_s, 4)}));
         QCOMPARE(transfer->create(), Status::Ok);
         g_openat.error = EACCES;
-        g_openat.match = ".part";
+        g_openat.match = "0"; // the temporary file is named by its plan index
         QCOMPARE(transfer->write(0, 0, pattern(4)), Status::IoError);
         QVERIFY(g_openat.hits > 0);
         g_openat = Fault();
@@ -987,6 +1089,7 @@ private Q_SLOTS:
         QDir().mkpath(root + u"/c-0000000000000dead/5/sub"_s);
         touch(root + u"/c-0000000000000dead/.lock"_s);
         touch(root + u"/c-0000000000000dead/5/sub/f.part"_s, "half");
+        touch(root + u"/c-0000000000000dead/5.parts/0"_s, "half of the temporary file"); // the temporary directory of the same transfer
         QVERIFY(QFile::link(outside.path(), root + u"/c-0000000000000dead/5/escape"_s));
         QCOMPARE(::link(QFile::encodeName(outside.filePath(u"victim"_s)).constData(), QFile::encodeName(root + u"/c-0000000000000dead/5/hard"_s).constData()), 0);
         ageBy(root + u"/c-0000000000000dead"_s, 3600);

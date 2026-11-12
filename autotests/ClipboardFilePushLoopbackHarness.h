@@ -76,7 +76,11 @@ struct PushRun {
         const auto instances = root.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
         if (instances.isEmpty()) return {};
         const QDir instance(root.filePath(instances.first()));
-        const auto transfers = instance.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+        const auto entries = instance.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+        QStringList transfers; // (not the `<seq>.parts` directories of the temporary files)
+        for (const QString &name : entries) {
+            if (!name.endsWith(QLatin1String(".parts"))) transfers.append(name);
+        }
         return transfers.isEmpty() ? QString() : instance.filePath(transfers.last()) + QLatin1Char('/') + relative;
     }
     bool anyStaging() const
