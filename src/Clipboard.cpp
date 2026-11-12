@@ -120,6 +120,7 @@ public:
     bool hostHtml = false; // OPT-077
     uint32_t pendingHostFormat = 0; // the format the client asked for in the request waiting for the worker
     bool announcedToClient = false; // a format list for it is out on the wire
+    bool standingAtClient = false; // GAP-G1: ... and the client has not replaced it with a copy of its own since (it is still the owner there)
     quint64 nextHostRequestId = 0;
     quint64 pendingHostRequest = 0; // the client's data request waiting for the worker
     bool discardClientResponse = false; // a request was reset away; its answer is dropped
@@ -635,6 +636,7 @@ void Clipboard::sendServerData()
         d->serverClipboardActivity.start();
         d->lastAnnounce.start();
         d->announcedToClient = true;
+        d->standingAtClient = true;
         ++d->counters.announces;
         context->ServerFormatList(context, &formatList);
     }
@@ -642,6 +644,9 @@ void Clipboard::sendServerData()
 
 void Clipboard::Private::onClientFormatList(const FormatList &formatList)
 {
+    // MS-RDPECLIP 3.1.5.2.2: a Format List makes its sender the clipboard owner. Whatever this side announced earlier is the client's no
+    // longer (it replaced it), so there is nothing of ours left to withdraw: an empty list sent now would empty the client's own copy.
+    standingAtClient = false;
     // One data request per format list, whatever text formats it announces:
     // a client copy typically lists CF_UNICODETEXT and CF_TEXT together, and
     // a request for each of them meant two clipboard writes and two announces
@@ -1360,6 +1365,49 @@ void Clipboard::Private::onClientImage(bool png, const QByteArray &data)
     Q_EMIT q->clientDataChanged();
 }
 
+void Clipboard::withdrawHostOffer()
+{
+    // GAP-G1: the host's clipboard no longer holds what was announced and holds nothing this server offers instead (it emptied, our own
+    // staged files came back, a copy was suppressed, the staged copy expired). A new text copy replaces an old offer by announcing itself;
+    // this is the case with nothing to announce. What a lock or a running transfer still pins stays served (clearOffer), as for any new copy.
+    if (d->closing || !(d->hostAnnounced || d->standingAtClient || d->pendingServerAnnounce)) {
+        return;
+    }
+    d->announceTimer.stop();
+    if (d->serve) {
+        d->serve->clearOffer();
+    }
+    const bool announced = d->standingAtClient;
+    d->hostAnnounced = false;
+    d->hostText = false;
+    d->hostImage = false;
+    d->hostHtml = false;
+    d->hostFiles = false;
+    d->pendingServerAnnounce = false;
+    d->announcedToClient = false;
+    d->standingAtClient = false;
+    d->lastServerText = QString();
+    d->lastServerHtml = QByteArray();
+    if (d->pendingHostRequest) {
+        d->pendingHostRequest = 0;
+        d->hostRequestTimer.stop();
+        d->sendFailResponse();
+    }
+    if (!announced) {
+        return; // announced but not yet sent (the picture is not delivered yet, or the interval holds it): nothing is on the client to take back
+    }
+    qCDebug(KRDP) << "Host clipboard holds nothing offered any more: withdrawing the announcement";
+    CLIPRDR_FORMAT_LIST formatList = {};
+    formatList.common.msgType = CB_FORMAT_LIST;
+    formatList.common.msgFlags = 0;
+    formatList.numFormats = 0;
+    formatList.formats = nullptr;
+    std::lock_guard lock(d->sendMutex);
+    if (auto *context = d->clipContext.load(); context && d->enabled) {
+        context->ServerFormatList(context, &formatList);
+    }
+}
+
 void Clipboard::resetHostSide()
 {
     d->announceTimer.stop();
@@ -1374,6 +1422,7 @@ void Clipboard::resetHostSide()
     d->lastServerHtml = QByteArray();
     d->pendingHostFormat = 0;
     d->announcedToClient = false;
+    d->standingAtClient = false;
     d->pendingServerAnnounce = false;
     d->lastServerText = QString();
     d->serverClipboardActivity = QElapsedTimer();

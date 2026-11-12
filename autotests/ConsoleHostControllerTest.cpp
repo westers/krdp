@@ -3608,6 +3608,25 @@ private Q_SLOTS:
         QVERIFY(policy && !policy->hostToClient && !policy->clientToHost);
     }
 
+    // GAP-G1 (wire 23): a ClipboardOffer of flags 0 takes back what the controller was told, once; nothing told, nothing sent.
+    void aClearedOfferWithdrawsTheAnnouncementAtTheClient()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, 0}));
+        QTest::qWait(80);
+        QVERIFY(rig.sent.formatLists.isEmpty()); // nothing was announced
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{2, ConsoleWorkerWire::ClipboardOfferText}));
+        QTRY_COMPARE(rig.sent.formatLists.size(), 1);
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{3, 0}));
+        QTRY_COMPARE(rig.sent.formatLists.size(), 2);
+        QVERIFY(rig.sent.formatLists.last().isEmpty());
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{4, 0}));
+        QTest::qWait(80);
+        QCOMPARE(rig.sent.formatLists.size(), 2);
+    }
+
     void clipboardHostCopyPasteFlowsThroughTheWorkerOnDemand()
     {
         ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));

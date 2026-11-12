@@ -53,6 +53,7 @@ private Q_SLOTS:
     void clipboardHtmlGatesAreStrict();
     void fileRecordsRoundTripAndAreBounded();
     void wireTwentyIsRefused();
+    void clearedClipboardOfferRoundTripsAndWireTwentyTwoIsRefused();
     void wireTwentyOneIsRefused();
     void filePushRecordsRoundTripAndAreBounded();
     void filePushGateIsStrict();
@@ -574,7 +575,7 @@ void ConsoleWorkerWireTest::roundTripsEncodedFrame()
 
 void ConsoleWorkerWireTest::encoderRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(22));
+    QCOMPARE(ProtocolVersion, quint16(23));
     Deframer deframer;
     EncoderCaps caps;
     caps.encoders.avc = {true, true, true};
@@ -966,7 +967,7 @@ void ConsoleWorkerWireTest::roundTripsControlGeneration()
 // OPT-067 (wire 16): the six clipboard records.
 void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
 {
-    QCOMPARE(ProtocolVersion, quint16(22));
+    QCOMPARE(ProtocolVersion, quint16(23));
     QCOMPARE(int(LastKind), int(Kind::FilePushState));
     const ClipboardPolicy policy{7, 42, true, false, true, false};
     const ClipboardOffer offer{3, 1};
@@ -1033,8 +1034,9 @@ void ConsoleWorkerWireTest::clipboardRecordsRoundTripAndAreBounded()
         d.feed(frame(ClipboardPolicy{1, 1, false, true, false, true}));
         QVERIFY(clipboardPolicy(*d.next()));
     }
-    // Offer: seq 0 and flags other than text are refused. Request: id 0, 0 bytes, more than the cap.
-    for (const auto &bad : {ClipboardOffer{0, 1}, ClipboardOffer{1, 0}, ClipboardOffer{1, 16}, ClipboardOffer{1, 9}}) {
+    // Offer: seq 0 and flag bits beyond the four formats are refused (flags 0 is the wire 23 "cleared" offer, valid with a seq).
+    // Request: id 0, 0 bytes, more than the cap.
+    for (const auto &bad : {ClipboardOffer{0, 1}, ClipboardOffer{0, 0}, ClipboardOffer{1, 16}, ClipboardOffer{1, 9}}) {
         Deframer d;
         d.feed(frame(bad));
         QVERIFY(!clipboardOffer(*d.next()));
@@ -1324,8 +1326,8 @@ void ConsoleWorkerWireTest::clipboardHtmlRecordsRoundTripAndAreBounded()
     QCOMPARE(clipboardSet(*setRecord), std::optional(set));
     QCOMPARE(clipboardSet(*htmlOnlyRecord), std::optional(htmlOnly));
     QVERIFY(frame(data).contains(html)); // raw UTF-8 on the wire
-    // Flag bits above files are not read, and an offer still needs at least one.
-    for (const quint8 flags : {quint8(16), quint8(0)}) {
+    // Flag bits above files are not read (flags 0 is the wire 23 "cleared" offer, valid).
+    for (const quint8 flags : {quint8(16), quint8(32), quint8(0x80)}) {
         Deframer d;
         d.feed(frame(ClipboardOffer{9, flags}));
         QVERIFY(!clipboardOffer(*d.next()));
@@ -1405,7 +1407,7 @@ void ConsoleWorkerWireTest::clipboardHtmlGatesAreStrict()
 void ConsoleWorkerWireTest::protocolVersionIsTwenty()
 {
     // The paired broker and worker must agree; a wire 20 record (no files kind) from an old peer is refused at the hello.
-    QCOMPARE(ProtocolVersion, quint16(22));
+    QCOMPARE(ProtocolVersion, quint16(23));
     QCOMPARE(int(LastClipboardKind), int(ClipboardKind::Files));
 }
 
@@ -1713,6 +1715,46 @@ void ConsoleWorkerWireTest::fileGatesAreStrict()
     QVERIFY(mayAnswerClipboardRequest(list, control, files, 19, true));
     QVERIFY(!mayAnswerClipboardRequest(list, control, noFiles, 19, true));
     QVERIFY(mayAnswerClipboardRequest(text, control, noFiles, 19, true));
+}
+
+// GAP-G1 (wire 23): a ClipboardOffer with flags 0 says "nothing is offered any more"; it round-trips, needs a seq and the exact size, and a
+// worker still on wire 22 (an offer always had a format) is refused as a whole.
+void ConsoleWorkerWireTest::clearedClipboardOfferRoundTripsAndWireTwentyTwoIsRefused()
+{
+    QCOMPARE(ProtocolVersion, quint16(23));
+    Deframer d;
+    d.feed(frame(ClipboardOffer{7, 0}));
+    const auto record = d.next();
+    QVERIFY(record);
+    QCOMPARE(record->kind, Kind::ClipboardOffer);
+    QCOMPARE(clipboardOffer(*record), std::optional(ClipboardOffer{7, 0}));
+    for (const quint8 flags : {ClipboardOfferText, ClipboardOfferImage, ClipboardOfferHtml, ClipboardOfferFiles, quint8(ClipboardOfferText | ClipboardOfferImage)}) {
+        Deframer e;
+        e.feed(frame(ClipboardOffer{8, flags}));
+        QCOMPARE(clipboardOffer(*e.next()), std::optional(ClipboardOffer{8, flags}));
+    }
+    // a zero seq is never valid, with or without a format; a short or long payload is not an offer
+    Deframer zeroSeq;
+    zeroSeq.feed(frame(ClipboardOffer{0, 0}));
+    QVERIFY(!clipboardOffer(*zeroSeq.next()));
+    Record shorter = *record;
+    shorter.payload.chop(1);
+    Record longer = *record;
+    longer.payload.append(char(0));
+    QVERIFY(!clipboardOffer(shorter) && !clipboardOffer(longer));
+    // files are still announced alone
+    Deframer mixed;
+    mixed.feed(frame(ClipboardOffer{9, quint8(ClipboardOfferFiles | ClipboardOfferText)}));
+    QVERIFY(!clipboardOffer(*mixed.next()));
+    // wire 22 is refused as a whole
+    QByteArray old = frame(Heartbeat{1});
+    old[4] = char(0);
+    old[5] = char(22);
+    Deframer stale;
+    stale.feed(old);
+    QVERIFY(!stale.next());
+    QCOMPARE(stale.takeInvalidCount(), 1);
+    QCOMPARE(stale.mismatchedVersion(), std::optional<quint16>(22));
 }
 
 // OPT-078 phase 3 (wire 22): a worker still on wire 21 (host-to-client files only) meets a 22 peer: refused as a whole.

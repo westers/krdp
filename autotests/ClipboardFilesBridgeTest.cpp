@@ -200,6 +200,26 @@ private Q_SLOTS:
         QVERIFY(clipboard.filesEnabled());
     }
 
+    // GAP-G1: the host's file offer is withdrawn (the host clipboard no longer holds it): the client's list of it is emptied, once.
+    void aWithdrawnFileOfferEmptiesTheClientsList()
+    {
+        Rig rig;
+        rig.clipboard.withdrawHostOffer();
+        QVERIFY(rig.sent.formatLists.isEmpty()); // nothing announced: nothing sent
+        rig.clipboard.announceHost(false, false, false, true);
+        QCOMPARE(rig.sent.formatLists.size(), 1);
+        rig.clipboard.withdrawHostOffer();
+        QCOMPARE(rig.sent.formatLists.size(), 2);
+        QVERIFY(rig.sent.formatLists.last().isEmpty()); // zero formats
+        rig.clipboard.withdrawHostOffer();
+        QCOMPARE(rig.sent.formatLists.size(), 2);
+        // the stale descriptor is not served any more
+        rig.dataRequest(ClipboardFileDescriptor::FormatId);
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+        QCOMPARE(rig.requested.size(), 0);
+    }
+
     void aFileCopyIsAnnouncedAloneAsTheRegisteredFormat()
     {
         Rig rig;

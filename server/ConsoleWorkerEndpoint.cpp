@@ -690,10 +690,11 @@ bool ConsoleWorkerEndpoint::processRecords()
         } else if (const auto state = ConsoleWorkerWire::controlState(*record, ConsoleWorkerWire::Kind::HostScreensChanged); state && state->active) {
             Q_EMIT hostScreensChanged(state->generation);
         } else if (const auto offer = ConsoleWorkerWire::clipboardOffer(*record)) {
-            // Newest only; one the policy no longer allows is dropped here, never forwarded.
+            // Newest only; one the policy no longer allows is dropped here, never forwarded. Wire 23: flags 0 (nothing is offered any more) is
+            // forwarded whatever the policy says: a withdrawal grants nothing, and the broker only acts on it when it announced something.
             if (offer->seq > m_clipboardOfferSeq) {
                 m_clipboardOfferSeq = offer->seq;
-                if (m_clipboardPolicy && m_clipboardPolicy->hostToClient) Q_EMIT clipboardOffered(offer->seq, offer->flags);
+                if (!offer->flags || (m_clipboardPolicy && m_clipboardPolicy->hostToClient)) Q_EMIT clipboardOffered(offer->seq, offer->flags);
             }
         } else if (const auto data = ConsoleWorkerWire::clipboardData(*record)) {
             // The answer must be of the kind that was asked for; anything else is dropped like an unknown id.
