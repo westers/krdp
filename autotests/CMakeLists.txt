@@ -1318,3 +1318,6 @@ add_executable(DeskActivityTest DeskActivityTest.cpp)
 target_include_directories(DeskActivityTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(DeskActivityTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
 add_test(NAME DeskActivityTest COMMAND DeskActivityTest)
+
+# Labels (unit, loopback, daemon, gpu, root): see TestLabels.cmake and docs/testing.md
+include(${CMAKE_CURRENT_LIST_DIR}/TestLabels.cmake)

@@ -100,14 +100,19 @@ private Q_SLOTS:
     }
     void guardianOwnsProfileAcrossChildExec()
     {
-        QTemporaryDir home, runtime;
+        QTemporaryDir home;
+        // A short root: QTemporaryDir under TMPDIR is "<TMPDIR>/VirtualSessionStorageTest-XXXXXX" and the guardian
+        // socket below it only fits sockaddr_un (107 bytes) when TMPDIR is as short as /tmp. /tmp is a root-owned
+        // sticky directory, which prepareAt() accepts as an ancestor.
+        QTemporaryDir runtime(u"/tmp/krdp-gs-XXXXXX"_s);
+        QVERIFY(runtime.isValid());
         QString error;
         const auto session = id();
         const QByteArray token(32, 'x');
         // The guardian listens on <runtime>/farside-virtual/<session>/guardian.sock, which must fit sockaddr_un (107 bytes).
         const QString socketPath = runtime.path() + u"/farside-virtual/"_s + session + u"/guardian.sock"_s;
         if (QFile::encodeName(socketPath).size() > 107)
-            QSKIP(qPrintable(u"TMPDIR is too long for the guardian socket (%1 > 107 bytes): use a short TMPDIR such as /tmp/rf-t1"_s.arg(QFile::encodeName(socketPath).size())));
+            QSKIP(qPrintable(u"TMPDIR is too long for the guardian socket (%1 > 107 bytes)"_s.arg(QFile::encodeName(socketPath).size())));
         auto storage = VirtualSessionStorage::prepareAt(getuid(), home.path(), runtime.path(), session, id(), token, &error);
         QVERIFY(storage);
         const auto profile = storage->profileDirectory();
