@@ -147,7 +147,7 @@ struct SpaceFailure {
 
 struct Config {
     QString cacheDir; ///< the user's cache directory (XDG_CACHE_HOME or ~/.cache); `krdp-clip` is created inside it
-    quint64 reserveBytes = 0; ///< ClipboardFileMinFreeBytes; 0 = max(2 GiB, 5% of the filesystem)
+    quint64 reserveBytes = 0; ///< ClipboardFileMinFreeBytes; 0 = 5% of the filesystem, at least 2 GiB and at most 8 GiB
     SpaceProbe space = probeSpace;
     std::function<uid_t()> effectiveUid = [] { return ::geteuid(); };
     quint64 spaceCheckIntervalBytes = ClipboardFileLimits::SpaceCheckIntervalBytes;

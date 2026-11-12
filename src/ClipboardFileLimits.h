@@ -117,20 +117,24 @@ constexpr int WalkBudgetMs = 5000;
 
 /// Space checks: before the first byte and every this many staged bytes.
 constexpr quint64 SpaceCheckIntervalBytes = 64ULL * 1024 * 1024;
-/// ClipboardFileMinFreeBytes default: max(2 GiB, 5% of the filesystem).
+/// ClipboardFileMinFreeBytes default: 5% of the filesystem, but never below 2 GiB and never above 8 GiB (a fixed percentage alone asked for 183 GiB of
+/// free space on a 3.6 TiB disk and refused every copy; what must stay free is a fixed safety margin, not a share of the disk).
 constexpr quint64 DefaultReserveFloorBytes = 2ULL * 1024 * 1024 * 1024;
+constexpr quint64 DefaultReserveCeilingBytes = 8ULL * 1024 * 1024 * 1024;
 constexpr quint64 DefaultReservePercent = 5;
 
 /// The staged selection becomes visible when it is at most this big, else after its first file.
 constexpr quint64 OfferWhenCompleteBytes = 256ULL * 1024 * 1024;
 
-/// The free space that must remain after a transfer: \a configured when non-zero, else max(2 GiB, 5% of \a filesystemBytes).
+/// The free space that must remain after a transfer: \a configured when non-zero (used as given, even above the ceiling), else 5% of \a filesystemBytes
+/// clamped to [2 GiB, 8 GiB].
 constexpr quint64 reserveBytes(quint64 configured, quint64 filesystemBytes)
 {
     if (configured != 0) {
         return configured;
     }
-    return std::max(DefaultReserveFloorBytes, filesystemBytes / 100 * DefaultReservePercent + filesystemBytes % 100 * DefaultReservePercent / 100);
+    const quint64 percent = filesystemBytes / 100 * DefaultReservePercent + filesystemBytes % 100 * DefaultReservePercent / 100;
+    return std::clamp(percent, DefaultReserveFloorBytes, DefaultReserveCeilingBytes);
 }
 
 enum class SpaceVerdict {

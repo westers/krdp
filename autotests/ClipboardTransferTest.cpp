@@ -137,7 +137,7 @@ private Q_SLOTS:
             QVERIFY2(!parseMinFree(QString::fromLatin1(bad)), bad);
             QVERIFY2(!normalizeMinFree(QString::fromLatin1(bad)), bad);
         }
-        // 0 means the built-in rule max(2 GiB, 5% of the filesystem)
+        // 0 means the built-in rule: 5% of the filesystem, at least 2 GiB and at most 8 GiB
         QCOMPARE(*parseMinFree(QStringLiteral("0")), quint64(0));
     }
 

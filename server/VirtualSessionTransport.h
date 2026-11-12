@@ -59,7 +59,7 @@ public:
     void setClipboardDirection(ConsoleClipboardPolicy::Direction direction);
     /** OPT-078: the host owner's ClipboardFiles and ClipboardFileMaxRate. Call before the client authenticates (the capability flags are exchanged once). */
     void setClipboardFiles(ConsoleClipboardPolicy::Direction direction, const ClipboardFilePacing::Ceiling &ceiling);
-    /** OPT-078 phase 3: ClipboardFileMinFreeBytes (0 = max(2 GiB, 5% of the filesystem)). */
+    /** OPT-078 phase 3: ClipboardFileMinFreeBytes (0 = 5% of the filesystem, at least 2 GiB and at most 8 GiB). */
     void setClipboardFileMinFreeBytes(quint64 bytes) { m_clipboardFileMinFree = bytes; }
 
 private:
