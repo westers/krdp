@@ -244,6 +244,9 @@ int lowestFreeVirtualNumber(const QList<HostMonitor> &monitors)
 // re-implemented here rather than reusing the floor along with the ceiling.
 std::optional<Error> sanitizeResult(const QList<HostMonitor> &monitors, const Caps &caps)
 {
+    if (monitors.size() > MaxMonitorCount) {
+        return Error{QStringLiteral("invalid"), QStringLiteral("the layout would have %1 monitors; the limit is %2").arg(monitors.size()).arg(MaxMonitorCount)};
+    }
     for (const auto &monitor : monitors) {
         const QSize size = monitor.kind == Kind::Real && monitor.standIn && monitor.standInSize ? *monitor.standInSize : monitor.size;
         const qreal scale = monitor.kind == Kind::Real && monitor.standIn && monitor.standInScale ? *monitor.standInScale : monitor.scale;
@@ -350,6 +353,11 @@ std::optional<ApplyRequest> applyFromJson(const QJsonObject &object)
     request.privateMode = object.value(QStringLiteral("private")).toBool(false);
     request.takeoverLayout = object.value(QStringLiteral("takeoverLayout")).toBool(false);
     for (const auto &value : object.value(QStringLiteral("monitors")).toArray()) {
+        // One entry past the limit is kept, so plan() refuses the request with
+        // the real reason; the rest of an oversized array is not parsed.
+        if (request.monitors.size() > MaxMonitorCount) {
+            break;
+        }
         const auto monitor = applyMonitorFromJson(value);
         if (!monitor) {
             return std::nullopt;
@@ -951,6 +959,11 @@ int Deframer::takeInvalidCount()
 
 std::variant<Plan, Error> plan(const Layout &current, const ApplyRequest &request, const QString &requester, const Caps &caps)
 {
+    // Before anything is planned: every `new` entry becomes a virtual output.
+    if (request.monitors.size() > MaxMonitorCount) {
+        return Error{QStringLiteral("invalid"), QStringLiteral("an apply may name at most %1 monitors").arg(MaxMonitorCount)};
+    }
+
     QHash<QString, const ApplyMonitor *> mentioned;
     for (const auto &entry : request.monitors) {
         if ((entry.scale && (!std::isfinite(*entry.scale) || *entry.scale <= 0.0))
