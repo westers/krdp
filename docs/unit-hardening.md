@@ -210,3 +210,60 @@ LimitCORE=infinity
 
 or install the previous package (rollback set `/root/farside-deploy-rel-*-backup-<host>/ROLLBACK.txt`). The `enterBrokerExecutionContext`
 call is in the binary, not the unit; the core marker file (section 5) is its only switch.
+
+## 10. Input devices in the Console broker: decision 2026-11-12
+
+### What the broker reads and delivers
+
+- `PhysicalInputWatcher` (`server/PhysicalInputWatcher.cpp:30-59`) opens every seat0 keyboard, mouse, touchpad and touchscreen
+  evdev node with `open(node, O_RDONLY | O_NONBLOCK | O_CLOEXEC)` (`:44`). Which nodes qualify is decided by `isDeskDevice`
+  (`server/PhysicalInputWatcher.h:27-33`): the node must be `/dev/input/event*`, not under `/devices/virtual/input/` (so
+  uinput devices are excluded) and on seat0.
+- Of each event only `isActivity` (`PhysicalInputWatcher.h:16-20`: key down, relative move, absolute event) is evaluated. Key
+  codes are not stored or logged (comment at `PhysicalInputWatcher.cpp:57`). The only output is a bare `activity()` signal
+  (`:58`), connected at `server/consolehost.cpp:166`.
+- `ConsoleHostController::physicalInputActivity` (`server/ConsoleHostController.cpp:2542`) uses that signal for two things:
+  desk-activity notices to clients (paced to at most 4 Hz by `DeskActivityTracker`), and ending a live Replace with reason
+  `deskInput` (`:2560`, `:646`). The broker needs one bit: "the desk was touched now".
+- The descriptors stay open for the life of the broker. They are not dropped when no client is connected.
+
+### Threat statement
+
+The broker runs the FreeRDP server stack and PAM as root, before the client is authenticated. An attacker with code
+execution in that pre-authentication path is root and holds these descriptors, so can read everything typed at the desk,
+including passwords at the greeter and lock screen. The same attacker can also ptrace KWin or the greeter (the broker keeps
+`CAP_SYS_PTRACE`, section 2), `setuid` to any user, read the shadow file and read the TLS key. The input devices are the
+cheapest route to typed passwords, not the only one. The unit directives in section 3 and the non-dumpable flag
+(`PR_SET_DUMPABLE`) do not change this: they limit core dumps and some kernel interfaces, not file descriptors the process
+already holds. A systemd `DeviceAllow` list cannot be used, because the capture worker is in the broker's cgroup
+(section 1) and needs GPU, video4linux and FUSE devices.
+
+### Options compared
+
+| Option | What it does | Protects against | Does not protect against |
+|---|---|---|---|
+| (a) Non-root helper in group `input` that sends only rate-limited ticks; AppArmor profile denies the broker `/dev/input/**` | Moves the open descriptors out of the root broker; the broker receives ticks only | Reading typed passwords through evdev from a compromised broker | Other root routes to the same passwords (ptrace of KWin/greeter, `setuid`, shadow, TLS key) unless the broker's ptrace capability is also dropped; adds a daemon, a system user and an AppArmor profile on every host |
+| (b) Take the signal from KWin idle events in the worker | Removes the watcher from the broker | The same evdev reading as (a), with no new daemon | Risk of counting remote (injected `fake_input`) input as desk activity, which would end Replace and flag the desk as busy wrongly; not verified (see below) |
+| (c) Split into an unprivileged per-connection network front end and a small root broker for PAM and worker launch | Pre-authentication code no longer runs as root | The whole class: code execution in the network path no longer gives root | Nothing is protected until it is built; very large change; not planned |
+| (d) Status quo, documented | Keeps the watcher in the broker | Nothing new | Everything above remains possible for a root attacker in the broker |
+
+### Decision (Steve, 2026-11-12: "go with your recommendation"; the recommendation was the assistant's)
+
+Option (d) now: keep the watcher in the broker, document it here, and fix the contradiction between the 2026-09-21 hosting spec
+and the 2026-10-14 desk-activity spec (both now point to this section). Reasons:
+
+- Option (a) adds a daemon, a system user and an AppArmor profile on every host, while a root attacker would take another
+  path to the same passwords. If (a) is ever done, it should be paired with dropping the broker's `CAP_SYS_PTRACE`.
+- Option (b) is not safe to assume: it is unverified whether injected input is counted (see below).
+- Option (c) is the only option that changes the threat class. It is a separate, later decision and is not planned.
+
+### Unverified points a future attempt must settle on Sol first
+
+1. Whether AppArmor is active on every fleet host, and whether the capture worker (a child of the broker) inherits the
+   broker's profile, so that a `/dev/input/**` denial for the broker would also bind the worker.
+2. Whether KWin's idle detection counts `fake_input` events. If it does, option (b) cannot tell the desk from the remote user.
+3. Whether a process holding `CAP_SYS_ADMIN` (kept, section 3) can leave the cgroup or mount namespace restrictions that
+   a `DeviceAllow` or AppArmor approach relies on.
+4. Whether PAM still works for the broker without `CAP_DAC_READ_SEARCH` (needed if the capability set is ever reduced).
+
+Nothing in this section was run on a live unit; it records code reading and a design study only.

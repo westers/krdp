@@ -131,6 +131,18 @@ capability group only.
 - Client: `ControlCapabilitiesTest`, `DeskActivityModelTest` (fake clock), `SessionModelTest` additions, QML smoke through
   the existing offscreen tests.
 
+## Security note (2026-11-12)
+
+This design gives the root Console broker (`farside-console-host`, which also runs the network-facing RDP stack and
+PAM) read access to every seat0 keyboard, mouse, touchpad and touchscreen node. The code drops key codes at once and
+keeps one boolean, but the open file descriptors exist for as long as the broker runs. An attacker who gets code
+execution in the broker, for example through the pre-authentication RDP path, can therefore read what is typed at the
+desk, including passwords typed at the greeter or lock screen. Because the broker is root, that attacker has other
+routes to the same secrets (ptrace of KWin or the greeter, `setuid` to any user, the shadow file, the TLS key), so
+the input devices are the cheapest route but not the only one. Steve decided on 2026-11-12 to accept this and keep
+the watcher in the broker. The options that were compared and the points a later attempt must verify are in
+`docs/unit-hardening.md`, section "Input devices in the Console broker: decision 2026-11-12".
+
 ## Open questions (recommended answers)
 
 1. Should the controller's own ghost also show when the host pointer equals its pointer? No: only where it differs
