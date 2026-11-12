@@ -5,14 +5,28 @@ Library and examples for creating an RDP server.
 
 # Farside Remote Desktop settings
 
+> **Routes.** Farside serves exactly two routes: **Console** (port 3391, the
+> physical display in any state, including the SDDM greeter and the lock screen)
+> and **Virtual** (port 3395, persistent per-user desktops). Both run as system
+> services. The legacy :3389 `krdpserver` user service is retired; the
+> `krdpserver` sections further down describe that example server and are kept
+> as library/developer documentation only. Current state and rollout history:
+> `HANDOFF-CODEX.md` (outside this repo) and [the task plan](docs/plans/2026-10-01-farside-task-plan.md).
+
+> **Warning: never use `kwriteconfig6 --notify` against a server you care about.**
+> `--notify` makes every running `krdpserver` re-read its configuration,
+> including a live one. Never write `~/.config/krdpserverrc` of a machine that
+> is serving clients. Test instances get their own port and their own
+> configuration directory, and the file is written without `--notify`:
+>
+> ```bash
+> export XDG_CONFIG_HOME="$(mktemp -d)"   # private config dir for the test instance
+> kwriteconfig6 --file krdpserverrc --group General --key MonitorMode virtual
+> krdpserver --port 3499                  # picks up the private config on start
+> ```
+
 The fork's Networking settings module manages **Console** and **Virtual** through
-four scoped pages. Desktop and mobile use the same navigation page. This is the
-implementation is installed on **Hal, Buzz and Sol** as server `df517e8`
-(2026-10-01); Ace, Cray and Marvin retain their previous release. Package,
-rollback and basic connection gates pass. Installed authorization, migration and
-coexistence acceptance remains open in [the task plan](docs/plans/2026-10-01-farside-task-plan.md).
-Existing service routes are preserved. The example-server sections below also
-describe retained legacy behavior.
+four scoped pages. Desktop and mobile use the same navigation page.
 
 | Page | Scope | When a saved change takes effect |
 |---|---|---|
@@ -189,16 +203,20 @@ the physical outputs come back either during the graceful shutdown or via
 the automatic startup recovery, so no manual step is normally needed.
 
 ```bash
-kwriteconfig6 --file krdpserverrc --group General --key MonitorMode virtual --notify
+# test instance only: private config dir, no --notify (see the warning at the top)
+XDG_CONFIG_HOME="$testConfigDir" kwriteconfig6 --file krdpserverrc --group General --key MonitorMode virtual
 ```
 
-takes effect at the next connection (not for one already in progress); roll
-back the same way with `specific` (or whichever mode was in use before).
+takes effect when that instance next reads its configuration (at the next
+start; not for a connection already in progress); roll back the same way with
+`specific` (or whichever mode was in use before).
 
-`MonitorMode` is applied live, so switching needs no restart:
+`MonitorMode` can also be re-applied by a running instance when it is told to
+reload its configuration. Do that only for a test instance you started
+yourself; never trigger a reload of a live server.
 
 ```bash
-kwriteconfig6 --file krdpserverrc --group General --key MonitorMode multi --notify
+XDG_CONFIG_HOME="$testConfigDir" kwriteconfig6 --file krdpserverrc --group General --key MonitorMode multi
 ```
 
 **The own client does not use `MonitorMode` at all.** It joins the private
@@ -314,7 +332,7 @@ kwriteconfig6 --file krdpserverrc --group General --key Certificate "$certificat
 kwriteconfig6 --file krdpserverrc --group General --key CertificateKey "$certificateKeyPath"
 kwriteconfig6 --file krdpserverrc --group General --key SystemUserEnabled true
 # Optional: display target (workspace|primary|specific|multi) and monitor ID
-# (applied live; add --notify to change it without restarting the service)
+# (read at start; never use --notify, it reloads every running server)
 kwriteconfig6 --file krdpserverrc --group General --key MonitorMode workspace
 kwriteconfig6 --file krdpserverrc --group General --key MonitorIndex 0
 # Optional: VAAPI driver mode (auto|off|radeonsi|iHD)
@@ -491,8 +509,9 @@ and the adaptive loop itself waits for at least three accepted samples
 (`NetworkDetection::validBandwidthSamples()`) before it starts steering
 quality — a fresh connection stays at the `Quality` cap until the estimate is
 real. `AdaptiveQuality`/`Quality` changes made while a session is connected
-(e.g. `kwriteconfig6 --notify --file krdpserverrc --group General --key
-AdaptiveQuality false`) take effect within a couple of seconds; a
+(for a test instance with its own `XDG_CONFIG_HOME`, `kwriteconfig6 --file
+krdpserverrc --group General --key AdaptiveQuality false`, then reload that
+instance only) take effect within a couple of seconds; a
 `Runtime config applied: ...` line in the journal confirms the reload ran.
 
 `Codec` (kcfg `General/Codec`, `String`, default `auto`) picks the RDPGFX video codec per

@@ -6,7 +6,7 @@ set -euo pipefail
 krdp="${KRDP_SRC:-$HOME/dev/krdp}"
 jobs="${JOBS:-16}"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "${tmp:?}"' EXIT
 
 cmake -S "$krdp" -B "$tmp" \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
