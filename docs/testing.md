@@ -1,7 +1,8 @@
 # Running the test suite
 
 The autotests are QtTest/ECM executables registered by name in `autotests/CMakeLists.txt`
-(199 tests in the full configuration on Sol, 2026-11-12). This page says how to run them on a
+(201 tests registered on the `review-fixes` tree, 2026-11-12; the 199 and the Sol measurements below
+were taken on `master` 30801020 plus the REVIEW-T1 test changes). This page says how to run them on a
 development host and on Sol, which tests need which tools, which cases are expected failures, and
 which cases skip on Sol and why. Measured on `master` 30801020 plus the REVIEW-T1 test changes.
 
@@ -11,6 +12,7 @@ which cases skip on Sol and why. Measured on `master` 30801020 plus the REVIEW-T
 cmake -S . -B build -DBUILD_TESTING=ON -DBUILD_EXAMPLES=ON -DBUILD_PLASMA_SESSION=ON   # + KPipeWire flags, see CLAUDE.md
 cmake --build build -j4
 ctest --test-dir build -L unit --output-on-failure      # daemon-free set, safe on a work desktop (Hal)
+ctest --test-dir build -L loopback --output-on-failure  # 127.0.0.0/8 only, no daemon, no device node (also safe on Hal)
 ctest --test-dir build -N                               # list; add -L <label> or -R <regex>
 ctest --test-dir build --output-on-failure --timeout 300 -j1    # everything (Sol only, see below)
 ```
@@ -20,22 +22,25 @@ one test at a time (`-j1`): several tests start private daemons or listen on soc
 
 ## Labels
 
-| Label | Meaning | Tests (Sol, 2026-11-12) |
+| Label | Meaning | Tests (`review-fixes`, 2026-11-12) |
 |---|---|---|
-| `unit` | No daemon, no D-Bus connection, no GPU/device node, no listening TCP socket. May spawn our own short-lived helpers or `sleep`, use private sockets under `TMPDIR`, fake tools on `PATH`. Safe on a work desktop. | 161 |
-| `loopback` | Listens on 127.0.0.1, runs `krdpctl-probe`/`openssl` against a test server, or binds sockets in the real `XDG_RUNTIME_DIR`. | 16 |
+| `unit` | No daemon, no D-Bus connection, no GPU/device node, no listening TCP socket. May spawn our own short-lived helpers or `sleep`, use private sockets under `TMPDIR`, fake tools on `PATH`. Safe on a work desktop. | 165 |
+| `loopback` | Listens on 127.0.0.0/8 or runs `krdpctl-probe`/`openssl` against a test server, and starts no daemon and opens no device node. A test that also needs a daemon or a GPU node carries only that stricter label, so `-L loopback` is daemon-free like `-L unit`. | 14 |
 | `daemon` | Starts or talks to a daemon: private PipeWire/WirePlumber/dbus-daemon/KWin, the session or system bus, bwrap sandboxes. Never on Hal. | 19 |
 | `gpu` | Opens `/dev/dri` or `/dev/nvidia*` (encoder probes, DMA-BUF, VAAPI/NVENC). | 7 |
 | `root` | Would need root. No registered test does (cases with a root-only path skip as root). | 0 |
 | `gui`, `non-hal`, `pure` | Older labels set next to their tests: offscreen QML page tests, "not on Hal", pure data. Kept. | 4, 4, 1 |
 
 The `unit` list is explicit (`autotests/TestLabels.cmake`), so a new test is not `unit` until someone
-has checked what it starts and added it. Tests with more than one label (for example
-`WorkerEndToEndTest`: `daemon`, `gpu`, `loopback`) are in each list. List tests with no label:
+has checked what it starts and added it. Every registered test has at least one of `unit`,
+`loopback`, `daemon`, `gpu`; `unit` and `loopback` never overlap with another label. Four tests carry
+both `daemon` and `gpu` (`DeviceToggleLoopTest`, `RenderAccessTest`, `SoftwareEncodeSessionTest`,
+`WorkerEndToEndTest`), so the four counts add up to 205 for 201 tests. `appstreamtest` is
+registered by ECM at the top level and labelled `unit` in the root `CMakeLists.txt`. List tests with no label:
 
 ```bash
 ctest --test-dir build -N | sed -n 's/.*#[0-9]*: //p' | sort > /tmp/all.txt
-for l in unit loopback daemon gpu gui; do ctest --test-dir build -L $l -N | sed -n 's/.*#[0-9]*: //p'; done | sort -u > /tmp/labelled.txt
+for l in unit loopback daemon gpu; do ctest --test-dir build -L $l -N | sed -n 's/.*#[0-9]*: //p'; done | sort -u > /tmp/labelled.txt
 comm -23 /tmp/all.txt /tmp/labelled.txt
 ```
 
@@ -50,9 +55,15 @@ decided a label: `SoftwareEncodeSessionTest` starts a private PipeWire and conne
 system bus; `KcmUiTest`, `BrokerSignInPageTest`, `BrokerPreferencesPageTest` connect a bus;
 `WorkerEndToEndTest` and `EncoderSupportTest` open GPU nodes even when they then skip;
 `VirtualSessionHostControllerTest` binds sockets in the real `/run/user/<uid>/farside-virtual` and
-opens `/dev/dri`; `ConsoleOutputJournalTest` and `ConsoleReleaseLockGuardTest` use stand-ins, not
+opens `/dev/dri` (so it is `gpu`, not `loopback`); `ConsoleOutputJournalTest` and `ConsoleReleaseLockGuardTest` use stand-ins, not
 real `kscreen-doctor`/`kscreenlocker_greet`. Shell-script tests (`dbus-run-session ... bash`) are
-not covered by the launcher and are `daemon` by construction. Do not run strace for timing: it
+not covered by the launcher and are `daemon` by construction, except
+`VirtualSessionDesktopSupervisionTest.sh`, which sources only helper functions of
+`scripts/virtual-session-desktop.sh` and `SharedHeadersDriftCheck`, which only diffs two source trees
+(both `unit`). Tests added after the strace run (REVIEW-S1/S3/S4/P1, GAP-G2/G5) were classified by
+reading their sources and, for the two QML page tests `BrokerHostsPageTest`/`BrokerMainPageTest`, by
+strace under the CTest environment (no connect other than the fake bus path). `ServerConnectionAdmissionTest`
+uses 127.0.0.2.. as extra client addresses: still loopback. Do not run strace for timing: it
 slowed `ClipboardFileLargeLoopbackTest` from 46 s to over 480 s and made it time out.
 
 ## Environment
@@ -63,6 +74,7 @@ slowed `ClipboardFileLargeLoopbackTest` from 46 s to over 480 s and made it time
 | `TMPDIR` private, for example `/tmp/rf-t1` (mode 0700, created first) | `VirtualSessionStorageTest` refuses a root with a group/world-writable ancestor (a stage dir with mode 0775 breaks every fixture; the test skips with a message). |
 | `LD_LIBRARY_PATH=<private KPipeWire>/lib/x86_64-linux-gnu:<build>/bin:<build>/lib` | The tests link the private KPipeWire (`97913cc` on Sol). |
 | `KRDP_E2E_NVIDIA=1` | Only for `WorkerEndToEndTest` on an NVIDIA host with an accessible render node: binds `/dev/nvidia*` into the private KWin session. Without a usable node the test skips. |
+| `KRDP_CLIENT_SRC=<krdp-client checkout>` | `SharedHeadersDriftCheck` compares the hand-copied headers with the client repo; without it (and without `../krdp-client`) it exits 77 and skips. |
 | `ulimit -c 0` | Tests such as `TerminateHandlerTest` abort on purpose; do not leave cores. |
 | No `FARSIDE_*` / `KRDP_*` set by you | Tests build their own environment. Old `KRDP_*` names are ignored by the product since the Farside rename; the product prints "Old KRDP environment names are ignored" for the test-only `KRDP_E2E_*` variables, which is harmless. |
 
@@ -109,7 +121,6 @@ environment cannot run them.
 | `WorkerEndToEndTest` | `bwrap`, `dbus-daemon`, `pipewire`, `wireplumber`, `kwin_wayland`, `kbuildsycoca6`; a render node the user can open; optional `ffplay` (motion) |
 | `*LoopbackTest`, `RdpConnectionInitTest` | `krdpctl-probe` (`BUILD_EXAMPLES=ON`), `openssl` |
 | `SystemdNotifyTest` (2 cases) | built with libsystemd (`libsystemd-dev`); skips otherwise |
-| `PlasmaBackendProbeTest` and friends | `BUILD_PLASMA_SESSION=ON` |
 | camera cases of `ConsoleHostControllerTest` | a v4l2loopback device at `/dev/video10` (else the "unsupported" refusal is asserted) |
 
 ## Expected failures (real product defects)
@@ -148,5 +159,5 @@ still does not fit.
 | after, run C | REVIEW-T1 (same) | 199 | 199 | 0 | 0 |
 | after, run D (final tree) | REVIEW-T1 + guardian-socket fix | 199 | 199 | 0 | 0 |
 
-`ctest -L unit`: 161 tests, 190 s. Counts include tests that pass with skipped cases (ctest does not
+`ctest -L unit`: 161 tests, 190 s on `master` plus REVIEW-T1 (165 on the `review-fixes` tree). Counts include tests that pass with skipped cases (ctest does not
 count a QtTest `SKIP` as skipped; only exit 77 does).

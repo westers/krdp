@@ -125,6 +125,10 @@ endif()
 if(BUILD_TESTING)
     find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED Test)
     add_subdirectory(autotests)
+    # appstreamtest is registered by KDECMakeSettings in this directory, so TestLabels.cmake (autotests/) cannot see it.
+    if(TEST appstreamtest)
+        set_property(TEST appstreamtest APPEND PROPERTY LABELS unit)
+    endif()
 endif()
 
 ecm_setup_version(
