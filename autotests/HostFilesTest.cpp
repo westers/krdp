@@ -42,6 +42,20 @@ class HostFilesTest : public QObject
 {
     Q_OBJECT
 
+    /// The walk refuses /proc, /sys and /dev as roots; a test directory under /dev/shm (TMPDIR=/dev/shm) must not trip that, so every walk
+    /// here (but the one that means the kernel file systems) leaves /dev out. The temporary directories live wherever TMPDIR says.
+    static WalkOptions plainOptions()
+    {
+        WalkOptions options;
+        options.refusedRoots = {"/proc", "/sys"};
+        return options;
+    }
+    static WalkResult walkHere(const QList<QByteArray> &paths, WalkOptions options = plainOptions())
+    {
+        if (options.refusedRoots == WalkOptions().refusedRoots) options.refusedRoots = plainOptions().refusedRoots; // (an options object that kept the defaults)
+        return walk(paths, options);
+    }
+
     static QByteArray pathOf(const QDir &dir, const QString &name)
     {
         return QFile::encodeName(dir.filePath(name));
@@ -110,7 +124,7 @@ private Q_SLOTS:
         write(root.filePath(QStringLiteral("sel/a/y/deep.bin")), QByteArray(1000, 'd'));
         QDir().mkpath(root.filePath(QStringLiteral("sel/empty")));
         write(root.filePath(QStringLiteral("single.txt")), "one");
-        const auto result = walk({pathOf(root, QStringLiteral("sel")), pathOf(root, QStringLiteral("single.txt"))});
+        const auto result = walkHere({pathOf(root, QStringLiteral("sel")), pathOf(root, QStringLiteral("single.txt"))});
         QCOMPARE(result.status, WalkStatus::Ok);
         QCOMPARE(result.skipped, 0u);
         // Directories before their children, children in byte order, the selection in the order given.
@@ -150,15 +164,15 @@ private Q_SLOTS:
             QCOMPARE(::bind(s, reinterpret_cast<sockaddr *>(&address), sizeof(address)), 0);
             ::close(s);
         }
-        auto result = walk({pathOf(root, QStringLiteral("sel"))});
+        auto result = walkHere({pathOf(root, QStringLiteral("sel"))});
         QCOMPARE(result.status, WalkStatus::Ok);
         QCOMPARE(names(result), (QStringList{u"sel"_s, u"sel\\real.txt"_s}));
         QCOMPARE(result.skipped, 5u); // two links, a dangling link, a FIFO, a socket
         // A symlink as the selected item itself is refused, and a path THROUGH a symlinked directory is the user's own choice.
-        result = walk({pathOf(root, QStringLiteral("sel/link.txt"))});
+        result = walkHere({pathOf(root, QStringLiteral("sel/link.txt"))});
         QCOMPARE(result.status, WalkStatus::Empty);
         QCOMPARE(result.skipped, 1u);
-        result = walk({pathOf(root, QStringLiteral("sel/dirlink/secret.txt"))});
+        result = walkHere({pathOf(root, QStringLiteral("sel/dirlink/secret.txt"))});
         QCOMPARE(result.status, WalkStatus::Ok); // sel/dirlink resolves to elsewhere/: the parent is canonicalised, the leaf is a real file
         QCOMPARE(names(result), (QStringList{u"secret.txt"_s}));
         // Kernel pseudo file systems are refused as roots.
@@ -166,7 +180,7 @@ private Q_SLOTS:
         QCOMPARE(result.status, WalkStatus::Empty);
         QCOMPARE(result.skipped, 3u);
         // Missing items count as skipped; the rest is still offered.
-        result = walk({pathOf(root, QStringLiteral("nothere")), pathOf(root, QStringLiteral("sel/real.txt"))});
+        result = walkHere({pathOf(root, QStringLiteral("nothere")), pathOf(root, QStringLiteral("sel/real.txt"))});
         QCOMPARE(result.status, WalkStatus::Ok);
         QCOMPARE(result.skipped, 1u);
     }
@@ -188,7 +202,7 @@ private Q_SLOTS:
             QVERIFY(fd >= 0);
             ::close(fd);
         }
-        const auto result = walk({pathOf(root, QStringLiteral("sel"))});
+        const auto result = walkHere({pathOf(root, QStringLiteral("sel"))});
         ::unlink(QByteArray(pathOf(root, QStringLiteral("sel")) + "/bad\xff" + "name").constData()); // QDir cannot remove a name that is not UTF-8
         QCOMPARE(result.status, WalkStatus::Ok);
         const auto got = names(result);
@@ -212,7 +226,7 @@ private Q_SLOTS:
         for (int i = 0; i < 4; ++i) dir += u"/"_s + QString(60, QLatin1Char('a' + i));
         write(root.filePath(dir + u"/"_s + QString(60, QLatin1Char('z'))), "deep");
         write(root.filePath(QStringLiteral("sel/short.txt")), "ok");
-        const auto result = walk({pathOf(root, QStringLiteral("sel"))});
+        const auto result = walkHere({pathOf(root, QStringLiteral("sel"))});
         QCOMPARE(result.status, WalkStatus::Ok);
         QCOMPARE(result.skipped, 1u);
         for (const auto &name : names(result)) QVERIFY(name.size() <= ClipboardFileDescriptor::MaxNameUnits);
@@ -221,7 +235,7 @@ private Q_SLOTS:
         QString longDir = QStringLiteral("sel2");
         for (int i = 0; i < 5; ++i) longDir += u"/"_s + QString(60, QLatin1Char('a' + i));
         write(root.filePath(longDir + QStringLiteral("/f.txt")), "x");
-        const auto second = walk({pathOf(root, QStringLiteral("sel2"))});
+        const auto second = walkHere({pathOf(root, QStringLiteral("sel2"))});
         QCOMPARE(second.status, WalkStatus::Ok);
         QVERIFY(second.skipped >= 2u);
         for (const auto &name : names(second)) QVERIFY(name.size() <= ClipboardFileDescriptor::MaxNameUnits);
@@ -235,7 +249,7 @@ private Q_SLOTS:
         QString deep = QStringLiteral("deep");
         for (int i = 0; i < 70; ++i) deep += QStringLiteral("/d");
         QDir().mkpath(root.filePath(deep));
-        QCOMPARE(walk({pathOf(root, QStringLiteral("deep"))}).status, WalkStatus::TooDeep);
+        QCOMPARE(walkHere({pathOf(root, QStringLiteral("deep"))}).status, WalkStatus::TooDeep);
         WalkOptions slow; // a Debug build needs more than the production 5 s for the 100 000-entry case
         slow.budgetMs = 600000;
         // time budget: a fake clock that jumps 10 s per reading
@@ -245,7 +259,7 @@ private Q_SLOTS:
         qint64 t = 0;
         options.nowMs = [&t] { return t += 10000; };
         options.budgetMs = 5000;
-        QCOMPARE(walk({pathOf(root, QStringLiteral("many"))}, options).status, WalkStatus::Budget);
+        QCOMPARE(walkHere({pathOf(root, QStringLiteral("many"))}, options).status, WalkStatus::Budget);
         // entries: one directory of 100 001 empty files is over the list's cap
         const QString big = root.filePath(QStringLiteral("big"));
         QDir().mkpath(big);
@@ -256,10 +270,10 @@ private Q_SLOTS:
             QVERIFY(fd >= 0);
             ::close(fd);
         }
-        QCOMPARE(walk({bigPath}, slow).status, WalkStatus::TooMany); // the directory itself is entry 1
+        QCOMPARE(walkHere({bigPath}, slow).status, WalkStatus::TooMany); // the directory itself is entry 1
         // exactly at the cap is fine: remove the directory entry's share by selecting the files alone is not possible here, so remove one file
         QFile::remove(QFile::decodeName(bigPath + "/0"));
-        const auto exact = walk({bigPath}, slow);
+        const auto exact = walkHere({bigPath}, slow);
         QCOMPARE(exact.status, WalkStatus::Ok);
         QCOMPARE(exact.count, int(ClipboardFileLimits::MaxEntries));
         QDir(big).removeRecursively();
@@ -282,13 +296,13 @@ private Q_SLOTS:
         }
         write(root.filePath(QStringLiteral("small.txt")), "s");
         // Without huge support the 5 GiB file is skipped and counted, never truncated.
-        auto result = walk({QFile::encodeName(big), pathOf(root, QStringLiteral("small.txt"))});
+        auto result = walkHere({QFile::encodeName(big), pathOf(root, QStringLiteral("small.txt"))});
         QCOMPARE(result.status, WalkStatus::Ok);
         QCOMPARE(names(result), (QStringList{u"small.txt"_s}));
         QCOMPARE(result.skipped, 1u);
         WalkOptions huge;
         huge.hugeFiles = true;
-        result = walk({QFile::encodeName(big), pathOf(root, QStringLiteral("small.txt"))}, huge);
+        result = walkHere({QFile::encodeName(big), pathOf(root, QStringLiteral("small.txt"))}, huge);
         QCOMPARE(result.status, WalkStatus::Ok);
         QCOMPARE(names(result), (QStringList{u"big.bin"_s, u"small.txt"_s}));
         const auto decoded = ClipboardFileDescriptor::decode(result.descriptor);
@@ -310,7 +324,7 @@ private Q_SLOTS:
         for (const char *name : {"grow", "shrink", "touch", "vanish", "replace", "symlink", "mode", "same"}) make(QString::fromLatin1(name), QByteArray(4096, 'x'));
         QList<QByteArray> selection;
         for (const char *name : {"grow", "shrink", "touch", "vanish", "replace", "symlink", "mode", "same"}) selection.append(pathOf(root, QString::fromLatin1(name)));
-        const auto result = walk(selection);
+        const auto result = walkHere(selection);
         QCOMPARE(result.status, WalkStatus::Ok);
         const auto snapshot = result.snapshot;
         const auto indexOf = [&](const char *name) {
@@ -364,7 +378,7 @@ private Q_SLOTS:
             write(root.filePath(QStringLiteral("f%1").arg(i, 2, 10, QLatin1Char('0'))), QByteArray(100, char('a' + i)));
             selection.append(pathOf(root, QStringLiteral("f%1").arg(i, 2, 10, QLatin1Char('0'))));
         }
-        const auto result = walk(selection);
+        const auto result = walkHere(selection);
         QCOMPARE(result.status, WalkStatus::Ok);
         for (int round = 0; round < 2; ++round) {
             for (quint32 i = 0; i < 20; ++i) {
@@ -385,7 +399,7 @@ private Q_SLOTS:
         QTemporaryDir tmp;
         const QDir root(tmp.path());
         write(root.filePath(QStringLiteral("f")), QByteArray(1000, 'q'));
-        const auto result = walk({pathOf(root, QStringLiteral("f"))});
+        const auto result = walkHere({pathOf(root, QStringLiteral("f"))});
         QCOMPARE(result.status, WalkStatus::Ok);
         g_failPread = EIO;
         QCOMPARE(result.snapshot->read(0, 0, 100).status, ReadStatus::IoError);
@@ -401,26 +415,26 @@ private Q_SLOTS:
         write(cache.filePath(QStringLiteral("krdp-clip-other/kept.txt")), "y"); // a sibling whose name only starts the same
         write(cache.filePath(QStringLiteral("plain.txt")), "z");
         WalkOptions options;
-        options.refusedRoots = refusedRootsFor(cache.path());
-        auto result = walk({pathOf(cache, QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt"))}, options);
+        options.refusedRoots = stagingRootsFor(cache.path());
+        auto result = walkHere({pathOf(cache, QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt"))}, options);
         QCOMPARE(result.status, WalkStatus::Empty);
         QCOMPARE(result.skipped, 1u);
         // the staged folder itself, as a root, is refused too
-        result = walk({pathOf(cache, QStringLiteral("krdp-clip/c-0000000000000001"))}, options);
+        result = walkHere({pathOf(cache, QStringLiteral("krdp-clip/c-0000000000000001"))}, options);
         QCOMPARE(result.status, WalkStatus::Empty);
         QCOMPARE(result.skipped, 1u);
-        result = walk({pathOf(cache, QStringLiteral("krdp-clip"))}, options);
+        result = walkHere({pathOf(cache, QStringLiteral("krdp-clip"))}, options);
         QCOMPARE(result.status, WalkStatus::Empty);
         QCOMPARE(result.skipped, 1u);
         // files beside it are still walked
-        result = walk({pathOf(cache, QStringLiteral("krdp-clip-other/kept.txt")), pathOf(cache, QStringLiteral("plain.txt"))}, options);
+        result = walkHere({pathOf(cache, QStringLiteral("krdp-clip-other/kept.txt")), pathOf(cache, QStringLiteral("plain.txt"))}, options);
         QCOMPARE(result.status, WalkStatus::Ok);
         QCOMPARE(names(result), (QStringList{u"kept.txt"_s, u"plain.txt"_s}));
         // a cache directory reached through a symlink: the walk canonicalises the parent, the guard has to know that name too
         QTemporaryDir other;
         QVERIFY(QFile::link(tmp.path(), other.filePath(QStringLiteral("link"))));
-        options.refusedRoots = refusedRootsFor(other.filePath(QStringLiteral("link")));
-        result = walk({pathOf(cache, QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt"))}, options);
+        options.refusedRoots = stagingRootsFor(other.filePath(QStringLiteral("link")));
+        result = walkHere({pathOf(cache, QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt"))}, options);
         QCOMPARE(result.status, WalkStatus::Empty);
         QCOMPARE(result.skipped, 1u);
         // the helper itself: lexical, with a separator
@@ -438,8 +452,8 @@ private Q_SLOTS:
     {
         QTemporaryDir tmp;
         const QDir root(tmp.path());
-        QCOMPARE(walk({}).status, WalkStatus::Empty);
-        QCOMPARE(walk({pathOf(root, QStringLiteral("gone"))}).status, WalkStatus::Empty);
+        QCOMPARE(walkHere({}).status, WalkStatus::Empty);
+        QCOMPARE(walkHere({pathOf(root, QStringLiteral("gone"))}).status, WalkStatus::Empty);
     }
 };
 

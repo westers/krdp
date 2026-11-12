@@ -89,6 +89,8 @@ public:
         std::function<bool()> ownsUriList; ///< the host's selection is the one writeUriList set (never read it back: that would ask this thread to serve itself)
         std::function<void(const QString &summary, const QString &body)> notify; ///< a desktop notification in this session
         std::function<QString()> cacheDir; ///< the user's cache directory (XDG_CACHE_HOME or ~/.cache); empty = no staging
+        /// Test seam: the free-space probe of the staging file system (unset = the real fstatvfs). Production never sets it.
+        HostFileStaging::SpaceProbe stagingSpace;
     };
     using Sender = std::function<void(const QByteArray &record)>;
 
@@ -248,6 +250,7 @@ private:
     {
         HostFileStaging::Config config;
         if (m_backend.cacheDir) config.cacheDir = m_backend.cacheDir();
+        if (m_backend.stagingSpace) config.space = m_backend.stagingSpace;
         return config;
     }
 

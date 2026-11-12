@@ -22,6 +22,15 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
+/// Where the tests make their files. The worker's file walk refuses /dev (and /proc, /sys) as a root, so a TMPDIR under /dev (TMPDIR=/dev/shm)
+/// would turn every file copy into a refusal: such a TMPDIR is replaced by /var/tmp for these directories.
+QString scratchTemplate()
+{
+    QString base = QDir::tempPath();
+    if (base == QStringLiteral("/dev") || base.startsWith(QStringLiteral("/dev/"))) base = QStringLiteral("/var/tmp");
+    return base + QStringLiteral("/hostclipboardtest-XXXXXX");
+}
+
 const QString Canary = QStringLiteral("CANARY-7f3a91-do-not-log");
 
 struct FakeHost {
@@ -49,7 +58,7 @@ struct FakeHost {
     QByteArray uriList; // what the host holds as text/uri-list
     int uriReads = 0;
     // OPT-078 phase 3: client-to-host files
-    QTemporaryDir cache;
+    QTemporaryDir cache{scratchTemplate()};
     bool ownUri = false; ///< the host's selection is what writeUriList set
     bool uriWriteOk = true;
     QList<QPair<QStringList, bool>> uriWrites; // (paths, secret)
@@ -101,7 +110,8 @@ struct FakeHost {
                 },
                 [this] { return ownUri; },
                 [this](const QString &summary, const QString &body) { notes.append({summary, body}); },
-                [this] { return cache.path(); }};
+                [this] { return cache.path(); },
+                [](int) { return std::optional(HostFileStaging::SpaceInfo{1ULL << 40, 2ULL << 40}); }}; // staging never measures the disk the tests run on
     }
 };
 
@@ -1061,7 +1071,7 @@ private Q_SLOTS:
 
     void aFileCopyIsOfferedAloneAndOnlyWhenTheFilePolicyAllows()
     {
-        QTemporaryDir dir;
+        QTemporaryDir dir{scratchTemplate()};
         QFile file(dir.filePath(QStringLiteral("report.txt")));
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.write("contents");
@@ -1103,7 +1113,7 @@ private Q_SLOTS:
 
     void aFileListRequestWalksOffTheEventLoopAndAnswersWithTheDescriptor()
     {
-        QTemporaryDir dir;
+        QTemporaryDir dir{scratchTemplate()};
         QDir().mkpath(dir.filePath(QStringLiteral("album/sub")));
         QFile one(dir.filePath(QStringLiteral("album/CANARY-name.jpg")));
         QVERIFY(one.open(QIODevice::WriteOnly));
@@ -1165,7 +1175,7 @@ private Q_SLOTS:
 
     void fileRequestsAreRefusedWithoutThePolicyOrControl()
     {
-        QTemporaryDir dir;
+        QTemporaryDir dir{scratchTemplate()};
         QFile file(dir.filePath(QStringLiteral("f")));
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.write("x");
@@ -1198,7 +1208,7 @@ private Q_SLOTS:
 
     void aWalkThatIsAbandonedAnswersGoneAndAHugeFileIsSkippedWithoutSupport()
     {
-        QTemporaryDir dir;
+        QTemporaryDir dir{scratchTemplate()};
         QFile file(dir.filePath(QStringLiteral("f")));
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.write("x");
@@ -1229,7 +1239,7 @@ private Q_SLOTS:
         const auto previous = qInstallMessageHandler(capture);
         QLoggingCategory::setFilterRules(QStringLiteral("*.debug=true"));
         {
-            QTemporaryDir dir;
+            QTemporaryDir dir{scratchTemplate()};
             QDir().mkpath(dir.filePath(QStringLiteral("CANARY-dir")));
             QFile file(dir.filePath(QStringLiteral("CANARY-dir/CANARY-file.txt")));
             QVERIFY(file.open(QIODevice::WriteOnly));

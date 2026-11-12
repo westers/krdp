@@ -83,6 +83,7 @@ struct Rig {
         policy.greeter = !desktop;
         if (!desktop) policy.filesHostToClient = policy.filesClientToHost = policy.hostToClient = false;
         config.cacheDir = cache.path();
+        config.space = [](int) { return std::optional(HostFileStaging::SpaceInfo{1ULL << 40, 2ULL << 40}); }; // never the disk the tests run on
         if (startNow) start();
     }
     void start()

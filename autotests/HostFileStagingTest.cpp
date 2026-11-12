@@ -186,6 +186,13 @@ QStringList entriesOf(const QString &dirPath)
     return QDir(dirPath).entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::Name);
 }
 
+/// A fixed answer for the free-space probe (1 TiB free of 2 TiB): no rig depends on the disk the tests happen to run on (a nearly full
+/// disk made most of them fail). Tests that mean the real probe say so (`config.space = probeSpace`) and bring their own reserve.
+std::optional<SpaceInfo> plentyOfSpace(int)
+{
+    return SpaceInfo{1ULL << 40, 2ULL << 40};
+}
+
 struct Rig {
     QTemporaryDir cache;
     Config config;
@@ -194,6 +201,7 @@ struct Rig {
     Rig()
     {
         config.cacheDir = cache.path();
+        config.space = plentyOfSpace;
     }
     bool open()
     {
@@ -312,6 +320,8 @@ private Q_SLOTS:
     void theRealSpaceGuardWorksOnARootThatDidNotExistBeforeTheOpen()
     {
         Rig rig;
+        rig.config.space = probeSpace; // the real probe...
+        rig.config.reserveBytes = 1; // ...with a reserve that does not depend on how full this disk is
         QVERIFY(!QFileInfo::exists(rig.root()));
         QVERIFY(rig.open());
         QVERIFY(QFileInfo(rig.root()).isDir());
@@ -766,6 +776,7 @@ private Q_SLOTS:
         QCOMPARE(transfer->create(), Status::SpaceUnknown);
         // the real probe through a failing fstatvfs
         Rig real;
+        real.config.space = probeSpace;
         QVERIFY(real.open());
         g_fstatvfs.error = EIO;
         auto second = real.area->begin(1, planOf({file(u"a"_s, 5)}));
