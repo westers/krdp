@@ -895,6 +895,8 @@ int main(int argc, char **argv)
 {
     // Before anything can load libva: no VA-API driver will initialise.
     qputenv("LIBVA_DRIVER_NAME", "krdp-test-none");
+    // NVENC is hardware too: without this a host with an NVIDIA GPU (Sol) still reports a Hardware backend.
+    qputenv("KPIPEWIRE_NVENC", "0");
     qputenv("QT_QPA_PLATFORM", "offscreen");
     qunsetenv("WAYLAND_DISPLAY");
     qunsetenv("DISPLAY");

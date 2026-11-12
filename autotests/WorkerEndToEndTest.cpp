@@ -325,6 +325,13 @@ void WorkerEndToEndTest::initTestCase()
         m_skip = QStringLiteral("no render node: KWin needs one for OpenGL compositing and screencast");
         return;
     }
+    // The private KWin opens this node itself: without read/write access (a host where the user has no logind
+    // session, so no uaccess ACL, and is not in the render group, as on Sol) it cannot composite and every
+    // row fails with "screencast failed", which says nothing about the code.
+    if (access(QFile::encodeName(m_renderNode).constData(), R_OK | W_OK) != 0) {
+        m_skip = QStringLiteral("%1 is not readable and writable by this user: KWin cannot open it (no logind session or render group)").arg(m_renderNode);
+        return;
+    }
 }
 
 PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion, bool cursorClient)
@@ -426,7 +433,7 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
     set("__EGL_VENDOR_LIBRARY_FILENAMES", QStringLiteral("/usr/share/glvnd/egl_vendor.d/50_mesa.json"));
     set("__GLX_VENDOR_LIBRARY_NAME", QStringLiteral("mesa"));
     set("LIBVA_MESSAGING_LEVEL", QStringLiteral("1"));
-    set("KRDP_RENDER_NODE", m_renderNode); // as the launcher exports the node it granted
+    set("FARSIDE_RENDER_NODE", m_renderNode); // as the launcher exports the node it granted
     set("KRDP_SERVER_DIR", qEnvironmentVariable("KRDP_E2E_SERVER_DIR", QStringLiteral(KRDP_SERVER_DIR)));
     if (qEnvironmentVariableIsSet("LD_LIBRARY_PATH")) set("LD_LIBRARY_PATH", qEnvironmentVariable("LD_LIBRARY_PATH"));
     set("KRDP_CONSOLE_WORKER", workerProgram());

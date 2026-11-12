@@ -16,7 +16,20 @@ class VirtualSessionStorageTest : public QObject
     Q_OBJECT
     QString id() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
 private Q_SLOTS:
-    void initTestCase() { QVERIFY(getuid() != 0); }
+    void initTestCase()
+    {
+        QVERIFY(getuid() != 0);
+        // prepareAt() refuses a root whose path has a group/world-writable component (other than a root-owned sticky
+        // directory such as /tmp). With such a TMPDIR every fixture is refused, which says nothing about the code.
+        QString walked;
+        for (const auto &part : QDir::tempPath().split(u'/', Qt::SkipEmptyParts)) {
+            walked += u'/' + part;
+            struct stat info{};
+            if (stat(QFile::encodeName(walked).constData(), &info)) continue;
+            if ((info.st_mode & 0022) && !(info.st_uid == 0 && (info.st_mode & S_ISVTX)))
+                QSKIP(qPrintable(u"TMPDIR %1 has the group/world-writable component %2: use a TMPDIR whose ancestors are not (chmod go-w), or /tmp"_s.arg(QDir::tempPath(), walked)));
+        }
+    }
     void privateTokenAndExclusivePersistentProfile()
     {
         QTemporaryDir home, runtime;
@@ -54,7 +67,7 @@ private Q_SLOTS:
     void refusesSymlinksAndSharedPermissions()
     {
         QTemporaryDir home, runtime, outside;
-        QVERIFY(QFile::link(outside.path(), home.path() + u"/.krdp-virtual"_s));
+        QVERIFY(QFile::link(outside.path(), home.path() + u"/.farside-virtual"_s));
         QString error;
         QVERIFY(!VirtualSessionStorage::prepareAt(getuid(), home.path(), runtime.path(), id(), id(), QByteArray(32, 'x'), &error));
         QVERIFY(QDir(outside.path()).entryList(QDir::NoDotAndDotDot | QDir::AllEntries).isEmpty());
@@ -91,6 +104,10 @@ private Q_SLOTS:
         QString error;
         const auto session = id();
         const QByteArray token(32, 'x');
+        // The guardian listens on <runtime>/farside-virtual/<session>/guardian.sock, which must fit sockaddr_un (107 bytes).
+        const QString socketPath = runtime.path() + u"/farside-virtual/"_s + session + u"/guardian.sock"_s;
+        if (QFile::encodeName(socketPath).size() > 107)
+            QSKIP(qPrintable(u"TMPDIR is too long for the guardian socket (%1 > 107 bytes): use a short TMPDIR such as /tmp/rf-t1"_s.arg(QFile::encodeName(socketPath).size())));
         auto storage = VirtualSessionStorage::prepareAt(getuid(), home.path(), runtime.path(), session, id(), token, &error);
         QVERIFY(storage);
         const auto profile = storage->profileDirectory();

@@ -23,12 +23,15 @@
 #include <QProcess>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QMutex>
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <pwd.h>
+#include <unistd.h>
 #include <QTest>
 #include <functional>
 
@@ -195,6 +198,17 @@ class KcmUiTest : public QObject
         }
     }
 
+    // BrokerPreferences reads the account's own farsideserverrc by passwd home (UserConfiguration::userPath), not through
+    // XDG_CONFIG_HOME, so the throwaway home does not isolate it. An account with saved preferences (Sol, Hal) never
+    // "represents defaults", which the two tests below assert; they skip there instead of failing.
+    static QString skipIfAccountHasSavedPreferences()
+    {
+        const passwd *entry = getpwuid(getuid());
+        if (!entry || !entry->pw_dir) return {};
+        const QString path = QString::fromLocal8Bit(entry->pw_dir) + u"/.config/farsideserverrc"_s;
+        return QFileInfo::exists(path) ? u"the account has a saved %1 that the module reads by passwd home (not XDG_CONFIG_HOME): Defaults cannot be asserted here; run as an account without saved preferences"_s.arg(path) : QString();
+    }
+
 private Q_SLOTS:
     void initTestCase()
     {
@@ -203,7 +217,10 @@ private Q_SLOTS:
         // Legacy settings/TLS/secret fixtures must remain byte-identical even
         // when the new module opens or its inherited global actions are called.
         const QString config = qEnvironmentVariable("XDG_CONFIG_HOME");
-        QVERIFY2(config.startsWith(QDir::tempPath()) || config.contains(u"/build"_s), "run through ctest: it sets a throwaway XDG_CONFIG_HOME");
+        // ctest names the throwaway home it created (KRDP_KCMUI_THROWAWAY_HOME), so a build tree with any name works.
+        const QString throwaway = qEnvironmentVariable("KRDP_KCMUI_THROWAWAY_HOME");
+        QVERIFY2(config.startsWith(QDir::tempPath()) || config.contains(u"/build"_s) || (!throwaway.isEmpty() && config.startsWith(throwaway + u"/"_s)),
+                 "run through ctest: it sets a throwaway XDG_CONFIG_HOME");
         QDir().mkpath(config);
         for (const auto &name : {u"farsideserverrc"_s, u"krdpserverrc"_s, u"legacy.crt"_s, u"legacy.key"_s, u"legacy-wallet.fixture"_s}) {
             const auto path=config+u"/"_s+name;QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly|QIODevice::Truncate));
@@ -434,6 +451,7 @@ private Q_SLOTS:
             QVERIFY(!QFile::exists(u":/kcm/kcm_farside/"_s+file));
     }
     void standardBarStateFollowsEveryDraft() {
+        if (const QString why = skipIfAccountHasSavedPreferences(); !why.isEmpty()) QSKIP(qPrintable(why));
         // needsSave / representsDefaults aggregate the five scoped drafts; Reset (load) and Defaults act on all of them.
         const auto model=[&](const char *name){ auto *o=m_module->property(name).value<QObject *>(); Q_ASSERT(o); return o; };
         const auto set=[&](const char *name,const QString &key,const QString &value) { bool ok=false; QMetaObject::invokeMethod(model(name),"setValue",Q_RETURN_ARG(bool,ok),Q_ARG(QString,key),Q_ARG(QString,value)); return ok; };
@@ -453,6 +471,7 @@ private Q_SLOTS:
         QVERIFY(m_module->findChildren<QProcess *>().isEmpty());   // neither Reset nor Defaults runs a helper
     }
     void cleanLoadAnnouncesDefaultsToTheShell() {
+        if (const QString why = skipIfAccountHasSavedPreferences(); !why.isEmpty()) QSKIP(qPrintable(why));
         // System Settings keeps Defaults enabled until it hears a change, and setting an unchanged value emits nothing. A clean
         // module already represents defaults, so loading must still announce it or Defaults stays enabled with nothing to reset.
         QSignalSpy spy(m_module,&KAbstractConfigModule::representsDefaultsChanged);

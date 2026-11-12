@@ -837,7 +837,7 @@ file(MAKE_DIRECTORY ${_kcm_ui_home}/run)
 file(CHMOD ${_kcm_ui_home}/run DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
 set_tests_properties(KcmUiTest PROPERTIES
     TIMEOUT 120
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=org.kde.desktop;XDG_CONFIG_HOME=${_kcm_ui_home}/config;XDG_DATA_HOME=${_kcm_ui_home}/data;XDG_STATE_HOME=${_kcm_ui_home}/state;XDG_CACHE_HOME=${_kcm_ui_home}/cache;XDG_RUNTIME_DIR=${_kcm_ui_home}/run;DBUS_SESSION_BUS_ADDRESS=unix:path=${_kcm_ui_home}/no-bus;LANGUAGE=en_US;LC_ALL=C.UTF-8")
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=org.kde.desktop;XDG_CONFIG_HOME=${_kcm_ui_home}/config;XDG_DATA_HOME=${_kcm_ui_home}/data;XDG_STATE_HOME=${_kcm_ui_home}/state;XDG_CACHE_HOME=${_kcm_ui_home}/cache;XDG_RUNTIME_DIR=${_kcm_ui_home}/run;KRDP_KCMUI_THROWAWAY_HOME=${_kcm_ui_home};DBUS_SESSION_BUS_ADDRESS=unix:path=${_kcm_ui_home}/no-bus;LANGUAGE=en_US;LC_ALL=C.UTF-8")
 
 # --- AUD-WS-C ---
 # Console broker/worker audit fixes (AUD-C-1 .. AUD-C-10).
@@ -907,7 +907,7 @@ add_executable(DeviceToggleLoopTest DeviceToggleLoopTest.cpp
     ${CMAKE_SOURCE_DIR}/src/PipeWireMicrophone.cpp
     ${CMAKE_SOURCE_DIR}/src/PipeWireCamera.cpp
     ${CMAKE_SOURCE_DIR}/src/PipeWireAudioPlayback.cpp)
-target_include_directories(DeviceToggleLoopTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(DeviceToggleLoopTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
 target_link_libraries(DeviceToggleLoopTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui PkgConfig::PipeWire)
 if(PIPEWIRE_EXECUTABLE)
     set(_krdp_device_loop_pipewire "${PIPEWIRE_EXECUTABLE}")
