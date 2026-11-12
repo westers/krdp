@@ -99,6 +99,24 @@ PAM keeper, setuid to the user, cgroup reads. It is **not** sandboxed here (sect
 Not touched on purpose: `krdp-console-host-test.service` (isolated `/opt` test package, built only by the packaging script),
 `app-org.kde.krdpserver.service.in` (a user unit, not a root listener), the presets.
 
+### Finding 2026-11-12: never set `User=root` in a hardened broker unit
+
+Measured on Sol (systemd 259.5, evidence `rdp/evidence/2026-11-12-review-fixes-live-sol/logs/phase1-cap-bisect*.txt`,
+`phase1-strace-caps.txt`, `phase1-fix-demo-no-user-root.txt`). The first version of the units above had an explicit `User=root`
+next to `NoNewPrivileges=yes` and the seccomp-backed directives (`RestrictNamespaces`, `RestrictAddressFamilies`,
+`SystemCallArchitectures`, ...). With that combination systemd clears `CAP_SETUID` from the service's permitted **and** effective
+sets: `CapEff` was `00000120f1acfd7f` (bit 7 missing; `CapBnd` still had it). The console broker could not launch its capture
+worker: `setgroups` and `setgid` succeeded, `setuid(107)` returned `EPERM`, and the journal repeated
+`Cannot launch console worker for session 1 : Child process modifier reported error: cannot drop privileges into logind session`
+in a retry loop. The virtual broker has the same unit pattern. The same sandbox **without** `User=root` kept `CAP_SETUID` (in the
+transient-unit demo: 0 such journal lines in 8 s, against 6 with `User=root`); root is the default user of a system unit.
+
+Fix: the two broker templates carry no `User=` (or `Group=`) line and a comment says why. `SystemdUnitPolicyTest` fails any unit
+that sets `NoNewPrivileges=yes` together with `User=root`, and any broker unit that sets `User=`, `Group=` or `DynamicUser=`.
+Check 0 of section 8 verifies the capability bits on the running process. `farside-virtual-session@.service` also has
+`User=root` but sets none of these directives (`retainedDesktopHasOnlyAGenerousTaskCap` keeps it that way), so it is unaffected;
+if `NoNewPrivileges` or a seccomp directive is ever added there, drop `User=root` first.
+
 ## 4. Session unit `farside-virtual-session@.service` (S)
 
 Only `TasksMax=100000` was added. A desktop with a browser and an IDE holds a few tens of thousands of threads; the default is
@@ -165,6 +183,7 @@ Record before/after in an evidence folder. Take before-values first with the old
 
 | # | Check | Pass | Fail action |
 |---|---|---|---|
+| 0 | Capabilities of the running brokers (before anything else): `for u in farside-console-host farside-virtual-host; do P=$(systemctl show -p MainPID --value $u); echo $u; grep -E 'CapEff\|CapPrm' /proc/$P/status; done`, then watch the Console worker start at the greeter: `journalctl -u farside-console-host -f` while a client connects, or `--since` the connect time | `CapEff` and `CapPrm` of **both** brokers have bit 7 (`CAP_SETUID`, mask `0x80`) and bit 6 (`CAP_SETGID`, mask `0x40`) set (the low byte of the mask is `ff`; with this deny-list expect `00000120f1acfdff`, while the broken units showed `00000120f1acfd7f`, low byte `7f`, bit 7 missing). The Console worker reaches ready within 30 s at the greeter ("console worker started", client sees the picture) | **Fail** = bit 7 or bit 6 clear, or the journal shows `Child process modifier reported error: cannot drop privileges into logind session` (repeating) or `Cannot launch console worker`: a `User=` line is back in the unit (`systemctl cat farside-console-host \| grep -n '^User='`). Remove it (finding 2026-11-12), `systemctl daemon-reload`, restart. Do not continue with step 1 onwards until this passes |
 | 1 | Install the candidate, `systemctl daemon-reload`, restart both brokers | both `active (running)`, `NRestarts=0`, no `status=226/NAMESPACE` or `status=218/CAPABILITIES` | drop the whole set (section 9) and report the status line |
 | 2 | Listeners: `ss -tlnp \| grep -E ':(3391\|3395)'` | both present, owned by the right `farside-*-host` | as above |
 | 3 | Sandbox as applied: `P=$(systemctl show -p MainPID --value farside-console-host); grep -E 'NoNewPrivs\|Seccomp\|CapBnd' /proc/$P/status` | `NoNewPrivs: 1`, `Seccomp: 2`, `CapBnd` lacks bits 16 (SYS_MODULE), 17 (RAWIO), 25 (SYS_TIME), 38 (PERFMON), 39 (BPF) etc.; same for the virtual host | drop-in per directive |

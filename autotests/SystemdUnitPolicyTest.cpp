@@ -141,6 +141,46 @@ private Q_SLOTS:
         QCOMPARE(only("RestrictAddressFamilies"), QStringList{QStringLiteral("AF_UNIX AF_INET AF_INET6 AF_NETLINK")});
     }
 
+    // Sol 2026-11-12 (systemd 259.5): an explicit User=root together with NoNewPrivileges=yes and the seccomp-backed directives
+    // (RestrictNamespaces, RestrictAddressFamilies, SystemCallArchitectures, ...) makes systemd clear CAP_SETUID from the service's
+    // permitted and effective sets (CapEff 00000120f1acfd7f, bit 7 missing; CapBnd still has it). The console broker then cannot
+    // launch its worker: setuid(<user>) returns EPERM ("cannot drop privileges into logind session"). root is the default user of
+    // a system unit, so the brokers must not name it. See docs/unit-hardening.md "Finding 2026-11-12".
+    void noNewPrivilegesUnitsDoNotSetUserRoot_data()
+    {
+        QTest::addColumn<QString>("unit");
+        QTest::newRow("console host") << unitPath("krdp-console-host.service");
+        QTest::newRow("virtual host") << unitPath("krdp-virtual-host.service");
+        QTest::newRow("retained desktop") << unitPath("krdp-virtual-session@.service");
+    }
+
+    void noNewPrivilegesUnitsDoNotSetUserRoot()
+    {
+        QFETCH(QString, unit);
+        const auto keys = parseUnit(unit);
+        QVERIFY2(!keys.isEmpty(), qPrintable(unit));
+        if (keys.values(QStringLiteral("Service/NoNewPrivileges")).contains(QStringLiteral("yes"))) {
+            const auto users = keys.values(QStringLiteral("Service/User"));
+            QVERIFY2(!users.contains(QStringLiteral("root")) && !users.contains(QStringLiteral("0")), "User=root + NoNewPrivileges=yes drops CAP_SETUID (systemd 259)");
+        }
+    }
+
+    void brokersDoNotSetUserOrGroup_data()
+    {
+        brokersCarrySeccompAndPrivilegeHardening_data();
+    }
+
+    void brokersDoNotSetUserOrGroup()
+    {
+        QFETCH(QString, unit);
+        const auto keys = parseUnit(unit);
+        QVERIFY2(!keys.isEmpty(), qPrintable(unit));
+        // A system unit runs as root by default; naming it explicitly is what drops CAP_SETUID next to NoNewPrivileges=yes.
+        QVERIFY2(!keys.contains(QStringLiteral("Service/User")), "the broker unit must not set User= (see noNewPrivilegesUnitsDoNotSetUserRoot)");
+        QVERIFY2(!keys.contains(QStringLiteral("Service/Group")), "the broker unit must not set Group=");
+        QVERIFY2(!keys.contains(QStringLiteral("Service/DynamicUser")), "the broker unit must not use DynamicUser=");
+    }
+
     // CapabilityBoundingSet is a deny-list of capabilities nothing in the broker (or FreeRDP, Qt, PAM, libva, libudev in it) uses.
     // An allow-list could not be proven from the code (PAM stacks and GPU drivers are site specific), so none is shipped.
     void brokersDropOnlyCapabilitiesNobodyUses_data()

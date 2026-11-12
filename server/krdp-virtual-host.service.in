@@ -10,7 +10,6 @@ StartLimitBurst=10
 
 [Service]
 Type=exec
-User=root
 Environment=FARSIDE_VIRTUAL_ADDRESS=0.0.0.0
 Environment=FARSIDE_VIRTUAL_PORT=3395
 # The host creates this certificate when it is missing and renews it when it expires within
@@ -53,6 +52,8 @@ KillMode=control-group
 Restart=on-failure
 RestartSec=3
 
+# Do not add User=root: with NoNewPrivileges and the seccomp directives systemd 259 then drops CAP_SETUID and the worker launch fails (Sol 2026-11-12).
+# A system unit already runs as root by default.
 # REVIEW-S2 hardening (docs/unit-hardening.md has the evidence, the Sol checklist and a one-line rollback per directive).
 # The broker starts no child process of its own (retained desktops are the separate farside-virtual-session@ units it starts
 # over D-Bus), so the mount-namespace directives are safe here. It writes only /etc/farside (certificate), StateDirectory and
