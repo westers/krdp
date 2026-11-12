@@ -15,6 +15,7 @@
 
 #include "ConsoleHandoff.h"
 #include "ConsoleWorkerWatchdog.h"
+#include "WorkerSocketBinding.h"
 #include <functional>
 #include <QJsonObject>
 #include "ConsoleWorkerWire.h"
@@ -243,6 +244,8 @@ private:
     QJsonObject m_pointerState;
     ConsoleHandoff::Target m_target;
     QByteArray m_token;
+    WorkerSocketBinding::Directory m_socketDirectory;
+    QString m_socketName;
     bool m_authenticated = false;
     bool m_ready = false;
     bool m_stopRequested = false;
