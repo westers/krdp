@@ -123,14 +123,13 @@ environment cannot run them.
 | `SystemdNotifyTest` (2 cases) | built with libsystemd (`libsystemd-dev`); skips otherwise |
 | camera cases of `ConsoleHostControllerTest` | a v4l2loopback device at `/dev/video10` (else the "unsupported" refusal is asserted) |
 
-## Expected failures (real product defects)
+## Expected failures
 
-Marked with `QEXPECT_FAIL` at the exact assertion. They XPASS, and so fail loudly, once the product
-is fixed: delete the marker then.
-
-| Test | Defect | Where |
-|---|---|---|
-| `LegacySettingsMigrationTest`: 8 functions (`omittedDefaultsMatchActualGeneratedLegacySettings`, `completeSettingsAndHostFactsAgreeWithRealLegacyAndBrokerReaders`, `escapedListsAndAliasesNeverResolveAsTheirOwner`, `sameFileMaterializesPartialDefaultsAndPreservesPrivateBytes`, `duplicateAndEscapedValuesUseActualKConfigSemantics`, `locksArePreservedForSameFileAndSeparateDestinations`, `conflictingOrLockedDestinationFailsWholePlan`, `identityPresenceAndCompleteRevisionAreBound`) | OPT-066 added `ClientQualityMax` to the kcfg (2026-10-11) without classifying it in the migration; the coverage guard refuses every input ("Legacy schema coverage changed"). Nothing in production calls the migration yet, so the effect is latent. | `server/LegacySettingsMigration.cpp:121`, `server/BrokerUserSettings.cpp:126` |
+None on the `review-fixes` tree. The two product defects that REVIEW-T1 first marked with `QEXPECT_FAIL`
+(`LegacySettingsMigrationTest`: `ClientQualityMax` not classified; `VirtualSessionTransportTest::
+finalAudioOffRestoresWithoutFrameOrPriorityRequest`: restore order) are fixed and the markers removed.
+A new product defect found by a test gets a `QEXPECT_FAIL` at the exact assertion, with the reason; it
+XPASSes (fails loudly) once fixed, and the marker is then deleted.
 
 ## Cases that skip, and why
 

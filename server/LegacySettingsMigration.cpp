@@ -115,7 +115,8 @@ Snapshot inspect(const QByteArray &source, const Owner &owner, const Resolver &r
         return fail(u"Original daemon owner is unresolved or inconsistent"_s);
     const auto known = schema();
     const QStringList special{u"ListenPort"_s, u"ListenAddress"_s, u"AutogenerateCertificates"_s, u"Certificate"_s,
-        u"CertificateKey"_s, u"VaapiDriverMode"_s, u"CameraLoopbackDevice"_s, u"Users"_s, u"SystemUserEnabled"_s};
+        u"CertificateKey"_s, u"VaapiDriverMode"_s, u"CameraLoopbackDevice"_s, u"Users"_s, u"SystemUserEnabled"_s,
+        u"ClientQualityMax"_s}; // OPT-066: a host-wide ceiling (not a per-user preference); the old daemon read it from krdpserverrc
     const auto preferences = BrokerUserSettings::preferenceKeys();
     auto expected = preferences; expected.append(special);
     if (known.size() != expected.size()) return fail(u"Legacy schema coverage changed"_s);
@@ -124,7 +125,7 @@ Snapshot inspect(const QByteArray &source, const Owner &owner, const Resolver &r
     for (auto it = known.cbegin(); it != known.cend(); ++it)
         profile += it.key().toUtf8() + '\0' + it.value().type.toUtf8() + '\0' + it.value().value.toUtf8() + '\n';
     // Old omissions must never inherit a future schema's changed defaults.
-    if (digest(profile) != "7cc20fc66baf2de64cbe4bdaf0e9d42019a61dae9323759056e912eecd948d86")
+    if (digest(profile) != "714c1a93c39f7a64705e443b3dd4b4904754c6f5e582efbeff5f9b0108b5317d")
         return fail(u"Legacy default profile changed; retain its historical schema"_s);
     const auto lexical = document(source, known);
     if (!lexical.error.isEmpty()) return fail(lexical.error);
@@ -172,6 +173,7 @@ Snapshot inspect(const QByteArray &source, const Owner &owner, const Resolver &r
             else if (key == u"ListenAddress") { hostKey = u"Address"_s; if (value.isEmpty()) value = u"0.0.0.0"_s; }
             else if (key == u"VaapiDriverMode") hostKey = u"VaapiDriver"_s;
             else if (key == u"CameraLoopbackDevice") { hostKey = key; if (value.isEmpty()) value = u"none"_s; }
+            else if (key == u"ClientQualityMax") hostKey = key; // the broker host setting of the same name, 0..100
             if (!hostKey.isEmpty()) {
                 const auto normalized = BrokerHostSettings::normalize(BrokerHostSettings::Scope::Console, hostKey, value);
                 if (!normalized) return fail(u"Legacy host field requires resolution: "_s + key);

@@ -123,6 +123,8 @@ Result readUser(quint32 uid)
 
 QStringList preferenceKeys()
 {
+    // Per-user preferences only. ClientQualityMax (OPT-066) is deliberately absent: it is a host-wide ceiling set in
+    // the host settings, and the legacy migration classifies it as a host fact (LegacySettingsMigration.cpp).
     return {u"Quality"_s, u"AdaptiveQuality"_s, u"PreferAudioQuality"_s, u"Codec"_s, u"SoftwareEncoding"_s, u"Av1Tiles"_s,
         u"Avc444MotionGapMs"_s, u"Avc444RestMs"_s, u"Avc444MaxGapMs"_s, u"MonitorMode"_s, u"MonitorIndex"_s,
         u"VirtualMonitorPolicy"_s, u"VirtualMonitorLayout"_s, u"VirtualMonitorFallbackSize"_s,
