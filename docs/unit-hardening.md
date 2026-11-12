@@ -175,6 +175,25 @@ may show a one-time warning if the core marker exists.
 `systemd-analyze security --offline=yes`: console host 9.4 UNSAFE -> 6.8 MEDIUM, virtual host 9.4 UNSAFE -> 5.8 MEDIUM.
 Unit policy: `SystemdUnitPolicyTest` (encodes this table); core flag: `PrivateExecutionContextTest`.
 
+**Second finding, same day: without `User=` systemd does not export `HOME`, `USER` or `LOGNAME` (and `SHELL`).** The first fix (removing
+`User=root`) was tried on Sol with the real units (evidence `rdp/evidence/2026-11-12-review-fixes-live-sol/logs/roundB-dropin.txt`,
+`phase4a-console-greeter-probe.txt`, `SUMMARY.md` "FAIL 2"). The Console broker then refused every RDP connection at 11:35:54:
+`[GetKnownPath]: Path KNOWN_PATH_HOME is nullptr`, `freerdp_peer_context_new_ex: ContextNew callback failed`,
+`farside.server: Failed to create peer context`; the client saw `Connection reset by peer`. The worker launch itself was fine, so
+no capability or denial check could show it: only a connect plus a received frame does (section 8, step 0 (c)). Adding `Environment=HOME=/root` to the unit fixed it
+(Console greeter capture 1920x1080, 55 frames, 100% non-black, identical to 0.16.4). FreeRDP resolves `KNOWN_PATH_HOME` while
+creating each peer context, so a missing `HOME` is fatal for every connection, not for a rare feature.
+
+Fix: both broker templates carry `Environment=HOME=/root USER=root LOGNAME=root` next to the comment about `User=`.
+`SystemdUnitPolicyTest::brokersExportRootIdentityEnvironment` parses the `Environment=` lines (several assignments may share one) and
+requires the three values while still forbidding `User=`/`Group=`/`DynamicUser=`. Audit of what a broker reads from its own
+environment: FreeRDP `HOME` (covered); `LD_LIBRARY_PATH` (`ConsoleWorkerLauncher.cpp`, not set by systemd either way); nothing reads
+`SHELL`, `USER` or `LOGNAME`; the console worker's environment (HOME, XDG_RUNTIME_DIR, Wayland) is taken from the logind session
+leader's `/proc/<pid>/environ`, not from the broker. `XDG_RUNTIME_DIR` is not exported to a system service with or without `User=`
+and no broker code path needs it (the `krdpserver` user daemon does). The virtual broker's own `ExecStart` runs under
+`env -i ... HOME=/var/lib/farside/virtual-host`, so it was never affected; the added variables reach its `ExecStartPre` helpers and keep
+the two units uniform.
+
 ## 8. Sol live checklist (all on Sol, no client attached for the restart; Hal only after this passes)
 
 Record before/after in an evidence folder. Take before-values first with the old units:
@@ -183,7 +202,7 @@ Record before/after in an evidence folder. Take before-values first with the old
 
 | # | Check | Pass | Fail action |
 |---|---|---|---|
-| 0 | Capabilities of the running brokers (before anything else): `for u in farside-console-host farside-virtual-host; do P=$(systemctl show -p MainPID --value $u); echo $u; grep -E 'CapEff\|CapPrm' /proc/$P/status; done`, then watch the Console worker start at the greeter: `journalctl -u farside-console-host -f` while a client connects, or `--since` the connect time | `CapEff` and `CapPrm` of **both** brokers have bit 7 (`CAP_SETUID`, mask `0x80`) and bit 6 (`CAP_SETGID`, mask `0x40`) set (the low byte of the mask is `ff`; with this deny-list expect `00000120f1acfdff`, while the broken units showed `00000120f1acfd7f`, low byte `7f`, bit 7 missing). The Console worker reaches ready within 30 s at the greeter ("console worker started", client sees the picture) | **Fail** = bit 7 or bit 6 clear, or the journal shows `Child process modifier reported error: cannot drop privileges into logind session` (repeating) or `Cannot launch console worker`: a `User=` line is back in the unit (`systemctl cat farside-console-host \| grep -n '^User='`). Remove it (finding 2026-11-12), `systemctl daemon-reload`, restart. Do not continue with step 1 onwards until this passes |
+| 0 | **First step, before anything else (findings 2026-11-12, both):** (a) capabilities of the running brokers: `for u in farside-console-host farside-virtual-host; do P=$(systemctl show -p MainPID --value $u); echo $u; grep -E 'CapEff\|CapPrm' /proc/$P/status; done`, then watch the Console worker start at the greeter: `journalctl -u farside-console-host -f` while a client connects, or `--since` the connect time; (b) `P=$(systemctl show -p MainPID --value farside-console-host); tr '\0' '\n' < /proc/$P/environ \| grep -E '^(HOME\|USER\|LOGNAME)='` (and the same for `farside-virtual-host`, whose process runs under `env -i`: there expect `HOME=/var/lib/farside/virtual-host`); (c) right after the restart, connect and receive at least one frame on **both** routes (:3391 and :3395), e.g. with `krdpctl-probe`; (d) the Console worker is ready at the greeter within 30 s | `CapEff` and `CapPrm` of **both** brokers have bit 7 (`CAP_SETUID`, mask `0x80`) and bit 6 (`CAP_SETGID`, mask `0x40`) set (the low byte of the mask is `ff`; with this deny-list expect `00000120f1acfdff`, while the broken units showed `00000120f1acfd7f`, low byte `7f`, bit 7 missing). (b) the Console broker's environ shows `HOME=/root`, `USER=root`, `LOGNAME=root`. (c) both routes accept the connection and deliver a frame; no `KNOWN_PATH_HOME is nullptr` and no `Failed to create peer context` in the journal. (d) the Console worker reaches ready within 30 s at the greeter ("console worker started", client sees the picture) | **Fail** = bit 7 or bit 6 clear, or the journal shows `Child process modifier reported error: cannot drop privileges into logind session` (repeating) or `Cannot launch console worker`: a `User=` line is back in the unit (`systemctl cat farside-console-host \| grep -n '^User='`). Remove it (finding 2026-11-12), `systemctl daemon-reload`, restart. A refused connection or `KNOWN_PATH_HOME is nullptr` means the `Environment=HOME=/root USER=root LOGNAME=root` line is missing (`systemctl cat farside-console-host \| grep -n '^Environment=HOME'`). Do not continue with step 1 onwards until this passes |
 | 1 | Install the candidate, `systemctl daemon-reload`, restart both brokers | both `active (running)`, `NRestarts=0`, no `status=226/NAMESPACE` or `status=218/CAPABILITIES` | drop the whole set (section 9) and report the status line |
 | 2 | Listeners: `ss -tlnp \| grep -E ':(3391\|3395)'` | both present, owned by the right `farside-*-host` | as above |
 | 3 | Sandbox as applied: `P=$(systemctl show -p MainPID --value farside-console-host); grep -E 'NoNewPrivs\|Seccomp\|CapBnd' /proc/$P/status` | `NoNewPrivs: 1`, `Seccomp: 2`, `CapBnd` lacks bits 16 (SYS_MODULE), 17 (RAWIO), 25 (SYS_TIME), 38 (PERFMON), 39 (BPF) etc.; same for the virtual host | drop-in per directive |

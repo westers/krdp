@@ -61,6 +61,9 @@ TimeoutAbortSec=30s
 
 # Do not add User=root: with NoNewPrivileges and the seccomp directives systemd 259 then drops CAP_SETUID and the worker launch fails (Sol 2026-11-12).
 # A system unit already runs as root by default.
+# Without User= systemd does not export HOME/USER/LOGNAME; FreeRDP needs HOME (KNOWN_PATH_HOME) or every connection is refused (Sol 2026-11-12).
+# So the root identity is exported explicitly (nothing in a broker reads SHELL; the console worker's environment comes from its logind session).
+Environment=HOME=/root USER=root LOGNAME=root
 # REVIEW-S2 hardening (docs/unit-hardening.md has the evidence, the Sol checklist and a one-line rollback per directive).
 # This unit's cgroup also holds the capture worker that runs as the logged-in (or greeter) user. The worker inherits seccomp
 # filters, the capability bounding set, rlimits, umask, the mount namespace and the device policy, so only what is provably

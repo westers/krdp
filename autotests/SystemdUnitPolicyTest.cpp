@@ -7,7 +7,9 @@
 // failure, not "abnormal").
 
 #include <QFile>
+#include <QHash>
 #include <QMultiHash>
+#include <QRegularExpression>
 #include <QTest>
 
 namespace
@@ -179,6 +181,57 @@ private Q_SLOTS:
         QVERIFY2(!keys.contains(QStringLiteral("Service/User")), "the broker unit must not set User= (see noNewPrivilegesUnitsDoNotSetUserRoot)");
         QVERIFY2(!keys.contains(QStringLiteral("Service/Group")), "the broker unit must not set Group=");
         QVERIFY2(!keys.contains(QStringLiteral("Service/DynamicUser")), "the broker unit must not use DynamicUser=");
+    }
+
+    // Sol 2026-11-12 (second finding): without a User= line systemd does not export HOME, USER, LOGNAME or SHELL to the service.
+    // FreeRDP resolves KNOWN_PATH_HOME while creating each peer context; with HOME unset the Console broker logged
+    // "[GetKnownPath]: Path KNOWN_PATH_HOME is nullptr", "freerdp_peer_context_new_ex: ContextNew callback failed" and
+    // "Failed to create peer context", and every client got "Connection reset by peer". The brokers therefore export the root
+    // identity explicitly. (The virtual broker's own ExecStart runs under `env -i ... HOME=/var/lib/farside/virtual-host`, so the
+    // variables there reach its ExecStartPre helpers; kept identical so both units are uniform and the checklist is one rule.)
+    void brokersExportRootIdentityEnvironment_data()
+    {
+        brokersCarrySeccompAndPrivilegeHardening_data();
+    }
+
+    void brokersExportRootIdentityEnvironment()
+    {
+        QFETCH(QString, unit);
+        const auto keys = parseUnit(unit);
+        QVERIFY2(!keys.isEmpty(), qPrintable(unit));
+        // Several assignments may share one Environment= line ("A=1 B=2"); later lines override earlier ones, as in systemd.
+        QHash<QString, QString> environment;
+        for (const QString &line : keys.values(QStringLiteral("Service/Environment"))) {
+            QString rest = line;
+            while (!rest.isEmpty()) {
+                rest = rest.trimmed();
+                if (rest.isEmpty()) {
+                    break;
+                }
+                QString token;
+                if (rest.startsWith(QLatin1Char('"')) || rest.startsWith(QLatin1Char('\''))) {
+                    const QChar quote = rest.at(0);
+                    const auto close = rest.indexOf(quote, 1);
+                    QVERIFY2(close > 0, qPrintable(line));
+                    token = rest.mid(1, close - 1);
+                    rest = rest.mid(close + 1);
+                } else {
+                    const auto space = rest.indexOf(QRegularExpression(QStringLiteral("\\s")));
+                    token = space < 0 ? rest : rest.left(space);
+                    rest = space < 0 ? QString() : rest.mid(space);
+                }
+                const auto eq = token.indexOf(QLatin1Char('='));
+                QVERIFY2(eq > 0, qPrintable(token));
+                environment.insert(token.left(eq), token.mid(eq + 1));
+            }
+        }
+        QCOMPARE(environment.value(QStringLiteral("HOME")), QStringLiteral("/root"));
+        QCOMPARE(environment.value(QStringLiteral("USER")), QStringLiteral("root"));
+        QCOMPARE(environment.value(QStringLiteral("LOGNAME")), QStringLiteral("root"));
+        // The reason it is needed at all: still no User=/Group=/DynamicUser= (brokersDoNotSetUserOrGroup).
+        QVERIFY(!keys.contains(QStringLiteral("Service/User")));
+        QVERIFY(!keys.contains(QStringLiteral("Service/Group")));
+        QVERIFY(!keys.contains(QStringLiteral("Service/DynamicUser")));
     }
 
     // CapabilityBoundingSet is a deny-list of capabilities nothing in the broker (or FreeRDP, Qt, PAM, libva, libudev in it) uses.
