@@ -39,7 +39,7 @@ Systemd is optional. C++20.
 ```bash
 cmake --build ~/dev/krdp/build -j16          # main dev tree: Debug, BUILD_TESTING=ON, Unix Makefiles
 ~/dev/krdp/scripts/build-kpipewire.sh        # rebuild private KPipeWire (~/dev/kpipewire) into .deps/, reconfigure+relink build/
-~/dev/krdp/scripts/check-kpipewire-link.sh   # verify krdpserver resolves libKPipeWire* from .deps/kpipewire
+~/dev/krdp/scripts/check-kpipewire-link.sh   # verify krdp-console-worker resolves libKPipeWire* from .deps/kpipewire
 ~/dev/krdp/scripts/check-stock-build.sh      # verify krdpplasmastreamer still builds against system KPipeWire
 ```
 
@@ -73,14 +73,13 @@ ctest --test-dir ~/dev/krdp/build -R 'Console' -N                      # list by
   `~/dev/krdp-client`; `docs/shared-headers.md`. `scripts/configure-sanitizers.sh BUILD_DIR` configures a separate
   ASan+UBSan test build (never `build/`; run the daemon tests on Sol only).
 
-## Smoke test, harnesses and probes
+## Harnesses and probes
 
-- `./smoke-test.sh` runs `cmake --build build`, then **restarts `plasma-xdg-desktop-portal-kde` and
-  the live `app-org.kde.krdpserver`**, then follows the logs. Use `--no-restart` for development
-  checks; an approved Hal deployment uses the gated release procedure. Other flags: `--no-build`, `--no-watch`,
-  `--watch-seconds N`, `--assert-encoder vaapi|software`.
+- The legacy per-user `krdpserver` (:3389) daemon, `smoke-test.sh`, the portal `streamer` example and
+  `scripts/package-krdp.sh` were removed 2026-11-12; the tree before the removal is the git tag
+  `archive/legacy-krdpserver`.
 - `examples/`: `plasmastreamer` (`krdpplasmastreamer`, the no-client pipeline harness described in the
-  imported file), `streamer` (portal variant), `avc444probe` (`krdpavc444probe`, decodes AVC444 output
+  imported file), `avc444probe` (`krdpavc444probe`, decodes AVC444 output
   like a client and scores PSNR), and `krdpctl-probe` (a minimal libfreerdp client for the private
   `KRDPCTL` channel: `--query`, `--apply f.json`, `--apply-seq`, `--gfx`).
 - `server/` also builds `krdp-*-probe` tools; they and `scripts/probe-*.sh` are for explicitly
@@ -98,7 +97,7 @@ scripts/package-virtual-test.sh   # build-virtual-package/, prefix /opt/krdp-vir
 - The production `farside-server` deb is built with `scripts/package-farside.sh` from a committed
   server tree. See `~/dev/rdp/HANDOFF-CODEX.md` §7 and
   `~/dev/rdp/evidence/2026-09-29-farside-rollout/SUMMARY.md` for the current release and Hal
-  rollout rules. `scripts/package-krdp.sh` is the historical fork package (its `~/dev/krdp-pkg` worktree was removed 2026-10-18).
+  rollout rules.
   Packaging commands do not themselves install packages.
 - Never install only the broker or only the worker, because the internal worker wire version is paired.
 - `docs/virtual-session-test-staging.md` covers `DESTDIR` staging (choose the prefix before building;
@@ -110,8 +109,7 @@ scripts/package-virtual-test.sh   # build-virtual-package/, prefix /opt/krdp-vir
 **`src/` → `libKRdp`** is the reusable RDP server library, built on FreeRDP 3 server APIs.
 - `Server` (a QTcpServer) creates one `RdpConnection` per client. `PeerContext` wraps the
   `freerdp_peer`.
-- `AbstractSession` is the capture/input backend: `PortalSession` (xdg-desktop-portal) or
-  `PlasmaScreencastV1Session` (`--plasma`: KWin `zkde_screencast_unstable_v1` + `fake_input`, granted
+- `AbstractSession` is the capture/input backend: `PlasmaScreencastV1Session` (KWin `zkde_screencast_unstable_v1` + `fake_input`, granted
   only to the exact executable path in the `.desktop` file's `X-KDE-Wayland-Interfaces`).
 - KPipeWire does capture and AVC/HEVC/AV1 encoding in hardware or software where available.
   `VideoStream` sends AVC420/AVC444 through standard RDPGFX and private HEVC/AV1 to the own client,
@@ -124,11 +122,11 @@ scripts/package-virtual-test.sh   # build-virtual-package/, prefix /opt/krdp-vir
 - `src/kcm/`: System Settings KCM. The `krdpserverrc` schema is `server/krdpserversettings.kcfg`
   (the only copy; the KCM generates its settings class from it).
 
-**`server/` → `krdpserver` plus a family of helper daemons.**
-- `krdpserver` (`main.cpp`, `SessionController`) is the user-service daemon. It maps `MonitorMode`
-  (`workspace|primary|specific|multi|virtual`) to sessions.
-  Helpers: `PhysicalOutputGuard` (`kscreen-doctor` snapshot/restore, crash recovery), `HostLayoutExecutor`/
-  `LayoutOwner`/`LayoutSessionDiff` (`KRDPCTL` layouts), `TakeoverDetector`, `DisplayWakeGuard`.
+**`server/` → the two system-service brokers, the capture worker and a family of helper daemons.**
+- The legacy `krdpserver` user daemon (`main.cpp`, `SessionController`, `HostLayoutExecutor`, `LayoutOwner`,
+  `TakeoverDetector`) is gone (tag `archive/legacy-krdpserver`). Shared helpers that stay:
+  `PhysicalOutputGuard` (`kscreen-doctor` snapshot/restore, owned by the Console worker; crash recovery is the
+  worker's own output-restore journal replay at start), `DisplayWakeGuard`.
 - **Physical console** (`krdp-console-host` + `krdp-console-worker`, `Console*`) is a system-service
   broker. It owns the TLS/RDP transport across the SDDM greeter to seat0 Plasma handoff. A per-session
   worker captures and injects input over an authenticated Unix socket (`ConsoleWorkerWire`, versioned).
