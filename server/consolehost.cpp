@@ -1,5 +1,6 @@
 #include "PhysicalInputWatcher.h"
 #include "FarsideEnv.h"
+#include "PrivateExecutionContext.h"
 // SPDX-FileCopyrightText: 2026 Steve Westers
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 
@@ -35,6 +36,17 @@
 
 int main(int argc, char **argv)
 {
+    // REVIEW-S2: no core file may hold a user's password or the TLS key (see PrivateExecutionContext.h); first thing in main.
+    switch (KRdp::enterBrokerExecutionContext()) {
+    case KRdp::BrokerContext::Failed:
+        qCritical("%s: cannot make the process non-dumpable; refusing to start", "farside-console-host");
+        return 1;
+    case KRdp::BrokerContext::DumpableByMarker:
+        qWarning("%s: core dumps are ALLOWED by %s; passwords and the TLS key can reach a core file. Remove the marker after the diagnosis.", "farside-console-host", KRdp::BrokerCoreDumpMarker);
+        break;
+    case KRdp::BrokerContext::NotDumpable:
+        break;
+    }
     // OPT-055 K6.1/K6.4: name an escaped exception and abort (keeps the core), and tell systemd the
     // main thread is alive before anything slow runs.
     KRdp::installTerminateHandler("farside-console-host");
