@@ -3109,15 +3109,23 @@ private Q_SLOTS:
             return QJsonObject{};
         };
 
-        // A logged-in, ready worker is required before a camera can start.
+        // A logged-in, ready worker is required before a camera can start. The camera pre-check needs a real
+        // V4L2 loopback at /dev/video10 (CameraAvailability); a host without one (Sol) refuses up front.
+        const bool haveBridge = CameraAvailability::reason(QStringLiteral("/dev/video10")).isEmpty();
         host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("c1"), QStringLiteral("camera"), QStringLiteral("on")));
-        QCOMPARE(last(&owner).value(QStringLiteral("type")).toString(), QStringLiteral("device"));
-        QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("error"));
-        QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("needs-session"));
-        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("c1"));
-        host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("c2"), QStringLiteral("camera"), QStringLiteral("query")));
-        QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("off"));
-        QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("c2"));
+        if (haveBridge) {
+            QCOMPARE(last(&owner).value(QStringLiteral("type")).toString(), QStringLiteral("device"));
+            QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("error"));
+            QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("needs-session"));
+            QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("c1"));
+            host.onControlRecord(&owner, ownerId, deviceRecord(QStringLiteral("c2"), QStringLiteral("camera"), QStringLiteral("query")));
+            QCOMPARE(last(&owner).value(QStringLiteral("state")).toString(), QStringLiteral("off"));
+            QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("c2"));
+        } else {
+            QCOMPARE(last(&owner).value(QStringLiteral("type")).toString(), QStringLiteral("error"));
+            QCOMPARE(last(&owner).value(QStringLiteral("code")).toString(), QStringLiteral("unsupported"));
+            QCOMPARE(last(&owner).value(QStringLiteral("requestId")).toString(), QStringLiteral("c1"));
+        }
 
         // Playback is per client; silencing the host is the controller's.
         host.onControlRecord(&viewer, viewerId, deviceRecord(QStringLiteral("p1"), QStringLiteral("playback"), QStringLiteral("on")));

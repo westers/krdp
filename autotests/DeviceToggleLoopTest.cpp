@@ -380,6 +380,13 @@ private Q_SLOTS:
         // by the host's live service, so a regular file stands in: open()
         // succeeds and VIDIOC_S_FMT fails, which exercises the endpoint's
         // loopback fd handling (open, then close on the failed configure).
+        //
+        // Stale since OPT-053 2828a7c4 (2026-10-01): PipeWireCamera::start() preflights the bridge with
+        // CameraAvailability::reason(), which refuses a regular file ("not a V4L2 loopback device"), so
+        // start() returns false before any fd is opened and this stand-in no longer reaches the code it
+        // was written for. Reviving it needs a real v4l2loopback device (kernel module) or an injectable
+        // preflight; until then it is skipped rather than reported as a failure of the camera.
+        QSKIP("stale: the regular-file stand-in is refused by CameraAvailability since OPT-053 2828a7c4; needs a real v4l2loopback or an injectable preflight (research.md follow-up)");
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
         const QString fakeLoopback = dir.filePath(QStringLiteral("video-loopback"));

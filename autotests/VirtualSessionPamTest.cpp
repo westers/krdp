@@ -25,7 +25,7 @@ int invoke(const char *name) {
 }
 extern "C" {
 int pam_start(const char *service, const char *user, const pam_conv *conv, pam_handle_t **handle) {
-    Q_ASSERT(QByteArray(service) == "krdp-virtual-session");
+    Q_ASSERT(QByteArray(service) == "farside-virtual-session");
     pamUser = user; conversation = *conv;
     *handle = reinterpret_cast<pam_handle_t *>(quintptr(1));
     return invoke("start");

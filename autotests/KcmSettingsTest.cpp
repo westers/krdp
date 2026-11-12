@@ -130,7 +130,7 @@ private Q_SLOTS:
         QCOMPARE(settings.codec(), u"auto"_s);
         QCOMPARE(settings.softwareEncoding(), u"auto"_s);
         QCOMPARE(settings.av1Tiles(), u"auto"_s);
-        QCOMPARE(settings.monitorMode(), u"workspace"_s);
+        QCOMPARE(settings.monitorMode(), u"multi"_s); // schema default (krdpserversettings.kcfg)
         QCOMPARE(settings.listenAddress(), QString());
         QVERIFY(settings.autogenerateCertificates());
         // Defaults is "done" even though the preserved settings kept their values.

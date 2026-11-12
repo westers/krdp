@@ -139,6 +139,9 @@ private Q_SLOTS:
 
     void pingsWhileTheMainThreadRunsAndStopsWhileItIsBlocked()
     {
+#ifndef KRDP_HAVE_SYSTEMD
+        QSKIP("built without libsystemd (libsystemd-dev is not installed): SystemdNotify is a stub that never pings");
+#endif
         using namespace std::chrono_literals;
         QTemporaryDir dir;
         FakeNotifySocket socket(dir.filePath(QStringLiteral("notify")));
@@ -168,6 +171,9 @@ private Q_SLOTS:
 
     void explicitPingReachesTheSocketBeforeAnEventLoopExists()
     {
+#ifndef KRDP_HAVE_SYSTEMD
+        QSKIP("built without libsystemd (libsystemd-dev is not installed): SystemdNotify is a stub that never pings");
+#endif
         QTemporaryDir dir;
         FakeNotifySocket socket(dir.filePath(QStringLiteral("notify")));
         QVERIFY(socket.ok());

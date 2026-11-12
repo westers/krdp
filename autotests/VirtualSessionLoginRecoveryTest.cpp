@@ -36,7 +36,7 @@ QVariant seatTuple(const QString &seat = {}) {
 }
 QVariantMap props(const QString &id, const QString &tag) {
     const QString scope = u"session-"_s + id + u".scope"_s;
-    return {{u"Id"_s, id}, {u"Desktop"_s, tag}, {u"Service"_s, u"krdp-virtual-session"_s},
+    return {{u"Id"_s, id}, {u"Desktop"_s, tag}, {u"Service"_s, u"farside-virtual-session"_s},
         {u"Type"_s, u"wayland"_s}, {u"Class"_s, u"background"_s}, {u"State"_s, u"closing"_s},
         {u"TTY"_s, QString()}, {u"Display"_s, QString()}, {u"Scope"_s, scope},
         {u"Leader"_s, quint32(2345)}, {u"VTNr"_s, quint32(0)}, {u"User"_s, userTuple(1000)}, {u"Seat"_s, seatTuple()}};

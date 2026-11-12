@@ -28,7 +28,7 @@ QVariant seatTuple() {
 class LoginFixture : public QDBusVirtualObject {
 public:
     QVariantMap session{
-        {u"Id"_s, u"c42"_s}, {u"Service"_s, u"krdp-virtual-session"_s}, {u"Type"_s, u"wayland"_s},
+        {u"Id"_s, u"c42"_s}, {u"Service"_s, u"farside-virtual-session"_s}, {u"Type"_s, u"wayland"_s},
         {u"Class"_s, u"background"_s}, {u"State"_s, u"online"_s}, {u"TTY"_s, QString()},
         {u"Display"_s, QString()}, {u"Desktop"_s, u"krdp-fixture"_s}, {u"Scope"_s, u"session-c42.scope"_s}, {u"Leader"_s, quint32(2345)},
         {u"VTNr"_s, quint32(0)}, {u"User"_s, ownerTuple()}, {u"Seat"_s, seatTuple()}};
@@ -69,7 +69,7 @@ class VirtualSessionLoginTest : public QObject {
     Q_OBJECT
 private Q_SLOTS:
     void exactIdentityAndNoConsole() {
-        VirtualSessionLogin login{u"c42"_s, u"krdp-virtual-session"_s, u"wayland"_s, u"background"_s,
+        VirtualSessionLogin login{u"c42"_s, u"farside-virtual-session"_s, u"wayland"_s, u"background"_s,
             u"online"_s, {}, {}, {}, u"/run/user/1000"_s, u"session-c42.scope"_s, 1000, 2345, 0, {}, {}, {}};
         const auto matches = [](const auto &value) { return value.matches(1000, 2345, u"c42"_s, u"/run/user/1000"_s); };
         QVERIFY(matches(login));
