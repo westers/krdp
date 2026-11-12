@@ -48,8 +48,12 @@ namespace KRdp::HostFileStaging
  *
  *   - The root is created 0700 and verified on EVERY use: it is a directory, not a symlink, owned by the effective uid, and no group or
  *     other access (a wrong mode is repaired with fchmod and verified again; anything else refuses to stage).
- *   - A file is written as `name.part` and renamed (renameat2 RENAME_NOREPLACE, so a final name that appeared meanwhile is reported
- *     and never replaced) only when complete and fsync'd, so a reader never sees a half file under its final name.
+ *   - A file is written under a temporary name and renamed to its final name (renameat2 RENAME_NOREPLACE, so a final name that appeared
+ *     meanwhile is reported and never replaced) only when complete, so a reader never sees a half file under its final name. The temporary
+ *     name is the file's plan index, in a sibling directory of the transfer (`<seq>.parts/<index>`): it needs no extra byte of the final
+ *     name (a name of 255 bytes is the longest a file system takes, and the sanitizer allows 255), and no name a client can send is ever
+ *     equal to it or in its way (an earlier `name.part` collided with a client's own `name.part`). The rename crosses directories on one file
+ *     system. Durability (fsync of each finished file) is a tuning, off by default (Config::syncFiles): the staging is disposable.
  *   - Chunks must arrive in order, inside the declared size (a peer that sends more is cut off, the file removed).
  *   - Free space: before the first byte and every SpaceCheckIntervalBytes (64 MiB) the staging filesystem is probed (injectable); the
  *     declared remainder plus the reserve must fit, else the transfer is refused up front or, mid-way, aborted and its partial files removed.
@@ -147,6 +151,14 @@ struct Config {
     SpaceProbe space = probeSpace;
     std::function<uid_t()> effectiveUid = [] { return ::geteuid(); };
     quint64 spaceCheckIntervalBytes = ClipboardFileLimits::SpaceCheckIntervalBytes;
+    /**
+     * fsync each finished file before it takes its final name. Off by default (REVIEW-S5, measured: 2000 files of 20 KB on this
+     * machine's NVMe ext4 took 6.9-8.5 s with it, 0.09-0.15 s without, 234-291 vs 13 500-23 000 files/s; on tmpfs there is no difference).
+     * The staging is disposable (the start-up sweep removes what a crash leaves), a file still never takes its final name before every
+     * byte was written, and a full disk or an exhausted quota is reported by the write itself (ENOSPC/EDQUOT) and by the free-space
+     * checks; what the fsync would add is the report of a write-back error that only shows later (EIO, a network file system's ENOSPC).
+     */
+    bool syncFiles = false;
 };
 
 // ---- the janitor ----
@@ -217,6 +229,16 @@ inline SweepReport runSweep(const SweepOps &ops, qint64 nowSeconds, qint64 grace
 namespace Detail
 {
 constexpr int MaxRemoveDepth = 128;
+
+/// The directory of a transfer's temporary files, beside the transfer's own (never inside it: names there are the client's).
+inline QByteArray partsDirName(quint64 seq)
+{
+    return QByteArray::number(seq) + ".parts";
+}
+inline bool isPartsDirName(const QByteArray &name)
+{
+    return name.size() > 6 && name.endsWith(".parts");
+}
 
 struct Fd {
     int fd = -1;
@@ -369,7 +391,7 @@ public:
      * root does not exist, is a symlink, or is not ours.
      */
     static SweepReport sweepStale(const Config &config, qint64 nowSeconds);
-    /// Transfers older than \a maxAgeSeconds in this instance are removed (spec 3.2 d, for a worker that outlives a day).
+    /// Transfers older than \a maxAgeSeconds in this instance are removed (spec 3.2 d, for a worker that outlives a day); returns how many.
     int removeOlderThan(qint64 nowSeconds, qint64 maxAgeSeconds = ClipboardFileStaging::MaxAgeSeconds);
 
 private:
@@ -421,6 +443,8 @@ public:
 
     quint64 seq() const { return m_seq; }
     QString path() const { return m_path; }
+    /// Where file \a index is written until it is complete (test seam; the final name is only ever taken by a rename).
+    QString partPath(quint32 index) const { return m_partsPath + QLatin1Char('/') + QString::number(index); }
     const ClipboardFilePush::Plan &plan() const { return m_plan; }
     quint64 totalBytes() const { return m_plan.totalBytes; }
     quint64 writtenBytes() const { return m_written; }
@@ -548,9 +572,12 @@ public:
     {
         closeCurrent();
         m_dir.reset();
+        m_parts.reset();
         if (!m_created) return true;
         m_created = false;
-        return Detail::removeTreeAt(m_d->instance, QByteArray::number(m_seq));
+        bool ok = Detail::removeTreeAt(m_d->instance, Detail::partsDirName(m_seq));
+        ok = Detail::removeTreeAt(m_d->instance, QByteArray::number(m_seq)) && ok;
+        return ok;
     }
 
 private:
@@ -560,6 +587,7 @@ private:
         , m_seq(seq)
         , m_plan(plan)
         , m_path(path)
+        , m_partsPath(path + QStringLiteral(".parts"))
         , m_reserve(reserve)
     {
     }
@@ -644,6 +672,17 @@ private:
         return index < quint32(m_plan.entries.size()) ? &m_plan.entries.at(qsizetype(index)) : nullptr;
     }
 
+    /// The directory of the temporary files, made on first use below the instance and held by descriptor (never looked up by name again).
+    Status ensureParts()
+    {
+        if (m_parts.valid()) return Status::Ok;
+        const QByteArray name = Detail::partsDirName(m_seq);
+        if (::mkdirat(m_d->instance, name.constData(), 0700) != 0 && errno != EEXIST) return Status::IoError;
+        m_parts = Detail::openDirAt(m_d->instance, name);
+        if (!m_parts.valid()) return errno == ELOOP || errno == ENOTDIR ? Status::Hostile : Status::IoError; // a planted link is not followed
+        return Status::Ok;
+    }
+
     Status openPart(quint32 index)
     {
         closeCurrent();
@@ -657,8 +696,12 @@ private:
         }
         m_parent = openParent(entry->components, int(entry->components.size()) - 1, &status);
         if (!m_parent.valid()) return status;
-        const QByteArray part = Detail::enc(ClipboardFileStaging::partNameFor(entry->components.last()));
-        m_fd = ::openat(m_parent, part.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (const Status made = ensureParts(); made != Status::Ok) {
+            m_parent.reset();
+            return made;
+        }
+        const QByteArray part = QByteArray::number(index);
+        m_fd = ::openat(m_parts, part.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (m_fd < 0) {
             m_parent.reset();
             return errno == EEXIST ? Status::Exists : Status::IoError;
@@ -672,10 +715,10 @@ private:
         const auto *entry = entryFor(index);
         if (!entry || m_fd < 0 || m_fdIndex != index) return Status::Gone;
         applyTimes(m_fd, *entry);
-        if (::fsync(m_fd) != 0) return errno == ENOSPC || errno == EDQUOT ? Status::NoSpace : Status::IoError;
-        const QByteArray part = Detail::enc(ClipboardFileStaging::partNameFor(entry->components.last()));
+        if (m_d->config.syncFiles && ::fsync(m_fd) != 0) return errno == ENOSPC || errno == EDQUOT ? Status::NoSpace : Status::IoError;
+        const QByteArray part = QByteArray::number(index);
         const QByteArray name = Detail::enc(entry->components.last());
-        if (::renameat2(m_parent, part.constData(), m_parent, name.constData(), RENAME_NOREPLACE) != 0) {
+        if (::renameat2(m_parts, part.constData(), m_parent, name.constData(), RENAME_NOREPLACE) != 0) {
             return errno == EEXIST ? Status::Exists : Status::IoError;
         }
         closeCurrent();
@@ -687,6 +730,7 @@ private:
     quint64 m_seq;
     ClipboardFilePush::Plan m_plan;
     QString m_path;
+    QString m_partsPath; ///< `<instance>/<seq>.parts`
     std::optional<quint64> m_reserve;
     QList<ClipboardFilePush::FetchFile> m_fetch;
     qsizetype m_nextFetch = 0;
@@ -696,6 +740,7 @@ private:
     QSet<quint32> m_complete;
     Detail::Fd m_dir;
     Detail::Fd m_parent;
+    Detail::Fd m_parts; ///< the temporary files' directory, opened on first use
     int m_fd = -1;
     quint32 m_fdIndex = ~0u;
     bool m_created = false;
@@ -792,7 +837,9 @@ inline std::unique_ptr<Transfer> Area::begin(quint64 seq, const ClipboardFilePus
 
 inline bool Area::removeTransfer(quint64 seq)
 {
-    return Detail::removeTreeAt(d->instance, QByteArray::number(seq));
+    bool ok = Detail::removeTreeAt(d->instance, Detail::partsDirName(seq));
+    ok = Detail::removeTreeAt(d->instance, QByteArray::number(seq)) && ok;
+    return ok;
 }
 
 inline bool Area::removeAll()
@@ -826,9 +873,12 @@ inline int Area::removeOlderThan(qint64 nowSeconds, qint64 maxAgeSeconds)
     for (const QByteArray &name : std::as_const(*names)) {
         if (name == ".lock") continue;
         struct stat st {};
-        if (::fstatat(d->instance, name.constData(), &st, AT_SYMLINK_NOFOLLOW) == 0 && nowSeconds - qint64(st.st_mtime) > maxAgeSeconds
-            && Detail::removeTreeAt(d->instance, name)) {
+        if (::fstatat(d->instance, name.constData(), &st, AT_SYMLINK_NOFOLLOW) != 0 || nowSeconds - qint64(st.st_mtime) <= maxAgeSeconds) continue;
+        if (!Detail::removeTreeAt(d->instance, name)) continue;
+        // (a transfer's temporary-file directory goes with it and is not counted; one whose transfer is long gone is removed on its own age)
+        if (!Detail::isPartsDirName(name)) {
             ++removed;
+            Detail::removeTreeAt(d->instance, name + ".parts");
         }
     }
     return removed;

@@ -18,6 +18,7 @@
 #include <QMetaObject>
 #include <QObject>
 #include <QThreadPool>
+#include <QTimer>
 
 #include "ClipboardFilePush.h"
 #include "ConsoleWorkerWire.h"
@@ -42,6 +43,11 @@ namespace KRdp
  *    with counts, sizes and a reason; never a file name. Logs carry counts, bytes, ids and reasons only.
  *  - A newer offer replaces older transfers (their staging is removed); cancel removes one or all; on a clean exit everything including the
  *    instance directory goes; after a crash the next worker's sweep removes the leftovers (the instance's flock is gone with the process).
+ *  - Expiry (spec 3.2 d: an owner removes its own transfers after 24 h): a transfer older than Tuning::maxAgeSeconds (counted from its offer,
+ *    by the injected clock) is removed by expireOldTransfers(), which runs at every new offer and on a coarse timer (hourly), so a worker
+ *    that lives for days does not keep a copy for days. The copy may still be on the host clipboard: if the clipboard is still our own
+ *    list it is withdrawn first (clearUriList, as for any ended transfer), and a transfer that was still receiving ends as Cancelled. A
+ *    clipboard manager that re-owned the list keeps a history entry whose files are gone, which is what an expired copy means.
  */
 class HostFileStager
 {
@@ -59,6 +65,8 @@ public:
     struct Tuning {
         quint64 offerWhenCompleteBytes = ClipboardFileLimits::OfferWhenCompleteBytes;
         std::function<qint64()> nowSeconds = [] { return qint64(::time(nullptr)); };
+        qint64 maxAgeSeconds = ClipboardFileStaging::MaxAgeSeconds; ///< a transfer older than this expires (spec 3.2 d: 24 h)
+        int expiryCheckIntervalMs = 60 * 60 * 1000; ///< how often expireOldTransfers() runs on its own; 0 = only at a new offer
     };
 
     HostFileStager(Sender send, Backend backend, bool desktop, HostFileStaging::Config config)
@@ -76,6 +84,12 @@ public:
     {
         m_pool.setMaxThreadCount(1);
         m_pool.setExpiryTimeout(2000);
+        if (m_tuning.expiryCheckIntervalMs > 0) {
+            auto *timer = new QTimer(&m_context); // (owned by the context: gone with this object)
+            timer->setInterval(m_tuning.expiryCheckIntervalMs);
+            QObject::connect(timer, &QTimer::timeout, &m_context, [this] { expireOldTransfers(); });
+            timer->start();
+        }
     }
 
     ~HostFileStager()
@@ -113,6 +127,33 @@ public:
         for (const quint64 seq : running) fail(seq, ConsoleWorkerWire::FilePushReason::Policy, {}); // (a no-op for one that went meanwhile)
     }
 
+    /**
+     * Removes what is older than Tuning::maxAgeSeconds: the transfers this stager knows (a finished copy is withdrawn from the host
+     * clipboard if it is still ours, one that was still receiving is ended as Cancelled) and, on the disk thread, anything of this instance
+     * the file system says is that old (what a failed removal left). Runs at every new offer and on the hourly timer; callable for tests.
+     * Returns how many known transfers expired.
+     */
+    int expireOldTransfers()
+    {
+        const qint64 now = m_tuning.nowSeconds();
+        std::vector<quint64> expired;
+        for (const auto &[seq, entry] : m_entries) {
+            if (now - entry.startedSeconds > m_tuning.maxAgeSeconds) expired.push_back(seq);
+        }
+        for (const quint64 seq : expired) {
+            const Entry *entry = entryFor(seq);
+            if (!entry) continue; // ended meanwhile (an earlier one's withdrawal re-entered)
+            qInfo().nospace() << "Clipboard: files from the client expired after " << (now - entry->startedSeconds) << " s";
+            if (entry->state == EntryState::Done) drop(seq);
+            else fail(seq, Reason::Cancelled, {});
+        }
+        const qint64 maxAge = m_tuning.maxAgeSeconds;
+        post([this, now, maxAge] {
+            if (m_area) m_area->removeOlderThan(now, maxAge);
+        });
+        return int(expired.size());
+    }
+
     /// A worker that starts cleans up after crashed ones (stale instances of this user), creating nothing.
     void sweepAtStart()
     {
@@ -128,6 +169,7 @@ public:
     void offer(const ConsoleWorkerWire::FilePushOffer &offer)
     {
         using Reason = ConsoleWorkerWire::FilePushReason;
+        expireOldTransfers(); // (a worker that stays for days sees offers; this is the other place besides the timer)
         if (!allowed()) {
             refuse(offer.seq, Reason::Policy, {});
             return;
@@ -149,6 +191,7 @@ public:
 
         Entry entry;
         entry.plan = plan;
+        entry.startedSeconds = m_tuning.nowSeconds();
         entry.generation = m_control.generation;
         entry.timing = totalOfferTiming(*plan);
         const quint64 seq = offer.seq;
@@ -223,6 +266,7 @@ private:
         std::shared_ptr<HostFileStaging::Transfer> fs; ///< only ever used on the background thread
         std::shared_ptr<const ClipboardFilePush::Plan> plan;
         quint64 generation = 0;
+        qint64 startedSeconds = 0; ///< the injected clock when the offer was accepted (expiry counts from here)
         EntryState state = EntryState::Creating;
         ClipboardFileStaging::OfferTiming timing = ClipboardFileStaging::OfferTiming::Now;
         quint64 done = 0;
@@ -270,7 +314,7 @@ private:
         }
         const qint64 now = m_tuning.nowSeconds();
         const auto report = m_area->sweep(now);
-        const int old = m_area->removeOlderThan(now);
+        const int old = m_area->removeOlderThan(now, m_tuning.maxAgeSeconds);
         if (report.removedTrees || report.unlinked || report.failed || old) {
             qInfo().nospace() << "Clipboard: swept stale file staging removed=" << report.removedTrees << " unlinked=" << report.unlinked << " failed=" << report.failed << " expired=" << old;
         }

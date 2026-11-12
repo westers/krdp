@@ -30,7 +30,12 @@ class ClipboardFilePushLoopbackTest : public QObject
         QDir().mkpath(dir);
         return dir;
     }
-    bool begin(PushRun &run, const QString &from, const QStringList &arguments = {}) { return run.start(this, m_certificate, m_key, m_dir.path(), from, arguments); }
+    bool begin(PushRun &run, const QString &from, const QStringList &arguments = {})
+    {
+        // Free space never comes from the disk the test runs on (a nearly full disk refused every copy); a test that means to say otherwise sets run.space first.
+        if (!run.space) run.space = [](int) { return std::optional(HostFileStaging::SpaceInfo{1ULL << 40, 2ULL << 40}); };
+        return run.start(this, m_certificate, m_key, m_dir.path(), from, arguments);
+    }
     static bool noH264(const PushRun &run) { return run.log.contains("does not support H.264"); }
 
 private Q_SLOTS:

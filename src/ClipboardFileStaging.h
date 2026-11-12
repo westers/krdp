@@ -17,8 +17,10 @@ namespace KRdp::ClipboardFileStaging
  * relative to a dirfd, the janitor that executes a SweepPlan, statvfs) arrives with the phase 3
  * transport and its link-wrap failure tests; this decides what to do, from a listing the caller read.
  *
- * Layout: `<cache>/krdp-clip/<connection-id>/<seq>/<relative path>`; a file is written as `name.part` and
- * renamed to `name` when complete, so a reader never sees a half file as final.
+ * Layout: `<cache>/krdp-clip/<connection-id>/<seq>/<relative path>`; a file is written to a temporary file named by its
+ * plan index in a sibling directory, `<connection-id>/<seq>.parts/<index>`, and renamed to its final name when complete,
+ * so a reader never sees a half file as final and the temporary name can never collide with, or lengthen, a client's name
+ * (see server/HostFileStaging.h). partNameFor()/isPartName() below name the OLD `name.part` scheme; staging no longer uses them.
  */
 constexpr qint64 MaxAgeSeconds = 24 * 60 * 60;
 inline const QString PartSuffix = QStringLiteral(".part");

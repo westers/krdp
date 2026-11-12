@@ -292,11 +292,11 @@ inline bool isUnderRoot(const QByteArray &path, const QByteArray &root)
     return path == root || path.startsWith(QByteArray(root + '/'));
 }
 
-/// The default refused roots plus the staging folder, also under its canonical name when the cache directory is reached through a
-/// symlink (the walk compares canonical parents).
-inline QList<QByteArray> refusedRootsFor(const QString &cacheDir)
+/// The staging folder under both names it can be reached by: the lexical one and, when the cache directory is itself a symlink, the
+/// canonical one (the walk compares canonical parents; a third party may report either). Empty = no staging.
+inline QList<QByteArray> stagingRootsFor(const QString &cacheDir)
 {
-    QList<QByteArray> roots = {"/proc", "/sys", "/dev"};
+    QList<QByteArray> roots;
     const QByteArray root = stagingRoot(cacheDir);
     if (root.isEmpty()) return roots;
     roots.append(root);
@@ -305,6 +305,23 @@ inline QList<QByteArray> refusedRootsFor(const QString &cacheDir)
         const QByteArray canonicalRoot = stagingRoot(canonical);
         if (canonicalRoot != root) roots.append(canonicalRoot);
     }
+    return roots;
+}
+
+/// True when \a path is inside one of \a roots (stagingRootsFor()): a file the worker staged for the client, however it is named.
+inline bool isUnderAnyRoot(const QByteArray &path, const QList<QByteArray> &roots)
+{
+    for (const QByteArray &root : roots) {
+        if (isUnderRoot(path, root)) return true;
+    }
+    return false;
+}
+
+/// The default refused roots plus the staging folder under both of its names (see stagingRootsFor()).
+inline QList<QByteArray> refusedRootsFor(const QString &cacheDir)
+{
+    QList<QByteArray> roots = {"/proc", "/sys", "/dev"};
+    roots.append(stagingRootsFor(cacheDir));
     return roots;
 }
 

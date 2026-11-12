@@ -22,6 +22,15 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
+/// Where the tests make their files. The worker's file walk refuses /dev (and /proc, /sys) as a root, so a TMPDIR under /dev (TMPDIR=/dev/shm)
+/// would turn every file copy into a refusal: such a TMPDIR is replaced by /var/tmp for these directories.
+QString scratchTemplate()
+{
+    QString base = QDir::tempPath();
+    if (base == QStringLiteral("/dev") || base.startsWith(QStringLiteral("/dev/"))) base = QStringLiteral("/var/tmp");
+    return base + QStringLiteral("/hostclipboardtest-XXXXXX");
+}
+
 const QString Canary = QStringLiteral("CANARY-7f3a91-do-not-log");
 
 struct FakeHost {
@@ -49,7 +58,8 @@ struct FakeHost {
     QByteArray uriList; // what the host holds as text/uri-list
     int uriReads = 0;
     // OPT-078 phase 3: client-to-host files
-    QTemporaryDir cache;
+    QTemporaryDir cache{scratchTemplate()};
+    QString cacheOverride; ///< what the backend reports as the cache directory instead of `cache` (a symlink to it, say)
     bool ownUri = false; ///< the host's selection is what writeUriList set
     bool uriWriteOk = true;
     QList<QPair<QStringList, bool>> uriWrites; // (paths, secret)
@@ -101,7 +111,8 @@ struct FakeHost {
                 },
                 [this] { return ownUri; },
                 [this](const QString &summary, const QString &body) { notes.append({summary, body}); },
-                [this] { return cache.path(); }};
+                [this] { return cacheOverride.isEmpty() ? cache.path() : cacheOverride; },
+                [](int) { return std::optional(HostFileStaging::SpaceInfo{1ULL << 40, 2ULL << 40}); }}; // staging never measures the disk the tests run on
     }
 };
 
@@ -173,6 +184,26 @@ QStringList g_messages;
 void capture(QtMsgType, const QMessageLogContext &, const QString &message)
 {
     g_messages.append(message);
+}
+/// Installs capture() and puts the previous message handler back however the test ends (a failed QTRY_* returns from the test).
+struct MessageCapture {
+    QtMessageHandler previous;
+    MessageCapture()
+    {
+        g_messages.clear();
+        previous = qInstallMessageHandler(capture);
+    }
+    ~MessageCapture() { qInstallMessageHandler(previous); }
+    MessageCapture(const MessageCapture &) = delete;
+    MessageCapture &operator=(const MessageCapture &) = delete;
+};
+
+/// The relative names of the files a Files answer lists, in order.
+QStringList namesIn(const ClipboardData &answer)
+{
+    QStringList names;
+    for (const auto &item : ClipboardFileDescriptor::decode(answer.files).items) names.append(item.name);
+    return names;
 }
 }
 
@@ -1011,13 +1042,157 @@ private Q_SLOTS:
             QVERIFY(f.open(QIODevice::WriteOnly));
             f.close();
         }
-        g_messages.clear();
-        const auto previous = qInstallMessageHandler(capture);
+        MessageCapture messages;
         h.host.uriList = uriFor(staged) + uriFor(plain);
         h.board->hostChanged();
         QTRY_COMPARE(h.offers().size(), 1);
-        qInstallMessageHandler(previous);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferFiles);
         QVERIFY(g_messages.filter(QStringLiteral("host copied files items=1")).size() == 1);
+        // what the client is actually given (not only a count in a log line): the plain file, and not the staged one
+        h.board->request({1, MaxClipboardFileListBytes, ClipboardKind::Files, true});
+        QTRY_COMPARE(h.data().size(), 1);
+        QCOMPARE(h.data().first().status, ClipboardStatus::Ok);
+        QCOMPARE(namesIn(h.data().first()), QStringList{QStringLiteral("plain.txt")});
+    }
+
+    // REVIEW-S5 (echo guard, finding 6): the staged-path filter does not depend on the host-to-client FILES policy. With client-to-host files
+    // on and host-to-client files off, a re-owned staged list used to fall through to the text offer and the cache path went to the client as text.
+    void stagedFilesAreNeverAnnouncedInAnyFormWhateverTheFilePolicy_data()
+    {
+        QTest::addColumn<bool>("filesHostToClient");
+        QTest::addColumn<bool>("withText");
+        QTest::newRow("files off, names as text") << false << true;
+        QTest::newRow("files off, no text") << false << false;
+        QTest::newRow("files on, names as text") << true << true;
+    }
+    void stagedFilesAreNeverAnnouncedInAnyFormWhateverTheFilePolicy()
+    {
+        QFETCH(bool, filesHostToClient);
+        QFETCH(bool, withText);
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, filesHostToClient, true);
+        const QString staged = h.host.cache.filePath(QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt"));
+        QVERIFY(QDir().mkpath(QFileInfo(staged).absolutePath()));
+        QFile f(staged);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.close();
+        h.host.hasText = withText;
+        h.host.text = staged; // a file manager or KDE Connect adds the path as text
+        h.host.uriList = uriFor(staged);
+        h.host.ownUri = false; // re-owned by a third party
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 4);
+        QVERIFY2(h.offers().isEmpty(), "nothing about the staged files reaches the client, as files or as text");
+        QCOMPARE(h.host.reads, 0);
+    }
+
+    // REVIEW-S5 (finding 7): an offer that is suppressed because the host's selection is our own staged list used to leave the previous
+    // offer standing: the client kept offering file X and a paste fetched X although the host clipboard no longer holds it.
+    void aSuppressedOfferWithdrawsTheEarlierFileOffer_data()
+    {
+        QTest::addColumn<bool>("ownedByUs");
+        QTest::newRow("re-owned by a clipboard manager") << false;
+        QTest::newRow("our own selection coming back") << true;
+    }
+    void aSuppressedOfferWithdrawsTheEarlierFileOffer()
+    {
+        QFETCH(bool, ownedByUs);
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, true, true);
+        const QString x = h.host.cache.filePath(QStringLiteral("x.txt"));
+        const QString staged = h.host.cache.filePath(QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt"));
+        QVERIFY(QDir().mkpath(QFileInfo(staged).absolutePath()));
+        for (const auto &path : {x, staged}) {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write("data");
+            f.close();
+        }
+        // the host user copies file X: offer 1, and a paste would be served
+        h.host.uriList = uriFor(x);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        h.board->request({1, MaxClipboardFileListBytes, ClipboardKind::Files, true});
+        QTRY_COMPARE(h.data().size(), 1);
+        QCOMPARE(h.data().last().status, ClipboardStatus::Ok);
+        QCOMPARE(namesIn(h.data().last()), QStringList{QStringLiteral("x.txt")});
+        // then an older Klipper entry holding the client's staged list is selected: not announced...
+        h.host.uriList = uriFor(staged);
+        h.host.ownUri = ownedByUs;
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 4);
+        QCOMPARE(h.offers().size(), 1);
+        // ...and X is no longer what a paste gets: the file service no longer has a current file offer
+        h.board->request({2, MaxClipboardFileListBytes, ClipboardKind::Files, true});
+        QTRY_COMPARE(h.data().size(), 2);
+        QCOMPARE(h.data().last().status, ClipboardStatus::Gone);
+        QVERIFY(h.data().last().files.isEmpty());
+        // and a later real copy of X is served again
+        h.host.ownUri = false;
+        h.host.uriList = uriFor(x);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 2);
+        h.board->request({3, MaxClipboardFileListBytes, ClipboardKind::Files, true});
+        QTRY_COMPARE(h.data().size(), 3);
+        QCOMPARE(h.data().last().status, ClipboardStatus::Ok);
+    }
+
+    // The host clipboard emptied (or turned into something that is not offered): the earlier file offer is stale as well.
+    void aClipboardThatHoldsNothingOfferedWithdrawsTheEarlierFileOffer()
+    {
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, true, true);
+        const QString x = h.host.cache.filePath(QStringLiteral("x.txt"));
+        QFile f(x);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("data");
+        f.close();
+        h.host.uriList = uriFor(x);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        h.host.uriList.clear();
+        h.host.hasText = false;
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 4);
+        QCOMPARE(h.offers().size(), 1);
+        h.board->request({1, MaxClipboardFileListBytes, ClipboardKind::Files, true});
+        QTRY_COMPARE(h.data().size(), 1);
+        QCOMPARE(h.data().last().status, ClipboardStatus::Gone);
+    }
+
+    // REVIEW-S5 (finding 8): the offer-level check was lexical, so with a symlinked cache directory a third party that reports canonical
+    // paths produced a Files offer for the client's own staged files (which the walk then refused: a phantom offer).
+    void stagedFilesReportedUnderTheCanonicalCacheNameAreNotOffered()
+    {
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, true, true);
+        QTemporaryDir links{scratchTemplate()};
+        const QString linked = links.filePath(QStringLiteral("link"));
+        QVERIFY(QFile::link(h.host.cache.path(), linked));
+        h.host.cacheOverride = linked; // the worker knows the cache directory by the link's name
+        const QString staged = h.host.cache.filePath(QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt")); // the canonical name
+        QVERIFY(QDir().mkpath(QFileInfo(staged).absolutePath()));
+        QFile f(staged);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.close();
+        h.host.uriList = uriFor(staged);
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 4);
+        QVERIFY2(h.offers().isEmpty(), "a phantom Files offer");
+        // the same file reached through the link's name is staged too
+        h.host.uriList = uriFor(linked + QStringLiteral("/krdp-clip/c-0000000000000001/1/staged.txt"));
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 4);
+        QVERIFY(h.offers().isEmpty());
+        // a file beside the staging folder is still a copy like any other
+        const QString plain = h.host.cache.filePath(QStringLiteral("plain.txt"));
+        QFile p(plain);
+        QVERIFY(p.open(QIODevice::WriteOnly));
+        p.close();
+        h.host.uriList = uriFor(plain);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferFiles);
     }
 
     void clientFilesAreStagedOfferedAndTheStagingFollowsThePolicy()
@@ -1061,7 +1236,7 @@ private Q_SLOTS:
 
     void aFileCopyIsOfferedAloneAndOnlyWhenTheFilePolicyAllows()
     {
-        QTemporaryDir dir;
+        QTemporaryDir dir{scratchTemplate()};
         QFile file(dir.filePath(QStringLiteral("report.txt")));
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.write("contents");
@@ -1073,13 +1248,13 @@ private Q_SLOTS:
         h.board->hostChanged();
         QTRY_COMPARE(h.offers().size(), 1);
         QCOMPARE(h.offers().last().flags, ClipboardOfferText);
-        QCOMPARE(h.host.uriReads, 0); // without the policy flag the list is not even read
+        QCOMPARE(h.host.uriReads, 1); // the list of paths is read (to keep staged paths out of every format), but no file offer is made without the policy flag
         h.allow(true, true, false, false, 2, 5, true);
         h.board->hostChanged();
         QTRY_COMPARE(h.offers().size(), 2);
         QCOMPARE(h.offers().last().flags, ClipboardOfferFiles); // files, alone
         QCOMPARE(h.offers().last().seq, quint64(2));
-        QCOMPARE(h.host.uriReads, 1);
+        QCOMPARE(h.host.uriReads, 2);
         // a list with no local file in it is not a file copy
         h.host.uriList = "smb://server/share/x\r\n";
         h.board->hostChanged();
@@ -1103,7 +1278,7 @@ private Q_SLOTS:
 
     void aFileListRequestWalksOffTheEventLoopAndAnswersWithTheDescriptor()
     {
-        QTemporaryDir dir;
+        QTemporaryDir dir{scratchTemplate()};
         QDir().mkpath(dir.filePath(QStringLiteral("album/sub")));
         QFile one(dir.filePath(QStringLiteral("album/CANARY-name.jpg")));
         QVERIFY(one.open(QIODevice::WriteOnly));
@@ -1165,7 +1340,7 @@ private Q_SLOTS:
 
     void fileRequestsAreRefusedWithoutThePolicyOrControl()
     {
-        QTemporaryDir dir;
+        QTemporaryDir dir{scratchTemplate()};
         QFile file(dir.filePath(QStringLiteral("f")));
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.write("x");
@@ -1198,7 +1373,7 @@ private Q_SLOTS:
 
     void aWalkThatIsAbandonedAnswersGoneAndAHugeFileIsSkippedWithoutSupport()
     {
-        QTemporaryDir dir;
+        QTemporaryDir dir{scratchTemplate()};
         QFile file(dir.filePath(QStringLiteral("f")));
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.write("x");
@@ -1229,7 +1404,7 @@ private Q_SLOTS:
         const auto previous = qInstallMessageHandler(capture);
         QLoggingCategory::setFilterRules(QStringLiteral("*.debug=true"));
         {
-            QTemporaryDir dir;
+            QTemporaryDir dir{scratchTemplate()};
             QDir().mkpath(dir.filePath(QStringLiteral("CANARY-dir")));
             QFile file(dir.filePath(QStringLiteral("CANARY-dir/CANARY-file.txt")));
             QVERIFY(file.open(QIODevice::WriteOnly));
