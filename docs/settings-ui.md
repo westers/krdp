@@ -280,7 +280,7 @@ not establish that the design is acceptable.
   NEW client-to-host transfer (a transfer that is already running is never cut by the lock, and what it staged stays pasteable); another account's
   lock screen and a viewer connection share nothing; Virtual is always the owner.
 - `ClipboardFileMinFreeBytes` (phase 3) is the free disk space that must remain on the host after files are copied TO it: a size in bytes or a whole
-  number with `K`, `M`, `G` or `T` (powers of 1024; `512M`, `5G`), up to 16 TiB, `0` (default) = the larger of 2 GiB and 5% of the filesystem. Environment
+  number with `K`, `M`, `G` or `T` (powers of 1024; `512M`, `5G`), up to 16 TiB, `0` (default) = 5% of the filesystem, at least 2 GiB and at most 8 GiB. Environment
   `FARSIDE_{CONSOLE,VIRTUAL}_CLIPBOARD_FILE_MIN_FREE`, option `--clipboard-file-min-free`, KCM "Free space to keep" (Advanced text field, "Sharing"
   section). It travels with every offer to the worker, which checks it before the first byte (the declared total plus the reserve must fit, else the
   copy is refused with the numbers) and every 64 MiB (a disk that fills mid-way aborts the copy and deletes the partial). The strict spelling is

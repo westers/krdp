@@ -1894,7 +1894,7 @@ inline const char *filePushReasonName(FilePushReason reason)
 struct FilePushOffer {
     quint64 seq = 0; ///< endpoint-wide, never reused
     bool hugeFiles = false; ///< CB_HUGE_FILE_SUPPORT_ENABLED was negotiated
-    quint64 reserveBytes = 0; ///< ClipboardFileMinFreeBytes; 0 = the default rule max(2 GiB, 5% of the filesystem)
+    quint64 reserveBytes = 0; ///< ClipboardFileMinFreeBytes; 0 = the default rule: 5% of the filesystem, at least 2 GiB and at most 8 GiB
     QByteArray descriptor;
     bool operator==(const FilePushOffer &) const = default;
 };

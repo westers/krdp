@@ -826,7 +826,7 @@ private Q_SLOTS:
         QVERIFY(rig.open());
         auto transfer = rig.area->begin(1, planOf({file(u"a"_s, 2ULL << 30)}));
         SpaceFailure failure;
-        QCOMPARE(transfer->create(&failure), Status::NoSpace); // 2 GiB + max(2 GiB, 5 GiB) > 3 GiB
+        QCOMPARE(transfer->create(&failure), Status::NoSpace); // 2 GiB + a 5 GiB reserve (5% of 100 GiB) > 3 GiB
         QCOMPARE(failure.freeBytes, quint64(3ULL << 30));
         QCOMPARE(failure.neededBytes, quint64(7ULL << 30));
         QVERIFY(!QFileInfo::exists(rig.area->instancePath() + u"/1"_s)); // nothing was created
@@ -841,11 +841,13 @@ private Q_SLOTS:
         QTest::addColumn<int>("expected");
         constexpr quint64 G = 1ULL << 30;
         const int ok = int(Status::Ok), no = int(Status::NoSpace), unknown = int(Status::SpaceUnknown);
-        // default reserve: max(2 GiB, 5%) -> on 100 GiB that is 5 GiB; on 10 GiB it is the 2 GiB floor
+        // default reserve: 5% clamped to [2 GiB, 8 GiB] -> on 100 GiB that is 5 GiB; on 10 GiB it is the 2 GiB floor; on a 3.6 TiB disk the 8 GiB ceiling
         QTest::newRow("fits exactly (100G fs)") << (15 * G) << (100 * G) << (10 * G) << quint64(0) << ok;
         QTest::newRow("one byte over (100G fs)") << (15 * G - 1) << (100 * G) << (10 * G) << quint64(0) << no;
         QTest::newRow("floor applies on a small fs") << (12 * G) << (20 * G) << (10 * G) << quint64(0) << ok; // 5% of 20 GiB is 1 GiB: the 2 GiB floor wins, 10 + 2 <= 12
         QTest::newRow("floor, one byte over") << (12 * G - 1) << (20 * G) << (10 * G) << quint64(0) << no;
+        QTest::newRow("big fs: the 8 GiB ceiling (was 183 GiB)") << (9 * G) << (3666 * G) << (1 * G) << quint64(0) << ok;
+        QTest::newRow("big fs: the ceiling, one byte over") << (9 * G - 1) << (3666 * G) << (1 * G) << quint64(0) << no;
         QTest::newRow("configured reserve replaces the rule") << (11 * G) << (100 * G) << (10 * G) << (1 * G) << ok;
         QTest::newRow("configured reserve, one byte over") << (11 * G - 1) << (100 * G) << (10 * G) << (1 * G) << no;
         QTest::newRow("zero need still keeps the reserve") << (5 * G) << (100 * G) << quint64(0) << quint64(0) << ok;

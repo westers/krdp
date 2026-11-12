@@ -31,5 +31,5 @@ FARSIDE_VIRTUAL_CERTIFICATE_KEY=/etc/farside/virtual-host.key
 #FARSIDE_VIRTUAL_CLIPBOARD_FILE_MAX_RATE=auto
 
 # Free space that must remain on the host after a file copy from the client: bytes, or a number with K, M, G or T (for example 512M or 5G).
-# 0 (default) means the larger of 2 GiB and 5% of the filesystem. A copy that would not leave that much is refused up front.
+# 0 (default) means 5% of the filesystem, at least 2 GiB and at most 8 GiB. A copy that would not leave that much is refused up front.
 #FARSIDE_VIRTUAL_CLIPBOARD_FILE_MIN_FREE=0

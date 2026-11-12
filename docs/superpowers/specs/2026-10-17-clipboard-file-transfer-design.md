@@ -111,7 +111,7 @@ starts (sweep of stale `krdp-clip/*` whose connection-id is unknown), (d) 24 h a
 only below the verified staging root (never follow symlinks; `openat`/`unlinkat` relative to a dirfd of the root).
 
 Disk-space handling for "no size limit": before the first byte and every 64 MiB, `statvfs` the staging filesystem. Setting
-`ClipboardFileMinFreeBytes` (default **max(2 GiB, 5% of the filesystem)**) is the free space that must remain after the
+`ClipboardFileMinFreeBytes` (default **5% of the filesystem, at least 2 GiB and at most 8 GiB (GAP-G7: capped at 8 GiB)**) is the free space that must remain after the
 transfer; when the declared total plus that reserve exceeds free space the transfer is refused up front with a user-visible
 message ("Not enough space on the host: need 12.0 GB, 3.1 GB free"); if space drops mid-way (other writers), abort, delete
 the partial, and report. `$XDG_RUNTIME_DIR` is a tmpfs sized by RAM, which is unsuitable for GB files; staging therefore lives
@@ -454,7 +454,7 @@ its own records instead of reusing them.
    planner denied a NEW client-to-host copy because the Console desktop is locked and nothing else (account, seat, settings) would have denied it
    (`ConsoleClipboardPolicy::FilesPlan::clientDeniedByLock`); every other planner denial, and a worker-side refusal, stays `policy`. A client
    that does not know `locked` shows it as an unknown reason word, as it already does for any other.
-8. **Setting `ClipboardFileMinFreeBytes`**: bytes or a number with K/M/G/T (powers of 1024), up to 16 TiB, `0` = max(2 GiB, 5% of the filesystem);
+8. **Setting `ClipboardFileMinFreeBytes`**: bytes or a number with K/M/G/T (powers of 1024), up to 16 TiB, `0` = 5% of the filesystem, at least 2 GiB and at most 8 GiB;
    env `FARSIDE_{CONSOLE,VIRTUAL}_CLIPBOARD_FILE_MIN_FREE`; it travels with each offer. KRDPCTL `capabilities.clipboard.files.clientToHost`
    follows `ClipboardFiles` AND the clipboard direction.
 9. **Rate limit**: at most 6 accepted client file copies per 10 s per connection (each costs the worker a plan and a staging tree).

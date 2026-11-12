@@ -45,7 +45,7 @@ public:
     void setCameraLoopbackDevice(const QString &device) { m_cameraLoopbackDevice = device; }
     /** OPT-067: the administrator's ClipboardDirection for every client this host accepts. */
     void setClipboardDirection(ConsoleClipboardPolicy::Direction direction) { m_clipboardDirection = direction; }
-    /** OPT-078 phase 3: ClipboardFileMinFreeBytes for every client this host accepts (0 = max(2 GiB, 5% of the filesystem)). */
+    /** OPT-078 phase 3: ClipboardFileMinFreeBytes for every client this host accepts (0 = 5% of the filesystem, at least 2 GiB and at most 8 GiB). */
     void setClipboardFileMinFreeBytes(quint64 bytes) { m_clipboardFileMinFree = bytes; }
     /** OPT-078: the host owner's ClipboardFiles and ClipboardFileMaxRate for every client this host accepts. */
     void setClipboardFiles(ConsoleClipboardPolicy::Direction direction, const ClipboardFilePacing::Ceiling &ceiling)

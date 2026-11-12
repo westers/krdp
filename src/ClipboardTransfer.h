@@ -153,7 +153,7 @@ inline std::optional<ClipboardFilePacing::Ceiling> parseCeiling(const QString &v
 // ---- the free-space reserve (ClipboardFileMinFreeBytes, phase 3) ----
 
 /// ClipboardFileMinFreeBytes: the free space that must remain on the host after a client-to-host copy. Whole bytes, or a whole number with one unit
-/// suffix K, M, G or T (powers of 1024); `0` means the built-in rule max(2 GiB, 5% of the filesystem). Up to 16 TiB. No sign, no decimals, no
+/// suffix K, M, G or T (powers of 1024); `0` means the built-in rule 5% of the filesystem, at least 2 GiB and at most 8 GiB. Up to 16 TiB. No sign, no decimals, no
 /// leading zeros, no spaces, no case folding. nullopt for anything else.
 inline std::optional<quint64> parseMinFree(const QString &value)
 {

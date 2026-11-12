@@ -107,7 +107,7 @@ public:
     /** OPT-078: the host owner's ClipboardFiles (file copy, same shape as ClipboardDirection) and ClipboardFileMaxRate (the rate ceiling). Set before clients connect. */
     void setClipboardFiles(ConsoleClipboardPolicy::Direction direction) { m_clipboardFiles = direction; }
     void setClipboardFileCeiling(const ClipboardFilePacing::Ceiling &ceiling) { m_clipboardFileCeiling = ceiling; }
-    /** OPT-078 phase 3: ClipboardFileMinFreeBytes, the free space that must remain on the host after a client-to-host copy (0 = max(2 GiB, 5% of the filesystem)). */
+    /** OPT-078 phase 3: ClipboardFileMinFreeBytes, the free space that must remain on the host after a client-to-host copy (0 = 5% of the filesystem, at least 2 GiB and at most 8 GiB). */
     void setClipboardFileMinFreeBytes(quint64 bytes) { m_clipboardFileMinFree = bytes; }
 
 private:

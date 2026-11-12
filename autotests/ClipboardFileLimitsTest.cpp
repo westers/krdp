@@ -11,7 +11,8 @@ using namespace KRdp::ClipboardFileLimits;
 
 namespace
 {
-constexpr quint64 GiB = 1024ULL * 1024 * 1024;
+constexpr quint64 MiB = 1024ULL * 1024;
+constexpr quint64 GiB = 1024 * MiB;
 constexpr quint64 TiB = 1024 * GiB;
 }
 
@@ -19,17 +20,44 @@ class ClipboardFileLimitsTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
-    void defaultReserveIsTheLargerOfTwoGiBAndFivePercent()
+    void defaultReserveIsFivePercentClampedToTwoAndEightGiB_data()
     {
-        QCOMPARE(reserveBytes(0, 10 * GiB), 2 * GiB);        // 5% = 0.5 GiB
-        QCOMPARE(reserveBytes(0, 40 * GiB), 2 * GiB);        // 5% = 2 GiB exactly
-        QCOMPARE(reserveBytes(0, 100 * GiB), 5 * GiB);
-        QCOMPARE(reserveBytes(0, 4 * TiB), 4 * TiB / 20);
-        QCOMPARE(reserveBytes(0, 0), 2 * GiB);
-        QCOMPARE(reserveBytes(3 * GiB, 4 * TiB), 3 * GiB);   // an explicit setting wins, both ways
+        QTest::addColumn<quint64>("filesystem");
+        QTest::addColumn<quint64>("expected");
+        QTest::newRow("0 (unknown): the floor") << quint64(0) << 2 * GiB;
+        QTest::newRow("1 GiB: the floor") << 1 * GiB << 2 * GiB;
+        QTest::newRow("10 GiB: 5% = 0.5 GiB, the floor") << 10 * GiB << 2 * GiB;
+        QTest::newRow("40 GiB: 5% = 2 GiB exactly") << 40 * GiB << 2 * GiB;
+        QTest::newRow("100 GiB: 5%") << 100 * GiB << 5 * GiB;
+        QTest::newRow("160 GiB: 5% = 8 GiB exactly, the ceiling") << 160 * GiB << 8 * GiB;
+        QTest::newRow("161 GiB: capped") << 161 * GiB << 8 * GiB;
+        QTest::newRow("a 3,666 GiB root (was 183 GiB): capped") << 3666 * GiB << 8 * GiB;
+        QTest::newRow("4 TiB: capped") << 4 * TiB << 8 * GiB;
+        QTest::newRow("no overflow with a huge filesystem") << ~quint64(0) << 8 * GiB;
+    }
+    void defaultReserveIsFivePercentClampedToTwoAndEightGiB()
+    {
+        QFETCH(quint64, filesystem);
+        QFETCH(quint64, expected);
+        QCOMPARE(reserveBytes(0, filesystem), expected);
+    }
+    void aConfiguredReserveIsUsedAsGiven()
+    {
+        QCOMPARE(reserveBytes(3 * GiB, 4 * TiB), 3 * GiB);
+        QCOMPARE(reserveBytes(20 * GiB, 4 * TiB), 20 * GiB); // above the default ceiling: still honoured
+        QCOMPARE(reserveBytes(20 * GiB, 10 * GiB), 20 * GiB);
         QCOMPARE(reserveBytes(1, 100 * GiB), quint64(1));
-        // No overflow with a huge filesystem
-        QVERIFY(reserveBytes(0, ~quint64(0)) > 0);
+    }
+    void aBigDiskWithModestFreeSpaceStillAcceptsASmallCopy()
+    {
+        // The work desktop: / is 3,666 GiB with 107 GiB available. The reserve used to be 183 GiB, which refused every copy.
+        const auto d = checkFreeSpace(107 * GiB, 3666 * GiB, 1 * MiB);
+        QCOMPARE(int(d.verdict), int(SpaceVerdict::Ok));
+        QCOMPARE(d.reserve, 8 * GiB);
+        QCOMPARE(d.neededBytes, 8 * GiB + 1 * MiB);
+        // the smallest free space that accepts S is S + 8 GiB, to the byte
+        QCOMPARE(int(checkFreeSpace(8 * GiB + 1 * MiB, 3666 * GiB, 1 * MiB).verdict), int(SpaceVerdict::Ok));
+        QCOMPARE(int(checkFreeSpace(8 * GiB + 1 * MiB - 1, 3666 * GiB, 1 * MiB).verdict), int(SpaceVerdict::NotEnough));
     }
     void decisionTable_data()
     {
