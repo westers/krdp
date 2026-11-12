@@ -26,7 +26,7 @@ files in shape) and §8 "Log" (newest first = latest state). `AGENTS.md` just po
 - For design-risk work, write a spec in `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and a
   plan in `docs/superpowers/plans/YYYY-MM-DD-<topic>.md`. Task ledgers go in
   `.superpowers/sdd/<plan>/progress.md`, which is git-ignored. Small items don't need either.
-- `TODO_UPSTREAM_PR.md` and `UPSTREAM_MR_DRAFT.md` are OUTDATED (pre-2026-09-15 clean-up).
+- `docs/archive/TODO_UPSTREAM_PR.md` and `docs/archive/UPSTREAM_MR_DRAFT.md` are OUTDATED (pre-2026-09-15 clean-up).
 
 ## Build
 
@@ -131,8 +131,8 @@ scripts/package-virtual-test.sh   # build-virtual-package/, prefix /opt/krdp-vir
   worker captures and injects input over an authenticated Unix socket (`ConsoleWorkerWire`, versioned).
   There is one controller at a time; other connections are viewers. `ConsoleTopology*` and
   `RemoteTopology*` implement revisioned preview/apply of monitor layout (Fit, Match, Add/Remove,
-  physical lease). The experimental paths stay default-OFF behind `KRDP_EXPERIMENTAL_CONSOLE_TOPOLOGY`
-  and `KRDP_EXPERIMENTAL_CONSOLE_VIRTUAL`.
+  physical lease). The experimental paths stay default-OFF behind `FARSIDE_EXPERIMENTAL_CONSOLE_TOPOLOGY`
+  and `FARSIDE_EXPERIMENTAL_CONSOLE_VIRTUAL`.
 - **Virtual sessions** (`krdp-virtual-host` broker + `VirtualSession*`) are persistent,
   monitor-independent Plasma desktops per PAM-authenticated user. Each one runs a private
   `kwin_wayland --virtual`, bus and PipeWire, launched by `scripts/launch-virtual-session.sh` and
