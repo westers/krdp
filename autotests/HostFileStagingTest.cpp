@@ -7,6 +7,7 @@
 
 #include <QDir>
 #include <QDirIterator>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QTemporaryDir>
 #include <QTest>
@@ -1003,6 +1004,7 @@ private Q_SLOTS:
     void aFailingFsyncKeepsTheFileOutOfItsFinalName()
     {
         Rig rig;
+        rig.config.syncFiles = true; // the per-file fsync is a tuning, off by default
         QVERIFY(rig.open());
         auto transfer = rig.area->begin(1, planOf({file(u"a"_s, 4)}));
         QCOMPARE(transfer->create(), Status::Ok);
@@ -1014,6 +1016,23 @@ private Q_SLOTS:
         QCOMPARE(late->create(), Status::Ok);
         g_fsync.error = ENOSPC; // delayed allocation reporting a full disk at fsync
         QCOMPARE(late->write(0, 0, pattern(4)), Status::NoSpace);
+    }
+    // REVIEW-S5: by default a file is not fsync'd (measured: many small files were bound by it); a full disk is still told by the write.
+    void byDefaultNoFsyncIsMadeAndAFullDiskIsStillTold()
+    {
+        Rig rig;
+        QVERIFY(!rig.config.syncFiles);
+        QVERIFY(rig.open());
+        g_fsync.error = EIO; // would fail every fsync
+        auto transfer = rig.area->begin(1, planOf({file(u"a"_s, 4), file(u"b"_s, 4)}));
+        QCOMPARE(transfer->create(), Status::Ok);
+        QCOMPARE(transfer->write(0, 0, pattern(4)), Status::Ok);
+        QCOMPARE(g_fsync.hits, 0); // not even called
+        QVERIFY(QFileInfo::exists(rig.area->instancePath() + u"/1/a"_s)); // complete: final name
+        g_pwrite.error = ENOSPC;
+        QCOMPARE(transfer->write(1, 0, pattern(4)), Status::NoSpace);
+        QVERIFY(transfer->aborted());
+        QVERIFY(!QFileInfo::exists(rig.area->instancePath() + u"/1"_s));
     }
     void aFailingOpenOrRenameIsAnIoErrorNotAFinalFile()
     {
@@ -1204,6 +1223,37 @@ private Q_SLOTS:
         QCOMPARE(refused->create(), Status::NoSpace);
         auto allowed = rig.area->begin(2, planOf({file(u"a"_s, 1000)}), quint64(1ULL << 30));
         QCOMPARE(allowed->create(), Status::Ok);
+    }
+
+    // REVIEW-S5: a measurement, not a test: KRDP_STAGING_BENCH=1 prints files/s for 2000 files of 20 KB (40 MB) staged with and without the
+    // per-file fsync, on the file system TMPDIR is on (3 rounds each, alternating). Skipped otherwise.
+    void manySmallFilesWithAndWithoutPerFileFsync()
+    {
+        if (qEnvironmentVariableIsEmpty("KRDP_STAGING_BENCH")) QSKIP("set KRDP_STAGING_BENCH=1 to measure");
+        constexpr int Count = 2000;
+        constexpr quint64 Size = 20 * 1024;
+        const QByteArray data = pattern(Size, 3);
+        QList<Descriptor> items;
+        for (int i = 0; i < Count; ++i) items.append(file(u"d%1\\f%2.bin"_s.arg(i / 100).arg(i), Size));
+        const auto plan = planOf(items);
+        QVERIFY(plan.ok());
+        for (int round = 0; round < 3; ++round) {
+            for (const bool sync : {true, false}) {
+                Rig rig;
+                rig.config.syncFiles = sync;
+                QVERIFY(rig.open());
+                auto transfer = rig.area->begin(1, plan);
+                QCOMPARE(transfer->create(), Status::Ok);
+                QElapsedTimer timer;
+                timer.start();
+                for (quint32 i = 0; i < quint32(Count); ++i) QCOMPARE(transfer->write(i, 0, data), Status::Ok);
+                const qint64 ms = timer.elapsed();
+                QVERIFY(transfer->complete());
+                qInfo().noquote() << QStringLiteral("BENCH fsync=%1 round=%2 files=%3 bytes=%4 ms=%5 files/s=%6 MB/s=%7")
+                                         .arg(sync ? u"on"_s : u"off"_s).arg(round).arg(Count).arg(quint64(Count) * Size).arg(ms)
+                                         .arg(ms ? Count * 1000 / ms : 0).arg(ms ? double(quint64(Count) * Size) / 1e6 * 1000 / double(ms) : 0.0, 0, 'f', 1);
+            }
+        }
     }
 
     // ---- no names in what this module says ----

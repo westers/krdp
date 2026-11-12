@@ -53,7 +53,7 @@ namespace KRdp::HostFileStaging
  *     name is the file's plan index, in a sibling directory of the transfer (`<seq>.parts/<index>`): it needs no extra byte of the final
  *     name (a name of 255 bytes is the longest a file system takes, and the sanitizer allows 255), and no name a client can send is ever
  *     equal to it or in its way (an earlier `name.part` collided with a client's own `name.part`). The rename crosses directories on one file
- *     system. Durability (fsync of each finished file) is a tuning (Config::syncFiles); the staging is disposable.
+ *     system. Durability (fsync of each finished file) is a tuning, off by default (Config::syncFiles): the staging is disposable.
  *   - Chunks must arrive in order, inside the declared size (a peer that sends more is cut off, the file removed).
  *   - Free space: before the first byte and every SpaceCheckIntervalBytes (64 MiB) the staging filesystem is probed (injectable); the
  *     declared remainder plus the reserve must fit, else the transfer is refused up front or, mid-way, aborted and its partial files removed.
@@ -151,10 +151,14 @@ struct Config {
     SpaceProbe space = probeSpace;
     std::function<uid_t()> effectiveUid = [] { return ::geteuid(); };
     quint64 spaceCheckIntervalBytes = ClipboardFileLimits::SpaceCheckIntervalBytes;
-    /// fsync each finished file before it takes its final name. A write error that only shows at sync time (ENOSPC on a delayed
-    /// allocation, EIO) is told at the file instead of at the first read; the staging is disposable (a crash sweep removes it), so the
-    /// only thing this buys is that error report.
-    bool syncFiles = true;
+    /**
+     * fsync each finished file before it takes its final name. Off by default (REVIEW-S5, measured: 2000 files of 20 KB on this
+     * machine's NVMe ext4 took 6.9-8.5 s with it, 0.09-0.15 s without, 234-291 vs 13 500-23 000 files/s; on tmpfs there is no difference).
+     * The staging is disposable (the start-up sweep removes what a crash leaves), a file still never takes its final name before every
+     * byte was written, and a full disk or an exhausted quota is reported by the write itself (ENOSPC/EDQUOT) and by the free-space
+     * checks; what the fsync would add is the report of a write-back error that only shows later (EIO, a network file system's ENOSPC).
+     */
+    bool syncFiles = false;
 };
 
 // ---- the janitor ----
