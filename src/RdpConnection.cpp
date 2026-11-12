@@ -56,6 +56,7 @@
 #include <winpr/sysinfo.h>
 
 #include "Clipboard.h"
+#include "SessionCloseGate.h"
 #include "Cursor.h"
 #include "InputHandler.h"
 #include "LayoutControl.h"
@@ -817,6 +818,23 @@ public:
 
     std::jthread thread;
 
+    // GAP-G5: every close of the peer (and the Set Error Info that goes with
+    // it) runs on the session thread. Other threads record the request in
+    // closeGate and set closeEvent, which the session loop waits on.
+    SessionCloseGate closeGate;
+    std::atomic<std::thread::id> sessionThreadId{};
+    HANDLE closeEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr); // manual reset
+    // Set by the session thread as the very last thing run() does; the
+    // destructor's bounded wait looks at it.
+    std::atomic<bool> loopFinished = false;
+
+    ~Private()
+    {
+        if (closeEvent) {
+            CloseHandle(closeEvent);
+        }
+    }
+
     std::mutex clientDisplayMutex;
     ClientDisplay::Info clientDisplay;
 
@@ -856,7 +874,7 @@ RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
     connect(d->videoStream.get(), &VideoStream::closed, this, [this]() {
         if (d->state == State::Running || d->state == State::Streaming) {
             qCInfo(KRDP) << "Video stream closed, closing session";
-            d->peer->Close(d->peer);
+            requestClose({});
         }
     });
     d->cursor = std::make_unique<Cursor>(this);
@@ -871,12 +889,37 @@ RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
 RdpConnection::~RdpConnection()
 {
     StallPhase stallPhase("~RdpConnection");
+    // GAP-G5: this runs on the main thread, which must not touch the peer
+    // while the session thread reads it. A streaming session is closed the
+    // proper way (error info and Close on the session thread, which the loop
+    // does on its way out); then the loop is told to stop and woken.
     if (d->state == State::Streaming) {
-        d->peer->Close(d->peer);
+        requestClose({});
     }
 
     if (d->thread.joinable()) {
         d->thread.request_stop();
+        if (d->closeEvent) {
+            SetEvent(d->closeEvent);
+        }
+        // Bounded wait for the loop to end by itself. A session thread stuck
+        // inside FreeRDP (a TLS handshake that never completes) cannot see
+        // the stop request: abort the connect and shut the socket down, both
+        // safe from another thread (as the handshake timeout does), then join.
+        constexpr auto LoopGrace = std::chrono::seconds(5);
+        const auto deadline = std::chrono::steady_clock::now() + LoopGrace;
+        while (!d->loopFinished.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (!d->loopFinished.load()) {
+            qCWarning(KRDP) << "The session thread did not end within" << LoopGrace.count() << "s of the stop request; aborting its transport";
+            if (d->peer && d->peer->context) {
+                freerdp_abort_connect_context(d->peer->context);
+            }
+            if (d->socketHandle >= 0) {
+                ::shutdown(int(d->socketHandle), SHUT_RDWR);
+            }
+        }
         d->thread.join();
     }
 
@@ -936,13 +979,10 @@ void RdpConnection::setState(KRdp::RdpConnection::State newState)
 
 void RdpConnection::closeWithErrorInfo(quint32 errorInfo)
 {
-    if (d->peer && d->peer->context && d->peer->context->rdp) {
-        freerdp_set_error_info(d->peer->context->rdp, errorInfo);
-        // As for AuthenticationFailed: a client that already processed the
-        // Deactivate All that Close() sends first ignores a later Set Error Info.
-        freerdp_send_error_info(d->peer->context->rdp);
-    }
-    close(CloseReason::None);
+    // As for AuthenticationFailed: a client that already processed the
+    // Deactivate All that Close() sends first ignores a later Set Error Info,
+    // so it is sent now as well.
+    requestClose({errorInfo, true});
 }
 
 void RdpConnection::setDisplayControlEnabled(bool enabled)
@@ -954,26 +994,55 @@ void RdpConnection::close(RdpConnection::CloseReason reason)
 {
     switch (reason) {
     case CloseReason::VideoInitFailed:
-        if (d->peer && d->peer->context) {
-            freerdp_set_error_info(d->peer->context->rdp, ERRINFO_GRAPHICS_SUBSYSTEM_FAILED);
-        }
+        requestClose({quint32(ERRINFO_GRAPHICS_SUBSYSTEM_FAILED), false});
         break;
     case CloseReason::AuthenticationFailed:
-        if (d->peer && d->peer->context) {
-            freerdp_set_error_info(d->peer->context->rdp, ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES);
-            // Send it now as well: Close() sends Deactivate All first, and a client in the
-            // deactivated state ignores the Set Error Info that follows it, reporting the
-            // ultimatum as ERRINFO_LOGOFF_BY_USER instead.
-            freerdp_send_error_info(d->peer->context->rdp);
-        }
+        // Sent now as well: Close() sends Deactivate All first, and a client in the
+        // deactivated state ignores the Set Error Info that follows it, reporting the
+        // ultimatum as ERRINFO_LOGOFF_BY_USER instead.
+        requestClose({quint32(ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES), true});
         break;
     case CloseReason::None:
+        requestClose({});
         break;
     }
+}
 
-    if (d->peer) { // may be null if creating the peer failed
-        d->peer->Close(d->peer);
+void RdpConnection::requestClose(const SessionCloseGate::Request &request)
+{
+    if (!d->peer) { // not created yet (initialize() is queued), or creating it failed
+        return;
     }
+    const bool onSessionThread = d->sessionThreadId.load() == std::this_thread::get_id();
+    switch (d->closeGate.submit(request, onSessionThread)) {
+    case SessionCloseGate::Route::Queued:
+        // The session thread owns the peer: it performs the close at the next
+        // safe point of its loop, woken now.
+        if (d->closeEvent) {
+            SetEvent(d->closeEvent);
+        }
+        break;
+    case SessionCloseGate::Route::Inline:
+        // The caller is the session thread, or no session loop is reading the peer.
+        performClose(request);
+        break;
+    case SessionCloseGate::Route::Ignored:
+        break;
+    }
+}
+
+void RdpConnection::performClose(const SessionCloseGate::Request &request)
+{
+    if (!d->peer) {
+        return;
+    }
+    if (request.errorInfo && d->peer->context && d->peer->context->rdp) {
+        freerdp_set_error_info(d->peer->context->rdp, *request.errorInfo);
+        if (request.sendErrorInfoNow) {
+            freerdp_send_error_info(d->peer->context->rdp);
+        }
+    }
+    d->peer->Close(d->peer);
 }
 
 InputHandler *RdpConnection::inputHandler() const
@@ -1576,7 +1645,9 @@ void RdpConnection::initialize()
     // Perform actual communication on a separate thread.
     // OPT-055 K6.5: thread creation can fail (EAGAIN); the scope guard above then closes the peer
     // and moves the connection to Closed, so only this session ends, not the daemon.
+    d->closeGate.beginLoop(); // before the thread exists: a close from here on is the loop's to perform
     if (!startJThread(d->thread, std::bind(&RdpConnection::run, this, std::placeholders::_1))) {
+        d->closeGate.abortLoop();
         qCWarning(KRDP) << "Could not start the session thread; closing the connection";
         return;
     }
@@ -1589,11 +1660,14 @@ void RdpConnection::run(std::stop_token stopToken)
     auto context = reinterpret_cast<PeerContext *>(d->peer->context);
     auto channelEvent = WTSVirtualChannelManagerGetEventHandle(context->virtualChannelManager);
 
+    d->sessionThreadId.store(std::this_thread::get_id());
     setState(State::Running);
 
     while (!stopToken.stop_requested()) {
-        std::array<HANDLE, 32> events{channelEvent};
-        auto handleCount = d->peer->GetEventHandles(d->peer, events.data() + 1, 31);
+        // The close event is the second handle: requestClose() from another
+        // thread wakes the wait below.
+        std::array<HANDLE, 32> events{channelEvent, d->closeEvent};
+        auto handleCount = d->peer->GetEventHandles(d->peer, events.data() + 2, 30);
         if (handleCount <= 0) {
             qCInfo(KRDP) << "Unable to get transport event handles; closing session";
             break;
@@ -1602,7 +1676,18 @@ void RdpConnection::run(std::stop_token stopToken)
         // 70 ms, bandwidth window stop after 500 ms) must run on an idle link
         // too. Waiting only for socket activity stretched idle bandwidth
         // windows to 1.0-1.6 s in the 2026-09-16 journal.
-        WaitForMultipleObjects(1 + handleCount, events.data(), FALSE, 100);
+        WaitForMultipleObjects(2 + handleCount, events.data(), FALSE, 100);
+
+        // GAP-G5: a close another thread asked for is performed here, on the
+        // thread that reads the peer. The loop goes on: the client's own
+        // disconnect (it closes the TCP connection after the Disconnect
+        // Provider Ultimatum) ends it, as it did when Close() ran elsewhere.
+        if (d->closeGate.hasPending()) {
+            ResetEvent(d->closeEvent); // manual reset: without this the wait would return at once from now on
+            if (const auto request = d->closeGate.take()) {
+                performClose(*request);
+            }
+        }
 
         // Read data from the socket and have FreeRDP process it.
         if (d->peer->CheckFileDescriptor(d->peer) != TRUE) {
@@ -1690,6 +1775,13 @@ void RdpConnection::run(std::stop_token stopToken)
 
     qCInfo(KRDP) << "Closing session";
     onClose();
+    // A request that arrived after the loop's last look is performed here; from
+    // now on the gate sends further requests back to their callers, which is
+    // safe because this thread no longer uses the peer.
+    if (const auto last = d->closeGate.finishLoop()) {
+        performClose(*last);
+    }
+    d->loopFinished.store(true);
 }
 
 bool RdpConnection::onCapabilities()

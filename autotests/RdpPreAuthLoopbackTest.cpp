@@ -18,6 +18,8 @@
 #include <QTest>
 #include <QTimer>
 
+#include <thread>
+
 #include "LayoutControl.h"
 #include "RdpConnection.h"
 #include "Server.h"
@@ -112,6 +114,34 @@ private:
         }
         if (output) {
             *output = probe.readAllStandardOutput() + probe.readAllStandardError();
+        }
+        return probe.exitStatus() == QProcess::NormalExit ? probe.exitCode() : -2;
+    }
+
+    /** A stock-client-like probe (no KRDPCTL, sends nothing); its stderr says how the session ended. */
+    int runStockProbe(quint16 port, QByteArray *errorOutput)
+    {
+        QProcess probe;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), m_dir.path());
+        probe.setProcessEnvironment(environment);
+        probe.start(QStringLiteral(KRDPCTL_PROBE),
+                    {QStringLiteral("127.0.0.1"), QString::number(port), TestUser, Password, QStringLiteral("--silent"), QStringLiteral("--no-krdpctl"),
+                     QStringLiteral("--timeout"), QStringLiteral("8")});
+        if (!probe.waitForStarted(5000)) {
+            return -1;
+        }
+        QDeadlineTimer deadline(30s);
+        while (probe.state() != QProcess::NotRunning && !deadline.hasExpired()) {
+            QTest::qWait(20);
+        }
+        if (probe.state() != QProcess::NotRunning) {
+            probe.kill();
+            probe.waitForFinished();
+            return -3;
+        }
+        if (errorOutput) {
+            *errorOutput = probe.readAllStandardError();
         }
         return probe.exitStatus() == QProcess::NormalExit ? probe.exitCode() : -2;
     }
@@ -227,6 +257,96 @@ private Q_SLOTS:
         QVERIFY(server);
         QCOMPARE(runProbe(server->serverPort(), Password), 0);
         QCOMPARE(observed.records, QStringList{QStringLiteral("query")});
+    }
+
+    // GAP-G5: close()/closeWithErrorInfo() called from the main thread (or any
+    // other thread) while the session thread is reading the peer must not touch
+    // the peer from the caller's thread: it is handed to the session thread,
+    // which sends the error info and closes. The client sees the code, intact,
+    // every time; a second request after the first is ignored.
+    void closeFromAnotherThreadReachesTheClientIntact_data()
+    {
+        QTest::addColumn<int>("mode");
+        QTest::newRow("main thread") << 0;
+        QTest::newRow("foreign thread") << 1;
+        QTest::newRow("first request wins") << 2;
+    }
+
+    void closeFromAnotherThreadReachesTheClientIntact()
+    {
+        QFETCH(int, mode);
+        constexpr quint32 ExpectedCode = 0x408; // ERRINFO_CB_DESTINATION_POOL_NOT_FREE
+        Observed observed;
+        auto server = startServer(15s, observed);
+        QVERIFY(server);
+        int closed = 0;
+        connect(server.get(), &Server::newConnectionCreated, this, [&](RdpConnection *connection) {
+            connect(connection, &RdpConnection::clientDisplayInfoReceived, connection, [connection, mode]() {
+                switch (mode) {
+                case 0:
+                    connection->closeWithErrorInfo(ExpectedCode);
+                    break;
+                case 1:
+                    std::thread([connection] { connection->closeWithErrorInfo(ExpectedCode); }).join();
+                    break;
+                case 2:
+                    connection->closeWithErrorInfo(ExpectedCode);
+                    connection->closeWithErrorInfo(0x5); // ignored
+                    connection->close(RdpConnection::CloseReason::VideoInitFailed); // ignored
+                    break;
+                }
+            }, Qt::QueuedConnection);
+            connect(connection, &RdpConnection::stateChanged, this, [&closed](RdpConnection::State state) {
+                if (state == RdpConnection::State::Closed) ++closed;
+            });
+        });
+        constexpr int Iterations = 12;
+        for (int i = 0; i < Iterations; ++i) {
+            QByteArray err;
+            QElapsedTimer elapsed;
+            elapsed.start();
+            runStockProbe(server->serverPort(), &err);
+            QVERIFY2(err.contains("server ended the session") && err.contains("0x00000408"), qPrintable(QStringLiteral("iteration %1: ").arg(i) + QString::fromUtf8(err)));
+            QVERIFY2(elapsed.elapsed() < 6000, "the close was not delivered promptly");
+            QTRY_COMPARE_WITH_TIMEOUT(closed, i + 1, 5000);
+        }
+    }
+
+    // GAP-G5: the destructor runs on the main thread while the session thread
+    // is live. It asks the loop to close and stop and waits for it; it must not
+    // touch the peer itself. The client is cut loose promptly, nothing crashes.
+    void destroyingAServerWithALiveClientEndsTheSession()
+    {
+        for (int i = 0; i < 5; ++i) {
+            Observed observed;
+            auto server = startServer(15s, observed);
+            QVERIFY(server);
+            bool authenticated = false;
+            connect(server.get(), &Server::newConnectionCreated, this, [&authenticated](RdpConnection *connection) {
+                connect(connection, &RdpConnection::clientDisplayInfoReceived, connection, [&authenticated]() { authenticated = true; }, Qt::QueuedConnection);
+            });
+            QProcess probe;
+            auto environment = QProcessEnvironment::systemEnvironment();
+            environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), m_dir.path());
+            probe.setProcessEnvironment(environment);
+            probe.setProcessChannelMode(QProcess::MergedChannels);
+            probe.start(QStringLiteral(KRDPCTL_PROBE),
+                        {QStringLiteral("127.0.0.1"), QString::number(server->serverPort()), TestUser, Password, QStringLiteral("--silent"),
+                         QStringLiteral("--no-krdpctl"), QStringLiteral("--timeout"), QStringLiteral("20")});
+            QVERIFY(probe.waitForStarted(5000));
+            QTRY_VERIFY_WITH_TIMEOUT(authenticated, 10000);
+            QElapsedTimer elapsed;
+            elapsed.start();
+            server.reset(); // joins every session thread
+            QVERIFY2(elapsed.elapsed() < 8000, "the server's destructor did not return promptly");
+            QDeadlineTimer deadline(10s);
+            while (probe.state() != QProcess::NotRunning && !deadline.hasExpired()) {
+                QTest::qWait(20);
+            }
+            QVERIFY2(probe.state() == QProcess::NotRunning, "the client was not cut loose");
+            probe.kill();
+            probe.waitForFinished();
+        }
     }
 
     void stalledHandshakeIsClosed_data()

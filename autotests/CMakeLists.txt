@@ -667,6 +667,13 @@ target_include_directories(PreAuthChannelGateTest SYSTEM PRIVATE ${FreeRDP_INCLU
 target_link_libraries(PreAuthChannelGateTest PRIVATE Qt6::Test Qt6::Core KRdp freerdp winpr)
 add_test(NAME PreAuthChannelGateTest COMMAND PreAuthChannelGateTest)
 
+# GAP-G5: the close-request hand-over state (header-only, no FreeRDP).
+add_executable(SessionCloseGateTest SessionCloseGateTest.cpp)
+target_include_directories(SessionCloseGateTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(SessionCloseGateTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME SessionCloseGateTest COMMAND SessionCloseGateTest)
+set_tests_properties(SessionCloseGateTest PROPERTIES TIMEOUT 60)
+
 # AUD-S1/S2/S3: a real Server on 127.0.0.1 with krdpctl-probe as the client.
 if(TARGET krdpctl-probe)
     add_executable(RdpPreAuthLoopbackTest RdpPreAuthLoopbackTest.cpp)

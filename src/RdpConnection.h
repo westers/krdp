@@ -16,6 +16,7 @@
 #include "ClientDisplayInfo.h"
 #include "DeliveryStats.h"
 #include "DeviceControl.h"
+#include "SessionCloseGate.h"
 #include "krdp_export.h"
 
 namespace KRdp
@@ -156,6 +157,11 @@ public:
      *
      * \param reason The reason to close the connection. May set error state if
      *               it is something different than CloseReason::None.
+     *
+     * Callable from any thread. The Set Error Info and the FreeRDP close always run on the
+     * session thread that owns the peer (a request from another thread is handed to its loop),
+     * so the call returns before the client has been told. The first close request wins; later
+     * ones, of any kind, are ignored.
      */
     void close(CloseReason reason = CloseReason::None);
 
@@ -163,7 +169,7 @@ public:
      * Close the connection with a standard MS-RDPBCGR Set Error Info code
      * (an `ERRINFO_*` value), sent at once and again by the close sequence,
      * so that any stock client (mstsc, FreeRDP, Remmina) shows the reason.
-     * Callable from the main thread, like close().
+     * Callable from any thread, like close() (the first close request wins).
      */
     void closeWithErrorInfo(quint32 errorInfo);
 
@@ -327,6 +333,14 @@ private:
     friend class Clipboard;
 
     void setState(State newState);
+    /**
+     * Any thread (GAP-G5): close the connection, with an optional Set Error Info. Never touches
+     * the FreeRDP peer from a thread other than the session thread while the session loop runs:
+     * the request is recorded (the first one wins) and the loop performs it.
+     */
+    void requestClose(const SessionCloseGate::Request &request);
+    /** Session thread, or any thread while no session loop runs: set/send the error info and Close() the peer. */
+    void performClose(const SessionCloseGate::Request &request);
     void initialize();
     void run(std::stop_token stopToken);
 
