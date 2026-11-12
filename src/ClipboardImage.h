@@ -9,8 +9,8 @@
 #include <QByteArray>
 #include <QByteArrayView>
 #include <QImage>
-#include <QHashFunctions>
 #include <QImageReader>
+#include <QHashFunctions>
 #include <QPainter>
 #include <QSize>
 #include <QStringList>
@@ -45,7 +45,7 @@ inline bool isPngFormatName(const QString &name)
     return name.compare(QLatin1String("PNG"), Qt::CaseInsensitive) == 0 || name.compare(QLatin1String("image/png"), Qt::CaseInsensitive) == 0;
 }
 
-/// The host clipboard formats a picture is read from, best first: PNG, then the formats Qt can decode for us.
+/// The clipboard formats a picture is read from, best first: PNG, then the formats Qt can decode for us.
 inline const QStringList &mimeOrder()
 {
     static const QStringList order = {QStringLiteral("image/png"), QStringLiteral("image/jpeg"), QStringLiteral("image/bmp"),
