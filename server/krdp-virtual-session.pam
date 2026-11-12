@@ -1,4 +1,4 @@
-# Installed as /etc/pam.d/krdp-virtual-session (krdp package; a draft in test packages).
+# Installed as /etc/pam.d/farside-virtual-session (the farside-server package installs this file under that name; a draft in test packages).
 # Authentication already happened at the RDP broker; this stack must never
 # become an alternative password-authentication policy.
 auth requisite pam_deny.so
