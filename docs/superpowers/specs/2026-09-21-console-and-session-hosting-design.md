@@ -31,7 +31,8 @@ not a login-screen server.
 
 `krdp-console-host` is a system service and owns each TLS/RDP transport from
 TCP accept through disconnect. It does **not** draw a second login UI and does
-not acquire raw DRM or evdev access.
+not acquire raw DRM access. It does read seat0's evdev input nodes, read-only
+and only as an "activity happened" signal (see the note below the diagram).
 
 ```
 client RDP transport (owned by krdp-console-host)
@@ -44,6 +45,14 @@ client RDP transport (owned by krdp-console-host)
                                   │
                           existing --plasma capture/input backend
 ```
+
+> **Note 2026-11-12 (GAP-G4).** The first version of this document said the host does not acquire raw DRM or evdev
+> access. That is still true for DRM. It is no longer true for evdev: since the desk-activity work
+> (`2026-10-14-desk-activity-signal-design.md`, OPT-071) the root broker opens seat0's keyboard, mouse, touchpad and
+> touchscreen nodes read-only and keeps one bit ("someone touched the desk"). Steve decided on 2026-11-12 to keep
+> it that way and to document it, not to move it into a helper. The threat statement, the options that were
+> compared and the reasons are in `docs/unit-hardening.md`, section "Input devices in the Console broker: decision
+> 2026-11-12".
 
 The host observes logind's active-session change. The greeter adapter and seat
 adapter are replaceable producers/consumers below the stable RDP transport:
