@@ -12,7 +12,6 @@ StartLimitBurst=10
 
 [Service]
 Type=exec
-User=root
 Environment=FARSIDE_CONSOLE_ADDRESS=0.0.0.0
 Environment=FARSIDE_CONSOLE_PORT=3391
 Environment=FARSIDE_CONSOLE_WORKER=@CMAKE_INSTALL_PREFIX@/bin/farside-console-worker
@@ -60,6 +59,8 @@ WatchdogSec=90s
 NotifyAccess=main
 TimeoutAbortSec=30s
 
+# Do not add User=root: with NoNewPrivileges and the seccomp directives systemd 259 then drops CAP_SETUID and the worker launch fails (Sol 2026-11-12).
+# A system unit already runs as root by default.
 # REVIEW-S2 hardening (docs/unit-hardening.md has the evidence, the Sol checklist and a one-line rollback per directive).
 # This unit's cgroup also holds the capture worker that runs as the logged-in (or greeter) user. The worker inherits seccomp
 # filters, the capability bounding set, rlimits, umask, the mount namespace and the device policy, so only what is provably
