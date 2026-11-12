@@ -69,6 +69,9 @@ ctest --test-dir ~/dev/krdp/build -R 'Console' -N                      # list by
   are only registered when their tools (dbus-run-session, pipewire, pw-dump, jq, wireplumber, ffmpeg,
   pactl…) are found; the audio shell tests exit 77 (skip) when the environment can't run them.
 - `GuardianSignalChild`, `OwnerWatchProbe` and `ServiceOwnerChild` are test helpers, not tests.
+- `scripts/check-shared-headers.sh` (read-only; exit 77 = client repo absent) checks the hand-copied files shared with
+  `~/dev/krdp-client`; `docs/shared-headers.md`. `scripts/configure-sanitizers.sh BUILD_DIR` configures a separate
+  ASan+UBSan test build (never `build/`; run the daemon tests on Sol only).
 
 ## Smoke test, harnesses and probes
 
@@ -154,7 +157,7 @@ live KPipeWire patches are in `~/dev/rdp/kpipewire-vaapi-fix/patches-6.6.4/`. `p
 
 ## Repo-specific gotchas
 
-- README's CLI examples use `kwriteconfig6 ... --notify`. The standing rule is **never** `--notify`,
+- The standing rule is **never** `kwriteconfig6 --notify` (README now shows the safe private-config procedure),
   because it makes every running krdpserver reload, including the live one. Never write
   `~/.config/krdpserverrc`. Test instances get their own port and `XDG_CONFIG_HOME`.
 - Hosts: Hal (hal9000, live :3389) is Steve's work desktop. Sol is the disposable test host
