@@ -491,6 +491,9 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
         QJsonObject group{{QStringLiteral("hostToClient"), clipboard->hostToClient},
                           {QStringLiteral("clientToHost"), clipboard->clientToHost},
                           {QStringLiteral("maxBytes"), clipboard->maxBytes}};
+        // GAP-G1 (additive): this host sends the private `clipboard-cleared` notice (beside the standard empty Format List) whenever the host's
+        // offer is taken back. Capabilities only reach a client that negotiated KRDPCTL, which is the only client the notice goes to.
+        group.insert(QStringLiteral("clearedNotice"), true);
         if (clipboard->images) {
             group.insert(QStringLiteral("images"), true);
             group.insert(QStringLiteral("maxImageBytes"), clipboard->maxImageBytes);

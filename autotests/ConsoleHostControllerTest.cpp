@@ -4284,7 +4284,8 @@ private Q_SLOTS:
                                  {u"images"_s, true}, // OPT-072: pictures follow the same directions
                                  {u"maxImageBytes"_s, 16 * 1024 * 1024},
                                  {u"html"_s, true}, // OPT-077: formatted text too
-                                 {u"maxHtmlBytes"_s, 8 * 1024 * 1024}};
+                                 {u"maxHtmlBytes"_s, 8 * 1024 * 1024},
+                                 {u"clearedNotice"_s, true}}; // GAP-G1: the private `clipboard-cleared` notice
             // OPT-078: file copy follows ClipboardFiles (both by default) per direction, and the clipboard direction narrows it too.
             expected.insert(u"files"_s, QJsonObject{{u"hostToClient"_s, both || direction == ConsoleClipboardPolicy::Direction::HostToClient},
                                                     {u"clientToHost"_s, both || direction == ConsoleClipboardPolicy::Direction::ClientToHost},

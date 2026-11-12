@@ -120,6 +120,8 @@ public:
     bool hostHtml = false; // OPT-077
     uint32_t pendingHostFormat = 0; // the format the client asked for in the request waiting for the worker
     bool announcedToClient = false; // a format list for it is out on the wire
+    quint32 nonEmptyListsSent = 0; // GAP-G1: non-empty Format Lists sent to this client on this connection (never reset); the `offers` of clipboard-cleared
+    void sendClearedNotice();
     bool standingAtClient = false; // GAP-G1: ... and the client has not replaced it with a copy of its own since (it is still the owner there)
     quint64 nextHostRequestId = 0;
     quint64 pendingHostRequest = 0; // the client's data request waiting for the worker
@@ -637,6 +639,7 @@ void Clipboard::sendServerData()
         d->lastAnnounce.start();
         d->announcedToClient = true;
         d->standingAtClient = true;
+        if (count > 0) ++d->nonEmptyListsSent; // only a non-empty list is an offer a later `clipboard-cleared` notice can name
         ++d->counters.announces;
         context->ServerFormatList(context, &formatList);
     }
@@ -1402,9 +1405,24 @@ void Clipboard::withdrawHostOffer()
     formatList.common.msgFlags = 0;
     formatList.numFormats = 0;
     formatList.formats = nullptr;
-    std::lock_guard lock(d->sendMutex);
-    if (auto *context = d->clipContext.load(); context && d->enabled) {
-        context->ServerFormatList(context, &formatList);
+    {
+        std::lock_guard lock(d->sendMutex);
+        if (auto *context = d->clipContext.load(); context && d->enabled) {
+            context->ServerFormatList(context, &formatList);
+        }
+    }
+    d->sendClearedNotice(); // our own client also learns it on KRDPCTL, which reaches it before or after the list on another channel
+}
+
+void Clipboard::Private::sendClearedNotice()
+{
+    // GAP-G1: to our own client only (a stock client has no KRDPCTL channel and gets just the empty Format List). `offers` counts the non-empty
+    // lists sent up to and including the offer being cleared, so a client that already has a newer offer can ignore a late notice.
+    const QJsonObject record{{u"type"_s, u"clipboard-cleared"_s}, {u"v"_s, 1}, {u"offers"_s, qint64(nonEmptyListsSent)}};
+    if (noticeSink) {
+        noticeSink(record);
+    } else if (session && session->hasControlChannel()) {
+        session->sendControlRecord(record);
     }
 }
 

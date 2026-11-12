@@ -204,6 +204,8 @@ private Q_SLOTS:
     void aWithdrawnFileOfferEmptiesTheClientsList()
     {
         Rig rig;
+        QList<QJsonObject> notices;
+        rig.clipboard.setNoticeSinkForTest([&notices](const QJsonObject &record) { notices.append(record); });
         rig.clipboard.withdrawHostOffer();
         QVERIFY(rig.sent.formatLists.isEmpty()); // nothing announced: nothing sent
         rig.clipboard.announceHost(false, false, false, true);
@@ -213,6 +215,9 @@ private Q_SLOTS:
         QVERIFY(rig.sent.formatLists.last().isEmpty()); // zero formats
         rig.clipboard.withdrawHostOffer();
         QCOMPARE(rig.sent.formatLists.size(), 2);
+        QCOMPARE(notices.size(), 1); // GAP-G1: and our own client is told on KRDPCTL, offer 1
+        QCOMPARE(notices.last().value(QStringLiteral("type")).toString(), QStringLiteral("clipboard-cleared"));
+        QCOMPARE(notices.last().value(QStringLiteral("offers")).toInt(), 1);
         // the stale descriptor is not served any more
         rig.dataRequest(ClipboardFileDescriptor::FormatId);
         QTRY_COMPARE(rig.sent.dataResponses.size(), 1);
