@@ -55,8 +55,6 @@ target_sources(KRdp PRIVATE
     PipeWireAudioPlayback.h
     PipeWireRuntime.h
     RemoteCameraSet.h
-    PortalSession.cpp
-    PortalSession.h
     VideoStream.cpp
     VideoStream.h
     Cursor.cpp
@@ -110,10 +108,6 @@ ecm_generate_export_header(KRdp
     DEPRECATED_BASE_VERSION 0
     EXCLUDE_DEPRECATED_BEFORE_AND_AT ${EXCLUDE_DEPRECATED_BEFORE_AND_AT}
 )
-
-qt6_add_dbus_interface(_dbus_sources xdp_dbus_remotedesktop_interface.xml xdp_dbus_remotedesktop_interface)
-qt6_add_dbus_interface(_dbus_sources xdp_dbus_screencast_interface.xml xdp_dbus_screencast_interface)
-target_sources(KRdp PRIVATE ${_dbus_sources})
 
 target_include_directories(KRdp PUBLIC ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR} ${FreeRDP_Server_INCLUDE_DIR})
 
