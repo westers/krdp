@@ -14,6 +14,7 @@
 
 #include <freerdp/settings.h>
 
+#include "ConnectionAdmission.h"
 #include "krdp_export.h"
 
 namespace KRdp
@@ -105,6 +106,18 @@ public:
     std::chrono::milliseconds handshakeTimeout() const;
     void setHandshakeTimeout(std::chrono::milliseconds timeout);
 
+    /**
+     * REVIEW-S1: limits on connections that have not authenticated yet and the
+     * per-source failed-login backoff (see ConnectionAdmission). A connection over a
+     * limit is closed at accept, before TLS. Defaults: 16 unauthenticated in total,
+     * 4 per source address, backoff after 3 failed logins in 60 s (2 s doubling to
+     * 60 s). Loopback is not exempt. Thread-safe; takes effect for later connections.
+     */
+    ConnectionAdmission::Limits admissionLimits() const;
+    void setAdmissionLimits(const ConnectionAdmission::Limits &limits);
+    /** Connections accepted and not yet authenticated or closed. Thread-safe. */
+    int unauthenticatedConnections() const;
+
     /** Whether to authenticate against PAM for the user running the daemon
      */
     bool usePAMAuthentication() const;
@@ -169,6 +182,10 @@ protected:
 private:
     friend class RdpConnection;
     rdp_settings *rdpSettings() const;
+    /** Session thread, once per login attempt that reached PostConnect: updates the admission state. */
+    void recordLoginResult(const RdpConnection *connection, bool success);
+    /** The peer address @p connection was accepted from, for log lines; empty when unknown. Any thread. */
+    QString peerAddress(const RdpConnection *connection) const;
     void ensureAcceptWatch();
     void reportAcceptFailure(const QString &what, int error, int openFds);
 

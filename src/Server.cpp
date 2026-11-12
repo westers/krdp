@@ -9,9 +9,13 @@
 #include <chrono>
 #include <dirent.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include <QCoreApplication>
@@ -96,6 +100,19 @@ public:
     // K3.2
     Clock::time_point lastPressureWarning;
     bool pressureWarned = false;
+
+    // REVIEW-S1: unauthenticated-connection caps and the failed-login backoff.
+    // Touched by the main thread (accept, close) and by session threads (login
+    // result), so everything below is guarded by admissionMutex.
+    struct Admitted {
+        quint64 id = 0;
+        QString source; // ConnectionAdmission::sourceKey()
+        QString address; // the peer address as it is logged
+    };
+    mutable std::mutex admissionMutex;
+    ConnectionAdmission admission;
+    quint64 nextConnectionId = 1;
+    std::unordered_map<const RdpConnection *, Admitted> admitted;
 };
 
 namespace
@@ -506,12 +523,107 @@ void Server::setStandardClientMedia(bool enabled)
     d->standardClientMedia.store(enabled);
 }
 
+ConnectionAdmission::Limits Server::admissionLimits() const
+{
+    std::lock_guard lock(d->admissionMutex);
+    return d->admission.limits();
+}
+
+void Server::setAdmissionLimits(const ConnectionAdmission::Limits &limits)
+{
+    std::lock_guard lock(d->admissionMutex);
+    d->admission.setLimits(limits);
+}
+
+int Server::unauthenticatedConnections() const
+{
+    std::lock_guard lock(d->admissionMutex);
+    return d->admission.pending();
+}
+
+QString Server::peerAddress(const RdpConnection *connection) const
+{
+    std::lock_guard lock(d->admissionMutex);
+    const auto it = d->admitted.find(connection);
+    return it == d->admitted.end() ? QString() : it->second.address;
+}
+
+void Server::recordLoginResult(const RdpConnection *connection, bool success)
+{
+    std::chrono::seconds delay{0};
+    QString address;
+    {
+        std::lock_guard lock(d->admissionMutex);
+        const auto it = d->admitted.find(connection);
+        if (it == d->admitted.end()) {
+            return;
+        }
+        address = it->second.address;
+        // Either way the connection is no longer an unauthenticated one: it
+        // authenticated, or it is about to be closed.
+        d->admission.release(it->second.id);
+        if (success) {
+            d->admission.recordSuccess(it->second.source);
+        } else {
+            delay = d->admission.recordFailure(it->second.source, Private::Clock::now());
+        }
+    }
+    if (delay.count() > 0) {
+        qCWarning(KRDP) << "Repeated failed logins from" << address << "- refusing new connections from it for" << delay.count() << "s";
+    }
+}
+
 void Server::incomingConnection(qintptr handle)
 {
+    // REVIEW-S1: decide before anything expensive (thread, TLS, certificate
+    // re-read) is spent on the peer.
+    Private::Admitted admitted;
+    {
+        sockaddr_storage peer{};
+        socklen_t length = sizeof(peer);
+        QHostAddress address;
+        if (::getpeername(int(handle), reinterpret_cast<sockaddr *>(&peer), &length) == 0) {
+            address = QHostAddress(reinterpret_cast<sockaddr *>(&peer));
+        }
+        admitted.source = ConnectionAdmission::sourceKey(address);
+        admitted.address = address.isNull() ? QStringLiteral("unknown") : address.toString();
+    }
+    {
+        std::unique_lock lock(d->admissionMutex);
+        admitted.id = d->nextConnectionId++;
+        const auto now = Private::Clock::now();
+        const auto verdict = d->admission.admit(admitted.id, admitted.source, now);
+        if (verdict != ConnectionAdmission::Verdict::Admit) {
+            const auto logCount = d->admission.takeRefusalLog(now);
+            const int pending = d->admission.pending();
+            lock.unlock();
+            ::close(int(handle));
+            if (logCount) {
+                const char *why = verdict == ConnectionAdmission::Verdict::RefuseBackoff ? "after repeated failed logins from it"
+                    : verdict == ConnectionAdmission::Verdict::RefuseSourceCap            ? "too many unauthenticated connections from it"
+                                                                                           : "too many unauthenticated connections in total";
+                qCWarning(KRDP) << "Refused a connection from" << admitted.address << "-" << why << "(" << pending << "unauthenticated now;" << *logCount
+                                << "refused since the last message)";
+            }
+            return;
+        }
+    }
+
     auto session = std::make_unique<RdpConnection>(this, handle);
     auto sessionPtr = session.get();
+    {
+        std::lock_guard lock(d->admissionMutex);
+        d->admitted.emplace(sessionPtr, admitted);
+    }
     connect(sessionPtr, &RdpConnection::stateChanged, this, [this, sessionPtr](RdpConnection::State state) {
         if (state == RdpConnection::State::Closed) {
+            {
+                std::lock_guard lock(d->admissionMutex);
+                if (const auto it = d->admitted.find(sessionPtr); it != d->admitted.end()) {
+                    d->admission.release(it->second.id);
+                    d->admitted.erase(it);
+                }
+            }
             auto itr = std::find_if(d->sessions.begin(), d->sessions.end(), [sessionPtr](auto &session) {
                 return session.get() == sessionPtr;
             });

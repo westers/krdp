@@ -73,6 +73,14 @@ struct HostMonitor {
     bool operator==(const HostMonitor &) const = default;
 };
 
+/**
+ * The most monitors a layout may have (real and virtual together), and so the
+ * most an `apply` may name. Equal to the number of surfaces VideoStream will
+ * stream; an apply that would exceed it is refused with an `invalid` error
+ * rather than truncated.
+ */
+constexpr int MaxMonitorCount = 16;
+
 /** Server-advertised limits; defaults match ClientDisplay's sanitising rules. */
 struct Caps {
     int maxOutputPx = ClientDisplay::MaxDimension;

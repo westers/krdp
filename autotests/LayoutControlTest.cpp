@@ -1415,6 +1415,62 @@ private Q_SLOTS:
         QVERIFY(std::holds_alternative<Plan>(fromReadBack));
         QCOMPARE(std::get<Plan>(fromReadBack).actions[1].position, QPoint(5120, 0));
     }
+
+    // REVIEW-S1: an authenticated client must not be able to ask for hundreds
+    // of virtual outputs (a KWin output storm); VideoStream only streams 16.
+    void monitorCountAtTheLimitIsAccepted()
+    {
+        Layout layout;
+        layout.monitors = {realMonitor(QStringLiteral("DP-1"), QSize(1280, 720), QPoint(0, 0), true)};
+        ApplyRequest request;
+        for (int i = 0; i < MaxMonitorCount - 1; ++i) {
+            request.monitors.append(newMonitorEntry(QSize(320, 240)));
+        }
+        const auto answer = plan(layout, request, QStringLiteral("owner"), Caps{});
+        QVERIFY(std::holds_alternative<Plan>(answer));
+        QCOMPARE(std::get<Plan>(answer).resulting.monitors.size(), MaxMonitorCount);
+    }
+
+    void oneMonitorOverTheLimitIsRefusedNotTruncated()
+    {
+        Layout layout;
+        layout.monitors = {realMonitor(QStringLiteral("DP-1"), QSize(1280, 720), QPoint(0, 0), true)};
+        ApplyRequest request;
+        for (int i = 0; i < MaxMonitorCount; ++i) { // 1 + 16 = 17
+            request.monitors.append(newMonitorEntry(QSize(320, 240)));
+        }
+        const auto answer = plan(layout, request, QStringLiteral("owner"), Caps{});
+        QVERIFY(std::holds_alternative<Error>(answer));
+        QCOMPARE(std::get<Error>(answer).code, QStringLiteral("invalid"));
+        QVERIFY2(std::get<Error>(answer).message.contains(QStringLiteral("16")), qPrintable(std::get<Error>(answer).message));
+    }
+
+    void hundredsOfNewMonitorsAreRefusedBeforeAnyPlacement()
+    {
+        ApplyRequest request;
+        for (int i = 0; i < 300; ++i) {
+            request.monitors.append(newMonitorEntry(QSize(8, 8)));
+        }
+        const auto answer = plan(hal9000Layout(), request, QStringLiteral("owner"), Caps{});
+        QVERIFY(std::holds_alternative<Error>(answer));
+        QCOMPARE(std::get<Error>(answer).code, QStringLiteral("invalid"));
+        // The count, not the union size, is what refuses it: 300 x 8px fits in 8192.
+        QVERIFY2(std::get<Error>(answer).message.contains(QStringLiteral("16")), qPrintable(std::get<Error>(answer).message));
+    }
+
+    void oversizedApplyRecordIsBoundedWhenParsedAndRefusedWhenPlanned()
+    {
+        ApplyRequest request;
+        for (int i = 0; i < 300; ++i) {
+            request.monitors.append(newMonitorEntry(QSize(8, 8)));
+        }
+        const auto parsed = applyFromJson(toJson(request));
+        // Either rejected outright, or kept short enough to be refused by the planner with the right reason.
+        if (parsed) {
+            QVERIFY2(parsed->monitors.size() <= MaxMonitorCount + 1, qPrintable(QString::number(parsed->monitors.size())));
+            QVERIFY(std::holds_alternative<Error>(plan(hal9000Layout(), *parsed, QStringLiteral("owner"), Caps{})));
+        }
+    }
 };
 
 QTEST_GUILESS_MAIN(LayoutControlTest)
