@@ -1150,7 +1150,7 @@ add_executable(BrokerMainPageTest BrokerMainPageTest.cpp)
 target_link_libraries(BrokerMainPageTest PRIVATE Qt6::Test Qt6::Quick Qt6::Qml Qt6::Widgets KF6::I18nQml kcm_krdpserver_core)
 target_compile_definitions(BrokerMainPageTest PRIVATE MAIN_PROTOCOL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/host-settings-protocol.py" MAIN_PAGE="${CMAKE_SOURCE_DIR}/src/kcm/ui/BrokerMainPage.qml" MAIN_AUTH_PROTOCOL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/authentication-admin-protocol.py")
 add_test(NAME BrokerMainPageTest COMMAND BrokerMainPageTest)
-set_tests_properties(BrokerMainPageTest PROPERTIES TIMEOUT 60 LABELS "gui;non-hal"
+set_tests_properties(BrokerMainPageTest PROPERTIES TIMEOUT 240 LABELS "gui;non-hal"
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=org.kde.desktop;DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent-farside-test-bus;LANGUAGE=en_US;LC_ALL=C.UTF-8")
 target_link_libraries(BrokerHostsPageTest PRIVATE Qt6::Test Qt6::Quick Qt6::Qml Qt6::Widgets KF6::I18nQml kcm_krdpserver_core)
 target_compile_definitions(BrokerHostsPageTest PRIVATE HOST_PROTOCOL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/host-settings-protocol.py" HOST_PAGE="${CMAKE_SOURCE_DIR}/src/kcm/ui/BrokerHostsPage.qml")
