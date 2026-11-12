@@ -187,8 +187,9 @@ private Q_SLOTS:
     // FreeRDP resolves KNOWN_PATH_HOME while creating each peer context; with HOME unset the Console broker logged
     // "[GetKnownPath]: Path KNOWN_PATH_HOME is nullptr", "freerdp_peer_context_new_ex: ContextNew callback failed" and
     // "Failed to create peer context", and every client got "Connection reset by peer". The brokers therefore export the root
-    // identity explicitly. (The virtual broker's own ExecStart runs under `env -i ... HOME=/var/lib/farside/virtual-host`, so the
-    // variables there reach its ExecStartPre helpers; kept identical so both units are uniform and the checklist is one rule.)
+    // identity explicitly, exactly as User=root exported it on 0.16.4 (HOME, USER, LOGNAME, SHELL; measured on Sol). The virtual
+    // broker's own ExecStart runs under `env -i ... HOME=/var/lib/farside/virtual-host`, which overrides these for the broker process;
+    // the line still reaches its ExecStartPre helpers (they had it under User=root), so both units carry it and are tested alike.
     void brokersExportRootIdentityEnvironment_data()
     {
         brokersCarrySeccompAndPrivilegeHardening_data();
@@ -228,6 +229,8 @@ private Q_SLOTS:
         QCOMPARE(environment.value(QStringLiteral("HOME")), QStringLiteral("/root"));
         QCOMPARE(environment.value(QStringLiteral("USER")), QStringLiteral("root"));
         QCOMPARE(environment.value(QStringLiteral("LOGNAME")), QStringLiteral("root"));
+        // What User=root exported on 0.16.4 (measured on Sol): restored exactly, children and libraries inherit it.
+        QCOMPARE(environment.value(QStringLiteral("SHELL")), QStringLiteral("/bin/bash"));
         // The reason it is needed at all: still no User=/Group=/DynamicUser= (brokersDoNotSetUserOrGroup).
         QVERIFY(!keys.contains(QStringLiteral("Service/User")));
         QVERIFY(!keys.contains(QStringLiteral("Service/Group")));
