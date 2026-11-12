@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2023 Arjen Hiemstra <ahiemstra@heimr.nl>
 # SPDX-License-Identifier: BSD-2-Clause
 
-add_subdirectory(streamer)
 add_subdirectory(krdpctl-probe)
 add_subdirectory(avc444probe)
 

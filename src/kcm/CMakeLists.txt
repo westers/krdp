@@ -58,7 +58,6 @@ target_link_libraries(kcm_krdpserver_core PUBLIC
     KF6::CoreAddons
     KF6::I18n
     KRdpServerCertificate
-    KRdpLegacyMigration
     KRdpBrokerUserSettings
     KRdpBrokerHostAdmin
     KRdpBrokerHostPublicSnapshot

@@ -21,7 +21,6 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
-#include <QTcpSocket>
 #include <QUuid>
 #include <QHash>
 #include <QSet>
@@ -52,12 +51,6 @@ QString workerProgram()
     return qEnvironmentVariable("KRDP_E2E_WORKER", QStringLiteral(KRDP_CONSOLE_WORKER));
 }
 
-/// The user server under test; KRDP_E2E_SERVER runs another build's (the pre-K4 red run).
-QString serverProgram()
-{
-    return qEnvironmentVariable("KRDP_E2E_SERVER", QStringLiteral(KRDP_E2E_SERVER));
-}
-
 // The virtual desktop's session, reduced to what capture needs (virtual-session-desktop.sh).
 constexpr const char *SessionScript = R"SH(
 set -eu
@@ -75,28 +68,6 @@ kwin_wayland --virtual --width "$KRDP_E2E_WIDTH" --height "$KRDP_E2E_HEIGHT" --o
     --no-lockscreen --no-global-shortcuts --no-kactivities >"$HOME/kwin.log" 2>&1 & children="$children $!"
 wait_for "$R/wayland-0"
 sleep 1
-# OPT-055 K4: the user server (farside-server) under a Restart=on-failure loop, like its systemd unit.
-# server-args/server-env (kept between runs) start it; server-stop ends it and the loop.
-server_loop() {
-    set +e
-    while true; do
-        while [ ! -f "$R/server-args" ]; do sleep 0.05; done
-        mapfile -t sargs <"$R/server-args"
-        senv=()
-        if [ -f "$R/server-env" ]; then mapfile -t senv <"$R/server-env"; fi
-        env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland "${senv[@]}" "$KRDP_E2E_SERVER" "${sargs[@]}" >>"$HOME/server.log" 2>&1 &
-        spid=$!
-        while kill -0 "$spid" 2>/dev/null; do
-            if [ -f "$R/server-stop" ]; then kill "$spid" 2>/dev/null; fi
-            sleep 0.1
-        done
-        wait "$spid"
-        echo $? >"$R/server-exit"
-        if [ -f "$R/server-stop" ]; then rm -f "$R/server-args" "$R/server-env" "$R/server-stop"; fi
-        sleep 0.3
-    done
-}
-server_loop & children="$children $!"
 # Motion, as on cray (testsrc2 at 30 fps in the desktop): every output keeps encoding delta frames.
 if [ -n "${KRDP_E2E_MOTION:-}" ]; then
     env WAYLAND_DISPLAY=wayland-0 SDL_VIDEODRIVER=wayland ffplay -loglevel error -an -fs -f lavfi \
@@ -283,8 +254,6 @@ private Q_SLOTS:
     void encoderFailureRestartsAndRecovers();
     void persistentEncoderFailureClosesAndNextWorkerStreams();
     void encoderFailureDuringDisconnectStillExits();
-    void userServerEndsWithSessionEndAndKeepsAccepting();
-    void userServerRestartsItselfIdleAfterAbandonedEncoder();
     void cleanupTestCase();
 
 private:
@@ -297,8 +266,6 @@ private:
     void stopWorker(PrivateSession &session, ConsoleWorkerEndpoint &endpoint);
     /// KEY=VALUE lines the next worker starts with (written to worker-env, consumed by the session loop).
     QStringList m_nextWorkerEnv;
-    /// Starts (or leaves running) the user server in the private session; false if it cannot.
-    bool startUserServer(PrivateSession &s, const QStringList &environment, int port);
 
     std::map<std::tuple<int, int, int, bool, bool>, PrivateSession> m_sessions;
     QString m_skip;
@@ -388,14 +355,6 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
                       .arg(workerProgram())
                       .toUtf8());
     desktop.close();
-    // The user server (OPT-055 K4 cases) likewise; written before kbuildsycoca6 runs at session start.
-    QFile serverDesktop(home + QStringLiteral("/data/applications/io.github.westers.farside.server.desktop"));
-    if (!serverDesktop.open(QIODevice::WriteOnly)) return nullptr;
-    serverDesktop.write(QStringLiteral("[Desktop Entry]\nType=Application\nName=Farside Server\nNoDisplay=true\nExec=%1\n"
-                                       "X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input,zkde_screencast_unstable_v1\n")
-                            .arg(serverProgram())
-                            .toUtf8());
-    serverDesktop.close();
 
     // Built from nothing: no DISPLAY, WAYLAND_DISPLAY, session bus or PipeWire of the user's session.
     QProcessEnvironment env;
@@ -430,7 +389,6 @@ PrivateSession *WorkerEndToEndTest::session(int outputs, QSize size, bool motion
     set("KRDP_SERVER_DIR", qEnvironmentVariable("KRDP_E2E_SERVER_DIR", QStringLiteral(KRDP_SERVER_DIR)));
     if (qEnvironmentVariableIsSet("LD_LIBRARY_PATH")) set("LD_LIBRARY_PATH", qEnvironmentVariable("LD_LIBRARY_PATH"));
     set("KRDP_CONSOLE_WORKER", workerProgram());
-    set("KRDP_E2E_SERVER", serverProgram());
     set("KRDP_E2E_OUTPUTS", QString::number(outputs));
     set("KRDP_E2E_WIDTH", QString::number(size.width()));
     set("KRDP_E2E_HEIGHT", QString::number(size.height()));
@@ -2687,187 +2645,6 @@ void WorkerEndToEndTest::encoderFailureDuringDisconnectStillExits()
     const qint64 ms = stopping.elapsed();
     qInfo().noquote() << "T-K4b(iii): the worker exited" << ms << "ms after stop with the encoder failing";
     QVERIFY2(ms <= 3000, qPrintable(QString::number(ms)));
-}
-
-bool WorkerEndToEndTest::startUserServer(PrivateSession &s, const QStringList &environment, int port)
-{
-    const QString runtime = s.runtime->path();
-    for (const auto *name : {"server-exit", "server-stop"}) QFile::remove(runtime + QLatin1Char('/') + QLatin1String(name));
-    QFile env(runtime + QStringLiteral("/server-env"));
-    if (!env.open(QIODevice::WriteOnly)) return false;
-    env.write(environment.join(QLatin1Char('\n')).toUtf8() + '\n');
-    env.close();
-    QFile args(runtime + QStringLiteral("/server-args"));
-    if (!args.open(QIODevice::WriteOnly)) return false;
-    // A disposable instance on loopback with a throwaway login (nothing here is a real credential).
-    args.write(QStringLiteral("--plasma\n--address\n127.0.0.1\n--port\n%1\n--username\nk4test\n--password\nk4test-not-a-secret\n").arg(port).toUtf8());
-    args.close();
-    return true;
-}
-
-namespace
-{
-bool portAccepts(int port)
-{
-    QTcpSocket socket;
-    socket.connectToHost(QStringLiteral("127.0.0.1"), quint16(port));
-    return socket.waitForConnected(300);
-}
-void stopUserServer(PrivateSession &s)
-{
-    QFile stop(s.runtime->path() + QStringLiteral("/server-stop"));
-    if (stop.open(QIODevice::WriteOnly)) stop.close();
-    QTest::qWaitFor([&] { return !QFileInfo::exists(s.runtime->path() + QStringLiteral("/server-args")); }, 15000);
-}
-/// The probe client; \a log collects stdout+stderr.
-struct Probe {
-    QProcess process;
-    QByteArray log;
-    explicit Probe(const QStringList &arguments)
-    {
-        process.setProcessChannelMode(QProcess::MergedChannels);
-        QObject::connect(&process, &QProcess::readyRead, &process, [this] { log += process.readAll(); });
-        process.start(QStringLiteral(KRDP_E2E_PROBE), QStringList{QStringLiteral("127.0.0.1"), QStringLiteral("3399"), QStringLiteral("k4test"),
-                                                                      QStringLiteral("k4test-not-a-secret")} + arguments);
-    }
-    ~Probe()
-    {
-        if (process.state() != QProcess::NotRunning) {
-            process.terminate();
-            if (!process.waitForFinished(3000)) {
-                process.kill();
-                process.waitForFinished(3000);
-            }
-        }
-    }
-};
-}
-
-// OPT-055 T-K4b (ii), user server: a persistently failing encoder ends the connection with a KRDPCTL
-// `session-end` (reason encoder-failed) and ERRINFO_GRAPHICS_SUBSYSTEM_FAILED, the listener keeps
-// accepting, and the next client decodes a frame.
-void WorkerEndToEndTest::userServerEndsWithSessionEndAndKeepsAccepting()
-{
-#ifndef KRDP_E2E_PROBE
-    QSKIP("krdpctl-probe (FreeRDP client) is not built");
-#else
-    if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
-    auto *s = session(1);
-    QVERIFY(s);
-    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
-    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
-    const QString failFile = s->runtime->path() + QStringLiteral("/fail-filter");
-    QFile::remove(failFile);
-    const qint64 serverLogFrom = QFileInfo(s->home->path() + QStringLiteral("/server.log")).size();
-    const auto serverLog = [&] {
-        QFile f(s->home->path() + QStringLiteral("/server.log"));
-        if (!f.open(QIODevice::ReadOnly) || !f.seek(serverLogFrom)) return QString();
-        return QString::fromUtf8(f.readAll());
-    };
-    const auto cleanup = qScopeGuard([&] {
-        QFile::remove(failFile);
-        stopUserServer(*s);
-        if (QTest::currentTestFailed()) qWarning().noquote() << "server.log:\n" << serverLog().right(6000);
-    });
-    QVERIFY(startUserServer(*s, {QStringLiteral("LD_PRELOAD=%1").arg(QStringLiteral(KRDP_E2E_FAILFILTER)),
-                                 QStringLiteral("FARSIDE_TEST_FAIL_FILTER_FILE=%1").arg(failFile)}, 3399));
-    QTRY_VERIFY_WITH_TIMEOUT(portAccepts(3399), 60000);
-
-    {
-        QFile f(failFile);
-        QVERIFY(f.open(QIODevice::WriteOnly));
-    }
-    {
-        Probe probe({QStringLiteral("--silent"), QStringLiteral("--gfx"), QStringLiteral("--timeout"), QStringLiteral("60")});
-        QTRY_VERIFY_WITH_TIMEOUT(probe.log.contains("session-end") || probe.process.state() == QProcess::NotRunning, 60000);
-        QVERIFY2(probe.log.contains("session-end"), probe.log.right(3000).constData());
-        QVERIFY2(probe.log.contains("encoder-failed"), probe.log.right(3000).constData());
-        qInfo().noquote() << "T-K4b(ii) user server: the client saw:" << QString::fromUtf8(probe.log.mid(probe.log.indexOf("{\"errorInfo")).left(400));
-    }
-    const QString log = serverLog();
-    QCOMPARE(countOf(log, QStringLiteral("the encoder failed (")), 2);
-    QVERIFY2(log.contains(QStringLiteral("closing the session")), qPrintable(log.right(3000)));
-    QVERIFY2(countOf(log, QStringLiteral("Failed receiving filtered frame")) <= 9, qPrintable(log.right(3000))); // 3 instances x (KPipeWire + krdp echo) + slack
-    QFile::remove(failFile);
-    QVERIFY2(portAccepts(3399), "the listener stopped accepting after the failed session");
-    // The next connection: accepted and a frame decoded within 5 s.
-    QElapsedTimer next;
-    next.start();
-    Probe again({QStringLiteral("--no-krdpctl"), QStringLiteral("--silent"), QStringLiteral("--gfx"), QStringLiteral("--timeout"), QStringLiteral("30")});
-    QTRY_VERIFY_WITH_TIMEOUT(again.log.contains("first frame") || again.process.state() == QProcess::NotRunning, 30000);
-    const qint64 ms = next.elapsed();
-    QVERIFY2(again.log.contains("first frame"), again.log.right(3000).constData());
-    qInfo().noquote() << "T-K4b(ii) user server: the next client decoded its first frame after" << ms << "ms";
-    QVERIFY2(ms <= 5000, qPrintable(QString::number(ms)));
-#endif
-}
-
-// OPT-055 T-K4c: after an encoder thread was abandoned the user server exits 70 once it is idle for 10 s;
-// the Restart=on-failure loop starts it again and it serves a client.
-void WorkerEndToEndTest::userServerRestartsItselfIdleAfterAbandonedEncoder()
-{
-#ifndef KRDP_E2E_PROBE
-    QSKIP("krdpctl-probe (FreeRDP client) is not built");
-#else
-    if (!m_skip.isEmpty()) QSKIP(qPrintable(m_skip));
-    auto *s = session(1);
-    QVERIFY(s);
-    if (s->skip.startsWith(QLatin1Char('!'))) QFAIL(qPrintable(s->skip.mid(1)));
-    if (!s->skip.isEmpty()) QSKIP(qPrintable(s->skip));
-    const QString blockFile = s->runtime->path() + QStringLiteral("/block-filter");
-    const QString exitFile = s->runtime->path() + QStringLiteral("/server-exit");
-    QFile::remove(blockFile);
-    const qint64 serverLogFrom = QFileInfo(s->home->path() + QStringLiteral("/server.log")).size();
-    const auto serverLog = [&] {
-        QFile f(s->home->path() + QStringLiteral("/server.log"));
-        if (!f.open(QIODevice::ReadOnly) || !f.seek(serverLogFrom)) return QString();
-        return QString::fromUtf8(f.readAll());
-    };
-    const auto cleanup = qScopeGuard([&] {
-        QFile::remove(blockFile);
-        stopUserServer(*s);
-        if (QTest::currentTestFailed()) qWarning().noquote() << "server.log:\n" << serverLog().right(6000);
-    });
-    QVERIFY(startUserServer(*s, {QStringLiteral("LD_PRELOAD=%1").arg(QStringLiteral(KRDP_E2E_FAILFILTER)),
-                                 QStringLiteral("FARSIDE_TEST_BLOCK_FILTER_FILE=%1").arg(blockFile)}, 3399));
-    QTRY_VERIFY_WITH_TIMEOUT(portAccepts(3399), 60000);
-    qint64 disconnectedAt = 0;
-    QElapsedTimer clock;
-    clock.start();
-    {
-        // Frames flow; then the encoder's filter call blocks (a driver that never returns); the idle desktop's
-        // Refresh Rect (3 s without a frame) makes the encoder run and wedge.
-        Probe probe({QStringLiteral("--no-krdpctl"), QStringLiteral("--silent"), QStringLiteral("--gfx"), QStringLiteral("--refresh-rect-idle"),
-                     QStringLiteral("3000"), QStringLiteral("--timeout"), QStringLiteral("90")});
-        QTRY_VERIFY_WITH_TIMEOUT(probe.log.contains("first frame"), 30000);
-        {
-            QFile f(blockFile);
-            QVERIFY(f.open(QIODevice::WriteOnly));
-        }
-        QTRY_VERIFY_WITH_TIMEOUT(probe.log.contains("refresh rect sent"), 15000);
-        QTest::qWait(1500); // the wedged producer is now stuck inside the call
-        probe.process.terminate();
-        probe.process.waitForFinished(5000);
-        disconnectedAt = clock.elapsed();
-    }
-    // The connection is gone; KPipeWire gives up the wedged producer (2 s), krdp waits 10 s idle, then exits 70.
-    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(exitFile), 40000);
-    const qint64 exitMs = clock.elapsed() - disconnectedAt;
-    QFile code(exitFile);
-    QVERIFY(code.open(QIODevice::ReadOnly));
-    const QByteArray exitCode = code.readAll().trimmed();
-    QFile::remove(blockFile); // the restarted instance must not wedge
-    qInfo().noquote() << "T-K4c: the server exited with" << exitCode << exitMs << "ms after the client left";
-    QCOMPARE(exitCode, QByteArray("70"));
-    QVERIFY2(exitMs >= 9000 && exitMs <= 30000, qPrintable(QString::number(exitMs)));
-    const QString log = serverLog();
-    QVERIFY2(log.contains(QStringLiteral("wedged encoder thread(s) leaked; restarting while idle")), qPrintable(log.right(3000)));
-    // Restarted by the loop: a client is served again.
-    QTRY_VERIFY_WITH_TIMEOUT(portAccepts(3399), 60000);
-    Probe again({QStringLiteral("--no-krdpctl"), QStringLiteral("--silent"), QStringLiteral("--gfx"), QStringLiteral("--timeout"), QStringLiteral("30")});
-    QTRY_VERIFY_WITH_TIMEOUT(again.log.contains("first frame") || again.process.state() == QProcess::NotRunning, 30000);
-    QVERIFY2(again.log.contains("first frame"), again.log.right(3000).constData());
-#endif
 }
 
 void WorkerEndToEndTest::cleanupTestCase()

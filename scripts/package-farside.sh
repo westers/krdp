@@ -213,24 +213,22 @@ dpkg-deb --root-owner-group -Zxz --build "$pkgroot" "$deb"
 # 4. Contract checks.
 [[ $(dpkg-deb -f "$deb" Package) == farside-server && $(dpkg-deb -f "$deb" Version) == "$version" ]]
 contents=$(dpkg-deb -c "$deb" | awk '{print $6}')
-for path in "./usr/lib/$multiarch/qt6/plugins/kwin/plugins/farside-pointer-capture.so" ./usr/bin/farside-server ./usr/bin/farside-console-host ./usr/bin/farside-console-worker \
+for path in "./usr/lib/$multiarch/qt6/plugins/kwin/plugins/farside-pointer-capture.so" ./usr/bin/farside-console-host ./usr/bin/farside-console-worker \
     ./usr/bin/farside-virtual-host ./usr/bin/farside-virtual-session-entry ./usr/bin/farside-virtual-pam-keeper \
     ./usr/bin/farside-virtual-session-cleanup ./usr/bin/farside-virtual-device-entry \
     ./usr/bin/farside-virtual-guardian ./usr/bin/farside-virtual-guardianctl \
     ".$privdir/libFarsideRdp.so.1" ".$privdir/libKPipeWire.so.6" ".$privdir/libKPipeWireDmaBuf.so.6" \
     ".$privdir/libKPipeWireRecord.so.6" \
-    ./usr/lib/systemd/user/app-io.github.westers.farside.server.service \
     ./usr/lib/systemd/system/farside-console-host.service ./usr/lib/systemd/system/farside-virtual-host.service \
     ./usr/lib/systemd/system/farside-virtual-session@.service \
     "./usr/lib/$multiarch/libexec/farside-authentication-helper" \
     ./usr/share/polkit-1/actions/org.farside.authentication.policy \
     "./usr/lib/$multiarch/libexec/farside-host-settings-helper" \
     ./usr/share/polkit-1/actions/org.farside.hostsettings.policy \
-    ./usr/lib/systemd/system-preset/00-farside-system.preset ./usr/lib/systemd/user-preset/00-farside.preset \
+    ./usr/lib/systemd/system-preset/00-farside-system.preset \
     ./etc/pam.d/farside-virtual-session \
     ./usr/share/farside/virtual-session/launch-virtual-session.sh \
     ./usr/share/farside/virtual-session.conf.example \
-    ./usr/share/applications/io.github.westers.farside.server.desktop \
     ./usr/share/applications/io.github.westers.farside.consoleworker.desktop \
     ./usr/share/applications/kcm_farside.desktop \
     ./usr/share/icons/hicolor/scalable/apps/io.github.westers.farside.server.svg \
