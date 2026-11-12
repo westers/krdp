@@ -60,5 +60,21 @@ WatchdogSec=90s
 NotifyAccess=main
 TimeoutAbortSec=30s
 
+# REVIEW-S2 hardening (docs/unit-hardening.md has the evidence, the Sol checklist and a one-line rollback per directive).
+# This unit's cgroup also holds the capture worker that runs as the logged-in (or greeter) user. The worker inherits seccomp
+# filters, the capability bounding set, rlimits, umask, the mount namespace and the device policy, so only what is provably
+# harmless to it is set: no LimitCORE (worker cores stay; the host itself calls PR_SET_DUMPABLE 0), no UMask, no PrivateTmp,
+# ProtectSystem/Home/Kernel*/ControlGroups/Clock/Hostname, PrivateDevices, MemoryDenyWriteExecute or SystemCallFilter.
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# A deny-list of capabilities nothing in the host uses (the module, clock, raw-I/O, BPF, log and MAC ones). No allow-list: the
+# PAM stack and GPU drivers are site specific.
+CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_BOOT CAP_SYS_TIME CAP_SYS_PACCT CAP_SYS_TTY_CONFIG CAP_LINUX_IMMUTABLE CAP_MKNOD CAP_WAKE_ALARM CAP_BLOCK_SUSPEND CAP_SYSLOG CAP_BPF CAP_PERFMON CAP_MAC_ADMIN CAP_MAC_OVERRIDE
+
 [Install]
 WantedBy=multi-user.target

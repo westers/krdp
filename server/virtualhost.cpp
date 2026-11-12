@@ -1,4 +1,5 @@
 #include "FarsideEnv.h"
+#include "PrivateExecutionContext.h"
 // SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 #include "ClipboardTransfer.h"
 #include "VirtualSessionHostController.h"
@@ -23,6 +24,17 @@
 
 int main(int argc, char **argv)
 {
+    // REVIEW-S2: no core file may hold a user's password or the TLS key (see PrivateExecutionContext.h); first thing in main.
+    switch (KRdp::enterBrokerExecutionContext()) {
+    case KRdp::BrokerContext::Failed:
+        qCritical("%s: cannot make the process non-dumpable; refusing to start", "farside-virtual-host");
+        return 1;
+    case KRdp::BrokerContext::DumpableByMarker:
+        qWarning("%s: core dumps are ALLOWED by %s; passwords and the TLS key can reach a core file. Remove the marker after the diagnosis.", "farside-virtual-host", KRdp::BrokerCoreDumpMarker);
+        break;
+    case KRdp::BrokerContext::NotDumpable:
+        break;
+    }
     KRdp::installTerminateHandler("farside-virtual-host"); // OPT-055 K6.4 (no watchdog here: env -i strips NOTIFY_SOCKET)
     // Block termination before Qt/FreeRDP start threads; consume it on the event
     // loop rather than invoking Qt inside an async POSIX signal handler.
