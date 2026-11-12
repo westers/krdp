@@ -40,7 +40,7 @@ public:
 
     struct Limits {
         int maxUnauthenticated = 16; ///< all sources together; <= 0 disables the cap
-        int maxUnauthenticatedPerSource = 4; ///< <= 0 disables the cap
+        int maxUnauthenticatedPerSource = 8; ///< one client opens up to 2 per saved host card; <= 0 disables the cap
         int failuresBeforeBackoff = 3; ///< failed logins within failureWindow that start the backoff; <= 0 disables it
         std::chrono::seconds failureWindow{60};
         std::chrono::seconds backoffStart{2};

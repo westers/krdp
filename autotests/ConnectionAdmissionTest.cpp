@@ -22,7 +22,7 @@ private Q_SLOTS:
     {
         const ConnectionAdmission::Limits limits;
         QCOMPARE(limits.maxUnauthenticated, 16);
-        QCOMPARE(limits.maxUnauthenticatedPerSource, 4);
+        QCOMPARE(limits.maxUnauthenticatedPerSource, 8);
         QCOMPARE(limits.failuresBeforeBackoff, 3);
         QCOMPARE(limits.failureWindow, 60s);
         QCOMPARE(limits.backoffStart, 2s);
@@ -33,14 +33,15 @@ private Q_SLOTS:
     void perSourceCap()
     {
         ConnectionAdmission a;
-        for (quint64 i = 1; i <= 4; ++i) {
+        // Eight from one address are admitted (e.g. two saved host cards, or several clients behind one NAT).
+        for (quint64 i = 1; i <= 8; ++i) {
             QCOMPARE(a.admit(i, QStringLiteral("10.0.0.1"), t0), Verdict::Admit);
         }
-        QCOMPARE(a.admit(5, QStringLiteral("10.0.0.1"), t0), Verdict::RefuseSourceCap);
-        QCOMPARE(a.pending(), 4); // the refused one is not counted
-        QCOMPARE(a.admit(6, QStringLiteral("10.0.0.2"), t0), Verdict::Admit); // another source is unaffected
+        QCOMPARE(a.admit(9, QStringLiteral("10.0.0.1"), t0), Verdict::RefuseSourceCap);
+        QCOMPARE(a.pending(), 8); // the refused one is not counted
+        QCOMPARE(a.admit(10, QStringLiteral("10.0.0.2"), t0), Verdict::Admit); // another source is unaffected
         a.release(1); // authenticated or closed
-        QCOMPARE(a.admit(7, QStringLiteral("10.0.0.1"), t0), Verdict::Admit);
+        QCOMPARE(a.admit(11, QStringLiteral("10.0.0.1"), t0), Verdict::Admit);
     }
 
     void totalCap()

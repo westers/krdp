@@ -159,7 +159,7 @@ private Q_SLOTS:
         Server server;
         const auto limits = server.admissionLimits();
         QCOMPARE(limits.maxUnauthenticated, 16);
-        QCOMPARE(limits.maxUnauthenticatedPerSource, 4);
+        QCOMPARE(limits.maxUnauthenticatedPerSource, 8);
         QCOMPARE(limits.failuresBeforeBackoff, 3);
         QCOMPARE(limits.backoffStart, 2s);
         QCOMPARE(limits.backoffMax, 60s);
