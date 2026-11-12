@@ -192,6 +192,13 @@ if(KREADCONFIG6_EXECUTABLE AND BASH_EXECUTABLE)
         ${CMAKE_SOURCE_DIR}/scripts/virtual-session-locked-config ${CMAKE_SOURCE_DIR}/scripts/launch-virtual-session.sh)
 endif()
 
+if(BASH_EXECUTABLE)
+    # REVIEW-S4: desktop worker restart backoff and log cap (extracted helpers only; the script itself is never run).
+    add_test(NAME VirtualSessionDesktopSupervisionTest COMMAND ${BASH_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/VirtualSessionDesktopSupervisionTest.sh ${CMAKE_SOURCE_DIR}/scripts/virtual-session-desktop.sh)
+    set_tests_properties(VirtualSessionDesktopSupervisionTest PROPERTIES TIMEOUT 60)
+endif()
+
 find_program(PYTHON3_EXECUTABLE python3)
 if(PYTHON3_EXECUTABLE AND BASH_EXECUTABLE)
     # OPT-075: the launcher's system-bus setup with a fake proxy (no real bus, proxy or device).

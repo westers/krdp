@@ -16,6 +16,32 @@ if (( $# == 6 )); then
     layout_args=(--initial-layout "$6")
 fi
 wrapper_pid= graph_pid= policy_pid= plasma_pid= worker_pid= polkit_pid=
+# BEGIN supervision helpers (extracted by autotests/virtual-session-desktop-supervision-test.sh)
+# Logs live on the per-user tmpfs (memory). Long-running writers append (>>) so
+# truncating a log from outside is safe; keep the newest 5 MiB plus one
+# previous generation (.1) per log.
+log_cap=$((5 * 1024 * 1024))
+cap_logs() {
+    local dir=$1 log size
+    for log in "$dir"/{service-cache,pipewire,policy,kwin,plasma,polkit-agent,worker}.log; do
+        [[ -f $log && ! -L $log ]] || continue
+        size=$(stat -c %s -- "$log" 2>/dev/null) || continue
+        if (( size > log_cap )); then
+            # Copy then truncate in place: writers keep their descriptor. Lines
+            # written between the two steps are lost; this is a diagnostic log.
+            if cp -f -- "$log" "$log.1" 2>/dev/null; then : >"$log" || true; fi
+        fi
+    done
+}
+# A crashing worker restarts after 2 s, then 4, 8 ... capped at 60 s. A worker
+# that ran at least 60 s resets the delay, so a broker restart stays quick.
+worker_backoff=2 worker_next=0 worker_started=0
+note_worker_exit() {
+    if (( SECONDS - worker_started >= 60 )); then worker_backoff=2; fi
+    worker_next=$((SECONDS + worker_backoff))
+    worker_backoff=$((worker_backoff * 2 > 60 ? 60 : worker_backoff * 2))
+}
+# END supervision helpers
 cleanup() {
     for child in "$polkit_pid" "$worker_pid" "$plasma_pid" "$wrapper_pid" "$policy_pid" "$graph_pid"; do
         if [[ -n $child ]]; then kill "$child" 2>/dev/null || true; fi
@@ -23,7 +49,7 @@ cleanup() {
 }
 trap cleanup EXIT
 kbuildsycoca6 --noincremental >"$XDG_RUNTIME_DIR/service-cache.log" 2>&1
-env PIPEWIRE_CONFIG_DIR="$support" PIPEWIRE_CONFIG_NAME=virtual-session-pipewire.conf pipewire >"$XDG_RUNTIME_DIR/pipewire.log" 2>&1 &
+env PIPEWIRE_CONFIG_DIR="$support" PIPEWIRE_CONFIG_NAME=virtual-session-pipewire.conf pipewire >>"$XDG_RUNTIME_DIR/pipewire.log" 2>&1 &
 graph_pid=$!
 for attempt in {1..50}; do
     kill -0 "$graph_pid"
@@ -31,7 +57,7 @@ for attempt in {1..50}; do
     sleep 0.1
 done
 [[ -S $XDG_RUNTIME_DIR/pipewire-0 ]]
-env WIREPLUMBER_CONFIG_DIR=/usr/share/wireplumber wireplumber --profile policy >"$XDG_RUNTIME_DIR/policy.log" 2>&1 &
+env WIREPLUMBER_CONFIG_DIR=/usr/share/wireplumber wireplumber --profile policy >>"$XDG_RUNTIME_DIR/policy.log" 2>&1 &
 policy_pid=$!
 ready=false
 for attempt in {1..50}; do
@@ -42,7 +68,7 @@ for attempt in {1..50}; do
 done
 [[ $ready == true ]]
 kwin_wayland_wrapper --xwayland --virtual --width "$width" --height "$height" --output-count 1 \
-    --no-global-shortcuts --no-kactivities >"$XDG_RUNTIME_DIR/kwin.log" 2>&1 &
+    --no-global-shortcuts --no-kactivities >>"$XDG_RUNTIME_DIR/kwin.log" 2>&1 &
 wrapper_pid=$!
 ready=false
 for attempt in {1..100}; do
@@ -68,7 +94,7 @@ for ((i=0; i+1<${#kwin_args[@]}; ++i)); do
 done
 [[ $compat_display =~ ^:[0-9]+$ && $compat_authority == "$XDG_RUNTIME_DIR/"* && -f $compat_authority ]]
 env DISPLAY="$compat_display" XAUTHORITY="$compat_authority" WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
-    startplasma-wayland >"$XDG_RUNTIME_DIR/plasma.log" 2>&1 &
+    startplasma-wayland >>"$XDG_RUNTIME_DIR/plasma.log" 2>&1 &
 plasma_pid=$!
 ready=false
 for attempt in {1..200}; do
@@ -83,7 +109,7 @@ done
 if [[ ${FARSIDE_POLKIT_AGENT:-0} == 1 && ${FARSIDE_SYSTEM_BUS:-none} != none ]]; then
     for agent in /usr/lib/*/libexec/polkit-kde-authentication-agent-1 /usr/libexec/polkit-kde-authentication-agent-1; do
         [[ -x $agent ]] || continue
-        env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland "$agent" >"$XDG_RUNTIME_DIR/polkit-agent.log" 2>&1 &
+        env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland "$agent" >>"$XDG_RUNTIME_DIR/polkit-agent.log" 2>&1 &
         polkit_pid=$!
         break
     done
@@ -101,13 +127,16 @@ while kill -0 "$plasma_pid" 2>/dev/null; do
     if [[ -n $worker_pid ]] && ! kill -0 "$worker_pid" 2>/dev/null; then
         wait "$worker_pid" || true
         worker_pid=
+        note_worker_exit
     fi
-    if [[ -z $worker_pid && -S $XDG_RUNTIME_DIR/worker.sock ]]; then
+    if [[ -z $worker_pid && -S $XDG_RUNTIME_DIR/worker.sock ]] && (( SECONDS >= worker_next )); then
         env WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland "$worker" --virtual-session "$session" --uid "$(id -u)" \
             --socket "$XDG_RUNTIME_DIR/worker.sock" --token-fd 0 --desktop-media "${layout_args[@]}" \
             <"$XDG_RUNTIME_DIR/worker-token" >>"$XDG_RUNTIME_DIR/worker.log" 2>&1 &
         worker_pid=$!
+        worker_started=$SECONDS
     fi
+    cap_logs "$XDG_RUNTIME_DIR"
     sleep 2
 done
 wait "$plasma_pid"
